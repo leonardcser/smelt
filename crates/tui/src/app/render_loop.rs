@@ -33,7 +33,7 @@ impl TuiApp {
         // to `Hardware` / `Block` if a focused surface owns the
         // caret. `Hidden` is the right baseline for unfocused frames
         // / cmdline-up / dialog-without-input cases.
-        self.ui.set_cursor_shape(crate::ui::CursorShape::Hidden);
+        self.ui.set_cursor_shape(crate::smelt_term::CursorShape::Hidden);
 
         // ── Layout ──
         let natural_prompt_height = self.measure_prompt_height(&self.input, width, queued);
@@ -78,10 +78,10 @@ impl TuiApp {
         // hit this branch. The transcript / prompt sync paths above
         // run unconditionally, so check this only when neither one
         // claimed the cursor.
-        if matches!(self.ui.cursor_shape(), crate::ui::CursorShape::Hidden) {
+        if matches!(self.ui.cursor_shape(), crate::smelt_term::CursorShape::Hidden) {
             if let Some(focus) = self.ui.focus() {
                 if self.ui.overlay_for_leaf(focus).is_some() {
-                    self.ui.set_cursor_shape(crate::ui::CursorShape::Hardware);
+                    self.ui.set_cursor_shape(crate::smelt_term::CursorShape::Hardware);
                 }
             }
         }
@@ -100,9 +100,9 @@ impl TuiApp {
         let in_vim_visual = self.transcript_window.vim_enabled
             && matches!(
                 self.vim_mode,
-                crate::ui::VimMode::Visual | crate::ui::VimMode::VisualLine
+                crate::smelt_term::VimMode::Visual | crate::smelt_term::VimMode::VisualLine
             );
-        let mouse_drag_active = matches!(self.ui.capture(), Some(crate::ui::HitTarget::Window(_)));
+        let mouse_drag_active = matches!(self.ui.capture(), Some(crate::smelt_term::HitTarget::Window(_)));
         let freeze = has_selection || in_vim_visual || mouse_drag_active;
         if !freeze && self.transcript_window.follow_tail {
             self.transcript_window.scroll_top = u16::MAX;
@@ -142,7 +142,7 @@ impl TuiApp {
     ) {
         let t_pad = self.transcript_gutters.pad_left;
         let transcript_rect =
-            crate::ui::Rect::new(0, t_pad, term_w.saturating_sub(t_pad), viewport_rows);
+            crate::smelt_term::Rect::new(0, t_pad, term_w.saturating_sub(t_pad), viewport_rows);
         let tdata = self.project_transcript_buffer(
             width,
             viewport_rows,
@@ -162,12 +162,12 @@ impl TuiApp {
         self.transcript_window.cursor_line = tcursor.clamped_line;
         self.transcript_window.cursor_col = tcursor.clamped_col;
 
-        let transcript_viewport = crate::ui::WindowViewport::new(
+        let transcript_viewport = crate::smelt_term::WindowViewport::new(
             transcript_rect,
             self.transcript_gutters.content_width(term_w),
             tdata.total_rows,
             tdata.clamped_scroll,
-            crate::ui::ScrollbarState::new(
+            crate::smelt_term::ScrollbarState::new(
                 tdata.scrollbar_col + t_pad,
                 tdata.total_rows,
                 viewport_rows,
@@ -177,7 +177,7 @@ impl TuiApp {
         let transcript_selection =
             self.transcript_selection_highlights(tdata.clamped_scroll, viewport_rows);
         let visual = self.ui.theme().get("Visual");
-        let visual_span = crate::ui::SpanStyle {
+        let visual_span = crate::smelt_term::SpanStyle {
             fg: visual.fg,
             bg: visual.bg,
             ..Default::default()
@@ -196,10 +196,10 @@ impl TuiApp {
                     ns,
                     *line,
                     *col_start as usize,
-                    crate::ui::ExtmarkOpts::highlight(
+                    crate::smelt_term::ExtmarkOpts::highlight(
                         *col_end as usize,
                         visual_span,
-                        crate::ui::SpanMeta::default(),
+                        crate::smelt_term::SpanMeta::default(),
                     ),
                 );
             }
@@ -227,9 +227,9 @@ impl TuiApp {
                     smelt_core::style::Color::White,
                 )
             };
-            self.ui.set_cursor_shape(crate::ui::CursorShape::Block {
+            self.ui.set_cursor_shape(crate::smelt_term::CursorShape::Block {
                 glyph: c.glyph,
-                style: crate::ui::Style {
+                style: crate::smelt_term::Style {
                     fg: Some(fg),
                     bg: Some(bg),
                     ..Default::default()
@@ -256,7 +256,7 @@ impl TuiApp {
     fn sync_prompt_layer(
         &mut self,
         term_w: u16,
-        prompt_rect: crate::ui::Rect,
+        prompt_rect: crate::smelt_term::Rect,
         prompt_height: u16,
         queued: &[String],
         has_prompt_cursor: bool,
@@ -304,18 +304,18 @@ impl TuiApp {
         self.input.win.last_render_cpos = Some(self.input.win.cpos);
 
         let prompt_viewport = if let Some(ref ivp) = prompt_output.input_viewport {
-            let input_rect = crate::ui::Rect::new(
+            let input_rect = crate::smelt_term::Rect::new(
                 prompt_rect.top + ivp.top_row,
                 0,
                 prompt_rect.width,
                 ivp.rows,
             );
-            Some(crate::ui::WindowViewport::new(
+            Some(crate::smelt_term::WindowViewport::new(
                 input_rect,
                 ivp.content_width,
                 ivp.total_rows,
                 ivp.scroll_top,
-                crate::ui::ScrollbarState::new(
+                crate::smelt_term::ScrollbarState::new(
                     prompt_rect.width.saturating_sub(1),
                     ivp.total_rows,
                     ivp.rows,
@@ -335,10 +335,10 @@ impl TuiApp {
         match (cursor, cursor_style) {
             (Some(_), Some((style, glyph))) => {
                 self.ui
-                    .set_cursor_shape(crate::ui::CursorShape::Block { glyph, style });
+                    .set_cursor_shape(crate::smelt_term::CursorShape::Block { glyph, style });
             }
             (Some(_), None) => {
-                self.ui.set_cursor_shape(crate::ui::CursorShape::Hardware);
+                self.ui.set_cursor_shape(crate::smelt_term::CursorShape::Hardware);
             }
             (None, _) => {}
         }

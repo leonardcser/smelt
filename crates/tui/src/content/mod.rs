@@ -26,7 +26,7 @@ pub(crate) fn emit_newlines(out: &mut builder::LineBuilder, n: u16) {
 
 pub(super) fn reasoning_color(
     effort: protocol::ReasoningEffort,
-    theme: &crate::ui::Theme,
+    theme: &crate::smelt_term::Theme,
 ) -> Color {
     let group = match effort {
         protocol::ReasoningEffort::Off => "SmeltReasonOff",

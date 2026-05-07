@@ -20,9 +20,9 @@
 
 use crate::app::TuiApp;
 use crate::app::PROMPT_WIN;
-use crate::ui::layout::Anchor;
-use crate::ui::{BufCreateOpts, SpanStyle};
-use crate::ui::{BufId, Constraint, Corner, LayoutTree, Overlay, OverlayId, SplitConfig, WinId};
+use crate::smelt_term::layout::Anchor;
+use crate::smelt_term::{BufCreateOpts, SpanStyle};
+use crate::smelt_term::{BufId, Constraint, Corner, LayoutTree, Overlay, OverlayId, SplitConfig, WinId};
 use smelt_core::style::Color;
 
 /// One row in a picker. Prefix sits left of the label; description (if
@@ -285,7 +285,7 @@ fn write_buffer(app: &mut TuiApp, buf: BufId, items: &[PickerItem], reversed: bo
     b.set_all_lines(lines);
 
     if items.is_empty() {
-        b.add_highlight(0, 0, 14, SpanStyle::dim());
+        b.add_highlight(0, 0, 14, SpanStyle::new().dim());
         return;
     }
 
@@ -295,7 +295,7 @@ fn write_buffer(app: &mut TuiApp, buf: BufId, items: &[PickerItem], reversed: bo
         let prefix_end = prefix_start + item.prefix.chars().count() as u16;
         if prefix_end > prefix_start {
             if let Some(color) = item.accent {
-                b.add_highlight(visual_row, prefix_start, prefix_end, SpanStyle::fg(color));
+                b.add_highlight(visual_row, prefix_start, prefix_end, SpanStyle::new().fg(color));
             }
         }
         if let Some(desc) = item.description.as_deref() {
@@ -304,7 +304,7 @@ fn write_buffer(app: &mut TuiApp, buf: BufId, items: &[PickerItem], reversed: bo
             let start = INDENT as u16 + label_chars as u16 + pad as u16;
             let end = start + desc.chars().count() as u16;
             if end > start {
-                b.add_highlight(visual_row, start, end, SpanStyle::dim());
+                b.add_highlight(visual_row, start, end, SpanStyle::new().dim());
             }
         }
     }

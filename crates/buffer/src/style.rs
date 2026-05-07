@@ -52,31 +52,50 @@ pub struct Style {
 }
 
 impl Style {
-    pub fn fg(color: Color) -> Self {
+    pub const fn new() -> Self {
         Self {
-            fg: Some(color),
-            ..Default::default()
+            fg: None,
+            bg: None,
+            bold: false,
+            dim: false,
+            italic: false,
+            underline: false,
+            crossedout: false,
         }
     }
 
-    pub fn bg(color: Color) -> Self {
-        Self {
-            bg: Some(color),
-            ..Default::default()
-        }
+    pub fn fg(mut self, color: Color) -> Self {
+        self.fg = Some(color);
+        self
     }
 
-    pub fn bold() -> Self {
-        Self {
-            bold: true,
-            ..Default::default()
-        }
+    pub fn bg(mut self, color: Color) -> Self {
+        self.bg = Some(color);
+        self
     }
 
-    pub fn dim() -> Self {
-        Self {
-            dim: true,
-            ..Default::default()
-        }
+    pub fn bold(mut self) -> Self {
+        self.bold = true;
+        self
+    }
+
+    pub fn dim(mut self) -> Self {
+        self.dim = true;
+        self
+    }
+
+    pub fn italic(mut self) -> Self {
+        self.italic = true;
+        self
+    }
+
+    pub fn underline(mut self) -> Self {
+        self.underline = true;
+        self
+    }
+
+    pub fn crossedout(mut self) -> Self {
+        self.crossedout = true;
+        self
     }
 }

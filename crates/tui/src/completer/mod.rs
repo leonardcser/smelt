@@ -165,7 +165,7 @@ impl Completer {
 /// when it closes.
 pub(crate) struct CompleterSession {
     pub(crate) completer: Completer,
-    pub(crate) picker_win: Option<crate::ui::WinId>,
+    pub(crate) picker_win: Option<crate::smelt_term::WinId>,
 }
 
 impl CompleterSession {

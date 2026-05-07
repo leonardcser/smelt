@@ -1,8 +1,8 @@
 //! Layout-tree paint stories. Pure structural shapes with no Lua, no
 //! engine — these hunt solver bugs, chrome painting, and gap math.
 
-use tui::ui::layout::{Border, Constraint, Gutters};
-use tui::ui::{LayoutTree, SplitConfig};
+use tui::smelt_term::layout::{Border, Constraint, Gutters};
+use tui::smelt_term::{LayoutTree, SplitConfig};
 
 fn pane_config(region: &str) -> SplitConfig {
     SplitConfig {
@@ -106,8 +106,9 @@ story!(hbox_ratio_split_one_to_two, |ctx| {
 });
 
 story!(vbox_min_competes_with_fill, |ctx| {
-    // 12-row viewport, two children: Min(3) and Fill. After the Min
-    // is satisfied, Fill takes the remainder.
+    // 12-row viewport, two children: Min(3) and Fill. Min is a Fill
+    // with a floor of 3 — both share the 12 rows equally (6/6) since
+    // the equal share already satisfies the floor.
     ctx.set_viewport(20, 12);
     let a = ctx.buf_with_lines(["min child"]);
     let b = ctx.buf_with_lines(["fill child"]);
@@ -224,7 +225,9 @@ story!(vbox_overflow_clamps_content, |ctx| {
 });
 
 story!(vbox_mixed_length_fill_and_min, |ctx| {
-    // Length(2) + Min(2) + Fill in a 10-row viewport: 2 + 2 + 6.
+    // Length(2) + Min(2) + Fill in a 10-row viewport. Length consumes
+    // 2; the remaining 8 splits equally between Min and Fill (4/4),
+    // since the Min floor is already met.
     ctx.set_viewport(15, 10);
     let head = ctx.buf_with_lines(["header line"]);
     let body = ctx.buf_with_lines(["body min line"]);

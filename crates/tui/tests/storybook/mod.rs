@@ -12,8 +12,8 @@ use smelt_core::buffer::BufCreateOpts;
 use smelt_core::clipboard::Clipboard;
 use smelt_core::style::Color;
 use smelt_core::style::Style;
-use tui::ui::layout::Rect;
-use tui::ui::{
+use tui::smelt_term::layout::Rect;
+use tui::smelt_term::{
     BufId, Buffer, Event, EventCtx, LayoutTree, SnapshotFrame, SplitConfig, Theme, Ui, VimMode,
     WinId, WindowViewport,
 };

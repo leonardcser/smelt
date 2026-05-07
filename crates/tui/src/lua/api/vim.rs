@@ -10,10 +10,10 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
         "set_mode",
         lua.create_function(|_, mode: String| {
             let target = match mode.as_str() {
-                "Normal" | "normal" | "n" => crate::ui::VimMode::Normal,
-                "Insert" | "insert" | "i" => crate::ui::VimMode::Insert,
-                "Visual" | "visual" | "v" => crate::ui::VimMode::Visual,
-                "VisualLine" | "visual_line" | "V" => crate::ui::VimMode::VisualLine,
+                "Normal" | "normal" | "n" => crate::smelt_term::VimMode::Normal,
+                "Insert" | "insert" | "i" => crate::smelt_term::VimMode::Insert,
+                "Visual" | "visual" | "v" => crate::smelt_term::VimMode::Visual,
+                "VisualLine" | "visual_line" | "V" => crate::smelt_term::VimMode::VisualLine,
                 other => {
                     return Err(LuaError::RuntimeError(format!(
                         "smelt.vim.set_mode: unknown mode `{other}`"

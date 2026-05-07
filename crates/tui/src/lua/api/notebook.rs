@@ -12,7 +12,7 @@
 use crate::content::builder::LineBuilder;
 use crate::content::highlight::{print_inline_diff, print_syntax_file};
 use crate::content::selection::wrap_line;
-use crate::ui::BufId;
+use crate::smelt_term::BufId;
 use mlua::prelude::*;
 use smelt_core::notebook;
 use smelt_core::notebook::NotebookRenderData;

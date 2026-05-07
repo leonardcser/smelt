@@ -8,9 +8,9 @@
 //! frontend is driving Lua at the moment installs `&mut Core` here, and
 //! the bindings reborrow it through [`with_core`] / [`try_with_core`].
 //!
-//! The compositor-bearing surface lives in [`crate::ui::UiHost`] (defined in
-//! the tui crate). It does not extend any Core-tier trait — `ui` can
-//! never reference tui-defined types. `TuiApp` installs both pointers in
+//! The compositor-bearing surface lives in `tui::smelt_term::UiHost` (defined in
+//! the tui crate). It does not extend any Core-tier trait — `smelt-term`
+//! can never reference tui-defined types. `TuiApp` installs both pointers in
 //! parallel; `HeadlessApp` installs only the Core pointer and errors at
 //! runtime if a UiHost-only Lua binding is invoked from a headless context.
 

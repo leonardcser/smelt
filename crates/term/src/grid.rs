@@ -1,5 +1,5 @@
 use super::geometry::Rect;
-pub use ui_data::style::{Color, Style};
+pub use smelt_buffer::style::{Color, Style};
 
 /// Convert core's frontend-neutral `Color` to crossterm's terminal
 /// `Color` at the SGR-emit boundary. 1:1 enum mapping; the trait
@@ -81,6 +81,20 @@ impl Grid {
         &self.cells[self.idx(x, y)]
     }
 
+    /// Direct mutable cell access for hot paint paths. Returns `None`
+    /// when `(x, y)` is out of bounds. Bypasses the wide-char
+    /// continuation marker bookkeeping that `set` does — only use this
+    /// for ASCII / width-1 painting where you control the entire grid
+    /// region (e.g. half-block colour fills).
+    pub fn cell_mut(&mut self, x: u16, y: u16) -> Option<&mut Cell> {
+        if x < self.width && y < self.height {
+            let idx = self.idx(x, y);
+            Some(&mut self.cells[idx])
+        } else {
+            None
+        }
+    }
+
     pub fn set(&mut self, x: u16, y: u16, symbol: char, style: Style) {
         use unicode_width::UnicodeWidthChar;
         if x < self.width && y < self.height {
@@ -116,6 +130,48 @@ impl Grid {
             }
             let idx = self.idx(col, y);
             self.cells[idx] = Cell { symbol: ch, style };
+            col += cw;
+        }
+    }
+
+    /// Partial cell update — overwrites `symbol` and `style.fg`, but
+    /// preserves the existing cell's `bg` and text attributes (bold,
+    /// italic, etc.). Use when painting fg-only content over a row that
+    /// already carries a background fill (treemap tile labels, cursor-
+    /// line text, inline diff markers).
+    pub fn put_char(&mut self, x: u16, y: u16, symbol: char, fg: Color) {
+        use unicode_width::UnicodeWidthChar;
+        if x >= self.width || y >= self.height {
+            return;
+        }
+        let idx = self.idx(x, y);
+        let mut style = self.cells[idx].style;
+        style.fg = Some(fg);
+        self.cells[idx] = Cell { symbol, style };
+        if UnicodeWidthChar::width(symbol).unwrap_or(1) == 2 && x + 1 < self.width {
+            let cont = self.idx(x + 1, y);
+            self.cells[cont] = Cell {
+                symbol: '\0',
+                style,
+            };
+        }
+    }
+
+    /// String form of [`Grid::put_char`]. Each character preserves the
+    /// underlying bg / attrs at its target cell; only `symbol` and
+    /// `style.fg` are overwritten.
+    pub fn put_str_fg(&mut self, x: u16, y: u16, text: &str, fg: Color) {
+        use unicode_width::UnicodeWidthChar;
+        if y >= self.height {
+            return;
+        }
+        let mut col = x;
+        for ch in text.chars() {
+            let cw = UnicodeWidthChar::width(ch).unwrap_or(1).max(1) as u16;
+            if col + cw > self.width {
+                break;
+            }
+            self.put_char(col, y, ch, fg);
             col += cw;
         }
     }
@@ -222,6 +278,24 @@ impl<'a> GridSlice<'a> {
         }
     }
 
+    /// Mutable cell access at slice-local coords. Mirrors
+    /// [`Grid::cell_mut`] — bypasses wide-char continuation
+    /// bookkeeping, intended for hot ASCII / half-block paint paths.
+    pub fn cell_mut(&mut self, x: u16, y: u16) -> Option<&mut Cell> {
+        if x < self.area.width && y < self.area.height {
+            self.grid.cell_mut(self.area.left + x, self.area.top + y)
+        } else {
+            None
+        }
+    }
+
+    /// Absolute rect this slice covers in the underlying grid. Useful
+    /// for hosts that want to record screen-coordinate hit regions
+    /// from inside a paint callback.
+    pub fn screen_rect(&self) -> Rect {
+        self.area
+    }
+
     pub fn put_str(&mut self, x: u16, y: u16, text: &str, style: Style) {
         if y >= self.area.height {
             return;
@@ -232,6 +306,34 @@ impl<'a> GridSlice<'a> {
                 break;
             }
             self.grid.set(self.area.left + col, abs_y, ch, style);
+        }
+    }
+
+    /// Partial cell update at slice-local coords. See [`Grid::put_char`]
+    /// for semantics: overwrites symbol + fg, preserves existing bg
+    /// and attrs.
+    pub fn put_char(&mut self, x: u16, y: u16, symbol: char, fg: Color) {
+        if x < self.area.width && y < self.area.height {
+            self.grid
+                .put_char(self.area.left + x, self.area.top + y, symbol, fg);
+        }
+    }
+
+    /// String form of [`GridSlice::put_char`].
+    pub fn put_str_fg(&mut self, x: u16, y: u16, text: &str, fg: Color) {
+        use unicode_width::UnicodeWidthChar;
+        if y >= self.area.height {
+            return;
+        }
+        let abs_y = self.area.top + y;
+        let mut col = x;
+        for ch in text.chars() {
+            let cw = UnicodeWidthChar::width(ch).unwrap_or(1).max(1) as u16;
+            if col + cw > self.area.width {
+                break;
+            }
+            self.grid.put_char(self.area.left + col, abs_y, ch, fg);
+            col += cw;
         }
     }
 
@@ -266,7 +368,7 @@ mod tests {
     #[test]
     fn set_and_read_cell() {
         let mut grid = Grid::new(10, 5);
-        let style = Style::fg(Color::Red);
+        let style = Style::new().fg(Color::Red);
         grid.set(3, 2, 'X', style);
         assert_eq!(grid.cell(3, 2).symbol, 'X');
         assert_eq!(grid.cell(3, 2).style.fg, Some(Color::Red));
@@ -293,7 +395,7 @@ mod tests {
     #[test]
     fn fill_region() {
         let mut grid = Grid::new(10, 5);
-        let style = Style::bg(Color::Blue);
+        let style = Style::new().bg(Color::Blue);
         grid.fill(Rect::new(1, 2, 3, 2), '#', style);
         assert_eq!(grid.cell(2, 1).symbol, '#');
         assert_eq!(grid.cell(4, 2).symbol, '#');
@@ -353,6 +455,43 @@ mod tests {
         assert_eq!(grid.width(), 10);
         assert_eq!(grid.height(), 5);
         assert_eq!(grid.cell(2, 1).symbol, ' ');
+    }
+
+    #[test]
+    fn put_char_preserves_bg_and_attrs() {
+        let mut grid = Grid::new(10, 3);
+        let base = Style::new().fg(Color::Yellow).bg(Color::Blue).bold();
+        grid.set(2, 1, '#', base);
+        grid.put_char(2, 1, 'X', Color::Red);
+        let cell = grid.cell(2, 1);
+        assert_eq!(cell.symbol, 'X');
+        assert_eq!(cell.style.fg, Some(Color::Red));
+        assert_eq!(cell.style.bg, Some(Color::Blue));
+        assert!(cell.style.bold);
+    }
+
+    #[test]
+    fn put_char_on_empty_cell_leaves_bg_none() {
+        let mut grid = Grid::new(5, 2);
+        grid.put_char(0, 0, 'A', Color::Green);
+        let cell = grid.cell(0, 0);
+        assert_eq!(cell.symbol, 'A');
+        assert_eq!(cell.style.fg, Some(Color::Green));
+        assert_eq!(cell.style.bg, None);
+    }
+
+    #[test]
+    fn slice_put_str_fg_preserves_bg() {
+        let mut grid = Grid::new(10, 2);
+        grid.fill(Rect::new(0, 0, 6, 1), ' ', Style::new().bg(Color::Cyan));
+        {
+            let mut slice = grid.slice_mut(Rect::new(0, 0, 10, 1));
+            slice.put_str_fg(1, 0, "hi", Color::Red);
+        }
+        assert_eq!(grid.cell(1, 0).symbol, 'h');
+        assert_eq!(grid.cell(1, 0).style.fg, Some(Color::Red));
+        assert_eq!(grid.cell(1, 0).style.bg, Some(Color::Cyan));
+        assert_eq!(grid.cell(2, 0).style.bg, Some(Color::Cyan));
     }
 
     #[test]

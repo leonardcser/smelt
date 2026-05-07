@@ -1,0 +1,16 @@
+[package]
+name = "smelt-term"
+version = "0.4.7"
+edition = "2021"
+description = "Terminal rendering library: Grid + Compositor + LayoutTree + Window + Overlay + diff-flush renderer."
+license = "MIT"
+repository = "https://github.com/leonardcser/smelt"
+
+[lib]
+name = "smelt_term"
+path = "src/lib.rs"
+
+[dependencies]
+smelt-buffer = { path = "../buffer" }
+crossterm = { version = "0.29", features = ["event-stream", "bracketed-paste"] }
+unicode-width = "0.1"

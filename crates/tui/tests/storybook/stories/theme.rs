@@ -5,8 +5,8 @@
 
 use smelt_core::style::Color;
 use smelt_core::theme::intern;
-use tui::ui::layout::{Constraint, Gutters};
-use tui::ui::{LayoutTree, SplitConfig};
+use tui::smelt_term::layout::{Constraint, Gutters};
+use tui::smelt_term::{LayoutTree, SplitConfig};
 
 fn pane(region: &str) -> SplitConfig {
     SplitConfig {
@@ -66,7 +66,7 @@ story!(theme_link_a_to_b_resolves_b, |ctx| {
         theme.link("Aux", "Special");
     }
     let aux = intern("Aux");
-    if let Some(buf) = ctx.ui.buf_mut(tui::ui::BufId(1)) {
+    if let Some(buf) = ctx.ui.buf_mut(tui::smelt_term::BufId(1)) {
         buf.add_highlight_group_with_meta(0, 0, 5, aux, smelt_core::buffer::SpanMeta::default());
     }
     ctx.assert_snapshot();
@@ -85,7 +85,7 @@ story!(theme_link_chain_three_hops, |ctx| {
         theme.link("HopA", "HopB");
     }
     let a = intern("HopA");
-    if let Some(buf) = ctx.ui.buf_mut(tui::ui::BufId(1)) {
+    if let Some(buf) = ctx.ui.buf_mut(tui::smelt_term::BufId(1)) {
         buf.add_highlight_group_with_meta(0, 6, 11, a, smelt_core::buffer::SpanMeta::default());
     }
     ctx.assert_snapshot();
@@ -101,7 +101,7 @@ story!(theme_link_cycle_falls_back_to_default, |ctx| {
         theme.link("Cyc2", "Cyc1");
     }
     let g = intern("Cyc1");
-    if let Some(buf) = ctx.ui.buf_mut(tui::ui::BufId(1)) {
+    if let Some(buf) = ctx.ui.buf_mut(tui::smelt_term::BufId(1)) {
         buf.add_highlight_group_with_meta(0, 0, 5, g, smelt_core::buffer::SpanMeta::default());
     }
     ctx.assert_snapshot();
@@ -113,7 +113,7 @@ story!(theme_unknown_group_returns_default, |ctx| {
     // empty for these cells.
     one_line_pane(ctx);
     let unknown = intern("DefinitelyNotRegistered");
-    if let Some(buf) = ctx.ui.buf_mut(tui::ui::BufId(1)) {
+    if let Some(buf) = ctx.ui.buf_mut(tui::smelt_term::BufId(1)) {
         buf.add_highlight_group_with_meta(
             0,
             0,

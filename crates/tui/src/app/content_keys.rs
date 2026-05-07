@@ -139,37 +139,37 @@ impl TuiApp {
             let buf = self.transcript_window.text.clone();
             let mv: Option<usize> = match action {
                 KeyAction::MoveLeft | KeyAction::SelectLeft => Some(
-                    crate::ui::text::prev_char_boundary(&buf, self.transcript_window.cpos),
+                    crate::smelt_term::text::prev_char_boundary(&buf, self.transcript_window.cpos),
                 ),
                 KeyAction::MoveRight | KeyAction::SelectRight => Some(
-                    crate::ui::text::next_char_boundary(&buf, self.transcript_window.cpos),
+                    crate::smelt_term::text::next_char_boundary(&buf, self.transcript_window.cpos),
                 ),
                 KeyAction::MoveStartOfLine | KeyAction::SelectStartOfLine => Some(
-                    crate::ui::text::line_start(&buf, self.transcript_window.cpos),
+                    crate::smelt_term::text::line_start(&buf, self.transcript_window.cpos),
                 ),
                 KeyAction::MoveEndOfLine | KeyAction::SelectEndOfLine => {
-                    Some(crate::ui::text::line_end(&buf, self.transcript_window.cpos))
+                    Some(crate::smelt_term::text::line_end(&buf, self.transcript_window.cpos))
                 }
                 KeyAction::MoveWordForward | KeyAction::SelectWordForward => {
-                    Some(crate::ui::text::word_forward_pos(
+                    Some(crate::smelt_term::text::word_forward_pos(
                         &buf,
                         self.transcript_window.cpos,
-                        crate::ui::text::CharClass::Word,
+                        crate::smelt_term::text::CharClass::Word,
                     ))
                 }
                 KeyAction::MoveWordBackward | KeyAction::SelectWordBackward => {
-                    Some(crate::ui::text::word_backward_pos(
+                    Some(crate::smelt_term::text::word_backward_pos(
                         &buf,
                         self.transcript_window.cpos,
-                        crate::ui::text::CharClass::Word,
+                        crate::smelt_term::text::CharClass::Word,
                     ))
                 }
                 KeyAction::CopySelection => {
                     if let Some((s, e)) =
                         self.transcript_window.selection_range(&rows, self.vim_mode)
                     {
-                        let s = crate::ui::text::snap(&buf, s);
-                        let e = crate::ui::text::snap(&buf, e);
+                        let s = crate::smelt_term::text::snap(&buf, s);
+                        let e = crate::smelt_term::text::snap(&buf, e);
                         if s < e {
                             let copy = self.copy_display_range(
                                 s,
@@ -232,8 +232,8 @@ impl TuiApp {
         // from the layout's row count — `viewport_rows_estimate()`
         // returns the layout-derived height even before the transcript
         // has painted, where `UiHost::viewport_for` would still be `None`.
-        let viewport = crate::ui::WindowViewport::new(
-            crate::ui::Rect::new(0, 0, 0, viewport_rows),
+        let viewport = crate::smelt_term::WindowViewport::new(
+            crate::smelt_term::Rect::new(0, 0, 0, viewport_rows),
             0,
             0,
             0,
@@ -244,7 +244,7 @@ impl TuiApp {
                 .core
                 .clipboard
                 .swap_sink(Box::new(smelt_core::NullSink));
-            let ctx = crate::ui::EventCtx {
+            let ctx = crate::smelt_term::EventCtx {
                 rows: &rows,
                 soft_breaks: &[],
                 hard_breaks: &[],
@@ -253,11 +253,11 @@ impl TuiApp {
                 vim_mode: &mut self.vim_mode,
                 clipboard: &mut self.core.clipboard,
             };
-            let r = self.transcript_window.handle(crate::ui::Event::Key(k), ctx);
+            let r = self.transcript_window.handle(crate::smelt_term::Event::Key(k), ctx);
             self.core.clipboard.swap_sink(prev_sink);
             r
         };
-        if matches!(status, crate::ui::Status::Ignored) {
+        if matches!(status, crate::smelt_term::Status::Ignored) {
             return false;
         }
         let raw = self.core.clipboard.kill_ring.current().to_string();

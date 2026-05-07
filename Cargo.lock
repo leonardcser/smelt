@@ -2524,6 +2524,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "smelt-buffer"
+version = "0.4.7"
+dependencies = [
+ "base64",
+ "sha2 0.10.9",
+ "unicode-width 0.1.14",
+]
+
+[[package]]
 name = "smelt-core"
 version = "0.4.7"
 dependencies = [
@@ -2548,7 +2557,7 @@ dependencies = [
  "serde_json",
  "sha2 0.10.9",
  "similar",
- "smelt-ui-data",
+ "smelt-buffer",
  "syntect",
  "tempfile",
  "tokio",
@@ -2560,20 +2569,11 @@ dependencies = [
 ]
 
 [[package]]
-name = "smelt-ui"
+name = "smelt-term"
 version = "0.4.7"
 dependencies = [
  "crossterm",
- "smelt-ui-data",
- "unicode-width 0.1.14",
-]
-
-[[package]]
-name = "smelt-ui-data"
-version = "0.4.7"
-dependencies = [
- "base64",
- "sha2 0.10.9",
+ "smelt-buffer",
  "unicode-width 0.1.14",
 ]
 
@@ -2950,9 +2950,9 @@ dependencies = [
  "serde_json",
  "sha2 0.10.9",
  "similar",
+ "smelt-buffer",
  "smelt-core",
- "smelt-ui",
- "smelt-ui-data",
+ "smelt-term",
  "syntect",
  "tempfile",
  "tokio",

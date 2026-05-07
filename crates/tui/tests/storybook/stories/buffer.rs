@@ -8,8 +8,8 @@ use smelt_core::buffer::{
 };
 use smelt_core::style::{Color, Style};
 use smelt_core::theme::intern;
-use tui::ui::layout::{Constraint, Gutters};
-use tui::ui::{BufId, LayoutTree, SplitConfig};
+use tui::smelt_term::layout::{Constraint, Gutters};
+use tui::smelt_term::{BufId, LayoutTree, SplitConfig};
 
 use crate::storybook::StoryCtx;
 

@@ -1,8 +1,8 @@
 //! Overlay stories — placement + chrome paint over splits, plus
 //! every Anchor variant.
 
-use tui::ui::layout::{Anchor, Border, Constraint, Corner, Gutters};
-use tui::ui::{LayoutTree, Overlay, SplitConfig};
+use tui::smelt_term::layout::{Anchor, Border, Constraint, Corner, Gutters};
+use tui::smelt_term::{LayoutTree, Overlay, SplitConfig};
 
 fn pane(region: &str) -> SplitConfig {
     SplitConfig {

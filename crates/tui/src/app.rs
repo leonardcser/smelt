@@ -53,7 +53,7 @@ pub struct TuiApp {
     pub(crate) transcript: smelt_core::content::transcript::Transcript,
     /// Streaming parser state (active text/thinking/tool/agent/exec blocks).
     pub(crate) parser: smelt_core::content::stream_parser::StreamParser,
-    /// Buffer-backed projection of the transcript into a crate::ui::Buffer.
+    /// Buffer-backed projection of the transcript into a crate::smelt_term::Buffer.
     pub(crate) transcript_projection: crate::content::transcript_buf::TranscriptProjection,
     /// Plain-text snapshot of each visible row (top to bottom) captured
     /// during `project_transcript_buffer`. Read by
@@ -96,7 +96,7 @@ pub struct TuiApp {
     /// visible. Dismissed on any key (see `handle_overlay_keys`).
     /// `None` when no toast. Closing the leaf via `close_overlay_leaf`
     /// cascades through `overlay_close` to remove the overlay.
-    pub(crate) notification: Option<crate::ui::WinId>,
+    pub(crate) notification: Option<crate::smelt_term::WinId>,
     /// Cmdline (`:`) mode state — history, history-browse cursor,
     /// pre-browse stash, and lazily-allocated completer.
     pub(crate) cmdline: crate::app::cmdline::CmdlineState,
@@ -106,7 +106,7 @@ pub struct TuiApp {
     /// `set_selected` can resize the overlay's outer height
     /// constraint and translate logical → visual indices for reversed
     /// pickers.
-    pub(crate) picker_state: HashMap<crate::ui::WinId, crate::picker::PickerState>,
+    pub(crate) picker_state: HashMap<crate::smelt_term::WinId, crate::picker::PickerState>,
     /// Terminal focus (FocusGained / FocusLost). Cursor is suppressed
     /// when the terminal isn't focused, so input from other apps
     /// doesn't draw a stale cursor in our window.
@@ -150,7 +150,7 @@ pub struct TuiApp {
     /// Readonly pane showing the transcript. Owns its `Buffer`
     /// (vim + kill ring + undo) and the viewport scroll / cursor
     /// position.
-    pub(crate) transcript_window: crate::ui::Window,
+    pub(crate) transcript_window: crate::smelt_term::Window,
     /// Last prompt-buffer text we dispatched a `TextChanged` event for.
     /// After each event, if `input.buf` differs from this, we fire
     /// `WinEvent::TextChanged` on `PROMPT_WIN` so Lua subscribers
@@ -161,13 +161,13 @@ pub struct TuiApp {
     /// drag enters `Visual`, restored on mouse-up so a drag from Insert
     /// lands the user back in Insert rather than Normal. `None` outside
     /// an active prompt drag.
-    pub(crate) prompt_drag_return_vim_mode: Option<crate::ui::VimMode>,
+    pub(crate) prompt_drag_return_vim_mode: Option<crate::smelt_term::VimMode>,
     /// **Single global** vim mode — the one source of truth read by
     /// status bar, lua_bridge, and `smelt.vim.mode`. Vim dispatch
     /// (Window / PromptState) writes through `&mut` references threaded
     /// via `VimContext.mode` and `MouseCtx.vim_mode`. Defaults to
     /// `Insert`, matching the historical default.
-    pub(crate) vim_mode: crate::ui::VimMode,
+    pub(crate) vim_mode: crate::smelt_term::VimMode,
     /// Extra instructions from AGENTS.md / config, injected into the system
     /// prompt as a section. Set during app initialization.
     pub extra_instructions: Option<String>,
@@ -175,7 +175,7 @@ pub struct TuiApp {
     pub skill_section: Option<String>,
     /// Prompt sections built from app state. Rebuilt on mode changes.
     pub(crate) prompt_sections: crate::prompt_sections::PromptSections,
-    pub ui: crate::ui::Ui,
+    pub ui: crate::smelt_term::Ui,
     /// `WinId`s of the well-known split-tree surfaces. The matching
     /// `Buffer`s are reached via `Ui::win_buf_mut`.
     pub(crate) well_known: WellKnown,
@@ -192,22 +192,22 @@ pub(crate) struct WellKnown {
     /// Prompt input window. Stable id [`PROMPT_WIN`]. Its buffer
     /// is rewritten each frame by `compute_prompt` (chrome rows +
     /// visible input slice + bottom bar + completer extmark).
-    pub(crate) prompt: crate::ui::WinId,
+    pub(crate) prompt: crate::smelt_term::WinId,
     /// Transcript window. Stable id [`TRANSCRIPT_WIN`]. Its
     /// buffer is rewritten each frame by
     /// `project_transcript_buffer`; selection bg lands as extmarks
     /// in the `NS_SELECTION` namespace.
-    pub(crate) transcript: crate::ui::WinId,
+    pub(crate) transcript: crate::smelt_term::WinId,
     /// Statusline window. Dynamically allocated at startup. Its
     /// buffer carries one line; `refresh_status_bar` rewrites it
     /// each frame.
-    pub(crate) statusline: crate::ui::WinId,
+    pub(crate) statusline: crate::smelt_term::WinId,
     /// Leaf `WinId` of the open `:` cmdline overlay, if visible.
     /// `cmdline_handle_key` mutates the leaf's buffer + cursor
     /// directly through `&mut self`. Closing the leaf via
     /// `close_overlay_leaf` cascades through `overlay_close` to
     /// remove the overlay.
-    pub(crate) cmdline: Option<crate::ui::WinId>,
+    pub(crate) cmdline: Option<crate::smelt_term::WinId>,
 }
 
 /// Which pane currently holds focus (nvim-style window split).
@@ -265,7 +265,7 @@ pub(crate) struct Timers {
     /// vim-style `gd`/`<C-w>q`, etc.). They share no name-leaking
     /// surface so unifying them is deferred until a plugin needs it.
     pub(crate) last_esc: Option<Instant>,
-    pub(crate) esc_vim_mode: Option<crate::ui::VimMode>,
+    pub(crate) esc_vim_mode: Option<crate::smelt_term::VimMode>,
     pub(crate) last_ctrlc: Option<Instant>,
     pub(crate) last_keypress: Option<Instant>,
     /// Pending `Ctrl-W` pane chord. When set, the next key consumes the
@@ -293,7 +293,7 @@ pub(crate) struct PendingChord {
     /// `ctx.vim_mode_at_chord_start` so handlers can branch on the
     /// pre-chord state (e.g. Esc-Esc rewinding into Insert mode if
     /// the user was typing when the chord started).
-    pub(crate) vim_mode_at_start: Option<crate::ui::VimMode>,
+    pub(crate) vim_mode_at_start: Option<crate::smelt_term::VimMode>,
 }
 
 /// Window for completing a multi-key chord. After this much time with
@@ -355,7 +355,7 @@ impl TuiApp {
         }
         // Arg sources for the CommandArg inline completer (type `/cmd arg`).
         // The picker-style commands (`/model`, `/theme`, `/color`, `/settings`)
-        // now live in Lua plugins and open real `crate::ui::Picker` windows via
+        // now live in Lua plugins and open real `crate::smelt_term::Picker` windows via
         // `smelt.prompt.open_picker`, so they're not listed here.
         input.command_arg_sources = Vec::new();
         // Use cached reasoning effort if not set from config
@@ -392,9 +392,9 @@ impl TuiApp {
 
         let (ui, transcript_display_buf, well_known) = {
             let (w, h) = terminal::size().unwrap_or((80, 24));
-            let mut ui = crate::ui::Ui::new();
+            let mut ui = crate::smelt_term::Ui::new();
             ui.set_terminal_size(w, h);
-            let input_display_buf = ui.buf_create(crate::ui::BufCreateOpts::default());
+            let input_display_buf = ui.buf_create(crate::smelt_term::BufCreateOpts::default());
             // Transcript: a Buffer-backed Window painted via `Ui::render`
             // from the post-layer closure. No compositor `Component`
             // layer — `project_transcript_buffer` writes the projected
@@ -402,16 +402,16 @@ impl TuiApp {
             // split path consumes them via `Window::render`. Selection
             // bg lands as extmarks in a dedicated `selection`
             // namespace registered ahead so the painted layering wins.
-            let transcript_display_buf = ui.buf_create(crate::ui::BufCreateOpts::default());
+            let transcript_display_buf = ui.buf_create(crate::smelt_term::BufCreateOpts::default());
             if let Some(buf) = ui.buf_mut(transcript_display_buf) {
                 buf.create_namespace(crate::content::transcript_buf::NS_SELECTION);
             }
             assert!(ui.win_open_split_at(
                 crate::app::TRANSCRIPT_WIN,
                 transcript_display_buf,
-                crate::ui::SplitConfig {
+                crate::smelt_term::SplitConfig {
                     region: "transcript".into(),
-                    gutters: crate::ui::Gutters::default(),
+                    gutters: crate::smelt_term::Gutters::default(),
                 },
             ));
             // Prompt: a Buffer-backed Window painted via `Ui::render`
@@ -423,9 +423,9 @@ impl TuiApp {
             assert!(ui.win_open_split_at(
                 crate::app::PROMPT_WIN,
                 input_display_buf,
-                crate::ui::SplitConfig {
+                crate::smelt_term::SplitConfig {
                     region: "prompt".into(),
-                    gutters: crate::ui::Gutters::default(),
+                    gutters: crate::smelt_term::Gutters::default(),
                 },
             ));
             // Status line: Buffer-backed Window painted directly via
@@ -433,13 +433,13 @@ impl TuiApp {
             // No compositor `Component` layer — the buffer carries the
             // text + highlight extmarks `refresh_status_bar` writes
             // each frame.
-            let status_buf = ui.buf_create(crate::ui::BufCreateOpts::default());
+            let status_buf = ui.buf_create(crate::smelt_term::BufCreateOpts::default());
             let status_win = ui
                 .win_open_split(
                     status_buf,
-                    crate::ui::SplitConfig {
+                    crate::smelt_term::SplitConfig {
                         region: "status".into(),
-                        gutters: crate::ui::Gutters::default(),
+                        gutters: crate::smelt_term::Gutters::default(),
                     },
                 )
                 .expect("status buffer was just created");
@@ -513,12 +513,12 @@ impl TuiApp {
             project_trust: Some(project_trust),
             app_focus: AppFocus::Prompt,
             transcript_window: {
-                let mut w = crate::ui::Window::new(
+                let mut w = crate::smelt_term::Window::new(
                     crate::app::TRANSCRIPT_WIN,
                     transcript_display_buf,
-                    crate::ui::SplitConfig {
+                    crate::smelt_term::SplitConfig {
                         region: "transcript".into(),
-                        gutters: crate::ui::Gutters::default(),
+                        gutters: crate::smelt_term::Gutters::default(),
                     },
                 );
                 w.set_vim_enabled(vim_enabled);
@@ -526,7 +526,7 @@ impl TuiApp {
             },
             last_prompt_text: String::new(),
             prompt_drag_return_vim_mode: None,
-            vim_mode: crate::ui::VimMode::Insert,
+            vim_mode: crate::smelt_term::VimMode::Insert,
             extra_instructions: None,
             skill_section: None,
             prompt_sections: crate::prompt_sections::PromptSections::default(),
@@ -648,7 +648,7 @@ impl TuiApp {
             .expect("prompt window registered at startup");
         let ns = buf.create_namespace(crate::content::prompt_buf::COMPLETER_NS);
         buf.extmarks(ns).into_iter().find_map(|(_, mark)| {
-            if let crate::ui::ExtmarkPayload::VirtText { text, .. } = &mark.payload {
+            if let crate::smelt_term::ExtmarkPayload::VirtText { text, .. } = &mark.payload {
                 Some(text.clone())
             } else {
                 None
@@ -670,7 +670,7 @@ impl TuiApp {
             ns,
             0,
             0,
-            crate::ui::ExtmarkOpts::virt_text(text, Some("GhostText".into())),
+            crate::smelt_term::ExtmarkOpts::virt_text(text, Some("GhostText".into())),
         );
     }
 
@@ -718,7 +718,7 @@ impl TuiApp {
         let gap = "  ";
         let line = format!("{indent}{label}{gap}{message}");
 
-        let buf = self.ui.buf_create(crate::ui::BufCreateOpts::default());
+        let buf = self.ui.buf_create(crate::smelt_term::BufCreateOpts::default());
 
         let label_start = indent.len() as u16;
         let label_end = label_start + label.len() as u16;
@@ -736,7 +736,7 @@ impl TuiApp {
                 0,
                 label_start,
                 label_end,
-                crate::ui::SpanStyle {
+                crate::smelt_term::SpanStyle {
                     fg: label_color,
                     bold: true,
                     ..Default::default()
@@ -746,7 +746,7 @@ impl TuiApp {
                 0,
                 msg_start,
                 msg_end,
-                crate::ui::SpanStyle {
+                crate::smelt_term::SpanStyle {
                     dim: true,
                     ..Default::default()
                 },
@@ -755,7 +755,7 @@ impl TuiApp {
 
         let Some(win) = self.ui.win_open_split(
             buf,
-            crate::ui::SplitConfig {
+            crate::smelt_term::SplitConfig {
                 region: "notification".into(),
                 gutters: Default::default(),
             },
@@ -769,19 +769,19 @@ impl TuiApp {
         // One row above the prompt, full screen width. Inner Hbox uses
         // `Percentage(100)` so the layout's natural width follows the
         // terminal cap each frame; outer Vbox fixes height at 1 row.
-        let layout = crate::ui::LayoutTree::vbox(vec![(
-            crate::ui::Constraint::Length(1),
-            crate::ui::LayoutTree::hbox(vec![(
-                crate::ui::Constraint::Percentage(100),
-                crate::ui::LayoutTree::leaf(win),
+        let layout = crate::smelt_term::LayoutTree::vbox(vec![(
+            crate::smelt_term::Constraint::Length(1),
+            crate::smelt_term::LayoutTree::hbox(vec![(
+                crate::smelt_term::Constraint::Percentage(100),
+                crate::smelt_term::LayoutTree::leaf(win),
             )]),
         )]);
         let _overlay_id = self.ui.overlay_open(
-            crate::ui::Overlay::new(
+            crate::smelt_term::Overlay::new(
                 layout,
-                crate::ui::layout::Anchor::Win {
+                crate::smelt_term::layout::Anchor::Win {
                     target: crate::app::PROMPT_WIN,
-                    attach: crate::ui::Corner::NW,
+                    attach: crate::smelt_term::Corner::NW,
                     row_offset: -1,
                     col_offset: 0,
                 },
@@ -959,9 +959,9 @@ impl TuiApp {
             {
                 let lua = &self.lua;
                 let mut lua_invoke =
-                    |handle: crate::ui::LuaHandle,
-                     win: crate::ui::WinId,
-                     payload: &crate::ui::Payload| {
+                    |handle: crate::smelt_term::LuaHandle,
+                     win: crate::smelt_term::WinId,
+                     payload: &crate::smelt_term::Payload| {
                         lua.queue_invocation(handle, win, payload);
                     };
                 self.ui.dispatch_tick(&mut lua_invoke);

@@ -21,12 +21,12 @@ impl TuiApp {
         let cap_before = self.ui.capture();
         if matches!(
             self.ui
-                .dispatch_event(crate::ui::Event::Mouse(me), &mut |_, _, _| {}),
-            crate::ui::Status::Consumed
+                .dispatch_event(crate::smelt_term::Event::Mouse(me), &mut |_, _, _| {}),
+            crate::smelt_term::Status::Consumed
         ) {
             let scrollbar_owner = match (cap_before, self.ui.capture()) {
-                (Some(crate::ui::HitTarget::Scrollbar { owner }), _)
-                | (_, Some(crate::ui::HitTarget::Scrollbar { owner })) => Some(owner),
+                (Some(crate::smelt_term::HitTarget::Scrollbar { owner }), _)
+                | (_, Some(crate::smelt_term::HitTarget::Scrollbar { owner })) => Some(owner),
                 _ => None,
             };
             if let Some(owner) = scrollbar_owner {
@@ -160,7 +160,7 @@ impl TuiApp {
     pub(crate) fn scroll_under_mouse(&mut self, row: u16, col: u16, delta: isize) {
         let on_prompt = matches!(
             self.ui.hit_test(row, col, None),
-            Some(crate::ui::HitTarget::Window(w)) if w == crate::app::PROMPT_WIN
+            Some(crate::smelt_term::HitTarget::Window(w)) if w == crate::app::PROMPT_WIN
         );
         if on_prompt {
             self.app_focus = crate::app::AppFocus::Prompt;
@@ -170,7 +170,7 @@ impl TuiApp {
             // (Step 6) syncs `scroll_top` to keep the cursor visible.
             // Once 7b lands the row-space adapter, this collapses into
             // a shared `Window::scroll_by_lines` call with the rest.
-            let (new_pos, new_want) = crate::ui::text::vertical_move(
+            let (new_pos, new_want) = crate::smelt_term::text::vertical_move(
                 &self.input.win.text,
                 self.input.win.cpos,
                 delta,
@@ -220,7 +220,7 @@ impl TuiApp {
     /// Prompt mouse yank is not implemented yet — the wrapped display
     /// text would need byte-range translation back to source bytes.
     fn handle_prompt_mouse(&mut self, me: MouseEvent, click_count: u8) {
-        let Some(vp) = crate::ui::UiHost::viewport_for(self, crate::app::PROMPT_WIN) else {
+        let Some(vp) = crate::smelt_term::UiHost::viewport_for(self, crate::app::PROMPT_WIN) else {
             return;
         };
         let usable = vp.content_width as usize;
@@ -240,7 +240,7 @@ impl TuiApp {
             .input
             .win
             .vim_enabled
-            .then(|| crate::ui::vim::visual_anchor(&self.input.win.vim_state, self.vim_mode))
+            .then(|| crate::smelt_term::vim::visual_anchor(&self.input.win.vim_state, self.vim_mode))
             .flatten();
 
         self.input.win.cpos = wrap.src_to_wrapped(saved_src_cpos);
@@ -253,13 +253,13 @@ impl TuiApp {
             if let Some(a) = saved_vim_visual_anchor {
                 self.input.win.vim_state.begin_visual(
                     &mut self.vim_mode,
-                    crate::ui::VimMode::Visual,
+                    crate::smelt_term::VimMode::Visual,
                     wrap.src_to_wrapped(a),
                 );
             }
         }
 
-        let mouse_ctx = crate::ui::MouseCtx {
+        let mouse_ctx = crate::smelt_term::MouseCtx {
             rows: &wrap.rows,
             soft_breaks: &wrap.soft_breaks,
             hard_breaks: &wrap.hard_breaks,
@@ -280,7 +280,7 @@ impl TuiApp {
             .input
             .win
             .vim_enabled
-            .then(|| crate::ui::vim::visual_anchor(&self.input.win.vim_state, self.vim_mode))
+            .then(|| crate::smelt_term::vim::visual_anchor(&self.input.win.vim_state, self.vim_mode))
             .flatten();
 
         self.input.win.cpos = wrap.wrapped_to_src(new_w_cpos);
@@ -293,7 +293,7 @@ impl TuiApp {
             if let Some(a) = new_w_vim_anchor {
                 self.input.win.vim_state.begin_visual(
                     &mut self.vim_mode,
-                    crate::ui::VimMode::Visual,
+                    crate::smelt_term::VimMode::Visual,
                     wrap.wrapped_to_src(a),
                 );
             }
@@ -313,15 +313,15 @@ impl TuiApp {
     /// so non-selectable cells (gutter glyphs, padding) and `copy_as`
     /// substitutions (rendered markdown → raw source) are honored.
     fn handle_content_mouse(&mut self, me: MouseEvent, click_count: u8) -> Option<String> {
-        let rows = crate::ui::UiHost::rows_for(self, crate::app::TRANSCRIPT_WIN)?;
+        let rows = crate::smelt_term::UiHost::rows_for(self, crate::app::TRANSCRIPT_WIN)?;
         if rows.is_empty() {
             return None;
         }
-        let (soft, hard) = crate::ui::UiHost::breaks_for(self, crate::app::TRANSCRIPT_WIN)?;
-        let viewport = crate::ui::UiHost::viewport_for(self, crate::app::TRANSCRIPT_WIN)?;
+        let (soft, hard) = crate::smelt_term::UiHost::breaks_for(self, crate::app::TRANSCRIPT_WIN)?;
+        let viewport = crate::smelt_term::UiHost::viewport_for(self, crate::app::TRANSCRIPT_WIN)?;
         let snapped = self.snap_event_for_selection(me, &rows, viewport);
         let range = {
-            let mouse_ctx = crate::ui::MouseCtx {
+            let mouse_ctx = crate::smelt_term::MouseCtx {
                 rows: &rows,
                 soft_breaks: &soft,
                 hard_breaks: &hard,
@@ -359,7 +359,7 @@ impl TuiApp {
         &mut self,
         me: MouseEvent,
         rows: &[String],
-        vp: crate::ui::WindowViewport,
+        vp: crate::smelt_term::WindowViewport,
     ) -> MouseEvent {
         let rel_row = me.row.saturating_sub(vp.rect.top) as usize;
         let line_idx = (self.transcript_window.scroll_top as usize + rel_row)
@@ -381,7 +381,7 @@ impl TuiApp {
     /// the scroll resolved to. PROMPT_WIN only needs the raw
     /// `scroll_top` copy — the next render-loop pass clamps it
     /// against the prompt buffer's height.
-    fn propagate_scrollbar_scroll(&mut self, owner: crate::ui::WinId) {
+    fn propagate_scrollbar_scroll(&mut self, owner: crate::smelt_term::WinId) {
         let Some(scroll_top) = self.ui.win(owner).map(|w| w.scroll_top) else {
             return;
         };

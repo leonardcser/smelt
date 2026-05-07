@@ -959,7 +959,7 @@ mod tests {
     fn add_highlight_round_trips_via_extmark() {
         let mut buf = make_buf();
         buf.set_all_lines(vec!["hello world".into()]);
-        buf.add_highlight(0, 0, 5, SpanStyle::bold());
+        buf.add_highlight(0, 0, 5, SpanStyle::new().bold());
         let spans = buf.highlights_at(0);
         assert_eq!(spans.len(), 1);
         assert_eq!(spans[0].col_start, 0);
@@ -1007,9 +1007,9 @@ mod tests {
     fn clear_highlights_only_clears_range() {
         let mut buf = make_buf();
         buf.set_all_lines(vec!["a".into(), "b".into(), "c".into()]);
-        buf.add_highlight(0, 0, 1, SpanStyle::bold());
-        buf.add_highlight(1, 0, 1, SpanStyle::bold());
-        buf.add_highlight(2, 0, 1, SpanStyle::bold());
+        buf.add_highlight(0, 0, 1, SpanStyle::new().bold());
+        buf.add_highlight(1, 0, 1, SpanStyle::new().bold());
+        buf.add_highlight(2, 0, 1, SpanStyle::new().bold());
         buf.clear_highlights(1, 2);
         assert_eq!(buf.highlights_at(0).len(), 1);
         assert_eq!(buf.highlights_at(1).len(), 0);
@@ -1020,7 +1020,7 @@ mod tests {
     fn set_all_lines_clears_extmarks() {
         let mut buf = make_buf();
         buf.set_all_lines(vec!["a".into(), "b".into()]);
-        buf.add_highlight(0, 0, 1, SpanStyle::bold());
+        buf.add_highlight(0, 0, 1, SpanStyle::new().bold());
         buf.set_decoration(
             1,
             LineDecoration {
@@ -1042,7 +1042,7 @@ mod tests {
             ns,
             0,
             0,
-            ExtmarkOpts::highlight(4, SpanStyle::fg(Color::Red), SpanMeta::default()),
+            ExtmarkOpts::highlight(4, SpanStyle::new().fg(Color::Red), SpanMeta::default()),
         );
         // Highlight payloads in any namespace are visible to
         // `highlights_at` so parsers / selection / search can
@@ -1065,13 +1065,13 @@ mod tests {
             ns_a,
             0,
             0,
-            ExtmarkOpts::highlight(1, SpanStyle::bold(), SpanMeta::default()),
+            ExtmarkOpts::highlight(1, SpanStyle::new().bold(), SpanMeta::default()),
         );
         buf.set_extmark(
             ns_b,
             0,
             0,
-            ExtmarkOpts::highlight(1, SpanStyle::bold(), SpanMeta::default()),
+            ExtmarkOpts::highlight(1, SpanStyle::new().bold(), SpanMeta::default()),
         );
         buf.clear_namespace(ns_a, 0, usize::MAX);
         assert_eq!(buf.extmarks(ns_a).len(), 0);

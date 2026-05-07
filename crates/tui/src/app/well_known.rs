@@ -2,7 +2,7 @@
 //! carries.  These live in `app` (not `ui`) because they are application
 //! semantics, not generic UI primitives.
 
-use crate::ui::{BufId, WinId};
+use crate::smelt_term::{BufId, WinId};
 
 /// Reserved [`WinId`] for the main prompt input window.  Stable id so Lua
 /// can `smelt.win.on_event(prompt, …)` and `smelt.win.set_keymap(prompt, …)`
