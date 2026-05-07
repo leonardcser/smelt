@@ -1413,7 +1413,7 @@ mod tests {
 
         input.win.cpos = 0;
         input.backspace(crate::smelt_term::VimMode::Insert); // Now at position 0
-                                                     // Can't backspace further, but the logic would clear it if we could
+                                                             // Can't backspace further, but the logic would clear it if we could
     }
 
     #[test]
@@ -1643,9 +1643,13 @@ mod tests {
         input.win.cpos = 0;
         input.test_action(KeyAction::SelectRight, crate::smelt_term::VimMode::Insert);
         input.test_action(KeyAction::SelectRight, crate::smelt_term::VimMode::Insert);
-        assert!(input.selection_range(crate::smelt_term::VimMode::Insert).is_some());
+        assert!(input
+            .selection_range(crate::smelt_term::VimMode::Insert)
+            .is_some());
         input.test_action(KeyAction::MoveRight, crate::smelt_term::VimMode::Insert);
-        assert!(input.selection_range(crate::smelt_term::VimMode::Insert).is_none());
+        assert!(input
+            .selection_range(crate::smelt_term::VimMode::Insert)
+            .is_none());
     }
 
     #[test]
@@ -1674,7 +1678,10 @@ mod tests {
         for _ in 0..5 {
             input.test_action(KeyAction::SelectRight, crate::smelt_term::VimMode::Insert);
         }
-        input.test_action(KeyAction::DeleteCharForward, crate::smelt_term::VimMode::Insert);
+        input.test_action(
+            KeyAction::DeleteCharForward,
+            crate::smelt_term::VimMode::Insert,
+        );
         assert_eq!(input.win.text, " world");
     }
 
@@ -1711,7 +1718,10 @@ mod tests {
         let mut input = PromptState::new();
         input.win.text = "hello world foo".to_string();
         input.win.cpos = 0;
-        input.test_action(KeyAction::SelectWordForward, crate::smelt_term::VimMode::Insert);
+        input.test_action(
+            KeyAction::SelectWordForward,
+            crate::smelt_term::VimMode::Insert,
+        );
         assert_eq!(input.win.selection_anchor, Some(0));
         // word_forward_pos from 0 should be 6 (start of "world").
         assert_eq!(input.win.cpos, 6);
@@ -1724,7 +1734,10 @@ mod tests {
         let mut input = PromptState::new();
         input.win.text = "hello world".to_string();
         input.win.cpos = 11;
-        input.test_action(KeyAction::SelectWordBackward, crate::smelt_term::VimMode::Insert);
+        input.test_action(
+            KeyAction::SelectWordBackward,
+            crate::smelt_term::VimMode::Insert,
+        );
         assert_eq!(
             input.selection_range(crate::smelt_term::VimMode::Insert),
             Some((6, 11))
@@ -1738,7 +1751,10 @@ mod tests {
         let mut input = PromptState::new();
         input.win.text = "hello world".to_string();
         input.win.cpos = 5;
-        input.test_action(KeyAction::SelectStartOfLine, crate::smelt_term::VimMode::Insert);
+        input.test_action(
+            KeyAction::SelectStartOfLine,
+            crate::smelt_term::VimMode::Insert,
+        );
         assert_eq!(
             input.selection_range(crate::smelt_term::VimMode::Insert),
             Some((0, 5))
@@ -1750,7 +1766,10 @@ mod tests {
         let mut input = PromptState::new();
         input.win.text = "hello world".to_string();
         input.win.cpos = 5;
-        input.test_action(KeyAction::SelectEndOfLine, crate::smelt_term::VimMode::Insert);
+        input.test_action(
+            KeyAction::SelectEndOfLine,
+            crate::smelt_term::VimMode::Insert,
+        );
         assert_eq!(
             input.selection_range(crate::smelt_term::VimMode::Insert),
             Some((5, 11))
@@ -1818,7 +1837,10 @@ mod tests {
         input.win.text = "hello".to_string();
         input.win.cpos = 3;
         input.win.selection_anchor = Some(3);
-        assert_eq!(input.selection_range(crate::smelt_term::VimMode::Insert), None);
+        assert_eq!(
+            input.selection_range(crate::smelt_term::VimMode::Insert),
+            None
+        );
     }
 
     #[test]
@@ -1827,9 +1849,13 @@ mod tests {
         input.win.text = "hello".to_string();
         input.win.cpos = 0;
         input.test_action(KeyAction::SelectRight, crate::smelt_term::VimMode::Insert);
-        assert!(input.selection_range(crate::smelt_term::VimMode::Insert).is_some());
+        assert!(input
+            .selection_range(crate::smelt_term::VimMode::Insert)
+            .is_some());
         input.clear();
-        assert!(input.selection_range(crate::smelt_term::VimMode::Insert).is_none());
+        assert!(input
+            .selection_range(crate::smelt_term::VimMode::Insert)
+            .is_none());
     }
 
     #[test]
@@ -1841,7 +1867,10 @@ mod tests {
         for _ in 0..3 {
             input.test_action(KeyAction::SelectRight, crate::smelt_term::VimMode::Insert);
         }
-        input.test_action(KeyAction::DeleteWordBackward, crate::smelt_term::VimMode::Insert);
+        input.test_action(
+            KeyAction::DeleteWordBackward,
+            crate::smelt_term::VimMode::Insert,
+        );
         assert_eq!(input.win.text, "hello ld");
     }
 
@@ -1853,7 +1882,10 @@ mod tests {
         for _ in 0..3 {
             input.test_action(KeyAction::SelectRight, crate::smelt_term::VimMode::Insert);
         }
-        input.test_action(KeyAction::DeleteWordForward, crate::smelt_term::VimMode::Insert);
+        input.test_action(
+            KeyAction::DeleteWordForward,
+            crate::smelt_term::VimMode::Insert,
+        );
         assert_eq!(input.win.text, "lo world");
     }
 
@@ -1865,7 +1897,10 @@ mod tests {
         for _ in 0..4 {
             input.test_action(KeyAction::SelectRight, crate::smelt_term::VimMode::Insert);
         }
-        input.test_action(KeyAction::DeleteToStartOfLine, crate::smelt_term::VimMode::Insert);
+        input.test_action(
+            KeyAction::DeleteToStartOfLine,
+            crate::smelt_term::VimMode::Insert,
+        );
         assert_eq!(input.win.text, "helorld");
     }
 
@@ -1895,7 +1930,9 @@ mod tests {
         input.win.cpos = 0;
         input.test_action(KeyAction::SelectRight, crate::smelt_term::VimMode::Insert);
         assert_eq!(input.win.cpos, 0);
-        assert!(input.selection_range(crate::smelt_term::VimMode::Insert).is_none());
+        assert!(input
+            .selection_range(crate::smelt_term::VimMode::Insert)
+            .is_none());
     }
 
     #[test]
@@ -1967,7 +2004,11 @@ mod tests {
             input.selection_range(mode).is_none(),
             "Esc should clear shift selection"
         );
-        assert_eq!(mode, crate::smelt_term::VimMode::Normal, "Should be in normal mode");
+        assert_eq!(
+            mode,
+            crate::smelt_term::VimMode::Normal,
+            "Should be in normal mode"
+        );
     }
 
     #[test]
@@ -1981,7 +2022,9 @@ mod tests {
         // Select "b[paste]c" (bytes 1..5 — marker is 3 bytes)
         input.win.selection_anchor = Some(1);
         input.win.cpos = 1 + 1 + ATTACHMENT_MARKER.len_utf8() + 1; // b + marker + c
-        assert!(input.selection_range(crate::smelt_term::VimMode::Insert).is_some());
+        assert!(input
+            .selection_range(crate::smelt_term::VimMode::Insert)
+            .is_some());
         let deleted = input.delete_selection(crate::smelt_term::VimMode::Insert);
         assert!(deleted.is_some());
         assert_eq!(input.win.text, "ad");

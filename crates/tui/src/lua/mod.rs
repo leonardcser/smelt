@@ -1091,11 +1091,17 @@ mod tests {
         use crossterm::event::{KeyCode, KeyModifiers};
         assert_eq!(
             parse_keybind("enter"),
-            Some(crate::smelt_term::KeyBind::new(KeyCode::Enter, KeyModifiers::NONE))
+            Some(crate::smelt_term::KeyBind::new(
+                KeyCode::Enter,
+                KeyModifiers::NONE
+            ))
         );
         assert_eq!(
             parse_keybind("esc"),
-            Some(crate::smelt_term::KeyBind::new(KeyCode::Esc, KeyModifiers::NONE))
+            Some(crate::smelt_term::KeyBind::new(
+                KeyCode::Esc,
+                KeyModifiers::NONE
+            ))
         );
         assert_eq!(
             parse_keybind("c-j"),
@@ -1132,7 +1138,10 @@ mod tests {
         // muscle memory pass `"<Esc>"` / `"<C-r>"` / `"<S-Tab>"`.
         assert_eq!(
             parse_keybind("<Esc>"),
-            Some(crate::smelt_term::KeyBind::new(KeyCode::Esc, KeyModifiers::NONE))
+            Some(crate::smelt_term::KeyBind::new(
+                KeyCode::Esc,
+                KeyModifiers::NONE
+            ))
         );
         assert_eq!(
             parse_keybind("<C-r>"),

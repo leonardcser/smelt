@@ -33,10 +33,16 @@ impl crate::smelt_term::UiHost for TuiApp {
     fn win_mut(&mut self, id: crate::smelt_term::WinId) -> Option<&mut crate::smelt_term::Window> {
         self.ui.win_mut(id)
     }
-    fn overlay_open(&mut self, overlay: crate::smelt_term::Overlay) -> crate::smelt_term::OverlayId {
+    fn overlay_open(
+        &mut self,
+        overlay: crate::smelt_term::Overlay,
+    ) -> crate::smelt_term::OverlayId {
         self.ui.overlay_open(overlay)
     }
-    fn viewport_for(&self, win: crate::smelt_term::WinId) -> Option<crate::smelt_term::WindowViewport> {
+    fn viewport_for(
+        &self,
+        win: crate::smelt_term::WinId,
+    ) -> Option<crate::smelt_term::WindowViewport> {
         self.ui.win(win).and_then(|w| w.viewport)
     }
     fn rows_for(&mut self, win: crate::smelt_term::WinId) -> Option<Vec<String>> {

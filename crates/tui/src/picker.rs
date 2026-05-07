@@ -22,7 +22,9 @@ use crate::app::TuiApp;
 use crate::app::PROMPT_WIN;
 use crate::smelt_term::layout::Anchor;
 use crate::smelt_term::{BufCreateOpts, SpanStyle};
-use crate::smelt_term::{BufId, Constraint, Corner, LayoutTree, Overlay, OverlayId, SplitConfig, WinId};
+use crate::smelt_term::{
+    BufId, Constraint, Corner, LayoutTree, Overlay, OverlayId, SplitConfig, WinId,
+};
 use smelt_core::style::Color;
 
 /// One row in a picker. Prefix sits left of the label; description (if
@@ -295,7 +297,12 @@ fn write_buffer(app: &mut TuiApp, buf: BufId, items: &[PickerItem], reversed: bo
         let prefix_end = prefix_start + item.prefix.chars().count() as u16;
         if prefix_end > prefix_start {
             if let Some(color) = item.accent {
-                b.add_highlight(visual_row, prefix_start, prefix_end, SpanStyle::new().fg(color));
+                b.add_highlight(
+                    visual_row,
+                    prefix_start,
+                    prefix_end,
+                    SpanStyle::new().fg(color),
+                );
             }
         }
         if let Some(desc) = item.description.as_deref() {

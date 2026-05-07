@@ -147,9 +147,9 @@ impl TuiApp {
                 KeyAction::MoveStartOfLine | KeyAction::SelectStartOfLine => Some(
                     crate::smelt_term::text::line_start(&buf, self.transcript_window.cpos),
                 ),
-                KeyAction::MoveEndOfLine | KeyAction::SelectEndOfLine => {
-                    Some(crate::smelt_term::text::line_end(&buf, self.transcript_window.cpos))
-                }
+                KeyAction::MoveEndOfLine | KeyAction::SelectEndOfLine => Some(
+                    crate::smelt_term::text::line_end(&buf, self.transcript_window.cpos),
+                ),
                 KeyAction::MoveWordForward | KeyAction::SelectWordForward => {
                     Some(crate::smelt_term::text::word_forward_pos(
                         &buf,
@@ -253,7 +253,9 @@ impl TuiApp {
                 vim_mode: &mut self.vim_mode,
                 clipboard: &mut self.core.clipboard,
             };
-            let r = self.transcript_window.handle(crate::smelt_term::Event::Key(k), ctx);
+            let r = self
+                .transcript_window
+                .handle(crate::smelt_term::Event::Key(k), ctx);
             self.core.clipboard.swap_sink(prev_sink);
             r
         };

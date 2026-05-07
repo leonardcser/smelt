@@ -62,7 +62,10 @@ impl LayoutState {
     /// the splits tree via `Ui::set_layout`. Missing leaves fall back
     /// to `Rect::default` (zero-sized) — practically only happens
     /// before the first frame.
-    pub(crate) fn from_ui(ui: &crate::smelt_term::Ui, status_win: crate::smelt_term::WinId) -> Self {
+    pub(crate) fn from_ui(
+        ui: &crate::smelt_term::Ui,
+        status_win: crate::smelt_term::WinId,
+    ) -> Self {
         Self {
             transcript: ui
                 .split_rect(crate::app::TRANSCRIPT_WIN)

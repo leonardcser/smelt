@@ -316,7 +316,11 @@ pub(super) fn theme_role_get(
 /// mutable. Caller must `populate_ui_theme` afterwards (or wait for
 /// the next frame's render-loop bridge) to flush the new value into
 /// the corresponding highlight group.
-pub(super) fn theme_role_set(theme: &mut crate::smelt_term::Theme, role: &str, ansi: u8) -> LuaResult<()> {
+pub(super) fn theme_role_set(
+    theme: &mut crate::smelt_term::Theme,
+    role: &str,
+    ansi: u8,
+) -> LuaResult<()> {
     match role {
         "accent" => {
             theme.set_accent(ansi);
