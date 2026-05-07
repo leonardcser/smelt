@@ -7,6 +7,8 @@ edition = "2021"
 protocol = { path = "../protocol" }
 engine = { path = "../engine" }
 smelt-core = { path = "../core" }
+ui-data = { package = "smelt-ui-data", path = "../ui-data" }
+ui = { package = "smelt-ui", path = "../ui" }
 tokio = { version = "1", features = ["full"] }
 tokio-util = "0.7"
 crossterm = { version = "0.29", features = ["event-stream", "bracketed-paste"] }

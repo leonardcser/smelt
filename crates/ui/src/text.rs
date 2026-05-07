@@ -2,7 +2,7 @@
 //! editor, and dialog input fields. All functions operate on `&str` buffers
 //! and byte positions; they never mutate state.
 
-pub use smelt_core::content::wrap::wrap_line;
+pub use ui_data::wrap::wrap_line;
 
 #[derive(Clone, Copy)]
 pub enum CharClass {

@@ -1861,7 +1861,7 @@ mod tests {
         writes: usize,
     }
     struct MemSink(std::rc::Rc<std::cell::RefCell<MemSinkInner>>);
-    impl smelt_core::clipboard::Sink for MemSink {
+    impl ui_data::clipboard::Sink for MemSink {
         fn read(&mut self) -> Option<String> {
             self.0.borrow().text.clone()
         }

@@ -14,7 +14,7 @@
 //! contained in the overlay's layout.
 
 use super::WinId;
-use crate::ui::layout::{Anchor, Corner, LayoutTree, Rect};
+use crate::layout::{Anchor, Corner, LayoutTree, Rect};
 use std::collections::HashMap;
 
 /// Stable handle for an overlay. Distinct from `WinId` so chrome
@@ -290,7 +290,7 @@ fn clamp_axis(pos: i32, term: u16, span: u16) -> u16 {
 mod tests {
     use super::WinId;
     use super::*;
-    use crate::ui::layout::{Anchor, Constraint, Corner};
+    use crate::layout::{Anchor, Constraint, Corner};
 
     #[test]
     fn overlay_defaults_are_sensible() {

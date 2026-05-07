@@ -154,9 +154,9 @@ fn paste_from_clipboard() -> Option<String> {
 /// `crate::Sink` impl backed by the platform subprocess helpers. Owned
 /// by the TuiApp-level `crate::Clipboard` so vim yank / paste sites push
 /// through the same path the prompt and transcript already use.
-pub(crate) struct SystemSink;
+pub struct SystemSink;
 
-impl crate::Sink for SystemSink {
+impl Sink for SystemSink {
     fn read(&mut self) -> Option<String> {
         paste_from_clipboard()
     }
@@ -170,9 +170,9 @@ impl crate::Sink for SystemSink {
 /// text to the system clipboard. Works over SSH/tmux with modern
 /// terminals (iTerm2, kitty, alacritty, foot, wezterm, tmux
 /// `set-clipboard on`, etc.). Read falls back to subprocess helpers.
-pub(crate) struct Osc52Sink;
+pub struct Osc52Sink;
 
-impl crate::Sink for Osc52Sink {
+impl Sink for Osc52Sink {
     fn read(&mut self) -> Option<String> {
         paste_from_clipboard()
     }

@@ -20,7 +20,7 @@ pub use content::highlight::warm_up_syntect;
 pub use smelt_core::state;
 pub(crate) mod input;
 pub mod theme;
-pub mod ui;
+pub use ::ui;
 pub(crate) mod window;
 
 pub use smelt_core::attachment;

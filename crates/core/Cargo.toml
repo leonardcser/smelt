@@ -6,6 +6,7 @@ edition = "2021"
 [dependencies]
 protocol = { path = "../protocol" }
 engine = { path = "../engine" }
+ui-data = { package = "smelt-ui-data", path = "../ui-data" }
 tokio = { version = "1", features = ["full"] }
 tokio-util = "0.7"
 serde = { version = "1", features = ["derive"] }
