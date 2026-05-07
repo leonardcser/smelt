@@ -15,6 +15,7 @@ mod markdown;
 mod metrics;
 mod model;
 mod notebook;
+mod paint;
 mod permissions;
 mod prompt;
 mod session;
@@ -71,6 +72,7 @@ impl LuaRuntime {
         statusline::register(lua, &smelt, shared)?;
         confirm::register(lua, &smelt)?;
         notebook::register(lua, &smelt)?;
+        paint::register(lua, &smelt, shared)?;
         diff::register(lua, &smelt)?;
         syntax::register(lua, &smelt)?;
         bash::register(lua, &smelt)?;

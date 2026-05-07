@@ -57,15 +57,24 @@ pub(crate) fn open_overlay(app: &mut TuiApp, opts: mlua::Table) -> Result<u64, S
     let mut leaf_items: Vec<(Constraint, LayoutTree)> = Vec::new();
     for pair in items_tbl.sequence_values::<mlua::Table>() {
         let item = pair.map_err(|e| format!("overlay item: {e}"))?;
-        let win = WinId(
-            item.get::<u64>("win")
-                .map_err(|e| format!("overlay item.win: {e}"))?,
-        );
-        if app.ui.win(win).is_none() {
-            return Err(format!("overlay item references missing window {}", win.0));
+        let raw_id: u64 = item
+            .get::<u64>("win")
+            .map_err(|e| format!("overlay item.win: {e}"))?;
+        // `win` accepts either a `WinId` (Buffer-backed pane) or a paint
+        // id allocated via `smelt.paint.register` (Lua custom paint
+        // region). The two namespaces are split: WinIds are issued from
+        // 1, paint ids start at 1<<32, so a single u64 disambiguates.
+        let win = WinId(raw_id);
+        let paint_id = crate::smelt_term::layout::PaintId(raw_id);
+        let is_window = app.ui.win(win).is_some();
+        let is_paint = app.paint_registry.contains(paint_id);
+        if !is_window && !is_paint {
+            return Err(format!(
+                "overlay item references missing window/paint id {raw_id}"
+            ));
         }
         let collapse_when_empty: bool = item.get("collapse_when_empty").unwrap_or(false);
-        let constraint = if collapse_when_empty && window_buffer_empty(app, win) {
+        let constraint = if collapse_when_empty && is_window && window_buffer_empty(app, win) {
             Constraint::Length(0)
         } else {
             parse_height_constraint(&item)?
@@ -80,7 +89,11 @@ pub(crate) fn open_overlay(app: &mut TuiApp, opts: mlua::Table) -> Result<u64, S
         };
         let item_title = parse_title(item.get::<mlua::Value>("title").ok())
             .map_err(|e| format!("overlay item.title: {e}"))?;
-        let mut leaf = LayoutTree::leaf(win);
+        let mut leaf = if is_window {
+            LayoutTree::leaf(win)
+        } else {
+            LayoutTree::leaf(paint_id)
+        };
         if let Some(b) = item_border {
             leaf = leaf.with_border(b);
         }
@@ -913,7 +926,7 @@ fn parse_span(t: &mlua::Table) -> Result<Span<'static>, String> {
     Ok(Span::styled(text, style))
 }
 
-fn parse_style(t: &mlua::Table) -> Result<Style, String> {
+pub(crate) fn parse_style(t: &mlua::Table) -> Result<Style, String> {
     let mut style = Style::new();
     if let Some(c) = parse_color_opt(t.get::<mlua::Value>("fg").ok())? {
         style = style.fg(c);

@@ -107,6 +107,11 @@ pub struct TuiApp {
     /// constraint and translate logical → visual indices for reversed
     /// pickers.
     pub(crate) picker_state: HashMap<crate::smelt_term::WinId, crate::picker::PickerState>,
+    /// Registry of Lua-registered paint regions, keyed by paint id.
+    /// Mutated by `smelt.paint.register / unregister`; read each frame
+    /// by the render loop's paint dispatcher to route paint ids back
+    /// to their Lua callbacks via `crate::lua::paint::invoke_paint`.
+    pub(crate) paint_registry: crate::lua::paint::PaintRegistry,
     /// Terminal focus (FocusGained / FocusLost). Cursor is suppressed
     /// when the terminal isn't focused, so input from other apps
     /// doesn't draw a stale cursor in our window.
@@ -495,6 +500,7 @@ impl TuiApp {
             notification: None,
             cmdline: crate::app::cmdline::CmdlineState::default(),
             picker_state: HashMap::new(),
+            paint_registry: crate::lua::paint::PaintRegistry::default(),
             term_focused: true,
             working: smelt_core::working::WorkingState::new(),
             transcript_gutters: crate::window::TRANSCRIPT_GUTTERS,

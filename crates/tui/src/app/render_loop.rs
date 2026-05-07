@@ -92,7 +92,19 @@ impl TuiApp {
         }
 
         let mut stdout = std::io::stdout();
-        let _ = self.ui.render(&mut stdout);
+        // Split-borrow the paint registry + lua runtime out of `self`
+        // so the dispatcher closure (passed mutably to `&mut self.ui`)
+        // can consult them without aliasing. Lua-registered paint ids
+        // route to `paint::invoke_paint`; everything else falls through
+        // (no-op — `Ui::render_with_paints` already handled the WinId
+        // → Window dispatch internally).
+        let paint_registry = &self.paint_registry;
+        let lua = &self.lua;
+        let _ = self.ui.render_with_paints(&mut stdout, |id, slice, ctx| {
+            if let Some(handle_id) = paint_registry.lookup(id) {
+                crate::lua::paint::invoke_paint(lua, handle_id, slice, ctx);
+            }
+        });
     }
 
     /// Freeze transcript tail-follow during an active selection / vim

@@ -27,6 +27,7 @@
 
 mod api;
 pub mod app_ref;
+pub(crate) mod paint;
 mod tasks;
 pub(crate) mod ui_ops;
 
