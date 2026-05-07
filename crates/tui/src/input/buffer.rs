@@ -17,11 +17,13 @@ impl PromptState {
         if self.win.vim_enabled && mode == VimMode::Insert {
             return; // insert session groups all edits into one undo step
         }
-        self.win.history.save(crate::smelt_term::UndoEntry::snapshot(
-            &self.win.text,
-            self.win.cpos,
-            &self.win.attachment_ids,
-        ));
+        self.win
+            .history
+            .save(crate::smelt_term::UndoEntry::snapshot(
+                &self.win.text,
+                self.win.cpos,
+                &self.win.attachment_ids,
+            ));
     }
 
     pub(super) fn insert_char(&mut self, c: char, mode: VimMode) {
@@ -225,8 +227,11 @@ impl PromptState {
     }
 
     pub(super) fn undo(&mut self) {
-        let current =
-            crate::smelt_term::UndoEntry::snapshot(&self.win.text, self.win.cpos, &self.win.attachment_ids);
+        let current = crate::smelt_term::UndoEntry::snapshot(
+            &self.win.text,
+            self.win.cpos,
+            &self.win.attachment_ids,
+        );
         if let Some(entry) = self.win.history.undo(current) {
             self.win.text = entry.buf;
             self.win.cpos = entry.cpos;
@@ -371,7 +376,11 @@ impl PromptState {
     /// Records the clipboard write on the kill ring so subsequent
     /// pastes know this is *our* latest push (distinguished from an
     /// externally-updated clipboard).
-    pub(super) fn kill_and_copy(&mut self, text: String, clipboard: &mut crate::smelt_term::Clipboard) {
+    pub(super) fn kill_and_copy(
+        &mut self,
+        text: String,
+        clipboard: &mut crate::smelt_term::Clipboard,
+    ) {
         if !text.is_empty() && clipboard.write(&text).is_ok() {
             clipboard.kill_ring.record_clipboard_write(text.clone());
         }

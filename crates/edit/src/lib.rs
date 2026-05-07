@@ -24,12 +24,12 @@ pub use smelt_buffer::buffer::{
 pub use smelt_buffer::clipboard::Clipboard;
 pub use smelt_buffer::undo::{UndoEntry, UndoHistory};
 
-pub use smelt_term::{grid, layout};
 pub use smelt_term::{
     flush_diff, paint_layout_tree, to_crossterm_color, Border, Cell, CellUpdate, Color, Compositor,
     Constraint, Corner, Grid, GridSlice, Gutters, HitRegistry, LayoutTree, Line, PaintDispatch,
     PaintId, Rect, SnapshotFrame, Span, Style, Theme, DEFAULT_ACCENT,
 };
+pub use smelt_term::{grid, layout};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct WinId(pub u64);
@@ -1073,22 +1073,23 @@ impl Ui {
         let term_h = self.surface.terminal_size().1;
         let theme_arc = std::sync::Arc::clone(self.surface.theme());
         let theme_for_compositor = std::sync::Arc::clone(&theme_arc);
-        self.surface.compositor_mut().render_with(&theme_for_compositor, w, move |grid, _theme| {
-            let theme = &theme_arc;
-            // Editor-aware paint dispatcher: every `LayoutTree::Leaf`
-            // carries a `PaintId`. If the id maps onto a known
-            // `WinId`, route through `Window::render` with the right
-            // focused / cursor-shape context. Otherwise hand off to
-            // the host's `paint` callback for custom regions
-            // (treemaps, sparklines, etc.). The renderer
-            // (`paint_layout_node`) is purely structural — it doesn't
-            // know about windows.
-            let mut dispatch =
-                |id: PaintId,
-                 area: Rect,
-                 grid: &mut Grid,
-                 theme: &std::sync::Arc<Theme>,
-                 term_size: (u16, u16)| {
+        self.surface
+            .compositor_mut()
+            .render_with(&theme_for_compositor, w, move |grid, _theme| {
+                let theme = &theme_arc;
+                // Editor-aware paint dispatcher: every `LayoutTree::Leaf`
+                // carries a `PaintId`. If the id maps onto a known
+                // `WinId`, route through `Window::render` with the right
+                // focused / cursor-shape context. Otherwise hand off to
+                // the host's `paint` callback for custom regions
+                // (treemaps, sparklines, etc.). The renderer
+                // (`paint_layout_node`) is purely structural — it doesn't
+                // know about windows.
+                let mut dispatch = |id: PaintId,
+                                    area: Rect,
+                                    grid: &mut Grid,
+                                    theme: &std::sync::Arc<Theme>,
+                                    term_size: (u16, u16)| {
                     let win_id = WinId(id.0);
                     if let Some(win) = wins.get(&win_id) {
                         if let Some(buf) = bufs.get(&win.buf) {
@@ -1119,23 +1120,23 @@ impl Ui {
                     };
                     paint(id, &mut slice, &ctx);
                 };
-            // Paint splits first so overlays draw on top, matching the
-            // prior order (status was a compositor layer at z=500;
-            // overlays in the closure ran *after* every compositor
-            // layer paint, so any overlap landed overlays-over-status).
-            paint_layout_tree(
-                grid,
-                theme,
-                &splits_tree,
-                Rect::new(0, 0, term_w, term_h),
-                term_size,
-                &mut dispatch,
-            );
-            for (_id, rect, overlay) in &resolved {
-                paint_overlay(grid, theme, *rect, overlay, term_size, &mut dispatch);
-            }
-            cursor_override
-        })
+                // Paint splits first so overlays draw on top, matching the
+                // prior order (status was a compositor layer at z=500;
+                // overlays in the closure ran *after* every compositor
+                // layer paint, so any overlap landed overlays-over-status).
+                paint_layout_tree(
+                    grid,
+                    theme,
+                    &splits_tree,
+                    Rect::new(0, 0, term_w, term_h),
+                    term_size,
+                    &mut dispatch,
+                );
+                for (_id, rect, overlay) in &resolved {
+                    paint_overlay(grid, theme, *rect, overlay, term_size, &mut dispatch);
+                }
+                cursor_override
+            })
     }
 
     /// Bypass the layout tree and overlay machinery entirely. The

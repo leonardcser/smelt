@@ -1,7 +1,5 @@
 use super::event::Status;
 use super::text::{self, byte_to_cell, cell_to_byte};
-use smelt_term::grid::{GridSlice, Style};
-use smelt_term::layout::{Gutters, Rect};
 use super::vim::{self, Action, VimContext, VimMode, VimWindowState};
 use super::Buffer;
 use super::Clipboard;
@@ -9,6 +7,8 @@ use super::{BufId, WinId};
 use crate::Theme;
 use crossterm::event::{KeyCode, KeyEvent, MouseButton, MouseEvent, MouseEventKind};
 use smelt_buffer::buffer::VirtTextPos;
+use smelt_term::grid::{GridSlice, Style};
+use smelt_term::layout::{Gutters, Rect};
 
 /// Per-frame paint context handed to `Window::render`. Carries terminal
 /// size + theme so renderers don't reach back into the host.
@@ -1203,18 +1203,14 @@ fn paint_scrollbar(slice: &mut GridSlice<'_>, viewport: WindowViewport, theme: &
     }
     let thumb = theme.get("SmeltScrollbarThumb");
     let track = theme.get("SmeltScrollbarTrack");
-    let thumb_style = Style::new().bg(
-        thumb
-            .bg
-            .or(thumb.fg)
-            .unwrap_or(smelt_buffer::style::Color::Reset),
-    );
-    let track_style = Style::new().bg(
-        track
-            .bg
-            .or(track.fg)
-            .unwrap_or(smelt_buffer::style::Color::Reset),
-    );
+    let thumb_style = Style::new().bg(thumb
+        .bg
+        .or(thumb.fg)
+        .unwrap_or(smelt_buffer::style::Color::Reset));
+    let track_style = Style::new().bg(track
+        .bg
+        .or(track.fg)
+        .unwrap_or(smelt_buffer::style::Color::Reset));
     let avail = height.saturating_sub(row_offset);
     let rows = bar.viewport_rows.min(avail);
     for row in 0..rows {
@@ -1811,8 +1807,14 @@ mod tests {
         let mut theme = Theme::default();
         let thumb_bg = smelt_buffer::style::Color::AnsiValue(220);
         let track_bg = smelt_buffer::style::Color::AnsiValue(238);
-        theme.set("SmeltScrollbarThumb", crate::grid::Style::new().bg(thumb_bg));
-        theme.set("SmeltScrollbarTrack", crate::grid::Style::new().bg(track_bg));
+        theme.set(
+            "SmeltScrollbarThumb",
+            crate::grid::Style::new().bg(thumb_bg),
+        );
+        theme.set(
+            "SmeltScrollbarTrack",
+            crate::grid::Style::new().bg(track_bg),
+        );
         let ctx = DrawContext {
             terminal_width: 20,
             terminal_height: 10,
@@ -1843,7 +1845,10 @@ mod tests {
         ));
         let mut theme = Theme::default();
         let track_bg = smelt_buffer::style::Color::AnsiValue(238);
-        theme.set("SmeltScrollbarTrack", crate::grid::Style::new().bg(track_bg));
+        theme.set(
+            "SmeltScrollbarTrack",
+            crate::grid::Style::new().bg(track_bg),
+        );
         let ctx = DrawContext {
             terminal_width: 20,
             terminal_height: 10,

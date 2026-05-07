@@ -444,7 +444,11 @@ pub(crate) fn configure_input_leaf(app: &mut TuiApp, leaf: WinId) {
             .unwrap_or(false)
     }
 
-    fn replace_line(ctx: &mut crate::smelt_term::CallbackCtx<'_>, new: String, new_cursor_col: u16) {
+    fn replace_line(
+        ctx: &mut crate::smelt_term::CallbackCtx<'_>,
+        new: String,
+        new_cursor_col: u16,
+    ) {
         let buf_id = match ctx.ui.win(ctx.win) {
             Some(w) => w.buf,
             None => return,

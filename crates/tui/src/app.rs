@@ -718,7 +718,9 @@ impl TuiApp {
         let gap = "  ";
         let line = format!("{indent}{label}{gap}{message}");
 
-        let buf = self.ui.buf_create(crate::smelt_term::BufCreateOpts::default());
+        let buf = self
+            .ui
+            .buf_create(crate::smelt_term::BufCreateOpts::default());
 
         let label_start = indent.len() as u16;
         let label_end = label_start + label.len() as u16;

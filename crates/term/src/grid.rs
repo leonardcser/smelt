@@ -524,11 +524,7 @@ mod tests {
         use crate::line::{Line, Span};
         let mut grid = Grid::new(15, 1);
         let red = Style::new().fg(Color::Red);
-        let line = Line::from_spans([
-            Span::raw("ab"),
-            Span::styled("CD", red),
-            Span::raw("ef"),
-        ]);
+        let line = Line::from_spans([Span::raw("ab"), Span::styled("CD", red), Span::raw("ef")]);
         grid.put_line(1, 0, &line);
         assert_eq!(grid.cell(1, 0).symbol, 'a');
         assert_eq!(grid.cell(1, 0).style.fg, None);

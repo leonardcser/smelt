@@ -33,7 +33,8 @@ impl TuiApp {
         // to `Hardware` / `Block` if a focused surface owns the
         // caret. `Hidden` is the right baseline for unfocused frames
         // / cmdline-up / dialog-without-input cases.
-        self.ui.set_cursor_shape(crate::smelt_term::CursorShape::Hidden);
+        self.ui
+            .set_cursor_shape(crate::smelt_term::CursorShape::Hidden);
 
         // ── Layout ──
         let natural_prompt_height = self.measure_prompt_height(&self.input, width, queued);
@@ -78,10 +79,14 @@ impl TuiApp {
         // hit this branch. The transcript / prompt sync paths above
         // run unconditionally, so check this only when neither one
         // claimed the cursor.
-        if matches!(self.ui.cursor_shape(), crate::smelt_term::CursorShape::Hidden) {
+        if matches!(
+            self.ui.cursor_shape(),
+            crate::smelt_term::CursorShape::Hidden
+        ) {
             if let Some(focus) = self.ui.focus() {
                 if self.ui.overlay_for_leaf(focus).is_some() {
-                    self.ui.set_cursor_shape(crate::smelt_term::CursorShape::Hardware);
+                    self.ui
+                        .set_cursor_shape(crate::smelt_term::CursorShape::Hardware);
                 }
             }
         }
@@ -102,7 +107,10 @@ impl TuiApp {
                 self.vim_mode,
                 crate::smelt_term::VimMode::Visual | crate::smelt_term::VimMode::VisualLine
             );
-        let mouse_drag_active = matches!(self.ui.capture(), Some(crate::smelt_term::HitTarget::Window(_)));
+        let mouse_drag_active = matches!(
+            self.ui.capture(),
+            Some(crate::smelt_term::HitTarget::Window(_))
+        );
         let freeze = has_selection || in_vim_visual || mouse_drag_active;
         if !freeze && self.transcript_window.follow_tail {
             self.transcript_window.scroll_top = u16::MAX;
@@ -227,14 +235,15 @@ impl TuiApp {
                     smelt_core::style::Color::White,
                 )
             };
-            self.ui.set_cursor_shape(crate::smelt_term::CursorShape::Block {
-                glyph: c.glyph,
-                style: crate::smelt_term::Style {
-                    fg: Some(fg),
-                    bg: Some(bg),
-                    ..Default::default()
-                },
-            });
+            self.ui
+                .set_cursor_shape(crate::smelt_term::CursorShape::Block {
+                    glyph: c.glyph,
+                    style: crate::smelt_term::Style {
+                        fg: Some(fg),
+                        bg: Some(bg),
+                        ..Default::default()
+                    },
+                });
         }
         let (cur_col, cur_line) = tcursor
             .soft_cursor
@@ -338,7 +347,8 @@ impl TuiApp {
                     .set_cursor_shape(crate::smelt_term::CursorShape::Block { glyph, style });
             }
             (Some(_), None) => {
-                self.ui.set_cursor_shape(crate::smelt_term::CursorShape::Hardware);
+                self.ui
+                    .set_cursor_shape(crate::smelt_term::CursorShape::Hardware);
             }
             (None, _) => {}
         }

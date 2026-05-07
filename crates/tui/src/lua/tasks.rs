@@ -129,7 +129,10 @@ impl LuaRuntime {
 
 /// Fill a Lua table with fields from a `crate::smelt_term::Payload` for
 /// `LuaRuntime::invoke_callback`.
-fn populate_payload_table(table: &mlua::Table, payload: &crate::smelt_term::Payload) -> mlua::Result<()> {
+fn populate_payload_table(
+    table: &mlua::Table,
+    payload: &crate::smelt_term::Payload,
+) -> mlua::Result<()> {
     match payload {
         crate::smelt_term::Payload::None => Ok(()),
         crate::smelt_term::Payload::Key { code, mods } => {

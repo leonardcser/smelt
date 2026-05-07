@@ -240,7 +240,9 @@ impl TuiApp {
             .input
             .win
             .vim_enabled
-            .then(|| crate::smelt_term::vim::visual_anchor(&self.input.win.vim_state, self.vim_mode))
+            .then(|| {
+                crate::smelt_term::vim::visual_anchor(&self.input.win.vim_state, self.vim_mode)
+            })
             .flatten();
 
         self.input.win.cpos = wrap.src_to_wrapped(saved_src_cpos);
@@ -280,7 +282,9 @@ impl TuiApp {
             .input
             .win
             .vim_enabled
-            .then(|| crate::smelt_term::vim::visual_anchor(&self.input.win.vim_state, self.vim_mode))
+            .then(|| {
+                crate::smelt_term::vim::visual_anchor(&self.input.win.vim_state, self.vim_mode)
+            })
             .flatten();
 
         self.input.win.cpos = wrap.wrapped_to_src(new_w_cpos);

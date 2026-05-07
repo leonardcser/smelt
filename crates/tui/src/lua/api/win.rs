@@ -105,9 +105,10 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
     win_tbl.set(
         "buf",
         lua.create_function(|_, id: u64| {
-            let buf =
-                crate::lua::try_with_app(|app| app.ui.win(crate::smelt_term::WinId(id)).map(|w| w.buf.0))
-                    .flatten();
+            let buf = crate::lua::try_with_app(|app| {
+                app.ui.win(crate::smelt_term::WinId(id)).map(|w| w.buf.0)
+            })
+            .flatten();
             Ok(buf)
         })?,
     )?;
@@ -210,7 +211,9 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
                 )));
             };
             crate::lua::with_app(|app| {
-                let prev = app.ui.win_clear_keymap(crate::smelt_term::WinId(win_id), key);
+                let prev = app
+                    .ui
+                    .win_clear_keymap(crate::smelt_term::WinId(win_id), key);
                 crate::lua::drop_displaced_lua_handle(app, prev);
             });
             Ok(())
@@ -225,9 +228,11 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
                 )));
             };
             crate::lua::with_app(|app| {
-                let prev =
-                    app.ui
-                        .win_clear_event_by_id(crate::smelt_term::WinId(win_id), event, callback_id);
+                let prev = app.ui.win_clear_event_by_id(
+                    crate::smelt_term::WinId(win_id),
+                    event,
+                    callback_id,
+                );
                 crate::lua::drop_displaced_lua_handle(app, prev);
             });
             Ok(())

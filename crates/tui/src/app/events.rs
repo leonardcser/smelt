@@ -839,10 +839,11 @@ impl TuiApp {
             return;
         };
         let lua = &self.lua;
-        let mut lua_invoke =
-            |handle: crate::smelt_term::LuaHandle, win: crate::smelt_term::WinId, payload: &crate::smelt_term::Payload| {
-                lua.queue_invocation(handle, win, payload);
-            };
+        let mut lua_invoke = |handle: crate::smelt_term::LuaHandle,
+                              win: crate::smelt_term::WinId,
+                              payload: &crate::smelt_term::Payload| {
+            lua.queue_invocation(handle, win, payload);
+        };
         self.ui.fire_win_event(
             root,
             crate::smelt_term::WinEvent::Dismiss,

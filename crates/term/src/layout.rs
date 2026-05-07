@@ -584,7 +584,10 @@ pub fn paint_chrome(
 /// when present; attribute booleans OR. Spans with `Style::default()`
 /// inherit the border's full styling so titles seamlessly blend with
 /// the frame.
-fn merge_title_span_style(base: crate::grid::Style, span: crate::grid::Style) -> crate::grid::Style {
+fn merge_title_span_style(
+    base: crate::grid::Style,
+    span: crate::grid::Style,
+) -> crate::grid::Style {
     crate::grid::Style {
         fg: span.fg.or(base.fg),
         bg: span.bg.or(base.bg),
@@ -694,11 +697,7 @@ pub fn resolve_constraints(items: &[Item], total: u16) -> Vec<u16> {
         .iter()
         .enumerate()
         .filter_map(|(i, (c, _))| {
-            matches!(
-                c,
-                Constraint::Fill | Constraint::Fit | Constraint::Min(_)
-            )
-            .then_some(i)
+            matches!(c, Constraint::Fill | Constraint::Fit | Constraint::Min(_)).then_some(i)
         })
         .collect();
     let flex_count = flex_indices.len() as u16;
@@ -744,8 +743,7 @@ pub fn resolve_constraints(items: &[Item], total: u16) -> Vec<u16> {
             if let Some(divisor) = (min_total > 0).then_some(min_total) {
                 for (k, &i) in flex_indices.iter().enumerate() {
                     if matches!(items[i].0, Constraint::Min(_)) {
-                        let take =
-                            ((shares[k] as u32 * surplus as u32) / divisor) as u16;
+                        let take = ((shares[k] as u32 * surplus as u32) / divisor) as u16;
                         shares[k] = shares[k].saturating_sub(take);
                     }
                 }

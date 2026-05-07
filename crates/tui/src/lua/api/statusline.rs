@@ -154,7 +154,10 @@ fn build_snapshot(app: &mut crate::app::TuiApp, lua: &Lua) -> LuaResult<mlua::Ta
             }
             crate::app::AppFocus::Prompt => {
                 let mut mode = app.input.vim_enabled().then_some(app.vim_mode);
-                let drag = matches!(app.ui.capture(), Some(crate::smelt_term::HitTarget::Window(_)));
+                let drag = matches!(
+                    app.ui.capture(),
+                    Some(crate::smelt_term::HitTarget::Window(_))
+                );
                 if drag {
                     mode = Some(crate::smelt_term::VimMode::Visual);
                 }
@@ -168,7 +171,8 @@ fn build_snapshot(app: &mut crate::app::TuiApp, lua: &Lua) -> LuaResult<mlua::Ta
         vim_tbl.set("label", label)?;
         let kind = match vim_mode {
             Some(crate::smelt_term::VimMode::Insert) => "insert",
-            Some(crate::smelt_term::VimMode::Visual) | Some(crate::smelt_term::VimMode::VisualLine) => "visual",
+            Some(crate::smelt_term::VimMode::Visual)
+            | Some(crate::smelt_term::VimMode::VisualLine) => "visual",
             _ => "normal",
         };
         vim_tbl.set("kind", kind)?;
