@@ -128,25 +128,44 @@ impl LayoutTree {
         }
     }
 
-    pub fn with_gap(mut self, g: u16) -> Self {
-        if let Some(c) = self.chrome_mut() {
+    /// If `self` is a `Leaf`, wrap it in a single-item Vbox with default
+    /// chrome so `with_border` / `with_title` / `with_gap` can attach
+    /// per-leaf chrome the same way they attach per-container chrome.
+    /// No-op for `Vbox` / `Hbox`. Renderer logic stays one-pass: a
+    /// `Vbox::with_border(...)` of one item and a `Leaf::with_border(...)`
+    /// produce identical trees.
+    fn ensure_chrome_capable(self) -> Self {
+        match self {
+            Self::Leaf(_) => Self::Vbox {
+                items: vec![(Constraint::Fill, self)],
+                chrome: Chrome::default(),
+            },
+            other => other,
+        }
+    }
+
+    pub fn with_gap(self, g: u16) -> Self {
+        let mut tree = self.ensure_chrome_capable();
+        if let Some(c) = tree.chrome_mut() {
             c.gap = g;
         }
-        self
+        tree
     }
 
-    pub fn with_border(mut self, b: Border) -> Self {
-        if let Some(c) = self.chrome_mut() {
+    pub fn with_border(self, b: Border) -> Self {
+        let mut tree = self.ensure_chrome_capable();
+        if let Some(c) = tree.chrome_mut() {
             c.border = Some(b);
         }
-        self
+        tree
     }
 
-    pub fn with_title(mut self, t: impl Into<crate::line::Line<'static>>) -> Self {
-        if let Some(c) = self.chrome_mut() {
+    pub fn with_title(self, t: impl Into<crate::line::Line<'static>>) -> Self {
+        let mut tree = self.ensure_chrome_capable();
+        if let Some(c) = tree.chrome_mut() {
             c.title = Some(t.into());
         }
-        self
+        tree
     }
 
     /// Whether this tree contains `id` as one of its paint leaves
@@ -1089,6 +1108,34 @@ mod tests {
     fn leaves_in_order_single_leaf() {
         let tree = LayoutTree::leaf(A);
         assert_eq!(tree.leaves_in_order(), vec![A]);
+    }
+
+    #[test]
+    fn leaf_with_border_auto_wraps_and_keeps_id_resolvable() {
+        let tree = LayoutTree::leaf(A)
+            .with_border(Border::SINGLE)
+            .with_title("hi");
+        // Wrapped in a Vbox internally — leaves walks find A unchanged.
+        assert_eq!(tree.leaves_in_order(), vec![A]);
+        assert!(tree.contains_leaf(A));
+        // Chrome attached on the wrapper.
+        match &tree {
+            LayoutTree::Vbox { chrome, .. } => {
+                assert!(chrome.border.is_some());
+                assert!(chrome.title.is_some());
+            }
+            _ => panic!("expected Vbox wrapper"),
+        }
+    }
+
+    #[test]
+    fn leaf_with_chrome_resolves_inside_inset_rect() {
+        let tree = LayoutTree::leaf(A).with_border(Border::SINGLE);
+        let area = Rect::new(0, 0, 10, 6);
+        let rects = resolve_layout(&tree, area);
+        // The inner leaf gets the area minus the 2-cell border inset.
+        let inner = rects.get(&A).copied().expect("leaf rect resolved");
+        assert_eq!(inner, Rect::new(1, 1, 8, 4));
     }
 
     #[test]
