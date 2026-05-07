@@ -1,6 +1,21 @@
 pub use super::geometry::Rect;
 use std::collections::HashMap;
 
+/// Stable identifier for a custom-paint leaf. Hosts mint these
+/// values, attach them to `LayoutTree::Paint(_)` leaves, and dispatch
+/// on them inside the paint callback passed to
+/// [`super::Ui::render_with_paints`]. Unlike `WinId`, paint leaves
+/// are not backed by a `Window`/`Buffer` — the host owns all paint
+/// state and writes directly into the per-leaf `GridSlice`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct PaintId(pub u32);
+
+impl PaintId {
+    pub fn raw(self) -> u32 {
+        self.0
+    }
+}
+
 /// Sizing constraint for a layout child along the parent's primary
 /// axis. Resolved by `resolve_constraints` against the parent's total
 /// size, in declaration order:
@@ -63,6 +78,12 @@ pub enum LayoutTree {
     /// Terminal node identifying a single window. The constraint
     /// governing its size lives in its parent's `items`.
     Leaf(super::WinId),
+    /// Custom-paint leaf. The host registers a paint dispatcher via
+    /// [`super::Ui::render_with_paints`] and matches on `PaintId` to
+    /// drive its own painter for this rect — no `Window` or `Buffer`
+    /// involved. Hit-testing for these regions is the host's
+    /// responsibility (use [`super::Ui::paint_rect`]).
+    Paint(PaintId),
     /// Vertical container; children stack top-to-bottom.
     Vbox { items: Vec<Item>, chrome: Chrome },
     /// Horizontal container; children pack left-to-right.
@@ -92,10 +113,16 @@ impl LayoutTree {
         Self::Leaf(win)
     }
 
+    /// Custom-paint leaf. Host paints into this rect via the dispatcher
+    /// passed to [`super::Ui::render_with_paints`].
+    pub fn paint(id: PaintId) -> Self {
+        Self::Paint(id)
+    }
+
     fn chrome_mut(&mut self) -> Option<&mut Chrome> {
         match self {
             Self::Vbox { chrome, .. } | Self::Hbox { chrome, .. } => Some(chrome),
-            Self::Leaf(_) => None,
+            Self::Leaf(_) | Self::Paint(_) => None,
         }
     }
 
@@ -126,8 +153,20 @@ impl LayoutTree {
     pub fn contains_leaf(&self, win: super::WinId) -> bool {
         match self {
             LayoutTree::Leaf(w) => *w == win,
+            LayoutTree::Paint(_) => false,
             LayoutTree::Vbox { items, .. } | LayoutTree::Hbox { items, .. } => {
                 items.iter().any(|(_, child)| child.contains_leaf(win))
+            }
+        }
+    }
+
+    /// Whether this tree contains `id` as a paint leaf.
+    pub fn contains_paint(&self, id: PaintId) -> bool {
+        match self {
+            LayoutTree::Paint(p) => *p == id,
+            LayoutTree::Leaf(_) => false,
+            LayoutTree::Vbox { items, .. } | LayoutTree::Hbox { items, .. } => {
+                items.iter().any(|(_, child)| child.contains_paint(id))
             }
         }
     }
@@ -144,6 +183,7 @@ impl LayoutTree {
     fn collect_leaves(&self, out: &mut Vec<super::WinId>) {
         match self {
             LayoutTree::Leaf(w) => out.push(*w),
+            LayoutTree::Paint(_) => {}
             LayoutTree::Vbox { items, .. } | LayoutTree::Hbox { items, .. } => {
                 for (_, child) in items {
                     child.collect_leaves(out);
@@ -167,7 +207,7 @@ impl LayoutTree {
             // Leaves have no intrinsic size yet — content-natural
             // sizing waits for windows to expose Buffer dimensions.
             // Callers wrap them in containers with explicit sizing.
-            LayoutTree::Leaf(_) => (0, 0),
+            LayoutTree::Leaf(_) | LayoutTree::Paint(_) => (0, 0),
             LayoutTree::Vbox { items, chrome } => natural_box(items, chrome, cap, true),
             LayoutTree::Hbox { items, chrome } => natural_box(items, chrome, cap, false),
         }
@@ -346,6 +386,12 @@ impl BorderSides {
         bottom: false,
         left: false,
     };
+    pub const BOTTOM: Self = Self {
+        top: false,
+        right: false,
+        bottom: true,
+        left: false,
+    };
 }
 
 /// A frame around a container: a glyph family plus the set of edges
@@ -368,6 +414,9 @@ impl Border {
     pub const fn top(style: BorderStyle) -> Self {
         Self::new(style, BorderSides::TOP)
     }
+    pub const fn bottom(style: BorderStyle) -> Self {
+        Self::new(style, BorderSides::BOTTOM)
+    }
     pub const SINGLE: Border = Border::all(BorderStyle::Single);
     pub const DOUBLE: Border = Border::all(BorderStyle::Double);
     pub const ROUNDED: Border = Border::all(BorderStyle::Rounded);
@@ -384,6 +433,16 @@ pub fn resolve_layout(tree: &LayoutTree, area: Rect) -> HashMap<super::WinId, Re
     let mut result = HashMap::new();
     // Top-level tree gets the full area; its constraint is implicit.
     resolve_node(tree, area, &mut result);
+    result
+}
+
+/// Resolve the tree against `area` and return the rect of every
+/// `LayoutTree::Paint` leaf. Mirror of [`resolve_layout`] for paint
+/// leaves — used by hosts that need hit-testing or per-paint geometry
+/// outside the paint callback.
+pub fn resolve_paint_layout(tree: &LayoutTree, area: Rect) -> HashMap<PaintId, Rect> {
+    let mut result = HashMap::new();
+    resolve_paint_node(tree, area, &mut result);
     result
 }
 
@@ -500,6 +559,7 @@ fn resolve_node(node: &LayoutTree, area: Rect, out: &mut HashMap<super::WinId, R
         LayoutTree::Leaf(win) => {
             out.insert(*win, area);
         }
+        LayoutTree::Paint(_) => {}
         LayoutTree::Vbox { items, chrome } => {
             resolve_box(items, chrome, area, true, out);
         }
@@ -538,11 +598,57 @@ fn resolve_box(
     }
 }
 
+fn resolve_paint_node(node: &LayoutTree, area: Rect, out: &mut HashMap<PaintId, Rect>) {
+    match node {
+        LayoutTree::Leaf(_) => {}
+        LayoutTree::Paint(id) => {
+            out.insert(*id, area);
+        }
+        LayoutTree::Vbox { items, chrome } => {
+            resolve_paint_box(items, chrome, area, true, out);
+        }
+        LayoutTree::Hbox { items, chrome } => {
+            resolve_paint_box(items, chrome, area, false, out);
+        }
+    }
+}
+
+fn resolve_paint_box(
+    items: &[Item],
+    chrome: &Chrome,
+    area: Rect,
+    vertical: bool,
+    out: &mut HashMap<PaintId, Rect>,
+) {
+    let inner = inset_for_border(area, chrome.border);
+    let primary_total = if vertical { inner.height } else { inner.width };
+    let total_gap = chrome
+        .gap
+        .saturating_mul(items.len().saturating_sub(1) as u16);
+    let available = primary_total.saturating_sub(total_gap);
+    let sizes = resolve_constraints(items, available);
+    let mut offset = 0u16;
+    for (i, ((_, child), &size)) in items.iter().zip(sizes.iter()).enumerate() {
+        let child_area = if vertical {
+            Rect::new(inner.top + offset, inner.left, inner.width, size)
+        } else {
+            Rect::new(inner.top, inner.left + offset, size, inner.height)
+        };
+        resolve_paint_node(child, child_area, out);
+        offset += size;
+        if i + 1 < items.len() {
+            offset += chrome.gap;
+        }
+    }
+}
+
 pub(crate) fn resolve_constraints(items: &[Item], total: u16) -> Vec<u16> {
     let mut sizes = vec![0u16; items.len()];
     let mut remaining = total;
 
-    // Pass 1: hard-sized constraints consume their share.
+    // Pass 1: hard-sized constraints consume their share. `Min(n)` is
+    // *not* hard-sized — it competes with `Fill` for leftover with a
+    // floor of `n`, handled in pass 3.
     for (i, (c, _)) in items.iter().enumerate() {
         match c {
             Constraint::Length(n) | Constraint::Max(n) => {
@@ -552,11 +658,6 @@ pub(crate) fn resolve_constraints(items: &[Item], total: u16) -> Vec<u16> {
             }
             Constraint::Percentage(pct) => {
                 let n = ((total as u32 * *pct as u32) / 100).min(remaining as u32) as u16;
-                sizes[i] = n;
-                remaining -= n;
-            }
-            Constraint::Min(n) => {
-                let n = (*n).min(remaining);
                 sizes[i] = n;
                 remaining -= n;
             }
@@ -586,20 +687,89 @@ pub(crate) fn resolve_constraints(items: &[Item], total: u16) -> Vec<u16> {
     }
     remaining -= consumed.min(remaining);
 
-    // Pass 3: `Fill` and `Fit` split the remainder evenly. (`Fit`
-    // behaves like `Fill` until leaves expose natural size.)
-    let fill_count = items
+    // Pass 3: `Fill`, `Fit`, and `Min` compete for the remainder
+    // equally. `Min(n)` is `Fill` with a floor of n — if its equal
+    // share is below the floor, it clamps up. If the resulting total
+    // exceeds remaining (floors push past the budget), surplus comes
+    // off the non-Min flex children first, then off Min children
+    // proportional to their current sizes.
+    let flex_indices: Vec<usize> = items
         .iter()
-        .filter(|(c, _)| matches!(c, Constraint::Fill | Constraint::Fit))
-        .count() as u16;
-    if let Some(per_fill) = remaining.checked_div(fill_count) {
-        let mut extra = remaining % fill_count;
-        for (i, (c, _)) in items.iter().enumerate() {
-            if matches!(c, Constraint::Fill | Constraint::Fit) {
-                sizes[i] = per_fill + u16::from(extra > 0);
-                extra = extra.saturating_sub(1);
+        .enumerate()
+        .filter_map(|(i, (c, _))| {
+            matches!(
+                c,
+                Constraint::Fill | Constraint::Fit | Constraint::Min(_)
+            )
+            .then_some(i)
+        })
+        .collect();
+    let flex_count = flex_indices.len() as u16;
+    if flex_count == 0 || remaining == 0 {
+        return sizes;
+    }
+
+    let per = remaining / flex_count;
+    let mut leftover = remaining % flex_count;
+    let mut shares = vec![0u16; flex_indices.len()];
+    for share in shares.iter_mut() {
+        *share = per + u16::from(leftover > 0);
+        leftover = leftover.saturating_sub(1);
+    }
+    for (k, &i) in flex_indices.iter().enumerate() {
+        if let Constraint::Min(n) = items[i].0 {
+            if shares[k] < n {
+                shares[k] = n;
             }
         }
+    }
+
+    let total_shares: u32 = shares.iter().map(|&v| v as u32).sum();
+    if total_shares > remaining as u32 {
+        let mut surplus = (total_shares - remaining as u32) as u16;
+        for (k, &i) in flex_indices.iter().enumerate() {
+            if surplus == 0 {
+                break;
+            }
+            if !matches!(items[i].0, Constraint::Min(_)) {
+                let take = shares[k].min(surplus);
+                shares[k] -= take;
+                surplus -= take;
+            }
+        }
+        if surplus > 0 {
+            let min_total: u32 = flex_indices
+                .iter()
+                .enumerate()
+                .filter(|(_, &i)| matches!(items[i].0, Constraint::Min(_)))
+                .map(|(k, _)| shares[k] as u32)
+                .sum();
+            if let Some(divisor) = (min_total > 0).then_some(min_total) {
+                for (k, &i) in flex_indices.iter().enumerate() {
+                    if matches!(items[i].0, Constraint::Min(_)) {
+                        let take =
+                            ((shares[k] as u32 * surplus as u32) / divisor) as u16;
+                        shares[k] = shares[k].saturating_sub(take);
+                    }
+                }
+                let new_total: u32 = shares.iter().map(|&v| v as u32).sum();
+                let mut residual = new_total.saturating_sub(remaining as u32) as u16;
+                for (k, &i) in flex_indices.iter().enumerate() {
+                    if residual == 0 {
+                        break;
+                    }
+                    if matches!(items[i].0, Constraint::Min(_)) {
+                        let take = shares[k].min(residual);
+                        shares[k] -= take;
+                        residual -= take;
+                    }
+                }
+            }
+        }
+    }
+
+    for (k, &i) in flex_indices.iter().enumerate() {
+        sizes[i] = shares[k];
     }
 
     sizes
@@ -693,14 +863,54 @@ mod tests {
     }
 
     #[test]
-    fn min_reserves_floor_then_competes_with_fill() {
+    fn min_competes_with_fill_for_equal_share_when_floor_satisfied() {
         let tree = LayoutTree::vbox(vec![
             (Constraint::Min(3), LayoutTree::leaf(A)),
             (Constraint::Fill, LayoutTree::leaf(B)),
         ]);
         let result = resolve_layout(&tree, Rect::new(0, 0, 80, 24));
-        assert_eq!(result[&A].height, 3);
-        assert_eq!(result[&B].height, 21);
+        assert_eq!(result[&A].height, 12);
+        assert_eq!(result[&B].height, 12);
+    }
+
+    #[test]
+    fn min_clamps_up_to_floor_when_equal_share_too_small() {
+        let tree = LayoutTree::vbox(vec![
+            (Constraint::Min(20), LayoutTree::leaf(A)),
+            (Constraint::Fill, LayoutTree::leaf(B)),
+        ]);
+        let result = resolve_layout(&tree, Rect::new(0, 0, 80, 24));
+        assert_eq!(result[&A].height, 20);
+        assert_eq!(result[&B].height, 4);
+    }
+
+    #[test]
+    fn min_zero_alone_consumes_all_remaining() {
+        let tree = LayoutTree::vbox(vec![(Constraint::Min(0), LayoutTree::leaf(A))]);
+        let result = resolve_layout(&tree, Rect::new(0, 0, 80, 24));
+        assert_eq!(result[&A].height, 24);
+    }
+
+    #[test]
+    fn min_with_length_sibling_takes_remainder() {
+        let tree = LayoutTree::vbox(vec![
+            (Constraint::Length(10), LayoutTree::leaf(A)),
+            (Constraint::Min(0), LayoutTree::leaf(B)),
+        ]);
+        let result = resolve_layout(&tree, Rect::new(0, 0, 80, 24));
+        assert_eq!(result[&A].height, 10);
+        assert_eq!(result[&B].height, 14);
+    }
+
+    #[test]
+    fn two_mins_split_evenly_when_total_overruns_floors() {
+        let tree = LayoutTree::vbox(vec![
+            (Constraint::Min(20), LayoutTree::leaf(A)),
+            (Constraint::Min(20), LayoutTree::leaf(B)),
+        ]);
+        let result = resolve_layout(&tree, Rect::new(0, 0, 80, 24));
+        assert_eq!(result[&A].height + result[&B].height, 24);
+        assert!((result[&A].height as i32 - result[&B].height as i32).abs() <= 1);
     }
 
     #[test]

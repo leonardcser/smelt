@@ -33,11 +33,11 @@ pub mod trust;
 pub mod utils;
 pub mod working;
 
-// Pure-data UI primitives live in `smelt-ui-data` so non-smelt
-// frontends (e.g. tcloc) can depend on them without pulling in
-// engine / lua / http. Re-exported here so existing call sites
-// (`smelt_core::buffer::Buffer`, etc.) keep resolving.
-pub use ui_data::{attachment, buffer, clipboard, kill_ring, style, theme, undo};
+// Frontend-neutral document model lives in `smelt-buffer` so headless
+// runtimes and non-smelt frontends (e.g. tcloc) can depend on it
+// without pulling in engine / lua / http. Re-exported here so existing
+// call sites (`smelt_core::buffer::Buffer`, etc.) keep resolving.
+pub use smelt_buffer::{attachment, buffer, clipboard, kill_ring, style, theme, undo};
 
 pub use app_config::AppConfig;
 pub use cells::Cells;

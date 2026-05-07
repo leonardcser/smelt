@@ -38,9 +38,9 @@ impl LuaRuntime {
     #[cfg(test)]
     pub(super) fn invoke_callback(
         &self,
-        handle: crate::ui::LuaHandle,
-        win: crate::ui::WinId,
-        payload: &crate::ui::Payload,
+        handle: crate::smelt_term::LuaHandle,
+        win: crate::smelt_term::WinId,
+        payload: &crate::smelt_term::Payload,
     ) {
         if let Some((func, payload_table)) = self.prepare_invocation(handle, win, payload) {
             if let Err(e) = func.call::<()>(payload_table) {
@@ -60,9 +60,9 @@ impl LuaRuntime {
     /// construction errored — both recorded as Lua errors.
     pub(crate) fn prepare_invocation(
         &self,
-        handle: crate::ui::LuaHandle,
-        win: crate::ui::WinId,
-        payload: &crate::ui::Payload,
+        handle: crate::smelt_term::LuaHandle,
+        win: crate::smelt_term::WinId,
+        payload: &crate::smelt_term::Payload,
     ) -> Option<(mlua::Function, mlua::Table)> {
         let func = {
             let cbs = self.shared.callbacks.lock().ok()?;
@@ -102,9 +102,9 @@ impl LuaRuntime {
     /// installed, giving Lua bindings sole access to TuiApp state.
     pub(crate) fn queue_invocation(
         &self,
-        handle: crate::ui::LuaHandle,
-        win: crate::ui::WinId,
-        payload: &crate::ui::Payload,
+        handle: crate::smelt_term::LuaHandle,
+        win: crate::smelt_term::WinId,
+        payload: &crate::smelt_term::Payload,
     ) {
         if let Ok(mut q) = self.shared.pending_invocations.lock() {
             q.push(crate::lua::PendingInvocation {
@@ -127,17 +127,17 @@ impl LuaRuntime {
     }
 }
 
-/// Fill a Lua table with fields from a `crate::ui::Payload` for
+/// Fill a Lua table with fields from a `crate::smelt_term::Payload` for
 /// `LuaRuntime::invoke_callback`.
-fn populate_payload_table(table: &mlua::Table, payload: &crate::ui::Payload) -> mlua::Result<()> {
+fn populate_payload_table(table: &mlua::Table, payload: &crate::smelt_term::Payload) -> mlua::Result<()> {
     match payload {
-        crate::ui::Payload::None => Ok(()),
-        crate::ui::Payload::Key { code, mods } => {
+        crate::smelt_term::Payload::None => Ok(()),
+        crate::smelt_term::Payload::Key { code, mods } => {
             table.set("code", format!("{code:?}"))?;
             table.set("mods", format!("{mods:?}"))?;
             Ok(())
         }
-        crate::ui::Payload::Selection { index } => table.set("index", *index + 1),
-        crate::ui::Payload::Text { content } => table.set("text", content.clone()),
+        crate::smelt_term::Payload::Selection { index } => table.set("index", *index + 1),
+        crate::smelt_term::Payload::Text { content } => table.set("text", content.clone()),
     }
 }

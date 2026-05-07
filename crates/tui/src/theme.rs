@@ -1,16 +1,16 @@
-//! Smelt-specific theme initialization for `crate::ui::Theme`.
+//! Smelt-specific theme initialization for `crate::smelt_term::Theme`.
 //!
 //! Atomic state (accent, slug, light/dark flag) lives directly on
-//! `crate::ui::Theme` now. This module owns:
+//! `crate::smelt_term::Theme` now. This module owns:
 //!   * `populate_ui_theme` — write the smelt highlight groups into a
-//!     `crate::ui::Theme` registry, sourced from the Theme's own state.
+//!     `crate::smelt_term::Theme` registry, sourced from the Theme's own state.
 //!   * `detect_background` — OSC 11 / `$COLORFGBG` light/dark probe.
 //!   * `PRESETS` — the picker list for `/theme` & `/color`.
 
 use smelt_core::style::Color;
 
 /// Re-export so callers can refer to one canonical name.
-pub use crate::ui::DEFAULT_ACCENT;
+pub use crate::smelt_term::DEFAULT_ACCENT;
 
 /// Look up a preset by name. Returns the ansi value if found.
 pub(crate) fn preset_by_name(name: &str) -> Option<u8> {
@@ -28,7 +28,7 @@ pub(crate) fn preset_by_name(name: &str) -> Option<u8> {
 /// result on `theme`. Must be called *before* entering the TUI's
 /// raw-mode / alternate screen since we temporarily enable raw mode
 /// ourselves for the OSC query.
-pub(crate) fn detect_background(theme: &mut crate::ui::Theme) {
+pub(crate) fn detect_background(theme: &mut crate::smelt_term::Theme) {
     if let Some(light) = detect_light_background() {
         theme.set_light(light);
     }
@@ -188,8 +188,8 @@ fn wait_for_input(fd: std::os::fd::RawFd, timeout_ms: u64) -> bool {
 /// `Comment`, `ErrorMsg`) and use the `Smelt*` prefix for app-specific
 /// roles (`SmeltAccent`, `SmeltAgent`, `SmeltModePlan`, …). Code with
 /// a `DrawContext` reads these via `ctx.theme.get("Visual")` etc.
-pub(crate) fn populate_ui_theme(theme: &mut crate::ui::Theme) {
-    use crate::ui::grid::Style;
+pub(crate) fn populate_ui_theme(theme: &mut crate::smelt_term::Theme) {
+    use crate::smelt_term::grid::Style;
 
     let is_light = theme.is_light();
     crate::content::highlight::set_syntax_theme_light(is_light);
@@ -241,10 +241,10 @@ pub(crate) fn populate_ui_theme(theme: &mut crate::ui::Theme) {
         Color::DarkGrey
     };
 
-    theme.set("Visual", Style::bg(selection_bg));
-    theme.set("CursorLine", Style::bg(cursor_line_bg));
-    theme.set("Comment", Style::fg(muted));
-    theme.set("ErrorMsg", Style::fg(Color::Red));
+    theme.set("Visual", Style::new().bg(selection_bg));
+    theme.set("CursorLine", Style::new().bg(cursor_line_bg));
+    theme.set("Comment", Style::new().fg(muted));
+    theme.set("ErrorMsg", Style::new().fg(Color::Red));
     theme.set(
         "GhostText",
         Style {
@@ -253,32 +253,32 @@ pub(crate) fn populate_ui_theme(theme: &mut crate::ui::Theme) {
         },
     );
 
-    theme.set("SmeltAccent", Style::fg(theme.accent_color()));
-    theme.set("SmeltSlug", Style::bg(theme.slug_color()));
-    theme.set("SmeltUserBg", Style::bg(user_bg));
-    theme.set("SmeltCodeBlockBg", Style::bg(code_block_bg));
-    theme.set("SmeltBar", Style::bg(bar));
-    theme.set("SmeltScrollbarTrack", Style::bg(scrollbar_track));
-    theme.set("SmeltScrollbarThumb", Style::bg(scrollbar_thumb));
-    theme.set("SmeltToolPending", Style::fg(tool_pending));
-    theme.set("SmeltReasonOff", Style::fg(reason_off));
-    theme.set("SmeltSuccess", Style::fg(Color::AnsiValue(77)));
-    theme.set("SmeltHeading", Style::fg(Color::AnsiValue(117)));
+    theme.set("SmeltAccent", Style::new().fg(theme.accent_color()));
+    theme.set("SmeltSlug", Style::new().bg(theme.slug_color()));
+    theme.set("SmeltUserBg", Style::new().bg(user_bg));
+    theme.set("SmeltCodeBlockBg", Style::new().bg(code_block_bg));
+    theme.set("SmeltBar", Style::new().bg(bar));
+    theme.set("SmeltScrollbarTrack", Style::new().bg(scrollbar_track));
+    theme.set("SmeltScrollbarThumb", Style::new().bg(scrollbar_thumb));
+    theme.set("SmeltToolPending", Style::new().fg(tool_pending));
+    theme.set("SmeltReasonOff", Style::new().fg(reason_off));
+    theme.set("SmeltSuccess", Style::new().fg(Color::AnsiValue(77)));
+    theme.set("SmeltHeading", Style::new().fg(Color::AnsiValue(117)));
 
-    theme.set("SmeltModePlan", Style::fg(Color::AnsiValue(79)));
-    theme.set("SmeltModeApply", Style::fg(Color::AnsiValue(141)));
-    theme.set("SmeltModeYolo", Style::fg(Color::AnsiValue(204)));
-    theme.set("SmeltModeExec", Style::fg(Color::AnsiValue(197)));
+    theme.set("SmeltModePlan", Style::new().fg(Color::AnsiValue(79)));
+    theme.set("SmeltModeApply", Style::new().fg(Color::AnsiValue(141)));
+    theme.set("SmeltModeYolo", Style::new().fg(Color::AnsiValue(204)));
+    theme.set("SmeltModeExec", Style::new().fg(Color::AnsiValue(197)));
 
-    theme.set("SmeltReasonLow", Style::fg(Color::AnsiValue(75)));
-    theme.set("SmeltReasonMed", Style::fg(Color::AnsiValue(214)));
-    theme.set("SmeltReasonHigh", Style::fg(Color::AnsiValue(203)));
-    theme.set("SmeltReasonMax", Style::fg(Color::AnsiValue(196)));
+    theme.set("SmeltReasonLow", Style::new().fg(Color::AnsiValue(75)));
+    theme.set("SmeltReasonMed", Style::new().fg(Color::AnsiValue(214)));
+    theme.set("SmeltReasonHigh", Style::new().fg(Color::AnsiValue(203)));
+    theme.set("SmeltReasonMax", Style::new().fg(Color::AnsiValue(196)));
 }
 
 /// Preset themes: (name, detail, ansi value)
 pub const PRESETS: &[(&str, &str, u8)] = &[
-    ("ember", "default", crate::ui::DEFAULT_ACCENT),
+    ("ember", "default", crate::smelt_term::DEFAULT_ACCENT),
     ("coral", "salmon pink", 210),
     ("rose", "soft pink", 211),
     ("gold", "warm yellow", 220),
@@ -338,7 +338,7 @@ mod tests {
 
     #[test]
     fn populate_writes_groups_for_default_theme() {
-        let mut t = crate::ui::Theme::new();
+        let mut t = crate::smelt_term::Theme::new();
         populate_ui_theme(&mut t);
         assert!(t.get("SmeltAccent").fg.is_some());
         assert!(t.get("SmeltSlug").bg.is_some());
@@ -347,7 +347,7 @@ mod tests {
 
     #[test]
     fn populate_reflects_set_accent() {
-        let mut t = crate::ui::Theme::new();
+        let mut t = crate::smelt_term::Theme::new();
         t.set_accent(108); // sage
         populate_ui_theme(&mut t);
         assert_eq!(t.get("SmeltAccent").fg, Some(Color::AnsiValue(108)));
@@ -357,9 +357,9 @@ mod tests {
 
     #[test]
     fn populate_light_palette_differs_from_dark() {
-        let mut dark = crate::ui::Theme::new();
+        let mut dark = crate::smelt_term::Theme::new();
         populate_ui_theme(&mut dark);
-        let mut light = crate::ui::Theme::new();
+        let mut light = crate::smelt_term::Theme::new();
         light.set_light(true);
         populate_ui_theme(&mut light);
         assert_ne!(dark.get("Visual").bg, light.get("Visual").bg);

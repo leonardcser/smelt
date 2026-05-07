@@ -304,7 +304,7 @@ mod tests {
     #[test]
     fn link_chases_to_target() {
         let mut t = Theme::new();
-        t.set("Visual", Style::bg(Color::AnsiValue(237)));
+        t.set("Visual", Style::new().bg(Color::AnsiValue(237)));
         t.link("SearchHighlight", "Visual");
         assert_eq!(t.get("SearchHighlight"), t.get("Visual"));
     }
@@ -312,7 +312,7 @@ mod tests {
     #[test]
     fn link_chain_resolves() {
         let mut t = Theme::new();
-        t.set("Base", Style::bg(Color::AnsiValue(42)));
+        t.set("Base", Style::new().bg(Color::AnsiValue(42)));
         t.link("Mid", "Base");
         t.link("Top", "Mid");
         assert_eq!(t.get("Top"), t.get("Base"));
@@ -329,9 +329,9 @@ mod tests {
     #[test]
     fn set_overwrites_existing_link() {
         let mut t = Theme::new();
-        t.set("Visual", Style::bg(Color::AnsiValue(237)));
+        t.set("Visual", Style::new().bg(Color::AnsiValue(237)));
         t.link("Search", "Visual");
-        let direct = Style::bg(Color::AnsiValue(220));
+        let direct = Style::new().bg(Color::AnsiValue(220));
         t.set("Search", direct);
         assert_eq!(t.get("Search"), direct);
     }
@@ -339,8 +339,8 @@ mod tests {
     #[test]
     fn link_overwrites_existing_set() {
         let mut t = Theme::new();
-        t.set("X", Style::bg(Color::AnsiValue(1)));
-        t.set("Y", Style::bg(Color::AnsiValue(2)));
+        t.set("X", Style::new().bg(Color::AnsiValue(1)));
+        t.set("Y", Style::new().bg(Color::AnsiValue(2)));
         t.link("X", "Y");
         assert_eq!(t.get("X"), t.get("Y"));
     }

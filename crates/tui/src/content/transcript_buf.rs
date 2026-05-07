@@ -1,7 +1,7 @@
 use super::block_buffers::BlockBufferCache;
 use crate::content::transcript_snapshot::TranscriptSnapshot;
-use crate::ui::Buffer;
-use crate::ui::Theme;
+use crate::smelt_term::Buffer;
+use crate::smelt_term::Theme;
 use smelt_core::buffer::{LineDecoration, Span, SpanMeta};
 use smelt_core::transcript_model::{BlockHistory, LayoutKey, ViewState};
 

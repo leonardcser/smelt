@@ -25,7 +25,7 @@ use mlua::prelude::*;
 
 use crate::app::TuiApp;
 use crate::content::to_buffer::render_into_buffer;
-use crate::ui::BufId;
+use crate::smelt_term::BufId;
 use smelt_core::cells::ConfirmResolved;
 use smelt_core::theme::role_hl;
 use smelt_core::transcript_model::{ApprovalScope, ConfirmChoice, ConfirmRequest};

@@ -4,7 +4,7 @@
 //! `{ is_error = bool }`.
 
 use crate::content::to_buffer::render_into_buffer;
-use crate::ui::BufId;
+use crate::smelt_term::BufId;
 use mlua::prelude::*;
 use smelt_core::content::wrap::wrap_line;
 use smelt_core::theme::role_hl;

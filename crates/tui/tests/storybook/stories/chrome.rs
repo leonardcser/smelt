@@ -3,8 +3,8 @@
 //! these stories pin the rendered chrome glyphs for each border
 //! variant + title placement / truncation.
 
-use tui::ui::layout::{Anchor, Border, BorderSides, BorderStyle, Constraint, Corner, Gutters};
-use tui::ui::{LayoutTree, Overlay, SplitConfig};
+use tui::smelt_term::layout::{Anchor, Border, BorderSides, BorderStyle, Constraint, Corner, Gutters};
+use tui::smelt_term::{LayoutTree, Overlay, SplitConfig};
 
 use crate::storybook::StoryCtx;
 

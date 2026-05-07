@@ -33,8 +33,8 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
                     .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                 crate::lua::with_app(|app| {
                     match app.ui.buf_create_with_id(
-                        crate::ui::BufId(id),
-                        crate::ui::BufCreateOpts::default(),
+                        crate::smelt_term::BufId(id),
+                        crate::smelt_term::BufCreateOpts::default(),
                     ) {
                         Ok(bid) => {
                             if let Some(buf) = app.ui.buf_mut(bid) {
@@ -57,7 +57,7 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
         "set_readonly",
         lua.create_function(|_, (id, ro): (u64, bool)| {
             crate::lua::with_app(|app| {
-                if let Some(buf) = app.ui.buf_mut(crate::ui::BufId(id)) {
+                if let Some(buf) = app.ui.buf_mut(crate::smelt_term::BufId(id)) {
                     buf.readonly = ro;
                 }
             });
@@ -72,7 +72,7 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
                 .filter_map(|v| v.ok())
                 .collect();
             crate::lua::with_app(|app| {
-                if let Some(buf) = app.ui.buf_mut(crate::ui::BufId(id)) {
+                if let Some(buf) = app.ui.buf_mut(crate::smelt_term::BufId(id)) {
                     buf.set_all_lines(lines);
                 }
             });
@@ -91,7 +91,7 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
             };
             let text = crate::lua::with_app(|app| {
                 app.ui
-                    .buf(crate::ui::BufId(id))
+                    .buf(crate::smelt_term::BufId(id))
                     .and_then(|b| b.get_line(line0).map(|s| s.to_string()))
             });
             Ok(text)
@@ -101,7 +101,7 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
         "set_source",
         lua.create_function(|_, (id, source): (u64, String)| {
             crate::lua::with_app(|app| {
-                if let Some(buf) = app.ui.buf_mut(crate::ui::BufId(id)) {
+                if let Some(buf) = app.ui.buf_mut(crate::smelt_term::BufId(id)) {
                     buf.set_source(source);
                 }
             });
@@ -132,7 +132,7 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
                     _ => usize::MAX,
                 };
                 crate::lua::with_app(|app| {
-                    if let Some(buf) = app.ui.buf_mut(crate::ui::BufId(id)) {
+                    if let Some(buf) = app.ui.buf_mut(crate::smelt_term::BufId(id)) {
                         buf.clear_namespace(NsId(ns), start_line, end_line);
                     }
                 });
@@ -159,7 +159,7 @@ fn set_extmark(
     lua: &Lua,
     (id, ns, row, col, opts): (u64, u32, u64, u64, Option<mlua::Table>),
 ) -> LuaResult<u64> {
-    use crate::ui::BufId;
+    use crate::smelt_term::BufId;
     use smelt_core::buffer::{ExtmarkId, ExtmarkOpts, NsId};
 
     let Some(row0) = row.checked_sub(1) else {
@@ -237,7 +237,7 @@ fn parse_virt_pos(s: &str) -> smelt_core::buffer::VirtTextPos {
     }
 }
 
-fn parse_highlight_style(t: &mlua::Table) -> LuaResult<crate::ui::SpanStyle> {
+fn parse_highlight_style(t: &mlua::Table) -> LuaResult<crate::smelt_term::SpanStyle> {
     use smelt_core::style::Style;
 
     // Highlight groups are looked up via `theme.get(name)` (nvim

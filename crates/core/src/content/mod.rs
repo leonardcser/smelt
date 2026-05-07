@@ -6,10 +6,10 @@ pub mod selection;
 pub mod stream_parser;
 pub mod transcript;
 
-// Wrap utility moved to `smelt-ui-data` so non-smelt frontends can
+// Wrap utility moved to `smelt-buffer` so non-smelt frontends can
 // reuse it. Re-export for `smelt_core::content::wrap::wrap_line`
 // call sites.
-pub use ui_data::wrap;
+pub use smelt_buffer::wrap;
 
 pub use crate::buffer::SpanMeta;
 pub use context::LayoutContext;

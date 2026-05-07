@@ -9,10 +9,10 @@
 
 use crate::app::{CommandAction, TuiApp};
 
-use crate::ui::layout::Anchor;
-use crate::ui::BufCreateOpts;
-use crate::ui::UiHost;
-use crate::ui::{Constraint, LayoutTree, Overlay, SplitConfig};
+use crate::smelt_term::layout::Anchor;
+use crate::smelt_term::BufCreateOpts;
+use crate::smelt_term::UiHost;
+use crate::smelt_term::{Constraint, LayoutTree, Overlay, SplitConfig};
 use crossterm::event::{KeyCode, KeyEvent};
 
 /// Visible prefix glyph rendered as the first cell of the cmdline

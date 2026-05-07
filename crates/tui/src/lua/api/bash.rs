@@ -8,7 +8,7 @@
 
 use crate::content::highlight::BashHighlighter;
 use crate::content::to_buffer::render_into_buffer;
-use crate::ui::BufId;
+use crate::smelt_term::BufId;
 use mlua::prelude::*;
 
 pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {

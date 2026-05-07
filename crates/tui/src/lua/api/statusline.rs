@@ -71,7 +71,7 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
 /// Mirrors the inputs the retired Rust composition read off `TuiApp`;
 /// see `runtime/lua/smelt/status.lua` for the segment shape.
 fn build_snapshot(app: &mut crate::app::TuiApp, lua: &Lua) -> LuaResult<mlua::Table> {
-    use crate::ui::text::byte_to_cell;
+    use crate::smelt_term::text::byte_to_cell;
     use smelt_core::style::Color;
 
     let t = lua.create_table()?;
@@ -154,9 +154,9 @@ fn build_snapshot(app: &mut crate::app::TuiApp, lua: &Lua) -> LuaResult<mlua::Ta
             }
             crate::app::AppFocus::Prompt => {
                 let mut mode = app.input.vim_enabled().then_some(app.vim_mode);
-                let drag = matches!(app.ui.capture(), Some(crate::ui::HitTarget::Window(_)));
+                let drag = matches!(app.ui.capture(), Some(crate::smelt_term::HitTarget::Window(_)));
                 if drag {
-                    mode = Some(crate::ui::VimMode::Visual);
+                    mode = Some(crate::smelt_term::VimMode::Visual);
                 }
                 (app.input.vim_enabled() || drag, mode)
             }
@@ -167,8 +167,8 @@ fn build_snapshot(app: &mut crate::app::TuiApp, lua: &Lua) -> LuaResult<mlua::Ta
         let label = crate::content::status::vim_mode_label(vim_mode).unwrap_or("NORMAL");
         vim_tbl.set("label", label)?;
         let kind = match vim_mode {
-            Some(crate::ui::VimMode::Insert) => "insert",
-            Some(crate::ui::VimMode::Visual) | Some(crate::ui::VimMode::VisualLine) => "visual",
+            Some(crate::smelt_term::VimMode::Insert) => "insert",
+            Some(crate::smelt_term::VimMode::Visual) | Some(crate::smelt_term::VimMode::VisualLine) => "visual",
             _ => "normal",
         };
         vim_tbl.set("kind", kind)?;

@@ -16,7 +16,7 @@ use std::sync::Arc;
 /// headless paths without touching `Ui`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FrontendKind {
-    /// Interactive terminal — `TuiApp` over a `crate::ui::Ui`.
+    /// Interactive terminal — `TuiApp` over a `crate::smelt_term::Ui`.
     Tui,
     /// One-shot CLI — `smelt -p "..."` / `--headless`. No Ui, no human input.
     Headless,

@@ -6,8 +6,8 @@
 //! No `LuaRuntime`, no engine.
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
-use tui::ui::layout::{Constraint, Gutters};
-use tui::ui::{Event, LayoutTree, SplitConfig};
+use tui::smelt_term::layout::{Constraint, Gutters};
+use tui::smelt_term::{Event, LayoutTree, SplitConfig};
 
 use crate::storybook::StoryCtx;
 

@@ -13,13 +13,13 @@ pub(crate) mod text_objects;
 pub mod vim;
 pub(crate) mod window;
 
-pub use ui_data::attachment::AttachmentId;
-pub use ui_data::buffer::{
+pub use smelt_buffer::attachment::AttachmentId;
+pub use smelt_buffer::buffer::{
     BufCreateOpts, BufId, Buffer, BufferParser, ExtmarkOpts, ExtmarkPayload, SpanMeta, SpanStyle,
     LUA_BUF_ID_BASE,
 };
-pub use ui_data::clipboard::Clipboard;
-pub use ui_data::undo::{UndoEntry, UndoHistory};
+pub use smelt_buffer::clipboard::Clipboard;
+pub use smelt_buffer::undo::{UndoEntry, UndoHistory};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct WinId(pub u64);
@@ -45,12 +45,12 @@ use callback::Callbacks;
 pub use callback::{Callback, CallbackCtx, CallbackResult, KeyBind, LuaHandle, Payload, WinEvent};
 use compositor::Compositor;
 pub use event::{Event, Status};
-pub use grid::{Grid, Style};
-pub use layout::{Border, Constraint, Corner, Gutters, LayoutTree, Rect};
+pub use grid::{Cell, Grid, GridSlice, Style};
+pub use layout::{Border, Constraint, Corner, Gutters, LayoutTree, PaintId, Rect};
 use overlay::OverlayHitTarget;
 pub use overlay::{HitTarget, Overlay, OverlayId};
 pub use snapshot::SnapshotFrame;
-pub use ui_data::theme::{Theme, DEFAULT_ACCENT};
+pub use smelt_buffer::theme::{Theme, DEFAULT_ACCENT};
 pub use vim::VimMode;
 pub use window::{
     CursorShape, DrawContext, EventCtx, MouseCtx, ScrollbarState, SplitConfig, Window,
@@ -959,6 +959,20 @@ impl Ui {
     // ── Renderer delegation ───────────────────────────────────────
 
     pub fn render<W: std::io::Write>(&mut self, w: &mut W) -> std::io::Result<()> {
+        self.render_with_paints(w, |_, _, _| {})
+    }
+
+    /// Render one frame, delegating `LayoutTree::Paint(id)` leaves to
+    /// `paint(id, slice, ctx)`. Hosts that mix `Window`-backed splits
+    /// with custom paint regions (treemaps, sparklines, plots) match
+    /// on `PaintId` inside the closure to dispatch to their painters.
+    /// Both splits-tree and overlay layouts route through the same
+    /// dispatcher.
+    pub fn render_with_paints<W, F>(&mut self, w: &mut W, mut paint: F) -> std::io::Result<()>
+    where
+        W: std::io::Write,
+        F: FnMut(PaintId, &mut GridSlice<'_>, &DrawContext),
+    {
         let resolved = self.resolve_overlays(None);
         let resolved: Vec<(OverlayId, Rect, Overlay)> = resolved
             .into_iter()
@@ -1062,6 +1076,7 @@ impl Ui {
                 term_size,
                 focus,
                 cursor_shape,
+                &mut paint,
             );
             for (_id, rect, overlay) in &resolved {
                 paint_overlay(
@@ -1074,10 +1089,41 @@ impl Ui {
                     term_size,
                     focus,
                     cursor_shape,
+                    &mut paint,
                 );
             }
             cursor_override
         })
+    }
+
+    /// Bypass the layout tree and overlay machinery entirely. The
+    /// closure paints directly into the compositor's `Grid` and may
+    /// optionally return a hardware cursor position. Useful for hosts
+    /// that own all layout themselves and only want smelt-term's
+    /// double-buffered diff/flush + synchronized-update wrapping.
+    pub fn render_raw<W, F>(&mut self, w: &mut W, paint: F) -> std::io::Result<()>
+    where
+        W: std::io::Write,
+        F: FnOnce(&mut Grid, &Theme) -> Option<(u16, u16)>,
+    {
+        self.compositor.render_with(&self.theme, w, paint)
+    }
+
+    /// Resolved screen rect for a `PaintId` leaf, searching the
+    /// splits tree and (z-order) overlay layouts. Returns `None`
+    /// when the id isn't in any current layout.
+    pub fn paint_rect(&self, id: PaintId) -> Option<Rect> {
+        let (term_w, term_h) = self.terminal_size;
+        let area = Rect::new(0, 0, term_w, term_h);
+        if let Some(rect) = layout::resolve_paint_layout(&self.splits, area).get(&id) {
+            return Some(*rect);
+        }
+        for (_oid, ov_rect, ov) in self.resolve_overlays(None) {
+            if let Some(rect) = layout::resolve_paint_layout(&ov.layout, ov_rect).get(&id) {
+                return Some(*rect);
+            }
+        }
+        None
     }
 
     /// Render the current state into the compositor (discarding SGR
@@ -1705,6 +1751,7 @@ fn paint_overlay(
     term_size: (u16, u16),
     focus: Option<WinId>,
     cursor_shape: CursorShape,
+    paint: &mut dyn FnMut(PaintId, &mut GridSlice<'_>, &DrawContext),
 ) {
     // Overlays are opaque: clear the rect first so layers below
     // (statusline, prompt borders, transcript content) don't bleed
@@ -1720,6 +1767,7 @@ fn paint_overlay(
         term_size,
         focus,
         cursor_shape,
+        paint,
     );
 }
 
@@ -1734,6 +1782,7 @@ fn paint_layout_node(
     term_size: (u16, u16),
     focus: Option<WinId>,
     cursor_shape: CursorShape,
+    paint: &mut dyn FnMut(PaintId, &mut GridSlice<'_>, &DrawContext),
 ) {
     match node {
         LayoutTree::Leaf(win_id) => {
@@ -1757,6 +1806,17 @@ fn paint_layout_node(
                 theme: theme.clone(),
             };
             win.render(buf, &mut slice, &ctx);
+        }
+        LayoutTree::Paint(id) => {
+            let mut slice = grid.slice_mut(area);
+            let ctx = DrawContext {
+                terminal_width: term_size.0,
+                terminal_height: term_size.1,
+                focused: false,
+                cursor_shape: CursorShape::Hidden,
+                theme: theme.clone(),
+            };
+            paint(*id, &mut slice, &ctx);
         }
         LayoutTree::Vbox { items, chrome } | LayoutTree::Hbox { items, chrome } => {
             layout::paint_chrome(grid, area, chrome, theme);
@@ -1785,6 +1845,7 @@ fn paint_layout_node(
                     term_size,
                     focus,
                     cursor_shape,
+                    paint,
                 );
                 offset += size;
                 if i + 1 < items.len() {

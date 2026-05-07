@@ -6,7 +6,7 @@
 //! keeps `BlockHistory`; `tui` owns display projection.
 
 use crate::content::block_buffers::BlockBufferCache;
-use crate::ui::Theme;
+use crate::smelt_term::Theme;
 use smelt_core::buffer::SpanMeta;
 use smelt_core::transcript_model::{BlockHistory, BlockId, LayoutKey, ViewState};
 use std::collections::HashMap;

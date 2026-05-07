@@ -1,21 +1,21 @@
 //! Buffer-parser registry.
 //!
-//! Every "content kind" a `crate::ui::Buffer` can display — markdown, bash
+//! Every "content kind" a `crate::smelt_term::Buffer` can display — markdown, bash
 //! script, syntax-highlighted file, inline diff, soft-wrapped plain
 //! text — lives here as a variant of [`BufFormat`]. An attached
 //! parser turns the buffer's `source` string into styled lines +
 //! soft-wrap decorations at the terminal `width` it's given. The
 //! dialog / window host is responsible for calling
-//! [`crate::ui::Buffer::ensure_rendered_at`] with the current content width
+//! [`crate::smelt_term::Buffer::ensure_rendered_at`] with the current content width
 //! (after chrome like borders, padding, and scrollbar reservation has
 //! been subtracted) before sampling the buffer for display.
 //!
 //! This is the single unification point for the transcript's markdown
 //! pipeline and Lua-driven dialog / window content: both attach a
-//! parser via `crate::ui::BufferParser` and reuse the same wrap-aware,
+//! parser via `crate::smelt_term::BufferParser` and reuse the same wrap-aware,
 //! copy-friendly rendering the transcript uses.
 
-use crate::ui::{Buffer, BufferParser};
+use crate::smelt_term::{Buffer, BufferParser};
 use std::sync::Arc;
 
 use crate::content::builder::LineBuilder;
@@ -25,7 +25,7 @@ use crate::content::to_buffer::render_into_buffer;
 /// Content kind a parser-backed buffer renders. Constructed from a
 /// Lua `mode` string or chosen by a Rust caller, handed to
 /// [`BufFormat::into_parser`] to get a trait object that can be
-/// attached to a `crate::ui::Buffer`.
+/// attached to a `crate::smelt_term::Buffer`.
 #[derive(Clone, Debug)]
 pub(crate) enum BufFormat {
     /// Plain text, soft-wrapped to the render width. Copy-friendly:
@@ -86,7 +86,7 @@ impl BufFormat {
     }
 
     /// Wrap this mode in a trait object ready to attach to a buffer
-    /// via [`crate::ui::Buffer::attach`] / [`crate::ui::Buffer::set_parser`].
+    /// via [`crate::smelt_term::Buffer::attach`] / [`crate::smelt_term::Buffer::set_parser`].
     pub(crate) fn into_parser(self) -> Arc<dyn BufferParser> {
         Arc::new(ModeParser { mode: self })
     }
@@ -98,7 +98,7 @@ struct ModeParser {
 
 impl BufferParser for ModeParser {
     fn parse(&self, buf: &mut Buffer, source: &str, width: u16) {
-        let mut theme = crate::ui::Theme::new();
+        let mut theme = crate::smelt_term::Theme::new();
         crate::theme::populate_ui_theme(&mut theme);
         let width = width.max(1);
         match &self.mode {
@@ -162,7 +162,7 @@ fn emit_wrapped_line<F>(out: &mut LineBuilder, line: &str, width: usize, mut emi
 where
     F: FnMut(&mut LineBuilder, &str),
 {
-    let wrapped = crate::ui::text::wrap_line(line, width);
+    let wrapped = crate::smelt_term::text::wrap_line(line, width);
     if wrapped.len() > 1 {
         out.mark_wrapped();
     }
@@ -180,8 +180,8 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ui::BufId;
-    use crate::ui::{BufCreateOpts, Buffer};
+    use crate::smelt_term::BufId;
+    use crate::smelt_term::{BufCreateOpts, Buffer};
 
     fn new_buf() -> Buffer {
         Buffer::new(BufId(1), BufCreateOpts::default())

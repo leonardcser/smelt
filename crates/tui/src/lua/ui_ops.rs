@@ -3,8 +3,8 @@
 //! few reusable window recipes (`list` / `input`).
 
 use crate::app::TuiApp;
-use crate::ui::layout::{Anchor, BorderSides, BorderStyle, Corner};
-use crate::ui::{
+use crate::smelt_term::layout::{Anchor, BorderSides, BorderStyle, Corner};
+use crate::smelt_term::{
     Border, Callback, CallbackResult, Constraint, KeyBind, LayoutTree, Overlay, Payload, WinEvent,
     WinId,
 };
@@ -313,7 +313,7 @@ pub(crate) fn configure_list_leaf(app: &mut TuiApp, leaf: WinId, initial_cursor:
         win.cursor_line = initial_cursor.min(max);
     }
 
-    fn move_cursor(ctx: &mut crate::ui::CallbackCtx<'_>, delta: isize) -> CallbackResult {
+    fn move_cursor(ctx: &mut crate::smelt_term::CallbackCtx<'_>, delta: isize) -> CallbackResult {
         let buf_id = match ctx.ui.win(ctx.win) {
             Some(w) => w.buf,
             None => return CallbackResult::Consumed,
@@ -417,7 +417,7 @@ pub(crate) fn configure_input_leaf(app: &mut TuiApp, leaf: WinId) {
         win.cursor_line = 0;
     }
 
-    fn current_line(ctx: &crate::ui::CallbackCtx<'_>) -> String {
+    fn current_line(ctx: &crate::smelt_term::CallbackCtx<'_>) -> String {
         let buf_id = match ctx.ui.win(ctx.win) {
             Some(w) => w.buf,
             None => return String::new(),
@@ -428,7 +428,7 @@ pub(crate) fn configure_input_leaf(app: &mut TuiApp, leaf: WinId) {
             .unwrap_or_default()
     }
 
-    fn is_placeholder(ctx: &crate::ui::CallbackCtx<'_>) -> bool {
+    fn is_placeholder(ctx: &crate::smelt_term::CallbackCtx<'_>) -> bool {
         // Placeholder lives behind a dim-highlight extmark on row 0.
         // The first user keystroke wholesale-replaces line 0 via
         // `set_lines`, which Buffer drops well-known namespace marks
@@ -444,7 +444,7 @@ pub(crate) fn configure_input_leaf(app: &mut TuiApp, leaf: WinId) {
             .unwrap_or(false)
     }
 
-    fn replace_line(ctx: &mut crate::ui::CallbackCtx<'_>, new: String, new_cursor_col: u16) {
+    fn replace_line(ctx: &mut crate::smelt_term::CallbackCtx<'_>, new: String, new_cursor_col: u16) {
         let buf_id = match ctx.ui.win(ctx.win) {
             Some(w) => w.buf,
             None => return,
@@ -457,7 +457,7 @@ pub(crate) fn configure_input_leaf(app: &mut TuiApp, leaf: WinId) {
         }
     }
 
-    fn insert_char(ctx: &mut crate::ui::CallbackCtx<'_>, c: char) -> CallbackResult {
+    fn insert_char(ctx: &mut crate::smelt_term::CallbackCtx<'_>, c: char) -> CallbackResult {
         let placeholder_mode = is_placeholder(ctx);
         let cursor = if placeholder_mode {
             0
@@ -485,7 +485,7 @@ pub(crate) fn configure_input_leaf(app: &mut TuiApp, leaf: WinId) {
         CallbackResult::Event(WinEvent::TextChanged, Payload::Text { content: new })
     }
 
-    fn backspace(ctx: &mut crate::ui::CallbackCtx<'_>) -> CallbackResult {
+    fn backspace(ctx: &mut crate::smelt_term::CallbackCtx<'_>) -> CallbackResult {
         if is_placeholder(ctx) {
             return CallbackResult::Consumed;
         }
@@ -517,7 +517,7 @@ pub(crate) fn configure_input_leaf(app: &mut TuiApp, leaf: WinId) {
         End,
     }
 
-    fn move_h(ctx: &mut crate::ui::CallbackCtx<'_>, target: HMove) -> CallbackResult {
+    fn move_h(ctx: &mut crate::smelt_term::CallbackCtx<'_>, target: HMove) -> CallbackResult {
         if is_placeholder(ctx) {
             return CallbackResult::Consumed;
         }

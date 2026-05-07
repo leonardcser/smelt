@@ -135,7 +135,7 @@ fn emit_style_diff<W: Write>(w: &mut W, from: &Style, to: &Style) -> std::io::Re
 mod tests {
     use super::*;
     use crate::grid::Grid;
-    use ui_data::style::Color;
+    use smelt_buffer::style::Color;
 
     #[test]
     fn flush_empty_diff_produces_no_output() {
@@ -161,7 +161,7 @@ mod tests {
     fn flush_styled_cell_emits_sgr() {
         let prev = Grid::new(5, 1);
         let mut curr = Grid::new(5, 1);
-        curr.set(0, 0, 'A', Style::fg(Color::Red));
+        curr.set(0, 0, 'A', Style::new().fg(Color::Red));
         let mut out = Vec::new();
         flush_diff(&mut out, curr.diff(&prev)).unwrap();
         let s = String::from_utf8(out).unwrap();
@@ -173,7 +173,7 @@ mod tests {
     fn flush_resets_style_at_end() {
         let prev = Grid::new(3, 1);
         let mut curr = Grid::new(3, 1);
-        curr.set(0, 0, 'A', Style::bold());
+        curr.set(0, 0, 'A', Style::new().bold());
         let mut out = Vec::new();
         flush_diff(&mut out, curr.diff(&prev)).unwrap();
         let s = String::from_utf8(out).unwrap();

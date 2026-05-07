@@ -279,7 +279,7 @@ fn rgb_to_ansi_256(r: u8, g: u8, b: u8) -> u8 {
     16 + 36 * band(r) + 6 * band(g) + band(b)
 }
 
-/// Map a Lua-facing role name to its `crate::ui::Theme` highlight group.
+/// Map a Lua-facing role name to its `crate::smelt_term::Theme` highlight group.
 fn role_to_group(role: &str) -> Option<&'static str> {
     Some(match role {
         "accent" => "SmeltAccent",
@@ -294,9 +294,9 @@ fn role_to_group(role: &str) -> Option<&'static str> {
     })
 }
 
-/// Resolved color for a `crate::ui::Theme` highlight group: prefer
+/// Resolved color for a `crate::smelt_term::Theme` highlight group: prefer
 /// fg, then bg, then `Color::Reset`.
-fn group_color(theme: &crate::ui::Theme, group: &str) -> smelt_core::style::Color {
+fn group_color(theme: &crate::smelt_term::Theme, group: &str) -> smelt_core::style::Color {
     let style = theme.get(group);
     style
         .fg
@@ -306,7 +306,7 @@ fn group_color(theme: &crate::ui::Theme, group: &str) -> smelt_core::style::Colo
 
 /// Read a named theme role from `theme`. Returns `None` for unknown names.
 pub(super) fn theme_role_get(
-    theme: &crate::ui::Theme,
+    theme: &crate::smelt_term::Theme,
     role: &str,
 ) -> Option<smelt_core::style::Color> {
     role_to_group(role).map(|g| group_color(theme, g))
@@ -316,7 +316,7 @@ pub(super) fn theme_role_get(
 /// mutable. Caller must `populate_ui_theme` afterwards (or wait for
 /// the next frame's render-loop bridge) to flush the new value into
 /// the corresponding highlight group.
-pub(super) fn theme_role_set(theme: &mut crate::ui::Theme, role: &str, ansi: u8) -> LuaResult<()> {
+pub(super) fn theme_role_set(theme: &mut crate::smelt_term::Theme, role: &str, ansi: u8) -> LuaResult<()> {
     match role {
         "accent" => {
             theme.set_accent(ansi);
@@ -336,7 +336,7 @@ pub(super) fn theme_role_set(theme: &mut crate::ui::Theme, role: &str, ansi: u8)
 
 /// List of (role_name, current_color) pairs for `theme.snapshot()`.
 pub(super) fn theme_snapshot_pairs(
-    theme: &crate::ui::Theme,
+    theme: &crate::smelt_term::Theme,
 ) -> Vec<(&'static str, smelt_core::style::Color)> {
     [
         "accent",
@@ -360,8 +360,8 @@ pub(super) fn theme_snapshot_pairs(
 mod tests {
     use super::*;
 
-    fn theme() -> crate::ui::Theme {
-        let mut t = crate::ui::Theme::new();
+    fn theme() -> crate::smelt_term::Theme {
+        let mut t = crate::smelt_term::Theme::new();
         crate::theme::populate_ui_theme(&mut t);
         t
     }

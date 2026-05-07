@@ -1,4 +1,4 @@
-pub(crate) use crate::ui::Rect;
+pub(crate) use crate::smelt_term::Rect;
 
 #[derive(Clone, Debug, Default)]
 pub(crate) struct LayoutState {
@@ -24,8 +24,8 @@ pub(crate) struct LayoutInput {
 /// `Ui` resolves rects against the current terminal area.
 pub(crate) fn build_layout_tree(
     input: &LayoutInput,
-    status_win: crate::ui::WinId,
-) -> crate::ui::LayoutTree {
+    status_win: crate::smelt_term::WinId,
+) -> crate::smelt_term::LayoutTree {
     let LayoutInput {
         term_height,
         prompt_height,
@@ -35,21 +35,21 @@ pub(crate) fn build_layout_tree(
     let prompt_height = prompt_height.min(max_prompt).max(2);
     let prompt_leaf_height = prompt_height.saturating_sub(1).max(1);
 
-    crate::ui::LayoutTree::vbox(vec![
+    crate::smelt_term::LayoutTree::vbox(vec![
         (
-            crate::ui::Constraint::Fill,
-            crate::ui::LayoutTree::leaf(crate::app::TRANSCRIPT_WIN),
+            crate::smelt_term::Constraint::Fill,
+            crate::smelt_term::LayoutTree::leaf(crate::app::TRANSCRIPT_WIN),
         ),
         (
-            crate::ui::Constraint::Length(prompt_height),
-            crate::ui::LayoutTree::vbox(vec![
+            crate::smelt_term::Constraint::Length(prompt_height),
+            crate::smelt_term::LayoutTree::vbox(vec![
                 (
-                    crate::ui::Constraint::Length(prompt_leaf_height),
-                    crate::ui::LayoutTree::leaf(crate::app::PROMPT_WIN),
+                    crate::smelt_term::Constraint::Length(prompt_leaf_height),
+                    crate::smelt_term::LayoutTree::leaf(crate::app::PROMPT_WIN),
                 ),
                 (
-                    crate::ui::Constraint::Length(1),
-                    crate::ui::LayoutTree::leaf(status_win),
+                    crate::smelt_term::Constraint::Length(1),
+                    crate::smelt_term::LayoutTree::leaf(status_win),
                 ),
             ]),
         ),
@@ -62,7 +62,7 @@ impl LayoutState {
     /// the splits tree via `Ui::set_layout`. Missing leaves fall back
     /// to `Rect::default` (zero-sized) — practically only happens
     /// before the first frame.
-    pub(crate) fn from_ui(ui: &crate::ui::Ui, status_win: crate::ui::WinId) -> Self {
+    pub(crate) fn from_ui(ui: &crate::smelt_term::Ui, status_win: crate::smelt_term::WinId) -> Self {
         Self {
             transcript: ui
                 .split_rect(crate::app::TRANSCRIPT_WIN)
@@ -101,16 +101,16 @@ pub(crate) enum HitRegion {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ui::{Constraint, LayoutTree, WinId};
+    use crate::smelt_term::{Constraint, LayoutTree, WinId};
 
-    fn open_split(ui: &mut crate::ui::Ui, win: WinId, region: &str) {
-        let buf = ui.buf_create(crate::ui::BufCreateOpts::default());
+    fn open_split(ui: &mut crate::smelt_term::Ui, win: WinId, region: &str) {
+        let buf = ui.buf_create(crate::smelt_term::BufCreateOpts::default());
         assert!(ui.win_open_split_at(
             win,
             buf,
-            crate::ui::SplitConfig {
+            crate::smelt_term::SplitConfig {
                 region: region.into(),
-                gutters: crate::ui::Gutters::default(),
+                gutters: crate::smelt_term::Gutters::default(),
             },
         ));
     }
@@ -119,18 +119,18 @@ mod tests {
         prompt_height: u16,
         term_width: u16,
         term_height: u16,
-    ) -> (crate::ui::Ui, WinId) {
-        let mut ui = crate::ui::Ui::new();
+    ) -> (crate::smelt_term::Ui, WinId) {
+        let mut ui = crate::smelt_term::Ui::new();
         ui.set_terminal_size(term_width, term_height);
         open_split(&mut ui, crate::app::TRANSCRIPT_WIN, "transcript");
         open_split(&mut ui, crate::app::PROMPT_WIN, "prompt");
-        let status_buf = ui.buf_create(crate::ui::BufCreateOpts::default());
+        let status_buf = ui.buf_create(crate::smelt_term::BufCreateOpts::default());
         let status_win = ui
             .win_open_split(
                 status_buf,
-                crate::ui::SplitConfig {
+                crate::smelt_term::SplitConfig {
                     region: "status".into(),
-                    gutters: crate::ui::Gutters::default(),
+                    gutters: crate::smelt_term::Gutters::default(),
                 },
             )
             .unwrap();

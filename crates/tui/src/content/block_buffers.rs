@@ -8,7 +8,7 @@
 //! on generation mismatch and on theme change).
 
 use crate::content::transcript_parsers::layout_block_into;
-use crate::ui::{BufCreateOpts, BufId, Buffer};
+use crate::smelt_term::{BufCreateOpts, BufId, Buffer};
 use smelt_core::content::builder::Outcome;
 use smelt_core::theme::Theme;
 use smelt_core::transcript_model::{BlockHistory, BlockId, LayoutKey};
