@@ -33,6 +33,9 @@ pub mod trust;
 pub mod utils;
 pub mod working;
 
+#[cfg(test)]
+mod test_util;
+
 // Frontend-neutral document model lives in `smelt-buffer` so headless
 // runtimes and non-smelt frontends (e.g. tcloc) can depend on it
 // without pulling in engine / lua / http. Re-exported here so existing

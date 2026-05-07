@@ -172,29 +172,11 @@ fn save_store(store: &BTreeMap<String, TrustEntry>) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    // `XDG_STATE_HOME` is process-wide; cargo runs unit tests on
-    // multiple threads in one process, so any test that mutates it
-    // must serialize against every other test that reads or mutates
-    // it. The guard returned by `isolate_state` keeps the lock until
-    // the test ends.
-    fn env_guard() -> std::sync::MutexGuard<'static, ()> {
-        use std::sync::{Mutex, OnceLock};
-        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-        LOCK.get_or_init(|| Mutex::new(()))
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-    }
-
-    fn isolate_state(tmp: &Path) -> std::sync::MutexGuard<'static, ()> {
-        let g = env_guard();
-        std::env::set_var("XDG_STATE_HOME", tmp);
-        g
-    }
+    use crate::test_util::{isolate_xdg_state, xdg_state_guard};
 
     #[test]
     fn no_smelt_dir_yields_no_content() {
-        let _g = env_guard();
+        let _g = xdg_state_guard();
         let tmp = tempfile::tempdir().unwrap();
         assert!(matches!(
             project_trust_state(tmp.path()),
@@ -210,7 +192,7 @@ mod tests {
         fs::write(smelt.join("init.lua"), "-- noop\n").unwrap();
 
         let state = tempfile::tempdir().unwrap();
-        let _g = isolate_state(state.path());
+        let _g = isolate_xdg_state(state.path());
         assert!(matches!(
             project_trust_state(tmp.path()),
             TrustState::Untrusted { .. }
@@ -226,7 +208,7 @@ mod tests {
         fs::write(smelt.join("plugins").join("a.lua"), "-- a\n").unwrap();
 
         let state = tempfile::tempdir().unwrap();
-        let _g = isolate_state(state.path());
+        let _g = isolate_xdg_state(state.path());
 
         let hash = mark_trusted(tmp.path()).unwrap();
         match project_trust_state(tmp.path()) {

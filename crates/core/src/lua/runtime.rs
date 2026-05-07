@@ -1372,7 +1372,7 @@ mod tests {
         std::fs::write(smelt_dir.join("init.lua"), "PROJECT_LOADED = true\n").unwrap();
 
         let state = tempfile::tempdir().unwrap();
-        std::env::set_var("XDG_STATE_HOME", state.path());
+        let _g = crate::test_util::isolate_xdg_state(state.path());
 
         let mut rt = LuaRuntime::new();
         let trust = rt.load_project_config(tmp.path());
@@ -1394,7 +1394,7 @@ mod tests {
         .unwrap();
 
         let state = tempfile::tempdir().unwrap();
-        std::env::set_var("XDG_STATE_HOME", state.path());
+        let _g = crate::test_util::isolate_xdg_state(state.path());
         crate::trust::mark_trusted(tmp.path()).unwrap();
 
         let mut rt = LuaRuntime::new();
