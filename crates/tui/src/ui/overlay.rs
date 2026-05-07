@@ -23,6 +23,20 @@ use std::collections::HashMap;
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct OverlayId(pub u32);
 
+/// Sub-region of an overlay's chrome that a hit landed on. Used by
+/// the dispatcher to differentiate drag-handles (`Title`) from
+/// resize-handles (`Resize`) from passive body chrome (`Body`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ChromeZone {
+    /// Top border row — the canonical drag handle when `draggable`.
+    Title,
+    /// Border / gap / padding away from the title and resize handle.
+    Body,
+    /// Bottom-right corner cell of the border — resize handle when
+    /// `resizable`. Drag here grows / shrinks `size_override`.
+    Resize,
+}
+
 /// What inside an overlay a hit landed on. `Window` carries the
 /// specific leaf `WinId`; `Chrome` is anywhere else inside the
 /// overlay's resolved rect (border, title row, gap, padding) — the
@@ -31,7 +45,7 @@ pub struct OverlayId(pub u32);
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum OverlayHitTarget {
     Window(super::WinId),
-    Chrome,
+    Chrome(ChromeZone),
 }
 
 /// Result of a global mouse hit-test against the open Ui surface.
@@ -45,7 +59,7 @@ pub enum OverlayHitTarget {
 pub enum HitTarget {
     Window(super::WinId),
     Scrollbar { owner: super::WinId },
-    Chrome { owner: OverlayId },
+    Chrome { owner: OverlayId, zone: ChromeZone },
 }
 
 #[derive(Clone, Debug)]
@@ -66,6 +80,21 @@ pub struct Overlay {
     /// permission prompts and other dialogs that gate a pending tool
     /// call.
     pub blocks_agent: bool,
+    /// When `true`, a Down on the title row (top border) starts a
+    /// drag gesture: the dispatcher captures the chrome, raises the
+    /// overlay's `z`, and rewrites `anchor` to a `ScreenAt { NW, … }`
+    /// pinned at the mouse-relative position on each Drag. Off by
+    /// default — dialogs and pickers stay anchor-locked.
+    pub draggable: bool,
+    /// When `true`, the bottom-right border cell becomes a resize
+    /// handle. Drag from there grows / shrinks `size_override`,
+    /// clamped to a small minimum size.
+    pub resizable: bool,
+    /// Forces an explicit `(width, height)` instead of the layout's
+    /// `natural_size()`. Set by a resize gesture; preserved across
+    /// frames so the overlay stays at the user-chosen size until
+    /// the host clears it.
+    pub size_override: Option<(u16, u16)>,
 }
 
 impl Overlay {
@@ -76,6 +105,9 @@ impl Overlay {
             z: 50,
             modal: false,
             blocks_agent: false,
+            draggable: false,
+            resizable: false,
+            size_override: None,
         }
     }
 
@@ -91,6 +123,21 @@ impl Overlay {
 
     pub fn blocks_agent(mut self, b: bool) -> Self {
         self.blocks_agent = b;
+        self
+    }
+
+    pub fn draggable(mut self, b: bool) -> Self {
+        self.draggable = b;
+        self
+    }
+
+    pub fn resizable(mut self, b: bool) -> Self {
+        self.resizable = b;
+        self
+    }
+
+    pub fn with_size(mut self, size: (u16, u16)) -> Self {
+        self.size_override = Some(size);
         self
     }
 }

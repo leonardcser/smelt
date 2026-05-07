@@ -127,6 +127,23 @@ pub struct Ui {
     /// with how long the cursor has been parked at the edge.
     /// [`Self::poll_drag_autoscroll`] manages this slot internally.
     drag_autoscroll_since: Option<std::time::Instant>,
+    /// In-flight chrome drag / resize gesture. Captures the overlay's
+    /// rect at Down so subsequent Drag events can compute the new
+    /// top-left or `size_override` from the mouse delta. `None` when
+    /// no chrome gesture is active.
+    chrome_drag: Option<ChromeDrag>,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct ChromeDrag {
+    overlay: OverlayId,
+    zone: overlay::ChromeZone,
+    /// Overlay's resolved rect at the moment Down latched.
+    start_rect: Rect,
+    /// Mouse position at Down — the delta from this gives the move /
+    /// resize amount.
+    origin_row: u16,
+    origin_col: u16,
 }
 
 impl Ui {
@@ -149,6 +166,7 @@ impl Ui {
             last_click: None,
             cursor_shape: CursorShape::Hidden,
             drag_autoscroll_since: None,
+            chrome_drag: None,
         }
     }
 
@@ -353,7 +371,7 @@ impl Ui {
         // either chrome of this overlay or a leaf inside its layout.
         if let Some(cap) = self.capture {
             let owned = match cap {
-                HitTarget::Chrome { owner } => owner == id,
+                HitTarget::Chrome { owner, .. } => owner == id,
                 HitTarget::Window(w) | HitTarget::Scrollbar { owner: w } => {
                     removed.layout.contains_leaf(w)
                 }
@@ -361,6 +379,7 @@ impl Ui {
             if owned {
                 self.capture = None;
                 self.drag_autoscroll_since = None;
+                self.chrome_drag = None;
             }
         }
         if let Some(focused) = self.focus {
@@ -441,7 +460,7 @@ impl Ui {
         if let Some((id, target)) = self.overlay_hit_test(row, col, cursor) {
             return Some(match target {
                 OverlayHitTarget::Window(w) => HitTarget::Window(w),
-                OverlayHitTarget::Chrome => HitTarget::Chrome { owner: id },
+                OverlayHitTarget::Chrome(zone) => HitTarget::Chrome { owner: id, zone },
             });
         }
         let split_rects = self.resolve_splits();
@@ -503,7 +522,10 @@ impl Ui {
                     return Some((id, OverlayHitTarget::Window(*win_id)));
                 }
             }
-            return Some((id, OverlayHitTarget::Chrome));
+            return Some((
+                id,
+                OverlayHitTarget::Chrome(chrome_zone(rect, ov, row, col)),
+            ));
         }
         None
     }
@@ -525,7 +547,9 @@ impl Ui {
         };
         let mut out = Vec::with_capacity(self.overlays.len());
         for (id, ov) in self.overlays_in_z_order() {
-            let size = ov.layout.natural_size((term_w, term_h));
+            let size = ov
+                .size_override
+                .unwrap_or_else(|| ov.layout.natural_size((term_w, term_h)));
             if let Some(rect) = overlay::resolve_anchor(&ov.anchor, size, &ctx) {
                 out.push((id, rect, ov));
             }
@@ -915,7 +939,7 @@ impl Ui {
             HitTarget::Window(w) | HitTarget::Scrollbar { owner: w } => {
                 self.splits.contains_leaf(w) || self.overlay_for_leaf(w).is_some()
             }
-            HitTarget::Chrome { owner } => self.overlays.iter().any(|(id, _)| *id == owner),
+            HitTarget::Chrome { owner, .. } => self.overlays.iter().any(|(id, _)| *id == owner),
         }
     }
 
@@ -1144,15 +1168,62 @@ impl Ui {
                             self.apply_scrollbar_drag(owner, me.row);
                             return Status::Consumed;
                         }
+                        if let Some(HitTarget::Chrome { owner, zone }) =
+                            self.hit_test(me.row, me.column, None)
+                        {
+                            // Click-to-front: any Down on an overlay
+                            // raises its z so it draws on top of
+                            // whatever was just clicked through.
+                            self.raise_overlay_to_front(owner);
+                            // Drag / resize gestures latch capture so
+                            // subsequent Drag rows land here even when
+                            // the pointer wanders off chrome.
+                            let drag_kind = match zone {
+                                overlay::ChromeZone::Title => {
+                                    self.overlay(owner).map(|ov| ov.draggable).unwrap_or(false)
+                                }
+                                overlay::ChromeZone::Resize => {
+                                    self.overlay(owner).map(|ov| ov.resizable).unwrap_or(false)
+                                }
+                                overlay::ChromeZone::Body => false,
+                            };
+                            if drag_kind {
+                                if let Some(rect) = self.resolved_overlay_rect(owner) {
+                                    self.set_capture(HitTarget::Chrome { owner, zone });
+                                    self.chrome_drag = Some(ChromeDrag {
+                                        overlay: owner,
+                                        zone,
+                                        start_rect: rect,
+                                        origin_row: me.row,
+                                        origin_col: me.column,
+                                    });
+                                    return Status::Consumed;
+                                }
+                            }
+                            // Non-drag chrome click on a draggable
+                            // overlay still consumes — clicking the
+                            // border shouldn't fall through to the
+                            // underlying transcript.
+                            return Status::Consumed;
+                        }
                     }
                     MouseEventKind::Drag(MouseButton::Left) => {
                         if let Some(HitTarget::Scrollbar { owner }) = self.capture {
                             self.apply_scrollbar_drag(owner, me.row);
                             return Status::Consumed;
                         }
+                        if let Some(drag) = self.chrome_drag {
+                            self.apply_chrome_drag(drag, me.row, me.column);
+                            return Status::Consumed;
+                        }
                     }
                     MouseEventKind::Up(MouseButton::Left) => {
                         if matches!(self.capture, Some(HitTarget::Scrollbar { .. })) {
+                            self.clear_capture();
+                            return Status::Consumed;
+                        }
+                        if self.chrome_drag.is_some() {
+                            self.chrome_drag = None;
                             self.clear_capture();
                             return Status::Consumed;
                         }
@@ -1180,6 +1251,63 @@ impl Ui {
                 Status::Ignored
             }
             Event::FocusGained | Event::FocusLost | Event::Paste(_) => Status::Ignored,
+        }
+    }
+
+    /// Promote `id` above every other overlay's `z`. Called on any
+    /// Down inside an overlay so the clicked one paints on top of
+    /// whatever it overlapped with. Same-z fall-back rule (insertion
+    /// order) means overlays opened together don't shuffle each
+    /// other on idle clicks — only the explicit raise here moves an
+    /// overlay above its peers.
+    fn raise_overlay_to_front(&mut self, id: OverlayId) {
+        let max_z = self.overlays.iter().map(|(_, o)| o.z).max().unwrap_or(0);
+        if let Some((_, ov)) = self.overlays.iter_mut().find(|(oid, _)| *oid == id) {
+            ov.z = max_z.saturating_add(1);
+        }
+    }
+
+    /// Resolve overlay `id`'s current screen rect using whatever
+    /// cursor / split state is live. Used by the chrome-drag handler
+    /// to snapshot the starting rect when a Down latches a gesture.
+    fn resolved_overlay_rect(&self, id: OverlayId) -> Option<Rect> {
+        self.resolve_overlays(None)
+            .into_iter()
+            .find_map(|(oid, rect, _)| if oid == id { Some(rect) } else { None })
+    }
+
+    /// Apply a chrome drag delta to the captured overlay. `Title`
+    /// rewrites `anchor` to a `ScreenAt { NW, … }` pinned at the new
+    /// top-left so subsequent frames resolve to the moved rect;
+    /// `Resize` updates `size_override` with a small min-size clamp.
+    /// `Body` is reachable when the user grabbed border chrome that
+    /// is neither title nor resize — treat it as a drag handle iff
+    /// the overlay is draggable.
+    fn apply_chrome_drag(&mut self, drag: ChromeDrag, row: u16, col: u16) {
+        let dy = row as i32 - drag.origin_row as i32;
+        let dx = col as i32 - drag.origin_col as i32;
+        let Some((_, ov)) = self
+            .overlays
+            .iter_mut()
+            .find(|(oid, _)| *oid == drag.overlay)
+        else {
+            return;
+        };
+        match drag.zone {
+            overlay::ChromeZone::Title | overlay::ChromeZone::Body => {
+                let new_top = drag.start_rect.top as i32 + dy;
+                let new_left = drag.start_rect.left as i32 + dx;
+                ov.anchor = layout::Anchor::ScreenAt {
+                    row: new_top,
+                    col: new_left,
+                    corner: Corner::NW,
+                };
+            }
+            overlay::ChromeZone::Resize => {
+                let new_w = (drag.start_rect.width as i32 + dx).max(8) as u16;
+                let new_h = (drag.start_rect.height as i32 + dy).max(3) as u16;
+                ov.size_override = Some((new_w, new_h));
+            }
         }
     }
 
@@ -1464,6 +1592,26 @@ impl UiHost for Ui {
         }
         Some((Vec::new(), hard))
     }
+}
+
+/// Classify a chrome hit `(row, col)` inside an overlay's resolved
+/// rect. Top border row is `Title` (the canonical drag handle when
+/// `draggable`); the bottom-right border cell is `Resize` when
+/// `resizable`; everything else is `Body`. Caller has already
+/// confirmed `(row, col)` lives in `rect`.
+fn chrome_zone(rect: Rect, ov: &Overlay, row: u16, col: u16) -> overlay::ChromeZone {
+    if ov.resizable
+        && rect.height >= 1
+        && rect.width >= 1
+        && row + 1 == rect.bottom()
+        && col + 1 == rect.right()
+    {
+        return overlay::ChromeZone::Resize;
+    }
+    if row == rect.top {
+        return overlay::ChromeZone::Title;
+    }
+    overlay::ChromeZone::Body
 }
 
 /// Paint one resolved overlay into `grid`. Walks the overlay's layout
@@ -2003,7 +2151,7 @@ mod tests {
         // Inside overlay rect (row 7 = top border), outside the leaf.
         let hit = ui.overlay_hit_test(7, 30, None).unwrap();
         assert_eq!(hit.0, id);
-        assert_eq!(hit.1, OverlayHitTarget::Chrome);
+        assert_eq!(hit.1, OverlayHitTarget::Chrome(overlay::ChromeZone::Title));
         // Inside the leaf → Window.
         let hit = ui.overlay_hit_test(10, 30, None).unwrap();
         assert!(matches!(hit.1, OverlayHitTarget::Window(WinId(99))));
@@ -2134,7 +2282,13 @@ mod tests {
             layout::Anchor::ScreenCenter,
         ));
         let hit = ui.hit_test(7, 30, None).unwrap();
-        assert_eq!(hit, HitTarget::Chrome { owner: id });
+        assert_eq!(
+            hit,
+            HitTarget::Chrome {
+                owner: id,
+                zone: overlay::ChromeZone::Title
+            }
+        );
     }
 
     #[test]
@@ -2331,7 +2485,10 @@ mod tests {
     fn overlay_close_clears_capture_for_overlay_chrome() {
         let mut ui = make_ui();
         let id = ui.overlay_open(stub_overlay());
-        ui.set_capture(HitTarget::Chrome { owner: id });
+        ui.set_capture(HitTarget::Chrome {
+            owner: id,
+            zone: overlay::ChromeZone::Body,
+        });
         ui.overlay_close(id);
         assert_eq!(ui.capture(), None);
     }
