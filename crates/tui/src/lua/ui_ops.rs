@@ -101,10 +101,25 @@ pub(crate) fn open_overlay(app: &mut TuiApp, opts: mlua::Table) -> Result<u64, S
             )])
             .with_border(Border::Single)
             .with_title(title.unwrap_or_default());
+            // Lua-facing `(row, col)` are offsets from the named
+            // corner: `corner = "ne", row = 0, col = 0` lands the
+            // overlay's NE corner at the terminal's top-right.
+            // Translate to the absolute terminal coordinates that
+            // `Anchor::ScreenAt` expects so `corner_to_topleft` +
+            // `clamp_axis` resolve to the user-visible corner.
+            let (term_w, term_h) = app.ui.terminal_size();
+            let abs_row = match corner {
+                Corner::NW | Corner::NE => row as i32,
+                Corner::SW | Corner::SE => term_h.saturating_sub(1) as i32 - row as i32,
+            };
+            let abs_col = match corner {
+                Corner::NW | Corner::SW => col as i32,
+                Corner::NE | Corner::SE => term_w.saturating_sub(1) as i32 - col as i32,
+            };
             (
                 Anchor::ScreenAt {
-                    row: row as i32,
-                    col: col as i32,
+                    row: abs_row,
+                    col: abs_col,
                     corner,
                 },
                 layout,

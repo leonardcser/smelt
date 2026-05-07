@@ -1168,24 +1168,35 @@ impl Ui {
                             self.apply_scrollbar_drag(owner, me.row);
                             return Status::Consumed;
                         }
-                        if let Some(HitTarget::Chrome { owner, zone }) =
-                            self.hit_test(me.row, me.column, None)
-                        {
-                            // Click-to-front: any Down on an overlay
-                            // raises its z so it draws on top of
-                            // whatever was just clicked through.
+                        // Click-to-front: any Down inside an overlay
+                        // (chrome or leaf) raises its z so it paints
+                        // on top of whatever it overlapped with. The
+                        // Scrollbar branch above already returned, so
+                        // here `hit` is Chrome or Window only.
+                        let hit = self.hit_test(me.row, me.column, None);
+                        let raise = match hit {
+                            Some(HitTarget::Chrome { owner, .. }) => Some(owner),
+                            Some(HitTarget::Window(w)) => self.overlay_for_leaf(w),
+                            _ => None,
+                        };
+                        if let Some(owner) = raise {
                             self.raise_overlay_to_front(owner);
+                        }
+                        if let Some(HitTarget::Chrome { owner, zone }) = hit {
                             // Drag / resize gestures latch capture so
                             // subsequent Drag rows land here even when
-                            // the pointer wanders off chrome.
+                            // the pointer wanders off chrome. `Title`
+                            // and `Body` (side / bottom borders, gap,
+                            // padding) both move the overlay when
+                            // `draggable`; only the bottom-right cell
+                            // (`Resize`) grows / shrinks it.
                             let drag_kind = match zone {
-                                overlay::ChromeZone::Title => {
+                                overlay::ChromeZone::Title | overlay::ChromeZone::Body => {
                                     self.overlay(owner).map(|ov| ov.draggable).unwrap_or(false)
                                 }
                                 overlay::ChromeZone::Resize => {
                                     self.overlay(owner).map(|ov| ov.resizable).unwrap_or(false)
                                 }
-                                overlay::ChromeZone::Body => false,
                             };
                             if drag_kind {
                                 if let Some(rect) = self.resolved_overlay_rect(owner) {
@@ -1200,10 +1211,9 @@ impl Ui {
                                     return Status::Consumed;
                                 }
                             }
-                            // Non-drag chrome click on a draggable
-                            // overlay still consumes — clicking the
-                            // border shouldn't fall through to the
-                            // underlying transcript.
+                            // Non-drag chrome click still consumes —
+                            // clicking the border shouldn't fall
+                            // through to the underlying transcript.
                             return Status::Consumed;
                         }
                     }
@@ -1276,13 +1286,11 @@ impl Ui {
             .find_map(|(oid, rect, _)| if oid == id { Some(rect) } else { None })
     }
 
-    /// Apply a chrome drag delta to the captured overlay. `Title`
-    /// rewrites `anchor` to a `ScreenAt { NW, … }` pinned at the new
-    /// top-left so subsequent frames resolve to the moved rect;
-    /// `Resize` updates `size_override` with a small min-size clamp.
-    /// `Body` is reachable when the user grabbed border chrome that
-    /// is neither title nor resize — treat it as a drag handle iff
-    /// the overlay is draggable.
+    /// Apply a chrome drag delta to the captured overlay. `Title` and
+    /// `Body` (side / bottom borders, gap, padding) both rewrite
+    /// `anchor` to a `ScreenAt { NW, … }` pinned at the new top-left
+    /// so subsequent frames resolve to the moved rect. `Resize`
+    /// updates `size_override`, clamped to [`MIN_OVERLAY_SIZE`].
     fn apply_chrome_drag(&mut self, drag: ChromeDrag, row: u16, col: u16) {
         let dy = row as i32 - drag.origin_row as i32;
         let dx = col as i32 - drag.origin_col as i32;
@@ -1304,8 +1312,9 @@ impl Ui {
                 };
             }
             overlay::ChromeZone::Resize => {
-                let new_w = (drag.start_rect.width as i32 + dx).max(8) as u16;
-                let new_h = (drag.start_rect.height as i32 + dy).max(3) as u16;
+                let (min_w, min_h) = MIN_OVERLAY_SIZE;
+                let new_w = (drag.start_rect.width as i32 + dx).max(min_w as i32) as u16;
+                let new_h = (drag.start_rect.height as i32 + dy).max(min_h as i32) as u16;
                 ov.size_override = Some((new_w, new_h));
             }
         }
@@ -1593,6 +1602,11 @@ impl UiHost for Ui {
         Some((Vec::new(), hard))
     }
 }
+
+/// Floor on `(width, height)` a resize gesture can shrink an overlay
+/// to. Tight enough to keep chrome (border + 1 content cell) usable
+/// without letting the user collapse an overlay to nothing.
+const MIN_OVERLAY_SIZE: (u16, u16) = (8, 3);
 
 /// Classify a chrome hit `(row, col)` inside an overlay's resolved
 /// rect. Top border row is `Title` (the canonical drag handle when
