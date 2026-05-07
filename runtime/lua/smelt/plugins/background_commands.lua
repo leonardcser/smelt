@@ -193,7 +193,10 @@ smelt.cmd.register("ps", function()
       local should_reopen = false
 
       smelt.ui.dialog.open({
-        title = "processes",
+        title = {
+          { text = " processes ", bold = true },
+          { text = "(bs: kill) ", fg = "grey", dim = true },
+        },
         panels = {
           { kind = "options", items = items },
         },
