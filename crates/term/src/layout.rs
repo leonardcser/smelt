@@ -1,17 +1,22 @@
 pub use super::geometry::Rect;
 use std::collections::HashMap;
 
-/// Stable identifier for a custom-paint leaf. Hosts mint these
-/// values, attach them to `LayoutTree::Paint(_)` leaves, and dispatch
+/// Stable identifier for a leaf in the layout tree. Hosts mint these
+/// values, attach them to `LayoutTree::Leaf(_)` leaves, and dispatch
 /// on them inside the paint callback passed to
-/// [`super::Ui::render_with_paints`]. Unlike `WinId`, paint leaves
-/// are not backed by a `Window`/`Buffer` — the host owns all paint
-/// state and writes directly into the per-leaf `GridSlice`.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-pub struct PaintId(pub u32);
+/// [`crate::render_with_paints`]. The renderer treats the id as
+/// opaque — semantics (a window? a tile? a custom widget?) are
+/// entirely the host's domain. Editor-style consumers (`smelt-edit`)
+/// map paint ids to `Window` instances; tcloc-style consumers map
+/// them to their own data.
+///
+/// Width sized to fit common host-side identifiers without coercion
+/// (e.g. `WinId(u64)`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct PaintId(pub u64);
 
 impl PaintId {
-    pub fn raw(self) -> u32 {
+    pub fn raw(self) -> u64 {
         self.0
     }
 }
@@ -78,15 +83,13 @@ pub struct Chrome {
 
 #[derive(Clone, Debug)]
 pub enum LayoutTree {
-    /// Terminal node identifying a single window. The constraint
-    /// governing its size lives in its parent's `items`.
-    Leaf(super::WinId),
-    /// Custom-paint leaf. The host registers a paint dispatcher via
-    /// [`super::Ui::render_with_paints`] and matches on `PaintId` to
-    /// drive its own painter for this rect — no `Window` or `Buffer`
-    /// involved. Hit-testing for these regions is the host's
-    /// responsibility (use [`super::Ui::paint_rect`]).
-    Paint(PaintId),
+    /// Terminal node identifying a paint region. The host registers a
+    /// dispatcher via [`crate::render_with_paints`] and matches on
+    /// `PaintId` to drive its own painter for this rect; the renderer
+    /// itself ascribes no semantics to the id. Editor consumers
+    /// (`smelt-edit`) map ids to `Window`/`Buffer`; standalone
+    /// consumers (tcloc, custom widgets) map them to their own state.
+    Leaf(PaintId),
     /// Vertical container; children stack top-to-bottom.
     Vbox { items: Vec<Item>, chrome: Chrome },
     /// Horizontal container; children pack left-to-right.
@@ -111,21 +114,17 @@ impl LayoutTree {
         }
     }
 
-    /// Terminal leaf for a single window.
-    pub fn leaf(win: super::WinId) -> Self {
-        Self::Leaf(win)
-    }
-
-    /// Custom-paint leaf. Host paints into this rect via the dispatcher
-    /// passed to [`super::Ui::render_with_paints`].
-    pub fn paint(id: PaintId) -> Self {
-        Self::Paint(id)
+    /// Terminal leaf for a paint region. Accepts anything convertible
+    /// to a [`PaintId`] (a raw `PaintId(_)` or a host id type that
+    /// implements `Into<PaintId>` — `smelt-edit`'s `WinId` does).
+    pub fn leaf(id: impl Into<PaintId>) -> Self {
+        Self::Leaf(id.into())
     }
 
     fn chrome_mut(&mut self) -> Option<&mut Chrome> {
         match self {
             Self::Vbox { chrome, .. } | Self::Hbox { chrome, .. } => Some(chrome),
-            Self::Leaf(_) | Self::Paint(_) => None,
+            Self::Leaf(_) => None,
         }
     }
 
@@ -150,43 +149,36 @@ impl LayoutTree {
         self
     }
 
-    /// Whether this tree contains `win` as one of its leaves
+    /// Whether this tree contains `id` as one of its paint leaves
     /// (depth-first). Pure structural check — no rect math, no
     /// dependency on terminal size.
-    pub fn contains_leaf(&self, win: super::WinId) -> bool {
+    pub fn contains_leaf(&self, id: impl Into<PaintId>) -> bool {
+        let id = id.into();
+        self.contains_leaf_id(id)
+    }
+
+    fn contains_leaf_id(&self, id: PaintId) -> bool {
         match self {
-            LayoutTree::Leaf(w) => *w == win,
-            LayoutTree::Paint(_) => false,
+            LayoutTree::Leaf(p) => *p == id,
             LayoutTree::Vbox { items, .. } | LayoutTree::Hbox { items, .. } => {
-                items.iter().any(|(_, child)| child.contains_leaf(win))
+                items.iter().any(|(_, child)| child.contains_leaf_id(id))
             }
         }
     }
 
-    /// Whether this tree contains `id` as a paint leaf.
-    pub fn contains_paint(&self, id: PaintId) -> bool {
-        match self {
-            LayoutTree::Paint(p) => *p == id,
-            LayoutTree::Leaf(_) => false,
-            LayoutTree::Vbox { items, .. } | LayoutTree::Hbox { items, .. } => {
-                items.iter().any(|(_, child)| child.contains_paint(id))
-            }
-        }
-    }
-
-    /// Leaf `WinId`s in document (depth-first, declaration) order.
-    /// Used by Tab cycling to walk focusable windows in a stable
-    /// sequence the user can predict.
-    pub fn leaves_in_order(&self) -> Vec<super::WinId> {
+    /// Paint ids in document (depth-first, declaration) order. Used
+    /// by editor consumers (`smelt-edit`) to drive Tab-cycle order
+    /// across windows; standalone consumers use it for hit-test
+    /// ordering.
+    pub fn leaves_in_order(&self) -> Vec<PaintId> {
         let mut out = Vec::new();
         self.collect_leaves(&mut out);
         out
     }
 
-    fn collect_leaves(&self, out: &mut Vec<super::WinId>) {
+    fn collect_leaves(&self, out: &mut Vec<PaintId>) {
         match self {
-            LayoutTree::Leaf(w) => out.push(*w),
-            LayoutTree::Paint(_) => {}
+            LayoutTree::Leaf(p) => out.push(*p),
             LayoutTree::Vbox { items, .. } | LayoutTree::Hbox { items, .. } => {
                 for (_, child) in items {
                     child.collect_leaves(out);
@@ -210,7 +202,7 @@ impl LayoutTree {
             // Leaves have no intrinsic size yet — content-natural
             // sizing waits for windows to expose Buffer dimensions.
             // Callers wrap them in containers with explicit sizing.
-            LayoutTree::Leaf(_) | LayoutTree::Paint(_) => (0, 0),
+            LayoutTree::Leaf(_) => (0, 0),
             LayoutTree::Vbox { items, chrome } => natural_box(items, chrome, cap, true),
             LayoutTree::Hbox { items, chrome } => natural_box(items, chrome, cap, false),
         }
@@ -432,20 +424,12 @@ pub struct Gutters {
     pub scrollbar: bool,
 }
 
-pub fn resolve_layout(tree: &LayoutTree, area: Rect) -> HashMap<super::WinId, Rect> {
-    let mut result = HashMap::new();
-    // Top-level tree gets the full area; its constraint is implicit.
-    resolve_node(tree, area, &mut result);
-    result
-}
-
 /// Resolve the tree against `area` and return the rect of every
-/// `LayoutTree::Paint` leaf. Mirror of [`resolve_layout`] for paint
-/// leaves — used by hosts that need hit-testing or per-paint geometry
+/// leaf. Used by hosts that need hit-testing or per-leaf geometry
 /// outside the paint callback.
-pub fn resolve_paint_layout(tree: &LayoutTree, area: Rect) -> HashMap<PaintId, Rect> {
+pub fn resolve_layout(tree: &LayoutTree, area: Rect) -> HashMap<PaintId, Rect> {
     let mut result = HashMap::new();
-    resolve_paint_node(tree, area, &mut result);
+    resolve_node(tree, area, &mut result);
     result
 }
 
@@ -593,12 +577,11 @@ fn merge_title_span_style(base: crate::grid::Style, span: crate::grid::Style) ->
     }
 }
 
-fn resolve_node(node: &LayoutTree, area: Rect, out: &mut HashMap<super::WinId, Rect>) {
+fn resolve_node(node: &LayoutTree, area: Rect, out: &mut HashMap<PaintId, Rect>) {
     match node {
-        LayoutTree::Leaf(win) => {
-            out.insert(*win, area);
+        LayoutTree::Leaf(id) => {
+            out.insert(*id, area);
         }
-        LayoutTree::Paint(_) => {}
         LayoutTree::Vbox { items, chrome } => {
             resolve_box(items, chrome, area, true, out);
         }
@@ -609,50 +592,6 @@ fn resolve_node(node: &LayoutTree, area: Rect, out: &mut HashMap<super::WinId, R
 }
 
 fn resolve_box(
-    items: &[Item],
-    chrome: &Chrome,
-    area: Rect,
-    vertical: bool,
-    out: &mut HashMap<super::WinId, Rect>,
-) {
-    let inner = inset_for_border(area, chrome.border);
-    let primary_total = if vertical { inner.height } else { inner.width };
-    let total_gap = chrome
-        .gap
-        .saturating_mul(items.len().saturating_sub(1) as u16);
-    let available = primary_total.saturating_sub(total_gap);
-    let sizes = resolve_constraints(items, available);
-    let mut offset = 0u16;
-    for (i, ((_, child), &size)) in items.iter().zip(sizes.iter()).enumerate() {
-        let child_area = if vertical {
-            Rect::new(inner.top + offset, inner.left, inner.width, size)
-        } else {
-            Rect::new(inner.top, inner.left + offset, size, inner.height)
-        };
-        resolve_node(child, child_area, out);
-        offset += size;
-        if i + 1 < items.len() {
-            offset += chrome.gap;
-        }
-    }
-}
-
-fn resolve_paint_node(node: &LayoutTree, area: Rect, out: &mut HashMap<PaintId, Rect>) {
-    match node {
-        LayoutTree::Leaf(_) => {}
-        LayoutTree::Paint(id) => {
-            out.insert(*id, area);
-        }
-        LayoutTree::Vbox { items, chrome } => {
-            resolve_paint_box(items, chrome, area, true, out);
-        }
-        LayoutTree::Hbox { items, chrome } => {
-            resolve_paint_box(items, chrome, area, false, out);
-        }
-    }
-}
-
-fn resolve_paint_box(
     items: &[Item],
     chrome: &Chrome,
     area: Rect,
@@ -673,7 +612,7 @@ fn resolve_paint_box(
         } else {
             Rect::new(inner.top, inner.left + offset, size, inner.height)
         };
-        resolve_paint_node(child, child_area, out);
+        resolve_node(child, child_area, out);
         offset += size;
         if i + 1 < items.len() {
             offset += chrome.gap;
@@ -817,11 +756,10 @@ pub(crate) fn resolve_constraints(items: &[Item], total: u16) -> Vec<u16> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::WinId;
 
-    const A: WinId = WinId(100);
-    const B: WinId = WinId(101);
-    const C: WinId = WinId(102);
+    const A: PaintId = PaintId(100);
+    const B: PaintId = PaintId(101);
+    const C: PaintId = PaintId(102);
 
     #[test]
     fn single_leaf_fills_area() {

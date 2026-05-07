@@ -38,6 +38,16 @@ impl std::fmt::Display for WinId {
     }
 }
 
+/// Editor windows project onto the renderer's `PaintId` namespace
+/// 1:1 — each window's `WinId` becomes the paint id of its leaf in
+/// the layout tree. The renderer resolves the leaf rect; the editor
+/// dispatcher walks the id back to its `Window` for `Window::render`.
+impl From<WinId> for PaintId {
+    fn from(w: WinId) -> Self {
+        PaintId(w.0)
+    }
+}
+
 /// Callback shape for routing `Callback::Lua` handles out of Ui into
 /// the host's Lua runtime. Receives the handle, the focused window,
 /// and the event payload.
@@ -284,6 +294,9 @@ impl Ui {
         let (w, h) = self.terminal_size;
         let area = Rect::new(0, 0, w, h);
         layout::resolve_layout(&self.splits, area)
+            .into_iter()
+            .map(|(p, r)| (WinId(p.0), r))
+            .collect()
     }
 
     /// Resolved rect for a single splits leaf, or `None` when `win`
@@ -358,7 +371,7 @@ impl Ui {
         self.overlays.push((id, overlay));
         if modal {
             if let Some(leaf) = first_leaf {
-                self.set_focus(leaf);
+                self.set_focus(WinId(leaf.0));
             }
         }
         id
@@ -473,7 +486,8 @@ impl Ui {
             });
         }
         let split_rects = self.resolve_splits();
-        for win in self.splits.leaves_in_order() {
+        for paint_id in self.splits.leaves_in_order() {
+            let win = WinId(paint_id.0);
             if let Some(rect) = split_rects.get(&win) {
                 if !rect.contains(row, col) {
                     continue;
@@ -539,9 +553,9 @@ impl Ui {
             }
             // Inside the overlay rect — is it a leaf or chrome?
             let leaf_rects = layout::resolve_layout(&ov.layout, rect);
-            for (win_id, leaf_rect) in &leaf_rects {
+            for (paint_id, leaf_rect) in &leaf_rects {
                 if leaf_rect.contains(row, col) {
-                    return Some((id, OverlayHitTarget::Window(*win_id)));
+                    return Some((id, OverlayHitTarget::Window(WinId(paint_id.0))));
                 }
             }
             return Some((
@@ -622,8 +636,9 @@ impl Ui {
             let mut all_ids = Vec::new();
             if let Some(removed) = self.overlay_close(overlay_id) {
                 for leaf in removed.layout.leaves_in_order() {
-                    all_ids.extend(self.callbacks.clear_all(leaf));
-                    self.wins.remove(&leaf);
+                    let win = WinId(leaf.0);
+                    all_ids.extend(self.callbacks.clear_all(win));
+                    self.wins.remove(&win);
                 }
             }
             return all_ids;
@@ -804,7 +819,11 @@ impl Ui {
     fn overlay_root_for_leaf(&self, win: WinId) -> Option<WinId> {
         let id = self.overlay_for_leaf(win)?;
         let ov = self.overlay(id)?;
-        ov.layout.leaves_in_order().first().copied()
+        ov.layout
+            .leaves_in_order()
+            .first()
+            .copied()
+            .map(|p| WinId(p.0))
     }
 
     /// Read-only view of the focus history (oldest first; the most
@@ -846,6 +865,7 @@ impl Ui {
             .layout
             .leaves_in_order()
             .into_iter()
+            .map(|p| WinId(p.0))
             .filter(|w| self.wins.contains_key(w))
             .collect();
         if leaves.is_empty() {
@@ -995,7 +1015,10 @@ impl Ui {
             .splits
             .leaves_in_order()
             .into_iter()
-            .filter_map(|win| split_rects.get(&win).map(|r| (win, *r)))
+            .filter_map(|p| {
+                let win = WinId(p.0);
+                split_rects.get(&win).map(|r| (win, *r))
+            })
             .collect();
         // Pre-pass: drive `Buffer::ensure_rendered_at` on each overlay
         // leaf at the width its leaf rect resolves to, so parsers
@@ -1010,8 +1033,9 @@ impl Ui {
         // Lua-built overlay leaves were left as `None`.
         for (_id, rect, overlay) in &resolved {
             let leaf_rects = layout::resolve_layout(&overlay.layout, *rect);
-            for (win_id, leaf_rect) in &leaf_rects {
-                let Some(buf_id) = self.wins.get(win_id).map(|w| w.buf) else {
+            for (paint_id, leaf_rect) in &leaf_rects {
+                let win_id = WinId(paint_id.0);
+                let Some(buf_id) = self.wins.get(&win_id).map(|w| w.buf) else {
                     continue;
                 };
                 if let Some(buf) = self.bufs.get_mut(&buf_id) {
@@ -1022,7 +1046,7 @@ impl Ui {
                     .get(&buf_id)
                     .map(|b| b.line_count() as u16)
                     .unwrap_or(0);
-                if let Some(win) = self.wins.get_mut(win_id) {
+                if let Some(win) = self.wins.get_mut(&win_id) {
                     win.viewport = Some(window::WindowViewport::new(
                         *leaf_rect,
                         leaf_rect.height,
@@ -1069,39 +1093,64 @@ impl Ui {
         let theme_arc = std::sync::Arc::clone(&self.theme);
         self.compositor.render_with(&self.theme, w, move |grid, _theme| {
             let theme = &theme_arc;
+            // Editor-aware paint dispatcher: every `LayoutTree::Leaf`
+            // carries a `PaintId`. If the id maps onto a known
+            // `WinId`, route through `Window::render` with the right
+            // focused / cursor-shape context. Otherwise hand off to
+            // the host's `paint` callback for custom regions
+            // (treemaps, sparklines, etc.). The renderer
+            // (`paint_layout_node`) is purely structural — it doesn't
+            // know about windows.
+            let mut dispatch =
+                |id: PaintId,
+                 area: Rect,
+                 grid: &mut Grid,
+                 theme: &std::sync::Arc<Theme>,
+                 term_size: (u16, u16)| {
+                    let win_id = WinId(id.0);
+                    if let Some(win) = wins.get(&win_id) {
+                        if let Some(buf) = bufs.get(&win.buf) {
+                            let mut slice = grid.slice_mut(area);
+                            let focused = focus == Some(win_id);
+                            let ctx = DrawContext {
+                                terminal_width: term_size.0,
+                                terminal_height: term_size.1,
+                                focused,
+                                cursor_shape: if focused {
+                                    cursor_shape
+                                } else {
+                                    CursorShape::Hidden
+                                },
+                                theme: std::sync::Arc::clone(theme),
+                            };
+                            win.render(buf, &mut slice, &ctx);
+                            return;
+                        }
+                    }
+                    let mut slice = grid.slice_mut(area);
+                    let ctx = DrawContext {
+                        terminal_width: term_size.0,
+                        terminal_height: term_size.1,
+                        focused: false,
+                        cursor_shape: CursorShape::Hidden,
+                        theme: std::sync::Arc::clone(theme),
+                    };
+                    paint(id, &mut slice, &ctx);
+                };
             // Paint splits first so overlays draw on top, matching the
             // prior order (status was a compositor layer at z=500;
             // overlays in the closure ran *after* every compositor
             // layer paint, so any overlap landed overlays-over-status).
-            // `paint_layout_node` walks containers (painting chrome at
-            // each level) and recurses into leaves, so a splits tree
-            // with `with_border` / `with_title` paints the same shape
-            // as an overlay tree would.
             paint_layout_node(
                 grid,
                 theme,
                 &splits_tree,
                 Rect::new(0, 0, term_w, term_h),
-                wins,
-                bufs,
                 term_size,
-                focus,
-                cursor_shape,
-                &mut paint,
+                &mut dispatch,
             );
             for (_id, rect, overlay) in &resolved {
-                paint_overlay(
-                    grid,
-                    theme,
-                    *rect,
-                    overlay,
-                    wins,
-                    bufs,
-                    term_size,
-                    focus,
-                    cursor_shape,
-                    &mut paint,
-                );
+                paint_overlay(grid, theme, *rect, overlay, term_size, &mut dispatch);
             }
             cursor_override
         })
@@ -1126,11 +1175,11 @@ impl Ui {
     pub fn paint_rect(&self, id: PaintId) -> Option<Rect> {
         let (term_w, term_h) = self.terminal_size;
         let area = Rect::new(0, 0, term_w, term_h);
-        if let Some(rect) = layout::resolve_paint_layout(&self.splits, area).get(&id) {
+        if let Some(rect) = layout::resolve_layout(&self.splits, area).get(&id) {
             return Some(*rect);
         }
         for (_oid, ov_rect, ov) in self.resolve_overlays(None) {
-            if let Some(rect) = layout::resolve_paint_layout(&ov.layout, ov_rect).get(&id) {
+            if let Some(rect) = layout::resolve_layout(&ov.layout, ov_rect).get(&id) {
                 return Some(*rect);
             }
         }
@@ -1158,9 +1207,10 @@ impl Ui {
     ) -> Option<(u16, u16)> {
         let focus = self.focus?;
         self.overlay_for_leaf(focus)?;
+        let focus_paint = PaintId::from(focus);
         for (_id, rect, overlay) in resolved {
             let leaf_rects = layout::resolve_layout(&overlay.layout, *rect);
-            let Some(leaf_rect) = leaf_rects.get(&focus) else {
+            let Some(leaf_rect) = leaf_rects.get(&focus_paint) else {
                 continue;
             };
             let win = self.wins.get(&focus)?;
@@ -1556,6 +1606,7 @@ impl Ui {
                 if let Some(root) = self
                     .overlay(modal)
                     .and_then(|o| o.layout.leaves_in_order().first().copied())
+                    .map(|p| WinId(p.0))
                 {
                     self.fire_win_event(root, WinEvent::Dismiss, Payload::None, lua_invoke);
                 }
@@ -1755,83 +1806,37 @@ fn chrome_zone(rect: Rect, ov: &Overlay, row: u16, col: u16) -> overlay::ChromeZ
 /// the grid and call `Window::render`. Missing windows / buffers are
 /// silently skipped — the paint pass is best-effort, not authoritative
 /// over registry state.
-#[allow(clippy::too_many_arguments)]
+/// Internal dispatcher signature for the per-leaf paint walk:
+/// `(paint_id, leaf_rect, grid, theme, terminal_size)`.
+type PaintDispatch<'a> =
+    dyn FnMut(PaintId, Rect, &mut Grid, &std::sync::Arc<Theme>, (u16, u16)) + 'a;
+
 fn paint_overlay(
     grid: &mut Grid,
     theme: &std::sync::Arc<Theme>,
     area: Rect,
     overlay: &Overlay,
-    wins: &HashMap<WinId, Window>,
-    bufs: &HashMap<BufId, Buffer>,
     term_size: (u16, u16),
-    focus: Option<WinId>,
-    cursor_shape: CursorShape,
-    paint: &mut dyn FnMut(PaintId, &mut GridSlice<'_>, &DrawContext),
+    paint: &mut PaintDispatch,
 ) {
     // Overlays are opaque: clear the rect first so layers below
     // (statusline, prompt borders, transcript content) don't bleed
     // through gap rows or buffer lines that don't fill the leaf width.
     grid.clear(area);
-    paint_layout_node(
-        grid,
-        theme,
-        &overlay.layout,
-        area,
-        wins,
-        bufs,
-        term_size,
-        focus,
-        cursor_shape,
-        paint,
-    );
+    paint_layout_node(grid, theme, &overlay.layout, area, term_size, paint);
 }
 
-#[allow(clippy::too_many_arguments)]
 fn paint_layout_node(
     grid: &mut Grid,
     theme: &std::sync::Arc<Theme>,
     node: &LayoutTree,
     area: Rect,
-    wins: &HashMap<WinId, Window>,
-    bufs: &HashMap<BufId, Buffer>,
     term_size: (u16, u16),
-    focus: Option<WinId>,
-    cursor_shape: CursorShape,
-    paint: &mut dyn FnMut(PaintId, &mut GridSlice<'_>, &DrawContext),
+    paint: &mut PaintDispatch,
 ) {
     match node {
-        LayoutTree::Leaf(win_id) => {
-            let Some(win) = wins.get(win_id) else {
-                return;
-            };
-            let Some(buf) = bufs.get(&win.buf) else {
-                return;
-            };
-            let mut slice = grid.slice_mut(area);
-            let focused = focus == Some(*win_id);
-            let ctx = DrawContext {
-                terminal_width: term_size.0,
-                terminal_height: term_size.1,
-                focused,
-                cursor_shape: if focused {
-                    cursor_shape
-                } else {
-                    CursorShape::Hidden
-                },
-                theme: std::sync::Arc::clone(theme),
-            };
-            win.render(buf, &mut slice, &ctx);
-        }
-        LayoutTree::Paint(id) => {
-            let mut slice = grid.slice_mut(area);
-            let ctx = DrawContext {
-                terminal_width: term_size.0,
-                terminal_height: term_size.1,
-                focused: false,
-                cursor_shape: CursorShape::Hidden,
-                theme: std::sync::Arc::clone(theme),
-            };
-            paint(*id, &mut slice, &ctx);
+        LayoutTree::Leaf(id) => {
+            paint(*id, area, grid, theme, term_size);
         }
         LayoutTree::Vbox { items, chrome } | LayoutTree::Hbox { items, chrome } => {
             layout::paint_chrome(grid, area, chrome, theme);
@@ -1850,18 +1855,7 @@ fn paint_layout_node(
                 } else {
                     Rect::new(inner.top, inner.left + offset, size, inner.height)
                 };
-                paint_layout_node(
-                    grid,
-                    theme,
-                    child,
-                    child_area,
-                    wins,
-                    bufs,
-                    term_size,
-                    focus,
-                    cursor_shape,
-                    paint,
-                );
+                paint_layout_node(grid, theme, child, child_area, term_size, paint);
                 offset += size;
                 if i + 1 < items.len() {
                     offset += chrome.gap;
