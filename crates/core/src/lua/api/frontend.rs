@@ -16,7 +16,7 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
     frontend_tbl.set(
         "kind",
         lua.create_function(|_, ()| {
-            Ok(crate::host::try_with_core(|core| core.frontend().as_str())
+            Ok(crate::host::try_with_core(|core| core.frontend.as_str())
                 .unwrap_or(crate::runtime::FrontendKind::Tui.as_str()))
         })?,
     )?;
@@ -24,7 +24,7 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
     frontend_tbl.set(
         "is_interactive",
         lua.create_function(|_, ()| {
-            Ok(crate::host::try_with_core(|core| core.frontend().is_interactive()).unwrap_or(true))
+            Ok(crate::host::try_with_core(|core| core.frontend.is_interactive()).unwrap_or(true))
         })?,
     )?;
 

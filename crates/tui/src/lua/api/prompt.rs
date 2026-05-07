@@ -20,7 +20,7 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
         lua.create_function(|_, text: String| {
             crate::lua::with_app(|app| {
                 let mode = app.vim_mode;
-                crate::api::buf::replace(&mut app.input, text, None, mode);
+                app.input.replace_text(text, None, mode);
             });
             Ok(())
         })?,

@@ -42,7 +42,7 @@ to invoke_ the feature.
 | Reasoning effort cycle (Off/Low/Med/High/Max)                 | `--reasoning-effort` + Ctrl+T + `plugins/toggles.lua`     | P2.c (cell), P4.f (modes)     | working |
 | Agent modes (Normal/Plan/Apply/Yolo)                          | `--mode` + Shift+Tab + `protocol/mode.rs`                 | P5 (mode gating to Lua hooks) | working |
 | Turn streaming                                                | `engine/agent.rs` → `EngineEvent::TextDelta` → transcript | P2.d (EngineClient)           | working |
-| Steer / Unsteer (queue messages mid-turn) | `protocol/event.rs::Steered` + `UiCommand::{Steer,Unsteer}` + `core/events.rs` | P2.d | working |
+| Steer / Unsteer (queue messages mid-turn) | `protocol/event.rs::Steered` + `UiCommand::{Steer,Unsteer}` + `tui/src/app/events.rs` | P2.d | working |
 | Auto-retry on transient errors (`Retrying`) | `engine/agent.rs` → `EngineEvent::Retrying` + `core/working.rs` spinner | P2.d (EngineClient fires) | working |
 | Auxiliary model routing (title, prediction, btw, compaction) | `engine/agent.rs` + `protocol/usage.rs::AuxiliaryTask` + auxiliary-model config | P2 (kept), P4 (predict/btw plugins) | working |
 | Per-turn message snapshot (`Messages` event for transcript sync) | `protocol/event.rs::Messages` + `core/transcript_model.rs` | P2.d | working |
@@ -74,7 +74,7 @@ to invoke_ the feature.
 | `edit_file`           | `runtime/lua/smelt/tools/edit_file.lua` | P5.b — landed; composes `smelt.fs.file_state.*` + `try_flock` + Lua-side find/replace | working |
 | `edit_notebook`       | `runtime/lua/smelt/tools/notebook_edit.lua` | P5.b — landed; thin Lua wrapper over `smelt.notebook.apply_edit` (intricate JSON cell munging stays Rust) | working |
 | `bash`                | `runtime/lua/smelt/tools/bash.lua` | P5.b — landed; composes `smelt.process.run_streaming` + `smelt.shell.*` | working |
-| `run_in_background` (background-process entry point, not part of foreground `bash`) | `plugins/background_commands.lua` | P5.c — separate plugin/tool surface over `smelt.process`; current `bash.lua` fold-in is transitional drift | partial |
+| `run_in_background` (parameter on `bash`, plugin-supplied)                          | `plugins/background_commands.lua` | P5.b/P10.3.15 — plugin overrides `bash` to add the `run_in_background` flag (one tool with a parameter beats two tools for the same capability) | working |
 | `read_process_output` | `plugins/background_commands.lua` | P5.b                                                | working |
 | `stop_process`        | `plugins/background_commands.lua` | P5.b                                                | working |
 | `glob`                | `runtime/lua/smelt/tools/glob.lua` | P5.b — landed; composes `smelt.fs.glob`            | working |
@@ -171,8 +171,8 @@ to invoke_ the feature.
 | Reasoning cycle (Ctrl+T)                        | `keymap.rs`                             | P4.f                                             | working |
 | Ghost-text accept (Tab)                         | `completer/mod.rs` + `predict.lua`      | P1.d (extmark)                                   | working |
 | Submit (Shift+Enter for multiline)              | `input/mod.rs`                          | P4 (input widget)                                | working |
-| Cancel (Ctrl+C)                                 | `core/events.rs` + `engine/cancel.rs`    | P6                                               | working |
-| Double-Esc (cancel + drain queue)               | `core/events.rs`                         | P6 (Esc chain)                                   | working |
+| Cancel (Ctrl+C)                                 | `tui/src/app/events.rs` + `engine/cancel.rs`    | P6                                               | working |
+| Double-Esc (cancel + drain queue)               | `input/mod.rs::resolve_agent_esc` (running mode) + `runtime/lua/smelt/plugins/esc_chord.lua` (idle mode) | P6 / P10.3.16 | working |
 | Mouse wheel scroll                              | `core/mouse.rs`                          | P1/P2                                            | working |
 | Mouse click focus                               | `core/mouse.rs` + `ui::Ui::resolve_split_mouse` | P2.b (HitTarget + Host)                  | working |
 | Mouse click position cursor                     | `core/mouse.rs` + `ui/window.rs`         | P1.d                                             | working |
@@ -182,10 +182,11 @@ to invoke_ the feature.
 | Scrollbar drag                                  | `core/mouse.rs` + `ui/window.rs`         | P2.b (HitTarget::Scrollbar)                      | working |
 | Edge autoscroll on drag                         | `core/mouse.rs`                          | P2 (Timers)                                      | working |
 | Tab cycles focus (modal-aware)                  | `core/pane_focus.rs`                     | P1.f (`focus_next` modal-aware)                  | working |
-| Esc chain (clear sel → dismiss → cancel)        | `core/events.rs` + overlay/dialog state  | P6                                               | working |
+| Esc chain (clear sel → dismiss → cancel)        | `tui/src/app/events.rs` + overlay/dialog state  | P6                                               | working |
 | Picker navigation (↑/↓/j/k/Ctrl+P/N, PgUp/PgDn) | `ui/picker.rs` + `option_list.rs`       | P4 (`widgets/picker.lua`, `widgets/options.lua`) | working |
 | Picker filter typing                            | `ui/picker.rs`                          | P4                                               | working |
-| Custom keymaps (Lua `smelt.keymap.set`)         | `lua/api/dispatch.rs`                   | P3.b                                             | working |
+| Custom keymaps (Lua `smelt.keymap.set`)         | `lua/api/keymap.rs`                     | P3.b                                             | working |
+| Multi-key chord keymaps (`<Esc><Esc>`, `gd`, `<C-w>q`) | `lua/api/keymap.rs` + `app/events.rs::dispatch_common` | P10.3.16 | working |
 
 ## Theming & UI customization
 
@@ -217,15 +218,15 @@ to invoke_ the feature.
 | Session branching / fork (`/fork`)                  | `plugins/session.lua` + `core/history.rs::fork_session` | P2.a + P4.e | working |
 | Rewind to turn (`/rewind`, Esc Esc)                 | `core/history.rs` + `dialogs/rewind.lua`                            | P2.a + P4.d | working |
 | Conversation export (markdown → clip/file)          | `plugins/export.lua`                                               | P4.e        | working |
-| Message queuing (queue while running, pop on Enter) | `core/events.rs` + `core/working.rs`                                 | P2          | working |
+| Message queuing (queue while running, pop on Enter) | `tui/src/app/events.rs` + `core/working.rs`                                 | P2          | working |
 | Per-workspace permissions                           | `engine/permissions/workspace.rs` + `tui/permissions/store.rs` | P5.c        | working |
 | Session-scoped permissions                          | `engine/permissions/approvals.rs`                                  | P5.c        | working |
 | Last-model cache                                    | `state.rs` + cache                                                 | P2.a        | working |
 | XDG dir support                                     | `engine/paths.rs`                                                  | n/a         | working |
 | OAuth keyring                                       | `engine/auth.rs` + `provider/auth_storage.rs`                      | n/a         | working |
 | Sleep inhibit during long turns                     | `sleep_inhibit.rs`                                                 | P2          | working |
-| Terminal focus tracking (term_focused)              | `core/events.rs`                                                    | P2          | working |
-| Graceful shutdown (Shutdown event)                  | `engine/agent.rs` + `core/events.rs`                                | P2.d        | working |
+| Terminal focus tracking (term_focused)              | `tui/src/app/events.rs`                                                    | P2          | working |
+| Graceful shutdown (Shutdown event)                  | `engine/agent.rs` + `tui/src/app/events.rs`                                | P2.d        | working |
 
 ## Plugin / scripting surface
 
@@ -246,7 +247,9 @@ to invoke_ the feature.
 | `smelt.engine.ask`                                      | `lua/api/engine.rs`                 | P3.b → `lua/api/engine.rs`                 | working        |
 | `smelt.model.{get,set,list}`                            | `lua/api/model.rs`                  | P4.e (carved from `smelt.engine`)          | working        |
 | `smelt.session.messages`                                | `lua/api/session.rs`                | P4.e (carved from `smelt.engine.history`)  | working        |
-| `smelt.engine.cancel`                                   | `lua/api/engine.rs`                 | P3.b                                       | working        |
+| `smelt.engine.cancel`                                   | `lua/api/engine.rs`                 | P3.b/P10.3.16 (now also cancels in-flight `/compact`) | working |
+| `smelt.engine.is_running` / `smelt.engine.is_compacting` | `lua/api/engine.rs`                | P10.3.16 — surfaces engine state for chord plugins | working |
+| `smelt.vim.set_mode("Insert" \| "Normal" \| "Visual" \| "VisualLine")` | `lua/api/vim.rs`     | P10.3.16 — chord handlers can restore the mode captured at chord start | working |
 | `smelt.reasoning.{get,set,cycle,cycle_list}`            | `lua/api/reasoning.rs` + `runtime/lua/smelt/modes.lua` | P4.e (carved from `smelt.engine`); P4.f (`cycle_list` + Lua-side cycle) | working        |
 | `smelt.mode.{get,set,cycle,cycle_list}`                 | `lua/api/mode.rs` + `runtime/lua/smelt/modes.lua`      | P3.c + P4.f (`cycle_list` + Lua-side cycle)                              | working        |
 | `smelt.ui.dialog.open` / `open_handle`                  | `dialog.lua` + `lua/api/widgets.rs` | P3.b → `lua/api/ui.rs`                     | working        |

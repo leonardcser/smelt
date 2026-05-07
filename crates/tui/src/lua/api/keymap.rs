@@ -56,7 +56,7 @@ pub(super) fn register(
                             ))
                         },
                     )?;
-                    let canonical_chord = crate::lua::canonicalize_chord(&chord)
+                    let canonical_chord = crate::lua::canonicalize_chord_sequence(&chord)
                         .ok_or_else(|| {
                             LuaError::RuntimeError(format!(
                                 "keymap.set: unknown chord `{chord}`"

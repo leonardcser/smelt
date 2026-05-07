@@ -333,7 +333,7 @@ impl TuiApp {
                     combined.push_str(&self.input.win.text);
                 }
                 let __mode = self.vim_mode;
-                crate::api::buf::replace(&mut self.input, combined, None, __mode);
+                self.input.replace_text(combined, None, __mode);
             }
         } else {
             {

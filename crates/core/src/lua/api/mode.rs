@@ -17,7 +17,7 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
         "get",
         lua.create_function(|_, ()| {
             Ok(
-                crate::host::try_with_core(|core| core.config().mode.as_str().to_string())
+                crate::host::try_with_core(|core| core.config.mode.as_str().to_string())
                     .unwrap_or_default(),
             )
         })?,
@@ -38,10 +38,10 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
         "cycle_list",
         lua.create_function(|lua, ()| {
             let cycle: Vec<String> = crate::host::try_with_core(|core| {
-                let cycle: &[protocol::AgentMode] = if core.config().mode_cycle.is_empty() {
+                let cycle: &[protocol::AgentMode] = if core.config.mode_cycle.is_empty() {
                     protocol::AgentMode::ALL
                 } else {
-                    &core.config().mode_cycle
+                    &core.config.mode_cycle
                 };
                 cycle.iter().map(|m| m.as_str().to_string()).collect()
             })

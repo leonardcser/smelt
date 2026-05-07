@@ -16,10 +16,10 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
     reasoning_tbl.set(
         "get",
         lua.create_function(|_, ()| {
-            Ok(crate::host::try_with_core(|core| {
-                core.config().reasoning_effort.label().to_string()
-            })
-            .unwrap_or_default())
+            Ok(
+                crate::host::try_with_core(|core| core.config.reasoning_effort.label().to_string())
+                    .unwrap_or_default(),
+            )
         })?,
     )?;
 
@@ -37,7 +37,7 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
         "cycle_list",
         lua.create_function(|lua, ()| {
             let labels: Vec<String> = crate::host::try_with_core(|core| {
-                core.config()
+                core.config
                     .reasoning_cycle
                     .iter()
                     .map(|e| e.label().to_string())

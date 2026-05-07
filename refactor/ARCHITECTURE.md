@@ -369,6 +369,19 @@ overlay, etc.) responsive even when a modal viewer is open. A
 chord with no Lua binding falls through to the viewer's vim recipe
 unchanged.
 
+**Multi-key chords flow through the same registry.**
+`smelt.keymap.set("", "<Esc><Esc>", fn)` registers a canonical
+chord sequence; the dispatcher keeps a `pending_chord` window
+(500 ms timeout, trim-front matching à la nvim's `timeoutlen`)
+and fires the handler once the running token sequence
+exact-matches a registered chord. Handlers receive a context
+table carrying state captured at the first key (e.g.
+`vim_mode_at_chord_start`) so they can branch on pre-chord
+state. Returning `false` falls through to downstream dispatch
+the same way single-key handlers do; closing the last
+hardcoded chord (`<Esc><Esc>` → `/rewind`) lives in
+`runtime/lua/smelt/plugins/esc_chord.lua`.
+
 ## Frontends — Core, TuiApp, HeadlessApp
 
 Split on the only axis that matters: does this code need a Ui?
@@ -387,22 +400,23 @@ branches. Borrow checker enforces the split.
 ### Side effects — `Core` and `UiHost`, no Effect enum
 
 Side effects are direct method calls. Host-tier flows reach `Core`
-directly via inherent accessor methods (`core.cells()`,
-`core.timers()`, `core.engine()`, …) — no `Host` trait wraps the
-11 subsystem fields. UiHost is a small trait owned by `tui::ui`;
-`TuiApp` impls it. Keeps `ui` free of tui-defined types.
+directly via field access (`core.cells`, `core.timers`,
+`core.engine`, …) — no `Host` trait, no accessor methods. The 11
+subsystem fields are `pub` and the surface. UiHost is a small trait
+owned by `tui::ui`; `TuiApp` impls it. Keeps `ui` free of
+tui-defined types.
 
-`Core` exposes the 11 Ui-agnostic accessors (`config`, `clipboard`,
-`cells`, `timers`, `engine`, `session`, `files`, `processes`,
-`skills`, `frontend`, `confirms`) as inherent methods. `UiHost`
-exposes `ui`, `focus`, `buf_*`, `win_*`, `overlay_open`.
+`Core`'s 11 Ui-agnostic fields are `config`, `clipboard`, `cells`,
+`timers`, `engine`, `session`, `files`, `processes`, `skills`,
+`frontend`, `confirms`. `UiHost` exposes `ui`, `focus`, `buf_*`,
+`win_*`, `overlay_open`.
 
 Lua bindings divide by tier. Host-tier (works in headless + tui)
 lives in `core/src/lua/api/` and reborrows `&mut Core`. UiHost-tier
 (errors in headless) lives in `tui/src/lua/api/` and reborrows
-`&mut dyn UiHost`. Two cross-runtime cases keep typed forms because
-they cross channels: engine boundary (`UiCommand`) and Lua
-coroutine resumption (`core.lua().resume_task`).
+`&mut TuiApp` (the only `UiHost` impl today). Two cross-runtime
+cases keep typed forms because they cross channels: engine boundary
+(`UiCommand`) and Lua coroutine resumption (`core.lua.resume_task`).
 
 No reducer, no Effect log. Observability via `tracing::trace!`.
 
@@ -440,18 +454,24 @@ callbacks registered via `ui::Callbacks` would collide with the `&mut Ui`
 borrow held during dispatch, so they're queued and drained after the borrow
 releases.
 
-**Two TLS slots: `*mut Core` for Host-tier, `*mut dyn UiHost` for
-UiHost-tier.** The Host-tier slot (`CORE_PTR`, set via
-`install_core_ptr`) holds a concrete `&mut Core` — every frontend
-embeds `Core` and installs through the same pointer; bindings
-reborrow `&mut Core` and reach subsystems via inherent accessor
-methods (`core.cells()`, `core.timers()`, …). The UiHost-tier slot
-(`UI_HOST`, set in P9.o.1) is type-erased over the trait so future
-frontends with their own compositor (`StoryApp`, alternative
-backends) host UiHost-tier Lua without binding rewrites — bindings
-reborrow the trait object, never the concrete `TuiApp`. The Host
-trait was retired in P10.3.8: pure DI table over `Core`'s field
-list adding zero behavior, replaced by direct field access.
+**Two TLS slots: `*mut Core` for Host-tier, `*mut TuiApp` for
+UiHost-tier.** Both concrete; no trait objects. The Host-tier slot
+(`CORE_PTR`, set via `install_core_ptr`) holds a concrete `&mut
+Core` — every frontend embeds `Core` and installs through the same
+pointer; bindings reborrow `&mut Core` and reach subsystems via
+direct field access (`core.cells`, `core.timers`, …). The
+UiHost-tier slot (`APP`) holds `&mut TuiApp` directly; bindings
+reborrow it via `with_app`. Two earlier seams retired in P10:
+- The `Host` trait (P10.3.8) — a manual DI table over `Core`'s
+  field list with zero behavior. Replaced by inherent fields.
+- The `UI_HOST` trait-object slot (P10.3.12, reverses P9.o.1) — a
+  speculative future-frontend seam that never paid off. Bindings
+  flipped back to `with_app`. When a real second frontend lands,
+  the slot is ~30 LOC to re-add.
+
+The shared rule both retirements arose from: don't ship DI seams
+ahead of a concrete consumer. Fields are the surface; trait
+objects show up when a second impl forces them.
 
 ### Bindings layout
 
@@ -471,7 +491,7 @@ A few bindings remain in `tui/src/lua/api/` pending reclassification
 `vim.rs`, `keymap.rs`, `history.rs`).
 
 Each binding declares whether it's Host-tier (reborrows `&mut Core`)
-or UiHost-tier (reborrows `&mut dyn UiHost`); calling a UiHost binding
+or UiHost-tier (reborrows `&mut TuiApp`); calling a UiHost binding
 from a `HeadlessApp` raises a runtime error in Lua.
 
 ## Engine boundary — channels only
@@ -807,10 +827,12 @@ reads (P9.c). Tool render returns `BlockLayout`
 permission defaults declared in Lua (P9.y). Host-tier Lua
 bindings in `core/src/lua/api/` resolve via `try_with_core` over
 a `*mut Core` TLS slot; UiHost-tier in `tui/src/lua/api/` via
-`try_with_app`. The `Host` trait retired in P10.3.8 (pure DI
-table, zero behavior); UiHost TLS trait-object slot landed
-(P9.o.1) — `*mut dyn UiHost` decouples future compositor
-frontends from the concrete `TuiApp`. Theme registry landed
+`try_with_app` over a `*mut TuiApp` TLS slot. Two DI seams
+retired in P10: the `Host` trait (P10.3.8 — pure DI table over
+`Core` fields with zero behavior) and the `UI_HOST` trait-object
+slot (P10.3.12 — speculative future-frontend seam that never paid
+off; reverses P9.o.1). Both retirements share the rule: don't
+ship DI seams ahead of a concrete consumer. Theme registry landed
 (P1.0): `set(name, style)`, `link(from, to)`, `get(name)`.
 
 ## Code rules — eternal

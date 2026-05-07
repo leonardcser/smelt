@@ -38,9 +38,7 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
     let s = shared.clone();
     tbl.set(
         "count",
-        lua.create_function(move |_, ()| {
-            Ok(s.messages.lock().map(|m| m.count()).unwrap_or(0))
-        })?,
+        lua.create_function(move |_, ()| Ok(s.messages.lock().map(|m| m.count()).unwrap_or(0)))?,
     )?;
 
     let s = shared.clone();

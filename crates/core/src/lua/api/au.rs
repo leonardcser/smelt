@@ -20,7 +20,7 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
             |lua, (name, handler): (String, mlua::Function)| -> LuaResult<mlua::Value> {
                 let key = lua.create_registry_value(handler)?;
                 let id = crate::host::try_with_core(|core| {
-                    core.cells()
+                    core.cells
                         .subscribe_kind(&name, SubscriberKind::Lua(Rc::new(LuaHandle { key })))
                 })
                 .flatten();
@@ -41,7 +41,7 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
             |lua, (name, payload): (String, mlua::Value)| -> LuaResult<bool> {
                 let key = lua.create_registry_value(payload)?;
                 Ok(crate::host::try_with_core(|core| {
-                    core.cells().set_dyn(&name, Rc::new(LuaCellValue { key }))
+                    core.cells.set_dyn(&name, Rc::new(LuaCellValue { key }))
                 })
                 .unwrap_or(false))
             },
