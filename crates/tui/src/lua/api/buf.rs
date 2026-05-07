@@ -1,7 +1,7 @@
 //! `smelt.buf` bindings — Buffer creation, line/source mutation,
 //! highlight extmarks. UiHost-only.
 
-use super::{app_read, theme_role_get};
+use super::app_read;
 use crate::lua::LuaShared;
 use mlua::prelude::*;
 use std::sync::Arc;
@@ -149,10 +149,12 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
 /// match every other Lua row index in smelt; convert to 0-based
 /// internally. `opts.id` retargets an existing mark across re-runs.
 ///
-/// Highlight payload: pick whichever of `hl_group` (theme name),
-/// or per-attribute `fg / bg / bold / dim / italic` is set.
-/// VirtText payload: pass `virt_text` (and optionally
-/// `virt_text_pos`).
+/// Highlight payload: `hl_group` names a theme highlight group whose
+/// full Style is applied; `fg` / `bg` name groups whose `.fg` / `.bg`
+/// axis is pulled in to override; `bold / dim / italic` override
+/// individual attribute axes. Unknown group names silently resolve
+/// to default (nvim policy). VirtText payload: pass `virt_text` (and
+/// optionally `virt_text_pos`).
 fn set_extmark(
     lua: &Lua,
     (id, ns, row, col, opts): (u64, u32, u64, u64, Option<mlua::Table>),
@@ -236,31 +238,37 @@ fn parse_virt_pos(s: &str) -> smelt_core::buffer::VirtTextPos {
 }
 
 fn parse_highlight_style(t: &mlua::Table) -> LuaResult<crate::ui::SpanStyle> {
-    let resolve_role = |role: &str| -> LuaResult<smelt_core::style::Color> {
-        crate::lua::with_app(|app| theme_role_get(app.ui.theme(), role))
-            .ok_or_else(|| LuaError::RuntimeError(format!("unknown theme role: {role}")))
+    use smelt_core::style::Style;
+
+    // Highlight groups are looked up via `theme.get(name)` (nvim
+    // parity): unknown names silently resolve to default rather than
+    // erroring, so a stale theme reference paints unstyled instead of
+    // crashing the caller. `hl_group` sets the full base Style;
+    // `fg` / `bg` strings name groups whose `.fg` / `.bg` axis is
+    // pulled in. Per-attribute Lua bools override individual axes.
+    let resolve_group =
+        |name: &str| -> Style { crate::lua::with_app(|app| app.ui.theme().get(name)) };
+
+    let mut style = match t.get::<Option<String>>("hl_group").ok().flatten() {
+        Some(name) => resolve_group(&name),
+        None => Style::default(),
     };
-    // hl_group sets fg by name (today's theme groups carry fg
-    // primarily). Per-attribute fields override individual axes.
-    let fg = match t.get::<Option<String>>("fg").ok().flatten() {
-        Some(role) => Some(resolve_role(&role)?),
-        None => match t.get::<Option<String>>("hl_group").ok().flatten() {
-            Some(role) => Some(resolve_role(&role)?),
-            None => None,
-        },
-    };
-    let bg = match t.get::<Option<String>>("bg").ok().flatten() {
-        Some(role) => Some(resolve_role(&role)?),
-        None => None,
-    };
-    Ok(crate::ui::SpanStyle {
-        fg,
-        bg,
-        bold: t.get::<bool>("bold").unwrap_or(false),
-        dim: t.get::<bool>("dim").unwrap_or(false),
-        italic: t.get::<bool>("italic").unwrap_or(false),
-        ..Default::default()
-    })
+    if let Some(name) = t.get::<Option<String>>("fg").ok().flatten() {
+        style.fg = resolve_group(&name).fg;
+    }
+    if let Some(name) = t.get::<Option<String>>("bg").ok().flatten() {
+        style.bg = resolve_group(&name).bg;
+    }
+    if let Some(b) = t.get::<Option<bool>>("bold")? {
+        style.bold = b;
+    }
+    if let Some(b) = t.get::<Option<bool>>("dim")? {
+        style.dim = b;
+    }
+    if let Some(b) = t.get::<Option<bool>>("italic")? {
+        style.italic = b;
+    }
+    Ok(style)
 }
 
 fn parse_meta(t: &mlua::Table) -> LuaResult<smelt_core::buffer::SpanMeta> {

@@ -115,15 +115,22 @@ pub(crate) fn chord_string(key: crossterm::event::KeyEvent) -> Option<String> {
 /// Parse a plugin-facing key spec like `"enter"`, `"esc"`, `"tab"`,
 /// `"bs"`, `"space"`, `"up"`, `"c-j"` (ctrl-j), `"a-x"` / `"m-x"`
 /// (alt-x), `"s-tab"` (shift-tab), or a single printable char into a
-/// [`crate::ui::KeyBind`]. Modifiers separate with `-`; the final token is
-/// the key name. Case-insensitive for names and modifiers. Returns
-/// `None` for unknown keys — the caller surfaces a Lua error.
+/// [`crate::ui::KeyBind`]. Also accepts the canonical bracket form
+/// `"<Esc>"` / `"<C-r>"` / `"<S-Tab>"` that `chord_string` emits — same
+/// grammar `smelt.keymap.set` accepts. Modifiers separate with `-`;
+/// the final token is the key name. Case-insensitive for names and
+/// modifiers. Returns `None` for unknown keys — the caller surfaces
+/// a Lua error.
 pub(crate) fn parse_keybind(spec: &str) -> Option<crate::ui::KeyBind> {
     use crossterm::event::{KeyCode, KeyModifiers};
     let raw = spec.trim();
     if raw.is_empty() {
         return None;
     }
+    let raw = raw
+        .strip_prefix('<')
+        .and_then(|s| s.strip_suffix('>'))
+        .unwrap_or(raw);
     let (mods, name) = match raw.rsplit_once('-') {
         Some((prefix, name)) => {
             let mut mods = KeyModifiers::NONE;
@@ -202,12 +209,7 @@ pub(crate) fn normalize_mode(mode: &str) -> Option<String> {
 /// error at registration.
 pub(crate) fn canonicalize_chord(chord: &str) -> Option<String> {
     use crossterm::event::KeyEvent;
-    let stripped = chord
-        .trim()
-        .strip_prefix('<')
-        .and_then(|s| s.strip_suffix('>'))
-        .unwrap_or(chord.trim());
-    let kb = parse_keybind(stripped)?;
+    let kb = parse_keybind(chord)?;
     chord_string(KeyEvent::new(kb.code, kb.mods))
 }
 
@@ -1122,6 +1124,27 @@ mod tests {
             parse_keybind("k"),
             Some(crate::ui::KeyBind::new(
                 KeyCode::Char('k'),
+                KeyModifiers::NONE
+            ))
+        );
+        // Bracket form (canonical nvim shape) — the same grammar
+        // `smelt.keymap.set` accepts. Plugins authored to nvim
+        // muscle memory pass `"<Esc>"` / `"<C-r>"` / `"<S-Tab>"`.
+        assert_eq!(
+            parse_keybind("<Esc>"),
+            Some(crate::ui::KeyBind::new(KeyCode::Esc, KeyModifiers::NONE))
+        );
+        assert_eq!(
+            parse_keybind("<C-r>"),
+            Some(crate::ui::KeyBind::new(
+                KeyCode::Char('r'),
+                KeyModifiers::CONTROL
+            ))
+        );
+        assert_eq!(
+            parse_keybind("<S-Tab>"),
+            Some(crate::ui::KeyBind::new(
+                KeyCode::BackTab,
                 KeyModifiers::NONE
             ))
         );
