@@ -3,7 +3,7 @@
 //! few reusable window recipes (`list` / `input`).
 
 use crate::app::TuiApp;
-use crate::ui::layout::Anchor;
+use crate::ui::layout::{Anchor, Corner};
 use crate::ui::{
     Border, Callback, CallbackResult, Constraint, KeyBind, LayoutTree, Overlay, Payload, WinEvent,
     WinId,
@@ -12,11 +12,22 @@ use crossterm::event::{KeyCode, KeyModifiers};
 
 /// Where the dialog's overlay anchors. Parsed from `opts.placement` on
 /// the Lua side: absent or `"center"` → `ScreenCenter`; `"dock_bottom"`
-/// → `DockBottom` reading `placement_height` (default 60).
+/// → `DockBottom` reading `placement_height` (default 60); `"screen_at"`
+/// → `ScreenAt` with `corner` + absolute `width` / `height`, used by
+/// the F12 debug panel.
 #[derive(Clone, Copy)]
 enum OverlayPlacement {
     ScreenCenter,
-    DockBottom { height_pct: u16 },
+    DockBottom {
+        height_pct: u16,
+    },
+    ScreenAt {
+        corner: Corner,
+        row: u16,
+        col: u16,
+        width: u16,
+        height: u16,
+    },
 }
 
 pub(crate) fn open_overlay(app: &mut TuiApp, opts: mlua::Table) -> Result<u64, String> {
@@ -71,6 +82,31 @@ pub(crate) fn open_overlay(app: &mut TuiApp, opts: mlua::Table) -> Result<u64, S
             .with_title(title.unwrap_or_default());
             (Anchor::ScreenBottom { above_rows: 1 }, layout)
         }
+        OverlayPlacement::ScreenAt {
+            corner,
+            row,
+            col,
+            width,
+            height,
+        } => {
+            // Wrap the inner vbox so the outer container has a fixed
+            // (Length × Length) size; the anchor places the rect's
+            // top-left and the resolver clamps to terminal bounds.
+            let layout = LayoutTree::vbox(vec![(
+                Constraint::Length(height),
+                LayoutTree::hbox(vec![(Constraint::Length(width), inner)]),
+            )])
+            .with_border(Border::Single)
+            .with_title(title.unwrap_or_default());
+            (
+                Anchor::ScreenAt {
+                    row: row as i32,
+                    col: col as i32,
+                    corner,
+                },
+                layout,
+            )
+        }
     };
 
     let id = app.ui.overlay_open(
@@ -86,12 +122,34 @@ pub(crate) fn open_overlay(app: &mut TuiApp, opts: mlua::Table) -> Result<u64, S
 /// Defaults to centered. `"dock_bottom"` docks full-width at the
 /// terminal bottom (1 row reserved above for the status bar); an
 /// optional `placement_height = <pct>` controls the overlay height as
-/// a fraction of available height.
+/// a fraction of available height. `"screen_at"` reads `corner`
+/// (`"nw"`/`"ne"`/`"sw"`/`"se"`) plus absolute `row` / `col` / `width`
+/// / `height` and pins the overlay at the named corner — used by the
+/// F12 debug panel for a fixed top-right box.
 fn parse_overlay_placement(opts: &mlua::Table) -> OverlayPlacement {
     match opts.get::<String>("placement").ok().as_deref() {
         Some("dock_bottom") => {
             let height_pct: u16 = opts.get("placement_height").unwrap_or(60);
             OverlayPlacement::DockBottom { height_pct }
+        }
+        Some("screen_at") => {
+            let corner = match opts.get::<String>("corner").ok().as_deref() {
+                Some("ne") => Corner::NE,
+                Some("sw") => Corner::SW,
+                Some("se") => Corner::SE,
+                _ => Corner::NW,
+            };
+            let row: u16 = opts.get("row").unwrap_or(0);
+            let col: u16 = opts.get("col").unwrap_or(0);
+            let width: u16 = opts.get("width").unwrap_or(60);
+            let height: u16 = opts.get("height").unwrap_or(20);
+            OverlayPlacement::ScreenAt {
+                corner,
+                row,
+                col,
+                width,
+                height,
+            }
         }
         _ => OverlayPlacement::ScreenCenter,
     }

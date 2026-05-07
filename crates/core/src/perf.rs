@@ -5,6 +5,19 @@ use std::time::{Duration, Instant};
 
 static ENABLED: AtomicBool = AtomicBool::new(false);
 
+/// Cap on retained samples per label. Live collection (debug panel,
+/// long-running sessions) keeps memory bounded by trimming the oldest
+/// sample when the buffer fills. `--bench` mode picks up the same cap;
+/// 1024 samples is enough for stable percentiles without unbounded growth.
+const RING_CAPACITY: usize = 1024;
+
+fn push_capped<T>(buf: &mut Vec<T>, value: T) {
+    if buf.len() >= RING_CAPACITY {
+        buf.remove(0);
+    }
+    buf.push(value);
+}
+
 /// Global per-label samples (self-time durations).
 fn samples() -> &'static Mutex<HashMap<&'static str, Vec<Duration>>> {
     static S: OnceLock<Mutex<HashMap<&'static str, Vec<Duration>>>> = OnceLock::new();
@@ -25,17 +38,125 @@ pub fn record_value(label: &'static str, value: u64) {
         return;
     }
     if let Ok(mut m) = value_samples().lock() {
-        m.entry(label).or_default().push(value);
+        push_capped(m.entry(label).or_default(), value);
     }
 }
 
-fn enabled() -> bool {
+pub fn enabled() -> bool {
     ENABLED.load(Ordering::Relaxed)
 }
 
 /// Enable bench-mode collection. Idempotent.
 pub fn enable() {
     ENABLED.store(true, Ordering::Relaxed);
+}
+
+/// Toggle collection on or off at runtime. The debug panel uses this
+/// so the perf overhead only applies while the panel is open.
+pub fn set_enabled(on: bool) {
+    ENABLED.store(on, Ordering::Relaxed);
+}
+
+/// Drop every retained sample. Called when the panel toggles off so a
+/// reopened panel starts with a fresh window.
+pub fn clear() {
+    if let Ok(mut s) = samples().lock() {
+        s.clear();
+    }
+    if let Ok(mut a) = alloc_samples().lock() {
+        a.clear();
+    }
+    if let Ok(mut v) = value_samples().lock() {
+        v.clear();
+    }
+}
+
+/// One row of the live snapshot consumed by `smelt.metrics.perf_snapshot()`.
+#[derive(Debug, Clone)]
+pub struct DurationRow {
+    pub label: &'static str,
+    pub count: usize,
+    pub last_us: u64,
+    pub p50_us: u64,
+    pub p95_us: u64,
+    pub p99_us: u64,
+    pub max_us: u64,
+    pub total_us: u64,
+}
+
+#[derive(Debug, Clone)]
+pub struct ValueRow {
+    pub label: &'static str,
+    pub count: usize,
+    pub last: u64,
+    pub p50: u64,
+    pub p95: u64,
+    pub p99: u64,
+    pub max: u64,
+    pub total: u64,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct Snapshot {
+    pub durations: Vec<DurationRow>,
+    pub values: Vec<ValueRow>,
+}
+
+fn pct_idx(count: usize, p: usize) -> usize {
+    ((count * p) / 100).min(count.saturating_sub(1))
+}
+
+/// Snapshot the current sample buffers without clearing them. Sorted
+/// by total time descending so the worst offender lands at the top.
+pub fn snapshot() -> Snapshot {
+    let mut out = Snapshot::default();
+    if let Ok(map) = samples().lock() {
+        for (label, durs) in map.iter() {
+            if durs.is_empty() {
+                continue;
+            }
+            let mut sorted: Vec<u64> = durs.iter().map(|d| d.as_micros() as u64).collect();
+            sorted.sort_unstable();
+            let last_us = durs.last().map(|d| d.as_micros() as u64).unwrap_or(0);
+            let total_us: u64 = sorted.iter().sum();
+            out.durations.push(DurationRow {
+                label,
+                count: sorted.len(),
+                last_us,
+                p50_us: sorted[pct_idx(sorted.len(), 50)],
+                p95_us: sorted[pct_idx(sorted.len(), 95)],
+                p99_us: sorted[pct_idx(sorted.len(), 99)],
+                max_us: *sorted.last().unwrap(),
+                total_us,
+            });
+        }
+    }
+    out.durations
+        .sort_by(|a, b| b.total_us.cmp(&a.total_us));
+
+    if let Ok(map) = value_samples().lock() {
+        for (label, vs) in map.iter() {
+            if vs.is_empty() {
+                continue;
+            }
+            let mut sorted = vs.clone();
+            sorted.sort_unstable();
+            let last = vs.last().copied().unwrap_or(0);
+            let total: u64 = sorted.iter().sum();
+            out.values.push(ValueRow {
+                label,
+                count: sorted.len(),
+                last,
+                p50: sorted[pct_idx(sorted.len(), 50)],
+                p95: sorted[pct_idx(sorted.len(), 95)],
+                p99: sorted[pct_idx(sorted.len(), 99)],
+                max: *sorted.last().unwrap(),
+                total,
+            });
+        }
+    }
+    out.values.sort_by(|a, b| a.label.cmp(b.label));
+    out
 }
 
 /// Returns an RAII guard that records a self-time sample for `label` when
@@ -62,15 +183,16 @@ impl Drop for Guard {
     fn drop(&mut self) {
         let dur = self.start.elapsed();
         if let Ok(mut s) = samples().lock() {
-            s.entry(self.label).or_default().push(dur);
+            push_capped(s.entry(self.label).or_default(), dur);
         }
         if crate::alloc::enabled() {
             let (c1, b1) = crate::alloc::snapshot();
             let (c0, b0) = self.allocs_start;
             if let Ok(mut m) = alloc_samples().lock() {
-                m.entry(self.label)
-                    .or_default()
-                    .push((c1.saturating_sub(c0), b1.saturating_sub(b0)));
+                push_capped(
+                    m.entry(self.label).or_default(),
+                    (c1.saturating_sub(c0), b1.saturating_sub(b0)),
+                );
             }
         }
     }

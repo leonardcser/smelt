@@ -97,6 +97,33 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
         "create_namespace",
         lua.create_function(|_, name: String| Ok(smelt_core::buffer::create_namespace(&name).0))?,
     )?;
+    // `smelt.buf.clear_namespace(buf, ns, line_start?, line_end?)` —
+    // drops every extmark in `ns` between `[line_start, line_end)`
+    // (1-based, inclusive start, exclusive end). Defaults clear the
+    // whole buffer so plugins that repaint a namespace each tick
+    // (perf panel, completer ghost text) don't have to track ids.
+    buf_tbl.set(
+        "clear_namespace",
+        lua.create_function(
+            |_, (id, ns, start, end_): (u64, u32, Option<i64>, Option<i64>)| {
+                use smelt_core::buffer::NsId;
+                let start_line = match start {
+                    Some(n) if n > 0 => (n as usize).saturating_sub(1),
+                    _ => 0,
+                };
+                let end_line = match end_ {
+                    Some(n) if n > 0 => n as usize,
+                    _ => usize::MAX,
+                };
+                crate::lua::with_app(|app| {
+                    if let Some(buf) = app.ui.buf_mut(crate::ui::BufId(id)) {
+                        buf.clear_namespace(NsId(ns), start_line, end_line);
+                    }
+                });
+                Ok(())
+            },
+        )?,
+    )?;
     smelt.set("buf", buf_tbl)?;
     Ok(())
 }
