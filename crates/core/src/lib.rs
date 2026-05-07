@@ -1,9 +1,6 @@
 pub mod alloc;
 pub mod app_config;
-pub mod attachment;
-pub mod buffer;
 pub mod cells;
-pub mod clipboard;
 pub mod config;
 pub mod confirms;
 pub mod content;
@@ -18,7 +15,6 @@ pub mod history;
 pub mod host;
 pub mod html;
 pub mod http;
-pub mod kill_ring;
 pub mod lua;
 pub mod mcp;
 pub mod messages;
@@ -30,15 +26,18 @@ pub mod process;
 pub mod runtime;
 pub mod session;
 pub mod state;
-pub mod style;
-pub mod theme;
 pub mod timers;
 pub mod tools;
 pub mod transcript_model;
 pub mod trust;
-pub mod undo;
 pub mod utils;
 pub mod working;
+
+// Pure-data UI primitives live in `smelt-ui-data` so non-smelt
+// frontends (e.g. tcloc) can depend on them without pulling in
+// engine / lua / http. Re-exported here so existing call sites
+// (`smelt_core::buffer::Buffer`, etc.) keep resolving.
+pub use ui_data::{attachment, buffer, clipboard, kill_ring, style, theme, undo};
 
 pub use app_config::AppConfig;
 pub use cells::Cells;

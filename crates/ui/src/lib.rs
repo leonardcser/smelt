@@ -13,13 +13,13 @@ pub(crate) mod text_objects;
 pub mod vim;
 pub(crate) mod window;
 
-pub use smelt_core::attachment::AttachmentId;
-pub use smelt_core::buffer::{
+pub use ui_data::attachment::AttachmentId;
+pub use ui_data::buffer::{
     BufCreateOpts, BufId, Buffer, BufferParser, ExtmarkOpts, ExtmarkPayload, SpanMeta, SpanStyle,
     LUA_BUF_ID_BASE,
 };
-pub use smelt_core::clipboard::Clipboard;
-pub use smelt_core::undo::{UndoEntry, UndoHistory};
+pub use ui_data::clipboard::Clipboard;
+pub use ui_data::undo::{UndoEntry, UndoHistory};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct WinId(pub u64);
@@ -49,8 +49,8 @@ pub use grid::{Grid, Style};
 pub use layout::{Border, Constraint, Corner, Gutters, LayoutTree, Rect};
 use overlay::OverlayHitTarget;
 pub use overlay::{HitTarget, Overlay, OverlayId};
-pub use smelt_core::theme::{Theme, DEFAULT_ACCENT};
 pub use snapshot::SnapshotFrame;
+pub use ui_data::theme::{Theme, DEFAULT_ACCENT};
 pub use vim::VimMode;
 pub use window::{
     CursorShape, DrawContext, EventCtx, MouseCtx, ScrollbarState, SplitConfig, Window,

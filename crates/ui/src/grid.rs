@@ -1,5 +1,5 @@
 use super::geometry::Rect;
-pub use smelt_core::style::{Color, Style};
+pub use ui_data::style::{Color, Style};
 
 /// Convert core's frontend-neutral `Color` to crossterm's terminal
 /// `Color` at the SGR-emit boundary. 1:1 enum mapping; the trait
