@@ -22,6 +22,7 @@ pub mod hit;
 pub mod layout;
 pub mod line;
 pub mod snapshot;
+pub mod surface;
 
 pub use compositor::Compositor;
 pub use flush::flush_diff;
@@ -32,6 +33,7 @@ pub use line::{Line, Span};
 pub use smelt_buffer::style::Color;
 pub use smelt_buffer::theme::{Theme, DEFAULT_ACCENT};
 pub use snapshot::SnapshotFrame;
+pub use surface::Surface;
 
 /// Per-leaf paint dispatcher: `(paint_id, leaf_rect, grid, theme,
 /// terminal_size)`. The renderer hands each [`LayoutTree::Leaf`] to
