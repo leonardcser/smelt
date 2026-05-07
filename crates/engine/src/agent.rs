@@ -30,7 +30,16 @@ pub(crate) async fn engine_task(
     mut cmd_rx: mpsc::UnboundedReceiver<UiCommand>,
     event_tx: mpsc::UnboundedSender<EngineEvent>,
 ) {
-    let client = reqwest::Client::new();
+    // Default User-Agent — `reqwest/<version>` is rejected by some
+    // openai-compatible endpoints that gate on UA (e.g. api.kimi.com
+    // /coding/v1, which only accepts known coding-agent UAs). Send
+    // `smelt/<version>` so providers see a consistent identity.
+    // Per-request `header("User-Agent", ...)` calls (Copilot, Codex
+    // GitHub releases fetch) still override this.
+    let client = reqwest::Client::builder()
+        .user_agent(concat!("smelt/", env!("CARGO_PKG_VERSION")))
+        .build()
+        .unwrap_or_else(|_| reqwest::Client::new());
     crate::pricing::spawn_catalog_fetch(client.clone());
 
     let _ = event_tx.send(EngineEvent::Ready);
