@@ -107,6 +107,8 @@ local function open()
     height = PANEL_H,
     modal = false,
     blocks_agent = false,
+    draggable = true,
+    resizable = true,
     items = { { win = win, height = "fill" } },
   })
   local timer = smelt.timer.every(250, paint_panel)

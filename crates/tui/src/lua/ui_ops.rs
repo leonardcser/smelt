@@ -39,6 +39,8 @@ pub(crate) fn open_overlay(app: &mut TuiApp, opts: mlua::Table) -> Result<u64, S
     let blocks_agent: bool = opts.get("blocks_agent").unwrap_or(false);
     let modal: bool = opts.get("modal").unwrap_or(true);
     let z: u16 = opts.get("z").unwrap_or(50);
+    let draggable: bool = opts.get("draggable").unwrap_or(false);
+    let resizable: bool = opts.get("resizable").unwrap_or(false);
 
     let mut leaf_items: Vec<(Constraint, LayoutTree)> = Vec::new();
     for pair in items_tbl.sequence_values::<mlua::Table>() {
@@ -86,15 +88,16 @@ pub(crate) fn open_overlay(app: &mut TuiApp, opts: mlua::Table) -> Result<u64, S
             corner,
             row,
             col,
-            width,
-            height,
+            width: _,
+            height: _,
         } => {
-            // Wrap the inner vbox so the outer container has a fixed
-            // (Length × Length) size; the anchor places the rect's
-            // top-left and the resolver clamps to terminal bounds.
+            // ScreenAt uses `Overlay::size_override` to drive the
+            // outer rect (set just below), so the inner layout uses
+            // `Fill` so chrome stretches to whatever size the host
+            // (or a resize gesture) writes onto the override.
             let layout = LayoutTree::vbox(vec![(
-                Constraint::Length(height),
-                LayoutTree::hbox(vec![(Constraint::Length(width), inner)]),
+                Constraint::Fill,
+                LayoutTree::hbox(vec![(Constraint::Fill, inner)]),
             )])
             .with_border(Border::Single)
             .with_title(title.unwrap_or_default());
@@ -109,12 +112,20 @@ pub(crate) fn open_overlay(app: &mut TuiApp, opts: mlua::Table) -> Result<u64, S
         }
     };
 
-    let id = app.ui.overlay_open(
-        Overlay::new(layout, anchor)
-            .with_z(z)
-            .modal(modal)
-            .blocks_agent(blocks_agent),
-    );
+    let mut overlay = Overlay::new(layout, anchor)
+        .with_z(z)
+        .modal(modal)
+        .blocks_agent(blocks_agent)
+        .draggable(draggable)
+        .resizable(resizable);
+    // ScreenAt placements drive the rect via `size_override` so a
+    // resize gesture has a stable handle to mutate (and so the
+    // initial frame doesn't collapse to chrome-only when the inner
+    // layout is `Fill`).
+    if let OverlayPlacement::ScreenAt { width, height, .. } = placement {
+        overlay = overlay.with_size((width, height));
+    }
+    let id = app.ui.overlay_open(overlay);
     Ok(id.0 as u64)
 }
 

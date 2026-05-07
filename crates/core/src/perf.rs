@@ -131,8 +131,7 @@ pub fn snapshot() -> Snapshot {
             });
         }
     }
-    out.durations
-        .sort_by(|a, b| b.total_us.cmp(&a.total_us));
+    out.durations.sort_by_key(|r| std::cmp::Reverse(r.total_us));
 
     if let Ok(map) = value_samples().lock() {
         for (label, vs) in map.iter() {
