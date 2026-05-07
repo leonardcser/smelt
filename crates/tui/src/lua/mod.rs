@@ -164,6 +164,13 @@ pub(crate) fn parse_keybind(spec: &str) -> Option<crate::ui::KeyBind> {
         "end" => KeyCode::End,
         "pageup" | "pgup" => KeyCode::PageUp,
         "pagedown" | "pgdn" => KeyCode::PageDown,
+        s if s.starts_with('f') && s[1..].chars().all(|c| c.is_ascii_digit()) => {
+            let n: u8 = s[1..].parse().ok()?;
+            if !(1..=12).contains(&n) {
+                return None;
+            }
+            KeyCode::F(n)
+        }
         s if s.chars().count() == 1 => KeyCode::Char(name.chars().next().unwrap()),
         _ => return None,
     };
