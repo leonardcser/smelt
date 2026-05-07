@@ -489,31 +489,44 @@ impl Ui {
     /// Returns the topmost overlay whose resolved rect contains
     /// `(row, col)`, plus whether the hit landed on one of its leaf
     /// `Window`s or its chrome (border, title, gap, padding).
-    /// `None` when no overlay covers the point. When a modal is
-    /// active, only the modal and overlays at or above its `z`
-    /// receive hits — lower-z overlays are blocked even if their
-    /// rect contains the point. `cursor` is forwarded to
-    /// [`Self::resolve_overlays`] for `Anchor::Cursor` resolution.
+    /// `None` when no overlay covers the point.
+    ///
+    /// Modal interaction: the active modal is opaque at its own rect
+    /// for every overlay **below it in z**. Higher-z overlays paint
+    /// over the modal and continue to receive clicks on the parts
+    /// that cover the modal. Lower-z overlays still receive clicks
+    /// on the parts they leave visible **outside** the modal's rect.
+    /// `cursor` is forwarded to [`Self::resolve_overlays`] for
+    /// `Anchor::Cursor` resolution.
     fn overlay_hit_test(
         &self,
         row: u16,
         col: u16,
         cursor: Option<(u16, u16)>,
     ) -> Option<(OverlayId, OverlayHitTarget)> {
-        let modal_z = self
-            .active_modal()
-            .and_then(|id| self.overlay(id).map(|o| o.z));
+        let modal_id = self.active_modal();
+        let resolved = self.resolve_overlays(cursor);
+        let modal_info: Option<(Rect, u16)> = modal_id.and_then(|mid| {
+            resolved
+                .iter()
+                .find_map(|(oid, rect, ov)| (*oid == mid).then_some((*rect, ov.z)))
+        });
         // Topmost first.
-        let mut resolved = self.resolve_overlays(cursor);
+        let mut resolved = resolved;
         resolved.reverse();
         for (id, rect, ov) in resolved {
-            if let Some(min_z) = modal_z {
-                if ov.z < min_z {
-                    continue;
-                }
-            }
             if !rect.contains(row, col) {
                 continue;
+            }
+            // Modal opaque only against z values strictly below it. An
+            // overlay at or above modal_z paints on top of the modal
+            // and gets the click; an overlay below modal_z is blocked
+            // at the modal's rect but still gets clicks at the parts
+            // it leaves visible outside that rect.
+            if let Some((mr, mz)) = modal_info {
+                if ov.z < mz && mr.contains(row, col) {
+                    continue;
+                }
             }
             // Inside the overlay rect — is it a leaf or chrome?
             let leaf_rects = layout::resolve_layout(&ov.layout, rect);
@@ -965,6 +978,13 @@ impl Ui {
         // leaf at the width its leaf rect resolves to, so parsers
         // (markdown / plain wrap / diff / syntax) populate their
         // `lines` vector before the immutable paint walk reads them.
+        // Also publish each leaf's resolved rect onto `Window.viewport`
+        // so any input dispatch path (vim navigation in `/messages`,
+        // mouse hit-testing, etc.) sees the same geometry the
+        // compositor will paint into. Production overlay leaves had
+        // no viewport otherwise — well-known windows (transcript,
+        // prompt) get theirs assigned in `app/render_loop.rs`, but
+        // Lua-built overlay leaves were left as `None`.
         for (_id, rect, overlay) in &resolved {
             let leaf_rects = layout::resolve_layout(&overlay.layout, *rect);
             for (win_id, leaf_rect) in &leaf_rects {
@@ -973,6 +993,20 @@ impl Ui {
                 };
                 if let Some(buf) = self.bufs.get_mut(&buf_id) {
                     buf.ensure_rendered_at(leaf_rect.width);
+                }
+                let total_rows = self
+                    .bufs
+                    .get(&buf_id)
+                    .map(|b| b.line_count() as u16)
+                    .unwrap_or(0);
+                if let Some(win) = self.wins.get_mut(win_id) {
+                    win.viewport = Some(window::WindowViewport::new(
+                        *leaf_rect,
+                        leaf_rect.height,
+                        total_rows,
+                        win.scroll_top,
+                        None,
+                    ));
                 }
             }
         }
@@ -1182,14 +1216,39 @@ impl Ui {
                         if let Some(owner) = raise {
                             self.raise_overlay_to_front(owner);
                         }
-                        if let Some(HitTarget::Chrome { owner, zone }) = hit {
-                            // Drag / resize gestures latch capture so
-                            // subsequent Drag rows land here even when
-                            // the pointer wanders off chrome. `Title`
-                            // and `Body` (side / bottom borders, gap,
-                            // padding) both move the overlay when
-                            // `draggable`; only the bottom-right cell
-                            // (`Resize`) grows / shrinks it.
+                        // Drag / resize gestures latch capture so
+                        // subsequent Drag rows land here even when
+                        // the pointer wanders off chrome. `Title`
+                        // and `Body` (side / bottom borders, gap,
+                        // padding) both move the overlay when
+                        // `draggable`; only the bottom-right cell
+                        // (`Resize`) grows / shrinks it. As a UX
+                        // convenience, a click on the *leaf* of a
+                        // draggable overlay whose leaf is
+                        // non-focusable (the perf panel and similar
+                        // passive HUDs) is treated the same as a
+                        // Body chrome hit — so the user can grab
+                        // anywhere on the panel to move it.
+                        let drag_target: Option<(OverlayId, overlay::ChromeZone)> = match hit {
+                            Some(HitTarget::Chrome { owner, zone }) => Some((owner, zone)),
+                            Some(HitTarget::Window(w)) => {
+                                let leaf_focusable = self
+                                    .wins
+                                    .get(&w)
+                                    .map(|win| win.focusable)
+                                    .unwrap_or(true);
+                                self.overlay_for_leaf(w).and_then(|owner| {
+                                    let ov_draggable = self
+                                        .overlay(owner)
+                                        .map(|o| o.draggable)
+                                        .unwrap_or(false);
+                                    (!leaf_focusable && ov_draggable)
+                                        .then_some((owner, overlay::ChromeZone::Body))
+                                })
+                            }
+                            _ => None,
+                        };
+                        if let Some((owner, zone)) = drag_target {
                             let drag_kind = match zone {
                                 overlay::ChromeZone::Title | overlay::ChromeZone::Body => {
                                     self.overlay(owner).map(|ov| ov.draggable).unwrap_or(false)
@@ -1214,7 +1273,9 @@ impl Ui {
                             // Non-drag chrome click still consumes —
                             // clicking the border shouldn't fall
                             // through to the underlying transcript.
-                            return Status::Consumed;
+                            if matches!(hit, Some(HitTarget::Chrome { .. })) {
+                                return Status::Consumed;
+                            }
                         }
                     }
                     MouseEventKind::Drag(MouseButton::Left) => {
@@ -1250,13 +1311,17 @@ impl Ui {
                 if is_scroll && self.focused_overlay().is_some() {
                     return Status::Consumed;
                 }
-                if let Some(modal_id) = self.active_modal() {
-                    let inside = self
-                        .overlay_hit_test(me.row, me.column, None)
-                        .is_some_and(|(id, _)| id == modal_id);
-                    if !inside {
-                        return Status::Consumed;
-                    }
+                // Modal blocks events that fall on splits (no overlay
+                // hit) when a modal is open: the host's splits-mouse
+                // routing must not promote focus into the transcript /
+                // prompt while a modal is up. Clicks on visible
+                // non-modal overlays already returned via the Down
+                // chrome / drag arms above; this branch only triggers
+                // for the splits fallthrough.
+                if self.active_modal().is_some()
+                    && self.overlay_hit_test(me.row, me.column, None).is_none()
+                {
+                    return Status::Consumed;
                 }
                 Status::Ignored
             }
@@ -1701,16 +1766,7 @@ fn paint_layout_node(
         LayoutTree::Vbox { items, chrome } | LayoutTree::Hbox { items, chrome } => {
             layout::paint_chrome(grid, area, chrome, theme);
             let vertical = matches!(node, LayoutTree::Vbox { .. });
-            let inner = if chrome.border.is_some() {
-                Rect::new(
-                    area.top + 1,
-                    area.left + 1,
-                    area.width.saturating_sub(2),
-                    area.height.saturating_sub(2),
-                )
-            } else {
-                area
-            };
+            let inner = layout::inset_for_border(area, chrome.border);
             let primary_total = if vertical { inner.height } else { inner.width };
             let total_gap = chrome
                 .gap
@@ -2158,7 +2214,7 @@ mod tests {
                 Constraint::Length(8),
                 LayoutTree::hbox(vec![(Constraint::Length(40), LayoutTree::leaf(WinId(99)))]),
             )])
-            .with_border(layout::Border::Single),
+            .with_border(layout::Border::SINGLE),
             layout::Anchor::ScreenCenter,
         );
         let id = ui.overlay_open(bordered);
@@ -2180,10 +2236,164 @@ mod tests {
     }
 
     #[test]
-    fn overlay_hit_test_modal_blocks_lower_z() {
+    fn body_click_drags_non_focusable_draggable_overlay_no_modal() {
+        let mut ui = make_ui();
+        let buf = ui.buf_create(BufCreateOpts::default());
+        let leaf = WinId(123);
+        assert!(ui.win_open_split_at(
+            leaf,
+            buf,
+            SplitConfig {
+                region: "test".into(),
+                gutters: Default::default(),
+            }
+        ));
+        ui.win_mut(leaf).unwrap().focusable = false;
+
+        let perf_layout = LayoutTree::hbox(vec![(
+            Constraint::Length(10),
+            LayoutTree::vbox(vec![(Constraint::Length(4), LayoutTree::leaf(leaf))]),
+        )])
+        .with_border(layout::Border::SINGLE)
+        .with_title("perf");
+        let perf = ui.overlay_open(
+            Overlay::new(
+                perf_layout,
+                layout::Anchor::ScreenAt {
+                    row: 0,
+                    col: 60,
+                    corner: layout::Corner::NW,
+                },
+            )
+            .draggable(true),
+        );
+        // Click on the body (inside the leaf, not the border).
+        let down = crossterm::event::MouseEvent {
+            kind: crossterm::event::MouseEventKind::Down(crossterm::event::MouseButton::Left),
+            column: 65,
+            row: 2,
+            modifiers: crossterm::event::KeyModifiers::NONE,
+        };
+        let status = ui.dispatch_event(Event::Mouse(down), &mut |_, _, _| {});
+        assert_eq!(status, Status::Consumed);
+        assert!(
+            ui.chrome_drag.is_some(),
+            "body click on non-focusable leaf of a draggable overlay should latch drag (no modal)"
+        );
+        assert_eq!(ui.chrome_drag.unwrap().overlay, perf);
+    }
+
+    #[test]
+    fn body_click_drags_non_focusable_draggable_overlay_through_modal() {
+        // Regression: a non-focusable leaf inside a draggable overlay
+        // (perf panel — pure HUD with `focusable = false`) treats body
+        // clicks the same as chrome Title/Body for drag purposes,
+        // *and* this works while a modal dialog is open below.
+        let mut ui = make_ui();
+        let buf = ui.buf_create(BufCreateOpts::default());
+        let leaf = WinId(123);
+        assert!(ui.win_open_split_at(
+            leaf,
+            buf,
+            SplitConfig {
+                region: "test".into(),
+                gutters: Default::default(),
+            }
+        ));
+        // Mark the leaf non-focusable (matches `perf_panel.lua`'s
+        // `smelt.win.open(buf, { focusable = false })`).
+        ui.win_mut(leaf).unwrap().focusable = false;
+
+        let perf_layout = LayoutTree::hbox(vec![(
+            Constraint::Length(10),
+            LayoutTree::vbox(vec![(Constraint::Length(4), LayoutTree::leaf(leaf))]),
+        )])
+        .with_border(layout::Border::SINGLE)
+        .with_title("perf");
+        let perf = ui.overlay_open(
+            Overlay::new(
+                perf_layout,
+                layout::Anchor::ScreenAt {
+                    row: 0,
+                    col: 60,
+                    corner: layout::Corner::NW,
+                },
+            )
+            .draggable(true),
+        );
+        ui.overlay_open(
+            sized_overlay(80, 8, layout::Anchor::ScreenBottom { above_rows: 1 }).modal(true),
+        );
+
+        // Click on the body (inside the leaf, not the border).
+        let down = crossterm::event::MouseEvent {
+            kind: crossterm::event::MouseEventKind::Down(crossterm::event::MouseButton::Left),
+            column: 65,
+            row: 2,
+            modifiers: crossterm::event::KeyModifiers::NONE,
+        };
+        let status = ui.dispatch_event(Event::Mouse(down), &mut |_, _, _| {});
+        assert_eq!(status, Status::Consumed);
+        assert!(
+            ui.chrome_drag.is_some(),
+            "body click on non-focusable leaf of a draggable overlay should latch drag"
+        );
+        assert_eq!(ui.chrome_drag.unwrap().overlay, perf);
+    }
+
+    #[test]
+    fn chrome_drag_latches_on_non_modal_overlay_with_modal_open() {
+        // Regression: a draggable non-modal overlay (perf panel) and a
+        // modal dialog (messages) both at default z=50 should not
+        // block each other's chrome drag — if the click lands on the
+        // perf panel's chrome, the drag must latch.
+        let mut ui = make_ui();
+        // Perf panel: bordered, top-right corner, draggable. Outer
+        // rect 10×4 with single border → top row is Title chrome.
+        let perf_layout = LayoutTree::hbox(vec![(
+            Constraint::Length(10),
+            LayoutTree::vbox(vec![(Constraint::Length(4), LayoutTree::leaf(WinId(99)))]),
+        )])
+        .with_border(layout::Border::SINGLE)
+        .with_title("perf");
+        let perf = ui.overlay_open(
+            Overlay::new(
+                perf_layout,
+                layout::Anchor::ScreenAt {
+                    row: 0,
+                    col: 60,
+                    corner: layout::Corner::NW,
+                },
+            )
+            .draggable(true),
+        );
+        // Messages dialog: bottom-docked modal.
+        ui.overlay_open(
+            sized_overlay(80, 8, layout::Anchor::ScreenBottom { above_rows: 1 }).modal(true),
+        );
+        // Click on perf's title row (row 0, somewhere on the border).
+        let down = crossterm::event::MouseEvent {
+            kind: crossterm::event::MouseEventKind::Down(crossterm::event::MouseButton::Left),
+            column: 65,
+            row: 0,
+            modifiers: crossterm::event::KeyModifiers::NONE,
+        };
+        let hit = ui.hit_test(0, 65, None);
+        let modal = ui.active_modal();
+        let status = ui.dispatch_event(Event::Mouse(down), &mut |_, _, _| {});
+        assert!(
+            ui.chrome_drag.is_some(),
+            "chrome drag should latch on perf panel even with modal open: hit={hit:?} modal={modal:?} status={status:?}"
+        );
+        let drag = ui.chrome_drag.unwrap();
+        assert_eq!(drag.overlay, perf);
+    }
+
+    #[test]
+    fn overlay_hit_test_modal_blocks_only_inside_its_rect() {
         let mut ui = make_ui();
         // Lower-z overlay covering (7,20)..(17,60).
-        let _under =
+        let under =
             ui.overlay_open(sized_overlay(40, 10, layout::Anchor::ScreenCenter).with_z(10));
         // Higher-z modal at same anchor, smaller (10x4 → centered (10,35)..(14,45)).
         let modal_id = ui.overlay_open(
@@ -2191,12 +2401,15 @@ mod tests {
                 .with_z(100)
                 .modal(true),
         );
-        // Hit inside the modal → returns the modal.
+        // Hit inside the modal → returns the modal (modal is opaque on
+        // its own rect).
         let hit = ui.overlay_hit_test(11, 36, None).unwrap();
         assert_eq!(hit.0, modal_id);
-        // Hit inside the under overlay but outside the modal → blocked,
-        // returns None (lower-z overlay can't receive the click).
-        assert_eq!(ui.overlay_hit_test(8, 22, None), None);
+        // Hit inside the under overlay but outside the modal — the
+        // visible part of the under overlay still receives clicks. The
+        // modal only blocks at its own rect, not globally.
+        let outside = ui.overlay_hit_test(8, 22, None).unwrap();
+        assert_eq!(outside.0, under);
     }
 
     fn modal_overlay_with_leaves(a: WinId, b: WinId, c: WinId) -> Overlay {
@@ -2292,7 +2505,7 @@ mod tests {
                 Constraint::Length(8),
                 LayoutTree::hbox(vec![(Constraint::Length(40), LayoutTree::leaf(WinId(99)))]),
             )])
-            .with_border(layout::Border::Single),
+            .with_border(layout::Border::SINGLE),
             layout::Anchor::ScreenCenter,
         ));
         let hit = ui.hit_test(7, 30, None).unwrap();
@@ -2928,7 +3141,7 @@ mod tests {
             Constraint::Length(3),
             LayoutTree::hbox(vec![(Constraint::Length(40), LayoutTree::leaf(win))]),
         )])
-        .with_border(Border::Single);
+        .with_border(Border::SINGLE);
         ui.overlay_open(Overlay::new(layout, layout::Anchor::ScreenCenter));
         let mut out = Vec::new();
         ui.render(&mut out).unwrap();
@@ -2961,7 +3174,7 @@ mod tests {
             Constraint::Length(3),
             LayoutTree::hbox(vec![(Constraint::Length(40), LayoutTree::leaf(win))]),
         )])
-        .with_border(Border::Single)
+        .with_border(Border::SINGLE)
         .with_title("title");
         ui.overlay_open(Overlay::new(layout, layout::Anchor::ScreenCenter));
         let mut out = Vec::new();

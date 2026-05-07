@@ -12,7 +12,11 @@ local NS_HL = smelt.buf.create_namespace("smelt.perf_panel")
 
 local PANEL_W = 38
 local PANEL_H = 14
-local LABEL_W = 14
+-- Width of the right-hand "last  p99   n" cluster (columns 1+6+2+6+1+3 = 19).
+-- Subtract from the live window width to get the label column width;
+-- floors at MIN_LABEL_W so the label column never collapses entirely.
+local STATS_W = 19
+local MIN_LABEL_W = 6
 
 -- Severity thresholds in microseconds. Maps a duration into a theme
 -- role name; the buffer extmark resolves the role to a colour.
@@ -32,15 +36,39 @@ local function fmt_us(us)
   return string.format("%4dms", math.floor(ms + 0.5))
 end
 
-local function pad_label(label)
-  if #label > LABEL_W then
-    return label:sub(1, LABEL_W - 1) .. "…"
+local function pad_label(label, label_w)
+  local len = #label
+  if len > label_w then
+    return label:sub(1, label_w - 1) .. "…"
   end
-  return label .. string.rep(" ", LABEL_W - #label)
+  return label .. string.rep(" ", label_w - len)
 end
 
-local function compose_lines(snap)
-  local lines = { "label          last      p99   n" }
+-- Each data row lays out as:
+--   pad_label(...)<sp>last_s(6)<sp><sp>p99_s(6)<sp>cnt_s(3)
+-- Header headers right-align inside those same field widths so the
+-- "last" / "p99" / "n" labels sit directly above their data columns.
+local function header_for(label_w)
+  local label_col = pad_label("label", label_w)
+  local last_col = string.format("%6s", "last")
+  local p99_col = string.format("%6s", "p99")
+  local cnt_col = string.format("%3s", "n")
+  return label_col .. " " .. last_col .. "  " .. p99_col .. " " .. cnt_col
+end
+
+local function current_label_width()
+  if not PANEL then return MIN_LABEL_W end
+  local rect = smelt.win.rect(PANEL.win)
+  if not rect then return MIN_LABEL_W end
+  -- Inner width excludes the 1-cell border on each side.
+  local inner_w = math.max(rect.width - 2, 0)
+  local lw = inner_w - STATS_W
+  if lw < MIN_LABEL_W then return MIN_LABEL_W end
+  return lw
+end
+
+local function compose_lines(snap, label_w)
+  local lines = { header_for(label_w) }
   local color_spans = {}                -- {row, col_start, col_end, role}
   local rows = snap.durations or {}
   local max_rows = PANEL_H - 3          -- border (2) + header (1)
@@ -50,10 +78,10 @@ local function compose_lines(snap)
     local last_s = fmt_us(r.last_us)
     local p99_s = fmt_us(r.p99_us)
     local cnt_s = string.format("%3d", math.min(r.count, 999))
-    local line = pad_label(r.label) .. " " .. last_s .. "  " .. p99_s .. " " .. cnt_s
+    local line = pad_label(r.label, label_w) .. " " .. last_s .. "  " .. p99_s .. " " .. cnt_s
     lines[#lines + 1] = line
     -- Colour the `last` and `p99` cells by their own severity.
-    local last_col = LABEL_W + 1
+    local last_col = label_w + 1
     table.insert(color_spans, {
       row = i + 1,                       -- 1-based row index in buffer
       col = last_col,
@@ -78,7 +106,8 @@ local function paint_panel()
   if not PANEL then return end
   local ok, snap = pcall(smelt.metrics.perf_snapshot)
   if not ok then return end
-  local lines, spans = compose_lines(snap)
+  local label_w = current_label_width()
+  local lines, spans = compose_lines(snap, label_w)
   smelt.buf.set_lines(PANEL.buf, lines)
   -- Repaint highlights — set_lines wipes rendered content but extmarks
   -- in a dedicated namespace persist; clear and rewrite each tick.

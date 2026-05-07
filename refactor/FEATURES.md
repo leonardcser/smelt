@@ -112,6 +112,7 @@ to invoke_ the feature.
 | `/help`                                           | `plugins/help.lua`                | P4.e                             | working — Overlay (P1.c C.6) |
 | `/history`                                        | `plugins/history_search.lua`      | P4.e                             | working |
 | `/yank-block` (opt-in)                            | `plugins/yank_block.lua`          | P4                               | working |
+| `/messages`                                       | `commands/messages.lua` over `core::messages::Messages` | P10  | working — bottom-docked, top-only-bordered viewer over the persistent message log; readonly buffer auto-flips vim_mode → Normal so j/k/v/y work without a per-recipe keymap; `c` clears, `q` / `Esc` close. Lua errors split summary (toast) + full body (this dialog). |
 | `/reflect`                                        | `runtime/lua/smelt/plugins/reflect.lua`                              | P4.e | working — fully Lua: body inlined; submits via `smelt.engine.submit_command` |
 | `/simplify`                                       | `runtime/lua/smelt/plugins/simplify.lua`                             | P4.e | working — fully Lua: body inlined; submits via `smelt.engine.submit_command` |
 | Custom commands (`~/.config/smelt/commands/*.md`) | `runtime/lua/smelt/plugins/custom_commands.lua` | P4.e            | working — fully Lua: scans dir at startup, parses YAML frontmatter via `smelt.parse.frontmatter`, evaluates exec blocks via `smelt.process.run`, submits via `smelt.engine.submit_command(name, body, overrides)` |
@@ -262,7 +263,10 @@ to invoke_ the feature.
 | `smelt.fuzzy.*`                                         | `_bootstrap.lua`                    | P3.b                                       | working        |
 | `smelt.notify` / `smelt.notify_error`                   | `lua/api/mod.rs`                    | P3.b                                       | working        |
 | `smelt.buf.*` (create/lines/text/extmark)               | `lua/api/buf.rs`                    | P3.b → `lua/api/buf.rs` (extmarks!)        | working        |
+| `smelt.buf.create({ readonly = true })` + `smelt.buf.set_readonly` | `lua/api/buf.rs`         | P10 — exposes `Buffer.readonly` to plugins; lets read-only viewers (e.g. `/messages`) opt out of edits | working |
 | `smelt.win.*`                                           | `lua/api/win.rs`                    | P3.b → `lua/api/win.rs`                    | working        |
+| `smelt.win.rect(win) -> { row, col, width, height } \| nil` | `lua/api/win.rs`               | P10 — last-painted viewport rect; lets plugins make content responsive (e.g. perf panel label width derived from current rect) | working |
+| `smelt.messages.{list,append,count,unread_count,mark_read,clear}` | `core/lua/api/messages.rs` + `core/messages.rs` | P10 — persistent log of Lua errors / warnings / notices; toasts show summary (1 line), `/messages` opens full bodies | working |
 | `smelt.statusline.{register,unregister,snapshot}`       | `lua/api/statusline.rs`             | P4.c (composer fully Lua)                  | working        |
 | `smelt.cell.new/get/set/subscribe`                      | `lua/api/cell.rs` + `core/cells.rs` | P2.a.4b (landed; `smelt.cell(name)` handle + `:glob_subscribe` shipped); a.4c migrates built-ins | working |
 | `smelt.defer(ms, fn)` (one-shot timer)                  | `lua/api/timer.rs`                 | thin alias over `smelt.timer.set`          | working        |

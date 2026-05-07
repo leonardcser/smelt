@@ -24,6 +24,10 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
                     },
                     None => None,
                 };
+                let readonly: bool = opts
+                    .as_ref()
+                    .and_then(|t| t.get::<bool>("readonly").ok())
+                    .unwrap_or(false);
                 let id = s
                     .next_buf_id
                     .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -33,8 +37,9 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
                         crate::ui::BufCreateOpts::default(),
                     ) {
                         Ok(bid) => {
-                            if let Some(fmt) = format {
-                                if let Some(buf) = app.ui.buf_mut(bid) {
+                            if let Some(buf) = app.ui.buf_mut(bid) {
+                                buf.readonly = readonly;
+                                if let Some(fmt) = format {
                                     buf.set_parser(fmt.into_parser());
                                 }
                             }
@@ -48,6 +53,17 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
             })?,
         )?;
     }
+    buf_tbl.set(
+        "set_readonly",
+        lua.create_function(|_, (id, ro): (u64, bool)| {
+            crate::lua::with_app(|app| {
+                if let Some(buf) = app.ui.buf_mut(crate::ui::BufId(id)) {
+                    buf.readonly = ro;
+                }
+            });
+            Ok(())
+        })?,
+    )?;
     buf_tbl.set(
         "set_lines",
         lua.create_function(|_, (id, lines): (u64, mlua::Table)| {

@@ -105,6 +105,10 @@ pub struct LuaShared {
     /// `default_allow` on the tool's registration table). Read once at
     /// startup and handed to `Permissions::from_raw`.
     pub tool_defaults: Mutex<crate::permissions::rules::ToolDefaults>,
+    /// Persistent message log (Lua errors, deferred warnings). Toast
+    /// notifications carry only the first line; the full body lives
+    /// here, addressable via `smelt.messages.*` and `/messages`.
+    pub messages: Mutex<crate::messages::Messages>,
 }
 
 impl Default for LuaShared {
@@ -127,6 +131,7 @@ impl Default for LuaShared {
             mcp_configs: Mutex::new(HashMap::new()),
             settings_overrides: Mutex::new(HashMap::new()),
             tool_defaults: Mutex::new(crate::permissions::rules::ToolDefaults::default()),
+            messages: Mutex::new(crate::messages::Messages::new()),
         }
     }
 }
