@@ -327,7 +327,7 @@ pub enum Anchor {
     /// notification one row above the prompt is `attach: NW,
     /// row_offset: -1, col_offset: 0`.
     Win {
-        target: super::WinId,
+        target: PaintId,
         attach: Corner,
         row_offset: i32,
         col_offset: i32,
@@ -620,7 +620,7 @@ fn resolve_box(
     }
 }
 
-pub(crate) fn resolve_constraints(items: &[Item], total: u16) -> Vec<u16> {
+pub fn resolve_constraints(items: &[Item], total: u16) -> Vec<u16> {
     let mut sizes = vec![0u16; items.len()];
     let mut remaining = total;
 

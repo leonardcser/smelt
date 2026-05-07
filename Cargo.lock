@@ -2569,6 +2569,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "smelt-edit"
+version = "0.4.7"
+dependencies = [
+ "crossterm",
+ "smelt-buffer",
+ "smelt-term",
+ "unicode-width 0.1.14",
+]
+
+[[package]]
 name = "smelt-term"
 version = "0.4.7"
 dependencies = [
@@ -2952,6 +2962,7 @@ dependencies = [
  "similar",
  "smelt-buffer",
  "smelt-core",
+ "smelt-edit",
  "smelt-term",
  "syntect",
  "tempfile",

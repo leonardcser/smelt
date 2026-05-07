@@ -260,7 +260,7 @@ story!(anchor_win_attaches_above_target, |ctx| {
     ctx.ui.overlay_open(Overlay::new(
         layout,
         Anchor::Win {
-            target: wb,
+            target: wb.into(),
             attach: Corner::NW,
             row_offset: -1,
             col_offset: 0,

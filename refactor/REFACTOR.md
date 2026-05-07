@@ -84,7 +84,13 @@ P9  make architecture true ✅      ── Buffer to core, transcript pipeline a
         │                              concerns (no name matching in Rust)
         ▼
 P10 ship it 🚧                     ── saved-state cleanup, parity walk in tmux,
-                                      final lint gate, doc-sync close-out
+        │                              final lint gate, doc-sync close-out
+        ▼
+P11 ui generalization ✅           ── renderer-as-a-library: split `smelt-term`
+                                      (pure renderer) out of `smelt-edit`
+                                      (editor layer); `LayoutTree::Leaf` unified
+                                      under `PaintId`; renderer becomes credible
+                                      standalone TUI library
 ```
 
 P1 is the load-bearing one. After it, P2/P3/P4 can interleave somewhat;
@@ -504,6 +510,35 @@ the refactor. See `P10.md`.
 - **Doc-sync close-out** ⏸. Decide whether `refactor/` archives
   or `ARCHITECTURE.md` + the puml stay as living docs outside the
   folder.
+
+---
+
+## P11 — UI generalization (renderer-as-a-library)
+
+After P10. Lifts the editor's renderer (was `tui::ui` → then
+`crates/ui` → then `crates/term` containing both renderer + editor)
+into a standalone TUI library. See `P11.md` for the full plan.
+
+- **P11.A ✅** — Quick wins: `Constraint::Min(n)` semantics fix
+  (now "at least n cells, share remainder with Fill/Fit"); fluent
+  `Style` builder (`Style::new().fg(c).bold()`); bg-preserving
+  partial cell update (`put_char` / `put_str_fg` / `put_line`);
+  crate rename `smelt-ui` → `smelt-term` and `smelt-ui-data` →
+  `smelt-buffer`.
+- **P11.B ✅** — API surface generalization: typed `HitRegistry<P>`;
+  styled chrome titles via `Line`/`Span`; renderer types promoted
+  to public surface (`Compositor`, `flush_diff`, `Cell`, `GridSlice`,
+  `Grid::cell_mut`); `DrawContext::theme: Arc<Theme>`.
+- **P11.C ✅** — Crate split. `crates/term` is now a pure renderer
+  (~90-line `lib.rs` + 8 sibling modules: compositor, flush, geometry,
+  grid, hit, layout, line, snapshot). `crates/edit` (new) is the
+  editor layer over `smelt-term`: `Window`, `Ui`, vim, callbacks,
+  overlays, focus + capture. `LayoutTree::Leaf(WinId)` retired and
+  unified under `LayoutTree::Leaf(PaintId)` (u64); editor maps via
+  `From<WinId> for PaintId` and dispatches in `Ui::render` via a
+  `PaintDispatch` closure. `crates/tui` flips from
+  `pub use ::smelt_term;` to `pub use ::smelt_edit as smelt_term;`,
+  keeping every `crate::smelt_term::*` path working unchanged.
 
 ---
 

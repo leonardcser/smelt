@@ -780,7 +780,7 @@ impl TuiApp {
             crate::smelt_term::Overlay::new(
                 layout,
                 crate::smelt_term::layout::Anchor::Win {
-                    target: crate::app::PROMPT_WIN,
+                    target: crate::app::PROMPT_WIN.into(),
                     attach: crate::smelt_term::Corner::NW,
                     row_offset: -1,
                     col_offset: 0,

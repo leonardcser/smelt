@@ -1,0 +1,17 @@
+[package]
+name = "smelt-edit"
+version = "0.4.7"
+edition = "2021"
+description = "Editor layer over smelt-term: Window + DrawContext, Buffer dispatch, vim modes, callbacks, overlays, focus + capture + click-tracking. The Ui struct that ties windows to layout."
+license = "MIT"
+repository = "https://github.com/leonardcser/seacret"
+
+[lib]
+name = "smelt_edit"
+path = "src/lib.rs"
+
+[dependencies]
+smelt-term = { path = "../term" }
+smelt-buffer = { path = "../buffer" }
+crossterm = { version = "0.29", features = ["event-stream", "bracketed-paste"] }
+unicode-width = "0.1"
