@@ -79,23 +79,13 @@ pub struct Ui {
     wins: HashMap<WinId, Window>,
     next_buf_id: u64,
     next_win_id: u64,
-    terminal_size: (u16, u16),
-    compositor: Compositor,
+    /// Renderer assembly: compositor, theme (`Arc<Theme>` for
+    /// copy-on-write sharing into per-leaf `DrawContext`), splits
+    /// layout tree, terminal size. Editor-specific state lives in the
+    /// fields below; everything in `Surface` is renderer plumbing
+    /// shared with non-editor consumers.
+    surface: smelt_term::Surface,
     callbacks: Callbacks,
-    /// Splits layout tree. The host publishes a fresh tree each frame
-    /// via [`Ui::set_layout`]; rects are resolved against the current
-    /// terminal area on demand. Leaves of this tree are the painted
-    /// splits — Window::render paints each leaf in declaration order
-    /// from `Ui::render`'s post-layer pass, before overlays.
-    splits: LayoutTree,
-    /// Theme registry — single source of truth for highlight groups.
-    /// Held behind an `Arc` so per-leaf `DrawContext` construction
-    /// shares the registry by pointer instead of cloning the whole
-    /// `HashMap<String, Style>` every frame, every leaf. Mutations
-    /// from the host go through `Arc::make_mut` (copy-on-write); since
-    /// theme writes only happen at startup or on Lua override (rare),
-    /// the cow path almost never triggers a real clone.
-    theme: std::sync::Arc<Theme>,
     /// Overlay storage. Each overlay is a positioned LayoutTree of
     /// windows; `Ui::overlay_open` returns an `OverlayId` and
     /// `resolve_anchor` is the per-frame positioning primitive.
@@ -171,11 +161,8 @@ impl Ui {
             wins: HashMap::new(),
             next_buf_id: 1,
             next_win_id: 0,
-            terminal_size: (80, 24),
-            compositor: Compositor::new(80, 24),
+            surface: smelt_term::Surface::new(80, 24),
             callbacks: Callbacks::new(),
-            splits: LayoutTree::vbox(Vec::new()),
-            theme: std::sync::Arc::new(Theme::new()),
             overlays: Vec::new(),
             next_overlay_id: 1,
             focus_history: Vec::new(),
@@ -235,7 +222,7 @@ impl Ui {
         match me.kind {
             MouseEventKind::Down(MouseButton::Left) => {
                 let win = match self.hit_test(me.row, me.column, None)? {
-                    HitTarget::Window(w) if self.splits.contains_leaf(w) => w,
+                    HitTarget::Window(w) if self.splits().contains_leaf(w) => w,
                     _ => return None,
                 };
                 self.set_capture(HitTarget::Window(win));
@@ -263,9 +250,9 @@ impl Ui {
     /// no longer reachable as a splits leaf or overlay leaf after the
     /// swap, focus is cleared.
     pub fn set_layout(&mut self, tree: LayoutTree) {
-        self.splits = tree;
+        self.surface.set_layout(tree);
         if let Some(focus) = self.focus {
-            if !self.splits.contains_leaf(focus) && self.overlay_for_leaf(focus).is_none() {
+            if !self.splits().contains_leaf(focus) && self.overlay_for_leaf(focus).is_none() {
                 self.focus = None;
             }
         }
@@ -277,12 +264,10 @@ impl Ui {
         }
     }
 
-    /// Read-only view of the splits tree. Test-only; production
-    /// consumers rebuild the tree from app state and write it back
-    /// via `set_layout`.
-    #[cfg(test)]
+    /// Read-only view of the splits tree. Internal accessor that
+    /// forwards to the inner `Surface`.
     fn splits(&self) -> &LayoutTree {
-        &self.splits
+        self.surface.layout()
     }
 
     /// Resolve the splits tree against the current terminal area,
@@ -290,9 +275,7 @@ impl Ui {
     /// — small trees in practice (3–4 leaves), so the cost is
     /// negligible.
     fn resolve_splits(&self) -> HashMap<WinId, Rect> {
-        let (w, h) = self.terminal_size;
-        let area = Rect::new(0, 0, w, h);
-        layout::resolve_layout(&self.splits, area)
+        layout::resolve_layout(self.splits(), self.surface.area())
             .into_iter()
             .map(|(p, r)| (WinId(p.0), r))
             .collect()
@@ -411,7 +394,7 @@ impl Ui {
                         self.focus = Some(prior);
                         return Some(removed);
                     }
-                    if self.splits.contains_leaf(prior)
+                    if self.splits().contains_leaf(prior)
                         && self.wins.get(&prior).map(|w| w.focusable).unwrap_or(false)
                     {
                         self.focus = Some(prior);
@@ -485,7 +468,7 @@ impl Ui {
             });
         }
         let split_rects = self.resolve_splits();
-        for paint_id in self.splits.leaves_in_order() {
+        for paint_id in self.splits().leaves_in_order() {
             let win = WinId(paint_id.0);
             if let Some(rect) = split_rects.get(&win) {
                 if !rect.contains(row, col) {
@@ -572,7 +555,7 @@ impl Ui {
     /// splits tree, are skipped silently. The caller (compositor
     /// integration in C.5+) feeds the cursor it knows from focus.
     fn resolve_overlays(&self, cursor: Option<(u16, u16)>) -> Vec<(OverlayId, Rect, &Overlay)> {
-        let (term_w, term_h) = self.terminal_size;
+        let (term_w, term_h) = self.surface.terminal_size();
         let split_rects = self.resolve_splits();
         let ctx = overlay::AnchorContext {
             term_width: term_w,
@@ -740,12 +723,11 @@ impl Ui {
     }
 
     pub fn set_terminal_size(&mut self, w: u16, h: u16) {
-        self.terminal_size = (w, h);
-        self.compositor.resize(w, h);
+        self.surface.set_terminal_size(w, h);
     }
 
     pub fn terminal_size(&self) -> (u16, u16) {
-        self.terminal_size
+        self.surface.terminal_size()
     }
 
     // ── Focus (canonical Win-typed API) ──────────────────────────
@@ -779,7 +761,7 @@ impl Ui {
         if prior == Some(win) {
             return true;
         }
-        let is_split_leaf = self.splits.contains_leaf(win)
+        let is_split_leaf = self.splits().contains_leaf(win)
             && self.wins.get(&win).map(|w| w.focusable).unwrap_or(false);
         let is_overlay_leaf = self.overlay_for_leaf(win).is_some();
         if !is_split_leaf && !is_overlay_leaf {
@@ -978,7 +960,7 @@ impl Ui {
     fn capture_target_alive(&self, target: HitTarget) -> bool {
         match target {
             HitTarget::Window(w) | HitTarget::Scrollbar { owner: w } => {
-                self.splits.contains_leaf(w) || self.overlay_for_leaf(w).is_some()
+                self.splits().contains_leaf(w) || self.overlay_for_leaf(w).is_some()
             }
             HitTarget::Chrome { owner, .. } => self.overlays.iter().any(|(id, _)| *id == owner),
         }
@@ -1011,7 +993,7 @@ impl Ui {
         // `self`.
         let split_rects = self.resolve_splits();
         let painted_splits: Vec<(WinId, Rect)> = self
-            .splits
+            .splits()
             .leaves_in_order()
             .into_iter()
             .filter_map(|p| {
@@ -1085,12 +1067,13 @@ impl Ui {
         let cursor_shape = self.cursor_shape;
         let wins = &self.wins;
         let bufs = &self.bufs;
-        let term_size = self.terminal_size;
-        let splits_tree = self.splits.clone();
-        let term_w = self.terminal_size.0;
-        let term_h = self.terminal_size.1;
-        let theme_arc = std::sync::Arc::clone(&self.theme);
-        self.compositor.render_with(&self.theme, w, move |grid, _theme| {
+        let term_size = self.surface.terminal_size();
+        let splits_tree = self.splits().clone();
+        let term_w = self.surface.terminal_size().0;
+        let term_h = self.surface.terminal_size().1;
+        let theme_arc = std::sync::Arc::clone(self.surface.theme());
+        let theme_for_compositor = std::sync::Arc::clone(&theme_arc);
+        self.surface.compositor_mut().render_with(&theme_for_compositor, w, move |grid, _theme| {
             let theme = &theme_arc;
             // Editor-aware paint dispatcher: every `LayoutTree::Leaf`
             // carries a `PaintId`. If the id maps onto a known
@@ -1165,16 +1148,16 @@ impl Ui {
         W: std::io::Write,
         F: FnOnce(&mut Grid, &Theme) -> Option<(u16, u16)>,
     {
-        self.compositor.render_with(&self.theme, w, paint)
+        self.surface.render_raw(w, paint)
     }
 
     /// Resolved screen rect for a `PaintId` leaf, searching the
     /// splits tree and (z-order) overlay layouts. Returns `None`
     /// when the id isn't in any current layout.
     pub fn paint_rect(&self, id: PaintId) -> Option<Rect> {
-        let (term_w, term_h) = self.terminal_size;
+        let (term_w, term_h) = self.surface.terminal_size();
         let area = Rect::new(0, 0, term_w, term_h);
-        if let Some(rect) = layout::resolve_layout(&self.splits, area).get(&id) {
+        if let Some(rect) = layout::resolve_layout(self.splits(), area).get(&id) {
             return Some(*rect);
         }
         for (_oid, ov_rect, ov) in self.resolve_overlays(None) {
@@ -1192,7 +1175,7 @@ impl Ui {
     pub fn snapshot(&mut self) -> SnapshotFrame {
         let mut sink = std::io::sink();
         self.render(&mut sink).expect("snapshot render to sink");
-        SnapshotFrame::from_grid(self.compositor.previous())
+        SnapshotFrame::from_grid(self.surface.compositor().previous())
     }
 
     /// Compute the absolute hardware cursor position for the focused
@@ -1233,7 +1216,7 @@ impl Ui {
     /// we add them to the rect's origin.
     fn focused_painted_split_cursor(&self) -> Option<(u16, u16)> {
         let focus = self.focus?;
-        if !self.splits.contains_leaf(focus) {
+        if !self.splits().contains_leaf(focus) {
             return None;
         }
         let win = self.wins.get(&focus)?;
@@ -1248,7 +1231,7 @@ impl Ui {
     }
 
     pub fn theme(&self) -> &Theme {
-        &self.theme
+        self.surface.theme().as_ref()
     }
 
     /// Mutable theme access. Triggers a copy-on-write clone via
@@ -1256,7 +1239,7 @@ impl Ui {
     /// still holds a reference to the prior theme; otherwise mutates
     /// the shared registry in place.
     pub fn theme_mut(&mut self) -> &mut Theme {
-        std::sync::Arc::make_mut(&mut self.theme)
+        self.surface.theme_mut()
     }
 
     /// Single Ui-side entry point for terminal events. Fans out by
@@ -1635,7 +1618,7 @@ impl Ui {
     }
 
     pub fn force_redraw(&mut self) {
-        self.compositor.force_redraw();
+        self.surface.force_redraw();
     }
 }
 
@@ -3194,7 +3177,7 @@ mod tests {
         let mut out = Vec::new();
         ui.render(&mut out).unwrap();
         // Borrow Compositor's previous grid (post-flush swap) for assertions.
-        let frame = ui.compositor.previous();
+        let frame = ui.surface.compositor().previous();
         // Centered (term 80x24, overlay natural 42 wide × 5 tall →
         // top=9 left=19). Title sits in the top border row at col=20.
         assert_eq!(frame.cell(19, 9).symbol, '┌');
