@@ -54,7 +54,7 @@ fn open_box_overlay(
         LayoutTree::hbox(vec![(Constraint::Length(width), LayoutTree::leaf(dw))]),
     )])
     .with_border(Border::ROUNDED)
-    .with_title(title);
+    .with_title(title.to_string());
     ctx.ui
         .overlay_open(Overlay::new(layout, anchor).with_z(100));
 }

@@ -50,7 +50,7 @@ fn open_chrome_overlay(
         tree = tree.with_border(b);
     }
     if let Some(t) = title {
-        tree = tree.with_title(t);
+        tree = tree.with_title(t.to_string());
     }
     let mut overlay = Overlay::new(
         tree,
