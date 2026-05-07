@@ -105,7 +105,13 @@ story!(title_truncates_in_narrow_border, |ctx| {
     // The literal "this is a long title" must clip cleanly inside
     // the top border row.
     dotted_backdrop(ctx, 18, 5);
-    open_chrome_overlay(ctx, 10, 3, Some(Border::SINGLE), Some("this is a long title"));
+    open_chrome_overlay(
+        ctx,
+        10,
+        3,
+        Some(Border::SINGLE),
+        Some("this is a long title"),
+    );
     ctx.assert_snapshot();
 });
 
@@ -142,37 +148,19 @@ story!(border_top_only_no_corners, |ctx| {
 
 story!(border_bottom_only_no_corners, |ctx| {
     dotted_backdrop(ctx, 18, 5);
-    open_chrome_overlay(
-        ctx,
-        12,
-        3,
-        Some(sided(false, false, true, false)),
-        None,
-    );
+    open_chrome_overlay(ctx, 12, 3, Some(sided(false, false, true, false)), None);
     ctx.assert_snapshot();
 });
 
 story!(border_left_only_no_corners, |ctx| {
     dotted_backdrop(ctx, 18, 5);
-    open_chrome_overlay(
-        ctx,
-        12,
-        3,
-        Some(sided(false, false, false, true)),
-        None,
-    );
+    open_chrome_overlay(ctx, 12, 3, Some(sided(false, false, false, true)), None);
     ctx.assert_snapshot();
 });
 
 story!(border_right_only_no_corners, |ctx| {
     dotted_backdrop(ctx, 18, 5);
-    open_chrome_overlay(
-        ctx,
-        12,
-        3,
-        Some(sided(false, true, false, false)),
-        None,
-    );
+    open_chrome_overlay(ctx, 12, 3, Some(sided(false, true, false, false)), None);
     ctx.assert_snapshot();
 });
 
@@ -180,13 +168,7 @@ story!(border_top_left_corner_only, |ctx| {
     // Top + left → a `┌` corner with the top edge running right and
     // the left edge running down. No bottom/right side, no other corners.
     dotted_backdrop(ctx, 18, 5);
-    open_chrome_overlay(
-        ctx,
-        12,
-        3,
-        Some(sided(true, false, false, true)),
-        None,
-    );
+    open_chrome_overlay(ctx, 12, 3, Some(sided(true, false, false, true)), None);
     ctx.assert_snapshot();
 });
 
@@ -194,26 +176,14 @@ story!(border_top_and_bottom_no_sides, |ctx| {
     // Horizontal "rule" both above and below — no corners, no
     // verticals.
     dotted_backdrop(ctx, 18, 5);
-    open_chrome_overlay(
-        ctx,
-        12,
-        3,
-        Some(sided(true, false, true, false)),
-        None,
-    );
+    open_chrome_overlay(ctx, 12, 3, Some(sided(true, false, true, false)), None);
     ctx.assert_snapshot();
 });
 
 story!(border_left_and_right_only, |ctx| {
     // Two vertical "rules" with no top/bottom edge.
     dotted_backdrop(ctx, 18, 5);
-    open_chrome_overlay(
-        ctx,
-        12,
-        3,
-        Some(sided(false, true, false, true)),
-        None,
-    );
+    open_chrome_overlay(ctx, 12, 3, Some(sided(false, true, false, true)), None);
     ctx.assert_snapshot();
 });
 

@@ -319,12 +319,23 @@ impl LuaRuntime {
         true
     }
 
-    /// Dispatch a keymap chord to any Lua-registered handler.
+    /// Dispatch a keymap chord (single key or canonical multi-key
+    /// sequence) to any Lua-registered handler. `chord_ctx`, when
+    /// `Some`, is passed to the handler as a context table — used
+    /// for multi-key chord sequences to expose state captured at the
+    /// first key (e.g. `vim_mode_at_chord_start`); single-key
+    /// dispatch passes `None` (handler invoked with no args).
+    ///
     /// Returns `Consumed` when a handler ran and returned truthy /
     /// nothing; `PassThrough` when a handler ran and returned `false`
     /// (the key falls through to downstream dispatch); `NoBinding`
     /// when no handler is registered for `(mode, chord)`.
-    pub fn run_keymap(&self, chord: &str, current_mode: Option<&str>) -> KeymapResult {
+    pub fn run_keymap(
+        &self,
+        chord: &str,
+        current_mode: Option<&str>,
+        chord_ctx: Option<&[(&str, String)]>,
+    ) -> KeymapResult {
         let func = {
             let Ok(map) = self.shared.keymaps.lock() else {
                 return KeymapResult::NoBinding;
@@ -346,7 +357,26 @@ impl LuaRuntime {
             };
             f
         };
-        match func.call::<mlua::Value>(()) {
+        let result = match chord_ctx {
+            Some(pairs) => {
+                let ctx = match self.lua.create_table() {
+                    Ok(t) => t,
+                    Err(e) => {
+                        self.record_error(format!("keymap `{chord}`: {e}"));
+                        return KeymapResult::Consumed;
+                    }
+                };
+                for (k, v) in pairs {
+                    if let Err(e) = ctx.set(*k, v.as_str()) {
+                        self.record_error(format!("keymap `{chord}`: {e}"));
+                        return KeymapResult::Consumed;
+                    }
+                }
+                func.call::<mlua::Value>(ctx)
+            }
+            None => func.call::<mlua::Value>(()),
+        };
+        match result {
             Ok(mlua::Value::Boolean(false)) => KeymapResult::PassThrough,
             Ok(_) => KeymapResult::Consumed,
             Err(e) => {
@@ -354,6 +384,33 @@ impl LuaRuntime {
                 KeymapResult::Consumed
             }
         }
+    }
+
+    /// Returns true when `sequence` is a strict prefix of at least one
+    /// registered chord under `current_mode` (or the global `""` mode).
+    /// "Strict" means the registered chord is longer than the sequence;
+    /// an exact match alone does not count. The chord dispatcher uses
+    /// this to decide whether to keep a pending sequence alive after
+    /// each key.
+    pub fn chord_has_longer(&self, sequence: &str, current_mode: Option<&str>) -> bool {
+        let Ok(map) = self.shared.keymaps.lock() else {
+            return false;
+        };
+        let mode_char = match current_mode {
+            Some("Normal") => "n",
+            Some("Insert") => "i",
+            Some("Visual") => "v",
+            _ => "n",
+        };
+        for (m, chord) in map.keys() {
+            if (m == mode_char || m.is_empty())
+                && chord.len() > sequence.len()
+                && chord.starts_with(sequence)
+            {
+                return true;
+            }
+        }
+        false
     }
 
     /// Fire `smelt.mode.cycle()`.
@@ -389,11 +446,7 @@ impl LuaRuntime {
     pub fn record_error(&self, msg: String) {
         let summary = msg.lines().next().unwrap_or("").to_string();
         if let Ok(mut messages) = self.shared.messages.lock() {
-            messages.append(
-                crate::messages::MessageKind::Error,
-                "lua".to_string(),
-                msg,
-            );
+            messages.append(crate::messages::MessageKind::Error, "lua".to_string(), msg);
         }
         if let Ok(smelt) = self.lua.globals().get::<mlua::Table>("smelt") {
             if let Ok(func) = smelt.get::<mlua::Function>("notify_error") {

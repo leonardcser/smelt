@@ -256,6 +256,14 @@ pub(crate) enum InputOutcome {
 
 /// Mutable timer state shared across event handlers.
 pub(crate) struct Timers {
+    /// First-Esc timestamp for the **running-mode** double-Esc cancel
+    /// (handled inside `resolve_agent_esc`). Decoupled from
+    /// [`Self::pending_chord`]: running-mode Esc-Esc cancels the active
+    /// agent turn (Rust-internal) and treats single-Esc-with-queued as
+    /// an immediate unqueue, while the Lua-registered chord registry
+    /// handles plugin-extensible chords (idle Esc-Esc → `/rewind`,
+    /// vim-style `gd`/`<C-w>q`, etc.). They share no name-leaking
+    /// surface so unifying them is deferred until a plugin needs it.
     pub(crate) last_esc: Option<Instant>,
     pub(crate) esc_vim_mode: Option<crate::ui::VimMode>,
     pub(crate) last_ctrlc: Option<Instant>,
@@ -263,7 +271,35 @@ pub(crate) struct Timers {
     /// Pending `Ctrl-W` pane chord. When set, the next key consumes the
     /// chord to navigate panes instead of flowing to input handling.
     pub(crate) pending_pane_chord: Option<Instant>,
+    /// Pending Lua-keymap chord. Tracks the rolling sequence of recent
+    /// chord tokens within the timeout window, plus context captured at
+    /// the first key (e.g. vim mode before the first Esc flipped it).
+    /// `None` between chords; populated when a key matches the prefix
+    /// of a registered multi-key chord; cleared on match, on prefix
+    /// miss, or on timeout.
+    pub(crate) pending_chord: Option<PendingChord>,
 }
+
+/// State carried between keys of a multi-key chord. See [`Timers::pending_chord`].
+pub(crate) struct PendingChord {
+    /// Canonical chord tokens collected so far (e.g. `["<Esc>"]` after
+    /// the first Esc of an `<Esc><Esc>` chord).
+    pub(crate) tokens: Vec<String>,
+    /// Wall time of the first key in the sequence. Pending chords
+    /// older than [`CHORD_TIMEOUT_MS`] are discarded.
+    pub(crate) started: Instant,
+    /// Vim mode at the first key, before any per-key dispatch flipped
+    /// it. Surfaced to chord handlers as
+    /// `ctx.vim_mode_at_chord_start` so handlers can branch on the
+    /// pre-chord state (e.g. Esc-Esc rewinding into Insert mode if
+    /// the user was typing when the chord started).
+    pub(crate) vim_mode_at_start: Option<crate::ui::VimMode>,
+}
+
+/// Window for completing a multi-key chord. After this much time with
+/// no follow-up key, a pending chord expires and the next key starts
+/// a fresh sequence.
+pub(crate) const CHORD_TIMEOUT_MS: u64 = 500;
 
 /// How long after the last keypress before we show a deferred permission dialog.
 pub(crate) const CONFIRM_DEFER_MS: u64 = 1500;
@@ -873,6 +909,7 @@ impl TuiApp {
             last_ctrlc: None,
             last_keypress: None,
             pending_pane_chord: None,
+            pending_chord: None,
         };
         let mut pending_dialogs: VecDeque<DeferredDialog> = VecDeque::new();
         const MIN_FRAME_INTERVAL: Duration = Duration::from_millis(16);

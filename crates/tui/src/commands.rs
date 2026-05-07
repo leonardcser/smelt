@@ -15,8 +15,8 @@ pub(crate) struct ExecHandle {
     pub kill: std::sync::Arc<tokio::sync::Notify>,
 }
 
-/// Public command runner used by `crate::api::cmd::run`. Accepts raw
-/// command lines (`/quit`, `:q`, `/compact foo`, `! ls`, ...).
+/// Slash-command dispatcher. Accepts raw command lines (`/quit`,
+/// `:q`, `/compact foo`, `! ls`, ...).
 /// Normalises a leading `:` to `/` so `/quit` and `:quit` dispatch
 /// identically. `!` lines spawn a shell escape; everything else
 /// dispatches by name to a Lua-registered handler (or no-ops if

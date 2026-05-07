@@ -23,7 +23,7 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
             |lua, (name, initial): (String, mlua::Value)| -> LuaResult<()> {
                 let key = lua.create_registry_value(initial)?;
                 crate::host::try_with_core(|core| {
-                    core.cells().declare(name, LuaCellValue { key });
+                    core.cells.declare(name, LuaCellValue { key });
                 });
                 Ok(())
             },
@@ -37,7 +37,7 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
         "get",
         lua.create_function(|lua, name: String| -> LuaResult<mlua::Value> {
             Ok(
-                crate::host::try_with_core(|core| core.cells().get_lua(&name, lua))
+                crate::host::try_with_core(|core| core.cells.get_lua(&name, lua))
                     .unwrap_or(mlua::Value::Nil),
             )
         })?,
@@ -52,7 +52,7 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
             |lua, (name, value): (String, mlua::Value)| -> LuaResult<bool> {
                 let key = lua.create_registry_value(value)?;
                 Ok(crate::host::try_with_core(|core| {
-                    core.cells().set_dyn(&name, Rc::new(LuaCellValue { key }))
+                    core.cells.set_dyn(&name, Rc::new(LuaCellValue { key }))
                 })
                 .unwrap_or(false))
             },
@@ -70,7 +70,7 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
             |lua, (name, handler): (String, mlua::Function)| -> LuaResult<mlua::Value> {
                 let key = lua.create_registry_value(handler)?;
                 let id = crate::host::try_with_core(|core| {
-                    core.cells()
+                    core.cells
                         .subscribe_kind(&name, SubscriberKind::Lua(Rc::new(LuaHandle { key })))
                 })
                 .flatten();
@@ -89,7 +89,7 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
         "unsubscribe",
         lua.create_function(|_, (name, id): (String, u64)| -> LuaResult<bool> {
             Ok(
-                crate::host::try_with_core(|core| core.cells().unsubscribe(&name, id))
+                crate::host::try_with_core(|core| core.cells.unsubscribe(&name, id))
                     .unwrap_or(false),
             )
         })?,
@@ -110,7 +110,7 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
                 })?;
                 let key = lua.create_registry_value(handler)?;
                 Ok(crate::host::try_with_core(|core| {
-                    core.cells()
+                    core.cells
                         .glob_subscribe(pat, SubscriberKind::Lua(Rc::new(LuaHandle { key })))
                 })
                 .unwrap_or(0))
@@ -123,10 +123,7 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
     cell_tbl.set(
         "glob_unsubscribe",
         lua.create_function(|_, id: u64| -> LuaResult<bool> {
-            Ok(
-                crate::host::try_with_core(|core| core.cells().unsubscribe_glob(id))
-                    .unwrap_or(false),
-            )
+            Ok(crate::host::try_with_core(|core| core.cells.unsubscribe_glob(id)).unwrap_or(false))
         })?,
     )?;
 
@@ -159,7 +156,7 @@ impl mlua::UserData for CellHandle {
 
         methods.add_method("get", |lua, this, _: ()| -> LuaResult<mlua::Value> {
             Ok(
-                crate::host::try_with_core(|core| core.cells().get_lua(&this.name, lua))
+                crate::host::try_with_core(|core| core.cells.get_lua(&this.name, lua))
                     .unwrap_or(mlua::Value::Nil),
             )
         });
@@ -167,7 +164,7 @@ impl mlua::UserData for CellHandle {
         methods.add_method("set", |lua, this, value: mlua::Value| -> LuaResult<bool> {
             let key = lua.create_registry_value(value)?;
             Ok(crate::host::try_with_core(|core| {
-                core.cells()
+                core.cells
                     .set_dyn(&this.name, Rc::new(LuaCellValue { key }))
             })
             .unwrap_or(false))
@@ -178,7 +175,7 @@ impl mlua::UserData for CellHandle {
             |lua, this, handler: mlua::Function| -> LuaResult<mlua::Value> {
                 let key = lua.create_registry_value(handler)?;
                 let id = crate::host::try_with_core(|core| {
-                    core.cells()
+                    core.cells
                         .subscribe_kind(&this.name, SubscriberKind::Lua(Rc::new(LuaHandle { key })))
                 })
                 .flatten();
@@ -191,7 +188,7 @@ impl mlua::UserData for CellHandle {
 
         methods.add_method("unsubscribe", |_, this, id: u64| -> LuaResult<bool> {
             Ok(
-                crate::host::try_with_core(|core| core.cells().unsubscribe(&this.name, id))
+                crate::host::try_with_core(|core| core.cells.unsubscribe(&this.name, id))
                     .unwrap_or(false),
             )
         });

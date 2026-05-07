@@ -182,7 +182,9 @@ pub(crate) fn open_overlay(app: &mut TuiApp, opts: mlua::Table) -> Result<u64, S
 ///   `"right"`, `"bottom"`, `"left"`) or a table of bools
 ///   (`{ top = true, left = true }`). Empty `sides` returns `None`.
 fn parse_border(opts: &mlua::Table) -> Result<Option<Border>, String> {
-    let v = opts.get::<mlua::Value>("border").unwrap_or(mlua::Value::Nil);
+    let v = opts
+        .get::<mlua::Value>("border")
+        .unwrap_or(mlua::Value::Nil);
     match v {
         mlua::Value::Nil => Ok(Some(Border::SINGLE)),
         mlua::Value::Boolean(false) => Ok(None),

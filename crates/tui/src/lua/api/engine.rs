@@ -17,8 +17,29 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
     engine_tbl.set(
         "cancel",
         lua.create_function(|_, ()| {
-            crate::lua::with_app(|app| app.core.engine.send(protocol::UiCommand::Cancel));
+            crate::lua::with_app(|app| {
+                if app.working.is_compacting() {
+                    app.compact_epoch += 1;
+                    app.working
+                        .finish(smelt_core::working::TurnOutcome::Interrupted);
+                    app.notify("compaction cancelled".into());
+                } else {
+                    app.core.engine.send(protocol::UiCommand::Cancel);
+                }
+            });
             Ok(())
+        })?,
+    )?;
+    engine_tbl.set(
+        "is_running",
+        lua.create_function(|_, ()| {
+            Ok(crate::lua::try_with_app(|app| app.agent.is_some()).unwrap_or(false))
+        })?,
+    )?;
+    engine_tbl.set(
+        "is_compacting",
+        lua.create_function(|_, ()| {
+            Ok(crate::lua::try_with_app(|app| app.working.is_compacting()).unwrap_or(false))
         })?,
     )?;
     engine_tbl.set(

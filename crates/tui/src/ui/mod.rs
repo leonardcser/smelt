@@ -1232,16 +1232,11 @@ impl Ui {
                         let drag_target: Option<(OverlayId, overlay::ChromeZone)> = match hit {
                             Some(HitTarget::Chrome { owner, zone }) => Some((owner, zone)),
                             Some(HitTarget::Window(w)) => {
-                                let leaf_focusable = self
-                                    .wins
-                                    .get(&w)
-                                    .map(|win| win.focusable)
-                                    .unwrap_or(true);
+                                let leaf_focusable =
+                                    self.wins.get(&w).map(|win| win.focusable).unwrap_or(true);
                                 self.overlay_for_leaf(w).and_then(|owner| {
-                                    let ov_draggable = self
-                                        .overlay(owner)
-                                        .map(|o| o.draggable)
-                                        .unwrap_or(false);
+                                    let ov_draggable =
+                                        self.overlay(owner).map(|o| o.draggable).unwrap_or(false);
                                     (!leaf_focusable && ov_draggable)
                                         .then_some((owner, overlay::ChromeZone::Body))
                                 })
@@ -2393,8 +2388,7 @@ mod tests {
     fn overlay_hit_test_modal_blocks_only_inside_its_rect() {
         let mut ui = make_ui();
         // Lower-z overlay covering (7,20)..(17,60).
-        let under =
-            ui.overlay_open(sized_overlay(40, 10, layout::Anchor::ScreenCenter).with_z(10));
+        let under = ui.overlay_open(sized_overlay(40, 10, layout::Anchor::ScreenCenter).with_z(10));
         // Higher-z modal at same anchor, smaller (10x4 → centered (10,35)..(14,45)).
         let modal_id = ui.overlay_open(
             sized_overlay(10, 4, layout::Anchor::ScreenCenter)

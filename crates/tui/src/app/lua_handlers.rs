@@ -12,7 +12,7 @@ impl TuiApp {
     /// `with_app`; the only `CommandAction` left to forward is `Exec`
     /// for shell escapes (`! cmd`).
     pub(crate) fn apply_lua_command(&mut self, line: &str) {
-        match crate::api::cmd::run(self, line) {
+        match crate::commands::run_command(self, line) {
             crate::app::CommandAction::Exec(handle) => {
                 self.exec = Some(handle);
             }

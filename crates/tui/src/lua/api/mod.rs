@@ -32,6 +32,11 @@ use super::{LuaRuntime, LuaShared};
 use mlua::prelude::*;
 use std::sync::Arc;
 
+/// Semantic-version tag for the Lua surface, exposed to plugins as
+/// `smelt.version`. Increments on any breaking signature change in the
+/// Lua bindings; additive changes do not bump it.
+pub(crate) const VERSION: &str = "1";
+
 /// Register a 0-arg getter that reads live state from `TuiApp` via
 /// `try_with_app`. Returns a Lua function that, when called, invokes
 /// `try_with_app` and returns the closure result (or `Default`).
@@ -52,7 +57,7 @@ impl LuaRuntime {
         let smelt_ui = lua.create_table()?;
         let smelt_keymap = lua.create_table()?;
 
-        smelt.set("version", crate::api::VERSION)?;
+        smelt.set("version", VERSION)?;
 
         // Host-tier bindings (registered by core)
         smelt_core::lua::api::register_host_api(lua, &smelt, &smelt_keymap, &shared.core)?;

@@ -105,10 +105,9 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
     win_tbl.set(
         "buf",
         lua.create_function(|_, id: u64| {
-            let buf = crate::lua::try_with_ui_host(|host| {
-                host.ui().win(crate::ui::WinId(id)).map(|w| w.buf.0)
-            })
-            .flatten();
+            let buf =
+                crate::lua::try_with_app(|app| app.ui.win(crate::ui::WinId(id)).map(|w| w.buf.0))
+                    .flatten();
             Ok(buf)
         })?,
     )?;
@@ -120,8 +119,8 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
     win_tbl.set(
         "rect",
         lua.create_function(|lua, id: u64| {
-            let rect = crate::lua::try_with_ui_host(|host| {
-                host.ui()
+            let rect = crate::lua::try_with_app(|app| {
+                app.ui
                     .win(crate::ui::WinId(id))
                     .and_then(|w| w.viewport)
                     .map(|vp| vp.rect)

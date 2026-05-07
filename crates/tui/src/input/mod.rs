@@ -233,9 +233,11 @@ impl PromptState {
 
     /// Replace the prompt buffer wholesale and re-establish invariants:
     /// snapshot undo, clear attachments + shift-selection anchor, reset
-    /// paste state, drop the completer so it re-derives. Prefer the
-    /// `crate::api::buf::replace` wrapper at call sites — it reads as
-    /// intent rather than a method on the receiver.
+    /// paste state, drop the completer so it re-derives. The canonical
+    /// path for commands that stuff new text into the prompt
+    /// (unqueue, resume restore, ghost accept). Direct `input.buf = …`
+    /// writes skip these invariants and have been a recurring source
+    /// of undo / completer / paste-state bugs.
     pub(crate) fn replace_text(&mut self, text: String, cursor: Option<usize>, mode: VimMode) {
         self.save_undo(mode);
         let cpos = cursor.unwrap_or(text.len()).min(text.len());

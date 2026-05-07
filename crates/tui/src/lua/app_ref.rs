@@ -1,20 +1,25 @@
 //! Thread-local pointer slots that let Lua bindings reach the
 //! frontend synchronously.
 //!
-//! Three slots are installed at every Rust-side Lua-entry boundary by
+//! Two slots are installed at every Rust-side Lua-entry boundary by
 //! [`install_app_ptr`]:
 //!
-//! * `APP_PTR` — `*mut TuiApp`. Concrete-type slot. Used by bindings
-//!   that need TuiApp internals not exposed through `Host` /
-//!   `UiHost` (e.g. command dispatcher, transcript yank).
-//! * `UI_HOST_PTR` — `*mut dyn crate::ui::UiHost`. Trait-object slot.
-//!   UiHost-only bindings (`smelt.buf` / `.win` / `.ui` /
-//!   `.statusline` / …) reach through here so any frontend that
-//!   impls `UiHost` (TuiApp today, story fixtures or future GUI
-//!   tomorrow) can serve them without rebinding rewrites.
-//! * `CORE_PTR` — `*mut dyn smelt_core::Host`. Installed inside core
-//!   via `smelt_core::host::install_core_ptr`. Host-tier bindings
-//!   reach through there.
+//! * `APP` — `*mut TuiApp`. UiHost-tier bindings (`smelt.buf` /
+//!   `.win` / `.ui` / `.statusline` / `.theme` / …) reborrow this
+//!   to reach the compositor and TuiApp internals.
+//! * `CORE_PTR` — `*mut Core`. Installed inside core via
+//!   `smelt_core::host::install_core_ptr`. Host-tier bindings
+//!   (cells / timers / engine / clipboard / session / confirms /
+//!   files / processes / skills / config / frontend) reach
+//!   through here so they stay headless-safe — `HeadlessApp`
+//!   installs into the same TLS slot.
+//!
+//! Both slots are concrete pointers, not trait objects. Two earlier
+//! DI-shaped seams retired in P10 (the `Host` trait in P10.3.8 and
+//! the `UI_HOST` trait-object slot in P10.3.12 — see `P10.md`); they
+//! shared the failure mode "DI table over field access with zero
+//! behavior". The pattern: don't ship trait-object seams ahead of a
+//! concrete second consumer.
 //!
 //! Safety contract
 //! ---------------
@@ -24,25 +29,22 @@
 //! their `&mut TuiApp` borrow across the subsequent Lua call, but that
 //! borrow is *not accessed* while Lua runs — Rust is blocked on the
 //! FFI call and the only way to touch TuiApp is through [`with_app`]
-//! / [`with_ui_host`] / `with_core`, each of which reborrows the raw
-//! pointer as a fresh `&mut` for the duration of its closure. Because
-//! Lua is single-threaded inside the TUI event loop and never re-enters
-//! a Rust stack frame that is itself holding an active mutable borrow,
-//! the reborrow is sole.
+//! / `with_core`, each of which reborrows the raw pointer as a fresh
+//! `&mut` for the duration of its closure. Because Lua is single-
+//! threaded inside the TUI event loop and never re-enters a Rust
+//! stack frame that is itself holding an active mutable borrow, the
+//! reborrow is sole.
 //!
-//! `with_app` / `with_ui_host` panic if their slot is unset — a
-//! defensive check for the "Lua ran from a site that forgot to install
-//! the pointer" bug.
+//! `with_app` panics if the slot is unset — a defensive check for
+//! the "Lua ran from a site that forgot to install the pointer" bug.
 
 use std::cell::Cell;
 use std::ptr::NonNull;
 
 use crate::app::TuiApp;
-use crate::ui::UiHost;
 
 thread_local! {
     static APP: Cell<Option<NonNull<TuiApp>>> = const { Cell::new(None) };
-    static UI_HOST: Cell<Option<NonNull<dyn UiHost>>> = const { Cell::new(None) };
 }
 
 /// Install `app` as the TLS pointer for the duration of the returned
@@ -53,17 +55,10 @@ pub(crate) fn install_app_ptr(app: &mut TuiApp) -> AppPtrGuard {
     let app_ptr = NonNull::from(&mut *app);
     let old_app = APP.with(|cell| cell.replace(Some(app_ptr)));
 
-    let ui_host_ptr: NonNull<dyn UiHost> = {
-        let dyn_ref: &mut dyn UiHost = app;
-        NonNull::from(dyn_ref)
-    };
-    let old_ui_host = UI_HOST.with(|cell| cell.replace(Some(ui_host_ptr)));
-
     let core_guard = smelt_core::host::install_core_ptr(&mut app.core);
     AppPtrGuard {
         old_app,
-        old_ui_host,
-        core_guard,
+        _core_guard: core_guard,
     }
 }
 
@@ -71,15 +66,12 @@ pub(crate) fn install_app_ptr(app: &mut TuiApp) -> AppPtrGuard {
 /// slot (usually `None`, but nested installs are supported).
 pub(crate) struct AppPtrGuard {
     old_app: Option<NonNull<TuiApp>>,
-    old_ui_host: Option<NonNull<dyn UiHost>>,
-    #[allow(dead_code)]
-    core_guard: smelt_core::host::CorePtrGuard,
+    _core_guard: smelt_core::host::CorePtrGuard,
 }
 
 impl Drop for AppPtrGuard {
     fn drop(&mut self) {
         APP.with(|cell| cell.set(self.old_app));
-        UI_HOST.with(|cell| cell.set(self.old_ui_host));
     }
 }
 
@@ -108,45 +100,12 @@ pub fn try_with_app<R>(f: impl FnOnce(&mut TuiApp) -> R) -> Option<R> {
     Some(unsafe { f(ptr.as_ptr().as_mut().expect("app ptr must be non-null")) })
 }
 
-/// Borrow the installed `&mut Core` for the duration of `f`. Host-tier
-/// Lua bindings (cells, timers, engine, clipboard, session, confirms,
-/// lua, autocmds) reach through here so they compose without locking
-/// the whole frontend struct, and so they stay headless-safe —
-/// `HeadlessApp` installs into the same TLS slot inside
-/// `smelt_core::host`.
-#[allow(dead_code)]
-pub(crate) fn with_core<R>(f: impl FnOnce(&mut smelt_core::Core) -> R) -> R {
-    smelt_core::host::with_core(f)
-}
-
 /// `try_` variant of `with_core` that returns `None` instead of
-/// panicking when no frontend is installed.
-#[allow(dead_code)]
+/// panicking when no frontend is installed. Re-export for the
+/// `tui/src/lua/api/session.rs` cross-tier helper that sits in tui
+/// for historical reasons; native Host-tier bindings under
+/// `core/src/lua/api/` reach `smelt_core::host::try_with_core`
+/// directly.
 pub(crate) fn try_with_core<R>(f: impl FnOnce(&mut smelt_core::Core) -> R) -> Option<R> {
     smelt_core::host::try_with_core(f)
-}
-
-/// Borrow the installed frontend as `&mut dyn UiHost` for the duration
-/// of `f`. UiHost-only Lua bindings (`smelt.ui` / `.win` / `.buf` /
-/// `.statusline`) reach through here. The slot is decoupled from the
-/// concrete `TuiApp` so any future frontend that impls `UiHost` (story
-/// fixtures, alternative compositor) can install without binding
-/// rewrites.
-pub(crate) fn with_ui_host<R>(f: impl FnOnce(&mut dyn UiHost) -> R) -> R {
-    let ptr = UI_HOST
-        .with(|cell| cell.get())
-        .expect("with_ui_host called outside Lua entry");
-    // SAFETY: the pointer is set only by `install_app_ptr`, which
-    // borrows `&mut TuiApp` exclusively for the duration of the guard.
-    // The same single-threaded re-borrow contract as `with_app`
-    // applies, but through the `dyn UiHost` vtable.
-    unsafe { f(ptr.as_ptr().as_mut().expect("ui_host ptr must be non-null")) }
-}
-
-/// `try_` variant of `with_ui_host` that returns `None` instead of
-/// panicking when no frontend is installed.
-pub(crate) fn try_with_ui_host<R>(f: impl FnOnce(&mut dyn UiHost) -> R) -> Option<R> {
-    let ptr = UI_HOST.with(|cell| cell.get())?;
-    // SAFETY: same contract as `with_ui_host`.
-    Some(unsafe { f(ptr.as_ptr().as_mut().expect("ui_host ptr must be non-null")) })
 }

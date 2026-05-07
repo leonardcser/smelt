@@ -1,5 +1,4 @@
 use crate::app::{CommandAction, EventOutcome, InputOutcome, Timers, TuiApp};
-use smelt_core::working::TurnOutcome;
 
 use crate::input::{resolve_agent_esc, Action, EscAction};
 use crate::keymap::{self, KeyAction};
@@ -110,7 +109,7 @@ impl TuiApp {
                         let vim_mode = self.current_vim_mode_label();
                         use smelt_core::lua::runtime::KeymapResult;
                         if matches!(
-                            self.lua.run_keymap(&chord, vim_mode.as_deref()),
+                            self.lua.run_keymap(&chord, vim_mode.as_deref(), None),
                             KeymapResult::Consumed
                         ) {
                             consumed = true;
@@ -302,18 +301,103 @@ impl TuiApp {
         // nvim's `vim.keymap.set` priority. Handlers may return `false`
         // to fall through to downstream dispatch (e.g. `?` opens help
         // when the prompt is empty but inserts the literal otherwise).
+        // Both single-key and multi-key chords flow through the same
+        // registry; multi-key sequences accumulate in `t.pending_chord`
+        // until they exact-match a registered chord or fall off the
+        // 500ms timeout window.
         if let Event::Key(k) = *ev {
-            if let Some(chord) = crate::lua::chord_string(k) {
+            if let Some(token) = crate::lua::chord_string(k) {
                 let vim_mode = self.current_vim_mode_label();
                 use smelt_core::lua::runtime::KeymapResult;
-                match self.lua.run_keymap(&chord, vim_mode.as_deref()) {
+
+                // Single-key dispatch first — preserves nvim parity for
+                // plain bindings like `?` and keeps the common case
+                // allocation-free.
+                match self.lua.run_keymap(&token, vim_mode.as_deref(), None) {
                     KeymapResult::Consumed => {
+                        t.pending_chord = None;
                         self.flush_lua_callbacks();
                         return Some(EventOutcome::Noop);
                     }
                     KeymapResult::PassThrough | KeymapResult::NoBinding => {
                         self.flush_lua_callbacks();
                     }
+                }
+
+                // Multi-key chord dispatch. Drop a stale pending sequence
+                // (timeout elapsed), then append the new token. Trim
+                // front while the running sequence isn't a registered
+                // chord and isn't a prefix of one — same matching rule
+                // nvim applies when resolving ambiguous mappings.
+                let now = Instant::now();
+                if let Some(pending) = &t.pending_chord {
+                    if now.duration_since(pending.started)
+                        >= Duration::from_millis(crate::app::CHORD_TIMEOUT_MS)
+                    {
+                        t.pending_chord = None;
+                    }
+                }
+                if t.pending_chord.is_none() {
+                    t.pending_chord = Some(crate::app::PendingChord {
+                        tokens: Vec::new(),
+                        started: now,
+                        vim_mode_at_start: if self.input.vim_enabled() {
+                            Some(self.vim_mode)
+                        } else {
+                            None
+                        },
+                    });
+                }
+                let (mut tokens, started, vim_mode_at_start) = {
+                    let p = t.pending_chord.take().unwrap();
+                    (p.tokens, p.started, p.vim_mode_at_start)
+                };
+                tokens.push(token);
+
+                let outcome = loop {
+                    let seq: String = tokens.concat();
+                    let has_longer = self.lua.chord_has_longer(&seq, vim_mode.as_deref());
+                    if tokens.len() > 1 {
+                        let ctx_pairs: Vec<(&str, String)> = vec![(
+                            "vim_mode_at_chord_start",
+                            vim_mode_at_start
+                                .map(|m| format!("{m:?}"))
+                                .unwrap_or_default(),
+                        )];
+                        let res = self.lua.run_keymap(
+                            &seq,
+                            vim_mode.as_deref(),
+                            Some(ctx_pairs.as_slice()),
+                        );
+                        match res {
+                            KeymapResult::Consumed => {
+                                self.flush_lua_callbacks();
+                                return Some(EventOutcome::Noop);
+                            }
+                            KeymapResult::PassThrough => {
+                                self.flush_lua_callbacks();
+                                break has_longer;
+                            }
+                            KeymapResult::NoBinding => {}
+                        }
+                    }
+                    if has_longer {
+                        break true;
+                    }
+                    if tokens.is_empty() {
+                        break false;
+                    }
+                    tokens.remove(0);
+                    if tokens.is_empty() {
+                        break false;
+                    }
+                };
+                if outcome && !tokens.is_empty() {
+                    t.pending_chord = Some(crate::app::PendingChord {
+                        tokens,
+                        started,
+                        vim_mode_at_start,
+                    });
                 }
             }
         }
@@ -352,68 +436,18 @@ impl TuiApp {
             return outcome;
         }
 
-        // Esc / double-Esc
+        // Single Esc: vim handling falls through to PromptState::handle_event;
+        // non-vim Esc is a no-op. Idle-mode Esc-Esc lives in the chord
+        // registry (`runtime/lua/smelt/plugins/esc_chord.lua`).
         if matches!(
             ev,
             Event::Key(KeyEvent {
                 code: KeyCode::Esc,
                 ..
             })
-        ) {
-            let in_normal =
-                !self.input.vim_enabled() || self.vim_mode != crate::ui::VimMode::Insert;
-            if in_normal {
-                let double = t
-                    .last_esc
-                    .is_some_and(|prev| prev.elapsed() < Duration::from_millis(500));
-                if double {
-                    t.last_esc = None;
-                    let restore_mode = t.esc_vim_mode.take();
-
-                    // Cancel in-flight compaction on double-Esc.
-                    if self.working.is_compacting() {
-                        self.compact_epoch += 1;
-                        {
-                            self.working.finish(TurnOutcome::Interrupted);
-                        };
-                        self.notify("compaction cancelled".into());
-                        if restore_mode == Some(crate::ui::VimMode::Insert) {
-                            self.input
-                                .set_vim_mode(&mut self.vim_mode, crate::ui::VimMode::Insert);
-                        }
-                        return EventOutcome::Noop;
-                    }
-
-                    if self.user_turns().is_empty() {
-                        return EventOutcome::Noop;
-                    }
-                    let line = if restore_mode == Some(crate::ui::VimMode::Insert) {
-                        "/rewind insert"
-                    } else {
-                        "/rewind"
-                    };
-                    crate::commands::run_command(self, line);
-                    return EventOutcome::Redraw;
-                }
-                // Single Esc in normal mode — start timer.
-                t.last_esc = Some(Instant::now());
-                t.esc_vim_mode = if self.input.vim_enabled() {
-                    Some(self.vim_mode)
-                } else {
-                    None
-                };
-                if !self.input.vim_enabled() {
-                    return EventOutcome::Noop;
-                }
-                // Vim normal mode — fall through to handle_event (resets pending op).
-            } else {
-                // Vim insert mode — start double-Esc timer, fall through so
-                // handle_event processes the Esc and switches vim to normal.
-                t.esc_vim_mode = Some(crate::ui::VimMode::Insert);
-                t.last_esc = Some(Instant::now());
-            }
-        } else {
-            t.last_esc = None;
+        ) && !self.input.vim_enabled()
+        {
+            return EventOutcome::Noop;
         }
 
         // Keymap lookup for app-level actions (before delegating to PromptState).
@@ -433,7 +467,7 @@ impl TuiApp {
                         let full = self.take_prompt_completer().unwrap();
                         let line = full.lines().next().unwrap_or(&full).to_string();
                         let __mode = self.vim_mode;
-                        crate::api::buf::replace(&mut self.input, line, None, __mode);
+                        self.input.replace_text(line, None, __mode);
                         return EventOutcome::Redraw;
                     }
                     Some(
@@ -558,7 +592,7 @@ impl TuiApp {
                         combined.push_str(&self.input.win.text);
                     }
                     let mode = self.vim_mode;
-                    crate::api::buf::replace(&mut self.input, combined, None, mode);
+                    self.input.replace_text(combined, None, mode);
                     self.queued_messages.clear();
                 }
                 EscAction::Cancel { restore_vim } => {
@@ -673,7 +707,7 @@ impl TuiApp {
             Ok(s) if s.success() => match std::fs::read_to_string(tmp.path()) {
                 Ok(new) => {
                     let __mode = self.vim_mode;
-                    crate::api::buf::replace(&mut self.input, new, None, __mode);
+                    self.input.replace_text(new, None, __mode);
                 }
                 Err(e) => self.notify_error(format!("read tmp: {e}")),
             },
@@ -857,11 +891,9 @@ impl TuiApp {
             None => return false,
         };
         let (vim_enabled, buf_id, viewport_rows) = match self.ui.win(win) {
-            Some(w) if w.vim_enabled => (
-                true,
-                w.buf,
-                w.viewport.map(|v| v.rect.height).unwrap_or(0),
-            ),
+            Some(w) if w.vim_enabled => {
+                (true, w.buf, w.viewport.map(|v| v.rect.height).unwrap_or(0))
+            }
             _ => return false,
         };
         if !vim_enabled || viewport_rows == 0 {

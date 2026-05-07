@@ -1,5 +1,4 @@
 pub mod alloc;
-pub(crate) mod api;
 pub mod app;
 pub(crate) mod commands;
 pub(crate) mod completer;

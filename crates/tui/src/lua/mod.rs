@@ -31,9 +31,7 @@ mod tasks;
 pub(crate) mod ui_ops;
 
 pub use app_ref::try_with_app;
-pub(crate) use app_ref::{
-    install_app_ptr, try_with_core, try_with_ui_host, with_app, with_ui_host,
-};
+pub(crate) use app_ref::{install_app_ptr, try_with_core, with_app};
 
 pub(crate) use smelt_core::lua::{LuaHandle, TaskDriveOutput, ToolEnv, ToolExecResult};
 
@@ -211,6 +209,73 @@ pub(crate) fn canonicalize_chord(chord: &str) -> Option<String> {
         .unwrap_or(chord.trim());
     let kb = parse_keybind(stripped)?;
     chord_string(KeyEvent::new(kb.code, kb.mods))
+}
+
+/// Canonicalize a chord *sequence* — one or more chord tokens
+/// concatenated. Each token is either a single printable char or
+/// `<...>`. Returns the canonical joined form (e.g. `"<Esc><Esc>"`,
+/// `"gd"`, `"<C-w>q"`), or `None` if any token is unknown.
+///
+/// Used by `smelt.keymap.set` so plugins can register multi-key
+/// chords as well as single keys. The dispatcher matches incoming
+/// key sequences against the canonical form.
+///
+/// Plain Lua shorthand (`"c-r"`, `"s-tab"`, `"enter"`) is treated
+/// as a single chord — sequence tokenization only kicks in when
+/// the input is unambiguously multi-token (concatenated `<...>`
+/// blocks or a mix of `<...>` and plain chars).
+pub(crate) fn canonicalize_chord_sequence(input: &str) -> Option<String> {
+    if let Some(single) = canonicalize_chord(input) {
+        return Some(single);
+    }
+    let tokens = tokenize_chord_spec(input)?;
+    let mut out = String::new();
+    for tok in tokens {
+        let canonical = canonicalize_chord(&tok)?;
+        out.push_str(&canonical);
+    }
+    if out.is_empty() {
+        None
+    } else {
+        Some(out)
+    }
+}
+
+/// Split a chord-spec string into individual chord tokens. Tokens are
+/// either `<...>` (named keys / modified keys) or a single printable
+/// char. Whitespace between tokens is allowed (`"<Esc> <Esc>"` and
+/// `"<Esc><Esc>"` both parse to two tokens). Returns `None` if the
+/// input is malformed (unmatched `<`, empty `<>`, etc.).
+fn tokenize_chord_spec(input: &str) -> Option<Vec<String>> {
+    let mut tokens = Vec::new();
+    let mut chars = input.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c.is_whitespace() {
+            continue;
+        }
+        if c == '<' {
+            let mut tok = String::from('<');
+            let mut closed = false;
+            for cc in chars.by_ref() {
+                tok.push(cc);
+                if cc == '>' {
+                    closed = true;
+                    break;
+                }
+            }
+            if !closed || tok == "<>" {
+                return None;
+            }
+            tokens.push(tok);
+        } else {
+            tokens.push(c.to_string());
+        }
+    }
+    if tokens.is_empty() {
+        None
+    } else {
+        Some(tokens)
+    }
 }
 
 /// Parse a Lua-facing window-event name into a [`crate::ui::WinEvent`]. Names
@@ -714,7 +779,7 @@ mod tests {
         let rt = LuaRuntime::new();
         assert!(rt.load_error.is_none(), "load_error: {:?}", rt.load_error);
         let version: String = rt.lua.load("return smelt.version").eval().expect("eval");
-        assert_eq!(version, crate::api::VERSION);
+        assert_eq!(version, crate::lua::api::VERSION);
     }
 
     #[test]
@@ -952,16 +1017,16 @@ mod tests {
             .expect("exec");
         use smelt_core::lua::runtime::KeymapResult;
         assert_eq!(
-            rt.run_keymap("<C-g>", Some("Normal")),
+            rt.run_keymap("<C-g>", Some("Normal"), None),
             KeymapResult::Consumed
         );
         assert_eq!(drain_notifications(&rt), vec!["ctrl-g".to_string()]);
         assert_eq!(
-            rt.run_keymap("<C-g>", Some("Insert")),
+            rt.run_keymap("<C-g>", Some("Insert"), None),
             KeymapResult::NoBinding
         );
         assert_eq!(
-            rt.run_keymap("<C-x>", Some("Normal")),
+            rt.run_keymap("<C-x>", Some("Normal"), None),
             KeymapResult::NoBinding
         );
     }
@@ -982,15 +1047,15 @@ mod tests {
             .expect("exec");
         use smelt_core::lua::runtime::KeymapResult;
         assert_eq!(
-            rt.run_keymap("<C-h>", Some("Normal")),
+            rt.run_keymap("<C-h>", Some("Normal"), None),
             KeymapResult::Consumed
         );
         assert_eq!(drain_notifications(&rt), vec!["any-mode".to_string()]);
         assert_eq!(
-            rt.run_keymap("<C-h>", Some("Insert")),
+            rt.run_keymap("<C-h>", Some("Insert"), None),
             KeymapResult::Consumed
         );
-        assert_eq!(rt.run_keymap("<C-h>", None), KeymapResult::Consumed);
+        assert_eq!(rt.run_keymap("<C-h>", None, None), KeymapResult::Consumed);
     }
 
     #[test]
@@ -1113,19 +1178,109 @@ mod tests {
             .expect("exec");
         use smelt_core::lua::runtime::KeymapResult;
         assert_eq!(
-            rt.run_keymap("<C-r>", Some("Normal")),
+            rt.run_keymap("<C-r>", Some("Normal"), None),
             KeymapResult::Consumed
         );
         assert_eq!(
-            rt.run_keymap("<C-r>", Some("Insert")),
+            rt.run_keymap("<C-r>", Some("Insert"), None),
             KeymapResult::Consumed
         );
         assert_eq!(
-            rt.run_keymap("<C-r>", Some("Visual")),
+            rt.run_keymap("<C-r>", Some("Visual"), None),
             KeymapResult::Consumed
         );
         let msgs = drain_notifications(&rt);
         assert_eq!(msgs.len(), 3);
+    }
+
+    #[test]
+    fn keymap_chord_sequence_registers_canonical_form() {
+        // `<Esc><Esc>` and `gd` register as multi-key chords; the
+        // dispatcher matches against the canonical concatenated form.
+        let rt = LuaRuntime::new();
+        install_test_notify(&rt);
+        rt.lua
+            .load(
+                r#"
+                    smelt.keymap.set("", "<Esc><Esc>", function() smelt.notify("esc-esc") end)
+                    smelt.keymap.set("n", "gd", function() smelt.notify("go-def") end)
+                "#,
+            )
+            .exec()
+            .expect("exec");
+        use smelt_core::lua::runtime::KeymapResult;
+        // Multi-key exact match in the global mode bucket.
+        assert_eq!(
+            rt.run_keymap("<Esc><Esc>", Some("Normal"), None),
+            KeymapResult::Consumed
+        );
+        // Multi-key exact match in a mode-specific bucket.
+        assert_eq!(
+            rt.run_keymap("gd", Some("Normal"), None),
+            KeymapResult::Consumed
+        );
+        // Single-key prefix doesn't fire on its own.
+        assert_eq!(
+            rt.run_keymap("g", Some("Normal"), None),
+            KeymapResult::NoBinding
+        );
+        let msgs = drain_notifications(&rt);
+        assert_eq!(msgs, vec!["esc-esc", "go-def"]);
+    }
+
+    #[test]
+    fn chord_has_longer_detects_prefix_matches() {
+        let rt = LuaRuntime::new();
+        rt.lua
+            .load(
+                r#"
+                    smelt.keymap.set("", "<Esc><Esc>", function() end)
+                    smelt.keymap.set("n", "gd", function() end)
+                "#,
+            )
+            .exec()
+            .expect("exec");
+        // `<Esc>` is a prefix of the registered `<Esc><Esc>` chord.
+        assert!(rt.chord_has_longer("<Esc>", Some("Normal")));
+        // `g` is a prefix of `gd` in Normal mode.
+        assert!(rt.chord_has_longer("g", Some("Normal")));
+        // The full sequence isn't a *strict* prefix (exact matches
+        // don't count — they fire via `run_keymap`).
+        assert!(!rt.chord_has_longer("<Esc><Esc>", Some("Normal")));
+        assert!(!rt.chord_has_longer("gd", Some("Normal")));
+        // Unrelated keys aren't a prefix of anything.
+        assert!(!rt.chord_has_longer("j", Some("Normal")));
+        // Mode-specific chord (`gd` in `n`) doesn't surface in Insert.
+        assert!(!rt.chord_has_longer("g", Some("Insert")));
+        // Global-mode chord (`<Esc><Esc>` in `""`) surfaces in every mode.
+        assert!(rt.chord_has_longer("<Esc>", Some("Insert")));
+    }
+
+    #[test]
+    fn keymap_chord_handler_receives_ctx_table() {
+        // Multi-key handlers receive a context table carrying state
+        // captured at the first key (e.g. `vim_mode_at_chord_start`).
+        let rt = LuaRuntime::new();
+        install_test_notify(&rt);
+        rt.lua
+            .load(
+                r#"
+                    smelt.keymap.set("", "<Esc><Esc>", function(ctx)
+                        smelt.notify("mode=" .. tostring(ctx.vim_mode_at_chord_start))
+                    end)
+                "#,
+            )
+            .exec()
+            .expect("exec");
+        use smelt_core::lua::runtime::KeymapResult;
+        let ctx_pairs: Vec<(&str, String)> =
+            vec![("vim_mode_at_chord_start", "Insert".to_string())];
+        assert_eq!(
+            rt.run_keymap("<Esc><Esc>", Some("Normal"), Some(ctx_pairs.as_slice())),
+            KeymapResult::Consumed
+        );
+        let msgs = drain_notifications(&rt);
+        assert_eq!(msgs, vec!["mode=Insert"]);
     }
 
     #[test]
