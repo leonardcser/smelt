@@ -13,19 +13,36 @@ title smelt — target architecture (structure)\n\
 Decisions and rationale live in **ARCHITECTURE.md**; sequencing in **REFACTOR.md**.
 
 legend right
-  **Target organization:** `core` and `tui` are separate crates.
-  `core` has no terminal imports and no `crossterm` / `ui` dependency.
-  `tui` depends on `core` and `crossterm`.
-  `ui` is a terminal UI primitives module inside `tui` (`tui::ui`);
-  it depends on `crossterm`.
-  A GUI or web frontend uses `core` directly and ignores `ui`.
+  **Target organization (post P11.C):**
+  - `core` — frontend-agnostic; no terminal imports, no `crossterm`,
+    no editor / renderer deps.
+  - `smelt-buffer` — shared data layer: `Buffer`, extmarks, undo,
+    `Theme`, `Style`, `Color`, clipboard, attachments. Both the
+    renderer and editor depend on it; pure data, no terminal calls.
+  - `smelt-term` — pure terminal renderer: `Grid`, `Compositor`,
+    `LayoutTree<PaintId>`, `flush_diff`, chrome paint, `paint_layout_tree`.
+    No `Window`, no vim, no editor concepts. Standalone; usable as a
+    TUI library (e.g. by `tcloc`).
+  - `smelt-edit` — editor layer over `smelt-term`: `Window`,
+    `DrawContext`, `Buffer` dispatch, vim modes, callbacks, overlays,
+    focus + capture + click-tracking. The `Ui` struct ties windows to
+    layout and routes events; its renderer is a `smelt_term::Compositor`.
+  - `tui` — terminal frontend; depends on `core`, `smelt-edit`,
+    `smelt-buffer`, and `crossterm`. Re-exports the editor surface as
+    `pub use ::smelt_edit as smelt_term;` so existing
+    `crate::smelt_term::*` paths keep working.
+  - `engine` / `protocol` — unchanged; LLM core + wire types.
 
-  **`Buffer` lives in `core`.** It is pure data — lines, extmarks,
-  namespaces, undo. Zero terminal deps. Headless reads transcript
-  content through the same surface as the TUI does. Parser
-  *implementations* (markdown / diff / syntax / bash) stay in `tui`
-  because they pull from `tui::content::highlight::*` (syntect,
-  inline markdown, diff LCS).
+  A GUI or web frontend uses `core` directly and ignores
+  `smelt-{term,edit}`. A non-editor TUI consumer (treemap, dashboard)
+  uses `smelt-term` directly with its own paint dispatcher.
+
+  **`Buffer` lives in `smelt-buffer`** (was: `core`). It is pure
+  data — lines, extmarks, namespaces, undo. Zero terminal deps.
+  Headless reads transcript content through the same surface as the
+  TUI does. Parser *implementations* (markdown / diff / syntax /
+  bash) stay in `tui` because they pull from
+  `tui::content::highlight::*` (syntect, inline markdown, diff LCS).
 
   **Lua's drawing context is full, not partial.** Tool / dialog /
   statusline `render` callbacks receive a `Buffer` userdata with the
@@ -433,7 +450,7 @@ package "crate: tui  (terminal frontend)" as TUI #E0E8FF {
   class TuiApp <<terminal frontend>> {
     core:       Core
     well_known: WellKnown
-    ui:         ui::Ui
+    ui:         smelt_edit::Ui
     --
     impl UiHost (compositor surface)
     Host-tier Lua flows through
@@ -455,25 +472,59 @@ package "crate: tui  (terminal frontend)" as TUI #E0E8FF {
 }
 
 ' =====================================================================
-' tui::ui module — terminal UI primitives inside the tui crate
+' crate: smelt-buffer — shared data layer (Theme, Buffer, Style, …)
 ' =====================================================================
-package "tui::ui  (terminal UI primitives module)" as UI #E6F1FF {
+package "crate: smelt-buffer  (shared data — Theme, Buffer, Style)" as BUF #FFF7E0 {
 
-  package "primitives" as P #F4F8FF {
-    class Style
-    class Cell
-    class Grid <<terminal frame>>
-    class Rect
-    class CellUpdate
-    class Flush <<diff → SGR writer>>
-  }
-
-  package "theme" as TH #F4F8FF {
+  package "theme + style" as TH #FFEFCC {
     class Theme <<highlight registry>> {
       groups, links
       get / set / link
     }
+    class Style <<fluent builder>> {
+      Style::new()
+        .fg(c).bg(c).bold().dim()
+    }
+    class Color
   }
+
+  package "buffer (pure data)" as BD #FFEFCC {
+    class Buffer <<lines + extmarks>> {
+      lines, namespaces,
+      extmarks, undo
+    }
+    class Clipboard
+    class AttachmentId
+    class UndoHistory
+  }
+}
+
+' =====================================================================
+' crate: smelt-term — pure terminal renderer (no editor concepts)
+' =====================================================================
+package "crate: smelt-term  (pure renderer — TUI library)" as UI #E6F1FF {
+
+  package "primitives" as P #F4F8FF {
+    class Cell
+    class Grid <<terminal frame>>
+    class GridSlice
+    class Rect
+    class CellUpdate
+    class Flush <<diff → SGR writer>>
+    class Compositor <<double-buffered>>
+    class SnapshotFrame
+    class HitRegistry <<HitRegistry<P>\nhost-defined payload>>
+    class Line
+    class Span
+  }
+
+' These three sub-packages logically live in smelt-edit (Window, Ui,
+' overlays, interaction contracts) but they're nested under the same
+' top-level package as smelt-term so the inheritance / composition
+' arrows stay readable on screen. Crate boundary is: anything
+' referencing Window / Ui / Overlay / vim is `smelt-edit`; anything
+' referencing only LayoutTree / Grid / Compositor / Line is
+' `smelt-term`.
 
   package "parser impls  (tui-side BufferParsers)" as C #F4F8FF {
     class "MarkdownParser"        as PARSEMD <<BufferParser>> {
@@ -490,7 +541,7 @@ package "tui::ui  (terminal UI primitives module)" as UI #E6F1FF {
     class "block-variant parsers" as PARSEBL <<User / Thinking / Text /\nCodeLine / ToolCall / Exec\n→ writes per-block Buffer>>
   }
 
-  package "interaction contracts" as IX #F4F8FF {
+  package "interaction contracts  (smelt-edit)" as IX #DCEAFF {
     interface UiHost <<TuiApp impl>> {
       ui()    : &mut Ui
       focus(win: WinId)
@@ -551,7 +602,7 @@ package "tui::ui  (terminal UI primitives module)" as UI #E6F1FF {
     }
   }
 
-  package "concrete interactive unit" as L #F4F8FF {
+  package "concrete interactive unit  (smelt-edit)" as L #DCEAFF {
     class Window <<buffer viewport>> {
       WinId, BufId
       cursor: (line, col)
@@ -566,24 +617,22 @@ package "tui::ui  (terminal UI primitives module)" as UI #E6F1FF {
     }
   }
 
-  package "layout + composition" as LO #F4F8FF {
+  package "layout + composition  (smelt-term)" as LO #F4F8FF {
     class LayoutTree {
-      Vbox { gap, border,
-             title, items }
-      Hbox { gap, border,
-             title, items }
-      Leaf(WinId)         ' splits / overlays
+      Vbox { gap, chrome, items }
+      Hbox { gap, chrome, items }
+      Leaf(PaintId)       ' opaque host id
       Item = (Constraint, LayoutTree)
-      ' Dividers between siblings are
-      ' painted by inserting a Window
-      ' leaf containing ─ / │ — same
-      ' pattern Ratatui uses; no
-      ' separator chrome field.
+      ' PaintId is u64; smelt-term assigns
+      ' no semantics to it. The editor
+      ' (smelt-edit) maps PaintId → WinId
+      ' via `From<WinId> for PaintId` and
+      ' dispatches in `Ui::render` via a
+      ' PaintDispatch closure.
       ' Any container can carry chrome
-      ' (border + title). Convention
-      ' is to use it on overlays only;
-      ' the type system allows it
-      ' anywhere.
+      ' (border + title). Convention is to
+      ' use it on overlays only; the type
+      ' system allows it anywhere.
     }
     enum Constraint {
       Length(u16)
@@ -641,9 +690,12 @@ package "tui::ui  (terminal UI primitives module)" as UI #E6F1FF {
       Screen(Center)
       Screen { row, col }
       Cursor(Edge)
-      Win { target: WinId,
-            attach: Edge }
+      Win { target: PaintId,
+            attach: Corner }
     }
+  }
+
+  package "overlays  (smelt-edit)" as OV #DCEAFF {
     class Overlay <<placement + modality>> {
       layout: LayoutTree     ' chrome (if any)
                               ' lives in here
@@ -653,7 +705,7 @@ package "tui::ui  (terminal UI primitives module)" as UI #E6F1FF {
     }
   }
 
-  class Ui <<facade + compositor>> {
+  class Ui <<smelt-edit facade>> {
     bufs:     Map<BufId, Buffer>
     wins:     Map<WinId, Window>
     splits:   LayoutTree         ' base layer
@@ -832,8 +884,10 @@ CORE  -[#888,dashed]-> PROTO : uses wire types
 CORE  -[#888,dashed]-> ENG   : EngineHandle\n(channels only)
 TUI   -[#888,dashed]-> PROTO : uses wire types
 TUI   -[#888,dashed]-> CORE  : Core + capabilities
-TUI   -[#888,dashed]-> UI    : ui primitives
-' UI has zero internal dependencies
+TUI   -[#888,dashed]-> UI    : Window / Ui /\nrenderer surface\n(via smelt-edit\nre-export)
+UI    -[#888,dashed]-> BUF   : Theme, Style, Buffer
+' smelt-edit (nested in UI) → smelt-term + smelt-buffer.
+' smelt-term → smelt-buffer only. No cycles.
 LUA   -[#888,dashed]-> CORE  : Host-tier smelt.* API
 LUA   -[#888,dashed]-> TUI   : UiHost-tier smelt.* API
 
@@ -943,7 +997,7 @@ Border     --> BorderSides
 LayoutTree --> Border          : optional chrome
 Overlay    --> Anchor          : positioning
 Overlay    --> LayoutTree      : tiles members
-Overlay  ..> Window            : refs members by WinId\nin layout leaves
+Overlay  ..> Window            : refs members by PaintId\n(WinId.into()) in layout leaves
 Buffer   o--> "*" Namespace
 Buffer   o--> "*" Extmark
 Extmark  --> ExtmarkPayload : carries one of three\nvariants (Highlight /\nDecoration / VirtText)
