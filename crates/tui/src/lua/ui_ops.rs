@@ -3,7 +3,7 @@
 //! few reusable window recipes (`list` / `input`).
 
 use crate::app::TuiApp;
-use crate::ui::layout::{Anchor, Corner};
+use crate::ui::layout::{Anchor, BorderSides, BorderStyle, Corner};
 use crate::ui::{
     Border, Callback, CallbackResult, Constraint, KeyBind, LayoutTree, Overlay, Payload, WinEvent,
     WinId,
@@ -13,8 +13,7 @@ use crossterm::event::{KeyCode, KeyModifiers};
 /// Where the dialog's overlay anchors. Parsed from `opts.placement` on
 /// the Lua side: absent or `"center"` → `ScreenCenter`; `"dock_bottom"`
 /// → `DockBottom` reading `placement_height` (default 60); `"screen_at"`
-/// → `ScreenAt` with `corner` + absolute `width` / `height`, used by
-/// the F12 debug panel.
+/// → `ScreenAt` with `corner` + absolute `width` / `height`.
 #[derive(Clone, Copy)]
 enum OverlayPlacement {
     ScreenCenter,
@@ -36,6 +35,7 @@ pub(crate) fn open_overlay(app: &mut TuiApp, opts: mlua::Table) -> Result<u64, S
         .get("items")
         .map_err(|e| format!("overlay items: {e}"))?;
     let placement = parse_overlay_placement(&opts);
+    let border = parse_border(&opts).map_err(|e| format!("overlay border: {e}"))?;
     let blocks_agent: bool = opts.get("blocks_agent").unwrap_or(false);
     let modal: bool = opts.get("modal").unwrap_or(true);
     let z: u16 = opts.get("z").unwrap_or(50);
@@ -65,49 +65,70 @@ pub(crate) fn open_overlay(app: &mut TuiApp, opts: mlua::Table) -> Result<u64, S
     }
 
     let inner = LayoutTree::vbox(leaf_items);
-    let (anchor, layout) = match placement {
+    // Apply chrome to the inner layout. `border = None` (Lua: omit the
+    // option, set `border = "none"`, or pass `border_sides` with no
+    // sides set) skips `with_border` entirely so no row/column is
+    // reserved at any edge.
+    let with_chrome = |tree: LayoutTree, t: Option<String>| -> LayoutTree {
+        let mut tree = tree;
+        if let Some(b) = border {
+            tree = tree.with_border(b);
+        }
+        if let Some(t) = t {
+            tree = tree.with_title(t);
+        }
+        tree
+    };
+    // Layout for placements that drive their rect via `size_override`
+    // (everything but `ScreenAt`, which now also fills): wrap the
+    // inner panels in a `Fill`/`Fill` vbox+hbox so chrome stretches
+    // to whatever rect the size_override writes. The percentage
+    // arguments below feed `size_override`, not a child constraint —
+    // the previous shape used `Percentage` as a child constraint
+    // *inside* a Fill outer, which left the unallocated rows/cols
+    // empty inside the dialog.
+    let fill_layout = |inner: LayoutTree, title: Option<String>| -> LayoutTree {
+        with_chrome(
+            LayoutTree::vbox(vec![(
+                Constraint::Fill,
+                LayoutTree::hbox(vec![(Constraint::Fill, inner)]),
+            )]),
+            title,
+        )
+    };
+    let (term_w, term_h) = app.ui.terminal_size();
+    let pct = |total: u16, p: u16| ((total as u32 * p as u32) / 100).min(total as u32) as u16;
+    let (anchor, layout, size_override) = match placement {
         OverlayPlacement::ScreenCenter => {
-            let layout = LayoutTree::vbox(vec![(
-                Constraint::Percentage(60),
-                LayoutTree::hbox(vec![(Constraint::Percentage(70), inner)]),
-            )])
-            .with_border(Border::Single)
-            .with_title(title.unwrap_or_default());
-            (Anchor::ScreenCenter, layout)
+            let layout = fill_layout(inner, title);
+            let w = pct(term_w, 70);
+            let h = pct(term_h, 60);
+            (Anchor::ScreenCenter, layout, Some((w, h)))
         }
         OverlayPlacement::DockBottom { height_pct } => {
-            let layout = LayoutTree::vbox(vec![(
-                Constraint::Percentage(height_pct),
-                LayoutTree::hbox(vec![(Constraint::Percentage(100), inner)]),
-            )])
-            .with_border(Border::Single)
-            .with_title(title.unwrap_or_default());
-            (Anchor::ScreenBottom { above_rows: 1 }, layout)
+            let layout = fill_layout(inner, title);
+            let avail_h = term_h.saturating_sub(1); // reserve 1 row for the statusline
+            let h = pct(avail_h, height_pct).max(1);
+            (
+                Anchor::ScreenBottom { above_rows: 1 },
+                layout,
+                Some((term_w, h)),
+            )
         }
         OverlayPlacement::ScreenAt {
             corner,
             row,
             col,
-            width: _,
-            height: _,
+            width,
+            height,
         } => {
-            // ScreenAt uses `Overlay::size_override` to drive the
-            // outer rect (set just below), so the inner layout uses
-            // `Fill` so chrome stretches to whatever size the host
-            // (or a resize gesture) writes onto the override.
-            let layout = LayoutTree::vbox(vec![(
-                Constraint::Fill,
-                LayoutTree::hbox(vec![(Constraint::Fill, inner)]),
-            )])
-            .with_border(Border::Single)
-            .with_title(title.unwrap_or_default());
+            let layout = fill_layout(inner, title);
             // Lua-facing `(row, col)` are offsets from the named
             // corner: `corner = "ne", row = 0, col = 0` lands the
             // overlay's NE corner at the terminal's top-right.
             // Translate to the absolute terminal coordinates that
             // `Anchor::ScreenAt` expects so `corner_to_topleft` +
             // `clamp_axis` resolve to the user-visible corner.
-            let (term_w, term_h) = app.ui.terminal_size();
             let abs_row = match corner {
                 Corner::NW | Corner::NE => row as i32,
                 Corner::SW | Corner::SE => term_h.saturating_sub(1) as i32 - row as i32,
@@ -123,6 +144,7 @@ pub(crate) fn open_overlay(app: &mut TuiApp, opts: mlua::Table) -> Result<u64, S
                     corner,
                 },
                 layout,
+                Some((width, height)),
             )
         }
     };
@@ -133,12 +155,8 @@ pub(crate) fn open_overlay(app: &mut TuiApp, opts: mlua::Table) -> Result<u64, S
         .blocks_agent(blocks_agent)
         .draggable(draggable)
         .resizable(resizable);
-    // ScreenAt placements drive the rect via `size_override` so a
-    // resize gesture has a stable handle to mutate (and so the
-    // initial frame doesn't collapse to chrome-only when the inner
-    // layout is `Fill`).
-    if let OverlayPlacement::ScreenAt { width, height, .. } = placement {
-        overlay = overlay.with_size((width, height));
+    if let Some(size) = size_override {
+        overlay = overlay.with_size(size);
     }
     let id = app.ui.overlay_open(overlay);
     Ok(id.0 as u64)
@@ -150,8 +168,102 @@ pub(crate) fn open_overlay(app: &mut TuiApp, opts: mlua::Table) -> Result<u64, S
 /// optional `placement_height = <pct>` controls the overlay height as
 /// a fraction of available height. `"screen_at"` reads `corner`
 /// (`"nw"`/`"ne"`/`"sw"`/`"se"`) plus absolute `row` / `col` / `width`
-/// / `height` and pins the overlay at the named corner — used by the
-/// F12 debug panel for a fixed top-right box.
+/// / `height` and pins the overlay at the named corner.
+/// Parse the Lua `border` + `border_sides` opts into an
+/// `Option<Border>`. Surface:
+///
+/// - `border = "single"` (default) / `"rounded"` / `"double"` —
+///   pick a glyph family, all four sides on.
+/// - `border = "none"` or `border = false` — no border at all.
+/// - `border = "top"` — single style, top edge only (sugar for the
+///   common docked-bottom case).
+/// - `border = { style = "rounded", sides = { "top", "left" } }` — the
+///   explicit form. `sides` accepts a list of edge names (`"top"`,
+///   `"right"`, `"bottom"`, `"left"`) or a table of bools
+///   (`{ top = true, left = true }`). Empty `sides` returns `None`.
+fn parse_border(opts: &mlua::Table) -> Result<Option<Border>, String> {
+    let v = opts.get::<mlua::Value>("border").unwrap_or(mlua::Value::Nil);
+    match v {
+        mlua::Value::Nil => Ok(Some(Border::SINGLE)),
+        mlua::Value::Boolean(false) => Ok(None),
+        mlua::Value::Boolean(true) => Ok(Some(Border::SINGLE)),
+        mlua::Value::String(s) => {
+            let raw = s.to_string_lossy();
+            match raw.as_ref() {
+                "none" => Ok(None),
+                "rounded" => Ok(Some(Border::ROUNDED)),
+                "double" => Ok(Some(Border::DOUBLE)),
+                "single" => Ok(Some(Border::SINGLE)),
+                "top" => Ok(Some(Border::top(BorderStyle::Single))),
+                other => Err(format!(
+                    "unknown border preset '{other}' (expected single|rounded|double|none|top)"
+                )),
+            }
+        }
+        mlua::Value::Table(t) => {
+            let style = match t.get::<Option<String>>("style").ok().flatten().as_deref() {
+                None | Some("single") => BorderStyle::Single,
+                Some("rounded") => BorderStyle::Rounded,
+                Some("double") => BorderStyle::Double,
+                Some(other) => {
+                    return Err(format!(
+                        "unknown border style '{other}' (expected single|rounded|double)"
+                    ))
+                }
+            };
+            let sides = parse_border_sides(&t)?;
+            if !(sides.top || sides.right || sides.bottom || sides.left) {
+                return Ok(None);
+            }
+            Ok(Some(Border::new(style, sides)))
+        }
+        other => Err(format!(
+            "border: expected string|table|bool, got {}",
+            other.type_name()
+        )),
+    }
+}
+
+fn parse_border_sides(t: &mlua::Table) -> Result<BorderSides, String> {
+    let sides_v = t.get::<mlua::Value>("sides").unwrap_or(mlua::Value::Nil);
+    match sides_v {
+        // No explicit `sides` → all sides.
+        mlua::Value::Nil => Ok(BorderSides::ALL),
+        mlua::Value::Table(st) => {
+            // List form: `sides = { "top", "left" }`.
+            let mut sides = BorderSides::NONE;
+            let mut saw_list_entry = false;
+            for v in st.clone().sequence_values::<String>().flatten() {
+                saw_list_entry = true;
+                match v.as_str() {
+                    "top" => sides.top = true,
+                    "right" => sides.right = true,
+                    "bottom" => sides.bottom = true,
+                    "left" => sides.left = true,
+                    other => {
+                        return Err(format!(
+                            "unknown border side '{other}' (expected top|right|bottom|left)"
+                        ))
+                    }
+                }
+            }
+            if saw_list_entry {
+                return Ok(sides);
+            }
+            // Map form: `sides = { top = true, left = true }`.
+            sides.top = st.get::<bool>("top").unwrap_or(false);
+            sides.right = st.get::<bool>("right").unwrap_or(false);
+            sides.bottom = st.get::<bool>("bottom").unwrap_or(false);
+            sides.left = st.get::<bool>("left").unwrap_or(false);
+            Ok(sides)
+        }
+        other => Err(format!(
+            "border.sides: expected table, got {}",
+            other.type_name()
+        )),
+    }
+}
+
 fn parse_overlay_placement(opts: &mlua::Table) -> OverlayPlacement {
     match opts.get::<String>("placement").ok().as_deref() {
         Some("dock_bottom") => {

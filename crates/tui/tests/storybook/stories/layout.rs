@@ -36,7 +36,7 @@ story!(splits_paint_border_and_title, |ctx| {
     let win = ctx.open_split(buf, pane_config("only"));
     ctx.set_layout(
         LayoutTree::vbox(vec![(Constraint::Fill, LayoutTree::leaf(win))])
-            .with_border(Border::Rounded)
+            .with_border(Border::ROUNDED)
             .with_title("frame"),
     );
     ctx.assert_snapshot();
@@ -179,11 +179,11 @@ story!(nested_borders_inset_correctly, |ctx| {
     let buf = ctx.buf_with_lines(["nested"]);
     let win = ctx.open_split(buf, pane_config("only"));
     let inner = LayoutTree::vbox(vec![(Constraint::Fill, LayoutTree::leaf(win))])
-        .with_border(Border::Rounded)
+        .with_border(Border::ROUNDED)
         .with_title("inner");
     ctx.set_layout(
         LayoutTree::vbox(vec![(Constraint::Fill, inner)])
-            .with_border(Border::Single)
+            .with_border(Border::SINGLE)
             .with_title("outer"),
     );
     ctx.assert_snapshot();

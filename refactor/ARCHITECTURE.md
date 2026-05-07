@@ -82,7 +82,7 @@ happens in two structures only:
 
 Two primitives, one role each:
 
-- **Buffer** — shared content: lines, extmarks, namespaces, undo, modifiable
+- **Buffer** — shared content: lines, extmarks, namespaces, undo, `readonly`
   flag, and coordinate/source-display translation.
 - **Window** — one viewport over one Buffer: cursor, scroll, selection,
   keymap recipe, focusability, gutters, and rendering. Window is the concrete
@@ -164,7 +164,7 @@ claims space") and removes the implication that there's a Window subtype.
 parser impls (markdown / diff / syntax) + rendering (`Window::render`,
 theme resolve, grid diff). Headless reads through the same surface.
 
-Vim-style: lines + extmarks in named namespaces + `modifiable` flag.
+Vim-style: lines + extmarks in named namespaces + `readonly` flag.
 
 - **All decoration is extmarks** in named namespaces (highlights,
   virt-text, signs, conceals, source-byte mapping, click metadata,
@@ -175,9 +175,13 @@ Vim-style: lines + extmarks in named namespaces + `modifiable` flag.
 - **Theme references are highlight ids, not raw colors.** P9.e:
   extmark `Highlight` payload carries `HlGroup(u32)`; theme is the
   paint-time resolver.
-- **`modifiable: bool`** is the data-layer edit guard, shared by all
-  Windows over a Buffer. False for transcript / diff / notification /
-  picker; true for prompt / cmdline / inputs.
+- **`readonly: bool`** is the data-layer edit guard, shared by all
+  Windows over a Buffer. True for transcript / diff / notification /
+  picker / `/messages` viewer; false for prompt / cmdline / inputs.
+  When the focused overlay leaf's Buffer has `readonly = true`, the
+  unified viewer fallthrough auto-flips `vim_mode` to `Normal` so the
+  user can navigate / select / yank without typing into a buffer that
+  refuses edits anyway.
 - **Yank substitution per extmark.** `yank: Option<YankSubst>`
   (`Empty` elides, `Static(s)` substitutes, absent = literal source).
   Default — yank source bytes verbatim — is right for rendered
@@ -301,7 +305,7 @@ TuiApp::vim_mode  (global VimMode)      what's the user trying to do?
 Window::keymap  (recipe id)             what keys are bound here?
        │
        ▼  recipe attempts mutation
-Buffer::modifiable  (data guard)        final yes/no on edits
+Buffer::readonly  (data guard)          final yes/no on edits
 ```
 
 Each layer is independent and composes:
@@ -319,8 +323,8 @@ Each layer is independent and composes:
 2. **Window keymap recipe** decides what keys do. Editor recipes bind
    `i/a/o/dd`; viewer recipes bind only `j/k/v/y`. Recipes are pure Lua,
    defined in `runtime/lua/smelt/widgets/`.
-3. **`Buffer::modifiable`** is the final guard. Even a buggy editor recipe
-   can't mutate a non-modifiable Buffer. Defense in depth.
+3. **`Buffer::readonly`** is the final guard. Even a buggy editor recipe
+   can't mutate a `readonly = true` Buffer. Defense in depth.
 
 There is **no `Vim` or `Completer` state-machine type in `ui`**. Per-buffer edit
 history (registers, dot-repeat, undo) lives on Buffer. Per-Window cursor +
@@ -348,6 +352,22 @@ focusable Window and no modal absorbs. Tab cycles are modal-aware.
 Esc chain: focused Window first; if `Ignored`, `WinEvent::Dismiss`
 fires on the enclosing Overlay. Cursor shape is global on `Ui`,
 nvim-style.
+
+**Modal opacity is z-aware.** A modal absorbs clicks at *its own
+rect* for everything below it in z; higher-z overlays still receive
+clicks on their visible cells (e.g. the perf HUD floating above a
+modal `/messages` viewer continues to drag and toggle). Lower-z
+overlays still receive clicks on the parts they leave outside the
+modal's rect.
+
+**Lua-registered global keymaps fire from inside modals.** The key
+dispatch path under a focused overlay is: focused leaf's bound
+callbacks → Lua-registered global keymap (`smelt.keymap.set`) →
+unified vim viewer fallthrough. Putting Lua keymaps before the
+viewer fallthrough keeps user-level chords (`<F12>` for the perf
+overlay, etc.) responsive even when a modal viewer is open. A
+chord with no Lua binding falls through to the viewer's vim recipe
+unchanged.
 
 ## Frontends — Core, TuiApp, HeadlessApp
 

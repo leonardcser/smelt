@@ -96,9 +96,38 @@ impl TuiApp {
                      payload: &crate::ui::Payload| {
                         lua.queue_invocation(handle, win, payload);
                     };
-                let _ = self
+                let status = self
                     .ui
                     .dispatch_event(crate::ui::Event::Key(k), &mut lua_invoke);
+                if matches!(status, crate::ui::Status::Ignored) {
+                    // Lua-registered global keymaps (e.g. `<F12>` for
+                    // the perf overlay) get the next shot. They fire
+                    // BEFORE the vim viewer fallthrough so unbound
+                    // chords aren't swallowed by the Window's default
+                    // Insert-mode passthrough on a read-only viewer.
+                    let mut consumed = false;
+                    if let Some(chord) = crate::lua::chord_string(k) {
+                        let vim_mode = self.current_vim_mode_label();
+                        use smelt_core::lua::runtime::KeymapResult;
+                        if matches!(
+                            self.lua.run_keymap(&chord, vim_mode.as_deref()),
+                            KeymapResult::Consumed
+                        ) {
+                            consumed = true;
+                        }
+                    }
+                    // Unified viewer/editor fallthrough: if the focused
+                    // overlay leaf is vim-enabled and no keymap absorbed
+                    // the key, run the same `Window::handle_key` path
+                    // the transcript and prompt rely on. This is what
+                    // makes `/messages`, `/help`, `/stats`, and any
+                    // plugin-built viewer panel support vim navigation
+                    // + selection + yank without each one wiring its
+                    // own keymap recipe.
+                    if !consumed {
+                        let _ = self.dispatch_overlay_viewer_key(k);
+                    }
+                }
                 self.flush_lua_callbacks();
                 return false;
             }
@@ -807,5 +836,59 @@ impl TuiApp {
             let viewport = self.viewport_rows_estimate();
             self.transcript_window.resync(&rows, viewport);
         }
+    }
+
+    /// Forward a keystroke to the focused overlay-leaf Window's
+    /// `handle_key` when it's vim-enabled and no keymap absorbed the
+    /// key. Provides the read-only viewer family (messages, /help,
+    /// /stats, plugin viewers) with the same vim motion + selection +
+    /// yank surface the transcript and prompt have used since P1.d.
+    ///
+    /// Viewer leaves are read-only — Insert mode makes no sense, and
+    /// keeping the mode the prompt was in would route `j`/`k` through
+    /// the Insert handler (which Passthroughs them, so the cursor
+    /// never moves). Force Normal on entry; the user can press `i`
+    /// only if the leaf were genuinely editable, which today's
+    /// viewer leaves are not.
+    /// Returns `true` if the Window claimed the event.
+    pub(crate) fn dispatch_overlay_viewer_key(&mut self, k: KeyEvent) -> bool {
+        let win = match self.ui.focus() {
+            Some(w) => w,
+            None => return false,
+        };
+        let (vim_enabled, buf_id, viewport_rows) = match self.ui.win(win) {
+            Some(w) if w.vim_enabled => (
+                true,
+                w.buf,
+                w.viewport.map(|v| v.rect.height).unwrap_or(0),
+            ),
+            _ => return false,
+        };
+        if !vim_enabled || viewport_rows == 0 {
+            return false;
+        }
+        let rows: Vec<String> = self
+            .ui
+            .buf(buf_id)
+            .map(|b| b.lines().to_vec())
+            .unwrap_or_default();
+        if rows.is_empty() {
+            return false;
+        }
+        if self.vim_mode == crate::ui::VimMode::Insert {
+            self.vim_mode = crate::ui::VimMode::Normal;
+        }
+        let win_mut = match self.ui.win_mut(win) {
+            Some(w) => w,
+            None => return false,
+        };
+        let status = win_mut.handle_key(
+            k,
+            &rows,
+            viewport_rows,
+            &mut self.vim_mode,
+            &mut self.core.clipboard,
+        );
+        matches!(status, crate::ui::Status::Consumed)
     }
 }

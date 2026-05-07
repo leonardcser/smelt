@@ -112,6 +112,34 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
             Ok(buf)
         })?,
     )?;
+    // `smelt.win.rect(win_id) -> { row, col, width, height } | nil` —
+    // last-painted viewport rect for `win_id`. Returns `nil` until the
+    // window has been rendered at least once. Plugins use this to make
+    // their content responsive to the window's current size (e.g. the
+    // perf panel truncating its label column to the live width).
+    win_tbl.set(
+        "rect",
+        lua.create_function(|lua, id: u64| {
+            let rect = crate::lua::try_with_ui_host(|host| {
+                host.ui()
+                    .win(crate::ui::WinId(id))
+                    .and_then(|w| w.viewport)
+                    .map(|vp| vp.rect)
+            })
+            .flatten();
+            match rect {
+                Some(r) => {
+                    let t = lua.create_table()?;
+                    t.set("row", r.top)?;
+                    t.set("col", r.left)?;
+                    t.set("width", r.width)?;
+                    t.set("height", r.height)?;
+                    Ok(mlua::Value::Table(t))
+                }
+                None => Ok(mlua::Value::Nil),
+            }
+        })?,
+    )?;
     // `smelt.win.set_focus(win_id)` — give keyboard focus to a Window.
     // Wraps `Ui::set_focus` so Lua-side dialog orchestration can move
     // focus between leaves (e.g. confirm.lua's `e` keymap that focuses

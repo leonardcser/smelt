@@ -21,6 +21,7 @@ pub mod http;
 pub mod kill_ring;
 pub mod lua;
 pub mod mcp;
+pub mod messages;
 pub mod notebook;
 pub mod path;
 pub mod perf;

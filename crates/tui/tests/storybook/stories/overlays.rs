@@ -53,7 +53,7 @@ fn open_box_overlay(
         Constraint::Length(height),
         LayoutTree::hbox(vec![(Constraint::Length(width), LayoutTree::leaf(dw))]),
     )])
-    .with_border(Border::Rounded)
+    .with_border(Border::ROUNDED)
     .with_title(title);
     ctx.ui
         .overlay_open(Overlay::new(layout, anchor).with_z(100));
@@ -89,7 +89,7 @@ story!(overlay_centered_modal_over_splits, |ctx| {
         Constraint::Length(3),
         LayoutTree::hbox(vec![(Constraint::Length(14), LayoutTree::leaf(dw))]),
     )])
-    .with_border(Border::Rounded)
+    .with_border(Border::ROUNDED)
     .with_title("modal");
     ctx.ui.overlay_open(
         Overlay::new(layout, Anchor::ScreenCenter)
@@ -183,7 +183,7 @@ story!(anchor_screen_bottom_docked, |ctx| {
         Constraint::Length(1),
         LayoutTree::hbox(vec![(Constraint::Percentage(100), LayoutTree::leaf(dw))]),
     )])
-    .with_border(Border::Single)
+    .with_border(Border::SINGLE)
     .with_title("dock");
     ctx.ui
         .overlay_open(Overlay::new(layout, Anchor::ScreenBottom { above_rows: 1 }));
@@ -198,7 +198,7 @@ story!(two_overlays_stack_by_z, |ctx| {
     let lo = ctx.buf_with_lines(["LO"]);
     let lw = ctx.ui.win_open_split(lo, pane("lo")).expect("buf exists");
     let lo_layout = LayoutTree::hbox(vec![(Constraint::Length(8), LayoutTree::leaf(lw))])
-        .with_border(Border::Single)
+        .with_border(Border::SINGLE)
         .with_title("lo");
     ctx.ui.overlay_open(
         Overlay::new(
@@ -215,7 +215,7 @@ story!(two_overlays_stack_by_z, |ctx| {
     let hi = ctx.buf_with_lines(["HI"]);
     let hw = ctx.ui.win_open_split(hi, pane("hi")).expect("buf exists");
     let hi_layout = LayoutTree::hbox(vec![(Constraint::Length(8), LayoutTree::leaf(hw))])
-        .with_border(Border::Rounded)
+        .with_border(Border::ROUNDED)
         .with_title("hi");
     ctx.ui.overlay_open(
         Overlay::new(

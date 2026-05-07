@@ -29,6 +29,7 @@ mod http;
 mod image;
 pub(crate) mod layout;
 mod mcp;
+mod messages;
 mod mode;
 mod os;
 mod parse;
@@ -136,6 +137,7 @@ pub fn register_host_api(
     image::register(lua, smelt)?;
     layout::register(lua, smelt)?;
     mcp::register(lua, smelt, shared)?;
+    messages::register(lua, smelt, shared)?;
     mode::register(lua, smelt)?;
     os::register(lua, smelt)?;
     reasoning::register(lua, smelt)?;

@@ -194,6 +194,7 @@ function M._open(opts)
     title = opts.title,
     placement = opts.placement,
     placement_height = opts.placement_height,
+    border = opts.border,
     blocks_agent = opts.blocks_agent,
     modal = true,
     items = overlay_items,

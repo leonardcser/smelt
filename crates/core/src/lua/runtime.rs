@@ -382,11 +382,22 @@ impl LuaRuntime {
         }
     }
 
-    /// Route an error through `smelt.notify_error` when available.
+    /// Append a message to the persistent log and surface a one-line
+    /// summary via `smelt.notify_error`. The full body (multi-line
+    /// tracebacks) stays addressable through `/messages` instead of
+    /// flooding the toast overlay.
     pub fn record_error(&self, msg: String) {
+        let summary = msg.lines().next().unwrap_or("").to_string();
+        if let Ok(mut messages) = self.shared.messages.lock() {
+            messages.append(
+                crate::messages::MessageKind::Error,
+                "lua".to_string(),
+                msg,
+            );
+        }
         if let Ok(smelt) = self.lua.globals().get::<mlua::Table>("smelt") {
             if let Ok(func) = smelt.get::<mlua::Function>("notify_error") {
-                let _ = func.call::<()>(msg);
+                let _ = func.call::<()>(summary);
             }
         }
     }

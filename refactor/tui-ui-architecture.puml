@@ -96,6 +96,14 @@ package "runtime/lua/smelt/  (UX layer — the whole user-facing surface)" as LU
                  on_block=… }
   }
   class "commands.lua" as LCMD <<Lua>>
+  class "commands/messages.lua" as LMSG <<Lua>> {
+    /messages — read-only
+    bottom-docked viewer over
+    `core::Messages`. Composes
+    smelt.buf.create({readonly=true})
+    + dialog.open with
+    border = "top", title.
+  }
   class "tools/*.lua" as LTOOLS <<Lua>> {
     bash, read_file, write_file,
     edit_file, glob, grep, web_fetch,
@@ -170,6 +178,21 @@ package "crate: core  (headless-safe runtime)" as CORE #FFF6E0 {
       ' next request from queue.
     }
     class Clipboard
+    class Messages <<persistent log — nvim-shaped>> {
+      ring: VecDeque<MessageEntry>
+      cap: 1024
+      unread_errors: u32
+      ' Pure data. Lua errors split into
+      ' summary (1-line toast) + full
+      ' (multi-line, traceback included).
+      ' Toasts show summary; /messages
+      ' opens a read-only viewer over
+      ' the full bodies.
+      --
+      append(kind, source, full)
+      list() -> Vec<MessageEntry>
+      mark_read() / clear()
+    }
     class Timers {
       set(ms, fn) -> TimerId
       set_interval(ms, fn) -> TimerId
@@ -294,7 +317,15 @@ package "crate: core  (headless-safe runtime)" as CORE #FFF6E0 {
   package "content data types  (pure data — zero terminal deps)" as CDATA #FFE9B5 {
     class Buffer <<lines + extmarks — core>> {
       lines, undo
-      modifiable: bool        ' data-layer guard
+      readonly: bool          ' data-layer edit guard.
+                              ' True elides set_lines,
+                              ' set_source, undo. The
+                              ' overlay viewer fallthrough
+                              ' auto-flips vim_mode to
+                              ' Normal when the focused
+                              ' leaf's buffer is readonly,
+                              ' so /messages opens in
+                              ' nav-only mode.
       namespaces, extmarks
       ' Pure data. Theme refs are
       ' highlight ids, not raw colors.
@@ -583,15 +614,28 @@ package "tui::ui  (terminal UI primitives module)" as UI #E6F1FF {
       Fill(u16)
     }
     enum BorderStyle {
-      Sharp / Rounded
+      Single | Double | Rounded
     }
-    class Borders <<bitflags>> {
-      TOP | RIGHT | BOTTOM | LEFT
-      ALL  | NONE
+    class BorderSides <<edge bitflag>> {
+      top:    bool
+      right:  bool
+      bottom: bool
+      left:   bool
+      ALL | NONE | TOP
     }
     class Border {
       style: BorderStyle
-      sides: Borders
+      sides: BorderSides
+      ' missing sides paint nothing
+      ' AND don't reserve a row/col;
+      ' corners only when both adjacent
+      ' sides are on (otherwise the lone
+      ' edge runs full extent with the
+      ' straight glyph).
+      ' Title is always inset by 1 cell
+      ' from each end of the top edge so
+      ' the leading cell stays painted by
+      ' the corner / horizontal bar.
     }
     enum Anchor {
       Screen(Center)
@@ -812,6 +856,7 @@ Core *--> AppConfig
 Core *--> Session
 Core *--> Confirms
 Core *--> Clipboard
+Core *--> Messages
 Core *--> Timers
 Core *--> Cells
 Core *--> LuaShared
@@ -845,6 +890,8 @@ Window ..> UiHost           : direct mutation\nvia &mut dyn UiHost
 
 ' Lua → tui Rust API
 LDLG     -[#aa6,dashed]-> LDLGHELP        : composes via dialog.lua
+LMSG     -[#aa6,dashed]-> Messages         : list/append/clear via\nsmelt.messages.*
+LMSG     -[#aa6,dashed]-> LDLGHELP         : composes via dialog.lua
 LDLGHELP -[#aa6,dashed]-> Ui              : splices into splits\nor opens an Overlay
 LDLGHELP -[#aa6,dashed]-> LWID            : composes widgets
 LSTAT    -[#aa6,dashed]-> Window          : statusline as a Window
@@ -892,7 +939,7 @@ LayoutTree --> Constraint
 BlockLayout  --> HboxItem      : per-column sizing
 HboxItem     --> BlockConstraint
 Border     --> BorderStyle
-Border     --> Borders
+Border     --> BorderSides
 LayoutTree --> Border          : optional chrome
 Overlay    --> Anchor          : positioning
 Overlay    --> LayoutTree      : tiles members
@@ -937,7 +984,7 @@ note as N3b #EEFFEE
   |  (highlights,   |        |        |
   |   signs, virt   |        |        |
   |   text)         |        |        |
-  | modifiable flag |   X    |        |
+  | readonly flag   |   X    |        |
   | undo history    |   X    |        |
   | on_change cb    |   X    |        |
   | cursor pos      |        |   X    |

@@ -176,21 +176,29 @@ impl LayoutTree {
 
 fn natural_box(items: &[Item], chrome: &Chrome, cap: (u16, u16), vertical: bool) -> (u16, u16) {
     let (cap_w, cap_h) = cap;
-    let border_inset: u16 = if chrome.border.is_some() { 2 } else { 0 };
+    let (border_w, border_h) = match chrome.border {
+        Some(b) => {
+            let s = b.sides;
+            let bw = u16::from(s.left) + u16::from(s.right);
+            let bh = u16::from(s.top) + u16::from(s.bottom);
+            (bw, bh)
+        }
+        None => (0, 0),
+    };
     let gaps = chrome
         .gap
         .saturating_mul(items.len().saturating_sub(1) as u16);
 
-    // Inner cap subtracts border (both axes) and gap (primary only).
+    // Inner cap subtracts border (per-axis, per-side) and gap (primary only).
     let (primary_cap, secondary_cap) = if vertical {
         (
-            cap_h.saturating_sub(border_inset).saturating_sub(gaps),
-            cap_w.saturating_sub(border_inset),
+            cap_h.saturating_sub(border_h).saturating_sub(gaps),
+            cap_w.saturating_sub(border_w),
         )
     } else {
         (
-            cap_w.saturating_sub(border_inset).saturating_sub(gaps),
-            cap_h.saturating_sub(border_inset),
+            cap_w.saturating_sub(border_w).saturating_sub(gaps),
+            cap_h.saturating_sub(border_h),
         )
     };
 
@@ -229,8 +237,13 @@ fn natural_box(items: &[Item], chrome: &Chrome, cap: (u16, u16), vertical: bool)
         primary = primary.saturating_add(primary_size);
         secondary = secondary.max(cross_size);
     }
-    primary = primary.saturating_add(gaps).saturating_add(border_inset);
-    secondary = secondary.saturating_add(border_inset);
+    let (primary_border, secondary_border) = if vertical {
+        (border_h, border_w)
+    } else {
+        (border_w, border_h)
+    };
+    primary = primary.saturating_add(gaps).saturating_add(primary_border);
+    secondary = secondary.saturating_add(secondary_border);
 
     let (w, h) = if vertical {
         (secondary, primary)
@@ -294,12 +307,70 @@ pub enum Anchor {
     ScreenBottom { above_rows: u16 },
 }
 
+/// Glyph family painted along a border edge.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Border {
-    None,
+pub enum BorderStyle {
     Single,
     Double,
     Rounded,
+}
+
+/// Which edges of a container's chrome get a frame painted. Each side
+/// also drives the inset the children render inside — a missing side
+/// means children paint flush to that edge with no reserved row/column.
+/// Mirrors the bitflag shape from `ARCHITECTURE.md`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct BorderSides {
+    pub top: bool,
+    pub right: bool,
+    pub bottom: bool,
+    pub left: bool,
+}
+
+impl BorderSides {
+    pub const ALL: Self = Self {
+        top: true,
+        right: true,
+        bottom: true,
+        left: true,
+    };
+    pub const NONE: Self = Self {
+        top: false,
+        right: false,
+        bottom: false,
+        left: false,
+    };
+    pub const TOP: Self = Self {
+        top: true,
+        right: false,
+        bottom: false,
+        left: false,
+    };
+}
+
+/// A frame around a container: a glyph family plus the set of edges
+/// that get painted. Use `Border::all(style)` for the common
+/// "frame on every side" case; `Border::sides(style, sides)` for
+/// per-edge control.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Border {
+    pub style: BorderStyle,
+    pub sides: BorderSides,
+}
+
+impl Border {
+    pub const fn new(style: BorderStyle, sides: BorderSides) -> Self {
+        Self { style, sides }
+    }
+    pub const fn all(style: BorderStyle) -> Self {
+        Self::new(style, BorderSides::ALL)
+    }
+    pub const fn top(style: BorderStyle) -> Self {
+        Self::new(style, BorderSides::TOP)
+    }
+    pub const SINGLE: Border = Border::all(BorderStyle::Single);
+    pub const DOUBLE: Border = Border::all(BorderStyle::Double);
+    pub const ROUNDED: Border = Border::all(BorderStyle::Rounded);
 }
 
 #[derive(Clone, Debug, Default)]
@@ -316,12 +387,33 @@ pub fn resolve_layout(tree: &LayoutTree, area: Rect) -> HashMap<super::WinId, Re
     result
 }
 
+/// Compute the inner area after subtracting the border's per-side
+/// reservations. Each enabled side consumes one row/column at that
+/// edge; missing sides leave the children flush. Returns `area`
+/// unchanged when `border` is `None`.
+pub fn inset_for_border(area: Rect, border: Option<Border>) -> Rect {
+    let Some(b) = border else {
+        return area;
+    };
+    let s = b.sides;
+    let top_pad = if s.top { 1 } else { 0 };
+    let bot_pad = if s.bottom { 1 } else { 0 };
+    let left_pad = if s.left { 1 } else { 0 };
+    let right_pad = if s.right { 1 } else { 0 };
+    let h = area.height.saturating_sub(top_pad).saturating_sub(bot_pad);
+    let w = area
+        .width
+        .saturating_sub(left_pad)
+        .saturating_sub(right_pad);
+    Rect::new(area.top + top_pad, area.left + left_pad, w, h)
+}
+
 /// Paint a container's chrome (border + title) into `grid` at `area`.
-/// `Border::None` is a no-op — pads `gap` and `separator` are
-/// layout-side and consume cells that the content fills, so they're
-/// rendered by the children, not chrome paint. Title sits in the top
-/// border row, after the top-left corner glyph; truncates at the
-/// pre-corner column.
+/// Honors `border.sides`: each enabled edge is drawn with the style's
+/// glyph; corners are drawn only when both adjacent edges are enabled
+/// (otherwise the lone edge runs the full extent with its straight
+/// glyph). Title sits in the top edge after the leading column;
+/// requires `border.sides.top`.
 pub fn paint_chrome(
     grid: &mut crate::ui::grid::Grid,
     area: Rect,
@@ -331,41 +423,74 @@ pub fn paint_chrome(
     let Some(border) = chrome.border else {
         return;
     };
-    if area.width < 2 || area.height < 2 {
+    let sides = border.sides;
+    if !(sides.top || sides.right || sides.bottom || sides.left) {
         return;
     }
-    let (h, v, tl, tr, bl, br) = match border {
-        Border::None => return,
-        Border::Single => ('─', '│', '┌', '┐', '└', '┘'),
-        Border::Double => ('═', '║', '╔', '╗', '╚', '╝'),
-        Border::Rounded => ('─', '│', '╭', '╮', '╰', '╯'),
+    if area.width == 0 || area.height == 0 {
+        return;
+    }
+    let (h, v, tl, tr, bl, br) = match border.style {
+        BorderStyle::Single => ('─', '│', '┌', '┐', '└', '┘'),
+        BorderStyle::Double => ('═', '║', '╔', '╗', '╚', '╝'),
+        BorderStyle::Rounded => ('─', '│', '╭', '╮', '╰', '╯'),
     };
     let style = super::grid::Style::default();
     let right = area.left + area.width - 1;
     let bottom = area.top + area.height - 1;
 
-    grid.set(area.left, area.top, tl, style);
-    for col in (area.left + 1)..right {
-        grid.set(col, area.top, h, style);
+    if sides.top {
+        for col in area.left..=right {
+            grid.set(col, area.top, h, style);
+        }
     }
-    grid.set(right, area.top, tr, style);
-
-    for row in (area.top + 1)..bottom {
-        grid.set(area.left, row, v, style);
-        grid.set(right, row, v, style);
+    if sides.bottom && bottom != area.top {
+        for col in area.left..=right {
+            grid.set(col, bottom, h, style);
+        }
+    }
+    if sides.left {
+        for row in area.top..=bottom {
+            grid.set(area.left, row, v, style);
+        }
+    }
+    if sides.right && right != area.left {
+        for row in area.top..=bottom {
+            grid.set(right, row, v, style);
+        }
+    }
+    // Corners: only when both adjacent edges are present.
+    if sides.top && sides.left {
+        grid.set(area.left, area.top, tl, style);
+    }
+    if sides.top && sides.right && right != area.left {
+        grid.set(right, area.top, tr, style);
+    }
+    if sides.bottom && sides.left && bottom != area.top {
+        grid.set(area.left, bottom, bl, style);
+    }
+    if sides.bottom && sides.right && bottom != area.top && right != area.left {
+        grid.set(right, bottom, br, style);
     }
 
-    grid.set(area.left, bottom, bl, style);
-    for col in (area.left + 1)..right {
-        grid.set(col, bottom, h, style);
-    }
-    grid.set(right, bottom, br, style);
-
-    if let Some(title) = chrome.title.as_deref() {
-        let max_title_cols = area.width.saturating_sub(2);
-        if max_title_cols > 0 {
-            let truncated: String = title.chars().take(max_title_cols as usize).collect();
-            grid.put_str(area.left + 1, area.top, &truncated, style);
+    if sides.top {
+        if let Some(title) = chrome.title.as_deref() {
+            // Title is always inset by one cell from each end of the
+            // top edge. Whatever sits in those leading/trailing cells
+            // — a corner when the adjacent side is on, the horizontal
+            // bar otherwise — was painted in the loops above and stays
+            // painted. This keeps the title visually anchored at the
+            // same offset whether or not the container has a left or
+            // right side, so a title on a top-only border (e.g. the
+            // /messages dock) reads as `─title──` rather than jumping
+            // hard against the container's leading column.
+            let title_left = area.left + 1;
+            let title_right_excl = right;
+            if title_right_excl > title_left {
+                let max_title_cols = title_right_excl - title_left;
+                let truncated: String = title.chars().take(max_title_cols as usize).collect();
+                grid.put_str(title_left, area.top, &truncated, style);
+            }
         }
     }
 }
@@ -391,15 +516,7 @@ fn resolve_box(
     vertical: bool,
     out: &mut HashMap<super::WinId, Rect>,
 ) {
-    let inner = match chrome.border {
-        Some(_) => Rect::new(
-            area.top + 1,
-            area.left + 1,
-            area.width.saturating_sub(2),
-            area.height.saturating_sub(2),
-        ),
-        None => area,
-    };
+    let inner = inset_for_border(area, chrome.border);
     let primary_total = if vertical { inner.height } else { inner.width };
     let total_gap = chrome
         .gap
@@ -667,7 +784,7 @@ mod tests {
     #[test]
     fn border_insets_children_by_one_each_side() {
         let tree = LayoutTree::vbox(vec![(Constraint::Fill, LayoutTree::leaf(A))])
-            .with_border(Border::Single);
+            .with_border(Border::SINGLE);
         let result = resolve_layout(&tree, Rect::new(0, 0, 80, 24));
         assert_eq!(result[&A], Rect::new(1, 1, 78, 22));
     }
@@ -678,7 +795,7 @@ mod tests {
             (Constraint::Fill, LayoutTree::leaf(A)),
             (Constraint::Fill, LayoutTree::leaf(B)),
         ])
-        .with_border(Border::Single)
+        .with_border(Border::SINGLE)
         .with_gap(1)
         .with_title("dialog");
         let result = resolve_layout(&tree, Rect::new(0, 0, 80, 24));
@@ -728,7 +845,7 @@ mod tests {
     #[test]
     fn natural_size_border_adds_two_each_axis() {
         let tree = LayoutTree::vbox(vec![(Constraint::Length(10), LayoutTree::leaf(A))])
-            .with_border(Border::Single);
+            .with_border(Border::SINGLE);
         // height: 10 + 2 (border); width: 0 + 2 (border).
         assert_eq!(tree.natural_size((80, 24)), (2, 12));
     }
@@ -818,7 +935,7 @@ mod tests {
                 (Constraint::Length(10), LayoutTree::leaf(B)),
             ]),
         )])
-        .with_border(Border::Single);
+        .with_border(Border::SINGLE);
         // Outer: 5 (length) + 2 (border) = 7 height; inner Hbox width
         // 30 + 2 (outer border) = 32.
         assert_eq!(tree.natural_size((80, 24)), (32, 7));
@@ -841,7 +958,7 @@ mod tests {
     fn paint_chrome_single_border_draws_corners_and_edges() {
         let mut grid = crate::ui::grid::Grid::new(10, 5);
         let chrome = Chrome {
-            border: Some(Border::Single),
+            border: Some(Border::SINGLE),
             ..Chrome::default()
         };
         paint_chrome(
@@ -862,7 +979,7 @@ mod tests {
     fn paint_chrome_title_lands_on_top_border() {
         let mut grid = crate::ui::grid::Grid::new(20, 5);
         let chrome = Chrome {
-            border: Some(Border::Rounded),
+            border: Some(Border::ROUNDED),
             title: Some("hello".into()),
             ..Chrome::default()
         };
@@ -883,7 +1000,7 @@ mod tests {
     fn paint_chrome_truncates_title_to_inner_width() {
         let mut grid = crate::ui::grid::Grid::new(8, 3);
         let chrome = Chrome {
-            border: Some(Border::Single),
+            border: Some(Border::SINGLE),
             title: Some("muchtoolong".into()),
             ..Chrome::default()
         };
