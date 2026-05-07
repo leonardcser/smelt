@@ -190,7 +190,8 @@ mod tests {
 
     #[test]
     fn build_layout_tree_includes_status_as_leaf() {
-        let mut tree_leaves: Vec<WinId> = LayoutTree::vbox(Vec::new()).leaves_in_order();
+        use crate::smelt_term::PaintId;
+        let mut tree_leaves: Vec<PaintId> = LayoutTree::vbox(Vec::new()).leaves_in_order();
         assert!(tree_leaves.is_empty());
         let status = WinId(99);
         let tree = build_layout_tree(
@@ -203,7 +204,11 @@ mod tests {
         tree_leaves = tree.leaves_in_order();
         assert_eq!(
             tree_leaves,
-            vec![crate::app::TRANSCRIPT_WIN, crate::app::PROMPT_WIN, status]
+            vec![
+                PaintId::from(crate::app::TRANSCRIPT_WIN),
+                PaintId::from(crate::app::PROMPT_WIN),
+                PaintId::from(status),
+            ]
         );
         let _ = Constraint::Fill;
     }

@@ -829,7 +829,13 @@ impl TuiApp {
         if overlay.blocks_agent {
             return;
         }
-        let Some(root) = overlay.layout.leaves_in_order().into_iter().next() else {
+        let Some(root) = overlay
+            .layout
+            .leaves_in_order()
+            .into_iter()
+            .next()
+            .map(|p| crate::smelt_term::WinId(p.0))
+        else {
             return;
         };
         let lua = &self.lua;
