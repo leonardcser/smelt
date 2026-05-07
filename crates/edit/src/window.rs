@@ -1,7 +1,7 @@
 use super::event::Status;
-use super::grid::{GridSlice, Style};
-use super::layout::{Gutters, Rect};
 use super::text::{self, byte_to_cell, cell_to_byte};
+use smelt_term::grid::{GridSlice, Style};
+use smelt_term::layout::{Gutters, Rect};
 use super::vim::{self, Action, VimContext, VimMode, VimWindowState};
 use super::Buffer;
 use super::Clipboard;

@@ -221,7 +221,7 @@ pub fn resolve_anchor(anchor: &Anchor, size: (u16, u16), ctx: &AnchorContext<'_>
             row_offset,
             col_offset,
         } => {
-            let target_rect = ctx.win_rects.get(target)?;
+            let target_rect = ctx.win_rects.get(&WinId(target.0))?;
             let (r, c) = match attach {
                 Corner::NW => (target_rect.top as i32, target_rect.left as i32),
                 Corner::NE => (
@@ -307,7 +307,7 @@ mod tests {
         let ov = Overlay::new(
             layout,
             Anchor::Win {
-                target: WinId(7),
+                target: WinId(7).into(),
                 attach: Corner::NW,
                 row_offset: 0,
                 col_offset: 0,
@@ -425,7 +425,7 @@ mod tests {
         rects.insert(WinId(7), Rect::new(10, 20, 40, 8));
         let r = resolve_anchor(
             &Anchor::Win {
-                target: WinId(7),
+                target: WinId(7).into(),
                 attach: Corner::NW,
                 row_offset: 0,
                 col_offset: 0,
@@ -445,7 +445,7 @@ mod tests {
         // top-left = (14, 50).
         let r = resolve_anchor(
             &Anchor::Win {
-                target: WinId(7),
+                target: WinId(7).into(),
                 attach: Corner::SE,
                 row_offset: 0,
                 col_offset: 0,
@@ -462,7 +462,7 @@ mod tests {
         let rects = HashMap::new();
         let r = resolve_anchor(
             &Anchor::Win {
-                target: WinId(999),
+                target: WinId(999).into(),
                 attach: Corner::NW,
                 row_offset: 0,
                 col_offset: 0,
@@ -480,7 +480,7 @@ mod tests {
         // NW corner at (10, 20) shifted up 1, right 3 → (9, 23).
         let r = resolve_anchor(
             &Anchor::Win {
-                target: WinId(7),
+                target: WinId(7).into(),
                 attach: Corner::NW,
                 row_offset: -1,
                 col_offset: 3,

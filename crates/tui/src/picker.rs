@@ -221,7 +221,7 @@ fn layout_for(leaf: WinId, height: u16) -> LayoutTree {
 fn anchor_for(placement: PickerPlacement, height: u16) -> Anchor {
     match placement {
         PickerPlacement::PromptDocked { .. } => Anchor::Win {
-            target: PROMPT_WIN,
+            target: PROMPT_WIN.into(),
             attach: Corner::NW,
             row_offset: -(height as i32),
             col_offset: 0,
