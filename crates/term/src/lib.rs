@@ -1,10 +1,12 @@
 pub mod callback;
-pub(crate) mod compositor;
+pub mod compositor;
 pub(crate) mod event;
-pub(crate) mod flush;
+pub mod flush;
 pub mod geometry;
 pub mod grid;
+pub mod hit;
 pub mod layout;
+pub mod line;
 pub(crate) mod motions;
 pub(crate) mod overlay;
 pub mod snapshot;
@@ -43,10 +45,14 @@ pub type LuaInvoke<'a> = dyn FnMut(callback::LuaHandle, WinId, &callback::Payloa
 
 use callback::Callbacks;
 pub use callback::{Callback, CallbackCtx, CallbackResult, KeyBind, LuaHandle, Payload, WinEvent};
-use compositor::Compositor;
+pub use compositor::Compositor;
+pub use flush::flush_diff;
+pub use grid::{to_crossterm_color, CellUpdate};
 pub use event::{Event, Status};
 pub use grid::{Cell, Grid, GridSlice, Style};
+pub use hit::HitRegistry;
 pub use layout::{Border, Constraint, Corner, Gutters, LayoutTree, PaintId, Rect};
+pub use line::{Line, Span};
 use overlay::OverlayHitTarget;
 pub use overlay::{HitTarget, Overlay, OverlayId};
 pub use snapshot::SnapshotFrame;
@@ -74,10 +80,13 @@ pub struct Ui {
     /// from `Ui::render`'s post-layer pass, before overlays.
     splits: LayoutTree,
     /// Theme registry — single source of truth for highlight groups.
-    /// Cloned into every `DrawContext` at frame start so widgets read
-    /// `ctx.theme.get(name)` instead of host-side colour constants. The
-    /// host populates this at startup; users override via Lua.
-    theme: Theme,
+    /// Held behind an `Arc` so per-leaf `DrawContext` construction
+    /// shares the registry by pointer instead of cloning the whole
+    /// `HashMap<String, Style>` every frame, every leaf. Mutations
+    /// from the host go through `Arc::make_mut` (copy-on-write); since
+    /// theme writes only happen at startup or on Lua override (rare),
+    /// the cow path almost never triggers a real clone.
+    theme: std::sync::Arc<Theme>,
     /// Overlay storage. Each overlay is a positioned LayoutTree of
     /// windows; `Ui::overlay_open` returns an `OverlayId` and
     /// `resolve_anchor` is the per-frame positioning primitive.
@@ -157,7 +166,7 @@ impl Ui {
             compositor: Compositor::new(80, 24),
             callbacks: Callbacks::new(),
             splits: LayoutTree::vbox(Vec::new()),
-            theme: Theme::new(),
+            theme: std::sync::Arc::new(Theme::new()),
             overlays: Vec::new(),
             next_overlay_id: 1,
             focus_history: Vec::new(),
@@ -1057,7 +1066,9 @@ impl Ui {
         let splits_tree = self.splits.clone();
         let term_w = self.terminal_size.0;
         let term_h = self.terminal_size.1;
-        self.compositor.render_with(&self.theme, w, |grid, theme| {
+        let theme_arc = std::sync::Arc::clone(&self.theme);
+        self.compositor.render_with(&self.theme, w, move |grid, _theme| {
+            let theme = &theme_arc;
             // Paint splits first so overlays draw on top, matching the
             // prior order (status was a compositor layer at z=500;
             // overlays in the closure ran *after* every compositor
@@ -1191,8 +1202,12 @@ impl Ui {
         &self.theme
     }
 
+    /// Mutable theme access. Triggers a copy-on-write clone via
+    /// `Arc::make_mut` if any [`DrawContext`] from a previous frame
+    /// still holds a reference to the prior theme; otherwise mutates
+    /// the shared registry in place.
     pub fn theme_mut(&mut self) -> &mut Theme {
-        &mut self.theme
+        std::sync::Arc::make_mut(&mut self.theme)
     }
 
     /// Single Ui-side entry point for terminal events. Fans out by
@@ -1743,7 +1758,7 @@ fn chrome_zone(rect: Rect, ov: &Overlay, row: u16, col: u16) -> overlay::ChromeZ
 #[allow(clippy::too_many_arguments)]
 fn paint_overlay(
     grid: &mut Grid,
-    theme: &Theme,
+    theme: &std::sync::Arc<Theme>,
     area: Rect,
     overlay: &Overlay,
     wins: &HashMap<WinId, Window>,
@@ -1774,7 +1789,7 @@ fn paint_overlay(
 #[allow(clippy::too_many_arguments)]
 fn paint_layout_node(
     grid: &mut Grid,
-    theme: &Theme,
+    theme: &std::sync::Arc<Theme>,
     node: &LayoutTree,
     area: Rect,
     wins: &HashMap<WinId, Window>,
@@ -1803,7 +1818,7 @@ fn paint_layout_node(
                 } else {
                     CursorShape::Hidden
                 },
-                theme: theme.clone(),
+                theme: std::sync::Arc::clone(theme),
             };
             win.render(buf, &mut slice, &ctx);
         }
@@ -1814,7 +1829,7 @@ fn paint_layout_node(
                 terminal_height: term_size.1,
                 focused: false,
                 cursor_shape: CursorShape::Hidden,
-                theme: theme.clone(),
+                theme: std::sync::Arc::clone(theme),
             };
             paint(*id, &mut slice, &ctx);
         }

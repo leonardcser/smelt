@@ -176,6 +176,24 @@ impl Grid {
         }
     }
 
+    /// Paint a [`Line`] of styled spans starting at `(x, y)`. Each
+    /// span paints with its own style; spans run left-to-right with
+    /// no implicit gap. Clips at the right edge.
+    pub fn put_line(&mut self, x: u16, y: u16, line: &crate::line::Line<'_>) {
+        let mut col = x;
+        for span in &line.spans {
+            if col >= self.width {
+                break;
+            }
+            let before = col;
+            self.put_str(col, y, span.text.as_ref(), span.style);
+            col = col.saturating_add(span.width());
+            if col == before {
+                break;
+            }
+        }
+    }
+
     pub fn fill(&mut self, area: Rect, symbol: char, style: Style) {
         for row in area.top..area.bottom().min(self.height) {
             for col in area.left..area.right().min(self.width) {
@@ -316,6 +334,27 @@ impl<'a> GridSlice<'a> {
         if x < self.area.width && y < self.area.height {
             self.grid
                 .put_char(self.area.left + x, self.area.top + y, symbol, fg);
+        }
+    }
+
+    /// Paint a styled [`Line`] at slice-local coords. See
+    /// [`Grid::put_line`] for semantics — spans paint left-to-right
+    /// with their own styles, clipping at the slice's right edge.
+    pub fn put_line(&mut self, x: u16, y: u16, line: &crate::line::Line<'_>) {
+        if y >= self.area.height {
+            return;
+        }
+        let mut col = x;
+        for span in &line.spans {
+            if col >= self.area.width {
+                break;
+            }
+            let before = col;
+            self.put_str(col, y, span.text.as_ref(), span.style);
+            col = col.saturating_add(span.width());
+            if col == before {
+                break;
+            }
         }
     }
 
@@ -478,6 +517,38 @@ mod tests {
         assert_eq!(cell.symbol, 'A');
         assert_eq!(cell.style.fg, Some(Color::Green));
         assert_eq!(cell.style.bg, None);
+    }
+
+    #[test]
+    fn put_line_paints_spans_with_their_styles() {
+        use crate::line::{Line, Span};
+        let mut grid = Grid::new(15, 1);
+        let red = Style::new().fg(Color::Red);
+        let line = Line::from_spans([
+            Span::raw("ab"),
+            Span::styled("CD", red),
+            Span::raw("ef"),
+        ]);
+        grid.put_line(1, 0, &line);
+        assert_eq!(grid.cell(1, 0).symbol, 'a');
+        assert_eq!(grid.cell(1, 0).style.fg, None);
+        assert_eq!(grid.cell(3, 0).symbol, 'C');
+        assert_eq!(grid.cell(3, 0).style.fg, Some(Color::Red));
+        assert_eq!(grid.cell(5, 0).symbol, 'e');
+        assert_eq!(grid.cell(5, 0).style.fg, None);
+    }
+
+    #[test]
+    fn slice_put_line_clips_at_right_edge() {
+        use crate::line::{Line, Span};
+        let mut grid = Grid::new(10, 1);
+        {
+            let mut slice = grid.slice_mut(Rect::new(0, 2, 5, 1));
+            slice.put_line(0, 0, &Line::from_spans([Span::raw("abcdefgh")]));
+        }
+        assert_eq!(grid.cell(2, 0).symbol, 'a');
+        assert_eq!(grid.cell(6, 0).symbol, 'e');
+        assert_eq!(grid.cell(7, 0).symbol, ' ');
     }
 
     #[test]

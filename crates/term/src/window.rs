@@ -25,8 +25,12 @@ pub struct DrawContext {
     pub cursor_shape: CursorShape,
     /// Theme registry resolved per-frame from `Ui`. Renderers read named
     /// highlight groups (`"Visual"`, `"SmeltAccent"`, …) via
-    /// `theme.get(name)`; missing names return `Style::default()`.
-    pub theme: Theme,
+    /// `theme.get(name)`; missing names return `Style::default()`. Held
+    /// behind an `Arc` so per-leaf `DrawContext` construction is a
+    /// pointer bump, not a `Theme` clone — themes carry an internal
+    /// `HashMap<String, Style>` keyed by hl-group name and would
+    /// allocate every frame, every leaf, otherwise.
+    pub theme: std::sync::Arc<Theme>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -1284,7 +1288,7 @@ mod tests {
             terminal_height: 10,
             focused: false,
             cursor_shape: CursorShape::Hidden,
-            theme: Theme::default(),
+            theme: std::sync::Arc::new(Theme::default()),
         }
     }
 
@@ -1464,7 +1468,7 @@ mod tests {
             terminal_height: 10,
             focused: true,
             cursor_shape: CursorShape::Hidden,
-            theme,
+            theme: std::sync::Arc::new(theme),
         };
         let mut grid = Grid::new(10, 3);
         let mut slice = grid.slice_mut(Rect::new(0, 0, 10, 3));
@@ -1494,7 +1498,7 @@ mod tests {
             terminal_height: 10,
             focused: true,
             cursor_shape: CursorShape::Hidden,
-            theme,
+            theme: std::sync::Arc::new(theme),
         };
         let mut grid = Grid::new(10, 2);
         let mut slice = grid.slice_mut(Rect::new(0, 0, 10, 2));
@@ -1518,7 +1522,7 @@ mod tests {
             terminal_height: 10,
             focused: false,
             cursor_shape: CursorShape::Hidden,
-            theme,
+            theme: std::sync::Arc::new(theme),
         };
         let mut grid = Grid::new(10, 1);
         let mut slice = grid.slice_mut(Rect::new(0, 0, 10, 1));
@@ -1551,7 +1555,7 @@ mod tests {
             terminal_height: 10,
             focused: true,
             cursor_shape: CursorShape::Hidden,
-            theme,
+            theme: std::sync::Arc::new(theme),
         };
         let mut grid = Grid::new(10, 1);
         let mut slice = grid.slice_mut(Rect::new(0, 0, 10, 1));
@@ -1581,7 +1585,7 @@ mod tests {
             terminal_height: 10,
             focused: false,
             cursor_shape: CursorShape::Hidden,
-            theme,
+            theme: std::sync::Arc::new(theme),
         };
         let mut grid = Grid::new(10, 2);
         let mut slice = grid.slice_mut(Rect::new(0, 0, 10, 2));
@@ -1609,7 +1613,7 @@ mod tests {
             terminal_height: 10,
             focused: false,
             cursor_shape: CursorShape::Hidden,
-            theme,
+            theme: std::sync::Arc::new(theme),
         };
         let mut grid = Grid::new(10, 1);
         let mut slice = grid.slice_mut(Rect::new(0, 0, 10, 1));
@@ -1637,7 +1641,7 @@ mod tests {
             terminal_height: 10,
             focused: false,
             cursor_shape: CursorShape::Hidden,
-            theme,
+            theme: std::sync::Arc::new(theme),
         };
         let mut grid = Grid::new(10, 1);
         let mut slice = grid.slice_mut(Rect::new(0, 0, 10, 1));
@@ -1661,7 +1665,7 @@ mod tests {
             terminal_height: 10,
             focused: false,
             cursor_shape: CursorShape::Hidden,
-            theme,
+            theme: std::sync::Arc::new(theme),
         };
         let mut grid = Grid::new(5, 1);
         let mut slice = grid.slice_mut(Rect::new(0, 0, 5, 1));
@@ -1693,7 +1697,7 @@ mod tests {
             terminal_height: 10,
             focused: true,
             cursor_shape: CursorShape::Hidden,
-            theme,
+            theme: std::sync::Arc::new(theme),
         };
         let mut grid = Grid::new(10, 1);
         let mut slice = grid.slice_mut(Rect::new(0, 0, 10, 1));
@@ -1814,7 +1818,7 @@ mod tests {
             terminal_height: 10,
             focused: false,
             cursor_shape: CursorShape::Hidden,
-            theme,
+            theme: std::sync::Arc::new(theme),
         };
         let mut grid = Grid::new(20, 10);
         let mut slice = grid.slice_mut(Rect::new(0, 0, 20, 10));
@@ -1845,7 +1849,7 @@ mod tests {
             terminal_height: 10,
             focused: false,
             cursor_shape: CursorShape::Hidden,
-            theme,
+            theme: std::sync::Arc::new(theme),
         };
         let mut grid = Grid::new(20, 10);
         let mut slice = grid.slice_mut(Rect::new(0, 0, 20, 10));

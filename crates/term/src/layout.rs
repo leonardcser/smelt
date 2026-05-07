@@ -69,8 +69,11 @@ pub struct Chrome {
     pub border: Option<Border>,
     /// Optional title displayed in the top border row. Doesn't
     /// consume layout space (lives in the border row); requires
-    /// `border = Some(_)` to render.
-    pub title: Option<String>,
+    /// `border = Some(_)` to render. Held as a styled [`Line`] so
+    /// titles can mix colours / weights without the host hand-painting
+    /// the border row. `From<&str>` / `From<String>` keep plain-string
+    /// callers one-line.
+    pub title: Option<crate::line::Line<'static>>,
 }
 
 #[derive(Clone, Debug)]
@@ -140,7 +143,7 @@ impl LayoutTree {
         self
     }
 
-    pub fn with_title(mut self, t: impl Into<String>) -> Self {
+    pub fn with_title(mut self, t: impl Into<crate::line::Line<'static>>) -> Self {
         if let Some(c) = self.chrome_mut() {
             c.title = Some(t.into());
         }
@@ -533,7 +536,7 @@ pub fn paint_chrome(
     }
 
     if sides.top {
-        if let Some(title) = chrome.title.as_deref() {
+        if let Some(title) = chrome.title.as_ref() {
             // Title is always inset by one cell from each end of the
             // top edge. Whatever sits in those leading/trailing cells
             // — a corner when the adjacent side is on, the horizontal
@@ -546,11 +549,47 @@ pub fn paint_chrome(
             let title_left = area.left + 1;
             let title_right_excl = right;
             if title_right_excl > title_left {
-                let max_title_cols = title_right_excl - title_left;
-                let truncated: String = title.chars().take(max_title_cols as usize).collect();
-                grid.put_str(title_left, area.top, &truncated, style);
+                let limit = title_right_excl;
+                let mut col = title_left;
+                for span in &title.spans {
+                    if col >= limit {
+                        break;
+                    }
+                    let span_style = merge_title_span_style(style, span.style);
+                    let mut written = false;
+                    for ch in span.text.chars() {
+                        use unicode_width::UnicodeWidthChar;
+                        let cw = UnicodeWidthChar::width(ch).unwrap_or(1).max(1) as u16;
+                        if col + cw > limit {
+                            break;
+                        }
+                        grid.set(col, area.top, ch, span_style);
+                        col += cw;
+                        written = true;
+                    }
+                    if !written {
+                        break;
+                    }
+                }
             }
         }
+    }
+}
+
+/// Layer a title span's style on top of the chrome (border) style.
+/// Same merge rule as `window::merge_styles`: span fg/bg override
+/// when present; attribute booleans OR. Spans with `Style::default()`
+/// inherit the border's full styling so titles seamlessly blend with
+/// the frame.
+fn merge_title_span_style(base: crate::grid::Style, span: crate::grid::Style) -> crate::grid::Style {
+    crate::grid::Style {
+        fg: span.fg.or(base.fg),
+        bg: span.bg.or(base.bg),
+        bold: base.bold || span.bold,
+        dim: base.dim || span.dim,
+        italic: base.italic || span.italic,
+        underline: base.underline || span.underline,
+        crossedout: base.crossedout || span.crossedout,
     }
 }
 
@@ -1183,6 +1222,32 @@ mod tests {
         assert_eq!(grid.cell(9, 4).symbol, '┘');
         assert_eq!(grid.cell(5, 0).symbol, '─');
         assert_eq!(grid.cell(0, 2).symbol, '│');
+    }
+
+    #[test]
+    fn paint_chrome_title_paints_styled_spans() {
+        use crate::grid::Color;
+        use crate::line::{Line, Span};
+        let mut grid = crate::grid::Grid::new(20, 3);
+        let red = crate::grid::Style::new().fg(Color::Red);
+        let chrome = Chrome {
+            border: Some(Border::ROUNDED),
+            title: Some(Line::from_spans([
+                Span::raw("ok "),
+                Span::styled("FAIL", red),
+            ])),
+            ..Chrome::default()
+        };
+        paint_chrome(
+            &mut grid,
+            Rect::new(0, 0, 20, 3),
+            &chrome,
+            &crate::Theme::default(),
+        );
+        assert_eq!(grid.cell(1, 0).symbol, 'o');
+        assert_eq!(grid.cell(1, 0).style.fg, None);
+        assert_eq!(grid.cell(4, 0).symbol, 'F');
+        assert_eq!(grid.cell(4, 0).style.fg, Some(Color::Red));
     }
 
     #[test]
