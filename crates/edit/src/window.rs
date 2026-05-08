@@ -961,16 +961,17 @@ impl Window {
                 let style = merge_span_style(row_style, &span_style);
                 let start = span.col_start.min(content_width);
                 let end = span.col_end.min(content_width);
-                for c in start..end {
-                    let ci = col_to_char.get(c as usize).copied();
-                    // Wide-char continuation shares the source index with the leading cell;
-                    // re-painting it would clobber the next char via a second Grid::set.
-                    if c > 0 && ci.is_some() && ci == col_to_char.get((c - 1) as usize).copied() {
-                        continue;
-                    }
-                    let ch = ci.and_then(|i| line_chars.get(i)).copied().unwrap_or(' ');
-                    slice.set(pad_left + c, row, ch, style);
-                }
+                paint_span_cells(
+                    slice,
+                    pad_left,
+                    row,
+                    start,
+                    end,
+                    &col_to_char,
+                    &line_chars,
+                    style,
+                    None,
+                );
                 if span.hl_eol {
                     for c in end..content_width {
                         slice.set(pad_left + c, row, ' ', style);
@@ -980,42 +981,43 @@ impl Window {
             // Selection painting: after highlights (wins over base) but before virt-text.
             // Cells under `selectable = false` spans are skipped so chrome spans don't
             // receive the Visual bg.
-            let mut selectable_mask: Option<Vec<bool>> = None;
-            if !selection_ranges.iter().any(|r| r.line == idx) {
-            } else {
-                let row_spans = buf.highlights_at(idx);
-                if row_spans.iter().any(|s| !s.meta.selectable) {
-                    let mut mask = vec![true; content_width as usize];
-                    for span in &row_spans {
-                        if span.meta.selectable {
-                            continue;
+            let selectable_mask: Option<Vec<bool>> =
+                if !selection_ranges.iter().any(|r| r.line == idx) {
+                    None
+                } else {
+                    let row_spans = buf.highlights_at(idx);
+                    if row_spans.iter().any(|s| !s.meta.selectable) {
+                        let mut mask = vec![true; content_width as usize];
+                        for span in &row_spans {
+                            if span.meta.selectable {
+                                continue;
+                            }
+                            let start = span.col_start.min(content_width) as usize;
+                            let end = span.col_end.min(content_width) as usize;
+                            for slot in mask.iter_mut().take(end).skip(start) {
+                                *slot = false;
+                            }
                         }
-                        let start = span.col_start.min(content_width) as usize;
-                        let end = span.col_end.min(content_width) as usize;
-                        for slot in mask.iter_mut().take(end).skip(start) {
-                            *slot = false;
-                        }
+                        Some(mask)
+                    } else {
+                        None
                     }
-                    selectable_mask = Some(mask);
-                }
-            }
+                };
             for r in selection_ranges.iter().filter(|r| r.line == idx) {
                 let style = merge_span_style(row_style, &visual_style);
                 let start = r.col_start.min(content_width);
                 let end = r.col_end.min(content_width);
-                for c in start..end {
-                    if let Some(mask) = selectable_mask.as_deref() {
-                        if !mask.get(c as usize).copied().unwrap_or(true) {
-                            continue;
-                        }
-                    }
-                    let ci = col_to_char.get(c as usize).copied();
-                    if c > 0 && ci.is_some() && ci == col_to_char.get((c - 1) as usize).copied() {
-                        continue;
-                    }
-                    let ch = ci.and_then(|i| line_chars.get(i)).copied().unwrap_or(' ');
-                    slice.set(pad_left + c, row, ch, style);
-                }
+                paint_span_cells(
+                    slice,
+                    pad_left,
+                    row,
+                    start,
+                    end,
+                    &col_to_char,
+                    &line_chars,
+                    style,
+                    selectable_mask.as_deref(),
+                );
             }
             for vt in buf.virtual_text_at(idx) {
                 let base = vt
@@ -1057,6 +1059,39 @@ impl Window {
                 }
             }
         }
+    }
+}
+
+/// Paint a styled span across `[start, end)` columns of `row`.
+/// Skips wide-char continuation cells: their `col_to_char` index repeats the leading
+/// cell, and `Grid::set` for a wide char also marks the next slot as `\0`, so a second
+/// paint at the continuation column would clobber the cell after the wide char.
+/// `mask`, when present, gates each column (used by selection paint to honor
+/// `selectable = false` spans).
+#[allow(clippy::too_many_arguments)]
+fn paint_span_cells(
+    slice: &mut GridSlice<'_>,
+    pad_left: u16,
+    row: u16,
+    start: u16,
+    end: u16,
+    col_to_char: &[usize],
+    line_chars: &[char],
+    style: Style,
+    mask: Option<&[bool]>,
+) {
+    for c in start..end {
+        if let Some(mask) = mask {
+            if !mask.get(c as usize).copied().unwrap_or(true) {
+                continue;
+            }
+        }
+        let ci = col_to_char.get(c as usize).copied();
+        if c > 0 && ci.is_some() && ci == col_to_char.get((c - 1) as usize).copied() {
+            continue;
+        }
+        let ch = ci.and_then(|i| line_chars.get(i)).copied().unwrap_or(' ');
+        slice.set(pad_left + c, row, ch, style);
     }
 }
 
