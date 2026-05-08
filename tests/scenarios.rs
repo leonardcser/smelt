@@ -70,6 +70,62 @@ async fn plain_turn() {
     });
 }
 
+/// Kimi-style SSE: provider omits the space after `data:`.
+/// The SSE parser must still correctly parse each event.
+#[tokio::test]
+async fn anthropic_compatible_sse_no_space() {
+    let h = Harness::new().await;
+    h.write_config("anthropic-compatible", "kimi-test");
+    h.write_init_lua("");
+    h.mount_anthropic_sse_no_space(&[
+        serde_json::json!({
+            "type": "message_start",
+            "message": {
+                "id": "msg_test",
+                "type": "message",
+                "role": "assistant",
+                "model": "kimi-test",
+                "content": [],
+                "stop_reason": null,
+                "stop_sequence": null,
+                "usage": { "input_tokens": 10, "output_tokens": 0 }
+            }
+        }),
+        serde_json::json!({
+            "type": "content_block_start",
+            "index": 0,
+            "content_block": { "type": "text", "text": "" }
+        }),
+        serde_json::json!({
+            "type": "content_block_delta",
+            "index": 0,
+            "delta": { "type": "text_delta", "text": "hello" }
+        }),
+        serde_json::json!({
+            "type": "content_block_stop",
+            "index": 0
+        }),
+        serde_json::json!({
+            "type": "message_delta",
+            "delta": { "stop_reason": "end_turn", "stop_sequence": null },
+            "usage": { "output_tokens": 1 }
+        }),
+        serde_json::json!({ "type": "message_stop" }),
+    ])
+    .await;
+
+    let out = h.run("hi", "test/kimi-test");
+    let has_text = out
+        .events
+        .iter()
+        .any(|ev| ev.get("TextDelta").is_some() || ev.get("Text").is_some());
+    assert!(
+        has_text,
+        "expected TextDelta or Text event, got: {:?}",
+        out.events
+    );
+}
+
 /// Provider streams the same response across two text deltas (split
 /// mid-word). Engine must concatenate them into a single assistant
 /// content string. Pins the SSE buffer-and-split logic.

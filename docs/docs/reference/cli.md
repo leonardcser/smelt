@@ -26,13 +26,14 @@ arguments and no config file launches the interactive setup wizard.
 
 Auto-detection:
 
-| URL contains        | Detected type       |
-| ------------------- | ------------------- |
-| `api.openai.com`    | `openai`            |
-| `chatgpt.com`       | `codex`             |
-| `api.anthropic.com` | `anthropic`         |
-| `githubcopilot.com` | `copilot`           |
-| anything else       | `openai-compatible` |
+| URL contains                     | Detected type          |
+| -------------------------------- | ---------------------- |
+| anything else                    | `openai-compatible`    |
+| `api.openai.com`                 | `openai`               |
+| `chatgpt.com`                    | `codex`                |
+| `api.kimi.com/coding`            | `anthropic-compatible` |
+| `api.anthropic.com`              | `anthropic`            |
+| `githubcopilot.com`              | `copilot`              |
 
 ## Behavior
 
@@ -48,7 +49,7 @@ Auto-detection:
 | `--set <KEY=VALUE>`          | Override a config setting (repeatable; see [Settings](configuration.md#settings) for valid keys) |
 
 Reasoning effort controls how deeply the model thinks before responding.
-Supported by Anthropic (`thinking`), OpenAI (`reasoning`), and openai-compatible
+Supported by Anthropic (`thinking`), OpenAI (`reasoning`), openai-compatible, and anthropic-compatible
 providers that support `reasoning_effort`. For OpenAI, `max` maps to `xhigh`.
 Models that don't support thinking ignore this setting.
 

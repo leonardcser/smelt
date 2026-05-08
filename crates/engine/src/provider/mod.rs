@@ -257,28 +257,33 @@ fn parse_retry_after(resp: &reqwest::Response) -> Option<Duration> {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ProviderKind {
+    OpenAiCompatible,
     OpenAi,
     Codex,
+    AnthropicCompatible,
     Anthropic,
     Copilot,
-    Local,
 }
 
 impl ProviderKind {
     pub fn default_reasoning_cycle(self) -> &'static [ReasoningEffort] {
         match self {
-            Self::OpenAi | Self::Codex | Self::Anthropic | Self::Copilot => &[
+            Self::OpenAiCompatible => &[
+                ReasoningEffort::Off,
+                ReasoningEffort::Low,
+                ReasoningEffort::Medium,
+                ReasoningEffort::High,
+            ],
+            Self::OpenAi
+            | Self::Codex
+            | Self::AnthropicCompatible
+            | Self::Anthropic
+            | Self::Copilot => &[
                 ReasoningEffort::Off,
                 ReasoningEffort::Low,
                 ReasoningEffort::Medium,
                 ReasoningEffort::High,
                 ReasoningEffort::Max,
-            ],
-            Self::Local => &[
-                ReasoningEffort::Off,
-                ReasoningEffort::Low,
-                ReasoningEffort::Medium,
-                ReasoningEffort::High,
             ],
         }
     }
@@ -287,33 +292,37 @@ impl ProviderKind {
         match provider_type {
             "openai" => Self::OpenAi,
             "codex" => Self::Codex,
+            "anthropic-compatible" => Self::AnthropicCompatible,
             "anthropic" => Self::Anthropic,
             "copilot" | "github-copilot" => Self::Copilot,
-            _ => Self::Local,
+            _ => Self::OpenAiCompatible,
         }
     }
 
     pub fn detect_from_url(api_base: &str) -> Self {
-        if api_base.contains("api.openai.com") {
+        if api_base.contains("api.kimi.com/coding") {
+            Self::AnthropicCompatible
+        } else if api_base.contains("api.anthropic.com") {
+            Self::Anthropic
+        } else if api_base.contains("api.openai.com") {
             Self::OpenAi
         } else if api_base.contains("chatgpt.com") {
             Self::Codex
-        } else if api_base.contains("api.anthropic.com") {
-            Self::Anthropic
         } else if api_base.contains("githubcopilot.com") {
             Self::Copilot
         } else {
-            Self::Local
+            Self::OpenAiCompatible
         }
     }
 
     pub fn as_config_str(self) -> &'static str {
         match self {
+            Self::OpenAiCompatible => "openai-compatible",
             Self::OpenAi => "openai",
             Self::Codex => "codex",
+            Self::AnthropicCompatible => "anthropic-compatible",
             Self::Anthropic => "anthropic",
             Self::Copilot => "copilot",
-            Self::Local => "openai-compatible",
         }
     }
 }
@@ -422,7 +431,8 @@ impl Provider {
         effort: ReasoningEffort,
         opts: &ChatOptions<'_>,
     ) -> Result<LLMResponse, ProviderError> {
-        let is_anthropic = self.kind == ProviderKind::Anthropic;
+        let is_anthropic =
+            self.kind == ProviderKind::Anthropic || self.kind == ProviderKind::AnthropicCompatible;
         let is_codex = self.kind == ProviderKind::Codex;
         let is_copilot = self.kind == ProviderKind::Copilot;
 
@@ -449,6 +459,17 @@ impl Provider {
         let mut copilot_401_retried = false;
 
         let (mut url, mut body) = match self.kind {
+            ProviderKind::OpenAiCompatible => {
+                let url = format!("{}/chat/completions", self.api_base);
+                let body = chat_completions::build_body(
+                    messages,
+                    tools,
+                    model,
+                    effort,
+                    &self.model_config,
+                );
+                (url, body)
+            }
             ProviderKind::OpenAi => {
                 let url = format!("{}/responses", self.api_base);
                 let body = openai::build_body(messages, tools, model, effort, &self.model_config);
@@ -465,7 +486,7 @@ impl Provider {
                 }
                 (url, body)
             }
-            ProviderKind::Anthropic => {
+            ProviderKind::AnthropicCompatible | ProviderKind::Anthropic => {
                 let url = format!("{}/messages", self.api_base);
                 let body =
                     anthropic::build_body(messages, tools, model, effort, &self.model_config);
@@ -478,17 +499,6 @@ impl Provider {
                     .map(|t| t.api_base.as_str())
                     .unwrap_or(copilot::DEFAULT_COPILOT_API_BASE);
                 let url = format!("{}/chat/completions", base.trim_end_matches('/'));
-                let body = chat_completions::build_body(
-                    messages,
-                    tools,
-                    model,
-                    effort,
-                    &self.model_config,
-                );
-                (url, body)
-            }
-            ProviderKind::Local => {
-                let url = format!("{}/chat/completions", self.api_base);
                 let body = chat_completions::build_body(
                     messages,
                     tools,
@@ -517,7 +527,7 @@ impl Provider {
         let use_stream = opts.on_delta.is_some() || is_codex;
         if use_stream {
             body["stream"] = serde_json::json!(true);
-            if self.kind == ProviderKind::Local {
+            if self.kind == ProviderKind::OpenAiCompatible {
                 body["stream_options"] = serde_json::json!({"include_usage": true});
             }
         }
@@ -684,14 +694,14 @@ impl Provider {
 
             let parsed = if use_stream {
                 match self.kind {
+                    ProviderKind::OpenAiCompatible | ProviderKind::Copilot => {
+                        chat_completions::read_stream(resp, opts.cancel, on_delta).await
+                    }
                     ProviderKind::OpenAi | ProviderKind::Codex => {
                         openai::read_stream(resp, opts.cancel, on_delta).await
                     }
-                    ProviderKind::Anthropic => {
+                    ProviderKind::AnthropicCompatible | ProviderKind::Anthropic => {
                         anthropic::read_stream(resp, opts.cancel, on_delta).await
-                    }
-                    ProviderKind::Copilot | ProviderKind::Local => {
-                        chat_completions::read_stream(resp, opts.cancel, on_delta).await
                     }
                 }?
             } else {
@@ -713,10 +723,12 @@ impl Provider {
                 }
 
                 match self.kind {
-                    ProviderKind::OpenAi | ProviderKind::Codex => openai::parse_response(&data)?,
-                    ProviderKind::Anthropic => anthropic::parse_response(&data)?,
-                    ProviderKind::Copilot | ProviderKind::Local => {
+                    ProviderKind::OpenAiCompatible | ProviderKind::Copilot => {
                         chat_completions::parse_response(&data)?
+                    }
+                    ProviderKind::OpenAi | ProviderKind::Codex => openai::parse_response(&data)?,
+                    ProviderKind::AnthropicCompatible | ProviderKind::Anthropic => {
+                        anthropic::parse_response(&data)?
                     }
                 }
             };
@@ -751,10 +763,14 @@ impl Provider {
 
     pub async fn fetch_context_window(&self, model: &str) -> Option<u32> {
         let result = match self.kind {
-            ProviderKind::Anthropic => self.fetch_context_window_anthropic(model).await,
-            ProviderKind::Local => self.fetch_context_window_local(model).await,
+            ProviderKind::OpenAiCompatible => {
+                self.fetch_context_window_openai_compatible(model).await
+            }
             ProviderKind::OpenAi => None,
             ProviderKind::Codex => codex::cached_context_window(model),
+            ProviderKind::AnthropicCompatible | ProviderKind::Anthropic => {
+                self.fetch_context_window_anthropic(model).await
+            }
             ProviderKind::Copilot => copilot::cached_context_window(model),
         };
         crate::log::entry(
@@ -786,7 +802,7 @@ impl Provider {
         data["max_input_tokens"].as_u64().map(|v| v as u32)
     }
 
-    async fn fetch_context_window_local(&self, model: &str) -> Option<u32> {
+    async fn fetch_context_window_openai_compatible(&self, model: &str) -> Option<u32> {
         let url = format!("{}/models", self.api_base);
         let mut req = self.client.get(&url);
         if !self.api_key.is_empty() {
@@ -940,6 +956,16 @@ fn parse_title_and_slug(raw: &str) -> (String, String) {
 
 fn apply_response_format(body: &mut serde_json::Value, kind: ProviderKind, fmt: &ResponseFormat) {
     match kind {
+        ProviderKind::OpenAiCompatible | ProviderKind::Copilot => {
+            body["response_format"] = serde_json::json!({
+                "type": "json_schema",
+                "json_schema": {
+                    "name": fmt.name,
+                    "schema": fmt.schema,
+                    "strict": true,
+                }
+            });
+        }
         ProviderKind::OpenAi | ProviderKind::Codex => {
             body["text"] = serde_json::json!({
                 "format": {
@@ -950,17 +976,7 @@ fn apply_response_format(body: &mut serde_json::Value, kind: ProviderKind, fmt: 
                 }
             });
         }
-        ProviderKind::Copilot | ProviderKind::Local => {
-            body["response_format"] = serde_json::json!({
-                "type": "json_schema",
-                "json_schema": {
-                    "name": fmt.name,
-                    "schema": fmt.schema,
-                    "strict": true,
-                }
-            });
-        }
-        ProviderKind::Anthropic => {
+        ProviderKind::AnthropicCompatible | ProviderKind::Anthropic => {
             // Older models (Haiku 3.5, Sonnet 3.7, etc.) 400 if this field is sent.
             let model = body["model"].as_str().unwrap_or("");
             if !anthropic_supports_structured_output(model) {

@@ -72,6 +72,27 @@ impl Harness {
             .await;
     }
 
+    /// Same as `mount_anthropic_sse`, but omits the space after `data:`.
+    /// Some providers (e.g. Kimi Code) send SSE lines like `data:{...}`
+    /// instead of `data: {...}`.
+    pub async fn mount_anthropic_sse_no_space(&self, events: &[Value]) {
+        let mut body = String::new();
+        for ev in events {
+            body.push_str("data:");
+            body.push_str(&serde_json::to_string(ev).expect("serialize sse event"));
+            body.push_str("\n\n");
+        }
+        Mock::given(method("POST"))
+            .and(path("/messages"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .insert_header("content-type", "text/event-stream")
+                    .set_body_string(body),
+            )
+            .mount(&self.mock)
+            .await;
+    }
+
     /// Mount a `POST /messages` stub returning an HTTP error with a
     /// JSON error body. Useful for pinning the error path (401, 429,
     /// 500, etc.).

@@ -18,6 +18,16 @@ struct ProviderTemplate {
 
 const PROVIDERS: &[ProviderTemplate] = &[
     ProviderTemplate {
+        name: "custom",
+        label: "Other (OpenAI-compatible)",
+        provider_type: "openai-compatible",
+        api_base: "",
+        api_key_env: "",
+        default_model: "",
+        needs_api_base: true,
+        oauth: None,
+    },
+    ProviderTemplate {
         name: "openai",
         label: "OpenAI (API key)",
         provider_type: "openai",
@@ -38,6 +48,16 @@ const PROVIDERS: &[ProviderTemplate] = &[
         oauth: Some(AuthProvider::Codex),
     },
     ProviderTemplate {
+        name: "anthropic-compatible",
+        label: "Other (Anthropic-compatible)",
+        provider_type: "anthropic-compatible",
+        api_base: "",
+        api_key_env: "",
+        default_model: "",
+        needs_api_base: true,
+        oauth: None,
+    },
+    ProviderTemplate {
         name: "anthropic",
         label: "Anthropic (Claude)",
         provider_type: "anthropic",
@@ -56,16 +76,6 @@ const PROVIDERS: &[ProviderTemplate] = &[
         default_model: "",
         needs_api_base: false,
         oauth: Some(AuthProvider::Copilot),
-    },
-    ProviderTemplate {
-        name: "custom",
-        label: "Other (OpenAI-compatible)",
-        provider_type: "openai-compatible",
-        api_base: "",
-        api_key_env: "",
-        default_model: "",
-        needs_api_base: true,
-        oauth: None,
     },
 ];
 

@@ -34,7 +34,7 @@ smelt.provider.register("openai", {
 
 | Field         | Description                                                                 |
 | ------------- | --------------------------------------------------------------------------- |
-| `type`        | `openai`, `codex`, `anthropic`, `copilot`, or `openai-compatible`           |
+| `type`        | `openai-compatible`, `openai`, `codex`, `anthropic-compatible`, `anthropic`, `copilot` |
 | `api_base`    | API endpoint URL                                                            |
 | `api_key_env` | Environment variable holding the API key (omit for `codex` and `copilot`)   |
 | `models`      | Array of model names (optional for `codex`/`copilot` — fetched via API)     |
@@ -43,11 +43,12 @@ smelt.provider.register("openai", {
 
 | Type                | Endpoint                                           | Compatible Services                            |
 | ------------------- | -------------------------------------------------- | ---------------------------------------------- |
+| `openai-compatible` | `/v1/chat/completions`                             | Ollama, vLLM, SGLang, llama.cpp, Google Gemini |
 | `openai`            | `/v1/responses`                                    | OpenAI, OpenRouter                             |
 | `codex`             | `chatgpt.com/backend-api/codex` (OAuth)            | OpenAI Codex (ChatGPT subscription)            |
+| `anthropic-compatible` | `/v1/messages` + thinking                     | Kimi Code, other Anthropic-compatible APIs     |
 | `anthropic`         | `/v1/messages` + thinking                          | Anthropic                                      |
 | `copilot`           | `api.*.githubcopilot.com/chat/completions` (OAuth) | GitHub Copilot subscription                    |
-| `openai-compatible` | `/v1/chat/completions`                             | Ollama, vLLM, SGLang, llama.cpp, Google Gemini |
 
 ### Model Configuration
 
@@ -72,7 +73,7 @@ Per-model overrides:
 | ---------------- | ---------------------------------------------------- |
 | `temperature`    | Sampling temperature                                 |
 | `top_p`          | Top-p (nucleus) sampling                             |
-| `top_k`          | Top-k sampling (openai-compatible & anthropic only)  |
+| `top_k`          | Top-k sampling (openai-compatible & copilot only)                          |
 | `min_p`          | Min-p sampling (openai-compatible only)              |
 | `repeat_penalty` | Repetition penalty (openai-compatible only)          |
 | `tool_calling`   | Set to `false` to disable tools for this model       |
@@ -111,7 +112,7 @@ Starting mode and reasoning effort can be changed at runtime or via CLI flags:
 | `--reasoning-cycle <LEVELS>` | Levels for `Ctrl+T` cycling (comma-separated)             |
 
 Reasoning effort controls how deeply the model thinks before responding.
-Supported by Anthropic (`thinking`), OpenAI (`reasoning`), and openai-compatible
+Supported by Anthropic (`thinking`), OpenAI (`reasoning`), openai-compatible, and anthropic-compatible
 providers that support `reasoning_effort`. For OpenAI, `max` maps to `xhigh`.
 Models that don't support thinking ignore this setting.
 
