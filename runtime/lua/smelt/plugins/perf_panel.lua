@@ -73,6 +73,9 @@ local function compose_lines(snap, label_w)
   local rows = snap.durations or {}
   local max_rows = PANEL_H - 3          -- border (2) + header (1)
   local n = math.min(#rows, max_rows)
+  -- Span offsets are visual columns; `fmt_us` may emit µ, so use width
+  -- (codepoints) rather than `#s` (bytes).
+  local width = smelt.text.width
   for i = 1, n do
     local r = rows[i]
     local last_s = fmt_us(r.last_us)
@@ -80,19 +83,21 @@ local function compose_lines(snap, label_w)
     local cnt_s = string.format("%3d", math.min(r.count, 999))
     local line = pad_label(r.label, label_w) .. " " .. last_s .. "  " .. p99_s .. " " .. cnt_s
     lines[#lines + 1] = line
+    local last_w = width(last_s)
+    local p99_w = width(p99_s)
     -- Colour the `last` and `p99` cells by their own severity.
     local last_col = label_w + 1
     table.insert(color_spans, {
       row = i + 1,                       -- 1-based row index in buffer
       col = last_col,
-      end_col = last_col + #last_s,
+      end_col = last_col + last_w,
       role = severity_role(r.last_us),
     })
-    local p99_col = last_col + #last_s + 2
+    local p99_col = last_col + last_w + 2
     table.insert(color_spans, {
       row = i + 1,
       col = p99_col,
-      end_col = p99_col + #p99_s,
+      end_col = p99_col + p99_w,
       role = severity_role(r.p99_us),
     })
   end

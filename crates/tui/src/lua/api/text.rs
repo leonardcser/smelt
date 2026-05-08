@@ -2,15 +2,24 @@
 //! into a Buffer with the same wrapping + dim/error styling that the
 //! built-in tool render path uses for body output. `opts` accepts
 //! `{ is_error = bool }`.
+//!
+//! `smelt.text.width(s)` — visual column count of `s`. Lua's `#s` is
+//! bytes; use this when sizing extmark ranges or computing column
+//! offsets so multi-byte and wide characters land correctly.
 
 use crate::content::to_buffer::render_into_buffer;
 use crate::smelt_term::BufId;
 use mlua::prelude::*;
 use smelt_core::content::wrap::wrap_line;
 use smelt_core::theme::role_hl;
+use unicode_width::UnicodeWidthStr;
 
 pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
     let text = lua.create_table()?;
+    text.set(
+        "width",
+        lua.create_function(|_, s: String| Ok(UnicodeWidthStr::width(s.as_str()) as u64))?,
+    )?;
     text.set(
         "render",
         lua.create_function(

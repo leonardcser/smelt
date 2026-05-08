@@ -2191,4 +2191,48 @@ mod tests {
         assert_eq!(r, Status::Consumed);
         assert_eq!(yank, Some((0, 11)));
     }
+
+    /// Highlight cols are visual columns, so a span anchored after a
+    /// multi-byte glyph (here `µ`, 2 bytes / 1 col) only lands on the
+    /// right cell when the upstream offset is computed from width, not
+    /// byte length.
+    #[test]
+    fn highlight_anchored_after_multibyte_covers_next_glyph() {
+        use smelt_buffer::style::Color;
+        use unicode_width::UnicodeWidthStr;
+        let mut buf = Buffer::new(BufId(1), BufCreateOpts::default());
+        let last_s = " 969\u{00B5}s";
+        let p99_s = "2.69ms";
+        buf.set_all_lines(vec![format!("  func {last_s}  {p99_s} 223")]);
+
+        let last_col: u16 = 7;
+        let last_w = UnicodeWidthStr::width(last_s) as u16;
+        let p99_w = UnicodeWidthStr::width(p99_s) as u16;
+        assert_ne!(last_w, last_s.len() as u16);
+
+        let p99_col = last_col + last_w + 2;
+        buf.add_highlight(
+            0,
+            p99_col,
+            p99_col + p99_w,
+            crate::SpanStyle::new().fg(Color::Yellow),
+        );
+
+        let w = make_win();
+        let ctx = DrawContext {
+            terminal_width: 60,
+            terminal_height: 4,
+            focused: false,
+            cursor_shape: CursorShape::Hidden,
+            theme: std::sync::Arc::new(Theme::default()),
+            vim_mode: VimMode::default(),
+        };
+        let mut grid = Grid::new(60, 1);
+        let mut slice = grid.slice_mut(Rect::new(0, 0, 60, 1));
+        w.render(&buf, &mut slice, &ctx);
+
+        assert_eq!(grid.cell(p99_col, 0).symbol, '2');
+        assert_eq!(grid.cell(p99_col, 0).style.fg, Some(Color::Yellow));
+        assert_eq!(grid.cell(p99_col + p99_w, 0).style.fg, None);
+    }
 }
