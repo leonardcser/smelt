@@ -326,7 +326,7 @@ checksum = "d64e8af5551369d19cf50138de61f1c42074ab970f74e99be916646777f8fc87"
 dependencies = [
  "encode_unicode",
  "libc",
- "unicode-width 0.2.2",
+ "unicode-width",
  "windows-sys 0.61.2",
 ]
 
@@ -850,7 +850,7 @@ version = "0.2.24"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "cfe4fbac503b8d1f88e6676011885f34b7174f46e59956bba534ba83abded4df"
 dependencies = [
- "unicode-width 0.2.2",
+ "unicode-width",
 ]
 
 [[package]]
@@ -2529,7 +2529,7 @@ version = "0.4.7"
 dependencies = [
  "base64",
  "sha2 0.10.9",
- "unicode-width 0.1.14",
+ "unicode-width",
 ]
 
 [[package]]
@@ -2563,7 +2563,7 @@ dependencies = [
  "tokio",
  "tokio-util",
  "two-face",
- "unicode-width 0.1.14",
+ "unicode-width",
  "url",
  "vt100",
 ]
@@ -2575,7 +2575,7 @@ dependencies = [
  "crossterm",
  "smelt-buffer",
  "smelt-term",
- "unicode-width 0.1.14",
+ "unicode-width",
 ]
 
 [[package]]
@@ -2584,7 +2584,7 @@ version = "0.4.7"
 dependencies = [
  "crossterm",
  "smelt-buffer",
- "unicode-width 0.1.14",
+ "unicode-width",
 ]
 
 [[package]]
@@ -2969,7 +2969,7 @@ dependencies = [
  "tokio",
  "tokio-util",
  "two-face",
- "unicode-width 0.2.2",
+ "unicode-width",
  "url",
  "vt100",
 ]
@@ -3008,12 +3008,6 @@ name = "unicode-segmentation"
 version = "1.13.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9629274872b2bfaf8d66f5f15725007f635594914870f65218920345aa11aa8c"
-
-[[package]]
-name = "unicode-width"
-version = "0.1.14"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7dd6e30e90baa6f72411720665d41d89b9a3d039dc45b8faea1ddd07f617f6af"
 
 [[package]]
 name = "unicode-width"
@@ -3076,7 +3070,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "054ff75fb8fa83e609e685106df4faeffdf3a735d3c74ebce97ec557d5d36fd9"
 dependencies = [
  "itoa",
- "unicode-width 0.2.2",
+ "unicode-width",
  "vte",
 ]
 

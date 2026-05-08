@@ -1117,11 +1117,19 @@ impl Window {
                 let start = span.col_start.min(width);
                 let end = span.col_end.min(width);
                 for c in start..end {
-                    let ch = col_to_char
-                        .get(c as usize)
-                        .and_then(|i| line_chars.get(*i))
-                        .copied()
-                        .unwrap_or(' ');
+                    let ci = col_to_char.get(c as usize).copied();
+                    // Wide-char continuation cells share the source-char
+                    // index with the leading cell. Re-painting here would
+                    // call `slice.set` a second time with the wide glyph,
+                    // and `Grid::set` would install fresh `⚡|\0` at
+                    // `(c, c+1)` — clobbering the next char and leaving
+                    // the grid with two adjacent wide cells. Skip; the
+                    // leading-cell paint already covered both visual
+                    // columns with the right style.
+                    if c > 0 && ci.is_some() && ci == col_to_char.get((c - 1) as usize).copied() {
+                        continue;
+                    }
+                    let ch = ci.and_then(|i| line_chars.get(i)).copied().unwrap_or(' ');
                     slice.set(c, row, ch, style);
                 }
                 if span.hl_eol {
@@ -1530,6 +1538,41 @@ mod tests {
         assert!(!grid.cell(5, 0).style.dim);
         // Cell before the span — not dim.
         assert!(!grid.cell(1, 0).style.dim);
+    }
+
+    #[test]
+    fn render_highlight_does_not_duplicate_wide_char_in_grid() {
+        // ⚡ (U+26A1) reports unicode-width 2. The line walk paints the
+        // glyph at col 1 with `\0` continuation at col 2, then the
+        // highlight loop overlays the span style. Re-painting the
+        // continuation cell would write a second ⚡ + clobber the next
+        // char with `\0`. Pin the post-render grid: one ⚡, one \0,
+        // then the next source char unscathed.
+        let mut buf = Buffer::new(BufId(1), BufCreateOpts::default());
+        buf.set_all_lines(vec![" \u{26A1}yolo".into()]);
+        buf.add_highlight(0, 0, 7, crate::SpanStyle::new().bold());
+        let w = make_win();
+        let theme = Theme::default();
+        let ctx = DrawContext {
+            terminal_width: 40,
+            terminal_height: 10,
+            focused: false,
+            cursor_shape: CursorShape::Hidden,
+            theme: std::sync::Arc::new(theme),
+        };
+        let mut grid = Grid::new(10, 1);
+        let mut slice = grid.slice_mut(Rect::new(0, 0, 10, 1));
+        w.render(&buf, &mut slice, &ctx);
+        assert_eq!(grid.cell(0, 0).symbol, ' ');
+        assert_eq!(grid.cell(1, 0).symbol, '\u{26A1}');
+        assert_eq!(grid.cell(2, 0).symbol, '\0');
+        assert_eq!(grid.cell(3, 0).symbol, 'y');
+        assert_eq!(grid.cell(4, 0).symbol, 'o');
+        assert_eq!(grid.cell(5, 0).symbol, 'l');
+        assert_eq!(grid.cell(6, 0).symbol, 'o');
+        // Highlight style applied to the wide char's leading cell.
+        assert!(grid.cell(1, 0).style.bold);
+        assert!(grid.cell(3, 0).style.bold);
     }
 
     #[test]

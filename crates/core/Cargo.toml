@@ -31,7 +31,7 @@ dirs = "6"
 scraper = "0.26"
 ego-tree = "0.11"
 url = "2"
-unicode-width = "0.1"
+unicode-width = "0.2"
 include_dir = "0.7"
 
 [dev-dependencies]

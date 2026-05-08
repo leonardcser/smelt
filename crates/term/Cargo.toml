@@ -13,4 +13,4 @@ path = "src/lib.rs"
 [dependencies]
 smelt-buffer = { path = "../buffer" }
 crossterm = { version = "0.29", features = ["event-stream", "bracketed-paste"] }
-unicode-width = "0.1"
+unicode-width = "0.2"

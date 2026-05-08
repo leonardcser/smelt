@@ -13,4 +13,4 @@ path = "src/lib.rs"
 [dependencies]
 base64 = "0.22"
 sha2 = "0.10"
-unicode-width = "0.1"
+unicode-width = "0.2"

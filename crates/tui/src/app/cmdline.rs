@@ -76,15 +76,16 @@ impl TuiApp {
             w.scroll_top = 0;
         }
 
-        // Single-row leaf at the bottom of the screen, one row above
-        // the status bar. Inner Hbox uses `Percentage(100)` so the
-        // overlay's natural width follows the terminal each frame.
+        // Single-row leaf docked on the bottom row, painting over the
+        // statusline buffer (nvim-style cmdline-mode). Inner Hbox uses
+        // `Percentage(100)` so the overlay's natural width follows the
+        // terminal each frame.
         let layout = LayoutTree::vbox(vec![(
             Constraint::Length(1),
             LayoutTree::hbox(vec![(Constraint::Percentage(100), LayoutTree::leaf(win))]),
         )]);
         let _ = self
-            .overlay_open(Overlay::new(layout, Anchor::ScreenBottom { above_rows: 1 }).modal(true));
+            .overlay_open(Overlay::new(layout, Anchor::ScreenBottom { above_rows: 0 }).modal(true));
 
         self.set_focus(win);
         self.well_known.cmdline = Some(win);
