@@ -10,7 +10,7 @@ local M = {}
 local PANEL = nil
 local NS_HL = smelt.buf.create_namespace("smelt.perf_panel")
 
-local PANEL_W = 38
+local PANEL_W = 44
 local PANEL_H = 14
 -- Width of the right-hand "last  p99   n" cluster (columns 1+6+2+6+1+3 = 19).
 -- Subtract from the live window width to get the label column width;

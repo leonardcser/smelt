@@ -238,12 +238,24 @@ local function paint(slice, _ctx)
   -- Status row.
   local status = string.format(" score: %d", STATE.score)
   if STATE.dead then
-    status = status .. "   GAME OVER (esc to close)"
+    status = status .. "   GAME OVER"
   end
   -- Right-pad so the status row ends with whitespace, not whatever
   -- overlay chrome painted before it.
   status = status .. string.rep(" ", math.max(0, sw - #status))
   slice:put_str(status_y, 0, status, { fg = "white", bold = true })
+end
+
+local function reset()
+  if not STATE then return end
+  math.randomseed(os.time())
+  local fresh = init_state()
+  STATE.snake = fresh.snake
+  STATE.direction = fresh.direction
+  STATE.next_direction = fresh.next_direction
+  STATE.food = fresh.food
+  STATE.dead = false
+  STATE.score = 0
 end
 
 local function close()
@@ -264,7 +276,7 @@ local function open()
   -- the paint region above does the actual game rendering.
   STATE.buf = smelt.buf.create()
   smelt.buf.set_lines(STATE.buf, {
-    " hjkl / arrows: move    esc / ctrl-c: close ",
+    " hjkl / arrows: move    space: reset    esc / ctrl-c: close ",
   })
   STATE.win = smelt.win.open(STATE.buf, { focusable = true })
 
@@ -278,6 +290,7 @@ local function open()
   smelt.win.set_keymap(STATE.win, "<Down>", turn("down"))
   smelt.win.set_keymap(STATE.win, "<Up>", turn("up"))
   smelt.win.set_keymap(STATE.win, "<Right>", turn("right"))
+  smelt.win.set_keymap(STATE.win, "<Space>", reset)
   smelt.win.set_keymap(STATE.win, "<Esc>", close)
   smelt.win.set_keymap(STATE.win, "<C-c>", close)
 
