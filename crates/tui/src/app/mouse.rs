@@ -136,7 +136,7 @@ impl TuiApp {
         if on_prompt {
             self.app_focus = crate::app::AppFocus::Prompt;
             let (new_pos, new_want) = crate::smelt_term::text::vertical_move(
-                &self.input.win.text,
+                &self.input.source,
                 self.input.win.cpos,
                 delta,
                 self.input.win.curswant,

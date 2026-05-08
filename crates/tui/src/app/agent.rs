@@ -312,9 +312,9 @@ impl TuiApp {
             let leftover = std::mem::take(&mut self.queued_messages);
             if !leftover.is_empty() {
                 let mut combined = leftover.join("\n");
-                if !self.input.win.text.is_empty() {
+                if !self.input.source.is_empty() {
                     combined.push('\n');
-                    combined.push_str(&self.input.win.text);
+                    combined.push_str(&self.input.source);
                 }
                 let __mode = self.vim_mode;
                 self.input.replace_text(combined, None, __mode);
@@ -639,7 +639,7 @@ impl TuiApp {
     ) -> bool {
         let should_queue = last_keypress
             .is_some_and(|t| t.elapsed() < Duration::from_millis(CONFIRM_DEFER_MS))
-            && !self.input.win.text.is_empty();
+            && !self.input.source.is_empty();
 
         match ctrl {
             SessionControl::Continue => true,

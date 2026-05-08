@@ -176,7 +176,7 @@ pub(crate) fn compute_input(
     if let Some(text) = prediction {
         // Row 0 when input is empty (dim suggestion visible); past last row otherwise
         // (keeps storage alive without rendering; Window::render only walks 0..line_count).
-        let row = if inp.input.win.text.is_empty() {
+        let row = if inp.input.source.is_empty() {
             0
         } else {
             total_lines
@@ -563,27 +563,27 @@ fn compute_input_area(
     let height = input.height as usize;
     let state = input.input;
 
-    let spans = build_display_spans(&state.win.text, &state.win.attachment_ids, &state.store);
+    let spans = build_display_spans(&state.source, &state.win.attachment_ids, &state.store);
     let display_buf = spans_to_string(&spans);
     let char_kinds = build_char_kinds(&spans);
-    let display_cursor = map_cursor(state.cursor_char(), &state.win.text, &spans);
+    let display_cursor = map_cursor(state.cursor_char(), &state.source, &spans);
     let display_selection = state
         .display_selection_range(input.vim_mode, input.clipboard)
         .map(|(start, end)| {
-            let raw_start_char = crate::input::char_pos(&state.win.text, start);
-            let raw_end_char = crate::input::char_pos(&state.win.text, end);
-            let ds = map_cursor(raw_start_char, &state.win.text, &spans);
-            let de = map_cursor(raw_end_char, &state.win.text, &spans);
+            let raw_start_char = crate::input::char_pos(&state.source, start);
+            let raw_end_char = crate::input::char_pos(&state.source, end);
+            let ds = map_cursor(raw_start_char, &state.source, &spans);
+            let de = map_cursor(raw_end_char, &state.source, &spans);
             (ds, de)
         });
     let (visual_lines, cursor_line, _, cursor_char_in_line) =
         wrap_and_locate_cursor(&display_buf, &char_kinds, display_cursor, usable);
-    let single_line = !state.win.text.contains('\n');
+    let single_line = !state.source.contains('\n');
     let plain_only = !single_line;
-    let is_command = !plain_only && crate::completer::Completer::is_command(state.win.text.trim());
-    let is_exec = !plain_only
-        && matches!(state.win.text.as_bytes(), [b'!', c, ..] if !c.is_ascii_whitespace());
-    let is_exec_invalid = !plain_only && state.win.text == "!";
+    let is_command = !plain_only && crate::completer::Completer::is_command(state.source.trim());
+    let is_exec =
+        !plain_only && matches!(state.source.as_bytes(), [b'!', c, ..] if !c.is_ascii_whitespace());
+    let is_exec_invalid = !plain_only && state.source == "!";
     let total_content_rows = visual_lines.len();
 
     let max_content_rows = height.max(1);

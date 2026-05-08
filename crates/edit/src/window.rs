@@ -579,8 +579,6 @@ impl Window {
         event: MouseEvent,
         mut ctx: MouseCtx,
     ) -> (Status, Option<(usize, usize)>) {
-        // Build joined buffer from rows, not `self.text` — the prompt's `self.text` is
-        // the source buffer, which differs from its wrapped display rows.
         let buf = ctx.rows.join("\n");
         match event.kind {
             MouseEventKind::Down(MouseButton::Left) => {
@@ -870,8 +868,6 @@ impl Window {
         }
         let line_idx = line_idx.min(rows.len() - 1);
         let offsets = Self::line_start_offsets(rows);
-        // Do not write `self.text` here — the prompt's `self.text` is the source buffer,
-        // not the wrapped display rows; overwriting it would lose the editable content.
         let line = &rows[line_idx];
         let col_bytes = cell_to_byte(line, col);
         self.cpos = offsets[line_idx] + col_bytes;

@@ -392,7 +392,7 @@ impl TuiApp {
         }) = ev
         {
             let ghost_text = self.prompt_completer_text();
-            let ghost = ghost_text.is_some() && self.input.win.text.is_empty();
+            let ghost = ghost_text.is_some() && self.input.source.is_empty();
             let ctx = self.input.key_context(false, ghost, self.vim_mode);
 
             // Editing keys dismiss ghost text; transparent actions (mode toggles, redraw) preserve it.
@@ -511,9 +511,9 @@ impl TuiApp {
                 }
                 EscAction::Unqueue => {
                     let mut combined = self.queued_messages.join("\n");
-                    if !self.input.win.text.is_empty() {
+                    if !self.input.source.is_empty() {
                         combined.push('\n');
-                        combined.push_str(&self.input.win.text);
+                        combined.push_str(&self.input.source);
                     }
                     let mode = self.vim_mode;
                     self.input.replace_text(combined, None, mode);
@@ -605,7 +605,7 @@ impl TuiApp {
                 return;
             }
         };
-        if let Err(e) = std::fs::write(tmp.path(), &self.input.win.text) {
+        if let Err(e) = std::fs::write(tmp.path(), &self.input.source) {
             self.notify_error(format!("write tmp: {e}"));
             return;
         }

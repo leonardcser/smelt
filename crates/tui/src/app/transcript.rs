@@ -622,7 +622,7 @@ impl TuiApp {
             }
         }
 
-        let (visual_lines, _, _, _) = wrap_and_locate_cursor(&state.win.text, &[], 0, usable);
+        let (visual_lines, _, _, _) = wrap_and_locate_cursor(&state.source, &[], 0, usable);
         let input_rows = visual_lines.len().max(1) as u16;
 
         let above = queued_rows + stash + 1; // +1 = top bar

@@ -14,7 +14,7 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
         "win_id",
         lua.create_function(|_, ()| Ok(crate::app::PROMPT_WIN.0))?,
     )?;
-    prompt_tbl.set("text", app_read!(lua, |app| app.input.win.text.clone()))?;
+    prompt_tbl.set("text", app_read!(lua, |app| app.input.source.clone()))?;
     prompt_tbl.set(
         "set_text",
         lua.create_function(|_, text: String| {

@@ -19,7 +19,7 @@ impl TuiApp {
 
     /// Fire `WinEvent::TextChanged` on `PROMPT_WIN` when the prompt buffer changed.
     pub(crate) fn emit_prompt_text_changed_if_dirty(&mut self) {
-        let current_text = self.input.win.text.clone();
+        let current_text = self.input.source.clone();
         if self.last_prompt_text == current_text {
             return;
         }
