@@ -6,7 +6,7 @@ use crate::content::{layout, prompt_buf};
 
 impl TuiApp {
     pub(crate) fn render_normal(&mut self, agent_running: bool) {
-        let _perf = smelt_core::perf::begin("app:tick_compositor");
+        let _perf = smelt_perf::perf::begin("app:tick_compositor");
         self.update_spinner();
         crate::theme::populate_ui_theme(self.ui.theme_mut());
         // Publish vim mode so overlay leaves read it via `DrawContext::vim_mode`.
@@ -32,30 +32,50 @@ impl TuiApp {
             .set_cursor_shape(crate::smelt_term::CursorShape::Hidden);
 
         // ── Layout ──
-        let (above_rows, input_rows) = self.measure_prompt_rows(&self.input, width, queued);
-        self.ui.set_layout(layout::build_layout_tree(
-            &layout::LayoutInput {
-                term_height: term_h,
-                prompt_above_rows: above_rows,
-                prompt_input_rows: input_rows,
-            },
-            self.well_known.statusline,
-        ));
-        self.layout = layout::LayoutState::from_ui(&self.ui, self.well_known.statusline);
-        let viewport_rows = self.layout.viewport_rows();
-        let prompt_rect = self.layout.prompt;
+        let (prompt_rect, viewport_rows) = {
+            let _p = smelt_perf::perf::begin("compositor:layout");
+            let (above_rows, input_rows) = self.measure_prompt_rows(&self.input, width, queued);
+            self.ui.set_layout(layout::build_layout_tree(
+                &layout::LayoutInput {
+                    term_height: term_h,
+                    prompt_above_rows: above_rows,
+                    prompt_input_rows: input_rows,
+                },
+                self.well_known.statusline,
+            ));
+            self.layout = layout::LayoutState::from_ui(&self.ui, self.well_known.statusline);
+            (self.layout.prompt, self.layout.viewport_rows())
+        };
 
-        self.sync_transcript_layer(term_w, width, viewport_rows, has_transcript_cursor);
-        self.sync_prompt_above_layer(term_w, queued);
-        self.sync_input_layer(prompt_rect, has_prompt_cursor);
-        self.sync_prompt_below_layer(term_w);
+        {
+            let _p = smelt_perf::perf::begin("compositor:transcript");
+            self.sync_transcript_layer(term_w, width, viewport_rows, has_transcript_cursor);
+        }
+        {
+            let _p = smelt_perf::perf::begin("compositor:prompt_above");
+            self.sync_prompt_above_layer(term_w, queued);
+        }
+        {
+            let _p = smelt_perf::perf::begin("compositor:input");
+            self.sync_input_layer(prompt_rect, has_prompt_cursor);
+        }
+        {
+            let _p = smelt_perf::perf::begin("compositor:prompt_below");
+            self.sync_prompt_below_layer(term_w);
+        }
         // Freeze timer/spinner while a blocking dialog is up.
         self.working.set_paused(self.focused_overlay_blocks_agent());
-        self.refresh_status_bar();
+        {
+            let _p = smelt_perf::perf::begin("compositor:status_bar");
+            self.refresh_status_bar();
+        }
 
         self.finalize_layer_rects();
 
-        self.sync_completer_overlay();
+        {
+            let _p = smelt_perf::perf::begin("compositor:completer");
+            self.sync_completer_overlay();
+        }
 
         // Focused overlay leaf gets a hardware caret when neither transcript nor prompt claimed it.
         if matches!(
@@ -70,6 +90,7 @@ impl TuiApp {
             }
         }
 
+        let _p = smelt_perf::perf::begin("compositor:render_flush");
         let mut stdout = std::io::stdout();
         // Split-borrow paint registry and lua out of `self` to avoid aliasing with `&mut self.ui`.
         let paint_registry = &self.paint_registry;
@@ -126,12 +147,15 @@ impl TuiApp {
         let t_pad = self.transcript_gutters.pad_left;
         let transcript_rect =
             crate::smelt_term::Rect::new(0, t_pad, term_w.saturating_sub(t_pad), viewport_rows);
-        let tdata = self.project_transcript_buffer(
-            width,
-            viewport_rows,
-            self.transcript_window.scroll_top,
-            self.core.config.settings.show_thinking,
-        );
+        let tdata = {
+            let _p = smelt_perf::perf::begin("compositor:project_transcript");
+            self.project_transcript_buffer(
+                width,
+                viewport_rows,
+                self.transcript_window.scroll_top,
+                self.core.config.settings.show_thinking,
+            )
+        };
         self.transcript_window.scroll_top = tdata.clamped_scroll;
 
         let tcursor = self.compute_transcript_cursor(
