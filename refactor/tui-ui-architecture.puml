@@ -13,7 +13,7 @@ title smelt — target architecture (structure)\n\
 Decisions and rationale live in **ARCHITECTURE.md**; sequencing in **REFACTOR.md**.
 
 legend right
-  **Target organization (post P11.C):**
+  **Target organization (post P12.A):**
   - `core` — frontend-agnostic; no terminal imports, no `crossterm`,
     no editor / renderer deps.
   - `smelt-buffer` — shared data layer: `Buffer`, extmarks, undo,
@@ -28,9 +28,9 @@ legend right
     focus + capture + click-tracking. The `Ui` struct ties windows to
     layout and routes events; its renderer is a `smelt_term::Compositor`.
   - `tui` — terminal frontend; depends on `core`, `smelt-edit`,
-    `smelt-buffer`, and `crossterm`. Re-exports the editor surface as
-    `pub use ::smelt_edit as smelt_term;` so existing
-    `crate::smelt_term::*` paths keep working.
+    `smelt-buffer`, `smelt-term`, and `crossterm`. Owns `PaintRegistry`
+    (Lua-side `smelt.paint` dispatch) and `TuiApp::resolve_leaf_id`
+    which maps raw `u64` paint ids to `LeafKind::Window` / `LeafKind::Paint`.
   - `engine` / `protocol` — unchanged; LLM core + wire types.
 
   A GUI or web frontend uses `core` directly and ignores
@@ -128,6 +128,18 @@ package "runtime/lua/smelt/  (UX layer — the whole user-facing surface)" as LU
   }
   class "plugins/*.lua" as LPLG <<Lua>>
   class "colorschemes/*.lua" as LCS <<Lua>>
+  class "paint.lua" as LPAINT <<Lua>> {
+    smelt.paint.register(fn) -> paint_id
+    smelt.paint.unregister(id)
+    ' Allocates PaintId via Rust registry;
+    ' callback receives GridSlice userdata.
+  }
+  class "examples/snake.lua" as LSNAKE <<Lua>> {
+    dogfood widget; two paint regions
+    (playfield + perf panel);
+    timer-driven animation at ~60fps.
+    Not autoloaded.
+  }
 }
 
 ' =====================================================================
@@ -354,6 +366,8 @@ package "crate: core  (headless-safe runtime)" as CORE #FFF6E0 {
       attach(spec)            ' parser + on_block cb
                               ' (semantic boundaries,
                               ' not per-chunk)
+      set_selection(ranges)   ' override selection paint
+      selection() / clear_selection()
       yank_text_for_range(r)  ' walks extmark
                               ' YankSubst values
     }
@@ -448,21 +462,46 @@ package "crate: tui  (terminal frontend)" as TUI #E0E8FF {
   }
 
   class TuiApp <<terminal frontend>> {
-    core:       Core
-    well_known: WellKnown
-    ui:         smelt_edit::Ui
+    core:           Core
+    well_known:     WellKnown
+    ui:             smelt_edit::Ui
+    paint_registry: PaintRegistry
     --
     impl UiHost (compositor surface)
     Host-tier Lua flows through
     `&mut Core` directly — no
     parallel trait impl on TuiApp.
+    resolve_leaf_id(raw: u64)
+      -> Option<LeafKind>
   }
 
   class WellKnown <<well-known WinIds — TuiApp only>> {
-    transcript: WinId
-    prompt:     WinId
-    statusline: WinId
+    PROMPT_WIN      = WinId(0)
+    TRANSCRIPT_WIN  = WinId(1)
+    PROMPT_ABOVE_WIN = WinId(2)   ' top chrome leaf (above prompt)
+    PROMPT_BELOW_WIN = WinId(3)   ' bottom chrome leaf (below prompt)
     cmdline:    Option<WinId>
+    ' PROMPT_WIN / PROMPT_ABOVE / BELOW form a three-leaf
+    ' layout for the prompt region (e44b4725).
+  }
+
+  class PaintRegistry <<Lua paint dispatch — tui only>> {
+    PAINT_ID_BASE: u64 = 1<<32
+    ' Allocates ids ≥ PAINT_ID_BASE.
+    ' WinId range is 0..(1<<32)-1.
+    ' No overlap enforced by debug-asserts.
+    --
+    register(cb: LuaCallback) -> PaintId
+    unregister(id: PaintId)
+    contains(id: PaintId) -> bool
+  }
+
+  enum LeafKind <<dispatch tag — tui only>> {
+    Window(WinId)
+    Paint(PaintId)
+    ' Returned by TuiApp::resolve_leaf_id.
+    ' Disambiguates the two halves of
+    ' the u64 PaintId namespace.
   }
 
   ' Terminal-specific modules live here:
@@ -492,6 +531,20 @@ package "crate: smelt-buffer  (shared data — Theme, Buffer, Style)" as BUF #FF
     class Buffer <<lines + extmarks>> {
       lines, namespaces,
       extmarks, undo
+      selection: Vec<SelectionRange>
+      --
+      set_selection(Vec<SelectionRange>)
+      selection() -> &[SelectionRange]
+      clear_selection()
+      ' Unified selection paint (e44b4725).
+      ' Window::render uses this override;
+      ' falls back to auto_selection_ranges
+      ' (from DrawContext::vim_mode) when empty.
+    }
+    class SelectionRange {
+      line:      usize
+      col_start: u16
+      col_end:   u16
     }
     class Clipboard
     class AttachmentId
@@ -507,7 +560,14 @@ package "crate: smelt-term  (pure renderer — TUI library)" as UI #E6F1FF {
   package "primitives" as P #F4F8FF {
     class Cell
     class Grid <<terminal frame>>
-    class GridSlice
+    class GridSlice <<direct cell-write slice>> {
+      set(row, col, char, style)
+      put_str(row, col, s, style)
+      fill_rect(rect, char, style)
+      width() / height()
+      ' Exposed as Lua userdata (P12.A).
+      ' Lifetime guarded by SliceGuard (TLS).
+    }
     class Rect
     class CellUpdate
     class Flush <<diff → SGR writer>>
@@ -516,6 +576,20 @@ package "crate: smelt-term  (pure renderer — TUI library)" as UI #E6F1FF {
     class HitRegistry <<HitRegistry<P>\nhost-defined payload>>
     class Line
     class Span
+    class Surface <<smelt-term facade — P11.C>> {
+      compositor: Compositor
+      theme:      Arc<Theme>
+      layout:     LayoutTree
+      size:       (u16, u16)
+      --
+      render<W, F>(w, paint: F)
+        where F: FnMut(PaintId,
+               &mut GridSlice, &Arc<Theme>)
+      ' Non-editor consumers (tcloc) use
+      ' this facade; supply their own paint
+      ' closure rather than registering into
+      ' a table. No register_paint method.
+    }
   }
 
 ' These three sub-packages logically live in smelt-edit (Window, Ui,
@@ -922,8 +996,10 @@ HeadlessApp *--> Core
 TuiApp      *--> Core
 TuiApp      *--> LuaRuntime
 TuiApp      *--> WellKnown
+TuiApp      *--> PaintRegistry
 TuiApp      --> Ui            : drives compositor
 TuiApp      ..|> UiHost       : impls with Ui surface
+TuiApp      ..> LeafKind      : resolve_leaf_id() -> Option<LeafKind>
 
 LuaRuntime  *--> LuaShared
 LuaRuntime  *--> LuaTaskRuntime
@@ -971,6 +1047,8 @@ LTOOLS   -[#aa6,dashed]-> LayoutTree      : `render(args, output, ctx)`\nreturns
 LTOOLS   -[#aa6,dashed]-> Buffer          : `preview(args)` returns\nLayoutTree<BufId> for confirm\ndialog (separate surface)
 
 LPLG     -[#aa6,dashed]-> BIND            : any plugin can\ncompose Rust capabilities
+LPAINT   -[#aa6,dashed]-> PaintRegistry  : register/unregister\nvia smelt.paint
+LPAINT   -[#aa6,dashed]-> GridSlice      : painter callback\nreceives GridSlice userdata
 
 ' Engine calls Lua tool callbacks generically (no name matching in Rust).
 ' Each registered tool exposes:
@@ -1043,7 +1121,7 @@ note as N3b #EEFFEE
   | on_change cb    |   X    |        |
   | cursor pos      |        |   X    |
   | scroll offset   |        |   X    |
-  | selection range |        |   X    |
+  | selection range |   X*   |   X    |  ' *Buffer.set_selection override (e44b4725); Window fallback via vim_mode
   | keymap overlay  |        |   X    |
   | scrollbar state |        |   X    |
   | border / title  |  —     |   —    |  ' on LayoutTree (any container)

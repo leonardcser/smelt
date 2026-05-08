@@ -39,24 +39,31 @@ Every change lands closer to all three, never farther from any.
 
 ## Crate map
 
-Four crates, dependency arrows go one way, no cycles:
+Seven crates, dependency arrows go one way, no cycles:
 
 ```
-protocol ← engine ← core ← tui
-              ↑
-       runtime/lua/smelt/
+protocol ← engine ← smelt-core ← tui
+                         ↑            ↑
+                   smelt-buffer ← smelt-term ← smelt-edit ← tui
+                         ↑
+               runtime/lua/smelt/
 ```
 
-(`tui` contains the `ui` module — Buffer, Window, Grid, LayoutTree,
-Theme, VimMode — internally.  It is not a separate crate.)
+(`tui` re-exports `smelt-edit` as `smelt_term` for internal path
+compatibility. `smelt-buffer` holds `Buffer`, `Style`, `Theme`. `smelt-term`
+is the pure renderer. `smelt-edit` is the editor layer. `smelt-core` depends
+on `smelt-buffer`; `tui` depends on all four.)
 
 | Crate                    | Role                                                                    |
 | ------------------------ | ----------------------------------------------------------------------- |
 | `protocol`               | Wire types, pure data, serde-serializable. Stable contract, no behavior. Includes `AgentMode`, `ReasoningEffort`, `PermissionOverrides`, `TurnMeta` |
 | `engine`                 | LLM core. Provider abstraction, agent loop, MCP, cancel tokens, schema-aware streaming. Tools = schema + dispatcher trait only; impls live in Lua. **No permission policy, no multi-agent concept**. **Zero UI imports** |
 | `core`                   | Headless-safe runtime. `Core` + `HeadlessApp`, subsystems, `LuaRuntime`, `EngineClient`, Rust capabilities (`fs`/`http`/`permissions`/`process`/…), `Clipboard`/`KillRing`, and **`Buffer` + `BufferParser` (the content data type)**. No terminal imports |
-| `tui`                    | Terminal frontend. `TuiApp`, event loop, terminal input editing, `UiHost` Lua bindings, rendering adapters (`to_buffer`, `prompt_buf`, `status`), `BufferParser` impls (markdown / diff / syntax / bash) under `tui::content::transcript_parsers/`, and the `ui` module (Window, Grid, LayoutTree, Theme, VimMode). Depends on `core` and `crossterm` |
-| `runtime/lua/smelt/`     | The whole UX. Widgets, dialogs, commands, statusline, transcript/diff presentation, themes, tools |
+| `smelt-buffer`           | Shared data layer. `Buffer`, `Style`, `Color`, `Theme`, extmarks, `UndoHistory`, attachments. Zero terminal deps. Both `smelt-term` and `smelt-edit` depend on it |
+| `smelt-term`             | Pure renderer. `Compositor`, `Grid`/`GridSlice`/`Cell`, `LayoutTree`/`PaintId`, `flush_diff`, `Surface` facade, `Line`/`Span`, `HitRegistry`. No editor concepts (no `Window`, no `vim`, no `Buffer`) |
+| `smelt-edit`             | Editor layer over `smelt-term`. `Ui`, `Window`, `WinId`, vim/motions, callbacks, overlays, focus + capture. Re-exports `smelt-term` surface so consumers see one import |
+| `tui`                    | Terminal frontend. `TuiApp`, event loop, terminal input editing, Lua bindings (`tui::lua::api/`), rendering adapters, `BufferParser` impls (markdown / diff / syntax / bash) under `tui::content::transcript_parsers/`. Depends on `core`, `smelt-edit`, and `crossterm`. Re-exports `smelt-edit` as `smelt_term` for internal path compatibility |
+| `runtime/lua/smelt/`     | The whole UX. Widgets, dialogs, commands, statusline, transcript/diff presentation, themes, tools, examples |
 
 **Litmus test for placement.** Stable wire contract → `protocol`.
 Frontend-agnostic LLM/tool code → `engine`. Headless runtime +
@@ -188,6 +195,14 @@ Vim-style: lines + extmarks in named namespaces + `readonly` flag.
   markdown (`**bold**` copies as `**bold**`).
 - **Per-buffer undo/marks** live on Buffer. Window owns no parallel
   edit buffer.
+- **`Buffer::set_selection(ranges)`** is the unified override path for
+  visual-mode selection paint. `SelectionRange { line, col_start, col_end }`
+  lets any producer (transcript yank-flash, prompt input-space, mouse drag
+  in render_loop) write pre-computed selection geometry. `Window::render`
+  reads `Buffer::selection()` first; falls back to auto-deriving ranges
+  from `selection_anchor` + `vim_state.visual_anchor` (via
+  `DrawContext::vim_mode`) for dialog panels and vim-editor windows.
+  No per-window selection namespace — one slot per buffer.
 - **`Buffer::attach(spec)`** wires parsers. Spec carries parser kind,
   decoration namespaces, and optional `on_block` callback at semantic
   boundaries (block end, tool start/stop, turn end) — never per delta.
@@ -483,7 +498,12 @@ Host-tier bindings live under `crates/core/src/lua/api/<name>.rs`:
 
 UiHost-tier bindings live under `crates/tui/src/lua/api/<name>.rs`:
 `buf.rs`, `win.rs`, `ui.rs`, `prompt.rs`, `statusline.rs`, `confirm.rs`,
-`notebook.rs`, `diff.rs`, `syntax.rs`, `theme.rs`, `bash.rs`.
+`notebook.rs`, `diff.rs`, `syntax.rs`, `theme.rs`, `bash.rs`, `paint.rs`.
+
+Supporting modules (not namespaces, not directly registered):
+`crates/tui/src/lua/parse.rs` — shared Lua→Rust argument parsers (style,
+color, constraint, border, corner, title); `crates/tui/src/lua/paint.rs`
+— `PaintRegistry`, `SliceGuard`, `GridSlice` userdata, `LeafKind`.
 
 A few bindings remain in `tui/src/lua/api/` pending reclassification
 (`engine.rs`, `fs.rs`, `process.rs`, `session.rs`, `html.rs`, `http.rs`,
@@ -493,6 +513,27 @@ A few bindings remain in `tui/src/lua/api/` pending reclassification
 Each binding declares whether it's Host-tier (reborrows `&mut Core`)
 or UiHost-tier (reborrows `&mut TuiApp`); calling a UiHost binding
 from a `HeadlessApp` raises a runtime error in Lua.
+
+### WinId / PaintId namespace partition
+
+`WinId` (allocated by `smelt-edit`, starts at 0, increments
+monotonically per session) and `PaintId` (allocated by `PaintRegistry`
+in `crates/tui/src/lua/paint.rs`) share the underlying `u64` space at
+the `LayoutTree::Leaf` layer. The two namespaces are partitioned at
+`PAINT_ID_BASE = 1 << 32`:
+
+- `id < PAINT_ID_BASE` → `LeafKind::Window(WinId)`, owned by `Ui` in `smelt-edit`.
+- `id ≥ PAINT_ID_BASE` → `LeafKind::Paint(PaintId)`, owned by `PaintRegistry` in tui.
+
+`TuiApp::resolve_leaf_id(raw: u64) -> Option<LeafKind>` is the single
+dispatch point for overlay `win` fields. Debug-asserts at both the
+allocator and resolver enforce the boundary. WinIds would need 4 billion
+windows per session to collide — well beyond any plausible workload.
+
+The smelt-term `Surface::render` method takes a `PaintDispatch` closure
+so non-tui consumers supply their own id→painter dispatch directly,
+without a registry (one callback per `render` call instead of a
+persistent table).
 
 ## Engine boundary — channels only
 
@@ -760,13 +801,18 @@ binding.
 
 | Concern                                                   | Owner                                       |
 | --------------------------------------------------------- | ------------------------------------------- |
-| Pixel pushing (grid, diff, SGR)                           | `tui::ui`                                   |
-| Buffer (content data type) + `BufferParser` trait         | `core`                                      |
+| Pixel pushing (grid, diff, SGR)                           | `smelt-term` (`crates/term`)                |
+| Renderer facade (Compositor + Theme + LayoutTree wiring)  | `smelt-term::Surface`                       |
+| Buffer (content data type) + `BufferParser` trait         | `core` / `smelt-buffer`                     |
 | BufferParser impls (markdown / diff / syntax / bash)      | `tui::content::transcript_parsers`          |
-| Window / cursor / scroll / selection / viewport           | `tui::ui`                                   |
-| LayoutTree / Overlay / Border / Anchor / Constraint       | `tui::ui`                                   |
-| Compositor event routing (focus-driven keys, hit-tested mouse) | `tui::ui::Ui`                          |
-| Theme groups, highlight resolution                        | `tui::ui::Theme`                            |
+| Window / cursor / scroll / selection / viewport           | `smelt-edit` (`crates/edit`)                |
+| LayoutTree / Overlay / Border / Anchor / Constraint       | `smelt-term` (`crates/term::layout`)        |
+| Compositor event routing (focus-driven keys, hit-tested mouse) | `smelt-edit::Ui`                       |
+| Theme groups, highlight resolution                        | `smelt-buffer::Theme`                       |
+| Custom paint regions (PaintRegistry, GridSlice userdata)  | `tui::lua::paint` + `smelt.paint` Lua       |
+| WinId / PaintId namespace partition (`PAINT_ID_BASE`)     | `tui::lua::paint` (= 1<<32)                 |
+| Paint dispatch for non-editor consumers                   | `smelt-term::Surface::render(PaintDispatch)`|
+| Lua argument parsers (style/color/constraint/border)      | `tui::lua::parse`                           |
 | Engine handle, agent loop, providers, MCP                 | `engine::`                                  |
 | Wire types (UiCommand, EngineEvent, AgentMode, ReasoningEffort, …) | `protocol::`                          |
 | Permission policy (rules, modes, runtime approvals, workspace store, bash AST) | `core::permissions` capability        |
@@ -775,13 +821,14 @@ binding.
 | Headless frontend (HeadlessApp)                           | `core::`                                     |
 | Terminal frontend (TuiApp, event loop, content rendering) | `tui::`                                     |
 | Lua bridge — Host tier (TLS pointer + Host bindings)      | `core::lua::api/<name>.rs`                   |
-| Lua bridge — UiHost tier (buf / win / ui / statusline)    | `tui::lua::api/<name>.rs`                   |
+| Lua bridge — UiHost tier (buf / win / ui / statusline / paint) | `tui::lua::api/<name>.rs`              |
 | Engine ↔ Lua bridge (RequestPermission, queue_event)      | `core` engine-event bridge / reducer         |
 | Tool dispatch (ToolDispatcher impl)                       | `core` Lua runtime                           |
 | Slash commands (`/model`, `/theme`, `/resume`, …)         | Lua                                         |
 | Dialogs (confirm, permissions, agents, rewind, …)         | Lua                                         |
 | Tools (bash, read, write, edit, glob, grep, …)            | Lua (compose Rust capabilities)             |
 | Statusline content                                        | Lua sources via `smelt.statusline.register` |
+| Custom cell-level widgets (sparklines, games, charts)     | Lua via `smelt.paint`                       |
 | Themes                                                    | Lua (`runtime/lua/smelt/colorschemes/*.lua`) |
 
 **Test for "Rust core" vs "Lua feature":** would a _different_ plugin reuse

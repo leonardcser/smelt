@@ -87,10 +87,13 @@ P10 ship it 🚧                     ── saved-state cleanup, parity walk in 
         │                              final lint gate, doc-sync close-out
         ▼
 P11 ui generalization ✅           ── renderer-as-a-library: split `smelt-term`
-                                      (pure renderer) out of `smelt-edit`
-                                      (editor layer); `LayoutTree::Leaf` unified
-                                      under `PaintId`; renderer becomes credible
-                                      standalone TUI library
+        │                              (pure renderer) out of `smelt-edit`
+        │                              (editor layer); `LayoutTree::Leaf` unified
+        │                              under `PaintId`; `Surface` facade; per-leaf
+        │                              chrome; full Lua constraint/anchor/title API
+        ▼
+P12 Lua-side custom paint regions 🚧── `smelt.paint` API; `GridSlice` userdata;
+                                      snake demo; Phase A landed
 ```
 
 P1 is the load-bearing one. After it, P2/P3/P4 can interleave somewhat;
@@ -539,6 +542,32 @@ into a standalone TUI library. See `P11.md` for the full plan.
   `PaintDispatch` closure. `crates/tui` flips from
   `pub use ::smelt_term;` to `pub use ::smelt_edit as smelt_term;`,
   keeping every `crate::smelt_term::*` path working unchanged.
+- **P11.D ✅** — Post-C additions: `Surface` facade in `smelt-term`
+  (`crates/term/src/surface.rs`) so non-editor consumers don't
+  hand-roll Compositor+Theme+LayoutTree; per-leaf chrome via auto-wrap
+  on `LayoutTree::leaf` nodes; full Lua overlay API (`smelt.ui.overlay`)
+  exposes styled titles, all `Constraint` variants (`Fill`/`Length`/
+  `Min`/`Max`/`Percentage`/`Ratio`), per-item chrome, and `Win` anchor.
+  Hidden flag added to slash-command registration (`hidden = true`
+  suppresses from the `/` completer while keeping the alias dispatchable).
+
+---
+
+## P12 — Lua-side custom paint regions
+
+After P11. Wires the paint-dispatch infrastructure in `smelt-term` to
+Lua-registered painters. See `P12.md` for the full plan.
+
+- **P12.A ✅** — `smelt.paint` API landed: `PaintRegistry` on `TuiApp`
+  (`crates/tui/src/lua/paint.rs`, `PAINT_ID_BASE = 1<<32`); `GridSlice`
+  Lua userdata (`set`/`put_str`/`fill_rect`/`width`/`height`); TLS
+  `SliceGuard` for lifetime safety; `LeafKind` enum + `resolve_leaf_id`
+  for WinId/PaintId disambiguation; `smelt.paint.register`/`unregister`
+  Lua surface. Parser extraction: 14 parsers moved from `ui_ops.rs` into
+  `lua/parse.rs` with unit tests (`ui_ops.rs` shrank ~400 lines).
+  Snake demo at `runtime/lua/smelt/examples/snake.lua`.
+- **P12.B ⏸** — Sparkline plugin + storybook paint story.
+- **P12.C ⏸** — Frame-buffer escape hatch; gated on profiling.
 
 ---
 
