@@ -15,9 +15,9 @@
 //! virt-text convenience method.
 
 use crate::attachment::AttachmentId;
-use crate::style::{Color, Style};
-use crate::theme::{intern_anonymous_style, HlGroup};
 use crate::undo::UndoHistory;
+use smelt_style::style::{Color, Style};
+use smelt_style::theme::{intern_anonymous_style, HlGroup};
 use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
 

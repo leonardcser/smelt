@@ -1345,14 +1345,8 @@ fn paint_scrollbar(slice: &mut GridSlice<'_>, viewport: WindowViewport, theme: &
     }
     let thumb = theme.get("SmeltScrollbarThumb");
     let track = theme.get("SmeltScrollbarTrack");
-    let thumb_style = Style::new().bg(thumb
-        .bg
-        .or(thumb.fg)
-        .unwrap_or(smelt_buffer::style::Color::Reset));
-    let track_style = Style::new().bg(track
-        .bg
-        .or(track.fg)
-        .unwrap_or(smelt_buffer::style::Color::Reset));
+    let thumb_style = Style::new().bg(thumb.bg.or(thumb.fg).unwrap_or(crate::grid::Color::Reset));
+    let track_style = Style::new().bg(track.bg.or(track.fg).unwrap_or(crate::grid::Color::Reset));
     let avail = height.saturating_sub(row_offset);
     let rows = bar.viewport_rows.min(avail);
     for row in 0..rows {
@@ -1600,7 +1594,7 @@ mod tests {
         w.cursor_line_highlight = true;
         w.cursor_line = 1; // second visible row
         let mut theme = Theme::default();
-        let bg = crate::grid::Style::new().bg(smelt_buffer::style::Color::AnsiValue(238));
+        let bg = crate::grid::Style::new().bg(crate::grid::Color::AnsiValue(238));
         theme.set("CursorLine", bg);
         let ctx = DrawContext {
             terminal_width: 40,
@@ -1631,7 +1625,7 @@ mod tests {
         buf.set_all_lines(vec!["alpha".into(), "bravo".into()]);
         let w = make_win();
         let mut theme = Theme::default();
-        let bg = crate::grid::Style::new().bg(smelt_buffer::style::Color::AnsiValue(238));
+        let bg = crate::grid::Style::new().bg(crate::grid::Color::AnsiValue(238));
         theme.set("CursorLine", bg);
         let ctx = DrawContext {
             terminal_width: 40,
@@ -1726,7 +1720,7 @@ mod tests {
         w.cursor_line_highlight = true;
         w.cursor_line = 0;
         let mut theme = Theme::default();
-        let bg = crate::grid::Style::new().bg(smelt_buffer::style::Color::AnsiValue(238));
+        let bg = crate::grid::Style::new().bg(crate::grid::Color::AnsiValue(238));
         theme.set("CursorLine", bg);
         let ctx = DrawContext {
             terminal_width: 40,
@@ -1757,7 +1751,7 @@ mod tests {
         let mut w = make_win();
         w.cursor_line_highlight = true;
         let mut theme = Theme::default();
-        let bg = crate::grid::Style::new().bg(smelt_buffer::style::Color::AnsiValue(238));
+        let bg = crate::grid::Style::new().bg(crate::grid::Color::AnsiValue(238));
         theme.set("CursorLine", bg);
         let ctx = DrawContext {
             terminal_width: 40,
@@ -1871,7 +1865,7 @@ mod tests {
         w.cursor_line_highlight = true;
         w.cursor_line = 0;
         let mut theme = Theme::default();
-        let bg = crate::grid::Style::new().bg(smelt_buffer::style::Color::AnsiValue(238));
+        let bg = crate::grid::Style::new().bg(crate::grid::Color::AnsiValue(238));
         theme.set("CursorLine", bg);
         // Ghost group only sets `dim`, not bg/fg.
         theme.set("Ghost", crate::grid::Style::new().dim());
@@ -1898,7 +1892,7 @@ mod tests {
         let mut w = make_win();
         w.cursor_line = 0;
         w.cursor_col = 1;
-        let cursor_style = crate::grid::Style::new().bg(smelt_buffer::style::Color::White);
+        let cursor_style = crate::grid::Style::new().bg(crate::grid::Color::White);
         let mut ctx = ctx();
         ctx.focused = true;
         ctx.cursor_shape = CursorShape::Block {
@@ -1993,8 +1987,8 @@ mod tests {
             ScrollbarState::new(19, 40, 10),
         ));
         let mut theme = Theme::default();
-        let thumb_bg = smelt_buffer::style::Color::AnsiValue(220);
-        let track_bg = smelt_buffer::style::Color::AnsiValue(238);
+        let thumb_bg = crate::grid::Color::AnsiValue(220);
+        let track_bg = crate::grid::Color::AnsiValue(238);
         theme.set(
             "SmeltScrollbarThumb",
             crate::grid::Style::new().bg(thumb_bg),
@@ -2033,7 +2027,7 @@ mod tests {
             ScrollbarState::new(19, 5, 10),
         ));
         let mut theme = Theme::default();
-        let track_bg = smelt_buffer::style::Color::AnsiValue(238);
+        let track_bg = crate::grid::Color::AnsiValue(238);
         theme.set(
             "SmeltScrollbarTrack",
             crate::grid::Style::new().bg(track_bg),
@@ -2198,7 +2192,7 @@ mod tests {
     /// byte length.
     #[test]
     fn highlight_anchored_after_multibyte_covers_next_glyph() {
-        use smelt_buffer::style::Color;
+        use crate::grid::Color;
         use unicode_width::UnicodeWidthStr;
         let mut buf = Buffer::new(BufId(1), BufCreateOpts::default());
         let last_s = " 969\u{00B5}s";

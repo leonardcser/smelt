@@ -15,7 +15,7 @@
 use std::io::Write;
 use std::sync::Arc;
 
-use smelt_buffer::theme::Theme;
+use smelt_style::theme::Theme;
 
 use crate::compositor::Compositor;
 use crate::grid::{Grid, GridSlice};

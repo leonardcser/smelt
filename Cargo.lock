@@ -2529,6 +2529,7 @@ version = "0.4.7"
 dependencies = [
  "base64",
  "sha2 0.10.9",
+ "smelt-style",
  "unicode-width",
 ]
 
@@ -2558,6 +2559,7 @@ dependencies = [
  "sha2 0.10.9",
  "similar",
  "smelt-buffer",
+ "smelt-style",
  "syntect",
  "tempfile",
  "tokio",
@@ -2579,11 +2581,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "smelt-style"
+version = "0.4.7"
+
+[[package]]
 name = "smelt-term"
 version = "0.4.7"
 dependencies = [
  "crossterm",
- "smelt-buffer",
+ "insta",
+ "smelt-style",
  "unicode-width",
 ]
 

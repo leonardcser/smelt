@@ -1,7 +1,7 @@
-//! Frame snapshot for L3 storybook tests. `Ui::snapshot` produces a
-//! `SnapshotFrame` after rendering into the compositor's internal grid;
-//! tests assert on the text + per-cell style sidecar without parsing
-//! SGR escapes back from a writer.
+//! Frame snapshot for renderer storybook tests. Captures the text +
+//! per-cell style sidecar of a rendered grid so snapshot tests can
+//! assert on the post-render state without parsing SGR escapes back
+//! from a writer.
 
 use super::grid::{Cell, Grid, Style};
 

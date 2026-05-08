@@ -25,9 +25,9 @@ pub use smelt_buffer::clipboard::Clipboard;
 pub use smelt_buffer::undo::{UndoEntry, UndoHistory};
 
 pub use smelt_term::{
-    flush_diff, paint_layout_tree, to_crossterm_color, Border, Cell, CellUpdate, Color, Compositor,
-    Constraint, Corner, Grid, GridSlice, Gutters, HitRegistry, LayoutTree, Line, PaintDispatch,
-    PaintId, Rect, SnapshotFrame, Span, Style, Theme, DEFAULT_ACCENT,
+    flush_diff, paint_layout_tree, Border, Cell, CellUpdate, Color, Compositor, Constraint, Corner,
+    Grid, GridSlice, Gutters, HitRegistry, LayoutTree, Line, PaintDispatch, PaintId, Rect,
+    SnapshotFrame, Span, Style, Theme, DEFAULT_ACCENT,
 };
 pub use smelt_term::{grid, layout};
 

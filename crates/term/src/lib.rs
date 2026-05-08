@@ -26,12 +26,12 @@ pub mod surface;
 
 pub use compositor::Compositor;
 pub use flush::flush_diff;
-pub use grid::{to_crossterm_color, Cell, CellUpdate, Grid, GridSlice, Style};
+pub use grid::{Cell, CellUpdate, Grid, GridSlice, Style};
 pub use hit::HitRegistry;
 pub use layout::{Border, Constraint, Corner, Gutters, LayoutTree, PaintId, Rect};
 pub use line::{Line, Span};
-pub use smelt_buffer::style::Color;
-pub use smelt_buffer::theme::{Theme, DEFAULT_ACCENT};
+pub use smelt_style::style::Color;
+pub use smelt_style::theme::{Theme, DEFAULT_ACCENT};
 pub use snapshot::SnapshotFrame;
 pub use surface::Surface;
 
@@ -48,8 +48,9 @@ pub type PaintDispatch<'a> =
 /// render their border + title before recursing into children at
 /// resolved rects; leaves are forwarded to the paint callback with
 /// the resolved leaf rect. The renderer ascribes no semantics to
-/// `PaintId` — host code (typically `smelt-edit`'s `Ui::render`) maps
-/// it back to whatever leaf it represents.
+/// `PaintId` — host code maps it back to whatever leaf it represents
+/// (e.g. `smelt-edit`'s editor surface, or a host's own per-leaf
+/// painter).
 pub fn paint_layout_tree(
     grid: &mut Grid,
     theme: &std::sync::Arc<Theme>,

@@ -1,21 +1,21 @@
 //! Theme registry — nvim-style highlight groups.
 //!
-//! Code references *names* (`"Visual"`, `"SmeltAccent"`, …); the host
-//! populates the registry at startup; users override names via Lua.
-//! Names that aren't set fall back to `Style::default()` — nvim's
-//! policy of no panic on typo. `link()` aliases one name to another.
+//! Code references *names* (`"Visual"`, `"Comment"`, …); hosts populate
+//! the registry at startup; users override names via Lua. Names that
+//! aren't set fall back to `Style::default()` — nvim's policy of no
+//! panic on typo. `link()` aliases one name to another.
 //!
-//! Replaces the host-side `super::theme::*` flat module of color
-//! constants and the `Ui::set_selection_bg` / `selection_style()` shim
-//! that fanned out one slot to every widget.
+//! Highlight groups intern to a small u32 id (`HlGroup`) so document
+//! span payloads can store the id instead of a resolved `Style`.
+//! Resolution happens
+//! at paint time via [`Theme::resolve`]; theme switches mutate the
+//! same Theme and update existing ids' styles — buffers don't need
+//! rebuilding. The interner is a singleton `HlGroupRegistry` shared by
+//! every Theme so ids stay stable across tests and across switches.
 //!
-//! P9.e: highlight groups are interned to a small u32 id (`HlGroup`)
-//! so extmarks can store the id instead of a resolved `Style`. The
-//! resolution happens at paint time via [`Theme::resolve`]; theme
-//! switches mutate the same Theme and update existing ids' styles —
-//! buffers don't need rebuilding. The interner is a singleton
-//! `HlGroupRegistry` shared by every Theme so ids stay stable across
-//! tests and across switches.
+//! Smelt-host-specific role mappings (`role_hl("Accent") →
+//! "SmeltAccent"`) live in `smelt-core::theme`; this module only
+//! carries the generic interner + Theme machinery.
 
 use crate::style::{Color, Style};
 use std::collections::HashMap;
@@ -23,7 +23,7 @@ use std::sync::{OnceLock, RwLock};
 
 /// Interned highlight-group id. Minted by [`HlGroupRegistry::intern`];
 /// stable for the process lifetime. Theme stores `HlGroup → Style`;
-/// extmark Highlight payloads carry the id (P9.e).
+/// document highlight payloads carry the id.
 #[derive(Copy, Clone, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct HlGroup(pub u32);
 
@@ -61,35 +61,6 @@ fn registry() -> &'static RwLock<HlGroupRegistry> {
     REG.get_or_init(|| RwLock::new(HlGroupRegistry::new()))
 }
 
-/// Resolve a smelt role label (e.g. `"Accent"`, `"Slug"`, `"Muted"`)
-/// to its canonical theme group id. Renderers flow the returned id
-/// through extmarks so theme switches mutate `Theme.styles[id]` once
-/// instead of re-rendering buffers. Unknown labels intern as-is.
-pub fn role_hl(role: &str) -> HlGroup {
-    let name = match role {
-        "Muted" => "Comment",
-        "ErrorMsg" => "ErrorMsg",
-        "Accent" => "SmeltAccent",
-        "Slug" => "SmeltSlug",
-        "UserBg" => "SmeltUserBg",
-        "CodeBlockBg" => "SmeltCodeBlockBg",
-        "Bar" => "SmeltBar",
-        "ToolPending" => "SmeltToolPending",
-        "ReasonOff" => "SmeltReasonOff",
-        "Success" => "SmeltSuccess",
-        "Apply" => "SmeltModeApply",
-        "Plan" => "SmeltModePlan",
-        "Exec" => "SmeltModeExec",
-        "Heading" => "SmeltHeading",
-        "ReasonLow" => "SmeltReasonLow",
-        "ReasonMed" => "SmeltReasonMed",
-        "ReasonHigh" => "SmeltReasonHigh",
-        "ReasonMax" => "SmeltReasonMax",
-        other => other,
-    };
-    intern(name)
-}
-
 /// Get-or-mint the [`HlGroup`] id for `name`. Stable across the whole
 /// process; the same name always interns to the same id.
 pub fn intern(name: &str) -> HlGroup {
@@ -112,8 +83,8 @@ pub fn name_of(g: HlGroup) -> Option<String> {
 
 /// Intern a Style as an anonymous group keyed by its content hash.
 /// Lets call sites that resolve a concrete Style (rather than a
-/// theme-named group) ride the same HlGroup-keyed extmark payload
-/// shape. Anonymous groups bypass theme switches — there's no name to
+/// theme-named group) ride the same HlGroup-keyed payload shape.
+/// Anonymous groups bypass theme switches — there's no name to
 /// override — so callers that want theme-reactive styling should use
 /// [`intern`] with a stable name instead.
 pub fn intern_anonymous_style(style: Style) -> HlGroup {
@@ -145,7 +116,7 @@ pub const DEFAULT_ACCENT: u8 = 208;
 
 #[derive(Debug, Clone)]
 pub struct Theme {
-    /// Resolved styles, keyed by interned HlGroup id (P9.e). Sparse
+    /// Resolved styles, keyed by interned HlGroup id. Sparse
     /// — `get`/`resolve` fall back to `Style::default()` for ids that
     /// were never set through this Theme.
     styles: HashMap<HlGroup, Style>,

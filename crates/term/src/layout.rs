@@ -4,14 +4,11 @@ use std::collections::HashMap;
 /// Stable identifier for a leaf in the layout tree. Hosts mint these
 /// values, attach them to `LayoutTree::Leaf(_)` leaves, and dispatch
 /// on them inside the paint callback passed to
-/// [`crate::render_with_paints`]. The renderer treats the id as
+/// [`crate::paint_layout_tree`]. The renderer treats the id as
 /// opaque — semantics (a window? a tile? a custom widget?) are
-/// entirely the host's domain. Editor-style consumers (`smelt-edit`)
-/// map paint ids to `Window` instances; tcloc-style consumers map
-/// them to their own data.
+/// entirely the host's domain.
 ///
-/// Width sized to fit common host-side identifiers without coercion
-/// (e.g. `WinId(u64)`).
+/// Width sized to fit common host-side identifiers without coercion.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct PaintId(pub u64);
 
@@ -33,8 +30,8 @@ impl PaintId {
 ///    evenly.
 ///
 /// `Fit` is reserved for content-natural sizing — currently behaves
-/// like `Fill`; gains true content awareness in P1.b.3 when leaves
-/// carry `WinId` and can be queried for natural size.
+/// like `Fill`; gains true content awareness once leaves can be
+/// queried for natural size.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Constraint {
     /// Exactly `n` cells along the axis.
@@ -53,7 +50,7 @@ pub enum Constraint {
     /// Fill the remaining space; siblings split evenly.
     Fill,
     /// Size to the leaf's natural content. Falls back to `Fill`
-    /// until leaves carry `WinId` (P1.b.3).
+    /// until leaves expose a natural-size hook.
     Fit,
 }
 
@@ -84,11 +81,11 @@ pub struct Chrome {
 #[derive(Clone, Debug)]
 pub enum LayoutTree {
     /// Terminal node identifying a paint region. The host registers a
-    /// dispatcher via [`crate::render_with_paints`] and matches on
+    /// dispatcher via [`crate::paint_layout_tree`] and matches on
     /// `PaintId` to drive its own painter for this rect; the renderer
-    /// itself ascribes no semantics to the id. Editor consumers
-    /// (`smelt-edit`) map ids to `Window`/`Buffer`; standalone
-    /// consumers (tcloc, custom widgets) map them to their own state.
+    /// itself ascribes no semantics to the id. Hosts map ids to
+    /// whatever leaf state they care about (windows, tiles, custom
+    /// widgets).
     Leaf(PaintId),
     /// Vertical container; children stack top-to-bottom.
     Vbox { items: Vec<Item>, chrome: Chrome },
@@ -209,18 +206,16 @@ impl LayoutTree {
     /// Natural `(width, height)` of this tree given an outer cap. Used
     /// by overlay sizing: `Length` / `Percentage` / `Ratio` / `Min` /
     /// `Max` contribute their resolved sizes along the parent axis;
-    /// `Fill` / `Fit` contribute `0` (no content awareness yet — that
-    /// arrives when leaves expose their Buffer extent in P1.d). The
-    /// secondary axis takes the max across siblings. Chrome (border,
-    /// gap) is added on top.
+    /// `Fill` / `Fit` contribute `0` (leaves don't yet expose a
+    /// natural-size hook). The secondary axis takes the max across
+    /// siblings. Chrome (border, gap) is added on top.
     ///
     /// `cap` bounds `Percentage` / `Ratio` resolution and clamps the
     /// final result. The return value is always `<= cap`.
     pub fn natural_size(&self, cap: (u16, u16)) -> (u16, u16) {
         match self {
-            // Leaves have no intrinsic size yet — content-natural
-            // sizing waits for windows to expose Buffer dimensions.
-            // Callers wrap them in containers with explicit sizing.
+            // Leaves have no intrinsic size; callers wrap them in
+            // containers with explicit sizing.
             LayoutTree::Leaf(_) => (0, 0),
             LayoutTree::Vbox { items, chrome } => natural_box(items, chrome, cap, true),
             LayoutTree::Hbox { items, chrome } => natural_box(items, chrome, cap, false),
@@ -318,11 +313,11 @@ pub enum Corner {
     SE,
 }
 
-/// Where an `Overlay` is positioned on screen. Drag = mutate the
-/// anchor; the renderer recomputes the overlay's rect each frame
-/// from the anchor + the overlay's natural / configured size.
-/// Sizing lives on the overlay's `layout: LayoutTree`; this enum
-/// only carries position.
+/// Where an anchored container (e.g. an editor overlay, a popup) is
+/// positioned on screen. Drag = mutate the anchor; the host
+/// recomputes the rect each frame from the anchor + the container's
+/// natural / configured size. Sizing lives on the container's own
+/// layout; this enum only carries position.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Anchor {
     /// Centered on screen along both axes.

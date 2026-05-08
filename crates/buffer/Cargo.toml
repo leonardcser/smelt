@@ -11,6 +11,7 @@ name = "smelt_buffer"
 path = "src/lib.rs"
 
 [dependencies]
+smelt-style = { path = "../style" }
 base64 = "0.22"
 sha2 = "0.10"
 unicode-width = "0.2"

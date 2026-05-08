@@ -6,6 +6,7 @@ edition = "2021"
 [dependencies]
 protocol = { path = "../protocol" }
 engine = { path = "../engine" }
+smelt-style = { path = "../style" }
 smelt-buffer = { path = "../buffer" }
 tokio = { version = "1", features = ["full"] }
 tokio-util = "0.7"

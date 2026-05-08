@@ -4,11 +4,10 @@
 //! is generic over the payload so each host attaches its own
 //! domain type — no `dyn Any`, no boxing.
 //!
-//! This is the "hit table" smelt's `Ui` already maintains internally
-//! for windows + overlays, exposed as a primitive for paint-leaf
-//! callers (`LayoutTree::Paint`) and standalone renderer consumers.
-//! Keep the registry separate per surface (one per `Ui::render_*`
-//! call); resetting between frames is the host's responsibility.
+//! Editor hosts use this internally for windows + overlays; standalone
+//! renderer consumers can use it the same way for their own paint
+//! leaves. Keep the registry separate per surface (one per render
+//! pass); resetting between frames is the host's responsibility.
 
 use crate::geometry::Rect;
 

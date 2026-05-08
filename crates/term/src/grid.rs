@@ -1,11 +1,13 @@
 use super::geometry::Rect;
-pub use smelt_buffer::style::{Color, Style};
+pub use smelt_style::style::{Color, Style};
 
-/// Convert core's frontend-neutral `Color` to crossterm's terminal
+/// Convert the frontend-neutral `Color` to crossterm's terminal
 /// `Color` at the SGR-emit boundary. 1:1 enum mapping; the trait
-/// orphan rule prevents `From<core::Color> for crossterm::Color`,
-/// so this is a free function.
-pub fn to_crossterm_color(c: Color) -> crossterm::style::Color {
+/// orphan rule prevents `From<smelt_style::Color> for crossterm::Color`,
+/// so this is a free function. Internal — callers should write `Style`
+/// values into the grid and let the compositor handle the SGR
+/// translation.
+pub(crate) fn to_crossterm_color(c: Color) -> crossterm::style::Color {
     use crossterm::style::Color as X;
     match c {
         Color::Reset => X::Reset,

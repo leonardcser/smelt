@@ -29,15 +29,6 @@ impl Compositor {
         }
     }
 
-    /// Read the most recently flushed grid. Used by in-crate tests
-    /// that drive `Ui::render` and want to assert on what landed on
-    /// the terminal-bound surface (post-swap, so `previous` carries
-    /// the just-rendered frame).
-    #[cfg(test)]
-    pub fn previous_for_test(&self) -> &Grid {
-        &self.previous
-    }
-
     pub fn resize(&mut self, width: u16, height: u16) {
         self.width = width;
         self.height = height;
@@ -48,9 +39,8 @@ impl Compositor {
 
     /// Render one frame. The caller paints into the in-flight `current`
     /// grid via `paint`, then optionally returns an absolute `(col, row)`
-    /// hardware cursor position. `Ui::render` uses the closure to paint
-    /// painted splits + overlays and to surface the focused leaf's
-    /// hardware cursor.
+    /// hardware cursor position. Hosts use the closure to walk their
+    /// own layout and to surface a focused leaf's hardware cursor.
     pub fn render_with<W: Write, F: FnOnce(&mut Grid, &Theme) -> Option<(u16, u16)>>(
         &mut self,
         theme: &Theme,
@@ -89,8 +79,8 @@ impl Compositor {
     }
 
     /// Read the most recently flushed grid. After `render_with` swaps,
-    /// `previous` carries the just-rendered frame. The L3 storybook
-    /// harness routes through this after a discard-writer render.
+    /// `previous` carries the just-rendered frame. Snapshot harnesses
+    /// route through this after a discard-writer render.
     pub fn previous(&self) -> &Grid {
         &self.previous
     }

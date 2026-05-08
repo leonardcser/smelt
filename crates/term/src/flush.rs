@@ -135,7 +135,7 @@ fn emit_style_diff<W: Write>(w: &mut W, from: &Style, to: &Style) -> std::io::Re
 mod tests {
     use super::*;
     use crate::grid::Grid;
-    use smelt_buffer::style::Color;
+    use smelt_style::style::Color;
 
     #[test]
     fn flush_empty_diff_produces_no_output() {
