@@ -5,7 +5,7 @@
 //! assume any selection handling, undo recording, and completer recomputation
 //! has already been set up by the caller (the dispatcher).
 
-use super::{PromptState, ATTACHMENT_MARKER, PASTE_LINE_THRESHOLD};
+use super::{PromptState, ATTACHMENT_MARKER};
 use crate::smelt_term::VimMode;
 use smelt_core::attachment::AttachmentId;
 
@@ -277,20 +277,19 @@ impl PromptState {
     }
 
     pub(super) fn insert_paste(&mut self, data: String) {
-        // Normalize line endings: terminals (especially macOS) send \r for
-        // newlines in bracketed paste mode.  Convert \r\n and lone \r to \n
-        // so that line counting and display work correctly.
+        // Normalize line endings: terminals (especially macOS) send `\r`
+        // for newlines in bracketed paste mode. Convert `\r\n` and lone
+        // `\r` to `\n` so multi-line pastes flow into the buffer as the
+        // user expects.
         let data = data.replace("\r\n", "\n").replace('\r', "\n");
 
         if data.is_empty() {
             return;
         }
 
-        let lines = data.lines().count();
-        let char_threshold =
-            PASTE_LINE_THRESHOLD * (crate::content::term_width().saturating_sub(1));
-        // Mark as from_paste if inserting at the beginning of the current line.
-        // This prevents pasted content starting with '!' from being treated as a shell escape.
+        // Mark as from_paste if inserting at the beginning of the
+        // current line. Prevents pasted content starting with `!` from
+        // being treated as a shell escape.
         let line_start = self.win.text[..self.win.cpos]
             .rfind('\n')
             .map(|i| i + 1)
@@ -298,13 +297,8 @@ impl PromptState {
         if self.win.cpos == line_start {
             self.from_paste = true;
         }
-        if lines >= PASTE_LINE_THRESHOLD || data.len() >= char_threshold {
-            let id = self.store.insert_paste(data);
-            self.insert_attachment_id(id);
-        } else {
-            self.win.text.insert_str(self.win.cpos, &data);
-            self.win.cpos += data.len();
-        }
+        self.win.text.insert_str(self.win.cpos, &data);
+        self.win.cpos += data.len();
     }
 
     pub(super) fn insert_attachment_id(&mut self, id: AttachmentId) {

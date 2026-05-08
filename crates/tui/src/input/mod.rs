@@ -15,12 +15,6 @@ use vim_bridge::VimBridgeResult;
 
 pub(crate) const ATTACHMENT_MARKER: char = '\u{FFFC}';
 
-/// Back-reference emitted in place of repeated paste expansions so the model
-/// sees the placement without paying tokens for the duplicate body.
-const PASTE_STUB: &str = "[see earlier pasted content]";
-
-const PASTE_LINE_THRESHOLD: usize = 12;
-
 /// Snapshot of the input buffer state (used for Ctrl+S stash).
 /// Owns its attachment data so it survives store clears across sessions.
 #[derive(Clone, Debug)]
@@ -314,27 +308,16 @@ impl PromptState {
         char_pos(&self.win.text, self.win.cpos)
     }
 
-    /// Expand attachment markers and return the final text for submission.
-    /// Pastes are inlined; image markers are stripped (images go via Content::Parts).
-    ///
-    /// When the same attachment id appears more than once in the buffer we
-    /// expand it only on the first occurrence. Subsequent occurrences emit a
-    /// short back-reference so the model still sees the placement without
-    /// spending tokens on duplicate content. The back-reference is omitted
-    /// for images entirely — their content is carried via `Content::Parts`,
-    /// not inline text, so repeating the (empty) image expansion is a no-op.
+    /// Expand attachment markers and return the final text for
+    /// submission. Image markers are stripped — image data flows via
+    /// `Content::Parts`, not inline text.
     pub(crate) fn expanded_text(&self) -> String {
         let mut result = String::new();
         let mut att_idx = 0;
-        let mut seen: std::collections::HashSet<AttachmentId> = std::collections::HashSet::new();
         for c in self.win.text.chars() {
             if c == ATTACHMENT_MARKER {
                 if let Some(&id) = self.win.attachment_ids.get(att_idx) {
-                    if seen.insert(id) {
-                        result.push_str(self.store.expanded_text(id));
-                    } else if matches!(self.store.get(id), Some(Attachment::Paste { .. })) {
-                        result.push_str(PASTE_STUB);
-                    }
+                    result.push_str(self.store.expanded_text(id));
                 }
                 att_idx += 1;
             } else {
@@ -344,20 +327,15 @@ impl PromptState {
         result
     }
 
-    /// Text for the user message block: pastes expanded, images shown as `[label]`.
+    /// Text for the user message block: images shown as `[label]`.
     pub(crate) fn message_display_text(&self) -> String {
         let mut result = String::new();
         let mut att_idx = 0;
         for c in self.win.text.chars() {
             if c == ATTACHMENT_MARKER {
                 if let Some(&id) = self.win.attachment_ids.get(att_idx) {
-                    if let Some(att) = self.store.get(id) {
-                        match att {
-                            Attachment::Paste { content } => result.push_str(content),
-                            Attachment::Image { label, .. } => {
-                                result.push_str(&format!("[{label}]"));
-                            }
-                        }
+                    if let Some(Attachment::Image { label, .. }) = self.store.get(id) {
+                        result.push_str(&format!("[{label}]"));
                     }
                 }
                 att_idx += 1;
@@ -1454,63 +1432,6 @@ mod tests {
     }
 
     #[test]
-    fn large_paste_creates_attachment() {
-        let mut input = PromptState::new();
-
-        // Use multi-line paste which definitely creates an attachment
-        let multi_line = (0..PASTE_LINE_THRESHOLD)
-            .map(|i| format!("!line{}", i))
-            .collect::<Vec<_>>()
-            .join("\n");
-        input.insert_paste(multi_line);
-        assert!(
-            input.skip_shell_escape(),
-            "Multi-line paste should set from_paste"
-        );
-        assert!(
-            !input.win.attachment_ids.is_empty(),
-            "Multi-line paste above threshold should create attachment"
-        );
-        assert_eq!(input.win.text, "\u{FFFC}"); // Should be just the marker
-    }
-
-    #[test]
-    fn multi_line_paste_above_threshold_creates_attachment() {
-        let mut input = PromptState::new();
-
-        let multi_line = (0..PASTE_LINE_THRESHOLD)
-            .map(|i| format!("!line{}", i))
-            .collect::<Vec<_>>()
-            .join("\n");
-        input.insert_paste(multi_line);
-        assert!(
-            input.skip_shell_escape(),
-            "Multi-line paste should set from_paste"
-        );
-        assert!(
-            !input.win.attachment_ids.is_empty(),
-            "Multi-line paste should create attachment"
-        );
-    }
-
-    #[test]
-    fn small_multi_line_paste_inlined() {
-        let mut input = PromptState::new();
-
-        let multi_line = "!line1\nline2\nline3".to_string();
-        input.insert_paste(multi_line);
-        assert!(
-            input.skip_shell_escape(),
-            "Small multi-line paste should set from_paste"
-        );
-        assert!(
-            input.win.attachment_ids.is_empty(),
-            "Small multi-line paste should not create attachment"
-        );
-        assert_eq!(input.win.text, "!line1\nline2\nline3");
-    }
-
-    #[test]
     fn stash_preserves_from_paste() {
         let mut input = PromptState::new();
         input.insert_paste("!test".to_string());
@@ -2014,14 +1935,16 @@ mod tests {
     #[test]
     fn delete_selection_removes_attachments() {
         let mut input = PromptState::new();
-        // Insert text with an attachment marker in the middle: "ab[paste]cd"
+        // Insert text with an image attachment marker in the middle.
         input.win.text = format!("ab{}cd", ATTACHMENT_MARKER);
         input.win.cpos = 0;
-        let id = input.store.insert_paste("pasted".to_string());
+        let id = input
+            .store
+            .insert_image("img.png".into(), "data:image/png;base64,AAA".into());
         input.win.attachment_ids.push(id);
-        // Select "b[paste]c" (bytes 1..5 — marker is 3 bytes)
+        // Select "b<marker>c" (bytes 1..5 — marker is 3 bytes).
         input.win.selection_anchor = Some(1);
-        input.win.cpos = 1 + 1 + ATTACHMENT_MARKER.len_utf8() + 1; // b + marker + c
+        input.win.cpos = 1 + 1 + ATTACHMENT_MARKER.len_utf8() + 1;
         assert!(input
             .selection_range(crate::smelt_term::VimMode::Insert)
             .is_some());
@@ -2041,49 +1964,6 @@ mod tests {
         input.win.text = format!("pre{m}mid{m}post", m = ATTACHMENT_MARKER);
         input.win.cpos = input.win.text.len();
         input.win.attachment_ids = vec![id, id];
-    }
-
-    #[test]
-    fn expanded_text_inlines_paste_once_for_duplicate_ids() {
-        let mut input = PromptState::new();
-        let body = "secret pasted block".to_string();
-        let id = input.store.insert_paste(body.clone());
-        buf_with_two_markers(&mut input, id);
-
-        let text = input.expanded_text();
-        assert_eq!(
-            text.matches(&body).count(),
-            1,
-            "paste body should appear exactly once"
-        );
-        assert!(text.contains(PASTE_STUB));
-    }
-
-    #[test]
-    fn expanded_text_distinct_pastes_both_expand() {
-        let mut input = PromptState::new();
-        let id1 = input.store.insert_paste("alpha body long enough".into());
-        let id2 = input.store.insert_paste("beta body different".into());
-        input.win.text = format!("{m}and{m}", m = ATTACHMENT_MARKER);
-        input.win.cpos = input.win.text.len();
-        input.win.attachment_ids = vec![id1, id2];
-        let text = input.expanded_text();
-        assert!(text.contains("alpha body long enough"));
-        assert!(text.contains("beta body different"));
-        assert!(!text.contains("[see earlier"));
-    }
-
-    #[test]
-    fn expanded_text_three_identical_ids_emits_one_body_two_stubs() {
-        let mut input = PromptState::new();
-        let body = "repeated content".to_string();
-        let id = input.store.insert_paste(body.clone());
-        input.win.text = format!("{m}a{m}b{m}", m = ATTACHMENT_MARKER);
-        input.win.cpos = input.win.text.len();
-        input.win.attachment_ids = vec![id, id, id];
-        let text = input.expanded_text();
-        assert_eq!(text.matches(&body).count(), 1);
-        assert_eq!(text.matches(PASTE_STUB).count(), 2);
     }
 
     #[test]

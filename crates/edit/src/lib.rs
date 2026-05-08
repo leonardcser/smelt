@@ -18,8 +18,8 @@ pub(crate) mod window;
 
 pub use smelt_buffer::attachment::AttachmentId;
 pub use smelt_buffer::buffer::{
-    BufCreateOpts, BufId, Buffer, BufferParser, ExtmarkOpts, ExtmarkPayload, SpanMeta, SpanStyle,
-    LUA_BUF_ID_BASE,
+    BufCreateOpts, BufId, Buffer, BufferParser, ExtmarkOpts, ExtmarkPayload, SelectionRange,
+    SpanMeta, SpanStyle, LUA_BUF_ID_BASE,
 };
 pub use smelt_buffer::clipboard::Clipboard;
 pub use smelt_buffer::undo::{UndoEntry, UndoHistory};
@@ -127,6 +127,14 @@ pub struct Ui {
     /// (only the focused window honours it) and by `Ui::render` to
     /// surface the hardware caret.
     cursor_shape: CursorShape,
+    /// Single global vim mode for the focused window. Hosts that drive
+    /// vim-enabled windows (currently always `TuiApp`) push the
+    /// authoritative mode each frame via [`Self::set_vim_mode`]; paint
+    /// paths read it into `DrawContext::vim_mode` so `Window::render`
+    /// can auto-derive visual selection ranges from each Window's own
+    /// `vim_state.visual_anchor` when no explicit `Buffer::set_selection`
+    /// override is set.
+    vim_mode: VimMode,
     /// Timestamp drag-autoscroll was last engaged. `Some` while the
     /// user is mid-drag with the captured window's cursor parked at a
     /// viewport edge; `None` otherwise. The host's main loop reads
@@ -170,9 +178,18 @@ impl Ui {
             capture: None,
             last_click: None,
             cursor_shape: CursorShape::Hidden,
+            vim_mode: VimMode::default(),
             drag_autoscroll_since: None,
             chrome_drag: None,
         }
+    }
+
+    pub fn set_vim_mode(&mut self, mode: VimMode) {
+        self.vim_mode = mode;
+    }
+
+    pub fn vim_mode(&self) -> VimMode {
+        self.vim_mode
     }
 
     /// Record a primary-button Down for click-count tracking and
@@ -1065,6 +1082,7 @@ impl Ui {
         };
         let focus = self.focus;
         let cursor_shape = self.cursor_shape;
+        let vim_mode = self.vim_mode;
         let wins = &self.wins;
         let bufs = &self.bufs;
         let term_size = self.surface.terminal_size();
@@ -1105,6 +1123,7 @@ impl Ui {
                                     CursorShape::Hidden
                                 },
                                 theme: std::sync::Arc::clone(theme),
+                                vim_mode,
                             };
                             win.render(buf, &mut slice, &ctx);
                             return;
@@ -1117,6 +1136,7 @@ impl Ui {
                         focused: false,
                         cursor_shape: CursorShape::Hidden,
                         theme: std::sync::Arc::clone(theme),
+                        vim_mode,
                     };
                     paint(id, &mut slice, &ctx);
                 };
@@ -1208,13 +1228,10 @@ impl Ui {
         None
     }
 
-    /// Compute the absolute hardware cursor position for the focused
-    /// splits leaf. Returns `None` when focus isn't a splits leaf or
-    /// its cursor coordinates fall outside the resolved rect. The
-    /// caller has already gated on `cursor_shape == Hardware` —
-    /// `Block` paints in-place via `Window::render`.
-    /// `Window::cursor_line` / `cursor_col` are viewport-relative and
-    /// we add them to the rect's origin.
+    /// Absolute hardware cursor position for the focused splits leaf.
+    /// `cursor_col` / `cursor_line` are content-local; the leaf's
+    /// `SplitConfig::gutters.pad_left` is applied here so the caret
+    /// lands past chrome.
     fn focused_painted_split_cursor(&self) -> Option<(u16, u16)> {
         let focus = self.focus?;
         if !self.splits().contains_leaf(focus) {
@@ -1222,8 +1239,9 @@ impl Ui {
         }
         let win = self.wins.get(&focus)?;
         let rect = self.split_rect(focus)?;
+        let pad_left = win.config.gutters.pad_left;
         let abs_y = rect.top + win.cursor_line;
-        let abs_x = rect.left + win.cursor_col;
+        let abs_x = rect.left + pad_left + win.cursor_col;
         if abs_y < rect.top + rect.height && abs_x < rect.left + rect.width {
             Some((abs_x, abs_y))
         } else {

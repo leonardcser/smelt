@@ -19,7 +19,7 @@
 //! `overlay_close` to remove the overlay.
 
 use crate::app::TuiApp;
-use crate::app::PROMPT_WIN;
+use crate::app::PROMPT_ABOVE_WIN;
 use crate::smelt_term::layout::Anchor;
 use crate::smelt_term::{BufCreateOpts, SpanStyle};
 use crate::smelt_term::{
@@ -256,8 +256,10 @@ fn layout_for(leaf: WinId, height: u16) -> LayoutTree {
 
 fn anchor_for(placement: PickerPlacement, height: u16) -> Anchor {
     match placement {
+        // Anchor to the chrome leaf above the input so the picker
+        // floats above the top bar instead of paining over it.
         PickerPlacement::PromptDocked { .. } => Anchor::Win {
-            target: PROMPT_WIN.into(),
+            target: PROMPT_ABOVE_WIN.into(),
             attach: Corner::NW,
             row_offset: -(height as i32),
             col_offset: 0,

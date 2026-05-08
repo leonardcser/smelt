@@ -13,6 +13,12 @@ pub const PROMPT_WIN: WinId = WinId(0);
 /// rationale as [`PROMPT_WIN`] — stable id for callback registration.
 pub const TRANSCRIPT_WIN: WinId = WinId(1);
 
+/// Read-only chrome leaf above the input (queued + stash + top bar).
+pub const PROMPT_ABOVE_WIN: WinId = WinId(2);
+
+/// Read-only chrome leaf below the input (bottom bar).
+pub const PROMPT_BELOW_WIN: WinId = WinId(3);
+
 /// Conceptual [`BufId`] for the prompt editing buffer.  The editing buffer
 /// is created before `Ui` exists (inside [`PromptState::new`](crate::input::PromptState)),
 /// so it is never allocated via `Ui::buf_create`.  Naming the magic number

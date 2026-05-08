@@ -16,8 +16,9 @@ use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
 // ── Public types ────────────────────────────────────────────────────────────
 
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum VimMode {
+    #[default]
     Insert,
     Normal,
     Visual,

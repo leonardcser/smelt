@@ -31,6 +31,12 @@ pub struct DrawContext {
     /// `HashMap<String, Style>` keyed by hl-group name and would
     /// allocate every frame, every leaf, otherwise.
     pub theme: std::sync::Arc<Theme>,
+    /// Global vim mode for this frame. `Window::render` consults it
+    /// when auto-deriving the visual-mode selection paint from the
+    /// Window's own `vim_state.visual_anchor` for vim-enabled
+    /// windows that haven't set an explicit `Buffer::set_selection`
+    /// override (e.g. dialog content panels).
+    pub vim_mode: VimMode,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -407,6 +413,58 @@ impl Window {
             }
         }
         self.selection_range_at(cpos)
+    }
+
+    /// Auto-derive per-row visual-mode selection ranges from this
+    /// Window's own anchors. Used by `Window::render` as the fallback
+    /// when the buffer carries no explicit `set_selection` override —
+    /// covers dialog content panels and any other Window whose
+    /// selection state lives entirely in `selection_anchor` /
+    /// `vim_state.visual_anchor`. Empty result means no paint.
+    fn auto_selection_ranges(
+        &self,
+        buf: &Buffer,
+        vim_mode: VimMode,
+    ) -> Vec<smelt_buffer::buffer::SelectionRange> {
+        let buf_text = buf.text();
+        let range = if self.vim_enabled && matches!(vim_mode, VimMode::Visual | VimMode::VisualLine)
+        {
+            vim::visual_range(&self.vim_state, &buf_text, self.cpos, vim_mode)
+        } else {
+            self.selection_range_at(self.cpos)
+        };
+        let Some((s, e)) = range else {
+            return Vec::new();
+        };
+        if s >= e {
+            return Vec::new();
+        }
+        let mut out = Vec::new();
+        let mut line_start = 0usize;
+        for (idx, line) in buf.lines().iter().enumerate() {
+            let line_end = line_start + line.len();
+            if e > line_start && s <= line_end {
+                let clip_s = s.saturating_sub(line_start).min(line.len());
+                let clip_e = e.saturating_sub(line_start).min(line.len());
+                let start_cell = byte_to_cell(line, clip_s) as u16;
+                let end_cell = byte_to_cell(line, clip_e) as u16;
+                if end_cell > start_cell {
+                    out.push(smelt_buffer::buffer::SelectionRange {
+                        line: idx,
+                        col_start: start_cell,
+                        col_end: end_cell,
+                    });
+                } else if line.is_empty() && s <= line_start && e > line_start {
+                    out.push(smelt_buffer::buffer::SelectionRange {
+                        line: idx,
+                        col_start: 0,
+                        col_end: 1,
+                    });
+                }
+            }
+            line_start = line_end + 1;
+        }
+        out
     }
 
     /// Vim "WORD" (capital W) selection: the token at `cpos` is any
@@ -1041,6 +1099,17 @@ impl Window {
         let height = slice.height();
         let scroll = self.scroll_top as usize;
         let line_count = buf.line_count();
+        // Window-uniform gutter from `SplitConfig::gutters`. Content,
+        // highlights, virt-text, selection, and the block cursor
+        // shift right by `pad_left` and clip at `content_width`.
+        // Cursor positions are content-local.
+        let pad_left = self.config.gutters.pad_left.min(width);
+        let pad_right = self
+            .config
+            .gutters
+            .pad_right
+            .min(width.saturating_sub(pad_left));
+        let content_width = width.saturating_sub(pad_left).saturating_sub(pad_right);
         let cursor_row = if self.cursor_line_highlight {
             Some(self.cursor_line)
         } else {
@@ -1048,6 +1117,18 @@ impl Window {
         };
         let normal_style = ctx.theme.get("Normal");
         let cursor_style = ctx.theme.get("CursorLine");
+        // Resolve visual selection paint state once. Override (set via
+        // `Buffer::set_selection`) wins; otherwise auto-derive from
+        // this Window's anchors. Empty result means no selection paint.
+        let visual_style = ctx.theme.get("Visual");
+        let selection_owned: Vec<smelt_buffer::buffer::SelectionRange>;
+        let selection_ranges: &[smelt_buffer::buffer::SelectionRange] =
+            if !buf.selection().is_empty() {
+                buf.selection()
+            } else {
+                selection_owned = self.auto_selection_ranges(buf, ctx.vim_mode);
+                &selection_owned[..]
+            };
         for row in 0..height {
             let idx = scroll + row as usize;
             let decoration = if idx < line_count {
@@ -1068,9 +1149,8 @@ impl Window {
                     };
                 }
             }
-            // Paint the row background first so trailing space beyond
-            // the line content also picks up `Normal` / `CursorLine` /
-            // `LineDecoration::fill_bg`.
+            // Row bg fill spans the full slice — gutter cells show
+            // the row's bg, just no content.
             if row_style != Style::default() {
                 for col in 0..width {
                     slice.set(col, row, ' ', row_style);
@@ -1083,19 +1163,18 @@ impl Window {
                 continue;
             };
             // Lay out the row's source characters in visual columns,
-            // honoring unicode width. `col_to_char` lets the highlight
-            // painter map a visual column back to its source char so
-            // wide glyphs pick up the right symbol when only one of
-            // their two cells overlaps a span.
-            let mut col_to_char: Vec<usize> = Vec::with_capacity(width as usize);
+            // honoring unicode width. `col_to_char` is indexed by
+            // *content* col (0..content_width); slice writes apply
+            // `pad_left` to land in the inner zone.
+            let mut col_to_char: Vec<usize> = Vec::with_capacity(content_width as usize);
             let line_chars: Vec<char> = line.chars().collect();
             let mut col: u16 = 0;
             for (ci, ch) in line_chars.iter().enumerate() {
                 let cw = UnicodeWidthChar::width(*ch).unwrap_or(0).max(1) as u16;
-                if col + cw > width {
+                if col + cw > content_width {
                     break;
                 }
-                slice.set(col, row, *ch, row_style);
+                slice.set(pad_left + col, row, *ch, row_style);
                 col_to_char.push(ci);
                 for _ in 1..cw {
                     col_to_char.push(ci);
@@ -1114,8 +1193,8 @@ impl Window {
             for span in buf.highlights_at(idx) {
                 let span_style = ctx.theme.resolve(span.hl);
                 let style = merge_span_style(row_style, &span_style);
-                let start = span.col_start.min(width);
-                let end = span.col_end.min(width);
+                let start = span.col_start.min(content_width);
+                let end = span.col_end.min(content_width);
                 for c in start..end {
                     let ci = col_to_char.get(c as usize).copied();
                     // Wide-char continuation cells share the source-char
@@ -1130,12 +1209,64 @@ impl Window {
                         continue;
                     }
                     let ch = ci.and_then(|i| line_chars.get(i)).copied().unwrap_or(' ');
-                    slice.set(c, row, ch, style);
+                    slice.set(pad_left + c, row, ch, style);
                 }
                 if span.hl_eol {
-                    for c in end..width {
-                        slice.set(c, row, ' ', style);
+                    for c in end..content_width {
+                        slice.set(pad_left + c, row, ' ', style);
                     }
+                }
+            }
+            // Selection painting. After the extmark highlight walk so
+            // selection bg always wins over base highlights; before
+            // virt-text so ghost predictions / overlay text stay
+            // unselected. Wide-char continuation cells share the source
+            // index with the leading cell — same skip rule as the
+            // highlight walk. Cells covered by a `SpanMeta::selectable
+            // = false` highlight are skipped entirely so chrome-like
+            // spans (user-block bar, elapsed-time suffix, …) don't
+            // paint with the visual selection bg.
+            //
+            // The selectable-mask is per-cell: any non-selectable span
+            // that covers a column wins (matches the navigation /
+            // copy semantics — those mechanisms also treat any
+            // non-selectable cover as exclusive).
+            let mut selectable_mask: Option<Vec<bool>> = None;
+            if !selection_ranges.iter().any(|r| r.line == idx) {
+                // No selection on this row — skip the mask build entirely.
+            } else {
+                let row_spans = buf.highlights_at(idx);
+                if row_spans.iter().any(|s| !s.meta.selectable) {
+                    let mut mask = vec![true; content_width as usize];
+                    for span in &row_spans {
+                        if span.meta.selectable {
+                            continue;
+                        }
+                        let start = span.col_start.min(content_width) as usize;
+                        let end = span.col_end.min(content_width) as usize;
+                        for slot in mask.iter_mut().take(end).skip(start) {
+                            *slot = false;
+                        }
+                    }
+                    selectable_mask = Some(mask);
+                }
+            }
+            for r in selection_ranges.iter().filter(|r| r.line == idx) {
+                let style = merge_span_style(row_style, &visual_style);
+                let start = r.col_start.min(content_width);
+                let end = r.col_end.min(content_width);
+                for c in start..end {
+                    if let Some(mask) = selectable_mask.as_deref() {
+                        if !mask.get(c as usize).copied().unwrap_or(true) {
+                            continue;
+                        }
+                    }
+                    let ci = col_to_char.get(c as usize).copied();
+                    if c > 0 && ci.is_some() && ci == col_to_char.get((c - 1) as usize).copied() {
+                        continue;
+                    }
+                    let ch = ci.and_then(|i| line_chars.get(i)).copied().unwrap_or(' ');
+                    slice.set(pad_left + c, row, ch, style);
                 }
             }
             // Virtual text painting. `VirtTextPos::Eol` appends after
@@ -1154,18 +1285,21 @@ impl Window {
                     .chars()
                     .map(|c| UnicodeWidthChar::width(c).unwrap_or(0).max(1) as u16)
                     .sum();
+                // Virt-text positions are in *content* coords; shift by
+                // `pad_left` and clip at `content_width` so virt-text
+                // lands inside the inner zone alongside real content.
                 let start_col = match vt.pos {
                     VirtTextPos::Eol => content_end_col,
                     VirtTextPos::Inline | VirtTextPos::Overlay => vt.col as u16,
-                    VirtTextPos::RightAlign => width.saturating_sub(vt_width),
+                    VirtTextPos::RightAlign => content_width.saturating_sub(vt_width),
                 };
                 let mut c = start_col;
                 for ch in vt.text.chars() {
                     let cw = UnicodeWidthChar::width(ch).unwrap_or(0).max(1) as u16;
-                    if c + cw > width {
+                    if c + cw > content_width {
                         break;
                     }
-                    slice.set(c, row, ch, style);
+                    slice.set(pad_left + c, row, ch, style);
                     c += cw;
                 }
             }
@@ -1177,8 +1311,8 @@ impl Window {
 
         if ctx.focused {
             if let CursorShape::Block { glyph, style } = ctx.cursor_shape {
-                if self.cursor_col < width && self.cursor_line < height {
-                    slice.set(self.cursor_col, self.cursor_line, glyph, style);
+                if self.cursor_col < content_width && self.cursor_line < height {
+                    slice.set(pad_left + self.cursor_col, self.cursor_line, glyph, style);
                 }
             }
         }
@@ -1293,6 +1427,7 @@ mod tests {
             focused: false,
             cursor_shape: CursorShape::Hidden,
             theme: std::sync::Arc::new(Theme::default()),
+            vim_mode: VimMode::default(),
         }
     }
 
@@ -1473,6 +1608,7 @@ mod tests {
             focused: true,
             cursor_shape: CursorShape::Hidden,
             theme: std::sync::Arc::new(theme),
+            vim_mode: VimMode::default(),
         };
         let mut grid = Grid::new(10, 3);
         let mut slice = grid.slice_mut(Rect::new(0, 0, 10, 3));
@@ -1503,6 +1639,7 @@ mod tests {
             focused: true,
             cursor_shape: CursorShape::Hidden,
             theme: std::sync::Arc::new(theme),
+            vim_mode: VimMode::default(),
         };
         let mut grid = Grid::new(10, 2);
         let mut slice = grid.slice_mut(Rect::new(0, 0, 10, 2));
@@ -1527,6 +1664,7 @@ mod tests {
             focused: false,
             cursor_shape: CursorShape::Hidden,
             theme: std::sync::Arc::new(theme),
+            vim_mode: VimMode::default(),
         };
         let mut grid = Grid::new(10, 1);
         let mut slice = grid.slice_mut(Rect::new(0, 0, 10, 1));
@@ -1559,6 +1697,7 @@ mod tests {
             focused: false,
             cursor_shape: CursorShape::Hidden,
             theme: std::sync::Arc::new(theme),
+            vim_mode: VimMode::default(),
         };
         let mut grid = Grid::new(10, 1);
         let mut slice = grid.slice_mut(Rect::new(0, 0, 10, 1));
@@ -1595,6 +1734,7 @@ mod tests {
             focused: true,
             cursor_shape: CursorShape::Hidden,
             theme: std::sync::Arc::new(theme),
+            vim_mode: VimMode::default(),
         };
         let mut grid = Grid::new(10, 1);
         let mut slice = grid.slice_mut(Rect::new(0, 0, 10, 1));
@@ -1625,6 +1765,7 @@ mod tests {
             focused: false,
             cursor_shape: CursorShape::Hidden,
             theme: std::sync::Arc::new(theme),
+            vim_mode: VimMode::default(),
         };
         let mut grid = Grid::new(10, 2);
         let mut slice = grid.slice_mut(Rect::new(0, 0, 10, 2));
@@ -1653,6 +1794,7 @@ mod tests {
             focused: false,
             cursor_shape: CursorShape::Hidden,
             theme: std::sync::Arc::new(theme),
+            vim_mode: VimMode::default(),
         };
         let mut grid = Grid::new(10, 1);
         let mut slice = grid.slice_mut(Rect::new(0, 0, 10, 1));
@@ -1681,6 +1823,7 @@ mod tests {
             focused: false,
             cursor_shape: CursorShape::Hidden,
             theme: std::sync::Arc::new(theme),
+            vim_mode: VimMode::default(),
         };
         let mut grid = Grid::new(10, 1);
         let mut slice = grid.slice_mut(Rect::new(0, 0, 10, 1));
@@ -1705,6 +1848,7 @@ mod tests {
             focused: false,
             cursor_shape: CursorShape::Hidden,
             theme: std::sync::Arc::new(theme),
+            vim_mode: VimMode::default(),
         };
         let mut grid = Grid::new(5, 1);
         let mut slice = grid.slice_mut(Rect::new(0, 0, 5, 1));
@@ -1737,6 +1881,7 @@ mod tests {
             focused: true,
             cursor_shape: CursorShape::Hidden,
             theme: std::sync::Arc::new(theme),
+            vim_mode: VimMode::default(),
         };
         let mut grid = Grid::new(10, 1);
         let mut slice = grid.slice_mut(Rect::new(0, 0, 10, 1));
@@ -1864,6 +2009,7 @@ mod tests {
             focused: false,
             cursor_shape: CursorShape::Hidden,
             theme: std::sync::Arc::new(theme),
+            vim_mode: VimMode::default(),
         };
         let mut grid = Grid::new(20, 10);
         let mut slice = grid.slice_mut(Rect::new(0, 0, 20, 10));
@@ -1898,6 +2044,7 @@ mod tests {
             focused: false,
             cursor_shape: CursorShape::Hidden,
             theme: std::sync::Arc::new(theme),
+            vim_mode: VimMode::default(),
         };
         let mut grid = Grid::new(20, 10);
         let mut slice = grid.slice_mut(Rect::new(0, 0, 20, 10));

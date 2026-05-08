@@ -186,7 +186,9 @@ pub struct TuiApp {
     pub(crate) well_known: WellKnown,
 }
 
-pub use well_known::{PROMPT_EDIT_BUF, PROMPT_WIN, TRANSCRIPT_WIN};
+pub use well_known::{
+    PROMPT_ABOVE_WIN, PROMPT_BELOW_WIN, PROMPT_EDIT_BUF, PROMPT_WIN, TRANSCRIPT_WIN,
+};
 
 /// The well-known split-tree windows that smelt always carries:
 /// the prompt, the transcript, and the statusline, plus the
@@ -194,14 +196,18 @@ pub use well_known::{PROMPT_EDIT_BUF, PROMPT_WIN, TRANSCRIPT_WIN};
 /// `Ui::win_buf_mut(WinId)` — there's exactly one `Buffer` per
 /// well-known `Window`.
 pub(crate) struct WellKnown {
-    /// Prompt input window. Stable id [`PROMPT_WIN`]. Its buffer
-    /// is rewritten each frame by `compute_prompt` (chrome rows +
-    /// visible input slice + bottom bar + completer extmark).
+    /// Input leaf. Stable id [`PROMPT_WIN`]. Buffer rewritten each
+    /// frame by `compute_input` (input rows + ghost text + selection).
     pub(crate) prompt: crate::smelt_term::WinId,
+    /// Read-only chrome leaf above the input: queued + stash + top
+    /// bar. Stable id [`PROMPT_ABOVE_WIN`].
+    pub(crate) prompt_above: crate::smelt_term::WinId,
+    /// Read-only bottom bar leaf. Stable id [`PROMPT_BELOW_WIN`].
+    pub(crate) prompt_below: crate::smelt_term::WinId,
     /// Transcript window. Stable id [`TRANSCRIPT_WIN`]. Its
     /// buffer is rewritten each frame by
-    /// `project_transcript_buffer`; selection bg lands as extmarks
-    /// in the `NS_SELECTION` namespace.
+    /// `project_transcript_buffer`; selection bg is published per
+    /// frame via `Buffer::set_selection`.
     pub(crate) transcript: crate::smelt_term::WinId,
     /// Statusline window. Dynamically allocated at startup. Its
     /// buffer carries one line; `refresh_status_bar` rewrites it
@@ -405,12 +411,8 @@ impl TuiApp {
             // layer — `project_transcript_buffer` writes the projected
             // lines + highlight extmarks each frame, and the painted-
             // split path consumes them via `Window::render`. Selection
-            // bg lands as extmarks in a dedicated `selection`
-            // namespace registered ahead so the painted layering wins.
+            // bg is published per frame via `Buffer::set_selection`.
             let transcript_display_buf = ui.buf_create(crate::smelt_term::BufCreateOpts::default());
-            if let Some(buf) = ui.buf_mut(transcript_display_buf) {
-                buf.create_namespace(crate::content::transcript_buf::NS_SELECTION);
-            }
             assert!(ui.win_open_split_at(
                 crate::app::TRANSCRIPT_WIN,
                 transcript_display_buf,
@@ -419,20 +421,42 @@ impl TuiApp {
                     gutters: crate::smelt_term::Gutters::default(),
                 },
             ));
-            // Prompt: a Buffer-backed Window painted via `Ui::render`
-            // from the post-layer closure. No compositor `Component`
-            // layer — `compute_prompt` writes the unified buffer
-            // (chrome rows + visible input slice + bottom bar) with
-            // highlight extmarks each frame, and the painted-split
-            // path consumes it via `Window::render`.
+            let prompt_above_buf = ui.buf_create(crate::smelt_term::BufCreateOpts::default());
+            assert!(ui.win_open_split_at(
+                crate::app::PROMPT_ABOVE_WIN,
+                prompt_above_buf,
+                crate::smelt_term::SplitConfig {
+                    region: "prompt_above".into(),
+                    gutters: crate::smelt_term::Gutters::default(),
+                },
+            ));
+            if let Some(w) = ui.win_mut(crate::app::PROMPT_ABOVE_WIN) {
+                w.focusable = false;
+            }
             assert!(ui.win_open_split_at(
                 crate::app::PROMPT_WIN,
                 input_display_buf,
                 crate::smelt_term::SplitConfig {
                     region: "prompt".into(),
+                    gutters: crate::smelt_term::Gutters {
+                        pad_left: 1,
+                        pad_right: 1,
+                        scrollbar: false,
+                    },
+                },
+            ));
+            let prompt_below_buf = ui.buf_create(crate::smelt_term::BufCreateOpts::default());
+            assert!(ui.win_open_split_at(
+                crate::app::PROMPT_BELOW_WIN,
+                prompt_below_buf,
+                crate::smelt_term::SplitConfig {
+                    region: "prompt_below".into(),
                     gutters: crate::smelt_term::Gutters::default(),
                 },
             ));
+            if let Some(w) = ui.win_mut(crate::app::PROMPT_BELOW_WIN) {
+                w.focusable = false;
+            }
             // Status line: Buffer-backed Window painted directly via
             // `Window::render` from `Ui::render`'s post-layer closure.
             // No compositor `Component` layer — the buffer carries the
@@ -458,7 +482,8 @@ impl TuiApp {
             ui.set_layout(crate::content::layout::build_layout_tree(
                 &crate::content::layout::LayoutInput {
                     term_height: h,
-                    prompt_height: 3,
+                    prompt_above_rows: 1,
+                    prompt_input_rows: 1,
                 },
                 status_win,
             ));
@@ -468,6 +493,8 @@ impl TuiApp {
                 transcript_display_buf,
                 WellKnown {
                     prompt: crate::app::PROMPT_WIN,
+                    prompt_above: crate::app::PROMPT_ABOVE_WIN,
+                    prompt_below: crate::app::PROMPT_BELOW_WIN,
                     transcript: crate::app::TRANSCRIPT_WIN,
                     statusline: status_win,
                     cmdline: None,

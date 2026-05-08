@@ -12,6 +12,10 @@ impl TuiApp {
         // Lua-driven mutation (`smelt.theme.set('accent', …)`) lands
         // before this frame's draw.
         crate::theme::populate_ui_theme(self.ui.theme_mut());
+        // Publish the current vim mode so `Window::render`'s auto-derive
+        // selection path on overlay leaves (dialogs, /messages) reads
+        // it from `DrawContext::vim_mode`.
+        self.ui.set_vim_mode(self.vim_mode);
 
         let (term_w, term_h) = self.ui.terminal_size();
         let width = term_w as usize;
@@ -37,31 +41,23 @@ impl TuiApp {
             .set_cursor_shape(crate::smelt_term::CursorShape::Hidden);
 
         // ── Layout ──
-        let natural_prompt_height = self.measure_prompt_height(&self.input, width, queued);
-        // Publish the splits tree to `Ui`; it resolves rects against
-        // the current terminal area on demand. `LayoutState::from_ui`
-        // reads the resolved transcript / prompt / status rects back
-        // out for downstream sync.
+        let (above_rows, input_rows) = self.measure_prompt_rows(&self.input, width, queued);
         self.ui.set_layout(layout::build_layout_tree(
             &layout::LayoutInput {
                 term_height: term_h,
-                prompt_height: natural_prompt_height,
+                prompt_above_rows: above_rows,
+                prompt_input_rows: input_rows,
             },
             self.well_known.statusline,
         ));
         self.layout = layout::LayoutState::from_ui(&self.ui, self.well_known.statusline);
         let viewport_rows = self.layout.viewport_rows();
         let prompt_rect = self.layout.prompt;
-        let prompt_height = prompt_rect.height;
 
         self.sync_transcript_layer(term_w, width, viewport_rows, has_transcript_cursor);
-        self.sync_prompt_layer(
-            term_w,
-            prompt_rect,
-            prompt_height,
-            queued,
-            has_prompt_cursor,
-        );
+        self.sync_prompt_above_layer(term_w, queued);
+        self.sync_input_layer(prompt_rect, has_prompt_cursor);
+        self.sync_prompt_below_layer(term_w);
         // Freeze the live-turn timer + spinner whenever a blocking
         // dialog (Confirm, Question, …) is up so the user doesn't see
         // wall-clock seconds tick by while the agent is actually parked
@@ -148,11 +144,12 @@ impl TuiApp {
 
     /// Project the transcript into its display buffer, compute the
     /// soft cursor, and drive the painted-split `Ui::wins[TRANSCRIPT_WIN]`
-    /// (cursor + viewport + scroll). Selection paints via extmarks in
-    /// the buffer's `NS_SELECTION` namespace. When content owns focus
-    /// the soft cursor surfaces as `Ui::cursor_shape = Block { glyph,
-    /// style }` so `Window::render` paints the cell after extmark
-    /// layering.
+    /// (cursor + viewport + scroll). Selection paints via the buffer's
+    /// `set_selection` override (vim Visual + non-vim shift-select +
+    /// yank-flash all flatten to per-row ranges). When content owns
+    /// focus the soft cursor surfaces as `Ui::cursor_shape = Block {
+    /// glyph, style }` so `Window::render` paints the cell after the
+    /// extmark + selection layering.
     fn sync_transcript_layer(
         &mut self,
         term_w: u16,
@@ -196,33 +193,18 @@ impl TuiApp {
 
         let transcript_selection =
             self.transcript_selection_highlights(tdata.clamped_scroll, viewport_rows);
-        let visual = self.ui.theme().get("Visual");
-        let visual_span = crate::smelt_term::SpanStyle {
-            fg: visual.fg,
-            bg: visual.bg,
-            ..Default::default()
-        };
-
-        // Selection lands in a dedicated `NS_SELECTION` namespace so
-        // its paint order is stable: `Window::render` walks all
-        // namespaces in NsId order, and the selection ns is created
-        // after `ns_highlights` in `TuiApp::new`, so its spans paint
-        // after projection highlights and override their bg/fg.
         if let Some(buf) = self.ui.win_buf_mut(self.well_known.transcript) {
-            let ns = buf.create_namespace(crate::content::transcript_buf::NS_SELECTION);
-            buf.clear_namespace(ns, 0, usize::MAX);
-            for (line, col_start, col_end) in &transcript_selection {
-                buf.set_extmark(
-                    ns,
-                    *line,
-                    *col_start as usize,
-                    crate::smelt_term::ExtmarkOpts::highlight(
-                        *col_end as usize,
-                        visual_span,
-                        crate::smelt_term::SpanMeta::default(),
-                    ),
-                );
-            }
+            let ranges: Vec<crate::smelt_term::SelectionRange> = transcript_selection
+                .iter()
+                .map(
+                    |(line, col_start, col_end)| crate::smelt_term::SelectionRange {
+                        line: *line,
+                        col_start: *col_start,
+                        col_end: *col_end,
+                    },
+                )
+                .collect();
+            buf.set_selection(ranges);
         }
 
         // Drive the painted-split Window's cursor + scrollbar viewport
@@ -270,18 +252,7 @@ impl TuiApp {
         }
     }
 
-    /// Populate the unified prompt buffer (chrome rows + visible
-    /// input slice + bottom bar) and set the painted-split prompt
-    /// Window's cursor + viewport. Stashes the resolved input-area
-    /// rect on `self.prompt_viewport` for mouse routing.
-    fn sync_prompt_layer(
-        &mut self,
-        term_w: u16,
-        prompt_rect: crate::smelt_term::Rect,
-        prompt_height: u16,
-        queued: &[String],
-        has_prompt_cursor: bool,
-    ) {
+    fn sync_prompt_above_layer(&mut self, term_w: u16, queued: &[String]) {
         let bar_info = prompt_buf::BarInfo {
             model_label: Some(self.core.config.model.clone()),
             reasoning_effort: self.core.config.reasoning_effort,
@@ -291,69 +262,90 @@ impl TuiApp {
             show_cost: self.core.config.settings.show_cost,
             session_cost_usd: self.core.session.session_cost_usd,
         };
+        let pa = prompt_buf::PromptAboveInput {
+            queued,
+            stash: &self.input.stash,
+            bar_info,
+            width: term_w,
+        };
+        let theme = self.ui.theme().clone();
+        let buf = self
+            .ui
+            .win_buf_mut(self.well_known.prompt_above)
+            .expect("prompt-above window registered at startup");
+        prompt_buf::compute_prompt_above(&pa, buf, &theme);
+    }
 
-        let prompt_output = {
-            let mut prompt_input = prompt_buf::PromptInput {
-                queued,
-                stash: &self.input.stash,
+    fn sync_prompt_below_layer(&mut self, term_w: u16) {
+        let theme = self.ui.theme().clone();
+        let buf = self
+            .ui
+            .win_buf_mut(self.well_known.prompt_below)
+            .expect("prompt-below window registered at startup");
+        prompt_buf::compute_prompt_below(term_w, buf, &theme);
+    }
+
+    /// Populate the input-leaf buffer and set its cursor + viewport.
+    /// Cursor positions are content-local; `Window::render` /
+    /// `Ui::focused_painted_split_cursor` apply the leaf's gutter shift.
+    fn sync_input_layer(&mut self, prompt_rect: crate::smelt_term::Rect, has_prompt_cursor: bool) {
+        let gutters = self
+            .ui
+            .win(crate::app::PROMPT_WIN)
+            .map(|w| w.config.gutters.clone())
+            .unwrap_or_default();
+        let pad_left = gutters.pad_left;
+        let content_width = prompt_rect
+            .width
+            .saturating_sub(pad_left)
+            .saturating_sub(gutters.pad_right);
+
+        let output = {
+            let inp = prompt_buf::InputLeafInput {
                 input: &self.input,
                 vim_mode: self.vim_mode,
                 clipboard: &self.core.clipboard,
-                width: term_w,
-                height: prompt_height,
+                content_width,
+                height: prompt_rect.height,
                 has_prompt_cursor,
-                bar_info,
             };
             let theme = self.ui.theme().clone();
-            let input_buf = self
+            let buf = self
                 .ui
                 .win_buf_mut(self.well_known.prompt)
-                .expect("prompt window must be registered at startup");
-            prompt_buf::compute_prompt(&mut prompt_input, input_buf, &theme)
+                .expect("prompt window registered at startup");
+            prompt_buf::compute_input(&inp, buf, &theme)
         };
 
-        let cursor = prompt_output.cursor;
-        let cursor_style = prompt_output.cursor_style;
-        // Write the renderer's clamped scroll_top back into the Window
-        // (handles the case where the prompt buffer shrank and the old
-        // scroll_top is now beyond max_off, or vim `zz` requested a
-        // recenter via `pending_recenter`).
-        if let Some(ref ivp) = prompt_output.input_viewport {
-            self.input.win.scroll_top = ivp.scroll_top;
+        if let Some(ref vp) = output.viewport {
+            self.input.win.scroll_top = vp.scroll_top;
         }
         self.input.win.pending_recenter = false;
         self.input.win.last_render_cpos = Some(self.input.win.cpos);
 
-        let prompt_viewport = if let Some(ref ivp) = prompt_output.input_viewport {
-            let input_rect = crate::smelt_term::Rect::new(
-                prompt_rect.top + ivp.top_row,
-                0,
-                prompt_rect.width,
-                ivp.rows,
+        // Viewport rect skips the left gutter so click→content-col
+        // mapping is direct. Scrollbar lives on the rightmost leaf col.
+        let viewport = output.viewport.as_ref().map(|vp| {
+            let rect = crate::smelt_term::Rect::new(
+                prompt_rect.top,
+                prompt_rect.left + pad_left,
+                prompt_rect.width.saturating_sub(pad_left),
+                vp.rows,
             );
-            Some(crate::smelt_term::WindowViewport::new(
-                input_rect,
-                ivp.content_width,
-                ivp.total_rows,
-                ivp.scroll_top,
+            crate::smelt_term::WindowViewport::new(
+                rect,
+                vp.content_width,
+                vp.total_rows,
+                vp.scroll_top,
                 crate::smelt_term::ScrollbarState::new(
-                    prompt_rect.width.saturating_sub(1),
-                    ivp.total_rows,
-                    ivp.rows,
+                    prompt_rect.left + prompt_rect.width.saturating_sub(1),
+                    vp.total_rows,
+                    vp.rows,
                 ),
-            ))
-        } else {
-            None
-        };
+            )
+        });
 
-        // Drive the painted-split Window's cursor + scrollbar viewport
-        // from the prompt output. `Ui::cursor_shape = Hardware` flows
-        // through `Ui::render`'s focused-painted-split-cursor path;
-        // `Block` paints in-place via `Window::render`. When the
-        // prompt isn't focused (`has_prompt_cursor == false` collapses
-        // `cursor` to `None`), the global shape is left at whatever
-        // `render_normal` reset it to (`Hidden`).
-        match (cursor, cursor_style) {
+        match (output.cursor, output.cursor_style) {
             (Some(_), Some((style, glyph))) => {
                 self.ui
                     .set_cursor_shape(crate::smelt_term::CursorShape::Block { glyph, style });
@@ -364,11 +356,11 @@ impl TuiApp {
             }
             (None, _) => {}
         }
-        let (cur_col, cur_line) = cursor.unwrap_or((0, 0));
+        let (cur_col, cur_line) = output.cursor.unwrap_or((0, 0));
         if let Some(win) = self.ui.win_mut(crate::app::PROMPT_WIN) {
             win.cursor_col = cur_col;
             win.cursor_line = cur_line;
-            win.viewport = prompt_viewport;
+            win.viewport = viewport;
         }
     }
 

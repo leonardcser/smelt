@@ -643,12 +643,16 @@ impl TuiApp {
         buf
     }
 
-    pub(crate) fn measure_prompt_height(
+    /// Per-leaf row counts for the prompt block.
+    /// `(above, input)` — `above` covers queued + stash + the top
+    /// bar; bottom bar (1) and status (1) are constants applied by
+    /// the layout. The caller passes them to [`LayoutInput`].
+    pub(crate) fn measure_prompt_rows(
         &self,
         state: &crate::input::PromptState,
         width: usize,
         queued: &[String],
-    ) -> u16 {
+    ) -> (u16, u16) {
         let usable = width.saturating_sub(2);
         let text_w = usable.saturating_sub(2).max(1);
 
@@ -664,8 +668,9 @@ impl TuiApp {
         }
 
         let (visual_lines, _, _, _) = wrap_and_locate_cursor(&state.win.text, &[], 0, usable);
-        let input_rows = visual_lines.len() as u16;
+        let input_rows = visual_lines.len().max(1) as u16;
 
-        queued_rows + stash + 1 + input_rows + 1 + 1
+        let above = queued_rows + stash + 1; // +1 = top bar
+        (above, input_rows)
     }
 }

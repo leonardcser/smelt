@@ -171,6 +171,20 @@ pub struct VirtualText {
     pub pos: VirtTextPos,
 }
 
+/// One per-row visual-mode selection range, in **content** columns
+/// (relative to the buffer line content, before `SplitConfig::gutters`
+/// is applied). Painted with the theme's `Visual` group.
+///
+/// Empty-line selections use `col_start = 0, col_end = 1` to paint a
+/// single virtual cell — same convention as Vim's `$` virtual-space
+/// behavior on empty lines in `v` / `V`.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct SelectionRange {
+    pub line: usize,
+    pub col_start: u16,
+    pub col_end: u16,
+}
+
 #[derive(Default)]
 pub struct BufCreateOpts {}
 
@@ -450,6 +464,15 @@ pub struct Buffer {
     /// Whether this buffer can be edited. Windows check this before
     /// running any edit-producing operation.
     pub readonly: bool,
+    /// Per-row visual-mode selection ranges painted by `Window::render`
+    /// using the theme's `Visual` group. Cleared by `set_lines` and
+    /// `set_all_lines` (matches the extmark-clear semantics for
+    /// wholesale content replacement). Consumers that need to override
+    /// the auto-derived selection (e.g. yank-flash, input-space
+    /// translation in the prompt) write here directly via
+    /// [`Self::set_selection`]; otherwise `Window::render` derives
+    /// ranges from the Window's own `selection_anchor` + vim state.
+    selection: Vec<SelectionRange>,
 }
 
 impl Buffer {
@@ -485,7 +508,28 @@ impl Buffer {
             history: UndoHistory::default(),
             attachment_ids: Vec::new(),
             readonly: false,
+            selection: Vec::new(),
         }
+    }
+
+    /// Override the per-row visual-mode selection painted by
+    /// `Window::render`. Empty `ranges` clears the override; the
+    /// painter then falls back to auto-deriving from the Window's own
+    /// `selection_anchor` + vim state. Used by consumers whose paint
+    /// state can't be inferred from a single Window anchor (transcript
+    /// yank-flash, prompt input-space translation).
+    pub fn set_selection(&mut self, ranges: Vec<SelectionRange>) {
+        self.selection = ranges;
+    }
+
+    /// Read the override selection set by [`Self::set_selection`].
+    /// Empty when no override is active.
+    pub fn selection(&self) -> &[SelectionRange] {
+        &self.selection
+    }
+
+    pub fn clear_selection(&mut self) {
+        self.selection.clear();
     }
 
     /// Attach a parser. Fires `BufferParser::on_attach` once,
@@ -582,6 +626,7 @@ impl Buffer {
         for ns in [self.ns_highlights, self.ns_decorations, self.ns_virt_text] {
             self.extmarks.clear_namespace(ns, start, end);
         }
+        self.selection.retain(|r| r.line < start || r.line >= end);
         self.changedtick += 1;
     }
 
@@ -598,11 +643,85 @@ impl Buffer {
         for ns in [self.ns_highlights, self.ns_decorations, self.ns_virt_text] {
             self.extmarks.clear_namespace(ns, 0, usize::MAX);
         }
+        self.selection.clear();
         self.changedtick += 1;
     }
 
     pub fn text(&self) -> String {
         self.lines.join("\n")
+    }
+
+    /// Extract text in byte range `[start, end)` over `self.text()`,
+    /// applying `SpanMeta` filters from highlight extmarks: cells whose
+    /// covering highlight has `selectable: false` are dropped, and
+    /// spans with `copy_as: Some(s)` substitute that string once per
+    /// span (the first cell of the span emits `s`; subsequent cells
+    /// of the same span emit nothing). Rows are joined with `\n`.
+    ///
+    /// No per-cell cache — walks lines + extmarks on demand. Suitable
+    /// for small / mid-sized buffers (dialogs, prompts, Lua-built
+    /// overlays). The transcript layer maintains a dedicated snapshot
+    /// for the same purpose because its scale (block-history-wide)
+    /// makes on-demand walks cost-prohibitive at copy time.
+    pub fn extract_text(&self, start: usize, end: usize) -> String {
+        use unicode_width::UnicodeWidthChar;
+        if start >= end {
+            return String::new();
+        }
+        let mut out = String::new();
+        let mut line_start = 0usize;
+        let total_lines = self.lines.len();
+        for (row, line) in self.lines.iter().enumerate() {
+            let line_end_byte = line_start + line.len();
+            let row_in_range = end > line_start && start <= line_end_byte;
+            if row_in_range {
+                let bs = start.saturating_sub(line_start).min(line.len());
+                let be = (end - line_start).min(line.len());
+                let row_spans = self.highlights_at(row);
+                let mut emitted_copy_as: std::collections::HashSet<usize> =
+                    std::collections::HashSet::new();
+                let mut col: u16 = 0;
+                let mut byte_pos: usize = 0;
+                for ch in line.chars() {
+                    let cw = UnicodeWidthChar::width(ch).unwrap_or(0).max(1) as u16;
+                    let ch_byte_end = byte_pos + ch.len_utf8();
+                    let in_byte_clip = ch_byte_end > bs && byte_pos < be;
+                    if in_byte_clip {
+                        let mut unselectable = false;
+                        let mut copy_as_hit: Option<(usize, &str)> = None;
+                        for (idx, span) in row_spans.iter().enumerate() {
+                            if col >= span.col_start && col < span.col_end {
+                                if !span.meta.selectable {
+                                    unselectable = true;
+                                    break;
+                                }
+                                if let Some(ref s) = span.meta.copy_as {
+                                    copy_as_hit = Some((idx, s.as_str()));
+                                }
+                            }
+                        }
+                        if !unselectable {
+                            if let Some((idx, s)) = copy_as_hit {
+                                if emitted_copy_as.insert(idx) {
+                                    out.push_str(s);
+                                }
+                            } else {
+                                out.push(ch);
+                            }
+                        }
+                    }
+                    col = col.saturating_add(cw);
+                    byte_pos += ch.len_utf8();
+                }
+            }
+            // Insert the row separator only when another row in the
+            // range follows. The +1 accounts for the `\n` joiner.
+            if row + 1 < total_lines && end > line_end_byte + 1 {
+                out.push('\n');
+            }
+            line_start = line_end_byte + 1;
+        }
+        out
     }
 
     pub fn lines(&self) -> &[String] {
@@ -953,6 +1072,50 @@ mod tests {
         let mut buf = make_buf();
         buf.set_all_lines(vec!["hello".into(), "world".into()]);
         assert_eq!(buf.text(), "hello\nworld");
+    }
+
+    #[test]
+    fn extract_text_skips_unselectable_spans() {
+        let mut buf = make_buf();
+        buf.set_all_lines(vec!["abXYcd".into()]);
+        buf.add_highlight_with_meta(
+            0,
+            2,
+            4,
+            SpanStyle::new(),
+            SpanMeta {
+                selectable: false,
+                copy_as: None,
+            },
+        );
+        assert_eq!(buf.extract_text(0, 6), "abcd");
+    }
+
+    #[test]
+    fn extract_text_substitutes_copy_as_once_per_span() {
+        let mut buf = make_buf();
+        buf.set_all_lines(vec!["abXYcd".into()]);
+        buf.add_highlight_with_meta(
+            0,
+            2,
+            4,
+            SpanStyle::new(),
+            SpanMeta {
+                selectable: true,
+                copy_as: Some("[snip]".into()),
+            },
+        );
+        assert_eq!(buf.extract_text(0, 6), "ab[snip]cd");
+    }
+
+    #[test]
+    fn extract_text_joins_rows_with_newline() {
+        let mut buf = make_buf();
+        buf.set_all_lines(vec!["abc".into(), "def".into(), "ghi".into()]);
+        // text() = "abc\ndef\nghi" (11 bytes). Range 0..11 = whole.
+        assert_eq!(buf.extract_text(0, 11), "abc\ndef\nghi");
+        // Range stopping mid-second-line should not emit the trailing \n.
+        assert_eq!(buf.extract_text(0, 6), "abc\nde");
     }
 
     #[test]

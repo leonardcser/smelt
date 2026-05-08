@@ -9,18 +9,15 @@ use crate::smelt_term::{Buffer, ExtmarkOpts, ExtmarkPayload};
 
 use smelt_core::style::Color;
 
-/// Namespace name for the prompt buffer's input-prediction (ghost text)
-/// extmark. `compute_prompt` reads-and-re-anchors this each frame so
-/// the dim suggestion follows the visible input row as chrome shifts;
-/// `TuiApp::{set,clear,take}_prompt_completer` mutate the storage from
-/// outside the render path.
+/// Namespace name for the input buffer's prediction (ghost text)
+/// extmark. `compute_input` re-anchors this each frame;
+/// `TuiApp::{set,clear,take}_prompt_completer` mutate the storage
+/// from outside the render path.
 pub(crate) const COMPLETER_NS: &str = "completer";
 
-/// Intermediate representation for a chrome row inside the prompt:
-/// queued message, stash indicator, top/bottom bar. `compute_prompt`
-/// composes a Vec of these, then converts to (line text + non-
-/// overlapping highlight extmarks) before writing to the unified
-/// buffer.
+/// Intermediate representation for a chrome row: queued message,
+/// stash indicator, top/bottom bar. Built as a Vec then flattened to
+/// (line text + non-overlapping highlight extmarks).
 struct StyledSegment {
     text: String,
     style: Style,
@@ -36,16 +33,25 @@ impl WindowRow {
     }
 }
 
-pub(crate) struct PromptInput<'a> {
+pub(crate) struct PromptAboveInput<'a> {
     pub(crate) queued: &'a [String],
     pub(crate) stash: &'a Option<crate::input::InputSnapshot>,
+    pub(crate) bar_info: BarInfo,
+    /// Leaf width in cells. `PROMPT_ABOVE_WIN` has no gutter, so this
+    /// is the full terminal width.
+    pub(crate) width: u16,
+}
+
+pub(crate) struct InputLeafInput<'a> {
     pub(crate) input: &'a PromptState,
     pub(crate) vim_mode: crate::smelt_term::VimMode,
     pub(crate) clipboard: &'a crate::smelt_term::Clipboard,
-    pub(crate) width: u16,
+    /// Inner width after `PROMPT_WIN`'s `SplitConfig::gutters` are
+    /// subtracted. `Window::render` shifts content past the gutter.
+    pub(crate) content_width: u16,
+    /// Visible row budget for the input leaf.
     pub(crate) height: u16,
     pub(crate) has_prompt_cursor: bool,
-    pub(crate) bar_info: BarInfo,
 }
 
 pub(crate) struct BarInfo {
@@ -58,14 +64,13 @@ pub(crate) struct BarInfo {
     pub(crate) session_cost_usd: f64,
 }
 
-pub(crate) struct PromptOutput {
+pub(crate) struct InputLeafOutput {
     pub(crate) cursor: Option<(u16, u16)>,
     pub(crate) cursor_style: Option<(Style, char)>,
-    pub(crate) input_viewport: Option<InputViewport>,
+    pub(crate) viewport: Option<InputViewport>,
 }
 
 pub(crate) struct InputViewport {
-    pub(crate) top_row: u16,
     pub(crate) rows: u16,
     pub(crate) content_width: u16,
     pub(crate) total_rows: u16,
@@ -85,17 +90,77 @@ fn theme_color(theme: &crate::smelt_term::Theme, group: &str) -> Color {
     style.fg.or(style.bg).unwrap_or(Color::Reset)
 }
 
-pub(crate) fn compute_prompt(
-    input: &mut PromptInput<'_>,
+/// Write the chrome above the input (queued + stash + top bar) into
+/// `buf`. `width` is the leaf's full width — no gutter applies on
+/// this leaf, so bars span edge to edge.
+pub(crate) fn compute_prompt_above(
+    pa: &PromptAboveInput<'_>,
     buf: &mut Buffer,
     theme: &crate::smelt_term::Theme,
-) -> PromptOutput {
-    let width = input.width as usize;
-    let usable = width.saturating_sub(2);
+) {
+    let usable = pa.width as usize;
 
-    // ── Read prediction storage (custom namespaces survive
-    // `set_all_lines`, but the line index from the previous frame
-    // may be stale; we re-anchor below).
+    let mut rows: Vec<WindowRow> = Vec::new();
+    rows.extend(queued_message_rows(pa.queued, usable, theme));
+    if pa.stash.is_some() {
+        rows.push(stash_row(usable, theme));
+    }
+    let top_bar_right = build_top_bar_right(&pa.bar_info, theme);
+    rows.push(bar_row(
+        usable,
+        None,
+        if top_bar_right.is_empty() {
+            None
+        } else {
+            Some(&top_bar_right)
+        },
+        theme,
+    ));
+
+    let mut all_lines: Vec<String> = Vec::with_capacity(rows.len());
+    let mut all_highlights: Vec<(usize, u16, u16, Style)> = Vec::new();
+    for (i, row) in rows.iter().enumerate() {
+        let (text, hls) = window_row_to_buffer_line(row);
+        all_lines.push(text);
+        for (s, e, style) in hls {
+            all_highlights.push((i, s, e, style));
+        }
+    }
+    let total = all_lines.len();
+    buf.set_all_lines(all_lines);
+    buf.clear_highlights(0, total);
+    for (line, s, e, style) in all_highlights {
+        buf.add_highlight(line, s, e, style);
+    }
+    buf.set_selection(Vec::new());
+}
+
+/// Write a single bottom-bar row into `buf`. `width` is the leaf's
+/// full width (no gutter on this leaf).
+pub(crate) fn compute_prompt_below(width: u16, buf: &mut Buffer, theme: &crate::smelt_term::Theme) {
+    let bottom = bar_row(width as usize, None, None, theme);
+    let (text, hls) = window_row_to_buffer_line(&bottom);
+    buf.set_all_lines(vec![text]);
+    buf.clear_highlights(0, 1);
+    for (s, e, style) in hls {
+        buf.add_highlight(0, s, e, style);
+    }
+    buf.set_selection(Vec::new());
+}
+
+/// Write the editable input rows + selection + ghost-text extmark
+/// into `buf`. Cursor positions and selection ranges are
+/// content-local; `Window::render` applies the leaf's
+/// `SplitConfig::gutters.pad_left` shift at paint time.
+pub(crate) fn compute_input(
+    inp: &InputLeafInput<'_>,
+    buf: &mut Buffer,
+    theme: &crate::smelt_term::Theme,
+) -> InputLeafOutput {
+    let usable = inp.content_width as usize;
+
+    // Custom namespaces survive `set_all_lines`, but the prior
+    // frame's row index can be stale; re-anchor below.
     let completer_ns = buf.create_namespace(COMPLETER_NS);
     let prediction: Option<String> = buf.extmarks(completer_ns).into_iter().find_map(|(_, m)| {
         if let ExtmarkPayload::VirtText { text, .. } = &m.payload {
@@ -105,96 +170,51 @@ pub(crate) fn compute_prompt(
         }
     });
 
-    // ── Chrome rows (queued, stash, top bar) ──
-    let mut chrome_rows: Vec<WindowRow> = Vec::new();
-    chrome_rows.extend(queued_message_rows(input.queued, usable, theme));
-    if input.stash.is_some() {
-        chrome_rows.push(stash_row(usable, theme));
-    }
-    let top_bar_right = build_top_bar_right(&input.bar_info, theme);
-    chrome_rows.push(bar_row(
-        width,
-        None,
-        if top_bar_right.is_empty() {
-            None
-        } else {
-            Some(&top_bar_right)
-        },
-        theme,
-    ));
-    let chrome_top_count = chrome_rows.len() as u16;
-
-    // ── Input area (returns lines + highlights, no buffer mutation) ──
-    let input_area = compute_input_area(input, usable, chrome_top_count, theme);
+    let input_area = compute_input_area(inp, usable, theme);
     let input_row_count = input_area.visible_rows;
 
-    // ── Bottom bar ──
-    let bottom_bar = bar_row(width, None, None, theme);
-
-    // ── Compose unified buffer (chrome + input slice + bottom bar) ──
-    let mut all_lines: Vec<String> =
-        Vec::with_capacity(chrome_rows.len() + input_area.lines.len() + 1);
-    let mut all_highlights: Vec<(usize, u16, u16, Style)> = Vec::new();
-
-    for (i, row) in chrome_rows.iter().enumerate() {
-        let (text, hls) = window_row_to_buffer_line(row);
-        all_lines.push(text);
-        for (s, e, style) in hls {
-            all_highlights.push((i, s, e, style));
-        }
-    }
-    let input_offset = all_lines.len();
-    for line in &input_area.lines {
-        all_lines.push(line.clone());
-    }
-    for &(rel_li, s, e, ref style) in &input_area.highlights {
-        all_highlights.push((input_offset + rel_li, s, e, *style));
-    }
-    let bottom_idx = all_lines.len();
-    let (bb_text, bb_hls) = window_row_to_buffer_line(&bottom_bar);
-    all_lines.push(bb_text);
-    for (s, e, style) in bb_hls {
-        all_highlights.push((bottom_idx, s, e, style));
-    }
-
-    let total_lines = all_lines.len();
-    buf.set_all_lines(all_lines);
+    let lines = input_area.lines.clone();
+    let total_lines = lines.len();
+    buf.set_all_lines(lines);
     buf.clear_highlights(0, total_lines);
-    for (line, s, e, style) in all_highlights {
-        buf.add_highlight(line, s, e, style);
+    for &(li, s, e, ref style) in &input_area.highlights {
+        buf.add_highlight(li, s, e, *style);
     }
+    let selection: Vec<crate::smelt_term::SelectionRange> = input_area
+        .selection_ranges
+        .iter()
+        .map(|(li, s, e)| crate::smelt_term::SelectionRange {
+            line: *li,
+            col_start: *s,
+            col_end: *e,
+        })
+        .collect();
+    buf.set_selection(selection);
 
-    // Re-anchor the prediction extmark. Visible position: input row
-    // col 1 (past the leading space) when the buffer is empty.
-    // Otherwise, park at `total_lines` (one past last) so the storage
-    // survives without rendering — `Window::render` only walks rows
-    // 0..line_count. Buffer mutation paths
-    // (`TuiApp::clear_prompt_completer` etc.) drop the storage entirely.
     buf.clear_namespace(completer_ns, 0, usize::MAX);
     if let Some(text) = prediction {
-        let row = if input.input.win.text.is_empty() {
-            input_offset
+        // Anchor at row 0 when the text is empty so the dim suggestion
+        // is visible; otherwise park past the last row to keep the
+        // storage alive without rendering. `Window::render` only walks
+        // rows 0..line_count.
+        let row = if inp.input.win.text.is_empty() {
+            0
         } else {
             total_lines
         };
         buf.set_extmark(
             completer_ns,
             row,
-            1,
+            0,
             ExtmarkOpts::virt_text(text, Some("GhostText".into())),
         );
     }
 
-    let cursor = input_area
-        .cursor_pos
-        .map(|(c, r)| (c, chrome_top_count + r));
-
-    PromptOutput {
-        cursor,
+    InputLeafOutput {
+        cursor: input_area.cursor_pos,
         cursor_style: input_area.cursor_style,
-        input_viewport: if input_row_count > 0 {
+        viewport: if input_row_count > 0 {
             Some(InputViewport {
-                top_row: chrome_top_count,
                 rows: input_row_count,
                 content_width: usable as u16,
                 total_rows: input_area.total_content_rows as u16,
@@ -572,6 +592,10 @@ struct InputArea {
     /// styled span over the visible slice. Indices are
     /// 0-relative to `lines`; the caller adds the chrome offset.
     highlights: Vec<(usize, u16, u16, Style)>,
+    /// Per-row visual-mode selection ranges. Indices are 0-relative to
+    /// `lines`; caller adds the chrome offset before publishing via
+    /// `Buffer::set_selection`.
+    selection_ranges: Vec<(usize, u16, u16)>,
     cursor_pos: Option<(u16, u16)>,
     cursor_style: Option<(Style, char)>,
     scroll_offset: usize,
@@ -580,9 +604,8 @@ struct InputArea {
 }
 
 fn compute_input_area(
-    input: &PromptInput<'_>,
+    input: &InputLeafInput<'_>,
     usable: usize,
-    row_offset: u16,
     theme: &crate::smelt_term::Theme,
 ) -> InputArea {
     let height = input.height as usize;
@@ -613,8 +636,7 @@ fn compute_input_area(
     let is_exec_invalid = !plain_only && state.win.text == "!";
     let total_content_rows = visual_lines.len();
 
-    let fixed = row_offset as usize + 1; // bottom bar (status is its own splits leaf)
-    let max_content_rows = height.saturating_sub(fixed).max(1);
+    let max_content_rows = height.max(1);
     let content_rows = total_content_rows.min(max_content_rows);
 
     let scroll_offset = if total_content_rows > content_rows {
@@ -645,15 +667,16 @@ fn compute_input_area(
     let mut cursor_pos: Option<(u16, u16)> = None;
     let mut cursor_style_out: Option<(Style, char)> = None;
     let mut highlights: Vec<(usize, u16, u16, Style)> = Vec::new();
+    let mut selection_ranges: Vec<(usize, u16, u16)> = Vec::new();
 
     let mut lines: Vec<String> = visual_lines
         .iter()
         .skip(scroll_offset)
         .take(content_rows)
-        .map(|(line, _)| format!(" {line}"))
+        .map(|(line, _)| line.clone())
         .collect();
     if lines.is_empty() {
-        lines.push(" ".into());
+        lines.push(String::new());
     }
 
     let line_char_offsets = compute_visual_line_offsets(&display_buf, &visual_lines);
@@ -665,13 +688,13 @@ fn compute_input_area(
         .enumerate()
     {
         let abs_idx = scroll_offset + li;
+        let line_chars = line.chars().count();
 
         let line_sel = display_selection.and_then(|(sel_start, sel_end)| {
             let line_start = line_char_offsets[abs_idx];
-            let line_len = line.chars().count();
-            let line_end = line_start + line_len;
-            if line_len == 0 && sel_start <= line_start && sel_end > line_start {
-                Some((0, 1))
+            let line_end = line_start + line_chars;
+            if line_chars == 0 && sel_start <= line_start && sel_end > line_start {
+                Some((0usize, 1usize))
             } else if sel_end <= line_start || sel_start >= line_end {
                 None
             } else {
@@ -681,6 +704,27 @@ fn compute_input_area(
             }
         });
 
+        // Selection ranges are in buffer-display columns (= char count
+        // for the prompt's ASCII-mostly content). A trailing virtual
+        // cell paints when the selection extends past the line end so
+        // the user can see line-end participation in `v` / `V`.
+        if let Some((s, e)) = line_sel {
+            let s_col = s as u16;
+            let raw_e = e.min(line_chars);
+            let visible_end = raw_e as u16;
+            let virtual_tail = if e > line_chars && s <= line_chars {
+                1
+            } else {
+                0
+            };
+            let total_end = visible_end + virtual_tail;
+            if line_chars == 0 {
+                selection_ranges.push((li, 0, 1));
+            } else if total_end > s_col {
+                selection_ranges.push((li, s_col, total_end));
+            }
+        }
+
         let line_cursor = if abs_idx == cursor_line && input.has_prompt_cursor {
             Some(cursor_char_in_line)
         } else {
@@ -688,7 +732,6 @@ fn compute_input_area(
         };
 
         let segments = if is_command {
-            let line_chars = line.chars().count();
             let prefix_chars = if abs_idx == 0 {
                 line.char_indices()
                     .find(|(_, c)| c.is_whitespace())
@@ -699,23 +742,25 @@ fn compute_input_area(
             };
             let mut cmd_kinds = vec![SpanKind::AtRef; prefix_chars];
             cmd_kinds.resize(line_chars, SpanKind::Plain);
-            styled_char_segments(line, &cmd_kinds, line_sel, line_cursor, theme)
+            styled_char_segments(line, &cmd_kinds, line_cursor, theme)
         } else if (is_exec || is_exec_invalid) && abs_idx == 0 && line.starts_with('!') {
-            exec_bang_segments(line, kinds, line_sel, line_cursor, theme)
+            exec_bang_segments(line, kinds, line_cursor, theme)
         } else {
-            styled_char_segments(line, kinds, line_sel, line_cursor, theme)
+            styled_char_segments(line, kinds, line_cursor, theme)
         };
         push_segment_highlights(&mut highlights, li, &segments);
 
         if line_cursor.is_some() {
-            let cursor_col = 1 + cursor_char_in_line as u16;
+            // Content-local cursor col; `Window::render` /
+            // `Ui::focused_painted_split_cursor` add `pad_left`.
+            let cursor_col = cursor_char_in_line as u16;
             cursor_pos = Some((cursor_col, li as u16));
         }
     }
 
     if cursor_line >= total_content_rows && input.has_prompt_cursor {
         let (fg, bg) = cursor_style(theme);
-        cursor_pos = Some((1, content_rows.saturating_sub(1) as u16));
+        cursor_pos = Some((0, content_rows.saturating_sub(1) as u16));
         cursor_style_out = Some((
             Style {
                 fg: Some(fg),
@@ -729,6 +774,7 @@ fn compute_input_area(
     InputArea {
         lines,
         highlights,
+        selection_ranges,
         cursor_pos,
         cursor_style: cursor_style_out,
         scroll_offset,
@@ -738,15 +784,14 @@ fn compute_input_area(
 }
 
 /// Append the input row's styled segments as `(line_idx, col_start,
-/// col_end, SpanStyle)` highlight tuples. Mirrors the prior
-/// `add_segments_to_buffer`'s 1-column leading offset (the input
-/// area's lines start with a literal space).
+/// col_end, SpanStyle)` highlight tuples. The input area renders
+/// flush-left, so segments accumulate from col 0.
 fn push_segment_highlights(
     out: &mut Vec<(usize, u16, u16, Style)>,
     line_idx: usize,
     segments: &[StyledSegment],
 ) {
-    let mut col = 1u16;
+    let mut col = 0u16;
     for seg in segments {
         let len = seg.text.chars().count() as u16;
         if len > 0 {
@@ -759,12 +804,12 @@ fn push_segment_highlights(
     }
 }
 
-/// Convert a styled line into StyledSegments, applying cursor and selection highlighting.
-/// This replaces `render_styled_chars` from the old escape-sequence-based renderer.
+/// Convert a styled line into StyledSegments, applying cursor highlighting.
+/// Visual-mode selection is published separately on the buffer via
+/// `Buffer::set_selection` and painted by `Window::render`.
 fn styled_char_segments(
     line: &str,
     kinds: &[SpanKind],
-    selection: Option<(usize, usize)>,
     cursor_pos: Option<usize>,
     theme: &crate::smelt_term::Theme,
 ) -> Vec<StyledSegment> {
@@ -774,12 +819,10 @@ fn styled_char_segments(
     let char_count = line.chars().count();
 
     let (cursor_fg, cursor_bg) = cursor_style(theme);
-    let selection_bg = theme_color(theme, "Visual");
     let accent = theme_color(theme, "SmeltAccent");
 
     for (i, ch) in line.chars().enumerate() {
         let kind = kinds.get(i).copied().unwrap_or(SpanKind::Plain);
-        let want_sel = selection.is_some_and(|(s, e)| i >= s && i < e);
         let want_cursor = cursor_pos == Some(i);
 
         let style = if want_cursor {
@@ -793,10 +836,8 @@ fn styled_char_segments(
                 SpanKind::AtRef | SpanKind::Attachment => Some(accent),
                 SpanKind::Plain => None,
             };
-            let bg = if want_sel { Some(selection_bg) } else { None };
             Style {
                 fg,
-                bg,
                 ..Style::default()
             }
         };
@@ -829,30 +870,22 @@ fn styled_char_segments(
                 ..Style::default()
             },
         });
-    } else if let Some((s, e)) = selection {
-        if e > char_count && s <= char_count {
-            segments.push(StyledSegment {
-                text: " ".into(),
-                style: Style::new().bg(selection_bg),
-            });
-        }
     }
 
     segments
 }
 
-/// Handle the exec `!` prefix with special styling.
+/// Handle the exec `!` prefix with special styling. Selection is
+/// painted separately by `Window::render` via `Buffer::set_selection`.
 fn exec_bang_segments(
     line: &str,
     kinds: &[SpanKind],
-    selection: Option<(usize, usize)>,
     cursor_pos: Option<usize>,
     theme: &crate::smelt_term::Theme,
 ) -> Vec<StyledSegment> {
     let mut segs = Vec::new();
 
     let bang_cursor = cursor_pos == Some(0);
-    let bang_selected = selection.is_some_and(|(s, _)| s == 0);
 
     if bang_cursor {
         let (fg, bg) = cursor_style(theme);
@@ -869,34 +902,18 @@ fn exec_bang_segments(
             text: "!".into(),
             style: Style {
                 fg: Some(Color::Red),
-                bg: if bang_selected {
-                    Some(theme_color(theme, "Visual"))
-                } else {
-                    None
-                },
                 bold: true,
                 ..Style::default()
             },
         });
     }
 
-    // Shift selection/cursor for remainder
-    let rest_sel = selection.and_then(|(s, e)| {
-        let s2 = if s == 0 { 0 } else { s - 1 };
-        let e2 = e.saturating_sub(1);
-        if s2 < e2 {
-            Some((s2, e2))
-        } else {
-            None
-        }
-    });
     let rest_cursor = cursor_pos.and_then(|c| c.checked_sub(1));
 
     if line.len() > 1 {
         segs.extend(styled_char_segments(
             &line[1..],
             if kinds.len() > 1 { &kinds[1..] } else { &[] },
-            rest_sel,
             rest_cursor,
             theme,
         ));
@@ -946,15 +963,14 @@ mod tests {
 
     #[test]
     fn styled_char_segments_plain() {
-        let segs = styled_char_segments("hello", &[SpanKind::Plain; 5], None, None, &test_theme());
+        let segs = styled_char_segments("hello", &[SpanKind::Plain; 5], None, &test_theme());
         assert_eq!(segs.len(), 1);
         assert_eq!(segs[0].text, "hello");
     }
 
     #[test]
     fn styled_char_segments_with_cursor() {
-        let segs =
-            styled_char_segments("hello", &[SpanKind::Plain; 5], None, Some(2), &test_theme());
+        let segs = styled_char_segments("hello", &[SpanKind::Plain; 5], Some(2), &test_theme());
         // Before cursor, cursor char, after cursor
         assert!(segs.len() >= 3);
         // The cursor char should have inverted colors
@@ -965,50 +981,51 @@ mod tests {
 
     #[test]
     fn styled_char_segments_cursor_at_end() {
-        let segs = styled_char_segments("hi", &[SpanKind::Plain; 2], None, Some(2), &test_theme());
+        let segs = styled_char_segments("hi", &[SpanKind::Plain; 2], Some(2), &test_theme());
         let last = segs.last().unwrap();
         assert_eq!(last.text, " ");
         assert!(last.style.bg.is_some());
     }
 
     #[test]
-    fn styled_char_segments_with_selection() {
-        let segs = styled_char_segments(
-            "hello",
-            &[SpanKind::Plain; 5],
-            Some((1, 4)),
-            None,
-            &test_theme(),
-        );
-        // Should have: unselected "h", selected "ell", unselected "o"
-        assert!(segs.len() >= 3);
-        assert_eq!(segs[0].text, "h");
-        assert!(segs[0].style.bg.is_none());
-        assert!(segs[1].style.bg.is_some()); // selected
-    }
-
-    #[test]
     fn exec_bang_segments_highlights_bang() {
         let kinds = vec![SpanKind::Plain; 4];
-        let segs = exec_bang_segments("!ls", &kinds, None, None, &test_theme());
+        let segs = exec_bang_segments("!ls", &kinds, None, &test_theme());
         assert_eq!(segs[0].text, "!");
         assert_eq!(segs[0].style.fg, Some(smelt_core::style::Color::Red));
         assert!(segs[0].style.bold);
     }
 
     #[test]
-    fn compute_prompt_produces_bars_and_status() {
+    fn compute_input_writes_input_only() {
         let input_state = PromptState::default();
         let test_clipboard = crate::smelt_term::Clipboard::null();
-        let mut prompt_input = PromptInput {
-            queued: &[],
-            stash: &None,
+        let inp = InputLeafInput {
             input: &input_state,
             vim_mode: crate::smelt_term::VimMode::Insert,
             clipboard: &test_clipboard,
-            width: 80,
-            height: 10,
+            content_width: 78,
+            height: 4,
             has_prompt_cursor: true,
+        };
+        let mut input_buf = Buffer::new(
+            crate::app::PROMPT_EDIT_BUF,
+            crate::smelt_term::BufCreateOpts::default(),
+        );
+        let output = compute_input(&inp, &mut input_buf, &test_theme());
+        // Empty input → one blank row.
+        assert_eq!(input_buf.line_count(), 1);
+        let (col, row) = output.cursor.expect("cursor populated");
+        assert_eq!(row, 0, "cursor on the first input row");
+        assert_eq!(col, 0, "cursor lives in content-local coords");
+    }
+
+    #[test]
+    fn compute_prompt_above_writes_top_bar() {
+        let pa = PromptAboveInput {
+            queued: &[],
+            stash: &None,
+            width: 80,
             bar_info: BarInfo {
                 model_label: None,
                 reasoning_effort: protocol::ReasoningEffort::Off,
@@ -1019,20 +1036,94 @@ mod tests {
                 session_cost_usd: 0.0,
             },
         };
-        let mut input_buf = Buffer::new(
+        let mut buf = Buffer::new(
             crate::app::PROMPT_EDIT_BUF,
             crate::smelt_term::BufCreateOpts::default(),
         );
-        let output = compute_prompt(&mut prompt_input, &mut input_buf, &test_theme());
-        // Buffer carries chrome (top bar) + input area + bottom bar at least.
-        assert!(input_buf.line_count() >= 3);
-        // Cursor lands in the input area, after the chrome rows.
-        let (col, row) = output.cursor.expect("cursor populated");
-        assert!(row >= 1, "cursor row {row} should be past the top bar");
-        assert_eq!(col, 1, "cursor sits past the leading space");
-        // First line is part of the top-bar chrome (or queued/stash);
-        // either way it isn't the input area's `" "` row.
-        let first = input_buf.get_line(0).unwrap_or("");
-        assert!(!first.is_empty());
+        compute_prompt_above(&pa, &mut buf, &test_theme());
+        assert_eq!(buf.line_count(), 1, "no queued/stash → just the top bar");
+        // Bar spans full width.
+        let line = buf.get_line(0).unwrap_or("");
+        let chars = line.chars().count();
+        assert!(
+            chars >= 78,
+            "bar should fill nearly the full width, got {chars} chars"
+        );
+    }
+
+    #[test]
+    fn compute_prompt_below_writes_one_bar_row() {
+        let mut buf = Buffer::new(
+            crate::app::PROMPT_EDIT_BUF,
+            crate::smelt_term::BufCreateOpts::default(),
+        );
+        compute_prompt_below(80, &mut buf, &test_theme());
+        assert_eq!(buf.line_count(), 1);
+    }
+
+    /// Behavior test: with the prompt's `Gutters { pad_left: 1,
+    /// pad_right: 1 }`, `Window::render` should leave col 0 and the
+    /// rightmost col blank on the input row, paint the cursor inside
+    /// the inner zone, and clip content at the inner edge. Asserts
+    /// the rendered grid layout, not the producer's coordinate math.
+    #[test]
+    fn window_render_honors_prompt_gutters() {
+        use crate::app::PROMPT_WIN;
+        use crate::smelt_term::{
+            grid::Grid, BufCreateOpts, CursorShape, DrawContext, Gutters, SplitConfig, Theme,
+            Window,
+        };
+
+        let theme = std::sync::Arc::new({
+            let mut t = Theme::new();
+            crate::theme::populate_ui_theme(&mut t);
+            t
+        });
+
+        let mut buf = Buffer::new(crate::app::PROMPT_EDIT_BUF, BufCreateOpts::default());
+        buf.set_all_lines(vec!["hello".into()]);
+
+        let mut win = Window::new(
+            PROMPT_WIN,
+            buf.id(),
+            SplitConfig {
+                region: "prompt".into(),
+                gutters: Gutters {
+                    pad_left: 1,
+                    pad_right: 1,
+                    scrollbar: false,
+                },
+            },
+        );
+        win.cursor_col = 0; // content-local: first inner cell
+        win.cursor_line = 0;
+
+        let mut grid = Grid::new(10, 1);
+        let mut slice = grid.slice_mut(crate::smelt_term::Rect::new(0, 0, 10, 1));
+        let ctx = DrawContext {
+            terminal_width: 10,
+            terminal_height: 1,
+            focused: true,
+            cursor_shape: CursorShape::Block {
+                glyph: '█',
+                style: crate::smelt_term::grid::Style::default(),
+            },
+            theme,
+            vim_mode: crate::smelt_term::VimMode::Insert,
+        };
+        win.render(&buf, &mut slice, &ctx);
+
+        // Inner zone spans cols 1..=8; col 0 (left gutter) and col 9
+        // (right gutter) stay blank. Content paints from col 1; the
+        // block cursor clobbers 'h' at the first inner col.
+        let cells: Vec<char> = (0..10).map(|c| grid.cell(c, 0).symbol).collect();
+        assert_eq!(cells[0], ' ', "left gutter blank");
+        assert_eq!(cells[9], ' ', "right gutter blank");
+        assert_eq!(cells[1], '█', "block cursor at first inner col");
+        assert_eq!(
+            &cells[2..6],
+            ['e', 'l', 'l', 'o'],
+            "content paints inside inner zone"
+        );
     }
 }

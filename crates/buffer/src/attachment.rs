@@ -5,27 +5,22 @@ use std::path::Path;
 
 pub type AttachmentId = u64;
 
-/// A single attachment: either a collapsed paste or an image.
+/// A single attachment. Currently only images — text pastes flow
+/// directly into the prompt buffer.
 #[derive(Clone, Debug)]
 pub enum Attachment {
-    Paste { content: String },
     Image { label: String, data_url: String },
 }
 
 impl Attachment {
     pub fn display_label(&self) -> String {
         match self {
-            Attachment::Paste { content } => {
-                let lines = content.lines().count().max(1);
-                format!("[pasted {lines} lines]")
-            }
             Attachment::Image { label, .. } => format!("[{label}]"),
         }
     }
 
     pub fn expanded_text(&self) -> &str {
         match self {
-            Attachment::Paste { content } => content.as_str(),
             Attachment::Image { .. } => "",
         }
     }
@@ -33,10 +28,6 @@ impl Attachment {
     fn content_hash(&self) -> String {
         let mut hasher = Sha256::new();
         match self {
-            Attachment::Paste { content } => {
-                hasher.update(b"paste:");
-                hasher.update(content.as_bytes());
-            }
             Attachment::Image { data_url, .. } => {
                 hasher.update(b"image:");
                 hasher.update(data_url.as_bytes());
@@ -113,11 +104,6 @@ impl AttachmentStore {
         self.insert(Attachment::Image { label, data_url })
     }
 
-    /// Insert a paste and return its ID. Convenience wrapper.
-    pub fn insert_paste(&mut self, content: String) -> AttachmentId {
-        self.insert(Attachment::Paste { content })
-    }
-
     // ── Blob persistence ─────────────────────────────────────────────────
 
     /// Snapshot `(filename, data_url)` pairs for every image attachment.
@@ -125,13 +111,12 @@ impl AttachmentStore {
     pub fn image_blobs(&self) -> Vec<(String, String)> {
         self.entries
             .values()
-            .filter_map(|att| match att {
+            .map(|att| match att {
                 Attachment::Image { data_url, .. } => {
                     let hash = att.content_hash();
                     let ext = mime_to_ext(data_url);
-                    Some((format!("{hash}.{ext}"), data_url.clone()))
+                    (format!("{hash}.{ext}"), data_url.clone())
                 }
-                _ => None,
             })
             .collect()
     }
@@ -214,18 +199,8 @@ mod tests {
     #[test]
     fn display_label() {
         let mut store = AttachmentStore::new();
-        let id = store.insert_paste("line1\nline2\nline3".into());
-        assert_eq!(store.display_label(id), "[pasted 3 lines]");
-
-        let id2 = store.insert_image("screenshot.png".into(), "data:...".into());
-        assert_eq!(store.display_label(id2), "[screenshot.png]");
-    }
-
-    #[test]
-    fn expanded_text_paste() {
-        let mut store = AttachmentStore::new();
-        let id = store.insert_paste("hello world".into());
-        assert_eq!(store.expanded_text(id), "hello world");
+        let id = store.insert_image("screenshot.png".into(), "data:...".into());
+        assert_eq!(store.display_label(id), "[screenshot.png]");
     }
 
     #[test]

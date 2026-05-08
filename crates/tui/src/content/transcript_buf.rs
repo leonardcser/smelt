@@ -5,13 +5,6 @@ use crate::smelt_term::Theme;
 use smelt_core::buffer::{LineDecoration, Span, SpanMeta};
 use smelt_core::transcript_model::{BlockHistory, LayoutKey, ViewState};
 
-/// Namespace name for transcript selection extmarks. Created on the
-/// transcript display buffer at startup; populated each frame from the
-/// active vim Visual / mouse drag / yank-flash range and read by
-/// `Window::render` (which walks all namespaces in NsId order, so
-/// selection paints over projection highlights).
-pub(crate) const NS_SELECTION: &str = "transcript.selection";
-
 /// Single per-block cache shared between the display-buffer projection
 /// and the snapshot consumers (copy / yank / line-break / cell-snap /
 /// pane-focus). Both reads ride the same `BlockBufferCache`; both
