@@ -7,8 +7,9 @@
 <p align="center">
   A Rust TUI coding agent. Connects to any OpenAI-compatible API (Ollama, OpenAI,
   Anthropic, Google Gemini, OpenRouter, etc.), your ChatGPT subscription via
-  OpenAI Codex, or your GitHub Copilot subscription, and provides an interactive
-  terminal interface for code generation, analysis, and assistance.
+  OpenAI Codex, your GitHub Copilot subscription, or your Kimi Code subscription,
+  and provides an interactive terminal interface for code generation, analysis,
+  and assistance.
 </p>
 
 <p align="center">
@@ -63,6 +64,13 @@ smelt --model claude-sonnet-4.5     # use any model your Copilot plan exposes
 ```bash
 read -s ANTHROPIC_API_KEY && export ANTHROPIC_API_KEY
 smelt --model claude-opus-4-5 --api-base https://api.anthropic.com/v1 --api-key-env ANTHROPIC_API_KEY
+```
+
+**With Kimi Code:**
+
+```bash
+read -s KIMI_API_KEY && export KIMI_API_KEY
+smelt --model kimi-for-coding --type anthropic-compatible --api-base https://api.kimi.com/coding --api-key-env KIMI_API_KEY
 ```
 
 ## Features
