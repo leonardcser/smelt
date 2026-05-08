@@ -1,0 +1,10 @@
+[package]
+name = "smelt-perf"
+version = "0.4.7"
+edition = "2021"
+description = "Lightweight allocation + timing instrumentation. Counting global allocator and labelled scope guards."
+license = "MIT"
+repository = "https://github.com/leonardcser/smelt"
+
+[lib]
+path = "src/lib.rs"

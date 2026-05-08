@@ -24,7 +24,7 @@ pub fn set_syntax_theme_light(light: bool) {
 
 /// Eagerly initialize syntect sets to avoid ~30ms deserialization cost on the first render.
 pub fn warm_up_syntect() {
-    let _perf = crate::perf::begin("warmup:syntect");
+    let _perf = smelt_perf::perf::begin("warmup:syntect");
     LazyLock::force(&SYNTAX_SET);
     LazyLock::force(&THEME_SET);
 }

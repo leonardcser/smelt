@@ -9,7 +9,7 @@ use startup::resolve_api_key;
 use std::sync::{Arc, Mutex};
 
 #[global_allocator]
-static ALLOCATOR: tui::alloc::Counting = tui::alloc::Counting;
+static ALLOCATOR: smelt_perf::alloc::Counting = smelt_perf::alloc::Counting;
 
 #[derive(Parser)]
 #[command(name = "smelt", about = "Coding agent TUI", version)]
@@ -215,8 +215,8 @@ async fn main() {
     }
 
     if args.bench {
-        smelt_core::perf::enable();
-        tui::alloc::enable();
+        smelt_perf::perf::enable();
+        smelt_perf::alloc::enable();
     }
 
     std::thread::spawn(tui::warm_up_syntect);
@@ -520,7 +520,7 @@ async fn main() {
             tui::print_resume_hint(&app.core.session.id);
         }
     }
-    smelt_core::perf::print_summary();
+    smelt_perf::perf::print_summary();
 }
 
 /// Assemble the `AppConfig` for a headless frontend from resolved CLI and config inputs.

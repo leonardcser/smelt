@@ -505,7 +505,7 @@ pub fn render_wrapped_output(
     is_error: bool,
     width: usize,
 ) -> u16 {
-    let _perf = smelt_core::perf::begin("render:wrapped_output");
+    let _perf = smelt_perf::perf::begin("render:wrapped_output");
     let max_cols = width.saturating_sub(3); // "  " gutter
 
     let wrapped: Vec<String> = content

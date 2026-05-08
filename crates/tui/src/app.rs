@@ -132,7 +132,7 @@ pub(crate) enum AppFocus {
 pub(crate) struct TurnState {
     pub(crate) turn_id: u64,
     pub(crate) pending: Vec<PendingTool>,
-    pub(crate) _perf: Option<smelt_core::perf::Guard>,
+    pub(crate) _perf: Option<smelt_perf::perf::Guard>,
 }
 
 pub(crate) enum EventOutcome {
@@ -435,7 +435,7 @@ impl TuiApp {
         let now = std::time::Instant::now();
         let due = self.core.timers.drain_due(now, self.lua.lua());
         for func in due {
-            let _perf = smelt_core::perf::begin("lua:timer");
+            let _perf = smelt_perf::perf::begin("lua:timer");
             if let Err(e) = func.call::<()>(()) {
                 self.lua.record_error(format!("timer: {e}"));
             }
@@ -480,7 +480,7 @@ impl TuiApp {
                     Ok(f) => f,
                     Err(_) => continue,
                 };
-                let _perf = smelt_core::perf::begin("lua:cell_cb");
+                let _perf = smelt_perf::perf::begin("lua:cell_cb");
                 let result = if cb.is_glob {
                     func.call::<()>((fire.name.clone(), value.clone(), prev.clone()))
                 } else {

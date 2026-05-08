@@ -1,4 +1,3 @@
-pub mod alloc;
 pub mod app;
 pub(crate) mod commands;
 pub(crate) mod completer;
@@ -11,7 +10,6 @@ pub mod lua;
 pub use smelt_core::mcp;
 pub use smelt_core::permissions;
 pub(crate) mod metrics;
-pub use smelt_core::perf;
 pub(crate) mod persist;
 pub(crate) mod picker;
 pub(crate) mod prompt_sections;

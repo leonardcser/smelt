@@ -183,7 +183,7 @@ pub(super) fn render_block(
     width: usize,
     show_thinking: bool,
 ) -> u16 {
-    let _perf = smelt_core::perf::begin(match block {
+    let _perf = smelt_perf::perf::begin(match block {
         Block::User { .. } => "render:user",
         Block::Thinking { .. } => "render:thinking",
         Block::Text { .. } => "render:text",

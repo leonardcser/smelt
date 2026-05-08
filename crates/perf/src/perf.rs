@@ -1,3 +1,12 @@
+//! Labelled scope guards plus a pretty-printer.
+//!
+//! Wrap a scope with [`begin`] (RAII guard); on drop it appends a sample to a per-label ring
+//! (capacity [`RING_CAPACITY`]). When [`crate::alloc::enabled`] is also true, allocs that happened
+//! on the same thread between begin and drop are recorded alongside the duration. Use
+//! [`record_value`] for non-duration metrics. [`snapshot`] returns sortable rows; [`print_summary`]
+//! emits a colored ANSI table.
+
+use crate::alloc;
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Mutex, OnceLock};
@@ -6,7 +15,7 @@ use std::time::{Duration, Instant};
 static ENABLED: AtomicBool = AtomicBool::new(false);
 
 /// Max retained samples per label. Oldest sample is dropped when the buffer fills.
-const RING_CAPACITY: usize = 1024;
+pub const RING_CAPACITY: usize = 1024;
 
 fn push_capped<T>(buf: &mut Vec<T>, value: T) {
     if buf.len() >= RING_CAPACITY {
@@ -25,14 +34,11 @@ fn value_samples() -> &'static Mutex<HashMap<&'static str, Vec<u64>>> {
     V.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
-/// Record a raw numeric sample (byte count, cache size, etc.) under `label`.
-pub fn record_value(label: &'static str, value: u64) {
-    if !enabled() {
-        return;
-    }
-    if let Ok(mut m) = value_samples().lock() {
-        push_capped(m.entry(label).or_default(), value);
-    }
+type AllocSamples = Mutex<HashMap<&'static str, Vec<(u64, u64)>>>;
+
+fn alloc_samples() -> &'static AllocSamples {
+    static A: OnceLock<AllocSamples> = OnceLock::new();
+    A.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
 pub fn enabled() -> bool {
@@ -45,6 +51,16 @@ pub fn enable() {
 
 pub fn set_enabled(on: bool) {
     ENABLED.store(on, Ordering::Relaxed);
+}
+
+/// Record a raw numeric sample (byte count, cache size, etc.) under `label`.
+pub fn record_value(label: &'static str, value: u64) {
+    if !enabled() {
+        return;
+    }
+    if let Ok(mut m) = value_samples().lock() {
+        push_capped(m.entry(label).or_default(), value);
+    }
 }
 
 /// Drop all retained samples.
@@ -94,7 +110,7 @@ fn pct_idx(count: usize, p: usize) -> usize {
     ((count * p) / 100).min(count.saturating_sub(1))
 }
 
-/// Snapshot current sample buffers, sorted by total time descending.
+/// Snapshot current sample buffers. Durations sorted by total descending; values by label.
 pub fn snapshot() -> Snapshot {
     let mut out = Snapshot::default();
     if let Ok(map) = samples().lock() {
@@ -153,7 +169,7 @@ pub fn begin(label: &'static str) -> Option<Guard> {
     Some(Guard {
         label,
         start: Instant::now(),
-        allocs_start: crate::alloc::snapshot(),
+        allocs_start: alloc::thread_snapshot(),
     })
 }
 
@@ -169,8 +185,8 @@ impl Drop for Guard {
         if let Ok(mut s) = samples().lock() {
             push_capped(s.entry(self.label).or_default(), dur);
         }
-        if crate::alloc::enabled() {
-            let (c1, b1) = crate::alloc::snapshot();
+        if alloc::enabled() {
+            let (c1, b1) = alloc::thread_snapshot();
             let (c0, b0) = self.allocs_start;
             if let Ok(mut m) = alloc_samples().lock() {
                 push_capped(
@@ -180,13 +196,6 @@ impl Drop for Guard {
             }
         }
     }
-}
-
-type AllocSamples = Mutex<HashMap<&'static str, Vec<(u64, u64)>>>;
-
-fn alloc_samples() -> &'static AllocSamples {
-    static A: OnceLock<AllocSamples> = OnceLock::new();
-    A.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
 const TABLE_WIDTH: usize = 115;
@@ -232,13 +241,11 @@ pub fn print_summary() {
     }
     println!("{}", bar);
 
-    // Allocation samples (count + bytes deltas per Guard scope).
     let alloc_map = alloc_samples().lock().unwrap();
     if !alloc_map.is_empty() {
         let mut agroups: Vec<(&'static str, Vec<(u64, u64)>)> =
             alloc_map.iter().map(|(k, v)| (*k, v.clone())).collect();
         drop(alloc_map);
-        // Sort by total bytes descending.
         agroups.sort_by(|a, b| {
             let ta: u64 = a.1.iter().map(|(_, b)| *b).sum();
             let tb: u64 = b.1.iter().map(|(_, b)| *b).sum();

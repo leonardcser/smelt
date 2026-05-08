@@ -83,7 +83,7 @@ impl TuiApp {
                 .collect();
             let _guard = crate::lua::install_app_ptr(self);
             for (func, payload, handle_id) in prepared {
-                let _perf = smelt_core::perf::begin("lua:event_cb");
+                let _perf = smelt_perf::perf::begin("lua:event_cb");
                 if let Err(e) = func.call::<()>(payload) {
                     crate::lua::try_with_app(|app| {
                         app.lua.record_callback_error(handle_id, e);

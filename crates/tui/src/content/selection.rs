@@ -12,7 +12,7 @@ pub(crate) fn wrap_and_locate_cursor(
     cursor_char: usize,
     usable: usize,
 ) -> (Vec<(String, Vec<SpanKind>)>, usize, usize, usize) {
-    let _perf = smelt_core::perf::begin("render:wrap_cursor");
+    let _perf = smelt_perf::perf::begin("render:wrap_cursor");
     let mut visual_lines: Vec<(String, Vec<SpanKind>)> = Vec::new();
     let mut cursor_line = 0;
     let mut cursor_col = 0;
@@ -247,7 +247,7 @@ pub(crate) fn build_display_spans(
     att_ids: &[AttachmentId],
     store: &AttachmentStore,
 ) -> Vec<Span> {
-    let _perf = smelt_core::perf::begin("render:display_spans");
+    let _perf = smelt_perf::perf::begin("render:display_spans");
     let mut spans = Vec::new();
     let mut plain = String::new();
     let mut att_idx = 0;

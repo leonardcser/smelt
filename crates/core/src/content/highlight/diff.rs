@@ -94,7 +94,7 @@ pub fn build_inline_diff_cache_ext(
     anchor: &str,
     syntax_ext: Option<&str>,
 ) -> CachedInlineDiff {
-    let _perf = crate::perf::begin("render:build_diff_cache");
+    let _perf = smelt_perf::perf::begin("render:build_diff_cache");
     let dv = compute_diff_view(old, new, path, anchor);
     let expanded_lines: Vec<String> = dv
         .file_content
@@ -337,7 +337,7 @@ pub fn print_inline_diff(
     skip: u16,
     max_rows: u16,
 ) -> u16 {
-    let _perf = crate::perf::begin("render:inline_diff_cold");
+    let _perf = smelt_perf::perf::begin("render:inline_diff_cold");
     let cache = build_inline_diff_cache(old, new, path, anchor);
     print_cached_inline_diff(out, &cache, skip, max_rows)
 }
@@ -409,7 +409,7 @@ pub fn print_cached_inline_diff(
     skip: u16,
     max_rows: u16,
 ) -> u16 {
-    let _perf = crate::perf::begin("render:inline_diff_cached");
+    let _perf = smelt_perf::perf::begin("render:inline_diff_cached");
 
     let indent = "  ";
     let gutter_width = format!("{}", cache.max_display_lineno).len();

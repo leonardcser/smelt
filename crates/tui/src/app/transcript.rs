@@ -334,7 +334,7 @@ impl TuiApp {
     }
 
     pub(crate) fn finish_transcript_turn(&mut self) {
-        let _perf = smelt_core::perf::begin("render:finish_turn");
+        let _perf = smelt_perf::perf::begin("render:finish_turn");
         self.parser
             .finalize_active_tools(&mut self.transcript.history);
     }

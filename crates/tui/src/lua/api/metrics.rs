@@ -42,7 +42,7 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
     metrics_tbl.set(
         "perf_set_enabled",
         lua.create_function(|_, on: bool| {
-            smelt_core::perf::set_enabled(on);
+            smelt_perf::perf::set_enabled(on);
             Ok(())
         })?,
     )?;
@@ -50,7 +50,7 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
     metrics_tbl.set(
         "perf_clear",
         lua.create_function(|_, ()| {
-            smelt_core::perf::clear();
+            smelt_perf::perf::clear();
             Ok(())
         })?,
     )?;
@@ -58,7 +58,7 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
     metrics_tbl.set(
         "perf_snapshot",
         lua.create_function(|lua, ()| {
-            let snap = smelt_core::perf::snapshot();
+            let snap = smelt_perf::perf::snapshot();
             let out = lua.create_table()?;
             let durs = lua.create_table()?;
             for (i, row) in snap.durations.iter().enumerate() {
@@ -88,7 +88,7 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
                 vals.set(i + 1, r)?;
             }
             out.set("values", vals)?;
-            out.set("enabled", smelt_core::perf::enabled())?;
+            out.set("enabled", smelt_perf::perf::enabled())?;
             Ok(out)
         })?,
     )?;

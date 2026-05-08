@@ -10,7 +10,7 @@ pub fn render_markdown_inner(
     dim: bool,
     bctx: Option<&smelt_core::content::BoxContext>,
 ) -> u16 {
-    let _perf = smelt_core::perf::begin("render:markdown");
+    let _perf = smelt_perf::perf::begin("render:markdown");
     let max_cols = if let Some(b) = bctx {
         b.inner_w
     } else {

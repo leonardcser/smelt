@@ -2517,6 +2517,7 @@ dependencies = [
  "reqwest",
  "serde_json",
  "smelt-core",
+ "smelt-perf",
  "tempfile",
  "tokio",
  "tui",
@@ -2559,6 +2560,7 @@ dependencies = [
  "sha2 0.10.9",
  "similar",
  "smelt-buffer",
+ "smelt-perf",
  "smelt-style",
  "syntect",
  "tempfile",
@@ -2579,6 +2581,10 @@ dependencies = [
  "smelt-term",
  "unicode-width",
 ]
+
+[[package]]
+name = "smelt-perf"
+version = "0.4.7"
 
 [[package]]
 name = "smelt-style"
@@ -2970,6 +2976,7 @@ dependencies = [
  "smelt-buffer",
  "smelt-core",
  "smelt-edit",
+ "smelt-perf",
  "smelt-term",
  "syntect",
  "tempfile",

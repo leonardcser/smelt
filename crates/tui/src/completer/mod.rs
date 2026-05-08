@@ -99,7 +99,7 @@ impl Completer {
     }
 
     fn filter_inner(&mut self, preserve_selection: bool) {
-        let _perf = smelt_core::perf::begin("completer:filter");
+        let _perf = smelt_perf::perf::begin("completer:filter");
         if preserve_selection {
             self.remember_selected_key();
         }

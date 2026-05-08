@@ -14,7 +14,7 @@ impl TuiApp {
     /// so the UI and the LLM see the same redacted form.
     pub(crate) fn redact_user_submission(&self, content: &mut Content, display: &mut String) {
         if self.core.config.settings.redact_secrets {
-            let _perf = smelt_core::perf::begin("ingress:redact");
+            let _perf = smelt_perf::perf::begin("ingress:redact");
             engine::redact::redact_content(content);
             *display = engine::redact::redact(display);
         }
@@ -103,7 +103,7 @@ impl TuiApp {
     }
 
     pub(crate) fn reset_session(&mut self) {
-        let _perf = smelt_core::perf::begin("app:reset_session");
+        let _perf = smelt_perf::perf::begin("app:reset_session");
         // Cancel in-flight engine work before clearing state so stale events don't restore old data.
         self.core.engine.send(UiCommand::Cancel);
         let old_id = self.core.session.id.clone();
@@ -361,7 +361,7 @@ impl TuiApp {
     }
 
     pub(crate) fn save_session(&mut self) {
-        let _perf = smelt_core::perf::begin("session:save");
+        let _perf = smelt_perf::perf::begin("session:save");
         if self.core.session.messages.is_empty() {
             return;
         }

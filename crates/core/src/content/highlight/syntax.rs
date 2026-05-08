@@ -22,7 +22,7 @@ pub fn render_code_block(
     bctx: Option<&super::super::BoxContext>,
     fence: bool,
 ) -> u16 {
-    let _perf = crate::perf::begin("render:code_block");
+    let _perf = smelt_perf::perf::begin("render:code_block");
     let ext = match lang {
         "" => "txt",
         "js" | "javascript" => "js",
@@ -118,7 +118,7 @@ pub(super) fn render_highlighted(
     skip: u16,
     max_rows: u16,
 ) -> u16 {
-    let _perf = crate::perf::begin("render:highlighted");
+    let _perf = smelt_perf::perf::begin("render:highlighted");
     let indent = "  ";
     let theme = syntax_theme();
     let gutter_width = format!("{}", lines.len()).len();
@@ -179,7 +179,7 @@ pub fn print_syntax_file_ext(
     skip: u16,
     max_rows: u16,
 ) -> u16 {
-    let _perf = crate::perf::begin("render:syntax_file");
+    let _perf = smelt_perf::perf::begin("render:syntax_file");
     let ext = syntax_ext.unwrap_or_else(|| {
         Path::new(path)
             .extension()

@@ -17,7 +17,7 @@ pub(crate) struct ExecHandle {
 /// Dispatch a raw command line. Leading `:` normalises to `/`. `!` lines
 /// spawn a shell escape; everything else dispatches to a Lua-registered handler.
 pub(crate) fn run_command(app: &mut TuiApp, line: &str) -> CommandAction {
-    let _perf = smelt_core::perf::begin("cmd:dispatch");
+    let _perf = smelt_perf::perf::begin("cmd:dispatch");
     let line = line.trim();
     if let Some(rest) = line.strip_prefix('!') {
         if !app.input.skip_shell_escape() {

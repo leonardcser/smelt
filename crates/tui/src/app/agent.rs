@@ -24,7 +24,7 @@ impl TuiApp {
     }
 
     pub(crate) fn begin_agent_turn(&mut self, display: &str, content: Content) -> TurnState {
-        let _perf = smelt_core::perf::begin("agent:begin_turn");
+        let _perf = smelt_perf::perf::begin("agent:begin_turn");
         self.sleep_inhibit.acquire();
         self.clear_prompt_completer();
         self.begin_turn();
@@ -53,7 +53,7 @@ impl TuiApp {
             return TurnState {
                 turn_id: 0,
                 pending: Vec::new(),
-                _perf: smelt_core::perf::begin("agent:turn"),
+                _perf: smelt_perf::perf::begin("agent:turn"),
             };
         };
 
@@ -67,11 +67,11 @@ impl TuiApp {
         self.pump_lua();
 
         let system_prompt = {
-            let _perf = smelt_core::perf::begin("agent:rebuild_prompt");
+            let _perf = smelt_perf::perf::begin("agent:rebuild_prompt");
             self.rebuild_system_prompt()
         };
         let tools = {
-            let _perf = smelt_core::perf::begin("agent:tool_defs");
+            let _perf = smelt_perf::perf::begin("agent:tool_defs");
             self.lua.tool_defs(self.core.config.mode)
         };
 
@@ -100,7 +100,7 @@ impl TuiApp {
         TurnState {
             turn_id,
             pending: Vec::new(),
-            _perf: smelt_core::perf::begin("agent:turn"),
+            _perf: smelt_perf::perf::begin("agent:turn"),
         }
     }
 
@@ -267,7 +267,7 @@ impl TuiApp {
         TurnState {
             turn_id,
             pending: Vec::new(),
-            _perf: smelt_core::perf::begin("agent:turn"),
+            _perf: smelt_perf::perf::begin("agent:turn"),
         }
     }
 

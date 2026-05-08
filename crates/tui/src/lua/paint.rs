@@ -209,7 +209,7 @@ pub(crate) fn invoke_paint(
             return;
         }
     };
-    let _perf = smelt_core::perf::begin("lua:paint");
+    let _perf = smelt_perf::perf::begin("lua:paint");
     if let Err(e) = func.call::<()>((ud, ctx_tbl)) {
         runtime.record_error(format!("smelt.paint: {e}"));
     }

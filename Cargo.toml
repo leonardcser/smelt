@@ -1,5 +1,5 @@
 [workspace]
-members = ["crates/protocol", "crates/engine", "crates/style", "crates/buffer", "crates/term", "crates/edit", "crates/core", "crates/tui"]
+members = ["crates/protocol", "crates/engine", "crates/style", "crates/perf", "crates/buffer", "crates/term", "crates/edit", "crates/core", "crates/tui"]
 
 [package]
 name = "smelt-agent"
@@ -22,6 +22,7 @@ dev-tools = []
 protocol = { path = "crates/protocol" }
 engine = { path = "crates/engine" }
 smelt-core = { path = "crates/core" }
+smelt-perf = { path = "crates/perf" }
 tui = { path = "crates/tui" }
 tokio = { version = "1", features = ["full"] }
 clap = { version = "4", features = ["derive"] }

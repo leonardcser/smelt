@@ -1,4 +1,3 @@
-pub mod alloc;
 pub mod app_config;
 pub mod cells;
 pub mod config;
@@ -20,7 +19,6 @@ pub mod mcp;
 pub mod messages;
 pub mod notebook;
 pub mod path;
-pub mod perf;
 pub mod permissions;
 pub mod process;
 pub mod runtime;

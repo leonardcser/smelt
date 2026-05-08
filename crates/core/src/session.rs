@@ -179,7 +179,7 @@ pub fn save(session: &Session, store: &crate::attachment::AttachmentStore) {
 /// Write `session.json` + `meta.json`. Assumes blobs are already flushed.
 /// Safe to call from a background thread.
 pub fn save_with_blobs(session: &Session, url_to_blob: &std::collections::HashMap<String, String>) {
-    let _perf = crate::perf::begin("session:write");
+    let _perf = smelt_perf::perf::begin("session:write");
     let session_dir = dir_for(session);
     let _ = fs::create_dir_all(&session_dir);
     let ts = now_ms();
@@ -275,7 +275,7 @@ pub fn delete(id: &str) {
 }
 
 pub fn list_sessions() -> Vec<SessionMeta> {
-    let _perf = crate::perf::begin("session:list");
+    let _perf = smelt_perf::perf::begin("session:list");
     let dir = sessions_dir();
     let Ok(entries) = fs::read_dir(&dir) else {
         return Vec::new();
