@@ -175,9 +175,7 @@ impl mlua::UserData for PaintSliceUd {
             |_, _, (row, col, ch, style): (u16, u16, String, Option<mlua::Table>)| {
                 let symbol = ch.chars().next().unwrap_or(' ');
                 let resolved_style = match style {
-                    Some(t) => {
-                        crate::lua::parse::style(&t).map_err(LuaError::RuntimeError)?
-                    }
+                    Some(t) => crate::lua::parse::style(&t).map_err(LuaError::RuntimeError)?,
                     None => crate::smelt_term::Style::new(),
                 };
                 with_slice(|s| s.set(col, row, symbol, resolved_style))
@@ -187,9 +185,7 @@ impl mlua::UserData for PaintSliceUd {
             "put_str",
             |_, _, (row, col, text, style): (u16, u16, String, Option<mlua::Table>)| {
                 let resolved_style = match style {
-                    Some(t) => {
-                        crate::lua::parse::style(&t).map_err(LuaError::RuntimeError)?
-                    }
+                    Some(t) => crate::lua::parse::style(&t).map_err(LuaError::RuntimeError)?,
                     None => crate::smelt_term::Style::new(),
                 };
                 with_slice(|s| s.put_str(col, row, &text, resolved_style))
@@ -209,9 +205,7 @@ impl mlua::UserData for PaintSliceUd {
             )| {
                 let symbol = ch.as_deref().and_then(|s| s.chars().next()).unwrap_or(' ');
                 let resolved_style = match style {
-                    Some(t) => {
-                        crate::lua::parse::style(&t).map_err(LuaError::RuntimeError)?
-                    }
+                    Some(t) => crate::lua::parse::style(&t).map_err(LuaError::RuntimeError)?,
                     None => crate::smelt_term::Style::new(),
                 };
                 let rect = crate::smelt_term::layout::Rect::new(row, col, w, h);

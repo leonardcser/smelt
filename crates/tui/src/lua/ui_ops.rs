@@ -63,9 +63,9 @@ pub(crate) fn open_overlay(app: &mut TuiApp, opts: mlua::Table) -> Result<u64, S
         // paint id (`smelt.paint.register`). `resolve_leaf_id` consults
         // both namespaces (partitioned at `PAINT_ID_BASE`) and tells us
         // which subsystem owns the id.
-        let leaf = app.resolve_leaf_id(raw_id).ok_or_else(|| {
-            format!("overlay item references missing window/paint id {raw_id}")
-        })?;
+        let leaf = app
+            .resolve_leaf_id(raw_id)
+            .ok_or_else(|| format!("overlay item references missing window/paint id {raw_id}"))?;
         let collapse_when_empty: bool = item.get("collapse_when_empty").unwrap_or(false);
         let constraint = match leaf {
             crate::lua::paint::LeafKind::Window(win)
@@ -84,7 +84,9 @@ pub(crate) fn open_overlay(app: &mut TuiApp, opts: mlua::Table) -> Result<u64, S
         // the host writing a manual Vbox wrapper.
         let item_border = match item.get::<mlua::Value>("border").ok() {
             None | Some(mlua::Value::Nil) => None,
-            _ => crate::lua::parse::border(&item).map_err(|e| format!("overlay item.border: {e}"))?,
+            _ => {
+                crate::lua::parse::border(&item).map_err(|e| format!("overlay item.border: {e}"))?
+            }
         };
         let item_title = crate::lua::parse::title(item.get::<mlua::Value>("title").ok())
             .map_err(|e| format!("overlay item.title: {e}"))?;
@@ -248,7 +250,8 @@ fn parse_overlay_placement(opts: &mlua::Table) -> Result<OverlayPlacement, Strin
             Ok(OverlayPlacement::DockBottom { height_pct })
         }
         Some("screen_at") => {
-            let corner = crate::lua::parse::corner(opts.get::<String>("corner").ok().as_deref(), Corner::NW);
+            let corner =
+                crate::lua::parse::corner(opts.get::<String>("corner").ok().as_deref(), Corner::NW);
             let row: u16 = opts.get("row").unwrap_or(0);
             let col: u16 = opts.get("col").unwrap_or(0);
             let width: u16 = opts.get("width").unwrap_or(60);

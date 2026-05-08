@@ -565,7 +565,9 @@ mod tests {
     fn constraint_unknown_kind_errors() {
         let lua = lua();
         let v = eval_value(&lua, r#"return "blub:5""#);
-        assert!(constraint(Some(v), "h").unwrap_err().contains("unknown kind"));
+        assert!(constraint(Some(v), "h")
+            .unwrap_err()
+            .contains("unknown kind"));
     }
 
     // ── border ────────────────────────────────────────────────────────

@@ -712,10 +712,7 @@ impl TuiApp {
     /// silently routing to the wrong subsystem. See
     /// [`crate::lua::paint::PAINT_ID_BASE`] for the partition contract
     /// the two namespaces share.
-    pub(crate) fn resolve_leaf_id(
-        &self,
-        raw_id: u64,
-    ) -> Option<crate::lua::paint::LeafKind> {
+    pub(crate) fn resolve_leaf_id(&self, raw_id: u64) -> Option<crate::lua::paint::LeafKind> {
         let win = crate::smelt_term::WinId(raw_id);
         if self.ui.win(win).is_some() {
             // Catches a future regression where the smelt-edit allocator
