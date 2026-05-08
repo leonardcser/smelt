@@ -3,13 +3,12 @@
 //! few reusable window recipes (`list` / `input`).
 
 use crate::app::TuiApp;
-use crate::smelt_term::layout::{Anchor, BorderSides, BorderStyle, Corner, PaintId};
+use crate::smelt_term::layout::{Anchor, Corner, PaintId};
 use crate::smelt_term::{
-    Border, Callback, CallbackResult, Constraint, KeyBind, LayoutTree, Line, Overlay, Payload,
-    Span, Style, WinEvent, WinId,
+    Callback, CallbackResult, Constraint, KeyBind, LayoutTree, Line, Overlay, Payload, WinEvent,
+    WinId,
 };
 use crossterm::event::{KeyCode, KeyModifiers};
-use smelt_core::style::Color;
 
 /// Where the dialog's overlay anchors. Parsed from `opts.placement` on
 /// the Lua side: absent or `"center"` → `ScreenCenter`; `"dock_bottom"`
@@ -41,13 +40,13 @@ enum OverlayPlacement {
 }
 
 pub(crate) fn open_overlay(app: &mut TuiApp, opts: mlua::Table) -> Result<u64, String> {
-    let title = parse_title(opts.get::<mlua::Value>("title").ok())
+    let title = crate::lua::parse::title(opts.get::<mlua::Value>("title").ok())
         .map_err(|e| format!("overlay title: {e}"))?;
     let items_tbl: mlua::Table = opts
         .get("items")
         .map_err(|e| format!("overlay items: {e}"))?;
     let placement = parse_overlay_placement(&opts)?;
-    let border = parse_border(&opts).map_err(|e| format!("overlay border: {e}"))?;
+    let border = crate::lua::parse::border(&opts).map_err(|e| format!("overlay border: {e}"))?;
     let blocks_agent: bool = opts.get("blocks_agent").unwrap_or(false);
     let modal: bool = opts.get("modal").unwrap_or(true);
     let z: u16 = opts.get("z").unwrap_or(50);
@@ -60,24 +59,24 @@ pub(crate) fn open_overlay(app: &mut TuiApp, opts: mlua::Table) -> Result<u64, S
         let raw_id: u64 = item
             .get::<u64>("win")
             .map_err(|e| format!("overlay item.win: {e}"))?;
-        // `win` accepts either a `WinId` (Buffer-backed pane) or a paint
-        // id allocated via `smelt.paint.register` (Lua custom paint
-        // region). The two namespaces are split: WinIds are issued from
-        // 1, paint ids start at 1<<32, so a single u64 disambiguates.
-        let win = WinId(raw_id);
-        let paint_id = crate::smelt_term::layout::PaintId(raw_id);
-        let is_window = app.ui.win(win).is_some();
-        let is_paint = app.paint_registry.contains(paint_id);
-        if !is_window && !is_paint {
-            return Err(format!(
-                "overlay item references missing window/paint id {raw_id}"
-            ));
-        }
+        // `win` accepts either a `WinId` (Buffer-backed pane) or a
+        // paint id (`smelt.paint.register`). `resolve_leaf_id` consults
+        // both namespaces (partitioned at `PAINT_ID_BASE`) and tells us
+        // which subsystem owns the id.
+        let leaf = app.resolve_leaf_id(raw_id).ok_or_else(|| {
+            format!("overlay item references missing window/paint id {raw_id}")
+        })?;
         let collapse_when_empty: bool = item.get("collapse_when_empty").unwrap_or(false);
-        let constraint = if collapse_when_empty && is_window && window_buffer_empty(app, win) {
-            Constraint::Length(0)
-        } else {
-            parse_height_constraint(&item)?
+        let constraint = match leaf {
+            crate::lua::paint::LeafKind::Window(win)
+                if collapse_when_empty && window_buffer_empty(app, win) =>
+            {
+                Constraint::Length(0)
+            }
+            _ => crate::lua::parse::constraint(
+                item.get::<mlua::Value>("height").ok(),
+                "overlay item.height",
+            )?,
         };
         // Per-leaf chrome: `border` / `title` on an item attach to that
         // leaf alone via `LayoutTree::ensure_chrome_capable`, so a row in
@@ -85,22 +84,21 @@ pub(crate) fn open_overlay(app: &mut TuiApp, opts: mlua::Table) -> Result<u64, S
         // the host writing a manual Vbox wrapper.
         let item_border = match item.get::<mlua::Value>("border").ok() {
             None | Some(mlua::Value::Nil) => None,
-            _ => parse_border(&item).map_err(|e| format!("overlay item.border: {e}"))?,
+            _ => crate::lua::parse::border(&item).map_err(|e| format!("overlay item.border: {e}"))?,
         };
-        let item_title = parse_title(item.get::<mlua::Value>("title").ok())
+        let item_title = crate::lua::parse::title(item.get::<mlua::Value>("title").ok())
             .map_err(|e| format!("overlay item.title: {e}"))?;
-        let mut leaf = if is_window {
-            LayoutTree::leaf(win)
-        } else {
-            LayoutTree::leaf(paint_id)
+        let mut leaf_tree = match leaf {
+            crate::lua::paint::LeafKind::Window(w) => LayoutTree::leaf(w),
+            crate::lua::paint::LeafKind::Paint(p) => LayoutTree::leaf(p),
         };
         if let Some(b) = item_border {
-            leaf = leaf.with_border(b);
+            leaf_tree = leaf_tree.with_border(b);
         }
         if let Some(t) = item_title {
-            leaf = leaf.with_title(t);
+            leaf_tree = leaf_tree.with_title(t);
         }
-        leaf_items.push((constraint, leaf));
+        leaf_items.push((constraint, leaf_tree));
     }
     if leaf_items.is_empty() {
         return Err("overlay must have at least one item".into());
@@ -243,103 +241,6 @@ pub(crate) fn open_overlay(app: &mut TuiApp, opts: mlua::Table) -> Result<u64, S
 /// a fraction of available height. `"screen_at"` reads `corner`
 /// (`"nw"`/`"ne"`/`"sw"`/`"se"`) plus absolute `row` / `col` / `width`
 /// / `height` and pins the overlay at the named corner.
-/// Parse the Lua `border` + `border_sides` opts into an
-/// `Option<Border>`. Surface:
-///
-/// - `border = "single"` (default) / `"rounded"` / `"double"` —
-///   pick a glyph family, all four sides on.
-/// - `border = "none"` or `border = false` — no border at all.
-/// - `border = "top"` — single style, top edge only (sugar for the
-///   common docked-bottom case).
-/// - `border = { style = "rounded", sides = { "top", "left" } }` — the
-///   explicit form. `sides` accepts a list of edge names (`"top"`,
-///   `"right"`, `"bottom"`, `"left"`) or a table of bools
-///   (`{ top = true, left = true }`). Empty `sides` returns `None`.
-fn parse_border(opts: &mlua::Table) -> Result<Option<Border>, String> {
-    let v = opts
-        .get::<mlua::Value>("border")
-        .unwrap_or(mlua::Value::Nil);
-    match v {
-        mlua::Value::Nil => Ok(Some(Border::SINGLE)),
-        mlua::Value::Boolean(false) => Ok(None),
-        mlua::Value::Boolean(true) => Ok(Some(Border::SINGLE)),
-        mlua::Value::String(s) => {
-            let raw = s.to_string_lossy();
-            match raw.as_ref() {
-                "none" => Ok(None),
-                "rounded" => Ok(Some(Border::ROUNDED)),
-                "double" => Ok(Some(Border::DOUBLE)),
-                "single" => Ok(Some(Border::SINGLE)),
-                "top" => Ok(Some(Border::top(BorderStyle::Single))),
-                other => Err(format!(
-                    "unknown border preset '{other}' (expected single|rounded|double|none|top)"
-                )),
-            }
-        }
-        mlua::Value::Table(t) => {
-            let style = match t.get::<Option<String>>("style").ok().flatten().as_deref() {
-                None | Some("single") => BorderStyle::Single,
-                Some("rounded") => BorderStyle::Rounded,
-                Some("double") => BorderStyle::Double,
-                Some(other) => {
-                    return Err(format!(
-                        "unknown border style '{other}' (expected single|rounded|double)"
-                    ))
-                }
-            };
-            let sides = parse_border_sides(&t)?;
-            if !(sides.top || sides.right || sides.bottom || sides.left) {
-                return Ok(None);
-            }
-            Ok(Some(Border::new(style, sides)))
-        }
-        other => Err(format!(
-            "border: expected string|table|bool, got {}",
-            other.type_name()
-        )),
-    }
-}
-
-fn parse_border_sides(t: &mlua::Table) -> Result<BorderSides, String> {
-    let sides_v = t.get::<mlua::Value>("sides").unwrap_or(mlua::Value::Nil);
-    match sides_v {
-        // No explicit `sides` → all sides.
-        mlua::Value::Nil => Ok(BorderSides::ALL),
-        mlua::Value::Table(st) => {
-            // List form: `sides = { "top", "left" }`.
-            let mut sides = BorderSides::NONE;
-            let mut saw_list_entry = false;
-            for v in st.clone().sequence_values::<String>().flatten() {
-                saw_list_entry = true;
-                match v.as_str() {
-                    "top" => sides.top = true,
-                    "right" => sides.right = true,
-                    "bottom" => sides.bottom = true,
-                    "left" => sides.left = true,
-                    other => {
-                        return Err(format!(
-                            "unknown border side '{other}' (expected top|right|bottom|left)"
-                        ))
-                    }
-                }
-            }
-            if saw_list_entry {
-                return Ok(sides);
-            }
-            // Map form: `sides = { top = true, left = true }`.
-            sides.top = st.get::<bool>("top").unwrap_or(false);
-            sides.right = st.get::<bool>("right").unwrap_or(false);
-            sides.bottom = st.get::<bool>("bottom").unwrap_or(false);
-            sides.left = st.get::<bool>("left").unwrap_or(false);
-            Ok(sides)
-        }
-        other => Err(format!(
-            "border.sides: expected table, got {}",
-            other.type_name()
-        )),
-    }
-}
-
 fn parse_overlay_placement(opts: &mlua::Table) -> Result<OverlayPlacement, String> {
     match opts.get::<String>("placement").ok().as_deref() {
         Some("dock_bottom") => {
@@ -347,7 +248,7 @@ fn parse_overlay_placement(opts: &mlua::Table) -> Result<OverlayPlacement, Strin
             Ok(OverlayPlacement::DockBottom { height_pct })
         }
         Some("screen_at") => {
-            let corner = parse_corner(opts.get::<String>("corner").ok().as_deref(), Corner::NW);
+            let corner = crate::lua::parse::corner(opts.get::<String>("corner").ok().as_deref(), Corner::NW);
             let row: u16 = opts.get("row").unwrap_or(0);
             let col: u16 = opts.get("col").unwrap_or(0);
             let width: u16 = opts.get("width").unwrap_or(60);
@@ -364,7 +265,7 @@ fn parse_overlay_placement(opts: &mlua::Table) -> Result<OverlayPlacement, Strin
             let target_id: u64 = opts.get("placement_target").map_err(|e| {
                 format!("placement = 'win' requires placement_target = <win_id>: {e}")
             })?;
-            let attach = parse_corner(
+            let attach = crate::lua::parse::corner(
                 opts.get::<String>("placement_attach").ok().as_deref(),
                 Corner::NW,
             );
@@ -382,16 +283,6 @@ fn parse_overlay_placement(opts: &mlua::Table) -> Result<OverlayPlacement, Strin
             })
         }
         _ => Ok(OverlayPlacement::ScreenCenter),
-    }
-}
-
-fn parse_corner(name: Option<&str>, default: Corner) -> Corner {
-    match name {
-        Some("nw") => Corner::NW,
-        Some("ne") => Corner::NE,
-        Some("sw") => Corner::SW,
-        Some("se") => Corner::SE,
-        _ => default,
     }
 }
 
@@ -779,252 +670,6 @@ pub(crate) fn parse_picker_item(v: &mlua::Value) -> Result<crate::picker::Picker
             other.type_name()
         )),
     }
-}
-
-/// Parse the per-item `height` field into a [`Constraint`]. Surface:
-///
-/// - omitted / `nil` → `Fill`
-/// - integer `n > 0` → `Length(n)`
-/// - string `"fill"` / `"fit"` → `Fill` / `Fit`
-/// - string `"min:N"` / `"max:N"` / `"pct:N"` / `"ratio:N/M"` →
-///   matching variant; `"length:N"` / `"len:N"` are aliases of an
-///   integer literal.
-/// - table `{ kind = "min", n = 5 }` etc. — the long form. `kind`
-///   accepts `"length" | "fit" | "fill" | "min" | "max" | "pct" |
-///   "percentage" | "ratio"`. `Length` / `Min` / `Max` / `Percentage`
-///   read `n`; `Ratio` reads `num` + `den`.
-fn parse_height_constraint(item: &mlua::Table) -> Result<Constraint, String> {
-    parse_constraint(
-        item.get::<mlua::Value>("height").ok(),
-        "overlay item.height",
-    )
-}
-
-fn parse_constraint(v: Option<mlua::Value>, ctx: &str) -> Result<Constraint, String> {
-    match v {
-        None | Some(mlua::Value::Nil) => Ok(Constraint::Fill),
-        Some(mlua::Value::Integer(n)) if n > 0 => Ok(Constraint::Length(n as u16)),
-        Some(mlua::Value::Number(n)) if n > 0.0 => Ok(Constraint::Length(n as u16)),
-        Some(mlua::Value::String(s)) => {
-            let raw = s.to_str().map_err(|e| e.to_string())?.to_string();
-            parse_constraint_str(&raw, ctx)
-        }
-        Some(mlua::Value::Table(t)) => parse_constraint_table(&t, ctx),
-        Some(other) => Err(format!(
-            "{ctx}: expected int | string | table | nil, got {}",
-            other.type_name()
-        )),
-    }
-}
-
-fn parse_constraint_str(raw: &str, ctx: &str) -> Result<Constraint, String> {
-    let s = raw.trim();
-    if s == "fill" {
-        return Ok(Constraint::Fill);
-    }
-    if s == "fit" {
-        return Ok(Constraint::Fit);
-    }
-    if let Some((kind, rest)) = s.split_once(':') {
-        let rest = rest.trim();
-        return match kind.trim() {
-            "length" | "len" => parse_u16(rest, ctx).map(Constraint::Length),
-            "min" => parse_u16(rest, ctx).map(Constraint::Min),
-            "max" => parse_u16(rest, ctx).map(Constraint::Max),
-            "pct" | "percentage" => parse_u16(rest, ctx).map(Constraint::Percentage),
-            "ratio" => {
-                let (a, b) = rest
-                    .split_once('/')
-                    .ok_or_else(|| format!("{ctx}: ratio expects 'N/M', got '{rest}'"))?;
-                Ok(Constraint::Ratio(
-                    parse_u16(a.trim(), ctx)?,
-                    parse_u16(b.trim(), ctx)?,
-                ))
-            }
-            other => Err(format!(
-                "{ctx}: unknown kind '{other}' (expected length|fit|fill|min|max|pct|ratio)"
-            )),
-        };
-    }
-    Err(format!(
-        "{ctx}: unknown value '{s}' (expected fit|fill|'<kind>:<n>')"
-    ))
-}
-
-fn parse_constraint_table(t: &mlua::Table, ctx: &str) -> Result<Constraint, String> {
-    let kind: String = t
-        .get::<String>("kind")
-        .map_err(|e| format!("{ctx}: missing 'kind': {e}"))?;
-    match kind.as_str() {
-        "fill" => Ok(Constraint::Fill),
-        "fit" => Ok(Constraint::Fit),
-        "length" | "len" => Ok(Constraint::Length(table_u16(t, "n", ctx)?)),
-        "min" => Ok(Constraint::Min(table_u16(t, "n", ctx)?)),
-        "max" => Ok(Constraint::Max(table_u16(t, "n", ctx)?)),
-        "pct" | "percentage" => Ok(Constraint::Percentage(table_u16(t, "n", ctx)?)),
-        "ratio" => Ok(Constraint::Ratio(
-            table_u16(t, "num", ctx)?,
-            table_u16(t, "den", ctx)?,
-        )),
-        other => Err(format!(
-            "{ctx}: unknown kind '{other}' (expected length|fit|fill|min|max|pct|ratio)"
-        )),
-    }
-}
-
-fn parse_u16(s: &str, ctx: &str) -> Result<u16, String> {
-    s.parse::<u16>()
-        .map_err(|e| format!("{ctx}: expected u16, got '{s}': {e}"))
-}
-
-fn table_u16(t: &mlua::Table, key: &str, ctx: &str) -> Result<u16, String> {
-    t.get::<u16>(key)
-        .map_err(|e| format!("{ctx}: missing '{key}' (u16): {e}"))
-}
-
-/// Parse a Lua-side title spec into a styled [`Line`]. Surface:
-///
-/// - omitted / `nil` → `None`
-/// - string → single-span Line with default style
-/// - single-span table `{ text = "...", fg = "red", bold = true }` →
-///   single-span Line
-/// - sequence of span tables `{ {text=..,fg=..}, " ", {text=..} }` →
-///   multi-span Line. List items can be plain strings (default style)
-///   or span tables.
-fn parse_title(v: Option<mlua::Value>) -> Result<Option<Line<'static>>, String> {
-    match v {
-        None | Some(mlua::Value::Nil) => Ok(None),
-        Some(mlua::Value::String(s)) => Ok(Some(Line::raw(s.to_string_lossy().to_string()))),
-        Some(mlua::Value::Table(t)) => {
-            // Single-span shape: table has a `text` key.
-            if t.contains_key("text").unwrap_or(false) {
-                let span = parse_span(&t)?;
-                return Ok(Some(Line::from_spans([span])));
-            }
-            // Sequence of spans (strings or span tables).
-            let mut spans: Vec<Span<'static>> = Vec::new();
-            for v in t.sequence_values::<mlua::Value>() {
-                let v = v.map_err(|e| format!("title span: {e}"))?;
-                match v {
-                    mlua::Value::String(s) => {
-                        spans.push(Span::raw(s.to_string_lossy().to_string()));
-                    }
-                    mlua::Value::Table(st) => spans.push(parse_span(&st)?),
-                    other => {
-                        return Err(format!(
-                            "title span: expected string or table, got {}",
-                            other.type_name()
-                        ))
-                    }
-                }
-            }
-            if spans.is_empty() {
-                return Ok(None);
-            }
-            Ok(Some(Line::from_spans(spans)))
-        }
-        Some(other) => Err(format!(
-            "expected string | table | nil, got {}",
-            other.type_name()
-        )),
-    }
-}
-
-fn parse_span(t: &mlua::Table) -> Result<Span<'static>, String> {
-    let text: String = t
-        .get::<String>("text")
-        .map_err(|e| format!("span.text: {e}"))?;
-    let style = parse_style(t)?;
-    Ok(Span::styled(text, style))
-}
-
-pub(crate) fn parse_style(t: &mlua::Table) -> Result<Style, String> {
-    let mut style = Style::new();
-    if let Some(c) = parse_color_opt(t.get::<mlua::Value>("fg").ok())? {
-        style = style.fg(c);
-    }
-    if let Some(c) = parse_color_opt(t.get::<mlua::Value>("bg").ok())? {
-        style = style.bg(c);
-    }
-    if t.get::<bool>("bold").unwrap_or(false) {
-        style = style.bold();
-    }
-    if t.get::<bool>("dim").unwrap_or(false) {
-        style = style.dim();
-    }
-    if t.get::<bool>("italic").unwrap_or(false) {
-        style = style.italic();
-    }
-    if t.get::<bool>("underline").unwrap_or(false) {
-        style = style.underline();
-    }
-    if t.get::<bool>("crossedout").unwrap_or(false) {
-        style = style.crossedout();
-    }
-    Ok(style)
-}
-
-/// Parse a color spec. Accepts:
-///
-/// - `nil` → `None`
-/// - integer `0..=255` → `AnsiValue`
-/// - string `"reset"`, named ANSI (`"red"`, `"darkred"`, …, `"grey"`)
-/// - string `"#RRGGBB"` (case-insensitive)
-/// - table `{ r=, g=, b= }`
-fn parse_color_opt(v: Option<mlua::Value>) -> Result<Option<Color>, String> {
-    match v {
-        None | Some(mlua::Value::Nil) => Ok(None),
-        Some(mlua::Value::Integer(n)) if (0..=255).contains(&n) => {
-            Ok(Some(Color::AnsiValue(n as u8)))
-        }
-        Some(mlua::Value::String(s)) => {
-            let raw = s.to_str().map_err(|e| e.to_string())?.to_string();
-            parse_color_str(&raw).map(Some)
-        }
-        Some(mlua::Value::Table(t)) => {
-            let r: u8 = t.get("r").map_err(|e| format!("color.r: {e}"))?;
-            let g: u8 = t.get("g").map_err(|e| format!("color.g: {e}"))?;
-            let b: u8 = t.get("b").map_err(|e| format!("color.b: {e}"))?;
-            Ok(Some(Color::Rgb { r, g, b }))
-        }
-        Some(other) => Err(format!(
-            "color: expected string | integer | table, got {}",
-            other.type_name()
-        )),
-    }
-}
-
-fn parse_color_str(s: &str) -> Result<Color, String> {
-    let lower = s.trim().to_ascii_lowercase();
-    if let Some(hex) = lower.strip_prefix('#') {
-        if hex.len() != 6 {
-            return Err(format!("color: '#{hex}' must be 6 hex digits"));
-        }
-        let r = u8::from_str_radix(&hex[0..2], 16).map_err(|e| format!("color: {e}"))?;
-        let g = u8::from_str_radix(&hex[2..4], 16).map_err(|e| format!("color: {e}"))?;
-        let b = u8::from_str_radix(&hex[4..6], 16).map_err(|e| format!("color: {e}"))?;
-        return Ok(Color::Rgb { r, g, b });
-    }
-    Ok(match lower.as_str() {
-        "reset" => Color::Reset,
-        "black" => Color::Black,
-        "darkgrey" | "darkgray" => Color::DarkGrey,
-        "red" => Color::Red,
-        "darkred" => Color::DarkRed,
-        "green" => Color::Green,
-        "darkgreen" => Color::DarkGreen,
-        "yellow" => Color::Yellow,
-        "darkyellow" => Color::DarkYellow,
-        "blue" => Color::Blue,
-        "darkblue" => Color::DarkBlue,
-        "magenta" => Color::Magenta,
-        "darkmagenta" => Color::DarkMagenta,
-        "cyan" => Color::Cyan,
-        "darkcyan" => Color::DarkCyan,
-        "white" => Color::White,
-        "grey" | "gray" => Color::Grey,
-        other => return Err(format!("color: unknown name '{other}'")),
-    })
 }
 
 fn window_buffer_empty(app: &TuiApp, win: WinId) -> bool {

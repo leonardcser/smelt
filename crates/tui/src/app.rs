@@ -705,6 +705,35 @@ impl TuiApp {
         (self.transcript_gutters.content_width(w) as usize).max(1)
     }
 
+    /// Resolve a Lua-supplied leaf id (raw `u64` from
+    /// `overlay.items[*].win`) to either a live Window or a registered
+    /// paint region. Returns `None` if neither namespace claims the
+    /// id, which the caller should surface as an error rather than
+    /// silently routing to the wrong subsystem. See
+    /// [`crate::lua::paint::PAINT_ID_BASE`] for the partition contract
+    /// the two namespaces share.
+    pub(crate) fn resolve_leaf_id(
+        &self,
+        raw_id: u64,
+    ) -> Option<crate::lua::paint::LeafKind> {
+        let win = crate::smelt_term::WinId(raw_id);
+        if self.ui.win(win).is_some() {
+            // Catches a future regression where the smelt-edit allocator
+            // grows past the partition boundary into paint-id space.
+            debug_assert!(
+                raw_id < crate::lua::paint::PAINT_ID_BASE,
+                "WinId {raw_id} crossed into PaintId half (>= {})",
+                crate::lua::paint::PAINT_ID_BASE
+            );
+            return Some(crate::lua::paint::LeafKind::Window(win));
+        }
+        let paint_id = crate::smelt_term::layout::PaintId(raw_id);
+        if self.paint_registry.contains(paint_id) {
+            return Some(crate::lua::paint::LeafKind::Paint(paint_id));
+        }
+        None
+    }
+
     pub(crate) fn notify(&mut self, message: String) {
         self.open_notification(message, false);
     }
