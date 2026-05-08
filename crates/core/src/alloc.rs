@@ -10,11 +10,17 @@
 //! `Counting` is the type to install.
 
 use std::alloc::{GlobalAlloc, Layout, System};
+use std::cell::Cell;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering::Relaxed};
 
 static ENABLED: AtomicBool = AtomicBool::new(false);
 static ALLOC_COUNT: AtomicU64 = AtomicU64::new(0);
 static ALLOC_BYTES: AtomicU64 = AtomicU64::new(0);
+
+thread_local! {
+    static T_ALLOCS: Cell<u64> = const { Cell::new(0) };
+    static T_BYTES: Cell<u64> = const { Cell::new(0) };
+}
 
 pub fn enable() {
     ENABLED.store(true, Relaxed);
@@ -24,9 +30,13 @@ pub(crate) fn enabled() -> bool {
     ENABLED.load(Relaxed)
 }
 
-/// Current `(alloc_count, alloc_bytes)` totals. Monotonic; take deltas.
+/// Calling-thread `(alloc_count, alloc_bytes)` totals. Per-thread so
+/// `perf::Guard` deltas stay clean of cross-thread allocator traffic.
+/// Monotonic; take deltas.
 pub(crate) fn snapshot() -> (u64, u64) {
-    (ALLOC_COUNT.load(Relaxed), ALLOC_BYTES.load(Relaxed))
+    let a = T_ALLOCS.try_with(|c| c.get()).unwrap_or(0);
+    let b = T_BYTES.try_with(|c| c.get()).unwrap_or(0);
+    (a, b)
 }
 
 pub struct Counting;
@@ -36,6 +46,10 @@ unsafe impl GlobalAlloc for Counting {
         if ENABLED.load(Relaxed) {
             ALLOC_COUNT.fetch_add(1, Relaxed);
             ALLOC_BYTES.fetch_add(layout.size() as u64, Relaxed);
+            // Per-thread tally for perf attribution. `try_with` because
+            // the allocator can run during TLS teardown.
+            let _ = T_ALLOCS.try_with(|c| c.set(c.get() + 1));
+            let _ = T_BYTES.try_with(|c| c.set(c.get() + layout.size() as u64));
         }
         unsafe { System.alloc(layout) }
     }
@@ -48,6 +62,8 @@ unsafe impl GlobalAlloc for Counting {
         if ENABLED.load(Relaxed) {
             ALLOC_COUNT.fetch_add(1, Relaxed);
             ALLOC_BYTES.fetch_add(layout.size() as u64, Relaxed);
+            let _ = T_ALLOCS.try_with(|c| c.set(c.get() + 1));
+            let _ = T_BYTES.try_with(|c| c.set(c.get() + layout.size() as u64));
         }
         unsafe { System.alloc_zeroed(layout) }
     }
@@ -58,7 +74,12 @@ unsafe impl GlobalAlloc for Counting {
             // Count the growth, not the total — realloc often just extends
             // an existing allocation. Shrinks contribute zero bytes.
             if new_size > layout.size() {
-                ALLOC_BYTES.fetch_add((new_size - layout.size()) as u64, Relaxed);
+                let grown = (new_size - layout.size()) as u64;
+                ALLOC_BYTES.fetch_add(grown, Relaxed);
+                let _ = T_ALLOCS.try_with(|c| c.set(c.get() + 1));
+                let _ = T_BYTES.try_with(|c| c.set(c.get() + grown));
+            } else {
+                let _ = T_ALLOCS.try_with(|c| c.set(c.get() + 1));
             }
         }
         unsafe { System.realloc(ptr, layout, new_size) }
