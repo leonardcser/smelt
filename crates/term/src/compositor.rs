@@ -100,7 +100,7 @@ fn flush_full<W: Write>(grid: &Grid, w: &mut W) -> std::io::Result<()> {
     use super::grid::Style;
     use crossterm::cursor::MoveTo;
     use crossterm::style::{
-        Attribute, Print, ResetColor, SetAttribute, SetBackgroundColor, SetForegroundColor,
+        Attribute, ResetColor, SetAttribute, SetBackgroundColor, SetForegroundColor,
     };
     use unicode_width::UnicodeWidthChar;
 
@@ -159,7 +159,7 @@ fn flush_full<W: Write>(grid: &Grid, w: &mut W) -> std::io::Result<()> {
             }
             let mut buf = [0u8; 4];
             let s = sym.encode_utf8(&mut buf);
-            w.queue(Print(s.to_string()))?;
+            w.write_all(s.as_bytes())?;
 
             terminal_col += emit_w;
             // Advance grid by emit_w so wide chars consume their
