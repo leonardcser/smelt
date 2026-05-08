@@ -6,17 +6,18 @@ impl Completer {
     }
 
     pub(crate) fn commands(anchor: usize) -> Self {
-        let mut all_items: Vec<CompletionItem> = Vec::new();
-        for (name, desc) in crate::lua::list_commands() {
-            // Hidden aliases (`q`, `qa`, …) declare `desc = nil` to stay
-            // out of the picker; they're still dispatchable by name.
-            let Some(desc) = desc else { continue };
-            all_items.push(CompletionItem {
+        // `list_commands` already filters out commands flagged
+        // `hidden = true` (the convention aliases like `q`/`qa`/`wq`
+        // use). Everything that survives gets a row, with or without a
+        // description.
+        let all_items: Vec<CompletionItem> = crate::lua::list_commands()
+            .into_iter()
+            .map(|(name, desc)| CompletionItem {
                 label: name,
-                description: Some(desc),
+                description: desc,
                 ..Default::default()
-            });
-        }
+            })
+            .collect();
         let results = all_items.clone();
         Self {
             anchor,

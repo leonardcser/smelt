@@ -29,6 +29,10 @@ pub struct RegisteredCommand {
     /// (`smelt /name`)? Defaults to `false`; plugins that open a UI
     /// useful at launch (`/resume`, `/settings`) opt in.
     pub startup_ok: bool,
+    /// Hide from the `/` completer picker. Still dispatchable by name —
+    /// used for aliases like `q`/`qa`/`wq` that share a handler with a
+    /// canonical entry already shown in the list.
+    pub hidden: bool,
 }
 
 /// One registered `smelt.statusline.register` entry. `default_align`

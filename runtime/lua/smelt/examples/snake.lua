@@ -356,7 +356,7 @@ local function toggle()
 	end
 end
 
-smelt.cmd.register("snake", toggle)
+smelt.cmd.register("snake", toggle, { desc = "snake game (demo)" })
 smelt.keymap.set("", "<F11>", toggle)
 
 return M

@@ -505,6 +505,7 @@ impl LuaRuntime {
             .lock()
             .map(|m| {
                 m.iter()
+                    .filter(|(_, v)| !v.hidden)
                     .map(|(k, v)| (k.clone(), v.description.clone()))
                     .collect()
             })
