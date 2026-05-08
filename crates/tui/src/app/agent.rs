@@ -26,6 +26,7 @@ impl TuiApp {
     // ── Agent lifecycle ──────────────────────────────────────────────────
 
     pub(crate) fn begin_agent_turn(&mut self, display: &str, content: Content) -> TurnState {
+        let _perf = smelt_core::perf::begin("agent:begin_turn");
         self.sleep_inhibit.acquire();
         self.clear_prompt_completer();
         self.begin_turn();
@@ -69,8 +70,14 @@ impl TuiApp {
             .set_dyn("turn_start", std::rc::Rc::new(smelt_core::cells::EventStub));
         self.pump_lua();
 
-        let system_prompt = self.rebuild_system_prompt();
-        let tools = self.lua.tool_defs(self.core.config.mode);
+        let system_prompt = {
+            let _perf = smelt_core::perf::begin("agent:rebuild_prompt");
+            self.rebuild_system_prompt()
+        };
+        let tools = {
+            let _perf = smelt_core::perf::begin("agent:tool_defs");
+            self.lua.tool_defs(self.core.config.mode)
+        };
 
         let turn_id = self.next_turn_id;
         self.next_turn_id += 1;

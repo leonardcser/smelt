@@ -198,6 +198,13 @@ fn patterns() -> &'static Patterns {
     })
 }
 
+/// Force eager initialization of the redaction pattern set so the first
+/// call to `redact()` doesn't pay the regex-compile cost on the user-input
+/// path. Call once at startup from a background thread.
+pub fn warm_up() {
+    let _ = patterns();
+}
+
 /// A redaction range: byte start, byte end, and the type label.
 struct RedactRange {
     start: usize,

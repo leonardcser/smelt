@@ -22,6 +22,7 @@ pub(crate) struct ExecHandle {
 /// dispatches by name to a Lua-registered handler (or no-ops if
 /// nothing matches).
 pub(crate) fn run_command(app: &mut TuiApp, line: &str) -> CommandAction {
+    let _perf = smelt_core::perf::begin("cmd:dispatch");
     let line = line.trim();
     if let Some(rest) = line.strip_prefix('!') {
         if !app.input.skip_shell_escape() {

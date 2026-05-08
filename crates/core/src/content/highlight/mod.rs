@@ -37,6 +37,7 @@ pub fn set_syntax_theme_light(light: bool) {
 /// once at startup from a background thread so the first tool render
 /// doesn't pay the ~30ms deserialization cost mid-frame.
 pub fn warm_up_syntect() {
+    let _perf = crate::perf::begin("warmup:syntect");
     LazyLock::force(&SYNTAX_SET);
     LazyLock::force(&THEME_SET);
 }

@@ -483,6 +483,7 @@ impl LuaRuntime {
             else {
                 continue;
             };
+            let _perf = smelt_core::perf::begin("lua:statusline");
             match func.call::<mlua::Value>(()) {
                 Ok(mlua::Value::Nil) => {
                     tick_errors.push((name.clone(), None));

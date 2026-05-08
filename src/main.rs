@@ -222,10 +222,10 @@ async fn main() {
         tui::alloc::enable();
     }
 
-    // Eager-load syntect's syntax and theme sets in the background so the
-    // first tool render doesn't pay the ~30ms lazy-init cost mid-frame.
-    // Runs in parallel with session loading and is done well before first paint.
+    // Eager-load lazy work in background threads so the first tool render
+    // and first user submit don't pay the lazy-init cost on the input path.
     std::thread::spawn(tui::warm_up_syntect);
+    std::thread::spawn(engine::redact::warm_up);
 
     if args.headless && args.message.is_none() {
         eprintln!("error: --headless requires a message argument");

@@ -309,6 +309,7 @@ impl LuaRuntime {
             };
             f
         };
+        let _perf = crate::perf::begin("lua:cmd");
         let result: LuaResult<()> = match arg {
             Some(a) => func.call::<()>(a),
             None => func.call::<()>(()),
@@ -372,9 +373,13 @@ impl LuaRuntime {
                         return KeymapResult::Consumed;
                     }
                 }
+                let _perf = crate::perf::begin("lua:keymap");
                 func.call::<mlua::Value>(ctx)
             }
-            None => func.call::<mlua::Value>(()),
+            None => {
+                let _perf = crate::perf::begin("lua:keymap");
+                func.call::<mlua::Value>(())
+            }
         };
         match result {
             Ok(mlua::Value::Boolean(false)) => KeymapResult::PassThrough,
@@ -544,6 +549,7 @@ impl LuaRuntime {
         let Ok(func) = self.lua.registry_value::<mlua::Function>(&handle.key) else {
             return;
         };
+        let _perf = crate::perf::begin("lua:ask_cb");
         if let Err(e) = func.call::<()>(content.to_string()) {
             self.record_error(format!("ask callback: {e}"));
         }
@@ -731,6 +737,7 @@ impl LuaRuntime {
                 return Vec::new();
             }
         };
+        let _perf = crate::perf::begin("lua:tool");
         match func.call::<Option<mlua::Table>>(args_table) {
             Ok(Some(t)) => t
                 .sequence_values::<String>()
@@ -770,6 +777,7 @@ impl LuaRuntime {
             }
         };
         let mode_str = mode.as_str();
+        let _perf = crate::perf::begin("lua:tool");
         match func.call::<String>((args_table, mode_str)) {
             Ok(label) => match label.as_str() {
                 "allow" => Some(protocol::Decision::Allow),
@@ -826,6 +834,7 @@ impl LuaRuntime {
             }
         };
 
+        let _perf = crate::perf::begin("lua:tool");
         if let Err(e) = render_fn.call::<()>((buf_id, args_table)) {
             self.record_error(format!("tool preview `{tool_name}`: {e}"));
             return false;
@@ -856,6 +865,7 @@ impl LuaRuntime {
                 return String::new();
             }
         };
+        let _perf = crate::perf::begin("lua:tool");
         match func.call::<String>(args_table) {
             Ok(summary) => summary,
             Err(e) => {
@@ -901,12 +911,14 @@ impl LuaRuntime {
         };
 
         if let Some(func) = confirm_text_fn {
+            let _perf = crate::perf::begin("lua:tool");
             match func.call::<Option<String>>(args_table.clone()) {
                 Ok(s) => out.confirm_message = s,
                 Err(e) => self.record_error(format!("tool hook confirm_text: {e}")),
             }
         }
         if let Some(func) = approval_patterns_fn {
+            let _perf = crate::perf::begin("lua:tool");
             match func.call::<Option<mlua::Table>>(args_table.clone()) {
                 Ok(Some(t)) => {
                     out.approval_patterns = t
@@ -919,6 +931,7 @@ impl LuaRuntime {
             }
         }
         if let Some(func) = preflight_fn {
+            let _perf = crate::perf::begin("lua:tool");
             match func.call::<Option<String>>(args_table) {
                 Ok(Some(s)) => out.decision = protocol::Decision::Error(s),
                 Ok(None) => {}
