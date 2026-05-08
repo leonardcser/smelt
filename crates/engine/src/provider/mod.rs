@@ -260,14 +260,24 @@ pub enum ProviderKind {
     OpenAi,
     Codex,
     Anthropic,
+    AnthropicCompatible,
     Copilot,
     Local,
 }
 
 impl ProviderKind {
+    /// Returns true for any provider that speaks the Anthropic Messages API wire format.
+    pub fn is_anthropic_protocol(self) -> bool {
+        matches!(self, Self::Anthropic | Self::AnthropicCompatible)
+    }
+
     pub fn default_reasoning_cycle(self) -> &'static [ReasoningEffort] {
         match self {
-            Self::OpenAi | Self::Codex | Self::Anthropic | Self::Copilot => &[
+            Self::OpenAi
+            | Self::Codex
+            | Self::Anthropic
+            | Self::AnthropicCompatible
+            | Self::Copilot => &[
                 ReasoningEffort::Off,
                 ReasoningEffort::Low,
                 ReasoningEffort::Medium,
@@ -288,6 +298,7 @@ impl ProviderKind {
             "openai" => Self::OpenAi,
             "codex" => Self::Codex,
             "anthropic" => Self::Anthropic,
+            "anthropic-compatible" => Self::AnthropicCompatible,
             "copilot" | "github-copilot" => Self::Copilot,
             _ => Self::Local,
         }
@@ -312,6 +323,7 @@ impl ProviderKind {
             Self::OpenAi => "openai",
             Self::Codex => "codex",
             Self::Anthropic => "anthropic",
+            Self::AnthropicCompatible => "anthropic-compatible",
             Self::Copilot => "copilot",
             Self::Local => "openai-compatible",
         }
@@ -422,7 +434,7 @@ impl Provider {
         effort: ReasoningEffort,
         opts: &ChatOptions<'_>,
     ) -> Result<LLMResponse, ProviderError> {
-        let is_anthropic = self.kind == ProviderKind::Anthropic;
+        let is_anthropic = self.kind.is_anthropic_protocol();
         let is_codex = self.kind == ProviderKind::Codex;
         let is_copilot = self.kind == ProviderKind::Copilot;
 
@@ -467,6 +479,12 @@ impl Provider {
             }
             ProviderKind::Anthropic => {
                 let url = format!("{}/messages", self.api_base);
+                let body =
+                    anthropic::build_body(messages, tools, model, effort, &self.model_config);
+                (url, body)
+            }
+            ProviderKind::AnthropicCompatible => {
+                let url = format!("{}/v1/messages", self.api_base);
                 let body =
                     anthropic::build_body(messages, tools, model, effort, &self.model_config);
                 (url, body)
@@ -687,7 +705,7 @@ impl Provider {
                     ProviderKind::OpenAi | ProviderKind::Codex => {
                         openai::read_stream(resp, opts.cancel, on_delta).await
                     }
-                    ProviderKind::Anthropic => {
+                    ProviderKind::Anthropic | ProviderKind::AnthropicCompatible => {
                         anthropic::read_stream(resp, opts.cancel, on_delta).await
                     }
                     ProviderKind::Copilot | ProviderKind::Local => {
@@ -714,7 +732,9 @@ impl Provider {
 
                 match self.kind {
                     ProviderKind::OpenAi | ProviderKind::Codex => openai::parse_response(&data)?,
-                    ProviderKind::Anthropic => anthropic::parse_response(&data)?,
+                    ProviderKind::Anthropic | ProviderKind::AnthropicCompatible => {
+                        anthropic::parse_response(&data)?
+                    }
                     ProviderKind::Copilot | ProviderKind::Local => {
                         chat_completions::parse_response(&data)?
                     }
@@ -751,7 +771,9 @@ impl Provider {
 
     pub async fn fetch_context_window(&self, model: &str) -> Option<u32> {
         let result = match self.kind {
-            ProviderKind::Anthropic => self.fetch_context_window_anthropic(model).await,
+            ProviderKind::Anthropic | ProviderKind::AnthropicCompatible => {
+                self.fetch_context_window_anthropic(model).await
+            }
             ProviderKind::Local => self.fetch_context_window_local(model).await,
             ProviderKind::OpenAi => None,
             ProviderKind::Codex => codex::cached_context_window(model),
@@ -770,7 +792,11 @@ impl Provider {
     }
 
     async fn fetch_context_window_anthropic(&self, model: &str) -> Option<u32> {
-        let url = format!("{}/models/{}", self.api_base, model);
+        let url = if self.kind == ProviderKind::AnthropicCompatible {
+            format!("{}/v1/models/{}", self.api_base, model)
+        } else {
+            format!("{}/models/{}", self.api_base, model)
+        };
         let resp = self
             .client
             .get(&url)
@@ -960,8 +986,11 @@ fn apply_response_format(body: &mut serde_json::Value, kind: ProviderKind, fmt: 
                 }
             });
         }
-        ProviderKind::Anthropic => {
-            // Older models (Haiku 3.5, Sonnet 3.7, etc.) 400 if this field is sent.
+        ProviderKind::Anthropic | ProviderKind::AnthropicCompatible => {
+            // Gate on models that support native structured outputs (GA as of
+            // 2025-11). Older models (Haiku 3.5, Sonnet 3.7, etc.) would 400
+            // if the field were sent, so we skip silently and let prompt-based
+            // JSON do the work.
             let model = body["model"].as_str().unwrap_or("");
             if !anthropic_supports_structured_output(model) {
                 return;

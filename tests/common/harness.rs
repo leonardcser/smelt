@@ -24,13 +24,13 @@ impl Harness {
 
     /// Write an `init.lua` that registers a provider routing all traffic
     /// through the wiremock server. `provider_type` is one of `anthropic` /
-    /// `openai` / `openai-compatible` / etc.
+    /// `openai` / `openai-compatible` / `anthropic-compatible` / etc.
     pub fn write_config(&self, provider_type: &str, model: &str) {
         let smelt_dir = self.smelt_dir();
         std::fs::create_dir_all(&smelt_dir).expect("mkdir");
+        let api_base = self.mock.uri();
         let lua = format!(
             "smelt.provider.register(\"test\", {{\n  type = \"{provider_type}\",\n  api_base = \"{api_base}\",\n  api_key_env = \"SMELT_TEST_API_KEY\",\n  models = {{ \"{model}\" }},\n}})\n",
-            api_base = self.mock.uri(),
         );
         std::fs::write(smelt_dir.join("init.lua"), lua).expect("write init.lua");
     }
@@ -63,6 +63,27 @@ impl Harness {
         }
         Mock::given(method("POST"))
             .and(path("/messages"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .insert_header("content-type", "text/event-stream")
+                    .set_body_string(body),
+            )
+            .mount(&self.mock)
+            .await;
+    }
+
+    /// Mount a `POST /v1/messages` stub for `anthropic-compatible` providers.
+    /// Uses compact SSE (`data:{...}` without a space) to exercise the SSE
+    /// parser's whitespace tolerance alongside the provider type.
+    pub async fn mount_anthropic_compatible_sse(&self, events: &[Value]) {
+        let mut body = String::new();
+        for ev in events {
+            body.push_str("data:");
+            body.push_str(&serde_json::to_string(ev).expect("serialize sse event"));
+            body.push_str("\n\n");
+        }
+        Mock::given(method("POST"))
+            .and(path("/v1/messages"))
             .respond_with(
                 ResponseTemplate::new(200)
                     .insert_header("content-type", "text/event-stream")

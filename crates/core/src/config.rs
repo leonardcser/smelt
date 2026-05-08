@@ -228,7 +228,7 @@ pub struct ResolvedModel {
     pub model_name: String,
     pub api_base: String,
     pub api_key_env: String,
-    /// Provider type from config: "openai", "anthropic", "codex", or "openai-compatible" (default).
+    /// Provider type from config: "openai", "anthropic", "anthropic-compatible", "codex", "copilot", or "openai-compatible" (default).
     pub provider_type: String,
     pub config: ModelConfig,
 }

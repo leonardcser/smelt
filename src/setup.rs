@@ -58,6 +58,16 @@ const PROVIDERS: &[ProviderTemplate] = &[
         oauth: Some(AuthProvider::Copilot),
     },
     ProviderTemplate {
+        name: "anthropic-compatible",
+        label: "Other (Anthropic-compatible)",
+        provider_type: "anthropic-compatible",
+        api_base: "",
+        api_key_env: "",
+        default_model: "",
+        needs_api_base: true,
+        oauth: None,
+    },
+    ProviderTemplate {
         name: "custom",
         label: "Other (OpenAI-compatible)",
         provider_type: "openai-compatible",
@@ -123,10 +133,10 @@ fn collect_provider(tmpl: &ProviderTemplate) -> Option<NewProvider> {
         return None;
     }
 
-    let name = if tmpl.name == "custom" {
+    let name = if tmpl.needs_api_base {
         Input::new()
             .with_prompt("Provider name (short label)")
-            .default("custom".to_string())
+            .default(tmpl.name.to_string())
             .interact_text()
             .ok()?
     } else {

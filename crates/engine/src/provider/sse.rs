@@ -26,10 +26,11 @@ pub(super) async fn read_events(
             let raw: String = buf.drain(..pos + 1).collect();
             let line = raw.trim_end_matches('\n').trim_end_matches('\r');
 
-            if !line.starts_with("data: ") {
+            let data = if let Some(rest) = line.strip_prefix("data:") {
+                rest.strip_prefix(' ').unwrap_or(rest)
+            } else {
                 continue;
-            }
-            let data = &line[6..];
+            };
             if data == "[DONE]" {
                 continue;
             }
