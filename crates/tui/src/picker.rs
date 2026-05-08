@@ -123,14 +123,15 @@ pub(crate) fn open(
             gutters: Default::default(),
         },
     )?;
+    let height = picker_height(items.len(), max_rows);
+    let (cursor_line, scroll) = cursor_and_scroll(selected, items.len(), height, reversed, 0);
     if let Some(w) = app.ui.win_mut(leaf) {
         w.cursor_line_highlight = true;
         w.focusable = focusable;
-        w.cursor_line = visual_cursor(selected, items.len(), reversed);
-        w.scroll_top = 0;
+        w.cursor_line = cursor_line;
+        w.scroll_top = scroll;
     }
 
-    let height = picker_height(items.len(), max_rows);
     let layout = layout_for(leaf, height);
     let anchor = anchor_for(placement, height);
     let overlay = Overlay::new(layout, anchor)
@@ -160,15 +161,18 @@ pub(crate) fn set_items(app: &mut TuiApp, leaf: WinId, items: Vec<PickerItem>, s
     let Some(state) = app.picker_state.get(&leaf).copied() else {
         return;
     };
+    let prev_scroll = app.ui.win(leaf).map(|w| w.scroll_top).unwrap_or(0);
     let buf_id = app.ui.win(leaf).map(|w| w.buf);
     if let Some(buf_id) = buf_id {
         write_buffer(app, buf_id, &items, state.reversed);
     }
-    if let Some(w) = app.ui.win_mut(leaf) {
-        w.cursor_line = visual_cursor(selected, items.len(), state.reversed);
-        w.scroll_top = 0;
-    }
     let height = picker_height(items.len(), state.max_rows);
+    let (cursor_line, scroll) =
+        cursor_and_scroll(selected, items.len(), height, state.reversed, prev_scroll);
+    if let Some(w) = app.ui.win_mut(leaf) {
+        w.cursor_line = cursor_line;
+        w.scroll_top = scroll;
+    }
     if let Some(ov) = app.ui.overlay_mut(state.overlay) {
         ov.layout = layout_for(leaf, height);
         ov.anchor = anchor_for(state.placement, height);
@@ -185,8 +189,12 @@ pub(crate) fn set_selected(app: &mut TuiApp, leaf: WinId, selected: usize) {
         None => return,
     };
     let n = app.ui.buf(buf_id).map(|b| b.line_count()).unwrap_or(0);
+    let prev_scroll = app.ui.win(leaf).map(|w| w.scroll_top).unwrap_or(0);
+    let height = picker_height(n, state.max_rows);
+    let (cursor_line, scroll) = cursor_and_scroll(selected, n, height, state.reversed, prev_scroll);
     if let Some(w) = app.ui.win_mut(leaf) {
-        w.cursor_line = visual_cursor(selected, n, state.reversed);
+        w.cursor_line = cursor_line;
+        w.scroll_top = scroll;
     }
 }
 
@@ -199,6 +207,32 @@ pub(crate) fn forget(app: &mut TuiApp, leaf: WinId) {
 fn picker_height(item_count: usize, max_rows: u16) -> u16 {
     let n = item_count.max(1) as u16;
     n.min(max_rows.max(1))
+}
+
+/// Compute `(cursor_line, scroll_top)` for a picker leaf. `cursor_line`
+/// is viewport-relative (the y-coord `Window::render` paints into the
+/// slice); `scroll_top` is adjusted from `prev_scroll` so the cursor's
+/// buffer row falls inside the visible window `[scroll, scroll + height)`.
+/// Preserves `prev_scroll` when the cursor is already in view.
+fn cursor_and_scroll(
+    selected: usize,
+    item_count: usize,
+    height: u16,
+    reversed: bool,
+    prev_scroll: u16,
+) -> (u16, u16) {
+    let buf_row = visual_cursor(selected, item_count, reversed);
+    let h = height.max(1);
+    let max_scroll = (item_count as u16).max(1).saturating_sub(h);
+    let scroll = if buf_row < prev_scroll {
+        buf_row
+    } else if buf_row >= prev_scroll.saturating_add(h) {
+        buf_row + 1 - h
+    } else {
+        prev_scroll
+    }
+    .min(max_scroll);
+    (buf_row.saturating_sub(scroll), scroll)
 }
 
 fn visual_cursor(logical: usize, n: usize, reversed: bool) -> u16 {

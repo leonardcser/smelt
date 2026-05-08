@@ -141,7 +141,14 @@ function smelt.prompt.open_picker(opts)
   smelt.win.set_keymap(PROMPT, "c-j",   function() move(-1) end)
   smelt.win.set_keymap(PROMPT, "c-p",   function() move(1)  end)
   smelt.win.set_keymap(PROMPT, "c-n",   function() move(-1) end)
-  smelt.win.set_keymap(PROMPT, "enter", function() accept("enter") end)
+  -- Enter accepts the highlighted item. Clear the prompt buffer first
+  -- so the typed query doesn't linger after the picker dispatches its
+  -- action (e.g. `/model` switches the model and the user expects an
+  -- empty prompt, not "codex" still sitting there).
+  smelt.win.set_keymap(PROMPT, "enter", function()
+    smelt.prompt.set_text("")
+    accept("enter")
+  end)
   smelt.win.set_keymap(PROMPT, "tab",   function()
     local picked = current[selected]
     if picked then
