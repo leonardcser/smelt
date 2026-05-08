@@ -1,5 +1,6 @@
 mod setup;
 mod startup;
+#[cfg(feature = "dev-tools")]
 mod synth;
 
 use clap::{Parser, Subcommand, ValueEnum};
@@ -123,6 +124,7 @@ enum Commands {
     /// `<state>/sessions/<id>/`, then prints the new session id. Resume
     /// it via `smelt -r <id>` to inspect scrolling, layout, and theme
     /// performance against a long transcript without a live LLM.
+    #[cfg(feature = "dev-tools")]
     Synth {
         /// How many user/assistant turn pairs to generate.
         #[arg(long, default_value = "5000")]
@@ -156,6 +158,7 @@ async fn main() {
         setup::run_auth_command().await;
         return;
     }
+    #[cfg(feature = "dev-tools")]
     if let Some(Commands::Synth {
         turns,
         words,
