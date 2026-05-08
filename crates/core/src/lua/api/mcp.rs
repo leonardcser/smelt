@@ -64,12 +64,21 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
                     )));
                 }
 
-                let mut command = read_string_array(&cfg, "command")?;
-                if command.is_empty() {
-                    if let Ok(cmd) = cfg.get::<String>("command") {
-                        command.push(cmd);
+                // `command` accepts either a string ("foo") or a list of
+                // strings ({ "foo", "bar" }). Try the string form first so
+                // the array reader doesn't error out with "expected table"
+                // when callers pass the simpler shape.
+                let command = match cfg.get::<mlua::Value>("command")? {
+                    mlua::Value::Nil => Vec::new(),
+                    mlua::Value::String(s) => vec![s.to_string_lossy().to_string()],
+                    mlua::Value::Table(_) => read_string_array(&cfg, "command")?,
+                    other => {
+                        return Err(mlua::Error::external(format!(
+                            "smelt.mcp.register: `command` expected string or list, got {}",
+                            other.type_name()
+                        )));
                     }
-                }
+                };
                 let args = read_string_array(&cfg, "args")?;
                 let env: std::collections::HashMap<String, String> = {
                     let t: Option<mlua::Table> = cfg.get("env")?;
