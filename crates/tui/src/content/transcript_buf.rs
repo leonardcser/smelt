@@ -69,6 +69,7 @@ impl TranscriptProjection {
             content_hash: 0,
         };
 
+        let _walk = smelt_perf::perf::begin("project:walk_blocks");
         let mut texts: Vec<String> = Vec::new();
         let mut highlights: Vec<Vec<Span>> = Vec::new();
         let mut decorations: Vec<LineDecoration> = Vec::new();
@@ -128,6 +129,7 @@ impl TranscriptProjection {
                 &mut decorations,
             );
         }
+        drop(_walk);
 
         buf.set_all_lines(texts);
         for (row, row_highlights) in highlights.into_iter().enumerate() {

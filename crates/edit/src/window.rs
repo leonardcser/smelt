@@ -315,9 +315,13 @@ impl Window {
         buf: &Buffer,
         vim_mode: VimMode,
     ) -> Vec<smelt_buffer::buffer::SelectionRange> {
-        let buf_text = buf.text();
-        let range = if self.vim_enabled && matches!(vim_mode, VimMode::Visual | VimMode::VisualLine)
-        {
+        let in_vim_visual =
+            self.vim_enabled && matches!(vim_mode, VimMode::Visual | VimMode::VisualLine);
+        if !in_vim_visual && self.selection_anchor.is_none() {
+            return Vec::new();
+        }
+        let range = if in_vim_visual {
+            let buf_text = buf.text();
             vim::visual_range(&self.vim_state, &buf_text, self.cpos, vim_mode)
         } else {
             self.selection_range_at(self.cpos)
@@ -909,6 +913,12 @@ impl Window {
                 selection_owned = self.auto_selection_ranges(buf, ctx.vim_mode);
                 &selection_owned[..]
             };
+        // Reused per-row scratch — avoids `height` allocations of each Vec.
+        let mut col_to_char: Vec<usize> = Vec::with_capacity(content_width as usize);
+        let mut line_chars: Vec<char> = Vec::with_capacity(content_width as usize);
+        let mut spans_buf: Vec<smelt_buffer::buffer::Span> = Vec::new();
+        let mut vt_buf: Vec<smelt_buffer::buffer::VirtualText> = Vec::new();
+        let mut mask_buf: Vec<bool> = Vec::with_capacity(content_width as usize);
         for row in 0..height {
             let idx = scroll + row as usize;
             let decoration = if idx < line_count {
@@ -940,8 +950,9 @@ impl Window {
             let Some(line) = buf.get_line(idx) else {
                 continue;
             };
-            let mut col_to_char: Vec<usize> = Vec::with_capacity(content_width as usize);
-            let line_chars: Vec<char> = line.chars().collect();
+            col_to_char.clear();
+            line_chars.clear();
+            line_chars.extend(line.chars());
             let mut col: u16 = 0;
             for (ci, ch) in line_chars.iter().enumerate() {
                 let cw = UnicodeWidthChar::width(*ch).unwrap_or(0).max(1) as u16;
@@ -956,7 +967,9 @@ impl Window {
                 col += cw;
             }
             let content_end_col = col;
-            for span in buf.highlights_at(idx) {
+            spans_buf.clear();
+            buf.highlights_at_into(idx, &mut spans_buf);
+            for span in &spans_buf {
                 let span_style = ctx.theme.resolve(span.hl);
                 let style = merge_span_style(row_style, &span_style);
                 let start = span.col_start.min(content_width);
@@ -980,29 +993,23 @@ impl Window {
             }
             // Selection painting: after highlights (wins over base) but before virt-text.
             // Cells under `selectable = false` spans are skipped so chrome spans don't
-            // receive the Visual bg.
-            let selectable_mask: Option<Vec<bool>> =
-                if !selection_ranges.iter().any(|r| r.line == idx) {
-                    None
-                } else {
-                    let row_spans = buf.highlights_at(idx);
-                    if row_spans.iter().any(|s| !s.meta.selectable) {
-                        let mut mask = vec![true; content_width as usize];
-                        for span in &row_spans {
-                            if span.meta.selectable {
-                                continue;
-                            }
-                            let start = span.col_start.min(content_width) as usize;
-                            let end = span.col_end.min(content_width) as usize;
-                            for slot in mask.iter_mut().take(end).skip(start) {
-                                *slot = false;
-                            }
-                        }
-                        Some(mask)
-                    } else {
-                        None
+            // receive the Visual bg. `spans_buf` is reused from the highlight pass above.
+            let mask_slice: Option<&[bool]> = if selection_ranges.iter().any(|r| r.line == idx)
+                && spans_buf.iter().any(|s| !s.meta.selectable)
+            {
+                mask_buf.clear();
+                mask_buf.resize(content_width as usize, true);
+                for span in spans_buf.iter().filter(|s| !s.meta.selectable) {
+                    let start = span.col_start.min(content_width) as usize;
+                    let end = span.col_end.min(content_width) as usize;
+                    for slot in mask_buf.iter_mut().take(end).skip(start) {
+                        *slot = false;
                     }
-                };
+                }
+                Some(mask_buf.as_slice())
+            } else {
+                None
+            };
             for r in selection_ranges.iter().filter(|r| r.line == idx) {
                 let style = merge_span_style(row_style, &visual_style);
                 let start = r.col_start.min(content_width);
@@ -1016,10 +1023,12 @@ impl Window {
                     &col_to_char,
                     &line_chars,
                     style,
-                    selectable_mask.as_deref(),
+                    mask_slice,
                 );
             }
-            for vt in buf.virtual_text_at(idx) {
+            vt_buf.clear();
+            buf.virtual_text_at_into(idx, &mut vt_buf);
+            for vt in &vt_buf {
                 let base = vt
                     .hl_group
                     .as_deref()

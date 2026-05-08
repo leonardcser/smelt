@@ -300,12 +300,59 @@ impl ExtmarkOpts {
 #[derive(Default, Clone)]
 struct NamespaceState {
     extmarks: BTreeMap<ExtmarkId, Extmark>,
+    /// Secondary index: row → ids on that row. Lets `highlights_at`,
+    /// `virtual_text_at`, and `decoration_at` skip the full extmark scan
+    /// (was O(N), now O(marks_on_row)). Kept in sync by the helpers below.
+    by_row: BTreeMap<usize, Vec<ExtmarkId>>,
     next_id: u32,
+}
+
+impl NamespaceState {
+    fn insert_mark(&mut self, id: ExtmarkId, mark: Extmark) {
+        let row = mark.start_row;
+        if let Some(prev) = self.extmarks.insert(id, mark) {
+            self.row_remove(prev.start_row, id);
+        }
+        self.by_row.entry(row).or_default().push(id);
+    }
+
+    fn remove_mark(&mut self, id: ExtmarkId) -> Option<Extmark> {
+        let mark = self.extmarks.remove(&id)?;
+        self.row_remove(mark.start_row, id);
+        Some(mark)
+    }
+
+    fn row_remove(&mut self, row: usize, id: ExtmarkId) {
+        if let Some(ids) = self.by_row.get_mut(&row) {
+            if let Some(pos) = ids.iter().position(|x| *x == id) {
+                ids.swap_remove(pos);
+            }
+            if ids.is_empty() {
+                self.by_row.remove(&row);
+            }
+        }
+    }
+
+    fn clear_all(&mut self) {
+        self.extmarks.clear();
+        self.by_row.clear();
+    }
+
+    /// Marks on `row` in `(id, mark)` form. Order is row-insertion order;
+    /// callers needing `(priority, ns, id)` sorting apply it themselves.
+    fn marks_at(&self, row: usize) -> impl Iterator<Item = (ExtmarkId, &Extmark)> + '_ {
+        self.by_row.get(&row).into_iter().flat_map(move |ids| {
+            ids.iter()
+                .filter_map(|id| self.extmarks.get(id).map(|m| (*id, m)))
+        })
+    }
 }
 
 #[derive(Default, Clone)]
 struct ExtmarkStore {
-    namespaces: HashMap<NsId, NamespaceState>,
+    /// `BTreeMap` so iteration is sorted by `NsId`, matching the priority/ns/id
+    /// tiebreak that highlight and virt-text queries assume.
+    namespaces: BTreeMap<NsId, NamespaceState>,
 }
 
 impl ExtmarkStore {
@@ -327,30 +374,35 @@ impl ExtmarkStore {
         let state = self.ns_mut(ns);
         let id = ExtmarkId(state.next_id);
         state.next_id += 1;
-        state.extmarks.insert(id, mark);
+        state.insert_mark(id, mark);
         id
     }
 
     fn replace_extmark(&mut self, ns: NsId, id: ExtmarkId, mark: Extmark) {
         let state = self.ns_mut(ns);
-        state.extmarks.insert(id, mark);
-        // Keep next_id past id to avoid future allocation collisions.
+        state.insert_mark(id, mark);
         if id.0 >= state.next_id {
             state.next_id = id.0 + 1;
         }
     }
 
     fn del_extmark(&mut self, ns: NsId, id: ExtmarkId) -> Option<Extmark> {
-        self.namespaces.get_mut(&ns)?.extmarks.remove(&id)
+        self.namespaces.get_mut(&ns)?.remove_mark(id)
     }
 
     fn clear_namespace(&mut self, ns: NsId, line_start: usize, line_end: usize) {
         let Some(state) = self.namespaces.get_mut(&ns) else {
             return;
         };
-        state
+        let to_remove: Vec<ExtmarkId> = state
             .extmarks
-            .retain(|_, m| !overlaps_lines(m, line_start, line_end));
+            .iter()
+            .filter(|(_, m)| overlaps_lines(m, line_start, line_end))
+            .map(|(id, _)| *id)
+            .collect();
+        for id in to_remove {
+            state.remove_mark(id);
+        }
     }
 }
 
@@ -470,7 +522,7 @@ impl Buffer {
             self.set_lines(0, n, vec![String::new()]);
         }
         for state in self.extmarks.namespaces.values_mut() {
-            state.extmarks.clear();
+            state.clear_all();
         }
         parser.parse(self, &source, width);
         self.source = source;
@@ -697,51 +749,62 @@ impl Buffer {
     }
 
     pub fn highlights_at(&self, line: usize) -> Vec<Span> {
-        // Collect all Highlight extmarks for this row across namespaces,
-        // sorted by (priority, ns-id, insertion order) — lower priority
-        // first, ties broken by namespace then id.
-        let mut entries: Vec<(u32, u32, u32, Span)> = Vec::new();
-        let mut ns_ids: Vec<NsId> = self.extmarks.namespaces.keys().copied().collect();
-        ns_ids.sort_by_key(|n| n.0);
-        for ns in ns_ids {
-            let Some(state) = self.extmarks.ns(ns) else {
-                continue;
-            };
-            for (id, mark) in state.extmarks.iter() {
-                if mark.start_row != line {
-                    continue;
-                }
-                if let ExtmarkPayload::Highlight {
-                    hl, meta, hl_eol, ..
-                } = &mark.payload
-                {
-                    entries.push((
-                        mark.priority,
-                        ns.0,
-                        id.0,
-                        Span {
-                            col_start: mark.start_col as u16,
-                            col_end: mark.end_col as u16,
-                            hl: *hl,
-                            meta: meta.clone(),
-                            hl_eol: *hl_eol,
-                        },
-                    ));
+        let mut out = Vec::new();
+        self.highlights_at_into(line, &mut out);
+        out
+    }
+
+    /// Extend `out` with all Highlight extmarks for `line`, sorted by
+    /// (priority, ns-id, insertion order). Reuses the caller's buffer to
+    /// avoid one allocation per call in tight render loops.
+    pub fn highlights_at_into(&self, line: usize, out: &mut Vec<Span>) {
+        // We need to sort by (priority, ns, id) before producing `Span`s, but
+        // `Span` doesn't carry those keys. Thread-local scratch keeps the
+        // tuple buffer reused across calls without re-allocating per row.
+        // Not reentrant: `with_borrow_mut` will panic if this is ever called
+        // from inside another `highlights_at_into` (e.g. via a paint hook).
+        thread_local! {
+            static SCRATCH: std::cell::RefCell<Vec<(u32, u32, u32, Span)>> =
+                const { std::cell::RefCell::new(Vec::new()) };
+        }
+        SCRATCH.with_borrow_mut(|buf| {
+            buf.clear();
+            // namespaces iterates in NsId order (BTreeMap); marks_at filters by
+            // row in O(k) using the secondary index. Priority/ns/id sort below.
+            for (ns, state) in self.extmarks.namespaces.iter() {
+                for (id, mark) in state.marks_at(line) {
+                    if let ExtmarkPayload::Highlight {
+                        hl, meta, hl_eol, ..
+                    } = &mark.payload
+                    {
+                        buf.push((
+                            mark.priority,
+                            ns.0,
+                            id.0,
+                            Span {
+                                col_start: mark.start_col as u16,
+                                col_end: mark.end_col as u16,
+                                hl: *hl,
+                                meta: meta.clone(),
+                                hl_eol: *hl_eol,
+                            },
+                        ));
+                    }
                 }
             }
-        }
-        entries.sort_by_key(|(prio, ns, id, _)| (*prio, *ns, *id));
-        entries.into_iter().map(|(_, _, _, s)| s).collect()
+            buf.sort_by_key(|(p, n, i, _)| (*p, *n, *i));
+            out.extend(buf.drain(..).map(|(_, _, _, s)| s));
+        });
     }
 
     pub fn set_decoration(&mut self, line: usize, decoration: LineDecoration) {
         // One decoration per line: replace any prior mark at this row.
         let ns = self.ns_decorations;
         let to_remove: Vec<ExtmarkId> = self
-            .extmarks(ns)
+            .extmarks
+            .ns(ns)
             .into_iter()
-            .filter(|(_, m)| m.start_row == line)
-            .map(|(id, _)| id)
+            .flat_map(|s| s.marks_at(line).map(|(id, _)| id))
             .collect();
         for id in to_remove {
             self.extmarks.del_extmark(ns, id);
@@ -760,10 +823,7 @@ impl Buffer {
         let Some(state) = self.extmarks.ns(self.ns_decorations) else {
             return &DEFAULT;
         };
-        for mark in state.extmarks.values() {
-            if mark.start_row != line {
-                continue;
-            }
+        for (_id, mark) in state.marks_at(line) {
             if let ExtmarkPayload::Decoration(dec) = &mark.payload {
                 return dec;
             }
@@ -775,10 +835,10 @@ impl Buffer {
     pub fn set_virtual_text(&mut self, line: usize, text: String, hl_group: Option<String>) {
         let ns = self.ns_virt_text;
         let to_remove: Vec<ExtmarkId> = self
-            .extmarks(ns)
+            .extmarks
+            .ns(ns)
             .into_iter()
-            .filter(|(_, m)| m.start_row == line)
-            .map(|(id, _)| id)
+            .flat_map(|s| s.marks_at(line).map(|(id, _)| id))
             .collect();
         for id in to_remove {
             self.extmarks.del_extmark(ns, id);
@@ -790,10 +850,10 @@ impl Buffer {
     pub fn clear_virtual_text(&mut self, line: usize) {
         let ns = self.ns_virt_text;
         let to_remove: Vec<ExtmarkId> = self
-            .extmarks(ns)
+            .extmarks
+            .ns(ns)
             .into_iter()
-            .filter(|(_, m)| m.start_row == line)
-            .map(|(id, _)| id)
+            .flat_map(|s| s.marks_at(line).map(|(id, _)| id))
             .collect();
         for id in to_remove {
             self.extmarks.del_extmark(ns, id);
@@ -802,39 +862,45 @@ impl Buffer {
 
     /// All virt-text entries for `line`, sorted by (priority, ns-id, insertion order).
     pub fn virtual_text_at(&self, line: usize) -> Vec<VirtualText> {
-        let mut entries: Vec<(u32, u32, u32, VirtualText)> = Vec::new();
-        let mut ns_ids: Vec<NsId> = self.extmarks.namespaces.keys().copied().collect();
-        ns_ids.sort_by_key(|n| n.0);
-        for ns in ns_ids {
-            let Some(state) = self.extmarks.ns(ns) else {
-                continue;
-            };
-            for (id, mark) in state.extmarks.iter() {
-                if mark.start_row != line {
-                    continue;
-                }
-                if let ExtmarkPayload::VirtText {
-                    text,
-                    hl_group,
-                    pos,
-                } = &mark.payload
-                {
-                    entries.push((
-                        mark.priority,
-                        ns.0,
-                        id.0,
-                        VirtualText {
-                            col: mark.start_col,
-                            text: text.clone(),
-                            hl_group: hl_group.clone(),
-                            pos: *pos,
-                        },
-                    ));
+        let mut out = Vec::new();
+        self.virtual_text_at_into(line, &mut out);
+        out
+    }
+
+    pub fn virtual_text_at_into(&self, line: usize, out: &mut Vec<VirtualText>) {
+        // See `highlights_at_into` for the SCRATCH design rationale and
+        // reentrancy caveat — same pattern, different payload.
+        thread_local! {
+            static SCRATCH: std::cell::RefCell<Vec<(u32, u32, u32, VirtualText)>> =
+                const { std::cell::RefCell::new(Vec::new()) };
+        }
+        SCRATCH.with_borrow_mut(|buf| {
+            buf.clear();
+            for (ns, state) in self.extmarks.namespaces.iter() {
+                for (id, mark) in state.marks_at(line) {
+                    if let ExtmarkPayload::VirtText {
+                        text,
+                        hl_group,
+                        pos,
+                    } = &mark.payload
+                    {
+                        buf.push((
+                            mark.priority,
+                            ns.0,
+                            id.0,
+                            VirtualText {
+                                col: mark.start_col,
+                                text: text.clone(),
+                                hl_group: hl_group.clone(),
+                                pos: *pos,
+                            },
+                        ));
+                    }
                 }
             }
-        }
-        entries.sort_by_key(|(prio, ns, id, _)| (*prio, *ns, *id));
-        entries.into_iter().map(|(_, _, _, v)| v).collect()
+            buf.sort_by_key(|(p, n, i, _)| (*p, *n, *i));
+            out.extend(buf.drain(..).map(|(_, _, _, v)| v));
+        });
     }
 }
 
