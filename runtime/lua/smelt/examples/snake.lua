@@ -28,9 +28,24 @@ local M = {}
 -- logical cells via the half-block trick). 24 × 24 fits inside the
 -- default ScreenCenter overlay (70 % / 60 %) on terminals as small as
 -- 80 × 24.
-local GRID_W = 24
-local GRID_H = 20 -- ⇒ 10 terminal rows after half-block packing
+local GRID_W = 32
+local GRID_H = 32 -- ⇒ 16 terminal rows after half-block packing
 local TICK_MS = 100
+
+-- Overlay sizing. The game itself is 32 cols × 16 term rows; we want
+-- a snug overlay around it. Status row above, hint strip below, and
+-- a 1-cell border on every side: 16 + 1 + 1 + 2 = 20 rows. Width is
+-- 32 + border = 34 cols. The whole thing reads as a square in
+-- pixels because terminal cells are roughly twice as tall as wide
+-- and the game uses half-block packing (one terminal cell = two
+-- logical cells).
+local OVERLAY_W = GRID_W + 2
+local OVERLAY_H = (GRID_H / 2) + 1 + 1 + 2
+
+-- Playfield background — a noticeably-darker shade than the overlay
+-- chrome so the snake's green half-blocks pop and the boundaries of
+-- the play area are unambiguous.
+local BG = { r = 18, g = 22, b = 30 }
 
 -- Module-local state, `nil` when the overlay is closed. Mirrors
 -- `perf_panel`'s `PANEL` pattern.
@@ -163,7 +178,11 @@ end
 -- Paint one terminal cell that represents two logical rows
 -- (top = `2*ty`, bottom = `2*ty+1`). Picks the right half-block glyph
 -- based on which halves are filled.
-local function paint_pair(slice, term_y, term_x, top_kind, bot_kind)
+--
+-- `bg` is the playfield background; we paint it explicitly on the
+-- empty half so a single-half block doesn't show the terminal's default
+-- bg through the gap (which would defeat the contrasting-bg cue).
+local function paint_pair(slice, term_y, term_x, top_kind, bot_kind, bg)
   local top = top_kind ~= nil
   local bot = bot_kind ~= nil
   if not top and not bot then return end
@@ -177,9 +196,9 @@ local function paint_pair(slice, term_y, term_x, top_kind, bot_kind)
       slice:set(term_y, term_x, "▀", { fg = top_color, bg = bot_color })
     end
   elseif top then
-    slice:set(term_y, term_x, "▀", { fg = top_color })
+    slice:set(term_y, term_x, "▀", { fg = top_color, bg = bg })
   else
-    slice:set(term_y, term_x, "▄", { fg = bot_color })
+    slice:set(term_y, term_x, "▄", { fg = bot_color, bg = bg })
   end
 end
 
@@ -187,19 +206,23 @@ local function paint(slice, _ctx)
   if not STATE then return end
   local sw = slice:width()
   local sh = slice:height()
-  local game_w = GRID_W
-  local game_h_term = math.floor(GRID_H / 2) -- half-block packing
+  local game_w = math.min(GRID_W, sw)
+  local game_h_term = math.min(math.floor(GRID_H / 2), math.max(0, sh - 1))
 
-  -- Center the game rect inside the overlay's slice. If the slice is
-  -- smaller than the game rect (very small terminal), clamp at 0 and
-  -- let the rest clip naturally.
-  local off_x = math.max(0, math.floor((sw - game_w) / 2))
-  local off_y = math.max(0, math.floor((sh - game_h_term - 1) / 2)) -- -1 for status row
+  -- Status row sits at the very top of the slice; playfield fills
+  -- everything below it. Overlay is sized to fit the game snugly via
+  -- OVERLAY_W / OVERLAY_H, so off_x / off_y are 0 in the common case;
+  -- the math.min above clips gracefully if the user resizes the
+  -- terminal smaller than the overlay's natural size.
+  local status_y = 0
+  local off_y = 1
+  local off_x = 0
 
-  -- Clear the playfield to a dark background so the snake's green
-  -- half-blocks pop. Clearing the whole slice would wipe overlay
-  -- chrome too, so we restrict to the game rect.
-  slice:fill_rect(off_y, off_x, game_w, game_h_term, " ", { bg = "black" })
+  -- Painted-over background distinct from the overlay's chrome so the
+  -- play area's edges are unambiguous against a possibly-coloured
+  -- terminal background. Use a deep-navy RGB the snake's green
+  -- half-blocks contrast cleanly with.
+  slice:fill_rect(off_y, off_x, game_w, game_h_term, " ", { bg = BG })
 
   local g = build_grid()
   for ty = 0, game_h_term - 1 do
@@ -208,17 +231,19 @@ local function paint(slice, _ctx)
     for x = 0, game_w - 1 do
       local top_kind = g[top_row * 1000 + x]
       local bot_kind = g[bot_row * 1000 + x]
-      paint_pair(slice, off_y + ty, off_x + x, top_kind, bot_kind)
+      paint_pair(slice, off_y + ty, off_x + x, top_kind, bot_kind, BG)
     end
   end
 
-  -- Status row above the playfield.
-  local status = string.format("score: %d", STATE.score)
+  -- Status row.
+  local status = string.format(" score: %d", STATE.score)
   if STATE.dead then
     status = status .. "   GAME OVER (esc to close)"
   end
-  local status_y = math.max(0, off_y - 1)
-  slice:put_str(status_y, off_x, status, { fg = "white", bold = true })
+  -- Right-pad so the status row ends with whitespace, not whatever
+  -- overlay chrome painted before it.
+  status = status .. string.rep(" ", math.max(0, sw - #status))
+  slice:put_str(status_y, 0, status, { fg = "white", bold = true })
 end
 
 local function close()
@@ -261,6 +286,8 @@ local function open()
       { text = " snake ", fg = "green", bold = true },
       { text = "(F11 to close) ", fg = "grey", dim = true },
     },
+    width = OVERLAY_W,
+    height = OVERLAY_H,
     items = {
       { win = STATE.paint_id, height = "fill" },
       { win = STATE.win,      height = 1 },

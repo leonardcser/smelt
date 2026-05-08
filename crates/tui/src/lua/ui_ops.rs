@@ -143,8 +143,20 @@ pub(crate) fn open_overlay(app: &mut TuiApp, opts: mlua::Table) -> Result<u64, S
     let (anchor, layout, size_override) = match placement {
         OverlayPlacement::ScreenCenter => {
             let layout = fill_layout(inner, title);
-            let w = pct(term_w, 70);
-            let h = pct(term_h, 60);
+            // Optional explicit `width` / `height` override the default
+            // 70% / 60% pct sizing. Useful for snug-sized overlays
+            // (snake game, fixed-size dashboards) where the consumer
+            // knows exactly how big the panel needs to be.
+            let w = opts
+                .get::<u16>("width")
+                .ok()
+                .filter(|n| *n > 0)
+                .unwrap_or_else(|| pct(term_w, 70));
+            let h = opts
+                .get::<u16>("height")
+                .ok()
+                .filter(|n| *n > 0)
+                .unwrap_or_else(|| pct(term_h, 60));
             (Anchor::ScreenCenter, layout, Some((w, h)))
         }
         OverlayPlacement::DockBottom { height_pct } => {
