@@ -262,7 +262,7 @@ pub enum ProviderKind {
     Anthropic,
     AnthropicCompatible,
     Copilot,
-    Local,
+    OpenAiCompatible,
 }
 
 impl ProviderKind {
@@ -284,7 +284,7 @@ impl ProviderKind {
                 ReasoningEffort::High,
                 ReasoningEffort::Max,
             ],
-            Self::Local => &[
+            Self::OpenAiCompatible => &[
                 ReasoningEffort::Off,
                 ReasoningEffort::Low,
                 ReasoningEffort::Medium,
@@ -300,7 +300,7 @@ impl ProviderKind {
             "anthropic" => Self::Anthropic,
             "anthropic-compatible" => Self::AnthropicCompatible,
             "copilot" | "github-copilot" => Self::Copilot,
-            _ => Self::Local,
+            _ => Self::OpenAiCompatible,
         }
     }
 
@@ -314,7 +314,7 @@ impl ProviderKind {
         } else if api_base.contains("githubcopilot.com") {
             Self::Copilot
         } else {
-            Self::Local
+            Self::OpenAiCompatible
         }
     }
 
@@ -325,7 +325,7 @@ impl ProviderKind {
             Self::Anthropic => "anthropic",
             Self::AnthropicCompatible => "anthropic-compatible",
             Self::Copilot => "copilot",
-            Self::Local => "openai-compatible",
+            Self::OpenAiCompatible => "openai-compatible",
         }
     }
 }
@@ -505,7 +505,7 @@ impl Provider {
                 );
                 (url, body)
             }
-            ProviderKind::Local => {
+            ProviderKind::OpenAiCompatible => {
                 let url = format!("{}/chat/completions", self.api_base);
                 let body = chat_completions::build_body(
                     messages,
@@ -535,7 +535,7 @@ impl Provider {
         let use_stream = opts.on_delta.is_some() || is_codex;
         if use_stream {
             body["stream"] = serde_json::json!(true);
-            if self.kind == ProviderKind::Local {
+            if self.kind == ProviderKind::OpenAiCompatible {
                 body["stream_options"] = serde_json::json!({"include_usage": true});
             }
         }
@@ -708,7 +708,7 @@ impl Provider {
                     ProviderKind::Anthropic | ProviderKind::AnthropicCompatible => {
                         anthropic::read_stream(resp, opts.cancel, on_delta).await
                     }
-                    ProviderKind::Copilot | ProviderKind::Local => {
+                    ProviderKind::Copilot | ProviderKind::OpenAiCompatible => {
                         chat_completions::read_stream(resp, opts.cancel, on_delta).await
                     }
                 }?
@@ -735,7 +735,7 @@ impl Provider {
                     ProviderKind::Anthropic | ProviderKind::AnthropicCompatible => {
                         anthropic::parse_response(&data)?
                     }
-                    ProviderKind::Copilot | ProviderKind::Local => {
+                    ProviderKind::Copilot | ProviderKind::OpenAiCompatible => {
                         chat_completions::parse_response(&data)?
                     }
                 }
@@ -774,7 +774,9 @@ impl Provider {
             ProviderKind::Anthropic | ProviderKind::AnthropicCompatible => {
                 self.fetch_context_window_anthropic(model).await
             }
-            ProviderKind::Local => self.fetch_context_window_local(model).await,
+            ProviderKind::OpenAiCompatible => {
+                self.fetch_context_window_openai_compatible(model).await
+            }
             ProviderKind::OpenAi => None,
             ProviderKind::Codex => codex::cached_context_window(model),
             ProviderKind::Copilot => copilot::cached_context_window(model),
@@ -812,7 +814,7 @@ impl Provider {
         data["max_input_tokens"].as_u64().map(|v| v as u32)
     }
 
-    async fn fetch_context_window_local(&self, model: &str) -> Option<u32> {
+    async fn fetch_context_window_openai_compatible(&self, model: &str) -> Option<u32> {
         let url = format!("{}/models", self.api_base);
         let mut req = self.client.get(&url);
         if !self.api_key.is_empty() {
@@ -976,7 +978,7 @@ fn apply_response_format(body: &mut serde_json::Value, kind: ProviderKind, fmt: 
                 }
             });
         }
-        ProviderKind::Copilot | ProviderKind::Local => {
+        ProviderKind::Copilot | ProviderKind::OpenAiCompatible => {
             body["response_format"] = serde_json::json!({
                 "type": "json_schema",
                 "json_schema": {
