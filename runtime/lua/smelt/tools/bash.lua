@@ -1,21 +1,12 @@
--- Built-in `bash` tool. Composes shell-validation helpers
--- (`smelt.shell.{check_interactive,check_background_op,split}`) with
--- the streaming subprocess primitive `smelt.process.run_streaming` —
--- the latter spawns `sh -c command` on a tokio task, fires
--- `EngineEvent::ToolOutput` per stdout/stderr line as the child
--- runs, and resumes this coroutine with the aggregated result on
--- exit.
+-- Built-in `bash` tool.
 
 local M = {}
 
 local DEFAULT_TIMEOUT_MS = 120000
 local MAX_TIMEOUT_MS = 600000
 
--- Safe read-only command prefixes that auto-approve in non-Yolo
--- modes. Sourced into the Rust permission layer at registration time
--- via the `default_allow` field below; consulted locally during
--- approval-pattern suggestion so we don't propose patterns that are
--- already permanently allowed.
+-- Read-only command prefixes that auto-approve. Also used locally to avoid
+-- suggesting patterns that are already permanently allowed.
 local DEFAULT_ALLOW = {
   -- Directory listing & file search
   "ls *", "find *", "tree *",
@@ -59,8 +50,7 @@ function M.approval_patterns(args)
   for _, sub in ipairs(subs) do
     local bin = sub:match("^%s*(%S+)") or ""
     local base = basename(bin)
-    -- `cd` is a path permission, not a command permission.
-    if base ~= "" and base ~= "cd" then
+    if base ~= "" and base ~= "cd" then -- cd is a path permission, not a command
       local pat = base .. " *"
       if not DEFAULT_ALLOW_SET[pat] and not seen[pat] then
         seen[pat] = true
@@ -133,9 +123,7 @@ smelt.tools.register({
     return smelt.shell.extract_paths(args.command or "")
   end,
   decide = function(args, mode)
-    -- Compose the bash decision: tool-level + per-subcommand. Deny
-    -- dominates; an Allow tool decision with an Ask bash decision
-    -- collapses to Ask; otherwise the bash decision wins.
+    -- Deny dominates; Allow tool + Ask bash collapses to Ask.
     local tool = smelt.permissions.check_tool(mode, "bash")
     if tool == "deny" then return "deny" end
     local sub = smelt.permissions.check(mode, "bash", args.command or "")

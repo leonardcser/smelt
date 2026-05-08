@@ -1,27 +1,5 @@
-//! Lua bindings (Phase D). Wraps the `api::*` surface so users can
-//! script smelt from `~/.config/smelt/init.lua`.
-//!
-//! Current scope:
-//! - **D1 bootstrap** — loads `~/.config/smelt/init.lua` at startup
-//!   (honouring `XDG_CONFIG_HOME`). Missing files are not errors.
-//! - **D2 api shim** — `smelt.version`, `smelt.cmd.register`,
-//!   `smelt.keymap.set`, `smelt.au.on` all accept Lua callables and
-//!   store them in per-category registries that the app polls on the
-//!   tick.
-//! - **D3 event dispatch** — every "autocmd-shaped" event flows
-//!   through `Cells`. TuiApp publishers call `cells.set_dyn(name,
-//!   payload)`; subscribers register via `smelt.au.on(name, fn)` (a
-//!   thin alias over `Cells::subscribe_kind`). One observer registry,
-//!   no parallel autocmd map.
-//! - **D4 user-command + keymap registration** — registration stores
-//!   `LuaRef` handles keyed by `(mode, chord)`; mode `"n"` matches
-//!   Normal, `"i"` Insert, `"v"` Visual, `""` matches any mode.
-//! - **D5 re-entrancy** — pending ops queue defers state mutations
-//!   until after the dispatching handler returns. `smelt.defer(ms, fn)`
-//!   posts to `pending_timers`; the tick loop fires them when due.
-//! - **D6 error UX** — every callable is wrapped in `try_call`;
-//!   errors append to `lua_errors` and the app surfaces the first as a
-//!   notification on the next tick.
+//! Lua bindings. Wraps the `api::*` surface so users can script smelt
+//! from `~/.config/smelt/init.lua`.
 
 #![allow(clippy::arc_with_non_send_sync)]
 
@@ -43,18 +21,13 @@ use mlua::prelude::*;
 
 use std::sync::{Arc, Mutex};
 
-/// One Lua-registered `/command` entry. Lives in `LuaShared.commands`
-/// so completers (`list_commands`, `is_lua_command`) read the same
 /// List all Lua-registered `/commands` as `(name, description)`.
-/// Sorted by name. Used by the `/` completer. Reads live via
-/// `try_with_app`; returns empty when no app pointer is installed
-/// (e.g. early startup).
+/// Sorted by name. Returns empty when no app pointer is installed.
 pub(crate) fn list_commands() -> Vec<(String, Option<String>)> {
     try_with_app(|app| app.lua.list_commands_with_desc()).unwrap_or_default()
 }
 
-/// True if `input` (e.g. `/pick-test` or `/pick-test arg`) matches a
-/// Lua-registered command name.
+/// True if `input` matches a Lua-registered command name (e.g. `/pick-test arg`).
 pub(crate) fn is_lua_command(input: &str) -> bool {
     let name = input
         .strip_prefix('/')
@@ -67,9 +40,8 @@ pub(crate) fn is_lua_command(input: &str) -> bool {
 }
 
 /// Format a `crossterm::KeyEvent` into an nvim-style chord string
-/// (`<C-g>`, `<S-Tab>`, `<M-x>`, printable `j`, etc). Unrecognized
-/// chords return `None` so the dispatcher falls through to the normal
-/// handlers. This is the lookup key for `smelt.keymap.set(_, chord, fn)`.
+/// (`<C-g>`, `<S-Tab>`, `<M-x>`, printable `j`, etc).
+/// The result is the lookup key for `smelt.keymap.set`. Returns `None` for unrecognized chords.
 pub(crate) fn chord_string(key: crossterm::event::KeyEvent) -> Option<String> {
     use crossterm::event::{KeyCode, KeyModifiers as M};
     let mods = key.modifiers;
@@ -114,15 +86,10 @@ pub(crate) fn chord_string(key: crossterm::event::KeyEvent) -> Option<String> {
     Some(format!("<{prefix}{base}>"))
 }
 
-/// Parse a plugin-facing key spec like `"enter"`, `"esc"`, `"tab"`,
-/// `"bs"`, `"space"`, `"up"`, `"c-j"` (ctrl-j), `"a-x"` / `"m-x"`
-/// (alt-x), `"s-tab"` (shift-tab), or a single printable char into a
-/// [`crate::smelt_term::KeyBind`]. Also accepts the canonical bracket form
-/// `"<Esc>"` / `"<C-r>"` / `"<S-Tab>"` that `chord_string` emits — same
-/// grammar `smelt.keymap.set` accepts. Modifiers separate with `-`;
-/// the final token is the key name. Case-insensitive for names and
-/// modifiers. Returns `None` for unknown keys — the caller surfaces
-/// a Lua error.
+/// Parse a plugin key spec into a [`crate::smelt_term::KeyBind`].
+/// Accepts shorthand (`"c-j"`, `"s-tab"`, `"enter"`) and canonical bracket form
+/// (`"<C-r>"`, `"<S-Tab>"`). Modifiers separate with `-`; case-insensitive.
+/// Returns `None` for unknown keys.
 pub(crate) fn parse_keybind(spec: &str) -> Option<crate::smelt_term::KeyBind> {
     use crossterm::event::{KeyCode, KeyModifiers};
     let raw = spec.trim();
@@ -184,12 +151,9 @@ pub(crate) fn parse_keybind(spec: &str) -> Option<crate::smelt_term::KeyBind> {
     Some(crate::smelt_term::KeyBind::new(code, mods))
 }
 
-/// Normalize a mode string from a Lua plugin into the canonical
-/// single-char form the dispatcher stores (`"n" | "i" | "v" | ""`).
-/// Accepts long names (`"normal"`, `"insert"`, `"visual"`), short
-/// names (`"n"`, `"i"`, `"v"`), the empty string (mode-independent),
-/// or `"any" / "*"` as aliases for "". Case-insensitive. Returns
-/// `None` on unknown input so the caller surfaces a Lua error.
+/// Normalize a mode string to the canonical single-char form (`"n"`, `"i"`, `"v"`, `""`).
+/// Accepts long names, short names, `"any"`, and `"*"`. Case-insensitive.
+/// Returns `None` for unknown input.
 pub(crate) fn normalize_mode(mode: &str) -> Option<String> {
     Some(
         match mode.trim().to_ascii_lowercase().as_str() {
@@ -203,31 +167,17 @@ pub(crate) fn normalize_mode(mode: &str) -> Option<String> {
     )
 }
 
-/// Canonicalize a Lua-supplied chord string into the nvim-angle-bracket
-/// form that `chord_string` emits from key events. Accepts plain Lua
-/// shorthand (`"c-r"`, `"s-tab"`, `"enter"`) *and* already-canonical
-/// (`"<C-r>"`, `"<S-Tab>"`) input. Plain printable chars stay plain
-/// (`"j"`). Returns `None` on unknown keys so the caller raises a Lua
-/// error at registration.
+/// Canonicalize a chord string to the nvim angle-bracket form `chord_string` produces.
+/// Accepts shorthand and already-canonical input. Returns `None` for unknown keys.
 pub(crate) fn canonicalize_chord(chord: &str) -> Option<String> {
     use crossterm::event::KeyEvent;
     let kb = parse_keybind(chord)?;
     chord_string(KeyEvent::new(kb.code, kb.mods))
 }
 
-/// Canonicalize a chord *sequence* — one or more chord tokens
-/// concatenated. Each token is either a single printable char or
-/// `<...>`. Returns the canonical joined form (e.g. `"<Esc><Esc>"`,
-/// `"gd"`, `"<C-w>q"`), or `None` if any token is unknown.
-///
-/// Used by `smelt.keymap.set` so plugins can register multi-key
-/// chords as well as single keys. The dispatcher matches incoming
-/// key sequences against the canonical form.
-///
-/// Plain Lua shorthand (`"c-r"`, `"s-tab"`, `"enter"`) is treated
-/// as a single chord — sequence tokenization only kicks in when
-/// the input is unambiguously multi-token (concatenated `<...>`
-/// blocks or a mix of `<...>` and plain chars).
+/// Canonicalize a chord sequence (one or more tokens: `<...>` or single printable chars).
+/// Returns the canonical joined form (e.g. `"<Esc><Esc>"`, `"gd"`) or `None` if any
+/// token is unknown. Single-token shorthand is tried first before sequence tokenization.
 pub(crate) fn canonicalize_chord_sequence(input: &str) -> Option<String> {
     if let Some(single) = canonicalize_chord(input) {
         return Some(single);
@@ -245,11 +195,8 @@ pub(crate) fn canonicalize_chord_sequence(input: &str) -> Option<String> {
     }
 }
 
-/// Split a chord-spec string into individual chord tokens. Tokens are
-/// either `<...>` (named keys / modified keys) or a single printable
-/// char. Whitespace between tokens is allowed (`"<Esc> <Esc>"` and
-/// `"<Esc><Esc>"` both parse to two tokens). Returns `None` if the
-/// input is malformed (unmatched `<`, empty `<>`, etc.).
+/// Split a chord-spec into individual tokens (`<...>` or single printable chars).
+/// Whitespace between tokens is allowed. Returns `None` if the input is malformed.
 fn tokenize_chord_spec(input: &str) -> Option<Vec<String>> {
     let mut tokens = Vec::new();
     let mut chars = input.chars().peekable();
@@ -282,10 +229,8 @@ fn tokenize_chord_spec(input: &str) -> Option<Vec<String>> {
     }
 }
 
-/// Parse a Lua-facing window-event name into a [`crate::smelt_term::WinEvent`]. Names
-/// match the Neovim-adjacent naming Lua plugins use for autocmd-style
-/// hooks. Returns `None` for unknown names so the caller surfaces a
-/// Lua error.
+/// Parse a Lua-facing window-event name into a [`crate::smelt_term::WinEvent`].
+/// Returns `None` for unknown names.
 pub(crate) fn parse_win_event(name: &str) -> Option<crate::smelt_term::WinEvent> {
     Some(match name {
         "open" => crate::smelt_term::WinEvent::Open,
@@ -301,11 +246,8 @@ pub(crate) fn parse_win_event(name: &str) -> Option<crate::smelt_term::WinEvent>
     })
 }
 
-/// A Lua callable registered via `smelt.cmd.register` / `smelt.keymap` /
-/// `smelt.on`. Stored as a mlua `RegistryKey` so references survive
 /// Stash a Lua callable in `shared.callbacks` under a fresh u64 id.
-/// Used by every `smelt.win.*` binding that takes a callback — pulls
-/// the registry-value + atomic-id + insert dance out of the bindings.
+/// Used by every `smelt.win.*` binding that takes a callback.
 pub(crate) fn register_callback_handle(
     shared: &Arc<LuaShared>,
     lua: &Lua,
@@ -321,9 +263,7 @@ pub(crate) fn register_callback_handle(
     Ok(id)
 }
 
-/// Drop the Lua handle id stashed in a displaced `Callback::Lua`, if
-/// the option is one. Used wherever a `win_set_keymap` / `win_clear_*`
-/// returns the callback that was just replaced or removed.
+/// Drop the Lua handle displaced by a `win_set_keymap` / `win_clear_*` call, if any.
 pub(crate) fn drop_displaced_lua_handle(
     app: &mut crate::app::TuiApp,
     displaced: Option<crate::smelt_term::Callback>,
@@ -333,19 +273,16 @@ pub(crate) fn drop_displaced_lua_handle(
     }
 }
 
-/// A callback invocation recorded by the ui dispatch path while
-/// `&mut Ui` is held. Drained by the host TuiApp between ui calls so each
-/// Lua fn body runs with the TLS app pointer installed.
+/// Callback invocation queued while `&mut Ui` is held.
+/// Drained by TuiApp after the ui call returns, with the TLS app pointer installed.
 pub(crate) struct PendingInvocation {
     pub(crate) handle: crate::smelt_term::LuaHandle,
     pub(crate) win: crate::smelt_term::WinId,
     pub(crate) payload: crate::smelt_term::Payload,
 }
 
-/// TUI-specific extension of [`smelt_core::lua::LuaShared`] that adds
-/// the `pending_invocations` queue. `Deref`s to the core shared state
-/// so existing `self.shared.commands.lock()`-style call sites keep
-/// working via autoderef on method calls.
+/// TUI-specific extension of [`smelt_core::lua::LuaShared`] adding the
+/// `pending_invocations` queue. `Deref`s to the core shared state.
 pub(crate) struct LuaShared {
     pub(crate) core: Arc<smelt_core::lua::LuaShared>,
     pub(crate) pending_invocations: Mutex<Vec<PendingInvocation>>,
@@ -368,17 +305,14 @@ impl std::ops::Deref for LuaShared {
 }
 
 impl LuaShared {
-    /// Clone the inner `Arc<smelt_core::lua::LuaShared>` so core-side
-    /// API modules (which take `Arc<core::LuaShared>`) can capture it
-    /// in `'static` Lua closures.
+    /// Clone the inner `Arc<smelt_core::lua::LuaShared>` for core API modules.
     pub(crate) fn core_arc(&self) -> Arc<smelt_core::lua::LuaShared> {
         Arc::clone(&self.core)
     }
 }
 
-/// User-scoped Lua state + any recorded startup error.
-/// Wraps [`smelt_core::lua::LuaRuntime`] and adds TUI-specific
-/// callback queues and statusline rendering.
+/// TUI-specific Lua runtime. Wraps [`smelt_core::lua::LuaRuntime`] and adds
+/// the callback queue and statusline rendering.
 pub struct LuaRuntime {
     core: smelt_core::lua::LuaRuntime,
     shared: Arc<LuaShared>,
@@ -399,12 +333,8 @@ impl std::ops::DerefMut for LuaRuntime {
 
 impl LuaRuntime {
     /// Build a fresh runtime and register the `smelt` global.
-    ///
-    /// *Does not* load plugins or `init.lua` — call
-    /// [`LuaRuntime::load_plugins`] after pushing startup snapshots
-    /// (available models, settings, history) so plugins that read those
-    /// at registration time (e.g. `/model` declaring `args = model_keys`)
-    /// see real data.
+    /// Does not load `init.lua` — call [`LuaRuntime::load_autoload`] after
+    /// startup snapshots are available so plugins see real data at registration time.
     pub fn new() -> Self {
         let shared = Arc::new(LuaShared::default());
         let mut core = smelt_core::lua::LuaRuntime::with_shared(shared.core_arc());
@@ -418,30 +348,20 @@ impl LuaRuntime {
         Self { core, shared }
     }
 
-    /// Borrow the shared state. Used to clone `Arc<LuaShared>` into
-    /// tokio tasks (e.g. streaming subprocess spawn) that need to
-    /// post `TaskEvent::ExternalResolvedJson` from outside the main
-    /// thread.
+    /// Borrow the shared state (e.g. to clone the `Arc` into tokio tasks).
     pub(crate) fn shared(&self) -> &Arc<LuaShared> {
         &self.shared
     }
 
-    /// Access the underlying `mlua::Lua` state.
     pub(crate) fn lua(&self) -> &Lua {
         &self.core.lua
     }
 
-    /// Take the load error, if any.
     pub(crate) fn take_load_error(&mut self) -> Option<String> {
         self.core.load_error.take()
     }
 
-    /// Run embedded autoload plugins. Order at startup is:
-    /// embedded autoload → user `init.lua` → global
-    /// `<config>/plugins/*.lua` → project-local
-    /// `<cwd>/.smelt/{plugins/*.lua,init.lua}` (only when
-    /// [`smelt_core::trust`] reports the project trusted). All
-    /// staged from `main.rs` so the runtime is built once.
+    /// Load embedded autoload plugins.
     pub fn load_autoload(&mut self) {
         if self.core.load_error.is_some() {
             return;
@@ -455,15 +375,9 @@ impl LuaRuntime {
         }
     }
 
-    /// Call every registered statusline source and return the combined
-    /// item list (appended to Rust-side built-ins at the status-bar
-    /// layer). Each source returns either a single item table or a list
-    /// of items; empty-text items are skipped.
-    ///
-    /// The second tuple element is `(source_name, error_msg_or_none)`
-    /// for every source, ordered as registered. The caller dedupes
-    /// against its own per-source error history so a perpetually-broken
-    /// source doesn't spam one toast per frame.
+    /// Call every registered statusline source, returning combined items and per-source errors.
+    /// Each source returns a single item or a list; empty-text items are skipped.
+    /// The second tuple element is `(source_name, error_or_none)` per source.
     pub(crate) fn tick_statusline(
         &self,
     ) -> (
@@ -506,10 +420,7 @@ impl LuaRuntime {
         (items, tick_errors)
     }
 
-    /// Fire `smelt.confirm.open(handle_id)`. Called by the agent loop
-    /// when an LLM tool call needs user approval — `agent.rs` registers
-    /// the request via `TuiApp::confirms.register` first, then this
-    /// method hands the handle to the Lua dialog runner.
+    /// Fire `smelt.confirm.open(handle_id)` to hand a pending confirm request to the Lua dialog.
     pub(crate) fn fire_confirm_open(&self, handle_id: u64) {
         let result: mlua::Result<()> = (|| {
             let smelt: mlua::Table = self.core.lua.globals().get("smelt")?;
@@ -528,8 +439,7 @@ fn ansi_color_from_lua(table: &mlua::Table, key: &str) -> Option<smelt_core::sty
     Some(smelt_core::style::Color::AnsiValue(val))
 }
 
-/// Parse a single-item or list-of-items Lua table into `StatusItem`s
-/// and append them to `out`. Empty-text items are skipped.
+/// Parse a single-item or list-of-items Lua table into `StatusItem`s, appending to `out`.
 fn collect_statusline_items(
     table: &mlua::Table,
     default_align_right: bool,
@@ -558,8 +468,7 @@ fn statusline_item_from(
     if text.is_empty() {
         return None;
     }
-    // Per-item `align_right` wins over the source-level default; falls
-    // back to the source's `align` opt when the item omits the field.
+    // Per-item `align_right` wins over source-level default.
     let align_right = if entry.contains_key("align_right").unwrap_or(false) {
         entry.get("align_right").unwrap_or(default_align_right)
     } else {
@@ -588,11 +497,7 @@ mod tests {
     use super::*;
     use smelt_core::lua::api::lua_table_to_json;
 
-    /// Install a Lua-level `smelt.notify` / `smelt.notify_error` stub
-    /// that pushes into `_G.test_log` instead of routing through `TuiApp`
-    /// (no TuiApp exists in unit tests). Tests that observe handler
-    /// behaviour through these calls should call this once at the
-    /// start, then read [`drain_notifications`] / [`drain_errors`].
+    /// Stub `smelt.notify` / `smelt.notify_error` to push into `_G.test_log` / `_G.test_err`.
     fn install_test_notify(rt: &LuaRuntime) {
         rt.lua
             .load(
@@ -669,8 +574,7 @@ mod tests {
             &crate::smelt_term::Payload::Selection { index: 2 },
         );
         let recorded: u64 = rt.lua.load("return _G.recorded").eval().unwrap();
-        // Payload is 0-indexed; Lua gets 1-based.
-        assert_eq!(recorded, 3);
+        assert_eq!(recorded, 3); // Selection is 0-indexed; Lua gets 1-based.
     }
 
     #[test]
@@ -709,12 +613,8 @@ mod tests {
         );
     }
 
-    /// Regression: every code path that drops a Lua-backed callback
-    /// (window close, displaced keymap binding) must funnel through
-    /// `remove_callback` to evict the entry from `shared.callbacks`,
-    /// otherwise the registry grows unbounded over a long session. Tests
-    /// the floor invariant: register inserts, remove evicts, and a
-    /// removed handle is a no-op when invoked.
+    /// Every code path dropping a Lua callback must call `remove_callback`; otherwise the
+    /// registry grows unbounded. Invariant: register inserts, remove evicts, invoke is a no-op.
     #[test]
     fn remove_callback_evicts_handle_from_registry() {
         let rt = LuaRuntime::new();
@@ -734,7 +634,7 @@ mod tests {
         rt.remove_callback(id);
         assert!(rt.shared.callbacks.lock().unwrap().is_empty());
 
-        // Invoking the dropped handle must not resurrect the call.
+        // Dropped handle must not fire.
         rt.invoke_callback(
             crate::smelt_term::LuaHandle(id),
             crate::smelt_term::WinId(0),
@@ -773,11 +673,7 @@ mod tests {
         assert!(parse_win_event("bogus").is_none());
     }
 
-    // Theme bindings (`smelt.theme.set/get/accent/snapshot`) cross the
-    // `with_app` boundary — they read/write through `TuiApp.ui.theme()`.
-    // The Lua-side wiring is exercised by integration scenarios; here
-    // the role-mapping and error logic is covered directly in
-    // `lua::api::tests` against a local `crate::smelt_term::Theme`.
+    // Theme role-mapping and error logic are tested in `lua::api::tests`.
 
     #[test]
     fn runtime_exposes_api_version() {
@@ -942,7 +838,7 @@ mod tests {
             ToolExecResult::Pending => {}
             ToolExecResult::Immediate { .. } => panic!("expected pending after yield"),
         }
-        // Drive again — the sleep(0) is elapsed, so the task resumes and completes.
+        // sleep(0) is elapsed; task resumes and completes.
         let outs = rt.drive_tasks();
         let complete = outs
             .iter()
@@ -1120,8 +1016,7 @@ mod tests {
                 KeyModifiers::ALT
             ))
         );
-        // shift-tab collapses to BackTab without the SHIFT bit so
-        // crossterm's event matches lookups done elsewhere.
+        // shift-tab collapses to BackTab with SHIFT removed so crossterm event matches.
         assert_eq!(
             parse_keybind("s-tab"),
             Some(crate::smelt_term::KeyBind::new(
@@ -1136,9 +1031,7 @@ mod tests {
                 KeyModifiers::NONE
             ))
         );
-        // Bracket form (canonical nvim shape) — the same grammar
-        // `smelt.keymap.set` accepts. Plugins authored to nvim
-        // muscle memory pass `"<Esc>"` / `"<C-r>"` / `"<S-Tab>"`.
+        // Canonical bracket form also accepted.
         assert_eq!(
             parse_keybind("<Esc>"),
             Some(crate::smelt_term::KeyBind::new(
@@ -1194,9 +1087,7 @@ mod tests {
 
     #[test]
     fn keymap_accepts_plugin_friendly_spellings() {
-        // The Ctrl-R class of bug: history_search.lua registers
-        // `"normal" + "c-r"` but dispatch uses `"n" + "<C-r>"`.
-        // Canonicalization at registration closes the gap.
+        // Canonicalization at registration closes the shorthand → bracket-form gap.
         let rt = LuaRuntime::new();
         install_test_notify(&rt);
         rt.lua
@@ -1230,8 +1121,7 @@ mod tests {
 
     #[test]
     fn keymap_chord_sequence_registers_canonical_form() {
-        // `<Esc><Esc>` and `gd` register as multi-key chords; the
-        // dispatcher matches against the canonical concatenated form.
+        // Dispatcher matches against canonical concatenated form.
         let rt = LuaRuntime::new();
         install_test_notify(&rt);
         rt.lua
@@ -1244,17 +1134,15 @@ mod tests {
             .exec()
             .expect("exec");
         use smelt_core::lua::runtime::KeymapResult;
-        // Multi-key exact match in the global mode bucket.
         assert_eq!(
             rt.run_keymap("<Esc><Esc>", Some("Normal"), None),
             KeymapResult::Consumed
         );
-        // Multi-key exact match in a mode-specific bucket.
         assert_eq!(
             rt.run_keymap("gd", Some("Normal"), None),
             KeymapResult::Consumed
         );
-        // Single-key prefix doesn't fire on its own.
+        // Single-key prefix of a multi-key chord must not fire on its own.
         assert_eq!(
             rt.run_keymap("g", Some("Normal"), None),
             KeymapResult::NoBinding
@@ -1275,26 +1163,21 @@ mod tests {
             )
             .exec()
             .expect("exec");
-        // `<Esc>` is a prefix of the registered `<Esc><Esc>` chord.
         assert!(rt.chord_has_longer("<Esc>", Some("Normal")));
-        // `g` is a prefix of `gd` in Normal mode.
         assert!(rt.chord_has_longer("g", Some("Normal")));
-        // The full sequence isn't a *strict* prefix (exact matches
-        // don't count — they fire via `run_keymap`).
+        // Exact sequences are not strict prefixes (they fire via `run_keymap`).
         assert!(!rt.chord_has_longer("<Esc><Esc>", Some("Normal")));
         assert!(!rt.chord_has_longer("gd", Some("Normal")));
-        // Unrelated keys aren't a prefix of anything.
         assert!(!rt.chord_has_longer("j", Some("Normal")));
-        // Mode-specific chord (`gd` in `n`) doesn't surface in Insert.
+        // Mode-specific chord `gd` (Normal only) doesn't surface in Insert.
         assert!(!rt.chord_has_longer("g", Some("Insert")));
-        // Global-mode chord (`<Esc><Esc>` in `""`) surfaces in every mode.
+        // Global-mode chord surfaces in every mode.
         assert!(rt.chord_has_longer("<Esc>", Some("Insert")));
     }
 
     #[test]
     fn keymap_chord_handler_receives_ctx_table() {
-        // Multi-key handlers receive a context table carrying state
-        // captured at the first key (e.g. `vim_mode_at_chord_start`).
+        // Multi-key handlers receive a context table with state captured at the first key.
         let rt = LuaRuntime::new();
         install_test_notify(&rt);
         rt.lua

@@ -1,11 +1,6 @@
 #![cfg(test)]
-//! Test-only helpers shared across modules.
-//!
-//! `XDG_STATE_HOME` is a process-wide env var. Multiple tests across
-//! `trust::tests` and `lua::runtime::tests` mutate it; cargo runs them
-//! on parallel threads inside one process. Anything that reads or
-//! writes `XDG_STATE_HOME` from a test must hold the guard returned
-//! here for the duration of the test.
+//! Test-only helpers. `XDG_STATE_HOME` is process-wide; tests that mutate it
+//! must hold the guard from `xdg_state_guard` for the duration of the test.
 
 use std::path::Path;
 use std::sync::{Mutex, MutexGuard, OnceLock};

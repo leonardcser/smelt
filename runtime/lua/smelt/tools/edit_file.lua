@@ -1,7 +1,4 @@
--- Built-in edit_file tool — exact-string find/replace under a flock,
--- guarded by the shared `engine::tools::FileStateCache` mtime check
--- exposed via `smelt.fs.file_state.*`. Notebooks redirect to
--- `edit_notebook`.
+-- Built-in edit_file tool. Exact-string find/replace under flock + mtime staleness check.
 
 local function count_occurrences(haystack, needle)
   if needle == "" then

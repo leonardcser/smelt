@@ -25,9 +25,7 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
         lua.create_function(|lua, query: String| {
             let entries = crate::lua::try_with_app(|app| app.input_history.entries().to_vec())
                 .unwrap_or_default();
-            // Oldest first in the vec; the scorer wants newest-first
-            // so "recent" ranks highest. Iterate reversed and dedupe
-            // to match the old `Completer::history` construction.
+            // Entries are oldest-first; iterate reversed and dedupe so recent ranks highest.
             let mut seen = std::collections::HashSet::new();
             let mut scored: Vec<(u32, usize, usize)> = Vec::new();
             for (rank, (orig_idx, entry)) in entries.iter().enumerate().rev().enumerate() {

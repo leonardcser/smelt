@@ -37,7 +37,6 @@ pub fn parse_level(s: &str) -> Option<Level> {
     }
 }
 
-/// Maximum number of log files to keep.
 const MAX_LOG_FILES: usize = 20;
 
 fn log_path() -> &'static PathBuf {
@@ -53,7 +52,6 @@ fn log_path() -> &'static PathBuf {
     })
 }
 
-/// Keep only the most recent `MAX_LOG_FILES` log files, delete the rest.
 fn rotate_logs(dir: &std::path::Path) {
     let Ok(entries) = fs::read_dir(dir) else {
         return;
@@ -69,7 +67,6 @@ fn rotate_logs(dir: &std::path::Path) {
     if logs.len() <= MAX_LOG_FILES {
         return;
     }
-    // Sort by name (timestamp prefix) ascending.
     logs.sort_by(|a, b| a.0.cmp(&b.0));
     let to_remove = logs.len() - MAX_LOG_FILES;
     for (_, path) in &logs[..to_remove] {
@@ -81,7 +78,6 @@ fn dirs() -> PathBuf {
     crate::paths::state_dir().join("logs")
 }
 
-/// Returns the logs directory, creating it if necessary.
 pub fn logs_dir() -> PathBuf {
     let dir = dirs();
     let _ = fs::create_dir_all(&dir);

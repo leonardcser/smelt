@@ -1,8 +1,5 @@
-//! UiHost-tier Lua API bindings — require a terminal UI context.
-//!
-//! Host-tier bindings live in `smelt_core::lua::api` and are registered
-//! first via `register_host_api`; this module registers the UiHost-tier
-//! namespaces on top.
+//! UiHost-tier Lua API bindings (require a terminal UI context).
+//! Host-tier bindings are registered first via `smelt_core::lua::api::register_host_api`.
 
 mod bash;
 mod buf;
@@ -33,14 +30,11 @@ use super::{LuaRuntime, LuaShared};
 use mlua::prelude::*;
 use std::sync::Arc;
 
-/// Semantic-version tag for the Lua surface, exposed to plugins as
-/// `smelt.version`. Increments on any breaking signature change in the
-/// Lua bindings; additive changes do not bump it.
+/// Semantic version of the Lua API surface, exposed as `smelt.version`.
+/// Increments on breaking changes; additive changes do not bump it.
 pub(crate) const VERSION: &str = "1";
 
-/// Register a 0-arg getter that reads live state from `TuiApp` via
-/// `try_with_app`. Returns a Lua function that, when called, invokes
-/// `try_with_app` and returns the closure result (or `Default`).
+/// Build a 0-arg Lua getter that reads from `TuiApp`, returning `Default` if no app is live.
 macro_rules! app_read {
     ($lua:expr, |$app:ident| $body:expr) => {{
         $lua.create_function(
@@ -60,7 +54,6 @@ impl LuaRuntime {
 
         smelt.set("version", VERSION)?;
 
-        // Host-tier bindings (registered by core)
         smelt_core::lua::api::register_host_api(lua, &smelt, &smelt_keymap, &shared.core)?;
 
         // UiHost-tier bindings
@@ -92,7 +85,6 @@ impl LuaRuntime {
         smelt.set("ui", smelt_ui)?;
         smelt.set("keymap", smelt_keymap)?;
 
-        // Cross-cutting bindings that need TuiApp
         let cmd_tbl: mlua::Table = smelt.get("cmd")?;
         cmd_tbl.set(
             "run",
@@ -155,10 +147,7 @@ impl LuaRuntime {
 
 // ── theme + color helpers ──────────────────────────────────────────────
 
-/// Encode a `smelt_core::style::Color` as a Lua table.
-///
-/// Shapes: `{ ansi = u8 }` for palette colors, `{ rgb = { r, g, b } }`
-/// for truecolor, `{ named = "red" }` for the 16 legacy names.
+/// Encode a `Color` as a Lua table: `{ansi=u8}`, `{rgb={r,g,b}}`, or `{named="red"}`.
 pub(super) fn color_to_lua(lua: &Lua, color: smelt_core::style::Color) -> LuaResult<mlua::Table> {
     use smelt_core::style::Color;
     let t = lua.create_table()?;
@@ -192,10 +181,7 @@ pub(super) fn color_to_lua(lua: &Lua, color: smelt_core::style::Color) -> LuaRes
     Ok(t)
 }
 
-/// Project a `smelt_core::style::Color` to an ANSI palette index for
-/// the `statusline_item_from` decoder, which only reads `u8` fg/bg.
-/// `Color::Reset` returns `None` (no override). Named legacy colors
-/// map to the canonical 0..15 ANSI slots.
+/// Project a `Color` to an ANSI palette index. `Color::Reset` → `None`.
 pub(super) fn color_to_ansi(color: smelt_core::style::Color) -> Option<u8> {
     use smelt_core::style::Color;
     match color {
@@ -221,8 +207,7 @@ pub(super) fn color_to_ansi(color: smelt_core::style::Color) -> Option<u8> {
     }
 }
 
-/// Approximate an RGB triple to the nearest ANSI 256 palette entry
-/// using the standard 16 + 6×6×6 cube + 24-step grayscale layout.
+/// Approximate an RGB triple to the nearest ANSI 256 palette entry.
 fn rgb_to_ansi256(r: u8, g: u8, b: u8) -> u8 {
     if r == g && g == b {
         if r < 8 {
@@ -245,9 +230,7 @@ fn rgb_to_ansi256(r: u8, g: u8, b: u8) -> u8 {
     16 + 36 * to_cube(r) + 6 * to_cube(g) + to_cube(b)
 }
 
-/// Decode a Lua color table to an ANSI palette index. Accepts
-/// `{ ansi = u8 }`, `{ preset = "name" }`, or `{ rgb = { r, g, b } }`
-/// (rgb is down-sampled via the nearest-palette approximation).
+/// Decode a Lua color table (`{ansi=u8}`, `{preset="name"}`, or `{rgb={r,g,b}}`) to ANSI index.
 pub(super) fn color_ansi_from_lua(table: &mlua::Table) -> LuaResult<u8> {
     if let Ok(v) = table.get::<u8>("ansi") {
         return Ok(v);
@@ -267,7 +250,7 @@ pub(super) fn color_ansi_from_lua(table: &mlua::Table) -> LuaResult<u8> {
     ))
 }
 
-/// Nearest 6×6×6 palette index for an sRGB triple.
+/// Nearest ANSI 256-color index for an sRGB triple.
 fn rgb_to_ansi_256(r: u8, g: u8, b: u8) -> u8 {
     fn band(c: u8) -> u8 {
         let levels = [0u8, 95, 135, 175, 215, 255];
@@ -281,7 +264,7 @@ fn rgb_to_ansi_256(r: u8, g: u8, b: u8) -> u8 {
     16 + 36 * band(r) + 6 * band(g) + band(b)
 }
 
-/// Map a Lua-facing role name to its `crate::smelt_term::Theme` highlight group.
+/// Map a Lua role name to its theme highlight group name.
 fn role_to_group(role: &str) -> Option<&'static str> {
     Some(match role {
         "accent" => "SmeltAccent",
@@ -296,8 +279,7 @@ fn role_to_group(role: &str) -> Option<&'static str> {
     })
 }
 
-/// Resolved color for a `crate::smelt_term::Theme` highlight group: prefer
-/// fg, then bg, then `Color::Reset`.
+/// Resolved color for a highlight group: fg preferred, then bg, then `Color::Reset`.
 fn group_color(theme: &crate::smelt_term::Theme, group: &str) -> smelt_core::style::Color {
     let style = theme.get(group);
     style
@@ -306,7 +288,7 @@ fn group_color(theme: &crate::smelt_term::Theme, group: &str) -> smelt_core::sty
         .unwrap_or(smelt_core::style::Color::Reset)
 }
 
-/// Read a named theme role from `theme`. Returns `None` for unknown names.
+/// Resolve a named theme role. Returns `None` for unknown names.
 pub(super) fn theme_role_get(
     theme: &crate::smelt_term::Theme,
     role: &str,
@@ -314,10 +296,7 @@ pub(super) fn theme_role_get(
     role_to_group(role).map(|g| group_color(theme, g))
 }
 
-/// Set a writable theme role on `theme`. Only `accent` and `slug` are
-/// mutable. Caller must `populate_ui_theme` afterwards (or wait for
-/// the next frame's render-loop bridge) to flush the new value into
-/// the corresponding highlight group.
+/// Set a writable theme role. Only `accent` and `slug` are mutable.
 pub(super) fn theme_role_set(
     theme: &mut crate::smelt_term::Theme,
     role: &str,
@@ -403,7 +382,7 @@ mod tests {
         let mut t = theme();
         theme_role_set(&mut t, "accent", 42).unwrap();
         assert_eq!(t.accent(), 42);
-        // The SmeltAccent group is rebuilt on set.
+        // SmeltAccent group is rebuilt immediately on set.
         assert_eq!(
             t.get("SmeltAccent").fg,
             Some(smelt_core::style::Color::AnsiValue(42))
@@ -412,7 +391,7 @@ mod tests {
 
     #[test]
     fn theme_role_set_preset_via_color_decode() {
-        // sage = 108 in PRESETS
+        // sage maps to ANSI 108.
         let v = crate::theme::preset_by_name("sage").unwrap();
         let mut t = theme();
         theme_role_set(&mut t, "accent", v).unwrap();

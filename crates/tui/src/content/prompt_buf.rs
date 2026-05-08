@@ -9,15 +9,9 @@ use crate::smelt_term::{Buffer, ExtmarkOpts, ExtmarkPayload};
 
 use smelt_core::style::Color;
 
-/// Namespace name for the input buffer's prediction (ghost text)
-/// extmark. `compute_input` re-anchors this each frame;
-/// `TuiApp::{set,clear,take}_prompt_completer` mutate the storage
-/// from outside the render path.
+/// Extmark namespace for ghost-text (completer prediction).
 pub(crate) const COMPLETER_NS: &str = "completer";
 
-/// Intermediate representation for a chrome row: queued message,
-/// stash indicator, top/bottom bar. Built as a Vec then flattened to
-/// (line text + non-overlapping highlight extmarks).
 struct StyledSegment {
     text: String,
     style: Style,
@@ -37,8 +31,6 @@ pub(crate) struct PromptAboveInput<'a> {
     pub(crate) queued: &'a [String],
     pub(crate) stash: &'a Option<crate::input::InputSnapshot>,
     pub(crate) bar_info: BarInfo,
-    /// Leaf width in cells. `PROMPT_ABOVE_WIN` has no gutter, so this
-    /// is the full terminal width.
     pub(crate) width: u16,
 }
 
@@ -46,10 +38,8 @@ pub(crate) struct InputLeafInput<'a> {
     pub(crate) input: &'a PromptState,
     pub(crate) vim_mode: crate::smelt_term::VimMode,
     pub(crate) clipboard: &'a crate::smelt_term::Clipboard,
-    /// Inner width after `PROMPT_WIN`'s `SplitConfig::gutters` are
-    /// subtracted. `Window::render` shifts content past the gutter.
+    /// Inner width after gutters; `Window::render` shifts content past the left gutter.
     pub(crate) content_width: u16,
-    /// Visible row budget for the input leaf.
     pub(crate) height: u16,
     pub(crate) has_prompt_cursor: bool,
 }
@@ -90,9 +80,6 @@ fn theme_color(theme: &crate::smelt_term::Theme, group: &str) -> Color {
     style.fg.or(style.bg).unwrap_or(Color::Reset)
 }
 
-/// Write the chrome above the input (queued + stash + top bar) into
-/// `buf`. `width` is the leaf's full width — no gutter applies on
-/// this leaf, so bars span edge to edge.
 pub(crate) fn compute_prompt_above(
     pa: &PromptAboveInput<'_>,
     buf: &mut Buffer,
@@ -135,8 +122,6 @@ pub(crate) fn compute_prompt_above(
     buf.set_selection(Vec::new());
 }
 
-/// Write a single bottom-bar row into `buf`. `width` is the leaf's
-/// full width (no gutter on this leaf).
 pub(crate) fn compute_prompt_below(width: u16, buf: &mut Buffer, theme: &crate::smelt_term::Theme) {
     let bottom = bar_row(width as usize, None, None, theme);
     let (text, hls) = window_row_to_buffer_line(&bottom);
@@ -148,10 +133,8 @@ pub(crate) fn compute_prompt_below(width: u16, buf: &mut Buffer, theme: &crate::
     buf.set_selection(Vec::new());
 }
 
-/// Write the editable input rows + selection + ghost-text extmark
-/// into `buf`. Cursor positions and selection ranges are
-/// content-local; `Window::render` applies the leaf's
-/// `SplitConfig::gutters.pad_left` shift at paint time.
+/// Write editable input rows, selection, and ghost-text extmark into `buf`.
+/// Cursor/selection positions are content-local; `Window::render` applies the gutter shift.
 pub(crate) fn compute_input(
     inp: &InputLeafInput<'_>,
     buf: &mut Buffer,
@@ -159,8 +142,6 @@ pub(crate) fn compute_input(
 ) -> InputLeafOutput {
     let usable = inp.content_width as usize;
 
-    // Custom namespaces survive `set_all_lines`, but the prior
-    // frame's row index can be stale; re-anchor below.
     let completer_ns = buf.create_namespace(COMPLETER_NS);
     let prediction: Option<String> = buf.extmarks(completer_ns).into_iter().find_map(|(_, m)| {
         if let ExtmarkPayload::VirtText { text, .. } = &m.payload {
@@ -193,10 +174,8 @@ pub(crate) fn compute_input(
 
     buf.clear_namespace(completer_ns, 0, usize::MAX);
     if let Some(text) = prediction {
-        // Anchor at row 0 when the text is empty so the dim suggestion
-        // is visible; otherwise park past the last row to keep the
-        // storage alive without rendering. `Window::render` only walks
-        // rows 0..line_count.
+        // Row 0 when input is empty (dim suggestion visible); past last row otherwise
+        // (keeps storage alive without rendering; Window::render only walks 0..line_count).
         let row = if inp.input.win.text.is_empty() {
             0
         } else {
@@ -226,12 +205,6 @@ pub(crate) fn compute_input(
     }
 }
 
-/// Convert a `WindowRow`'s segments into a plain line text plus
-/// non-overlapping `(col_start, col_end, SpanStyle)` highlights for
-/// each non-default-styled segment. Default-styled segments contribute
-/// their text to the line but no highlight extmark — `Window::render`
-/// paints those cells with the row's base style. Mirrors the
-/// non-overlapping-spans pattern the status line uses.
 fn window_row_to_buffer_line(row: &WindowRow) -> (String, Vec<(u16, u16, Style)>) {
     let mut text = String::new();
     let mut highlights = Vec::new();
@@ -248,8 +221,6 @@ fn window_row_to_buffer_line(row: &WindowRow) -> (String, Vec<(u16, u16, Style)>
     }
     (text, highlights)
 }
-
-// ── Queued messages ──
 
 fn queued_message_rows(
     queued: &[String],
@@ -305,7 +276,6 @@ fn queued_message_rows(
                     style: bg_style,
                 });
 
-                // Build styled segments for the chunk content
                 let chunk_segs = user_highlight_segments(chunk, is_command, bg_style, theme);
                 segs.extend(chunk_segs);
 
@@ -336,16 +306,11 @@ fn user_highlight_segments(
         }];
     }
 
-    // Simple path: no @ref highlighting for now — just plain text with base style.
-    // The full `print_user_highlights` does @path detection + image labels,
-    // but for queued messages the simple path covers the common case.
     vec![StyledSegment {
         text: text.into(),
         style: base_style,
     }]
 }
-
-// ── Stash ──
 
 fn stash_row(_usable: usize, theme: &crate::smelt_term::Theme) -> WindowRow {
     let text = "› Stashed (ctrl+s to unstash)";
@@ -365,8 +330,6 @@ fn stash_row(_usable: usize, theme: &crate::smelt_term::Theme) -> WindowRow {
         },
     ])
 }
-
-// ── Bar (horizontal rule with optional spans) ──
 
 fn bar_row(
     width: usize,
@@ -581,20 +544,9 @@ fn build_top_bar_right(info: &BarInfo, theme: &crate::smelt_term::Theme) -> Vec<
     spans
 }
 
-// ── Input area ──
-
 struct InputArea {
-    /// Visible-slice lines, one per visible row (length =
-    /// `visible_rows`). Caller appends these to the unified prompt
-    /// buffer at the chrome offset.
     lines: Vec<String>,
-    /// `(visible_line_idx, col_start, col_end, style)` for each
-    /// styled span over the visible slice. Indices are
-    /// 0-relative to `lines`; the caller adds the chrome offset.
     highlights: Vec<(usize, u16, u16, Style)>,
-    /// Per-row visual-mode selection ranges. Indices are 0-relative to
-    /// `lines`; caller adds the chrome offset before publishing via
-    /// `Buffer::set_selection`.
     selection_ranges: Vec<(usize, u16, u16)>,
     cursor_pos: Option<(u16, u16)>,
     cursor_style: Option<(Style, char)>,
@@ -626,8 +578,6 @@ fn compute_input_area(
         });
     let (visual_lines, cursor_line, _, cursor_char_in_line) =
         wrap_and_locate_cursor(&display_buf, &char_kinds, display_cursor, usable);
-    // Slash commands and `!exec` are single-line by design. Multi-line
-    // buffers render as plain text.
     let single_line = !state.win.text.contains('\n');
     let plain_only = !single_line;
     let is_command = !plain_only && crate::completer::Completer::is_command(state.win.text.trim());
@@ -645,10 +595,8 @@ fn compute_input_area(
         let raw = if state.win.pending_recenter {
             cursor_line.saturating_sub(content_rows / 2)
         } else if cursor_moved {
-            // Cursor moved since last render → ensure it's visible.
-            // tmux copy-mode: wheel/scrollbar panning leaves cpos
-            // unchanged, so this branch doesn't fire and scroll_top
-            // stays where the user pinned it.
+            // Keep cursor visible. Wheel/scrollbar panning doesn't move cpos,
+            // so this branch is skipped and scroll_top stays where the user pinned it.
             let mut s = state.win.scroll_top as usize;
             if cursor_line < s {
                 s = cursor_line;
@@ -704,10 +652,8 @@ fn compute_input_area(
             }
         });
 
-        // Selection ranges are in buffer-display columns (= char count
-        // for the prompt's ASCII-mostly content). A trailing virtual
-        // cell paints when the selection extends past the line end so
-        // the user can see line-end participation in `v` / `V`.
+        // Virtual trailing cell paints when selection extends past line end
+        // so line-end participation in `v`/`V` is visible.
         if let Some((s, e)) = line_sel {
             let s_col = s as u16;
             let raw_e = e.min(line_chars);
@@ -751,8 +697,6 @@ fn compute_input_area(
         push_segment_highlights(&mut highlights, li, &segments);
 
         if line_cursor.is_some() {
-            // Content-local cursor col; `Window::render` /
-            // `Ui::focused_painted_split_cursor` add `pad_left`.
             let cursor_col = cursor_char_in_line as u16;
             cursor_pos = Some((cursor_col, li as u16));
         }
@@ -783,9 +727,6 @@ fn compute_input_area(
     }
 }
 
-/// Append the input row's styled segments as `(line_idx, col_start,
-/// col_end, SpanStyle)` highlight tuples. The input area renders
-/// flush-left, so segments accumulate from col 0.
 fn push_segment_highlights(
     out: &mut Vec<(usize, u16, u16, Style)>,
     line_idx: usize,
@@ -804,9 +745,6 @@ fn push_segment_highlights(
     }
 }
 
-/// Convert a styled line into StyledSegments, applying cursor highlighting.
-/// Visual-mode selection is published separately on the buffer via
-/// `Buffer::set_selection` and painted by `Window::render`.
 fn styled_char_segments(
     line: &str,
     kinds: &[SpanKind],
@@ -852,7 +790,6 @@ fn styled_char_segments(
         current_text.push(ch);
     }
 
-    // Flush remaining text
     if !current_text.is_empty() {
         segments.push(StyledSegment {
             text: current_text,
@@ -860,7 +797,6 @@ fn styled_char_segments(
         });
     }
 
-    // Cursor past end of line
     if cursor_pos == Some(char_count) {
         segments.push(StyledSegment {
             text: " ".into(),
@@ -875,8 +811,6 @@ fn styled_char_segments(
     segments
 }
 
-/// Handle the exec `!` prefix with special styling. Selection is
-/// painted separately by `Window::render` via `Buffer::set_selection`.
 fn exec_bang_segments(
     line: &str,
     kinds: &[SpanKind],
@@ -1013,11 +947,10 @@ mod tests {
             crate::smelt_term::BufCreateOpts::default(),
         );
         let output = compute_input(&inp, &mut input_buf, &test_theme());
-        // Empty input → one blank row.
         assert_eq!(input_buf.line_count(), 1);
         let (col, row) = output.cursor.expect("cursor populated");
-        assert_eq!(row, 0, "cursor on the first input row");
-        assert_eq!(col, 0, "cursor lives in content-local coords");
+        assert_eq!(row, 0);
+        assert_eq!(col, 0);
     }
 
     #[test]
@@ -1041,8 +974,7 @@ mod tests {
             crate::smelt_term::BufCreateOpts::default(),
         );
         compute_prompt_above(&pa, &mut buf, &test_theme());
-        assert_eq!(buf.line_count(), 1, "no queued/stash → just the top bar");
-        // Bar spans full width.
+        assert_eq!(buf.line_count(), 1);
         let line = buf.get_line(0).unwrap_or("");
         let chars = line.chars().count();
         assert!(
@@ -1061,11 +993,6 @@ mod tests {
         assert_eq!(buf.line_count(), 1);
     }
 
-    /// Behavior test: with the prompt's `Gutters { pad_left: 1,
-    /// pad_right: 1 }`, `Window::render` should leave col 0 and the
-    /// rightmost col blank on the input row, paint the cursor inside
-    /// the inner zone, and clip content at the inner edge. Asserts
-    /// the rendered grid layout, not the producer's coordinate math.
     #[test]
     fn window_render_honors_prompt_gutters() {
         use crate::app::PROMPT_WIN;
@@ -1095,7 +1022,7 @@ mod tests {
                 },
             },
         );
-        win.cursor_col = 0; // content-local: first inner cell
+        win.cursor_col = 0;
         win.cursor_line = 0;
 
         let mut grid = Grid::new(10, 1);
@@ -1113,9 +1040,6 @@ mod tests {
         };
         win.render(&buf, &mut slice, &ctx);
 
-        // Inner zone spans cols 1..=8; col 0 (left gutter) and col 9
-        // (right gutter) stay blank. Content paints from col 1; the
-        // block cursor clobbers 'h' at the first inner col.
         let cells: Vec<char> = (0..10).map(|c| grid.cell(c, 0).symbol).collect();
         assert_eq!(cells[0], ' ', "left gutter blank");
         assert_eq!(cells[9], ' ', "right gutter blank");

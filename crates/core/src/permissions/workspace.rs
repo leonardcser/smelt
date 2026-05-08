@@ -1,18 +1,9 @@
-//! Path extraction + workspace boundary enforcement.
-//!
-//! Given a tool call (name + args), pull out filesystem paths it touches
-//! and decide whether any of them escape the configured workspace root.
-
 use crate::permissions::bash::strip_heredoc_bodies;
 use std::path::{Path, PathBuf};
 
-// ── Workspace path restriction ───────────────────────────────────────────────
-
-/// Extract tokens that look like absolute paths from a shell command.
-/// Relative paths are fine (they resolve within the workspace).
+/// Extract absolute and tilde-prefixed path tokens from a shell command.
 pub fn extract_paths_from_command(cmd: &str) -> Vec<String> {
-    // Strip heredoc bodies — they are data, not shell commands.
-    let cmd = strip_heredoc_bodies(cmd);
+    let cmd = strip_heredoc_bodies(cmd); // heredoc bodies are data, not paths
     let mut paths = Vec::new();
     for token in cmd.split_whitespace() {
         let clean = token.trim_matches(|c: char| c == '\'' || c == '"' || c == ';');

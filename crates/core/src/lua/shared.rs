@@ -1,49 +1,28 @@
-//! Shared Lua state — the `Arc<LuaShared>` that outlives individual
-//! callbacks and lets tokio tasks post resume payloads back to the
-//! main thread.
+//! Shared Lua state: the `Arc<LuaShared>` that outlives callbacks and lets tokio tasks post resume payloads.
 
 use super::{LuaHandle, LuaTaskRuntime, TaskEvent};
 use std::collections::HashMap;
 use std::sync::atomic::AtomicU64;
 use std::sync::{Arc, Mutex};
 
-/// One Lua-registered `/command` entry. Lives in `LuaShared.commands`
-/// so completers (`list_commands`, `is_lua_command`) read the same
-/// map the dispatcher does — no parallel snapshot.
 pub struct RegisteredCommand {
     pub handle: LuaHandle,
     pub description: Option<String>,
     pub args: Vec<String>,
-    /// May this command run while the agent is mid-turn? Defaults to
-    /// `true`. Plugins like `/compact` / `/fork` / `/resume` set
-    /// `while_busy = false` so the dispatcher rejects them with
-    /// `cannot run /name while agent is working` instead of queueing.
+    /// If false, dispatcher rejects this command while the agent is mid-turn.
     pub while_busy: bool,
-    /// Should this command queue as a regular message when invoked
-    /// while the agent is mid-turn? Defaults to `false`. User-defined
-    /// custom commands (which spawn their own turn) opt in so the
-    /// dispatcher silently defers them until the current turn ends
-    /// instead of erroring or running mid-turn.
+    /// If true, silently defers this command until the current turn ends rather than erroring.
     pub queue_when_busy: bool,
-    /// May this command be invoked as a startup argument
-    /// (`smelt /name`)? Defaults to `false`; plugins that open a UI
-    /// useful at launch (`/resume`, `/settings`) opt in.
     pub startup_ok: bool,
-    /// Hide from the `/` completer picker. Still dispatchable by name —
-    /// used for aliases like `q`/`qa`/`wq` that share a handler with a
-    /// canonical entry already shown in the list.
+    /// If true, hidden from the completer but still dispatchable by name.
     pub hidden: bool,
 }
 
-/// One registered `smelt.statusline.register` entry. `default_align`
-/// applies to items the source returns without an explicit
-/// `align_right` field; items can still override per-item.
 pub struct StatusSource {
     pub handle: LuaHandle,
     pub default_align_right: bool,
 }
 
-/// Handles for a plugin tool registered via `smelt.tools.register`.
 pub struct ToolHandles {
     pub execute: LuaHandle,
     pub confirm_text: Option<LuaHandle>,
@@ -56,62 +35,31 @@ pub struct ToolHandles {
 }
 
 /// All shared state between Lua closures and the app loop.
-/// One `Arc<LuaShared>` replaces N separate `Arc<Mutex<…>>` fields.
-///
-/// The TUI wraps this in a local type that adds
-/// `pending_invocations` (UI-specific callback queue).
 pub struct LuaShared {
     pub commands: Mutex<HashMap<String, RegisteredCommand>>,
     pub keymaps: Mutex<HashMap<(String, String), LuaHandle>>,
-    /// Statusline sources in registration order. A `Vec` (not a
-    /// `HashMap`) so the on-screen left-to-right order matches the
-    /// order plugins called `smelt.statusline.register`. Re-registering
-    /// an existing name updates in place without changing position.
+    /// Vec preserves registration order; re-registering an existing name updates in place.
     pub statusline_sources: Mutex<Vec<(String, StatusSource)>>,
     pub tools: Mutex<HashMap<String, ToolHandles>>,
     pub callbacks: Mutex<HashMap<u64, LuaHandle>>,
     pub next_id: AtomicU64,
-    /// Separate counter for buffer IDs minted by `smelt.buf.create`.
-    /// Starts at `1 << 32` so Lua-allocated `BufId`s never collide with
-    /// Rust-side buffers (prompt input, scratch, etc.) that are minted
-    /// by `ui.buf_create` from 1.
+    /// Starts at `1 << 32` so Lua-allocated `BufId`s never collide with Rust-side buffers.
     pub next_buf_id: AtomicU64,
-    /// Lock-free counter for `smelt.task.alloc`. Lives on the
-    /// shared arc (not in `LuaTaskRuntime`) so a Lua coroutine running
-    /// *inside* `drive_tasks` — which already holds the `tasks` lock —
-    /// can mint an id without re-entering the same mutex.
+    /// Lives on the shared arc (not `LuaTaskRuntime`) so a coroutine inside `drive_tasks`
+    /// can mint an id without re-entering the `tasks` mutex.
     pub next_external_id: AtomicU64,
     pub tasks: Mutex<LuaTaskRuntime>,
-    /// Task-runtime inbox. Dialog callbacks / other UI events that need
-    /// to *resume a Lua coroutine* push here instead of through `ops`.
-    /// Keeps the reducer's `AppOp` enum free of Lua-task variants; the
-    /// Lua module pumps its own inbox each tick.
+    /// Resume-events for Lua coroutines; pumped each tick.
     pub task_inbox: Mutex<Vec<TaskEvent>>,
-    /// Cross-thread JSON inbox mirroring `task_inbox`. tokio tasks
-    /// push `(external_id, json)` tuples; the main loop drains
-    /// them into `task_inbox` (as `ExternalResolvedJson`) before
-    /// pumping. Wrapped in `Arc<Mutex<...>>` so the
-    /// `LuaResumeSink` clone the tokio task holds is `Send`.
+    /// Cross-thread inbox: tokio tasks push `(external_id, json)`; main loop drains to `task_inbox`.
     pub json_inbox: Arc<Mutex<Vec<(u64, serde_json::Value)>>>,
-    /// Sender that wakes the main loop when a tokio task pushes a
-    /// JSON resume payload from outside the main thread. The
-    /// receiver lives on the host; its `select!` arm flushes the
-    /// inbox and renders. Optional so `LuaShared::default()` stays
-    /// trivially constructable.
+    /// Wakes the main loop when a tokio task pushes a JSON payload. Optional for trivial default.
     pub wakeup_tx: std::sync::OnceLock<tokio::sync::mpsc::UnboundedSender<()>>,
-    // ── Config registries (populated by init.lua before engine starts) ───────
     pub providers: Mutex<Vec<crate::config::ProviderConfig>>,
     pub permission_rules: Mutex<Option<crate::permissions::rules::RawPerms>>,
     pub mcp_configs: Mutex<HashMap<String, crate::mcp::McpServerConfig>>,
     pub settings_overrides: Mutex<HashMap<String, bool>>,
-    /// Per-tool default permission decisions and subpattern allow-lists
-    /// declared at registration time (`permission_defaults` /
-    /// `default_allow` on the tool's registration table). Read once at
-    /// startup and handed to `Permissions::from_raw`.
     pub tool_defaults: Mutex<crate::permissions::rules::ToolDefaults>,
-    /// Persistent message log (Lua errors, deferred warnings). Toast
-    /// notifications carry only the first line; the full body lives
-    /// here, addressable via `smelt.messages.*` and `/messages`.
     pub messages: Mutex<crate::messages::Messages>,
 }
 
@@ -141,10 +89,8 @@ impl Default for LuaShared {
 }
 
 impl LuaShared {
-    /// Build a `Send`-safe handle that lets a tokio task push a
-    /// JSON resume payload and wake the main loop. `Arc<LuaShared>`
-    /// itself is `!Send` (it owns `mlua::Thread`s inside `tasks`);
-    /// the resume sink is the narrowest cross-thread surface.
+    /// `Send`-safe handle for pushing JSON resume payloads from tokio tasks.
+    /// `Arc<LuaShared>` is `!Send` (owns `mlua::Thread`s); this is the narrowest cross-thread surface.
     pub fn resume_sink(&self) -> LuaResumeSink {
         LuaResumeSink {
             inbox: Arc::clone(&self.json_inbox),
@@ -153,10 +99,7 @@ impl LuaShared {
     }
 }
 
-/// Send-safe handle a tokio task uses to resume a parked Lua
-/// coroutine from outside the main thread. Stores into a
-/// `LuaShared.json_inbox` mirror; the main loop drains that into
-/// the runtime's `task_inbox` before pumping.
+/// `Send`-safe handle for resuming a parked Lua coroutine from a tokio task.
 #[derive(Clone)]
 pub struct LuaResumeSink {
     inbox: Arc<Mutex<Vec<(u64, serde_json::Value)>>>,
@@ -164,8 +107,6 @@ pub struct LuaResumeSink {
 }
 
 impl LuaResumeSink {
-    /// Push a JSON resume payload. Wakes the main loop so the
-    /// runtime pumps the inbox on the next iteration.
     pub fn resolve_json(&self, external_id: u64, value: serde_json::Value) {
         if let Ok(mut inbox) = self.inbox.lock() {
             inbox.push((external_id, value));

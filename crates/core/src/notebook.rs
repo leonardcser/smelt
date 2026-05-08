@@ -1,24 +1,13 @@
-//! Notebook capability — Jupyter `.ipynb` JSON helpers. Pure parse +
-//! introspection surface, no I/O. Exposed to Lua via
-//! `crates/tui/src/lua/api/notebook.rs::{parse, ...}` and composed by
-//! tools that need to understand notebook structure.
-//!
-//! Apply-edit / atomic write semantics (the `edit_notebook` tool's
-//! 600 LOC of cell mutation, source-string concatenation, and id
-//! generation) migrate here when `notebook_edit` moves to Lua in
-//! P5.b. Today this module ships the read shapes a plugin needs:
-//! parse JSON → typed `Notebook { cells, metadata }`, pull a cell's
-//! plain-text source, locate a cell by id.
+//! Jupyter `.ipynb` helpers — pure JSON parse + editing, no I/O beyond
+//! the `apply_edit` write path.
 
 use serde_json::Value;
 
-/// File-extension probe (case-insensitive).
 pub fn is_notebook_path(path: &str) -> bool {
     path.to_ascii_lowercase().ends_with(".ipynb")
 }
 
-/// Cell types Jupyter recognises. Anything unfamiliar surfaces as
-/// `Other(_)` so callers don't lose information.
+/// Unfamiliar cell types surface as `Other(_)` so callers don't lose information.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CellKind {
     Code,
@@ -47,7 +36,6 @@ impl CellKind {
     }
 }
 
-/// One notebook cell, normalised into a plain `source` string.
 #[derive(Debug, Clone)]
 pub struct Cell {
     pub kind: CellKind,
@@ -56,8 +44,6 @@ pub struct Cell {
     pub execution_count: Option<i64>,
 }
 
-/// Parsed notebook view. `format_*` mirror nbformat's top-level keys;
-/// `cells` walks `cells[]` in order.
 #[derive(Debug, Clone)]
 pub struct Notebook {
     pub format: Option<i64>,
@@ -65,7 +51,6 @@ pub struct Notebook {
     pub cells: Vec<Cell>,
 }
 
-/// Parse `.ipynb` JSON. Errors surface as `serde_json::Error`.
 pub fn parse(json: &str) -> Result<Notebook, serde_json::Error> {
     let raw: Value = serde_json::from_str(json)?;
     let format = raw.get("nbformat").and_then(|v| v.as_i64());
@@ -103,8 +88,7 @@ fn parse_cell(cell: &Value) -> Cell {
     }
 }
 
-/// Jupyter stores `source` as either a single string or an array of
-/// strings. Concatenate and return the canonical text.
+/// `source` in `.ipynb` is a string or array of strings; return the concatenation.
 fn source_to_string(source: Option<&Value>) -> String {
     match source {
         Some(Value::String(s)) => s.clone(),
@@ -117,7 +101,6 @@ fn source_to_string(source: Option<&Value>) -> String {
     }
 }
 
-/// Find the index of a cell by id. `None` when no match.
 #[cfg(test)]
 fn cell_index_by_id(nb: &Notebook, id: &str) -> Option<usize> {
     nb.cells.iter().position(|c| c.id.as_deref() == Some(id))
@@ -187,7 +170,7 @@ mod tests {
     }
 }
 
-// ── Notebook editing / rendering (migrated from engine/tools/notebook.rs) ───
+// ── Notebook editing / rendering ─────────────────────────────────────────────
 
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -242,9 +225,8 @@ impl NotebookRenderData {
     }
 }
 
-/// Build preview data for an `edit_notebook` call. Returns `None`
-/// when the notebook can't be read, parsed, or the targeted cell is
-/// out of bounds; callers can then leave the preview pane blank.
+/// Build preview data for an `edit_notebook` call. Returns `None` when the
+/// notebook can't be read/parsed or the target cell is out of bounds.
 pub fn preview_render_data(args: &HashMap<String, Value>) -> Option<NotebookRenderData> {
     let path = args
         .get("notebook_path")
@@ -341,10 +323,7 @@ pub fn preview_render_data(args: &HashMap<String, Value>) -> Option<NotebookRend
     }
 }
 
-/// Render a notebook's cells as human-readable text with line numbers.
-/// Public wrapper for Lua tools that need the same line-numbered
-/// formatted-cell output the engine `read_file` tool produces for
-/// `.ipynb` paths.
+/// Render notebook cells as line-numbered human-readable text (same format as `read_file` for `.ipynb`).
 pub fn render_notebook_text(path: &str, offset: usize, limit: usize) -> Result<String, String> {
     let r = read_notebook(path, offset, limit);
     if r.is_error {
@@ -354,7 +333,6 @@ pub fn render_notebook_text(path: &str, offset: usize, limit: usize) -> Result<S
     }
 }
 
-/// Local result type used by internal notebook helpers.
 pub(crate) struct NbResult {
     content: String,
     is_error: bool,
@@ -382,7 +360,6 @@ impl NbResult {
     }
 }
 
-/// Render a notebook's cells as human-readable text with line numbers.
 pub(crate) fn read_notebook(path: &str, offset: usize, limit: usize) -> NbResult {
     let raw = match std::fs::read_to_string(path) {
         Ok(c) => c,
@@ -420,7 +397,6 @@ pub(crate) fn read_notebook(path: &str, offset: usize, limit: usize) -> NbResult
 
         lines.push(format!("--- Cell {i} [{cell_type}]{id_display} ---"));
 
-        // Source
         let source = join_string_or_array(cell.get("source"));
         for line in source.lines() {
             lines.push(line.to_string());
@@ -429,7 +405,6 @@ pub(crate) fn read_notebook(path: &str, offset: usize, limit: usize) -> NbResult
             lines.push(String::new());
         }
 
-        // Outputs (code cells only)
         if cell_type == "code" {
             if let Some(outputs) = cell.get("outputs").and_then(|o| o.as_array()) {
                 for output in outputs {
@@ -438,10 +413,9 @@ pub(crate) fn read_notebook(path: &str, offset: usize, limit: usize) -> NbResult
             }
         }
 
-        lines.push(String::new()); // blank separator
+        lines.push(String::new());
     }
 
-    // Apply offset/limit (1-based offset like read_file)
     let start = (offset.max(1)) - 1;
     if start >= lines.len() {
         return NbResult::ok("offset beyond end of notebook");
@@ -476,7 +450,6 @@ fn render_output(output: &Value, lines: &mut Vec<String>) {
         }
         "execute_result" | "display_data" => {
             if let Some(data) = output.get("data") {
-                // Prefer text/plain, note image presence
                 if let Some(text) = data.get("text/plain") {
                     let t = join_string_or_array(Some(text));
                     if !t.is_empty() {
@@ -510,7 +483,6 @@ fn render_output(output: &Value, lines: &mut Vec<String>) {
             if let Some(tb) = output.get("traceback").and_then(|v| v.as_array()) {
                 for frame in tb {
                     if let Some(s) = frame.as_str() {
-                        // Strip ANSI escape codes from traceback
                         let clean = strip_ansi(s);
                         for line in clean.lines() {
                             lines.push(line.to_string());
@@ -523,7 +495,6 @@ fn render_output(output: &Value, lines: &mut Vec<String>) {
     }
 }
 
-/// Notebook source can be a string or an array of strings.
 fn join_string_or_array(val: Option<&Value>) -> String {
     match val {
         Some(Value::String(s)) => s.clone(),
@@ -638,18 +609,11 @@ fn render_data_from_snapshots(
 // Editing
 // ---------------------------------------------------------------------------
 
-/// Result of a successful `apply_edit`. Carries the human-readable
-/// confirmation message plus the dialog metadata payload.
 pub struct NotebookEditOutcome {
     pub message: String,
     pub metadata: Value,
 }
 
-/// Public entry-point for the Lua `edit_notebook` tool. Performs the
-/// JSON cell munging, writes the notebook with one-space indent
-/// (matching Jupyter convention), and records the new content in the
-/// shared file-state cache. The caller holds the per-path advisory
-/// lock for the duration of the call.
 pub fn apply_edit(
     args: &HashMap<String, Value>,
     files: &FileStateCache,
@@ -695,19 +659,16 @@ fn run_edit(args: &HashMap<String, Value>, files: &FileStateCache) -> NbResult {
     let cell_type = str_arg(args, "cell_type");
     let cell_number = args.get("cell_number").and_then(|v| v.as_i64());
 
-    // Validate edit_mode
     if !matches!(edit_mode.as_str(), "replace" | "insert" | "delete") {
         return NbResult::err(format!(
             "invalid edit_mode: {edit_mode} (expected replace, insert, or delete)"
         ));
     }
 
-    // new_source required for replace and insert
     if edit_mode != "delete" && new_source.is_empty() {
         return NbResult::err(format!("new_source is required for {edit_mode}"));
     }
 
-    // cell_type required for insert
     if edit_mode == "insert" && cell_type.is_empty() {
         return NbResult::err("cell_type is required when inserting a new cell");
     }
@@ -731,7 +692,6 @@ fn run_edit(args: &HashMap<String, Value>, files: &FileStateCache) -> NbResult {
         None => return NbResult::err("notebook has no cells array"),
     };
 
-    // Resolve target cell index
     let target_idx = resolve_cell_index(cells, &cell_id, cell_number);
 
     match edit_mode.as_str() {
@@ -751,20 +711,17 @@ fn run_edit(args: &HashMap<String, Value>, files: &FileStateCache) -> NbResult {
 
             let old_cell = cell_snapshot(&cells[idx], idx);
 
-            // Convert source to array of lines (notebook convention)
             let source_value = source_to_json(&new_source);
             cells[idx]["source"] = source_value;
 
             if !cell_type.is_empty() {
                 cells[idx]["cell_type"] = Value::String(cell_type.clone());
-                // If switching to markdown, remove outputs and execution_count
                 if cell_type == "markdown" {
                     if let Some(o) = cells[idx].as_object_mut() {
                         o.remove("outputs");
                         o.remove("execution_count");
                     }
                 }
-                // If switching to code, ensure outputs/execution_count exist
                 if cell_type == "code" {
                     let obj = cells[idx].as_object_mut().unwrap();
                     obj.entry("outputs").or_insert(Value::Array(vec![]));
@@ -772,7 +729,7 @@ fn run_edit(args: &HashMap<String, Value>, files: &FileStateCache) -> NbResult {
                 }
             }
 
-            // Clear outputs on replace (stale)
+            // Clear stale outputs on replace.
             if cells[idx].get("cell_type").and_then(|v| v.as_str()) == Some("code") {
                 cells[idx]["outputs"] = Value::Array(vec![]);
                 cells[idx]["execution_count"] = Value::Null;
@@ -790,7 +747,6 @@ fn run_edit(args: &HashMap<String, Value>, files: &FileStateCache) -> NbResult {
             )
         }
         "insert" => {
-            // Insert after target_idx, or at beginning if no target specified
             let insert_at = if cell_id.is_empty() && cell_number.is_none() {
                 0
             } else {
@@ -858,7 +814,6 @@ fn run_edit(args: &HashMap<String, Value>, files: &FileStateCache) -> NbResult {
 }
 
 fn resolve_cell_index(cells: &[Value], cell_id: &str, cell_number: Option<i64>) -> Option<usize> {
-    // cell_id takes precedence
     if !cell_id.is_empty() {
         return cells
             .iter()
@@ -877,7 +832,7 @@ fn cell_not_found_msg(cell_id: &str, cell_number: Option<i64>, total: usize) -> 
     }
 }
 
-/// Convert a source string into the notebook JSON array-of-lines format.
+/// Convert a source string to the notebook JSON array-of-lines format.
 fn source_to_json(source: &str) -> Value {
     let lines: Vec<&str> = source.split('\n').collect();
     let arr: Vec<Value> = lines

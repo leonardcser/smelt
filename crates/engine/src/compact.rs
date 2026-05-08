@@ -1,14 +1,5 @@
-//! Conversation history compaction.
-//!
-//! Replaces older history with a model-generated handoff summary so the
-//! conversation can keep growing without overflowing the context window.
-//!
-//! Resilience notes:
-//! - The summarization call itself can overflow the model's context window
-//!   when the thread is huge; the retry loop drops the oldest item and tries
-//!   again rather than surfacing the failure.
-//! - A stable marker on summary messages prevents repeat compactions from
-//!   feeding a prior summary back in as if it were user input.
+//! Conversation history compaction: replaces older history with a model-generated
+//! handoff summary to prevent context-window overflow.
 
 use crate::cancel::CancellationToken;
 use crate::log;
@@ -18,45 +9,32 @@ use protocol::{Content, Message, ReasoningEffort, Role};
 /// Handoff instructions handed to the summarizing model.
 pub(crate) const SUMMARIZATION_PROMPT: &str = include_str!("prompts/compact.md");
 
-/// Lead-in text the _next_ model sees at the top of the handoff summary.
-/// Used both as a marker to detect "already summarized" messages on repeat
-/// compaction and as framing so the next model treats the summary as
-/// reference material rather than a user instruction.
+/// Prefix on handoff summary messages. Also used to detect prior summaries on re-compaction.
 pub const SUMMARY_PREFIX: &str = include_str!("prompts/compact_summary_prefix.md");
 
-/// Soft cap on user-message text preserved verbatim after compaction, so the
-/// replacement history leaves room for the next turn in the context window.
+/// Soft token cap on user messages carried forward after compaction.
 pub(crate) const COMPACT_USER_MESSAGE_MAX_TOKENS: usize = 20_000;
 
-/// Per-message cap when flattening history for the summarizer: stops a single
-/// oversized tool output from eating the compact prompt's budget.
+/// Per-message byte cap when flattening history for the summarizer.
 const MAX_STRINGIFIED_MESSAGE_BYTES: usize = 8_000;
 
 /// How many times `run_compact` will drop the oldest history message and
 /// retry when the summarization call itself hits the model's context window.
 const MAX_CONTEXT_TRIMS: usize = 20;
 
-/// How many times `run_compact` will retry when the model returns an empty
-/// summary.
 const MAX_EMPTY_RETRIES: u8 = 2;
 
-/// Controls how much context the replacement history preserves.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum InitialContextInjection {
-    /// Drop everything except the summary. Fits a user-initiated `/compact`
-    /// where a fresh user message is expected to arrive next.
+    /// Drop everything except the summary (used by `/compact`).
     DoNotInject,
-    /// Carry recent user-authored messages forward so a mid-turn compaction
-    /// leaves the in-flight request visible to the model.
+    /// Carry recent user messages forward (used by mid-turn auto-compact).
     BeforeLastUserMessage,
 }
 
-/// Why compaction is running. Surfaced to logs so flakiness is diagnosable.
 #[derive(Debug, Clone, Copy)]
 pub(crate) enum CompactReason {
-    /// The prompt crossed the configured context-window percentage.
     ContextLimit,
-    /// The user invoked `/compact`.
     UserRequested,
 }
 
@@ -69,7 +47,6 @@ impl CompactReason {
     }
 }
 
-/// Which point in the turn lifecycle triggered compaction.
 #[derive(Debug, Clone, Copy)]
 pub(crate) enum CompactPhase {
     MidTurn,
@@ -85,9 +62,6 @@ impl CompactPhase {
     }
 }
 
-/// Caller-declared metadata for a compaction pass: what to keep, why, and
-/// when. Bundled into a single options struct so `run_compact` doesn't grow
-/// an unwieldy positional argument list.
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct CompactOptions {
     pub(crate) injection: InitialContextInjection,
@@ -95,18 +69,9 @@ pub(crate) struct CompactOptions {
     pub(crate) reason: CompactReason,
 }
 
-/// Run a compaction pass against `history` (which must NOT contain the
-/// system prompt — the caller owns that) and return the replacement
-/// history plus token usage.
-///
-/// Resilience:
-/// - Retries with exponential backoff are already handled inside
-///   `Provider::chat`, so network/server/rate-limit failures are covered.
-/// - If the summarization call itself overflows the model's context window,
-///   drops the oldest history entry and retries up to
-///   [`MAX_CONTEXT_TRIMS`] times.
-/// - If the model returns an empty summary, retries up to
-///   [`MAX_EMPTY_RETRIES`] times before giving up.
+/// Compact `history` (excluding system prompt) and return replacement history plus token usage.
+/// Drops oldest entries on context-window errors (up to `MAX_CONTEXT_TRIMS`) and
+/// retries empty summaries (up to `MAX_EMPTY_RETRIES`).
 pub(crate) async fn run_compact(
     provider: &Provider,
     history: &[Message],
@@ -235,7 +200,6 @@ pub(crate) async fn run_compact(
     Ok((replacement, usage))
 }
 
-/// Build the messages that get sent to the summarizer.
 fn build_summarize_request(
     history: &[Message],
     instructions: Option<&str>,
@@ -263,8 +227,6 @@ fn build_summarize_request(
     ]
 }
 
-/// Flatten history into a role-tagged transcript for the summarizer.
-/// Each message is capped at [`MAX_STRINGIFIED_MESSAGE_BYTES`].
 fn stringify_conversation(messages: &[Message]) -> String {
     let mut out = String::new();
     for m in messages {
@@ -325,8 +287,6 @@ fn assistant_text(m: &Message) -> String {
     text
 }
 
-/// Truncate to at most `max_bytes`, snapping down to the nearest char
-/// boundary so we never split a multi-byte sequence.
 fn truncate_bytes_floor(text: &str, max_bytes: usize) -> String {
     if text.len() <= max_bytes {
         return text.to_string();
@@ -338,8 +298,7 @@ fn truncate_bytes_floor(text: &str, max_bytes: usize) -> String {
     out
 }
 
-/// Collect user messages as plain text, skipping anything
-/// that was itself produced by a prior compaction.
+/// Collect non-summary user messages as plain text.
 fn collect_user_messages(messages: &[Message]) -> Vec<String> {
     messages
         .iter()
@@ -359,9 +318,6 @@ fn collect_user_messages(messages: &[Message]) -> Vec<String> {
         .collect()
 }
 
-/// True if `message` is a handoff summary produced by a prior compaction.
-/// Used on re-compaction so a prior summary doesn't get re-ingested as user
-/// input and nested under a new summary.
 #[cfg(test)]
 fn is_summary_message(message: &Message) -> bool {
     if !matches!(message.role, Role::User) {
@@ -378,9 +334,6 @@ fn is_summary_text(text: &str) -> bool {
     text.starts_with(SUMMARY_PREFIX.trim_end())
 }
 
-/// Assemble the replacement history: recent user-authored messages
-/// (token-budgeted, most recent kept) followed by the handoff summary as the
-/// final user message. Caller prepends the system prompt.
 fn build_compacted_history(
     user_messages: Vec<String>,
     summary_text: &str,
@@ -406,8 +359,6 @@ fn build_compacted_history(
     out
 }
 
-/// Select the most recent user messages (in chronological order) that fit
-/// within `max_tokens` total, truncating the oldest-kept message if needed.
 fn select_recent_user_messages(user_messages: Vec<String>, max_tokens: usize) -> Vec<String> {
     if max_tokens == 0 || user_messages.is_empty() {
         return Vec::new();
@@ -432,16 +383,12 @@ fn select_recent_user_messages(user_messages: Vec<String>, max_tokens: usize) ->
     selected
 }
 
-/// Very rough token estimator: ~4 bytes per token. Only used to budget user-
-/// message carryover, so exactness against a real tokenizer isn't required.
+/// Rough token estimate (~4 bytes per token).
 fn approx_token_count(text: &str) -> usize {
     text.len().div_ceil(4)
 }
 
-/// Detect context-window-exceeded via error text. The provider layer funnels
-/// `context_length_exceeded` and several 400 bodies into `InvalidResponse`,
-/// so the retry loop has to pattern-match the body. Substring list is kept
-/// narrow so an unrelated 400 (e.g. schema error) doesn't trip retries.
+/// True when the error indicates the model's context window was exceeded.
 fn is_context_window_error(e: &ProviderError) -> bool {
     let body = match e {
         ProviderError::InvalidResponse(b) => b.as_str(),

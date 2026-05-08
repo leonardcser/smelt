@@ -1,7 +1,4 @@
-//! History reverse-search scoring. The UI is a Lua plugin
-//! (`runtime/lua/smelt/plugins/history_search.lua`) that calls into
-//! `smelt.history.search(query)`, which wraps this function. Tests
-//! exercise the scorer directly.
+//! History reverse-search scoring used by `smelt.history.search(query)`.
 
 use crate::fuzzy::score::{recency_bonus, split_words};
 
@@ -63,8 +60,7 @@ pub(crate) fn history_score(text: &str, query: &str, recency_rank: usize) -> Opt
     }
 
     if !query_has_multiple_words {
-        // For single-word reverse search, plain fuzzy subsequence matches like
-        // "default allow" for "full" should come well after true word hits.
+        // Penalize pure fuzzy-subsequence matches so word hits rank above them.
         if !saw_exact_word_match && !saw_prefix_word_match && !saw_substring_match {
             score += 900;
         }

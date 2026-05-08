@@ -1,21 +1,6 @@
-//! Terminal event surface and dispatch outcome shared by `Ui` and
-//! `Window`.
-//!
-//! The `Event` enum mirrors `crossterm::event::Event` but lives in
-//! `ui` so the dispatch surface doesn't leak the backend type. Hosts
-//! convert at the App boundary via `Event::from(crossterm_event)`.
-//!
-//! `Status` is the single dispatch outcome. It replaces the earlier
-//! `DispatchOutcome` (key/mouse pre-flight at `Ui::dispatch_event`)
-//! and `MouseAction` (`Window::handle_mouse` return). `Capture`
-//! signals an in-flight gesture grab the host folds into
-//! `Ui::set_capture`.
+//! Terminal event type and dispatch outcome.
 
-/// Terminal event in `ui`'s vocabulary. Variants carry crossterm
-/// payloads — the conversion is a thin re-wrap, so no information
-/// is lost. Consuming code matches on `ui::Event` and pulls the
-/// crossterm payload out of the variant when it needs the typed
-/// fields.
+/// Terminal event mirroring `crossterm::event::Event`. Hosts convert at the App boundary.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Event {
     Key(crossterm::event::KeyEvent),
@@ -42,16 +27,8 @@ impl From<crossterm::event::Event> for Event {
 
 /// Dispatch outcome for `Ui::dispatch_event` and `Window::handle_mouse`.
 ///
-/// - `Consumed` — handled end-to-end; the host has nothing further to
-///   route. For mouse this is also the "fall-through to host's own
-///   paint refresh" signal.
-/// - `Capture` — gesture grab. Returned from `Window::handle_mouse`
-///   on a `Down(Left)` that lands on content; the host folds it into
-///   `Ui::set_capture` so subsequent `Drag` / `Up` reach this target
-///   even when the pointer leaves the window's rect.
-/// - `Ignored` — handler had nothing to say. The host may continue
-///   routing through its own paths (App-level chords, prompt /
-///   transcript mouse, paste side effects, terminal focus tracking).
+/// `Capture` is returned on `Down(Left)` landing on content; the host folds it
+/// into `Ui::set_capture` so subsequent `Drag`/`Up` reach the same target.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Status {
     Consumed,

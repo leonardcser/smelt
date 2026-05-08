@@ -91,8 +91,6 @@ fn spawn_inhibitor() -> Option<std::process::Child> {
 fn spawn_inhibitor() -> Option<std::process::Child> {
     use std::os::unix::process::CommandExt;
 
-    // systemd-inhibit holds the lock until the wrapped command exits.
-    // idle:sleep blocks both the idle timeout and explicit suspend triggers.
     let mut cmd = std::process::Command::new("systemd-inhibit");
     cmd.args([
         "--what=idle:sleep",
@@ -105,9 +103,7 @@ fn spawn_inhibitor() -> Option<std::process::Child> {
     .stdout(std::process::Stdio::null())
     .stderr(std::process::Stdio::null());
 
-    // Start a new session so the child has no controlling terminal.
-    // This prevents polkit-agent-helper from opening /dev/tty to prompt
-    // for a password (which corrupts the TUI, especially over SSH).
+    // New session: no controlling terminal, prevents polkit from opening /dev/tty.
     unsafe {
         cmd.pre_exec(|| {
             libc::setsid();

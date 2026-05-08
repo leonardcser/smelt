@@ -1,13 +1,5 @@
-//! Streaming input adapter.
-//!
-//! `StreamParser` accumulates character-level deltas from the engine,
-//! detects structural boundaries (paragraphs, code blocks, tables),
-//! and writes finished blocks into a `BlockHistory`. It is transient
-//! input state — only alive while the engine is streaming.
-//!
-//! `TuiApp` owns a `StreamParser` alongside the `Transcript` (block
-//! store + snapshot cache). The dependency is one-way: parser writes
-//! into `BlockHistory`, never reads the snapshot.
+//! Streaming input adapter: accumulates character deltas, detects structural boundaries
+//! (paragraphs, code blocks, tables), and writes finished blocks into `BlockHistory`.
 
 use super::is_table_separator;
 use crate::transcript_model::{
@@ -538,8 +530,6 @@ impl StreamParser {
             return;
         };
         mutator(state);
-        // Tool state mutation needs to invalidate the per-block layout
-        // cache. The frontend cache is generation-keyed; bump it.
         history.bump_generation();
     }
 

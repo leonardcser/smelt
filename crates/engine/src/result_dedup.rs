@@ -1,31 +1,14 @@
-//! Deduplication of `tool_result` messages within a single conversation.
-//!
-//! When a newly-produced tool_result body exactly matches an earlier
-//! tool_result body in the same conversation, we replace the new body with
-//! a short reference stub. This is **append-only** — prior messages are
-//! never modified, so the prompt-cache prefix remains intact. The new stub
-//! is the only thing added, and it's small.
-//!
-//! Covers cross-tool duplication that the per-tool `read_file` dedup doesn't:
-//! e.g., two `bash` `cat` invocations on the same path, repeated `grep` or
-//! `glob` calls with identical results, or tools that produce identical
-//! structured output.
+//! Append-only deduplication of `tool_result` messages within a conversation.
+//! Prior messages are never modified, preserving the prompt-cache prefix.
 
 use protocol::{Message, Role};
 
-/// Minimum body length for dedup to fire. Shorter outputs (e.g. `"ok"`,
-/// short error blurbs) aren't worth the indirection — the stub body itself
-/// would be comparable in length, and the savings wouldn't justify the
-/// cognitive cost on the model of interpreting the stub.
+/// Minimum body length for dedup to fire.
 const MIN_DEDUP_LEN: usize = 500;
 
-/// Look up a prior tool_result in `history` whose content matches
-/// `new_content` and whose error flag matches `new_is_error`. Returns the
-/// call id of the most recent match, or `None` if no match qualifies.
-///
-/// We require `is_error` equality so that swapping an error for a success
-/// reference (or vice versa) never happens — the model would otherwise see
-/// a success-flagged message pointing to a failing earlier call.
+/// Return the call id of the most recent prior tool_result matching `new_content`
+/// and `new_is_error`, or `None`. Requires `is_error` equality to prevent mixing
+/// a success reference with an error result.
 pub(crate) fn duplicate_of<'a>(
     new_content: &str,
     new_is_error: bool,
@@ -54,7 +37,7 @@ pub(crate) fn duplicate_of<'a>(
     None
 }
 
-/// Render the replacement body for a deduplicated tool_result.
+/// Replacement body for a deduplicated tool_result.
 pub(crate) fn dedup_stub(prior_call_id: &str) -> String {
     format!(
         "Output identical to a prior tool_result (call {prior_call_id}). \
@@ -106,8 +89,7 @@ mod tests {
     #[test]
     fn non_tool_messages_are_ignored() {
         let body = big("same ");
-        // A user message whose text happens to match the tool_result body
-        // must NOT be returned as a dedup target — its role is wrong.
+        // A user message matching the body must not be a dedup target.
         let history = vec![Message::user(Content::text(body.clone()))];
         assert!(duplicate_of(&body, false, &history).is_none());
     }
@@ -141,18 +123,15 @@ mod tests {
         let s = dedup_stub("call_42");
         assert!(s.contains("call_42"));
         assert!(s.contains("identical"));
-        // Keep the stub short — the whole point is to use fewer tokens.
         assert!(s.len() < 200);
     }
 
     #[test]
     fn threshold_boundary() {
-        // Exactly at the threshold — should dedup.
         let body = "x".repeat(MIN_DEDUP_LEN);
         let history = vec![tool_msg("call_1", &body, false)];
         assert_eq!(duplicate_of(&body, false, &history), Some("call_1"));
 
-        // One short — should not.
         let body = "x".repeat(MIN_DEDUP_LEN - 1);
         let history = vec![tool_msg("call_1", &body, false)];
         assert!(duplicate_of(&body, false, &history).is_none());

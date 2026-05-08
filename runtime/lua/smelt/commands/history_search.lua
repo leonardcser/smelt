@@ -1,9 +1,5 @@
--- Ctrl+R reverse history search.
---
--- Opens a filterable picker over past prompts ranked by the history
--- scorer (word-boundary matches + recency). Typing filters live;
--- Enter commits the selected entry to the prompt buffer; Esc restores
--- whatever the user had before opening.
+-- Ctrl+R reverse history search. Filterable picker over past prompts;
+-- Enter commits to prompt, Esc restores previous text.
 
 local function entry_label(entry)
   for line in (entry or ""):gmatch("[^\r\n]+") do
@@ -16,8 +12,6 @@ end
 local function build_items()
   local entries = smelt.history.entries()
   if #entries == 0 then return {} end
-  -- Newest-first (reverse order). Stash the full entry on the item so
-  -- on_enter / on_dismiss can look it up without another indirection.
   local items = {}
   for i = #entries, 1, -1 do
     items[#items + 1] = {

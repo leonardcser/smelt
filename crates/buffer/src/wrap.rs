@@ -1,9 +1,5 @@
-//! Headless-safe text wrapping.
-
-/// Wrap a line to fit within `width` display columns, breaking at
-/// word boundaries. Words longer than `width` are broken
-/// character-by-character. Width is measured in display columns
-/// (wide chars like CJK count as 2).
+/// Wrap `line` to `width` display columns, breaking at word boundaries.
+/// Words wider than `width` are broken character-by-character.
 pub fn wrap_line(line: &str, width: usize) -> Vec<String> {
     use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
     if width == 0 {

@@ -23,8 +23,6 @@ impl TuiApp {
         });
     }
 
-    // ── Agent lifecycle ──────────────────────────────────────────────────
-
     pub(crate) fn begin_agent_turn(&mut self, display: &str, content: Content) -> TurnState {
         let _perf = smelt_core::perf::begin("agent:begin_turn");
         self.sleep_inhibit.acquire();
@@ -47,8 +45,6 @@ impl TuiApp {
         self.dispatch_turn(content)
     }
 
-    /// Mark the engine busy, allocate a turn id, and send `StartTurn` with the
-    /// current app state. Callers own any history/session prep before this.
     fn dispatch_turn(&mut self, content: Content) -> TurnState {
         let Some(api_key) = self.resolve_api_key() else {
             {
@@ -112,9 +108,6 @@ impl TuiApp {
         &mut self,
         cmd: smelt_core::custom_commands::CustomCommand,
     ) -> TurnState {
-        // Body comes pre-rendered from Lua (frontmatter stripped, exec
-        // blocks evaluated, extra args appended). Apply redaction
-        // before history / engine dispatch.
         let evaluated = if self.core.config.settings.redact_secrets {
             engine::redact::redact(&cmd.body)
         } else {
@@ -131,7 +124,6 @@ impl TuiApp {
             self.core.session.messages.pop();
         }
 
-        // Resolve model/provider overrides
         let (model, api_base, api_key) = {
             let target_model = cmd.overrides.model.as_deref();
             let target_provider = cmd.overrides.provider.as_deref();
@@ -279,9 +271,7 @@ impl TuiApp {
         }
     }
 
-    /// Lightweight cancel: stop the engine turn without saving session,
-    /// generating titles, or triggering auto-compact. Used before rewind/clear
-    /// where the history will be mutated immediately after.
+    /// Stop the engine turn without saving session or triggering auto-compact; used before rewind/clear.
     pub(crate) fn cancel_agent(&mut self) {
         self.sleep_inhibit.release();
         self.core.engine.send(UiCommand::Cancel);
@@ -292,9 +282,6 @@ impl TuiApp {
         self.queued_messages.clear();
     }
 
-    /// Finish and drop the active turn (no-op when idle). Combines
-    /// the `finish_turn` + `self.agent = None` pair every cancel
-    /// site needs.
     pub(crate) fn discard_turn(&mut self, cancelled: bool) {
         if self.agent.is_some() {
             self.finish_turn(cancelled);
@@ -312,25 +299,15 @@ impl TuiApp {
             std::rc::Rc::new(smelt_core::cells::TurnEnd { cancelled }),
         );
         self.pump_lua();
-        // Flush any in-flight streaming content before committing tools.
         self.flush_streaming_thinking();
         self.flush_streaming_text();
-        // Commit active tools to block history but don't render yet —
-        // the next draw_frame renders blocks + prompt atomically in one
-        // synchronized update, avoiding a flash where the prompt disappears.
         self.finish_transcript_turn();
         if cancelled {
             {
                 self.working.finish(TurnOutcome::Interrupted);
             };
-            // If a title/slug generation was in-flight, discard it so stale
-            // TitleGenerated events don't update the session. But if a slug
-            // was already set before this turn, keep it.
             if self.pending_title {
                 self.pending_title = false;
-                // Only clear the slug if it wasn't already set before this
-                // turn's title generation request. If a slug existed before,
-                // keep it — we're just discarding the in-flight update.
             }
             let leftover = std::mem::take(&mut self.queued_messages);
             if !leftover.is_empty() {
@@ -363,13 +340,7 @@ impl TuiApp {
         self.maybe_auto_compact();
     }
 
-    /// Execute a plugin-defined tool by calling the Lua handler registered for
-    /// it. If no handler is found, returns an error result to the engine.
-    ///
-    /// Handlers run as `LuaTask`s. A handler that doesn't yield
-    /// completes synchronously and the result is forwarded right away.
-    /// A handler that yields (e.g. via `smelt.ui.dialog.open`) parks;
-    /// its result arrives later through `drive_tasks()`.
+    /// Invokes the Lua handler for a plugin-defined tool; synchronous handlers resolve immediately, async ones park until `drive_tasks` completes them.
     pub(crate) fn handle_tool_call(
         &mut self,
         request_id: u64,
@@ -399,9 +370,7 @@ impl TuiApp {
                     is_error,
                 });
             }
-            crate::lua::ToolExecResult::Pending => {
-                // Result will be delivered via drive_tasks.
-            }
+            crate::lua::ToolExecResult::Pending => {}
         }
     }
 
@@ -503,7 +472,6 @@ impl TuiApp {
         session_entries: Vec<PermissionEntry>,
         workspace_rules: Vec<smelt_core::permissions::store::Rule>,
     ) {
-        // Rebuild session approvals from flattened entries.
         let mut session_tools: HashMap<String, Vec<glob::Pattern>> = HashMap::new();
         let mut session_dirs: Vec<PathBuf> = Vec::new();
         for entry in session_entries {
@@ -516,7 +484,6 @@ impl TuiApp {
             }
         }
 
-        // Persist and reload workspace rules.
         smelt_core::permissions::store::save(&self.cwd, &workspace_rules);
         let (ws_tools, ws_dirs) = smelt_core::permissions::store::into_approvals(&workspace_rules);
         let mut rt = self.core.permissions.approvals.write().unwrap();
@@ -544,8 +511,7 @@ impl TuiApp {
             .clear_session();
     }
 
-    /// Resolve a completed confirm dialog choice.
-    /// Returns `true` if the agent should be cancelled.
+    /// Resolves a confirm dialog choice; returns `true` if the agent should be cancelled.
     pub(crate) fn resolve_confirm(
         &mut self,
         (choice, message): (ConfirmChoice, Option<String>),
@@ -663,11 +629,7 @@ impl TuiApp {
         }
     }
 
-    // ── Control dispatch ─────────────────────────────────────────────────
-
-    /// Dispatch one engine-event control signal. Returns `true` to keep
-    /// draining the engine event loop, `false` to break (turn complete /
-    /// channel disconnected).
+    /// Dispatches one engine-event control signal; returns `true` to continue draining, `false` on turn end.
     pub(crate) fn dispatch_control(
         &mut self,
         ctrl: SessionControl,
@@ -675,9 +637,6 @@ impl TuiApp {
         pending_dialogs: &mut VecDeque<DeferredDialog>,
         last_keypress: Option<Instant>,
     ) -> bool {
-        // Defer dialogs while the user is actively typing.
-        // The queue is drained in the main loop via re-dispatch, so auto-approval
-        // checks re-run (handles "always allow" → recheck).
         let should_queue = last_keypress
             .is_some_and(|t| t.elapsed() < Duration::from_millis(CONFIRM_DEFER_MS))
             && !self.input.win.text.is_empty();
@@ -690,7 +649,6 @@ impl TuiApp {
                     req.tool_name = pending.last().map(|p| p.name.clone()).unwrap_or_default();
                 }
 
-                // Check runtime auto-approvals.
                 let auto_approved = {
                     let rt = self.core.permissions.approvals.read().unwrap();
                     rt.is_auto_approved(
@@ -706,7 +664,6 @@ impl TuiApp {
                     return true;
                 }
 
-                // Check mode-based permissions (e.g. Apply mode auto-allows writes).
                 if self.core.permissions.decide(
                     self.core.config.mode,
                     &req.tool_name,
@@ -723,7 +680,6 @@ impl TuiApp {
                     .permissions
                     .outside_workspace_paths(&req.tool_name, &req.args);
 
-                // Auto-approval didn't match — queue if we can't show a dialog now.
                 if should_queue {
                     self.set_active_status(&req.call_id, ToolStatus::Confirm);
                     self.pending_dialog = true;
@@ -731,17 +687,12 @@ impl TuiApp {
                     return true;
                 }
 
-                // Prepare dialog options.
                 let downgraded = self.core.permissions.was_downgraded(
                     self.core.config.mode,
                     &req.tool_name,
                     &req.args,
                 );
                 req.outside_dir = if downgraded && !outside_paths.is_empty() {
-                    // Only offer the dir option when the Ask is specifically
-                    // from the workspace restriction (downgraded from Allow).
-                    // When the Ask is from the command itself (e.g. `for` loop),
-                    // a dir approval won't help — show tool patterns instead.
                     let raw = std::path::Path::new(&outside_paths[0]);
                     let expanded = engine::paths::expand_tilde(raw);
                     let abs_dir = if expanded.is_dir() {
@@ -760,17 +711,9 @@ impl TuiApp {
                         .retain(|p| !rt.has_pattern(&req.tool_name, p));
                 }
 
-                // Close any non-blocking overlay (e.g. Ps) to make room.
                 self.close_focused_non_blocking_overlay();
                 self.set_active_status(&req.call_id, ToolStatus::Confirm);
 
-                // Register the request and fire the Lua dialog. The
-                // dialog (runtime/lua/smelt/dialogs/confirm.lua) reads
-                // the payload from the `confirm_requested` cell, builds
-                // its own option labels from `outside_dir` +
-                // `approval_patterns`, and resolves through
-                // `smelt.confirm._resolve(handle_id, decision, message)`
-                // on submit / dismiss.
                 let snapshot = smelt_core::cells::ConfirmRequested {
                     handle_id: 0,
                     tool_name: req.tool_name.clone(),

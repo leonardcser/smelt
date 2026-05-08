@@ -1,12 +1,4 @@
--- Built-in /messages command.
---
--- Persistent log of Lua errors, warnings, and notices. Toasts show
--- only the first line; this dialog renders the full body (multi-line
--- tracebacks). Bottom-docked with a top-edge border + title only —
--- the ui crate's border is configured to paint just the top side, so
--- there is no manual separator buffer. Content panel is read-only +
--- vim-enabled so the user can navigate, select, and yank.
--- Opening clears the unread-error counter.
+-- Built-in /messages command. Full-body log of Lua errors, warnings, and notices.
 
 local function format_lines(entries)
   if #entries == 0 then
@@ -19,9 +11,7 @@ local function format_lines(entries)
     for body_line in (e.full or e.summary):gmatch("([^\n]*)\n?") do
       table.insert(lines, "  " .. body_line)
     end
-    -- gmatch leaves a trailing empty line on a trailing newline;
-    -- strip it.
-    if lines[#lines] == "  " then
+    if lines[#lines] == "  " then -- gmatch trailing empty line on trailing newline
       table.remove(lines, #lines)
     end
   end

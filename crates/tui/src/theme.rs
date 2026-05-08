@@ -1,11 +1,4 @@
-//! Smelt-specific theme initialization for `crate::smelt_term::Theme`.
-//!
-//! Atomic state (accent, slug, light/dark flag) lives directly on
-//! `crate::smelt_term::Theme` now. This module owns:
-//!   * `populate_ui_theme` — write the smelt highlight groups into a
-//!     `crate::smelt_term::Theme` registry, sourced from the Theme's own state.
-//!   * `detect_background` — OSC 11 / `$COLORFGBG` light/dark probe.
-//!   * `PRESETS` — the picker list for `/theme` & `/color`.
+//! Theme initialisation: `populate_ui_theme`, light/dark detection, and preset list.
 
 use smelt_core::style::Color;
 
@@ -24,18 +17,14 @@ pub(crate) fn preset_by_name(name: &str) -> Option<u8> {
 // Light / dark terminal detection
 // ---------------------------------------------------------------------------
 
-/// Detect whether the terminal has a light background and store the
-/// result on `theme`. Must be called *before* entering the TUI's
-/// raw-mode / alternate screen since we temporarily enable raw mode
-/// ourselves for the OSC query.
+/// Probe terminal background and set the light flag on `theme`.
+/// Must be called before entering raw mode / alternate screen.
 pub(crate) fn detect_background(theme: &mut crate::smelt_term::Theme) {
     if let Some(light) = detect_light_background() {
         theme.set_light(light);
     }
-    // On failure, leave the existing flag (default: dark).
 }
 
-/// Try OSC 11 query first, fall back to `$COLORFGBG`.
 fn detect_light_background() -> Option<bool> {
     if let Some(luma) = osc_background_luma() {
         return Some(luma > 0.6);
@@ -43,8 +32,7 @@ fn detect_light_background() -> Option<bool> {
     colorfgbg_is_light()
 }
 
-/// Parse `$COLORFGBG` (format "fg;bg" or "fg;default;bg").
-/// Returns `Some(true)` for light backgrounds.
+/// Parse `$COLORFGBG` (`"fg;bg"` or `"fg;default;bg"`).
 fn colorfgbg_is_light() -> Option<bool> {
     let val = std::env::var("COLORFGBG").ok()?;
     let parts: Vec<&str> = val.split(';').collect();
@@ -54,12 +42,10 @@ fn colorfgbg_is_light() -> Option<bool> {
         _ => return None,
     };
     let code: u8 = bg.parse().ok()?;
-    // ANSI colors 0-6 and 8 are dark; 7 and 9-15 are light.
-    Some(matches!(code, 7 | 9..=15))
+    Some(matches!(code, 7 | 9..=15)) // ANSI: 0-6,8 dark; 7,9-15 light
 }
 
-/// Query the terminal's background color via the OSC 11 "dynamic colors"
-/// escape sequence and return its luma (0.0 = black, 1.0 = white).
+/// OSC 11 query: returns luma of the terminal background (0.0 = black, 1.0 = white).
 #[cfg(unix)]
 fn osc_background_luma() -> Option<f32> {
     use crossterm::terminal::{disable_raw_mode, enable_raw_mode, is_raw_mode_enabled};
@@ -79,15 +65,13 @@ fn osc_background_luma() -> Option<f32> {
 
     let result = (|| -> Option<f32> {
         let mut stdout = std::io::stdout().lock();
-        // Send OSC 11 query + DSR fence.
-        write!(stdout, "\x1b]11;?\x07\x1b[5n").ok()?;
+        write!(stdout, "\x1b]11;?\x07\x1b[5n").ok()?; // OSC 11 + DSR fence
         stdout.flush().ok()?;
 
         let mut tty = File::open("/dev/tty").ok()?;
         let mut buf = [0u8; 100];
         let mut written = 0;
 
-        // Read with timeout until we get the fence response ('n').
         while written < buf.len() {
             if !wait_for_input(tty.as_raw_fd(), 100) {
                 break;
@@ -97,7 +81,6 @@ fn osc_background_luma() -> Option<f32> {
                 break;
             }
             written += n;
-            // Check if we've received the fence response.
             if buf[..written].contains(&b'n') {
                 break;
             }
@@ -119,31 +102,28 @@ fn osc_background_luma() -> Option<f32> {
     None
 }
 
-/// Parse an OSC 11 response like `\x1b]11;rgb:ffff/ffff/ffff\x1b\\` and return luma.
+/// Parse `\x1b]11;rgb:RRRR/GGGG/BBBB\x1b\\` and return luma.
 fn parse_osc11_response(response: &str) -> Option<f32> {
-    // Find the rgb: portion. The response is wrapped in ESC sequences.
     let rgb_start = response.find("rgb:")?;
     let raw = &response[rgb_start + 4..];
-    // Format: RRRR/GGGG/BBBB or RR/GG/BB — we take the first 2 hex digits of each.
+    // RRRR/GGGG/BBBB or RR/GG/BB — take the first 2 hex digits of each.
     let parts: Vec<&str> = raw.split('/').collect();
     if parts.len() < 3 {
         return None;
     }
     let r = u8::from_str_radix(parts[0].get(..2)?, 16).ok()?;
     let g = u8::from_str_radix(parts[1].get(..2)?, 16).ok()?;
-    // The blue component may have trailing ESC/BEL, so take only first 2 chars.
+    // Blue may have trailing ESC/BEL; take only the leading hex digits.
     let blue_str: String = parts[2]
         .chars()
         .take_while(|c| c.is_ascii_hexdigit())
         .collect();
     let b = u8::from_str_radix(blue_str.get(..2)?, 16).ok()?;
 
-    // Perceived luminance (sRGB coefficients).
-    Some((0.299 * r as f32 + 0.587 * g as f32 + 0.114 * b as f32) / 255.0)
+    Some((0.299 * r as f32 + 0.587 * g as f32 + 0.114 * b as f32) / 255.0) // sRGB luma
 }
 
-/// Wait for input on a file descriptor with a timeout in milliseconds.
-/// Returns `true` if input is available.
+/// Returns `true` if the fd is readable within `timeout_ms`.
 #[cfg(target_os = "macos")]
 fn wait_for_input(fd: std::os::fd::RawFd, timeout_ms: u64) -> bool {
     unsafe {
@@ -179,15 +159,10 @@ fn wait_for_input(fd: std::os::fd::RawFd, timeout_ms: u64) -> bool {
 // Highlight group population
 // ---------------------------------------------------------------------------
 
-/// Write smelt's default highlight groups into `theme`, sourced from
-/// the Theme's own accent / slug / is_light state. Idempotent — safe
-/// to call every frame so Lua-driven `set_accent` mutations propagate
-/// without an extra notification path.
-///
-/// Group names follow nvim conventions where they overlap (`Visual`,
-/// `Comment`, `ErrorMsg`) and use the `Smelt*` prefix for app-specific
-/// roles (`SmeltAccent`, `SmeltAgent`, `SmeltModePlan`, …). Code with
-/// a `DrawContext` reads these via `ctx.theme.get("Visual")` etc.
+/// Write smelt's highlight groups into `theme` from its accent/slug/light state.
+/// Idempotent — safe to call every frame so `set_accent` mutations propagate.
+/// Names follow nvim conventions (`Visual`, `Comment`) with a `Smelt*` prefix
+/// for app-specific roles.
 pub(crate) fn populate_ui_theme(theme: &mut crate::smelt_term::Theme) {
     use crate::smelt_term::grid::Style;
 
@@ -276,7 +251,7 @@ pub(crate) fn populate_ui_theme(theme: &mut crate::smelt_term::Theme) {
     theme.set("SmeltReasonMax", Style::new().fg(Color::AnsiValue(196)));
 }
 
-/// Preset themes: (name, detail, ansi value)
+/// Available accent presets: `(name, description, ansi_value)`.
 pub const PRESETS: &[(&str, &str, u8)] = &[
     ("ember", "default", crate::smelt_term::DEFAULT_ACCENT),
     ("coral", "salmon pink", 210),

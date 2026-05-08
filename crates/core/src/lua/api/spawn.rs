@@ -1,6 +1,4 @@
-//! `smelt.spawn` binding — fire-and-forget Lua coroutine on the
-//! `LuaTaskRuntime`. Used by plugin authors who want a background
-//! coroutine without owning its result.
+//! `smelt.spawn` — fire-and-forget Lua coroutine on the `LuaTaskRuntime`.
 
 use crate::lua::{LuaShared, TaskCompletion};
 use mlua::prelude::*;

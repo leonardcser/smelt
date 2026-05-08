@@ -1,9 +1,4 @@
--- Built-in /help command.
---
--- Scrollable dialog listing every registered keybinding in two columns
--- (label · detail). Content is generated on-demand from
--- `smelt.keymap.help()` which reflects the active vim
--- setting.
+-- Built-in /help command. Scrollable dialog of all keybindings.
 
 local function build_lines(sections)
   local max_label = 0
@@ -46,16 +41,12 @@ smelt.cmd.register("help", function()
   end)
 end, { desc = "show keybindings" })
 
--- `?` is a global keybind that opens /help — except when the prompt is
--- focused with non-empty content (the `?` is part of a real question).
--- Returning `false` falls through to the built-in dispatcher so the
--- literal `?` lands in the buffer.
+-- `?` opens /help unless the prompt has content or vim is in Normal/Visual mode.
+-- Returns false to let the literal `?` fall through to the buffer.
 smelt.keymap.set("", "?", function()
   if smelt.win.focus() == "prompt" then
     local txt = smelt.prompt.text()
     local vim_mode = smelt.win.mode()
-    -- In vim normal/visual the prompt is read-only-style; let `?` pass
-    -- through to the editor recipe (search, etc).
     if vim_mode == "Normal" or vim_mode == "Visual" or vim_mode == "VisualLine" then
       return false
     end

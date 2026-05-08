@@ -1,17 +1,11 @@
-//! Transcript domain model.
-//!
-//! The content-addressed block store, layout cache, and all mutable
-//! sidecar state (tool output, exec output, etc.)
-//! owned by `TuiApp`. Held inside `app::transcript::Transcript`, which
-//! adds projection / streaming / paint orchestration on top.
+//! Transcript domain model: content-addressed block store, layout cache,
+//! and mutable sidecar state (tool output, exec output). Held inside
+//! `app::transcript::Transcript`, which adds streaming and paint orchestration.
 
 use std::collections::{HashMap, HashSet};
 use std::time::{Duration, Instant};
 
-/// In-flight tool call — a thin handle to a streaming `Block::ToolCall`.
-/// The full state (status, output, user_message, elapsed) lives in
-/// `tool_states` keyed by `call_id`; rewrites go through
-/// `TuiApp::update_tool_state` which invalidates the layout cache.
+/// Handle to an in-flight tool call; full mutable state lives in `tool_states[call_id]`.
 pub struct ActiveTool {
     pub call_id: String,
     pub(crate) block_id: BlockId,
@@ -24,9 +18,6 @@ impl ActiveTool {
     }
 }
 
-/// All data needed to show a confirm dialog. Flows unchanged from
-/// `EngineEvent::RequestPermission` through `SessionControl`, `DeferredDialog`,
-/// `ConfirmContext`, and `ConfirmDialog::new`.
 #[derive(Clone)]
 pub struct ConfirmRequest {
     pub call_id: String,
@@ -34,7 +25,6 @@ pub struct ConfirmRequest {
     pub desc: String,
     pub args: std::collections::HashMap<String, serde_json::Value>,
     pub approval_patterns: Vec<String>,
-    /// Set during dispatch when paths outside the workspace are detected.
     pub outside_dir: Option<std::path::PathBuf>,
     pub summary: Option<String>,
     pub request_id: u64,
@@ -58,11 +48,9 @@ pub struct ToolOutput {
 
 pub type ToolOutputRef = Box<ToolOutput>;
 
-/// Mutable sidecar for a committed `Block::ToolCall`, keyed by `call_id` on
-/// `BlockHistory::tool_states`. Holds every field of a tool block that can
-/// change after the block has been pushed (status flip, streamed output,
-/// finalized elapsed, etc.). Splitting this out keeps `Block::ToolCall`
-/// immutable so its layout can be cached permanently once finalized.
+/// Mutable sidecar for a committed `Block::ToolCall`, keyed by `call_id`.
+/// Splitting mutable fields out keeps `Block::ToolCall` immutable so its
+/// layout can be cached permanently.
 #[derive(Clone)]
 pub struct ToolState {
     pub status: ToolStatus,
@@ -84,8 +72,7 @@ impl ToolState {
 pub enum Block {
     User {
         text: String,
-        /// Bracketed labels for image attachments (e.g. `[screenshot.png]`).
-        /// Used to accent-highlight them in the rendered message.
+        /// Accent-highlighted in the rendered message.
         image_labels: Vec<String>,
     },
     Thinking {
@@ -94,14 +81,10 @@ pub enum Block {
     Text {
         content: String,
     },
-    /// A single line of code from a streaming code block.
     CodeLine {
         content: String,
         lang: String,
     },
-    /// Immutable handle to a committed tool call. The mutable result
-    /// (status, elapsed, output, user_message) lives in `BlockHistory::tool_states`
-    /// keyed by `call_id`; look it up with `TuiApp::tool_state`.
     ToolCall {
         call_id: String,
         name: String,
@@ -165,7 +148,6 @@ pub enum ApprovalScope {
     Workspace,
 }
 
-/// A single runtime permission rule: one tool + one pattern.
 #[derive(Clone)]
 pub struct PermissionEntry {
     pub tool: String,
@@ -181,10 +163,8 @@ pub enum ConfirmChoice {
     AlwaysDir(String, ApprovalScope),
 }
 
-/// Stable, monotonic per-session handle to a block. Independent of
-/// block content: mutating a block in place keeps the same `BlockId`.
-/// Layout cache invalidation on content change is handled via
-/// [`LayoutKey::content_hash`], not by identity.
+/// Stable monotonic per-session handle. Mutating a block in place preserves its
+/// `BlockId`; content changes are detected via `LayoutKey::content_hash`.
 #[derive(
     Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, serde::Serialize, serde::Deserialize,
 )]
@@ -196,12 +176,9 @@ impl BlockId {
     }
 }
 
-/// Per-block view state — how the block is presented inside the
-/// transcript. Independent of the block's [`Status`] (a still-streaming
-/// block can be `Collapsed`; a finished block can be `TrimmedHead`).
-///
-/// The layout cache keys on this so flipping view states invalidates
-/// only the affected block, not the whole cache.
+/// How the block is presented in the transcript. Independent of [`Status`] —
+/// a streaming block can be `Collapsed`. The layout cache keys on this, so
+/// flipping view state invalidates only that block.
 #[derive(
     Debug, Clone, Copy, PartialEq, Eq, Hash, Default, serde::Serialize, serde::Deserialize,
 )]
@@ -217,67 +194,40 @@ pub enum ViewState {
     TrimmedTail { keep: u16 },
 }
 
-/// Lifecycle state of a block. Orthogonal to [`ViewState`]: a block
-/// can be `Streaming` + `Collapsed`, `Done` + `Expanded`, etc.
 #[derive(
     Debug, Clone, Copy, PartialEq, Eq, Hash, Default, serde::Serialize, serde::Deserialize,
 )]
 pub enum Status {
-    /// Block content is still being produced (active stream, running
-    /// tool). The layout cache should expect invalidation on every
-    /// chunk; the renderer may apply a "live" style.
     Streaming,
-    /// Block is final. Cached layouts remain valid until width changes.
     #[default]
     Done,
 }
 
-/// Cache key for a single block's per-frame layout — the inputs to
-/// `layout_block_into` that affect the laid-out output. Used by the
-/// frontend's per-block buffer cache (`BlockBufferCache` in `tui`)
-/// for hit / miss decisions; the model itself stores no layout.
+/// Cache key for a block's per-frame layout. When content changes, the new
+/// `content_hash` misses the old entry — invalidation by keying, not eviction.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub struct LayoutKey {
     pub width: u16,
     pub show_thinking: bool,
     pub view_state: ViewState,
-    /// Content hash of the block this layout was produced for. When a
-    /// block mutates (streaming append / rewrite), its content hash
-    /// changes and the new `LayoutKey` misses the old cached layout
-    /// — automatic invalidation by keying, not by eviction.
     pub content_hash: u64,
 }
 
 pub struct BlockHistory {
-    /// Append-only sequence of `BlockId`s. Each entry is a unique
-    /// monotonic handle; positions are 1:1 with block instances.
     pub order: Vec<BlockId>,
-    /// Per-instance block store.
     pub blocks: HashMap<BlockId, Block>,
-    /// Cached content hash per `BlockId`. Populated on push / mutation
-    /// so layout-key construction and persisted-cache re-keying can
-    /// skip re-hashing the block bytes.
+    /// Cached per-block content hashes; avoids re-hashing on layout-key construction.
     pub(crate) content_hashes: HashMap<BlockId, u64>,
-    /// Monotonic counter driving fresh `BlockId`s on push.
     pub(crate) next_id: u64,
-    /// Mutable sidecar state for `Block::ToolCall` entries, keyed by `call_id`.
     pub tool_states: HashMap<String, ToolState>,
-    /// Per-block view state (collapsed / trimmed / expanded). Absent
-    /// entries default to `ViewState::Expanded`. Mutating this map
-    /// invalidates that block's layout cache — `LayoutKey` includes
-    /// `view_state`.
+    /// Absent entries default to `ViewState::Expanded`.
     pub(crate) view_states: HashMap<BlockId, ViewState>,
-    /// Per-block lifecycle state (streaming vs done). Absent entries
-    /// default to `Status::Done`. Streaming blocks signal to callers
-    /// that layout may change on the next frame.
+    /// Absent entries default to `Status::Done`.
     pub(crate) statuses: HashMap<BlockId, Status>,
-    /// Block ids that transitioned from `Streaming` to `Done` since the
-    /// last drain. Drained by the app loop to emit `block_done`
-    /// autocmds into the Lua runtime.
+    /// Blocks that transitioned `Streaming` → `Done` since last drain;
+    /// drained by the app loop to emit `block_done` autocmds.
     pub finished_blocks: Vec<BlockId>,
-    /// Monotonic generation counter — bumped on every content mutation
-    /// (push, rewrite, status change, view state change, truncate,
-    /// clear). Used by `TranscriptSnapshot` to detect staleness.
+    /// Bumped on every mutation; used by `TranscriptSnapshot` to detect staleness.
     generation: u64,
 }
 
@@ -304,14 +254,10 @@ impl BlockHistory {
         self.generation = self.generation.wrapping_add(1);
     }
 
-    /// Drain block ids that transitioned `Streaming` → `Done` since the
-    /// last call.
     pub fn drain_finished_blocks(&mut self) -> Vec<BlockId> {
         std::mem::take(&mut self.finished_blocks)
     }
 
-    /// Cached content hash for `id`. Falls back to re-hashing if the
-    /// cache entry is missing (shouldn't happen in steady state).
     pub fn content_hash(&self, id: BlockId) -> u64 {
         if let Some(h) = self.content_hashes.get(&id) {
             return *h;
@@ -331,14 +277,10 @@ impl BlockHistory {
         &self.blocks[&self.order[i]]
     }
 
-    /// Current view state for `id`. Defaults to [`ViewState::Expanded`]
-    /// when no explicit state has been set.
     pub(crate) fn view_state(&self, id: BlockId) -> ViewState {
         self.view_states.get(&id).copied().unwrap_or_default()
     }
 
-    /// Set the view state for `id`. Bumps the generation counter so
-    /// the frontend per-block buffer cache picks up the change.
     pub(crate) fn set_view_state(&mut self, id: BlockId, state: ViewState) {
         let prev = self.view_states.get(&id).copied().unwrap_or_default();
         if prev == state {
@@ -352,16 +294,12 @@ impl BlockHistory {
         self.bump_generation();
     }
 
-    /// Current status for `id`. Defaults to [`Status::Done`].
-    /// Test-only accessor — production code reads status as part of
-    /// the projected snapshot rather than poking the field directly.
     #[cfg(test)]
     pub(crate) fn status(&self, id: BlockId) -> Status {
         self.statuses.get(&id).copied().unwrap_or_default()
     }
 
-    /// Set the status for `id`. Does not invalidate the layout cache —
-    /// status is a style concern, not a layout one.
+    /// Status changes do not invalidate the layout cache (style concern only).
     pub(crate) fn set_status(&mut self, id: BlockId, status: Status) {
         let was_streaming = matches!(
             self.statuses.get(&id).copied().unwrap_or_default(),
@@ -378,11 +316,6 @@ impl BlockHistory {
         self.bump_generation();
     }
 
-    /// Append `block` and return a fresh monotonic `BlockId`. Each
-    /// push produces a unique id; identical content at two positions
-    /// gets distinct ids and distinct cache slots. Cross-session cache
-    /// sharing of identical blocks is preserved at the persistence
-    /// boundary (see [`Self::export_layouts_by_hash`]).
     pub(crate) fn push(&mut self, block: Block) -> BlockId {
         let hash = block.content_hash();
         let id = BlockId(self.next_id);
@@ -394,7 +327,6 @@ impl BlockHistory {
         id
     }
 
-    /// Push a `Block::ToolCall` alongside its initial `ToolState`.
     pub(crate) fn push_with_state(
         &mut self,
         block: Block,
@@ -405,22 +337,15 @@ impl BlockHistory {
         self.push(block)
     }
 
-    /// Replace the content of an existing block in place. Preserves
-    /// `BlockId`, `Status`, and `ViewState`; updates the cached content
-    /// hash so the next layout-cache lookup misses stale entries
-    /// automatically via `LayoutKey::content_hash`.
-    ///
-    /// The canonical path for streaming updates: the live streamer
-    /// holds a `BlockId` from `push`, then calls `rewrite` as each
-    /// chunk arrives. No-ops when the block doesn't exist (e.g. it
-    /// was truncated by a rewind while a stream was in flight).
+    /// Replace block content in place. Preserves `BlockId`, `Status`, and
+    /// `ViewState`. No-ops when the block doesn't exist (e.g. truncated during
+    /// a stream). Same content hash skips the generation bump.
     pub(crate) fn rewrite(&mut self, id: BlockId, block: Block) {
         if !self.blocks.contains_key(&id) {
             return;
         }
         let hash = block.content_hash();
         if self.content_hashes.get(&id) == Some(&hash) {
-            // Same content — nothing to do, cache stays warm.
             self.blocks.insert(id, block);
             return;
         }
@@ -440,10 +365,6 @@ impl BlockHistory {
         self.bump_generation();
     }
 
-    /// Gap (in rows) before the block at `i`, based on adjacency rules.
-    /// Streaming blocks participate in the main paint path like any other
-    /// block — alt-buffer repaints every frame, so "live" vs "committed"
-    /// is a style distinction, not a layout one.
     pub fn block_gap(&self, i: usize) -> u16 {
         if i > 0 {
             gap_between(self.block_at(i - 1), self.block_at(i))
@@ -452,13 +373,8 @@ impl BlockHistory {
         }
     }
 
-    /// Rows the block at `i` would occupy under `key`. Lays the block out
-    /// if no cached layout exists, so that the caller's subsequent render
-    /// pass gets a cache hit.
-    /// Fill in per-block view state on a base layout key. Callers build
-    /// `(width, show_thinking, view_state=Expanded)` without needing to
-    /// know each block's individual view state; this substitutes the
-    /// actual per-block value so the cache lookup + layout pass agree.
+    /// Substitute the actual per-block view state and content hash into a base
+    /// `LayoutKey` so cache lookups and layout passes agree.
     pub fn resolve_key(&self, id: BlockId, base: LayoutKey) -> LayoutKey {
         LayoutKey {
             view_state: self.view_state(id),
@@ -482,8 +398,6 @@ impl BlockHistory {
         self.gc_tool_states();
     }
 
-    /// Drop tool states whose owning `Block::ToolCall` no longer appears in
-    /// `order`.
     pub(crate) fn gc_tool_states(&mut self) {
         let live: HashSet<String> = self
             .order
@@ -501,45 +415,30 @@ impl BlockHistory {
     }
 }
 
-/// Streaming state for incremental thinking output.
-/// Completed lines are committed to block history immediately.
-/// Only the current incomplete line lives in the overlay.
+/// Completed lines are committed immediately; only the current incomplete line lives here.
 pub struct ActiveThinking {
     pub current_line: String,
     pub paragraph: String,
     pub streaming_id: Option<BlockId>,
 }
 
-/// Streaming state for incremental LLM text output.
-/// Completed lines are committed to block history immediately.
-/// Only the current incomplete line lives in the overlay.
 pub struct ActiveText {
     pub(crate) current_line: String,
     pub(crate) paragraph: String,
     pub(crate) in_code_block: Option<String>,
-    /// Table rows accumulated silently during streaming.
     pub(crate) table_rows: Vec<String>,
-    /// Cached count of non-separator data rows (avoids recomputing per frame).
+    /// Cached non-separator row count; avoids recomputing per frame.
     pub(crate) table_data_rows: usize,
-    /// Streaming block id for the in-flight paragraph (if any).
     pub(crate) streaming_id: Option<BlockId>,
-    /// Streaming block id for the in-flight table (if any). Rewritten
-    /// with the accumulated table text on each new row.
     pub(crate) table_streaming_id: Option<BlockId>,
-    /// Streaming block id for the in-flight code line (if any).
-    /// Rewritten as characters flow; set to `Done` on newline.
     pub(crate) code_line_streaming_id: Option<BlockId>,
 }
 
-/// Number of blank lines to insert between two adjacent blocks, based
-/// on adjacency rules (CodeLine→CodeLine: 0; transitions across user
-/// / exec / thinking / compacted: 1; etc.).
+/// Blank row gap before `below` given the preceding block. Headings suppress
+/// the trailing gap; CodeLine→CodeLine is zero; most other transitions are 1.
 pub fn gap_between(above: &Block, below: &Block) -> u16 {
     match (above, below) {
-        // CodeLine→CodeLine: no gap (consecutive lines in same block).
         (Block::CodeLine { .. }, Block::CodeLine { .. }) => return 0,
-        // Transitions into/out of code lines need a blank line,
-        // except after headings (headings have no trailing gap).
         (Block::CodeLine { .. }, _) => return 1,
         (Block::Text { content }, Block::CodeLine { .. }) => {
             let last_line = content.lines().last().unwrap_or("");
@@ -565,9 +464,6 @@ pub fn gap_between(above: &Block, below: &Block) -> u16 {
         (_, Block::Compacted { .. }) => 1,
         (Block::Compacted { .. }, _) => 1,
 
-        // Text→Text: 1 gap (paragraph spacing), except when the previous
-        // text block ends with a markdown heading — headings do not get a
-        // trailing blank line.
         (Block::Text { content }, Block::Text { .. }) => {
             let last_line = content.lines().last().unwrap_or("");
             if last_line.trim_start().starts_with('#') {
@@ -580,9 +476,7 @@ pub fn gap_between(above: &Block, below: &Block) -> u16 {
     }
 }
 
-/// Heuristic: does this look like a `/command` line? Used by the
-/// headless prompt path before the Lua command registry is reachable
-/// and by the user-block renderer to accent-color the whole line.
+/// Heuristic: does this look like a `/command` line?
 pub fn is_command_like(text: &str) -> bool {
     let name = text
         .strip_prefix('/')

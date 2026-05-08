@@ -1,8 +1,4 @@
--- Built-in web_fetch tool — fetch a URL and extract content via an
--- isolated LLM call. Composes `smelt.http.{get,cache,random_user_agent}`,
--- `smelt.html.{title,links,to_text,to_markdown}`,
--- `smelt.image.data_url_from_bytes`, and `smelt.engine.ask` for the
--- extraction step. Mirrors the retired Rust `WebFetchTool`.
+-- Built-in web_fetch tool. Fetches a URL and extracts content via an isolated LLM call.
 
 local MAX_RESPONSE_SIZE = 5 * 1024 * 1024
 local DEFAULT_TIMEOUT = 30
@@ -31,8 +27,7 @@ local function domain_pattern(url)
   return scheme:lower() .. "://" .. host:lower() .. "/*"
 end
 
--- Match the retired Rust truncate_output: hard line cap, then char-
--- safe byte cap, then a one-line tail note.
+-- Hard line cap, then char-safe byte cap, then a truncation note.
 local function truncate_output(text, max_lines, max_bytes)
   local lines = {}
   for line in (text .. "\n"):gmatch("([^\n]*)\n") do
@@ -184,9 +179,7 @@ local function fetch_raw(args)
   return output
 end
 
--- Synchronous wrapper around `smelt.engine.ask`: spawns the auxiliary
--- request, parks the coroutine, returns the response text once the
--- engine emits `EngineAskResponse`.
+-- Spawn an auxiliary LLM request and park the coroutine until it responds.
 local function ask_extract(content, prompt)
   local id = smelt.task.alloc()
   smelt.engine.ask({
@@ -243,10 +236,7 @@ smelt.tools.register({
     return smelt.layout.vbox(items)
   end,
   decide = function(args, mode)
-    -- Compose the web_fetch decision: tool-level + per-URL pattern.
-    -- Deny dominates. A pattern allow short-circuits to Allow even if
-    -- the tool decision was Ask. An Ask pattern combined with Allow
-    -- tool collapses to Ask. Otherwise the URL pattern decision wins.
+    -- Deny dominates; pattern allow short-circuits; Allow tool + Ask pattern → Ask.
     local tool = smelt.permissions.check_tool(mode, "web_fetch")
     if tool == "deny" then return "deny" end
     local pat = smelt.permissions.check(mode, "web_fetch", args.url or "")

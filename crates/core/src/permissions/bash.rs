@@ -13,8 +13,7 @@ const SHELL_OPERATORS: &[(&str, usize)] = &[
     ("\n", 1),
 ];
 
-/// Split a command string on shell operators, returning each sub-command
-/// paired with the operator that follows it (None for the last command).
+/// Split on shell operators; pairs each sub-command with the following operator (`None` for last).
 pub fn split_shell_commands_with_ops(cmd: &str) -> Vec<(String, Option<String>)> {
     let (commands, operators) = split_impl(cmd);
     commands
@@ -24,12 +23,10 @@ pub fn split_shell_commands_with_ops(cmd: &str) -> Vec<(String, Option<String>)>
         .collect()
 }
 
-/// Split a command string on shell operators (&&, ||, ;, |, &, newline).
-/// Quote-aware: operators inside single or double quotes are ignored.
-/// Also extracts commands embedded in $(...), backticks, and (...) subshells.
+/// Split on shell operators (`&&`, `||`, `;`, `|`, `&`, newline), quote-aware.
+/// Also extracts commands embedded in `$(...)`, backticks, and `(...)` subshells.
 pub fn split_shell_commands(cmd: &str) -> Vec<String> {
     let mut result = split_impl(cmd).0;
-    // Post-process: extract embedded commands from subshells and substitutions.
     let mut i = 0;
     while i < result.len() {
         let extracted = extract_embedded_commands(&result[i]);
@@ -78,8 +75,7 @@ fn split_impl(cmd: &str) -> (Vec<String>, Vec<String>) {
             _ => {
                 let rest = &cmd[i..];
 
-                // Handle heredoc: << or <<- followed by a delimiter word.
-                // Skip everything until the delimiter appears on its own line.
+                // Heredoc: skip body so its content isn't parsed as operators.
                 if rest.starts_with("<<") {
                     if let Some((_header_end, body_end)) = parse_heredoc(cmd, i) {
                         i = body_end;
@@ -87,17 +83,14 @@ fn split_impl(cmd: &str) -> (Vec<String>, Vec<String>) {
                     }
                 }
 
-                // Handle redirections containing & (e.g. 2>&1, >&2, &>, &>>)
-                // Don't treat & as an operator in these contexts.
+                // Redirections involving & (2>&1, >&2, &>, &>>) — not an operator.
                 if rest.starts_with("&>") {
-                    // &> or &>> redirection
                     i += if rest.starts_with("&>>") { 3 } else { 2 };
                     continue;
                 }
                 if bytes[i] == b'&' && i > 0 && bytes[i - 1] == b'>' {
-                    // >& redirection (e.g. 2>&1)
+                    // >& fd duplication (e.g. 2>&1) — skip the fd digit(s).
                     i += 1;
-                    // skip the fd number after
                     while i < len && bytes[i].is_ascii_digit() {
                         i += 1;
                     }
@@ -128,14 +121,9 @@ fn split_impl(cmd: &str) -> (Vec<String>, Vec<String>) {
     (commands, operators)
 }
 
-/// Parse a heredoc starting at `cmd[i..]` (which must begin with `<<`).
-/// Returns `Some((header_end, body_end))` where:
-///   - `header_end` is the byte offset (relative to `cmd`) just past the
-///     delimiter word (e.g. after `'EOF'` in `<< 'EOF'`).
-///   - `body_end` is the byte offset past the closing delimiter line
-///     (the `\n` after `EOF`), or `cmd.len()` if no closing delimiter.
-///
-/// Returns `None` if no valid delimiter is found.
+/// Parse a heredoc at `cmd[i..]` (must start with `<<`).
+/// Returns `(header_end, body_end)`: byte offsets past the delimiter word and past the
+/// closing delimiter line respectively (`cmd.len()` if no closing delimiter found).
 fn parse_heredoc(cmd: &str, i: usize) -> Option<(usize, usize)> {
     let rest = &cmd[i..];
     let bytes = cmd.as_bytes();
@@ -143,13 +131,11 @@ fn parse_heredoc(cmd: &str, i: usize) -> Option<(usize, usize)> {
 
     let mut hi = 2; // skip "<<"
     if hi < rest.len() && rest.as_bytes()[hi] == b'-' {
-        hi += 1;
+        hi += 1; // <<- strips leading tabs
     }
-    // Skip whitespace before delimiter.
     while hi < rest.len() && rest.as_bytes()[hi] == b' ' {
         hi += 1;
     }
-    // Read the delimiter (strip quotes).
     let mut delim_start = hi;
     let mut strip_quotes = false;
     if hi < rest.len() && (rest.as_bytes()[hi] == b'\'' || rest.as_bytes()[hi] == b'"') {
@@ -179,7 +165,6 @@ fn parse_heredoc(cmd: &str, i: usize) -> Option<(usize, usize)> {
     }
     let header_end = i + hi;
 
-    // Scan for the closing delimiter on its own line.
     let mut si = header_end;
     while si < len {
         if bytes[si] == b'\n' {
@@ -195,13 +180,10 @@ fn parse_heredoc(cmd: &str, i: usize) -> Option<(usize, usize)> {
         }
         si += 1;
     }
-    // No closing delimiter — consume rest.
-    Some((header_end, len))
+    Some((header_end, len)) // no closing delimiter — consume rest
 }
 
-/// Strip heredoc bodies from a command string so that downstream parsing
-/// (e.g. `extract_embedded_commands`) does not misinterpret content inside
-/// heredocs as shell constructs like `(...)` subshells.
+/// Strip heredoc bodies so downstream parsing doesn't misinterpret body content as shell constructs.
 pub(super) fn strip_heredoc_bodies(cmd: &str) -> String {
     let bytes = cmd.as_bytes();
     let len = bytes.len();
@@ -243,13 +225,9 @@ pub(super) fn strip_heredoc_bodies(cmd: &str) -> String {
                 let rest = &cmd[i..];
                 if rest.starts_with("<<") {
                     if let Some((header_end, body_end)) = parse_heredoc(cmd, i) {
-                        // Keep the header (e.g. "<< 'EOF'") and the closing
-                        // delimiter line, but drop the body in between.
+                        // Emit header and closing delimiter line; drop the body.
                         out.push_str(&cmd[i..header_end]);
-                        // Find the closing delimiter line start (\n before it).
                         if body_end < len || cmd[header_end..body_end].contains('\n') {
-                            // The last \nDELIM portion: find where the closing
-                            // delimiter line begins.
                             if let Some(last_nl) = cmd[header_end..body_end].rfind('\n') {
                                 out.push_str(&cmd[header_end + last_nl..body_end]);
                             }
@@ -266,10 +244,7 @@ pub(super) fn strip_heredoc_bodies(cmd: &str) -> String {
     out
 }
 
-/// Extract commands embedded in $(...), `...`, and (...) subshells.
-/// Returns additional commands found inside these constructs.
-/// The original command is kept as-is (for pattern matching); these are extras
-/// that also need permission checks.
+/// Extract commands from `$(...)`, backtick, and `(...)` subshells for separate permission checks.
 fn extract_embedded_commands(raw_cmd: &str) -> Vec<String> {
     let stripped = strip_heredoc_bodies(raw_cmd);
     let cmd: &str = &stripped;
@@ -281,8 +256,7 @@ fn extract_embedded_commands(raw_cmd: &str) -> Vec<String> {
 
     while i < len {
         match bytes[i] {
-            // Single quotes are fully opaque — no expansions inside.
-            // Inside double quotes single quotes are literal, so skip this.
+            // Single quotes: fully opaque (no expansions). Not applicable inside double quotes.
             b'\'' if !in_dquote => {
                 i += 1;
                 while i < len && bytes[i] != b'\'' {
@@ -292,9 +266,7 @@ fn extract_embedded_commands(raw_cmd: &str) -> Vec<String> {
                     i += 1;
                 }
             }
-            // Toggle double-quote state. Bash expands $() and backticks
-            // inside double quotes, so we keep scanning — but plain (...)
-            // subshells are NOT expanded inside double quotes.
+            // Double quotes: $() and backticks still expand inside; plain (...) subshells do not.
             b'"' => {
                 in_dquote = !in_dquote;
                 i += 1;
@@ -302,7 +274,6 @@ fn extract_embedded_commands(raw_cmd: &str) -> Vec<String> {
             b'\\' if i + 1 < len => {
                 i += 2;
             }
-            // $( ... ) — valid both inside and outside double quotes
             b'$' if i + 1 < len && bytes[i + 1] == b'(' => {
                 i += 2;
                 if let Some((inner, end)) = find_matching_paren(cmd, i) {
@@ -312,7 +283,6 @@ fn extract_embedded_commands(raw_cmd: &str) -> Vec<String> {
                     i = end + 1;
                 }
             }
-            // backtick substitution — valid both inside and outside double quotes
             b'`' => {
                 i += 1;
                 let start = i;
@@ -330,7 +300,6 @@ fn extract_embedded_commands(raw_cmd: &str) -> Vec<String> {
                     i += 1;
                 }
             }
-            // ( ... ) subshell — only outside quotes
             b'(' if !in_dquote => {
                 i += 1;
                 if let Some((inner, end)) = find_matching_paren(cmd, i) {
@@ -348,9 +317,7 @@ fn extract_embedded_commands(raw_cmd: &str) -> Vec<String> {
     extra
 }
 
-/// Find the matching `)` for an already-opened `(`, respecting nesting and quotes.
-/// `start` is the index right after the opening `(`.
-/// Returns the inner slice and the index of the closing `)`.
+/// Find the closing `)` for an already-consumed `(`. Returns the inner slice and close index.
 fn find_matching_paren(cmd: &str, start: usize) -> Option<(&str, usize)> {
     let bytes = cmd.as_bytes();
     let len = bytes.len();
@@ -402,18 +369,14 @@ fn find_matching_paren(cmd: &str, start: usize) -> Option<(&str, usize)> {
     None
 }
 
-/// Check whether a sub-command is a bare `cd` invocation (e.g. `cd /tmp`,
-/// `cd`, `cd -`).  Permission for the target directory is handled by the
-/// workspace path restriction in [`Permissions::decide`], so `cd` itself
-/// is always allowed at the command level.
+/// `cd` is always allowed at the command level; workspace path restriction handles the target.
 pub(super) fn is_cd_command(subcmd: &str) -> bool {
     let trimmed = subcmd.trim();
     trimmed == "cd" || trimmed.starts_with("cd ") || trimmed.starts_with("cd\t")
 }
 
-/// Check whether a command contains an output redirection (`>`, `>>`, `&>`, `&>>`)
-/// to a real file.  Redirects to `/dev/null` are harmless and ignored.
-/// Quote-aware: ignores redirection operators inside single or double quotes.
+/// Returns true if `cmd` redirects output to a real file (`>`, `>>`, `&>`, `&>>`).
+/// Redirects to `/dev/null` and fd duplications (`2>&1`) are ignored. Quote-aware.
 pub(super) fn has_output_redirection(cmd: &str) -> bool {
     let bytes = cmd.as_bytes();
     let len = bytes.len();
@@ -446,30 +409,28 @@ pub(super) fn has_output_redirection(cmd: &str) -> bool {
                 i += 2;
             }
             b'<' => {
-                // Skip << (heredoc) — not an output redirection by itself.
-                if i + 1 < len && bytes[i + 1] == b'<' {
-                    i += 2;
+                // << is heredoc, < is input redirect — neither is output.
+                i += if i + 1 < len && bytes[i + 1] == b'<' {
+                    2
                 } else {
-                    // Input redirection <, not output.
-                    i += 1;
-                }
+                    1
+                };
             }
             b'&' if i + 1 < len && bytes[i + 1] == b'>' => {
-                // &> or &>> — output redirection.
                 i += 1; // now on '>'
                 if !redirect_is_dev_null(bytes, &mut i) {
                     return true;
                 }
             }
             b'>' => {
-                // >&N is fd duplication (e.g. 2>&1), not file output.
+                // >&N is fd duplication, not file output.
                 if i + 1 < len && bytes[i + 1] == b'&' {
                     let j = i + 2;
                     if j < len && bytes[j].is_ascii_digit() {
                         i = j + 1;
                         continue;
                     }
-                    // >& without digit — treat as real redirection.
+                    // >& without a digit — treat as real redirection.
                 }
                 if !redirect_is_dev_null(bytes, &mut i) {
                     return true;
@@ -483,20 +444,17 @@ pub(super) fn has_output_redirection(cmd: &str) -> bool {
     false
 }
 
-/// Starting at a `>` in `bytes[*pos]`, skip past `>` or `>>` and whitespace,
-/// then check whether the target is `/dev/null`.  Advances `*pos` past the
-/// target on match so the caller can continue scanning.
+/// Starting at `bytes[*pos]` (`>`), check whether the redirection target is `/dev/null`.
+/// Advances `*pos` past the target on a match.
 fn redirect_is_dev_null(bytes: &[u8], pos: &mut usize) -> bool {
     let len = bytes.len();
     let mut j = *pos;
-    // Skip > or >>
     if j < len && bytes[j] == b'>' {
         j += 1;
     }
     if j < len && bytes[j] == b'>' {
         j += 1; // >>
     }
-    // Skip whitespace
     while j < len && (bytes[j] == b' ' || bytes[j] == b'\t') {
         j += 1;
     }
@@ -509,7 +467,6 @@ fn redirect_is_dev_null(bytes: &[u8], pos: &mut usize) -> bool {
             return true;
         }
     }
-    // Not /dev/null — don't advance pos; caller will return true.
-    *pos += 1;
+    *pos += 1; // not /dev/null; caller will return true
     false
 }

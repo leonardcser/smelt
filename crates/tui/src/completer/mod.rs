@@ -8,12 +8,9 @@ pub(crate) mod history;
 pub(crate) struct CompletionItem {
     pub(crate) label: String,
     pub(crate) description: Option<String>,
-    /// Optional ANSI color. When set, the row's pill + label + description
-    /// are all painted in this color.
+    /// When set, paints the row's pill, label, and description in this color.
     pub(crate) ansi_color: Option<u8>,
-    /// Extra terms to match against when filtering — label and this
-    /// field are both scanned. Lets a plugin match on hidden fields
-    /// (provider + key for the model picker) without displaying them.
+    /// Extra match terms not shown in the label (e.g. provider key for the model picker).
     pub(crate) search_terms: Option<String>,
 }
 
@@ -28,20 +25,16 @@ pub(crate) struct Completer {
     /// Byte offset in the buffer where the trigger char starts.
     pub(crate) anchor: usize,
     pub(crate) kind: CompleterKind,
-    /// Current query (text after trigger).
     pub(crate) query: String,
-    /// Filtered results.
     pub(crate) results: Vec<CompletionItem>,
-    /// Selected index in results.
     pub(crate) selected: usize,
-    /// Full item list (cached on activation).
     pub(super) all_items: Vec<CompletionItem>,
-    /// Stable identity of the selected item across filter updates.
+    /// Stable selection identity preserved across re-filter.
     pub(super) selected_key: Option<String>,
 }
 
 impl Completer {
-    /// Replace the item list and re-filter, preserving the current selection.
+    /// Replace the item list and re-filter, keeping the current selection stable.
     pub(crate) fn refresh_items(&mut self, items: Vec<CompletionItem>) {
         self.all_items = items;
         self.filter_inner(true);
@@ -51,12 +44,10 @@ impl Completer {
         &self.all_items
     }
 
-    /// Returns the selected item, if any.
     pub(crate) fn selected_item(&self) -> Option<&CompletionItem> {
         self.results.get(self.selected)
     }
 
-    /// Maximum rows to display for the inline completer popup.
     pub(crate) fn max_visible_rows(&self) -> usize {
         5
     }
@@ -160,9 +151,7 @@ impl Completer {
     }
 }
 
-/// Couples a `Completer` model with its picker-overlay leaf WinId.
-/// One owner, one lifecycle: created when a completer opens, destroyed
-/// when it closes.
+/// Pairs a `Completer` with its picker-overlay leaf. One lifecycle: open → close.
 pub(crate) struct CompleterSession {
     pub(crate) completer: Completer,
     pub(crate) picker_win: Option<crate::smelt_term::WinId>,

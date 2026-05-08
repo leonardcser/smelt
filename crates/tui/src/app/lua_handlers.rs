@@ -1,16 +1,10 @@
-//! `pub(crate)` operations called by Lua bindings through `with_app`.
-//! Each method wraps a multi-step TuiApp mutation that the Lua layer
-//! invokes as a single semantic action — `/<command>` dispatch,
-//! settings toggle, transcript yank, and so on.
+//! Operations called by Lua bindings through `with_app`.
 
 use crate::app::TuiApp;
 use smelt_core::transcript_model::ConfirmChoice;
 
 impl TuiApp {
-    /// Run a slash command. Mirrors the user typing `:<line>` into
-    /// the cmdline. Lua command bodies do their own side effects via
-    /// `with_app`; the only `CommandAction` left to forward is `Exec`
-    /// for shell escapes (`! cmd`).
+    /// Run a slash command as if typed into the cmdline. Forwards `Exec` for shell escapes.
     pub(crate) fn apply_lua_command(&mut self, line: &str) {
         match crate::commands::run_command(self, line) {
             crate::app::CommandAction::Exec(handle) => {
@@ -20,8 +14,6 @@ impl TuiApp {
         }
     }
 
-    /// Compact the transcript or notify "nothing to compact" when
-    /// `session.messages` is empty.
     pub(crate) fn compact_or_notify(&mut self, instructions: Option<String>) {
         if self.core.session.messages.is_empty() {
             self.notify_error("nothing to compact".into());
@@ -30,8 +22,7 @@ impl TuiApp {
         }
     }
 
-    /// Rewind to a transcript block (Rewind dialog) or, when
-    /// `block_idx` is `None`, optionally restore Vim Insert mode.
+    /// Rewind to a transcript block, or restore Vim Insert mode when `block_idx` is `None`.
     pub(crate) fn rewind_to_block(&mut self, block_idx: Option<usize>, restore_vim_insert: bool) {
         if let Some(bidx) = block_idx {
             if self.agent.is_some() {
@@ -49,8 +40,7 @@ impl TuiApp {
         }
     }
 
-    /// Load a saved session by id. Refreshes screen and scrolls to
-    /// bottom on success; silent no-op on missing id.
+    /// Load a saved session by id, refresh screen, and scroll to bottom. Silent no-op on miss.
     pub(crate) fn load_session_by_id(&mut self, id: &str) {
         if let Some(loaded) = smelt_core::session::load(id) {
             self.load_session(loaded);
@@ -60,8 +50,6 @@ impl TuiApp {
         }
     }
 
-    /// Copy the transcript block under the cursor to the clipboard
-    /// (`/yank-block`). Notifies success / failure.
     pub(crate) fn yank_current_block(&mut self) {
         let abs_row = self.transcript_window.cursor_abs_row();
         if let Some(text) = self.block_text_at_row(abs_row, self.core.config.settings.show_thinking)
@@ -75,9 +63,7 @@ impl TuiApp {
         }
     }
 
-    /// Resolve an open Confirm dialog with the user's choice. Heavy
-    /// cancel (flush events, drop the active turn) when the resolution
-    /// asks the turn to cancel.
+    /// Resolve a Confirm dialog. Cancels the active turn when the choice requires it.
     pub(crate) fn handle_confirm_resolve(
         &mut self,
         choice: ConfirmChoice,

@@ -1,14 +1,10 @@
-//! `smelt.trust` — query and mutate the per-project content trust
-//! store backing `<cwd>/.smelt/{init.lua, plugins/*.lua,
-//! commands/*.md}` autoload.
+//! `smelt.trust` — query and mutate the per-project content trust store.
 
 use mlua::prelude::*;
 
 pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
     let trust_tbl = lua.create_table()?;
 
-    // Returns one of `"trusted" / "untrusted" / "no_content"` for
-    // the current working directory.
     trust_tbl.set(
         "status",
         lua.create_function(|_, ()| {
@@ -22,9 +18,6 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
         })?,
     )?;
 
-    // Marks the current `.smelt/` content trusted by hashing it and
-    // writing the digest to the trust store. Returns the recorded
-    // hash on success; raises a Lua error otherwise.
     trust_tbl.set(
         "mark",
         lua.create_function(|_, ()| {

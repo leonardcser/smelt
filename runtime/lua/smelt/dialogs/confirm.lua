@@ -1,35 +1,7 @@
--- `smelt.confirm.open(handle_id)` — built-in tool-approval dialog.
---
--- Fired from the agent loop after registering a request in
--- `App::confirm_requests`. Plugins can override this function in
--- their init.lua to swap the default UI.
---
--- Panels (top → bottom, indices below match the keymap callbacks):
---   1 title    — bash-syntax-highlit ` tool: desc Allow?`
---   2 summary  — optional muted summary, hidden when empty
---   3 preview  — diff / notebook / file / bash body, hidden when empty
---   4 options  — yes / no + dynamic "always allow …" entries
---   5 reason   — optional message attached to the decision
---
--- Keys:
---   e                    focus the reason input
---   <S-Tab>              toggle app mode; auto-allow + close when the
---                        new mode covers this request
---   Enter                resolve with the focused option (+ reason text)
---   Esc / Ctrl-C         resolve as "no"
---
--- The preview panel is interactive — click it to focus, then scroll
--- with the wheel or vim motions (j/k, gg/G, Ctrl-D/Ctrl-U).
+-- Built-in tool-approval dialog. Override `smelt.confirm.open` in init.lua to
+-- swap the default UI. Tool `preview` callbacks live in each tool's Lua definition.
 
--- Each tool registers its own `preview(buf, args)` callback (see
--- `tools/{bash,edit_file,write_file,notebook_edit}.lua`). The dispatch
--- routes by tool name on the Rust side via `smelt.confirm._render_preview`,
--- so adding a new tool with a confirm preview is a matter of dropping a
--- callback into its Lua definition — no edit here.
-
--- `~/`-rewrite of the process cwd, used for "in {cwd}" labels on the
--- workspace-scoped variants. Falls back to the absolute path if the
--- cwd is outside HOME.
+-- `~/`-rewrite of the process cwd for workspace-scoped "always allow" labels.
 local function pretty_cwd()
   local cwd = smelt.os.cwd() or ""
   local home = smelt.os.home()
@@ -41,10 +13,7 @@ local function pretty_cwd()
   return cwd
 end
 
--- Build (labels, decisions) in parallel from the request payload.
--- Decision strings round-trip through `smelt.confirm._resolve`; the
--- `confirm_resolved` cell payload publishes the same string so plugin
--- subscribers branch on a stable lexicon.
+-- Build option labels and decision strings from the request payload.
 local function build_options(req)
   local labels, decisions = {}, {}
   local function push(label, decision)
@@ -84,12 +53,8 @@ local function build_options(req)
 end
 
 function smelt.confirm.open(handle_id)
-  -- Request payload (tool / desc / args / options / approval patterns
-  -- / outside_dir / cwd_label / handle_id) flows through the
-  -- `confirm_requested` cell. Bail if the cell snapshot doesn't match
-  -- this handle (a follow-up request flipped the cell before this
-  -- dialog opened — the next `fire_confirm_open` will hand us the
-  -- right one).
+  -- Bail if the cell doesn't match this handle; a newer request may have
+  -- replaced it before this dialog opened.
   local req = smelt.cell("confirm_requested"):get()
   if not req or req.handle_id ~= handle_id then return end
 
@@ -134,13 +99,6 @@ function smelt.confirm.open(handle_id)
   if not d then return end
 
   local resolved = false
-  -- Track the options panel's current selection (list leaves fire
-  -- `selection_changed { index = 1-based }` on cursor move) and
-  -- whether the reason input has any user-typed text. Both flags
-  -- are needed so a Submit from either leaf can resolve with the
-  -- right option + the right reason: ctx.index is only present when
-  -- Submit comes from the options leaf; the placeholder-vs-typed
-  -- distinction can't be made from the buffer alone.
   local selected_idx = 1
   local typed_reason = false
   local function close_with(idx, message)
@@ -178,7 +136,6 @@ function smelt.confirm.open(handle_id)
   end)
 
   smelt.win.on_event(d.win, "dismiss", function()
-    -- "no" is always option 2 (yes/no come first).
-    close_with(2, nil)
+    close_with(2, nil) -- "no" is always option 2
   end)
 end

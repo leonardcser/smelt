@@ -12,17 +12,13 @@ pub(crate) struct LayoutState {
 #[derive(Debug)]
 pub(crate) struct LayoutInput {
     pub(crate) term_height: u16,
-    /// Rows for the chrome leaf above the input (queued + stash +
-    /// top bar). `>= 1` — the top bar is always present.
+    /// Chrome rows above input (queued + stash + top bar); always `>= 1`.
     pub(crate) prompt_above_rows: u16,
-    /// Rows for the input leaf itself, before clamping. `>= 1`.
+    /// Input rows before clamping; always `>= 1`.
     pub(crate) prompt_input_rows: u16,
 }
 
-/// Build the splits tree for the main TUI layout. Outer vbox:
-/// transcript fills the top, with a 1-row gap, then an inner vbox
-/// stacking prompt-above + prompt + prompt-below + status. The host
-/// publishes this tree to `Ui` via `Ui::set_layout` once per frame.
+/// Build the splits tree for the main TUI layout.
 pub(crate) fn build_layout_tree(
     input: &LayoutInput,
     status_win: crate::smelt_term::WinId,
@@ -37,8 +33,7 @@ pub(crate) fn build_layout_tree(
     let below = 1u16;
     let status = 1u16;
     let chrome = above + below + status;
-    // Cap the prompt block at half the terminal so the transcript
-    // always has room. Input is the elastic leaf — shrink it to fit.
+    // Cap prompt block at half the terminal so the transcript always has room.
     let max_block = (term_height / 2).max(chrome + 1);
     let input_rows = prompt_input_rows
         .max(1)
@@ -100,8 +95,7 @@ impl LayoutState {
         self.transcript.height
     }
 
-    /// Rect spanning the whole prompt block (above + input + below).
-    /// Used by mouse routing to decide if a click is in the prompt area.
+    /// Rect spanning the whole prompt block; used by mouse-click routing.
     pub(crate) fn prompt_block(&self) -> Rect {
         let top = self.prompt_above.top;
         let bottom = self.prompt_below.bottom();
@@ -212,11 +206,9 @@ mod tests {
 
     #[test]
     fn normal_layout_splits_term() {
-        // 1 row above (top bar), 1 row input, 1 row below, 1 row status.
         let (ui, status_win) = set_up_layout(1, 1, 80, 40);
         let layout = LayoutState::from_ui(&ui, status_win);
         assert_eq!(layout.transcript.top, 0);
-        // term=40, prompt block = 4, gap = 1 → transcript = 35.
         assert_eq!(layout.transcript.height, 35);
         assert_eq!(layout.prompt_above.top, 36);
         assert_eq!(layout.prompt_above.height, 1);
@@ -230,7 +222,6 @@ mod tests {
 
     #[test]
     fn prompt_capped_at_half_height() {
-        // Request 15 input rows on a 20-row terminal. Block capped at 10.
         let (ui, status_win) = set_up_layout(1, 15, 80, 20);
         let layout = LayoutState::from_ui(&ui, status_win);
         let block = layout.prompt_above.height

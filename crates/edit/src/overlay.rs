@@ -1,60 +1,31 @@
-//! `Overlay` — z-stacked window groups positioned via an `Anchor`
-//! over a `LayoutTree` of leaves.
-//!
-//! An overlay is a rectangle of windows positioned on top of the
-//! main editor area. Its layout is a regular `LayoutTree` (so an
-//! overlay can contain a Vbox/Hbox of one or more `Leaf(WinId)`s
-//! with chrome on the container itself); positioning is by
-//! [`Anchor`] (screen / cursor / another window); stacking is by
-//! `z`; modality controls whether the host pauses engine drain
-//! while focus is here.
-//!
-//! `OverlayId` is a stable opaque handle for chrome hit-testing
-//! (border drag, title-bar grab) — distinct from any `WinId`s
-//! contained in the overlay's layout.
+//! Z-stacked overlay window groups positioned via an `Anchor` over a `LayoutTree`.
 
 use super::WinId;
 use crate::layout::{Anchor, Corner, LayoutTree, Rect};
 use std::collections::HashMap;
 
-/// Stable handle for an overlay. Distinct from `WinId` so chrome
-/// hit-testing (`HitTarget::Chrome { owner: OverlayId }`) doesn't
-/// collide with content hit-testing.
+/// Stable handle for an overlay. Distinct from `WinId` to avoid chrome/content hit collision.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct OverlayId(pub u32);
 
-/// Sub-region of an overlay's chrome that a hit landed on. Used by
-/// the dispatcher to differentiate drag-handles (`Title`) from
-/// resize-handles (`Resize`) from passive body chrome (`Body`).
+/// Sub-region of an overlay's chrome that a mouse hit landed on.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ChromeZone {
-    /// Top border row — the canonical drag handle when `draggable`.
+    /// Top border row; canonical drag handle when `draggable`.
     Title,
-    /// Border / gap / padding away from the title and resize handle.
     Body,
-    /// Bottom-right corner cell of the border — resize handle when
-    /// `resizable`. Drag here grows / shrinks `size_override`.
+    /// Bottom-right corner cell; resize handle when `resizable`.
     Resize,
 }
 
-/// What inside an overlay a hit landed on. `Window` carries the
-/// specific leaf `WinId`; `Chrome` is anywhere else inside the
-/// overlay's resolved rect (border, title row, gap, padding) — the
-/// host treats chrome hits as drag handles, close-button targets,
-/// or focus-promote on click depending on the overlay's policy.
+/// Hit target inside an overlay: a specific leaf `WinId` or its chrome.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum OverlayHitTarget {
     Window(super::WinId),
     Chrome(ChromeZone),
 }
 
-/// Result of a global mouse hit-test against the open Ui surface.
-/// Composes `OverlayHitTarget` (overlay paths) with split-window
-/// hits, so callers don't need separate code per surface kind.
-/// `Scrollbar { owner }` is reserved for the eventual split-render
-/// path where Window publishes its scrollbar rect; the variant
-/// exists so callers can pattern-match the full target shape today,
-/// but `Ui::hit_test` doesn't return it yet.
+/// Global mouse hit-test result covering both overlays and splits.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum HitTarget {
     Window(super::WinId),
@@ -66,34 +37,17 @@ pub enum HitTarget {
 pub struct Overlay {
     pub layout: LayoutTree,
     pub anchor: Anchor,
-    /// Stacking order. Higher draws on top. Same `z` falls back to
-    /// insertion order.
+    /// Stacking order. Higher draws on top; same `z` breaks by insertion order.
     pub z: u16,
-    /// When `true`, focus + Tab cycling stay inside this overlay and
-    /// Esc or Ctrl-C on the focused leaf fires `WinEvent::Dismiss` on
-    /// every leaf before closing. Independent of [`Self::blocks_agent`]
-    /// — passive viewers (`/help`, `/btw`) are modal but do not pause
-    /// the engine.
+    /// When true, focus + Tab cycling stay inside this overlay; Esc/Ctrl-C fires Dismiss.
     pub modal: bool,
-    /// When `true`, the host pauses engine-event drain and queues
-    /// new user input while focus is inside this overlay. Set on
-    /// permission prompts and other dialogs that gate a pending tool
-    /// call.
+    /// When true, the host pauses engine-event drain while focus is here.
     pub blocks_agent: bool,
-    /// When `true`, a Down on the title row (top border) starts a
-    /// drag gesture: the dispatcher captures the chrome, raises the
-    /// overlay's `z`, and rewrites `anchor` to a `ScreenAt { NW, … }`
-    /// pinned at the mouse-relative position on each Drag. Off by
-    /// default — dialogs and pickers stay anchor-locked.
+    /// When true, a Down on the title row starts a drag gesture.
     pub draggable: bool,
-    /// When `true`, the bottom-right border cell becomes a resize
-    /// handle. Drag from there grows / shrinks `size_override`,
-    /// clamped to a small minimum size.
+    /// When true, the bottom-right border cell is a resize handle.
     pub resizable: bool,
-    /// Forces an explicit `(width, height)` instead of the layout's
-    /// `natural_size()`. Set by a resize gesture; preserved across
-    /// frames so the overlay stays at the user-chosen size until
-    /// the host clears it.
+    /// Explicit size override; set by resize gesture, preserved across frames.
     pub size_override: Option<(u16, u16)>,
 }
 
@@ -142,28 +96,16 @@ impl Overlay {
     }
 }
 
-/// Inputs the anchor resolver needs from the rest of `Ui`.
+/// Inputs for the anchor resolver.
 pub struct AnchorContext<'a> {
     pub term_width: u16,
     pub term_height: u16,
-    /// Where the text cursor currently is, in terminal cells.
-    /// `None` if the cursor isn't visible / placed.
     pub cursor: Option<(u16, u16)>,
-    /// Per-window rects for the host's split windows. Looked up by
-    /// `Anchor::Win { target, .. }`.
     pub win_rects: &'a HashMap<WinId, Rect>,
 }
 
-/// Resolve an anchor + overlay size to a screen rect.
-///
-/// `size` is the `(width, height)` the overlay wants to render at
-/// (typically computed from its layout's natural size + chrome).
-/// The returned rect is clamped to the terminal — overflowing
-/// overlays shrink and shift to remain on-screen.
-///
-/// Cursor anchors flip to the opposite corner if the natural
-/// placement would overflow (canonical popup behavior). Win
-/// anchors return `None` when the target window has no rect (yet).
+/// Resolve an anchor + overlay size to a clamped screen rect.
+/// Returns `None` for `Cursor` anchors without a cursor or `Win` anchors with no target rect.
 pub fn resolve_anchor(anchor: &Anchor, size: (u16, u16), ctx: &AnchorContext<'_>) -> Option<Rect> {
     let (w, h) = size;
     let term_w = ctx.term_width;
@@ -185,8 +127,7 @@ pub fn resolve_anchor(anchor: &Anchor, size: (u16, u16), ctx: &AnchorContext<'_>
             let r = cy as i32 + row_offset;
             let c = cx as i32 + col_offset;
             let (r, c) = corner_to_topleft(*corner, r, c, w, h);
-            // Flip: if natural placement overflows the screen, swap
-            // to the opposite corner relative to the cursor.
+            // Flip to opposite corner if overflow.
             let r = if r + h as i32 > term_h as i32 || r < 0 {
                 let opposite = flip_vert(*corner);
                 let (r2, _) = corner_to_topleft(
@@ -252,8 +193,7 @@ pub fn resolve_anchor(anchor: &Anchor, size: (u16, u16), ctx: &AnchorContext<'_>
     Some(Rect::new(top, left, w, h))
 }
 
-/// Translate a corner-anchored point `(row, col)` into the
-/// rectangle's top-left given its `(w, h)`.
+/// Corner-anchored point `(row, col)` → rectangle top-left for size `(w, h)`.
 fn corner_to_topleft(corner: Corner, row: i32, col: i32, w: u16, h: u16) -> (i32, i32) {
     match corner {
         Corner::NW => (row, col),
@@ -379,7 +319,6 @@ mod tests {
             &ctx(80, 24, &rects),
         )
         .unwrap();
-        // SE corner of overlay sits at (10, 30) → top-left at (7, 21).
         assert_eq!(r, Rect::new(7, 21, 10, 4));
     }
 
@@ -398,8 +337,6 @@ mod tests {
             &c,
         )
         .unwrap();
-        // NW at row 22 + height 8 would overflow row 24; flips to SW.
-        // SW corner at (22, 5) → top-left at (15, 5).
         assert_eq!(r.top, 15);
         assert_eq!(r.left, 5);
     }
@@ -441,8 +378,6 @@ mod tests {
     fn win_anchor_se_aligns_bottom_right() {
         let mut rects = HashMap::new();
         rects.insert(WinId(7), Rect::new(10, 20, 40, 8));
-        // target's SE = (18, 60), overlay's SE corner sits there →
-        // top-left = (14, 50).
         let r = resolve_anchor(
             &Anchor::Win {
                 target: WinId(7).into(),
@@ -477,7 +412,6 @@ mod tests {
     fn win_anchor_offsets_shift_position() {
         let mut rects = HashMap::new();
         rects.insert(WinId(7), Rect::new(10, 20, 40, 8));
-        // NW corner at (10, 20) shifted up 1, right 3 → (9, 23).
         let r = resolve_anchor(
             &Anchor::Win {
                 target: WinId(7).into(),
@@ -495,10 +429,6 @@ mod tests {
     #[test]
     fn screen_bottom_docks_full_height_above_statusline() {
         let rects = HashMap::new();
-        // term 80x24, above_rows=1 (statusline). Layout reports
-        // natural (40, 24) — wants full height. The anchor clamps
-        // height to 23 (term_h - above_rows) and pins it to the
-        // bottom of the available area.
         let r = resolve_anchor(
             &Anchor::ScreenBottom { above_rows: 1 },
             (40, 24),
@@ -511,15 +441,12 @@ mod tests {
     #[test]
     fn screen_bottom_docks_short_layout_at_bottom() {
         let rects = HashMap::new();
-        // Layout's natural (60, 8) — short content. Anchor sits
-        // it at the bottom of the available area, centered.
         let r = resolve_anchor(
             &Anchor::ScreenBottom { above_rows: 1 },
             (60, 8),
             &ctx(80, 24, &rects),
         )
         .unwrap();
-        // top = (24 - 1) - 8 = 15; left = (80 - 60)/2 = 10.
         assert_eq!(r, Rect::new(15, 10, 60, 8));
     }
 

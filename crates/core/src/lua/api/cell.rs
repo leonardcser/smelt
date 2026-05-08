@@ -1,8 +1,4 @@
-//! `smelt.cell` bindings — typed reactive registry shared with Rust
-//! subscribers and built-in cells. The flat `smelt.cell.{new, get, set,
-//! subscribe, unsubscribe, glob_subscribe, glob_unsubscribe}` API plus
-//! the `smelt.cell(name)` userdata handle both route to the same
-//! `Cells` registry on the host.
+//! `smelt.cell` — typed reactive cell registry (flat API + callable userdata handle).
 
 use crate::lua::LuaHandle;
 use mlua::prelude::*;
@@ -13,10 +9,6 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
 
     let cell_tbl = lua.create_table()?;
 
-    // `smelt.cell.new(name, initial)` declares a cell and stores
-    // `initial` as its starting value. Idempotent: redeclaring resets
-    // the value and drops every prior subscriber. Returns nothing —
-    // callers pass the same `name` to `get` / `set` / `subscribe`.
     cell_tbl.set(
         "new",
         lua.create_function(
@@ -30,9 +22,6 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
         )?,
     )?;
 
-    // `smelt.cell.get(name)` returns the cell's current value or
-    // `nil` when undeclared / when no projector is registered for
-    // the cell's value type.
     cell_tbl.set(
         "get",
         lua.create_function(|lua, name: String| -> LuaResult<mlua::Value> {
@@ -43,9 +32,6 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
         })?,
     )?;
 
-    // `smelt.cell.set(name, value)` replaces the cell's value and
-    // queues every subscriber for fire on the next drain. Returns
-    // `true` on success, `false` when the cell isn't declared.
     cell_tbl.set(
         "set",
         lua.create_function(
@@ -59,11 +45,6 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
         )?,
     )?;
 
-    // `smelt.cell.subscribe(name, fn)` registers `fn(new, old)` to
-    // fire each time `name` is `set`. Returns the subscription id
-    // `unsubscribe` accepts, or `nil` when `name` isn't declared.
-    // The trailing `old` argument is the value the cell held just
-    // before the publish (the initial value on the first publish).
     cell_tbl.set(
         "subscribe",
         lua.create_function(
@@ -82,9 +63,6 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
         )?,
     )?;
 
-    // `smelt.cell.unsubscribe(name, id)` drops the subscription and
-    // returns `true` on success, `false` when the cell or id is
-    // unknown.
     cell_tbl.set(
         "unsubscribe",
         lua.create_function(|_, (name, id): (String, u64)| -> LuaResult<bool> {
@@ -95,10 +73,6 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
         })?,
     )?;
 
-    // `smelt.cell:glob_subscribe(pattern, fn)` fires `fn(name, new, old)`
-    // for every cell whose name matches the glob pattern. Returns the
-    // id `glob_unsubscribe` accepts. Errors when `pattern` is not a
-    // valid glob.
     cell_tbl.set(
         "glob_subscribe",
         lua.create_function(
@@ -118,8 +92,6 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
         )?,
     )?;
 
-    // `smelt.cell.glob_unsubscribe(id)` drops a glob subscription and
-    // returns `true` on success, `false` when `id` is unknown.
     cell_tbl.set(
         "glob_unsubscribe",
         lua.create_function(|_, id: u64| -> LuaResult<bool> {
@@ -127,10 +99,6 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
         })?,
     )?;
 
-    // `smelt.cell(name)` returns a `CellHandle` userdata bound to
-    // `name`. Methods `:get()`, `:set(v)`, `:subscribe(fn)`,
-    // `:unsubscribe(id)` route to the same registry the flat API
-    // uses — `cell.new(name, …)` must have run first.
     let mt = lua.create_table()?;
     mt.set(
         "__call",
@@ -142,9 +110,6 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
     Ok(())
 }
 
-/// Userdata handle returned by `smelt.cell(name)`. Stores the cell
-/// name; methods reach the live `Cells` registry via the TLS host
-/// pointer the same way the flat `smelt.cell.*` bindings do.
 struct CellHandle {
     name: String,
 }

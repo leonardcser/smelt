@@ -1,19 +1,5 @@
-//! Lua-value → typed-Rust converters.
-//!
-//! Pure value coercion — no `TuiApp` / `Ui` dependencies, no side
-//! effects. Callable from any Lua-facing module that needs to translate
-//! a `mlua::Value` into a `Color` / `Style` / `Line` / `Constraint` /
-//! `Border` / `Corner`. Each parser accepts the same surface across
-//! the codebase so plugin authors learn one shape and reuse it.
-//!
-//! All parsers report errors as `String` (passed back through
-//! `LuaError::RuntimeError` at the call site) and surround failures
-//! with a `ctx` label where the call site can disambiguate which
-//! field failed (`"overlay item.height"`, `"title.fg"`, …).
-//!
-//! Tested in isolation under `#[cfg(test)]`; these parsers have a lot
-//! of branches and the unit tests at the bottom of this file exercise
-//! the surface without spinning up a `TuiApp`.
+//! Lua-value → typed-Rust converters (pure, no `TuiApp` dependencies).
+//! Errors are returned as `String`; call sites wrap them in `LuaError::RuntimeError`.
 
 use crate::smelt_term::layout::{Border, BorderSides, BorderStyle, Constraint, Corner};
 use crate::smelt_term::{Line, Span, Style};
@@ -86,10 +72,8 @@ fn color_str(s: &str) -> Result<Color, String> {
 
 // ── style + span + title ───────────────────────────────────────────────
 
-/// Read style fields off a table: `fg`, `bg`, `bold`, `dim`, `italic`,
-/// `underline`, `crossedout`. Unrecognised keys are ignored — the table
-/// often carries extra fields (`text` for spans, `kind` for constraints,
-/// etc.) that aren't style attributes.
+/// Read style fields (`fg`, `bg`, `bold`, `dim`, `italic`, `underline`, `crossedout`)
+/// off a table. Unrecognised keys are ignored.
 pub(crate) fn style(t: &mlua::Table) -> Result<Style, String> {
     let mut style = Style::new();
     if let Some(c) = color_opt(t.get::<mlua::Value>("fg").ok())? {
@@ -137,11 +121,10 @@ pub(crate) fn title(v: Option<mlua::Value>) -> Result<Option<Line<'static>>, Str
         None | Some(mlua::Value::Nil) => Ok(None),
         Some(mlua::Value::String(s)) => Ok(Some(Line::raw(s.to_string_lossy().to_string()))),
         Some(mlua::Value::Table(t)) => {
-            // Single-span shape: table has a `text` key.
+            // Table with `text` key → single-span Line.
             if t.contains_key("text").unwrap_or(false) {
                 return Ok(Some(Line::from_spans([span(&t)?])));
             }
-            // Sequence of spans (strings or span tables).
             let mut spans: Vec<Span<'static>> = Vec::new();
             for v in t.sequence_values::<mlua::Value>() {
                 let v = v.map_err(|e| format!("title span: {e}"))?;
@@ -321,10 +304,8 @@ pub(crate) fn border(opts: &mlua::Table) -> Result<Option<Border>, String> {
 fn border_sides(t: &mlua::Table) -> Result<BorderSides, String> {
     let sides_v = t.get::<mlua::Value>("sides").unwrap_or(mlua::Value::Nil);
     match sides_v {
-        // No explicit `sides` → all sides.
         mlua::Value::Nil => Ok(BorderSides::ALL),
         mlua::Value::Table(st) => {
-            // List form: `sides = { "top", "left" }`.
             let mut sides = BorderSides::NONE;
             let mut saw_list_entry = false;
             for v in st.clone().sequence_values::<String>().flatten() {
@@ -344,7 +325,7 @@ fn border_sides(t: &mlua::Table) -> Result<BorderSides, String> {
             if saw_list_entry {
                 return Ok(sides);
             }
-            // Map form: `sides = { top = true, left = true }`.
+            // Boolean-map form: `sides = { top = true, left = true }`.
             sides.top = st.get::<bool>("top").unwrap_or(false);
             sides.right = st.get::<bool>("right").unwrap_or(false);
             sides.bottom = st.get::<bool>("bottom").unwrap_or(false);
@@ -358,8 +339,7 @@ fn border_sides(t: &mlua::Table) -> Result<BorderSides, String> {
     }
 }
 
-/// Parse a corner name (`"nw"` / `"ne"` / `"sw"` / `"se"`). `default`
-/// is returned for `None` / unknown.
+/// Parse `"nw"` / `"ne"` / `"sw"` / `"se"` into a `Corner`. Falls back to `default`.
 pub(crate) fn corner(name: Option<&str>, default: Corner) -> Corner {
     match name {
         Some("nw") => Corner::NW,

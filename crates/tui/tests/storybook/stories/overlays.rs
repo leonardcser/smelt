@@ -1,5 +1,4 @@
-//! Overlay stories — placement + chrome paint over splits, plus
-//! every Anchor variant.
+//! Overlay stories.
 
 use tui::smelt_term::layout::{Anchor, Border, Constraint, Corner, Gutters};
 use tui::smelt_term::{LayoutTree, Overlay, SplitConfig};
@@ -11,8 +10,6 @@ fn pane(region: &str) -> SplitConfig {
     }
 }
 
-/// Build a backdrop transcript pane filling the viewport so overlay
-/// stories share a consistent base scene.
 fn backdrop(ctx: &mut crate::storybook::StoryCtx, w: u16, h: u16) {
     ctx.set_viewport(w, h);
     let lines: Vec<String> = (1..=h)
@@ -36,10 +33,6 @@ fn backdrop(ctx: &mut crate::storybook::StoryCtx, w: u16, h: u16) {
     )]));
 }
 
-/// Push a small bordered overlay at `anchor`. Outer box sizes to
-/// `(width + 2, height + 2)` so the anchor's clamping behaviour shows
-/// against a deterministic-shaped frame, and the buffer's first
-/// `height` lines are visible inside the border.
 fn open_box_overlay(
     ctx: &mut crate::storybook::StoryCtx,
     title: &str,
@@ -62,8 +55,6 @@ fn open_box_overlay(
 story!(overlay_centered_modal_over_splits, |ctx| {
     ctx.set_viewport(40, 10);
 
-    // Backdrop: one full-height pane the user would normally interact
-    // with (a transcript stand-in).
     let backdrop = ctx.buf_with_lines(
         (1..=10)
             .map(|i| format!("backdrop row {i:02}"))
@@ -75,11 +66,6 @@ story!(overlay_centered_modal_over_splits, |ctx| {
         LayoutTree::leaf(bw),
     )]));
 
-    // Modal: one bordered leaf centered, smaller than the screen.
-    // Leaves don't carry natural size, so size the modal explicitly:
-    // Length(3) rows for the buffer's three lines, Length(14) cols for
-    // its widest line ("  • alpha" plus a little headroom). Outer
-    // box becomes 16×5 once the rounded border is added.
     let dlg = ctx.buf_with_lines(["pick one:", "  • alpha", "  • beta"]);
     let dw = ctx
         .ui
@@ -99,8 +85,6 @@ story!(overlay_centered_modal_over_splits, |ctx| {
 
     ctx.assert_snapshot();
 });
-
-// ── Anchor variant coverage ───────────────────────────────────────
 
 story!(anchor_screen_at_topleft_corner, |ctx| {
     backdrop(ctx, 30, 8);
@@ -151,8 +135,6 @@ story!(anchor_screen_at_bottomleft_corner, |ctx| {
 });
 
 story!(anchor_clamped_when_offscreen, |ctx| {
-    // Anchor would place the overlay past the right edge — the
-    // resolver clamps the rect to the terminal bounds.
     backdrop(ctx, 30, 6);
     open_box_overlay(
         ctx,
@@ -169,10 +151,6 @@ story!(anchor_clamped_when_offscreen, |ctx| {
 });
 
 story!(anchor_screen_bottom_docked, |ctx| {
-    // ScreenBottom reserves `above_rows` cells for the statusline +
-    // docks the overlay there full-width. `Percentage(100)` on the
-    // inner Hbox sizes the leaf to the terminal width — same shape the
-    // cmdline uses in production.
     backdrop(ctx, 30, 8);
     let dlg = ctx.buf_with_lines(["docked"]);
     let dw = ctx
@@ -190,11 +168,8 @@ story!(anchor_screen_bottom_docked, |ctx| {
     ctx.assert_snapshot();
 });
 
-// ── Z-ordering ────────────────────────────────────────────────────
-
 story!(two_overlays_stack_by_z, |ctx| {
     backdrop(ctx, 30, 8);
-    // Lower-z overlay first.
     let lo = ctx.buf_with_lines(["LO"]);
     let lw = ctx.ui.win_open_split(lo, pane("lo")).expect("buf exists");
     let lo_layout = LayoutTree::hbox(vec![(Constraint::Length(8), LayoutTree::leaf(lw))])
@@ -211,7 +186,6 @@ story!(two_overlays_stack_by_z, |ctx| {
         )
         .with_z(10),
     );
-    // Higher-z overlay overlapping the first; should paint on top.
     let hi = ctx.buf_with_lines(["HI"]);
     let hw = ctx.ui.win_open_split(hi, pane("hi")).expect("buf exists");
     let hi_layout = LayoutTree::hbox(vec![(Constraint::Length(8), LayoutTree::leaf(hw))])
@@ -231,11 +205,7 @@ story!(two_overlays_stack_by_z, |ctx| {
     ctx.assert_snapshot();
 });
 
-// ── Win-attached anchor ───────────────────────────────────────────
-
 story!(anchor_win_attaches_above_target, |ctx| {
-    // Two-pane vbox; toast overlay attaches to the top of the bottom
-    // pane via Win { attach: NW, row_offset: -1 }.
     ctx.set_viewport(30, 8);
     let top = ctx.buf_with_lines((1..=4).map(|i| format!("top row {i}")).collect::<Vec<_>>());
     let bot = ctx.buf_with_lines(["bot row"]);
@@ -251,8 +221,6 @@ story!(anchor_win_attaches_above_target, |ctx| {
         .ui
         .win_open_split(toast, pane("toast"))
         .expect("buf exists");
-    // Wrap the leaf in a 1-row Vbox so the toast has a non-zero
-    // natural height (leaves carry no intrinsic size).
     let layout = LayoutTree::vbox(vec![(
         Constraint::Length(1),
         LayoutTree::hbox(vec![(Constraint::Length(8), LayoutTree::leaf(tw))]),

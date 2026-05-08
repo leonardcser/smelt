@@ -2,10 +2,6 @@ use super::ProviderError;
 use crate::cancel::CancellationToken;
 use futures_util::StreamExt;
 
-/// Read an SSE byte stream, parse each JSON event, and call `handler`.
-///
-/// Shared across all backends — handles byte buffering, line splitting,
-/// `data: ` prefix parsing, `[DONE]` detection, and cancellation.
 pub(super) async fn read_events(
     resp: reqwest::Response,
     cancel: &CancellationToken,

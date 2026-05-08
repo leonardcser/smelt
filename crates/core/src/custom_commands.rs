@@ -1,10 +1,5 @@
-//! Custom-command turn data. The user-facing flow (file scanning,
-//! frontmatter parsing, exec block evaluation, slash-command
-//! registration) lives in `runtime/lua/smelt/plugins/custom_commands.lua`
-//! and the built-in `/reflect` / `/simplify` plugins; the Lua side
-//! hands the rendered body and parsed overrides to
-//! `smelt.engine.submit_command`, which builds these structs and calls
-//! `TuiApp::begin_custom_command_turn`.
+//! Custom-command turn data. Lua populates these structs via
+//! `smelt.engine.submit_command`; `TuiApp::begin_custom_command_turn` consumes them.
 
 use std::collections::HashMap;
 

@@ -1,14 +1,10 @@
-//! Frame snapshot for renderer storybook tests. Captures the text +
-//! per-cell style sidecar of a rendered grid so snapshot tests can
-//! assert on the post-render state without parsing SGR escapes back
-//! from a writer.
+//! Frame snapshot for storybook tests. Captures text and per-cell style
+//! so tests can assert on rendered state without parsing SGR escapes.
 
 use super::grid::{Cell, Grid, Style};
 
-/// Structured copy of one rendered frame. `rows` is the visible
-/// glyph grid (one `String` per row, full-width); `styles` carries
-/// per-cell style for the same coordinates. Cells flagged as wide-char
-/// continuation slots (`\0` sentinel) collapse to a space in `rows`.
+/// Structured copy of one rendered frame. Wide-char continuation cells
+/// (`\0`) collapse to a space in `rows`.
 #[derive(Clone, Debug)]
 pub struct SnapshotFrame {
     pub width: u16,
@@ -47,8 +43,7 @@ impl SnapshotFrame {
         }
     }
 
-    /// Plain-text view: rows joined by `\n`, trailing whitespace
-    /// stripped per row so snapshots are diff-friendly.
+    /// Rows joined by `\n` with trailing whitespace stripped per row.
     pub fn text(&self) -> String {
         let mut out = String::with_capacity(self.rows.iter().map(|r| r.len() + 1).sum());
         for (i, row) in self.rows.iter().enumerate() {
@@ -60,10 +55,8 @@ impl SnapshotFrame {
         out
     }
 
-    /// Style sidecar serialized as one line per styled run. Runs
-    /// collapse adjacent cells with identical style; default-styled
-    /// runs are omitted. Format: `row col len fg=… bg=… attrs=…`.
-    /// Stable ordering (row, col) for diff stability.
+    /// Style sidecar as one line per non-default styled run.
+    /// Adjacent equal-style cells are merged. Format: `row col len fg=… bg=… attrs=…`.
     pub fn styles_text(&self) -> String {
         let mut out = String::new();
         for (y, row) in self.styles.iter().enumerate() {

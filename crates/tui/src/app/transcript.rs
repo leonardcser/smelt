@@ -1,6 +1,4 @@
-//! Transcript ownership on `TuiApp` — block history, streaming state
-//! (thinking / text / tools / exec), projection to a
-//! crate::smelt_term::Buffer, and the transcript-cursor glyph cache.
+//! Transcript block history, streaming state, projection, and cursor glyph cache.
 
 use crate::app::TuiApp;
 use crate::content::builder::LineBuilder;
@@ -23,10 +21,7 @@ pub(crate) struct TranscriptData {
     pub(crate) viewport: crate::smelt_term::WindowViewport,
 }
 
-/// Soft cursor placement carried back from `compute_transcript_cursor`
-/// to the painted-split sync. `(col, row)` is viewport-relative;
-/// `glyph` is the buffer character under the cursor cell so the block
-/// cursor renders the same glyph.
+/// Viewport-relative cursor position and glyph for the block cursor in the transcript pane.
 pub(crate) struct SoftCursor {
     pub(crate) col: u16,
     pub(crate) row: u16,
@@ -163,10 +158,7 @@ impl TuiApp {
         !self.transcript.history.is_empty() || self.has_ephemeral(show_thinking)
     }
 
-    /// Full transcript as one string per display row. Cheap when there
-    /// are no ephemeral rows (returns an `Arc::clone` of the cached
-    /// snapshot); otherwise clones the vec once to append ephemeral
-    /// rows. Callers treat it as a `&[String]` via deref coercion.
+    /// Full transcript as one string per display row. Returns a cached `Arc` when no ephemeral rows exist.
     pub(crate) fn full_transcript_display_text(&mut self, show_thinking: bool) -> Arc<Vec<String>> {
         let tw = self.transcript_width() as u16;
         let theme = self.ui.theme().clone();
@@ -193,11 +185,8 @@ impl TuiApp {
         Arc::new(rows)
     }
 
-    /// Byte positions in `rows.join("\n")` of each `\n` separator,
-    /// partitioned into soft-wrap continuations and real line breaks.
-    /// Soft-wrap positions are "transparent" to word-select; hard
-    /// positions are the boundaries used by line-select. Ephemeral
-    /// rows (appended after the snapshot) are treated as hard breaks.
+    /// `\n` byte positions in `rows.join("\n")`, partitioned into soft-wrap and hard-break sets.
+    /// Soft positions are transparent to word-select; hard positions bound line-select.
     pub(crate) fn transcript_line_breaks(
         &mut self,
         show_thinking: bool,
@@ -228,9 +217,6 @@ impl TuiApp {
                 pos += 1;
             }
         }
-        // Every boundary between the snapshot's last row and subsequent
-        // ephemeral rows (and between ephemeral rows themselves) is a
-        // hard break.
         let snap_row_count = rows.len();
         if self.has_ephemeral(show_thinking) {
             let ephemeral_buf = self.render_ephemeral_to_buffer(tw, show_thinking, &theme);
@@ -254,12 +240,8 @@ impl TuiApp {
     ) -> Option<String> {
         let tw = self.transcript_width() as u16;
         let theme = self.ui.theme().clone();
-        // Prefer the block's raw markdown source (text-bearing variants
-        // expose `Block::raw_text`) so yanking a rendered markdown block
-        // returns `**bold**`, `` `code` ``, fenced blocks, tables etc.
-        // verbatim. Fall back to cell-walking for structured blocks
-        // (tool / confirm) whose "raw" form isn't a single
-        // string.
+        // Prefer raw markdown source so yanking returns `**bold**` etc. verbatim.
+        // Fall back to cell-walking for structured blocks (tool/confirm).
         let block_id = {
             let snap = self.transcript_projection.snapshot(
                 &mut self.transcript.history,
@@ -369,11 +351,7 @@ impl TuiApp {
         self.transcript.drain_finished_blocks()
     }
 
-    /// Invalidate the width-dependent block layout cache when the
-    /// terminal width changes. The TranscriptProjection's BlockBufferCache
-    /// is keyed by width, so a width change naturally invalidates on
-    /// the next paint pass — this hook is preserved as a no-op for
-    /// callers that explicitly want to signal the resize.
+    /// No-op: width changes invalidate the cache implicitly on next paint.
     pub(crate) fn invalidate_for_width(&mut self, _width: u16) {}
 
     pub(crate) fn clear_transcript(&mut self) {
@@ -390,9 +368,7 @@ impl TuiApp {
         self.parser.clear_tools();
     }
 
-    /// Update spinner animation state. Call before rendering. Returns
-    /// `true` if the spinner frame changed and the caller should
-    /// redraw.
+    /// Advance spinner animation. Returns `true` if the frame changed.
     pub(crate) fn update_spinner(&mut self) -> bool {
         let mut changed = false;
         if let (Some(elapsed), Some(prev_frame)) =
@@ -407,9 +383,6 @@ impl TuiApp {
         changed
     }
 
-    /// Project transcript blocks into the transcript display buffer
-    /// (`Ui::bufs[transcript_display_buf]`). Gated by generation —
-    /// skips work when nothing changed since the last projection.
     pub(crate) fn project_transcript_buffer(
         &mut self,
         width: usize,
@@ -443,8 +416,6 @@ impl TuiApp {
         let layer_w = gutters.layer_width(width as u16);
         let scrollbar_col = layer_w.saturating_sub(1);
 
-        // Snapshot visible rows for the soft-cursor glyph lookup in
-        // `compute_transcript_cursor`.
         let start = clamped_scroll as usize;
         let end = (start + viewport_rows as usize).min(buf.line_count());
         self.last_viewport_text = buf.get_lines(start, end).to_vec();
@@ -465,7 +436,6 @@ impl TuiApp {
         }
     }
 
-    /// Compute transcript cursor position for the compositor pipeline.
     pub(crate) fn compute_transcript_cursor(
         &self,
         width: usize,
@@ -514,11 +484,8 @@ impl TuiApp {
         }
     }
 
-    /// Build the transcript's per-line selection ranges (absolute
-    /// buffer line index, col_start, col_end) in display-cell units.
-    /// Used by the per-frame sync to overlay selection-bg on top of
-    /// the projected buffer's text highlights. Cheap no-op when no
-    /// vim visual, cursor anchor, or yank-flash is active.
+    /// Per-line selection ranges (line, col_start, col_end) in display-cell units.
+    /// No-op when no vim visual, selection anchor, or yank-flash is active.
     pub(crate) fn transcript_selection_highlights(
         &mut self,
         scroll_top: u16,
@@ -561,9 +528,7 @@ impl TuiApp {
         } else {
             self.transcript_window.selection_range_at(cpos)
         };
-        // Fall back to the yank-flash range so the selection bg
-        // briefly paints over the yanked text after `y`-family vim ops
-        // (mirrors nvim's `vim.highlight.on_yank`).
+        // Fall back to yank-flash range (mirrors nvim's `vim.highlight.on_yank`).
         let (s, e) = match active_selection.or_else(|| {
             self.core
                 .clipboard
@@ -590,10 +555,7 @@ impl TuiApp {
                 if end_cell > start_cell {
                     out.push((idx, start_cell, end_cell));
                 } else if row.is_empty() && s <= line_start && e > line_start {
-                    // Empty line inside the selection: paint a single
-                    // virtual cell so the user can see the line is part
-                    // of the range. Mirrors vim's "$" virtual-space
-                    // behavior on empty lines in v / V mode.
+                    // Paint one virtual cell on empty lines to show they're in the selection.
                     out.push((idx, 0, 1));
                 }
             }
@@ -627,11 +589,7 @@ impl TuiApp {
         }
     }
 
-    /// Render the ephemeral (active thinking) summary into a fresh
-    /// scratch Buffer at the given width. Returns an empty buffer when
-    /// there's no ephemeral content. Used by the transcript snapshot
-    /// helpers and projection path so the same rendering writes
-    /// directly into a Buffer (no LineBuilder→DisplayBlock detour).
+    /// Render the active-thinking summary into a scratch Buffer at the given width.
     fn render_ephemeral_to_buffer(&self, tw: u16, show_thinking: bool, theme: &Theme) -> Buffer {
         let mut buf = Buffer::new(BufId(0), BufCreateOpts::default());
         if !self.has_ephemeral(show_thinking) {
@@ -643,10 +601,7 @@ impl TuiApp {
         buf
     }
 
-    /// Per-leaf row counts for the prompt block.
-    /// `(above, input)` — `above` covers queued + stash + the top
-    /// bar; bottom bar (1) and status (1) are constants applied by
-    /// the layout. The caller passes them to [`LayoutInput`].
+    /// Row counts `(above, input)` for the prompt block. `above` = queued + stash + top bar.
     pub(crate) fn measure_prompt_rows(
         &self,
         state: &crate::input::PromptState,

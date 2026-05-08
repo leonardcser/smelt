@@ -1,11 +1,5 @@
-//! Per-block layout cache for the transcript.
-//!
-//! Each block gets its own cached `Buffer`, keyed by `LayoutKey`
-//! (width, show_thinking, view_state, content_hash). The cache lives
-//! in `tui` because display projection is a tui concern; the cached
-//! Buffers carry resolved styles so theme changes invalidate the
-//! cache (handled at the `TranscriptProjection` boundary by clearing
-//! on generation mismatch and on theme change).
+//! Per-block layout cache keyed by `LayoutKey`. Theme changes invalidate the cache at the
+//! `TranscriptProjection` boundary.
 
 use crate::content::transcript_parsers::layout_block_into;
 use crate::smelt_term::{BufCreateOpts, BufId, Buffer};
@@ -14,7 +8,6 @@ use smelt_core::theme::Theme;
 use smelt_core::transcript_model::{BlockHistory, BlockId, LayoutKey};
 use std::collections::HashMap;
 
-/// Cached per-block layout.
 struct CachedBlock {
     key: LayoutKey,
     buf: Buffer,
@@ -41,9 +34,7 @@ impl BlockBufferCache {
         }
     }
 
-    /// Ensure the block at `id` is laid out at the given layout key.
-    /// On a cache miss, allocates a fresh per-block `Buffer` and runs
-    /// `layout_block_into` against it. Returns `(buf, outcome)`.
+    /// Returns `(buf, outcome)` for `id` at `key`, re-running layout on miss.
     pub fn ensure(
         &mut self,
         history: &mut BlockHistory,
@@ -75,7 +66,6 @@ impl BlockBufferCache {
         (&entry.buf, entry.outcome)
     }
 
-    /// Drop all cached layouts.
     pub fn clear(&mut self) {
         self.blocks.clear();
     }

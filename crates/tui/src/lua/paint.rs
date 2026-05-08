@@ -1,19 +1,9 @@
-//! Lua paint registry — Lua-side custom paint regions.
+//! Lua paint registry — maps `PaintId`s to Lua callbacks invoked by the renderer.
 //!
-//! Phase A of P12. Registers Lua callbacks against `PaintId`s allocated
-//! above the WinId range, so the same `Ui::render_with_paints`
-//! dispatcher that routes WinIds to `Window::render` can route paint
-//! ids to a Lua function. The Lua callback receives a slice userdata
-//! and a context table; cell writes go through TLS-stashed access to
-//! the live `GridSlice` for the duration of one paint call.
-//!
-//! Lifetime model: the slice borrow is alive only while the
-//! dispatcher's paint closure is on the stack. We install the slice
-//! pointer in TLS via [`SliceGuard`] just before invoking the Lua
-//! function and clear it on drop (panic-safe). Slice methods read TLS
-//! at call time; calling them outside a paint callback errors cleanly
-//! with `"smelt.paint: slice not in scope"` rather than dereferencing
-//! a dangling pointer.
+//! The slice borrow is live only while the dispatcher's paint closure is on the stack.
+//! [`SliceGuard`] installs the pointer in TLS before the Lua call and clears it on drop
+//! (panic-safe). Methods called outside a paint callback return a clean Lua error instead
+//! of touching a dangling pointer.
 
 use crate::smelt_term::layout::PaintId;
 use crate::smelt_term::{DrawContext, GridSlice};
@@ -22,43 +12,22 @@ use std::cell::Cell;
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 
-/// Paint ids allocated by the Lua registry start above this base so a
-/// single dispatcher table can route both WinIds (low) and paint ids
-/// (high) without collision.
+/// Paint ids start above this base to partition the shared `u64` space:
+/// - `id <  PAINT_ID_BASE` → WinId (owned by `Ui`)
+/// - `id >= PAINT_ID_BASE` → PaintId (owned by [`PaintRegistry`])
 ///
-/// **Namespace partition.** WinIds (`smelt-edit`) and PaintIds (this
-/// registry) share the underlying `u64` space at the layout layer
-/// (`LayoutTree::Leaf` is opaque over the id type). Splitting the
-/// space at `PAINT_ID_BASE = 1<<32` lets a single dispatcher
-/// (`Ui::render_with_paints`) and a single Lua-side `win` field on
-/// overlay items disambiguate which subsystem should resolve a
-/// given id. The contract:
-///
-/// - `id <  PAINT_ID_BASE` ⇒ WinId, owned by `Ui` (`smelt-edit`)
-/// - `id >= PAINT_ID_BASE` ⇒ PaintId, owned by [`PaintRegistry`]
-///
-/// The WinId allocator in `smelt-edit` increments from 0 monotonically
-/// per session and would need 4 billion windows to collide — well
-/// beyond any plausible workload. [`PaintRegistry::register`] preserves
-/// the lower bound by initialising `next_id` to `PAINT_ID_BASE`.
-/// [`super::resolve_leaf_id`] / [`crate::app::TuiApp::resolve_leaf_id`]
-/// rely on this partition.
+/// WinIds increment from 0; reaching `1<<32` would require 4 billion windows.
+/// [`PaintRegistry::register`] initializes `next_id` to this value to uphold the contract.
 pub(crate) const PAINT_ID_BASE: u64 = 1u64 << 32;
 
-/// Result of resolving a Lua-supplied leaf id (a raw `u64` from an
-/// overlay `items[*].win` field). The two namespaces (WinId / PaintId)
-/// share the `u64` space — see [`PAINT_ID_BASE`] for the partition.
+/// Resolved kind of a raw `u64` leaf id from an overlay `items[*].win` field.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum LeafKind {
     Window(crate::smelt_term::WinId),
     Paint(PaintId),
 }
 
-/// Per-host registry mapping `PaintId` → Lua callback handle id. The
-/// handle id is the same `u64` produced by
-/// [`super::register_callback_handle`] — the actual `mlua::Function`
-/// lives in `LuaShared::callbacks` keyed by that id, so we don't clone
-/// the registry key.
+/// Maps `PaintId` → callback handle id (a `u64` into `LuaShared::callbacks`).
 pub(crate) struct PaintRegistry {
     handles: HashMap<PaintId, u64>,
     next_id: AtomicU64,
@@ -74,10 +43,8 @@ impl Default for PaintRegistry {
 }
 
 impl PaintRegistry {
-    /// Reserve a fresh paint id and bind it to `handle_id`. Asserts the
-    /// freshly-allocated id stays in the paint half of the partition
-    /// (>= `PAINT_ID_BASE`); allocator init guarantees this for any
-    /// reasonable session length, but the assert pins the contract.
+    /// Reserve a fresh paint id and bind it to `handle_id`.
+    /// Asserts the id stays in the paint half (`>= PAINT_ID_BASE`).
     pub(crate) fn register(&mut self, handle_id: u64) -> PaintId {
         let id = PaintId(self.next_id.fetch_add(1, Ordering::Relaxed));
         debug_assert!(
@@ -88,9 +55,7 @@ impl PaintRegistry {
         id
     }
 
-    /// Drop the binding, returning the previously-registered handle id
-    /// so the caller can release the underlying Lua callback (via
-    /// `LuaRuntime::remove_callback`).
+    /// Remove the binding and return the handle id so the caller can release the Lua callback.
     pub(crate) fn unregister(&mut self, id: PaintId) -> Option<u64> {
         self.handles.remove(&id)
     }
@@ -105,29 +70,20 @@ impl PaintRegistry {
 }
 
 thread_local! {
-    /// Active `GridSlice` pointer for the in-flight Lua paint callback,
-    /// or null when no paint is in progress. Set by [`SliceGuard::new`],
-    /// cleared on guard drop (including panic unwind).
+    /// Active `GridSlice` pointer for the in-flight paint callback; null otherwise.
+    /// Set by [`SliceGuard::new`], cleared on drop (including panic unwind).
     static CURRENT_SLICE: Cell<*mut GridSlice<'static>> =
         const { Cell::new(std::ptr::null_mut()) };
 }
 
-/// RAII guard installed for the duration of one Lua paint callback.
-/// Stashes the slice pointer in TLS on creation; clears it on drop so
-/// out-of-scope `slice:set` etc. error out instead of touching a stale
-/// borrow.
+/// RAII guard that stashes the slice pointer in TLS for one paint callback, clearing on drop.
 struct SliceGuard;
 
 impl SliceGuard {
     fn new(slice: &mut GridSlice<'_>) -> Self {
-        // SAFETY: lifetime-erased to `'static` for storage. The guard's
-        // Drop impl runs before `invoke_paint` returns to its caller —
-        // who still owns the real `&mut GridSlice<'_>` borrow — so the
-        // pointer is valid for the entire window in which `with_slice`
-        // can read it back.
-        // SAFETY: lifetime-erase via raw pointer. Same allocation, only
-        // the lifetime parameter changes. The Drop impl clears TLS
-        // before our caller's borrow ends.
+        // SAFETY: lifetime-erased to `'static` for TLS storage. The Drop impl clears TLS
+        // before `invoke_paint` returns to its caller, who still holds the real borrow.
+        // The pointer is valid for the entire window in which `with_slice` can read it.
         #[allow(clippy::unnecessary_cast)]
         let ptr: *mut GridSlice<'static> = slice as *mut GridSlice<'_> as *mut GridSlice<'static>;
         CURRENT_SLICE.with(|cell| cell.set(ptr));
@@ -141,10 +97,7 @@ impl Drop for SliceGuard {
     }
 }
 
-/// Run `f` against the active paint slice. Returns `Err` (Lua-facing
-/// "not in paint" message) when no callback is on the stack, so slice
-/// userdata methods can be called from any Lua context and fail
-/// cleanly rather than crash.
+/// Run `f` against the active paint slice, or return a Lua error if not in a paint callback.
 pub(crate) fn with_slice<R>(f: impl FnOnce(&mut GridSlice<'_>) -> R) -> LuaResult<R> {
     let ptr = CURRENT_SLICE.with(|cell| cell.get());
     if ptr.is_null() {
@@ -152,18 +105,14 @@ pub(crate) fn with_slice<R>(f: impl FnOnce(&mut GridSlice<'_>) -> R) -> LuaResul
             "smelt.paint: slice not in scope (call from a paint callback)".into(),
         ));
     }
-    // SAFETY: pointer set by the live `SliceGuard` on the dispatcher's
-    // stack; the guard hasn't dropped or we wouldn't be inside a Lua
-    // callback. Lifetime-restoration to a fresh borrow is sound for
-    // the same reason.
+    // SAFETY: pointer set by the live `SliceGuard`; guard hasn't dropped
+    // (we're inside a Lua callback). Lifetime-restoration is sound for the same reason.
     let slice: &mut GridSlice<'_> = unsafe { &mut *ptr };
     Ok(f(slice))
 }
 
-/// Empty marker userdata. The methods on this userdata don't carry the
-/// slice borrow themselves — they read [`with_slice`] at call time —
-/// but the userdata exists so plugins write idiomatic
-/// `slice:set(...)` calls instead of free `smelt.paint.set(...)`.
+/// Marker userdata enabling idiomatic `slice:set(...)` call syntax.
+/// Methods delegate to [`with_slice`] at call time rather than carrying the borrow.
 pub(crate) struct PaintSliceUd;
 
 impl mlua::UserData for PaintSliceUd {
@@ -215,11 +164,7 @@ impl mlua::UserData for PaintSliceUd {
     }
 }
 
-/// Build the per-frame `ctx` table handed to the Lua callback.
-/// Currently exposes `focused` + `terminal_width` + `terminal_height`.
-/// `theme` access from the paint callback isn't wired yet — plugins
-/// pull palette colours from `smelt.theme` instead, which already
-/// reads the same theme object.
+/// Build the per-frame `ctx` table handed to the Lua paint callback.
 fn build_ctx_table(lua: &Lua, ctx: &DrawContext) -> LuaResult<mlua::Table> {
     let t = lua.create_table()?;
     t.set("focused", ctx.focused)?;
@@ -228,11 +173,8 @@ fn build_ctx_table(lua: &Lua, ctx: &DrawContext) -> LuaResult<mlua::Table> {
     Ok(t)
 }
 
-/// Fire the registered Lua paint callback for `handle_id` against the
-/// live `slice`. Stashes the slice pointer for the duration of the
-/// call so userdata methods can write through it; records errors
-/// rather than propagating (a broken painter doesn't crash the
-/// renderer — it just fails to paint that leaf for the frame).
+/// Fire the Lua paint callback for `handle_id`. Errors are recorded rather than
+/// propagated — a broken painter skips the leaf for the frame without crashing the renderer.
 pub(crate) fn invoke_paint(
     runtime: &super::LuaRuntime,
     handle_id: u64,

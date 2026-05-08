@@ -1,8 +1,5 @@
--- Built-in read_file tool — text files, Jupyter notebooks (`.ipynb`),
--- and image files (png/jpg/gif/webp/bmp/tiff/svg). Caches each read
--- in `Core.files` (the shared `engine::tools::FileStateCache`) so
--- repeat reads of the same range against an unchanged file return a
--- short stub instead of the full content, saving prompt-cache tokens.
+-- Built-in read_file tool. Supports text, notebooks (.ipynb), and images.
+-- Returns a stub for unchanged files at the same range to save prompt-cache tokens.
 
 local DEFAULT_LINE_LIMIT = 2000
 
@@ -41,8 +38,7 @@ local function format_text_window(content, offset, limit)
   for line in (content .. "\n"):gmatch("([^\n]*)\n") do
     lines[#lines + 1] = line
   end
-  -- string.gmatch above leaves a trailing empty entry when content ends in
-  -- a newline; the engine impl uses `content.lines()` which drops it.
+  -- gmatch leaves a trailing empty entry on a trailing newline; drop it.
   if content:sub(-1) == "\n" and lines[#lines] == "" then
     lines[#lines] = nil
   end

@@ -1,18 +1,8 @@
-//! TLS-installed `&mut Core` slot used by Host-tier Lua bindings.
+//! TLS slot for `&mut Core`, used by Host-tier Lua bindings.
 //!
-//! Host-tier bindings (`smelt.cell`, `smelt.timer`, `smelt.fs`, etc.)
-//! need to reach the headless-safe runtime state — `Cells`, `Timers`,
-//! `Session`, `EngineClient`, `AppConfig`, the file/process registries,
-//! the skill loader, the frontend tag, and `Confirms`. Each frontend
-//! (`HeadlessApp`, `TuiApp`, future story-app) owns a `Core`; whichever
-//! frontend is driving Lua at the moment installs `&mut Core` here, and
-//! the bindings reborrow it through [`with_core`] / [`try_with_core`].
-//!
-//! The compositor-bearing surface lives in `tui::smelt_term::UiHost` (defined in
-//! the tui crate). It does not extend any Core-tier trait — `smelt-term`
-//! can never reference tui-defined types. `TuiApp` installs both pointers in
-//! parallel; `HeadlessApp` installs only the Core pointer and errors at
-//! runtime if a UiHost-only Lua binding is invoked from a headless context.
+//! Whichever frontend drives Lua installs its `Core` here; bindings reborrow
+//! through [`with_core`] / [`try_with_core`]. `HeadlessApp` installs only the
+//! Core pointer; UiHost-only bindings return an error from headless context.
 
 use super::runtime::Core;
 use std::cell::RefCell;
@@ -22,14 +12,12 @@ thread_local! {
 }
 
 /// Install `core` as the TLS pointer for the duration of the returned guard.
-/// Typically called at the top of any function that drives Lua callbacks.
 pub fn install_core_ptr(core: &mut Core) -> CorePtrGuard {
     let ptr: *mut Core = core;
     let old = CORE_PTR.with(|cell| cell.replace(Some(ptr)));
     CorePtrGuard { old }
 }
 
-/// Drop guard returned by [`install_core_ptr`]. Restores the previous slot.
 pub struct CorePtrGuard {
     old: Option<*mut Core>,
 }
@@ -40,7 +28,6 @@ impl Drop for CorePtrGuard {
     }
 }
 
-/// Borrow the installed `&mut Core` for the duration of `f`.
 /// Panics if called outside an [`install_core_ptr`] scope.
 pub fn with_core<R>(f: impl FnOnce(&mut Core) -> R) -> R {
     let ptr = CORE_PTR
@@ -52,7 +39,6 @@ pub fn with_core<R>(f: impl FnOnce(&mut Core) -> R) -> R {
     unsafe { f(&mut *ptr) }
 }
 
-/// Variant that returns `None` if the pointer is unset instead of panicking.
 pub fn try_with_core<R>(f: impl FnOnce(&mut Core) -> R) -> Option<R> {
     let ptr = CORE_PTR.with(|cell| *cell.borrow())?;
     Some(unsafe { f(&mut *ptr) })

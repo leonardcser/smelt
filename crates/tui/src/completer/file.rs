@@ -25,8 +25,7 @@ impl Completer {
     }
 }
 
-/// Get tracked + untracked (but not ignored) files and directories via git.
-/// Falls back to a filesystem walk when not inside a git repository.
+/// Tracked + untracked non-ignored files via git; falls back to filesystem walk.
 fn git_files() -> Vec<String> {
     let output = Command::new("git")
         .args(["ls-files", "--cached", "--others", "--exclude-standard"])
@@ -68,7 +67,7 @@ fn git_files() -> Vec<String> {
     entries
 }
 
-/// Recursively walk the cwd collecting files and directories (non-git fallback).
+/// Recursively walk cwd for files and directories (non-git fallback).
 fn walk_cwd_files() -> Vec<String> {
     use std::fs;
     use std::path::Path;
@@ -127,7 +126,6 @@ fn walk_cwd_files() -> Vec<String> {
                     stack.push((rel, depth + 1));
                 }
             } else {
-                // Also collect parent dirs.
                 let mut dir_prefix = String::new();
                 for component in Path::new(&rel)
                     .parent()

@@ -1,12 +1,4 @@
-//! `smelt.reasoning` — `get / set / cycle / cycle_list` over
-//! `protocol::ReasoningEffort` (Off / Low / Medium / High / Max).
-//! Mirrors `smelt.mode`; lives at top-level so the surface stays
-//! symmetric.
-//!
-//! `cycle` is seeded as a no-op stub here so callers always see a
-//! function; `runtime/lua/smelt/modes.lua` overrides it with the
-//! real Lua-side cycle implementation that reads `cycle_list` and
-//! calls `set`. `set` is a no-op stub in core; the TUI overrides it.
+//! `smelt.reasoning` — get/set/cycle reasoning effort. Mirrors `smelt.mode`; stubs overridden by TUI/Lua.
 
 use mlua::prelude::*;
 
@@ -31,8 +23,6 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
         })?,
     )?;
 
-    // The configured cycle as a list of effort labels. Returns the
-    // empty list when no cycle is configured.
     reasoning_tbl.set(
         "cycle_list",
         lua.create_function(|lua, ()| {

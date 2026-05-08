@@ -1,8 +1,4 @@
--- `/theme` — change the accent color.
---
--- With an arg (`/theme lavender`), applies directly. Without, opens a
--- prompt-docked picker: typing filters presets, navigation live-
--- previews the accent, Enter commits, Esc restores the original.
+-- `/theme` — change the accent color. Direct with an arg; live-preview picker without.
 
 local presets = smelt.theme.presets()
 local preset_names, items = {}, {}

@@ -1,6 +1,4 @@
-//! `smelt.clipboard` — read / write the system clipboard. Both call
-//! into `core.clipboard.{read,write}` so every text I/O routes
-//! through the host-level Clipboard subsystem.
+//! `smelt.clipboard` — read/write the system clipboard.
 
 use mlua::prelude::*;
 

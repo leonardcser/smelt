@@ -1,8 +1,5 @@
--- Task-yielding primitives. Each checks `coroutine.isyieldable()` so
--- calls from a non-task context raise a clear error instead of yielding
--- into the void. Autoloaded before user init.lua so every plugin sees
--- `smelt.sleep`, and before `smelt.dialog` / `smelt.picker` so those
--- runtime files can reference yield helpers safely.
+-- Task-yielding primitives. Autoloaded before user init.lua so all plugins
+-- see `smelt.sleep` and dialog/picker helpers can reference them.
 
 function smelt.sleep(ms)
   if not coroutine.isyieldable() then
@@ -15,10 +12,7 @@ function smelt.sleep(ms)
   return result
 end
 
--- Park the running task until `smelt.task.resume(id, value)` fires (from a
--- Rust callback, a keymap, another task, …). Returns the resumed value.
--- Sugar over `coroutine.yield({__yield="external", id=...})` so plugins
--- don't spell the sentinel by hand.
+-- Park the running task until `smelt.task.resume(id, value)` fires. Returns the resumed value.
 function smelt.task.wait(id)
   if not coroutine.isyieldable() then
     error("smelt.task.wait: call from inside smelt.spawn(fn) or tool.execute", 2)
@@ -30,11 +24,8 @@ function smelt.task.wait(id)
   return result
 end
 
--- Side-call from a plugin tool's `execute` into a core (or another plugin)
--- tool. Suspends the running coroutine until the engine returns the
--- result. Pass `parent_call_id` (from the `ctx` table) so streamed output
--- groups under the visible plugin invocation. Returns the result table
--- `{ content, is_error, metadata? }`.
+-- Call another tool from within `execute`. Pass `parent_call_id` so streamed
+-- output groups under the parent invocation. Returns `{ content, is_error, metadata? }`.
 function smelt.tools.call(name, args, parent_call_id)
   if not coroutine.isyieldable() then
     error("smelt.tools.call: call from inside tool.execute", 2)
@@ -91,38 +82,30 @@ do
   end
 end
 
--- Sugar: build a leaf layout from a string. Mints a fresh buffer, paints
--- via `smelt.text.render`, returns it wrapped as `smelt.layout.leaf`.
--- The common shape for a tool's `render(args, output, ctx)` callback.
+-- Build a leaf layout from a string. Common pattern for `render` callbacks.
 function smelt.layout.text(content, opts)
   local buf = smelt.buf.create()
   smelt.text.render(buf, content or "", opts)
   return smelt.layout.leaf(buf)
 end
 
--- Sugar: build a 1×1 leaf with a single glyph. The transcript composer
--- auto-repeats 1×1 leaves to fill their allocated rect along the parent's
--- layout axis — `sep("│")` inside an `hbox` paints a vertical divider;
--- `sep("─")` inside a `vbox` paints a horizontal one.
+-- Build a 1×1 leaf from a single glyph. Auto-repeats to fill the parent's
+-- axis: `sep("│")` in an hbox = vertical divider, `sep("─")` in a vbox = horizontal.
 function smelt.layout.sep(char)
   local buf = smelt.buf.create()
   smelt.buf.set_lines(buf, 0, -1, { char or "─" })
   return smelt.layout.leaf(buf)
 end
 
--- Apply a colorscheme by name. `smelt.theme.use("default")` requires
--- `smelt.colorschemes.<name>` and lets the loaded chunk run its
--- `smelt.theme.set` / `smelt.theme.link` calls. Plugin authors install
--- a colorscheme by adding `runtime/lua/smelt/colorschemes/<name>.lua`
--- (or shipping it under their own package).
+-- Load a colorscheme by name via `require("smelt.colorschemes.<name>")`.
+-- Install custom colorschemes at `runtime/lua/smelt/colorschemes/<name>.lua`.
 function smelt.theme.use(name)
   return require("smelt.colorschemes." .. name)
 end
 
--- Fuzzy-rank a list against `query`. Returns an array of 1-based indices
--- into `items`, best matches first. `key_fn(item) -> haystack_string` is
--- optional; omit to score the raw item (must be a string). An empty query
--- returns the original ordering.
+-- Rank `items` against `query`. Returns 1-based indices into `items`, best first.
+-- `key_fn(item) -> string` is optional; omit to score the item directly (must be a string).
+-- Empty query returns original order.
 function smelt.fuzzy.rank(items, query, key_fn)
   if query == nil or query == "" then
     local all = {}

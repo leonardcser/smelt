@@ -42,18 +42,7 @@ pub enum Action {
     Passthrough,
 }
 
-/// Shared mutable state that vim needs to operate on.
-///
-/// `mode` is the **single global** TuiApp-owned `VimMode`; vim reads and
-/// writes it through this reference rather than owning a private copy.
-/// `clipboard` is the TuiApp-owned `Clipboard` subsystem (kill ring +
-/// platform sink): yanks mirror into the sink, pastes pull from it
-/// when it was updated externally (see `KillRing::last_clipboard_write`).
-/// `curswant` is the per-Window preferred vertical-motion column (in
-/// terminal cells, so wide glyphs don't throw column off); vim's
-/// `j`/`k` motions read and write it. `vim_state` carries the
-/// per-Window persistent vim state (Visual anchor, last `f`/`t`
-/// target) plus in-flight key-sequence state.
+/// Shared mutable state for vim operations. Borrowed from the host per keypress.
 pub struct VimContext<'a> {
     pub buf: &'a mut String,
     pub cpos: &'a mut usize,
@@ -66,13 +55,13 @@ pub struct VimContext<'a> {
 }
 
 impl VimContext<'_> {
-    /// Snapshot buffer state into undo history before mutating.
+    /// Snapshot to undo history before mutating.
     fn save_undo(&mut self) {
         self.history
             .save(UndoEntry::snapshot(self.buf, *self.cpos, self.attachments));
     }
 
-    /// Undo: pop the most recent snapshot, stashing the current state on redo.
+    /// Undo: pop the most recent snapshot, stash current state for redo.
     fn undo(&mut self) {
         let current = UndoEntry::snapshot(self.buf, *self.cpos, self.attachments);
         if let Some(entry) = self.history.undo(current) {
@@ -83,7 +72,7 @@ impl VimContext<'_> {
         }
     }
 
-    /// Redo: pop the most recent redo, stashing the current state on undo.
+    /// Redo: pop the most recent redo, stash current state for undo.
     fn redo(&mut self) {
         let current = UndoEntry::snapshot(self.buf, *self.cpos, self.attachments);
         if let Some(entry) = self.history.redo(current) {
@@ -94,10 +83,7 @@ impl VimContext<'_> {
         }
     }
 
-    /// Copy `buf[start..end]` into the kill ring with the given linewise flag.
-    /// Also mirrors the text to the system clipboard so a `y` in smelt is
-    /// immediately pasteable in other apps, matching nvim's
-    /// `clipboard=unnamedplus`.
+    /// Yank `buf[start..end]` into the kill ring and mirror to system clipboard.
     fn yank_range(&mut self, start: usize, end: usize, linewise: bool) {
         let text = self.buf[start..end].to_string();
         self.clipboard
@@ -116,12 +102,8 @@ impl VimContext<'_> {
         self.clipboard.kill_ring.is_linewise()
     }
 
-    /// Before reading the register for a paste, reconcile with the
-    /// system clipboard. If the clipboard holds text different from
-    /// what we last pushed, an external source updated it — overwrite
-    /// the kill ring with that text (charwise, since external sources
-    /// don't carry vim's linewise flag). When they match, the kill
-    /// ring stays authoritative so `p` vs `P` + linewise still work.
+    /// Sync the kill ring from the system clipboard before a paste.
+    /// If the clipboard was updated externally, overwrite the kill ring (charwise).
     fn sync_paste_from_clipboard(&mut self) {
         let current = self.clipboard.read();
         let Some(text) = current else { return };
@@ -180,31 +162,24 @@ pub(crate) enum SubState {
 
 // ── Vim state ───────────────────────────────────────────────────────────────
 
-/// Per-Window vim state. Holds both the persistent slots that outlive any
-/// single key sequence (`visual_anchor`, `last_find`) and the in-flight
-/// key-sequence accumulators (`sub`, `count1`, `count2`) that are reset
-/// between commands. The split was historical — both live here now since
-/// both are per-Window and neither needs to survive Window destruction.
+/// Per-Window vim state: persistent slots (`visual_anchor`, `last_find`) and
+/// in-flight key-sequence accumulators (`sub`, `count1`, `count2`).
 #[derive(Clone, Copy, Debug, Default)]
 pub struct VimWindowState {
-    /// Byte position of the Visual-mode anchor (where the most recent
-    /// `v`/`V` was pressed). Only meaningful while
-    /// `mode ∈ {Visual, VisualLine}`; carries a stale value otherwise.
+    /// Visual-mode anchor byte; meaningful only in `Visual`/`VisualLine`.
     pub(crate) visual_anchor: usize,
-    /// Last `f`/`t`/`F`/`T` target, replayed by `;` (same direction) or
-    /// `,` (reversed).
+    /// Last `f`/`t`/`F`/`T` target for `;`/`,` replay.
     pub(crate) last_find: Option<(FindKind, char)>,
-    /// In-flight sub-state for multi-key sequences (operator pending, find
-    /// pending, text-object pending). Reset to `Ready` at command boundaries.
+    /// In-flight sub-state for multi-key sequences.
     pub(crate) sub: SubState,
-    /// Count accumulated before the operator (or before a standalone motion).
+    /// Count before the operator (or standalone motion).
     pub(crate) count1: Option<usize>,
-    /// Count accumulated after the operator, before the motion.
+    /// Count after the operator, before the motion.
     pub(crate) count2: Option<usize>,
 }
 
 impl VimWindowState {
-    /// Pop count1 (defaulting to 1), clearing both count accumulators.
+    /// Pop count1 (default 1), clearing both accumulators.
     fn take_count(&mut self) -> usize {
         let n = self.count1.unwrap_or(1);
         self.count1 = None;
@@ -212,7 +187,7 @@ impl VimWindowState {
         n
     }
 
-    /// Pop count1 * count2 (each defaulting to 1) and clear both.
+    /// Pop count1 × count2 (each default 1) and clear both.
     fn effective_count(&mut self) -> usize {
         let c1 = self.count1.unwrap_or(1);
         let c2 = self.count2.unwrap_or(1);
@@ -221,29 +196,25 @@ impl VimWindowState {
         c1 * c2
     }
 
-    /// Clear count accumulators only — leaves `sub` untouched.
+    /// Clear count accumulators; leaves `sub` untouched.
     fn reset_counts(&mut self) {
         self.count1 = None;
         self.count2 = None;
     }
 
-    /// Reset the entire pending sequence: `sub = Ready`, both counts cleared.
+    /// Reset the entire pending sequence: `sub = Ready`, counts cleared.
     fn reset_pending(&mut self) {
         self.sub = SubState::Ready;
         self.reset_counts();
     }
 
-    /// Write a new mode through `mode_ref` and clear the pending sequence.
-    /// Use when the caller has the mode handy outside a `VimContext`.
+    /// Set mode and clear the pending sequence.
     pub fn set_mode(&mut self, mode_ref: &mut VimMode, mode: VimMode) {
         *mode_ref = mode;
         self.reset_pending();
     }
 
-    /// Anchor a visual selection at `cpos` and enter the requested visual
-    /// mode (`Visual` or `VisualLine`). Used by mouse drag-select so the
-    /// selection originates at the click rather than the previous cursor
-    /// position.
+    /// Anchor a visual selection at `cpos` and enter the given visual mode.
     pub fn begin_visual(&mut self, mode_ref: &mut VimMode, mode: VimMode, cpos: usize) {
         *mode_ref = mode;
         self.reset_pending();
@@ -251,8 +222,7 @@ impl VimWindowState {
     }
 }
 
-/// Returns the visual selection range (start, end) as byte offsets when
-/// `mode` is Visual or VisualLine. Range is always ordered (start <= end).
+/// Visual selection as ordered byte offsets, or `None` outside Visual modes.
 pub fn visual_range(
     state: &VimWindowState,
     buf: &str,
@@ -281,10 +251,7 @@ pub fn visual_range(
     }
 }
 
-/// Read the Visual-mode anchor byte. Returns `Some(byte)` only
-/// while in `Visual`/`VisualLine`; `None` in Normal/Insert. Used by
-/// the prompt mouse adapter to translate between source-byte and
-/// wrapped-byte spaces across `Window::handle_mouse` calls.
+/// Visual-mode anchor byte, or `None` in Normal/Insert.
 pub fn visual_anchor(state: &VimWindowState, mode: VimMode) -> Option<usize> {
     match mode {
         VimMode::Visual | VimMode::VisualLine => Some(state.visual_anchor),
@@ -292,8 +259,7 @@ pub fn visual_anchor(state: &VimWindowState, mode: VimMode) -> Option<usize> {
     }
 }
 
-/// Process a key event. Reads and mutates `ctx` (buffer, cursor,
-/// attachments, kill ring, undo history, mode) as needed.
+/// Process a key event, mutating `ctx` (buffer, cursor, kill ring, undo, mode).
 pub fn handle_key(key: KeyEvent, ctx: &mut VimContext<'_>) -> Action {
     match *ctx.mode {
         VimMode::Insert => handle_insert(key, ctx),
@@ -306,7 +272,6 @@ pub fn handle_key(key: KeyEvent, ctx: &mut VimContext<'_>) -> Action {
 
 fn handle_insert(key: KeyEvent, ctx: &mut VimContext<'_>) -> Action {
     match key {
-        // Esc or Ctrl+[ → normal mode
         KeyEvent {
             code: KeyCode::Esc, ..
         }
@@ -318,19 +283,16 @@ fn handle_insert(key: KeyEvent, ctx: &mut VimContext<'_>) -> Action {
             enter_normal(ctx);
             Action::Consumed
         }
-        // Ctrl+W / Ctrl+U → pass through to main handler (kill ring support).
         KeyEvent {
             code: KeyCode::Char('w' | 'u'),
             modifiers: KeyModifiers::CONTROL,
             ..
         } => Action::Passthrough,
-        // Ctrl+H → backspace (same as Backspace, but let caller handle)
         KeyEvent {
             code: KeyCode::Char('h'),
             modifiers: KeyModifiers::CONTROL,
             ..
         } => Action::Passthrough,
-        // Everything else → let caller handle normal insert editing
         _ => Action::Passthrough,
     }
 }
@@ -338,7 +300,6 @@ fn handle_insert(key: KeyEvent, ctx: &mut VimContext<'_>) -> Action {
 // ── Normal mode ─────────────────────────────────────────────────────
 
 fn handle_normal(key: KeyEvent, ctx: &mut VimContext<'_>) -> Action {
-    // Ctrl+key handling in normal mode.
     if key.modifiers.contains(KeyModifiers::CONTROL) {
         match key.code {
             KeyCode::Char('r') => {
@@ -353,15 +314,11 @@ fn handle_normal(key: KeyEvent, ctx: &mut VimContext<'_>) -> Action {
         }
     }
 
-    // BackTab passes through for mode toggle.
     if key.code == KeyCode::BackTab {
         return Action::Passthrough;
     }
 
-    // Shift+arrow / Shift+Home/End pass through so the keymap's
-    // shared shift-selection actions (`SelectLeft`, …) run —
-    // selection extension is the same operation whether vim is on
-    // or off, so it lives in one place.
+    // Shift+arrows pass through for shared shift-selection actions.
     if key.modifiers.contains(KeyModifiers::SHIFT)
         && matches!(
             key.code,
@@ -376,7 +333,6 @@ fn handle_normal(key: KeyEvent, ctx: &mut VimContext<'_>) -> Action {
         return Action::Passthrough;
     }
 
-    // Handle sub-states first.
     match ctx.vim_state.sub {
         SubState::WaitingR => return handle_waiting_r(key, ctx),
         SubState::WaitingZ => {
@@ -393,29 +349,23 @@ fn handle_normal(key: KeyEvent, ctx: &mut VimContext<'_>) -> Action {
         SubState::WaitingOpG(op) => return handle_waiting_op_g(key, op, ctx),
         SubState::WaitingTextObj(op, inner) => return handle_waiting_textobj(key, op, inner, ctx),
         SubState::WaitingOp(op) => {
-            // Could be digit, motion, text object prefix (i/a), or same-key (dd/cc/yy).
             if let KeyCode::Char(c) = key.code {
-                // Digit accumulation for count2.
                 if c.is_ascii_digit() && (c != '0' || ctx.vim_state.count2.is_some()) {
                     ctx.vim_state.count2 = Some(
                         ctx.vim_state.count2.unwrap_or(0) * 10 + c.to_digit(10).unwrap() as usize,
                     );
                     return Action::Consumed;
                 }
-                // Same operator key → linewise (dd, cc, yy).
                 if c == op.char() {
                     return execute_linewise_op(op, ctx);
                 }
-                // Text object prefix.
                 if c == 'i' || c == 'a' {
                     ctx.vim_state.sub = SubState::WaitingTextObj(op, c == 'i');
                     return Action::Consumed;
                 }
             }
-            // Otherwise try as a motion.
             let result = execute_op_motion(key, op, ctx);
-            // Don't reset if execute_op_motion transitioned to a new substate
-            // (e.g. WaitingOpFind for df/dt combos).
+            // Don't reset if a new substate was set (e.g. WaitingOpFind for df/dt).
             if matches!(ctx.vim_state.sub, SubState::WaitingOp(_)) {
                 ctx.vim_state.reset_pending();
             }
@@ -424,14 +374,12 @@ fn handle_normal(key: KeyEvent, ctx: &mut VimContext<'_>) -> Action {
         SubState::WaitingVisualTextObj(_) | SubState::Ready => {}
     }
 
-    // Ready state — handle count digits, commands, motions.
     if let KeyCode::Char(c) = key.code {
         if key.modifiers.is_empty() || key.modifiers == KeyModifiers::SHIFT {
             return handle_normal_char(c, ctx);
         }
     }
 
-    // Non-char keys in normal mode.
     match key.code {
         KeyCode::Esc => {
             ctx.vim_state.reset_pending();
@@ -465,12 +413,10 @@ fn handle_normal(key: KeyEvent, ctx: &mut VimContext<'_>) -> Action {
 }
 
 fn handle_normal_char(c: char, ctx: &mut VimContext<'_>) -> Action {
-    // Clear desired column for any non-vertical motion.
     if c != 'j' && c != 'k' && !c.is_ascii_digit() {
         *ctx.curswant = None;
     }
 
-    // Count digit accumulation.
     if c.is_ascii_digit() && (c != '0' || ctx.vim_state.count1.is_some()) {
         ctx.vim_state.count1 =
             Some(ctx.vim_state.count1.unwrap_or(0) * 10 + c.to_digit(10).unwrap() as usize);
@@ -878,7 +824,6 @@ fn handle_normal_char(c: char, ctx: &mut VimContext<'_>) -> Action {
         }
         '$' => {
             let n = ctx.vim_state.take_count();
-            // n$ moves down n-1 lines then to end.
             for _ in 1..n {
                 *ctx.cpos = move_down(ctx.buf, *ctx.cpos);
             }
@@ -931,7 +876,6 @@ fn handle_normal_char(c: char, ctx: &mut VimContext<'_>) -> Action {
             Action::Consumed
         }
 
-        // Unknown — swallow it.
         _ => {
             ctx.vim_state.reset_pending();
             Action::Consumed
@@ -942,7 +886,6 @@ fn handle_normal_char(c: char, ctx: &mut VimContext<'_>) -> Action {
 // ── Visual mode ──────────────────────────────────────────────────────
 
 fn handle_visual(key: KeyEvent, ctx: &mut VimContext<'_>) -> Action {
-    // Handle sub-states.
     if let SubState::WaitingVisualTextObj(inner) = ctx.vim_state.sub {
         ctx.vim_state.sub = SubState::Ready;
         if let KeyCode::Char(c) = key.code {
@@ -968,12 +911,10 @@ fn handle_visual(key: KeyEvent, ctx: &mut VimContext<'_>) -> Action {
         };
     }
 
-    // Pass through Ctrl keys.
     if key.modifiers.contains(KeyModifiers::CONTROL) {
         return Action::Passthrough;
     }
 
-    // Count digit accumulation.
     if let KeyCode::Char(c) = key.code {
         if c.is_ascii_digit() && (c != '0' || ctx.vim_state.count1.is_some()) {
             ctx.vim_state.count1 =
@@ -985,7 +926,6 @@ fn handle_visual(key: KeyEvent, ctx: &mut VimContext<'_>) -> Action {
         }
     }
 
-    // Non-char keys.
     match key.code {
         KeyCode::Esc => {
             exit_visual(ctx);
@@ -1044,12 +984,8 @@ fn handle_visual_char(c: char, ctx: &mut VimContext<'_>) -> Action {
         }
 
         // ── Substitute (s → change, S → linewise change) ────────
-        's' => {
-            // Visual s is the same as c.
-            handle_visual_char('c', ctx)
-        }
+        's' => handle_visual_char('c', ctx),
         'S' => {
-            // Visual S forces linewise, then changes.
             *ctx.mode = VimMode::VisualLine;
             handle_visual_char('c', ctx)
         }
@@ -1061,11 +997,9 @@ fn handle_visual_char(c: char, ctx: &mut VimContext<'_>) -> Action {
                 ctx.save_undo();
                 ctx.yank_range(start, end, linewise);
                 if linewise {
-                    // Include trailing newline if present.
                     let drain_end = if end < ctx.buf.len() && ctx.buf.as_bytes()[end] == b'\n' {
                         end + 1
                     } else if start > 0 && ctx.buf.as_bytes()[start - 1] == b'\n' {
-                        // Last line(s) — remove preceding newline.
                         let s = start - 1;
                         ctx.buf.drain(s..end);
                         *ctx.cpos = s.min(ctx.buf.len());
@@ -1094,8 +1028,6 @@ fn handle_visual_char(c: char, ctx: &mut VimContext<'_>) -> Action {
                 ctx.save_undo();
                 ctx.yank_range(start, end, linewise);
                 if linewise {
-                    // Like cc: clear line content but keep the line structure.
-                    // Find the content range (excluding leading/trailing newlines).
                     let content_start = first_non_blank_at(ctx.buf, start);
                     ctx.buf.drain(content_start..end);
                     *ctx.cpos = content_start;
@@ -1200,9 +1132,7 @@ fn handle_visual_char(c: char, ctx: &mut VimContext<'_>) -> Action {
                     ctx.buf.replace_range(start..end, &text);
                     *ctx.cpos = start;
                     clamp_normal(ctx.buf, ctx.cpos);
-                    // The replaced text goes into register (like vim).
-                    // Also mirror to clipboard so subsequent external
-                    // pastes pick it up.
+                    // Replaced text goes into register; mirror to clipboard.
                     ctx.clipboard
                         .kill_ring
                         .set_with_linewise(old.clone(), false);
@@ -1384,7 +1314,6 @@ fn handle_visual_char(c: char, ctx: &mut VimContext<'_>) -> Action {
             Action::Consumed
         }
 
-        // Unknown — swallow.
         _ => Action::Consumed,
     }
 }
@@ -1449,8 +1378,6 @@ fn handle_waiting_op_find(
         let n = ctx.vim_state.effective_count();
         ctx.vim_state.last_find = Some((kind, ch));
         let origin = *ctx.cpos;
-        // For operators, always find the actual char position (Forward/Backward),
-        // then adjust the range for till variants.
         let raw_kind = match kind {
             FindKind::ForwardTill => FindKind::Forward,
             FindKind::BackwardTill => FindKind::Backward,
@@ -1463,7 +1390,6 @@ fn handle_waiting_op_find(
             }
         }
         if pos != origin {
-            // f is inclusive (include target char), t excludes target char.
             let (start, end) = match kind {
                 FindKind::Forward => (*ctx.cpos, advance_chars(ctx.buf, pos, 1)),
                 FindKind::ForwardTill => (*ctx.cpos, pos),
@@ -1483,7 +1409,6 @@ fn handle_waiting_g(key: KeyEvent, ctx: &mut VimContext<'_>) -> Action {
     ctx.vim_state.sub = SubState::Ready;
     let action = match key.code {
         KeyCode::Char('g') => {
-            // gg → start of buffer.
             if let Some(n) = ctx.vim_state.count1.take() {
                 *ctx.cpos = goto_line(ctx.buf, n.saturating_sub(1));
             } else {
@@ -1536,7 +1461,7 @@ fn handle_waiting_textobj(key: KeyEvent, op: Op, inner: bool, ctx: &mut VimConte
     Action::Consumed
 }
 
-/// Operator pending + a motion key.
+/// Operator-pending motion dispatch.
 fn execute_op_motion(key: KeyEvent, op: Op, ctx: &mut VimContext<'_>) -> Action {
     let n = ctx.vim_state.effective_count();
     let origin = *ctx.cpos;
@@ -1668,19 +1593,15 @@ fn execute_op_motion(key: KeyEvent, op: Op, ctx: &mut VimContext<'_>) -> Action 
     };
 
     let Some(target) = target else {
-        // Invalid motion — cancel.
         return Action::Consumed;
     };
 
     if linewise {
-        // Linewise: delegate to the existing linewise operator logic
-        // which handles newline inclusion, first-non-blank, etc.
         let (start, end) = if target < origin {
             (target, origin)
         } else {
             (origin, target)
         };
-        // Expand to full lines.
         let ls = line_start(ctx.buf, start);
         let le = line_end(ctx.buf, end);
         return apply_linewise_op(op, ctx, ls, le);
@@ -1744,15 +1665,11 @@ fn apply_charwise_op(op: Op, ctx: &mut VimContext<'_>, start: usize, end: usize)
     Action::Consumed
 }
 
-/// Apply a linewise operator over the content range [start..end].
-/// `start` is the first byte of the first line, `end` is the last byte
-/// of the last line (before its newline). This function handles newline
-/// inclusion at buffer boundaries and cursor placement.
+/// Apply linewise operator over [start..end] (line boundaries).
 fn apply_linewise_op(op: Op, ctx: &mut VimContext<'_>, start: usize, end: usize) -> Action {
     let mut s = start;
     let mut e = end;
     let mut has_trailing_nl = false;
-    // Include trailing newline if present.
     if e < ctx.buf.len() && ctx.buf.as_bytes()[e] == b'\n' {
         e += 1;
         has_trailing_nl = true;
@@ -1763,8 +1680,7 @@ fn apply_linewise_op(op: Op, ctx: &mut VimContext<'_>, start: usize, end: usize)
             has_trailing_nl = true;
         }
     }
-    // At end of buffer with no trailing newline — include preceding
-    // newline to avoid leaving a dangling one.
+    // No trailing newline at buffer end: include the preceding newline instead.
     if !has_trailing_nl && e >= ctx.buf.len() && s > 0 {
         s -= 1;
     }
@@ -1782,7 +1698,6 @@ fn apply_linewise_op(op: Op, ctx: &mut VimContext<'_>, start: usize, end: usize)
         }
         Op::Change => {
             ctx.save_undo();
-            // Clear line content but keep the line structure.
             let content_start = first_non_blank_at(ctx.buf, s);
             let content_end = line_end(ctx.buf, e.saturating_sub(1).max(s));
             ctx.yank_range(content_start, content_end, true);
@@ -1792,9 +1707,7 @@ fn apply_linewise_op(op: Op, ctx: &mut VimContext<'_>, start: usize, end: usize)
             return Action::Consumed;
         }
         Op::Yank => {
-            // `yy` / `Y`: linewise yank leaves the cursor in place,
-            // matching vim's default cpoptions. Only delete / change
-            // operators (and visual-mode yank) reposition.
+            // Linewise yank does not reposition the cursor (vim default).
             ctx.yank_range(s, e, true);
             ctx.clipboard.kill_ring.mark_yanked();
         }
@@ -1818,8 +1731,7 @@ fn enter_normal(ctx: &mut VimContext<'_>) {
     *ctx.mode = VimMode::Normal;
     ctx.vim_state.sub = SubState::Ready;
     ctx.vim_state.reset_counts();
-    // Standard vim: cursor moves left one when leaving insert mode,
-    // unless at the start of a line.
+    // Leaving insert mode moves cursor left one, unless at start of line.
     let sol = line_start(ctx.buf, *ctx.cpos);
     if *ctx.cpos > sol {
         *ctx.cpos = prev_char_boundary(ctx.buf, *ctx.cpos);
@@ -1853,10 +1765,6 @@ mod tests {
         }
     }
 
-    /// In-memory sink for testing the kill-ring ↔ system-clipboard
-    /// sync without shelling out. Stored behind a `Rc<RefCell<…>>` so
-    /// the test can inspect the latest write while the `Clipboard`
-    /// owns the boxed sink.
     struct MemSinkInner {
         text: Option<String>,
         writes: usize,
@@ -1873,9 +1781,7 @@ mod tests {
             Ok(())
         }
     }
-    // `Sink` requires `Send` so `Clipboard` can carry `Box<dyn Sink + Send>`.
-    // Tests run single-threaded and `Rc` keeps the inspection handle
-    // local to the test thread.
+    // SAFETY: tests are single-threaded; Rc stays local to the test thread.
     unsafe impl Send for MemSink {}
 
     fn mem_sink(initial: Option<&str>) -> std::rc::Rc<std::cell::RefCell<MemSinkInner>> {

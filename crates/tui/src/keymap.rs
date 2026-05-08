@@ -1,17 +1,11 @@
-//! Declarative keymap for non-stateful keybindings.
-//!
-//! All simple key→action mappings live here as data. Stateful handlers (vim
-//! normal mode, completer, menu, dialog text editing) remain as dedicated code
-//! and are consulted separately by the dispatch loop.
+//! Declarative keymap for non-stateful key→action bindings.
+//! Stateful handlers (vim, completer, menu, dialog) are consulted separately.
 
 use crossterm::event::{KeyCode, KeyModifiers};
 
 // ── Actions ──────────────────────────────────────────────────────────────────
 
-/// Actions that the keymap can resolve to.
-///
-/// The dispatch loop matches on these to perform side effects. Ordering here
-/// doesn't matter — priority comes from the binding list order.
+/// Actions the keymap can resolve to. Priority comes from binding list order.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum KeyAction {
     // TuiApp control
@@ -91,7 +85,7 @@ pub(crate) struct KeyContext {
 
 // ── Conditions ───────────────────────────────────────────────────────────────
 
-/// Tri-state condition: must be true, must be false, or don't care.
+/// Tri-state condition for binding guards.
 #[derive(Clone, Copy, Debug)]
 enum Cond {
     Any,
@@ -179,8 +173,7 @@ impl When {
 struct Binding {
     code: KeyCode,
     mods: KeyModifiers,
-    /// Extra modifier that must NOT be present (used to distinguish e.g.
-    /// plain Backspace from Alt+Backspace).
+    /// Modifier that must NOT be present (e.g. to distinguish plain Backspace from Alt+Backspace).
     exclude_mods: KeyModifiers,
     when: When,
     action: KeyAction,
@@ -227,16 +220,9 @@ const NONE: KeyModifiers = KeyModifiers::NONE;
 
 // ── The Keymap ───────────────────────────────────────────────────────────────
 
-/// Central keymap table. Bindings are evaluated top-to-bottom; first match wins.
-///
-/// This intentionally does NOT include:
-/// - Vim normal mode commands (handled by the Vim state machine)
-/// - Menu navigation (handled by Menu::handle_event)
-/// - Completer navigation (handled by handle_completer_event)
-/// - Dialog key handling (handled by each Dialog impl)
-/// - Esc / double-Esc logic (inherently stateful, needs timers)
-/// - Paste events (not key events)
-/// - Char insertion (fallback after keymap miss)
+/// Keymap table. Bindings are evaluated top-to-bottom; first match wins.
+/// Does not include vim motions, menu/completer navigation, dialog handling,
+/// Esc logic, paste events, or char insertion (all handled elsewhere).
 static BINDINGS: &[Binding] = &[
     // ── Ghost text ──────────────────────────────────────────────────────
     bind(
@@ -246,8 +232,7 @@ static BINDINGS: &[Binding] = &[
         KeyAction::AcceptGhostText,
     ),
     // ── TuiApp control ─────────────────────────────────────────────────────
-    // Ctrl+C: context-dependent (menu/completer/clear/quit/cancel)
-    // Note: menu and completer dismissal happen before keymap lookup.
+    // Ctrl+C: menu/completer dismissal happens before keymap lookup.
     bind(
         KeyCode::Char('c'),
         CTRL,
@@ -273,8 +258,7 @@ static BINDINGS: &[Binding] = &[
     // ── Submit / newline ────────────────────────────────────────────────
     bind_exclude(KeyCode::Enter, NONE, SHIFT, when(), KeyAction::Submit),
     bind(KeyCode::Enter, SHIFT, when(), KeyAction::InsertNewline),
-    // Ctrl+J: navigation in vim normal, newline otherwise.
-    // Ctrl+K: navigation in vim normal, kill-to-eol otherwise.
+    // Ctrl+J / Ctrl+K: navigate in vim normal mode, newline/kill otherwise.
     bind(
         KeyCode::Char('j'),
         CTRL,
@@ -293,7 +277,7 @@ static BINDINGS: &[Binding] = &[
         when().not_vim_non_insert(),
         KeyAction::InsertNewline,
     ),
-    // ── Vim half-page scroll (must be before emacs Ctrl+U/D) ────────────
+    // ── Vim half-page scroll (before emacs Ctrl+U/D) ────────────────────
     bind(
         KeyCode::Char('u'),
         CTRL,
@@ -390,10 +374,9 @@ static BINDINGS: &[Binding] = &[
         when().not_vim_non_insert(),
         KeyAction::Undo,
     ),
-    // ── Selection (shift+movement, non-vim only) ──────────────────────
-    // More-specific combos (shift+alt, shift+ctrl) must come before plain
-    // shift so they match first. Note: Cmd (SUPER) combos are not included
-    // because macOS terminals intercept them for scrollback/tab management.
+    // ── Selection (shift+movement) ────────────────────────────────────────
+    // More-specific combos (shift+alt, shift+ctrl) before plain shift.
+    // Cmd (SUPER) omitted: macOS terminals intercept those.
     bind(
         KeyCode::Left,
         SHIFT.union(ALT),
@@ -469,8 +452,7 @@ static BINDINGS: &[Binding] = &[
 
 // ── Lookup ───────────────────────────────────────────────────────────────────
 
-/// Look up the first matching action for the given key event and context.
-/// Returns `None` if no binding matches (caller should try vim / char insert).
+/// Return the first matching action for a key event, or `None` if no binding matches.
 pub(crate) fn lookup(
     code: KeyCode,
     modifiers: KeyModifiers,
@@ -480,24 +462,19 @@ pub(crate) fn lookup(
         if b.code != code {
             continue;
         }
-        // Check required modifiers are present.
         if !modifiers.contains(b.mods) {
             continue;
         }
-        // Check excluded modifiers are absent.
         if !b.exclude_mods.is_empty() && modifiers.contains(b.exclude_mods) {
             continue;
         }
-        // For bindings that require exact modifiers (NONE), don't match if
-        // extra modifiers are pressed — unless the binding uses ALT/CTRL/SUPER
-        // which are explicitly checked via `contains`.
-        if b.mods.is_empty() && !modifiers.is_empty() {
-            // Allow SHIFT through — terminals set it for uppercase chars,
-            // BackTab, and sometimes arrow keys. Only block if a "real"
-            // modifier (CTRL/ALT/SUPER) is present.
-            if modifiers.intersects(CTRL.union(ALT).union(SUPER)) {
-                continue;
-            }
+        // NONE bindings: reject extra CTRL/ALT/SUPER but allow SHIFT (terminals
+        // set it for uppercase chars, BackTab, and arrow keys).
+        if b.mods.is_empty()
+            && !modifiers.is_empty()
+            && modifiers.intersects(CTRL.union(ALT).union(SUPER))
+        {
+            continue;
         }
         if b.when.matches(ctx) {
             return Some(b.action);
@@ -508,9 +485,8 @@ pub(crate) fn lookup(
 
 // ── Help dialog ──────────────────────────────────────────────────────────────
 
-/// Help dialog content sections sourced by the Lua keymap-help binding.
+/// Help dialog content sections for the Lua keymap-help binding.
 pub(crate) mod hints {
-    // ── Help dialog content ─────────────────────────────────────────
 
     const HELP_PREFIXES: &[(&str, &str)] = &[
         (
@@ -649,7 +625,6 @@ mod tests {
             vim_enabled: true,
             ..ctx()
         };
-        // Ctrl+R in vim normal → no keymap match (vim handler does redo)
         assert_eq!(lookup(KeyCode::Char('r'), CTRL, &c), None);
     }
 
@@ -689,7 +664,6 @@ mod tests {
     #[test]
     fn backtab_toggles_mode() {
         let c = ctx();
-        // Terminals send BackTab with SHIFT modifier.
         assert_eq!(
             lookup(KeyCode::BackTab, SHIFT, &c),
             Some(KeyAction::ToggleMode)

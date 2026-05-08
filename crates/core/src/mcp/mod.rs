@@ -63,8 +63,7 @@ pub(crate) struct McpManager {
 }
 
 impl McpManager {
-    /// Connect to all configured MCP servers. Servers that fail to connect
-    /// are logged and skipped — they don't block the agent from starting.
+    /// Connect to all configured servers concurrently; failures are logged and skipped.
     pub(crate) async fn start(configs: &HashMap<String, McpServerConfig>) -> Arc<Self> {
         let manager = Arc::new(Self {
             connections: RwLock::new(HashMap::new()),
@@ -195,15 +194,12 @@ impl McpManager {
         );
     }
 
-    /// Get all discovered MCP tool definitions across all connected servers.
     pub async fn tool_defs(&self) -> Vec<McpToolDef> {
         let conns = self.connections.read().await;
         conns.values().flat_map(|c| c.tools.clone()).collect()
     }
 
-    /// Call a tool on the appropriate MCP server.
-    /// Acquires the connection lock briefly to clone the client handle,
-    /// then releases it before the potentially slow remote call.
+    /// Call a tool on the appropriate MCP server. Clones the client handle before releasing the lock.
     pub async fn call_tool(
         &self,
         server_name: &str,

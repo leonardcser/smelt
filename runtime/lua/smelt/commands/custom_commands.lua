@@ -1,23 +1,13 @@
--- User-defined custom commands. Scans `smelt.path.commands_dir()`
--- (`~/.config/smelt/commands` by default) for `*.md` files at startup
--- and registers a `/<name>` slash command per file. The handler
--- re-reads the file on every invocation so user edits take effect
--- without a restart.
+-- User-defined custom commands. Scans `~/.config/smelt/commands` for `*.md` files
+-- and registers a `/<name>` command per file; re-reads on each invocation.
 --
--- Each file may carry a YAML frontmatter block (`---\n...\n---\n`)
--- with optional `description` (shown in the picker), per-turn
--- model/sampling overrides (`provider`, `model`, `temperature`,
--- `top_p`, `top_k`, `min_p`, `repeat_penalty`, `reasoning_effort`),
--- and per-turn permission rule-set overrides (`tools`, `bash`,
--- `web_fetch` — each a sub-table with `allow` / `ask` / `deny` arrays).
+-- Each file may carry YAML frontmatter with `description`, model/sampling overrides,
+-- and permission rule-set overrides (`tools`, `bash`, `web_fetch`).
 --
--- Bodies may inline shell output via two markers:
---   ```!\n<script>\n```      ← fenced code block: runs the script
---                               and replaces the whole fence with a
---                               plain ``` block carrying its output.
---   !`<command>`             ← inline: replaces the marker with the
---                               command's stdout/stderr.
--- A leading backslash escapes the marker (`\!` ` `).
+-- Shell output markers in the body:
+--   ` ```!\n<script>\n``` ` — runs the script, replaces the fence with its output.
+--   `!`<command>`` ` — inline; replaces the marker with stdout/stderr.
+-- A leading backslash escapes the marker.
 
 local function trim_trailing(s)
   return (s:gsub("[%s\n]+$", ""))
@@ -36,9 +26,7 @@ local function exec_cmd(script)
   return trim_trailing(out)
 end
 
--- Detect ` ```! ` and ` ```!bash ` style exec fences. Mirrors the
--- prior Rust implementation: leading whitespace is allowed, the `!`
--- must follow the three backticks immediately.
+-- Leading whitespace is allowed; `!` must immediately follow the three backticks.
 local function is_exec_fence(line)
   local trimmed = line:match("^%s*(.*)$") or ""
   if trimmed:sub(1, 3) ~= "```" then return false end
@@ -82,9 +70,7 @@ local function evaluate(body)
   for line in body:gmatch("([^\n]*)\n?") do
     lines[#lines + 1] = line
   end
-  -- gmatch with that pattern leaves a trailing empty entry; drop it
-  -- so `for` doesn't process a phantom line.
-  if lines[#lines] == "" then table.remove(lines) end
+  if lines[#lines] == "" then table.remove(lines) end -- gmatch trailing empty entry
 
   local out = {}
   local i = 1
@@ -150,10 +136,8 @@ local function file_desc(path)
   return ""
 end
 
--- Reserved keys that map to typed CommandOverrides fields. Anything
--- else under the frontmatter that's a sub-table becomes a per-tool
--- subpattern bucket (`bash`, `web_fetch`, `mcp`, plus any custom
--- tool that registers one).
+-- Reserved frontmatter keys map to CommandOverrides; any other sub-table becomes
+-- a per-tool subpattern bucket.
 local RESERVED = {
   description = true, provider = true, model = true, temperature = true,
   top_p = true, top_k = true, min_p = true, repeat_penalty = true,
@@ -204,7 +188,7 @@ local function register_all()
       end
     end
   end
-  table.sort(files, function(a, b) return a.stem < b.stem end)
+  table.sort(files, function(a, b) return a.stem < b.stem end) -- deterministic order
 
   for _, f in ipairs(files) do
     local stem, path = f.stem, f.path

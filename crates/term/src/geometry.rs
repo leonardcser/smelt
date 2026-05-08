@@ -1,8 +1,4 @@
-//! `Rect` — viewport geometry primitive shared by `grid` and `layout`.
-//!
-//! Lives outside both modules so `grid` no longer imports from
-//! `layout`. The compositor frame (Grid) and the layout solver both
-//! reach for `Rect` independently.
+//! Viewport geometry primitive shared by `grid` and `layout`.
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct Rect {

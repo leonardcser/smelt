@@ -1,18 +1,6 @@
-//! `Timers` — scheduled Lua callbacks (one-shot + recurring).
-//!
-//! Each entry holds a stable id, a deadline, an optional period (None
-//! = one-shot, Some = re-arm with that interval after firing), and a
-//! `LuaHandle` that owns the callback registry slot. Bindings call
-//! [`Timers::set`] / [`Timers::every`] / [`Timers::cancel`] through the
-//! TLS app pointer; the main loop drains due entries each iteration
-//! via `TuiApp::tick_timers`.
-//!
-//! The drain pass walks entries with `retain_mut`: due one-shots are
-//! removed, due periodics are re-armed in place, and the LuaHandles for
-//! due entries are pulled out as `mlua::Function` clones so the
-//! callbacks fire *after* the borrow on `Timers` releases. That lets a
-//! callback re-enter `with_app(|app| app.core.timers.set(...))` without a
-//! re-entrant borrow.
+//! Scheduled Lua callbacks (one-shot + recurring). `drain_due` returns
+//! functions *after* releasing the borrow on `Timers`, so a callback can
+//! safely re-enter `Timers::set` / `every` / `cancel`.
 
 use std::time::{Duration, Instant};
 
@@ -20,22 +8,17 @@ use mlua::Lua;
 
 use crate::lua::LuaHandle;
 
-/// Stable handle returned by `set` / `every`. `cancel` consumes one to
-/// drop the underlying registry slot.
 pub(crate) type TimerId = u64;
 
 struct TimerEntry {
     id: TimerId,
     deadline: Instant,
-    /// `None` = one-shot (removed on fire); `Some(p)` = recurring,
-    /// re-armed with `now + p` after each fire.
-    period: Option<Duration>,
+    period: Option<Duration>, // None = one-shot; Some(p) = re-arm with now+p
     handle: LuaHandle,
 }
 
-/// Scheduler for Lua-callback timers. Storage is a `Vec` because timer
-/// counts stay small and order doesn't matter — fire order is by
-/// deadline, picked at drain time.
+/// Vec storage is fine: timer counts stay small and fire order is determined
+/// at drain time by deadline, not insertion order.
 #[derive(Default)]
 pub struct Timers {
     entries: Vec<TimerEntry>,
@@ -50,14 +33,10 @@ impl Timers {
         }
     }
 
-    /// Schedule a one-shot callback to fire after `delay`. Returns the
-    /// id `cancel` accepts.
     pub(crate) fn set(&mut self, delay: Duration, handle: LuaHandle) -> TimerId {
         self.push(delay, None, handle)
     }
 
-    /// Schedule a recurring callback to fire every `period`, starting
-    /// `period` from now. Returns the id `cancel` accepts.
     pub(crate) fn every(&mut self, period: Duration, handle: LuaHandle) -> TimerId {
         self.push(period, Some(period), handle)
     }
@@ -74,9 +53,6 @@ impl Timers {
         id
     }
 
-    /// Cancel the timer with `id`. Returns `true` if a timer was
-    /// removed; `false` if `id` was unknown (already fired or never
-    /// existed).
     pub(crate) fn cancel(&mut self, id: TimerId) -> bool {
         let Some(idx) = self.entries.iter().position(|e| e.id == id) else {
             return false;
@@ -85,12 +61,6 @@ impl Timers {
         true
     }
 
-    /// Walk entries: collect due callbacks, re-arm periodics in place,
-    /// drop one-shots. Returns the functions in walk order so the
-    /// caller can fire them after the borrow on `self` releases. A
-    /// callback that re-enters `Timers::set` / `every` / `cancel` is
-    /// safe — those calls land on a fresh `&mut Timers` taken via
-    /// `with_app`.
     pub fn drain_due(&mut self, now: Instant, lua: &Lua) -> Vec<mlua::Function> {
         let mut due = Vec::new();
         self.entries.retain_mut(|e| {

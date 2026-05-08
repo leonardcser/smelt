@@ -28,12 +28,8 @@ const DEFAULT_COMPACT_THRESHOLD_PERCENT: u64 = 80;
 /// Accepts an integer percentage in `[10, 95]`.
 const COMPACT_THRESHOLD_ENV: &str = "SMELT_COMPACT_THRESHOLD_PERCENT";
 
-/// Auto-compaction trigger threshold as a percentage of the context window.
-///
-/// Reads `SMELT_COMPACT_THRESHOLD_PERCENT` at call time (it's a cheap env
-/// lookup, and reading each check keeps behavior easy to verify from tests
-/// and lets the user change it without restarting the engine process).
-/// Invalid or out-of-range values fall back to the 80% default.
+/// Auto-compaction threshold as a percentage of the context window.
+/// Reads `SMELT_COMPACT_THRESHOLD_PERCENT` at call time; falls back to 80.
 pub fn compact_threshold_percent() -> u64 {
     std::env::var(COMPACT_THRESHOLD_ENV)
         .ok()
@@ -49,7 +45,6 @@ pub use paths::{config_dir, data_dir, home_dir, state_dir};
 pub use provider::{Provider, ProviderKind};
 pub use skills::SkillLoader;
 
-/// Context for rendering the system prompt template.
 struct PromptContext<'a> {
     cwd: &'a std::path::Path,
     write_access: bool,
@@ -72,7 +67,6 @@ pub(crate) fn build_system_prompt_full(
     render_system_prompt(&ctx)
 }
 
-/// Render the system prompt template with the given context.
 fn render_system_prompt(ctx: &PromptContext<'_>) -> String {
     let template_src = include_str!("prompts/system.txt");
     let env = minijinja::Environment::new();
@@ -89,7 +83,6 @@ fn render_system_prompt(ctx: &PromptContext<'_>) -> String {
         })
         .expect("system prompt template should render");
 
-    // Collapse runs of 3+ blank lines into 2 (section separators).
     let mut result = String::with_capacity(rendered.len());
     let mut blank_count = 0u32;
     for line in rendered.lines() {
@@ -107,7 +100,6 @@ fn render_system_prompt(ctx: &PromptContext<'_>) -> String {
     result.trim().to_string()
 }
 
-/// API connection and model configuration, grouped for clarity.
 #[derive(Clone)]
 pub struct ApiConfig {
     pub base: String,
@@ -131,42 +123,26 @@ pub struct AuxiliaryModelConfig {
     pub btw: Option<RequestModelConfig>,
 }
 
-/// Configuration for the engine. Constructed once by the binary.
 pub struct EngineConfig {
     pub api: ApiConfig,
-    /// Initial primary model name.
     pub model: String,
-    /// Per-task auxiliary model overrides. Tasks with `None` fall back to
-    /// the live primary at request time.
+    /// Per-task model overrides; `None` falls back to the live primary.
     pub auxiliary: AuxiliaryModelConfig,
     pub instructions: Option<String>,
-    /// When set, replaces the entire system prompt (skips the built-in
-    /// template, mode overlays, and AGENTS.md instructions).
+    /// When set, replaces the built-in system prompt template entirely.
     pub system_prompt_override: Option<String>,
     pub cwd: PathBuf,
-    /// Pre-loaded skill loader.
     pub skills: Option<Arc<SkillLoader>>,
-    /// Auto-compact when context usage crosses the threshold.
     pub auto_compact: bool,
-    /// Context window size (tokens). When `None`, the engine fetches it from
-    /// the provider API at startup. User config can override via
-    /// `context_window`.
+    /// `None` causes the engine to fetch this from the provider API on first use.
     pub context_window: Option<u32>,
-    /// When true, redact detected secrets from messages sent to the LLM,
-    /// debug logs, and inter-agent socket communication.
     pub redact_secrets: bool,
 }
 
 pub use protocol::AuxiliaryTask;
 
 impl EngineConfig {
-    /// Resolve the model+api to use for an auxiliary task. Falls back to the
-    /// primary model when no dedicated auxiliary model is configured.
-    ///
-    /// Note: a `SetModel` applied mid-turn (via `Turn::apply_model_change`)
-    /// updates the active turn's provider but does not propagate back here,
-    /// so a `/btw` arriving in the same turn will use the pre-switch primary.
-    /// The next `SetModel` between turns re-syncs.
+    /// Returns the model+api for an auxiliary task, falling back to the primary.
     pub(crate) fn aux_or_primary(&self, task: AuxiliaryTask) -> RequestModelConfig {
         let slot = match task {
             AuxiliaryTask::Title => &self.auxiliary.title,
@@ -181,7 +157,6 @@ impl EngineConfig {
     }
 }
 
-/// Handle to a running engine. Send commands, receive events.
 pub struct EngineHandle {
     cmd_tx: mpsc::UnboundedSender<UiCommand>,
     event_tx: mpsc::UnboundedSender<EngineEvent>,
@@ -201,21 +176,14 @@ impl EngineHandle {
         self.event_rx.try_recv()
     }
 
-    /// Create a cloneable injector for external tasks that need to push
-    /// events into the engine's event stream.
     pub fn injector(&self) -> EventInjector {
         EventInjector {
             event_tx: self.event_tx.clone(),
         }
     }
 
-    /// Construct a handle whose channels are owned by the caller — no
-    /// agent task spawned, no provider wiring. The returned sender
-    /// receives whatever the frontend would normally hand to the agent
-    /// (`UiCommand`s); the returned receiver lets the caller pull
-    /// frontend-bound `EngineEvent`s out of the same `event_tx` the
-    /// handle hands to `EventInjector`. Used by the L3 storybook
-    /// harness to drive UI state without booting a real engine.
+    /// Build a handle backed by caller-owned channels, with no agent task.
+    /// Used by the storybook harness to drive UI state without a real engine.
     pub fn for_test() -> (
         Self,
         mpsc::UnboundedReceiver<UiCommand>,
@@ -232,16 +200,12 @@ impl EngineHandle {
     }
 }
 
-/// Cloneable handle for injecting events from external async tasks.
 #[derive(Clone)]
 pub struct EventInjector {
     event_tx: mpsc::UnboundedSender<EngineEvent>,
 }
 
 impl EventInjector {
-    /// Stream a chunk of output for an in-flight tool call. Used by
-    /// the tui-side bash tool to emit `EngineEvent::ToolOutput` per
-    /// line as a child process runs.
     pub fn inject_tool_output(&self, call_id: String, chunk: String) {
         let _ = self
             .event_tx
@@ -249,10 +213,7 @@ impl EventInjector {
     }
 }
 
-/// Start the engine. Returns a handle for bidirectional communication.
-///
-/// MCP servers are connected asynchronously — this must be called from
-/// within a tokio runtime.
+/// Start the engine. Must be called from within a tokio runtime.
 pub fn start(config: EngineConfig, dispatcher: Box<dyn tools::ToolDispatcher>) -> EngineHandle {
     let (cmd_tx, cmd_rx) = mpsc::unbounded_channel();
     let (event_tx, event_rx) = mpsc::unbounded_channel();

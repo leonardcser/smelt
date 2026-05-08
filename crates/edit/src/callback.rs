@@ -1,24 +1,9 @@
 //! Per-window keymap and event callback registry.
-//!
-//! Every window can register callbacks keyed by:
-//! - `(WinId, KeyBind)` — a specific key chord on this window.
-//! - `(WinId, WinEvent)` — a lifecycle / semantic event.
-//!
-//! Callbacks are either Rust closures (`FnMut(&mut CallbackCtx) ->
-//! CallbackResult`) or Lua handles. Both run through the same
-//! dispatcher in `Ui::dispatch_event` / `Ui::fire_win_event`. Side
-//! effects flow through the app-owned `AppOp` queue that Rust
-//! callbacks see via their shared ops handle, or through direct
-//! `ui::Ui` mutations — no return channel for effect strings.
-//!
-//! This is the single behavior mechanism for window input.
 use super::WinId;
 use crossterm::event::{KeyCode, KeyModifiers};
 use std::collections::HashMap;
 
-/// A keyboard chord. Stored as the key plus modifier bitset so the
-/// lookup key is `Hash + Eq` without depending on crossterm's own
-/// hashing behavior.
+/// A keyboard chord (`Hash + Eq` for registry keying).
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub struct KeyBind {
     pub code: KeyCode,
@@ -52,39 +37,24 @@ impl KeyBind {
     }
 }
 
-/// Window lifecycle / semantic events. Dialogs with typed payloads
-/// use the richer variants in `Payload` at invocation time.
+/// Window lifecycle / semantic events.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub enum WinEvent {
-    /// Fired after the window opens and is registered in the
-    /// compositor.
     Open,
-    /// Fired just before the window closes; callback may push close-
-    /// cleanup actions.
     Close,
-    /// Fired when the focus stack moves to this window.
     FocusGained,
-    /// Fired when focus leaves this window.
     FocusLost,
-    /// List/Dialog cursor moved to a different row.
     SelectionChanged,
-    /// Enter pressed on a List (payload carries `index`) or Input
-    /// (payload carries `text`). Apps bind this instead of binding
-    /// `Enter` directly so the dialog doesn't need to parse its own
-    /// selection.
+    /// Enter pressed on a List or Input; payload carries `index` / `text`.
     Submit,
-    /// Input buffer edited (payload carries the new text).
+    /// Input buffer edited; payload carries the new text.
     TextChanged,
-    /// User triggered dismissal (Esc or a configured dismiss key).
     Dismiss,
-    /// Fired once per event-loop iteration on each registered window.
-    /// Used by overlays that need to refresh their content from live
-    /// external state (process list, etc.).
+    /// Fired once per event-loop iteration for live-refresh overlays.
     Tick,
 }
 
-/// Payload attached to a callback invocation. The variants map 1:1
-/// to the invocation sites in the routing layer.
+/// Payload attached to a callback invocation.
 #[derive(Clone, Debug)]
 pub enum Payload {
     None,
@@ -96,33 +66,20 @@ pub enum Payload {
 /// Result returned by a callback.
 #[derive(Clone, Debug)]
 pub enum CallbackResult {
-    /// Callback handled the event; no further routing.
     Consumed,
-    /// Callback passes; the dispatcher reports `DispatchOutcome::Ignored`
-    /// (for keymap callbacks) or does nothing (for event callbacks).
     Pass,
-    /// Consumed, and additionally fire a `WinEvent` on the same
-    /// window with the given payload. The dispatcher translates
-    /// this into a follow-up `Ui::fire_win_event` after the Rust
-    /// callback returns. Lets a built-in keymap callback (e.g. a
-    /// list's Enter binding) trigger the same on-event handlers
-    /// (`smelt.win.on_event(win, "submit", fn)`).
+    /// Consumed, and fire a follow-up `WinEvent` on the same window.
     Event(WinEvent, Payload),
 }
 
-/// Handle to a Lua callback, opaque to the `ui` crate. The `tui`
-/// crate's Lua runtime owns the actual function; this registry only
-/// stores the handle and routes `(WinId, payload)` back.
+/// Opaque handle to a Lua callback; the Lua runtime owns the actual function.
 #[derive(Clone, Copy, Debug)]
 pub struct LuaHandle(pub u64);
 
-/// Rust-side callback closure. Boxed `FnMut` with full mutable
-/// access to `Ui` via the ctx, plus the shared `actions` buffer
-/// for app-level effects.
+/// Rust-side callback closure.
 pub(crate) type RustCallback = Box<dyn FnMut(&mut CallbackCtx<'_>) -> CallbackResult>;
 
-/// A callback is either a Rust closure or a Lua handle. Both share
-/// the same (WinId, KeyBind/WinEvent) registry and dispatch path.
+/// A callback: either a Rust closure or a Lua handle.
 pub enum Callback {
     Rust(RustCallback),
     Lua(LuaHandle),
@@ -137,27 +94,19 @@ impl std::fmt::Debug for Callback {
     }
 }
 
-/// Context passed to Rust callbacks. `ui` is full `&mut Ui`;
-/// callbacks can mutate buffers, open/close overlays, change focus,
-/// and queue `AppOp`s via the shared ops handle. No return channel
-/// for effect strings — all side effects flow through `AppOp` or
-/// direct `ui::Ui` mutation.
+/// Context passed to Rust callbacks. Provides full `&mut Ui` access.
 pub struct CallbackCtx<'a> {
     pub ui: &'a mut super::Ui,
     pub win: WinId,
     pub payload: Payload,
 }
 
-/// Per-window callback registry owned by `Ui`. Keyed by WinId so
-/// closing a window removes all its bindings cleanly.
+/// Per-window callback registry owned by `Ui`.
 #[derive(Default)]
 pub(crate) struct Callbacks {
     keymaps: HashMap<WinId, HashMap<KeyBind, Callback>>,
     events: HashMap<WinId, HashMap<WinEvent, Vec<Callback>>>,
-    /// Per-window fallback key handler tried after specific `keymaps`
-    /// miss. Useful for catch-all filter inputs (`Resume` types any
-    /// printable char into its query buffer) where enumerating every
-    /// chord would be absurd.
+    /// Per-window fallback key handler tried after specific keymaps miss.
     key_fallback: HashMap<WinId, Callback>,
 }
 
@@ -166,9 +115,7 @@ impl Callbacks {
         Self::default()
     }
 
-    /// Install a (win, key) keymap. Returns the displaced `Callback`
-    /// (if any), so callers with `Callback::Lua` bindings can drop the
-    /// stale `LuaHandle` from their side registry.
+    /// Install a (win, key) keymap. Returns the displaced `Callback`, if any.
     #[must_use]
     pub(crate) fn set_keymap(
         &mut self,
@@ -183,10 +130,7 @@ impl Callbacks {
         self.keymaps.get_mut(&win).and_then(|t| t.remove(&key))
     }
 
-    /// Remove a specific event callback identified by its Lua handle id.
-    /// Lua plugins attach picker-lifetime handlers to other windows (e.g.
-    /// `on_event(prompt, "text_changed", …)`); they need a way to tear
-    /// down exactly their own binding without nuking co-existing ones.
+    /// Remove a specific event callback by Lua handle id.
     pub(crate) fn clear_event_by_id(
         &mut self,
         win: WinId,
@@ -209,9 +153,7 @@ impl Callbacks {
             .push(cb);
     }
 
-    /// Remove every binding for `win`. Returns the IDs of all
-    /// `Callback::Lua` handles that were attached, so the caller can
-    /// drop them from the Lua-side registry.
+    /// Remove every binding for `win`. Returns Lua handle IDs for caller cleanup.
     #[must_use]
     pub(crate) fn clear_all(&mut self, win: WinId) -> Vec<u64> {
         let mut lua_ids = Vec::new();
@@ -237,9 +179,7 @@ impl Callbacks {
         lua_ids
     }
 
-    /// Register a per-window fallback key handler. Runs after
-    /// specific `keymaps` miss. Returns the displaced `Callback` (if
-    /// any) so Lua-side handles can be cleaned up.
+    /// Register a per-window fallback key handler. Returns the displaced `Callback`, if any.
     #[must_use]
     pub(crate) fn set_key_fallback(&mut self, win: WinId, cb: Callback) -> Option<Callback> {
         self.key_fallback.insert(win, cb)
@@ -253,8 +193,7 @@ impl Callbacks {
         self.key_fallback.insert(win, cb);
     }
 
-    /// List every window that has at least one callback registered
-    /// for `ev`. Used by `Ui::dispatch_tick`.
+    /// List every window with at least one callback registered for `ev`.
     pub(crate) fn wins_with_event(&self, ev: WinEvent) -> Vec<WinId> {
         self.events
             .iter()
@@ -262,10 +201,8 @@ impl Callbacks {
             .collect()
     }
 
-    /// Remove and return a keymap callback so it can be invoked with
-    /// `&mut Ui`. Caller must put it back via `restore_keymap` after
-    /// the callback returns. Removal + restore avoids a
-    /// reentrant-borrow conflict with `&mut Ui` inside the callback.
+    /// Remove a keymap callback for invocation. Caller must restore it after.
+    /// Removal + restore avoids a reentrant-borrow conflict with `&mut Ui`.
     pub(crate) fn take_keymap(&mut self, win: WinId, key: KeyBind) -> Option<Callback> {
         self.keymaps.get_mut(&win)?.remove(&key)
     }
@@ -274,9 +211,7 @@ impl Callbacks {
         self.keymaps.entry(win).or_default().insert(key, cb);
     }
 
-    /// Same take/restore pattern for event callbacks. Multiple
-    /// callbacks can be registered per event; we take the whole
-    /// `Vec` and restore it after all are invoked.
+    /// Same take/restore pattern for event callbacks (takes the whole Vec).
     pub(crate) fn take_event(&mut self, win: WinId, ev: WinEvent) -> Option<Vec<Callback>> {
         self.events.get_mut(&win)?.remove(&ev)
     }

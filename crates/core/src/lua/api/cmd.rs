@@ -1,9 +1,4 @@
-//! `smelt.cmd` bindings — register / list slash commands. Plugin
-//! authors call `smelt.cmd.register(name, fn, opts)` to add a new
-//! `/name`; `list` enumerates the registry.
-//!
-//! The `run` binding is UiHost-tier and is added by the TUI after
-//! `register_host_api` returns.
+//! `smelt.cmd` — register/list slash commands. `run` is added by the TUI after host-API init.
 
 use crate::lua::{LuaHandle, LuaShared, RegisteredCommand};
 use mlua::prelude::*;
@@ -20,9 +15,6 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
                     let desc: Option<String> = opts
                         .as_ref()
                         .and_then(|t| t.get::<Option<String>>("desc").ok().flatten());
-                    // `args` may be either a Lua array of strings (static) or
-                    // omitted. Drives the secondary CommandArg picker that
-                    // opens after `/name `.
                     let args: Vec<String> = opts
                         .as_ref()
                         .and_then(|t| t.get::<Option<mlua::Table>>("args").ok().flatten())

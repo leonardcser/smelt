@@ -1,9 +1,3 @@
-//! Static + runtime configuration that drives the engine and the
-//! TUI's behaviour: the active provider/model triple, the agent and
-//! reasoning modes (and their cycle lists), the resolved settings
-//! flags, and the CLI override flags that take precedence over saved
-//! session values.
-
 use crate::config;
 use engine::ModelConfig;
 use protocol::{AgentMode, ReasoningEffort};

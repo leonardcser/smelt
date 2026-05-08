@@ -6,9 +6,6 @@ pub mod selection;
 pub mod stream_parser;
 pub mod transcript;
 
-// Wrap utility moved to `smelt-buffer` so non-smelt frontends can
-// reuse it. Re-export for `smelt_core::content::wrap::wrap_line`
-// call sites.
 pub use smelt_buffer::wrap;
 
 pub use crate::buffer::SpanMeta;
@@ -17,28 +14,24 @@ pub use context::LayoutContext;
 use crate::theme::HlGroup;
 
 /// Context for rendering content inside a bordered box.
-/// When passed to `render_markdown` and its sub-renderers, each output line
-/// gets a colored left border prefix and a right border suffix with padding.
 pub struct BoxContext {
     /// Left border string printed before each line (e.g. "   │ ").
     pub left: &'static str,
     /// Right border string printed after padding (e.g. " │").
     pub right: &'static str,
-    /// Theme group whose fg colors the border characters.
     pub group: HlGroup,
     /// Inner content width (between left and right borders).
     pub inner_w: usize,
 }
 
 impl BoxContext {
-    /// Print the left border with color.
     pub fn print_left(&self, out: &mut builder::LineBuilder) {
         out.push_hl(self.group);
         out.print_gutter(self.left);
         out.pop_style();
     }
 
-    /// Print right-side padding and border for a line that used `cols` content columns.
+    /// Pad to `inner_w` and print the right border.
     pub fn print_right(&self, out: &mut builder::LineBuilder, cols: usize) {
         let pad = self.inner_w.saturating_sub(cols);
         if pad > 0 {
@@ -51,24 +44,14 @@ impl BoxContext {
 }
 
 pub(crate) const SPINNER_FRAMES: &[&str] = &["✿", "❀", "✾", "❁"];
-/// Frame duration for every animated spinner in the app. Callers in
-/// the status bar, transcript tool previews, and the Lua `smelt.ui.
-/// spinner` API all read this so every on-screen spinner stays in
-/// lockstep.
+/// Frame duration shared by all spinners; read by every animated call site to stay in lockstep.
 pub const SPINNER_FRAME_MS: u64 = 150;
 
-/// Current spinner frame glyph, sampled from a process-wide monotonic
-/// clock. All call sites that animate the same pill should use this
-/// helper rather than reimplementing the `elapsed / SPINNER_FRAME_MS
-/// % len` modulo so frames stay coherent across the status bar,
-/// transcript, and Lua-driven dialogs.
 pub fn spinner_frame_index(elapsed: std::time::Duration) -> usize {
     ((elapsed.as_millis() / SPINNER_FRAME_MS as u128) as usize) % SPINNER_FRAMES.len()
 }
 
-/// Time-based current glyph. Uses a process-start epoch so every
-/// caller converges on the same frame without threading an explicit
-/// `Instant` around.
+/// Current glyph from a process-start epoch; all callers converge on the same frame.
 pub fn spinner_glyph() -> &'static str {
     use std::sync::OnceLock;
     use std::time::Instant;
@@ -77,13 +60,12 @@ pub fn spinner_glyph() -> &'static str {
     SPINNER_FRAMES[spinner_frame_index(epoch.elapsed())]
 }
 
-/// Default layout width when no explicit width is provided.
-/// Used by renderers that need a fallback column budget.
+/// Fallback column budget when no explicit width is provided.
 pub(crate) fn default_width() -> usize {
     80
 }
 
-/// A markdown table separator line (e.g. `|---|---|`).
+/// Returns true for markdown table separator lines (e.g. `|---|---|`).
 pub fn is_table_separator(line: &str) -> bool {
     let t = line.trim();
     !t.is_empty()

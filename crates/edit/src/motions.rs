@@ -1,9 +1,4 @@
-//! Cursor-motion primitives over `&str` buffers.
-//!
-//! Pure functions over byte positions; they hold no editor state. Used by
-//! the vim keymap and any other code that wants vim-shaped motions
-//! (h/j/k/l, w/b/e, f/F/t/T, %, G, gg) — these primitives are
-//! frontend-agnostic.
+//! Pure cursor-motion primitives over `&str` byte positions.
 
 use super::text::{
     char_class, line_end, line_start, next_char_boundary, prev_char_boundary, CharClass,
@@ -19,8 +14,7 @@ pub(crate) enum FindKind {
 }
 
 impl FindKind {
-    /// Reverse direction. Used by vim's `,` to replay the last `f`/`t`
-    /// in the opposite direction.
+    /// Reverse direction (for `,` repeating last `f`/`t`).
     pub fn reversed(self) -> Self {
         match self {
             FindKind::Forward => FindKind::Backward,
@@ -74,7 +68,6 @@ pub(crate) fn word_end_pos(buf: &str, cpos: usize, mode: CharClass) -> usize {
         return cpos;
     }
     let mut i = 0;
-    // Skip whitespace.
     while i < chars.len() && char_class(chars[i].1, mode) == 0 {
         i += 1;
     }
@@ -82,7 +75,6 @@ pub(crate) fn word_end_pos(buf: &str, cpos: usize, mode: CharClass) -> usize {
         return buf.len().saturating_sub(1);
     }
     let target_class = char_class(chars[i].1, mode);
-    // Skip same class.
     while i + 1 < chars.len() && char_class(chars[i + 1].1, mode) == target_class {
         i += 1;
     }
@@ -116,14 +108,14 @@ pub(crate) fn first_non_blank_at(buf: &str, from: usize) -> usize {
     pos
 }
 
-/// Range of the full current line including trailing newline (for dd).
+/// Full current line range including trailing newline (for dd).
 pub(crate) fn current_line_range(buf: &str, cpos: usize) -> (usize, usize) {
     let start = line_start(buf, cpos);
     let end = line_end(buf, cpos);
     (start, end)
 }
 
-/// Range of just the content of the current line (no newline) — for S/cc.
+/// Content range of the current line, no newline (for S/cc).
 pub(crate) fn current_line_content_range(buf: &str, cpos: usize) -> (usize, usize) {
     let start = line_start(buf, cpos);
     let end = line_end(buf, cpos);
@@ -141,8 +133,7 @@ pub(crate) fn goto_line(buf: &str, line_idx: usize) -> usize {
     pos
 }
 
-/// Move down one line. If `want_col` is Some, use that column instead of
-/// the current one (for curswant support). Returns (new_cpos, actual_col).
+/// Move down one line, preserving preferred column (`curswant`). Returns `(new_cpos, actual_col)`.
 pub(crate) fn move_down_col(buf: &str, cpos: usize, want_col: Option<usize>) -> (usize, usize) {
     let sol = line_start(buf, cpos);
     let col = want_col.unwrap_or(cpos - sol);
@@ -213,8 +204,7 @@ pub(crate) fn find_char(buf: &str, cpos: usize, kind: FindKind, ch: char) -> Opt
     }
 }
 
-/// Repeat a find-char motion `n` times, adjusting for till variants so
-/// repeated `;`/`,` don't get stuck on the same character.
+/// Repeat a find-char motion `n` times; adjusts for till variants so `;`/`,` don't get stuck.
 pub(crate) fn repeat_find(buf: &str, mut pos: usize, kind: FindKind, ch: char, n: usize) -> usize {
     for _ in 0..n {
         let search_pos = match kind {
@@ -307,9 +297,8 @@ pub(crate) fn retreat_chars(buf: &str, pos: usize, n: usize) -> usize {
     p
 }
 
-/// Clamp cursor to valid normal-mode position (on a char, not past end).
-/// Exception: if the buffer ends with '\n', `buf.len()` is valid — it
-/// represents the cursor on the empty trailing line.
+/// Clamp cursor to valid normal-mode position.
+/// If the buffer ends with `'\n'`, `buf.len()` is valid (cursor on the empty trailing line).
 pub(crate) fn clamp_normal(buf: &str, cpos: &mut usize) {
     if buf.is_empty() {
         *cpos = 0;
@@ -323,7 +312,7 @@ pub(crate) fn clamp_normal(buf: &str, cpos: &mut usize) {
         };
         return;
     }
-    // Don't let cursor sit on a '\n' in the middle of the buffer.
+    // Cursor must not sit on an interior '\n'.
     if buf.as_bytes()[*cpos] == b'\n' && *cpos > 0 {
         let sol = line_start(buf, *cpos);
         if *cpos > sol {

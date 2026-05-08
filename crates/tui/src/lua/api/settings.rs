@@ -1,15 +1,6 @@
-//! `smelt.settings` — boolean preferences exposed as direct field
-//! access. Reads (`local v = smelt.settings.vim`) hit the live
-//! [`ResolvedSettings`]; writes (`smelt.settings.vim = true`) toggle
-//! the live setting at runtime, or — when the app isn't live yet
-//! (config-time `init.lua`) — store the value into
-//! `LuaShared.settings_overrides` for `Config::from_lua_shared` to
-//! pick up.
-//!
-//! Unknown keys raise an error at the access site so a typo can't
-//! silently lose an override. The known set lives in
-//! [`smelt_core::config::SETTINGS_KEYS`] and matches the field names
-//! on [`smelt_core::config::ResolvedSettings`].
+//! `smelt.settings` — boolean preferences as direct field access via `__index`/`__newindex`.
+//! Writes before app init are stored in `LuaShared.settings_overrides` for later pickup.
+//! Unknown keys raise at the access site.
 
 use mlua::prelude::*;
 use smelt_core::config::{ResolvedSettings, SETTINGS_KEYS};

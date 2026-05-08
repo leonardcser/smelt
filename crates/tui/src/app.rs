@@ -40,98 +40,45 @@ use std::pin::Pin;
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
-// ── TuiApp ──────────────────────────────────────────────────────────────────────
-
 pub struct TuiApp {
-    /// Headless-safe subsystems aggregated into one struct. `TuiApp`
-    /// is the compositor-bearing frontend; `HeadlessApp` is the
-    /// JSON / text sink frontend over the same `Core`. Subsystem
-    /// access is `self.core.<field>.X`.
     pub core: smelt_core::Core,
     pub lua: crate::lua::LuaRuntime,
-    /// Block history, tool states, layout cache — the committed transcript.
     pub(crate) transcript: smelt_core::content::transcript::Transcript,
-    /// Streaming parser state (active text/thinking/tool/agent/exec blocks).
     pub(crate) parser: smelt_core::content::stream_parser::StreamParser,
-    /// Buffer-backed projection of the transcript into a crate::smelt_term::Buffer.
     pub(crate) transcript_projection: crate::content::transcript_buf::TranscriptProjection,
-    /// Plain-text snapshot of each visible row (top to bottom) captured
-    /// during `project_transcript_buffer`. Read by
-    /// `compute_transcript_cursor` to look up the glyph under the soft
-    /// cursor.
+    /// Plain-text snapshot of visible rows captured during `project_transcript_buffer`.
+    /// Read by `compute_transcript_cursor` to look up the glyph under the soft cursor.
     pub(crate) last_viewport_text: Vec<String>,
     pub(crate) input_history: History,
     pub(crate) input: PromptState,
     pub(crate) exec: Option<crate::commands::ExecHandle>,
-    /// Wakeup signal from cross-thread tokio tasks (streaming
-    /// subprocess spawn, future async work) that pushed a
-    /// `TaskEvent::ExternalResolvedJson` to the Lua inbox. Drains
-    /// the inbox and renders so a parked Lua coroutine resumes
-    /// promptly.
+    /// Wakeup from cross-thread tasks that pushed to the Lua inbox. Drains the inbox so parked coroutines resume.
     lua_wakeup_rx: tokio::sync::mpsc::UnboundedReceiver<()>,
     pub(crate) queued_messages: Vec<String>,
-    /// Runtime approvals shared with the engine. The engine checks these
-    /// during `decide()` to auto-approve tools without sending
-    /// `RequestPermission`. The TUI writes to them when the user approves.
     /// Current working directory (cached at startup).
     pub(crate) cwd: String,
     pub(crate) shared_session: Arc<Mutex<Option<Session>>>,
-    /// Short task label (slug) shown on the status bar after the throbber.
     pub(crate) task_label: Option<String>,
-    /// A permission dialog is waiting for the user to stop typing.
     pub(crate) pending_dialog: bool,
-    /// Set by reducer handlers (e.g. `DomainOp::RunCommand` dispatching
-    /// `/quit`) to request the main loop break out on its next check.
     pub(crate) pending_quit: bool,
-    /// Items returned by Lua-registered statusline sources. Appended
-    /// after the Rust-side built-in spans each frame; priority /
-    /// align_right on each item controls layout.
+    /// Items from Lua-registered statusline sources, appended each frame.
     pub(crate) custom_status_items: Vec<crate::content::status::StatusItem>,
-    /// Last error message reported per statusline source. Used to
-    /// rate-limit notifications so a perpetually-broken source doesn't
-    /// spam one toast per frame — only re-notify when the message
-    /// changes; clear the entry on a successful tick.
+    /// Last error per statusline source; rate-limits toast spam.
     statusline_last_errors: HashMap<String, String>,
-    /// Leaf `WinId` of the open notification overlay, if one is
-    /// visible. Dismissed on any key (see `handle_overlay_keys`).
-    /// `None` when no toast. Closing the leaf via `close_overlay_leaf`
-    /// cascades through `overlay_close` to remove the overlay.
     pub(crate) notification: Option<crate::smelt_term::WinId>,
-    /// Cmdline (`:`) mode state — history, history-browse cursor,
-    /// pre-browse stash, and lazily-allocated completer.
     pub(crate) cmdline: crate::app::cmdline::CmdlineState,
-    /// Per-leaf bookkeeping for open picker overlays. Populated by
-    /// `crate::picker::open` and cleaned up by `close_overlay_leaf` when the
-    /// leaf closes. Lookup keyed by leaf `WinId` so `set_items` /
-    /// `set_selected` can resize the overlay's outer height
-    /// constraint and translate logical → visual indices for reversed
-    /// pickers.
     pub(crate) picker_state: HashMap<crate::smelt_term::WinId, crate::picker::PickerState>,
-    /// Registry of Lua-registered paint regions, keyed by paint id.
-    /// Mutated by `smelt.paint.register / unregister`; read each frame
-    /// by the render loop's paint dispatcher to route paint ids back
-    /// to their Lua callbacks via `crate::lua::paint::invoke_paint`.
     pub(crate) paint_registry: crate::lua::paint::PaintRegistry,
-    /// Terminal focus (FocusGained / FocusLost). Cursor is suppressed
-    /// when the terminal isn't focused, so input from other apps
+    /// Drives cursor suppression when unfocused so input from another app
     /// doesn't draw a stale cursor in our window.
     pub(crate) term_focused: bool,
-    /// Live-turn + last-turn state driving the status bar spinner and
-    /// result line. `begin(TurnPhase::...)` / `finish(TurnOutcome::...)`
-    /// are the write paths, mirrored from engine lifecycle events.
     pub(crate) working: smelt_core::working::WorkingState,
-    /// Gutter reservation for the transcript window (left padding +
-    /// right scrollbar column).
     pub(crate) transcript_gutters: crate::window::WindowGutters,
-    /// Last-computed viewport layout (status / transcript / prompt
-    /// rows). Updated each frame in `render_normal`; read by mouse
-    /// hit-testing and viewport-rows estimation.
+    /// Viewport layout updated each frame; read by mouse hit-testing and scroll estimation.
     pub(crate) layout: crate::content::layout::LayoutState,
 
-    /// The active turn's state, or `None` when the app is idle.
-    /// Owned by `TuiApp` so reducer handlers (`apply_ops`) can mutate
-    /// it directly rather than threading `&mut Option<TurnState>`
-    /// through every call chain.
+    /// Owned here so reducer handlers (`apply_ops`) can mutate it directly
+    /// instead of threading `&mut Option<TurnState>` through every call.
     pub(crate) agent: Option<TurnState>,
     pub(crate) sleep_inhibit: crate::sleep_inhibit::SleepInhibitor,
     pub(crate) persister: crate::persist::Persister,
@@ -139,50 +86,25 @@ pub struct TuiApp {
     pub(crate) last_width: u16,
     pub(crate) last_height: u16,
     pub(crate) next_turn_id: u64,
-    /// Incremented on rewind/clear/load to invalidate in-flight compactions.
+    /// Incremented on rewind/clear/load; invalidates in-flight compactions.
     pub(crate) compact_epoch: u64,
-    /// The `compact_epoch` value when the last compaction was requested.
     pub(crate) pending_compact_epoch: u64,
-    /// TurnMeta from the engine, consumed by `finish_turn`.
     pub(crate) pending_turn_meta: Option<protocol::TurnMeta>,
     startup_auth_error: Option<String>,
-    /// Trust gate result for `<cwd>/.smelt/`, computed in `main.rs`
-    /// when `LuaRuntime::load_project_config` ran. Surfaced as a
-    /// startup toast in `start()` and then dropped.
+    /// Trust state for `<cwd>/.smelt/`; surfaced as a startup toast then dropped.
     pub(crate) project_trust: Option<smelt_core::trust::TrustState>,
-    /// TuiApp-level focus (Prompt = editing buffer; History = navigating transcript).
     pub(crate) app_focus: AppFocus,
-    /// Readonly pane showing the transcript. Owns its `Buffer`
-    /// (vim + kill ring + undo) and the viewport scroll / cursor
-    /// position.
     pub(crate) transcript_window: crate::smelt_term::Window,
-    /// Last prompt-buffer text we dispatched a `TextChanged` event for.
-    /// After each event, if `input.buf` differs from this, we fire
-    /// `WinEvent::TextChanged` on `PROMPT_WIN` so Lua subscribers
-    /// (`smelt.win.on_event(prompt, "text_changed", …)`) get called.
+    /// Tracks the last text dispatched as `TextChanged` on `PROMPT_WIN`.
     pub(crate) last_prompt_text: String,
-    /// Prompt vim mode at the start of a mouse-drag. Set on mouse-down
-    /// inside the prompt viewport (only when vim is enabled) before the
-    /// drag enters `Visual`, restored on mouse-up so a drag from Insert
-    /// lands the user back in Insert rather than Normal. `None` outside
-    /// an active prompt drag.
+    /// Vim mode captured at drag-start; restored on mouse-up.
     pub(crate) prompt_drag_return_vim_mode: Option<crate::smelt_term::VimMode>,
-    /// **Single global** vim mode — the one source of truth read by
-    /// status bar, lua_bridge, and `smelt.vim.mode`. Vim dispatch
-    /// (Window / PromptState) writes through `&mut` references threaded
-    /// via `VimContext.mode` and `MouseCtx.vim_mode`. Defaults to
-    /// `Insert`, matching the historical default.
+    /// Single global vim mode — authoritative source for status bar, Lua, and dispatch.
     pub(crate) vim_mode: crate::smelt_term::VimMode,
-    /// Extra instructions from AGENTS.md / config, injected into the system
-    /// prompt as a section. Set during app initialization.
     pub extra_instructions: Option<String>,
-    /// Pre-rendered skills prompt section. Set during app initialization.
     pub skill_section: Option<String>,
-    /// Prompt sections built from app state. Rebuilt on mode changes.
     pub(crate) prompt_sections: crate::prompt_sections::PromptSections,
     pub ui: crate::smelt_term::Ui,
-    /// `WinId`s of the well-known split-tree surfaces. The matching
-    /// `Buffer`s are reached via `Ui::win_buf_mut`.
     pub(crate) well_known: WellKnown,
 }
 
@@ -190,43 +112,17 @@ pub use well_known::{
     PROMPT_ABOVE_WIN, PROMPT_BELOW_WIN, PROMPT_EDIT_BUF, PROMPT_WIN, TRANSCRIPT_WIN,
 };
 
-/// The well-known split-tree windows that smelt always carries:
-/// the prompt, the transcript, and the statusline, plus the
-/// transient cmdline overlay leaf. Buffers are reached through
-/// `Ui::win_buf_mut(WinId)` — there's exactly one `Buffer` per
-/// well-known `Window`.
+/// Well-known stable `WinId`s for the always-present split-tree windows.
 pub(crate) struct WellKnown {
-    /// Input leaf. Stable id [`PROMPT_WIN`]. Buffer rewritten each
-    /// frame by `compute_input` (input rows + ghost text + selection).
     pub(crate) prompt: crate::smelt_term::WinId,
-    /// Read-only chrome leaf above the input: queued + stash + top
-    /// bar. Stable id [`PROMPT_ABOVE_WIN`].
     pub(crate) prompt_above: crate::smelt_term::WinId,
-    /// Read-only bottom bar leaf. Stable id [`PROMPT_BELOW_WIN`].
     pub(crate) prompt_below: crate::smelt_term::WinId,
-    /// Transcript window. Stable id [`TRANSCRIPT_WIN`]. Its
-    /// buffer is rewritten each frame by
-    /// `project_transcript_buffer`; selection bg is published per
-    /// frame via `Buffer::set_selection`.
     pub(crate) transcript: crate::smelt_term::WinId,
-    /// Statusline window. Dynamically allocated at startup. Its
-    /// buffer carries one line; `refresh_status_bar` rewrites it
-    /// each frame.
     pub(crate) statusline: crate::smelt_term::WinId,
-    /// Leaf `WinId` of the open `:` cmdline overlay, if visible.
-    /// `cmdline_handle_key` mutates the leaf's buffer + cursor
-    /// directly through `&mut self`. Closing the leaf via
-    /// `close_overlay_leaf` cascades through `overlay_close` to
-    /// remove the overlay.
     pub(crate) cmdline: Option<crate::smelt_term::WinId>,
 }
 
-/// Which pane currently holds focus (nvim-style window split).
-///
-/// * `Prompt` — the bottom input pane owns focus; vim Insert/Normal/Visual
-///   live inside and regular typing goes there.
-/// * `Content` — the transcript pane owns focus; motions target it and
-///   the prompt is frozen until focus returns.
+/// Which pane currently holds focus.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum AppFocus {
     Prompt,
@@ -244,8 +140,7 @@ pub(crate) enum EventOutcome {
     Redraw,
     Quit,
     CancelAgent,
-    /// Interrupt the running agent and immediately start a new turn
-    /// with the oldest queued message.
+    /// Cancel the running agent and immediately start a new turn with the oldest queued message.
     InterruptWithQueued,
     Submit {
         content: Content,
@@ -267,60 +162,35 @@ pub(crate) enum InputOutcome {
 
 /// Mutable timer state shared across event handlers.
 pub(crate) struct Timers {
-    /// First-Esc timestamp for the **running-mode** double-Esc cancel
-    /// (handled inside `resolve_agent_esc`). Decoupled from
-    /// [`Self::pending_chord`]: running-mode Esc-Esc cancels the active
-    /// agent turn (Rust-internal) and treats single-Esc-with-queued as
-    /// an immediate unqueue, while the Lua-registered chord registry
-    /// handles plugin-extensible chords (idle Esc-Esc → `/rewind`,
-    /// vim-style `gd`/`<C-w>q`, etc.). They share no name-leaking
-    /// surface so unifying them is deferred until a plugin needs it.
+    /// Timestamp of the most recent Esc; used by double-Esc cancel logic in `resolve_agent_esc`.
     pub(crate) last_esc: Option<Instant>,
     pub(crate) esc_vim_mode: Option<crate::smelt_term::VimMode>,
     pub(crate) last_ctrlc: Option<Instant>,
     pub(crate) last_keypress: Option<Instant>,
-    /// Pending `Ctrl-W` pane chord. When set, the next key consumes the
-    /// chord to navigate panes instead of flowing to input handling.
+    /// Pending `Ctrl-W` pane chord; next key navigates panes instead of flowing to input.
     pub(crate) pending_pane_chord: Option<Instant>,
-    /// Pending Lua-keymap chord. Tracks the rolling sequence of recent
-    /// chord tokens within the timeout window, plus context captured at
-    /// the first key (e.g. vim mode before the first Esc flipped it).
-    /// `None` between chords; populated when a key matches the prefix
-    /// of a registered multi-key chord; cleared on match, on prefix
-    /// miss, or on timeout.
+    /// Active Lua-keymap chord sequence; `None` between chords.
     pub(crate) pending_chord: Option<PendingChord>,
 }
 
 /// State carried between keys of a multi-key chord. See [`Timers::pending_chord`].
 pub(crate) struct PendingChord {
-    /// Canonical chord tokens collected so far (e.g. `["<Esc>"]` after
-    /// the first Esc of an `<Esc><Esc>` chord).
     pub(crate) tokens: Vec<String>,
-    /// Wall time of the first key in the sequence. Pending chords
-    /// older than [`CHORD_TIMEOUT_MS`] are discarded.
+    /// Wall time of the first key; chords older than [`CHORD_TIMEOUT_MS`] are discarded.
     pub(crate) started: Instant,
-    /// Vim mode at the first key, before any per-key dispatch flipped
-    /// it. Surfaced to chord handlers as
-    /// `ctx.vim_mode_at_chord_start` so handlers can branch on the
-    /// pre-chord state (e.g. Esc-Esc rewinding into Insert mode if
-    /// the user was typing when the chord started).
+    /// Vim mode captured before the first key was dispatched; surfaced to chord handlers.
     pub(crate) vim_mode_at_start: Option<crate::smelt_term::VimMode>,
 }
 
-/// Window for completing a multi-key chord. After this much time with
-/// no follow-up key, a pending chord expires and the next key starts
-/// a fresh sequence.
+/// Idle time after which a pending chord expires and the next key starts a fresh sequence.
 pub(crate) const CHORD_TIMEOUT_MS: u64 = 500;
 
-/// How long after the last keypress before we show a deferred permission dialog.
+/// Idle time after the last keypress before showing a deferred permission dialog.
 pub(crate) const CONFIRM_DEFER_MS: u64 = 1500;
 
-/// A permission dialog deferred because the user was actively typing.
 pub(crate) enum DeferredDialog {
     Confirm(Box<ConfirmRequest>),
 }
-
-// ── Supporting types ─────────────────────────────────────────────────────────
 
 pub(crate) enum SessionControl {
     Continue,
@@ -332,8 +202,6 @@ pub(crate) struct PendingTool {
     pub(crate) call_id: String,
     pub(crate) name: String,
 }
-
-// ── TuiApp impl ─────────────────────────────────────────────────────────────────
 
 impl TuiApp {
     #[allow(clippy::too_many_arguments)]
@@ -364,12 +232,7 @@ impl TuiApp {
         if vim_enabled {
             input.set_vim_enabled(true);
         }
-        // Arg sources for the CommandArg inline completer (type `/cmd arg`).
-        // The picker-style commands (`/model`, `/theme`, `/color`, `/settings`)
-        // now live in Lua plugins and open real `crate::smelt_term::Picker` windows via
-        // `smelt.prompt.open_picker`, so they're not listed here.
         input.command_arg_sources = Vec::new();
-        // Use cached reasoning effort if not set from config
         let reasoning_effort = if reasoning_effort == protocol::ReasoningEffort::Off
             && cache.reasoning_effort != protocol::ReasoningEffort::Off
         {
@@ -406,12 +269,6 @@ impl TuiApp {
             let mut ui = crate::smelt_term::Ui::new();
             ui.set_terminal_size(w, h);
             let input_display_buf = ui.buf_create(crate::smelt_term::BufCreateOpts::default());
-            // Transcript: a Buffer-backed Window painted via `Ui::render`
-            // from the post-layer closure. No compositor `Component`
-            // layer — `project_transcript_buffer` writes the projected
-            // lines + highlight extmarks each frame, and the painted-
-            // split path consumes them via `Window::render`. Selection
-            // bg is published per frame via `Buffer::set_selection`.
             let transcript_display_buf = ui.buf_create(crate::smelt_term::BufCreateOpts::default());
             assert!(ui.win_open_split_at(
                 crate::app::TRANSCRIPT_WIN,
@@ -457,11 +314,6 @@ impl TuiApp {
             if let Some(w) = ui.win_mut(crate::app::PROMPT_BELOW_WIN) {
                 w.focusable = false;
             }
-            // Status line: Buffer-backed Window painted directly via
-            // `Window::render` from `Ui::render`'s post-layer closure.
-            // No compositor `Component` layer — the buffer carries the
-            // text + highlight extmarks `refresh_status_bar` writes
-            // each frame.
             let status_buf = ui.buf_create(crate::smelt_term::BufCreateOpts::default());
             let status_win = ui
                 .win_open_split(
@@ -475,10 +327,7 @@ impl TuiApp {
             if let Some(win) = ui.win_mut(status_win) {
                 win.focusable = false;
             }
-            // Seed a minimal splits tree so overlay anchors (e.g.
-            // notifications targeting PROMPT_WIN) can resolve before
-            // the first render frame publishes the real layout via
-            // `Ui::set_layout`.
+            // Seed a minimal splits tree so overlay anchors can resolve before the first render frame.
             ui.set_layout(crate::content::layout::build_layout_tree(
                 &crate::content::layout::LayoutInput {
                     term_height: h,
@@ -568,8 +417,7 @@ impl TuiApp {
         }
     }
 
-    /// Rebuild prompt sections from current app state (mode, instructions, etc.)
-    /// and return the assembled system prompt string.
+    /// Rebuilds prompt sections from current app state and returns the assembled system prompt.
     pub(crate) fn rebuild_system_prompt(&mut self) -> String {
         let cwd = std::path::Path::new(&self.cwd);
         self.prompt_sections = crate::prompt_sections::build_defaults(
@@ -582,10 +430,7 @@ impl TuiApp {
         self.prompt_sections.assemble()
     }
 
-    /// Drain timers whose deadline has passed: re-arm recurring entries,
-    /// drop one-shots, fire each callback after the borrow on `Timers`
-    /// releases so a callback that re-enters `app.core.timers.set/every/cancel`
-    /// composes cleanly with the TLS app pointer.
+    /// Fire due timer callbacks; re-arms recurring entries and drops one-shots.
     pub(crate) fn tick_timers(&mut self) {
         let now = std::time::Instant::now();
         let due = self.core.timers.drain_due(now, self.lua.lua());
@@ -597,22 +442,7 @@ impl TuiApp {
         }
     }
 
-    /// Drain cell-fire notifications queued by `Cells::set_dyn` and
-    /// run each subscriber against the snapshot. Called once per
-    /// main-loop iteration after timers tick — same reasoning as
-    /// `tick_timers`: fires happen with the `&mut Cells` borrow
-    /// released so a subscriber that re-enters `app.core.cells.set_dyn /
-    /// subscribe_kind / unsubscribe` composes cleanly with the TLS
-    /// app pointer.
-    ///
-    /// Snapshot the TuiApp-side fields that back diff-driven cells and
-    /// publish through `Cells` whenever they differ from the last
-    /// published value. Runs once per main-loop tick so a Lua
-    /// subscriber on `vim_mode` / `confirms_pending` / `now` /
-    /// `spinner_frame` sees every flip without each individual
-    /// mutation point having to call `cells.set_dyn`. `now` and
-    /// `spinner_frame` follow the same diff pattern so subscribers
-    /// fire only on second-rollover / frame-rollover, not every tick.
+    /// Publish `vim_mode`, `confirms_pending`, `now`, and `spinner_frame` cells whenever their values change.
     pub(crate) fn publish_diff_cells(&mut self) {
         self.core
             .cells
@@ -625,9 +455,6 @@ impl TuiApp {
             .map(|d| d.as_secs())
             .unwrap_or(0);
         self.core.cells.publish_if_changed("now", now_secs);
-        // Spinner advances only while a turn is animating; outside of
-        // a live turn the frame stays at 0 so a subscriber sees a
-        // single rollover when the turn ends and never fires again.
         let frame = self
             .working
             .elapsed()
@@ -637,12 +464,7 @@ impl TuiApp {
         self.core.cells.publish_if_changed("spinner_frame", frame);
     }
 
-    /// Direct subscribers see the Lua function called as `func(value)`;
-    /// glob subscribers see `func(name, value)` so a pattern handler
-    /// can branch per cell name (matching nvim's `pattern`-augmented
-    /// autocmd ergonomics). The cell value is converted to Lua via
-    /// the per-`TypeId` projector registered on `Cells`; values with
-    /// no registered projector surface as `nil`.
+    /// Drain pending cell-fire notifications and invoke subscribers.
     pub(crate) fn drain_cells_pending(&mut self) {
         if !self.core.cells.has_pending() {
             return;
@@ -671,11 +493,7 @@ impl TuiApp {
         }
     }
 
-    /// Read the prompt buffer's `"completer"`-namespace virt-text
-    /// extmark. The extmark IS the storage for input prediction
-    /// (ghost text); `compute_prompt` re-anchors it at the input
-    /// row each frame so `Window::render`'s virt-text walk paints
-    /// the dim suggestion past the leading space.
+    /// Returns the current ghost-text prediction from the prompt buffer's completer extmark.
     pub(crate) fn prompt_completer_text(&mut self) -> Option<String> {
         let buf = self
             .ui
@@ -691,9 +509,7 @@ impl TuiApp {
         })
     }
 
-    /// Replace the prompt buffer's prediction extmark with `text`.
-    /// Anchors at line 0, col 0 — `compute_prompt` re-anchors to the
-    /// visible input row on the next frame.
+    /// Replaces the prompt buffer's ghost-text prediction extmark.
     pub(crate) fn set_prompt_completer(&mut self, text: String) {
         let buf = self
             .ui
@@ -726,21 +542,13 @@ impl TuiApp {
         text
     }
 
-    /// Width available for transcript content. Reserves the rightmost
-    /// column for the scrollbar track so the scrollbar never overpaints
-    /// rendered content and mouse hit-testing has a stable target.
+    /// Width available for transcript content (terminal width minus gutter/scrollbar columns).
     pub(crate) fn transcript_width(&self) -> usize {
         let (w, _) = self.ui.terminal_size();
         (self.transcript_gutters.content_width(w) as usize).max(1)
     }
 
-    /// Resolve a Lua-supplied leaf id (raw `u64` from
-    /// `overlay.items[*].win`) to either a live Window or a registered
-    /// paint region. Returns `None` if neither namespace claims the
-    /// id, which the caller should surface as an error rather than
-    /// silently routing to the wrong subsystem. See
-    /// [`crate::lua::paint::PAINT_ID_BASE`] for the partition contract
-    /// the two namespaces share.
+    /// Resolves a raw leaf id to a live `Window` or a registered paint region (`None` if unrecognised).
     pub(crate) fn resolve_leaf_id(&self, raw_id: u64) -> Option<crate::lua::paint::LeafKind> {
         let win = crate::smelt_term::WinId(raw_id);
         if self.ui.win(win).is_some() {
@@ -769,7 +577,6 @@ impl TuiApp {
     }
 
     fn open_notification(&mut self, message: String, is_error: bool) {
-        // Replace any existing toast — one at a time.
         if let Some(win) = self.notification.take() {
             self.close_overlay_leaf(win);
         }
@@ -829,9 +636,6 @@ impl TuiApp {
             w.focusable = false;
         }
 
-        // One row above the prompt, full screen width. Inner Hbox uses
-        // `Percentage(100)` so the layout's natural width follows the
-        // terminal cap each frame; outer Vbox fixes height at 1 row.
         let layout = crate::smelt_term::LayoutTree::vbox(vec![(
             crate::smelt_term::Constraint::Length(1),
             crate::smelt_term::LayoutTree::hbox(vec![(
@@ -851,6 +655,7 @@ impl TuiApp {
             )
             // Sits below dialogs (default overlay z 50) so a toast
             // never obscures a modal asking for input.
+            // Sits below dialogs (z 50) so a toast never obscures a modal.
             .with_z(40),
         );
         self.notification = Some(win);
@@ -870,8 +675,6 @@ impl TuiApp {
         };
     }
 
-    // ── Unified event loop ───────────────────────────────────────────────
-
     pub async fn run(
         &mut self,
         mut ctx_rx: Option<tokio::sync::oneshot::Receiver<Option<u32>>>,
@@ -881,10 +684,7 @@ impl TuiApp {
         crate::theme::populate_ui_theme(self.ui.theme_mut());
         terminal::enable_raw_mode().ok();
         let _ = io::stdout().execute(EnterAlternateScreen);
-        // Disable DECAWM so writing to the bottom-right cell doesn't
-        // trigger the terminal's auto-scroll (which would push a whole
-        // row up and break the status bar's last char — see "1:1 100%"
-        // wrapping regression).
+        // Disable DECAWM — writing to the bottom-right cell must not trigger auto-scroll.
         let _ = io::stdout().execute(DisableLineWrap);
         let _ = io::stdout().execute(cursor::Hide);
         let _ = io::stdout().execute(EnableBracketedPaste);
@@ -903,10 +703,6 @@ impl TuiApp {
             self.notify_error(message);
         }
 
-        // Lua autoload + `init.lua` + global / project plugins all
-        // ran in `main.rs` before construction. Just install the TLS
-        // app pointer for the rest of the runtime and publish the
-        // session-started cell.
         {
             let _guard = crate::lua::install_app_ptr(self);
             self.core.cells.set_dyn(
@@ -926,9 +722,6 @@ impl TuiApp {
             }
         }
         self.flush_lua_callbacks();
-        // Plugins have now registered their commands — pull every
-        // declared `args = {...}` list so the CommandArg picker opens
-        // when the user types `/name ` (space).
         self.input.command_arg_sources = self.lua.list_command_args();
 
         let mut term_events = EventStream::new();
@@ -941,10 +734,6 @@ impl TuiApp {
                     self.exec = Some(handle);
                 }
             } else if trimmed.starts_with('/') && crate::completer::Completer::is_command(trimmed) {
-                // A registered slash command. If the plugin opted into
-                // `startup_ok = true`, run it through the unified
-                // dispatcher; otherwise notify the user that it has no
-                // useful effect at launch.
                 let name = trimmed
                     .trim_start_matches('/')
                     .split_whitespace()
@@ -959,7 +748,6 @@ impl TuiApp {
                     ));
                 }
             } else {
-                // Plain message (or unrecognized slash) — submit it.
                 let content = Content::text(msg.clone());
                 let turn = self.begin_agent_turn(&msg, content);
                 self.agent = Some(turn);
@@ -982,16 +770,7 @@ impl TuiApp {
                 self.discard_turn(true);
                 break 'main;
             }
-            // Install the TLS app pointer for the whole tick. Any Lua
-            // binding firing during this iteration can reach `&mut TuiApp`
-            // via `crate::lua::with_app`. Guard drops at end of the
-            // iteration scope and restores the previous slot (usually
-            // None). The pointer is the Neovim-equivalent to Vim's
-            // globals — Rust code itself never reads it; only Lua
-            // bindings do, and only when their enclosing &Rust borrow
-            // is field-disjoint from whatever the binding writes.
             let _app_guard = crate::lua::install_app_ptr(self);
-            // ── Lua timer + notification pump ────────────────────────────
             self.tick_timers();
             self.publish_diff_cells();
             self.drain_cells_pending();
@@ -1017,8 +796,6 @@ impl TuiApp {
                     .set_dyn("block_done", std::rc::Rc::new(smelt_core::cells::EventStub));
             }
             self.pump_lua();
-            // Fire `WinEvent::Tick` on every window with a registered
-            // Tick callback.
             {
                 let lua = &self.lua;
                 let mut lua_invoke =
@@ -1031,7 +808,6 @@ impl TuiApp {
             }
             self.flush_lua_callbacks();
 
-            // ── Background polls ─────────────────────────────────────────
             if let Some(ref mut rx) = ctx_rx {
                 if let Ok(result) = rx.try_recv() {
                     self.core.config.context_window = result;
@@ -1039,8 +815,6 @@ impl TuiApp {
                 }
             }
 
-            // ── Drain engine events ──
-            // Gate lives inside EngineClient (Confirms::is_clear).
             loop {
                 let ev = match self.core.engine.try_recv() {
                     Ok(ev) => ev,
@@ -1058,9 +832,6 @@ impl TuiApp {
                         break;
                     }
                 };
-                // Take the TurnState out for the duration of the
-                // dispatch so `handle_engine_event` can
-                // borrow its fields while we still hold `&mut self`.
                 let action = if let Some(mut ag) = self.agent.take() {
                     let ctrl = self.handle_engine_event(ev, ag.turn_id, &mut ag.pending);
                     let action = self.dispatch_control(
@@ -1082,7 +853,6 @@ impl TuiApp {
                 }
             }
 
-            // ── Auto-start from leftover queued messages (one per turn) ──
             if self.agent.is_none() && !self.queued_messages.is_empty() && !self.is_compacting() {
                 let text = self.queued_messages.remove(0);
                 if !text.is_empty() {
@@ -1092,14 +862,10 @@ impl TuiApp {
                 }
             }
 
-            // ── Process pending permission dialogs ──────────────────────
-            // If agent was cancelled while dialogs were pending, discard them.
             if self.agent.is_none() && !pending_dialogs.is_empty() {
                 pending_dialogs.clear();
                 self.pending_dialog = false;
             }
-            // Re-dispatch queued dialogs.  Each goes through dispatch_control
-            // so auto-approval checks re-run ("always allow" → auto-approve rest).
             if !pending_dialogs.is_empty()
                 && !self.focused_overlay_blocks_agent()
                 && self.agent.is_some()
@@ -1134,13 +900,9 @@ impl TuiApp {
                 self.pending_dialog = !pending_dialogs.is_empty();
             }
 
-            // ── Render ───────────────────────────────────────────────────
             self.render_normal(self.agent.is_some());
             let last_frame = Instant::now();
 
-            // Pre-compute animation signal here so the sleep expression
-            // inside `tokio::select!` below can read it without holding
-            // a borrow on `self` that conflicts with other branches.
             let now = Instant::now();
             let yank_flash_active = self
                 .core
@@ -1153,22 +915,12 @@ impl TuiApp {
                 || self.working.is_animating()
                 || yank_flash_active;
 
-            // ── Wait for next event ──────────────────────────────────────
             tokio::select! {
                 biased;
 
                 Some(Ok(ev)) = stream_next(&mut term_events) => {
-                    // Batch scroll wheel ticks across the drain so a
-                    // rapid burst collapses into a single motion + one
-                    // render — otherwise each tick repaints the whole
-                    // screen and the terminal can't keep up, making
-                    // fast scrolling feel laggy or frozen.
-                    //
-                    // The coalescer only fires when no overlay is
-                    // focused. With a dialog up, wheel events need to
-                    // reach `dispatch_terminal_event` → `handle_mouse`
-                    // so they route into the overlay instead of
-                    // bleeding past it into the transcript behind.
+                    // Coalesce scroll: batch rapid wheel ticks into a single motion + one render.
+                    // Disabled when an overlay is focused so wheel events route into it.
                     let coalesce_scroll = self.ui.focused_overlay().is_none();
                     let mut scroll_delta: isize = 0;
                     let mut scroll_row: u16 = 0;
@@ -1212,7 +964,6 @@ impl TuiApp {
                         }
                     }
 
-                    // Drain buffered terminal events (coalesce scroll).
                     while event::poll(Duration::ZERO).unwrap_or(false) {
                         if let Ok(ev) = event::read() {
                             if let Some(ev) = absorb(
@@ -1228,7 +979,6 @@ impl TuiApp {
                         }
                     }
 
-                    // Apply any accumulated scroll as a single motion.
                     if scroll_delta != 0 {
                         self.scroll_under_mouse(scroll_row, scroll_col, scroll_delta);
                     }
@@ -1251,20 +1001,11 @@ impl TuiApp {
                             self.discard_turn(false);
                         }
                     } else {
-                        // No active turn — handle out-of-band events.
                         self.handle_idle_engine_event(ev);
                     }
-                    // Don't render here — deferred to the frame timer or
-                    // top-of-loop render to batch rapid engine events into
-                    // fewer frames and reduce flicker.
                 }
 
                 Some(_) = self.lua_wakeup_rx.recv() => {
-                    // Drain any backlog the cross-thread sender pushed
-                    // before this wake. flush_lua_callbacks pumps the
-                    // Lua task inbox so coroutines parked on
-                    // `smelt.task.wait(id)` resume; render reflects
-                    // any state they touched.
                     while self.lua_wakeup_rx.try_recv().is_ok() {}
                     self.flush_lua_callbacks();
                     self.drive_lua_tasks();
@@ -1290,17 +1031,6 @@ impl TuiApp {
                 }
 
                 _ = tokio::time::sleep({
-                    // Fires only when there's real time-driven work:
-                    // drag-autoscroll advances one line per tick (the
-                    // interval ramps down the longer the cursor is
-                    // parked at the edge), and animations (spinner,
-                    // exec output, working agent, yank flash) drive
-                    // frames at `MIN_FRAME_INTERVAL`. When neither is
-                    // active, this arm is disabled via the `if` guard
-                    // below — the loop parks on terminal / engine /
-                    // exec channels and CPU goes to ~0% until the next
-                    // event. An idle timer here would wake the loop
-                    // every 80ms to redraw the same screen.
                     let since = last_frame.elapsed();
                     let want = if let Some(started) = self.ui.drag_autoscroll_started() {
                         let held = started.elapsed().as_millis() as u64;
@@ -1312,18 +1042,12 @@ impl TuiApp {
                     };
                     want.saturating_sub(since)
                 }), if has_animation || self.ui.drag_autoscroll_started().is_some() => {
-                    // Auto-scroll while the user is mid-drag with the
-                    // cursor parked on the top/bottom row of the
-                    // transcript — extends selection past the viewport
-                    // without requiring further mouse motion.
                     self.tick_drag_autoscroll();
-                    // Render deferred engine events + animations.
                     self.render_normal(self.agent.is_some());
                 }
             }
         }
 
-        // Cleanup
         if self.agent.is_some() {
             self.finish_turn(true);
         }

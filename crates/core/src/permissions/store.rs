@@ -6,9 +6,9 @@ use std::path::PathBuf;
 /// A single persisted workspace permission rule.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Rule {
-    /// Tool name (e.g. "bash") or "directory" for dir-based approvals.
+    /// Tool name (e.g. `"bash"`) or `"directory"` for dir-based approvals.
     pub tool: String,
-    /// Glob patterns — empty means "allow all" for this tool.
+    /// Glob patterns; empty means "allow all" for this tool.
     #[serde(default)]
     pub patterns: Vec<String>,
 }
@@ -19,10 +19,8 @@ struct Store {
     rules: Vec<Rule>,
 }
 
-/// Encode a cwd path as a directory name.
-///
-/// `/` becomes `-`, literal `-` becomes `--`. Leading `-` from the root `/` is stripped.
-/// This is reversible and collision-free.
+/// Encode a cwd path as a directory name: `/` → `-`, `-` → `--`, leading `-` stripped.
+/// Reversible and collision-free (see `decode_path`).
 fn encode_path(cwd: &str) -> String {
     let mut out = String::with_capacity(cwd.len());
     for c in cwd.chars() {
@@ -32,7 +30,6 @@ fn encode_path(cwd: &str) -> String {
             c => out.push(c),
         }
     }
-    // Strip the leading `-` produced by the root `/`.
     if out.starts_with('-') && !out.starts_with("--") {
         out.remove(0);
     }
@@ -41,7 +38,7 @@ fn encode_path(cwd: &str) -> String {
 
 #[cfg(test)]
 fn decode_path(encoded: &str) -> String {
-    let full = format!("-{encoded}"); // restore leading `/`
+    let full = format!("-{encoded}"); // restore the leading `/`
     let mut out = String::with_capacity(full.len());
     let mut chars = full.chars();
     while let Some(c) = chars.next() {
@@ -93,13 +90,12 @@ pub fn save(cwd: &str, rules: &[Rule]) {
     }
 }
 
-/// Add a tool-level approval rule for the workspace.
+/// Add a tool-level approval rule, merging with any existing rule for the same tool.
 pub fn add_tool(cwd: &str, tool: &str, patterns: Vec<String>) {
     let mut rules = load(cwd);
-    // Merge with existing rule for this tool if present.
     if let Some(existing) = rules.iter_mut().find(|r| r.tool == tool) {
         if patterns.is_empty() || existing.patterns.is_empty() {
-            existing.patterns.clear(); // "allow all" wins
+            existing.patterns.clear(); // empty = "allow all"; that always wins
         } else {
             for p in &patterns {
                 if !existing.patterns.contains(p) {
@@ -116,7 +112,7 @@ pub fn add_tool(cwd: &str, tool: &str, patterns: Vec<String>) {
     save(cwd, &rules);
 }
 
-/// Add a directory-level approval rule for the workspace.
+/// Add a directory-level approval rule (idempotent).
 pub fn add_dir(cwd: &str, dir: &str) {
     let mut rules = load(cwd);
     let already = rules
@@ -131,7 +127,7 @@ pub fn add_dir(cwd: &str, dir: &str) {
     save(cwd, &rules);
 }
 
-/// Build the auto_approved and auto_approved_dirs from workspace rules.
+/// Build compiled approval maps from persisted workspace rules.
 pub fn into_approvals(rules: &[Rule]) -> (HashMap<String, Vec<glob::Pattern>>, Vec<PathBuf>) {
     let mut tool_map: HashMap<String, Vec<glob::Pattern>> = HashMap::new();
     let mut dirs = Vec::new();

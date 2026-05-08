@@ -1,13 +1,4 @@
-//! `smelt.notebook` bindings.
-//!
-//! - `render(buf_id, args)` paints an `edit_notebook` preview into a
-//!   Buffer the caller owns (UiHost-only). It asks `app::notebook`
-//!   for typed `NotebookRenderData` from the tool args (insert /
-//!   delete / replace cell), then prints it via the same syntax /
-//!   inline-diff helpers the transcript renderer uses.
-//! - `parse / is_notebook_path` are Host-tier read shapes over
-//!   `app::notebook` for plugins that want to introspect a
-//!   notebook's structure.
+//! `smelt.notebook` — render, parse, read, and apply notebook edits.
 
 use crate::content::builder::LineBuilder;
 use crate::content::highlight::{print_inline_diff, print_syntax_file};
@@ -57,10 +48,7 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
         })?,
     )?;
 
-    // `smelt.notebook.read(path, offset, limit)` returns the same
-    // line-numbered cell-by-cell text the engine `read_file` tool
-    // produces for `.ipynb` paths. Used by the Lua `read_file` tool
-    // when the caller hands it a notebook path.
+    // `smelt.notebook.read(path, offset, limit)` — same cell-by-cell text as the read_file tool.
     notebook.set(
         "read",
         lua.create_function(|_, (path, offset, limit): (String, u64, u64)| {
@@ -72,12 +60,8 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
         })?,
     )?;
 
-    // `smelt.notebook.apply_edit(args)` performs the JSON cell munging
-    // for the Lua `edit_notebook` tool. The caller already holds the
-    // per-path advisory flock; this writes the file, populates the
-    // shared file-state cache via `record_write`, and returns the
-    // confirmation message + metadata table on success. On failure
-    // returns `(nil, error_string)`.
+    // `smelt.notebook.apply_edit(args)` — write the file and return (message, metadata)
+    // or (nil, error). Caller holds the per-path advisory flock.
     notebook.set(
         "apply_edit",
         lua.create_function(|lua, args: mlua::Table| {
@@ -135,9 +119,7 @@ fn cell_to_lua(lua: &Lua, cell: &notebook::Cell) -> LuaResult<mlua::Table> {
     Ok(t)
 }
 
-/// Shallow Lua → JSON map conversion for tool-arg tables. Strings,
-/// numbers, booleans, nil pass through; nested tables become arrays
-/// or objects depending on whether they look sequence-shaped.
+/// Shallow Lua table → JSON map. Nested tables become arrays or objects based on shape.
 fn lua_table_to_json_map(t: &mlua::Table) -> mlua::Result<HashMap<String, serde_json::Value>> {
     let mut out = HashMap::new();
     for pair in t.clone().pairs::<String, mlua::Value>() {

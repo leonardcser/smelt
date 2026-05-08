@@ -1,15 +1,11 @@
--- Bottom-row statusline composer. Registers a single `core` source
--- whose handler returns the full list of segments the Rust layout
--- engine (priority dropping, truncation, alignment) consumes. The
--- snapshot binding (`smelt.statusline.snapshot()`) hands every input
--- the Rust composition used to read off `TuiApp` directly, so the Lua
--- side stays declarative: walk the snapshot, build the items, return.
+-- Statusline composer. Registers a `core` source returning segments for the
+-- Rust layout engine (priority, truncation, alignment).
 
 local M = {}
 
-local STATUS_BG = 233 -- the dim charcoal the throbber/indicators sit on
-local PILL_FG = 0     -- black foreground on the slug pill
-local COMPACTING_BG = 15 -- bright white bg while the compactor runs
+local STATUS_BG = 233
+local PILL_FG = 0
+local COMPACTING_BG = 15
 local VIM_BG = 236
 local VIM_INSERT_FG = 78
 local VIM_VISUAL_FG = 176
@@ -30,9 +26,6 @@ local function compose()
   local working = snap.working or {}
   local items = {}
 
-  -- Slug pill: spinner glyph + label, both painted with the slug bg
-  -- (or bright-white while compacting). Decoupled from animation so a
-  -- paused turn (no glyph) still shows its label.
   local pill_bg = working.compacting and COMPACTING_BG or theme.slug_bg
   local live = working.animating
   local label
@@ -66,7 +59,6 @@ local function compose()
     })
   end
 
-  -- Vim mode (only when the focused buffer-cursor surface is vim-aware).
   if snap.vim and snap.vim.enabled then
     table.insert(items, {
       text = " " .. (snap.vim.label or "NORMAL") .. " ",
@@ -76,8 +68,6 @@ local function compose()
     })
   end
 
-  -- Mode (Plan/Apply/Yolo/Normal): icon + name. Color picks up the
-  -- matching theme group.
   local mode = snap.mode
   if mode then
     local mode_fg
@@ -99,8 +89,7 @@ local function compose()
     })
   end
 
-  -- Throbber: live-turn timer + tok/s; deduplicates the leading
-  -- spinner glyph that the slug pill already painted on the left.
+  -- Throbber: skip the first span when animating (slug pill already shows the spinner).
   local throb = working.throbber or {}
   local skip = (working.animating and #throb > 0) and 1 or 0
   for i = skip + 1, #throb do
@@ -118,9 +107,6 @@ local function compose()
     })
   end
 
-  -- "permission pending" surfaces while a confirm request landed but
-  -- the dialog overlay hasn't opened yet (e.g. the user is mid-typing
-  -- in another modal).
   if snap.permission_pending then
     table.insert(items, {
       text = "permission pending",
@@ -132,7 +118,6 @@ local function compose()
     })
   end
 
-  -- Background-proc counters.
   local procs = snap.running_procs or 0
   if procs > 0 then
     table.insert(items, {
@@ -154,7 +139,6 @@ local function compose()
     })
   end
 
-  -- Right-aligned cursor position.
   if snap.position and snap.position.text then
     table.insert(items, {
       text = snap.position.text,

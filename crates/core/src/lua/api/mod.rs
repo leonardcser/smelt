@@ -1,12 +1,5 @@
-//! Host-tier Lua API bindings — work in both TUI and headless modes.
-//!
-//! These modules use `try_with_host` (or direct `Core` field access) and
-//! never touch `TuiApp`-specific state such as `Ui`, `transcript`, or
-//! `input_history`.
+//! Host-tier Lua API bindings (TUI and headless).
 
-/// Register a 0-arg getter that reads live state from the host via
-/// `try_with_host`. Returns a Lua function that, when called, invokes
-/// `try_with_host` and returns the closure result (or `Default`).
 #[macro_export]
 macro_rules! host_read {
     ($lua:expr, |$host:ident| $body:expr) => {{

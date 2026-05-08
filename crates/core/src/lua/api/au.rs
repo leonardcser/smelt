@@ -1,6 +1,4 @@
-//! `smelt.au` bindings — nvim-shaped `au.on` / `au.fire` aliases over
-//! `smelt.cell(name):subscribe` / `:set`. The underlying registry is
-//! one and the same; this surface exists for nvim familiarity.
+//! `smelt.au` — nvim-shaped aliases over `smelt.cell` subscribe/set.
 
 use crate::lua::LuaHandle;
 use mlua::prelude::*;
@@ -11,9 +9,6 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
 
     let au_tbl = lua.create_table()?;
 
-    // `smelt.au.on(name, fn)` — thin alias over
-    // `smelt.cell(name):subscribe(fn)`. The cell must already be
-    // declared; subscribing to an undeclared name returns `nil`.
     au_tbl.set(
         "on",
         lua.create_function(
@@ -32,9 +27,6 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
         )?,
     )?;
 
-    // `smelt.au.fire(name, payload)` — thin alias over
-    // `smelt.cell(name):set(payload)`. Returns `true` on success,
-    // `false` when the cell isn't declared.
     au_tbl.set(
         "fire",
         lua.create_function(

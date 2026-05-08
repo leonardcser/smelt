@@ -1,5 +1,4 @@
-//! `smelt.timer` + `smelt.defer` bindings — schedule one-shot and
-//! recurring callbacks via the App-level `Timers` subsystem.
+//! `smelt.timer` + `smelt.defer` — one-shot and recurring timer callbacks.
 
 use crate::lua::LuaHandle;
 use mlua::prelude::*;
@@ -42,9 +41,6 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
     )?;
     smelt.set("timer", timer_tbl)?;
 
-    // `smelt.defer(ms, fn)` — alias for `smelt.timer.set` kept for the
-    // nvim-shaped one-shot ergonomics. Returns nothing so existing
-    // callers stay untouched.
     smelt.set(
         "defer",
         lua.create_function(|lua, (ms, handler): (u64, mlua::Function)| {

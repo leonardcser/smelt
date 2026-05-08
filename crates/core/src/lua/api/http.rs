@@ -1,7 +1,4 @@
-//! `smelt.http` bindings — synchronous HTTP fetch over `crate::http`.
-//! Host-tier (works in tui and headless) — no Ui touch.
-//!
-//! Errors flow through the `(value, err)` Lua convention.
+//! `smelt.http` — synchronous HTTP get/post. Errors use `(value, err_string)` convention.
 
 use mlua::prelude::*;
 use std::collections::HashMap;

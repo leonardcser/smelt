@@ -1,9 +1,5 @@
--- F12 perf panel.
---
--- Small overlay anchored to the screen's top-right corner showing live
--- duration percentiles for the busiest perf labels. Non-modal +
--- non-focusable so the prompt keeps input focus while it's open.
--- F12 again to dismiss.
+-- F12 perf panel. Top-right overlay showing live duration percentiles.
+-- Non-modal and non-focusable; F12 again to dismiss.
 
 local M = {}
 
@@ -12,14 +8,11 @@ local NS_HL = smelt.buf.create_namespace("smelt.perf_panel")
 
 local PANEL_W = 44
 local PANEL_H = 14
--- Width of the right-hand "last  p99   n" cluster (columns 1+6+2+6+1+3 = 19).
--- Subtract from the live window width to get the label column width;
--- floors at MIN_LABEL_W so the label column never collapses entirely.
+-- STATS_W = right-hand "last  p99   n" cluster width; label column = inner_w - STATS_W.
 local STATS_W = 19
 local MIN_LABEL_W = 6
 
--- Severity thresholds in microseconds. Maps a duration into a theme
--- role name; the buffer extmark resolves the role to a colour.
+-- Maps a duration (µs) to a theme highlight role.
 local function severity_role(us)
   if us < 100 then return "Comment" end                  -- < 100µs (dim)
   if us < 1000 then return "SmeltReasonLow" end          -- < 1ms (cyan/blue)
@@ -44,10 +37,7 @@ local function pad_label(label, label_w)
   return label .. string.rep(" ", label_w - len)
 end
 
--- Each data row lays out as:
---   pad_label(...)<sp>last_s(6)<sp><sp>p99_s(6)<sp>cnt_s(3)
--- Header headers right-align inside those same field widths so the
--- "last" / "p99" / "n" labels sit directly above their data columns.
+-- Layout: label | last(6) | p99(6) | n(3). Header right-aligns within the same widths.
 local function header_for(label_w)
   local label_col = pad_label("label", label_w)
   local last_col = string.format("%6s", "last")
@@ -60,8 +50,7 @@ local function current_label_width()
   if not PANEL then return MIN_LABEL_W end
   local rect = smelt.win.rect(PANEL.win)
   if not rect then return MIN_LABEL_W end
-  -- Inner width excludes the 1-cell border on each side.
-  local inner_w = math.max(rect.width - 2, 0)
+  local inner_w = math.max(rect.width - 2, 0) -- exclude 1-cell border each side
   local lw = inner_w - STATS_W
   if lw < MIN_LABEL_W then return MIN_LABEL_W end
   return lw
@@ -69,12 +58,11 @@ end
 
 local function compose_lines(snap, label_w)
   local lines = { header_for(label_w) }
-  local color_spans = {}                -- {row, col_start, col_end, role}
+  local color_spans = {}
   local rows = snap.durations or {}
-  local max_rows = PANEL_H - 3          -- border (2) + header (1)
+  local max_rows = PANEL_H - 3 -- border(2) + header(1)
   local n = math.min(#rows, max_rows)
-  -- Span offsets are visual columns; `fmt_us` may emit µ, so use width
-  -- (codepoints) rather than `#s` (bytes).
+  -- Use visual width (codepoints) for span offsets; fmt_us may emit µ.
   local width = smelt.text.width
   for i = 1, n do
     local r = rows[i]
@@ -85,7 +73,6 @@ local function compose_lines(snap, label_w)
     lines[#lines + 1] = line
     local last_w = width(last_s)
     local p99_w = width(p99_s)
-    -- Colour the `last` and `p99` cells by their own severity.
     local last_col = label_w + 1
     table.insert(color_spans, {
       row = i + 1,                       -- 1-based row index in buffer
@@ -114,8 +101,7 @@ local function paint_panel()
   local label_w = current_label_width()
   local lines, spans = compose_lines(snap, label_w)
   smelt.buf.set_lines(PANEL.buf, lines)
-  -- Repaint highlights — set_lines wipes rendered content but extmarks
-  -- in a dedicated namespace persist; clear and rewrite each tick.
+  -- Clear and rewrite highlights each tick (set_lines wipes content but not extmarks).
   smelt.buf.clear_namespace(PANEL.buf, NS_HL)
   for _, sp in ipairs(spans) do
     smelt.buf.set_extmark(PANEL.buf, NS_HL, sp.row, sp.col, {

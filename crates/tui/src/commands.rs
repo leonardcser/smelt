@@ -7,20 +7,15 @@ pub(crate) enum ExecEvent {
     Done(Option<i32>),
 }
 
-/// A live shell-escape (`!cmd`) child: the receiver streams stdout/stderr
-/// lines plus a final exit status, and the `kill` notify cancels the
-/// process group on Ctrl-C.
+/// Live shell-escape child. Streams stdout/stderr lines and a final exit
+/// status; `kill` cancels the process group on Ctrl-C.
 pub(crate) struct ExecHandle {
     pub rx: tokio::sync::mpsc::UnboundedReceiver<ExecEvent>,
     pub kill: std::sync::Arc<tokio::sync::Notify>,
 }
 
-/// Slash-command dispatcher. Accepts raw command lines (`/quit`,
-/// `:q`, `/compact foo`, `! ls`, ...).
-/// Normalises a leading `:` to `/` so `/quit` and `:quit` dispatch
-/// identically. `!` lines spawn a shell escape; everything else
-/// dispatches by name to a Lua-registered handler (or no-ops if
-/// nothing matches).
+/// Dispatch a raw command line. Leading `:` normalises to `/`. `!` lines
+/// spawn a shell escape; everything else dispatches to a Lua-registered handler.
 pub(crate) fn run_command(app: &mut TuiApp, line: &str) -> CommandAction {
     let _perf = smelt_core::perf::begin("cmd:dispatch");
     let line = line.trim();
@@ -61,12 +56,9 @@ pub(crate) fn run_command(app: &mut TuiApp, line: &str) -> CommandAction {
 }
 
 impl TuiApp {
-    /// Apply the result of `process_input` to app state (starting an agent,
-    /// running a command, kicking off a shell escape). Centralizes the
-    /// dispatch previously duplicated across the Submit path, queued-message
-    /// fallback, and auto-start-from-queued loop. Quit is not an outcome
-    /// here — `/quit` and friends set `pending_quit` directly via the Lua
-    /// `smelt.quit()` body, and the main loop honors it on the next tick.
+    /// Apply a resolved `InputOutcome` to app state. `/quit` is handled
+    /// separately via `pending_quit`; this covers the start-agent, exec,
+    /// and continue cases.
     pub(crate) fn apply_input_outcome(
         &mut self,
         outcome: InputOutcome,
@@ -85,13 +77,12 @@ impl TuiApp {
         }
     }
 
-    /// Execute a command while the agent is running.
-    /// Returns the `EventOutcome` to use, or `None` to queue as a message.
+    /// Attempt to execute a command mid-run. Returns the outcome, or `None`
+    /// to queue the input as a regular user message.
     pub(crate) fn try_command_while_running(&mut self, input: &str) -> Option<EventOutcome> {
         let is_from_paste = self.input.skip_shell_escape();
 
-        // Shell escape — `! cmd` (skipped while pasting). Dispatched
-        // unconditionally; `run_command` spawns the subprocess.
+        // Shell escape — `! cmd` (skipped while pasting).
         if input.starts_with('!') && !is_from_paste {
             return match run_command(self, input) {
                 CommandAction::Exec(handle) => Some(EventOutcome::Exec(handle)),
@@ -99,9 +90,7 @@ impl TuiApp {
             };
         }
 
-        // Slash- or colon-prefixed command. `:` is a vim-style alias for
-        // `/`; both dispatch through the same Lua registry. Anything else
-        // is queued as a regular user message.
+        // `:` is a vim-style alias for `/`; non-command input is queued.
         let normalized = if let Some(rest) = input.strip_prefix(':') {
             format!("/{rest}")
         } else if input.starts_with('/') {
@@ -118,16 +107,12 @@ impl TuiApp {
             .strip_prefix('/')
             .and_then(|s| s.split_whitespace().next())
             .unwrap_or("");
-        // Commands that spawn their own agent turn (user-defined custom
-        // commands) opt into `queue_when_busy` so the dispatcher defers
-        // them to after the current turn instead of running mid-turn or
-        // erroring.
+        // Commands that opt into `queue_when_busy` are deferred until after
+        // the current turn rather than running mid-turn.
         if !name.is_empty() && self.lua.command_queues_when_busy(name) {
             return None;
         }
-        // Access control: a command opts out of mid-turn execution
-        // by registering with `{ while_busy = false }` (e.g. /compact,
-        // /fork, /resume).
+        // Commands registered with `{ while_busy = false }` are blocked mid-turn.
         if !name.is_empty() && self.lua.command_blocks_while_busy(name) == Some(true) {
             self.notify_error(format!("cannot run /{name} while agent is working"));
             return Some(EventOutcome::Noop);
@@ -139,8 +124,8 @@ impl TuiApp {
         }
     }
 
-    /// Spawn a shell command asynchronously. Returns a handle the caller
-    /// can stash on `TuiApp::exec` to stream output and kill on Ctrl+C.
+    /// Spawn a shell command. Returns a handle for streaming output and
+    /// killing the process on Ctrl+C.
     pub(crate) fn start_shell_escape(&mut self, raw: &str) -> Option<ExecHandle> {
         let cmd = raw.trim();
         if cmd.is_empty() {
@@ -209,8 +194,7 @@ impl TuiApp {
         Some(ExecHandle { rx, kill })
     }
 
-    /// Switch to a model by key, updating all relevant state. Silently does
-    /// nothing if the key is not found.
+    /// Switch to a model by key. No-op if the key is not found.
     pub(crate) fn apply_model(&mut self, key: &str) {
         let Some(resolved) = self
             .core
@@ -243,9 +227,8 @@ impl TuiApp {
         }
     }
 
-    /// Mutate resolved settings in place and propagate to input/screen.
-    /// Settings are not persisted: the runtime live-state is the source
-    /// of truth and config lives in `init.lua`.
+    /// Mutate resolved settings and propagate to input/screen. Live state
+    /// is authoritative; persistence lives in `init.lua`.
     pub(super) fn update_settings<F: FnOnce(&mut smelt_core::config::ResolvedSettings)>(
         &mut self,
         f: F,
@@ -256,21 +239,17 @@ impl TuiApp {
             .set_vim_enabled(self.core.config.settings.vim);
     }
 
-    /// Replace all resolved settings at once (from a settings dialog result),
-    /// propagating to input/screen.
+    /// Replace all resolved settings at once, propagating to input/screen.
     pub(crate) fn set_settings(&mut self, new: smelt_core::config::ResolvedSettings) {
         self.update_settings(|slot| *slot = new);
     }
 
-    /// Set the agent mode, persist it, and notify the engine. Marks the
-    /// screen dirty so the mode indicator refreshes.
+    /// Set the agent mode, persist it, and notify the engine.
     pub(crate) fn set_mode(&mut self, mode: AgentMode) {
         let old = self.core.config.mode;
         self.core.config.mode = mode;
         state::set_mode(self.core.config.mode);
-        // Publish the new mode first so plugins can (un)register tools
-        // and prompt sections for the new mode before we snapshot them
-        // for the engine.
+        // Publish new mode before snapshotting tools/prompt for the engine.
         if old != mode {
             self.core
                 .cells

@@ -1,19 +1,9 @@
 //! Buffer-parser registry.
 //!
-//! Every "content kind" a `crate::smelt_term::Buffer` can display — markdown, bash
-//! script, syntax-highlighted file, inline diff, soft-wrapped plain
-//! text — lives here as a variant of [`BufFormat`]. An attached
-//! parser turns the buffer's `source` string into styled lines +
-//! soft-wrap decorations at the terminal `width` it's given. The
-//! dialog / window host is responsible for calling
-//! [`crate::smelt_term::Buffer::ensure_rendered_at`] with the current content width
-//! (after chrome like borders, padding, and scrollbar reservation has
-//! been subtracted) before sampling the buffer for display.
-//!
-//! This is the single unification point for the transcript's markdown
-//! pipeline and Lua-driven dialog / window content: both attach a
-//! parser via `crate::smelt_term::BufferParser` and reuse the same wrap-aware,
-//! copy-friendly rendering the transcript uses.
+//! [`BufFormat`] enumerates every content kind a buffer can display.
+//! An attached parser converts `source` into styled lines at a given width.
+//! Callers must call `Buffer::ensure_rendered_at` with the content width
+//! (after borders, padding, and scrollbar) before sampling for display.
 
 use crate::smelt_term::{Buffer, BufferParser};
 use std::sync::Arc;
@@ -22,35 +12,24 @@ use crate::content::builder::LineBuilder;
 use crate::content::highlight::{print_inline_diff, print_syntax_file, BashHighlighter};
 use crate::content::to_buffer::render_into_buffer;
 
-/// Content kind a parser-backed buffer renders. Constructed from a
-/// Lua `mode` string or chosen by a Rust caller, handed to
-/// [`BufFormat::into_parser`] to get a trait object that can be
-/// attached to a `crate::smelt_term::Buffer`.
+/// Content kind a parser-backed buffer renders.
 #[derive(Clone, Debug)]
 pub(crate) enum BufFormat {
-    /// Plain text, soft-wrapped to the render width. Copy-friendly:
-    /// wrap continuations are marked so vim/visual copies round-trip
-    /// without the inserted line breaks.
+    /// Soft-wrapped plain text. Wrap continuations are marked for copy-friendly round-trips.
     Plain,
-    /// CommonMark-ish markdown: headings, lists, fenced code blocks
-    /// (syntax-highlighted), tables, blockquotes, inline emphasis.
-    /// Reuses the exact renderer the transcript response block uses.
+    /// CommonMark-ish markdown with syntax-highlighted code blocks.
     Markdown,
-    /// Shell/bash syntax highlighting, soft-wrapped.
+    /// Bash/shell syntax highlighting, soft-wrapped.
     Bash,
-    /// Syntax-highlighted source file. Language is inferred from the
-    /// `path` extension.
+    /// Syntax-highlighted source file; language inferred from `path` extension.
     File { path: String },
-    /// Inline unified diff. `old` is the pre-edit content; the
-    /// buffer's `source` is treated as the post-edit content.
+    /// Inline unified diff. `old` is pre-edit content; `source` is post-edit.
     Diff { old: String, path: String },
 }
 
 impl BufFormat {
-    /// Parse a Lua `mode` keyword into the matching variant. Modes
-    /// that need an extra payload (`file` → `path`, `diff` → `old +
-    /// path`) are constructed via [`BufFormat::from_lua_spec`] which
-    /// also reads those fields from the opts table.
+    /// Parse a simple Lua `mode` keyword. Modes that need extra payload use
+    /// [`BufFormat::from_lua_spec`] instead.
     fn parse_simple(mode: &str) -> Option<Self> {
         match mode {
             "plain" => Some(Self::Plain),
@@ -60,9 +39,8 @@ impl BufFormat {
         }
     }
 
-    /// Resolve a full mode spec from a Lua opts table: `{ mode = "…",
-    /// path = "…", old = "…" }`. Unknown modes or missing payloads
-    /// produce `Err(msg)`.
+    /// Resolve a mode from a Lua opts table `{ mode, path, old }`.
+    /// Returns `Err(msg)` for unknown modes or missing payloads.
     pub(crate) fn from_lua_spec(mode: &str, opts: &mlua::Table) -> Result<Self, String> {
         if let Some(simple) = Self::parse_simple(mode) {
             return Ok(simple);
@@ -85,8 +63,7 @@ impl BufFormat {
         }
     }
 
-    /// Wrap this mode in a trait object ready to attach to a buffer
-    /// via [`crate::smelt_term::Buffer::attach`] / [`crate::smelt_term::Buffer::set_parser`].
+    /// Wrap into a parser trait object for `Buffer::attach`.
     pub(crate) fn into_parser(self) -> Arc<dyn BufferParser> {
         Arc::new(ModeParser { mode: self })
     }
@@ -153,11 +130,8 @@ fn render_bash(out: &mut LineBuilder, source: &str, width: u16) {
     }
 }
 
-/// Soft-wrap `line` to `width` columns, call `emit` for each wrapped
-/// segment. Marks the produced rows as a single logical source line:
-/// `source_text` on row 0, `soft_wrapped` on every continuation row,
-/// `mark_wrapped` on the group if it actually wrapped — all the
-/// metadata the transcript copy path and the dialog viewport expect.
+/// Soft-wrap `line` to `width` columns, calling `emit` for each segment.
+/// Marks `source_text` on row 0 and `soft_wrapped` on continuations.
 fn emit_wrapped_line<F>(out: &mut LineBuilder, line: &str, width: usize, mut emit: F)
 where
     F: FnMut(&mut LineBuilder, &str),
@@ -197,9 +171,6 @@ mod tests {
             "expected plain formatter to soft-wrap long line, got {} line(s)",
             buf.line_count()
         );
-        // The first row remembers the unwrapped source for copy;
-        // continuation rows are flagged so selection copy skips the
-        // injected row break.
         assert_eq!(
             buf.decoration_at(0).source_text.as_deref(),
             Some("hello world this is a long line that must wrap")
@@ -213,7 +184,6 @@ mod tests {
         buf.set_source("# Heading\n\nbody text".into());
         buf.ensure_rendered_at(40);
         assert!(buf.line_count() >= 2);
-        // Heading row should expose its raw markdown for copy-paste.
         assert_eq!(
             buf.decoration_at(0).source_text.as_deref(),
             Some("# Heading")

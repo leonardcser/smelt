@@ -1,10 +1,4 @@
 //! Lua runtime types for `smelt-core`.
-//!
-//! Hosts (TuiApp, HeadlessApp) own the full [`LuaRuntime`]; core
-//! provides the shared state ([`LuaShared`]), task runtime
-//! ([`LuaTaskRuntime`]), and minimal handle types ([`LuaHandle`])
-//! so that [`Cells`], [`Timers`], and headless scripts can store
-//! Lua callbacks without depending on the terminal frontend.
 
 pub mod api;
 pub mod runtime;
@@ -20,25 +14,19 @@ pub use task::{
 
 /// Outcome of invoking a plugin tool handler.
 pub enum ToolExecResult {
-    /// Handler returned without yielding — caller forwards this
-    /// content to the engine immediately.
+    /// Handler returned synchronously; forward content to the engine immediately.
     Immediate { content: String, is_error: bool },
-    /// Handler yielded (called an API that suspends on the
-    /// `LuaTask` runtime). The result will arrive later via
-    /// `drive_tasks() -> TaskDriveOutput::ToolComplete`.
+    /// Handler yielded; result arrives later via `drive_tasks() -> TaskDriveOutput::ToolComplete`.
     Pending,
 }
 
 use mlua::prelude::*;
 
-/// A Lua callable registered via `smelt.cmd.register` / `smelt.keymap` /
-/// `smelt.on`. Stored as a mlua `RegistryKey` so references survive
-/// across GC cycles and can be invoked from Rust handlers.
+/// A Lua callable stored as a `RegistryKey` so it survives GC cycles.
 pub struct LuaHandle {
     pub key: mlua::RegistryKey,
 }
 
-/// Convert a `serde_json::Value` to a `mlua::Value`.
 pub fn json_to_lua(lua: &Lua, v: &serde_json::Value) -> LuaResult<mlua::Value> {
     match v {
         serde_json::Value::Null => Ok(mlua::Value::Nil),

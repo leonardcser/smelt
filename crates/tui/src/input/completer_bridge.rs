@@ -1,16 +1,11 @@
-//! Wiring between the input buffer and the `Completer` popup.
-//!
-//! Inline completers (`Command`/`File`/`CommandArg`) are driven by the
-//! buffer contents (`/cmd`, `@file`, `/cmd arg`). Each owns a single
-//! `CompleterSession` on `PromptState.completer`, cleaned up
-//! deterministically on close.
+//! Wiring between the input buffer and the completer popup.
 
 use super::{cursor_in_at_zone, find_slash_anchor, Action, PromptState};
 use crate::completer::{Completer, CompleterKind};
 use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
 
 impl PromptState {
-    /// Try to handle the event as a completer navigation. Returns Some if consumed.
+    /// Handle event as completer navigation. Returns `Some` if consumed.
     pub(super) fn handle_completer_event(&mut self, ev: &Event) -> Option<Action> {
         let _kind = self.completer.as_ref().map(|c| c.kind)?;
 
@@ -47,9 +42,7 @@ impl PromptState {
                 self.close_completer();
                 Some(Action::Redraw)
             }
-            // Inline completers only cycle when the list has multiple
-            // entries — a single-option match falls through to normal
-            // arrow-key behaviour (cursor navigation in the prompt).
+            // Only cycle when there are multiple entries; single-match falls through to arrow-key nav.
             Event::Key(KeyEvent {
                 code: KeyCode::Up, ..
             })

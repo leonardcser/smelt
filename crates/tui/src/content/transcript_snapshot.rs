@@ -1,9 +1,4 @@
-//! Transcript snapshot: width-keyed projection of the full transcript into
-//! plain-text rows with block↔row mappings.
-//!
-//! Lives in `tui` because `TranscriptSnapshot` is only consumed by tui
-//! (pane focus, transcript scrolling, copy/yank, cursor snapping). `core`
-//! keeps `BlockHistory`; `tui` owns display projection.
+//! Width-keyed snapshot of the transcript with block↔row mappings for copy, yank, and snapping.
 
 use crate::content::block_buffers::BlockBufferCache;
 use crate::smelt_term::Theme;
@@ -13,50 +8,29 @@ use std::collections::HashMap;
 use std::ops::Range;
 use std::sync::Arc;
 
-/// One display cell in the snapshot, carrying the character and its
-/// copy/selection metadata from the span that produced it.
 #[derive(Clone, Debug)]
 pub(crate) struct SnapshotCell {
     pub(crate) ch: char,
     pub(crate) meta: SpanMeta,
 }
 
-/// Cached, width-keyed projection of the full transcript into plain-text
-/// rows with block↔row mappings. Built lazily by `build_snapshot` and
-/// invalidated on any block mutation or width change.
 pub struct TranscriptSnapshot {
     pub(crate) width: u16,
     pub(crate) show_thinking: bool,
-    /// One entry per row in the full transcript (including gap rows).
-    /// `Arc` so callers that only need to read rows can share the cache
-    /// without a deep clone — only the rare "append ephemeral rows"
-    /// path pays the copy.
+    /// Shared to avoid deep-clone when callers only need to read.
     pub rows: Arc<Vec<String>>,
-    /// Per-cell metadata for each row, parallel to `rows`. Each inner
-    /// vec has one `SnapshotCell` per display column. Used by
-    /// `copy_range` to respect `SpanMeta.selectable` / `copy_as`.
+    /// Per-cell metadata parallel to `rows`; used by `copy_range`.
     pub(crate) row_cells: Vec<Vec<SnapshotCell>>,
-    /// True when this row is a soft-wrap continuation of the previous
-    /// logical line. `copy_range` suppresses `\n` before these rows.
+    /// Row is a soft-wrap continuation; `copy_range` suppresses `\n` before it.
     pub soft_wrapped: Vec<bool>,
-    /// Raw source text for each row. `Some(line)` on the first display
-    /// row of a source line; `None` on soft-wrap continuations and rows
-    /// without source annotation. `copy_range` uses this for
-    /// fully-selected rows instead of cell-based reconstruction.
+    /// Raw source text; `copy_range` uses it for fully-selected rows.
     pub(crate) source_text: Vec<Option<String>>,
-    /// For each row, the `BlockId` that produced it (`None` for gap rows).
     pub block_of_row: Vec<Option<BlockId>>,
-    /// Row range `[start..end)` for each block, in insertion order.
     pub(crate) row_of_block: HashMap<BlockId, Range<u16>>,
-    /// Generation counter at build time — compared against
-    /// `BlockHistory`'s counter to detect staleness.
     pub(crate) generation: u64,
 }
 
 impl TranscriptSnapshot {
-    /// Extract copy text from a rectangular range of display cells,
-    /// respecting `SpanMeta`. Non-selectable cells are skipped;
-    /// `copy_as` substitutions are applied; rows are joined with `\n`.
     fn copy_range(
         &self,
         start_row: usize,
@@ -116,9 +90,6 @@ impl TranscriptSnapshot {
         out
     }
 
-    /// Convert a byte offset in the `rows.join("\n")` text into a
-    /// `(row, col_chars)` position. `col_chars` is a character index,
-    /// matching `row_cells` indexing.
     pub fn byte_to_row_col(&self, byte: usize) -> (usize, usize) {
         let mut acc = 0usize;
         for (r, row) in self.rows.iter().enumerate() {
@@ -134,19 +105,13 @@ impl TranscriptSnapshot {
         (last_row, last_col)
     }
 
-    /// Copy text from a byte range in the joined row text, respecting
-    /// `SpanMeta`. This is the primary copy primitive — selection ranges
-    /// expressed as byte offsets (from vim visual or cursor anchor) are
-    /// converted to `(row, col)` and routed through `copy_range`.
+    /// Primary copy primitive: converts byte-range selection to `(row, col)` via `copy_range`.
     pub fn copy_byte_range(&self, start: usize, end: usize) -> String {
         let (sr, sc) = self.byte_to_row_col(start);
         let (er, ec) = self.byte_to_row_col(end);
         self.copy_range(sr, sc, er, ec)
     }
 
-    /// Extract the selectable text of the block at `abs_row`. Uses
-    /// `block_of_row` to find the block, then `row_of_block` for its
-    /// full row range, and `copy_range` to get SpanMeta-aware text.
     pub fn block_text_at(&self, abs_row: usize) -> Option<String> {
         let block_id = (*self.block_of_row.get(abs_row)?)?;
         let range = self.row_of_block.get(&block_id)?;
@@ -164,9 +129,6 @@ impl TranscriptSnapshot {
         }
     }
 
-    /// Snap a `(row, col)` position to the nearest selectable cell,
-    /// searching forward then backward on the same row. Returns the
-    /// adjusted `(row, col)` or `None` if the row has no selectable cells.
     pub fn snap_to_selectable(&self, row: usize, col: usize) -> Option<(usize, usize)> {
         let cells = self.row_cells.get(row)?;
         if cells.is_empty() {
@@ -175,13 +137,11 @@ impl TranscriptSnapshot {
         if cells.get(col).is_some_and(|c| c.meta.selectable) {
             return Some((row, col));
         }
-        // Search forward
         for (c, cell) in cells.iter().enumerate().skip(col + 1) {
             if cell.meta.selectable {
                 return Some((row, c));
             }
         }
-        // Search backward
         for c in (0..col.min(cells.len())).rev() {
             if cells[c].meta.selectable {
                 return Some((row, c));
@@ -191,12 +151,6 @@ impl TranscriptSnapshot {
     }
 }
 
-/// Build a `TranscriptSnapshot` from `history` at the given width,
-/// using `cache` (shared with [`crate::content::transcript_buf::TranscriptProjection`])
-/// to cache per-block layouts. The snapshot reads back text + cell
-/// metadata + decorations from those buffers. Theme is required
-/// because [`crate::content::builder::LineBuilder`] resolves
-/// theme-role colours at write time.
 pub(crate) fn build_snapshot(
     cache: &mut BlockBufferCache,
     history: &mut BlockHistory,
@@ -266,11 +220,6 @@ pub(crate) fn build_snapshot(
 }
 
 fn build_row_cells(text: &str, highlights: &[smelt_core::buffer::Span]) -> Vec<SnapshotCell> {
-    // Default meta = selectable, no copy_as. Highlights override per
-    // covered character range. Multi-cell `copy_as` substitutes the
-    // first cell's payload and emits empty payloads for the rest, so
-    // the substitution lands once per span (preserves the previous
-    // snapshot semantics).
     let chars: Vec<char> = text.chars().collect();
     let mut cells: Vec<SnapshotCell> = chars
         .iter()

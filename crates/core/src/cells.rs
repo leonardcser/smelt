@@ -1,30 +1,9 @@
-//! `Cells` — typed reactive name → value registry with deferred
-//! subscriber notification.
+//! Typed reactive name → value registry with deferred subscriber notification.
 //!
-//! Each cell is one `Rc<dyn Any>` slot keyed by name plus a list of
-//! direct subscribers; the registry also carries a flat list of
-//! `glob_subs` whose `glob::Pattern` is matched against every cell
-//! name on `set_dyn`. Writes (`set_dyn`) snapshot the new value and
-//! the union of (direct + matching glob) subscribers into a pending
-//! fire queue; the loop drains the queue at a safe point (after the
-//! current `&mut Cells` / `&mut TuiApp` borrow releases) so subscriber
-//! bodies can re-enter `Cells` / other subsystems freely. Same
-//! "queue, release the borrow, then fire" pattern Timers and Lua
-//! keymap dispatch already use.
-//!
-//! `Rc<dyn Any>` is intentionally `!Send`-friendly: `Cells` lives on
-//! the `!Send` `TuiApp` and Lua values (carried as `mlua::RegistryKey`
-//! inside `LuaCellValue`) are non-Send too. Snapshots use `Rc::clone`
-//! so cell values never need a deep-clone impl — the subscriber sees
-//! the value as it stood at the moment of the `set`, even if later
-//! writes overwrite the slot before the drain.
-//!
-//! Lua-defined cells (`smelt.cell.new`) store their value as a
-//! `LuaCellValue` wrapping an `mlua::RegistryKey`. Built-in Rust-typed
-//! cells (`vim_mode`, `agent_mode`, …) store the typed Rust value
-//! directly and rely on a per-`TypeId` `LuaProjector` registered on
-//! the registry to convert `&dyn Any` to `mlua::Value` at fire time
-//! (drain pump) or at read time (`smelt.cell.get`).
+//! Each cell is an `Rc<dyn Any>` slot. Writes queue direct + glob subscribers for firing after
+//! the `&mut Cells` borrow releases, so subscriber bodies can re-enter `Cells` freely. Lua cells
+//! store an `mlua::RegistryKey`; Rust-typed cells use a per-`TypeId` `LuaProjector` to convert to
+//! `mlua::Value` at drain time.
 
 use std::any::{Any, TypeId};
 use std::collections::HashMap;
@@ -34,37 +13,20 @@ use protocol::{TokenUsage, TurnMeta};
 
 use crate::lua::LuaHandle;
 
-/// Cell value wrapper for Lua-originated cells. Stores the value as a
-/// stable `mlua::RegistryKey` so it survives Lua GC; Lua-side
-/// `smelt.cell.get(name)` resolves the key back to a Lua value, and
-/// the drain pump does the same when firing Lua subscribers.
-/// Rust-typed built-ins carry their typed Rust value directly and
-/// rely on the per-`TypeId` projector to project them into Lua at
-/// fire time.
+/// Value for Lua-originated cells. Stored as a stable `mlua::RegistryKey` so it survives GC.
 pub(crate) struct LuaCellValue {
     pub(crate) key: mlua::RegistryKey,
 }
 
-/// Per-`TypeId` converter from a stored cell value (`&dyn Any`) to a
-/// Lua value. Registered with `Cells::register_lua_projector`; called
-/// by the drain pump and by `Cells::get_lua` / `Cells::project_to_lua`.
-/// Returns `mlua::Value::Nil` when conversion isn't possible (Lua
-/// allocation failure, type mismatch).
+/// Converter from a stored cell value (`&dyn Any`) to a Lua value, keyed by `TypeId`.
 pub(crate) type LuaProjector = Box<dyn Fn(&dyn Any, &mlua::Lua) -> mlua::Value>;
 
-/// Stable id returned by `subscribe_kind` and consumed by
-/// `unsubscribe`.
+/// Stable id returned by `subscribe_kind` and consumed by `unsubscribe`.
 pub(crate) type SubscriptionId = u64;
 
-/// What kind of callback to fire when a cell changes. Today only the
-/// `Lua` variant ships; a Rust variant lands when the first Rust-side
-/// built-in subscriber surfaces (e.g. statusline spec bindings).
 #[derive(Clone)]
 pub enum SubscriberKind {
-    /// Handle to an `mlua::Function` stashed in the Lua registry. The
-    /// drain pump resolves it against the live Lua state at fire time
-    /// and projects the cell value through the per-`TypeId`
-    /// `LuaProjector` registered on the registry.
+    /// Lua function stashed in the registry; projected at fire time via the per-`TypeId` projector.
     Lua(Rc<LuaHandle>),
 }
 
@@ -84,25 +46,15 @@ struct Slot {
     subscribers: Vec<Subscriber>,
 }
 
-/// One queued callback inside a `PendingFire`. `is_glob` lets the
-/// drain pump pick the right call shape: direct subscribers receive
-/// `(new, old)`, glob subscribers receive `(name, new, old)` —
-/// matching nvim's `pattern`-augmented autocmd ergonomics. The trailing
-/// `old` argument lets diff-on-change subscribers (animation, mode
-/// flips, "did the model actually change") read the prior value
-/// directly instead of mirroring it in plugin state.
+/// One queued callback inside a `PendingFire`. `is_glob` selects the call shape:
+/// direct → `(new, old)`, glob → `(name, new, old)`.
 pub struct PendingCallback {
     pub kind: SubscriberKind,
     pub is_glob: bool,
 }
 
-/// One queued notification: the value snapshot at the moment of `set`,
-/// the previous value the slot held just before the write, and the
-/// subscriber callbacks captured at that moment. The caller fires each
-/// callback in registration order after the `&mut Cells` borrow
-/// releases. `prev` is the value the slot carried prior to this `set`
-/// (the initial value for the first publish), so subscribers see
-/// `(new, old)` without having to remember the prior value themselves.
+/// One queued notification: value snapshot, previous value, and subscriber callbacks.
+/// Fired in registration order after the `&mut Cells` borrow releases.
 pub struct PendingFire {
     pub name: String,
     pub value: Rc<dyn Any>,
@@ -110,7 +62,6 @@ pub struct PendingFire {
     pub callbacks: Vec<PendingCallback>,
 }
 
-/// Typed name → value registry plus a pending-fire queue.
 pub struct Cells {
     slots: HashMap<String, Slot>,
     glob_subs: Vec<GlobSubscriber>,
@@ -134,10 +85,6 @@ impl Cells {
             next_id: 0,
             lua_projectors: HashMap::new(),
         };
-        // Lua-defined cells: resolve the stable RegistryKey and hand
-        // back the live Lua value. Without this, `smelt.cell.get`
-        // and Lua subscribers would see Nil for cells created via
-        // `smelt.cell.new`.
         s.register_lua_projector::<LuaCellValue, _>(|v, lua| {
             lua.registry_value::<mlua::Value>(&v.key)
                 .unwrap_or(mlua::Value::Nil)
@@ -145,9 +92,6 @@ impl Cells {
         s
     }
 
-    /// Register a converter from a stored cell value of type `T` to
-    /// `mlua::Value`. The drain pump and `get_lua` use it whenever a
-    /// cell's slot value is a `T` (matched by `TypeId`).
     fn register_lua_projector<T, F>(&mut self, project: F)
     where
         T: Any + 'static,
@@ -160,11 +104,7 @@ impl Cells {
         self.lua_projectors.insert(TypeId::of::<T>(), wrapper);
     }
 
-    /// Project the cell value at `name` to a Lua value via the
-    /// registered projector for its concrete type. Returns `Nil`
-    /// when the cell isn't declared, when no projector is registered
-    /// for the value's `TypeId`, or when the projector itself yields
-    /// `Nil` (e.g. dropped registry key).
+    /// Project the cell at `name` to a Lua value. Returns `Nil` when undeclared or no projector.
     pub(crate) fn get_lua(&self, name: &str, lua: &mlua::Lua) -> mlua::Value {
         let Some(slot) = self.slots.get(name) else {
             return mlua::Value::Nil;
@@ -172,10 +112,6 @@ impl Cells {
         self.project_to_lua(&*slot.value, lua)
     }
 
-    /// Project an arbitrary `&dyn Any` through the registered
-    /// projector matching its concrete type. The drain pump calls
-    /// this against each pending fire's value snapshot before
-    /// invoking Lua subscribers.
     pub fn project_to_lua(&self, value: &dyn Any, lua: &mlua::Lua) -> mlua::Value {
         let tid = (*value).type_id();
         match self.lua_projectors.get(&tid) {
@@ -184,9 +120,7 @@ impl Cells {
         }
     }
 
-    /// Declare a cell with its initial value. Idempotent — calling
-    /// twice with the same name resets the value and drops every
-    /// subscriber.
+    /// Declare a cell. Idempotent — re-declaration resets the value and drops all subscribers.
     pub(crate) fn declare<T: Any + 'static>(&mut self, name: impl Into<String>, initial: T) {
         self.slots.insert(
             name.into(),
@@ -197,9 +131,7 @@ impl Cells {
         );
     }
 
-    /// Overwrite the cell's value and queue every direct + matching
-    /// glob subscriber for firing at the next drain. Returns `true`
-    /// on success, `false` when `name` is undeclared.
+    /// Overwrite a cell and queue subscribers. Returns `false` when `name` is undeclared.
     pub fn set_dyn(&mut self, name: &str, value: Rc<dyn Any>) -> bool {
         let Some(slot) = self.slots.get_mut(name) else {
             return false;
@@ -234,9 +166,7 @@ impl Cells {
         true
     }
 
-    /// Register a subscriber callback against `name`. Returns the
-    /// subscription id `unsubscribe` accepts, or `None` when `name`
-    /// isn't declared.
+    /// Subscribe to `name`. Returns `None` when the cell is undeclared.
     pub(crate) fn subscribe_kind(
         &mut self,
         name: &str,
@@ -249,9 +179,7 @@ impl Cells {
         Some(id)
     }
 
-    /// Remove the subscriber with `id` from `name`. Returns `true`
-    /// if a subscriber was found and removed; `false` otherwise (cell
-    /// undeclared or id unknown).
+    /// Remove a subscriber. Returns `false` when the cell is undeclared or `id` is unknown.
     pub(crate) fn unsubscribe(&mut self, name: &str, id: SubscriptionId) -> bool {
         let Some(slot) = self.slots.get_mut(name) else {
             return false;
@@ -263,10 +191,6 @@ impl Cells {
         true
     }
 
-    /// Register a glob subscriber that fires for every cell whose
-    /// name matches `pattern`. Subscribers are walked in registration
-    /// order at every `set_dyn`. Returns the id `unsubscribe_glob`
-    /// accepts.
     pub(crate) fn glob_subscribe(
         &mut self,
         pattern: glob::Pattern,
@@ -278,8 +202,6 @@ impl Cells {
         id
     }
 
-    /// Remove the glob subscriber with `id`. Returns `true` if a
-    /// subscriber was found and removed; `false` otherwise.
     pub(crate) fn unsubscribe_glob(&mut self, id: SubscriptionId) -> bool {
         let Some(idx) = self.glob_subs.iter().position(|g| g.id == id) else {
             return false;
@@ -288,27 +210,15 @@ impl Cells {
         true
     }
 
-    /// Pull every queued fire out of the registry. The caller invokes
-    /// each `PendingFire`'s callbacks after the `&mut Cells` borrow
-    /// releases. Empty when no `set_dyn` has fired since the last
-    /// drain.
     pub fn drain_pending(&mut self) -> Vec<PendingFire> {
         std::mem::take(&mut self.pending)
     }
 
-    /// Cheap probe used by the main-loop drain pump to skip the
-    /// drain when nothing's pending.
     pub fn has_pending(&self) -> bool {
         !self.pending.is_empty()
     }
 
-    /// Publish `value` to the cell at `name` only when it differs from
-    /// the current slot. Returns `true` when a write fired (and queued
-    /// subscribers); `false` when the cell is undeclared, the stored
-    /// value's type doesn't match `T`, or the new value equals the old.
-    /// Lets the main-loop tick fan out diff-driven cells (`vim_mode`,
-    /// `confirms_pending`, …) without firing subscribers on no-op
-    /// re-publishes.
+    /// Publish `value` only when it differs from the current slot. Skips subscribers on no-op writes.
     pub fn publish_if_changed<T>(&mut self, name: &str, value: T) -> bool
     where
         T: PartialEq + Any + 'static,
@@ -325,11 +235,7 @@ impl Cells {
     }
 }
 
-/// Initial values TuiApp passes to `register_builtin_cells` so the
-/// stateful cells start with the same content the underlying source
-/// fields hold (mode, model, vim_mode, …) — ensures plugin authors
-/// reading `smelt.cell("agent_mode"):get()` at startup see the right
-/// value before any flip publishes.
+/// Seed values for stateful built-in cells, so plugins read correct state at startup.
 pub(crate) struct BuiltinSeeds {
     pub(crate) vim_mode: String,
     pub(crate) agent_mode: String,
@@ -340,68 +246,45 @@ pub(crate) struct BuiltinSeeds {
     pub(crate) branch: String,
 }
 
-/// Sentinel placeholder for event-shaped cells whose setter hasn't
-/// fired yet. The `EventStub` projector returns `nil`; the typed
-/// projector (TurnMeta / TurnError / ConfirmResolved / HistoryDelta /
-/// String / u64 …) takes over the moment the first `set_dyn` writes
-/// the typed payload, since `Cells::project_to_lua` keys on the
-/// stored value's `TypeId`, not the slot's declared type.
+/// Placeholder for event-shaped cells before the first typed payload is published. Projects to `nil`.
 #[derive(Debug, Default, Clone, Copy)]
 pub struct EventStub;
 
-/// Payload for the `turn_error` cell. Engine emits `EngineEvent::TurnError`
-/// carrying just a message; the cell projects it as a Lua table so a
-/// subscriber written today still composes if the engine grows
-/// structured error fields later.
+/// Payload for the `turn_error` cell.
 #[derive(Debug, Default, Clone)]
 pub struct TurnError {
     pub message: String,
 }
 
-/// Payload for the `confirm_resolved` cell. `decision` is a stable
-/// short string ("yes" | "no" | "always_session" | "always_workspace" |
-/// "always_pattern_session" | "always_pattern_workspace" |
-/// "always_dir_session" | "always_dir_workspace" | "auto_allow")
-/// matching the resolved `ConfirmChoice` variant + scope.
+/// Payload for the `confirm_resolved` cell. `decision` is a stable string matching the
+/// resolved `ConfirmChoice` variant + scope (e.g. `"yes"`, `"always_session"`).
 #[derive(Debug, Clone)]
 pub struct ConfirmResolved {
     pub handle_id: u64,
     pub decision: String,
 }
 
-/// Payload for the `history` cell. `kind` is a short stable string
-/// ("set" | "cleared" | "forked" | "loaded") describing the mutation,
-/// `count` is the post-mutation `messages.len()` so a subscriber sees
-/// the new size without having to reach into TuiApp state.
+/// Payload for the `history` cell. `kind` is `"set" | "cleared" | "forked" | "loaded"`.
 #[derive(Debug, Clone)]
 pub struct HistoryDelta {
     pub kind: String,
     pub count: usize,
 }
 
-/// Payload for the `turn_end` cell. Fires from `TuiApp::finish_turn` on
-/// every turn termination — natural end (paired with `turn_complete`),
-/// cancel (Esc / Ctrl-C / mode switch), or error. `cancelled = true`
-/// for the cancel/error legs; subscribers needing the message list
-/// query `smelt.session.messages()` from the callback.
+/// Payload for the `turn_end` cell. `cancelled` is `true` for cancel/error legs.
 #[derive(Debug, Clone)]
 pub struct TurnEnd {
     pub cancelled: bool,
 }
 
-/// Payload for the `tool_start` cell. Fires once per tool invocation
-/// at engine `ToolStarted`. Args are the same JSON-shaped map the
-/// engine ships; nested objects round-trip through `json_to_lua`.
+/// Payload for the `tool_start` cell.
 #[derive(Debug, Clone)]
 pub struct ToolStart {
     pub tool: String,
     pub args: std::collections::HashMap<String, serde_json::Value>,
 }
 
-/// Payload for the `tool_end` cell. Fires on engine `ToolFinished`
-/// after the result lands on the active tool entry. `is_error` mirrors
-/// the engine's flag; `elapsed_ms` is `None` when the engine didn't
-/// timestamp the run.
+/// Payload for the `tool_end` cell. `elapsed_ms` is `None` when not timed.
 #[derive(Debug, Clone)]
 pub struct ToolEnd {
     pub tool: String,
@@ -409,16 +292,7 @@ pub struct ToolEnd {
     pub elapsed_ms: Option<u64>,
 }
 
-/// Payload for the `confirm_requested` cell. Carries the full request
-/// snapshot the dialog needs to render — tool / desc / args / outside
-/// dir / approval-pattern globs / pre-built option labels — so the Lua
-/// dialog reads the request data straight from the cell instead of
-/// looking it up by handle. `handle_id` keys the `_resolve` /
-/// `_render_title` / `_back_tab` Rust-side primitives that still need
-/// to find the underlying `Confirms` entry. Option labels and the
-/// `~/`-rewritten cwd label are derived in `confirm.lua` directly
-/// from `outside_dir` / `approval_patterns` + `smelt.os.{cwd,home}`,
-/// so neither lives in this snapshot.
+/// Payload for the `confirm_requested` cell. Full snapshot the Lua dialog reads.
 #[derive(Debug, Clone)]
 pub struct ConfirmRequested {
     pub handle_id: u64,
@@ -430,15 +304,10 @@ pub struct ConfirmRequested {
     pub approval_patterns: Vec<String>,
 }
 
-/// Register projectors for primitive types we publish, declare every
-/// built-in cell with its initial value (or an `EventStub` placeholder
-/// for event-shaped cells whose payload type lands in a.4c.2/.3), and
-/// return the populated `Cells` ready for subscriber registration.
+/// Register projectors and declare all built-in cells with their initial values.
 pub(crate) fn build_with_builtins(seeds: BuiltinSeeds) -> Cells {
     let mut cells = Cells::new();
 
-    // Primitive projectors covering every type a.4c.1 publishes plus
-    // headroom for a.4c.2's clock + token counters.
     cells.register_lua_projector::<String, _>(|s, lua| match lua.create_string(s.as_str()) {
         Ok(s) => mlua::Value::String(s),
         Err(_) => mlua::Value::Nil,
@@ -447,14 +316,8 @@ pub(crate) fn build_with_builtins(seeds: BuiltinSeeds) -> Cells {
     cells.register_lua_projector::<u32, _>(|n, _| mlua::Value::Integer(*n as i64));
     cells.register_lua_projector::<u64, _>(|n, _| mlua::Value::Integer(*n as i64));
     cells.register_lua_projector::<u8, _>(|n, _| mlua::Value::Integer(*n as i64));
-    // `EventStub` projector: explicit `nil`. Means a Lua subscriber
-    // attached to an event-shaped cell sees `nil` until the cell's
-    // setter migrates to publish a typed payload.
     cells.register_lua_projector::<EventStub, _>(|_, _| mlua::Value::Nil);
-    // `TokenUsage` projector: project the typed payload into a Lua
-    // table mirroring the protocol struct. `None` fields are absent
-    // (no key) so plugins can `usage.prompt_tokens or 0` without
-    // tripping nil-arithmetic.
+    // `None` fields are absent so plugins can write `usage.prompt_tokens or 0`.
     cells.register_lua_projector::<TokenUsage, _>(|u, lua| {
         let Ok(t) = lua.create_table() else {
             return mlua::Value::Nil;
@@ -476,8 +339,6 @@ pub(crate) fn build_with_builtins(seeds: BuiltinSeeds) -> Cells {
         }
         mlua::Value::Table(t)
     });
-    // `TurnMeta` projector: surface the per-turn metadata as a flat
-    // Lua table. `tool_elapsed` flattens to `{ [call_id] = ms }`.
     cells.register_lua_projector::<TurnMeta, _>(|m, lua| {
         let Ok(t) = lua.create_table() else {
             return mlua::Value::Nil;
@@ -495,7 +356,6 @@ pub(crate) fn build_with_builtins(seeds: BuiltinSeeds) -> Cells {
         }
         mlua::Value::Table(t)
     });
-    // `TurnError`: `{ message = "…" }`.
     cells.register_lua_projector::<TurnError, _>(|e, lua| {
         let Ok(t) = lua.create_table() else {
             return mlua::Value::Nil;
@@ -503,7 +363,6 @@ pub(crate) fn build_with_builtins(seeds: BuiltinSeeds) -> Cells {
         let _ = t.set("message", e.message.as_str());
         mlua::Value::Table(t)
     });
-    // `ConfirmResolved`: `{ handle_id = u64, decision = "yes" | "no" | … }`.
     cells.register_lua_projector::<ConfirmResolved, _>(|r, lua| {
         let Ok(t) = lua.create_table() else {
             return mlua::Value::Nil;
@@ -512,7 +371,6 @@ pub(crate) fn build_with_builtins(seeds: BuiltinSeeds) -> Cells {
         let _ = t.set("decision", r.decision.as_str());
         mlua::Value::Table(t)
     });
-    // `HistoryDelta`: `{ kind = "set" | "cleared" | "forked" | "loaded", count = n }`.
     cells.register_lua_projector::<HistoryDelta, _>(|d, lua| {
         let Ok(t) = lua.create_table() else {
             return mlua::Value::Nil;
@@ -521,7 +379,6 @@ pub(crate) fn build_with_builtins(seeds: BuiltinSeeds) -> Cells {
         let _ = t.set("count", d.count as i64);
         mlua::Value::Table(t)
     });
-    // `TurnEnd`: `{ cancelled = bool }`.
     cells.register_lua_projector::<TurnEnd, _>(|e, lua| {
         let Ok(t) = lua.create_table() else {
             return mlua::Value::Nil;
@@ -529,7 +386,6 @@ pub(crate) fn build_with_builtins(seeds: BuiltinSeeds) -> Cells {
         let _ = t.set("cancelled", e.cancelled);
         mlua::Value::Table(t)
     });
-    // `ToolStart`: `{ tool = "...", args = {...} }`.
     cells.register_lua_projector::<ToolStart, _>(|s, lua| {
         let Ok(t) = lua.create_table() else {
             return mlua::Value::Nil;
@@ -545,7 +401,6 @@ pub(crate) fn build_with_builtins(seeds: BuiltinSeeds) -> Cells {
         }
         mlua::Value::Table(t)
     });
-    // `ToolEnd`: `{ tool = "...", is_error = bool, elapsed_ms = n? }`.
     cells.register_lua_projector::<ToolEnd, _>(|s, lua| {
         let Ok(t) = lua.create_table() else {
             return mlua::Value::Nil;
@@ -557,10 +412,6 @@ pub(crate) fn build_with_builtins(seeds: BuiltinSeeds) -> Cells {
         }
         mlua::Value::Table(t)
     });
-    // `ConfirmRequested`: full request snapshot for the dialog.
-    // `args` projects through `json_to_lua` so nested objects / arrays
-    // round-trip into Lua tables; `outside_dir` is `nil` when absent
-    // (so plugins write `if req.outside_dir then ... end`).
     cells.register_lua_projector::<ConfirmRequested, _>(|r, lua| {
         let Ok(t) = lua.create_table() else {
             return mlua::Value::Nil;
@@ -594,9 +445,6 @@ pub(crate) fn build_with_builtins(seeds: BuiltinSeeds) -> Cells {
         mlua::Value::Table(t)
     });
 
-    // Stateful cells (typed payloads, primitive projectors). Every
-    // setter chokepoint that publishes calls `cells.set_dyn(name,
-    // Rc::new(value))` after the underlying field flips.
     cells.declare("vim_mode", seeds.vim_mode);
     cells.declare("agent_mode", seeds.agent_mode);
     cells.declare("model", seeds.model);
@@ -607,18 +455,10 @@ pub(crate) fn build_with_builtins(seeds: BuiltinSeeds) -> Cells {
     cells.declare("cwd", seeds.cwd);
     cells.declare("session_title", seeds.session_title);
     cells.declare("branch", seeds.branch);
-    // `now` carries unix epoch seconds; Lua plugins format with
-    // `os.date("%H:%M:%S", smelt.cell("now"):get())`. TuiApp publishes
-    // through `publish_diff_cells` so subscribers fire when the
-    // second changes (loop must already be awake — idle ticks
-    // genuinely have nothing to display).
     cells.declare("now", 0u64);
     cells.declare("spinner_frame", 0u8);
 
-    // Event-shaped cells: declared with an `EventStub` placeholder so
-    // `smelt.cell.subscribe` works today; setters land later (turn
-    // events with EngineClient in a.11; confirm/session lifecycle as
-    // their TuiApp-side handlers migrate).
+    // Event-shaped cells: declared with an `EventStub` placeholder so `smelt.cell.subscribe` works.
     cells.declare("history", EventStub);
     cells.declare("turn_complete", EventStub);
     cells.declare("turn_error", EventStub);
@@ -626,11 +466,6 @@ pub(crate) fn build_with_builtins(seeds: BuiltinSeeds) -> Cells {
     cells.declare("confirm_resolved", EventStub);
     cells.declare("session_started", EventStub);
     cells.declare("session_ended", EventStub);
-    // Migrated from the parallel autocmd registry in P2.a.9. Single
-    // observer mechanism: `smelt.au.on(name, fn)` and `smelt.cell:get`
-    // both reach into this registry. Cells with no payload carry an
-    // `EventStub` placeholder so a subscriber registered before the
-    // first publish reads `nil` rather than a synthetic default.
     cells.declare("block_done", EventStub);
     cells.declare("cmd_pre", String::new());
     cells.declare("cmd_post", String::new());
@@ -1146,8 +981,8 @@ mod tests {
 
     #[test]
     fn builtin_cells_queue_subscribers_on_set() {
-        // P6.f: every state-changing event in the engine pipeline
-        // reaches the right cell setter and queues subscribers.
+        // Every state-changing event in the engine pipeline reaches
+        // the right cell setter and queues subscribers.
         let lua = Lua::new();
         let mut cells = build_with_builtins(BuiltinSeeds {
             vim_mode: "Insert".into(),

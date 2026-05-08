@@ -15,8 +15,6 @@ use reqwest::Client;
 use serde::Serialize;
 use std::time::{Duration, Instant};
 
-// ── Tool definitions ────────────────────────────────────────────────────────
-
 #[derive(Debug, Clone, Serialize)]
 pub struct ToolDefinition {
     #[serde(rename = "type")]
@@ -49,9 +47,7 @@ impl ToolDefinition {
     }
 }
 
-// ── Response types ──────────────────────────────────────────────────────────
-
-/// Internal parsed fields from an API response. Shared across backends.
+/// Internal parsed fields from an API response.
 pub(crate) struct ParsedResponse {
     pub(crate) content: Option<String>,
     pub(crate) reasoning: Option<String>,
@@ -71,7 +67,6 @@ impl ParsedResponse {
     }
 }
 
-/// Convert an accumulated String to Option, returning None if empty.
 pub(crate) fn non_empty(s: String) -> Option<String> {
     if s.is_empty() {
         None
@@ -80,8 +75,6 @@ pub(crate) fn non_empty(s: String) -> Option<String> {
     }
 }
 
-/// Collect indexed tool calls from a HashMap<usize, (id, name, args)>,
-/// sorted by index. Used by Anthropic and Chat Completions backends.
 pub(crate) fn collect_indexed_tool_calls(
     map: std::collections::HashMap<usize, (String, String, String)>,
 ) -> Vec<ToolCall> {
@@ -117,8 +110,6 @@ pub(crate) struct LLMResponse {
     pub(crate) usage: TokenUsage,
     pub(crate) tokens_per_sec: Option<f64>,
 }
-
-// ── Errors ──────────────────────────────────────────────────────────────────
 
 #[derive(Debug, thiserror::Error)]
 pub(crate) enum ProviderError {
@@ -256,7 +247,6 @@ fn backoff_delay(attempt: usize) -> Duration {
     Duration::from_millis(500 * 2u64.pow(attempt as u32))
 }
 
-/// Parse the `retry-after` header from an HTTP response (seconds).
 fn parse_retry_after(resp: &reqwest::Response) -> Option<Duration> {
     let val = resp.headers().get("retry-after")?.to_str().ok()?;
     val.parse::<f64>()
@@ -264,8 +254,6 @@ fn parse_retry_after(resp: &reqwest::Response) -> Option<Duration> {
         .filter(|&s| s > 0.0)
         .map(Duration::from_secs_f64)
 }
-
-// ── Provider kind ───────────────────────────────────────────────────────────
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ProviderKind {
@@ -330,20 +318,13 @@ impl ProviderKind {
     }
 }
 
-// ── Chat options ────────────────────────────────────────────────────────────
-
-/// Request a structured JSON response that conforms to `schema`. Each
-/// provider adapter translates this to its native field (`text.format` for the
-/// OpenAI Responses API, `response_format.json_schema` for chat/completions).
-/// Providers that don't support structured outputs ignore it; the model still
-/// usually emits valid JSON thanks to the prompt, but without enforcement.
+/// Structured JSON output schema. Each provider adapter maps this to its native field.
 #[derive(Clone)]
 pub(crate) struct ResponseFormat {
     pub(crate) name: String,
     pub(crate) schema: serde_json::Value,
 }
 
-/// Execution-time options for a `Provider::chat()` call.
 pub(crate) struct ChatOptions<'a> {
     pub(crate) cancel: &'a CancellationToken,
     pub(crate) on_retry: Option<&'a (dyn Fn(Duration, u32) + Send + Sync)>,
@@ -362,8 +343,6 @@ impl<'a> ChatOptions<'a> {
     }
 }
 
-// ── Provider ────────────────────────────────────────────────────────────────
-
 #[derive(Clone)]
 pub struct Provider {
     api_base: String,
@@ -371,14 +350,11 @@ pub struct Provider {
     client: Client,
     kind: ProviderKind,
     model_config: crate::config::ModelConfig,
-    /// Sticky routing token for Codex — set from the first response in a turn,
-    /// echoed back on subsequent requests within the same turn.
+    /// Sticky routing token for Codex: set from the first response, echoed on subsequent requests within the same turn.
     turn_state: std::sync::Arc<std::sync::Mutex<Option<String>>>,
 }
 
-/// Ensure that `arguments` in any `tool_calls[].function` is valid JSON.
-/// Some models produce malformed argument strings (e.g. `"{"`); sending these
-/// back in conversation history causes 400 errors from strict backends.
+/// Ensure `tool_calls[].function.arguments` is valid JSON; some models emit malformed strings.
 pub(crate) fn sanitize_tool_call_arguments(obj: &mut serde_json::Map<String, serde_json::Value>) {
     if let Some(tcs) = obj.get_mut("tool_calls").and_then(|v| v.as_array_mut()) {
         for tc in tcs {
@@ -393,7 +369,6 @@ pub(crate) fn sanitize_tool_call_arguments(obj: &mut serde_json::Map<String, ser
     }
 }
 
-/// Rewrite an Agent-role message as a user message for API serialization.
 impl Provider {
     pub fn new(api_base: String, api_key: String, provider_type: &str, client: Client) -> Self {
         let api_base = api_base.trim_end_matches('/').to_string();
@@ -408,7 +383,6 @@ impl Provider {
         }
     }
 
-    /// Reset the sticky routing state. Call this at the start of each new turn.
     pub(crate) fn reset_turn_state(&self) {
         *self.turn_state.lock().unwrap() = None;
     }
@@ -440,8 +414,6 @@ impl Provider {
         }
     }
 
-    // ── Main chat method ────────────────────────────────────────────────
-
     pub(crate) async fn chat(
         &self,
         messages: &[Message],
@@ -454,7 +426,6 @@ impl Provider {
         let is_codex = self.kind == ProviderKind::Codex;
         let is_copilot = self.kind == ProviderKind::Copilot;
 
-        // Codex: resolve OAuth access token (refreshing if needed).
         let mut codex_auth = if is_codex {
             Some(
                 codex::ensure_access_token_full(&self.client)
@@ -466,7 +437,6 @@ impl Provider {
         };
         let mut codex_401_retried = false;
 
-        // Copilot: resolve OAuth access token + dynamic API base (refreshing if needed).
         let mut copilot_auth = if is_copilot {
             Some(
                 copilot::ensure_access_token_full(&self.client)
@@ -489,7 +459,6 @@ impl Provider {
                 let mut body =
                     openai::build_body(messages, tools, model, effort, &self.model_config);
                 body["store"] = serde_json::json!(false);
-                // Codex API doesn't support temperature/top_p; remove them.
                 if let Some(obj) = body.as_object_mut() {
                     obj.remove("temperature");
                     obj.remove("top_p");
@@ -531,9 +500,6 @@ impl Provider {
             }
         };
 
-        // Copilot dynamic headers: X-Initiator indicates whether the last
-        // message is user- or agent-initiated; Copilot-Vision-Request is set
-        // when any user/tool-result message contains an image.
         let copilot_initiator: &'static str = if is_copilot {
             match messages.last().map(|m| m.role) {
                 Some(protocol::Role::User) | None => "user",
@@ -551,15 +517,12 @@ impl Provider {
         let use_stream = opts.on_delta.is_some() || is_codex;
         if use_stream {
             body["stream"] = serde_json::json!(true);
-            // Request usage data in the final streaming chunk.
-            // Anthropic and OpenAI Responses API don't use stream_options.
             if self.kind == ProviderKind::Local {
                 body["stream_options"] = serde_json::json!({"include_usage": true});
             }
         }
 
         if log::Level::Debug.enabled() {
-            // `body` is derived from redacted history; safe to log as-is.
             log::entry(
                 log::Level::Debug,
                 "request",
@@ -655,7 +618,6 @@ impl Provider {
                     }),
                 );
 
-                // Codex 401 recovery: refresh tokens and retry once.
                 if is_codex && matches!(err, ProviderError::Auth(_)) && !codex_401_retried {
                     codex_401_retried = true;
                     if let Some(ref stale) = codex_auth {
@@ -673,8 +635,7 @@ impl Provider {
                     }
                 }
 
-                // Copilot 401 recovery: the short-lived token may have expired
-                // mid-flight. Refresh once using the stored GitHub token.
+                // Copilot: the short-lived access token may expire mid-flight; refresh once.
                 if is_copilot && matches!(err, ProviderError::Auth(_)) && !copilot_401_retried {
                     copilot_401_retried = true;
                     if let Some(ref stale) = copilot_auth {
@@ -686,8 +647,6 @@ impl Provider {
                                 "copilot_401_recovery",
                                 &serde_json::json!({ "expires_at": refreshed.expires_at }),
                             );
-                            // A refreshed token may point at a different proxy
-                            // host; re-derive the URL for the retry.
                             url = format!(
                                 "{}/chat/completions",
                                 refreshed.api_base.trim_end_matches('/')
@@ -742,7 +701,6 @@ impl Provider {
                     .map_err(|e| ProviderError::InvalidResponse(e.to_string()))?;
 
                 if log::Level::Debug.enabled() {
-                    // Response is model-generated; policy: don't redact model output.
                     log::entry(
                         log::Level::Debug,
                         "raw_response",
@@ -791,13 +749,6 @@ impl Provider {
         Err(ProviderError::MaxRetries)
     }
 
-    // ── Utility methods ─────────────────────────────────────────────────
-
-    /// Fetch the context window size (in tokens) from the provider's API.
-    ///
-    /// - **Anthropic**: `GET /v1/models/{model}` → `max_input_tokens`
-    /// - **Local** (llama.cpp): `GET /models` → parse `--ctx-size` from args
-    /// - **OpenAI / Codex**: the standard API does not expose this, returns `None`.
     pub async fn fetch_context_window(&self, model: &str) -> Option<u32> {
         let result = match self.kind {
             ProviderKind::Anthropic => self.fetch_context_window_anthropic(model).await,
@@ -835,8 +786,6 @@ impl Provider {
         data["max_input_tokens"].as_u64().map(|v| v as u32)
     }
 
-    /// Fetch context window from a local OpenAI-compatible server.
-    /// Supports vLLM/SGLang (`max_model_len`) and llama.cpp (`--ctx-size`).
     async fn fetch_context_window_local(&self, model: &str) -> Option<u32> {
         let url = format!("{}/models", self.api_base);
         let mut req = self.client.get(&url);
@@ -851,12 +800,10 @@ impl Provider {
         let models = data["data"].as_array()?;
         let entry = models.iter().find(|m| m["id"].as_str() == Some(model))?;
 
-        // vLLM / SGLang: top-level `max_model_len` field.
         if let Some(v) = entry["max_model_len"].as_u64() {
             return Some(v as u32);
         }
 
-        // llama.cpp: `--ctx-size` in status args.
         if let Some(args) = entry["status"]["args"].as_array() {
             for i in 0..args.len().saturating_sub(1) {
                 if args[i].as_str() == Some("--ctx-size") {
@@ -868,7 +815,6 @@ impl Provider {
         None
     }
 
-    /// Simple helper: run a system+user message pair through `chat()` and return the text.
     async fn complete_simple(
         &self,
         messages: &[Message],
@@ -959,8 +905,6 @@ impl Provider {
     }
 }
 
-// ── Free functions ──────────────────────────────────────────────────────────
-
 #[derive(serde::Deserialize)]
 struct TitleSlug {
     #[serde(default)]
@@ -994,11 +938,6 @@ fn parse_title_and_slug(raw: &str) -> (String, String) {
     (title, slug)
 }
 
-/// Patch a built request body with provider-native structured-output fields.
-/// - OpenAI Responses API (and Codex): `text.format` with a `json_schema` entry.
-/// - chat/completions-style (Local/vLLM/llama.cpp/OpenAI-compatible):
-///   `response_format` with a `json_schema` entry.
-/// - Anthropic: no patch yet; falls back to prompt-based JSON.
 fn apply_response_format(body: &mut serde_json::Value, kind: ProviderKind, fmt: &ResponseFormat) {
     match kind {
         ProviderKind::OpenAi | ProviderKind::Codex => {
@@ -1022,10 +961,7 @@ fn apply_response_format(body: &mut serde_json::Value, kind: ProviderKind, fmt: 
             });
         }
         ProviderKind::Anthropic => {
-            // Gate on models that support native structured outputs (GA as of
-            // 2025-11). Older models (Haiku 3.5, Sonnet 3.7, etc.) would 400
-            // if the field were sent, so we skip silently and let prompt-based
-            // JSON handle those.
+            // Older models (Haiku 3.5, Sonnet 3.7, etc.) 400 if this field is sent.
             let model = body["model"].as_str().unwrap_or("");
             if !anthropic_supports_structured_output(model) {
                 return;
@@ -1063,7 +999,6 @@ fn extract_json_title_slug(raw: &str) -> Option<(String, String)> {
     ))
 }
 
-/// Returns true if any user or tool-result message contains an image part.
 fn messages_have_images(messages: &[Message]) -> bool {
     messages.iter().any(|m| match m.role {
         protocol::Role::User | protocol::Role::Tool => {

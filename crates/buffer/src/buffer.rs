@@ -1,18 +1,8 @@
 //! Buffer — lines + namespaced extmarks.
 //!
-//! The data layer mirrors `nvim_buf_set_extmark`: a `Buffer` is a
-//! sequence of text lines plus a single store of `Extmark`s grouped
-//! into `Namespace`s. Highlight spans, line decorations, and virtual
-//! text are all extmarks tagged by namespace — one storage shape,
-//! queried per-line at render time.
-//!
-//! The convenience methods `add_highlight` and `set_decoration` create
-//! extmarks in well-known namespaces (`Buffer::NS_HIGHLIGHTS`,
-//! `NS_DECORATIONS`). Code that wants nvim's full extmark ergonomics
-//! (custom namespace, `clear_namespace`, IDs) calls `create_namespace`
-//! plus `set_extmark` directly. Virt-text always goes through the
-//! latter shape (`ExtmarkOpts::virt_text`); production has no
-//! virt-text convenience method.
+//! Mirrors `nvim_buf_set_extmark`: a `Buffer` holds text lines plus
+//! `Extmark`s grouped into namespaces. Highlights, decorations, and
+//! virtual text are all extmarks queried per-line at render time.
 
 use crate::attachment::AttachmentId;
 use crate::undo::UndoHistory;
@@ -21,12 +11,8 @@ use smelt_style::theme::{intern_anonymous_style, HlGroup};
 use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
 
-/// Buffer handle. IDs below `LUA_BUF_ID_BASE` are minted by the Rust
-/// side via `Ui::buf_create`; IDs at or above are minted by plugin
-/// code via `smelt.buf.create`. The split is by contract, not
-/// enforcement — `Ui::buf_create_with_id` still refuses to overwrite,
-/// so a collision surfaces as a loud notify rather than silent data
-/// loss.
+/// Buffer handle. IDs below `LUA_BUF_ID_BASE` are Rust-minted; IDs at
+/// or above are plugin-minted. Collisions surface as a loud notify.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct BufId(pub u64);
 
@@ -42,49 +28,28 @@ impl std::fmt::Display for BufId {
     }
 }
 
-/// Smallest id a plugin-side `smelt.buf.create` will mint. Keeps
-/// Lua buffers in a disjoint range from Rust's sequential allocator.
+/// Smallest id minted by plugin-side `smelt.buf.create`. Keeps Lua
+/// buffers in a disjoint range from Rust's sequential allocator.
 pub const LUA_BUF_ID_BASE: u64 = 1 << 32;
 
-/// Parser attached to a `Buffer` to maintain its lines, extmarks, and
-/// decorations from a `source` string. Host crates implement this
-/// trait for each "content kind" a buffer can display (markdown,
-/// bash, syntax-highlighted file, inline diff, plain wrap, …); the
-/// `core` crate knows nothing about any specific format and calls
-/// back through the lifecycle hooks below when the buffer's source
-/// or render width changes.
-///
-/// `parse` is the only required hook today; it has wholesale-rebuild
-/// semantics. The optional `on_attach` lifecycle hook lets a parser
-/// install namespaces or seed initial state the moment the parser is
-/// installed on a Buffer (mirrors nvim's `nvim_buf_attach`). Future
-/// hooks (`on_change`, `on_render`) will let parsers respond
-/// incrementally to line edits and width changes; for now, `parse`
-/// runs whenever `(source_tick, width)` differs from the last call.
+/// Parser attached to a `Buffer`. Rebuilds lines, extmarks, and
+/// decorations from a source string whenever `(source_tick, width)`
+/// changes. `on_attach` fires once at installation for namespace setup.
 pub trait BufferParser: Send + Sync {
     /// Rebuild the buffer's lines / extmarks / decorations from
-    /// `source` at the given render `width`. Free to call any mutator
-    /// on `buf` (`set_all_lines`, `add_highlight`, `set_decoration`,
-    /// …). The buffer's `source` is read-only from the parser's
-    /// point of view and lives on `Buffer` untouched across calls.
+    /// `source` at the given render `width`.
     fn parse(&self, buf: &mut Buffer, source: &str, width: u16);
 
-    /// Called once when the parser is installed via
-    /// [`Buffer::attach`] / [`Buffer::set_parser`]. Default no-op;
-    /// override to register custom namespaces, seed marks, or run
-    /// any one-time setup that doesn't depend on `source` or width.
+    /// Called once when the parser is installed. Default no-op.
     fn on_attach(&self, _buf: &mut Buffer) {}
 }
 
-/// Process-global namespace id. Minted by [`create_namespace`] (or
-/// equivalently `Buffer::create_namespace`); stable for the process
-/// lifetime — the same name always returns the same id, across
-/// every Buffer. Mirrors `nvim_create_namespace`'s semantics.
+/// Process-global namespace id. Stable for the process lifetime;
+/// the same name always yields the same id across every `Buffer`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct NsId(pub u32);
 
-/// Process-global name → id minter. Idempotent: the same `name`
-/// always returns the same id. Mirrors `nvim_create_namespace`.
+/// Idempotent name → id minter. Same `name` always returns the same id.
 pub fn create_namespace(name: &str) -> NsId {
     use std::sync::{OnceLock, RwLock};
     static REG: OnceLock<RwLock<NamespaceRegistry>> = OnceLock::new();
@@ -106,8 +71,7 @@ struct NamespaceRegistry {
     name_to_id: HashMap<String, NsId>,
 }
 
-/// Identifier returned by `Buffer::set_extmark`. Unique within a
-/// namespace.
+/// Identifier returned by `Buffer::set_extmark`. Unique within its namespace.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct ExtmarkId(pub u32);
 
@@ -137,32 +101,19 @@ pub struct LineDecoration {
 
 pub type SpanStyle = Style;
 
-/// Materialized highlight span for one line. Derived on demand from
-/// extmarks in `NS_HIGHLIGHTS` (or any namespace whose payload is
-/// `ExtmarkPayload::Highlight`). Returned by `Buffer::highlights_at`.
-/// Always single-row at the moment — parsers emit one per row when an
-/// extmark spans multiple rows.
-///
-/// Carries an interned [`HlGroup`] id, not a resolved `Style` — the
-/// theme resolves the id at paint time. Theme switches mutate the
-/// shared theme, not the buffer; existing spans pick up the new
-/// colors automatically.
+/// Materialized highlight span for one line, returned by `Buffer::highlights_at`.
+/// Carries an interned [`HlGroup`] id; the theme resolves it at paint time.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Span {
     pub col_start: u16,
     pub col_end: u16,
     pub hl: HlGroup,
     pub meta: SpanMeta,
-    /// Mirrors `nvim_buf_set_extmark`'s `hl_eol`. When true, the span's
-    /// background extends past `col_end` to the right edge of the
-    /// visible row. Used for diff add/delete bars and similar full-row
-    /// tinting.
+    /// When true, background extends past `col_end` to the right edge of the row.
     pub hl_eol: bool,
 }
 
-/// One-line virtual text overlay. Derived on demand from extmarks in
-/// `NS_VIRT_TEXT` (or any namespace whose payload is
-/// `ExtmarkPayload::VirtText`).
+/// One-line virtual text overlay. Derived from `ExtmarkPayload::VirtText` marks.
 #[derive(Clone, Debug)]
 pub struct VirtualText {
     pub col: usize,
@@ -171,13 +122,8 @@ pub struct VirtualText {
     pub pos: VirtTextPos,
 }
 
-/// One per-row visual-mode selection range, in **content** columns
-/// (relative to the buffer line content, before `SplitConfig::gutters`
-/// is applied). Painted with the theme's `Visual` group.
-///
-/// Empty-line selections use `col_start = 0, col_end = 1` to paint a
-/// single virtual cell — same convention as Vim's `$` virtual-space
-/// behavior on empty lines in `v` / `V`.
+/// Per-row visual-mode selection range in content columns (before gutter offset).
+/// Empty lines use `col_start = 0, col_end = 1` to paint one virtual cell.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct SelectionRange {
     pub line: usize,
@@ -190,39 +136,33 @@ pub struct BufCreateOpts {}
 
 // ─── Extmark model ─────────────────────────────────────────────────
 
-/// How a Highlight extmark blends with its row's existing background
-/// when the mark covers the cursor row or another bg-painting layer.
-/// Matches `nvim_buf_set_extmark`'s `hl_mode` keyset.
+/// How a Highlight extmark blends with its row's existing background.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum HlMode {
-    /// Replace the existing bg outright (default — today's behavior).
+    /// Replace the existing bg outright (default).
     #[default]
     Replace,
-    /// Combine fg/bg attributes from this mark over the existing
-    /// row paint without dropping the existing bg.
+    /// Combine fg/bg attributes over the existing row paint.
     Combine,
-    /// Blend (alpha) — currently treated as Combine; reserved for
-    /// future TUI implementations.
+    /// Blend (alpha) — currently treated as Combine.
     Blend,
 }
 
-/// Where inline virtual text places relative to the mark's column.
-/// Mirrors `nvim_buf_set_extmark`'s `virt_text_pos` keyset.
+/// Placement of inline virtual text relative to the mark's column.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum VirtTextPos {
-    /// Append at end of the line content. Default for plain virt_text.
+    /// Append at end of line content.
     #[default]
     Eol,
-    /// Insert at `start_col` shifting real content right.
+    /// Insert at `start_col`, shifting real content right.
     Inline,
-    /// Overlay starting at `start_col`, replacing real content cells.
+    /// Overlay at `start_col`, replacing real content cells.
     Overlay,
-    /// Right-align: paint at `width - virt_text_width` end of row.
+    /// Right-align at `width - virt_text_width`.
     RightAlign,
 }
 
-/// One extmark — a positional anchor with a payload. Lives in a
-/// namespace; addressable by `(NsId, ExtmarkId)`.
+/// Positional anchor with a payload. Addressable by `(NsId, ExtmarkId)`.
 #[derive(Clone, Debug)]
 pub struct Extmark {
     pub start_row: usize,
@@ -230,31 +170,25 @@ pub struct Extmark {
     pub end_row: usize,
     pub end_col: usize,
     pub payload: ExtmarkPayload,
-    /// Paint priority. Higher priority paints on top; equal priorities
-    /// fall back to namespace-id ascending then insertion order. Default 0.
+    /// Paint priority. Higher paints on top; ties break by ns-id then insertion order.
     pub priority: u32,
-    /// Whether the mark's start anchor sticks to the right of an
-    /// inserted character at its column. Default `true` matches nvim.
+    /// Start anchor sticks right of an insertion at its column. Default `true`.
     pub right_gravity: bool,
-    /// Same for the end anchor. Default `false` matches nvim.
+    /// End anchor sticks right of an insertion at its column. Default `false`.
     pub end_right_gravity: bool,
 }
 
-/// Payload carried by an extmark. Each variant maps onto one of the
-/// public per-line getters (`highlights_at`, `decoration_at`,
-/// `virtual_text_at`).
+/// Payload carried by an extmark.
 #[derive(Clone, Debug)]
 pub enum ExtmarkPayload {
     Highlight {
         hl: HlGroup,
         meta: SpanMeta,
-        /// Extend the highlight to end-of-line, even if `end_col` is
-        /// shorter than the line. Mirrors nvim's `hl_eol`.
+        /// Extend highlight to end-of-line even if `end_col` is shorter.
         hl_eol: bool,
         /// How this highlight blends with the row's existing paint.
         hl_mode: HlMode,
-        /// When set, replace each visible cell in the range with this
-        /// string (single grapheme expected). Mirrors nvim's `conceal`.
+        /// Replace each visible cell in the range with this string (single grapheme).
         conceal: Option<String>,
     },
     Decoration(LineDecoration),
@@ -265,10 +199,7 @@ pub enum ExtmarkPayload {
     },
 }
 
-/// `set_extmark` opts. `end_row`/`end_col` default to the start
-/// position (a point mark); supply both to span a range. The remaining
-/// fields default to nvim's defaults; constructors below set them
-/// from the ergonomic shortcuts.
+/// Options for `set_extmark`. `end_row`/`end_col` default to the start position.
 #[derive(Clone, Debug)]
 pub struct ExtmarkOpts {
     pub end_row: Option<usize>,
@@ -277,16 +208,13 @@ pub struct ExtmarkOpts {
     pub priority: u32,
     pub right_gravity: bool,
     pub end_right_gravity: bool,
-    /// When set, replace the mark with this id instead of allocating a
-    /// new one. Lets a parser update the same mark across re-runs.
+    /// When set, replace this mark id instead of allocating a new one.
     pub id: Option<ExtmarkId>,
 }
 
 impl ExtmarkOpts {
-    /// Anonymous-style convenience: interns the given Style as a
-    /// content-hashed [`HlGroup`] for call sites that carry resolved
-    /// colors. Prefer [`Self::highlight_group`] when the style is
-    /// theme-reactive — anonymous groups bypass theme switches.
+    /// Interns `style` as a content-hashed [`HlGroup`]. Prefer
+    /// [`Self::highlight_group`] for theme-reactive styles.
     pub fn highlight(end_col: usize, style: SpanStyle, meta: SpanMeta) -> Self {
         Self::highlight_group(end_col, intern_anonymous_style(style), meta)
     }
@@ -337,20 +265,19 @@ impl ExtmarkOpts {
         }
     }
 
-    /// Builder: paint priority. Higher prints on top.
+    /// Set paint priority. Higher paints on top.
     pub fn with_priority(mut self, priority: u32) -> Self {
         self.priority = priority;
         self
     }
 
-    /// Builder: re-target an existing extmark id instead of minting one.
+    /// Re-target an existing extmark id instead of minting a new one.
     pub fn with_id(mut self, id: ExtmarkId) -> Self {
         self.id = Some(id);
         self
     }
 
-    /// Builder: extend the highlight to end-of-line. No-op for non-
-    /// Highlight payloads.
+    /// Extend the highlight to end-of-line. No-op for non-Highlight payloads.
     pub fn with_hl_eol(mut self, hl_eol: bool) -> Self {
         if let ExtmarkPayload::Highlight {
             hl_eol: ref mut e, ..
@@ -361,7 +288,7 @@ impl ExtmarkOpts {
         self
     }
 
-    /// Builder: place virt_text. No-op for non-VirtText payloads.
+    /// Set virt_text position. No-op for non-VirtText payloads.
     pub fn with_virt_pos(mut self, pos: VirtTextPos) -> Self {
         if let ExtmarkPayload::VirtText { pos: ref mut p, .. } = &mut self.payload {
             *p = pos;
@@ -407,7 +334,7 @@ impl ExtmarkStore {
     fn replace_extmark(&mut self, ns: NsId, id: ExtmarkId, mark: Extmark) {
         let state = self.ns_mut(ns);
         state.extmarks.insert(id, mark);
-        // Bump next_id past id so subsequent allocations don't collide.
+        // Keep next_id past id to avoid future allocation collisions.
         if id.0 >= state.next_id {
             state.next_id = id.0 + 1;
         }
@@ -435,57 +362,31 @@ fn overlaps_lines(m: &Extmark, line_start: usize, line_end: usize) -> bool {
 #[derive(Clone)]
 pub struct Buffer {
     pub(crate) id: BufId,
-    /// `Arc`-wrapped so `Buffer::clone()` and sync-to-view become
-    /// refcount bumps; mutators use `Arc::make_mut` which only deep-
-    /// copies when the Arc is actually shared.
+    /// Arc-wrapped so clones and sync-to-view are cheap refcount bumps;
+    /// `Arc::make_mut` deep-copies only when the Arc is shared.
     lines: Arc<Vec<String>>,
     extmarks: ExtmarkStore,
-    /// Bumped on lines mutation.
+    /// Bumped on every lines mutation.
     changedtick: u64,
-    /// Well-known namespace ids — interned at construction so the
-    /// convenience methods (`add_highlight`, `set_decoration`, …)
-    /// don't pay a hashmap lookup per call.
+    /// Interned at construction so convenience methods skip a hashmap lookup.
     ns_highlights: NsId,
     ns_decorations: NsId,
     ns_virt_text: NsId,
-    /// When set, `source` drives the visible lines: the parser
-    /// re-runs `parse` into this buffer lazily when
-    /// `ensure_rendered_at` is called with a different
-    /// `(source_tick, width)` than the last call.
     parser: Option<Arc<dyn BufferParser>>,
     source: String,
     source_tick: u64,
     last_render: Option<(u64, u16)>,
-    /// Per-buffer undo/redo stack. `None` capacity disables undo
-    /// (used for readonly buffers).
     pub history: UndoHistory,
-    /// Attachment markers inside the buffer text.
     pub attachment_ids: Vec<AttachmentId>,
-    /// Whether this buffer can be edited. Windows check this before
-    /// running any edit-producing operation.
     pub readonly: bool,
-    /// Per-row visual-mode selection ranges painted by `Window::render`
-    /// using the theme's `Visual` group. Cleared by `set_lines` and
-    /// `set_all_lines` (matches the extmark-clear semantics for
-    /// wholesale content replacement). Consumers that need to override
-    /// the auto-derived selection (e.g. yank-flash, input-space
-    /// translation in the prompt) write here directly via
-    /// [`Self::set_selection`]; otherwise `Window::render` derives
-    /// ranges from the Window's own `selection_anchor` + vim state.
     selection: Vec<SelectionRange>,
 }
 
 impl Buffer {
-    /// Default namespace name for highlight extmarks created via
-    /// `add_highlight` / `add_highlight_with_meta`.
     pub const NS_HIGHLIGHTS: &'static str = "buffer.highlights";
-    /// Default namespace name for line decorations created via
-    /// `set_decoration`.
     pub const NS_DECORATIONS: &'static str = "buffer.decorations";
-    /// Default namespace name for virtual text created via the
-    /// test-only `set_virtual_text` helper. Production virt-text is
-    /// stored under per-feature namespaces (`completer`, `GhostText`,
-    /// …) reached through `set_extmark` + `ExtmarkOpts::virt_text`.
+    /// Convenience namespace for `set_virtual_text`. Production virt-text
+    /// uses per-feature namespaces via `set_extmark` + `ExtmarkOpts::virt_text`.
     pub const NS_VIRT_TEXT: &'static str = "buffer.virt_text";
 
     pub fn new(id: BufId, _opts: BufCreateOpts) -> Self {
@@ -512,18 +413,13 @@ impl Buffer {
         }
     }
 
-    /// Override the per-row visual-mode selection painted by
-    /// `Window::render`. Empty `ranges` clears the override; the
-    /// painter then falls back to auto-deriving from the Window's own
-    /// `selection_anchor` + vim state. Used by consumers whose paint
-    /// state can't be inferred from a single Window anchor (transcript
-    /// yank-flash, prompt input-space translation).
+    /// Override the per-row visual-mode selection. Empty `ranges` clears
+    /// the override; `Window::render` then derives selection from its own state.
     pub fn set_selection(&mut self, ranges: Vec<SelectionRange>) {
         self.selection = ranges;
     }
 
-    /// Read the override selection set by [`Self::set_selection`].
-    /// Empty when no override is active.
+    /// Returns the selection override set by [`Self::set_selection`]. Empty when inactive.
     pub fn selection(&self) -> &[SelectionRange] {
         &self.selection
     }
@@ -532,27 +428,20 @@ impl Buffer {
         self.selection.clear();
     }
 
-    /// Attach a parser. Fires `BufferParser::on_attach` once,
-    /// invalidates the render cache so the next `ensure_rendered_at`
-    /// call re-runs `parse` from the current `source`. Replaces any
-    /// prior parser.
+    /// Attach a parser, firing `on_attach` once and invalidating the render cache.
     pub fn set_parser(&mut self, parser: Arc<dyn BufferParser>) {
         parser.on_attach(self);
         self.parser = Some(parser);
         self.last_render = None;
     }
 
-    /// Builder form of `set_parser`. Mirrors `nvim_buf_attach` — the
-    /// returned Buffer has the parser installed and `on_attach`
-    /// already fired.
+    /// Builder form of `set_parser`.
     pub fn attach(mut self, parser: Arc<dyn BufferParser>) -> Self {
         self.set_parser(parser);
         self
     }
 
-    /// Update the source driving the parser. The next
-    /// `ensure_rendered_at` will re-run `parse`; without a parser
-    /// attached, the source is held but never consulted.
+    /// Update the source driving the parser. No-op if source is unchanged.
     pub fn set_source(&mut self, source: String) {
         if source == self.source {
             return;
@@ -561,8 +450,7 @@ impl Buffer {
         self.source_tick = self.source_tick.wrapping_add(1);
     }
 
-    /// Re-run the parser if `(source, width)` differs from the last
-    /// call. No-op without a parser or when nothing changed.
+    /// Re-run the parser if `(source_tick, width)` differs from the last call.
     /// Returns `true` when a parse actually happened.
     pub fn ensure_rendered_at(&mut self, width: u16) -> bool {
         let Some(parser) = self.parser.clone() else {
@@ -576,10 +464,7 @@ impl Buffer {
             return false;
         }
         let source = std::mem::take(&mut self.source);
-        // Reset to a single empty seed line so the parser writes from
-        // row 0. LineBuilder's append-mode replaces a trailing empty
-        // seed on the first commit, then appends — so a single seed
-        // empty line is all the parser needs to start fresh.
+        // Seed with one empty line so parsers can start from row 0.
         let n = self.lines.len();
         if n > 1 || (n == 1 && !self.lines[0].is_empty()) {
             self.set_lines(0, n, vec![String::new()]);
@@ -619,10 +504,8 @@ impl Buffer {
         if lines.is_empty() {
             lines.push(String::new());
         }
-        // Clear extmarks whose anchor falls in the replaced range.
-        // Mirrors nvim's behavior: marks track edits, but a wholesale
-        // line replacement is treated as "everything in this slice
-        // is gone."
+        // Clear extmarks in the replaced range (wholesale line replacement
+        // drops all marks in the slice, mirroring nvim's behavior).
         for ns in [self.ns_highlights, self.ns_decorations, self.ns_virt_text] {
             self.extmarks.clear_namespace(ns, start, end);
         }
@@ -637,9 +520,7 @@ impl Buffer {
             lines
         };
         self.lines = Arc::new(new_lines);
-        // Wholesale replacement: drop every extmark in the well-known
-        // namespaces. (Custom namespaces persist; their owners decide
-        // when to clear.)
+        // Drop well-known namespaces; custom namespaces persist.
         for ns in [self.ns_highlights, self.ns_decorations, self.ns_virt_text] {
             self.extmarks.clear_namespace(ns, 0, usize::MAX);
         }
@@ -651,18 +532,9 @@ impl Buffer {
         self.lines.join("\n")
     }
 
-    /// Extract text in byte range `[start, end)` over `self.text()`,
-    /// applying `SpanMeta` filters from highlight extmarks: cells whose
-    /// covering highlight has `selectable: false` are dropped, and
-    /// spans with `copy_as: Some(s)` substitute that string once per
-    /// span (the first cell of the span emits `s`; subsequent cells
-    /// of the same span emit nothing). Rows are joined with `\n`.
-    ///
-    /// No per-cell cache — walks lines + extmarks on demand. Suitable
-    /// for small / mid-sized buffers (dialogs, prompts, Lua-built
-    /// overlays). The transcript layer maintains a dedicated snapshot
-    /// for the same purpose because its scale (block-history-wide)
-    /// makes on-demand walks cost-prohibitive at copy time.
+    /// Extract text in byte range `[start, end)`, applying `SpanMeta` filters:
+    /// cells covered by `selectable: false` spans are dropped; `copy_as` spans
+    /// emit their substitution string once per span. Rows are joined with `\n`.
     pub fn extract_text(&self, start: usize, end: usize) -> String {
         use unicode_width::UnicodeWidthChar;
         if start >= end {
@@ -714,8 +586,7 @@ impl Buffer {
                     byte_pos += ch.len_utf8();
                 }
             }
-            // Insert the row separator only when another row in the
-            // range follows. The +1 accounts for the `\n` joiner.
+            // +1 accounts for the `\n` joiner between rows.
             if row + 1 < total_lines && end > line_end_byte + 1 {
                 out.push('\n');
             }
@@ -735,15 +606,12 @@ impl Buffer {
 
     // ── Extmark API (the primary surface) ──────────────────────────
 
-    /// Get-or-create a namespace by name. Same `name` always returns
-    /// the same `NsId` for the lifetime of the Buffer.
+    /// Get-or-create a namespace by name.
     pub fn create_namespace(&mut self, name: &str) -> NsId {
         self.extmarks.create_namespace(name)
     }
 
-    /// Place an extmark in `ns`. Returns the mark's id (a fresh one, or
-    /// the one passed via `opts.id` when re-targeting an existing
-    /// mark).
+    /// Place an extmark in `ns`. Returns the mark's id.
     pub fn set_extmark(
         &mut self,
         ns: NsId,
@@ -770,14 +638,12 @@ impl Buffer {
         }
     }
 
-    /// Clear every extmark in `ns` whose anchor lies within
-    /// `[line_start, line_end)`. Pass `0..usize::MAX` to clear the
-    /// whole namespace.
+    /// Clear extmarks in `ns` within `[line_start, line_end)`. Use `0..usize::MAX` for all.
     pub fn clear_namespace(&mut self, ns: NsId, line_start: usize, line_end: usize) {
         self.extmarks.clear_namespace(ns, line_start, line_end);
     }
 
-    /// Iterate every extmark in `ns`, in insertion order.
+    /// All extmarks in `ns`, in insertion order.
     pub fn extmarks(&self, ns: NsId) -> Vec<(ExtmarkId, &Extmark)> {
         match self.extmarks.ns(ns) {
             Some(state) => state.extmarks.iter().map(|(id, m)| (*id, m)).collect(),
@@ -807,9 +673,8 @@ impl Buffer {
         );
     }
 
-    /// HlGroup-keyed counterpart to [`Self::add_highlight_with_meta`].
-    /// Use this when copying spans from one buffer to another so the
-    /// id stays interned (theme switches stay live across the copy).
+    /// Like [`Self::add_highlight_with_meta`] but takes an interned [`HlGroup`]
+    /// directly, preserving theme-reactivity when copying spans across buffers.
     pub fn add_highlight_group_with_meta(
         &mut self,
         line: usize,
@@ -832,16 +697,9 @@ impl Buffer {
     }
 
     pub fn highlights_at(&self, line: usize) -> Vec<Span> {
-        // Collect every Highlight extmark for this row across all
-        // namespaces, then sort by `(priority, namespace id, insertion
-        // order)`. Lower priority paints first; equal priorities fall
-        // back to namespace-id ascending then insertion order. Mirrors
-        // nvim's z-order: priority is the primary axis, and the
-        // namespace + id pair is a stable tiebreaker so spans from a
-        // single source still paint in registration order. Highlight
-        // extmarks today are single-row (matching the nvim convention
-        // where line-spanning highlights are emitted per-row by the
-        // parser); end-row is recorded but not yet split here.
+        // Collect all Highlight extmarks for this row across namespaces,
+        // sorted by (priority, ns-id, insertion order) — lower priority
+        // first, ties broken by namespace then id.
         let mut entries: Vec<(u32, u32, u32, Span)> = Vec::new();
         let mut ns_ids: Vec<NsId> = self.extmarks.namespaces.keys().copied().collect();
         ns_ids.sort_by_key(|n| n.0);
@@ -877,8 +735,7 @@ impl Buffer {
     }
 
     pub fn set_decoration(&mut self, line: usize, decoration: LineDecoration) {
-        // One decoration per line: clear any prior at this row before
-        // writing the new one.
+        // One decoration per line: replace any prior mark at this row.
         let ns = self.ns_decorations;
         let to_remove: Vec<ExtmarkId> = self
             .extmarks(ns)
@@ -914,12 +771,8 @@ impl Buffer {
         &DEFAULT
     }
 
-    /// Test convenience: set a single virt_text on `line` in the
-    /// well-known `NS_VIRT_TEXT` namespace, replacing any prior one
-    /// at that row. Production virt-text uses per-feature namespaces
-    /// reached through `set_extmark` + `ExtmarkOpts::virt_text`.
+    /// Set a single virt_text on `line` in `NS_VIRT_TEXT`, replacing any prior.
     pub fn set_virtual_text(&mut self, line: usize, text: String, hl_group: Option<String>) {
-        // One virt_text per line in the convenience namespace.
         let ns = self.ns_virt_text;
         let to_remove: Vec<ExtmarkId> = self
             .extmarks(ns)
@@ -933,7 +786,7 @@ impl Buffer {
         self.set_extmark(ns, line, 0, ExtmarkOpts::virt_text(text, hl_group));
     }
 
-    /// Test convenience: clear virt_text on `line` in `NS_VIRT_TEXT`.
+    /// Clear virt_text on `line` in `NS_VIRT_TEXT`.
     pub fn clear_virtual_text(&mut self, line: usize) {
         let ns = self.ns_virt_text;
         let to_remove: Vec<ExtmarkId> = self
@@ -947,12 +800,7 @@ impl Buffer {
         }
     }
 
-    /// Walk every namespace whose extmarks carry virt-text payloads
-    /// (not just `ns_virt_text`). Cross-namespace ordering is namespace-id
-    /// ascending so later-created namespaces paint after earlier ones;
-    /// within a namespace, BTreeMap iteration is by extmark id —
-    /// insertion order — so virt_texts from a single source paint in
-    /// registration order. Mirrors the `highlights_at` precedent.
+    /// All virt-text entries for `line`, sorted by (priority, ns-id, insertion order).
     pub fn virtual_text_at(&self, line: usize) -> Vec<VirtualText> {
         let mut entries: Vec<(u32, u32, u32, VirtualText)> = Vec::new();
         let mut ns_ids: Vec<NsId> = self.extmarks.namespaces.keys().copied().collect();
@@ -1052,9 +900,6 @@ mod tests {
 
     #[test]
     fn virtual_text_at_walks_every_namespace_in_nsid_order() {
-        // Two namespaces both anchor virt_text on row 0; the
-        // later-registered namespace appears after the earlier one in
-        // the returned Vec — same paint-order rule as `highlights_at`.
         let mut buf = make_buf();
         buf.set_all_lines(vec!["hi".into()]);
         let ns_a = buf.create_namespace("a");
@@ -1112,9 +957,7 @@ mod tests {
     fn extract_text_joins_rows_with_newline() {
         let mut buf = make_buf();
         buf.set_all_lines(vec!["abc".into(), "def".into(), "ghi".into()]);
-        // text() = "abc\ndef\nghi" (11 bytes). Range 0..11 = whole.
         assert_eq!(buf.extract_text(0, 11), "abc\ndef\nghi");
-        // Range stopping mid-second-line should not emit the trailing \n.
         assert_eq!(buf.extract_text(0, 6), "abc\nde");
     }
 
@@ -1207,10 +1050,6 @@ mod tests {
             0,
             ExtmarkOpts::highlight(4, SpanStyle::new().fg(Color::Red), SpanMeta::default()),
         );
-        // Highlight payloads in any namespace are visible to
-        // `highlights_at` so parsers / selection / search can
-        // partition decoration into independent namespaces while
-        // sharing the same paint pass.
         assert_eq!(buf.highlights_at(0).len(), 1);
         assert_eq!(buf.extmarks(ns).len(), 1);
         buf.clear_namespace(ns, 0, usize::MAX);
@@ -1241,9 +1080,6 @@ mod tests {
         assert_eq!(buf.extmarks(ns_b).len(), 1);
     }
 
-    /// Drives [`Buffer::ensure_rendered_at`] with a stub parser so
-    /// we can assert the caching + re-render semantics without
-    /// pulling the full markdown pipeline into core.
     struct StubParser {
         calls: std::sync::Mutex<Vec<(String, u16)>>,
         attach_calls: std::sync::Mutex<u32>,

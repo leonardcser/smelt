@@ -1,12 +1,4 @@
-//! Pure-data UI primitives shared between headless runtimes and
-//! terminal frontends. No terminal deps, no async runtime, no Lua.
-//!
-//! - `buffer` — Buffer + extmarks + namespaces + parser trait.
-//! - `style` / `theme` — color + style data + named highlight groups.
-//! - `clipboard` / `kill_ring` — text yank/paste + emacs-style ring.
-//! - `undo` — per-buffer undo/redo history.
-//! - `attachment` — image/paste attachment store.
-//! - `wrap` — display-column word wrap.
+//! Pure-data UI primitives. No terminal deps, no async runtime, no Lua.
 
 pub mod attachment;
 pub mod buffer;

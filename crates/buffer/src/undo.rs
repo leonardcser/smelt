@@ -1,10 +1,4 @@
-//! Shared undo/redo history for the input buffer and vim motions.
-//!
-//! A single `UndoEntry` captures the triple (buf, cpos, attachments) that both
-//! the plain input and vim need to save. `UndoHistory` owns the undo and redo
-//! stacks and enforces an optional size cap. Callers drive it with the current
-//! buffer state on each operation; the history only stores states and never
-//! mutates the live buffer directly.
+//! Undo/redo history for the input buffer and vim motions.
 
 use crate::attachment::AttachmentId;
 
@@ -56,7 +50,7 @@ impl UndoHistory {
         }
     }
 
-    /// Record a pre-edit snapshot, clearing any pending redo.
+    /// Push a snapshot, clearing redo.
     pub fn save(&mut self, entry: UndoEntry) {
         self.redo.clear();
         self.undo.push(entry);
@@ -67,14 +61,14 @@ impl UndoHistory {
         }
     }
 
-    /// Pop the most recent snapshot, stashing `current` onto the redo stack.
+    /// Pop the most recent snapshot onto redo, return it.
     pub fn undo(&mut self, current: UndoEntry) -> Option<UndoEntry> {
         let entry = self.undo.pop()?;
         self.redo.push(current);
         Some(entry)
     }
 
-    /// Pop the most recent redo, stashing `current` back onto the undo stack.
+    /// Pop the most recent redo onto undo, return it.
     pub fn redo(&mut self, current: UndoEntry) -> Option<UndoEntry> {
         let entry = self.redo.pop()?;
         self.undo.push(current);

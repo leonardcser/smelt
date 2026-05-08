@@ -1,5 +1,4 @@
-//! `smelt.buf` bindings — Buffer creation, line/source mutation,
-//! highlight extmarks. UiHost-only.
+//! `smelt.buf` — buffer creation, line/source mutation, extmarks. UiHost-only.
 
 use super::app_read;
 use crate::lua::LuaShared;
@@ -79,9 +78,7 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
             Ok(())
         })?,
     )?;
-    // `smelt.buf.get_line(buf_id, line_idx)` — line_idx is
-    // 1-based to match every other Lua-facing line index in the
-    // codebase. Returns `nil` when out of range.
+    // `smelt.buf.get_line(buf_id, line_idx)` — line_idx is 1-based; returns nil when out of range.
     buf_tbl.set(
         "get_line",
         lua.create_function(|_, (id, line_idx): (u64, u64)| {
@@ -113,11 +110,8 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
         "create_namespace",
         lua.create_function(|_, name: String| Ok(smelt_core::buffer::create_namespace(&name).0))?,
     )?;
-    // `smelt.buf.clear_namespace(buf, ns, line_start?, line_end?)` —
-    // drops every extmark in `ns` between `[line_start, line_end)`
-    // (1-based, inclusive start, exclusive end). Defaults clear the
-    // whole buffer so plugins that repaint a namespace each tick
-    // (perf panel, completer ghost text) don't have to track ids.
+    // `smelt.buf.clear_namespace(buf, ns, line_start?, line_end?)` — 1-based, inclusive start,
+    // exclusive end; defaults clear the whole buffer.
     buf_tbl.set(
         "clear_namespace",
         lua.create_function(
@@ -145,16 +139,9 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
 }
 
 /// `smelt.buf.set_extmark(buf, ns, row, col, opts) -> extmark_id`.
-/// Mirrors `nvim_buf_set_extmark`'s keyset. `row` is 1-based to
-/// match every other Lua row index in smelt; convert to 0-based
-/// internally. `opts.id` retargets an existing mark across re-runs.
-///
-/// Highlight payload: `hl_group` names a theme highlight group whose
-/// full Style is applied; `fg` / `bg` name groups whose `.fg` / `.bg`
-/// axis is pulled in to override; `bold / dim / italic` override
-/// individual attribute axes. Unknown group names silently resolve
-/// to default (nvim policy). VirtText payload: pass `virt_text` (and
-/// optionally `virt_text_pos`).
+/// `row` is 1-based. `opts.id` retargets an existing mark.
+/// Highlight: `hl_group` applies a full style; `fg`/`bg` override individual axes;
+/// unknown groups silently resolve to default. VirtText: pass `virt_text`.
 fn set_extmark(
     lua: &Lua,
     (id, ns, row, col, opts): (u64, u32, u64, u64, Option<mlua::Table>),
@@ -240,12 +227,8 @@ fn parse_virt_pos(s: &str) -> smelt_core::buffer::VirtTextPos {
 fn parse_highlight_style(t: &mlua::Table) -> LuaResult<crate::smelt_term::SpanStyle> {
     use smelt_core::style::Style;
 
-    // Highlight groups are looked up via `theme.get(name)` (nvim
-    // parity): unknown names silently resolve to default rather than
-    // erroring, so a stale theme reference paints unstyled instead of
-    // crashing the caller. `hl_group` sets the full base Style;
-    // `fg` / `bg` strings name groups whose `.fg` / `.bg` axis is
-    // pulled in. Per-attribute Lua bools override individual axes.
+    // Unknown group names silently resolve to default (nvim parity).
+    // `hl_group` sets the full base style; `fg`/`bg` override individual color axes.
     let resolve_group =
         |name: &str| -> Style { crate::lua::with_app(|app| app.ui.theme().get(name)) };
 

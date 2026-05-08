@@ -1,14 +1,7 @@
-//! HTTP capability — synchronous fetch primitives over `reqwest::blocking`.
-//! Pure transport, no policy. Exposed to Lua via
-//! `crates/tui/src/lua/api/http.rs` and composed by tools that need to
-//! pull a URL.
-//!
-//! `get` and `post` return a [`Response`] struct with body bytes,
-//! status, headers, and the final URL after any redirects. Retry /
-//! cassette layers belong to the calling tool. The disk-backed
-//! TTL [`cache`] submodule lives here for tools that want to skip
-//! repeated fetches; `random_user_agent` provides a pseudo-rotating
-//! UA string to soften rate-limit detection on scraped endpoints.
+//! HTTP capability — synchronous fetch over `reqwest::blocking`. Pure transport,
+//! no policy. Retry logic belongs to the caller. The `cache` submodule provides
+//! a disk-backed TTL cache; `random_user_agent` rotates UA strings to soften
+//! rate-limit detection.
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -16,7 +9,6 @@ use std::time::Duration;
 
 pub(crate) mod cache;
 
-/// Result of a single HTTP request.
 #[derive(Debug, Clone)]
 pub(crate) struct Response {
     pub(crate) status: u16,
@@ -25,8 +17,7 @@ pub(crate) struct Response {
     pub(crate) body: Vec<u8>,
 }
 
-/// Options accepted by [`get`]. Defaults: 30s timeout, follow up to 10
-/// redirects, no extra headers.
+/// Defaults: 30s timeout, up to 10 redirects, no extra headers.
 #[derive(Debug, Clone, Default)]
 pub(crate) struct Options {
     pub(crate) timeout: Option<Duration>,
@@ -34,9 +25,6 @@ pub(crate) struct Options {
     pub(crate) headers: HashMap<String, String>,
 }
 
-/// GET `url` with the given options. Errors surface as
-/// `reqwest::Error` so callers (Lua bindings, tools) can decide how
-/// to format them.
 pub(crate) fn get(url: &str, opts: &Options) -> Result<Response, reqwest::Error> {
     let mut request = build_client(opts)?.get(url);
     for (k, v) in &opts.headers {
@@ -45,9 +33,7 @@ pub(crate) fn get(url: &str, opts: &Options) -> Result<Response, reqwest::Error>
     finish(request)
 }
 
-/// POST `url` with the given body bytes. Defaults match [`get`]:
-/// 30s timeout, follow up to 10 redirects, no extra headers. Body is
-/// sent verbatim — set `Content-Type` via `opts.headers` when needed.
+/// Body is sent verbatim — set `Content-Type` via `opts.headers` when needed.
 pub(crate) fn post(url: &str, body: Vec<u8>, opts: &Options) -> Result<Response, reqwest::Error> {
     let mut request = build_client(opts)?.post(url).body(body);
     for (k, v) in &opts.headers {
@@ -83,9 +69,7 @@ fn finish(request: reqwest::blocking::RequestBuilder) -> Result<Response, reqwes
     })
 }
 
-/// Rotating User-Agent picker. 80% round-robin over [`USER_AGENTS`],
-/// 20% pseudo-random pick. Useful when scraping endpoints that
-/// rate-limit by UA.
+/// 80% round-robin, 20% pseudo-random pick from [`USER_AGENTS`].
 pub(crate) fn random_user_agent() -> &'static str {
     let idx = UA_COUNTER.fetch_add(1, Ordering::Relaxed);
     if idx.is_multiple_of(5) {
@@ -125,17 +109,12 @@ const USER_AGENTS: &[&str] = &[
 mod tests {
     use super::*;
 
-    /// Network calls aren't available in CI sandboxes; this test only
-    /// exercises the option plumbing by calling a localhost address
-    /// that's guaranteed to fail. We just check the error path returns
-    /// without panicking.
     #[test]
     fn get_unreachable_returns_error() {
         let opts = Options {
             timeout: Some(Duration::from_millis(50)),
             ..Default::default()
         };
-        // `127.0.0.1:1` is a reserved low port — connect should refuse.
         let err = get("http://127.0.0.1:1/", &opts);
         assert!(err.is_err());
     }

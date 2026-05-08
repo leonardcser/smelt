@@ -1,11 +1,4 @@
 //! Span-emitting renderers shared across the transcript and dialogs.
-//!
-//! - [`syntax`] — code-block + syntax-file rendering, `BashHighlighter`.
-//! - [`diff`] — inline diff rendering and the persisted `CachedInlineDiff`.
-//! - [`inline`] — markdown tables and inline emphasis (the markdown
-//!   inline grammar lives here; block-level lives in
-//!   `app::transcript_present::markdown`).
-//! - [`util`] — helpers shared by inline and table rendering.
 
 use std::sync::LazyLock;
 use syntect::parsing::SyntaxSet;
@@ -20,12 +13,8 @@ pub(super) static SYNTAX_SET: LazyLock<SyntaxSet> =
 pub(super) static THEME_SET: LazyLock<two_face::theme::EmbeddedLazyThemeSet> =
     LazyLock::new(two_face::theme::extra);
 
-/// Light/dark hint for `syntax_theme()`. Mirrored from `crate::smelt_term::Theme`'s
-/// `is_light` flag by `crate::theme::populate_ui_theme()` each frame.
-/// Local to this module since syntect picks pre-loaded themes by index
-/// and the alternative — threading `&crate::smelt_term::Theme` through every
-/// `print_syntax_file` / `print_inline_diff` call site — touches 14+
-/// callers for one branch.
+/// Light/dark hint for `syntax_theme()`. Module-local to avoid threading a `&Theme` through every
+/// syntax call site; updated each frame by `crate::theme::populate_ui_theme()`.
 static SYNTAX_THEME_LIGHT: std::sync::atomic::AtomicBool =
     std::sync::atomic::AtomicBool::new(false);
 
@@ -33,9 +22,7 @@ pub fn set_syntax_theme_light(light: bool) {
     SYNTAX_THEME_LIGHT.store(light, std::sync::atomic::Ordering::Relaxed);
 }
 
-/// Force eager initialization of the syntect syntax and theme sets. Call
-/// once at startup from a background thread so the first tool render
-/// doesn't pay the ~30ms deserialization cost mid-frame.
+/// Eagerly initialize syntect sets to avoid ~30ms deserialization cost on the first render.
 pub fn warm_up_syntect() {
     let _perf = crate::perf::begin("warmup:syntect");
     LazyLock::force(&SYNTAX_SET);

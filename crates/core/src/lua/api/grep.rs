@@ -1,11 +1,4 @@
-//! `smelt.grep` bindings — ripgrep wrapper over `app::grep`. Host-tier
-//! (works in tui and headless) — no Ui touch.
-//!
-//! Lua surface: `smelt.grep.run(pattern, path, opts)` returns
-//! `(output_table, nil)` on success or `(nil, err)` on failure to
-//! launch `rg`. Match-vs-no-match is conveyed via `output.exit_code`,
-//! not the `(value, err)` channel — `rg` exits 1 on no-match which is
-//! not an error to the caller.
+//! `smelt.grep` — ripgrep wrapper. `rg` exit 1 (no match) is not an error; check `exit_code`.
 
 use mlua::prelude::*;
 use std::time::Duration;

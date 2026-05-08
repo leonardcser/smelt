@@ -1,11 +1,4 @@
-//! Headless-safe Lua runtime skeleton.
-//!
-//! Owns the `mlua::Lua` state, the `Arc<LuaShared>` registries, and
-//! all methods that do not touch TUI-specific types (`Ui`, `WinId`,
-//! `Payload`, etc.).
-//!
-//! The TUI wraps this in [`tui::lua::LuaRuntime`](crate::tui::lua::LuaRuntime)
-//! and adds UI-specific callback queues + statusline rendering.
+//! Headless-safe Lua runtime. The TUI extends this with UI-specific queues and statusline rendering.
 
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -19,18 +12,10 @@ use crate::lua::{
     json_to_lua, LuaShared, TaskCompletion, TaskDriveOutput, TaskEvent, ToolEnv, ToolExecResult,
 };
 
-/// Embedded `runtime/lua/smelt/` tree. Every `.lua` file under here is
-/// `require`-able as `smelt.<dotted-path>`; the paths in
-/// [`BOOTSTRAP_FILES`] additionally run at `register_api` time, and
-/// every file under `tools/`, `commands/`, `plugins/` is required at
-/// startup.
+/// Embedded `runtime/lua/smelt/` tree; every `.lua` file is `require`-able as `smelt.<path>`.
 static EMBEDDED_LUA: Dir<'_> = include_dir!("$CARGO_MANIFEST_DIR/../../runtime/lua/smelt");
 
-/// Lua chunks executed at `register_api` time, in this order, after
-/// the `smelt` global is fully populated but before any plugin or user
-/// init.lua runs. Order is semantic: framework primitives (`_bootstrap`,
-/// `dialog`, `cmd`) ship before consumers (`widgets`, `dialogs/confirm`,
-/// `status`, `modes`).
+/// Lua chunks executed at `register_api` time, in order: primitives before consumers.
 const BOOTSTRAP_FILES: &[&str] = &[
     "_bootstrap.lua",
     "dialog.lua",
@@ -42,46 +27,28 @@ const BOOTSTRAP_FILES: &[&str] = &[
     "modes.lua",
 ];
 
-/// Top-level subdirectories whose `.lua` files are `require`'d at
-/// startup. Files within these directories must be self-contained;
-/// they register tools, commands, and cell subscribers as a
-/// side-effect of being loaded. `dialogs/` is autoloaded because most
-/// dialog modules register a slash command at top level; the one
-/// exception (`dialogs/confirm.lua`) is loaded earlier via
-/// [`BOOTSTRAP_FILES`] and the second `require` is a no-op.
+/// Subdirectories whose files are `require`'d at startup as side-effect registrations.
 const AUTOLOAD_DIRS: &[&str] = &["tools", "commands", "plugins", "dialogs"];
 
-/// Lifecycle context passed to a tool's `render(args, output, ctx)`
-/// hook. Mirrors the data the transcript composer would otherwise paint
-/// itself (status pill, elapsed pill, available width).
-/// Outcome of dispatching a key event to a Lua-registered chord
-/// handler. `Consumed` means the handler claimed the key; `PassThrough`
-/// means the handler ran but explicitly returned `false` so the key
-/// falls through to downstream dispatchers; `NoBinding` means no Lua
-/// handler is registered for the given `(mode, chord)` pair.
+/// Outcome of dispatching a keymap chord.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum KeymapResult {
+    /// Handler ran and returned truthy or nothing.
     Consumed,
+    /// Handler ran and returned `false`; key falls through.
     PassThrough,
     NoBinding,
 }
 
+/// Context passed to a tool's `render(args, output, ctx)` hook.
 pub struct ToolRenderCtx<'a> {
-    /// Available column budget for the body (after the `⏺ name `
-    /// prefix is reserved).
     pub width: usize,
-    /// Plain-text summary the engine recorded for the call (the
-    /// `summary(args)` callback's return value). Tools that want a
-    /// custom-styled summary line typically render `args` themselves
-    /// and ignore this string.
     pub summary: &'a str,
-    /// Lifecycle status: `"pending" | "ok" | "err" | "denied" | "confirm"`.
+    /// `"pending" | "ok" | "err" | "denied" | "confirm"`
     pub status: &'a str,
-    /// Elapsed time in seconds (rounded down). `None` while the call
-    /// is still running and no measurement is available.
+    /// `None` while the call is still running.
     pub elapsed_secs: Option<u64>,
-    /// Engine-side call id. `None` for synthetic renders (preview /
-    /// dialog title).
+    /// `None` for synthetic renders (preview / dialog title).
     pub call_id: Option<&'a str>,
 }
 
@@ -127,7 +94,6 @@ impl LuaRuntime {
         rt
     }
 
-    /// Build a runtime around an existing `Arc<LuaShared>`.
     pub fn with_shared(shared: Arc<LuaShared>) -> Self {
         let lua = Lua::new();
         let load_error = Self::register_api(&lua, &shared)
@@ -150,18 +116,14 @@ impl LuaRuntime {
         rt
     }
 
-    /// Read the load error, if any.
     pub fn load_error(&self) -> Option<&str> {
         self.load_error.as_deref()
     }
 
-    /// Set a custom path for `init.lua`.
     pub fn set_init_lua_path(&mut self, path: PathBuf) {
         self.init_lua_path = Some(path);
     }
 
-    /// Load `~/.config/smelt/init.lua` (or the override set by
-    /// [`set_init_lua_path`]).
     pub fn load_user_config(&mut self) {
         if self.load_error.is_some() {
             return;
@@ -187,9 +149,6 @@ impl LuaRuntime {
         self.lua.load(&src).set_name("init.lua").exec()
     }
 
-    /// Load every `.lua` file under `<config>/plugins/` (sorted) at
-    /// startup. Errors are recorded as load errors but do not stop
-    /// the runtime.
     pub fn load_global_plugins(&mut self) {
         if self.load_error.is_some() {
             return;
@@ -203,10 +162,7 @@ impl LuaRuntime {
         }
     }
 
-    /// Load `<cwd>/.smelt/init.lua` and `<cwd>/.smelt/plugins/*.lua`,
-    /// gated by [`crate::trust`]. Returns the trust state so the
-    /// caller can surface a notification when the project is
-    /// untrusted.
+    /// Load `.smelt/init.lua` and `.smelt/plugins/*.lua`, gated by trust. Returns the trust state.
     pub fn load_project_config(&mut self, cwd: &std::path::Path) -> crate::trust::TrustState {
         let state = crate::trust::project_trust_state(cwd);
         if !matches!(state, crate::trust::TrustState::Trusted { .. }) {
@@ -240,8 +196,6 @@ impl LuaRuntime {
             .exec()
     }
 
-    /// Build a `Config` from the LuaShared registries populated by
-    /// `init.lua`.
     pub fn to_config(&self) -> crate::config::Config {
         let providers = self
             .shared
@@ -274,7 +228,6 @@ impl LuaRuntime {
         }
     }
 
-    /// Take any permission rules registered by Lua config.
     pub fn take_permission_rules(&self) -> Option<crate::permissions::rules::RawPerms> {
         self.shared
             .permission_rules
@@ -283,10 +236,6 @@ impl LuaRuntime {
             .take()
     }
 
-    /// Snapshot per-tool permission defaults captured during tool
-    /// registration. Cloned (not taken) so re-registering a tool after
-    /// startup still updates the captured state, even though the
-    /// already-built `Permissions` won't observe it.
     pub fn tool_defaults(&self) -> crate::permissions::rules::ToolDefaults {
         self.shared
             .tool_defaults
@@ -295,7 +244,6 @@ impl LuaRuntime {
             .clone()
     }
 
-    /// Invoke a registered command by name.
     pub fn run_command(&self, name: &str, arg: Option<String>) -> bool {
         let func = {
             let Ok(map) = self.shared.commands.lock() else {
@@ -320,17 +268,8 @@ impl LuaRuntime {
         true
     }
 
-    /// Dispatch a keymap chord (single key or canonical multi-key
-    /// sequence) to any Lua-registered handler. `chord_ctx`, when
-    /// `Some`, is passed to the handler as a context table — used
-    /// for multi-key chord sequences to expose state captured at the
-    /// first key (e.g. `vim_mode_at_chord_start`); single-key
-    /// dispatch passes `None` (handler invoked with no args).
-    ///
-    /// Returns `Consumed` when a handler ran and returned truthy /
-    /// nothing; `PassThrough` when a handler ran and returned `false`
-    /// (the key falls through to downstream dispatch); `NoBinding`
-    /// when no handler is registered for `(mode, chord)`.
+    /// Dispatch a keymap chord to any Lua-registered handler.
+    /// `chord_ctx` is passed as a table for multi-key sequences; `None` for single-key.
     pub fn run_keymap(
         &self,
         chord: &str,
@@ -391,12 +330,7 @@ impl LuaRuntime {
         }
     }
 
-    /// Returns true when `sequence` is a strict prefix of at least one
-    /// registered chord under `current_mode` (or the global `""` mode).
-    /// "Strict" means the registered chord is longer than the sequence;
-    /// an exact match alone does not count. The chord dispatcher uses
-    /// this to decide whether to keep a pending sequence alive after
-    /// each key.
+    /// Returns true if `sequence` is a strict prefix of a registered chord (exact match excluded).
     pub fn chord_has_longer(&self, sequence: &str, current_mode: Option<&str>) -> bool {
         let Ok(map) = self.shared.keymaps.lock() else {
             return false;
@@ -418,7 +352,6 @@ impl LuaRuntime {
         false
     }
 
-    /// Fire `smelt.mode.cycle()`.
     pub fn cycle_mode(&self) {
         let result: mlua::Result<()> = (|| {
             let smelt: mlua::Table = self.lua.globals().get("smelt")?;
@@ -431,7 +364,6 @@ impl LuaRuntime {
         }
     }
 
-    /// Fire `smelt.reasoning.cycle()`.
     pub fn cycle_reasoning(&self) {
         let result: mlua::Result<()> = (|| {
             let smelt: mlua::Table = self.lua.globals().get("smelt")?;
@@ -444,10 +376,7 @@ impl LuaRuntime {
         }
     }
 
-    /// Append a message to the persistent log and surface a one-line
-    /// summary via `smelt.notify_error`. The full body (multi-line
-    /// tracebacks) stays addressable through `/messages` instead of
-    /// flooding the toast overlay.
+    /// Log to the persistent message store and surface a one-line summary via `smelt.notify_error`.
     pub fn record_error(&self, msg: String) {
         let summary = msg.lines().next().unwrap_or("").to_string();
         if let Ok(mut messages) = self.shared.messages.lock() {
@@ -535,7 +464,6 @@ impl LuaRuntime {
         items
     }
 
-    /// Fire the `on_response` callback for a completed `engine.ask()` call.
     pub fn fire_callback(&self, id: u64, content: &str) {
         let handle = {
             let Ok(mut cbs) = self.shared.callbacks.lock() else {
@@ -707,11 +635,7 @@ impl LuaRuntime {
         defs
     }
 
-    /// Call a tool's `paths_for_workspace(args)` Lua callback if
-    /// registered. Returns the filesystem paths the tool call would
-    /// touch, used by the workspace-boundary policy in
-    /// `core::permissions`. Tools that don't touch paths return `[]`
-    /// (and typically don't register the callback at all).
+    /// Call a tool's `paths_for_workspace(args)` callback; returns touched paths for boundary checks.
     pub fn tool_paths_for_workspace(
         &self,
         tool_name: &str,
@@ -751,12 +675,7 @@ impl LuaRuntime {
         }
     }
 
-    /// Run a tool's `decide(args, mode)` Lua callback if registered.
-    /// The callback returns `"allow" | "ask" | "deny"`; anything else
-    /// (or no callback) yields `None` so the caller falls through to
-    /// the generic `Permissions::check_tool` path. The bash + web_fetch
-    /// tools register decide callbacks; everything else relies on the
-    /// generic path.
+    /// Run a tool's `decide(args, mode)` callback; returns `None` to fall through to generic permissions.
     pub fn tool_decide(
         &self,
         tool_name: &str,
@@ -802,10 +721,7 @@ impl LuaRuntime {
         handlers.get(tool_name).is_some_and(|h| h.preview.is_some())
     }
 
-    /// Run a tool's `preview(buf, args)` Lua callback against the
-    /// buffer named by `buf_id`. The callback paints the confirm
-    /// dialog's preview pane (diff / syntax / notebook / bash). Returns
-    /// `true` iff the callback ran successfully.
+    /// Run a tool's `preview(buf, args)` callback; returns true on success.
     pub fn render_tool_preview(
         &self,
         tool_name: &str,
@@ -947,14 +863,7 @@ impl LuaRuntime {
         out
     }
 
-    /// Call a tool's Lua `render` hook, if registered. Returns the
-    /// composed [`BlockLayout`] tree so the transcript composer can
-    /// replay each leaf buffer's lines into its `LineBuilder`.
-    ///
-    /// The hook receives `(args, output, ctx)` where `ctx` carries
-    /// `{ width, summary, status, elapsed_secs, call_id }`. The tool
-    /// mints its own buffers via `smelt.buf.create` and arranges them
-    /// using `smelt.layout.{vbox,hbox,leaf}`.
+    /// Call a tool's `render(args, output, ctx)` hook and return the composed `BlockLayout` tree.
     pub fn render_tool_layout(
         &self,
         tool_name: &str,
@@ -1190,8 +1099,6 @@ pub fn load_bootstrap_chunks(lua: &Lua) -> mlua::Result<()> {
     Ok(())
 }
 
-/// Iterate every `.lua` file under [`EMBEDDED_LUA`] as
-/// `(module_name, source)` pairs.
 fn embedded_lua_modules() -> impl Iterator<Item = (String, &'static str)> {
     fn walk(dir: &'static Dir<'static>, out: &mut Vec<(String, &'static str)>) {
         for entry in dir.entries() {
@@ -1216,18 +1123,13 @@ fn embedded_lua_modules() -> impl Iterator<Item = (String, &'static str)> {
     out.into_iter()
 }
 
-/// Translate an embedded relative path (`tools/glob.lua`) into a
-/// `smelt.*` module name (`smelt.tools.glob`).
 fn path_to_module(rel: &str) -> String {
     let trimmed = rel.strip_suffix(".lua").unwrap_or(rel);
     let dotted = trimmed.replace('/', ".");
     format!("smelt.{dotted}")
 }
 
-/// Modules to `require` at startup, derived from [`AUTOLOAD_DIRS`].
-/// Sorted within each directory for deterministic order. Files
-/// already executed in [`BOOTSTRAP_FILES`] are skipped to avoid a
-/// re-run during autoload.
+/// Modules to `require` at startup; sorted per directory, bootstrap files excluded.
 pub fn autoload_modules() -> Vec<String> {
     let bootstrap_modules: std::collections::HashSet<String> =
         BOOTSTRAP_FILES.iter().map(|p| path_to_module(p)).collect();
@@ -1280,17 +1182,13 @@ fn register_module_searcher_with_roots(lua: &Lua, roots: Vec<PathBuf>) -> LuaRes
     Ok(())
 }
 
-/// Translate a Lua module name (`smelt.dialogs.confirm`) into a
-/// relative file path (`smelt/dialogs/confirm.lua`).
 fn module_to_relpath(module: &str) -> PathBuf {
     let mut path = PathBuf::from(module.replace('.', "/"));
     path.set_extension("lua");
     path
 }
 
-/// Roots searched for Lua module overrides, in priority order:
-/// project-local `.smelt/runtime/`, then user data
-/// `<XDG_DATA_HOME>/smelt/runtime/`. The embedded fallback runs last.
+/// Override search roots in priority order: `.smelt/runtime/` then `<XDG_DATA_HOME>/smelt/runtime/`.
 fn module_overlay_roots() -> Vec<PathBuf> {
     let mut roots = Vec::new();
     if let Ok(cwd) = std::env::current_dir() {
@@ -1300,8 +1198,6 @@ fn module_overlay_roots() -> Vec<PathBuf> {
     roots
 }
 
-/// Sorted list of `.lua` files directly under `dir`. Missing dir
-/// returns empty.
 fn lua_files_in(dir: &std::path::Path) -> Vec<PathBuf> {
     let Ok(entries) = std::fs::read_dir(dir) else {
         return Vec::new();

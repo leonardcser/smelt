@@ -1,9 +1,4 @@
--- Built-in /export command.
---
--- Opens a 2-option dialog: copy the conversation as markdown to the
--- clipboard, or write it to a timestamped file in the cwd. Pure Lua
--- composition over primitives (session metadata, session.messages(),
--- smelt.clipboard.write, io.open) — the host has no export-specific Rust.
+-- Built-in /export command. Copy conversation markdown to clipboard or write to a file.
 
 local function format_timestamp(ms)
   if ms == nil or ms <= 0 then
@@ -36,7 +31,6 @@ local function default_export_path()
   local slug = slugify(smelt.session.title())
   local stamp = file_stamp(smelt.session.created_at_ms())
   local base = string.format("%s/smelt-%s-%s.md", dir, slug, stamp)
-  -- Disambiguate against existing files.
   local path = base
   local n = 2
   while true do
@@ -74,7 +68,6 @@ local function format_markdown()
     table.insert(parts, "---\n")
   end
 
-  -- Build a lookup: tool_call_id -> (content, is_error).
   local history = smelt.session.messages()
   local tool_results = {}
   for _, msg in ipairs(history) do
@@ -112,7 +105,6 @@ local function format_markdown()
         end
       end
     end
-    -- Tool messages handled inline under Assistant above; skip here.
   end
 
   return table.concat(parts, "\n")

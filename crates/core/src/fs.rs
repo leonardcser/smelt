@@ -1,42 +1,29 @@
-//! Filesystem capability — sync primitives over `std::fs`. Pure I/O,
-//! no policy. Exposed to Lua via `crates/tui/src/lua/api/fs.rs` and
-//! composed by tools that need to read, write, or enumerate the
-//! filesystem.
-//!
-//! Async-yielding wrappers (used when a Lua tool's coroutine awaits a
-//! long read/write) live in the tool's host binding, not here. This
-//! module is the lowest layer.
+//! Filesystem capability — sync primitives over `std::fs`. Pure I/O, no policy.
 
 use std::io;
 use std::path::{Path, PathBuf};
 
-/// Read the entire file as a UTF-8 string.
 pub(crate) fn read_to_string(path: impl AsRef<Path>) -> io::Result<String> {
     std::fs::read_to_string(path)
 }
 
-/// Write `contents` to `path`, replacing existing contents.
 pub(crate) fn write(path: impl AsRef<Path>, contents: impl AsRef<[u8]>) -> io::Result<()> {
     std::fs::write(path, contents)
 }
 
-/// `true` if the path exists (file, dir, or otherwise).
 pub(crate) fn exists(path: impl AsRef<Path>) -> bool {
     path.as_ref().exists()
 }
 
-/// `true` if the path resolves to a regular file.
 pub(crate) fn is_file(path: impl AsRef<Path>) -> bool {
     path.as_ref().is_file()
 }
 
-/// `true` if the path resolves to a directory.
 pub(crate) fn is_dir(path: impl AsRef<Path>) -> bool {
     path.as_ref().is_dir()
 }
 
-/// Enumerate a directory's immediate entries. Returns absolute (or
-/// input-relative) paths in OS order — callers sort if they care.
+/// Returns paths in OS order — callers sort if they care.
 pub(crate) fn read_dir(path: impl AsRef<Path>) -> io::Result<Vec<PathBuf>> {
     let mut out = Vec::new();
     for entry in std::fs::read_dir(path)? {
@@ -45,43 +32,35 @@ pub(crate) fn read_dir(path: impl AsRef<Path>) -> io::Result<Vec<PathBuf>> {
     Ok(out)
 }
 
-/// Create a directory. Errors if the parent does not exist.
 pub(crate) fn mkdir(path: impl AsRef<Path>) -> io::Result<()> {
     std::fs::create_dir(path)
 }
 
-/// Create a directory and any missing parents.
 pub(crate) fn mkdir_all(path: impl AsRef<Path>) -> io::Result<()> {
     std::fs::create_dir_all(path)
 }
 
-/// Remove a regular file.
 pub(crate) fn remove_file(path: impl AsRef<Path>) -> io::Result<()> {
     std::fs::remove_file(path)
 }
 
-/// Remove an empty directory.
 pub(crate) fn remove_dir(path: impl AsRef<Path>) -> io::Result<()> {
     std::fs::remove_dir(path)
 }
 
-/// Remove a directory and all its contents.
 pub(crate) fn remove_dir_all(path: impl AsRef<Path>) -> io::Result<()> {
     std::fs::remove_dir_all(path)
 }
 
-/// Rename or move a path.
 pub(crate) fn rename(from: impl AsRef<Path>, to: impl AsRef<Path>) -> io::Result<()> {
     std::fs::rename(from, to)
 }
 
-/// Copy the file `from` to `to`, returning the number of bytes copied.
 pub(crate) fn copy(from: impl AsRef<Path>, to: impl AsRef<Path>) -> io::Result<u64> {
     std::fs::copy(from, to)
 }
 
-/// Modification time as Unix epoch seconds. `None` if the platform
-/// does not expose mtime or the value is before the epoch.
+/// `None` if the platform does not expose mtime or the value is before the epoch.
 pub(crate) fn mtime_secs(path: impl AsRef<Path>) -> io::Result<Option<u64>> {
     let meta = std::fs::metadata(path)?;
     let modified = meta.modified()?;
@@ -91,23 +70,17 @@ pub(crate) fn mtime_secs(path: impl AsRef<Path>) -> io::Result<Option<u64>> {
         .map(|d| d.as_secs()))
 }
 
-/// File size in bytes, or directory link metadata size on platforms
-/// that report it.
 pub(crate) fn size(path: impl AsRef<Path>) -> io::Result<u64> {
     Ok(std::fs::metadata(path)?.len())
 }
 
-/// One match emitted by [`glob`]: the file's modification time plus
-/// its display path. Callers sort or truncate as they like.
 pub(crate) struct GlobMatch {
     pub mtime: std::time::SystemTime,
     pub path: String,
 }
 
-/// Walk `search_dir` (or `.` when empty) honouring `.gitignore` and
-/// emit files whose path *relative to `search_dir`* matches `pattern`.
-/// Stops once `max` matches accumulate. Returns the matches unsorted —
-/// the caller decides ordering.
+/// Walk `search_dir` (or `.`) honouring `.gitignore`, matching `pattern` against
+/// paths relative to `search_dir`. Stops after `max` matches; returns unsorted.
 pub(crate) fn glob(pattern: &str, search_dir: &str, max: usize) -> Result<Vec<GlobMatch>, String> {
     let matcher = match globset::Glob::new(pattern) {
         Ok(g) => g.compile_matcher(),
@@ -202,7 +175,7 @@ mod tests {
     }
 }
 
-// ── File-state cache (migrated from engine/tools/file_state.rs) ───────────
+// ── File-state cache ──────────────────────────────────────────────────────
 
 use std::collections::HashMap;
 use std::path::Component;
@@ -221,9 +194,8 @@ pub struct FileState {
 const MAX_ENTRIES: usize = 100;
 const MAX_TOTAL_BYTES: usize = 25 * 1024 * 1024;
 
-/// Collapse `.` and `..` segments without touching the filesystem. Absolute
-/// paths stay absolute. Used as the cache key so `./foo` and `foo/../foo`
-/// hit the same entry.
+/// Collapse `.` and `..` without touching the filesystem. Used as the cache
+/// key so `./foo` and `foo/../foo` hit the same entry.
 fn normalize_path(p: &str) -> String {
     let path = Path::new(p);
     let mut out = PathBuf::new();
@@ -244,7 +216,6 @@ fn normalize_path(p: &str) -> String {
     out.to_string_lossy().into_owned()
 }
 
-/// Read `path`'s mtime as milliseconds since the UNIX epoch.
 pub fn file_mtime_ms(path: &str) -> std::io::Result<u64> {
     let meta = std::fs::metadata(path)?;
     let mtime = meta.modified()?;
@@ -255,7 +226,7 @@ pub fn file_mtime_ms(path: &str) -> std::io::Result<u64> {
     Ok(ms)
 }
 
-/// Shared cache of recent file observations. Cheap to clone (Arc-backed).
+/// Shared cache of recent file observations. Arc-backed, cheap to clone.
 #[derive(Clone, Default)]
 pub struct FileStateCache(Arc<Mutex<Inner>>);
 
@@ -276,7 +247,6 @@ impl FileStateCache {
         Self::default()
     }
 
-    /// Return a copy of the cached state for `path`, if present.
     pub fn get(&self, path: &str) -> Option<FileState> {
         let key = normalize_path(path);
         self.0
@@ -295,7 +265,7 @@ impl FileStateCache {
             .unwrap_or(false)
     }
 
-    /// Cache a just-read file. Looks up mtime itself; entry is dedup-eligible.
+    /// Cache a just-read file (dedup-eligible against a later read).
     pub fn record_read(&self, path: &str, content: String, range: (usize, usize)) {
         let mtime_ms = file_mtime_ms(path).unwrap_or(0);
         self.set(
@@ -308,8 +278,7 @@ impl FileStateCache {
         );
     }
 
-    /// Cache a just-written file. Not dedup-eligible — a follow-up read_file
-    /// must actually re-read rather than hit this entry.
+    /// Cache a just-written file. Not dedup-eligible — a follow-up read must re-read.
     pub fn record_write(&self, path: &str, content: String) {
         let mtime_ms = file_mtime_ms(path).unwrap_or(0);
         self.set(
@@ -322,8 +291,8 @@ impl FileStateCache {
         );
     }
 
-    /// Insert or replace an entry. Inserts exceeding the total byte cap are
-    /// dropped; otherwise oldest entries are evicted until both caps hold.
+    /// Insert or replace an entry, evicting oldest entries when either cap is exceeded.
+    /// Entries larger than `MAX_TOTAL_BYTES` are silently dropped.
     pub fn set(&self, path: &str, state: FileState) {
         let new_bytes = state.content.len();
         if new_bytes > MAX_TOTAL_BYTES {
@@ -367,9 +336,9 @@ impl FileStateCache {
     }
 }
 
-/// Error string when the cache has no prior observation or the file drifted
-/// since the last observation. `None` means safe to proceed. `noun` is
-/// `"file"` or `"notebook"`, used to phrase the message for the caller tool.
+/// `None` when safe to proceed; error string when the cache has no prior read
+/// or the file's mtime has changed. `noun` (`"file"` or `"notebook"`) phrases
+/// the message for the caller tool.
 pub fn staleness_error(cache: &FileStateCache, path: &str, noun: &str) -> Option<String> {
     let Some(cached) = cache.get(path) else {
         return Some(format!(
@@ -393,12 +362,10 @@ pub fn staleness_error(cache: &FileStateCache, path: &str, noun: &str) -> Option
     }
 }
 
-// ── Advisory file locking (migrated from engine/tools/mod.rs) ─────────────
+// ── Advisory file locking ─────────────────────────────────────────────────
 
-/// Acquire an exclusive, non-blocking advisory lock on the given file path.
-/// Returns `Ok(guard)` on success. Returns `Err(message)` if the file is
-/// locked by another process (EWOULDBLOCK) or on any other I/O error.
-/// The lock is released when the guard is dropped.
+/// Acquire an exclusive non-blocking advisory lock. Returns `Err` if the file
+/// is locked by another process (EWOULDBLOCK) or on I/O error. Released on drop.
 #[cfg(unix)]
 pub fn try_flock(path: &str) -> Result<FlockGuard, String> {
     use std::os::unix::io::AsRawFd;

@@ -1,16 +1,6 @@
-//! `Surface` — pre-assembled renderer facade.
-//!
-//! Holds the four pieces a non-trivial renderer always needs together:
-//! a [`Compositor`], an [`Arc<Theme>`], a [`LayoutTree`], and the
-//! current terminal size. Exposes the Ui-shaped surface
-//! (`set_layout` / `set_terminal_size` / `force_redraw` / `paint_rect`)
-//! so non-editor consumers don't hand-roll the wiring every time.
-//!
-//! `smelt-edit`'s `Ui` is a thin editor layer on top of `Surface` —
-//! it forwards renderer plumbing to the inner `Surface` and adds
-//! editor-specific state (windows, buffers, focus, capture, overlays).
-//! Standalone consumers (treemaps, dashboards, anything that doesn't
-//! want vim or buffers) use `Surface` directly.
+//! Renderer facade: bundles a [`Compositor`], [`Arc<Theme>`], [`LayoutTree`],
+//! and terminal size. Use directly for standalone renderers; `smelt-edit`'s
+//! `Ui` wraps it and adds editor-specific state.
 
 use std::io::Write;
 use std::sync::Arc;
@@ -69,9 +59,7 @@ impl Surface {
         &self.theme
     }
 
-    /// Mutable handle for in-place theme edits. Uses `Arc::make_mut`
-    /// internally — copy-on-write, so mutations only clone when other
-    /// references are outstanding.
+    /// Mutable theme handle; copy-on-write via `Arc::make_mut`.
     pub fn theme_mut(&mut self) -> &mut Theme {
         Arc::make_mut(&mut self.theme)
     }
@@ -80,8 +68,7 @@ impl Surface {
         self.compositor.force_redraw();
     }
 
-    /// Resolved screen rect for a `PaintId` leaf in the current layout
-    /// tree, or `None` if the id isn't a leaf.
+    /// Resolved screen rect for a `PaintId` leaf, or `None` if not present.
     pub fn paint_rect(&self, id: PaintId) -> Option<Rect> {
         resolve_layout(&self.layout, self.area()).get(&id).copied()
     }
@@ -94,9 +81,7 @@ impl Surface {
         &mut self.compositor
     }
 
-    /// Standard render path: walks the layout tree, paints chrome,
-    /// hands each leaf's `GridSlice` to `paint`. The closure typically
-    /// matches on `PaintId` and dispatches to its own painters.
+    /// Walk the layout tree, paint chrome, and hand each leaf's `GridSlice` to `paint`.
     pub fn render<W, F>(&mut self, w: &mut W, mut paint: F) -> std::io::Result<()>
     where
         W: Write,
@@ -122,9 +107,7 @@ impl Surface {
             })
     }
 
-    /// Bypass the layout tree entirely — paint directly into the
-    /// compositor's grid. Returns optional absolute `(col, row)` for
-    /// hardware cursor placement.
+    /// Paint directly into the compositor's grid, bypassing the layout tree.
     pub fn render_raw<W, F>(&mut self, w: &mut W, paint: F) -> std::io::Result<()>
     where
         W: Write,

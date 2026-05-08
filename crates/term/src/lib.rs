@@ -1,18 +1,13 @@
-//! `smelt-term` — terminal rendering library.
+//! Pure terminal renderer: double-buffered diff/flush, `LayoutTree`, `Grid`,
+//! `paint_chrome`, and half-block-friendly cell primitives.
+//! Editor concepts (`Window`, `Buffer`, overlays) live in `smelt-edit`.
 //!
-//! Pure renderer: `Compositor`, `Grid`, `LayoutTree`, double-buffered
-//! diff/flush, `paint_chrome`, half-block-friendly cell primitives. No
-//! editor concepts (`Window`, `Buffer`, vim, callbacks, overlays);
-//! those live in `smelt-edit`.
-//!
-//! Public entry points:
-//! - [`Compositor`] / [`Compositor::render_with`] — drive a frame.
-//! - [`paint_layout_tree`] — walk a [`LayoutTree`], paint chrome, and
-//!   dispatch each leaf to a host-supplied paint callback.
-//! - [`flush_diff`] — emit cell-diff SGR escapes for a `Grid` diff.
-//! - [`Grid`] / [`GridSlice`] — the cell grid, with `set` / `put_str`
-//!   (full overwrite) and `put_char` / `put_str_fg` / `put_line`
-//!   (partial — preserve bg).
+//! Key entry points:
+//! - [`Compositor::render_with`] — drive a frame.
+//! - [`paint_layout_tree`] — walk a [`LayoutTree`] and dispatch leaves.
+//! - [`flush_diff`] — emit SGR escapes for a `Grid` diff.
+//! - [`Grid`] / [`GridSlice`] — `set`/`put_str` (full overwrite),
+//!   `put_char`/`put_str_fg`/`put_line` (preserve bg).
 
 pub mod compositor;
 pub mod flush;
@@ -35,22 +30,13 @@ pub use smelt_style::theme::{Theme, DEFAULT_ACCENT};
 pub use snapshot::SnapshotFrame;
 pub use surface::Surface;
 
-/// Per-leaf paint dispatcher: `(paint_id, leaf_rect, grid, theme,
-/// terminal_size)`. The renderer hands each [`LayoutTree::Leaf`] to
-/// this callback after resolving its rect; the callback owns the
-/// painting (typically `grid.slice_mut(rect)` and writing through the
-/// slice) and ascribes whatever semantics it likes to the paint id.
+/// Per-leaf paint callback: `(paint_id, leaf_rect, grid, theme, terminal_size)`.
+/// The renderer calls this for each resolved [`LayoutTree::Leaf`].
 pub type PaintDispatch<'a> =
     dyn FnMut(PaintId, Rect, &mut Grid, &std::sync::Arc<Theme>, (u16, u16)) + 'a;
 
-/// Walk `node` against `area`, painting container chrome and
-/// dispatching each leaf to `paint`. Containers (`Vbox` / `Hbox`)
-/// render their border + title before recursing into children at
-/// resolved rects; leaves are forwarded to the paint callback with
-/// the resolved leaf rect. The renderer ascribes no semantics to
-/// `PaintId` — host code maps it back to whatever leaf it represents
-/// (e.g. `smelt-edit`'s editor surface, or a host's own per-leaf
-/// painter).
+/// Walk `node` against `area`, paint chrome on containers, and dispatch
+/// each resolved leaf rect to `paint`.
 pub fn paint_layout_tree(
     grid: &mut Grid,
     theme: &std::sync::Arc<Theme>,

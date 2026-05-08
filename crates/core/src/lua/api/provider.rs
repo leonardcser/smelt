@@ -1,13 +1,4 @@
-//! `smelt.provider` bindings — config-time provider registration.
-//!
-//! `smelt.provider.register(name, { type, api_base, api_key_env, models })`
-//! stores into `LuaShared.providers`; the startup sequence reads it
-//! after `init.lua` runs.
-//!
-//! Each entry in `models` is either a bare string (just the model name)
-//! or a table with the full per-model config: `{ name, temperature,
-//! top_p, top_k, min_p, repeat_penalty, tool_calling, input_cost,
-//! output_cost, cache_read_cost, cache_write_cost }`.
+//! `smelt.provider` — config-time provider and model registration.
 
 use mlua::prelude::*;
 use std::sync::Arc;
@@ -15,8 +6,6 @@ use std::sync::Arc;
 use crate::config::{ModelConfig, ProviderConfig};
 use crate::lua::LuaShared;
 
-/// Reject-unknown reader for per-model config tables. Plugins that rely
-/// on a typo'd field would otherwise silently lose the override.
 fn parse_model_table(t: &mlua::Table) -> LuaResult<ModelConfig> {
     const KNOWN: &[&str] = &[
         "name",

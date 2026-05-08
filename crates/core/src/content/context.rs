@@ -1,11 +1,6 @@
-//! Width-independent context plumbed through the layout stage.
-
 use crate::transcript_model::ViewState;
 
-/// Settings that flow through the layout stage. Layout produces a
-/// theme-independent `DisplayBlock` so the only width-relevant inputs
-/// are the viewport width, whether thinking blocks are expanded, and
-/// the per-block view state (expanded / collapsed / trimmed).
+/// Settings threaded through the layout stage.
 #[derive(Debug, Clone, Copy)]
 pub struct LayoutContext {
     pub width: u16,

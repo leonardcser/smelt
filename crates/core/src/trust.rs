@@ -1,15 +1,7 @@
-//! Project-local config trust. Smelt loads `<cwd>/.smelt/init.lua`
-//! and `<cwd>/.smelt/plugins/*.lua` only after the user has marked
-//! the current content trusted, so cloning a hostile repo can't run
-//! arbitrary code.
-//!
-//! Trust is keyed by the canonical path of the project root and the
-//! SHA-256 hash of the concatenated file contents. Editing a file
-//! invalidates the hash and demands re-trust; deleting `.smelt/`
-//! removes nothing from the trust store but the directory simply
-//! has no content to load.
-//!
-//! Persisted to `<XDG_STATE_HOME>/smelt/trust.json`.
+//! Project-local config trust. `.smelt/` is only loaded after the user marks
+//! it trusted. Trust is keyed by canonical project-root path and SHA-256 of
+//! file contents; editing any file invalidates the hash. Persisted to
+//! `<XDG_STATE_HOME>/smelt/trust.json`.
 
 use std::collections::BTreeMap;
 use std::fs;
@@ -19,13 +11,11 @@ use sha2::{Digest, Sha256};
 
 const TRUST_FILE: &str = "trust.json";
 
-/// Per-project entry in the trust store.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct TrustEntry {
     pub hash: String,
 }
 
-/// Result of inspecting `.smelt/` against the trust store.
 #[derive(Debug, Clone)]
 pub enum TrustState {
     /// No `.smelt/` content under the project root.
@@ -36,14 +26,12 @@ pub enum TrustState {
     Untrusted { hash: String },
 }
 
-/// Path to the persisted trust store.
 pub fn trust_path() -> PathBuf {
     engine::state_dir().join(TRUST_FILE)
 }
 
-/// Compute the SHA-256 of project content under `<cwd>/.smelt/`.
-/// Returns `None` when no relevant files exist. Files are walked in
-/// sorted order so the hash is deterministic.
+/// SHA-256 of `.smelt/` files walked in sorted order (deterministic).
+/// Returns `None` when no relevant files exist.
 pub fn project_content_hash(cwd: &Path) -> Option<String> {
     let dir = cwd.join(".smelt");
     if !dir.exists() {
@@ -67,9 +55,6 @@ pub fn project_content_hash(cwd: &Path) -> Option<String> {
     Some(format!("{:x}", hasher.finalize()))
 }
 
-/// Walk `<cwd>/.smelt/` for files smelt would auto-load:
-/// `init.lua`, `plugins/*.lua`, `commands/*.md`. Pure read; no side
-/// effects.
 fn collect_files(root: &Path, dir: &Path, out: &mut Vec<PathBuf>) {
     let Ok(entries) = fs::read_dir(dir) else {
         return;
@@ -119,7 +104,6 @@ fn relevant_file(rel: &Path) -> bool {
     false
 }
 
-/// Inspect `.smelt/` against the trust store.
 pub fn project_trust_state(cwd: &Path) -> TrustState {
     let Some(hash) = project_content_hash(cwd) else {
         return TrustState::NoContent;
@@ -132,9 +116,7 @@ pub fn project_trust_state(cwd: &Path) -> TrustState {
     }
 }
 
-/// Mark `cwd`'s current content trusted by writing its hash to the
-/// store. Returns the recorded hash, or `Err` if no relevant content
-/// exists.
+/// Returns the recorded hash, or `Err` if no relevant content exists.
 pub fn mark_trusted(cwd: &Path) -> Result<String, String> {
     let hash = project_content_hash(cwd)
         .ok_or_else(|| "no project content under .smelt/ to trust".to_string())?;

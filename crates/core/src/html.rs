@@ -1,10 +1,5 @@
-//! HTML capability — small read-only surface over `scraper`. Pure
-//! parsing, no I/O. Exposed to Lua via `crates/tui/src/lua/api/html.rs`
-//! and composed by tools that need to digest a fetched page.
-//!
-//! Read shapes ship for title, links, plain text, and a markdown
-//! projection that consumers like `web_fetch` use to feed an LLM
-//! extractor.
+//! HTML capability — pure parsing over `scraper`, no I/O. Exposes title,
+//! links, plain text, and a markdown projection for LLM consumption.
 
 use scraper::{ElementRef, Html, Selector};
 use std::collections::HashSet;
@@ -14,7 +9,6 @@ const SKIP_ELEMENTS: &[&str] = &[
     "script", "style", "noscript", "iframe", "object", "embed", "meta", "link", "svg",
 ];
 
-/// Extract the document title, if present.
 pub(crate) fn title(html: &str) -> Option<String> {
     let doc = Html::parse_document(html);
     let sel = Selector::parse("title").ok()?;
@@ -24,8 +18,7 @@ pub(crate) fn title(html: &str) -> Option<String> {
         .filter(|s| !s.is_empty())
 }
 
-/// Extract `<a href>` targets, resolved against `base_url` when given.
-/// Output is unique-preserving-insertion-order.
+/// Extract `<a href>` targets, resolved against `base_url`. Output preserves insertion order, deduplicated.
 pub(crate) fn links(html: &str, base_url: Option<&str>) -> Vec<String> {
     let doc = Html::parse_document(html);
     let Ok(sel) = Selector::parse("a[href]") else {
@@ -54,8 +47,6 @@ pub(crate) fn links(html: &str, base_url: Option<&str>) -> Vec<String> {
     out
 }
 
-/// One DuckDuckGo HTML search result row: title text, resolved
-/// destination URL, and an optional snippet.
 #[derive(Debug, Clone)]
 pub(crate) struct DdgResult {
     pub(crate) title: String,
@@ -63,10 +54,8 @@ pub(crate) struct DdgResult {
     pub(crate) description: String,
 }
 
-/// Parse the DuckDuckGo HTML results page (`html.duckduckgo.com/html/`)
-/// into a list of [`DdgResult`]s. Returns at most 20 entries — enough
-/// for the model, soft enough on token budget. Empty title or empty
-/// resolved link skips the row.
+/// Parse `html.duckduckgo.com/html/` results. Returns at most 20 entries;
+/// rows with empty title or unresolvable link are skipped.
 pub(crate) fn parse_ddg_results(html: &str) -> Vec<DdgResult> {
     let doc = Html::parse_document(html);
     let result_sel = match Selector::parse("div.result, div.web-result") {
@@ -140,10 +129,8 @@ fn extract_ddg_url(ddg_url: &str) -> String {
     String::new()
 }
 
-/// Plain-text projection: walks the DOM, skips script/style/etc, joins
-/// visible text with spaces. Whitespace is collapsed to single spaces;
-/// blocks introduce a newline. Good enough for "read what the page
-/// says"; not a faithful renderer.
+/// Plain-text DOM projection: skips script/style, collapses whitespace,
+/// block elements introduce newlines. Not a faithful renderer.
 pub(crate) fn to_text(html: &str) -> String {
     let doc = Html::parse_document(html);
     let mut out = String::new();
@@ -197,12 +184,9 @@ fn walk(node: &ego_tree::NodeRef<scraper::node::Node>, out: &mut String) {
     }
 }
 
-/// Combined markdown projection: page title, body content rendered as
-/// markdown, and filtered outbound links resolved against `base_url`.
-/// Used by `web_fetch` to digest a fetched page into a single payload
-/// before extraction. Links are deduplicated, fragment-stripped, and
-/// capped at 50; `javascript:` / `mailto:` / `tel:` / pure-fragment
-/// targets are dropped.
+/// Markdown projection of a fetched page: title, body as markdown, and
+/// outbound links (deduplicated, fragment-stripped, capped at 50; `javascript:` /
+/// `mailto:` / `tel:` / fragment-only targets dropped).
 #[derive(Debug, Clone)]
 pub(crate) struct Markdown {
     pub(crate) title: Option<String>,

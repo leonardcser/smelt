@@ -1,10 +1,5 @@
-//! `smelt.statusline` bindings — register / unregister statusline
-//! sources by name + a `snapshot()` of all state the core composer
-//! reads. The Rust side stays the layout engine (priority dropping,
-//! truncation, alignment) and `smelt.statusline.snapshot()` shovels
-//! every input the bottom-row composition needs into one Lua table so
-//! `runtime/lua/smelt/status.lua` can build the items without reaching
-//! across half a dozen narrower bindings every refresh.
+//! `smelt.statusline` — register/unregister sources and expose a `snapshot()` of all
+//! state the Lua composer needs in one table per refresh.
 
 use crate::lua::{LuaHandle, LuaShared, StatusSource};
 use mlua::prelude::*;
@@ -56,9 +51,7 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
         "snapshot",
         lua.create_function(|lua, ()| {
             match crate::lua::try_with_app(|app| build_snapshot(app, lua)) {
-                // No app pointer (cold-start unit-test path); return an
-                // empty table so status.lua can short-circuit cleanly.
-                None => lua.create_table(),
+                None => lua.create_table(), // no app pointer — status.lua short-circuits
                 Some(result) => result,
             }
         })?,
@@ -68,16 +61,13 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
 }
 
 /// Build the full snapshot the Lua composer consumes once per refresh.
-/// Mirrors the inputs the retired Rust composition read off `TuiApp`;
-/// see `runtime/lua/smelt/status.lua` for the segment shape.
 fn build_snapshot(app: &mut crate::app::TuiApp, lua: &Lua) -> LuaResult<mlua::Table> {
     use crate::smelt_term::text::byte_to_cell;
     use smelt_core::style::Color;
 
     let t = lua.create_table()?;
 
-    // Theme colors as ANSI u8s. `nil` slots mean the highlight group
-    // has no fg/bg and the segment should fall back to the default.
+    // Theme colors as ANSI u8s; nil means fall back to the terminal default.
     let theme = lua.create_table()?;
     let theme_ref = app.ui.theme();
     let fg_of = |group: &str| theme_ref.get(group).fg.and_then(super::color_to_ansi);
@@ -102,10 +92,7 @@ fn build_snapshot(app: &mut crate::app::TuiApp, lua: &Lua) -> LuaResult<mlua::Ta
     }
     t.set("theme", theme)?;
 
-    // Working state + Rust-rendered throbber sub-spans (the throbber
-    // walks `LiveTurn` / `LastTurn` state machines tracked entirely on
-    // `WorkingState`; cheaper to project the spans than to re-export
-    // the state machine itself).
+    // Working state + throbber spans (cheaper to project than re-export the state machine).
     let working = lua.create_table()?;
     working.set("animating", app.working.is_animating())?;
     working.set("compacting", app.working.is_compacting())?;
@@ -132,10 +119,7 @@ fn build_snapshot(app: &mut crate::app::TuiApp, lua: &Lua) -> LuaResult<mlua::Ta
     working.set("throbber", throbber_arr)?;
     t.set("working", working)?;
 
-    // Vim mode resolution mirrors the keymap dispatcher: focused
-    // overlay-leaf with vim wins, then split under `app_focus`. A
-    // non-vim overlay leaf yields no label (those windows have no
-    // buffer cursor — same model nvim uses).
+    // Vim mode: focused overlay-leaf with vim wins; non-vim overlay leaf yields no label.
     let vim_tbl = lua.create_table()?;
     let focused_window_has_vim = app
         .ui
@@ -179,15 +163,12 @@ fn build_snapshot(app: &mut crate::app::TuiApp, lua: &Lua) -> LuaResult<mlua::Ta
     }
     t.set("vim", vim_tbl)?;
 
-    // AgentMode — name only; icon resolves through `smelt.mode.icon`
-    // in Lua so plugin-defined modes pick up their own glyph. The
-    // composer reads `theme.{plan,apply,yolo,muted}_fg` to colorize.
+    // AgentMode: name only; icon resolves in Lua so plugin-defined modes pick up their glyph.
     let mode_tbl = lua.create_table()?;
     mode_tbl.set("name", app.core.config.mode.as_str())?;
     t.set("mode", mode_tbl)?;
 
-    // Indicators that flip the "permission pending" / "N procs" / "N
-    // agents" trio on the right-of-throbber strip.
+    // Right-strip indicators.
     let blocked = app.focused_overlay_blocks_agent();
     t.set("permission_pending", app.pending_dialog && !blocked)?;
     t.set("running_procs", app.core.processes.running_count() as i64)?;
@@ -201,8 +182,7 @@ fn build_snapshot(app: &mut crate::app::TuiApp, lua: &Lua) -> LuaResult<mlua::Ta
     settings.set("show_tps", show_tps)?;
     t.set("settings", settings)?;
 
-    // Position — mirrors the retired `compute_status_position` for
-    // both prompt and content focus. `nil` for an empty transcript.
+    // Cursor position; nil for empty transcript.
     let position = match app.app_focus {
         crate::app::AppFocus::Prompt => {
             let buf = &app.input.win.text;

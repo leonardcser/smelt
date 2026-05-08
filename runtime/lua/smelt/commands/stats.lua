@@ -1,7 +1,4 @@
--- Built-in /stats and /cost commands.
---
--- Both open a passive scrollable text dialog formatted Rust-side via
--- `smelt.metrics.*`; q / ? / Esc dismiss.
+-- Built-in /stats and /cost commands. Scrollable text dialogs; q/Esc dismiss.
 
 local function open_text_modal(title, text)
   smelt.spawn(function()

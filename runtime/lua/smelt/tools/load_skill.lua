@@ -1,7 +1,4 @@
--- Built-in load_skill tool — fetch the formatted body of a skill
--- discovered at startup. Composes `smelt.skills.content` (FFI into
--- the shared `SkillLoader`) so the prompt-section listing in the
--- system prompt and this tool's lookups stay in sync.
+-- Built-in load_skill tool. Fetches a skill body via `smelt.skills.content`.
 
 smelt.tools.register({
   name = "load_skill",

@@ -1,8 +1,4 @@
-//! `smelt.messages` — read / mark / clear the persistent message log.
-//!
-//! Lua errors append full bodies (with tracebacks) here while the
-//! toast overlay shows only the first line. The `/messages` slash
-//! command renders this list in a scrollable buffer.
+//! `smelt.messages` — persistent message log. Full bodies (with tracebacks) live here; toasts show only the first line.
 
 use crate::lua::LuaShared;
 use crate::messages::MessageKind;

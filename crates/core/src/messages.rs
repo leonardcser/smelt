@@ -1,15 +1,8 @@
-//! Persistent message log — the nvim `:messages` model.
-//!
-//! Lua errors, deferred warnings, and any other diagnostic that
-//! shouldn't disappear with the next toast land here. Toasts get a
-//! one-line summary; the full body (multi-line tracebacks, source
-//! context) stays addressable via `/messages` and the
-//! `smelt.messages.*` Lua bindings.
+//! Persistent message log. Lua errors, warnings, and diagnostics that should
+//! outlive a toast land here; full bodies are accessible via `/messages`.
 
 use std::time::SystemTime;
 
-/// Capacity guard. Append-only ring; on overflow we drop the oldest
-/// entries so the log stays bounded.
 const MAX_ENTRIES: usize = 1024;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -35,22 +28,17 @@ pub struct MessageEntry {
     /// Coarse origin label (`"lua"`, `"engine"`, …). Free-form;
     /// shown verbatim in the `/messages` overlay.
     pub source: String,
-    /// First line — what shows up in the toast.
+    /// First line; shown in the toast.
     pub summary: String,
-    /// Full body. May be the same string as `summary` for short
-    /// messages; for Lua tracebacks it is the multi-line form.
+    /// Full body (multi-line for tracebacks; same as `summary` for short messages).
     pub full: String,
-    /// Wall-clock timestamp at append.
     pub ts: SystemTime,
 }
 
-/// Persistent message buffer. Locked behind a `Mutex` so
-/// `record_error` (which holds only `&self` on `LuaRuntime`) can
-/// append without re-entering `&mut Core`.
+/// Append-only message ring. Drives the statusline unread-error indicator;
+/// `/messages` clears it on open.
 pub struct Messages {
     entries: Vec<MessageEntry>,
-    /// Errors appended since the last `mark_read`. Drives the
-    /// statusline indicator; `/messages` clears it on open.
     unread_errors: usize,
 }
 

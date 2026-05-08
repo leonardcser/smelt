@@ -1,9 +1,4 @@
 //! Prompt text spans, wrapping, and styled-char rendering.
-//!
-//! Shared between prompt rendering and queued/btw overlays. Handles the
-//! raw-buffer → display-buffer expansion (attachments, `@path` refs),
-//! wrapping text into visual lines while tracking the cursor column,
-//! and painting those lines with selection + cursor highlighting.
 
 use crate::input::ATTACHMENT_MARKER;
 pub(crate) use crate::smelt_term::text::wrap_line;
@@ -184,14 +179,8 @@ fn display_char_width(ch: char, col: usize) -> usize {
     }
 }
 
-/// Compute the display-char offset of each visual line.
-///
-/// The display buffer is the concatenation of spans (with attachments
-/// expanded to their labels).  `wrap_and_locate_cursor` splits on `\n`
-/// and then further wraps each logical line into visual lines.  The
-/// char offsets it uses include +1 for every `\n` consumed by `split`.
-/// We replicate that counting here by re-splitting the display buffer
-/// and mapping each logical line's visual chunks to offsets.
+/// Compute the display-char start offset of each visual line, mirroring
+/// `wrap_and_locate_cursor`'s `+1` per `\n` consumed by `split`.
 pub(super) fn compute_visual_line_offsets(
     display_buf: &str,
     visual_lines: &[(String, Vec<SpanKind>)],
@@ -393,7 +382,6 @@ mod tests {
     #[test]
     fn offsets_selection_across_wrapped() {
         let offsets = compute_visual_line_offsets("abcdef", &vlines(&["abc", "def"]));
-        // Selection chars 1..5 should map to line0:(1,3), line1:(0,2).
         let sel = (1usize, 5usize);
         let l0_s = sel.0.saturating_sub(offsets[0]);
         let l0_e = sel.1.min(offsets[0] + 3) - offsets[0];

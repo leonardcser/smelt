@@ -1,9 +1,7 @@
-// Re-export headless-safe modules from core
 pub use smelt_core::content::builder;
 pub use smelt_core::content::highlight;
 pub(crate) mod selection;
 
-// Tui-specific submodules
 pub(crate) mod block_buffers;
 pub(crate) mod layout;
 pub(crate) mod prompt_buf;

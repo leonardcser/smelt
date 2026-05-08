@@ -1,6 +1,4 @@
-//! `smelt.win` bindings — focus state, keymap / event registration,
-//! buf resolution, window creation/configuration, overlay leaf close.
-//! UiHost-only.
+//! `smelt.win` — focus, keymap/event registration, buf resolution, window config. UiHost-only.
 
 use super::app_read;
 use crate::lua::{parse_keybind, parse_win_event, LuaShared};
@@ -98,10 +96,7 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
             Ok(())
         })?,
     )?;
-    // `smelt.win.buf(win_id) -> buf_id | nil` — resolve the
-    // Buffer backing a Window. Used by Lua-side dialog
-    // orchestration (e.g. `dialog.lua` reading text from an
-    // input leaf at submit time).
+    // `smelt.win.buf(win_id) -> buf_id | nil`
     win_tbl.set(
         "buf",
         lua.create_function(|_, id: u64| {
@@ -112,11 +107,7 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
             Ok(buf)
         })?,
     )?;
-    // `smelt.win.rect(win_id) -> { row, col, width, height } | nil` —
-    // last-painted viewport rect for `win_id`. Returns `nil` until the
-    // window has been rendered at least once. Plugins use this to make
-    // their content responsive to the window's current size (e.g. the
-    // perf panel truncating its label column to the live width).
+    // `smelt.win.rect(win_id) -> {row, col, width, height} | nil` — nil until first render.
     win_tbl.set(
         "rect",
         lua.create_function(|lua, id: u64| {
@@ -140,10 +131,7 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
             }
         })?,
     )?;
-    // `smelt.win.set_focus(win_id)` — give keyboard focus to a Window.
-    // Wraps `Ui::set_focus` so Lua-side dialog orchestration can move
-    // focus between leaves (e.g. confirm.lua's `e` keymap that focuses
-    // the reason input).
+    // `smelt.win.set_focus(win_id)`
     win_tbl.set(
         "set_focus",
         lua.create_function(|_, id: u64| {

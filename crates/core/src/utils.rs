@@ -1,9 +1,3 @@
-/// Format elapsed seconds into a human-readable string.
-///
-/// Format rules:
-/// - 0-59s: "Xs" (e.g., "45s")
-/// - 1-59m: "Xm Ys" (e.g., "3m 27s")
-/// - 1h+: "Xh Ym Zs" (e.g., "2h 15m 30s")
 pub fn format_duration(secs: u64) -> String {
     if secs < 60 {
         format!("{secs}s")
@@ -19,8 +13,8 @@ pub fn format_duration(secs: u64) -> String {
     }
 }
 
-/// Map `f` over `items` across `available_parallelism()` worker threads,
-/// dropping `None` results. Output order is not stable across threads.
+/// Map `f` over `items` in parallel worker threads, dropping `None` results.
+/// Output order is not stable.
 pub fn parallel_filter_map<T, R, F>(items: Vec<T>, f: F) -> Vec<R>
 where
     T: Send + 'static,

@@ -5,10 +5,7 @@ use std::time::{Duration, Instant};
 
 static ENABLED: AtomicBool = AtomicBool::new(false);
 
-/// Cap on retained samples per label. Live collection (debug panel,
-/// long-running sessions) keeps memory bounded by trimming the oldest
-/// sample when the buffer fills. `--bench` mode picks up the same cap;
-/// 1024 samples is enough for stable percentiles without unbounded growth.
+/// Max retained samples per label. Oldest sample is dropped when the buffer fills.
 const RING_CAPACITY: usize = 1024;
 
 fn push_capped<T>(buf: &mut Vec<T>, value: T) {
@@ -18,21 +15,17 @@ fn push_capped<T>(buf: &mut Vec<T>, value: T) {
     buf.push(value);
 }
 
-/// Global per-label samples (self-time durations).
 fn samples() -> &'static Mutex<HashMap<&'static str, Vec<Duration>>> {
     static S: OnceLock<Mutex<HashMap<&'static str, Vec<Duration>>>> = OnceLock::new();
     S.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
-/// Global per-label value samples (arbitrary u64, e.g. byte counts).
 fn value_samples() -> &'static Mutex<HashMap<&'static str, Vec<u64>>> {
     static V: OnceLock<Mutex<HashMap<&'static str, Vec<u64>>>> = OnceLock::new();
     V.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
-/// Record a raw numeric sample under `label`. Used for things that
-/// aren't durations — byte counts, cache sizes, etc. Printed in the
-/// summary alongside the duration table.
+/// Record a raw numeric sample (byte count, cache size, etc.) under `label`.
 pub fn record_value(label: &'static str, value: u64) {
     if !enabled() {
         return;
@@ -46,19 +39,15 @@ pub fn enabled() -> bool {
     ENABLED.load(Ordering::Relaxed)
 }
 
-/// Enable bench-mode collection. Idempotent.
 pub fn enable() {
     ENABLED.store(true, Ordering::Relaxed);
 }
 
-/// Toggle collection on or off at runtime. The debug panel uses this
-/// so the perf overhead only applies while the panel is open.
 pub fn set_enabled(on: bool) {
     ENABLED.store(on, Ordering::Relaxed);
 }
 
-/// Drop every retained sample. Called when the panel toggles off so a
-/// reopened panel starts with a fresh window.
+/// Drop all retained samples.
 pub fn clear() {
     if let Ok(mut s) = samples().lock() {
         s.clear();
@@ -71,7 +60,6 @@ pub fn clear() {
     }
 }
 
-/// One row of the live snapshot consumed by `smelt.metrics.perf_snapshot()`.
 #[derive(Debug, Clone)]
 pub struct DurationRow {
     pub label: &'static str,
@@ -106,8 +94,7 @@ fn pct_idx(count: usize, p: usize) -> usize {
     ((count * p) / 100).min(count.saturating_sub(1))
 }
 
-/// Snapshot the current sample buffers without clearing them. Sorted
-/// by total time descending so the worst offender lands at the top.
+/// Snapshot current sample buffers, sorted by total time descending.
 pub fn snapshot() -> Snapshot {
     let mut out = Snapshot::default();
     if let Ok(map) = samples().lock() {
@@ -158,9 +145,7 @@ pub fn snapshot() -> Snapshot {
     out
 }
 
-/// Returns an RAII guard that records a self-time sample for `label` when
-/// dropped. Also records allocation count and bytes delta if the counting
-/// allocator is enabled. Cheap no-op if bench mode is off.
+/// RAII guard that records a self-time (and allocation delta when enabled) for `label` on drop.
 pub fn begin(label: &'static str) -> Option<Guard> {
     if !enabled() {
         return None;
@@ -197,7 +182,6 @@ impl Drop for Guard {
     }
 }
 
-/// Per-label alloc samples: `(count, bytes)` deltas captured by `Guard`.
 type AllocSamples = Mutex<HashMap<&'static str, Vec<(u64, u64)>>>;
 
 fn alloc_samples() -> &'static AllocSamples {
@@ -205,10 +189,6 @@ fn alloc_samples() -> &'static AllocSamples {
     A.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
-// ── summary printing ─────────────────────────────────────────────────────
-
-// Total visual width of the table:
-// 30 (label) + 1 + 8 (calls) + 6 * (1 + 10) = 30 + 1 + 8 + 66 = 105
 const TABLE_WIDTH: usize = 115;
 
 /// Print a summary table of all recorded timings to stdout.
@@ -223,7 +203,6 @@ pub fn print_summary() {
     let mut groups: Vec<(&'static str, Vec<Duration>)> =
         map.iter().map(|(k, v)| (*k, v.clone())).collect();
     drop(map);
-    // Sort by total time descending so worst offenders are at the top.
     groups.sort_by(|a, b| {
         let ta: Duration = a.1.iter().sum();
         let tb: Duration = b.1.iter().sum();
@@ -275,7 +254,6 @@ pub fn print_summary() {
             let avg_bytes = total_bytes / bytes.len() as u64;
             let total_count: u64 = counts.iter().sum();
             let avg_count = total_count / counts.len() as u64;
-            // Two rows per label: one for count, one for bytes.
             println!(
                 "{}",
                 format_row(
@@ -302,7 +280,6 @@ pub fn print_summary() {
         drop(alloc_map);
     }
 
-    // Value samples (byte counts etc.) in a smaller table below.
     let value_map = value_samples().lock().unwrap();
     if !value_map.is_empty() {
         let mut vgroups: Vec<(&'static str, Vec<u64>)> =
@@ -328,10 +305,7 @@ fn print_header(first: &str, bar: &str) {
     println!("{}", bar);
 }
 
-/// Format one row of a samples table. `samples` must already be sorted
-/// ascending. Generic over the sample value type so both the duration
-/// and byte-count tables share the same column layout and percentile
-/// math.
+/// Format one row. `samples` must be sorted ascending.
 fn format_row<T, F>(label: &str, samples: &[T], total: T, avg: T, fmt: F) -> String
 where
     T: Copy,
@@ -356,22 +330,16 @@ where
     )
 }
 
-/// Colorize a formatted row based on the row's `total` time relative to
-/// the worst row's total. Uses a log-scaled gradient from dim → red.
 fn colorize_row(row: &str, total: Duration, max_total: Duration) -> String {
     let code = severity_color(total, max_total);
     format!("\x1b[{}m{}\x1b[0m", code, row)
 }
 
-/// Map a (total, max_total) pair to an ANSI SGR color code.
-/// Log-scaled so that the totals (which span ~5 orders of magnitude in
-/// practice) get spread across the gradient instead of all clumping at
-/// the bottom.
+/// Map a `(total, max_total)` pair to an ANSI SGR color code using a log scale.
 fn severity_color(total: Duration, max_total: Duration) -> &'static str {
     let t = total.as_secs_f64();
     let m = max_total.as_secs_f64().max(1e-9);
-    // Normalize on a log scale: ratio = log(t)/log(m), clamped to [0, 1].
-    // Using log(1 + x * 1000) to avoid -inf at zero and to compress.
+    // log(1 + x*1000) avoids -inf at zero and compresses the range.
     let ratio = (1.0 + t * 1000.0).ln() / (1.0 + m * 1000.0).ln();
     let ratio = ratio.clamp(0.0, 1.0);
 

@@ -1,5 +1,4 @@
--- Plan-mode plugin: swaps the `exit_plan_mode` tool and the plan-mode
--- system prompt section in / out as the user enters or leaves Plan mode.
+-- Plan-mode plugin: manages the `exit_plan_mode` tool and system prompt section.
 
 local PLAN_PROMPT = [[
 # Plan mode
@@ -40,7 +39,6 @@ You may only use read-only tools: read_file, glob, grep, bash (read-only command
 - Use exit_plan_mode to submit the plan for approval -- do NOT ask about plan approval via text
 - Don't make large assumptions about user intent -- ask first]]
 
--- ── exit_plan_mode tool (inline) ───────────────────────────────────────
 
 local ADJECTIVES = {
   "amber", "ancient", "azure", "blazing", "bold", "brave", "bright", "broad",
@@ -168,7 +166,6 @@ local function unregister_exit_plan_mode()
   smelt.tools.unregister("exit_plan_mode")
 end
 
--- ── mode hook driver ────────────────────────────────────────────────────
 
 local function activate()
   smelt.prompt.set_section("plan_mode", PLAN_PROMPT)
@@ -180,7 +177,6 @@ local function deactivate()
   unregister_exit_plan_mode()
 end
 
--- React to mode changes via the `agent_mode` cell.
 smelt.au.on("agent_mode", function(mode)
   if mode == "plan" then
     activate()
@@ -189,7 +185,6 @@ smelt.au.on("agent_mode", function(mode)
   end
 end)
 
--- If we're already in plan mode at session start, activate.
 smelt.au.on("session_started", function()
   if smelt.mode.get() == "plan" then activate() end
 end)

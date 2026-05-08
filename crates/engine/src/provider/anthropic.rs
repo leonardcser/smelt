@@ -167,7 +167,7 @@ pub(super) fn parse_response(data: &serde_json::Value) -> Result<ParsedResponse,
         }
     }
 
-    // Check for thinking in the top-level thinking field (summary mode).
+    // Summary mode places thinking in a top-level `thinking` array, not content blocks.
     if reasoning.is_none() {
         if let Some(thinking) = data["thinking"].as_array() {
             for block in thinking {

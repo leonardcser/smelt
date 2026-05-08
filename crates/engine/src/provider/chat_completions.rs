@@ -130,7 +130,6 @@ pub(super) async fn read_stream(
     let mut usage = TokenUsage::default();
 
     sse::read_events(resp, cancel, |ev| {
-        // Usage from the final chunk
         if let Some(u) = ev.get("usage") {
             usage.prompt_tokens = u["prompt_tokens"].as_u64().map(|n| n as u32);
             usage.completion_tokens = usage
@@ -186,7 +185,6 @@ pub(super) async fn read_stream(
     let reasoning = non_empty(reasoning);
     let tool_calls = collect_indexed_tool_calls(tool_calls);
 
-    // Fallback: extract tool calls from text (vLLM etc.)
     if tool_calls.is_empty() {
         let (from_content, cleaned_content) = extract_tool_calls_from_text(content.as_deref());
         let (from_reasoning, cleaned_reasoning) =

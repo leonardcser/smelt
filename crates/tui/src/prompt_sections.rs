@@ -42,8 +42,6 @@ impl PromptSections {
     }
 }
 
-// ── Default section content ─────────────────────────────────────────────────
-
 fn base_section(cwd: &std::path::Path) -> String {
     format!(
         "You are an expert coding agent running in the user's terminal. You help with \

@@ -1,8 +1,4 @@
--- Built-in `/vim` and `/thinking` toggles.
---
--- Direct shortcuts for the two most-toggled boolean settings. The
--- `/settings` picker covers the same ground via a menu; these are the
--- single-keystroke aliases users reach for during a session.
+-- `/vim` and `/thinking` toggles (quick aliases for the two most-used settings).
 
 smelt.cmd.register("vim", function()
   smelt.settings.vim = not smelt.settings.vim

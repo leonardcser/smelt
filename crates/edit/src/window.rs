@@ -10,32 +10,18 @@ use smelt_buffer::buffer::VirtTextPos;
 use smelt_term::grid::{GridSlice, Style};
 use smelt_term::layout::{Gutters, Rect};
 
-/// Per-frame paint context handed to `Window::render`. Carries terminal
-/// size + theme so renderers don't reach back into the host.
+/// Per-frame paint context for `Window::render`.
 #[derive(Default, Clone)]
 pub struct DrawContext {
     pub terminal_width: u16,
     pub terminal_height: u16,
     pub focused: bool,
-    /// Global cursor shape for this frame. Only meaningful when
-    /// `focused` is true — non-focused windows ignore it. `Block` paints
-    /// the glyph + style at `(cursor_col, cursor_line)` after extmark
-    /// layering; `Hardware` flows through `Ui::render` to the terminal
-    /// caret and is inert in `Window::render`; `Hidden` paints nothing.
+    /// Only meaningful when `focused` is true. `Block` paints at cursor pos;
+    /// `Hardware` is handled by `Ui::render`; `Hidden` paints nothing.
     pub cursor_shape: CursorShape,
-    /// Theme registry resolved per-frame from `Ui`. Renderers read named
-    /// highlight groups (`"Visual"`, `"SmeltAccent"`, …) via
-    /// `theme.get(name)`; missing names return `Style::default()`. Held
-    /// behind an `Arc` so per-leaf `DrawContext` construction is a
-    /// pointer bump, not a `Theme` clone — themes carry an internal
-    /// `HashMap<String, Style>` keyed by hl-group name and would
-    /// allocate every frame, every leaf, otherwise.
+    /// `Arc` so per-leaf construction is a pointer bump, not a clone.
     pub theme: std::sync::Arc<Theme>,
-    /// Global vim mode for this frame. `Window::render` consults it
-    /// when auto-deriving the visual-mode selection paint from the
-    /// Window's own `vim_state.visual_anchor` for vim-enabled
-    /// windows that haven't set an explicit `Buffer::set_selection`
-    /// override (e.g. dialog content panels).
+    /// Used by `Window::render` to auto-derive visual selection ranges.
     pub vim_mode: VimMode,
 }
 
@@ -75,12 +61,7 @@ impl ScrollbarState {
         self.viewport_rows.saturating_sub(self.thumb_size())
     }
 
-    /// Convert a click row (relative to viewport top) into the thumb
-    /// top such that the thumb is centered on the click — the row the
-    /// pointer is on lands on the middle of the thumb, not its first
-    /// cell. Clamped to `[0, max_thumb_top()]`. Used by both the
-    /// jump-scroll click and the in-flight drag tick so the thumb
-    /// stays under the pointer.
+    /// Click row → thumb top, centered on the click. Clamped to `[0, max_thumb_top()]`.
     pub(crate) fn thumb_top_for_click(&self, rel_row: u16) -> u16 {
         let half = self.thumb_size() / 2;
         rel_row.saturating_sub(half).min(self.max_thumb_top())
@@ -102,10 +83,7 @@ impl ScrollbarState {
         col == self.col && row >= rect.top && row < rect.bottom()
     }
 
-    /// Thumb top row (0-based within the viewport) for a given
-    /// scroll offset. Mirror of `thumb_top_for_click`'s inverse,
-    /// rounded toward the nearest thumb cell. Used by paint paths
-    /// to figure out where the thumb's first cell renders.
+    /// Scroll offset → thumb top row (0-based). Inverse of `thumb_top_for_click`.
     pub(crate) fn thumb_top_for_scroll(&self, scroll_top: u16) -> u16 {
         let max_thumb = self.max_thumb_top();
         let max_scroll = self.max_scroll();
@@ -116,9 +94,6 @@ impl ScrollbarState {
         ((scroll as u32 * max_thumb as u32 + max_scroll as u32 / 2) / max_scroll as u32) as u16
     }
 
-    /// `true` if viewport-relative row `row` paints as the thumb
-    /// (vs. the track) when scrolled to `scroll_top`. The thumb
-    /// covers `[thumb_top, thumb_top + thumb_size)`.
     pub(crate) fn is_thumb_at(&self, scroll_top: u16, row: u16) -> bool {
         let thumb_top = self.thumb_top_for_scroll(scroll_top);
         let thumb_end = thumb_top + self.thumb_size();
@@ -175,18 +150,8 @@ impl WindowViewport {
     }
 }
 
-/// Per-call context for [`Window::handle`] and the per-event
-/// helpers underneath it. The window itself does not store row
-/// layout or viewport geometry — they're recomputed each frame and
-/// supplied here so a single `Window` primitive can drive
-/// heterogeneous backings (transcript display projection, dialog
-/// buffer panel, plain split window).
-///
-/// Bundles per-pane data the host computed (rows, soft/hard breaks,
-/// viewport, click count, vim mode, clipboard). Key dispatch reads
-/// `rows` / `viewport.rect.height` / `vim_mode` / `clipboard`; mouse
-/// dispatch reads everything except `clipboard`. Hosts pass full
-/// data on every event — the unused fields are zero-cost references.
+/// Per-call context for [`Window::handle`]. Geometry is recomputed each frame and
+/// supplied here so one `Window` drives heterogeneous backings.
 pub struct EventCtx<'a> {
     pub rows: &'a [String],
     pub soft_breaks: &'a [usize],
@@ -197,34 +162,17 @@ pub struct EventCtx<'a> {
     pub clipboard: &'a mut Clipboard,
 }
 
-/// Per-call context for [`Window::handle_mouse`]. The window itself
-/// does not store row layout or viewport geometry — they're recomputed
-/// each frame and supplied here so a single `Window` primitive can
-/// drive heterogeneous backings (transcript display projection,
-/// dialog buffer panel, plain split window).
+/// Per-call context for [`Window::handle_mouse`].
 pub struct MouseCtx<'a> {
-    /// Display rows, one per visual line. For buffers with no soft
-    /// wrap, this is the buffer's `lines()`. For projected views
-    /// (transcript) it's the post-projection rows.
+    /// One per visual line; for unwrapped buffers equals `buffer.lines()`.
     pub rows: &'a [String],
-    /// Byte positions in `rows.join("\n")` of soft-wrap boundaries —
-    /// the word selector treats these as transparent so a word split
-    /// across two display rows still selects as one unit. Empty when
-    /// the rows are not soft-wrapped.
+    /// Soft-wrap byte positions in `rows.join("\n")`; word-select crosses these transparently.
     pub soft_breaks: &'a [usize],
-    /// Byte positions in `rows.join("\n")` of *hard* line breaks —
-    /// real `\n` characters in the source. Used by triple-click line
-    /// selection to grow the range to the full source line.
+    /// Hard `\n` byte positions; triple-click extends to the full source line.
     pub hard_breaks: &'a [usize],
-    /// Painted viewport rect + content width + scrollbar geometry.
     pub viewport: WindowViewport,
-    /// Click sequence number (1, 2, 3, …). Hosts that don't track
-    /// click cadence can pass `1` and lose word/line click — that's
-    /// fine for read-only views.
     pub click_count: u8,
-    /// TuiApp-owned single-global VimMode reference. Vim mouse paths
-    /// (begin Visual on click, exit Visual on mouse-up) write
-    /// through this; non-vim windows ignore it.
+    /// Vim mouse paths (begin/exit Visual) write through this; non-vim windows ignore it.
     pub vim_mode: &'a mut VimMode,
 }
 
@@ -234,21 +182,9 @@ pub struct SplitConfig {
     pub gutters: Gutters,
 }
 
-/// How the focused window's cursor renders. Single global on `Ui`;
-/// the focused window's `cursor_line` / `cursor_col` carry the
-/// viewport-relative position.
-///
-/// * `Hidden` — no cursor paints anywhere. Read-only viewers, modal
-///   dialogs without an input target, or any frame where focus does
-///   not point at a window expecting a caret.
-/// * `Hardware` — the terminal's native caret. `Ui::render` pulls
-///   the absolute (col, row) for the focused window and emits a
-///   `cursor::MoveTo` after the diff flush. Used for plain text-input
-///   fields (cmdline, prompt in Insert mode, dialog input panels).
-/// * `Block { glyph, style }` — paint the cell at the focused window's
-///   `(cursor_col, cursor_line)` with `glyph` + `style` and suppress
-///   the hardware caret. Used for vim Normal/Visual modes and the
-///   ghost-text "cursor on prediction" preview.
+/// How the focused window's cursor renders (single global on `Ui`).
+/// `Hidden` — no cursor. `Hardware` — native terminal caret via `Ui::render`.
+/// `Block { glyph, style }` — paint a cell at `(cursor_col, cursor_line)`.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum CursorShape {
     #[default]
@@ -265,77 +201,38 @@ pub struct Window {
     pub buf: BufId,
     pub config: SplitConfig,
     pub focusable: bool,
-    /// Opt-in flag: paint a `CursorLine`-themed background under
-    /// the visible cursor row when the window is focused. Defaults
-    /// to `false` so generic content viewers (transcript, /help,
-    /// /btw) stay clean. List-shaped Windows (option panels,
-    /// `kind="list"` dialog leaves) flip this on so the selected
-    /// row reads at a glance.
+    /// Paints `CursorLine` bg on the cursor row when focused. Off by default; list-shaped
+    /// windows opt in so the selected row is visible regardless of focus.
     pub cursor_line_highlight: bool,
 
-    /// Per-frame viewport geometry. When `Some`, `Window::render`
-    /// paints the scrollbar from the viewport's `scrollbar` state.
-    /// Hosts repopulate each frame from layout state — the field
-    /// lives on Window (not pushed in via render args) so painted
-    /// splits and overlay leaves can both surface scrollbars
-    /// without an extra render-time channel.
+    /// Populated each frame by the host so scrollbar paint is available without a render-time channel.
     pub viewport: Option<WindowViewport>,
 
-    /// Flat text content for this window. For Buffer-backed windows
-    /// this mirrors `buffer.text()`; for prompt editing it is the
-    /// live editable source.
     pub text: String,
-    /// Attachment markers inside `text`.
     pub attachment_ids: Vec<super::AttachmentId>,
-    /// Undo/redo stack. `None` capacity disables undo (used for readonly
-    /// buffers).
     pub history: super::UndoHistory,
-    /// Whether this window's text can be edited.
     pub readonly: bool,
     pub cpos: usize,
-    /// Vim mode is enabled on this Window. Combined with `vim_state`
-    /// it gates the keystroke dispatcher in `dispatch_vim_key`.
+    /// Gates `dispatch_vim_key`; `vim_state` is always present.
     pub vim_enabled: bool,
-    /// Persistent per-Window vim state (Visual anchor, last `f`/`t`
-    /// target, in-flight key-sequence state). Always present; the
-    /// `vim_enabled` flag controls whether it's consulted.
     pub vim_state: VimWindowState,
-    /// Shift-selection anchor. Vim Visual's `v`/`V` set this too (via
-    /// `set_selection_anchor`) so paint/copy read one range. `None`
-    /// means no active selection.
+    /// Shift-selection / vim Visual anchor. `None` means no active selection.
     pub selection_anchor: Option<usize>,
-    /// Preferred display column for vertical motion. Set by the first
-    /// vertical motion after a horizontal one; preserved across
-    /// subsequent vertical motions so the cursor returns to the wanted
-    /// column on longer lines. Measured in terminal cells, so wide
-    /// glyphs (`⏺`, CJK) don't throw the column off.
+    /// Preferred display column for vertical motion; measured in terminal cells.
     pub curswant: Option<usize>,
     pub scroll_top: u16,
     pub cursor_line: u16,
     pub cursor_col: u16,
-    /// Autoscroll flag for append-only buffers. `true` keeps the
-    /// viewport snapped to the newest row — new content flows in
-    /// below and the viewport follows. Flipped to `false` as soon as
-    /// the user scrolls away from the bottom; back to `true` when
-    /// they scroll back to it.
+    /// Keeps viewport snapped to newest row; cleared when the user scrolls away.
     pub follow_tail: bool,
-    /// One-shot "center cursor on next render" request, set by vim `zz`.
-    /// Honored and cleared by the next paint that knows the viewport
-    /// dimensions. Independent of `follow_tail` (which is sticky).
+    /// One-shot recenter request (vim `zz`); cleared after the next paint.
     pub pending_recenter: bool,
-    /// Last `cpos` observed by the renderer. Compared against current
-    /// `cpos` each frame to distinguish "cursor moved → ensure visible"
-    /// from "wheel/scrollbar panned → leave scroll alone." `None` on
-    /// first render forces an initial ensure-visible.
+    /// Last cpos seen by the renderer; distinguishes cursor-move from scroll-pan.
     pub last_render_cpos: Option<usize>,
     pub cursor_positioned: bool,
-    /// Active drag-anchor span set by a double-click word-select
-    /// (`[start, end)` byte range in the joined buffer). When set,
-    /// drag extension grows in word units and keeps the original word
-    /// inside the selection regardless of drag direction. Cleared on
-    /// mouse-up or any non-mouse cursor motion.
+    /// Double-click word-select anchor; drag extends in word units while set.
     pub drag_anchor_word: Option<(usize, usize)>,
-    /// Same as `drag_anchor_word` but for triple-click line-select.
+    /// Triple-click line-select anchor; drag extends in line units while set.
     pub drag_anchor_line: Option<(usize, usize)>,
 }
 
@@ -388,17 +285,13 @@ impl Window {
         self.scroll_top as usize + self.cursor_line as usize
     }
 
-    /// Latch `selection_anchor` at `cpos` if none is set. Called before
-    /// a shift-movement so the first extension anchors where the
-    /// cursor was before the key.
+    /// Set `selection_anchor` to `cpos` if unset. Call before a shift-move.
     pub fn extend_selection(&mut self, cpos: usize) {
         if self.selection_anchor.is_none() {
             self.selection_anchor = Some(cpos);
         }
     }
 
-    /// Selection as a `(start, end)` byte pair against `cpos`. Returns
-    /// `None` when no anchor is set or the anchor equals `cpos`.
     pub fn selection_range_at(&self, cpos: usize) -> Option<(usize, usize)> {
         let a = self.selection_anchor?;
         let (lo, hi) = if a <= cpos { (a, cpos) } else { (cpos, a) };
@@ -415,12 +308,8 @@ impl Window {
         self.selection_range_at(cpos)
     }
 
-    /// Auto-derive per-row visual-mode selection ranges from this
-    /// Window's own anchors. Used by `Window::render` as the fallback
-    /// when the buffer carries no explicit `set_selection` override —
-    /// covers dialog content panels and any other Window whose
-    /// selection state lives entirely in `selection_anchor` /
-    /// `vim_state.visual_anchor`. Empty result means no paint.
+    /// Derive selection ranges from this window's own anchors; used when the buffer
+    /// has no explicit `set_selection` override. Empty result means no paint.
     fn auto_selection_ranges(
         &self,
         buf: &Buffer,
@@ -467,13 +356,8 @@ impl Window {
         out
     }
 
-    /// Vim "WORD" (capital W) selection: the token at `cpos` is any
-    /// whitespace-delimited run, punctuation included. `transparent`
-    /// byte positions are crossed by the boundary walk as if they
-    /// were word chars (used for soft-wrap `\n` so a word broken
-    /// across display rows selects as one unit); must be sorted
-    /// ascending. Cursor lands at the last char of the selection so
-    /// the visual-range render covers the whole word.
+    /// Select the WORD (whitespace-delimited, punctuation included) at `cpos`.
+    /// `transparent` positions (soft-wrap joins) are treated as word chars.
     fn select_big_word_at_transparent(
         &mut self,
         cpos: usize,
@@ -488,14 +372,8 @@ impl Window {
         Some((start, end))
     }
 
-    /// Select the source line containing `cpos` and enter Visual mode
-    /// anchored at the line's start. `hard_breaks` lists byte positions
-    /// of `\n` characters that are real line breaks (not soft-wrap
-    /// continuations), sorted ascending. We use plain `Visual` rather
-    /// than `VisualLine` because `VisualLine` snaps to display rows
-    /// (every `\n`), which would collapse selection to a single
-    /// wrapped row for soft-wrapped content. Returns the byte range of
-    /// the selected source line.
+    /// Select the source line at `cpos` and enter Visual mode anchored at its start.
+    /// Uses `Visual` (not `VisualLine`) so soft-wrapped lines select correctly.
     fn select_line_at(
         &mut self,
         cpos: usize,
@@ -510,11 +388,8 @@ impl Window {
         Some((start, end))
     }
 
-    /// Park the cursor at the last char of `[start, end)` and anchor a
-    /// Visual selection at `start`. Re-syncs `cursor_line`/`cursor_col`
-    /// from the new `cpos` so the selection-highlight pass (which
-    /// derives cpos via `compute_cpos`) sees the moved cursor — without
-    /// this, the highlight extends only to the original click position.
+    /// Position cursor at end of `[start, end)` and anchor Visual at `start`.
+    /// Re-syncs cursor coords so the highlight pass sees the correct position.
     fn finish_range_select(
         &mut self,
         start: usize,
@@ -523,10 +398,7 @@ impl Window {
         viewport_rows: u16,
         mode: &mut VimMode,
     ) {
-        // Vim visual_range uses next_char_boundary to include the char
-        // at cpos, so cpos lands on the last selected char. Non-vim
-        // selection_range_at is exclusive at cpos, so cpos must land
-        // one past the last selected char to include it.
+        // vim visual_range is inclusive at cpos; non-vim selection_range_at is exclusive.
         self.cpos = if self.vim_enabled {
             end.saturating_sub(1).max(start)
         } else {
@@ -601,9 +473,7 @@ impl Window {
 
     // ── Follow-tail ────────────────────────────────────────────────────
 
-    /// Snap to the bottom of the buffer and re-enable autoscroll.
-    /// `scroll_top = u16::MAX` is the "go to bottom" sentinel; the
-    /// per-frame clamp in the render loop resolves it to `max_scroll`.
+    /// Snap to the bottom. `u16::MAX` is the sentinel; the render loop clamps it.
     pub fn scroll_to_bottom(&mut self) {
         self.scroll_top = u16::MAX;
         self.follow_tail = true;
@@ -668,19 +538,8 @@ impl Window {
         offsets
     }
 
-    // ── Unified event dispatch ────────────────────────────────────────
+    // ── Event dispatch ────────────────────────────────────────────────
 
-    /// Single public entry consuming an `Event` plus per-pane `ctx`.
-    /// Dispatches `Key` events to the vim/edit key path and `Mouse`
-    /// events to the cursor/selection path; non-input events return
-    /// `Status::Ignored` so the host can route them itself
-    /// (terminal-focus tracking, paste-side effects, resize bookkeeping).
-    ///
-    /// Hosts populate `ctx` from `UiHost::rows_for` / `breaks_for` /
-    /// `viewport_for` plus the App-owned `vim_mode` and clipboard
-    /// before calling. Unused fields per event kind (e.g. clipboard
-    /// for mouse, breaks for keys) are passed through as zero-cost
-    /// references — Window simply doesn't read them.
     pub fn handle(&mut self, ev: super::event::Event, ctx: EventCtx<'_>) -> Status {
         use super::event::Event;
         match ev {
@@ -713,31 +572,15 @@ impl Window {
 
     // ── Mouse dispatch ─────────────────────────────────────────────────
 
-    /// Handle a single mouse event using the supplied `MouseCtx`
-    /// (rows, soft/hard line breaks, viewport, click count).
-    /// Encapsulates the cursor and Visual selection logic that the
-    /// transcript pane has used for ages: click-to-position cursor,
-    /// double-click word-select, triple-click line-select, drag
-    /// extension anchored to the original word/line when applicable.
-    /// The window's `drag_anchor_*` fields are managed internally so
-    /// successive `Drag` events extend by the right unit.
-    ///
-    /// On `MouseUp`, if a selection was active, the byte range
-    /// `(start, end)` over the joined display rows is returned so the
-    /// host can apply the appropriate copy primitive — plain
-    /// `buf[start..end]` for editor-style buffers, the metadata-aware
-    /// `TranscriptSnapshot::copy_byte_range` for the transcript pane.
-    /// Window still clears its own selection state.
+    /// Handle a mouse event. On `Up`, returns the selected byte range `(start, end)` over
+    /// the joined display rows if a selection was active (host applies the copy primitive).
     pub fn handle_mouse(
         &mut self,
         event: MouseEvent,
         mut ctx: MouseCtx,
     ) -> (Status, Option<(usize, usize)>) {
-        // Build the joined buffer once and pass it down. Mouse helpers
-        // operate on this `&str` instead of `self.text`, which
-        // lets surfaces whose `self.text` is *not* `rows.join("\n")`
-        // (the prompt — source buffer ≠ wrapped display rows) reuse
-        // `Window::handle_mouse` directly.
+        // Build joined buffer from rows, not `self.text` — the prompt's `self.text` is
+        // the source buffer, which differs from its wrapped display rows.
         let buf = ctx.rows.join("\n");
         match event.kind {
             MouseEventKind::Down(MouseButton::Left) => {
@@ -756,9 +599,6 @@ impl Window {
     }
 
     fn mouse_down(&mut self, event: MouseEvent, ctx: &mut MouseCtx, buf: &str) -> Status {
-        // Hit-test against the painted viewport: anything that lands
-        // on the scrollbar or outside the rect is the host's problem
-        // (scrollbar drag latching, focus shift, …).
         let Some(hit) = ctx.viewport.hit(event.row, event.column) else {
             return Status::Ignored;
         };
@@ -780,9 +620,6 @@ impl Window {
 
         match ctx.click_count {
             2 => {
-                // Vim "WORD" (whitespace-delimited, punctuation in)
-                // matches what users expect from a double-click in
-                // a code preview: `foo.bar(baz)` selects whole.
                 if let Some((s, e)) = self.select_big_word_at_transparent(
                     cpos,
                     ctx.soft_breaks,
@@ -811,10 +648,6 @@ impl Window {
                 Status::Capture
             }
             _ => {
-                // Single click: anchor a Visual selection at the click
-                // so a subsequent drag grows from this point. Vim and
-                // non-vim paths anchor differently (vim's Visual range
-                // reads cpos directly; non-vim uses `selection_anchor`).
                 self.drag_anchor_word = None;
                 self.drag_anchor_line = None;
                 if self.vim_enabled {
@@ -829,10 +662,6 @@ impl Window {
     }
 
     fn mouse_drag(&mut self, event: MouseEvent, ctx: &mut MouseCtx, buf: &str) -> Status {
-        // Drag past the rect edges still extends — clamp the cell to
-        // the viewport's content area so the cursor lands on the
-        // nearest visible position. Host handles edge-autoscroll on
-        // a separate timer.
         let viewport_rows = ctx.viewport.rect.height;
         if viewport_rows == 0 || ctx.rows.is_empty() {
             return Status::Consumed;
@@ -858,11 +687,7 @@ impl Window {
         Status::Consumed
     }
 
-    /// Compute the byte range to yank from the current selection state,
-    /// *before* `mouse_up` clears the anchors. Returns `None` when
-    /// no selection is active or the range is empty. The host applies
-    /// the appropriate copy primitive (plain slice / snapshot copy) on
-    /// the returned `(start, end)`.
+    /// Selection byte range before `mouse_up` clears anchors; `None` if empty or absent.
     fn mouse_yank_range(&self, ctx: &MouseCtx, buf: &str) -> Option<(usize, usize)> {
         let cpos = self.compute_cpos(ctx.rows);
         let (start, end) = if self.vim_enabled {
@@ -879,12 +704,6 @@ impl Window {
     }
 
     fn mouse_up(&mut self, ctx: &mut MouseCtx, _buf: &str) -> Status {
-        // The user's gesture is over: clear all selection state so a
-        // fresh click starts a fresh selection. Owning this here means
-        // every consumer (transcript, prompt, dialog buffer) gets the
-        // same lifecycle for free — no bespoke clear-anchor code in
-        // the host adapters. Clipboard side effects are the host's
-        // job; Window only owns its selection state.
         if self.vim_enabled && matches!(*ctx.vim_mode, VimMode::Visual | VimMode::VisualLine) {
             self.vim_state.set_mode(ctx.vim_mode, VimMode::Normal);
         }
@@ -894,10 +713,7 @@ impl Window {
         Status::Consumed
     }
 
-    /// Word-anchored drag extension: keep the originally-double-clicked
-    /// word inside the selection while the drag grows by full WORD
-    /// units, flipping the visual anchor as the drag crosses back over
-    /// the original word.
+    /// Extend drag by WORD units, keeping the original double-clicked word inside the selection.
     fn extend_word_anchored_drag(&mut self, ctx: &mut MouseCtx, buf: &str) {
         let Some((ws, we)) = self.drag_anchor_word else {
             return;
@@ -1020,7 +836,6 @@ impl Window {
         !matches!(action, Action::Passthrough)
     }
 
-    /// Shift `scroll_top` by `delta` rows, clamped to
     pub fn scroll_by_lines(
         &mut self,
         delta: isize,
@@ -1055,11 +870,8 @@ impl Window {
         }
         let line_idx = line_idx.min(rows.len() - 1);
         let offsets = Self::line_start_offsets(rows);
-        // Intentionally do NOT write `self.text` here. Mouse
-        // helpers are pure over `(rows, &str buf)` so the prompt — whose
-        // `self.text` is the source buffer, not the wrapped display
-        // rows — can run through `Window::handle_mouse` without losing
-        // its source content.
+        // Do not write `self.text` here — the prompt's `self.text` is the source buffer,
+        // not the wrapped display rows; overwriting it would lose the editable content.
         let line = &rows[line_idx];
         let col_bytes = cell_to_byte(line, col);
         self.cpos = offsets[line_idx] + col_bytes;
@@ -1070,28 +882,6 @@ impl Window {
         self.follow_tail = self.scroll_top >= max_scroll;
     }
 
-    /// Paint visible buffer lines into `slice`, starting at this
-    /// window's `scroll_top`. Each row of the slice maps 1:1 to a
-    /// buffer line; lines longer than `slice.width()` truncate at
-    /// the right edge.
-    ///
-    /// When `cursor_line_highlight` is on, the cursor row
-    /// (`cursor_line` viewport offset) gets a `CursorLine`
-    /// theme-driven background — the seam list-shaped Buffer Windows
-    /// use for "selected item" highlighting. The flag is off by
-    /// default so generic content viewers (transcript, /help, /btw)
-    /// stay clean; list-shaped Windows opt in. Selection paints
-    /// regardless of focus so non-focusable list leaves (picker
-    /// overlays) still show their selection while keys flow
-    /// elsewhere.
-    ///
-    /// When `viewport.scrollbar` is set, the scrollbar paints over
-    /// the right edge column the viewport designates. When
-    /// `ctx.focused` is true and `ctx.cursor_shape == Block`, the
-    /// block cursor cell paints over `(cursor_col, cursor_line)`
-    /// after extmark layering. The `Hardware` cursor variant is read
-    /// by `Ui::render` and emitted as a `cursor::MoveTo` after the
-    /// diff flush — `Window::render` itself does nothing for it.
     pub fn render(&self, buf: &Buffer, slice: &mut GridSlice<'_>, ctx: &DrawContext) {
         use unicode_width::UnicodeWidthChar;
 
@@ -1099,10 +889,6 @@ impl Window {
         let height = slice.height();
         let scroll = self.scroll_top as usize;
         let line_count = buf.line_count();
-        // Window-uniform gutter from `SplitConfig::gutters`. Content,
-        // highlights, virt-text, selection, and the block cursor
-        // shift right by `pad_left` and clip at `content_width`.
-        // Cursor positions are content-local.
         let pad_left = self.config.gutters.pad_left.min(width);
         let pad_right = self
             .config
@@ -1117,10 +903,8 @@ impl Window {
         };
         let normal_style = ctx.theme.get("Normal");
         let cursor_style = ctx.theme.get("CursorLine");
-        // Resolve visual selection paint state once. Override (set via
-        // `Buffer::set_selection`) wins; otherwise auto-derive from
-        // this Window's anchors. Empty result means no selection paint.
         let visual_style = ctx.theme.get("Visual");
+        // Buffer override wins; fall back to window anchors.
         let selection_owned: Vec<smelt_buffer::buffer::SelectionRange>;
         let selection_ranges: &[smelt_buffer::buffer::SelectionRange] =
             if !buf.selection().is_empty() {
@@ -1149,8 +933,6 @@ impl Window {
                     };
                 }
             }
-            // Row bg fill spans the full slice — gutter cells show
-            // the row's bg, just no content.
             if row_style != Style::default() {
                 for col in 0..width {
                     slice.set(col, row, ' ', row_style);
@@ -1162,10 +944,6 @@ impl Window {
             let Some(line) = buf.get_line(idx) else {
                 continue;
             };
-            // Lay out the row's source characters in visual columns,
-            // honoring unicode width. `col_to_char` is indexed by
-            // *content* col (0..content_width); slice writes apply
-            // `pad_left` to land in the inner zone.
             let mut col_to_char: Vec<usize> = Vec::with_capacity(content_width as usize);
             let line_chars: Vec<char> = line.chars().collect();
             let mut col: u16 = 0;
@@ -1182,14 +960,6 @@ impl Window {
                 col += cw;
             }
             let content_end_col = col;
-            // Layered highlight painting: walk highlight extmarks
-            // anchored on this row and overlay each span's style on
-            // top of `row_style`. Span styles carry resolved colors
-            // (parsers/Lua have already looked up theme groups), so
-            // no theme reads happen here. Cell symbols stay as the
-            // already-painted line glyphs; only attributes change.
-            // `hl_eol` extends the span's background past `col_end` to
-            // the right edge of the row.
             for span in buf.highlights_at(idx) {
                 let span_style = ctx.theme.resolve(span.hl);
                 let style = merge_span_style(row_style, &span_style);
@@ -1197,14 +967,8 @@ impl Window {
                 let end = span.col_end.min(content_width);
                 for c in start..end {
                     let ci = col_to_char.get(c as usize).copied();
-                    // Wide-char continuation cells share the source-char
-                    // index with the leading cell. Re-painting here would
-                    // call `slice.set` a second time with the wide glyph,
-                    // and `Grid::set` would install fresh `⚡|\0` at
-                    // `(c, c+1)` — clobbering the next char and leaving
-                    // the grid with two adjacent wide cells. Skip; the
-                    // leading-cell paint already covered both visual
-                    // columns with the right style.
+                    // Wide-char continuation shares the source index with the leading cell;
+                    // re-painting it would clobber the next char via a second Grid::set.
                     if c > 0 && ci.is_some() && ci == col_to_char.get((c - 1) as usize).copied() {
                         continue;
                     }
@@ -1217,23 +981,11 @@ impl Window {
                     }
                 }
             }
-            // Selection painting. After the extmark highlight walk so
-            // selection bg always wins over base highlights; before
-            // virt-text so ghost predictions / overlay text stay
-            // unselected. Wide-char continuation cells share the source
-            // index with the leading cell — same skip rule as the
-            // highlight walk. Cells covered by a `SpanMeta::selectable
-            // = false` highlight are skipped entirely so chrome-like
-            // spans (user-block bar, elapsed-time suffix, …) don't
-            // paint with the visual selection bg.
-            //
-            // The selectable-mask is per-cell: any non-selectable span
-            // that covers a column wins (matches the navigation /
-            // copy semantics — those mechanisms also treat any
-            // non-selectable cover as exclusive).
+            // Selection painting: after highlights (wins over base) but before virt-text.
+            // Cells under `selectable = false` spans are skipped so chrome spans don't
+            // receive the Visual bg.
             let mut selectable_mask: Option<Vec<bool>> = None;
             if !selection_ranges.iter().any(|r| r.line == idx) {
-                // No selection on this row — skip the mask build entirely.
             } else {
                 let row_spans = buf.highlights_at(idx);
                 if row_spans.iter().any(|s| !s.meta.selectable) {
@@ -1269,10 +1021,6 @@ impl Window {
                     slice.set(pad_left + c, row, ch, style);
                 }
             }
-            // Virtual text painting. `VirtTextPos::Eol` appends after
-            // the row's existing content; `Inline` / `Overlay` start at
-            // the extmark's column (overwriting real cells);
-            // `RightAlign` paints flush against the right edge.
             for vt in buf.virtual_text_at(idx) {
                 let base = vt
                     .hl_group
@@ -1285,9 +1033,6 @@ impl Window {
                     .chars()
                     .map(|c| UnicodeWidthChar::width(c).unwrap_or(0).max(1) as u16)
                     .sum();
-                // Virt-text positions are in *content* coords; shift by
-                // `pad_left` and clip at `content_width` so virt-text
-                // lands inside the inner zone alongside real content.
                 let start_col = match vt.pos {
                     VirtTextPos::Eol => content_end_col,
                     VirtTextPos::Inline | VirtTextPos::Overlay => vt.col as u16,
@@ -1319,15 +1064,8 @@ impl Window {
     }
 }
 
-/// Paint the scrollbar described by `viewport.scrollbar` into the
-/// window's `slice`. `viewport.rect` is in absolute terminal
-/// coordinates; the scrollbar paints at `viewport.rect.top -
-/// slice.area().top` rows down from the slice origin so painted
-/// splits whose viewport covers only a sub-region of the window
-/// (the prompt's input area) place the scrollbar correctly. For
-/// surfaces where window rect == viewport rect (transcript,
-/// overlay leaves) the row offset is zero and behaviour matches
-/// the prior version.
+/// Paint the scrollbar. Row offset = `viewport.rect.top - slice.area().top` so splits whose
+/// viewport is a sub-region of the window (e.g. prompt input area) position the bar correctly.
 fn paint_scrollbar(slice: &mut GridSlice<'_>, viewport: WindowViewport, theme: &super::Theme) {
     let Some(bar) = viewport.scrollbar else {
         return;
@@ -1359,10 +1097,7 @@ fn paint_scrollbar(slice: &mut GridSlice<'_>, viewport: WindowViewport, theme: &
     }
 }
 
-/// Layer a foreground `Style` on top of a base `Style`. Same merge
-/// rule as `merge_span_style` but for full `Style` values (used by
-/// virt-text painting where the extmark's `hl_group` resolves through
-/// the theme to a `Style`, not a `SpanStyle`).
+/// Layer `top` onto `base`; `Some` fields win, booleans OR. For full `Style` values.
 fn merge_styles(base: Style, top: Style) -> Style {
     Style {
         fg: top.fg.or(base.fg),
@@ -1375,10 +1110,7 @@ fn merge_styles(base: Style, top: Style) -> Style {
     }
 }
 
-/// Layer a `SpanStyle` (extmark highlight) on top of a base `Style`
-/// (row default). `Some` fields on the span override; `None` keeps
-/// the base. Boolean attributes OR together so `bold` / `dim` /
-/// `italic` accumulate across layers.
+/// Layer a `SpanStyle` onto a base `Style`. Same merge rules as `merge_styles`.
 fn merge_span_style(base: Style, span: &crate::SpanStyle) -> Style {
     Style {
         fg: span.fg.or(base.fg),

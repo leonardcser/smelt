@@ -34,14 +34,12 @@ pub fn read_image_as_data_url(path: &str) -> Result<String, String> {
     Ok(data_url_from_bytes(&bytes, mime))
 }
 
-/// Encode in-memory bytes as a `data:mime;base64,...` URL. Used by
-/// tools that already have image bytes in hand (e.g. an HTTP response).
+/// Encode bytes as a `data:mime;base64,...` URL.
 pub fn data_url_from_bytes(bytes: &[u8], mime: &str) -> String {
     let b64 = base64::engine::general_purpose::STANDARD.encode(bytes);
     format!("data:{mime};base64,{b64}")
 }
 
-/// Extract filename from a path for use as an image label.
 pub fn image_label_from_path(path: &str) -> String {
     std::path::Path::new(path)
         .file_name()
@@ -50,10 +48,8 @@ pub fn image_label_from_path(path: &str) -> String {
         .to_string()
 }
 
-/// Normalize a terminal-pasted path (from drag-and-drop).
-///
-/// Handles quoting, backslash-escaped spaces, and `file://` URLs.
-/// Returns `None` if the data looks like multi-line text (not a single path).
+/// Normalize a terminal-pasted path: handles quoting, backslash-escaped spaces,
+/// and `file://` URLs. Returns `None` for multi-line input.
 pub fn normalize_pasted_path(data: &str) -> Option<String> {
     let trimmed = data.trim();
     if trimmed.is_empty() || trimmed.contains('\n') {

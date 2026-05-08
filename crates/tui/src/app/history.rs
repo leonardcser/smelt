@@ -43,9 +43,7 @@ impl TuiApp {
         }
     }
 
-    /// Resolve the active model to its full `provider/model` key so that
-    /// resuming a session restores the same provider (auth method), even
-    /// when the same model name is configured under multiple providers.
+    /// Full `provider/model` key so resuming a session restores the correct provider/auth.
     fn current_model_key(&self) -> String {
         self.core
             .config
@@ -61,7 +59,6 @@ impl TuiApp {
             .unwrap_or_else(|| self.core.config.model.clone())
     }
 
-    /// Record current token count and cost so they can be restored on rewind.
     pub(crate) fn snapshot_tokens(&mut self) {
         if let Some(tokens) = self.core.session.context_tokens {
             self.core
@@ -107,8 +104,7 @@ impl TuiApp {
 
     pub(crate) fn reset_session(&mut self) {
         let _perf = smelt_core::perf::begin("app:reset_session");
-        // Cancel any in-flight engine work (agent turn, title generation, etc.)
-        // before clearing state so stale events don't restore old data.
+        // Cancel in-flight engine work before clearing state so stale events don't restore old data.
         self.core.engine.send(UiCommand::Cancel);
         let old_id = self.core.session.id.clone();
         self.core.session.messages.clear();
@@ -148,8 +144,7 @@ impl TuiApp {
                 count: 0,
             }),
         );
-        // Drain stale engine events so old Messages snapshots don't
-        // restore history into the freshly cleared session.
+        // Drain stale events so old Messages snapshots don't restore history into the fresh session.
         while self.core.engine.try_recv().is_ok() {}
     }
 
@@ -157,8 +152,6 @@ impl TuiApp {
         let old_id = self.core.session.id.clone();
         self.flush_persist();
 
-        // Restore per-session settings through the canonical helpers so
-        // state.json + engine + screen all stay in sync with `self`.
         if let Some(mode) = loaded.mode.as_deref().and_then(AgentMode::parse) {
             self.set_mode(mode);
         }
@@ -171,9 +164,7 @@ impl TuiApp {
             && !self.core.config.cli_api_key_env_override
         {
             if let Some(ref model_key) = loaded.model {
-                // Prefer an exact key match so the original provider/auth method
-                // is restored. Fall back to a unique bare model name for
-                // sessions saved before the key was persisted.
+                // Prefer exact key match; fall back to bare model name for older sessions.
                 let resolved_key = smelt_core::config::resolve_model_ref(
                     &self.core.config.available_models,
                     model_key,
@@ -190,7 +181,7 @@ impl TuiApp {
         if let Some(ref slug) = self.core.session.slug {
             self.set_task_label(slug.clone());
         }
-        // Defensive scrub: drop any snapshots beyond restored history.
+        // Drop snapshots beyond the restored history length.
         let hist_len = self.core.session.messages.len();
         self.core
             .session
@@ -236,7 +227,6 @@ impl TuiApp {
 
     // ── History / session ────────────────────────────────────────────────
 
-    /// Rebuild the screen from session history and import persisted render cache.
     pub(crate) fn restore_screen(&mut self) {
         self.rebuild_screen_from_history();
     }
@@ -389,8 +379,7 @@ impl TuiApp {
         });
     }
 
-    /// Block until all queued persist writes have completed. Call before
-    /// code paths that read session files off disk (load, fork, shutdown).
+    /// Block until all queued persist writes complete. Call before reading session files from disk.
     pub(crate) fn flush_persist(&self) {
         self.persister.flush();
     }
@@ -430,7 +419,6 @@ impl TuiApp {
             );
             return;
         }
-        // Tail of assistant text after the last user message (bounded to 1000 chars).
         let tail_start = last_user_idx.map(|i| i + 1).unwrap_or(0);
         let mut assistant_tail: String = self.core.session.messages[tail_start..]
             .iter()
@@ -483,9 +471,7 @@ impl TuiApp {
             return;
         }
 
-        // Replace history with the compacted messages (summary + kept turns).
-        // Old snapshots key into pre-compaction positions and are no longer
-        // valid, but the running cost carries forward.
+        // Old snapshots key into pre-compaction positions; running cost carries forward.
         self.core.session.messages = messages;
         self.core.session.token_snapshots.clear();
         self.core.session.cost_snapshots.clear();
@@ -539,7 +525,6 @@ impl TuiApp {
             hist_idx = i + 1;
         }
 
-        // Extract image (label, data_url) pairs from the target message before truncating.
         let images: Vec<(String, String)> = self
             .core
             .session
@@ -579,8 +564,6 @@ impl TuiApp {
 
         turn_text.map(|t| (t, images))
     }
-
-    // ── Agent internals ──────────────────────────────────────────────────
 
     pub(crate) fn show_user_message(&mut self, input: &str, image_labels: Vec<String>) {
         self.push_block(Block::User {

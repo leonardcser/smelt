@@ -27,21 +27,16 @@ pub(crate) struct InputSnapshot {
 
 // ── Shared input state ───────────────────────────────────────────────────────
 
-/// Prompt window state — a `crate::smelt_term::Window` (cursor, vim, kill ring,
-/// editable buffer) plus prompt-specific side-cars (completer, stash,
-/// history, attachments). Text lives on `win.text`; attachments on
-/// `win.attachment_ids`.
+/// Prompt window state: `Window` plus prompt-specific side-cars (completer, stash, attachments).
+/// Text lives on `win.text`; attachment ids on `win.attachment_ids`.
 pub(crate) struct PromptState {
     pub(crate) win: crate::smelt_term::Window,
     pub(crate) store: AttachmentStore,
     pub(crate) completer: Option<CompleterSession>,
-    /// Picker leaf WinIds from closed completer sessions, waiting for
-    /// the next frame to drain and `win_close`. `PromptState` doesn't
-    /// hold a `&mut crate::smelt_term::Ui`, so closing has to happen out-of-band.
+    /// WinIds of closed completer sessions, drained and closed on the next frame.
     pub(crate) pending_picker_close: Vec<crate::smelt_term::WinId>,
     pub(crate) stash: Option<InputSnapshot>,
-    /// Tracks whether the current buffer content originated from a paste.
-    /// Cleared on any manual character input.
+    /// True when content came from a paste; cleared on manual character input.
     pub(super) from_paste: bool,
     /// Chord state: true after Ctrl+X, waiting for second key.
     pending_ctrl_x: bool,
@@ -91,10 +86,7 @@ impl PromptState {
         }
     }
 
-    /// Returns the current selection range as (start_byte, end_byte), ordered.
-    /// Works for both vim visual modes and shift+key selection. `mode` is
-    /// the TuiApp-owned single-global VimMode (only consulted when vim is
-    /// enabled on this prompt).
+    /// Active selection range `(start_byte, end_byte)` for vim visual or shift+key selection.
     pub(crate) fn selection_range(&self, mode: VimMode) -> Option<(usize, usize)> {
         // Vim visual mode takes priority.
         if self.win.vim_enabled {
@@ -110,12 +102,9 @@ impl PromptState {
         self.win.selection_range_at(self.win.cpos)
     }
 
-    /// Selection range to *render* with the selection-bg style. Falls
-    /// back to the yank-flash range from the TuiApp-level kill ring when
-    /// there's no real selection so vim copy ops (`yy`, `yw`, visual
-    /// `y`, …) get the brief post-yank highlight, matching nvim's
-    /// `vim.highlight.on_yank`. Editing logic must keep using
-    /// `selection_range` so the flash never affects mutations.
+    /// Selection range for rendering. Falls back to yank-flash so vim copy ops get the
+    /// brief post-yank highlight (nvim's `vim.highlight.on_yank`).
+    /// Editing must use `selection_range` — the flash must never affect mutations.
     pub(crate) fn display_selection_range(
         &self,
         mode: VimMode,
@@ -133,14 +122,11 @@ impl PromptState {
         self.selection_range(mode).is_some()
     }
 
-    /// Clear any active selection (non-vim). Called on non-shift movement or editing.
     pub(crate) fn clear_selection(&mut self) {
         self.win.selection_anchor = None;
     }
 
-    /// End the active completer session, queueing its picker overlay
-    /// leaf for close on the next frame. Replaces bare `self.completer
-    /// = None` so the associated `crate::smelt_term::WinId` doesn't leak.
+    /// End the active completer session, queuing its picker leaf for close. Use instead of `= None`.
     pub(crate) fn close_completer(&mut self) {
         if let Some(session) = self.completer.take() {
             if let Some(win) = session.picker_win {
@@ -149,22 +135,16 @@ impl PromptState {
         }
     }
 
-    /// Install a fresh completer, retiring any previous session's
-    /// picker overlay. Every site that creates a new
-    /// `CompleterSession` must go through this — bare `self.completer
-    /// = Some(...)` orphans the old `crate::smelt_term::WinId` and leaves a stale
-    /// picker painted above the prompt.
+    /// Install a new completer, retiring the previous session. Bare `= Some(...)` orphans the WinId.
     pub(crate) fn set_completer(&mut self, comp: crate::completer::Completer) {
         self.close_completer();
         self.completer = Some(CompleterSession::new(comp));
     }
 
-    /// Start or extend selection at current cursor position (non-vim shift+key).
     fn extend_selection(&mut self) {
         self.win.extend_selection(self.win.cpos);
     }
 
-    /// Delete the currently selected text, returning it. Handles attachment cleanup.
     fn delete_selection(&mut self, mode: VimMode) -> Option<String> {
         let (start, end) = self.selection_range(mode)?;
         let deleted = self.win.text[start..end].to_string();
@@ -179,8 +159,7 @@ impl PromptState {
         self.win.vim_enabled
     }
 
-    /// Returns true if the current content originated from a paste and should
-    /// not be treated as a shell escape command (starting with '!').
+    /// True when content originated from a paste; skips `!` shell-escape treatment.
     pub(crate) fn skip_shell_escape(&self) -> bool {
         self.from_paste
     }
@@ -189,21 +168,15 @@ impl PromptState {
         self.win.set_vim_enabled(enabled);
     }
 
-    /// Restore vim to a specific mode (used after double-Esc cancel).
-    /// Writes through `mode_ref` (the TuiApp-owned single global) and
-    /// resets the in-flight key sequence on the prompt's Vim instance.
+    /// Set vim mode via `mode_ref` (the TuiApp global) and reset the in-flight key sequence.
     pub(crate) fn set_vim_mode(&mut self, mode_ref: &mut VimMode, new: VimMode) {
         if self.win.vim_enabled {
             self.win.vim_state.set_mode(mode_ref, new);
         }
     }
 
-    /// Reconcile the kill ring with the system clipboard before an
-    /// emacs-style paste (`C-y`). If the clipboard text differs from
-    /// what we last pushed, treat it as externally updated and
-    /// overwrite the kill ring (charwise — external sources don't
-    /// know about vim's linewise concept). When they match, the kill
-    /// ring is already authoritative.
+    /// Sync kill ring from clipboard before `C-y` paste.
+    /// If clipboard text differs from our last push, treat it as externally updated (charwise).
     fn sync_kill_ring_from_clipboard(clipboard: &mut crate::smelt_term::Clipboard) {
         let Some(text) = clipboard.read() else {
             return;
@@ -222,16 +195,11 @@ impl PromptState {
         self.close_completer();
         self.from_paste = false;
         self.win.selection_anchor = None;
-        // Note: stash and store are intentionally NOT cleared here.
+        // Stash and store are intentionally preserved.
     }
 
-    /// Replace the prompt buffer wholesale and re-establish invariants:
-    /// snapshot undo, clear attachments + shift-selection anchor, reset
-    /// paste state, drop the completer so it re-derives. The canonical
-    /// path for commands that stuff new text into the prompt
-    /// (unqueue, resume restore, ghost accept). Direct `input.buf = …`
-    /// writes skip these invariants and have been a recurring source
-    /// of undo / completer / paste-state bugs.
+    /// Replace the buffer wholesale: snapshot undo, clear attachments/selection/paste-state,
+    /// re-derive completer. Direct `win.text =` writes bypass these invariants.
     pub(crate) fn replace_text(&mut self, text: String, cursor: Option<usize>, mode: VimMode) {
         self.save_undo(mode);
         let cpos = cursor.unwrap_or(text.len()).min(text.len());
@@ -244,8 +212,7 @@ impl PromptState {
         self.recompute_completer();
     }
 
-    /// Toggle stash: if no stash, save current buf and clear; if stashed, restore.
-    /// Attachments are cloned out of the store so the stash survives store clears.
+    /// Toggle stash. Attachments are cloned out of the store so the stash survives store clears.
     fn toggle_stash(&mut self) {
         if let Some(snap) = self.stash.take() {
             self.win.text = snap.buf;
@@ -272,7 +239,6 @@ impl PromptState {
         }
     }
 
-    /// Restore stash into the buffer (called after submit/command completes).
     pub(crate) fn restore_stash(&mut self) {
         if let Some(snap) = self.stash.take() {
             self.win.text = snap.buf;
@@ -286,9 +252,7 @@ impl PromptState {
         }
     }
 
-    /// Restore input from a rewind. The text has pastes expanded and image
-    /// labels inline as `[label]`. Replace each `[label]` with an attachment
-    /// marker so images become editable attachments again.
+    /// Restore rewind text: replace `[label]` placeholders with attachment markers.
     pub(crate) fn restore_from_rewind(&mut self, mut text: String, images: Vec<(String, String)>) {
         let mut ids = Vec::new();
         for (label, data_url) in images {
@@ -308,9 +272,7 @@ impl PromptState {
         char_pos(&self.win.text, self.win.cpos)
     }
 
-    /// Expand attachment markers and return the final text for
-    /// submission. Image markers are stripped — image data flows via
-    /// `Content::Parts`, not inline text.
+    /// Expand attachment markers to text. Image markers are stripped (data flows via `Content::Parts`).
     pub(crate) fn expanded_text(&self) -> String {
         let mut result = String::new();
         let mut att_idx = 0;
@@ -327,7 +289,6 @@ impl PromptState {
         result
     }
 
-    /// Text for the user message block: images shown as `[label]`.
     pub(crate) fn message_display_text(&self) -> String {
         let mut result = String::new();
         let mut att_idx = 0;
@@ -346,17 +307,12 @@ impl PromptState {
         result
     }
 
-    /// Attach an image at the current cursor position.
     pub(crate) fn insert_image(&mut self, label: String, data_url: String) {
         let id = self.store.insert_image(label, data_url);
         self.insert_attachment_id(id);
     }
 
-    /// Build the message content combining text and any attached images.
-    ///
-    /// Images referenced multiple times in the buffer are emitted only once
-    /// in `Content::Parts` — the payload is a base64 data URL (large), and
-    /// the model gets nothing extra from seeing it twice.
+    /// Build submission `Content`. Duplicate image refs are deduplicated (base64 payloads are large).
     pub(crate) fn build_content(&self) -> Content {
         let text = self.expanded_text();
         let mut seen: std::collections::HashSet<AttachmentId> = std::collections::HashSet::new();
@@ -375,7 +331,6 @@ impl PromptState {
         Content::with_images(text, images)
     }
 
-    /// Build a `KeyContext` snapshot for keymap lookups.
     pub(crate) fn key_context(
         &self,
         agent_running: bool,
@@ -395,9 +350,6 @@ impl PromptState {
         }
     }
 
-    /// Execute a `KeyAction` resolved by the keymap. Handles all editing,
-    /// navigation, and app-control actions. Returns `None` for actions that
-    /// the caller (app event loop) must handle itself.
     fn execute_key_action(
         &mut self,
         action: KeyAction,
@@ -446,20 +398,15 @@ impl PromptState {
             self.clear_selection();
         }
         match action {
-            // ── Actions the caller must handle ──────────────────────────
-            KeyAction::Quit => Action::Noop,        // caller checks
-            KeyAction::CancelAgent => Action::Noop, // caller checks
-            KeyAction::AcceptGhostText => Action::Noop, // caller checks
+            // Caller handles these.
+            KeyAction::Quit | KeyAction::CancelAgent | KeyAction::AcceptGhostText => Action::Noop,
 
             // ── TuiApp control ─────────────────────────────────────────────
             KeyAction::ClearBuffer => {
                 self.clear();
                 Action::Redraw
             }
-            // ToggleMode/CycleReasoning are intercepted by the global
-            // chord layer in events.rs before handle_event runs; reaching
-            // these arms would mean the global chord was bypassed (only
-            // possible if focus routing changes), so fall through to Noop.
+            // Intercepted by the global chord layer; these arms are unreachable in practice.
             KeyAction::ToggleMode | KeyAction::CycleReasoning => Action::Noop,
             KeyAction::ToggleStash => {
                 self.toggle_stash();
@@ -758,12 +705,8 @@ impl PromptState {
                 }
             }
             KeyAction::ClipboardImage => {
-                // Cmd/Meta+V. When bracketed paste is active the
-                // terminal forwards the clipboard as an `Event::Paste`
-                // we never reach here. But some terminals (or configs
-                // with bracketed paste off) send raw Cmd+V as a key —
-                // handle both image and text paste so the shortcut is
-                // reliable regardless of the terminal's paste mode.
+                // Bracketed-paste terminals forward Cmd+V as `Event::Paste`, bypassing this arm.
+                // Terminals with bracketed paste off send it as a key — handle both paths.
                 if let Some(url) = clipboard_image_to_data_url() {
                     self.save_undo(mode);
                     self.insert_image("clipboard.png".into(), url);
@@ -854,11 +797,7 @@ impl PromptState {
         }
     }
 
-    /// Process a terminal event. Returns what the caller should do next.
-    ///
-    /// Priority ladder: completer → vim → paste → resize → keymap → insert.
-    /// `mode` is the TuiApp-owned single-global VimMode; the bridge writes
-    /// through it during vim dispatch and other paths read it.
+    /// Process a terminal event. Priority: completer → vim → paste → keymap → insert.
     pub(crate) fn handle_event(
         &mut self,
         ev: Event,
@@ -866,25 +805,17 @@ impl PromptState {
         mode: &mut VimMode,
         clipboard: &mut crate::smelt_term::Clipboard,
     ) -> Action {
-        // 1. Completer intercepts navigation keys when active.
         if self.completer.is_some() {
             if let Some(action) = self.handle_completer_event(&ev) {
                 return action;
             }
         }
 
-        // 2. Vim mode intercepts key events.
         match self.dispatch_vim(&ev, &mut history, mode, clipboard) {
             VimBridgeResult::Handled(action) => return action,
-            VimBridgeResult::Passthrough => {
-                // Fall through to keymap / char insert below.
-            }
-            VimBridgeResult::NotAKey => {
-                // Not a key event or vim disabled — handle paste/resize/key below.
-            }
+            VimBridgeResult::Passthrough | VimBridgeResult::NotAKey => {}
         }
 
-        // 3. Paste events.
         if let Event::Paste(data) = ev {
             self.save_undo(*mode);
             if self.selection_range(*mode).is_some() {
@@ -914,29 +845,22 @@ impl PromptState {
             return Action::Redraw;
         }
 
-        // 4. Key events — look up in the keymap. (Resize events are
-        // intercepted in dispatch_common before reaching here.)
         if let Event::Key(KeyEvent {
             code, modifiers, ..
         }) = ev
         {
-            // Chord: C-x C-e → edit in $EDITOR.
+            // C-x C-e chord → edit in $EDITOR.
             if self.pending_ctrl_x {
                 self.pending_ctrl_x = false;
                 if code == KeyCode::Char('e') && modifiers.contains(KeyModifiers::CONTROL) {
                     return Action::EditInEditor;
                 }
-                // Not a recognized chord — discard the C-x and process this
-                // key normally below.
             }
             if code == KeyCode::Char('x') && modifiers.contains(KeyModifiers::CONTROL) {
                 self.pending_ctrl_x = true;
                 return Action::Noop;
             }
 
-            // Build context for keymap lookup. The caller-specific fields
-            // (agent_running, ghost_text) are set to defaults here — the app
-            // event loop overrides them by calling lookup directly when needed.
             let ctx = KeyContext {
                 buf_empty: self.win.text.is_empty() && self.win.attachment_ids.is_empty(),
                 vim_non_insert: self.win.vim_enabled
@@ -953,7 +877,6 @@ impl PromptState {
                 return self.execute_key_action(action, history, *mode, clipboard);
             }
 
-            // Fallback: insert character for unmodified / shift-only key presses.
             if let KeyCode::Char(c) = code {
                 if modifiers.is_empty() || modifiers == KeyModifiers::SHIFT {
                     self.insert_char(c, *mode);
@@ -985,34 +908,29 @@ fn current_line(buf: &str, cpos: usize) -> usize {
     buf[..end].chars().filter(|&c| c == '\n').count()
 }
 
-/// Like find_at_anchor but also matches when the cursor is ON the '@' itself.
+/// Returns the byte offset of the `@` anchor when the cursor is inside an `@…` zone.
 pub(super) fn cursor_in_at_zone(buf: &str, cpos: usize) -> Option<usize> {
     if !buf.is_char_boundary(cpos) {
         return None;
     }
-    // Include the char at cpos so the cursor-on-@ case works.
-    // Find the end of the character at cpos (next char boundary after cpos).
+    // Include the char at cpos so cursor-on-@ is matched.
     let search_end = buf[cpos..]
         .char_indices()
         .nth(1)
         .map(|(i, _)| cpos + i)
         .unwrap_or(buf.len());
     let at_pos = buf[..search_end].rfind('@')?;
-    // @ must be at start or preceded by whitespace.
     if at_pos > 0 && !buf[..at_pos].ends_with(char::is_whitespace) {
         return None;
     }
-    // No whitespace between @ and cpos.
     if at_pos < cpos && buf[at_pos + 1..cpos].contains(char::is_whitespace) {
         return None;
     }
     Some(at_pos)
 }
 
-/// Read image data from the system clipboard and return a data URL.
-///
-/// On macOS, uses `osascript` to write clipboard image to a temp file.
-/// On Linux, tries `xclip` then `wl-paste`.
+/// Read an image from the system clipboard and return a data URL.
+/// macOS: uses `osascript`; Linux: tries `xclip` then `wl-paste`.
 fn clipboard_image_to_data_url() -> Option<String> {
     use base64::Engine;
 
@@ -1036,7 +954,6 @@ fn clipboard_image_to_data_url() -> Option<String> {
             .ok()
             .is_some_and(|o| o.status.success())
     } else {
-        // Try xclip first, then wl-paste.
         std::process::Command::new("xclip")
             .args(["-selection", "clipboard", "-t", "image/png", "-o"])
             .stdout(std::fs::File::create(&tmp).ok()?)
@@ -1066,7 +983,6 @@ fn clipboard_image_to_data_url() -> Option<String> {
 }
 
 pub(super) fn find_slash_anchor(buf: &str, cpos: usize) -> Option<usize> {
-    // Only valid when `/` is at position 0 and no whitespace in the query.
     if !buf.starts_with('/') || !buf.is_char_boundary(cpos) {
         return None;
     }
@@ -1091,11 +1007,8 @@ pub(crate) enum EscAction {
     StartTimer,
 }
 
-/// Pure logic for Esc key handling during agent processing.
-///
-/// `vim_mode_at_first_esc` tracks the vim mode before the Esc sequence started,
-/// so that a double-Esc cancel can restore it (the first Esc may have switched
-/// vim from insert → normal).
+/// Resolve Esc during agent processing. `vim_mode_at_first_esc` tracks the mode before the
+/// sequence so a double-Esc cancel can restore it (first Esc may have switched insert → normal).
 pub(crate) fn resolve_agent_esc(
     vim_mode: Option<VimMode>,
     has_queued: bool,
@@ -1104,22 +1017,19 @@ pub(crate) fn resolve_agent_esc(
 ) -> EscAction {
     use std::time::{Duration, Instant};
 
-    // Vim insert mode: switch to normal AND start the double-Esc timer so that
-    // a second Esc within 500ms cancels (only two presses total, not three).
+    // Insert mode: switch to Normal and start the double-Esc timer (two presses total to cancel).
     if vim_mode == Some(VimMode::Insert) {
         *vim_mode_at_first_esc = Some(VimMode::Insert);
         *last_esc = Some(Instant::now());
         return EscAction::VimToNormal;
     }
 
-    // Unqueue if there are queued messages.
     if has_queued {
         *last_esc = None;
         *vim_mode_at_first_esc = None;
         return EscAction::Unqueue;
     }
 
-    // Double-Esc: cancel agent, return mode to restore.
     if let Some(prev) = *last_esc {
         if prev.elapsed() < Duration::from_millis(500) {
             let restore = vim_mode_at_first_esc.take();
@@ -1130,7 +1040,6 @@ pub(crate) fn resolve_agent_esc(
         }
     }
 
-    // First Esc (vim normal or vim disabled) — start timer.
     *vim_mode_at_first_esc = vim_mode;
     *last_esc = Some(Instant::now());
     EscAction::StartTimer

@@ -21,7 +21,6 @@ pub(crate) struct MetricsEntry {
     pub(crate) prompt_tokens: u32,
     pub(crate) completion_tokens: u32,
     pub(crate) model: String,
-    /// Cost of this LLM call in USD. Absent in old entries.
     #[serde(default)]
     pub(crate) cost_usd: Option<f64>,
     #[serde(default)]
@@ -36,7 +35,7 @@ fn metrics_path() -> PathBuf {
     config::state_dir().join("metrics.jsonl")
 }
 
-/// Append a single entry to the metrics JSONL file.
+/// Append one entry to the metrics JSONL file.
 pub(crate) fn append(entry: &MetricsEntry) {
     let path = metrics_path();
     if let Some(parent) = path.parent() {
@@ -54,7 +53,7 @@ pub(crate) fn append(entry: &MetricsEntry) {
     }
 }
 
-/// Load all metrics entries from disk.
+/// Load all entries from the metrics file.
 pub(crate) fn load() -> Vec<MetricsEntry> {
     let path = metrics_path();
     let Ok(f) = std::fs::File::open(&path) else {
@@ -231,7 +230,6 @@ pub(crate) fn render_stats(entries: &[MetricsEntry]) -> StatsOutput {
         });
     }
 
-    // Per-model breakdown (sorted by total tokens descending)
     if stats.by_model.len() > 1 {
         left.push(StatsLine::Blank);
         left.push(StatsLine::Heading("per model".into()));
@@ -271,7 +269,6 @@ pub(crate) fn render_stats(entries: &[MetricsEntry]) -> StatsOutput {
         }
     }
 
-    // Last 24h hourly sparkline
     if !stats.by_hour.is_empty() {
         right.push(StatsLine::Heading("last 24 hours".into()));
         let now_hour = hour_key(now_ms());
@@ -287,7 +284,6 @@ pub(crate) fn render_stats(entries: &[MetricsEntry]) -> StatsOutput {
         ));
     }
 
-    // Daily heatmap (last 12 weeks)
     if !stats.by_day.is_empty() {
         right.push(StatsLine::Blank);
         right.push(StatsLine::Heading("daily activity (12 weeks)".into()));
@@ -325,11 +321,8 @@ pub(crate) fn render_stats(entries: &[MetricsEntry]) -> StatsOutput {
     StatsOutput { left, right }
 }
 
-/// Visual width of a stats line (excluding the 2-char left margin).
-/// Minimum gap between label and value columns.
 const KV_GAP: usize = 2;
 
-/// Compute the label column width for a set of lines (max label length + gap).
 fn label_col_width(lines: &[StatsLine]) -> usize {
     lines
         .iter()

@@ -1,22 +1,12 @@
-//! Picker — Buffer-backed list overlay for selectable items.
+//! Buffer-backed list overlay for selectable items.
 //!
-//! The picker is a Vbox-shaped Overlay containing one Buffer-backed
-//! list leaf. Each item lives as one buffer line shaped
-//! `{indent}{prefix}{label}{padding}{description}`; per-item accents
-//! and the dim description column are rendered as highlight extmarks.
-//! Selection is the leaf's `cursor_line` flagged with
-//! `cursor_line_highlight = true`, so the selected row picks up the
-//! `CursorLine` theme background.
+//! Each item occupies one buffer line: `{indent}{prefix}{label}{padding}{description}`.
+//! Per-item accents and the dim description column are extmarks. Selection is
+//! `cursor_line` with `cursor_line_highlight = true`.
 //!
-//! Reversed mode (used by prompt-docked completer pickers) places the
-//! "best match" at the bottom row by writing items in reverse order
-//! into the buffer; selection is mapped logical → visual by
-//! `n - 1 - logical`.
-//!
-//! All callers go through `open` to allocate the overlay and through
-//! `set_items` / `set_selected` to mutate an existing one. Closing the
-//! leaf via `close_overlay_leaf` (or `Ui::win_close`) cascades through
-//! `overlay_close` to remove the overlay.
+//! Reversed mode (prompt-docked completer) writes items in reverse order so
+//! the best match sits at the bottom; logical → visual mapping is `n - 1 - logical`.
+//! Closing the leaf cascades through `overlay_close` to remove the overlay.
 
 use crate::app::TuiApp;
 use crate::app::PROMPT_ABOVE_WIN;
@@ -27,16 +17,14 @@ use crate::smelt_term::{
 };
 use smelt_core::style::Color;
 
-/// One row in a picker. Prefix sits left of the label; description (if
-/// any) prints in a column-aligned dim block to the right of the
-/// longest label across the whole item set.
+/// One row in a picker. Description (if any) is column-aligned after the
+/// longest label across the set.
 #[derive(Clone, Default, Debug)]
 pub(crate) struct PickerItem {
     pub(crate) label: String,
     pub(crate) description: Option<String>,
     pub(crate) prefix: String,
-    /// Optional per-item accent color. When set, the prefix paints in
-    /// this color regardless of selection.
+    /// Paints the prefix in this color regardless of selection state.
     pub(crate) accent: Option<Color>,
 }
 
@@ -67,22 +55,18 @@ impl PickerItem {
 /// Where the picker overlay anchors on screen.
 #[derive(Clone, Copy, Debug)]
 pub(crate) enum PickerPlacement {
-    /// Centered on screen — used by focusable selector overlays.
+    /// Centered on screen.
     ScreenCenter,
-    /// Docked above the prompt window. Reversed: best match sits at
-    /// the bottom row, closest to the prompt.
+    /// Docked above the prompt; reversed so the best match is closest to the input.
     PromptDocked { max_rows: u16 },
-    /// Anchored to the cursor (fallback for `placement = "cursor"`).
+    /// Anchored to the cursor.
     Cursor,
-    /// Docked to the bottom of the screen, full width, reserving one
-    /// row for the status bar.
+    /// Bottom of screen, full width, one row above the status bar.
     ScreenBottom,
 }
 
-/// Per-leaf picker bookkeeping. Lives on `TuiApp::picker_state` keyed by
-/// the leaf `WinId` so `set_items` / `set_selected` can resize the
-/// overlay's outer height constraint and reverse logical → visual
-/// indices without re-deriving placement on every call.
+/// Per-leaf picker state, keyed by `WinId`. Lets `set_items` / `set_selected`
+/// resize the overlay and reverse logical → visual indices without re-deriving placement.
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct PickerState {
     pub(crate) overlay: OverlayId,
@@ -94,10 +78,8 @@ pub(crate) struct PickerState {
 const INDENT: usize = 1;
 const DESC_GAP: usize = 2;
 
-/// Open a Buffer-backed picker overlay. `selected` is a logical
-/// 0-based index into `items`; `reversed` is implicit from
-/// `placement`. Returns the leaf `WinId` (caller stores it for
-/// subsequent `set_items` / `set_selected` calls).
+/// Open a picker overlay. `selected` is a logical 0-based index into `items`.
+/// Returns the leaf `WinId` for subsequent `set_items` / `set_selected` calls.
 pub(crate) fn open(
     app: &mut TuiApp,
     items: Vec<PickerItem>,
@@ -109,7 +91,7 @@ pub(crate) fn open(
 ) -> Option<WinId> {
     let max_rows = match placement {
         PickerPlacement::PromptDocked { max_rows } => max_rows,
-        _ => 32, // generous cap for screen-center / cursor / dock-bottom
+        _ => 32,
     };
     let reversed = matches!(placement, PickerPlacement::PromptDocked { .. });
 
@@ -154,9 +136,7 @@ pub(crate) fn open(
     Some(leaf)
 }
 
-/// Replace the picker's items in place. Resizes the overlay's outer
-/// height constraint when the count changes; preserves selection at
-/// `selected` (clamped). No-op when `leaf` isn't a known picker.
+/// Replace picker items, resizing the overlay. No-op if `leaf` is not a known picker.
 pub(crate) fn set_items(app: &mut TuiApp, leaf: WinId, items: Vec<PickerItem>, selected: usize) {
     let Some(state) = app.picker_state.get(&leaf).copied() else {
         return;
@@ -179,7 +159,7 @@ pub(crate) fn set_items(app: &mut TuiApp, leaf: WinId, items: Vec<PickerItem>, s
     }
 }
 
-/// Update the picker's logical selection. Clamps to `n - 1`.
+/// Update the picker's logical selection (clamped to `n - 1`).
 pub(crate) fn set_selected(app: &mut TuiApp, leaf: WinId, selected: usize) {
     let Some(state) = app.picker_state.get(&leaf).copied() else {
         return;
@@ -198,8 +178,8 @@ pub(crate) fn set_selected(app: &mut TuiApp, leaf: WinId, selected: usize) {
     }
 }
 
-/// Remove the picker's bookkeeping when its leaf closes. The overlay
-/// itself is removed by `Ui::win_close → overlay_close` cascade.
+/// Remove picker state when its leaf closes. The overlay itself is removed
+/// by `Ui::win_close → overlay_close`.
 pub(crate) fn forget(app: &mut TuiApp, leaf: WinId) {
     app.picker_state.remove(&leaf);
 }
@@ -209,11 +189,8 @@ fn picker_height(item_count: usize, max_rows: u16) -> u16 {
     n.min(max_rows.max(1))
 }
 
-/// Compute `(cursor_line, scroll_top)` for a picker leaf. `cursor_line`
-/// is viewport-relative (the y-coord `Window::render` paints into the
-/// slice); `scroll_top` is adjusted from `prev_scroll` so the cursor's
-/// buffer row falls inside the visible window `[scroll, scroll + height)`.
-/// Preserves `prev_scroll` when the cursor is already in view.
+/// Compute `(cursor_line, scroll_top)` for a picker leaf. Adjusts scroll
+/// so the selected buffer row stays in `[scroll, scroll + height)`.
 fn cursor_and_scroll(
     selected: usize,
     item_count: usize,
@@ -256,8 +233,6 @@ fn layout_for(leaf: WinId, height: u16) -> LayoutTree {
 
 fn anchor_for(placement: PickerPlacement, height: u16) -> Anchor {
     match placement {
-        // Anchor to the chrome leaf above the input so the picker
-        // floats above the top bar instead of paining over it.
         PickerPlacement::PromptDocked { .. } => Anchor::Win {
             target: PROMPT_ABOVE_WIN.into(),
             attach: Corner::NW,
@@ -274,8 +249,7 @@ fn anchor_for(placement: PickerPlacement, height: u16) -> Anchor {
     }
 }
 
-/// Compute the longest label width (`prefix + label`) across the item
-/// set so descriptions can align in a column.
+/// Longest `prefix + label` width across the item set, for description alignment.
 fn max_label_chars(items: &[PickerItem]) -> usize {
     items
         .iter()
@@ -284,10 +258,8 @@ fn max_label_chars(items: &[PickerItem]) -> usize {
         .unwrap_or(0)
 }
 
-/// Render `items` into `buf` as one row each, populating highlight
-/// extmarks for per-item accent (prefix) and the dim description
-/// column. Reversed mode flips item order so logical 0 lands on the
-/// last visual row.
+/// Write items into the buffer, one row each, with accent and dim-description
+/// extmarks. Reversed mode flips order so logical 0 lands on the last row.
 fn write_buffer(app: &mut TuiApp, buf: BufId, items: &[PickerItem], reversed: bool) {
     let max_label = max_label_chars(items);
     let order: Vec<usize> = if reversed {
@@ -312,8 +284,7 @@ fn write_buffer(app: &mut TuiApp, buf: BufId, items: &[PickerItem], reversed: bo
         lines.push(line);
     }
     if lines.is_empty() {
-        // A picker with zero items renders as one blank dim line. Keeps
-        // the overlay non-empty even when filtering returns no matches.
+        // Keep the overlay non-empty when filtering returns no matches.
         lines.push(" (no matches)".into());
     }
 

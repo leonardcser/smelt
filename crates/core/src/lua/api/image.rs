@@ -1,7 +1,4 @@
-//! `smelt.image` bindings — thin shapes over `engine::image` for tools
-//! that need to detect or load image files. Used by the Lua
-//! `read_file` tool to short-circuit `.png` / `.jpg` / `.gif` /
-//! `.webp` / `.bmp` / `.tiff` / `.svg` paths into a base64 data URL.
+//! `smelt.image` — image file detection and base64 data-URL loading.
 
 use mlua::prelude::*;
 

@@ -16,7 +16,6 @@ use std::time::{Duration, Instant};
 impl TuiApp {
     // ── Terminal event dispatch ───────────────────────────────────────────
 
-    /// Handle a single terminal event, potentially starting/stopping agents.
     /// Returns `true` if the app should quit.
     pub(crate) fn dispatch_terminal_event(&mut self, ev: Event, t: &mut Timers) -> bool {
         if matches!(ev, Event::FocusGained | Event::FocusLost) {
@@ -27,17 +26,12 @@ impl TuiApp {
             return false;
         }
 
-        // Global chord layer: these keys fire in every focus context
-        // (prompt, content, or any overlay leaf). Intercepted before
-        // focus-specific routing so no handler below can swallow them.
+        // Global chords fire before focus-specific routing so no handler can swallow them.
         if let Event::Key(KeyEvent {
             code, modifiers, ..
         }) = &ev
         {
-            // Global shortcuts only fire when no overlay is focused
-            // and no cmdline overlay is open — otherwise the dialog's
-            // keymap (e.g. Confirm's BackTab handler) or the cmdline's
-            // text-edit recipe gets first dibs.
+            // Skip when an overlay or cmdline is focused — they get first dibs.
             if self.ui.focused_overlay().is_none() && self.well_known.cmdline.is_none() {
                 let ctx = self
                     .input
@@ -60,12 +54,8 @@ impl TuiApp {
             }
         }
 
-        // Overlay focus: when an overlay leaf is focused (or a modal
-        // overlay is active), route keys through the focused leaf's
-        // keymap registry. Per-window keymaps fire from `Callbacks`;
-        // any Rust callbacks queue `AppOp`s drained below. Mouse
-        // events fall through so the regular `handle_mouse` path can
-        // run wheel/scrollbar logic over the overlay's rect.
+        // Overlay/modal focus: route keys through the focused leaf's keymap registry.
+        // Mouse events fall through so wheel/scrollbar logic runs over the overlay rect.
         if self.ui.focused_overlay().is_some() || self.ui.active_modal().is_some() {
             if let Event::Resize(w, h) = ev {
                 self.handle_resize(w, h);
@@ -83,9 +73,7 @@ impl TuiApp {
                     if let Some(quit) = self.cmdline_handle_key(k) {
                         return quit;
                     }
-                    // Cmdline didn't claim the key — swallow it so
-                    // unrelated split keymaps don't fire on top of an
-                    // open cmdline.
+                    // Swallow unclaimed keys so split keymaps don't fire over an open cmdline.
                     return false;
                 }
                 let lua = &self.lua;
@@ -99,11 +87,8 @@ impl TuiApp {
                     .ui
                     .dispatch_event(crate::smelt_term::Event::Key(k), &mut lua_invoke);
                 if matches!(status, crate::smelt_term::Status::Ignored) {
-                    // Lua-registered global keymaps (e.g. `<F12>` for
-                    // the perf overlay) get the next shot. They fire
-                    // BEFORE the vim viewer fallthrough so unbound
-                    // chords aren't swallowed by the Window's default
-                    // Insert-mode passthrough on a read-only viewer.
+                    // Global Lua keymaps get the next shot, before the vim viewer fallthrough,
+                    // so unbound chords aren't swallowed by Insert-mode passthrough on read-only viewers.
                     let mut consumed = false;
                     if let Some(chord) = crate::lua::chord_string(k) {
                         let vim_mode = self.current_vim_mode_label();
@@ -115,14 +100,9 @@ impl TuiApp {
                             consumed = true;
                         }
                     }
-                    // Unified viewer/editor fallthrough: if the focused
-                    // overlay leaf is vim-enabled and no keymap absorbed
-                    // the key, run the same `Window::handle_key` path
-                    // the transcript and prompt rely on. This is what
-                    // makes `/messages`, `/help`, `/stats`, and any
-                    // plugin-built viewer panel support vim navigation
-                    // + selection + yank without each one wiring its
-                    // own keymap recipe.
+                    // Vim-enabled overlay leaves share the same `Window::handle_key` path
+                    // as transcript/prompt — gives viewer panels (help, stats, plugins)
+                    // vim navigation + selection + yank without per-panel keymap wiring.
                     if !consumed {
                         let _ = self.dispatch_overlay_viewer_key(k);
                     }
@@ -133,11 +113,10 @@ impl TuiApp {
             if !matches!(ev, Event::Mouse(_)) {
                 return false;
             }
-            // Fallthrough: mouse events go to the regular dispatch
-            // below so wheel + scrollbar drag work on overlays.
+            // Mouse events fall through so wheel + scrollbar drag work on overlays.
         }
 
-        // Ctrl+C while exec is running → kill it.
+        // Ctrl+C kills a running exec process.
         if self.exec.is_some()
             && matches!(
                 ev,
@@ -160,9 +139,7 @@ impl TuiApp {
             self.handle_event_idle(ev, t)
         };
 
-        // Fire `WinEvent::TextChanged` on the prompt window if the buffer
-        // changed during this event. Lua plugins use this to drive
-        // filter-as-you-type (e.g. `smelt.prompt.open_picker`).
+        // Notify Lua subscribers if the prompt buffer changed (drives filter-as-you-type pickers).
         self.emit_prompt_text_changed_if_dirty();
 
         match outcome {
@@ -183,10 +160,7 @@ impl TuiApp {
                 false
             }
             EventOutcome::InterruptWithQueued => {
-                // Cancel the running turn and let the queued messages
-                // auto-start via the main loop once TurnComplete arrives.
-                // We must save the queued messages before finish_turn
-                // because the cancel path dumps them into the input buffer.
+                // Save queued messages before cancel — the cancel path dumps them into the input buffer.
                 let remaining = std::mem::take(&mut self.queued_messages);
                 self.discard_turn(true);
                 self.queued_messages = remaining;
@@ -200,11 +174,8 @@ impl TuiApp {
                 mut content,
                 mut display,
             } => {
-                // Ingress: scrub secrets from user submissions before they
-                // reach the screen, the queue, or the engine.
                 self.redact_user_submission(&mut content, &mut display);
-                // Queue messages while compaction is in progress so they
-                // are sent against the compacted history, not the old one.
+                // Queue during compaction so messages run against the compacted history.
                 if self.is_compacting() {
                     let text = content.text_content();
                     if !text.is_empty() {
@@ -221,15 +192,14 @@ impl TuiApp {
                         };
                         self.apply_input_outcome(outcome, content, &display);
                     } else if !self.queued_messages.is_empty() {
-                        // Empty submit with queued messages: pop and send the
-                        // oldest one immediately.
+                        // Empty submit: send the oldest queued message immediately.
                         let queued = self.queued_messages.remove(0);
                         let outcome = self.process_input(&queued);
                         let content = Content::text(queued.clone());
                         self.apply_input_outcome(outcome, content, &queued);
                     }
                 }
-                // Restore stash unless a dialog was opened (it will restore on close).
+                // Don't restore stash if a dialog opened — it restores on close.
                 if self.ui.focused_overlay().is_none() {
                     self.input.restore_stash();
                 }
@@ -240,26 +210,11 @@ impl TuiApp {
 
     // ── Idle event handler ───────────────────────────────────────────────
 
-    /// Shared event-routing preamble for both the idle and
-    /// agent-running paths. Handles the routes that behave identically
-    /// regardless of whether the agent is streaming: paste (drops the
-    /// prompt prediction), resize, mouse (wheel, click, drag-select,
-    /// scrollbar), `Ctrl-W` pane chord, transcript-window key
-    /// routing when `Content` has focus, and dialog/overlay keys.
+    /// Shared preamble for idle and agent-running paths.
     ///
-    /// Shared key/event preamble for both idle and running paths.
+    /// Returns `Some(outcome)` when consumed; `None` to continue with path-specific logic.
     ///
-    /// Returns `Some(outcome)` when the event was fully handled;
-    /// `None` when the caller should continue with path-specific
-    /// logic (esc handling, keymap lookups, `PromptState`).
-    ///
-    /// Dispatch priority (first match wins):
-    ///  1. Resize / mouse — structural events, always handled
-    ///  2. Lua keymaps    — user-registered chords (`vim.keymap.set`)
-    ///  3. Pane chords    — Ctrl-W window management
-    ///  4. Cmdline `:`    — opens nvim-style command line (normal mode only)
-    ///  5. Content focus  — transcript navigation when content pane is focused
-    ///  6. Overlay keys   — notifications, btw block dismiss
+    /// Dispatch priority: resize/mouse → Lua keymaps → pane chords → cmdline `:` → content focus → overlay keys.
     fn dispatch_common(&mut self, ev: &Event, t: &mut Timers) -> Option<EventOutcome> {
         if matches!(ev, Event::Paste(_)) {
             self.clear_prompt_completer();
@@ -271,12 +226,7 @@ impl TuiApp {
         if let Event::Mouse(me) = *ev {
             return Some(self.handle_mouse(me));
         }
-        // Split-scoped ("buffer-local") Lua keymaps win over global
-        // ones — matches nvim's buffer-local > global priority. The
-        // focused split (prompt_input / transcript) is resolved inside
-        // `Ui::dispatch_event` via the registered split layer-id map.
-        // Used by `smelt.prompt.open_picker` to capture Enter / Esc /
-        // arrows while a picker is active. Skipped when an overlay
+        // Buffer-local Lua keymaps win over global (nvim priority). Skipped when an overlay
         // owns focus — overlay-leaf dispatch happens upstream.
         if let Event::Key(k) = *ev {
             if self.ui.focused_overlay().is_none() {
@@ -297,22 +247,14 @@ impl TuiApp {
             }
         }
 
-        // Lua-registered keymaps get first crack at key events, matching
-        // nvim's `vim.keymap.set` priority. Handlers may return `false`
-        // to fall through to downstream dispatch (e.g. `?` opens help
-        // when the prompt is empty but inserts the literal otherwise).
-        // Both single-key and multi-key chords flow through the same
-        // registry; multi-key sequences accumulate in `t.pending_chord`
-        // until they exact-match a registered chord or fall off the
-        // 500ms timeout window.
+        // Global Lua keymaps. Handlers may return `false` to fall through.
+        // Multi-key sequences accumulate in `t.pending_chord` until exact-matched or timed out.
         if let Event::Key(k) = *ev {
             if let Some(token) = crate::lua::chord_string(k) {
                 let vim_mode = self.current_vim_mode_label();
                 use smelt_core::lua::runtime::KeymapResult;
 
-                // Single-key dispatch first — preserves nvim parity for
-                // plain bindings like `?` and keeps the common case
-                // allocation-free.
+                // Single-key first — allocation-free common case.
                 match self.lua.run_keymap(&token, vim_mode.as_deref(), None) {
                     KeymapResult::Consumed => {
                         t.pending_chord = None;
@@ -324,11 +266,7 @@ impl TuiApp {
                     }
                 }
 
-                // Multi-key chord dispatch. Drop a stale pending sequence
-                // (timeout elapsed), then append the new token. Trim
-                // front while the running sequence isn't a registered
-                // chord and isn't a prefix of one — same matching rule
-                // nvim applies when resolving ambiguous mappings.
+                // Multi-key chord: drop stale pending sequence, then append and match.
                 let now = Instant::now();
                 if let Some(pending) = &t.pending_chord {
                     if now.duration_since(pending.started)
@@ -404,7 +342,7 @@ impl TuiApp {
         if let Some(outcome) = self.handle_pane_chord(ev, t) {
             return Some(outcome);
         }
-        // `:` opens the cmdline from any window, unless in insert mode.
+        // `:` opens the cmdline unless in insert mode.
         if let Event::Key(KeyEvent {
             code: KeyCode::Char(':'),
             modifiers: KeyModifiers::NONE | KeyModifiers::SHIFT,
@@ -436,9 +374,8 @@ impl TuiApp {
             return outcome;
         }
 
-        // Single Esc: vim handling falls through to PromptState::handle_event;
-        // non-vim Esc is a no-op. Idle-mode Esc-Esc lives in the chord
-        // registry (`runtime/lua/smelt/plugins/esc_chord.lua`).
+        // Single Esc: vim falls through to PromptState::handle_event; non-vim is a no-op.
+        // Esc-Esc lives in the chord registry (esc_chord.lua).
         if matches!(
             ev,
             Event::Key(KeyEvent {
@@ -450,7 +387,6 @@ impl TuiApp {
             return EventOutcome::Noop;
         }
 
-        // Keymap lookup for app-level actions (before delegating to PromptState).
         if let Event::Key(KeyEvent {
             code, modifiers, ..
         }) = ev
@@ -459,8 +395,7 @@ impl TuiApp {
             let ghost = ghost_text.is_some() && self.input.win.text.is_empty();
             let ctx = self.input.key_context(false, ghost, self.vim_mode);
 
-            // Dismiss ghost text on keys that affect input content.
-            // Transparent actions (mode toggles, redraw, etc.) preserve it.
+            // Editing keys dismiss ghost text; transparent actions (mode toggles, redraw) preserve it.
             if ghost {
                 match keymap::lookup(code, modifiers, &ctx) {
                     Some(KeyAction::AcceptGhostText) => {
@@ -483,13 +418,11 @@ impl TuiApp {
             }
 
             if let Some(action) = keymap::lookup(code, modifiers, &ctx) {
-                // Handle actions that need app-level context.
                 match action {
                     KeyAction::Quit => {
                         return EventOutcome::Quit;
                     }
                     KeyAction::ClearBuffer => {
-                        // Dismiss completer first, then clear buffer.
                         if self.input.completer.is_some() {
                             self.input.close_completer();
                             return EventOutcome::Redraw;
@@ -498,14 +431,11 @@ impl TuiApp {
                         self.input.clear();
                         return EventOutcome::Redraw;
                     }
-                    _ => {
-                        // Delegate to PromptState for editing/navigation actions.
-                    }
+                    _ => {}
                 }
             }
         }
 
-        // Delegate to PromptState::handle_event (menu, completer, vim, editing).
         let action = self.input.handle_event(
             ev,
             Some(&mut self.input_history),
@@ -522,12 +452,11 @@ impl TuiApp {
             return outcome;
         }
 
-        // Track last keypress for deferring permission dialogs.
+        // Record last keypress for deferred permission dialogs.
         if matches!(ev, Event::Key(_)) {
             t.last_keypress = Some(Instant::now());
         }
 
-        // Keymap lookup for Ctrl+C (agent-running variant).
         if let Event::Key(KeyEvent {
             code, modifiers, ..
         }) = ev
@@ -536,7 +465,6 @@ impl TuiApp {
             if let Some(action) = keymap::lookup(code, modifiers, &ctx) {
                 match action {
                     KeyAction::CancelAgent => {
-                        // Dismiss completer first, then cancel.
                         if self.input.completer.is_some() {
                             self.input.close_completer();
                             return EventOutcome::Noop;
@@ -545,7 +473,6 @@ impl TuiApp {
                         return EventOutcome::CancelAgent;
                     }
                     KeyAction::ClearBuffer => {
-                        // Dismiss completer first, then clear.
                         if self.input.completer.is_some() {
                             self.input.close_completer();
                             return EventOutcome::Noop;
@@ -555,14 +482,11 @@ impl TuiApp {
                         self.queued_messages.clear();
                         return EventOutcome::Noop;
                     }
-                    _ => {
-                        // Other keymap actions — continue to Esc / input handling.
-                    }
+                    _ => {}
                 }
             }
         }
 
-        // Esc: dismiss any open picker completer first, then run agent-mode logic.
         if matches!(
             ev,
             Event::Key(KeyEvent {
@@ -606,7 +530,6 @@ impl TuiApp {
             return EventOutcome::Noop;
         }
 
-        // Everything else → PromptState::handle_event (type-ahead with history).
         let input_action = self.input.handle_event(
             ev,
             Some(&mut self.input_history),
@@ -618,7 +541,6 @@ impl TuiApp {
                 mut content,
                 mut display,
             } => {
-                // Ingress: scrub secrets before queueing or running commands.
                 self.redact_user_submission(&mut content, &mut display);
                 let text = content.text_content();
                 if let Some(outcome) = self.try_command_while_running(text.trim()) {
@@ -650,7 +572,6 @@ impl TuiApp {
 
     // ── Shared helpers ────────────────────────────────────────────────────
 
-    /// Map an `input::Action` into an `EventOutcome`.
     fn dispatch_input_action(&mut self, action: Action) -> EventOutcome {
         match action {
             Action::Submit { content, display } => EventOutcome::Submit { content, display },
@@ -689,7 +610,7 @@ impl TuiApp {
             return;
         }
 
-        // Suspend TUI so the editor gets a normal terminal.
+        // Suspend TUI for the editor.
         let _ = io::stdout().execute(DisableMouseCapture);
         let _ = io::stdout().execute(EnableLineWrap);
         let _ = io::stdout().execute(LeaveAlternateScreen);
@@ -697,7 +618,6 @@ impl TuiApp {
 
         let status = std::process::Command::new(&editor).arg(tmp.path()).status();
 
-        // Resume TUI.
         terminal::enable_raw_mode().ok();
         let _ = io::stdout().execute(EnterAlternateScreen);
         let _ = io::stdout().execute(DisableLineWrap);
@@ -735,8 +655,6 @@ impl TuiApp {
         }
     }
 
-    /// Handle overlay keys (notification dismiss).
-    /// Returns `Some(EventOutcome)` if the event was consumed.
     fn handle_overlay_keys(&mut self, ev: &Event) -> Option<EventOutcome> {
         if matches!(ev, Event::Key(_)) && self.notification.is_some() {
             self.dismiss_notification();
@@ -755,13 +673,9 @@ impl TuiApp {
         let trimmed = input.trim();
         self.input_history.push(input.to_string());
 
-        // Skip shell escape for pasted content
         let is_from_paste = self.input.skip_shell_escape();
 
-        // `:` is a vim-style alias for `/` — both dispatch through the
-        // same Lua command registry. Normalize once so the lookups
-        // below find `:reflect` / `:resume` / etc. the same way they
-        // find their `/` siblings.
+        // `:` is a vim-style alias for `/` — normalize before command lookup.
         let dispatch_input = if let Some(rest) = trimmed.strip_prefix(':') {
             format!("/{rest}")
         } else {
@@ -777,12 +691,11 @@ impl TuiApp {
         {
             return InputOutcome::Continue;
         }
-        // Skip starting agent for shell escapes, but NOT for pasted content
+        // Shell escapes (`!cmd`) skip agent start, but pasted content starting with `!` does not.
         if trimmed.starts_with('!') && !is_from_paste {
             return InputOutcome::Continue;
         }
 
-        // Publish input_submit so Lua plugins can observe/log.
         self.core
             .cells
             .set_dyn("input_submit", std::rc::Rc::new(trimmed.to_string()));
@@ -793,19 +706,14 @@ impl TuiApp {
 
     // ── Tick ─────────────────────────────────────────────────────────────
 
-    /// Viewport rows available for the content pane. Uses the prompt's
-    /// actual rendered height from the previous frame plus the 1-row
-    /// gap, so multi-line prompts (and completion menus) don't cause
-    /// the scroll math to overshoot.
+    /// Viewport rows for the content pane. Uses the prompt's previous-frame rendered height
+    /// so multi-line prompts don't cause scroll math to overshoot.
     pub(crate) fn viewport_rows_estimate(&self) -> u16 {
         self.layout.viewport_rows().max(1)
     }
 
-    /// Close an overlay leaf and clean up its picker / Lua-callback
-    /// registrations. The leaf id is whatever was returned from the
-    /// overlay's open path (picker / cmdline / notification / dialog);
-    /// `Ui::win_close` cascades to overlay close when the leaf belongs
-    /// to one.
+    /// Close an overlay leaf and clean up picker/Lua-callback registrations.
+    /// `Ui::win_close` cascades to overlay close when the leaf belongs to one.
     pub(crate) fn close_overlay_leaf(&mut self, win_id: crate::smelt_term::WinId) {
         crate::picker::forget(self, win_id);
         for id in self.win_close(win_id) {
@@ -813,12 +721,8 @@ impl TuiApp {
         }
     }
 
-    /// Close the focused overlay if it doesn't block the agent (e.g.
-    /// Ps, Permissions, Resume). Used before opening a blocking
-    /// dialog so only one is visible at a time. Fires
-    /// `WinEvent::Dismiss` on the overlay's root leaf so the dialog's
-    /// callbacks can flush any pending state (e.g. Permissions syncs
-    /// its edits before close).
+    /// Close the focused overlay if it doesn't block the agent.
+    /// Fires `WinEvent::Dismiss` so callbacks can flush pending state before close.
     pub(crate) fn close_focused_non_blocking_overlay(&mut self) {
         let Some(overlay_id) = self.ui.focused_overlay() else {
             return;
@@ -853,8 +757,7 @@ impl TuiApp {
         self.flush_lua_callbacks();
     }
 
-    /// True when the focused overlay pauses engine-event drain
-    /// (Confirm / Question / Lua dialogs gating a pending tool call).
+    /// True when the focused overlay blocks engine-event drain (Confirm/Question/Lua dialogs).
     pub(crate) fn focused_overlay_blocks_agent(&self) -> bool {
         self.ui
             .focused_overlay()
@@ -862,9 +765,7 @@ impl TuiApp {
             .is_some_and(|o| o.blocks_agent)
     }
 
-    /// Snap the transcript cursor to the nearest selectable cell.
-    /// Called after every cursor motion to skip non-selectable gutters
-    /// and padding now that the cursor operates in display-text space.
+    /// Snap the transcript cursor to the nearest selectable cell, skipping gutters and padding.
     pub(crate) fn snap_transcript_cursor(&mut self) {
         let rows = self.full_transcript_display_text(self.core.config.settings.show_thinking);
         let snapped = self.snap_cpos_to_selectable(
@@ -879,18 +780,8 @@ impl TuiApp {
         }
     }
 
-    /// Forward a keystroke to the focused overlay-leaf Window's
-    /// `handle_key` when it's vim-enabled and no keymap absorbed the
-    /// key. Provides the read-only viewer family (messages, /help,
-    /// /stats, plugin viewers) with the same vim motion + selection +
-    /// yank surface the transcript and prompt have used since P1.d.
-    ///
-    /// Viewer leaves are read-only — Insert mode makes no sense, and
-    /// keeping the mode the prompt was in would route `j`/`k` through
-    /// the Insert handler (which Passthroughs them, so the cursor
-    /// never moves). Force Normal on entry; the user can press `i`
-    /// only if the leaf were genuinely editable, which today's
-    /// viewer leaves are not.
+    /// Forward a key to the focused overlay-leaf Window when it's vim-enabled and no keymap
+    /// absorbed the key. Forces Normal mode — Insert would passthrough `j`/`k` without moving.
     /// Returns `true` if the Window claimed the event.
     pub(crate) fn dispatch_overlay_viewer_key(&mut self, k: KeyEvent) -> bool {
         let win = match self.ui.focus() {

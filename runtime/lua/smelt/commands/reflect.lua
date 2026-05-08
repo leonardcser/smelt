@@ -1,6 +1,4 @@
--- Built-in `/reflect` command. Self-contained: the prompt body is a
--- Lua string below; the Rust side only re-enters via
--- `smelt.engine.submit_command(name, body)` to start the turn.
+-- Built-in /reflect command.
 
 local BODY = [[# Reflect
 

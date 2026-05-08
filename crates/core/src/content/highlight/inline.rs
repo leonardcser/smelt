@@ -29,7 +29,6 @@ pub fn render_markdown_table(
         return 0;
     }
 
-    // Calculate column widths based on visual (stripped) content.
     let max_table = if let Some(b) = bctx {
         b.inner_w.saturating_sub(1)
     } else {
@@ -43,10 +42,7 @@ pub fn render_markdown_table(
         }
     }
 
-    // Borders: "┃" + (" col ┃") * num_cols → 3 * num_cols + 1.
     let overhead = 3 * num_cols + 1;
-
-    // Minimum column widths: the longest unwrappable segment per column.
     let mut min_widths = vec![0usize; num_cols];
     for row in rows {
         for (c, cell) in row.iter().enumerate() {
@@ -54,7 +50,6 @@ pub fn render_markdown_table(
         }
     }
 
-    // Shrink columns by wrapping until the table fits, or we hit minimums.
     let total: usize = col_widths.iter().sum::<usize>() + overhead;
     if total > max_table {
         let avail = max_table.saturating_sub(overhead);
@@ -68,21 +63,18 @@ pub fn render_markdown_table(
         // Shrink proportionally but clamp to min_widths.
         let content_total: usize = col_widths.iter().sum();
         if content_total > 0 {
-            // First pass: proportional shrink.
             let mut new_widths: Vec<usize> = col_widths
                 .iter()
                 .zip(min_widths.iter())
                 .map(|(&w, &min)| ((w * avail) / content_total).max(min))
                 .collect();
 
-            // Redistribute any excess from clamped columns.
             loop {
                 let used: usize = new_widths.iter().sum();
                 if used <= avail {
                     break;
                 }
                 let excess = used - avail;
-                // Find columns that can still shrink.
                 let shrinkable: Vec<usize> = (0..num_cols)
                     .filter(|&c| new_widths[c] > min_widths[c])
                     .collect();
@@ -132,7 +124,7 @@ pub fn render_markdown_table(
                 bar(out, dim);
                 out.print_gutter("┃");
                 reset(out, dim);
-                let mut line_cols = 1; // "┃"
+                let mut line_cols = 1;
                 for (c, width) in widths.iter().enumerate() {
                     let text = wrapped
                         .get(c)
@@ -160,7 +152,6 @@ pub fn render_markdown_table(
             height as u16
         };
 
-    // left, horizontal, junction, right
     let render_border =
         |out: &mut LineBuilder, widths: &[usize], dim: bool, l: &str, j: &str, r: &str| -> u16 {
             if let Some(b) = bctx {
@@ -170,7 +161,7 @@ pub fn render_markdown_table(
             }
             bar(out, dim);
             out.print_gutter(l);
-            let mut line_cols = 1; // "l"
+            let mut line_cols = 1;
             for (c, width) in widths.iter().enumerate() {
                 let seg = width + 2;
                 out.print_gutter(&"━".repeat(seg));
@@ -190,28 +181,21 @@ pub fn render_markdown_table(
             1
         };
 
-    // Top border
     total_rows += render_border(out, &col_widths, dim, "┏", "┳", "┓");
-
-    // Header
     if let Some(header) = rows.first() {
         total_rows += render_table_row(out, header, &col_widths, dim);
         total_rows += render_border(out, &col_widths, dim, "┣", "╋", "┫");
     }
-
-    // Data rows
     for row in rows.iter().skip(1) {
         total_rows += render_table_row(out, row, &col_widths, dim);
     }
 
-    // Bottom border
     total_rows += render_border(out, &col_widths, dim, "┗", "┻", "┛");
 
     total_rows
 }
 
-/// Stacked layout for tables too wide for the terminal.
-/// Each data row becomes a block of "Header: value" lines, separated by blank lines.
+/// Stacked fallback: each data row becomes "Header: value" lines, used when the table is too wide.
 fn render_table_stacked(out: &mut LineBuilder, rows: &[Vec<String>], dim: bool) -> u16 {
     let header = match rows.first() {
         Some(h) => h,
@@ -224,7 +208,6 @@ fn render_table_stacked(out: &mut LineBuilder, rows: &[Vec<String>], dim: bool) 
         .max()
         .unwrap_or(0);
 
-    // "  label  value" → indent for continuation lines is 2 + label_width + 2
     let value_indent = 2 + label_width + 2;
     let value_width = default_width().saturating_sub(value_indent);
 
@@ -265,8 +248,7 @@ fn render_table_stacked(out: &mut LineBuilder, rows: &[Vec<String>], dim: bool) 
     total_rows
 }
 
-/// Word-wrap cell text so each line's visual width (after stripping markers) fits within `max_width`.
-/// Only breaks at spaces that are outside inline markdown spans.
+/// Word-wrap cell text to `max_width`, breaking only at spaces outside inline spans.
 fn wrap_cell_words(out: &mut LineBuilder, text: &str, max_width: usize) -> Vec<String> {
     if max_width == 0 {
         return vec![text.to_string()];
@@ -308,8 +290,7 @@ fn wrap_cell_words(out: &mut LineBuilder, text: &str, max_width: usize) -> Vec<S
     lines
 }
 
-/// Find the visual width of the longest unwrappable segment in text.
-/// Used to compute minimum column widths.
+/// Visual width of the longest unwrappable segment; used for minimum column widths.
 fn min_visual_width(text: &str) -> usize {
     let chars: Vec<char> = text.chars().collect();
     let len = chars.len();
@@ -350,18 +331,9 @@ pub(crate) fn print_inline_styled(out: &mut LineBuilder, text: &str, dim: bool) 
 
 // ── Inline markdown AST + parser ─────────────────────────────────────────
 //
-// `print_inline_styled` parses its input into a small `InlineNode` tree
-// and then walks the tree to emit spans. The tree approach is what lets
-// nested spans (bold containing italic, code inside italic, …) render
-// correctly: each inner node pushes a style on top of the outer one
-// instead of flatly resetting between spans.
-//
-// Delimiter matching is **strict** on count: an opener of length N can
-// only match a closer of length N. That prevents the "inverted" case
-// where e.g. `**text*` used to flip an unclosed bold into an italic by
-// letting a single `*` close a double `**`. Runs that don't match
-// anything are emitted as literal text *as a whole run*, so the trailing
-// `*` of `**text*` never gets re-scanned as a new italic opener.
+// A small `InlineNode` tree lets nested spans (bold containing italic, etc.) push styles
+// rather than flatly resetting. Delimiter matching is strict on run length: `**text*`
+// emits the whole unmatched run as literal so the trailing `*` never re-enters as an opener.
 
 enum InlineNode {
     Text(String),
@@ -372,9 +344,6 @@ enum InlineNode {
     BoldItalic(Vec<InlineNode>),
 }
 
-/// Parse the slice `chars[start..end]` into a flat list of `InlineNode`s.
-/// Recurses into emphasis/strikethrough content so nesting works, but
-/// treats code-span content as literal.
 fn parse_inline(chars: &[char], start: usize, end: usize) -> Vec<InlineNode> {
     let mut nodes: Vec<InlineNode> = Vec::new();
     let mut plain = String::new();
@@ -432,9 +401,7 @@ fn parse_inline(chars: &[char], start: usize, end: usize) -> Vec<InlineNode> {
                 }
             }
 
-            // No match — emit the ENTIRE run as literal and skip past it.
-            // Emitting char-by-char would let the tail of the run re-enter
-            // the parser as a new opener (the "inverted emphasis" bug).
+            // No match: emit the whole run as literal to avoid re-entry as a new opener.
             for _ in 0..open_run {
                 plain.push(marker);
             }
@@ -450,9 +417,6 @@ fn parse_inline(chars: &[char], start: usize, end: usize) -> Vec<InlineNode> {
     nodes
 }
 
-/// Walk an `InlineNode` tree and emit its spans to the sink. Uses
-/// `push_style`/`pop_style` so inner nodes inherit the outer style —
-/// e.g. italic inside bold becomes a single span with both attributes.
 fn emit_inline_nodes(out: &mut LineBuilder, nodes: &[InlineNode]) {
     for node in nodes {
         match node {
@@ -488,9 +452,6 @@ fn emit_inline_nodes(out: &mut LineBuilder, nodes: &[InlineNode]) {
 }
 
 // ── Parse-then-wrap pipeline ─────────────────────────────────────────
-//
-// Inline markdown is parsed into styled spans FIRST, then wrapped by
-// display width. This preserves formatting across soft-wrap boundaries.
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct InlineStyle {
@@ -498,10 +459,7 @@ pub struct InlineStyle {
     pub italic: bool,
     pub dim: bool,
     pub crossedout: bool,
-    /// Theme group whose fg/bg fill the rendered span. `None` for
-    /// plain text. Inline `code` spans default to `role_hl("Accent")`
-    /// when the parser sees a backtick run; markdown headings paint
-    /// through `role_hl("Heading")`.
+    /// Theme group for the span; `None` for plain text.
     pub group: Option<HlGroup>,
 }
 

@@ -1,7 +1,4 @@
--- `/settings` — toggle boolean settings.
---
--- Each Enter toggles the selected setting and reopens the picker with
--- the refreshed `on`/`off` labels. Esc closes. Typing filters.
+-- `/settings` — toggle boolean settings. Enter toggles and reopens; Esc closes.
 
 local SETTINGS_META = {
   { key = "vim",                   label = "vim mode",             terms = "vim editor" },

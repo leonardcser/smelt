@@ -1,11 +1,4 @@
-//! Task + callback lifecycle methods on `LuaRuntime`. Covers Lua
-//! callbacks (`register_callback`, `invoke_callback`, `fire_callback`),
-//! the parked-task resume API (`resolve_external` + `pump_task_events`),
-//! the `LuaTaskRuntime` bridge (`drive_tasks`), and plugin-tool
-//! execution (`tool_defs`, `execute_tool`).
-//!
-//! Headless-safe methods have moved to [`smelt_core::lua::LuaRuntime`];
-//! this file only holds TUI-specific callback queueing.
+//! TUI-specific callback queueing methods on `LuaRuntime`.
 
 use super::LuaRuntime;
 
@@ -13,11 +6,8 @@ use super::LuaRuntime;
 use std::sync::atomic::Ordering;
 
 impl LuaRuntime {
-    /// Register a Lua callable under a fresh u64 id in
-    /// `shared.callbacks`. Test-only: production registers callbacks
-    /// through [`crate::lua::register_callback_handle`] which writes
-    /// directly into `LuaShared.callbacks` without going through this
-    /// runtime method.
+    /// Register a Lua callable under a fresh u64 id. Test-only — production uses
+    /// [`crate::lua::register_callback_handle`] directly.
     #[cfg(test)]
     pub(super) fn register_callback(&self, func: mlua::Function) -> mlua::Result<u64> {
         let key = self.lua.create_registry_value(func)?;
@@ -28,13 +18,8 @@ impl LuaRuntime {
         Ok(id)
     }
 
-    /// Invoke the Lua function registered under `handle.0` with a
-    /// table derived from `payload`. Test-only: production splits this
-    /// into [`Self::prepare_invocation`] (called while `&LuaRuntime` is
-    /// borrowed) plus a separate `func.call::<()>(payload_table)`
-    /// invocation after Rust borrows on `TuiApp` have lapsed (see
-    /// `app/lua_bridge.rs::flush_callbacks`). Tests use the merged
-    /// path for terseness.
+    /// Invoke a registered callback with a payload table. Test-only — production uses
+    /// the two-phase [`Self::prepare_invocation`] / call split to avoid borrow conflicts.
     #[cfg(test)]
     pub(super) fn invoke_callback(
         &self,
@@ -49,15 +34,10 @@ impl LuaRuntime {
         }
     }
 
-    /// Produce the `mlua::Function` + built payload table for a queued
-    /// invocation, **without calling into Lua**. Splitting this out of
-    /// [`Self::invoke_callback`] lets the host drain the queue in two
-    /// phases: phase 1 prepares each invocation while `&LuaRuntime` is
-    /// borrowed (mlua table construction needs it); phase 2 calls them
-    /// after all Rust borrows on TuiApp have lapsed (so the Lua body can
-    /// reach `&mut TuiApp` through [`crate::lua::with_app`]). Returns
-    /// `None` when the handle is already dropped or when payload
-    /// construction errored — both recorded as Lua errors.
+    /// Build the `mlua::Function` + payload table for a queued invocation without calling Lua.
+    /// Splitting preparation from the call lets the host release all TuiApp borrows before
+    /// the Lua body runs (so it can reach `&mut TuiApp` via [`crate::lua::with_app`]).
+    /// Returns `None` if the handle is dropped or payload construction fails.
     pub(crate) fn prepare_invocation(
         &self,
         handle: crate::smelt_term::LuaHandle,
@@ -87,19 +67,14 @@ impl LuaRuntime {
         Some((func, payload_table))
     }
 
-    /// Record a callback error from outside the runtime's usual call
-    /// path (e.g. a phase-2 invocation in `TuiApp::drain_lua_invocations`).
+    /// Record a callback error from the phase-2 invocation path.
     pub(crate) fn record_callback_error(&self, handle_id: u64, err: impl std::fmt::Display) {
         self.record_error(format!("callback `{handle_id}`: {err}"));
     }
 
-    /// Record a pending invocation from inside `ui.dispatch_event` /
-    /// `ui.fire_win_event`. The ui dispatcher holds `&mut Ui` while the
-    /// callback would fire, so firing Lua immediately would deny Lua
-    /// bindings access to `&mut TuiApp` (they'd collide with the ui
-    /// borrow). The host drains this queue right after the ui call
-    /// returns and invokes each callback with the TLS app pointer
-    /// installed, giving Lua bindings sole access to TuiApp state.
+    /// Queue an invocation from inside `ui.dispatch_event` / `ui.fire_win_event`.
+    /// The ui dispatcher holds `&mut Ui`, so Lua cannot be called immediately — it would
+    /// collide with the borrow. The host drains the queue after the ui call returns.
     pub(crate) fn queue_invocation(
         &self,
         handle: crate::smelt_term::LuaHandle,
@@ -115,10 +90,7 @@ impl LuaRuntime {
         }
     }
 
-    /// Drain every queued callback invocation. Called by the host after
-    /// `ui.dispatch_event` / `ui.fire_win_event` returns, under an
-    /// [`crate::lua::install_app_ptr`] scope so each Lua body can reach
-    /// `&mut TuiApp` through [`crate::lua::with_app`].
+    /// Drain all queued invocations. Must be called under an [`crate::lua::install_app_ptr`] scope.
     pub(crate) fn drain_invocations(&self) -> Vec<crate::lua::PendingInvocation> {
         match self.shared.pending_invocations.lock() {
             Ok(mut q) => std::mem::take(&mut *q),
@@ -127,8 +99,7 @@ impl LuaRuntime {
     }
 }
 
-/// Fill a Lua table with fields from a `crate::smelt_term::Payload` for
-/// `LuaRuntime::invoke_callback`.
+/// Fill a Lua table with fields derived from `payload`.
 fn populate_payload_table(
     table: &mlua::Table,
     payload: &crate::smelt_term::Payload,

@@ -1,13 +1,6 @@
 //! GitHub Copilot authentication and API access.
-//!
-//! Flow:
-//! 1. Device-code OAuth against github.com to get a long-lived GitHub access
-//!    token (the "refresh" token in our storage).
-//! 2. Exchange that token at api.github.com/copilot_internal/v2/token for a
-//!    short-lived Copilot API token (~30min TTL). The token string carries a
-//!    `proxy-ep=` claim from which we derive the API base URL.
-//! 3. Copilot speaks OpenAI chat/completions. The provider layer uses
-//!    `chat_completions::build_body` and injects Copilot-specific headers.
+//! GitHub OAuth device-code → long-lived GitHub token → short-lived Copilot token (~30min TTL).
+//! The Copilot token carries a `proxy-ep=` claim from which the API base URL is derived.
 
 use crate::log;
 use crate::paths::state_dir;
@@ -18,10 +11,7 @@ use std::time::Duration;
 use super::auth_storage::CredStore;
 use super::unix_now;
 
-// ── Constants ──────────────────────────────────────────────────────────────
-
-// base64-encoded GitHub OAuth client ID used by the official VS Code Copilot
-// Chat extension. Stored encoded so casual greps won't flag it.
+// VS Code Copilot Chat OAuth client ID, stored base64-encoded to avoid casual grep matches.
 const CLIENT_ID_B64: &str = "SXYxLmI1MDdhMDhjODdlY2ZlOTg=";
 
 const GITHUB_DEVICE_CODE_URL: &str = "https://github.com/login/device/code";
@@ -36,8 +26,6 @@ const COPILOT_INTEGRATION_ID: &str = "vscode-chat";
 
 const COPILOT_TOKENS_ENV: &str = "SMELT_COPILOT_TOKENS";
 
-// ── Persisted tokens ───────────────────────────────────────────────────────
-
 fn cred_store() -> CredStore {
     CredStore {
         keyring_service: "smelt-copilot-auth",
@@ -47,16 +35,6 @@ fn cred_store() -> CredStore {
     }
 }
 
-/// Persisted Copilot credentials.
-///
-/// `refresh_token` = the long-lived GitHub OAuth access token obtained from the
-/// device-code flow. It never expires on its own (the user must revoke it).
-///
-/// `access_token` + `expires_at` = the short-lived Copilot API token returned
-/// by `/copilot_internal/v2/token`. It lives ~30 minutes.
-///
-/// `api_base` = derived from the Copilot token's `proxy-ep=` claim. Cached so
-/// we don't re-parse on every request.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub(crate) struct CopilotTokens {
     pub(crate) refresh_token: String,
@@ -68,7 +46,6 @@ pub(crate) struct CopilotTokens {
 }
 
 impl CopilotTokens {
-    /// True if the access token is expired or within 60 seconds of expiry.
     pub(crate) fn needs_refresh(&self) -> bool {
         let now = unix_now();
         now + 60 >= self.expires_at
@@ -89,8 +66,6 @@ impl CopilotTokens {
     }
 }
 
-// ── Client ID decoding ─────────────────────────────────────────────────────
-
 fn client_id() -> String {
     use base64::Engine;
     let bytes = base64::engine::general_purpose::STANDARD
@@ -99,24 +74,15 @@ fn client_id() -> String {
     String::from_utf8(bytes).expect("client ID must be UTF-8")
 }
 
-// ── Base URL derivation ────────────────────────────────────────────────────
-
-/// Extract the Copilot API base URL from the `proxy-ep=` claim in a Copilot
-/// token. Token format:
-/// `tid=...;exp=...;proxy-ep=proxy.individual.githubcopilot.com;...`
+/// Extract the Copilot API base URL from the `proxy-ep=` claim in a Copilot token.
 fn base_url_from_token(token: &str) -> Option<String> {
     let proxy_host = token
         .split(';')
         .find_map(|kv| kv.strip_prefix("proxy-ep="))?;
-    // Convert proxy.xxx → api.xxx (Copilot uses api.* for REST endpoints).
     let api_host = proxy_host.strip_prefix("proxy.").unwrap_or(proxy_host);
     Some(format!("https://api.{}", api_host))
 }
 
-// ── Copilot headers (sent on every API request) ────────────────────────────
-
-/// Base headers every Copilot request needs. Dynamic headers (X-Initiator,
-/// Copilot-Vision-Request) are added by the provider layer per request.
 pub(crate) fn base_headers() -> [(&'static str, &'static str); 4] {
     [
         ("User-Agent", COPILOT_USER_AGENT),
@@ -125,8 +91,6 @@ pub(crate) fn base_headers() -> [(&'static str, &'static str); 4] {
         ("Copilot-Integration-Id", COPILOT_INTEGRATION_ID),
     ]
 }
-
-// ── Device-code login ──────────────────────────────────────────────────────
 
 #[derive(Deserialize)]
 struct DeviceCodeResponse {
@@ -137,24 +101,17 @@ struct DeviceCodeResponse {
     expires_in: u64,
 }
 
-/// Callbacks for the interactive device-code login flow.
 pub(crate) struct LoginCallbacks<'a> {
-    /// Called once the verification URL and user code are known. The caller
-    /// should display these to the user and open the URL in a browser if
-    /// possible.
     pub(crate) on_prompt: &'a (dyn Fn(&str, &str) + Send + Sync),
-    /// Called with progress messages (e.g. "Fetching Copilot token…").
     pub(crate) on_progress: &'a (dyn Fn(&str) + Send + Sync),
 }
 
-/// Run the GitHub device-code OAuth flow.
 pub(crate) async fn device_code_login(
     client: &reqwest::Client,
     callbacks: &LoginCallbacks<'_>,
 ) -> Result<CopilotTokens, String> {
     let cid = client_id();
 
-    // 1. Request device + user code.
     let body = url::form_urlencoded::Serializer::new(String::new())
         .append_pair("client_id", &cid)
         .append_pair("scope", "read:user")
@@ -183,7 +140,6 @@ pub(crate) async fn device_code_login(
     (callbacks.on_prompt)(&device.verification_uri, &device.user_code);
     open_browser(&device.verification_uri);
 
-    // 2. Poll for the GitHub access token.
     let github_token = poll_for_github_token(
         client,
         &cid,
@@ -193,7 +149,6 @@ pub(crate) async fn device_code_login(
     )
     .await?;
 
-    // 3. Exchange for a Copilot token.
     (callbacks.on_progress)("Fetching Copilot token…");
     let (access, expires_at, api_base) = fetch_copilot_token(client, &github_token).await?;
 
@@ -208,8 +163,6 @@ pub(crate) async fn device_code_login(
         .save()
         .map_err(|e| format!("failed to save tokens: {e}"))?;
 
-    // 4. Discover models and enable the policy for each one (required for
-    //    Claude/Grok etc. before they respond).
     (callbacks.on_progress)("Enabling Copilot models…");
     let models = match fetch_available_models(client, &tokens.access_token, &tokens.api_base).await
     {
@@ -249,7 +202,6 @@ async fn poll_for_github_token(
     expires_in: u64,
 ) -> Result<String, String> {
     let deadline = tokio::time::Instant::now() + Duration::from_secs(expires_in.max(1));
-    // Multipliers and behaviour match pi-mono's reference flow.
     let initial_multiplier = 1.2_f64;
     let slow_down_multiplier = 1.4_f64;
     let mut interval_ms: u64 = initial_interval.max(1) * 1000;
@@ -368,8 +320,6 @@ async fn fetch_copilot_token(
     Ok((token, expires_at, api_base))
 }
 
-// ── Token refresh ──────────────────────────────────────────────────────────
-
 pub(crate) async fn refresh_tokens(
     client: &reqwest::Client,
     refresh_token: &str,
@@ -393,7 +343,6 @@ pub(crate) async fn refresh_tokens(
     Ok(tokens)
 }
 
-/// Return valid Copilot tokens, refreshing if the access token is expired.
 pub(crate) async fn ensure_access_token_full(
     client: &reqwest::Client,
 ) -> Result<CopilotTokens, String> {
@@ -405,9 +354,6 @@ pub(crate) async fn ensure_access_token_full(
     refresh_tokens(client, &tokens.refresh_token).await
 }
 
-// ── Model discovery + policy enablement ────────────────────────────────────
-
-/// A model returned by the Copilot `/models` endpoint.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub(crate) struct CopilotModel {
     pub(crate) id: String,
@@ -453,8 +399,6 @@ async fn fetch_available_models(
 
     let mut out: Vec<CopilotModel> = Vec::with_capacity(entries.len());
     for m in entries {
-        // Copilot returns entries that aren't chat-capable (e.g. embeddings).
-        // Filter for entries whose capability type is "chat".
         let capability_type = m
             .pointer("/capabilities/type")
             .and_then(|v| v.as_str())
@@ -535,8 +479,6 @@ async fn enable_model_policy(
     }
 }
 
-// ── Model cache ────────────────────────────────────────────────────────────
-
 fn cache_path() -> PathBuf {
     crate::paths::cache_dir().join("copilot_models.json")
 }
@@ -556,8 +498,6 @@ fn save_models_cache(models: &[CopilotModel]) {
     let _ = std::fs::write(&path, serde_json::to_string(models).unwrap_or_default());
 }
 
-/// Fetch models using the stored credentials, caching on success.
-/// Returns the fresh list, or an empty vec on failure.
 pub(crate) async fn refresh_models_cache(client: &reqwest::Client) -> Vec<CopilotModel> {
     let Ok(tokens) = ensure_access_token_full(client).await else {
         return Vec::new();
@@ -571,15 +511,12 @@ pub(crate) async fn refresh_models_cache(client: &reqwest::Client) -> Vec<Copilo
     models
 }
 
-/// Look up the context window for a model from the disk cache.
 pub(crate) fn cached_context_window(model: &str) -> Option<u32> {
     load_cached_models()
         .into_iter()
         .find(|m| m.id == model)
         .and_then(|m| m.context_window)
 }
-
-// ── Browser opener ─────────────────────────────────────────────────────────
 
 fn open_browser(url: &str) {
     use std::process::Stdio;
@@ -616,8 +553,6 @@ fn open_browser(url: &str) {
         let _ = url;
     }
 }
-
-// ── Tests ──────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
 mod tests {

@@ -1,15 +1,4 @@
-//! Cell style — fg/bg + text attributes. Pure data; shared between
-//! document models that carry styled spans and any frontend's render
-//! layer.
-//!
-//! `Color` is a frontend-neutral mirror of crossterm's `style::Color`
-//! variant set: `Reset`, the 16 named ANSI slots, an indexed
-//! `AnsiValue(u8)`, and `Rgb { r, g, b }`. Frontends interpret the
-//! variants for their target — the terminal frontend converts to
-//! `crossterm::style::Color` at SGR-emit time; a future GUI frontend
-//! defines its own mapping (named slots → theme palette, `Reset` →
-//! "use the theme's default text color", etc.). Keeping the shape
-//! neutral means consumers of this crate carry no terminal dep.
+//! Cell style: fg/bg color and text attributes. No terminal dependencies.
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Ord, PartialOrd, Hash)]
 pub enum Color {

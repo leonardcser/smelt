@@ -1,10 +1,5 @@
--- Built-in edit_notebook tool — replace / insert / delete a Jupyter
--- notebook (`.ipynb`) cell. The intricate JSON cell munging lives
--- behind `smelt.notebook.apply_edit` (FFI into
--- `engine::tools::notebook::apply_edit`); this Lua wrapper supplies
--- the schema, the staleness preflight, the per-path flock, and the
--- typed metadata payload the confirm dialog renders for the preview
--- pane.
+-- Built-in edit_notebook tool. Replace/insert/delete a Jupyter cell with
+-- staleness preflight and per-path flock.
 
 smelt.tools.register({
   name = "edit_notebook",

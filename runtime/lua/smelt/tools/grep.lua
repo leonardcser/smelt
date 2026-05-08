@@ -1,6 +1,4 @@
--- Built-in grep tool — ripgrep-first, with a `grep` fallback when
--- `rg` is missing. Migrated from `engine::tools::grep` to compose
--- `tui::grep` + `tui::process` via FFI.
+-- Built-in grep tool. Uses ripgrep, falls back to grep when rg is absent.
 
 local function pick_bool(v, default)
   if type(v) == "boolean" then return v end

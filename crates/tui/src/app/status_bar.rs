@@ -1,9 +1,4 @@
-//! Bottom-row painter. Pulls items from Lua sources via
-//! `LuaRuntime::tick_statusline` (the shipped `smelt/status.lua`
-//! registers a `core` source that builds every segment), runs the
-//! responsive layout (priority dropping + truncation + alignment) on
-//! the resulting list, and writes the styled line into the
-//! `well_known.statusline` buffer.
+//! Bottom-row status bar: pulls Lua-registered segments and writes the styled line into the statusline buffer.
 
 use crate::app::TuiApp;
 

@@ -1,7 +1,4 @@
-//! `Block::ToolCall` renderer — pulls everything heavy from
-//! `super::tools` (header pill, summary line, body output, status
-//! glyphs). This file is a thin call site so the `render_block`
-//! dispatch table stays one line per variant.
+//! `Block::ToolCall` renderer — thin delegation to `super::tools::render_tool`.
 
 use smelt_core::content::builder::LineBuilder;
 use smelt_core::transcript_model::{ToolState, ToolStatus};

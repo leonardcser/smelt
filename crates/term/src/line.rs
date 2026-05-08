@@ -1,18 +1,11 @@
-//! Styled text runs. `Span` is one attribute-uniform run; `Line` is a
-//! sequence of spans painted on a single visual row. Both are
-//! data-only — they describe *what* to paint, not *where*; rendering
-//! happens via [`crate::grid::GridSlice::put_line`] and friends.
-//!
-//! Designed as the second-tier paint primitive alongside `Grid`-level
-//! `set` / `put_str`. Where `put_str` writes a single styled run,
-//! `put_line` lays out a heterogeneous row in one call so callers stop
-//! threading manual columns through `put_str_clip`-style chains.
+//! Styled text primitives. `Span` is a single attribute-uniform run;
+//! `Line` is a sequence of spans for one visual row. Both are data-only;
+//! rendering happens via [`crate::grid::GridSlice::put_line`].
 
 use crate::grid::Style;
 use std::borrow::Cow;
 
-/// A styled run of text. Cheap to clone — the text is `Cow`, so
-/// borrowed literals stay zero-copy and owned strings move through.
+/// A styled run of text. `Cow` text keeps borrowed literals zero-copy.
 #[derive(Clone, Debug, PartialEq, Eq, Default)]
 pub struct Span<'a> {
     pub text: Cow<'a, str>,
@@ -75,7 +68,7 @@ impl<'a> Line<'a> {
         Self::from_spans([Span::raw(text)])
     }
 
-    /// Append a span and return self for chaining: `Line::new().push("hi").push(styled(", world", red))`.
+    /// Append a span; returns `self` for chaining.
     pub fn push<S: Into<Span<'a>>>(mut self, span: S) -> Self {
         self.spans.push(span.into());
         self
@@ -105,9 +98,8 @@ impl<'a> From<Span<'a>> for Line<'a> {
     }
 }
 
-/// Construct a [`Line`] from a comma-separated list of `Into<Span>`
-/// values. Mixes raw strings and explicit spans:
-/// `line!["foo", " ", Span::styled("bar", red)]`.
+/// Construct a [`Line`] from a list of `Into<Span>` values.
+/// `line!["foo", " ", Span::styled("bar", red)]`
 #[macro_export]
 macro_rules! line {
     () => { $crate::line::Line::new() };

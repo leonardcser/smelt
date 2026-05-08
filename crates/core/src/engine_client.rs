@@ -1,9 +1,4 @@
-//! `EngineClient` — owns the `EngineHandle` and is the single
-//! Rust-side surface app uses to talk to the engine.
-//!
-//! Thin wrapper around `EngineHandle` that gates `recv` / `try_recv`
-//! on the confirms-clear flag so the engine pauses while a confirm
-//! dialog is open. Event dispatch lives in `crate::app::engine_events`.
+//! Thin wrapper around `EngineHandle` that gates `recv`/`try_recv` on the confirms-clear flag.
 
 use engine::EngineHandle;
 use protocol::{EngineEvent, UiCommand};
@@ -28,9 +23,7 @@ impl EngineClient {
         self.handle.send(cmd);
     }
 
-    /// Returns `pending()` when a confirm dialog is open so the
-    /// `select!` branch never resolves — the engine pauses until
-    /// `Confirms::is_clear()` is true again.
+    /// Returns `pending()` when a confirm dialog is open, pausing the engine.
     pub async fn recv(&mut self) -> Option<EngineEvent> {
         if !self.confirms_clear.load(Ordering::Relaxed) {
             std::future::pending().await
@@ -39,8 +32,7 @@ impl EngineClient {
         }
     }
 
-    /// Returns `Err(Empty)` when a confirm dialog is open so the
-    /// drain loop breaks immediately.
+    /// Returns `Err(Empty)` when a confirm dialog is open.
     pub fn try_recv(&mut self) -> Result<EngineEvent, mpsc::error::TryRecvError> {
         if !self.confirms_clear.load(Ordering::Relaxed) {
             Err(mpsc::error::TryRecvError::Empty)
@@ -49,9 +41,6 @@ impl EngineClient {
         }
     }
 
-    /// Cloneable injector for cross-thread tasks that need to push
-    /// events into the engine's event stream (e.g. streaming bash
-    /// emitting `EngineEvent::ToolOutput` per line).
     pub(crate) fn injector(&self) -> engine::EventInjector {
         self.handle.injector()
     }

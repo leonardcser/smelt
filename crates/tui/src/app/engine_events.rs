@@ -48,10 +48,7 @@ impl TuiApp {
                     cache_write_tokens: usage.cache_write_tokens,
                     reasoning_tokens: usage.reasoning_tokens,
                 });
-                // Auxiliary requests (title, compaction, btw, predict)
-                // are excluded so a `tokens_used` subscriber sees only
-                // the user-visible context flow.
-                // doesn't touch this cell.
+                // Background requests excluded so `tokens_used` sees only user-visible context.
                 if !background {
                     self.core
                         .cells
@@ -256,9 +253,7 @@ impl TuiApp {
                 tool_name,
                 args,
             } => {
-                // Plugins open their own confirm dialogs via
-                // `smelt.ui.dialog.open` from inside `execute`. The
-                // core no longer special-cases plugin tools here.
+                // Plugins open their own confirm dialogs via `smelt.ui.dialog.open` inside `execute`.
                 self.handle_tool_call(request_id, call_id, tool_name, args);
                 SessionControl::Continue
             }
@@ -272,7 +267,7 @@ impl TuiApp {
                 let _guard = crate::lua::install_app_ptr(self);
                 let mut hooks = self.lua.evaluate_hooks(&tool_name, &args);
                 drop(_guard);
-                // Apply permission policy on the TUI side.
+                // Permission policy is evaluated on the TUI side.
                 if !matches!(hooks.decision, protocol::Decision::Error(_)) {
                     let decision = self.core.permissions.decide(mode, &tool_name, &args, false);
                     let mut decision = decision;
@@ -314,14 +309,10 @@ impl TuiApp {
     /// Handle engine events that arrive when no turn is active.
     pub(crate) fn handle_idle_engine_event(&mut self, ev: EngineEvent) {
         match ev {
-        // Ignore stale Messages snapshots from cancelled/completed turns.
-        // These would overwrite a freshly cleared history (e.g. after /clear).
+        // Stale Messages snapshots from cancelled/completed turns would overwrite a freshly cleared history.
         EngineEvent::Messages { .. } => {}
         EngineEvent::TurnComplete { messages, .. }
-            // Accept final messages from a just-cancelled turn so that
-            // partial assistant content and tool results are persisted.
-            // Don't rebuild the screen — the displayed blocks already
-            // reflect what the user saw at cancel time.
+            // Persist final messages from a cancelled turn without rebuilding the screen.
             if !messages.is_empty() =>
         {
             self.set_history(messages);

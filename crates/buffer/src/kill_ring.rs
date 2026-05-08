@@ -1,23 +1,13 @@
 //! Emacs-style kill ring with yank-pop support.
-//!
-//! Accumulates killed text with a bounded history and tracks the byte range
-//! of the most recent yank so successive `yank_pop` calls can rotate through
-//! earlier kills in place.
 
 use std::time::{Duration, Instant};
 
 const KILL_RING_MAX: usize = 32;
 
-/// How long the post-yank highlight flash stays on screen. Matches
-/// nvim's `vim.highlight.on_yank` default.
+/// Duration of the post-yank highlight flash.
 pub(crate) const YANK_FLASH_DURATION: Duration = Duration::from_millis(200);
 
-/// Emacs-style kill ring with yank-pop support.
-///
-/// Shared by the input buffer (emacs-style kills and yanks) and vim (registers
-/// for `y`/`d`/`p`/`P`). The `linewise` flag lets vim distinguish line-wise
-/// yanks (`Y`, `yy`, `dd`) from character-wise ones so `p`/`P` insert on a new
-/// line rather than inline.
+/// Kill ring shared by emacs-style edits and vim yank/paste operations.
 pub struct KillRing {
     current: String,
     /// Older kills, newest first.
@@ -25,24 +15,14 @@ pub struct KillRing {
     /// Byte range of the last yank insertion, for yank-pop replacement.
     last_yank: Option<(usize, usize)>,
     pop_idx: usize,
-    /// Whether the current kill was captured as a whole-line ("linewise") op.
-    /// Needed for vim paste (`p`/`P`) to insert on a new line rather than
-    /// inline.
+    /// True for line-wise kills (`Y`, `yy`, `dd`); vim `p`/`P` insert on a new line.
     linewise: bool,
-    /// Byte range in the *source* buffer the last kill was captured from.
-    /// Used by the transcript yank path to map back to nav-row coordinates
-    /// without the fragile `buf.find(&yanked_text)` search.
+    /// Byte range in the source buffer the last kill was captured from.
     source_range: Option<(usize, usize)>,
-    /// Timestamp of the most recent yank operation (set explicitly by
-    /// `mark_yanked` after vim `y`-family ops complete). Used to drive
-    /// a brief post-yank highlight flash on the source range. Cleared
-    /// implicitly by the flash window expiring.
+    /// Set by `mark_yanked`; drives the post-yank highlight flash.
     last_yank_at: Option<Instant>,
-    /// Exact text last pushed to the system clipboard from this kill
-    /// ring. Paste sites compare `clipboard.read()` to this value to
-    /// decide between "kill ring is authoritative" (preserves vim
-    /// linewise flag + yank-pop history) and "clipboard was updated
-    /// externally" (overwrite kill ring with the clipboard text).
+    /// Last text pushed to the system clipboard. Paste sites compare against
+    /// `clipboard.read()` to detect external clipboard updates.
     last_clipboard_write: Option<String>,
 }
 
@@ -109,37 +89,32 @@ impl KillRing {
         Some(new_end)
     }
 
-    /// Clear last-yank tracking (call on any non-yank editing action).
+    /// Clear last-yank tracking.
     pub fn clear_yank(&mut self) {
         self.last_yank = None;
     }
 
-    /// Take the current kill text (for dialog sync).
     pub fn take(&mut self) -> String {
         self.linewise = false;
         self.source_range = None;
         std::mem::take(&mut self.current)
     }
 
-    /// Set the current kill text (for dialog sync / emacs-style copy).
-    /// Clears the linewise flag.
+    /// Set the current kill text, clearing the linewise flag.
     pub fn set(&mut self, text: String) {
         self.current = text;
         self.linewise = false;
         self.source_range = None;
     }
 
-    /// Set the current kill text along with an explicit linewise flag (used
-    /// by vim yank operations).
+    /// Set the current kill text with an explicit linewise flag.
     pub fn set_with_linewise(&mut self, text: String, linewise: bool) {
         self.current = text;
         self.linewise = linewise;
     }
 
-    /// Set the current kill text with linewise flag and source byte range.
-    /// Clears `last_yank_at` so a delete / change doesn't inherit a prior
-    /// yank's flash window — yank-only sites must call `mark_yanked`
-    /// after this to re-stamp the timestamp.
+    /// Set kill text, linewise flag, and source byte range. Clears `last_yank_at`
+    /// so deletes don't inherit a prior yank's flash; call `mark_yanked` after for yanks.
     pub fn set_with_source(&mut self, text: String, linewise: bool, start: usize, end: usize) {
         self.current = text;
         self.linewise = linewise;
@@ -159,17 +134,12 @@ impl KillRing {
         self.source_range
     }
 
-    /// Mark the most recent kill as a *yank* (vs a delete / change).
-    /// Drives the post-yank highlight flash. Vim yank operations call
-    /// this immediately after `set_with_source`; delete / change do
-    /// not, so the flash only fires on actual copies.
+    /// Mark the most recent kill as a yank, enabling the post-yank highlight flash.
     pub fn mark_yanked(&mut self) {
         self.last_yank_at = Some(Instant::now());
     }
 
-    /// Source range of the most recent yank if its flash window is
-    /// still active. Renderers overlay selection-bg on this range to
-    /// reproduce nvim's `vim.highlight.on_yank` effect.
+    /// Source range of the most recent yank if its flash window is still active.
     pub fn yank_flash_range(&self, now: Instant) -> Option<(usize, usize)> {
         let started = self.last_yank_at?;
         let range = self.source_range?;
@@ -180,18 +150,12 @@ impl KillRing {
         }
     }
 
-    /// Earliest `Instant` at which the flash window expires, if a flash
-    /// is currently active. The render loop uses this to keep ticking
-    /// at frame rate while the flash is visible so it clears promptly.
+    /// When the current flash window expires, if one is active.
     pub fn yank_flash_until(&self) -> Option<Instant> {
         self.last_yank_at.map(|t| t + YANK_FLASH_DURATION)
     }
 
-    /// Record that we just pushed `text` to the system clipboard. The
-    /// next paste compares `clipboard.read()` against this value: a
-    /// match means our push is still current (trust kill ring's
-    /// linewise flag); a mismatch means the clipboard was updated
-    /// externally and the new text should overwrite the kill ring.
+    /// Record the last text pushed to the system clipboard for external-update detection.
     pub fn record_clipboard_write(&mut self, text: String) {
         self.last_clipboard_write = Some(text);
     }
@@ -227,9 +191,6 @@ mod tests {
 
     #[test]
     fn delete_after_yank_clears_flash() {
-        // Regression: a delete that piggybacks on `set_with_source`
-        // must not inherit the prior yank's flash timestamp, or the
-        // selection-bg would briefly paint over the deletion target.
         let mut kr = KillRing::new();
         kr.set_with_source("first".into(), false, 0, 5);
         kr.mark_yanked();

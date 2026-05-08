@@ -1,14 +1,8 @@
 pub use super::geometry::Rect;
 use std::collections::HashMap;
 
-/// Stable identifier for a leaf in the layout tree. Hosts mint these
-/// values, attach them to `LayoutTree::Leaf(_)` leaves, and dispatch
-/// on them inside the paint callback passed to
-/// [`crate::paint_layout_tree`]. The renderer treats the id as
-/// opaque — semantics (a window? a tile? a custom widget?) are
-/// entirely the host's domain.
-///
-/// Width sized to fit common host-side identifiers without coercion.
+/// Opaque leaf identifier. Hosts mint and dispatch on these; the renderer
+/// treats them as opaque. Wide enough for common host-side id types.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct PaintId(pub u64);
 
@@ -54,38 +48,23 @@ pub enum Constraint {
     Fit,
 }
 
-/// One child of a container: a sizing `Constraint` paired with the
-/// subtree it applies to. Used by `LayoutTree::Vbox` and
-/// `LayoutTree::Hbox` items.
+/// A sizing `Constraint` paired with its subtree; used as `Vbox`/`Hbox` items.
 pub type Item = (Constraint, LayoutTree);
 
-/// Container chrome shared by `Vbox` and `Hbox`.
+/// Container chrome (gap, border, title) shared by `Vbox` and `Hbox`.
 #[derive(Clone, Debug, Default)]
 pub struct Chrome {
-    /// Cells inserted between adjacent children along the primary
-    /// axis. `0` packs children flush.
+    /// Cells between adjacent children; `0` packs flush.
     pub gap: u16,
-    /// Optional frame drawn around the container; subtracts 2 from
-    /// the inner area on each axis so children render inside the
-    /// border. `None` = no frame, no inset.
+    /// Frame around the container; each enabled side reserves one row/col. `None` = no inset.
     pub border: Option<Border>,
-    /// Optional title displayed in the top border row. Doesn't
-    /// consume layout space (lives in the border row); requires
-    /// `border = Some(_)` to render. Held as a styled [`Line`] so
-    /// titles can mix colours / weights without the host hand-painting
-    /// the border row. `From<&str>` / `From<String>` keep plain-string
-    /// callers one-line.
+    /// Title in the top border row. Requires `border = Some(_)`; renders as a styled [`Line`].
     pub title: Option<crate::line::Line<'static>>,
 }
 
 #[derive(Clone, Debug)]
 pub enum LayoutTree {
-    /// Terminal node identifying a paint region. The host registers a
-    /// dispatcher via [`crate::paint_layout_tree`] and matches on
-    /// `PaintId` to drive its own painter for this rect; the renderer
-    /// itself ascribes no semantics to the id. Hosts map ids to
-    /// whatever leaf state they care about (windows, tiles, custom
-    /// widgets).
+    /// Terminal node; the host matches on `PaintId` in its paint dispatcher.
     Leaf(PaintId),
     /// Vertical container; children stack top-to-bottom.
     Vbox { items: Vec<Item>, chrome: Chrome },
@@ -94,8 +73,7 @@ pub enum LayoutTree {
 }
 
 impl LayoutTree {
-    /// Vertical container with no chrome. Children stack top-to-bottom.
-    /// Use `.with_gap` / `.with_border` / `.with_title` to add chrome.
+    /// Vertical container. Use `.with_gap` / `.with_border` / `.with_title` to add chrome.
     pub fn vbox(items: Vec<Item>) -> Self {
         Self::Vbox {
             items,
@@ -103,7 +81,7 @@ impl LayoutTree {
         }
     }
 
-    /// Horizontal container with no chrome. Children pack left-to-right.
+    /// Horizontal container. Use `.with_gap` / `.with_border` / `.with_title` to add chrome.
     pub fn hbox(items: Vec<Item>) -> Self {
         Self::Hbox {
             items,
@@ -111,9 +89,7 @@ impl LayoutTree {
         }
     }
 
-    /// Terminal leaf for a paint region. Accepts anything convertible
-    /// to a [`PaintId`] (a raw `PaintId(_)` or a host id type that
-    /// implements `Into<PaintId>` — `smelt-edit`'s `WinId` does).
+    /// Terminal leaf. Accepts anything `Into<PaintId>`.
     pub fn leaf(id: impl Into<PaintId>) -> Self {
         Self::Leaf(id.into())
     }
@@ -125,12 +101,8 @@ impl LayoutTree {
         }
     }
 
-    /// If `self` is a `Leaf`, wrap it in a single-item Vbox with default
-    /// chrome so `with_border` / `with_title` / `with_gap` can attach
-    /// per-leaf chrome the same way they attach per-container chrome.
-    /// No-op for `Vbox` / `Hbox`. Renderer logic stays one-pass: a
-    /// `Vbox::with_border(...)` of one item and a `Leaf::with_border(...)`
-    /// produce identical trees.
+    /// If `self` is a `Leaf`, wraps it in a single-item `Vbox` so chrome
+    /// methods work uniformly. No-op for `Vbox`/`Hbox`.
     fn ensure_chrome_capable(self) -> Self {
         match self {
             Self::Leaf(_) => Self::Vbox {
@@ -165,9 +137,7 @@ impl LayoutTree {
         tree
     }
 
-    /// Whether this tree contains `id` as one of its paint leaves
-    /// (depth-first). Pure structural check — no rect math, no
-    /// dependency on terminal size.
+    /// Whether `id` appears as a leaf in this tree (depth-first structural check).
     pub fn contains_leaf(&self, id: impl Into<PaintId>) -> bool {
         let id = id.into();
         self.contains_leaf_id(id)
@@ -182,10 +152,7 @@ impl LayoutTree {
         }
     }
 
-    /// Paint ids in document (depth-first, declaration) order. Used
-    /// by editor consumers (`smelt-edit`) to drive Tab-cycle order
-    /// across windows; standalone consumers use it for hit-test
-    /// ordering.
+    /// All leaf `PaintId`s in depth-first declaration order.
     pub fn leaves_in_order(&self) -> Vec<PaintId> {
         let mut out = Vec::new();
         self.collect_leaves(&mut out);
@@ -203,19 +170,11 @@ impl LayoutTree {
         }
     }
 
-    /// Natural `(width, height)` of this tree given an outer cap. Used
-    /// by overlay sizing: `Length` / `Percentage` / `Ratio` / `Min` /
-    /// `Max` contribute their resolved sizes along the parent axis;
-    /// `Fill` / `Fit` contribute `0` (leaves don't yet expose a
-    /// natural-size hook). The secondary axis takes the max across
-    /// siblings. Chrome (border, gap) is added on top.
-    ///
-    /// `cap` bounds `Percentage` / `Ratio` resolution and clamps the
-    /// final result. The return value is always `<= cap`.
+    /// Natural `(width, height)` bounded by `cap`. `Fill`/`Fit` contribute `0`;
+    /// chrome (border, gap) is added on top. Result is always `<= cap`.
     pub fn natural_size(&self, cap: (u16, u16)) -> (u16, u16) {
         match self {
-            // Leaves have no intrinsic size; callers wrap them in
-            // containers with explicit sizing.
+            // Leaves have no intrinsic size.
             LayoutTree::Leaf(_) => (0, 0),
             LayoutTree::Vbox { items, chrome } => natural_box(items, chrome, cap, true),
             LayoutTree::Hbox { items, chrome } => natural_box(items, chrome, cap, false),
@@ -238,7 +197,7 @@ fn natural_box(items: &[Item], chrome: &Chrome, cap: (u16, u16), vertical: bool)
         .gap
         .saturating_mul(items.len().saturating_sub(1) as u16);
 
-    // Inner cap subtracts border (per-axis, per-side) and gap (primary only).
+    // Inner cap subtracts border and gap from the primary axis.
     let (primary_cap, secondary_cap) = if vertical {
         (
             cap_h.saturating_sub(border_h).saturating_sub(gaps),
@@ -302,9 +261,7 @@ fn natural_box(items: &[Item], chrome: &Chrome, cap: (u16, u16), vertical: bool)
     (w.min(cap_w), h.min(cap_h))
 }
 
-/// Which corner of a rectangle is its anchor point. Used by
-/// `Anchor::Win { target, attach, .. }` to specify which corner of
-/// the target window the overlay attaches to.
+/// Which corner of a rectangle serves as its anchor point.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Corner {
     NW,
@@ -313,46 +270,28 @@ pub enum Corner {
     SE,
 }
 
-/// Where an anchored container (e.g. an editor overlay, a popup) is
-/// positioned on screen. Drag = mutate the anchor; the host
-/// recomputes the rect each frame from the anchor + the container's
-/// natural / configured size. Sizing lives on the container's own
-/// layout; this enum only carries position.
+/// Screen position for an anchored overlay. Carries position only;
+/// sizing lives on the container's layout.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Anchor {
-    /// Centered on screen along both axes.
+    /// Centered on screen.
     ScreenCenter,
-    /// Absolute screen position. The overlay's `corner` is placed at
-    /// `(row, col)` (terminal cell coordinates, top-left = 0,0).
+    /// Absolute screen position; `corner` is placed at `(row, col)`.
     ScreenAt { row: i32, col: i32, corner: Corner },
-    /// Anchored to the text cursor. The overlay's `corner` touches
-    /// the cursor cell, offset by `(row_offset, col_offset)`. If
-    /// the overlay would overflow the screen, the renderer flips to
-    /// the opposite corner (canonical completer popup behavior).
+    /// Anchored to the text cursor; flips to the opposite corner on screen overflow.
     Cursor {
         corner: Corner,
         row_offset: i32,
         col_offset: i32,
     },
-    /// Anchored to another window. The overlay's `attach` corner
-    /// sits on the corresponding edge of the target window's rect,
-    /// shifted by `(row_offset, col_offset)`. Negative offsets pull
-    /// the overlay above / left of the target — e.g. a one-line
-    /// notification one row above the prompt is `attach: NW,
-    /// row_offset: -1, col_offset: 0`.
+    /// Anchored to another window; `attach` corner aligns to the target's edge.
     Win {
         target: PaintId,
         attach: Corner,
         row_offset: i32,
         col_offset: i32,
     },
-    /// Docked to the bottom of the screen. The overlay's natural
-    /// height clamps to `term_h - above_rows` (reserve room for the
-    /// statusline); width and horizontal centering follow the
-    /// overlay's natural width — typically the layout's outer
-    /// container is sized full-width via `Constraint::Percentage(100)`,
-    /// so the rect spans the whole terminal. Used by tool-approval
-    /// dialogs that want a sticky bottom-edge presence.
+    /// Docked to the bottom of the screen; height clamps to `term_h - above_rows`.
     ScreenBottom { above_rows: u16 },
 }
 
@@ -364,10 +303,8 @@ pub enum BorderStyle {
     Rounded,
 }
 
-/// Which edges of a container's chrome get a frame painted. Each side
-/// also drives the inset the children render inside — a missing side
-/// means children paint flush to that edge with no reserved row/column.
-/// Mirrors the bitflag shape from `ARCHITECTURE.md`.
+/// Which edges of a container's chrome get a frame painted. Each enabled side
+/// reserves one row/column; missing sides leave children flush to that edge.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct BorderSides {
     pub top: bool,
@@ -403,10 +340,7 @@ impl BorderSides {
     };
 }
 
-/// A frame around a container: a glyph family plus the set of edges
-/// that get painted. Use `Border::all(style)` for the common
-/// "frame on every side" case; `Border::sides(style, sides)` for
-/// per-edge control.
+/// A frame around a container: glyph family plus the set of edges to paint.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Border {
     pub style: BorderStyle,
@@ -438,19 +372,15 @@ pub struct Gutters {
     pub scrollbar: bool,
 }
 
-/// Resolve the tree against `area` and return the rect of every
-/// leaf. Used by hosts that need hit-testing or per-leaf geometry
-/// outside the paint callback.
+/// Resolve the tree against `area` and return the rect of every leaf.
 pub fn resolve_layout(tree: &LayoutTree, area: Rect) -> HashMap<PaintId, Rect> {
     let mut result = HashMap::new();
     resolve_node(tree, area, &mut result);
     result
 }
 
-/// Compute the inner area after subtracting the border's per-side
-/// reservations. Each enabled side consumes one row/column at that
-/// edge; missing sides leave the children flush. Returns `area`
-/// unchanged when `border` is `None`.
+/// Inner area after subtracting the border's per-side reservations.
+/// Returns `area` unchanged when `border` is `None`.
 pub fn inset_for_border(area: Rect, border: Option<Border>) -> Rect {
     let Some(b) = border else {
         return area;
@@ -468,12 +398,9 @@ pub fn inset_for_border(area: Rect, border: Option<Border>) -> Rect {
     Rect::new(area.top + top_pad, area.left + left_pad, w, h)
 }
 
-/// Paint a container's chrome (border + title) into `grid` at `area`.
-/// Honors `border.sides`: each enabled edge is drawn with the style's
-/// glyph; corners are drawn only when both adjacent edges are enabled
-/// (otherwise the lone edge runs the full extent with its straight
-/// glyph). Title sits in the top edge after the leading column;
-/// requires `border.sides.top`.
+/// Paint a container's border and title into `grid` at `area`.
+/// Corners are drawn only when both adjacent edges are enabled.
+/// Title requires `border.sides.top`.
 pub fn paint_chrome(
     grid: &mut crate::grid::Grid,
     area: Rect,
@@ -519,7 +446,7 @@ pub fn paint_chrome(
             grid.set(right, row, v, style);
         }
     }
-    // Corners: only when both adjacent edges are present.
+    // Corners only when both adjacent edges are present.
     if sides.top && sides.left {
         grid.set(area.left, area.top, tl, style);
     }
@@ -535,15 +462,8 @@ pub fn paint_chrome(
 
     if sides.top {
         if let Some(title) = chrome.title.as_ref() {
-            // Title is always inset by one cell from each end of the
-            // top edge. Whatever sits in those leading/trailing cells
-            // — a corner when the adjacent side is on, the horizontal
-            // bar otherwise — was painted in the loops above and stays
-            // painted. This keeps the title visually anchored at the
-            // same offset whether or not the container has a left or
-            // right side, so a title on a top-only border (e.g. the
-            // /messages dock) reads as `─title──` rather than jumping
-            // hard against the container's leading column.
+            // Inset title by one cell from each end so it reads as `─title──`
+            // regardless of whether the left/right sides are enabled.
             let title_left = area.left + 1;
             let title_right_excl = right;
             if title_right_excl > title_left {
@@ -574,11 +494,7 @@ pub fn paint_chrome(
     }
 }
 
-/// Layer a title span's style on top of the chrome (border) style.
-/// Same merge rule as `window::merge_styles`: span fg/bg override
-/// when present; attribute booleans OR. Spans with `Style::default()`
-/// inherit the border's full styling so titles seamlessly blend with
-/// the frame.
+/// Merge a title span's style over the chrome style: span fg/bg override when set; attrs OR.
 fn merge_title_span_style(
     base: crate::grid::Style,
     span: crate::grid::Style,
@@ -641,9 +557,8 @@ pub fn resolve_constraints(items: &[Item], total: u16) -> Vec<u16> {
     let mut sizes = vec![0u16; items.len()];
     let mut remaining = total;
 
-    // Pass 1: hard-sized constraints consume their share. `Min(n)` is
-    // *not* hard-sized — it competes with `Fill` for leftover with a
-    // floor of `n`, handled in pass 3.
+    // Pass 1: hard-sized constraints (`Length`, `Max`, `Percentage`) consume their share first.
+    // `Min(n)` is not hard-sized — it competes with `Fill` in pass 3.
     for (i, (c, _)) in items.iter().enumerate() {
         match c {
             Constraint::Length(n) | Constraint::Max(n) => {
@@ -660,8 +575,7 @@ pub fn resolve_constraints(items: &[Item], total: u16) -> Vec<u16> {
         }
     }
 
-    // Pass 2: `Ratio` splits its slice of the remaining proportionally
-    // to its siblings' (num, denom) pairs.
+    // Pass 2: `Ratio` siblings split the remaining pool proportionally.
     let ratio_total: u32 = items
         .iter()
         .filter_map(|(c, _)| match c {
@@ -682,12 +596,10 @@ pub fn resolve_constraints(items: &[Item], total: u16) -> Vec<u16> {
     }
     remaining -= consumed.min(remaining);
 
-    // Pass 3: `Fill`, `Fit`, and `Min` compete for the remainder
-    // equally. `Min(n)` is `Fill` with a floor of n — if its equal
-    // share is below the floor, it clamps up. If the resulting total
-    // exceeds remaining (floors push past the budget), surplus comes
-    // off the non-Min flex children first, then off Min children
-    // proportional to their current sizes.
+    // Pass 3: `Fill`, `Fit`, and `Min` share the remainder equally.
+    // `Min(n)` clamps its share up to `n`; if floors push the total over
+    // budget, surplus is taken from non-Min children first, then Min
+    // children proportionally.
     let flex_indices: Vec<usize> = items
         .iter()
         .enumerate()
@@ -1011,8 +923,6 @@ mod tests {
 
     #[test]
     fn natural_size_vbox_lengths_sum_along_primary() {
-        // Two Length(5) children stacked vertically → height 10,
-        // width 0 (leaves have no width).
         let tree = LayoutTree::vbox(vec![
             (Constraint::Length(5), LayoutTree::leaf(A)),
             (Constraint::Length(5), LayoutTree::leaf(B)),
@@ -1037,7 +947,6 @@ mod tests {
             (Constraint::Length(5), LayoutTree::leaf(C)),
         ])
         .with_gap(2);
-        // 3 + 4 + 5 + 2*(3-1) = 16
         assert_eq!(tree.natural_size((80, 24)), (0, 16));
     }
 
@@ -1045,14 +954,12 @@ mod tests {
     fn natural_size_border_adds_two_each_axis() {
         let tree = LayoutTree::vbox(vec![(Constraint::Length(10), LayoutTree::leaf(A))])
             .with_border(Border::SINGLE);
-        // height: 10 + 2 (border); width: 0 + 2 (border).
         assert_eq!(tree.natural_size((80, 24)), (2, 12));
     }
 
     #[test]
     fn natural_size_percentage_resolves_against_cap() {
         let tree = LayoutTree::vbox(vec![(Constraint::Percentage(50), LayoutTree::leaf(A))]);
-        // 50% of cap_h=24 = 12.
         assert_eq!(tree.natural_size((80, 24)), (0, 12));
     }
 
@@ -1062,7 +969,6 @@ mod tests {
             (Constraint::Ratio(1, 4), LayoutTree::leaf(A)),
             (Constraint::Ratio(1, 4), LayoutTree::leaf(B)),
         ]);
-        // 1/4 of cap_w=80 = 20, twice → 40.
         assert_eq!(tree.natural_size((80, 24)), (40, 0));
     }
 
@@ -1072,7 +978,6 @@ mod tests {
             (Constraint::Length(3), LayoutTree::leaf(A)),
             (Constraint::Fill, LayoutTree::leaf(B)),
         ]);
-        // Fill has no natural size yet, so total = 3.
         assert_eq!(tree.natural_size((80, 24)), (0, 3));
     }
 
@@ -1108,10 +1013,8 @@ mod tests {
         let tree = LayoutTree::leaf(A)
             .with_border(Border::SINGLE)
             .with_title("hi");
-        // Wrapped in a Vbox internally — leaves walks find A unchanged.
         assert_eq!(tree.leaves_in_order(), vec![A]);
         assert!(tree.contains_leaf(A));
-        // Chrome attached on the wrapper.
         match &tree {
             LayoutTree::Vbox { chrome, .. } => {
                 assert!(chrome.border.is_some());
@@ -1126,7 +1029,6 @@ mod tests {
         let tree = LayoutTree::leaf(A).with_border(Border::SINGLE);
         let area = Rect::new(0, 0, 10, 6);
         let rects = resolve_layout(&tree, area);
-        // The inner leaf gets the area minus the 2-cell border inset.
         let inner = rects.get(&A).copied().expect("leaf rect resolved");
         assert_eq!(inner, Rect::new(1, 1, 8, 4));
     }
@@ -1154,7 +1056,6 @@ mod tests {
 
     #[test]
     fn natural_size_nested_chrome_composes() {
-        // Outer Vbox border + inner Hbox of two Length children.
         let tree = LayoutTree::vbox(vec![(
             Constraint::Length(5),
             LayoutTree::hbox(vec![
@@ -1163,8 +1064,6 @@ mod tests {
             ]),
         )])
         .with_border(Border::SINGLE);
-        // Outer: 5 (length) + 2 (border) = 7 height; inner Hbox width
-        // 30 + 2 (outer border) = 32.
         assert_eq!(tree.natural_size((80, 24)), (32, 7));
     }
 
@@ -1245,7 +1144,6 @@ mod tests {
         assert_eq!(grid.cell(0, 0).symbol, '╭');
         assert_eq!(grid.cell(1, 0).symbol, 'h');
         assert_eq!(grid.cell(5, 0).symbol, 'o');
-        // Beyond the title, the top edge resumes the border glyph.
         assert_eq!(grid.cell(6, 0).symbol, '─');
     }
 
@@ -1266,8 +1164,6 @@ mod tests {
         assert_eq!(grid.cell(0, 0).symbol, '┌');
         assert_eq!(grid.cell(1, 0).symbol, 'm');
         assert_eq!(grid.cell(6, 0).symbol, 'o');
-        // Last cell before the corner — overwritten by the title's 6th
-        // char (max_title_cols = 6 = area.width − 2).
         assert_eq!(grid.cell(7, 0).symbol, '┐');
     }
 }

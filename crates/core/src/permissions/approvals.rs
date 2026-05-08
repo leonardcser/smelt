@@ -1,7 +1,4 @@
-//! Runtime approval tracking (session- and workspace-scoped auto-approvals).
-//!
-//! Augments the static config rules: the TUI can grant a pattern like
-//! `"cargo test *"` once, and future matching calls skip the confirm dialog.
+//! Session- and workspace-scoped runtime auto-approvals, augmenting static config rules.
 
 use crate::permissions::bash::split_shell_commands;
 use crate::permissions::rules::{check_ruleset, RuleSet};
@@ -12,10 +9,6 @@ use serde_json::Value;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
-/// Runtime permission approvals that augment the static config-based rules.
-/// Shared between the engine and TUI via `Arc<RwLock<RuntimeApprovals>>` so
-/// the engine can check them during `decide()` and the TUI can update them
-/// when the user approves a tool call.
 #[derive(Debug, Default)]
 pub struct RuntimeApprovals {
     session_tools: HashMap<String, Vec<glob::Pattern>>,
@@ -83,19 +76,8 @@ impl RuntimeApprovals {
             .collect();
     }
 
-    /// Check whether a tool call that the config-based rules said "Ask" for
-    /// should be auto-approved based on runtime patterns.
-    ///
-    /// For tools with shell-aware syntax (`bash`): splits the command into
-    /// subcommands and checks each against runtime patterns AND the
-    /// tool's config-allow list (so that default-allowed commands like
-    /// `head`, `cat`, etc. don't block auto-approval).
-    ///
-    /// For other tools with subpatterns (e.g. web_fetch URLs): checks the
-    /// description against runtime patterns; falls back to the config
-    /// ruleset's allow patterns if registered.
-    ///
-    /// Returns `true` if the tool call should be auto-approved.
+    /// Returns `true` when a tool call should be auto-approved based on runtime patterns.
+    /// Splits compound shell commands and checks each subcommand.
     pub(crate) fn is_approved(
         &self,
         tool_name: &str,
@@ -125,22 +107,14 @@ impl RuntimeApprovals {
             session.into_iter().chain(workspace).flatten().collect();
 
         subcmds.iter().all(|sc| {
-            // Check runtime approval patterns.
             all_pats.iter().any(|p| p.matches(sc))
-            // Also consult the tool's config ruleset (e.g. bash's
-            // tool-declared `default_allow` patterns like "head *");
-            // the full compound was Ask because of OTHER subcommands,
-            // not this one.
+                // Also check config allow patterns (e.g. bash's default_allow list).
                 || config_subpatterns
                     .is_some_and(|rs| check_ruleset(rs, sc) == Decision::Allow)
         })
     }
 
-    /// Full runtime auto-approval for an Ask decision.
-    ///
-    /// Inside the workspace, tool approvals are enough.
-    /// Outside the workspace, tool approvals and directory approvals must both
-    /// match when `restrict_to_workspace` is enabled.
+    /// Full auto-approval check. Outside the workspace, directory approvals must also match.
     pub fn is_auto_approved(
         &self,
         permissions: &Permissions,
@@ -159,17 +133,14 @@ impl RuntimeApprovals {
         if dirs_ok && tool_approved {
             return true;
         }
-        // Directory approved + base permission is Allow (downgraded only
-        // because of the workspace restriction) → auto-approve.
+        // Directory approved + base Allow (downgraded only by workspace restriction) → auto-approve.
         if dirs_ok && permissions.was_downgraded(mode, tool_name, args) {
             return true;
         }
         false
     }
 
-    /// Check whether a specific pattern string is already present in the
-    /// runtime approvals for a tool (used to filter already-approved patterns
-    /// from the confirm dialog options).
+    /// `true` when `pattern` is already approved for `tool_name`.
     pub fn has_pattern(&self, tool_name: &str, pattern: &str) -> bool {
         let check = |pats: Option<&Vec<glob::Pattern>>| -> bool {
             pats.is_some_and(|ps| ps.iter().any(|p| p.as_str() == pattern))

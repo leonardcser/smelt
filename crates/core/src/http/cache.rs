@@ -1,8 +1,5 @@
-//! Disk-backed TTL cache for HTTP responses. Files live under
-//! `<cache_dir>/web/<hash>` and start with an `<expires_unix_secs>\n`
-//! header followed by the cached body. Tools that want to skip
-//! repeated fetches (search, web_fetch) compose `get` / `put` here;
-//! everything else uses [`super::get`] / [`super::post`] directly.
+//! Disk-backed TTL cache for HTTP responses.
+//! Files: `<cache_dir>/web/<hash>`, format: `<expires_unix_secs>\n<body>`.
 
 use std::hash::{Hash, Hasher};
 use std::path::PathBuf;
@@ -28,8 +25,7 @@ fn now_secs() -> u64 {
         .as_secs()
 }
 
-/// Read the cached body for `key` if present and not expired.
-/// Expired entries are removed on read.
+/// Return the cached body for `key`, or `None` if missing or expired (expired entries deleted).
 pub(crate) fn get(key: &str) -> Option<String> {
     let path = key_path(key);
     let contents = std::fs::read_to_string(&path).ok()?;
@@ -47,9 +43,8 @@ pub(crate) fn put(key: &str, value: &str) {
     put_with_ttl(key, value, DEFAULT_TTL);
 }
 
-/// Cache `value` under `key` with an explicit TTL. Writes go through a
-/// temp file + rename so concurrent readers see either the old or the
-/// new payload, never a partial write.
+/// Cache `value` under `key` with an explicit TTL.
+/// Uses temp-file + rename so readers never see a partial write.
 pub(crate) fn put_with_ttl(key: &str, value: &str, ttl: Duration) {
     let dir = cache_dir();
     let _ = std::fs::create_dir_all(&dir);

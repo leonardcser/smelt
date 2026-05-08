@@ -1,7 +1,6 @@
-//! Cross-session cache for last-used picks (model, mode, reasoning effort,
-//! accent). Genuinely cache-shaped: nothing here is config — config lives
-//! in `init.lua`. The cache only remembers what the user picked last so a
-//! fresh launch lands where they left off.
+//! Cross-session cache for last-used picks (model, mode, reasoning effort).
+//! Not config — config lives in `init.lua`. Persists so a fresh launch
+//! lands where the user left off.
 
 use crate::config;
 use protocol::{AgentMode, ReasoningEffort};

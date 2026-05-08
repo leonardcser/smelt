@@ -1,12 +1,4 @@
-//! `smelt.mode` — `get / set / cycle / cycle_list` over `protocol::AgentMode`
-//! (Plan / Apply / Yolo / Normal). Lives at top-level so it does
-//! not collide with the future `smelt.process` long-lived IPC.
-//!
-//! `cycle` is seeded as a no-op stub here so callers always see a
-//! function; `runtime/lua/smelt/modes.lua` overrides it with the
-//! real Lua-side cycle implementation that reads `cycle_list` and
-//! calls `set`. `set` is a no-op stub in core; the TUI overrides it
-//! with a binding that mutates `app.core.config.mode`.
+//! `smelt.mode` — get/set/cycle agent mode. `set` and `cycle` are stubs here; TUI/Lua override them.
 
 use mlua::prelude::*;
 
@@ -31,9 +23,6 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
         })?,
     )?;
 
-    // The configured cycle as a list of mode label strings. Returns
-    // the full `protocol::AgentMode::ALL` order when no cycle is set so
-    // callers don't need to handle the "empty cycle" edge case.
     mode_tbl.set(
         "cycle_list",
         lua.create_function(|lua, ()| {

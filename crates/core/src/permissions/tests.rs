@@ -1,5 +1,4 @@
 #![cfg(test)]
-//! Integration tests spanning rules, bash parsing, approvals, and workspace.
 
 use super::approvals::*;
 use super::bash::*;
@@ -34,10 +33,7 @@ fn mode_perms(tools: HashMap<String, Decision>, buckets: &[(&str, RuleSet)]) -> 
     ModePerms { tools, subcommands }
 }
 
-/// Production wires the shell parser to the `bash` bucket via
-/// `tools/bash.lua`'s `subpattern_parser = "shell"`. Test helpers
-/// build `Permissions` directly, so they install the same mapping
-/// here.
+/// Mirrors the `subpattern_parser = "shell"` wiring from `tools/bash.lua`.
 fn bash_parser_map() -> HashMap<String, std::sync::Arc<crate::permissions::SubpatternParserFn>> {
     let mut m = HashMap::new();
     if let Some(p) = crate::permissions::builtin_subpattern_parser("shell") {
@@ -62,17 +58,10 @@ fn perms_with_bash(allow: &[&str], ask: &[&str], deny: &[&str]) -> Permissions {
     }
 }
 
-/// Install a stub `decide_hook_fn` on `perms` matching the production
-/// wiring of the built-in tools' `decide(args, mode)` callbacks. Bash
-/// and web_fetch are the only tools that override the generic
-/// `check_tool` path; every other tool returns `None` and falls through.
-/// The closure captures a clone of `perms` (with the hook cleared so
-/// it doesn't recurse) so it can call `check_tool` / `check_bash` /
-/// `check_web_fetch` the same way the Lua hooks do in production.
+/// Installs a stub `decide_hook_fn` mirroring production Lua hooks for `bash` and `web_fetch`.
+/// The captured clone has its hook cleared to prevent recursion.
 fn install_stub_decide_hook(perms: &mut crate::permissions::Permissions) {
     let mut perms_for_hook = perms.clone();
-    // Sever the hook on the captured copy so calls inside the closure
-    // don't recurse.
     perms_for_hook.set_decide_hook_fn(std::sync::Arc::new(|_, _, _| None));
     perms.set_decide_hook_fn(std::sync::Arc::new(move |name, args, mode| match name {
         "bash" => {
@@ -112,12 +101,8 @@ fn install_stub_decide_hook(perms: &mut crate::permissions::Permissions) {
     }));
 }
 
-/// Stub `paths_fn` matching the production wiring of the built-in
-/// tools' `paths_for_workspace(args)` callbacks: file tools read
-/// `file_path`, glob/grep read `path`, bash extracts paths from the
-/// shell command. Tests that exercise the workspace boundary install
-/// this so the eternal rule (no tool-name matching in Rust) is upheld
-/// in production while tests still get realistic behaviour.
+/// Stub `paths_fn` mirroring production `paths_for_workspace` callbacks
+/// (file tools → `file_path`, glob/grep → `path`, bash → shell extraction).
 fn stub_paths_fn() -> std::sync::Arc<crate::permissions::PathsFn> {
     std::sync::Arc::new(|name, args| match name {
         "read_file" | "write_file" | "edit_file" => {
@@ -415,7 +400,6 @@ fn whitespace_only_command() {
 #[test]
 fn operator_in_quoted_argument() {
     let p = perms_with_bash(&["grep *"], &[], &[]);
-    // && inside quotes is not an operator — stays as single command
     assert_eq!(
         p.check_subcommand(AgentMode::Normal, "bash", r#"grep "&&" file.txt"#),
         Decision::Allow
@@ -425,7 +409,6 @@ fn operator_in_quoted_argument() {
 #[test]
 fn semicolon_in_echo() {
     let p = perms_with_bash(&["echo *"], &[], &["rm *"]);
-    // shlex sees: ["echo", "hello; world"] — semicolon inside quotes
     assert_eq!(
         p.check_subcommand(AgentMode::Normal, "bash", r#"echo "hello; world""#),
         Decision::Allow
@@ -435,7 +418,6 @@ fn semicolon_in_echo() {
 #[test]
 fn pipe_in_quoted_filename() {
     let p = perms_with_bash(&["cat *"], &[], &["rm *"]);
-    // shlex sees: ["cat", "file|name"] — pipe inside quotes
     assert_eq!(
         p.check_subcommand(AgentMode::Normal, "bash", r#"cat "file|name""#),
         Decision::Allow
@@ -447,20 +429,17 @@ fn pipe_in_quoted_filename() {
 #[test]
 fn single_ampersand_background() {
     let p = perms_with_bash(&["sleep *"], &[], &["rm *"]);
-    // shlex sees: ["sleep", "5", "&", "rm", "foo"]
-    // splits to ["sleep 5", "rm foo"] — rm is denied
     assert_eq!(
         p.check_subcommand(AgentMode::Normal, "bash", "sleep 5 & rm foo"),
         Decision::Deny
     );
 }
 
-// --- subshell / substitution (still not caught) ---
+// --- subshell / substitution ---
 
 #[test]
 fn command_substitution() {
     let p = perms_with_bash(&["echo *"], &[], &["rm *"]);
-    // rm inside $() is now extracted and checked
     assert_eq!(
         p.check_subcommand(AgentMode::Normal, "bash", "echo $(rm -rf /)"),
         Decision::Deny
@@ -470,7 +449,6 @@ fn command_substitution() {
 #[test]
 fn backtick_substitution() {
     let p = perms_with_bash(&["echo *"], &[], &["rm *"]);
-    // rm inside backticks is now extracted and checked
     assert_eq!(
         p.check_subcommand(AgentMode::Normal, "bash", "echo `rm -rf /`"),
         Decision::Deny
@@ -482,7 +460,6 @@ fn backtick_substitution() {
 #[test]
 fn newline_separator() {
     let p = perms_with_bash(&["ls *"], &[], &["rm *"]);
-    // Newline is now treated as a command separator
     assert_eq!(
         p.check_subcommand(AgentMode::Normal, "bash", "ls\nrm -rf /"),
         Decision::Deny
@@ -511,8 +488,6 @@ fn split_trailing_operator() {
 #[test]
 fn leading_operator() {
     let p = perms_with_bash(&["rm *"], &[], &[]);
-    // shlex sees: ["&&", "rm", "foo"] → splits to ["rm foo"]
-    // single-command path uses original "&& rm foo" which won't match
     assert_eq!(
         p.check_subcommand(AgentMode::Normal, "bash", "&& rm foo"),
         Decision::Ask
@@ -528,14 +503,11 @@ fn split_leading_operator() {
 
 #[test]
 fn triple_ampersand() {
-    // "ls &&&rm foo" — && consumes first two, & consumes third → ["ls", "rm foo"]
     assert_eq!(split_shell_commands("ls &&&rm foo"), vec!["ls", "rm foo"]);
 }
 
 #[test]
 fn triple_ampersand_spaced() {
-    // "ls &&& rm foo" → shlex: ["ls", "&&", "&", "rm", "foo"]
-    // splits on && and &: ["ls", "rm foo"]
     assert_eq!(split_shell_commands("ls &&& rm foo"), vec!["ls", "rm foo"]);
 }
 
@@ -570,7 +542,6 @@ fn trailing_space_no_false_positive() {
 #[test]
 fn unclosed_quote() {
     let p = perms_with_bash(&["echo *"], &[], &["rm *"]);
-    // shlex returns None for unclosed quotes — treated as single command
     assert_eq!(
         p.check_subcommand(AgentMode::Normal, "bash", r#"echo "hello && rm foo"#),
         Decision::Allow
@@ -676,12 +647,11 @@ fn extra_whitespace_around_operators() {
     );
 }
 
-// --- single-command path inconsistency (pre-existing bug) ---
+// --- single-command leading whitespace ---
 
 #[test]
 fn leading_whitespace_single_command() {
     let p = perms_with_bash(&["ls *"], &[], &[]);
-    // Input is trimmed before matching, so leading whitespace is fine
     assert_eq!(
         p.check_subcommand(AgentMode::Normal, "bash", "  ls -la"),
         Decision::Allow
@@ -691,19 +661,17 @@ fn leading_whitespace_single_command() {
 #[test]
 fn leading_whitespace_chained_command() {
     let p = perms_with_bash(&["ls *", "echo *"], &[], &[]);
-    // Multi-command path trims each part, so "ls -la" matches "ls *".
     assert_eq!(
         p.check_subcommand(AgentMode::Normal, "bash", "  ls -la && echo hi"),
         Decision::Allow
     );
 }
 
-// --- subshells / parentheses (known limitation) ---
+// --- subshells / parentheses ---
 
 #[test]
 fn subshell_not_parsed() {
     let p = perms_with_bash(&["echo *"], &[], &["rm *"]);
-    // rm inside (...) subshell is now extracted and checked
     assert_eq!(
         p.check_subcommand(AgentMode::Normal, "bash", "echo hi && (rm -rf /)"),
         Decision::Deny
@@ -713,9 +681,7 @@ fn subshell_not_parsed() {
 #[test]
 fn subshell_hides_denied_command() {
     let p = perms_with_bash(&["echo *"], &[], &["rm *"]);
-    // $() inside quotes: quotes prevent extraction in split_impl,
-    // but extract_embedded_commands scans the full command including quotes.
-    // The $() is found and rm is extracted → Deny.
+    // extract_embedded_commands scans through quotes; $() is found and rm is extracted.
     assert_eq!(
         p.check_subcommand(AgentMode::Normal, "bash", r#"echo "$(rm -rf /)""#),
         Decision::Deny
@@ -888,12 +854,7 @@ fn args_with(key: &str, val: &str) -> HashMap<String, Value> {
 }
 
 // --- bash shell-string path extraction ---
-//
-// The tool→path mapping (read_file→file_path, etc.) lives in each
-// tool's Lua `paths_for_workspace(args)` callback now. The shell
-// parsing primitive that bash's callback composes via
-// `smelt.shell.extract_paths` is the only path-extraction logic
-// left in Rust, so it's the only one with a unit test here.
+// Only `extract_paths_from_command` lives in Rust; tool→path mapping is in Lua callbacks.
 
 #[test]
 fn shell_extracts_absolute_paths() {
@@ -1027,7 +988,6 @@ fn workspace_allows_bash_relative() {
 fn workspace_downgrades_yolo_outside() {
     let p = perms_with_workspace("/home/user/project");
     let args = args_with("command", "rm -rf /etc");
-    // Even in yolo, out-of-workspace should ask
     assert_eq!(
         p.decide(AgentMode::Yolo, "bash", &args, false),
         Decision::Ask
@@ -1057,12 +1017,9 @@ fn workspace_restriction_off_allows_everything() {
 
 #[test]
 fn workspace_ask_stays_ask() {
-    // If the tool is already Ask (not Allow), workspace restriction doesn't change it
     let mut p = perms_with_workspace("/home/user/project");
-    // Remove write_file from allowed tools so it defaults to Ask
-    p.normal.tools.remove("write_file");
+    p.normal.tools.remove("write_file"); // defaults to Ask
     let args = args_with("file_path", "/home/user/project/foo.txt");
-    // Even inside workspace, Ask stays Ask because the tool itself is Ask
     assert_eq!(
         p.decide(AgentMode::Normal, "write_file", &args, false),
         Decision::Ask
@@ -1083,7 +1040,6 @@ fn workspace_glob_outside_downgrades() {
 fn workspace_no_path_tools_unaffected() {
     let p = perms_with_workspace("/home/user/project");
     let args = HashMap::new();
-    // web_search has no paths, should not be affected
     assert_eq!(
         p.decide(AgentMode::Yolo, "web_search", &args, false),
         Decision::Allow
@@ -1327,7 +1283,7 @@ fn broad_allow_still_works_for_non_specific() {
     assert_eq!(check_ruleset(&rs, "git status"), Decision::Allow);
 }
 
-// --- bash decide_base: tool Allow + pattern Ask = Ask ---
+// --- bash decide_base ---
 
 #[test]
 fn bash_tool_allow_pattern_ask() {
@@ -1354,7 +1310,7 @@ fn bash_tool_allow_pattern_ask() {
     );
 }
 
-// --- override tightening: base Allow, override Ask → Ask ---
+// --- override tightening ---
 
 #[test]
 fn override_tightens_allow_to_ask() {
@@ -1613,8 +1569,6 @@ fn dirs_approved_multiple_paths_one_uncovered() {
 // --- tilde normalization in is_auto_approved ---
 
 /// Workspace-restricted permissions with an explicit bash allow list.
-/// Tests pass only the patterns relevant to what they exercise — the
-/// production list lives in `runtime/lua/smelt/tools/bash.lua`.
 fn perms_with_workspace_bash_allow(workspace: &str, bash_allow: &[&str]) -> Permissions {
     let mut tools = HashMap::new();
     tools.insert("read_file".to_string(), Decision::Allow);
@@ -1650,8 +1604,6 @@ fn tilde_dir_approval_works_for_absolute_read_file() {
     rt.add_session_dir(PathBuf::from("~/syncthing"));
     let file = format!("{}/syncthing/vault/notes.md", home.display());
     let args = args_with("file_path", &file);
-    // read_file is Allow by default, downgraded to Ask by workspace restriction.
-    // Dir approval should lift the restriction.
     assert!(rt.is_auto_approved(&p, AgentMode::Normal, "read_file", &args, &file));
 }
 
@@ -1676,8 +1628,6 @@ fn absolute_dir_approval_works_for_tilde_bash() {
 fn dir_approval_alone_insufficient_for_ask_command_outside_workspace() {
     let home = engine::paths::home_dir();
     let workspace = format!("{}/dev/project", home.display());
-    // Allow list omits `rm` so the command is Ask. Dir approval alone
-    // shouldn't auto-approve a command that requires its own permission.
     let p = perms_with_workspace_bash_allow(&workspace, &[]);
     let mut rt = RuntimeApprovals::new();
     rt.add_session_dir(PathBuf::from("~/syncthing"));
@@ -1711,9 +1661,6 @@ fn dir_plus_tool_approval_for_ask_command_outside_workspace() {
 
 #[test]
 fn compound_command_default_allowed_with_dir_approval() {
-    // Both subcommands are allowed at the base level (perms_with_workspace
-    // uses a wildcard `*` bash allow), so was_downgraded is true and dir
-    // approval suffices.
     let p = perms_with_workspace("/home/user/project");
     let mut rt = RuntimeApprovals::new();
     rt.add_session_dir(PathBuf::from("/tmp"));
@@ -1729,8 +1676,6 @@ fn compound_command_default_allowed_with_dir_approval() {
 
 #[test]
 fn compound_command_with_ask_subcommand_needs_tool_approval() {
-    // `find` is allowed; `python3` is Ask. Dir approval alone is
-    // insufficient — the Ask subcommand needs its own approval.
     let home = engine::paths::home_dir();
     let workspace = format!("{}/dev/project", home.display());
     let p = perms_with_workspace_bash_allow(&workspace, &["find *"]);

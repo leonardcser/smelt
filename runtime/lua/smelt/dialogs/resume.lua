@@ -1,9 +1,5 @@
--- Built-in /resume command.
---
--- Live-filtered session picker. The input panel above captures typing;
--- the list panel below shows matches. Enter loads the highlighted
--- session, Ctrl-d deletes it, Alt-w toggles the workspace-only
--- filter. Fuzzy search uses `smelt.fuzzy.score`.
+-- Built-in /resume command. Live-filtered session picker; Enter loads,
+-- Ctrl-d deletes, Alt-w toggles workspace filter.
 
 local NS_META = smelt.buf.create_namespace("smelt.resume.meta")
 
@@ -55,9 +51,6 @@ local function format_row(entry, now_ms)
     (entry.updated_at_ms > 0) and entry.updated_at_ms or entry.created_at_ms,
     now_ms
   )
-  -- size right-aligned (column edge), time left-aligned so the
-  -- size↔time gap is exactly GAP. Title still starts at a fixed
-  -- column because TIME_COL pads on the right.
   return string.format(
     "%s%" .. SIZE_COL .. "s%s%-" .. TIME_COL .. "s%s%s",
     string.rep(" ", LEADING),
@@ -77,7 +70,6 @@ local function filter_entries(entries, query, workspace_only, current_cwd)
       keep = (e.cwd == current_cwd)
     end
     if keep and query ~= "" then
-      -- Fuzzy-score the title+subtitle. Non-match returns nil.
       local hay = display_title(e) .. " " .. (e.subtitle or "")
       keep = smelt.fuzzy.score(hay, query) ~= nil
     end
@@ -99,9 +91,7 @@ local function refresh_list(buf_id, filtered, now_ms)
     table.insert(lines, format_row(e, now_ms))
   end
   smelt.buf.set_lines(buf_id, lines)
-  -- Dim the size + duration columns so the title reads as the primary
-  -- content. Columns: `LEADING + SIZE_COL + GAP + TIME_COL` spans
-  -- [0, LEADING+SIZE_COL+GAP+TIME_COL), everything after is the title.
+  -- Dim metadata columns; title starts after LEADING+SIZE_COL+GAP+TIME_COL.
   local meta_end = LEADING + SIZE_COL + GAP + TIME_COL
   for i = 1, #filtered do
     smelt.buf.set_extmark(buf_id, NS_META, i, 0, { end_col = meta_end, dim = true })
@@ -123,9 +113,6 @@ smelt.cmd.register("resume", function()
     local filtered = filter_entries(entries, query, workspace_only, current_cwd)
 
     local list_buf = smelt.buf.create()
-    -- Seed the buffer on the same tick the dialog opens. The op
-    -- reducer drains this BufSetLines before `dialog.open` is
-    -- serviced, so the list shows its initial rows without a flicker.
     refresh_list(list_buf, filtered, now_ms)
 
     local function selected_entry(idx)

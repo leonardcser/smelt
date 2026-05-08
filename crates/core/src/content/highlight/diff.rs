@@ -299,13 +299,12 @@ fn compute_diff_view(old: &str, new: &str, path: &str, anchor: &str) -> DiffView
     }
 }
 
-/// For each change, decide whether it should be shown or collapsed.
-/// Equal lines within `ctx` of a non-Equal change are visible; the rest are collapsed.
+/// Mark equal lines within `ctx` of any non-Equal change as visible; collapse the rest.
 fn compute_change_visibility(changes: &[DiffChange], ctx: usize) -> Vec<bool> {
     let n = changes.len();
-    // Forward pass: set visible based on distance from previous non-Equal.
     let mut visible = vec![false; n];
     let mut d = usize::MAX;
+    // Forward pass: visible based on distance from preceding non-Equal.
     for i in 0..n {
         if changes[i].tag != ChangeTag::Equal {
             d = 0;
@@ -315,7 +314,7 @@ fn compute_change_visibility(changes: &[DiffChange], ctx: usize) -> Vec<bool> {
         }
         d = d.saturating_add(1);
     }
-    // Backward pass: also mark Equal lines near a following non-Equal.
+    // Backward pass: also catch equal lines near a following non-Equal.
     d = usize::MAX;
     for i in (0..n).rev() {
         if changes[i].tag != ChangeTag::Equal {
@@ -328,9 +327,7 @@ fn compute_change_visibility(changes: &[DiffChange], ctx: usize) -> Vec<bool> {
     visible
 }
 
-/// Render a syntax-highlighted inline diff.
-/// `skip` rows are computed but not emitted; up to `max_rows` visible rows
-/// are written to `out`.
+/// Render a syntax-highlighted inline diff; `skip` rows are skipped, at most `max_rows` emitted.
 pub fn print_inline_diff(
     out: &mut LineBuilder,
     old: &str,
@@ -371,7 +368,7 @@ fn split_cached_spans_into_rows(
     spans: &[CachedSpan],
     max_width: usize,
 ) -> Vec<Vec<CachedSpan>> {
-    let _ = out; // wrap-marking is owned by the diff caller
+    let _ = out;
     let max_width = max_width.max(1);
     let mut rows: Vec<Vec<CachedSpan>> = Vec::new();
     let mut current_row: Vec<CachedSpan> = Vec::new();
@@ -420,8 +417,7 @@ pub fn print_cached_inline_diff(
     let right_margin = indent.len();
     let tw = default_width();
     let max_content = tw.saturating_sub(prefix_len + right_margin).max(1);
-    // Diff lines re-wrap content per row using `default_width()`-derived
-    // bounds, so the layout cannot be replayed at a different width.
+    // Content re-wraps per row from default_width(), so the layout is width-pinned.
     out.mark_wrapped();
     let emit_limit = if max_rows == 0 { u16::MAX } else { max_rows };
     let bg_del = Color::Rgb {

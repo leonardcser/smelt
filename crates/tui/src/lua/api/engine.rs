@@ -1,11 +1,4 @@
-//! `smelt.engine` bindings — turn-driver writes (cancel, compact),
-//! the `ask` auxiliary request primitive, and `submit_command` for
-//! Lua-rendered slash-command turns (`/reflect`, `/simplify`,
-//! user-defined custom commands). Mode get/set/cycle live under
-//! `smelt.mode`; reasoning effort lives under `smelt.reasoning`;
-//! model get/set/list live under `smelt.model`; per-session cost /
-//! context-token / context-window / messages snapshot live under
-//! `smelt.session`.
+//! `smelt.engine` — cancel, compact, `ask`, and `submit_command` for Lua-rendered turns.
 
 use crate::lua::{LuaHandle, LuaShared};
 use mlua::prelude::*;
@@ -50,16 +43,8 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
         })?,
     )?;
 
-    // smelt.engine.submit_command(name, body, overrides?) — start a
-    // turn from a Lua-rendered slash-command template. `name` is the
-    // bare command (e.g. `"reflect"`) and shows in the transcript as
-    // `/name`; `body` is the fully resolved prompt the LLM sees;
-    // optional `overrides` is a Lua table mirroring the YAML
-    // frontmatter on user-defined commands (`provider`, `model`,
-    // `temperature`, `top_p`, `top_k`, `min_p`, `repeat_penalty`,
-    // `reasoning_effort`, `tools`, `bash`, `web_fetch`; the three
-    // rule-set keys take a sub-table with `allow` / `ask` / `deny`
-    // arrays). No-op when an agent turn is already running.
+    // smelt.engine.submit_command(name, body, overrides?) — start a turn from a Lua command.
+    // No-op when an agent is already running.
     engine_tbl.set(
         "submit_command",
         lua.create_function(
@@ -86,7 +71,7 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
         )?,
     )?;
 
-    // smelt.engine.ask({ system, messages?, question?, task?, on_response })
+    // smelt.engine.ask({system, messages?, question?, task?, on_response})
     {
         let s = shared.clone();
         engine_tbl.set(
@@ -154,8 +139,7 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
     Ok(())
 }
 
-/// Reserved override keys that map to typed `CommandOverrides` fields.
-/// Anything else becomes a per-tool subpattern bucket in `subcommands`.
+/// Keys that map to typed `CommandOverrides` fields; anything else becomes a subpattern bucket.
 const RESERVED_OVERRIDE_KEYS: &[&str] = &[
     "description",
     "provider",

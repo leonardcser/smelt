@@ -18,9 +18,7 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
         })?,
     )?;
 
-    // `list()` returns an array of `{ key, name, provider }` entries
-    // for the available models the user can switch to. Used by the
-    // prompt-docked `/model` picker.
+    // `list()` returns `{key, name, provider}` entries for available models.
     model_tbl.set(
         "list",
         lua.create_function(|lua, ()| {

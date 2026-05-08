@@ -1,13 +1,8 @@
--- Built-in background_commands plugin.
---
--- Overrides the `bash` tool to add a `run_in_background` parameter,
--- and registers the `read_process_output` and `stop_process` tools
--- that the LLM uses to interact with backgrounded jobs, plus the `/ps`
--- slash command for managing them from the TUI.
+-- Overrides `bash` to add `run_in_background`, registers `read_process_output`
+-- and `stop_process` tools, and the `/ps` command.
 
 local bash = require("smelt.tools.bash")
 
--- ── bash override (adds run_in_background) ────────────────────────────
 
 local BG_PARAM_DESC =
 "Run the command in the background and return a process ID. Use read_process_output to check output and stop_process to kill it."
@@ -55,7 +50,6 @@ smelt.tools.register({
   execute = execute,
 })
 
--- ── read_process_output ───────────────────────────────────────────────
 
 local function format_read_result(output, running, exit_code)
   local status
@@ -123,7 +117,6 @@ smelt.tools.register({
   end,
 })
 
--- ── stop_process ──────────────────────────────────────────────────────
 
 smelt.tools.register({
   name = "stop_process",
@@ -138,7 +131,6 @@ smelt.tools.register({
   },
   execute = function(args)
     local id = args.id or ""
-    -- Drain whatever's been buffered before killing, then kill.
     local r = smelt.process.read_output(id)
     if r == nil or next(r) == nil then
       return { content = "no process with id '" .. id .. "'", is_error = true }
@@ -152,7 +144,6 @@ smelt.tools.register({
   end,
 })
 
--- ── /ps slash-command ─────────────────────────────────────────────────
 
 local function format_duration(secs)
   if secs < 60 then

@@ -1,9 +1,4 @@
--- Built-in /rewind command.
---
--- Lists user turns plus a "(current)" row and rewinds the transcript
--- to the selected block. Pure Lua over `session.turns()` and
--- `session.rewind_to(block_idx, opts)` primitives — the host carries
--- no rewind-specific dialog code.
+-- Built-in /rewind command. Picks a past user turn and rewinds the transcript to it.
 
 local function build_labels(turns)
   local labels = {}
@@ -21,9 +16,7 @@ smelt.cmd.register("rewind", function(args)
     return
   end
 
-  -- Callers can pass "insert" to force vim Insert restoration after
-  -- dismiss (used by the double-Esc keymap which exits Insert before
-  -- dispatching). Otherwise honor the current vim mode.
+  -- "insert" arg forces vim Insert restoration after rewind (used by the Esc-Esc keymap).
   local restore_vim_insert = (args == "insert") or (smelt.win.mode() == "Insert")
 
   smelt.spawn(function()

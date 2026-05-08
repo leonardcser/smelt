@@ -1,6 +1,4 @@
-//! Content-pane key dispatch: vim/novim key handlers over the readonly
-//! transcript buffer. Routes arrow keys, page keys, and vim motions;
-//! Enter runs a block-scoped keymap; Ctrl-C returns focus to the prompt.
+//! Content-pane key dispatch: vim/novim key handlers over the transcript buffer.
 
 use crate::app::{EventOutcome, TuiApp};
 use crossterm::event::{Event, KeyCode, KeyEvent};
@@ -13,18 +11,11 @@ impl TuiApp {
         };
         use crossterm::event::KeyModifiers as M;
 
-        // Ctrl-C from a non-prompt pane returns focus to the prompt.
         if k.modifiers.contains(M::CONTROL) && matches!(k.code, KeyCode::Char('c')) {
             self.app_focus = crate::app::AppFocus::Prompt;
             return EventOutcome::Redraw;
         }
 
-        // Readonly-buffer scrolling keybinds: Ctrl-U / Ctrl-D (half-page),
-        // Ctrl-B / Ctrl-F (full-page), Ctrl-Y / Ctrl-E (one line). These
-        // mirror Vim's scroll commands. Since Vim in the prompt reuses
-        // PromptState for these, we implement them here by driving the
-        // content cursor directly — which in turn pulls the viewport via
-        // the normal scroll-follows-cursor logic.
         if k.modifiers.contains(M::CONTROL) {
             let half = (self.viewport_rows_estimate() / 2).max(1) as isize;
             let full = (self.viewport_rows_estimate() as isize).max(1);
@@ -43,10 +34,6 @@ impl TuiApp {
             }
         }
 
-        // Shift+arrow / Shift+Home/End extends selection via the shared
-        // keymap regardless of vim mode — the anchor logic lives in
-        // one place (`ShiftSelection`). Vim's own v/V remain for users
-        // who prefer them.
         if k.modifiers.contains(M::SHIFT)
             && matches!(
                 k.code,
@@ -60,8 +47,6 @@ impl TuiApp {
         {
             return self.handle_content_novim_key(k);
         }
-        // Block-scoped bindings: the focused block gets first crack at
-        // the key before buffer/window keymaps (nvim-style layering).
         if let Some(outcome) = self.dispatch_block_key(k) {
             return outcome;
         }

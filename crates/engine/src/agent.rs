@@ -30,12 +30,8 @@ pub(crate) async fn engine_task(
     mut cmd_rx: mpsc::UnboundedReceiver<UiCommand>,
     event_tx: mpsc::UnboundedSender<EngineEvent>,
 ) {
-    // Default User-Agent — `reqwest/<version>` is rejected by some
-    // openai-compatible endpoints that gate on UA (e.g. api.kimi.com
-    // /coding/v1, which only accepts known coding-agent UAs). Send
-    // `smelt/<version>` so providers see a consistent identity.
-    // Per-request `header("User-Agent", ...)` calls (Copilot, Codex
-    // GitHub releases fetch) still override this.
+    // Some openai-compatible endpoints gate on User-Agent (e.g. api.kimi.com).
+    // Per-request header() calls (Copilot, Codex) still override this.
     let client = reqwest::Client::builder()
         .user_agent(concat!("smelt/", env!("CARGO_PKG_VERSION")))
         .build()
@@ -44,8 +40,6 @@ pub(crate) async fn engine_task(
 
     let _ = event_tx.send(EngineEvent::Ready);
 
-    // Context window size — set from config or lazily fetched from the
-    // provider API on the first turn.
     let mut context_window: Option<u32> = config.context_window;
 
     loop {
@@ -100,7 +94,6 @@ pub(crate) async fn engine_task(
                             compacted_this_turn: false,
                         };
                         turn.run(input_content, history).await;
-                        // Cache the (possibly fetched) context window for future turns.
                         context_window = turn.context_window;
                     }
                     UiCommand::Compact { history, instructions } => {
@@ -188,8 +181,6 @@ pub(crate) async fn engine_task(
     let _ = event_tx.send(EngineEvent::Shutdown { reason: None });
 }
 
-/// Spawn title generation as a background task so it doesn't block the engine
-/// loop or get swallowed by a running turn.
 fn spawn_title_generation(
     config: &EngineConfig,
     client: &reqwest::Client,
@@ -203,8 +194,6 @@ fn spawn_title_generation(
     let model = request.model;
     let tx = event_tx.clone();
     tokio::spawn(async move {
-        // History (source of last_user_message) is already redacted at ingress;
-        // assistant_tail is model-generated and left unredacted by policy.
         log::entry(
             log::Level::Info,
             "title_request",
@@ -277,9 +266,6 @@ fn spawn_btw_request(
     tokio::spawn(async move {
         let cancel = crate::cancel::CancellationToken::new();
 
-        // Btw questions can originate from the TUI (already redacted at
-        // submit) or from a peer agent over the socket (not yet scrubbed).
-        // Redact here so both paths land in history the same way.
         let question = if redact {
             crate::redact::redact(&question)
         } else {
@@ -396,9 +382,6 @@ fn build_provider(
 
 // ── Turn ────────────────────────────────────────────────────────────────────
 
-/// A tool call awaiting execution. Borrows the `ToolCall` from the parent
-/// assistant message; the tool name keys the dispatcher when it's time
-/// to launch.
 struct ToolSlot<'a> {
     tc: &'a protocol::ToolCall,
     args: HashMap<String, Value>,
@@ -406,37 +389,16 @@ struct ToolSlot<'a> {
     start: Instant,
 }
 
-/// Tool calls from one LLM response, sorted by how they execute.
-///
-/// Tools whose base decision is `Allow` go into `ready` (run concurrently)
-/// or `sequential_tools` (tools that blocked the LLM turn).
-/// Tools whose decision is `Ask` go into `pending_perms`; they sit in
-/// `slots` waiting for a `PermissionDecision` to either launch or cancel.
-/// `Deny` decisions don't land here at all — they produce a synthetic
-/// tool-result message inside [`Turn::classify_tools`] and are dropped.
 struct ToolExecutionPlan<'a> {
     slots: Vec<ToolSlot<'a>>,
     ready: Vec<usize>,
     pending_perms: Vec<(usize, u64)>,
-    /// Tools awaiting execution by the TUI (request_id, call_id, start).
     pending_tools: Vec<(u64, String, Instant)>,
-    /// Tools that opted into sequential execution — deferred
-    /// until after the concurrent phase, then dispatched one at a time.
-    /// (tool_call, args, start)
     sequential_tools: Vec<(&'a protocol::ToolCall, HashMap<String, Value>, Instant)>,
-    /// Tools whose permission hooks are being evaluated by the
-    /// TUI. Resolved by `UiCommand::ToolHooksResponse`, after which
-    /// the call transitions into `pending_tools` (Allow), into
-    /// `pending_tool_perms` (Ask), or into a synthetic deny result.
     pending_tool_hooks: Vec<(u64, PendingToolCall<'a>)>,
-    /// Tools awaiting a user permission decision after their
-    /// hooks evaluated to `Ask`. Resolved by
-    /// `UiCommand::PermissionDecision`.
     pending_tool_perms: Vec<(u64, PendingToolCall<'a>)>,
 }
 
-/// In-flight tool call carried through the hooks→permission
-/// pipeline. Mirrors the data `ToolSlot` carries for core tools.
 struct PendingToolCall<'a> {
     tc: &'a protocol::ToolCall,
     args: HashMap<String, Value>,
@@ -444,7 +406,6 @@ struct PendingToolCall<'a> {
     is_sequential: bool,
 }
 
-/// Encapsulates the state of a single agent turn.
 struct Turn<'a> {
     provider: Provider,
     dispatcher: &'a dyn ToolDispatcher,
@@ -463,8 +424,6 @@ struct Turn<'a> {
     started_at: Instant,
     tps_samples: Vec<f64>,
     tool_elapsed: HashMap<String, u64>,
-    /// Cached context window size. Lazily fetched from the provider API
-    /// on the first turn if not set via config.
     context_window: Option<u32>,
     compacted_this_turn: bool,
 }
@@ -474,10 +433,7 @@ impl<'a> Turn<'a> {
         let _ = self.event_tx.send(event);
     }
 
-    /// Push a message into history. When `redact_secrets` is enabled, content
-    /// from user/tool/agent roles — the only roles that carry data entering
-    /// from outside the model — is scrubbed at this boundary. Model-generated
-    /// messages (assistant, system) are passed through untouched.
+    /// Scrubs user/tool content when redact_secrets is enabled; passes assistant/system through.
     fn push_message(&mut self, mut msg: Message) {
         if self.config.redact_secrets && matches!(msg.role, Role::User | Role::Tool) {
             crate::redact::redact_message(&mut msg);
@@ -485,8 +441,7 @@ impl<'a> Turn<'a> {
         self.messages.push(msg);
     }
 
-    /// Rebuild the system prompt after a mid-turn mode change so the LLM sees
-    /// the correct mode instructions on the next API call.
+    /// Rebuilds the system prompt after a mid-turn mode change.
     fn regenerate_system_prompt(&mut self) {
         let skill_section = self.config.skills.as_ref().and_then(|s| s.prompt_section());
         let new = self
@@ -523,14 +478,12 @@ impl<'a> Turn<'a> {
         });
     }
 
-    /// Compact conversation history mid-turn when context usage crosses the
-    /// threshold. Returns `true` if compaction happened. Only fires once per
-    /// turn to avoid wasting an LLM call when compaction can't reduce further.
+    /// Compact history when context crosses the threshold. Returns true if compaction ran.
+    /// Only fires once per turn.
     async fn maybe_compact(&mut self, prompt_tokens: u32) -> bool {
         if !self.config.auto_compact || self.compacted_this_turn {
             return false;
         }
-        // Lazily fetch context window on first check.
         if self.context_window.is_none() {
             self.context_window = self.provider.fetch_context_window(&self.model).await;
         }
@@ -645,8 +598,7 @@ impl<'a> Turn<'a> {
             .with_model_config(self.config.api.model_config.clone());
     }
 
-    /// Handle a command that arrived during a turn but isn't turn-specific.
-    /// Returns true if the command was handled (caller should not fall through).
+    /// Handle a command that can be processed regardless of turn state.
     fn handle_background_cmd(&self, cmd: UiCommand) -> bool {
         match cmd {
             UiCommand::GenerateTitle {
@@ -698,8 +650,6 @@ impl<'a> Turn<'a> {
         }
     }
 
-    /// Apply a turn-local command immediately to in-memory state.
-    /// Returns true if the command was consumed here.
     fn handle_turn_cmd(&mut self, cmd: UiCommand) -> bool {
         match cmd {
             UiCommand::Steer { text } => {
@@ -762,7 +712,6 @@ impl<'a> Turn<'a> {
         }
     }
 
-    /// Main agentic loop for a single turn.
     async fn run(&mut self, content: Content, history: Vec<Message>) {
         self.provider.reset_turn_state();
         self.messages = Vec::with_capacity(history.len() + 2);
@@ -784,13 +733,9 @@ impl<'a> Turn<'a> {
             }
             first = false;
 
-            // Ensure the system prompt reflects the current mode — a mid-turn
-            // mode change (via SetAgentMode) updates self.mode but the prompt may
-            // still describe the old mode.
             self.regenerate_system_prompt();
 
-            // Recompute tool definitions each iteration — mode may have
-            // changed (e.g. Plan → Apply after plan approval).
+            // Recompute tool definitions each iteration — mode may have changed.
             let tool_defs: Vec<ToolDefinition> = if self.provider.tool_calling() {
                 let mut defs: Vec<ToolDefinition> = self
                     .dispatcher
@@ -801,9 +746,7 @@ impl<'a> Turn<'a> {
                             .is_visible(d.function.name.as_str(), self.mode)
                     })
                     .collect();
-                // Plugin tools with `override_core` shadow the core
-                // definition of the same name — drop the core one so
-                // the LLM only sees a single schema for that tool name.
+                // Plugin tools with `override_core` shadow the same-named core tool.
                 let overridden: std::collections::HashSet<&str> = self
                     .tools
                     .iter()
@@ -835,7 +778,6 @@ impl<'a> Turn<'a> {
                 return;
             }
 
-            // Call LLM with cancel monitoring
             let (result, partial_text, partial_reasoning) = self.call_llm(&tool_defs).await;
             let (resp, had_injected) = match result {
                 Ok(r) => r,
@@ -864,8 +806,6 @@ impl<'a> Turn<'a> {
                         "agent_stop",
                         &serde_json::json!({"reason": "llm_error", "error": error_msg.clone()}),
                     );
-                    // Send final history so the TUI can persist tool results
-                    // accumulated before the error.
                     self.emit_turn_complete(false);
                     self.emit(EngineEvent::TurnError { message: error_msg });
                     return;
@@ -889,9 +829,6 @@ impl<'a> Turn<'a> {
                 );
             }
 
-            // Mid-turn auto-compaction: if context usage crossed the 80%
-            // threshold, summarize older messages and continue the loop
-            // with a smaller context.
             if let Some(tokens) = prompt_tokens {
                 if self.maybe_compact(tokens).await {
                     continue;
@@ -902,16 +839,12 @@ impl<'a> Turn<'a> {
             let tool_calls = resp.tool_calls;
             let reasoning = resp.reasoning_content;
 
-            // If a message was injected during the LLM call and the LLM
-            // produced only text (no tool calls), discard this response —
-            // the LLM never saw the injected message. Loop immediately so
-            // it gets a chance to respond to the new context.
+            // Injected message arrived during the LLM call; loop so the model can respond.
             if had_injected && tool_calls.is_empty() {
                 continue;
             }
 
-            // Only emit batch Thinking/Text when streaming wasn't active.
-            // When streaming, ThinkingDelta/TextDelta already delivered the content.
+            // Streaming already delivered deltas; only emit batch events for non-streaming.
             if partial_text.is_empty() && partial_reasoning.is_empty() {
                 if let Some(ref reasoning) = reasoning {
                     let trimmed = reasoning.trim();
@@ -932,7 +865,6 @@ impl<'a> Turn<'a> {
                 }
             }
 
-            // No tool calls — turn is done.
             if tool_calls.is_empty() {
                 let is_empty = content.is_none()
                     && reasoning.is_none()
@@ -959,10 +891,6 @@ impl<'a> Turn<'a> {
                 return;
             }
 
-            // Has tool calls — commit the assistant message (with the
-            // tool_calls attached) then classify → execute → collect.
-            // Deferred commands are replayed after results land in history
-            // so steered user messages appear in the right position.
             empty_retries = 0;
             self.messages.push(Message::assistant(
                 content,
@@ -991,10 +919,6 @@ impl<'a> Turn<'a> {
         }
     }
 
-    /// Phase 1: turn LLM-emitted tool calls into a plan of slots with their
-    /// permission decisions resolved. Allow/Deny are terminal here (Deny
-    /// emits a synthetic tool result); Ask lands in `pending_perms` and
-    /// waits for a `PermissionDecision` during [`execute_concurrent`].
     fn classify_tools<'b>(&mut self, tool_calls: &'b [protocol::ToolCall]) -> ToolExecutionPlan<'b>
     where
         'a: 'b,
@@ -1025,12 +949,6 @@ impl<'a> Turn<'a> {
                 args: args.clone(),
             });
 
-            // Tool dispatch. A tool with `override_core`
-            // shadows the same-named core tool here AND in `definitions()`
-            // — the LLM only sees the Lua schema and we never reach
-            // the core-tool path for that name. Without the flag, the
-            // core tool wins on dispatch (and the engine errors at
-            // schema-emit time for collisions, see `definitions()`).
             let tool = self.tools.iter().find(|pt| {
                 pt.name == tc.function.name
                     && (pt.override_core || !self.dispatcher.contains(&tc.function.name))
@@ -1039,7 +957,6 @@ impl<'a> Turn<'a> {
                 let is_sequential =
                     matches!(pt.execution_mode, protocol::ToolExecutionMode::Sequential);
                 if pt.hooks.any() {
-                    // Round-trip through the TUI for permission hooks.
                     let request_id = next_request_id();
                     self.emit(EngineEvent::ToolHooksRequest {
                         request_id,
@@ -1140,12 +1057,7 @@ impl<'a> Turn<'a> {
         plan
     }
 
-    /// Phase 2: run ready tools concurrently while draining the command
-    /// channel. `PermissionDecision` for any pending tool launches it
-    /// mid-flight (approved) or records a denial (rejected). Mid-turn
-    /// steering / mode / model commands are collected into `deferred` and
-    /// replayed after results are committed to history.
-    ///
+    /// Run ready tools concurrently, processing permission decisions and steering mid-flight.
     /// Returns `(cancelled, deferred_commands, tool_results)`.
     async fn execute_concurrent<'b>(
         &mut self,
@@ -1162,10 +1074,7 @@ impl<'a> Turn<'a> {
         let mut futs: futures_util::stream::FuturesUnordered<TaggedFut<'_>> =
             futures_util::stream::FuturesUnordered::new();
 
-        // Side-call futures from `smelt.tools.call` invocations.
-        // Tracked separately from `outstanding` since they don't fill a tool
-        // slot — they belong to a parent tool invocation that's already
-        // counted via `pending_tools`.
+        // Side-call futures from `smelt.tools.call` — don't count against `outstanding`.
         type SideFut<'x> =
             std::pin::Pin<Box<dyn std::future::Future<Output = (u64, ToolResult)> + Send + 'x>>;
         let mut side_futs: futures_util::stream::FuturesUnordered<SideFut<'_>> =
@@ -1251,8 +1160,6 @@ impl<'a> Turn<'a> {
                             .iter()
                             .position(|(rid, _)| *rid == request_id)
                         {
-                            // Tool whose hooks evaluated to Ask
-                            // and is now hearing back from the user.
                             let (_, pending) = plan.pending_tool_perms.swap_remove(pos);
                             if approved {
                                 if pending.is_sequential {
@@ -1486,9 +1393,7 @@ impl<'a> Turn<'a> {
         (cancelled, deferred, tool_results)
     }
 
-    /// When the turn was cancelled mid-flight, emit a cancelled-result
-    /// message for every slot that never completed. Permissions that were
-    /// still pending (no approval ever arrived) also land here.
+    /// Emits cancelled results for slots that never completed.
     fn mark_unfinished_cancelled(
         &mut self,
         plan: &ToolExecutionPlan<'_>,
@@ -1506,9 +1411,7 @@ impl<'a> Turn<'a> {
         }
     }
 
-    /// Phase 2b: sequential tools — deferred past the concurrent
-    /// phase and dispatched one at a time. Used by tools that
-    /// open a dialog and await a user reply.
+    /// Dispatch sequential tools one at a time (used by tools that await user interaction).
     async fn run_sequential(
         &mut self,
         plan: &ToolExecutionPlan<'_>,
@@ -1551,9 +1454,7 @@ impl<'a> Turn<'a> {
         tool_results
     }
 
-    /// Phase 3: commit each tool's result to history, emit `ToolFinished`,
-    /// and record elapsed times. Duplicate detection replaces identical
-    /// prior results with a dedup stub to keep context small.
+    /// Commit tool results to history, emit ToolFinished, and record elapsed times.
     fn collect_results(
         &mut self,
         plan: &ToolExecutionPlan<'_>,
@@ -1612,18 +1513,14 @@ impl<'a> Turn<'a> {
         }
     }
 
-    /// Drain pending commands (steering, mode changes, cancel).
     fn drain_commands(&mut self) {
         while let Ok(cmd) = self.cmd_rx.try_recv() {
             self.handle_turn_cmd(cmd);
         }
     }
 
-    /// Call the LLM, monitoring cmd_rx for Cancel during the request.
-    /// Returns (response, had_injected_messages). The bool is true when
-    /// Commands arrived during the LLM call and were injected into
-    /// conversation history — the caller should continue the loop instead of
-    /// ending the turn.
+    /// Call the LLM. Returns `(result, partial_text, partial_reasoning)`.
+    /// `had_injected` in the result is true when a Steer arrived mid-call.
     async fn call_llm(
         &mut self,
         tool_defs: &[ToolDefinition],
@@ -1640,6 +1537,7 @@ impl<'a> Turn<'a> {
         let partial_text = std::sync::Mutex::new(String::new());
         let partial_reasoning = std::sync::Mutex::new(String::new());
 
+        // Model changes received mid-request are applied after the future resolves.
         let result = {
             let on_retry = |delay: std::time::Duration, attempt: u32| {
                 let _ = self.event_tx.send(EngineEvent::Retrying {
@@ -1667,8 +1565,6 @@ impl<'a> Turn<'a> {
                 on_delta: Some(&on_delta),
                 response_format: None,
             };
-            // History is redacted at ingress (see Turn::push_message), so we
-            // can pass self.messages straight through — no per-turn clone.
             let chat_future = self.provider.chat(
                 &self.messages,
                 tool_defs,
@@ -1724,8 +1620,6 @@ impl<'a> Turn<'a> {
         (result.map(|r| (r, had_injected)), pt, pr)
     }
 
-    /// Wait for a ToolResult matching the given request_id.
-    /// Applies mid-wait mode/model/reasoning changes.
     async fn wait_for_tool_result(&mut self, request_id: u64) -> Option<(String, bool)> {
         loop {
             match self.cmd_rx.recv().await {
@@ -1819,8 +1713,7 @@ fn send_usage(
     });
 }
 
-/// Emit a background `TokenUsage` event (compaction, title, btw, predict).
-/// Cost is tracked but prompt_tokens won't update displayed context usage.
+/// Emit a background TokenUsage event; cost is tracked but doesn't update context display.
 fn emit_usage_background(
     tx: &mpsc::UnboundedSender<EngineEvent>,
     api: &crate::ApiConfig,
@@ -1838,7 +1731,6 @@ fn emit_usage_background(
     );
 }
 
-/// Lightweight pricing context for spawned background tasks.
 #[derive(Clone)]
 struct PricingContext {
     provider_type: String,

@@ -11,13 +11,8 @@ use crate::content::default_width;
 use crate::style::Color;
 use crate::theme::role_hl;
 
-/// Render a code block. When `fence` is true, the rendered output
-/// stays unchanged but each code line's `source_text` carries its raw
-/// content, with the opening ```` ```{lang} ```` prepended to the first
-/// row and the closing ```` ``` ```` appended to the last row. This
-/// lets partial selections (vim visual / click-drag) over fenced blocks
-/// round-trip back to raw markdown — the visible code body is what the
-/// user sees, the fences re-attach if the first/last row is covered.
+/// Render a code block. When `fence` is true, each line's `source_text` carries the fenced
+/// markdown form so partial selections can round-trip back to raw markdown.
 pub fn render_code_block(
     out: &mut LineBuilder,
     lines: &[&str],
@@ -238,7 +233,7 @@ fn split_regions_into_rows(
     rows
 }
 
-/// Stateful bash/shell syntax highlighter that preserves state across lines.
+/// Stateful bash/shell syntax highlighter.
 pub struct BashHighlighter<'a> {
     h: HighlightLines<'a>,
 }
@@ -260,8 +255,7 @@ impl<'a> BashHighlighter<'a> {
         }
     }
 
-    /// Print a single line with syntax highlighting.
-    /// Does not emit a newline — the caller controls line breaks.
+    /// Print a single line with syntax highlighting; does not emit a newline.
     pub fn print_line(&mut self, out: &mut LineBuilder, line: &str) {
         let line_with_nl = format!("{}\n", line);
         let regions = self
@@ -285,7 +279,6 @@ impl<'a> BashHighlighter<'a> {
     }
 }
 
-/// Print pre-split owned regions. Returns columns printed.
 fn print_split_regions(
     out: &mut LineBuilder,
     regions: &[(Style, String)],

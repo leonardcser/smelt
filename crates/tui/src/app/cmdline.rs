@@ -1,11 +1,4 @@
-//! Nvim-style `:`-command line as a Buffer-backed input leaf in a
-//! modal overlay anchored above the status bar.
-//!
-//! All key handling lives in `cmdline_handle_key`, called by
-//! `events.rs` before compositor dispatch. The overlay leaf carries no
-//! Window-level keymap recipe; cmdline state mutates through the TuiApp
-//! directly, including text editing, history navigation, completer
-//! cycling, command execution, and dismissal.
+//! Nvim-style `:` command line: a Buffer-backed modal overlay with history and Tab completion.
 
 use crate::app::{CommandAction, TuiApp};
 
@@ -15,32 +8,19 @@ use crate::smelt_term::UiHost;
 use crate::smelt_term::{Constraint, LayoutTree, Overlay, SplitConfig};
 use crossterm::event::{KeyCode, KeyEvent};
 
-/// Visible prefix glyph rendered as the first cell of the cmdline
-/// buffer. Cursor positions and editing operations clamp to columns
-/// `>= PREFIX_LEN` so the prefix can't be deleted.
+/// Prefix glyph; cursor and editing clamp to `>= PREFIX_LEN` so it cannot be deleted.
 const PREFIX: &str = ":";
 const PREFIX_LEN: u16 = 1;
 
-/// Cohesive cmdline-mode state owned by `TuiApp.cmdline`. Persists
-/// across open/close cycles (history) and lazily allocates the
-/// completer on first Tab.
+/// Cmdline state persisted across open/close cycles.
 #[derive(Default)]
 pub(crate) struct CmdlineState {
-    /// Persistent `:` history across open/close cycles. Most-recent
-    /// at the back; submit appends (dedup'd against the previous
-    /// entry).
     pub(crate) history: Vec<String>,
-    /// Index into `history` while the user is browsing with Up/Down.
-    /// `None` when not browsing.
+    /// Index into `history` while browsing with Up/Down; `None` otherwise.
     pub(crate) history_browse: Option<usize>,
-    /// Snapshot of the cmdline payload at the moment the user started
-    /// history browsing. Restored when Down past the most-recent
-    /// entry returns to "live" input.
+    /// Live input snapshot saved when history browsing begins; restored on Down past the newest entry.
     pub(crate) history_stash: String,
-    /// Shared completer instance for `:` command completion. Lazily
-    /// constructed on first Tab press (it queries Lua command names),
-    /// dropped on cmdline close or any text mutation that invalidates
-    /// the current selection.
+    /// Completer lazily constructed on first Tab; dropped on close or text mutation.
     pub(crate) completer: Option<crate::completer::Completer>,
 }
 
@@ -76,10 +56,6 @@ impl TuiApp {
             w.scroll_top = 0;
         }
 
-        // Single-row leaf docked on the bottom row, painting over the
-        // statusline buffer (nvim-style cmdline-mode). Inner Hbox uses
-        // `Percentage(100)` so the overlay's natural width follows the
-        // terminal each frame.
         let layout = LayoutTree::vbox(vec![(
             Constraint::Length(1),
             LayoutTree::hbox(vec![(Constraint::Percentage(100), LayoutTree::leaf(win))]),
@@ -99,7 +75,6 @@ impl TuiApp {
         self.cmdline.completer = None;
     }
 
-    /// Read the cmdline's typed text (without the leading prefix).
     fn cmdline_text(&self) -> String {
         let Some(win) = self.well_known.cmdline else {
             return String::new();
@@ -112,8 +87,6 @@ impl TuiApp {
         line.strip_prefix(PREFIX).unwrap_or(&line).to_string()
     }
 
-    /// Replace the cmdline buffer with `prefix + payload` and place the
-    /// cursor at column `prefix_len + cursor_in_payload`.
     fn cmdline_set_payload(&mut self, payload: &str, cursor_in_payload: usize) {
         let Some(win) = self.well_known.cmdline else {
             return;
@@ -129,8 +102,6 @@ impl TuiApp {
         }
     }
 
-    /// Cursor position within the payload (always `>= 0`). Returns 0
-    /// when the cmdline isn't open.
     fn cmdline_cursor_in_payload(&self) -> usize {
         let Some(win) = self.well_known.cmdline else {
             return 0;
@@ -139,12 +110,7 @@ impl TuiApp {
         cur.saturating_sub(PREFIX_LEN) as usize
     }
 
-    /// Single dispatcher for every keystroke routed at a focused
-    /// cmdline. Returns `Some(true)` when the command resolved to
-    /// `Quit` (so the main loop tears down), `Some(false)` when we
-    /// handled but stay alive, and `None` only when the key isn't
-    /// ours. The overlay leaf carries no callbacks so a `None` return
-    /// silently swallows the key.
+    /// Handles a keystroke for a focused cmdline; `Some(true)` → quit, `Some(false)` → handled, `None` → unrecognised.
     pub(crate) fn cmdline_handle_key(&mut self, k: KeyEvent) -> Option<bool> {
         use crossterm::event::KeyModifiers as M;
         match (k.code, k.modifiers) {
@@ -227,13 +193,10 @@ impl TuiApp {
         let payload = self.cmdline_text();
         let cur = self.cmdline_cursor_in_payload();
         if payload.is_empty() {
-            // Backspace on the bare prefix dismisses.
             self.close_cmdline();
             return Some(false);
         }
         if cur == 0 {
-            // Cursor is at the prefix boundary but text exists ahead;
-            // nothing to delete to the left.
             return Some(false);
         }
         let chars: Vec<char> = payload.chars().collect();
@@ -267,7 +230,6 @@ impl TuiApp {
     fn cmdline_delete_word_back(&mut self) -> Option<bool> {
         let payload = self.cmdline_text();
         if payload.is_empty() {
-            // Ctrl+W on a blank cmdline closes.
             self.close_cmdline();
             return Some(false);
         }
@@ -276,10 +238,6 @@ impl TuiApp {
         let split = cur.min(chars.len());
         let prefix: String = chars[..split].iter().collect();
         let trimmed_end = prefix.trim_end();
-        // Walk backwards from the cursor to the previous word
-        // boundary (alphanumeric / `_`). Land just past the
-        // boundary char so consecutive Ctrl+W deletes successive
-        // words including their trailing whitespace.
         let new_cursor = match trimmed_end.rfind(|c: char| !c.is_alphanumeric() && c != '_') {
             Some(boundary) => {
                 let boundary_char_len = trimmed_end[boundary..]
@@ -371,11 +329,6 @@ impl TuiApp {
         self.cmdline.completer = None;
     }
 
-    /// Persist the current line into history (if non-empty and not a
-    /// duplicate of the most-recent entry), close the overlay, then
-    /// dispatch the command. Returns `true` when `pending_quit` is set
-    /// (e.g. the line was `q` / `quit` / `exit`) so the caller can break
-    /// the main loop on the next tick.
     fn cmdline_submit(&mut self) -> bool {
         let line = self.cmdline_text();
         let last = self.cmdline.history.last().cloned();
@@ -396,9 +349,6 @@ impl TuiApp {
         }
     }
 
-    /// Lazily build the shared completer from the static command list +
-    /// Lua-registered names, then advance / rewind the selection and
-    /// apply the selected label as the cmdline text.
     fn cmdline_cycle_completer(&mut self, next: bool) {
         use crate::completer::{Completer, CompletionItem};
         if self.cmdline.completer.is_none() {
@@ -421,8 +371,6 @@ impl TuiApp {
             comp.update_query(typed);
             self.cmdline.completer = Some(comp);
         } else if let Some(ref mut comp) = self.cmdline.completer {
-            // Reversed picker style: `next` advances upward toward the
-            // best match near the prompt.
             if next {
                 comp.move_up();
             } else {

@@ -1,6 +1,4 @@
--- `/color` — change the task-slug label color.
---
--- Same shape as `/theme` but targets the "slug" role.
+-- `/color` — change the task-slug label color (same shape as /theme).
 
 local presets = smelt.theme.presets()
 local preset_names, items = {}, {}

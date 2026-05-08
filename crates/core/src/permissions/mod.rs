@@ -1,15 +1,4 @@
 //! Permission policy for tool calls.
-//!
-//! Layout:
-//! - [`rules`]: rule-set types and pattern matching
-//! - [`bash`]: shell command splitting / heredoc parsing / redirection detection
-//! - [`workspace`]: path extraction + workspace boundary enforcement
-//! - [`approvals`]: runtime auto-approval tracking
-//! - [`store`]: workspace JSON store
-//!
-//! The public surface is this module: `Permissions`, `Decision`,
-//! `RuntimeApprovals`, and one helper consumed by tool implementations
-//! (`split_shell_commands`).
 
 pub(crate) mod approvals;
 pub(crate) mod bash;
@@ -37,20 +26,11 @@ use std::path::PathBuf;
 use std::sync::{Arc, RwLock};
 use workspace::{any_outside_workspace, is_in_workspace};
 
-/// Lookup "what filesystem paths does this tool call touch?" without
-/// hardcoding tool names in Rust. Wired from each Lua tool's
-/// `paths_for_workspace(args)` callback at startup; tools that don't
-/// touch paths simply don't register one and the workspace-boundary
-/// check short-circuits to "in".
+/// Maps `(tool_name, args)` to filesystem paths the call would touch.
+/// Tools that don't touch paths don't register one; the workspace check short-circuits.
 pub type PathsFn = dyn Fn(&str, &HashMap<String, Value>) -> Vec<String> + Send + Sync;
 
-/// Tool-decision override: `Some(decision)` skips Rust's generic
-/// `check_tool` path. Wired from each Lua tool's `decide(args, mode)`
-/// callback at startup; tools without one fall through to the generic
-/// path. The bash + web_fetch tools register decide callbacks that
-/// compose `check_tool` + `check_bash` / `check_tool_pattern` from Lua,
-/// so the historical "if name == bash / web_fetch" branches in Rust
-/// retire.
+/// Per-tool decision override. `Some(decision)` skips the generic `check_tool` path.
 pub type DecideFn =
     dyn Fn(&str, &HashMap<String, Value>, AgentMode) -> Option<Decision> + Send + Sync;
 
@@ -65,10 +45,7 @@ pub struct Permissions {
     paths_fn: Option<Arc<PathsFn>>,
     decide_hook_fn: Option<Arc<DecideFn>>,
     subpattern_parsers: HashMap<String, Arc<SubpatternParserFn>>,
-    /// Runtime auto-approval state (session- and workspace-scoped).
-    /// Interior-mutable so handlers that hold an `Arc<Permissions>`
-    /// can grant approvals without holding a writable handle. Cloned
-    /// `Permissions` share the same approvals lock.
+    /// Interior-mutable so `Arc<Permissions>` holders can grant approvals without a writable handle.
     pub approvals: Arc<RwLock<RuntimeApprovals>>,
 }
 
@@ -99,10 +76,6 @@ impl Permissions {
         Self::from_raw(&RawConfig::default().permissions, &ToolDefaults::default())
     }
 
-    /// Build from a Lua-populated `RawPerms` plus the tool-declared
-    /// defaults captured during registration. Called by startup after
-    /// autoloads (which register tools and seed `tool_defaults`) and
-    /// `init.lua` (which may call `smelt.permissions.set_rules`).
     pub fn from_raw(raw: &RawPerms, tool_defaults: &ToolDefaults) -> Self {
         let def = &raw.default;
         Self {
@@ -196,11 +169,6 @@ impl Permissions {
         self.restrict_to_workspace = val;
     }
 
-    /// Install the per-tool path-extraction callback. Called once at
-    /// startup after Lua tool defs are registered. The callback's job
-    /// is to map `(tool_name, args) -> [paths]` by invoking each
-    /// tool's `paths_for_workspace(args)` Lua hook (and returning
-    /// `[]` for tools that didn't register one).
     pub fn set_paths_fn(&mut self, f: Arc<PathsFn>) {
         self.paths_fn = Some(f);
     }
@@ -212,9 +180,6 @@ impl Permissions {
         }
     }
 
-    /// Install the per-tool decide-hook callback. When set, a tool's
-    /// `decide(args, mode)` Lua callback returning `Some(decision)`
-    /// short-circuits the generic `check_tool` path. See [`DecideFn`].
     pub fn set_decide_hook_fn(&mut self, f: Arc<DecideFn>) {
         self.decide_hook_fn = Some(f);
     }
@@ -249,24 +214,13 @@ impl Permissions {
         perms.tools.get(tool_name).cloned().unwrap_or(default)
     }
 
-    /// Look up a per-tool subpattern ruleset for the given mode. Tools
-    /// register subpattern buckets via `smelt.permissions.set_rules`
-    /// (`bash`, `web_fetch`, `mcp`, plus any custom-named tool); each
-    /// is consulted by the tool's own `decide` Lua callback through
-    /// [`Permissions::check_subcommand`].
     pub fn subcommand_ruleset(&self, mode: AgentMode, bucket: &str) -> Option<&RuleSet> {
         self.mode_perms(mode).subcommands.get(bucket)
     }
 
-    /// Check a value against a tool's subpattern ruleset for the given
-    /// mode. `bucket` is the tool name. If the tool registered a custom
-    /// subpattern parser at registration time (see [`SubpatternParserFn`]
-    /// — the `bash` tool registers the `shell` parser, which splits on
-    /// shell operators and folds per-subcommand), it runs; otherwise the
-    /// plain glob-match path runs against the value as a whole.
-    ///
-    /// Returns `Decision::Ask` (or Allow in Yolo) when no bucket is
-    /// registered.
+    /// Check `value` against the bucket's ruleset. Custom parsers (e.g. `bash`'s shell parser)
+    /// run when registered; otherwise plain glob-match. Returns `Ask` (or `Allow` in Yolo)
+    /// when no bucket is registered.
     pub fn check_subcommand(&self, mode: AgentMode, bucket: &str, value: &str) -> Decision {
         let Some(rs) = self.subcommand_ruleset(mode, bucket) else {
             return if mode == AgentMode::Yolo {
@@ -276,9 +230,6 @@ impl Permissions {
             };
         };
         if let Some(parser) = self.subpattern_parsers.get(bucket) {
-            // Custom parsers embed mode semantics themselves (e.g. the
-            // shell parser only escalates output redirection in
-            // Normal/Plan); their result is taken as authoritative.
             return parser(rs, value, mode);
         }
         let decision = check_ruleset(rs, value);
@@ -289,9 +240,7 @@ impl Permissions {
         }
     }
 
-    /// Full permission decision for a tool call, including workspace restriction.
-    /// When `is_mcp` is true, routes through the `mcp` subpattern bucket
-    /// instead of the generic `check_tool` path.
+    /// Full decision including workspace restriction. MCP calls route through the `mcp` bucket.
     pub fn decide(
         &self,
         mode: AgentMode,
@@ -314,8 +263,7 @@ impl Permissions {
         base
     }
 
-    /// Whether this tool call's base permission is Allow but was downgraded
-    /// to Ask solely because of paths outside the workspace.
+    /// `true` when the base decision is Allow but was downgraded to Ask solely by workspace paths.
     pub fn was_downgraded(
         &self,
         mode: AgentMode,
@@ -344,8 +292,6 @@ impl Permissions {
     }
 }
 
-// ── Base decision (without workspace restriction) ────────────────────────────
-
 fn decide_base(
     permissions: &Permissions,
     mode: AgentMode,
@@ -358,13 +304,8 @@ fn decide_base(
     permissions.check_tool(mode, tool_name)
 }
 
-/// Shell-aware [`SubpatternParserFn`]: splits on shell operators, folds
-/// per subcommand to the worst decision, escalates output redirection
-/// in Normal/Plan, and trusts `cd` unconditionally (workspace
-/// restriction in [`Permissions::decide`] still rejects outside-workspace
-/// paths). The `bash` tool registers this parser at startup; nothing
-/// else uses it, but plugin tools that wrap shell-shaped values
-/// (subcommand wrappers around `git`, `npm`, etc.) can opt in.
+/// Shell-aware decision: splits on operators, folds subcommands to the worst decision,
+/// escalates output redirection in Normal/Plan, trusts `cd` unconditionally.
 pub fn shell_parser_decide(rs: &RuleSet, command: &str, mode: AgentMode) -> Decision {
     let command = command.trim();
     let escalate_redirect = matches!(mode, AgentMode::Normal | AgentMode::Plan);
@@ -399,10 +340,7 @@ pub fn shell_parser_decide(rs: &RuleSet, command: &str, mode: AgentMode) -> Deci
     worst
 }
 
-/// Look up a built-in subpattern parser by Rust-built-in kind name.
-/// Tool registration ([`crate::lua::api::tools::register`]) reads the
-/// `subpattern_parser` Lua field as a string and routes through this.
-/// Currently `"shell"` is the only built-in.
+/// Look up a built-in subpattern parser by name. Currently only `"shell"`.
 pub fn builtin_subpattern_parser(kind: &str) -> Option<Arc<SubpatternParserFn>> {
     match kind {
         "shell" => Some(Arc::new(shell_parser_decide)),

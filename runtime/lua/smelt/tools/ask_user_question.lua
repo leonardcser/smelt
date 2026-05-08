@@ -1,12 +1,6 @@
--- Built-in ask_user_question tool.
---
--- Registers a sequential plugin tool (blocks the LLM turn until the
--- user replies) that iterates one dialog per question in args.questions.
--- Each dialog has a markdown question, the LLM's options, and an
--- "Other" free-text input. Returns a plain-text answer list.
---
--- multiSelect in the schema is accepted for LLM compatibility but
--- treated as single-select for now.
+-- Built-in ask_user_question tool. Sequential; blocks the LLM turn until the user replies.
+-- One dialog per question with a markdown body, option list, and free-text "Other" input.
+-- multiSelect is accepted in the schema but treated as single-select.
 
 smelt.tools.register({
   name = "ask_user_question",

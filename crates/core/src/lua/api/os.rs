@@ -1,7 +1,4 @@
-//! `smelt.os` bindings — environment + system primitives. Host-tier
-//! (works in tui and headless). Pure Rust-side surface; no Rust
-//! capability module backs it (each binding is a one-liner over
-//! `std`).
+//! `smelt.os` — environment and system primitives (getenv, setenv, platform, cwd, pid, etc.).
 
 use mlua::prelude::*;
 

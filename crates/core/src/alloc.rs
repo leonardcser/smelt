@@ -1,13 +1,6 @@
-//! Counting global-allocator shim.
-//!
-//! When enabled (via `enable()`, typically wired to `--bench`), every call to
-//! the system allocator bumps a pair of atomic counters. `snapshot()` returns
-//! the current totals so callers can compute deltas around a scope — the
-//! `perf::Guard` does this to attribute allocations to labelled spans.
-//!
-//! Overhead when disabled is one relaxed atomic load per alloc. The
-//! `#[global_allocator]` static must be defined in the binary crate;
-//! `Counting` is the type to install.
+//! Counting global-allocator shim. When enabled, bumps per-thread atomic counters on every alloc
+//! so `perf::Guard` can attribute allocation deltas to labelled spans. Overhead when disabled is
+//! one relaxed atomic load per alloc. Install via `#[global_allocator]` in the binary crate.
 
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::cell::Cell;
@@ -30,9 +23,7 @@ pub(crate) fn enabled() -> bool {
     ENABLED.load(Relaxed)
 }
 
-/// Calling-thread `(alloc_count, alloc_bytes)` totals. Per-thread so
-/// `perf::Guard` deltas stay clean of cross-thread allocator traffic.
-/// Monotonic; take deltas.
+/// Calling-thread `(alloc_count, alloc_bytes)` totals. Monotonic; take deltas.
 pub(crate) fn snapshot() -> (u64, u64) {
     let a = T_ALLOCS.try_with(|c| c.get()).unwrap_or(0);
     let b = T_BYTES.try_with(|c| c.get()).unwrap_or(0);
@@ -46,8 +37,7 @@ unsafe impl GlobalAlloc for Counting {
         if ENABLED.load(Relaxed) {
             ALLOC_COUNT.fetch_add(1, Relaxed);
             ALLOC_BYTES.fetch_add(layout.size() as u64, Relaxed);
-            // Per-thread tally for perf attribution. `try_with` because
-            // the allocator can run during TLS teardown.
+            // `try_with` because the allocator can run during TLS teardown.
             let _ = T_ALLOCS.try_with(|c| c.set(c.get() + 1));
             let _ = T_BYTES.try_with(|c| c.set(c.get() + layout.size() as u64));
         }
@@ -71,8 +61,7 @@ unsafe impl GlobalAlloc for Counting {
     unsafe fn realloc(&self, ptr: *mut u8, layout: Layout, new_size: usize) -> *mut u8 {
         if ENABLED.load(Relaxed) {
             ALLOC_COUNT.fetch_add(1, Relaxed);
-            // Count the growth, not the total — realloc often just extends
-            // an existing allocation. Shrinks contribute zero bytes.
+            // Count the growth only; shrinks contribute zero bytes.
             if new_size > layout.size() {
                 let grown = (new_size - layout.size()) as u64;
                 ALLOC_BYTES.fetch_add(grown, Relaxed);

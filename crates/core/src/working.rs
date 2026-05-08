@@ -1,12 +1,6 @@
-//! Turn state for the status bar: a running "live" turn (animating
-//! spinner, elapsed clock, tokens-per-second accumulator) and/or the
-//! "last" archived turn result displayed until the next turn begins.
-//!
-//! Splitting these into separate slots — instead of one `throbber`
-//! that carries both "animating" and "display-done" semantics — makes
-//! it impossible for the render loop to mistake a completed turn for
-//! a frame-by-frame animation (which used to keep CPU pegged at
-//! 60 Hz after every completed turn).
+//! Status-bar turn state: a live animating turn and an archived last-turn
+//! result. Separate slots prevent the render loop from mistaking a completed
+//! turn for an ongoing animation (which would pin CPU at 60 Hz).
 
 use crate::content::SPINNER_FRAMES;
 use crate::utils::format_duration;

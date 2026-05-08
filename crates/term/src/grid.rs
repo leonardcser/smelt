@@ -1,12 +1,8 @@
 use super::geometry::Rect;
 pub use smelt_style::style::{Color, Style};
 
-/// Convert the frontend-neutral `Color` to crossterm's terminal
-/// `Color` at the SGR-emit boundary. 1:1 enum mapping; the trait
-/// orphan rule prevents `From<smelt_style::Color> for crossterm::Color`,
-/// so this is a free function. Internal — callers should write `Style`
-/// values into the grid and let the compositor handle the SGR
-/// translation.
+/// Convert `Color` to crossterm's `Color` at the SGR-emit boundary.
+/// A free function because the orphan rule prevents a `From` impl.
 pub(crate) fn to_crossterm_color(c: Color) -> crossterm::style::Color {
     use crossterm::style::Color as X;
     match c {
@@ -83,11 +79,9 @@ impl Grid {
         &self.cells[self.idx(x, y)]
     }
 
-    /// Direct mutable cell access for hot paint paths. Returns `None`
-    /// when `(x, y)` is out of bounds. Bypasses the wide-char
-    /// continuation marker bookkeeping that `set` does — only use this
-    /// for ASCII / width-1 painting where you control the entire grid
-    /// region (e.g. half-block colour fills).
+    /// Mutable cell access; returns `None` when out of bounds.
+    /// Bypasses wide-char continuation bookkeeping — use only for ASCII /
+    /// width-1 painting where you own the entire region.
     pub fn cell_mut(&mut self, x: u16, y: u16) -> Option<&mut Cell> {
         if x < self.width && y < self.height {
             let idx = self.idx(x, y);
@@ -102,12 +96,9 @@ impl Grid {
         if x < self.width && y < self.height {
             let idx = self.idx(x, y);
             self.cells[idx] = Cell { symbol, style };
-            // Wide-char invariant: the cell immediately after a width-2
-            // glyph holds a `\0` continuation marker so the flush and
-            // diff paths can skip it (the terminal renders the wide
-            // glyph across both visual cells on its own). Marker
-            // inherits the wide char's style so inclusion in a styled
-            // pill stays visually consistent.
+            // Mark the next cell as a wide-char continuation (`\0`) so flush
+            // and diff paths skip it — the terminal covers both visual columns.
+            // Inherits the same style so styled backgrounds stay consistent.
             if UnicodeWidthChar::width(symbol).unwrap_or(1) == 2 && x + 1 < self.width {
                 let cont = self.idx(x + 1, y);
                 self.cells[cont] = Cell {
@@ -136,11 +127,8 @@ impl Grid {
         }
     }
 
-    /// Partial cell update — overwrites `symbol` and `style.fg`, but
-    /// preserves the existing cell's `bg` and text attributes (bold,
-    /// italic, etc.). Use when painting fg-only content over a row that
-    /// already carries a background fill (treemap tile labels, cursor-
-    /// line text, inline diff markers).
+    /// Overwrites `symbol` and `style.fg`; preserves the existing cell's
+    /// `bg` and text attributes. Use for fg-only painting over a filled background.
     pub fn put_char(&mut self, x: u16, y: u16, symbol: char, fg: Color) {
         use unicode_width::UnicodeWidthChar;
         if x >= self.width || y >= self.height {
@@ -159,9 +147,7 @@ impl Grid {
         }
     }
 
-    /// String form of [`Grid::put_char`]. Each character preserves the
-    /// underlying bg / attrs at its target cell; only `symbol` and
-    /// `style.fg` are overwritten.
+    /// String form of [`Grid::put_char`]: overwrites symbol + fg, preserves bg and attrs.
     pub fn put_str_fg(&mut self, x: u16, y: u16, text: &str, fg: Color) {
         use unicode_width::UnicodeWidthChar;
         if y >= self.height {
@@ -178,9 +164,7 @@ impl Grid {
         }
     }
 
-    /// Paint a [`Line`] of styled spans starting at `(x, y)`. Each
-    /// span paints with its own style; spans run left-to-right with
-    /// no implicit gap. Clips at the right edge.
+    /// Paint a [`Line`] of styled spans at `(x, y)`, clipping at the right edge.
     pub fn put_line(&mut self, x: u16, y: u16, line: &crate::line::Line<'_>) {
         let mut col = x;
         for span in &line.spans {
@@ -227,11 +211,8 @@ impl Grid {
 
     pub fn diff<'a>(&'a self, prev: &'a Grid) -> impl Iterator<Item = CellUpdate<'a>> {
         self.cells.iter().enumerate().filter_map(move |(i, cell)| {
-            // Wide-char continuation cells (`\0` sentinel) are never
-            // flushed — the preceding wide glyph paints both visual
-            // columns. Emitting them would either overwrite the
-            // continuation (clobbering the glyph) or desync the
-            // terminal cursor.
+            // Skip wide-char continuation cells (`\0`); the preceding wide
+            // glyph already covers both visual columns on the terminal.
             if cell.symbol == '\0' {
                 return None;
             }
@@ -288,8 +269,7 @@ impl<'a> GridSlice<'a> {
         }
     }
 
-    /// Read a cell from the underlying grid at slice-local coords.
-    /// Returns the default `Cell` when out of bounds.
+    /// Read a cell at slice-local coords; returns default `Cell` when out of bounds.
     pub fn cell(&self, x: u16, y: u16) -> Cell {
         if x < self.area.width && y < self.area.height {
             *self.grid.cell(self.area.left + x, self.area.top + y)
@@ -298,9 +278,7 @@ impl<'a> GridSlice<'a> {
         }
     }
 
-    /// Mutable cell access at slice-local coords. Mirrors
-    /// [`Grid::cell_mut`] — bypasses wide-char continuation
-    /// bookkeeping, intended for hot ASCII / half-block paint paths.
+    /// Mutable cell access at slice-local coords. See [`Grid::cell_mut`] for caveats.
     pub fn cell_mut(&mut self, x: u16, y: u16) -> Option<&mut Cell> {
         if x < self.area.width && y < self.area.height {
             self.grid.cell_mut(self.area.left + x, self.area.top + y)
@@ -309,9 +287,7 @@ impl<'a> GridSlice<'a> {
         }
     }
 
-    /// Absolute rect this slice covers in the underlying grid. Useful
-    /// for hosts that want to record screen-coordinate hit regions
-    /// from inside a paint callback.
+    /// Absolute rect this slice covers in the underlying grid.
     pub fn screen_rect(&self) -> Rect {
         self.area
     }
@@ -329,9 +305,7 @@ impl<'a> GridSlice<'a> {
         }
     }
 
-    /// Partial cell update at slice-local coords. See [`Grid::put_char`]
-    /// for semantics: overwrites symbol + fg, preserves existing bg
-    /// and attrs.
+    /// Slice-local [`Grid::put_char`]: overwrites symbol + fg, preserves bg and attrs.
     pub fn put_char(&mut self, x: u16, y: u16, symbol: char, fg: Color) {
         if x < self.area.width && y < self.area.height {
             self.grid
@@ -339,9 +313,7 @@ impl<'a> GridSlice<'a> {
         }
     }
 
-    /// Paint a styled [`Line`] at slice-local coords. See
-    /// [`Grid::put_line`] for semantics — spans paint left-to-right
-    /// with their own styles, clipping at the slice's right edge.
+    /// Slice-local [`Grid::put_line`]: paint spans left-to-right, clipping at the slice edge.
     pub fn put_line(&mut self, x: u16, y: u16, line: &crate::line::Line<'_>) {
         if y >= self.area.height {
             return;
@@ -360,7 +332,7 @@ impl<'a> GridSlice<'a> {
         }
     }
 
-    /// String form of [`GridSlice::put_char`].
+    /// Slice-local [`Grid::put_str_fg`]: overwrites symbol + fg per char, preserves bg and attrs.
     pub fn put_str_fg(&mut self, x: u16, y: u16, text: &str, fg: Color) {
         use unicode_width::UnicodeWidthChar;
         if y >= self.area.height {

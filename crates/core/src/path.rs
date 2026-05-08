@@ -1,8 +1,5 @@
-//! Path manipulation primitives. Pure logic — does not touch the
-//! filesystem except for `canonical`. Exposed to Lua via
-//! `crates/tui/src/lua/api/path.rs` and composed by tools that need to
-//! reason about workspace boundaries, display paths, or anchor a
-//! relative reference.
+//! Path manipulation primitives. Pure logic — does not touch the filesystem
+//! except for `canonical`.
 
 use std::path::{Component, Path, PathBuf};
 
@@ -44,16 +41,12 @@ pub(crate) fn normalize(input: impl AsRef<Path>) -> PathBuf {
     out
 }
 
-/// Resolve a path against the filesystem. Errors surface as
-/// `std::io::Error` so callers (Lua bindings, tools) can decide how to
-/// present them.
 pub(crate) fn canonical(input: impl AsRef<Path>) -> std::io::Result<PathBuf> {
     std::fs::canonicalize(input)
 }
 
-/// Compute `target` relative to `base`. Pure path arithmetic — does not
-/// resolve symlinks. If `target` lives outside `base`, the returned
-/// path uses `..` to walk up. Both inputs are normalized first.
+/// Compute `target` relative to `base` (pure arithmetic, no symlink resolution).
+/// Uses `..` when `target` is outside `base`. Both inputs are normalized first.
 pub(crate) fn relative(base: impl AsRef<Path>, target: impl AsRef<Path>) -> PathBuf {
     let base = normalize(base.as_ref());
     let target = normalize(target.as_ref());
@@ -82,15 +75,11 @@ pub(crate) fn relative(base: impl AsRef<Path>, target: impl AsRef<Path>) -> Path
     out
 }
 
-/// Expand a leading `~` to the user's home directory. Returns the
-/// input unchanged when no home is available or the path does not
-/// start with `~`.
+/// Expand a leading `~` to the home directory. Returns input unchanged when
+/// no home is available or path does not start with `~`.
 pub(crate) fn expand_home(input: impl AsRef<Path>) -> PathBuf {
     let path = input.as_ref();
     let Some(rest) = path.strip_prefix("~").ok().or_else(|| {
-        // Some callers pass `~/foo` as a single segment when constructing
-        // via `PathBuf::from`. `strip_prefix` handles that for us above;
-        // also handle the literal `~` case.
         if path == Path::new("~") {
             Some(Path::new(""))
         } else {

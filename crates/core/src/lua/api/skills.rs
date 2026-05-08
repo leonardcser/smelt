@@ -1,10 +1,4 @@
-//! `smelt.skills` bindings — read the loaded `SkillLoader` populated
-//! at startup. Backs `runtime/lua/smelt/tools/load_skill.lua`.
-//!
-//! The loader scans `~/.config/smelt/skills/*/SKILL.md` plus
-//! workspace-local + config-extra paths once at boot; both engine
-//! (system prompt section) and tui (this binding) read from the
-//! same `Arc<SkillLoader>` clone.
+//! `smelt.skills` — list/load skill content from the `SkillLoader` populated at startup.
 
 use mlua::prelude::*;
 

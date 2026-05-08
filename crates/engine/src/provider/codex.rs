@@ -15,8 +15,6 @@ pub(crate) const CODEX_TOKENS_ENV: &str = "SMELT_CODEX_TOKENS";
 use super::auth_storage::CredStore;
 use super::unix_now;
 
-// ── Persisted tokens ───────────────────────────────────────────────────────
-
 fn cred_store() -> CredStore {
     CredStore {
         keyring_service: "smelt-codex-auth",
@@ -30,16 +28,13 @@ fn cred_store() -> CredStore {
 pub(crate) struct CodexTokens {
     pub(crate) access_token: String,
     pub(crate) refresh_token: String,
-    /// Unix timestamp (seconds) when the access token expires.
     pub(crate) expires_at: u64,
     pub(crate) account_id: Option<String>,
-    /// Unix timestamp (seconds) of the last successful token refresh.
     #[serde(default)]
     pub(crate) last_refresh: u64,
 }
 
 impl CodexTokens {
-    /// Returns true if the token is expired (within 60s) or stale (>8h since refresh).
     pub(crate) fn needs_refresh(&self) -> bool {
         let now = unix_now();
         now + 60 >= self.expires_at
@@ -60,8 +55,6 @@ impl CodexTokens {
         cred_store().delete();
     }
 }
-
-// ── JWT helpers ────────────────────────────────────────────────────────────
 
 fn extract_account_id(access_token: &str, id_token: Option<&str>) -> Option<String> {
     for token in id_token.into_iter().chain(std::iter::once(access_token)) {
@@ -103,8 +96,6 @@ fn parse_jwt_claims(token: &str) -> Option<JwtClaims> {
     serde_json::from_slice(&payload).ok()
 }
 
-// ── PKCE helpers ───────────────────────────────────────────────────────────
-
 struct PkceCodes {
     verifier: String,
     challenge: String,
@@ -135,8 +126,6 @@ fn generate_state() -> String {
     rand::rng().fill(&mut bytes);
     base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(bytes)
 }
-
-// ── Browser OAuth flow ─────────────────────────────────────────────────────
 
 #[derive(Deserialize)]
 struct TokenResponse {
@@ -186,27 +175,20 @@ padding:1rem;background:#3c140d;border-radius:.5rem}}</style>
     )
 }
 
-/// Run the browser-based OAuth + PKCE flow.
-///
-/// 1. Starts a local HTTP server on port 1455
-/// 2. Opens the browser to OpenAI's authorize endpoint
-/// 3. Waits for the redirect callback with the authorization code
-/// 4. Exchanges the code for tokens
+/// Run the browser-based OAuth + PKCE flow: starts a local server, opens the browser,
+/// waits for the callback, and exchanges the code for tokens.
 pub(crate) async fn browser_login(client: &reqwest::Client) -> Result<CodexTokens, String> {
     let pkce = generate_pkce();
     let state = generate_state();
     let redirect_uri = format!("http://localhost:{OAUTH_PORT}/auth/callback");
     let auth_url = build_authorize_url(&redirect_uri, &pkce, &state);
 
-    // Start the local callback server.
     let listener = tokio::net::TcpListener::bind(("127.0.0.1", OAUTH_PORT))
         .await
         .map_err(|e| format!("failed to bind port {OAUTH_PORT}: {e}"))?;
 
-    // Open the browser.
     open_browser(&auth_url);
 
-    // Wait for the callback (with a 5 minute timeout).
     let (code, received_state) =
         tokio::time::timeout(Duration::from_secs(300), wait_for_callback(&listener))
             .await
@@ -220,7 +202,6 @@ pub(crate) async fn browser_login(client: &reqwest::Client) -> Result<CodexToken
     exchange_code(client, &code, &pkce.verifier, &redirect_uri).await
 }
 
-/// Wait for a single HTTP request on the callback listener, parse the code.
 async fn wait_for_callback(listener: &tokio::net::TcpListener) -> Result<(String, String), String> {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
@@ -236,7 +217,6 @@ async fn wait_for_callback(listener: &tokio::net::TcpListener) -> Result<(String
         .map_err(|e| format!("read failed: {e}"))?;
     let request = String::from_utf8_lossy(&buf[..n]);
 
-    // Parse the GET request line: "GET /auth/callback?code=...&state=... HTTP/1.1"
     let path = request
         .lines()
         .next()
@@ -346,8 +326,6 @@ async fn exchange_code(
     save_token_response(tokens)
 }
 
-// ── Token refresh ──────────────────────────────────────────────────────────
-
 pub(crate) async fn refresh_tokens(
     client: &reqwest::Client,
     refresh_token: &str,
@@ -414,9 +392,6 @@ fn save_token_response(tokens: TokenResponse) -> Result<CodexTokens, String> {
     Ok(result)
 }
 
-// ── Model discovery ────────────────────────────────────────────────────────
-
-/// A model returned by the Codex models endpoint.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub(crate) struct CodexModel {
     pub(crate) slug: String,
@@ -425,8 +400,6 @@ pub(crate) struct CodexModel {
     pub(crate) context_window: Option<u32>,
 }
 
-/// Fetch the list of models available to the logged-in Codex account.
-/// Returns models with `visibility: "list"`, sorted by priority.
 async fn fetch_models(client: &reqwest::Client) -> Result<Vec<CodexModel>, String> {
     let (access_token, account_id) = ensure_access_token(client).await?;
 
@@ -472,7 +445,6 @@ async fn fetch_models(client: &reqwest::Client) -> Result<Vec<CodexModel>, Strin
             let visibility = m["visibility"].as_str().unwrap_or("none");
             let priority = m["priority"].as_i64().unwrap_or(999);
 
-            // Only include models visible in the picker.
             if visibility != "list" {
                 return None;
             }
@@ -494,7 +466,6 @@ async fn fetch_models(client: &reqwest::Client) -> Result<Vec<CodexModel>, Strin
     Ok(result.into_iter().map(|(_, m)| m).collect())
 }
 
-/// Look up the context window for a model from the disk cache.
 pub(crate) fn cached_context_window(model: &str) -> Option<u32> {
     load_cached_models()
         .into_iter()
@@ -502,7 +473,6 @@ pub(crate) fn cached_context_window(model: &str) -> Option<u32> {
         .and_then(|m| m.context_window)
 }
 
-/// Load cached models from disk (fast, synchronous).
 pub(crate) fn load_cached_models() -> Vec<CodexModel> {
     let cache_path = crate::paths::cache_dir().join("codex_models.json");
     let Ok(data) = std::fs::read_to_string(&cache_path) else {
@@ -511,7 +481,6 @@ pub(crate) fn load_cached_models() -> Vec<CodexModel> {
     serde_json::from_str::<Vec<CodexModel>>(&data).unwrap_or_default()
 }
 
-/// Write models to the disk cache.
 fn save_models_cache(models: &[CodexModel]) {
     let cache_path = crate::paths::cache_dir().join("codex_models.json");
     if let Some(parent) = cache_path.parent() {
@@ -523,8 +492,6 @@ fn save_models_cache(models: &[CodexModel]) {
     );
 }
 
-/// Fetch models from the API and update the cache. Returns the fresh list,
-/// or an empty vec on failure.
 pub(crate) async fn refresh_models_cache(client: &reqwest::Client) -> Vec<CodexModel> {
     let models = match fetch_models(client).await {
         Ok(m) => m,
@@ -559,8 +526,6 @@ async fn fetch_codex_version(client: &reqwest::Client) -> Result<String, String>
         .ok_or("missing release name".into())
 }
 
-// ── Device code flow ──────────────────────────────────────────────────────
-
 #[derive(Deserialize)]
 struct DeviceCodeResponse {
     device_auth_id: String,
@@ -592,12 +557,7 @@ struct DeviceCodePollResponse {
     code_verifier: Option<String>,
 }
 
-/// Run the device-code flow for headless environments.
-///
-/// 1. Request a user code from the auth server
-/// 2. Display the code and verification URL to the user
-/// 3. Poll until the user authorizes (up to 15 minutes)
-/// 4. Exchange the authorization code for tokens
+/// Device-code flow for headless environments.
 pub(crate) async fn device_code_login(client: &reqwest::Client) -> Result<CodexTokens, String> {
     let body = serde_json::json!({ "client_id": CLIENT_ID });
 
@@ -675,9 +635,6 @@ pub(crate) async fn device_code_login(client: &reqwest::Client) -> Result<CodexT
     }
 }
 
-// ── Access token ───────────────────────────────────────────────────────────
-
-/// Get valid tokens, refreshing if needed. Returns the full `CodexTokens`.
 pub(crate) async fn ensure_access_token_full(
     client: &reqwest::Client,
 ) -> Result<CodexTokens, String> {
@@ -690,7 +647,6 @@ pub(crate) async fn ensure_access_token_full(
     refresh_tokens(client, &tokens.refresh_token).await
 }
 
-/// Get a valid access token, refreshing if needed. Returns `(access_token, account_id)`.
 async fn ensure_access_token(client: &reqwest::Client) -> Result<(String, Option<String>), String> {
     let tokens = ensure_access_token_full(client).await?;
     Ok((tokens.access_token, tokens.account_id))

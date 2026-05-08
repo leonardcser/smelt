@@ -1,7 +1,4 @@
-//! Pane focus + block-scoped key dispatch. `Ctrl-W` chord toggles
-//! focus between prompt and transcript; when a block is focused,
-//! `dispatch_block_key` gets first crack at a key before buffer /
-//! window keymaps (nvim-style layering).
+//! Pane focus and block-scoped key dispatch.
 
 use crate::app::{EventOutcome, Timers, TuiApp};
 use crossterm::event::{Event, KeyCode, KeyEvent};
@@ -16,7 +13,6 @@ impl TuiApp {
         use crossterm::event::KeyModifiers as M;
         let Event::Key(k) = ev else { return None };
 
-        // In-flight chord: consume the follow-up key.
         if let Some(started) = t.pending_pane_chord {
             if started.elapsed() < PANE_CHORD_WINDOW {
                 let navigated = matches!(
@@ -28,14 +24,11 @@ impl TuiApp {
                     self.toggle_pane_focus();
                     return Some(EventOutcome::Redraw);
                 }
-                // Non-navigation follow-up — fall through so the key is
-                // processed normally.
                 return None;
             }
             t.pending_pane_chord = None;
         }
 
-        // Prime the chord.
         if k.code == KeyCode::Char('w') && k.modifiers.contains(M::CONTROL) {
             t.pending_pane_chord = Some(Instant::now());
             return Some(EventOutcome::Noop);
@@ -59,10 +52,8 @@ impl TuiApp {
         }
     }
 
-    /// Warm up the content pane on focus switch: mount the transcript,
-    /// clamp cpos into range, sync cursor line/col. Without this, a
-    /// resumed session has stale/zero state and the first key press
-    /// is a no-op until the user triggers a click-to-position.
+    /// Warm up the content pane on focus switch: clamp cpos and sync cursor state.
+    /// Without this, a resumed session has stale state and the first key is a no-op.
     fn refocus_content(&mut self) {
         let rows = self.full_transcript_display_text(self.core.config.settings.show_thinking);
         let viewport = self.viewport_rows_estimate();
@@ -71,9 +62,6 @@ impl TuiApp {
         self.snap_transcript_cursor();
     }
 
-    /// Determine which block the content cursor is currently on, if any.
-    /// Derives the absolute row from `cpos` (byte offset in the display
-    /// buffer), then looks up the snapshot's `block_of_row`.
     fn focused_block_id(&mut self) -> Option<BlockId> {
         let tw = self.transcript_width() as u16;
         let theme = self.ui.theme().clone();
@@ -91,9 +79,7 @@ impl TuiApp {
         snap.block_of_row.get(row).copied().flatten()
     }
 
-    /// Try to handle a key as a block-scoped binding. Returns `Some` if
-    /// the key was consumed, `None` to fall through to buffer/window
-    /// keymaps.
+    /// Handle a key as a block-scoped binding. Returns `Some` if consumed, `None` to fall through.
     pub(crate) fn dispatch_block_key(&mut self, k: KeyEvent) -> Option<EventOutcome> {
         use crossterm::event::KeyModifiers as M;
         if k.modifiers != M::NONE {

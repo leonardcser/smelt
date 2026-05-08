@@ -1,13 +1,4 @@
--- Built-in /btw (side question) plugin.
---
--- Registers the `/btw` command. Opens a dialog, sends the question to
--- the engine via `engine.ask()`, and drives the answer into a
--- markdown-formatted buffer. The formatter reflows on terminal
--- resize and re-renders when `set_source` changes the content; the
--- dialog panel reads its wrapped + highlighted output directly.
--- While the answer is pending, a spinner pill mirrors the "working"
--- status the bottom bar shows for the main agent. Uses only generic
--- buf / dialog / spinner primitives — zero btw-specific Rust code.
+-- Built-in /btw command. Asks a side question; streams the answer into a markdown dialog.
 
 local SYSTEM = "You are a helpful assistant. The user is asking a quick side question "
   .. "while working on something else. Answer concisely and directly. "

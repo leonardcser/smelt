@@ -1,6 +1,4 @@
--- Built-in `/simplify` command. Self-contained: the prompt body is a
--- Lua string below; the Rust side only re-enters via
--- `smelt.engine.submit_command(name, body)` to start the turn.
+-- Built-in /simplify command.
 
 local BODY = [[# Simplify: Code Review and Cleanup
 

@@ -1,18 +1,12 @@
-//! `smelt.shell` bindings — pure parsing helpers consumed by the
-//! Lua-side `bash` tool and `background_commands` plugin. Wraps
-//! `crate::permissions::split_shell_commands` for AST-level
-//! splitting, plus inline interactive-binary / shell-background
-//! validators.
+//! `smelt.shell` — shell command splitting and interactive/background-operator validators.
 
 use mlua::prelude::*;
 
-/// Known interactive binaries that require a TTY.
 const INTERACTIVE_BINS: &[&str] = &[
     "vim", "nvim", "vi", "nano", "emacs", "pico", "less", "more", "top", "htop", "btop", "nmon",
     "irb", "ghci",
 ];
 
-/// Git subcommands whose `-i`/`--interactive` flag requires a TTY.
 const GIT_INTERACTIVE_SUBCMDS: &[&str] = &["rebase", "add", "checkout", "clean", "stash"];
 
 fn check_interactive(command: &str) -> Option<&'static str> {
@@ -89,12 +83,6 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
         "check_background_op",
         lua.create_function(|_, command: String| Ok(check_shell_background_operator(&command)))?,
     )?;
-    // smelt.shell.extract_paths(command) -> [string]
-    //
-    // Pull tokens that look like absolute (`/foo`) or home-rooted
-    // (`~/foo`) paths from a shell command. Heredoc bodies are
-    // stripped first. Used by the bash tool's
-    // `paths_for_workspace(args)` callback.
     shell_tbl.set(
         "extract_paths",
         lua.create_function(|_, command: String| {

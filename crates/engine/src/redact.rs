@@ -1,34 +1,23 @@
-//! Secret redaction for chat content.
+//! Secret redaction for chat content (redact-at-ingress).
 //!
-//! The policy is **redact-at-ingress**: data entering the conversation from
-//! outside the model (user input, tool results) is
-//! scrubbed once at the boundary, before it lands in history. Model-generated
-//! content (assistant text, reasoning, tool-call arguments) is never touched.
-//! This is the only layer preventing secrets from leaving the machine toward
-//! the LLM API.
+//! User input and tool results are scrubbed before entering history.
+//! Model-generated content (assistant, reasoning, tool-call args) is never touched.
 //!
-//! Detection uses a layered approach sourced from gitleaks' battle-tested
-//! patterns:
-//! 1. **Known prefix patterns** — provider tokens with distinctive prefixes (near-zero false positives)
-//! 2. **Structural patterns** — PEM keys, JWTs, database connection strings
-//! 3. **Keyword proximity** — `password = "..."`, `secret: "..."`, etc.
-//! 4. **Shannon entropy** — catch-all for unknown high-entropy strings
+//! Detection layers (sourced from gitleaks patterns):
+//! 1. Known prefix patterns — provider tokens (near-zero false positives)
+//! 2. Structural patterns — PEM keys, JWTs, database connection strings
+//! 3. Keyword proximity — `password = "..."`, `secret: "..."`, etc.
+//! 4. Shannon entropy — catch-all for high-entropy unknown tokens
 //!
-//! Redacted values are replaced with type-labeled placeholders like
-//! `[REDACTED:github_pat]` so the LLM can still reason about what kind of
-//! secret was present without seeing the value.
+//! Secrets are replaced with `[REDACTED:label]` placeholders.
 
 use regex::Regex;
 use std::sync::OnceLock;
 
-/// Minimum token length for entropy-based detection. Kept high to avoid
-/// swallowing ordinary long identifiers; real opaque secrets are longer still.
 const ENTROPY_MIN_LEN: usize = 32;
 
-/// Shannon entropy threshold. Tokens above this are flagged.
 const ENTROPY_THRESHOLD: f64 = 4.5;
 
-/// Format a redaction placeholder with a type label.
 fn placeholder(label: &str) -> String {
     format!("[REDACTED:{label}]")
 }
@@ -39,11 +28,8 @@ struct LabeledPattern {
 }
 
 struct Patterns {
-    /// Known prefix patterns — highest confidence, near-zero false positives.
     prefix: Vec<LabeledPattern>,
-    /// Structural patterns — PEM blocks, JWTs, connection strings.
     structural: Vec<LabeledPattern>,
-    /// Keyword proximity — `password = "value"` style.
     keyword: Vec<Regex>,
 }
 
@@ -153,26 +139,17 @@ fn patterns() -> &'static Patterns {
         ];
 
         let structural: Vec<(&str, &str)> = vec![
-            // PEM private key blocks (full block matching)
             (r"(?i)-----BEGIN[ A-Z0-9_-]{0,100}PRIVATE KEY(?: BLOCK)?-----[\s\S-]*?KEY(?: BLOCK)?-----", "private_key"),
-            // JWT tokens (3 base64url segments separated by dots)
             (r"ey[a-zA-Z0-9]{17,}\.ey[a-zA-Z0-9/\\_\-]{17,}\.(?:[a-zA-Z0-9/\\_\-]{10,}={0,2})?", "jwt"),
-            // GCP service account JSON identifier
             (r#""type"\s*:\s*"service_account""#, "gcp_service_account"),
-            // Database connection strings with embedded credentials
             (r"(?i)(?:postgres|mysql|mongodb|redis|amqp|mariadb|cockroachdb)(?:\+\w+)?://[^:\s]+:[^@\s]+@[^\s]+", "database_url"),
-            // Generic connection strings (ADO.NET / JDBC style)
             (r"(?i)(?:Server|Data Source)=[^;]+;[^;]*Password=[^;\s]+", "connection_string"),
         ];
 
-        // `token` and `credential` are intentionally omitted: they're too
-        // generic (e.g. `access_token_url`, `auth_token_scope`), and real
-        // provider tokens are caught precisely by the prefix layer above.
+        // `token` and `credential` omitted — too generic; caught by prefix layer.
         let keyword: Vec<&str> = vec![
-            // Quoted values after secret-like keys
             r#"(?i)(?:password|passwd|pwd|secret|api_?key|auth_?key|private_?key|access_?key|api_?secret|client_?secret)\s*[:=]\s*"[^"]{8,}""#,
             r"(?i)(?:password|passwd|pwd|secret|api_?key|auth_?key|private_?key|access_?key|api_?secret|client_?secret)\s*[:=]\s*'[^']{8,}'",
-            // Unquoted values (single token, no whitespace)
             r#"(?i)(?:password|passwd|pwd|secret|api_?key|auth_?key|private_?key|access_?key|api_?secret|client_?secret)\s*[:=]\s*[^\s'"]{16,}"#,
         ];
 
@@ -198,22 +175,17 @@ fn patterns() -> &'static Patterns {
     })
 }
 
-/// Force eager initialization of the redaction pattern set so the first
-/// call to `redact()` doesn't pay the regex-compile cost on the user-input
-/// path. Call once at startup from a background thread.
+/// Eagerly compile redaction patterns. Call once at startup to avoid latency on first input.
 pub fn warm_up() {
     let _ = patterns();
 }
 
-/// A redaction range: byte start, byte end, and the type label.
 struct RedactRange {
     start: usize,
     end: usize,
     label: &'static str,
 }
 
-/// Redact secrets in the given text, returning a new string with secrets
-/// replaced by type-labeled placeholders like `[REDACTED:github_pat]`.
 pub fn redact(input: &str) -> String {
     if input.is_empty() {
         return String::new();
@@ -222,7 +194,6 @@ pub fn redact(input: &str) -> String {
     let mut ranges: Vec<RedactRange> = Vec::new();
     let pats = patterns();
 
-    // Layer 1 & 2: prefix and structural patterns
     for lp in pats.prefix.iter().chain(pats.structural.iter()) {
         for m in lp.regex.find_iter(input) {
             ranges.push(RedactRange {
@@ -233,8 +204,6 @@ pub fn redact(input: &str) -> String {
         }
     }
 
-    // Layer 3: keyword proximity — redact only the value part.
-    // The label is derived from the matched keyword name.
     for re in pats.keyword.iter() {
         for caps in re.find_iter(input) {
             let matched = caps.as_str();
@@ -246,7 +215,6 @@ pub fn redact(input: &str) -> String {
                 let trim_offset = value_str.len() - trimmed.len();
                 let actual_start = value_start + trim_offset;
 
-                // Strip surrounding quotes from the redaction range.
                 let (final_start, final_end) =
                     if trimmed.starts_with('"') || trimmed.starts_with('\'') {
                         (actual_start + 1, caps.end() - 1)
@@ -258,7 +226,6 @@ pub fn redact(input: &str) -> String {
                     if looks_like_url_or_path(value) {
                         continue;
                     }
-                    // Extract the keyword name for the label.
                     let key_part = matched[..sep_pos].trim();
                     let label = keyword_label(key_part);
                     ranges.push(RedactRange {
@@ -271,7 +238,6 @@ pub fn redact(input: &str) -> String {
         }
     }
 
-    // Layer 4: Shannon entropy
     for (start, end, _entropy) in entropy_tokens(input) {
         ranges.push(RedactRange {
             start,
@@ -284,8 +250,7 @@ pub fn redact(input: &str) -> String {
         return input.to_string();
     }
 
-    // Merge overlapping ranges. When ranges overlap, keep the label of
-    // the first (highest-confidence) match.
+    // Merge overlapping ranges, keeping the label of the first (highest-confidence) match.
     ranges.sort_by_key(|r| r.start);
     let mut merged: Vec<RedactRange> = Vec::new();
     for r in ranges {
@@ -298,7 +263,6 @@ pub fn redact(input: &str) -> String {
         merged.push(r);
     }
 
-    // Build the redacted string.
     let mut result = String::with_capacity(input.len());
     let mut pos = 0;
     for r in &merged {
@@ -310,7 +274,6 @@ pub fn redact(input: &str) -> String {
     result
 }
 
-/// Map a keyword match (the part before `=` or `:`) to a static label.
 fn keyword_label(key: &str) -> &'static str {
     let lower = key.to_ascii_lowercase();
     if lower.ends_with("password") || lower.ends_with("passwd") || lower.ends_with("pwd") {
@@ -332,9 +295,6 @@ fn keyword_label(key: &str) -> &'static str {
     }
 }
 
-/// Heuristic: does this value look like a URL or file path?
-/// Used to avoid redacting things like `auth_key: "https://.../oauth"` or
-/// `access_key = /etc/creds/my-key.pem`.
 fn looks_like_url_or_path(value: &str) -> bool {
     value.starts_with("http://")
         || value.starts_with("https://")
@@ -345,7 +305,6 @@ fn looks_like_url_or_path(value: &str) -> bool {
         || value.starts_with("~/")
 }
 
-/// Compute Shannon entropy of a byte slice over its unique byte values.
 fn shannon_entropy(data: &[u8]) -> f64 {
     if data.is_empty() {
         return 0.0;
@@ -365,8 +324,7 @@ fn shannon_entropy(data: &[u8]) -> f64 {
         .sum()
 }
 
-/// Does a token have at least two distinct character classes
-/// (lowercase / uppercase / digit / symbol)?
+/// True when the token contains at least two distinct character classes.
 fn has_mixed_char_classes(token: &str) -> bool {
     let mut classes = 0u8;
     for b in token.bytes() {
@@ -387,7 +345,6 @@ fn has_mixed_char_classes(token: &str) -> bool {
     false
 }
 
-/// UUID shape: 8-4-4-4-12 hex chars with dashes, case-insensitive.
 fn is_uuid_shape(token: &str) -> bool {
     static UUID_RE: OnceLock<Regex> = OnceLock::new();
     let re = UUID_RE.get_or_init(|| {
@@ -397,14 +354,9 @@ fn is_uuid_shape(token: &str) -> bool {
     re.is_match(token)
 }
 
-/// Extract high-entropy tokens from text. Returns (byte_start, byte_end, entropy).
 fn entropy_tokens(input: &str) -> Vec<(usize, usize, f64)> {
     static TOKEN_RE: OnceLock<Regex> = OnceLock::new();
-    let re = TOKEN_RE.get_or_init(|| {
-        // Match contiguous non-whitespace tokens that look like potential secrets:
-        // must contain mixed character classes to filter out prose.
-        Regex::new(r#"[^\s=:"'`,;\{\}\[\]\(\)]{20,}"#).unwrap()
-    });
+    let re = TOKEN_RE.get_or_init(|| Regex::new(r#"[^\s=:"'`,;\{\}\[\]\(\)]{20,}"#).unwrap());
 
     let mut results = Vec::new();
     for m in re.find_iter(input) {
@@ -412,11 +364,10 @@ fn entropy_tokens(input: &str) -> Vec<(usize, usize, f64)> {
         if token.len() < ENTROPY_MIN_LEN {
             continue;
         }
-        // Skip tokens that are all lowercase alpha (likely English words).
+        // Skip lowercase-only (likely English words).
         if token.bytes().all(|b| b.is_ascii_lowercase() || b == b'-') {
             continue;
         }
-        // Skip tokens that look like file paths.
         if token.starts_with('/') || token.starts_with("./") || token.contains("/../") {
             continue;
         }
@@ -424,17 +375,14 @@ fn entropy_tokens(input: &str) -> Vec<(usize, usize, f64)> {
         if token.starts_with("http://") || token.starts_with("https://") {
             continue;
         }
-        // Skip hex-only strings: commit SHAs, content hashes, and similar
-        // non-secret identifiers the model often needs to reason about.
+        // Skip hex-only strings (commit SHAs, hashes).
         if token.bytes().all(|b| b.is_ascii_hexdigit()) {
             continue;
         }
-        // Skip UUIDs: structured identifiers, not secrets.
         if is_uuid_shape(token) {
             continue;
         }
-        // Require at least two character classes so ordinary snake_case or
-        // PascalCase identifiers don't trip the entropy check.
+        // Require mixed character classes to skip identifiers like snake_case.
         if !has_mixed_char_classes(token) {
             continue;
         }
@@ -446,18 +394,13 @@ fn entropy_tokens(input: &str) -> Vec<(usize, usize, f64)> {
     results
 }
 
-/// Redact secrets in a single message's content at ingress.
-///
-/// Only mutates `content`. `reasoning_content` and `tool_calls.arguments`
-/// are left alone — they reflect the model's own prior thought and actions,
-/// generated from already-redacted inputs.
+/// Redact secrets in message content. Leaves reasoning and tool_call args untouched.
 pub(crate) fn redact_message(msg: &mut protocol::Message) {
     if let Some(ref mut content) = msg.content {
         redact_content(content);
     }
 }
 
-/// Redact secrets within a `Content` value in place.
 pub fn redact_content(content: &mut protocol::Content) {
     match content {
         protocol::Content::Text(ref mut s) => {
@@ -483,7 +426,6 @@ pub fn redact_content(content: &mut protocol::Content) {
 mod tests {
     use super::*;
 
-    /// Helper: check that a redacted result contains `[REDACTED:<label>]`.
     fn assert_redacted_with(result: &str, label: &str) {
         let expected = format!("[REDACTED:{label}]");
         assert!(

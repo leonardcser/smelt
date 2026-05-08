@@ -152,7 +152,6 @@ async fn main() {
 
     let mut args = Args::parse();
 
-    // Handle subcommands before loading config.
     if let Some(Commands::Auth) = args.command {
         setup::run_auth_command().await;
         return;
@@ -167,15 +166,10 @@ async fn main() {
         return;
     }
 
-    // Phase 1: run Lua init.lua for config registration (before engine starts).
     let mut lua_runtime = tui::lua::LuaRuntime::new();
     if let Some(ref path) = args.config {
         lua_runtime.set_init_lua_path(std::path::PathBuf::from(path));
     }
-    // Embedded autoload first so user code can override built-in
-    // registrations. Runs without a TLS app pointer; autoload modules
-    // only do `smelt.{tools,cmd,au,cell}.register` at load time, which
-    // writes to `LuaShared` and never reaches into live app state.
     lua_runtime.load_autoload();
     lua_runtime.load_user_config();
     lua_runtime.load_global_plugins();
@@ -222,8 +216,6 @@ async fn main() {
         tui::alloc::enable();
     }
 
-    // Eager-load lazy work in background threads so the first tool render
-    // and first user submit don't pay the lazy-init cost on the input path.
     std::thread::spawn(tui::warm_up_syntect);
     std::thread::spawn(engine::redact::warm_up);
 
@@ -240,12 +232,10 @@ async fn main() {
         std::process::exit(1);
     }
 
-    // Parse theme accent from config (applied after TuiApp::new — see below).
     let cfg_accent: Option<u8> = cfg.theme.accent.as_ref().map(|accent| {
         if let Ok(v) = accent.parse::<u8>() {
             v
         } else {
-            // Try to find by name in presets
             tui::theme::PRESETS
                 .iter()
                 .find(|(name, _, _)| name.eq_ignore_ascii_case(accent))
@@ -258,7 +248,6 @@ async fn main() {
         Arc::new(Mutex::new(None));
     let headless_cancel = Arc::new(tokio::sync::Notify::new());
 
-    // Signal handler for graceful shutdown
     {
         let shared = shared_session.clone();
         let is_headless = args.headless;
@@ -281,8 +270,6 @@ async fn main() {
                 tokio::signal::ctrl_c().await.ok();
             }
             if is_headless {
-                // Notify run_headless to break out of the event loop so it
-                // can print the token summary before exiting.
                 headless_cancel.notify_one();
                 return;
             }
@@ -312,7 +299,6 @@ async fn main() {
         });
     }
 
-    // Load instructions and workspace.
     let cwd = std::env::current_dir().unwrap_or_default();
     let instructions = if args.no_system_prompt {
         None
@@ -338,7 +324,6 @@ async fn main() {
         })
     };
 
-    // Start the engine.
     let workspace = engine::paths::git_root(&cwd).unwrap_or_else(|| cwd.clone());
     let mut permissions = smelt_core::permissions::Permissions::from_raw(
         &lua_permission_rules.unwrap_or_default(),
@@ -346,22 +331,13 @@ async fn main() {
     );
     permissions.set_workspace(workspace);
     permissions.set_restrict_to_workspace(settings.restrict_to_workspace);
-    // Wire the workspace-path query to each Lua tool's
-    // `paths_for_workspace(args)` callback. Resolved at call time via
-    // the TLS app pointer the main loop installs while dispatching.
     permissions.set_paths_fn(std::sync::Arc::new(|name, args| {
         tui::lua::try_with_app(|app| app.lua.tool_paths_for_workspace(name, args))
             .unwrap_or_default()
     }));
-    // Wire the per-tool decision override to each Lua tool's
-    // `decide(args, mode)` callback. Tools without one (everything but
-    // bash and web_fetch today) return `None` and the generic
-    // `check_tool` path runs.
     permissions.set_decide_hook_fn(std::sync::Arc::new(|name, args, mode| {
         tui::lua::try_with_app(|app| app.lua.tool_decide(name, args, mode)).flatten()
     }));
-    // Load workspace-scoped auto-approvals into the permissions'
-    // interior-mutable approvals slot before sharing the `Arc`.
     {
         let cwd_str = cwd.to_string_lossy();
         let rules = smelt_core::permissions::store::load(&cwd_str);
@@ -417,8 +393,6 @@ async fn main() {
         },
         dispatcher,
     );
-    // Fetch context window in background (only needed for interactive TUI display).
-    // If the user set it in config, skip the fetch entirely.
     let ctx_rx = if !args.headless && cfg.settings.context_window.is_none() {
         let ctx_api_base = args
             .api_base
@@ -489,7 +463,6 @@ async fn main() {
             .run_oneshot(args.message.unwrap(), headless_cancel)
             .await;
     } else {
-        // Build the TUI app.
         let mut app = tui::app::TuiApp::new(
             model,
             initial_api_base,
@@ -527,8 +500,6 @@ async fn main() {
 
         if let Some(ref resume_val) = args.resume {
             if resume_val.is_empty() {
-                // Open the resume dialog inside `run()` so dismissal goes
-                // through the normal dialog lifecycle (clear_dialog_area).
                 args.message = Some("/resume".to_string());
             } else if let Some(loaded) = smelt_core::session::load(resume_val) {
                 app.load_session(loaded);
@@ -538,8 +509,6 @@ async fn main() {
             }
         }
 
-        // Redirect stderr to a log file so stray output from system processes
-        // (e.g. polkit, PAM) or libraries doesn't corrupt the TUI display.
         redirect_stderr();
 
         println!();
@@ -551,10 +520,7 @@ async fn main() {
     smelt_core::perf::print_summary();
 }
 
-/// Assemble the `AppConfig` for a headless frontend from resolved CLI +
-/// config inputs. No saved-state seeding — predictable behaviour from
-/// the CLI invocation; the TUI path threads `SessionCache` through
-/// `TuiApp::new` instead.
+/// Assemble the `AppConfig` for a headless frontend from resolved CLI and config inputs.
 #[allow(clippy::too_many_arguments)]
 fn build_headless_config(
     model: String,
@@ -597,9 +563,7 @@ fn build_headless_config(
     }
 }
 
-/// Redirect stderr (fd 2) to a file in the logs directory so that any stray
-/// output from system daemons, libraries, or child processes doesn't pollute
-/// the TUI display.
+/// Redirect stderr to a log file to prevent stray output from corrupting the TUI display.
 fn redirect_stderr() {
     #[cfg(unix)]
     {
@@ -612,13 +576,11 @@ fn redirect_stderr() {
             .open(&path)
         {
             let file_fd = file.as_raw_fd();
-            // dup2 the log file onto fd 2 (stderr).
             // SAFETY: both fds are valid open file descriptors.
             unsafe {
                 libc::dup2(file_fd, 2);
             }
-            // `file` is dropped here but fd 2 now points to the same open file
-            // description, so it stays open.
+            // `file` drops here but fd 2 now shares the same open file description.
         }
     }
 }

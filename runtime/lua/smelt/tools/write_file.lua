@@ -1,9 +1,4 @@
--- Built-in write_file tool — overwrite (or create) a file with new
--- contents. Refuses to clobber a file that hasn't been read this
--- session and detects mid-flight mtime drift; both checks compose
--- the shared `engine::tools::FileStateCache` exposed at
--- `smelt.fs.file_state.*`. Notebooks are routed to `edit_notebook`
--- instead.
+-- Built-in write_file tool. Refuses to overwrite unread files and detects mtime drift.
 
 local UNREAD_OVERWRITE_ERR = "File already exists. Use edit_file to modify existing files, or read_file then write_file to replace."
 

@@ -1,7 +1,4 @@
--- `/model` — switch active model.
---
--- With an arg, applies directly. Without, opens a filterable picker
--- of available models (matches on name + provider + key).
+-- `/model` — switch active model. Direct with an arg; picker without.
 
 local function models_list()
   return smelt.model.list() or {}

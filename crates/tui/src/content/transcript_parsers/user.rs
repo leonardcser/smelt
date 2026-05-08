@@ -1,5 +1,4 @@
-//! `Block::User` renderer + the geometry helper used both here and by
-//! the prompt buffer to size the tinted user-bubble.
+//! `Block::User` renderer.
 
 use smelt_core::buffer::SpanMeta;
 use smelt_core::content::builder::{display_width, LineBuilder};
@@ -7,8 +6,7 @@ use smelt_core::content::wrap::wrap_line;
 use smelt_core::theme::role_hl;
 use smelt_core::transcript_model::is_command_like;
 
-/// Preprocessed user message layout: tab-expanded, blank-trimmed lines
-/// with a computed `block_w` for multiline bubble rendering.
+/// Preprocessed user message layout: tab-expanded, blank-trimmed lines with a computed `block_w`.
 pub struct UserBlockGeometry {
     pub lines: Vec<String>,
     pub block_w: usize,
@@ -91,8 +89,6 @@ pub(super) fn render(
     rows
 }
 
-/// Print user message text with accent highlighting for valid `@path` refs,
-/// `/command` lines, and `[image]` attachment labels.
 fn print_highlights(out: &mut LineBuilder, text: &str, image_labels: &[String], is_command: bool) {
     let accent_role = role_hl("Accent");
 

@@ -57,9 +57,8 @@ pub fn data_dir() -> PathBuf {
         .join(APP_NAME)
 }
 
-/// Detect the git repository root for the given directory.
-/// Returns `None` if not in a git repo, or if the root is the home directory
-/// or filesystem root (too broad to be useful as a workspace boundary).
+/// Detect the git repository root. Returns `None` outside a git repo, or when
+/// the root is `~` or `/` (too broad to be a useful workspace boundary).
 pub fn git_root(cwd: &std::path::Path) -> Option<PathBuf> {
     let output = std::process::Command::new("git")
         .args(["rev-parse", "--show-toplevel"])
@@ -79,7 +78,6 @@ pub fn git_root(cwd: &std::path::Path) -> Option<PathBuf> {
     Some(root)
 }
 
-/// Detect the current git branch, if any.
 pub fn git_branch(cwd: &std::path::Path) -> Option<String> {
     let output = std::process::Command::new("git")
         .args(["rev-parse", "--abbrev-ref", "HEAD"])

@@ -47,9 +47,9 @@ pub fn split_words(text: &str) -> Vec<&str> {
         .collect()
 }
 
+/// Recency bonus for history items (newest-first). Recent entries get a material advantage
+/// without overpowering exact or whole-word matches.
 pub fn recency_bonus(recency_rank: usize) -> i64 {
-    // History items are stored newest-first. Give recent entries a material
-    // advantage without overpowering exact or whole-word matches.
     match recency_rank {
         0..=4 => 180 - (recency_rank as i64 * 20),
         5..=14 => 90 - ((recency_rank as i64 - 5) * 6),

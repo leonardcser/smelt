@@ -1,12 +1,4 @@
-//! `smelt.frontend` bindings — read which frontend wraps the running
-//! `Core` so tools can branch between the human-facing TUI and the
-//! headless paths.
-//!
-//! Today only `TuiApp` installs the TLS app pointer, so reads from
-//! Lua always see `Tui`. When `HeadlessApp` gains a Lua driver
-//! (P2.b.5b), the same TLS slot will carry either frontend and the
-//! same binding will dispatch to the right `frontend` field — no
-//! signature change.
+//! `smelt.frontend` — query which frontend (TUI vs headless) is running.
 
 use mlua::prelude::*;
 

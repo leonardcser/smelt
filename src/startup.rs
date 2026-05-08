@@ -1,8 +1,7 @@
 use crate::{setup, Args};
 use protocol::{AgentMode, ReasoningEffort};
 
-/// Read an API key from the given environment variable name.
-/// An empty `key_env` yields an empty key (used by providers that don't need one).
+/// Read an API key from `key_env`. An empty `key_env` returns an empty key.
 pub fn resolve_api_key(key_env: &str) -> Result<String, String> {
     if key_env.is_empty() {
         return Ok(String::new());
@@ -18,8 +17,7 @@ pub fn resolve_api_key(key_env: &str) -> Result<String, String> {
     }
 }
 
-/// Everything resolved from args + config + cached state before the engine
-/// starts. Produced by [`resolve`] and consumed by the mode dispatch in `main`.
+/// Fully resolved startup parameters, produced by [`resolve`] before the engine starts.
 pub struct ResolvedStartup {
     pub cfg: smelt_core::config::Config,
     pub available_models: Vec<smelt_core::config::ResolvedModel>,
@@ -39,12 +37,8 @@ pub struct ResolvedStartup {
     pub cache: smelt_core::state::SessionCache,
 }
 
-/// Resolve the four priority fallbacks for the active model reference:
-/// CLI `--model` > config default > cached selection > first in config.
-///
-/// Returns `None` only when all sources are empty or when a CLI model is
-/// not found in the resolved models and `allow_not_found_cli` is true (the
-/// caller then falls back to `--api-base`-driven configuration).
+/// Resolve the active model: CLI `--model` > config default > cached selection > first in config.
+/// Returns `None` when the CLI model is absent from resolved models and `--api-base` is also set.
 fn resolve_model_reference(
     args: &Args,
     cfg: &smelt_core::config::Config,
@@ -64,14 +58,10 @@ fn resolve_model_reference(
     };
 
     if let Some(ref cli_model) = args.model {
-        // If the user passed --api-base alongside, a missing --model is allowed —
-        // the caller will build a config from --api-base/--model directly.
         pick(cli_model, args.api_base.is_some())
     } else if let Some(default) = cfg.get_default_model() {
-        // Config has a default: use it, ignore cached selection.
         pick(default, false)
     } else if let Some(ref cached) = cache.selected_model {
-        // No config default: prefer last-used, fall back to first if stale.
         smelt_core::config::resolve_model_ref(available_models, cached)
             .ok()
             .cloned()
@@ -81,9 +71,7 @@ fn resolve_model_reference(
     }
 }
 
-/// Build config from Lua registries (already populated by init.lua),
-/// honour `--set`, fetch dynamic model lists, resolve the active model,
-/// auxiliary routing, API keys, and all pure defaults merges.
+/// Resolve all startup configuration: Lua registries, `--set` overrides, model lists, API keys, and defaults.
 pub async fn resolve(args: &Args, cfg: smelt_core::config::Config) -> ResolvedStartup {
     let mut cfg = cfg;
 
@@ -111,9 +99,6 @@ pub async fn resolve(args: &Args, cfg: smelt_core::config::Config) -> ResolvedSt
     let cache = smelt_core::state::SessionCache::load();
     let mut available_models = cfg.resolve_models();
 
-    // For Codex providers, fetch models dynamically from the API (with cache).
-    // Use cached models for instant startup; always refresh in background.
-    // Done before auxiliary validation so cached codex slugs are in scope.
     if cfg.has_codex_provider() {
         let ids = engine::auth::cached_models(engine::auth::AuthProvider::Codex);
         if !ids.is_empty() {
@@ -126,7 +111,6 @@ pub async fn resolve(args: &Args, cfg: smelt_core::config::Config) -> ResolvedSt
         });
     }
 
-    // Same pattern for GitHub Copilot.
     if cfg.has_copilot_provider() {
         let ids = engine::auth::cached_models(engine::auth::AuthProvider::Copilot);
         if !ids.is_empty() {
@@ -150,7 +134,6 @@ pub async fn resolve(args: &Args, cfg: smelt_core::config::Config) -> ResolvedSt
 
     let mut startup_auth_error: Option<String> = None;
 
-    // Resolve the active model and the connection details derived from it.
     let (api_base, api_key, api_key_env, mut provider_type, model, mut model_config) = {
         let resolved = resolve_model_reference(args, &cfg, &available_models, &cache);
 
@@ -178,14 +161,12 @@ pub async fn resolve(args: &Args, cfg: smelt_core::config::Config) -> ResolvedSt
         } else if cfg.source == Some(smelt_core::config::ConfigSource::NotFound)
             && args.api_base.is_none()
         {
-            // No config at all — run the interactive setup wizard.
             if !setup::run_initial_setup(&cfg.path).await {
                 std::process::exit(1);
             }
             cfg = smelt_core::config::Config::load_from(&cfg.path);
             cfg.inject_oauth_providers();
             available_models = cfg.resolve_models();
-            // Inject cached models for OAuth providers discovered after the wizard.
             if cfg.has_codex_provider() {
                 let ids = engine::auth::cached_models(engine::auth::AuthProvider::Codex);
                 if !ids.is_empty() {
@@ -262,8 +243,6 @@ pub async fn resolve(args: &Args, cfg: smelt_core::config::Config) -> ResolvedSt
         }
     };
 
-    // CLI --type overrides config/auto-detected provider type.
-    // CLI --api-base re-triggers auto-detect when no --type is given.
     if let Some(ref t) = args.r#type {
         provider_type = t.clone();
     } else if args.api_base.is_some() {
@@ -272,7 +251,6 @@ pub async fn resolve(args: &Args, cfg: smelt_core::config::Config) -> ResolvedSt
             .to_string();
     }
 
-    // Apply CLI sampling overrides to model_config.
     if let Some(v) = args.temperature {
         model_config.temperature = Some(v);
     }
@@ -286,9 +264,6 @@ pub async fn resolve(args: &Args, cfg: smelt_core::config::Config) -> ResolvedSt
         model_config.tool_calling = Some(false);
     }
 
-    // Resolve auxiliary request configs; auth errors are captured but non-fatal
-    // here so interactive sessions can still render their "set your API key"
-    // hint without aborting.
     let auxiliary = {
         let mut build = |task: smelt_core::config::AuxiliaryTask| {
             auxiliary_routing.model_for(task).map(|resolved| {
@@ -335,7 +310,6 @@ pub async fn resolve(args: &Args, cfg: smelt_core::config::Config) -> ResolvedSt
         .filter(|v| !v.is_empty())
         .unwrap_or_else(|| AgentMode::ALL.to_vec());
 
-    // Reasoning effort: CLI --reasoning-effort > config defaults > saved cache.
     let reasoning_effort = args
         .reasoning_effort
         .as_deref()
@@ -361,7 +335,6 @@ pub async fn resolve(args: &Args, cfg: smelt_core::config::Config) -> ResolvedSt
     }
 
     let mut settings = cfg.settings.resolve();
-    // Force auto_compact on for headless mode.
     if args.headless {
         settings.auto_compact = true;
     }

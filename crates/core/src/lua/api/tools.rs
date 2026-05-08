@@ -1,7 +1,4 @@
-//! `smelt.tools` bindings — register / unregister plugin tools and
-//! resolve their results back to the engine. `__send_call` is the
-//! private dispatch that the `_bootstrap.lua` wrapper around
-//! `smelt.tools.call` mints request ids for and yields after.
+//! `smelt.tools` — register/unregister plugin tools and resolve their results to the engine.
 
 use super::{lua_table_to_args, lua_table_to_json};
 use crate::lua::{LuaHandle, LuaShared, ToolHandles};
@@ -16,10 +13,6 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
         let handler: mlua::Function = def.get("execute")?;
         let key = lua.create_registry_value(handler)?;
 
-        // Per-tool permission defaults declared at registration time.
-        // Decisions for each mode landing where the user config doesn't
-        // already speak; bash-style subpattern allow-lists landing as
-        // the bucket's allow fallback in non-Yolo modes.
         if let Ok(perms_tbl) = def.get::<mlua::Table>("permission_defaults") {
             let mut defaults = s.tool_defaults.lock().unwrap_or_else(|e| e.into_inner());
             let entry = defaults.tool_decisions.entry(name.clone()).or_default();
@@ -49,10 +42,6 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
                 defaults.subcommand_allow.insert(name.clone(), patterns);
             }
         }
-        // Optional `subpattern_parser = "<kind>"` selects a Rust-built-in
-        // subpattern decision function (today only `"shell"` ships,
-        // wired by `tools/bash.lua`). Unknown kinds are ignored — tools
-        // fall through to the plain glob-match path.
         if let Ok(kind) = def.get::<String>("subpattern_parser") {
             if let Some(parser) = crate::permissions::builtin_subpattern_parser(&kind) {
                 let mut defaults = s.tool_defaults.lock().unwrap_or_else(|e| e.into_inner());
@@ -60,8 +49,6 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
             }
         }
 
-        // Optional permission hooks. When present, the engine asks
-        // the host to evaluate them before deciding Allow / Deny / Ask.
         let confirm_text_handle = def
             .get::<mlua::Function>("confirm_text")
             .ok()
@@ -113,9 +100,6 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
         if let Ok(mode_str) = def.get::<String>("execution_mode") {
             meta.set("execution_mode", mode_str)?;
         }
-        // Hook flag bits — let `tool_defs` build
-        // `ToolHookFlags` without reaching back into the
-        // handles map.
         meta.set("hook_confirm_text", confirm_text_handle.is_some())?;
         meta.set("hook_approval_patterns", approval_patterns_handle.is_some())?;
         meta.set("hook_preflight", preflight_handle.is_some())?;
@@ -126,10 +110,6 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
         )?;
         meta.set("hook_preview", preview_handle.is_some())?;
         meta.set("hook_decide", decide_handle.is_some())?;
-        // override_core: explicit signal that this plugin shadows a
-        // core Rust tool of the same name. The engine drops the
-        // colliding core definition from the LLM schema and routes
-        // dispatch to the plugin.
         let override_core: bool = def.get::<bool>("override").unwrap_or(false);
         meta.set("override_core", override_core)?;
         if let Some(summary) = summary_fn {
@@ -185,9 +165,6 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
             },
         )?,
     )?;
-    // Internal: dispatch a `smelt.tools.call` side request to the
-    // engine. The Lua wrapper in `_bootstrap.lua` mints `request_id`
-    // via `smelt.task.alloc` and yields after this returns.
     tools_tbl.set(
         "__send_call",
         lua.create_function(

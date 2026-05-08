@@ -33,12 +33,7 @@ fn register_ghost_text(lua: &Lua, smelt_ui: &mlua::Table) -> LuaResult<()> {
 }
 
 fn register_spinner(lua: &Lua, smelt_ui: &mlua::Table) -> LuaResult<()> {
-    // Same glyph set and cadence the status bar uses for its
-    // "working" pill, exposed as primitives so Lua plugins (e.g.
-    // /btw's "thinking" placeholder) can animate in lockstep with
-    // the rest of the UI. Lua drives the animation via
-    // `smelt.defer(period_ms, tick)`; `glyph()` returns the current
-    // frame without any server-side state.
+    // Same glyph and cadence as the status bar's "working" pill for in-sync animation.
     let spinner_tbl = lua.create_table()?;
     spinner_tbl.set(
         "glyph",

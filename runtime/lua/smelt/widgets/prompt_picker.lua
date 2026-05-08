@@ -1,24 +1,12 @@
--- `smelt.prompt.open_picker(opts)`
+-- `smelt.prompt.open_picker(opts)` — prompt-docked picker.
+-- Up/Down navigate, Enter accepts, Tab inserts the label, Esc dismisses.
 --
--- Prompt-docked picker: a non-focusable `ui::Picker` floats above the
--- prompt; the user types into the prompt as normal and each keystroke
--- re-filters the list. Up/Down navigate, Enter accepts, Tab inserts
--- the selected label into the prompt, Esc dismisses. All routing
--- lives here — no Rust completer involved.
+-- opts.items    = { { label, description?, ansi_color?, search_terms? }, ... }
+-- opts.on_select = function(item)  -- fires on navigation
 --
--- `opts` shape:
---   items     = { { label, description?, ansi_color?, search_terms? }, ... }
---   on_select = function(item) -- optional, fires on every navigation
---
--- Returns `{ index, item, action }` on accept (action `"enter"` or
--- `"tab"`), `nil` on dismiss. `index` is the position in the caller's
--- original `items` table.
+-- Returns `{ index, item, action }` on accept, nil on dismiss.
 
 local function filter_items(all_items, query)
-  -- Defer to smelt.fuzzy.rank — it scores label / description /
-  -- search_terms as separate fields and takes the best, matching the
-  -- old Rust ArgPicker's ranking. Empty query short-circuits to the
-  -- original ordering.
   local order = smelt.fuzzy.rank(all_items, query)
   local out = {}
   for i, idx in ipairs(order) do out[i] = all_items[idx] end
@@ -52,8 +40,7 @@ function smelt.prompt.open_picker(opts)
   local original = opts.items
   local on_select = opts.on_select
 
-  -- Stamp each entry with its 1-based index into the caller's items so
-  -- filtering + sorting can resolve back to the original row.
+  -- Stamp each entry with its original index so filtering can resolve back to it.
   local all_items = {}
   for i, it in ipairs(original) do
     all_items[i] = {
@@ -129,22 +116,15 @@ function smelt.prompt.open_picker(opts)
     close_with({ action = action, index = idx, item = original[idx] })
   end
 
-  -- The picker is rendered reversed (logical index 0 sits at the
-  -- bottom visual row, closest to the prompt). Pressing Up moves
-  -- toward higher logical indices (worse matches, higher on screen);
-  -- Down moves toward lower indices (better matches, closer to the
-  -- prompt). Mirror that for c-k/c-p (vim/emacs "up") and c-j/c-n
-  -- ("down").
+  -- Picker renders reversed: index 0 is at the bottom (closest to prompt).
+  -- Up moves toward worse matches; Down toward better (closer to prompt).
   smelt.win.set_keymap(PROMPT, "up",    function() move(1)  end)
   smelt.win.set_keymap(PROMPT, "down",  function() move(-1) end)
   smelt.win.set_keymap(PROMPT, "c-k",   function() move(1)  end)
   smelt.win.set_keymap(PROMPT, "c-j",   function() move(-1) end)
   smelt.win.set_keymap(PROMPT, "c-p",   function() move(1)  end)
   smelt.win.set_keymap(PROMPT, "c-n",   function() move(-1) end)
-  -- Enter accepts the highlighted item. Clear the prompt buffer first
-  -- so the typed query doesn't linger after the picker dispatches its
-  -- action (e.g. `/model` switches the model and the user expects an
-  -- empty prompt, not "codex" still sitting there).
+  -- Clear prompt before dispatching so the typed query doesn't linger.
   smelt.win.set_keymap(PROMPT, "enter", function()
     smelt.prompt.set_text("")
     accept("enter")

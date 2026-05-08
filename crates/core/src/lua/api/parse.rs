@@ -1,17 +1,10 @@
-//! `smelt.parse` bindings — pure parsers exposed to Lua. Today carries
-//! `frontmatter(content) -> table | nil, body`; markdown / diff /
-//! syntax block parsers ride P4.b's transcript pipeline migration onto
-//! `BufferParser`.
+//! `smelt.parse` — pure parsers: `frontmatter(content) -> (table | nil, body)`.
 
 use mlua::prelude::*;
 
 pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
     let parse_tbl = lua.create_table()?;
 
-    // smelt.parse.frontmatter(content) -> (table | nil, body).
-    // Splits a leading `---\n…\n---\n` YAML block off `content` and
-    // returns it as a Lua table plus the remaining body. Returns
-    // `(nil, content)` when no frontmatter is present.
     parse_tbl.set(
         "frontmatter",
         lua.create_function(|lua, content: String| {
@@ -38,10 +31,6 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
     Ok(())
 }
 
-/// Minimal YAML frontmatter → JSON value. Only handles the subset
-/// used by skill and custom-command frontmatter: scalar strings,
-/// arrays of strings, and one-level mappings of strings → strings /
-/// arrays of strings.
 fn yaml_to_json(yaml: &str) -> serde_json::Value {
     let mut map = serde_json::Map::new();
     let mut current_key: Option<String> = None;
@@ -53,7 +42,6 @@ fn yaml_to_json(yaml: &str) -> serde_json::Value {
             continue;
         }
         if let Some((key, val)) = trimmed.split_once(':') {
-            // Flush previous array if any
             if let Some(k) = current_key.take() {
                 map.insert(k, serde_json::Value::Array(current_arr.clone()));
                 current_arr.clear();

@@ -1,9 +1,5 @@
-//! `UiHost` impl for `TuiApp` — delegates every method to the inner
-//! `crate::smelt_term::Ui`. The trait itself lives in `crate::ui`; see its docs.
-//! `HeadlessApp` deliberately does **not** impl `UiHost`; UiHost-only
-//! Lua bindings raise a runtime error when invoked from a headless
-//! context. Host-tier subsystems flow through `&mut Core` directly via
-//! the `try_with_core` TLS slot — no parallel trait impl on `TuiApp`.
+//! `UiHost` impl for `TuiApp`. Delegates to `crate::smelt_term::Ui`; overrides
+//! `rows_for`/`breaks_for` for the prompt and transcript windows.
 
 use crate::app::TuiApp;
 

@@ -1,10 +1,4 @@
-//! `smelt.process` bindings — list, kill, read output, spawn
-//! background processes against the `ProcessRegistry`.
-//!
-//! `smelt.process.run` is the synchronous short-lived counterpart over
-//! `crate::process::run` — `Command::new(cmd).args(args).output()` with
-//! timeout, cwd, env, optional stdin. Long-lived bidirectional
-//! children land in `crate::process` (P3.a).
+//! `smelt.process` — run/spawn/list/kill processes against the `ProcessRegistry`.
 
 use mlua::prelude::*;
 use std::collections::HashMap;
@@ -62,10 +56,6 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
             }
         })?,
     )?;
-    // smelt.process.spawn_bg(command) → string id, or raises on
-    // spawn error. Adds the child to the `ProcessRegistry` so
-    // `smelt.process.list/read_output/kill` and the background-process
-    // tools observe it consistently.
     process_tbl.set(
         "spawn_bg",
         lua.create_function(|_, command: String| -> LuaResult<String> {
@@ -83,8 +73,6 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
                 .spawn()
                 .map_err(|e| mlua::Error::external(e.to_string()))?;
             let id = registry.next_id();
-            // Discard channel — plugin-spawned processes don't emit
-            // `EngineEvent::ProcessCompleted` today.
             let (done_tx, _done_rx) = tokio::sync::mpsc::unbounded_channel();
             registry.spawn(id.clone(), &command, child, done_tx);
             Ok(id)
@@ -103,14 +91,6 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
             },
         )?,
     )?;
-    // smelt.process.run_streaming(task_id, call_id, command, timeout_ms)
-    //
-    // Spawns `sh -c command` on a tokio task, streams stdout+stderr
-    // via `EngineEvent::ToolOutput` as lines arrive, and on exit
-    // pushes `TaskEvent::ExternalResolvedJson` so a Lua coroutine
-    // parked on `smelt.task.wait(task_id)` resumes with
-    // `{ content, is_error, timed_out }`. The bash tool uses this —
-    // any other streaming subprocess tool composes it the same way.
     let shared_run_streaming = Arc::clone(shared);
     process_tbl.set(
         "run_streaming",

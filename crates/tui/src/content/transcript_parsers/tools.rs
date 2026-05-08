@@ -54,14 +54,13 @@ pub(super) fn render_tool(
     rows
 }
 
-/// Layout metrics for a tool header line.
 struct ToolLineLayout {
     prefix_len: usize,
     max_summary: usize,
 }
 
 fn tool_line_layout(name: &str, suffix_len: usize, width: usize) -> ToolLineLayout {
-    let prefix_len = 2 + name.len() + 1; // "⏺ " + name + " "
+    let prefix_len = 2 + name.len() + 1; // "⏺ name "
     let max_summary = width.saturating_sub(prefix_len + suffix_len + 1);
     ToolLineLayout {
         prefix_len,
@@ -89,9 +88,6 @@ fn print_tool_line(
 
     print_dim(out, &format!(" {} ", name));
 
-    // Wrap the summary, then paint each line as plain text. Tools that
-    // want custom row-0 styling do so by skipping the default summary
-    // (returning a layout that includes their own header buffer).
     let raw_lines: Vec<&str> = summary.lines().collect();
     let mut wrapped: Vec<String> = Vec::new();
     let mut is_soft_wrap = Vec::new();
@@ -186,12 +182,6 @@ fn call_render_layout(
     .flatten()
 }
 
-/// Walk a [`BlockLayout`] returned by a tool's `render` hook and
-/// replay each leaf buffer's rows into `out`. Continuation rows are
-/// gutter-padded to two columns so they line up under the `⏺ name `
-/// prefix. Caps at [`MAX_TOOL_BLOCK_ROWS`]. `inner_width` is the
-/// width available inside the gutter; used by `Hbox` column allocation
-/// and 1×1 leaf auto-repeat.
 fn replay_layout(out: &mut LineBuilder, layout: &BlockLayout, inner_width: u16) -> u16 {
     crate::lua::app_ref::try_with_app(|app| {
         let cap = MAX_TOOL_BLOCK_ROWS as u16;
@@ -281,11 +271,6 @@ fn replay_hbox(
 ) -> u16 {
     let widths = smelt_core::content::block_layout::solve_hbox_widths(items, total_width);
 
-    // Take ownership of each child leaf's buffer when it is a Leaf.
-    // Non-Leaf Hbox children render as their flattened leaves stacked
-    // (a v1 limitation; nested Hbox/Vbox columns aren't laid out
-    // side-by-side). Using leaves() preserves the buf-destroy semantics
-    // and order.
     let mut columns: Vec<Vec<smelt_core::buffer::Buffer>> = Vec::with_capacity(items.len());
     let mut col_height: u16 = 0;
     let mut any_unit_only = true;
@@ -315,8 +300,7 @@ fn replay_hbox(
         columns.push(bufs);
     }
     if any_unit_only {
-        // Pure separator row — keep it a single line.
-        col_height = 1;
+        col_height = 1; // pure separator row
     }
     let row_total = col_height.min(rows_cap);
     if row_total == 0 {
@@ -333,8 +317,6 @@ fn replay_hbox(
                 continue;
             }
             let emitted = emit_column_row(out, bufs, r, col_w);
-            // Pad the rest of the column with spaces so subsequent
-            // columns start at the right offset.
             if emitted < col_w {
                 out.print(&" ".repeat((col_w - emitted) as usize));
             }
@@ -344,17 +326,13 @@ fn replay_hbox(
     row_total
 }
 
-/// Pick which leaf inside a column owns row `r`, then emit a clipped
-/// styled row into `out`. Returns the display width emitted.
 fn emit_column_row(
     out: &mut LineBuilder,
     bufs: &[smelt_core::buffer::Buffer],
     r: u16,
     col_w: u16,
 ) -> u16 {
-    // 1×1 unit leaves repeat horizontally to fill the column; if the
-    // column contains a unit leaf at any vertical position it paints on
-    // every row.
+    // Unit leaves (1×1) repeat horizontally to fill the column.
     for buf in bufs {
         if is_unit_leaf(buf) {
             let glyph = buf.get_line(0).unwrap_or("");
@@ -364,7 +342,6 @@ fn emit_column_row(
             return col_w;
         }
     }
-    // Walk the leaves to find the (leaf, local_row) for absolute row r.
     let mut consumed: u16 = 0;
     for buf in bufs {
         let h = buf.line_count() as u16;
@@ -384,8 +361,6 @@ fn is_unit_leaf(buf: &smelt_core::buffer::Buffer) -> bool {
     smelt_core::content::builder::display_width(line) == 1
 }
 
-/// Emit a buffer row's styled spans into `out`, clipped to `max_cols`
-/// display columns. Returns the display width actually emitted.
 fn emit_buffer_row_clipped(
     buf: &smelt_core::buffer::Buffer,
     row: u16,
@@ -531,9 +506,8 @@ pub fn render_wrapped_output(
     width: usize,
 ) -> u16 {
     let _perf = smelt_core::perf::begin("render:wrapped_output");
-    let max_cols = width.saturating_sub(3); // "  " prefix + 1 margin
+    let max_cols = width.saturating_sub(3); // "  " gutter
 
-    // Pre-wrap all lines so we can count visual rows.
     let wrapped: Vec<String> = content
         .lines()
         .flat_map(|line| {

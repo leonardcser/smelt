@@ -5,8 +5,6 @@ use std::path::PathBuf;
 use std::sync::OnceLock;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-// ── Local disk cache (inlined from the retired engine/tools/web_cache.rs) ──
-
 fn cache_dir() -> PathBuf {
     crate::paths::cache_dir().join("web")
 }
@@ -59,7 +57,6 @@ pub struct ModelPricing {
 }
 
 impl ModelPricing {
-    /// Calculate the cost in USD for the given token usage.
     pub(crate) fn cost(&self, usage: &TokenUsage) -> f64 {
         let input = usage.prompt_tokens.unwrap_or(0) as f64;
         let output = usage.completion_tokens.unwrap_or(0) as f64;
@@ -88,14 +85,10 @@ const ZERO: ModelPricing = ModelPricing {
     cache_write: 0.0,
 };
 
-/// Where the resolved pricing came from.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PricingSource {
-    /// User-supplied cost overrides in model config.
     Config,
-    /// Matched from the models.dev remote catalog.
     Catalog,
-    /// No pricing data available (local/unknown model).
     None,
 }
 
@@ -109,24 +102,19 @@ impl PricingSource {
     }
 }
 
-/// Resolved pricing plus its source.
 #[derive(Debug, Clone, Copy)]
 pub struct ResolvedPricing {
     pub pricing: ModelPricing,
     pub source: PricingSource,
 }
 
-// ── Remote catalog (models.dev) ──────────────────────────────────────────
-
 const MODELS_API_URL: &str = "https://models.dev/api.json";
 const CACHE_KEY: &str = "models_dev_pricing";
-const CACHE_TTL: Duration = Duration::from_secs(60 * 60); // 1 hour
+const CACHE_TTL: Duration = Duration::from_secs(60 * 60);
 
-/// Global catalog keyed by (provider, model_id).
 static CATALOG: OnceLock<HashMap<(String, String), ModelPricing>> = OnceLock::new();
 
-/// Fetch pricing from models.dev in the background. Call once at startup.
-/// Safe to call multiple times — only the first call populates the catalog.
+/// Fetch pricing from models.dev in the background. Only the first call populates the catalog.
 pub(crate) fn spawn_catalog_fetch(client: reqwest::Client) {
     if CATALOG.get().is_some() {
         return;
@@ -138,13 +126,11 @@ pub(crate) fn spawn_catalog_fetch(client: reqwest::Client) {
 }
 
 async fn load_or_fetch(client: &reqwest::Client) -> HashMap<(String, String), ModelPricing> {
-    // Try disk cache first.
     if let Some(json) = cache_get(CACHE_KEY) {
         if let Some(map) = parse_catalog(&json) {
             return map;
         }
     }
-    // Fetch from API.
     let json = match client.get(MODELS_API_URL).send().await {
         Ok(resp) => match resp.text().await {
             Ok(t) => t,
@@ -159,7 +145,6 @@ async fn load_or_fetch(client: &reqwest::Client) -> HashMap<(String, String), Mo
     map
 }
 
-/// Parse the models.dev JSON into a (provider, model_id) → pricing map.
 fn parse_catalog(json: &str) -> Option<HashMap<(String, String), ModelPricing>> {
     let root: serde_json::Value = serde_json::from_str(json).ok()?;
     let obj = root.as_object()?;
@@ -194,17 +179,12 @@ fn parse_catalog(json: &str) -> Option<HashMap<(String, String), ModelPricing>> 
     Some(map)
 }
 
-/// Look up pricing for a (provider, model) pair from the remote catalog.
-/// Returns `None` when the provider/model combination isn't found.
 fn lookup(provider_type: &str, model: &str) -> Option<ModelPricing> {
     let catalog = CATALOG.get()?;
     let key = catalog_key(provider_type)?;
     catalog.get(&(key.to_string(), model.to_string())).copied()
 }
 
-/// Map a provider_type string to the corresponding models.dev provider key.
-/// Known first-party providers map directly; "openai-compatible" gets no
-/// lookup. Other values are tried verbatim as catalog keys.
 fn catalog_key(provider_type: &str) -> Option<&str> {
     match provider_type {
         "openai" | "codex" => Some("openai"),
@@ -215,7 +195,6 @@ fn catalog_key(provider_type: &str) -> Option<&str> {
     }
 }
 
-/// Resolve pricing for a model, returning both the rates and where they came from.
 pub fn resolve(
     model: &str,
     provider_type: &str,

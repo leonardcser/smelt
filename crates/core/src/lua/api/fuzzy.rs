@@ -1,5 +1,4 @@
-//! `smelt.fuzzy` bindings — score a candidate string against a query.
-//! Thin Lua surface over `app::fuzzy::fuzzy_score`.
+//! `smelt.fuzzy` — score a candidate string against a query.
 
 use mlua::prelude::*;
 

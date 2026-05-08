@@ -1,22 +1,12 @@
 //! Shared credential storage for OAuth providers.
-//!
-//! Persists a JSON blob through three layers, in priority order on load:
-//! 1. Environment variable (for child processes receiving creds from a parent)
-//! 2. OS keyring (secure, preferred)
-//! 3. On-disk JSON file with `0600` perms (fallback when keyring is unavailable)
-//!
-//! On save, writes to both keyring and disk (keyring failures are ignored so
-//! the user isn't locked out when the OS service is flaky).
+//! Load priority: env var → OS keyring → on-disk JSON (0600). Save writes to both keyring and disk.
 
 use std::path::PathBuf;
 
-/// Credential persistence backend parameterized by provider-specific addresses.
 pub(crate) struct CredStore {
     pub(crate) keyring_service: &'static str,
     pub(crate) keyring_user: &'static str,
     pub(crate) file_path: PathBuf,
-    /// Environment variable checked first on load. Lets a parent process pass
-    /// credentials to a child without touching disk.
     pub(crate) env_var: &'static str,
 }
 
@@ -27,7 +17,6 @@ impl CredStore {
         Ok(())
     }
 
-    /// Try env var → keyring → file, returning the first JSON blob found.
     pub(crate) fn load(&self) -> Option<String> {
         if let Ok(json) = std::env::var(self.env_var) {
             return Some(json);

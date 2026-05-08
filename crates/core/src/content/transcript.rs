@@ -1,8 +1,4 @@
-//! Transcript domain state: block store.
-//!
-//! `Transcript` owns the block history. Streaming input parsing lives in
-//! `StreamParser` (owned by `TuiApp`). Display projection lives in
-//! `tui::content::transcript_snapshot` — projection is a tui concern.
+//! `Transcript` owns the block history. Streaming parsing lives in `StreamParser`; display projection in `tui`.
 
 use crate::transcript_model::{Block, BlockHistory, BlockId, ToolState, ViewState};
 

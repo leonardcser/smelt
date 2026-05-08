@@ -1,6 +1,5 @@
-//! `Block::Thinking` renderer + the summary helpers shared with the
-//! transcript projection (used to build a one-line fold marker when
-//! `show_thinking` is off).
+//! `Block::Thinking` renderer. `thinking_summary`/`render_thinking_summary` build
+//! the fold marker when `show_thinking` is off.
 
 use smelt_core::content::builder::LineBuilder;
 use smelt_core::content::wrap::wrap_line;
@@ -17,7 +16,7 @@ pub(super) fn render(
         let (label, line_count) = thinking_summary(content);
         return render_thinking_summary(out, width, &label, line_count, false);
     }
-    let max_cols = width.saturating_sub(3).max(1); // "│ " prefix + 1 margin
+    let max_cols = width.saturating_sub(3).max(1); // "│ " gutter
     let mut rows = 0u16;
     for line in content.lines() {
         let segments = wrap_line(line, max_cols);
@@ -36,7 +35,6 @@ pub(super) fn render(
     rows
 }
 
-/// Animated trailing dots for streaming indicators.
 pub(super) fn animated_dots() -> &'static str {
     let n = (std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -48,8 +46,7 @@ pub(super) fn animated_dots() -> &'static str {
     &"..."[..n]
 }
 
-/// Extract a title and non-empty line count from thinking content.
-/// If the first non-empty line is a markdown bold title (`**...**`), use it as the label.
+/// Returns `(label, non_empty_line_count)`. Uses the first `**bold**` line as label if present.
 pub fn thinking_summary(content: &str) -> (String, usize) {
     let mut label = None;
     let mut lines = 0usize;
@@ -70,7 +67,6 @@ pub fn thinking_summary(content: &str) -> (String, usize) {
     (label.unwrap_or_else(|| "thinking".to_string()), lines)
 }
 
-/// Render a single hidden-thinking summary row with optional animated dots.
 pub fn render_thinking_summary(
     out: &mut LineBuilder,
     width: usize,

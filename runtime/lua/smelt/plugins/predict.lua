@@ -1,8 +1,5 @@
--- Built-in input prediction plugin.
---
--- Subscribes to the `turn_end` cell to predict the user's next
--- message using a lightweight background LLM call, displayed as
--- ghost text.
+-- Input prediction plugin. Predicts the user's next message via a background
+-- LLM call and displays it as ghost text.
 
 local SYSTEM = "You predict what a user will type next in a coding assistant conversation. "
   .. "Reply with ONLY the predicted message — no quotes, no explanation, "
@@ -18,7 +15,6 @@ smelt.au.on("turn_end", function(payload)
 
   local history = smelt.session.messages()
 
-  -- Collect last 3 user messages + last assistant message.
   local user_msgs = {}
   local last_assistant = nil
   for i = #history, 1, -1 do
@@ -37,7 +33,6 @@ smelt.au.on("turn_end", function(payload)
     return
   end
 
-  -- Build context string, truncating each message.
   local parts = {}
   for _, msg in ipairs(user_msgs) do
     local text = msg.content or ""

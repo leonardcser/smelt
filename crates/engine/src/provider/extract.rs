@@ -1,14 +1,8 @@
 use protocol::{FunctionCall, ToolCall};
 
-/// Extract `<tool_call>...</tool_call>` blocks from raw text.
-///
-/// Some backends (vLLM with reasoning + tool calling) place tool call markup
-/// inside `content` or `reasoning_content` instead of the `tool_calls` field.
-/// Following Ollama's approach (PR #14477), we treat `<tool_call>` as an
-/// implicit end of any thinking block and parse the tool calls ourselves.
-///
-/// Returns the parsed tool calls and the cleaned text (with tool call blocks
-/// removed). If the cleaned text is empty/whitespace, returns `None`.
+/// Extract `<tool_call>` blocks from text. Some backends (vLLM) embed tool call
+/// markup in `content` or `reasoning_content` instead of the `tool_calls` field.
+/// Returns parsed calls and the cleaned text; cleaned is `None` if empty.
 pub(super) fn extract_tool_calls_from_text(text: Option<&str>) -> (Vec<ToolCall>, Option<String>) {
     let Some(text) = text else {
         return (vec![], None);
@@ -30,7 +24,6 @@ pub(super) fn extract_tool_calls_from_text(text: Option<&str>) -> (Vec<ToolCall>
             }
             rest = &after_open[close + "</tool_call>".len()..];
         } else {
-            // Unclosed tag — try to parse the remainder as a tool call anyway
             let raw = after_open.trim();
             if let Some(tc) = parse_tool_call_json(raw, &mut idx) {
                 calls.push(tc);
@@ -51,16 +44,6 @@ pub(super) fn extract_tool_calls_from_text(text: Option<&str>) -> (Vec<ToolCall>
     (calls, cleaned)
 }
 
-/// Parse a tool call body in either JSON or XML-attribute format.
-///
-/// JSON format: `{"name": "...", "arguments": {...}}`
-/// XML format:
-/// ```text
-/// <function=tool_name>
-/// <parameter=key>value</parameter>
-/// ...
-/// </function>
-/// ```
 fn parse_tool_call_json(raw: &str, idx: &mut usize) -> Option<ToolCall> {
     if let Some(tc) = parse_tool_call_json_inner(raw, idx) {
         return Some(tc);
@@ -90,7 +73,6 @@ fn parse_tool_call_json_inner(raw: &str, idx: &mut usize) -> Option<ToolCall> {
     ))
 }
 
-/// Parse `<function=name><parameter=k>v</parameter>...</function>` format.
 fn parse_tool_call_xml(raw: &str, idx: &mut usize) -> Option<ToolCall> {
     let func_start = raw.find("<function=")?;
     let after_eq = &raw[func_start + "<function=".len()..];
@@ -126,9 +108,7 @@ fn parse_tool_call_xml(raw: &str, idx: &mut usize) -> Option<ToolCall> {
 }
 
 /// Parse `<function>name</function><arg_key>k</arg_key><arg_value>v</arg_value>` format.
-///
-/// Some models (e.g. certain vLLM/reasoning backends) emit tool calls in this
-/// format. The `thought` key is model reasoning and is stripped from the arguments.
+/// The `thought` key is stripped.
 fn parse_tool_call_arg_kv(raw: &str, idx: &mut usize) -> Option<ToolCall> {
     let func_start = raw.find("<function>")?;
     let after_tag = &raw[func_start + "<function>".len()..];

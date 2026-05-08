@@ -1,20 +1,10 @@
-//! Headless log output. Bare-minimum style — assistant
-//! text flows undecorated; only tool lifecycle gets markers. Thinking
-//! is dim+italic. Colors match the TUI theme. Respects NO_COLOR,
-//! TERM=dumb, non-TTY stderr, and the `--color` CLI flag.
-//!
-//! `HeadlessSink` is the typed write surface `HeadlessApp` carries —
-//! the format / verbose flags are state on the sink, every emission
-//! and log helper hangs off `&self` so the call site reads as
-//! `self.sink.log_tool(…)`. Color resolution stays at module scope
-//! because terminal capability is process-wide, not per-sink.
+//! Headless log output. Respects `NO_COLOR`, `TERM=dumb`, `FORCE_COLOR`, and
+//! the `--color` CLI flag. Color capability is resolved once process-wide.
 
 use protocol::EngineEvent;
 use std::io::IsTerminal;
 use std::sync::OnceLock;
 
-/// Minimal color enum for headless output.  Maps directly to ANSI
-/// escape sequences; no dependency on crossterm.
 enum AnsiColor {
     Red,
     Green,
@@ -45,25 +35,18 @@ pub enum ColorMode {
     Never,
 }
 
-/// Output writer for `HeadlessApp`. Carries the format / verbosity
-/// flags chosen at startup; every event emission and log helper hangs
-/// off `&self`. The headless variant honours the CLI's `--format` and
-/// `-v` flags.
 pub struct HeadlessSink {
     pub(super) format: OutputFormat,
     pub(super) verbose: bool,
 }
 
 impl HeadlessSink {
-    /// Build a sink for `smelt --headless` with the chosen format,
-    /// color mode, and verbosity. Process-wide color resolution is
-    /// pinned here once.
+    /// Pins process-wide color resolution on first call.
     pub fn new(format: OutputFormat, color: ColorMode, verbose: bool) -> Self {
         init_color_mode(color);
         Self { format, verbose }
     }
 
-    /// Write a single `EngineEvent` as a JSON line to stdout.
     pub(super) fn emit_json(&self, ev: &EngineEvent) {
         println!("{}", serde_json::to_string(ev).unwrap());
     }
@@ -159,7 +142,6 @@ impl HeadlessSink {
     }
 }
 
-/// Explicit color mode set via `--color`. `None` means auto-detect.
 static COLOR_OVERRIDE: OnceLock<Option<bool>> = OnceLock::new();
 
 fn init_color_mode(mode: ColorMode) {

@@ -1,15 +1,9 @@
 //! Background session persistence.
 //!
-//! `TuiApp::save_session` used to serialize + write the full session on the
-//! main loop — easily 1–5 MB of JSON work at every turn boundary. This
-//! module moves the serialization and disk I/O to a worker thread. The
-//! main loop clones the session + the blob data it needs into a
-//! `PersistRequest` and sends it; the worker coalesces adjacent saves for
-//! the same session id (drains additional queued requests before writing)
-//! and handles the rest.
-//!
-//! Callers that need the on-disk state to be up-to-date (session load,
-//! fork, shutdown) call [`Persister::flush`] to drain the queue first.
+//! Serialisation and disk I/O run on a worker thread. The main loop sends
+//! a `PersistRequest`; the worker coalesces adjacent saves for the same
+//! session id before writing. Call [`Persister::flush`] when the on-disk
+//! state must be current (session load, fork, shutdown).
 
 use smelt_core::session::{self, Session};
 use std::path::PathBuf;
@@ -56,8 +50,7 @@ impl Persister {
         }
     }
 
-    /// Block until all queued saves have been written. No-op if the worker
-    /// has already exited (panic or shutdown).
+    /// Block until all queued saves are written. No-op if the worker has exited.
     pub(crate) fn flush(&self) {
         let Some(tx) = &self.tx else { return };
         if self.handle.as_ref().is_some_and(|h| h.is_finished()) {
@@ -73,7 +66,6 @@ impl Persister {
 impl Drop for Persister {
     fn drop(&mut self) {
         self.flush();
-        // Drop the sender so the worker's recv loop exits, then join.
         self.tx = None;
         if let Some(h) = self.handle.take() {
             let _ = h.join();
@@ -85,9 +77,7 @@ fn worker_loop(rx: Receiver<Cmd>) {
     while let Ok(cmd) = rx.recv() {
         match cmd {
             Cmd::Save(mut req) => {
-                // Coalesce: drain any already-queued saves for the same
-                // session id. Keep only the latest payload for that id;
-                // process other sessions in order.
+                // Drain queued saves: keep only the latest for this session id.
                 let mut others: Vec<Box<PersistRequest>> = Vec::new();
                 while let Ok(next) = rx.try_recv() {
                     match next {

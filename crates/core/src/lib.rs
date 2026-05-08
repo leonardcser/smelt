@@ -36,23 +36,17 @@ pub mod working;
 #[cfg(test)]
 mod test_util;
 
-// Frontend-neutral document model lives in `smelt-buffer` so headless
-// runtimes and non-smelt frontends (e.g. tcloc) can depend on it
-// without pulling in engine / lua / http. Re-exported here so existing
-// call sites (`smelt_core::buffer::Buffer`, etc.) keep resolving.
+// Re-exported from `smelt-buffer` so call sites (`smelt_core::buffer::Buffer`, etc.) keep resolving.
 pub use smelt_buffer::{attachment, buffer, clipboard, kill_ring, undo};
 
 mod theme_roles;
 
-/// Style primitives — re-exported from the leaf `smelt-style` crate
-/// (via `smelt-buffer`'s own re-export).
+/// Style primitives re-exported from `smelt-buffer`.
 pub mod style {
     pub use smelt_buffer::style::*;
 }
 
-/// Theme registry — generic interner + Theme machinery from
-/// `smelt-style`, plus the smelt-host-specific [`role_hl`] role
-/// mapping table.
+/// Theme registry plus the host-specific [`role_hl`] role mapping table.
 pub mod theme {
     pub use crate::theme_roles::role_hl;
     pub use smelt_buffer::theme::*;

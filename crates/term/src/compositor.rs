@@ -5,11 +5,8 @@ use crossterm::terminal::{BeginSynchronizedUpdate, EndSynchronizedUpdate};
 use crossterm::QueueableCommand;
 use std::io::Write;
 
-/// Double-buffered terminal renderer. Owns the in-flight `current` grid
-/// and the previously-flushed `previous` grid; `render_with` lets the
-/// caller paint into `current`, then diffs against `previous` and flushes
-/// only the changed cells. Resize / Ctrl-L / first frame use a full
-/// repaint by setting `force_redraw`.
+/// Double-buffered terminal renderer. Diffs `current` against `previous`
+/// and flushes only changed cells; `force_redraw` triggers a full repaint.
 pub struct Compositor {
     current: Grid,
     previous: Grid,
@@ -37,10 +34,8 @@ impl Compositor {
         self.force_redraw = true;
     }
 
-    /// Render one frame. The caller paints into the in-flight `current`
-    /// grid via `paint`, then optionally returns an absolute `(col, row)`
-    /// hardware cursor position. Hosts use the closure to walk their
-    /// own layout and to surface a focused leaf's hardware cursor.
+    /// Render one frame. `paint` writes into `current` and returns an
+    /// optional absolute `(col, row)` hardware cursor position.
     pub fn render_with<W: Write, F: FnOnce(&mut Grid, &Theme) -> Option<(u16, u16)>>(
         &mut self,
         theme: &Theme,
@@ -78,9 +73,7 @@ impl Compositor {
         self.force_redraw = true;
     }
 
-    /// Read the most recently flushed grid. After `render_with` swaps,
-    /// `previous` carries the just-rendered frame. Snapshot harnesses
-    /// route through this after a discard-writer render.
+    /// The most recently flushed grid (snapshot harnesses read this after a discard-writer render).
     pub fn previous(&self) -> &Grid {
         &self.previous
     }
@@ -101,11 +94,8 @@ fn flush_full<W: Write>(grid: &Grid, w: &mut W) -> std::io::Result<()> {
         let mut x = 0u16;
         while x < grid.width() {
             let cell = grid.cell(x, y);
-            // `\0` marks the continuation half of a preceding wide
-            // char. If the path through the row is aligned it should
-            // have been skipped; if we somehow land on one, paint a
-            // space so the cursor stays in sync instead of emitting a
-            // literal NUL.
+            // `\0` is a wide-char continuation slot — paint a space to
+            // keep the cursor in sync rather than emitting a literal NUL.
             let symbol = if cell.symbol == '\0' {
                 ' '
             } else {
@@ -113,8 +103,7 @@ fn flush_full<W: Write>(grid: &Grid, w: &mut W) -> std::io::Result<()> {
             };
             let cw = UnicodeWidthChar::width(symbol).unwrap_or(1).max(1) as u16;
 
-            // Wide char whose second cell would fall past the terminal edge:
-            // emit a space instead so the terminal doesn't wrap.
+            // Wide char overflowing the right edge: emit a space to prevent wrapping.
             let (sym, emit_w) = if terminal_col + cw > grid.width() {
                 (' ', 1u16)
             } else {
@@ -152,10 +141,7 @@ fn flush_full<W: Write>(grid: &Grid, w: &mut W) -> std::io::Result<()> {
             w.write_all(s.as_bytes())?;
 
             terminal_col += emit_w;
-            // Advance grid by emit_w so wide chars consume their
-            // continuation cell — the grid allocates 1 slot per char,
-            // so the compositor must skip the next column to stay in
-            // sync with the terminal's visual width.
+            // Skip the continuation cell so the grid cursor matches the terminal's visual width.
             x += emit_w;
         }
     }

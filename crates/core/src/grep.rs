@@ -1,30 +1,20 @@
-//! Grep capability — thin synchronous wrapper over `rg` (ripgrep).
-//! Pure subprocess composition, no policy. Exposed to Lua via
-//! `crates/tui/src/lua/api/grep.rs` and composed by tools that need
-//! to search a tree.
-//!
-//! When `rg` is missing or fails to launch, callers see an `io::Error`
-//! and decide how to fall back. This module never falls back to grep
-//! by itself — that's the calling Lua tool's concern.
+//! Grep capability — thin synchronous wrapper over `rg`. Pure subprocess
+//! composition, no policy. Missing/failed `rg` surfaces as `io::Error`; fallback
+//! is the caller's concern.
 
 use std::io;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
-/// Output mode for `rg`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub(crate) enum Mode {
-    /// Default — print matching lines.
     #[default]
     Content,
-    /// `--files-with-matches` — list files with at least one match.
     FilesWithMatches,
-    /// `--count` — line counts per file.
     Count,
 }
 
-/// Options accepted by [`run`]. Defaults match `rg`'s defaults.
 #[derive(Debug, Clone, Default)]
 pub(crate) struct Options {
     pub(crate) mode: Mode,
@@ -39,8 +29,6 @@ pub(crate) struct Options {
     pub(crate) timeout: Option<Duration>,
 }
 
-/// Output from a single `rg` invocation. Callers slice / paginate the
-/// stdout themselves; this module returns it verbatim.
 #[derive(Debug, Clone)]
 pub(crate) struct Output {
     pub(crate) stdout: String,
@@ -49,8 +37,7 @@ pub(crate) struct Output {
     pub(crate) timed_out: bool,
 }
 
-/// Run `rg <pattern> <path>` with the given options. `path` defaults
-/// to `.` when empty.
+/// Run `rg <pattern> <path>` with the given options. `path` defaults to `.` when empty.
 pub(crate) fn run(pattern: &str, path: impl AsRef<Path>, opts: &Options) -> io::Result<Output> {
     let path: PathBuf = {
         let p = path.as_ref();

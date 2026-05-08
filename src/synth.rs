@@ -1,16 +1,9 @@
 //! `smelt synth` — generate a synthetic session for perf testing.
-//!
-//! Writes `turns` user/assistant message pairs into
-//! `<state>/sessions/<id>/`, prints the new session id on stdout,
-//! and the user resumes via `smelt -r <id>` to inspect scrolling,
-//! layout, and theme performance against a long transcript without
-//! a live LLM.
 
 use protocol::Content;
 use smelt_core::attachment::AttachmentStore;
 use smelt_core::session::{self, Session};
 
-/// Build and persist a synthetic session for perf testing.
 pub fn run(turns: usize, words: usize, title: Option<String>) {
     let mut session = Session::new();
     let stamp = session.id.clone();
@@ -46,10 +39,7 @@ pub fn run(turns: usize, words: usize, title: Option<String>) {
     eprintln!("resume with: smelt -r {stamp}");
 }
 
-/// Generate one assistant body. Rotates over four shapes so the
-/// fixture exercises the four most common transcript-render paths:
-/// heading + fenced code block, bullet list, plain prose, and
-/// blockquote with inline code.
+/// Generate one assistant body, rotating over four shapes to exercise common render paths.
 fn assistant_body(turn: usize, words: usize) -> String {
     const LOREM: &[&str] = &[
         "the",

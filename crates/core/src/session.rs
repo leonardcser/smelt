@@ -38,16 +38,12 @@ pub struct Session {
     pub context_tokens: Option<u32>,
     #[serde(default)]
     pub token_snapshots: Vec<(usize, u32)>,
-    /// Accumulated session cost in USD, keyed by history length.
     #[serde(default)]
     pub cost_snapshots: Vec<(usize, f64)>,
-    /// Per-turn metadata keyed by history length at capture time, parallel
-    /// to `token_snapshots`.
+    /// Per-turn metadata, parallel to `token_snapshots`, keyed by history length.
     #[serde(default)]
     pub turn_metas: Vec<(usize, TurnMeta)>,
-    /// Running session cost in USD. Mirrors the last entry in
-    /// `cost_snapshots` between turns; updated incrementally as token
-    /// usage events arrive within a turn.
+    /// Running session cost in USD; updated incrementally as token usage events arrive.
     #[serde(default)]
     pub session_cost_usd: f64,
 }
@@ -77,9 +73,8 @@ pub struct SessionMeta {
     pub parent_id: Option<String>,
     #[serde(default)]
     pub context_tokens: Option<u32>,
-    /// Approximate byte size of the session's text content (message bodies,
-    /// reasoning, tool-call args). Used to show session size in the resume
-    /// dialog without loading full session.json.
+    /// Approximate text byte size (message bodies, reasoning, tool-call args).
+    /// Populated in `meta.json` so the resume dialog avoids loading `session.json`.
     #[serde(default)]
     pub text_bytes: Option<u64>,
 }
@@ -136,7 +131,6 @@ impl Session {
         }
     }
 
-    /// Create a fork: same content, new ID, parent_id pointing back.
     pub fn fork(&self) -> Self {
         let now = now_ms();
         Self {
@@ -170,7 +164,6 @@ pub fn now_ms() -> u64 {
 
 // ── Save / Load / Delete ─────────────────────────────────────────────────────
 
-/// Return the directory for a session on disk.
 pub fn dir_for(session: &Session) -> PathBuf {
     sessions_dir().join(&session.id)
 }
@@ -183,11 +176,8 @@ pub fn save(session: &Session, store: &crate::attachment::AttachmentStore) {
     save_with_blobs(session, &url_to_blob);
 }
 
-/// Serialize and write `session.json` + `meta.json`, assuming blob files
-/// have already been flushed and their URL→filename mapping collected.
-/// Safe to call from a background thread — does no I/O on `store`.
-///
-/// Message content is redacted at ingress, so save does no extra redaction.
+/// Write `session.json` + `meta.json`. Assumes blobs are already flushed.
+/// Safe to call from a background thread.
 pub fn save_with_blobs(session: &Session, url_to_blob: &std::collections::HashMap<String, String>) {
     let _perf = crate::perf::begin("session:write");
     let session_dir = dir_for(session);
@@ -209,7 +199,6 @@ pub fn save_with_blobs(session: &Session, url_to_blob: &std::collections::HashMa
     if let Ok(json) = serde_json::to_string(&meta) {
         atomic_write(&session_dir.join("meta.json"), json.as_bytes(), ts);
     }
-    // Searchable plain-text blob for the resume dialog.
     let blob = build_search_blob(&session_out.messages);
     atomic_write(&session_dir.join("content.txt"), blob.as_bytes(), ts);
 }
@@ -226,7 +215,7 @@ fn atomic_write(path: &std::path::Path, contents: &[u8], ts: u64) {
     }
 }
 
-/// Load a session by exact ID or unique prefix (git-style).
+/// Load by exact ID or unique prefix (git-style short ID).
 pub fn load(id_or_prefix: &str) -> Option<Session> {
     let id = resolve_prefix(id_or_prefix)?;
     load_exact(&id)
@@ -247,17 +236,14 @@ fn load_exact(id: &str) -> Option<Session> {
     Some(session)
 }
 
-/// Resolve a prefix to a full session ID. Returns `None` if no match,
-/// or if the prefix is ambiguous (matches multiple sessions).
+/// Returns `None` when no match or prefix is ambiguous.
 fn resolve_prefix(prefix: &str) -> Option<String> {
     let dir = sessions_dir();
 
-    // Exact match — fast path.
     if dir.join(prefix).join("session.json").is_file() {
         return Some(prefix.to_string());
     }
 
-    // Prefix scan over session directories.
     let Ok(entries) = fs::read_dir(&dir) else {
         return None;
     };
@@ -307,9 +293,8 @@ pub fn list_sessions() -> Vec<SessionMeta> {
     out
 }
 
-/// Load a session's metadata from its on-disk directory. Uses the fast
-/// `meta.json` sidecar when present; falls back to parsing `session.json`
-/// (and persists a regenerated sidecar) for legacy sessions.
+/// Uses `meta.json` when present; falls back to `session.json` and regenerates
+/// the sidecar for older sessions.
 fn load_meta_for_dir(path: PathBuf) -> Option<SessionMeta> {
     if let Ok(contents) = fs::read_to_string(path.join("meta.json")) {
         if let Ok(mut meta) = serde_json::from_str::<SessionMeta>(&contents) {
@@ -331,8 +316,6 @@ fn load_meta_for_dir(path: PathBuf) -> Option<SessionMeta> {
     Some(meta)
 }
 
-/// Compute the approximate text byte size of a session's messages:
-/// sum of text content, reasoning, and tool-call argument lengths.
 fn compute_text_bytes(messages: &[Message]) -> u64 {
     let mut total: u64 = 0;
     for msg in messages {
@@ -352,7 +335,6 @@ fn compute_text_bytes(messages: &[Message]) -> u64 {
     total
 }
 
-/// Read session.json, compute text_bytes, and rewrite meta.json to cache it.
 fn backfill_text_bytes(session_dir: &std::path::Path, meta: &mut SessionMeta) {
     let Ok(contents) = fs::read_to_string(session_dir.join("session.json")) else {
         return;
@@ -365,9 +347,7 @@ fn backfill_text_bytes(session_dir: &std::path::Path, meta: &mut SessionMeta) {
     write_meta(session_dir, meta);
 }
 
-/// Build the search blob for a session: user and assistant
-/// message text, separated by newlines. Reasoning, tool output, and system
-/// messages are excluded.
+/// User + assistant text only; reasoning, tool output, and system messages excluded.
 fn build_search_blob(messages: &[Message]) -> String {
     use protocol::Role;
     let mut out = String::new();
@@ -394,7 +374,6 @@ fn write_meta(session_dir: &std::path::Path, meta: &SessionMeta) {
     }
 }
 
-/// Replace inline `data:` URLs in messages with `blob:` refs.
 fn externalize_blobs(
     messages: &mut [Message],
     url_to_blob: &std::collections::HashMap<String, String>,
@@ -412,7 +391,6 @@ fn externalize_blobs(
     }
 }
 
-/// Replace `blob:` refs in messages with inline data URLs.
 fn internalize_blobs(
     messages: &mut [Message],
     blob_to_url: &std::collections::HashMap<String, String>,

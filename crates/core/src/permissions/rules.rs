@@ -1,12 +1,4 @@
-//! Rule-set types, compilation, mode construction, and pattern matching.
-//!
-//! This module owns the static permission rules loaded from config:
-//! - `Decision`, `RuleSet`, `ModePerms`
-//! - Raw deserialization types and merge helpers
-//! - `ToolDefaults` — Lua-declared per-tool defaults (decisions per
-//!   mode + subpattern allow lists), supplied by tool registration
-//! - `build_mode` (materializes a `ModePerms` for one AgentMode)
-//! - `check_ruleset` (the core pattern-matching decision)
+//! Static permission rule types, compilation, and pattern matching.
 
 use protocol::AgentMode;
 use protocol::Decision;
@@ -14,11 +6,7 @@ use serde::Deserialize;
 use std::collections::HashMap;
 use std::sync::Arc;
 
-/// Custom subpattern decision function. Tools that need bucket-aware
-/// matching beyond plain glob (e.g. shell-aware splitting + per-piece
-/// fold for the `bash` bucket) register one of these at registration
-/// time. When present, [`super::Permissions::check_subcommand`]
-/// delegates to it; otherwise the plain glob-match path runs.
+/// Custom decision function for a subpattern bucket. When present, `check_subcommand` delegates.
 pub type SubpatternParserFn = dyn Fn(&RuleSet, &str, AgentMode) -> Decision + Send + Sync;
 
 #[derive(Debug, Default, Deserialize)]
@@ -29,10 +17,6 @@ pub struct RawRuleSet {
     pub deny: Vec<String>,
 }
 
-/// Per-mode permission rules. `tools` is the tool-name decision bucket;
-/// `subcommands` is keyed by tool name (`bash`, `web_fetch`, `mcp`,
-/// or any tool that registers one) and carries pattern rulesets the
-/// tool's `decide` callback consults.
 #[derive(Debug, Default, Deserialize)]
 #[serde(default)]
 pub struct RawModePerms {
@@ -123,11 +107,7 @@ fn build_tool_map(raw: &RawRuleSet) -> HashMap<String, Decision> {
     map
 }
 
-/// Per-tool, per-mode default decisions declared by the tool's Lua
-/// registration table (`permission_defaults = { normal = "ask", ... }`).
-/// `None` means the tool didn't speak for that mode and the global
-/// fallback in `Permissions::check_tool` (Yolo→Allow, else Ask) takes
-/// over.
+/// Per-tool, per-mode defaults declared at registration. `None` falls back to the global default.
 #[derive(Debug, Default, Clone)]
 pub struct ToolPermDefaults {
     pub normal: Option<Decision>,
@@ -148,12 +128,6 @@ impl ToolPermDefaults {
 }
 
 /// Aggregated tool-declared defaults consumed by `Permissions::from_raw`.
-/// `tool_decisions` keys are tool names; `subcommand_allow` keys are
-/// subpattern bucket names (= tool names) and values are pattern lists
-/// used as the bucket's allow fallback when neither user config nor
-/// Yolo's `*` catch-all supplies one. `subpattern_parsers` keys are
-/// also bucket names; values are decision functions that override the
-/// plain glob-match path inside `check_subcommand` for that bucket.
 #[derive(Default, Clone)]
 pub struct ToolDefaults {
     pub tool_decisions: HashMap<String, ToolPermDefaults>,
@@ -174,11 +148,8 @@ impl std::fmt::Debug for ToolDefaults {
     }
 }
 
-/// Compile a raw subpattern bucket into a `RuleSet`. Tools that
-/// declared `default_allow` via Lua registration (e.g. bash's safe
-/// read-only prefix list) get those patterns as the allow fallback
-/// when no user-configured allow patterns are present; every bucket
-/// falls back to `*` in Yolo.
+/// Compile a raw subpattern bucket. Tool-declared `default_allow` is used when no user patterns
+/// are configured; Yolo always falls back to `*`.
 fn build_subcommand_ruleset(
     name: &str,
     raw: &RawRuleSet,
@@ -206,8 +177,7 @@ pub(super) fn build_mode(
     tool_defaults: &ToolDefaults,
 ) -> ModePerms {
     let mut tools = build_tool_map(&raw.tools);
-    // Layer in tool-declared per-mode defaults; only fill gaps where
-    // the user config doesn't already speak for the tool.
+    // Fill gaps where user config doesn't specify a decision.
     for (name, perms) in &tool_defaults.tool_decisions {
         if let Some(d) = perms.for_mode(mode) {
             tools.entry(name.clone()).or_insert_with(|| d.clone());
@@ -221,8 +191,7 @@ pub(super) fn build_mode(
             build_subcommand_ruleset(name, rs, mode, tool_defaults),
         );
     }
-    // Buckets a tool declared `default_allow` for but the user didn't
-    // configure: insert a default ruleset so the allow-fallback engages.
+    // Insert default rulesets for tool-declared buckets the user didn't configure.
     for name in tool_defaults.subcommand_allow.keys() {
         subcommands.entry(name.clone()).or_insert_with(|| {
             build_subcommand_ruleset(name, &RawRuleSet::default(), mode, tool_defaults)
@@ -233,22 +202,19 @@ pub(super) fn build_mode(
 }
 
 fn matches_rule(pat: &glob::Pattern, value: &str) -> bool {
-    // Match both the value as-is and with a trailing space to handle
-    // patterns like "ls *" matching bare "ls" (no arguments).
+    // Also match with a trailing space so "ls *" matches bare "ls" (no arguments).
     pat.matches(value) || pat.matches(&format!("{value} "))
 }
 
 pub(super) fn check_ruleset(ruleset: &RuleSet, value: &str) -> Decision {
-    // Deny always wins — checked first regardless of specificity.
+    // Deny wins unconditionally.
     for pat in &ruleset.deny {
         if matches_rule(pat, value) {
             return Decision::Deny;
         }
     }
 
-    // Among allow and ask, the most specific (longest pattern) wins.
-    // On tie, ask wins (safer default). Pattern length is a heuristic for
-    // specificity — works well for typical patterns like "git *" vs "git push *".
+    // Most specific (longest) pattern wins; on tie, ask wins (safer default).
     let mut best_allow: Option<usize> = None;
     let mut best_ask: Option<usize> = None;
 

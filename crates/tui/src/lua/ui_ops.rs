@@ -1,6 +1,4 @@
-//! Generic Lua → ui helpers that are still easier to keep on the
-//! Rust side: overlay placement parsing, picker construction, and a
-//! few reusable window recipes (`list` / `input`).
+//! Lua → ui helpers: overlay placement, picker construction, list/input window recipes.
 
 use crate::app::TuiApp;
 use crate::smelt_term::layout::{Anchor, Corner, PaintId};
@@ -10,12 +8,7 @@ use crate::smelt_term::{
 };
 use crossterm::event::{KeyCode, KeyModifiers};
 
-/// Where the dialog's overlay anchors. Parsed from `opts.placement` on
-/// the Lua side: absent or `"center"` → `ScreenCenter`; `"dock_bottom"`
-/// → `DockBottom` reading `placement_height` (default 60); `"screen_at"`
-/// → `ScreenAt` with `corner` + absolute `width` / `height`; `"win"` →
-/// `Win` anchored to another window via `placement_target` +
-/// `placement_attach` (corner) + `row_offset` / `col_offset`.
+/// Overlay anchor placement, parsed from `opts.placement`.
 #[derive(Clone, Copy)]
 enum OverlayPlacement {
     ScreenCenter,
@@ -59,10 +52,7 @@ pub(crate) fn open_overlay(app: &mut TuiApp, opts: mlua::Table) -> Result<u64, S
         let raw_id: u64 = item
             .get::<u64>("win")
             .map_err(|e| format!("overlay item.win: {e}"))?;
-        // `win` accepts either a `WinId` (Buffer-backed pane) or a
-        // paint id (`smelt.paint.register`). `resolve_leaf_id` consults
-        // both namespaces (partitioned at `PAINT_ID_BASE`) and tells us
-        // which subsystem owns the id.
+        // `resolve_leaf_id` disambiguates WinId vs PaintId via the PAINT_ID_BASE partition.
         let leaf = app
             .resolve_leaf_id(raw_id)
             .ok_or_else(|| format!("overlay item references missing window/paint id {raw_id}"))?;
@@ -78,10 +68,7 @@ pub(crate) fn open_overlay(app: &mut TuiApp, opts: mlua::Table) -> Result<u64, S
                 "overlay item.height",
             )?,
         };
-        // Per-leaf chrome: `border` / `title` on an item attach to that
-        // leaf alone via `LayoutTree::ensure_chrome_capable`, so a row in
-        // a multi-pane overlay can carry its own frame and title without
-        // the host writing a manual Vbox wrapper.
+        // Per-leaf border/title lets individual rows in a multi-pane overlay carry their own frame.
         let item_border = match item.get::<mlua::Value>("border").ok() {
             None | Some(mlua::Value::Nil) => None,
             _ => {
@@ -107,10 +94,7 @@ pub(crate) fn open_overlay(app: &mut TuiApp, opts: mlua::Table) -> Result<u64, S
     }
 
     let inner = LayoutTree::vbox(leaf_items);
-    // Apply chrome to the inner layout. `border = None` (Lua: omit the
-    // option, set `border = "none"`, or pass `border_sides` with no
-    // sides set) skips `with_border` entirely so no row/column is
-    // reserved at any edge.
+    // `border = None` skips `with_border` entirely — no row/column reserved at any edge.
     let with_chrome = |tree: LayoutTree, t: Option<Line<'static>>| -> LayoutTree {
         let mut tree = tree;
         if let Some(b) = border {
@@ -121,14 +105,7 @@ pub(crate) fn open_overlay(app: &mut TuiApp, opts: mlua::Table) -> Result<u64, S
         }
         tree
     };
-    // Layout for placements that drive their rect via `size_override`
-    // (everything but `ScreenAt`, which now also fills): wrap the
-    // inner panels in a `Fill`/`Fill` vbox+hbox so chrome stretches
-    // to whatever rect the size_override writes. The percentage
-    // arguments below feed `size_override`, not a child constraint —
-    // the previous shape used `Percentage` as a child constraint
-    // *inside* a Fill outer, which left the unallocated rows/cols
-    // empty inside the dialog.
+    // Wrap inner panels in Fill vbox+hbox so chrome stretches to the size_override rect.
     let fill_layout = |inner: LayoutTree, title: Option<Line<'static>>| -> LayoutTree {
         with_chrome(
             LayoutTree::vbox(vec![(
@@ -143,10 +120,7 @@ pub(crate) fn open_overlay(app: &mut TuiApp, opts: mlua::Table) -> Result<u64, S
     let (anchor, layout, size_override) = match placement {
         OverlayPlacement::ScreenCenter => {
             let layout = fill_layout(inner, title);
-            // Optional explicit `width` / `height` override the default
-            // 70% / 60% pct sizing. Useful for snug-sized overlays
-            // (snake game, fixed-size dashboards) where the consumer
-            // knows exactly how big the panel needs to be.
+            // Explicit `width` / `height` override the default 70%/60% pct sizing.
             let w = opts
                 .get::<u16>("width")
                 .ok()
@@ -161,7 +135,7 @@ pub(crate) fn open_overlay(app: &mut TuiApp, opts: mlua::Table) -> Result<u64, S
         }
         OverlayPlacement::DockBottom { height_pct } => {
             let layout = fill_layout(inner, title);
-            let avail_h = term_h.saturating_sub(1); // reserve 1 row for the statusline
+            let avail_h = term_h.saturating_sub(1); // 1 row reserved for the statusline
             let h = pct(avail_h, height_pct).max(1);
             (
                 Anchor::ScreenBottom { above_rows: 1 },
@@ -177,12 +151,8 @@ pub(crate) fn open_overlay(app: &mut TuiApp, opts: mlua::Table) -> Result<u64, S
             height,
         } => {
             let layout = fill_layout(inner, title);
-            // Lua-facing `(row, col)` are offsets from the named
-            // corner: `corner = "ne", row = 0, col = 0` lands the
-            // overlay's NE corner at the terminal's top-right.
-            // Translate to the absolute terminal coordinates that
-            // `Anchor::ScreenAt` expects so `corner_to_topleft` +
-            // `clamp_axis` resolve to the user-visible corner.
+            // Lua `(row, col)` are offsets from the named corner; translate to absolute
+            // terminal coordinates so `Anchor::ScreenAt` resolves the user-visible corner.
             let abs_row = match corner {
                 Corner::NW | Corner::NE => row as i32,
                 Corner::SW | Corner::SE => term_h.saturating_sub(1) as i32 - row as i32,
@@ -236,13 +206,7 @@ pub(crate) fn open_overlay(app: &mut TuiApp, opts: mlua::Table) -> Result<u64, S
     Ok(id.0 as u64)
 }
 
-/// Top-level `placement` option on generic overlay-open requests.
-/// Defaults to centered. `"dock_bottom"` docks full-width at the
-/// terminal bottom (1 row reserved above for the status bar); an
-/// optional `placement_height = <pct>` controls the overlay height as
-/// a fraction of available height. `"screen_at"` reads `corner`
-/// (`"nw"`/`"ne"`/`"sw"`/`"se"`) plus absolute `row` / `col` / `width`
-/// / `height` and pins the overlay at the named corner.
+/// Parse the `placement` option from an overlay-open opts table.
 fn parse_overlay_placement(opts: &mlua::Table) -> Result<OverlayPlacement, String> {
     match opts.get::<String>("placement").ok().as_deref() {
         Some("dock_bottom") => {
@@ -289,11 +253,8 @@ fn parse_overlay_placement(opts: &mlua::Table) -> Result<OverlayPlacement, Strin
     }
 }
 
-/// Wire up the built-in list keymap on a leaf Window: cursor row
-/// highlight on, navigation keys for j/k/Up/Down/Home/End/PgUp/PgDn,
+/// Wire the built-in list keymap: j/k/arrows/Home/End/PgUp/PgDn navigate,
 /// Enter fires `WinEvent::Submit` with the absolute selected row.
-/// Each binding is a small Rust callback that mutates the Window's
-/// cursor + scroll state directly.
 pub(crate) fn configure_list_leaf(app: &mut TuiApp, leaf: WinId, initial_cursor: u16) {
     let line_count = app
         .ui
@@ -324,11 +285,8 @@ pub(crate) fn configure_list_leaf(app: &mut TuiApp, leaf: WinId, initial_cursor:
             if target == abs {
                 return CallbackResult::Consumed;
             }
-            // Keep cursor visible: simple model — adjust scroll_top so
-            // cursor_line stays in [0, viewport_rows). Without the
-            // exact viewport here, fall back to nudging scroll_top so
-            // the abs row is reachable. List dialogs are short
-            // overall; full scroll resolution lands in P1.d.
+            // Adjust scroll_top to keep cursor visible. Exact viewport unavailable;
+            // nudging suffices for short list dialogs.
             if (target as u16) < win.scroll_top {
                 win.scroll_top = target as u16;
                 win.cursor_line = 0;
@@ -375,7 +333,7 @@ pub(crate) fn configure_list_leaf(app: &mut TuiApp, leaf: WinId, initial_cursor:
         let _ = app.ui.win_set_keymap(leaf, *key, cb);
     }
 
-    // Enter → fire Submit with the absolute selected line index.
+    // Enter fires Submit with the absolute selected line index.
     let submit_cb: Callback = Callback::Rust(Box::new(|ctx| {
         let abs = ctx
             .ui
@@ -391,20 +349,13 @@ pub(crate) fn configure_list_leaf(app: &mut TuiApp, leaf: WinId, initial_cursor:
     );
 }
 
-/// Wire up the built-in input recipe on a leaf Window. Printable
-/// chars insert at cursor (key fallback); Backspace deletes the
-/// preceding char; Left/Right/Home/End move the cursor; Enter
-/// fires `WinEvent::Submit { Text { content } }`. Every edit
-/// also fires `WinEvent::TextChanged { Text { content } }` so
-/// plugin-side handlers (e.g. `/resume`'s filter binding) react.
+/// Wire the built-in input recipe: printable chars insert at cursor, Backspace deletes,
+/// Left/Right/Home/End move the cursor, Enter fires `WinEvent::Submit`.
+/// Every edit also fires `WinEvent::TextChanged`.
 ///
-/// Placeholder mode: when `make_input_buffer` seeded a
-/// placeholder, the buffer's row 0 carries dim-highlight extmarks
-/// covering the placeholder text. The recipe detects this state
-/// via `highlights_at(0)` non-empty and treats the line as
-/// "logically empty" — first printable keystroke replaces line +
-/// extmark before inserting the typed char. Backspace is a no-op
-/// in placeholder mode.
+/// Placeholder detection: if row 0 carries dim-highlight extmarks (seeded by
+/// `make_input_buffer`), the line is treated as logically empty — the first
+/// printable keystroke replaces the line before inserting; Backspace is a no-op.
 pub(crate) fn configure_input_leaf(app: &mut TuiApp, leaf: WinId) {
     if let Some(win) = app.ui.win_mut(leaf) {
         win.cursor_col = 0;
@@ -423,11 +374,8 @@ pub(crate) fn configure_input_leaf(app: &mut TuiApp, leaf: WinId) {
     }
 
     fn is_placeholder(ctx: &crate::smelt_term::CallbackCtx<'_>) -> bool {
-        // Placeholder lives behind a dim-highlight extmark on row 0.
-        // The first user keystroke wholesale-replaces line 0 via
-        // `set_lines`, which Buffer drops well-known namespace marks
-        // for — so a present highlight reliably indicates the
-        // placeholder is still showing.
+        // A non-empty row 0 with highlights indicates the placeholder is still showing.
+        // `set_lines` drops well-known-namespace marks, so highlights are a reliable signal.
         let buf_id = match ctx.ui.win(ctx.win) {
             Some(w) => w.buf,
             None => return false,
@@ -559,8 +507,7 @@ pub(crate) fn configure_input_leaf(app: &mut TuiApp, leaf: WinId) {
         Callback::Rust(Box::new(|ctx| move_h(ctx, HMove::End))),
     );
 
-    // Enter → fire Submit with the buffer's line 0 as the text
-    // payload. Placeholder counts as empty.
+    // Enter fires Submit with line 0; placeholder counts as empty.
     let submit: Callback = Callback::Rust(Box::new(|ctx| {
         let content = if is_placeholder(ctx) {
             String::new()
@@ -575,10 +522,7 @@ pub(crate) fn configure_input_leaf(app: &mut TuiApp, leaf: WinId) {
         submit,
     );
 
-    // Catch-all key fallback for printable characters. Specific
-    // keymaps win first; non-printable miss-throughs return
-    // `Consumed` so the compositor doesn't re-route to transcript.
-    // Esc and Ctrl-C are passed so modal overlays can dismiss themselves.
+    // Catch-all: printable chars insert, non-printables are consumed, Esc/Ctrl-C pass through.
     let fallback: Callback = Callback::Rust(Box::new(|ctx| {
         if let Payload::Key {
             code: KeyCode::Char(c),
@@ -631,11 +575,7 @@ pub(crate) fn open_picker(app: &mut TuiApp, opts: mlua::Table) -> Result<WinId, 
         "prompt_docked" => crate::picker::PickerPlacement::PromptDocked { max_rows: 7 },
         _ => crate::picker::PickerPlacement::ScreenCenter,
     };
-    // `prompt_docked` is non-focusable so keys keep flowing to the
-    // prompt; every other placement is focusable so the picker can
-    // own arrow / enter / esc dispatch via Lua keymaps. Z values
-    // mirror the legacy split: prompt-docked sits below dialogs, the
-    // other placements ride at the default overlay z.
+    // prompt_docked is non-focusable (keys flow to the prompt); other placements own dispatch.
     let (focusable, z) = match placement {
         crate::picker::PickerPlacement::PromptDocked { .. } => (false, 30),
         _ => (true, 50),

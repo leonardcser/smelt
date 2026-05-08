@@ -1,11 +1,5 @@
--- Optional /yank-block command (not autoloaded).
---
--- Copies the transcript block under the cursor to the clipboard.
--- Thin wrapper around `smelt.transcript.yank_block()` which
--- handles the extract + copy + notify flow in Rust.
---
--- To enable, add to your init.lua:
---   require("smelt.plugins.yank_block")
+-- Optional /yank-block command. Copies the transcript block under the cursor to the clipboard.
+-- Not autoloaded; add `require("smelt.plugins.yank_block")` to init.lua to enable.
 
 smelt.cmd.register("yank-block", function()
   smelt.transcript.yank_block()

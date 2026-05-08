@@ -30,12 +30,11 @@ use smelt_core::cells::ConfirmResolved;
 use smelt_core::theme::role_hl;
 use smelt_core::transcript_model::{ApprovalScope, ConfirmChoice, ConfirmRequest};
 
-/// Wire `smelt.confirm.*` primitives onto the supplied table.
+/// Register `smelt.confirm.*` primitives.
 pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
     let confirm_tbl = lua.create_table()?;
 
-    // smelt.confirm._render_title(buf_id, handle_id) — fill an
-    // existing buffer with the title line.
+    // smelt.confirm._render_title(buf_id, handle_id)
     confirm_tbl.set(
         "_render_title",
         lua.create_function(|_, (buf_id, handle_id): (u64, u64)| {
@@ -50,17 +49,10 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
         })?,
     )?;
 
-    // smelt.confirm._back_tab(handle_id) → bool. Cycles the app
-    // mode (via the Lua-side `smelt.mode.cycle`); returns true when
-    // the new mode auto-allows this request (caller closes the
-    // dialog) and false otherwise (dialog stays open so the user
-    // can pick manually).
-    //
-    // The `with_app` borrow has to be released before reaching back
-    // into Lua to fire the cycle (`smelt.mode.set` re-enters `with_app`
-    // through its binding), so the body is split into three steps:
-    // gather the request payload, run the cycle, then re-enter
-    // `with_app` to inspect the new mode's decision and resolve.
+    // smelt.confirm._back_tab(handle_id) → bool. Cycles app mode and returns true if the
+    // new mode auto-allows the request. The with_app borrow must be released before calling
+    // back into Lua (smelt.mode.cycle re-enters with_app), so the body is split: gather
+    // request payload, run cycle, then re-enter with_app to inspect and resolve.
     confirm_tbl.set(
         "_back_tab",
         lua.create_function(|lua, handle_id: u64| {
@@ -117,10 +109,8 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
         })?,
     )?;
 
-    // smelt.confirm._render_preview(buf_id, handle_id) → bool. Routes
-    // the request's args through the tool's `preview` Lua callback (if
-    // registered) painting into `buf_id`. Returns false when the tool
-    // didn't register one — caller leaves the buffer empty.
+    // smelt.confirm._render_preview(buf_id, handle_id) → bool.
+    // Calls the tool's `preview` callback if registered. Returns false if none registered.
     confirm_tbl.set(
         "_render_preview",
         lua.create_function(|_, (buf_id, handle_id): (u64, u64)| {
@@ -141,10 +131,7 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
     )?;
 
     // smelt.confirm._resolve(handle_id, decision, message?).
-    // `decision` is the label string Lua built alongside the option
-    // labels (`"yes"` / `"no"` / `"always_session"` / …); same lexicon
-    // the `confirm_resolved` cell publishes. Removes the registry
-    // entry; the caller is expected to close the dialog.
+    // `decision` matches the `confirm_resolved` cell lexicon. Removes the registry entry.
     confirm_tbl.set(
         "_resolve",
         lua.create_function(
@@ -176,10 +163,7 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
     Ok(())
 }
 
-/// Stable short label for the `confirm_resolved` cell payload. Plugins
-/// branch on this rather than reading the `ConfirmChoice` Rust enum.
-/// Same lexicon `confirm.lua` passes to `_resolve` to build the
-/// matching `ConfirmChoice`.
+/// Stable string label for the `confirm_resolved` cell payload and `_resolve` input.
 fn decision_label(choice: &ConfirmChoice) -> &'static str {
     match choice {
         ConfirmChoice::Yes => "yes",
@@ -199,9 +183,7 @@ fn decision_label(choice: &ConfirmChoice) -> &'static str {
     }
 }
 
-/// Reconstruct a `ConfirmChoice` from the Lua-supplied decision label
-/// and the live request payload (which still carries `outside_dir`
-/// and `approval_patterns`). Unknown labels collapse to `No`.
+/// Parse a decision label back into `ConfirmChoice`. Unknown labels become `No`.
 fn parse_decision(decision: &str, req: &ConfirmRequest) -> ConfirmChoice {
     use ApprovalScope::*;
     use ConfirmChoice::*;
@@ -225,10 +207,7 @@ fn outside_dir_string(req: &ConfirmRequest) -> String {
         .unwrap_or_default()
 }
 
-/// Render the ` tool: desc Allow?` title into `buf_id`. The tool name
-/// shows in the accent color; the description is painted as plain
-/// text. Multi-line descriptions paint the first line only — the rest
-/// renders into the preview panel.
+/// Render the confirm title line into `buf_id`. Multi-line descriptions show only the first line.
 fn render_title_into_buf(app: &mut TuiApp, buf_id: BufId, req: &ConfirmRequest) {
     let theme_snap = app.ui.theme().clone();
     let width = crate::content::term_width() as u16;

@@ -52,9 +52,7 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
         "is_light",
         lua.create_function(|_, ()| Ok(crate::lua::with_app(|app| app.ui.theme().is_light())))?,
     )?;
-    // Built-in color presets (name, description, ANSI-256 value).
-    // Exposed so Lua-side pickers (`/theme`, `/color`) can use
-    // them instead of hard-coding the list.
+    // Built-in color presets for Lua-side pickers.
     theme_tbl.set(
         "presets",
         lua.create_function(|lua, ()| {

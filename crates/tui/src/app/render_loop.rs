@@ -8,13 +8,8 @@ impl TuiApp {
     pub(crate) fn render_normal(&mut self, agent_running: bool) {
         let _perf = smelt_core::perf::begin("app:tick_compositor");
         self.update_spinner();
-        // Re-populate the theme registry from the host atomics so any
-        // Lua-driven mutation (`smelt.theme.set('accent', …)`) lands
-        // before this frame's draw.
         crate::theme::populate_ui_theme(self.ui.theme_mut());
-        // Publish the current vim mode so `Window::render`'s auto-derive
-        // selection path on overlay leaves (dialogs, /messages) reads
-        // it from `DrawContext::vim_mode`.
+        // Publish vim mode so overlay leaves read it via `DrawContext::vim_mode`.
         self.ui.set_vim_mode(self.vim_mode);
 
         let (term_w, term_h) = self.ui.terminal_size();
@@ -32,11 +27,7 @@ impl TuiApp {
 
         let (has_prompt_cursor, has_transcript_cursor) = self.compute_cursor_ownership();
 
-        // Reset the global cursor shape; downstream `sync_*_layer`
-        // calls and the overlay-focus default below will set it back
-        // to `Hardware` / `Block` if a focused surface owns the
-        // caret. `Hidden` is the right baseline for unfocused frames
-        // / cmdline-up / dialog-without-input cases.
+        // Hidden is the right baseline; sync paths below set Hardware/Block when focus owns the caret.
         self.ui
             .set_cursor_shape(crate::smelt_term::CursorShape::Hidden);
 
@@ -58,10 +49,7 @@ impl TuiApp {
         self.sync_prompt_above_layer(term_w, queued);
         self.sync_input_layer(prompt_rect, has_prompt_cursor);
         self.sync_prompt_below_layer(term_w);
-        // Freeze the live-turn timer + spinner whenever a blocking
-        // dialog (Confirm, Question, …) is up so the user doesn't see
-        // wall-clock seconds tick by while the agent is actually parked
-        // waiting on input.
+        // Freeze timer/spinner while a blocking dialog is up.
         self.working.set_paused(self.focused_overlay_blocks_agent());
         self.refresh_status_bar();
 
@@ -69,12 +57,7 @@ impl TuiApp {
 
         self.sync_completer_overlay();
 
-        // Overlay-leaf focus surfaces a hardware caret by default —
-        // input panels (cmdline, dialog text inputs) need it, and
-        // text/list-shaped leaves are non-focusable so they never
-        // hit this branch. The transcript / prompt sync paths above
-        // run unconditionally, so check this only when neither one
-        // claimed the cursor.
+        // Focused overlay leaf gets a hardware caret when neither transcript nor prompt claimed it.
         if matches!(
             self.ui.cursor_shape(),
             crate::smelt_term::CursorShape::Hidden
@@ -88,12 +71,7 @@ impl TuiApp {
         }
 
         let mut stdout = std::io::stdout();
-        // Split-borrow the paint registry + lua runtime out of `self`
-        // so the dispatcher closure (passed mutably to `&mut self.ui`)
-        // can consult them without aliasing. Lua-registered paint ids
-        // route to `paint::invoke_paint`; everything else falls through
-        // (no-op — `Ui::render_with_paints` already handled the WinId
-        // → Window dispatch internally).
+        // Split-borrow paint registry and lua out of `self` to avoid aliasing with `&mut self.ui`.
         let paint_registry = &self.paint_registry;
         let lua = &self.lua;
         let _ = self.ui.render_with_paints(&mut stdout, |id, slice, ctx| {
@@ -103,11 +81,7 @@ impl TuiApp {
         });
     }
 
-    /// Freeze transcript tail-follow during an active selection / vim
-    /// visual / mouse drag so streaming rows grow into scrollback
-    /// rather than shifting the user's selection. Otherwise, when
-    /// `follow_tail` is on, snap `scroll_top` to the bottom so content
-    /// appended below stays visible across viewport resizes.
+    /// Freeze tail-follow during selection/vim-visual/drag; otherwise snap to bottom.
     fn adjust_tail_scroll(&mut self) {
         let has_selection = self.transcript_window.selection_anchor.is_some();
         let in_vim_visual = self.transcript_window.vim_enabled
@@ -125,10 +99,8 @@ impl TuiApp {
         }
     }
 
-    /// Cmdline / overlay focus steal the cursor (overlay path supplies
-    /// its own hardware caret); terminal-unfocused suppresses;
-    /// otherwise `app_focus` decides prompt-vs-transcript ownership
-    /// for this frame.
+    /// Compute which pane owns the cursor this frame.
+    /// Cmdline/overlay steals it; terminal-unfocused suppresses it.
     fn compute_cursor_ownership(&self) -> (bool, bool) {
         let overlay_owns_cursor = self.ui.focused_overlay().is_some();
         let cmdline_active = self.well_known.cmdline.is_some();
@@ -142,14 +114,8 @@ impl TuiApp {
         (has_prompt_cursor, has_transcript_cursor)
     }
 
-    /// Project the transcript into its display buffer, compute the
-    /// soft cursor, and drive the painted-split `Ui::wins[TRANSCRIPT_WIN]`
-    /// (cursor + viewport + scroll). Selection paints via the buffer's
-    /// `set_selection` override (vim Visual + non-vim shift-select +
-    /// yank-flash all flatten to per-row ranges). When content owns
-    /// focus the soft cursor surfaces as `Ui::cursor_shape = Block {
-    /// glyph, style }` so `Window::render` paints the cell after the
-    /// extmark + selection layering.
+    /// Project the transcript into its display buffer and drive `Ui::wins[TRANSCRIPT_WIN]`.
+    /// When content owns focus, surfaces a Block cursor after extmark + selection layering.
     fn sync_transcript_layer(
         &mut self,
         term_w: u16,
@@ -207,15 +173,6 @@ impl TuiApp {
             buf.set_selection(ranges);
         }
 
-        // Drive the painted-split Window's cursor + scrollbar viewport
-        // from the projection. The transcript shows a vim-style block
-        // cursor over the glyph beneath when content owns focus —
-        // `Ui::cursor_shape = Block { glyph, style }` paints in-place
-        // after extmark layering on the focused window. When content
-        // doesn't own the cursor (prompt focused / terminal unfocused
-        // / cmdline up), `soft_cursor` is `None` and the global shape
-        // stays whatever the prompt path / overlay path set (or
-        // `Hidden`).
         if let Some(c) = tcursor.soft_cursor.as_ref() {
             let theme = self.ui.theme();
             let (fg, bg) = if theme.is_light() {
@@ -285,9 +242,8 @@ impl TuiApp {
         prompt_buf::compute_prompt_below(term_w, buf, &theme);
     }
 
-    /// Populate the input-leaf buffer and set its cursor + viewport.
-    /// Cursor positions are content-local; `Window::render` /
-    /// `Ui::focused_painted_split_cursor` apply the leaf's gutter shift.
+    /// Populate the input-leaf buffer, cursor, and viewport. Cursor positions are content-local;
+    /// the leaf's gutter shift is applied by `Window::render`.
     fn sync_input_layer(&mut self, prompt_rect: crate::smelt_term::Rect, has_prompt_cursor: bool) {
         let gutters = self
             .ui
@@ -323,8 +279,6 @@ impl TuiApp {
         self.input.win.pending_recenter = false;
         self.input.win.last_render_cpos = Some(self.input.win.cpos);
 
-        // Viewport rect skips the left gutter so click→content-col
-        // mapping is direct. Scrollbar lives on the rightmost leaf col.
         let viewport = output.viewport.as_ref().map(|vp| {
             let rect = crate::smelt_term::Rect::new(
                 prompt_rect.top,
@@ -365,10 +319,7 @@ impl TuiApp {
     }
 
     fn finalize_layer_rects(&mut self) {
-        // Rect publishing is now implicit via `Ui::set_layout` at the
-        // top of `render_normal` — the splits tree resolves rects on
-        // demand. This pass only re-asserts focus when no overlay is
-        // up so app-pane focus tracks the user's intent.
+        // Re-assert focus when no overlay is up so app-pane focus tracks user intent.
         if self.ui.focused_overlay().is_none() {
             match self.app_focus {
                 crate::app::AppFocus::Prompt => {
@@ -382,19 +333,9 @@ impl TuiApp {
     }
 
     // ── Completer overlay ──────────────────────────────────────────
-    //
-    // Mirrors the active `CompleterSession` into a Buffer-backed
-    // picker overlay. The session (`PromptState.completer`) holds both
-    // the matcher model *and* the picker leaf `WinId` — one owner,
-    // one lifecycle. Matches the shape a future Lua completer plugin
-    // would hold in its own local state.
-    //
-    // The leaf is non-focusable so keys keep flowing to the prompt,
-    // driving `completer_bridge::handle_completer_event`.
+
     fn sync_completer_overlay(&mut self) {
-        // Drain any picker leaves that were orphaned when their session
-        // ended (session held the WinId; when it dropped, it queued the
-        // WinId here for out-of-band close).
+        // Drain picker leaves orphaned when their session ended.
         for win in std::mem::take(&mut self.input.pending_picker_close) {
             self.close_overlay_leaf(win);
         }
@@ -436,11 +377,7 @@ impl TuiApp {
             None => return,
         };
 
-        // Open once and reuse — the overlay's anchor + outer height
-        // constraint resize in-place from the picker's item count
-        // each frame. Closing and reopening the overlay on every
-        // filter change forces a full-screen redraw, which makes the
-        // cursor visibly jump around.
+        // Reuse the existing overlay — closing/reopening on every filter change causes cursor jumps.
         let open_win = match existing_win {
             Some(win) => {
                 crate::picker::set_items(self, win, items, selected);
@@ -453,9 +390,7 @@ impl TuiApp {
                 crate::picker::PickerPlacement::PromptDocked { max_rows },
                 false,
                 false,
-                // Below the default overlay z (50) so dialogs (help,
-                // confirm, …) overlay the completer picker.
-                30,
+                30, // below default overlay z (50) so dialogs overlay the completer
             ),
         };
 

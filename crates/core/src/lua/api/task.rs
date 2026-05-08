@@ -1,7 +1,4 @@
-//! `smelt.task` bindings — `alloc` mints external task ids the
-//! `_bootstrap.lua` yield primitives suspend on; `resume` delivers a
-//! resolution to a pending coroutine. Used internally by the wrappers
-//! around tool-as-task / dialog / picker / async helpers.
+//! `smelt.task` — `alloc`/`resume` for the yield-then-resume coroutine bridge.
 
 use crate::lua::{LuaShared, TaskEvent};
 use mlua::prelude::*;

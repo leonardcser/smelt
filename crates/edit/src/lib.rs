@@ -1,11 +1,7 @@
 //! `smelt-edit` — editor layer over `smelt-term`.
 //!
-//! Concepts: `Window` (per-buffer view + viewport + scrollbar +
-//! gutter), `Buffer` dispatch, vim modes, callbacks, overlays,
-//! focus + capture + click-tracking. The `Ui` struct ties windows
-//! to layout and routes events. Renderer primitives (`Grid`,
-//! `LayoutTree`, `Compositor`, `flush_diff`, `paint_layout_tree`)
-//! come from `smelt-term`.
+//! `Ui` ties `Window`s (per-buffer view + viewport + scrollbar + gutter)
+//! to layout and routes events. Renderer primitives come from `smelt-term`.
 
 pub mod callback;
 pub(crate) mod event;
@@ -46,19 +42,14 @@ impl std::fmt::Display for WinId {
     }
 }
 
-/// Editor windows project onto the renderer's `PaintId` namespace
-/// 1:1 — each window's `WinId` becomes the paint id of its leaf in
-/// the layout tree. The renderer resolves the leaf rect; the editor
-/// dispatcher walks the id back to its `Window` for `Window::render`.
+/// Each `WinId` doubles as the `PaintId` for its layout-tree leaf.
 impl From<WinId> for PaintId {
     fn from(w: WinId) -> Self {
         PaintId(w.0)
     }
 }
 
-/// Callback shape for routing `Callback::Lua` handles out of Ui into
-/// the host's Lua runtime. Receives the handle, the focused window,
-/// and the event payload.
+/// Routes `Callback::Lua` handles out to the host's Lua runtime.
 pub type LuaInvoke<'a> = dyn FnMut(callback::LuaHandle, WinId, &callback::Payload) + 'a;
 
 use callback::Callbacks;
@@ -79,74 +70,26 @@ pub struct Ui {
     wins: HashMap<WinId, Window>,
     next_buf_id: u64,
     next_win_id: u64,
-    /// Renderer assembly: compositor, theme (`Arc<Theme>` for
-    /// copy-on-write sharing into per-leaf `DrawContext`), splits
-    /// layout tree, terminal size. Editor-specific state lives in the
-    /// fields below; everything in `Surface` is renderer plumbing
-    /// shared with non-editor consumers.
     surface: smelt_term::Surface,
     callbacks: Callbacks,
-    /// Overlay storage. Each overlay is a positioned LayoutTree of
-    /// windows; `Ui::overlay_open` returns an `OverlayId` and
-    /// `resolve_anchor` is the per-frame positioning primitive.
-    /// `Vec` preserves insertion order naturally — used as the
-    /// secondary sort key in z-order ties (see
-    /// [`Self::overlays_in_z_order`]).
+    /// Insertion order is the secondary z-order sort key; see [`Self::overlays_in_z_order`].
     overlays: Vec<(OverlayId, Overlay)>,
     next_overlay_id: u32,
-    /// Stack of prior focused windows. `set_focus` pushes the
-    /// outgoing focus here; the overlay close paths walk back through
-    /// it for the most recent still-existing focusable window.
+    /// `set_focus` pushes the outgoing focus here; overlay-close walks it back.
     focus_history: Vec<WinId>,
-    /// Currently focused window — the single source of truth for
-    /// keyboard focus. May refer to an overlay leaf or a splits-tree
-    /// leaf; the discrimination is derived at lookup time
-    /// (`overlay_for_leaf` vs `splits.contains_leaf`).
     focus: Option<WinId>,
-    /// In-flight gesture capture target. When set, mouse routing
-    /// short-circuits hit-testing and delivers events to this target
-    /// directly until the gesture ends (mouse-up clears it). Used by
-    /// scrollbar drag — once the user grabs the thumb, subsequent
-    /// drag rows must continue mapping to the same scrollbar even if
-    /// the pointer wanders off the track. Auto-clears when the
-    /// captured target's owning split disappears (`set_layout`) or
-    /// owning overlay closes (`overlay_close`).
+    /// Gesture target that bypasses hit-testing for the duration of a drag.
+    /// Auto-clears when the owning split or overlay disappears.
     capture: Option<HitTarget>,
-    /// Last primary-button Down for click-count tracking. Successive
-    /// Downs on the same cell within 400ms increment the count up to
-    /// 3 (so the fourth click wraps back to 1). Tuple shape:
-    /// `(time, row, col, count)`. The host calls `record_click` on
-    /// each Down to get the next count. Once Ui owns Down dispatch
-    /// (P2.b.4c.5), this becomes an internal helper.
+    /// `(time, row, col, count)` — tracks successive Down events for click-count.
     last_click: Option<(std::time::Instant, u16, u16, u8)>,
-    /// Single global cursor shape for the focused window. The host
-    /// sets this each frame from the focused window's mode/state
-    /// (vim Insert → `Hardware`, vim Normal/Visual → `Block`,
-    /// transcript content cursor → `Block`, nothing focused →
-    /// `Hidden`). Read by paint paths into `DrawContext::cursor_shape`
-    /// (only the focused window honours it) and by `Ui::render` to
-    /// surface the hardware caret.
+    /// Global cursor shape; only the focused window honours it.
     cursor_shape: CursorShape,
-    /// Single global vim mode for the focused window. Hosts that drive
-    /// vim-enabled windows (currently always `TuiApp`) push the
-    /// authoritative mode each frame via [`Self::set_vim_mode`]; paint
-    /// paths read it into `DrawContext::vim_mode` so `Window::render`
-    /// can auto-derive visual selection ranges from each Window's own
-    /// `vim_state.visual_anchor` when no explicit `Buffer::set_selection`
-    /// override is set.
+    /// Global vim mode; pushed each frame by the host via [`Self::set_vim_mode`].
     vim_mode: VimMode,
-    /// Timestamp drag-autoscroll was last engaged. `Some` while the
-    /// user is mid-drag with the captured window's cursor parked at a
-    /// viewport edge; `None` otherwise. The host's main loop reads
-    /// [`Self::drag_autoscroll_started`] to ramp the tick interval
-    /// down (~30ms → ~5ms) so selection-extension acceleration grows
-    /// with how long the cursor has been parked at the edge.
-    /// [`Self::poll_drag_autoscroll`] manages this slot internally.
+    /// Timestamp when edge-drag autoscroll last engaged; drives host tick-rate ramp.
     drag_autoscroll_since: Option<std::time::Instant>,
-    /// In-flight chrome drag / resize gesture. Captures the overlay's
-    /// rect at Down so subsequent Drag events can compute the new
-    /// top-left or `size_override` from the mouse delta. `None` when
-    /// no chrome gesture is active.
+    /// In-flight chrome drag/resize gesture; `None` when idle.
     chrome_drag: Option<ChromeDrag>,
 }
 
@@ -154,10 +97,7 @@ pub struct Ui {
 struct ChromeDrag {
     overlay: OverlayId,
     zone: overlay::ChromeZone,
-    /// Overlay's resolved rect at the moment Down latched.
     start_rect: Rect,
-    /// Mouse position at Down — the delta from this gives the move /
-    /// resize amount.
     origin_row: u16,
     origin_col: u16,
 }
@@ -192,11 +132,7 @@ impl Ui {
         self.vim_mode
     }
 
-    /// Record a primary-button Down for click-count tracking and
-    /// return the resulting count (1, 2, or 3). Successive Downs on
-    /// the same cell within 400ms increment up to 3; the fourth
-    /// click wraps back to 1 so a fresh gesture restarts. Internal
-    /// helper for [`Self::resolve_split_mouse`].
+    /// Returns 1/2/3 for successive Downs on the same cell within 400ms; wraps at 4.
     fn record_click(&mut self, row: u16, col: u16) -> u8 {
         use std::time::{Duration, Instant};
         let now = Instant::now();
@@ -215,25 +151,10 @@ impl Ui {
         count
     }
 
-    /// Resolve a primary-button Down/Drag/Up against the splits-leaf
-    /// hit-test, latching a `HitTarget::Window(win)` capture on Down
-    /// so subsequent Drag rows continue routing to the same Window
-    /// even if the pointer drifts off its rect. Returns
-    /// `Some((win, click_count))` when the host should forward the
-    /// event to that Window's per-pane handler; `None` for any other
-    /// kind, for hits outside splits leaves, or for orphan Drag/Up
-    /// arriving without an established capture.
-    ///
-    /// `click_count` is the value [`Self::record_click`] returns on
-    /// Down (1 / 2 / 3) and `0` for Drag/Up (no fresh click). Up
-    /// clears the capture as a side-effect; on Down, capture is set
-    /// before this method returns.
-    ///
-    /// Coexists with `Ui::dispatch_event`'s scrollbar capture: when
-    /// `Ui::dispatch_event` claimed the event (scrollbar drag, wheel
-    /// on overlay, modal click-outside), the host returns early and
-    /// never calls this method. When `Ui::dispatch_event` returned
-    /// `Ignored`, this method runs.
+    /// Hit-test a primary-button Down/Drag/Up against splits leaves.
+    /// Latches capture on Down; returns `(win, click_count)` where `click_count`
+    /// is 0 for Drag/Up. Up clears capture. Call only when `dispatch_event`
+    /// returned `Ignored` — that method owns scrollbar drag and modal blocking.
     pub fn resolve_split_mouse(&mut self, me: crossterm::event::MouseEvent) -> Option<(WinId, u8)> {
         use crossterm::event::{MouseButton, MouseEventKind};
         match me.kind {
@@ -261,11 +182,8 @@ impl Ui {
         }
     }
 
-    /// Publish the splits layout for this frame. Leaves of the tree
-    /// become the painted splits; their rects are resolved against
-    /// the current terminal area on demand. If the focused window is
-    /// no longer reachable as a splits leaf or overlay leaf after the
-    /// swap, focus is cleared.
+    /// Replace the splits layout. Clears focus and capture if their targets
+    /// are no longer reachable.
     pub fn set_layout(&mut self, tree: LayoutTree) {
         self.surface.set_layout(tree);
         if let Some(focus) = self.focus {
@@ -281,16 +199,10 @@ impl Ui {
         }
     }
 
-    /// Read-only view of the splits tree. Internal accessor that
-    /// forwards to the inner `Surface`.
     fn splits(&self) -> &LayoutTree {
         self.surface.layout()
     }
 
-    /// Resolve the splits tree against the current terminal area,
-    /// returning the rect for each leaf. Walks the tree on every call
-    /// — small trees in practice (3–4 leaves), so the cost is
-    /// negligible.
     fn resolve_splits(&self) -> HashMap<WinId, Rect> {
         layout::resolve_layout(self.splits(), self.surface.area())
             .into_iter()
@@ -298,8 +210,6 @@ impl Ui {
             .collect()
     }
 
-    /// Resolved rect for a single splits leaf, or `None` when `win`
-    /// isn't a leaf in the current splits tree.
     pub fn split_rect(&self, win: WinId) -> Option<Rect> {
         self.resolve_splits().get(&win).copied()
     }
@@ -312,22 +222,16 @@ impl Ui {
         id
     }
 
-    /// Create a buffer at an explicit id. Returns `Err` if a buffer
-    /// with that id already exists — callers should mint a fresh id
-    /// via `buf_create`. Plugin-facing IDs (Lua `smelt.buf.create`)
-    /// live above `LUA_BUF_ID_BASE` so they can't collide with
-    /// sequentially-allocated Rust buffers.
+    /// Create a buffer at an explicit id. Returns `Err` if the id is already occupied.
+    /// Lua-minted ids live above `LUA_BUF_ID_BASE`; advancing `next_buf_id` past that
+    /// boundary would cause Rust and Lua allocators to collide.
     pub fn buf_create_with_id(&mut self, id: BufId, opts: BufCreateOpts) -> Result<BufId, BufId> {
         if self.bufs.contains_key(&id) {
             return Err(id);
         }
         let buf = Buffer::new(id, opts);
         self.bufs.insert(id, buf);
-        // Only advance the Rust-side allocator when the explicit id
-        // sits inside Rust's own range. Lua-minted ids live above
-        // `LUA_BUF_ID_BASE` and have their own atomic counter; pulling
-        // `next_buf_id` past the base would make subsequent
-        // `buf_create()` calls collide with the next Lua allocation.
+        // Only advance when the id is in Rust's range — Lua ids have their own counter.
         if id.0 < LUA_BUF_ID_BASE && id.0 >= self.next_buf_id {
             self.next_buf_id = id.0 + 1;
         }
@@ -342,26 +246,18 @@ impl Ui {
         self.bufs.get_mut(&id)
     }
 
-    /// Drain a buffer from the registry and return it. Use for
-    /// short-lived "scratch" buffers (e.g. tool render hooks) that
-    /// produce content the caller needs to consume once and discard.
     pub fn buf_destroy(&mut self, id: BufId) -> Option<Buffer> {
         self.bufs.remove(&id)
     }
 
-    /// Mutably borrow the buffer backing `win`, if both the window and
-    /// buffer exist.
     pub fn win_buf_mut(&mut self, win: WinId) -> Option<&mut Buffer> {
         let id = self.wins.get(&win)?.buf;
         self.bufs.get_mut(&id)
     }
 
-    // ── Overlay (P1.c) ───────────────────────────────────────────────
+    // ── Overlay ──────────────────────────────────────────────────────
 
-    /// Register an overlay. Returns its stable `OverlayId`. The
-    /// overlay's positioning is recomputed each frame from its
-    /// `anchor` via `overlay::resolve_anchor`; mutate the anchor via
-    /// `overlay_mut(id).anchor = …` to drag it.
+    /// Register an overlay and return its `OverlayId`. Modal overlays auto-focus the first leaf.
     pub fn overlay_open(&mut self, overlay: Overlay) -> OverlayId {
         let id = OverlayId(self.next_overlay_id);
         self.next_overlay_id += 1;
@@ -376,20 +272,12 @@ impl Ui {
         id
     }
 
-    /// Close an overlay. Returns the removed `Overlay` for callers
-    /// that want to inspect its layout (e.g. to close the contained
-    /// windows individually). When the currently-focused window is
-    /// a leaf of the closed overlay, walks `focus_history` backward
-    /// to the most recent still-focusable `WinId` and restores
-    /// focus there. If the history is exhausted (or all entries are
-    /// stale), focus is cleared. Focus on a window outside the
-    /// closed overlay is preserved untouched, and `focus_history`
-    /// is left alone.
+    /// Close an overlay. Returns the removed `Overlay`. Restores focus to the most
+    /// recent still-focusable entry in `focus_history`, or clears focus if history
+    /// is exhausted. Focus outside the closed overlay is left untouched.
     pub fn overlay_close(&mut self, id: OverlayId) -> Option<Overlay> {
         let pos = self.overlays.iter().position(|(oid, _)| *oid == id)?;
         let (_, removed) = self.overlays.remove(pos);
-        // Clear capture when the closing overlay owned the gesture —
-        // either chrome of this overlay or a leaf inside its layout.
         if let Some(cap) = self.capture {
             let owned = match cap {
                 HitTarget::Chrome { owner, .. } => owner == id,
@@ -403,6 +291,7 @@ impl Ui {
                 self.chrome_drag = None;
             }
         }
+
         if let Some(focused) = self.focus {
             if removed.layout.contains_leaf(focused) {
                 self.focus = None;
@@ -436,9 +325,6 @@ impl Ui {
             .find_map(|(oid, ov)| (*oid == id).then_some(ov))
     }
 
-    /// Iterate overlays in stacking order (lowest `z` first; ties
-    /// broken by insertion order — the live vec already carries
-    /// insertion order, and `sort_by_key` is stable).
     fn overlays_in_z_order(&self) -> Vec<(OverlayId, &Overlay)> {
         let mut entries: Vec<(OverlayId, &Overlay)> =
             self.overlays.iter().map(|(id, o)| (*id, o)).collect();
@@ -446,10 +332,7 @@ impl Ui {
         entries
     }
 
-    /// Topmost modal overlay, if any. "Topmost" = highest `z`; ties
-    /// broken by insertion order (later open wins). Engine-drain gating
-    /// (don't pull engine events while a modal is up) and modal-aware
-    /// focus cycling (Tab stays inside the overlay) read this.
+    /// Topmost (highest-z) open modal overlay, if any.
     pub fn active_modal(&self) -> Option<OverlayId> {
         self.overlays_in_z_order()
             .into_iter()
@@ -457,11 +340,7 @@ impl Ui {
             .find_map(|(id, ov)| ov.modal.then_some(id))
     }
 
-    /// Overlay containing the currently-focused window, if focus is
-    /// inside one. Pure structural query — walks open overlays and
-    /// asks whether the focused `WinId` appears as a leaf in their
-    /// layouts. Returns `None` when focus is on a split window or
-    /// nothing is focused.
+    /// Overlay whose layout contains the currently-focused window, if any.
     pub fn focused_overlay(&self) -> Option<OverlayId> {
         let focused = self.focus()?;
         self.overlays
@@ -469,14 +348,8 @@ impl Ui {
             .find_map(|(id, ov)| ov.layout.contains_leaf(focused).then_some(*id))
     }
 
-    /// Unified hit-test for a screen position. Returns the target
-    /// the cell belongs to: an overlay leaf or chrome, or a splits
-    /// leaf underneath. Overlays are checked first (topmost-z to
-    /// lowest, modal-aware — see `overlay_hit_test`); when no overlay
-    /// covers the point, walks splits leaves in declaration order.
-    /// Splits leaves with a painted scrollbar return
-    /// [`HitTarget::Scrollbar`] when the click lands on the bar's
-    /// column; the rest of the leaf returns [`HitTarget::Window`].
+    /// Hit-test a screen position. Checks overlays (topmost-z first, modal-aware)
+    /// then splits leaves. Scrollbar column returns `HitTarget::Scrollbar`.
     pub fn hit_test(&self, row: u16, col: u16, cursor: Option<(u16, u16)>) -> Option<HitTarget> {
         if let Some((id, target)) = self.overlay_hit_test(row, col, cursor) {
             return Some(match target {
@@ -507,19 +380,9 @@ impl Ui {
         None
     }
 
-    /// Hit-test a screen position against the open overlay set.
-    /// Returns the topmost overlay whose resolved rect contains
-    /// `(row, col)`, plus whether the hit landed on one of its leaf
-    /// `Window`s or its chrome (border, title, gap, padding).
-    /// `None` when no overlay covers the point.
-    ///
-    /// Modal interaction: the active modal is opaque at its own rect
-    /// for every overlay **below it in z**. Higher-z overlays paint
-    /// over the modal and continue to receive clicks on the parts
-    /// that cover the modal. Lower-z overlays still receive clicks
-    /// on the parts they leave visible **outside** the modal's rect.
-    /// `cursor` is forwarded to [`Self::resolve_overlays`] for
-    /// `Anchor::Cursor` resolution.
+    /// Hit-test against overlays only. The active modal is opaque at its rect for
+    /// lower-z overlays; higher-z overlays still receive clicks on the parts that
+    /// cover the modal.
     fn overlay_hit_test(
         &self,
         row: u16,
@@ -533,24 +396,19 @@ impl Ui {
                 .iter()
                 .find_map(|(oid, rect, ov)| (*oid == mid).then_some((*rect, ov.z)))
         });
-        // Topmost first.
         let mut resolved = resolved;
-        resolved.reverse();
+        resolved.reverse(); // topmost first
         for (id, rect, ov) in resolved {
             if !rect.contains(row, col) {
                 continue;
             }
-            // Modal opaque only against z values strictly below it. An
-            // overlay at or above modal_z paints on top of the modal
-            // and gets the click; an overlay below modal_z is blocked
-            // at the modal's rect but still gets clicks at the parts
-            // it leaves visible outside that rect.
+            // Overlays at or above the modal's z paint on top and receive clicks;
+            // overlays below are blocked at the modal's rect.
             if let Some((mr, mz)) = modal_info {
                 if ov.z < mz && mr.contains(row, col) {
                     continue;
                 }
             }
-            // Inside the overlay rect — is it a leaf or chrome?
             let leaf_rects = layout::resolve_layout(&ov.layout, rect);
             for (paint_id, leaf_rect) in &leaf_rects {
                 if leaf_rect.contains(row, col) {
@@ -565,12 +423,8 @@ impl Ui {
         None
     }
 
-    /// Resolve every overlay's screen rect for the upcoming frame.
-    /// Returns z-ordered entries (lowest first) for which the anchor
-    /// resolved — overlays whose `Anchor::Cursor` requires a missing
-    /// `cursor`, or whose `Anchor::Win` target is absent from the
-    /// splits tree, are skipped silently. The caller (compositor
-    /// integration in C.5+) feeds the cursor it knows from focus.
+    /// Returns z-ordered (lowest first) overlay rects. Overlays whose anchor
+    /// cannot resolve (missing cursor / missing Win target) are silently skipped.
     fn resolve_overlays(&self, cursor: Option<(u16, u16)>) -> Vec<(OverlayId, Rect, &Overlay)> {
         let (term_w, term_h) = self.surface.terminal_size();
         let split_rects = self.resolve_splits();
@@ -606,12 +460,8 @@ impl Ui {
         Some(id)
     }
 
-    /// Open a window at a pre-reserved `WinId`. Returns `false` when
-    /// the id is already occupied or the buffer doesn't exist. Used by
-    /// frontends that want a Window with a stable id callers can
-    /// register Lua callbacks against — the reserved-id machinery
-    /// skips fresh allocation, so this is the only path that lands a
-    /// Window at a caller-chosen id.
+    /// Open a window at an explicit `WinId`. Returns `false` if the id is occupied
+    /// or the buffer doesn't exist. Use when callers need a stable id for Lua callbacks.
     pub fn win_open_split_at(&mut self, id: WinId, buf: BufId, config: SplitConfig) -> bool {
         if self.wins.contains_key(&id) || !self.bufs.contains_key(&buf) {
             return false;
@@ -621,14 +471,8 @@ impl Ui {
         true
     }
 
-    /// Close a window. Returns the Lua callback IDs that were
-    /// attached (keymaps, events, fallback) so the caller can drop
-    /// them from the Lua-side registry. When `id` is a leaf of an
-    /// open overlay, closes the overlay and clears callbacks for
-    /// every leaf in that overlay's tree (a single dialog typically
-    /// renders as one leaf today; multi-panel overlays keep each
-    /// leaf's bindings independent so close clears all of them
-    /// atomically).
+    /// Close a window. Returns Lua callback ids for the caller to drop from the Lua registry.
+    /// When `id` is an overlay leaf, closes the whole overlay and clears all leaf callbacks.
     #[must_use]
     pub fn win_close(&mut self, id: WinId) -> Vec<u64> {
         if let Some(overlay_id) = self.overlay_for_leaf(id) {
@@ -647,61 +491,38 @@ impl Ui {
     }
 
     // ── Callbacks ────────────────────────────────────────────────────
-    //
-    // Per-window keymap + event callbacks. The registry is the single
-    // behavior mechanism shared by Rust and Lua.
 
-    /// Bind a key chord on a specific window to a callback. Returns
-    /// the displaced callback (if any) so Lua-side handles can be
-    /// cleaned up by the caller.
+    /// Bind a key to a callback. Returns the displaced callback, if any.
     #[must_use]
     pub fn win_set_keymap(&mut self, win: WinId, key: KeyBind, cb: Callback) -> Option<Callback> {
         self.callbacks.set_keymap(win, key, cb)
     }
 
-    /// Remove a keymap binding. Returns the removed callback, if any.
     #[must_use]
     pub fn win_clear_keymap(&mut self, win: WinId, key: KeyBind) -> Option<Callback> {
         self.callbacks.clear_keymap(win, key)
     }
 
-    /// Register a catch-all key handler for a window. Runs after
-    /// specific keymaps miss. Returns the displaced callback (if
-    /// any).
+    /// Catch-all key handler; runs after specific keymaps miss. Returns the displaced callback.
     #[must_use]
     pub fn win_set_key_fallback(&mut self, win: WinId, cb: Callback) -> Option<Callback> {
         self.callbacks.set_key_fallback(win, cb)
     }
 
-    /// Register a callback for a window lifecycle / semantic event.
-    /// Multiple callbacks per (win, event) are supported and fire
-    /// in registration order.
+    /// Register an event callback. Multiple callbacks per (win, event) fire in registration order.
     pub fn win_on_event(&mut self, win: WinId, ev: WinEvent, cb: Callback) {
         self.callbacks.on_event(win, ev, cb);
     }
 
-    /// Remove a specific event callback by its Lua handle id. Used by
-    /// plugins that install cross-window handlers (e.g. a picker that
-    /// listens to `text_changed` on the prompt) and need to tear down
-    /// exactly their own binding on close.
+    /// Remove a specific event callback by Lua handle id.
     #[must_use]
     pub fn win_clear_event_by_id(&mut self, win: WinId, ev: WinEvent, id: u64) -> Option<Callback> {
         self.callbacks.clear_event_by_id(win, ev, id)
     }
 
-    /// Fire a `WinEvent` on a window's registered callbacks.
-    /// `lua_invoke` is called for each `Callback::Lua` with
-    /// (handle, payload). Side effects flow through the `AppOp` queue
-    /// that Rust callbacks have via `shared.ops` — no return channel.
-    ///
-    /// Overlay leaves redirect to the overlay's root leaf (first in
-    /// declaration order). `dialog.lua` registers handlers on the
-    /// `win_id` returned from `_open` (which is the root); events
-    /// fired on any leaf bubble up so mixed dialogs hear them.
-    ///
-    /// Matches `UiHost::fire_win_event` from the target architecture
-    /// — when `Host` / `UiHost` land in P2, this is the method the
-    /// trait method delegates to.
+    /// Fire a `WinEvent`. Overlay leaves redirect to the overlay root (first declaration-order
+    /// leaf) so `dialog.lua` handlers registered on the root fire regardless of which leaf
+    /// triggered the event.
     pub fn fire_win_event(
         &mut self,
         win: WinId,
@@ -747,32 +568,18 @@ impl Ui {
         self.surface.terminal_size()
     }
 
-    // ── Focus (canonical Win-typed API) ──────────────────────────
+    // ── Focus ──────────────────────────────────────────────────────
 
-    /// Currently focused window, if any. Overlay-leaf focus wins
-    /// over painted-split focus (a modal overlay's input claim
-    /// suppresses split dispatch).
     pub fn focus(&self) -> Option<WinId> {
         self.focus
     }
 
-    /// Currently focused `Window`, if its id is registered in
-    /// `wins`. Convenience over `focus()` for callers that need the
-    /// struct (cursor / selection / config). Splits whose `Window`
-    /// hasn't been inserted into `wins` (e.g. the prompt /
-    /// transcript pseudo-windows) return `None` here even when
-    /// focused — `focus()` is the canonical reader.
     pub fn focused_window(&self) -> Option<&Window> {
         self.wins.get(&self.focus()?)
     }
 
-    /// Focus a specific window. Accepts focusable splits leaves and
-    /// overlay leaves (any leaf reachable in an open overlay's
-    /// `LayoutTree`). Returns `false` when `win` is neither. On
-    /// success, the prior focus is appended to `focus_history` so
-    /// close paths can pop back to the previous focus target.
-    /// Re-focusing the already-focused window is a no-op (no history
-    /// push).
+    /// Focus `win`. Returns `false` if it isn't a focusable splits leaf or overlay leaf.
+    /// Re-focusing the current window is a no-op (no history push).
     pub fn set_focus(&mut self, win: WinId) -> bool {
         let prior = self.focus;
         if prior == Some(win) {
@@ -791,10 +598,7 @@ impl Ui {
         true
     }
 
-    /// Return the `OverlayId` of an open overlay whose `LayoutTree`
-    /// contains `win` as a leaf. `None` when `win` isn't a leaf of
-    /// any open overlay. Used by leaf callbacks that need to close
-    /// or otherwise manipulate the containing overlay.
+    /// Returns the `OverlayId` of the open overlay whose layout contains `win`, if any.
     pub fn overlay_for_leaf(&self, win: WinId) -> Option<OverlayId> {
         for (id, ov) in &self.overlays {
             if ov.layout.contains_leaf(win) {
@@ -804,16 +608,8 @@ impl Ui {
         None
     }
 
-    /// Return the "root" leaf of the overlay containing `win`: the
-    /// first leaf in the layout tree's declaration order. This is
-    /// the WinId returned to dialog.lua at open time, and the one
-    /// it registers WinEvent callbacks against. `None` when `win`
-    /// isn't part of any open overlay.
-    ///
-    /// `fire_win_event` redirects to this root so handlers fire
-    /// regardless of which leaf the user actually interacted with
-    /// — necessary for mixed dialogs where multiple leaves are
-    /// interactive (e.g. options + input).
+    /// Returns the first declaration-order leaf of the overlay containing `win`.
+    /// `fire_win_event` redirects to this root so dialog handlers fire on any leaf interaction.
     fn overlay_root_for_leaf(&self, win: WinId) -> Option<WinId> {
         let id = self.overlay_for_leaf(win)?;
         let ov = self.overlay(id)?;
@@ -824,28 +620,16 @@ impl Ui {
             .map(|p| WinId(p.0))
     }
 
-    /// Read-only view of the focus history (oldest first; the most
-    /// recent prior focus is at the back). Test-only introspection
-    /// helper — production state flows through `set_focus` /
-    /// `overlay_close`.
     #[cfg(test)]
     fn focus_history(&self) -> &[WinId] {
         &self.focus_history
     }
 
-    /// Move focus to the next focusable window in cycle order.
-    /// Returns `true` if focus changed. Modal-aware: when an
-    /// `active_modal` overlay is open, cycles through that overlay's
-    /// focusable leaves only. Returns `false` outside a modal —
-    /// cross-source (split + overlay-leaf) z-order is gated on the
-    /// unified Ui facade.
     #[cfg(test)]
     fn focus_next(&mut self) -> bool {
         self.focus_step(1)
     }
 
-    /// Move focus to the previous focusable window. See `focus_next`
-    /// for cycling and modal-awareness rules.
     #[cfg(test)]
     fn focus_prev(&mut self) -> bool {
         self.focus_step(-1)
@@ -883,60 +667,37 @@ impl Ui {
         self.set_focus(target)
     }
 
-    // ── Capture (in-flight gesture) ──────────────────────────────
+    // ── Capture ──────────────────────────────────────────────────
 
-    /// In-flight gesture target, if any. Mouse routing should consult
-    /// this before [`Self::hit_test`]: while a gesture is captured,
-    /// drag rows must continue flowing to the same target even if the
-    /// pointer drifts off its rect.
     pub fn capture(&self) -> Option<HitTarget> {
         self.capture
     }
 
-    /// Latch a gesture target. Call on mouse-down once the host has
-    /// decided which target should own the in-flight gesture (e.g.
-    /// scrollbar hit). `clear_capture` releases it on mouse-up;
-    /// `set_layout` / `overlay_close` auto-release if the target's
-    /// owning split or overlay disappears.
     fn set_capture(&mut self, target: HitTarget) {
         self.capture = Some(target);
     }
 
-    /// Release the in-flight gesture target. Idempotent.
     fn clear_capture(&mut self) {
         self.capture = None;
         self.drag_autoscroll_since = None;
     }
 
-    /// Read the current global cursor shape.
     pub fn cursor_shape(&self) -> CursorShape {
         self.cursor_shape
     }
 
-    /// Set the global cursor shape for the focused window. Hosts call
-    /// this each frame as the focused window's mode/state changes —
-    /// for unfocused frames, set to [`CursorShape::Hidden`].
     pub fn set_cursor_shape(&mut self, shape: CursorShape) {
         self.cursor_shape = shape;
     }
 
-    /// When drag-autoscroll is engaged, the timestamp it started.
-    /// Hosts read this from their main-loop timer arm to ramp the
-    /// tick interval (longer parking = faster scroll). `None` when
-    /// no autoscroll is active.
+    /// Timestamp when edge-drag autoscroll started; hosts use this to ramp the tick interval.
     pub fn drag_autoscroll_started(&self) -> Option<std::time::Instant> {
         self.drag_autoscroll_since
     }
 
-    /// Per-tick drag-autoscroll query. While the captured window's
-    /// cursor sits on the top or bottom row of its viewport, returns
-    /// `Some((win, delta))` where `delta` is `-1` (top) or `+1`
-    /// (bottom) — hosts perform the per-pane scroll-by-line action
-    /// for the returned window. The internal "started at" timestamp
-    /// is set on first edge engagement and cleared when the cursor
-    /// leaves the edge or capture releases. Reads `cursor_line` and
-    /// the painted viewport height from the captured window directly,
-    /// so hosts don't need to thread per-pane state.
+    /// While the captured window's cursor is parked at a viewport edge, returns
+    /// `Some((win, delta))` with `delta = -1` (top) or `+1` (bottom). Manages the
+    /// autoscroll timestamp internally.
     pub fn poll_drag_autoscroll(&mut self) -> Option<(WinId, isize)> {
         let win_id = match self.capture {
             Some(HitTarget::Window(w)) => w,
@@ -957,10 +718,6 @@ impl Ui {
             self.drag_autoscroll_since = None;
             return None;
         }
-        // `cursor_line` is viewport-relative: 0 = top row,
-        // viewport-1 = bottom row. Top edge → cursor-up (-1) to
-        // reveal older rows; bottom edge → cursor-down (+1) to
-        // reveal newer rows.
         let delta: isize = if win.cursor_line == 0 {
             -1
         } else if (win.cursor_line as usize) >= viewport_h.saturating_sub(1) {
@@ -983,18 +740,13 @@ impl Ui {
         }
     }
 
-    // ── Renderer delegation ───────────────────────────────────────
+    // ── Renderer ─────────────────────────────────────────────────
 
     pub fn render<W: std::io::Write>(&mut self, w: &mut W) -> std::io::Result<()> {
         self.render_with_paints(w, |_, _, _| {})
     }
 
-    /// Render one frame, delegating `LayoutTree::Paint(id)` leaves to
-    /// `paint(id, slice, ctx)`. Hosts that mix `Window`-backed splits
-    /// with custom paint regions (treemaps, sparklines, plots) match
-    /// on `PaintId` inside the closure to dispatch to their painters.
-    /// Both splits-tree and overlay layouts route through the same
-    /// dispatcher.
+    /// Render one frame, delegating non-Window `Paint(id)` leaves to `paint(id, slice, ctx)`.
     pub fn render_with_paints<W, F>(&mut self, w: &mut W, mut paint: F) -> std::io::Result<()>
     where
         W: std::io::Write,
@@ -1005,9 +757,6 @@ impl Ui {
             .into_iter()
             .map(|(id, rect, ov)| (id, rect, ov.clone()))
             .collect();
-        // Snapshot splits leaves with their resolved rects so the
-        // post-layer closure can paint them without re-borrowing
-        // `self`.
         let split_rects = self.resolve_splits();
         let painted_splits: Vec<(WinId, Rect)> = self
             .splits()
@@ -1018,17 +767,9 @@ impl Ui {
                 split_rects.get(&win).map(|r| (win, *r))
             })
             .collect();
-        // Pre-pass: drive `Buffer::ensure_rendered_at` on each overlay
-        // leaf at the width its leaf rect resolves to, so parsers
-        // (markdown / plain wrap / diff / syntax) populate their
-        // `lines` vector before the immutable paint walk reads them.
-        // Also publish each leaf's resolved rect onto `Window.viewport`
-        // so any input dispatch path (vim navigation in `/messages`,
-        // mouse hit-testing, etc.) sees the same geometry the
-        // compositor will paint into. Production overlay leaves had
-        // no viewport otherwise — well-known windows (transcript,
-        // prompt) get theirs assigned in `app/render_loop.rs`, but
-        // Lua-built overlay leaves were left as `None`.
+        // Pre-pass: call `ensure_rendered_at` on each overlay leaf so parsers populate
+        // their lines before the immutable paint walk. Also writes `Window.viewport` so
+        // input dispatch (vim nav, mouse hit-test) sees the same geometry as the compositor.
         for (_id, rect, overlay) in &resolved {
             let leaf_rects = layout::resolve_layout(&overlay.layout, *rect);
             for (paint_id, leaf_rect) in &leaf_rects {
@@ -1055,7 +796,6 @@ impl Ui {
                 }
             }
         }
-        // Same pre-pass for painted splits.
         for (win_id, rect) in &painted_splits {
             let Some(buf_id) = self.wins.get(win_id).map(|w| w.buf) else {
                 continue;
@@ -1064,16 +804,9 @@ impl Ui {
                 buf.ensure_rendered_at(rect.width);
             }
         }
-        // Resolve the focused window's hardware cursor (if any) so
-        // input panels / cmdline / prompt draw a visible caret. The
-        // compositor's focused-layer cursor path doesn't see overlay
-        // leaves or painted splits; we route the cursor through
-        // `render_with`'s closure return. The global `cursor_shape`
-        // gates this — only `Hardware` surfaces a caret. `Block`
-        // paints in-place via `Window::render`. Overlay > painted
-        // split priority order is preserved (overlay first, painted
-        // split as fallback); the compositor's focused-layer path
-        // applies when the closure returns `None`.
+        // Hardware cursor: overlay leaves and painted splits are outside the compositor's
+        // focused-layer cursor path, so we compute the absolute position here and return
+        // it from the closure. Overlay wins over split if both are focused.
         let cursor_override = if matches!(self.cursor_shape, CursorShape::Hardware) {
             self.focused_overlay_cursor(&resolved)
                 .or_else(|| self.focused_painted_split_cursor())
@@ -1095,14 +828,6 @@ impl Ui {
             .compositor_mut()
             .render_with(&theme_for_compositor, w, move |grid, _theme| {
                 let theme = &theme_arc;
-                // Editor-aware paint dispatcher: every `LayoutTree::Leaf`
-                // carries a `PaintId`. If the id maps onto a known
-                // `WinId`, route through `Window::render` with the right
-                // focused / cursor-shape context. Otherwise hand off to
-                // the host's `paint` callback for custom regions
-                // (treemaps, sparklines, etc.). The renderer
-                // (`paint_layout_node`) is purely structural — it doesn't
-                // know about windows.
                 let mut dispatch = |id: PaintId,
                                     area: Rect,
                                     grid: &mut Grid,
@@ -1140,10 +865,6 @@ impl Ui {
                     };
                     paint(id, &mut slice, &ctx);
                 };
-                // Paint splits first so overlays draw on top, matching the
-                // prior order (status was a compositor layer at z=500;
-                // overlays in the closure ran *after* every compositor
-                // layer paint, so any overlap landed overlays-over-status).
                 paint_layout_tree(
                     grid,
                     theme,
@@ -1159,11 +880,7 @@ impl Ui {
             })
     }
 
-    /// Bypass the layout tree and overlay machinery entirely. The
-    /// closure paints directly into the compositor's `Grid` and may
-    /// optionally return a hardware cursor position. Useful for hosts
-    /// that own all layout themselves and only want smelt-term's
-    /// double-buffered diff/flush + synchronized-update wrapping.
+    /// Paint directly into the compositor's `Grid`, bypassing layout and overlay machinery.
     pub fn render_raw<W, F>(&mut self, w: &mut W, paint: F) -> std::io::Result<()>
     where
         W: std::io::Write,
@@ -1172,9 +889,7 @@ impl Ui {
         self.surface.render_raw(w, paint)
     }
 
-    /// Resolved screen rect for a `PaintId` leaf, searching the
-    /// splits tree and (z-order) overlay layouts. Returns `None`
-    /// when the id isn't in any current layout.
+    /// Resolved screen rect for a `PaintId` leaf across splits and overlays.
     pub fn paint_rect(&self, id: PaintId) -> Option<Rect> {
         let (term_w, term_h) = self.surface.terminal_size();
         let area = Rect::new(0, 0, term_w, term_h);
@@ -1189,21 +904,13 @@ impl Ui {
         None
     }
 
-    /// Render the current state into the compositor (discarding SGR
-    /// output) and return a structured snapshot of the resulting
-    /// frame. Used by the L3 storybook harness; in production, the
-    /// compositor's previous-grid is internal state.
+    /// Render to a sink and return the resulting grid snapshot. Used by the storybook harness.
     pub fn snapshot(&mut self) -> SnapshotFrame {
         let mut sink = std::io::sink();
         self.render(&mut sink).expect("snapshot render to sink");
         SnapshotFrame::from_grid(self.surface.compositor().previous())
     }
 
-    /// Compute the absolute hardware cursor position for the focused
-    /// overlay leaf, given pre-resolved overlay rects. Returns `None`
-    /// when no overlay leaf is focused or the cursor falls outside the
-    /// leaf's rect. `Window::cursor_line` is viewport-relative so we
-    /// add it directly to the leaf's `top`.
     fn focused_overlay_cursor(
         &self,
         resolved: &[(OverlayId, Rect, Overlay)],
@@ -1228,10 +935,7 @@ impl Ui {
         None
     }
 
-    /// Absolute hardware cursor position for the focused splits leaf.
-    /// `cursor_col` / `cursor_line` are content-local; the leaf's
-    /// `SplitConfig::gutters.pad_left` is applied here so the caret
-    /// lands past chrome.
+    /// Absolute hardware cursor for the focused splits leaf; applies `pad_left` to land past chrome.
     fn focused_painted_split_cursor(&self) -> Option<(u16, u16)> {
         let focus = self.focus?;
         if !self.splits().contains_leaf(focus) {
@@ -1253,47 +957,14 @@ impl Ui {
         self.surface.theme().as_ref()
     }
 
-    /// Mutable theme access. Triggers a copy-on-write clone via
-    /// `Arc::make_mut` if any [`DrawContext`] from a previous frame
-    /// still holds a reference to the prior theme; otherwise mutates
-    /// the shared registry in place.
     pub fn theme_mut(&mut self) -> &mut Theme {
         self.surface.theme_mut()
     }
 
-    /// Single Ui-side entry point for terminal events. Fans out by
-    /// variant:
-    ///
-    /// - [`Event::Key`] — routes through the focused window's keymap
-    ///   table (resolved via [`Ui::focus`]). Bare Esc or Ctrl-C on an
-    ///   active modal fires [`WinEvent::Dismiss`] on the modal's root
-    ///   leaf and closes the modal as a built-in; subsequent variants
-    ///   route through the regular [`Callbacks`] registry so
-    ///   `on_event("dismiss", …)` handlers can flush pending state.
-    ///   `lua_invoke` is called for each `Callback::Lua` with
-    ///   (handle, win, payload); side effects flow through host-side
-    ///   plumbing.
-    /// - [`Event::Resize`] — applies to [`Ui::set_terminal_size`] and
-    ///   reports `Consumed`. Hosts may still do additional resize
-    ///   work (cache invalidation, layout adapters) on top.
-    /// - [`Event::Mouse`] — absorbs wheel events that drift over a
-    ///   focused overlay (so they don't bleed into the transcript
-    ///   below), absorbs clicks/drags outside the rect of an active
-    ///   modal overlay, and owns the scrollbar drag gesture: a
-    ///   left-Down on a painted scrollbar latches a
-    ///   [`HitTarget::Scrollbar`] capture and snaps the owning
-    ///   window's `scroll_top`; subsequent left-Drag rows re-snap
-    ///   while the capture holds; left-Up releases the capture.
-    ///   Hosts mirroring `scroll_top` elsewhere read it back from
-    ///   [`Ui::win`] after dispatch returns `Consumed` and apply any
-    ///   per-window side effects (re-anchor, follow-tail). All other
-    ///   mouse routing (content drag, click counts, prompt/transcript
-    ///   cursor positioning) stays host-side; Ui returns `Ignored`
-    ///   so the host can continue routing.
-    /// - [`Event::FocusGained`] / [`Event::FocusLost`] /
-    ///   [`Event::Paste`] — Ui has no state to update; returns
-    ///   `Ignored` so hosts can track terminal focus / drive
-    ///   paste-side effects.
+    /// Route a terminal event. Key: fires keymaps; bare Esc/Ctrl-C on a modal dismisses it.
+    /// Resize: updates terminal size. Mouse: owns scrollbar drag and chrome drag; absorbs
+    /// wheel on focused overlays and clicks blocked by a modal. Returns `Ignored` for
+    /// everything else so the host can continue routing.
     pub fn dispatch_event(&mut self, ev: Event, lua_invoke: &mut LuaInvoke) -> Status {
         use crossterm::event::{KeyEvent, MouseButton, MouseEventKind};
         match ev {
@@ -1314,11 +985,6 @@ impl Ui {
                             self.apply_scrollbar_drag(owner, me.row);
                             return Status::Consumed;
                         }
-                        // Click-to-front: any Down inside an overlay
-                        // (chrome or leaf) raises its z so it paints
-                        // on top of whatever it overlapped with. The
-                        // Scrollbar branch above already returned, so
-                        // here `hit` is Chrome or Window only.
                         let hit = self.hit_test(me.row, me.column, None);
                         let raise = match hit {
                             Some(HitTarget::Chrome { owner, .. }) => Some(owner),
@@ -1328,19 +994,8 @@ impl Ui {
                         if let Some(owner) = raise {
                             self.raise_overlay_to_front(owner);
                         }
-                        // Drag / resize gestures latch capture so
-                        // subsequent Drag rows land here even when
-                        // the pointer wanders off chrome. `Title`
-                        // and `Body` (side / bottom borders, gap,
-                        // padding) both move the overlay when
-                        // `draggable`; only the bottom-right cell
-                        // (`Resize`) grows / shrinks it. As a UX
-                        // convenience, a click on the *leaf* of a
-                        // draggable overlay whose leaf is
-                        // non-focusable (the perf panel and similar
-                        // passive HUDs) is treated the same as a
-                        // Body chrome hit — so the user can grab
-                        // anywhere on the panel to move it.
+                        // Non-focusable leaf of a draggable overlay is treated as Body chrome
+                        // so the user can grab anywhere on it to move the panel.
                         let drag_target: Option<(OverlayId, overlay::ChromeZone)> = match hit {
                             Some(HitTarget::Chrome { owner, zone }) => Some((owner, zone)),
                             Some(HitTarget::Window(w)) => {
@@ -1377,9 +1032,7 @@ impl Ui {
                                     return Status::Consumed;
                                 }
                             }
-                            // Non-drag chrome click still consumes —
-                            // clicking the border shouldn't fall
-                            // through to the underlying transcript.
+                            // Non-drag chrome click still consumes so it doesn't fall through.
                             if matches!(hit, Some(HitTarget::Chrome { .. })) {
                                 return Status::Consumed;
                             }
@@ -1418,13 +1071,7 @@ impl Ui {
                 if is_scroll && self.focused_overlay().is_some() {
                     return Status::Consumed;
                 }
-                // Modal blocks events that fall on splits (no overlay
-                // hit) when a modal is open: the host's splits-mouse
-                // routing must not promote focus into the transcript /
-                // prompt while a modal is up. Clicks on visible
-                // non-modal overlays already returned via the Down
-                // chrome / drag arms above; this branch only triggers
-                // for the splits fallthrough.
+                // Modal blocks splits hits while open; overlay hits already returned above.
                 if self.active_modal().is_some()
                     && self.overlay_hit_test(me.row, me.column, None).is_none()
                 {
@@ -1436,12 +1083,7 @@ impl Ui {
         }
     }
 
-    /// Promote `id` above every other overlay's `z`. Called on any
-    /// Down inside an overlay so the clicked one paints on top of
-    /// whatever it overlapped with. Same-z fall-back rule (insertion
-    /// order) means overlays opened together don't shuffle each
-    /// other on idle clicks — only the explicit raise here moves an
-    /// overlay above its peers.
+    /// Raise `id` above all other overlays' `z`. Called on any Down inside an overlay.
     fn raise_overlay_to_front(&mut self, id: OverlayId) {
         let max_z = self.overlays.iter().map(|(_, o)| o.z).max().unwrap_or(0);
         if let Some((_, ov)) = self.overlays.iter_mut().find(|(oid, _)| *oid == id) {
@@ -1449,20 +1091,13 @@ impl Ui {
         }
     }
 
-    /// Resolve overlay `id`'s current screen rect using whatever
-    /// cursor / split state is live. Used by the chrome-drag handler
-    /// to snapshot the starting rect when a Down latches a gesture.
     fn resolved_overlay_rect(&self, id: OverlayId) -> Option<Rect> {
         self.resolve_overlays(None)
             .into_iter()
             .find_map(|(oid, rect, _)| if oid == id { Some(rect) } else { None })
     }
 
-    /// Apply a chrome drag delta to the captured overlay. `Title` and
-    /// `Body` (side / bottom borders, gap, padding) both rewrite
-    /// `anchor` to a `ScreenAt { NW, … }` pinned at the new top-left
-    /// so subsequent frames resolve to the moved rect. `Resize`
-    /// updates `size_override`, clamped to [`MIN_OVERLAY_SIZE`].
+    /// Apply a chrome-drag delta. Title/Body move the overlay via `ScreenAt`; Resize grows it.
     fn apply_chrome_drag(&mut self, drag: ChromeDrag, row: u16, col: u16) {
         let dy = row as i32 - drag.origin_row as i32;
         let dx = col as i32 - drag.origin_col as i32;
@@ -1492,11 +1127,6 @@ impl Ui {
         }
     }
 
-    /// Translate a scrollbar-drag pointer row into a scroll offset on
-    /// `owner`'s painted viewport and write it to
-    /// `Ui::wins[owner].scroll_top`. No-op when `owner` is missing or
-    /// has no painted scrollbar — defensive against torn state when a
-    /// drag outlives the underlying viewport.
     fn apply_scrollbar_drag(&mut self, owner: WinId, row: u16) {
         let Some(win) = self.wins.get(&owner) else {
             return;
@@ -1522,11 +1152,7 @@ impl Ui {
         lua_invoke: &mut LuaInvoke,
     ) -> Status {
         let key = KeyBind::new(code, mods);
-        // Pending follow-up dispatched after the keymap callback
-        // returns. `CallbackResult::Event` writes here so a Rust
-        // callback can synthesize a `WinEvent` (e.g. a list's Enter
-        // binding firing `Submit`) without needing direct access to
-        // `lua_invoke`.
+        // `CallbackResult::Event` writes here to synthesize a WinEvent after the key callback.
         let mut follow_up: Option<(WinEvent, Payload)> = None;
         let result = if let Some(win) = self.focus() {
             if let Some(mut cb) = self.callbacks.take_keymap(win, key) {
@@ -1594,10 +1220,7 @@ impl Ui {
             }
         }
 
-        // Esc / Ctrl-C chain: if the focused window ignored bare
-        // Esc or Ctrl-C, fall through to dismissing the active modal.
-        // This lets a leaf consume Esc first (e.g. clearing its own
-        // selection) before the overlay closes.
+        // Leaf gets first dibs on Esc/Ctrl-C; if ignored, dismiss the active modal.
         let is_dismiss_chord = matches!(code, crossterm::event::KeyCode::Esc)
             && mods == crossterm::event::KeyModifiers::NONE
             || matches!(code, crossterm::event::KeyCode::Char('c'))
@@ -1611,10 +1234,7 @@ impl Ui {
                 {
                     self.fire_win_event(root, WinEvent::Dismiss, Payload::None, lua_invoke);
                 }
-                // The Lua dismiss handler may have already called
-                // `smelt.win.close(...)` (which routes through
-                // `Ui::win_close` → `overlay_close`). Re-check before
-                // closing so we don't double-pop focus_history.
+                // Guard: Lua dismiss handler may have already closed the overlay.
                 if self.overlay(modal).is_some() {
                     let _ = self.overlay_close(modal);
                 }
@@ -1625,10 +1245,6 @@ impl Ui {
         result
     }
 
-    /// Fire `WinEvent::Tick` on every window that has a registered
-    /// Tick callback. Used by the app event loop to drive per-frame
-    /// refresh of dialogs with live external state (process registry,
-    /// …).
     pub fn dispatch_tick(&mut self, lua_invoke: &mut LuaInvoke) {
         let wins: Vec<WinId> = self.callbacks.wins_with_event(WinEvent::Tick);
         for win in wins {
@@ -1647,85 +1263,33 @@ impl Default for Ui {
     }
 }
 
-/// Compositor-bearing surface that frontends touching the screen
-/// expose. Sibling to the `Host` trait in `tui::app::host` —
-/// `UiHost` is **independent** of `Host` (no supertrait bound)
-/// because `ui` cannot reference tui-defined types. Frontends that
-/// need both impl each side by side.
-///
-/// Only `TuiApp` impls this trait. `HeadlessApp` does not — the
-/// UiHost-only Lua bindings (`smelt.ui`, `smelt.win`, `smelt.buf`,
-/// `smelt.statusline`) raise a runtime error when invoked from a
-/// headless context (wired in P2.b.5).
-///
-/// Method names mirror `Ui`'s inherent surface so call sites read
-/// the same whether they go through the trait or directly. `Ui`
-/// also impls this trait — useful for tests that want to exercise
-/// compositor-touching code without spinning up a full frontend.
+/// Compositor-bearing surface exposed by frontends. `TuiApp` implements this; `HeadlessApp`
+/// does not — UiHost-only Lua bindings raise a runtime error in headless context.
+/// `Ui` also impls it so tests can exercise compositor code without a full frontend.
 pub trait UiHost {
-    /// Borrow the inner `Ui` directly. Lets compositor-touching
-    /// code reach helpers (overlay enumeration, hit-test, focus
-    /// history, theme, render) without growing the trait surface.
     fn ui(&mut self) -> &mut Ui;
-
-    /// Set keyboard focus to `win`. Returns `true` if focus
-    /// changed. Mirrors [`Ui::set_focus`].
     fn set_focus(&mut self, win: WinId) -> bool;
-
-    /// Create a fresh buffer with an auto-allocated `BufId`.
-    /// Mirrors [`Ui::buf_create`].
     fn buf_create(&mut self, opts: BufCreateOpts) -> BufId;
-
-    /// Mutably borrow a buffer by id. Mirrors [`Ui::buf_mut`].
     fn buf_mut(&mut self, id: BufId) -> Option<&mut Buffer>;
-
-    /// Open a split-tree window backed by `buf`. Mirrors
-    /// [`Ui::win_open_split`].
     fn win_open_split(&mut self, buf: BufId, config: SplitConfig) -> Option<WinId>;
-
-    /// Close a window. Returns the Lua callback IDs that were
-    /// attached so the caller can drop them from the Lua-side
-    /// registry. Mirrors [`Ui::win_close`].
     #[must_use]
     fn win_close(&mut self, id: WinId) -> Vec<u64>;
-
-    /// Mutably borrow a window by id. Mirrors [`Ui::win_mut`].
     fn win_mut(&mut self, id: WinId) -> Option<&mut Window>;
-
-    /// Register an overlay. Mirrors [`Ui::overlay_open`].
     fn overlay_open(&mut self, overlay: Overlay) -> OverlayId;
 
-    /// Last-painted viewport rect + content width + scrollbar geometry
-    /// for `win`. Mirrors `Ui::win(win)?.viewport`. Hosts that project
-    /// per-pane geometry through other paths (compositor cache, splits
-    /// resolution) override this to keep one accessor canonical for
-    /// mouse routing.
+    /// Last-painted viewport for `win`. Hosts override when they project geometry differently.
     fn viewport_for(&self, win: WinId) -> Option<WindowViewport>;
 
-    /// Display rows for `win` — the same `&[String]` shape that
-    /// [`MouseCtx::rows`] carries. The default implementation reads the
-    /// backing buffer's lines (one row per source line, no soft wrap).
-    /// Hosts override for windows whose painted rows differ from the
-    /// source: the prompt window returns wrapped rows;
-    /// the transcript window returns the projected display rows that
-    /// include ephemeral content. Returns `None` when the window or its
-    /// buffer is missing.
+    /// Display rows for `win`. Default reads the backing buffer's lines.
+    /// Hosts override for windows whose painted rows differ from the source
+    /// (wrapped prompt, transcript projection).
     fn rows_for(&mut self, win: WinId) -> Option<Vec<String>>;
 
-    /// Soft and hard line-break byte positions in
-    /// `rows_for(win)?.join("\n")`. Soft positions mark word-wrap
-    /// continuations (transparent to word-select); hard positions mark
-    /// real `\n` separators (the unit triple-click extends to). The
-    /// default implementation treats every join as a hard break and
-    /// returns no soft breaks. Hosts override for wrapped panes.
-    /// Returns `None` when the window or its buffer is missing.
+    /// Soft (word-wrap) and hard (`\n`) break byte positions in `rows_for(win)?.join("\n")`.
+    /// Default returns no soft breaks and hard breaks at join points.
     fn breaks_for(&mut self, win: WinId) -> Option<(Vec<usize>, Vec<usize>)>;
 }
 
-/// `Ui` impls `UiHost` so direct `&mut Ui` callers (tests, helpers
-/// that already hold the `Ui`) can dispatch through the trait too.
-/// Bodies use the explicit `Ui::method(self, …)` path syntax to
-/// disambiguate from the trait's same-named method.
 impl UiHost for Ui {
     fn ui(&mut self) -> &mut Ui {
         self
@@ -1776,16 +1340,10 @@ impl UiHost for Ui {
     }
 }
 
-/// Floor on `(width, height)` a resize gesture can shrink an overlay
-/// to. Tight enough to keep chrome (border + 1 content cell) usable
-/// without letting the user collapse an overlay to nothing.
+/// Minimum `(width, height)` a resize gesture can shrink an overlay to.
 const MIN_OVERLAY_SIZE: (u16, u16) = (8, 3);
 
-/// Classify a chrome hit `(row, col)` inside an overlay's resolved
-/// rect. Top border row is `Title` (the canonical drag handle when
-/// `draggable`); the bottom-right border cell is `Resize` when
-/// `resizable`; everything else is `Body`. Caller has already
-/// confirmed `(row, col)` lives in `rect`.
+/// Classify a chrome hit inside an overlay rect: top row → Title, bottom-right cell → Resize, else Body.
 fn chrome_zone(rect: Rect, ov: &Overlay, row: u16, col: u16) -> overlay::ChromeZone {
     if ov.resizable
         && rect.height >= 1
@@ -1801,10 +1359,7 @@ fn chrome_zone(rect: Rect, ov: &Overlay, row: u16, col: u16) -> overlay::ChromeZ
     overlay::ChromeZone::Body
 }
 
-/// Paint one resolved overlay into `grid`. Overlays are opaque: clear
-/// the rect first so layers below don't bleed through gap rows or
-/// buffer lines that don't fill the leaf width, then walk the overlay's
-/// layout tree via `smelt_term::paint_layout_tree`.
+/// Paint one resolved overlay: clear the rect (overlays are opaque) then walk its layout tree.
 fn paint_overlay(
     grid: &mut Grid,
     theme: &std::sync::Arc<Theme>,
@@ -1827,10 +1382,6 @@ mod tests {
         ui
     }
 
-    /// Dispatch a bare key through `Ui::dispatch_event` with a no-op
-    /// `lua_invoke`. The Lua-runtime collaboration is exercised by
-    /// the `tui` integration tests; tests here only assert on
-    /// dispatcher behaviour.
     fn dispatch_key(
         ui: &mut Ui,
         code: crossterm::event::KeyCode,
@@ -1842,11 +1393,6 @@ mod tests {
         )
     }
 
-    /// Open a Buffer-backed split Window at `win_id` and append it as
-    /// a leaf to the splits tree — the test-only equivalent of what
-    /// `TuiApp::new` does at startup for the prompt / transcript / status
-    /// windows. Most focus / overlay tests just need a focusable target
-    /// to exercise; this helper takes the boilerplate.
     fn make_split(ui: &mut Ui, win_id: WinId) {
         let buf = ui.buf_create(BufCreateOpts::default());
         assert!(ui.win_open_split_at(
@@ -1878,7 +1424,7 @@ mod tests {
         assert!(rust_second.0 < LUA_BUF_ID_BASE);
     }
 
-    // ── Overlay API (P1.c) ───────────────────────────────────────────
+    // ── Overlay API ──────────────────────────────────────────────────
 
     fn stub_overlay() -> Overlay {
         let layout = LayoutTree::vbox(vec![(Constraint::Fill, LayoutTree::leaf(WinId(99)))]);
@@ -2448,7 +1994,7 @@ mod tests {
         let win = WinId(50);
         make_split(&mut ui, win);
         ui.set_focus(win);
-        // No modal open → focus cycling is a no-op (gated on P1.f).
+        // No modal open → focus cycling is a no-op.
         assert!(!ui.focus_next());
         assert_eq!(ui.focus(), Some(win));
     }
@@ -3207,14 +2753,14 @@ mod tests {
         assert_eq!(frame.cell(31, 10).symbol, 't');
     }
 
-    // ── UiHost trait dispatch (P2.b.2) ───────────────────────────────
+    // ── UiHost trait dispatch ────────────────────────────────────────
 
     #[test]
     fn ui_host_dispatch_round_trips_through_dyn() {
         // Drive every UiHost method through `&mut dyn UiHost` so the
         // trait shape is exercised end-to-end (not just the inherent
-        // path). Mirrors how P2.b.5's Lua bindings will reach the
-        // compositor — by trait, not by direct field access.
+        // path). Mirrors how Lua bindings reach the compositor — by
+        // trait, not by direct field access.
         fn drive(host: &mut dyn UiHost) -> (BufId, WinId, OverlayId) {
             let buf = host.buf_create(BufCreateOpts::default());
             host.buf_mut(buf)
@@ -3278,7 +2824,7 @@ mod tests {
         assert!(ui.buf(buf).is_some());
     }
 
-    // ── UiHost per-pane data accessors (P2.b.4c.5b) ──────────────────
+    // ── UiHost per-pane data accessors ───────────────────────────────
 
     #[test]
     fn ui_host_per_pane_data_default_impl() {

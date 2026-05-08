@@ -1,8 +1,4 @@
 //! Authentication façade for provider login/logout and cached model lists.
-//!
-//! Consumers (`smelt auth`, the first-run wizard) should prefer this module
-//! over reaching into `provider::codex` / `provider::copilot` directly. This
-//! keeps provider internals free to evolve without breaking callers.
 
 use crate::provider;
 
@@ -22,16 +18,11 @@ pub enum LoginMethod {
     DeviceCode,
 }
 
-/// Callbacks invoked during interactive login flows.
-///
-/// `on_prompt` is called once with the URL to open and the code to enter.
-/// `on_message` is called for each status update (polling, progress, etc.).
 pub struct LoginProgress<'a> {
     pub on_prompt: &'a (dyn Fn(&str, &str) + Send + Sync),
     pub on_message: &'a (dyn Fn(&str) + Send + Sync),
 }
 
-/// Human-readable details about a successful login (for display only).
 #[derive(Debug, Default, Clone)]
 pub struct LoginDetails {
     pub account_id: Option<String>,
@@ -58,9 +49,7 @@ pub fn logout(provider: AuthProvider) {
     }
 }
 
-/// Return the cached model identifiers for a provider (loaded from disk).
-/// The identifier is the string the user types to select the model
-/// (Codex "slug", Copilot "id").
+/// Return cached model identifiers for a provider (Codex slug, Copilot id).
 pub fn cached_models(kind: AuthProvider) -> Vec<String> {
     match kind {
         AuthProvider::Codex => provider::codex::load_cached_models()
@@ -74,7 +63,6 @@ pub fn cached_models(kind: AuthProvider) -> Vec<String> {
     }
 }
 
-/// Whether the user has stored credentials for this OAuth provider.
 pub fn is_logged_in(provider: AuthProvider) -> bool {
     match provider {
         AuthProvider::Codex => provider::codex::CodexTokens::load().is_some(),
@@ -82,9 +70,7 @@ pub fn is_logged_in(provider: AuthProvider) -> bool {
     }
 }
 
-/// Refresh the cached model list from the provider's API. Returns the
-/// freshly fetched identifiers, or an empty vec on failure (logged by the
-/// underlying implementation).
+/// Fetch fresh model identifiers from the provider API, or return empty on failure.
 pub async fn refresh_models_cache(kind: AuthProvider, client: &reqwest::Client) -> Vec<String> {
     match kind {
         AuthProvider::Codex => provider::codex::refresh_models_cache(client)
@@ -99,8 +85,6 @@ pub async fn refresh_models_cache(kind: AuthProvider, client: &reqwest::Client) 
             .collect(),
     }
 }
-
-// ── internals ─────────────────────────────────────────────────────────────
 
 async fn codex_login(
     method: LoginMethod,

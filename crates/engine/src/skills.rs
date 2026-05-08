@@ -6,29 +6,21 @@ struct SkillFrontmatter {
     description: String,
 }
 
-/// A discovered skill with its pre-formatted content for the LLM.
 #[derive(Debug, Clone)]
 struct SkillEntry {
     name: String,
     description: String,
-    /// Pre-built content string returned by `content()`.
     formatted: String,
 }
 
-/// Loads and caches skills from well-known directories.
 #[derive(Debug, Clone)]
 pub struct SkillLoader {
     skills: HashMap<String, SkillEntry>,
-    /// Pre-built system prompt section (computed once at load time).
     prompt_section: Option<String>,
 }
 
 impl SkillLoader {
-    /// Scan all skill directories and load SKILL.md files.
-    /// Directories searched (later entries override earlier ones):
-    ///   1. ~/.config/smelt/skills/*/SKILL.md
-    ///   2. .smelt/skills/*/SKILL.md (project-local)
-    ///   3. Any extra paths from config
+    /// Load skills from global, project-local, and extra directories. Later entries override earlier ones.
     pub fn load(extra_paths: &[PathBuf]) -> Self {
         let mut skills = HashMap::new();
 
@@ -50,8 +42,6 @@ impl SkillLoader {
         }
     }
 
-    /// Get skill content wrapped in tags for the LLM.
-    /// Returns `Ok(content)` if found, `Err(message)` if not.
     pub fn content(&self, name: &str) -> Result<String, String> {
         match self.skills.get(name) {
             Some(entry) => Ok(entry.formatted.clone()),
@@ -70,15 +60,12 @@ impl SkillLoader {
         }
     }
 
-    /// List loaded skill names alphabetically. Used by the Lua
-    /// `smelt.skills.list()` binding for plugins that want to enumerate.
     pub fn names(&self) -> Vec<String> {
         let mut out: Vec<String> = self.skills.keys().cloned().collect();
         out.sort();
         out
     }
 
-    /// Pre-built system prompt section listing available skills.
     pub fn prompt_section(&self) -> Option<&str> {
         self.prompt_section.as_deref()
     }
@@ -122,7 +109,6 @@ fn parse_skill(path: &Path) -> Option<SkillEntry> {
     let (fm, body) = split_frontmatter(&text)?;
     let meta = parse_frontmatter(fm)?;
 
-    // Pre-build the formatted output
     let mut formatted = format!("<skill name=\"{}\">\n{}", meta.name, body);
 
     if let Some(dir) = path.parent() {
@@ -145,7 +131,6 @@ fn parse_skill(path: &Path) -> Option<SkillEntry> {
     })
 }
 
-/// Split a markdown file into (frontmatter_yaml, body) at `---` delimiters.
 fn split_frontmatter(text: &str) -> Option<(&str, &str)> {
     let text = text.trim_start();
     if !text.starts_with("---") {
@@ -158,9 +143,7 @@ fn split_frontmatter(text: &str) -> Option<(&str, &str)> {
     Some((yaml, body))
 }
 
-/// Parse a minimal YAML frontmatter block: only `name` and `description`
-/// keys are recognised. Values may be unquoted, double-quoted, or
-/// single-quoted strings.
+/// Parse `name` and `description` from a minimal YAML frontmatter block.
 fn parse_frontmatter(yaml: &str) -> Option<SkillFrontmatter> {
     let mut name = None;
     let mut description = String::new();
@@ -190,7 +173,6 @@ fn unquote_yaml(s: &str) -> String {
     s.to_string()
 }
 
-/// List non-SKILL.md files in a skill directory (up to 10).
 fn list_bundled_files(dir: &Path) -> Vec<String> {
     let Ok(entries) = std::fs::read_dir(dir) else {
         return vec![];

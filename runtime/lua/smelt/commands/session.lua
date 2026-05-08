@@ -1,4 +1,4 @@
--- Built-in session lifecycle commands: /clear, /new, /fork, /branch.
+-- Session lifecycle commands: /clear, /new, /fork, /branch.
 
 smelt.cmd.register("clear", function()
   smelt.session.reset()

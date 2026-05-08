@@ -1,9 +1,5 @@
--- Built-in /permissions command.
---
--- Lists session + workspace permission rules. Backspace (or the `dd`
--- vim chord) deletes the selected row. On any close path, the
--- runtime approvals and workspace config are rewritten via
--- `permissions.sync` so the user's edits persist.
+-- Built-in /permissions command. Lists and deletes session/workspace rules;
+-- syncs on close so edits persist.
 
 local function build_items(perms)
   local items = {}

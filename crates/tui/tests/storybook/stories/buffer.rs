@@ -1,7 +1,4 @@
-//! Buffer-content stories — extmark painting, line decoration,
-//! virtual text, soft-wrap, unicode width handling. Drives `Buffer`
-//! mutators directly through `ctx.ui.buf_mut(...)`; nothing here
-//! cares about Lua or the engine.
+//! Buffer-content stories.
 
 use smelt_core::buffer::{
     ExtmarkOpts, ExtmarkPayload, HlMode, LineDecoration, SpanMeta, VirtTextPos,
@@ -31,8 +28,6 @@ fn open_with_lines(ctx: &mut StoryCtx, lines: &[&str], w: u16, h: u16) -> BufId 
     buf
 }
 
-// ── Highlight extmarks ────────────────────────────────────────────
-
 story!(highlight_range_paints_in_styles, |ctx| {
     let buf_id = open_with_lines(ctx, &["foo bar baz"], 16, 3);
     let style = Style {
@@ -41,7 +36,7 @@ story!(highlight_range_paints_in_styles, |ctx| {
         ..Style::default()
     };
     if let Some(buf) = ctx.ui.buf_mut(buf_id) {
-        buf.add_highlight(0, 4, 7, style); // highlight "bar"
+        buf.add_highlight(0, 4, 7, style);
     }
     ctx.assert_snapshot();
 });
@@ -65,8 +60,6 @@ story!(multiple_highlights_same_line_layered, |ctx| {
 });
 
 story!(highlight_hl_eol_paints_to_line_end, |ctx| {
-    // hl_eol = true extends a span past `end_col` to the right edge
-    // of the visible row. Useful for diff +/- lines.
     let buf_id = open_with_lines(ctx, &["abc"], 10, 3);
     let style = Style {
         bg: Some(Color::DarkGreen),
@@ -99,8 +92,6 @@ story!(highlight_hl_eol_paints_to_line_end, |ctx| {
     ctx.assert_snapshot();
 });
 
-// ── Line decoration ───────────────────────────────────────────────
-
 story!(decoration_fill_bg_paints_full_row, |ctx| {
     let buf_id = open_with_lines(ctx, &["hello"], 12, 3);
     if let Some(buf) = ctx.ui.buf_mut(buf_id) {
@@ -112,8 +103,6 @@ story!(decoration_fill_bg_paints_full_row, |ctx| {
     }
     ctx.assert_snapshot();
 });
-
-// ── Virtual text ──────────────────────────────────────────────────
 
 story!(virt_text_eol_appends_after_content, |ctx| {
     let buf_id = open_with_lines(ctx, &["code"], 20, 3);
@@ -130,16 +119,12 @@ story!(virt_text_eol_appends_after_content, |ctx| {
     ctx.assert_snapshot();
 });
 
-// ── Unicode width ─────────────────────────────────────────────────
-
 story!(cjk_double_width_glyphs_render, |ctx| {
-    // Each CJK char takes 2 cells; 5 chars → 10 visual columns.
     open_with_lines(ctx, &["你好世界"], 16, 3);
     ctx.assert_snapshot();
 });
 
 story!(emoji_double_width_glyphs_render, |ctx| {
-    // Common emoji cluster + ASCII trailer.
     open_with_lines(ctx, &["smelt: ✨ 🚀 🔥 done"], 24, 3);
     ctx.assert_snapshot();
 });
@@ -148,8 +133,6 @@ story!(mixed_ascii_and_cjk, |ctx| {
     open_with_lines(ctx, &["hello 你好 world"], 20, 3);
     ctx.assert_snapshot();
 });
-
-// ── Edge cases ────────────────────────────────────────────────────
 
 story!(empty_buffer_fills_with_blanks, |ctx| {
     ctx.set_viewport(8, 3);

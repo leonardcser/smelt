@@ -1,7 +1,4 @@
-//! Vim-shaped text-object selection (iw/aw, i"/a", i(/a(, etc.).
-//!
-//! Pure helpers over `&str` buffers — no editor state. Used by the vim
-//! keymap and any other code that wants the same selection semantics.
+//! Vim text-object selection (iw/aw, i"/a", i(/a(, etc.) over `&str` buffers.
 
 use super::text::{char_class, line_end, line_start, CharClass};
 
@@ -37,13 +34,11 @@ fn text_object_word(
     let cur_char = chars[ci].1;
     let cur_class = char_class(cur_char, mode);
 
-    // Newlines are their own unit — never expand across them.
     if cur_char == '\n' {
         let byte_pos = chars[ci].0;
         return Some((byte_pos, byte_pos + 1));
     }
 
-    // Expand backward over same class, stopping at newlines.
     let mut start = ci;
     while start > 0 {
         let prev = chars[start - 1].1;
@@ -52,7 +47,6 @@ fn text_object_word(
         }
         start -= 1;
     }
-    // Expand forward over same class, stopping at newlines.
     let mut end = ci;
     while end + 1 < chars.len() {
         let next = chars[end + 1].1;
@@ -72,8 +66,7 @@ fn text_object_word(
     if inner {
         Some((byte_start, byte_end))
     } else {
-        // "a word" includes trailing whitespace (spaces/tabs, not newlines),
-        // or leading whitespace if no trailing.
+        // "a word" includes trailing whitespace, or leading if none trailing.
         let mut a_end = byte_end;
         while a_end < buf.len() && matches!(buf.as_bytes()[a_end], b' ' | b'\t') {
             a_end += 1;

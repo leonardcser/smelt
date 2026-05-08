@@ -1,10 +1,5 @@
-//! LuaTask runtime — one mechanism for plugin code that needs to suspend.
-//!
-//! A `LuaTask` wraps an `mlua::Thread`. The task runs until it yields a
-//! discriminated table (`{ __yield = "...", ... }`); the runtime parks
-//! the task on a typed `TaskWait`, and the app-loop driver resumes it
-//! when the wait is satisfied (timer elapsed, external resolver fires,
-//! …).
+//! Cooperative Lua task runtime. A task wraps `mlua::Thread`; it runs until it yields
+//! a discriminated `{ __yield = "...", ... }` table and parks on a typed `TaskWait`.
 
 use mlua::prelude::*;
 use std::cell::RefCell;
@@ -12,30 +7,14 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 use tokio_util::sync::CancellationToken;
 
-/// What a parked task is waiting for. When the wait is satisfied the
-/// driver resumes the thread with the stored values.
 enum TaskWait {
-    /// Resume on next drive tick with these values. Tool-execute tasks
-    /// start with `Ready(args, ctx)`; bare `smelt.spawn(fn)` kickoffs
-    /// start with `Ready()`. External resolvers also set this
-    /// (`resolve_external` stores the answer here).
     Ready(LuaMultiValue),
-    /// Resume with `nil` once `Instant` has passed.
     Sleep(Instant),
-    /// Waiting for `resolve_external(id, …)` — either from a Lua
-    /// runtime file calling `smelt.task.resume(id, value)`, or
-    /// from a reducer-side op (dialog/picker open) that
-    /// resolves after doing its work.
     External(u64),
 }
 
-/// What to do when a task's top-level function returns.
 pub enum TaskCompletion {
-    /// `smelt.spawn(fn)` kickoff — return value is discarded, errors
-    /// surface as notifications.
     FireAndForget,
-    /// Tool `execute` handler — return value is delivered to the
-    /// engine as the tool result.
     ToolResult { request_id: u64, call_id: String },
 }
 
@@ -47,53 +26,37 @@ struct LuaTask {
     cancel: CancellationToken,
 }
 
-/// One output per drive tick. The app loop consumes these and maps
-/// them onto Rust-side side effects (deliver a tool result, notify an
-/// error).
 pub enum TaskDriveOutput {
-    /// Tool-execute task returned.
     ToolComplete {
         request_id: u64,
         call_id: String,
         content: String,
         is_error: bool,
     },
-    /// Task errored (bad yield shape, handler panic, …). The app
-    /// queues a `NotifyError`.
     Error(String),
 }
 
-/// Events that drive the Lua task runtime.
 pub enum TaskEvent {
-    /// `smelt.task.resume(id, value)` posts this to route the
-    /// resume through the Lua pump. The pump looks up the parked task
-    /// by `id` and resumes it with the stored value on the next
-    /// `pump_task_events` drain.
+    /// In-thread resume via `smelt.task.resume(id, value)`.
     ExternalResolved {
         external_id: u64,
         value: mlua::RegistryKey,
     },
-    /// Cross-thread resume — pushed by tokio tasks (e.g. streaming
-    /// subprocess spawn) that need to resume a parked Lua coroutine
-    /// from outside the main thread. JSON is `Send`; the pump
-    /// converts it to an `mlua::Value` on the main thread.
+    /// Cross-thread resume from a tokio task; JSON is `Send` and converted on the main thread.
     ExternalResolvedJson {
         external_id: u64,
         value: serde_json::Value,
     },
 }
 
-/// Per-call environment passed to a plugin tool's `execute` handler.
-/// Mirrors the call-scoped fields of the Rust `ToolContext` and is
-/// surfaced to Lua as the second argument of `execute(args, ctx)`.
+/// Second argument of `execute(args, ctx)`.
 pub struct ToolEnv<'a> {
     pub mode: protocol::AgentMode,
     pub session_id: &'a str,
     pub session_dir: &'a std::path::Path,
 }
 
-/// Single-threaded task runtime. All methods must be called on the
-/// thread that owns the `mlua::Lua`.
+/// Single-threaded task runtime; all methods must run on the Lua owner thread.
 pub struct LuaTaskRuntime {
     tasks: Vec<LuaTask>,
     next_task_id: AtomicU64,
@@ -107,9 +70,6 @@ impl LuaTaskRuntime {
         }
     }
 
-    /// Spawn a task from a Lua function. The task runs on the next
-    /// `drive` call; `initial_args` are passed positionally to the
-    /// handler on first resume.
     pub fn spawn(
         &mut self,
         lua: &Lua,
@@ -129,8 +89,7 @@ impl LuaTaskRuntime {
         Ok(id)
     }
 
-    /// Satisfy a `TaskWait::External(id)` wait with the given result
-    /// value. Returns `true` if a matching task was found.
+    /// Resolve a `TaskWait::External(id)` wait; returns `true` if found.
     pub fn resolve_external(&mut self, external_id: u64, value: LuaValue) -> bool {
         for task in &mut self.tasks {
             if matches!(&task.wait, TaskWait::External(id) if *id == external_id) {
@@ -143,8 +102,6 @@ impl LuaTaskRuntime {
         false
     }
 
-    /// Cancel every active task. Sleep tasks become ready with a
-    /// cancel marker; External tasks are resolved with a cancel marker.
     pub fn cancel_all(&mut self, lua: &Lua) {
         let marker = cancelled_marker(lua);
         for task in &mut self.tasks {
@@ -160,9 +117,6 @@ impl LuaTaskRuntime {
         }
     }
 
-    /// Drive all ready tasks once. Each ready task is resumed; if it
-    /// yields, it's parked on a new wait; if it returns, its
-    /// completion is reported.
     pub fn drive(&mut self, lua: &Lua, now: Instant) -> Vec<TaskDriveOutput> {
         let mut outputs = Vec::new();
         let mut i = 0;
@@ -170,7 +124,6 @@ impl LuaTaskRuntime {
             let ready = match &self.tasks[i].wait {
                 TaskWait::Ready(_) => true,
                 TaskWait::Sleep(deadline) => {
-                    // Cancelled sleep tasks wake immediately.
                     self.tasks[i].cancel.is_cancelled() || *deadline <= now
                 }
                 TaskWait::External(_) => false,
@@ -189,16 +142,13 @@ impl LuaTaskRuntime {
         outputs
     }
 
-    /// Resume task at `idx` once. Returns `true` when the task should
-    /// be dropped (finished or errored).
     fn step_task(&mut self, lua: &Lua, idx: usize, outputs: &mut Vec<TaskDriveOutput>) -> bool {
         let task = &mut self.tasks[idx];
         let resume_args =
             match std::mem::replace(&mut task.wait, TaskWait::Ready(LuaMultiValue::new())) {
                 TaskWait::Ready(mv) => mv,
                 TaskWait::Sleep(_) => LuaMultiValue::new(),
-                // unreachable per ready check above:
-                TaskWait::External(_) => LuaMultiValue::new(),
+                TaskWait::External(_) => LuaMultiValue::new(), // unreachable per ready check
             };
         let cancel = task.cancel.clone();
         let result: LuaResult<LuaValue> =
@@ -224,7 +174,6 @@ impl LuaTaskRuntime {
                     }
                     return true;
                 }
-                // Still yielded — decode the yield table.
                 match decode_yield(lua, v) {
                     Ok(Yield::Sleep(d)) => {
                         if task.cancel.is_cancelled() {
@@ -263,16 +212,12 @@ impl LuaTaskRuntime {
     }
 }
 
-// Thread-local slot that holds the current task's cancellation token
-// while its coroutine is executing. Lua bindings that spawn async work
-// read this to wire cancellation through.
+// Thread-local cancellation token for the executing coroutine; read by async Lua bindings.
 thread_local! {
     static CURRENT_TASK_CANCEL: RefCell<Option<CancellationToken>> = const { RefCell::new(None) };
 }
 
-/// Install the current task's cancellation token for the duration of
-/// the closure. Lua async bindings call [`current_task_cancel`] to
-/// propagate cancellation into in-flight tokio tasks.
+/// Install the task's cancellation token for the closure's duration.
 pub fn with_task_cancel<R>(cancel: CancellationToken, f: impl FnOnce() -> R) -> R {
     CURRENT_TASK_CANCEL.with(|c| *c.borrow_mut() = Some(cancel));
     let r = f();
@@ -280,13 +225,11 @@ pub fn with_task_cancel<R>(cancel: CancellationToken, f: impl FnOnce() -> R) -> 
     r
 }
 
-/// Read the cancellation token of the task currently executing its
-/// coroutine. Returns `None` when called outside `step_task`.
+/// Current task's cancellation token; `None` when called outside `step_task`.
 pub fn current_task_cancel() -> Option<CancellationToken> {
     CURRENT_TASK_CANCEL.with(|c| c.borrow().clone())
 }
 
-/// Build the Lua cancel-marker table `{"__cancelled" = true}`.
 fn cancelled_marker(lua: &Lua) -> LuaValue {
     lua.create_table()
         .and_then(|t| {
@@ -317,11 +260,8 @@ impl Default for LuaTaskRuntime {
     }
 }
 
-/// Decoded `coroutine.yield(...)` payload.
 enum Yield {
     Sleep(Duration),
-    /// Park the task on an externally-resolved wait. The id must have
-    /// been minted via `smelt.task.alloc` beforehand.
     External(u64),
 }
 
@@ -348,9 +288,7 @@ fn decode_yield(_lua: &Lua, v: LuaValue) -> Result<Yield, String> {
     }
 }
 
-/// Turn a task return value into `(content, is_error)` for tool
-/// results. Accepts either a string (`is_error = false`) or a table
-/// `{ content = "...", is_error = bool }`.
+/// Coerce a task return value to `(content, is_error)`: string or `{ content, is_error }` table.
 fn coerce_tool_result(v: &LuaValue) -> (String, bool) {
     match v {
         LuaValue::String(s) => (s.to_string_lossy().to_string(), false),

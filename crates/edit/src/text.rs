@@ -1,6 +1,4 @@
-//! Pure text-motion helpers shared by the vim keymap, the non-vim input
-//! editor, and dialog input fields. All functions operate on `&str` buffers
-//! and byte positions; they never mutate state.
+//! Pure text-motion helpers over `&str` buffers and byte positions.
 
 pub use smelt_buffer::wrap::wrap_line;
 
@@ -13,9 +11,7 @@ pub enum CharClass {
     WORD,
 }
 
-/// Clamp `pos` to `buf.len()` and snap backward to the nearest char
-/// boundary. Prevents byte-slicing panics when callers hand us an
-/// offset that was computed on a different snapshot of the string.
+/// Clamp `pos` to `buf.len()` and snap back to the nearest char boundary.
 pub fn snap(buf: &str, pos: usize) -> usize {
     let mut p = pos.min(buf.len());
     while p > 0 && !buf.is_char_boundary(p) {
@@ -24,30 +20,14 @@ pub fn snap(buf: &str, pos: usize) -> usize {
     p
 }
 
-/// Convert a byte offset inside `line` to the terminal column the
-/// character there would occupy (sum of `unicode-width` cells of every
-/// preceding char). Handles offsets mid-multibyte-char by snapping
-/// backward to the nearest char boundary first.
+/// Byte offset → terminal column (sum of `unicode-width` cells of preceding chars).
 pub fn byte_to_cell(line: &str, byte: usize) -> usize {
     use unicode_width::UnicodeWidthStr;
     UnicodeWidthStr::width(&line[..snap(line, byte)])
 }
 
-/// Shared vertical-motion helper: move `cpos` up or down by one line in
-/// `buf`, preserving the preferred display column (`curswant`). Returns
-/// `(new_cpos, new_curswant)` where `new_curswant` is the column the
-/// caller should remember for the next vertical motion — either the
-/// supplied one (if we landed short of it on a shorter line) or the
-/// current cell column (on the first vertical motion after a horizontal
-/// one, when `curswant` is `None`).
-///
-/// This is the single code path for every vertical-motion source that
-/// wants vim's "stay on the column you wanted, even if the intermediate
-/// line was too short" behaviour: shift+arrow, vim j/k in Normal,
-/// vim j/k in Visual, mouse-wheel scroll, Ctrl+U/D half-page, etc.
-///
-/// Columns are in terminal display cells, so wide glyphs (`⏺`, `─`,
-/// CJK) behave correctly — you end up under the glyph, not mid-bytes.
+/// Move `cpos` by `delta_lines` in `buf`, preserving the preferred display column (`curswant`).
+/// Returns `(new_cpos, new_curswant)`. Columns are in terminal display cells (wide-char safe).
 pub fn vertical_move(
     buf: &str,
     cpos: usize,
@@ -55,7 +35,6 @@ pub fn vertical_move(
     curswant: Option<usize>,
 ) -> (usize, usize) {
     let cpos = snap(buf, cpos);
-    // Build (line_start, line_end) pairs by walking `\n`.
     let mut lines: Vec<(usize, usize)> = Vec::new();
     let mut start = 0usize;
     for (i, &b) in buf.as_bytes().iter().enumerate() {
@@ -109,9 +88,7 @@ pub fn next_char_boundary(s: &str, pos: usize) -> usize {
     p
 }
 
-/// Inverse of [`byte_to_cell`]: find the byte offset whose preceding
-/// text occupies `cell` terminal columns. Wide glyphs that cross the
-/// target land on their starting byte (never mid-glyph).
+/// Inverse of [`byte_to_cell`]: byte offset at which the preceding text occupies `cell` columns.
 pub fn cell_to_byte(line: &str, cell: usize) -> usize {
     use unicode_width::UnicodeWidthChar;
     let mut acc = 0usize;
@@ -153,11 +130,9 @@ pub fn word_forward_pos(buf: &str, cpos: usize, mode: CharClass) -> usize {
     }
     let mut i = 0;
     let start_class = char_class(chars[0].1, mode);
-    // Skip same class.
     while i < chars.len() && char_class(chars[i].1, mode) == start_class {
         i += 1;
     }
-    // Skip whitespace.
     while i < chars.len() && char_class(chars[i].1, mode) == 0 {
         i += 1;
     }
@@ -178,12 +153,10 @@ pub fn word_backward_pos(buf: &str, cpos: usize, mode: CharClass) -> usize {
         return 0;
     }
     let mut i = chars.len() - 1;
-    // Skip whitespace backward.
     while i > 0 && char_class(chars[i].1, mode) == 0 {
         i -= 1;
     }
     let target_class = char_class(chars[i].1, mode);
-    // Skip same class backward.
     while i > 0 && char_class(chars[i - 1].1, mode) == target_class {
         i -= 1;
     }
@@ -200,14 +173,10 @@ pub fn line_end(buf: &str, cpos: usize) -> usize {
     cpos + buf[cpos..].find('\n').unwrap_or(buf.len() - cpos)
 }
 
-/// Find word boundaries around the given byte offset inside `buf`.
-/// A word is a contiguous run of alphanumeric characters plus `_`.
-/// `transparent` lists byte positions that are treated as if they
-/// were word characters during the walk — used to cross soft-wrap
-/// `\n` boundaries so a word split by a display wrap still selects
-/// as one unit. `transparent` must be sorted ascending.
-/// Leading/trailing transparent bytes are trimmed from the returned
-/// range. Returns `None` if `pos` is in whitespace / out of bounds.
+/// Word boundaries around `pos` (`[a-zA-Z0-9_]` runs).
+/// `transparent` byte positions (sorted) are crossed as if they were word chars
+/// (for soft-wrap `\n` so a wrapped word selects as one unit). Leading/trailing
+/// transparent bytes are trimmed. Returns `None` on whitespace or out of bounds.
 pub fn word_range_at_transparent(
     buf: &str,
     pos: usize,
@@ -216,7 +185,7 @@ pub fn word_range_at_transparent(
     token_range_at_transparent(buf, pos, transparent, |c| c.is_alphanumeric() || c == '_')
 }
 
-/// Vim "WORD" range: any contiguous run of non-whitespace.
+/// Vim WORD boundaries: any contiguous run of non-whitespace.
 pub fn big_word_range_at_transparent(
     buf: &str,
     pos: usize,
@@ -289,12 +258,9 @@ where
     Some((start, end))
 }
 
-/// Source-line range at `pos`. `hard_breaks` lists byte positions of
-/// `\n` characters that are "real" line breaks (i.e. not soft-wrap
-/// continuations). Returns the span bounded by the previous hard
-/// break (exclusive) and the next hard break (exclusive), or the
-/// buffer start/end. The returned range does not include the
-/// trailing `\n`.
+/// Source-line span at `pos`, bounded by surrounding hard breaks (excluded).
+/// `hard_breaks` lists `\n` byte positions that are real line breaks, sorted ascending.
+/// Returns `None` on an empty buffer. The returned range excludes the trailing `\n`.
 pub(crate) fn line_range_at(
     buf: &str,
     pos: usize,
@@ -345,8 +311,6 @@ mod tests {
 
     #[test]
     fn word_range_at_treats_newline_as_non_word() {
-        // Baseline: walk stops at '\n', so clicking on "world" only
-        // selects "world", not "hello\nworld".
         assert_eq!(
             word_range_at_transparent("hello\nworld", 6, &[]),
             Some((6, 11))
@@ -355,23 +319,15 @@ mod tests {
 
     #[test]
     fn word_range_at_transparent_crosses_soft_wrap() {
-        // "verylong" was soft-wrapped as "very\nlong". The \n at byte 4
-        // is a soft-wrap — treat as transparent → whole "verylong"
-        // selects regardless of which side was clicked.
         let s = "very\nlong";
         let transparent = [4usize];
         assert_eq!(word_range_at_transparent(s, 0, &transparent), Some((0, 9)));
         assert_eq!(word_range_at_transparent(s, 5, &transparent), Some((0, 9)));
-        // Click on the transparent \n itself → still selects the word.
         assert_eq!(word_range_at_transparent(s, 4, &transparent), Some((0, 9)));
     }
 
     #[test]
     fn word_range_at_transparent_trims_trailing_wrap() {
-        // "end\n\nrest" with the first \n soft and second hard. Click
-        // on "end" should return [0, 3) — the trailing transparent \n
-        // is trimmed because nothing word-like followed it in the
-        // extended walk (the hard \n stops forward walk before "rest").
         let s = "end\n\nrest";
         let transparent = [3usize]; // first \n is soft
         assert_eq!(word_range_at_transparent(s, 0, &transparent), Some((0, 3)));
@@ -400,10 +356,6 @@ mod tests {
 
     #[test]
     fn line_range_at_joins_soft_wrapped_rows() {
-        // "one long paragraph\nnext" with the first \n being a soft
-        // wrap (not in hard_breaks) and the second a real line break.
-        // Clicking in the wrapped part should return the full
-        // paragraph span.
         let b = "one long\nparagraph\nnext";
         let hard = [18usize]; // only the second \n is hard
         assert_eq!(line_range_at(b, 4, &hard), Some((0, 18)));
@@ -415,9 +367,7 @@ mod tests {
     fn line_range_at_on_hard_break_returns_empty_line() {
         let b = "a\n\nb";
         let hard = [1usize, 2];
-        // Pos on the first hard break → empty line after it.
         assert_eq!(line_range_at(b, 1, &hard), None);
-        // Pos on the second hard break → empty line between.
         assert_eq!(line_range_at(b, 2, &hard), None);
     }
 }

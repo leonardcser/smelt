@@ -1,12 +1,4 @@
-//! `smelt.mcp` bindings — config-time MCP server registration.
-//!
-//! `smelt.mcp.register(name, { type, command, args, env, timeout,
-//! enabled })` stores into `LuaShared.mcp_configs`; the startup sequence
-//! reads it after `init.lua` runs.
-//!
-//! `type` defaults to `"local"`. Unknown `type` values, and unknown
-//! top-level keys, raise an error so a typo doesn't silently lose
-//! config.
+//! `smelt.mcp` — config-time MCP server registration. Unknown fields and types raise errors.
 
 use crate::lua::LuaShared;
 use crate::mcp::McpServerConfig;
@@ -64,10 +56,6 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
                     )));
                 }
 
-                // `command` accepts either a string ("foo") or a list of
-                // strings ({ "foo", "bar" }). Try the string form first so
-                // the array reader doesn't error out with "expected table"
-                // when callers pass the simpler shape.
                 let command = match cfg.get::<mlua::Value>("command")? {
                     mlua::Value::Nil => Vec::new(),
                     mlua::Value::String(s) => vec![s.to_string_lossy().to_string()],

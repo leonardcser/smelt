@@ -6,7 +6,6 @@ use serde_json::Value;
 use std::collections::HashMap;
 use std::sync::Arc;
 
-/// Dispatches MCP tools to their servers.
 pub struct McpDispatcher {
     manager: Arc<McpManager>,
     defs: Vec<McpToolDef>,

@@ -6,10 +6,6 @@ impl Completer {
     }
 
     pub(crate) fn commands(anchor: usize) -> Self {
-        // `list_commands` already filters out commands flagged
-        // `hidden = true` (the convention aliases like `q`/`qa`/`wq`
-        // use). Everything that survives gets a row, with or without a
-        // description.
         let all_items: Vec<CompletionItem> = crate::lua::list_commands()
             .into_iter()
             .map(|(name, desc)| CompletionItem {

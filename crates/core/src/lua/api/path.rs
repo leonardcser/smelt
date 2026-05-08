@@ -1,5 +1,4 @@
-//! `smelt.path` bindings — pure path arithmetic over `app::path`.
-//! Host-tier (works in tui and headless) — no Ui touch.
+//! `smelt.path` — pure path arithmetic (normalize, join, relative, expand, display, etc.).
 
 use mlua::prelude::*;
 use std::path::{Path, PathBuf};
@@ -73,25 +72,16 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
         lua.create_function(|_, p: String| Ok(Path::new(&p).is_absolute()))?,
     )?;
 
-    // `smelt.path.display(p)` — the path the way smelt shows it in
-    // confirm dialogs and tool summaries: relative to cwd if inside,
-    // absolute otherwise. `"."` for cwd itself.
     path_tbl.set(
         "display",
         lua.create_function(|_, p: String| Ok(crate::tools::display_path(&p)))?,
     )?;
 
-    // `smelt.path.config_dir()` — `~/.config/smelt` (or the
-    // platform-specific equivalent). Resolved through the engine's
-    // path helper so headless and tui agree on the lookup.
     path_tbl.set(
         "config_dir",
         lua.create_function(|_, ()| Ok(to_string(crate::config::config_dir())))?,
     )?;
 
-    // `smelt.path.commands_dir()` — `~/.config/smelt/commands`. Used
-    // by the custom-commands plugin to scan for user-defined `/foo`
-    // markdown templates at startup.
     path_tbl.set(
         "commands_dir",
         lua.create_function(|_, ()| Ok(to_string(crate::config::config_dir().join("commands"))))?,

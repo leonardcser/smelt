@@ -1,54 +1,22 @@
--- Snake game (demo of `smelt.paint` custom paint regions).
+-- Snake game — demo of `smelt.paint` custom paint regions.
+-- Not autoloaded; add `require("smelt.examples.snake")` to init.lua.
+-- Registers F11 to toggle and a /snake command.
 --
--- Not autoloaded — sits under `examples/` rather than `plugins/` so
--- nothing requires it at startup. To enable, drop the line
---
---     require('smelt.examples.snake')
---
--- into `~/.config/smelt/init.lua` (or your project's `.smelt/init.lua`).
--- That registers an `<F11>` global keybind that toggles the overlay,
--- plus a `:snake` command for non-keymap launches.
---
--- Why this exists: `smelt.paint.register(fn)` lets a Lua plugin paint
--- arbitrary cells into a leaf rect. Anything that doesn't fit the
--- editor's text + highlight model — sparklines, charts, retro game
--- grids — uses paint regions. Snake is a tight stress test: 24 × 24
--- logical cells via half-block compression (▀▄█), fixed tick, direct
--- cell writes via `slice:set / put_str / fill_rect`.
---
--- The half-block trick: each terminal row holds two logical rows
--- (`▀` paints the upper half, `▄` the lower, `█` both). With one
--- half-block per logical cell, vertical resolution doubles — so the
--- snake moves the same distance per tick whether it's heading
--- horizontally or vertically.
+-- Half-block trick: `▀` paints the upper half-cell, `▄` the lower, `█` both.
+-- Two logical rows pack into one terminal row, doubling vertical resolution.
 
 local M = {}
 
--- Logical game grid. Terminal rows = GRID_H / 2 (each row holds two
--- logical cells via the half-block trick). 24 × 24 fits inside the
--- default ScreenCenter overlay (70 % / 60 %) on terminals as small as
--- 80 × 24.
 local GRID_W = 32
-local GRID_H = 32 -- ⇒ 16 terminal rows after half-block packing
+local GRID_H = 32 -- 16 terminal rows after half-block packing
 local TICK_MS = 100
 
--- Overlay sizing. The game itself is 32 cols × 16 term rows; we want
--- a snug overlay around it. Status row above, hint strip below, and
--- a 1-cell border on every side: 16 + 1 + 1 + 2 = 20 rows. Width is
--- 32 + border = 34 cols. The whole thing reads as a square in
--- pixels because terminal cells are roughly twice as tall as wide
--- and the game uses half-block packing (one terminal cell = two
--- logical cells).
+-- Overlay: status row + game (GRID_H/2 term rows) + hint strip + 1-cell border each side.
 local OVERLAY_W = GRID_W + 2
 local OVERLAY_H = (GRID_H / 2) + 1 + 1 + 2
 
--- Playfield background — a noticeably-darker shade than the overlay
--- chrome so the snake's green half-blocks pop and the boundaries of
--- the play area are unambiguous.
-local BG = { r = 18, g = 22, b = 30 }
+local BG = { r = 18, g = 22, b = 30 } -- dark playfield so snake's green pops
 
--- Module-local state, `nil` when the overlay is closed. Mirrors
--- `perf_panel`'s `PANEL` pattern.
 local STATE = nil
 
 local function new_food(snake)
@@ -66,8 +34,7 @@ local function new_food(snake)
 			return { row = r, col = c }
 		end
 	end
-	-- Worst-case fallback (board nearly full): drop on the first empty
-	-- cell we can find rather than spinning forever.
+	-- Board nearly full fallback: scan for the first empty cell.
 	for r = 0, GRID_H - 1 do
 		for c = 0, GRID_W - 1 do
 			local clash = false
@@ -143,8 +110,7 @@ local function tick()
 		return
 	end
 
-	-- Self collision (skip the tail cell — it'll move out of the way
-	-- this tick unless we're growing).
+	-- Skip tail cell: it moves out of the way this tick unless we're growing.
 	for i = 2, #STATE.snake do
 		local seg = STATE.snake[i]
 		if seg.row == nr and seg.col == nc then
@@ -163,9 +129,7 @@ local function tick()
 	end
 end
 
--- Build a (row, col) → kind lookup so `paint` can answer
--- "what's at this cell" in O(1) per query rather than scanning the
--- snake body for each of GRID_W × GRID_H cells.
+-- O(1) cell-kind lookup for the paint pass.
 local function build_grid()
 	local g = {}
 	for i, seg in ipairs(STATE.snake) do
@@ -193,13 +157,8 @@ local function color_for(kind)
 	return nil
 end
 
--- Paint one terminal cell that represents two logical rows
--- (top = `2*ty`, bottom = `2*ty+1`). Picks the right half-block glyph
--- based on which halves are filled.
---
--- `bg` is the playfield background; we paint it explicitly on the
--- empty half so a single-half block doesn't show the terminal's default
--- bg through the gap (which would defeat the contrasting-bg cue).
+-- Paint one terminal cell for two logical rows (top=2*ty, bottom=2*ty+1).
+-- Explicit bg on the empty half prevents the terminal default from showing through.
 local function paint_pair(slice, term_y, term_x, top_kind, bot_kind, bg)
 	local top = top_kind ~= nil
 	local bot = bot_kind ~= nil
@@ -212,7 +171,6 @@ local function paint_pair(slice, term_y, term_x, top_kind, bot_kind, bg)
 		if top_color == bot_color then
 			slice:set(term_y, term_x, "█", { fg = top_color })
 		else
-			-- ▀ paints upper half in fg, lower half in bg.
 			slice:set(term_y, term_x, "▀", { fg = top_color, bg = bot_color })
 		end
 	elseif top then
@@ -231,19 +189,10 @@ local function paint(slice, _ctx)
 	local game_w = math.min(GRID_W, sw)
 	local game_h_term = math.min(math.floor(GRID_H / 2), math.max(0, sh - 1))
 
-	-- Status row sits at the very top of the slice; playfield fills
-	-- everything below it. Overlay is sized to fit the game snugly via
-	-- OVERLAY_W / OVERLAY_H, so off_x / off_y are 0 in the common case;
-	-- the math.min above clips gracefully if the user resizes the
-	-- terminal smaller than the overlay's natural size.
 	local status_y = 0
 	local off_y = 1
 	local off_x = 0
 
-	-- Painted-over background distinct from the overlay's chrome so the
-	-- play area's edges are unambiguous against a possibly-coloured
-	-- terminal background. Use a deep-navy RGB the snake's green
-	-- half-blocks contrast cleanly with.
 	slice:fill_rect(off_y, off_x, game_w, game_h_term, " ", { bg = BG })
 
 	local g = build_grid()
@@ -257,14 +206,12 @@ local function paint(slice, _ctx)
 		end
 	end
 
-	-- Status row.
 	local status = string.format(" score: %d", STATE.score)
 	if STATE.dead then
 		status = status .. "   GAME OVER"
 	end
-	-- Right-pad so the status row ends with whitespace, not whatever
-	-- overlay chrome painted before it.
-	status = status .. string.rep(" ", math.max(0, sw - #status))
+	status = status .. string.rep(" ", math.max(0, sw - #status)) -- pad to erase stale chrome
+
 	slice:put_str(status_y, 0, status, { fg = "white", bold = true })
 end
 
@@ -305,9 +252,6 @@ local function open()
 	math.randomseed(os.time())
 	STATE = init_state()
 
-	-- Hint strip at the bottom of the overlay carries focus so keymaps
-	-- have a window to attach to. Buffer holds one line of help text;
-	-- the paint region above does the actual game rendering.
 	STATE.buf = smelt.buf.create()
 	smelt.buf.set_lines(STATE.buf, {
 		" hjkl / arrows: move    space: reset    esc / ctrl-c: close ",

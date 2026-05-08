@@ -1,14 +1,9 @@
-//! Per-tick glue between `TuiApp` and the Lua runtime. Drains pending
-//! Lua callback invocations + the task-runtime inbox so dispatched
-//! handlers see a consistent state.
+//! Per-tick glue between `TuiApp` and the Lua runtime.
 
 use crate::app::TuiApp;
 
 impl TuiApp {
-    /// Vim-mode label for the currently focused buffer Window. Reads
-    /// the TuiApp-owned single-global `vim_mode` whenever the focused
-    /// surface has a Vim instance attached. Returns `None` for
-    /// surfaces without vim (nvim's "no mode in widget windows").
+    /// Vim-mode label for the focused window, or `None` for non-vim surfaces.
     pub(crate) fn current_vim_mode_label(&self) -> Option<String> {
         if let Some(win) = self.ui.focused_window() {
             if win.vim_enabled {
@@ -22,12 +17,7 @@ impl TuiApp {
         has_vim.then(|| format!("{:?}", self.vim_mode))
     }
 
-    /// Fire `WinEvent::TextChanged` on `PROMPT_WIN` when the prompt
-    /// buffer has changed since the last dispatch. Any Lua subscriber
-    /// (`smelt.win.on_event(smelt.prompt.win_id(), "text_changed", fn)`)
-    /// runs in the callback's own invocation pass; ops pushed by the
-    /// handler are drained before returning so downstream code sees
-    /// a consistent state.
+    /// Fire `WinEvent::TextChanged` on `PROMPT_WIN` when the prompt buffer changed.
     pub(crate) fn emit_prompt_text_changed_if_dirty(&mut self) {
         let current_text = self.input.win.text.clone();
         if self.last_prompt_text == current_text {
@@ -51,21 +41,13 @@ impl TuiApp {
         self.flush_lua_callbacks();
     }
 
-    /// Drain pending Lua callback invocations + the task-runtime
-    /// inbox. Call after any Lua handler dispatch.
     pub(crate) fn flush_lua_callbacks(&mut self) {
         self.drain_lua_invocations();
         self.lua.pump_task_events();
     }
 
-    /// Drive everything Lua-shaped to a fixpoint: fire pending cell
-    /// subscribers, drain the resulting invocation queue, and pump the
-    /// task-runtime inbox. Either pass can re-feed the other (a cell
-    /// callback queues a Lua invocation; an invocation sets a cell), so
-    /// loop until both are quiet. Call this at any well-defined yield
-    /// point (after engine drain, after key dispatch, after a handler
-    /// returns) instead of hand-pairing `drain_cells_pending` +
-    /// `flush_lua_callbacks`.
+    /// Drive cell subscribers + invocation queue + task inbox to a fixpoint.
+    /// Either pass can re-feed the other, so loop until both are quiet.
     pub(crate) fn pump_lua(&mut self) {
         loop {
             let cells_had_work = self.core.cells.has_pending();
@@ -73,35 +55,23 @@ impl TuiApp {
                 self.drain_cells_pending();
             }
             self.flush_lua_callbacks();
-            // `flush_lua_callbacks` may have set new cells; re-check.
             if !self.core.cells.has_pending() {
                 break;
             }
         }
     }
 
-    /// Drain the pending-invocation queue built up during
-    /// `ui.dispatch_event` / `ui.fire_win_event`. Each Lua callback fires
-    /// under an `install_app_ptr` scope so its body can reach `&mut TuiApp`
-    /// through `crate::lua::with_app`. Until a binding uses it, this is
-    /// behaviour-neutral: callbacks just fire after the ui borrow
-    /// releases instead of during it.
+    /// Drain invocations queued by `ui.dispatch_event` / `ui.fire_win_event`.
     ///
-    /// Two-phase to keep `&mut TuiApp` aliasing clean: phase 1 uses the
-    /// `&mut self` borrow to prepare mlua Function + payload handles
-    /// (these own internal refs to the Lua state, independent of Rust
-    /// borrows on self); phase 2 installs the TLS pointer and calls
-    /// each function with no Rust-level borrow on self alive — so a
-    /// Lua body that reaches back via `with_app` gets the sole `&mut
-    /// TuiApp` reborrow.
+    /// Two-phase to keep `&mut TuiApp` aliasing clean: phase 1 collects (func, payload) while
+    /// `&mut self` is live; phase 2 installs the TLS app pointer and calls each function with no
+    /// Rust borrow on self — so Lua bodies that reach back via `with_app` get the sole reborrow.
     pub(crate) fn drain_lua_invocations(&mut self) {
         loop {
             let pending = self.lua.drain_invocations();
             if pending.is_empty() {
                 return;
             }
-            // Phase 1: collect (func, payload_table, handle_id) tuples.
-            // Uses the `&mut self` borrow on self.lua.
             let prepared: Vec<(mlua::Function, mlua::Table, u64)> = pending
                 .into_iter()
                 .filter_map(|inv| {
@@ -111,10 +81,6 @@ impl TuiApp {
                     Some((func, payload, inv.handle.0))
                 })
                 .collect();
-            // Phase 2: install TLS app pointer and call each. After
-            // install_app_ptr returns, no &mut self use remains on any
-            // control-flow path, so NLL kills the borrow — Lua bodies
-            // that reach back via `with_app` get the sole reborrow.
             let _guard = crate::lua::install_app_ptr(self);
             for (func, payload, handle_id) in prepared {
                 let _perf = smelt_core::perf::begin("lua:event_cb");
@@ -124,24 +90,14 @@ impl TuiApp {
                     });
                 }
             }
-            // Loop: a callback body may itself queue further invocations
-            // (e.g. a text_changed handler dispatches a submit inside
-            // the same frame). Drain them in the same tick.
+            // A callback may itself queue further invocations; drain in the same tick.
         }
     }
 
-    /// Drive the `LuaTask` runtime and act on its outputs. Errors are
-    /// queued via `NotifyError` internally; the only remaining output
-    /// is `ToolComplete` (tool-as-task results). Dialog/picker opens
-    /// now ride on `UiOp::OpenLuaDialog` / `OpenLuaPicker` and are
-    /// resolved inside `apply_ui_op`.
     pub(crate) fn drive_lua_tasks(&mut self) {
         self.flush_lua_callbacks();
         let outs = self.lua.drive_tasks();
-        // Drain the ops pushed by the coroutine *before* it yielded —
-        // a task that calls `buf.create` + `buf.set_lines` right
-        // before `dialog.open` needs those ops applied now so the
-        // reducer sees the buffers when `OpenLuaDialog` fires.
+        // Drain ops pushed before the coroutine yielded so `OpenLuaDialog` sees created buffers.
         self.flush_lua_callbacks();
         for out in outs {
             match out {

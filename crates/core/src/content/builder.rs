@@ -1,45 +1,25 @@
-//! Buffer-builder used by every block renderer.
-//!
-//! `LineBuilder` is the single layout primitive: renderers
-//! (markdown, diff, syntax, tool blocks, dialog previews) walk their
-//! input and call `print` / `newline` / `push_style` etc. on a
-//! `&mut LineBuilder`; the collector resolves styles against the
-//! supplied [`Theme`] and writes lines + highlights + decorations
-//! directly into a [`Buffer`]. There is no intermediate
-//! span-tree representation — `Buffer` is the only output.
-//!
-//! Callers construct a fresh collector each time they want to render
-//! into a buffer. The collector borrows the buffer and theme for the
-//! duration of rendering; on [`LineBuilder::finish`] the trailing
-//! incomplete line is flushed and an [`Outcome`] (line count + width
-//! pinning info) returned.
+//! `LineBuilder` is the single layout primitive for all block renderers.
+//! Renderers call `print` / `newline` / `push_style` etc.; the builder resolves styles
+//! against the supplied [`Theme`] and writes lines + highlights + decorations into a [`Buffer`].
+//! On [`LineBuilder::finish`] the trailing incomplete line is flushed and an [`Outcome`] returned.
 
 use crate::buffer::{Buffer, LineDecoration, SpanMeta};
 use crate::style::{Color, Style};
 use crate::theme::{intern_anonymous_style, HlGroup, Theme};
 use unicode_width::UnicodeWidthStr;
 
-/// Display-column width of a string slice. Used for visible-width
-/// tracking inside `LineBuilder` and by callers pre-measuring
-/// content.
+/// Display-column width of a string slice.
 pub fn display_width(s: &str) -> usize {
     UnicodeWidthStr::width(s)
 }
 
-/// Outcome metadata returned by [`LineBuilder::finish`]. Mirrors the
-/// fields the old `DisplayBlock` carried so callers can reason about
-/// width pinning the same way.
+/// Outcome returned by [`LineBuilder::finish`].
 #[derive(Debug, Clone, Copy, Default)]
 pub struct Outcome {
-    /// Number of logical lines committed to the buffer.
     pub line_count: usize,
-    /// Terminal width this layout was computed at.
     pub layout_width: u16,
-    /// True iff layout broke at least one logical line into multiple
-    /// visual rows. When false, the layout is replayable at any width
-    /// >= `max_line_width`.
+    /// True when the layout wrapped at least one line; false means replayable at any width >= `max_line_width`.
     pub was_wrapped: bool,
-    /// Longest visible line in the layout (display columns).
     pub max_line_width: u16,
 }
 
@@ -53,12 +33,6 @@ impl Outcome {
     }
 }
 
-/// Index of the first line this collector wrote to in `buf`. Lines
-/// before this offset are left untouched; renderers append to a
-/// non-empty buffer by passing the existing line count as the start
-/// row at construction (handled internally — collector starts writing
-/// at `buf.line_count()` minus one if the trailing line is empty,
-/// otherwise appends after it).
 pub struct LineBuilder<'a> {
     buf: &'a mut Buffer,
     theme: &'a Theme,
@@ -76,9 +50,6 @@ pub struct LineBuilder<'a> {
     has_pending_content: bool,
     overwrote_blank_seed: bool,
 
-    // Style state — group + axis mods tracked separately. Resolved
-    // at print time. Single-group spans with default mods flow the
-    // group id directly; compound spans intern anonymously.
     cur_group: Option<HlGroup>,
     cur_style: Style,
     style_stack: Vec<(Option<HlGroup>, Style)>,
@@ -94,9 +65,7 @@ pub struct LineBuilder<'a> {
 
 impl<'a> LineBuilder<'a> {
     pub fn new(buf: &'a mut Buffer, theme: &'a Theme, layout_width: u16) -> Self {
-        // Append mode: write past the existing content. Buffer always
-        // starts with at least one (possibly empty) line; the first
-        // committed line replaces the trailing empty seed when present.
+        // The first committed line replaces the trailing empty seed line when present.
         let starting_line = buf.line_count();
         let trailing_seed_blank = buf
             .get_line(starting_line.saturating_sub(1))
@@ -129,9 +98,6 @@ impl<'a> LineBuilder<'a> {
         }
     }
 
-    /// Active theme reference. Used by callers that need to resolve
-    /// theme groups to concrete colors (e.g. for paint-time decoration
-    /// fields that don't carry an HlGroup id).
     pub fn theme(&self) -> &Theme {
         self.theme
     }
@@ -149,10 +115,7 @@ impl<'a> LineBuilder<'a> {
         }
     }
 
-    /// Number of logical display lines accumulated so far, including
-    /// the current incomplete line if it has any content. Mirrors the
-    /// old DisplayBlock-based count for renderer code that branches on
-    /// it (e.g. tool previews).
+    /// Lines accumulated so far, including the current incomplete line if it has content.
     pub fn line_count(&self) -> usize {
         self.lines_committed
             + if self.has_pending_content
@@ -213,21 +176,14 @@ impl<'a> LineBuilder<'a> {
 
     // ── Per-line decorations ────────────────────────────────────────
 
-    /// Mark the layout as width-pinned: it cannot be replayed at a
-    /// different viewport width without re-laying-out from the source.
-    /// Wrap helpers call this when they break a line.
+    /// Mark the layout as width-pinned (not replayable at a different viewport width).
     pub fn mark_wrapped(&mut self) {
         self.was_wrapped = true;
     }
 
-    /// Fill the remainder of the current visual row with `bg` so the row
-    /// extends to the right edge of the viewport (minus `right_margin`
-    /// columns reserved on the right). Used by diff and code rows.
+    /// Fill the row remainder with `bg` up to the right edge, leaving `right_margin` columns blank.
     pub fn fill_line_bg(&mut self, bg: Color, right_margin: u16) {
-        // Calling `fill_line_bg` twice on the same row would silently
-        // overwrite the first fill. No legitimate caller does this — a
-        // row has at most one trailing bg fill — so catch the misuse in
-        // debug builds.
+        // A row has at most one fill; catch double-calls in debug builds.
         debug_assert!(
             self.cur_decoration.fill_bg.is_none(),
             "fill_line_bg called twice on the same row"
@@ -236,44 +192,33 @@ impl<'a> LineBuilder<'a> {
         self.cur_decoration.fill_right_margin = right_margin;
     }
 
-    /// Same as `fill_line_bg` but takes a theme group; reads the
-    /// group's bg through the active theme. For role-keyed background
-    /// fills the renderer still wants the *current* color baked in
-    /// (decoration is a paint-time hint, not a buffer-level group ref).
+    /// Like `fill_line_bg` but resolves the background from a theme group.
     pub fn fill_line_bg_group(&mut self, group: HlGroup, right_margin: u16) {
         let bg = self.theme.resolve(group).bg.unwrap_or(Color::Reset);
         self.fill_line_bg(bg, right_margin);
     }
 
-    /// Set the gutter background for the current line. Paint-time gutter
-    /// padding will be filled with this color instead of blank spaces.
     pub fn set_gutter_bg(&mut self, bg: Color) {
         self.cur_decoration.gutter_bg = Some(bg);
     }
 
-    /// Same as `set_gutter_bg` but takes a theme group; reads the
-    /// group's bg through the active theme.
+    /// Like `set_gutter_bg` but resolves the background from a theme group.
     pub fn set_gutter_bg_group(&mut self, group: HlGroup) {
         let bg = self.theme.resolve(group).bg.unwrap_or(Color::Reset);
         self.set_gutter_bg(bg);
     }
 
-    /// Mark the current line as a soft-wrap continuation of the
-    /// previous logical line.
     pub fn mark_soft_wrap_continuation(&mut self) {
         self.cur_decoration.soft_wrapped = true;
     }
 
-    /// Set the raw source text for the current line. Used by markdown
-    /// rendering so copy walks emit raw markdown instead of display
-    /// text for fully-selected rows.
+    /// Attach raw source text to the current line so copy emits markdown rather than display text.
     pub fn set_source_text(&mut self, text: &str) {
         self.cur_decoration.source_text = Some(text.to_string());
     }
 
-    /// Tag the next-closed line with `source` and turn every following
-    /// `newline()` into a soft-wrap continuation until
-    /// `disarm_source_text` is called.
+    /// Attach `source` to the next committed line; subsequent `newline()` calls become soft-wrap
+    /// continuations until `disarm_source_text` is called.
     pub fn arm_source_text(&mut self, source: String) {
         self.pending_source_text = Some(source);
         self.auto_soft_wrap_continuation = true;
@@ -286,16 +231,13 @@ impl<'a> LineBuilder<'a> {
 
     // ── Style state ─────────────────────────────────────────────────
 
-    /// Push the current (group, style) onto the stack and replace
-    /// with the supplied pair. Pair `pop_style` to restore.
+    /// Push the current (group, style) onto the stack and replace with the supplied pair.
     pub fn push(&mut self, group: Option<HlGroup>, style: Style) {
         self.style_stack.push((self.cur_group, self.cur_style));
         self.cur_group = group;
         self.cur_style = style;
     }
 
-    /// Save current state on the stack without changing it. Following
-    /// `set_*` calls modify the new layer; `pop_style` restores.
     fn push_clone(&mut self) {
         self.style_stack.push((self.cur_group, self.cur_style));
     }
@@ -320,11 +262,6 @@ impl<'a> LineBuilder<'a> {
         self.cur_style.bg = Some(c);
     }
 
-    /// Set the current span's theme group. The group's resolved
-    /// fg/bg fill any unset slots on the explicit `fg`/`bg`. When the
-    /// rest of the style is default, the collector emits this id
-    /// directly so theme switches flip the rendered span without
-    /// re-running the parser.
     pub fn set_hl(&mut self, group: HlGroup) {
         self.cur_group = Some(group);
     }
@@ -382,11 +319,6 @@ impl<'a> LineBuilder<'a> {
 
     // ── Internals ───────────────────────────────────────────────────
 
-    /// Renderer-facing append: resolves the active (group, style)
-    /// pair through the theme. Single-group spans with default mods
-    /// flow the group id directly so theme switches flip the rendered
-    /// span without re-running the parser; compound spans intern
-    /// anonymously at the resolved Style.
     fn append_span_styled(&mut self, text: &str, meta: SpanMeta) {
         let resolved = self.resolve_current();
         let style_default = style_is_default(&resolved);
@@ -399,10 +331,6 @@ impl<'a> LineBuilder<'a> {
         self.append_span_with_hl(text, hl, meta);
     }
 
-    /// Resolved-Style append for replay paths that read spans from an
-    /// existing buffer (no role info to recover). Falls through to
-    /// anonymous interning — these spans don't follow theme switches,
-    /// but neither does the source buffer they're being copied from.
     fn append_span_resolved(&mut self, text: &str, style: Style, meta: SpanMeta) {
         let style_default = style_is_default(&style);
         let meta_default = meta.selectable && meta.copy_as.is_none();
@@ -444,12 +372,7 @@ impl<'a> LineBuilder<'a> {
     }
 
     /// Map the active (group, style) to an interned [`HlGroup`].
-    /// Single theme-group reference with no other axis modifications
-    /// flows the group id directly (theme switches mutate
-    /// `Theme.styles[id]` once and the rendered span tracks live).
-    /// Anything more complex — group plus axis mods, or concrete
-    /// `fg`/`bg` — falls back to content-hashed anonymous interning of
-    /// the resolved `Style`.
+    /// A plain group reference flows the id directly (live theme updates); compound styles intern anonymously.
     fn current_hl(&self, resolved: Style) -> HlGroup {
         if let Some(group) = self.cur_group {
             if !style_has_axis_mods(&self.cur_style) && self.theme.contains(group) {
@@ -460,7 +383,6 @@ impl<'a> LineBuilder<'a> {
     }
 
     fn commit_line(&mut self) {
-        // Choose the destination row.
         let target_row = self.starting_line + self.lines_committed;
         let buf_len = self.buf.line_count();
         let text = std::mem::take(&mut self.cur_text);
@@ -468,15 +390,11 @@ impl<'a> LineBuilder<'a> {
         let decoration = std::mem::take(&mut self.cur_decoration);
 
         if target_row < buf_len {
-            // Replace existing line (the buffer's seed empty line on
-            // the very first commit, or a line we previously wrote in
-            // append mode).
             self.buf.set_lines(target_row, target_row + 1, vec![text]);
             if target_row == self.starting_line && !self.overwrote_blank_seed {
                 self.overwrote_blank_seed = true;
             }
         } else {
-            // Append.
             self.buf.set_lines(buf_len, buf_len, vec![text]);
         }
 
@@ -501,11 +419,7 @@ impl<'a> LineBuilder<'a> {
         let (group_fg, group_bg) = match self.cur_group {
             Some(g) => {
                 let s = self.theme.resolve(g);
-                // Empty Theme entry ⇒ ensure the span still emits a
-                // non-default Style so the extmark survives the
-                // `style_is_default` short-circuit. `Color::Reset`
-                // is the role-fallback color for groups the active
-                // theme hasn't registered.
+                // Unregistered group: force Color::Reset so the extmark bypasses the `style_is_default` short-circuit.
                 let fg = s.fg.or(if s.bg.is_none() {
                     Some(Color::Reset)
                 } else {
@@ -549,9 +463,7 @@ fn style_is_default(s: &Style) -> bool {
         && !s.crossedout
 }
 
-/// Convenience: build a fresh Buffer, render into it, and return the
-/// outcome. Used by callers that want a one-off scratch buffer and
-/// don't care about the BufId.
+/// Build a fresh `Buffer`, render into it, and return the outcome.
 pub fn render_into_fresh(
     width: u16,
     theme: &Theme,
@@ -563,8 +475,6 @@ pub fn render_into_fresh(
     (buf, outcome)
 }
 
-/// Construct a `LineBuilder` around `buf`, run `fill`, and return
-/// the outcome. The most common renderer entry point.
 pub fn render_into(
     buf: &mut Buffer,
     width: u16,
@@ -576,31 +486,17 @@ pub fn render_into(
     col.finish()
 }
 
-/// Read a previously-rendered Buffer back as if it were a single
-/// "block" — useful when nested renderers want to inline a tool's
-/// per-call Buffer into a parent collector. Mirrors the old
-/// `buffer_into_collector` shape but writes via the regular
-/// collector API so styles and metas round-trip through theme
-/// resolution unchanged.
+/// Replay a previously-rendered `Buffer` into `out` as styled spans.
 pub fn replay_buffer_into(buf: &Buffer, out: &mut LineBuilder) {
     let n = buf.line_count();
     for i in 0..n {
         replay_buffer_row_into(buf, i as u16, out);
         out.newline();
     }
-
-    // Carry through line decorations from the source buffer.
-    // Replay loop above committed `n` lines starting from
-    // `out.starting_line + (out.lines_committed - n)`. We can't easily
-    // address those from outside, so we set decorations as we go via
-    // a small internal helper.
-    let _ = buf; // suppress unused after the loop
+    let _ = buf;
 }
 
-/// Replay one row of `buf` into `out` as styled spans, without emitting
-/// a trailing newline. Used by `render_summary` Lua hooks: the caller
-/// mints an ephemeral Buffer, runs the Lua callback against it, then
-/// projects row 0 inline into the transcript / confirm-title sink.
+/// Replay one row of `buf` into `out` as styled spans without a trailing newline.
 pub fn replay_buffer_row_into(buf: &Buffer, row: u16, out: &mut LineBuilder) {
     let text = buf.get_line(row as usize).unwrap_or("");
     let mut highlights = buf.highlights_at(row as usize);
@@ -635,12 +531,7 @@ pub fn replay_buffer_row_into(buf: &Buffer, row: u16, out: &mut LineBuilder) {
 }
 
 impl<'a> LineBuilder<'a> {
-    /// Append a span whose style is already resolved (no theme lookup
-    /// needed). Internal helper for [`replay_buffer_row_into`]:
-    /// replay reads spans by HlGroup id from the source Buffer and
-    /// hands the caller the per-span resolved Style; we re-intern
-    /// anonymously so the replayed mark sits in the destination
-    /// Buffer's payload alongside live-named groups.
+    /// Append a span with a pre-resolved style (no theme lookup). Used by replay paths.
     pub fn append_resolved_span(&mut self, text: &str, style: Style, meta: SpanMeta) {
         if text.is_empty() {
             return;
@@ -652,9 +543,6 @@ impl<'a> LineBuilder<'a> {
 }
 
 pub mod test_util {
-    //! Helpers that rebuild the old `DisplayBlock` / `DisplayLine` /
-    //! `DisplaySpan` shape from a rendered `Buffer`, for the unit
-    //! tests that grew up around the IR.
     use super::*;
     use crate::buffer::{BufCreateOpts, BufId};
 
@@ -676,8 +564,6 @@ pub mod test_util {
         pub outcome: Outcome,
     }
 
-    /// Build a fresh buffer + default theme, run `fill`, then read the
-    /// resulting buffer back into the legacy `TestBlock` shape.
     pub fn render_test(width: u16, fill: impl FnOnce(&mut LineBuilder)) -> TestBlock {
         let theme = Theme::default();
         let mut buf = Buffer::new(BufId(0), BufCreateOpts::default());
@@ -686,8 +572,6 @@ pub mod test_util {
         TestBlock { lines, outcome }
     }
 
-    /// Convert a rendered buffer into per-line text + source / soft-wrap
-    /// metadata + spans (highlight runs interleaved with plain runs).
     pub fn read_buffer(buf: &Buffer, theme: &Theme, line_count: usize) -> Vec<TestLine> {
         let n = line_count.min(buf.line_count());
         (0..n)

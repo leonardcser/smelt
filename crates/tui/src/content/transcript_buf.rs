@@ -5,20 +5,11 @@ use crate::smelt_term::Theme;
 use smelt_core::buffer::{LineDecoration, Span, SpanMeta};
 use smelt_core::transcript_model::{BlockHistory, LayoutKey, ViewState};
 
-/// Single per-block cache shared between the display-buffer projection
-/// and the snapshot consumers (copy / yank / line-break / cell-snap /
-/// pane-focus). Both reads ride the same `BlockBufferCache`; both
-/// invalidate on `BlockHistory::generation()` change.
 pub(crate) struct TranscriptProjection {
     cache: BlockBufferCache,
     cache_generation: u64,
     cache_width: u16,
-    /// Last `(generation, width, show_thinking)` we wrote into the
-    /// display buffer. Same-key reprojection is a no-op.
     project_key: Option<ProjectKey>,
-    /// Cached snapshot. Rebuilt lazily when its embedded
-    /// `(generation, width, show_thinking)` no longer matches the
-    /// caller's request.
     snapshot: Option<TranscriptSnapshot>,
 }
 
@@ -40,11 +31,7 @@ impl TranscriptProjection {
         }
     }
 
-    /// Drop cached per-block buffers when generation or width drifts.
-    /// Width changes are key-discriminating in `BlockBufferCache`, but
-    /// we still clear so dead entries don't accumulate after rewinds
-    /// or terminal resizes. The snapshot also drops on generation
-    /// change (its rows reflect the laid-out blocks).
+    /// Clear cache on generation or width change so stale entries don't accumulate.
     fn gc_if_stale(&mut self, gen: u64, width: u16) {
         if gen != self.cache_generation || width != self.cache_width {
             self.cache.clear();
@@ -82,10 +69,6 @@ impl TranscriptProjection {
             content_hash: 0,
         };
 
-        // Collect everything before committing to the buffer in one
-        // shot. Appending block-by-block via Buffer's set_lines/
-        // add_highlight is awkward when the destination starts with a
-        // seed empty line; collecting first keeps row indices simple.
         let mut texts: Vec<String> = Vec::new();
         let mut highlights: Vec<Vec<Span>> = Vec::new();
         let mut decorations: Vec<LineDecoration> = Vec::new();
@@ -146,7 +129,6 @@ impl TranscriptProjection {
             );
         }
 
-        // Apply.
         buf.set_all_lines(texts);
         for (row, row_highlights) in highlights.into_iter().enumerate() {
             apply_row_highlights(buf, row, row_highlights);
@@ -160,10 +142,6 @@ impl TranscriptProjection {
         self.project_key = Some(key);
     }
 
-    /// Lazily rebuilt snapshot of the transcript at `(width,
-    /// show_thinking)`. Reuses the per-block cache `project()`
-    /// populated. Returned reference is valid until the next call
-    /// to `snapshot` or `project`.
     pub(crate) fn snapshot(
         &mut self,
         history: &mut BlockHistory,

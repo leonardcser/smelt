@@ -1,8 +1,6 @@
 //! `smelt.permissions` bindings — list current session + workspace
-//! rules, sync a Lua-built ruleset back through the App. Pre-P5
-//! surface over `RuntimeApprovals` + [`crate::permissions::store`];
-//! grows the rest of the `app::permissions` capability surface in
-//! P5.c when engine permission policy lands here.
+//! rules, sync a Lua-built ruleset back through the App. Sits over
+//! `RuntimeApprovals` + [`crate::permissions::store`].
 
 use mlua::prelude::*;
 use std::sync::Arc;
@@ -40,8 +38,7 @@ fn parse_mode_perms(
         .map(|tbl| parse_ruleset(lua, &tbl))
         .transpose()?
         .unwrap_or_default();
-    // Every key besides `tools` is a per-tool subpattern bucket
-    // (`bash`, `web_fetch`, `mcp`, or any custom-named tool).
+    // Every key besides `tools` is a per-tool subpattern bucket.
     let mut subcommands = std::collections::HashMap::new();
     for pair in t.clone().pairs::<String, mlua::Value>() {
         let (key, value) = pair?;
@@ -184,11 +181,7 @@ pub(super) fn register(
             }
         })?,
     )?;
-    // Decision-shaped primitives consumed by tool `decide` Lua
-    // callbacks. `check_tool` matches a tool name against the per-mode
-    // tool bucket; `check` matches a value against any registered
-    // subpattern bucket (`bash`, `web_fetch`, `mcp`, …). Returns
-    // "allow" / "ask" / "deny"; unknown mode labels collapse to "ask".
+    // Decision primitives for tool `decide` callbacks. Returns "allow"/"ask"/"deny".
     permissions_tbl.set(
         "check_tool",
         lua.create_function(|_, (mode_str, name): (String, String)| {

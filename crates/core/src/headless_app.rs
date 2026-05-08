@@ -1,6 +1,4 @@
-//! Headless frontend: `Core` + `HeadlessSink`. Used for
-//! `smelt --headless` (one-shot CLI). Constructed in
-//! `src/main.rs` directly — no `Ui`, no buffers, no compositor.
+//! Headless frontend (`smelt --headless`). No `Ui`, no buffers, no compositor.
 
 use std::collections::HashMap;
 use std::io;
@@ -30,17 +28,13 @@ impl HeadlessApp {
         std::env::var(&self.core.config.api_key_env).unwrap_or_default()
     }
 
-    /// One-shot: send the user's message, drain engine events,
-    /// print the final assistant text + token / cost summary, exit.
-    /// Aborts cleanly on Ctrl-C (cancellation flips the parent's
-    /// `Notify`, the engine receives `UiCommand::Cancel`, and the
-    /// loop breaks before the summary prints).
+    /// Send `message`, drain engine events, print assistant text + token/cost
+    /// summary, then exit. Ctrl-C sends `UiCommand::Cancel` and exits 130.
     pub async fn run_oneshot(&mut self, message: String, cancel: Arc<tokio::sync::Notify>) {
         use std::io::Write;
 
         let trimmed = message.trim();
 
-        // Shell escape: execute and print output.
         if let Some(cmd) = trimmed.strip_prefix('!') {
             let cmd = cmd.trim();
             if !cmd.is_empty() {
@@ -56,7 +50,6 @@ impl HeadlessApp {
             return;
         }
 
-        // Commands require interactive mode.
         if trimmed.starts_with('/') && crate::transcript_model::is_command_like(trimmed) {
             eprintln!("\"{}\" requires interactive mode", trimmed);
             std::process::exit(1);
@@ -84,14 +77,12 @@ impl HeadlessApp {
                 tools: vec![],
             })));
 
-        // In text mode, buffer assistant text and only print to stdout at the end.
         let mut final_message = String::new();
         let mut total_usage = protocol::TokenUsage::default();
         let mut last_tps: Option<f64> = None;
         let mut total_cost = 0.0_f64;
         let mut pending_tools: HashMap<String, (String, String, String)> = HashMap::new();
 
-        // Drain events. Break on cancellation (Ctrl+C) so the summary still prints.
         let mut interrupted = false;
         loop {
             let ev = tokio::select! {
@@ -107,10 +98,7 @@ impl HeadlessApp {
             };
             match self.sink.format {
                 OutputFormat::Json => {
-                    // Forward every event as JSONL.
                     self.sink.emit_json(&ev);
-
-                    // Still need to handle side-effect events.
                     match ev {
                         EngineEvent::RequestPermission { request_id, .. } => {
                             let approved = self.core.config.mode == AgentMode::Yolo;
@@ -135,7 +123,6 @@ impl HeadlessApp {
                         final_message.push_str(&delta);
                     }
                     EngineEvent::Text { content } => {
-                        // Full text block replaces any accumulated deltas.
                         final_message = content;
                     }
                     EngineEvent::ToolStarted {
@@ -210,29 +197,24 @@ impl HeadlessApp {
             }
         }
 
-        // Print accumulated token/cost summary.
         if self.sink.format == OutputFormat::Text {
             self.sink
                 .log_token_usage(&total_usage, last_tps, total_cost);
         }
 
-        // Text mode: write the final message to stdout (only when piped).
-        // `final_message` is model-generated and passes through unredacted.
         if self.sink.format == OutputFormat::Text && !final_message.is_empty() {
             use std::io::IsTerminal;
             let stdout_is_tty = std::io::stdout().is_terminal();
             let stderr_is_tty = std::io::stderr().is_terminal();
 
             if stdout_is_tty && stderr_is_tty {
-                // Interactive: print to stderr so the answer appears in
-                // chronological order after tool output, not on a separate stream.
+                // Both TTY: print to stderr so the answer appears after tool output.
                 eprintln!();
                 eprint!("{final_message}");
                 if !final_message.ends_with('\n') {
                     eprintln!();
                 }
             } else {
-                // At least one stream is piped — stdout gets the clean answer.
                 print!("{final_message}");
                 if !final_message.ends_with('\n') {
                     println!();

@@ -5,8 +5,7 @@ use std::path::Path;
 
 pub type AttachmentId = u64;
 
-/// A single attachment. Currently only images — text pastes flow
-/// directly into the prompt buffer.
+/// A single attachment (currently images only).
 #[derive(Clone, Debug)]
 pub enum Attachment {
     Image { label: String, data_url: String },
@@ -39,11 +38,10 @@ impl Attachment {
 
 // ── Store ────────────────────────────────────────────────────────────────────
 
-/// Global attachment registry. Owns all attachment data for the session.
+/// Session-global attachment registry.
 pub struct AttachmentStore {
     entries: HashMap<AttachmentId, Attachment>,
     next_id: AttachmentId,
-    /// Content hash → ID for deduplication.
     hash_to_id: HashMap<String, AttachmentId>,
 }
 
@@ -62,7 +60,7 @@ impl AttachmentStore {
         }
     }
 
-    /// Insert an attachment, deduplicating by content hash.
+    /// Insert an attachment, deduplicating by content hash. Returns the id.
     pub fn insert(&mut self, att: Attachment) -> AttachmentId {
         let hash = att.content_hash();
         if let Some(&existing) = self.hash_to_id.get(&hash) {
@@ -99,15 +97,13 @@ impl AttachmentStore {
         self.next_id = 1;
     }
 
-    /// Insert an image and return its ID. Convenience wrapper.
     pub fn insert_image(&mut self, label: String, data_url: String) -> AttachmentId {
         self.insert(Attachment::Image { label, data_url })
     }
 
     // ── Blob persistence ─────────────────────────────────────────────────
 
-    /// Snapshot `(filename, data_url)` pairs for every image attachment.
-    /// Shared by the background persister and the sync `save_blobs` path.
+    /// `(filename, data_url)` pairs for every image attachment.
     pub fn image_blobs(&self) -> Vec<(String, String)> {
         self.entries
             .values()
@@ -121,8 +117,7 @@ impl AttachmentStore {
             .collect()
     }
 
-    /// Write all image attachments as blob files and return the
-    /// data_url → `blob:<filename>` replacement map.
+    /// Write all image attachments to `blob_dir` and return a data_url → `blob:<filename>` map.
     pub fn save_blobs(&self, blob_dir: &Path) -> HashMap<String, String> {
         let blobs = self.image_blobs();
         if blobs.is_empty() {
@@ -140,8 +135,7 @@ impl AttachmentStore {
         url_to_blob
     }
 
-    /// Read blob files and resolve `blob:` refs back to data URLs.
-    /// Returns a map from `blob:<filename>` → data URL string.
+    /// Read blob files, returning a `blob:<filename>` → data URL map.
     pub fn load_blobs(blob_dir: &Path) -> HashMap<String, String> {
         let mut blob_to_url = HashMap::new();
         let Ok(entries) = fs::read_dir(blob_dir) else {

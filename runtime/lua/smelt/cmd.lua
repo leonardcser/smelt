@@ -1,21 +1,10 @@
--- `smelt.cmd.picker(name, opts)` — register a slash-command whose
--- bareword form opens a prompt-docked picker.
---
--- Direct dispatch (`/name foo`) calls `apply(arg)`. With no argument,
--- `prepare()` runs (e.g. snapshot pre-open state for `on_dismiss` to
--- restore), then a prompt-docked picker opens. Navigation calls
--- `on_select(item)` for live preview, Enter calls `on_enter(item, idx)`
--- and either closes or re-opens (when `stay_open = true`). Esc / Tab
--- closes; Esc routes through `on_dismiss()`. Tab inserts the label
--- into the prompt and closes without re-firing apply.
+-- Register a slash-command that opens a prompt-docked picker when called
+-- without arguments, or calls `apply(arg)` directly when given one.
 --
 -- `opts`:
---   desc       string  — completion description.
---   args       table   — completion args; defaults to `items[*].label`.
---   items      table | function() table  — picker entries
---                  ({ label, description?, ansi_color?, prefix?,
---                     search_terms?, ... }). A function is re-evaluated
---                  on every reopen so toggle-style menus refresh.
+--   desc       string                      — completion description.
+--   args       table                       — completion args; defaults to `items[*].label`.
+--   items      table | function() → table  — picker entries. A function re-evaluates on reopen.
 --   apply      function(arg)               — direct dispatch.
 --   prepare    function()                  — runs once before opening.
 --   on_select  function(item)              — fires on every navigation.
@@ -59,7 +48,6 @@ end
 function smelt.cmd.picker(name, opts)
   opts = opts or {}
 
-  -- Derive completion args from static items if not supplied.
   local args = opts.args
   if not args and type(opts.items) == "table" then
     args = {}

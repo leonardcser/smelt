@@ -1,18 +1,11 @@
 //! Low-level buffer editing primitives for `PromptState`.
-//!
-//! These operate directly on `buf`, `cpos`, and `attachment_ids`, and are the
-//! implementation details behind the `KeyAction` dispatch in `mod.rs`. They
-//! assume any selection handling, undo recording, and completer recomputation
-//! has already been set up by the caller (the dispatcher).
 
 use super::{PromptState, ATTACHMENT_MARKER};
 use crate::smelt_term::VimMode;
 use smelt_core::attachment::AttachmentId;
 
 impl PromptState {
-    /// Save undo state before an editing operation.
-    /// When vim is in insert mode, skip — the entire insert session is
-    /// already covered by the undo entry saved on insert entry.
+    /// Save undo state. Skips during vim Insert — the session entry saved on insert-entry covers it.
     pub(crate) fn save_undo(&mut self, mode: VimMode) {
         if self.win.vim_enabled && mode == VimMode::Insert {
             return; // insert session groups all edits into one undo step
@@ -47,7 +40,7 @@ impl PromptState {
         if self.win.cpos == 0 {
             return;
         }
-        // If deleting the closing `"` of a `"@path"` token, remove the whole token.
+        // Deleting the closing `"` of a `"@path"` token removes the whole token.
         if let Some(start) = self.quoted_at_ref_start() {
             if start == 0 {
                 self.from_paste = false;
@@ -71,8 +64,7 @@ impl PromptState {
         self.recompute_completer();
     }
 
-    /// If the cursor is right after the closing `"` of a `"@path"` token,
-    /// return the byte offset of the opening `"`.
+    /// Byte offset of the opening `"` when the cursor is just after the closing `"` of a `"@path"` token.
     fn quoted_at_ref_start(&self) -> Option<usize> {
         let before = &self.win.text[..self.win.cpos];
         if !before.ends_with('"') {
@@ -277,19 +269,15 @@ impl PromptState {
     }
 
     pub(super) fn insert_paste(&mut self, data: String) {
-        // Normalize line endings: terminals (especially macOS) send `\r`
-        // for newlines in bracketed paste mode. Convert `\r\n` and lone
-        // `\r` to `\n` so multi-line pastes flow into the buffer as the
-        // user expects.
+        // Normalize `\r\n` and lone `\r` to `\n` (terminals in bracketed-paste mode send `\r`).
         let data = data.replace("\r\n", "\n").replace('\r', "\n");
 
         if data.is_empty() {
             return;
         }
 
-        // Mark as from_paste if inserting at the beginning of the
-        // current line. Prevents pasted content starting with `!` from
-        // being treated as a shell escape.
+        // Mark from_paste when inserting at the beginning of the current line
+        // so pasted content starting with `!` isn't treated as a shell escape.
         let line_start = self.win.text[..self.win.cpos]
             .rfind('\n')
             .map(|i| i + 1)
@@ -311,7 +299,6 @@ impl PromptState {
         self.win.cpos += ATTACHMENT_MARKER.len_utf8();
     }
 
-    /// Remove attachment IDs for any markers in `buf[start..end]`.
     pub(super) fn remove_attachments_in_range(&mut self, start: usize, end: usize) {
         let before = self.win.text[..start]
             .chars()
@@ -341,7 +328,6 @@ impl PromptState {
         }
     }
 
-    /// Move cursor to the beginning of the given line number (0-indexed).
     pub(super) fn move_to_line(&mut self, target_line: usize) {
         let mut line = 0;
         let mut pos = 0;
@@ -366,10 +352,8 @@ impl PromptState {
         self.recompute_completer();
     }
 
-    /// Kill text into the kill ring and copy to the system clipboard.
-    /// Records the clipboard write on the kill ring so subsequent
-    /// pastes know this is *our* latest push (distinguished from an
-    /// externally-updated clipboard).
+    /// Kill text into the kill ring and copy to clipboard.
+    /// Records the write so subsequent pastes can distinguish our push from external updates.
     pub(super) fn kill_and_copy(
         &mut self,
         text: String,

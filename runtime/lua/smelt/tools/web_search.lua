@@ -1,8 +1,4 @@
--- Built-in web_search tool — search the web via DuckDuckGo's HTML
--- endpoint. Composes `smelt.http.{post,cache,random_user_agent}`
--- and `smelt.html.parse_ddg_results`. Mirrors the retired Rust
--- `WebSearchTool`: 15-minute cache, rotated User-Agent, top-20
--- results trimmed and formatted as a numbered list.
+-- Built-in web_search tool. DuckDuckGo HTML search with 15-minute cache and rotated UA.
 
 local function urlencode(s)
   return (
@@ -78,7 +74,6 @@ smelt.tools.register({
       end
       table.insert(lines, "")
     end
-    -- Trim trailing blank line.
     while #lines > 0 and lines[#lines] == "" do
       table.remove(lines)
     end

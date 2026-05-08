@@ -1,18 +1,6 @@
-//! Process capability — synchronous spawn-and-wait primitive over
-//! `std::process::Command`. Pure subprocess composition, no policy.
-//! Exposed to Lua via `crates/tui/src/lua/api/process.rs::run` and
-//! composed by tools that need to run a short-lived shell command.
-//!
-//! Long-lived background processes go through the engine
-//! `ProcessRegistry` (`smelt.process.{list,kill,read_output,spawn_bg}`);
-//! that surface stays put. The future `app::process` long-lived IPC
-//! surface will cover bidirectional event-channel children (MCP, etc.).
-//!
-//! `run_streaming` is the async counterpart used by the bash tool —
-//! drives the child via `tokio::process`, fires a per-line callback
-//! as stdout/stderr arrive, returns aggregated output. The Lua-side
-//! `bash` tool calls this through `smelt.process.run_streaming` and
-//! parks its coroutine on `smelt.task.wait`.
+//! Process capability — sync spawn-and-wait (`run`) and async streaming
+//! (`run_streaming`) primitives. `ProcessRegistry` manages long-lived
+//! background children (`spawn_bg`, `read_output`, `stop`).
 
 use std::collections::HashMap;
 use std::ffi::OsStr;
@@ -25,18 +13,15 @@ use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
-/// Options accepted by [`run`]. Defaults: 30s timeout, inherit env,
-/// no stdin, capture stdout+stderr.
+/// Defaults: 30s timeout, inherit env, no stdin, capture stdout+stderr.
 #[derive(Debug, Clone, Default)]
 pub(crate) struct Options {
     pub(crate) cwd: Option<String>,
     pub(crate) env: HashMap<String, String>,
     pub(crate) timeout: Option<Duration>,
-    /// Optional stdin text; written to the child's stdin then closed.
     pub(crate) stdin: Option<String>,
 }
 
-/// Result of a single short-lived process invocation.
 #[derive(Debug, Clone)]
 pub(crate) struct Output {
     pub(crate) stdout: String,
@@ -45,8 +30,6 @@ pub(crate) struct Output {
     pub(crate) timed_out: bool,
 }
 
-/// Run `cmd` with `args` and the given options, awaiting exit (or the
-/// configured timeout). Stdout/stderr are captured as UTF-8 (lossy).
 pub(crate) fn run<I, S>(cmd: &str, args: I, opts: &Options) -> io::Result<Output>
 where
     I: IntoIterator<Item = S>,
@@ -120,22 +103,17 @@ where
     }
 }
 
-/// Result of [`run_streaming`]. Mirrors [`Output`] without the
-/// stdout/stderr split — streaming aggregates both into one buffer
-/// since per-line callbacks already saw them in arrival order.
 #[derive(Debug, Clone)]
 pub(crate) struct StreamOutput {
-    /// stdout + stderr lines joined by '\n' in arrival order.
+    /// stdout + stderr lines interleaved in arrival order, joined by '\n'.
     pub(crate) content: String,
     pub(crate) is_error: bool,
     pub(crate) timed_out: bool,
 }
 
-/// Spawn `sh -c command` and stream stdout+stderr lines through
-/// `on_line` as they arrive. Returns aggregated output once the child
-/// exits or the timeout expires. The child is in its own process
-/// group so `kill_process_group` semantics are available to a future
-/// cancel path.
+/// Spawn `sh -c command`, stream lines through `on_line`, return aggregated
+/// output once the child exits or the timeout expires. Child runs in its
+/// own process group so the whole group can be signalled on cancel/timeout.
 pub(crate) async fn run_streaming(
     command: &str,
     timeout: Duration,
@@ -248,14 +226,11 @@ fn kill_process_group(child: &tokio::process::Child) {
 #[cfg(not(unix))]
 fn kill_process_group(_child: &tokio::process::Child) {}
 
-/// SIGKILL variant of [`kill_process_group`] used by the background-
-/// process registry's stop path. The streaming `run_streaming` timeout
-/// path uses SIGTERM (above) for graceful shutdown; explicit
-/// `stop_process` invocations skip the grace period.
+/// SIGKILL variant used by the process registry stop path (skips SIGTERM grace period).
 #[cfg(unix)]
 fn kill_group_sigkill(child: &tokio::process::Child) {
     if let Some(pid) = child.id() {
-        // SAFETY: pid is a valid process group ID (we set process_group(0) at spawn).
+        // SAFETY: pid is a valid process group ID (set via process_group(0) at spawn).
         unsafe {
             libc::kill(-(pid as i32), libc::SIGKILL);
         }
@@ -265,17 +240,10 @@ fn kill_group_sigkill(child: &tokio::process::Child) {
 #[cfg(not(unix))]
 fn kill_group_sigkill(_child: &tokio::process::Child) {}
 
-// ── Background-process registry ───────────────────────────────────────
-// Long-lived `proc_<n>` children spawned via the `bash` tool's
-// `run_in_background` parameter. Output buffered on the registry; the Lua
-// `read_process_output` / `stop_process` tools read or terminate
-// running entries. Read by the statusline indicator and cleared on
-// session reset.
+// ── Background-process registry ──────────────────────────────────────────
 
 static NEXT_PROC_ID: AtomicU32 = AtomicU32::new(1);
 
-/// Maximum number of output lines retained per background process.
-/// Older lines are dropped once this limit is reached.
 const MAX_LINES: usize = 10_000;
 
 struct Process {
@@ -285,12 +253,9 @@ struct Process {
     exit_code: Option<i32>,
     command: String,
     started_at: Instant,
-    /// Sends SIGKILL to the child process.
     kill_tx: Option<mpsc::Sender<()>>,
 }
 
-/// Info about a running background process, returned by
-/// [`ProcessRegistry::list`].
 pub struct ProcessInfo {
     pub id: String,
     pub command: String,
@@ -308,7 +273,6 @@ impl Process {
     }
 }
 
-/// Shared registry of background processes.
 #[derive(Clone)]
 pub struct ProcessRegistry(Arc<Mutex<HashMap<String, Process>>>);
 
@@ -323,9 +287,6 @@ impl ProcessRegistry {
         Self::default()
     }
 
-    /// Spawn a background process. Output is accumulated internally; a
-    /// background tokio task reads stdout/stderr and marks the process
-    /// finished when it exits.
     pub fn spawn(
         &self,
         id: String,
@@ -410,7 +371,7 @@ impl ProcessRegistry {
         });
     }
 
-    /// Read new output since the last read. Returns (new_lines, running, exit_code).
+    /// Returns `(new_lines, running, exit_code)`.
     pub fn read(&self, id: &str) -> Result<(String, bool, Option<i32>), String> {
         let mut map = self.0.lock().unwrap();
         let p = map
@@ -426,7 +387,6 @@ impl ProcessRegistry {
         Ok((output, running, exit_code))
     }
 
-    /// Stop a background process. Returns its final accumulated output.
     pub async fn stop(&self, id: &str) -> Result<String, String> {
         let kill_tx = {
             let mut map = self.0.lock().unwrap();
@@ -438,8 +398,6 @@ impl ProcessRegistry {
         if let Some(tx) = kill_tx {
             let _ = tx.try_send(());
         }
-        // Poll until the background task marks the process finished,
-        // rather than a blind sleep that may be too short or too long.
         for _ in 0..20 {
             tokio::time::sleep(std::time::Duration::from_millis(10)).await;
             let map = self.0.lock().unwrap();
@@ -459,13 +417,11 @@ impl ProcessRegistry {
         format!("proc_{n}")
     }
 
-    /// Number of currently running processes.
     pub fn running_count(&self) -> usize {
         let map = self.0.lock().unwrap();
         map.values().filter(|p| !p.finished).count()
     }
 
-    /// List running background processes.
     pub fn list(&self) -> Vec<ProcessInfo> {
         let map = self.0.lock().unwrap();
         let mut procs: Vec<ProcessInfo> = map
@@ -481,7 +437,6 @@ impl ProcessRegistry {
         procs
     }
 
-    /// Kill all running processes and remove all entries.
     pub fn clear(&self) {
         let mut map = self.0.lock().unwrap();
         for p in map.values_mut() {

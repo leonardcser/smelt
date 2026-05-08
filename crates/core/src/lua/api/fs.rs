@@ -1,10 +1,4 @@
-//! `smelt.fs` bindings — sync filesystem primitives over `crate::fs`.
-//! Host-tier (works in tui and headless) — no Ui touch.
-//!
-//! Errors flow through the `(value, err)` Lua convention: success
-//! returns `(value, nil)`, failure returns `(nil, error_string)`. This
-//! lets plugin code do `local data, err = smelt.fs.read(p)` without
-//! `pcall`.
+//! `smelt.fs` — sync filesystem primitives. Errors use `(value, err_string)` convention.
 
 use crate::fs::FlockGuard;
 use mlua::prelude::*;
@@ -166,10 +160,6 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
     Ok(())
 }
 
-/// Userdata wrapper for an exclusive advisory lock acquired via
-/// `crate::fs::try_flock`. Released on `:release()` or when garbage
-/// collected. Lua tools that mutate a file under a flock acquire one of
-/// these and let it drop when the write completes.
 struct FlockHandle(RefCell<Option<FlockGuard>>);
 
 impl FlockHandle {
@@ -187,11 +177,6 @@ impl LuaUserData for FlockHandle {
     }
 }
 
-/// `smelt.fs.file_state` — shared mtime + content + read-range cache.
-/// Read by Lua `read_file` / `write_file` / `edit_file` / `notebook_edit`
-/// during their migration off the engine impls. Backed by the same
-/// `crate::fs::FileStateCache` engine-side tools see, parked on
-/// `Host::files`.
 fn build_file_state(lua: &Lua) -> LuaResult<mlua::Table> {
     let t = lua.create_table()?;
 

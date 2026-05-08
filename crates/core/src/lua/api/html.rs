@@ -1,5 +1,4 @@
-//! `smelt.html` bindings — read-only HTML parsing over `crate::html`.
-//! Host-tier (works in tui and headless) — no Ui touch.
+//! `smelt.html` — HTML parsing (title, links, to_text, to_markdown, DDG results).
 
 use mlua::prelude::*;
 

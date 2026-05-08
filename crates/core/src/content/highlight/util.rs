@@ -1,12 +1,6 @@
-//! Helpers shared by the inline-emphasis renderer and the markdown table
-//! renderer: visible-width measurement (`strip_markdown_markers`),
-//! word-break candidate detection (`breakable_positions`), and the
-//! recursive `strip_range` over inline syntax characters.
+//! Shared helpers: visible-width measurement, break-candidate detection, and inline-syntax stripping.
 
-/// Strip inline markdown markers (`**`, `*`, `__`, `_`, `` ` ``, `~~`) and
-/// return the visible text content. Used for measuring visual width.
-/// Recurses into nested spans so nested emphasis/code is also stripped,
-/// keeping this consistent with `print_inline_styled`'s actual output.
+/// Strip inline markdown markers and return visible text. Must match `print_inline_styled` output.
 pub(crate) fn strip_markdown_markers(text: &str) -> String {
     let chars: Vec<char> = text.chars().collect();
     strip_range(&chars, 0, chars.len())
@@ -17,7 +11,6 @@ fn strip_range(chars: &[char], start: usize, end: usize) -> String {
     let mut i = start;
     while i < end {
         if let Some((content_start, content_end, after)) = skip_inline_span_range(chars, i, end) {
-            // Code spans are literal; emphasis/strike recurse for nesting.
             if chars[i] == '`' {
                 out.extend(chars[content_start..content_end].iter());
             } else {
@@ -26,11 +19,7 @@ fn strip_range(chars: &[char], start: usize, end: usize) -> String {
             i = after;
             continue;
         }
-        // When an emphasis delimiter run didn't open a span, consume
-        // the whole run at once. Otherwise a stray `*` inside e.g.
-        // `**text*` could be re-interpreted by the next iteration as
-        // an italic opener, producing a stripped string that doesn't
-        // match what `print_inline_styled` actually emits.
+        // Consume the whole unmatched run at once to stay consistent with `print_inline_styled`.
         if chars[i] == '*' || chars[i] == '_' {
             let run = run_length(chars, i, end, chars[i]);
             for _ in 0..run {
@@ -45,9 +34,7 @@ fn strip_range(chars: &[char], start: usize, end: usize) -> String {
     out
 }
 
-/// Identify character positions in `text` where line-breaking is allowed.
-/// Returns a bool vec parallel to `text.chars()` — `true` at spaces outside
-/// inline markdown spans (delimiters are not breakable).
+/// Bool vec parallel to chars: `true` at spaces outside inline spans.
 pub(super) fn breakable_positions(text: &str) -> Vec<bool> {
     let chars: Vec<char> = text.chars().collect();
     let len = chars.len();
@@ -55,7 +42,6 @@ pub(super) fn breakable_positions(text: &str) -> Vec<bool> {
     let mut i = 0;
     while i < len {
         if let Some((_, _, after)) = skip_inline_span_range(&chars, i, len) {
-            // Jump past the entire span (delimiters + content) — no breaks inside.
             i = after;
             continue;
         }
@@ -67,10 +53,8 @@ pub(super) fn breakable_positions(text: &str) -> Vec<bool> {
     breakable
 }
 
-/// Try to match an inline markdown span at position `i` within the open
-/// range `[0..end)`. Returns `Some((content_start, content_end, after))`
-/// if a complete span is found. Uses strict delimiter-run matching so
-/// that e.g. `**text*` does not collapse to `*` + italic("text").
+/// Match an inline span at `i`; returns `(content_start, content_end, after)` if complete.
+/// Strict run-length matching: `**text*` does not collapse to italic.
 pub(super) fn skip_inline_span_range(
     chars: &[char],
     i: usize,
@@ -80,21 +64,18 @@ pub(super) fn skip_inline_span_range(
         return None;
     }
 
-    // `code`: highest precedence.
     if chars[i] == '`' {
         if let Some(close) = find_code_close(chars, i + 1, end) {
             return Some((i + 1, close, close + 1));
         }
     }
 
-    // ~~strikethrough~~
     if i + 1 < end && chars[i] == '~' && chars[i + 1] == '~' {
         if let Some(close) = find_strike_close(chars, i + 2, end) {
             return Some((i + 2, close, close + 2));
         }
     }
 
-    // Emphasis: *italic*, **bold**, ***both*** (and `_` variants).
     if chars[i] == '*' || chars[i] == '_' {
         let marker = chars[i];
         let run = run_length(chars, i, end, marker);
@@ -116,12 +97,8 @@ pub(super) fn run_length(chars: &[char], i: usize, end: usize, marker: char) -> 
     j - i
 }
 
-/// Can a delimiter run of `count` `marker` chars at position `i` open
-/// emphasis? Rules (simplified CommonMark left-flanking):
-/// - The character after the run must exist and not be whitespace.
-/// - For `_`: the character before the run must not be alphanumeric.
-///   Prevents intraword emphasis like `snake_case` or URLs containing
-///   underscores.
+/// Returns true if a delimiter run of `count` `marker` chars at `i` can open emphasis.
+/// For `_`: the preceding char must not be alphanumeric (prevents intraword emphasis).
 pub(super) fn can_open_emphasis(
     chars: &[char],
     i: usize,
@@ -139,13 +116,8 @@ pub(super) fn can_open_emphasis(
     true
 }
 
-/// Find a closing delimiter run of **exactly** `count` consecutive
-/// `marker` chars in `[start..end)`. Rules:
-/// - The character before the run must not be whitespace
-///   (right-flanking).
-/// - For `_`: the character after the run must not be alphanumeric.
-/// - Run length must equal `count` exactly — a run of 1 cannot close an
-///   opener of 2, and vice versa.
+/// Find a closing delimiter run of exactly `count` `marker` chars: right-flanking,
+/// and for `_` not followed by alphanumeric. Run length must match exactly.
 pub(super) fn find_closing_run(
     chars: &[char],
     start: usize,
@@ -171,7 +143,6 @@ pub(super) fn find_closing_run(
     None
 }
 
-/// Find the closing backtick of a code span starting at `start`.
 pub(super) fn find_code_close(chars: &[char], start: usize, end: usize) -> Option<usize> {
     let mut j = start;
     while j < end {
@@ -183,7 +154,6 @@ pub(super) fn find_code_close(chars: &[char], start: usize, end: usize) -> Optio
     None
 }
 
-/// Find the closing `~~` of a strikethrough span.
 pub(super) fn find_strike_close(chars: &[char], start: usize, end: usize) -> Option<usize> {
     let mut j = start;
     while j + 1 < end {

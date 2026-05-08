@@ -1,6 +1,4 @@
--- Built-in glob tool — fast file-pattern matching, gitignore-aware.
--- Composes `tui::fs::glob` (globset + ignore::WalkBuilder) and returns
--- matching paths sorted newest-first by mtime.
+-- Built-in glob tool. Gitignore-aware pattern matching; results sorted newest-first.
 
 local function confirm_message(args)
   local pattern = args.pattern or ""

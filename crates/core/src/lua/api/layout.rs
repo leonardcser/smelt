@@ -1,30 +1,9 @@
-//! `smelt.layout` bindings — composable block layout returned from a
-//! tool's `render` callback. Wraps [`BlockLayout`] as Lua userdata so
-//! tool code can build trees without crossing back into Rust on every
-//! node:
-//!
-//! ```lua
-//! return smelt.layout.vbox {
-//!   smelt.layout.leaf(header_buf),
-//!   smelt.layout.hbox {
-//!     smelt.layout.leaf(body_buf),
-//!     smelt.layout.sep("│"),
-//!     { smelt.layout.leaf(side_buf), cols = 20 },
-//!   },
-//! }
-//! ```
-//!
-//! `vbox` stacks children top-to-bottom. `hbox` lays children out
-//! side-by-side: bare leaves sugar to `Fill(1)` (equal split); a child
-//! wrapped as `{ leaf, weight = N }` or `{ leaf, cols = N }` overrides
-//! the per-column constraint.
+//! `smelt.layout` — composable block layout (vbox/hbox/leaf) returned from tool `render` callbacks.
 
 use crate::buffer::BufId;
 use crate::content::block_layout::{BlockLayout, Constraint, HboxItem};
 use mlua::prelude::*;
 
-/// Userdata wrapper so Lua can pass `BlockLayout` values into nested
-/// `vbox` / `hbox` constructors and back into Rust runtime hooks.
 pub struct LuaBlockLayout(pub BlockLayout);
 
 impl mlua::UserData for LuaBlockLayout {}

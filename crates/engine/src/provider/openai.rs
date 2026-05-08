@@ -8,8 +8,7 @@ use crate::trim::{trim_tool_output, MAX_TOOL_OUTPUT_LINES};
 use protocol::{FunctionCall, Message, ReasoningEffort, Role, TokenUsage, ToolCall};
 use std::collections::HashMap;
 
-/// Parse OpenAI usage fields into a `TokenUsage`. OpenAI reports total input
-/// tokens (including cached), so we subtract cached to match Anthropic semantics.
+/// OpenAI reports total input tokens (including cached); subtract cached to match Anthropic semantics.
 fn parse_usage(u: &serde_json::Value) -> TokenUsage {
     let total_input = u["input_tokens"].as_u64().map(|n| n as u32);
     let cached = u["input_tokens_details"]["cached_tokens"]
@@ -231,7 +230,6 @@ pub(super) async fn read_stream(
 ) -> Result<ParsedResponse, ProviderError> {
     let mut content = String::new();
     let mut reasoning = String::new();
-    // Map from item_id to (call_id, name, args)
     let mut tool_calls: HashMap<String, (String, String, String)> = HashMap::new();
     let mut usage = TokenUsage::default();
     let mut stream_error: Option<ProviderError> = None;
