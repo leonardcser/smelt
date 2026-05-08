@@ -32,22 +32,23 @@ smelt.provider.register("openai", {
 })
 ```
 
-| Field         | Description                                                                 |
-| ------------- | --------------------------------------------------------------------------- |
-| `type`        | `openai`, `codex`, `anthropic`, `copilot`, or `openai-compatible`           |
-| `api_base`    | API endpoint URL                                                            |
-| `api_key_env` | Environment variable holding the API key (omit for `codex` and `copilot`)   |
-| `models`      | Array of model names (optional for `codex`/`copilot` — fetched via API)     |
+| Field         | Description                                                                              |
+| ------------- | ---------------------------------------------------------------------------------------- |
+| `type`        | `openai`, `codex`, `anthropic`, `copilot`, `openai-compatible` or `anthropic-compatible` |
+| `api_base`    | API endpoint URL                                                                         |
+| `api_key_env` | Environment variable holding the API key (omit for `codex` and `copilot`)                |
+| `models`      | Array of model names (optional for `codex`/`copilot` — fetched via API)                  |
 
 ### Provider Types
 
-| Type                | Endpoint                                           | Compatible Services                            |
-| ------------------- | -------------------------------------------------- | ---------------------------------------------- |
-| `openai`            | `/v1/responses`                                    | OpenAI, OpenRouter                             |
-| `codex`             | `chatgpt.com/backend-api/codex` (OAuth)            | OpenAI Codex (ChatGPT subscription)            |
-| `anthropic`         | `/v1/messages` + thinking                          | Anthropic                                      |
-| `copilot`           | `api.*.githubcopilot.com/chat/completions` (OAuth) | GitHub Copilot subscription                    |
-| `openai-compatible` | `/v1/chat/completions`                             | Ollama, vLLM, SGLang, llama.cpp, Google Gemini |
+| Type                   | Endpoint                                           | Compatible Services                            |
+| ---------------------- | -------------------------------------------------- | ---------------------------------------------- |
+| `openai`               | `/v1/responses`                                    | OpenAI, OpenRouter                             |
+| `codex`                | `chatgpt.com/backend-api/codex` (OAuth)            | OpenAI Codex (ChatGPT subscription)            |
+| `anthropic`            | `/v1/messages` + thinking                          | Anthropic                                      |
+| `copilot`              | `api.*.githubcopilot.com/chat/completions` (OAuth) | GitHub Copilot subscription                    |
+| `openai-compatible`    | `/v1/chat/completions`                             | Ollama, vLLM, SGLang, llama.cpp, Google Gemini |
+| `anthropic-compatible` | `/v1/messages` + thinking                          | Kimi Code, other Anthropic-compatible APIs     |
 
 ### Model Configuration
 
@@ -68,18 +69,18 @@ smelt.provider.register("ollama", {
 
 Per-model overrides:
 
-| Field            | Description                                          |
-| ---------------- | ---------------------------------------------------- |
-| `temperature`    | Sampling temperature                                 |
-| `top_p`          | Top-p (nucleus) sampling                             |
-| `top_k`          | Top-k sampling (openai-compatible & anthropic only)  |
-| `min_p`          | Min-p sampling (openai-compatible only)              |
-| `repeat_penalty` | Repetition penalty (openai-compatible only)          |
-| `tool_calling`   | Set to `false` to disable tools for this model       |
-| `input_cost`     | USD per 1M input tokens                              |
-| `output_cost`    | USD per 1M output tokens                             |
-| `cache_read_cost`| USD per 1M cache-read tokens                         |
-| `cache_write_cost`| USD per 1M cache-write tokens                       |
+| Field              | Description                                         |
+| ------------------ | --------------------------------------------------- |
+| `temperature`      | Sampling temperature                                |
+| `top_p`            | Top-p (nucleus) sampling                            |
+| `top_k`            | Top-k sampling (openai-compatible & anthropic only) |
+| `min_p`            | Min-p sampling (openai-compatible only)             |
+| `repeat_penalty`   | Repetition penalty (openai-compatible only)         |
+| `tool_calling`     | Set to `false` to disable tools for this model      |
+| `input_cost`       | USD per 1M input tokens                             |
+| `output_cost`      | USD per 1M output tokens                            |
+| `cache_read_cost`  | USD per 1M cache-read tokens                        |
+| `cache_write_cost` | USD per 1M cache-write tokens                       |
 
 #### Pricing
 
@@ -111,7 +112,7 @@ Starting mode and reasoning effort can be changed at runtime or via CLI flags:
 | `--reasoning-cycle <LEVELS>` | Levels for `Ctrl+T` cycling (comma-separated)             |
 
 Reasoning effort controls how deeply the model thinks before responding.
-Supported by Anthropic (`thinking`), OpenAI (`reasoning`), and openai-compatible
+Supported by Anthropic (`thinking`), OpenAI (`reasoning`), openai-compatible, and anthropic-compatible
 providers that support `reasoning_effort`. For OpenAI, `max` maps to `xhigh`.
 Models that don't support thinking ignore this setting.
 
@@ -319,6 +320,13 @@ smelt.provider.register("openrouter", {
   api_base = "https://openrouter.ai/api/v1",
   api_key_env = "OPENROUTER_API_KEY",
   models = { "anthropic/claude-sonnet-4-6", "openai/gpt-5.4" },
+})
+
+smelt.provider.register("kimi", {
+  type = "anthropic-compatible",
+  api_base = "https://api.kimi.com/coding",
+  api_key_env = "KIMI_API_KEY",
+  models = { "kimi-for-coding" },
 })
 
 smelt.settings.set("vim_mode", false)

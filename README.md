@@ -96,7 +96,7 @@ Config file: `~/.config/smelt/init.lua` (respects `$XDG_CONFIG_HOME`).
 
 ```lua
 smelt.provider.register("ollama", {
-  type = "openai-compatible", -- or: "openai", "anthropic", "codex", "copilot"
+  type = "openai-compatible", -- or: "openai", "anthropic", "anthropic-compatible", "codex", "copilot"
   api_base = "http://localhost:11434/v1",
   models = { "qwen3.5:27b" },
 })
