@@ -6,11 +6,10 @@ impl TuiApp {
     pub(crate) fn refresh_status_bar(&mut self) {
         use crate::content::status::{spans_to_buffer_line, StatusSpan};
         use crate::smelt_term::SpanStyle;
-        use smelt_core::style::Color;
 
         let (term_w, _) = self.ui.terminal_size();
         let width = term_w as usize;
-        let status_bg = Color::AnsiValue(233);
+        let status_bg = self.ui.theme().get("SmeltStatusBg").bg.unwrap();
         let theme_muted_fg = self.ui.theme().get("Comment").fg;
 
         let mut spans: Vec<StatusSpan> = self

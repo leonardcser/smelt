@@ -66,6 +66,28 @@ impl TuiApp {
         self.set_focus(win);
         self.well_known.cmdline = Some(win);
         self.cmdline.completer = None;
+        self.cmdline_apply_status_bg();
+    }
+
+    /// Re-applied after every payload mutation: `Buffer::set_lines` wipes decorations in the replaced range.
+    fn cmdline_apply_status_bg(&mut self) {
+        let Some(win) = self.well_known.cmdline else {
+            return;
+        };
+        let Some(buf_id) = self.ui.win(win).map(|w| w.buf) else {
+            return;
+        };
+        let bg = self.ui.theme().get("SmeltStatusBg").bg;
+        let Some(bg) = bg else { return };
+        if let Some(b) = self.ui.buf_mut(buf_id) {
+            b.set_decoration(
+                0,
+                smelt_buffer::buffer::LineDecoration {
+                    fill_bg: Some(bg),
+                    ..Default::default()
+                },
+            );
+        }
     }
 
     fn close_cmdline(&mut self) {
@@ -100,6 +122,7 @@ impl TuiApp {
         if let Some(w) = self.ui.win_mut(win) {
             w.cursor_col = PREFIX_LEN + cursor_in_payload as u16;
         }
+        self.cmdline_apply_status_bg();
     }
 
     fn cmdline_cursor_in_payload(&self) -> usize {

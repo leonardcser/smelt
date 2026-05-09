@@ -230,6 +230,7 @@ pub(crate) fn populate_ui_theme(theme: &mut crate::smelt_term::Theme) {
 
     theme.set("SmeltAccent", Style::new().fg(theme.accent_color()));
     theme.set("SmeltSlug", Style::new().bg(theme.slug_color()));
+    theme.set("SmeltStatusBg", Style::new().bg(Color::AnsiValue(233)));
     theme.set("SmeltUserBg", Style::new().bg(user_bg));
     theme.set("SmeltCodeBlockBg", Style::new().bg(code_block_bg));
     theme.set("SmeltBar", Style::new().bg(bar));

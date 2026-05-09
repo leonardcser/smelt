@@ -46,7 +46,7 @@ pub(super) fn render(
     width: usize,
 ) -> u16 {
     let is_command = is_command_like(text.trim());
-    let text_w = width.saturating_sub(1).max(1);
+    let text_w = width.saturating_sub(2).max(1);
     let geom = UserBlockGeometry::new(text, text_w);
     let user_bg = role_hl("UserBg");
     let mut rows = 0u16;
@@ -58,7 +58,7 @@ pub(super) fn render(
         if logical_line.is_empty() {
             let fill = if geom.block_w > 0 { geom.block_w } else { 1 };
             out.set_hl(user_bg);
-            out.print_with_meta(&" ".repeat(fill), pad_meta.clone());
+            out.print_with_meta(&" ".repeat(fill + 1), pad_meta.clone());
             out.reset_style();
             out.set_gutter_bg_group(user_bg);
             out.newline();
@@ -77,6 +77,7 @@ pub(super) fn render(
                 1
             };
             out.set_hl(user_bg);
+            out.print_with_meta(" ", pad_meta.clone());
             out.set_bold();
             print_highlights(out, chunk, image_labels, is_command);
             out.print_with_meta(&" ".repeat(trailing), pad_meta.clone());
