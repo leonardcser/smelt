@@ -120,6 +120,11 @@ impl PromptState {
         clipboard
             .kill_ring
             .yank_flash_range(std::time::Instant::now())
+            .filter(|&(s, e)| {
+                e <= self.source.len()
+                    && self.source.is_char_boundary(s)
+                    && self.source.is_char_boundary(e)
+            })
     }
 
     fn has_selection(&self, mode: VimMode) -> bool {
