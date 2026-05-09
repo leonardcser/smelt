@@ -73,7 +73,6 @@ pub struct TuiApp {
     /// doesn't draw a stale cursor in our window.
     pub(crate) term_focused: bool,
     pub(crate) working: smelt_core::working::WorkingState,
-    pub(crate) transcript_gutters: crate::window::WindowGutters,
     /// Viewport layout updated each frame; read by mouse hit-testing and scroll estimation.
     pub(crate) layout: crate::content::layout::LayoutState,
 
@@ -275,7 +274,11 @@ impl TuiApp {
                 transcript_display_buf,
                 crate::smelt_term::SplitConfig {
                     region: "transcript".into(),
-                    gutters: crate::smelt_term::Gutters::default(),
+                    gutters: crate::smelt_term::Gutters {
+                        pad_left: 0,
+                        pad_right: 0,
+                        scrollbar: true,
+                    },
                 },
             ));
             let prompt_above_buf = ui.buf_create(crate::smelt_term::BufCreateOpts::default());
@@ -379,7 +382,6 @@ impl TuiApp {
             paint_registry: crate::lua::paint::PaintRegistry::default(),
             term_focused: true,
             working: smelt_core::working::WorkingState::new(),
-            transcript_gutters: crate::window::TRANSCRIPT_GUTTERS,
             layout: crate::content::layout::LayoutState::default(),
             agent: None,
             sleep_inhibit: crate::sleep_inhibit::SleepInhibitor::new(),
@@ -542,10 +544,18 @@ impl TuiApp {
         text
     }
 
+    /// Gutters configured on the transcript window (single source of truth: `Window.config.gutters`).
+    pub(crate) fn transcript_gutters(&self) -> crate::smelt_term::Gutters {
+        self.ui
+            .win(crate::app::TRANSCRIPT_WIN)
+            .map(|w| w.config.gutters)
+            .unwrap_or_default()
+    }
+
     /// Width available for transcript content (terminal width minus gutter/scrollbar columns).
     pub(crate) fn transcript_width(&self) -> usize {
         let (w, _) = self.ui.terminal_size();
-        (self.transcript_gutters.content_width(w) as usize).max(1)
+        (self.transcript_gutters().content_width(w) as usize).max(1)
     }
 
     /// Resolves a raw leaf id to a live `Window` or a registered paint region (`None` if unrecognised).
@@ -775,21 +785,6 @@ impl TuiApp {
             self.publish_diff_cells();
             self.drain_cells_pending();
             self.drive_lua_tasks();
-            let (items, tick_errors) = self.lua.tick_statusline();
-            self.custom_status_items = items;
-            for (name, msg) in tick_errors {
-                match msg {
-                    Some(new_msg) => {
-                        if self.statusline_last_errors.get(&name) != Some(&new_msg) {
-                            self.notify_error(new_msg.clone());
-                            self.statusline_last_errors.insert(name, new_msg);
-                        }
-                    }
-                    None => {
-                        self.statusline_last_errors.remove(&name);
-                    }
-                }
-            }
             for _id in self.drain_finished_blocks() {
                 self.core
                     .cells
@@ -898,6 +893,25 @@ impl TuiApp {
                     }
                 }
                 self.pending_dialog = !pending_dialogs.is_empty();
+            }
+
+            // Recompute statusline after engine events drain so a turn ending mid-iteration
+            // (TurnComplete) flips the spinner pill to "done" in the same frame, instead of
+            // showing stale items until the next input event.
+            let (items, tick_errors) = self.lua.tick_statusline();
+            self.custom_status_items = items;
+            for (name, msg) in tick_errors {
+                match msg {
+                    Some(new_msg) => {
+                        if self.statusline_last_errors.get(&name) != Some(&new_msg) {
+                            self.notify_error(new_msg.clone());
+                            self.statusline_last_errors.insert(name, new_msg);
+                        }
+                    }
+                    None => {
+                        self.statusline_last_errors.remove(&name);
+                    }
+                }
             }
 
             self.render_normal(self.agent.is_some());

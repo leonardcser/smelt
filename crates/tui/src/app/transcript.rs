@@ -390,7 +390,7 @@ impl TuiApp {
         scroll_top: u16,
         show_thinking: bool,
     ) -> TranscriptData {
-        let gutters = crate::window::TRANSCRIPT_GUTTERS;
+        let gutters = self.transcript_gutters();
         let tw = (gutters.content_width(width as u16) as usize).max(1);
         let theme = self.ui.theme().clone();
 
@@ -445,7 +445,7 @@ impl TuiApp {
         transcript_owns_cursor: bool,
         viewport: Option<&crate::smelt_term::WindowViewport>,
     ) -> TranscriptCursor {
-        let gutters = crate::window::TRANSCRIPT_GUTTERS;
+        let gutters = self.transcript_gutters();
         let tw = (gutters.content_width(width as u16) as usize).max(1);
 
         if !transcript_owns_cursor || viewport_rows == 0 {

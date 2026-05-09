@@ -144,7 +144,8 @@ impl TuiApp {
         viewport_rows: u16,
         has_transcript_cursor: bool,
     ) {
-        let t_pad = self.transcript_gutters.pad_left;
+        let gutters = self.transcript_gutters();
+        let t_pad = gutters.pad_left;
         let transcript_rect =
             crate::smelt_term::Rect::new(0, t_pad, term_w.saturating_sub(t_pad), viewport_rows);
         let tdata = {
@@ -171,7 +172,7 @@ impl TuiApp {
 
         let transcript_viewport = crate::smelt_term::WindowViewport::new(
             transcript_rect,
-            self.transcript_gutters.content_width(term_w),
+            gutters.content_width(term_w),
             tdata.total_rows,
             tdata.clamped_scroll,
             crate::smelt_term::ScrollbarState::new(
@@ -272,7 +273,7 @@ impl TuiApp {
         let gutters = self
             .ui
             .win(crate::app::PROMPT_WIN)
-            .map(|w| w.config.gutters.clone())
+            .map(|w| w.config.gutters)
             .unwrap_or_default();
         let pad_left = gutters.pad_left;
         let content_width = prompt_rect

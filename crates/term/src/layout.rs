@@ -365,11 +365,33 @@ impl Border {
     pub const ROUNDED: Border = Border::all(BorderStyle::Rounded);
 }
 
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Copy, Debug, Default)]
 pub struct Gutters {
     pub pad_left: u16,
     pub pad_right: u16,
     pub scrollbar: bool,
+}
+
+impl Gutters {
+    pub fn scrollbar_width(&self) -> u16 {
+        if self.scrollbar {
+            1
+        } else {
+            0
+        }
+    }
+
+    /// Width inside the left gutter (still includes the scrollbar column if any).
+    pub fn layer_width(&self, total: u16) -> u16 {
+        total.saturating_sub(self.pad_left)
+    }
+
+    /// Inner content width once `pad_left`, `pad_right`, and the scrollbar column are subtracted.
+    pub fn content_width(&self, total: u16) -> u16 {
+        self.layer_width(total)
+            .saturating_sub(self.pad_right)
+            .saturating_sub(self.scrollbar_width())
+    }
 }
 
 /// Resolve the tree against `area` and return the rect of every leaf.

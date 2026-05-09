@@ -19,7 +19,6 @@ pub use smelt_core::state;
 pub(crate) mod input;
 pub mod theme;
 pub use ::smelt_edit as smelt_term;
-pub(crate) mod window;
 
 pub use smelt_core::attachment;
 pub use smelt_core::session;
