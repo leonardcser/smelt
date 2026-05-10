@@ -117,34 +117,44 @@ impl TuiApp {
         self.core.clipboard.kill_ring.set_with_linewise(text, false);
     }
 
-    /// Scroll the pane under the cursor by `delta` lines. Prompt: moves `cpos`; transcript: scrolls buffer.
+    /// Scroll the pane under the cursor by `delta` lines, tmux-style: the viewport
+    /// pans and the cursor stays on the same screen row (its text position shifts).
+    /// Wheel does not change `app_focus` — only clicks promote focus.
     pub(crate) fn scroll_under_mouse(&mut self, row: u16, col: u16, delta: isize) {
         let on_prompt = matches!(
             self.ui.hit_test(row, col, None),
             Some(crate::smelt_term::HitTarget::Window(w)) if w == crate::app::PROMPT_WIN
         );
         if on_prompt {
-            self.app_focus = crate::app::AppFocus::Prompt;
-            let (new_pos, new_want) = crate::smelt_term::text::vertical_move(
-                &self.input.source,
-                self.input.win.cpos,
-                delta,
-                self.input.win.curswant,
-            );
-            self.input.win.curswant = Some(new_want);
-            if new_pos != self.input.win.cpos {
-                self.input.win.cpos = new_pos;
-            }
+            self.pan_prompt_by_lines(delta);
             return;
         }
         if !self.has_transcript_content(self.core.config.settings.show_thinking) {
             return;
         }
-        self.app_focus = crate::app::AppFocus::Content;
         let rows = self.full_transcript_display_text(self.core.config.settings.show_thinking);
         let viewport = self.viewport_rows_estimate();
-        self.transcript_window
-            .scroll_by_lines(delta, &rows, viewport);
+        self.transcript_window.pan_by_lines(delta, &rows, viewport);
+    }
+
+    /// Pan the prompt's wrapped-row viewport by `delta`, keeping the cursor on the same
+    /// screen row. `cpos` lives in source bytes; convert through `PromptWrap` so the
+    /// `Window` pan operates on wrapped-row bytes, then convert back.
+    fn pan_prompt_by_lines(&mut self, delta: isize) {
+        let Some(vp) = crate::smelt_term::UiHost::viewport_for(self, crate::app::PROMPT_WIN) else {
+            return;
+        };
+        let usable = vp.content_width as usize;
+        let wrap = crate::content::prompt_wrap::PromptWrap::build(&self.input, usable);
+        if wrap.rows.is_empty() {
+            return;
+        }
+        let saved_src_cpos = self.input.win.cpos;
+        self.input.win.cpos = wrap.src_to_wrapped(saved_src_cpos);
+        self.input
+            .win
+            .pan_by_lines(delta, &wrap.rows, vp.rect.height);
+        self.input.win.cpos = wrap.wrapped_to_src(self.input.win.cpos);
     }
 
     /// Scroll one line when a drag cursor sits at the viewport edge (autoscroll).

@@ -825,7 +825,9 @@ impl Window {
         !matches!(action, Action::Passthrough)
     }
 
-    pub fn scroll_by_lines(&mut self, delta: isize, rows: &[String], viewport_rows: u16) {
+    /// Cursor-led vertical motion: move `cpos` by `delta` rows; viewport pans only
+    /// when the cursor would otherwise leave it. Used by j/k, arrow keys, Ctrl-U/D.
+    pub fn move_cursor_by_lines(&mut self, delta: isize, rows: &[String], viewport_rows: u16) {
         if rows.is_empty() || delta == 0 {
             return;
         }
@@ -838,6 +840,44 @@ impl Window {
         }
         self.sync_from_cpos(rows, &offsets, viewport_rows);
         let max_scroll = (rows.len() as u16).saturating_sub(viewport_rows);
+        self.follow_tail = self.scroll_top >= max_scroll;
+    }
+
+    /// Viewport-led pan (mouse wheel / tmux-style): bump `scroll_top` by `delta` rows;
+    /// the cursor stays on the same screen row, so its text position shifts with the
+    /// viewport. Stops at the buffer boundary.
+    pub fn pan_by_lines(&mut self, delta: isize, rows: &[String], viewport_rows: u16) {
+        if rows.is_empty() || delta == 0 {
+            return;
+        }
+        let total = rows.len();
+        let max_scroll = (total as u16).saturating_sub(viewport_rows);
+        let new_scroll = (self.scroll_top as isize + delta).clamp(0, max_scroll as isize) as u16;
+        if new_scroll == self.scroll_top {
+            return;
+        }
+        let offsets = Self::line_start_offsets(rows);
+        self.text = rows.join("\n");
+        // Derive screen row from `cpos` rather than `cursor_line` — wheel paths bypass
+        // the click handlers that set `cursor_line`, so it can be stale.
+        let cur_line = match offsets.binary_search(&self.cpos) {
+            Ok(i) => i,
+            Err(i) => i.saturating_sub(1),
+        }
+        .min(total - 1);
+        let screen_row = cur_line.saturating_sub(self.scroll_top as usize);
+        let want = self.curswant.unwrap_or_else(|| {
+            let line = &rows[cur_line];
+            byte_to_cell(line, self.cpos.saturating_sub(offsets[cur_line]))
+        });
+        self.scroll_top = new_scroll;
+        let new_line = (self.scroll_top as usize + screen_row).min(total - 1);
+        let line = &rows[new_line];
+        let col_bytes = cell_to_byte(line, want);
+        self.cpos = offsets[new_line] + col_bytes;
+        self.cursor_col = byte_to_cell(line, col_bytes) as u16;
+        self.cursor_line = (new_line as u16).saturating_sub(self.scroll_top);
+        self.curswant = Some(want);
         self.follow_tail = self.scroll_top >= max_scroll;
     }
 
@@ -1189,7 +1229,7 @@ mod tests {
     }
 
     #[test]
-    fn scroll_by_lines_moves_cursor_down() {
+    fn move_cursor_by_lines_advances_cursor_within_viewport() {
         let mut w = make_win();
         w.set_vim_enabled(true);
         w.set_vim_mode(VimMode::Normal);
@@ -1198,9 +1238,79 @@ mod tests {
         w.jump_to_line_col(&rows, 0, 0, viewport);
         assert_eq!(w.cursor_line, 0);
         assert_eq!(w.scroll_top, 0);
-        w.scroll_by_lines(1, &rows, viewport);
+        w.move_cursor_by_lines(1, &rows, viewport);
+        // Cursor-led: cursor moves down, viewport stays put.
         assert_eq!(w.cursor_line, 1);
         assert_eq!(w.scroll_top, 0);
+    }
+
+    #[test]
+    fn pan_by_lines_pans_viewport_and_pins_cursor_row() {
+        let mut w = make_win();
+        w.set_vim_enabled(true);
+        w.set_vim_mode(VimMode::Normal);
+        let rows = sample_rows(30);
+        let viewport = 10;
+        w.jump_to_line_col(&rows, 0, 0, viewport);
+        assert_eq!(w.cursor_line, 0);
+        assert_eq!(w.scroll_top, 0);
+        w.pan_by_lines(1, &rows, viewport);
+        // tmux-style: viewport pans, cursor screen row unchanged, cpos moves with it.
+        assert_eq!(w.scroll_top, 1);
+        assert_eq!(w.cursor_line, 0, "cursor row must stay fixed in viewport");
+        let offsets = Window::line_start_offsets(&rows);
+        assert_eq!(w.cpos, offsets[1]);
+    }
+
+    #[test]
+    fn pan_by_lines_clamps_at_top() {
+        let mut w = make_win();
+        let rows = sample_rows(30);
+        let viewport = 10;
+        w.jump_to_line_col(&rows, 0, 0, viewport);
+        assert_eq!(w.scroll_top, 0);
+        let cpos_before = w.cpos;
+        w.pan_by_lines(-3, &rows, viewport);
+        assert_eq!(w.scroll_top, 0, "scroll clamps at 0");
+        assert_eq!(
+            w.cpos, cpos_before,
+            "cursor must not move when viewport can't"
+        );
+    }
+
+    #[test]
+    fn pan_by_lines_clamps_at_bottom() {
+        let mut w = make_win();
+        let rows = sample_rows(30);
+        let viewport = 10;
+        w.jump_to_line_col(&rows, 29, 0, viewport);
+        let max_scroll = 30 - viewport;
+        assert_eq!(w.scroll_top, max_scroll);
+        let cpos_before = w.cpos;
+        w.pan_by_lines(5, &rows, viewport);
+        assert_eq!(w.scroll_top, max_scroll, "scroll clamps at max");
+        assert_eq!(
+            w.cpos, cpos_before,
+            "cursor must not move when viewport can't"
+        );
+    }
+
+    #[test]
+    fn pan_by_lines_keeps_cursor_visible_after_repeated_pan() {
+        // Pan the viewport multiple times; cursor row stays inside viewport.
+        let mut w = make_win();
+        let rows = sample_rows(50);
+        let viewport = 10;
+        w.jump_to_line_col(&rows, 5, 0, viewport);
+        assert_eq!(w.cursor_line, 5);
+        for _ in 0..3 {
+            w.pan_by_lines(3, &rows, viewport);
+        }
+        assert!(
+            w.cursor_line < viewport,
+            "cursor must remain inside viewport after repeated pans"
+        );
+        assert_eq!(w.scroll_top, 9);
     }
 
     #[test]

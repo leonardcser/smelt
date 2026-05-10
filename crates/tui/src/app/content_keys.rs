@@ -183,15 +183,14 @@ impl TuiApp {
         }
     }
 
-    /// Move the content-pane cursor by `delta` lines. Delegates to
-    /// `TranscriptWindow::scroll_by_lines`, which reuses vim `j`/`k` so
-    /// vertical motion shares one code path (with `curswant`) across
-    /// mouse wheel, Ctrl-U/D, arrows and j/k.
+    /// Move the content-pane cursor by `delta` lines (cursor-led: viewport pans only
+    /// when the cursor would leave it). Used by Ctrl-U/D, arrows, and j/k. Mouse
+    /// wheel uses `pan_by_lines` instead — that path is viewport-led.
     pub(crate) fn move_content_cursor_by_lines(&mut self, delta: isize) {
         let rows = self.full_transcript_display_text(self.core.config.settings.show_thinking);
         let viewport = self.viewport_rows_estimate();
         self.transcript_window
-            .scroll_by_lines(delta, &rows, viewport);
+            .move_cursor_by_lines(delta, &rows, viewport);
         self.snap_transcript_cursor();
     }
 
