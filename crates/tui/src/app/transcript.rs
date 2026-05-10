@@ -493,7 +493,7 @@ impl TuiApp {
     ) -> Vec<(usize, u16, u16)> {
         let vim_visual = self.transcript_window.vim_enabled
             && matches!(
-                self.vim_mode,
+                self.transcript_window.vim_mode,
                 crate::smelt_term::VimMode::Visual | crate::smelt_term::VimMode::VisualLine
             );
         let anchor_set = self.transcript_window.selection_anchor.is_some();
@@ -514,13 +514,13 @@ impl TuiApp {
         let buf = rows.join("\n");
         let cpos = self.transcript_window.compute_cpos(&rows);
         let active_selection = if self.transcript_window.vim_enabled {
-            match self.vim_mode {
+            match self.transcript_window.vim_mode {
                 crate::smelt_term::VimMode::Visual | crate::smelt_term::VimMode::VisualLine => {
                     crate::smelt_term::vim::visual_range(
                         &self.transcript_window.vim_state,
                         &buf,
                         cpos,
-                        self.vim_mode,
+                        self.transcript_window.vim_mode,
                     )
                 }
                 _ => self.transcript_window.selection_range_at(cpos),

@@ -96,10 +96,6 @@ pub struct TuiApp {
     pub(crate) transcript_window: crate::smelt_term::Window,
     /// Tracks the last text dispatched as `TextChanged` on `PROMPT_WIN`.
     pub(crate) last_prompt_text: String,
-    /// Vim mode captured at drag-start; restored on mouse-up.
-    pub(crate) prompt_drag_return_vim_mode: Option<crate::smelt_term::VimMode>,
-    /// Single global vim mode — authoritative source for status bar, Lua, and dispatch.
-    pub(crate) vim_mode: crate::smelt_term::VimMode,
     pub extra_instructions: Option<String>,
     pub skill_section: Option<String>,
     pub(crate) prompt_sections: crate::prompt_sections::PromptSections,
@@ -409,8 +405,6 @@ impl TuiApp {
                 w
             },
             last_prompt_text: String::new(),
-            prompt_drag_return_vim_mode: None,
-            vim_mode: crate::smelt_term::VimMode::Insert,
             extra_instructions: None,
             skill_section: None,
             prompt_sections: crate::prompt_sections::PromptSections::default(),
@@ -446,9 +440,10 @@ impl TuiApp {
 
     /// Publish `vim_mode`, `confirms_pending`, `now`, and `spinner_frame` cells whenever their values change.
     pub(crate) fn publish_diff_cells(&mut self) {
-        self.core
-            .cells
-            .publish_if_changed("vim_mode", format!("{:?}", self.vim_mode));
+        self.core.cells.publish_if_changed(
+            "vim_mode",
+            self.focused_vim_mode_label().unwrap_or_default(),
+        );
         self.core
             .cells
             .publish_if_changed("confirms_pending", !self.core.confirms.is_clear());

@@ -6,8 +6,8 @@ use smelt_core::attachment::AttachmentId;
 
 impl PromptState {
     /// Save undo state. Skips during vim Insert — the session entry saved on insert-entry covers it.
-    pub(crate) fn save_undo(&mut self, mode: VimMode) {
-        if self.win.vim_enabled && mode == VimMode::Insert {
+    pub(crate) fn save_undo(&mut self) {
+        if self.win.vim_enabled && self.win.vim_mode == VimMode::Insert {
             return; // insert session groups all edits into one undo step
         }
         self.win
@@ -19,21 +19,21 @@ impl PromptState {
             ));
     }
 
-    pub(super) fn insert_char(&mut self, c: char, mode: VimMode) {
+    pub(super) fn insert_char(&mut self, c: char) {
         self.from_paste = false;
-        if self.selection_range(mode).is_some() {
-            self.save_undo(mode);
-            self.delete_selection(mode);
+        if self.selection_range().is_some() {
+            self.save_undo();
+            self.delete_selection();
         }
         self.source.insert(self.win.cpos, c);
         self.win.cpos += c.len_utf8();
         self.recompute_completer();
     }
 
-    pub(super) fn backspace(&mut self, mode: VimMode) {
-        if self.selection_range(mode).is_some() {
-            self.save_undo(mode);
-            self.delete_selection(mode);
+    pub(super) fn backspace(&mut self) {
+        if self.selection_range().is_some() {
+            self.save_undo();
+            self.delete_selection();
             self.recompute_completer();
             return;
         }

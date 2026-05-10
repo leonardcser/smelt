@@ -1,11 +1,16 @@
-//! `smelt.vim` bindings — read and write the App-owned single-global `VimMode`.
+//! `smelt.vim` bindings — read and write the focused-pane `VimMode`.
 
 use super::app_read;
 use mlua::prelude::*;
 
 pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
     let vim_tbl = lua.create_table()?;
-    vim_tbl.set("mode", app_read!(lua, |app| format!("{:?}", app.vim_mode)))?;
+    vim_tbl.set(
+        "mode",
+        app_read!(lua, |app| {
+            app.focused_vim_mode_label().unwrap_or_default()
+        }),
+    )?;
     vim_tbl.set(
         "set_mode",
         lua.create_function(|_, mode: String| {
@@ -21,9 +26,7 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
                 }
             };
             crate::lua::with_app(|app| {
-                if app.input.vim_enabled() {
-                    app.input.set_vim_mode(&mut app.vim_mode, target);
-                }
+                app.set_focused_vim_mode(target);
             });
             Ok(())
         })?,

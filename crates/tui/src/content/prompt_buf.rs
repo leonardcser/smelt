@@ -36,7 +36,6 @@ pub(crate) struct PromptAboveInput<'a> {
 
 pub(crate) struct InputLeafInput<'a> {
     pub(crate) input: &'a PromptState,
-    pub(crate) vim_mode: crate::smelt_term::VimMode,
     pub(crate) clipboard: &'a crate::smelt_term::Clipboard,
     /// Inner width after gutters; `Window::render` shifts content past the left gutter.
     pub(crate) content_width: u16,
@@ -568,7 +567,7 @@ fn compute_input_area(
     let char_kinds = build_char_kinds(&spans);
     let display_cursor = map_cursor(state.cursor_char(), &state.source, &spans);
     let display_selection = state
-        .display_selection_range(input.vim_mode, input.clipboard)
+        .display_selection_range(input.clipboard)
         .map(|(start, end)| {
             let raw_start_char = crate::input::char_pos(&state.source, start);
             let raw_end_char = crate::input::char_pos(&state.source, end);
@@ -936,7 +935,6 @@ mod tests {
         let test_clipboard = crate::smelt_term::Clipboard::null();
         let inp = InputLeafInput {
             input: &input_state,
-            vim_mode: crate::smelt_term::VimMode::Insert,
             clipboard: &test_clipboard,
             content_width: 78,
             height: 4,

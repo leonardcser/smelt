@@ -316,8 +316,7 @@ impl TuiApp {
                     combined.push('\n');
                     combined.push_str(&self.input.source);
                 }
-                let __mode = self.vim_mode;
-                self.input.replace_text(combined, None, __mode);
+                self.input.replace_text(combined, None);
             }
         } else {
             {

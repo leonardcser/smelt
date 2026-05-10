@@ -5,16 +5,49 @@ use crate::app::TuiApp;
 impl TuiApp {
     /// Vim-mode label for the focused window, or `None` for non-vim surfaces.
     pub(crate) fn current_vim_mode_label(&self) -> Option<String> {
+        self.focused_vim_mode_label()
+    }
+
+    /// Vim mode of the surface the user is currently driving (focused overlay > app pane).
+    /// Returns `None` when the focused surface isn't vim-enabled.
+    pub(crate) fn focused_vim_mode_label(&self) -> Option<String> {
+        self.focused_vim_mode().map(|m| format!("{m:?}"))
+    }
+
+    pub(crate) fn focused_vim_mode(&self) -> Option<crate::smelt_term::VimMode> {
         if let Some(win) = self.ui.focused_window() {
             if win.vim_enabled {
-                return Some(format!("{:?}", self.vim_mode));
+                return Some(win.vim_mode);
             }
         }
-        let has_vim = match self.app_focus {
-            crate::app::AppFocus::Content => self.transcript_window.vim_enabled,
-            crate::app::AppFocus::Prompt => self.input.vim_enabled(),
-        };
-        has_vim.then(|| format!("{:?}", self.vim_mode))
+        match self.app_focus {
+            crate::app::AppFocus::Content if self.transcript_window.vim_enabled => {
+                Some(self.transcript_window.vim_mode)
+            }
+            crate::app::AppFocus::Prompt if self.input.vim_enabled() => Some(self.input.vim_mode()),
+            _ => None,
+        }
+    }
+
+    /// Set the vim mode on whichever pane the user is currently driving. No-op if non-vim.
+    pub(crate) fn set_focused_vim_mode(&mut self, mode: crate::smelt_term::VimMode) {
+        if let Some(win_id) = self.ui.focus() {
+            if let Some(w) = self.ui.win_mut(win_id) {
+                if w.vim_enabled {
+                    w.set_vim_mode(mode);
+                    return;
+                }
+            }
+        }
+        match self.app_focus {
+            crate::app::AppFocus::Content if self.transcript_window.vim_enabled => {
+                self.transcript_window.set_vim_mode(mode);
+            }
+            crate::app::AppFocus::Prompt => {
+                self.input.set_vim_mode(mode);
+            }
+            _ => {}
+        }
     }
 
     /// Fire `WinEvent::TextChanged` on `PROMPT_WIN` when the prompt buffer changed.

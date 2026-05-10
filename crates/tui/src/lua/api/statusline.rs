@@ -121,23 +121,20 @@ fn build_snapshot(app: &mut crate::app::TuiApp, lua: &Lua) -> LuaResult<mlua::Ta
 
     // Vim mode: focused overlay-leaf with vim wins; non-vim overlay leaf yields no label.
     let vim_tbl = lua.create_table()?;
-    let focused_window_has_vim = app
-        .ui
-        .focused_window()
-        .map(|w| w.vim_enabled)
-        .unwrap_or(false);
+    let focused_window = app.ui.focused_window();
+    let focused_window_has_vim = focused_window.map(|w| w.vim_enabled).unwrap_or(false);
     let (vim_enabled, vim_mode) = if focused_window_has_vim {
-        (true, Some(app.vim_mode))
+        (true, focused_window.map(|w| w.vim_mode))
     } else if app.ui.focused_overlay().is_some() {
         (false, None)
     } else {
         match app.app_focus {
             crate::app::AppFocus::Content => {
                 let has = app.transcript_window.vim_enabled;
-                (has, has.then_some(app.vim_mode))
+                (has, has.then_some(app.transcript_window.vim_mode))
             }
             crate::app::AppFocus::Prompt => {
-                let mut mode = app.input.vim_enabled().then_some(app.vim_mode);
+                let mut mode = app.input.vim_enabled().then_some(app.input.win.vim_mode);
                 let drag = matches!(
                     app.ui.capture(),
                     Some(crate::smelt_term::HitTarget::Window(_))

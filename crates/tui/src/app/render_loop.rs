@@ -10,7 +10,6 @@ impl TuiApp {
         self.update_spinner();
         crate::theme::populate_ui_theme(self.ui.theme_mut());
         // Publish vim mode so overlay leaves read it via `DrawContext::vim_mode`.
-        self.ui.set_vim_mode(self.vim_mode);
 
         let (term_w, term_h) = self.ui.terminal_size();
         let width = term_w as usize;
@@ -107,7 +106,7 @@ impl TuiApp {
         let has_selection = self.transcript_window.selection_anchor.is_some();
         let in_vim_visual = self.transcript_window.vim_enabled
             && matches!(
-                self.vim_mode,
+                self.transcript_window.vim_mode,
                 crate::smelt_term::VimMode::Visual | crate::smelt_term::VimMode::VisualLine
             );
         let mouse_drag_active = matches!(
@@ -284,7 +283,6 @@ impl TuiApp {
         let output = {
             let inp = prompt_buf::InputLeafInput {
                 input: &self.input,
-                vim_mode: self.vim_mode,
                 clipboard: &self.core.clipboard,
                 content_width,
                 height: prompt_rect.height,

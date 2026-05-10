@@ -158,7 +158,6 @@ pub struct EventCtx<'a> {
     pub hard_breaks: &'a [usize],
     pub viewport: WindowViewport,
     pub click_count: u8,
-    pub vim_mode: &'a mut VimMode,
     pub clipboard: &'a mut Clipboard,
 }
 
@@ -172,8 +171,6 @@ pub struct MouseCtx<'a> {
     pub hard_breaks: &'a [usize],
     pub viewport: WindowViewport,
     pub click_count: u8,
-    /// Vim mouse paths (begin/exit Visual) write through this; non-vim windows ignore it.
-    pub vim_mode: &'a mut VimMode,
 }
 
 #[derive(Clone, Debug)]
@@ -215,6 +212,7 @@ pub struct Window {
     pub cpos: usize,
     /// Gates `dispatch_vim_key`; `vim_state` is always present.
     pub vim_enabled: bool,
+    pub vim_mode: VimMode,
     pub vim_state: VimWindowState,
     /// Shift-selection / vim Visual anchor. `None` means no active selection.
     pub selection_anchor: Option<usize>,
@@ -251,6 +249,7 @@ impl Window {
             readonly: true,
             cpos: 0,
             vim_enabled: false,
+            vim_mode: VimMode::default(),
             vim_state: VimWindowState::default(),
             selection_anchor: None,
             curswant: None,
@@ -279,6 +278,16 @@ impl Window {
         }
     }
 
+    /// Set this window's vim mode and clear any pending key sequence.
+    pub fn set_vim_mode(&mut self, mode: VimMode) {
+        self.vim_state.set_mode(&mut self.vim_mode, mode);
+    }
+
+    /// Anchor a visual selection at `cpos` and enter the given visual mode.
+    pub fn begin_visual(&mut self, mode: VimMode, cpos: usize) {
+        self.vim_state.begin_visual(&mut self.vim_mode, mode, cpos);
+    }
+
     // ── Cursor ─────────────────────────────────────────────────────────
 
     pub fn cursor_abs_row(&self) -> usize {
@@ -298,10 +307,12 @@ impl Window {
         (lo != hi).then_some((lo, hi))
     }
 
-    pub fn selection_range(&self, rows: &[String], mode: VimMode) -> Option<(usize, usize)> {
+    pub fn selection_range(&self, rows: &[String]) -> Option<(usize, usize)> {
         let cpos = self.compute_cpos(rows);
         if self.vim_enabled {
-            if let Some(range) = vim::visual_range(&self.vim_state, &rows.join("\n"), cpos, mode) {
+            if let Some(range) =
+                vim::visual_range(&self.vim_state, &rows.join("\n"), cpos, self.vim_mode)
+            {
                 return Some(range);
             }
         }
@@ -369,10 +380,9 @@ impl Window {
         rows: &[String],
         buf: &str,
         viewport_rows: u16,
-        mode: &mut VimMode,
     ) -> Option<(usize, usize)> {
         let (start, end) = super::text::big_word_range_at_transparent(buf, cpos, transparent)?;
-        self.finish_range_select(start, end, rows, viewport_rows, mode);
+        self.finish_range_select(start, end, rows, viewport_rows);
         Some((start, end))
     }
 
@@ -385,10 +395,9 @@ impl Window {
         rows: &[String],
         buf: &str,
         viewport_rows: u16,
-        mode: &mut VimMode,
     ) -> Option<(usize, usize)> {
         let (start, end) = super::text::line_range_at(buf, cpos, hard_breaks)?;
-        self.finish_range_select(start, end, rows, viewport_rows, mode);
+        self.finish_range_select(start, end, rows, viewport_rows);
         Some((start, end))
     }
 
@@ -400,7 +409,6 @@ impl Window {
         end: usize,
         rows: &[String],
         viewport_rows: u16,
-        mode: &mut VimMode,
     ) {
         // vim visual_range is inclusive at cpos; non-vim selection_range_at is exclusive.
         self.cpos = if self.vim_enabled {
@@ -411,7 +419,8 @@ impl Window {
         let offsets = Self::line_start_offsets(rows);
         self.sync_from_cpos(rows, &offsets, viewport_rows);
         if self.vim_enabled {
-            self.vim_state.begin_visual(mode, VimMode::Visual, start);
+            self.vim_state
+                .begin_visual(&mut self.vim_mode, VimMode::Visual, start);
         } else {
             self.selection_anchor = Some(start);
         }
@@ -426,7 +435,7 @@ impl Window {
         self.sync_from_cpos(rows, &offsets, viewport_rows);
     }
 
-    pub fn refocus(&mut self, rows: &[String], viewport_rows: u16, mode: &mut VimMode) {
+    pub fn refocus(&mut self, rows: &[String], viewport_rows: u16) {
         if rows.is_empty() {
             self.text.clear();
             self.cpos = 0;
@@ -435,8 +444,8 @@ impl Window {
             self.cursor_positioned = false;
             return;
         }
-        if self.vim_enabled && *mode != VimMode::Normal {
-            self.vim_state.set_mode(mode, VimMode::Normal);
+        if self.vim_enabled && self.vim_mode != VimMode::Normal {
+            self.vim_state.set_mode(&mut self.vim_mode, VimMode::Normal);
         }
         if !self.cursor_positioned {
             let total = rows.len();
@@ -547,13 +556,7 @@ impl Window {
     pub fn handle(&mut self, ev: super::event::Event, ctx: EventCtx<'_>) -> Status {
         use super::event::Event;
         match ev {
-            Event::Key(k) => self.handle_key(
-                k,
-                ctx.rows,
-                ctx.viewport.rect.height,
-                ctx.vim_mode,
-                ctx.clipboard,
-            ),
+            Event::Key(k) => self.handle_key(k, ctx.rows, ctx.viewport.rect.height, ctx.clipboard),
             Event::Mouse(me) => {
                 let (status, _) = self.handle_mouse(
                     me,
@@ -563,7 +566,6 @@ impl Window {
                         hard_breaks: ctx.hard_breaks,
                         viewport: ctx.viewport,
                         click_count: ctx.click_count,
-                        vim_mode: ctx.vim_mode,
                     },
                 );
                 status
@@ -581,26 +583,22 @@ impl Window {
     pub fn handle_mouse(
         &mut self,
         event: MouseEvent,
-        mut ctx: MouseCtx,
+        ctx: MouseCtx,
     ) -> (Status, Option<(usize, usize)>) {
         let buf = ctx.rows.join("\n");
         match event.kind {
-            MouseEventKind::Down(MouseButton::Left) => {
-                (self.mouse_down(event, &mut ctx, &buf), None)
-            }
-            MouseEventKind::Drag(MouseButton::Left) => {
-                (self.mouse_drag(event, &mut ctx, &buf), None)
-            }
+            MouseEventKind::Down(MouseButton::Left) => (self.mouse_down(event, &ctx, &buf), None),
+            MouseEventKind::Drag(MouseButton::Left) => (self.mouse_drag(event, &ctx, &buf), None),
             MouseEventKind::Up(MouseButton::Left) => {
                 let range = self.mouse_yank_range(&ctx, &buf);
-                let status = self.mouse_up(&mut ctx, &buf);
+                let status = self.mouse_up();
                 (status, range)
             }
             _ => (Status::Ignored, None),
         }
     }
 
-    fn mouse_down(&mut self, event: MouseEvent, ctx: &mut MouseCtx, buf: &str) -> Status {
+    fn mouse_down(&mut self, event: MouseEvent, ctx: &MouseCtx, buf: &str) -> Status {
         let Some(hit) = ctx.viewport.hit(event.row, event.column) else {
             return Status::Ignored;
         };
@@ -628,7 +626,6 @@ impl Window {
                     ctx.rows,
                     buf,
                     viewport_rows,
-                    ctx.vim_mode,
                 ) {
                     self.drag_anchor_word = Some((s, e));
                     self.drag_anchor_line = None;
@@ -636,14 +633,9 @@ impl Window {
                 Status::Capture
             }
             3 => {
-                if let Some((s, e)) = self.select_line_at(
-                    cpos,
-                    ctx.hard_breaks,
-                    ctx.rows,
-                    buf,
-                    viewport_rows,
-                    ctx.vim_mode,
-                ) {
+                if let Some((s, e)) =
+                    self.select_line_at(cpos, ctx.hard_breaks, ctx.rows, buf, viewport_rows)
+                {
                     self.drag_anchor_line = Some((s, e));
                     self.drag_anchor_word = None;
                 }
@@ -654,7 +646,7 @@ impl Window {
                 self.drag_anchor_line = None;
                 if self.vim_enabled {
                     self.vim_state
-                        .begin_visual(ctx.vim_mode, VimMode::Visual, cpos);
+                        .begin_visual(&mut self.vim_mode, VimMode::Visual, cpos);
                 } else {
                     self.selection_anchor = Some(cpos);
                 }
@@ -663,7 +655,7 @@ impl Window {
         }
     }
 
-    fn mouse_drag(&mut self, event: MouseEvent, ctx: &mut MouseCtx, buf: &str) -> Status {
+    fn mouse_drag(&mut self, event: MouseEvent, ctx: &MouseCtx, buf: &str) -> Status {
         let viewport_rows = ctx.viewport.rect.height;
         if viewport_rows == 0 || ctx.rows.is_empty() {
             return Status::Consumed;
@@ -693,7 +685,7 @@ impl Window {
     fn mouse_yank_range(&self, ctx: &MouseCtx, buf: &str) -> Option<(usize, usize)> {
         let cpos = self.compute_cpos(ctx.rows);
         let (start, end) = if self.vim_enabled {
-            vim::visual_range(&self.vim_state, buf, cpos, *ctx.vim_mode)?
+            vim::visual_range(&self.vim_state, buf, cpos, self.vim_mode)?
         } else {
             self.selection_range_at(cpos)?
         };
@@ -705,9 +697,9 @@ impl Window {
         Some((start, end))
     }
 
-    fn mouse_up(&mut self, ctx: &mut MouseCtx, _buf: &str) -> Status {
-        if self.vim_enabled && matches!(*ctx.vim_mode, VimMode::Visual | VimMode::VisualLine) {
-            self.vim_state.set_mode(ctx.vim_mode, VimMode::Normal);
+    fn mouse_up(&mut self) -> Status {
+        if self.vim_enabled && matches!(self.vim_mode, VimMode::Visual | VimMode::VisualLine) {
+            self.vim_state.set_mode(&mut self.vim_mode, VimMode::Normal);
         }
         self.selection_anchor = None;
         self.drag_anchor_word = None;
@@ -716,7 +708,7 @@ impl Window {
     }
 
     /// Extend drag by WORD units, keeping the original double-clicked word inside the selection.
-    fn extend_word_anchored_drag(&mut self, ctx: &mut MouseCtx, buf: &str) {
+    fn extend_word_anchored_drag(&mut self, ctx: &MouseCtx, buf: &str) {
         let Some((ws, we)) = self.drag_anchor_word else {
             return;
         };
@@ -737,13 +729,13 @@ impl Window {
         self.cpos = new_cpos;
         if self.vim_enabled {
             self.vim_state
-                .begin_visual(ctx.vim_mode, VimMode::Visual, new_anchor);
+                .begin_visual(&mut self.vim_mode, VimMode::Visual, new_anchor);
         } else {
             self.selection_anchor = Some(new_anchor);
         }
     }
 
-    fn extend_line_anchored_drag(&mut self, ctx: &mut MouseCtx, buf: &str) {
+    fn extend_line_anchored_drag(&mut self, ctx: &MouseCtx, buf: &str) {
         let Some((ls, le)) = self.drag_anchor_line else {
             return;
         };
@@ -764,7 +756,7 @@ impl Window {
         self.cpos = new_cpos;
         if self.vim_enabled {
             self.vim_state
-                .begin_visual(ctx.vim_mode, VimMode::Visual, new_anchor);
+                .begin_visual(&mut self.vim_mode, VimMode::Visual, new_anchor);
         } else {
             self.selection_anchor = Some(new_anchor);
         }
@@ -777,29 +769,23 @@ impl Window {
         k: KeyEvent,
         rows: &[String],
         viewport_rows: u16,
-        mode: &mut VimMode,
         clipboard: &mut Clipboard,
     ) -> Status {
         if rows.is_empty() {
             return Status::Ignored;
         }
         let offsets = self.mount(rows);
-        if !self.dispatch_vim_key(k, mode, clipboard) {
+        if !self.dispatch_vim_key(k, clipboard) {
             return Status::Ignored;
         }
-        if self.vim_enabled && *mode == VimMode::Insert {
-            self.vim_state.set_mode(mode, VimMode::Normal);
+        if self.vim_enabled && self.vim_mode == VimMode::Insert {
+            self.vim_state.set_mode(&mut self.vim_mode, VimMode::Normal);
         }
         self.sync_from_cpos(rows, &offsets, viewport_rows);
         Status::Consumed
     }
 
-    fn dispatch_vim_key(
-        &mut self,
-        key: KeyEvent,
-        mode: &mut VimMode,
-        clipboard: &mut Clipboard,
-    ) -> bool {
+    fn dispatch_vim_key(&mut self, key: KeyEvent, clipboard: &mut Clipboard) -> bool {
         if !self.vim_enabled {
             return false;
         }
@@ -829,7 +815,7 @@ impl Window {
             attachments: &mut self.attachment_ids,
             history: &mut self.history,
             clipboard,
-            mode,
+            mode: &mut self.vim_mode,
             curswant: &mut self.curswant,
             vim_state: &mut self.vim_state,
         };
@@ -838,13 +824,7 @@ impl Window {
         !matches!(action, Action::Passthrough)
     }
 
-    pub fn scroll_by_lines(
-        &mut self,
-        delta: isize,
-        rows: &[String],
-        viewport_rows: u16,
-        mode: &mut VimMode,
-    ) {
+    pub fn scroll_by_lines(&mut self, delta: isize, rows: &[String], viewport_rows: u16) {
         if rows.is_empty() || delta == 0 {
             return;
         }
@@ -852,8 +832,8 @@ impl Window {
         let (new_cpos, new_want) = text::vertical_move(&self.text, self.cpos, delta, self.curswant);
         self.curswant = Some(new_want);
         self.cpos = new_cpos;
-        if self.vim_enabled && *mode == VimMode::Insert {
-            self.vim_state.set_mode(mode, VimMode::Normal);
+        if self.vim_enabled && self.vim_mode == VimMode::Insert {
+            self.vim_state.set_mode(&mut self.vim_mode, VimMode::Normal);
         }
         self.sync_from_cpos(rows, &offsets, viewport_rows);
         let max_scroll = (rows.len() as u16).saturating_sub(viewport_rows);
@@ -1211,13 +1191,13 @@ mod tests {
     fn scroll_by_lines_moves_cursor_down() {
         let mut w = make_win();
         w.set_vim_enabled(true);
+        w.set_vim_mode(VimMode::Normal);
         let rows = sample_rows(30);
         let viewport = 10;
-        let mut mode = VimMode::Normal;
         w.jump_to_line_col(&rows, 0, 0, viewport);
         assert_eq!(w.cursor_line, 0);
         assert_eq!(w.scroll_top, 0);
-        w.scroll_by_lines(1, &rows, viewport, &mut mode);
+        w.scroll_by_lines(1, &rows, viewport);
         assert_eq!(w.cursor_line, 1);
         assert_eq!(w.scroll_top, 0);
     }
@@ -1225,10 +1205,9 @@ mod tests {
     #[test]
     fn refocus_on_empty_resets_cursor() {
         let mut w = make_win();
-        let mut mode = VimMode::Normal;
         w.cursor_line = 5;
         w.cursor_col = 3;
-        w.refocus(&[], 20, &mut mode);
+        w.refocus(&[], 20);
         assert_eq!(w.cursor_line, 0);
         assert_eq!(w.cursor_col, 0);
     }
@@ -1281,7 +1260,7 @@ mod tests {
     #[test]
     fn click_positions_cursor_and_captures() {
         let mut w = make_win();
-        let mut mode = VimMode::Normal;
+        w.set_vim_mode(VimMode::Normal);
         let rows: Vec<String> = vec!["hello world".into(), "second line".into()];
         let rect = Rect::new(0, 0, 20, 5);
         let ctx = MouseCtx {
@@ -1290,7 +1269,6 @@ mod tests {
             hard_breaks: &hard_breaks(&rows),
             viewport: viewport_for(&rows, rect),
             click_count: 1,
-            vim_mode: &mut mode,
         };
         let (r, yank) = w.handle_mouse(
             click_event(MouseEventKind::Down(MouseButton::Left), 1, 7),
@@ -1822,7 +1800,7 @@ mod tests {
     #[test]
     fn mouse_drag_yank_on_up() {
         let mut w = make_win();
-        let mut mode = VimMode::Normal;
+        w.set_vim_mode(VimMode::Normal);
         let rows: Vec<String> = vec!["hello world".into(), "second line".into()];
         let rect = Rect::new(0, 0, 20, 5);
         let viewport = viewport_for(&rows, rect);
@@ -1834,7 +1812,6 @@ mod tests {
             hard_breaks: &hard_breaks(&rows),
             viewport,
             click_count: 1,
-            vim_mode: &mut mode,
         };
         let (r, yank) = w.handle_mouse(
             click_event(MouseEventKind::Down(MouseButton::Left), 0, 0),
@@ -1850,7 +1827,6 @@ mod tests {
             hard_breaks: &hard_breaks(&rows),
             viewport,
             click_count: 1,
-            vim_mode: &mut mode,
         };
         let (r, yank) = w.handle_mouse(
             click_event(MouseEventKind::Drag(MouseButton::Left), 0, 7),
@@ -1866,7 +1842,6 @@ mod tests {
             hard_breaks: &hard_breaks(&rows),
             viewport,
             click_count: 1,
-            vim_mode: &mut mode,
         };
         let (r, yank) = w.handle_mouse(
             click_event(MouseEventKind::Up(MouseButton::Left), 0, 7),
@@ -1879,7 +1854,7 @@ mod tests {
     #[test]
     fn mouse_double_click_yank_word() {
         let mut w = make_win();
-        let mut mode = VimMode::Normal;
+        w.set_vim_mode(VimMode::Normal);
         let rows: Vec<String> = vec!["hello world".into()];
         let rect = Rect::new(0, 0, 20, 5);
         let viewport = viewport_for(&rows, rect);
@@ -1891,7 +1866,6 @@ mod tests {
             hard_breaks: &hard_breaks(&rows),
             viewport,
             click_count: 2,
-            vim_mode: &mut mode,
         };
         let (r, yank) = w.handle_mouse(
             click_event(MouseEventKind::Down(MouseButton::Left), 0, 8),
@@ -1907,7 +1881,6 @@ mod tests {
             hard_breaks: &hard_breaks(&rows),
             viewport,
             click_count: 2,
-            vim_mode: &mut mode,
         };
         let (r, yank) = w.handle_mouse(
             click_event(MouseEventKind::Up(MouseButton::Left), 0, 8),
@@ -1920,7 +1893,7 @@ mod tests {
     #[test]
     fn mouse_triple_click_yank_line() {
         let mut w = make_win();
-        let mut mode = VimMode::Normal;
+        w.set_vim_mode(VimMode::Normal);
         let rows: Vec<String> = vec!["hello world".into(), "second line".into()];
         let rect = Rect::new(0, 0, 20, 5);
         let viewport = viewport_for(&rows, rect);
@@ -1932,7 +1905,6 @@ mod tests {
             hard_breaks: &hard_breaks(&rows),
             viewport,
             click_count: 3,
-            vim_mode: &mut mode,
         };
         let (r, yank) = w.handle_mouse(
             click_event(MouseEventKind::Down(MouseButton::Left), 0, 4),
@@ -1948,7 +1920,6 @@ mod tests {
             hard_breaks: &hard_breaks(&rows),
             viewport,
             click_count: 3,
-            vim_mode: &mut mode,
         };
         let (r, yank) = w.handle_mouse(
             click_event(MouseEventKind::Up(MouseButton::Left), 0, 4),

@@ -23,6 +23,15 @@ impl StoryCtx {
     pub fn new(name: &str) -> Self {
         let mut ui = Ui::new();
         ui.set_terminal_size(80, 24);
+        // Register a `Visual` style so `Window::auto_selection_ranges` paints the
+        // visual selection with a recognisable bg in snapshots.
+        ui.theme_mut().set(
+            "Visual",
+            Style {
+                bg: Some(Color::DarkGrey),
+                ..Style::default()
+            },
+        );
         Self {
             ui,
             vim_mode: VimMode::Normal,
@@ -100,16 +109,20 @@ impl StoryCtx {
         );
         if let Some(win) = self.ui.win_mut(focus) {
             win.set_vim_enabled(true);
+            // Direct field write so we don't clobber any pending vim sub-sequence
+            // (e.g. mid-`dd`, `df<x>`). `set_vim_mode` resets pending state, which would
+            // turn every `press_vim` call into a sequence break.
+            win.vim_mode = self.vim_mode;
             let ctx = EventCtx {
                 rows: &rows,
                 soft_breaks: &[],
                 hard_breaks: &[],
                 viewport,
                 click_count: 0,
-                vim_mode: &mut self.vim_mode,
                 clipboard: &mut self.clipboard,
             };
             win.handle(ev, ctx);
+            self.vim_mode = win.vim_mode;
         }
         let new_text = self
             .ui
@@ -141,10 +154,8 @@ impl StoryCtx {
                     .collect()
             })
             .unwrap_or_default();
-        let range = self
-            .ui
-            .win(win)
-            .and_then(|w| w.selection_range(&rows, mode));
+        let _ = mode;
+        let range = self.ui.win(win).and_then(|w| w.selection_range(&rows));
         let Some((start, end)) = range else {
             return;
         };

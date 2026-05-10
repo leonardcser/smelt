@@ -17,15 +17,7 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
     win_tbl.set(
         "mode",
         app_read!(lua, |app| {
-            let has_vim = match app.app_focus {
-                crate::app::AppFocus::Content => app.transcript_window.vim_enabled,
-                crate::app::AppFocus::Prompt => app.input.vim_enabled(),
-            };
-            if has_vim {
-                format!("{:?}", app.vim_mode)
-            } else {
-                String::new()
-            }
+            app.focused_vim_mode_label().unwrap_or_default()
         }),
     )?;
     win_tbl.set(

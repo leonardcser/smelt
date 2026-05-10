@@ -150,9 +150,7 @@ impl TuiApp {
                     ))
                 }
                 KeyAction::CopySelection => {
-                    if let Some((s, e)) =
-                        self.transcript_window.selection_range(&rows, self.vim_mode)
-                    {
+                    if let Some((s, e)) = self.transcript_window.selection_range(&rows) {
                         let s = crate::smelt_term::text::snap(&buf, s);
                         let e = crate::smelt_term::text::snap(&buf, e);
                         if s < e {
@@ -193,7 +191,7 @@ impl TuiApp {
         let rows = self.full_transcript_display_text(self.core.config.settings.show_thinking);
         let viewport = self.viewport_rows_estimate();
         self.transcript_window
-            .scroll_by_lines(delta, &rows, viewport, &mut self.vim_mode);
+            .scroll_by_lines(delta, &rows, viewport);
         self.snap_transcript_cursor();
     }
 
@@ -235,7 +233,6 @@ impl TuiApp {
                 hard_breaks: &[],
                 viewport,
                 click_count: 1,
-                vim_mode: &mut self.vim_mode,
                 clipboard: &mut self.core.clipboard,
             };
             let r = self

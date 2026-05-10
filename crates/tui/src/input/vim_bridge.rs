@@ -9,7 +9,7 @@
 
 use super::{Action, History, PromptState};
 use crate::smelt_term::vim::{self, VimContext};
-use crate::smelt_term::{Clipboard, VimMode};
+use crate::smelt_term::Clipboard;
 use crossterm::event::{Event, KeyEvent};
 
 /// Outcome of the vim bridge for a single key event.
@@ -27,7 +27,6 @@ impl PromptState {
         &mut self,
         ev: &Event,
         history: &mut Option<&mut History>,
-        mode: &mut VimMode,
         clipboard: &mut Clipboard,
     ) -> VimBridgeResult {
         if !self.win.vim_enabled {
@@ -45,7 +44,7 @@ impl PromptState {
                 attachments: &mut self.win.attachment_ids,
                 history: &mut self.win.history,
                 clipboard,
-                mode,
+                mode: &mut self.win.vim_mode,
                 curswant: &mut self.win.curswant,
                 vim_state: &mut self.win.vim_state,
             };

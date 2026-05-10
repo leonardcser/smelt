@@ -70,18 +70,8 @@ impl TuiApp {
             if win == crate::app::PROMPT_WIN {
                 if is_down {
                     self.app_focus = crate::app::AppFocus::Prompt;
-                    if self.input.win.vim_enabled {
-                        self.prompt_drag_return_vim_mode = Some(self.vim_mode);
-                    }
                 }
                 self.handle_prompt_mouse(me, count);
-                if is_up {
-                    if let Some(prev) = self.prompt_drag_return_vim_mode.take() {
-                        if self.input.win.vim_enabled {
-                            self.input.win.vim_state.set_mode(&mut self.vim_mode, prev);
-                        }
-                    }
-                }
             } else if win == crate::app::TRANSCRIPT_WIN {
                 if is_down && !self.has_transcript_content(self.core.config.settings.show_thinking)
                 {
@@ -154,7 +144,7 @@ impl TuiApp {
         let rows = self.full_transcript_display_text(self.core.config.settings.show_thinking);
         let viewport = self.viewport_rows_estimate();
         self.transcript_window
-            .scroll_by_lines(delta, &rows, viewport, &mut self.vim_mode);
+            .scroll_by_lines(delta, &rows, viewport);
     }
 
     /// Scroll one line when a drag cursor sits at the viewport edge (autoscroll).
@@ -190,7 +180,10 @@ impl TuiApp {
             .win
             .vim_enabled
             .then(|| {
-                crate::smelt_term::vim::visual_anchor(&self.input.win.vim_state, self.vim_mode)
+                crate::smelt_term::vim::visual_anchor(
+                    &self.input.win.vim_state,
+                    self.input.win.vim_mode,
+                )
             })
             .flatten();
 
@@ -202,11 +195,9 @@ impl TuiApp {
             saved_src_dline.map(|(s, e)| (wrap.src_to_wrapped(s), wrap.src_to_wrapped(e)));
         if self.input.win.vim_enabled {
             if let Some(a) = saved_vim_visual_anchor {
-                self.input.win.vim_state.begin_visual(
-                    &mut self.vim_mode,
-                    crate::smelt_term::VimMode::Visual,
-                    wrap.src_to_wrapped(a),
-                );
+                self.input
+                    .win
+                    .begin_visual(crate::smelt_term::VimMode::Visual, wrap.src_to_wrapped(a));
             }
         }
 
@@ -216,7 +207,6 @@ impl TuiApp {
             hard_breaks: &wrap.hard_breaks,
             viewport: vp,
             click_count,
-            vim_mode: &mut self.vim_mode,
         };
         let (_, _yank) = self.input.win.handle_mouse(me, mouse_ctx);
 
@@ -230,7 +220,10 @@ impl TuiApp {
             .win
             .vim_enabled
             .then(|| {
-                crate::smelt_term::vim::visual_anchor(&self.input.win.vim_state, self.vim_mode)
+                crate::smelt_term::vim::visual_anchor(
+                    &self.input.win.vim_state,
+                    self.input.win.vim_mode,
+                )
             })
             .flatten();
 
@@ -242,11 +235,9 @@ impl TuiApp {
             new_w_dline.map(|(s, e)| (wrap.wrapped_to_src(s), wrap.wrapped_to_src(e)));
         if self.input.win.vim_enabled {
             if let Some(a) = new_w_vim_anchor {
-                self.input.win.vim_state.begin_visual(
-                    &mut self.vim_mode,
-                    crate::smelt_term::VimMode::Visual,
-                    wrap.wrapped_to_src(a),
-                );
+                self.input
+                    .win
+                    .begin_visual(crate::smelt_term::VimMode::Visual, wrap.wrapped_to_src(a));
             }
         }
     }
@@ -270,7 +261,6 @@ impl TuiApp {
                 hard_breaks: &hard,
                 viewport,
                 click_count,
-                vim_mode: &mut self.vim_mode,
             };
             let (_, range) = self.transcript_window.handle_mouse(snapped, mouse_ctx);
             range?

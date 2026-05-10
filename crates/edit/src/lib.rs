@@ -85,8 +85,6 @@ pub struct Ui {
     last_click: Option<(std::time::Instant, u16, u16, u8)>,
     /// Global cursor shape; only the focused window honours it.
     cursor_shape: CursorShape,
-    /// Global vim mode; pushed each frame by the host via [`Self::set_vim_mode`].
-    vim_mode: VimMode,
     /// Timestamp when edge-drag autoscroll last engaged; drives host tick-rate ramp.
     drag_autoscroll_since: Option<std::time::Instant>,
     /// In-flight chrome drag/resize gesture; `None` when idle.
@@ -118,18 +116,9 @@ impl Ui {
             capture: None,
             last_click: None,
             cursor_shape: CursorShape::Hidden,
-            vim_mode: VimMode::default(),
             drag_autoscroll_since: None,
             chrome_drag: None,
         }
-    }
-
-    pub fn set_vim_mode(&mut self, mode: VimMode) {
-        self.vim_mode = mode;
-    }
-
-    pub fn vim_mode(&self) -> VimMode {
-        self.vim_mode
     }
 
     /// Returns 1/2/3 for successive Downs on the same cell within 400ms; wraps at 4.
@@ -815,7 +804,6 @@ impl Ui {
         };
         let focus = self.focus;
         let cursor_shape = self.cursor_shape;
-        let vim_mode = self.vim_mode;
         let wins = &self.wins;
         let bufs = &self.bufs;
         let term_size = self.surface.terminal_size();
@@ -848,7 +836,7 @@ impl Ui {
                                     CursorShape::Hidden
                                 },
                                 theme: std::sync::Arc::clone(theme),
-                                vim_mode,
+                                vim_mode: win.vim_mode,
                             };
                             win.render(buf, &mut slice, &ctx);
                             return;
@@ -861,7 +849,7 @@ impl Ui {
                         focused: false,
                         cursor_shape: CursorShape::Hidden,
                         theme: std::sync::Arc::clone(theme),
-                        vim_mode,
+                        vim_mode: VimMode::default(),
                     };
                     paint(id, &mut slice, &ctx);
                 };

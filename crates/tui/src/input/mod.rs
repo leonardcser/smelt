@@ -91,14 +91,14 @@ impl PromptState {
     }
 
     /// Active selection range `(start_byte, end_byte)` for vim visual or shift+key selection.
-    pub(crate) fn selection_range(&self, mode: VimMode) -> Option<(usize, usize)> {
+    pub(crate) fn selection_range(&self) -> Option<(usize, usize)> {
         // Vim visual mode takes priority.
         if self.win.vim_enabled {
             if let Some(range) = crate::smelt_term::vim::visual_range(
                 &self.win.vim_state,
                 &self.source,
                 self.win.cpos,
-                mode,
+                self.win.vim_mode,
             ) {
                 return Some(range);
             }
@@ -111,10 +111,9 @@ impl PromptState {
     /// Editing must use `selection_range` — the flash must never affect mutations.
     pub(crate) fn display_selection_range(
         &self,
-        mode: VimMode,
         clipboard: &crate::smelt_term::Clipboard,
     ) -> Option<(usize, usize)> {
-        if let Some(range) = self.selection_range(mode) {
+        if let Some(range) = self.selection_range() {
             return Some(range);
         }
         clipboard
@@ -127,8 +126,8 @@ impl PromptState {
             })
     }
 
-    fn has_selection(&self, mode: VimMode) -> bool {
-        self.selection_range(mode).is_some()
+    fn has_selection(&self) -> bool {
+        self.selection_range().is_some()
     }
 
     pub(crate) fn clear_selection(&mut self) {
@@ -154,8 +153,8 @@ impl PromptState {
         self.win.extend_selection(self.win.cpos);
     }
 
-    fn delete_selection(&mut self, mode: VimMode) -> Option<String> {
-        let (start, end) = self.selection_range(mode)?;
+    fn delete_selection(&mut self) -> Option<String> {
+        let (start, end) = self.selection_range()?;
         let deleted = self.source[start..end].to_string();
         self.remove_attachments_in_range(start, end);
         self.source.drain(start..end);
@@ -177,11 +176,16 @@ impl PromptState {
         self.win.set_vim_enabled(enabled);
     }
 
-    /// Set vim mode via `mode_ref` (the TuiApp global) and reset the in-flight key sequence.
-    pub(crate) fn set_vim_mode(&mut self, mode_ref: &mut VimMode, new: VimMode) {
+    /// Set this prompt window's vim mode and reset the in-flight key sequence.
+    pub(crate) fn set_vim_mode(&mut self, new: VimMode) {
         if self.win.vim_enabled {
-            self.win.vim_state.set_mode(mode_ref, new);
+            self.win.set_vim_mode(new);
         }
+    }
+
+    /// Current vim mode for this prompt window.
+    pub(crate) fn vim_mode(&self) -> VimMode {
+        self.win.vim_mode
     }
 
     /// Sync kill ring from clipboard before `C-y` paste.
@@ -209,8 +213,8 @@ impl PromptState {
 
     /// Replace the buffer wholesale: snapshot undo, clear attachments/selection/paste-state,
     /// re-derive completer. Direct `source` writes bypass these invariants.
-    pub(crate) fn replace_text(&mut self, text: String, cursor: Option<usize>, mode: VimMode) {
-        self.save_undo(mode);
+    pub(crate) fn replace_text(&mut self, text: String, cursor: Option<usize>) {
+        self.save_undo();
         let cpos = cursor.unwrap_or(text.len()).min(text.len());
         self.source = text;
         self.win.cpos = cpos;
@@ -340,17 +344,12 @@ impl PromptState {
         Content::with_images(text, images)
     }
 
-    pub(crate) fn key_context(
-        &self,
-        agent_running: bool,
-        ghost_text_visible: bool,
-        mode: VimMode,
-    ) -> KeyContext {
+    pub(crate) fn key_context(&self, agent_running: bool, ghost_text_visible: bool) -> KeyContext {
         KeyContext {
             buf_empty: self.source.is_empty() && self.win.attachment_ids.is_empty(),
             vim_non_insert: self.win.vim_enabled
                 && matches!(
-                    mode,
+                    self.win.vim_mode,
                     VimMode::Normal | VimMode::Visual | VimMode::VisualLine
                 ),
             vim_enabled: self.win.vim_enabled,
@@ -363,7 +362,6 @@ impl PromptState {
         &mut self,
         action: KeyAction,
         history: Option<&mut History>,
-        mode: VimMode,
         clipboard: &mut crate::smelt_term::Clipboard,
     ) -> Action {
         if !matches!(action, KeyAction::Yank | KeyAction::YankPop) {
@@ -435,9 +433,9 @@ impl PromptState {
                 }
             }
             KeyAction::InsertNewline => {
-                if self.selection_range(mode).is_some() {
-                    self.save_undo(mode);
-                    self.delete_selection(mode);
+                if self.selection_range().is_some() {
+                    self.save_undo();
+                    self.delete_selection();
                 }
                 self.source.insert(self.win.cpos, '\n');
                 self.win.cpos += 1;
@@ -567,49 +565,49 @@ impl PromptState {
 
             // ── Editing ─────────────────────────────────────────────────
             KeyAction::Backspace => {
-                self.backspace(mode);
+                self.backspace();
                 Action::Redraw
             }
             KeyAction::DeleteCharForward => {
-                self.save_undo(mode);
-                if self.has_selection(mode) {
-                    self.delete_selection(mode);
+                self.save_undo();
+                if self.has_selection() {
+                    self.delete_selection();
                 } else {
                     self.delete_char_forward();
                 }
                 Action::Redraw
             }
             KeyAction::DeleteWordBackward => {
-                self.save_undo(mode);
-                if self.has_selection(mode) {
-                    self.delete_selection(mode);
+                self.save_undo();
+                if self.has_selection() {
+                    self.delete_selection();
                 } else {
                     self.delete_word_backward();
                 }
                 Action::Redraw
             }
             KeyAction::DeleteWordForward => {
-                self.save_undo(mode);
-                if self.has_selection(mode) {
-                    self.delete_selection(mode);
+                self.save_undo();
+                if self.has_selection() {
+                    self.delete_selection();
                 } else {
                     self.delete_word_forward();
                 }
                 Action::Redraw
             }
             KeyAction::DeleteToStartOfLine => {
-                self.save_undo(mode);
-                if self.has_selection(mode) {
-                    self.delete_selection(mode);
+                self.save_undo();
+                if self.has_selection() {
+                    self.delete_selection();
                 } else {
                     self.delete_to_start_of_line();
                 }
                 Action::Redraw
             }
             KeyAction::KillToEndOfLine => {
-                self.save_undo(mode);
-                if self.has_selection(mode) {
-                    let deleted = self.delete_selection(mode);
+                self.save_undo();
+                if self.has_selection() {
+                    let deleted = self.delete_selection();
                     if let Some(text) = deleted {
                         self.kill_and_copy(text, clipboard);
                     }
@@ -619,9 +617,9 @@ impl PromptState {
                 Action::Redraw
             }
             KeyAction::KillToStartOfLine => {
-                self.save_undo(mode);
-                if self.has_selection(mode) {
-                    let deleted = self.delete_selection(mode);
+                self.save_undo();
+                if self.has_selection() {
+                    let deleted = self.delete_selection();
                     if let Some(text) = deleted {
                         self.kill_and_copy(text, clipboard);
                     }
@@ -631,9 +629,9 @@ impl PromptState {
                 Action::Redraw
             }
             KeyAction::Yank => {
-                self.save_undo(mode);
-                if self.has_selection(mode) {
-                    self.delete_selection(mode);
+                self.save_undo();
+                if self.has_selection() {
+                    self.delete_selection();
                 }
                 Self::sync_kill_ring_from_clipboard(clipboard);
                 if let Some(new_cpos) = clipboard.kill_ring.yank(&mut self.source, self.win.cpos) {
@@ -650,17 +648,17 @@ impl PromptState {
                 Action::Redraw
             }
             KeyAction::UppercaseWord => {
-                self.save_undo(mode);
+                self.save_undo();
                 self.uppercase_word();
                 Action::Redraw
             }
             KeyAction::LowercaseWord => {
-                self.save_undo(mode);
+                self.save_undo();
                 self.lowercase_word();
                 Action::Redraw
             }
             KeyAction::CapitalizeWord => {
-                self.save_undo(mode);
+                self.save_undo();
                 self.capitalize_word();
                 Action::Redraw
             }
@@ -688,7 +686,7 @@ impl PromptState {
 
             // ── Clipboard ───────────────────────────────────────────────
             KeyAction::CopySelection => {
-                if let Some((start, end)) = self.selection_range(mode) {
+                if let Some((start, end)) = self.selection_range() {
                     let text = self.source[start..end].to_string();
                     if clipboard.write(&text).is_ok() {
                         clipboard.kill_ring.record_clipboard_write(text.clone());
@@ -698,9 +696,9 @@ impl PromptState {
                 Action::Noop
             }
             KeyAction::CutSelection => {
-                if self.selection_range(mode).is_some() {
-                    self.save_undo(mode);
-                    if let Some(text) = self.delete_selection(mode) {
+                if self.selection_range().is_some() {
+                    self.save_undo();
+                    if let Some(text) = self.delete_selection() {
                         if clipboard.write(&text).is_ok() {
                             clipboard.kill_ring.record_clipboard_write(text.clone());
                         }
@@ -716,15 +714,15 @@ impl PromptState {
                 // Bracketed-paste terminals forward Cmd+V as `Event::Paste`, bypassing this arm.
                 // Terminals with bracketed paste off send it as a key — handle both paths.
                 if let Some(url) = clipboard_image_to_data_url() {
-                    self.save_undo(mode);
+                    self.save_undo();
                     self.insert_image("clipboard.png".into(), url);
                     return Action::Redraw;
                 }
                 if let Some(text) = clipboard.read() {
                     if !text.is_empty() {
-                        self.save_undo(mode);
-                        if self.has_selection(mode) {
-                            self.delete_selection(mode);
+                        self.save_undo();
+                        if self.has_selection() {
+                            self.delete_selection();
                         }
                         self.insert_paste(text);
                         return Action::Redraw;
@@ -810,7 +808,6 @@ impl PromptState {
         &mut self,
         ev: Event,
         mut history: Option<&mut History>,
-        mode: &mut VimMode,
         clipboard: &mut crate::smelt_term::Clipboard,
     ) -> Action {
         if self.completer.is_some() {
@@ -819,15 +816,15 @@ impl PromptState {
             }
         }
 
-        match self.dispatch_vim(&ev, &mut history, mode, clipboard) {
+        match self.dispatch_vim(&ev, &mut history, clipboard) {
             VimBridgeResult::Handled(action) => return action,
             VimBridgeResult::Passthrough | VimBridgeResult::NotAKey => {}
         }
 
         if let Event::Paste(data) = ev {
-            self.save_undo(*mode);
-            if self.selection_range(*mode).is_some() {
-                self.delete_selection(*mode);
+            self.save_undo();
+            if self.selection_range().is_some() {
+                self.delete_selection();
             }
             if let Some(path) = engine::image::normalize_pasted_path(&data) {
                 if engine::image::is_image_file(&path) {
@@ -873,7 +870,7 @@ impl PromptState {
                 buf_empty: self.source.is_empty() && self.win.attachment_ids.is_empty(),
                 vim_non_insert: self.win.vim_enabled
                     && matches!(
-                        *mode,
+                        self.win.vim_mode,
                         VimMode::Normal | VimMode::Visual | VimMode::VisualLine
                     ),
                 vim_enabled: self.win.vim_enabled,
@@ -882,12 +879,12 @@ impl PromptState {
             };
 
             if let Some(action) = keymap::lookup(code, modifiers, &ctx) {
-                return self.execute_key_action(action, history, *mode, clipboard);
+                return self.execute_key_action(action, history, clipboard);
             }
 
             if let KeyCode::Char(c) = code {
                 if modifiers.is_empty() || modifiers == KeyModifiers::SHIFT {
-                    self.insert_char(c, *mode);
+                    self.insert_char(c);
                     return Action::Redraw;
                 }
             }
@@ -1066,8 +1063,9 @@ mod tests {
         /// `YankPop`, `Cut`, `Copy`, `KillTo*`) use `execute_key_action`
         /// directly with a real `Clipboard` and assert against it.
         fn test_action(&mut self, action: KeyAction, mode: VimMode) -> Action {
+            self.win.vim_mode = mode;
             let mut clip = crate::smelt_term::Clipboard::null();
-            self.execute_key_action(action, None, mode, &mut clip)
+            self.execute_key_action(action, None, &mut clip)
         }
     }
 
@@ -1183,8 +1181,8 @@ mod tests {
     #[test]
     fn type_then_type_sets_from_paste_false() {
         let mut input = PromptState::new();
-        input.insert_char('!', crate::smelt_term::VimMode::Insert);
-        input.insert_char('e', crate::smelt_term::VimMode::Insert);
+        input.insert_char('!');
+        input.insert_char('e');
         assert!(
             !input.skip_shell_escape(),
             "Manual typing should clear from_paste"
@@ -1196,7 +1194,7 @@ mod tests {
         let mut input = PromptState::new();
 
         // Simulate user typing '!'
-        input.insert_char('!', crate::smelt_term::VimMode::Insert);
+        input.insert_char('!');
         assert!(!input.skip_shell_escape(), "Typing clears from_paste");
 
         // Reset cursor to simulate the scenario: user types '!', then pastes at line start
@@ -1287,7 +1285,7 @@ mod tests {
         input.insert_paste("!echo hello".to_string());
         assert!(input.skip_shell_escape());
 
-        input.insert_char('x', crate::smelt_term::VimMode::Insert);
+        input.insert_char('x');
         assert!(
             !input.skip_shell_escape(),
             "Manual character after paste should clear from_paste"
@@ -1300,15 +1298,15 @@ mod tests {
         input.insert_paste("!echo hello".to_string());
         assert!(input.skip_shell_escape());
 
-        input.backspace(crate::smelt_term::VimMode::Insert); // Deletes last character
+        input.backspace(); // Deletes last character
         assert!(
             input.skip_shell_escape(),
             "Backspace not at start should not clear from_paste"
         );
 
         input.win.cpos = 0;
-        input.backspace(crate::smelt_term::VimMode::Insert); // Now at position 0
-                                                             // Can't backspace further, but the logic would clear it if we could
+        input.backspace(); // Now at position 0
+                           // Can't backspace further, but the logic would clear it if we could
     }
 
     #[test]
@@ -1378,7 +1376,7 @@ mod tests {
         assert!(input.skip_shell_escape());
 
         // Type something, which clears from_paste
-        input.insert_char(' ', crate::smelt_term::VimMode::Insert);
+        input.insert_char(' ');
         assert!(!input.skip_shell_escape());
 
         // Paste again at start of line
@@ -1452,10 +1450,7 @@ mod tests {
         input.test_action(KeyAction::SelectRight, crate::smelt_term::VimMode::Insert);
         assert_eq!(input.win.selection_anchor, Some(0));
         assert_eq!(input.win.cpos, 1);
-        assert_eq!(
-            input.selection_range(crate::smelt_term::VimMode::Insert),
-            Some((0, 1))
-        );
+        assert_eq!(input.selection_range(), Some((0, 1)));
     }
 
     #[test]
@@ -1468,10 +1463,7 @@ mod tests {
         input.test_action(KeyAction::SelectRight, crate::smelt_term::VimMode::Insert);
         assert_eq!(input.win.selection_anchor, Some(0));
         assert_eq!(input.win.cpos, 3);
-        assert_eq!(
-            input.selection_range(crate::smelt_term::VimMode::Insert),
-            Some((0, 3))
-        );
+        assert_eq!(input.selection_range(), Some((0, 3)));
     }
 
     #[test]
@@ -1481,13 +1473,9 @@ mod tests {
         input.win.cpos = 0;
         input.test_action(KeyAction::SelectRight, crate::smelt_term::VimMode::Insert);
         input.test_action(KeyAction::SelectRight, crate::smelt_term::VimMode::Insert);
-        assert!(input
-            .selection_range(crate::smelt_term::VimMode::Insert)
-            .is_some());
+        assert!(input.selection_range().is_some());
         input.test_action(KeyAction::MoveRight, crate::smelt_term::VimMode::Insert);
-        assert!(input
-            .selection_range(crate::smelt_term::VimMode::Insert)
-            .is_none());
+        assert!(input.selection_range().is_none());
     }
 
     #[test]
@@ -1499,10 +1487,7 @@ mod tests {
         for _ in 0..5 {
             input.test_action(KeyAction::SelectRight, crate::smelt_term::VimMode::Insert);
         }
-        assert_eq!(
-            input.selection_range(crate::smelt_term::VimMode::Insert),
-            Some((0, 5))
-        );
+        assert_eq!(input.selection_range(), Some((0, 5)));
         input.test_action(KeyAction::Backspace, crate::smelt_term::VimMode::Insert);
         assert_eq!(input.source, " world");
         assert_eq!(input.win.cpos, 0);
@@ -1531,7 +1516,7 @@ mod tests {
         for _ in 0..5 {
             input.test_action(KeyAction::SelectRight, crate::smelt_term::VimMode::Insert);
         }
-        input.insert_char('X', crate::smelt_term::VimMode::Insert);
+        input.insert_char('X');
         assert_eq!(input.source, "X world");
         assert_eq!(input.win.cpos, 1);
     }
@@ -1545,10 +1530,7 @@ mod tests {
         input.test_action(KeyAction::SelectLeft, crate::smelt_term::VimMode::Insert);
         assert_eq!(input.win.selection_anchor, Some(5));
         assert_eq!(input.win.cpos, 3);
-        assert_eq!(
-            input.selection_range(crate::smelt_term::VimMode::Insert),
-            Some((3, 5))
-        );
+        assert_eq!(input.selection_range(), Some((3, 5)));
     }
 
     #[test]
@@ -1576,10 +1558,7 @@ mod tests {
             KeyAction::SelectWordBackward,
             crate::smelt_term::VimMode::Insert,
         );
-        assert_eq!(
-            input.selection_range(crate::smelt_term::VimMode::Insert),
-            Some((6, 11))
-        );
+        assert_eq!(input.selection_range(), Some((6, 11)));
         input.test_action(KeyAction::Backspace, crate::smelt_term::VimMode::Insert);
         assert_eq!(input.source, "hello ");
     }
@@ -1593,10 +1572,7 @@ mod tests {
             KeyAction::SelectStartOfLine,
             crate::smelt_term::VimMode::Insert,
         );
-        assert_eq!(
-            input.selection_range(crate::smelt_term::VimMode::Insert),
-            Some((0, 5))
-        );
+        assert_eq!(input.selection_range(), Some((0, 5)));
     }
 
     #[test]
@@ -1608,10 +1584,7 @@ mod tests {
             KeyAction::SelectEndOfLine,
             crate::smelt_term::VimMode::Insert,
         );
-        assert_eq!(
-            input.selection_range(crate::smelt_term::VimMode::Insert),
-            Some((5, 11))
-        );
+        assert_eq!(input.selection_range(), Some((5, 11)));
     }
 
     #[test]
@@ -1634,19 +1607,9 @@ mod tests {
         input.source = "hello world".to_string();
         input.win.cpos = 0;
         for _ in 0..5 {
-            input.execute_key_action(
-                KeyAction::SelectRight,
-                None,
-                crate::smelt_term::VimMode::Insert,
-                &mut clip,
-            );
+            input.execute_key_action(KeyAction::SelectRight, None, &mut clip);
         }
-        input.execute_key_action(
-            KeyAction::KillToEndOfLine,
-            None,
-            crate::smelt_term::VimMode::Insert,
-            &mut clip,
-        );
+        input.execute_key_action(KeyAction::KillToEndOfLine, None, &mut clip);
         assert_eq!(input.source, " world");
         // Killed text lands on the TuiApp-level kill ring.
         assert_eq!(clip.kill_ring.current(), "hello");
@@ -1660,10 +1623,7 @@ mod tests {
         // Select all.
         input.test_action(KeyAction::SelectRight, crate::smelt_term::VimMode::Insert);
         input.test_action(KeyAction::SelectRight, crate::smelt_term::VimMode::Insert);
-        assert_eq!(
-            input.selection_range(crate::smelt_term::VimMode::Insert),
-            Some((0, 2))
-        );
+        assert_eq!(input.selection_range(), Some((0, 2)));
         input.test_action(KeyAction::Backspace, crate::smelt_term::VimMode::Insert);
         assert_eq!(input.source, "");
         assert_eq!(input.win.cpos, 0);
@@ -1675,10 +1635,7 @@ mod tests {
         input.source = "hello".to_string();
         input.win.cpos = 3;
         input.win.selection_anchor = Some(3);
-        assert_eq!(
-            input.selection_range(crate::smelt_term::VimMode::Insert),
-            None
-        );
+        assert_eq!(input.selection_range(), None);
     }
 
     #[test]
@@ -1687,13 +1644,9 @@ mod tests {
         input.source = "hello".to_string();
         input.win.cpos = 0;
         input.test_action(KeyAction::SelectRight, crate::smelt_term::VimMode::Insert);
-        assert!(input
-            .selection_range(crate::smelt_term::VimMode::Insert)
-            .is_some());
+        assert!(input.selection_range().is_some());
         input.clear();
-        assert!(input
-            .selection_range(crate::smelt_term::VimMode::Insert)
-            .is_none());
+        assert!(input.selection_range().is_none());
     }
 
     #[test]
@@ -1768,9 +1721,7 @@ mod tests {
         input.win.cpos = 0;
         input.test_action(KeyAction::SelectRight, crate::smelt_term::VimMode::Insert);
         assert_eq!(input.win.cpos, 0);
-        assert!(input
-            .selection_range(crate::smelt_term::VimMode::Insert)
-            .is_none());
+        assert!(input.selection_range().is_none());
     }
 
     #[test]
@@ -1782,10 +1733,7 @@ mod tests {
         input.test_action(KeyAction::SelectRight, crate::smelt_term::VimMode::Insert);
         // Should select "hé" — 2 chars but 3 bytes.
         assert_eq!(input.win.cpos, 3); // byte offset of 'l'
-        assert_eq!(
-            input.selection_range(crate::smelt_term::VimMode::Insert),
-            Some((0, 3))
-        );
+        assert_eq!(input.selection_range(), Some((0, 3)));
         input.test_action(KeyAction::Backspace, crate::smelt_term::VimMode::Insert);
         assert_eq!(input.source, "llo");
     }
@@ -1798,20 +1746,14 @@ mod tests {
                             // Select right 2 chars.
         input.test_action(KeyAction::SelectRight, crate::smelt_term::VimMode::Insert);
         input.test_action(KeyAction::SelectRight, crate::smelt_term::VimMode::Insert);
-        assert_eq!(
-            input.selection_range(crate::smelt_term::VimMode::Insert),
-            Some((3, 5))
-        );
+        assert_eq!(input.selection_range(), Some((3, 5)));
         // Then select left 4 chars — anchor stays at 3.
         input.test_action(KeyAction::SelectLeft, crate::smelt_term::VimMode::Insert);
         input.test_action(KeyAction::SelectLeft, crate::smelt_term::VimMode::Insert);
         input.test_action(KeyAction::SelectLeft, crate::smelt_term::VimMode::Insert);
         input.test_action(KeyAction::SelectLeft, crate::smelt_term::VimMode::Insert);
         assert_eq!(input.win.cpos, 1);
-        assert_eq!(
-            input.selection_range(crate::smelt_term::VimMode::Insert),
-            Some((1, 3))
-        );
+        assert_eq!(input.selection_range(), Some((1, 3)));
     }
 
     #[test]
@@ -1821,15 +1763,15 @@ mod tests {
         };
 
         let mut input = PromptState::new();
-        let mut mode = crate::smelt_term::VimMode::Insert;
         let mut clipboard = crate::smelt_term::Clipboard::null();
         input.set_vim_enabled(true);
+        input.set_vim_mode(crate::smelt_term::VimMode::Insert);
         input.source = "hello world".to_string();
         input.win.cpos = 0;
         // Create a shift selection.
-        input.test_action(KeyAction::SelectRight, mode);
-        input.test_action(KeyAction::SelectRight, mode);
-        assert!(input.selection_range(mode).is_some());
+        input.test_action(KeyAction::SelectRight, crate::smelt_term::VimMode::Insert);
+        input.test_action(KeyAction::SelectRight, crate::smelt_term::VimMode::Insert);
+        assert!(input.selection_range().is_some());
         // Press Esc — vim switches to normal mode AND clears selection.
         let esc = Event::Key(KeyEvent {
             code: KeyCode::Esc,
@@ -1837,13 +1779,13 @@ mod tests {
             kind: KeyEventKind::Press,
             state: KeyEventState::empty(),
         });
-        input.handle_event(esc, None, &mut mode, &mut clipboard);
+        input.handle_event(esc, None, &mut clipboard);
         assert!(
-            input.selection_range(mode).is_none(),
+            input.selection_range().is_none(),
             "Esc should clear shift selection"
         );
         assert_eq!(
-            mode,
+            input.vim_mode(),
             crate::smelt_term::VimMode::Normal,
             "Should be in normal mode"
         );
@@ -1862,10 +1804,8 @@ mod tests {
         // Select "b<marker>c" (bytes 1..5 — marker is 3 bytes).
         input.win.selection_anchor = Some(1);
         input.win.cpos = 1 + 1 + ATTACHMENT_MARKER.len_utf8() + 1;
-        assert!(input
-            .selection_range(crate::smelt_term::VimMode::Insert)
-            .is_some());
-        let deleted = input.delete_selection(crate::smelt_term::VimMode::Insert);
+        assert!(input.selection_range().is_some());
+        let deleted = input.delete_selection();
         assert!(deleted.is_some());
         assert_eq!(input.source, "ad");
         assert!(

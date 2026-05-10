@@ -35,8 +35,7 @@ impl TuiApp {
             while self.core.engine.try_recv().is_ok() {}
             self.save_session();
         } else if restore_vim_insert {
-            self.input
-                .set_vim_mode(&mut self.vim_mode, crate::smelt_term::VimMode::Insert);
+            self.input.set_vim_mode(crate::smelt_term::VimMode::Insert);
         }
     }
 

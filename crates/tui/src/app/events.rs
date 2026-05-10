@@ -33,9 +33,7 @@ impl TuiApp {
         {
             // Skip when an overlay or cmdline is focused — they get first dibs.
             if self.ui.focused_overlay().is_none() && self.well_known.cmdline.is_none() {
-                let ctx = self
-                    .input
-                    .key_context(self.agent.is_some(), false, self.vim_mode);
+                let ctx = self.input.key_context(self.agent.is_some(), false);
                 match keymap::lookup(*code, *modifiers, &ctx) {
                     Some(KeyAction::ToggleMode) => {
                         self.lua.cycle_mode();
@@ -280,7 +278,7 @@ impl TuiApp {
                         tokens: Vec::new(),
                         started: now,
                         vim_mode_at_start: if self.input.vim_enabled() {
-                            Some(self.vim_mode)
+                            Some(self.input.win.vim_mode)
                         } else {
                             None
                         },
@@ -351,7 +349,8 @@ impl TuiApp {
         {
             let in_insert = match self.app_focus {
                 crate::app::AppFocus::Prompt => {
-                    !self.input.vim_enabled() || self.vim_mode == crate::smelt_term::VimMode::Insert
+                    !self.input.vim_enabled()
+                        || self.input.win.vim_mode == crate::smelt_term::VimMode::Insert
                 }
                 crate::app::AppFocus::Content => false,
             };
@@ -393,7 +392,7 @@ impl TuiApp {
         {
             let ghost_text = self.prompt_completer_text();
             let ghost = ghost_text.is_some() && self.input.source.is_empty();
-            let ctx = self.input.key_context(false, ghost, self.vim_mode);
+            let ctx = self.input.key_context(false, ghost);
 
             // Editing keys dismiss ghost text; transparent actions (mode toggles, redraw) preserve it.
             if ghost {
@@ -401,8 +400,7 @@ impl TuiApp {
                     Some(KeyAction::AcceptGhostText) => {
                         let full = self.take_prompt_completer().unwrap();
                         let line = full.lines().next().unwrap_or(&full).to_string();
-                        let __mode = self.vim_mode;
-                        self.input.replace_text(line, None, __mode);
+                        self.input.replace_text(line, None);
                         return EventOutcome::Redraw;
                     }
                     Some(
@@ -436,12 +434,9 @@ impl TuiApp {
             }
         }
 
-        let action = self.input.handle_event(
-            ev,
-            Some(&mut self.input_history),
-            &mut self.vim_mode,
-            &mut self.core.clipboard,
-        );
+        let action =
+            self.input
+                .handle_event(ev, Some(&mut self.input_history), &mut self.core.clipboard);
         self.dispatch_input_action(action)
     }
 
@@ -461,7 +456,7 @@ impl TuiApp {
             code, modifiers, ..
         }) = ev
         {
-            let ctx = self.input.key_context(true, false, self.vim_mode);
+            let ctx = self.input.key_context(true, false);
             if let Some(action) = keymap::lookup(code, modifiers, &ctx) {
                 match action {
                     KeyAction::CancelAgent => {
@@ -495,7 +490,7 @@ impl TuiApp {
             })
         ) {
             let cur_mode = if self.input.vim_enabled() {
-                Some(self.vim_mode)
+                Some(self.input.win.vim_mode)
             } else {
                 None
             };
@@ -506,8 +501,7 @@ impl TuiApp {
                 &mut t.esc_vim_mode,
             ) {
                 EscAction::VimToNormal => {
-                    self.input
-                        .handle_event(ev, None, &mut self.vim_mode, &mut self.core.clipboard);
+                    self.input.handle_event(ev, None, &mut self.core.clipboard);
                 }
                 EscAction::Unqueue => {
                     let mut combined = self.queued_messages.join("\n");
@@ -515,13 +509,12 @@ impl TuiApp {
                         combined.push('\n');
                         combined.push_str(&self.input.source);
                     }
-                    let mode = self.vim_mode;
-                    self.input.replace_text(combined, None, mode);
+                    self.input.replace_text(combined, None);
                     self.queued_messages.clear();
                 }
                 EscAction::Cancel { restore_vim } => {
                     if let Some(mode) = restore_vim {
-                        self.input.set_vim_mode(&mut self.vim_mode, mode);
+                        self.input.set_vim_mode(mode);
                     }
                     return EventOutcome::CancelAgent;
                 }
@@ -530,12 +523,9 @@ impl TuiApp {
             return EventOutcome::Noop;
         }
 
-        let input_action = self.input.handle_event(
-            ev,
-            Some(&mut self.input_history),
-            &mut self.vim_mode,
-            &mut self.core.clipboard,
-        );
+        let input_action =
+            self.input
+                .handle_event(ev, Some(&mut self.input_history), &mut self.core.clipboard);
         match input_action {
             Action::Submit {
                 mut content,
@@ -626,8 +616,7 @@ impl TuiApp {
         match status {
             Ok(s) if s.success() => match std::fs::read_to_string(tmp.path()) {
                 Ok(new) => {
-                    let __mode = self.vim_mode;
-                    self.input.replace_text(new, None, __mode);
+                    self.input.replace_text(new, None);
                 }
                 Err(e) => self.notify_error(format!("read tmp: {e}")),
             },
@@ -805,20 +794,14 @@ impl TuiApp {
         if rows.is_empty() {
             return false;
         }
-        if self.vim_mode == crate::smelt_term::VimMode::Insert {
-            self.vim_mode = crate::smelt_term::VimMode::Normal;
-        }
         let win_mut = match self.ui.win_mut(win) {
             Some(w) => w,
             None => return false,
         };
-        let status = win_mut.handle_key(
-            k,
-            &rows,
-            viewport_rows,
-            &mut self.vim_mode,
-            &mut self.core.clipboard,
-        );
+        if win_mut.vim_mode == crate::smelt_term::VimMode::Insert {
+            win_mut.set_vim_mode(crate::smelt_term::VimMode::Normal);
+        }
+        let status = win_mut.handle_key(k, &rows, viewport_rows, &mut self.core.clipboard);
         matches!(status, crate::smelt_term::Status::Consumed)
     }
 }
