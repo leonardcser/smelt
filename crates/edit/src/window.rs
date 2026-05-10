@@ -845,40 +845,48 @@ impl Window {
 
     /// Viewport-led pan (mouse wheel / tmux-style): bump `scroll_top` by `delta` rows;
     /// the cursor stays on the same screen row, so its text position shifts with the
-    /// viewport. Stops at the buffer boundary.
+    /// viewport. Stops at the buffer boundary — when the viewport can't move, neither
+    /// does the cursor.
     pub fn pan_by_lines(&mut self, delta: isize, rows: &[String], viewport_rows: u16) {
         if rows.is_empty() || delta == 0 {
             return;
         }
         let total = rows.len();
         let max_scroll = (total as u16).saturating_sub(viewport_rows);
-        let new_scroll = (self.scroll_top as isize + delta).clamp(0, max_scroll as isize) as u16;
-        if new_scroll == self.scroll_top {
+        // Normalize the `follow_tail` sentinel (`u16::MAX`) before arithmetic so a
+        // wheel-down at the bottom doesn't pretend to "scroll" from MAX → max_scroll
+        // and yank the cursor along with it.
+        let cur_scroll = self.scroll_top.min(max_scroll);
+        let new_scroll = (cur_scroll as isize + delta).clamp(0, max_scroll as isize) as u16;
+        if new_scroll == cur_scroll {
+            // At a boundary: collapse the sentinel but leave the cursor untouched.
+            self.scroll_top = cur_scroll;
+            self.follow_tail = cur_scroll >= max_scroll;
             return;
         }
         let offsets = Self::line_start_offsets(rows);
         self.text = rows.join("\n");
         // Derive screen row from `cpos` rather than `cursor_line` — wheel paths bypass
-        // the click handlers that set `cursor_line`, so it can be stale.
+        // the click handlers that maintain `cursor_line`, so it can be stale.
         let cur_line = match offsets.binary_search(&self.cpos) {
             Ok(i) => i,
             Err(i) => i.saturating_sub(1),
         }
         .min(total - 1);
-        let screen_row = cur_line.saturating_sub(self.scroll_top as usize);
+        let screen_row = cur_line.saturating_sub(cur_scroll as usize);
         let want = self.curswant.unwrap_or_else(|| {
             let line = &rows[cur_line];
             byte_to_cell(line, self.cpos.saturating_sub(offsets[cur_line]))
         });
         self.scroll_top = new_scroll;
-        let new_line = (self.scroll_top as usize + screen_row).min(total - 1);
+        let new_line = (new_scroll as usize + screen_row).min(total - 1);
         let line = &rows[new_line];
         let col_bytes = cell_to_byte(line, want);
         self.cpos = offsets[new_line] + col_bytes;
         self.cursor_col = byte_to_cell(line, col_bytes) as u16;
-        self.cursor_line = (new_line as u16).saturating_sub(self.scroll_top);
+        self.cursor_line = (new_line as u16).saturating_sub(new_scroll);
         self.curswant = Some(want);
-        self.follow_tail = self.scroll_top >= max_scroll;
+        self.follow_tail = new_scroll >= max_scroll;
     }
 
     fn jump_to_line_col(
@@ -1293,6 +1301,54 @@ mod tests {
             w.cpos, cpos_before,
             "cursor must not move when viewport can't"
         );
+    }
+
+    #[test]
+    fn pan_by_lines_no_op_when_follow_tail_sentinel_at_bottom() {
+        // `follow_tail` mode stores `u16::MAX` as the scroll_top sentinel.
+        // Wheel-down at the bottom must collapse the sentinel without yanking the
+        // cursor — regression for the "cursor jumps to top of viewport" bug.
+        let mut w = make_win();
+        let rows = sample_rows(30);
+        let viewport = 10;
+        let max_scroll = 30 - viewport;
+        w.jump_to_line_col(&rows, 29, 0, viewport);
+        let cpos_before = w.cpos;
+        let cursor_line_before = w.cursor_line;
+        w.scroll_to_bottom();
+        assert_eq!(w.scroll_top, u16::MAX);
+        w.pan_by_lines(3, &rows, viewport);
+        assert_eq!(w.scroll_top, max_scroll, "sentinel collapses to max_scroll");
+        assert_eq!(
+            w.cpos, cpos_before,
+            "cursor text position must be unchanged"
+        );
+        assert_eq!(
+            w.cursor_line, cursor_line_before,
+            "cursor screen row must be unchanged"
+        );
+        assert!(
+            w.follow_tail,
+            "still at the bottom \u{2192} follow_tail stays true"
+        );
+    }
+
+    #[test]
+    fn pan_by_lines_up_from_follow_tail_sentinel() {
+        // Wheel-up while in follow_tail must scroll up off the bottom; the cursor
+        // tracks the same screen row.
+        let mut w = make_win();
+        let rows = sample_rows(30);
+        let viewport = 10;
+        let max_scroll = 30 - viewport;
+        w.jump_to_line_col(&rows, 29, 0, viewport);
+        let cursor_line_before = w.cursor_line;
+        w.scroll_to_bottom();
+        assert_eq!(w.scroll_top, u16::MAX);
+        w.pan_by_lines(-3, &rows, viewport);
+        assert_eq!(w.scroll_top, max_scroll - 3);
+        assert_eq!(w.cursor_line, cursor_line_before);
+        assert!(!w.follow_tail);
     }
 
     #[test]
