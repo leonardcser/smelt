@@ -523,10 +523,10 @@ impl TuiApp {
                         self.transcript_window.vim_mode,
                     )
                 }
-                _ => self.transcript_window.selection_range_at(cpos),
+                _ => self.transcript_window.selection_range_at(cpos, &buf),
             }
         } else {
-            self.transcript_window.selection_range_at(cpos)
+            self.transcript_window.selection_range_at(cpos, &buf)
         };
         // Fall back to yank-flash range (mirrors nvim's `vim.highlight.on_yank`).
         let (s, e) = match active_selection.or_else(|| {

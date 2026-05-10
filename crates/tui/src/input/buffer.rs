@@ -225,8 +225,7 @@ impl PromptState {
             &self.win.attachment_ids,
         );
         if let Some(entry) = self.win.history.undo(current) {
-            self.source = entry.buf;
-            self.win.cpos = entry.cpos;
+            self.install_source(entry.buf, entry.cpos);
             self.win.attachment_ids = entry.attachments;
         }
         self.recompute_completer();

@@ -71,16 +71,16 @@ impl PromptState {
             }
             vim::Action::HistoryPrev => {
                 if let Some(entry) = history.as_deref_mut().and_then(|h| h.up(&self.source)) {
-                    self.source = entry.to_string();
-                    self.win.cpos = 0;
+                    self.install_source(entry.to_string(), 0);
                     self.sync_completer();
                 }
                 VimBridgeResult::Handled(Action::Redraw)
             }
             vim::Action::HistoryNext => {
                 if let Some(entry) = history.as_deref_mut().and_then(|h| h.down()) {
-                    self.source = entry.to_string();
-                    self.win.cpos = self.source.len();
+                    let s = entry.to_string();
+                    let cpos = s.len();
+                    self.install_source(s, cpos);
                     self.sync_completer();
                 }
                 VimBridgeResult::Handled(Action::Redraw)

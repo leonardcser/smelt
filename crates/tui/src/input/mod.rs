@@ -103,7 +103,7 @@ impl PromptState {
                 return Some(range);
             }
         }
-        self.win.selection_range_at(self.win.cpos)
+        self.win.selection_range_at(self.win.cpos, &self.source)
     }
 
     /// Selection range for rendering. Falls back to yank-flash so vim copy ops get the
@@ -201,13 +201,21 @@ impl PromptState {
         clipboard.kill_ring.record_clipboard_write(text);
     }
 
+    /// Single seam for replacing `source` wholesale. Clamps `cpos` to a char boundary
+    /// and clears `selection_anchor` — the only invariants every replacement must
+    /// uphold. Callers manage attachments / paste-state / completer / undo since
+    /// those differ per site.
+    pub(crate) fn install_source(&mut self, text: String, cpos: usize) {
+        self.source = text;
+        self.win.cpos = crate::smelt_term::text::snap(&self.source, cpos);
+        self.win.selection_anchor = None;
+    }
+
     pub(crate) fn clear(&mut self) {
-        self.source.clear();
-        self.win.cpos = 0;
+        self.install_source(String::new(), 0);
         self.win.attachment_ids.clear();
         self.close_completer();
         self.from_paste = false;
-        self.win.selection_anchor = None;
         // Stash and store are intentionally preserved.
     }
 
@@ -215,11 +223,9 @@ impl PromptState {
     /// re-derive completer. Direct `source` writes bypass these invariants.
     pub(crate) fn replace_text(&mut self, text: String, cursor: Option<usize>) {
         self.save_undo();
-        let cpos = cursor.unwrap_or(text.len()).min(text.len());
-        self.source = text;
-        self.win.cpos = cpos;
+        let cpos = cursor.unwrap_or(text.len());
+        self.install_source(text, cpos);
         self.win.attachment_ids.clear();
-        self.win.selection_anchor = None;
         self.from_paste = false;
         self.close_completer();
         self.recompute_completer();
@@ -228,8 +234,7 @@ impl PromptState {
     /// Toggle stash. Attachments are cloned out of the store so the stash survives store clears.
     fn toggle_stash(&mut self) {
         if let Some(snap) = self.stash.take() {
-            self.source = snap.buf;
-            self.win.cpos = snap.cpos;
+            self.install_source(snap.buf, snap.cpos);
             self.win.attachment_ids = snap
                 .attachments
                 .into_iter()
@@ -242,20 +247,22 @@ impl PromptState {
                 .into_iter()
                 .filter_map(|id| self.store.get(id).cloned())
                 .collect();
+            let buf = std::mem::take(&mut self.source);
+            let cpos = std::mem::replace(&mut self.win.cpos, 0);
             self.stash = Some(InputSnapshot {
-                buf: std::mem::take(&mut self.source),
-                cpos: std::mem::replace(&mut self.win.cpos, 0),
+                buf,
+                cpos,
                 attachments,
                 from_paste: self.from_paste,
             });
+            self.win.selection_anchor = None;
             self.close_completer();
         }
     }
 
     pub(crate) fn restore_stash(&mut self) {
         if let Some(snap) = self.stash.take() {
-            self.source = snap.buf;
-            self.win.cpos = snap.cpos;
+            self.install_source(snap.buf, snap.cpos);
             self.win.attachment_ids = snap
                 .attachments
                 .into_iter()
@@ -276,8 +283,8 @@ impl PromptState {
                 ids.push(id);
             }
         }
-        self.win.cpos = text.len();
-        self.source = text;
+        let cpos = text.len();
+        self.install_source(text, cpos);
         self.win.attachment_ids = ids;
     }
 
@@ -491,8 +498,7 @@ impl PromptState {
                     self.recompute_completer();
                     Action::Redraw
                 } else if let Some(entry) = history.and_then(|h| h.up(&self.source)) {
-                    self.source = entry.to_string();
-                    self.win.cpos = 0;
+                    self.install_source(entry.to_string(), 0);
                     self.win.curswant = None;
                     self.sync_completer();
                     Action::Redraw
@@ -513,8 +519,9 @@ impl PromptState {
                     self.recompute_completer();
                     Action::Redraw
                 } else if let Some(entry) = history.and_then(|h| h.down()) {
-                    self.source = entry.to_string();
-                    self.win.cpos = self.source.len();
+                    let s = entry.to_string();
+                    let cpos = s.len();
+                    self.install_source(s, cpos);
                     self.win.curswant = None;
                     self.sync_completer();
                     Action::Redraw
@@ -544,8 +551,7 @@ impl PromptState {
             }
             KeyAction::HistoryPrev => {
                 if let Some(entry) = history.and_then(|h| h.up(&self.source)) {
-                    self.source = entry.to_string();
-                    self.win.cpos = 0;
+                    self.install_source(entry.to_string(), 0);
                     self.sync_completer();
                     Action::Redraw
                 } else {
@@ -554,8 +560,9 @@ impl PromptState {
             }
             KeyAction::HistoryNext => {
                 if let Some(entry) = history.and_then(|h| h.down()) {
-                    self.source = entry.to_string();
-                    self.win.cpos = self.source.len();
+                    let s = entry.to_string();
+                    let cpos = s.len();
+                    self.install_source(s, cpos);
                     self.sync_completer();
                     Action::Redraw
                 } else {
@@ -1872,4 +1879,143 @@ mod tests {
     }
 
     use crate::keymap::KeyAction;
+
+    // ── Stale-anchor regression suite ──────────────────────────────────
+    //
+    // Selection anchors are byte offsets into `source`. Any path that replaces
+    // `source` wholesale must clear the anchor, OR the read seam must clamp;
+    // both layers exist. These tests pin both invariants.
+
+    #[test]
+    fn stale_anchor_past_source_end_clamps_to_source_len() {
+        let mut input = PromptState::new();
+        input.source = "hi".to_string();
+        input.win.cpos = 0;
+        input.win.selection_anchor = Some(5808);
+        // Stale anchor is clamped to source.len(); slice is in-bounds, no panic.
+        assert_eq!(input.selection_range(), Some((0, 2)));
+        // And the slice that would previously panic now succeeds.
+        let (s, e) = input.selection_range().unwrap();
+        let _ = &input.source[s..e];
+    }
+
+    #[test]
+    fn stale_anchor_against_empty_source_returns_none() {
+        let mut input = PromptState::new();
+        input.source = String::new();
+        input.win.cpos = 0;
+        input.win.selection_anchor = Some(371);
+        // Both endpoints clamp to 0 → range collapses to None.
+        assert_eq!(input.selection_range(), None);
+    }
+
+    #[test]
+    fn delete_selection_with_stale_anchor_does_not_panic() {
+        let mut input = PromptState::new();
+        input.source = String::new();
+        input.win.cpos = 0;
+        input.win.selection_anchor = Some(5808);
+        assert_eq!(input.delete_selection(), None);
+        assert_eq!(input.source, "");
+    }
+
+    #[test]
+    fn copy_selection_with_stale_anchor_does_not_panic() {
+        let mut input = PromptState::new();
+        input.source = String::new();
+        input.win.cpos = 0;
+        input.win.selection_anchor = Some(5808);
+        input.test_action(KeyAction::CopySelection, crate::smelt_term::VimMode::Insert);
+    }
+
+    #[test]
+    fn stale_anchor_mid_codepoint_snaps_to_boundary() {
+        // Anchor lands inside a multi-byte codepoint; snap pulls it to a boundary
+        // so the resulting slice can never split a UTF-8 sequence.
+        let mut input = PromptState::new();
+        input.source = "héllo".to_string(); // 'é' occupies bytes 1..3
+        input.win.cpos = 0;
+        input.win.selection_anchor = Some(2); // mid-codepoint
+        assert_eq!(input.selection_range(), Some((0, 1)));
+        let (s, e) = input.selection_range().unwrap();
+        let _ = &input.source[s..e]; // would panic without the snap
+    }
+
+    #[test]
+    fn replace_text_clears_anchor() {
+        let mut input = PromptState::new();
+        input.source = "long source".to_string();
+        input.win.selection_anchor = Some(7);
+        input.win.cpos = 0;
+        input.replace_text(String::new(), None);
+        assert_eq!(input.win.selection_anchor, None);
+    }
+
+    #[test]
+    fn toggle_stash_both_branches_clear_anchor() {
+        let mut input = PromptState::new();
+        input.source = "hello".to_string();
+        input.win.cpos = 5;
+        input.win.selection_anchor = Some(2);
+        // Stash branch: source moves into stash.
+        input.toggle_stash();
+        assert_eq!(
+            input.win.selection_anchor, None,
+            "stashing must clear stale anchor"
+        );
+        // Re-set an anchor against the (now empty) source and unstash.
+        input.win.selection_anchor = Some(99);
+        input.toggle_stash();
+        assert_eq!(
+            input.win.selection_anchor, None,
+            "unstashing must clear stale anchor"
+        );
+        assert_eq!(input.source, "hello");
+    }
+
+    #[test]
+    fn restore_stash_clears_anchor() {
+        let mut input = PromptState::new();
+        input.source = "hello".to_string();
+        input.toggle_stash(); // moves "hello" into stash
+        input.win.selection_anchor = Some(99); // stale against current empty source
+        input.restore_stash();
+        assert_eq!(input.win.selection_anchor, None);
+        assert_eq!(input.source, "hello");
+    }
+
+    #[test]
+    fn restore_from_rewind_clears_anchor() {
+        let mut input = PromptState::new();
+        input.source = "long buffer".to_string();
+        input.win.selection_anchor = Some(7);
+        input.restore_from_rewind("hi".to_string(), Vec::new());
+        assert_eq!(input.win.selection_anchor, None);
+        assert_eq!(input.source, "hi");
+    }
+
+    #[test]
+    fn undo_clears_anchor_when_replacing_with_shorter_source() {
+        let mut input = PromptState::new();
+        // Save undo with empty buffer.
+        input.save_undo();
+        // Type some text and create a selection.
+        input.source = "hello world".to_string();
+        input.win.cpos = 11;
+        input.win.selection_anchor = Some(6);
+        // Undo back to empty.
+        input.undo();
+        assert_eq!(input.source, "");
+        assert_eq!(
+            input.win.selection_anchor, None,
+            "undo must clear anchor that no longer fits the restored source"
+        );
+    }
+
+    #[test]
+    fn install_source_snaps_cpos_to_char_boundary() {
+        let mut input = PromptState::new();
+        input.install_source("héllo".to_string(), 2); // mid 'é'
+        assert_eq!(input.win.cpos, 1, "cpos must snap to a char boundary");
+    }
 }

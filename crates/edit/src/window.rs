@@ -301,22 +301,25 @@ impl Window {
         }
     }
 
-    pub fn selection_range_at(&self, cpos: usize) -> Option<(usize, usize)> {
-        let a = self.selection_anchor?;
-        let (lo, hi) = if a <= cpos { (a, cpos) } else { (cpos, a) };
+    /// Resolve the shift-selection range against `src`. Both endpoints are clamped to
+    /// `src.len()` and snapped to char boundaries — a stale anchor that survived a
+    /// source mutation degrades to `None` instead of producing an out-of-bounds slice.
+    pub fn selection_range_at(&self, cpos: usize, src: &str) -> Option<(usize, usize)> {
+        let a = text::snap(src, self.selection_anchor?);
+        let c = text::snap(src, cpos);
+        let (lo, hi) = if a <= c { (a, c) } else { (c, a) };
         (lo != hi).then_some((lo, hi))
     }
 
     pub fn selection_range(&self, rows: &[String]) -> Option<(usize, usize)> {
         let cpos = self.compute_cpos(rows);
+        let buf = rows.join("\n");
         if self.vim_enabled {
-            if let Some(range) =
-                vim::visual_range(&self.vim_state, &rows.join("\n"), cpos, self.vim_mode)
-            {
+            if let Some(range) = vim::visual_range(&self.vim_state, &buf, cpos, self.vim_mode) {
                 return Some(range);
             }
         }
-        self.selection_range_at(cpos)
+        self.selection_range_at(cpos, &buf)
     }
 
     /// Derive selection ranges from this window's own anchors; used when the buffer
@@ -331,11 +334,11 @@ impl Window {
         if !in_vim_visual && self.selection_anchor.is_none() {
             return Vec::new();
         }
+        let buf_text = buf.text();
         let range = if in_vim_visual {
-            let buf_text = buf.text();
             vim::visual_range(&self.vim_state, &buf_text, self.cpos, vim_mode)
         } else {
-            self.selection_range_at(self.cpos)
+            self.selection_range_at(self.cpos, &buf_text)
         };
         let Some((s, e)) = range else {
             return Vec::new();
@@ -687,10 +690,8 @@ impl Window {
         let (start, end) = if self.vim_enabled {
             vim::visual_range(&self.vim_state, buf, cpos, self.vim_mode)?
         } else {
-            self.selection_range_at(cpos)?
+            self.selection_range_at(cpos, buf)?
         };
-        let start = start.min(buf.len());
-        let end = end.min(buf.len());
         if start >= end {
             return None;
         }
