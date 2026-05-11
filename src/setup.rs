@@ -19,7 +19,7 @@ struct ProviderTemplate {
 const PROVIDERS: &[ProviderTemplate] = &[
     ProviderTemplate {
         name: "custom",
-        label: "Other (OpenAI-compatible)",
+        label: "OpenAI Compatible",
         provider_type: "openai-compatible",
         api_base: "",
         api_key_env: "",
@@ -33,7 +33,7 @@ const PROVIDERS: &[ProviderTemplate] = &[
         provider_type: "openai",
         api_base: "https://api.openai.com/v1",
         api_key_env: "OPENAI_API_KEY",
-        default_model: "gpt-4.1",
+        default_model: "gpt-5.5",
         needs_api_base: false,
         oauth: None,
     },
@@ -49,7 +49,7 @@ const PROVIDERS: &[ProviderTemplate] = &[
     },
     ProviderTemplate {
         name: "anthropic-compatible",
-        label: "Other (Anthropic-compatible)",
+        label: "Anthropic Compatible",
         provider_type: "anthropic-compatible",
         api_base: "",
         api_key_env: "",
@@ -76,6 +76,16 @@ const PROVIDERS: &[ProviderTemplate] = &[
         default_model: "",
         needs_api_base: false,
         oauth: Some(AuthProvider::Copilot),
+    },
+    ProviderTemplate {
+        name: "kimi-code",
+        label: "Kimi Code",
+        provider_type: "anthropic-compatible",
+        api_base: "https://api.kimi.com/coding/v1",
+        api_key_env: "KIMI_API_KEY",
+        default_model: "kimi-for-coding",
+        needs_api_base: false,
+        oauth: None,
     },
 ];
 
