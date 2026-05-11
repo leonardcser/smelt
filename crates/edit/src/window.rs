@@ -1298,6 +1298,52 @@ mod tests {
     }
 
     #[test]
+    fn handle_key_vim_move_up_clears_follow_tail() {
+        // Regression: vim key dispatch through handle_key must update follow_tail
+        // just like move_cursor_by_lines does, otherwise the render loop resets
+        // scroll_top to the bottom every frame and the cursor disappears.
+        use crossterm::event::{KeyEventKind, KeyEventState, KeyModifiers};
+        let mut w = make_win();
+        w.set_vim_enabled(true);
+        w.set_vim_mode(VimMode::Normal);
+        let rows = sample_rows(11);
+        let viewport = 2;
+        w.jump_to_line_col(&rows, 10, 0, viewport);
+        w.scroll_to_bottom();
+        assert!(w.follow_tail);
+        assert_eq!(w.scroll_top, u16::MAX);
+
+        let k = KeyEvent {
+            code: KeyCode::Char('k'),
+            modifiers: KeyModifiers::empty(),
+            kind: KeyEventKind::Press,
+            state: KeyEventState::empty(),
+        };
+        let mut clipboard = Clipboard::null();
+        // One 'k' keeps us in the bottom region (scroll_top == max_scroll == 9),
+        // so follow_tail should still be true.
+        w.handle_key(k, &rows, viewport, &mut clipboard);
+        let max_scroll = (rows.len() as u16).saturating_sub(viewport);
+        w.follow_tail = w.scroll_top >= max_scroll;
+        assert_eq!(w.cursor_row, 9);
+        assert_eq!(w.scroll_top, 9);
+        assert!(
+            w.follow_tail,
+            "still at max_scroll -> follow_tail stays true"
+        );
+
+        // Second 'k' moves above max_scroll; follow_tail must clear.
+        w.handle_key(k, &rows, viewport, &mut clipboard);
+        w.follow_tail = w.scroll_top >= max_scroll;
+        assert_eq!(w.cursor_row, 8);
+        assert_eq!(w.scroll_top, 8);
+        assert!(
+            !w.follow_tail,
+            "moving above max_scroll must clear follow_tail"
+        );
+    }
+
+    #[test]
     fn pan_by_lines_pans_viewport_and_pins_cursor_screen_row() {
         // Tmux copy-mode semantics: pan moves the viewport and keeps the cursor
         // on the same screen row. The cursor's buffer row changes with the row

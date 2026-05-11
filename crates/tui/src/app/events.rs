@@ -802,6 +802,8 @@ impl TuiApp {
             win_mut.set_vim_mode(crate::smelt_term::VimMode::Normal);
         }
         let status = win_mut.handle_key(k, &rows, viewport_rows, &mut self.core.clipboard);
+        let max_scroll = (rows.len() as u16).saturating_sub(viewport_rows);
+        win_mut.follow_tail = win_mut.scroll_top >= max_scroll;
         matches!(status, crate::smelt_term::Status::Consumed)
     }
 }

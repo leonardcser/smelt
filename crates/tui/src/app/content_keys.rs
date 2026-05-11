@@ -240,6 +240,8 @@ impl TuiApp {
             self.core.clipboard.swap_sink(prev_sink);
             r
         };
+        let max_scroll = (rows.len() as u16).saturating_sub(viewport_rows);
+        self.transcript_window.follow_tail = self.transcript_window.scroll_top >= max_scroll;
         if matches!(status, crate::smelt_term::Status::Ignored) {
             return false;
         }
