@@ -31,7 +31,7 @@ pub fn print_resume_hint(session_id: &str) {
     let mut out = std::io::stdout();
     let _ = out.queue(SetAttribute(Attribute::Dim));
     let _ = out.queue(Print(format!(
-        "\nresume with:\nagent --resume {session_id}\n\n"
+        "\nresume with:\nsmelt --resume {session_id}\n\n"
     )));
     let _ = out.queue(SetAttribute(Attribute::Reset));
     let _ = out.flush();
