@@ -265,7 +265,7 @@ pub(crate) fn configure_list_leaf(app: &mut TuiApp, leaf: WinId, initial_cursor:
     if let Some(win) = app.ui.win_mut(leaf) {
         win.cursor_line_highlight = true;
         let max = line_count.saturating_sub(1) as u16;
-        win.cursor_line = initial_cursor.min(max);
+        win.set_cursor_position(initial_cursor.min(max), 0);
     }
 
     fn move_cursor(ctx: &mut crate::smelt_term::CallbackCtx<'_>, delta: isize) -> CallbackResult {
@@ -279,23 +279,18 @@ pub(crate) fn configure_list_leaf(app: &mut TuiApp, leaf: WinId, initial_cursor:
         }
         let mut new_abs: Option<usize> = None;
         if let Some(win) = ctx.ui.win_mut(ctx.win) {
-            let abs = win.scroll_top as usize + win.cursor_line as usize;
+            let abs = win.cursor_row() as usize;
             let max = line_count.saturating_sub(1);
             let target = (abs as isize + delta).clamp(0, max as isize) as usize;
             if target == abs {
                 return CallbackResult::Consumed;
             }
-            // Adjust scroll_top to keep cursor visible. Exact viewport unavailable;
-            // nudging suffices for short list dialogs.
+            // Nudge scroll_top so the cursor stays visible. Exact viewport unavailable;
+            // approximations suffice for short list dialogs.
             if (target as u16) < win.scroll_top {
                 win.scroll_top = target as u16;
-                win.cursor_line = 0;
-            } else {
-                let rel = target as isize - win.scroll_top as isize;
-                if rel >= 0 {
-                    win.cursor_line = rel as u16;
-                }
             }
+            win.set_cursor_position(target as u16, 0);
             new_abs = Some(target);
         }
         match new_abs {
@@ -338,7 +333,7 @@ pub(crate) fn configure_list_leaf(app: &mut TuiApp, leaf: WinId, initial_cursor:
         let abs = ctx
             .ui
             .win(ctx.win)
-            .map(|w| w.scroll_top as usize + w.cursor_line as usize)
+            .map(|w| w.cursor_row() as usize)
             .unwrap_or(0);
         CallbackResult::Event(WinEvent::Submit, Payload::Selection { index: abs })
     }));
@@ -358,8 +353,7 @@ pub(crate) fn configure_list_leaf(app: &mut TuiApp, leaf: WinId, initial_cursor:
 /// printable keystroke replaces the line before inserting; Backspace is a no-op.
 pub(crate) fn configure_input_leaf(app: &mut TuiApp, leaf: WinId) {
     if let Some(win) = app.ui.win_mut(leaf) {
-        win.cursor_col = 0;
-        win.cursor_line = 0;
+        win.set_cursor_position(0, 0);
     }
 
     fn current_line(ctx: &crate::smelt_term::CallbackCtx<'_>) -> String {
@@ -399,7 +393,7 @@ pub(crate) fn configure_input_leaf(app: &mut TuiApp, leaf: WinId) {
             buf.set_lines(0, 1, vec![new]);
         }
         if let Some(win) = ctx.ui.win_mut(ctx.win) {
-            win.cursor_col = new_cursor_col;
+            win.set_cursor_col_single_line(new_cursor_col);
         }
     }
 
@@ -410,7 +404,7 @@ pub(crate) fn configure_input_leaf(app: &mut TuiApp, leaf: WinId) {
         } else {
             ctx.ui
                 .win(ctx.win)
-                .map(|w| w.cursor_col as usize)
+                .map(|w| w.cursor_col() as usize)
                 .unwrap_or(0)
         };
         let base = if placeholder_mode {
@@ -439,7 +433,7 @@ pub(crate) fn configure_input_leaf(app: &mut TuiApp, leaf: WinId) {
         let cursor = ctx
             .ui
             .win(ctx.win)
-            .map(|w| w.cursor_col as usize)
+            .map(|w| w.cursor_col() as usize)
             .unwrap_or(0);
         if cursor == 0 {
             return CallbackResult::Consumed;
@@ -469,14 +463,14 @@ pub(crate) fn configure_input_leaf(app: &mut TuiApp, leaf: WinId) {
         }
         let len = current_line(ctx).chars().count();
         if let Some(win) = ctx.ui.win_mut(ctx.win) {
-            let cur = win.cursor_col as usize;
+            let cur = win.cursor_col() as usize;
             let new = match target {
                 HMove::Left => cur.saturating_sub(1),
                 HMove::Right => (cur + 1).min(len),
                 HMove::Home => 0,
                 HMove::End => len,
             };
-            win.cursor_col = new as u16;
+            win.set_cursor_col_single_line(new as u16);
         }
         CallbackResult::Consumed
     }

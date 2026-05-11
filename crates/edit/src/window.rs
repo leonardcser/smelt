@@ -181,7 +181,7 @@ pub struct SplitConfig {
 
 /// How the focused window's cursor renders (single global on `Ui`).
 /// `Hidden` — no cursor. `Hardware` — native terminal caret via `Ui::render`.
-/// `Block { glyph, style }` — paint a cell at `(cursor_col, cursor_line)`.
+/// `Block { glyph, style }` — paint a cell at `(cursor_col, cursor_row - scroll_top)`.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum CursorShape {
     #[default]
@@ -219,8 +219,12 @@ pub struct Window {
     /// Preferred display column for vertical motion; measured in terminal cells.
     pub curswant: Option<usize>,
     pub scroll_top: u16,
-    pub cursor_line: u16,
-    pub cursor_col: u16,
+    /// Buffer-absolute cursor row (0 = first row of the buffer, **not** of the viewport).
+    /// Derived from `cpos` via `sync_from_cpos`; never mutated directly.
+    cursor_row: u16,
+    /// Cursor column within the line, in terminal cells.
+    /// Derived from `cpos` via `sync_from_cpos`; never mutated directly.
+    cursor_col: u16,
     /// Keeps viewport snapped to newest row; cleared when the user scrolls away.
     pub follow_tail: bool,
     /// One-shot recenter request (vim `zz`); cleared after the next paint.
@@ -254,7 +258,7 @@ impl Window {
             selection_anchor: None,
             curswant: None,
             scroll_top: 0,
-            cursor_line: 0,
+            cursor_row: 0,
             cursor_col: 0,
             follow_tail: true,
             pending_recenter: false,
@@ -291,7 +295,52 @@ impl Window {
     // ── Cursor ─────────────────────────────────────────────────────────
 
     pub fn cursor_abs_row(&self) -> usize {
-        self.scroll_top as usize + self.cursor_line as usize
+        self.cursor_row as usize
+    }
+
+    /// Screen row (relative to the viewport top) where the cursor should render.
+    /// `None` when the buffer cursor lies outside the viewport — the renderer must
+    /// suppress the cursor in that case.
+    pub fn cursor_screen_row(&self, viewport_rows: u16) -> Option<u16> {
+        self.cursor_screen_row_at(self.scroll_top, viewport_rows)
+    }
+
+    pub fn cursor_screen_row_at(&self, scroll_top: u16, viewport_rows: u16) -> Option<u16> {
+        let rel = self.cursor_row.checked_sub(scroll_top)?;
+        (rel < viewport_rows).then_some(rel)
+    }
+
+    pub fn cursor_row(&self) -> u16 {
+        self.cursor_row
+    }
+
+    pub fn cursor_col(&self) -> u16 {
+        self.cursor_col
+    }
+
+    /// Set cursor column on a single-line buffer (row is always 0).
+    pub fn set_cursor_col_single_line(&mut self, col: u16) {
+        self.cursor_col = col;
+        self.cursor_row = 0;
+        self.cpos = col as usize;
+    }
+
+    /// Reset cursor to the origin.
+    pub fn reset_cursor(&mut self) {
+        self.cpos = 0;
+        self.cursor_row = 0;
+        self.cursor_col = 0;
+        self.curswant = None;
+    }
+
+    /// Set the render cursor in buffer coordinates.
+    ///
+    /// This is for UI surfaces whose caller already owns the row/column mapping
+    /// (pickers, status inputs, projected panes). Text-editing paths should use
+    /// cursor movement methods so `cpos`, `curswant`, and scrolling stay coherent.
+    pub fn set_cursor_position(&mut self, row: u16, col: u16) {
+        self.cursor_row = row;
+        self.cursor_col = col;
     }
 
     /// Set `selection_anchor` to `cpos` if unset. Call before a shift-move.
@@ -441,9 +490,7 @@ impl Window {
     pub fn refocus(&mut self, rows: &[String], viewport_rows: u16) {
         if rows.is_empty() {
             self.text.clear();
-            self.cpos = 0;
-            self.cursor_line = 0;
-            self.cursor_col = 0;
+            self.reset_cursor();
             self.cursor_positioned = false;
             return;
         }
@@ -465,26 +512,6 @@ impl Window {
         if self.curswant.is_none() {
             self.curswant = Some(self.cursor_col as usize);
         }
-    }
-
-    pub fn reanchor_to_visible_row(&mut self, rows: &[String], viewport_rows: u16) {
-        if rows.is_empty() {
-            return;
-        }
-        let offsets = Self::line_start_offsets(rows);
-        self.text = rows.join("\n");
-        let total = rows.len() as u16;
-        let max = total.saturating_sub(viewport_rows);
-        self.scroll_top = self.scroll_top.min(max);
-        let cursor_line = self.cursor_line.min(viewport_rows.saturating_sub(1));
-        let target_line = (self.scroll_top + cursor_line) as usize;
-        let target_line = target_line.min(rows.len() - 1);
-        let line = &rows[target_line];
-        let want = self.curswant.unwrap_or(self.cursor_col as usize);
-        let col_bytes = cell_to_byte(line, want);
-        self.cpos = offsets[target_line] + col_bytes;
-        self.cursor_col = byte_to_cell(line, col_bytes) as u16;
-        self.cursor_line = cursor_line;
     }
 
     // ── Follow-tail ────────────────────────────────────────────────────
@@ -517,7 +544,7 @@ impl Window {
         if total == 0 {
             return 0;
         }
-        let line_idx = (self.scroll_top as usize + self.cursor_line as usize).min(total - 1);
+        let line_idx = (self.cursor_row as usize).min(total - 1);
         offsets[line_idx] + cell_to_byte(&rows[line_idx], self.cursor_col as usize)
     }
 
@@ -544,7 +571,7 @@ impl Window {
         } else if line_idx < self.scroll_top {
             self.scroll_top = line_idx;
         }
-        self.cursor_line = line_idx.saturating_sub(self.scroll_top);
+        self.cursor_row = line_idx;
     }
 
     fn mount(&mut self, rows: &[String]) -> Vec<usize> {
@@ -828,7 +855,7 @@ impl Window {
     /// Cursor-led vertical motion: move `cpos` by `delta` rows; viewport pans only
     /// when the cursor would otherwise leave it. Used by j/k, arrow keys, Ctrl-U/D.
     pub fn move_cursor_by_lines(&mut self, delta: isize, rows: &[String], viewport_rows: u16) {
-        if rows.is_empty() || delta == 0 {
+        if rows.is_empty() || viewport_rows == 0 || delta == 0 {
             return;
         }
         let offsets = self.mount(rows);
@@ -843,49 +870,62 @@ impl Window {
         self.follow_tail = self.scroll_top >= max_scroll;
     }
 
-    /// Viewport-led pan (mouse wheel / tmux-style): bump `scroll_top` by `delta` rows;
-    /// the cursor stays on the same screen row, so its text position shifts with the
-    /// viewport. Stops at the buffer boundary — when the viewport can't move, neither
-    /// does the cursor.
+    /// Viewport-led pan (mouse wheel / tmux copy-mode semantics): bump `scroll_top`
+    /// by `delta` rows and keep the cursor on the same screen row. The cursor's
+    /// buffer row changes to whatever row is now under that screen cell.
+    /// To move the cursor first and reveal it afterward, use `move_cursor_by_lines`.
     pub fn pan_by_lines(&mut self, delta: isize, rows: &[String], viewport_rows: u16) {
-        if rows.is_empty() || delta == 0 {
+        if rows.is_empty() || viewport_rows == 0 || delta == 0 {
             return;
         }
-        let total = rows.len();
-        let max_scroll = (total as u16).saturating_sub(viewport_rows);
-        // Normalize the `follow_tail` sentinel (`u16::MAX`) before arithmetic so a
-        // wheel-down at the bottom doesn't pretend to "scroll" from MAX → max_scroll
-        // and yank the cursor along with it.
+        let total = rows.len() as u16;
+        let max_scroll = total.saturating_sub(viewport_rows);
         let cur_scroll = self.scroll_top.min(max_scroll);
         let new_scroll = (cur_scroll as isize + delta).clamp(0, max_scroll as isize) as u16;
-        if new_scroll == cur_scroll {
-            // At a boundary: collapse the sentinel but leave the cursor untouched.
-            self.scroll_top = cur_scroll;
-            self.follow_tail = cur_scroll >= max_scroll;
+        self.scroll_to_preserving_cursor_screen_row(new_scroll, rows, viewport_rows);
+    }
+
+    /// Set `scroll_top` as a viewport operation: preserve the cursor's screen row
+    /// and re-anchor the cursor to the buffer line now under that row.
+    pub fn scroll_to_preserving_cursor_screen_row(
+        &mut self,
+        scroll_top: u16,
+        rows: &[String],
+        viewport_rows: u16,
+    ) {
+        if rows.is_empty() || viewport_rows == 0 {
             return;
         }
+        let total = rows.len() as u16;
+        let max_scroll = total.saturating_sub(viewport_rows);
+        let cur_scroll = self.scroll_top.min(max_scroll);
+
+        let screen_row = self
+            .cursor_screen_row_at(cur_scroll, viewport_rows)
+            .unwrap_or_else(|| {
+                if self.cursor_row < cur_scroll {
+                    0
+                } else {
+                    viewport_rows.saturating_sub(1)
+                }
+            });
+        let new_scroll = scroll_top.min(max_scroll);
+        if new_scroll == cur_scroll {
+            self.scroll_top = new_scroll;
+            self.follow_tail = new_scroll >= max_scroll;
+            return;
+        }
+        let target_line = (new_scroll as usize + screen_row as usize).min(rows.len() - 1);
+        let want = self.curswant.unwrap_or(self.cursor_col as usize);
         let offsets = Self::line_start_offsets(rows);
         self.text = rows.join("\n");
-        // Derive screen row from `cpos` rather than `cursor_line` — wheel paths bypass
-        // the click handlers that maintain `cursor_line`, so it can be stale.
-        let cur_line = match offsets.binary_search(&self.cpos) {
-            Ok(i) => i,
-            Err(i) => i.saturating_sub(1),
-        }
-        .min(total - 1);
-        let screen_row = cur_line.saturating_sub(cur_scroll as usize);
-        let want = self.curswant.unwrap_or_else(|| {
-            let line = &rows[cur_line];
-            byte_to_cell(line, self.cpos.saturating_sub(offsets[cur_line]))
-        });
-        self.scroll_top = new_scroll;
-        let new_line = (new_scroll as usize + screen_row).min(total - 1);
-        let line = &rows[new_line];
+        let line = &rows[target_line];
         let col_bytes = cell_to_byte(line, want);
-        self.cpos = offsets[new_line] + col_bytes;
+        self.cpos = offsets[target_line] + col_bytes;
         self.cursor_col = byte_to_cell(line, col_bytes) as u16;
-        self.cursor_line = (new_line as u16).saturating_sub(new_scroll);
+        self.cursor_row = target_line as u16;
         self.curswant = Some(want);
+        self.scroll_top = new_scroll;
         self.follow_tail = new_scroll >= max_scroll;
     }
 
@@ -925,8 +965,11 @@ impl Window {
             .pad_right
             .min(width.saturating_sub(pad_left));
         let content_width = width.saturating_sub(pad_left).saturating_sub(pad_right);
-        let cursor_row = if self.cursor_line_highlight {
-            Some(self.cursor_line)
+        // `cursor_line_highlight` paints `CursorLine` bg under the cursor row.
+        // The buffer cursor lives at `cursor_row`, which converts to a screen row via
+        // `cursor_screen_row`; off-screen → no highlight row.
+        let cursor_screen_row = if self.cursor_line_highlight {
+            self.cursor_screen_row(height)
         } else {
             None
         };
@@ -955,7 +998,7 @@ impl Window {
             } else {
                 None
             };
-            let mut row_style = if cursor_row == Some(row) {
+            let mut row_style = if cursor_screen_row == Some(row) {
                 cursor_style
             } else {
                 normal_style
@@ -1092,8 +1135,10 @@ impl Window {
 
         if ctx.focused {
             if let CursorShape::Block { glyph, style } = ctx.cursor_shape {
-                if self.cursor_col < content_width && self.cursor_line < height {
-                    slice.set(pad_left + self.cursor_col, self.cursor_line, glyph, style);
+                if let Some(screen_row) = self.cursor_screen_row(height) {
+                    if self.cursor_col < content_width {
+                        slice.set(pad_left + self.cursor_col, screen_row, glyph, style);
+                    }
                 }
             }
         }
@@ -1244,30 +1289,30 @@ mod tests {
         let rows = sample_rows(30);
         let viewport = 10;
         w.jump_to_line_col(&rows, 0, 0, viewport);
-        assert_eq!(w.cursor_line, 0);
+        assert_eq!(w.cursor_row, 0);
         assert_eq!(w.scroll_top, 0);
         w.move_cursor_by_lines(1, &rows, viewport);
         // Cursor-led: cursor moves down, viewport stays put.
-        assert_eq!(w.cursor_line, 1);
+        assert_eq!(w.cursor_row, 1);
         assert_eq!(w.scroll_top, 0);
     }
 
     #[test]
-    fn pan_by_lines_pans_viewport_and_pins_cursor_row() {
+    fn pan_by_lines_pans_viewport_and_pins_cursor_screen_row() {
+        // Tmux copy-mode semantics: pan moves the viewport and keeps the cursor
+        // on the same screen row. The cursor's buffer row changes with the row
+        // now visible under that screen cell.
         let mut w = make_win();
-        w.set_vim_enabled(true);
-        w.set_vim_mode(VimMode::Normal);
         let rows = sample_rows(30);
         let viewport = 10;
-        w.jump_to_line_col(&rows, 0, 0, viewport);
-        assert_eq!(w.cursor_line, 0);
-        assert_eq!(w.scroll_top, 0);
-        w.pan_by_lines(1, &rows, viewport);
-        // tmux-style: viewport pans, cursor screen row unchanged, cpos moves with it.
-        assert_eq!(w.scroll_top, 1);
-        assert_eq!(w.cursor_line, 0, "cursor row must stay fixed in viewport");
+        w.jump_to_line_col(&rows, 5, 3, viewport);
+        let screen_row = w.cursor_screen_row(viewport);
+        w.pan_by_lines(2, &rows, viewport);
+        assert_eq!(w.scroll_top, 2);
+        assert_eq!(w.cursor_screen_row(viewport), screen_row);
+        assert_eq!(w.cursor_row, 7);
         let offsets = Window::line_start_offsets(&rows);
-        assert_eq!(w.cpos, offsets[1]);
+        assert_eq!(w.cpos, offsets[7] + 3);
     }
 
     #[test]
@@ -1277,13 +1322,8 @@ mod tests {
         let viewport = 10;
         w.jump_to_line_col(&rows, 0, 0, viewport);
         assert_eq!(w.scroll_top, 0);
-        let cpos_before = w.cpos;
         w.pan_by_lines(-3, &rows, viewport);
         assert_eq!(w.scroll_top, 0, "scroll clamps at 0");
-        assert_eq!(
-            w.cpos, cpos_before,
-            "cursor must not move when viewport can't"
-        );
     }
 
     #[test]
@@ -1294,60 +1334,41 @@ mod tests {
         w.jump_to_line_col(&rows, 29, 0, viewport);
         let max_scroll = 30 - viewport;
         assert_eq!(w.scroll_top, max_scroll);
-        let cpos_before = w.cpos;
         w.pan_by_lines(5, &rows, viewport);
         assert_eq!(w.scroll_top, max_scroll, "scroll clamps at max");
-        assert_eq!(
-            w.cpos, cpos_before,
-            "cursor must not move when viewport can't"
+        assert!(
+            w.follow_tail,
+            "still at the bottom -> follow_tail stays true"
         );
     }
 
     #[test]
-    fn pan_by_lines_no_op_when_follow_tail_sentinel_at_bottom() {
+    fn pan_by_lines_collapses_follow_tail_sentinel() {
         // `follow_tail` mode stores `u16::MAX` as the scroll_top sentinel.
-        // Wheel-down at the bottom must collapse the sentinel without yanking the
-        // cursor — regression for the "cursor jumps to top of viewport" bug.
+        // Pan must normalize that to the real max_scroll, not arithmetic on MAX.
         let mut w = make_win();
         let rows = sample_rows(30);
         let viewport = 10;
         let max_scroll = 30 - viewport;
         w.jump_to_line_col(&rows, 29, 0, viewport);
-        let cpos_before = w.cpos;
-        let cursor_line_before = w.cursor_line;
         w.scroll_to_bottom();
         assert_eq!(w.scroll_top, u16::MAX);
         w.pan_by_lines(3, &rows, viewport);
         assert_eq!(w.scroll_top, max_scroll, "sentinel collapses to max_scroll");
-        assert_eq!(
-            w.cpos, cpos_before,
-            "cursor text position must be unchanged"
-        );
-        assert_eq!(
-            w.cursor_line, cursor_line_before,
-            "cursor screen row must be unchanged"
-        );
-        assert!(
-            w.follow_tail,
-            "still at the bottom \u{2192} follow_tail stays true"
-        );
+        assert!(w.follow_tail);
     }
 
     #[test]
     fn pan_by_lines_up_from_follow_tail_sentinel() {
-        // Wheel-up while in follow_tail must scroll up off the bottom; the cursor
-        // tracks the same screen row.
         let mut w = make_win();
         let rows = sample_rows(30);
         let viewport = 10;
         let max_scroll = 30 - viewport;
         w.jump_to_line_col(&rows, 29, 0, viewport);
-        let cursor_line_before = w.cursor_line;
         w.scroll_to_bottom();
         assert_eq!(w.scroll_top, u16::MAX);
         w.pan_by_lines(-3, &rows, viewport);
         assert_eq!(w.scroll_top, max_scroll - 3);
-        assert_eq!(w.cursor_line, cursor_line_before);
         assert!(!w.follow_tail);
     }
 
@@ -1358,24 +1379,22 @@ mod tests {
         let rows = sample_rows(50);
         let viewport = 10;
         w.jump_to_line_col(&rows, 5, 0, viewport);
-        assert_eq!(w.cursor_line, 5);
+        let screen_row = w.cursor_screen_row(viewport);
         for _ in 0..3 {
             w.pan_by_lines(3, &rows, viewport);
         }
-        assert!(
-            w.cursor_line < viewport,
-            "cursor must remain inside viewport after repeated pans"
-        );
         assert_eq!(w.scroll_top, 9);
+        assert_eq!(w.cursor_screen_row(viewport), screen_row);
+        assert_eq!(w.cursor_row, 14);
     }
 
     #[test]
     fn refocus_on_empty_resets_cursor() {
         let mut w = make_win();
-        w.cursor_line = 5;
+        w.cursor_row = 5;
         w.cursor_col = 3;
         w.refocus(&[], 20);
-        assert_eq!(w.cursor_line, 0);
+        assert_eq!(w.cursor_row, 0);
         assert_eq!(w.cursor_col, 0);
     }
 
@@ -1386,15 +1405,22 @@ mod tests {
         let viewport = 10;
         w.jump_to_line_col(&rows, 49, 0, viewport);
         assert_eq!(w.scroll_top, 40);
-        assert_eq!(w.cursor_line, 9);
+        assert_eq!(w.cursor_row, 49, "buffer-absolute row");
+        assert_eq!(w.cursor_screen_row(viewport), Some(9));
     }
 
     #[test]
-    fn cursor_abs_row_top_relative() {
+    fn cursor_screen_row_subtracts_scroll() {
         let mut w = make_win();
         w.scroll_top = 10;
-        w.cursor_line = 5;
+        w.cursor_row = 15;
         assert_eq!(w.cursor_abs_row(), 15);
+        assert_eq!(w.cursor_screen_row(10), Some(5));
+        // Out of viewport above and below collapses to None.
+        w.cursor_row = 9;
+        assert_eq!(w.cursor_screen_row(10), None);
+        w.cursor_row = 20;
+        assert_eq!(w.cursor_screen_row(10), None);
     }
 
     fn click_event(kind: MouseEventKind, row: u16, col: u16) -> MouseEvent {
@@ -1443,7 +1469,7 @@ mod tests {
         );
         assert_eq!(r, Status::Capture);
         assert!(yank.is_none());
-        assert_eq!(w.cursor_line, 1);
+        assert_eq!(w.cursor_row, 1);
         assert_eq!(w.cursor_col, 7);
         assert!(w.selection_anchor.is_some());
     }
@@ -1503,13 +1529,13 @@ mod tests {
     #[test]
     fn render_highlights_cursor_row_when_opted_in_and_focused() {
         // List-shaped Window with `cursor_line_highlight = true`:
-        // the row at `cursor_line` (relative to the viewport) gets
+        // the row at `cursor_row` (buffer-absolute, converted to screen row) gets
         // the `CursorLine` theme bg.
         let mut buf = Buffer::new(BufId(1), BufCreateOpts::default());
         buf.set_all_lines(vec!["alpha".into(), "bravo".into(), "charlie".into()]);
         let mut w = make_win();
         w.cursor_line_highlight = true;
-        w.cursor_line = 1; // second visible row
+        w.cursor_row = 1; // second visible row
         let mut theme = Theme::default();
         let bg = crate::grid::Style::new().bg(crate::grid::Color::AnsiValue(238));
         theme.set("CursorLine", bg);
@@ -1635,7 +1661,7 @@ mod tests {
         buf.add_highlight(0, 0, 3, crate::SpanStyle::new().bold());
         let mut w = make_win();
         w.cursor_line_highlight = true;
-        w.cursor_line = 0;
+        w.cursor_row = 0;
         let mut theme = Theme::default();
         let bg = crate::grid::Style::new().bg(crate::grid::Color::AnsiValue(238));
         theme.set("CursorLine", bg);
@@ -1780,7 +1806,7 @@ mod tests {
         buf.set_virtual_text(0, "g".into(), Some("Ghost".into()));
         let mut w = make_win();
         w.cursor_line_highlight = true;
-        w.cursor_line = 0;
+        w.cursor_row = 0;
         let mut theme = Theme::default();
         let bg = crate::grid::Style::new().bg(crate::grid::Color::AnsiValue(238));
         theme.set("CursorLine", bg);
@@ -1807,7 +1833,7 @@ mod tests {
         let mut buf = Buffer::new(BufId(1), BufCreateOpts::default());
         buf.set_all_lines(vec!["abc".into()]);
         let mut w = make_win();
-        w.cursor_line = 0;
+        w.cursor_row = 0;
         w.cursor_col = 1;
         let cursor_style = crate::grid::Style::new().bg(crate::grid::Color::White);
         let mut ctx = ctx();
@@ -1835,7 +1861,7 @@ mod tests {
         let mut buf = Buffer::new(BufId(1), BufCreateOpts::default());
         buf.set_all_lines(vec!["abc".into()]);
         let mut w = make_win();
-        w.cursor_line = 0;
+        w.cursor_row = 0;
         w.cursor_col = 1;
         let mut ctx = ctx();
         ctx.focused = false;
@@ -1855,7 +1881,7 @@ mod tests {
         let mut buf = Buffer::new(BufId(1), BufCreateOpts::default());
         buf.set_all_lines(vec!["abc".into()]);
         let mut w = make_win();
-        w.cursor_line = 5;
+        w.cursor_row = 5;
         w.cursor_col = 99;
         let mut ctx = ctx();
         ctx.focused = true;
@@ -1879,7 +1905,7 @@ mod tests {
         let mut buf = Buffer::new(BufId(1), BufCreateOpts::default());
         buf.set_all_lines(vec!["abc".into()]);
         let mut w = make_win();
-        w.cursor_line = 0;
+        w.cursor_row = 0;
         w.cursor_col = 1;
         let mut ctx = ctx();
         ctx.focused = true;

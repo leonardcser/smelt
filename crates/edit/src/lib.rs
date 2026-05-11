@@ -707,9 +707,16 @@ impl Ui {
             self.drag_autoscroll_since = None;
             return None;
         }
-        let delta: isize = if win.cursor_line == 0 {
+        // Drag-autoscroll fires when the cursor sits at the top/bottom edge of the
+        // viewport. `cursor_row` is buffer-absolute; convert via `cursor_screen_row`
+        // (cursor off-screen → no autoscroll).
+        let Some(screen_row) = win.cursor_screen_row(viewport_h as u16) else {
+            self.drag_autoscroll_since = None;
+            return None;
+        };
+        let delta: isize = if screen_row == 0 {
             -1
-        } else if (win.cursor_line as usize) >= viewport_h.saturating_sub(1) {
+        } else if (screen_row as usize) >= viewport_h.saturating_sub(1) {
             1
         } else {
             self.drag_autoscroll_since = None;
@@ -912,8 +919,9 @@ impl Ui {
                 continue;
             };
             let win = self.wins.get(&focus)?;
-            let abs_y = leaf_rect.top + win.cursor_line;
-            let abs_x = leaf_rect.left + win.cursor_col;
+            let screen_row = win.cursor_screen_row(leaf_rect.height)?;
+            let abs_y = leaf_rect.top + screen_row;
+            let abs_x = leaf_rect.left + win.cursor_col();
             if abs_y < leaf_rect.top + leaf_rect.height && abs_x < leaf_rect.left + leaf_rect.width
             {
                 return Some((abs_x, abs_y));
@@ -932,8 +940,9 @@ impl Ui {
         let win = self.wins.get(&focus)?;
         let rect = self.split_rect(focus)?;
         let pad_left = win.config.gutters.pad_left;
-        let abs_y = rect.top + win.cursor_line;
-        let abs_x = rect.left + pad_left + win.cursor_col;
+        let screen_row = win.cursor_screen_row(rect.height)?;
+        let abs_y = rect.top + screen_row;
+        let abs_x = rect.left + pad_left + win.cursor_col();
         if abs_y < rect.top + rect.height && abs_x < rect.left + rect.width {
             Some((abs_x, abs_y))
         } else {
@@ -2307,15 +2316,14 @@ mod tests {
             )
             .unwrap();
         // Tree resolves to (top=0, left=0, width=20, height=4) — the
-        // full terminal — so cursor_line=1 / cursor_col=3 → (3, 1).
+        // full terminal — so cursor_row=1 / cursor_col=3 → (3, 1).
         ui.set_layout(LayoutTree::vbox(vec![(
             Constraint::Fill,
             LayoutTree::leaf(win),
         )]));
         ui.set_focus(win);
         let w = ui.win_mut(win).unwrap();
-        w.cursor_line = 1;
-        w.cursor_col = 3;
+        w.set_cursor_position(1, 3);
         assert_eq!(ui.focused_painted_split_cursor(), Some((3, 1)));
     }
 
@@ -2338,8 +2346,7 @@ mod tests {
             LayoutTree::leaf(win),
         )]));
         let w = ui.win_mut(win).unwrap();
-        w.cursor_line = 0;
-        w.cursor_col = 0;
+        w.set_cursor_position(0, 0);
         // No focus call → focus stays None.
         assert_eq!(ui.focused_painted_split_cursor(), None);
     }
@@ -2763,7 +2770,7 @@ mod tests {
                     },
                 )
                 .unwrap();
-            host.win_mut(win).unwrap().cursor_col = 3;
+            host.win_mut(win).unwrap().set_cursor_position(0, 3);
             // Hosting `win` in a modal overlay both makes it focusable
             // (overlay leaf) and exercises `overlay_open`. The modal
             // also auto-focuses the first leaf — re-asserting via the
@@ -3102,7 +3109,7 @@ mod tests {
         let mut ui = make_ui();
         let win = make_scrollbar_split(&mut ui);
         ui.set_capture(HitTarget::Window(win));
-        ui.win_mut(win).unwrap().cursor_line = 0;
+        ui.win_mut(win).unwrap().set_cursor_position(0, 0);
         let result = ui.poll_drag_autoscroll();
         assert_eq!(result, Some((win, -1)));
         assert!(ui.drag_autoscroll_started().is_some());
@@ -3114,8 +3121,8 @@ mod tests {
         let win = make_scrollbar_split(&mut ui);
         ui.set_capture(HitTarget::Window(win));
         // make_scrollbar_split paints a viewport with rect height = 10,
-        // so cursor_line=9 is the bottom row.
-        ui.win_mut(win).unwrap().cursor_line = 9;
+        // so cursor_row=9 is the bottom row.
+        ui.win_mut(win).unwrap().set_cursor_position(9, 0);
         assert_eq!(ui.poll_drag_autoscroll(), Some((win, 1)));
     }
 
@@ -3124,10 +3131,10 @@ mod tests {
         let mut ui = make_ui();
         let win = make_scrollbar_split(&mut ui);
         ui.set_capture(HitTarget::Window(win));
-        ui.win_mut(win).unwrap().cursor_line = 0;
+        ui.win_mut(win).unwrap().set_cursor_position(0, 0);
         let _ = ui.poll_drag_autoscroll();
         assert!(ui.drag_autoscroll_started().is_some());
-        ui.win_mut(win).unwrap().cursor_line = 5;
+        ui.win_mut(win).unwrap().set_cursor_position(5, 0);
         assert_eq!(ui.poll_drag_autoscroll(), None);
         assert_eq!(ui.drag_autoscroll_started(), None);
     }
@@ -3137,7 +3144,7 @@ mod tests {
         let mut ui = make_ui();
         let win = make_scrollbar_split(&mut ui);
         ui.set_capture(HitTarget::Window(win));
-        ui.win_mut(win).unwrap().cursor_line = 0;
+        ui.win_mut(win).unwrap().set_cursor_position(0, 0);
         let _ = ui.poll_drag_autoscroll();
         assert!(ui.drag_autoscroll_started().is_some());
         ui.clear_capture();
@@ -3150,7 +3157,7 @@ mod tests {
         let mut ui = make_ui();
         let win = make_scrollbar_split(&mut ui);
         ui.set_capture(HitTarget::Scrollbar { owner: win });
-        ui.win_mut(win).unwrap().cursor_line = 0;
+        ui.win_mut(win).unwrap().set_cursor_position(0, 0);
         assert_eq!(ui.poll_drag_autoscroll(), None);
     }
 }

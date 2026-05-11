@@ -2,7 +2,7 @@
 //!
 //! Each item occupies one buffer line: `{indent}{prefix}{label}{padding}{description}`.
 //! Per-item accents and the dim description column are extmarks. Selection is
-//! `cursor_line` with `cursor_line_highlight = true`.
+//! `cursor_row` with `cursor_line_highlight = true`.
 //!
 //! Reversed mode (prompt-docked completer) writes items in reverse order so
 //! the best match sits at the bottom; logical → visual mapping is `n - 1 - logical`.
@@ -106,11 +106,11 @@ pub(crate) fn open(
         },
     )?;
     let height = picker_height(items.len(), max_rows);
-    let (cursor_line, scroll) = cursor_and_scroll(selected, items.len(), height, reversed, 0);
+    let (cursor_row, scroll) = cursor_and_scroll(selected, items.len(), height, reversed, 0);
     if let Some(w) = app.ui.win_mut(leaf) {
         w.cursor_line_highlight = true;
         w.focusable = focusable;
-        w.cursor_line = cursor_line;
+        w.set_cursor_position(cursor_row, 0);
         w.scroll_top = scroll;
     }
 
@@ -147,10 +147,10 @@ pub(crate) fn set_items(app: &mut TuiApp, leaf: WinId, items: Vec<PickerItem>, s
         write_buffer(app, buf_id, &items, state.reversed);
     }
     let height = picker_height(items.len(), state.max_rows);
-    let (cursor_line, scroll) =
+    let (cursor_row, scroll) =
         cursor_and_scroll(selected, items.len(), height, state.reversed, prev_scroll);
     if let Some(w) = app.ui.win_mut(leaf) {
-        w.cursor_line = cursor_line;
+        w.set_cursor_position(cursor_row, 0);
         w.scroll_top = scroll;
     }
     if let Some(ov) = app.ui.overlay_mut(state.overlay) {
@@ -171,9 +171,9 @@ pub(crate) fn set_selected(app: &mut TuiApp, leaf: WinId, selected: usize) {
     let n = app.ui.buf(buf_id).map(|b| b.line_count()).unwrap_or(0);
     let prev_scroll = app.ui.win(leaf).map(|w| w.scroll_top).unwrap_or(0);
     let height = picker_height(n, state.max_rows);
-    let (cursor_line, scroll) = cursor_and_scroll(selected, n, height, state.reversed, prev_scroll);
+    let (cursor_row, scroll) = cursor_and_scroll(selected, n, height, state.reversed, prev_scroll);
     if let Some(w) = app.ui.win_mut(leaf) {
-        w.cursor_line = cursor_line;
+        w.set_cursor_position(cursor_row, 0);
         w.scroll_top = scroll;
     }
 }
@@ -189,8 +189,9 @@ fn picker_height(item_count: usize, max_rows: u16) -> u16 {
     n.min(max_rows.max(1))
 }
 
-/// Compute `(cursor_line, scroll_top)` for a picker leaf. Adjusts scroll
+/// Compute `(cursor_row, scroll_top)` for a picker leaf. Adjusts scroll
 /// so the selected buffer row stays in `[scroll, scroll + height)`.
+/// `cursor_row` is buffer-absolute.
 fn cursor_and_scroll(
     selected: usize,
     item_count: usize,
@@ -209,7 +210,7 @@ fn cursor_and_scroll(
         prev_scroll
     }
     .min(max_scroll);
-    (buf_row.saturating_sub(scroll), scroll)
+    (buf_row, scroll)
 }
 
 fn visual_cursor(logical: usize, n: usize, reversed: bool) -> u16 {

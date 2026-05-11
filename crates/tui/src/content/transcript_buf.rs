@@ -48,7 +48,7 @@ impl TranscriptProjection {
         width: u16,
         show_thinking: bool,
         theme: &Theme,
-        ephemeral: &Buffer,
+        ephemeral: Option<&Buffer>,
     ) {
         let gen = history.generation();
         let key = ProjectKey {
@@ -116,18 +116,20 @@ impl TranscriptProjection {
             }
         }
 
-        for r in 0..ephemeral.line_count() {
-            let text = ephemeral.get_line(r).unwrap_or("").to_string();
-            let row_h = ephemeral.highlights_at(r);
-            let dec = ephemeral.decoration_at(r).clone();
-            emit(
-                text,
-                row_h,
-                dec,
-                &mut texts,
-                &mut highlights,
-                &mut decorations,
-            );
+        if let Some(ephemeral) = ephemeral {
+            for r in 0..ephemeral.line_count() {
+                let text = ephemeral.get_line(r).unwrap_or("").to_string();
+                let row_h = ephemeral.highlights_at(r);
+                let dec = ephemeral.decoration_at(r).clone();
+                emit(
+                    text,
+                    row_h,
+                    dec,
+                    &mut texts,
+                    &mut highlights,
+                    &mut decorations,
+                );
+            }
         }
         drop(_walk);
 
@@ -175,5 +177,32 @@ fn apply_row_highlights(buf: &mut Buffer, row: usize, highlights: Vec<Span>) {
     for span in highlights {
         let meta: SpanMeta = span.meta;
         buf.add_highlight_group_with_meta(row, span.col_start, span.col_end, span.hl, meta);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use smelt_core::content::transcript::Transcript;
+    use smelt_core::transcript_model::Block;
+
+    #[test]
+    fn project_without_ephemeral_does_not_append_default_blank_row() {
+        let mut transcript = Transcript::new();
+        transcript.push(Block::Text {
+            content: "hello".into(),
+        });
+        let theme = Theme::default();
+        let mut projection = TranscriptProjection::new();
+        let mut buf = Buffer::new(crate::smelt_term::BufId(1), Default::default());
+
+        projection.project(&mut buf, &mut transcript.history, 80, false, &theme, None);
+        let snap_rows = projection
+            .snapshot(&mut transcript.history, 80, false, &theme)
+            .rows
+            .len();
+
+        assert_eq!(buf.line_count(), snap_rows);
+        assert_eq!(buf.get_line(buf.line_count() - 1), Some("hello"));
     }
 }

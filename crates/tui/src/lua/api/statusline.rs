@@ -210,7 +210,7 @@ fn build_snapshot(app: &mut crate::app::TuiApp, lua: &Lua) -> LuaResult<mlua::Ta
                 };
                 Some((
                     (line_idx as u32) + 1,
-                    app.transcript_window.cursor_col as u32 + 1,
+                    app.transcript_window.cursor_col() as u32 + 1,
                     pct.min(100),
                 ))
             }

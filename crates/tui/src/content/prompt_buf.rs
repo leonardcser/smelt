@@ -1020,8 +1020,7 @@ mod tests {
                 },
             },
         );
-        win.cursor_col = 0;
-        win.cursor_line = 0;
+        win.set_cursor_position(0, 0);
 
         let mut grid = Grid::new(10, 1);
         let mut slice = grid.slice_mut(crate::smelt_term::Rect::new(0, 0, 10, 1));

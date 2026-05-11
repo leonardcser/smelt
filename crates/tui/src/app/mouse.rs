@@ -118,7 +118,7 @@ impl TuiApp {
     }
 
     /// Scroll the pane under the cursor by `delta` lines, tmux-style: the viewport
-    /// pans and the cursor stays on the same screen row (its text position shifts).
+    /// pans and the cursor stays on the same screen row.
     /// Wheel does not change `app_focus` — only clicks promote focus.
     pub(crate) fn scroll_under_mouse(&mut self, row: u16, col: u16, delta: isize) {
         let on_prompt = matches!(
@@ -137,9 +137,9 @@ impl TuiApp {
         self.transcript_window.pan_by_lines(delta, &rows, viewport);
     }
 
-    /// Pan the prompt's wrapped-row viewport by `delta`, keeping the cursor on the same
-    /// screen row. `cpos` lives in source bytes; convert through `PromptWrap` so the
-    /// `Window` pan operates on wrapped-row bytes, then convert back.
+    /// Pan the prompt's wrapped-row viewport by `delta`, keeping the cursor on the
+    /// same screen row. `cpos` lives in source bytes; convert through `PromptWrap`
+    /// so the window pan operates on wrapped rows, then convert back.
     fn pan_prompt_by_lines(&mut self, delta: isize) {
         let Some(vp) = crate::smelt_term::UiHost::viewport_for(self, crate::app::PROMPT_WIN) else {
             return;
@@ -313,19 +313,16 @@ impl TuiApp {
     }
 
     /// Mirror `scroll_top` from `Ui::wins[owner]` onto the host pane state.
-    /// For the transcript, also recomputes `follow_tail` and re-anchors the cursor.
+    /// Transcript scrollbar drags use the same viewport-led path as wheel scroll.
     fn propagate_scrollbar_scroll(&mut self, owner: crate::smelt_term::WinId) {
         let Some(scroll_top) = self.ui.win(owner).map(|w| w.scroll_top) else {
             return;
         };
         if owner == crate::app::TRANSCRIPT_WIN {
-            self.transcript_window.scroll_top = scroll_top;
             let rows = self.full_transcript_display_text(self.core.config.settings.show_thinking);
             let viewport = self.viewport_rows_estimate();
-            let max_scroll = (rows.len() as u16).saturating_sub(viewport);
-            self.transcript_window.follow_tail = self.transcript_window.scroll_top >= max_scroll;
             self.transcript_window
-                .reanchor_to_visible_row(&rows, viewport);
+                .scroll_to_preserving_cursor_screen_row(scroll_top, &rows, viewport);
         } else if owner == crate::app::PROMPT_WIN {
             self.input.win.scroll_top = scroll_top;
         }

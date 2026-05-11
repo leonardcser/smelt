@@ -29,8 +29,8 @@ pub(crate) struct SoftCursor {
 }
 
 pub(crate) struct TranscriptCursor {
-    pub(crate) clamped_line: u16,
-    pub(crate) clamped_col: u16,
+    /// Screen-space cursor for the renderer. `None` when the cursor is off-screen
+    /// or when the transcript doesn't own the cursor.
     pub(crate) soft_cursor: Option<SoftCursor>,
 }
 
@@ -394,7 +394,9 @@ impl TuiApp {
         let tw = (gutters.content_width(width as u16) as usize).max(1);
         let theme = self.ui.theme().clone();
 
-        let ephemeral_buf = self.render_ephemeral_to_buffer(tw as u16, show_thinking, &theme);
+        let ephemeral_buf = self
+            .has_ephemeral(show_thinking)
+            .then(|| self.render_ephemeral_to_buffer(tw as u16, show_thinking, &theme));
 
         let buf = self
             .ui
@@ -406,7 +408,7 @@ impl TuiApp {
             tw as u16,
             show_thinking,
             &theme,
-            &ephemeral_buf,
+            ephemeral_buf.as_ref(),
         );
 
         let total_rows = buf.line_count() as u16;
@@ -436,12 +438,14 @@ impl TuiApp {
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn compute_transcript_cursor(
         &self,
         width: usize,
         viewport_rows: u16,
-        history_cursor_line: u16,
+        history_cursor_row: u16,
         history_cursor_col: u16,
+        scroll_top: u16,
         transcript_owns_cursor: bool,
         viewport: Option<&crate::smelt_term::WindowViewport>,
     ) -> TranscriptCursor {
@@ -449,23 +453,34 @@ impl TuiApp {
         let tw = (gutters.content_width(width as u16) as usize).max(1);
 
         if !transcript_owns_cursor || viewport_rows == 0 {
-            return TranscriptCursor {
-                clamped_line: history_cursor_line,
-                clamped_col: history_cursor_col,
-                soft_cursor: None,
-            };
+            return TranscriptCursor { soft_cursor: None };
         }
 
         let visible = viewport
             .map(|v| v.total_rows.min(viewport_rows))
             .unwrap_or(viewport_rows);
-        let max_line = visible.saturating_sub(1);
-        let line = history_cursor_line.min(max_line);
+
+        // Buffer-absolute → screen-relative. Off-screen → no soft cursor.
+        let screen_row = match history_cursor_row.checked_sub(scroll_top) {
+            Some(r) if r < visible => r,
+            _ => {
+                return TranscriptCursor { soft_cursor: None };
+            }
+        };
+
         let max_col = (tw as u16).saturating_sub(1);
-        let col = history_cursor_col.min(max_col);
+        let col = self
+            .last_viewport_text
+            .get(screen_row as usize)
+            .map(|row| {
+                let byte = crate::smelt_term::text::cell_to_byte(row, history_cursor_col as usize);
+                crate::smelt_term::text::byte_to_cell(row, byte) as u16
+            })
+            .unwrap_or(0)
+            .min(max_col);
         let under: char = self
             .last_viewport_text
-            .get(line as usize)
+            .get(screen_row as usize)
             .map(|row| {
                 let byte = crate::smelt_term::text::cell_to_byte(row, col as usize);
                 row[byte..].chars().next()
@@ -474,11 +489,9 @@ impl TuiApp {
             .unwrap_or(' ');
 
         TranscriptCursor {
-            clamped_line: line,
-            clamped_col: history_cursor_col,
             soft_cursor: Some(SoftCursor {
                 col,
-                row: line,
+                row: screen_row,
                 glyph: under,
             }),
         }

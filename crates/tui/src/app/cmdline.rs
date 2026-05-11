@@ -51,8 +51,7 @@ impl TuiApp {
             return;
         };
         if let Some(w) = self.win_mut(win) {
-            w.cursor_line = 0;
-            w.cursor_col = PREFIX_LEN;
+            w.set_cursor_col_single_line(PREFIX_LEN);
             w.scroll_top = 0;
         }
 
@@ -120,7 +119,7 @@ impl TuiApp {
             }
         }
         if let Some(w) = self.ui.win_mut(win) {
-            w.cursor_col = PREFIX_LEN + cursor_in_payload as u16;
+            w.set_cursor_col_single_line(PREFIX_LEN + cursor_in_payload as u16);
         }
         self.cmdline_apply_status_bg();
     }
@@ -129,7 +128,11 @@ impl TuiApp {
         let Some(win) = self.well_known.cmdline else {
             return 0;
         };
-        let cur = self.ui.win(win).map(|w| w.cursor_col).unwrap_or(PREFIX_LEN);
+        let cur = self
+            .ui
+            .win(win)
+            .map(|w| w.cursor_col())
+            .unwrap_or(PREFIX_LEN);
         cur.saturating_sub(PREFIX_LEN) as usize
     }
 
@@ -292,7 +295,7 @@ impl TuiApp {
         let new = (cur + delta).clamp(0, count) as usize;
         if let Some(win) = self.well_known.cmdline {
             if let Some(w) = self.ui.win_mut(win) {
-                w.cursor_col = PREFIX_LEN + new as u16;
+                w.set_cursor_col_single_line(PREFIX_LEN + new as u16);
             }
         }
     }
@@ -300,7 +303,7 @@ impl TuiApp {
     fn cmdline_move_home(&mut self) {
         if let Some(win) = self.well_known.cmdline {
             if let Some(w) = self.ui.win_mut(win) {
-                w.cursor_col = PREFIX_LEN;
+                w.set_cursor_col_single_line(PREFIX_LEN);
             }
         }
     }
@@ -309,7 +312,7 @@ impl TuiApp {
         let count = self.cmdline_text().chars().count() as u16;
         if let Some(win) = self.well_known.cmdline {
             if let Some(w) = self.ui.win_mut(win) {
-                w.cursor_col = PREFIX_LEN + count;
+                w.set_cursor_col_single_line(PREFIX_LEN + count);
             }
         }
     }

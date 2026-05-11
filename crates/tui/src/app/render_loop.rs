@@ -161,13 +161,12 @@ impl TuiApp {
         let tcursor = self.compute_transcript_cursor(
             width,
             viewport_rows,
-            self.transcript_window.cursor_line,
-            self.transcript_window.cursor_col,
+            self.transcript_window.cursor_row(),
+            self.transcript_window.cursor_col(),
+            tdata.clamped_scroll,
             has_transcript_cursor,
             Some(&tdata.viewport),
         );
-        self.transcript_window.cursor_line = tcursor.clamped_line;
-        self.transcript_window.cursor_col = tcursor.clamped_col;
 
         let transcript_viewport = crate::smelt_term::WindowViewport::new(
             transcript_rect,
@@ -219,15 +218,26 @@ impl TuiApp {
                         ..Default::default()
                     },
                 });
+        } else if has_transcript_cursor {
+            // Focus is on transcript but the cursor anchor is off-screen (panned away).
+            // Hide the cursor — without this, a stale `Block` shape from the prior frame
+            // would draw a stray glyph at the viewport edge.
+            self.ui
+                .set_cursor_shape(crate::smelt_term::CursorShape::Hidden);
         }
-        let (cur_col, cur_line) = tcursor
+        // `soft_cursor.row` is screen-relative; lift it back to buffer-absolute for
+        // the UI surface. This is paint state only: visual clamping must not rewrite
+        // the transcript cursor anchor or its preferred column.
+        let (surface_col, surface_row) = tcursor
             .soft_cursor
             .as_ref()
-            .map(|c| (c.col, c.row))
-            .unwrap_or((0, 0));
+            .map(|c| (c.col, c.row.saturating_add(tdata.clamped_scroll)))
+            .unwrap_or((
+                self.transcript_window.cursor_col(),
+                self.transcript_window.cursor_row(),
+            ));
         if let Some(win) = self.ui.win_mut(crate::app::TRANSCRIPT_WIN) {
-            win.cursor_col = cur_col;
-            win.cursor_line = cur_line;
+            win.set_cursor_position(surface_row, surface_col);
             win.scroll_top = tdata.clamped_scroll;
             win.viewport = Some(transcript_viewport);
         }
@@ -331,12 +341,24 @@ impl TuiApp {
                 self.ui
                     .set_cursor_shape(crate::smelt_term::CursorShape::Hardware);
             }
+            (None, _) if has_prompt_cursor => {
+                // Prompt is focused but the cursor anchor is off-screen — hide it so a
+                // stale shape from the prior frame doesn't draw a stray glyph.
+                self.ui
+                    .set_cursor_shape(crate::smelt_term::CursorShape::Hidden);
+            }
             (None, _) => {}
         }
-        let (cur_col, cur_line) = output.cursor.unwrap_or((0, 0));
+        // `output.cursor` is the prompt's screen-space (col, screen_row) inside its
+        // viewport; the UI window's `cursor_row` is buffer-absolute, so add the
+        // viewport's scroll_top.
+        let scroll = viewport.as_ref().map(|v| v.scroll_top).unwrap_or(0);
+        let (cur_col, cur_row) = output
+            .cursor
+            .map(|(c, r)| (c, r.saturating_add(scroll)))
+            .unwrap_or((0, 0));
         if let Some(win) = self.ui.win_mut(crate::app::PROMPT_WIN) {
-            win.cursor_col = cur_col;
-            win.cursor_line = cur_line;
+            win.set_cursor_position(cur_row, cur_col);
             win.viewport = viewport;
         }
     }
