@@ -124,9 +124,11 @@ impl VimContext<'_> {
         self.clipboard.kill_ring.record_clipboard_write(text);
     }
 
-    /// Delete `buf[start..end]`, removing any attachment markers in that range
-    /// from `self.attachments`.
+    /// Delete `buf[start..end]`, dropping any attachment markers in that range.
+    /// Endpoints are snapped.
     fn delete_range(&mut self, start: usize, end: usize) {
+        let start = smelt_buffer::text::snap(self.buf, start);
+        let end = smelt_buffer::text::snap(self.buf, end);
         if start >= end {
             return;
         }
@@ -140,13 +142,17 @@ impl VimContext<'_> {
             .count();
         self.buf.drain(start..end);
         if in_range > 0 {
-            self.attachments.drain(before..before + in_range);
+            let drain_end = (before + in_range).min(self.attachments.len());
+            let drain_start = before.min(drain_end);
+            self.attachments.drain(drain_start..drain_end);
         }
     }
 
     /// Replace `buf[start..end]` with `text`, removing any attachment markers in
-    /// that range from `self.attachments`.
+    /// that range from `self.attachments`. Endpoints are snapped.
     fn replace_range(&mut self, start: usize, end: usize, text: &str) {
+        let start = smelt_buffer::text::snap(self.buf, start);
+        let end = smelt_buffer::text::snap(self.buf, end).max(start);
         if start < end {
             let before = self.buf[..start]
                 .chars()
@@ -158,7 +164,9 @@ impl VimContext<'_> {
                 .count();
             self.buf.replace_range(start..end, text);
             if in_range > 0 {
-                self.attachments.drain(before..before + in_range);
+                let drain_end = (before + in_range).min(self.attachments.len());
+                let drain_start = before.min(drain_end);
+                self.attachments.drain(drain_start..drain_end);
             }
         } else {
             self.buf.replace_range(start..end, text);
@@ -223,6 +231,12 @@ pub struct VimWindowState {
 }
 
 impl VimWindowState {
+    /// Visual anchor, snapped to a char boundary in `buf`. All consumers
+    /// must go through this accessor — the raw field may be stale.
+    pub fn visual_anchor_at(&self, buf: &str) -> usize {
+        smelt_buffer::text::snap(buf, self.visual_anchor)
+    }
+
     /// Pop count1 (default 1), clearing both accumulators.
     fn take_count(&mut self) -> usize {
         let n = self.count1.unwrap_or(1);
@@ -275,8 +289,8 @@ pub fn visual_range(
 ) -> Option<(usize, usize)> {
     match mode {
         VimMode::Visual => {
-            let anchor = state.visual_anchor.min(buf.len());
-            let cursor = cpos.min(buf.len());
+            let anchor = state.visual_anchor_at(buf);
+            let cursor = smelt_buffer::text::snap(buf, cpos);
             let (a, b) = if anchor <= cursor {
                 (anchor, next_char_boundary(buf, cursor).min(buf.len()))
             } else {
@@ -285,8 +299,8 @@ pub fn visual_range(
             Some((a, b))
         }
         VimMode::VisualLine => {
-            let anchor = state.visual_anchor.min(buf.len());
-            let cursor = cpos.min(buf.len());
+            let anchor = state.visual_anchor_at(buf);
+            let cursor = smelt_buffer::text::snap(buf, cpos);
             let start = line_start(buf, anchor).min(line_start(buf, cursor));
             let end = line_end(buf, anchor).max(line_end(buf, cursor));
             Some((start, end))
@@ -295,10 +309,10 @@ pub fn visual_range(
     }
 }
 
-/// Visual-mode anchor byte, or `None` in Normal/Insert.
-pub fn visual_anchor(state: &VimWindowState, mode: VimMode) -> Option<usize> {
+/// Visual-mode anchor byte (snapped against `buf`), or `None` in Normal/Insert.
+pub fn visual_anchor(state: &VimWindowState, buf: &str, mode: VimMode) -> Option<usize> {
     match mode {
-        VimMode::Visual | VimMode::VisualLine => Some(state.visual_anchor),
+        VimMode::Visual | VimMode::VisualLine => Some(state.visual_anchor_at(buf)),
         _ => None,
     }
 }
@@ -591,8 +605,8 @@ fn handle_normal_char(c: char, ctx: &mut VimContext<'_>) -> Action {
                     let eol = line_end(ctx.buf, *ctx.cpos);
                     let text = ctx.register().to_string();
                     let insert = format!("\n{}", text);
-                    ctx.buf.insert_str(eol, &insert);
-                    *ctx.cpos = eol + 1;
+                    let p = smelt_buffer::text::safe_insert_str(ctx.buf, eol, &insert);
+                    *ctx.cpos = p + 1;
                     // Move to first non-blank.
                     *ctx.cpos += ctx.buf[*ctx.cpos..]
                         .bytes()
@@ -601,9 +615,9 @@ fn handle_normal_char(c: char, ctx: &mut VimContext<'_>) -> Action {
                 } else {
                     let after = advance_chars(ctx.buf, *ctx.cpos, 1).min(ctx.buf.len());
                     let text = ctx.register().to_string();
-                    ctx.buf.insert_str(after, &text);
-                    let paste_end = after + text.len();
-                    *ctx.cpos = prev_char_boundary(ctx.buf, paste_end).max(after);
+                    let p = smelt_buffer::text::safe_insert_str(ctx.buf, after, &text);
+                    let paste_end = p + text.len();
+                    *ctx.cpos = prev_char_boundary(ctx.buf, paste_end).max(p);
                     clamp_normal(ctx.buf, ctx.cpos);
                 }
             }
@@ -617,20 +631,22 @@ fn handle_normal_char(c: char, ctx: &mut VimContext<'_>) -> Action {
                     let sol = line_start(ctx.buf, *ctx.cpos);
                     let text = ctx.register().to_string();
                     let insert = format!("{}\n", text);
-                    ctx.buf.insert_str(sol, &insert);
-                    *ctx.cpos = sol;
+                    let p = smelt_buffer::text::safe_insert_str(ctx.buf, sol, &insert);
+                    *ctx.cpos = p;
                     *ctx.cpos += ctx.buf[*ctx.cpos..]
                         .bytes()
                         .take_while(|b| *b == b' ' || *b == b'\t')
                         .count();
                 } else {
                     let text = ctx.register().to_string();
-                    ctx.buf.insert_str(*ctx.cpos, &text);
+                    let p = smelt_buffer::text::safe_insert_str(ctx.buf, *ctx.cpos, &text);
                     let plen = text.len();
                     if plen > 0 {
-                        let paste_end = *ctx.cpos + plen;
-                        *ctx.cpos = prev_char_boundary(ctx.buf, paste_end).max(*ctx.cpos);
+                        let paste_end = p + plen;
+                        *ctx.cpos = prev_char_boundary(ctx.buf, paste_end).max(p);
                         clamp_normal(ctx.buf, ctx.cpos);
+                    } else {
+                        *ctx.cpos = p;
                     }
                 }
             }
@@ -690,16 +706,16 @@ fn handle_normal_char(c: char, ctx: &mut VimContext<'_>) -> Action {
         'o' => {
             ctx.save_undo();
             let eol = line_end(ctx.buf, *ctx.cpos);
-            ctx.buf.insert(eol, '\n');
-            *ctx.cpos = eol + 1;
+            let p = smelt_buffer::text::safe_insert(ctx.buf, eol, '\n');
+            *ctx.cpos = p + 1;
             enter_insert_mode(ctx);
             Action::Consumed
         }
         'O' => {
             ctx.save_undo();
             let sol = line_start(ctx.buf, *ctx.cpos);
-            ctx.buf.insert(sol, '\n');
-            *ctx.cpos = sol;
+            let p = smelt_buffer::text::safe_insert(ctx.buf, sol, '\n');
+            *ctx.cpos = p;
             enter_insert_mode(ctx);
             Action::Consumed
         }

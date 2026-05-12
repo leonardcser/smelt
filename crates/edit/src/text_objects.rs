@@ -1,6 +1,6 @@
 //! Vim text-object selection (iw/aw, i"/a", i(/a(, etc.) over `&str` buffers.
 
-use super::text::{char_class, line_end, line_start, CharClass};
+use super::text::{char_class, line_end, line_start, next_char_boundary, CharClass};
 
 pub(crate) fn text_object(
     buf: &str,
@@ -118,11 +118,10 @@ fn text_object_pair(
 ) -> Option<(usize, usize)> {
     let mut depth = 0i32;
     let mut open_pos = None;
-    for (i, c) in buf[..=cpos.min(buf.len().saturating_sub(1))]
-        .char_indices()
-        .rev()
-    {
-        if c == close && i != cpos {
+    let snapped = smelt_buffer::text::snap(buf, cpos);
+    let upper = next_char_boundary(buf, snapped);
+    for (i, c) in buf[..upper].char_indices().rev() {
+        if c == close && i != snapped {
             depth += 1;
         } else if c == open {
             if depth == 0 {

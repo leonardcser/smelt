@@ -156,11 +156,14 @@ impl PromptState {
         clipboard
             .kill_ring
             .yank_flash_range(std::time::Instant::now())
-            .filter(|&(s, e)| {
-                e <= ctx.buf.source().len()
-                    && ctx.buf.source().is_char_boundary(s)
-                    && ctx.buf.source().is_char_boundary(e)
+            .map(|(s, e)| {
+                let src = ctx.buf.source();
+                (
+                    smelt_buffer::text::snap(src, s),
+                    smelt_buffer::text::snap(src, e),
+                )
             })
+            .filter(|&(s, e)| s < e)
     }
 
     fn has_selection(&self, ctx: PromptCtxRef<'_>) -> bool {
@@ -197,7 +200,7 @@ impl PromptState {
         let (start, end) = self.selection_range(ctx.as_ref())?;
         let deleted = ctx.buf.copy_range(start..end);
         ctx.buf.remove_attachments_in_range(start, end);
-        ctx.buf.source_mut().drain(start..end);
+        smelt_buffer::text::safe_drain(ctx.buf.source_mut(), start..end);
         ctx.win.cpos = start;
         ctx.win.selection_anchor = None;
         Some(deleted)
@@ -528,9 +531,8 @@ impl PromptState {
                     self.save_undo(ctx);
                     self.delete_selection(ctx);
                 }
-                let cpos = ctx.win.cpos;
-                ctx.buf.source_mut().insert(cpos, '\n');
-                ctx.win.cpos += 1;
+                let p = smelt_buffer::text::safe_insert(ctx.buf.source_mut(), ctx.win.cpos, '\n');
+                ctx.win.cpos = p + 1;
                 self.close_completer();
                 Action::Redraw
             }
@@ -1003,28 +1005,16 @@ impl PromptState {
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
 
-pub(crate) fn char_pos(s: &str, byte_idx: usize) -> usize {
-    s[..byte_idx].chars().count()
-}
-
-pub(crate) fn byte_of_char(s: &str, n: usize) -> usize {
-    s.char_indices().nth(n).map(|(i, _)| i).unwrap_or(s.len())
-}
+pub(crate) use smelt_buffer::text::{byte_of_char, char_pos};
 
 fn current_line(buf: &str, cpos: usize) -> usize {
-    let end = if buf.is_char_boundary(cpos) {
-        cpos
-    } else {
-        buf.len()
-    };
+    let end = smelt_buffer::text::snap(buf, cpos);
     buf[..end].chars().filter(|&c| c == '\n').count()
 }
 
 /// Returns the byte offset of the `@` anchor when the cursor is inside an `@…` zone.
 pub(super) fn cursor_in_at_zone(buf: &str, cpos: usize) -> Option<usize> {
-    if !buf.is_char_boundary(cpos) {
-        return None;
-    }
+    let cpos = smelt_buffer::text::snap(buf, cpos);
     // Include the char at cpos so cursor-on-@ is matched.
     let search_end = buf[cpos..]
         .char_indices()
@@ -1095,9 +1085,10 @@ fn clipboard_image_to_data_url() -> Option<String> {
 }
 
 pub(super) fn find_slash_anchor(buf: &str, cpos: usize) -> Option<usize> {
-    if !buf.starts_with('/') || !buf.is_char_boundary(cpos) {
+    if !buf.starts_with('/') {
         return None;
     }
+    let cpos = smelt_buffer::text::snap(buf, cpos);
     if cpos < 1 || buf[1..cpos].contains(char::is_whitespace) {
         return None;
     }
@@ -1322,9 +1313,13 @@ mod tests {
     #[test]
     fn paste_into_empty_buffer_sets_from_paste() {
         let mut input = Harness::new();
-        input
-            .state
-            .insert_paste(&mut PromptCtx { buf: &mut input.buf, win: &mut input.win }, "!echo hello".to_string());
+        input.state.insert_paste(
+            &mut PromptCtx {
+                buf: &mut input.buf,
+                win: &mut input.win,
+            },
+            "!echo hello".to_string(),
+        );
         assert!(
             input.skip_shell_escape(),
             "Paste at buffer start should set from_paste"
@@ -1335,8 +1330,20 @@ mod tests {
     #[test]
     fn type_then_type_sets_from_paste_false() {
         let mut input = Harness::new();
-        input.state.insert_char(&mut PromptCtx { buf: &mut input.buf, win: &mut input.win }, '!');
-        input.state.insert_char(&mut PromptCtx { buf: &mut input.buf, win: &mut input.win }, 'e');
+        input.state.insert_char(
+            &mut PromptCtx {
+                buf: &mut input.buf,
+                win: &mut input.win,
+            },
+            '!',
+        );
+        input.state.insert_char(
+            &mut PromptCtx {
+                buf: &mut input.buf,
+                win: &mut input.win,
+            },
+            'e',
+        );
         assert!(
             !input.skip_shell_escape(),
             "Manual typing should clear from_paste"
@@ -1348,16 +1355,26 @@ mod tests {
         let mut input = Harness::new();
 
         // Simulate user typing '!'
-        input.state.insert_char(&mut PromptCtx { buf: &mut input.buf, win: &mut input.win }, '!');
+        input.state.insert_char(
+            &mut PromptCtx {
+                buf: &mut input.buf,
+                win: &mut input.win,
+            },
+            '!',
+        );
         assert!(!input.skip_shell_escape(), "Typing clears from_paste");
 
         // Reset cursor to simulate the scenario: user types '!', then pastes at line start
         // This is the key scenario that was broken before the fix
         input.buf.set_source(String::new());
         input.win.cpos = 0;
-        input
-            .state
-            .insert_paste(&mut PromptCtx { buf: &mut input.buf, win: &mut input.win }, "echo hello".to_string());
+        input.state.insert_paste(
+            &mut PromptCtx {
+                buf: &mut input.buf,
+                win: &mut input.win,
+            },
+            "echo hello".to_string(),
+        );
         assert!(
             input.skip_shell_escape(),
             "Paste at line start should set from_paste"
@@ -1371,9 +1388,13 @@ mod tests {
 
         input.buf.set_source("hello ".to_string());
         input.win.cpos = 6; // After "hello "
-        input
-            .state
-            .insert_paste(&mut PromptCtx { buf: &mut input.buf, win: &mut input.win }, "!world".to_string());
+        input.state.insert_paste(
+            &mut PromptCtx {
+                buf: &mut input.buf,
+                win: &mut input.win,
+            },
+            "!world".to_string(),
+        );
         assert!(
             !input.skip_shell_escape(),
             "Paste in middle of line should not set from_paste"
@@ -1387,9 +1408,13 @@ mod tests {
 
         input.buf.set_source("hello".to_string());
         input.win.cpos = 5; // At end
-        input
-            .state
-            .insert_paste(&mut PromptCtx { buf: &mut input.buf, win: &mut input.win }, " world".to_string());
+        input.state.insert_paste(
+            &mut PromptCtx {
+                buf: &mut input.buf,
+                win: &mut input.win,
+            },
+            " world".to_string(),
+        );
         assert!(
             !input.skip_shell_escape(),
             "Paste at end of line should not set from_paste"
@@ -1403,9 +1428,13 @@ mod tests {
 
         input.buf.set_source("line1\nline2".to_string());
         input.win.cpos = 0; // At very start
-        input
-            .state
-            .insert_paste(&mut PromptCtx { buf: &mut input.buf, win: &mut input.win }, "!command".to_string());
+        input.state.insert_paste(
+            &mut PromptCtx {
+                buf: &mut input.buf,
+                win: &mut input.win,
+            },
+            "!command".to_string(),
+        );
         assert!(
             input.skip_shell_escape(),
             "Paste at buffer start should set from_paste"
@@ -1419,9 +1448,13 @@ mod tests {
 
         input.buf.set_source("line1\n".to_string());
         input.win.cpos = 6; // Start of second line
-        input
-            .state
-            .insert_paste(&mut PromptCtx { buf: &mut input.buf, win: &mut input.win }, "!command".to_string());
+        input.state.insert_paste(
+            &mut PromptCtx {
+                buf: &mut input.buf,
+                win: &mut input.win,
+            },
+            "!command".to_string(),
+        );
         assert!(
             input.skip_shell_escape(),
             "Paste at line start should set from_paste"
@@ -1435,9 +1468,13 @@ mod tests {
 
         input.buf.set_source("line1\nhello".to_string());
         input.win.cpos = 8; // Insert at byte position 8 (before first 'l' of "hello")
-        input
-            .state
-            .insert_paste(&mut PromptCtx { buf: &mut input.buf, win: &mut input.win }, " world".to_string());
+        input.state.insert_paste(
+            &mut PromptCtx {
+                buf: &mut input.buf,
+                win: &mut input.win,
+            },
+            " world".to_string(),
+        );
         assert!(
             !input.skip_shell_escape(),
             "Paste in middle of line should not set from_paste"
@@ -1448,12 +1485,22 @@ mod tests {
     #[test]
     fn manual_char_after_paste_clears_from_paste() {
         let mut input = Harness::new();
-        input
-            .state
-            .insert_paste(&mut PromptCtx { buf: &mut input.buf, win: &mut input.win }, "!echo hello".to_string());
+        input.state.insert_paste(
+            &mut PromptCtx {
+                buf: &mut input.buf,
+                win: &mut input.win,
+            },
+            "!echo hello".to_string(),
+        );
         assert!(input.skip_shell_escape());
 
-        input.state.insert_char(&mut PromptCtx { buf: &mut input.buf, win: &mut input.win }, 'x');
+        input.state.insert_char(
+            &mut PromptCtx {
+                buf: &mut input.buf,
+                win: &mut input.win,
+            },
+            'x',
+        );
         assert!(
             !input.skip_shell_escape(),
             "Manual character after paste should clear from_paste"
@@ -1463,33 +1510,50 @@ mod tests {
     #[test]
     fn backspace_at_start_clears_from_paste() {
         let mut input = Harness::new();
-        input
-            .state
-            .insert_paste(&mut PromptCtx { buf: &mut input.buf, win: &mut input.win }, "!echo hello".to_string());
+        input.state.insert_paste(
+            &mut PromptCtx {
+                buf: &mut input.buf,
+                win: &mut input.win,
+            },
+            "!echo hello".to_string(),
+        );
         assert!(input.skip_shell_escape());
 
-        input.state.backspace(&mut PromptCtx { buf: &mut input.buf, win: &mut input.win }); // Deletes last character
+        input.state.backspace(&mut PromptCtx {
+            buf: &mut input.buf,
+            win: &mut input.win,
+        }); // Deletes last character
         assert!(
             input.skip_shell_escape(),
             "Backspace not at start should not clear from_paste"
         );
 
         input.win.cpos = 0;
-        input.state.backspace(&mut PromptCtx { buf: &mut input.buf, win: &mut input.win }); // Now at position 0
-                                                 // Can't backspace further, but the logic would clear it if we could
+        input.state.backspace(&mut PromptCtx {
+            buf: &mut input.buf,
+            win: &mut input.win,
+        }); // Now at position 0
+            // Can't backspace further, but the logic would clear it if we could
     }
 
     #[test]
     fn delete_word_backward_at_start_clears_from_paste() {
         let mut input = Harness::new();
-        input
-            .state
-            .insert_paste(&mut PromptCtx { buf: &mut input.buf, win: &mut input.win }, "!echo hello".to_string());
+        input.state.insert_paste(
+            &mut PromptCtx {
+                buf: &mut input.buf,
+                win: &mut input.win,
+            },
+            "!echo hello".to_string(),
+        );
         assert!(input.skip_shell_escape());
 
         // Move cursor to end
         input.win.cpos = input.buf.source().len();
-        input.state.delete_word_backward(&mut PromptCtx { buf: &mut input.buf, win: &mut input.win }); // Deletes "hello"
+        input.state.delete_word_backward(&mut PromptCtx {
+            buf: &mut input.buf,
+            win: &mut input.win,
+        }); // Deletes "hello"
         assert!(
             input.skip_shell_escape(),
             "Delete word not at start should not clear from_paste"
@@ -1497,11 +1561,17 @@ mod tests {
 
         // Move to after "echo " and delete word
         input.win.cpos = 5; // After "echo"
-        input.state.delete_word_backward(&mut PromptCtx { buf: &mut input.buf, win: &mut input.win }); // Deletes "echo"
+        input.state.delete_word_backward(&mut PromptCtx {
+            buf: &mut input.buf,
+            win: &mut input.win,
+        }); // Deletes "echo"
         assert!(input.skip_shell_escape(), "Still not at absolute start");
 
         input.win.cpos = 1; // After "!"
-        input.state.delete_word_backward(&mut PromptCtx { buf: &mut input.buf, win: &mut input.win }); // Would delete to start, which should clear from_paste
+        input.state.delete_word_backward(&mut PromptCtx {
+            buf: &mut input.buf,
+            win: &mut input.win,
+        }); // Would delete to start, which should clear from_paste
         assert!(
             !input.skip_shell_escape(),
             "Delete word to start should clear from_paste"
@@ -1511,25 +1581,39 @@ mod tests {
     #[test]
     fn clear_resets_from_paste() {
         let mut input = Harness::new();
-        input
-            .state
-            .insert_paste(&mut PromptCtx { buf: &mut input.buf, win: &mut input.win }, "!test".to_string());
+        input.state.insert_paste(
+            &mut PromptCtx {
+                buf: &mut input.buf,
+                win: &mut input.win,
+            },
+            "!test".to_string(),
+        );
         assert!(input.skip_shell_escape());
 
-        input.state.clear(&mut PromptCtx { buf: &mut input.buf, win: &mut input.win });
+        input.state.clear(&mut PromptCtx {
+            buf: &mut input.buf,
+            win: &mut input.win,
+        });
         assert!(!input.skip_shell_escape(), "Clear should reset from_paste");
     }
 
     #[test]
     fn stash_preserves_from_paste() {
         let mut input = Harness::new();
-        input
-            .state
-            .insert_paste(&mut PromptCtx { buf: &mut input.buf, win: &mut input.win }, "!test".to_string());
+        input.state.insert_paste(
+            &mut PromptCtx {
+                buf: &mut input.buf,
+                win: &mut input.win,
+            },
+            "!test".to_string(),
+        );
         assert!(input.skip_shell_escape());
 
         // Stash: saves from_paste to snapshot, but doesn't clear it in active buffer
-        input.state.toggle_stash(&mut PromptCtx { buf: &mut input.buf, win: &mut input.win });
+        input.state.toggle_stash(&mut PromptCtx {
+            buf: &mut input.buf,
+            win: &mut input.win,
+        });
         assert!(
             input.skip_shell_escape(),
             "Stash saves from_paste to snapshot but keeps it in buffer"
@@ -1540,7 +1624,10 @@ mod tests {
         );
 
         // Restore: restores from_paste from snapshot
-        input.state.toggle_stash(&mut PromptCtx { buf: &mut input.buf, win: &mut input.win });
+        input.state.toggle_stash(&mut PromptCtx {
+            buf: &mut input.buf,
+            win: &mut input.win,
+        });
         assert!(input.skip_shell_escape(), "Stash should restore from_paste");
         assert_eq!(input.buf.source(), "!test");
     }
@@ -1548,20 +1635,34 @@ mod tests {
     #[test]
     fn multiple_pastes_set_from_paste() {
         let mut input = Harness::new();
-        input
-            .state
-            .insert_paste(&mut PromptCtx { buf: &mut input.buf, win: &mut input.win }, "!first".to_string());
+        input.state.insert_paste(
+            &mut PromptCtx {
+                buf: &mut input.buf,
+                win: &mut input.win,
+            },
+            "!first".to_string(),
+        );
         assert!(input.skip_shell_escape());
 
         // Type something, which clears from_paste
-        input.state.insert_char(&mut PromptCtx { buf: &mut input.buf, win: &mut input.win }, ' ');
+        input.state.insert_char(
+            &mut PromptCtx {
+                buf: &mut input.buf,
+                win: &mut input.win,
+            },
+            ' ',
+        );
         assert!(!input.skip_shell_escape());
 
         // Paste again at start of line
         input.win.cpos = 0;
-        input
-            .state
-            .insert_paste(&mut PromptCtx { buf: &mut input.buf, win: &mut input.win }, "!second".to_string());
+        input.state.insert_paste(
+            &mut PromptCtx {
+                buf: &mut input.buf,
+                win: &mut input.win,
+            },
+            "!second".to_string(),
+        );
         assert!(
             input.skip_shell_escape(),
             "Second paste at start should set from_paste again"
@@ -1571,9 +1672,13 @@ mod tests {
     #[test]
     fn paste_with_carriage_returns_normalized() {
         let mut input = Harness::new();
-        input
-            .state
-            .insert_paste(&mut PromptCtx { buf: &mut input.buf, win: &mut input.win }, "!line1\r\nline2\rline3".to_string());
+        input.state.insert_paste(
+            &mut PromptCtx {
+                buf: &mut input.buf,
+                win: &mut input.win,
+            },
+            "!line1\r\nline2\rline3".to_string(),
+        );
         assert!(input.skip_shell_escape());
         assert!(
             !input.buf.source().contains('\r'),
@@ -1585,7 +1690,13 @@ mod tests {
     #[test]
     fn empty_paste_does_not_set_from_paste() {
         let mut input = Harness::new();
-        input.state.insert_paste(&mut PromptCtx { buf: &mut input.buf, win: &mut input.win }, "".to_string());
+        input.state.insert_paste(
+            &mut PromptCtx {
+                buf: &mut input.buf,
+                win: &mut input.win,
+            },
+            "".to_string(),
+        );
         assert!(
             !input.skip_shell_escape(),
             "Empty paste should not set from_paste"
@@ -1595,9 +1706,13 @@ mod tests {
     #[test]
     fn whitespace_only_paste_at_start_sets_from_paste() {
         let mut input = Harness::new();
-        input
-            .state
-            .insert_paste(&mut PromptCtx { buf: &mut input.buf, win: &mut input.win }, "   ".to_string());
+        input.state.insert_paste(
+            &mut PromptCtx {
+                buf: &mut input.buf,
+                win: &mut input.win,
+            },
+            "   ".to_string(),
+        );
         assert!(
             input.skip_shell_escape(),
             "Whitespace paste at start should set from_paste"
@@ -1611,9 +1726,13 @@ mod tests {
 
         input.buf.set_source(String::new());
         input.win.cpos = 0;
-        input
-            .state
-            .insert_paste(&mut PromptCtx { buf: &mut input.buf, win: &mut input.win }, "!ls -la".to_string());
+        input.state.insert_paste(
+            &mut PromptCtx {
+                buf: &mut input.buf,
+                win: &mut input.win,
+            },
+            "!ls -la".to_string(),
+        );
 
         assert!(
             input.skip_shell_escape(),
@@ -1636,7 +1755,13 @@ mod tests {
         input.test_action(KeyAction::SelectRight, crate::smelt_term::VimMode::Insert);
         assert_eq!(input.win.selection_anchor, Some(0));
         assert_eq!(input.win.cpos, 1);
-        assert_eq!(input.state.selection_range(PromptCtxRef { buf: &input.buf, win: &input.win }), Some((0, 1)));
+        assert_eq!(
+            input.state.selection_range(PromptCtxRef {
+                buf: &input.buf,
+                win: &input.win
+            }),
+            Some((0, 1))
+        );
     }
 
     #[test]
@@ -1649,7 +1774,13 @@ mod tests {
         input.test_action(KeyAction::SelectRight, crate::smelt_term::VimMode::Insert);
         assert_eq!(input.win.selection_anchor, Some(0));
         assert_eq!(input.win.cpos, 3);
-        assert_eq!(input.state.selection_range(PromptCtxRef { buf: &input.buf, win: &input.win }), Some((0, 3)));
+        assert_eq!(
+            input.state.selection_range(PromptCtxRef {
+                buf: &input.buf,
+                win: &input.win
+            }),
+            Some((0, 3))
+        );
     }
 
     #[test]
@@ -1659,9 +1790,21 @@ mod tests {
         input.win.cpos = 0;
         input.test_action(KeyAction::SelectRight, crate::smelt_term::VimMode::Insert);
         input.test_action(KeyAction::SelectRight, crate::smelt_term::VimMode::Insert);
-        assert!(input.state.selection_range(PromptCtxRef { buf: &input.buf, win: &input.win }).is_some());
+        assert!(input
+            .state
+            .selection_range(PromptCtxRef {
+                buf: &input.buf,
+                win: &input.win
+            })
+            .is_some());
         input.test_action(KeyAction::MoveRight, crate::smelt_term::VimMode::Insert);
-        assert!(input.state.selection_range(PromptCtxRef { buf: &input.buf, win: &input.win }).is_none());
+        assert!(input
+            .state
+            .selection_range(PromptCtxRef {
+                buf: &input.buf,
+                win: &input.win
+            })
+            .is_none());
     }
 
     #[test]
@@ -1673,7 +1816,13 @@ mod tests {
         for _ in 0..5 {
             input.test_action(KeyAction::SelectRight, crate::smelt_term::VimMode::Insert);
         }
-        assert_eq!(input.state.selection_range(PromptCtxRef { buf: &input.buf, win: &input.win }), Some((0, 5)));
+        assert_eq!(
+            input.state.selection_range(PromptCtxRef {
+                buf: &input.buf,
+                win: &input.win
+            }),
+            Some((0, 5))
+        );
         input.test_action(KeyAction::Backspace, crate::smelt_term::VimMode::Insert);
         assert_eq!(input.buf.source(), " world");
         assert_eq!(input.win.cpos, 0);
@@ -1702,7 +1851,13 @@ mod tests {
         for _ in 0..5 {
             input.test_action(KeyAction::SelectRight, crate::smelt_term::VimMode::Insert);
         }
-        input.state.insert_char(&mut PromptCtx { buf: &mut input.buf, win: &mut input.win }, 'X');
+        input.state.insert_char(
+            &mut PromptCtx {
+                buf: &mut input.buf,
+                win: &mut input.win,
+            },
+            'X',
+        );
         assert_eq!(input.buf.source(), "X world");
         assert_eq!(input.win.cpos, 1);
     }
@@ -1716,7 +1871,13 @@ mod tests {
         input.test_action(KeyAction::SelectLeft, crate::smelt_term::VimMode::Insert);
         assert_eq!(input.win.selection_anchor, Some(5));
         assert_eq!(input.win.cpos, 3);
-        assert_eq!(input.state.selection_range(PromptCtxRef { buf: &input.buf, win: &input.win }), Some((3, 5)));
+        assert_eq!(
+            input.state.selection_range(PromptCtxRef {
+                buf: &input.buf,
+                win: &input.win
+            }),
+            Some((3, 5))
+        );
     }
 
     #[test]
@@ -1744,7 +1905,13 @@ mod tests {
             KeyAction::SelectWordBackward,
             crate::smelt_term::VimMode::Insert,
         );
-        assert_eq!(input.state.selection_range(PromptCtxRef { buf: &input.buf, win: &input.win }), Some((6, 11)));
+        assert_eq!(
+            input.state.selection_range(PromptCtxRef {
+                buf: &input.buf,
+                win: &input.win
+            }),
+            Some((6, 11))
+        );
         input.test_action(KeyAction::Backspace, crate::smelt_term::VimMode::Insert);
         assert_eq!(input.buf.source(), "hello ");
     }
@@ -1758,7 +1925,13 @@ mod tests {
             KeyAction::SelectStartOfLine,
             crate::smelt_term::VimMode::Insert,
         );
-        assert_eq!(input.state.selection_range(PromptCtxRef { buf: &input.buf, win: &input.win }), Some((0, 5)));
+        assert_eq!(
+            input.state.selection_range(PromptCtxRef {
+                buf: &input.buf,
+                win: &input.win
+            }),
+            Some((0, 5))
+        );
     }
 
     #[test]
@@ -1770,7 +1943,13 @@ mod tests {
             KeyAction::SelectEndOfLine,
             crate::smelt_term::VimMode::Insert,
         );
-        assert_eq!(input.state.selection_range(PromptCtxRef { buf: &input.buf, win: &input.win }), Some((5, 11)));
+        assert_eq!(
+            input.state.selection_range(PromptCtxRef {
+                buf: &input.buf,
+                win: &input.win
+            }),
+            Some((5, 11))
+        );
     }
 
     #[test]
@@ -1823,7 +2002,13 @@ mod tests {
         // Select all.
         input.test_action(KeyAction::SelectRight, crate::smelt_term::VimMode::Insert);
         input.test_action(KeyAction::SelectRight, crate::smelt_term::VimMode::Insert);
-        assert_eq!(input.state.selection_range(PromptCtxRef { buf: &input.buf, win: &input.win }), Some((0, 2)));
+        assert_eq!(
+            input.state.selection_range(PromptCtxRef {
+                buf: &input.buf,
+                win: &input.win
+            }),
+            Some((0, 2))
+        );
         input.test_action(KeyAction::Backspace, crate::smelt_term::VimMode::Insert);
         assert_eq!(input.buf.source(), "");
         assert_eq!(input.win.cpos, 0);
@@ -1835,7 +2020,13 @@ mod tests {
         input.buf.set_source("hello".to_string());
         input.win.cpos = 3;
         input.win.selection_anchor = Some(3);
-        assert_eq!(input.state.selection_range(PromptCtxRef { buf: &input.buf, win: &input.win }), None);
+        assert_eq!(
+            input.state.selection_range(PromptCtxRef {
+                buf: &input.buf,
+                win: &input.win
+            }),
+            None
+        );
     }
 
     #[test]
@@ -1844,9 +2035,24 @@ mod tests {
         input.buf.set_source("hello".to_string());
         input.win.cpos = 0;
         input.test_action(KeyAction::SelectRight, crate::smelt_term::VimMode::Insert);
-        assert!(input.state.selection_range(PromptCtxRef { buf: &input.buf, win: &input.win }).is_some());
-        input.state.clear(&mut PromptCtx { buf: &mut input.buf, win: &mut input.win });
-        assert!(input.state.selection_range(PromptCtxRef { buf: &input.buf, win: &input.win }).is_none());
+        assert!(input
+            .state
+            .selection_range(PromptCtxRef {
+                buf: &input.buf,
+                win: &input.win
+            })
+            .is_some());
+        input.state.clear(&mut PromptCtx {
+            buf: &mut input.buf,
+            win: &mut input.win,
+        });
+        assert!(input
+            .state
+            .selection_range(PromptCtxRef {
+                buf: &input.buf,
+                win: &input.win
+            })
+            .is_none());
     }
 
     #[test]
@@ -1921,7 +2127,13 @@ mod tests {
         input.win.cpos = 0;
         input.test_action(KeyAction::SelectRight, crate::smelt_term::VimMode::Insert);
         assert_eq!(input.win.cpos, 0);
-        assert!(input.state.selection_range(PromptCtxRef { buf: &input.buf, win: &input.win }).is_none());
+        assert!(input
+            .state
+            .selection_range(PromptCtxRef {
+                buf: &input.buf,
+                win: &input.win
+            })
+            .is_none());
     }
 
     #[test]
@@ -1933,7 +2145,13 @@ mod tests {
         input.test_action(KeyAction::SelectRight, crate::smelt_term::VimMode::Insert);
         // Should select "hé" — 2 chars but 3 bytes.
         assert_eq!(input.win.cpos, 3); // byte offset of 'l'
-        assert_eq!(input.state.selection_range(PromptCtxRef { buf: &input.buf, win: &input.win }), Some((0, 3)));
+        assert_eq!(
+            input.state.selection_range(PromptCtxRef {
+                buf: &input.buf,
+                win: &input.win
+            }),
+            Some((0, 3))
+        );
         input.test_action(KeyAction::Backspace, crate::smelt_term::VimMode::Insert);
         assert_eq!(input.buf.source(), "llo");
     }
@@ -1946,14 +2164,26 @@ mod tests {
                             // Select right 2 chars.
         input.test_action(KeyAction::SelectRight, crate::smelt_term::VimMode::Insert);
         input.test_action(KeyAction::SelectRight, crate::smelt_term::VimMode::Insert);
-        assert_eq!(input.state.selection_range(PromptCtxRef { buf: &input.buf, win: &input.win }), Some((3, 5)));
+        assert_eq!(
+            input.state.selection_range(PromptCtxRef {
+                buf: &input.buf,
+                win: &input.win
+            }),
+            Some((3, 5))
+        );
         // Then select left 4 chars — anchor stays at 3.
         input.test_action(KeyAction::SelectLeft, crate::smelt_term::VimMode::Insert);
         input.test_action(KeyAction::SelectLeft, crate::smelt_term::VimMode::Insert);
         input.test_action(KeyAction::SelectLeft, crate::smelt_term::VimMode::Insert);
         input.test_action(KeyAction::SelectLeft, crate::smelt_term::VimMode::Insert);
         assert_eq!(input.win.cpos, 1);
-        assert_eq!(input.state.selection_range(PromptCtxRef { buf: &input.buf, win: &input.win }), Some((1, 3)));
+        assert_eq!(
+            input.state.selection_range(PromptCtxRef {
+                buf: &input.buf,
+                win: &input.win
+            }),
+            Some((1, 3))
+        );
     }
 
     #[test]
@@ -1973,7 +2203,13 @@ mod tests {
         // Create a shift selection.
         input.test_action(KeyAction::SelectRight, crate::smelt_term::VimMode::Insert);
         input.test_action(KeyAction::SelectRight, crate::smelt_term::VimMode::Insert);
-        assert!(input.state.selection_range(PromptCtxRef { buf: &input.buf, win: &input.win }).is_some());
+        assert!(input
+            .state
+            .selection_range(PromptCtxRef {
+                buf: &input.buf,
+                win: &input.win
+            })
+            .is_some());
         // Press Esc — vim switches to normal mode AND clears selection.
         let esc = Event::Key(KeyEvent {
             code: KeyCode::Esc,
@@ -1991,7 +2227,13 @@ mod tests {
                 .handle_event(&mut ctx, esc, None, &mut clipboard);
         }
         assert!(
-            input.state.selection_range(PromptCtxRef { buf: &input.buf, win: &input.win }).is_none(),
+            input
+                .state
+                .selection_range(PromptCtxRef {
+                    buf: &input.buf,
+                    win: &input.win
+                })
+                .is_none(),
             "Esc should clear shift selection"
         );
         assert_eq!(
@@ -2016,8 +2258,17 @@ mod tests {
         // Select "b<marker>c" (bytes 1..5 — marker is 3 bytes).
         input.win.selection_anchor = Some(1);
         input.win.cpos = 1 + 1 + ATTACHMENT_MARKER.len_utf8() + 1;
-        assert!(input.state.selection_range(PromptCtxRef { buf: &input.buf, win: &input.win }).is_some());
-        let deleted = input.state.delete_selection(&mut PromptCtx { buf: &mut input.buf, win: &mut input.win });
+        assert!(input
+            .state
+            .selection_range(PromptCtxRef {
+                buf: &input.buf,
+                win: &input.win
+            })
+            .is_some());
+        let deleted = input.state.delete_selection(&mut PromptCtx {
+            buf: &mut input.buf,
+            win: &mut input.win,
+        });
         assert!(deleted.is_some());
         assert_eq!(input.buf.source(), "ad");
         assert!(
@@ -2114,9 +2365,21 @@ mod tests {
         input.win.cpos = 0;
         input.win.selection_anchor = Some(5808);
         // Stale anchor is clamped to source.len(); slice is in-bounds, no panic.
-        assert_eq!(input.state.selection_range(PromptCtxRef { buf: &input.buf, win: &input.win }), Some((0, 2)));
+        assert_eq!(
+            input.state.selection_range(PromptCtxRef {
+                buf: &input.buf,
+                win: &input.win
+            }),
+            Some((0, 2))
+        );
         // And the slice that would previously panic now succeeds.
-        let (s, e) = input.state.selection_range(PromptCtxRef { buf: &input.buf, win: &input.win }).unwrap();
+        let (s, e) = input
+            .state
+            .selection_range(PromptCtxRef {
+                buf: &input.buf,
+                win: &input.win,
+            })
+            .unwrap();
         let _ = input.buf.source()[s..e];
     }
 
@@ -2127,7 +2390,13 @@ mod tests {
         input.win.cpos = 0;
         input.win.selection_anchor = Some(371);
         // Both endpoints clamp to 0 → range collapses to None.
-        assert_eq!(input.state.selection_range(PromptCtxRef { buf: &input.buf, win: &input.win }), None);
+        assert_eq!(
+            input.state.selection_range(PromptCtxRef {
+                buf: &input.buf,
+                win: &input.win
+            }),
+            None
+        );
     }
 
     #[test]
@@ -2136,7 +2405,13 @@ mod tests {
         input.buf.set_source(String::new());
         input.win.cpos = 0;
         input.win.selection_anchor = Some(5808);
-        assert_eq!(input.state.delete_selection(&mut PromptCtx { buf: &mut input.buf, win: &mut input.win }), None);
+        assert_eq!(
+            input.state.delete_selection(&mut PromptCtx {
+                buf: &mut input.buf,
+                win: &mut input.win
+            }),
+            None
+        );
         assert_eq!(input.buf.source(), "");
     }
 
@@ -2157,8 +2432,20 @@ mod tests {
         input.buf.set_source("héllo".to_string()); // 'é' occupies bytes 1..3
         input.win.cpos = 0;
         input.win.selection_anchor = Some(2); // mid-codepoint
-        assert_eq!(input.state.selection_range(PromptCtxRef { buf: &input.buf, win: &input.win }), Some((0, 1)));
-        let (s, e) = input.state.selection_range(PromptCtxRef { buf: &input.buf, win: &input.win }).unwrap();
+        assert_eq!(
+            input.state.selection_range(PromptCtxRef {
+                buf: &input.buf,
+                win: &input.win
+            }),
+            Some((0, 1))
+        );
+        let (s, e) = input
+            .state
+            .selection_range(PromptCtxRef {
+                buf: &input.buf,
+                win: &input.win,
+            })
+            .unwrap();
         let _ = input.buf.source()[s..e]; // would panic without the snap
     }
 
@@ -2168,9 +2455,14 @@ mod tests {
         input.buf.set_source("long source".to_string());
         input.win.selection_anchor = Some(7);
         input.win.cpos = 0;
-        input
-            .state
-            .replace_text(&mut PromptCtx { buf: &mut input.buf, win: &mut input.win }, String::new(), None);
+        input.state.replace_text(
+            &mut PromptCtx {
+                buf: &mut input.buf,
+                win: &mut input.win,
+            },
+            String::new(),
+            None,
+        );
         assert_eq!(input.win.selection_anchor, None);
     }
 
@@ -2181,14 +2473,20 @@ mod tests {
         input.win.cpos = 5;
         input.win.selection_anchor = Some(2);
         // Stash branch: source moves into stash.
-        input.state.toggle_stash(&mut PromptCtx { buf: &mut input.buf, win: &mut input.win });
+        input.state.toggle_stash(&mut PromptCtx {
+            buf: &mut input.buf,
+            win: &mut input.win,
+        });
         assert_eq!(
             input.win.selection_anchor, None,
             "stashing must clear stale anchor"
         );
         // Re-set an anchor against the (now empty) source and unstash.
         input.win.selection_anchor = Some(99);
-        input.state.toggle_stash(&mut PromptCtx { buf: &mut input.buf, win: &mut input.win });
+        input.state.toggle_stash(&mut PromptCtx {
+            buf: &mut input.buf,
+            win: &mut input.win,
+        });
         assert_eq!(
             input.win.selection_anchor, None,
             "unstashing must clear stale anchor"
@@ -2200,9 +2498,15 @@ mod tests {
     fn restore_stash_clears_anchor() {
         let mut input = Harness::new();
         input.buf.set_source("hello".to_string());
-        input.state.toggle_stash(&mut PromptCtx { buf: &mut input.buf, win: &mut input.win }); // moves "hello" into stash
+        input.state.toggle_stash(&mut PromptCtx {
+            buf: &mut input.buf,
+            win: &mut input.win,
+        }); // moves "hello" into stash
         input.win.selection_anchor = Some(99); // stale against current empty source
-        input.state.restore_stash(&mut PromptCtx { buf: &mut input.buf, win: &mut input.win });
+        input.state.restore_stash(&mut PromptCtx {
+            buf: &mut input.buf,
+            win: &mut input.win,
+        });
         assert_eq!(input.win.selection_anchor, None);
         assert_eq!(input.buf.source(), "hello");
     }
@@ -2212,9 +2516,14 @@ mod tests {
         let mut input = Harness::new();
         input.buf.set_source("long buffer".to_string());
         input.win.selection_anchor = Some(7);
-        input
-            .state
-            .restore_from_rewind(&mut PromptCtx { buf: &mut input.buf, win: &mut input.win }, "hi".to_string(), Vec::new());
+        input.state.restore_from_rewind(
+            &mut PromptCtx {
+                buf: &mut input.buf,
+                win: &mut input.win,
+            },
+            "hi".to_string(),
+            Vec::new(),
+        );
         assert_eq!(input.win.selection_anchor, None);
         assert_eq!(input.buf.source(), "hi");
     }
@@ -2223,13 +2532,19 @@ mod tests {
     fn undo_clears_anchor_when_replacing_with_shorter_source() {
         let mut input = Harness::new();
         // Save undo with empty buffer.
-        input.state.save_undo(&mut PromptCtx { buf: &mut input.buf, win: &mut input.win });
+        input.state.save_undo(&mut PromptCtx {
+            buf: &mut input.buf,
+            win: &mut input.win,
+        });
         // Type some text and create a selection.
         input.buf.set_source("hello world".to_string());
         input.win.cpos = 11;
         input.win.selection_anchor = Some(6);
         // Undo back to empty.
-        input.state.undo(&mut PromptCtx { buf: &mut input.buf, win: &mut input.win });
+        input.state.undo(&mut PromptCtx {
+            buf: &mut input.buf,
+            win: &mut input.win,
+        });
         assert_eq!(input.buf.source(), "");
         assert_eq!(
             input.win.selection_anchor, None,
@@ -2240,9 +2555,14 @@ mod tests {
     #[test]
     fn install_source_snaps_cpos_to_char_boundary() {
         let mut input = Harness::new();
-        input
-            .state
-            .install_source(&mut PromptCtx { buf: &mut input.buf, win: &mut input.win }, "héllo".to_string(), 2); // mid 'é'
+        input.state.install_source(
+            &mut PromptCtx {
+                buf: &mut input.buf,
+                win: &mut input.win,
+            },
+            "héllo".to_string(),
+            2,
+        ); // mid 'é'
         assert_eq!(input.win.cpos, 1, "cpos must snap to a char boundary");
     }
 }

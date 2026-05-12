@@ -577,11 +577,9 @@ impl Buffer {
     }
 
     /// Snapshot a byte range as a [`CopyOutput`]. The range is in the buffer's
-    /// editable-byte space — `source` for buffers whose parser writes it
-    /// (prompt), or `lines.join("\n")` for buffers that only ever set lines
-    /// (transcript). The range is clamped and snapped to char boundaries —
-    /// stale anchors degrade to an empty output instead of panicking. Buffers
-    /// without a copier fall through to identity.
+    /// editable-byte space — `source` when the parser writes it, otherwise
+    /// `lines.join("\n")`. Endpoints are snapped and clamped; buffers without
+    /// a copier fall through to identity.
     pub fn copy_range(&self, range: std::ops::Range<usize>) -> CopyOutput {
         let owned;
         let src: &str = if self.source.is_empty() {
@@ -636,22 +634,28 @@ impl Buffer {
     }
 
     /// Remove the attachment marker at `pos` (if any) from `attachment_ids`.
+    /// `pos` is snapped to a char boundary before the marker check.
     pub fn remove_attachment_at(&mut self, pos: usize) {
         use crate::attachment::ATTACHMENT_MARKER;
-        if self.source.as_bytes().get(pos) == Some(&(ATTACHMENT_MARKER as u8)) {
-            let idx = self.source[..pos]
-                .chars()
-                .filter(|&c| c == ATTACHMENT_MARKER)
-                .count();
-            if idx < self.attachment_ids.len() {
-                self.attachment_ids.remove(idx);
-            }
+        let pos = crate::text::snap(&self.source, pos);
+        if !self.source[pos..].starts_with(ATTACHMENT_MARKER) {
+            return;
+        }
+        let idx = self.source[..pos]
+            .chars()
+            .filter(|&c| c == ATTACHMENT_MARKER)
+            .count();
+        if idx < self.attachment_ids.len() {
+            self.attachment_ids.remove(idx);
         }
     }
 
     /// Remove all `attachment_ids` that fall inside a source text range.
+    /// Endpoints are snapped to char boundaries.
     pub fn remove_attachments_in_range(&mut self, start: usize, end: usize) {
         use crate::attachment::ATTACHMENT_MARKER;
+        let start = crate::text::snap(&self.source, start);
+        let end = crate::text::snap(&self.source, end).max(start);
         let before = self.source[..start]
             .chars()
             .filter(|&c| c == ATTACHMENT_MARKER)
@@ -660,7 +664,9 @@ impl Buffer {
             .chars()
             .filter(|&c| c == ATTACHMENT_MARKER)
             .count();
-        self.attachment_ids.drain(before..before + in_range);
+        let drain_end = (before + in_range).min(self.attachment_ids.len());
+        let drain_start = before.min(drain_end);
+        self.attachment_ids.drain(drain_start..drain_end);
     }
 
     /// Update the source driving the parser. No-op if source is unchanged.
@@ -1364,6 +1370,59 @@ mod tests {
         let out = buf.copy_range(0..5);
         assert_eq!(out.kill_ring, "hello");
         assert_eq!(out.clipboard, "HELLO");
+    }
+
+    /// Property test: stale byte offsets surviving an edit must never panic
+    /// the public slicing/mutation APIs.
+    #[test]
+    fn stale_offsets_never_panic_public_slicing() {
+        type Mutate = dyn Fn(&mut String);
+        let scenarios: &[(&str, &Mutate)] = &[
+            ("日本語hello", &|s| s.insert(0, '🦀')),
+            ("日本語hello", &|s| {
+                s.truncate(0);
+            }),
+            ("a🦀b日c", &|s| s.push_str("XYZ")),
+            ("a🦀b日c", &|s| {
+                *s = String::from("z");
+            }),
+            ("\u{FFFC}hello\u{FFFC}", &|s| s.replace_range(0..3, "")),
+        ];
+
+        for (initial, mutate) in scenarios {
+            let mut buf = make_buf();
+            buf.set_source((*initial).to_string());
+
+            let len = buf.source().len();
+            let captured: Vec<usize> = (0..=len + 4).collect();
+
+            // Mutate directly — `set_source` would normalize and hide the issue.
+            mutate(buf.source_mut());
+
+            for &a in &captured {
+                for &b in &captured {
+                    let _ = buf.copy_range(a..b);
+                    let _ = crate::text::safe_slice(buf.source(), a..b);
+
+                    let mut s = buf.source().to_string();
+                    let _ = crate::text::safe_drain(&mut s, a..b);
+                    let mut s = buf.source().to_string();
+                    crate::text::safe_replace_range(&mut s, a..b, "X");
+
+                    let mut kr = crate::kill_ring::KillRing::new();
+                    kr.kill("seed".into());
+                    kr.kill("seed2".into());
+                    kr.set_with_source("payload".into(), false, a, b);
+                    let mut bs = buf.source().to_string();
+                    let _ = kr.yank_pop(&mut bs);
+
+                    let mut clone = make_buf();
+                    clone.set_source(buf.source().to_string());
+                    clone.remove_attachments_in_range(a, b);
+                    clone.remove_attachment_at(a);
+                }
+            }
+        }
     }
 
     #[test]

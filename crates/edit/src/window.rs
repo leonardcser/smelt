@@ -284,7 +284,9 @@ impl Window {
     }
 
     /// Anchor a visual selection at `cpos` and enter the given visual mode.
+    /// Clears any shift-selection anchor.
     pub fn begin_visual(&mut self, mode: VimMode, cpos: usize) {
+        self.selection_anchor = None;
         self.vim_state.begin_visual(&mut self.vim_mode, mode, cpos);
     }
 
@@ -644,8 +646,7 @@ impl Window {
                 if self.vim_enabled
                     && matches!(self.vim_mode, VimMode::Visual | VimMode::VisualLine)
                 {
-                    self.vim_state
-                        .set_mode(&mut self.vim_mode, VimMode::Normal);
+                    self.vim_state.set_mode(&mut self.vim_mode, VimMode::Normal);
                 }
                 self.pending_press = Some(cpos);
                 Status::Capture
@@ -731,19 +732,22 @@ impl Window {
         let Some((ws, we)) = self.drag_anchor_word else {
             return;
         };
+        // Vim cursor sits on the last char's start byte; `prev_char_boundary`
+        // is the correct step for ASCII and multibyte alike.
+        let last_of = |end: usize| smelt_buffer::text::prev_char_boundary(text, end).max(ws);
         let p = self.compute_cpos(buf);
         let (new_cpos, new_anchor) = if p >= we {
             let far = super::text::word_range_at_transparent(text, p, ctx.soft_breaks)
-                .map(|(_, e)| e.saturating_sub(1).max(ws))
-                .unwrap_or(p.max(we.saturating_sub(1)));
+                .map(|(_, e)| last_of(e))
+                .unwrap_or_else(|| p.max(last_of(we)));
             (far, ws)
         } else if p < ws {
             let near = super::text::word_range_at_transparent(text, p, ctx.soft_breaks)
                 .map(|(s, _)| s)
                 .unwrap_or(p);
-            (near, we.saturating_sub(1).max(ws))
+            (near, last_of(we))
         } else {
-            (we.saturating_sub(1).max(ws), ws)
+            (last_of(we), ws)
         };
         self.cpos = new_cpos;
         if self.vim_enabled {
@@ -758,19 +762,20 @@ impl Window {
         let Some((ls, le)) = self.drag_anchor_line else {
             return;
         };
+        let last_of = |end: usize| smelt_buffer::text::prev_char_boundary(text, end).max(ls);
         let p = self.compute_cpos(buf);
         let (new_cpos, new_anchor) = if p >= le {
             let far = super::text::line_range_at(text, p, ctx.hard_breaks)
-                .map(|(_, e)| e.saturating_sub(1).max(ls))
-                .unwrap_or(p.max(le.saturating_sub(1)));
+                .map(|(_, e)| last_of(e))
+                .unwrap_or_else(|| p.max(last_of(le)));
             (far, ls)
         } else if p < ls {
             let near = super::text::line_range_at(text, p, ctx.hard_breaks)
                 .map(|(s, _)| s)
                 .unwrap_or(p);
-            (near, le.saturating_sub(1).max(ls))
+            (near, last_of(le))
         } else {
-            (le.saturating_sub(1).max(ls), ls)
+            (last_of(le), ls)
         };
         self.cpos = new_cpos;
         if self.vim_enabled {

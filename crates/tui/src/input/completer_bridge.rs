@@ -3,6 +3,7 @@
 use super::{cursor_in_at_zone, find_slash_anchor, Action, PromptCtx, PromptCtxRef, PromptState};
 use crate::completer::{Completer, CompleterKind};
 use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
+use smelt_buffer::text::safe_slice;
 
 impl PromptState {
     /// Handle event as completer navigation. Returns `Some` if consumed.
@@ -108,14 +109,17 @@ impl PromptState {
 
     fn accept_completion(&mut self, ctx: &mut PromptCtx<'_>, comp: &Completer) {
         if let Some(label) = comp.accept() {
-            let end = ctx.win.cpos;
-            let start = comp.anchor;
+            // `comp.anchor` is preserved across keystrokes by
+            // `set_or_update_completer`; if a buffer mutation shifted bytes
+            // since capture, the stored anchor can land mid-char.
+            let start = smelt_buffer::text::snap(ctx.buf.source(), comp.anchor);
+            let end = ctx.win.cpos.max(start);
             if comp.kind == CompleterKind::CommandArg {
                 // Replace just the argument portion after the command prefix.
-                ctx.buf.source_mut().replace_range(start..end, label);
+                smelt_buffer::text::safe_replace_range(ctx.buf.source_mut(), start..end, label);
                 ctx.win.cpos = start + label.len();
             } else {
-                let trigger = &ctx.buf.source()[start..start + 1];
+                let trigger = safe_slice(ctx.buf.source(), start..start + 1);
                 let replacement = if trigger == "/" {
                     format!("/{} ", label)
                 } else if label.contains(' ') {
@@ -123,7 +127,11 @@ impl PromptState {
                 } else {
                     format!("@{} ", label)
                 };
-                ctx.buf.source_mut().replace_range(start..end, &replacement);
+                smelt_buffer::text::safe_replace_range(
+                    ctx.buf.source_mut(),
+                    start..end,
+                    &replacement,
+                );
                 ctx.win.cpos = start + replacement.len();
             }
         }
@@ -146,7 +154,7 @@ impl PromptState {
                 return;
             }
             if find_slash_anchor(ctx.buf.source(), ctx.win.cpos).is_some() {
-                let query = ctx.buf.source()[1..ctx.win.cpos].to_string();
+                let query = safe_slice(ctx.buf.source(), 1..ctx.win.cpos).to_string();
                 self.set_or_update_completer(
                     CompleterKind::Command,
                     || Completer::commands(0),
@@ -164,7 +172,7 @@ impl PromptState {
     pub(super) fn recompute_completer(&mut self, ctx: PromptCtxRef<'_>) {
         if let Some(at_pos) = cursor_in_at_zone(ctx.buf.source(), ctx.win.cpos) {
             let query = if ctx.win.cpos > at_pos + 1 {
-                ctx.buf.source()[at_pos + 1..ctx.win.cpos].to_string()
+                safe_slice(ctx.buf.source(), at_pos + 1..ctx.win.cpos).to_string()
             } else {
                 String::new()
             };
@@ -199,7 +207,7 @@ impl PromptState {
                 || (ctx.win.cpos == 0 && ctx.buf.source().starts_with('/'))
             {
                 let end = ctx.win.cpos.max(1);
-                let query = ctx.buf.source()[1..end].to_string();
+                let query = safe_slice(ctx.buf.source(), 1..end).to_string();
                 self.set_or_update_completer(
                     CompleterKind::Command,
                     || Completer::commands(0),
@@ -230,7 +238,7 @@ impl PromptState {
 
     fn arg_query(&self, ctx: PromptCtxRef<'_>, anchor: usize) -> String {
         if ctx.win.cpos > anchor {
-            ctx.buf.source()[anchor..ctx.win.cpos].to_string()
+            safe_slice(ctx.buf.source(), anchor..ctx.win.cpos).to_string()
         } else {
             String::new()
         }

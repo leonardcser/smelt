@@ -72,7 +72,7 @@ pub(crate) fn word_end_pos(buf: &str, cpos: usize, mode: CharClass) -> usize {
         i += 1;
     }
     if i >= chars.len() {
-        return buf.len().saturating_sub(1);
+        return prev_char_boundary(buf, buf.len());
     }
     let target_class = char_class(chars[i].1, mode);
     while i + 1 < chars.len() && char_class(chars[i + 1].1, mode) == target_class {

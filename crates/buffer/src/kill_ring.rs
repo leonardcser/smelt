@@ -69,11 +69,12 @@ impl KillRing {
     }
 
     /// Yank the current kill into `buf` at `cpos`. Returns new cpos.
+    /// `cpos` is snapped to a char boundary.
     pub fn yank(&mut self, buf: &mut String, cpos: usize) -> Option<usize> {
         if self.current.is_empty() {
             return None;
         }
-        buf.insert_str(cpos, &self.current);
+        let cpos = crate::text::safe_insert_str(buf, cpos, &self.current);
         let end = cpos + self.current.len();
         self.last_yank = Some((cpos, end));
         self.pop_idx = 0;
@@ -86,9 +87,11 @@ impl KillRing {
         if self.history.is_empty() {
             return None;
         }
-        let text = &self.history[self.pop_idx % self.history.len()];
+        let start = crate::text::snap(buf, start);
+        let end = crate::text::snap(buf, end).max(start);
+        let text = self.history[self.pop_idx % self.history.len()].clone();
         let new_end = start + text.len();
-        buf.replace_range(start..end, text);
+        crate::text::safe_replace_range(buf, start..end, &text);
         self.last_yank = Some((start, new_end));
         self.pop_idx = (self.pop_idx + 1) % self.history.len();
         Some(new_end)

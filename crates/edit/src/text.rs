@@ -1,5 +1,8 @@
 //! Pure text-motion helpers over `&str` buffers and byte positions.
 
+pub use smelt_buffer::text::{
+    byte_to_cell, cell_to_byte, next_char_boundary, prev_char_boundary, snap,
+};
 pub use smelt_buffer::wrap::wrap_line;
 
 #[derive(Clone, Copy)]
@@ -9,21 +12,6 @@ pub enum CharClass {
     /// vim "WORD" boundaries: non-whitespace vs whitespace.
     #[allow(clippy::upper_case_acronyms)]
     WORD,
-}
-
-/// Clamp `pos` to `buf.len()` and snap back to the nearest char boundary.
-pub fn snap(buf: &str, pos: usize) -> usize {
-    let mut p = pos.min(buf.len());
-    while p > 0 && !buf.is_char_boundary(p) {
-        p -= 1;
-    }
-    p
-}
-
-/// Byte offset → terminal column (sum of `unicode-width` cells of preceding chars).
-pub fn byte_to_cell(line: &str, byte: usize) -> usize {
-    use unicode_width::UnicodeWidthStr;
-    UnicodeWidthStr::width(&line[..snap(line, byte)])
 }
 
 /// Move `cpos` by `delta_lines` in `buf`, preserving the preferred display column (`curswant`).
@@ -62,43 +50,6 @@ pub fn vertical_move(
     let (sol, eol) = lines[target_line];
     let byte_in_line = cell_to_byte(&buf[sol..eol], want);
     (sol + byte_in_line, want)
-}
-
-/// Byte offset of the char boundary before `pos`. Returns 0 at start.
-pub fn prev_char_boundary(s: &str, pos: usize) -> usize {
-    if pos == 0 {
-        return 0;
-    }
-    let mut p = pos - 1;
-    while p > 0 && !s.is_char_boundary(p) {
-        p -= 1;
-    }
-    p
-}
-
-/// Byte offset of the char boundary after `pos`. Returns `s.len()` at end.
-pub fn next_char_boundary(s: &str, pos: usize) -> usize {
-    if pos >= s.len() {
-        return s.len();
-    }
-    let mut p = pos + 1;
-    while p < s.len() && !s.is_char_boundary(p) {
-        p += 1;
-    }
-    p
-}
-
-/// Inverse of [`byte_to_cell`]: byte offset at which the preceding text occupies `cell` columns.
-pub fn cell_to_byte(line: &str, cell: usize) -> usize {
-    use unicode_width::UnicodeWidthChar;
-    let mut acc = 0usize;
-    for (b, ch) in line.char_indices() {
-        if acc >= cell {
-            return b;
-        }
-        acc += UnicodeWidthChar::width(ch).unwrap_or(0);
-    }
-    line.len()
 }
 
 pub fn char_class(c: char, mode: CharClass) -> u8 {
