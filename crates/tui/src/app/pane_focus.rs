@@ -55,9 +55,12 @@ impl TuiApp {
     /// Warm up the content pane on focus switch: clamp cpos and sync cursor state.
     /// Without this, a resumed session has stale state and the first key is a no-op.
     fn refocus_content(&mut self) {
-        let rows = self.full_transcript_display_text(self.core.config.settings.show_thinking);
         let viewport = self.viewport_rows_estimate();
-        self.transcript_window.refocus(&rows, viewport);
+        let win_id = self.well_known.transcript;
+        let buf_id = self.transcript_win().buf;
+        let (win, buf) = self.ui.win_and_buf_mut(win_id, buf_id);
+        win.expect("transcript window")
+            .refocus(buf.expect("transcript buffer"), viewport);
         self.snap_transcript_cursor();
     }
 
@@ -65,6 +68,7 @@ impl TuiApp {
         let tw = self.transcript_width() as u16;
         let theme = self.ui.theme().clone();
         let show_thinking = self.core.config.settings.show_thinking;
+        let row = self.transcript_win().cursor_abs_row();
         let snap = self.transcript_projection.snapshot(
             &mut self.transcript.history,
             tw,
@@ -74,7 +78,6 @@ impl TuiApp {
         if snap.rows.is_empty() {
             return None;
         }
-        let row = self.transcript_window.cursor_abs_row();
         snap.block_of_row.get(row).copied().flatten()
     }
 

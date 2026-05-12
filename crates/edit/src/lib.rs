@@ -14,8 +14,8 @@ pub(crate) mod window;
 
 pub use smelt_buffer::attachment::AttachmentId;
 pub use smelt_buffer::buffer::{
-    BufCreateOpts, BufId, Buffer, BufferParser, ExtmarkOpts, ExtmarkPayload, SelectionRange,
-    SpanMeta, SpanStyle, LUA_BUF_ID_BASE,
+    BufCreateOpts, BufId, Buffer, BufferCopy, BufferParser, CopyOutput, ExtmarkOpts,
+    ExtmarkPayload, SelectionRange, SpanMeta, SpanStyle, LUA_BUF_ID_BASE,
 };
 pub use smelt_buffer::clipboard::Clipboard;
 pub use smelt_buffer::undo::{UndoEntry, UndoHistory};
@@ -242,6 +242,18 @@ impl Ui {
     pub fn win_buf_mut(&mut self, win: WinId) -> Option<&mut Buffer> {
         let id = self.wins.get(&win)?.buf;
         self.bufs.get_mut(&id)
+    }
+
+    /// Borrow both a window and a buffer mutably at once. Safe because they live
+    /// in disjoint collections inside `Ui`.
+    pub fn win_and_buf_mut(
+        &mut self,
+        win: WinId,
+        buf: BufId,
+    ) -> (Option<&mut Window>, Option<&mut Buffer>) {
+        let win_ref = self.wins.get_mut(&win);
+        let buf_ref = self.bufs.get_mut(&buf);
+        (win_ref, buf_ref)
     }
 
     // ── Overlay ──────────────────────────────────────────────────────

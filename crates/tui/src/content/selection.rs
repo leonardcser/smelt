@@ -222,14 +222,14 @@ pub(crate) enum Span {
     AtRef(String),
 }
 
-#[derive(Clone, Copy, PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) enum SpanKind {
     Plain,
     Attachment,
     AtRef,
 }
 
-pub(super) fn build_char_kinds(spans: &[Span]) -> Vec<SpanKind> {
+pub(crate) fn build_char_kinds(spans: &[Span]) -> Vec<SpanKind> {
     let mut kinds = Vec::new();
     for span in spans {
         let (text, kind) = match span {
@@ -299,7 +299,7 @@ pub(crate) fn spans_to_string(spans: &[Span]) -> String {
     s
 }
 
-pub(super) fn map_cursor(raw_cursor: usize, raw_buf: &str, spans: &[Span]) -> usize {
+pub(crate) fn map_cursor(raw_cursor: usize, raw_buf: &str, spans: &[Span]) -> usize {
     let mut raw_pos = 0;
     let mut display_pos = 0;
     for span in spans {

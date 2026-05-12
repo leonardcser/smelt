@@ -33,7 +33,8 @@ impl TuiApp {
         // ── Layout ──
         let (prompt_rect, viewport_rows) = {
             let _p = smelt_perf::perf::begin("compositor:layout");
-            let (above_rows, input_rows) = self.measure_prompt_rows(&self.input, width, queued);
+            let (above_rows, input_rows) =
+                self.measure_prompt_rows(&self.input, self.prompt_buf(), width, queued);
             self.ui.set_layout(layout::build_layout_tree(
                 &layout::LayoutInput {
                     term_height: term_h,
@@ -103,10 +104,11 @@ impl TuiApp {
 
     /// Freeze tail-follow during selection/vim-visual/drag; otherwise snap to bottom.
     fn adjust_tail_scroll(&mut self) {
-        let has_selection = self.transcript_window.selection_anchor.is_some();
-        let in_vim_visual = self.transcript_window.vim_enabled
+        let win = self.transcript_win();
+        let has_selection = win.selection_anchor.is_some();
+        let in_vim_visual = win.vim_enabled
             && matches!(
-                self.transcript_window.vim_mode,
+                win.vim_mode,
                 crate::smelt_term::VimMode::Visual | crate::smelt_term::VimMode::VisualLine
             );
         let mouse_drag_active = matches!(
@@ -114,8 +116,9 @@ impl TuiApp {
             Some(crate::smelt_term::HitTarget::Window(_))
         );
         let freeze = has_selection || in_vim_visual || mouse_drag_active;
-        if !freeze && self.transcript_window.follow_tail {
-            self.transcript_window.scroll_top = u16::MAX;
+        let follow_tail = self.transcript_win().follow_tail;
+        if !freeze && follow_tail {
+            self.transcript_win_mut().scroll_top = u16::MAX;
         }
     }
 
@@ -152,17 +155,21 @@ impl TuiApp {
             self.project_transcript_buffer(
                 width,
                 viewport_rows,
-                self.transcript_window.scroll_top,
+                self.transcript_win().scroll_top,
                 self.core.config.settings.show_thinking,
             )
         };
-        self.transcript_window.scroll_top = tdata.clamped_scroll;
+        self.transcript_win_mut().scroll_top = tdata.clamped_scroll;
 
+        let (cur_row, cur_col) = {
+            let win = self.transcript_win();
+            (win.cursor_row(), win.cursor_col())
+        };
         let tcursor = self.compute_transcript_cursor(
             width,
             viewport_rows,
-            self.transcript_window.cursor_row(),
-            self.transcript_window.cursor_col(),
+            cur_row,
+            cur_col,
             tdata.clamped_scroll,
             has_transcript_cursor,
             Some(&tdata.viewport),
@@ -217,6 +224,7 @@ impl TuiApp {
                         bg: Some(bg),
                         ..Default::default()
                     },
+                    pos: Some((c.col, c.row)),
                 });
         } else if has_transcript_cursor {
             // Focus is on transcript but the cursor anchor is off-screen (panned away).
@@ -225,19 +233,7 @@ impl TuiApp {
             self.ui
                 .set_cursor_shape(crate::smelt_term::CursorShape::Hidden);
         }
-        // `soft_cursor.row` is screen-relative; lift it back to buffer-absolute for
-        // the UI surface. This is paint state only: visual clamping must not rewrite
-        // the transcript cursor anchor or its preferred column.
-        let (surface_col, surface_row) = tcursor
-            .soft_cursor
-            .as_ref()
-            .map(|c| (c.col, c.row.saturating_add(tdata.clamped_scroll)))
-            .unwrap_or((
-                self.transcript_window.cursor_col(),
-                self.transcript_window.cursor_row(),
-            ));
         if let Some(win) = self.ui.win_mut(crate::app::TRANSCRIPT_WIN) {
-            win.set_cursor_position(surface_row, surface_col);
             win.scroll_top = tdata.clamped_scroll;
             win.viewport = Some(transcript_viewport);
         }
@@ -290,28 +286,31 @@ impl TuiApp {
             .saturating_sub(pad_left)
             .saturating_sub(gutters.pad_right);
 
+        {
+            let mut pctx = crate::input::prompt_ctx_mut(&mut self.ui);
+            pctx.buf.ensure_rendered_at(content_width);
+            self.input
+                .sync_display_coords(&mut pctx, prompt_rect.height);
+            pctx.win.pending_recenter = false;
+            pctx.win.last_render_cpos = Some(pctx.win.cpos);
+        }
+
         let output = {
+            let theme = self.ui.theme().clone();
+            let (win, buf) = self
+                .ui
+                .win_and_buf_mut(crate::app::PROMPT_WIN, crate::app::PROMPT_EDIT_BUF);
             let inp = prompt_buf::InputLeafInput {
                 input: &self.input,
+                win: win.expect("prompt window"),
                 clipboard: &self.core.clipboard,
                 content_width,
                 height: prompt_rect.height,
-                has_prompt_cursor,
             };
-            let theme = self.ui.theme().clone();
-            let buf = self
-                .ui
-                .win_buf_mut(self.well_known.prompt)
-                .expect("prompt window registered at startup");
-            prompt_buf::compute_input(&inp, buf, &theme)
+            prompt_buf::compute_input(&inp, buf.expect("prompt edit buffer"), &theme)
         };
 
-        if let Some(ref vp) = output.viewport {
-            self.input.win.scroll_top = vp.scroll_top;
-        }
-        self.input.win.pending_recenter = false;
-        self.input.win.last_render_cpos = Some(self.input.win.cpos);
-
+        let scroll_top = self.prompt_win().scroll_top;
         let viewport = output.viewport.as_ref().map(|vp| {
             let rect = crate::smelt_term::Rect::new(
                 prompt_rect.top,
@@ -323,7 +322,7 @@ impl TuiApp {
                 rect,
                 vp.content_width,
                 vp.total_rows,
-                vp.scroll_top,
+                scroll_top,
                 crate::smelt_term::ScrollbarState::new(
                     prompt_rect.left + prompt_rect.width.saturating_sub(1),
                     vp.total_rows,
@@ -332,33 +331,20 @@ impl TuiApp {
             )
         });
 
-        match (output.cursor, output.cursor_style) {
-            (Some(_), Some((style, glyph))) => {
-                self.ui
-                    .set_cursor_shape(crate::smelt_term::CursorShape::Block { glyph, style });
-            }
-            (Some(_), None) => {
+        if has_prompt_cursor {
+            let screen_row = self.prompt_win().cursor_screen_row(prompt_rect.height);
+            if screen_row.is_some() {
                 self.ui
                     .set_cursor_shape(crate::smelt_term::CursorShape::Hardware);
-            }
-            (None, _) if has_prompt_cursor => {
-                // Prompt is focused but the cursor anchor is off-screen — hide it so a
-                // stale shape from the prior frame doesn't draw a stray glyph.
+            } else {
+                // Cursor is off-screen — hide it so a stale shape from the prior frame
+                // doesn't draw a stray glyph.
                 self.ui
                     .set_cursor_shape(crate::smelt_term::CursorShape::Hidden);
             }
-            (None, _) => {}
         }
-        // `output.cursor` is the prompt's screen-space (col, screen_row) inside its
-        // viewport; the UI window's `cursor_row` is buffer-absolute, so add the
-        // viewport's scroll_top.
-        let scroll = viewport.as_ref().map(|v| v.scroll_top).unwrap_or(0);
-        let (cur_col, cur_row) = output
-            .cursor
-            .map(|(c, r)| (c, r.saturating_add(scroll)))
-            .unwrap_or((0, 0));
+
         if let Some(win) = self.ui.win_mut(crate::app::PROMPT_WIN) {
-            win.set_cursor_position(cur_row, cur_col);
             win.viewport = viewport;
         }
     }

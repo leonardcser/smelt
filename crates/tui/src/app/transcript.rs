@@ -316,23 +316,6 @@ impl TuiApp {
         cpos
     }
 
-    pub(crate) fn copy_display_range(
-        &mut self,
-        start: usize,
-        end: usize,
-        show_thinking: bool,
-    ) -> String {
-        let tw = self.transcript_width() as u16;
-        let theme = self.ui.theme().clone();
-        let snap = self.transcript_projection.snapshot(
-            &mut self.transcript.history,
-            tw,
-            show_thinking,
-            &theme,
-        );
-        snap.copy_byte_range(start, end)
-    }
-
     pub(crate) fn finish_transcript_turn(&mut self) {
         let _perf = smelt_perf::perf::begin("render:finish_turn");
         self.parser
@@ -504,12 +487,13 @@ impl TuiApp {
         scroll_top: u16,
         viewport_rows: u16,
     ) -> Vec<(usize, u16, u16)> {
-        let vim_visual = self.transcript_window.vim_enabled
+        let win = self.transcript_win();
+        let vim_visual = win.vim_enabled
             && matches!(
-                self.transcript_window.vim_mode,
+                win.vim_mode,
                 crate::smelt_term::VimMode::Visual | crate::smelt_term::VimMode::VisualLine
             );
-        let anchor_set = self.transcript_window.selection_anchor.is_some();
+        let anchor_set = win.selection_anchor.is_some();
         let yank_flash = self
             .core
             .clipboard
@@ -520,26 +504,27 @@ impl TuiApp {
             return Vec::new();
         }
 
-        let rows = self.full_transcript_display_text(self.core.config.settings.show_thinking);
+        let buf_id = self.transcript_win().buf;
+        let buf = match self.ui.buf(buf_id) {
+            Some(b) => b,
+            None => return Vec::new(),
+        };
+        let rows = buf.lines();
         if rows.is_empty() {
             return Vec::new();
         }
-        let buf = rows.join("\n");
-        let cpos = self.transcript_window.compute_cpos(&rows);
-        let active_selection = if self.transcript_window.vim_enabled {
-            match self.transcript_window.vim_mode {
+        let text = buf.text();
+        let win = self.transcript_win();
+        let cpos = win.compute_cpos(buf);
+        let active_selection = if win.vim_enabled {
+            match win.vim_mode {
                 crate::smelt_term::VimMode::Visual | crate::smelt_term::VimMode::VisualLine => {
-                    crate::smelt_term::vim::visual_range(
-                        &self.transcript_window.vim_state,
-                        &buf,
-                        cpos,
-                        self.transcript_window.vim_mode,
-                    )
+                    crate::smelt_term::vim::visual_range(&win.vim_state, &text, cpos, win.vim_mode)
                 }
-                _ => self.transcript_window.selection_range_at(cpos, &buf),
+                _ => win.selection_range_at(cpos, &text),
             }
         } else {
-            self.transcript_window.selection_range_at(cpos, &buf)
+            win.selection_range_at(cpos, &text)
         };
         // Fall back to yank-flash range (mirrors nvim's `vim.highlight.on_yank`).
         let (s, e) = match active_selection.or_else(|| {
@@ -618,6 +603,7 @@ impl TuiApp {
     pub(crate) fn measure_prompt_rows(
         &self,
         state: &crate::input::PromptState,
+        edit_buf: &crate::smelt_term::Buffer,
         width: usize,
         queued: &[String],
     ) -> (u16, u16) {
@@ -635,7 +621,7 @@ impl TuiApp {
             }
         }
 
-        let (visual_lines, _, _, _) = wrap_and_locate_cursor(&state.source, &[], 0, usable);
+        let (visual_lines, _, _, _) = wrap_and_locate_cursor(edit_buf.source(), &[], 0, usable);
         let input_rows = visual_lines.len().max(1) as u16;
 
         let above = queued_rows + stash + 1; // +1 = top bar

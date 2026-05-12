@@ -33,7 +33,8 @@ impl TuiApp {
         {
             // Skip when an overlay or cmdline is focused — they get first dibs.
             if self.ui.focused_overlay().is_none() && self.well_known.cmdline.is_none() {
-                let ctx = self.input.key_context(self.agent.is_some(), false);
+                let pctx = crate::input::prompt_ctx_ref(&self.ui);
+                let ctx = self.input.key_context(pctx, self.agent.is_some(), false);
                 match keymap::lookup(*code, *modifiers, &ctx) {
                     Some(KeyAction::ToggleMode) => {
                         self.lua.cycle_mode();
@@ -199,7 +200,8 @@ impl TuiApp {
                 }
                 // Don't restore stash if a dialog opened — it restores on close.
                 if self.ui.focused_overlay().is_none() {
-                    self.input.restore_stash();
+                    let mut pctx = crate::input::prompt_ctx_mut(&mut self.ui);
+                    self.input.restore_stash(&mut pctx);
                 }
                 false
             }
@@ -277,8 +279,8 @@ impl TuiApp {
                     t.pending_chord = Some(crate::app::PendingChord {
                         tokens: Vec::new(),
                         started: now,
-                        vim_mode_at_start: if self.input.vim_enabled() {
-                            Some(self.input.win.vim_mode)
+                        vim_mode_at_start: if self.input.vim_enabled(self.prompt_win()) {
+                            Some(self.prompt_win().vim_mode)
                         } else {
                             None
                         },
@@ -349,8 +351,8 @@ impl TuiApp {
         {
             let in_insert = match self.app_focus {
                 crate::app::AppFocus::Prompt => {
-                    !self.input.vim_enabled()
-                        || self.input.win.vim_mode == crate::smelt_term::VimMode::Insert
+                    !self.input.vim_enabled(self.prompt_win())
+                        || self.prompt_win().vim_mode == crate::smelt_term::VimMode::Insert
                 }
                 crate::app::AppFocus::Content => false,
             };
@@ -381,7 +383,7 @@ impl TuiApp {
                 code: KeyCode::Esc,
                 ..
             })
-        ) && !self.input.vim_enabled()
+        ) && !self.input.vim_enabled(self.prompt_win())
         {
             return EventOutcome::Noop;
         }
@@ -391,8 +393,9 @@ impl TuiApp {
         }) = ev
         {
             let ghost_text = self.prompt_completer_text();
-            let ghost = ghost_text.is_some() && self.input.source.is_empty();
-            let ctx = self.input.key_context(false, ghost);
+            let ghost = ghost_text.is_some() && self.prompt_buf().source().is_empty();
+            let pctx_ref = crate::input::prompt_ctx_ref(&self.ui);
+            let ctx = self.input.key_context(pctx_ref, false, ghost);
 
             // Editing keys dismiss ghost text; transparent actions (mode toggles, redraw) preserve it.
             if ghost {
@@ -400,7 +403,8 @@ impl TuiApp {
                     Some(KeyAction::AcceptGhostText) => {
                         let full = self.take_prompt_completer().unwrap();
                         let line = full.lines().next().unwrap_or(&full).to_string();
-                        self.input.replace_text(line, None);
+                        let mut pctx = crate::input::prompt_ctx_mut(&mut self.ui);
+                        self.input.replace_text(&mut pctx, line, None);
                         return EventOutcome::Redraw;
                     }
                     Some(
@@ -426,7 +430,8 @@ impl TuiApp {
                             return EventOutcome::Redraw;
                         }
                         t.last_ctrlc = Some(Instant::now());
-                        self.input.clear();
+                        let mut pctx = crate::input::prompt_ctx_mut(&mut self.ui);
+                        self.input.clear(&mut pctx);
                         return EventOutcome::Redraw;
                     }
                     _ => {}
@@ -434,9 +439,13 @@ impl TuiApp {
             }
         }
 
-        let action =
-            self.input
-                .handle_event(ev, Some(&mut self.input_history), &mut self.core.clipboard);
+        let mut pctx = crate::input::prompt_ctx_mut(&mut self.ui);
+        let action = self.input.handle_event(
+            &mut pctx,
+            ev,
+            Some(&mut self.input_history),
+            &mut self.core.clipboard,
+        );
         self.dispatch_input_action(action)
     }
 
@@ -456,7 +465,8 @@ impl TuiApp {
             code, modifiers, ..
         }) = ev
         {
-            let ctx = self.input.key_context(true, false);
+            let pctx_ref = crate::input::prompt_ctx_ref(&self.ui);
+            let ctx = self.input.key_context(pctx_ref, true, false);
             if let Some(action) = keymap::lookup(code, modifiers, &ctx) {
                 match action {
                     KeyAction::CancelAgent => {
@@ -473,7 +483,8 @@ impl TuiApp {
                             return EventOutcome::Noop;
                         }
                         t.last_ctrlc = Some(Instant::now());
-                        self.input.clear();
+                        let mut pctx = crate::input::prompt_ctx_mut(&mut self.ui);
+                        self.input.clear(&mut pctx);
                         self.queued_messages.clear();
                         return EventOutcome::Noop;
                     }
@@ -489,8 +500,8 @@ impl TuiApp {
                 ..
             })
         ) {
-            let cur_mode = if self.input.vim_enabled() {
-                Some(self.input.win.vim_mode)
+            let cur_mode = if self.input.vim_enabled(self.prompt_win()) {
+                Some(self.prompt_win().vim_mode)
             } else {
                 None
             };
@@ -501,20 +512,27 @@ impl TuiApp {
                 &mut t.esc_vim_mode,
             ) {
                 EscAction::VimToNormal => {
-                    self.input.handle_event(ev, None, &mut self.core.clipboard);
+                    let mut pctx = crate::input::prompt_ctx_mut(&mut self.ui);
+                    self.input
+                        .handle_event(&mut pctx, ev, None, &mut self.core.clipboard);
                 }
                 EscAction::Unqueue => {
+                    let mut pctx = crate::input::prompt_ctx_mut(&mut self.ui);
                     let mut combined = self.queued_messages.join("\n");
-                    if !self.input.source.is_empty() {
+                    if !pctx.buf.source().is_empty() {
                         combined.push('\n');
-                        combined.push_str(&self.input.source);
+                        combined.push_str(pctx.buf.source());
                     }
-                    self.input.replace_text(combined, None);
+                    self.input.replace_text(&mut pctx, combined, None);
                     self.queued_messages.clear();
                 }
                 EscAction::Cancel { restore_vim } => {
                     if let Some(mode) = restore_vim {
-                        self.input.set_vim_mode(mode);
+                        let win = self
+                            .ui
+                            .win_mut(crate::app::PROMPT_WIN)
+                            .expect("prompt window");
+                        self.input.set_vim_mode(win, mode);
                     }
                     return EventOutcome::CancelAgent;
                 }
@@ -523,9 +541,13 @@ impl TuiApp {
             return EventOutcome::Noop;
         }
 
-        let input_action =
-            self.input
-                .handle_event(ev, Some(&mut self.input_history), &mut self.core.clipboard);
+        let mut pctx = crate::input::prompt_ctx_mut(&mut self.ui);
+        let input_action = self.input.handle_event(
+            &mut pctx,
+            ev,
+            Some(&mut self.input_history),
+            &mut self.core.clipboard,
+        );
         match input_action {
             Action::Submit {
                 mut content,
@@ -550,7 +572,7 @@ impl TuiApp {
                 self.edit_in_editor();
             }
             Action::CenterScroll => {
-                self.input.win.pending_recenter = true;
+                self.prompt_win_mut().pending_recenter = true;
             }
             Action::NotifyError(msg) => {
                 self.notify_error(msg);
@@ -571,7 +593,7 @@ impl TuiApp {
                 EventOutcome::Noop
             }
             Action::CenterScroll => {
-                self.input.win.pending_recenter = true;
+                self.prompt_win_mut().pending_recenter = true;
                 EventOutcome::Noop
             }
             Action::Redraw => EventOutcome::Redraw,
@@ -595,7 +617,7 @@ impl TuiApp {
                 return;
             }
         };
-        if let Err(e) = std::fs::write(tmp.path(), &self.input.source) {
+        if let Err(e) = std::fs::write(tmp.path(), self.prompt_buf().source()) {
             self.notify_error(format!("write tmp: {e}"));
             return;
         }
@@ -616,7 +638,8 @@ impl TuiApp {
         match status {
             Ok(s) if s.success() => match std::fs::read_to_string(tmp.path()) {
                 Ok(new) => {
-                    self.input.replace_text(new, None);
+                    let mut pctx = crate::input::prompt_ctx_mut(&mut self.ui);
+                    self.input.replace_text(&mut pctx, new, None);
                 }
                 Err(e) => self.notify_error(format!("read tmp: {e}")),
             },
@@ -756,16 +779,22 @@ impl TuiApp {
 
     /// Snap the transcript cursor to the nearest selectable cell, skipping gutters and padding.
     pub(crate) fn snap_transcript_cursor(&mut self) {
-        let rows = self.full_transcript_display_text(self.core.config.settings.show_thinking);
-        let snapped = self.snap_cpos_to_selectable(
-            &rows,
-            self.transcript_window.cpos,
-            self.core.config.settings.show_thinking,
-        );
-        if snapped != self.transcript_window.cpos {
-            self.transcript_window.cpos = snapped;
+        let win_id = self.well_known.transcript;
+        let buf_id = self.transcript_win().buf;
+        let cpos = self.transcript_win().cpos;
+        let show_thinking = self.core.config.settings.show_thinking;
+        let rows: Vec<String> = self
+            .ui
+            .buf(buf_id)
+            .map(|b| b.lines().to_vec())
+            .unwrap_or_default();
+        let snapped = self.snap_cpos_to_selectable(&rows, cpos, show_thinking);
+        if snapped != cpos {
+            self.transcript_win_mut().cpos = snapped;
             let viewport = self.viewport_rows_estimate();
-            self.transcript_window.resync(&rows, viewport);
+            let (win, buf) = self.ui.win_and_buf_mut(win_id, buf_id);
+            win.expect("transcript window")
+                .resync(buf.expect("transcript buffer"), viewport);
         }
     }
 
@@ -786,23 +815,23 @@ impl TuiApp {
         if !vim_enabled || viewport_rows == 0 {
             return false;
         }
-        let rows: Vec<String> = self
-            .ui
-            .buf(buf_id)
-            .map(|b| b.lines().to_vec())
-            .unwrap_or_default();
-        if rows.is_empty() {
-            return false;
-        }
-        let win_mut = match self.ui.win_mut(win) {
+        let (win_mut, buf) = self.ui.win_and_buf_mut(win, buf_id);
+        let win_mut = match win_mut {
             Some(w) => w,
             None => return false,
         };
+        let buf = match buf {
+            Some(b) => b,
+            None => return false,
+        };
+        if buf.lines().is_empty() {
+            return false;
+        }
         if win_mut.vim_mode == crate::smelt_term::VimMode::Insert {
             win_mut.set_vim_mode(crate::smelt_term::VimMode::Normal);
         }
-        let status = win_mut.handle_key(k, &rows, viewport_rows, &mut self.core.clipboard);
-        let max_scroll = (rows.len() as u16).saturating_sub(viewport_rows);
+        let status = win_mut.handle_key(buf, k, &mut self.core.clipboard);
+        let max_scroll = (buf.lines().len() as u16).saturating_sub(viewport_rows);
         win_mut.follow_tail = win_mut.scroll_top >= max_scroll;
         matches!(status, crate::smelt_term::Status::Consumed)
     }

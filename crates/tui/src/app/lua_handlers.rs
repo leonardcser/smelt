@@ -30,12 +30,18 @@ impl TuiApp {
                 self.agent = None;
             }
             if let Some((text, images)) = self.rewind_to(bidx) {
-                self.input.restore_from_rewind(text, images);
+                let mut pctx = crate::input::prompt_ctx_mut(&mut self.ui);
+                self.input.restore_from_rewind(&mut pctx, text, images);
             }
             while self.core.engine.try_recv().is_ok() {}
             self.save_session();
         } else if restore_vim_insert {
-            self.input.set_vim_mode(crate::smelt_term::VimMode::Insert);
+            let win = self
+                .ui
+                .win_mut(crate::app::PROMPT_WIN)
+                .expect("prompt window");
+            self.input
+                .set_vim_mode(win, crate::smelt_term::VimMode::Insert);
         }
     }
 
@@ -45,12 +51,12 @@ impl TuiApp {
             self.load_session(loaded);
             self.restore_screen();
             self.finish_transcript_turn();
-            self.transcript_window.scroll_to_bottom();
+            self.transcript_win_mut().scroll_to_bottom();
         }
     }
 
     pub(crate) fn yank_current_block(&mut self) {
-        let abs_row = self.transcript_window.cursor_abs_row();
+        let abs_row = self.transcript_win().cursor_abs_row();
         if let Some(text) = self.block_text_at_row(abs_row, self.core.config.settings.show_thinking)
         {
             if self.core.clipboard.write(&text).is_ok() {

@@ -112,8 +112,8 @@ impl TuiApp {
         self.queued_messages.clear();
         self.task_label = None;
         self.working.clear();
-        self.input.win.scroll_top = 0;
         if let Some(w) = self.ui.win_mut(crate::app::PROMPT_WIN) {
+            w.scroll_top = 0;
             w.viewport = None;
         }
         if let Some(w) = self.ui.win_mut(crate::app::TRANSCRIPT_WIN) {
@@ -121,8 +121,9 @@ impl TuiApp {
         }
         self.clear_transcript();
         self.app_focus = crate::app::AppFocus::Prompt;
-        self.input.clear();
-        self.input.store.clear();
+        let mut pctx = crate::input::prompt_ctx_mut(&mut self.ui);
+        self.input.clear(&mut pctx);
+        self.input.store.lock().unwrap().clear();
         self.core.processes.clear();
         self.core.session = session::Session::new();
         self.pending_title = false;
@@ -200,8 +201,9 @@ impl TuiApp {
             .unwrap_or(0.0);
         self.reset_session_permissions();
         self.queued_messages.clear();
-        self.input.clear();
-        self.input.store.clear();
+        let mut pctx = crate::input::prompt_ctx_mut(&mut self.ui);
+        self.input.clear(&mut pctx);
+        self.input.store.lock().unwrap().clear();
         self.pending_title = false;
         self.core.processes.clear();
         self.compact_epoch += 1;
@@ -369,6 +371,8 @@ impl TuiApp {
         let blobs = self
             .input
             .store
+            .lock()
+            .unwrap()
             .image_blobs()
             .into_iter()
             .map(|(filename, data_url)| crate::persist::Blob { filename, data_url })
@@ -483,7 +487,7 @@ impl TuiApp {
         {
             self.working.finish(TurnOutcome::Done);
         };
-        self.transcript_window.scroll_to_bottom();
+        self.transcript_win_mut().scroll_to_bottom();
     }
 
     pub(crate) fn maybe_auto_compact(&mut self) {

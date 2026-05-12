@@ -19,6 +19,10 @@ pub struct KillRing {
     linewise: bool,
     /// Byte range in the source buffer the last kill was captured from.
     source_range: Option<(usize, usize)>,
+    /// Monotonic counter, incremented on every `set_with_source`. Hosts use it
+    /// to detect "vim just yanked something" without depending on the flash
+    /// timer (which is a UI animation concern, not an event-tick).
+    yank_tick: u64,
     /// Set by `mark_yanked`; drives the post-yank highlight flash.
     last_yank_at: Option<Instant>,
     /// Last text pushed to the system clipboard. Paste sites compare against
@@ -41,6 +45,7 @@ impl KillRing {
             pop_idx: 0,
             linewise: false,
             source_range: None,
+            yank_tick: 0,
             last_yank_at: None,
             last_clipboard_write: None,
         }
@@ -113,13 +118,21 @@ impl KillRing {
         self.linewise = linewise;
     }
 
-    /// Set kill text, linewise flag, and source byte range. Clears `last_yank_at`
-    /// so deletes don't inherit a prior yank's flash; call `mark_yanked` after for yanks.
+    /// Set kill text, linewise flag, and source byte range. Bumps `yank_tick`
+    /// so hosts can detect that a yank happened. Clears `last_yank_at` so
+    /// deletes don't inherit a prior yank's flash; call `mark_yanked` after for yanks.
     pub fn set_with_source(&mut self, text: String, linewise: bool, start: usize, end: usize) {
         self.current = text;
         self.linewise = linewise;
         self.source_range = Some((start, end));
+        self.yank_tick = self.yank_tick.wrapping_add(1);
         self.last_yank_at = None;
+    }
+
+    /// Monotonic counter, bumped on every `set_with_source`. Hosts snapshot
+    /// this before and after a dispatch; a difference means a yank landed.
+    pub fn yank_tick(&self) -> u64 {
+        self.yank_tick
     }
 
     pub fn current(&self) -> &str {

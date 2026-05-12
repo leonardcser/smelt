@@ -311,12 +311,13 @@ impl TuiApp {
             }
             let leftover = std::mem::take(&mut self.queued_messages);
             if !leftover.is_empty() {
+                let mut ctx = crate::input::prompt_ctx_mut(&mut self.ui);
                 let mut combined = leftover.join("\n");
-                if !self.input.source.is_empty() {
+                if !ctx.buf.source().is_empty() {
                     combined.push('\n');
-                    combined.push_str(&self.input.source);
+                    combined.push_str(ctx.buf.source());
                 }
-                self.input.replace_text(combined, None);
+                self.input.replace_text(&mut ctx, combined, None);
             }
         } else {
             {
@@ -638,7 +639,7 @@ impl TuiApp {
     ) -> bool {
         let should_queue = last_keypress
             .is_some_and(|t| t.elapsed() < Duration::from_millis(CONFIRM_DEFER_MS))
-            && !self.input.source.is_empty();
+            && !self.prompt_buf().source().is_empty();
 
         match ctrl {
             SessionControl::Continue => true,

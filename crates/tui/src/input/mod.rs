@@ -11,9 +11,56 @@ use crate::smelt_term::VimMode;
 use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
 use protocol::Content;
 use smelt_core::attachment::{Attachment, AttachmentId, AttachmentStore};
+use std::sync::{Arc, Mutex};
 use vim_bridge::VimBridgeResult;
 
-pub(crate) const ATTACHMENT_MARKER: char = '\u{FFFC}';
+pub(crate) use smelt_buffer::ATTACHMENT_MARKER;
+
+/// Mutable borrow bundle for prompt edits. Same shape that a Lua-created
+/// editable buffer will eventually present, so methods written against `&mut PromptCtx`
+/// transfer over without further signature churn.
+pub(crate) struct PromptCtx<'a> {
+    pub(crate) buf: &'a mut crate::smelt_term::Buffer,
+    pub(crate) win: &'a mut crate::smelt_term::Window,
+}
+
+impl<'a> PromptCtx<'a> {
+    pub(crate) fn as_ref(&self) -> PromptCtxRef<'_> {
+        PromptCtxRef {
+            buf: self.buf,
+            win: self.win,
+        }
+    }
+}
+
+/// Read-only sibling of `PromptCtx`.
+#[derive(Clone, Copy)]
+pub(crate) struct PromptCtxRef<'a> {
+    pub(crate) buf: &'a crate::smelt_term::Buffer,
+    pub(crate) win: &'a crate::smelt_term::Window,
+}
+
+/// Disjoint-borrow helper: returns the prompt's `(win, buf)` bundle borrowed
+/// from `ui` alone, leaving the rest of `TuiApp` (notably `self.input`)
+/// independently borrowable at the call site. Replaces the
+/// `ui.win_and_buf_mut(...)` + manual struct-ctor pattern.
+pub(crate) fn prompt_ctx_mut(ui: &mut crate::smelt_term::Ui) -> PromptCtx<'_> {
+    let (win, buf) = ui.win_and_buf_mut(crate::app::PROMPT_WIN, crate::app::PROMPT_EDIT_BUF);
+    PromptCtx {
+        buf: buf.expect("prompt edit buffer"),
+        win: win.expect("prompt window"),
+    }
+}
+
+/// Read-only counterpart of [`prompt_ctx_mut`].
+pub(crate) fn prompt_ctx_ref(ui: &crate::smelt_term::Ui) -> PromptCtxRef<'_> {
+    PromptCtxRef {
+        buf: ui
+            .buf(crate::app::PROMPT_EDIT_BUF)
+            .expect("prompt edit buffer"),
+        win: ui.win(crate::app::PROMPT_WIN).expect("prompt window"),
+    }
+}
 
 /// Snapshot of the input buffer state (used for Ctrl+S stash).
 /// Owns its attachment data so it survives store clears across sessions.
@@ -27,14 +74,14 @@ pub(crate) struct InputSnapshot {
 
 // ── Shared input state ───────────────────────────────────────────────────────
 
-/// Prompt window state: `Window` plus prompt-specific side-cars (completer, stash, attachments).
-/// `source` is the canonical edit buffer for the prompt. The wrapped display rows
-/// passed to `Window::handle_mouse` are derived on demand by `PromptWrap`; the
-/// `Window`'s own `text` cache is unused on the prompt path.
+/// Prompt-specific side-cars (completer, stash, attachments).
+/// The canonical edit buffer lives in `ui.bufs[PROMPT_EDIT_BUF]` and the
+/// window in `ui.wins[PROMPT_WIN]`; methods that touch either take
+/// `&mut Buffer`/`&mut Window` (or shared refs) as parameters. Display
+/// coordinates (`cursor_row`, `cursor_col`, `scroll_top`) are synced from
+/// `buf.source` via `sync_display_coords` before each render.
 pub(crate) struct PromptState {
-    pub(crate) win: crate::smelt_term::Window,
-    pub(crate) source: String,
-    pub(crate) store: AttachmentStore,
+    pub(crate) store: Arc<Mutex<AttachmentStore>>,
     pub(crate) completer: Option<CompleterSession>,
     /// WinIds of closed completer sessions, drained and closed on the next frame.
     pub(crate) pending_picker_close: Vec<crate::smelt_term::WinId>,
@@ -67,20 +114,9 @@ impl Default for PromptState {
 
 impl PromptState {
     pub(crate) fn new() -> Self {
-        let mut win = crate::smelt_term::Window::new(
-            crate::app::PROMPT_WIN,
-            crate::app::PROMPT_EDIT_BUF,
-            crate::smelt_term::SplitConfig {
-                region: "prompt".into(),
-                gutters: crate::smelt_term::Gutters::default(),
-            },
-        );
-        win.readonly = false;
-        win.history = crate::smelt_term::UndoHistory::new(Some(100));
+        let store = Arc::new(Mutex::new(AttachmentStore::new()));
         Self {
-            win,
-            source: String::new(),
-            store: AttachmentStore::new(),
+            store,
             completer: None,
             pending_picker_close: Vec::new(),
             stash: None,
@@ -91,19 +127,19 @@ impl PromptState {
     }
 
     /// Active selection range `(start_byte, end_byte)` for vim visual or shift+key selection.
-    pub(crate) fn selection_range(&self) -> Option<(usize, usize)> {
+    pub(crate) fn selection_range(&self, ctx: PromptCtxRef<'_>) -> Option<(usize, usize)> {
         // Vim visual mode takes priority.
-        if self.win.vim_enabled {
+        if ctx.win.vim_enabled {
             if let Some(range) = crate::smelt_term::vim::visual_range(
-                &self.win.vim_state,
-                &self.source,
-                self.win.cpos,
-                self.win.vim_mode,
+                &ctx.win.vim_state,
+                ctx.buf.source(),
+                ctx.win.cpos,
+                ctx.win.vim_mode,
             ) {
                 return Some(range);
             }
         }
-        self.win.selection_range_at(self.win.cpos, &self.source)
+        ctx.win.selection_range_at(ctx.win.cpos, ctx.buf.source())
     }
 
     /// Selection range for rendering. Falls back to yank-flash so vim copy ops get the
@@ -111,27 +147,28 @@ impl PromptState {
     /// Editing must use `selection_range` — the flash must never affect mutations.
     pub(crate) fn display_selection_range(
         &self,
+        ctx: PromptCtxRef<'_>,
         clipboard: &crate::smelt_term::Clipboard,
     ) -> Option<(usize, usize)> {
-        if let Some(range) = self.selection_range() {
+        if let Some(range) = self.selection_range(ctx) {
             return Some(range);
         }
         clipboard
             .kill_ring
             .yank_flash_range(std::time::Instant::now())
             .filter(|&(s, e)| {
-                e <= self.source.len()
-                    && self.source.is_char_boundary(s)
-                    && self.source.is_char_boundary(e)
+                e <= ctx.buf.source().len()
+                    && ctx.buf.source().is_char_boundary(s)
+                    && ctx.buf.source().is_char_boundary(e)
             })
     }
 
-    fn has_selection(&self) -> bool {
-        self.selection_range().is_some()
+    fn has_selection(&self, ctx: PromptCtxRef<'_>) -> bool {
+        self.selection_range(ctx).is_some()
     }
 
-    pub(crate) fn clear_selection(&mut self) {
-        self.win.selection_anchor = None;
+    pub(crate) fn clear_selection(&mut self, win: &mut crate::smelt_term::Window) {
+        win.selection_anchor = None;
     }
 
     /// End the active completer session, queuing its picker leaf for close. Use instead of `= None`.
@@ -149,22 +186,25 @@ impl PromptState {
         self.completer = Some(CompleterSession::new(comp));
     }
 
-    fn extend_selection(&mut self) {
-        self.win.extend_selection(self.win.cpos);
+    fn extend_selection(&mut self, win: &mut crate::smelt_term::Window) {
+        win.extend_selection(win.cpos);
     }
 
-    fn delete_selection(&mut self) -> Option<String> {
-        let (start, end) = self.selection_range()?;
-        let deleted = self.source[start..end].to_string();
-        self.remove_attachments_in_range(start, end);
-        self.source.drain(start..end);
-        self.win.cpos = start;
-        self.win.selection_anchor = None;
+    fn delete_selection(
+        &mut self,
+        ctx: &mut PromptCtx<'_>,
+    ) -> Option<crate::smelt_term::CopyOutput> {
+        let (start, end) = self.selection_range(ctx.as_ref())?;
+        let deleted = ctx.buf.copy_range(start..end);
+        ctx.buf.remove_attachments_in_range(start, end);
+        ctx.buf.source_mut().drain(start..end);
+        ctx.win.cpos = start;
+        ctx.win.selection_anchor = None;
         Some(deleted)
     }
 
-    pub(crate) fn vim_enabled(&self) -> bool {
-        self.win.vim_enabled
+    pub(crate) fn vim_enabled(&self, win: &crate::smelt_term::Window) -> bool {
+        win.vim_enabled
     }
 
     /// True when content originated from a paste; skips `!` shell-escape treatment.
@@ -172,20 +212,20 @@ impl PromptState {
         self.from_paste
     }
 
-    pub(crate) fn set_vim_enabled(&mut self, enabled: bool) {
-        self.win.set_vim_enabled(enabled);
+    pub(crate) fn set_vim_enabled(&mut self, win: &mut crate::smelt_term::Window, enabled: bool) {
+        win.set_vim_enabled(enabled);
     }
 
     /// Set this prompt window's vim mode and reset the in-flight key sequence.
-    pub(crate) fn set_vim_mode(&mut self, new: VimMode) {
-        if self.win.vim_enabled {
-            self.win.set_vim_mode(new);
+    pub(crate) fn set_vim_mode(&mut self, win: &mut crate::smelt_term::Window, new: VimMode) {
+        if win.vim_enabled {
+            win.set_vim_mode(new);
         }
     }
 
     /// Current vim mode for this prompt window.
-    pub(crate) fn vim_mode(&self) -> VimMode {
-        self.win.vim_mode
+    pub(crate) fn vim_mode(&self, win: &crate::smelt_term::Window) -> VimMode {
+        win.vim_mode
     }
 
     /// Sync kill ring from clipboard before `C-y` paste.
@@ -205,15 +245,16 @@ impl PromptState {
     /// and clears `selection_anchor` — the only invariants every replacement must
     /// uphold. Callers manage attachments / paste-state / completer / undo since
     /// those differ per site.
-    pub(crate) fn install_source(&mut self, text: String, cpos: usize) {
-        self.source = text;
-        self.win.cpos = crate::smelt_term::text::snap(&self.source, cpos);
-        self.win.selection_anchor = None;
+    pub(crate) fn install_source(&mut self, ctx: &mut PromptCtx<'_>, text: String, cpos: usize) {
+        ctx.buf.set_source(text);
+        let source = ctx.buf.source();
+        ctx.win.cpos = crate::smelt_term::text::snap(source, cpos);
+        ctx.win.selection_anchor = None;
     }
 
-    pub(crate) fn clear(&mut self) {
-        self.install_source(String::new(), 0);
-        self.win.attachment_ids.clear();
+    pub(crate) fn clear(&mut self, ctx: &mut PromptCtx<'_>) {
+        self.install_source(ctx, String::new(), 0);
+        ctx.buf.attachment_ids.clear();
         self.close_completer();
         self.from_paste = false;
         // Stash and store are intentionally preserved.
@@ -221,85 +262,96 @@ impl PromptState {
 
     /// Replace the buffer wholesale: snapshot undo, clear attachments/selection/paste-state,
     /// re-derive completer. Direct `source` writes bypass these invariants.
-    pub(crate) fn replace_text(&mut self, text: String, cursor: Option<usize>) {
-        self.save_undo();
+    pub(crate) fn replace_text(
+        &mut self,
+        ctx: &mut PromptCtx<'_>,
+        text: String,
+        cursor: Option<usize>,
+    ) {
+        self.save_undo(ctx);
         let cpos = cursor.unwrap_or(text.len());
-        self.install_source(text, cpos);
-        self.win.attachment_ids.clear();
+        self.install_source(ctx, text, cpos);
+        ctx.buf.attachment_ids.clear();
         self.from_paste = false;
         self.close_completer();
-        self.recompute_completer();
+        self.recompute_completer(ctx.as_ref());
     }
 
     /// Toggle stash. Attachments are cloned out of the store so the stash survives store clears.
-    fn toggle_stash(&mut self) {
+    fn toggle_stash(&mut self, ctx: &mut PromptCtx<'_>) {
         if let Some(snap) = self.stash.take() {
-            self.install_source(snap.buf, snap.cpos);
-            self.win.attachment_ids = snap
+            self.install_source(ctx, snap.buf, snap.cpos);
+            ctx.buf.attachment_ids = snap
                 .attachments
                 .into_iter()
-                .map(|a| self.store.insert(a))
+                .map(|a| self.store.lock().unwrap().insert(a))
                 .collect();
             self.from_paste = snap.from_paste;
             self.close_completer();
-        } else if !self.source.is_empty() || !self.win.attachment_ids.is_empty() {
-            let attachments = std::mem::take(&mut self.win.attachment_ids)
-                .into_iter()
-                .filter_map(|id| self.store.get(id).cloned())
-                .collect();
-            let buf = std::mem::take(&mut self.source);
-            let cpos = std::mem::replace(&mut self.win.cpos, 0);
-            self.stash = Some(InputSnapshot {
-                buf,
-                cpos,
-                attachments,
-                from_paste: self.from_paste,
-            });
-            self.win.selection_anchor = None;
-            self.close_completer();
+        } else {
+            let source_empty = ctx.buf.source().is_empty();
+            let no_attachments = ctx.buf.attachment_ids.is_empty();
+            if !source_empty || !no_attachments {
+                let attachments = std::mem::take(&mut ctx.buf.attachment_ids)
+                    .into_iter()
+                    .filter_map(|id| self.store.lock().unwrap().get(id).cloned())
+                    .collect();
+                let stashed = std::mem::take(ctx.buf.source_mut());
+                let cpos = std::mem::replace(&mut ctx.win.cpos, 0);
+                self.stash = Some(InputSnapshot {
+                    buf: stashed,
+                    cpos,
+                    attachments,
+                    from_paste: self.from_paste,
+                });
+                ctx.win.selection_anchor = None;
+                self.close_completer();
+            }
         }
     }
 
-    pub(crate) fn restore_stash(&mut self) {
+    pub(crate) fn restore_stash(&mut self, ctx: &mut PromptCtx<'_>) {
         if let Some(snap) = self.stash.take() {
-            self.install_source(snap.buf, snap.cpos);
-            self.win.attachment_ids = snap
+            self.install_source(ctx, snap.buf, snap.cpos);
+            ctx.buf.attachment_ids = snap
                 .attachments
                 .into_iter()
-                .map(|a| self.store.insert(a))
+                .map(|a| self.store.lock().unwrap().insert(a))
                 .collect();
             self.from_paste = snap.from_paste;
         }
     }
 
     /// Restore rewind text: replace `[label]` placeholders with attachment markers.
-    pub(crate) fn restore_from_rewind(&mut self, mut text: String, images: Vec<(String, String)>) {
+    pub(crate) fn restore_from_rewind(
+        &mut self,
+        ctx: &mut PromptCtx<'_>,
+        mut text: String,
+        images: Vec<(String, String)>,
+    ) {
         let mut ids = Vec::new();
         for (label, data_url) in images {
             let display = format!("[{label}]");
             if let Some(pos) = text.find(&display) {
                 text.replace_range(pos..pos + display.len(), &ATTACHMENT_MARKER.to_string());
-                let id = self.store.insert_image(label, data_url);
+                let id = self.store.lock().unwrap().insert_image(label, data_url);
                 ids.push(id);
             }
         }
         let cpos = text.len();
-        self.install_source(text, cpos);
-        self.win.attachment_ids = ids;
-    }
-
-    pub(crate) fn cursor_char(&self) -> usize {
-        char_pos(&self.source, self.win.cpos)
+        self.install_source(ctx, text, cpos);
+        ctx.buf.attachment_ids = ids;
     }
 
     /// Expand attachment markers to text. Image markers are stripped (data flows via `Content::Parts`).
-    pub(crate) fn expanded_text(&self) -> String {
+    pub(crate) fn expanded_text(&self, buf: &crate::smelt_term::Buffer) -> String {
         let mut result = String::new();
         let mut att_idx = 0;
-        for c in self.source.chars() {
+        let source = buf.source().to_string();
+        for c in source.chars() {
             if c == ATTACHMENT_MARKER {
-                if let Some(&id) = self.win.attachment_ids.get(att_idx) {
-                    result.push_str(self.store.expanded_text(id));
+                if let Some(&id) = buf.attachment_ids.get(att_idx) {
+                    result.push_str(self.store.lock().unwrap().expanded_text(id));
                 }
                 att_idx += 1;
             } else {
@@ -309,13 +361,16 @@ impl PromptState {
         result
     }
 
-    pub(crate) fn message_display_text(&self) -> String {
+    pub(crate) fn message_display_text(&self, buf: &crate::smelt_term::Buffer) -> String {
         let mut result = String::new();
         let mut att_idx = 0;
-        for c in self.source.chars() {
+        let source = buf.source().to_string();
+        for c in source.chars() {
             if c == ATTACHMENT_MARKER {
-                if let Some(&id) = self.win.attachment_ids.get(att_idx) {
-                    if let Some(Attachment::Image { label, .. }) = self.store.get(id) {
+                if let Some(&id) = buf.attachment_ids.get(att_idx) {
+                    if let Some(Attachment::Image { label, .. }) =
+                        self.store.lock().unwrap().get(id)
+                    {
                         result.push_str(&format!("[{label}]"));
                     }
                 }
@@ -327,21 +382,25 @@ impl PromptState {
         result
     }
 
-    pub(crate) fn insert_image(&mut self, label: String, data_url: String) {
-        let id = self.store.insert_image(label, data_url);
-        self.insert_attachment_id(id);
+    pub(crate) fn insert_image(
+        &mut self,
+        ctx: &mut PromptCtx<'_>,
+        label: String,
+        data_url: String,
+    ) {
+        let id = self.store.lock().unwrap().insert_image(label, data_url);
+        self.insert_attachment_id(ctx, id);
     }
 
     /// Build submission `Content`. Duplicate image refs are deduplicated (base64 payloads are large).
-    pub(crate) fn build_content(&self) -> Content {
-        let text = self.expanded_text();
+    pub(crate) fn build_content(&self, buf: &crate::smelt_term::Buffer) -> Content {
+        let text = self.expanded_text(buf);
         let mut seen: std::collections::HashSet<AttachmentId> = std::collections::HashSet::new();
-        let images: Vec<(String, String)> = self
-            .win
+        let images: Vec<(String, String)> = buf
             .attachment_ids
             .iter()
             .filter(|&&id| seen.insert(id))
-            .filter_map(|&id| match self.store.get(id) {
+            .filter_map(|&id| match self.store.lock().unwrap().get(id) {
                 Some(Attachment::Image { label, data_url }) => {
                     Some((label.clone(), data_url.clone()))
                 }
@@ -351,22 +410,45 @@ impl PromptState {
         Content::with_images(text, images)
     }
 
-    pub(crate) fn key_context(&self, agent_running: bool, ghost_text_visible: bool) -> KeyContext {
+    pub(crate) fn key_context(
+        &self,
+        ctx: PromptCtxRef<'_>,
+        agent_running: bool,
+        ghost_text_visible: bool,
+    ) -> KeyContext {
         KeyContext {
-            buf_empty: self.source.is_empty() && self.win.attachment_ids.is_empty(),
-            vim_non_insert: self.win.vim_enabled
+            buf_empty: ctx.buf.source().is_empty() && ctx.buf.attachment_ids.is_empty(),
+            vim_non_insert: ctx.win.vim_enabled
                 && matches!(
-                    self.win.vim_mode,
+                    ctx.win.vim_mode,
                     VimMode::Normal | VimMode::Visual | VimMode::VisualLine
                 ),
-            vim_enabled: self.win.vim_enabled,
+            vim_enabled: ctx.win.vim_enabled,
             agent_running,
             ghost_text_visible,
         }
     }
 
+    /// Sync `win.cursor_row`, `win.cursor_col`, and `win.scroll_top` from the current
+    /// source `cpos` using the buffer's parser (if any) or identity mapping.
+    pub(crate) fn sync_display_coords(&mut self, ctx: &mut PromptCtx<'_>, viewport_rows: u16) {
+        let (cursor_line, cursor_col) = ctx.buf.display_cursor_pos(ctx.win.cpos);
+        let total_rows = ctx.buf.line_count() as u16;
+        ctx.win
+            .set_cursor_position(cursor_line as u16, cursor_col as u16);
+        if ctx.win.pending_recenter {
+            let max_scroll = total_rows.saturating_sub(viewport_rows.max(1));
+            let s = cursor_line.saturating_sub((viewport_rows.max(1) / 2) as usize);
+            ctx.win.scroll_top = (s as u16).min(max_scroll);
+        } else {
+            ctx.win
+                .keep_cursor_visible(cursor_line as u16, total_rows, viewport_rows);
+        }
+    }
+
     fn execute_key_action(
         &mut self,
+        ctx: &mut PromptCtx<'_>,
         action: KeyAction,
         history: Option<&mut History>,
         clipboard: &mut crate::smelt_term::Clipboard,
@@ -380,7 +462,7 @@ impl PromptState {
             action,
             KeyAction::MoveUp | KeyAction::MoveDown | KeyAction::SelectUp | KeyAction::SelectDown
         ) {
-            self.win.curswant = None;
+            ctx.win.curswant = None;
         }
         // Selection actions extend; editing actions consume; everything else clears.
         let is_select = matches!(
@@ -409,7 +491,7 @@ impl PromptState {
         );
         let preserves_selection = matches!(action, KeyAction::CopySelection);
         if !is_select && !is_editing && !preserves_selection {
-            self.clear_selection();
+            self.clear_selection(ctx.win);
         }
         match action {
             // Caller handles these.
@@ -417,142 +499,149 @@ impl PromptState {
 
             // ── TuiApp control ─────────────────────────────────────────────
             KeyAction::ClearBuffer => {
-                self.clear();
+                self.clear(ctx);
                 Action::Redraw
             }
             // Intercepted by the global chord layer; these arms are unreachable in practice.
             KeyAction::ToggleMode | KeyAction::CycleReasoning => Action::Noop,
             KeyAction::ToggleStash => {
-                self.toggle_stash();
+                self.toggle_stash(ctx);
                 Action::Redraw
             }
             KeyAction::Redraw => Action::Redraw,
 
             // ── Submit / newline ─────────────────────────────────────────
             KeyAction::Submit => {
-                if self.source.is_empty() && self.win.attachment_ids.is_empty() {
+                let source_empty = ctx.buf.source().is_empty();
+                let no_attachments = ctx.buf.attachment_ids.is_empty();
+                if source_empty && no_attachments {
                     Action::SubmitEmpty
                 } else {
-                    let display = self.message_display_text();
-                    let content = self.build_content();
-                    self.clear();
+                    let display = self.message_display_text(ctx.buf);
+                    let content = self.build_content(ctx.buf);
+                    self.clear(ctx);
                     Action::Submit { content, display }
                 }
             }
             KeyAction::InsertNewline => {
-                if self.selection_range().is_some() {
-                    self.save_undo();
-                    self.delete_selection();
+                if self.selection_range(ctx.as_ref()).is_some() {
+                    self.save_undo(ctx);
+                    self.delete_selection(ctx);
                 }
-                self.source.insert(self.win.cpos, '\n');
-                self.win.cpos += 1;
+                let cpos = ctx.win.cpos;
+                ctx.buf.source_mut().insert(cpos, '\n');
+                ctx.win.cpos += 1;
                 self.close_completer();
                 Action::Redraw
             }
 
             // ── Navigation ──────────────────────────────────────────────
             KeyAction::MoveLeft => {
-                if self.win.cpos > 0 {
-                    let cp = char_pos(&self.source, self.win.cpos);
-                    self.win.cpos = byte_of_char(&self.source, cp - 1);
-                    self.recompute_completer();
+                if ctx.win.cpos > 0 {
+                    let cpos = ctx.win.cpos;
+                    let source = ctx.buf.source();
+                    let cp = char_pos(source, cpos);
+                    ctx.win.cpos = byte_of_char(source, cp - 1);
+                    self.recompute_completer(ctx.as_ref());
                     Action::Redraw
                 } else {
                     Action::Noop
                 }
             }
             KeyAction::MoveRight => {
-                if self.win.cpos < self.source.len() {
-                    let cp = char_pos(&self.source, self.win.cpos);
-                    self.win.cpos = byte_of_char(&self.source, cp + 1);
-                    self.recompute_completer();
+                let cpos = ctx.win.cpos;
+                if cpos < ctx.buf.source().len() {
+                    let source = ctx.buf.source();
+                    let cp = char_pos(source, cpos);
+                    ctx.win.cpos = byte_of_char(source, cp + 1);
+                    self.recompute_completer(ctx.as_ref());
                     Action::Redraw
                 } else {
                     Action::Noop
                 }
             }
             KeyAction::MoveWordForward => {
-                if self.move_word_forward() {
+                if self.move_word_forward(ctx) {
                     Action::Redraw
                 } else {
                     Action::Noop
                 }
             }
             KeyAction::MoveWordBackward => {
-                if self.move_word_backward() {
+                if self.move_word_backward(ctx) {
                     Action::Redraw
                 } else {
                     Action::Noop
                 }
             }
             KeyAction::MoveUp => {
-                let (new_pos, new_want) = crate::smelt_term::text::vertical_move(
-                    &self.source,
-                    self.win.cpos,
-                    -1,
-                    self.win.curswant,
-                );
-                self.win.curswant = Some(new_want);
-                if new_pos != self.win.cpos {
-                    self.win.cpos = new_pos;
-                    self.recompute_completer();
+                let cpos = ctx.win.cpos;
+                let source = ctx.buf.source();
+                let (new_pos, new_want) =
+                    crate::smelt_term::text::vertical_move(source, cpos, -1, ctx.win.curswant);
+                ctx.win.curswant = Some(new_want);
+                if new_pos != ctx.win.cpos {
+                    ctx.win.cpos = new_pos;
+                    self.recompute_completer(ctx.as_ref());
                     Action::Redraw
-                } else if let Some(entry) = history.and_then(|h| h.up(&self.source)) {
-                    self.install_source(entry.to_string(), 0);
-                    self.win.curswant = None;
-                    self.sync_completer();
+                } else if let Some(entry) = history.and_then(|h| h.up(ctx.buf.source())) {
+                    let text = entry.to_string();
+                    self.install_source(ctx, text, 0);
+                    ctx.win.curswant = None;
+                    self.sync_completer(ctx.as_ref());
                     Action::Redraw
                 } else {
                     Action::Noop
                 }
             }
             KeyAction::MoveDown => {
-                let (new_pos, new_want) = crate::smelt_term::text::vertical_move(
-                    &self.source,
-                    self.win.cpos,
-                    1,
-                    self.win.curswant,
-                );
-                self.win.curswant = Some(new_want);
-                if new_pos != self.win.cpos {
-                    self.win.cpos = new_pos;
-                    self.recompute_completer();
+                let cpos = ctx.win.cpos;
+                let source = ctx.buf.source();
+                let (new_pos, new_want) =
+                    crate::smelt_term::text::vertical_move(source, cpos, 1, ctx.win.curswant);
+                ctx.win.curswant = Some(new_want);
+                if new_pos != ctx.win.cpos {
+                    ctx.win.cpos = new_pos;
+                    self.recompute_completer(ctx.as_ref());
                     Action::Redraw
                 } else if let Some(entry) = history.and_then(|h| h.down()) {
                     let s = entry.to_string();
                     let cpos = s.len();
-                    self.install_source(s, cpos);
-                    self.win.curswant = None;
-                    self.sync_completer();
+                    self.install_source(ctx, s, cpos);
+                    ctx.win.curswant = None;
+                    self.sync_completer(ctx.as_ref());
                     Action::Redraw
                 } else {
                     Action::Noop
                 }
             }
             KeyAction::MoveStartOfLine => {
-                self.win.cpos = crate::smelt_term::text::line_start(&self.source, self.win.cpos);
-                self.recompute_completer();
+                let cpos = ctx.win.cpos;
+                ctx.win.cpos = crate::smelt_term::text::line_start(ctx.buf.source(), cpos);
+                self.recompute_completer(ctx.as_ref());
                 Action::Redraw
             }
             KeyAction::MoveEndOfLine => {
-                self.win.cpos = crate::smelt_term::text::line_end(&self.source, self.win.cpos);
-                self.recompute_completer();
+                let cpos = ctx.win.cpos;
+                ctx.win.cpos = crate::smelt_term::text::line_end(ctx.buf.source(), cpos);
+                self.recompute_completer(ctx.as_ref());
                 Action::Redraw
             }
             KeyAction::MoveStartOfBuffer => {
-                self.win.cpos = 0;
-                self.recompute_completer();
+                ctx.win.cpos = 0;
+                self.recompute_completer(ctx.as_ref());
                 Action::Redraw
             }
             KeyAction::MoveEndOfBuffer => {
-                self.win.cpos = self.source.len();
-                self.recompute_completer();
+                ctx.win.cpos = ctx.buf.source().len();
+                self.recompute_completer(ctx.as_ref());
                 Action::Redraw
             }
             KeyAction::HistoryPrev => {
-                if let Some(entry) = history.and_then(|h| h.up(&self.source)) {
-                    self.install_source(entry.to_string(), 0);
-                    self.sync_completer();
+                if let Some(entry) = history.and_then(|h| h.up(ctx.buf.source())) {
+                    let text = entry.to_string();
+                    self.install_source(ctx, text, 0);
+                    self.sync_completer(ctx.as_ref());
                     Action::Redraw
                 } else {
                     Action::Noop
@@ -562,8 +651,8 @@ impl PromptState {
                 if let Some(entry) = history.and_then(|h| h.down()) {
                     let s = entry.to_string();
                     let cpos = s.len();
-                    self.install_source(s, cpos);
-                    self.sync_completer();
+                    self.install_source(ctx, s, cpos);
+                    self.sync_completer(ctx.as_ref());
                     Action::Redraw
                 } else {
                     Action::Noop
@@ -572,146 +661,152 @@ impl PromptState {
 
             // ── Editing ─────────────────────────────────────────────────
             KeyAction::Backspace => {
-                self.backspace();
+                self.backspace(ctx);
                 Action::Redraw
             }
             KeyAction::DeleteCharForward => {
-                self.save_undo();
-                if self.has_selection() {
-                    self.delete_selection();
+                self.save_undo(ctx);
+                if self.has_selection(ctx.as_ref()) {
+                    self.delete_selection(ctx);
                 } else {
-                    self.delete_char_forward();
+                    self.delete_char_forward(ctx);
                 }
                 Action::Redraw
             }
             KeyAction::DeleteWordBackward => {
-                self.save_undo();
-                if self.has_selection() {
-                    self.delete_selection();
+                self.save_undo(ctx);
+                if self.has_selection(ctx.as_ref()) {
+                    self.delete_selection(ctx);
                 } else {
-                    self.delete_word_backward();
+                    self.delete_word_backward(ctx);
                 }
                 Action::Redraw
             }
             KeyAction::DeleteWordForward => {
-                self.save_undo();
-                if self.has_selection() {
-                    self.delete_selection();
+                self.save_undo(ctx);
+                if self.has_selection(ctx.as_ref()) {
+                    self.delete_selection(ctx);
                 } else {
-                    self.delete_word_forward();
+                    self.delete_word_forward(ctx);
                 }
                 Action::Redraw
             }
             KeyAction::DeleteToStartOfLine => {
-                self.save_undo();
-                if self.has_selection() {
-                    self.delete_selection();
+                self.save_undo(ctx);
+                if self.has_selection(ctx.as_ref()) {
+                    self.delete_selection(ctx);
                 } else {
-                    self.delete_to_start_of_line();
+                    self.delete_to_start_of_line(ctx);
                 }
                 Action::Redraw
             }
             KeyAction::KillToEndOfLine => {
-                self.save_undo();
-                if self.has_selection() {
-                    let deleted = self.delete_selection();
+                self.save_undo(ctx);
+                if self.has_selection(ctx.as_ref()) {
+                    let deleted = self.delete_selection(ctx);
                     if let Some(text) = deleted {
                         self.kill_and_copy(text, clipboard);
                     }
                 } else {
-                    self.kill_to_end_of_line(clipboard);
+                    self.kill_to_end_of_line(ctx, clipboard);
                 }
                 Action::Redraw
             }
             KeyAction::KillToStartOfLine => {
-                self.save_undo();
-                if self.has_selection() {
-                    let deleted = self.delete_selection();
+                self.save_undo(ctx);
+                if self.has_selection(ctx.as_ref()) {
+                    let deleted = self.delete_selection(ctx);
                     if let Some(text) = deleted {
                         self.kill_and_copy(text, clipboard);
                     }
                 } else {
-                    self.kill_to_start_of_line(clipboard);
+                    self.kill_to_start_of_line(ctx, clipboard);
                 }
                 Action::Redraw
             }
             KeyAction::Yank => {
-                self.save_undo();
-                if self.has_selection() {
-                    self.delete_selection();
+                self.save_undo(ctx);
+                if self.has_selection(ctx.as_ref()) {
+                    self.delete_selection(ctx);
                 }
                 Self::sync_kill_ring_from_clipboard(clipboard);
-                if let Some(new_cpos) = clipboard.kill_ring.yank(&mut self.source, self.win.cpos) {
-                    self.win.cpos = new_cpos;
-                    self.recompute_completer();
+                let cpos = ctx.win.cpos;
+                if let Some(new_cpos) = clipboard.kill_ring.yank(ctx.buf.source_mut(), cpos) {
+                    ctx.win.cpos = new_cpos;
+                    self.recompute_completer(ctx.as_ref());
                 }
                 Action::Redraw
             }
             KeyAction::YankPop => {
-                if let Some(new_cpos) = clipboard.kill_ring.yank_pop(&mut self.source) {
-                    self.win.cpos = new_cpos;
-                    self.recompute_completer();
+                if let Some(new_cpos) = clipboard.kill_ring.yank_pop(ctx.buf.source_mut()) {
+                    ctx.win.cpos = new_cpos;
+                    self.recompute_completer(ctx.as_ref());
                 }
                 Action::Redraw
             }
             KeyAction::UppercaseWord => {
-                self.save_undo();
-                self.uppercase_word();
+                self.save_undo(ctx);
+                self.uppercase_word(ctx);
                 Action::Redraw
             }
             KeyAction::LowercaseWord => {
-                self.save_undo();
-                self.lowercase_word();
+                self.save_undo(ctx);
+                self.lowercase_word(ctx);
                 Action::Redraw
             }
             KeyAction::CapitalizeWord => {
-                self.save_undo();
-                self.capitalize_word();
+                self.save_undo(ctx);
+                self.capitalize_word(ctx);
                 Action::Redraw
             }
             KeyAction::Undo => {
-                self.undo();
+                self.undo(ctx);
                 Action::Redraw
             }
 
             // ── Vim half-page scroll ────────────────────────────────────
             KeyAction::VimHalfPageUp => {
                 let half = content::term_height() / 2;
-                let line = current_line(&self.source, self.win.cpos);
+                let line = current_line(ctx.buf.source(), ctx.win.cpos);
                 let target = line.saturating_sub(half);
-                self.move_to_line(target);
+                self.move_to_line(ctx, target);
                 Action::Redraw
             }
             KeyAction::VimHalfPageDown => {
                 let half = content::term_height() / 2;
-                let line = current_line(&self.source, self.win.cpos);
-                let total = self.source.chars().filter(|&c| c == '\n').count() + 1;
+                let source = ctx.buf.source();
+                let line = current_line(source, ctx.win.cpos);
+                let total = source.chars().filter(|&c| c == '\n').count() + 1;
                 let target = (line + half).min(total - 1);
-                self.move_to_line(target);
+                self.move_to_line(ctx, target);
                 Action::Redraw
             }
 
             // ── Clipboard ───────────────────────────────────────────────
             KeyAction::CopySelection => {
-                if let Some((start, end)) = self.selection_range() {
-                    let text = self.source[start..end].to_string();
-                    if clipboard.write(&text).is_ok() {
-                        clipboard.kill_ring.record_clipboard_write(text.clone());
+                if let Some((start, end)) = self.selection_range(ctx.as_ref()) {
+                    let out = ctx.buf.copy_range(start..end);
+                    if clipboard.write(&out.clipboard).is_ok() {
+                        clipboard
+                            .kill_ring
+                            .record_clipboard_write(out.clipboard.clone());
                     }
-                    clipboard.kill_ring.set(text);
+                    clipboard.kill_ring.set(out.kill_ring);
                 }
                 Action::Noop
             }
             KeyAction::CutSelection => {
-                if self.selection_range().is_some() {
-                    self.save_undo();
-                    if let Some(text) = self.delete_selection() {
-                        if clipboard.write(&text).is_ok() {
-                            clipboard.kill_ring.record_clipboard_write(text.clone());
+                if self.selection_range(ctx.as_ref()).is_some() {
+                    self.save_undo(ctx);
+                    if let Some(out) = self.delete_selection(ctx) {
+                        if clipboard.write(&out.clipboard).is_ok() {
+                            clipboard
+                                .kill_ring
+                                .record_clipboard_write(out.clipboard.clone());
                         }
-                        clipboard.kill_ring.set(text);
+                        clipboard.kill_ring.set(out.kill_ring);
                     }
-                    self.recompute_completer();
+                    self.recompute_completer(ctx.as_ref());
                     Action::Redraw
                 } else {
                     Action::Noop
@@ -721,17 +816,17 @@ impl PromptState {
                 // Bracketed-paste terminals forward Cmd+V as `Event::Paste`, bypassing this arm.
                 // Terminals with bracketed paste off send it as a key — handle both paths.
                 if let Some(url) = clipboard_image_to_data_url() {
-                    self.save_undo();
-                    self.insert_image("clipboard.png".into(), url);
+                    self.save_undo(ctx);
+                    self.insert_image(ctx, "clipboard.png".into(), url);
                     return Action::Redraw;
                 }
                 if let Some(text) = clipboard.read() {
                     if !text.is_empty() {
-                        self.save_undo();
-                        if self.has_selection() {
-                            self.delete_selection();
+                        self.save_undo(ctx);
+                        if self.has_selection(ctx.as_ref()) {
+                            self.delete_selection(ctx);
                         }
-                        self.insert_paste(text);
+                        self.insert_paste(ctx, text);
                         return Action::Redraw;
                     }
                 }
@@ -740,71 +835,75 @@ impl PromptState {
 
             // ── Selection (shift+movement) ─────────────────────────────
             KeyAction::SelectLeft => {
-                self.extend_selection();
-                if self.win.cpos > 0 {
-                    let cp = char_pos(&self.source, self.win.cpos);
-                    self.win.cpos = byte_of_char(&self.source, cp - 1);
+                self.extend_selection(ctx.win);
+                if ctx.win.cpos > 0 {
+                    let cpos = ctx.win.cpos;
+                    let source = ctx.buf.source();
+                    let cp = char_pos(source, cpos);
+                    ctx.win.cpos = byte_of_char(source, cp - 1);
                 }
                 Action::Redraw
             }
             KeyAction::SelectRight => {
-                self.extend_selection();
-                if self.win.cpos < self.source.len() {
-                    let cp = char_pos(&self.source, self.win.cpos);
-                    self.win.cpos = byte_of_char(&self.source, cp + 1);
+                self.extend_selection(ctx.win);
+                if ctx.win.cpos < ctx.buf.source().len() {
+                    let cpos = ctx.win.cpos;
+                    let source = ctx.buf.source();
+                    let cp = char_pos(source, cpos);
+                    ctx.win.cpos = byte_of_char(source, cp + 1);
                 }
                 Action::Redraw
             }
             KeyAction::SelectUp => {
-                self.extend_selection();
-                let (new_pos, new_want) = crate::smelt_term::text::vertical_move(
-                    &self.source,
-                    self.win.cpos,
-                    -1,
-                    self.win.curswant,
-                );
-                self.win.curswant = Some(new_want);
-                self.win.cpos = new_pos;
+                self.extend_selection(ctx.win);
+                let cpos = ctx.win.cpos;
+                let source = ctx.buf.source();
+                let (new_pos, new_want) =
+                    crate::smelt_term::text::vertical_move(source, cpos, -1, ctx.win.curswant);
+                ctx.win.curswant = Some(new_want);
+                ctx.win.cpos = new_pos;
                 Action::Redraw
             }
             KeyAction::SelectDown => {
-                self.extend_selection();
-                let (new_pos, new_want) = crate::smelt_term::text::vertical_move(
-                    &self.source,
-                    self.win.cpos,
-                    1,
-                    self.win.curswant,
-                );
-                self.win.curswant = Some(new_want);
-                self.win.cpos = new_pos;
+                self.extend_selection(ctx.win);
+                let cpos = ctx.win.cpos;
+                let source = ctx.buf.source();
+                let (new_pos, new_want) =
+                    crate::smelt_term::text::vertical_move(source, cpos, 1, ctx.win.curswant);
+                ctx.win.curswant = Some(new_want);
+                ctx.win.cpos = new_pos;
                 Action::Redraw
             }
             KeyAction::SelectWordForward => {
-                self.extend_selection();
-                self.win.cpos = crate::smelt_term::text::word_forward_pos(
-                    &self.source,
-                    self.win.cpos,
+                self.extend_selection(ctx.win);
+                let cpos = ctx.win.cpos;
+                ctx.win.cpos = crate::smelt_term::text::word_forward_pos(
+                    ctx.buf.source(),
+                    cpos,
                     crate::smelt_term::text::CharClass::Word,
                 );
                 Action::Redraw
             }
             KeyAction::SelectWordBackward => {
-                self.extend_selection();
-                self.win.cpos = crate::smelt_term::text::word_backward_pos(
-                    &self.source,
-                    self.win.cpos,
+                self.extend_selection(ctx.win);
+                let cpos = ctx.win.cpos;
+                ctx.win.cpos = crate::smelt_term::text::word_backward_pos(
+                    ctx.buf.source(),
+                    cpos,
                     crate::smelt_term::text::CharClass::Word,
                 );
                 Action::Redraw
             }
             KeyAction::SelectStartOfLine => {
-                self.extend_selection();
-                self.win.cpos = crate::smelt_term::text::line_start(&self.source, self.win.cpos);
+                self.extend_selection(ctx.win);
+                let cpos = ctx.win.cpos;
+                ctx.win.cpos = crate::smelt_term::text::line_start(ctx.buf.source(), cpos);
                 Action::Redraw
             }
             KeyAction::SelectEndOfLine => {
-                self.extend_selection();
-                self.win.cpos = crate::smelt_term::text::line_end(&self.source, self.win.cpos);
+                self.extend_selection(ctx.win);
+                let cpos = ctx.win.cpos;
+                ctx.win.cpos = crate::smelt_term::text::line_end(ctx.buf.source(), cpos);
                 Action::Redraw
             }
         }
@@ -813,32 +912,33 @@ impl PromptState {
     /// Process a terminal event. Priority: completer → vim → paste → keymap → insert.
     pub(crate) fn handle_event(
         &mut self,
+        ctx: &mut PromptCtx<'_>,
         ev: Event,
         mut history: Option<&mut History>,
         clipboard: &mut crate::smelt_term::Clipboard,
     ) -> Action {
         if self.completer.is_some() {
-            if let Some(action) = self.handle_completer_event(&ev) {
+            if let Some(action) = self.handle_completer_event(ctx, &ev) {
                 return action;
             }
         }
 
-        match self.dispatch_vim(&ev, &mut history, clipboard) {
+        match self.dispatch_vim(ctx, &ev, &mut history, clipboard) {
             VimBridgeResult::Handled(action) => return action,
             VimBridgeResult::Passthrough | VimBridgeResult::NotAKey => {}
         }
 
         if let Event::Paste(data) = ev {
-            self.save_undo();
-            if self.selection_range().is_some() {
-                self.delete_selection();
+            self.save_undo(ctx);
+            if self.selection_range(ctx.as_ref()).is_some() {
+                self.delete_selection(ctx);
             }
             if let Some(path) = engine::image::normalize_pasted_path(&data) {
                 if engine::image::is_image_file(&path) {
                     match engine::image::read_image_as_data_url(&path) {
                         Ok(url) => {
                             let label = engine::image::image_label_from_path(&path);
-                            self.insert_image(label, url);
+                            self.insert_image(ctx, label, url);
                             return Action::Redraw;
                         }
                         Err(e) => {
@@ -849,11 +949,11 @@ impl PromptState {
             }
             if data.trim().is_empty() {
                 if let Some(url) = clipboard_image_to_data_url() {
-                    self.insert_image("clipboard.png".into(), url);
+                    self.insert_image(ctx, "clipboard.png".into(), url);
                     return Action::Redraw;
                 }
             }
-            self.insert_paste(data);
+            self.insert_paste(ctx, data);
             return Action::Redraw;
         }
 
@@ -873,25 +973,25 @@ impl PromptState {
                 return Action::Noop;
             }
 
-            let ctx = KeyContext {
-                buf_empty: self.source.is_empty() && self.win.attachment_ids.is_empty(),
-                vim_non_insert: self.win.vim_enabled
+            let key_ctx = KeyContext {
+                buf_empty: ctx.buf.source().is_empty() && ctx.buf.attachment_ids.is_empty(),
+                vim_non_insert: ctx.win.vim_enabled
                     && matches!(
-                        self.win.vim_mode,
+                        ctx.win.vim_mode,
                         VimMode::Normal | VimMode::Visual | VimMode::VisualLine
                     ),
-                vim_enabled: self.win.vim_enabled,
+                vim_enabled: ctx.win.vim_enabled,
                 agent_running: false,
                 ghost_text_visible: false,
             };
 
-            if let Some(action) = keymap::lookup(code, modifiers, &ctx) {
-                return self.execute_key_action(action, history, clipboard);
+            if let Some(action) = keymap::lookup(code, modifiers, &key_ctx) {
+                return self.execute_key_action(ctx, action, history, clipboard);
             }
 
             if let KeyCode::Char(c) = code {
                 if modifiers.is_empty() || modifiers == KeyModifiers::SHIFT {
-                    self.insert_char(c);
+                    self.insert_char(ctx, c);
                     return Action::Redraw;
                 }
             }
@@ -907,7 +1007,7 @@ pub(crate) fn char_pos(s: &str, byte_idx: usize) -> usize {
     s[..byte_idx].chars().count()
 }
 
-fn byte_of_char(s: &str, n: usize) -> usize {
+pub(crate) fn byte_of_char(s: &str, n: usize) -> usize {
     s.char_indices().nth(n).map(|(i, _)| i).unwrap_or(s.len())
 }
 
@@ -1063,16 +1163,61 @@ pub(crate) fn resolve_agent_esc(
 mod tests {
     use super::*;
 
-    impl PromptState {
-        /// Test-only convenience: run `execute_key_action` against a
-        /// throwaway null clipboard. Most tests don't exercise the
-        /// kill-ring path; the few that do (`KeyAction::Yank`,
-        /// `YankPop`, `Cut`, `Copy`, `KillTo*`) use `execute_key_action`
-        /// directly with a real `Clipboard` and assert against it.
+    /// Pair a `PromptState` with its own `Buffer` and `Window` for test
+    /// convenience. Mirrors the runtime layout where the buffer lives in
+    /// `ui.bufs` and the window in `ui.wins`. Derefs to `PromptState` so tests
+    /// can call `harness.set_vim_enabled(...)` while still passing
+    /// `&mut harness.buf` / `&mut harness.win` to methods that need them.
+    pub(super) struct Harness {
+        pub(super) state: PromptState,
+        pub(super) buf: crate::smelt_term::Buffer,
+        pub(super) win: crate::smelt_term::Window,
+    }
+
+    impl std::ops::Deref for Harness {
+        type Target = PromptState;
+        fn deref(&self) -> &PromptState {
+            &self.state
+        }
+    }
+    impl std::ops::DerefMut for Harness {
+        fn deref_mut(&mut self) -> &mut PromptState {
+            &mut self.state
+        }
+    }
+
+    impl Harness {
+        pub(super) fn new() -> Self {
+            let state = PromptState::new();
+            let parser = Arc::new(crate::content::prompt_parser::PromptBufferParser::new(
+                state.store.clone(),
+            ));
+            let mut buf = crate::smelt_term::Buffer::new(
+                crate::app::PROMPT_EDIT_BUF,
+                crate::smelt_term::BufCreateOpts::default(),
+            );
+            buf.set_parser(parser);
+            buf.history = crate::smelt_term::UndoHistory::new(Some(100));
+            let win = crate::smelt_term::Window::new(
+                crate::app::PROMPT_WIN,
+                crate::app::PROMPT_EDIT_BUF,
+                crate::smelt_term::SplitConfig {
+                    region: "prompt".into(),
+                    gutters: crate::smelt_term::Gutters::default(),
+                },
+            );
+            Self { state, buf, win }
+        }
+
         fn test_action(&mut self, action: KeyAction, mode: VimMode) -> Action {
             self.win.vim_mode = mode;
             let mut clip = crate::smelt_term::Clipboard::null();
-            self.execute_key_action(action, None, &mut clip)
+            let mut ctx = PromptCtx {
+                buf: &mut self.buf,
+                win: &mut self.win,
+            };
+            self.state
+                .execute_key_action(&mut ctx, action, None, &mut clip)
         }
     }
 
@@ -1176,20 +1321,22 @@ mod tests {
 
     #[test]
     fn paste_into_empty_buffer_sets_from_paste() {
-        let mut input = PromptState::new();
-        input.insert_paste("!echo hello".to_string());
+        let mut input = Harness::new();
+        input
+            .state
+            .insert_paste(&mut PromptCtx { buf: &mut input.buf, win: &mut input.win }, "!echo hello".to_string());
         assert!(
             input.skip_shell_escape(),
             "Paste at buffer start should set from_paste"
         );
-        assert_eq!(input.source, "!echo hello");
+        assert_eq!(input.buf.source(), "!echo hello");
     }
 
     #[test]
     fn type_then_type_sets_from_paste_false() {
-        let mut input = PromptState::new();
-        input.insert_char('!');
-        input.insert_char('e');
+        let mut input = Harness::new();
+        input.state.insert_char(&mut PromptCtx { buf: &mut input.buf, win: &mut input.win }, '!');
+        input.state.insert_char(&mut PromptCtx { buf: &mut input.buf, win: &mut input.win }, 'e');
         assert!(
             !input.skip_shell_escape(),
             "Manual typing should clear from_paste"
@@ -1198,101 +1345,115 @@ mod tests {
 
     #[test]
     fn type_bang_then_paste_sets_from_paste() {
-        let mut input = PromptState::new();
+        let mut input = Harness::new();
 
         // Simulate user typing '!'
-        input.insert_char('!');
+        input.state.insert_char(&mut PromptCtx { buf: &mut input.buf, win: &mut input.win }, '!');
         assert!(!input.skip_shell_escape(), "Typing clears from_paste");
 
         // Reset cursor to simulate the scenario: user types '!', then pastes at line start
         // This is the key scenario that was broken before the fix
-        input.source.clear();
+        input.buf.set_source(String::new());
         input.win.cpos = 0;
-        input.insert_paste("echo hello".to_string());
+        input
+            .state
+            .insert_paste(&mut PromptCtx { buf: &mut input.buf, win: &mut input.win }, "echo hello".to_string());
         assert!(
             input.skip_shell_escape(),
             "Paste at line start should set from_paste"
         );
-        assert_eq!(input.source, "echo hello");
+        assert_eq!(input.buf.source(), "echo hello");
     }
 
     #[test]
     fn paste_in_middle_of_line_does_not_set_from_paste() {
-        let mut input = PromptState::new();
+        let mut input = Harness::new();
 
-        input.source = "hello ".to_string();
+        input.buf.set_source("hello ".to_string());
         input.win.cpos = 6; // After "hello "
-        input.insert_paste("!world".to_string());
+        input
+            .state
+            .insert_paste(&mut PromptCtx { buf: &mut input.buf, win: &mut input.win }, "!world".to_string());
         assert!(
             !input.skip_shell_escape(),
             "Paste in middle of line should not set from_paste"
         );
-        assert_eq!(input.source, "hello !world");
+        assert_eq!(input.buf.source(), "hello !world");
     }
 
     #[test]
     fn paste_at_end_of_line_does_not_set_from_paste() {
-        let mut input = PromptState::new();
+        let mut input = Harness::new();
 
-        input.source = "hello".to_string();
+        input.buf.set_source("hello".to_string());
         input.win.cpos = 5; // At end
-        input.insert_paste(" world".to_string());
+        input
+            .state
+            .insert_paste(&mut PromptCtx { buf: &mut input.buf, win: &mut input.win }, " world".to_string());
         assert!(
             !input.skip_shell_escape(),
             "Paste at end of line should not set from_paste"
         );
-        assert_eq!(input.source, "hello world");
+        assert_eq!(input.buf.source(), "hello world");
     }
 
     #[test]
     fn paste_at_start_of_multiline_buffer() {
-        let mut input = PromptState::new();
+        let mut input = Harness::new();
 
-        input.source = "line1\nline2".to_string();
+        input.buf.set_source("line1\nline2".to_string());
         input.win.cpos = 0; // At very start
-        input.insert_paste("!command".to_string());
+        input
+            .state
+            .insert_paste(&mut PromptCtx { buf: &mut input.buf, win: &mut input.win }, "!command".to_string());
         assert!(
             input.skip_shell_escape(),
             "Paste at buffer start should set from_paste"
         );
-        assert_eq!(input.source, "!commandline1\nline2");
+        assert_eq!(input.buf.source(), "!commandline1\nline2");
     }
 
     #[test]
     fn paste_at_start_of_second_line_sets_from_paste() {
-        let mut input = PromptState::new();
+        let mut input = Harness::new();
 
-        input.source = "line1\n".to_string();
+        input.buf.set_source("line1\n".to_string());
         input.win.cpos = 6; // Start of second line
-        input.insert_paste("!command".to_string());
+        input
+            .state
+            .insert_paste(&mut PromptCtx { buf: &mut input.buf, win: &mut input.win }, "!command".to_string());
         assert!(
             input.skip_shell_escape(),
             "Paste at line start should set from_paste"
         );
-        assert_eq!(input.source, "line1\n!command");
+        assert_eq!(input.buf.source(), "line1\n!command");
     }
 
     #[test]
     fn paste_middle_of_second_line_does_not_set_from_paste() {
-        let mut input = PromptState::new();
+        let mut input = Harness::new();
 
-        input.source = "line1\nhello".to_string();
+        input.buf.set_source("line1\nhello".to_string());
         input.win.cpos = 8; // Insert at byte position 8 (before first 'l' of "hello")
-        input.insert_paste(" world".to_string());
+        input
+            .state
+            .insert_paste(&mut PromptCtx { buf: &mut input.buf, win: &mut input.win }, " world".to_string());
         assert!(
             !input.skip_shell_escape(),
             "Paste in middle of line should not set from_paste"
         );
-        assert_eq!(input.source, "line1\nhe worldllo");
+        assert_eq!(input.buf.source(), "line1\nhe worldllo");
     }
 
     #[test]
     fn manual_char_after_paste_clears_from_paste() {
-        let mut input = PromptState::new();
-        input.insert_paste("!echo hello".to_string());
+        let mut input = Harness::new();
+        input
+            .state
+            .insert_paste(&mut PromptCtx { buf: &mut input.buf, win: &mut input.win }, "!echo hello".to_string());
         assert!(input.skip_shell_escape());
 
-        input.insert_char('x');
+        input.state.insert_char(&mut PromptCtx { buf: &mut input.buf, win: &mut input.win }, 'x');
         assert!(
             !input.skip_shell_escape(),
             "Manual character after paste should clear from_paste"
@@ -1301,30 +1462,34 @@ mod tests {
 
     #[test]
     fn backspace_at_start_clears_from_paste() {
-        let mut input = PromptState::new();
-        input.insert_paste("!echo hello".to_string());
+        let mut input = Harness::new();
+        input
+            .state
+            .insert_paste(&mut PromptCtx { buf: &mut input.buf, win: &mut input.win }, "!echo hello".to_string());
         assert!(input.skip_shell_escape());
 
-        input.backspace(); // Deletes last character
+        input.state.backspace(&mut PromptCtx { buf: &mut input.buf, win: &mut input.win }); // Deletes last character
         assert!(
             input.skip_shell_escape(),
             "Backspace not at start should not clear from_paste"
         );
 
         input.win.cpos = 0;
-        input.backspace(); // Now at position 0
-                           // Can't backspace further, but the logic would clear it if we could
+        input.state.backspace(&mut PromptCtx { buf: &mut input.buf, win: &mut input.win }); // Now at position 0
+                                                 // Can't backspace further, but the logic would clear it if we could
     }
 
     #[test]
     fn delete_word_backward_at_start_clears_from_paste() {
-        let mut input = PromptState::new();
-        input.insert_paste("!echo hello".to_string());
+        let mut input = Harness::new();
+        input
+            .state
+            .insert_paste(&mut PromptCtx { buf: &mut input.buf, win: &mut input.win }, "!echo hello".to_string());
         assert!(input.skip_shell_escape());
 
         // Move cursor to end
-        input.win.cpos = input.source.len();
-        input.delete_word_backward(); // Deletes "hello"
+        input.win.cpos = input.buf.source().len();
+        input.state.delete_word_backward(&mut PromptCtx { buf: &mut input.buf, win: &mut input.win }); // Deletes "hello"
         assert!(
             input.skip_shell_escape(),
             "Delete word not at start should not clear from_paste"
@@ -1332,11 +1497,11 @@ mod tests {
 
         // Move to after "echo " and delete word
         input.win.cpos = 5; // After "echo"
-        input.delete_word_backward(); // Deletes "echo"
+        input.state.delete_word_backward(&mut PromptCtx { buf: &mut input.buf, win: &mut input.win }); // Deletes "echo"
         assert!(input.skip_shell_escape(), "Still not at absolute start");
 
         input.win.cpos = 1; // After "!"
-        input.delete_word_backward(); // Would delete to start, which should clear from_paste
+        input.state.delete_word_backward(&mut PromptCtx { buf: &mut input.buf, win: &mut input.win }); // Would delete to start, which should clear from_paste
         assert!(
             !input.skip_shell_escape(),
             "Delete word to start should clear from_paste"
@@ -1345,50 +1510,58 @@ mod tests {
 
     #[test]
     fn clear_resets_from_paste() {
-        let mut input = PromptState::new();
-        input.insert_paste("!test".to_string());
+        let mut input = Harness::new();
+        input
+            .state
+            .insert_paste(&mut PromptCtx { buf: &mut input.buf, win: &mut input.win }, "!test".to_string());
         assert!(input.skip_shell_escape());
 
-        input.clear();
+        input.state.clear(&mut PromptCtx { buf: &mut input.buf, win: &mut input.win });
         assert!(!input.skip_shell_escape(), "Clear should reset from_paste");
     }
 
     #[test]
     fn stash_preserves_from_paste() {
-        let mut input = PromptState::new();
-        input.insert_paste("!test".to_string());
+        let mut input = Harness::new();
+        input
+            .state
+            .insert_paste(&mut PromptCtx { buf: &mut input.buf, win: &mut input.win }, "!test".to_string());
         assert!(input.skip_shell_escape());
 
         // Stash: saves from_paste to snapshot, but doesn't clear it in active buffer
-        input.toggle_stash();
+        input.state.toggle_stash(&mut PromptCtx { buf: &mut input.buf, win: &mut input.win });
         assert!(
             input.skip_shell_escape(),
             "Stash saves from_paste to snapshot but keeps it in buffer"
         );
         assert!(
-            input.source.is_empty(),
+            input.buf.source().is_empty(),
             "Buffer should be empty after stashing"
         );
 
         // Restore: restores from_paste from snapshot
-        input.toggle_stash();
+        input.state.toggle_stash(&mut PromptCtx { buf: &mut input.buf, win: &mut input.win });
         assert!(input.skip_shell_escape(), "Stash should restore from_paste");
-        assert_eq!(input.source, "!test");
+        assert_eq!(input.buf.source(), "!test");
     }
 
     #[test]
     fn multiple_pastes_set_from_paste() {
-        let mut input = PromptState::new();
-        input.insert_paste("!first".to_string());
+        let mut input = Harness::new();
+        input
+            .state
+            .insert_paste(&mut PromptCtx { buf: &mut input.buf, win: &mut input.win }, "!first".to_string());
         assert!(input.skip_shell_escape());
 
         // Type something, which clears from_paste
-        input.insert_char(' ');
+        input.state.insert_char(&mut PromptCtx { buf: &mut input.buf, win: &mut input.win }, ' ');
         assert!(!input.skip_shell_escape());
 
         // Paste again at start of line
         input.win.cpos = 0;
-        input.insert_paste("!second".to_string());
+        input
+            .state
+            .insert_paste(&mut PromptCtx { buf: &mut input.buf, win: &mut input.win }, "!second".to_string());
         assert!(
             input.skip_shell_escape(),
             "Second paste at start should set from_paste again"
@@ -1397,20 +1570,22 @@ mod tests {
 
     #[test]
     fn paste_with_carriage_returns_normalized() {
-        let mut input = PromptState::new();
-        input.insert_paste("!line1\r\nline2\rline3".to_string());
+        let mut input = Harness::new();
+        input
+            .state
+            .insert_paste(&mut PromptCtx { buf: &mut input.buf, win: &mut input.win }, "!line1\r\nline2\rline3".to_string());
         assert!(input.skip_shell_escape());
         assert!(
-            !input.source.contains('\r'),
+            !input.buf.source().contains('\r'),
             "Carriage returns should be normalized"
         );
-        assert_eq!(input.source, "!line1\nline2\nline3");
+        assert_eq!(input.buf.source(), "!line1\nline2\nline3");
     }
 
     #[test]
     fn empty_paste_does_not_set_from_paste() {
-        let mut input = PromptState::new();
-        input.insert_paste("".to_string());
+        let mut input = Harness::new();
+        input.state.insert_paste(&mut PromptCtx { buf: &mut input.buf, win: &mut input.win }, "".to_string());
         assert!(
             !input.skip_shell_escape(),
             "Empty paste should not set from_paste"
@@ -1419,8 +1594,10 @@ mod tests {
 
     #[test]
     fn whitespace_only_paste_at_start_sets_from_paste() {
-        let mut input = PromptState::new();
-        input.insert_paste("   ".to_string());
+        let mut input = Harness::new();
+        input
+            .state
+            .insert_paste(&mut PromptCtx { buf: &mut input.buf, win: &mut input.win }, "   ".to_string());
         assert!(
             input.skip_shell_escape(),
             "Whitespace paste at start should set from_paste"
@@ -1430,20 +1607,22 @@ mod tests {
     #[test]
     fn paste_starting_with_bang_at_line_start() {
         // This is the main bug scenario: type '!', then paste command
-        let mut input = PromptState::new();
+        let mut input = Harness::new();
 
-        input.source = String::new();
+        input.buf.set_source(String::new());
         input.win.cpos = 0;
-        input.insert_paste("!ls -la".to_string());
+        input
+            .state
+            .insert_paste(&mut PromptCtx { buf: &mut input.buf, win: &mut input.win }, "!ls -la".to_string());
 
         assert!(
             input.skip_shell_escape(),
             "Paste at start of line should set from_paste"
         );
-        assert_eq!(input.source, "!ls -la");
+        assert_eq!(input.buf.source(), "!ls -la");
 
         // The expanded text should not be treated as shell command
-        let text = input.expanded_text();
+        let text = input.state.expanded_text(&input.buf);
         assert_eq!(text, "!ls -la");
     }
 
@@ -1451,59 +1630,59 @@ mod tests {
 
     #[test]
     fn shift_select_right_creates_selection() {
-        let mut input = PromptState::new();
-        input.source = "hello".to_string();
+        let mut input = Harness::new();
+        input.buf.set_source("hello".to_string());
         input.win.cpos = 0;
         input.test_action(KeyAction::SelectRight, crate::smelt_term::VimMode::Insert);
         assert_eq!(input.win.selection_anchor, Some(0));
         assert_eq!(input.win.cpos, 1);
-        assert_eq!(input.selection_range(), Some((0, 1)));
+        assert_eq!(input.state.selection_range(PromptCtxRef { buf: &input.buf, win: &input.win }), Some((0, 1)));
     }
 
     #[test]
     fn shift_select_extends_selection() {
-        let mut input = PromptState::new();
-        input.source = "hello".to_string();
+        let mut input = Harness::new();
+        input.buf.set_source("hello".to_string());
         input.win.cpos = 0;
         input.test_action(KeyAction::SelectRight, crate::smelt_term::VimMode::Insert);
         input.test_action(KeyAction::SelectRight, crate::smelt_term::VimMode::Insert);
         input.test_action(KeyAction::SelectRight, crate::smelt_term::VimMode::Insert);
         assert_eq!(input.win.selection_anchor, Some(0));
         assert_eq!(input.win.cpos, 3);
-        assert_eq!(input.selection_range(), Some((0, 3)));
+        assert_eq!(input.state.selection_range(PromptCtxRef { buf: &input.buf, win: &input.win }), Some((0, 3)));
     }
 
     #[test]
     fn movement_clears_selection() {
-        let mut input = PromptState::new();
-        input.source = "hello".to_string();
+        let mut input = Harness::new();
+        input.buf.set_source("hello".to_string());
         input.win.cpos = 0;
         input.test_action(KeyAction::SelectRight, crate::smelt_term::VimMode::Insert);
         input.test_action(KeyAction::SelectRight, crate::smelt_term::VimMode::Insert);
-        assert!(input.selection_range().is_some());
+        assert!(input.state.selection_range(PromptCtxRef { buf: &input.buf, win: &input.win }).is_some());
         input.test_action(KeyAction::MoveRight, crate::smelt_term::VimMode::Insert);
-        assert!(input.selection_range().is_none());
+        assert!(input.state.selection_range(PromptCtxRef { buf: &input.buf, win: &input.win }).is_none());
     }
 
     #[test]
     fn backspace_deletes_selection() {
-        let mut input = PromptState::new();
-        input.source = "hello world".to_string();
+        let mut input = Harness::new();
+        input.buf.set_source("hello world".to_string());
         input.win.cpos = 0;
         // Select "hello"
         for _ in 0..5 {
             input.test_action(KeyAction::SelectRight, crate::smelt_term::VimMode::Insert);
         }
-        assert_eq!(input.selection_range(), Some((0, 5)));
+        assert_eq!(input.state.selection_range(PromptCtxRef { buf: &input.buf, win: &input.win }), Some((0, 5)));
         input.test_action(KeyAction::Backspace, crate::smelt_term::VimMode::Insert);
-        assert_eq!(input.source, " world");
+        assert_eq!(input.buf.source(), " world");
         assert_eq!(input.win.cpos, 0);
     }
 
     #[test]
     fn delete_forward_deletes_selection() {
-        let mut input = PromptState::new();
-        input.source = "hello world".to_string();
+        let mut input = Harness::new();
+        input.buf.set_source("hello world".to_string());
         input.win.cpos = 0;
         for _ in 0..5 {
             input.test_action(KeyAction::SelectRight, crate::smelt_term::VimMode::Insert);
@@ -1512,38 +1691,38 @@ mod tests {
             KeyAction::DeleteCharForward,
             crate::smelt_term::VimMode::Insert,
         );
-        assert_eq!(input.source, " world");
+        assert_eq!(input.buf.source(), " world");
     }
 
     #[test]
     fn typing_replaces_selection() {
-        let mut input = PromptState::new();
-        input.source = "hello world".to_string();
+        let mut input = Harness::new();
+        input.buf.set_source("hello world".to_string());
         input.win.cpos = 0;
         for _ in 0..5 {
             input.test_action(KeyAction::SelectRight, crate::smelt_term::VimMode::Insert);
         }
-        input.insert_char('X');
-        assert_eq!(input.source, "X world");
+        input.state.insert_char(&mut PromptCtx { buf: &mut input.buf, win: &mut input.win }, 'X');
+        assert_eq!(input.buf.source(), "X world");
         assert_eq!(input.win.cpos, 1);
     }
 
     #[test]
     fn select_left_from_end() {
-        let mut input = PromptState::new();
-        input.source = "hello".to_string();
+        let mut input = Harness::new();
+        input.buf.set_source("hello".to_string());
         input.win.cpos = 5;
         input.test_action(KeyAction::SelectLeft, crate::smelt_term::VimMode::Insert);
         input.test_action(KeyAction::SelectLeft, crate::smelt_term::VimMode::Insert);
         assert_eq!(input.win.selection_anchor, Some(5));
         assert_eq!(input.win.cpos, 3);
-        assert_eq!(input.selection_range(), Some((3, 5)));
+        assert_eq!(input.state.selection_range(PromptCtxRef { buf: &input.buf, win: &input.win }), Some((3, 5)));
     }
 
     #[test]
     fn select_word_forward() {
-        let mut input = PromptState::new();
-        input.source = "hello world foo".to_string();
+        let mut input = Harness::new();
+        input.buf.set_source("hello world foo".to_string());
         input.win.cpos = 0;
         input.test_action(
             KeyAction::SelectWordForward,
@@ -1553,113 +1732,127 @@ mod tests {
         // word_forward_pos from 0 should be 6 (start of "world").
         assert_eq!(input.win.cpos, 6);
         input.test_action(KeyAction::Backspace, crate::smelt_term::VimMode::Insert);
-        assert_eq!(input.source, "world foo");
+        assert_eq!(input.buf.source(), "world foo");
     }
 
     #[test]
     fn select_word_backward() {
-        let mut input = PromptState::new();
-        input.source = "hello world".to_string();
+        let mut input = Harness::new();
+        input.buf.set_source("hello world".to_string());
         input.win.cpos = 11;
         input.test_action(
             KeyAction::SelectWordBackward,
             crate::smelt_term::VimMode::Insert,
         );
-        assert_eq!(input.selection_range(), Some((6, 11)));
+        assert_eq!(input.state.selection_range(PromptCtxRef { buf: &input.buf, win: &input.win }), Some((6, 11)));
         input.test_action(KeyAction::Backspace, crate::smelt_term::VimMode::Insert);
-        assert_eq!(input.source, "hello ");
+        assert_eq!(input.buf.source(), "hello ");
     }
 
     #[test]
     fn select_to_line_start() {
-        let mut input = PromptState::new();
-        input.source = "hello world".to_string();
+        let mut input = Harness::new();
+        input.buf.set_source("hello world".to_string());
         input.win.cpos = 5;
         input.test_action(
             KeyAction::SelectStartOfLine,
             crate::smelt_term::VimMode::Insert,
         );
-        assert_eq!(input.selection_range(), Some((0, 5)));
+        assert_eq!(input.state.selection_range(PromptCtxRef { buf: &input.buf, win: &input.win }), Some((0, 5)));
     }
 
     #[test]
     fn select_to_line_end() {
-        let mut input = PromptState::new();
-        input.source = "hello world".to_string();
+        let mut input = Harness::new();
+        input.buf.set_source("hello world".to_string());
         input.win.cpos = 5;
         input.test_action(
             KeyAction::SelectEndOfLine,
             crate::smelt_term::VimMode::Insert,
         );
-        assert_eq!(input.selection_range(), Some((5, 11)));
+        assert_eq!(input.state.selection_range(PromptCtxRef { buf: &input.buf, win: &input.win }), Some((5, 11)));
     }
 
     #[test]
     fn newline_replaces_selection() {
-        let mut input = PromptState::new();
-        input.source = "hello world".to_string();
+        let mut input = Harness::new();
+        input.buf.set_source("hello world".to_string());
         input.win.cpos = 0;
         for _ in 0..5 {
             input.test_action(KeyAction::SelectRight, crate::smelt_term::VimMode::Insert);
         }
         input.test_action(KeyAction::InsertNewline, crate::smelt_term::VimMode::Insert);
-        assert_eq!(input.source, "\n world");
+        assert_eq!(input.buf.source(), "\n world");
         assert_eq!(input.win.cpos, 1);
     }
 
     #[test]
     fn kill_to_eol_with_selection() {
-        let mut input = PromptState::new();
+        let mut input = Harness::new();
         let mut clip = crate::smelt_term::Clipboard::null();
-        input.source = "hello world".to_string();
+        input.buf.set_source("hello world".to_string());
         input.win.cpos = 0;
         for _ in 0..5 {
-            input.execute_key_action(KeyAction::SelectRight, None, &mut clip);
+            let mut ctx = PromptCtx {
+                buf: &mut input.buf,
+                win: &mut input.win,
+            };
+            input
+                .state
+                .execute_key_action(&mut ctx, KeyAction::SelectRight, None, &mut clip);
         }
-        input.execute_key_action(KeyAction::KillToEndOfLine, None, &mut clip);
-        assert_eq!(input.source, " world");
+        {
+            let mut ctx = PromptCtx {
+                buf: &mut input.buf,
+                win: &mut input.win,
+            };
+            input
+                .state
+                .execute_key_action(&mut ctx, KeyAction::KillToEndOfLine, None, &mut clip);
+        }
+        assert_eq!(input.buf.source(), " world");
         // Killed text lands on the TuiApp-level kill ring.
         assert_eq!(clip.kill_ring.current(), "hello");
     }
 
     #[test]
     fn selection_at_buffer_boundary() {
-        let mut input = PromptState::new();
-        input.source = "ab".to_string();
+        let mut input = Harness::new();
+        input.buf.set_source("ab".to_string());
         input.win.cpos = 0;
         // Select all.
         input.test_action(KeyAction::SelectRight, crate::smelt_term::VimMode::Insert);
         input.test_action(KeyAction::SelectRight, crate::smelt_term::VimMode::Insert);
-        assert_eq!(input.selection_range(), Some((0, 2)));
+        assert_eq!(input.state.selection_range(PromptCtxRef { buf: &input.buf, win: &input.win }), Some((0, 2)));
         input.test_action(KeyAction::Backspace, crate::smelt_term::VimMode::Insert);
-        assert_eq!(input.source, "");
+        assert_eq!(input.buf.source(), "");
         assert_eq!(input.win.cpos, 0);
     }
 
     #[test]
     fn selection_range_empty_when_anchor_equals_cursor() {
-        let mut input = PromptState::new();
-        input.source = "hello".to_string();
+        let mut input = Harness::new();
+        input.buf.set_source("hello".to_string());
         input.win.cpos = 3;
         input.win.selection_anchor = Some(3);
-        assert_eq!(input.selection_range(), None);
+        assert_eq!(input.state.selection_range(PromptCtxRef { buf: &input.buf, win: &input.win }), None);
     }
 
     #[test]
     fn clear_resets_selection() {
-        let mut input = PromptState::new();
-        input.source = "hello".to_string();
+        let mut input = Harness::new();
+        input.buf.set_source("hello".to_string());
         input.win.cpos = 0;
         input.test_action(KeyAction::SelectRight, crate::smelt_term::VimMode::Insert);
-        assert!(input.selection_range().is_some());
-        input.clear();
-        assert!(input.selection_range().is_none());
+        assert!(input.state.selection_range(PromptCtxRef { buf: &input.buf, win: &input.win }).is_some());
+        input.state.clear(&mut PromptCtx { buf: &mut input.buf, win: &mut input.win });
+        assert!(input.state.selection_range(PromptCtxRef { buf: &input.buf, win: &input.win }).is_none());
     }
 
     #[test]
     fn delete_word_backward_with_selection() {
-        let mut input = PromptState::new();
-        input.source = "hello world".to_string();
+        let mut input = Harness::new();
+        input.buf.set_source("hello world".to_string());
         input.win.cpos = 6;
         // Select "wor"
         for _ in 0..3 {
@@ -1669,13 +1862,13 @@ mod tests {
             KeyAction::DeleteWordBackward,
             crate::smelt_term::VimMode::Insert,
         );
-        assert_eq!(input.source, "hello ld");
+        assert_eq!(input.buf.source(), "hello ld");
     }
 
     #[test]
     fn delete_word_forward_with_selection() {
-        let mut input = PromptState::new();
-        input.source = "hello world".to_string();
+        let mut input = Harness::new();
+        input.buf.set_source("hello world".to_string());
         input.win.cpos = 0;
         for _ in 0..3 {
             input.test_action(KeyAction::SelectRight, crate::smelt_term::VimMode::Insert);
@@ -1684,13 +1877,13 @@ mod tests {
             KeyAction::DeleteWordForward,
             crate::smelt_term::VimMode::Insert,
         );
-        assert_eq!(input.source, "lo world");
+        assert_eq!(input.buf.source(), "lo world");
     }
 
     #[test]
     fn delete_to_start_of_line_with_selection() {
-        let mut input = PromptState::new();
-        input.source = "hello world".to_string();
+        let mut input = Harness::new();
+        input.buf.set_source("hello world".to_string());
         input.win.cpos = 3;
         for _ in 0..4 {
             input.test_action(KeyAction::SelectRight, crate::smelt_term::VimMode::Insert);
@@ -1699,13 +1892,13 @@ mod tests {
             KeyAction::DeleteToStartOfLine,
             crate::smelt_term::VimMode::Insert,
         );
-        assert_eq!(input.source, "helorld");
+        assert_eq!(input.buf.source(), "helorld");
     }
 
     #[test]
     fn select_left_at_start_stays() {
-        let mut input = PromptState::new();
-        input.source = "hello".to_string();
+        let mut input = Harness::new();
+        input.buf.set_source("hello".to_string());
         input.win.cpos = 0;
         input.test_action(KeyAction::SelectLeft, crate::smelt_term::VimMode::Insert);
         assert_eq!(input.win.cpos, 0);
@@ -1714,8 +1907,8 @@ mod tests {
 
     #[test]
     fn select_right_at_end_stays() {
-        let mut input = PromptState::new();
-        input.source = "hello".to_string();
+        let mut input = Harness::new();
+        input.buf.set_source("hello".to_string());
         input.win.cpos = 5;
         input.test_action(KeyAction::SelectRight, crate::smelt_term::VimMode::Insert);
         assert_eq!(input.win.cpos, 5);
@@ -1723,44 +1916,44 @@ mod tests {
 
     #[test]
     fn select_empty_buffer() {
-        let mut input = PromptState::new();
-        input.source = String::new();
+        let mut input = Harness::new();
+        input.buf.set_source(String::new());
         input.win.cpos = 0;
         input.test_action(KeyAction::SelectRight, crate::smelt_term::VimMode::Insert);
         assert_eq!(input.win.cpos, 0);
-        assert!(input.selection_range().is_none());
+        assert!(input.state.selection_range(PromptCtxRef { buf: &input.buf, win: &input.win }).is_none());
     }
 
     #[test]
     fn utf8_selection() {
-        let mut input = PromptState::new();
-        input.source = "héllo".to_string();
+        let mut input = Harness::new();
+        input.buf.set_source("héllo".to_string());
         input.win.cpos = 0;
         input.test_action(KeyAction::SelectRight, crate::smelt_term::VimMode::Insert);
         input.test_action(KeyAction::SelectRight, crate::smelt_term::VimMode::Insert);
         // Should select "hé" — 2 chars but 3 bytes.
         assert_eq!(input.win.cpos, 3); // byte offset of 'l'
-        assert_eq!(input.selection_range(), Some((0, 3)));
+        assert_eq!(input.state.selection_range(PromptCtxRef { buf: &input.buf, win: &input.win }), Some((0, 3)));
         input.test_action(KeyAction::Backspace, crate::smelt_term::VimMode::Insert);
-        assert_eq!(input.source, "llo");
+        assert_eq!(input.buf.source(), "llo");
     }
 
     #[test]
     fn selection_preserved_across_multiple_select_directions() {
-        let mut input = PromptState::new();
-        input.source = "abcdef".to_string();
+        let mut input = Harness::new();
+        input.buf.set_source("abcdef".to_string());
         input.win.cpos = 3; // on 'd'
                             // Select right 2 chars.
         input.test_action(KeyAction::SelectRight, crate::smelt_term::VimMode::Insert);
         input.test_action(KeyAction::SelectRight, crate::smelt_term::VimMode::Insert);
-        assert_eq!(input.selection_range(), Some((3, 5)));
+        assert_eq!(input.state.selection_range(PromptCtxRef { buf: &input.buf, win: &input.win }), Some((3, 5)));
         // Then select left 4 chars — anchor stays at 3.
         input.test_action(KeyAction::SelectLeft, crate::smelt_term::VimMode::Insert);
         input.test_action(KeyAction::SelectLeft, crate::smelt_term::VimMode::Insert);
         input.test_action(KeyAction::SelectLeft, crate::smelt_term::VimMode::Insert);
         input.test_action(KeyAction::SelectLeft, crate::smelt_term::VimMode::Insert);
         assert_eq!(input.win.cpos, 1);
-        assert_eq!(input.selection_range(), Some((1, 3)));
+        assert_eq!(input.state.selection_range(PromptCtxRef { buf: &input.buf, win: &input.win }), Some((1, 3)));
     }
 
     #[test]
@@ -1769,16 +1962,18 @@ mod tests {
             Event, KeyCode, KeyEvent, KeyEventKind, KeyEventState, KeyModifiers,
         };
 
-        let mut input = PromptState::new();
+        let mut input = Harness::new();
         let mut clipboard = crate::smelt_term::Clipboard::null();
-        input.set_vim_enabled(true);
-        input.set_vim_mode(crate::smelt_term::VimMode::Insert);
-        input.source = "hello world".to_string();
+        input.state.set_vim_enabled(&mut input.win, true);
+        input
+            .state
+            .set_vim_mode(&mut input.win, crate::smelt_term::VimMode::Insert);
+        input.buf.set_source("hello world".to_string());
         input.win.cpos = 0;
         // Create a shift selection.
         input.test_action(KeyAction::SelectRight, crate::smelt_term::VimMode::Insert);
         input.test_action(KeyAction::SelectRight, crate::smelt_term::VimMode::Insert);
-        assert!(input.selection_range().is_some());
+        assert!(input.state.selection_range(PromptCtxRef { buf: &input.buf, win: &input.win }).is_some());
         // Press Esc — vim switches to normal mode AND clears selection.
         let esc = Event::Key(KeyEvent {
             code: KeyCode::Esc,
@@ -1786,13 +1981,21 @@ mod tests {
             kind: KeyEventKind::Press,
             state: KeyEventState::empty(),
         });
-        input.handle_event(esc, None, &mut clipboard);
+        {
+            let mut ctx = PromptCtx {
+                buf: &mut input.buf,
+                win: &mut input.win,
+            };
+            input
+                .state
+                .handle_event(&mut ctx, esc, None, &mut clipboard);
+        }
         assert!(
-            input.selection_range().is_none(),
+            input.state.selection_range(PromptCtxRef { buf: &input.buf, win: &input.win }).is_none(),
             "Esc should clear shift selection"
         );
         assert_eq!(
-            input.vim_mode(),
+            input.state.vim_mode(&input.win),
             crate::smelt_term::VimMode::Normal,
             "Should be in normal mode"
         );
@@ -1800,23 +2003,25 @@ mod tests {
 
     #[test]
     fn delete_selection_removes_attachments() {
-        let mut input = PromptState::new();
+        let mut input = Harness::new();
         // Insert text with an image attachment marker in the middle.
-        input.source = format!("ab{}cd", ATTACHMENT_MARKER);
+        input.buf.set_source(format!("ab{}cd", ATTACHMENT_MARKER));
         input.win.cpos = 0;
         let id = input
             .store
+            .lock()
+            .unwrap()
             .insert_image("img.png".into(), "data:image/png;base64,AAA".into());
-        input.win.attachment_ids.push(id);
+        input.buf.attachment_ids.push(id);
         // Select "b<marker>c" (bytes 1..5 — marker is 3 bytes).
         input.win.selection_anchor = Some(1);
         input.win.cpos = 1 + 1 + ATTACHMENT_MARKER.len_utf8() + 1;
-        assert!(input.selection_range().is_some());
-        let deleted = input.delete_selection();
+        assert!(input.state.selection_range(PromptCtxRef { buf: &input.buf, win: &input.win }).is_some());
+        let deleted = input.state.delete_selection(&mut PromptCtx { buf: &mut input.buf, win: &mut input.win });
         assert!(deleted.is_some());
-        assert_eq!(input.source, "ad");
+        assert_eq!(input.buf.source(), "ad");
         assert!(
-            input.win.attachment_ids.is_empty(),
+            input.buf.attachment_ids.is_empty(),
             "Attachment should be removed"
         );
     }
@@ -1824,20 +2029,24 @@ mod tests {
     // ── Attachment dedup within a single message ───────────────────────
 
     /// Place two markers in the buffer that both point at `id`.
-    fn buf_with_two_markers(input: &mut PromptState, id: AttachmentId) {
-        input.source = format!("pre{m}mid{m}post", m = ATTACHMENT_MARKER);
-        input.win.cpos = input.source.len();
-        input.win.attachment_ids = vec![id, id];
+    fn buf_with_two_markers(input: &mut Harness, id: AttachmentId) {
+        input
+            .buf
+            .set_source(format!("pre{m}mid{m}post", m = ATTACHMENT_MARKER));
+        input.win.cpos = input.buf.source().len();
+        input.buf.attachment_ids = vec![id, id];
     }
 
     #[test]
     fn build_content_dedups_repeated_image_in_parts() {
-        let mut input = PromptState::new();
+        let mut input = Harness::new();
         let id = input
             .store
+            .lock()
+            .unwrap()
             .insert_image("img.png".into(), "data:image/png;base64,AAA".into());
         buf_with_two_markers(&mut input, id);
-        let content = input.build_content();
+        let content = input.state.build_content(&input.buf);
         assert_eq!(
             content.image_count(),
             1,
@@ -1847,34 +2056,46 @@ mod tests {
 
     #[test]
     fn build_content_preserves_distinct_images() {
-        let mut input = PromptState::new();
+        let mut input = Harness::new();
         let id1 = input
             .store
+            .lock()
+            .unwrap()
             .insert_image("a.png".into(), "data:image/png;base64,AAA".into());
         let id2 = input
             .store
+            .lock()
+            .unwrap()
             .insert_image("b.png".into(), "data:image/png;base64,BBB".into());
-        input.source = format!("{m}{m}", m = ATTACHMENT_MARKER);
-        input.win.cpos = input.source.len();
-        input.win.attachment_ids = vec![id1, id2];
-        let content = input.build_content();
+        input
+            .buf
+            .set_source(format!("{m}{m}", m = ATTACHMENT_MARKER));
+        input.win.cpos = input.buf.source().len();
+        input.buf.attachment_ids = vec![id1, id2];
+        let content = input.state.build_content(&input.buf);
         assert_eq!(content.image_count(), 2);
     }
 
     #[test]
     fn build_content_dedups_interleaved_image_references() {
         // Pattern: img A, img B, img A again. Parts should be [A, B].
-        let mut input = PromptState::new();
+        let mut input = Harness::new();
         let id_a = input
             .store
+            .lock()
+            .unwrap()
             .insert_image("a.png".into(), "data:image/png;base64,AAA".into());
         let id_b = input
             .store
+            .lock()
+            .unwrap()
             .insert_image("b.png".into(), "data:image/png;base64,BBB".into());
-        input.source = format!("{m}x{m}y{m}", m = ATTACHMENT_MARKER);
-        input.win.cpos = input.source.len();
-        input.win.attachment_ids = vec![id_a, id_b, id_a];
-        let content = input.build_content();
+        input
+            .buf
+            .set_source(format!("{m}x{m}y{m}", m = ATTACHMENT_MARKER));
+        input.win.cpos = input.buf.source().len();
+        input.buf.attachment_ids = vec![id_a, id_b, id_a];
+        let content = input.state.build_content(&input.buf);
         assert_eq!(content.image_count(), 2);
     }
 
@@ -1888,41 +2109,41 @@ mod tests {
 
     #[test]
     fn stale_anchor_past_source_end_clamps_to_source_len() {
-        let mut input = PromptState::new();
-        input.source = "hi".to_string();
+        let mut input = Harness::new();
+        input.buf.set_source("hi".to_string());
         input.win.cpos = 0;
         input.win.selection_anchor = Some(5808);
         // Stale anchor is clamped to source.len(); slice is in-bounds, no panic.
-        assert_eq!(input.selection_range(), Some((0, 2)));
+        assert_eq!(input.state.selection_range(PromptCtxRef { buf: &input.buf, win: &input.win }), Some((0, 2)));
         // And the slice that would previously panic now succeeds.
-        let (s, e) = input.selection_range().unwrap();
-        let _ = &input.source[s..e];
+        let (s, e) = input.state.selection_range(PromptCtxRef { buf: &input.buf, win: &input.win }).unwrap();
+        let _ = input.buf.source()[s..e];
     }
 
     #[test]
     fn stale_anchor_against_empty_source_returns_none() {
-        let mut input = PromptState::new();
-        input.source = String::new();
+        let mut input = Harness::new();
+        input.buf.set_source(String::new());
         input.win.cpos = 0;
         input.win.selection_anchor = Some(371);
         // Both endpoints clamp to 0 → range collapses to None.
-        assert_eq!(input.selection_range(), None);
+        assert_eq!(input.state.selection_range(PromptCtxRef { buf: &input.buf, win: &input.win }), None);
     }
 
     #[test]
     fn delete_selection_with_stale_anchor_does_not_panic() {
-        let mut input = PromptState::new();
-        input.source = String::new();
+        let mut input = Harness::new();
+        input.buf.set_source(String::new());
         input.win.cpos = 0;
         input.win.selection_anchor = Some(5808);
-        assert_eq!(input.delete_selection(), None);
-        assert_eq!(input.source, "");
+        assert_eq!(input.state.delete_selection(&mut PromptCtx { buf: &mut input.buf, win: &mut input.win }), None);
+        assert_eq!(input.buf.source(), "");
     }
 
     #[test]
     fn copy_selection_with_stale_anchor_does_not_panic() {
-        let mut input = PromptState::new();
-        input.source = String::new();
+        let mut input = Harness::new();
+        input.buf.set_source(String::new());
         input.win.cpos = 0;
         input.win.selection_anchor = Some(5808);
         input.test_action(KeyAction::CopySelection, crate::smelt_term::VimMode::Insert);
@@ -1932,80 +2153,84 @@ mod tests {
     fn stale_anchor_mid_codepoint_snaps_to_boundary() {
         // Anchor lands inside a multi-byte codepoint; snap pulls it to a boundary
         // so the resulting slice can never split a UTF-8 sequence.
-        let mut input = PromptState::new();
-        input.source = "héllo".to_string(); // 'é' occupies bytes 1..3
+        let mut input = Harness::new();
+        input.buf.set_source("héllo".to_string()); // 'é' occupies bytes 1..3
         input.win.cpos = 0;
         input.win.selection_anchor = Some(2); // mid-codepoint
-        assert_eq!(input.selection_range(), Some((0, 1)));
-        let (s, e) = input.selection_range().unwrap();
-        let _ = &input.source[s..e]; // would panic without the snap
+        assert_eq!(input.state.selection_range(PromptCtxRef { buf: &input.buf, win: &input.win }), Some((0, 1)));
+        let (s, e) = input.state.selection_range(PromptCtxRef { buf: &input.buf, win: &input.win }).unwrap();
+        let _ = input.buf.source()[s..e]; // would panic without the snap
     }
 
     #[test]
     fn replace_text_clears_anchor() {
-        let mut input = PromptState::new();
-        input.source = "long source".to_string();
+        let mut input = Harness::new();
+        input.buf.set_source("long source".to_string());
         input.win.selection_anchor = Some(7);
         input.win.cpos = 0;
-        input.replace_text(String::new(), None);
+        input
+            .state
+            .replace_text(&mut PromptCtx { buf: &mut input.buf, win: &mut input.win }, String::new(), None);
         assert_eq!(input.win.selection_anchor, None);
     }
 
     #[test]
     fn toggle_stash_both_branches_clear_anchor() {
-        let mut input = PromptState::new();
-        input.source = "hello".to_string();
+        let mut input = Harness::new();
+        input.buf.set_source("hello".to_string());
         input.win.cpos = 5;
         input.win.selection_anchor = Some(2);
         // Stash branch: source moves into stash.
-        input.toggle_stash();
+        input.state.toggle_stash(&mut PromptCtx { buf: &mut input.buf, win: &mut input.win });
         assert_eq!(
             input.win.selection_anchor, None,
             "stashing must clear stale anchor"
         );
         // Re-set an anchor against the (now empty) source and unstash.
         input.win.selection_anchor = Some(99);
-        input.toggle_stash();
+        input.state.toggle_stash(&mut PromptCtx { buf: &mut input.buf, win: &mut input.win });
         assert_eq!(
             input.win.selection_anchor, None,
             "unstashing must clear stale anchor"
         );
-        assert_eq!(input.source, "hello");
+        assert_eq!(input.buf.source(), "hello");
     }
 
     #[test]
     fn restore_stash_clears_anchor() {
-        let mut input = PromptState::new();
-        input.source = "hello".to_string();
-        input.toggle_stash(); // moves "hello" into stash
+        let mut input = Harness::new();
+        input.buf.set_source("hello".to_string());
+        input.state.toggle_stash(&mut PromptCtx { buf: &mut input.buf, win: &mut input.win }); // moves "hello" into stash
         input.win.selection_anchor = Some(99); // stale against current empty source
-        input.restore_stash();
+        input.state.restore_stash(&mut PromptCtx { buf: &mut input.buf, win: &mut input.win });
         assert_eq!(input.win.selection_anchor, None);
-        assert_eq!(input.source, "hello");
+        assert_eq!(input.buf.source(), "hello");
     }
 
     #[test]
     fn restore_from_rewind_clears_anchor() {
-        let mut input = PromptState::new();
-        input.source = "long buffer".to_string();
+        let mut input = Harness::new();
+        input.buf.set_source("long buffer".to_string());
         input.win.selection_anchor = Some(7);
-        input.restore_from_rewind("hi".to_string(), Vec::new());
+        input
+            .state
+            .restore_from_rewind(&mut PromptCtx { buf: &mut input.buf, win: &mut input.win }, "hi".to_string(), Vec::new());
         assert_eq!(input.win.selection_anchor, None);
-        assert_eq!(input.source, "hi");
+        assert_eq!(input.buf.source(), "hi");
     }
 
     #[test]
     fn undo_clears_anchor_when_replacing_with_shorter_source() {
-        let mut input = PromptState::new();
+        let mut input = Harness::new();
         // Save undo with empty buffer.
-        input.save_undo();
+        input.state.save_undo(&mut PromptCtx { buf: &mut input.buf, win: &mut input.win });
         // Type some text and create a selection.
-        input.source = "hello world".to_string();
+        input.buf.set_source("hello world".to_string());
         input.win.cpos = 11;
         input.win.selection_anchor = Some(6);
         // Undo back to empty.
-        input.undo();
-        assert_eq!(input.source, "");
+        input.state.undo(&mut PromptCtx { buf: &mut input.buf, win: &mut input.win });
+        assert_eq!(input.buf.source(), "");
         assert_eq!(
             input.win.selection_anchor, None,
             "undo must clear anchor that no longer fits the restored source"
@@ -2014,8 +2239,10 @@ mod tests {
 
     #[test]
     fn install_source_snaps_cpos_to_char_boundary() {
-        let mut input = PromptState::new();
-        input.install_source("héllo".to_string(), 2); // mid 'é'
+        let mut input = Harness::new();
+        input
+            .state
+            .install_source(&mut PromptCtx { buf: &mut input.buf, win: &mut input.win }, "héllo".to_string(), 2); // mid 'é'
         assert_eq!(input.win.cpos, 1, "cpos must snap to a char boundary");
     }
 }

@@ -93,7 +93,6 @@ pub struct TuiApp {
     /// Trust state for `<cwd>/.smelt/`; surfaced as a startup toast then dropped.
     pub(crate) project_trust: Option<smelt_core::trust::TrustState>,
     pub(crate) app_focus: AppFocus,
-    pub(crate) transcript_window: crate::smelt_term::Window,
     /// Tracks the last text dispatched as `TextChanged` on `PROMPT_WIN`.
     pub(crate) last_prompt_text: String,
     pub extra_instructions: Option<String>,
@@ -224,9 +223,6 @@ impl TuiApp {
         let mode = cache.mode();
         let mut input = PromptState::new();
         let vim_enabled = settings.vim;
-        if vim_enabled {
-            input.set_vim_enabled(true);
-        }
         input.command_arg_sources = Vec::new();
         let reasoning_effort = if reasoning_effort == protocol::ReasoningEffort::Off
             && cache.reasoning_effort != protocol::ReasoningEffort::Off
@@ -259,12 +255,37 @@ impl TuiApp {
             context_window: None,
         };
 
-        let (ui, transcript_display_buf, well_known) = {
+        let transcript_projection = crate::content::transcript_buf::TranscriptProjection::new();
+        let (ui, well_known) = {
             let (w, h) = terminal::size().unwrap_or((80, 24));
             let mut ui = crate::smelt_term::Ui::new();
             ui.set_terminal_size(w, h);
-            let input_display_buf = ui.buf_create(crate::smelt_term::BufCreateOpts::default());
+            let input_display_buf = ui
+                .buf_create_with_id(
+                    crate::app::PROMPT_EDIT_BUF,
+                    crate::smelt_term::BufCreateOpts::default(),
+                )
+                .expect("PROMPT_EDIT_BUF slot is free");
+            let parser: std::sync::Arc<dyn crate::smelt_term::BufferParser> = std::sync::Arc::new(
+                crate::content::prompt_parser::PromptBufferParser::new(input.store.clone()),
+            );
+            let copier: std::sync::Arc<dyn crate::smelt_term::BufferCopy> = std::sync::Arc::new(
+                crate::content::prompt_parser::PromptCopier::new(input.store.clone()),
+            );
+            if let Some(b) = ui.buf_mut(input_display_buf) {
+                b.set_parser(parser);
+                b.set_copier(copier);
+                b.history = crate::smelt_term::UndoHistory::new(Some(100));
+            }
             let transcript_display_buf = ui.buf_create(crate::smelt_term::BufCreateOpts::default());
+            let transcript_copier: std::sync::Arc<dyn crate::smelt_term::BufferCopy> =
+                std::sync::Arc::new(crate::content::transcript_buf::TranscriptCopier::new(
+                    transcript_projection.shared_snapshot(),
+                ));
+            if let Some(b) = ui.buf_mut(transcript_display_buf) {
+                b.readonly = true;
+                b.set_copier(transcript_copier);
+            }
             assert!(ui.win_open_split_at(
                 crate::app::TRANSCRIPT_WIN,
                 transcript_display_buf,
@@ -277,6 +298,9 @@ impl TuiApp {
                     },
                 },
             ));
+            if let Some(w) = ui.win_mut(crate::app::TRANSCRIPT_WIN) {
+                w.set_vim_enabled(vim_enabled);
+            }
             let prompt_above_buf = ui.buf_create(crate::smelt_term::BufCreateOpts::default());
             assert!(ui.win_open_split_at(
                 crate::app::PROMPT_ABOVE_WIN,
@@ -301,6 +325,9 @@ impl TuiApp {
                     },
                 },
             ));
+            if let Some(w) = ui.win_mut(crate::app::PROMPT_WIN) {
+                w.set_vim_enabled(vim_enabled);
+            }
             let prompt_below_buf = ui.buf_create(crate::smelt_term::BufCreateOpts::default());
             assert!(ui.win_open_split_at(
                 crate::app::PROMPT_BELOW_WIN,
@@ -338,7 +365,6 @@ impl TuiApp {
             ui.set_focus(crate::app::PROMPT_WIN);
             (
                 ui,
-                transcript_display_buf,
                 WellKnown {
                     prompt: crate::app::PROMPT_WIN,
                     prompt_above: crate::app::PROMPT_ABOVE_WIN,
@@ -358,7 +384,7 @@ impl TuiApp {
             lua,
             transcript: smelt_core::content::transcript::Transcript::new(),
             parser: smelt_core::content::stream_parser::StreamParser::new(),
-            transcript_projection: crate::content::transcript_buf::TranscriptProjection::new(),
+            transcript_projection,
             last_viewport_text: Vec::new(),
             input_history: History::load(),
             input,
@@ -392,18 +418,6 @@ impl TuiApp {
             startup_auth_error,
             project_trust: Some(project_trust),
             app_focus: AppFocus::Prompt,
-            transcript_window: {
-                let mut w = crate::smelt_term::Window::new(
-                    crate::app::TRANSCRIPT_WIN,
-                    transcript_display_buf,
-                    crate::smelt_term::SplitConfig {
-                        region: "transcript".into(),
-                        gutters: crate::smelt_term::Gutters::default(),
-                    },
-                );
-                w.set_vim_enabled(vim_enabled);
-                w
-            },
             last_prompt_text: String::new(),
             extra_instructions: None,
             skill_section: None,
@@ -545,6 +559,34 @@ impl TuiApp {
             .win(crate::app::TRANSCRIPT_WIN)
             .map(|w| w.config.gutters)
             .unwrap_or_default()
+    }
+
+    pub(crate) fn transcript_win(&self) -> &crate::smelt_term::Window {
+        self.ui
+            .win(self.well_known.transcript)
+            .expect("transcript window")
+    }
+
+    pub(crate) fn transcript_win_mut(&mut self) -> &mut crate::smelt_term::Window {
+        self.ui
+            .win_mut(self.well_known.transcript)
+            .expect("transcript window")
+    }
+
+    pub(crate) fn prompt_buf(&self) -> &crate::smelt_term::Buffer {
+        self.ui
+            .buf(crate::app::PROMPT_EDIT_BUF)
+            .expect("prompt edit buffer")
+    }
+
+    pub(crate) fn prompt_win(&self) -> &crate::smelt_term::Window {
+        self.ui.win(crate::app::PROMPT_WIN).expect("prompt window")
+    }
+
+    pub(crate) fn prompt_win_mut(&mut self) -> &mut crate::smelt_term::Window {
+        self.ui
+            .win_mut(crate::app::PROMPT_WIN)
+            .expect("prompt window")
     }
 
     /// Width available for transcript content (terminal width minus gutter/scrollbar columns).
@@ -702,7 +744,7 @@ impl TuiApp {
                 self.set_task_label(slug.clone());
             }
             self.finish_transcript_turn();
-            self.transcript_window.scroll_to_bottom();
+            self.transcript_win_mut().scroll_to_bottom();
         }
         if let Some(message) = self.startup_auth_error.take() {
             self.notify_error(message);

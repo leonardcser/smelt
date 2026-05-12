@@ -36,11 +36,11 @@ pub(crate) struct PromptAboveInput<'a> {
 
 pub(crate) struct InputLeafInput<'a> {
     pub(crate) input: &'a PromptState,
+    pub(crate) win: &'a crate::smelt_term::Window,
     pub(crate) clipboard: &'a crate::smelt_term::Clipboard,
     /// Inner width after gutters; `Window::render` shifts content past the left gutter.
     pub(crate) content_width: u16,
     pub(crate) height: u16,
-    pub(crate) has_prompt_cursor: bool,
 }
 
 pub(crate) struct BarInfo {
@@ -54,8 +54,6 @@ pub(crate) struct BarInfo {
 }
 
 pub(crate) struct InputLeafOutput {
-    pub(crate) cursor: Option<(u16, u16)>,
-    pub(crate) cursor_style: Option<(Style, char)>,
     pub(crate) viewport: Option<InputViewport>,
 }
 
@@ -63,15 +61,6 @@ pub(crate) struct InputViewport {
     pub(crate) rows: u16,
     pub(crate) content_width: u16,
     pub(crate) total_rows: u16,
-    pub(crate) scroll_top: u16,
-}
-
-fn cursor_style(theme: &crate::smelt_term::Theme) -> (Color, Color) {
-    if theme.is_light() {
-        (Color::White, Color::Black)
-    } else {
-        (Color::Black, Color::White)
-    }
 }
 
 fn theme_color(theme: &crate::smelt_term::Theme, group: &str) -> Color {
@@ -150,7 +139,50 @@ pub(crate) fn compute_input(
         }
     });
 
-    let input_area = compute_input_area(inp, usable, theme);
+    if buf.has_parser() {
+        // Parser already built lines and highlights. Just map selection and ghost text.
+        let total_lines = buf.line_count();
+        let input_row_count = total_lines.min(inp.height as usize) as u16;
+
+        // Map source selection to display selection via the shared helper —
+        // same code path the transcript will eventually use.
+        let pctx_ref = crate::input::PromptCtxRef { buf, win: inp.win };
+        if let Some((start, end)) = inp.input.display_selection_range(pctx_ref, inp.clipboard) {
+            let ranges = smelt_buffer::coords::selection_to_row_ranges(buf, start, end);
+            buf.set_selection(ranges);
+        } else {
+            buf.set_selection(Vec::new());
+        }
+
+        buf.clear_namespace(completer_ns, 0, usize::MAX);
+        if let Some(text) = prediction {
+            let row = if buf.source().is_empty() {
+                0
+            } else {
+                total_lines
+            };
+            buf.set_extmark(
+                completer_ns,
+                row,
+                0,
+                ExtmarkOpts::virt_text(text, Some("GhostText".into())),
+            );
+        }
+
+        return InputLeafOutput {
+            viewport: if input_row_count > 0 {
+                Some(InputViewport {
+                    rows: input_row_count,
+                    content_width: usable as u16,
+                    total_rows: total_lines as u16,
+                })
+            } else {
+                None
+            },
+        };
+    }
+
+    let input_area = compute_input_area(inp, buf, usable, theme);
     let input_row_count = input_area.visible_rows;
 
     let lines = input_area.lines.clone();
@@ -175,7 +207,7 @@ pub(crate) fn compute_input(
     if let Some(text) = prediction {
         // Row 0 when input is empty (dim suggestion visible); past last row otherwise
         // (keeps storage alive without rendering; Window::render only walks 0..line_count).
-        let row = if inp.input.source.is_empty() {
+        let row = if buf.source().is_empty() {
             0
         } else {
             total_lines
@@ -189,14 +221,11 @@ pub(crate) fn compute_input(
     }
 
     InputLeafOutput {
-        cursor: input_area.cursor_pos,
-        cursor_style: input_area.cursor_style,
         viewport: if input_row_count > 0 {
             Some(InputViewport {
                 rows: input_row_count,
                 content_width: usable as u16,
                 total_rows: input_area.total_content_rows as u16,
-                scroll_top: input_area.scroll_offset as u16,
             })
         } else {
             None
@@ -547,72 +576,53 @@ struct InputArea {
     lines: Vec<String>,
     highlights: Vec<(usize, u16, u16, Style)>,
     selection_ranges: Vec<(usize, u16, u16)>,
-    cursor_pos: Option<(u16, u16)>,
-    cursor_style: Option<(Style, char)>,
-    scroll_offset: usize,
     total_content_rows: usize,
     visible_rows: u16,
 }
 
 fn compute_input_area(
     input: &InputLeafInput<'_>,
+    edit_buf: &crate::smelt_term::Buffer,
     usable: usize,
     theme: &crate::smelt_term::Theme,
 ) -> InputArea {
     let height = input.height as usize;
     let state = input.input;
 
-    let spans = build_display_spans(&state.source, &state.win.attachment_ids, &state.store);
+    let spans = build_display_spans(
+        edit_buf.source(),
+        &edit_buf.attachment_ids,
+        &state.store.lock().unwrap(),
+    );
     let display_buf = spans_to_string(&spans);
     let char_kinds = build_char_kinds(&spans);
-    let display_cursor = map_cursor(state.cursor_char(), &state.source, &spans);
+    let pctx_ref = crate::input::PromptCtxRef {
+        buf: edit_buf,
+        win: input.win,
+    };
     let display_selection = state
-        .display_selection_range(input.clipboard)
+        .display_selection_range(pctx_ref, input.clipboard)
         .map(|(start, end)| {
-            let raw_start_char = crate::input::char_pos(&state.source, start);
-            let raw_end_char = crate::input::char_pos(&state.source, end);
-            let ds = map_cursor(raw_start_char, &state.source, &spans);
-            let de = map_cursor(raw_end_char, &state.source, &spans);
+            let raw_start_char = crate::input::char_pos(edit_buf.source(), start);
+            let raw_end_char = crate::input::char_pos(edit_buf.source(), end);
+            let ds = map_cursor(raw_start_char, edit_buf.source(), &spans);
+            let de = map_cursor(raw_end_char, edit_buf.source(), &spans);
             (ds, de)
         });
-    let (visual_lines, cursor_line, _, cursor_char_in_line) =
-        wrap_and_locate_cursor(&display_buf, &char_kinds, display_cursor, usable);
-    let single_line = !state.source.contains('\n');
+    let (visual_lines, _, _, _) = wrap_and_locate_cursor(&display_buf, &char_kinds, 0, usable);
+    let single_line = !edit_buf.source().contains('\n');
     let plain_only = !single_line;
-    let is_command = !plain_only && crate::completer::Completer::is_command(state.source.trim());
-    let is_exec =
-        !plain_only && matches!(state.source.as_bytes(), [b'!', c, ..] if !c.is_ascii_whitespace());
-    let is_exec_invalid = !plain_only && state.source == "!";
+    let is_command =
+        !plain_only && crate::completer::Completer::is_command(edit_buf.source().trim());
+    let is_exec = !plain_only
+        && matches!(edit_buf.source().as_bytes(), [b'!', c, ..] if !c.is_ascii_whitespace());
+    let is_exec_invalid = !plain_only && edit_buf.source() == "!";
     let total_content_rows = visual_lines.len();
 
     let max_content_rows = height.max(1);
     let content_rows = total_content_rows.min(max_content_rows);
+    let scroll_offset = input.win.scroll_top as usize;
 
-    let scroll_offset = if total_content_rows > content_rows {
-        let max_off = total_content_rows.saturating_sub(content_rows);
-        let cursor_moved = state.win.last_render_cpos != Some(state.win.cpos);
-        let raw = if state.win.pending_recenter {
-            cursor_line.saturating_sub(content_rows / 2)
-        } else if cursor_moved {
-            // Keep cursor visible. Wheel/scrollbar panning doesn't move cpos,
-            // so this branch is skipped and scroll_top stays where the user pinned it.
-            let mut s = state.win.scroll_top as usize;
-            if cursor_line < s {
-                s = cursor_line;
-            } else if cursor_line >= s + content_rows {
-                s = cursor_line + 1 - content_rows;
-            }
-            s
-        } else {
-            state.win.scroll_top as usize
-        };
-        raw.min(max_off)
-    } else {
-        0
-    };
-
-    let mut cursor_pos: Option<(u16, u16)> = None;
-    let mut cursor_style_out: Option<(Style, char)> = None;
     let mut highlights: Vec<(usize, u16, u16, Style)> = Vec::new();
     let mut selection_ranges: Vec<(usize, u16, u16)> = Vec::new();
 
@@ -670,12 +680,6 @@ fn compute_input_area(
             }
         }
 
-        let line_cursor = if abs_idx == cursor_line && input.has_prompt_cursor {
-            Some(cursor_char_in_line)
-        } else {
-            None
-        };
-
         let segments = if is_command {
             let prefix_chars = if abs_idx == 0 {
                 line.char_indices()
@@ -687,40 +691,19 @@ fn compute_input_area(
             };
             let mut cmd_kinds = vec![SpanKind::AtRef; prefix_chars];
             cmd_kinds.resize(line_chars, SpanKind::Plain);
-            styled_char_segments(line, &cmd_kinds, line_cursor, theme)
+            styled_char_segments(line, &cmd_kinds, theme)
         } else if (is_exec || is_exec_invalid) && abs_idx == 0 && line.starts_with('!') {
-            exec_bang_segments(line, kinds, line_cursor, theme)
+            exec_bang_segments(line, kinds, theme)
         } else {
-            styled_char_segments(line, kinds, line_cursor, theme)
+            styled_char_segments(line, kinds, theme)
         };
         push_segment_highlights(&mut highlights, li, &segments);
-
-        if line_cursor.is_some() {
-            let cursor_col = cursor_char_in_line as u16;
-            cursor_pos = Some((cursor_col, li as u16));
-        }
-    }
-
-    if cursor_line >= total_content_rows && input.has_prompt_cursor {
-        let (fg, bg) = cursor_style(theme);
-        cursor_pos = Some((0, content_rows.saturating_sub(1) as u16));
-        cursor_style_out = Some((
-            Style {
-                fg: Some(fg),
-                bg: Some(bg),
-                ..Style::default()
-            },
-            ' ',
-        ));
     }
 
     InputArea {
         lines,
         highlights,
         selection_ranges,
-        cursor_pos,
-        cursor_style: cursor_style_out,
-        scroll_offset,
         total_content_rows,
         visible_rows: content_rows as u16,
     }
@@ -747,36 +730,22 @@ fn push_segment_highlights(
 fn styled_char_segments(
     line: &str,
     kinds: &[SpanKind],
-    cursor_pos: Option<usize>,
     theme: &crate::smelt_term::Theme,
 ) -> Vec<StyledSegment> {
     let mut segments: Vec<StyledSegment> = Vec::new();
     let mut current_text = String::new();
     let mut current_style = Style::default();
-    let char_count = line.chars().count();
-
-    let (cursor_fg, cursor_bg) = cursor_style(theme);
     let accent = theme_color(theme, "SmeltAccent");
 
     for (i, ch) in line.chars().enumerate() {
         let kind = kinds.get(i).copied().unwrap_or(SpanKind::Plain);
-        let want_cursor = cursor_pos == Some(i);
-
-        let style = if want_cursor {
-            Style {
-                fg: Some(cursor_fg),
-                bg: Some(cursor_bg),
-                ..Style::default()
-            }
-        } else {
-            let fg = match kind {
-                SpanKind::AtRef | SpanKind::Attachment => Some(accent),
-                SpanKind::Plain => None,
-            };
-            Style {
-                fg,
-                ..Style::default()
-            }
+        let fg = match kind {
+            SpanKind::AtRef | SpanKind::Attachment => Some(accent),
+            SpanKind::Plain => None,
+        };
+        let style = Style {
+            fg,
+            ..Style::default()
         };
 
         if style != current_style && !current_text.is_empty() {
@@ -796,58 +765,29 @@ fn styled_char_segments(
         });
     }
 
-    if cursor_pos == Some(char_count) {
-        segments.push(StyledSegment {
-            text: " ".into(),
-            style: Style {
-                fg: Some(cursor_fg),
-                bg: Some(cursor_bg),
-                ..Style::default()
-            },
-        });
-    }
-
     segments
 }
 
 fn exec_bang_segments(
     line: &str,
     kinds: &[SpanKind],
-    cursor_pos: Option<usize>,
     theme: &crate::smelt_term::Theme,
 ) -> Vec<StyledSegment> {
     let mut segs = Vec::new();
 
-    let bang_cursor = cursor_pos == Some(0);
-
-    if bang_cursor {
-        let (fg, bg) = cursor_style(theme);
-        segs.push(StyledSegment {
-            text: "!".into(),
-            style: Style {
-                fg: Some(fg),
-                bg: Some(bg),
-                ..Style::default()
-            },
-        });
-    } else {
-        segs.push(StyledSegment {
-            text: "!".into(),
-            style: Style {
-                fg: Some(Color::Red),
-                bold: true,
-                ..Style::default()
-            },
-        });
-    }
-
-    let rest_cursor = cursor_pos.and_then(|c| c.checked_sub(1));
+    segs.push(StyledSegment {
+        text: "!".into(),
+        style: Style {
+            fg: Some(Color::Red),
+            bold: true,
+            ..Style::default()
+        },
+    });
 
     if line.len() > 1 {
         segs.extend(styled_char_segments(
             &line[1..],
             if kinds.len() > 1 { &kinds[1..] } else { &[] },
-            rest_cursor,
             theme,
         ));
     }
@@ -896,34 +836,15 @@ mod tests {
 
     #[test]
     fn styled_char_segments_plain() {
-        let segs = styled_char_segments("hello", &[SpanKind::Plain; 5], None, &test_theme());
+        let segs = styled_char_segments("hello", &[SpanKind::Plain; 5], &test_theme());
         assert_eq!(segs.len(), 1);
         assert_eq!(segs[0].text, "hello");
     }
 
     #[test]
-    fn styled_char_segments_with_cursor() {
-        let segs = styled_char_segments("hello", &[SpanKind::Plain; 5], Some(2), &test_theme());
-        // Before cursor, cursor char, after cursor
-        assert!(segs.len() >= 3);
-        // The cursor char should have inverted colors
-        let cursor_seg = &segs[1];
-        assert_eq!(cursor_seg.text, "l");
-        assert!(cursor_seg.style.bg.is_some());
-    }
-
-    #[test]
-    fn styled_char_segments_cursor_at_end() {
-        let segs = styled_char_segments("hi", &[SpanKind::Plain; 2], Some(2), &test_theme());
-        let last = segs.last().unwrap();
-        assert_eq!(last.text, " ");
-        assert!(last.style.bg.is_some());
-    }
-
-    #[test]
     fn exec_bang_segments_highlights_bang() {
         let kinds = vec![SpanKind::Plain; 4];
-        let segs = exec_bang_segments("!ls", &kinds, None, &test_theme());
+        let segs = exec_bang_segments("!ls", &kinds, &test_theme());
         assert_eq!(segs[0].text, "!");
         assert_eq!(segs[0].style.fg, Some(smelt_core::style::Color::Red));
         assert!(segs[0].style.bold);
@@ -933,12 +854,20 @@ mod tests {
     fn compute_input_writes_input_only() {
         let input_state = PromptState::default();
         let test_clipboard = crate::smelt_term::Clipboard::null();
+        let test_win = crate::smelt_term::Window::new(
+            crate::app::PROMPT_WIN,
+            crate::app::PROMPT_EDIT_BUF,
+            crate::smelt_term::SplitConfig {
+                region: "prompt".into(),
+                gutters: crate::smelt_term::Gutters::default(),
+            },
+        );
         let inp = InputLeafInput {
             input: &input_state,
+            win: &test_win,
             clipboard: &test_clipboard,
             content_width: 78,
             height: 4,
-            has_prompt_cursor: true,
         };
         let mut input_buf = Buffer::new(
             crate::app::PROMPT_EDIT_BUF,
@@ -946,9 +875,7 @@ mod tests {
         );
         let output = compute_input(&inp, &mut input_buf, &test_theme());
         assert_eq!(input_buf.line_count(), 1);
-        let (col, row) = output.cursor.expect("cursor populated");
-        assert_eq!(row, 0);
-        assert_eq!(col, 0);
+        assert!(output.viewport.is_some());
     }
 
     #[test]
@@ -1031,6 +958,7 @@ mod tests {
             cursor_shape: CursorShape::Block {
                 glyph: '█',
                 style: crate::smelt_term::grid::Style::default(),
+                pos: None,
             },
             theme,
             vim_mode: crate::smelt_term::VimMode::Insert,

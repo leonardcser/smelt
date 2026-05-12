@@ -1,11 +1,11 @@
 use super::event::Status;
-use super::text::{self, byte_to_cell, cell_to_byte};
+use super::text::{self, byte_to_cell};
 use super::vim::{self, Action, VimContext, VimMode, VimWindowState};
 use super::Buffer;
 use super::Clipboard;
-use super::{BufId, WinId};
+use super::{BufId, UndoHistory, WinId};
 use crate::Theme;
-use crossterm::event::{KeyCode, KeyEvent, MouseButton, MouseEvent, MouseEventKind};
+use crossterm::event::{KeyEvent, MouseButton, MouseEvent, MouseEventKind};
 use smelt_buffer::buffer::VirtTextPos;
 use smelt_term::grid::{GridSlice, Style};
 use smelt_term::layout::{Gutters, Rect};
@@ -153,7 +153,6 @@ impl WindowViewport {
 /// Per-call context for [`Window::handle`]. Geometry is recomputed each frame and
 /// supplied here so one `Window` drives heterogeneous backings.
 pub struct EventCtx<'a> {
-    pub rows: &'a [String],
     pub soft_breaks: &'a [usize],
     pub hard_breaks: &'a [usize],
     pub viewport: WindowViewport,
@@ -163,9 +162,7 @@ pub struct EventCtx<'a> {
 
 /// Per-call context for [`Window::handle_mouse`].
 pub struct MouseCtx<'a> {
-    /// One per visual line; for unwrapped buffers equals `buffer.lines()`.
-    pub rows: &'a [String],
-    /// Soft-wrap byte positions in `rows.join("\n")`; word-select crosses these transparently.
+    /// Soft-wrap byte positions in `buf.lines().join("\n")`; word-select crosses these transparently.
     pub soft_breaks: &'a [usize],
     /// Hard `\n` byte positions; triple-click extends to the full source line.
     pub hard_breaks: &'a [usize],
@@ -181,7 +178,10 @@ pub struct SplitConfig {
 
 /// How the focused window's cursor renders (single global on `Ui`).
 /// `Hidden` — no cursor. `Hardware` — native terminal caret via `Ui::render`.
-/// `Block { glyph, style }` — paint a cell at `(cursor_col, cursor_row - scroll_top)`.
+/// `Block { glyph, style, pos }` — paint a cell at `pos` when set, else at the
+/// window-derived `(cursor_col, cursor_row - scroll_top)`. `pos` is the host's
+/// projected (screen-relative) `(col, row)` override for panes that wrap or
+/// format their buffer before paint (transcript, prompt).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum CursorShape {
     #[default]
@@ -190,6 +190,7 @@ pub enum CursorShape {
     Block {
         glyph: char,
         style: Style,
+        pos: Option<(u16, u16)>,
     },
 }
 
@@ -205,12 +206,7 @@ pub struct Window {
     /// Populated each frame by the host so scrollbar paint is available without a render-time channel.
     pub viewport: Option<WindowViewport>,
 
-    pub text: String,
-    pub attachment_ids: Vec<super::AttachmentId>,
-    pub history: super::UndoHistory,
-    pub readonly: bool,
     pub cpos: usize,
-    /// Gates `dispatch_vim_key`; `vim_state` is always present.
     pub vim_enabled: bool,
     pub vim_mode: VimMode,
     pub vim_state: VimWindowState,
@@ -236,6 +232,9 @@ pub struct Window {
     pub drag_anchor_word: Option<(usize, usize)>,
     /// Triple-click line-select anchor; drag extends in line units while set.
     pub drag_anchor_line: Option<(usize, usize)>,
+    /// Cpos of a single-click press awaiting drag; promoted to a selection on the
+    /// first `Drag` event. A bare press-release with no motion leaves no selection.
+    pub pending_press: Option<usize>,
 }
 
 impl Window {
@@ -247,10 +246,6 @@ impl Window {
             focusable: true,
             cursor_line_highlight: false,
             viewport: None,
-            text: String::new(),
-            attachment_ids: Vec::new(),
-            history: super::UndoHistory::default(),
-            readonly: true,
             cpos: 0,
             vim_enabled: false,
             vim_mode: VimMode::default(),
@@ -266,6 +261,7 @@ impl Window {
             cursor_positioned: false,
             drag_anchor_word: None,
             drag_anchor_line: None,
+            pending_press: None,
         }
     }
 
@@ -360,15 +356,15 @@ impl Window {
         (lo != hi).then_some((lo, hi))
     }
 
-    pub fn selection_range(&self, rows: &[String]) -> Option<(usize, usize)> {
-        let cpos = self.compute_cpos(rows);
-        let buf = rows.join("\n");
+    pub fn selection_range(&self, buf: &Buffer) -> Option<(usize, usize)> {
+        let cpos = self.compute_cpos(buf);
+        let text = buf.text();
         if self.vim_enabled {
-            if let Some(range) = vim::visual_range(&self.vim_state, &buf, cpos, self.vim_mode) {
+            if let Some(range) = vim::visual_range(&self.vim_state, &text, cpos, self.vim_mode) {
                 return Some(range);
             }
         }
-        self.selection_range_at(cpos, &buf)
+        self.selection_range_at(cpos, &text)
     }
 
     /// Derive selection ranges from this window's own anchors; used when the buffer
@@ -429,12 +425,12 @@ impl Window {
         &mut self,
         cpos: usize,
         transparent: &[usize],
-        rows: &[String],
-        buf: &str,
+        buf: &Buffer,
         viewport_rows: u16,
     ) -> Option<(usize, usize)> {
-        let (start, end) = super::text::big_word_range_at_transparent(buf, cpos, transparent)?;
-        self.finish_range_select(start, end, rows, viewport_rows);
+        let text = buf.text();
+        let (start, end) = super::text::big_word_range_at_transparent(&text, cpos, transparent)?;
+        self.finish_range_select(start, end, buf, viewport_rows);
         Some((start, end))
     }
 
@@ -444,32 +440,25 @@ impl Window {
         &mut self,
         cpos: usize,
         hard_breaks: &[usize],
-        rows: &[String],
-        buf: &str,
+        buf: &Buffer,
         viewport_rows: u16,
     ) -> Option<(usize, usize)> {
-        let (start, end) = super::text::line_range_at(buf, cpos, hard_breaks)?;
-        self.finish_range_select(start, end, rows, viewport_rows);
+        let text = buf.text();
+        let (start, end) = super::text::line_range_at(&text, cpos, hard_breaks)?;
+        self.finish_range_select(start, end, buf, viewport_rows);
         Some((start, end))
     }
 
     /// Position cursor at end of `[start, end)` and anchor Visual at `start`.
     /// Re-syncs cursor coords so the highlight pass sees the correct position.
-    fn finish_range_select(
-        &mut self,
-        start: usize,
-        end: usize,
-        rows: &[String],
-        viewport_rows: u16,
-    ) {
+    fn finish_range_select(&mut self, start: usize, end: usize, buf: &Buffer, viewport_rows: u16) {
         // vim visual_range is inclusive at cpos; non-vim selection_range_at is exclusive.
         self.cpos = if self.vim_enabled {
             end.saturating_sub(1).max(start)
         } else {
             end
         };
-        let offsets = Self::line_start_offsets(rows);
-        self.sync_from_cpos(rows, &offsets, viewport_rows);
+        self.sync_from_cpos(buf, viewport_rows);
         if self.vim_enabled {
             self.vim_state
                 .begin_visual(&mut self.vim_mode, VimMode::Visual, start);
@@ -478,18 +467,15 @@ impl Window {
         }
     }
 
-    pub fn resync(&mut self, rows: &[String], viewport_rows: u16) {
-        if rows.is_empty() {
+    pub fn resync(&mut self, buf: &Buffer, viewport_rows: u16) {
+        if buf.lines().is_empty() {
             return;
         }
-        let offsets = Self::line_start_offsets(rows);
-        self.text = rows.join("\n");
-        self.sync_from_cpos(rows, &offsets, viewport_rows);
+        self.sync_from_cpos(buf, viewport_rows);
     }
 
-    pub fn refocus(&mut self, rows: &[String], viewport_rows: u16) {
-        if rows.is_empty() {
-            self.text.clear();
+    pub fn refocus(&mut self, buf: &Buffer, viewport_rows: u16) {
+        if buf.lines().is_empty() {
             self.reset_cursor();
             self.cursor_positioned = false;
             return;
@@ -498,16 +484,13 @@ impl Window {
             self.vim_state.set_mode(&mut self.vim_mode, VimMode::Normal);
         }
         if !self.cursor_positioned {
-            let total = rows.len();
-            let last_line = total.saturating_sub(1);
-            let offsets = Self::line_start_offsets(rows);
-            self.text = rows.join("\n");
-            self.cpos = offsets[last_line];
-            self.sync_from_cpos(rows, &offsets, viewport_rows);
+            let rows = buf.lines();
+            let last_line = rows.len().saturating_sub(1);
+            self.cpos = buf.byte_at_display_pos(last_line, 0);
+            self.sync_from_cpos(buf, viewport_rows);
             self.cursor_positioned = true;
         } else {
-            let offsets = self.mount(rows);
-            self.sync_from_cpos(rows, &offsets, viewport_rows);
+            self.sync_from_cpos(buf, viewport_rows);
         }
         if self.curswant.is_none() {
             self.curswant = Some(self.cursor_col as usize);
@@ -524,74 +507,50 @@ impl Window {
 
     // ── Navigation ─────────────────────────────────────────────────────
 
-    pub fn compute_cpos(&self, rows: &[String]) -> usize {
-        let offsets = Self::line_start_offsets(rows);
-        self.visible_cpos(rows, &offsets)
+    pub fn compute_cpos(&self, buf: &Buffer) -> usize {
+        buf.byte_at_display_pos(self.cursor_row as usize, self.cursor_col as usize)
     }
 
-    fn line_start_offsets(rows: &[String]) -> Vec<usize> {
-        let mut v = Vec::with_capacity(rows.len());
-        let mut acc = 0usize;
-        for r in rows {
-            v.push(acc);
-            acc += r.len() + 1;
-        }
-        v
-    }
-
-    fn visible_cpos(&self, rows: &[String], offsets: &[usize]) -> usize {
-        let total = rows.len();
-        if total == 0 {
-            return 0;
-        }
-        let line_idx = (self.cursor_row as usize).min(total - 1);
-        offsets[line_idx] + cell_to_byte(&rows[line_idx], self.cursor_col as usize)
-    }
-
-    fn sync_from_cpos(&mut self, rows: &[String], offsets: &[usize], viewport_rows: u16) {
-        let total = rows.len();
-        if total == 0 {
-            return;
-        }
-        let tail_byte = *offsets.last().unwrap() + rows.last().map_or(0, |r| r.len());
-        self.cpos = self.cpos.min(tail_byte);
-        let line_idx = match offsets.binary_search(&self.cpos) {
-            Ok(i) => i,
-            Err(i) => i.saturating_sub(1),
-        };
-        let line = &rows[line_idx];
-        let byte_col = self.cpos.saturating_sub(offsets[line_idx]);
-        self.cursor_col = byte_to_cell(line, byte_col) as u16;
-        let line_idx = line_idx as u16;
+    /// Clamp `scroll_top` so `cursor_row` stays inside the viewport.
+    /// Call after updating `cursor_row` (or call `sync_from_cpos` which does both).
+    pub fn keep_cursor_visible(&mut self, cursor_row: u16, total_rows: u16, viewport_rows: u16) {
+        let max_scroll = total_rows.saturating_sub(viewport_rows);
         let viewport_bottom = self
             .scroll_top
             .saturating_add(viewport_rows.saturating_sub(1));
-        if line_idx > viewport_bottom {
-            self.scroll_top = line_idx.saturating_sub(viewport_rows.saturating_sub(1));
-        } else if line_idx < self.scroll_top {
-            self.scroll_top = line_idx;
+        if cursor_row > viewport_bottom {
+            self.scroll_top = cursor_row
+                .saturating_sub(viewport_rows.saturating_sub(1))
+                .min(max_scroll);
+        } else if cursor_row < self.scroll_top {
+            self.scroll_top = cursor_row;
         }
-        self.cursor_row = line_idx;
     }
 
-    fn mount(&mut self, rows: &[String]) -> Vec<usize> {
-        let offsets = Self::line_start_offsets(rows);
-        self.text = rows.join("\n");
-        self.cpos = self.visible_cpos(rows, &offsets);
-        offsets
+    fn sync_from_cpos(&mut self, buf: &Buffer, viewport_rows: u16) {
+        let (row, col) = buf.display_cursor_pos(self.cpos);
+        self.cursor_row = row as u16;
+        self.cursor_col = col as u16;
+        let total_rows = buf.lines().len() as u16;
+        self.keep_cursor_visible(self.cursor_row, total_rows, viewport_rows);
     }
 
     // ── Event dispatch ────────────────────────────────────────────────
 
-    pub fn handle(&mut self, ev: super::event::Event, ctx: EventCtx<'_>) -> Status {
+    pub fn handle(
+        &mut self,
+        buf: &mut Buffer,
+        ev: super::event::Event,
+        ctx: EventCtx<'_>,
+    ) -> Status {
         use super::event::Event;
         match ev {
-            Event::Key(k) => self.handle_key(k, ctx.rows, ctx.viewport.rect.height, ctx.clipboard),
+            Event::Key(k) => self.handle_key(buf, k, ctx.clipboard),
             Event::Mouse(me) => {
                 let (status, _) = self.handle_mouse(
+                    buf,
                     me,
                     MouseCtx {
-                        rows: ctx.rows,
                         soft_breaks: ctx.soft_breaks,
                         hard_breaks: ctx.hard_breaks,
                         viewport: ctx.viewport,
@@ -612,15 +571,20 @@ impl Window {
     /// the joined display rows if a selection was active (host applies the copy primitive).
     pub fn handle_mouse(
         &mut self,
+        buf: &Buffer,
         event: MouseEvent,
         ctx: MouseCtx,
     ) -> (Status, Option<(usize, usize)>) {
-        let buf = ctx.rows.join("\n");
+        let text = buf.text();
         match event.kind {
-            MouseEventKind::Down(MouseButton::Left) => (self.mouse_down(event, &ctx, &buf), None),
-            MouseEventKind::Drag(MouseButton::Left) => (self.mouse_drag(event, &ctx, &buf), None),
+            MouseEventKind::Down(MouseButton::Left) => {
+                (self.mouse_down(buf, event, &ctx, &text), None)
+            }
+            MouseEventKind::Drag(MouseButton::Left) => {
+                (self.mouse_drag(buf, event, &ctx, &text), None)
+            }
             MouseEventKind::Up(MouseButton::Left) => {
-                let range = self.mouse_yank_range(&ctx, &buf);
+                let range = self.mouse_yank_range(buf, &ctx, &text);
                 let status = self.mouse_up();
                 (status, range)
             }
@@ -628,7 +592,13 @@ impl Window {
         }
     }
 
-    fn mouse_down(&mut self, event: MouseEvent, ctx: &MouseCtx, buf: &str) -> Status {
+    fn mouse_down(
+        &mut self,
+        buf: &Buffer,
+        event: MouseEvent,
+        ctx: &MouseCtx,
+        _text: &str,
+    ) -> Status {
         let Some(hit) = ctx.viewport.hit(event.row, event.column) else {
             return Status::Ignored;
         };
@@ -639,32 +609,28 @@ impl Window {
         else {
             return Status::Ignored;
         };
-        if ctx.rows.is_empty() {
+        let rows = buf.lines();
+        if rows.is_empty() {
             return Status::Consumed;
         }
 
         let viewport_rows = ctx.viewport.rect.height;
-        let line_idx = (self.scroll_top as usize + rel_row as usize).min(ctx.rows.len() - 1);
-        self.jump_to_line_col(ctx.rows, line_idx, rel_col as usize, viewport_rows);
+        let line_idx = (self.scroll_top as usize + rel_row as usize).min(rows.len() - 1);
+        self.jump_to_line_col(buf, line_idx, rel_col as usize, viewport_rows);
         let cpos = self.cpos;
 
         match ctx.click_count {
             2 => {
-                if let Some((s, e)) = self.select_big_word_at_transparent(
-                    cpos,
-                    ctx.soft_breaks,
-                    ctx.rows,
-                    buf,
-                    viewport_rows,
-                ) {
+                if let Some((s, e)) =
+                    self.select_big_word_at_transparent(cpos, ctx.soft_breaks, buf, viewport_rows)
+                {
                     self.drag_anchor_word = Some((s, e));
                     self.drag_anchor_line = None;
                 }
                 Status::Capture
             }
             3 => {
-                if let Some((s, e)) =
-                    self.select_line_at(cpos, ctx.hard_breaks, ctx.rows, buf, viewport_rows)
+                if let Some((s, e)) = self.select_line_at(cpos, ctx.hard_breaks, buf, viewport_rows)
                 {
                     self.drag_anchor_line = Some((s, e));
                     self.drag_anchor_word = None;
@@ -674,20 +640,29 @@ impl Window {
             _ => {
                 self.drag_anchor_word = None;
                 self.drag_anchor_line = None;
-                if self.vim_enabled {
+                self.selection_anchor = None;
+                if self.vim_enabled
+                    && matches!(self.vim_mode, VimMode::Visual | VimMode::VisualLine)
+                {
                     self.vim_state
-                        .begin_visual(&mut self.vim_mode, VimMode::Visual, cpos);
-                } else {
-                    self.selection_anchor = Some(cpos);
+                        .set_mode(&mut self.vim_mode, VimMode::Normal);
                 }
+                self.pending_press = Some(cpos);
                 Status::Capture
             }
         }
     }
 
-    fn mouse_drag(&mut self, event: MouseEvent, ctx: &MouseCtx, buf: &str) -> Status {
+    fn mouse_drag(
+        &mut self,
+        buf: &Buffer,
+        event: MouseEvent,
+        ctx: &MouseCtx,
+        text: &str,
+    ) -> Status {
         let viewport_rows = ctx.viewport.rect.height;
-        if viewport_rows == 0 || ctx.rows.is_empty() {
+        let rows = buf.lines();
+        if viewport_rows == 0 || rows.is_empty() {
             return Status::Consumed;
         }
         let rel_row = event
@@ -698,26 +673,41 @@ impl Window {
             .column
             .saturating_sub(ctx.viewport.rect.left)
             .min(ctx.viewport.content_width.saturating_sub(1));
-        let line_idx = (self.scroll_top as usize + rel_row as usize).min(ctx.rows.len() - 1);
-        self.jump_to_line_col(ctx.rows, line_idx, rel_col as usize, viewport_rows);
+        let line_idx = (self.scroll_top as usize + rel_row as usize).min(rows.len() - 1);
+        self.jump_to_line_col(buf, line_idx, rel_col as usize, viewport_rows);
 
         if self.drag_anchor_word.is_some() {
-            self.extend_word_anchored_drag(ctx, buf);
+            self.extend_word_anchored_drag(buf, ctx, text);
         } else if self.drag_anchor_line.is_some() {
-            self.extend_line_anchored_drag(ctx, buf);
-        } else if !self.vim_enabled {
-            self.extend_selection(self.cpos);
+            self.extend_line_anchored_drag(buf, ctx, text);
+        } else {
+            if let Some(press) = self.pending_press.take() {
+                if self.vim_enabled {
+                    self.vim_state
+                        .begin_visual(&mut self.vim_mode, VimMode::Visual, press);
+                } else {
+                    self.selection_anchor = Some(press);
+                }
+            }
+            if !self.vim_enabled {
+                self.extend_selection(self.cpos);
+            }
         }
         Status::Consumed
     }
 
     /// Selection byte range before `mouse_up` clears anchors; `None` if empty or absent.
-    fn mouse_yank_range(&self, ctx: &MouseCtx, buf: &str) -> Option<(usize, usize)> {
-        let cpos = self.compute_cpos(ctx.rows);
+    fn mouse_yank_range(
+        &self,
+        buf: &Buffer,
+        _ctx: &MouseCtx,
+        text: &str,
+    ) -> Option<(usize, usize)> {
+        let cpos = self.compute_cpos(buf);
         let (start, end) = if self.vim_enabled {
-            vim::visual_range(&self.vim_state, buf, cpos, self.vim_mode)?
+            vim::visual_range(&self.vim_state, text, cpos, self.vim_mode)?
         } else {
-            self.selection_range_at(cpos, buf)?
+            self.selection_range_at(cpos, text)?
         };
         if start >= end {
             return None;
@@ -732,22 +722,23 @@ impl Window {
         self.selection_anchor = None;
         self.drag_anchor_word = None;
         self.drag_anchor_line = None;
+        self.pending_press = None;
         Status::Consumed
     }
 
     /// Extend drag by WORD units, keeping the original double-clicked word inside the selection.
-    fn extend_word_anchored_drag(&mut self, ctx: &MouseCtx, buf: &str) {
+    fn extend_word_anchored_drag(&mut self, buf: &Buffer, ctx: &MouseCtx, text: &str) {
         let Some((ws, we)) = self.drag_anchor_word else {
             return;
         };
-        let p = self.compute_cpos(ctx.rows);
+        let p = self.compute_cpos(buf);
         let (new_cpos, new_anchor) = if p >= we {
-            let far = super::text::word_range_at_transparent(buf, p, ctx.soft_breaks)
+            let far = super::text::word_range_at_transparent(text, p, ctx.soft_breaks)
                 .map(|(_, e)| e.saturating_sub(1).max(ws))
                 .unwrap_or(p.max(we.saturating_sub(1)));
             (far, ws)
         } else if p < ws {
-            let near = super::text::word_range_at_transparent(buf, p, ctx.soft_breaks)
+            let near = super::text::word_range_at_transparent(text, p, ctx.soft_breaks)
                 .map(|(s, _)| s)
                 .unwrap_or(p);
             (near, we.saturating_sub(1).max(ws))
@@ -763,18 +754,18 @@ impl Window {
         }
     }
 
-    fn extend_line_anchored_drag(&mut self, ctx: &MouseCtx, buf: &str) {
+    fn extend_line_anchored_drag(&mut self, buf: &Buffer, ctx: &MouseCtx, text: &str) {
         let Some((ls, le)) = self.drag_anchor_line else {
             return;
         };
-        let p = self.compute_cpos(ctx.rows);
+        let p = self.compute_cpos(buf);
         let (new_cpos, new_anchor) = if p >= le {
-            let far = super::text::line_range_at(buf, p, ctx.hard_breaks)
+            let far = super::text::line_range_at(text, p, ctx.hard_breaks)
                 .map(|(_, e)| e.saturating_sub(1).max(ls))
                 .unwrap_or(p.max(le.saturating_sub(1)));
             (far, ls)
         } else if p < ls {
-            let near = super::text::line_range_at(buf, p, ctx.hard_breaks)
+            let near = super::text::line_range_at(text, p, ctx.hard_breaks)
                 .map(|(s, _)| s)
                 .unwrap_or(p);
             (near, le.saturating_sub(1).max(ls))
@@ -794,78 +785,77 @@ impl Window {
 
     pub fn handle_key(
         &mut self,
+        buf: &mut Buffer,
         k: KeyEvent,
-        rows: &[String],
-        viewport_rows: u16,
         clipboard: &mut Clipboard,
     ) -> Status {
-        if rows.is_empty() {
-            return Status::Ignored;
-        }
-        let offsets = self.mount(rows);
-        if !self.dispatch_vim_key(k, clipboard) {
-            return Status::Ignored;
+        let width = self.viewport.map(|v| v.content_width).unwrap_or(80);
+        let viewport_rows = self.viewport.map(|v| v.rect.height).unwrap_or(1);
+        {
+            let mut cpos = self.cpos;
+            let action = if buf.readonly {
+                let mut scratch = buf.text().to_string();
+                let mut scratch_history = UndoHistory::default();
+                let mut scratch_attachments = Vec::new();
+                let mut ctx = VimContext {
+                    buf: &mut scratch,
+                    cpos: &mut cpos,
+                    attachments: &mut scratch_attachments,
+                    history: &mut scratch_history,
+                    clipboard,
+                    mode: &mut self.vim_mode,
+                    curswant: &mut self.curswant,
+                    vim_state: &mut self.vim_state,
+                };
+                vim::handle_key(k, &mut ctx)
+            } else {
+                let (text, history, attachments) = buf.edit_refs();
+                let mut ctx = VimContext {
+                    buf: text,
+                    cpos: &mut cpos,
+                    attachments,
+                    history,
+                    clipboard,
+                    mode: &mut self.vim_mode,
+                    curswant: &mut self.curswant,
+                    vim_state: &mut self.vim_state,
+                };
+                vim::handle_key(k, &mut ctx)
+            };
+            self.cpos = cpos;
+            if matches!(action, Action::Passthrough) {
+                return Status::Ignored;
+            }
         }
         if self.vim_enabled && self.vim_mode == VimMode::Insert {
             self.vim_state.set_mode(&mut self.vim_mode, VimMode::Normal);
         }
-        self.sync_from_cpos(rows, &offsets, viewport_rows);
-        Status::Consumed
-    }
-
-    fn dispatch_vim_key(&mut self, key: KeyEvent, clipboard: &mut Clipboard) -> bool {
-        if !self.vim_enabled {
-            return false;
+        if !buf.readonly {
+            buf.sync_after_edit(width);
         }
-        let key = match key.code {
-            KeyCode::Up => KeyEvent {
-                code: KeyCode::Char('k'),
-                ..key
-            },
-            KeyCode::Down => KeyEvent {
-                code: KeyCode::Char('j'),
-                ..key
-            },
-            KeyCode::Left => KeyEvent {
-                code: KeyCode::Char('h'),
-                ..key
-            },
-            KeyCode::Right => KeyEvent {
-                code: KeyCode::Char('l'),
-                ..key
-            },
-            _ => key,
-        };
-        let mut cpos = self.cpos;
-        let mut ctx = VimContext {
-            buf: &mut self.text,
-            cpos: &mut cpos,
-            attachments: &mut self.attachment_ids,
-            history: &mut self.history,
-            clipboard,
-            mode: &mut self.vim_mode,
-            curswant: &mut self.curswant,
-            vim_state: &mut self.vim_state,
-        };
-        let action = vim::handle_key(key, &mut ctx);
-        self.cpos = cpos;
-        !matches!(action, Action::Passthrough)
+        let (row, col) = buf.display_cursor_pos(self.cpos);
+        self.cursor_row = row as u16;
+        self.cursor_col = col as u16;
+        let total_rows = buf.lines().len() as u16;
+        self.keep_cursor_visible(self.cursor_row, total_rows, viewport_rows);
+        Status::Consumed
     }
 
     /// Cursor-led vertical motion: move `cpos` by `delta` rows; viewport pans only
     /// when the cursor would otherwise leave it. Used by j/k, arrow keys, Ctrl-U/D.
-    pub fn move_cursor_by_lines(&mut self, delta: isize, rows: &[String], viewport_rows: u16) {
+    pub fn move_cursor_by_lines(&mut self, buf: &Buffer, delta: isize, viewport_rows: u16) {
+        let rows = buf.lines();
         if rows.is_empty() || viewport_rows == 0 || delta == 0 {
             return;
         }
-        let offsets = self.mount(rows);
-        let (new_cpos, new_want) = text::vertical_move(&self.text, self.cpos, delta, self.curswant);
+        let text = buf.text();
+        let (new_cpos, new_want) = text::vertical_move(&text, self.cpos, delta, self.curswant);
         self.curswant = Some(new_want);
         self.cpos = new_cpos;
         if self.vim_enabled && self.vim_mode == VimMode::Insert {
             self.vim_state.set_mode(&mut self.vim_mode, VimMode::Normal);
         }
-        self.sync_from_cpos(rows, &offsets, viewport_rows);
+        self.sync_from_cpos(buf, viewport_rows);
         let max_scroll = (rows.len() as u16).saturating_sub(viewport_rows);
         self.follow_tail = self.scroll_top >= max_scroll;
     }
@@ -874,7 +864,8 @@ impl Window {
     /// by `delta` rows and keep the cursor on the same screen row. The cursor's
     /// buffer row changes to whatever row is now under that screen cell.
     /// To move the cursor first and reveal it afterward, use `move_cursor_by_lines`.
-    pub fn pan_by_lines(&mut self, delta: isize, rows: &[String], viewport_rows: u16) {
+    pub fn pan_by_lines(&mut self, buf: &Buffer, delta: isize, viewport_rows: u16) {
+        let rows = buf.lines();
         if rows.is_empty() || viewport_rows == 0 || delta == 0 {
             return;
         }
@@ -882,7 +873,7 @@ impl Window {
         let max_scroll = total.saturating_sub(viewport_rows);
         let cur_scroll = self.scroll_top.min(max_scroll);
         let new_scroll = (cur_scroll as isize + delta).clamp(0, max_scroll as isize) as u16;
-        self.scroll_to_preserving_cursor_screen_row(new_scroll, rows, viewport_rows);
+        self.scroll_to_preserving_cursor_screen_row(new_scroll, buf, viewport_rows);
     }
 
     /// Set `scroll_top` as a viewport operation: preserve the cursor's screen row
@@ -890,9 +881,10 @@ impl Window {
     pub fn scroll_to_preserving_cursor_screen_row(
         &mut self,
         scroll_top: u16,
-        rows: &[String],
+        buf: &Buffer,
         viewport_rows: u16,
     ) {
+        let rows = buf.lines();
         if rows.is_empty() || viewport_rows == 0 {
             return;
         }
@@ -917,36 +909,25 @@ impl Window {
         }
         let target_line = (new_scroll as usize + screen_row as usize).min(rows.len() - 1);
         let want = self.curswant.unwrap_or(self.cursor_col as usize);
-        let offsets = Self::line_start_offsets(rows);
-        self.text = rows.join("\n");
-        let line = &rows[target_line];
-        let col_bytes = cell_to_byte(line, want);
-        self.cpos = offsets[target_line] + col_bytes;
-        self.cursor_col = byte_to_cell(line, col_bytes) as u16;
-        self.cursor_row = target_line as u16;
+        self.cpos = buf.byte_at_display_pos(target_line, want);
+        let (row, col) = buf.display_cursor_pos(self.cpos);
+        self.cursor_row = row as u16;
+        self.cursor_col = col as u16;
         self.curswant = Some(want);
         self.scroll_top = new_scroll;
         self.follow_tail = new_scroll >= max_scroll;
     }
 
-    fn jump_to_line_col(
-        &mut self,
-        rows: &[String],
-        line_idx: usize,
-        col: usize,
-        viewport_rows: u16,
-    ) {
+    fn jump_to_line_col(&mut self, buf: &Buffer, line_idx: usize, col: usize, viewport_rows: u16) {
+        let rows = buf.lines();
         if rows.is_empty() {
             return;
         }
         let line_idx = line_idx.min(rows.len() - 1);
-        let offsets = Self::line_start_offsets(rows);
-        let line = &rows[line_idx];
-        let col_bytes = cell_to_byte(line, col);
-        self.cpos = offsets[line_idx] + col_bytes;
-        let landed_col = byte_to_cell(line, col_bytes);
+        self.cpos = buf.byte_at_display_pos(line_idx, col);
+        let landed_col = buf.display_cursor_pos(self.cpos).1;
         self.curswant = Some(landed_col);
-        self.sync_from_cpos(rows, &offsets, viewport_rows);
+        self.sync_from_cpos(buf, viewport_rows);
         let max_scroll = (rows.len() as u16).saturating_sub(viewport_rows);
         self.follow_tail = self.scroll_top >= max_scroll;
     }
@@ -1134,10 +1115,14 @@ impl Window {
         }
 
         if ctx.focused {
-            if let CursorShape::Block { glyph, style } = ctx.cursor_shape {
-                if let Some(screen_row) = self.cursor_screen_row(height) {
-                    if self.cursor_col < content_width {
-                        slice.set(pad_left + self.cursor_col, screen_row, glyph, style);
+            if let CursorShape::Block { glyph, style, pos } = ctx.cursor_shape {
+                let resolved = pos.or_else(|| {
+                    self.cursor_screen_row(height)
+                        .map(|row| (self.cursor_col, row))
+                });
+                if let Some((col, screen_row)) = resolved {
+                    if col < content_width && screen_row < height {
+                        slice.set(pad_left + col, screen_row, glyph, style);
                     }
                 }
             }
@@ -1244,6 +1229,7 @@ mod tests {
     use crate::grid::Grid;
     use crate::BufCreateOpts;
     use crate::Theme;
+    use crossterm::event::KeyCode;
 
     fn make_win() -> Window {
         Window::new(
@@ -1258,6 +1244,12 @@ mod tests {
 
     fn sample_rows(n: usize) -> Vec<String> {
         (0..n).map(|i| format!("line {i}")).collect()
+    }
+
+    fn make_buf(rows: Vec<String>) -> Buffer {
+        let mut buf = Buffer::new(BufId(1), BufCreateOpts::default());
+        buf.set_all_lines(rows);
+        buf
     }
 
     fn ctx() -> DrawContext {
@@ -1287,11 +1279,12 @@ mod tests {
         w.set_vim_enabled(true);
         w.set_vim_mode(VimMode::Normal);
         let rows = sample_rows(30);
+        let buf = make_buf(rows.clone());
         let viewport = 10;
-        w.jump_to_line_col(&rows, 0, 0, viewport);
+        w.jump_to_line_col(&buf, 0, 0, viewport);
         assert_eq!(w.cursor_row, 0);
         assert_eq!(w.scroll_top, 0);
-        w.move_cursor_by_lines(1, &rows, viewport);
+        w.move_cursor_by_lines(&buf, 1, viewport);
         // Cursor-led: cursor moves down, viewport stays put.
         assert_eq!(w.cursor_row, 1);
         assert_eq!(w.scroll_top, 0);
@@ -1307,8 +1300,9 @@ mod tests {
         w.set_vim_enabled(true);
         w.set_vim_mode(VimMode::Normal);
         let rows = sample_rows(11);
+        let mut buf = make_buf(rows.clone());
         let viewport = 2;
-        w.jump_to_line_col(&rows, 10, 0, viewport);
+        w.jump_to_line_col(&buf, 10, 0, viewport);
         w.scroll_to_bottom();
         assert!(w.follow_tail);
         assert_eq!(w.scroll_top, u16::MAX);
@@ -1322,7 +1316,7 @@ mod tests {
         let mut clipboard = Clipboard::null();
         // One 'k' keeps us in the bottom region (scroll_top == max_scroll == 9),
         // so follow_tail should still be true.
-        w.handle_key(k, &rows, viewport, &mut clipboard);
+        w.handle_key(&mut buf, k, &mut clipboard);
         let max_scroll = (rows.len() as u16).saturating_sub(viewport);
         w.follow_tail = w.scroll_top >= max_scroll;
         assert_eq!(w.cursor_row, 9);
@@ -1333,7 +1327,7 @@ mod tests {
         );
 
         // Second 'k' moves above max_scroll; follow_tail must clear.
-        w.handle_key(k, &rows, viewport, &mut clipboard);
+        w.handle_key(&mut buf, k, &mut clipboard);
         w.follow_tail = w.scroll_top >= max_scroll;
         assert_eq!(w.cursor_row, 8);
         assert_eq!(w.scroll_top, 8);
@@ -1350,14 +1344,15 @@ mod tests {
         // now visible under that screen cell.
         let mut w = make_win();
         let rows = sample_rows(30);
+        let buf = make_buf(rows.clone());
         let viewport = 10;
-        w.jump_to_line_col(&rows, 5, 3, viewport);
+        w.jump_to_line_col(&buf, 5, 3, viewport);
         let screen_row = w.cursor_screen_row(viewport);
-        w.pan_by_lines(2, &rows, viewport);
+        w.pan_by_lines(&buf, 2, viewport);
         assert_eq!(w.scroll_top, 2);
         assert_eq!(w.cursor_screen_row(viewport), screen_row);
         assert_eq!(w.cursor_row, 7);
-        let offsets = Window::line_start_offsets(&rows);
+        let offsets = smelt_buffer::text::line_start_offsets(&rows);
         assert_eq!(w.cpos, offsets[7] + 3);
     }
 
@@ -1365,10 +1360,11 @@ mod tests {
     fn pan_by_lines_clamps_at_top() {
         let mut w = make_win();
         let rows = sample_rows(30);
+        let buf = make_buf(rows.clone());
         let viewport = 10;
-        w.jump_to_line_col(&rows, 0, 0, viewport);
+        w.jump_to_line_col(&buf, 0, 0, viewport);
         assert_eq!(w.scroll_top, 0);
-        w.pan_by_lines(-3, &rows, viewport);
+        w.pan_by_lines(&buf, -3, viewport);
         assert_eq!(w.scroll_top, 0, "scroll clamps at 0");
     }
 
@@ -1376,11 +1372,12 @@ mod tests {
     fn pan_by_lines_clamps_at_bottom() {
         let mut w = make_win();
         let rows = sample_rows(30);
+        let buf = make_buf(rows.clone());
         let viewport = 10;
-        w.jump_to_line_col(&rows, 29, 0, viewport);
+        w.jump_to_line_col(&buf, 29, 0, viewport);
         let max_scroll = 30 - viewport;
         assert_eq!(w.scroll_top, max_scroll);
-        w.pan_by_lines(5, &rows, viewport);
+        w.pan_by_lines(&buf, 5, viewport);
         assert_eq!(w.scroll_top, max_scroll, "scroll clamps at max");
         assert!(
             w.follow_tail,
@@ -1394,12 +1391,13 @@ mod tests {
         // Pan must normalize that to the real max_scroll, not arithmetic on MAX.
         let mut w = make_win();
         let rows = sample_rows(30);
+        let buf = make_buf(rows.clone());
         let viewport = 10;
         let max_scroll = 30 - viewport;
-        w.jump_to_line_col(&rows, 29, 0, viewport);
+        w.jump_to_line_col(&buf, 29, 0, viewport);
         w.scroll_to_bottom();
         assert_eq!(w.scroll_top, u16::MAX);
-        w.pan_by_lines(3, &rows, viewport);
+        w.pan_by_lines(&buf, 3, viewport);
         assert_eq!(w.scroll_top, max_scroll, "sentinel collapses to max_scroll");
         assert!(w.follow_tail);
     }
@@ -1408,12 +1406,13 @@ mod tests {
     fn pan_by_lines_up_from_follow_tail_sentinel() {
         let mut w = make_win();
         let rows = sample_rows(30);
+        let buf = make_buf(rows.clone());
         let viewport = 10;
         let max_scroll = 30 - viewport;
-        w.jump_to_line_col(&rows, 29, 0, viewport);
+        w.jump_to_line_col(&buf, 29, 0, viewport);
         w.scroll_to_bottom();
         assert_eq!(w.scroll_top, u16::MAX);
-        w.pan_by_lines(-3, &rows, viewport);
+        w.pan_by_lines(&buf, -3, viewport);
         assert_eq!(w.scroll_top, max_scroll - 3);
         assert!(!w.follow_tail);
     }
@@ -1423,11 +1422,12 @@ mod tests {
         // Pan the viewport multiple times; cursor row stays inside viewport.
         let mut w = make_win();
         let rows = sample_rows(50);
+        let buf = make_buf(rows.clone());
         let viewport = 10;
-        w.jump_to_line_col(&rows, 5, 0, viewport);
+        w.jump_to_line_col(&buf, 5, 0, viewport);
         let screen_row = w.cursor_screen_row(viewport);
         for _ in 0..3 {
-            w.pan_by_lines(3, &rows, viewport);
+            w.pan_by_lines(&buf, 3, viewport);
         }
         assert_eq!(w.scroll_top, 9);
         assert_eq!(w.cursor_screen_row(viewport), screen_row);
@@ -1439,7 +1439,7 @@ mod tests {
         let mut w = make_win();
         w.cursor_row = 5;
         w.cursor_col = 3;
-        w.refocus(&[], 20);
+        w.refocus(&make_buf(vec![]), 20);
         assert_eq!(w.cursor_row, 0);
         assert_eq!(w.cursor_col, 0);
     }
@@ -1448,8 +1448,9 @@ mod tests {
     fn jump_to_last_line_scrolls_to_bottom() {
         let mut w = make_win();
         let rows = sample_rows(50);
+        let buf = make_buf(rows.clone());
         let viewport = 10;
-        w.jump_to_line_col(&rows, 49, 0, viewport);
+        w.jump_to_line_col(&buf, 49, 0, viewport);
         assert_eq!(w.scroll_top, 40);
         assert_eq!(w.cursor_row, 49, "buffer-absolute row");
         assert_eq!(w.cursor_screen_row(viewport), Some(9));
@@ -1501,15 +1502,16 @@ mod tests {
         let mut w = make_win();
         w.set_vim_mode(VimMode::Normal);
         let rows: Vec<String> = vec!["hello world".into(), "second line".into()];
+        let buf = make_buf(rows.clone());
         let rect = Rect::new(0, 0, 20, 5);
         let ctx = MouseCtx {
-            rows: &rows,
             soft_breaks: &[],
             hard_breaks: &hard_breaks(&rows),
             viewport: viewport_for(&rows, rect),
             click_count: 1,
         };
         let (r, yank) = w.handle_mouse(
+            &buf,
             click_event(MouseEventKind::Down(MouseButton::Left), 1, 7),
             ctx,
         );
@@ -1517,7 +1519,10 @@ mod tests {
         assert!(yank.is_none());
         assert_eq!(w.cursor_row, 1);
         assert_eq!(w.cursor_col, 7);
-        assert!(w.selection_anchor.is_some());
+        // Single-click Down stages a press but does not yet open a selection;
+        // the first Drag promotes `pending_press` into a selection anchor.
+        assert!(w.selection_anchor.is_none());
+        assert_eq!(w.pending_press, Some(w.cpos));
     }
 
     #[test]
@@ -1887,6 +1892,7 @@ mod tests {
         ctx.cursor_shape = CursorShape::Block {
             glyph: 'b',
             style: cursor_style,
+            pos: None,
         };
         let mut grid = Grid::new(10, 1);
         let mut slice = grid.slice_mut(Rect::new(0, 0, 10, 1));
@@ -1914,6 +1920,7 @@ mod tests {
         ctx.cursor_shape = CursorShape::Block {
             glyph: 'X',
             style: crate::grid::Style::default(),
+            pos: None,
         };
         let mut grid = Grid::new(10, 1);
         let mut slice = grid.slice_mut(Rect::new(0, 0, 10, 1));
@@ -1934,6 +1941,7 @@ mod tests {
         ctx.cursor_shape = CursorShape::Block {
             glyph: '!',
             style: crate::grid::Style::default(),
+            pos: None,
         };
         let mut grid = Grid::new(10, 1);
         let mut slice = grid.slice_mut(Rect::new(0, 0, 10, 1));
@@ -2037,22 +2045,57 @@ mod tests {
     }
 
     #[test]
+    fn mouse_single_click_without_drag_yields_no_selection() {
+        // Down-then-Up with no Drag in between must leave no selection,
+        // no Visual mode, and no clipboard yank — only the cursor moved.
+        let mut w = make_win();
+        w.set_vim_mode(VimMode::Normal);
+        w.vim_enabled = true;
+        let rows: Vec<String> = vec!["hello world".into()];
+        let buf = make_buf(rows.clone());
+        let rect = Rect::new(0, 0, 20, 5);
+        let viewport = viewport_for(&rows, rect);
+        let hb = hard_breaks(&rows);
+        let mk_ctx = || MouseCtx {
+            soft_breaks: &[],
+            hard_breaks: &hb,
+            viewport,
+            click_count: 1,
+        };
+        let (_, _) = w.handle_mouse(
+            &buf,
+            click_event(MouseEventKind::Down(MouseButton::Left), 0, 4),
+            mk_ctx(),
+        );
+        assert_eq!(w.vim_mode, VimMode::Normal, "Down must not enter Visual");
+        let (_, yank) = w.handle_mouse(
+            &buf,
+            click_event(MouseEventKind::Up(MouseButton::Left), 0, 4),
+            mk_ctx(),
+        );
+        assert!(yank.is_none(), "bare click must not produce a yank range");
+        assert!(w.selection_anchor.is_none());
+        assert!(w.pending_press.is_none(), "Up clears the staged press");
+    }
+
+    #[test]
     fn mouse_drag_yank_on_up() {
         let mut w = make_win();
         w.set_vim_mode(VimMode::Normal);
         let rows: Vec<String> = vec!["hello world".into(), "second line".into()];
+        let buf = make_buf(rows.clone());
         let rect = Rect::new(0, 0, 20, 5);
         let viewport = viewport_for(&rows, rect);
 
         // Down on 'h' (row 0, col 0)
         let ctx = MouseCtx {
-            rows: &rows,
             soft_breaks: &[],
             hard_breaks: &hard_breaks(&rows),
             viewport,
             click_count: 1,
         };
         let (r, yank) = w.handle_mouse(
+            &buf,
             click_event(MouseEventKind::Down(MouseButton::Left), 0, 0),
             ctx,
         );
@@ -2061,13 +2104,13 @@ mod tests {
 
         // Drag to 'o' in "world" (row 0, col 7)
         let ctx = MouseCtx {
-            rows: &rows,
             soft_breaks: &[],
             hard_breaks: &hard_breaks(&rows),
             viewport,
             click_count: 1,
         };
         let (r, yank) = w.handle_mouse(
+            &buf,
             click_event(MouseEventKind::Drag(MouseButton::Left), 0, 7),
             ctx,
         );
@@ -2076,13 +2119,13 @@ mod tests {
 
         // Up — selected text "hello wo" is returned
         let ctx = MouseCtx {
-            rows: &rows,
             soft_breaks: &[],
             hard_breaks: &hard_breaks(&rows),
             viewport,
             click_count: 1,
         };
         let (r, yank) = w.handle_mouse(
+            &buf,
             click_event(MouseEventKind::Up(MouseButton::Left), 0, 7),
             ctx,
         );
@@ -2095,18 +2138,19 @@ mod tests {
         let mut w = make_win();
         w.set_vim_mode(VimMode::Normal);
         let rows: Vec<String> = vec!["hello world".into()];
+        let buf = make_buf(rows.clone());
         let rect = Rect::new(0, 0, 20, 5);
         let viewport = viewport_for(&rows, rect);
 
         // Double-click on "world" (row 0, col 8)
         let ctx = MouseCtx {
-            rows: &rows,
             soft_breaks: &[],
             hard_breaks: &hard_breaks(&rows),
             viewport,
             click_count: 2,
         };
         let (r, yank) = w.handle_mouse(
+            &buf,
             click_event(MouseEventKind::Down(MouseButton::Left), 0, 8),
             ctx,
         );
@@ -2115,13 +2159,13 @@ mod tests {
 
         // Up returns the selected word
         let ctx = MouseCtx {
-            rows: &rows,
             soft_breaks: &[],
             hard_breaks: &hard_breaks(&rows),
             viewport,
             click_count: 2,
         };
         let (r, yank) = w.handle_mouse(
+            &buf,
             click_event(MouseEventKind::Up(MouseButton::Left), 0, 8),
             ctx,
         );
@@ -2134,18 +2178,19 @@ mod tests {
         let mut w = make_win();
         w.set_vim_mode(VimMode::Normal);
         let rows: Vec<String> = vec!["hello world".into(), "second line".into()];
+        let buf = make_buf(rows.clone());
         let rect = Rect::new(0, 0, 20, 5);
         let viewport = viewport_for(&rows, rect);
 
         // Triple-click on the first line
         let ctx = MouseCtx {
-            rows: &rows,
             soft_breaks: &[],
             hard_breaks: &hard_breaks(&rows),
             viewport,
             click_count: 3,
         };
         let (r, yank) = w.handle_mouse(
+            &buf,
             click_event(MouseEventKind::Down(MouseButton::Left), 0, 4),
             ctx,
         );
@@ -2154,13 +2199,13 @@ mod tests {
 
         // Up returns the selected line
         let ctx = MouseCtx {
-            rows: &rows,
             soft_breaks: &[],
             hard_breaks: &hard_breaks(&rows),
             viewport,
             click_count: 3,
         };
         let (r, yank) = w.handle_mouse(
+            &buf,
             click_event(MouseEventKind::Up(MouseButton::Left), 0, 4),
             ctx,
         );

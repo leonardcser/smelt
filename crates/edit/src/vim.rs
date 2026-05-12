@@ -13,6 +13,7 @@ use super::AttachmentId;
 use super::Clipboard;
 use super::{UndoEntry, UndoHistory};
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+use smelt_buffer::attachment::ATTACHMENT_MARKER;
 
 // ── Public types ────────────────────────────────────────────────────────────
 
@@ -83,15 +84,17 @@ impl VimContext<'_> {
         }
     }
 
-    /// Yank `buf[start..end]` into the kill ring and mirror to system clipboard.
+    /// Stage `buf[start..end]` in the kill ring with its source byte range.
+    /// The system clipboard is **not** written here — `Window::handle_key`'s
+    /// caller observes the kill-ring's `source_range` change and pushes the
+    /// rendered (`BufferCopy::copy`) form to the system clipboard. Keeping
+    /// vim out of the system clipboard means raw markers stay in the kill
+    /// ring for paste-back fidelity, while the clipboard gets `[label]` etc.
     fn yank_range(&mut self, start: usize, end: usize, linewise: bool) {
         let text = self.buf[start..end].to_string();
         self.clipboard
             .kill_ring
-            .set_with_source(text.clone(), linewise, start, end);
-        if self.clipboard.write(&text).is_ok() {
-            self.clipboard.kill_ring.record_clipboard_write(text);
-        }
+            .set_with_source(text, linewise, start, end);
     }
 
     fn register(&self) -> &str {
@@ -119,6 +122,47 @@ impl VimContext<'_> {
             .kill_ring
             .set_with_linewise(text.clone(), false);
         self.clipboard.kill_ring.record_clipboard_write(text);
+    }
+
+    /// Delete `buf[start..end]`, removing any attachment markers in that range
+    /// from `self.attachments`.
+    fn delete_range(&mut self, start: usize, end: usize) {
+        if start >= end {
+            return;
+        }
+        let before = self.buf[..start]
+            .chars()
+            .filter(|&c| c == ATTACHMENT_MARKER)
+            .count();
+        let in_range = self.buf[start..end]
+            .chars()
+            .filter(|&c| c == ATTACHMENT_MARKER)
+            .count();
+        self.buf.drain(start..end);
+        if in_range > 0 {
+            self.attachments.drain(before..before + in_range);
+        }
+    }
+
+    /// Replace `buf[start..end]` with `text`, removing any attachment markers in
+    /// that range from `self.attachments`.
+    fn replace_range(&mut self, start: usize, end: usize, text: &str) {
+        if start < end {
+            let before = self.buf[..start]
+                .chars()
+                .filter(|&c| c == ATTACHMENT_MARKER)
+                .count();
+            let in_range = self.buf[start..end]
+                .chars()
+                .filter(|&c| c == ATTACHMENT_MARKER)
+                .count();
+            self.buf.replace_range(start..end, text);
+            if in_range > 0 {
+                self.attachments.drain(before..before + in_range);
+            }
+        } else {
+            self.buf.replace_range(start..end, text);
+        }
     }
 }
 
@@ -443,7 +487,7 @@ fn handle_normal_char(c: char, ctx: &mut VimContext<'_>) -> Action {
             ctx.save_undo();
             let end = line_end(ctx.buf, *ctx.cpos);
             ctx.yank_range(*ctx.cpos, end, false);
-            ctx.buf.drain(*ctx.cpos..end);
+            ctx.delete_range(*ctx.cpos, end);
             clamp_normal(ctx.buf, ctx.cpos);
             ctx.vim_state.reset_pending();
             Action::Consumed
@@ -452,7 +496,7 @@ fn handle_normal_char(c: char, ctx: &mut VimContext<'_>) -> Action {
             ctx.save_undo();
             let end = line_end(ctx.buf, *ctx.cpos);
             ctx.yank_range(*ctx.cpos, end, false);
-            ctx.buf.drain(*ctx.cpos..end);
+            ctx.delete_range(*ctx.cpos, end);
             enter_insert_mode(ctx);
             Action::Consumed
         }
@@ -471,7 +515,7 @@ fn handle_normal_char(c: char, ctx: &mut VimContext<'_>) -> Action {
                 ctx.save_undo();
                 let end = advance_chars(ctx.buf, *ctx.cpos, n);
                 ctx.yank_range(*ctx.cpos, end, false);
-                ctx.buf.drain(*ctx.cpos..end);
+                ctx.delete_range(*ctx.cpos, end);
                 clamp_normal(ctx.buf, ctx.cpos);
             }
             ctx.vim_state.reset_pending();
@@ -483,7 +527,7 @@ fn handle_normal_char(c: char, ctx: &mut VimContext<'_>) -> Action {
                 ctx.save_undo();
                 let start = retreat_chars(ctx.buf, *ctx.cpos, n);
                 ctx.yank_range(start, *ctx.cpos, false);
-                ctx.buf.drain(start..*ctx.cpos);
+                ctx.delete_range(start, *ctx.cpos);
                 *ctx.cpos = start;
                 clamp_normal(ctx.buf, ctx.cpos);
             }
@@ -496,7 +540,7 @@ fn handle_normal_char(c: char, ctx: &mut VimContext<'_>) -> Action {
             if !ctx.buf.is_empty() && *ctx.cpos < ctx.buf.len() {
                 let end = advance_chars(ctx.buf, *ctx.cpos, n);
                 ctx.yank_range(*ctx.cpos, end, false);
-                ctx.buf.drain(*ctx.cpos..end);
+                ctx.delete_range(*ctx.cpos, end);
             }
             enter_insert_mode(ctx);
             Action::Consumed
@@ -505,7 +549,7 @@ fn handle_normal_char(c: char, ctx: &mut VimContext<'_>) -> Action {
             ctx.save_undo();
             let (start, end) = current_line_content_range(ctx.buf, *ctx.cpos);
             ctx.yank_range(start, end, false);
-            ctx.buf.drain(start..end);
+            ctx.delete_range(start, end);
             *ctx.cpos = start;
             enter_insert_mode(ctx);
             Action::Consumed
@@ -529,7 +573,7 @@ fn handle_normal_char(c: char, ctx: &mut VimContext<'_>) -> Action {
                     } else {
                         ch.to_uppercase().collect()
                     };
-                    ctx.buf.replace_range(*ctx.cpos..end, &toggled);
+                    ctx.replace_range(*ctx.cpos, end, &toggled);
                     *ctx.cpos += toggled.len();
                 }
                 clamp_normal(ctx.buf, ctx.cpos);
@@ -865,7 +909,7 @@ fn handle_normal_char(c: char, ctx: &mut VimContext<'_>) -> Action {
                         while end < ctx.buf.len() && ctx.buf.as_bytes()[end] == b' ' {
                             end += 1;
                         }
-                        ctx.buf.replace_range(abs..end, " ");
+                        ctx.replace_range(abs, end, " ");
                         join_pos = abs;
                     } else {
                         break;
@@ -1001,7 +1045,7 @@ fn handle_visual_char(c: char, ctx: &mut VimContext<'_>) -> Action {
                         end + 1
                     } else if start > 0 && ctx.buf.as_bytes()[start - 1] == b'\n' {
                         let s = start - 1;
-                        ctx.buf.drain(s..end);
+                        ctx.delete_range(s, end);
                         *ctx.cpos = s.min(ctx.buf.len());
                         clamp_normal(ctx.buf, ctx.cpos);
                         if !ctx.buf.is_empty() && *ctx.cpos < ctx.buf.len() {
@@ -1012,9 +1056,9 @@ fn handle_visual_char(c: char, ctx: &mut VimContext<'_>) -> Action {
                     } else {
                         end
                     };
-                    ctx.buf.drain(start..drain_end);
+                    ctx.delete_range(start, drain_end);
                 } else {
-                    ctx.buf.drain(start..end);
+                    ctx.delete_range(start, end);
                 }
                 *ctx.cpos = start.min(ctx.buf.len());
                 clamp_normal(ctx.buf, ctx.cpos);
@@ -1029,10 +1073,10 @@ fn handle_visual_char(c: char, ctx: &mut VimContext<'_>) -> Action {
                 ctx.yank_range(start, end, linewise);
                 if linewise {
                     let content_start = first_non_blank_at(ctx.buf, start);
-                    ctx.buf.drain(content_start..end);
+                    ctx.delete_range(content_start, end);
                     *ctx.cpos = content_start;
                 } else {
-                    ctx.buf.drain(start..end);
+                    ctx.delete_range(start, end);
                     *ctx.cpos = start;
                 }
                 *ctx.mode = VimMode::Insert;
@@ -1068,7 +1112,7 @@ fn handle_visual_char(c: char, ctx: &mut VimContext<'_>) -> Action {
                         }
                     })
                     .collect();
-                ctx.buf.replace_range(start..end, &toggled);
+                ctx.replace_range(start, end, &toggled);
             }
             exit_visual(ctx);
             Action::Consumed
@@ -1077,7 +1121,7 @@ fn handle_visual_char(c: char, ctx: &mut VimContext<'_>) -> Action {
             if let Some((start, end)) = visual_range(ctx.vim_state, ctx.buf, *ctx.cpos, *ctx.mode) {
                 ctx.save_undo();
                 let upper = ctx.buf[start..end].to_uppercase();
-                ctx.buf.replace_range(start..end, &upper);
+                ctx.replace_range(start, end, &upper);
             }
             exit_visual(ctx);
             Action::Consumed
@@ -1086,7 +1130,7 @@ fn handle_visual_char(c: char, ctx: &mut VimContext<'_>) -> Action {
             if let Some((start, end)) = visual_range(ctx.vim_state, ctx.buf, *ctx.cpos, *ctx.mode) {
                 ctx.save_undo();
                 let lower = ctx.buf[start..end].to_lowercase();
-                ctx.buf.replace_range(start..end, &lower);
+                ctx.replace_range(start, end, &lower);
             }
             exit_visual(ctx);
             Action::Consumed
@@ -1106,7 +1150,7 @@ fn handle_visual_char(c: char, ctx: &mut VimContext<'_>) -> Action {
                             ws_end += 1;
                         }
                         let removed = ws_end - abs;
-                        ctx.buf.replace_range(abs..ws_end, " ");
+                        ctx.replace_range(abs, ws_end, " ");
                         remaining -= removed - 1; // replaced N chars with 1
                         pos = abs + 1;
                     } else {
@@ -1129,7 +1173,7 @@ fn handle_visual_char(c: char, ctx: &mut VimContext<'_>) -> Action {
                     ctx.save_undo();
                     let old = ctx.buf[start..end].to_string();
                     let text = ctx.register().to_string();
-                    ctx.buf.replace_range(start..end, &text);
+                    ctx.replace_range(start, end, &text);
                     *ctx.cpos = start;
                     clamp_normal(ctx.buf, ctx.cpos);
                     // Replaced text goes into register; mirror to clipboard.
@@ -1339,7 +1383,7 @@ fn handle_waiting_r(key: KeyEvent, ctx: &mut VimContext<'_>) -> Action {
                 let old = ctx.buf[pos..].chars().next().unwrap();
                 let end = pos + old.len_utf8();
                 let replacement = c.to_string();
-                ctx.buf.replace_range(pos..end, &replacement);
+                ctx.replace_range(pos, end, &replacement);
                 pos += replacement.len();
             }
             *ctx.cpos = prev_char_boundary(ctx.buf, pos).max(*ctx.cpos);
@@ -1643,14 +1687,14 @@ fn apply_charwise_op(op: Op, ctx: &mut VimContext<'_>, start: usize, end: usize)
         Op::Delete => {
             ctx.save_undo();
             ctx.yank_range(start, end, false);
-            ctx.buf.drain(start..end);
+            ctx.delete_range(start, end);
             *ctx.cpos = start;
             clamp_normal(ctx.buf, ctx.cpos);
         }
         Op::Change => {
             ctx.save_undo();
             ctx.yank_range(start, end, false);
-            ctx.buf.drain(start..end);
+            ctx.delete_range(start, end);
             *ctx.cpos = start;
             enter_insert_mode(ctx);
             ctx.vim_state.reset_counts();
@@ -1689,7 +1733,7 @@ fn apply_linewise_op(op: Op, ctx: &mut VimContext<'_>, start: usize, end: usize)
         Op::Delete => {
             ctx.save_undo();
             ctx.yank_range(s, e, true);
-            ctx.buf.drain(s..e);
+            ctx.delete_range(s, e);
             *ctx.cpos = s.min(ctx.buf.len());
             if !ctx.buf.is_empty() && *ctx.cpos < ctx.buf.len() {
                 *ctx.cpos = first_non_blank_at(ctx.buf, *ctx.cpos);
@@ -1701,7 +1745,7 @@ fn apply_linewise_op(op: Op, ctx: &mut VimContext<'_>, start: usize, end: usize)
             let content_start = first_non_blank_at(ctx.buf, s);
             let content_end = line_end(ctx.buf, e.saturating_sub(1).max(s));
             ctx.yank_range(content_start, content_end, true);
-            ctx.buf.drain(content_start..content_end);
+            ctx.delete_range(content_start, content_end);
             *ctx.cpos = content_start;
             enter_insert_mode(ctx);
             return Action::Consumed;
@@ -2161,17 +2205,23 @@ mod tests {
     }
 
     #[test]
-    fn yank_mirrors_to_clipboard() {
+    fn yank_stages_in_kill_ring_with_source_range() {
+        // Vim deliberately does NOT push to the system clipboard — the host
+        // observes `kill_ring.yank_tick()` and pushes the rendered form via
+        // `Buffer::sync_clipboard_from_kill_ring`, so the prompt/transcript
+        // copier can transform attachment markers / fold markers before paste.
         let inner = mem_sink(None);
         let clipboard = Clipboard::new(Box::new(MemSink(inner.clone())));
         let mut h = TestHarness::with_clipboard("hello world", clipboard);
+        let tick_before = h.clipboard.kill_ring.yank_tick();
         h.handle(key('y'));
         h.handle(key('w'));
+        assert_eq!(h.clipboard.kill_ring.current(), "hello ");
+        assert_eq!(h.clipboard.kill_ring.source_range(), Some((0, 6)));
+        assert!(h.clipboard.kill_ring.yank_tick() > tick_before);
+        // System clipboard was not touched by vim.
         let s = inner.borrow();
-        assert_eq!(s.text.as_deref(), Some("hello "));
-        assert_eq!(s.writes, 1);
-        drop(s);
-        assert_eq!(h.clipboard.kill_ring.last_clipboard_write(), Some("hello "));
+        assert_eq!(s.writes, 0);
     }
 
     #[test]

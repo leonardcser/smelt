@@ -234,9 +234,13 @@ impl TuiApp {
         f: F,
     ) {
         f(&mut self.core.config.settings);
-        self.input.set_vim_enabled(self.core.config.settings.vim);
-        self.transcript_window
-            .set_vim_enabled(self.core.config.settings.vim);
+        let vim = self.core.config.settings.vim;
+        let prompt_win = self
+            .ui
+            .win_mut(crate::app::PROMPT_WIN)
+            .expect("prompt window");
+        self.input.set_vim_enabled(prompt_win, vim);
+        self.transcript_win_mut().set_vim_enabled(vim);
     }
 
     /// Replace all resolved settings at once, propagating to input/screen.

@@ -14,12 +14,16 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
         "win_id",
         lua.create_function(|_, ()| Ok(crate::app::PROMPT_WIN.0))?,
     )?;
-    prompt_tbl.set("text", app_read!(lua, |app| app.input.source.clone()))?;
+    prompt_tbl.set(
+        "text",
+        app_read!(lua, |app| app.prompt_buf().source().to_string()),
+    )?;
     prompt_tbl.set(
         "set_text",
         lua.create_function(|_, text: String| {
             crate::lua::with_app(|app| {
-                app.input.replace_text(text, None);
+                let mut pctx = crate::input::prompt_ctx_mut(&mut app.ui);
+                app.input.replace_text(&mut pctx, text, None);
             });
             Ok(())
         })?,

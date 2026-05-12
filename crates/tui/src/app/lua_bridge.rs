@@ -21,10 +21,12 @@ impl TuiApp {
             }
         }
         match self.app_focus {
-            crate::app::AppFocus::Content if self.transcript_window.vim_enabled => {
-                Some(self.transcript_window.vim_mode)
+            crate::app::AppFocus::Content if self.transcript_win().vim_enabled => {
+                Some(self.transcript_win().vim_mode)
             }
-            crate::app::AppFocus::Prompt if self.input.vim_enabled() => Some(self.input.vim_mode()),
+            crate::app::AppFocus::Prompt if self.input.vim_enabled(self.prompt_win()) => {
+                Some(self.input.vim_mode(self.prompt_win()))
+            }
             _ => None,
         }
     }
@@ -40,11 +42,15 @@ impl TuiApp {
             }
         }
         match self.app_focus {
-            crate::app::AppFocus::Content if self.transcript_window.vim_enabled => {
-                self.transcript_window.set_vim_mode(mode);
+            crate::app::AppFocus::Content if self.transcript_win().vim_enabled => {
+                self.transcript_win_mut().set_vim_mode(mode);
             }
             crate::app::AppFocus::Prompt => {
-                self.input.set_vim_mode(mode);
+                let win = self
+                    .ui
+                    .win_mut(crate::app::PROMPT_WIN)
+                    .expect("prompt window");
+                self.input.set_vim_mode(win, mode);
             }
             _ => {}
         }
@@ -52,7 +58,7 @@ impl TuiApp {
 
     /// Fire `WinEvent::TextChanged` on `PROMPT_WIN` when the prompt buffer changed.
     pub(crate) fn emit_prompt_text_changed_if_dirty(&mut self) {
-        let current_text = self.input.source.clone();
+        let current_text = self.prompt_buf().source().to_string();
         if self.last_prompt_text == current_text {
             return;
         }

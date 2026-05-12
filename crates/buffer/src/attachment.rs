@@ -5,6 +5,9 @@ use std::path::Path;
 
 pub type AttachmentId = u64;
 
+/// The character used as a placeholder for attachments in source text.
+pub const ATTACHMENT_MARKER: char = '\u{FFFC}';
+
 /// A single attachment (currently images only).
 #[derive(Clone, Debug)]
 pub enum Attachment {

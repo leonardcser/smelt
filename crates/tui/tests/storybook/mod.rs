@@ -107,31 +107,23 @@ impl StoryCtx {
             0,
             None,
         );
-        if let Some(win) = self.ui.win_mut(focus) {
+        let (win, buf) = self.ui.win_and_buf_mut(focus, buf_id);
+        if let (Some(win), Some(buf)) = (win, buf) {
             win.set_vim_enabled(true);
             // Direct field write so we don't clobber any pending vim sub-sequence
             // (e.g. mid-`dd`, `df<x>`). `set_vim_mode` resets pending state, which would
             // turn every `press_vim` call into a sequence break.
             win.vim_mode = self.vim_mode;
+            win.viewport = Some(viewport);
             let ctx = EventCtx {
-                rows: &rows,
                 soft_breaks: &[],
                 hard_breaks: &[],
                 viewport,
                 click_count: 0,
                 clipboard: &mut self.clipboard,
             };
-            win.handle(ev, ctx);
+            win.handle(buf, ev, ctx);
             self.vim_mode = win.vim_mode;
-        }
-        let new_text = self
-            .ui
-            .win(focus)
-            .map(|w| w.text.clone())
-            .unwrap_or_default();
-        let new_lines: Vec<String> = new_text.split('\n').map(String::from).collect();
-        if let Some(b) = self.ui.buf_mut(buf_id) {
-            b.set_all_lines(new_lines);
         }
         self.repaint_visual_selection(focus);
     }
@@ -145,17 +137,11 @@ impl StoryCtx {
             Some(w) => w.buf,
             None => return,
         };
-        let rows: Vec<String> = self
+        let _ = mode;
+        let range = self
             .ui
             .buf(buf_id)
-            .map(|b| {
-                (0..b.line_count())
-                    .filter_map(|i| b.get_line(i).map(String::from))
-                    .collect()
-            })
-            .unwrap_or_default();
-        let _ = mode;
-        let range = self.ui.win(win).and_then(|w| w.selection_range(&rows));
+            .and_then(|buf| self.ui.win(win).and_then(|w| w.selection_range(buf)));
         let Some((start, end)) = range else {
             return;
         };
@@ -163,10 +149,12 @@ impl StoryCtx {
             bg: Some(Color::DarkGrey),
             ..Style::default()
         };
-        let mut byte = 0usize;
         if let Some(b) = self.ui.buf_mut(buf_id) {
-            b.clear_highlights(0, rows.len());
-            for (row, line) in rows.iter().enumerate() {
+            let line_count = b.line_count();
+            b.clear_highlights(0, line_count);
+            let mut byte = 0usize;
+            for row in 0..line_count {
+                let line = b.get_line(row).unwrap_or("");
                 let row_start = byte;
                 let row_end = row_start + line.len();
                 let lo = start.max(row_start).min(row_end);

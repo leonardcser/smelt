@@ -16,7 +16,8 @@ pub(super) fn register(
         "help_sections",
         lua.create_function(|lua, ()| {
             let vim_enabled =
-                crate::lua::try_with_app(|app| app.input.vim_enabled()).unwrap_or(false);
+                crate::lua::try_with_app(|app| app.input.vim_enabled(app.prompt_win()))
+                    .unwrap_or(false);
             let sections = crate::keymap::hints::help_sections(vim_enabled);
             let out = lua.create_table()?;
             for (i, (title, entries)) in sections.into_iter().enumerate() {

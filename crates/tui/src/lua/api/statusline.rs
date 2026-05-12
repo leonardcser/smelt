@@ -130,11 +130,15 @@ fn build_snapshot(app: &mut crate::app::TuiApp, lua: &Lua) -> LuaResult<mlua::Ta
     } else {
         match app.app_focus {
             crate::app::AppFocus::Content => {
-                let has = app.transcript_window.vim_enabled;
-                (has, has.then_some(app.transcript_window.vim_mode))
+                let has = app.transcript_win().vim_enabled;
+                (has, has.then_some(app.transcript_win().vim_mode))
             }
             crate::app::AppFocus::Prompt => {
-                let mut mode = app.input.vim_enabled().then_some(app.input.win.vim_mode);
+                let prompt_win = app.prompt_win();
+                let mut mode = app
+                    .input
+                    .vim_enabled(prompt_win)
+                    .then_some(prompt_win.vim_mode);
                 let drag = matches!(
                     app.ui.capture(),
                     Some(crate::smelt_term::HitTarget::Window(_))
@@ -142,7 +146,7 @@ fn build_snapshot(app: &mut crate::app::TuiApp, lua: &Lua) -> LuaResult<mlua::Ta
                 if drag {
                     mode = Some(crate::smelt_term::VimMode::Visual);
                 }
-                (app.input.vim_enabled() || drag, mode)
+                (app.input.vim_enabled(prompt_win) || drag, mode)
             }
         }
     };
@@ -182,8 +186,8 @@ fn build_snapshot(app: &mut crate::app::TuiApp, lua: &Lua) -> LuaResult<mlua::Ta
     // Cursor position; nil for empty transcript.
     let position = match app.app_focus {
         crate::app::AppFocus::Prompt => {
-            let buf = &app.input.source;
-            let cpos = app.input.win.cpos.min(buf.len());
+            let buf = app.prompt_buf().source();
+            let cpos = app.prompt_win().cpos.min(buf.len());
             let line_idx = buf[..cpos].bytes().filter(|&b| b == b'\n').count();
             let line_start = buf[..cpos].rfind('\n').map(|i| i + 1).unwrap_or(0);
             let col_cells = byte_to_cell(&buf[line_start..], cpos - line_start);
@@ -202,7 +206,7 @@ fn build_snapshot(app: &mut crate::app::TuiApp, lua: &Lua) -> LuaResult<mlua::Ta
             if total == 0 {
                 None
             } else {
-                let line_idx = app.transcript_window.cursor_abs_row();
+                let line_idx = app.transcript_win().cursor_abs_row();
                 let pct = if total <= 1 {
                     100u8
                 } else {
@@ -210,7 +214,7 @@ fn build_snapshot(app: &mut crate::app::TuiApp, lua: &Lua) -> LuaResult<mlua::Ta
                 };
                 Some((
                     (line_idx as u32) + 1,
-                    app.transcript_window.cursor_col() as u32 + 1,
+                    app.transcript_win().cursor_col() as u32 + 1,
                     pct.min(100),
                 ))
             }

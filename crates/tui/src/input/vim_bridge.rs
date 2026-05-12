@@ -7,7 +7,7 @@
 //! `VimWindowState` (Visual anchor, last `f`/`t`) carried on
 //! `crate::smelt_term::Window`. Vim itself holds only in-flight key-sequence state.
 
-use super::{Action, History, PromptState};
+use super::{Action, History, PromptCtx, PromptState};
 use crate::smelt_term::vim::{self, VimContext};
 use crate::smelt_term::Clipboard;
 use crossterm::event::{Event, KeyEvent};
@@ -25,11 +25,12 @@ pub(super) enum VimBridgeResult {
 impl PromptState {
     pub(super) fn dispatch_vim(
         &mut self,
+        ctx: &mut PromptCtx<'_>,
         ev: &Event,
         history: &mut Option<&mut History>,
         clipboard: &mut Clipboard,
     ) -> VimBridgeResult {
-        if !self.win.vim_enabled {
+        if !ctx.win.vim_enabled {
             return VimBridgeResult::NotAKey;
         }
         let Event::Key(key_ev) = ev else {
@@ -37,42 +38,48 @@ impl PromptState {
         };
         let key_ev: KeyEvent = *key_ev;
 
+        let yank_tick_before = clipboard.kill_ring.yank_tick();
         let result = {
-            let mut ctx = VimContext {
-                buf: &mut self.source,
-                cpos: &mut self.win.cpos,
-                attachments: &mut self.win.attachment_ids,
-                history: &mut self.win.history,
+            let (src, hist, attachments) = ctx.buf.edit_refs();
+            let mut vctx = VimContext {
+                buf: src,
+                cpos: &mut ctx.win.cpos,
+                attachments,
+                history: hist,
                 clipboard,
-                mode: &mut self.win.vim_mode,
-                curswant: &mut self.win.curswant,
-                vim_state: &mut self.win.vim_state,
+                mode: &mut ctx.win.vim_mode,
+                curswant: &mut ctx.win.curswant,
+                vim_state: &mut ctx.win.vim_state,
             };
-            vim::handle_key(key_ev, &mut ctx)
+            vim::handle_key(key_ev, &mut vctx)
         };
+        if clipboard.kill_ring.yank_tick() != yank_tick_before {
+            ctx.buf.sync_clipboard_from_kill_ring(clipboard);
+        }
 
         match result {
             vim::Action::Consumed => {
                 // Clear shift+key selection on any vim-consumed key
                 // (e.g. Esc in insert mode, Esc in visual mode).
-                self.clear_selection();
-                self.recompute_completer();
+                self.clear_selection(ctx.win);
+                self.recompute_completer(ctx.as_ref());
                 VimBridgeResult::Handled(Action::Redraw)
             }
             vim::Action::Submit => {
-                if self.source.is_empty() && self.win.attachment_ids.is_empty() {
+                if ctx.buf.source().is_empty() && ctx.buf.attachment_ids.is_empty() {
                     VimBridgeResult::Handled(Action::SubmitEmpty)
                 } else {
-                    let display = self.message_display_text();
-                    let content = self.build_content();
-                    self.clear();
+                    let display = self.message_display_text(ctx.buf);
+                    let content = self.build_content(ctx.buf);
+                    self.clear(ctx);
                     VimBridgeResult::Handled(Action::Submit { content, display })
                 }
             }
             vim::Action::HistoryPrev => {
-                if let Some(entry) = history.as_deref_mut().and_then(|h| h.up(&self.source)) {
-                    self.install_source(entry.to_string(), 0);
-                    self.sync_completer();
+                if let Some(entry) = history.as_deref_mut().and_then(|h| h.up(ctx.buf.source())) {
+                    let text = entry.to_string();
+                    self.install_source(ctx, text, 0);
+                    self.sync_completer(ctx.as_ref());
                 }
                 VimBridgeResult::Handled(Action::Redraw)
             }
@@ -80,8 +87,8 @@ impl PromptState {
                 if let Some(entry) = history.as_deref_mut().and_then(|h| h.down()) {
                     let s = entry.to_string();
                     let cpos = s.len();
-                    self.install_source(s, cpos);
-                    self.sync_completer();
+                    self.install_source(ctx, s, cpos);
+                    self.sync_completer(ctx.as_ref());
                 }
                 VimBridgeResult::Handled(Action::Redraw)
             }

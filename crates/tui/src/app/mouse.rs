@@ -82,8 +82,8 @@ impl TuiApp {
                 }
                 let yank = self.handle_content_mouse(me, count);
                 if is_up {
-                    if let Some(text) = yank {
-                        self.yank_to_clipboard(text);
+                    if let Some(out) = yank {
+                        self.yank_to_clipboard(out);
                     }
                 }
             }
@@ -107,14 +107,17 @@ impl TuiApp {
         EventOutcome::Noop
     }
 
-    fn yank_to_clipboard(&mut self, text: String) {
-        if self.core.clipboard.write(&text).is_ok() {
+    fn yank_to_clipboard(&mut self, out: crate::smelt_term::CopyOutput) {
+        if self.core.clipboard.write(&out.clipboard).is_ok() {
             self.core
                 .clipboard
                 .kill_ring
-                .record_clipboard_write(text.clone());
+                .record_clipboard_write(out.clipboard);
         }
-        self.core.clipboard.kill_ring.set_with_linewise(text, false);
+        self.core
+            .clipboard
+            .kill_ring
+            .set_with_linewise(out.kill_ring, false);
     }
 
     /// Scroll the pane under the cursor by `delta` lines, tmux-style: the viewport
@@ -132,29 +135,32 @@ impl TuiApp {
         if !self.has_transcript_content(self.core.config.settings.show_thinking) {
             return;
         }
-        let rows = self.full_transcript_display_text(self.core.config.settings.show_thinking);
         let viewport = self.viewport_rows_estimate();
-        self.transcript_window.pan_by_lines(delta, &rows, viewport);
+        let win_id = self.well_known.transcript;
+        let buf_id = self.transcript_win().buf;
+        let (win, buf) = self.ui.win_and_buf_mut(win_id, buf_id);
+        win.expect("transcript window").pan_by_lines(
+            buf.expect("transcript buffer"),
+            delta,
+            viewport,
+        );
     }
 
     /// Pan the prompt's wrapped-row viewport by `delta`, keeping the cursor on the
-    /// same screen row. `cpos` lives in source bytes; convert through `PromptWrap`
-    /// so the window pan operates on wrapped rows, then convert back.
+    /// same screen row. `cpos` lives in source bytes; convert through the buffer's
+    /// parser so the window pan operates on wrapped rows, then convert back.
     fn pan_prompt_by_lines(&mut self, delta: isize) {
         let Some(vp) = crate::smelt_term::UiHost::viewport_for(self, crate::app::PROMPT_WIN) else {
             return;
         };
-        let usable = vp.content_width as usize;
-        let wrap = crate::content::prompt_wrap::PromptWrap::build(&self.input, usable);
-        if wrap.rows.is_empty() {
-            return;
-        }
-        let saved_src_cpos = self.input.win.cpos;
-        self.input.win.cpos = wrap.src_to_wrapped(saved_src_cpos);
-        self.input
-            .win
-            .pan_by_lines(delta, &wrap.rows, vp.rect.height);
-        self.input.win.cpos = wrap.wrapped_to_src(self.input.win.cpos);
+        let (win, buf) = self
+            .ui
+            .win_and_buf_mut(crate::app::PROMPT_WIN, crate::app::PROMPT_EDIT_BUF);
+        win.expect("prompt window").pan_by_lines(
+            buf.expect("prompt edit buffer"),
+            delta,
+            vp.rect.height,
+        );
     }
 
     /// Scroll one line when a drag cursor sits at the viewport edge (autoscroll).
@@ -168,128 +174,92 @@ impl TuiApp {
         }
     }
 
-    /// Drive a prompt mouse event through `Window::handle_mouse`.
-    /// Translates source-byte state to wrapped-row space before the call and back after,
-    /// since the prompt's source buffer differs from wrapped display rows.
+    /// Drive a prompt mouse event through `Window::handle_mouse`. On `Up` with
+    /// a non-empty selection, route the yanked range through `buf.copy_range`
+    /// (the prompt's `BufferCopy` expands `\u{FFFC}` markers to `[label]` for
+    /// the system clipboard while keeping raw markers in the kill ring for
+    /// vim paste-back).
     fn handle_prompt_mouse(&mut self, me: MouseEvent, click_count: u8) {
         let Some(vp) = crate::smelt_term::UiHost::viewport_for(self, crate::app::PROMPT_WIN) else {
             return;
         };
         let usable = vp.content_width as usize;
-        let wrap = crate::content::prompt_wrap::PromptWrap::build(&self.input, usable);
-        if wrap.rows.is_empty() {
-            return;
-        }
-
-        let saved_src_cpos = self.input.win.cpos;
-        let saved_src_anchor = self.input.win.selection_anchor;
-        let saved_src_dword = self.input.win.drag_anchor_word;
-        let saved_src_dline = self.input.win.drag_anchor_line;
-        let saved_vim_visual_anchor = self
-            .input
-            .win
-            .vim_enabled
-            .then(|| {
-                crate::smelt_term::vim::visual_anchor(
-                    &self.input.win.vim_state,
-                    self.input.win.vim_mode,
-                )
-            })
-            .flatten();
-
-        self.input.win.cpos = wrap.src_to_wrapped(saved_src_cpos);
-        self.input.win.selection_anchor = saved_src_anchor.map(|a| wrap.src_to_wrapped(a));
-        self.input.win.drag_anchor_word =
-            saved_src_dword.map(|(s, e)| (wrap.src_to_wrapped(s), wrap.src_to_wrapped(e)));
-        self.input.win.drag_anchor_line =
-            saved_src_dline.map(|(s, e)| (wrap.src_to_wrapped(s), wrap.src_to_wrapped(e)));
-        if self.input.win.vim_enabled {
-            if let Some(a) = saved_vim_visual_anchor {
-                self.input
-                    .win
-                    .begin_visual(crate::smelt_term::VimMode::Visual, wrap.src_to_wrapped(a));
-            }
-        }
-
-        let mouse_ctx = crate::smelt_term::MouseCtx {
-            rows: &wrap.rows,
-            soft_breaks: &wrap.soft_breaks,
-            hard_breaks: &wrap.hard_breaks,
-            viewport: vp,
-            click_count,
+        let yank = {
+            let (win, buf) = self
+                .ui
+                .win_and_buf_mut(crate::app::PROMPT_WIN, crate::app::PROMPT_EDIT_BUF);
+            let buf = buf.expect("prompt edit buffer");
+            let win = win.expect("prompt window");
+            buf.ensure_rendered_at(usable as u16);
+            let mouse_ctx = crate::smelt_term::MouseCtx {
+                soft_breaks: &[],
+                hard_breaks: &[],
+                viewport: vp,
+                click_count,
+            };
+            let (_, range) = win.handle_mouse(buf, me, mouse_ctx);
+            range.map(|(s, e)| buf.copy_range(s..e))
         };
-        let (_, _yank) = self.input.win.handle_mouse(me, mouse_ctx);
-
-        // Translate back to source bytes (`Window::mouse_up` already cleared anchors on Up).
-        let new_w_cpos = self.input.win.cpos;
-        let new_w_anchor = self.input.win.selection_anchor;
-        let new_w_dword = self.input.win.drag_anchor_word;
-        let new_w_dline = self.input.win.drag_anchor_line;
-        let new_w_vim_anchor = self
-            .input
-            .win
-            .vim_enabled
-            .then(|| {
-                crate::smelt_term::vim::visual_anchor(
-                    &self.input.win.vim_state,
-                    self.input.win.vim_mode,
-                )
-            })
-            .flatten();
-
-        self.input.win.cpos = wrap.wrapped_to_src(new_w_cpos);
-        self.input.win.selection_anchor = new_w_anchor.map(|a| wrap.wrapped_to_src(a));
-        self.input.win.drag_anchor_word =
-            new_w_dword.map(|(s, e)| (wrap.wrapped_to_src(s), wrap.wrapped_to_src(e)));
-        self.input.win.drag_anchor_line =
-            new_w_dline.map(|(s, e)| (wrap.wrapped_to_src(s), wrap.wrapped_to_src(e)));
-        if self.input.win.vim_enabled {
-            if let Some(a) = new_w_vim_anchor {
-                self.input
-                    .win
-                    .begin_visual(crate::smelt_term::VimMode::Visual, wrap.wrapped_to_src(a));
+        if let Some(out) = yank {
+            if !out.is_empty() {
+                self.yank_to_clipboard(out);
             }
         }
     }
 
     /// Drive a transcript-pane mouse event through `Window::handle_mouse`.
     /// Snaps the click column to a selectable cell (hidden-thinking rows route to fold markers).
-    /// On `MouseUp`, returns yanked text via `TranscriptSnapshot::copy_byte_range` so
-    /// `copy_as` substitutions and non-selectable cells are honored.
-    fn handle_content_mouse(&mut self, me: MouseEvent, click_count: u8) -> Option<String> {
-        let rows = crate::smelt_term::UiHost::rows_for(self, crate::app::TRANSCRIPT_WIN)?;
+    /// On `MouseUp`, returns the yanked range as `CopyOutput` via `Buffer::copy_range` —
+    /// the transcript's `BufferCopy` impl walks the latest snapshot so `copy_as`
+    /// substitutions, soft-wrap merging, and non-selectable cells are honored.
+    fn handle_content_mouse(
+        &mut self,
+        me: MouseEvent,
+        click_count: u8,
+    ) -> Option<crate::smelt_term::CopyOutput> {
+        let (soft, hard) = crate::smelt_term::UiHost::breaks_for(self, crate::app::TRANSCRIPT_WIN)?;
+        let viewport = crate::smelt_term::UiHost::viewport_for(self, crate::app::TRANSCRIPT_WIN)?;
+        let win_id = self.well_known.transcript;
+        let buf_id = self.transcript_win().buf;
+        let rows: Vec<String> = self
+            .ui
+            .buf(buf_id)
+            .map(|b| b.lines().to_vec())
+            .unwrap_or_default();
         if rows.is_empty() {
             return None;
         }
-        let (soft, hard) = crate::smelt_term::UiHost::breaks_for(self, crate::app::TRANSCRIPT_WIN)?;
-        let viewport = crate::smelt_term::UiHost::viewport_for(self, crate::app::TRANSCRIPT_WIN)?;
         let snapped = self.snap_event_for_selection(me, &rows, viewport);
-        let range = {
-            let mouse_ctx = crate::smelt_term::MouseCtx {
-                rows: &rows,
-                soft_breaks: &soft,
-                hard_breaks: &hard,
-                viewport,
-                click_count,
-            };
-            let (_, range) = self.transcript_window.handle_mouse(snapped, mouse_ctx);
-            range?
-        };
-        let (start, end) = range;
+        // Refresh the shared snapshot before consuming the range so the copier
+        // returns rendered text for the current generation+width+show_thinking.
         let theme = self.ui.theme().clone();
         let width = self.transcript_width() as u16;
         let show_thinking = self.core.config.settings.show_thinking;
-        let snap = self.transcript_projection.snapshot(
+        let _ = self.transcript_projection.snapshot(
             &mut self.transcript.history,
             width,
             show_thinking,
             &theme,
         );
-        let text = snap.copy_byte_range(start, end);
-        if text.is_empty() {
+        let range = {
+            let mouse_ctx = crate::smelt_term::MouseCtx {
+                soft_breaks: &soft,
+                hard_breaks: &hard,
+                viewport,
+                click_count,
+            };
+            let (win, buf) = self.ui.win_and_buf_mut(win_id, buf_id);
+            let (_, range) = win
+                .expect("transcript window")
+                .handle_mouse(buf?, snapped, mouse_ctx);
+            range?
+        };
+        let buf = self.ui.buf(buf_id)?;
+        let out = buf.copy_range(range.0..range.1);
+        if out.is_empty() {
             None
         } else {
-            Some(text)
+            Some(out)
         }
     }
 
@@ -301,8 +271,8 @@ impl TuiApp {
         vp: crate::smelt_term::WindowViewport,
     ) -> MouseEvent {
         let rel_row = me.row.saturating_sub(vp.rect.top) as usize;
-        let line_idx = (self.transcript_window.scroll_top as usize + rel_row)
-            .min(rows.len().saturating_sub(1));
+        let line_idx =
+            (self.transcript_win().scroll_top as usize + rel_row).min(rows.len().saturating_sub(1));
         let rel_col = me.column.saturating_sub(vp.rect.left) as usize;
         let snapped =
             self.snap_col_to_selectable(line_idx, rel_col, self.core.config.settings.show_thinking);
@@ -319,12 +289,28 @@ impl TuiApp {
             return;
         };
         if owner == crate::app::TRANSCRIPT_WIN {
-            let rows = self.full_transcript_display_text(self.core.config.settings.show_thinking);
             let viewport = self.viewport_rows_estimate();
-            self.transcript_window
-                .scroll_to_preserving_cursor_screen_row(scroll_top, &rows, viewport);
+            let win_id = self.well_known.transcript;
+            let buf_id = self.transcript_win().buf;
+            let (win, buf) = self.ui.win_and_buf_mut(win_id, buf_id);
+            win.expect("transcript window")
+                .scroll_to_preserving_cursor_screen_row(
+                    scroll_top,
+                    buf.expect("transcript buffer"),
+                    viewport,
+                );
         } else if owner == crate::app::PROMPT_WIN {
-            self.input.win.scroll_top = scroll_top;
+            let Some(vp) = crate::smelt_term::UiHost::viewport_for(self, crate::app::PROMPT_WIN)
+            else {
+                return;
+            };
+            let (win, buf) = self
+                .ui
+                .win_and_buf_mut(crate::app::PROMPT_WIN, crate::app::PROMPT_EDIT_BUF);
+            let buf = buf.expect("prompt edit buffer");
+            let win = win.expect("prompt window");
+            buf.ensure_rendered_at(vp.content_width);
+            win.scroll_to_preserving_cursor_screen_row(scroll_top, buf, vp.rect.height);
         }
     }
 }

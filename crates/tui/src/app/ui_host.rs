@@ -43,9 +43,9 @@ impl crate::smelt_term::UiHost for TuiApp {
     }
     fn rows_for(&mut self, win: crate::smelt_term::WinId) -> Option<Vec<String>> {
         if win == crate::app::PROMPT_WIN {
-            let usable = self.ui.win(win)?.viewport?.content_width as usize;
-            let wrap = crate::content::prompt_wrap::PromptWrap::build(&self.input, usable);
-            Some(wrap.rows)
+            let buf_id = self.ui.win(self.well_known.prompt)?.buf;
+            let buf = self.ui.buf(buf_id)?;
+            Some(buf.lines().to_vec())
         } else if win == crate::app::TRANSCRIPT_WIN {
             let rows = self.full_transcript_display_text(self.core.config.settings.show_thinking);
             Some((*rows).clone())
@@ -55,9 +55,8 @@ impl crate::smelt_term::UiHost for TuiApp {
     }
     fn breaks_for(&mut self, win: crate::smelt_term::WinId) -> Option<(Vec<usize>, Vec<usize>)> {
         if win == crate::app::PROMPT_WIN {
-            let usable = self.ui.win(win)?.viewport?.content_width as usize;
-            let wrap = crate::content::prompt_wrap::PromptWrap::build(&self.input, usable);
-            Some((wrap.soft_breaks, wrap.hard_breaks))
+            // Prompt lines are already wrapped; no additional soft/hard break tracking.
+            Some((Vec::new(), Vec::new()))
         } else if win == crate::app::TRANSCRIPT_WIN {
             Some(self.transcript_line_breaks(self.core.config.settings.show_thinking))
         } else {

@@ -7,7 +7,10 @@ use std::sync::Arc;
 
 pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) -> LuaResult<()> {
     let buf_tbl = lua.create_table()?;
-    buf_tbl.set("text", app_read!(lua, |app| app.input.source.clone()))?;
+    buf_tbl.set(
+        "text",
+        app_read!(lua, |app| app.prompt_buf().source().to_string()),
+    )?;
     {
         let s = shared.clone();
         buf_tbl.set(
@@ -27,6 +30,15 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
                     .as_ref()
                     .and_then(|t| t.get::<bool>("readonly").ok())
                     .unwrap_or(false);
+                let editable: bool = opts
+                    .as_ref()
+                    .and_then(|t| t.get::<bool>("editable").ok())
+                    .unwrap_or(false);
+                let undo_limit: Option<usize> = opts
+                    .as_ref()
+                    .and_then(|t| t.get::<Option<u64>>("undo").ok())
+                    .flatten()
+                    .map(|n| n as usize);
                 let id = s
                     .next_buf_id
                     .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -40,6 +52,10 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
                                 buf.readonly = readonly;
                                 if let Some(fmt) = format {
                                     buf.set_parser(fmt.into_parser());
+                                }
+                                if editable {
+                                    let limit = undo_limit.or(Some(100));
+                                    buf.history = crate::smelt_term::UndoHistory::new(limit);
                                 }
                             }
                         }

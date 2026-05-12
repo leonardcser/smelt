@@ -4,13 +4,20 @@ use crate::smelt_term::Buffer;
 use crate::smelt_term::Theme;
 use smelt_core::buffer::{LineDecoration, Span, SpanMeta};
 use smelt_core::transcript_model::{BlockHistory, LayoutKey, ViewState};
+use std::sync::{Arc, Mutex};
+
+/// Shared latest snapshot. The transcript's `BufferCopy` impl reads from this
+/// holder after every rebuild so `Buffer::copy_range` returns rendered text
+/// without the host needing to plumb the snapshot through every call site.
+pub(crate) type SharedSnapshot = Arc<Mutex<Option<Arc<TranscriptSnapshot>>>>;
 
 pub(crate) struct TranscriptProjection {
     cache: BlockBufferCache,
     cache_generation: u64,
     cache_width: u16,
     project_key: Option<ProjectKey>,
-    snapshot: Option<TranscriptSnapshot>,
+    snapshot: Option<Arc<TranscriptSnapshot>>,
+    shared: SharedSnapshot,
 }
 
 #[derive(PartialEq, Eq, Clone, Copy)]
@@ -28,7 +35,14 @@ impl TranscriptProjection {
             cache_width: 0,
             project_key: None,
             snapshot: None,
+            shared: Arc::new(Mutex::new(None)),
         }
+    }
+
+    /// Handle to the latest snapshot. The transcript buffer's `BufferCopy`
+    /// reads from this Arc to compute rendered yanks.
+    pub(crate) fn shared_snapshot(&self) -> SharedSnapshot {
+        self.shared.clone()
     }
 
     /// Clear cache on generation or width change so stale entries don't accumulate.
@@ -167,9 +181,46 @@ impl TranscriptProjection {
                 show_thinking,
                 theme,
             );
+            let snap = Arc::new(snap);
+            *self.shared.lock().unwrap() = Some(snap.clone());
             self.snapshot = Some(snap);
         }
-        self.snapshot.as_ref().expect("just rebuilt")
+        self.snapshot.as_deref().expect("just rebuilt")
+    }
+}
+
+/// Yank transform for the transcript. `kill_ring` keeps the raw source bytes
+/// (paste-back fidelity), `clipboard` walks the latest snapshot's cells so
+/// `copy_as` substitutions, soft-wrap merging, and `source_text` row overrides
+/// are honored on external paste.
+pub(crate) struct TranscriptCopier {
+    shared: SharedSnapshot,
+}
+
+impl TranscriptCopier {
+    pub(crate) fn new(shared: SharedSnapshot) -> Self {
+        Self { shared }
+    }
+}
+
+impl smelt_core::buffer::BufferCopy for TranscriptCopier {
+    fn copy(&self, buf: &Buffer, range: std::ops::Range<usize>) -> smelt_core::buffer::CopyOutput {
+        // Transcript has no `source` — its editable-byte space is
+        // `lines.join("\n")`, which `buf.text()` returns.
+        let text = buf.text();
+        let raw = text
+            .get(range.start..range.end)
+            .map(str::to_string)
+            .unwrap_or_default();
+        let snap = self.shared.lock().unwrap().clone();
+        let clipboard = match snap {
+            Some(s) => s.copy_byte_range(range.start, range.end),
+            None => raw.clone(),
+        };
+        smelt_core::buffer::CopyOutput {
+            kill_ring: raw,
+            clipboard,
+        }
     }
 }
 

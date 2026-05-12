@@ -35,6 +35,12 @@ pub const LUA_BUF_ID_BASE: u64 = 1 << 32;
 /// Parser attached to a `Buffer`. Rebuilds lines, extmarks, and
 /// decorations from a source string whenever `(source_tick, width)`
 /// changes. `on_attach` fires once at installation for namespace setup.
+///
+/// Parsers whose source bytes don't map 1:1 to display chars (e.g. the prompt,
+/// where attachment markers expand to `[label]`) should write a
+/// [`ProjectionMaps`](crate::coords::ProjectionMaps) into the buffer via
+/// [`Buffer::set_projection_maps`] inside `parse`. Parsers that don't write
+/// maps fall through to identity coord mapping.
 pub trait BufferParser: Send + Sync {
     /// Rebuild the buffer's lines / extmarks / decorations from
     /// `source` at the given render `width`.
@@ -42,6 +48,50 @@ pub trait BufferParser: Send + Sync {
 
     /// Called once when the parser is installed. Default no-op.
     fn on_attach(&self, _buf: &mut Buffer) {}
+}
+
+/// Two outputs from a single yank: the kill-ring text (paste-back fidelity,
+/// e.g. raw `\u{FFFC}` attachment markers survive `y`/`p`) and the system
+/// clipboard text (human-readable, e.g. markers expand to `[label]`).
+///
+/// Buffers without a [`BufferCopy`] impl produce identical outputs equal to
+/// the raw source slice.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct CopyOutput {
+    pub kill_ring: String,
+    pub clipboard: String,
+}
+
+impl CopyOutput {
+    /// Both outputs equal `s`. The default identity case for buffers without
+    /// a [`BufferCopy`] installed.
+    pub fn same(s: String) -> Self {
+        Self {
+            kill_ring: s.clone(),
+            clipboard: s,
+        }
+    }
+
+    /// `true` when both outputs are empty (the only state callers should skip).
+    pub fn is_empty(&self) -> bool {
+        self.kill_ring.is_empty() && self.clipboard.is_empty()
+    }
+
+    /// `(kill_ring, clipboard)`. Useful when both halves need to be moved
+    /// into different sinks without intermediate clones.
+    pub fn into_parts(self) -> (String, String) {
+        (self.kill_ring, self.clipboard)
+    }
+}
+
+/// Per-buffer transform from a source byte range to a [`CopyOutput`].
+///
+/// `range` is expressed in `source` bytes and is guaranteed to be in-bounds
+/// and on char boundaries by [`Buffer::copy_range`]. The buffer itself is
+/// passed so impls can read sidecar state (attachment ids, decorations)
+/// without needing a separate holder.
+pub trait BufferCopy: Send + Sync {
+    fn copy(&self, buf: &Buffer, range: std::ops::Range<usize>) -> CopyOutput;
 }
 
 /// Process-global namespace id. Stable for the process lifetime;
@@ -333,11 +383,6 @@ impl NamespaceState {
         }
     }
 
-    fn clear_all(&mut self) {
-        self.extmarks.clear();
-        self.by_row.clear();
-    }
-
     /// Marks on `row` in `(id, mark)` form. Order is row-insertion order;
     /// callers needing `(priority, ns, id)` sorting apply it themselves.
     fn marks_at(&self, row: usize) -> impl Iterator<Item = (ExtmarkId, &Extmark)> + '_ {
@@ -425,6 +470,7 @@ pub struct Buffer {
     ns_decorations: NsId,
     ns_virt_text: NsId,
     parser: Option<Arc<dyn BufferParser>>,
+    copier: Option<Arc<dyn BufferCopy>>,
     source: String,
     source_tick: u64,
     last_render: Option<(u64, u16)>,
@@ -432,6 +478,9 @@ pub struct Buffer {
     pub attachment_ids: Vec<AttachmentId>,
     pub readonly: bool,
     selection: Vec<SelectionRange>,
+    /// Source↔display coord maps. Written by parsers in `parse()` when source
+    /// bytes don't map 1:1 to display chars. `None` falls back to identity.
+    projection_maps: Option<crate::coords::ProjectionMaps>,
 }
 
 impl Buffer {
@@ -455,6 +504,7 @@ impl Buffer {
             ns_decorations,
             ns_virt_text,
             parser: None,
+            copier: None,
             source: String::new(),
             source_tick: 0,
             last_render: None,
@@ -462,6 +512,7 @@ impl Buffer {
             attachment_ids: Vec::new(),
             readonly: false,
             selection: Vec::new(),
+            projection_maps: None,
         }
     }
 
@@ -481,6 +532,10 @@ impl Buffer {
     }
 
     /// Attach a parser, firing `on_attach` once and invalidating the render cache.
+    pub fn has_parser(&self) -> bool {
+        self.parser.is_some()
+    }
+
     pub fn set_parser(&mut self, parser: Arc<dyn BufferParser>) {
         parser.on_attach(self);
         self.parser = Some(parser);
@@ -491,6 +546,121 @@ impl Buffer {
     pub fn attach(mut self, parser: Arc<dyn BufferParser>) -> Self {
         self.set_parser(parser);
         self
+    }
+
+    /// Install a [`BufferCopy`] sidecar. Without one, [`Self::copy_range`]
+    /// returns the raw source slice for both outputs.
+    pub fn set_copier(&mut self, copier: Arc<dyn BufferCopy>) {
+        self.copier = Some(copier);
+    }
+
+    pub fn has_copier(&self) -> bool {
+        self.copier.is_some()
+    }
+
+    /// Push the most recent kill-ring source range to the system clipboard,
+    /// transformed by this buffer's [`BufferCopy`]. Idempotent; no-op when
+    /// the kill ring lacks a source range or yields empty output. Records
+    /// the write on the kill ring so external-clipboard-update detection
+    /// stays correct.
+    pub fn sync_clipboard_from_kill_ring(&self, clipboard: &mut crate::clipboard::Clipboard) {
+        let Some((start, end)) = clipboard.kill_ring.source_range() else {
+            return;
+        };
+        let out = self.copy_range(start..end);
+        if out.clipboard.is_empty() {
+            return;
+        }
+        if clipboard.write(&out.clipboard).is_ok() {
+            clipboard.kill_ring.record_clipboard_write(out.clipboard);
+        }
+    }
+
+    /// Snapshot a byte range as a [`CopyOutput`]. The range is in the buffer's
+    /// editable-byte space — `source` for buffers whose parser writes it
+    /// (prompt), or `lines.join("\n")` for buffers that only ever set lines
+    /// (transcript). The range is clamped and snapped to char boundaries —
+    /// stale anchors degrade to an empty output instead of panicking. Buffers
+    /// without a copier fall through to identity.
+    pub fn copy_range(&self, range: std::ops::Range<usize>) -> CopyOutput {
+        let owned;
+        let src: &str = if self.source.is_empty() {
+            owned = self.text();
+            &owned
+        } else {
+            &self.source
+        };
+        let len = src.len();
+        let start = crate::text::snap(src, range.start.min(len));
+        let end = crate::text::snap(src, range.end.min(len));
+        if start >= end {
+            return CopyOutput::default();
+        }
+        let clamped = start..end;
+        match self.copier.clone() {
+            Some(c) => c.copy(self, clamped),
+            None => CopyOutput::same(src[clamped].to_string()),
+        }
+    }
+
+    /// Read the editable source text.
+    pub fn source(&self) -> &str {
+        &self.source
+    }
+
+    /// Mutable access to the editable source text. Callers must run
+    /// `ensure_rendered_at` after mutations to keep display lines in sync.
+    pub fn source_mut(&mut self) -> &mut String {
+        self.source_tick = self.source_tick.wrapping_add(1);
+        &mut self.source
+    }
+
+    /// Split-mutable refs for a single edit step: source text, undo history,
+    /// attachment ids. Bumps `source_tick` (callers must follow with
+    /// `sync_after_edit` to refresh `lines`). For buffers without a parser,
+    /// lazily rebuilds `source` from `lines.join("\n")` on first call.
+    pub fn edit_refs(&mut self) -> (&mut String, &mut UndoHistory, &mut Vec<AttachmentId>) {
+        if self.parser.is_none() && self.source.is_empty() && !self.lines_is_blank() {
+            self.source = self.lines.join("\n");
+        }
+        self.source_tick = self.source_tick.wrapping_add(1);
+        (
+            &mut self.source,
+            &mut self.history,
+            &mut self.attachment_ids,
+        )
+    }
+
+    fn lines_is_blank(&self) -> bool {
+        self.lines.iter().all(|s| s.is_empty())
+    }
+
+    /// Remove the attachment marker at `pos` (if any) from `attachment_ids`.
+    pub fn remove_attachment_at(&mut self, pos: usize) {
+        use crate::attachment::ATTACHMENT_MARKER;
+        if self.source.as_bytes().get(pos) == Some(&(ATTACHMENT_MARKER as u8)) {
+            let idx = self.source[..pos]
+                .chars()
+                .filter(|&c| c == ATTACHMENT_MARKER)
+                .count();
+            if idx < self.attachment_ids.len() {
+                self.attachment_ids.remove(idx);
+            }
+        }
+    }
+
+    /// Remove all `attachment_ids` that fall inside a source text range.
+    pub fn remove_attachments_in_range(&mut self, start: usize, end: usize) {
+        use crate::attachment::ATTACHMENT_MARKER;
+        let before = self.source[..start]
+            .chars()
+            .filter(|&c| c == ATTACHMENT_MARKER)
+            .count();
+        let in_range = self.source[start..end]
+            .chars()
+            .filter(|&c| c == ATTACHMENT_MARKER)
+            .count();
+        self.attachment_ids.drain(before..before + in_range);
     }
 
     /// Update the source driving the parser. No-op if source is unchanged.
@@ -516,14 +686,11 @@ impl Buffer {
             return false;
         }
         let source = std::mem::take(&mut self.source);
-        // Seed with one empty line so parsers can start from row 0.
-        let n = self.lines.len();
-        if n > 1 || (n == 1 && !self.lines[0].is_empty()) {
-            self.set_lines(0, n, vec![String::new()]);
-        }
-        for state in self.extmarks.namespaces.values_mut() {
-            state.clear_all();
-        }
+        // Reset to a single seed line; `set_all_lines` clears well-known
+        // namespaces across all rows so stale highlights don't leak.
+        // Maps cleared too — parser repopulates if it needs custom mapping.
+        self.set_all_lines(vec![String::new()]);
+        self.projection_maps = None;
         parser.parse(self, &source, width);
         self.source = source;
         self.last_render = Some((self.source_tick, width));
@@ -649,6 +816,77 @@ impl Buffer {
 
     pub fn lines(&self) -> &[String] {
         &self.lines
+    }
+
+    // ── Editable buffer API ──────────────────────────────────────────
+
+    /// Call after mutating `source` via `edit_refs()` / `source_mut()`.
+    /// Re-projects `source` into `lines` + extmarks:
+    ///   - With parser: invalidate cache, re-run `parser.parse(self, source, width)`.
+    ///   - Without parser: identity split of `source` into `lines`.
+    pub fn sync_after_edit(&mut self, width: u16) {
+        if self.parser.is_some() {
+            self.last_render = None;
+            self.ensure_rendered_at(width);
+        } else {
+            let new_lines: Vec<String> = self.source.split('\n').map(String::from).collect();
+            self.set_all_lines(new_lines);
+        }
+    }
+
+    /// Map an editable-space byte offset to a display `(row, col)`.
+    ///
+    /// Uses the parser-written [`ProjectionMaps`](crate::coords::ProjectionMaps)
+    /// if present; otherwise walks `lines()` directly (1:1 identity mapping).
+    pub fn display_cursor_pos(&self, cpos: usize) -> (usize, usize) {
+        if let Some(maps) = &self.projection_maps {
+            return maps.cursor_pos(&self.source, cpos);
+        }
+        if self.lines.is_empty() {
+            return (0, 0);
+        }
+        let offsets = crate::text::line_start_offsets(&self.lines);
+        let tail = offsets[self.lines.len() - 1] + self.lines[self.lines.len() - 1].len();
+        let cpos = cpos.min(tail);
+        let line_idx = match offsets.binary_search(&cpos) {
+            Ok(i) => i,
+            Err(i) => i.saturating_sub(1),
+        };
+        let byte_col = cpos.saturating_sub(offsets[line_idx]);
+        let col = crate::text::byte_to_cell(&self.lines[line_idx], byte_col);
+        (line_idx, col)
+    }
+
+    /// Map a display `(row, col)` back to an editable-space byte offset.
+    ///
+    /// Uses the parser-written [`ProjectionMaps`](crate::coords::ProjectionMaps)
+    /// if present; otherwise walks `lines()` directly (1:1 identity mapping).
+    pub fn byte_at_display_pos(&self, row: usize, col: usize) -> usize {
+        if let Some(maps) = &self.projection_maps {
+            return maps.byte_at(&self.source, row, col);
+        }
+        if self.lines.is_empty() {
+            return 0;
+        }
+        let row = row.min(self.lines.len().saturating_sub(1));
+        let offsets = crate::text::line_start_offsets(&self.lines);
+        offsets[row] + crate::text::cell_to_byte(&self.lines[row], col)
+    }
+
+    /// Set source↔display coord maps. Parsers call this from `parse()` when
+    /// their source bytes don't map 1:1 to display chars.
+    pub fn set_projection_maps(&mut self, maps: crate::coords::ProjectionMaps) {
+        self.projection_maps = Some(maps);
+    }
+
+    /// Clear coord maps so subsequent cursor queries fall back to identity.
+    pub fn clear_projection_maps(&mut self) {
+        self.projection_maps = None;
+    }
+
+    /// Read the source↔display coord maps, if any.
+    pub fn projection_maps(&self) -> Option<&crate::coords::ProjectionMaps> {
+        self.projection_maps.as_ref()
     }
 
     #[cfg(test)]
@@ -1086,6 +1324,46 @@ mod tests {
         assert_eq!(buf.highlights_at(0).len(), 1);
         assert_eq!(buf.highlights_at(1).len(), 0);
         assert_eq!(buf.highlights_at(2).len(), 1);
+    }
+
+    #[test]
+    fn copy_range_default_is_identity_for_both_outputs() {
+        let mut buf = make_buf();
+        buf.set_source("hello world".into());
+        let out = buf.copy_range(0..5);
+        assert_eq!(out.kill_ring, "hello");
+        assert_eq!(out.clipboard, "hello");
+    }
+
+    #[test]
+    fn copy_range_clamps_stale_endpoints_without_panicking() {
+        let mut buf = make_buf();
+        buf.set_source("abc".into());
+        // Endpoints past `source.len()` clamp to len; reversed/empty → default.
+        let out = buf.copy_range(100..200);
+        assert!(out.is_empty());
+        let out = buf.copy_range(0..2);
+        assert_eq!(out.kill_ring, "ab");
+    }
+
+    #[test]
+    fn copy_range_dispatches_to_installed_copier() {
+        struct UpperCopier;
+        impl BufferCopy for UpperCopier {
+            fn copy(&self, buf: &Buffer, range: std::ops::Range<usize>) -> CopyOutput {
+                let raw = buf.source()[range].to_string();
+                CopyOutput {
+                    clipboard: raw.to_uppercase(),
+                    kill_ring: raw,
+                }
+            }
+        }
+        let mut buf = make_buf();
+        buf.set_source("hello".into());
+        buf.set_copier(std::sync::Arc::new(UpperCopier));
+        let out = buf.copy_range(0..5);
+        assert_eq!(out.kill_ring, "hello");
+        assert_eq!(out.clipboard, "HELLO");
     }
 
     #[test]

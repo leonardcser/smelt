@@ -5,7 +5,7 @@ pub(crate) mod selection;
 pub(crate) mod block_buffers;
 pub(crate) mod layout;
 pub(crate) mod prompt_buf;
-pub(crate) mod prompt_wrap;
+pub(crate) mod prompt_parser;
 pub(crate) mod status;
 pub(crate) mod to_buffer;
 pub(crate) mod transcript_buf;
