@@ -11,7 +11,7 @@ this page covers the workflow for writing plugins against it.
 ## IDE completion
 
 Every public function, opts record, and string-literal alias is generated from
-the Rust source by `cargo run -p tui --bin gen-lua-docs`. The output lands in
+the Rust source by `cargo xtask gen-lua-docs`. The output lands in
 two trees:
 
 - `runtime/lua/smelt/_meta/<namespace>.lua` — `---@meta` stubs consumed by
@@ -83,7 +83,7 @@ hints.
 ## Regenerating docs and stubs
 
 ```bash
-cargo run -p tui --bin gen-lua-docs
+cargo xtask gen-lua-docs
 ```
 
 Run this after editing any `register_fn`/`register_ui_fn` site or an opts
