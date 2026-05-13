@@ -2,19 +2,31 @@
 //! Chords and modes are canonicalized at registration; unknown values raise immediately.
 
 use crate::lua::{LuaHandle, LuaShared};
+use lua_doc_derive::lua_module;
 use mlua::prelude::*;
+use smelt_core::lua::doc::{record_module_doc, register_ui_fn};
+use smelt_core::lua::lua_type::LuaCallback;
 use std::sync::Arc;
 
+#[lua_module]
 pub(super) fn register(
     lua: &Lua,
     smelt_keymap: &mlua::Table,
     shared: &Arc<LuaShared>,
 ) -> LuaResult<()> {
-    // smelt.keymap.help_sections() — layered binding help from `crate::keymap::hints`.
     let keymap_tbl = lua.create_table()?;
-    keymap_tbl.set(
+    record_module_doc(
+        "smelt.keymap",
+        "Register key bindings and query layered help sections. UiHost-only.",
+    );
+    register_ui_fn(
+        &keymap_tbl,
+        "smelt.keymap",
         "help_sections",
-        lua.create_function(|lua, ()| {
+        "Return layered keybinding help as `{ title, entries = { { label, detail } } }` rows. Filters vim-only chords when vim mode is disabled.",
+        &[],
+        lua,
+        |lua, ()|  -> LuaResult<mlua::Table>{
             let vim_enabled =
                 crate::lua::try_with_app(|app| app.input.vim_enabled()).unwrap_or(false);
             let sections = crate::keymap::hints::help_sections(vim_enabled);
@@ -33,36 +45,41 @@ pub(super) fn register(
                 out.set(i + 1, row)?;
             }
             Ok(out)
-        })?,
+        },
     )?;
     smelt_keymap.set("help", keymap_tbl.get::<mlua::Function>("help_sections")?)?;
 
     {
         let s = shared.clone();
-        smelt_keymap.set(
+        register_ui_fn(
+            smelt_keymap,
+            "smelt.keymap",
             "set",
-            lua.create_function(
-                move |lua, (mode, chord, handler): (String, String, mlua::Function)| {
-                    let canonical_mode = crate::lua::normalize_mode(&mode).ok_or_else(
-                        || {
-                            LuaError::RuntimeError(format!(
-                                "keymap.set: unknown mode `{mode}` (expected \"n\"|\"i\"|\"v\"|\"\" or \"normal\"|\"insert\"|\"visual\")"
-                            ))
-                        },
-                    )?;
-                    let canonical_chord = crate::lua::canonicalize_chord_sequence(&chord)
-                        .ok_or_else(|| {
-                            LuaError::RuntimeError(format!(
-                                "keymap.set: unknown chord `{chord}`"
-                            ))
-                        })?;
-                    let key = lua.create_registry_value(handler)?;
-                    if let Ok(mut map) = s.keymaps.lock() {
-                        map.insert((canonical_mode, canonical_chord), LuaHandle { key });
-                    }
-                    Ok(())
-                },
-            )?,
+            "Bind `chord` in `mode` to a Lua callback. `mode` is `\"n\"|\"i\"|\"v\"|\"\"` (or the long form `normal`/`insert`/`visual`); the chord is canonicalized at registration and unknown values raise immediately.",
+            &["mode", "chord", "handler"],
+            lua,
+            move |lua,
+                  (mode, chord, handler): (String, String, LuaCallback<(), ()>)|
+                  -> LuaResult<()> {
+                let canonical_mode = crate::lua::normalize_mode(&mode).ok_or_else(
+                    || {
+                        LuaError::RuntimeError(format!(
+                            "keymap.set: unknown mode `{mode}` (expected \"n\"|\"i\"|\"v\"|\"\" or \"normal\"|\"insert\"|\"visual\")"
+                        ))
+                    },
+                )?;
+                let canonical_chord = crate::lua::canonicalize_chord_sequence(&chord)
+                    .ok_or_else(|| {
+                        LuaError::RuntimeError(format!(
+                            "keymap.set: unknown chord `{chord}`"
+                        ))
+                    })?;
+                let key = lua.create_registry_value(handler.into_inner())?;
+                if let Ok(mut map) = s.keymaps.lock() {
+                    map.insert((canonical_mode, canonical_chord), LuaHandle { key });
+                }
+                Ok(())
+            },
         )?;
     }
     Ok(())

@@ -268,7 +268,7 @@ function smelt.ui.dialog.open(opts)
     if type(on_select_fn) == "function" then
       local ok, err = pcall(on_select_fn)
       if not ok then
-        smelt.notify_error("dialog on_select: " .. tostring(err))
+        smelt.ui.notify_error("dialog on_select: " .. tostring(err))
       end
     end
     smelt.win.close(win_id)
@@ -295,7 +295,7 @@ function smelt.ui.dialog.open(opts)
           local ctx = build_ctx(raw_ctx, win_id, task_id, nil, input_leaves)
           local ok, err = pcall(on_press, ctx)
           if not ok then
-            smelt.notify_error("dialog keymap: " .. tostring(err))
+            smelt.ui.notify_error("dialog keymap: " .. tostring(err))
           end
         end)
       end
@@ -308,7 +308,7 @@ function smelt.ui.dialog.open(opts)
       for _, fn in pairs(input_on_change) do
         local ok, err = pcall(fn, ctx)
         if not ok then
-          smelt.notify_error("dialog on_change: " .. tostring(err))
+          smelt.ui.notify_error("dialog on_change: " .. tostring(err))
         end
       end
     end)
@@ -320,7 +320,7 @@ function smelt.ui.dialog.open(opts)
       local ctx = build_ctx(raw_ctx, win_id, task_id, nil, input_leaves)
       local ok, err = pcall(on_tick, ctx)
       if not ok then
-        smelt.notify_error("dialog on_tick: " .. tostring(err))
+        smelt.ui.notify_error("dialog on_tick: " .. tostring(err))
       end
     end)
   end

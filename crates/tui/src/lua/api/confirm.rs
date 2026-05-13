@@ -26,18 +26,27 @@ use mlua::prelude::*;
 use crate::app::TuiApp;
 use crate::content::to_buffer::render_into_buffer;
 use crate::smelt_term::BufId;
+use lua_doc_derive::lua_module;
 use smelt_core::cells::ConfirmResolved;
+use smelt_core::lua::doc::{record_module_doc, register_ui_fn};
 use smelt_core::theme::role_hl;
 use smelt_core::transcript_model::{ApprovalScope, ConfirmChoice, ConfirmRequest};
 
 /// Register `smelt.confirm.*` primitives.
+#[lua_module]
 pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
     let confirm_tbl = lua.create_table()?;
+    record_module_doc("smelt.confirm", "Confirm dialog primitives — render title, preview, back-tab cycling, and choice resolution. UiHost-only.");
 
     // smelt.confirm._render_title(buf_id, handle_id)
-    confirm_tbl.set(
+    register_ui_fn(
+        &confirm_tbl,
+        "smelt.confirm",
         "_render_title",
-        lua.create_function(|_, (buf_id, handle_id): (u64, u64)| {
+        "smelt.confirm._render_title(buf_id, handle_id)",
+        &["buf_id", "handle_id"],
+        lua,
+        |_, (buf_id, handle_id): (u64, u64)| -> LuaResult<()> {
             crate::lua::with_app(|app| {
                 let req = match app.core.confirms.get(handle_id) {
                     Some(e) => e.req.clone(),
@@ -46,16 +55,22 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
                 render_title_into_buf(app, BufId(buf_id), &req);
             });
             Ok(())
-        })?,
+        },
     )?;
 
     // smelt.confirm._back_tab(handle_id) → bool. Cycles app mode and returns true if the
     // new mode auto-allows the request. The with_app borrow must be released before calling
     // back into Lua (smelt.mode.cycle re-enters with_app), so the body is split: gather
     // request payload, run cycle, then re-enter with_app to inspect and resolve.
-    confirm_tbl.set(
+    register_ui_fn(
+        &confirm_tbl,
+        "smelt.confirm",
         "_back_tab",
-        lua.create_function(|lua, handle_id: u64| {
+        "smelt.confirm._back_tab(handle_id) → bool. Cycles app mode and returns true if the new mode auto-allows the request. The with_app borrow must be released before calling back into Lua (smelt.mode.cycle re-enters with_app), so the body is split: gather request payload, run cycle, then re-enter with_app to inspect and resolve.",
+        &["handle_id"],
+        lua,
+        |lua, handle_id: u64|  -> LuaResult<bool>{
+
             let request: Option<(
                 u64,
                 String,
@@ -106,14 +121,21 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
                 }
             });
             Ok(auto_allowed)
-        })?,
+
+        },
     )?;
 
     // smelt.confirm._render_preview(buf_id, handle_id) → bool.
     // Calls the tool's `preview` callback if registered. Returns false if none registered.
-    confirm_tbl.set(
+    register_ui_fn(
+        &confirm_tbl,
+        "smelt.confirm",
         "_render_preview",
-        lua.create_function(|_, (buf_id, handle_id): (u64, u64)| {
+        "smelt.confirm._render_preview(buf_id, handle_id) → bool. Calls the tool's `preview` callback if registered. Returns false if none registered.",
+        &["buf_id", "handle_id"],
+        lua,
+        |_, (buf_id, handle_id): (u64, u64)|  -> LuaResult<bool>{
+
             let req = match crate::lua::with_app(|app| {
                 app.core
                     .confirms
@@ -127,36 +149,40 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
                 crate::lua::try_with_app(|app| app.lua.render_tool_preview(&req.0, &req.1, buf_id))
                     .unwrap_or(false),
             )
-        })?,
+
+        },
     )?;
 
     // smelt.confirm._resolve(handle_id, decision, message?).
     // `decision` matches the `confirm_resolved` cell lexicon. Removes the registry entry.
-    confirm_tbl.set(
+    register_ui_fn(
+        &confirm_tbl,
+        "smelt.confirm",
         "_resolve",
-        lua.create_function(
-            |_, (handle_id, decision, message): (u64, String, Option<String>)| {
-                crate::lua::with_app(|app| {
-                    let entry = match app.core.confirms.take(handle_id) {
-                        Some(e) => e,
-                        None => return,
-                    };
-                    let choice = parse_decision(&decision, &entry.req);
-                    app.core.cells.set_dyn(
-                        "confirm_resolved",
-                        std::rc::Rc::new(ConfirmResolved {
-                            handle_id,
-                            decision: decision_label(&choice).into(),
-                        }),
-                    );
-                    let request_id = entry.req.request_id;
-                    let call_id = entry.req.call_id.clone();
-                    let tool_name = entry.req.tool_name.clone();
-                    app.handle_confirm_resolve(choice, message, request_id, &call_id, &tool_name);
-                });
-                Ok(())
-            },
-        )?,
+        "Final confirm pick. `decision` matches the `confirm_resolved` cell lexicon (`yes`, `no`, `always_session`, `always_workspace`, `always_pattern_*`, `always_dir_*`); `message` is an optional rejection note. Removes the registry entry and routes the choice through the engine.",
+        &["handle_id", "decision", "message"],
+        lua,
+        |_, (handle_id, decision, message): (u64, String, Option<String>)|  -> LuaResult<()>{
+            crate::lua::with_app(|app| {
+                let entry = match app.core.confirms.take(handle_id) {
+                    Some(e) => e,
+                    None => return,
+                };
+                let choice = parse_decision(&decision, &entry.req);
+                app.core.cells.set_dyn(
+                    "confirm_resolved",
+                    std::rc::Rc::new(ConfirmResolved {
+                        handle_id,
+                        decision: decision_label(&choice).into(),
+                    }),
+                );
+                let request_id = entry.req.request_id;
+                let call_id = entry.req.call_id.clone();
+                let tool_name = entry.req.tool_name.clone();
+                app.handle_confirm_resolve(choice, message, request_id, &call_id, &tool_name);
+            });
+            Ok(())
+        },
     )?;
 
     smelt.set("confirm", confirm_tbl)?;

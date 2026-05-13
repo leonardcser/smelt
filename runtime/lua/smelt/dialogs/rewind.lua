@@ -12,7 +12,7 @@ end
 smelt.cmd.register("rewind", function(args)
   local turns = smelt.session.turns()
   if #turns == 0 then
-    smelt.notify_error("nothing to rewind")
+    smelt.ui.notify_error("nothing to rewind")
     return
   end
 

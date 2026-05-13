@@ -1,13 +1,25 @@
 //! `smelt.parse` — pure parsers: `frontmatter(content) -> (table | nil, body)`.
 
+use crate::lua::doc::{record_module_doc, register_fn};
+use lua_doc_derive::lua_module;
 use mlua::prelude::*;
 
+#[lua_module]
 pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
     let parse_tbl = lua.create_table()?;
+    record_module_doc(
+        "smelt.parse",
+        "Pure parsers: frontmatter extraction from markdown documents.",
+    );
 
-    parse_tbl.set(
+    register_fn(
+        &parse_tbl,
+        "smelt.parse",
         "frontmatter",
-        lua.create_function(|lua, content: String| {
+        "Split `---`-delimited YAML frontmatter from a markdown document. Returns `(frontmatter_table, body)` or `(nil, content)` when no frontmatter is present.",
+        &["content"],
+        lua,
+        |lua, content: String| -> LuaResult<(mlua::Value, String)> {
             let Some(rest) = content.strip_prefix("---") else {
                 return Ok((mlua::Value::Nil, content));
             };
@@ -24,7 +36,7 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
             let value = yaml_to_json(yaml);
             let lua_value = json_to_lua(lua, value)?;
             Ok((lua_value, body))
-        })?,
+        },
     )?;
 
     smelt.set("parse", parse_tbl)?;

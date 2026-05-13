@@ -4,13 +4,26 @@
 
 use crate::content::to_buffer::render_into_buffer;
 use crate::smelt_term::BufId;
+use lua_doc_derive::lua_module;
 use mlua::prelude::*;
+use smelt_core::lua::doc::{record_module_doc, register_ui_fn};
 
+#[lua_module]
 pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
     let md = lua.create_table()?;
-    md.set(
+    record_module_doc(
+        "smelt.markdown",
+        "Paint markdown into a Buffer. UiHost-only.",
+    );
+
+    register_ui_fn(
+        &md,
+        "smelt.markdown",
         "render",
-        lua.create_function(|_, (buf_id, source): (u64, String)| {
+        "Render markdown `source` into the buffer using the same renderer the transcript uses for assistant text blocks (headings, lists, code fences, inline emphasis).",
+        &["buf_id", "source"],
+        lua,
+        |_, (buf_id, source): (u64, String)|  -> LuaResult<()>{
             crate::lua::with_app(|app| {
                 let theme_snap = app.ui.theme().clone();
                 let width = crate::content::term_width() as u16;
@@ -28,7 +41,7 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
                 }
             });
             Ok(())
-        })?,
+        },
     )?;
     smelt.set("markdown", md)?;
     Ok(())

@@ -96,7 +96,7 @@ end
 
 local function paint_panel()
   if not PANEL then return end
-  local ok, snap = pcall(smelt.metrics.perf_snapshot)
+  local ok, snap = pcall(smelt.metrics.perf.snapshot)
   if not ok then return end
   local label_w = current_label_width()
   local lines, spans = compose_lines(snap, label_w)
@@ -113,8 +113,8 @@ end
 
 local function open()
   if PANEL then return end
-  smelt.metrics.perf_clear()
-  smelt.metrics.perf_set_enabled(true)
+  smelt.metrics.perf.clear()
+  smelt.metrics.perf.set_enabled(true)
   local buf = smelt.buf.create()
   local win = smelt.win.open(buf, { focusable = false })
   smelt.ui.overlay.open({
@@ -144,8 +144,8 @@ local function close()
   smelt.timer.cancel(PANEL.timer)
   smelt.win.close(PANEL.win)
   PANEL = nil
-  smelt.metrics.perf_set_enabled(false)
-  smelt.metrics.perf_clear()
+  smelt.metrics.perf.set_enabled(false)
+  smelt.metrics.perf.clear()
 end
 
 local function toggle()

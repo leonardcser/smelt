@@ -1,6 +1,8 @@
 //! Lua runtime types for `smelt-core`.
 
 pub mod api;
+pub mod doc;
+pub mod lua_type;
 pub mod runtime;
 mod shared;
 mod task;

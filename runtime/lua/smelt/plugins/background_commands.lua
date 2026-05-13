@@ -164,7 +164,7 @@ end
 smelt.cmd.register("ps", function()
   local procs = smelt.process.list()
   if #procs == 0 then
-    smelt.notify_error("no background processes")
+    smelt.ui.notify_error("no background processes")
     return
   end
 

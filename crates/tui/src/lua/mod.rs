@@ -229,23 +229,6 @@ fn tokenize_chord_spec(input: &str) -> Option<Vec<String>> {
     }
 }
 
-/// Parse a Lua-facing window-event name into a [`crate::smelt_term::WinEvent`].
-/// Returns `None` for unknown names.
-pub(crate) fn parse_win_event(name: &str) -> Option<crate::smelt_term::WinEvent> {
-    Some(match name {
-        "open" => crate::smelt_term::WinEvent::Open,
-        "close" => crate::smelt_term::WinEvent::Close,
-        "focus" | "focus_gained" => crate::smelt_term::WinEvent::FocusGained,
-        "blur" | "focus_lost" => crate::smelt_term::WinEvent::FocusLost,
-        "selection_changed" | "select_changed" => crate::smelt_term::WinEvent::SelectionChanged,
-        "submit" => crate::smelt_term::WinEvent::Submit,
-        "text_changed" | "change" => crate::smelt_term::WinEvent::TextChanged,
-        "dismiss" | "cancel" => crate::smelt_term::WinEvent::Dismiss,
-        "tick" => crate::smelt_term::WinEvent::Tick,
-        _ => return None,
-    })
-}
-
 /// Stash a Lua callable in `shared.callbacks` under a fresh u64 id.
 /// Used by every `smelt.win.*` binding that takes a callback.
 pub(crate) fn register_callback_handle(
@@ -344,8 +327,22 @@ impl LuaRuntime {
                 core.load_error = Some(e.to_string());
             }
         }
+        if core.load_error.is_none() {
+            if let Err(e) = smelt_core::lua::runtime::load_bootstrap_chunks(&core.lua) {
+                core.load_error = Some(e.to_string());
+            }
+        }
 
         Self { core, shared }
+    }
+
+    /// Register the full API surface (host + UiHost) without loading
+    /// bootstrap chunks or spinning up the full runtime state.
+    /// Used by `gen-lua-docs` to harvest the doc registry.
+    pub fn register_for_docs() -> mlua::Result<()> {
+        let shared = Arc::new(LuaShared::default());
+        let core = smelt_core::lua::LuaRuntime::with_shared(shared.core_arc());
+        Self::register_api(&core.lua, &shared)
     }
 
     /// Borrow the shared state (e.g. to clone the `Arc` into tokio tasks).
@@ -497,15 +494,15 @@ mod tests {
     use super::*;
     use smelt_core::lua::api::lua_table_to_json;
 
-    /// Stub `smelt.notify` / `smelt.notify_error` to push into `_G.test_log` / `_G.test_err`.
+    /// Stub `smelt.ui.notify` / `smelt.ui.notify_error` to push into `_G.test_log` / `_G.test_err`.
     fn install_test_notify(rt: &LuaRuntime) {
         rt.lua
             .load(
                 r#"
                     _G.test_log = {}
                     _G.test_err = {}
-                    smelt.notify = function(msg) table.insert(_G.test_log, msg) end
-                    smelt.notify_error = function(msg) table.insert(_G.test_err, msg) end
+                    smelt.ui.notify = function(msg) table.insert(_G.test_log, msg) end
+                    smelt.ui.notify_error = function(msg) table.insert(_G.test_err, msg) end
                 "#,
             )
             .exec()
@@ -642,35 +639,6 @@ mod tests {
         );
         let fired: u64 = rt.lua.load("return _G.fired").eval().unwrap();
         assert_eq!(fired, 0);
-    }
-
-    #[test]
-    fn parse_win_event_covers_common_names() {
-        assert!(matches!(
-            parse_win_event("submit"),
-            Some(crate::smelt_term::WinEvent::Submit)
-        ));
-        assert!(matches!(
-            parse_win_event("text_changed"),
-            Some(crate::smelt_term::WinEvent::TextChanged)
-        ));
-        assert!(matches!(
-            parse_win_event("change"),
-            Some(crate::smelt_term::WinEvent::TextChanged)
-        ));
-        assert!(matches!(
-            parse_win_event("dismiss"),
-            Some(crate::smelt_term::WinEvent::Dismiss)
-        ));
-        assert!(matches!(
-            parse_win_event("tick"),
-            Some(crate::smelt_term::WinEvent::Tick)
-        ));
-        assert!(matches!(
-            parse_win_event("focus"),
-            Some(crate::smelt_term::WinEvent::FocusGained)
-        ));
-        assert!(parse_win_event("bogus").is_none());
     }
 
     // Theme role-mapping and error logic are tested in `lua::api::tests`.
@@ -865,7 +833,7 @@ mod tests {
         let rt = LuaRuntime::new();
         install_test_notify(&rt);
         rt.lua
-            .load("smelt.notify('hello from lua')")
+            .load("smelt.ui.notify('hello from lua')")
             .exec()
             .expect("exec");
         let msgs = drain_notifications(&rt);
@@ -890,7 +858,7 @@ mod tests {
             .load(
                 r#"
                     smelt.cmd.register("hello", function()
-                        smelt.notify("hello world")
+                        smelt.ui.notify("hello world")
                     end)
                 "#,
             )
@@ -910,7 +878,7 @@ mod tests {
             .load(
                 r#"
                     smelt.keymap.set("n", "<C-g>", function()
-                        smelt.notify("ctrl-g")
+                        smelt.ui.notify("ctrl-g")
                     end)
                 "#,
             )
@@ -940,7 +908,7 @@ mod tests {
             .load(
                 r#"
                     smelt.keymap.set("", "<C-h>", function()
-                        smelt.notify("any-mode")
+                        smelt.ui.notify("any-mode")
                     end)
                 "#,
             )
@@ -1095,7 +1063,7 @@ mod tests {
                 r#"
                     for _, mode in ipairs({ "normal", "insert", "visual" }) do
                         smelt.keymap.set(mode, "c-r", function()
-                            smelt.notify("history: " .. mode)
+                            smelt.ui.notify("history: " .. mode)
                         end)
                     end
                 "#,
@@ -1127,8 +1095,8 @@ mod tests {
         rt.lua
             .load(
                 r#"
-                    smelt.keymap.set("", "<Esc><Esc>", function() smelt.notify("esc-esc") end)
-                    smelt.keymap.set("n", "gd", function() smelt.notify("go-def") end)
+                    smelt.keymap.set("", "<Esc><Esc>", function() smelt.ui.notify("esc-esc") end)
+                    smelt.keymap.set("n", "gd", function() smelt.ui.notify("go-def") end)
                 "#,
             )
             .exec()
@@ -1184,7 +1152,7 @@ mod tests {
             .load(
                 r#"
                     smelt.keymap.set("", "<Esc><Esc>", function(ctx)
-                        smelt.notify("mode=" .. tostring(ctx.vim_mode_at_chord_start))
+                        smelt.ui.notify("mode=" .. tostring(ctx.vim_mode_at_chord_start))
                     end)
                 "#,
             )

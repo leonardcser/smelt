@@ -2,65 +2,131 @@
 //! rules, sync a Lua-built ruleset back through the App. Sits over
 //! `RuntimeApprovals` + [`crate::permissions::store`].
 
+use lua_doc_derive::{lua_module, LuaOpts};
 use mlua::prelude::*;
+use smelt_core::lua::doc::{record_module_doc, register_ui_fn};
 use std::sync::Arc;
 
-fn parse_ruleset(_lua: &Lua, t: &mlua::Table) -> LuaResult<crate::permissions::rules::RawRuleSet> {
-    let mut allow = Vec::new();
-    let mut ask = Vec::new();
-    let mut deny = Vec::new();
-    if let Ok(arr) = t.get::<mlua::Table>("allow") {
-        for v in arr.sequence_values::<String>().flatten() {
-            allow.push(v);
-        }
-    }
-    if let Ok(arr) = t.get::<mlua::Table>("ask") {
-        for v in arr.sequence_values::<String>().flatten() {
-            ask.push(v);
-        }
-    }
-    if let Ok(arr) = t.get::<mlua::Table>("deny") {
-        for v in arr.sequence_values::<String>().flatten() {
-            deny.push(v);
-        }
-    }
-    Ok(crate::permissions::rules::RawRuleSet { allow, ask, deny })
+/// A single session permission entry (one approved tool/pattern pair).
+#[derive(Debug, LuaOpts)]
+#[lua(name = "smelt.permissions.SessionEntry")]
+pub struct LuaPermissionSessionEntry {
+    /// Tool name the rule applies to (e.g. `"shell"`).
+    pub tool: String,
+    /// Pattern matched against the tool's argument bucket.
+    pub pattern: String,
 }
 
-fn parse_mode_perms(
-    lua: &Lua,
-    t: &mlua::Table,
-) -> LuaResult<crate::permissions::rules::RawModePerms> {
-    let tools = t
-        .get::<Option<mlua::Table>>("tools")
-        .ok()
-        .flatten()
-        .map(|tbl| parse_ruleset(lua, &tbl))
-        .transpose()?
-        .unwrap_or_default();
-    // Every key besides `tools` is a per-tool subpattern bucket.
-    let mut subcommands = std::collections::HashMap::new();
-    for pair in t.clone().pairs::<String, mlua::Value>() {
-        let (key, value) = pair?;
-        if key == "tools" {
-            continue;
-        }
-        if let mlua::Value::Table(tbl) = value {
-            subcommands.insert(key, parse_ruleset(lua, &tbl)?);
-        }
-    }
-    Ok(crate::permissions::rules::RawModePerms { tools, subcommands })
+/// A workspace permission rule (one tool with N patterns, persisted to disk).
+#[derive(Debug, LuaOpts)]
+#[lua(name = "smelt.permissions.WorkspaceRule")]
+pub struct LuaPermissionWorkspaceRule {
+    /// Tool name the rule applies to.
+    pub tool: String,
+    /// Patterns granted for this tool.
+    pub patterns: Vec<String>,
 }
 
+/// Spec for `smelt.permissions.sync`.
+#[derive(Default, Debug, LuaOpts)]
+#[lua(name = "smelt.permissions.SyncSpec")]
+pub struct LuaPermissionSyncSpec {
+    /// Session entries; applied for this run only.
+    #[lua(default)]
+    pub session: Vec<LuaPermissionSessionEntry>,
+    /// Workspace rules; persisted to disk under the current cwd.
+    #[lua(default)]
+    pub workspace: Vec<LuaPermissionWorkspaceRule>,
+}
+
+/// `allow`/`ask`/`deny` pattern arrays accepted by every permission slot.
+#[derive(Default, Debug, LuaOpts)]
+#[lua(name = "smelt.permissions.RuleSet")]
+pub struct LuaRuleSet {
+    /// Patterns that auto-allow without prompting.
+    #[lua(default)]
+    pub allow: Vec<String>,
+    /// Patterns that always prompt.
+    #[lua(default)]
+    pub ask: Vec<String>,
+    /// Patterns that auto-deny.
+    #[lua(default)]
+    pub deny: Vec<String>,
+}
+
+impl From<LuaRuleSet> for crate::permissions::rules::RawRuleSet {
+    fn from(r: LuaRuleSet) -> Self {
+        Self {
+            allow: r.allow,
+            ask: r.ask,
+            deny: r.deny,
+        }
+    }
+}
+
+/// Permission slots that apply within a single agent mode. The fixed
+/// `tools` key controls the tool itself; any additional key is treated
+/// as a subcommand bucket and routed through that tool's subpattern
+/// parser (e.g. `bash = { allow = { "git status" } }`).
+#[derive(Default, Debug, LuaOpts)]
+#[lua(name = "smelt.permissions.ModePerms")]
+pub struct LuaModePerms {
+    /// Per-tool `allow`/`ask`/`deny` patterns.
+    pub tools: Option<LuaRuleSet>,
+    /// Subcommand patterns keyed by tool name (`"bash"`, `"edit"`, …).
+    #[lua(rest)]
+    pub subcommands: std::collections::HashMap<String, LuaRuleSet>,
+}
+
+impl From<LuaModePerms> for crate::permissions::rules::RawModePerms {
+    fn from(m: LuaModePerms) -> Self {
+        Self {
+            tools: m.tools.map(Into::into).unwrap_or_default(),
+            subcommands: m
+                .subcommands
+                .into_iter()
+                .map(|(k, v)| (k, v.into()))
+                .collect(),
+        }
+    }
+}
+
+/// Spec for `smelt.permissions.set_rules`. Each mode falls back to
+/// `default` (and then to host-level rules) when its slot is `nil`.
+#[derive(Default, Debug, LuaOpts)]
+#[lua(name = "smelt.permissions.RulesSpec")]
+pub struct LuaPermissionRulesSpec {
+    /// Baseline rules applied unless a mode-specific slot overrides.
+    pub default: Option<LuaModePerms>,
+    /// Rules active while the agent is in normal mode.
+    pub normal: Option<LuaModePerms>,
+    /// Rules active while the agent is in plan mode.
+    pub plan: Option<LuaModePerms>,
+    /// Rules active while the agent is in apply mode.
+    pub apply: Option<LuaModePerms>,
+    /// Rules active while the agent is in yolo mode.
+    pub yolo: Option<LuaModePerms>,
+}
+
+#[lua_module]
 pub(super) fn register(
     lua: &Lua,
     smelt: &mlua::Table,
     shared: &Arc<crate::lua::LuaShared>,
 ) -> LuaResult<()> {
     let permissions_tbl = lua.create_table()?;
-    permissions_tbl.set(
+    record_module_doc(
+        "smelt.permissions",
+        "List session/workspace rules and sync a Lua-built ruleset back through the App. UiHost-only.",
+    );
+    register_ui_fn(
+        &permissions_tbl,
+        "smelt.permissions",
         "list",
-        lua.create_function(|lua, ()| {
+        "Return current permission rules as `{ session = { { tool, pattern } }, workspace = { { tool, patterns } } }`. Session entries come from runtime approvals; workspace entries come from the on-disk store rooted at the current cwd.",
+        &[],
+        lua,
+        |lua, ()|  -> LuaResult<mlua::Table>{
             let (session_entries, cwd) = crate::lua::try_with_app(|app| {
                 let entries = app
                     .session_permission_entries()
@@ -95,82 +161,52 @@ pub(super) fn register(
             }
             out.set("workspace", workspace_arr)?;
             Ok(out)
-        })?,
+        },
     )?;
-    permissions_tbl.set(
+    register_ui_fn(
+        &permissions_tbl,
+        "smelt.permissions",
         "sync",
-        lua.create_function(|_, spec: mlua::Table| {
-            let mut session_entries: Vec<smelt_core::PermissionEntry> = Vec::new();
-            if let Ok(arr) = spec.get::<mlua::Table>("session") {
-                for row in arr.sequence_values::<mlua::Table>().flatten() {
-                    let tool: String = row.get("tool").unwrap_or_default();
-                    let pattern: String = row.get("pattern").unwrap_or_default();
-                    session_entries.push(smelt_core::PermissionEntry { tool, pattern });
-                }
-            }
-            let mut workspace_rules: Vec<crate::permissions::store::Rule> = Vec::new();
-            if let Ok(arr) = spec.get::<mlua::Table>("workspace") {
-                for row in arr.sequence_values::<mlua::Table>().flatten() {
-                    let tool: String = row.get("tool").unwrap_or_default();
-                    let mut patterns: Vec<String> = Vec::new();
-                    if let Ok(pats) = row.get::<mlua::Table>("patterns") {
-                        for p in pats.sequence_values::<String>().flatten() {
-                            patterns.push(p);
-                        }
-                    }
-                    workspace_rules.push(crate::permissions::store::Rule { tool, patterns });
-                }
-            }
+        "Replace runtime + workspace permission entries with `spec.session` and `spec.workspace`. Persists workspace rules to disk; session rules apply for this run only.",
+        &["spec"],
+        lua,
+        |_, spec: LuaPermissionSyncSpec| -> LuaResult<()> {
+            let session_entries: Vec<smelt_core::PermissionEntry> = spec
+                .session
+                .into_iter()
+                .map(|e| smelt_core::PermissionEntry {
+                    tool: e.tool,
+                    pattern: e.pattern,
+                })
+                .collect();
+            let workspace_rules: Vec<crate::permissions::store::Rule> = spec
+                .workspace
+                .into_iter()
+                .map(|r| crate::permissions::store::Rule {
+                    tool: r.tool,
+                    patterns: r.patterns,
+                })
+                .collect();
             crate::lua::with_app(|app| app.sync_permissions(session_entries, workspace_rules));
             Ok(())
-        })?,
+        },
     )?;
-    permissions_tbl.set(
-        "set_rules",
-        lua.create_function({
-            let shared = Arc::clone(shared);
-            move |lua, spec: mlua::Table| {
-                let default = spec
-                    .get::<Option<mlua::Table>>("default")
-                    .ok()
-                    .flatten()
-                    .map(|t| parse_mode_perms(lua, &t))
-                    .transpose()?
-                    .unwrap_or_default();
-                let normal = spec
-                    .get::<Option<mlua::Table>>("normal")
-                    .ok()
-                    .flatten()
-                    .map(|t| parse_mode_perms(lua, &t))
-                    .transpose()?
-                    .unwrap_or_default();
-                let plan = spec
-                    .get::<Option<mlua::Table>>("plan")
-                    .ok()
-                    .flatten()
-                    .map(|t| parse_mode_perms(lua, &t))
-                    .transpose()?
-                    .unwrap_or_default();
-                let apply = spec
-                    .get::<Option<mlua::Table>>("apply")
-                    .ok()
-                    .flatten()
-                    .map(|t| parse_mode_perms(lua, &t))
-                    .transpose()?
-                    .unwrap_or_default();
-                let yolo = spec
-                    .get::<Option<mlua::Table>>("yolo")
-                    .ok()
-                    .flatten()
-                    .map(|t| parse_mode_perms(lua, &t))
-                    .transpose()?
-                    .unwrap_or_default();
+    {
+        let shared = Arc::clone(shared);
+        register_ui_fn(
+            &permissions_tbl,
+            "smelt.permissions",
+            "set_rules",
+            "Install the per-mode permission ruleset. See [`smelt.permissions.RulesSpec`](types.md#smeltpermissionsrulesspec).",
+            &["spec"],
+            lua,
+            move |_, spec: LuaPermissionRulesSpec| -> LuaResult<()> {
                 let rules = crate::permissions::rules::RawPerms {
-                    default,
-                    normal,
-                    plan,
-                    apply,
-                    yolo,
+                    default: spec.default.map(Into::into).unwrap_or_default(),
+                    normal: spec.normal.map(Into::into).unwrap_or_default(),
+                    plan: spec.plan.map(Into::into).unwrap_or_default(),
+                    apply: spec.apply.map(Into::into).unwrap_or_default(),
+                    yolo: spec.yolo.map(Into::into).unwrap_or_default(),
                 };
                 let mut guard = shared
                     .permission_rules
@@ -178,30 +214,40 @@ pub(super) fn register(
                     .unwrap_or_else(|e| e.into_inner());
                 *guard = Some(rules);
                 Ok(())
-            }
-        })?,
-    )?;
+            },
+        )?;
+    }
     // Decision primitives for tool `decide` callbacks. Returns "allow"/"ask"/"deny".
-    permissions_tbl.set(
+    register_ui_fn(
+        &permissions_tbl,
+        "smelt.permissions",
         "check_tool",
-        lua.create_function(|_, (mode_str, name): (String, String)| {
+        "Decision primitives for tool `decide` callbacks. Returns \"allow\"/\"ask\"/\"deny\".",
+        &["mode_str", "name"],
+        lua,
+        |_, (mode_str, name): (String, String)| -> LuaResult<String> {
             Ok(crate::lua::try_with_app(|app| {
                 let mode = parse_mode(&mode_str);
                 decision_label(app.core.permissions.check_tool(mode, &name)).to_string()
             })
             .unwrap_or_else(|| "ask".to_string()))
-        })?,
+        },
     )?;
-    permissions_tbl.set(
+    register_ui_fn(
+        &permissions_tbl,
+        "smelt.permissions",
         "check",
-        lua.create_function(|_, (mode_str, bucket, value): (String, String, String)| {
+        "Decide a subcommand bucket (e.g. `(\"normal\", \"shell\", \"git status\")`) against the current ruleset. Returns `\"allow\"`, `\"ask\"`, or `\"deny\"`; defaults to `\"ask\"` when no app context is available.",
+        &["mode_str", "bucket", "value"],
+        lua,
+        |_, (mode_str, bucket, value): (String, String, String)|  -> LuaResult<String>{
             Ok(crate::lua::try_with_app(|app| {
                 let mode = parse_mode(&mode_str);
                 decision_label(app.core.permissions.check_subcommand(mode, &bucket, &value))
                     .to_string()
             })
             .unwrap_or_else(|| "ask".to_string()))
-        })?,
+        },
     )?;
 
     smelt.set("permissions", permissions_tbl)?;

@@ -1,56 +1,85 @@
 //! `smelt.timer` + `smelt.defer` — one-shot and recurring timer callbacks.
 
+use crate::lua::doc::{record_module_doc, register_fn};
+use crate::lua::lua_type::LuaCallback;
 use crate::lua::LuaHandle;
+use lua_doc_derive::lua_module;
 use mlua::prelude::*;
 use std::time::Duration;
 
+type TimerHandler = LuaCallback<(), ()>;
+
+#[lua_module]
 pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
     let timer_tbl = lua.create_table()?;
-    timer_tbl.set(
+    record_module_doc(
+        "smelt.timer",
+        "One-shot and recurring timer callbacks. `defer` is a fire-and-forget alias of `timer.set`.",
+    );
+
+    register_fn(
+        &timer_tbl,
+        "smelt.timer",
         "set",
-        lua.create_function(|lua, (ms, handler): (u64, mlua::Function)| {
-            let key = lua.create_registry_value(handler)?;
+        "Schedule `handler` to run once after `ms` milliseconds. Returns the timer id, or `0` if no host is installed.",
+        &["ms", "handler"],
+        lua,
+        |lua, (ms, handler): (u64, TimerHandler)| -> LuaResult<u64> {
+            let key = lua.create_registry_value(handler.into_inner())?;
             Ok(crate::host::try_with_core(|core| {
                 core.timers
                     .set(Duration::from_millis(ms), LuaHandle { key })
             })
             .unwrap_or(0))
-        })?,
+        },
     )?;
-    timer_tbl.set(
+    register_fn(
+        &timer_tbl,
+        "smelt.timer",
         "every",
-        lua.create_function(|lua, (ms, handler): (u64, mlua::Function)| {
+        "Schedule `handler` to fire repeatedly every `ms` milliseconds. Returns the timer id; raises if `ms` is `0`.",
+        &["ms", "handler"],
+        lua,
+        |lua, (ms, handler): (u64, TimerHandler)| -> LuaResult<u64> {
             if ms == 0 {
                 return Err(LuaError::RuntimeError(
                     "smelt.timer.every: period must be > 0".into(),
                 ));
             }
-            let key = lua.create_registry_value(handler)?;
+            let key = lua.create_registry_value(handler.into_inner())?;
             Ok(crate::host::try_with_core(|core| {
                 core.timers
                     .every(Duration::from_millis(ms), LuaHandle { key })
             })
             .unwrap_or(0))
-        })?,
+        },
     )?;
-    timer_tbl.set(
+    register_fn(
+        &timer_tbl,
+        "smelt.timer",
         "cancel",
-        lua.create_function(|_, id: u64| {
-            Ok(crate::host::try_with_core(|core| core.timers.cancel(id)).unwrap_or(false))
-        })?,
+        "Cancel a previously scheduled timer by `id`. Returns `true` if a timer was cancelled, `false` if none matched or no host is installed.",
+        &["id"],
+        lua,
+        |_, id: u64| Ok(crate::host::try_with_core(|core| core.timers.cancel(id)).unwrap_or(false)),
     )?;
     smelt.set("timer", timer_tbl)?;
 
-    smelt.set(
+    register_fn(
+        smelt,
+        "smelt.timer",
         "defer",
-        lua.create_function(|lua, (ms, handler): (u64, mlua::Function)| {
-            let key = lua.create_registry_value(handler)?;
+        "Schedule `handler` to run once after `ms` milliseconds. Fire-and-forget alias of `timer.set` that does not return an id.",
+        &["ms", "handler"],
+        lua,
+        |lua, (ms, handler): (u64, TimerHandler)|  -> LuaResult<()>{
+            let key = lua.create_registry_value(handler.into_inner())?;
             crate::host::try_with_core(|core| {
                 core.timers
                     .set(Duration::from_millis(ms), LuaHandle { key })
             });
             Ok(())
-        })?,
+        },
     )?;
     Ok(())
 }

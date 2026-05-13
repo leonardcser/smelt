@@ -6,7 +6,9 @@ The config lives at `~/.config/smelt/init.lua` (respects `$XDG_CONFIG_HOME`).
 Load a different file with `--config <path>`.
 
 The [Getting Started](getting-started.md) guide covers basic provider setup. See
-the [Configuration Reference](../reference/configuration.md) for every option.
+the [Configuration Reference](../reference/configuration.md) for every option,
+and the [Plugin Authoring](plugins.md) guide for writing larger extensions
+against the `smelt` Lua API.
 
 ## Runtime Settings
 

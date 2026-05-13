@@ -5,13 +5,26 @@
 use crate::content::highlight::print_inline_diff;
 use crate::content::to_buffer::render_into_buffer;
 use crate::smelt_term::BufId;
+use lua_doc_derive::lua_module;
 use mlua::prelude::*;
+use smelt_core::lua::doc::{record_module_doc, register_ui_fn};
 
+#[lua_module]
 pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
     let diff = lua.create_table()?;
-    diff.set(
+    record_module_doc(
+        "smelt.diff",
+        "Paint an inline diff into a Buffer. UiHost-only.",
+    );
+
+    register_ui_fn(
+        &diff,
+        "smelt.diff",
         "render",
-        lua.create_function(|_, (buf_id, opts): (u64, mlua::Table)| {
+        "Paint an inline diff between `opts.old` and `opts.new` into the buffer, syntax-highlighted by `opts.path`'s extension. Mirrors the pipeline used by the built-in confirm dialog.",
+        &["buf_id", "opts"],
+        lua,
+        |_, (buf_id, opts): (u64, mlua::Table)|  -> LuaResult<()>{
             let old: String = opts.get::<Option<String>>("old")?.unwrap_or_default();
             let new: String = opts.get::<Option<String>>("new")?.unwrap_or_default();
             let path: String = opts.get::<Option<String>>("path")?.unwrap_or_default();
@@ -25,7 +38,7 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
                 }
             });
             Ok(())
-        })?,
+        },
     )?;
     smelt.set("diff", diff)?;
     Ok(())

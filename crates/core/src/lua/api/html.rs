@@ -3,30 +3,55 @@
 use mlua::prelude::*;
 
 use crate::html;
+use crate::lua::doc::{record_module_doc, register_fn};
+use lua_doc_derive::lua_module;
 
+#[lua_module]
 pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
     let html_tbl = lua.create_table()?;
+    record_module_doc(
+        "smelt.html",
+        "HTML parsing: title extraction, link scraping, to_text, to_markdown, DDG results.",
+    );
 
-    html_tbl.set(
+    register_fn(
+        &html_tbl,
+        "smelt.html",
         "title",
-        lua.create_function(|_, source: String| Ok(html::title(&source)))?,
+        "Return the `<title>` text of `source`, or `nil` if no title element is present.",
+        &["source"],
+        lua,
+        |_, source: String| Ok(html::title(&source)),
     )?;
 
-    html_tbl.set(
+    register_fn(
+        &html_tbl,
+        "smelt.html",
         "links",
-        lua.create_function(|_, (source, base): (String, Option<String>)| {
-            Ok(html::links(&source, base.as_deref()))
-        })?,
+        "Extract all anchor `href` links from `source`. When `base` is supplied, relative URLs are resolved against it.",
+        &["source", "base"],
+        lua,
+        |_, (source, base): (String, Option<String>)| Ok(html::links(&source, base.as_deref())),
     )?;
 
-    html_tbl.set(
+    register_fn(
+        &html_tbl,
+        "smelt.html",
         "to_text",
-        lua.create_function(|_, source: String| Ok(html::to_text(&source)))?,
+        "Strip HTML tags from `source` and return the visible text content.",
+        &["source"],
+        lua,
+        |_, source: String| Ok(html::to_text(&source)),
     )?;
 
-    html_tbl.set(
+    register_fn(
+        &html_tbl,
+        "smelt.html",
         "to_markdown",
-        lua.create_function(|lua, (source, base): (String, Option<String>)| {
+        "Convert `source` HTML to a `{ title, content, links }` table where `content` is markdown. Relative links resolve against `base` when supplied.",
+        &["source", "base"],
+        lua,
+        |lua, (source, base): (String, Option<String>)|  -> LuaResult<mlua::Table>{
             let md = html::to_markdown(&source, base.as_deref());
             let out = lua.create_table()?;
             out.set("title", md.title)?;
@@ -37,12 +62,17 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
             }
             out.set("links", links)?;
             Ok(out)
-        })?,
+        },
     )?;
 
-    html_tbl.set(
+    register_fn(
+        &html_tbl,
+        "smelt.html",
         "parse_ddg_results",
-        lua.create_function(|lua, source: String| {
+        "Parse a DuckDuckGo HTML results page into rows of `{ title, link, description }`.",
+        &["source"],
+        lua,
+        |lua, source: String| -> LuaResult<mlua::Table> {
             let results = html::parse_ddg_results(&source);
             let out = lua.create_table()?;
             for (i, r) in results.into_iter().enumerate() {
@@ -53,7 +83,7 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
                 out.set(i + 1, row)?;
             }
             Ok(out)
-        })?,
+        },
     )?;
 
     smelt.set("html", html_tbl)?;

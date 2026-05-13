@@ -9,13 +9,26 @@
 use crate::content::highlight::BashHighlighter;
 use crate::content::to_buffer::render_into_buffer;
 use crate::smelt_term::BufId;
+use lua_doc_derive::lua_module;
 use mlua::prelude::*;
+use smelt_core::lua::doc::{record_module_doc, register_ui_fn};
 
+#[lua_module]
 pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
     let bash = lua.create_table()?;
-    bash.set(
+    record_module_doc(
+        "smelt.bash",
+        "Paint bash syntax highlighting into a Buffer. UiHost-only.",
+    );
+
+    register_ui_fn(
+        &bash,
+        "smelt.bash",
         "render",
-        lua.create_function(|_, (buf_id, command): (u64, String)| {
+        "Paint syntax-highlighted bash into the buffer, one source line per row with a single-space leading gutter. Used to render multi-line shell commands inside tool output.",
+        &["buf_id", "command"],
+        lua,
+        |_, (buf_id, command): (u64, String)|  -> LuaResult<()>{
             crate::lua::with_app(|app| {
                 let theme_snap = app.ui.theme().clone();
                 let width = crate::content::term_width() as u16;
@@ -31,11 +44,16 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
                 }
             });
             Ok(())
-        })?,
+        },
     )?;
-    bash.set(
+    register_ui_fn(
+        &bash,
+        "smelt.bash",
         "render_line",
-        lua.create_function(|_, (buf_id, line): (u64, String)| {
+        "Paint one bash line into row 0 of the buffer with no leading gutter. Used by tool `render_summary` callbacks where the host supplies a scratch buffer per wrapped summary line.",
+        &["buf_id", "line"],
+        lua,
+        |_, (buf_id, line): (u64, String)|  -> LuaResult<()>{
             crate::lua::with_app(|app| {
                 let theme_snap = app.ui.theme().clone();
                 let width = crate::content::term_width() as u16;
@@ -48,7 +66,7 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
                 }
             });
             Ok(())
-        })?,
+        },
     )?;
     smelt.set("bash", bash)?;
     Ok(())

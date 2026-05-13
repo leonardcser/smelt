@@ -102,7 +102,7 @@ smelt.cmd.register("resume", function()
   smelt.spawn(function()
     local entries = smelt.session.list()
     if #entries == 0 then
-      smelt.notify_error("no saved sessions")
+      smelt.ui.notify_error("no saved sessions")
       return
     end
 

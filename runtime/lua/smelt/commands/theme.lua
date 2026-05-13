@@ -19,7 +19,7 @@ smelt.cmd.picker("theme", {
         return
       end
     end
-    smelt.notify_error("unknown theme: " .. arg)
+    smelt.ui.notify_error("unknown theme: " .. arg)
   end,
   prepare    = function() original_ansi = (smelt.theme.get("accent") or {}).ansi end,
   on_select  = function(item) if item.ansi_color then smelt.theme.set("accent", { ansi = item.ansi_color }) end end,

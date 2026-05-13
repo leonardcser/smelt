@@ -2,9 +2,12 @@
 //! shared spinner glyph + cadence, picker overlay (set_items /
 //! set_selected / _open), and generic overlay composition. UiHost-only.
 
+use lua_doc_derive::lua_module;
 use mlua::prelude::*;
+use smelt_core::lua::doc::{record_module_doc, register_ui_fn};
 
 pub(super) fn register(lua: &Lua, smelt_ui: &mlua::Table) -> LuaResult<()> {
+    record_module_doc("smelt.ui", "Overlay primitives — ghost text, spinner, picker, and generic overlay composition. UiHost-only.");
     register_ghost_text(lua, smelt_ui)?;
     register_spinner(lua, smelt_ui)?;
     register_picker(lua, smelt_ui)?;
@@ -12,64 +15,110 @@ pub(super) fn register(lua: &Lua, smelt_ui: &mlua::Table) -> LuaResult<()> {
     Ok(())
 }
 
+#[lua_module]
 fn register_ghost_text(lua: &Lua, smelt_ui: &mlua::Table) -> LuaResult<()> {
     let ghost_text_tbl = lua.create_table()?;
-    ghost_text_tbl.set(
+    register_ui_fn(
+        &ghost_text_tbl,
+        "smelt.ui",
         "set",
-        lua.create_function(|_, text: String| {
+        "Set the prompt's ghost text (the dim suggestion shown after the cursor). Replaces any existing ghost completion.",
+        &["text"],
+        lua,
+        |_, text: String|  -> LuaResult<()>{
             crate::lua::with_app(|app| app.set_prompt_completer(text));
             Ok(())
-        })?,
+        },
     )?;
-    ghost_text_tbl.set(
+    register_ui_fn(
+        &ghost_text_tbl,
+        "smelt.ui",
         "clear",
-        lua.create_function(|_, ()| {
+        "Clear the prompt's ghost text. Idempotent.",
+        &[],
+        lua,
+        |_, ()| -> LuaResult<()> {
             crate::lua::with_app(|app| app.clear_prompt_completer());
             Ok(())
-        })?,
+        },
     )?;
     smelt_ui.set("ghost_text", ghost_text_tbl)?;
     Ok(())
 }
 
+#[lua_module]
 fn register_spinner(lua: &Lua, smelt_ui: &mlua::Table) -> LuaResult<()> {
     // Same glyph and cadence as the status bar's "working" pill for in-sync animation.
     let spinner_tbl = lua.create_table()?;
-    spinner_tbl.set(
+    record_module_doc(
+        "smelt.ui.spinner",
+        "Shared spinner glyph and cadence for plugin animations. UiHost-only.",
+    );
+    register_ui_fn(
+        &spinner_tbl,
+        "smelt.ui.spinner",
         "glyph",
-        lua.create_function(|_, ()| Ok(smelt_core::content::spinner_glyph()))?,
+        "Return the current spinner glyph (single grapheme). Stays in sync with the status bar's working pill so plugin spinners animate together.",
+        &[],
+        lua,
+        |_, ()| Ok(smelt_core::content::spinner_glyph()),
     )?;
-    spinner_tbl.set(
+    register_ui_fn(
+        &spinner_tbl,
+        "smelt.ui.spinner",
         "period_ms",
-        lua.create_function(|_, ()| Ok(smelt_core::content::SPINNER_FRAME_MS))?,
+        "Return the spinner frame period in milliseconds. Use as the redraw interval to match the built-in cadence.",
+        &[],
+        lua,
+        |_, ()| Ok(smelt_core::content::SPINNER_FRAME_MS),
     )?;
     smelt_ui.set("spinner", spinner_tbl)?;
     Ok(())
 }
 
+#[lua_module]
 fn register_picker(lua: &Lua, smelt_ui: &mlua::Table) -> LuaResult<()> {
     let picker_tbl = lua.create_table()?;
-    picker_tbl.set(
+    record_module_doc(
+        "smelt.ui.picker",
+        "Picker overlay: open, set_items, set_selected. UiHost-only.",
+    );
+    register_ui_fn(
+        &picker_tbl,
+        "smelt.ui",
         "set_selected",
-        lua.create_function(|_, (win_id, idx): (u64, i64)| {
+        "Move the picker `win_id`'s selection to row `idx` (0-based, clamped at 0). No-op for non-picker windows.",
+        &["win_id", "idx"],
+        lua,
+        |_, (win_id, idx): (u64, i64)|  -> LuaResult<()>{
             let index = if idx < 0 { 0 } else { idx as usize };
             crate::lua::with_app(|app| {
                 crate::picker::set_selected(app, crate::smelt_term::WinId(win_id), index);
             });
             Ok(())
-        })?,
+        },
     )?;
-    picker_tbl.set(
+    register_ui_fn(
+        &picker_tbl,
+        "smelt.ui.picker",
         "_open",
-        lua.create_function(|_, opts: mlua::Table| -> LuaResult<u64> {
+        "Open a picker overlay configured by `opts` (`title`, `items`, `on_select`, ...). Returns the picker's `WinId` so callers can mutate items later via `set_items`/`set_selected`.",
+        &["opts"],
+        lua,
+        |_, opts: mlua::Table| -> LuaResult<u64> {
             let win_id = crate::lua::with_app(|app| crate::lua::ui_ops::open_picker(app, opts))
                 .map_err(|e| LuaError::RuntimeError(format!("picker.open: {e}")))?;
             Ok(win_id.0)
-        })?,
+        },
     )?;
-    picker_tbl.set(
+    register_ui_fn(
+        &picker_tbl,
+        "smelt.ui",
         "set_items",
-        lua.create_function(|_, (win_id, items_tbl): (u64, mlua::Table)| {
+        "Replace the picker `win_id`'s items. Each entry can be a string or a `{ label, detail?, value?, ... }` table; selection resets to row 0.",
+        &["win_id", "items_tbl"],
+        lua,
+        |_, (win_id, items_tbl): (u64, mlua::Table)|  -> LuaResult<()>{
             let mut items = Vec::new();
             for pair in items_tbl.sequence_values::<mlua::Value>() {
                 let v = pair?;
@@ -81,21 +130,31 @@ fn register_picker(lua: &Lua, smelt_ui: &mlua::Table) -> LuaResult<()> {
                 crate::picker::set_items(app, crate::smelt_term::WinId(win_id), items, 0);
             });
             Ok(())
-        })?,
+        },
     )?;
     smelt_ui.set("picker", picker_tbl)?;
     Ok(())
 }
 
+#[lua_module]
 fn register_overlay(lua: &Lua, smelt_ui: &mlua::Table) -> LuaResult<()> {
     let overlay_tbl = lua.create_table()?;
-    overlay_tbl.set(
+    record_module_doc(
+        "smelt.ui.overlay",
+        "Generic overlay composition from items and paint regions. UiHost-only.",
+    );
+    register_ui_fn(
+        &overlay_tbl,
+        "smelt.ui.overlay",
         "open",
-        lua.create_function(|_, opts: mlua::Table| -> LuaResult<u64> {
+        "Open a generic overlay composed from `opts.items` (windows, paint regions, lines). Returns the overlay id so it can be focused or closed via `smelt.win`.",
+        &["opts"],
+        lua,
+        |_, opts: mlua::Table| -> LuaResult<u64> {
             let id = crate::lua::with_app(|app| crate::lua::ui_ops::open_overlay(app, opts))
                 .map_err(|e| LuaError::RuntimeError(format!("overlay.open: {e}")))?;
             Ok(id)
-        })?,
+        },
     )?;
 
     smelt_ui.set("overlay", overlay_tbl)?;
