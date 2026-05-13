@@ -27,6 +27,7 @@ pub mod mode;
 mod os;
 mod parse;
 mod path;
+mod perf;
 mod process;
 mod provider;
 pub mod reasoning;
@@ -136,6 +137,7 @@ pub fn register_host_api(
     reasoning::register(lua, smelt)?;
     parse::register(lua, smelt)?;
     path::register(lua, smelt)?;
+    perf::register(lua, smelt)?;
     process::register(lua, smelt, shared)?;
     provider::register(lua, smelt, shared)?;
     shell::register(lua, smelt)?;

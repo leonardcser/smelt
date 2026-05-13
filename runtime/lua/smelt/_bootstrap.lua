@@ -103,35 +103,3 @@ function smelt.theme.use(name)
   return require("smelt.colorschemes." .. name)
 end
 
--- Rank `items` against `query`. Returns 1-based indices into `items`, best first.
--- `key_fn(item) -> string` is optional; omit to score the item directly (must be a string).
--- Empty query returns original order.
-function smelt.fuzzy.rank(items, query, key_fn)
-  if query == nil or query == "" then
-    local all = {}
-    for i = 1, #items do all[i] = i end
-    return all
-  end
-  local scored = {}
-  for i, it in ipairs(items) do
-    local hay
-    if key_fn then
-      hay = key_fn(it)
-    elseif type(it) == "string" then
-      hay = it
-    else
-      hay = (it.label or "") .. " " .. (it.description or "") .. " " .. (it.search_terms or "")
-    end
-    local s = smelt.fuzzy.score(hay, query)
-    if s ~= nil then
-      scored[#scored + 1] = { score = s, idx = i }
-    end
-  end
-  table.sort(scored, function(a, b)
-    if a.score ~= b.score then return a.score < b.score end
-    return a.idx < b.idx
-  end)
-  local out = {}
-  for _, r in ipairs(scored) do out[#out + 1] = r.idx end
-  return out
-end

@@ -7,10 +7,12 @@
 -- Returns `{ index, item, action }` on accept, nil on dismiss.
 
 local function filter_items(all_items, query)
-  local order = smelt.fuzzy.rank(all_items, query)
-  local out = {}
-  for i, idx in ipairs(order) do out[i] = all_items[idx] end
-  return out
+  return smelt.perf.time("picker:filter", function()
+    local order = smelt.fuzzy.rank(all_items, query)
+    local out = {}
+    for i, idx in ipairs(order) do out[i] = all_items[idx] end
+    return out
+  end)
 end
 
 local function to_picker_items(list)
@@ -41,6 +43,7 @@ function smelt.prompt.open_picker(opts)
   local on_select = opts.on_select
 
   -- Stamp each entry with its original index so filtering can resolve back to it.
+  -- Precompute `_hay` so per-keystroke ranking skips concatenation.
   local all_items = {}
   for i, it in ipairs(original) do
     all_items[i] = {
@@ -50,6 +53,8 @@ function smelt.prompt.open_picker(opts)
       prefix       = it.prefix,
       search_terms = it.search_terms,
       _idx         = i,
+      _hay         = it._hay
+        or ((it.label or "") .. " " .. (it.description or "") .. " " .. (it.search_terms or "")),
     }
   end
 

@@ -379,8 +379,7 @@ impl TuiApp {
                     crate::completer::CompleterKind::CommandArg => "",
                 };
                 let items: Vec<crate::picker::PickerItem> = session
-                    .results
-                    .iter()
+                    .results_iter()
                     .map(|r| {
                         let item_prefix = if r.ansi_color.is_some() {
                             "● "

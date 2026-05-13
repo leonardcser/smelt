@@ -7,12 +7,9 @@ impl Completer {
     pub(crate) fn files(anchor: usize) -> Self {
         let all_items: Vec<CompletionItem> = git_files()
             .into_iter()
-            .map(|f| CompletionItem {
-                label: f,
-                ..Default::default()
-            })
+            .map(|f| CompletionItem::new(f, None, None))
             .collect();
-        let results = all_items.clone();
+        let results = (0..all_items.len()).collect();
         Self {
             anchor,
             kind: CompleterKind::File,

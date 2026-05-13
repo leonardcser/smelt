@@ -1,17 +1,23 @@
-use crate::fuzzy::score::{query_match_score, split_words};
-
 pub(crate) mod command;
 pub(crate) mod file;
 pub(crate) mod history;
 
-#[derive(Clone, Default)]
+#[derive(Clone)]
 pub(crate) struct CompletionItem {
     pub(crate) label: String,
     pub(crate) description: Option<String>,
-    /// When set, paints the row's pill, label, and description in this color.
+    /// Paints pill / label / description in this color when set.
     pub(crate) ansi_color: Option<u8>,
-    /// Extra match terms not shown in the label (e.g. provider key for the model picker).
-    pub(crate) search_terms: Option<String>,
+}
+
+impl CompletionItem {
+    pub(crate) fn new(label: String, description: Option<String>, ansi_color: Option<u8>) -> Self {
+        Self {
+            label,
+            description,
+            ansi_color,
+        }
+    }
 }
 
 #[derive(Clone, Copy, PartialEq, Debug)]
@@ -26,7 +32,8 @@ pub(crate) struct Completer {
     pub(crate) anchor: usize,
     pub(crate) kind: CompleterKind,
     pub(crate) query: String,
-    pub(crate) results: Vec<CompletionItem>,
+    /// Indices into `all_items`, ranked best-first.
+    pub(crate) results: Vec<usize>,
     pub(crate) selected: usize,
     pub(super) all_items: Vec<CompletionItem>,
     /// Stable selection identity preserved across re-filter.
@@ -45,7 +52,13 @@ impl Completer {
     }
 
     pub(crate) fn selected_item(&self) -> Option<&CompletionItem> {
-        self.results.get(self.selected)
+        self.results
+            .get(self.selected)
+            .and_then(|&i| self.all_items.get(i))
+    }
+
+    pub(crate) fn results_iter(&self) -> impl Iterator<Item = &CompletionItem> {
+        self.results.iter().map(move |&i| &self.all_items[i])
     }
 
     pub(crate) fn max_visible_rows(&self) -> usize {
@@ -58,8 +71,7 @@ impl Completer {
 
     fn remember_selected_key(&mut self) {
         self.selected_key = self
-            .results
-            .get(self.selected)
+            .selected_item()
             .map(|item| Self::item_key(item).to_string());
     }
 
@@ -68,7 +80,7 @@ impl Completer {
             if let Some(idx) = self
                 .results
                 .iter()
-                .position(|item| Self::item_key(item) == key)
+                .position(|&i| Self::item_key(&self.all_items[i]) == key)
             {
                 self.selected = idx;
                 return;
@@ -77,14 +89,6 @@ impl Completer {
         if self.selected >= self.results.len() {
             self.selected = 0;
         }
-    }
-
-    fn search_fields(&self, item: &CompletionItem) -> Vec<String> {
-        let mut fields = vec![item.label.to_lowercase()];
-        if let Some(t) = item.search_terms.as_deref() {
-            fields.push(t.to_lowercase());
-        }
-        fields
     }
 
     pub(crate) fn update_query(&mut self, query: String) {
@@ -103,23 +107,13 @@ impl Completer {
         if preserve_selection {
             self.remember_selected_key();
         }
+        self.results.clear();
         if self.query.is_empty() {
-            self.results = self.all_items.clone();
+            self.results.extend(0..self.all_items.len());
         } else {
-            let query = self.query.to_lowercase();
-            let query_words = split_words(&query);
-            let mut scored: Vec<_> = self
-                .all_items
-                .iter()
-                .enumerate()
-                .filter_map(|(i, item)| {
-                    let fields = self.search_fields(item);
-                    let score = query_match_score(&query, &query_words, &fields)?;
-                    Some((score, i, item.clone()))
-                })
-                .collect();
-            scored.sort_by_key(|(s, i, _)| (*s, *i));
-            self.results = scored.into_iter().map(|(_, _, item)| item).collect();
+            let labels: Vec<&str> = self.all_items.iter().map(|it| it.label.as_str()).collect();
+            self.results
+                .extend(smelt_core::fuzzy::fuzzy_rank(&self.query, &labels));
         }
         if preserve_selection {
             self.restore_selected_key();
@@ -147,7 +141,7 @@ impl Completer {
     }
 
     pub(crate) fn accept(&self) -> Option<&str> {
-        self.results.get(self.selected).map(|i| i.label.as_str())
+        self.selected_item().map(|i| i.label.as_str())
     }
 }
 

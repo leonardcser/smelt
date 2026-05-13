@@ -385,11 +385,7 @@ impl TuiApp {
                 let mut items: Vec<CompletionItem> = comp.all_items().to_vec();
                 for name in lua_cmds {
                     if !items.iter().any(|i| i.label == name) {
-                        items.push(CompletionItem {
-                            label: name,
-                            description: Some("(lua)".into()),
-                            ..Default::default()
-                        });
+                        items.push(CompletionItem::new(name, Some("(lua)".into()), None));
                     }
                 }
                 comp.refresh_items(items);

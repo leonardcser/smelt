@@ -4,7 +4,15 @@
 
 **Tier:** `Host` — Available in every runtime, including headless mode.
 
-Fuzzy-match scoring for candidate strings against queries.
+Fuzzy-match scoring backed by neo_frizbee (SIMD Smith-Waterman).
+
+## `smelt.fuzzy.rank`
+
+```lua
+fun(items: table, query: string): integer[]
+```
+
+Rank `items` by fuzzy match against `query`. Returns 1-based indices, best first. Empty query → identity order. Items may be strings or tables with `label`/`description`/`search_terms`; set `_hay` to a precomputed concatenated haystack to skip per-call concatenation.
 
 ## `smelt.fuzzy.score`
 
@@ -12,5 +20,5 @@ Fuzzy-match scoring for candidate strings against queries.
 fun(text: string, query: string): integer?
 ```
 
-Return a fuzzy-match score for `text` against `query`. Higher is better; `nil` means no match.
+Fuzzy-match score for `text` against `query`. Lower = better; `nil` = no match.
 

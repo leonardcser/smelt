@@ -57,6 +57,7 @@ nav = [
     { "`smelt.paint`" = "reference/api/paint.md" },
     { "`smelt.parse`" = "reference/api/parse.md" },
     { "`smelt.path`" = "reference/api/path.md" },
+    { "`smelt.perf`" = "reference/api/perf.md" },
     { "`smelt.permissions`" = "reference/api/permissions.md" },
     { "`smelt.process`" = "reference/api/process.md" },
     { "`smelt.prompt`" = "reference/api/prompt.md" },

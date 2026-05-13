@@ -8,13 +8,9 @@ impl Completer {
     pub(crate) fn commands(anchor: usize) -> Self {
         let all_items: Vec<CompletionItem> = crate::lua::list_commands()
             .into_iter()
-            .map(|(name, desc)| CompletionItem {
-                label: name,
-                description: desc,
-                ..Default::default()
-            })
+            .map(|(name, desc)| CompletionItem::new(name, desc, None))
             .collect();
-        let results = all_items.clone();
+        let results = (0..all_items.len()).collect();
         Self {
             anchor,
             kind: CompleterKind::Command,
@@ -29,12 +25,9 @@ impl Completer {
     pub(crate) fn command_args(anchor: usize, items: &[String]) -> Self {
         let all_items: Vec<CompletionItem> = items
             .iter()
-            .map(|s| CompletionItem {
-                label: s.clone(),
-                ..Default::default()
-            })
+            .map(|s| CompletionItem::new(s.clone(), None, None))
             .collect();
-        let results = all_items.clone();
+        let results = (0..all_items.len()).collect();
         Self {
             anchor,
             kind: CompleterKind::CommandArg,

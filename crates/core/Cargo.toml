@@ -36,6 +36,7 @@ url = "2"
 unicode-width = "0.2"
 include_dir = "0.7"
 lua-doc-derive = { path = "../lua-doc-derive" }
+neo_frizbee = "0.10"
 
 [dev-dependencies]
 vt100 = "0.16"

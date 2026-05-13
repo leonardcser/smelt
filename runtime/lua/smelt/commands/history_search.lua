@@ -14,26 +14,39 @@ local function build_items()
   if #entries == 0 then return {} end
   local items = {}
   for i = #entries, 1, -1 do
+    local entry = entries[i]
+    local label = entry_label(entry)
     items[#items + 1] = {
-      label        = entry_label(entries[i]),
-      search_terms = entries[i],
-      _entry       = entries[i],
+      label        = label,
+      search_terms = entry,
+      _entry       = entry,
+      _hay         = label .. " " .. entry,
     }
   end
   return items
 end
 
 local saved_text
+local is_open = false
+
 local function open()
+  if is_open then return end
+  is_open = true
   saved_text = smelt.prompt.text()
-  if #smelt.history.entries() == 0 then return end
+  if #smelt.history.entries() == 0 then
+    is_open = false
+    return
+  end
   smelt.spawn(function()
-    local r = smelt.prompt.open_picker({ items = build_items() })
-    if r and r.action == "enter" then
+    local ok, r = pcall(function()
+      return smelt.prompt.open_picker({ items = build_items() })
+    end)
+    if ok and r and r.action == "enter" then
       smelt.prompt.set_text(r.item._entry or "")
     else
       smelt.prompt.set_text(saved_text or "")
     end
+    is_open = false
   end)
 end
 
