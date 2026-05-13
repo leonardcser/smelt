@@ -150,15 +150,16 @@ The completer pops up when typing `/` (commands) or `@` (file references).
 
 ### Common
 
-| Key                                   | Action        |
-| ------------------------------------- | ------------- |
-| `↑` / `k` / `Ctrl+P`                  | Previous item |
-| `↓` / `j` / `Ctrl+N`                  | Next item     |
-| `PgUp` / `PgDn`                       | Page scroll   |
-| `Home` / `g`                          | Top           |
-| `End`                                 | Bottom        |
-| `Enter`                               | Confirm       |
-| `Esc` / `Ctrl+C`                      | Dismiss       |
+| Key                                   | Action          |
+| ------------------------------------- | --------------- |
+| `↑` / `k` / `Ctrl+K` / `Ctrl+P`       | Previous item   |
+| `↓` / `j` / `Ctrl+J` / `Ctrl+N`       | Next item       |
+| `PgUp` / `PgDn`                       | Page scroll     |
+| `Ctrl+U` / `Ctrl+D`                   | Half-page scroll|
+| `Home` / `g`                          | Top             |
+| `End`                                 | Bottom          |
+| `Enter`                               | Confirm         |
+| `Esc` / `Ctrl+C`                      | Dismiss         |
 
 ### Per-Dialog
 
@@ -169,7 +170,7 @@ The completer pops up when typing `/` (commands) or `@` (file references).
 | Confirm     | `Shift+Tab`      | Back to previous request           |
 | Permissions | `dd` / `⌫`       | Delete permission                  |
 | Ps          | `⌫`              | Kill process                       |
-| Resume      | `Ctrl+D`         | Delete session                     |
+| Resume      | `Alt+D`          | Delete session                     |
 | Resume      | `Alt+W`          | Toggle workspace filter            |
 | Resume      | (type)           | Fuzzy filter                       |
 | Rewind      | `↑` / `↓`        | Select turn                        |

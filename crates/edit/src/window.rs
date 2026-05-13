@@ -226,6 +226,10 @@ pub struct Window {
     pub follow_tail: bool,
     /// One-shot recenter request (vim `zz`); cleared after the next paint.
     pub pending_recenter: bool,
+    /// One-shot "scroll so the cursor row is on-screen"; cleared after the next paint.
+    /// Used when callers set a cursor position before the viewport height is known
+    /// (e.g. opening a list dialog with an initial selection partway down the list).
+    pub pending_scroll_to_cursor: bool,
     /// Last cpos seen by the renderer; distinguishes cursor-move from scroll-pan.
     pub last_render_cpos: Option<usize>,
     pub cursor_positioned: bool,
@@ -258,6 +262,7 @@ impl Window {
             cursor_col: 0,
             follow_tail: true,
             pending_recenter: false,
+            pending_scroll_to_cursor: false,
             last_render_cpos: None,
             cursor_positioned: false,
             drag_anchor_word: None,

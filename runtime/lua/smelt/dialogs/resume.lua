@@ -142,15 +142,19 @@ smelt.cmd.register("resume", function()
         { key = "down",   on_press = nav(1)   },
         { key = "ctrl-k", on_press = nav(-1)  },
         { key = "ctrl-j", on_press = nav(1)   },
+        { key = "ctrl-p", on_press = nav(-1)  },
+        { key = "ctrl-n", on_press = nav(1)   },
         { key = "pgup",   on_press = nav(-10) },
         { key = "pgdn",   on_press = nav(10)  },
+        { key = "ctrl-u", on_press = nav(-5)  },
+        { key = "ctrl-d", on_press = nav(5)   },
         { key = "alt-w", hint = "⌥w: toggle workspace filter", on_press = function()
             workspace_only = not workspace_only
             filtered = filter_entries(entries, query, workspace_only, current_cwd)
             refresh_list(list_buf, filtered, now_ms)
             smelt.win.set_cursor_row(list_leaf, 0)
           end },
-        { key = "ctrl-d", hint = "^d: delete", on_press = function()
+        { key = "alt-d", hint = "⌥d: delete", on_press = function()
             local idx = (smelt.win.cursor_row(list_leaf) or 0) + 1
             local e = filtered[idx]
             if not e then return end

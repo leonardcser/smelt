@@ -54,7 +54,12 @@ function smelt.ui.dialog.options(labels, opts)
   if #lines == 0 then lines = { "" } end
   local buf = smelt.buf.create()
   smelt.buf.set_lines(buf, lines)
-  local leaf = smelt.win.open(buf, { region = REGION, focusable = true })
+  local leaf = smelt.win.open(buf, {
+    region    = REGION,
+    focusable = true,
+    pad_left  = opts.pad_left,
+    pad_right = opts.pad_right,
+  })
   if leaf then
     local selected = tonumber(opts.selected or 1) or 1
     if selected < 1 then selected = 1 end

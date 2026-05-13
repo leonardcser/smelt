@@ -1,12 +1,21 @@
 -- Built-in /rewind command. Picks a past user turn and rewinds the transcript to it.
 
-local function build_labels(turns)
-  local labels = {}
+local NS_META = smelt.buf.create_namespace("smelt.rewind.meta")
+
+local function build_rows(turns)
+  -- Returns { lines, prefix_widths }: parallel arrays of the rendered label and the
+  -- width of the "N. " prefix (used to dim that range).
+  local lines = {}
+  local prefix_widths = {}
   for i, t in ipairs(turns) do
-    table.insert(labels, string.format("%d. %s", i, t.label or ""))
+    local prefix = string.format("%d. ", i)
+    table.insert(lines, prefix .. (t.label or ""))
+    table.insert(prefix_widths, #prefix)
   end
-  table.insert(labels, string.format("%d. (current)", #turns + 1))
-  return labels
+  local last_prefix = string.format("%d. ", #turns + 1)
+  table.insert(lines, last_prefix .. "(current)")
+  table.insert(prefix_widths, #last_prefix)
+  return lines, prefix_widths
 end
 
 smelt.cmd.register("rewind", function(args)
@@ -20,8 +29,20 @@ smelt.cmd.register("rewind", function(args)
   local restore_vim_insert = (args == "insert") or (smelt.vim.mode() == "insert")
 
   smelt.spawn(function()
-    local labels = build_labels(turns)
-    local options_leaf = smelt.ui.dialog.options(labels, { selected = #labels })
+    local lines, prefix_widths = build_rows(turns)
+    local options_leaf, options_buf = smelt.ui.dialog.options(lines, {
+      selected  = #lines,
+      pad_left  = 1,
+      pad_right = 1,
+    })
+
+    -- Dim the "N. " turn number prefix so the label stands out.
+    for i, width in ipairs(prefix_widths) do
+      smelt.buf.set_extmark(options_buf, NS_META, i, 0, {
+        end_col = width,
+        dim     = true,
+      })
+    end
 
     local picked = smelt.ui.dialog.open({
       title  = "rewind",

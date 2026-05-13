@@ -793,6 +793,11 @@ impl Ui {
                     .map(|b| b.line_count() as u16)
                     .unwrap_or(0);
                 if let Some(win) = self.wins.get_mut(&win_id) {
+                    if win.pending_scroll_to_cursor && leaf_rect.height > 0 {
+                        let cursor_row = win.cursor_abs_row() as u16;
+                        win.keep_cursor_visible(cursor_row, total_rows, leaf_rect.height);
+                        win.pending_scroll_to_cursor = false;
+                    }
                     win.viewport = Some(window::WindowViewport::new(
                         *leaf_rect,
                         leaf_rect.height,

@@ -277,7 +277,11 @@ pub(crate) fn configure_list_leaf(app: &mut TuiApp, leaf: WinId, initial_cursor:
     if let Some(win) = app.ui.win_mut(leaf) {
         win.cursor_line_highlight = true;
         let max = line_count.saturating_sub(1) as u16;
-        win.set_cursor_position(initial_cursor.min(max), 0);
+        let target = initial_cursor.min(max);
+        win.set_cursor_position(target, 0);
+        if target > 0 {
+            win.pending_scroll_to_cursor = true;
+        }
     }
 
     fn move_cursor(ctx: &mut crate::smelt_term::CallbackCtx<'_>, delta: isize) -> CallbackResult {
@@ -316,8 +320,14 @@ pub(crate) fn configure_list_leaf(app: &mut TuiApp, leaf: WinId, initial_cursor:
         (KeyBind::new(KeyCode::Down, KeyModifiers::NONE), 1),
         (KeyBind::new(KeyCode::Char('k'), KeyModifiers::NONE), -1),
         (KeyBind::new(KeyCode::Up, KeyModifiers::NONE), -1),
+        (KeyBind::new(KeyCode::Char('j'), KeyModifiers::CONTROL), 1),
+        (KeyBind::new(KeyCode::Char('k'), KeyModifiers::CONTROL), -1),
+        (KeyBind::new(KeyCode::Char('n'), KeyModifiers::CONTROL), 1),
+        (KeyBind::new(KeyCode::Char('p'), KeyModifiers::CONTROL), -1),
         (KeyBind::new(KeyCode::PageDown, KeyModifiers::NONE), 10),
         (KeyBind::new(KeyCode::PageUp, KeyModifiers::NONE), -10),
+        (KeyBind::new(KeyCode::Char('d'), KeyModifiers::CONTROL), 5),
+        (KeyBind::new(KeyCode::Char('u'), KeyModifiers::CONTROL), -5),
         (
             KeyBind::new(KeyCode::Home, KeyModifiers::NONE),
             isize::MIN / 2,
