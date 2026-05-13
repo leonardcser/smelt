@@ -256,10 +256,10 @@ impl TuiApp {
         };
 
         let transcript_projection = crate::content::transcript_buf::TranscriptProjection::new();
+        let (term_w, term_h) = terminal::size().unwrap_or((80, 24));
         let (ui, well_known) = {
-            let (w, h) = terminal::size().unwrap_or((80, 24));
             let mut ui = crate::smelt_term::Ui::new();
-            ui.set_terminal_size(w, h);
+            ui.set_terminal_size(term_w, term_h);
             let input_display_buf = ui
                 .buf_create_with_id(
                     crate::app::PROMPT_EDIT_BUF,
@@ -356,7 +356,7 @@ impl TuiApp {
             // Seed a minimal splits tree so overlay anchors can resolve before the first render frame.
             ui.set_layout(crate::content::layout::build_layout_tree(
                 &crate::content::layout::LayoutInput {
-                    term_height: h,
+                    term_height: term_h,
                     prompt_above_rows: 1,
                     prompt_input_rows: 1,
                 },
@@ -409,8 +409,8 @@ impl TuiApp {
             sleep_inhibit: crate::sleep_inhibit::SleepInhibitor::new(),
             persister: crate::persist::Persister::spawn(),
             pending_title: false,
-            last_width: terminal::size().map(|(w, _)| w).unwrap_or(80),
-            last_height: terminal::size().map(|(_, h)| h).unwrap_or(24),
+            last_width: term_w,
+            last_height: term_h,
             next_turn_id: 1,
             compact_epoch: 0,
             pending_compact_epoch: 0,
@@ -772,6 +772,14 @@ impl TuiApp {
         self.input.command_arg_sources = self.lua.list_command_args();
 
         let mut term_events = EventStream::new();
+        // Independent SIGWINCH listener: crossterm's signal source intermittently drops
+        // resize events (signal-hook-mio counter / mio readiness race), so we keep our
+        // own tokio-native handler. Both fire on resize; the duplicate just hits an
+        // idempotent `compositor.resize` and one extra full repaint.
+        let mut sigwinch = tokio::signal::unix::signal(
+            tokio::signal::unix::SignalKind::window_change(),
+        )
+        .expect("install SIGWINCH listener");
 
         // Auto-submit initial message if provided (e.g. `agent "fix the bug"`).
         if let Some(msg) = initial_message {
@@ -1095,6 +1103,15 @@ impl TuiApp {
                 }), if has_animation || self.ui.drag_autoscroll_started().is_some() => {
                     self.tick_drag_autoscroll();
                     self.render_normal(self.agent.is_some());
+                }
+
+                Some(_) = sigwinch.recv() => {
+                    if let Ok((w, h)) = terminal::size() {
+                        if w != self.last_width || h != self.last_height {
+                            self.handle_resize(w, h);
+                            self.render_normal(self.agent.is_some());
+                        }
+                    }
                 }
             }
         }

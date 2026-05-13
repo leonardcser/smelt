@@ -652,10 +652,7 @@ impl TuiApp {
         }
     }
 
-    fn handle_resize(&mut self, w: u16, h: u16) {
-        if w == self.last_width && h == self.last_height {
-            return;
-        }
+    pub(crate) fn handle_resize(&mut self, w: u16, h: u16) {
         let width_changed = w != self.last_width;
         self.last_width = w;
         self.last_height = h;
