@@ -4,7 +4,7 @@
 
 use lua_doc_derive::{lua_module, LuaOpts};
 use mlua::prelude::*;
-use smelt_core::lua::doc::{record_module_doc, register_ui_fn};
+use smelt_core::lua::doc::register_ui_fn;
 use std::sync::Arc;
 
 /// A single session permission entry (one approved tool/pattern pair).
@@ -108,17 +108,16 @@ pub struct LuaPermissionRulesSpec {
     pub yolo: Option<LuaModePerms>,
 }
 
-#[lua_module]
+#[lua_module(
+    name = "smelt.permissions",
+    doc = "List session/workspace rules and sync a Lua-built ruleset back through the App. UiHost-only."
+)]
 pub(super) fn register(
     lua: &Lua,
     smelt: &mlua::Table,
     shared: &Arc<crate::lua::LuaShared>,
 ) -> LuaResult<()> {
     let permissions_tbl = lua.create_table()?;
-    record_module_doc(
-        "smelt.permissions",
-        "List session/workspace rules and sync a Lua-built ruleset back through the App. UiHost-only.",
-    );
     register_ui_fn(
         &permissions_tbl,
         "smelt.permissions",

@@ -5,14 +5,15 @@ use std::collections::HashMap;
 use std::time::Duration;
 
 use crate::http;
-use crate::lua::doc::{record_module_doc, register_fn};
+use crate::lua::doc::register_fn;
 use lua_doc_derive::lua_module;
 
-#[lua_module]
+#[lua_module(
+    name = "smelt.http",
+    doc = "Synchronous HTTP get/post with redirect following and header support. Errors use the `(value, err_string)` convention."
+)]
 pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
     let http_tbl = lua.create_table()?;
-    record_module_doc("smelt.http", "Synchronous HTTP get/post with redirect following and header support. Errors use the `(value, err_string)` convention.");
-
     register_fn(
         &http_tbl,
         "smelt.http",

@@ -7,11 +7,11 @@
 ---@class smelt.model
 local model = {}
 
---- Return `get` from the app state.
+--- Return the active model key (matches an entry in `list()`).
 ---@type fun(): string
 model.get = nil
 
---- `list()` returns `{key, name, provider}` entries for available models.
+--- Return an array of `{ key, name, provider }` records for every model the active config can switch to.
 ---@type fun(): table
 model.list = nil
 

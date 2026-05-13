@@ -7,7 +7,7 @@
 ---@class smelt.transcript
 local transcript = {}
 
---- Return `text` from the app state.
+--- Return the full transcript as a single newline-joined string (post-render display text, with thinking blocks visible according to the `show_thinking` setting).
 ---@type fun(): string
 transcript.text = nil
 

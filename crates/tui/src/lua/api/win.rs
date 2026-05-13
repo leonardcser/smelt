@@ -4,7 +4,7 @@ use crate::lua::{parse_keybind, LuaShared};
 use lua_doc_derive::lua_module;
 use lua_doc_derive::LuaAlias;
 use mlua::prelude::*;
-use smelt_core::lua::doc::{record_module_doc, register_ui_fn};
+use smelt_core::lua::doc::register_ui_fn;
 use smelt_core::lua::lua_type::LuaCallback;
 use std::sync::Arc;
 
@@ -52,15 +52,17 @@ impl From<LuaWinEvent> for crate::smelt_term::WinEvent {
     }
 }
 
-#[lua_module]
+#[lua_module(
+    name = "smelt.win",
+    doc = "Window lifecycle, focus, keymap/event registration, and buffer resolution. UiHost-only — windows are layout leaves that render a buffer onto the screen."
+)]
 pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) -> LuaResult<()> {
     let win_tbl = lua.create_table()?;
-    record_module_doc("smelt.win", "Window lifecycle, focus, keymap/event registration, and buffer resolution. UiHost-only — windows are layout leaves that render a buffer onto the screen.");
     register_ui_fn(
         &win_tbl,
         "smelt.win",
         "focus",
-        "Return `focus` from the app state.",
+        "Return which top-level pane currently has focus: `\"transcript\"` or `\"prompt\"`.",
         &[],
         lua,
         |_, ()| -> LuaResult<String> {
@@ -69,19 +71,6 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
                 crate::app::AppFocus::Prompt => "prompt".to_string(),
             })
             .unwrap_or_default())
-        },
-    )?;
-    register_ui_fn(
-        &win_tbl,
-        "smelt.win",
-        "mode",
-        "Vim mode label of the focused window (empty string if non-vim).",
-        &[],
-        lua,
-        |_, ()| -> LuaResult<String> {
-            Ok(crate::lua::try_with_app(|app| app.focused_vim_mode_label())
-                .flatten()
-                .unwrap_or_default())
         },
     )?;
     register_ui_fn(
@@ -172,12 +161,11 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
             Ok(())
         },
     )?;
-    // `smelt.win.buf(win_id) -> buf_id | nil`
     register_ui_fn(
         &win_tbl,
         "smelt.win",
         "buf",
-        "`smelt.win.buf(win_id) -> buf_id | nil`",
+        "Return the buffer id backing window `id`, or `nil` if no such window exists.",
         &["id"],
         lua,
         |_, id: u64| -> LuaResult<Option<u64>> {
@@ -188,12 +176,11 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
             Ok(buf)
         },
     )?;
-    // `smelt.win.rect(win_id) -> {row, col, width, height} | nil` — nil until first render.
     register_ui_fn(
         &win_tbl,
         "smelt.win",
         "rect",
-        "`smelt.win.rect(win_id) -> {row, col, width, height} | nil` — nil until first render.",
+        "Return the window's current viewport rect as `{ row, col, width, height }`, or `nil` until the first render lays it out.",
         &["id"],
         lua,
         |lua, id: u64| -> LuaResult<mlua::Value> {
@@ -217,12 +204,11 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
             }
         },
     )?;
-    // `smelt.win.set_focus(win_id)`
     register_ui_fn(
         &win_tbl,
         "smelt.win",
         "set_focus",
-        "`smelt.win.set_focus(win_id)`",
+        "Move keyboard focus to window `id`. No-op if the window is not focusable or does not exist.",
         &["id"],
         lua,
         |_, id: u64| -> LuaResult<()> {

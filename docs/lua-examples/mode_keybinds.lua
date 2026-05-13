@@ -11,7 +11,7 @@ smelt.keymap.set("n", "<C-y>", function()
             smelt.notify("transcript copied")
         end
     elseif win == "prompt" then
-        local text = smelt.buf.text()
+        local text = smelt.prompt.text()
         if #text > 0 then
             smelt.clipboard(text)
             smelt.notify("prompt copied")

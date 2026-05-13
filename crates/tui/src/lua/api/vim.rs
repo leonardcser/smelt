@@ -2,7 +2,7 @@
 
 use lua_doc_derive::{lua_module, LuaAlias};
 use mlua::prelude::*;
-use smelt_core::lua::doc::{record_module_doc, register_ui_fn};
+use smelt_core::lua::doc::register_ui_fn;
 
 /// Vim mode string literal.
 #[derive(Clone, Copy, Debug, LuaAlias)]
@@ -14,14 +14,26 @@ pub enum LuaVimMode {
     VisualLine,
 }
 
-#[lua_module]
+impl LuaVimMode {
+    /// Snake-case label matching the `smelt.vim.Mode` Lua alias. Use this
+    /// when emitting vim-mode strings into Lua-visible payloads so the
+    /// value compares equal to what `smelt.vim.mode()` would return.
+    pub fn label(self) -> &'static str {
+        match self {
+            LuaVimMode::Insert => "insert",
+            LuaVimMode::Normal => "normal",
+            LuaVimMode::Visual => "visual",
+            LuaVimMode::VisualLine => "visual_line",
+        }
+    }
+}
+
+#[lua_module(
+    name = "smelt.vim",
+    doc = "Read and write the vim mode of the focused vim-enabled surface. UiHost-only."
+)]
 pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
     let vim_tbl = lua.create_table()?;
-    record_module_doc(
-        "smelt.vim",
-        "Read and write the vim mode of the focused vim-enabled surface. UiHost-only.",
-    );
-
     register_ui_fn(
         &vim_tbl,
         "smelt.vim",

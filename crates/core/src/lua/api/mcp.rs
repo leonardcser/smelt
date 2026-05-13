@@ -1,6 +1,6 @@
 //! `smelt.mcp` — config-time MCP server registration. Unknown fields and types raise errors.
 
-use crate::lua::doc::{record_module_doc, register_fn};
+use crate::lua::doc::register_fn;
 use crate::lua::lua_type::{LuaType, LuaTypeTuple};
 use crate::lua::LuaShared;
 use crate::mcp::McpServerConfig;
@@ -70,14 +70,12 @@ pub struct LuaMcpConfig {
     pub enabled: Option<bool>,
 }
 
-#[lua_module]
+#[lua_module(
+    name = "smelt.mcp",
+    doc = "Config-time MCP server registration. Unknown fields raise errors."
+)]
 pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) -> LuaResult<()> {
     let tbl = lua.create_table()?;
-    record_module_doc(
-        "smelt.mcp",
-        "Config-time MCP server registration. Unknown fields raise errors.",
-    );
-
     let shared_for_register = Arc::clone(shared);
     register_fn(
         &tbl,

@@ -1,19 +1,17 @@
 //! `smelt.grep` — ripgrep wrapper. `rg` exit 1 (no match) is not an error; check `exit_code`.
 
 use crate::grep;
-use crate::lua::doc::{record_module_doc, register_fn};
+use crate::lua::doc::register_fn;
 use lua_doc_derive::lua_module;
 use mlua::prelude::*;
 use std::time::Duration;
 
-#[lua_module]
+#[lua_module(
+    name = "smelt.grep",
+    doc = "Ripgrep wrapper for searching files. Exit code 1 (no match) is not an error."
+)]
 pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
     let grep_tbl = lua.create_table()?;
-    record_module_doc(
-        "smelt.grep",
-        "Ripgrep wrapper for searching files. Exit code 1 (no match) is not an error.",
-    );
-
     register_fn(
         &grep_tbl,
         "smelt.grep",

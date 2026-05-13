@@ -23,7 +23,7 @@ mod text;
 mod theme;
 mod transcript;
 mod ui;
-mod vim;
+pub(crate) mod vim;
 mod win;
 
 use super::{LuaRuntime, LuaShared};

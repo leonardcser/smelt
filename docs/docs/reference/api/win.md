@@ -12,7 +12,7 @@ Window lifecycle, focus, keymap/event registration, and buffer resolution. UiHos
 fun(id: integer): integer?
 ```
 
-`smelt.win.buf(win_id) -> buf_id | nil`
+Return the buffer id backing window `id`, or `nil` if no such window exists.
 
 ## `smelt.win.clear_event`
 
@@ -62,15 +62,7 @@ Mark `win_id` as a list leaf with arrow-key/scroll handling and place the initia
 fun(): string
 ```
 
-Return `focus` from the app state.
-
-## `smelt.win.mode`
-
-```lua
-fun(): string
-```
-
-Vim mode label of the focused window (empty string if non-vim).
+Return which top-level pane currently has focus: `"transcript"` or `"prompt"`.
 
 ## `smelt.win.on_event`
 
@@ -96,7 +88,7 @@ Open a split window over the buffer `buf_id`. `opts.region` picks the layout slo
 fun(id: integer): any
 ```
 
-`smelt.win.rect(win_id) -> {row, col, width, height} | nil` — nil until first render.
+Return the window's current viewport rect as `{ row, col, width, height }`, or `nil` until the first render lays it out.
 
 ## `smelt.win.set_focus`
 
@@ -104,7 +96,7 @@ fun(id: integer): any
 fun(id: integer): nil
 ```
 
-`smelt.win.set_focus(win_id)`
+Move keyboard focus to window `id`. No-op if the window is not focusable or does not exist.
 
 ## `smelt.win.set_keymap`
 

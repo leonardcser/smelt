@@ -1,18 +1,16 @@
 //! `smelt.path` — pure path arithmetic (normalize, join, relative, expand, display, etc.).
 
-use crate::lua::doc::{record_module_doc, register_fn};
+use crate::lua::doc::register_fn;
 use lua_doc_derive::lua_module;
 use mlua::prelude::*;
 use std::path::{Path, PathBuf};
 
-#[lua_module]
+#[lua_module(
+    name = "smelt.path",
+    doc = "Pure path arithmetic: normalize, join, relative, expand, display, etc."
+)]
 pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
     let path_tbl = lua.create_table()?;
-    record_module_doc(
-        "smelt.path",
-        "Pure path arithmetic: normalize, join, relative, expand, display, etc.",
-    );
-
     register_fn(
         &path_tbl,
         "smelt.path",

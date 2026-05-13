@@ -7,26 +7,24 @@
 //! parallel mechanisms.
 
 use crate::lua::api::cell::LuaCellName;
-use crate::lua::doc::{record_module_doc, register_fn};
+use crate::lua::doc::register_fn;
 use crate::lua::lua_type::LuaCallback;
 use crate::lua::LuaHandle;
 use lua_doc_derive::lua_module;
 use mlua::prelude::*;
 
-#[lua_module]
+#[lua_module(
+    name = "smelt.au",
+    doc = "Nvim-shaped surface aliases for [`smelt.cell`](cell.md). \
+`au.on(name, handler)` is `smelt.cell.subscribe`; \
+`au.fire(name, payload)` is `smelt.cell.set`. Both share the same \
+underlying registry — pick whichever name fits your plugin."
+)]
 pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
     use crate::cells::{LuaCellValue, SubscriberKind};
     use std::rc::Rc;
 
     let au_tbl = lua.create_table()?;
-    record_module_doc(
-        "smelt.au",
-        "Nvim-shaped surface aliases for [`smelt.cell`](cell.md). \
-`au.on(name, handler)` is `smelt.cell.subscribe`; \
-`au.fire(name, payload)` is `smelt.cell.set`. Both share the same \
-underlying registry — pick whichever name fits your plugin.",
-    );
-
     register_fn(
         &au_tbl,
         "smelt.au",

@@ -1,6 +1,6 @@
 //! `smelt.cmd` — register/list slash commands. `run` is added by the TUI after host-API init.
 
-use crate::lua::doc::{record_module_doc, register_fn};
+use crate::lua::doc::register_fn;
 use crate::lua::lua_type::LuaCallback;
 use crate::lua::{LuaHandle, LuaShared, RegisteredCommand};
 use lua_doc_derive::{lua_module, LuaOpts};
@@ -26,10 +26,12 @@ pub struct LuaCmdRegisterOpts {
     pub hidden: Option<bool>,
 }
 
-#[lua_module]
+#[lua_module(
+    name = "smelt.cmd",
+    doc = "Register and list slash commands. `cmd.run` is injected by the TUI layer so it can access the live app state."
+)]
 pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) -> LuaResult<()> {
     let cmd_tbl = lua.create_table()?;
-    record_module_doc("smelt.cmd", "Register and list slash commands. `cmd.run` is injected by the TUI layer so it can access the live app state.");
     {
         let s = shared.clone();
         register_fn(

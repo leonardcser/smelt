@@ -17,7 +17,7 @@ smelt.cmd.register("rewind", function(args)
   end
 
   -- "insert" arg forces vim Insert restoration after rewind (used by the Esc-Esc keymap).
-  local restore_vim_insert = (args == "insert") or (smelt.win.mode() == "Insert")
+  local restore_vim_insert = (args == "insert") or (smelt.vim.mode() == "insert")
 
   smelt.spawn(function()
     local labels = build_labels(turns)

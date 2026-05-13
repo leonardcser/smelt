@@ -4,7 +4,7 @@ use crate::lua::LuaShared;
 use lua_doc_derive::lua_module;
 use lua_doc_derive::{LuaAlias, LuaOpts};
 use mlua::prelude::*;
-use smelt_core::lua::doc::{record_module_doc, register_ui_fn};
+use smelt_core::lua::doc::register_ui_fn;
 use std::sync::Arc;
 
 /// Where a virtual-text chunk is rendered relative to the line.
@@ -81,23 +81,26 @@ pub struct LuaExtmarkOpts {
     pub yank_as: Option<String>,
 }
 
-#[lua_module]
+#[lua_module(
+    name = "smelt.buf",
+    doc = "Buffer creation, line/source mutation, extmarks, and yank. UiHost-only — buffers are terminal-screen backing stores that windows render into."
+)]
 pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) -> LuaResult<()> {
     let buf_tbl = lua.create_table()?;
-    record_module_doc("smelt.buf", "Buffer creation, line/source mutation, extmarks, and yank. UiHost-only — buffers are terminal-screen backing stores that windows render into.");
-
     register_ui_fn(
         &buf_tbl,
         "smelt.buf",
         "text",
-        "Return the prompt input buffer's current text.",
-        &[],
+        "Return the buffer's full source as a string. `nil` if no buffer has that id.",
+        &["buf"],
         lua,
-        |_, ()| {
-            Ok(
-                crate::lua::try_with_app(|app| app.prompt_buf().source().to_string())
-                    .unwrap_or_default(),
-            )
+        |_, id: u64| -> LuaResult<Option<String>> {
+            Ok(crate::lua::try_with_app(|app| {
+                app.ui
+                    .buf(crate::smelt_term::BufId(id))
+                    .map(|b| b.source().to_string())
+            })
+            .flatten())
         },
     )?;
 

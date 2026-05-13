@@ -14,7 +14,7 @@
 use crate::lua::LuaShared;
 use lua_doc_derive::lua_module;
 use mlua::prelude::*;
-use smelt_core::lua::doc::{record_module_doc, register_ui_fn};
+use smelt_core::lua::doc::register_ui_fn;
 use smelt_core::lua::lua_type::{LuaCallback, LuaType};
 use std::sync::Arc;
 
@@ -29,13 +29,12 @@ impl LuaType for LuaPaintSlice {
     }
 }
 
-#[lua_module]
+#[lua_module(
+    name = "smelt.paint",
+    doc = "Register Lua callbacks against custom paint regions. UiHost-only."
+)]
 pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) -> LuaResult<()> {
     let paint_tbl = lua.create_table()?;
-    record_module_doc(
-        "smelt.paint",
-        "Register Lua callbacks against custom paint regions. UiHost-only.",
-    );
     crate::lua::paint::register_paint_slice_docs();
 
     {

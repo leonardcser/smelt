@@ -39,8 +39,8 @@ buf.set_readonly = nil
 ---@type fun(buf: integer, source: string): nil
 buf.set_source = nil
 
---- Return the prompt input buffer's current text.
----@type fun(): string
+--- Return the buffer's full source as a string. `nil` if no buffer has that id.
+---@type fun(buf: integer): string?
 buf.text = nil
 
 return buf

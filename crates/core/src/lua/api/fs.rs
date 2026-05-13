@@ -1,17 +1,18 @@
 //! `smelt.fs` — sync filesystem primitives. Errors use `(value, err_string)` convention.
 
 use crate::fs::FlockGuard;
-use crate::lua::doc::{record_module_doc, register_fn};
+use crate::lua::doc::register_fn;
 use lua_doc_derive::lua_module;
 use mlua::prelude::*;
 use std::cell::RefCell;
 use std::path::PathBuf;
 
-#[lua_module]
+#[lua_module(
+    name = "smelt.fs",
+    doc = "Sync filesystem primitives. Errors use the `(value, err_string)` convention so callers can distinguish failures without pcall."
+)]
 pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
     let fs = lua.create_table()?;
-    record_module_doc("smelt.fs", "Sync filesystem primitives. Errors use the `(value, err_string)` convention so callers can distinguish failures without pcall.");
-
     register_fn(
         &fs,
         "smelt.fs",
@@ -255,7 +256,6 @@ impl LuaUserData for FlockHandle {
     }
 }
 
-#[lua_module]
 fn build_file_state(lua: &Lua) -> LuaResult<mlua::Table> {
     let t = lua.create_table()?;
 

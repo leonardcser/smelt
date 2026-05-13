@@ -5,15 +5,17 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 
-use crate::lua::doc::{record_module_doc, register_fn};
+use crate::lua::doc::register_fn;
 use crate::lua::LuaShared;
 use crate::process;
 use lua_doc_derive::lua_module;
 
-#[lua_module]
+#[lua_module(
+    name = "smelt.process",
+    doc = "Run, spawn, list, and kill processes against the `ProcessRegistry`. spawned processes are non-blocking; run processes wait for completion."
+)]
 pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) -> LuaResult<()> {
     let process_tbl = lua.create_table()?;
-    record_module_doc("smelt.process", "Run, spawn, list, and kill processes against the `ProcessRegistry`. spawned processes are non-blocking; run processes wait for completion.");
     register_fn(
         &process_tbl,
         "smelt.process",

@@ -3,7 +3,7 @@
 use crate::lua::{LuaHandle, LuaShared};
 use lua_doc_derive::{lua_module, LuaAlias, LuaOpts};
 use mlua::prelude::*;
-use smelt_core::lua::doc::{record_module_doc, register_ui_fn};
+use smelt_core::lua::doc::register_ui_fn;
 use smelt_core::lua::lua_type::LuaCallback;
 use std::sync::Arc;
 
@@ -124,11 +124,12 @@ pub struct LuaAskSpec {
     pub on_response: Option<LuaCallback<String, ()>>,
 }
 
-#[lua_module]
+#[lua_module(
+    name = "smelt.engine",
+    doc = "LLM engine control — cancel, ask, submit commands, and request tool approval. UiHost-only."
+)]
 pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) -> LuaResult<()> {
     let engine_tbl = lua.create_table()?;
-    record_module_doc("smelt.engine", "LLM engine control — cancel, ask, submit commands, and request tool approval. UiHost-only.");
-
     register_ui_fn(
         &engine_tbl,
         "smelt.engine",

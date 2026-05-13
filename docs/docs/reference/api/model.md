@@ -12,7 +12,7 @@ Get, set, and list the configured provider/model triple. Mirrors smelt.mode and 
 fun(): string
 ```
 
-Return `get` from the app state.
+Return the active model key (matches an entry in `list()`).
 
 ## `smelt.model.list`
 
@@ -20,7 +20,7 @@ Return `get` from the app state.
 fun(): table
 ```
 
-`list()` returns `{key, name, provider}` entries for available models.
+Return an array of `{ key, name, provider }` records for every model the active config can switch to.
 
 ## `smelt.model.set`
 

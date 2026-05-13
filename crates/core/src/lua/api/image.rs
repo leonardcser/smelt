@@ -1,17 +1,15 @@
 //! `smelt.image` — image file detection and base64 data-URL loading.
 
-use crate::lua::doc::{record_module_doc, register_fn};
+use crate::lua::doc::register_fn;
 use lua_doc_derive::lua_module;
 use mlua::prelude::*;
 
-#[lua_module]
+#[lua_module(
+    name = "smelt.image",
+    doc = "Image file detection and base64 data-URL loading."
+)]
 pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
     let image = lua.create_table()?;
-    record_module_doc(
-        "smelt.image",
-        "Image file detection and base64 data-URL loading.",
-    );
-
     register_fn(
         &image,
         "smelt.image",

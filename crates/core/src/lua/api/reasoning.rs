@@ -1,6 +1,6 @@
 //! `smelt.reasoning` — get/set/cycle reasoning effort. Mirrors `smelt.mode`; stubs overridden by TUI/Lua.
 
-use crate::lua::doc::{record_module_doc, register_fn};
+use crate::lua::doc::register_fn;
 use lua_doc_derive::{lua_module, LuaAlias};
 use mlua::prelude::*;
 
@@ -15,11 +15,12 @@ pub enum LuaReasoningEffort {
     Max,
 }
 
-#[lua_module]
+#[lua_module(
+    name = "smelt.reasoning",
+    doc = "Reasoning effort read/cycle. `reasoning.set` and `reasoning.cycle` are injected by the TUI layer so they can access the live app state."
+)]
 pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
     let reasoning_tbl = lua.create_table()?;
-    record_module_doc("smelt.reasoning", "Reasoning effort read/cycle. `reasoning.set` and `reasoning.cycle` are injected by the TUI layer so they can access the live app state.");
-
     register_fn(
         &reasoning_tbl,
         "smelt.reasoning",

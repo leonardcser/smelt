@@ -1,6 +1,6 @@
 //! `smelt.messages` — persistent message log. Full bodies (with tracebacks) live here; toasts show only the first line.
 
-use crate::lua::doc::{record_module_doc, register_fn};
+use crate::lua::doc::register_fn;
 use crate::lua::LuaShared;
 use crate::messages::MessageKind;
 use lua_doc_derive::lua_module;
@@ -8,14 +8,12 @@ use mlua::prelude::*;
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-#[lua_module]
+#[lua_module(
+    name = "smelt.messages",
+    doc = "Persistent message log with full bodies and tracebacks."
+)]
 pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) -> LuaResult<()> {
     let tbl = lua.create_table()?;
-    record_module_doc(
-        "smelt.messages",
-        "Persistent message log with full bodies and tracebacks.",
-    );
-
     let s = shared.clone();
     register_fn(
         &tbl,

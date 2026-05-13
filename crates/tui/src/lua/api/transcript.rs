@@ -3,20 +3,19 @@
 
 use lua_doc_derive::lua_module;
 use mlua::prelude::*;
-use smelt_core::lua::doc::{record_module_doc, register_ui_fn};
+use smelt_core::lua::doc::register_ui_fn;
 
-#[lua_module]
+#[lua_module(
+    name = "smelt.transcript",
+    doc = "Read rendered transcript display text and yank the current block. UiHost-only."
+)]
 pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
     let transcript_tbl = lua.create_table()?;
-    record_module_doc(
-        "smelt.transcript",
-        "Read rendered transcript display text and yank the current block. UiHost-only.",
-    );
     register_ui_fn(
         &transcript_tbl,
         "smelt.transcript",
         "text",
-        "Return `text` from the app state.",
+        "Return the full transcript as a single newline-joined string (post-render display text, with thinking blocks visible according to the `show_thinking` setting).",
         &[],
         lua,
         |_, ()| -> LuaResult<String> {

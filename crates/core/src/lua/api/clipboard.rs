@@ -1,14 +1,12 @@
 //! `smelt.clipboard` — read/write the system clipboard.
 
-use crate::lua::doc::{record_module_doc, register_fn};
+use crate::lua::doc::register_fn;
 use lua_doc_derive::lua_module;
 use mlua::prelude::*;
 
-#[lua_module]
+#[lua_module(name = "smelt.clipboard", doc = "Read and write the system clipboard.")]
 pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
     let clipboard_tbl = lua.create_table()?;
-    record_module_doc("smelt.clipboard", "Read and write the system clipboard.");
-
     register_fn(
         &clipboard_tbl,
         "smelt.clipboard",

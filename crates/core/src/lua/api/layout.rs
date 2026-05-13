@@ -2,7 +2,7 @@
 
 use crate::buffer::BufId;
 use crate::content::block_layout::{BlockLayout, Constraint, HboxItem};
-use crate::lua::doc::{record_module_doc, register_fn};
+use crate::lua::doc::register_fn;
 use lua_doc_derive::lua_module;
 use mlua::prelude::*;
 
@@ -56,14 +56,12 @@ fn collect_hbox_items(items: mlua::Table) -> LuaResult<Vec<HboxItem>> {
     Ok(out)
 }
 
-#[lua_module]
+#[lua_module(
+    name = "smelt.layout",
+    doc = "Composable block layout (vbox/hbox/leaf) for tool render callbacks."
+)]
 pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
     let layout_tbl = lua.create_table()?;
-    record_module_doc(
-        "smelt.layout",
-        "Composable block layout (vbox/hbox/leaf) for tool render callbacks.",
-    );
-
     register_fn(
         &layout_tbl,
         "smelt.layout",

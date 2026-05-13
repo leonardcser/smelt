@@ -3,7 +3,7 @@
 
 use lua_doc_derive::lua_module;
 use mlua::prelude::*;
-use smelt_core::lua::doc::{record_module_doc, register_ui_fn};
+use smelt_core::lua::doc::register_ui_fn;
 
 fn messages_to_lua(lua: &Lua, msgs: &[protocol::Message]) -> LuaResult<mlua::Table> {
     let tbl = lua.create_table()?;
@@ -41,15 +41,17 @@ fn messages_to_lua(lua: &Lua, msgs: &[protocol::Message]) -> LuaResult<mlua::Tab
     Ok(tbl)
 }
 
-#[lua_module]
+#[lua_module(
+    name = "smelt.session",
+    doc = "Current session metadata, turn list, message snapshots, rewind, and persisted session management. UiHost-only."
+)]
 pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
     let session_tbl = lua.create_table()?;
-    record_module_doc("smelt.session", "Current session metadata, turn list, message snapshots, rewind, and persisted session management. UiHost-only.");
     register_ui_fn(
         &session_tbl,
         "smelt.session",
         "title",
-        "Return `title` from the app state.",
+        "Session title (a short summary derived from the first user message), or `nil` until the engine assigns one.",
         &[],
         lua,
         |_, ()| -> LuaResult<Option<String>> {
@@ -60,7 +62,7 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
         &session_tbl,
         "smelt.session",
         "cwd",
-        "Return `cwd` from the app state.",
+        "Working directory the session was launched from. Stable across the session.",
         &[],
         lua,
         |_, ()| Ok(crate::lua::try_with_app(|app| app.cwd.clone()).unwrap_or_default()),
@@ -69,7 +71,7 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
         &session_tbl,
         "smelt.session",
         "cost",
-        "Return `cost` from the app state.",
+        "Cumulative session cost in USD across every model call this session has made.",
         &[],
         lua,
         |_, ()| -> LuaResult<f64> {
@@ -83,7 +85,7 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
         &session_tbl,
         "smelt.session",
         "context_tokens",
-        "Return `context_tokens` from the app state.",
+        "Most recent prompt-token count reported by the provider, or `nil` if no turn has completed yet.",
         &[],
         lua,
         |_, ()| -> LuaResult<Option<u32>> {
@@ -94,7 +96,7 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
         &session_tbl,
         "smelt.session",
         "context_window",
-        "Return `context_window` from the app state.",
+        "Configured context-window size in tokens for the active model. `nil` when the model entry has no declared limit.",
         &[],
         lua,
         |_, ()| -> LuaResult<Option<u32>> {
@@ -105,7 +107,7 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
         &session_tbl,
         "smelt.session",
         "created_at_ms",
-        "Return `created_at_ms` from the app state.",
+        "Unix-epoch timestamp (milliseconds) at which this session was started.",
         &[],
         lua,
         |_, ()| -> LuaResult<u64> {
@@ -116,7 +118,7 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
         &session_tbl,
         "smelt.session",
         "id",
-        "Return `id` from the app state.",
+        "Stable session id (matches the on-disk session filename).",
         &[],
         lua,
         |_, ()| Ok(crate::lua::try_with_app(|app| app.core.session.id.clone()).unwrap_or_default()),
@@ -125,7 +127,7 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
         &session_tbl,
         "smelt.session",
         "dir",
-        "Return `dir` from the app state.",
+        "Absolute path of the on-disk session directory (transcript JSONL, attachments, ledger).",
         &[],
         lua,
         |_, ()| -> LuaResult<String> {

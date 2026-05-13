@@ -46,8 +46,8 @@ end, { desc = "show keybindings" })
 smelt.keymap.set("", "?", function()
   if smelt.win.focus() == "prompt" then
     local txt = smelt.prompt.text()
-    local vim_mode = smelt.win.mode()
-    if vim_mode == "Normal" or vim_mode == "Visual" or vim_mode == "VisualLine" then
+    local vim_mode = smelt.vim.mode()
+    if vim_mode == "normal" or vim_mode == "visual" or vim_mode == "visual_line" then
       return false
     end
     if txt and txt ~= "" then

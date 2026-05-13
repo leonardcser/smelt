@@ -1,17 +1,15 @@
 //! `smelt.fuzzy` — score a candidate string against a query.
 
-use crate::lua::doc::{record_module_doc, register_fn};
+use crate::lua::doc::register_fn;
 use lua_doc_derive::lua_module;
 use mlua::prelude::*;
 
-#[lua_module]
+#[lua_module(
+    name = "smelt.fuzzy",
+    doc = "Fuzzy-match scoring for candidate strings against queries."
+)]
 pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
     let fuzzy_tbl = lua.create_table()?;
-    record_module_doc(
-        "smelt.fuzzy",
-        "Fuzzy-match scoring for candidate strings against queries.",
-    );
-
     register_fn(
         &fuzzy_tbl,
         "smelt.fuzzy",

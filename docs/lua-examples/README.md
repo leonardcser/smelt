@@ -45,9 +45,9 @@ hangs off `smelt.*` — flat namespace, Neovim-style.
 
 - `smelt.transcript.text()` — transcript content (snapshot)
 - `smelt.transcript.yank_block()` — copy the block under the cursor
-- `smelt.buf.text()` — prompt buffer content (snapshot)
+- `smelt.prompt.text()` — prompt buffer content (snapshot)
 - `smelt.win.focus()` — `"transcript"` or `"prompt"`
-- `smelt.win.mode()` — vim mode string (`"Normal"`, `"Insert"`, `"Visual"`)
+- `smelt.vim.mode()` — vim mode (`"insert"`, `"normal"`, `"visual"`, `"visual_line"`, or `nil`)
 
 ### UI primitives
 

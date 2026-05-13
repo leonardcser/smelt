@@ -6,16 +6,14 @@
 
 use lua_doc_derive::lua_module;
 use mlua::prelude::*;
-use smelt_core::lua::doc::{record_module_doc, register_ui_fn};
+use smelt_core::lua::doc::register_ui_fn;
 
-#[lua_module]
+#[lua_module(
+    name = "smelt.history",
+    doc = "Prompt history entries and search. UiHost-only."
+)]
 pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
     let history_tbl = lua.create_table()?;
-    record_module_doc(
-        "smelt.history",
-        "Prompt history entries and search. UiHost-only.",
-    );
-
     register_ui_fn(
         &history_tbl,
         "smelt.history",

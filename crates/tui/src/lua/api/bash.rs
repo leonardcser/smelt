@@ -11,16 +11,14 @@ use crate::content::to_buffer::render_into_buffer;
 use crate::smelt_term::BufId;
 use lua_doc_derive::lua_module;
 use mlua::prelude::*;
-use smelt_core::lua::doc::{record_module_doc, register_ui_fn};
+use smelt_core::lua::doc::register_ui_fn;
 
-#[lua_module]
+#[lua_module(
+    name = "smelt.bash",
+    doc = "Paint bash syntax highlighting into a Buffer. UiHost-only."
+)]
 pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
     let bash = lua.create_table()?;
-    record_module_doc(
-        "smelt.bash",
-        "Paint bash syntax highlighting into a Buffer. UiHost-only.",
-    );
-
     register_ui_fn(
         &bash,
         "smelt.bash",

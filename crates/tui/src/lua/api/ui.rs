@@ -4,10 +4,9 @@
 
 use lua_doc_derive::lua_module;
 use mlua::prelude::*;
-use smelt_core::lua::doc::{record_module_doc, register_ui_fn};
+use smelt_core::lua::doc::register_ui_fn;
 
 pub(super) fn register(lua: &Lua, smelt_ui: &mlua::Table) -> LuaResult<()> {
-    record_module_doc("smelt.ui", "Overlay primitives — ghost text, spinner, picker, and generic overlay composition. UiHost-only.");
     register_ghost_text(lua, smelt_ui)?;
     register_spinner(lua, smelt_ui)?;
     register_picker(lua, smelt_ui)?;
@@ -15,7 +14,10 @@ pub(super) fn register(lua: &Lua, smelt_ui: &mlua::Table) -> LuaResult<()> {
     Ok(())
 }
 
-#[lua_module]
+#[lua_module(
+    name = "smelt.ui",
+    doc = "Overlay primitives — ghost text, spinner, picker, and generic overlay composition. UiHost-only."
+)]
 fn register_ghost_text(lua: &Lua, smelt_ui: &mlua::Table) -> LuaResult<()> {
     let ghost_text_tbl = lua.create_table()?;
     register_ui_fn(
@@ -46,14 +48,13 @@ fn register_ghost_text(lua: &Lua, smelt_ui: &mlua::Table) -> LuaResult<()> {
     Ok(())
 }
 
-#[lua_module]
+#[lua_module(
+    name = "smelt.ui.spinner",
+    doc = "Shared spinner glyph and cadence for plugin animations. UiHost-only."
+)]
 fn register_spinner(lua: &Lua, smelt_ui: &mlua::Table) -> LuaResult<()> {
     // Same glyph and cadence as the status bar's "working" pill for in-sync animation.
     let spinner_tbl = lua.create_table()?;
-    record_module_doc(
-        "smelt.ui.spinner",
-        "Shared spinner glyph and cadence for plugin animations. UiHost-only.",
-    );
     register_ui_fn(
         &spinner_tbl,
         "smelt.ui.spinner",
@@ -76,13 +77,12 @@ fn register_spinner(lua: &Lua, smelt_ui: &mlua::Table) -> LuaResult<()> {
     Ok(())
 }
 
-#[lua_module]
+#[lua_module(
+    name = "smelt.ui.picker",
+    doc = "Picker overlay: open, set_items, set_selected. UiHost-only."
+)]
 fn register_picker(lua: &Lua, smelt_ui: &mlua::Table) -> LuaResult<()> {
     let picker_tbl = lua.create_table()?;
-    record_module_doc(
-        "smelt.ui.picker",
-        "Picker overlay: open, set_items, set_selected. UiHost-only.",
-    );
     register_ui_fn(
         &picker_tbl,
         "smelt.ui",
@@ -136,13 +136,12 @@ fn register_picker(lua: &Lua, smelt_ui: &mlua::Table) -> LuaResult<()> {
     Ok(())
 }
 
-#[lua_module]
+#[lua_module(
+    name = "smelt.ui.overlay",
+    doc = "Generic overlay composition from items and paint regions. UiHost-only."
+)]
 fn register_overlay(lua: &Lua, smelt_ui: &mlua::Table) -> LuaResult<()> {
     let overlay_tbl = lua.create_table()?;
-    record_module_doc(
-        "smelt.ui.overlay",
-        "Generic overlay composition from items and paint regions. UiHost-only.",
-    );
     register_ui_fn(
         &overlay_tbl,
         "smelt.ui.overlay",

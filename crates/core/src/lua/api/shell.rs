@@ -1,6 +1,6 @@
 //! `smelt.shell` — shell command splitting and interactive/background-operator validators.
 
-use crate::lua::doc::{record_module_doc, register_fn};
+use crate::lua::doc::register_fn;
 use lua_doc_derive::lua_module;
 use mlua::prelude::*;
 
@@ -51,13 +51,12 @@ fn check_shell_background_operator(command: &str) -> Option<String> {
     }
 }
 
-#[lua_module]
+#[lua_module(
+    name = "smelt.shell",
+    doc = "Shell command splitting and interactive/background-operator validators."
+)]
 pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
     let shell_tbl = lua.create_table()?;
-    record_module_doc(
-        "smelt.shell",
-        "Shell command splitting and interactive/background-operator validators.",
-    );
     register_fn(
         &shell_tbl,
         "smelt.shell",

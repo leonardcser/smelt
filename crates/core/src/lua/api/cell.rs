@@ -3,7 +3,7 @@
 //! a sticky [`CellHandle`] userdata for repeated access (`local c =
 //! smelt.cell("foo"); c:set(1)`).
 
-use crate::lua::doc::{record_alias, record_class, record_module_doc, register_fn};
+use crate::lua::doc::{record_alias, record_class, register_fn};
 use crate::lua::lua_type::{LuaAliasDecl, LuaCallback, LuaClassDecl, LuaType, LuaTypeTuple};
 use crate::lua::LuaHandle;
 use lua_doc_derive::lua_module;
@@ -59,18 +59,17 @@ impl std::ops::Deref for LuaCellName {
     }
 }
 
-#[lua_module]
+#[lua_module(
+    name = "smelt.cell",
+    doc = "Typed reactive cell registry. Surface is a flat table for one-shot \
+reads/writes and a callable that hands back a sticky handle for repeated \
+access (`local c = smelt.cell(\"foo\"); c:set(1)`). \
+[`smelt.au`](au.md) is an nvim-shaped alias of `subscribe`/`set`."
+)]
 pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
     use crate::cells::{LuaCellValue, SubscriberKind};
     use std::rc::Rc;
 
-    record_module_doc(
-        "smelt.cell",
-        "Typed reactive cell registry. Surface is a flat table for one-shot \
-reads/writes and a callable that hands back a sticky handle for repeated \
-access (`local c = smelt.cell(\"foo\"); c:set(1)`). \
-[`smelt.au`](au.md) is an nvim-shaped alias of `subscribe`/`set`.",
-    );
     record_class(LuaClassDecl {
         name: "smelt.cell.CellHandle",
         doc: "Sticky handle returned by `smelt.cell(name)`. Provides `:get()`, `:set(value)`, `:subscribe(handler)`, `:unsubscribe(id)`, and `:name()` methods.",

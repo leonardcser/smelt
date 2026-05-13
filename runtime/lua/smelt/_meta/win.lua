@@ -7,7 +7,7 @@
 ---@class smelt.win
 local win = {}
 
---- `smelt.win.buf(win_id) -> buf_id | nil`
+--- Return the buffer id backing window `id`, or `nil` if no such window exists.
 ---@type fun(id: integer): integer?
 win.buf = nil
 
@@ -31,13 +31,9 @@ win.configure_input = nil
 ---@type fun(win_id: integer, initial_cursor: integer?): nil
 win.configure_list = nil
 
---- Return `focus` from the app state.
+--- Return which top-level pane currently has focus: `"transcript"` or `"prompt"`.
 ---@type fun(): string
 win.focus = nil
-
---- Vim mode label of the focused window (empty string if non-vim).
----@type fun(): string
-win.mode = nil
 
 --- Subscribe `func` to event `event` on window `win_id`. Returns a callback id usable with `clear_event`.
 ---@type fun(win_id: integer, event: smelt.win.Event, func: fun(value: table)): integer
@@ -47,11 +43,11 @@ win.on_event = nil
 ---@type fun(buf_id: integer, opts: table?): integer?
 win.open = nil
 
---- `smelt.win.rect(win_id) -> {row, col, width, height} | nil` — nil until first render.
+--- Return the window's current viewport rect as `{ row, col, width, height }`, or `nil` until the first render lays it out.
 ---@type fun(id: integer): any
 win.rect = nil
 
---- `smelt.win.set_focus(win_id)`
+--- Move keyboard focus to window `id`. No-op if the window is not focusable or does not exist.
 ---@type fun(id: integer): nil
 win.set_focus = nil
 

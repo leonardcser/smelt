@@ -1,19 +1,18 @@
 //! `smelt.task` — `alloc`/`resume` for the yield-then-resume coroutine bridge.
 
-use crate::lua::doc::{record_module_doc, register_fn};
+use crate::lua::doc::register_fn;
 use crate::lua::{LuaShared, TaskEvent};
 use lua_doc_derive::lua_module;
 use mlua::prelude::*;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
 
-#[lua_module]
+#[lua_module(
+    name = "smelt.task",
+    doc = "Yield-then-resume coroutine bridge: alloc and resume external tasks."
+)]
 pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) -> LuaResult<()> {
     let task_tbl = lua.create_table()?;
-    record_module_doc(
-        "smelt.task",
-        "Yield-then-resume coroutine bridge: alloc and resume external tasks.",
-    );
     {
         let s = shared.clone();
         register_fn(

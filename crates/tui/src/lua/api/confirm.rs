@@ -28,16 +28,17 @@ use crate::content::to_buffer::render_into_buffer;
 use crate::smelt_term::BufId;
 use lua_doc_derive::lua_module;
 use smelt_core::cells::ConfirmResolved;
-use smelt_core::lua::doc::{record_module_doc, register_ui_fn};
+use smelt_core::lua::doc::register_ui_fn;
 use smelt_core::theme::role_hl;
 use smelt_core::transcript_model::{ApprovalScope, ConfirmChoice, ConfirmRequest};
 
 /// Register `smelt.confirm.*` primitives.
-#[lua_module]
+#[lua_module(
+    name = "smelt.confirm",
+    doc = "Confirm dialog primitives — render title, preview, back-tab cycling, and choice resolution. UiHost-only."
+)]
 pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
     let confirm_tbl = lua.create_table()?;
-    record_module_doc("smelt.confirm", "Confirm dialog primitives — render title, preview, back-tab cycling, and choice resolution. UiHost-only.");
-
     // smelt.confirm._render_title(buf_id, handle_id)
     register_ui_fn(
         &confirm_tbl,

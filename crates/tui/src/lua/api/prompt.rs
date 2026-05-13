@@ -7,15 +7,14 @@
 
 use lua_doc_derive::lua_module;
 use mlua::prelude::*;
-use smelt_core::lua::doc::{record_module_doc, register_ui_fn};
+use smelt_core::lua::doc::register_ui_fn;
 
-#[lua_module]
+#[lua_module(
+    name = "smelt.prompt",
+    doc = "The main editable input surface: win_id, text get/set, and cursor control. UiHost-only."
+)]
 pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
     let prompt_tbl = lua.create_table()?;
-    record_module_doc(
-        "smelt.prompt",
-        "The main editable input surface: win_id, text get/set, and cursor control. UiHost-only.",
-    );
     register_ui_fn(
         &prompt_tbl,
         "smelt.prompt",

@@ -7,18 +7,16 @@ use crate::smelt_term::BufId;
 use lua_doc_derive::lua_module;
 use mlua::prelude::*;
 use smelt_core::content::wrap::wrap_line;
-use smelt_core::lua::doc::{record_module_doc, register_ui_fn};
+use smelt_core::lua::doc::register_ui_fn;
 use smelt_core::theme::role_hl;
 use unicode_width::UnicodeWidthStr;
 
-#[lua_module]
+#[lua_module(
+    name = "smelt.text",
+    doc = "Visual-width measurement and dim/error body rendering into a Buffer. UiHost-only."
+)]
 pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
     let text = lua.create_table()?;
-    record_module_doc(
-        "smelt.text",
-        "Visual-width measurement and dim/error body rendering into a Buffer. UiHost-only.",
-    );
-
     register_ui_fn(
         &text,
         "smelt.text",

@@ -4,7 +4,7 @@
 use crate::lua::{LuaHandle, LuaShared, StatusSource};
 use lua_doc_derive::{lua_module, LuaOpts};
 use mlua::prelude::*;
-use smelt_core::lua::doc::{record_module_doc, register_ui_fn};
+use smelt_core::lua::doc::register_ui_fn;
 use smelt_core::lua::lua_type::LuaCallback;
 use std::sync::Arc;
 
@@ -16,13 +16,12 @@ pub struct LuaStatuslineRegisterOpts {
     pub align: Option<String>,
 }
 
-#[lua_module]
+#[lua_module(
+    name = "smelt.statusline",
+    doc = "Register/unregister statusline sources and snapshot composer state. UiHost-only."
+)]
 pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) -> LuaResult<()> {
     let statusline_tbl = lua.create_table()?;
-    record_module_doc(
-        "smelt.statusline",
-        "Register/unregister statusline sources and snapshot composer state. UiHost-only.",
-    );
     {
         let s = shared.clone();
         register_ui_fn(

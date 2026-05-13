@@ -12,7 +12,7 @@ Read rendered transcript display text and yank the current block. UiHost-only.
 fun(): string
 ```
 
-Return `text` from the app state.
+Return the full transcript as a single newline-joined string (post-render display text, with thinking blocks visible according to the `show_thinking` setting).
 
 ## `smelt.transcript.yank_block`
 

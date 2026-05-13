@@ -5,7 +5,7 @@
 use lua_doc_derive::lua_module;
 use mlua::prelude::*;
 use smelt_core::config::{ResolvedSettings, SETTINGS_KEYS};
-use smelt_core::lua::doc::{record_module_doc, register_ui_fn};
+use smelt_core::lua::doc::register_ui_fn;
 use std::sync::Arc;
 
 fn known(key: &str) -> bool {
@@ -51,14 +51,16 @@ fn write_resolved(s: &mut ResolvedSettings, key: &str, value: bool) -> bool {
     true
 }
 
-#[lua_module]
+#[lua_module(
+    name = "smelt.settings",
+    doc = "Metatable-backed proxy table for boolean preferences. Read and write keys directly (`settings.foo = true`) or iterate with `pairs`. UiHost-only."
+)]
 pub(super) fn register(
     lua: &Lua,
     smelt: &mlua::Table,
     shared: &Arc<crate::lua::LuaShared>,
 ) -> LuaResult<()> {
     let settings_tbl = lua.create_table()?;
-    record_module_doc("smelt.settings", "Metatable-backed proxy table for boolean preferences. Read and write keys directly (`settings.foo = true`) or iterate with `pairs`. UiHost-only.");
     let mt = lua.create_table()?;
 
     register_ui_fn(

@@ -1,17 +1,15 @@
 //! `smelt.skills` — list/load skill content from the `SkillLoader` populated at startup.
 
-use crate::lua::doc::{record_module_doc, register_fn};
+use crate::lua::doc::register_fn;
 use lua_doc_derive::lua_module;
 use mlua::prelude::*;
 
-#[lua_module]
+#[lua_module(
+    name = "smelt.skills",
+    doc = "List and load skill content from the SkillLoader populated at startup."
+)]
 pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
     let tbl = lua.create_table()?;
-    record_module_doc(
-        "smelt.skills",
-        "List and load skill content from the SkillLoader populated at startup.",
-    );
-
     register_fn(
         &tbl,
         "smelt.skills",

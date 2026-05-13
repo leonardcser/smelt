@@ -4,7 +4,7 @@ use mlua::prelude::*;
 use std::sync::Arc;
 
 use crate::config::{ModelConfig, ProviderConfig};
-use crate::lua::doc::{record_module_doc, register_fn};
+use crate::lua::doc::register_fn;
 use crate::lua::lua_type::{LuaType, LuaTypeTuple};
 use crate::lua::LuaShared;
 use lua_doc_derive::{lua_module, LuaOpts};
@@ -111,14 +111,12 @@ pub struct LuaProviderConfig {
     pub models: Vec<LuaModelEntry>,
 }
 
-#[lua_module]
+#[lua_module(
+    name = "smelt.provider",
+    doc = "List built-in model providers and register custom ones. Headless-safe."
+)]
 pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) -> LuaResult<()> {
     let tbl = lua.create_table()?;
-    record_module_doc(
-        "smelt.provider",
-        "List built-in model providers and register custom ones. Headless-safe.",
-    );
-
     {
         let shared = Arc::clone(shared);
         register_fn(

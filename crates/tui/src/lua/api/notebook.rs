@@ -6,19 +6,18 @@ use crate::content::selection::wrap_line;
 use crate::smelt_term::BufId;
 use lua_doc_derive::lua_module;
 use mlua::prelude::*;
-use smelt_core::lua::doc::{record_module_doc, register_ui_fn};
+use smelt_core::lua::doc::register_ui_fn;
 use smelt_core::notebook;
 use smelt_core::notebook::NotebookRenderData;
 use smelt_core::theme::role_hl;
 use std::collections::HashMap;
 
-#[lua_module]
+#[lua_module(
+    name = "smelt.notebook",
+    doc = "Render, parse, read, and apply notebook cell edits. UiHost-only."
+)]
 pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
     let notebook = lua.create_table()?;
-    record_module_doc(
-        "smelt.notebook",
-        "Render, parse, read, and apply notebook cell edits. UiHost-only.",
-    );
     register_ui_fn(
         &notebook,
         "smelt.notebook",
@@ -70,12 +69,11 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
         },
     )?;
 
-    // `smelt.notebook.read(path, offset, limit)` — same cell-by-cell text as the read_file tool.
     register_ui_fn(
         &notebook,
         "smelt.notebook",
         "read",
-        "`smelt.notebook.read(path, offset, limit)` — same cell-by-cell text as the read_file tool.",
+        "Render a Jupyter notebook at `path` as cell-by-cell text starting at `offset` for at most `limit` cells. Returns `(text, nil)` on success or `(nil, err_msg)` on parse failure — same output the built-in `read_file` tool produces.",
         &["path", "offset", "limit"],
         lua,
         |_, (path, offset, limit): (String, u64, u64)| -> LuaResult<(Option<String>, Option<String>)> {
@@ -89,13 +87,11 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
         },
     )?;
 
-    // `smelt.notebook.apply_edit(args)` — write the file and return (message, metadata)
-    // or (nil, error). Caller holds the per-path advisory flock.
     register_ui_fn(
         &notebook,
         "smelt.notebook",
         "apply_edit",
-        "`smelt.notebook.apply_edit(args)` — write the file and return (message, metadata) or (nil, error). Caller holds the per-path advisory flock.",
+        "Apply a notebook edit (cell insert/replace/delete) described by `args` and persist the new file. Returns `(message_table, nil)` on success or `(nil, err_msg)` on failure. Callers are expected to hold the per-path advisory flock.",
         &["args"],
         lua,
         |lua, args: mlua::Table| -> LuaResult<(Option<mlua::Value>, Option<String>)> {

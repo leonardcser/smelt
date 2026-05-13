@@ -4,21 +4,20 @@
 use crate::lua::{LuaHandle, LuaShared};
 use lua_doc_derive::lua_module;
 use mlua::prelude::*;
-use smelt_core::lua::doc::{record_module_doc, register_ui_fn};
+use smelt_core::lua::doc::register_ui_fn;
 use smelt_core::lua::lua_type::LuaCallback;
 use std::sync::Arc;
 
-#[lua_module]
+#[lua_module(
+    name = "smelt.keymap",
+    doc = "Register key bindings and query layered help sections. UiHost-only."
+)]
 pub(super) fn register(
     lua: &Lua,
     smelt_keymap: &mlua::Table,
     shared: &Arc<LuaShared>,
 ) -> LuaResult<()> {
     let keymap_tbl = lua.create_table()?;
-    record_module_doc(
-        "smelt.keymap",
-        "Register key bindings and query layered help sections. UiHost-only.",
-    );
     register_ui_fn(
         &keymap_tbl,
         "smelt.keymap",

@@ -1,17 +1,15 @@
 //! `smelt.os` — environment and system primitives (getenv, setenv, platform, cwd, pid, etc.).
 
-use crate::lua::doc::{record_module_doc, register_fn};
+use crate::lua::doc::register_fn;
 use lua_doc_derive::lua_module;
 use mlua::prelude::*;
 
-#[lua_module]
+#[lua_module(
+    name = "smelt.os",
+    doc = "Environment and system primitives: getenv, setenv, platform, cwd, pid, etc."
+)]
 pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
     let os = lua.create_table()?;
-    record_module_doc(
-        "smelt.os",
-        "Environment and system primitives: getenv, setenv, platform, cwd, pid, etc.",
-    );
-
     register_fn(
         &os,
         "smelt.os",

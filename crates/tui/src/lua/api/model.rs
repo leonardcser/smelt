@@ -4,21 +4,19 @@
 
 use lua_doc_derive::lua_module;
 use mlua::prelude::*;
-use smelt_core::lua::doc::{record_module_doc, register_ui_fn};
+use smelt_core::lua::doc::register_ui_fn;
 
-#[lua_module]
+#[lua_module(
+    name = "smelt.model",
+    doc = "Get, set, and list the configured provider/model triple. Mirrors smelt.mode and smelt.reasoning."
+)]
 pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
     let model_tbl = lua.create_table()?;
-    record_module_doc(
-        "smelt.model",
-        "Get, set, and list the configured provider/model triple. Mirrors smelt.mode and smelt.reasoning.",
-    );
-
     register_ui_fn(
         &model_tbl,
         "smelt.model",
         "get",
-        "Return `get` from the app state.",
+        "Return the active model key (matches an entry in `list()`).",
         &[],
         lua,
         |_, ()| -> LuaResult<String> {
@@ -44,7 +42,7 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
         &model_tbl,
         "smelt.model",
         "list",
-        "`list()` returns `{key, name, provider}` entries for available models.",
+        "Return an array of `{ key, name, provider }` records for every model the active config can switch to.",
         &[],
         lua,
         |lua, ()| -> LuaResult<mlua::Table> {

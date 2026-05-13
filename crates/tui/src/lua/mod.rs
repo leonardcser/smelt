@@ -4,6 +4,7 @@
 #![allow(clippy::arc_with_non_send_sync)]
 
 mod api;
+pub(crate) use api::vim::LuaVimMode;
 pub mod app_ref;
 pub(crate) mod paint;
 pub(crate) mod parse;
@@ -1160,13 +1161,13 @@ mod tests {
             .expect("exec");
         use smelt_core::lua::runtime::KeymapResult;
         let ctx_pairs: Vec<(&str, String)> =
-            vec![("vim_mode_at_chord_start", "Insert".to_string())];
+            vec![("vim_mode_at_chord_start", "insert".to_string())];
         assert_eq!(
             rt.run_keymap("<Esc><Esc>", Some("Normal"), Some(ctx_pairs.as_slice())),
             KeymapResult::Consumed
         );
         let msgs = drain_notifications(&rt);
-        assert_eq!(msgs, vec!["mode=Insert"]);
+        assert_eq!(msgs, vec!["mode=insert"]);
     }
 
     #[test]

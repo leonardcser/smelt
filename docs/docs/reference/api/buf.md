@@ -75,8 +75,8 @@ Replace the buffer's full source text in one call. Cheaper than `set_lines` when
 ## `smelt.buf.text`
 
 ```lua
-fun(): string
+fun(buf: integer): string?
 ```
 
-Return the prompt input buffer's current text.
+Return the buffer's full source as a string. `nil` if no buffer has that id.
 

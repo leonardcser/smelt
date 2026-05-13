@@ -7,7 +7,7 @@
 ---@class smelt.notebook
 local notebook = {}
 
---- `smelt.notebook.apply_edit(args)` — write the file and return (message, metadata) or (nil, error). Caller holds the per-path advisory flock.
+--- Apply a notebook edit (cell insert/replace/delete) described by `args` and persist the new file. Returns `(message_table, nil)` on success or `(nil, err_msg)` on failure. Callers are expected to hold the per-path advisory flock.
 ---@type fun(args: table): any?, string?
 notebook.apply_edit = nil
 
@@ -19,7 +19,7 @@ notebook.is_notebook_path = nil
 ---@type fun(json: string): table?, string?
 notebook.parse = nil
 
---- `smelt.notebook.read(path, offset, limit)` — same cell-by-cell text as the read_file tool.
+--- Render a Jupyter notebook at `path` as cell-by-cell text starting at `offset` for at most `limit` cells. Returns `(text, nil)` on success or `(nil, err_msg)` on parse failure — same output the built-in `read_file` tool produces.
 ---@type fun(path: string, offset: integer, limit: integer): string?, string?
 notebook.read = nil
 

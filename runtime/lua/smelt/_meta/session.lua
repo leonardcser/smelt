@@ -7,23 +7,23 @@
 ---@class smelt.session
 local session = {}
 
---- Return `context_tokens` from the app state.
+--- Most recent prompt-token count reported by the provider, or `nil` if no turn has completed yet.
 ---@type fun(): integer?
 session.context_tokens = nil
 
---- Return `context_window` from the app state.
+--- Configured context-window size in tokens for the active model. `nil` when the model entry has no declared limit.
 ---@type fun(): integer?
 session.context_window = nil
 
---- Return `cost` from the app state.
+--- Cumulative session cost in USD across every model call this session has made.
 ---@type fun(): number
 session.cost = nil
 
---- Return `created_at_ms` from the app state.
+--- Unix-epoch timestamp (milliseconds) at which this session was started.
 ---@type fun(): integer
 session.created_at_ms = nil
 
---- Return `cwd` from the app state.
+--- Working directory the session was launched from. Stable across the session.
 ---@type fun(): string
 session.cwd = nil
 
@@ -31,7 +31,7 @@ session.cwd = nil
 ---@type fun(id: string): nil
 session.delete = nil
 
---- Return `dir` from the app state.
+--- Absolute path of the on-disk session directory (transcript JSONL, attachments, ledger).
 ---@type fun(): string
 session.dir = nil
 
@@ -39,7 +39,7 @@ session.dir = nil
 ---@type fun(): nil
 session.fork = nil
 
---- Return `id` from the app state.
+--- Stable session id (matches the on-disk session filename).
 ---@type fun(): string
 session.id = nil
 
@@ -63,7 +63,7 @@ session.reset = nil
 ---@type fun(block_idx: integer?, opts: table?): nil
 session.rewind_to = nil
 
---- Return `title` from the app state.
+--- Session title (a short summary derived from the first user message), or `nil` until the engine assigns one.
 ---@type fun(): string?
 session.title = nil
 

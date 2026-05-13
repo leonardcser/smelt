@@ -1,7 +1,7 @@
 //! `smelt.tools` — register/unregister plugin tools and resolve their results to the engine.
 
 use super::{lua_table_to_args, lua_table_to_json};
-use crate::lua::doc::{record_module_doc, register_fn};
+use crate::lua::doc::register_fn;
 use crate::lua::{LuaHandle, LuaShared, ToolHandles};
 use lua_doc_derive::{lua_module, LuaAlias, LuaOpts};
 use mlua::prelude::*;
@@ -92,13 +92,12 @@ pub struct LuaToolDef {
     pub override_core: bool,
 }
 
-#[lua_module]
+#[lua_module(
+    name = "smelt.tools",
+    doc = "Register, unregister, and resolve plugin tools for the engine."
+)]
 pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) -> LuaResult<()> {
     let tools_tbl = lua.create_table()?;
-    record_module_doc(
-        "smelt.tools",
-        "Register, unregister, and resolve plugin tools for the engine.",
-    );
     {
         let s = shared.clone();
         register_fn(

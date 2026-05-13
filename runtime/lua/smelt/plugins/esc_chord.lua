@@ -6,12 +6,12 @@ smelt.keymap.set("", "<Esc><Esc>", function(ctx)
     return false
   end
 
-  local restore_insert = ctx.vim_mode_at_chord_start == "Insert"
+  local restore_insert = ctx.vim_mode_at_chord_start == "insert"
 
   if smelt.engine.is_compacting() then
     smelt.engine.cancel()
     if restore_insert then
-      smelt.vim.set_mode("Insert")
+      smelt.vim.set_mode("insert")
     end
     return
   end

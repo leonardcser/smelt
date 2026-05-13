@@ -1,6 +1,6 @@
 //! `smelt.timer` + `smelt.defer` — one-shot and recurring timer callbacks.
 
-use crate::lua::doc::{record_module_doc, register_fn};
+use crate::lua::doc::register_fn;
 use crate::lua::lua_type::LuaCallback;
 use crate::lua::LuaHandle;
 use lua_doc_derive::lua_module;
@@ -9,14 +9,12 @@ use std::time::Duration;
 
 type TimerHandler = LuaCallback<(), ()>;
 
-#[lua_module]
+#[lua_module(
+    name = "smelt.timer",
+    doc = "One-shot and recurring timer callbacks. `defer` is a fire-and-forget alias of `timer.set`."
+)]
 pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
     let timer_tbl = lua.create_table()?;
-    record_module_doc(
-        "smelt.timer",
-        "One-shot and recurring timer callbacks. `defer` is a fire-and-forget alias of `timer.set`.",
-    );
-
     register_fn(
         &timer_tbl,
         "smelt.timer",

@@ -3,17 +3,15 @@
 use mlua::prelude::*;
 
 use crate::html;
-use crate::lua::doc::{record_module_doc, register_fn};
+use crate::lua::doc::register_fn;
 use lua_doc_derive::lua_module;
 
-#[lua_module]
+#[lua_module(
+    name = "smelt.html",
+    doc = "HTML parsing: title extraction, link scraping, to_text, to_markdown, DDG results."
+)]
 pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
     let html_tbl = lua.create_table()?;
-    record_module_doc(
-        "smelt.html",
-        "HTML parsing: title extraction, link scraping, to_text, to_markdown, DDG results.",
-    );
-
     register_fn(
         &html_tbl,
         "smelt.html",

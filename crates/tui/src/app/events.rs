@@ -299,7 +299,7 @@ impl TuiApp {
                         let ctx_pairs: Vec<(&str, String)> = vec![(
                             "vim_mode_at_chord_start",
                             vim_mode_at_start
-                                .map(|m| format!("{m:?}"))
+                                .map(|m| crate::lua::LuaVimMode::from(m).label().to_string())
                                 .unwrap_or_default(),
                         )];
                         let res = self.lua.run_keymap(

@@ -6,14 +6,12 @@ use lua_doc_derive::lua_module;
 use mlua::prelude::*;
 use smelt_core::lua::doc::{record_module_doc, register_ui_fn};
 
-#[lua_module]
+#[lua_module(
+    name = "smelt.metrics",
+    doc = "Preformatted stats text and live perf instrumentation. UiHost-only."
+)]
 pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
     let metrics_tbl = lua.create_table()?;
-    record_module_doc(
-        "smelt.metrics",
-        "Preformatted stats text and live perf instrumentation. UiHost-only.",
-    );
-
     register_ui_fn(
         &metrics_tbl,
         "smelt.metrics",

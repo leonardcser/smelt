@@ -12,7 +12,7 @@ Current session metadata, turn list, message snapshots, rewind, and persisted se
 fun(): integer?
 ```
 
-Return `context_tokens` from the app state.
+Most recent prompt-token count reported by the provider, or `nil` if no turn has completed yet.
 
 ## `smelt.session.context_window`
 
@@ -20,7 +20,7 @@ Return `context_tokens` from the app state.
 fun(): integer?
 ```
 
-Return `context_window` from the app state.
+Configured context-window size in tokens for the active model. `nil` when the model entry has no declared limit.
 
 ## `smelt.session.cost`
 
@@ -28,7 +28,7 @@ Return `context_window` from the app state.
 fun(): number
 ```
 
-Return `cost` from the app state.
+Cumulative session cost in USD across every model call this session has made.
 
 ## `smelt.session.created_at_ms`
 
@@ -36,7 +36,7 @@ Return `cost` from the app state.
 fun(): integer
 ```
 
-Return `created_at_ms` from the app state.
+Unix-epoch timestamp (milliseconds) at which this session was started.
 
 ## `smelt.session.cwd`
 
@@ -44,7 +44,7 @@ Return `created_at_ms` from the app state.
 fun(): string
 ```
 
-Return `cwd` from the app state.
+Working directory the session was launched from. Stable across the session.
 
 ## `smelt.session.delete`
 
@@ -60,7 +60,7 @@ Delete the persisted session with `id`. Refuses to delete the currently active s
 fun(): string
 ```
 
-Return `dir` from the app state.
+Absolute path of the on-disk session directory (transcript JSONL, attachments, ledger).
 
 ## `smelt.session.fork`
 
@@ -76,7 +76,7 @@ Fork the current session: clone its messages into a new session id and switch to
 fun(): string
 ```
 
-Return `id` from the app state.
+Stable session id (matches the on-disk session filename).
 
 ## `smelt.session.list`
 
@@ -124,7 +124,7 @@ Rewind the session to a prior user turn. `block_idx = nil` rewinds to before the
 fun(): string?
 ```
 
-Return `title` from the app state.
+Session title (a short summary derived from the first user message), or `nil` until the engine assigns one.
 
 ## `smelt.session.turns`
 
