@@ -1,7 +1,5 @@
 mod setup;
 mod startup;
-#[cfg(feature = "dev-tools")]
-mod synth;
 
 use clap::{Parser, Subcommand, ValueEnum};
 use crossterm::ExecutableCommand;
@@ -118,26 +116,6 @@ enum ColorMode {
 enum Commands {
     /// Manage provider authentication (add providers, Codex or Copilot login/logout)
     Auth,
-    /// Generate a synthetic session for performance testing.
-    ///
-    /// Writes a session with `--turns` (user, assistant) message pairs to
-    /// `<state>/sessions/<id>/`, then prints the new session id. Resume
-    /// it via `smelt -r <id>` to inspect scrolling, layout, and theme
-    /// performance against a long transcript without a live LLM.
-    #[cfg(feature = "dev-tools")]
-    Synth {
-        /// How many user/assistant turn pairs to generate.
-        #[arg(long, default_value = "5000")]
-        turns: usize,
-        /// Words per assistant message body. Bigger means more layout
-        /// work per row.
-        #[arg(long, default_value = "60")]
-        words: usize,
-        /// Optional title for the synthetic session (defaults to a
-        /// labelled stamp).
-        #[arg(long)]
-        title: Option<String>,
-    },
 }
 
 #[tokio::main]
@@ -156,16 +134,6 @@ async fn main() {
 
     if let Some(Commands::Auth) = args.command {
         setup::run_auth_command().await;
-        return;
-    }
-    #[cfg(feature = "dev-tools")]
-    if let Some(Commands::Synth {
-        turns,
-        words,
-        title,
-    }) = args.command
-    {
-        synth::run(turns, words, title);
         return;
     }
 

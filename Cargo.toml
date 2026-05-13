@@ -13,11 +13,6 @@ repository = "https://github.com/leonardcser/smelt"
 name = "smelt"
 path = "src/main.rs"
 
-[features]
-default = []
-# Includes dev/perf utilities like the `synth` subcommand.
-dev-tools = []
-
 [dependencies]
 protocol = { path = "crates/protocol" }
 engine = { path = "crates/engine" }

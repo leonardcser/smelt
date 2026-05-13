@@ -1,10 +1,66 @@
-//! `smelt synth` — generate a synthetic session for perf testing.
+//! `cargo xtask synth` — generate a synthetic session for perf testing.
+//!
+//! Writes a session with `--turns` (user, assistant) message pairs to
+//! `<state>/sessions/<id>/`, then prints the new session id. Resume it via
+//! `smelt -r <id>` to inspect scrolling, layout, and theme performance against
+//! a long transcript without a live LLM.
 
 use protocol::Content;
 use smelt_core::attachment::AttachmentStore;
 use smelt_core::session::{self, Session};
 
-pub fn run(turns: usize, words: usize, title: Option<String>) {
+pub fn run() {
+    let mut turns: usize = 5000;
+    let mut words: usize = 60;
+    let mut title: Option<String> = None;
+
+    let mut args = std::env::args().skip(2);
+    while let Some(arg) = args.next() {
+        match arg.as_str() {
+            "--turns" => {
+                turns = args
+                    .next()
+                    .and_then(|v| v.parse().ok())
+                    .unwrap_or_else(|| usage_exit("--turns expects a positive integer"));
+            }
+            "--words" => {
+                words = args
+                    .next()
+                    .and_then(|v| v.parse().ok())
+                    .unwrap_or_else(|| usage_exit("--words expects a positive integer"));
+            }
+            "--title" => {
+                title = Some(
+                    args.next()
+                        .unwrap_or_else(|| usage_exit("--title expects a value")),
+                );
+            }
+            "--help" | "-h" => {
+                print_usage();
+                std::process::exit(0);
+            }
+            other => usage_exit(&format!("unknown argument `{other}`")),
+        }
+    }
+
+    generate(turns, words, title);
+}
+
+fn usage_exit(msg: &str) -> ! {
+    eprintln!("xtask synth: {msg}");
+    print_usage();
+    std::process::exit(2);
+}
+
+fn print_usage() {
+    eprintln!("usage: cargo xtask synth [--turns N] [--words N] [--title STR]");
+    eprintln!();
+    eprintln!("  --turns N    user/assistant turn pairs to generate (default 5000)");
+    eprintln!("  --words N    words per assistant message body (default 60)");
+    eprintln!("  --title STR  optional session title");
+}
+
+fn generate(turns: usize, words: usize, title: Option<String>) {
     let mut session = Session::new();
     let stamp = session.id.clone();
     session.title =
@@ -39,7 +95,6 @@ pub fn run(turns: usize, words: usize, title: Option<String>) {
     eprintln!("resume with: smelt -r {stamp}");
 }
 
-/// Generate one assistant body, rotating over four shapes to exercise common render paths.
 fn assistant_body(turn: usize, words: usize) -> String {
     const LOREM: &[&str] = &[
         "the",
