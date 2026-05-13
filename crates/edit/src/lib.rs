@@ -782,11 +782,22 @@ impl Ui {
             let leaf_rects = layout::resolve_layout(&overlay.layout, *rect);
             for (paint_id, leaf_rect) in &leaf_rects {
                 let win_id = WinId(paint_id.0);
-                let Some(buf_id) = self.wins.get(&win_id).map(|w| w.buf) else {
+                let Some(win) = self.wins.get(&win_id) else {
                     continue;
                 };
+                let buf_id = win.buf;
+                let pad_left = win.config.gutters.pad_left.min(leaf_rect.width);
+                let pad_right = win
+                    .config
+                    .gutters
+                    .pad_right
+                    .min(leaf_rect.width.saturating_sub(pad_left));
+                let content_width = leaf_rect
+                    .width
+                    .saturating_sub(pad_left)
+                    .saturating_sub(pad_right);
                 if let Some(buf) = self.bufs.get_mut(&buf_id) {
-                    buf.ensure_rendered_at(leaf_rect.width);
+                    buf.ensure_rendered_at(content_width);
                 }
                 let total_rows = self
                     .bufs
@@ -805,11 +816,22 @@ impl Ui {
             }
         }
         for (win_id, rect) in &painted_splits {
-            let Some(buf_id) = self.wins.get(win_id).map(|w| w.buf) else {
+            let Some(win) = self.wins.get(win_id) else {
                 continue;
             };
+            let buf_id = win.buf;
+            let pad_left = win.config.gutters.pad_left.min(rect.width);
+            let pad_right = win
+                .config
+                .gutters
+                .pad_right
+                .min(rect.width.saturating_sub(pad_left));
+            let content_width = rect
+                .width
+                .saturating_sub(pad_left)
+                .saturating_sub(pad_right);
             if let Some(buf) = self.bufs.get_mut(&buf_id) {
-                buf.ensure_rendered_at(rect.width);
+                buf.ensure_rendered_at(content_width);
             }
         }
         let focus = self.focus;
