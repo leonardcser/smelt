@@ -4,26 +4,32 @@ Type `/` to open the command picker with fuzzy search.
 
 ## Built-in Commands
 
-| Command                   | Description                                   |
-| ------------------------- | --------------------------------------------- |
-| `/clear`, `/new`          | Start a new conversation                      |
-| `/rewind`                 | Rewind to a previous turn (same as `Esc Esc`) |
-| `/resume`                 | Resume a saved session                        |
-| `/compact [instructions]` | Summarize older history to free context       |
-| `/fork`, `/branch`        | Fork the current session                      |
-| `/export`                 | Export conversation (clipboard or file)       |
-| `/model [provider/model]` | Switch model (opens picker if no name given)  |
-| `/settings`               | Toggle runtime settings                       |
-| `/theme [name]`           | Change accent color                           |
-| `/color [name]`           | Set task slug color                           |
-| `/stats`                  | Show token usage, cost, and activity history  |
-| `/cost`                   | Show current session cost                     |
-| `/vim`                    | Toggle vim mode                               |
-| `/thinking`               | Toggle display of thinking blocks             |
-| `/permissions`            | Manage saved permissions                      |
-| `/ps`                     | Manage background processes                   |
-| `/btw <question>`         | Ask a side question (not added to history)    |
-| `/exit`, `/quit`          | Exit (also `:q`, `:qa`, `:wq`, `:wqa`)        |
+| Command                   | Description                                                |
+| ------------------------- | ---------------------------------------------------------- |
+| `/clear`, `/new`          | Start a new conversation                                   |
+| `/rewind`                 | Rewind to a previous turn (same as `Esc Esc`)              |
+| `/resume`                 | Resume a saved session                                     |
+| `/compact [instructions]` | Summarize older history to free context                    |
+| `/fork`, `/branch`        | Fork the current session                                   |
+| `/export`                 | Export conversation; prompts for clipboard or file         |
+| `/model [provider/model]` | Switch model (opens picker if no name given)               |
+| `/settings`               | Toggle runtime settings                                    |
+| `/theme [name]`           | Change accent color                                        |
+| `/color [name]`           | Set task slug color                                        |
+| `/stats`                  | Show token usage statistics                                |
+| `/cost`                   | Show current session cost                                  |
+| `/vim`                    | Toggle vim mode                                            |
+| `/thinking`               | Toggle display of thinking blocks                          |
+| `/permissions`            | Manage saved permissions                                   |
+| `/ps`                     | Manage background processes                                |
+| `/history`                | Fuzzy-search prompt history (also `Ctrl+R`)                |
+| `/messages`               | Show recorded errors, warnings, and notices               |
+| `/help`                   | Show keybindings (also `?` on an empty prompt)             |
+| `/btw <question>`         | Ask a side question; answer streams into a dialog          |
+| `/reflect [focus]`        | Step back and rethink recent changes before moving on      |
+| `/simplify [focus]`       | Review changed code for reuse, quality, and efficiency     |
+| `/trust`                  | Trust the current project's `.smelt/` content              |
+| `/exit`, `/quit`          | Exit (also `:q`, `:qa`, `:wq`, `:wqa`)                     |
 
 ## Shell Escape
 

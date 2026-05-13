@@ -1,40 +1,47 @@
 # Permissions Reference
 
 The permission system controls what the agent can do without asking. Each
-[mode](../guide/usage.md#modes) has its own rules.
+[mode](../guide/usage.md#modes) has its own rules, and the prompt that appears
+when a tool is gated offers several scopes for approving the call.
 
 ## How Rules Work
 
-Four categories: **tools**, **bash**, **web_fetch**, and **mcp**. Each category
-has three rule lists:
+Permissions are split between **tool-level** rules and **subcommand-level**
+rules. The tool name (`bash`, `edit_file`, `web_fetch`, …) decides whether the
+call needs gating at all; subcommand buckets (`bash`, `web_fetch`, `mcp`, and
+any tool that registers its own bucket) further refine the decision based on
+the call's arguments.
+
+Each rule list has three slots:
 
 - **allow** — execute silently
 - **ask** — prompt for confirmation
-- **deny** — block (deny always wins over allow)
+- **deny** — block (deny always wins over allow and ask)
 
-Rules use glob patterns. Anything not matched defaults to **Ask** in
-Normal/Plan/Apply or **Allow** in Yolo.
+Patterns are globs. For subcommand rules, the most specific (longest) matching
+pattern wins; on a tie, **ask** beats **allow**. Anything not matched defaults
+to **Ask** in Normal/Plan/Apply or **Allow** in Yolo.
 
 ## Default Tool Permissions
 
 | Tool                  | Normal | Plan  | Apply | Yolo  |
 | --------------------- | ------ | ----- | ----- | ----- |
 | `read_file`           | Allow  | Allow | Allow | Allow |
+| `glob`                | Allow  | Allow | Allow | Allow |
+| `grep`                | Allow  | Allow | Allow | Allow |
+| `ask_user_question`   | Allow  | Allow | Allow | Allow |
 | `edit_file`           | Ask    | Ask   | Allow | Allow |
 | `write_file`          | Ask    | Ask   | Allow | Allow |
 | `edit_notebook`       | Ask    | Ask   | Ask   | Allow |
-| `glob`                | Allow  | Allow | Allow | Allow |
-| `grep`                | Allow  | Allow | Allow | Allow |
 | `bash`                | Ask    | Ask   | Ask   | Allow |
 | `web_fetch`           | Ask    | Ask   | Ask   | Allow |
 | `web_search`          | Ask    | Ask   | Ask   | Allow |
-| `ask_user_question`   | Allow  | Allow | Allow | Allow |
-| `exit_plan_mode`      | —      | Ask   | —     | —     |
 | `read_process_output` | Ask    | Ask   | Ask   | Allow |
 | `stop_process`        | Ask    | Ask   | Ask   | Allow |
 | `load_skill`          | Ask    | Ask   | Ask   | Allow |
+| `exit_plan_mode`      | —      | Ask   | —     | —     |
 
-— = not available in that mode.
+— = not registered in that mode.
 
 ## Default Bash Patterns
 
@@ -78,10 +85,14 @@ can modify files, install packages, or affect system state require approval.
 | `strings *`   | Allow  | Allow | Allow | Allow |
 | _other_       | Ask    | Ask   | Ask   | Allow |
 
+Compound commands split on shell operators (`&&`, `||`, `;`, `|`) are evaluated
+per subcommand; the worst decision wins, and a single deny blocks the whole
+command. `cd` is always allowed.
+
 !!! note
 
-    In Normal and Plan modes, allowed bash commands that contain output
-    redirection (`>`, `>>`, `&>`) are automatically escalated to Ask.
+    In Normal and Plan modes, otherwise-allowed bash commands that contain
+    output redirection (`>`, `>>`, `&>`) are escalated to Ask.
 
 ## Configuring Permissions
 
@@ -115,45 +126,99 @@ default-level allow for the same entry.
 
 Each mode table can contain:
 
-| Key         | Value type                |
-| ----------- | ------------------------- |
-| `tools`     | `{ allow = {...}, ask = {...}, deny = {...} }` |
-| `bash`      | `{ allow = {...}, ask = {...}, deny = {...} }` |
-| `web_fetch` | `{ allow = {...}, ask = {...}, deny = {...} }` |
-| `mcp`       | `{ allow = {...}, ask = {...}, deny = {...} }` |
+| Key       | Value                                                              |
+| --------- | ------------------------------------------------------------------ |
+| `tools`   | `{ allow = {...}, ask = {...}, deny = {...} }` — tool names        |
+| `<other>` | `{ allow = {...}, ask = {...}, deny = {...} }` — subcommand bucket |
+
+Any key other than `tools` is treated as a subcommand bucket and routed through
+that tool's parser. Built-in buckets are `bash` (shell-aware parsing),
+`web_fetch` (URL glob), and `mcp` (matched against `servername_toolname`); tools
+that register their own bucket appear here too.
+
+## The Permission Prompt
+
+When a call is gated, a confirm dialog appears with the tool summary, a preview
+(when available — e.g. a diff for `edit_file`), and these options:
+
+| Option                       | Effect                                                     |
+| ---------------------------- | ---------------------------------------------------------- |
+| **yes**                      | Approve this call only                                     |
+| **no**                       | Deny this call (and `Esc` does the same)                   |
+| **allow `<pattern>`**        | Auto-approve calls matching `<pattern>` for this session   |
+| **allow `<pattern>` in cwd** | Same, persisted to this workspace                          |
+| **always allow**             | Auto-approve any call to this tool for this session        |
+| **always allow in cwd**      | Same, persisted to this workspace                          |
+
+`<pattern>` is the tool-specific approval pattern (e.g. a shell command stem
+like `git status` for `bash`, or a URL host for `web_fetch`). When the call
+touches a path outside the workspace, the dir-based options
+(**allow `<dir>`** / **allow `<dir>` in cwd**) appear instead.
+
+Press `e` to add a freeform reason that the model will see along with your
+decision.
 
 ## Approval Scopes
 
-When the confirm dialog appears, you can choose how broadly to approve:
+The "always allow" options above approve future calls at one of two scopes:
 
-| Scope         | Lifetime                        | Storage                                                   |
-| ------------- | ------------------------------- | --------------------------------------------------------- |
-| **Once**      | This call only                  | —                                                         |
-| **Session**   | Until `/clear`, `/new`, or exit | Memory                                                    |
-| **Workspace** | All future sessions in this CWD | `~/.local/state/smelt/workspaces/<hash>/permissions.json` |
+| Scope         | Lifetime                        | Storage                                             |
+| ------------- | ------------------------------- | --------------------------------------------------- |
+| **Session**   | Until `/clear`, `/new`, or exit | Memory                                              |
+| **Workspace** | All future sessions in this CWD | `$XDG_STATE_HOME/smelt/workspaces/<cwd>/permissions.json` |
 
-## Managing Permissions
+Workspace approvals stay narrow: approving a command pattern only approves
+calls matching that pattern, and approving an outside directory only approves
+access under that directory.
 
-Use `/permissions` to view and delete saved permissions:
+## Managing Saved Approvals
+
+Use `/permissions` to view and remove session/workspace approvals:
 
 - `j`/`k` to navigate
-- `dd` or `Backspace` to delete
-- `Esc` to close
+- `dd` or `Backspace` to delete the highlighted entry
+- `Esc` to close (changes are persisted on close)
 
 ## Workspace Restriction
 
 When `restrict_to_workspace` is enabled (default), any tool call targeting a
-path outside the current workspace has its permission downgraded from Allow to
-Ask.
-
-Workspace approvals stay narrow: approving a command pattern only approves that
-pattern, and approving an outside directory only approves access to that
-directory.
+path outside the current workspace has its decision downgraded from Allow to
+Ask — even if the call would otherwise have been auto-approved by tool, bash
+pattern, or runtime approval. The prompt then offers per-directory approval
+options.
 
 !!! warning
 
     **Best-effort safety measure.** Shell commands, symlinks, and indirect
     access can bypass workspace restriction.
+
+## Project Trust
+
+`.smelt/` content (`init.lua`, `plugins/`, `commands/`, `runtime/`) is only
+loaded after the user explicitly trusts the project. Run `/trust` from the
+project root to record a SHA-256 hash of the current `.smelt/` contents; on
+next startup smelt loads the directory if the hash still matches. Editing any
+trusted file invalidates the hash and requires re-running `/trust`.
+
+Trust state is stored in `$XDG_STATE_HOME/smelt/trust.json`, keyed by canonical
+project path. See [`smelt.trust`](api/trust.md) for the Lua API.
+
+## Secret Redaction
+
+When `redact_secrets` is enabled (default), smelt scrubs detected secrets from
+user-submitted text and tool output — including command lines and file
+contents shown in the confirm prompt — before they reach the LLM or the
+transcript. Disable it with:
+
+```lua
+smelt.settings.redact_secrets = false
+```
+
+## Headless Mode
+
+In `--headless`, there is no interactive prompt: calls that would be **Ask**
+are denied. To run autonomously, combine headless with `--mode yolo`. See the
+[Headless Mode guide](../advanced/headless.md#permissions).
 
 ## Isolation
 

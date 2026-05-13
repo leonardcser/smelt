@@ -29,8 +29,9 @@
 
 ## First-Time Setup
 
-Just run `smelt`. It will create `~/.config/smelt/init.lua` and you're ready
-to go.
+Just run `smelt`. With no config file, it launches an interactive wizard that
+picks a provider, runs OAuth if needed (Codex, Copilot), and writes
+`~/.config/smelt/init.lua` for API-key providers.
 
 You can also skip the wizard and connect directly with CLI flags.
 
@@ -57,10 +58,10 @@ SGLang, llama.cpp.
 
 === ":fontawesome-brands-openai: OpenAI Codex"
 
-    No API key needed — authenticate with your ChatGPT Pro/Plus subscription:
+    No API key needed — authenticate with your ChatGPT subscription:
 
     ```bash
-    smelt auth   # log in via browser OAuth
+    smelt auth   # pick "OpenAI Codex", choose browser or device-code login
     smelt --model gpt-5.4
     ```
 
@@ -120,7 +121,7 @@ smelt.provider.register("openai", {
 })
 
 smelt.provider.register("anthropic", {
-  type = "openai-compatible",
+  type = "anthropic",
   api_base = "https://api.anthropic.com/v1",
   api_key_env = "ANTHROPIC_API_KEY",
   models = { "claude-opus-4-6" },

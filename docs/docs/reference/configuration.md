@@ -4,7 +4,8 @@ Config file: `~/.config/smelt/init.lua` (respects `$XDG_CONFIG_HOME`).
 
 Load a different file with `--config <path>`.
 
-If no config file exists, an interactive setup wizard runs on first launch.
+If no config file exists, an interactive setup wizard runs on first launch and
+writes a starter `init.lua`.
 
 ## init.lua
 
@@ -12,6 +13,19 @@ If no config file exists, an interactive setup wizard runs on first launch.
 providers, MCP servers, settings, and permission rules by calling APIs on the
 `smelt` table. Anything else you put in the file (custom commands, keymaps,
 autocmds) behaves like a plugin and is also loaded at startup.
+
+### Per-project config
+
+After the user `init.lua` runs, smelt looks for `.smelt/init.lua` and
+`.smelt/plugins/*.lua` under the current working directory and sources them.
+Project config is gated by a content trust system: run `/trust` once to record
+the SHA-256 hash of `.smelt/`. Any edit invalidates the hash and requires
+re-running `/trust`.
+
+| Lua API             | Description                                                 |
+| ------------------- | ----------------------------------------------------------- |
+| `smelt.trust.mark`  | Trust the current cwd's `.smelt/` content                   |
+| `smelt.trust.status`| Return `"trusted"`, `"untrusted"`, or `"no_content"`        |
 
 ## Providers
 
@@ -32,23 +46,26 @@ smelt.provider.register("openai", {
 })
 ```
 
-| Field         | Description                                                                 |
-| ------------- | --------------------------------------------------------------------------- |
-| `type`        | `openai-compatible`, `openai`, `codex`, `anthropic-compatible`, `anthropic`, `copilot` |
-| `api_base`    | API endpoint URL                                                            |
-| `api_key_env` | Environment variable holding the API key (omit for `codex` and `copilot`)   |
-| `models`      | Array of model names (optional for `codex`/`copilot` — fetched via API)     |
+| Field         | Description                                                                            |
+| ------------- | -------------------------------------------------------------------------------------- |
+| `type`        | `openai-compatible` (default), `openai`, `codex`, `anthropic-compatible`, `anthropic`, `copilot` |
+| `api_base`    | API endpoint URL                                                                       |
+| `api_key_env` | Environment variable holding the API key (omit for `codex` and `copilot`)              |
+| `models`      | Array of model names (optional for `codex`/`copilot` — fetched via API)                |
+
+Re-registering the same name replaces the previous entry. Unknown `type` values
+fall back to `openai-compatible`.
 
 ### Provider Types
 
-| Type                | Endpoint                                           | Compatible Services                            |
-| ------------------- | -------------------------------------------------- | ---------------------------------------------- |
-| `openai-compatible` | `/v1/chat/completions`                             | Ollama, vLLM, SGLang, llama.cpp, Google Gemini |
-| `openai`            | `/v1/responses`                                    | OpenAI, OpenRouter                             |
-| `codex`             | `chatgpt.com/backend-api/codex` (OAuth)            | OpenAI Codex (ChatGPT subscription)            |
-| `anthropic-compatible` | `/v1/messages` + thinking                     | Kimi Code, other Anthropic-compatible APIs     |
-| `anthropic`         | `/v1/messages` + thinking                          | Anthropic                                      |
-| `copilot`           | `api.*.githubcopilot.com/chat/completions` (OAuth) | GitHub Copilot subscription                    |
+| Type                   | Endpoint                                           | Compatible Services                            |
+| ---------------------- | -------------------------------------------------- | ---------------------------------------------- |
+| `openai-compatible`    | `/v1/chat/completions`                             | Ollama, vLLM, SGLang, llama.cpp, Google Gemini |
+| `openai`               | `/v1/responses`                                    | OpenAI, OpenRouter                             |
+| `codex`                | `chatgpt.com/backend-api/codex` (OAuth)            | OpenAI Codex (ChatGPT subscription)            |
+| `anthropic-compatible` | `/v1/messages` + thinking                          | Kimi Code, other Anthropic-compatible APIs     |
+| `anthropic`            | `/v1/messages` + thinking                          | Anthropic                                      |
+| `copilot`              | `api.*.githubcopilot.com/chat/completions` (OAuth) | GitHub Copilot subscription                    |
 
 ### Model Configuration
 
@@ -69,40 +86,45 @@ smelt.provider.register("ollama", {
 
 Per-model overrides:
 
-| Field            | Description                                          |
-| ---------------- | ---------------------------------------------------- |
-| `temperature`    | Sampling temperature                                 |
-| `top_p`          | Top-p (nucleus) sampling                             |
-| `top_k`          | Top-k sampling (openai-compatible & copilot only)                          |
-| `min_p`          | Min-p sampling (openai-compatible only)              |
-| `repeat_penalty` | Repetition penalty (openai-compatible only)          |
-| `tool_calling`   | Set to `false` to disable tools for this model       |
-| `input_cost`     | USD per 1M input tokens                              |
-| `output_cost`    | USD per 1M output tokens                             |
-| `cache_read_cost`| USD per 1M cache-read tokens                         |
-| `cache_write_cost`| USD per 1M cache-write tokens                       |
+| Field             | Description                                          |
+| ----------------- | ---------------------------------------------------- |
+| `name`            | Model id as it appears in API requests               |
+| `temperature`     | Sampling temperature                                 |
+| `top_p`           | Top-p (nucleus) sampling                             |
+| `top_k`           | Top-k sampling                                       |
+| `min_p`           | Min-p sampling (openai-compatible only)              |
+| `repeat_penalty`  | Repetition penalty (openai-compatible only)          |
+| `tool_calling`    | Set to `false` to disable tools for this model       |
+| `input_cost`      | USD per 1M input tokens                              |
+| `output_cost`     | USD per 1M output tokens                             |
+| `cache_read_cost` | USD per 1M cache-read tokens                         |
+| `cache_write_cost`| USD per 1M cache-write tokens                        |
 
 #### Pricing
 
-Cost tracking is built in for popular models (GPT, Claude, DeepSeek). Codex
-models are zero-cost (included with your ChatGPT subscription). The session cost
-is shown in the status bar and total cost appears in `/stats`.
+Cost tracking is built in for popular models (GPT, Claude, DeepSeek). Codex and
+Copilot models are zero-cost (included with your subscription). The session
+cost is shown in the status bar and the running total appears in `/stats`.
 
 For models not in the built-in table, or to override built-in prices, set cost
 fields on the model config. All values are USD per 1 million tokens. Unknown
 models default to zero cost.
 
-## Defaults
+## Model Selection
 
-Model selection follows this precedence:
+Model resolution follows this precedence:
 
 1. `--model` CLI flag
 2. Last used model (cached from previous session)
 3. First model in the providers list
 
-Switch models at runtime with `/model`.
+Switch models at runtime with `/model`. The choice is persisted in
+`state.json` and restored on next launch.
 
-Starting mode and reasoning effort can be changed at runtime or via CLI flags:
+## Modes and Reasoning
+
+Starting mode and reasoning effort can be set via CLI flags. Both are
+toggleable at runtime: `Shift+Tab` cycles modes, `Ctrl+T` cycles reasoning.
 
 | CLI flag                     | Description                                               |
 | ---------------------------- | --------------------------------------------------------- |
@@ -112,33 +134,37 @@ Starting mode and reasoning effort can be changed at runtime or via CLI flags:
 | `--reasoning-cycle <LEVELS>` | Levels for `Ctrl+T` cycling (comma-separated)             |
 
 Reasoning effort controls how deeply the model thinks before responding.
-Supported by Anthropic (`thinking`), OpenAI (`reasoning`), openai-compatible, and anthropic-compatible
-providers that support `reasoning_effort`. For OpenAI, `max` maps to `xhigh`.
-Models that don't support thinking ignore this setting.
+Supported by Anthropic (`thinking`), OpenAI (`reasoning`), and any
+openai-compatible / anthropic-compatible provider that supports
+`reasoning_effort`. For OpenAI, `max` maps to `xhigh`. Models that don't
+support thinking ignore this setting.
+
+`openai-compatible` providers default the reasoning cycle to
+`off,low,medium,high`; everything else adds `max`. The currently active
+effort is always included in the cycle.
+
+Toggle full thinking blocks at runtime with `/thinking` (or the
+`show_thinking` setting).
 
 ## Auxiliary Model
 
-Use the auxiliary model to route small background/meta requests to a different
-model. The auxiliary model must be one you've registered under a provider.
-Resolution uses the same rules as the primary model.
+The auxiliary model handles small background/meta requests:
 
-Set the auxiliary model at runtime via `/settings` or with the `--set`
-flag (`--set auxiliary.model=provider/model`).
-
-Each `use_for` toggle defaults to `true`; set a task to `false` to fall back to
-your primary model. When no auxiliary model is set, no auxiliary routing
-happens.
-
-| Key          | Description                                      |
+| Task         | Description                                      |
 | ------------ | ------------------------------------------------ |
 | `title`      | Generate the session title and slug              |
 | `prediction` | Input prediction / ghost text                    |
 | `compaction` | Explicit `/compact` and automatic history shrink |
 | `btw`        | `/btw` side-question requests                    |
 
+When no auxiliary model is configured, all tasks fall back to the primary
+model. Each task can be individually disabled via `auxiliary.use_for.<task> =
+false` so it routes back to the primary model. The auxiliary model reference
+follows the same `provider/model` or bare-model resolution as the primary.
+
 ## Settings
 
-Set defaults in `init.lua` by writing to `smelt.settings`:
+Set boolean preferences in `init.lua` by writing to `smelt.settings`:
 
 ```lua
 smelt.settings.vim = true
@@ -146,54 +172,63 @@ smelt.settings.auto_compact = false
 smelt.settings.show_tps = true
 ```
 
-All toggleable at runtime via `/settings`.
+All toggleable at runtime via `/settings`. Unknown keys raise at the access
+site.
 
-| Key                     | Default | Description                                                                              |
-| ----------------------- | ------- | ---------------------------------------------------------------------------------------- |
-| `vim_mode`              | `false` | Vi keybindings                                                                           |
-| `auto_compact`          | `false` | Auto-summarize when context usage crosses the threshold (always on in headless) |
-| `show_tps`              | `true`  | Tokens/sec in status bar                                                                 |
-| `show_tokens`           | `true`  | Context token count in status bar                                                        |
-| `show_cost`             | `true`  | Session cost in status bar                                                               |
-| `input_prediction`      | `true`  | Ghost text suggestions                                                                   |
-| `task_slug`             | `true`  | Task label in status bar                                                                 |
-| `show_thinking`         | `true`  | Show full thinking/reasoning blocks (false shows a single summary)                       |
-| `restrict_to_workspace` | `true`  | Downgrade Allow → Ask outside workspace                                                  |
-| `redact_secrets`        | `true`  | Scrub detected secrets from user input and tool results before they reach the LLM        |
-| `context_window`        | auto    | Override context window size (tokens); auto-detected from API                            |
+| Key                     | Default | Description                                                                       |
+| ----------------------- | ------- | --------------------------------------------------------------------------------- |
+| `vim`                   | `false` | Vi keybindings in the prompt                                                      |
+| `auto_compact`          | `false` | Auto-summarize when context usage crosses the threshold (forced on in headless)   |
+| `show_tps`              | `true`  | Tokens/sec in status bar                                                          |
+| `show_tokens`           | `true`  | Context token count in status bar                                                 |
+| `show_cost`             | `true`  | Session cost in status bar                                                        |
+| `show_prediction`       | `true`  | Ghost-text input predictions                                                      |
+| `show_slug`             | `true`  | Task-slug label in status bar                                                     |
+| `show_thinking`         | `true`  | Show full thinking/reasoning blocks (false shows a single summary)                |
+| `restrict_to_workspace` | `true`  | Downgrade Allow → Ask for paths outside the workspace                             |
+| `redact_secrets`        | `true`  | Scrub detected secrets from user input and tool results before they reach the LLM |
+
+Override any setting from the CLI with `--set KEY=VALUE`, e.g.
+`--set vim=true`. Values must be `true` or `false`.
 
 ## Theme
 
-Change accent color at runtime with `/theme`. Presets: `ember`, `coral`, `rose`,
-`gold`, `ice`, `sky`, `blue`, `lavender`, `lilac`, `mint`, `sage`, `silver`. Or
-a raw ANSI value (0–255).
+Change accent color at runtime with `/theme`. Presets: `ember`, `coral`,
+`rose`, `gold`, `ice`, `sky`, `blue`, `lavender`, `lilac`, `mint`, `sage`,
+`silver`. Or a raw ANSI value (0–255).
 
 The task slug color is separate — change it per-session with `/color`.
 
+Colorschemes are Lua modules under `runtime/lua/smelt/colorschemes/<name>.lua`.
+Install custom colorschemes at
+`~/.config/smelt/lua/smelt/colorschemes/<name>.lua` and load via
+`smelt.theme.use("<name>")`.
+
 ## MCP (Model Context Protocol)
 
-Connect external tool servers that expose tools via the MCP protocol. Each
-server runs as a child process communicating over stdio.
+Connect external tool servers that expose tools via MCP. Each server runs as
+a child process communicating over stdio.
 
 ```lua
 smelt.mcp.register("filesystem", {
   command = { "npx", "-y", "@modelcontextprotocol/server-filesystem", "/tmp" },
   env = { DEBUG = "true" },
-  timeout = 30000, -- ms, default 30000
-  enabled = true,  -- default true
+  timeout = 30000,
+  enabled = true,
 })
 ```
 
-| Field     | Description                                      |
-| --------- | ------------------------------------------------ |
-| `command` | Array of strings: executable and arguments       |
-| `args`    | Additional arguments (appended to `command`)     |
-| `env`     | Environment variables for the server process     |
-| `timeout` | Connection and tool call timeout in milliseconds |
-| `enabled` | Set to `false` to skip connecting on startup     |
+| Field     | Description                                                             |
+| --------- | ----------------------------------------------------------------------- |
+| `type`    | Server kind. Only `"local"` (the default) is supported.                 |
+| `command` | String or array of strings: executable and leading argv                 |
+| `args`    | Additional arguments (appended to `command`)                            |
+| `env`     | Environment variables for the server process                            |
+| `timeout` | Connection and tool-call timeout in milliseconds. Default `30000`.      |
+| `enabled` | Set to `false` to skip connecting on startup. Default `true`.           |
 
-MCP tools appear in the agent's tool list with names prefixed by the server name
-(e.g., `filesystem_read_file`). They default to "ask" permission.
+MCP tools appear in the agent's tool list with names prefixed by the server
+name (e.g. `filesystem_read_file`). They default to "ask" permission.
 
 ### MCP Permissions
 
@@ -244,15 +279,18 @@ See [Permissions Reference](permissions.md) for full details.
 
 All runtime data is stored under the XDG base directories:
 
-| Directory                           | Contents                                            |
-| ----------------------------------- | --------------------------------------------------- |
-| `$XDG_CONFIG_HOME/smelt/`           | `init.lua`, custom commands, global skills          |
-| `$XDG_STATE_HOME/smelt/sessions/`   | Saved sessions (`session.json`, `meta.json`, blobs) |
-| `$XDG_STATE_HOME/smelt/state.json`  | Persisted state (last model, mode, accent color)    |
-| `$XDG_STATE_HOME/smelt/registry/`   | Multi-agent registry entries                        |
-| `$XDG_STATE_HOME/smelt/workspaces/` | Per-workspace saved permissions                     |
-| `$XDG_STATE_HOME/smelt/logs/`       | Log files (rotated, max 20)                         |
-| `$XDG_CACHE_HOME/smelt/`            | Cache                                               |
+| Directory                           | Contents                                                     |
+| ----------------------------------- | ------------------------------------------------------------ |
+| `$XDG_CONFIG_HOME/smelt/`           | `init.lua`, `plugins/`, global `skills/`                     |
+| `$XDG_STATE_HOME/smelt/sessions/`   | Saved sessions (`session.json`, `meta.json`, blobs)          |
+| `$XDG_STATE_HOME/smelt/state.json`  | Persisted state (last model, mode, accent color)             |
+| `$XDG_STATE_HOME/smelt/workspaces/` | Per-workspace saved permissions                              |
+| `$XDG_STATE_HOME/smelt/history`     | Prompt history                                               |
+| `$XDG_STATE_HOME/smelt/trust.json`  | Trusted project `.smelt/` hashes                             |
+| `$XDG_STATE_HOME/smelt/logs/`       | Log files (rotated)                                          |
+| `$XDG_DATA_HOME/smelt/runtime/`     | Extra Lua runtime roots (optional)                           |
+| `$XDG_CACHE_HOME/smelt/web/`        | HTTP/pricing cache                                           |
+| `$XDG_CACHE_HOME/smelt/`            | `copilot_models.json` and other discovered model caches      |
 
 Codex OAuth tokens are stored in the system keyring (service:
 `smelt-codex-auth`). If the keyring is unavailable, tokens fall back to
@@ -260,8 +298,7 @@ Codex OAuth tokens are stored in the system keyring (service:
 
 GitHub Copilot OAuth tokens are stored in the system keyring (service:
 `smelt-copilot-auth`). If the keyring is unavailable, they fall back to
-`$XDG_STATE_HOME/smelt/copilot_auth.json` (mode `0600`). The discovered model
-list is cached in `$XDG_CACHE_HOME/smelt/copilot_models.json`.
+`$XDG_STATE_HOME/smelt/copilot_auth.json` (mode `0600`).
 
 ## Environment Variables
 
@@ -270,11 +307,51 @@ list is cached in `$XDG_CACHE_HOME/smelt/copilot_models.json`.
 | `XDG_CONFIG_HOME`                 | Config directory (default: `~/.config`)                                                          |
 | `XDG_STATE_HOME`                  | State directory (default: `~/.local/state`)                                                      |
 | `XDG_CACHE_HOME`                  | Cache directory (default: `~/.cache`)                                                            |
+| `XDG_DATA_HOME`                   | Data directory (default: `~/.local/share`)                                                       |
+| `HOME`                            | Used as a fallback when XDG variables are unset                                                  |
 | `COLORFGBG`                       | Terminal color hint (fallback for dark/light detection)                                          |
 | `TERM`                            | Terminal type (`dumb` skips color detection)                                                     |
+| `NO_COLOR`                        | Disable ANSI colors                                                                              |
+| `FORCE_COLOR`                     | Force ANSI colors regardless of TTY detection                                                    |
 | `EDITOR`                          | Editor for `Ctrl+X Ctrl+E` and vim `v`                                                           |
-| `NO_COLOR`                        | Disable ANSI colors (respected in headless mode)                                                 |
 | `SMELT_COMPACT_THRESHOLD_PERCENT` | Auto-compact trigger as a percentage of the context window. Integer in `[10, 95]`; default `80`. |
+| `SMELT_CODEX_TOKENS`              | Inline JSON Codex auth payload (overrides keyring and disk)                                      |
+| `SMELT_COPILOT_TOKENS`            | Inline JSON Copilot auth payload (overrides keyring and disk)                                    |
+
+## CLI Flags
+
+| Flag                            | Description                                                            |
+| ------------------------------- | ---------------------------------------------------------------------- |
+| `--config <PATH>`               | Path to a custom `init.lua`                                            |
+| `--api-base <URL>`              | Override the provider's API endpoint                                   |
+| `--api-key-env <VAR>`           | Environment variable holding the API key                               |
+| `--type <TYPE>`                 | Provider type (see Provider Types above)                               |
+| `-m, --model <ID>`              | Model id (provider/model or bare model)                                |
+| `--mode <MODE>`                 | Starting agent mode                                                    |
+| `--mode-cycle <MODES>`          | Comma-separated mode cycle                                             |
+| `--reasoning-effort <EFFORT>`   | Starting reasoning effort                                              |
+| `--reasoning-cycle <LEVELS>`    | Comma-separated reasoning cycle                                        |
+| `--temperature <TEMP>`          | Sampling temperature                                                   |
+| `--top-p <VALUE>`               | Top-p (nucleus) sampling                                               |
+| `--top-k <VALUE>`               | Top-k sampling                                                         |
+| `--no-tool-calling`             | Disable tool calling (chat-only mode)                                  |
+| `--system-prompt <STRING\|PATH>`| Override the system prompt (string or file path)                       |
+| `--no-system-prompt`            | Disable system prompt and `AGENTS.md` instructions                     |
+| `--log-level <LEVEL>`           | `trace`, `debug`, `info`, `warn`, `error`. Default `info`.             |
+| `--bench`                       | Print performance timing summary on exit                               |
+| `--headless`                    | Run without TUI (requires a message argument)                          |
+| `--format <FORMAT>`             | Headless output format: `text` or `json`. Default `text`.              |
+| `--color <MODE>`                | Color output: `auto`, `always`, `never`. Default `auto`.               |
+| `-v, --verbose`                 | Show tool output in headless mode                                      |
+| `-r, --resume [<SESSION_ID>]`   | Resume a session (omit id for the picker)                              |
+| `--set <KEY=VALUE>`             | Override a boolean setting (e.g. `--set vim=true`)                     |
+
+The `auth` subcommand opens an interactive provider management UI (add
+providers, Codex/Copilot login and logout):
+
+```bash
+smelt auth
+```
 
 ## Full Example
 

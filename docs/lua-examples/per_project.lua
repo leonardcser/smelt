@@ -8,6 +8,6 @@ if cwd then
   if f then
     f:close()
     dofile(path)
-    smelt.notify("loaded project config: " .. path)
+    smelt.ui.notify("loaded project config: " .. path)
   end
 end

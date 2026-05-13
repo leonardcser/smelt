@@ -8,6 +8,8 @@ smelt auth
 When a message is provided, it auto-submits on startup. Running with no
 arguments and no config file launches the interactive setup wizard.
 
+CLI flags always take precedence over config values.
+
 ## Subcommands
 
 | Subcommand   | Description                                                                          |
@@ -22,7 +24,7 @@ arguments and no config file launches the interactive setup wizard.
 | `-m, --model <MODEL>` | Model to use. With configured providers, prefer `provider_name/model_name`; with `--api-base`, use the provider-native model name |
 | `--api-base <URL>`    | API base URL (overrides config)                                                                                                   |
 | `--api-key-env <VAR>` | Env var holding the API key                                                                                                       |
-| `--type <TYPE>`       | Provider type (auto-detected from URL when omitted)                                                                               |
+| `--type <TYPE>`       | Provider type: `openai-compatible`, `openai`, `codex`, `anthropic-compatible`, `anthropic`, `copilot` (auto-detected from URL when omitted) |
 
 Auto-detection:
 
@@ -77,5 +79,3 @@ Models that don't support thinking ignore this setting.
 | `--color <WHEN>`      | Color output: `auto` (default), `always`, `never`                              |
 | `--log-level <LEVEL>` | `debug`, `info`, `warn`, `error` (default: `info`)                             |
 | `--bench`             | Print timing summary on exit                                                   |
-
-CLI flags always take precedence over config values.

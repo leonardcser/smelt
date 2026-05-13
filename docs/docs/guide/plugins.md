@@ -1,18 +1,45 @@
 # Plugin Authoring
 
-smelt's runtime exposes a Lua API on the global `smelt` table — register
-commands, react to window events, paint extmarks, read or mutate the prompt
-buffer, talk to the engine, and so on. Plugins are plain Lua files dropped into
-`~/.config/smelt/init.lua` (or required from there).
+smelt's runtime exposes a Lua API on the global `smelt` table — register slash
+commands, react to lifecycle events, paint extmarks, drive the engine, add
+custom tools, and so on. Plugins are plain Lua files loaded from
+`~/.config/smelt/init.lua` (or `require`d from there).
 
 The full surface lives in the [Lua API reference](../reference/api/index.md);
-this page covers the workflow for writing plugins against it.
+this page walks through the workflow and patterns for writing plugins against
+it.
+
+## Anatomy of a plugin
+
+A plugin is just a Lua module. There is no manifest, no register-yourself call,
+and no init hook. Top-level statements run when the file is `require`d, so
+that's where you wire your behaviour up.
+
+```lua
+-- ~/.config/smelt/plugins/hello.lua
+smelt.cmd.register("hello", function(arg)
+  smelt.ui.notify("hello, " .. (arg ~= "" and arg or "world"))
+end, { desc = "greet someone" })
+
+return {}
+```
+
+Load it from `init.lua`:
+
+```lua
+require("smelt.plugins.hello") -- ships in runtime/
+require("hello")               -- yours, under ~/.config/smelt/
+```
+
+For a real walkthrough, the bundled plugins under
+[`runtime/lua/smelt/plugins/`](https://github.com/leonardcser/smelt/tree/main/runtime/lua/smelt/plugins)
+(`background_commands`, `plan_mode`, `perf_panel`, `predict`, `esc_chord`) are
+the canonical examples — every pattern below comes straight from them.
 
 ## IDE completion
 
 Every public function, opts record, and string-literal alias is generated from
-the Rust source by `cargo xtask gen-lua-docs`. The output lands in
-two trees:
+the Rust source by `cargo xtask gen-lua-docs`. The output lands in two trees:
 
 - `runtime/lua/smelt/_meta/<namespace>.lua` — `---@meta` stubs consumed by
   [lua-language-server](https://github.com/LuaLS/lua-language-server) for
@@ -25,8 +52,8 @@ Point lua-language-server at the `_meta` directory in your editor. The shipped
 is a working config — copy it next to your `init.lua` (or set
 `workspace.library` to the smelt checkout's `runtime/lua/smelt/_meta` path).
 With that in place, typing `smelt.win.on_event(` brings up the
-`smelt.win.Event` string-literal union, and `smelt.buf.set_extmark` autocompletes
-each field of `smelt.buf.ExtmarkOpts`.
+`smelt.win.Event` string-literal union, and `smelt.buf.set_extmark`
+autocompletes each field of `smelt.buf.ExtmarkOpts`.
 
 ## Host vs UiHost
 
@@ -36,49 +63,243 @@ per-namespace page calls it out in the header.
 
 - **Host** — works everywhere, including headless mode (`smelt --headless`).
   Examples: `smelt.fs`, `smelt.http`, `smelt.process`, `smelt.cell`,
-  `smelt.au`.
+  `smelt.au`, `smelt.tools`.
 - **UiHost** — requires a live terminal UI. Calling a UiHost function from
   headless mode raises. Examples: `smelt.win`, `smelt.buf`, `smelt.theme`,
-  `smelt.confirm`, `smelt.statusline`.
+  `smelt.ui`, `smelt.statusline`, `smelt.keymap`.
 
 Plugins that should keep working in headless contexts must avoid UiHost
 namespaces or guard them behind a tier check.
 
-## A small example
+## Slash commands
+
+`smelt.cmd.register` adds a `/name` command. The handler receives the argument
+string (everything after `/name `, possibly empty); `opts` covers description,
+busy-state policy, and visibility.
 
 ```lua
--- ~/.config/smelt/init.lua
+smelt.cmd.register("ps", function(_arg)
+  -- ...
+end, {
+  desc            = "manage background processes",
+  while_busy      = true,   -- callable while an agent turn is running (default)
+  queue_when_busy = false,  -- reject vs queue when busy
+  hidden          = false,  -- skip /help and the picker
+})
+```
+
+Use `smelt.cmd.run("name args")` to invoke another command (with or without the
+leading slash). Markdown files in `~/.config/smelt/commands/` register
+automatically — see [Custom Commands](customization.md#custom-commands) for
+that path.
+
+## Lifecycle events
+
+`smelt.au.on(name, handler)` subscribes to runtime cells — agent turns, session
+load, mode changes, tool start/end, and so on. Some carry a payload, some are
+bare signals. The full list is the `smelt.cell.Name` alias in
+[`_types.lua`](https://github.com/leonardcser/smelt/blob/main/runtime/lua/smelt/_meta/_types.lua);
+common ones:
+
+| Event | Payload | When |
+| --- | --- | --- |
+| `session_started` | — | A session has been loaded |
+| `turn_start` | — | The agent dispatched a turn |
+| `turn_end` | `{ cancelled }` | Turn complete (or interrupted) |
+| `tool_start` | `{ tool, args }` | A tool call began |
+| `tool_end` | `{ tool, is_error, elapsed_ms }` | A tool call finished |
+| `agent_mode` | `"normal"|"plan"|"apply"|"yolo"` | Agent mode changed |
+| `input_submit` | `{ text }` | User submitted a message |
+| `shutdown` | — | App is about to quit |
+
+```lua
+smelt.au.on("turn_end", function(payload)
+  if payload.cancelled then return end
+  -- ... e.g. kick off a prediction call
+end)
+
+smelt.au.on("agent_mode", function(mode)
+  if mode == "plan" then activate() else deactivate() end
+end)
+```
+
+`smelt.au` is the Neovim-style alias of `smelt.cell.subscribe` / `set`. You can
+also declare your own cells with `smelt.cell.new("my_plugin:state", initial)`
+and broadcast updates with `smelt.au.fire`.
+
+## Keymaps
+
+`smelt.keymap.set(mode, chord, handler)`. The mode is `"n"`, `"i"`, `"v"`, or
+`""` for any mode; handlers receive a context table.
+
+```lua
+smelt.keymap.set("n", "<C-y>", function()
+  local where = smelt.win.focus()
+  local text  = where == "transcript" and smelt.transcript.text() or smelt.prompt.text()
+  smelt.clipboard.write(text)
+end)
+
+smelt.keymap.set("", "<Esc><Esc>", function(ctx)
+  if ctx.vim_mode_at_chord_start == "insert" then
+    -- ...
+  end
+  -- returning `false` lets the chord fall through to the next binding
+end)
+```
+
+Per-window bindings (transcript-only, picker-only, etc.) go through
+`smelt.win.set_keymap(win_id, key, handler)`.
+
+## Window events and extmarks
+
+Plugins that paint into existing buffers subscribe to per-window events and
+draw with extmarks scoped to a namespace they own. The pattern is:
+
+```lua
 local prompt = smelt.prompt.win_id()
+local ns     = smelt.buf.create_namespace("my_plugin")
 
-local ns = smelt.buf.create_namespace("hello")
-
--- Highlight the prompt buffer's first row whenever its text changes.
 smelt.win.on_event(prompt, "text_changed", function()
   local buf = smelt.win.buf(prompt)
   if not buf then return end
   smelt.buf.clear_namespace(buf, ns)
   smelt.buf.set_extmark(buf, ns, 1, 0, {
-    end_col = 999,
+    end_col  = 999,
     hl_group = "DiagnosticHint",
     priority = 200,
   })
 end)
 ```
 
-Both the `"text_changed"` literal and the `set_extmark` opts table get
-type-checked: an unknown event name or a typo'd field surfaces as a diagnostic
-in your editor before the plugin ever runs.
+Both `"text_changed"` and the `set_extmark` opts table are type-checked: an
+unknown event name or a typo'd field surfaces as a diagnostic in your editor
+before the plugin ever runs.
+
+## Floating windows and overlays
+
+For overlays that own their own buffer and rect — picker panels, perf HUDs,
+side docks — open a buffer, attach it to a window, then mount that window in an
+overlay placement:
+
+```lua
+local buf = smelt.buf.create()
+local win = smelt.win.open(buf, { focusable = false })
+
+smelt.ui.overlay.open({
+  title     = { { text = " perf ", bold = true } },
+  placement = "screen_at",
+  corner    = "ne",
+  width     = 44,
+  height    = 14,
+  modal     = false,
+  draggable = true,
+  items     = { { win = win, height = "fill" } },
+})
+```
+
+For modal dialogs (a markdown panel + an option list + a free-text input, etc.)
+`smelt.ui.dialog.open` is the higher-level surface — it returns the result of
+the user's choice. The bundled dialogs in
+[`runtime/lua/smelt/dialogs/`](https://github.com/leonardcser/smelt/tree/main/runtime/lua/smelt/dialogs)
+(`confirm`, `permissions`, `resume`, `rewind`) are the reference implementations.
+
+## Tasks: tool calls, dialogs, sleeps
+
+Anything that yields — `smelt.sleep`, `smelt.ui.dialog.open`,
+`smelt.ui.picker.open`, `smelt.tools.call`, `smelt.task.wait` — must run inside
+a task-yielding context. There are two:
+
+1. **Inside `tool.execute`** — every plugin tool already runs on a coroutine.
+2. **Wrapped in `smelt.spawn(fn)`** — fire-and-forget coroutine for everything
+   else (a slash-command handler that opens a dialog, a timer callback that
+   parks on a tool call, etc.).
+
+```lua
+smelt.cmd.register("ps", function()
+  smelt.spawn(function()
+    local result = smelt.ui.dialog.open({ ... })
+    if result.action == "approve" then ... end
+  end)
+end)
+```
+
+Calling `smelt.sleep` from outside a yielding context raises immediately —
+that's how you tell which side of the line you're on.
+
+## Custom tools
+
+`smelt.tools.register({ name, execute, ... })` exposes a tool to the model.
+Only `name` and `execute` are required; the rest of `smelt.tools.ToolDef` is
+optional metadata that controls rendering, approvals, and per-mode behaviour.
+
+```lua
+smelt.tools.register({
+  name        = "exit_plan_mode",
+  description = "Signal that planning is complete and ready for user approval.",
+  modes       = { "plan" },           -- only registered in plan mode
+  parameters  = {
+    type = "object",
+    properties = {
+      plan_summary = { type = "string", description = "..." },
+    },
+    required = { "plan_summary" },
+  },
+  permission_defaults = { normal = "allow", plan = "allow" },
+  summary  = function(_args) return "plan ready" end,
+  render   = function(args, output, width, buf)
+    smelt.markdown.render(buf, args.plan_summary or "")
+  end,
+  execute  = function(args)
+    local result = smelt.ui.dialog.open({ ... }) -- yields, allowed inside execute
+    if result.action ~= "approve" then
+      return { content = "Plan not approved", is_error = true }
+    end
+    return "ok"
+  end,
+})
+```
+
+Return either a plain string (success) or `{ content, is_error }`. From inside
+`execute` you can also:
+
+- **Chain another tool** with `smelt.tools.call("name", args, parent_call_id)`
+  — yields until the child resolves and returns its `{ content, is_error }`.
+- **Park on user input** with `smelt.task.wait(id)`, resumed later by
+  `smelt.task.resume(id, value)` from a key handler, event subscriber, etc.
+
+Set `override = true` to replace a built-in tool of the same name (this is how
+`background_commands.lua` adds `run_in_background` to `bash`). Use
+`smelt.tools.unregister(name)` to take it back out.
+
+For tool-authoring conventions (parameter shape, `confirm_text`,
+`approval_patterns`, `preflight`, `paths_for_workspace`), the implementations
+under [`runtime/lua/smelt/tools/`](https://github.com/leonardcser/smelt/tree/main/runtime/lua/smelt/tools)
+are the source of truth.
+
+## Statusline sources
+
+Plugins can append segments to the statusline. The handler is called once per
+refresh with the current snapshot and returns one segment or a list of
+segments:
+
+```lua
+smelt.statusline.register("clock", function(_snap)
+  return { text = os.date(" %H:%M "), fg = 245, priority = 2 }
+end, { align = "right" })
+```
+
+`smelt.statusline.unregister(name)` removes it. Built-in segments (slug, vim
+mode, model, cost, position) keep rendering alongside whatever you add.
 
 ## String-literal aliases
 
 String parameters typed as `smelt.<namespace>.<Name>` accept a closed set of
 labels — the IDE shows them in autocomplete and rejects typos. Closed aliases
 require canonical names only: `smelt.vim.set_mode("normal")` works,
-`smelt.vim.set_mode("n")` no longer does (short forms `"n"`, `"i"`, `"v"`,
-`"V"`, and PascalCase variants like `"Insert"` are not accepted as of the
-typed-alias migration). Open aliases (e.g. [`smelt.cell.Name`](../reference/api/types.md#smeltcellname))
-keep accepting any string and just expose well-known names as completion
-hints.
+`smelt.vim.set_mode("n")` does not (short forms `"n"`, `"i"`, `"v"`, `"V"`,
+and PascalCase variants like `"Insert"` are not accepted). Open aliases (e.g.
+[`smelt.cell.Name`](../reference/api/types.md#smeltcellname)) keep accepting
+any string and just expose well-known names as completion hints.
 
 ## Regenerating docs and stubs
 
@@ -87,6 +308,5 @@ cargo xtask gen-lua-docs
 ```
 
 Run this after editing any `register_fn`/`register_ui_fn` site or an opts
-struct. It rewrites `runtime/lua/smelt/_meta/`, the
-`docs/docs/reference/api/` Markdown pages, and the navigation block in
-`docs/zensical.toml`.
+struct. It rewrites `runtime/lua/smelt/_meta/`, the `docs/docs/reference/api/`
+Markdown pages, and the navigation block in `docs/zensical.toml`.

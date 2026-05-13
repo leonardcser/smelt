@@ -22,9 +22,8 @@ The agent has four modes, each with different permission defaults. Press
 | **Apply**  | File edits are auto-approved. Bash still asks.                                                                                    |
 | **Yolo**   | Everything auto-approved. You can still deny specific patterns via config.                                                        |
 
-The current mode is shown in the status bar. Set the starting mode with `--mode`
-or `defaults.mode` in config. Customize which modes appear in the cycle with
-`--mode-cycle` or `defaults.mode_cycle`.
+The current mode is shown in the status bar. Set the starting mode with
+`--mode`, and customize which modes appear in the cycle with `--mode-cycle`.
 
 See [Permissions Reference](../reference/permissions.md) for the full default
 matrix.
@@ -32,8 +31,8 @@ matrix.
 ## Reasoning Effort
 
 Press `Ctrl+T` to cycle through reasoning levels (`off`, `low`, `medium`,
-`high`, `max`). Configure which levels appear with `defaults.reasoning_cycle` in
-config.
+`high`, `max`). Set the starting level with `--reasoning-effort`, and configure
+which levels appear in the cycle with `--reasoning-cycle`.
 
 ## Tools
 
@@ -88,7 +87,8 @@ smelt --resume <SESSION_ID> # resume a specific session
 ```
 
 Or use `/resume` from within the TUI. Use `/fork` to branch the current
-conversation into a new session.
+conversation into a new session, or `/rewind` (also `Esc Esc` when idle) to
+roll back to an earlier turn.
 
 ## Compaction
 
@@ -106,8 +106,8 @@ automatically when context is running low. Press `Esc Esc` to cancel.
 
 ## Vim Mode
 
-Toggle with `/vim` or set `settings.vim_mode` in config. Supports insert,
-normal, and visual modes. See the
+Toggle with `/vim` or set `smelt.settings.vim = true` in `init.lua`. Supports
+insert, normal, and visual modes. See the
 [Keybindings Reference](../reference/keybindings.md#vim-mode) for details.
 
 ## Input Stashing
@@ -119,4 +119,5 @@ Press `Ctrl+S` to stash your current input and get a blank buffer. Press
 
 After each turn, the agent may suggest your next message as dim **ghost text**.
 Press `Tab` to accept it, or just start typing to dismiss. Toggle in `/settings`
-→ `input_prediction` or set `settings.input_prediction` in config.
+→ `input prediction` or set `smelt.settings.show_prediction = false` in
+`init.lua`.

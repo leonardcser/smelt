@@ -4,23 +4,25 @@
 
 ### General
 
-| Key                             | Action                             |
-| ------------------------------- | ---------------------------------- |
-| `Enter`                         | Submit message                     |
-| `Ctrl+J` / `Shift+Enter`        | Insert newline                     |
-| `Ctrl+R`                        | Fuzzy search history               |
-| `Ctrl+S`                        | Stash / unstash input              |
-| `Ctrl+C`                        | Clear input / cancel agent / quit  |
-| `Ctrl+L`                        | Redraw screen                      |
-| `Ctrl+T`                        | Cycle reasoning effort             |
-| `Shift+Tab`                     | Cycle mode                         |
-| `Enter` (empty prompt)          | Pop and send next queued message   |
-| `Esc`                           | Unqueue messages or dismiss dialog |
-| `Esc Esc`                       | Cancel agent / compaction / rewind |
-| `↑` / `↓` / `Ctrl+P` / `Ctrl+N` | Navigate input history             |
-| `Tab`                           | Accept completion / ghost text     |
-| `?`                             | Open help (empty input only)       |
-| `Cmd+V`                         | Paste clipboard (image or text)    |
+| Key                             | Action                                  |
+| ------------------------------- | --------------------------------------- |
+| `Enter`                         | Submit message                          |
+| `Ctrl+J` / `Shift+Enter`        | Insert newline                          |
+| `Ctrl+R`                        | Fuzzy search input history              |
+| `Ctrl+S`                        | Stash / unstash input                   |
+| `Ctrl+C`                        | Clear input / cancel agent / quit       |
+| `Ctrl+L`                        | Redraw screen                           |
+| `Ctrl+T`                        | Cycle reasoning effort                  |
+| `Shift+Tab`                     | Cycle mode (normal → plan → apply → yolo) |
+| `Esc`                           | Dismiss dialog / unqueue messages       |
+| `Esc Esc`                       | Cancel agent / compaction / rewind      |
+| `↑` / `↓` / `Ctrl+P` / `Ctrl+N` | Navigate input history                  |
+| `Tab`                           | Accept ghost text completion            |
+| `?`                             | Open help (empty input only)            |
+| `Cmd+V`                         | Paste image from clipboard              |
+
+While the agent is running, queued messages stack up. `Esc` flushes them back
+into the prompt; a second `Esc` cancels the running turn.
 
 ### Cursor
 
@@ -54,15 +56,24 @@
 | `Ctrl+_`                                      | Undo                       |
 | `Ctrl+X Ctrl+E`                               | Edit in `$EDITOR`          |
 
+`Ctrl+Y` and the vim `p` / `P` commands share the system clipboard with the
+internal kill ring: yanking pushes to both, and pasting prefers external
+clipboard text if it changed since the last yank.
+
 ### Selection (non-vim)
 
 | Key                                                                           | Action                  |
 | ----------------------------------------------------------------------------- | ----------------------- |
 | `Shift+Left` / `Shift+Right`                                                  | Select character        |
+| `Shift+Up` / `Shift+Down`                                                     | Select line             |
 | `Shift+Alt+Left` / `Shift+Alt+Right` / `Shift+Ctrl+Left` / `Shift+Ctrl+Right` | Select word             |
 | `Shift+Home` / `Shift+End`                                                    | Select to line boundary |
-| `Cmd+C`                                                                       | Copy                    |
-| `Cmd+X`                                                                       | Cut                     |
+| `Cmd+C`                                                                       | Copy selection          |
+| `Cmd+X`                                                                       | Cut selection           |
+
+Drag with the mouse in the prompt or transcript to select text. Releasing the
+drag copies the selection to the clipboard. While dragging the status bar
+shows a temporary `VISUAL` indicator.
 
 !!! note
 
@@ -70,10 +81,19 @@
     `Cmd` combinations for their own features (tabs, scrollback). If a `Cmd`
     binding doesn't work, check your terminal's settings.
 
+## Modes
+
+Smelt has four agent modes — `normal`, `plan`, `apply`, `yolo` — each with its
+own permission defaults. The active mode is shown in the status bar. Cycle
+with `Shift+Tab`. Bindings can be scoped to a specific mode through the Lua
+API (`smelt.keymap.set`); see the [Customization
+guide](../guide/customization.md#keymaps).
+
 ## Vim Mode
 
-Toggle with `/vim` or set `settings.vim_mode` in config. Supports insert,
-normal, and visual modes. When in normal mode, these keys change behavior:
+Toggle with `/vim` or set `settings.vim = true` in config. Supports insert,
+normal, and visual modes. In normal mode, several emacs-style keys take on
+their vim meanings:
 
 | Key      | Vim normal        | Insert / non-vim      |
 | -------- | ----------------- | --------------------- |
@@ -95,8 +115,36 @@ Full vim support: motions, operators (`d`, `c`, `y`), text objects (`iw`,
 Yank / paste are mirrored with the system clipboard: `y` / `yy` / `d` / `x`
 push to the clipboard, and `p` / `P` read from it. If the clipboard was
 updated externally since your last yank, `p` pastes the external text
-(charwise); otherwise vim's linewise flag from `yy` is preserved. The emacs
-`Ctrl+Y` yank behaves the same way.
+(charwise); otherwise vim's linewise flag from `yy` is preserved.
+
+## Cmdline (`:`)
+
+Vim-style cmdline (`:q`, `:wq`, etc.) supports tab completion over registered
+commands.
+
+| Key                       | Action                             |
+| ------------------------- | ---------------------------------- |
+| `Tab` / `Ctrl+N` / `Ctrl+J` | Next completion                  |
+| `Shift+Tab` / `Ctrl+P` / `Ctrl+K` | Previous completion        |
+| `↑` / `↓`                 | Cmdline history                    |
+| `Enter`                   | Run command                        |
+| `Esc` / `Ctrl+C`          | Close cmdline                      |
+| `Ctrl+W`                  | Delete word backward               |
+| `Ctrl+U`                  | Clear cmdline                      |
+| `Ctrl+A` / `Home`         | Beginning                          |
+| `Ctrl+E` / `End`          | End                                |
+
+## Completer (slash / file pickers)
+
+The completer pops up when typing `/` (commands) or `@` (file references).
+
+| Key                       | Action          |
+| ------------------------- | --------------- |
+| `Tab`                     | Accept          |
+| `Enter`                   | Accept + submit |
+| `↑` / `Ctrl+K` / `Ctrl+P` | Previous        |
+| `↓` / `Ctrl+J` / `Ctrl+N` | Next            |
+| `Esc` / `Ctrl+C`          | Cancel          |
 
 ## Dialogs
 
@@ -106,47 +154,38 @@ updated externally since your last yank, `p` pastes the external text
 | ------------------------------------- | ------------- |
 | `↑` / `k` / `Ctrl+P`                  | Previous item |
 | `↓` / `j` / `Ctrl+N`                  | Next item     |
-| `Ctrl+U` / `Ctrl+D` / `PgUp` / `PgDn` | Page scroll   |
+| `PgUp` / `PgDn`                       | Page scroll   |
+| `Home` / `g`                          | Top           |
+| `End`                                 | Bottom        |
 | `Enter`                               | Confirm       |
-| `Esc` / `Ctrl+C`                      | Cancel        |
+| `Esc` / `Ctrl+C`                      | Dismiss       |
 
 ### Per-Dialog
 
-| Dialog      | Key                               | Action                     |
-| ----------- | --------------------------------- | -------------------------- |
-| Help        | `q` / `?`                         | Close                      |
-| Confirm     | `Tab`                             | Attach message to approval |
-| Question    | `Space`                           | Toggle option              |
-| Question    | `1`–`9`                           | Jump to option             |
-| Question    | `←`/`→`/`h`/`l`/`Tab`/`Shift+Tab` | Switch questions           |
-| Permissions | `dd` / `⌫`                        | Delete permission          |
-| Permissions | `q`                               | Close                      |
-| Ps          | `⌫`                               | Kill process               |
-| Resume      | `dd` / `⌫`                        | Delete session             |
-| Resume      | `Ctrl+W`                          | Toggle workspace filter    |
-| Resume      | `q`                               | Close                      |
-| Resume      | (type)                            | Fuzzy search               |
-| Rewind      | `↑` / `↓`                         | Select turn                |
-| Rewind      | `Enter`                           | Rewind to turn             |
+| Dialog      | Key              | Action                            |
+| ----------- | ---------------- | --------------------------------- |
+| Help        | `q` / `?` / `Esc` | Close                            |
+| Confirm     | `e`              | Focus reason input                 |
+| Confirm     | `Shift+Tab`      | Back to previous request           |
+| Permissions | `dd` / `⌫`       | Delete permission                  |
+| Ps          | `⌫`              | Kill process                       |
+| Resume      | `Ctrl+D`         | Delete session                     |
+| Resume      | `Alt+W`          | Toggle workspace filter            |
+| Resume      | (type)           | Fuzzy filter                       |
+| Rewind      | `↑` / `↓`        | Select turn                        |
+| Rewind      | `Enter`          | Rewind to turn                     |
 
-## Completer
+## Esc Chords
 
-| Key                       | Action                |
-| ------------------------- | --------------------- |
-| `Tab`                     | Accept                |
-| `Enter`                   | Accept + submit       |
-| `↑` / `Ctrl+K` / `Ctrl+P` | Previous              |
-| `↓` / `Ctrl+J` / `Ctrl+N` | Next                  |
-| `Ctrl+R`                  | Cycle history matches |
-| `Esc`                     | Cancel                |
+Bindings that start with `Esc` are treated as a chord: press `Esc`, then the
+next key within the chord window to complete it. The built-in `Esc Esc`
+either cancels the in-flight agent or rewinds the last turn when idle. Define
+your own chords (any length) with `smelt.keymap.set` — see the [Customization
+guide](../guide/customization.md#keymaps).
 
-## Menu (Settings / Model / Theme)
+## Custom Keybindings
 
-| Key                  | Action                           |
-| -------------------- | -------------------------------- |
-| `↑` / `k` / `Ctrl+P` | Previous                         |
-| `↓` / `j` / `Ctrl+N` | Next                             |
-| `Enter`              | Select / toggle                  |
-| `Space`              | Toggle (settings)                |
-| `Tab`                | Cycle auxiliary (e.g. reasoning) |
-| `Esc` / `q`          | Dismiss                          |
+Bind any chord from Lua with `smelt.keymap.set(mode, chord, handler)`. Modes
+are `"n"`, `"i"`, `"v"`, or `""` (every mode). Examples ship with the
+distribution — see `docs/lua-examples/mode_keybinds.lua` and
+`runtime/lua/smelt/plugins/esc_chord.lua` for working patterns.
