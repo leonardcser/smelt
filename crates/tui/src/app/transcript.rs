@@ -233,38 +233,6 @@ impl TuiApp {
         (soft, hard)
     }
 
-    pub(crate) fn block_text_at_row(
-        &mut self,
-        abs_row: usize,
-        show_thinking: bool,
-    ) -> Option<String> {
-        let tw = self.transcript_width() as u16;
-        let theme = self.ui.theme().clone();
-        // Prefer raw markdown source so yanking returns `**bold**` etc. verbatim.
-        // Fall back to cell-walking for structured blocks (tool/confirm).
-        let block_id = {
-            let snap = self.transcript_projection.snapshot(
-                &mut self.transcript.history,
-                tw,
-                show_thinking,
-                &theme,
-            );
-            snap.block_of_row.get(abs_row).copied().flatten()
-        };
-        if let Some(id) = block_id {
-            if let Some(raw) = self.transcript.block(id).and_then(|b| b.raw_text()) {
-                return Some(raw);
-            }
-        }
-        let snap = self.transcript_projection.snapshot(
-            &mut self.transcript.history,
-            tw,
-            show_thinking,
-            &theme,
-        );
-        snap.block_text_at(abs_row)
-    }
-
     pub(crate) fn snap_col_to_selectable(
         &mut self,
         abs_row: usize,

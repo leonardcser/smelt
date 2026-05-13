@@ -1,5 +1,5 @@
 //! `smelt.transcript` bindings — read the rendered transcript display
-//! text and yank the current block. Thin live-state surface over `TuiApp`.
+//! text. Thin live-state surface over `TuiApp`.
 
 use lua_doc_derive::lua_module;
 use mlua::prelude::*;
@@ -7,7 +7,7 @@ use smelt_core::lua::doc::register_ui_fn;
 
 #[lua_module(
     name = "smelt.transcript",
-    doc = "Read rendered transcript display text and yank the current block. UiHost-only."
+    doc = "Read rendered transcript display text. UiHost-only."
 )]
 pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
     let transcript_tbl = lua.create_table()?;
@@ -24,18 +24,6 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
                     .join("\n")
             })
             .unwrap_or_default())
-        },
-    )?;
-    register_ui_fn(
-        &transcript_tbl,
-        "smelt.transcript",
-        "yank_block",
-        "Copy the transcript block under the cursor to the system clipboard. Notifies the user with the copied range; no-op when the cursor is outside any block.",
-        &[],
-        lua,
-        |_, ()|  -> LuaResult<()>{
-            crate::lua::with_app(|app| app.yank_current_block());
-            Ok(())
         },
     )?;
     smelt.set("transcript", transcript_tbl)?;

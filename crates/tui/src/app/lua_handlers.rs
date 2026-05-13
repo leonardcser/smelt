@@ -55,19 +55,6 @@ impl TuiApp {
         }
     }
 
-    pub(crate) fn yank_current_block(&mut self) {
-        let abs_row = self.transcript_win().cursor_abs_row();
-        if let Some(text) = self.block_text_at_row(abs_row, self.core.config.settings.show_thinking)
-        {
-            if self.core.clipboard.write(&text).is_ok() {
-                self.core.clipboard.kill_ring.record_clipboard_write(text);
-            }
-            self.notify("block copied".into());
-        } else {
-            self.notify_error("no block at cursor".into());
-        }
-    }
-
     /// Resolve a Confirm dialog. Cancels the active turn when the choice requires it.
     pub(crate) fn handle_confirm_resolve(
         &mut self,

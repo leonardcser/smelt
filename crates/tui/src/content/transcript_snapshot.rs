@@ -4,8 +4,6 @@ use crate::content::block_buffers::BlockBufferCache;
 use crate::smelt_term::Theme;
 use smelt_core::buffer::SpanMeta;
 use smelt_core::transcript_model::{BlockHistory, BlockId, LayoutKey, ViewState};
-use std::collections::HashMap;
-use std::ops::Range;
 use std::sync::Arc;
 
 #[derive(Clone, Debug)]
@@ -26,7 +24,6 @@ pub struct TranscriptSnapshot {
     /// Raw source text; `copy_range` uses it for fully-selected rows.
     pub(crate) source_text: Vec<Option<String>>,
     pub block_of_row: Vec<Option<BlockId>>,
-    pub(crate) row_of_block: HashMap<BlockId, Range<u16>>,
     pub(crate) generation: u64,
 }
 
@@ -112,23 +109,6 @@ impl TranscriptSnapshot {
         self.copy_range(sr, sc, er, ec)
     }
 
-    pub fn block_text_at(&self, abs_row: usize) -> Option<String> {
-        let block_id = (*self.block_of_row.get(abs_row)?)?;
-        let range = self.row_of_block.get(&block_id)?;
-        let start_row = range.start as usize;
-        let end_row = (range.end as usize).saturating_sub(1);
-        if end_row < start_row || start_row >= self.row_cells.len() {
-            return None;
-        }
-        let end_col = self.row_cells.get(end_row).map(|c| c.len()).unwrap_or(0);
-        let text = self.copy_range(start_row, 0, end_row, end_col);
-        if text.is_empty() {
-            None
-        } else {
-            Some(text)
-        }
-    }
-
     pub fn snap_to_selectable(&self, row: usize, col: usize) -> Option<(usize, usize)> {
         let cells = self.row_cells.get(row)?;
         if cells.is_empty() {
@@ -170,7 +150,6 @@ pub(crate) fn build_snapshot(
     let mut soft_wrapped: Vec<bool> = Vec::new();
     let mut source_text: Vec<Option<String>> = Vec::new();
     let mut block_of_row: Vec<Option<BlockId>> = Vec::new();
-    let mut row_of_block: HashMap<BlockId, Range<u16>> = HashMap::new();
 
     for i in 0..history.order.len() {
         let id = history.order[i];
@@ -188,7 +167,6 @@ pub(crate) fn build_snapshot(
                 block_of_row.push(None);
             }
         }
-        let start = rows.len() as u16;
         for r in 0..block_rows {
             let text = block_buf.get_line(r).unwrap_or("").to_string();
             let highlights = block_buf.highlights_at(r);
@@ -200,10 +178,6 @@ pub(crate) fn build_snapshot(
             source_text.push(dec.source_text);
             block_of_row.push(Some(id));
         }
-        let end = rows.len() as u16;
-        if end > start {
-            row_of_block.insert(id, start..end);
-        }
     }
 
     TranscriptSnapshot {
@@ -214,7 +188,6 @@ pub(crate) fn build_snapshot(
         soft_wrapped,
         source_text,
         block_of_row,
-        row_of_block,
         generation: history.generation(),
     }
 }
@@ -295,7 +268,6 @@ mod tests {
             soft_wrapped: vec![false; len],
             source_text: vec![None; len],
             block_of_row: Vec::new(),
-            row_of_block: HashMap::new(),
             generation: 0,
         }
     }
@@ -375,16 +347,6 @@ mod tests {
         snap.source_text[0] = Some("# Title".into());
         assert_eq!(snap.copy_range(0, 0, 0, 5), "# Title");
         assert_eq!(snap.copy_range(0, 0, 1, 5), "# Title\nhello");
-    }
-
-    #[test]
-    fn block_text_at_includes_last_cell_in_source_text_path() {
-        let mut snap = make_snapshot(vec![vec![cell('b'), cell('o'), cell('l'), cell('d')]]);
-        snap.source_text[0] = Some("**bold**".into());
-        let bid = BlockId::new(42);
-        snap.block_of_row = vec![Some(bid)];
-        snap.row_of_block.insert(bid, 0..1);
-        assert_eq!(snap.block_text_at(0).as_deref(), Some("**bold**"));
     }
 
     #[test]
