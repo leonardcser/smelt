@@ -61,8 +61,9 @@ When the active phase closes:
 ## Doc sync rule
 
 When a decision is made or design shifts, update **every** affected doc in the
-**same change**. Drifted docs are bugs. `check.sh` catches the mechanical cases;
-the human-shaped cases (intent vs structure consistency) need attention.
+**same change**. Drifted docs are bugs — both the mechanical cases (paths,
+counts, headers) and the human-shaped cases (intent vs structure consistency)
+need attention.
 
 A phase isn't landed until `P<n>.md` is written and companion files reflect what
 happened.
@@ -78,8 +79,6 @@ after multiple features land together). Never produce a
 
 - **At phase boundaries:**
   `cargo fmt && cargo clippy --workspace --all-targets -- -D warnings && cargo nextest run --workspace`.
-- **Whenever a `refactor/*` doc changes:** `refactor/check.sh`. All green;
-  warnings fine; red `✗` means a doc lies.
 - **For UI changes:** drive the binary in a tmux side-pane (see
   `ARCHITECTURE.md` § Testing TUI changes).
 - **For puml edits:** regenerate the SVG
@@ -98,12 +97,7 @@ after multiple features land together). Never produce a
 | `P<n>.md`                  | Per-phase log: what landed + decisions made.                                |
 | `TRACE.md`                 | One vertical slice end-to-end through target.                               |
 | `TESTING.md`               | Three-layer testing strategy.                                               |
-| `check.sh`                 | Drift-detection invariants.                                                 |
 | `PROMPT.md`                | Agent session entry prompt — orient, land one sub-phase.                    |
-| `PROMPT_RALPH.md`          | Legacy RALPH self-driving loop prompt (multi-sub-phase, auto-commit).       |
-| `ralph.sh`                 | Legacy loop driver. Spawns a tmux window running `claude -p` per iteration. |
-| `hooks/post_doc_edit.sh`   | PostToolUse hook. Yells when a `refactor/*.md` file exceeds its line cap.   |
-| `hooks/stop_gate.sh`       | Stop hook. Blocks "done" if `refactor/check.sh` is red.                     |
 
 ## `P<n>.md` template
 
