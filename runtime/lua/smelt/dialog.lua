@@ -54,10 +54,14 @@ function smelt.ui.dialog.options(labels, opts)
   if #lines == 0 then lines = { "" } end
   local buf = smelt.buf.create()
   smelt.buf.set_lines(buf, lines)
+  -- Default pad_left = 1 so options align with dialog.input's gutter; callers
+  -- can pass 0 or a larger pad explicitly to opt out.
+  local pad_left = opts.pad_left
+  if pad_left == nil then pad_left = 1 end
   local leaf = smelt.win.open(buf, {
     region    = REGION,
     focusable = true,
-    pad_left  = opts.pad_left,
+    pad_left  = pad_left,
     pad_right = opts.pad_right,
   })
   if leaf then

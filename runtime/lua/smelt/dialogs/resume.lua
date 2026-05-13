@@ -129,6 +129,10 @@ smelt.cmd.register("resume", function()
       return function() smelt.win.move_cursor(list_leaf, delta) end
     end
 
+    -- `configure_list` already binds these on the list leaf itself, but the list
+    -- is non-focusable here (focus stays on the input), so those bindings never
+    -- fire. We forward at the dialog level instead so the input stays focused
+    -- while these keys drive the list cursor.
     local picked = smelt.ui.dialog.open({
       title  = "resume",
       height = 70,

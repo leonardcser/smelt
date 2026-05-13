@@ -32,7 +32,6 @@ smelt.cmd.register("rewind", function(args)
     local lines, prefix_widths = build_rows(turns)
     local options_leaf, options_buf = smelt.ui.dialog.options(lines, {
       selected  = #lines,
-      pad_left  = 1,
       pad_right = 1,
     })
 

@@ -156,7 +156,7 @@ The completer pops up when typing `/` (commands) or `@` (file references).
 | `↓` / `j` / `Ctrl+J` / `Ctrl+N`       | Next item       |
 | `PgUp` / `PgDn`                       | Page scroll     |
 | `Ctrl+U` / `Ctrl+D`                   | Half-page scroll|
-| `Home` / `g`                          | Top             |
+| `Home`                                | Top             |
 | `End`                                 | Bottom          |
 | `Enter`                               | Confirm         |
 | `Esc` / `Ctrl+C`                      | Dismiss         |

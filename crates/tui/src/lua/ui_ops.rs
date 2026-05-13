@@ -333,10 +333,6 @@ pub(crate) fn configure_list_leaf(app: &mut TuiApp, leaf: WinId, initial_cursor:
             isize::MIN / 2,
         ),
         (
-            KeyBind::new(KeyCode::Char('g'), KeyModifiers::NONE),
-            isize::MIN / 2,
-        ),
-        (
             KeyBind::new(KeyCode::End, KeyModifiers::NONE),
             isize::MAX / 2,
         ),
