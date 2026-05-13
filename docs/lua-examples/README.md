@@ -38,7 +38,7 @@ hangs off `smelt.*` — flat namespace, Neovim-style.
 - `smelt.provider.list()` — list registered provider names
 - `smelt.mcp.register(name, { command, args, env, timeout, enabled })` — register an MCP server
 - `smelt.mcp.list()` — list registered MCP server names
-- `smelt.settings.set(key, value)` — set a config setting (bool, number, or string)
+- `smelt.settings.<key> = value` — set a boolean config setting (metatable-backed proxy)
 - `smelt.permissions.set_rules({ default = ..., normal = ..., plan = ..., apply = ..., yolo = ... })` — configure permission rules
 
 ### Transcript / Prompt / Windows

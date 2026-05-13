@@ -30,10 +30,10 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
         &[],
         lua,
         |_, ()| -> LuaResult<Option<LuaVimMode>> {
-            Ok(crate::lua::try_with_app(|app| {
-                app.focused_vim_mode().map(LuaVimMode::from)
-            })
-            .flatten())
+            Ok(
+                crate::lua::try_with_app(|app| app.focused_vim_mode().map(LuaVimMode::from))
+                    .flatten(),
+            )
         },
     )?;
     register_ui_fn(

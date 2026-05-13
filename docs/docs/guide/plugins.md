@@ -48,7 +48,7 @@ namespaces or guard them behind a tier check.
 
 ```lua
 -- ~/.config/smelt/init.lua
-local prompt = smelt.prompt.win()
+local prompt = smelt.prompt.win_id()
 
 local ns = smelt.buf.create_namespace("hello")
 

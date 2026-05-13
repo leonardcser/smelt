@@ -94,8 +94,10 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
         &[],
         lua,
         |_, ()| {
-            Ok(crate::lua::try_with_app(|app| app.prompt_buf().source().to_string())
-                .unwrap_or_default())
+            Ok(
+                crate::lua::try_with_app(|app| app.prompt_buf().source().to_string())
+                    .unwrap_or_default(),
+            )
         },
     )?;
 

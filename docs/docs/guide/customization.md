@@ -12,8 +12,9 @@ against the `smelt` Lua API.
 
 ## Runtime Settings
 
-Toggle settings at runtime with `/settings`, set defaults in `init.lua` with
-`smelt.settings.set`, or override from the CLI with `--set key=value`. See the
+Toggle settings at runtime with `/settings`, set defaults in `init.lua` by
+writing to `smelt.settings` (e.g. `smelt.settings.vim = true`), or override
+from the CLI with `--set key=value`. See the
 [Configuration Reference](../reference/configuration.md#settings) for all
 available settings.
 

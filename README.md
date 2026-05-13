@@ -118,9 +118,9 @@ smelt.provider.register("copilot", {
   api_base = "https://api.individual.githubcopilot.com",
 })
 
-smelt.settings.set("vim_mode", false)
-smelt.settings.set("auto_compact", false)
-smelt.settings.set("redact_secrets", true) -- on by default — scrubs secrets from user input and tool results before they reach the LLM
+smelt.settings.vim = false
+smelt.settings.auto_compact = false
+smelt.settings.redact_secrets = true -- on by default — scrubs secrets from user input and tool results before they reach the LLM
 ```
 
 See the [full documentation](https://leonardcser.github.io/smelt/) for all

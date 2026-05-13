@@ -138,12 +138,12 @@ happens.
 
 ## Settings
 
-Set defaults in `init.lua` with `smelt.settings.set`:
+Set defaults in `init.lua` by writing to `smelt.settings`:
 
 ```lua
-smelt.settings.set("vim_mode", true)
-smelt.settings.set("auto_compact", false)
-smelt.settings.set("show_tps", true)
+smelt.settings.vim = true
+smelt.settings.auto_compact = false
+smelt.settings.show_tps = true
 ```
 
 All toggleable at runtime via `/settings`.
@@ -322,16 +322,16 @@ smelt.provider.register("openrouter", {
   models = { "anthropic/claude-sonnet-4-6", "openai/gpt-5.4" },
 })
 
-smelt.settings.set("vim_mode", false)
-smelt.settings.set("auto_compact", false)
-smelt.settings.set("show_tps", true)
-smelt.settings.set("show_tokens", true)
-smelt.settings.set("show_cost", true)
-smelt.settings.set("input_prediction", true)
-smelt.settings.set("task_slug", true)
-smelt.settings.set("show_thinking", true)
-smelt.settings.set("restrict_to_workspace", true)
-smelt.settings.set("redact_secrets", true)
+smelt.settings.vim = false
+smelt.settings.auto_compact = false
+smelt.settings.show_tps = true
+smelt.settings.show_tokens = true
+smelt.settings.show_cost = true
+smelt.settings.show_prediction = true
+smelt.settings.show_slug = true
+smelt.settings.show_thinking = true
+smelt.settings.restrict_to_workspace = true
+smelt.settings.redact_secrets = true
 
 smelt.mcp.register("filesystem", {
   command = { "npx", "-y", "@modelcontextprotocol/server-filesystem", "/tmp" },
