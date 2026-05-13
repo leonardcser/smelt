@@ -1,6 +1,58 @@
 [workspace]
 members = ["crates/protocol", "crates/engine", "crates/style", "crates/perf", "crates/buffer", "crates/term", "crates/edit", "crates/core", "crates/tui", "crates/lua-doc-derive", "crates/xtask"]
 
+[workspace.dependencies]
+# Internal crates
+protocol = { path = "crates/protocol" }
+engine = { path = "crates/engine" }
+smelt-style = { path = "crates/style" }
+smelt-perf = { path = "crates/perf" }
+smelt-buffer = { path = "crates/buffer" }
+smelt-term = { path = "crates/term" }
+smelt-edit = { path = "crates/edit" }
+smelt-core = { path = "crates/core" }
+tui = { path = "crates/tui" }
+lua-doc-derive = { path = "crates/lua-doc-derive" }
+
+# Async / runtime
+tokio = { version = "1", default-features = false }
+tokio-util = { version = "0.7", default-features = false }
+futures-core = "0.3"
+futures-util = { version = "0.3", default-features = false }
+
+# HTTP
+reqwest = { version = "0.13", default-features = false, features = ["json", "charset", "http2", "rustls"] }
+
+# Serde
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+# Terminal
+crossterm = { version = "0.29", features = ["event-stream", "bracketed-paste"] }
+unicode-width = "0.2"
+
+# Cryptography / encoding
+base64 = "0.22"
+sha2 = "0.10"
+
+# Lua
+mlua = { version = "0.11", features = ["lua54", "vendored"] }
+
+# Globbing
+glob = "0.3"
+globset = "0.4"
+ignore = "0.4"
+
+# System
+libc = "0.2"
+dirs = "6"
+url = "2"
+
+# Dev
+insta = { version = "1", features = ["json", "redactions"] }
+tempfile = "3"
+vt100 = "0.16"
+
 [package]
 name = "smelt-agent"
 version = "0.4.7"
@@ -14,17 +66,17 @@ name = "smelt"
 path = "src/main.rs"
 
 [dependencies]
-protocol = { path = "crates/protocol" }
-engine = { path = "crates/engine" }
-smelt-core = { path = "crates/core" }
-smelt-perf = { path = "crates/perf" }
-tui = { path = "crates/tui" }
-tokio = { version = "1", features = ["full"] }
+protocol = { workspace = true }
+engine = { workspace = true }
+smelt-core = { workspace = true }
+smelt-perf = { workspace = true }
+tui = { workspace = true }
+tokio = { workspace = true, features = ["macros", "rt-multi-thread", "sync", "signal", "time"] }
 clap = { version = "4", features = ["derive"] }
-crossterm = { version = "0.29", features = ["event-stream", "bracketed-paste"] }
-reqwest = { version = "0.13", default-features = false, features = ["json", "charset", "http2", "rustls"] }
-libc = "0.2.186"
-dialoguer = "0.12.0"
+crossterm = { workspace = true }
+reqwest = { workspace = true }
+libc = { workspace = true }
+dialoguer = "0.12"
 
 [profile.release]
 strip = true
@@ -44,13 +96,19 @@ debug = true
 # usable while drastically cutting link time and dSYM generation on macOS.
 [profile.dev]
 debug = "line-tables-only"
+split-debuginfo = "unpacked"
 
 [profile.dev.package."*"]
 debug = false
-opt-level = 0
+
+[profile.test]
+inherits = "dev"
+
+[profile.test.package."*"]
+debug = false
 
 [dev-dependencies]
-insta = { version = "1.47.2", features = ["json", "redactions"] }
-serde_json = "1.0.149"
-tempfile = "3.27.0"
-wiremock = "0.6.5"
+insta = { workspace = true }
+serde_json = { workspace = true }
+tempfile = { workspace = true }
+wiremock = "0.6"

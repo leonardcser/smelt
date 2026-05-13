@@ -11,9 +11,9 @@ name = "smelt_term"
 path = "src/lib.rs"
 
 [dependencies]
-smelt-style = { path = "../style" }
-crossterm = { version = "0.29", features = ["event-stream", "bracketed-paste"] }
-unicode-width = "0.2"
+smelt-style = { workspace = true }
+crossterm = { workspace = true }
+unicode-width = { workspace = true }
 
 [dev-dependencies]
-insta = "1.47"
+insta = { workspace = true }

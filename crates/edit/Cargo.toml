@@ -11,7 +11,7 @@ name = "smelt_edit"
 path = "src/lib.rs"
 
 [dependencies]
-smelt-term = { path = "../term" }
-smelt-buffer = { path = "../buffer" }
-crossterm = { version = "0.29", features = ["event-stream", "bracketed-paste"] }
-unicode-width = "0.2"
+smelt-term = { workspace = true }
+smelt-buffer = { workspace = true }
+crossterm = { workspace = true }
+unicode-width = { workspace = true }

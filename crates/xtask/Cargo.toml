@@ -5,6 +5,6 @@ edition = "2021"
 publish = false
 
 [dependencies]
-smelt-core = { path = "../core" }
-tui = { path = "../tui" }
-protocol = { path = "../protocol" }
+smelt-core = { workspace = true }
+tui = { workspace = true }
+protocol = { workspace = true }
