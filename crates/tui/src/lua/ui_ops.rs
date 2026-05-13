@@ -712,7 +712,10 @@ pub(crate) fn parse_picker_item(v: &mlua::Value) -> Result<crate::picker::Picker
                 item = item.with_prefix(prefix);
             }
             if let Ok(Some(ansi)) = t.get::<Option<u64>>("ansi_color") {
-                item = item.with_accent(smelt_core::style::Color::AnsiValue(ansi as u8));
+                item = item.with_prefix_style(
+                    smelt_core::style::Style::new()
+                        .fg(smelt_core::style::Color::AnsiValue(ansi as u8)),
+                );
             }
             Ok(item)
         }

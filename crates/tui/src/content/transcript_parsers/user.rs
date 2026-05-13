@@ -91,10 +91,17 @@ pub(super) fn render(
 }
 
 fn print_highlights(out: &mut LineBuilder, text: &str, image_labels: &[String], is_command: bool) {
-    let accent_role = intern("SmeltAccent");
+    // Push only the accent foreground so the active user-message background
+    // keeps painting underneath. `push_hl` would swap the whole highlight
+    // group and lose the bg.
+    let accent_fg = out
+        .theme()
+        .resolve(intern("SmeltAccent"))
+        .fg
+        .unwrap_or(smelt_core::style::Color::Reset);
 
     if is_command {
-        out.push_hl(accent_role);
+        out.push_fg(accent_fg);
         out.print(text);
         out.pop_style();
         return;
@@ -113,7 +120,7 @@ fn print_highlights(out: &mut LineBuilder, text: &str, image_labels: &[String], 
     };
 
     let accent = |out: &mut LineBuilder, token: String| {
-        out.push_hl(accent_role);
+        out.push_fg(accent_fg);
         out.print(&token);
         out.pop_style();
     };

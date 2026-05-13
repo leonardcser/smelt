@@ -244,7 +244,10 @@ pub(crate) fn populate_ui_theme(theme: &mut crate::smelt_term::Theme) {
     theme.set("SmeltModePlan", Style::new().fg(Color::AnsiValue(79)));
     theme.set("SmeltModeApply", Style::new().fg(Color::AnsiValue(141)));
     theme.set("SmeltModeYolo", Style::new().fg(Color::AnsiValue(204)));
-    theme.set("SmeltModeExec", Style::new().fg(Color::AnsiValue(197)));
+    theme.set(
+        "SmeltModeExec",
+        Style::new().fg(Color::AnsiValue(197)).bold(),
+    );
 
     theme.set("SmeltReasonLow", Style::new().fg(Color::AnsiValue(75)));
     theme.set("SmeltReasonMed", Style::new().fg(Color::AnsiValue(214)));

@@ -380,6 +380,16 @@ impl TuiApp {
                     crate::completer::CompleterKind::File => "./",
                     crate::completer::CompleterKind::CommandArg => "",
                 };
+                let command_style =
+                    matches!(session.kind, crate::completer::CompleterKind::Command).then(|| {
+                        let accent = self
+                            .ui
+                            .theme()
+                            .get("SmeltAccent")
+                            .fg
+                            .unwrap_or(smelt_core::style::Color::Reset);
+                        smelt_core::style::Style::new().fg(accent)
+                    });
                 let items: Vec<crate::picker::PickerItem> = session
                     .results_iter()
                     .map(|r| {
@@ -394,7 +404,12 @@ impl TuiApp {
                             it = it.with_description(desc);
                         }
                         if let Some(c) = r.ansi_color {
-                            it = it.with_accent(smelt_core::style::Color::AnsiValue(c));
+                            it = it.with_prefix_style(
+                                smelt_core::style::Style::new()
+                                    .fg(smelt_core::style::Color::AnsiValue(c)),
+                            );
+                        } else if let Some(style) = command_style {
+                            it = it.with_prefix_style(style).with_label_style(style);
                         }
                         it
                     })

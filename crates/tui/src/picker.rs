@@ -1,8 +1,9 @@
 //! Buffer-backed list overlay for selectable items.
 //!
 //! Each item occupies one buffer line: `{indent}{prefix}{label}{padding}{description}`.
-//! Per-item accents and the dim description column are extmarks. Selection is
-//! `cursor_row` with `cursor_line_highlight = true`.
+//! `prefix_style` and `label_style` paint their cell, and the description column
+//! always renders dim. Rendering goes through `LineBuilder` so styled spans
+//! compose the same way as everywhere else in the TUI.
 //!
 //! Reversed mode (prompt-docked completer) writes items in reverse order so
 //! the best match sits at the bottom; logical → visual mapping is `n - 1 - logical`.
@@ -11,21 +12,22 @@
 use crate::app::TuiApp;
 use crate::app::PROMPT_ABOVE_WIN;
 use crate::smelt_term::layout::Anchor;
-use crate::smelt_term::{BufCreateOpts, SpanStyle};
+use crate::smelt_term::BufCreateOpts;
 use crate::smelt_term::{
     BufId, Constraint, Corner, LayoutTree, Overlay, OverlayId, SplitConfig, WinId,
 };
-use smelt_core::style::Color;
+use smelt_core::content::builder::render_into;
+use smelt_core::style::Style;
 
 /// One row in a picker. Description (if any) is column-aligned after the
 /// longest label across the set.
 #[derive(Clone, Default, Debug)]
 pub(crate) struct PickerItem {
-    pub(crate) label: String,
-    pub(crate) description: Option<String>,
     pub(crate) prefix: String,
-    /// Paints the prefix in this color regardless of selection state.
-    pub(crate) accent: Option<Color>,
+    pub(crate) prefix_style: Style,
+    pub(crate) label: String,
+    pub(crate) label_style: Style,
+    pub(crate) description: Option<String>,
 }
 
 impl PickerItem {
@@ -46,8 +48,13 @@ impl PickerItem {
         self
     }
 
-    pub(crate) fn with_accent(mut self, color: Color) -> Self {
-        self.accent = Some(color);
+    pub(crate) fn with_prefix_style(mut self, style: Style) -> Self {
+        self.prefix_style = style;
+        self
+    }
+
+    pub(crate) fn with_label_style(mut self, style: Style) -> Self {
+        self.label_style = style;
         self
     }
 }
@@ -259,8 +266,8 @@ fn max_label_chars(items: &[PickerItem]) -> usize {
         .unwrap_or(0)
 }
 
-/// Write items into the buffer, one row each, with accent and dim-description
-/// extmarks. Reversed mode flips order so logical 0 lands on the last row.
+/// Write items into the buffer, one row each, via `LineBuilder`. Reversed mode
+/// flips order so logical 0 lands on the last row.
 fn write_buffer(app: &mut TuiApp, buf: BufId, items: &[PickerItem], reversed: bool) {
     let max_label = max_label_chars(items);
     let order: Vec<usize> = if reversed {
@@ -269,58 +276,47 @@ fn write_buffer(app: &mut TuiApp, buf: BufId, items: &[PickerItem], reversed: bo
         (0..items.len()).collect()
     };
 
-    let mut lines: Vec<String> = Vec::with_capacity(items.len().max(1));
-    for &src_idx in &order {
-        let item = &items[src_idx];
-        let label_chars = item.prefix.chars().count() + item.label.chars().count();
-        let mut line = String::new();
-        line.push_str(&" ".repeat(INDENT));
-        line.push_str(&item.prefix);
-        line.push_str(&item.label);
-        if let Some(desc) = item.description.as_deref() {
-            let pad = max_label.saturating_sub(label_chars) + DESC_GAP;
-            line.push_str(&" ".repeat(pad));
-            line.push_str(desc);
-        }
-        lines.push(line);
-    }
-    if lines.is_empty() {
-        // Keep the overlay non-empty when filtering returns no matches.
-        lines.push(" (no matches)".into());
-    }
-
+    // Clone the theme Arc so the buffer can be borrowed mutably alongside it.
+    let theme = app.ui.theme().clone();
     let Some(b) = app.ui.buf_mut(buf) else {
         return;
     };
-    b.set_all_lines(lines);
+    // Reset to a single blank seed line; `LineBuilder` will replace it on the
+    // first emitted row and append the rest.
+    b.set_all_lines(vec![]);
 
-    if items.is_empty() {
-        b.add_highlight(0, 0, 14, SpanStyle::new().dim());
-        return;
-    }
-
-    for (visual_row, &src_idx) in order.iter().enumerate() {
-        let item = &items[src_idx];
-        let prefix_start = INDENT as u16;
-        let prefix_end = prefix_start + item.prefix.chars().count() as u16;
-        if prefix_end > prefix_start {
-            if let Some(color) = item.accent {
-                b.add_highlight(
-                    visual_row,
-                    prefix_start,
-                    prefix_end,
-                    SpanStyle::new().fg(color),
-                );
-            }
+    render_into(b, u16::MAX, &theme, |out| {
+        if items.is_empty() {
+            out.push(None, Style::new().dim());
+            out.print(" (no matches)");
+            out.pop_style();
+            out.newline();
+            return;
         }
-        if let Some(desc) = item.description.as_deref() {
+        for &src_idx in &order {
+            let item = &items[src_idx];
             let label_chars = item.prefix.chars().count() + item.label.chars().count();
-            let pad = max_label.saturating_sub(label_chars) + DESC_GAP;
-            let start = INDENT as u16 + label_chars as u16 + pad as u16;
-            let end = start + desc.chars().count() as u16;
-            if end > start {
-                b.add_highlight(visual_row, start, end, SpanStyle::new().dim());
+
+            out.print(&" ".repeat(INDENT));
+
+            if !item.prefix.is_empty() {
+                out.push(None, item.prefix_style);
+                out.print(&item.prefix);
+                out.pop_style();
             }
+            if !item.label.is_empty() {
+                out.push(None, item.label_style);
+                out.print(&item.label);
+                out.pop_style();
+            }
+            if let Some(desc) = item.description.as_deref() {
+                let pad = max_label.saturating_sub(label_chars) + DESC_GAP;
+                out.print(&" ".repeat(pad));
+                out.push(None, Style::new().dim());
+                out.print(desc);
+                out.pop_style();
+            }
+            out.newline();
         }
-    }
+    });
 }

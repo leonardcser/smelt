@@ -6,9 +6,9 @@ use crate::content::selection::{
     SpanKind,
 };
 use smelt_buffer::attachment::{AttachmentStore, ATTACHMENT_MARKER};
-use smelt_buffer::buffer::{Buffer, BufferCopy, BufferParser, CopyOutput};
+use smelt_buffer::buffer::{Buffer, BufferCopy, BufferParser, CopyOutput, SpanMeta};
 use smelt_buffer::coords::ProjectionMaps;
-use smelt_term::{Color, Style};
+use smelt_core::theme::intern;
 use std::sync::{Arc, Mutex};
 
 pub struct PromptBufferParser {
@@ -140,15 +140,22 @@ impl BufferParser for PromptBufferParser {
         let line_count = buf.line_count();
         buf.clear_highlights(0, line_count.max(1));
 
-        // Add highlight extmarks for attachment / @ref / command / exec styling.
-        let accent_style = Style {
-            fg: Some(Color::Blue),
-            ..Style::default()
-        };
-        let exec_style = Style {
-            fg: Some(Color::Red),
-            bold: true,
-            ..Style::default()
+        // Theme-group extmarks: the renderer resolves group → style at paint
+        // time, so live theme updates flow through without re-parsing.
+        let accent_group = intern("SmeltAccent");
+        let exec_group = intern("SmeltModeExec");
+
+        // Char index of the first whitespace on the first visual line, which
+        // marks the end of the leading `/command` token. Highlighting only
+        // extends up to here so a typed argument's first char doesn't pick up
+        // the accent.
+        let command_token_end = if is_command {
+            visual_lines
+                .first()
+                .and_then(|(line, _)| line.chars().position(|c| c.is_whitespace()))
+                .unwrap_or(usize::MAX)
+        } else {
+            0
         };
 
         for (li, (line, kinds)) in visual_lines.iter().enumerate() {
@@ -159,24 +166,33 @@ impl BufferParser for PromptBufferParser {
                 match kind {
                     SpanKind::Attachment | SpanKind::AtRef => {
                         if ch_width > 0 {
-                            buf.add_highlight(li, col, col + ch_width, accent_style);
+                            buf.add_highlight_group_with_meta(
+                                li,
+                                col,
+                                col + ch_width,
+                                accent_group,
+                                SpanMeta::default(),
+                            );
                         }
                     }
                     SpanKind::Plain => {
-                        // Command prefix styling on first line.
-                        if is_command && li == 0 {
-                            let is_first_word = i == 0
-                                || kinds.get(i - 1).copied().unwrap_or(SpanKind::Plain)
-                                    != SpanKind::Plain
-                                || line.chars().nth(i - 1) == Some(' ');
-                            let is_whitespace = ch.is_whitespace();
-                            if is_first_word && !is_whitespace {
-                                buf.add_highlight(li, col, col + ch_width, accent_style);
-                            }
+                        if is_command && li == 0 && i < command_token_end && ch_width > 0 {
+                            buf.add_highlight_group_with_meta(
+                                li,
+                                col,
+                                col + ch_width,
+                                accent_group,
+                                SpanMeta::default(),
+                            );
                         }
-                        // Exec bang styling on first line.
                         if (is_exec || is_exec_invalid) && li == 0 && i == 0 && ch == '!' {
-                            buf.add_highlight(li, col, col + ch_width, exec_style);
+                            buf.add_highlight_group_with_meta(
+                                li,
+                                col,
+                                col + ch_width,
+                                exec_group,
+                                SpanMeta::default(),
+                            );
                         }
                     }
                 }
