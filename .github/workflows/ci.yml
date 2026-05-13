@@ -50,6 +50,6 @@ jobs:
 
       - name: Check Lua API docs are in sync
         run: |
-          cargo run -p tui --bin gen-lua-docs
+          cargo xtask gen-lua-docs
           git diff --exit-code -- docs/docs/reference/api runtime/lua/smelt/_meta docs/zensical.toml \
-            || (echo "::error::Generated Lua API docs are out of date. Run 'cargo run -p tui --bin gen-lua-docs' and commit." && exit 1)
+            || (echo "::error::Generated Lua API docs are out of date. Run 'cargo xtask gen-lua-docs' and commit." && exit 1)
