@@ -10,7 +10,6 @@ pub(crate) mod status;
 pub(crate) mod to_buffer;
 pub(crate) mod transcript_buf;
 pub mod transcript_parsers;
-pub(crate) mod transcript_snapshot;
 
 use crossterm::terminal;
 use smelt_core::style::Color;

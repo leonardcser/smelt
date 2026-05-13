@@ -158,67 +158,57 @@ impl TuiApp {
         !self.transcript.history.is_empty() || self.has_ephemeral(show_thinking)
     }
 
-    /// Full transcript as one string per display row. Returns a cached `Arc` when no ephemeral rows exist.
+    /// Full transcript as one string per display row. Result is cached as an
+    /// `Arc<Vec<String>>` until the generation, width, or `show_thinking` changes.
     pub(crate) fn full_transcript_display_text(&mut self, show_thinking: bool) -> Arc<Vec<String>> {
         let tw = self.transcript_width() as u16;
         let theme = self.ui.theme().clone();
-        if !self.has_ephemeral(show_thinking) {
-            let snap = self.transcript_projection.snapshot(
-                &mut self.transcript.history,
-                tw,
-                show_thinking,
-                &theme,
-            );
-            return Arc::clone(&snap.rows);
-        }
-        let ephemeral_buf = self.render_ephemeral_to_buffer(tw, show_thinking, &theme);
-        let snap = self.transcript_projection.snapshot(
+        let cached = self.transcript_projection.build_rows(
             &mut self.transcript.history,
             tw,
             show_thinking,
             &theme,
         );
-        let mut rows: Vec<String> = (*snap.rows).clone();
+        if !self.has_ephemeral(show_thinking) {
+            return cached;
+        }
+        // Ephemeral content varies per frame; clone-and-append rather than invalidate.
+        let ephemeral_buf = self.render_ephemeral_to_buffer(tw, show_thinking, &theme);
+        let mut rows: Vec<String> = (*cached).clone();
         for r in 0..ephemeral_buf.line_count() {
             rows.push(ephemeral_buf.get_line(r).unwrap_or("").to_string());
         }
         Arc::new(rows)
     }
 
-    /// `\n` byte positions in `rows.join("\n")`, partitioned into soft-wrap and hard-break sets.
-    /// Soft positions are transparent to word-select; hard positions bound line-select.
+    /// `\n` byte positions in `full_transcript_display_text(..).join("\n")`,
+    /// partitioned into soft-wrap and hard-break sets. Soft positions are
+    /// transparent to word-select; hard positions bound line-select.
     pub(crate) fn transcript_line_breaks(
         &mut self,
         show_thinking: bool,
     ) -> (Vec<usize>, Vec<usize>) {
         let tw = self.transcript_width() as u16;
         let theme = self.ui.theme().clone();
-        let (rows, soft_wrapped) = {
-            let snap = self.transcript_projection.snapshot(
+        let (mut soft, mut hard) = self.transcript_projection.line_breaks(
+            &mut self.transcript.history,
+            tw,
+            show_thinking,
+            &theme,
+        );
+
+        if self.has_ephemeral(show_thinking) {
+            let rows = self.transcript_projection.build_rows(
                 &mut self.transcript.history,
                 tw,
                 show_thinking,
                 &theme,
             );
-            (snap.rows.clone(), snap.soft_wrapped.clone())
-        };
-        let mut soft = Vec::new();
-        let mut hard = Vec::new();
-        let mut pos = 0usize;
-        for (i, row) in rows.iter().enumerate() {
-            pos += row.len();
-            if i + 1 < rows.len() {
-                let next_is_soft = soft_wrapped.get(i + 1).copied().unwrap_or(false);
-                if next_is_soft {
-                    soft.push(pos);
-                } else {
-                    hard.push(pos);
-                }
-                pos += 1;
+            let snap_row_count = rows.len();
+            let mut pos: usize = rows.iter().map(|r| r.len()).sum();
+            if snap_row_count > 1 {
+                pos += snap_row_count - 1; // join '\n' bytes
             }
-        }
-        let snap_row_count = rows.len();
-        if self.has_ephemeral(show_thinking) {
             let ephemeral_buf = self.render_ephemeral_to_buffer(tw, show_thinking, &theme);
             let mut first_ephemeral = true;
             for r in 0..ephemeral_buf.line_count() {
@@ -230,56 +220,50 @@ impl TuiApp {
                 pos += ephemeral_buf.get_line(r).unwrap_or("").len();
             }
         }
+        soft.sort_unstable();
+        hard.sort_unstable();
         (soft, hard)
     }
 
+    /// Snap a clicked cell column to the nearest selectable cell on `abs_row`.
     pub(crate) fn snap_col_to_selectable(
         &mut self,
         abs_row: usize,
         col: usize,
-        show_thinking: bool,
+        _show_thinking: bool,
     ) -> usize {
-        let tw = self.transcript_width() as u16;
-        let theme = self.ui.theme().clone();
-        let snap = self.transcript_projection.snapshot(
-            &mut self.transcript.history,
-            tw,
-            show_thinking,
-            &theme,
-        );
-        snap.snap_to_selectable(abs_row, col)
-            .map(|(_, c)| c)
-            .unwrap_or(col)
+        let buf_id = self.transcript_win().buf;
+        let Some(buf) = self.ui.buf(buf_id) else {
+            return col;
+        };
+        crate::content::transcript_buf::snap_col_to_selectable(buf, abs_row, col)
     }
 
     pub(crate) fn snap_cpos_to_selectable(
         &mut self,
         rows: &[String],
         cpos: usize,
-        show_thinking: bool,
+        _show_thinking: bool,
     ) -> usize {
-        let tw = self.transcript_width() as u16;
-        let theme = self.ui.theme().clone();
-        let snap = self.transcript_projection.snapshot(
-            &mut self.transcript.history,
-            tw,
-            show_thinking,
-            &theme,
-        );
-        let (row, col) = snap.byte_to_row_col(cpos);
-        if let Some((_, snapped_col)) = snap.snap_to_selectable(row, col) {
-            if snapped_col == col {
-                return cpos;
-            }
-            let mut offset = 0;
-            for (r, line) in rows.iter().enumerate() {
-                if r == row {
-                    let byte_col: usize =
-                        line.chars().take(snapped_col).map(|c| c.len_utf8()).sum();
-                    return offset + byte_col;
+        let buf_id = self.transcript_win().buf;
+        let Some(buf) = self.ui.buf(buf_id) else {
+            return cpos;
+        };
+        let mut acc = 0usize;
+        for (r, row) in rows.iter().enumerate() {
+            let row_end = acc + row.len();
+            if cpos <= row_end {
+                let col_byte = cpos.saturating_sub(acc).min(row.len());
+                let col = row[..col_byte].chars().count();
+                let snapped =
+                    crate::content::transcript_buf::snap_col_to_selectable(buf, r, col);
+                if snapped == col {
+                    return cpos;
                 }
-                offset += line.len() + 1;
+                let byte_col: usize = row.chars().take(snapped).map(|c| c.len_utf8()).sum();
+                return acc + byte_col;
             }
+            acc = row_end + 1;
         }
         cpos
     }
@@ -353,18 +337,19 @@ impl TuiApp {
             .ui
             .win_buf_mut(self.well_known.transcript)
             .expect("transcript window must be registered at startup");
-        self.transcript_projection.project(
+        let out = self.transcript_projection.project(
             buf,
             &mut self.transcript.history,
             tw as u16,
             show_thinking,
             &theme,
             ephemeral_buf.as_ref(),
+            scroll_top,
+            viewport_rows,
         );
 
-        let total_rows = buf.line_count() as u16;
-
-        let clamped_scroll = scroll_top.min(total_rows.saturating_sub(viewport_rows));
+        let total_rows = out.total_rows;
+        let clamped_scroll = out.clamped_scroll;
 
         let layer_w = gutters.layer_width(width as u16);
         let scrollbar_col = layer_w.saturating_sub(1);

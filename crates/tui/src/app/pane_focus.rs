@@ -65,20 +65,8 @@ impl TuiApp {
     }
 
     fn focused_block_id(&mut self) -> Option<BlockId> {
-        let tw = self.transcript_width() as u16;
-        let theme = self.ui.theme().clone();
-        let show_thinking = self.core.config.settings.show_thinking;
         let row = self.transcript_win().cursor_abs_row();
-        let snap = self.transcript_projection.snapshot(
-            &mut self.transcript.history,
-            tw,
-            show_thinking,
-            &theme,
-        );
-        if snap.rows.is_empty() {
-            return None;
-        }
-        snap.block_of_row.get(row).copied().flatten()
+        self.transcript_projection.block_of_row(row)
     }
 
     /// Handle a key as a block-scoped binding. Returns `Some` if consumed, `None` to fall through.

@@ -60,20 +60,38 @@ pub fn name_of(g: HlGroup) -> Option<String> {
 
 /// Intern a `Style` as an anonymous group keyed by content hash.
 /// Anonymous groups bypass theme switches; use [`intern`] with a stable name for theme-reactive styling.
+///
+/// Called per span by syntect/markdown renderers; the read-locked fast path keeps
+/// parallel block workers from serializing on the anon-styles write lock.
 pub fn intern_anonymous_style(style: Style) -> HlGroup {
     use std::collections::hash_map::DefaultHasher;
     use std::hash::{Hash, Hasher};
     let mut h = DefaultHasher::new();
     style.hash(&mut h);
-    let key = format!("__anon__/{:016x}", h.finish());
+    let style_hash = h.finish();
+
+    if let Some(&id) = anon_hash_to_group().read().unwrap().get(&style_hash) {
+        return id;
+    }
+
+    let key = format!("__anon__/{:016x}", style_hash);
     let id = intern(&key);
-    // Stash the style so resolve() works without a Theme::set() call.
+    anon_hash_to_group()
+        .write()
+        .unwrap()
+        .insert(style_hash, id);
     anon_styles().write().unwrap().insert(id, style);
     id
 }
 
 fn anon_styles() -> &'static RwLock<HashMap<HlGroup, Style>> {
     static MAP: OnceLock<RwLock<HashMap<HlGroup, Style>>> = OnceLock::new();
+    MAP.get_or_init(|| RwLock::new(HashMap::new()))
+}
+
+/// Style-hash → interned id. Backs the read-locked fast path of `intern_anonymous_style`.
+fn anon_hash_to_group() -> &'static RwLock<HashMap<u64, HlGroup>> {
+    static MAP: OnceLock<RwLock<HashMap<u64, HlGroup>>> = OnceLock::new();
     MAP.get_or_init(|| RwLock::new(HashMap::new()))
 }
 

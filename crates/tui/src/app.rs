@@ -279,9 +279,7 @@ impl TuiApp {
             }
             let transcript_display_buf = ui.buf_create(crate::smelt_term::BufCreateOpts::default());
             let transcript_copier: std::sync::Arc<dyn crate::smelt_term::BufferCopy> =
-                std::sync::Arc::new(crate::content::transcript_buf::TranscriptCopier::new(
-                    transcript_projection.shared_snapshot(),
-                ));
+                std::sync::Arc::new(crate::content::transcript_buf::TranscriptCopier);
             if let Some(b) = ui.buf_mut(transcript_display_buf) {
                 b.readonly = true;
                 b.set_copier(transcript_copier);

@@ -167,18 +167,6 @@ impl TuiApp {
                         let s = crate::smelt_term::text::snap(&text, s);
                         let e = crate::smelt_term::text::snap(&text, e);
                         if s < e {
-                            // Refresh shared snapshot, then dispatch through the
-                            // transcript's `BufferCopy` so renderers / soft-wrap /
-                            // copy_as substitutions are applied uniformly.
-                            let theme = self.ui.theme().clone();
-                            let width = self.transcript_width() as u16;
-                            let show_thinking = self.core.config.settings.show_thinking;
-                            let _ = self.transcript_projection.snapshot(
-                                &mut self.transcript.history,
-                                width,
-                                show_thinking,
-                                &theme,
-                            );
                             if let Some(buf) = self.ui.buf(buf_id) {
                                 let out = buf.copy_range(s..e);
                                 if !out.clipboard.is_empty() {
@@ -229,8 +217,8 @@ impl TuiApp {
     ///
     /// Yank handling is shared with the prompt: vim writes only to the
     /// kill ring, then `Buffer::sync_clipboard_from_kill_ring` consults the
-    /// transcript's `BufferCopy` impl (which walks the latest snapshot) and
-    /// pushes the rendered text to the system clipboard.
+    /// transcript's `BufferCopy` impl and pushes rendered text to the system
+    /// clipboard.
     fn handle_content_vim_key(&mut self, k: KeyEvent) -> bool {
         let viewport_rows = self.viewport_rows_estimate();
         // EventCtx carries a full `WindowViewport`, but key dispatch
@@ -244,17 +232,6 @@ impl TuiApp {
             0,
             0,
             None,
-        );
-        // Refresh the shared snapshot so a yank's copier sees the current
-        // generation+width+show_thinking before vim runs.
-        let theme = self.ui.theme().clone();
-        let width = self.transcript_width() as u16;
-        let show_thinking = self.core.config.settings.show_thinking;
-        let _ = self.transcript_projection.snapshot(
-            &mut self.transcript.history,
-            width,
-            show_thinking,
-            &theme,
         );
         let win_id = self.well_known.transcript;
         let buf_id = self.transcript_win().buf;

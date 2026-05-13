@@ -233,9 +233,11 @@ fn build_snapshot(app: &mut crate::app::TuiApp, lua: &Lua) -> LuaResult<mlua::Ta
             Some(((line_idx as u32) + 1, col_cells as u32 + 1, pct.min(100)))
         }
         crate::app::AppFocus::Content => {
-            let total = app
-                .full_transcript_display_text(app.core.config.settings.show_thinking)
-                .len();
+            // Read the unified buffer's row count directly — calling
+            // `full_transcript_display_text` here would materialize 50k+ Strings
+            // every paint just for this number.
+            let buf_id = app.transcript_win().buf;
+            let total = app.ui.buf(buf_id).map(|b| b.line_count()).unwrap_or(0);
             if total == 0 {
                 None
             } else {

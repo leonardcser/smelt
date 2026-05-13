@@ -217,7 +217,6 @@ impl TuiApp {
         me: MouseEvent,
         click_count: u8,
     ) -> Option<crate::smelt_term::CopyOutput> {
-        let (soft, hard) = crate::smelt_term::UiHost::breaks_for(self, crate::app::TRANSCRIPT_WIN)?;
         let viewport = crate::smelt_term::UiHost::viewport_for(self, crate::app::TRANSCRIPT_WIN)?;
         let win_id = self.well_known.transcript;
         let buf_id = self.transcript_win().buf;
@@ -230,17 +229,24 @@ impl TuiApp {
             return None;
         }
         let snapped = self.snap_event_for_selection(me, &rows, viewport);
-        // Refresh the shared snapshot before consuming the range so the copier
-        // returns rendered text for the current generation+width+show_thinking.
-        let theme = self.ui.theme().clone();
-        let width = self.transcript_width() as u16;
-        let show_thinking = self.core.config.settings.show_thinking;
-        let _ = self.transcript_projection.snapshot(
-            &mut self.transcript.history,
-            width,
-            show_thinking,
-            &theme,
-        );
+
+        // Breaks only matter for word/line selection and word/line-anchored drags;
+        // skip the full-transcript walk otherwise.
+        let needs_breaks = match me.kind {
+            MouseEventKind::Down(_) => click_count >= 2,
+            MouseEventKind::Drag(_) => {
+                let w = self.transcript_win();
+                w.drag_anchor_word.is_some() || w.drag_anchor_line.is_some()
+            }
+            _ => false,
+        };
+        let (soft, hard) = if needs_breaks {
+            crate::smelt_term::UiHost::breaks_for(self, crate::app::TRANSCRIPT_WIN)
+                .unwrap_or_default()
+        } else {
+            (Vec::new(), Vec::new())
+        };
+
         let range = {
             let mouse_ctx = crate::smelt_term::MouseCtx {
                 soft_breaks: &soft,
