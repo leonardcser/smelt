@@ -16,8 +16,8 @@ pub struct DrawContext {
     pub terminal_width: u16,
     pub terminal_height: u16,
     pub focused: bool,
-    /// Only meaningful when `focused` is true. `Block` paints at cursor pos;
-    /// `Hardware` is handled by `Ui::render`; `Hidden` paints nothing.
+    /// Only meaningful when `focused` is true. `Block` paints a glyph at the
+    /// cursor position; `Hidden` paints nothing.
     pub cursor_shape: CursorShape,
     /// `Arc` so per-leaf construction is a pointer bump, not a clone.
     pub theme: std::sync::Arc<Theme>,
@@ -177,16 +177,17 @@ pub struct SplitConfig {
 }
 
 /// How the focused window's cursor renders (single global on `Ui`).
-/// `Hidden` — no cursor. `Hardware` — native terminal caret via `Ui::render`.
-/// `Block { glyph, style, pos }` — paint a cell at `pos` when set, else at the
-/// window-derived `(cursor_col, cursor_row - scroll_top)`. `pos` is the host's
-/// projected (screen-relative) `(col, row)` override for panes that wrap or
-/// format their buffer before paint (transcript, prompt).
+/// `Hidden` — no cursor. `Block { glyph, style, pos }` — paint a cell at `pos`
+/// when set, else at the window-derived `(cursor_col, cursor_row - scroll_top)`.
+/// `pos` is the host's projected (screen-relative) `(col, row)` override for
+/// panes that wrap or format their buffer before paint (transcript, prompt).
+/// The terminal's hardware caret is hidden for the lifetime of the app —
+/// every cursor we show is painted into the grid as a styled cell, which keeps
+/// large redraws atomic with the rest of the frame.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum CursorShape {
     #[default]
     Hidden,
-    Hardware,
     Block {
         glyph: char,
         style: Style,
@@ -1127,7 +1128,17 @@ impl Window {
                 });
                 if let Some((col, screen_row)) = resolved {
                     if col < content_width && screen_row < height {
-                        slice.set(pad_left + col, screen_row, glyph, style);
+                        // Preserve the underlying character when there is one — block-cursor
+                        // semantics are "invert the cell," not "stamp a glyph." Empty cells
+                        // (past EOL, blank gutters) fall back to `glyph` so callers control
+                        // what shows when there's nothing under the cursor.
+                        let under = slice.cell(pad_left + col, screen_row).symbol;
+                        let painted = if under == '\0' || under == ' ' {
+                            glyph
+                        } else {
+                            under
+                        };
+                        slice.set(pad_left + col, screen_row, painted, style);
                     }
                 }
             }
@@ -1955,25 +1966,6 @@ mod tests {
         for col in 0..10 {
             assert_ne!(grid.cell(col, 0).symbol, '!');
         }
-    }
-
-    #[test]
-    fn render_hardware_cursor_is_inert_in_window_render() {
-        // Hardware cursor flows through Ui::render to the terminal
-        // caret; Window::render itself paints nothing extra for it.
-        let mut buf = Buffer::new(BufId(1), BufCreateOpts::default());
-        buf.set_all_lines(vec!["abc".into()]);
-        let mut w = make_win();
-        w.cursor_row = 0;
-        w.cursor_col = 1;
-        let mut ctx = ctx();
-        ctx.focused = true;
-        ctx.cursor_shape = CursorShape::Hardware;
-        let mut grid = Grid::new(10, 1);
-        let mut slice = grid.slice_mut(Rect::new(0, 0, 10, 1));
-        w.render(&buf, &mut slice, &ctx);
-        // Buffer text untouched at the cursor col.
-        assert_eq!(grid.cell(1, 0).symbol, 'b');
     }
 
     #[test]

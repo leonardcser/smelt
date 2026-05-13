@@ -812,15 +812,6 @@ impl Ui {
                 buf.ensure_rendered_at(rect.width);
             }
         }
-        // Hardware cursor: overlay leaves and painted splits are outside the compositor's
-        // focused-layer cursor path, so we compute the absolute position here and return
-        // it from the closure. Overlay wins over split if both are focused.
-        let cursor_override = if matches!(self.cursor_shape, CursorShape::Hardware) {
-            self.focused_overlay_cursor(&resolved)
-                .or_else(|| self.focused_painted_split_cursor())
-        } else {
-            None
-        };
         let focus = self.focus;
         let cursor_shape = self.cursor_shape;
         let wins = &self.wins;
@@ -883,7 +874,6 @@ impl Ui {
                 for (_id, rect, overlay) in &resolved {
                     paint_overlay(grid, theme, *rect, overlay, term_size, &mut dispatch);
                 }
-                cursor_override
             })
     }
 
@@ -891,7 +881,7 @@ impl Ui {
     pub fn render_raw<W, F>(&mut self, w: &mut W, paint: F) -> std::io::Result<()>
     where
         W: std::io::Write,
-        F: FnOnce(&mut Grid, &Theme) -> Option<(u16, u16)>,
+        F: FnOnce(&mut Grid, &Theme),
     {
         self.surface.render_raw(w, paint)
     }
@@ -916,50 +906,6 @@ impl Ui {
         let mut sink = std::io::sink();
         self.render(&mut sink).expect("snapshot render to sink");
         SnapshotFrame::from_grid(self.surface.compositor().previous())
-    }
-
-    fn focused_overlay_cursor(
-        &self,
-        resolved: &[(OverlayId, Rect, Overlay)],
-    ) -> Option<(u16, u16)> {
-        let focus = self.focus?;
-        self.overlay_for_leaf(focus)?;
-        let focus_paint = PaintId::from(focus);
-        for (_id, rect, overlay) in resolved {
-            let leaf_rects = layout::resolve_layout(&overlay.layout, *rect);
-            let Some(leaf_rect) = leaf_rects.get(&focus_paint) else {
-                continue;
-            };
-            let win = self.wins.get(&focus)?;
-            let screen_row = win.cursor_screen_row(leaf_rect.height)?;
-            let abs_y = leaf_rect.top + screen_row;
-            let abs_x = leaf_rect.left + win.cursor_col();
-            if abs_y < leaf_rect.top + leaf_rect.height && abs_x < leaf_rect.left + leaf_rect.width
-            {
-                return Some((abs_x, abs_y));
-            }
-            return None;
-        }
-        None
-    }
-
-    /// Absolute hardware cursor for the focused splits leaf; applies `pad_left` to land past chrome.
-    fn focused_painted_split_cursor(&self) -> Option<(u16, u16)> {
-        let focus = self.focus?;
-        if !self.splits().contains_leaf(focus) {
-            return None;
-        }
-        let win = self.wins.get(&focus)?;
-        let rect = self.split_rect(focus)?;
-        let pad_left = win.config.gutters.pad_left;
-        let screen_row = win.cursor_screen_row(rect.height)?;
-        let abs_y = rect.top + screen_row;
-        let abs_x = rect.left + pad_left + win.cursor_col();
-        if abs_y < rect.top + rect.height && abs_x < rect.left + rect.width {
-            Some((abs_x, abs_y))
-        } else {
-            None
-        }
     }
 
     pub fn theme(&self) -> &Theme {
@@ -2311,56 +2257,6 @@ mod tests {
         ui.set_capture(HitTarget::Scrollbar { owner: other });
         ui.overlay_close(id);
         assert_eq!(ui.capture(), Some(HitTarget::Scrollbar { owner: other }));
-    }
-
-    #[test]
-    fn focused_painted_split_cursor_returns_hardware_cursor_position() {
-        let mut ui = make_ui();
-        ui.set_terminal_size(20, 4);
-        let buf = ui.buf_create(BufCreateOpts::default());
-        let win = ui
-            .win_open_split(
-                buf,
-                SplitConfig {
-                    region: "p".into(),
-                    gutters: Gutters::default(),
-                },
-            )
-            .unwrap();
-        // Tree resolves to (top=0, left=0, width=20, height=4) — the
-        // full terminal — so cursor_row=1 / cursor_col=3 → (3, 1).
-        ui.set_layout(LayoutTree::vbox(vec![(
-            Constraint::Fill,
-            LayoutTree::leaf(win),
-        )]));
-        ui.set_focus(win);
-        let w = ui.win_mut(win).unwrap();
-        w.set_cursor_position(1, 3);
-        assert_eq!(ui.focused_painted_split_cursor(), Some((3, 1)));
-    }
-
-    #[test]
-    fn focused_painted_split_cursor_returns_none_when_unfocused() {
-        let mut ui = make_ui();
-        ui.set_terminal_size(20, 4);
-        let buf = ui.buf_create(BufCreateOpts::default());
-        let win = ui
-            .win_open_split(
-                buf,
-                SplitConfig {
-                    region: "p".into(),
-                    gutters: Gutters::default(),
-                },
-            )
-            .unwrap();
-        ui.set_layout(LayoutTree::vbox(vec![(
-            Constraint::Fill,
-            LayoutTree::leaf(win),
-        )]));
-        let w = ui.win_mut(win).unwrap();
-        w.set_cursor_position(0, 0);
-        // No focus call → focus stays None.
-        assert_eq!(ui.focused_painted_split_cursor(), None);
     }
 
     #[test]

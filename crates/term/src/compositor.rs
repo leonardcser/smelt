@@ -34,16 +34,19 @@ impl Compositor {
         self.force_redraw = true;
     }
 
-    /// Render one frame. `paint` writes into `current` and returns an
-    /// optional absolute `(col, row)` hardware cursor position.
-    pub fn render_with<W: Write, F: FnOnce(&mut Grid, &Theme) -> Option<(u16, u16)>>(
+    /// Render one frame. `paint` writes into `current`. The hardware caret
+    /// stays hidden for the lifetime of the app — any visible cursor is
+    /// painted into the grid as a styled cell, so it rides the diff atomically
+    /// with the rest of the frame and can never flicker through the
+    /// intermediate `MoveTo`s that `flush_diff` emits between cell runs.
+    pub fn render_with<W: Write, F: FnOnce(&mut Grid, &Theme)>(
         &mut self,
         theme: &Theme,
         w: &mut W,
         paint: F,
     ) -> std::io::Result<()> {
         self.current.clear_all();
-        let cursor = paint(&mut self.current, theme);
+        paint(&mut self.current, theme);
 
         w.queue(BeginSynchronizedUpdate)?;
 
@@ -51,13 +54,6 @@ impl Compositor {
             flush_full(&self.current, w)?;
         } else {
             flush_diff(w, self.current.diff(&self.previous))?;
-        }
-
-        if let Some((x, y)) = cursor {
-            w.queue(crossterm::cursor::Show)?;
-            w.queue(crossterm::cursor::MoveTo(x, y))?;
-        } else {
-            w.queue(crossterm::cursor::Hide)?;
         }
 
         w.queue(EndSynchronizedUpdate)?;

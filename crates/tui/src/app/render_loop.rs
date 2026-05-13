@@ -26,7 +26,7 @@ impl TuiApp {
 
         let (has_prompt_cursor, has_transcript_cursor) = self.compute_cursor_ownership();
 
-        // Hidden is the right baseline; sync paths below set Hardware/Block when focus owns the caret.
+        // Hidden is the right baseline; sync paths below set Block when focus owns the caret.
         self.ui
             .set_cursor_shape(crate::smelt_term::CursorShape::Hidden);
 
@@ -77,7 +77,9 @@ impl TuiApp {
             self.sync_completer_overlay();
         }
 
-        // Focused overlay leaf gets a hardware caret when neither transcript nor prompt claimed it.
+        // Focused overlay leaf gets a virtual block caret when neither transcript nor prompt
+        // claimed it. The block is painted by `Window::render` from the leaf's own
+        // `cursor_col` / `cursor_screen_row`, so no absolute-screen-coord plumbing is needed.
         if matches!(
             self.ui.cursor_shape(),
             crate::smelt_term::CursorShape::Hidden
@@ -85,7 +87,7 @@ impl TuiApp {
             if let Some(focus) = self.ui.focus() {
                 if self.ui.overlay_for_leaf(focus).is_some() {
                     self.ui
-                        .set_cursor_shape(crate::smelt_term::CursorShape::Hardware);
+                        .set_cursor_shape(prompt_block_cursor(self.ui.theme()));
                 }
             }
         }
@@ -335,7 +337,7 @@ impl TuiApp {
             let screen_row = self.prompt_win().cursor_screen_row(prompt_rect.height);
             if screen_row.is_some() {
                 self.ui
-                    .set_cursor_shape(crate::smelt_term::CursorShape::Hardware);
+                    .set_cursor_shape(prompt_block_cursor(self.ui.theme()));
             } else {
                 // Cursor is off-screen — hide it so a stale shape from the prior frame
                 // doesn't draw a stray glyph.
@@ -427,5 +429,32 @@ impl TuiApp {
         if let Some(session) = self.input.completer.as_mut() {
             session.picker_win = open_win;
         }
+    }
+}
+
+/// Inverted-block cursor for input surfaces (prompt, focused overlay leaves).
+/// `Window::render` derives the position from the focused leaf's own
+/// `cursor_col` / `cursor_screen_row` and preserves the underlying glyph,
+/// falling back to a space when the cell is empty.
+fn prompt_block_cursor(theme: &crate::smelt_term::Theme) -> crate::smelt_term::CursorShape {
+    let (fg, bg) = if theme.is_light() {
+        (
+            smelt_core::style::Color::White,
+            smelt_core::style::Color::Black,
+        )
+    } else {
+        (
+            smelt_core::style::Color::Black,
+            smelt_core::style::Color::White,
+        )
+    };
+    crate::smelt_term::CursorShape::Block {
+        glyph: ' ',
+        style: crate::smelt_term::Style {
+            fg: Some(fg),
+            bg: Some(bg),
+            ..Default::default()
+        },
+        pos: None,
     }
 }

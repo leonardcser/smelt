@@ -131,7 +131,6 @@ impl StoryCtx {
                     };
                     paint_layout_tree(grid, &theme, tree, area, term_size, &mut dispatch);
                 }
-                None
             })
             .expect("render");
     }

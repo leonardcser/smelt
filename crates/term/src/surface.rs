@@ -103,7 +103,6 @@ impl Surface {
                     paint(id, &mut slice, theme);
                 };
                 paint_layout_tree(grid, theme, &layout, area, size, &mut dispatch);
-                None
             })
     }
 
@@ -111,7 +110,7 @@ impl Surface {
     pub fn render_raw<W, F>(&mut self, w: &mut W, paint: F) -> std::io::Result<()>
     where
         W: Write,
-        F: FnOnce(&mut Grid, &Theme) -> Option<(u16, u16)>,
+        F: FnOnce(&mut Grid, &Theme),
     {
         self.compositor.render_with(&self.theme, w, paint)
     }
