@@ -26,22 +26,16 @@ smelt.cmd.register("messages", function()
 
     local body_buf = smelt.buf.create({ readonly = true })
     smelt.buf.set_lines(body_buf, body_lines)
+    local body_leaf = smelt.ui.dialog.content({ buf = body_buf, interactive = true })
 
     smelt.ui.dialog.open({
-      placement        = "dock_bottom",
-      placement_height = 40,
-      border           = "top",
-      title            = string.format(" messages (%d) ", #entries),
-      panels           = {
-        { kind = "content", buf = body_buf, height = "fill", interactive = true, focus = true },
-      },
+      title  = string.format(" messages (%d) ", #entries),
+      height = 40,
+      panels = { { leaf = body_leaf, height = "fill" } },
       keymaps = {
-        { key = "q", on_press = function(ctx) ctx.close() end },
+        { key = "q",     on_press = function(ctx) ctx.close() end },
         { key = "<Esc>", on_press = function(ctx) ctx.close() end },
-        { key = "c", on_press = function(ctx)
-            smelt.messages.clear()
-            ctx.close()
-          end },
+        { key = "c",     on_press = function(ctx) smelt.messages.clear(); ctx.close() end },
       },
     })
   end)

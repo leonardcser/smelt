@@ -9,7 +9,7 @@ use super::{syntax_theme, SYNTAX_SET};
 use crate::content::builder::LineBuilder;
 use crate::content::default_width;
 use crate::style::Color;
-use crate::theme::role_hl;
+use crate::theme::intern;
 
 /// Render a code block. When `fence` is true, each line's `source_text` carries the fenced
 /// markdown form so partial selections can round-trip back to raw markdown.
@@ -49,7 +49,7 @@ pub fn render_code_block(
         out.set_dim();
     }
 
-    let bg_group = role_hl("CodeBlockBg");
+    let bg_group = intern("SmeltCodeBlockBg");
     let bg = out.theme().resolve(bg_group).bg.unwrap_or(Color::Reset);
     let last_idx = expanded.len().saturating_sub(1);
     for (line_idx, line) in expanded.iter().enumerate() {

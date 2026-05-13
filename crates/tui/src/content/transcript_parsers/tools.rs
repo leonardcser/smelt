@@ -3,7 +3,7 @@ use smelt_core::buffer::SpanMeta;
 use smelt_core::content::block_layout::BlockLayout;
 use smelt_core::content::builder::{replay_buffer_row_into, LineBuilder};
 use smelt_core::content::wrap::wrap_line;
-use smelt_core::theme::{role_hl, HlGroup};
+use smelt_core::theme::{intern, HlGroup};
 use smelt_core::transcript_model::{ToolOutput, ToolStatus};
 use smelt_core::utils::format_duration;
 use std::collections::HashMap;
@@ -23,10 +23,10 @@ pub(super) fn render_tool(
     width: usize,
 ) -> u16 {
     let color: HlGroup = match status {
-        ToolStatus::Ok => role_hl("Success"),
-        ToolStatus::Err | ToolStatus::Denied => role_hl("ErrorMsg"),
-        ToolStatus::Confirm => role_hl("Accent"),
-        ToolStatus::Pending => role_hl("ToolPending"),
+        ToolStatus::Ok => intern("SmeltSuccess"),
+        ToolStatus::Err | ToolStatus::Denied => intern("ErrorMsg"),
+        ToolStatus::Confirm => intern("SmeltAccent"),
+        ToolStatus::Pending => intern("SmeltToolPending"),
     };
     let time = if status != ToolStatus::Confirm {
         elapsed
@@ -534,7 +534,7 @@ pub fn render_wrapped_output(
     let start = total.saturating_sub(MAX_TOOL_BLOCK_ROWS);
     for seg in &wrapped[start..] {
         if is_error {
-            out.push_hl(role_hl("ErrorMsg"));
+            out.push_hl(intern("ErrorMsg"));
             out.print_string(format!("  {}", seg));
             out.pop_style();
         } else {

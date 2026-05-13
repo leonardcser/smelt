@@ -1,5 +1,6 @@
--- Built-in /resume command. Live-filtered session picker; Enter loads,
--- Ctrl-d deletes, Alt-w toggles workspace filter.
+-- Built-in /resume command. Telescope-style picker: search input on top, results
+-- below. Arrows + Ctrl-J/K navigate; typing into the input filters; Enter loads;
+-- Ctrl-D deletes the highlighted session; Alt-W toggles the workspace filter.
 
 local NS_META = smelt.buf.create_namespace("smelt.resume.meta")
 
@@ -45,7 +46,6 @@ end
 local LEADING, SIZE_COL, TIME_COL, GAP = 2, 8, 7, 2
 
 local function format_row(entry, now_ms)
-  local title = display_title(entry)
   local size_str = format_size(entry.size_bytes)
   local time_str = time_ago(
     (entry.updated_at_ms > 0) and entry.updated_at_ms or entry.created_at_ms,
@@ -58,43 +58,41 @@ local function format_row(entry, now_ms)
     string.rep(" ", GAP),
     time_str,
     string.rep(" ", GAP),
-    title
+    display_title(entry)
   )
 end
 
 local function filter_entries(entries, query, workspace_only, current_cwd)
-  local filtered = {}
+  local out = {}
   for _, e in ipairs(entries) do
     local keep = true
-    if workspace_only then
-      keep = (e.cwd == current_cwd)
-    end
+    if workspace_only then keep = (e.cwd == current_cwd) end
     if keep and query ~= "" then
       local hay = display_title(e) .. " " .. (e.subtitle or "")
       keep = smelt.fuzzy.score(hay, query) ~= nil
     end
-    if keep then
-      table.insert(filtered, e)
-    end
+    if keep then table.insert(out, e) end
   end
-  return filtered
+  return out
 end
 
-local function refresh_list(buf_id, filtered, now_ms)
-  local lines = {}
+local function refresh_list(list_buf, filtered, now_ms)
+  -- NS_META is a custom namespace, so `set_lines` doesn't clear it for us;
+  -- wipe it ourselves before each render or stale dim marks from a longer
+  -- previous list leak into shorter renders (e.g. the empty-state line).
+  smelt.buf.clear_namespace(list_buf, NS_META)
   if #filtered == 0 then
-    table.insert(lines, "  (no matching sessions)")
-    smelt.buf.set_lines(buf_id, lines)
+    local empty = "  (no matching sessions)"
+    smelt.buf.set_lines(list_buf, { empty })
+    smelt.buf.set_extmark(list_buf, NS_META, 1, 0, { end_col = #empty, dim = true })
     return
   end
-  for _, e in ipairs(filtered) do
-    table.insert(lines, format_row(e, now_ms))
-  end
-  smelt.buf.set_lines(buf_id, lines)
-  -- Dim metadata columns; title starts after LEADING+SIZE_COL+GAP+TIME_COL.
+  local lines = {}
+  for _, e in ipairs(filtered) do table.insert(lines, format_row(e, now_ms)) end
+  smelt.buf.set_lines(list_buf, lines)
   local meta_end = LEADING + SIZE_COL + GAP + TIME_COL
   for i = 1, #filtered do
-    smelt.buf.set_extmark(buf_id, NS_META, i, 0, { end_col = meta_end, dim = true })
+    smelt.buf.set_extmark(list_buf, NS_META, i, 0, { end_col = meta_end, dim = true })
   end
 end
 
@@ -106,56 +104,71 @@ smelt.cmd.register("resume", function()
       return
     end
 
-    local current_cwd = smelt.session.cwd()
-    local now_ms = os.time() * 1000
+    local current_cwd   = smelt.session.cwd()
+    local now_ms        = os.time() * 1000
     local workspace_only = true
-    local query = ""
-    local filtered = filter_entries(entries, query, workspace_only, current_cwd)
+    local query         = ""
+    local filtered      = filter_entries(entries, query, workspace_only, current_cwd)
 
+    -- List: passive display, non-focusable; selection shown via cursor_line_highlight.
     local list_buf = smelt.buf.create()
     refresh_list(list_buf, filtered, now_ms)
+    local list_leaf = smelt.ui.dialog.list(list_buf, { focusable = false })
 
-    local function selected_entry(idx)
-      return (idx and idx > 0) and filtered[idx] or nil
+    -- Input: focused, receives typing. Filter loop wired below.
+    local input_leaf = smelt.ui.dialog.input("filter sessions…")
+
+    smelt.win.on_event(input_leaf, "text_changed", function(ctx)
+      query = ctx.text or ""
+      filtered = filter_entries(entries, query, workspace_only, current_cwd)
+      refresh_list(list_buf, filtered, now_ms)
+      smelt.win.set_cursor_row(list_leaf, 0)
+    end)
+
+    local function nav(delta)
+      return function() smelt.win.move_cursor(list_leaf, delta) end
     end
 
-    local result = smelt.ui.dialog.open({
-      title   = "resume",
-      panels  = {
-        { kind = "input", name = "query",
-          placeholder = "filter by title…",
-          on_change = function(ctx)
-            query = (ctx.inputs and ctx.inputs.query) or ""
-            filtered = filter_entries(entries, query, workspace_only, current_cwd)
-            refresh_list(list_buf, filtered, now_ms)
-          end },
-        { kind = "list", buf = list_buf, height = "fill", focus = true },
+    local picked = smelt.ui.dialog.open({
+      title  = "resume",
+      height = 70,
+      panels = {
+        { leaf = input_leaf, height = 1      },
+        { leaf = list_leaf,  height = "fill" },
       },
+      focus  = input_leaf,
       keymaps = {
-        { key = "alt-w", hint = "⌥w: toggle workspace filter", on_press = function(ctx)
+        { key = "up",     on_press = nav(-1)  },
+        { key = "down",   on_press = nav(1)   },
+        { key = "ctrl-k", on_press = nav(-1)  },
+        { key = "ctrl-j", on_press = nav(1)   },
+        { key = "pgup",   on_press = nav(-10) },
+        { key = "pgdn",   on_press = nav(10)  },
+        { key = "alt-w", hint = "⌥w: toggle workspace filter", on_press = function()
             workspace_only = not workspace_only
             filtered = filter_entries(entries, query, workspace_only, current_cwd)
             refresh_list(list_buf, filtered, now_ms)
+            smelt.win.set_cursor_row(list_leaf, 0)
           end },
-        { key = "ctrl-d", hint = "^d: delete", on_press = function(ctx)
-            local e = selected_entry(ctx.selected_index)
-            if e then
-              smelt.session.delete(e.id)
-              for i, x in ipairs(entries) do
-                if x.id == e.id then table.remove(entries, i); break end
-              end
-              filtered = filter_entries(entries, query, workspace_only, current_cwd)
-              refresh_list(list_buf, filtered, now_ms)
+        { key = "ctrl-d", hint = "^d: delete", on_press = function()
+            local idx = (smelt.win.cursor_row(list_leaf) or 0) + 1
+            local e = filtered[idx]
+            if not e then return end
+            smelt.session.delete(e.id)
+            for i, x in ipairs(entries) do
+              if x.id == e.id then table.remove(entries, i); break end
             end
+            filtered = filter_entries(entries, query, workspace_only, current_cwd)
+            refresh_list(list_buf, filtered, now_ms)
+            smelt.win.set_cursor_row(list_leaf, 0)
           end },
       },
+      on_submit = function(ctx)
+        local idx = (smelt.win.cursor_row(list_leaf) or 0) + 1
+        ctx.resolve(filtered[idx])
+      end,
     })
 
-    if result.action == "dismiss" then return end
-    local idx = result.option_index
-    local e = selected_entry(idx)
-    if e then
-      smelt.session.load(e.id)
-    end
+    if picked then smelt.session.load(picked.id) end
   end)
 end, { desc = "resume saved session", while_busy = false, startup_ok = true })

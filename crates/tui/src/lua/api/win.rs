@@ -91,7 +91,7 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
         &win_tbl,
         "smelt.win",
         "open",
-        "Open a split window over the buffer `buf_id`. `opts.region` picks the layout slot (default `\"lua_overlay\"`); `opts.focusable`, `opts.cursor_line_highlight`, and `opts.vim_enabled` toggle behaviour. Returns the new `WinId` or `nil` if no slot was available.",
+        "Open a split window over the buffer `buf_id`. `opts.region` picks the layout slot (default `\"lua_overlay\"`); `opts.focusable`, `opts.cursor_line_highlight`, and `opts.vim_enabled` toggle behaviour. `opts.pad_left` / `opts.pad_right` reserve gutter columns on either side. Returns the new `WinId` or `nil` if no slot was available.",
         &["buf_id", "opts"],
         lua,
         |_, (buf_id, opts): (u64, Option<mlua::Table>)| -> LuaResult<Option<u64>> {
@@ -100,11 +100,23 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
                     .as_ref()
                     .and_then(|t| t.get::<String>("region").ok())
                     .unwrap_or_else(|| "lua_overlay".to_string());
+                let pad_left = opts
+                    .as_ref()
+                    .and_then(|t| t.get::<u64>("pad_left").ok())
+                    .unwrap_or(0) as u16;
+                let pad_right = opts
+                    .as_ref()
+                    .and_then(|t| t.get::<u64>("pad_right").ok())
+                    .unwrap_or(0) as u16;
                 let win = app.ui.win_open_split(
                     crate::smelt_term::BufId(buf_id),
                     crate::smelt_term::SplitConfig {
                         region,
-                        gutters: Default::default(),
+                        gutters: crate::smelt_term::layout::Gutters {
+                            pad_left,
+                            pad_right,
+                            scrollbar: false,
+                        },
                     },
                 );
                 if let Some(win_id) = win {
@@ -150,13 +162,68 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
     register_ui_fn(
         &win_tbl,
         "smelt.win",
-        "configure_input",
-        "Mark `win_id` as a single-line text input leaf with the same editing keymap as the prompt.",
+        "move_cursor",
+        "Move `win_id`'s cursor by `delta` rows (clamped to the buffer's line count), keep the row on-screen by adjusting `scroll_top`, and emit `selection_changed`. Lets an external panel (e.g. a docked search input) drive a list without holding focus.",
+        &["win_id", "delta"],
+        lua,
+        |_, (win_id, delta): (u64, i64)| -> LuaResult<()> {
+            crate::lua::with_app(|app| {
+                crate::lua::ui_ops::move_cursor(
+                    app,
+                    crate::smelt_term::WinId(win_id),
+                    delta as isize,
+                );
+            });
+            Ok(())
+        },
+    )?;
+    register_ui_fn(
+        &win_tbl,
+        "smelt.win",
+        "set_cursor_row",
+        "Place `win_id`'s cursor at absolute `row` (clamped to the buffer's line count). Adjusts `scroll_top` so the row stays on-screen and emits `selection_changed` if the position actually moved.",
+        &["win_id", "row"],
+        lua,
+        |_, (win_id, row): (u64, u64)| -> LuaResult<()> {
+            crate::lua::with_app(|app| {
+                crate::lua::ui_ops::set_cursor_row(
+                    app,
+                    crate::smelt_term::WinId(win_id),
+                    row.min(u16::MAX as u64) as u16,
+                );
+            });
+            Ok(())
+        },
+    )?;
+    register_ui_fn(
+        &win_tbl,
+        "smelt.win",
+        "cursor_row",
+        "Return the current cursor row (0-based) of `win_id`, or `nil` if the window doesn't exist.",
         &["win_id"],
         lua,
-        |_, win_id: u64|  -> LuaResult<()>{
+        |_, win_id: u64| -> LuaResult<Option<u64>> {
+            let row = crate::lua::try_with_app(|app| {
+                crate::lua::ui_ops::cursor_row(app, crate::smelt_term::WinId(win_id))
+            })
+            .flatten();
+            Ok(row.map(|r| r as u64))
+        },
+    )?;
+    register_ui_fn(
+        &win_tbl,
+        "smelt.win",
+        "configure_input",
+        "Mark `win_id` as a single-line text input leaf with the same editing keymap as the prompt. If `placeholder` is non-empty, seed the buffer with dim placeholder text; the first printable keystroke clears it and starts a fresh line.",
+        &["win_id", "placeholder"],
+        lua,
+        |_, (win_id, placeholder): (u64, Option<String>)| -> LuaResult<()> {
             crate::lua::with_app(|app| {
-                crate::lua::ui_ops::configure_input_leaf(app, crate::smelt_term::WinId(win_id));
+                crate::lua::ui_ops::configure_input_leaf(
+                    app,
+                    crate::smelt_term::WinId(win_id),
+                    placeholder.unwrap_or_default(),
+                );
             });
             Ok(())
         },

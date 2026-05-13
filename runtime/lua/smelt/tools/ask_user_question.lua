@@ -66,17 +66,15 @@ smelt.tools.register({
     local parts = {}
     for _, q in ipairs(questions) do
       local options = q.options or {}
-      local items = {}
+      local labels = {}
       for _, opt in ipairs(options) do
         local label = opt.label or ""
         local desc = opt.description or ""
-        local item_label
         if desc ~= "" and label ~= "" then
-          item_label = label .. " — " .. desc
+          table.insert(labels, label .. " — " .. desc)
         else
-          item_label = label
+          table.insert(labels, label)
         end
-        table.insert(items, { label = item_label })
       end
 
       local title = q.header
@@ -84,26 +82,44 @@ smelt.tools.register({
         title = "question"
       end
 
+      local md_leaf      = smelt.ui.dialog.markdown(q.question or "")
+      local options_leaf = smelt.ui.dialog.options(labels)
+      local other_leaf, other_buf = smelt.ui.dialog.input("or type a custom answer...")
+
+      local typed_other = false
+      smelt.win.on_event(other_leaf, "text_changed", function() typed_other = true end)
+
       local result = smelt.ui.dialog.open({
-        title = title,
+        title        = title,
         blocks_agent = true,
+        height       = 70,
         panels = {
-          { kind = "markdown", text = q.question or "" },
-          { kind = "options",  items = items },
-          { kind = "input",    name = "other", placeholder = "or type a custom answer..." },
+          { leaf = md_leaf,      height = "fill" },
+          { leaf = options_leaf, height = "fit"  },
+          { leaf = other_leaf                     },
         },
+        on_submit = function(ctx)
+          if typed_other then
+            local custom = smelt.buf.get_line(other_buf, 1) or ""
+            if custom ~= "" then
+              ctx.resolve({ custom = custom })
+              return
+            end
+          end
+          local idx = (smelt.win.cursor_row(options_leaf) or 0) + 1
+          ctx.resolve({ option = idx })
+        end,
       })
 
       local answer
-      local custom = (result.inputs and result.inputs.other) or ""
-      if custom ~= "" then
-        answer = "Other: " .. custom
-      elseif result.action == "dismiss" or result.option_index == nil then
+      if result and result.custom then
+        answer = "Other: " .. result.custom
+      elseif result and result.option then
+        local picked = options[result.option]
+        answer = (picked and picked.label) or "(unknown)"
+      else
         smelt.engine.cancel()
         return { content = "user cancelled", is_error = true }
-      else
-        local picked = options[result.option_index]
-        answer = (picked and picked.label) or "(unknown)"
       end
 
       table.insert(parts, string.format("Q: %s\nA: %s", q.question or "", answer))

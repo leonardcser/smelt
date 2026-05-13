@@ -1,4 +1,4 @@
--- Built-in /help command. Scrollable dialog of all keybindings.
+-- Built-in /help command. Centered info viewer of all keybindings.
 
 local function build_lines(sections)
   local max_label = 0
@@ -28,16 +28,25 @@ smelt.cmd.register("help", function()
   smelt.spawn(function()
     local sections = smelt.keymap.help()
     local lines = build_lines(sections)
-    smelt.ui.dialog.open({
-      title   = "help",
-      panels  = {
-        { kind = "content", text = table.concat(lines, "\n"), height = "fill" },
-      },
-      keymaps = {
-        { key = "q", on_press = function(ctx) ctx.close() end },
-        { key = "?", on_press = function(ctx) ctx.close() end },
-      },
+
+    local buf = smelt.buf.create()
+    smelt.buf.set_lines(buf, lines)
+    local leaf = smelt.win.open(buf, { region = "dialog_overlay", focusable = true, vim_enabled = true })
+
+    smelt.ui.overlay.open({
+      title     = "help",
+      placement = "screen_center",
+      border    = "single",
+      modal     = true,
+      items     = { { win = leaf, height = "fill" } },
     })
+
+    local task_id = smelt.task.alloc()
+    local function close() smelt.win.close(leaf); smelt.task.resume(task_id, nil) end
+    smelt.win.set_keymap(leaf, "q", close)
+    smelt.win.set_keymap(leaf, "?", close)
+    smelt.win.on_event(leaf, "dismiss", close)
+    smelt.task.wait(task_id)
   end)
 end, { desc = "show keybindings" })
 

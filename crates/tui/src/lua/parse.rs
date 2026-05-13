@@ -1,7 +1,7 @@
 //! Lua-value → typed-Rust converters (pure, no `TuiApp` dependencies).
 //! Errors are returned as `String`; call sites wrap them in `LuaError::RuntimeError`.
 
-use crate::smelt_term::layout::{Border, BorderSides, BorderStyle, Constraint, Corner};
+use crate::smelt_term::layout::{Border, BorderStyle, Constraint, Corner, EdgeStyle};
 use crate::smelt_term::{Line, Span, Style};
 use smelt_core::style::Color;
 
@@ -250,12 +250,15 @@ fn table_u16(t: &mlua::Table, key: &str, ctx: &str) -> Result<u16, String> {
 
 /// Parse a border spec from a table that may carry the `border` key:
 ///
-/// - `border = "single"` (default) / `"rounded"` / `"double"` —
-///   pick a glyph family, all four sides on.
+/// - `border = "single"` (default) / `"rounded"` / `"double"` — all four sides,
+///   default color.
 /// - `border = "none"` or `border = false` — no border at all.
-/// - `border = "top"` — single style, top edge only.
-/// - `border = { style = "rounded", sides = { "top", "left" } }` —
-///   explicit form.
+/// - `border = "top"` — single style, top edge only, default color.
+/// - `border = { style = "rounded", top = "accent", bottom = true }` — per-side
+///   table form. Each side key is `nil`/`false` (off), `true` (on, default
+///   color), a theme-role string (on, fg = `theme.resolve(role)`), or a table
+///   `{ color = "..." }`. `all = "..."` sugar applies to every side; per-side
+///   keys override `all`.
 pub(crate) fn border(opts: &mlua::Table) -> Result<Option<Border>, String> {
     let v = opts
         .get::<mlua::Value>("border")
@@ -271,7 +274,7 @@ pub(crate) fn border(opts: &mlua::Table) -> Result<Option<Border>, String> {
                 "rounded" => Ok(Some(Border::ROUNDED)),
                 "double" => Ok(Some(Border::DOUBLE)),
                 "single" => Ok(Some(Border::SINGLE)),
-                "top" => Ok(Some(Border::top(BorderStyle::Single))),
+                "top" => Ok(Some(Border::single().top(()))),
                 other => Err(format!(
                     "unknown border preset '{other}' (expected single|rounded|double|none|top)"
                 )),
@@ -288,11 +291,40 @@ pub(crate) fn border(opts: &mlua::Table) -> Result<Option<Border>, String> {
                     ))
                 }
             };
-            let sides = border_sides(&t)?;
-            if !(sides.top || sides.right || sides.bottom || sides.left) {
+            let mut b = Border {
+                style,
+                ..Border::OFF
+            };
+            // `all = ...` sugar: applies to every side first; per-side keys override.
+            if let Some(all) = edge_opt(t.get::<mlua::Value>("all").unwrap_or(mlua::Value::Nil))? {
+                b.top = Some(all);
+                b.right = Some(all);
+                b.bottom = Some(all);
+                b.left = Some(all);
+            }
+            for (key, slot) in [
+                ("top", &mut b.top),
+                ("right", &mut b.right),
+                ("bottom", &mut b.bottom),
+                ("left", &mut b.left),
+            ] {
+                let v = t.get::<mlua::Value>(key).unwrap_or(mlua::Value::Nil);
+                match v {
+                    mlua::Value::Nil => {} // keep existing (possibly from `all`)
+                    mlua::Value::Boolean(false) => *slot = None,
+                    other => *slot = edge_opt(other)?,
+                }
+            }
+            // Back-compat: `sides = { "top", "left" }` or `sides = { top = true }`.
+            if let mlua::Value::Table(st) =
+                t.get::<mlua::Value>("sides").unwrap_or(mlua::Value::Nil)
+            {
+                apply_legacy_sides(&st, &mut b)?;
+            }
+            if !b.any_side() {
                 return Ok(None);
             }
-            Ok(Some(Border::new(style, sides)))
+            Ok(Some(b))
         }
         other => Err(format!(
             "border: expected string|table|bool, got {}",
@@ -301,42 +333,80 @@ pub(crate) fn border(opts: &mlua::Table) -> Result<Option<Border>, String> {
     }
 }
 
-fn border_sides(t: &mlua::Table) -> Result<BorderSides, String> {
-    let sides_v = t.get::<mlua::Value>("sides").unwrap_or(mlua::Value::Nil);
-    match sides_v {
-        mlua::Value::Nil => Ok(BorderSides::ALL),
-        mlua::Value::Table(st) => {
-            let mut sides = BorderSides::NONE;
-            let mut saw_list_entry = false;
-            for v in st.clone().sequence_values::<String>().flatten() {
-                saw_list_entry = true;
-                match v.as_str() {
-                    "top" => sides.top = true,
-                    "right" => sides.right = true,
-                    "bottom" => sides.bottom = true,
-                    "left" => sides.left = true,
-                    other => {
-                        return Err(format!(
-                            "unknown border side '{other}' (expected top|right|bottom|left)"
-                        ))
-                    }
+/// Parse one side value into `Option<EdgeStyle>`. `nil`/`false` → None;
+/// `true` → enabled, default color; string → enabled with theme group; table
+/// `{ color = "..." }` → enabled with that color.
+fn edge_opt(v: mlua::Value) -> Result<Option<EdgeStyle>, String> {
+    match v {
+        mlua::Value::Nil => Ok(None),
+        mlua::Value::Boolean(false) => Ok(None),
+        mlua::Value::Boolean(true) => Ok(Some(EdgeStyle::new())),
+        mlua::Value::String(s) => {
+            let raw = s.to_str().map_err(|e| e.to_string())?.to_string();
+            Ok(Some(EdgeStyle::with_color(smelt_core::theme::intern(&raw))))
+        }
+        mlua::Value::Table(t) => {
+            let color_v = t.get::<mlua::Value>("color").unwrap_or(mlua::Value::Nil);
+            match color_v {
+                mlua::Value::Nil => Ok(Some(EdgeStyle::new())),
+                mlua::Value::String(s) => {
+                    let raw = s.to_str().map_err(|e| e.to_string())?.to_string();
+                    Ok(Some(EdgeStyle::with_color(smelt_core::theme::intern(
+                        &raw,
+                    ))))
                 }
+                other => Err(format!(
+                    "border edge color: expected string, got {}",
+                    other.type_name()
+                )),
             }
-            if saw_list_entry {
-                return Ok(sides);
-            }
-            // Boolean-map form: `sides = { top = true, left = true }`.
-            sides.top = st.get::<bool>("top").unwrap_or(false);
-            sides.right = st.get::<bool>("right").unwrap_or(false);
-            sides.bottom = st.get::<bool>("bottom").unwrap_or(false);
-            sides.left = st.get::<bool>("left").unwrap_or(false);
-            Ok(sides)
         }
         other => Err(format!(
-            "border.sides: expected table, got {}",
+            "border edge: expected nil|bool|string|table, got {}",
             other.type_name()
         )),
     }
+}
+
+fn apply_legacy_sides(st: &mlua::Table, b: &mut Border) -> Result<(), String> {
+    let mut saw_list = false;
+    let mut top = false;
+    let mut right = false;
+    let mut bottom = false;
+    let mut left = false;
+    for v in st.clone().sequence_values::<String>().flatten() {
+        saw_list = true;
+        match v.as_str() {
+            "top" => top = true,
+            "right" => right = true,
+            "bottom" => bottom = true,
+            "left" => left = true,
+            other => {
+                return Err(format!(
+                    "unknown border side '{other}' (expected top|right|bottom|left)"
+                ))
+            }
+        }
+    }
+    if !saw_list {
+        top = st.get::<bool>("top").unwrap_or(false);
+        right = st.get::<bool>("right").unwrap_or(false);
+        bottom = st.get::<bool>("bottom").unwrap_or(false);
+        left = st.get::<bool>("left").unwrap_or(false);
+    }
+    if top {
+        b.top = Some(EdgeStyle::new());
+    }
+    if right {
+        b.right = Some(EdgeStyle::new());
+    }
+    if bottom {
+        b.bottom = Some(EdgeStyle::new());
+    }
+    if left {
+        b.left = Some(EdgeStyle::new());
+    }
+    Ok(())
 }
 
 /// Parse `"nw"` / `"ne"` / `"sw"` / `"se"` into a `Corner`. Falls back to `default`.
@@ -558,7 +628,7 @@ mod tests {
         let t = eval_table(&lua, "return {}");
         let b = border(&t).unwrap().expect("some border");
         assert_eq!(b.style, BorderStyle::Single);
-        assert!(b.sides.top && b.sides.right && b.sides.bottom && b.sides.left);
+        assert!(b.top.is_some() && b.right.is_some() && b.bottom.is_some() && b.left.is_some());
     }
 
     #[test]
@@ -569,7 +639,7 @@ mod tests {
     }
 
     #[test]
-    fn border_table_with_partial_sides() {
+    fn border_table_with_partial_sides_legacy() {
         let lua = lua();
         let t = eval_table(
             &lua,
@@ -577,8 +647,36 @@ mod tests {
         );
         let b = border(&t).unwrap().expect("some border");
         assert_eq!(b.style, BorderStyle::Rounded);
-        assert!(b.sides.top && b.sides.left);
-        assert!(!b.sides.right && !b.sides.bottom);
+        assert!(b.top.is_some() && b.left.is_some());
+        assert!(b.right.is_none() && b.bottom.is_none());
+    }
+
+    #[test]
+    fn border_table_per_side_keys_with_color() {
+        let lua = lua();
+        let t = eval_table(
+            &lua,
+            r#"return { border = { style = "single", top = "accent", bottom = true } }"#,
+        );
+        let b = border(&t).unwrap().expect("some border");
+        assert_eq!(b.style, BorderStyle::Single);
+        assert!(b.top.unwrap().color.is_some());
+        assert!(b.bottom.unwrap().color.is_none());
+        assert!(b.left.is_none() && b.right.is_none());
+    }
+
+    #[test]
+    fn border_all_sugar_applies_to_every_side() {
+        let lua = lua();
+        let t = eval_table(
+            &lua,
+            r#"return { border = { style = "rounded", all = "accent" } }"#,
+        );
+        let b = border(&t).unwrap().expect("some border");
+        assert_eq!(b.style, BorderStyle::Rounded);
+        for e in [b.top, b.right, b.bottom, b.left] {
+            assert!(e.unwrap().color.is_some());
+        }
     }
 
     // ── corner ────────────────────────────────────────────────────────

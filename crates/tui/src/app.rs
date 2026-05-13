@@ -776,10 +776,9 @@ impl TuiApp {
         // resize events (signal-hook-mio counter / mio readiness race), so we keep our
         // own tokio-native handler. Both fire on resize; the duplicate just hits an
         // idempotent `compositor.resize` and one extra full repaint.
-        let mut sigwinch = tokio::signal::unix::signal(
-            tokio::signal::unix::SignalKind::window_change(),
-        )
-        .expect("install SIGWINCH listener");
+        let mut sigwinch =
+            tokio::signal::unix::signal(tokio::signal::unix::SignalKind::window_change())
+                .expect("install SIGWINCH listener");
 
         // Auto-submit initial message if provided (e.g. `agent "fix the bug"`).
         if let Some(msg) = initial_message {

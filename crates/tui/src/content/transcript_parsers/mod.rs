@@ -4,7 +4,7 @@
 use smelt_core::buffer::Buffer;
 use smelt_core::content::builder::{LineBuilder, Outcome};
 use smelt_core::content::LayoutContext;
-use smelt_core::theme::role_hl;
+use smelt_core::theme::intern;
 use smelt_core::theme::Theme;
 use smelt_core::transcript_model::{Block, ToolState, ViewState};
 
@@ -161,7 +161,7 @@ fn append_ellipsis(
     let added = {
         let mut col = LineBuilder::new(buf, theme, width);
         col.push_dim();
-        col.push_hl(role_hl("Muted"));
+        col.push_hl(intern("Comment"));
         col.print(text);
         col.pop_style();
         col.pop_style();

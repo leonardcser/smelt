@@ -5,7 +5,7 @@
 use crate::content::builder::LineBuilder;
 use crate::content::default_width;
 use crate::style::Color;
-use crate::theme::{role_hl, HlGroup};
+use crate::theme::{intern, HlGroup};
 use unicode_width::UnicodeWidthStr;
 
 use super::util::{
@@ -94,7 +94,7 @@ pub fn render_markdown_table(
     let mut total_rows = 0u16;
 
     let bar = |out: &mut LineBuilder, dim: bool| {
-        out.set_hl(role_hl("Bar"));
+        out.set_hl(intern("SmeltBar"));
         if dim {
             out.set_dim();
         }
@@ -422,7 +422,7 @@ fn emit_inline_nodes(out: &mut LineBuilder, nodes: &[InlineNode]) {
         match node {
             InlineNode::Text(s) => out.print(s),
             InlineNode::Code(s) => {
-                out.push_hl(role_hl("Accent"));
+                out.push_hl(intern("SmeltAccent"));
                 out.print(s);
                 out.pop_style();
             }
@@ -495,7 +495,7 @@ fn flatten_nodes_into(nodes: &[InlineNode], style: &InlineStyle, out: &mut Vec<I
                 out.push(InlineSpan {
                     text: s.clone(),
                     style: InlineStyle {
-                        group: Some(role_hl("Accent")),
+                        group: Some(intern("SmeltAccent")),
                         ..*style
                     },
                 });
@@ -675,7 +675,7 @@ mod tests {
     }
 
     fn tag_for(style: &Style) -> &'static str {
-        // Code spans flow through `role_hl("Accent")` and the default
+        // Code spans flow through `intern("SmeltAccent")` and the default
         // core Theme keeps `SmeltAccent` empty, so the resolved fg is
         // `Some(Color::Reset)` — distinct from plain runs (which never
         // make it to the highlight list because their style is

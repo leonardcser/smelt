@@ -9,7 +9,7 @@ use mlua::prelude::*;
 use smelt_core::lua::doc::register_ui_fn;
 use smelt_core::notebook;
 use smelt_core::notebook::NotebookRenderData;
-use smelt_core::theme::role_hl;
+use smelt_core::theme::intern;
 use std::collections::HashMap;
 
 #[lua_module(
@@ -212,7 +212,7 @@ fn render_notebook_preview(
             return;
         }
         out.print(" ");
-        out.push_hl(role_hl("Muted"));
+        out.push_hl(intern("Comment"));
         out.print(line);
         out.pop_style();
         out.newline();

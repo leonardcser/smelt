@@ -175,12 +175,11 @@ smelt.cmd.register("ps", function()
         return
       end
 
-      local items = {}
-      for _, p in ipairs(procs) do
-        table.insert(items, { label = format_proc(p) })
-      end
+      local labels = {}
+      for _, p in ipairs(procs) do table.insert(labels, format_proc(p)) end
 
       local snapshot = procs
+      local options_leaf = smelt.ui.dialog.options(labels)
       local should_reopen = false
 
       smelt.ui.dialog.open({
@@ -188,17 +187,15 @@ smelt.cmd.register("ps", function()
           { text = " processes ", bold = true },
           { text = "(bs: kill) ", fg = "grey", dim = true },
         },
-        panels = {
-          { kind = "options", items = items },
-        },
+        height = 50,
+        panels = { { leaf = options_leaf } },
         keymaps = {
           { key = "bs", hint = "\u{232b}: kill selected", on_press = function(ctx)
-            if ctx.selected_index then
-              local target = snapshot[ctx.selected_index]
-              if target then
-                smelt.process.kill(target.id)
-                should_reopen = true
-              end
+            local idx = (smelt.win.cursor_row(options_leaf) or 0) + 1
+            local target = snapshot[idx]
+            if target then
+              smelt.process.kill(target.id)
+              should_reopen = true
             end
             ctx.close()
           end },

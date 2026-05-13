@@ -3,7 +3,7 @@
 //! at `(col=1, row=1)` so the rendered chrome glyphs read clearly
 //! against the surrounding fill.
 
-use smelt_term::layout::{Border, BorderSides, BorderStyle, Constraint};
+use smelt_term::layout::{Border, Constraint, EdgeStyle};
 use smelt_term::{LayoutTree, PaintId, Rect};
 
 use crate::story;
@@ -94,15 +94,14 @@ story!(title_truncates_in_narrow_border, |ctx| {
 // ── Per-side border combinations ──────────────────────────────────
 
 fn sided(top: bool, right: bool, bottom: bool, left: bool) -> Border {
-    Border::new(
-        BorderStyle::Single,
-        BorderSides {
-            top,
-            right,
-            bottom,
-            left,
-        },
-    )
+    let on = |b: bool| if b { Some(EdgeStyle::new()) } else { None };
+    Border {
+        top: on(top),
+        right: on(right),
+        bottom: on(bottom),
+        left: on(left),
+        ..Border::single()
+    }
 }
 
 story!(border_top_only_no_corners, |ctx| {

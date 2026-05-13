@@ -1,6 +1,6 @@
 use smelt_core::content::builder::LineBuilder;
 use smelt_core::content::highlight::{render_code_block, render_markdown_table};
-use smelt_core::theme::role_hl;
+use smelt_core::theme::intern;
 
 pub fn render_markdown_inner(
     out: &mut LineBuilder,
@@ -103,7 +103,7 @@ pub fn render_markdown_inner(
                         style: InlineStyle {
                             bold: true,
                             dim,
-                            group: Some(role_hl("Heading")),
+                            group: Some(intern("SmeltHeading")),
                             ..Default::default()
                         },
                     });

@@ -43,10 +43,10 @@ Close the overlay leaf identified by `id`. No-op if the window does not exist or
 ## `smelt.win.configure_input`
 
 ```lua
-fun(win_id: integer): nil
+fun(win_id: integer, placeholder: string?): nil
 ```
 
-Mark `win_id` as a single-line text input leaf with the same editing keymap as the prompt.
+Mark `win_id` as a single-line text input leaf with the same editing keymap as the prompt. If `placeholder` is non-empty, seed the buffer with dim placeholder text; the first printable keystroke clears it and starts a fresh line.
 
 ## `smelt.win.configure_list`
 
@@ -56,6 +56,14 @@ fun(win_id: integer, initial_cursor: integer?): nil
 
 Mark `win_id` as a list leaf with arrow-key/scroll handling and place the initial cursor at row `initial_cursor` (clamped to `u16`).
 
+## `smelt.win.cursor_row`
+
+```lua
+fun(win_id: integer): integer?
+```
+
+Return the current cursor row (0-based) of `win_id`, or `nil` if the window doesn't exist.
+
 ## `smelt.win.focus`
 
 ```lua
@@ -63,6 +71,14 @@ fun(): string
 ```
 
 Return which top-level pane currently has focus: `"transcript"` or `"prompt"`.
+
+## `smelt.win.move_cursor`
+
+```lua
+fun(win_id: integer, delta: integer): nil
+```
+
+Move `win_id`'s cursor by `delta` rows (clamped to the buffer's line count), keep the row on-screen by adjusting `scroll_top`, and emit `selection_changed`. Lets an external panel (e.g. a docked search input) drive a list without holding focus.
 
 ## `smelt.win.on_event`
 
@@ -80,7 +96,7 @@ Subscribe `func` to event `event` on window `win_id`. Returns a callback id usab
 fun(buf_id: integer, opts: table?): integer?
 ```
 
-Open a split window over the buffer `buf_id`. `opts.region` picks the layout slot (default `"lua_overlay"`); `opts.focusable`, `opts.cursor_line_highlight`, and `opts.vim_enabled` toggle behaviour. Returns the new `WinId` or `nil` if no slot was available.
+Open a split window over the buffer `buf_id`. `opts.region` picks the layout slot (default `"lua_overlay"`); `opts.focusable`, `opts.cursor_line_highlight`, and `opts.vim_enabled` toggle behaviour. `opts.pad_left` / `opts.pad_right` reserve gutter columns on either side. Returns the new `WinId` or `nil` if no slot was available.
 
 ## `smelt.win.rect`
 
@@ -89,6 +105,14 @@ fun(id: integer): any
 ```
 
 Return the window's current viewport rect as `{ row, col, width, height }`, or `nil` until the first render lays it out.
+
+## `smelt.win.set_cursor_row`
+
+```lua
+fun(win_id: integer, row: integer): nil
+```
+
+Place `win_id`'s cursor at absolute `row` (clamped to the buffer's line count). Adjusts `scroll_top` so the row stays on-screen and emits `selection_changed` if the position actually moved.
 
 ## `smelt.win.set_focus`
 

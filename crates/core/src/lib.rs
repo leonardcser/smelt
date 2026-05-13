@@ -42,16 +42,15 @@ mod test_util;
 // Re-exported from `smelt-buffer` so call sites (`smelt_core::buffer::Buffer`, etc.) keep resolving.
 pub use smelt_buffer::{attachment, buffer, clipboard, kill_ring, undo};
 
-mod theme_roles;
-
 /// Style primitives re-exported from `smelt-buffer`.
 pub mod style {
     pub use smelt_buffer::style::*;
 }
 
-/// Theme registry plus the host-specific [`role_hl`] role mapping table.
+/// Theme registry re-export. Highlight groups follow nvim's PascalCase
+/// convention (`Comment`, `SmeltAccent`, …); call `intern(name)` to get a
+/// stable `HlGroup` id, then `theme.resolve(id)` for the current style.
 pub mod theme {
-    pub use crate::theme_roles::role_hl;
     pub use smelt_buffer::theme::*;
 }
 

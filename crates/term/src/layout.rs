@@ -186,9 +186,8 @@ fn natural_box(items: &[Item], chrome: &Chrome, cap: (u16, u16), vertical: bool)
     let (cap_w, cap_h) = cap;
     let (border_w, border_h) = match chrome.border {
         Some(b) => {
-            let s = b.sides;
-            let bw = u16::from(s.left) + u16::from(s.right);
-            let bh = u16::from(s.top) + u16::from(s.bottom);
+            let bw = u16::from(b.left.is_some()) + u16::from(b.right.is_some());
+            let bh = u16::from(b.top.is_some()) + u16::from(b.bottom.is_some());
             (bw, bh)
         }
         None => (0, 0),
@@ -296,73 +295,142 @@ pub enum Anchor {
 }
 
 /// Glyph family painted along a border edge.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum BorderStyle {
+    #[default]
     Single,
     Double,
     Rounded,
 }
 
-/// Which edges of a container's chrome get a frame painted. Each enabled side
-/// reserves one row/column; missing sides leave children flush to that edge.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct BorderSides {
-    pub top: bool,
-    pub right: bool,
-    pub bottom: bool,
-    pub left: bool,
+/// Styling for one edge of a `Border`. Currently only `color` (a theme highlight
+/// group resolved at paint time). `EdgeStyle::default()` paints with the
+/// terminal's default fg.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct EdgeStyle {
+    pub color: Option<smelt_style::theme::HlGroup>,
 }
 
-impl BorderSides {
-    pub const ALL: Self = Self {
-        top: true,
-        right: true,
-        bottom: true,
-        left: true,
-    };
-    pub const NONE: Self = Self {
-        top: false,
-        right: false,
-        bottom: false,
-        left: false,
-    };
-    pub const TOP: Self = Self {
-        top: true,
-        right: false,
-        bottom: false,
-        left: false,
-    };
-    pub const BOTTOM: Self = Self {
-        top: false,
-        right: false,
-        bottom: true,
-        left: false,
-    };
+impl EdgeStyle {
+    pub const fn new() -> Self {
+        Self { color: None }
+    }
+    pub const fn with_color(hl: smelt_style::theme::HlGroup) -> Self {
+        Self { color: Some(hl) }
+    }
 }
 
-/// A frame around a container: glyph family plus the set of edges to paint.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+impl From<()> for EdgeStyle {
+    fn from(_: ()) -> Self {
+        Self::new()
+    }
+}
+
+impl From<smelt_style::theme::HlGroup> for EdgeStyle {
+    fn from(hl: smelt_style::theme::HlGroup) -> Self {
+        Self::with_color(hl)
+    }
+}
+
+/// A frame around a container: glyph family plus per-side `Option<EdgeStyle>`.
+/// A side that is `None` is not drawn and reserves no row/column. A side that is
+/// `Some(_)` reserves one row/column and is painted in the resolved fg.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct Border {
     pub style: BorderStyle,
-    pub sides: BorderSides,
+    pub top: Option<EdgeStyle>,
+    pub right: Option<EdgeStyle>,
+    pub bottom: Option<EdgeStyle>,
+    pub left: Option<EdgeStyle>,
 }
 
 impl Border {
-    pub const fn new(style: BorderStyle, sides: BorderSides) -> Self {
-        Self { style, sides }
+    /// All sides disabled; glyph family `Single`. Use as a base for builders.
+    pub const OFF: Self = Self {
+        style: BorderStyle::Single,
+        top: None,
+        right: None,
+        bottom: None,
+        left: None,
+    };
+
+    pub const fn single() -> Self {
+        Self {
+            style: BorderStyle::Single,
+            ..Self::OFF
+        }
     }
-    pub const fn all(style: BorderStyle) -> Self {
-        Self::new(style, BorderSides::ALL)
+    pub const fn rounded() -> Self {
+        Self {
+            style: BorderStyle::Rounded,
+            ..Self::OFF
+        }
     }
-    pub const fn top(style: BorderStyle) -> Self {
-        Self::new(style, BorderSides::TOP)
+    pub const fn double() -> Self {
+        Self {
+            style: BorderStyle::Double,
+            ..Self::OFF
+        }
     }
-    pub const fn bottom(style: BorderStyle) -> Self {
-        Self::new(style, BorderSides::BOTTOM)
+
+    pub fn top(mut self, e: impl Into<EdgeStyle>) -> Self {
+        self.top = Some(e.into());
+        self
     }
-    pub const SINGLE: Border = Border::all(BorderStyle::Single);
-    pub const DOUBLE: Border = Border::all(BorderStyle::Double);
-    pub const ROUNDED: Border = Border::all(BorderStyle::Rounded);
+    pub fn right(mut self, e: impl Into<EdgeStyle>) -> Self {
+        self.right = Some(e.into());
+        self
+    }
+    pub fn bottom(mut self, e: impl Into<EdgeStyle>) -> Self {
+        self.bottom = Some(e.into());
+        self
+    }
+    pub fn left(mut self, e: impl Into<EdgeStyle>) -> Self {
+        self.left = Some(e.into());
+        self
+    }
+    /// Enable every side with `e`. Copy bound lets callers pass `()` or a `HlGroup`.
+    pub fn all<E: Into<EdgeStyle> + Copy>(self, e: E) -> Self {
+        self.top(e).right(e).bottom(e).left(e)
+    }
+
+    pub fn any_side(&self) -> bool {
+        self.top.is_some() || self.right.is_some() || self.bottom.is_some() || self.left.is_some()
+    }
+
+    /// `Border::single().all(())` — single glyphs on all four sides, default color.
+    pub fn single_all() -> Self {
+        Self::single().all(())
+    }
+    pub fn rounded_all() -> Self {
+        Self::rounded().all(())
+    }
+    pub fn double_all() -> Self {
+        Self::double().all(())
+    }
+
+    /// Compatibility shortcuts for the three most common presets.
+    pub const SINGLE: Border = Border {
+        style: BorderStyle::Single,
+        top: Some(EdgeStyle::new()),
+        right: Some(EdgeStyle::new()),
+        bottom: Some(EdgeStyle::new()),
+        left: Some(EdgeStyle::new()),
+    };
+    pub const DOUBLE: Border = Border {
+        style: BorderStyle::Double,
+        top: Some(EdgeStyle::new()),
+        right: Some(EdgeStyle::new()),
+        bottom: Some(EdgeStyle::new()),
+        left: Some(EdgeStyle::new()),
+    };
+    pub const ROUNDED: Border = Border {
+        style: BorderStyle::Rounded,
+        top: Some(EdgeStyle::new()),
+        right: Some(EdgeStyle::new()),
+        bottom: Some(EdgeStyle::new()),
+        left: Some(EdgeStyle::new()),
+    };
 }
 
 #[derive(Clone, Copy, Debug, Default)]
@@ -407,11 +475,10 @@ pub fn inset_for_border(area: Rect, border: Option<Border>) -> Rect {
     let Some(b) = border else {
         return area;
     };
-    let s = b.sides;
-    let top_pad = if s.top { 1 } else { 0 };
-    let bot_pad = if s.bottom { 1 } else { 0 };
-    let left_pad = if s.left { 1 } else { 0 };
-    let right_pad = if s.right { 1 } else { 0 };
+    let top_pad = if b.top.is_some() { 1 } else { 0 };
+    let bot_pad = if b.bottom.is_some() { 1 } else { 0 };
+    let left_pad = if b.left.is_some() { 1 } else { 0 };
+    let right_pad = if b.right.is_some() { 1 } else { 0 };
     let h = area.height.saturating_sub(top_pad).saturating_sub(bot_pad);
     let w = area
         .width
@@ -421,19 +488,19 @@ pub fn inset_for_border(area: Rect, border: Option<Border>) -> Rect {
 }
 
 /// Paint a container's border and title into `grid` at `area`.
-/// Corners are drawn only when both adjacent edges are enabled.
-/// Title requires `border.sides.top`.
+/// Corners are drawn only when both adjacent edges are enabled. When two
+/// adjacent edges disagree on color, the top/bottom edge wins.
+/// Title requires `border.top.is_some()`.
 pub fn paint_chrome(
     grid: &mut crate::grid::Grid,
     area: Rect,
     chrome: &Chrome,
-    _theme: &crate::Theme,
+    theme: &crate::Theme,
 ) {
     let Some(border) = chrome.border else {
         return;
     };
-    let sides = border.sides;
-    if !(sides.top || sides.right || sides.bottom || sides.left) {
+    if !border.any_side() {
         return;
     }
     if area.width == 0 || area.height == 0 {
@@ -444,45 +511,55 @@ pub fn paint_chrome(
         BorderStyle::Double => ('═', '║', '╔', '╗', '╚', '╝'),
         BorderStyle::Rounded => ('─', '│', '╭', '╮', '╰', '╯'),
     };
-    let style = super::grid::Style::default();
+    let edge_style = |e: Option<EdgeStyle>| -> super::grid::Style {
+        match e.and_then(|s| s.color) {
+            Some(hl) => theme.resolve(hl),
+            None => super::grid::Style::default(),
+        }
+    };
+    let top_style = edge_style(border.top);
+    let bot_style = edge_style(border.bottom);
+    let left_style = edge_style(border.left);
+    let right_style = edge_style(border.right);
     let right = area.left + area.width - 1;
     let bottom = area.top + area.height - 1;
 
-    if sides.top {
+    if border.top.is_some() {
         for col in area.left..=right {
-            grid.set(col, area.top, h, style);
+            grid.set(col, area.top, h, top_style);
         }
     }
-    if sides.bottom && bottom != area.top {
+    if border.bottom.is_some() && bottom != area.top {
         for col in area.left..=right {
-            grid.set(col, bottom, h, style);
+            grid.set(col, bottom, h, bot_style);
         }
     }
-    if sides.left {
+    if border.left.is_some() {
         for row in area.top..=bottom {
-            grid.set(area.left, row, v, style);
+            grid.set(area.left, row, v, left_style);
         }
     }
-    if sides.right && right != area.left {
+    if border.right.is_some() && right != area.left {
         for row in area.top..=bottom {
-            grid.set(right, row, v, style);
+            grid.set(right, row, v, right_style);
         }
     }
-    // Corners only when both adjacent edges are present.
-    if sides.top && sides.left {
-        grid.set(area.left, area.top, tl, style);
+    // Corners only when both adjacent edges are present. Top/bottom wins on color.
+    if border.top.is_some() && border.left.is_some() {
+        grid.set(area.left, area.top, tl, top_style);
     }
-    if sides.top && sides.right && right != area.left {
-        grid.set(right, area.top, tr, style);
+    if border.top.is_some() && border.right.is_some() && right != area.left {
+        grid.set(right, area.top, tr, top_style);
     }
-    if sides.bottom && sides.left && bottom != area.top {
-        grid.set(area.left, bottom, bl, style);
+    if border.bottom.is_some() && border.left.is_some() && bottom != area.top {
+        grid.set(area.left, bottom, bl, bot_style);
     }
-    if sides.bottom && sides.right && bottom != area.top && right != area.left {
-        grid.set(right, bottom, br, style);
+    if border.bottom.is_some() && border.right.is_some() && bottom != area.top && right != area.left
+    {
+        grid.set(right, bottom, br, bot_style);
     }
 
-    if sides.top {
+    if border.top.is_some() {
         if let Some(title) = chrome.title.as_ref() {
             // Inset title by one cell from each end so it reads as `─title──`
             // regardless of whether the left/right sides are enabled.
@@ -495,7 +572,7 @@ pub fn paint_chrome(
                     if col >= limit {
                         break;
                     }
-                    let span_style = merge_title_span_style(style, span.style);
+                    let span_style = merge_title_span_style(top_style, span.style);
                     let mut written = false;
                     for ch in span.text.chars() {
                         use unicode_width::UnicodeWidthChar;

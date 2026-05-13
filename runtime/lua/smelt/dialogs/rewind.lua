@@ -21,30 +21,23 @@ smelt.cmd.register("rewind", function(args)
 
   smelt.spawn(function()
     local labels = build_labels(turns)
-    local options = {}
-    for _, label in ipairs(labels) do
-      table.insert(options, { label = label })
-    end
+    local options_leaf = smelt.ui.dialog.options(labels, { selected = #labels })
 
-    local result = smelt.ui.dialog.open({
+    local picked = smelt.ui.dialog.open({
       title  = "rewind",
-      panels = {
-        { kind = "options", items = options, selected = #options },
-      },
+      height = 50,
+      panels = { { leaf = options_leaf } },
+      on_submit = function(ctx)
+        ctx.resolve((smelt.win.cursor_row(options_leaf) or 0) + 1)
+      end,
     })
 
-    if result.action == "dismiss" or result.option_index == nil then
-      return
-    end
+    if picked == nil then return end
 
-    local idx = result.option_index
     local block_idx = nil
-    if idx <= #turns then
-      block_idx = turns[idx].block_idx
+    if picked <= #turns then
+      block_idx = turns[picked].block_idx
     end
-
-    smelt.session.rewind_to(block_idx, {
-      restore_vim_insert = restore_vim_insert,
-    })
+    smelt.session.rewind_to(block_idx, { restore_vim_insert = restore_vim_insert })
   end)
 end, { desc = "rewind to a previous turn" })

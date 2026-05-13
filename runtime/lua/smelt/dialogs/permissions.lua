@@ -52,28 +52,29 @@ smelt.cmd.register("permissions", function()
         smelt.permissions.sync(perms)
         return
       end
+      local labels = {}
+      for _, it in ipairs(items) do table.insert(labels, it.label) end
 
+      local options_leaf = smelt.ui.dialog.options(labels)
       local deleted_this_round = false
       local pending_d = false
       local function delete_selected(ctx)
-        if ctx.selected_index then
-          local m = mapping[ctx.selected_index]
-          if m then
-            delete_entry(perms, m)
-            deleted_this_round = true
-          end
+        local idx = (smelt.win.cursor_row(options_leaf) or 0) + 1
+        local m = mapping[idx]
+        if m then
+          delete_entry(perms, m)
+          deleted_this_round = true
         end
         ctx.close()
       end
 
       smelt.ui.dialog.open({
-        title   = {
+        title = {
           { text = " permissions ", bold = true },
           { text = "(d/bs: delete) ", fg = "grey", dim = true },
         },
-        panels  = {
-          { kind = "options", items = items },
-        },
+        height = 60,
+        panels = { { leaf = options_leaf } },
         keymaps = {
           { key = "bs", hint = "\u{232b}: delete selected", on_press = delete_selected },
           { key = "d", on_press = function(ctx)

@@ -284,23 +284,11 @@ fn rgb_to_ansi_256(r: u8, g: u8, b: u8) -> u8 {
     16 + 36 * band(r) + 6 * band(g) + band(b)
 }
 
-/// Map a Lua role name to its theme highlight group name.
-fn role_to_group(role: &str) -> Option<&'static str> {
-    Some(match role {
-        "accent" => "SmeltAccent",
-        "slug" => "SmeltSlug",
-        "user_bg" => "SmeltUserBg",
-        "code_block_bg" => "SmeltCodeBlockBg",
-        "bar" => "SmeltBar",
-        "tool_pending" => "SmeltToolPending",
-        "reason_off" => "SmeltReasonOff",
-        "muted" => "Comment",
-        _ => return None,
-    })
-}
-
 /// Resolved color for a highlight group: fg preferred, then bg, then `Color::Reset`.
-fn group_color(theme: &crate::smelt_term::Theme, group: &str) -> smelt_core::style::Color {
+pub(super) fn group_color(
+    theme: &crate::smelt_term::Theme,
+    group: &str,
+) -> smelt_core::style::Color {
     let style = theme.get(group);
     style
         .fg
@@ -308,57 +296,49 @@ fn group_color(theme: &crate::smelt_term::Theme, group: &str) -> smelt_core::sty
         .unwrap_or(smelt_core::style::Color::Reset)
 }
 
-/// Resolve a named theme role. Returns `None` for unknown names.
-pub(super) fn theme_role_get(
-    theme: &crate::smelt_term::Theme,
-    role: &str,
-) -> Option<smelt_core::style::Color> {
-    role_to_group(role).map(|g| group_color(theme, g))
-}
-
-/// Set a writable theme role. Only `accent` and `slug` are mutable.
-pub(super) fn theme_role_set(
-    theme: &mut crate::smelt_term::Theme,
-    role: &str,
-    ansi: u8,
-) -> LuaResult<()> {
-    match role {
-        "accent" => {
+/// Set highlight group `group` to fg = `Color::AnsiValue(ansi)`. For the two
+/// "palette" groups (`SmeltAccent`, `SmeltSlug`), bumps the corresponding ANSI
+/// index on the `Theme` and re-runs `populate_ui_theme` so derived groups
+/// follow. Any other group is set in place — only the fg moves.
+pub(super) fn theme_set(theme: &mut crate::smelt_term::Theme, group: &str, ansi: u8) {
+    match group {
+        "SmeltAccent" => {
             theme.set_accent(ansi);
             crate::theme::populate_ui_theme(theme);
-            Ok(())
         }
-        "slug" => {
+        "SmeltSlug" => {
             theme.set_slug(ansi);
             crate::theme::populate_ui_theme(theme);
-            Ok(())
         }
-        other => Err(LuaError::RuntimeError(format!(
-            "theme role is read-only: {other}"
-        ))),
+        other => {
+            theme.set(
+                other,
+                smelt_core::style::Style::new().fg(smelt_core::style::Color::AnsiValue(ansi)),
+            );
+        }
     }
 }
 
-/// List of (role_name, current_color) pairs for `theme.snapshot()`.
+/// Well-known smelt highlight groups, in the order `theme.snapshot()` reports them.
+pub(super) const SMELT_GROUPS: &[&str] = &[
+    "SmeltAccent",
+    "SmeltSlug",
+    "SmeltUserBg",
+    "SmeltCodeBlockBg",
+    "SmeltBar",
+    "SmeltToolPending",
+    "SmeltReasonOff",
+    "Comment",
+];
+
+/// List of (group_name, current_color) pairs for `theme.snapshot()`.
 pub(super) fn theme_snapshot_pairs(
     theme: &crate::smelt_term::Theme,
 ) -> Vec<(&'static str, smelt_core::style::Color)> {
-    [
-        "accent",
-        "slug",
-        "user_bg",
-        "code_block_bg",
-        "bar",
-        "tool_pending",
-        "reason_off",
-        "muted",
-    ]
-    .into_iter()
-    .map(|role| {
-        let group = role_to_group(role).expect("known role");
-        (role, group_color(theme, group))
-    })
-    .collect()
+    SMELT_GROUPS
+        .iter()
+        .map(|g| (*g, group_color(theme, g)))
+        .collect()
 }
 
 #[cfg(test)]
@@ -372,37 +352,30 @@ mod tests {
     }
 
     #[test]
-    fn theme_role_get_known_roles() {
+    fn group_color_known_groups_return_color() {
         let t = theme();
-        for role in [
-            "accent",
-            "slug",
-            "user_bg",
-            "code_block_bg",
-            "bar",
-            "tool_pending",
-            "reason_off",
-            "muted",
-        ] {
-            assert!(
-                theme_role_get(&t, role).is_some(),
-                "expected color for {role}"
+        for g in SMELT_GROUPS {
+            // All built-in smelt groups are populated by `populate_ui_theme`;
+            // none should fall through to `Color::Reset`.
+            assert_ne!(
+                group_color(&t, g),
+                smelt_core::style::Color::Reset,
+                "expected populated color for {g}"
             );
         }
     }
 
     #[test]
-    fn theme_role_get_unknown_returns_none() {
+    fn group_color_unknown_returns_reset() {
         let t = theme();
-        assert!(theme_role_get(&t, "bogus").is_none());
+        assert_eq!(group_color(&t, "Bogus"), smelt_core::style::Color::Reset);
     }
 
     #[test]
-    fn theme_role_set_accent_round_trips() {
+    fn theme_set_smelt_accent_rebuilds_palette() {
         let mut t = theme();
-        theme_role_set(&mut t, "accent", 42).unwrap();
+        theme_set(&mut t, "SmeltAccent", 42);
         assert_eq!(t.accent(), 42);
-        // SmeltAccent group is rebuilt immediately on set.
         assert_eq!(
             t.get("SmeltAccent").fg,
             Some(smelt_core::style::Color::AnsiValue(42))
@@ -410,38 +383,35 @@ mod tests {
     }
 
     #[test]
-    fn theme_role_set_preset_via_color_decode() {
+    fn theme_set_smelt_accent_via_preset_decode() {
         // sage maps to ANSI 108.
         let v = crate::theme::preset_by_name("sage").unwrap();
         let mut t = theme();
-        theme_role_set(&mut t, "accent", v).unwrap();
+        theme_set(&mut t, "SmeltAccent", v);
         assert_eq!(t.accent(), 108);
     }
 
     #[test]
-    fn theme_role_set_read_only_errors() {
+    fn theme_set_arbitrary_group_only_moves_fg() {
         let mut t = theme();
-        let err = theme_role_set(&mut t, "muted", 1).unwrap_err();
-        assert!(err.to_string().contains("read-only"));
+        let accent_before = t.accent();
+        theme_set(&mut t, "Comment", 99);
+        assert_eq!(
+            t.get("Comment").fg,
+            Some(smelt_core::style::Color::AnsiValue(99))
+        );
+        // Accent palette index is untouched when setting a non-palette group.
+        assert_eq!(t.accent(), accent_before);
     }
 
     #[test]
-    fn theme_snapshot_pairs_lists_all_roles() {
+    fn theme_snapshot_pairs_lists_all_groups() {
         let t = theme();
         let pairs = theme_snapshot_pairs(&t);
         let names: Vec<&str> = pairs.iter().map(|(n, _)| *n).collect();
-        for expected in [
-            "accent",
-            "bar",
-            "code_block_bg",
-            "muted",
-            "reason_off",
-            "slug",
-            "tool_pending",
-            "user_bg",
-        ] {
+        for expected in SMELT_GROUPS {
             assert!(
-                names.contains(&expected),
+                names.contains(expected),
                 "snapshot missing {expected}: {names:?}"
             );
         }

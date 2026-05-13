@@ -58,10 +58,10 @@ function smelt.confirm.open(handle_id)
   local req = smelt.cell("confirm_requested"):get()
   if not req or req.handle_id ~= handle_id then return end
 
+  -- Title / summary / preview content buffers (consumer-built).
   local title_buf   = smelt.buf.create()
   local summary_buf = smelt.buf.create()
   local preview_buf = smelt.buf.create()
-
   smelt.confirm._render_title(title_buf, handle_id)
   if req.summary and req.summary ~= "" then
     smelt.buf.set_lines(summary_buf, { " " .. req.summary })
@@ -69,73 +69,64 @@ function smelt.confirm.open(handle_id)
   smelt.confirm._render_preview(preview_buf, handle_id)
 
   local labels, decisions = build_options(req)
-  local items = {}
-  for i, label in ipairs(labels) do
-    items[i] = { label = label }
-  end
 
-  local panels = {
-    { kind = "content", buf = title_buf,   height = "fit",  focusable = false, name = "title"   },
-    { kind = "content", buf = summary_buf, height = "fit",  focusable = false, collapse_when_empty = true, name = "summary" },
-    {
-      kind                = "content",
-      buf                 = preview_buf,
-      height              = "fill",
-      interactive         = true,
-      collapse_when_empty = true,
-      separator           = "dashed",
-      name                = "preview",
-    },
-    { kind = "options", items = items, focus = true, name = "options" },
-    { kind = "input", placeholder = "reason (optional)…", collapse_when_empty = true, name = "reason" },
-  }
+  local title_leaf   = smelt.ui.dialog.content({ buf = title_buf })
+  local summary_leaf = smelt.ui.dialog.content({ buf = summary_buf })
+  local preview_leaf = smelt.ui.dialog.content({ buf = preview_buf, interactive = true })
+  local options_leaf = smelt.ui.dialog.options(labels)
+  local reason_leaf, reason_buf = smelt.ui.dialog.input("reason (optional)…")
 
-  local d = smelt.ui.dialog.open_handle({
-    panels           = panels,
-    blocks_agent     = true,
-    placement        = "dock_bottom",
-    placement_height = 100,
-  })
-  if not d then return end
+  local typed_reason = false
+  smelt.win.on_event(reason_leaf, "text_changed", function() typed_reason = true end)
 
   local resolved = false
-  local selected_idx = 1
-  local typed_reason = false
   local function close_with(idx, message)
     if resolved then return end
     resolved = true
-    local decision = decisions[idx] or "no"
-    smelt.confirm._resolve(handle_id, decision, message)
-    d:close()
+    smelt.confirm._resolve(handle_id, decisions[idx] or "no", message)
   end
 
-  smelt.win.set_keymap(d.win, "e",         function() d.panels.reason:focus()      end)
-  smelt.win.set_keymap(d.win, "s-tab",     function()
-    if smelt.confirm._back_tab(handle_id) then
-      resolved = true
-      d:close()
-    end
+  local handle = smelt.ui.dialog.open_handle({
+    blocks_agent = true,
+    height       = 100,
+    panels = {
+      { leaf = title_leaf,   height = "fit"                                       },
+      { leaf = summary_leaf, height = "fit",  collapse_when_empty = true          },
+      { leaf = preview_leaf, height = "fill", collapse_when_empty = true          },
+      { leaf = options_leaf                                                        },
+      { leaf = reason_leaf,                   collapse_when_empty = true          },
+    },
+    focus = options_leaf,
+    keymaps = {
+      { key = "s-tab", on_press = function(ctx)
+          if smelt.confirm._back_tab(handle_id) then
+            resolved = true
+            ctx.close()
+          end
+        end },
+    },
+    on_submit = function(ctx)
+      local idx = (smelt.win.cursor_row(options_leaf) or 0) + 1
+      local message = nil
+      if typed_reason then
+        local line = smelt.buf.get_line(reason_buf, 1) or ""
+        if line ~= "" then message = line end
+      end
+      close_with(idx, message)
+      ctx.close()
+    end,
+    on_dismiss = function(ctx)
+      close_with(2, nil) -- "no" is always option 2
+      ctx.close()
+    end,
+  })
+
+  -- `e` only fires when the options panel has focus: it switches focus to the
+  -- reason input. Installing on the options leaf scopes it correctly so typing
+  -- `e` while editing the reason still types a literal `e`.
+  smelt.win.set_keymap(options_leaf, "e", function()
+    smelt.win.set_focus(reason_leaf)
   end)
 
-  smelt.win.on_event(d.win, "selection_changed", function(ctx)
-    if ctx.index then selected_idx = ctx.index end
-  end)
-
-  smelt.win.on_event(d.win, "text_changed", function()
-    typed_reason = true
-  end)
-
-  smelt.win.on_event(d.win, "submit", function(ctx)
-    local idx = ctx.index or selected_idx
-    local message = nil
-    if typed_reason and d.panels.reason then
-      message = d.panels.reason:text()
-      if message == "" then message = nil end
-    end
-    close_with(idx, message)
-  end)
-
-  smelt.win.on_event(d.win, "dismiss", function()
-    close_with(2, nil) -- "no" is always option 2
-  end)
+  return handle
 end

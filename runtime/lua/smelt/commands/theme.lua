@@ -15,14 +15,14 @@ smelt.cmd.picker("theme", {
   apply      = function(arg)
     for _, p in ipairs(presets) do
       if p.name == arg then
-        smelt.theme.set("accent", { ansi = p.ansi })
+        smelt.theme.set("SmeltAccent",{ ansi = p.ansi })
         return
       end
     end
     smelt.ui.notify_error("unknown theme: " .. arg)
   end,
-  prepare    = function() original_ansi = (smelt.theme.get("accent") or {}).ansi end,
-  on_select  = function(item) if item.ansi_color then smelt.theme.set("accent", { ansi = item.ansi_color }) end end,
+  prepare    = function() original_ansi = (smelt.theme.get("SmeltAccent") or {}).ansi end,
+  on_select  = function(item) if item.ansi_color then smelt.theme.set("SmeltAccent",{ ansi = item.ansi_color }) end end,
   on_enter   = function(item) smelt.cmd.run("/theme " .. item.label) end,
-  on_dismiss = function() if original_ansi then smelt.theme.set("accent", { ansi = original_ansi }) end end,
+  on_dismiss = function() if original_ansi then smelt.theme.set("SmeltAccent",{ ansi = original_ansi }) end end,
 })

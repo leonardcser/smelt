@@ -3,7 +3,7 @@
 use smelt_core::buffer::SpanMeta;
 use smelt_core::content::builder::{display_width, LineBuilder};
 use smelt_core::content::wrap::wrap_line;
-use smelt_core::theme::role_hl;
+use smelt_core::theme::intern;
 use smelt_core::transcript_model::is_command_like;
 
 /// Preprocessed user message layout: tab-expanded, blank-trimmed lines with a computed `block_w`.
@@ -48,7 +48,7 @@ pub(super) fn render(
     let is_command = is_command_like(text.trim());
     let text_w = width.saturating_sub(2).max(1);
     let geom = UserBlockGeometry::new(text, text_w);
-    let user_bg = role_hl("UserBg");
+    let user_bg = intern("SmeltUserBg");
     let mut rows = 0u16;
     let pad_meta = SpanMeta {
         selectable: false,
@@ -91,7 +91,7 @@ pub(super) fn render(
 }
 
 fn print_highlights(out: &mut LineBuilder, text: &str, image_labels: &[String], is_command: bool) {
-    let accent_role = role_hl("Accent");
+    let accent_role = intern("SmeltAccent");
 
     if is_command {
         out.push_hl(accent_role);

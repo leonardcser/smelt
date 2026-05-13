@@ -4,23 +4,15 @@
 
 **Tier:** `UiHost` — Requires a terminal UI; calling these from headless mode raises.
 
-Read and write theme roles, snapshot the current palette, and enumerate built-in color presets. UiHost-only.
-
-## `smelt.theme.accent`
-
-```lua
-fun(): table
-```
-
-Return the theme's accent color as a `{ ansi, rgb? }` table. Used to drive accent-tinted UI like the throbber and selected list rows.
+Read and write theme highlight groups, snapshot the current palette, and enumerate built-in color presets. UiHost-only. Highlight groups follow nvim's PascalCase convention (`Comment`, `SmeltAccent`, …). Writing `SmeltAccent` or `SmeltSlug` is special: it bumps the corresponding palette index and rebuilds dependent groups.
 
 ## `smelt.theme.get`
 
 ```lua
-fun(role: string): table
+fun(group: string): table
 ```
 
-Return the foreground color for theme `role` (e.g. `Comment`, `ErrorMsg`, `SmeltAccent`) as a `{ ansi, rgb? }` table. Raises if the role is unknown.
+Return the resolved foreground (or background) color for highlight group `group` (PascalCase: `Comment`, `ErrorMsg`, `SmeltAccent`, …) as a `{ ansi, rgb? }` table. Unknown groups resolve to the terminal's default fg.
 
 ## `smelt.theme.is_light`
 
@@ -49,10 +41,10 @@ Built-in color presets for Lua-side pickers.
 ## `smelt.theme.set`
 
 ```lua
-fun(role: string, value: table): nil
+fun(group: string, value: table): nil
 ```
 
-Override theme `role`'s color with a `{ ansi = N }` or `{ rgb = { r, g, b } }` table. Takes effect on the next paint.
+Set highlight group `group`'s color. Pass a `{ ansi = N }` or `{ rgb = { r, g, b } }` table; RGB snaps to the closest 256-color slot. Setting `SmeltAccent` or `SmeltSlug` also bumps the corresponding palette index and rebuilds dependent groups; other groups only have their fg replaced.
 
 ## `smelt.theme.snapshot`
 

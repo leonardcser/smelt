@@ -128,27 +128,37 @@ local function register_exit_plan_mode()
     execute = function(args)
       local summary = args.plan_summary or ""
 
-      local result = smelt.ui.dialog.open({
-        title  = {
+      local options = {
+        { label = "yes, and auto-apply", action = "approve", on_select = function() smelt.mode.set("apply") end },
+        { label = "yes",                 action = "approve" },
+        { label = "no",                  action = "deny"    },
+      }
+      local labels = {}
+      for _, o in ipairs(options) do table.insert(labels, o.label) end
+
+      local md_leaf      = smelt.ui.dialog.markdown(summary)
+      local options_leaf = smelt.ui.dialog.options(labels)
+
+      local action = smelt.ui.dialog.open({
+        title = {
           { text = " plan ", fg = "yellow", bold = true },
           { text = "(review and approve) ", fg = "grey", dim = true },
         },
         blocks_agent = true,
+        height       = 80,
         panels = {
-          { kind = "markdown", text = summary },
-          { kind = "options", items = {
-            {
-              label = "yes, and auto-apply",
-              action = "approve",
-              on_select = function() smelt.mode.set("apply") end,
-            },
-            { label = "yes", action = "approve" },
-            { label = "no",  action = "deny"    },
-          }},
+          { leaf = md_leaf,      height = "fill" },
+          { leaf = options_leaf, height = "fit"  },
         },
+        on_submit = function(ctx)
+          local idx = (smelt.win.cursor_row(options_leaf) or 0) + 1
+          local opt = options[idx]
+          if opt and opt.on_select then opt.on_select() end
+          ctx.resolve(opt and opt.action or nil)
+        end,
       })
 
-      if result.action ~= "approve" then
+      if action ~= "approve" then
         return { content = "Plan not approved.\n\n" .. summary, is_error = true }
       end
 

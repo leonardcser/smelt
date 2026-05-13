@@ -1,41 +1,26 @@
 //! `smelt.theme` bindings — read / write theme roles, snapshot the
 //! current palette, enumerate built-in presets.
 
-use super::{
-    color_ansi_from_lua, color_to_lua, theme_role_get, theme_role_set, theme_snapshot_pairs,
-};
+use super::{color_ansi_from_lua, color_to_lua, group_color, theme_set, theme_snapshot_pairs};
 use lua_doc_derive::lua_module;
 use mlua::prelude::*;
 use smelt_core::lua::doc::register_ui_fn;
 
 #[lua_module(
     name = "smelt.theme",
-    doc = "Read and write theme roles, snapshot the current palette, and enumerate built-in color presets. UiHost-only."
+    doc = "Read and write theme highlight groups, snapshot the current palette, and enumerate built-in color presets. UiHost-only. Highlight groups follow nvim's PascalCase convention (`Comment`, `SmeltAccent`, …). Writing `SmeltAccent` or `SmeltSlug` is special: it bumps the corresponding palette index and rebuilds dependent groups."
 )]
 pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
     let theme_tbl = lua.create_table()?;
     register_ui_fn(
         &theme_tbl,
         "smelt.theme",
-        "accent",
-        "Return the theme's accent color as a `{ ansi, rgb? }` table. Used to drive accent-tinted UI like the throbber and selected list rows.",
-        &[],
-        lua,
-        |lua, ()| -> LuaResult<mlua::Table> {
-            let color = crate::lua::with_app(|app| app.ui.theme().accent_color());
-            color_to_lua(lua, color)
-        },
-    )?;
-    register_ui_fn(
-        &theme_tbl,
-        "smelt.theme",
         "get",
-        "Return the foreground color for theme `role` (e.g. `Comment`, `ErrorMsg`, `SmeltAccent`) as a `{ ansi, rgb? }` table. Raises if the role is unknown.",
-        &["role"],
+        "Return the resolved foreground (or background) color for highlight group `group` (PascalCase: `Comment`, `ErrorMsg`, `SmeltAccent`, …) as a `{ ansi, rgb? }` table. Unknown groups resolve to the terminal's default fg.",
+        &["group"],
         lua,
-        |lua, role: String| -> LuaResult<mlua::Table> {
-            let color = crate::lua::with_app(|app| theme_role_get(app.ui.theme(), &role))
-                .ok_or_else(|| LuaError::RuntimeError(format!("unknown theme role: {role}")))?;
+        |lua, group: String| -> LuaResult<mlua::Table> {
+            let color = crate::lua::with_app(|app| group_color(app.ui.theme(), &group));
             color_to_lua(lua, color)
         },
     )?;
@@ -43,12 +28,13 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
         &theme_tbl,
         "smelt.theme",
         "set",
-        "Override theme `role`'s color with a `{ ansi = N }` or `{ rgb = { r, g, b } }` table. Takes effect on the next paint.",
-        &["role", "value"],
+        "Set highlight group `group`'s color. Pass a `{ ansi = N }` or `{ rgb = { r, g, b } }` table; RGB snaps to the closest 256-color slot. Setting `SmeltAccent` or `SmeltSlug` also bumps the corresponding palette index and rebuilds dependent groups; other groups only have their fg replaced.",
+        &["group", "value"],
         lua,
-        |_, (role, value): (String, mlua::Table)| -> LuaResult<()> {
+        |_, (group, value): (String, mlua::Table)| -> LuaResult<()> {
             let ansi = color_ansi_from_lua(&value)?;
-            crate::lua::with_app(|app| theme_role_set(app.ui.theme_mut(), &role, ansi))
+            crate::lua::with_app(|app| theme_set(app.ui.theme_mut(), &group, ansi));
+            Ok(())
         },
     )?;
     register_ui_fn(

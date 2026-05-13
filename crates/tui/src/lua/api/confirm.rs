@@ -29,7 +29,7 @@ use crate::smelt_term::BufId;
 use lua_doc_derive::lua_module;
 use smelt_core::cells::ConfirmResolved;
 use smelt_core::lua::doc::register_ui_fn;
-use smelt_core::theme::role_hl;
+use smelt_core::theme::intern;
 use smelt_core::transcript_model::{ApprovalScope, ConfirmChoice, ConfirmRequest};
 
 /// Register `smelt.confirm.*` primitives.
@@ -248,7 +248,7 @@ fn render_title_into_buf(app: &mut TuiApp, buf_id: BufId, req: &ConfirmRequest) 
     if let Some(buf) = app.ui.buf_mut(buf_id) {
         render_into_buffer(buf, width, &theme_snap, |sink| {
             sink.print(" ");
-            sink.push_hl(role_hl("Accent"));
+            sink.push_hl(intern("SmeltAccent"));
             sink.print(&req.tool_name);
             sink.pop_style();
             sink.print(": ");

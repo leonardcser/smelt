@@ -1,4 +1,4 @@
--- Built-in /btw command. Asks a side question; streams the answer into a markdown dialog.
+-- Built-in /btw command. Asks a side question; streams the answer into a markdown overlay.
 
 local SYSTEM = "You are a helpful assistant. The user is asking a quick side question "
   .. "while working on something else. Answer concisely and directly. "
@@ -39,11 +39,20 @@ smelt.cmd.register("btw", function(args)
       end,
     })
 
-    smelt.ui.dialog.open({
-      title = question,
-      panels = {
-        { kind = "content", buf = buf, height = "fill" },
-      },
+    local leaf = smelt.win.open(buf, { region = "dialog_overlay", focusable = true, vim_enabled = true })
+
+    smelt.ui.overlay.open({
+      title     = question,
+      placement = "screen_center",
+      border    = "single",
+      modal     = true,
+      items     = { { win = leaf, height = "fill" } },
     })
+
+    local task_id = smelt.task.alloc()
+    local function close() smelt.win.close(leaf); smelt.task.resume(task_id, nil) end
+    smelt.win.set_keymap(leaf, "q", close)
+    smelt.win.on_event(leaf, "dismiss", close)
+    smelt.task.wait(task_id)
   end)
 end, { desc = "ask a side question" })

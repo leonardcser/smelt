@@ -3,7 +3,7 @@
 
 use smelt_core::content::builder::LineBuilder;
 use smelt_core::style::{Color, Style};
-use smelt_core::theme::role_hl;
+use smelt_core::theme::intern;
 
 use super::tools::render_wrapped_output;
 
@@ -13,12 +13,12 @@ pub(super) fn render(out: &mut LineBuilder, command: &str, output: &str, width: 
     let trailing = pad_width.saturating_sub(char_len + 1);
     let user_bg = out
         .theme()
-        .resolve(role_hl("UserBg"))
+        .resolve(intern("SmeltUserBg"))
         .bg
         .unwrap_or(Color::Reset);
     let exec_fg = out
         .theme()
-        .resolve(role_hl("Exec"))
+        .resolve(intern("SmeltModeExec"))
         .fg
         .unwrap_or(Color::Reset);
     out.push(

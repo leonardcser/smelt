@@ -15,6 +15,8 @@ enum OverlayPlacement {
     DockBottom {
         height_pct: u16,
     },
+    /// Covers the whole viewport except the bottom statusline row.
+    Fullscreen,
     ScreenAt {
         corner: Corner,
         row: u16,
@@ -143,6 +145,15 @@ pub(crate) fn open_overlay(app: &mut TuiApp, opts: mlua::Table) -> Result<u64, S
                 Some((term_w, h)),
             )
         }
+        OverlayPlacement::Fullscreen => {
+            let layout = fill_layout(inner, title);
+            let avail_h = term_h.saturating_sub(1); // 1 row reserved for the statusline
+            (
+                Anchor::ScreenBottom { above_rows: 1 },
+                layout,
+                Some((term_w, avail_h)),
+            )
+        }
         OverlayPlacement::ScreenAt {
             corner,
             row,
@@ -213,6 +224,7 @@ fn parse_overlay_placement(opts: &mlua::Table) -> Result<OverlayPlacement, Strin
             let height_pct: u16 = opts.get("placement_height").unwrap_or(60);
             Ok(OverlayPlacement::DockBottom { height_pct })
         }
+        Some("fullscreen") => Ok(OverlayPlacement::Fullscreen),
         Some("screen_at") => {
             let corner =
                 crate::lua::parse::corner(opts.get::<String>("corner").ok().as_deref(), Corner::NW);
@@ -277,6 +289,7 @@ pub(crate) fn configure_list_leaf(app: &mut TuiApp, leaf: WinId, initial_cursor:
         if line_count == 0 {
             return CallbackResult::Consumed;
         }
+        let viewport = ctx.ui.paint_rect(PaintId::from(ctx.win)).map(|r| r.height);
         let mut new_abs: Option<usize> = None;
         if let Some(win) = ctx.ui.win_mut(ctx.win) {
             let abs = win.cursor_row() as usize;
@@ -285,11 +298,7 @@ pub(crate) fn configure_list_leaf(app: &mut TuiApp, leaf: WinId, initial_cursor:
             if target == abs {
                 return CallbackResult::Consumed;
             }
-            // Nudge scroll_top so the cursor stays visible. Exact viewport unavailable;
-            // approximations suffice for short list dialogs.
-            if (target as u16) < win.scroll_top {
-                win.scroll_top = target as u16;
-            }
+            win.scroll_top = scroll_to_show(win.scroll_top, target as u16, viewport);
             win.set_cursor_position(target as u16, 0);
             new_abs = Some(target);
         }
@@ -344,14 +353,112 @@ pub(crate) fn configure_list_leaf(app: &mut TuiApp, leaf: WinId, initial_cursor:
     );
 }
 
+/// Adjust `scroll_top` so `target` falls within `[scroll, scroll + height)`. `height`
+/// is the leaf's painted viewport height (rows). Falls back to top-edge-only when
+/// height is unknown.
+fn scroll_to_show(scroll: u16, target: u16, height: Option<u16>) -> u16 {
+    match height {
+        Some(h) if h >= 1 => {
+            if target < scroll {
+                target
+            } else if target >= scroll.saturating_add(h) {
+                target + 1 - h
+            } else {
+                scroll
+            }
+        }
+        _ => {
+            if target < scroll {
+                target
+            } else {
+                scroll
+            }
+        }
+    }
+}
+
+/// Place `leaf`'s cursor at `target` (clamped to the buffer's line count), keep the
+/// row on-screen by nudging `scroll_top`, and emit `SelectionChanged` if the position
+/// actually moved. Used by both the absolute (`set_cursor_row`) and relative
+/// (`move_cursor`) entry points.
+fn apply_cursor(app: &mut TuiApp, leaf: WinId, target: u16) {
+    let buf_id = match app.ui.win(leaf) {
+        Some(w) => w.buf,
+        None => return,
+    };
+    let line_count = app.ui.buf(buf_id).map(|b| b.line_count()).unwrap_or(0);
+    if line_count == 0 {
+        return;
+    }
+    let max = line_count.saturating_sub(1) as u16;
+    let target = target.min(max);
+    let viewport = app.ui.paint_rect(PaintId::from(leaf)).map(|r| r.height);
+    let win = match app.ui.win_mut(leaf) {
+        Some(w) => w,
+        None => return,
+    };
+    let abs = win.cursor_row();
+    if abs == target {
+        return;
+    }
+    win.scroll_top = scroll_to_show(win.scroll_top, target, viewport);
+    win.set_cursor_position(target, 0);
+    let lua = &app.lua;
+    let mut lua_invoke =
+        |handle: crate::smelt_term::LuaHandle, win: WinId, payload: &crate::smelt_term::Payload| {
+            lua.queue_invocation(handle, win, payload);
+        };
+    app.ui.fire_win_event(
+        leaf,
+        crate::smelt_term::WinEvent::SelectionChanged,
+        crate::smelt_term::Payload::Selection {
+            index: target as usize,
+        },
+        &mut lua_invoke,
+    );
+}
+
+/// Move `leaf`'s cursor by `delta` rows (clamped to the buffer's line count) and emit
+/// `SelectionChanged`. Used by external panels (e.g. an input docked next to a list)
+/// to drive selection without holding focus on the list itself.
+pub(crate) fn move_cursor(app: &mut TuiApp, leaf: WinId, delta: isize) {
+    let abs = match app.ui.win(leaf) {
+        Some(w) => w.cursor_row() as isize,
+        None => return,
+    };
+    let target = abs.saturating_add(delta).max(0) as u16;
+    apply_cursor(app, leaf, target);
+}
+
+/// Place `leaf`'s cursor at an absolute row.
+pub(crate) fn set_cursor_row(app: &mut TuiApp, leaf: WinId, row: u16) {
+    apply_cursor(app, leaf, row);
+}
+
+/// Read the current cursor row of `leaf` (0-based), or `None` if the leaf doesn't exist.
+pub(crate) fn cursor_row(app: &TuiApp, leaf: WinId) -> Option<u16> {
+    app.ui.win(leaf).map(|w| w.cursor_row())
+}
+
 /// Wire the built-in input recipe: printable chars insert at cursor, Backspace deletes,
 /// Left/Right/Home/End move the cursor, Enter fires `WinEvent::Submit`.
 /// Every edit also fires `WinEvent::TextChanged`.
 ///
-/// Placeholder detection: if row 0 carries dim-highlight extmarks (seeded by
-/// `make_input_buffer`), the line is treated as logically empty — the first
-/// printable keystroke replaces the line before inserting; Backspace is a no-op.
-pub(crate) fn configure_input_leaf(app: &mut TuiApp, leaf: WinId) {
+/// Placeholder: when `placeholder` is non-empty, the buffer's row 0 is seeded with the
+/// placeholder text and dimmed via the well-known highlights namespace. The first
+/// printable keystroke replaces the line (set_lines clears well-known highlights, so
+/// `is_placeholder` flips to false naturally); Backspace is a no-op while the
+/// placeholder is showing.
+pub(crate) fn configure_input_leaf(app: &mut TuiApp, leaf: WinId, placeholder: String) {
+    if !placeholder.is_empty() {
+        if let Some(buf_id) = app.ui.win(leaf).map(|w| w.buf) {
+            if let Some(buf) = app.ui.buf_mut(buf_id) {
+                buf.set_all_lines(vec![placeholder.clone()]);
+                let end = placeholder.chars().count() as u16;
+                buf.add_highlight(0, 0, end, crate::smelt_term::SpanStyle::new().dim());
+            }
+        }
+    }
     if let Some(win) = app.ui.win_mut(leaf) {
         win.set_cursor_position(0, 0);
     }

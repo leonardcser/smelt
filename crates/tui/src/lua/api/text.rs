@@ -8,7 +8,7 @@ use lua_doc_derive::lua_module;
 use mlua::prelude::*;
 use smelt_core::content::wrap::wrap_line;
 use smelt_core::lua::doc::register_ui_fn;
-use smelt_core::theme::role_hl;
+use smelt_core::theme::intern;
 use unicode_width::UnicodeWidthStr;
 
 #[lua_module(
@@ -53,7 +53,7 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
                             }
                             for seg in &segs {
                                 if is_error {
-                                    sink.push_hl(role_hl("ErrorMsg"));
+                                    sink.push_hl(intern("ErrorMsg"));
                                     sink.print(&format!("  {}", seg));
                                     sink.pop_style();
                                 } else {

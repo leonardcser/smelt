@@ -521,9 +521,10 @@ impl Ui {
         self.callbacks.clear_event_by_id(win, ev, id)
     }
 
-    /// Fire a `WinEvent`. Overlay leaves redirect to the overlay root (first declaration-order
-    /// leaf) so `dialog.lua` handlers registered on the root fire regardless of which leaf
-    /// triggered the event.
+    /// Fire a `WinEvent` on `win`. Callbacks registered on `win` for `ev` fire in
+    /// registration order. The event does not bubble to other leaves — consumers that
+    /// need to catch events from multiple panels (e.g. `dialog.lua`) register on each
+    /// relevant leaf.
     pub fn fire_win_event(
         &mut self,
         win: WinId,
@@ -531,8 +532,7 @@ impl Ui {
         payload: Payload,
         lua_invoke: &mut LuaInvoke,
     ) {
-        let target = self.overlay_root_for_leaf(win).unwrap_or(win);
-        let Some(mut cbs) = self.callbacks.take_event(target, ev) else {
+        let Some(mut cbs) = self.callbacks.take_event(win, ev) else {
             return;
         };
         for cb in cbs.iter_mut() {
@@ -540,17 +540,17 @@ impl Ui {
                 Callback::Rust(inner) => {
                     let mut ctx = CallbackCtx {
                         ui: self,
-                        win: target,
+                        win,
                         payload: payload.clone(),
                     };
                     let _ = inner(&mut ctx);
                 }
                 Callback::Lua(handle) => {
-                    lua_invoke(*handle, target, &payload);
+                    lua_invoke(*handle, win, &payload);
                 }
             }
         }
-        self.callbacks.restore_event(target, ev, cbs);
+        self.callbacks.restore_event(win, ev, cbs);
     }
 
     pub fn win(&self, id: WinId) -> Option<&Window> {
@@ -607,18 +607,6 @@ impl Ui {
             }
         }
         None
-    }
-
-    /// Returns the first declaration-order leaf of the overlay containing `win`.
-    /// `fire_win_event` redirects to this root so dialog handlers fire on any leaf interaction.
-    fn overlay_root_for_leaf(&self, win: WinId) -> Option<WinId> {
-        let id = self.overlay_for_leaf(win)?;
-        let ov = self.overlay(id)?;
-        ov.layout
-            .leaves_in_order()
-            .first()
-            .copied()
-            .map(|p| WinId(p.0))
     }
 
     #[cfg(test)]
@@ -2517,28 +2505,40 @@ mod tests {
     }
 
     #[test]
-    fn fire_win_event_on_non_root_leaf_redirects_to_root() {
-        // When a callback fires `WinEvent::Submit` on a non-root
-        // leaf (e.g. an input panel below an options panel),
-        // `fire_win_event` redirects to the overlay's root so the
-        // dialog.lua handler registered on the root sees it.
+    fn fire_win_event_fires_on_leaf_not_root() {
+        // Events fire on the leaf they're directed at. Consumers that need to catch
+        // events from multiple panels register on each leaf themselves.
         let mut ui = make_ui();
         let a = WinId(70);
         let b = WinId(71);
         let _id = ui.overlay_open(modal_overlay_with_leaves(a, b, WinId(72)));
-        let saw = std::sync::Arc::new(std::sync::Mutex::new(false));
-        let saw_cb = saw.clone();
-        ui.win_on_event(
-            a,
-            WinEvent::Submit,
-            Callback::Rust(Box::new(move |_| {
-                *saw_cb.lock().unwrap() = true;
-                CallbackResult::Consumed
-            })),
-        );
-        // Fire Submit on the NON-root leaf; root's callback should fire.
+        let saw_a = std::sync::Arc::new(std::sync::Mutex::new(false));
+        let saw_b = std::sync::Arc::new(std::sync::Mutex::new(false));
+        {
+            let saw_cb = saw_a.clone();
+            ui.win_on_event(
+                a,
+                WinEvent::Submit,
+                Callback::Rust(Box::new(move |_| {
+                    *saw_cb.lock().unwrap() = true;
+                    CallbackResult::Consumed
+                })),
+            );
+        }
+        {
+            let saw_cb = saw_b.clone();
+            ui.win_on_event(
+                b,
+                WinEvent::Submit,
+                Callback::Rust(Box::new(move |_| {
+                    *saw_cb.lock().unwrap() = true;
+                    CallbackResult::Consumed
+                })),
+            );
+        }
         ui.fire_win_event(b, WinEvent::Submit, Payload::None, &mut |_, _, _| {});
-        assert!(*saw.lock().unwrap());
+        assert!(!*saw_a.lock().unwrap(), "root handler must not fire");
+        assert!(*saw_b.lock().unwrap(), "leaf handler must fire");
     }
 
     #[test]
