@@ -112,7 +112,7 @@ end
 
 smelt.cmd.register("export", function()
   if #smelt.session.messages() == 0 then
-    smelt.notify_error("nothing to export")
+    smelt.ui.notify_error("nothing to export")
     return
   end
 
@@ -134,18 +134,18 @@ smelt.cmd.register("export", function()
     local markdown = format_markdown()
     if result.option_index == 1 then
       smelt.clipboard.write(markdown)
-      smelt.notify("conversation copied to clipboard")
+      smelt.ui.notify("conversation copied to clipboard")
     elseif result.option_index == 2 then
       local path = default_export_path()
       local f, err = io.open(path, "w")
       if not f then
-        smelt.notify_error("export failed: " .. (err or "unknown"))
+        smelt.ui.notify_error("export failed: " .. (err or "unknown"))
         return
       end
       f:write(markdown)
       f:close()
       local name = path:match("([^/]+)$") or path
-      smelt.notify("exported to " .. name)
+      smelt.ui.notify("exported to " .. name)
     end
   end)
 end, { desc = "copy conversation to clipboard" })

@@ -1,0 +1,13 @@
+{
+  "$schema": "https://raw.githubusercontent.com/sumneko/vscode-lua/master/setting/schema.json",
+  "runtime": {
+    "version": "Lua 5.4"
+  },
+  "diagnostics": {
+    "globals": ["smelt"]
+  },
+  "workspace": {
+    "library": ["runtime/lua/smelt/_meta"],
+    "checkThirdParty": false
+  }
+}

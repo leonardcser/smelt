@@ -2,59 +2,93 @@
 //! state the Lua composer needs in one table per refresh.
 
 use crate::lua::{LuaHandle, LuaShared, StatusSource};
+use lua_doc_derive::{lua_module, LuaOpts};
 use mlua::prelude::*;
+use smelt_core::lua::doc::{record_module_doc, register_ui_fn};
+use smelt_core::lua::lua_type::LuaCallback;
 use std::sync::Arc;
 
+/// Options accepted by `smelt.statusline.register`.
+#[derive(Default, Debug, LuaOpts)]
+#[lua(name = "smelt.statusline.RegisterOpts")]
+pub struct LuaStatuslineRegisterOpts {
+    /// `"right"` makes the source's segments default to the right strip. Defaults to left.
+    pub align: Option<String>,
+}
+
+#[lua_module]
 pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) -> LuaResult<()> {
     let statusline_tbl = lua.create_table()?;
+    record_module_doc(
+        "smelt.statusline",
+        "Register/unregister statusline sources and snapshot composer state. UiHost-only.",
+    );
     {
         let s = shared.clone();
-        statusline_tbl.set(
+        register_ui_fn(
+            &statusline_tbl,
+            "smelt.statusline",
             "register",
-            lua.create_function(
-                move |lua, (name, handler, opts): (String, mlua::Function, Option<mlua::Table>)| {
-                    let default_align_right = opts
-                        .as_ref()
-                        .and_then(|t| t.get::<Option<String>>("align").ok().flatten())
-                        .map(|s| s == "right")
-                        .unwrap_or(false);
-                    let key = lua.create_registry_value(handler)?;
-                    let source = StatusSource {
-                        handle: LuaHandle { key },
-                        default_align_right,
-                    };
-                    if let Ok(mut sources) = s.statusline_sources.lock() {
-                        if let Some(existing) = sources.iter_mut().find(|(n, _)| n == &name) {
-                            existing.1 = source;
-                        } else {
-                            sources.push((name, source));
-                        }
+            "Register a Lua statusline source named `name`. The handler is called once per refresh with the snapshot table and returns segments. `opts.align = \"right\"` makes its segments default to the right strip; later registrations replace earlier ones with the same name.",
+            &["name", "handler", "opts"],
+            lua,
+            move |lua,
+                  (name, handler, opts): (
+                String,
+                LuaCallback<mlua::Table, mlua::Table>,
+                Option<LuaStatuslineRegisterOpts>,
+            )|
+                  -> LuaResult<()> {
+                let default_align_right = opts
+                    .and_then(|o| o.align)
+                    .map(|s| s == "right")
+                    .unwrap_or(false);
+                let key = lua.create_registry_value(handler.into_inner())?;
+                let source = StatusSource {
+                    handle: LuaHandle { key },
+                    default_align_right,
+                };
+                if let Ok(mut sources) = s.statusline_sources.lock() {
+                    if let Some(existing) = sources.iter_mut().find(|(n, _)| n == &name) {
+                        existing.1 = source;
+                    } else {
+                        sources.push((name, source));
                     }
-                    Ok(())
-                },
-            )?,
+                }
+                Ok(())
+            },
         )?;
     }
     {
         let s = shared.clone();
-        statusline_tbl.set(
+        register_ui_fn(
+            &statusline_tbl,
+            "smelt.statusline",
             "unregister",
-            lua.create_function(move |_, name: String| {
+            "Drop the statusline source registered under `name`. No-op if no such source exists.",
+            &["name"],
+            lua,
+            move |_, name: String| -> LuaResult<()> {
                 if let Ok(mut sources) = s.statusline_sources.lock() {
                     sources.retain(|(n, _)| n != &name);
                 }
                 Ok(())
-            })?,
+            },
         )?;
     }
-    statusline_tbl.set(
+    register_ui_fn(
+        &statusline_tbl,
+        "smelt.statusline",
         "snapshot",
-        lua.create_function(|lua, ()| {
+        "Return the full statusline state in one table per refresh: theme colors, working/throbber state, vim mode, agent mode, indicators, and cursor position. Returns an empty table when the app pointer is unavailable.",
+        &[],
+        lua,
+        |lua, ()| -> LuaResult<mlua::Table> {
             match crate::lua::try_with_app(|app| build_snapshot(app, lua)) {
                 None => lua.create_table(), // no app pointer — status.lua short-circuits
                 Some(result) => result,
             }
-        })?,
+        },
     )?;
     smelt.set("statusline", statusline_tbl)?;
     Ok(())

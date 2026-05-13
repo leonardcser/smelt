@@ -28,21 +28,14 @@ mod win;
 
 use super::{LuaRuntime, LuaShared};
 use mlua::prelude::*;
+use smelt_core::lua::api::mode::LuaAgentMode;
+use smelt_core::lua::api::reasoning::LuaReasoningEffort;
+use smelt_core::lua::doc::{record_module_doc, register_ui_fn};
 use std::sync::Arc;
 
 /// Semantic version of the Lua API surface, exposed as `smelt.version`.
 /// Increments on breaking changes; additive changes do not bump it.
 pub(crate) const VERSION: &str = "1";
-
-/// Build a 0-arg Lua getter that reads from `TuiApp`, returning `Default` if no app is live.
-macro_rules! app_read {
-    ($lua:expr, |$app:ident| $body:expr) => {{
-        $lua.create_function(
-            |_, ()| Ok(crate::lua::try_with_app(|$app| $body).unwrap_or_default()),
-        )?
-    }};
-}
-pub(crate) use app_read;
 
 pub(crate) use smelt_core::lua::json_to_lua as json_to_lua_value;
 
@@ -53,6 +46,7 @@ impl LuaRuntime {
         let smelt_keymap = lua.create_table()?;
 
         smelt.set("version", VERSION)?;
+        record_module_doc("smelt", "Root smelt namespace. Host-tier bindings are registered first; UiHost-tier bindings are injected when a TUI is active.");
 
         smelt_core::lua::api::register_host_api(lua, &smelt, &smelt_keymap, &shared.core)?;
 
@@ -82,60 +76,86 @@ impl LuaRuntime {
         transcript::register(lua, &smelt)?;
         vim::register(lua, &smelt)?;
 
-        smelt.set("ui", smelt_ui)?;
         smelt.set("keymap", smelt_keymap)?;
 
+        // Cross-cutting UiHost-tier additions to host modules.
         let cmd_tbl: mlua::Table = smelt.get("cmd")?;
-        cmd_tbl.set(
+        register_ui_fn(
+            &cmd_tbl,
+            "smelt.cmd",
             "run",
-            lua.create_function(|_, line: String| {
+            "Execute the slash-command line `line` (with or without leading `/`) as if the user had typed it. Errors are surfaced as in-app notifications.",
+            &["line"],
+            lua,
+            |_, line: String|  -> LuaResult<()>{
                 crate::lua::with_app(|app| app.apply_lua_command(&line));
                 Ok(())
-            })?,
+            },
         )?;
         let mode_tbl: mlua::Table = smelt.get("mode")?;
-        mode_tbl.set(
+        register_ui_fn(
+            &mode_tbl,
+            "smelt.mode",
             "set",
-            lua.create_function(|_, v: String| {
-                crate::lua::with_app(|app| match protocol::AgentMode::parse(&v) {
-                    Some(mode) => app.set_mode(mode),
-                    None => app.notify_error(format!("unknown mode: {v}")),
-                });
+            "Switch the agent mode. Raises a Lua error on unknown values.",
+            &["mode"],
+            lua,
+            |_, mode: LuaAgentMode| -> LuaResult<()> {
+                crate::lua::with_app(|app| app.set_mode(mode.into()));
                 Ok(())
-            })?,
+            },
         )?;
         let reasoning_tbl: mlua::Table = smelt.get("reasoning")?;
-        reasoning_tbl.set(
+        register_ui_fn(
+            &reasoning_tbl,
+            "smelt.reasoning",
             "set",
-            lua.create_function(|_, v: String| {
-                crate::lua::with_app(|app| match protocol::ReasoningEffort::parse(&v) {
-                    Some(effort) => app.set_reasoning_effort(effort),
-                    None => app.notify_error(format!("unknown reasoning effort: {v}")),
-                });
+            "Set the reasoning effort (`off`, `low`, `medium`, `high`).",
+            &["effort"],
+            lua,
+            |_, effort: LuaReasoningEffort| -> LuaResult<()> {
+                crate::lua::with_app(|app| app.set_reasoning_effort(effort.into()));
                 Ok(())
-            })?,
+            },
         )?;
-        smelt.set(
+        register_ui_fn(
+            &smelt_ui,
+            "smelt.ui",
             "notify",
-            lua.create_function(|_, msg: String| {
+            "Show an informational notification in the status area.",
+            &["msg"],
+            lua,
+            |_, msg: String| -> LuaResult<()> {
                 crate::lua::with_app(|app| app.notify(msg));
                 Ok(())
-            })?,
+            },
         )?;
-        smelt.set(
+        register_ui_fn(
+            &smelt_ui,
+            "smelt.ui",
             "notify_error",
-            lua.create_function(|_, msg: String| {
+            "Show an error notification in the status area (highlighted with the error color).",
+            &["msg"],
+            lua,
+            |_, msg: String| -> LuaResult<()> {
                 crate::lua::with_app(|app| app.notify_error(msg));
                 Ok(())
-            })?,
+            },
         )?;
-        smelt.set(
+        register_ui_fn(
+            &smelt,
+            "smelt",
             "quit",
-            lua.create_function(|_, ()| {
+            "Request a clean shutdown of the app. The quit fires on the next tick after the current handler returns.",
+            &[],
+            lua,
+            |_, ()|  -> LuaResult<()>{
                 crate::lua::with_app(|app| app.pending_quit = true);
                 Ok(())
-            })?,
+            },
         )?;
+
+        smelt.set("ui", smelt_ui)?;
 
         lua.globals().set("smelt", smelt)?;
 

@@ -7,7 +7,7 @@ local SYSTEM = "You are a helpful assistant. The user is asking a quick side que
 smelt.cmd.register("btw", function(args)
   local question = args or ""
   if question == "" then
-    smelt.notify_error("usage: /btw <question>")
+    smelt.ui.notify_error("usage: /btw <question>")
     return
   end
 

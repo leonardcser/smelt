@@ -304,6 +304,42 @@ pub struct ConfirmRequested {
     pub approval_patterns: Vec<String>,
 }
 
+/// Built-in cell names declared by [`build_with_builtins`]. Surfaces in
+/// the `smelt.cell.Name` LuaCATS alias as IDE autocomplete hints.
+/// Keep in lockstep with the `cells.declare(...)` calls below — both
+/// the assertion in `builtin_seeds_declare_every_cell` and
+/// `crates/core/src/lua/api/cell.rs` read from this list.
+pub const SEEDED_CELL_NAMES: &[&str] = &[
+    "agent_mode",
+    "block_done",
+    "branch",
+    "cmd_post",
+    "cmd_pre",
+    "confirm_requested",
+    "confirm_resolved",
+    "confirms_pending",
+    "cwd",
+    "errors",
+    "history",
+    "input_submit",
+    "model",
+    "now",
+    "reasoning",
+    "session_ended",
+    "session_started",
+    "session_title",
+    "shutdown",
+    "spinner_frame",
+    "tokens_used",
+    "tool_end",
+    "tool_start",
+    "turn_complete",
+    "turn_end",
+    "turn_error",
+    "turn_start",
+    "vim_mode",
+];
+
 /// Register projectors and declare all built-in cells with their initial values.
 pub(crate) fn build_with_builtins(seeds: BuiltinSeeds) -> Cells {
     let mut cells = Cells::new();
@@ -824,6 +860,36 @@ mod tests {
             }
             other => panic!("expected Table, got {other:?}"),
         }
+
+        // Every name in `SEEDED_CELL_NAMES` must round-trip through
+        // `Cells::get_lua` (i.e. actually be declared above). Adding a
+        // new builtin without updating the list trips this test.
+        for name in SEEDED_CELL_NAMES {
+            let v = cells.get_lua(name, &lua);
+            assert!(
+                !matches!(v, mlua::Value::Nil) || is_event_cell(name),
+                "SEEDED_CELL_NAMES lists `{name}` but Cells::get_lua returned Nil for a non-event cell"
+            );
+        }
+    }
+
+    fn is_event_cell(name: &str) -> bool {
+        matches!(
+            name,
+            "history"
+                | "turn_complete"
+                | "turn_error"
+                | "confirm_requested"
+                | "confirm_resolved"
+                | "session_started"
+                | "session_ended"
+                | "block_done"
+                | "shutdown"
+                | "turn_start"
+                | "turn_end"
+                | "tool_start"
+                | "tool_end"
+        )
     }
 
     #[test]

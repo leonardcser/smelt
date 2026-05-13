@@ -2,26 +2,52 @@
 //! triple. Mirrors `smelt.mode` / `smelt.reasoning`; lives at top-level so
 //! `init.lua`'s `smelt.model.set(name)` reads naturally.
 
-use super::app_read;
+use lua_doc_derive::lua_module;
 use mlua::prelude::*;
+use smelt_core::lua::doc::{record_module_doc, register_ui_fn};
 
+#[lua_module]
 pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
     let model_tbl = lua.create_table()?;
+    record_module_doc(
+        "smelt.model",
+        "Get, set, and list the configured provider/model triple. Mirrors smelt.mode and smelt.reasoning.",
+    );
 
-    model_tbl.set("get", app_read!(lua, |app| app.core.config.model.clone()))?;
+    register_ui_fn(
+        &model_tbl,
+        "smelt.model",
+        "get",
+        "Return `get` from the app state.",
+        &[],
+        lua,
+        |_, ()| -> LuaResult<String> {
+            Ok(crate::lua::try_with_app(|app| app.core.config.model.clone()).unwrap_or_default())
+        },
+    )?;
 
-    model_tbl.set(
+    register_ui_fn(
+        &model_tbl,
+        "smelt.model",
         "set",
-        lua.create_function(|_, v: String| {
+        "Switch to model `v` by key. Re-resolves the provider/model triple, propagates the change to the engine, and persists it to session config.",
+        &["v"],
+        lua,
+        |_, v: String|  -> LuaResult<()>{
             crate::lua::with_app(|app| app.apply_model(&v));
             Ok(())
-        })?,
+        },
     )?;
 
     // `list()` returns `{key, name, provider}` entries for available models.
-    model_tbl.set(
+    register_ui_fn(
+        &model_tbl,
+        "smelt.model",
         "list",
-        lua.create_function(|lua, ()| {
+        "`list()` returns `{key, name, provider}` entries for available models.",
+        &[],
+        lua,
+        |lua, ()| -> LuaResult<mlua::Table> {
             let out = lua.create_table()?;
             if let Some(res) = crate::lua::try_with_app(|app| -> LuaResult<()> {
                 for (i, m) in app.core.config.available_models.iter().enumerate() {
@@ -36,7 +62,7 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
                 res?;
             }
             Ok(out)
-        })?,
+        },
     )?;
 
     smelt.set("model", model_tbl)?;

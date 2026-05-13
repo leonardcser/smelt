@@ -4,13 +4,26 @@
 use crate::content::highlight::print_syntax_file;
 use crate::content::to_buffer::render_into_buffer;
 use crate::smelt_term::BufId;
+use lua_doc_derive::lua_module;
 use mlua::prelude::*;
+use smelt_core::lua::doc::{record_module_doc, register_ui_fn};
 
+#[lua_module]
 pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
     let syntax = lua.create_table()?;
-    syntax.set(
+    record_module_doc(
+        "smelt.syntax",
+        "Paint syntect-highlighted code into a Buffer. UiHost-only.",
+    );
+
+    register_ui_fn(
+        &syntax,
+        "smelt.syntax",
         "render",
-        lua.create_function(|_, (buf_id, opts): (u64, mlua::Table)| {
+        "Paint syntect-highlighted code from `opts.content` into the buffer, picking the syntax from `opts.path`'s file extension. Falls back to plain text when no syntax matches.",
+        &["buf_id", "opts"],
+        lua,
+        |_, (buf_id, opts): (u64, mlua::Table)|  -> LuaResult<()>{
             let content: String = opts.get::<Option<String>>("content")?.unwrap_or_default();
             let path: String = opts.get::<Option<String>>("path")?.unwrap_or_default();
             crate::lua::with_app(|app| {
@@ -23,7 +36,7 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
                 }
             });
             Ok(())
-        })?,
+        },
     )?;
     smelt.set("syntax", syntax)?;
     Ok(())

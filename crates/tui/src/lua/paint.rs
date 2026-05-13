@@ -8,6 +8,8 @@
 use crate::smelt_term::layout::PaintId;
 use crate::smelt_term::{DrawContext, GridSlice};
 use mlua::prelude::*;
+use smelt_core::lua::doc::record_class;
+use smelt_core::lua::lua_type::LuaClassDecl;
 use std::cell::Cell;
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -162,6 +164,22 @@ impl mlua::UserData for PaintSliceUd {
             },
         );
     }
+}
+
+/// Register the `smelt.paint.Slice` class docs. Keep in sync with the
+/// `impl UserData for PaintSliceUd` block above.
+pub fn register_paint_slice_docs() {
+    record_class(LuaClassDecl {
+        name: "smelt.paint.Slice",
+        doc: "Grid slice passed to paint callbacks. Methods delegate to the live grid slice for the current frame; out-of-scope calls fail cleanly.",
+        fields: smelt_core::class_methods! {
+            "width" => fn() -> i64, "Return the slice width in cells.",
+            "height" => fn() -> i64, "Return the slice height in cells.",
+            "set" => fn(row: u16, col: u16, ch: String, style: Option<mlua::Table>) -> (), "Write a single character with optional style at (row, col).",
+            "put_str" => fn(row: u16, col: u16, text: String, style: Option<mlua::Table>) -> (), "Write a string with optional style at (row, col).",
+            "fill_rect" => fn(row: u16, col: u16, w: u16, h: u16, ch: Option<String>, style: Option<mlua::Table>) -> (), "Fill a rectangle with an optional character and style.",
+        },
+    });
 }
 
 /// Build the per-frame `ctx` table handed to the Lua paint callback.

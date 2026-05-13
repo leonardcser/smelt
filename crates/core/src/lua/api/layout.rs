@@ -2,6 +2,8 @@
 
 use crate::buffer::BufId;
 use crate::content::block_layout::{BlockLayout, Constraint, HboxItem};
+use crate::lua::doc::{record_module_doc, register_fn};
+use lua_doc_derive::lua_module;
 use mlua::prelude::*;
 
 pub struct LuaBlockLayout(pub BlockLayout);
@@ -54,30 +56,52 @@ fn collect_hbox_items(items: mlua::Table) -> LuaResult<Vec<HboxItem>> {
     Ok(out)
 }
 
+#[lua_module]
 pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
     let layout_tbl = lua.create_table()?;
+    record_module_doc(
+        "smelt.layout",
+        "Composable block layout (vbox/hbox/leaf) for tool render callbacks.",
+    );
 
-    layout_tbl.set(
+    register_fn(
+        &layout_tbl,
+        "smelt.layout",
         "leaf",
-        lua.create_function(|_, buf_id: u64| Ok(LuaBlockLayout(BlockLayout::Leaf(BufId(buf_id)))))?,
+        "Wrap a buffer id into a leaf block layout that renders the buffer's contents in place.",
+        &["buf_id"],
+        lua,
+        |_, buf_id: u64| -> LuaResult<LuaBlockLayout> {
+            Ok(LuaBlockLayout(BlockLayout::Leaf(BufId(buf_id))))
+        },
     )?;
 
-    layout_tbl.set(
+    register_fn(
+        &layout_tbl,
+        "smelt.layout",
         "vbox",
-        lua.create_function(|_, items: mlua::Table| {
+        "Stack `items` vertically into a single block layout. Each item must be a layout userdata produced by `layout.leaf`/`layout.vbox`/`layout.hbox`.",
+        &["items"],
+        lua,
+        |_, items: mlua::Table| -> LuaResult<LuaBlockLayout> {
             Ok(LuaBlockLayout(BlockLayout::Vbox(collect_vbox_items(
                 items,
             )?)))
-        })?,
+        },
     )?;
 
-    layout_tbl.set(
+    register_fn(
+        &layout_tbl,
+        "smelt.layout",
         "hbox",
-        lua.create_function(|_, items: mlua::Table| {
+        "Lay `items` out horizontally. Each entry is either a layout userdata (defaults to fill weight 1) or `{ layout, cols=N }` / `{ layout, weight=N }` for a fixed-column or weighted slot.",
+        &["items"],
+        lua,
+        |_, items: mlua::Table| {
             Ok(LuaBlockLayout(BlockLayout::Hbox(collect_hbox_items(
                 items,
             )?)))
-        })?,
+        },
     )?;
 
     smelt.set("layout", layout_tbl)?;

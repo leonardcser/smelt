@@ -4,13 +4,26 @@
 //!                    history-specific scorer (word-match boosts,
 //!                    recency bonus). 1-based index into entries().
 
+use lua_doc_derive::lua_module;
 use mlua::prelude::*;
+use smelt_core::lua::doc::{record_module_doc, register_ui_fn};
 
+#[lua_module]
 pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
     let history_tbl = lua.create_table()?;
-    history_tbl.set(
+    record_module_doc(
+        "smelt.history",
+        "Prompt history entries and search. UiHost-only.",
+    );
+
+    register_ui_fn(
+        &history_tbl,
+        "smelt.history",
         "entries",
-        lua.create_function(|lua, ()| {
+        "Return the prompt history as an array of strings, oldest first. Mirrors what the up-arrow recall in the input bar walks through.",
+        &[],
+        lua,
+        |lua, ()|  -> LuaResult<mlua::Table>{
             let entries = crate::lua::try_with_app(|app| app.input_history.entries().to_vec())
                 .unwrap_or_default();
             let out = lua.create_table()?;
@@ -18,11 +31,16 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
                 out.set(i + 1, entry)?;
             }
             Ok(out)
-        })?,
+        },
     )?;
-    history_tbl.set(
+    register_ui_fn(
+        &history_tbl,
+        "smelt.history",
         "search",
-        lua.create_function(|lua, query: String| {
+        "Rank prompt history against `query` using the history-specific scorer (word-match boost, recency bonus, dedupe). Returns `{ index, score }` rows where `index` is 1-based into `entries()`.",
+        &["query"],
+        lua,
+        |lua, query: String|  -> LuaResult<mlua::Table>{
             let entries = crate::lua::try_with_app(|app| app.input_history.entries().to_vec())
                 .unwrap_or_default();
             // Entries are oldest-first; iterate reversed and dedupe so recent ranks highest.
@@ -51,7 +69,7 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
                 out.set(i + 1, entry)?;
             }
             Ok(out)
-        })?,
+        },
     )?;
     smelt.set("history", history_tbl)?;
     Ok(())

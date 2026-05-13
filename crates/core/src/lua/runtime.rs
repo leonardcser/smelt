@@ -376,15 +376,17 @@ impl LuaRuntime {
         }
     }
 
-    /// Log to the persistent message store and surface a one-line summary via `smelt.notify_error`.
+    /// Log to the persistent message store and surface a one-line summary via `smelt.ui.notify_error`.
     pub fn record_error(&self, msg: String) {
         let summary = msg.lines().next().unwrap_or("").to_string();
         if let Ok(mut messages) = self.shared.messages.lock() {
             messages.append(crate::messages::MessageKind::Error, "lua".to_string(), msg);
         }
         if let Ok(smelt) = self.lua.globals().get::<mlua::Table>("smelt") {
-            if let Ok(func) = smelt.get::<mlua::Function>("notify_error") {
-                let _ = func.call::<()>(summary);
+            if let Ok(ui) = smelt.get::<mlua::Table>("ui") {
+                if let Ok(func) = ui.get::<mlua::Function>("notify_error") {
+                    let _ = func.call::<()>(summary);
+                }
             }
         }
     }

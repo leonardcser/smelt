@@ -2,8 +2,10 @@
 //! Writes before app init are stored in `LuaShared.settings_overrides` for later pickup.
 //! Unknown keys raise at the access site.
 
+use lua_doc_derive::lua_module;
 use mlua::prelude::*;
 use smelt_core::config::{ResolvedSettings, SETTINGS_KEYS};
+use smelt_core::lua::doc::{record_module_doc, register_ui_fn};
 use std::sync::Arc;
 
 fn known(key: &str) -> bool {
@@ -49,17 +51,24 @@ fn write_resolved(s: &mut ResolvedSettings, key: &str, value: bool) -> bool {
     true
 }
 
+#[lua_module]
 pub(super) fn register(
     lua: &Lua,
     smelt: &mlua::Table,
     shared: &Arc<crate::lua::LuaShared>,
 ) -> LuaResult<()> {
     let settings_tbl = lua.create_table()?;
+    record_module_doc("smelt.settings", "Metatable-backed proxy table for boolean preferences. Read and write keys directly (`settings.foo = true`) or iterate with `pairs`. UiHost-only.");
     let mt = lua.create_table()?;
 
-    mt.set(
+    register_ui_fn(
+        &mt,
+        "smelt.settings",
         "__index",
-        lua.create_function(|_, (_, key): (mlua::Value, String)| {
+        "Read a boolean preference by `key` from the resolved settings. Raises if the app is not yet initialized or if `key` is not in `SETTINGS_KEYS`.",
+        &["_", "key"],
+        lua,
+        |_, (_, key): (mlua::Value, String)| -> LuaResult<bool> {
             if !known(&key) {
                 return Err(unknown_key_err(&key));
             }
@@ -71,14 +80,19 @@ pub(super) fn register(
                     "smelt.settings.{key}: app not initialized"
                 ))),
             }
-        })?,
+        },
     )?;
 
-    mt.set(
-        "__newindex",
-        lua.create_function({
-            let shared = Arc::clone(shared);
-            move |_, (_, key, value): (mlua::Value, String, bool)| {
+    {
+        let shared = Arc::clone(shared);
+        register_ui_fn(
+            &mt,
+            "smelt.settings",
+            "__newindex",
+            "Write a boolean preference. Persists to the running config when the app is initialized; otherwise stashes the write in `LuaShared.settings_overrides` for pickup at init time. Raises on unknown keys.",
+            &["_", "key", "value"],
+            lua,
+            move |_, (_, key, value): (mlua::Value, String, bool)|  -> LuaResult<()>{
                 if !known(&key) {
                     return Err(unknown_key_err(&key));
                 }
@@ -99,13 +113,18 @@ pub(super) fn register(
                     overrides.insert(key, value);
                 }
                 Ok(())
-            }
-        })?,
-    )?;
+            },
+        )?;
+    }
 
-    mt.set(
+    register_ui_fn(
+        &mt,
+        "smelt.settings",
         "__pairs",
-        lua.create_function(|lua, _: mlua::Value| {
+        "Iterate every known settings key and its current resolved value as `(key, boolean)` pairs. Lets `for k, v in pairs(smelt.settings) do ... end` enumerate all preferences.",
+        &["_"],
+        lua,
+        |lua, _: mlua::Value| -> LuaResult<(mlua::Function, mlua::Value, mlua::Value)> {
             let next = lua.create_function(|lua, (_, prev): (mlua::Value, mlua::Value)| {
                 let prev_key = match prev {
                     mlua::Value::String(s) => Some(s.to_string_lossy().to_string()),
@@ -132,7 +151,7 @@ pub(super) fn register(
                 Ok((mlua::Value::String(lua.create_string(key)?), v))
             })?;
             Ok((next, mlua::Value::Nil, mlua::Value::Nil))
-        })?,
+        },
     )?;
 
     settings_tbl.set_metatable(Some(mt))?;

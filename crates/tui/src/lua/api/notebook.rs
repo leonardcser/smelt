@@ -4,17 +4,29 @@ use crate::content::builder::LineBuilder;
 use crate::content::highlight::{print_inline_diff, print_syntax_file};
 use crate::content::selection::wrap_line;
 use crate::smelt_term::BufId;
+use lua_doc_derive::lua_module;
 use mlua::prelude::*;
+use smelt_core::lua::doc::{record_module_doc, register_ui_fn};
 use smelt_core::notebook;
 use smelt_core::notebook::NotebookRenderData;
 use smelt_core::theme::role_hl;
 use std::collections::HashMap;
 
+#[lua_module]
 pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
     let notebook = lua.create_table()?;
-    notebook.set(
+    record_module_doc(
+        "smelt.notebook",
+        "Render, parse, read, and apply notebook cell edits. UiHost-only.",
+    );
+    register_ui_fn(
+        &notebook,
+        "smelt.notebook",
         "render",
-        lua.create_function(|_, (buf_id, args): (u64, mlua::Table)| {
+        "Render a notebook edit preview into the buffer (insert mode shows the new source highlighted; edit mode shows an inline diff). `args` is the notebook tool's argument table.",
+        &["buf_id", "args"],
+        lua,
+        |_, (buf_id, args): (u64, mlua::Table)|  -> LuaResult<()>{
             let args = lua_table_to_json_map(&args)
                 .map_err(|e| LuaError::RuntimeError(format!("notebook.render: {e}")))?;
             crate::lua::with_app(|app| {
@@ -33,38 +45,61 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
                 }
             });
             Ok(())
-        })?,
+        },
     )?;
-    notebook.set(
+    register_ui_fn(
+        &notebook,
+        "smelt.notebook",
         "is_notebook_path",
-        lua.create_function(|_, p: String| Ok(smelt_core::notebook::is_notebook_path(&p)))?,
+        "Return `true` if `path` looks like a Jupyter notebook (`.ipynb` extension).",
+        &["path"],
+        lua,
+        |_, p: String| Ok(smelt_core::notebook::is_notebook_path(&p)),
     )?;
 
-    notebook.set(
+    register_ui_fn(
+        &notebook,
+        "smelt.notebook",
         "parse",
-        lua.create_function(|lua, json: String| match notebook::parse(&json) {
+        "Parse a notebook JSON string. Returns `(notebook, nil)` with `{ nbformat, nbformat_minor, cells = { { kind, id?, source, execution_count? } } }` on success, or `(nil, error)` on failure.",
+        &["json"],
+        lua,
+        |lua, json: String| match notebook::parse(&json) {
             Ok(nb) => Ok((Some(notebook_to_lua(lua, &nb)?), None)),
             Err(err) => Ok((None, Some(err.to_string()))),
-        })?,
+        },
     )?;
 
     // `smelt.notebook.read(path, offset, limit)` — same cell-by-cell text as the read_file tool.
-    notebook.set(
+    register_ui_fn(
+        &notebook,
+        "smelt.notebook",
         "read",
-        lua.create_function(|_, (path, offset, limit): (String, u64, u64)| {
+        "`smelt.notebook.read(path, offset, limit)` — same cell-by-cell text as the read_file tool.",
+        &["path", "offset", "limit"],
+        lua,
+        |_, (path, offset, limit): (String, u64, u64)| -> LuaResult<(Option<String>, Option<String>)> {
+
             match smelt_core::notebook::render_notebook_text(&path, offset as usize, limit as usize)
             {
                 Ok(s) => Ok((Some(s), None)),
                 Err(err) => Ok((None, Some(err))),
             }
-        })?,
+
+        },
     )?;
 
     // `smelt.notebook.apply_edit(args)` — write the file and return (message, metadata)
     // or (nil, error). Caller holds the per-path advisory flock.
-    notebook.set(
+    register_ui_fn(
+        &notebook,
+        "smelt.notebook",
         "apply_edit",
-        lua.create_function(|lua, args: mlua::Table| {
+        "`smelt.notebook.apply_edit(args)` — write the file and return (message, metadata) or (nil, error). Caller holds the per-path advisory flock.",
+        &["args"],
+        lua,
+        |lua, args: mlua::Table| -> LuaResult<(Option<mlua::Value>, Option<String>)> {
+
             let args_map = lua_table_to_json_map(&args)
                 .map_err(|e| LuaError::RuntimeError(format!("notebook.apply_edit: {e}")))?;
             let result = crate::lua::try_with_app(|app| {
@@ -83,7 +118,8 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
                 Some(Err(err)) => Ok((None, Some(err))),
                 None => Ok((None, Some("notebook.apply_edit: no app context".into()))),
             }
-        })?,
+
+        },
     )?;
 
     smelt.set("notebook", notebook)?;

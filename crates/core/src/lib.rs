@@ -1,3 +1,8 @@
+// Self-alias so `#[derive(LuaOpts)]` / `#[derive(LuaAlias)]` emit
+// `::smelt_core::...` paths that resolve both inside this crate and
+// from downstream consumers.
+extern crate self as smelt_core;
+
 pub mod app_config;
 pub mod cells;
 pub mod config;

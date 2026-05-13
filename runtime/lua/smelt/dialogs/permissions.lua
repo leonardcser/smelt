@@ -42,7 +42,7 @@ smelt.cmd.register("permissions", function()
   smelt.spawn(function()
     local perms = smelt.permissions.list()
     if #(perms.session or {}) == 0 and #(perms.workspace or {}) == 0 then
-      smelt.notify_error("no permissions")
+      smelt.ui.notify_error("no permissions")
       return
     end
 

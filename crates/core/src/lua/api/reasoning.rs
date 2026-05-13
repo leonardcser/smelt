@@ -1,48 +1,82 @@
 //! `smelt.reasoning` — get/set/cycle reasoning effort. Mirrors `smelt.mode`; stubs overridden by TUI/Lua.
 
+use crate::lua::doc::{record_module_doc, register_fn};
+use lua_doc_derive::{lua_module, LuaAlias};
 use mlua::prelude::*;
 
+/// Reasoning effort level string literal.
+#[derive(Clone, Copy, Debug, LuaAlias)]
+#[lua(name = "smelt.reasoning.Effort", mirror = "protocol::ReasoningEffort")]
+pub enum LuaReasoningEffort {
+    Off,
+    Low,
+    Medium,
+    High,
+    Max,
+}
+
+#[lua_module]
 pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
     let reasoning_tbl = lua.create_table()?;
+    record_module_doc("smelt.reasoning", "Reasoning effort read/cycle. `reasoning.set` and `reasoning.cycle` are injected by the TUI layer so they can access the live app state.");
 
-    reasoning_tbl.set(
+    register_fn(
+        &reasoning_tbl,
+        "smelt.reasoning",
         "get",
-        lua.create_function(|_, ()| {
-            Ok(
-                crate::host::try_with_core(|core| core.config.reasoning_effort.label().to_string())
-                    .unwrap_or_default(),
-            )
-        })?,
+        "Return the current reasoning effort label (e.g. `\"low\"`, `\"medium\"`, `\"high\"`).",
+        &[],
+        lua,
+        |_, ()| -> LuaResult<LuaReasoningEffort> {
+            Ok(crate::host::try_with_core(|core| {
+                LuaReasoningEffort::from(core.config.reasoning_effort)
+            })
+            .unwrap_or(LuaReasoningEffort::Medium))
+        },
     )?;
 
-    reasoning_tbl.set(
+    register_fn(
+        &reasoning_tbl,
+        "smelt.reasoning",
         "set",
-        lua.create_function(|_, _v: String| {
+        "Set the reasoning effort to the given label. No-op in core; the TUI overrides this binding.",
+        &["effort"],
+        lua,
+        |_, _effort: LuaReasoningEffort| -> LuaResult<()> {
             // No-op in core; TUI overrides this binding.
             Ok(())
-        })?,
+        },
     )?;
 
-    reasoning_tbl.set(
+    register_fn(
+        &reasoning_tbl,
+        "smelt.reasoning",
         "cycle_list",
-        lua.create_function(|lua, ()| {
-            let labels: Vec<String> = crate::host::try_with_core(|core| {
+        "Return the configured reasoning-effort cycle.",
+        &[],
+        lua,
+        |_, ()| -> LuaResult<Vec<LuaReasoningEffort>> {
+            Ok(crate::host::try_with_core(|core| {
                 core.config
                     .reasoning_cycle
                     .iter()
-                    .map(|e| e.label().to_string())
+                    .copied()
+                    .map(LuaReasoningEffort::from)
                     .collect()
             })
-            .unwrap_or_default();
-            let t = lua.create_table()?;
-            for (i, label) in labels.into_iter().enumerate() {
-                t.set(i + 1, label)?;
-            }
-            Ok(t)
-        })?,
+            .unwrap_or_default())
+        },
     )?;
 
-    reasoning_tbl.set("cycle", lua.create_function(|_, ()| Ok(()))?)?;
+    register_fn(
+        &reasoning_tbl,
+        "smelt.reasoning",
+        "cycle",
+        "Advance to the next reasoning effort in the configured cycle. No-op stub in core; the TUI overrides this binding.",
+        &[],
+        lua,
+        |_, ()| Ok(()),
+    )?;
 
     smelt.set("reasoning", reasoning_tbl)?;
     Ok(())

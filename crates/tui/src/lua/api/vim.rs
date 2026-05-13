@@ -1,35 +1,55 @@
 //! `smelt.vim` bindings — read and write the focused-pane `VimMode`.
 
-use super::app_read;
+use lua_doc_derive::{lua_module, LuaAlias};
 use mlua::prelude::*;
+use smelt_core::lua::doc::{record_module_doc, register_ui_fn};
 
+/// Vim mode string literal.
+#[derive(Clone, Copy, Debug, LuaAlias)]
+#[lua(name = "smelt.vim.Mode", mirror = "crate::smelt_term::VimMode")]
+pub enum LuaVimMode {
+    Insert,
+    Normal,
+    Visual,
+    VisualLine,
+}
+
+#[lua_module]
 pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
     let vim_tbl = lua.create_table()?;
-    vim_tbl.set(
+    record_module_doc(
+        "smelt.vim",
+        "Read and write the vim mode of the focused vim-enabled surface. UiHost-only.",
+    );
+
+    register_ui_fn(
+        &vim_tbl,
+        "smelt.vim",
         "mode",
-        app_read!(lua, |app| {
-            app.focused_vim_mode_label().unwrap_or_default()
-        }),
+        "Return the vim mode of the focused surface, or `nil` if it isn't vim-enabled.",
+        &[],
+        lua,
+        |_, ()| -> LuaResult<Option<LuaVimMode>> {
+            Ok(crate::lua::try_with_app(|app| {
+                app.focused_vim_mode().map(LuaVimMode::from)
+            })
+            .flatten())
+        },
     )?;
-    vim_tbl.set(
+    register_ui_fn(
+        &vim_tbl,
+        "smelt.vim",
         "set_mode",
-        lua.create_function(|_, mode: String| {
-            let target = match mode.as_str() {
-                "Normal" | "normal" | "n" => crate::smelt_term::VimMode::Normal,
-                "Insert" | "insert" | "i" => crate::smelt_term::VimMode::Insert,
-                "Visual" | "visual" | "v" => crate::smelt_term::VimMode::Visual,
-                "VisualLine" | "visual_line" | "V" => crate::smelt_term::VimMode::VisualLine,
-                other => {
-                    return Err(LuaError::RuntimeError(format!(
-                        "smelt.vim.set_mode: unknown mode `{other}`"
-                    )))
-                }
-            };
+        "Switch the vim mode of the focused vim-enabled window. Raises on unknown values.",
+        &["mode"],
+        lua,
+        |_, mode: LuaVimMode| -> LuaResult<()> {
+            let target = mode.into();
             crate::lua::with_app(|app| {
                 app.set_focused_vim_mode(target);
             });
             Ok(())
-        })?,
+        },
     )?;
     smelt.set("vim", vim_tbl)?;
     Ok(())

@@ -4,94 +4,137 @@ use mlua::prelude::*;
 use std::sync::Arc;
 
 use crate::config::{ModelConfig, ProviderConfig};
+use crate::lua::doc::{record_module_doc, register_fn};
+use crate::lua::lua_type::{LuaType, LuaTypeTuple};
 use crate::lua::LuaShared;
+use lua_doc_derive::{lua_module, LuaOpts};
 
-fn parse_model_table(t: &mlua::Table) -> LuaResult<ModelConfig> {
-    const KNOWN: &[&str] = &[
-        "name",
-        "temperature",
-        "top_p",
-        "top_k",
-        "min_p",
-        "repeat_penalty",
-        "tool_calling",
-        "input_cost",
-        "output_cost",
-        "cache_read_cost",
-        "cache_write_cost",
-    ];
-    for pair in t.clone().pairs::<mlua::Value, mlua::Value>() {
-        let (key, _) = pair?;
-        if let mlua::Value::String(s) = key {
-            let k = s.to_string_lossy();
-            if !KNOWN.contains(&k.as_ref()) {
-                return Err(mlua::Error::external(format!(
-                    "smelt.provider.register: unknown model field `{k}`; \
-                     known fields are {KNOWN:?}"
-                )));
-            }
-        }
-    }
-    Ok(ModelConfig {
-        name: t.get::<Option<String>>("name")?,
-        temperature: t.get::<Option<f64>>("temperature")?,
-        top_p: t.get::<Option<f64>>("top_p")?,
-        top_k: t.get::<Option<u32>>("top_k")?,
-        min_p: t.get::<Option<f64>>("min_p")?,
-        repeat_penalty: t.get::<Option<f64>>("repeat_penalty")?,
-        tool_calling: t.get::<Option<bool>>("tool_calling")?,
-        input_cost: t.get::<Option<f64>>("input_cost")?,
-        output_cost: t.get::<Option<f64>>("output_cost")?,
-        cache_read_cost: t.get::<Option<f64>>("cache_read_cost")?,
-        cache_write_cost: t.get::<Option<f64>>("cache_write_cost")?,
-    })
+/// One model entry in a provider's `models` list. Plugin authors can
+/// pass either a bare model id string or a full table — the wrapper
+/// handles both forms transparently.
+#[derive(Debug, Default, LuaOpts)]
+#[lua(name = "smelt.provider.Model")]
+pub struct LuaProviderModel {
+    /// Model id as it appears in API requests.
+    pub name: Option<String>,
+    /// Default sampling temperature.
+    pub temperature: Option<f64>,
+    /// Default nucleus-sampling cutoff.
+    pub top_p: Option<f64>,
+    /// Default top-k sampling cutoff.
+    pub top_k: Option<u32>,
+    /// Default minimum-probability cutoff.
+    pub min_p: Option<f64>,
+    /// Default repeat penalty.
+    pub repeat_penalty: Option<f64>,
+    /// Whether the model supports tool calls.
+    pub tool_calling: Option<bool>,
+    /// Cost per input token in USD.
+    pub input_cost: Option<f64>,
+    /// Cost per output token in USD.
+    pub output_cost: Option<f64>,
+    /// Cost per cache-read token in USD.
+    pub cache_read_cost: Option<f64>,
+    /// Cost per cache-write token in USD.
+    pub cache_write_cost: Option<f64>,
 }
 
+/// Wrapper that accepts either a `string` model id or a full
+/// [`LuaProviderModel`] table. The derive emits FromLua expecting a
+/// table only; we hand-roll the union here.
+#[derive(Debug)]
+pub struct LuaModelEntry(pub ModelConfig);
+
+impl FromLua for LuaModelEntry {
+    fn from_lua(value: mlua::Value, lua: &Lua) -> LuaResult<Self> {
+        match value {
+            mlua::Value::String(s) => Ok(Self(ModelConfig {
+                name: Some(s.to_string_lossy().to_string()),
+                ..Default::default()
+            })),
+            mlua::Value::Table(_) => {
+                let m: LuaProviderModel = FromLua::from_lua(value, lua)?;
+                Ok(Self(ModelConfig {
+                    name: m.name,
+                    temperature: m.temperature,
+                    top_p: m.top_p,
+                    top_k: m.top_k,
+                    min_p: m.min_p,
+                    repeat_penalty: m.repeat_penalty,
+                    tool_calling: m.tool_calling,
+                    input_cost: m.input_cost,
+                    output_cost: m.output_cost,
+                    cache_read_cost: m.cache_read_cost,
+                    cache_write_cost: m.cache_write_cost,
+                }))
+            }
+            other => Err(mlua::Error::external(format!(
+                "smelt.provider.register: each model entry must be a string or table, got {}",
+                other.type_name()
+            ))),
+        }
+    }
+}
+
+impl LuaType for LuaModelEntry {
+    fn lua_type() -> String {
+        // Trigger the LuaProviderModel class registration so the
+        // sibling type page picks it up even though we never type
+        // `LuaProviderModel` directly in a sig.
+        let _ = <LuaProviderModel as LuaType>::lua_type();
+        "string|smelt.provider.Model".into()
+    }
+}
+
+impl LuaTypeTuple for LuaModelEntry {
+    const ARITY: usize = 1;
+    fn lua_param_list(param_names: &[&'static str]) -> String {
+        let name = param_names.first().copied().unwrap_or("arg1");
+        format!("{}: {}", name, <Self as LuaType>::lua_type())
+    }
+}
+
+/// Spec accepted by `smelt.provider.register`.
+#[derive(Default, Debug, LuaOpts)]
+#[lua(name = "smelt.provider.Config")]
+pub struct LuaProviderConfig {
+    /// Provider kind tag (`"openai"`, `"anthropic"`, etc.).
+    #[lua(rename = "type", default)]
+    pub provider_type: String,
+    /// Base URL the engine talks to.
+    #[lua(default)]
+    pub api_base: String,
+    /// Environment variable that holds the bearer token.
+    pub api_key_env: Option<String>,
+    /// Models offered by this provider.
+    #[lua(default)]
+    pub models: Vec<LuaModelEntry>,
+}
+
+#[lua_module]
 pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) -> LuaResult<()> {
     let tbl = lua.create_table()?;
+    record_module_doc(
+        "smelt.provider",
+        "List built-in model providers and register custom ones. Headless-safe.",
+    );
 
-    tbl.set(
-        "register",
-        lua.create_function({
-            let shared = Arc::clone(shared);
-            move |_lua, (name, cfg): (String, mlua::Table)| {
-                let provider_type = cfg.get::<Option<String>>("type")?.unwrap_or_default();
-                let api_base = cfg.get::<Option<String>>("api_base")?.unwrap_or_default();
-                let api_key_env = cfg.get::<Option<String>>("api_key_env")?;
-                let models: Vec<ModelConfig> = {
-                    let arr: Option<mlua::Table> = cfg.get("models")?;
-                    match arr {
-                        Some(t) => {
-                            let mut out = Vec::new();
-                            for i in 1..=t.raw_len() {
-                                let val: mlua::Value = t.get(i)?;
-                                let mc = match val {
-                                    mlua::Value::String(s) => ModelConfig {
-                                        name: Some(s.to_string_lossy().to_string()),
-                                        ..Default::default()
-                                    },
-                                    mlua::Value::Table(model_tbl) => parse_model_table(&model_tbl)?,
-                                    other => {
-                                        return Err(mlua::Error::external(format!(
-                                            "smelt.provider.register: each model entry must \
-                                             be a string or table, got {}",
-                                            other.type_name()
-                                        )));
-                                    }
-                                };
-                                out.push(mc);
-                            }
-                            out
-                        }
-                        None => Vec::new(),
-                    }
-                };
+    {
+        let shared = Arc::clone(shared);
+        register_fn(
+            &tbl,
+            "smelt.provider",
+            "register",
+            "Declare a provider named `name`. Re-registering replaces the previous entry of the same name.",
+            &["name", "cfg"],
+            lua,
+            move |_lua, (name, cfg): (String, LuaProviderConfig)| -> LuaResult<()> {
                 let provider = ProviderConfig {
                     name: Some(name),
-                    provider_type: Some(provider_type),
-                    api_base: Some(api_base),
-                    api_key_env,
-                    models,
+                    provider_type: Some(cfg.provider_type),
+                    api_base: Some(cfg.api_base),
+                    api_key_env: cfg.api_key_env,
+                    models: cfg.models.into_iter().map(|m| m.0).collect(),
                 };
                 let mut providers = shared.providers.lock().unwrap_or_else(|e| e.into_inner());
                 providers.retain(|p| {
@@ -99,15 +142,20 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
                 });
                 providers.push(provider);
                 Ok(())
-            }
-        })?,
-    )?;
+            },
+        )?;
+    }
 
-    tbl.set(
-        "list",
-        lua.create_function({
-            let shared = Arc::clone(shared);
-            move |lua, ()| {
+    {
+        let shared = Arc::clone(shared);
+        register_fn(
+            &tbl,
+            "smelt.provider",
+            "list",
+            "Return every registered provider as an array of tables. Each entry has `name`, `type`, `api_base`, `api_key_env`, and a `models` array.",
+            &[],
+            lua,
+            move |lua, ()| -> LuaResult<mlua::Table> {
                 let providers = shared.providers.lock().unwrap_or_else(|e| e.into_inner());
                 let out = lua.create_table()?;
                 for (i, p) in providers.iter().enumerate() {
@@ -136,9 +184,9 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
                     out.set(i + 1, t)?;
                 }
                 Ok(out)
-            }
-        })?,
-    )?;
+            },
+        )?;
+    }
 
     smelt.set("provider", tbl)?;
     Ok(())

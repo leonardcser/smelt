@@ -5,14 +5,23 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 
+use crate::lua::doc::{record_module_doc, register_fn};
 use crate::lua::LuaShared;
 use crate::process;
+use lua_doc_derive::lua_module;
 
+#[lua_module]
 pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) -> LuaResult<()> {
     let process_tbl = lua.create_table()?;
-    process_tbl.set(
+    record_module_doc("smelt.process", "Run, spawn, list, and kill processes against the `ProcessRegistry`. spawned processes are non-blocking; run processes wait for completion.");
+    register_fn(
+        &process_tbl,
+        "smelt.process",
         "list",
-        lua.create_function(|lua, ()| {
+        "Return the registry of running processes as rows of `{ id, command, elapsed_secs }`.",
+        &[],
+        lua,
+        |lua, ()| -> LuaResult<mlua::Table> {
             let procs =
                 crate::host::try_with_core(|core| core.processes.list()).unwrap_or_default();
             let out = lua.create_table()?;
@@ -24,11 +33,16 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
                 out.set(i + 1, row)?;
             }
             Ok(out)
-        })?,
+        },
     )?;
-    process_tbl.set(
+    register_fn(
+        &process_tbl,
+        "smelt.process",
         "kill",
-        lua.create_function(|_, id: String| {
+        "Stop the registered process with `id`. Schedules the kill asynchronously; no-op when no host is installed.",
+        &["id"],
+        lua,
+        |_, id: String|  -> LuaResult<()>{
             crate::host::with_core(|core| {
                 let registry = core.processes.clone();
                 tokio::spawn(async move {
@@ -36,11 +50,16 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
                 });
             });
             Ok(())
-        })?,
+        },
     )?;
-    process_tbl.set(
+    register_fn(
+        &process_tbl,
+        "smelt.process",
         "read_output",
-        lua.create_function(|lua, id: String| {
+        "Drain buffered output from the registered process `id`. Returns `{ text, running, exit_code? }`, or an empty table when no such process exists.",
+        &["id"],
+        lua,
+        |lua, id: String| -> LuaResult<mlua::Table> {
             let read = crate::host::try_with_core(|core| core.processes.read(&id));
             match read {
                 Some(Ok((text, running, exit_code))) => {
@@ -54,11 +73,16 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
                 }
                 _ => lua.create_table(),
             }
-        })?,
+        },
     )?;
-    process_tbl.set(
+    register_fn(
+        &process_tbl,
+        "smelt.process",
         "spawn_bg",
-        lua.create_function(|_, command: String| -> LuaResult<String> {
+        "Spawn `command` as a background `sh -c` child registered with the process registry. Returns the process id; raises if no host is installed or the spawn fails.",
+        &["command"],
+        lua,
+        |_, command: String| -> LuaResult<String> {
             let registry = crate::host::try_with_core(|core| core.processes.clone())
                 .ok_or_else(|| mlua::Error::external("process.spawn_bg: app unavailable"))?;
             let mut cmd = tokio::process::Command::new("sh");
@@ -76,26 +100,34 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
             let (done_tx, _done_rx) = tokio::sync::mpsc::unbounded_channel();
             registry.spawn(id.clone(), &command, child, done_tx);
             Ok(id)
-        })?,
+        },
     )?;
-    process_tbl.set(
+    register_fn(
+        &process_tbl,
+        "smelt.process",
         "run",
-        lua.create_function(
-            |lua, (cmd, args, opts): (String, Option<Vec<String>>, Option<mlua::Table>)| {
-                let parsed = parse_run_options(opts.as_ref())?;
-                let args = args.unwrap_or_default();
-                match process::run(&cmd, &args, &parsed) {
-                    Ok(out) => Ok((Some(output_to_lua(lua, &out)?), None)),
-                    Err(err) => Ok((None, Some(err.to_string()))),
-                }
-            },
-        )?,
+        "Run `cmd` with `args` synchronously. `opts` accepts `cwd`, `env`, `timeout_secs`, and `stdin`. Returns `({ stdout, stderr, exit_code, timed_out }, nil)` or `(nil, err_string)` on failure.",
+        &["cmd", "args", "opts"],
+        lua,
+        |lua, (cmd, args, opts): (String, Option<Vec<String>>, Option<mlua::Table>)| -> LuaResult<(Option<mlua::Table>, Option<String>)> {
+            let parsed = parse_run_options(opts.as_ref())?;
+            let args = args.unwrap_or_default();
+            match process::run(&cmd, &args, &parsed) {
+                Ok(out) => Ok((Some(output_to_lua(lua, &out)?), None)),
+                Err(err) => Ok((None, Some(err.to_string()))),
+            }
+        },
     )?;
-    let shared_run_streaming = Arc::clone(shared);
-    process_tbl.set(
-        "run_streaming",
-        lua.create_function(
-            move |_, (task_id, call_id, command, timeout_ms): (u64, String, String, u64)| {
+    {
+        let shared_run_streaming = Arc::clone(shared);
+        register_fn(
+            &process_tbl,
+            "smelt.process",
+            "run_streaming",
+            "Run `command` with a `timeout_ms` deadline, streaming each output line into the live tool call `call_id` and resolving task `task_id` with `{ content, is_error, timed_out }` (or `{ __cancelled = true }` if cancelled).",
+            &["task_id", "call_id", "command", "timeout_ms"],
+            lua,
+            move |_, (task_id, call_id, command, timeout_ms): (u64, String, String, u64)|  -> LuaResult<()>{
                 let injector = crate::host::try_with_core(|core| core.engine.injector())
                     .ok_or_else(|| {
                         mlua::Error::external("process.run_streaming: app unavailable")
@@ -123,8 +155,8 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
                 });
                 Ok(())
             },
-        )?,
-    )?;
+        )?;
+    }
 
     smelt.set("process", process_tbl)?;
     Ok(())

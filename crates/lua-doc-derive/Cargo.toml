@@ -1,0 +1,14 @@
+[package]
+name = "lua-doc-derive"
+version = "0.4.7"
+edition = "2021"
+description = "Proc macros for declaring Lua-side types from Rust structs/enums (smelt internal)"
+
+[lib]
+proc-macro = true
+
+[dependencies]
+syn = { version = "2", features = ["full", "extra-traits"] }
+quote = "1"
+proc-macro2 = "1"
+

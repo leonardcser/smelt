@@ -1,37 +1,111 @@
 //! `smelt.win` — focus, keymap/event registration, buf resolution, window config. UiHost-only.
 
-use super::app_read;
-use crate::lua::{parse_keybind, parse_win_event, LuaShared};
+use crate::lua::{parse_keybind, LuaShared};
+use lua_doc_derive::lua_module;
+use lua_doc_derive::LuaAlias;
 use mlua::prelude::*;
+use smelt_core::lua::doc::{record_module_doc, register_ui_fn};
+use smelt_core::lua::lua_type::LuaCallback;
 use std::sync::Arc;
 
+/// Window-event names accepted by `smelt.win.on_event` and
+/// `smelt.win.clear_event`. Maps onto the internal `WinEvent` enum.
+#[derive(Clone, Copy, Debug, LuaAlias)]
+#[lua(name = "smelt.win.Event")]
+pub enum LuaWinEvent {
+    /// Window was created.
+    Open,
+    /// Window was closed.
+    Close,
+    /// Window gained focus.
+    #[lua(rename = "focus")]
+    FocusGained,
+    /// Window lost focus.
+    #[lua(rename = "blur")]
+    FocusLost,
+    /// Selection within a list-style window changed.
+    SelectionChanged,
+    /// User confirmed input (Enter, button click, etc.).
+    Submit,
+    /// Buffer text changed.
+    TextChanged,
+    /// User cancelled / dismissed the window.
+    Dismiss,
+    /// Periodic tick for animation/refresh.
+    Tick,
+}
+
+impl From<LuaWinEvent> for crate::smelt_term::WinEvent {
+    fn from(e: LuaWinEvent) -> Self {
+        use crate::smelt_term::WinEvent;
+        match e {
+            LuaWinEvent::Open => WinEvent::Open,
+            LuaWinEvent::Close => WinEvent::Close,
+            LuaWinEvent::FocusGained => WinEvent::FocusGained,
+            LuaWinEvent::FocusLost => WinEvent::FocusLost,
+            LuaWinEvent::SelectionChanged => WinEvent::SelectionChanged,
+            LuaWinEvent::Submit => WinEvent::Submit,
+            LuaWinEvent::TextChanged => WinEvent::TextChanged,
+            LuaWinEvent::Dismiss => WinEvent::Dismiss,
+            LuaWinEvent::Tick => WinEvent::Tick,
+        }
+    }
+}
+
+#[lua_module]
 pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) -> LuaResult<()> {
     let win_tbl = lua.create_table()?;
-    win_tbl.set(
+    record_module_doc("smelt.win", "Window lifecycle, focus, keymap/event registration, and buffer resolution. UiHost-only — windows are layout leaves that render a buffer onto the screen.");
+    register_ui_fn(
+        &win_tbl,
+        "smelt.win",
         "focus",
-        app_read!(lua, |app| match app.app_focus {
-            crate::app::AppFocus::Content => "transcript".to_string(),
-            crate::app::AppFocus::Prompt => "prompt".to_string(),
-        }),
+        "Return `focus` from the app state.",
+        &[],
+        lua,
+        |_, ()| -> LuaResult<String> {
+            Ok(crate::lua::try_with_app(|app| match app.app_focus {
+                crate::app::AppFocus::Content => "transcript".to_string(),
+                crate::app::AppFocus::Prompt => "prompt".to_string(),
+            })
+            .unwrap_or_default())
+        },
     )?;
-    win_tbl.set(
+    register_ui_fn(
+        &win_tbl,
+        "smelt.win",
         "mode",
-        app_read!(lua, |app| {
-            app.focused_vim_mode_label().unwrap_or_default()
-        }),
+        "Vim mode label of the focused window (empty string if non-vim).",
+        &[],
+        lua,
+        |_, ()| -> LuaResult<String> {
+            Ok(crate::lua::try_with_app(|app| app.focused_vim_mode_label())
+                .flatten()
+                .unwrap_or_default())
+        },
     )?;
-    win_tbl.set(
+    register_ui_fn(
+        &win_tbl,
+        "smelt.win",
         "close",
-        lua.create_function(|_, id: u64| {
+        "Close the overlay leaf identified by `id`. No-op if the window does not exist or is not an overlay leaf.",
+        &["id"],
+        lua,
+        |_, id: u64|  -> LuaResult<()>{
             crate::lua::with_app(|app| {
                 app.close_overlay_leaf(crate::smelt_term::WinId(id));
             });
             Ok(())
-        })?,
+        },
     )?;
-    win_tbl.set(
+    register_ui_fn(
+        &win_tbl,
+        "smelt.win",
         "open",
-        lua.create_function(|_, (buf_id, opts): (u64, Option<mlua::Table>)| {
+        "Open a split window over the buffer `buf_id`. `opts.region` picks the layout slot (default `\"lua_overlay\"`); `opts.focusable`, `opts.cursor_line_highlight`, and `opts.vim_enabled` toggle behaviour. Returns the new `WinId` or `nil` if no slot was available.",
+        &["buf_id", "opts"],
+        lua,
+        |_, (buf_id, opts): (u64, Option<mlua::Table>)| -> LuaResult<Option<u64>> {
             let win = crate::lua::with_app(|app| {
                 let region = opts
                     .as_ref()
@@ -64,11 +138,16 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
                 win.map(|w| w.0)
             });
             Ok(win)
-        })?,
+        },
     )?;
-    win_tbl.set(
+    register_ui_fn(
+        &win_tbl,
+        "smelt.win",
         "configure_list",
-        lua.create_function(|_, (win_id, initial_cursor): (u64, Option<u64>)| {
+        "Mark `win_id` as a list leaf with arrow-key/scroll handling and place the initial cursor at row `initial_cursor` (clamped to `u16`).",
+        &["win_id", "initial_cursor"],
+        lua,
+        |_, (win_id, initial_cursor): (u64, Option<u64>)|  -> LuaResult<()>{
             crate::lua::with_app(|app| {
                 crate::lua::ui_ops::configure_list_leaf(
                     app,
@@ -77,32 +156,47 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
                 );
             });
             Ok(())
-        })?,
+        },
     )?;
-    win_tbl.set(
+    register_ui_fn(
+        &win_tbl,
+        "smelt.win",
         "configure_input",
-        lua.create_function(|_, win_id: u64| {
+        "Mark `win_id` as a single-line text input leaf with the same editing keymap as the prompt.",
+        &["win_id"],
+        lua,
+        |_, win_id: u64|  -> LuaResult<()>{
             crate::lua::with_app(|app| {
                 crate::lua::ui_ops::configure_input_leaf(app, crate::smelt_term::WinId(win_id));
             });
             Ok(())
-        })?,
+        },
     )?;
     // `smelt.win.buf(win_id) -> buf_id | nil`
-    win_tbl.set(
+    register_ui_fn(
+        &win_tbl,
+        "smelt.win",
         "buf",
-        lua.create_function(|_, id: u64| {
+        "`smelt.win.buf(win_id) -> buf_id | nil`",
+        &["id"],
+        lua,
+        |_, id: u64| -> LuaResult<Option<u64>> {
             let buf = crate::lua::try_with_app(|app| {
                 app.ui.win(crate::smelt_term::WinId(id)).map(|w| w.buf.0)
             })
             .flatten();
             Ok(buf)
-        })?,
+        },
     )?;
     // `smelt.win.rect(win_id) -> {row, col, width, height} | nil` — nil until first render.
-    win_tbl.set(
+    register_ui_fn(
+        &win_tbl,
+        "smelt.win",
         "rect",
-        lua.create_function(|lua, id: u64| {
+        "`smelt.win.rect(win_id) -> {row, col, width, height} | nil` — nil until first render.",
+        &["id"],
+        lua,
+        |lua, id: u64| -> LuaResult<mlua::Value> {
             let rect = crate::lua::try_with_app(|app| {
                 app.ui
                     .win(crate::smelt_term::WinId(id))
@@ -121,70 +215,89 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
                 }
                 None => Ok(mlua::Value::Nil),
             }
-        })?,
+        },
     )?;
     // `smelt.win.set_focus(win_id)`
-    win_tbl.set(
+    register_ui_fn(
+        &win_tbl,
+        "smelt.win",
         "set_focus",
-        lua.create_function(|_, id: u64| {
+        "`smelt.win.set_focus(win_id)`",
+        &["id"],
+        lua,
+        |_, id: u64| -> LuaResult<()> {
             crate::lua::with_app(|app| {
                 app.ui.set_focus(crate::smelt_term::WinId(id));
             });
             Ok(())
-        })?,
+        },
     )?;
     {
         let s = shared.clone();
-        win_tbl.set(
+        register_ui_fn(
+            &win_tbl,
+            "smelt.win",
             "set_keymap",
-            lua.create_function(
-                move |lua, (win_id, key_str, func): (u64, String, mlua::Function)| {
-                    let Some(key) = parse_keybind(&key_str) else {
-                        return Err(mlua::Error::RuntimeError(format!(
-                            "win.set_keymap: unknown key `{key_str}`"
-                        )));
-                    };
-                    let id = crate::lua::register_callback_handle(&s, lua, func)?;
-                    crate::lua::with_app(|app| {
-                        let prev = app.ui.win_set_keymap(
-                            crate::smelt_term::WinId(win_id),
-                            key,
-                            crate::smelt_term::Callback::Lua(crate::smelt_term::LuaHandle(id)),
-                        );
-                        crate::lua::drop_displaced_lua_handle(app, prev);
-                    });
-                    Ok(())
-                },
-            )?,
+            "Install `func` as the handler for `key_str` on window `win_id`. Replaces any existing binding (the displaced Lua handle is freed). Raises on unknown key strings.",
+            &["win_id", "key_str", "func"],
+            lua,
+            move |lua,
+                  (win_id, key_str, func): (u64, String, LuaCallback<mlua::Table, ()>)|
+                  -> LuaResult<()> {
+                let Some(key) = parse_keybind(&key_str) else {
+                    return Err(mlua::Error::RuntimeError(format!(
+                        "win.set_keymap: unknown key `{key_str}`"
+                    )));
+                };
+                let id = crate::lua::register_callback_handle(&s, lua, func.into_inner())?;
+                crate::lua::with_app(|app| {
+                    let prev = app.ui.win_set_keymap(
+                        crate::smelt_term::WinId(win_id),
+                        key,
+                        crate::smelt_term::Callback::Lua(crate::smelt_term::LuaHandle(id)),
+                    );
+                    crate::lua::drop_displaced_lua_handle(app, prev);
+                });
+                Ok(())
+            },
         )?;
     }
     {
         let s = shared.clone();
-        win_tbl.set(
+        register_ui_fn(
+            &win_tbl,
+            "smelt.win",
             "on_event",
-            lua.create_function(
-                move |lua, (win_id, ev_str, func): (u64, String, mlua::Function)| {
-                    let Some(event) = parse_win_event(&ev_str) else {
-                        return Err(mlua::Error::RuntimeError(format!(
-                            "win.on_event: unknown event `{ev_str}`"
-                        )));
-                    };
-                    let id = crate::lua::register_callback_handle(&s, lua, func)?;
-                    crate::lua::with_app(|app| {
-                        app.ui.win_on_event(
-                            crate::smelt_term::WinId(win_id),
-                            event,
-                            crate::smelt_term::Callback::Lua(crate::smelt_term::LuaHandle(id)),
-                        );
-                    });
-                    Ok(id)
-                },
-            )?,
+            "Subscribe `func` to event `event` on window `win_id`. Returns a callback id usable with `clear_event`.",
+            &["win_id", "event", "func"],
+            lua,
+            move |lua,
+                  (win_id, event, func): (
+                u64,
+                LuaWinEvent,
+                LuaCallback<mlua::Table, ()>,
+            )|
+                  -> LuaResult<u64> {
+                let id = crate::lua::register_callback_handle(&s, lua, func.into_inner())?;
+                crate::lua::with_app(|app| {
+                    app.ui.win_on_event(
+                        crate::smelt_term::WinId(win_id),
+                        event.into(),
+                        crate::smelt_term::Callback::Lua(crate::smelt_term::LuaHandle(id)),
+                    );
+                });
+                Ok(id)
+            },
         )?;
     }
-    win_tbl.set(
+    register_ui_fn(
+        &win_tbl,
+        "smelt.win",
         "clear_keymap",
-        lua.create_function(|_, (win_id, key_str): (u64, String)| {
+        "Remove a per-window key binding for `win_id` previously installed via `set_keymap`. The associated Lua handle is freed.",
+        &["win_id", "key_str"],
+        lua,
+        |_, (win_id, key_str): (u64, String)|  -> LuaResult<()>{
             let Some(key) = parse_keybind(&key_str) else {
                 return Err(mlua::Error::RuntimeError(format!(
                     "win.clear_keymap: unknown key `{key_str}`"
@@ -197,26 +310,26 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
                 crate::lua::drop_displaced_lua_handle(app, prev);
             });
             Ok(())
-        })?,
+        },
     )?;
-    win_tbl.set(
+    register_ui_fn(
+        &win_tbl,
+        "smelt.win",
         "clear_event",
-        lua.create_function(|_, (win_id, ev_str, callback_id): (u64, String, u64)| {
-            let Some(event) = parse_win_event(&ev_str) else {
-                return Err(mlua::Error::RuntimeError(format!(
-                    "win.clear_event: unknown event `{ev_str}`"
-                )));
-            };
+        "Remove a per-window event handler by `callback_id` (returned from `on_event`). The associated Lua handle is freed.",
+        &["win_id", "event", "callback_id"],
+        lua,
+        |_, (win_id, event, callback_id): (u64, LuaWinEvent, u64)|  -> LuaResult<()>{
             crate::lua::with_app(|app| {
                 let prev = app.ui.win_clear_event_by_id(
                     crate::smelt_term::WinId(win_id),
-                    event,
+                    event.into(),
                     callback_id,
                 );
                 crate::lua::drop_displaced_lua_handle(app, prev);
             });
             Ok(())
-        })?,
+        },
     )?;
     smelt.set("win", win_tbl)?;
     Ok(())

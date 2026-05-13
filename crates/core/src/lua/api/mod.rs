@@ -10,7 +10,7 @@ macro_rules! host_read {
 }
 
 mod au;
-mod cell;
+pub(crate) mod cell;
 mod clipboard;
 mod cmd;
 mod frontend;
@@ -23,13 +23,13 @@ mod image;
 pub(crate) mod layout;
 mod mcp;
 mod messages;
-mod mode;
+pub mod mode;
 mod os;
 mod parse;
 mod path;
 mod process;
 mod provider;
-mod reasoning;
+pub mod reasoning;
 mod shell;
 mod skills;
 mod spawn;
