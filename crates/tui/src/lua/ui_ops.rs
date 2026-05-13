@@ -276,6 +276,7 @@ pub(crate) fn configure_list_leaf(app: &mut TuiApp, leaf: WinId, initial_cursor:
         .unwrap_or(0);
     if let Some(win) = app.ui.win_mut(leaf) {
         win.cursor_line_highlight = true;
+        win.mouse_scroll = true;
         let max = line_count.saturating_sub(1) as u16;
         let target = initial_cursor.min(max);
         win.set_cursor_position(target, 0);

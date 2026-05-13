@@ -351,9 +351,7 @@ fn edge_opt(v: mlua::Value) -> Result<Option<EdgeStyle>, String> {
                 mlua::Value::Nil => Ok(Some(EdgeStyle::new())),
                 mlua::Value::String(s) => {
                     let raw = s.to_str().map_err(|e| e.to_string())?.to_string();
-                    Ok(Some(EdgeStyle::with_color(smelt_core::theme::intern(
-                        &raw,
-                    ))))
+                    Ok(Some(EdgeStyle::with_color(smelt_core::theme::intern(&raw))))
                 }
                 other => Err(format!(
                     "border edge color: expected string, got {}",

@@ -1039,6 +1039,32 @@ impl Ui {
                         | MouseEventKind::ScrollRight
                 );
                 if is_scroll && self.focused_overlay().is_some() {
+                    // Inside a focused overlay, route vertical wheel to the leaf under the
+                    // cursor only if that leaf opted into `mouse_scroll` (e.g. lists via
+                    // `configure_list_leaf`). Other leaves consume silently — wheeling near
+                    // an input or on chrome shouldn't pan anything visible.
+                    let delta = match me.kind {
+                        MouseEventKind::ScrollUp => -3_isize,
+                        MouseEventKind::ScrollDown => 3,
+                        _ => 0,
+                    };
+                    if delta != 0 {
+                        if let Some(HitTarget::Window(w)) = self.hit_test(me.row, me.column, None) {
+                            let leaf_info = self.wins.get(&w).and_then(|win| {
+                                if win.mouse_scroll {
+                                    win.viewport.map(|vp| (win.buf, vp.rect.height))
+                                } else {
+                                    None
+                                }
+                            });
+                            if let Some((buf_id, vp_height)) = leaf_info {
+                                let (win, buf) = self.win_and_buf_mut(w, buf_id);
+                                if let (Some(win), Some(buf)) = (win, buf) {
+                                    win.pan_by_lines(buf, delta, vp_height);
+                                }
+                            }
+                        }
+                    }
                     return Status::Consumed;
                 }
                 // Modal blocks splits hits while open; overlay hits already returned above.

@@ -203,6 +203,10 @@ pub struct Window {
     /// Paints `CursorLine` bg on the cursor row when focused. Off by default; list-shaped
     /// windows opt in so the selected row is visible regardless of focus.
     pub cursor_line_highlight: bool,
+    /// Whether mouse-wheel events over this leaf scroll the viewport. List leaves opt in
+    /// so the wheel pans the rows; one-line inputs leave it off so wheeling near them
+    /// stays inert. The host hit-tests on every scroll event and routes accordingly.
+    pub mouse_scroll: bool,
 
     /// Populated each frame by the host so scrollbar paint is available without a render-time channel.
     pub viewport: Option<WindowViewport>,
@@ -250,6 +254,7 @@ impl Window {
             config,
             focusable: true,
             cursor_line_highlight: false,
+            mouse_scroll: false,
             viewport: None,
             cpos: 0,
             vim_enabled: false,
