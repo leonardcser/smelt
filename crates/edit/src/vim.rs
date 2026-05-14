@@ -2053,6 +2053,26 @@ mod tests {
     }
 
     #[test]
+    fn dip_deletes_the_paragraph_around_the_cursor() {
+        let mut h = TestHarness::new("a\nb\nc\n\nd\n");
+        h.cpos = 2;
+        h.handle(key('d'));
+        h.handle(key('i'));
+        h.handle(key('p'));
+        assert_eq!(h.buf, "\nd\n");
+    }
+
+    #[test]
+    fn dap_also_consumes_the_trailing_blank_lines() {
+        let mut h = TestHarness::new("a\nb\n\n\nc\n");
+        h.cpos = 0;
+        h.handle(key('d'));
+        h.handle(key('a'));
+        h.handle(key('p'));
+        assert_eq!(h.buf, "c\n");
+    }
+
+    #[test]
     fn test_paste() {
         let mut h = TestHarness::new("hello");
         h.clipboard

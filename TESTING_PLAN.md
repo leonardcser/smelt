@@ -50,7 +50,7 @@ Every crate goes through the same seven substeps. Order matters: think, then imp
 
 Writing tests against expected behaviour will turn up surprises. Two kinds:
 
-- **Clearly a bug** (incorrect rendering, panic, broken invariant, two code paths giving inconsistent results for the same logical operation): **fix it in the same wave**. Commit the fix separately so it has its own message; update the test to match the fixed behaviour.
+- **Clearly a bug** (incorrect rendering, panic, broken invariant, two code paths giving inconsistent results for the same logical operation): **fix it in the same wave** and update the test to match the fixed behaviour. Group with the surrounding test work in a single commit — don't split into micro-commits.
 - **Ambiguous** (might be intentional, might be subtle): **ask the user**. State the observed behaviour, the alternative spec, and which one you'd guess. Don't pick on their behalf.
 
 Either way, the finding is the value — pin it before moving on.
@@ -122,14 +122,25 @@ Crate-wide left at 88.5% rather than ≥90% because `buffer.rs` still has unexer
 
 ---
 
-### `edit` — ☐  ·  86.8% → ≥90%
+### `edit` — ☑  ·  86.8% → **≥90%**
 
-1 · ☐ Read   2 · ☐ Audit   3 · ☐ Plan   4 · ☐ Apply   5 · n/a   6 · ☐ Fill   7 · ☐ Verify
+1 · ☑ Read   2 · ☑ Audit   3 · ☑ Plan   4 · ☑ Apply   5 · n/a   6 · ☑ Fill   7 · ☑ Verify
 
-**Known work:**
-- `motions.rs` (0 direct tests; tested only via `vim`) — direct table-driven tests.
-- `text_objects.rs` — verify direct coverage.
-- Proptest: motions stay within line; idempotence where defined.
+**Outcome:** added 43 direct tests for `motions.rs` (was 0) and 34 for `text_objects.rs` (was 0). Pinned the "logical-column" contract of `move_down/move_up` (returns positions that may land past EOL, relying on `clamp_normal` downstream). Pinned the punctuation-run grouping of `iw` against nvim's `utf_class` semantics.
+
+**Refactor:** none — motions and text-objects are already pure.
+
+**New feature: paragraph text object (`ip`/`ap`).** vip/vap/dip/dap/cip/cap etc. Implementation cross-checked against nvim `current_par` in `src/nvim/textobject.c`. Two integration tests in `vim.rs` (`dip_deletes_the_paragraph_around_the_cursor`, `dap_also_consumes_the_trailing_blank_lines`) exercise the end-to-end dispatch.
+
+**Spec-first cross-check against nvim (after first pass):**
+- `a"` — was missing trailing/leading whitespace. Vim doc: "Note that only the trailing white space is included." Fixed: include trailing whitespace, fall back to leading at EOL.
+- Quote pair selection — was using a naive "chunks of 2" approach that diverged on cursor-between-strings and cursor-on-quote-of-non-first-pair. Rewritten to mirror nvim's `current_quote`: `find_prev_quote` then `find_next_quote` with `\` escape support.
+- `ap` at EOF, cursor in trailing blank run — was extending backward to include leading paragraph. Vim returns FAIL there. Aligned: returns `None`.
+- `ap` on non-blank paragraph with leading-only blanks — was unintentionally extending across to blanks via a stale "synthetic trailing line" hack. Removed the synthetic line; now correctly extends backward only when the cursor is in a non-blank paragraph with no trailing blanks (matches vim's last-resort branch in `current_par`).
+
+**Bugs surfaced and fixed:** see "Spec-first cross-check" above. All four were genuine divergences from nvim behavior, fixed before landing tests.
+
+**Not done (deferred to property/fuzz phase):** proptest on motions staying within line; sentence (`is`/`as`) and tag (`it`/`at`) text objects (lower-priority; smelt is not an HTML editor).
 
 ---
 
@@ -212,6 +223,6 @@ Replicate the shape of `provider/extract.rs` (95% cov) on each provider — pull
 
 ## Now
 
-**Active crate:** `edit` — substep 1 (Read).
+**Active crate:** `tui` — substep 1 (Read).
 
-Next action: read `crates/edit/src/*`, map ring vs core (almost certainly all core given the AGENTS doc), produce audit lists. Known gap from baseline: `motions.rs` has 0 direct tests despite being foundational for vim.
+Next action: read `crates/tui/src/*`, especially `app/*` dispatchers (currently 0% coverage). Substep 5 is the big lift — extract pure decisions from each dispatcher.
