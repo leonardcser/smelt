@@ -367,8 +367,9 @@ impl StreamParser {
         name: String,
         summary: protocol::StyledLines,
         args: HashMap<String, serde_json::Value>,
+        now: Instant,
     ) {
-        let start_time = Instant::now();
+        let start_time = now;
         let block = Block::ToolCall {
             call_id: call_id.clone(),
             name,
@@ -438,6 +439,7 @@ impl StreamParser {
         history: &mut BlockHistory,
         call_id: &str,
         status: ToolStatus,
+        now: Instant,
     ) {
         let Some(cid) = self.resolve_active_call_id(history, call_id) else {
             return;
@@ -448,7 +450,7 @@ impl StreamParser {
                 Some(ToolStatus::Confirm)
             ) && status == ToolStatus::Pending
             {
-                active.start_time = Instant::now();
+                active.start_time = now;
             }
         }
         Self::update_tool_state(history, &cid, |state| state.status = status);
@@ -781,6 +783,7 @@ mod tests {
             "bash".into(),
             "bash".into(),
             HashMap::new(),
+            Instant::now(),
         );
         assert_eq!(history.len(), 2);
         assert_eq!(
@@ -802,6 +805,7 @@ mod tests {
             "bash".into(),
             "bash".into(),
             HashMap::new(),
+            Instant::now(),
         );
         let tool_block_id = history.order[0];
         assert_eq!(history.status(tool_block_id), Status::Streaming);

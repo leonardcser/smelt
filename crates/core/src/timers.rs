@@ -33,20 +33,26 @@ impl Timers {
         }
     }
 
-    pub(crate) fn set(&mut self, delay: Duration, handle: LuaHandle) -> TimerId {
-        self.push(delay, None, handle)
+    pub(crate) fn set(&mut self, delay: Duration, handle: LuaHandle, now: Instant) -> TimerId {
+        self.push(delay, None, handle, now)
     }
 
-    pub(crate) fn every(&mut self, period: Duration, handle: LuaHandle) -> TimerId {
-        self.push(period, Some(period), handle)
+    pub(crate) fn every(&mut self, period: Duration, handle: LuaHandle, now: Instant) -> TimerId {
+        self.push(period, Some(period), handle, now)
     }
 
-    fn push(&mut self, delay: Duration, period: Option<Duration>, handle: LuaHandle) -> TimerId {
+    fn push(
+        &mut self,
+        delay: Duration,
+        period: Option<Duration>,
+        handle: LuaHandle,
+        now: Instant,
+    ) -> TimerId {
         let id = self.next_id;
         self.next_id = self.next_id.wrapping_add(1);
         self.entries.push(TimerEntry {
             id,
-            deadline: Instant::now() + delay,
+            deadline: now + delay,
             period,
             handle,
         });
@@ -112,10 +118,10 @@ mod tests {
         lua.globals().set("c", counter).unwrap();
         let h = handle(&lua, "function() c.n = c.n + 1 end");
         let mut t = Timers::new();
-        t.set(Duration::from_millis(0), h);
+        let now = Instant::now();
+        t.set(Duration::from_millis(10), h, now);
         assert_eq!(t.len(), 1);
-        std::thread::sleep(Duration::from_millis(2));
-        let due = t.drain_due(Instant::now(), &lua);
+        let due = t.drain_due(now + Duration::from_millis(20), &lua);
         assert_eq!(due.len(), 1);
         for f in due {
             f.call::<()>(()).unwrap();
@@ -135,9 +141,9 @@ mod tests {
         let lua = Lua::new();
         let h = handle(&lua, "function() end");
         let mut t = Timers::new();
-        let id = t.every(Duration::from_millis(0), h);
-        std::thread::sleep(Duration::from_millis(2));
-        let due = t.drain_due(Instant::now(), &lua);
+        let now = Instant::now();
+        let id = t.every(Duration::from_millis(10), h, now);
+        let due = t.drain_due(now + Duration::from_millis(20), &lua);
         assert_eq!(due.len(), 1);
         // Still in the queue, deadline pushed forward.
         assert_eq!(t.len(), 1);

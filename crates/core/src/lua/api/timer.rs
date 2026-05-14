@@ -25,7 +25,8 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
         |lua, (ms, handler): (u64, TimerHandler)| -> LuaResult<u64> {
             let handle = LuaHandle::from_func(lua, handler.into_inner())?;
             Ok(crate::host::try_with_core(|core| {
-                core.timers.set(Duration::from_millis(ms), handle)
+                let now = core.clock.instant_now();
+                core.timers.set(Duration::from_millis(ms), handle, now)
             })
             .unwrap_or(0))
         },
@@ -45,7 +46,8 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
             }
             let handle = LuaHandle::from_func(lua, handler.into_inner())?;
             Ok(crate::host::try_with_core(|core| {
-                core.timers.every(Duration::from_millis(ms), handle)
+                let now = core.clock.instant_now();
+                core.timers.every(Duration::from_millis(ms), handle, now)
             })
             .unwrap_or(0))
         },
@@ -71,7 +73,8 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
         |lua, (ms, handler): (u64, TimerHandler)|  -> LuaResult<()>{
             let handle = LuaHandle::from_func(lua, handler.into_inner())?;
             crate::host::try_with_core(|core| {
-                core.timers.set(Duration::from_millis(ms), handle)
+                let now = core.clock.instant_now();
+                core.timers.set(Duration::from_millis(ms), handle, now)
             });
             Ok(())
         },

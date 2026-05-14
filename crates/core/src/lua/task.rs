@@ -151,7 +151,7 @@ impl LuaTaskRuntime {
                 i += 1;
                 continue;
             }
-            let drop_task = self.step_task(lua, i, &mut outputs);
+            let drop_task = self.step_task(lua, i, now, &mut outputs);
             if drop_task {
                 self.tasks.swap_remove(i);
             } else {
@@ -161,7 +161,13 @@ impl LuaTaskRuntime {
         outputs
     }
 
-    fn step_task(&mut self, lua: &Lua, idx: usize, outputs: &mut Vec<TaskDriveOutput>) -> bool {
+    fn step_task(
+        &mut self,
+        lua: &Lua,
+        idx: usize,
+        now: Instant,
+        outputs: &mut Vec<TaskDriveOutput>,
+    ) -> bool {
         let task = &mut self.tasks[idx];
         let resume_args =
             match std::mem::replace(&mut task.wait, TaskWait::Ready(LuaMultiValue::new())) {
@@ -200,7 +206,7 @@ impl LuaTaskRuntime {
                             mv.push_back(cancelled_marker(lua));
                             task.wait = TaskWait::Ready(mv);
                         } else {
-                            task.wait = TaskWait::Sleep(Instant::now() + d);
+                            task.wait = TaskWait::Sleep(now + d);
                         }
                         false
                     }

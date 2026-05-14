@@ -81,8 +81,15 @@ impl TuiApp {
         summary: ::protocol::StyledLines,
         args: HashMap<String, serde_json::Value>,
     ) {
-        self.parser
-            .start_tool(&mut self.transcript.history, call_id, name, summary, args);
+        let now = self.core.clock.instant_now();
+        self.parser.start_tool(
+            &mut self.transcript.history,
+            call_id,
+            name,
+            summary,
+            args,
+            now,
+        );
     }
 
     pub(crate) fn start_exec(&mut self, command: String) {
@@ -113,8 +120,9 @@ impl TuiApp {
     }
 
     pub(crate) fn set_active_status(&mut self, call_id: &str, status: ToolStatus) {
+        let now = self.core.clock.instant_now();
         self.parser
-            .set_active_status(&mut self.transcript.history, call_id, status);
+            .set_active_status(&mut self.transcript.history, call_id, status, now);
     }
 
     pub(crate) fn set_active_user_message(&mut self, call_id: &str, msg: String) {
