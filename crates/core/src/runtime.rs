@@ -86,7 +86,7 @@ impl Core {
                 FrontendKind::Tui => Box::new(Osc52Sink),
                 FrontendKind::Headless => Box::new(SystemSink),
             }),
-            timers: Timers::new(),
+            timers: Timers::new(Arc::clone(&clock)),
             cells,
             engine: EngineClient::new(engine, confirms_flag),
             frontend,

@@ -450,8 +450,7 @@ impl TuiApp {
 
     /// Fire due timer callbacks; re-arms recurring entries and drops one-shots.
     pub(crate) fn tick_timers(&mut self) {
-        let now = self.core.clock.instant_now();
-        let due = self.core.timers.drain_due(now, self.lua.lua());
+        let due = self.core.timers.drain_due(self.lua.lua());
         for func in due {
             let _perf = smelt_perf::perf::begin("lua:timer");
             if let Err(e) = func.call::<()>(()) {
