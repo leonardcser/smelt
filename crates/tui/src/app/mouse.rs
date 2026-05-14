@@ -1,13 +1,76 @@
 //! Mouse event handling: wheel scrolling, drag-select, scrollbar drag, cell-click hit-testing.
 
-use crate::app::{EventOutcome, TuiApp};
+use crate::app::{AppFocus, EventOutcome, TuiApp};
 use crate::content::layout::HitRegion;
-use crossterm::event::{MouseEvent, MouseEventKind};
+use crate::smelt_term::{HitTarget, WinId};
+use crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
+
+/// `true` for the four wheel directions. Used to decide whether an event
+/// merits a redraw after `Ui::dispatch_event` consumed it.
+pub(crate) fn is_scroll_event(kind: MouseEventKind) -> bool {
+    matches!(
+        kind,
+        MouseEventKind::ScrollUp
+            | MouseEventKind::ScrollDown
+            | MouseEventKind::ScrollLeft
+            | MouseEventKind::ScrollRight
+    )
+}
+
+/// `true` for a left-button press. The dispatcher uses this to gate focus
+/// promotion and yank-on-release.
+pub(crate) fn is_left_down(kind: MouseEventKind) -> bool {
+    matches!(kind, MouseEventKind::Down(MouseButton::Left))
+}
+
+/// Inspect the capture state immediately before and after `Ui::dispatch_event`
+/// and report which window owns the scrollbar drag, if any. Either edge of
+/// the transition counts: capture *starts* on Down, but a drag/Up still
+/// observes the scrollbar in `cap_before` after `Ui::dispatch_event` clears it.
+pub(crate) fn scrollbar_owner_from_capture_transition(
+    before: Option<HitTarget>,
+    after: Option<HitTarget>,
+) -> Option<WinId> {
+    match (before, after) {
+        (Some(HitTarget::Scrollbar { owner }), _) | (_, Some(HitTarget::Scrollbar { owner })) => {
+            Some(owner)
+        }
+        _ => None,
+    }
+}
+
+/// Map a well-known [`WinId`] to the [`AppFocus`] it represents. Used by the
+/// scrollbar-click path so dragging the transcript scrollbar promotes
+/// content focus and dragging the prompt scrollbar promotes prompt focus.
+/// Returns `None` for any other window.
+pub(crate) fn app_focus_for_owner(owner: WinId) -> Option<AppFocus> {
+    if owner == crate::app::TRANSCRIPT_WIN {
+        Some(AppFocus::Content)
+    } else if owner == crate::app::PROMPT_WIN {
+        Some(AppFocus::Prompt)
+    } else {
+        None
+    }
+}
+
+/// Compute the new [`AppFocus`] for a left-down click landing in `region`.
+/// `has_transcript_content` is `false` when the transcript pane is empty
+/// (we don't promote focus to a blank pane). Returns `None` to leave focus
+/// untouched.
+pub(crate) fn focus_for_region_click(
+    region: HitRegion,
+    has_transcript_content: bool,
+) -> Option<AppFocus> {
+    match region {
+        HitRegion::Prompt => Some(AppFocus::Prompt),
+        HitRegion::Transcript if has_transcript_content => Some(AppFocus::Content),
+        _ => None,
+    }
+}
 
 impl TuiApp {
     // ── Mouse event dispatch ─────────────────────────────────────────────
     pub(crate) fn handle_mouse(&mut self, me: MouseEvent) -> EventOutcome {
-        use crossterm::event::MouseButton;
         // `Ui::dispatch_event` handles wheel-over-overlay, modal click-outside absorb,
         // and scrollbar drag. Anything unclaimed (`Ignored`) flows through below.
         let cap_before = self.ui.capture();
@@ -16,29 +79,17 @@ impl TuiApp {
                 .dispatch_event(crate::smelt_term::Event::Mouse(me), &mut |_, _, _| {}),
             crate::smelt_term::Status::Consumed
         ) {
-            let scrollbar_owner = match (cap_before, self.ui.capture()) {
-                (Some(crate::smelt_term::HitTarget::Scrollbar { owner }), _)
-                | (_, Some(crate::smelt_term::HitTarget::Scrollbar { owner })) => Some(owner),
-                _ => None,
-            };
-            if let Some(owner) = scrollbar_owner {
-                if matches!(me.kind, MouseEventKind::Down(MouseButton::Left)) {
-                    if owner == crate::app::TRANSCRIPT_WIN {
-                        self.app_focus = crate::app::AppFocus::Content;
-                    } else if owner == crate::app::PROMPT_WIN {
-                        self.app_focus = crate::app::AppFocus::Prompt;
+            if let Some(owner) =
+                scrollbar_owner_from_capture_transition(cap_before, self.ui.capture())
+            {
+                if is_left_down(me.kind) {
+                    if let Some(focus) = app_focus_for_owner(owner) {
+                        self.app_focus = focus;
                     }
                 }
                 return EventOutcome::Redraw;
             }
-            let is_scroll = matches!(
-                me.kind,
-                MouseEventKind::ScrollUp
-                    | MouseEventKind::ScrollDown
-                    | MouseEventKind::ScrollLeft
-                    | MouseEventKind::ScrollRight
-            );
-            return if is_scroll {
+            return if is_scroll_event(me.kind) {
                 EventOutcome::Redraw
             } else {
                 EventOutcome::Noop
@@ -52,13 +103,7 @@ impl TuiApp {
         // Wheel scroll is handled generically by `Ui::dispatch_event` — when it
         // falls through here, the wheel didn't land on a scrollable leaf and is
         // safe to drop.
-        if matches!(
-            me.kind,
-            MouseEventKind::ScrollUp
-                | MouseEventKind::ScrollDown
-                | MouseEventKind::ScrollLeft
-                | MouseEventKind::ScrollRight
-        ) {
+        if is_scroll_event(me.kind) {
             return EventOutcome::Noop;
         }
 
@@ -68,22 +113,18 @@ impl TuiApp {
         // on individual leaves don't have to know about app-level focus, and
         // visually-grouped chrome (prompt's top/bottom bars) inherits the
         // input's focus naturally.
-        let is_down = matches!(me.kind, MouseEventKind::Down(MouseButton::Left));
-        if is_down {
-            match self.layout.hit_test(me.row, me.column) {
-                HitRegion::Prompt => self.app_focus = crate::app::AppFocus::Prompt,
-                HitRegion::Transcript
-                    if self.has_transcript_content(self.core.config.settings.show_thinking) =>
-                {
-                    self.app_focus = crate::app::AppFocus::Content;
-                }
-                _ => {}
+        if is_left_down(me.kind) {
+            let region = self.layout.hit_test(me.row, me.column);
+            let has_content = self.has_transcript_content(self.core.config.settings.show_thinking);
+            if let Some(focus) = focus_for_region_click(region, has_content) {
+                self.app_focus = focus;
             }
         }
 
         // `Ui::resolve_split_mouse` handles hit-test, click-count, and HitTarget capture
         // so drags stay on the originating window even if the pointer drifts.
         if let Some((win, count)) = self.ui.resolve_split_mouse(me) {
+            let is_down = is_left_down(me.kind);
             let is_up = matches!(me.kind, MouseEventKind::Up(MouseButton::Left));
             if win == crate::app::PROMPT_WIN {
                 self.handle_prompt_mouse(me, count);
@@ -286,5 +327,141 @@ impl TuiApp {
             column: vp.rect.left.saturating_add(snapped as u16),
             ..me
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::smelt_term::HitTarget;
+
+    fn ev(kind: MouseEventKind) -> MouseEventKind {
+        kind
+    }
+
+    // ── is_scroll_event ──────────────────────────────────────────────────
+
+    #[test]
+    fn is_scroll_event_covers_all_four_wheel_directions() {
+        assert!(is_scroll_event(ev(MouseEventKind::ScrollUp)));
+        assert!(is_scroll_event(ev(MouseEventKind::ScrollDown)));
+        assert!(is_scroll_event(ev(MouseEventKind::ScrollLeft)));
+        assert!(is_scroll_event(ev(MouseEventKind::ScrollRight)));
+    }
+
+    #[test]
+    fn is_scroll_event_rejects_click_and_drag_events() {
+        assert!(!is_scroll_event(ev(MouseEventKind::Down(
+            MouseButton::Left
+        ))));
+        assert!(!is_scroll_event(ev(MouseEventKind::Up(MouseButton::Left))));
+        assert!(!is_scroll_event(ev(MouseEventKind::Drag(
+            MouseButton::Left
+        ))));
+        assert!(!is_scroll_event(ev(MouseEventKind::Moved)));
+    }
+
+    // ── is_left_down ─────────────────────────────────────────────────────
+
+    #[test]
+    fn is_left_down_matches_left_button_press_only() {
+        assert!(is_left_down(MouseEventKind::Down(MouseButton::Left)));
+        assert!(!is_left_down(MouseEventKind::Up(MouseButton::Left)));
+        assert!(!is_left_down(MouseEventKind::Down(MouseButton::Right)));
+        assert!(!is_left_down(MouseEventKind::Down(MouseButton::Middle)));
+        assert!(!is_left_down(MouseEventKind::Drag(MouseButton::Left)));
+    }
+
+    // ── scrollbar_owner_from_capture_transition ─────────────────────────
+
+    /// A WinId guaranteed not to collide with `PROMPT_WIN`/`TRANSCRIPT_WIN`,
+    /// for testing the "unknown owner" branch of `app_focus_for_owner`.
+    fn other_win() -> WinId {
+        WinId(9999)
+    }
+
+    #[test]
+    fn scrollbar_owner_is_none_when_neither_capture_was_a_scrollbar() {
+        assert_eq!(scrollbar_owner_from_capture_transition(None, None), None);
+    }
+
+    #[test]
+    fn scrollbar_owner_recovers_from_before_when_after_is_cleared() {
+        // `Up` clears capture but we still want to know who owned the drag.
+        let owner = other_win();
+        let before = Some(HitTarget::Scrollbar { owner });
+        assert_eq!(
+            scrollbar_owner_from_capture_transition(before, None),
+            Some(owner)
+        );
+    }
+
+    #[test]
+    fn scrollbar_owner_picks_up_after_when_before_was_empty() {
+        // `Down` sets capture for the first time; `before` was `None`.
+        let owner = other_win();
+        let after = Some(HitTarget::Scrollbar { owner });
+        assert_eq!(
+            scrollbar_owner_from_capture_transition(None, after),
+            Some(owner)
+        );
+    }
+
+    // ── app_focus_for_owner ──────────────────────────────────────────────
+
+    #[test]
+    fn app_focus_for_owner_maps_transcript_window_to_content_focus() {
+        assert_eq!(
+            app_focus_for_owner(crate::app::TRANSCRIPT_WIN),
+            Some(AppFocus::Content)
+        );
+    }
+
+    #[test]
+    fn app_focus_for_owner_maps_prompt_window_to_prompt_focus() {
+        assert_eq!(
+            app_focus_for_owner(crate::app::PROMPT_WIN),
+            Some(AppFocus::Prompt)
+        );
+    }
+
+    #[test]
+    fn app_focus_for_owner_returns_none_for_unrelated_windows() {
+        assert_eq!(app_focus_for_owner(other_win()), None);
+    }
+
+    // ── focus_for_region_click ───────────────────────────────────────────
+
+    #[test]
+    fn region_click_on_prompt_always_promotes_to_prompt_focus() {
+        assert_eq!(
+            focus_for_region_click(HitRegion::Prompt, true),
+            Some(AppFocus::Prompt)
+        );
+        assert_eq!(
+            focus_for_region_click(HitRegion::Prompt, false),
+            Some(AppFocus::Prompt)
+        );
+    }
+
+    #[test]
+    fn region_click_on_transcript_with_content_promotes_to_content_focus() {
+        assert_eq!(
+            focus_for_region_click(HitRegion::Transcript, true),
+            Some(AppFocus::Content)
+        );
+    }
+
+    #[test]
+    fn region_click_on_empty_transcript_does_not_steal_focus() {
+        // No content means there's nothing to focus into — leave the user
+        // in the prompt.
+        assert_eq!(focus_for_region_click(HitRegion::Transcript, false), None);
+    }
+
+    #[test]
+    fn region_click_on_status_or_outside_does_not_change_focus() {
+        assert_eq!(focus_for_region_click(HitRegion::Status, true), None);
+        assert_eq!(focus_for_region_click(HitRegion::Outside, true), None);
     }
 }
