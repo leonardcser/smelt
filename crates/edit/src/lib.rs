@@ -259,9 +259,8 @@ impl Ui {
     }
 
     /// Returns 1/2/3 for successive Downs on the same cell within 400ms; wraps at 4.
-    fn record_click(&mut self, row: u16, col: u16) -> u8 {
-        use std::time::{Duration, Instant};
-        let now = Instant::now();
+    fn record_click(&mut self, row: u16, col: u16, now: std::time::Instant) -> u8 {
+        use std::time::Duration;
         let count = match self.last_click {
             Some((t, r, c, n))
                 if now.duration_since(t) < Duration::from_millis(400)
@@ -283,7 +282,11 @@ impl Ui {
     /// returned `Ignored` — that method owns scrollbar drag and modal blocking.
     /// Overlay leaves participate so a `selectable` notification or dialog body
     /// can drive its own selection through `Window::handle_mouse`.
-    pub fn resolve_split_mouse(&mut self, me: crossterm::event::MouseEvent) -> Option<(WinId, u8)> {
+    pub fn resolve_split_mouse(
+        &mut self,
+        me: crossterm::event::MouseEvent,
+        now: std::time::Instant,
+    ) -> Option<(WinId, u8)> {
         use crossterm::event::{MouseButton, MouseEventKind};
         match me.kind {
             MouseEventKind::Down(MouseButton::Left) => {
@@ -292,7 +295,7 @@ impl Ui {
                     _ => return None,
                 };
                 self.set_capture(HitTarget::Window(win));
-                let count = self.record_click(me.row, me.column);
+                let count = self.record_click(me.row, me.column, now);
                 Some((win, count))
             }
             MouseEventKind::Drag(MouseButton::Left) => match self.capture {
@@ -3488,14 +3491,15 @@ mod tests {
     #[test]
     fn record_click_caps_at_three_then_wraps() {
         let mut ui = make_ui();
+        let t0 = std::time::Instant::now();
         // Same cell, no time gap → climbs to 3, then wraps.
-        assert_eq!(ui.record_click(5, 7), 1);
-        assert_eq!(ui.record_click(5, 7), 2);
-        assert_eq!(ui.record_click(5, 7), 3);
-        assert_eq!(ui.record_click(5, 7), 1);
+        assert_eq!(ui.record_click(5, 7, t0), 1);
+        assert_eq!(ui.record_click(5, 7, t0), 2);
+        assert_eq!(ui.record_click(5, 7, t0), 3);
+        assert_eq!(ui.record_click(5, 7, t0), 1);
         // Different cell resets the count.
-        assert_eq!(ui.record_click(5, 7), 2);
-        assert_eq!(ui.record_click(8, 7), 1);
+        assert_eq!(ui.record_click(5, 7, t0), 2);
+        assert_eq!(ui.record_click(8, 7, t0), 1);
     }
 
     /// Set up a single splits leaf at `(0, 0, 20, 10)` with a painted
@@ -3639,11 +3643,11 @@ mod tests {
             3,
             5,
         );
-        let resolved = ui.resolve_split_mouse(me);
+        let resolved = ui.resolve_split_mouse(me, std::time::Instant::now());
         assert_eq!(resolved, Some((win, 1)));
         assert_eq!(ui.capture(), Some(HitTarget::Window(win)));
         // A second Down on the same cell increments the click count.
-        let resolved = ui.resolve_split_mouse(me);
+        let resolved = ui.resolve_split_mouse(me, std::time::Instant::now());
         assert_eq!(resolved, Some((win, 2)));
     }
 
@@ -3659,7 +3663,7 @@ mod tests {
             50,
             50,
         );
-        let resolved = ui.resolve_split_mouse(drag);
+        let resolved = ui.resolve_split_mouse(drag, std::time::Instant::now());
         assert_eq!(resolved, Some((win, 0)));
         assert_eq!(ui.capture(), Some(HitTarget::Window(win)));
     }
@@ -3674,7 +3678,7 @@ mod tests {
             0,
             0,
         );
-        let resolved = ui.resolve_split_mouse(up);
+        let resolved = ui.resolve_split_mouse(up, std::time::Instant::now());
         assert_eq!(resolved, Some((win, 0)));
         assert_eq!(ui.capture(), None);
     }
@@ -3690,7 +3694,7 @@ mod tests {
             3,
             19,
         );
-        assert_eq!(ui.resolve_split_mouse(me), None);
+        assert_eq!(ui.resolve_split_mouse(me, std::time::Instant::now()), None);
         assert_eq!(ui.capture(), None);
     }
 
@@ -3703,7 +3707,10 @@ mod tests {
             3,
             5,
         );
-        assert_eq!(ui.resolve_split_mouse(drag), None);
+        assert_eq!(
+            ui.resolve_split_mouse(drag, std::time::Instant::now()),
+            None
+        );
     }
 
     #[test]
@@ -3715,7 +3722,7 @@ mod tests {
             3,
             5,
         );
-        assert_eq!(ui.resolve_split_mouse(me), None);
+        assert_eq!(ui.resolve_split_mouse(me, std::time::Instant::now()), None);
         assert_eq!(ui.capture(), None);
     }
 

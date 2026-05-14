@@ -125,7 +125,8 @@ impl TuiApp {
 
         // `Ui::resolve_split_mouse` handles hit-test, click-count, and HitTarget capture
         // so drags stay on the originating window even if the pointer drifts.
-        if let Some((win, count)) = self.ui.resolve_split_mouse(me) {
+        let now = self.core.clock.instant_now();
+        if let Some((win, count)) = self.ui.resolve_split_mouse(me, now) {
             let is_down = is_left_down(me.kind);
             let is_up = matches!(me.kind, MouseEventKind::Up(MouseButton::Left));
             if win == crate::app::PROMPT_WIN {
