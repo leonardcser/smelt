@@ -26,4 +26,3 @@ tempfile = { workspace = true }
 
 [dev-dependencies]
 insta = { workspace = true }
-vt100 = { workspace = true }

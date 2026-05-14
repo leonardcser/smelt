@@ -51,7 +51,6 @@ url = "2"
 # Dev
 insta = { version = "1", features = ["json", "redactions"] }
 tempfile = "3"
-vt100 = "0.16"
 
 [package]
 name = "smelt-agent"

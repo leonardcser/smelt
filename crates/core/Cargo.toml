@@ -6,7 +6,6 @@ edition = "2021"
 [dependencies]
 protocol = { workspace = true }
 engine = { workspace = true }
-smelt-style = { workspace = true }
 smelt-perf = { workspace = true }
 smelt-buffer = { workspace = true }
 lua-doc-derive = { workspace = true }
@@ -36,4 +35,3 @@ neo_frizbee = "0.10"
 
 [dev-dependencies]
 tempfile = { workspace = true }
-vt100 = { workspace = true }
