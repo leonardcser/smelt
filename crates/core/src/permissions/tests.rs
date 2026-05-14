@@ -1708,3 +1708,351 @@ fn compound_command_with_ask_subcommand_and_tool_approval() {
         "find /tmp/data -name '*.py' | python3",
     ));
 }
+
+// ── RuntimeApprovals lifecycle (backfill) ───────────────────────────
+
+fn pat(s: &str) -> glob::Pattern {
+    glob::Pattern::new(s).unwrap()
+}
+
+/// Documents the surprising semantics of `add_session_tool` on a fresh entry:
+/// because an empty-Vec entry signals blanket approval to `is_approved`, the
+/// first call discards its patterns and the entry stays in the blanket state.
+/// Pattern extension only kicks in when the entry was pre-populated (via
+/// `set_session` or `load_workspace`).
+#[test]
+fn approvals_add_session_tool_first_call_blankets_and_discards_patterns() {
+    let mut rt = RuntimeApprovals::new();
+    rt.add_session_tool("bash", vec![pat("ls *"), pat("cat *")]);
+    // Pattern is NOT stored — the entry is empty (= blanket approval).
+    assert!(!rt.has_pattern("bash", "ls *"));
+    // Blanket approval is in effect.
+    assert!(rt.is_approved("bash", "anything goes", None));
+}
+
+#[test]
+fn approvals_add_session_tool_extends_when_session_was_preloaded() {
+    let mut rt = RuntimeApprovals::new();
+    // Seed the entry through set_session so the entry is non-empty.
+    let mut seed: HashMap<String, Vec<glob::Pattern>> = HashMap::new();
+    seed.insert("bash".into(), vec![pat("ls *")]);
+    rt.set_session(seed, vec![]);
+    rt.add_session_tool("bash", vec![pat("cat *")]);
+    assert!(rt.has_pattern("bash", "ls *"));
+    assert!(rt.has_pattern("bash", "cat *"));
+}
+
+#[test]
+fn approvals_add_workspace_tool_first_call_blankets_and_discards_patterns() {
+    let mut rt = RuntimeApprovals::new();
+    rt.add_workspace_tool("bash", vec![pat("git *")]);
+    assert!(!rt.has_pattern("bash", "git *"));
+    assert!(rt.is_approved("bash", "git status", None));
+}
+
+#[test]
+fn approvals_add_workspace_tool_extends_when_workspace_was_preloaded() {
+    let mut rt = RuntimeApprovals::new();
+    let mut seed: HashMap<String, Vec<glob::Pattern>> = HashMap::new();
+    seed.insert("bash".into(), vec![pat("git *")]);
+    rt.load_workspace(seed, vec![]);
+    rt.add_workspace_tool("bash", vec![pat("ls *")]);
+    assert!(rt.has_pattern("bash", "git *"));
+    assert!(rt.has_pattern("bash", "ls *"));
+}
+
+#[test]
+fn approvals_add_session_dir_dedupes_after_tilde_expansion() {
+    let mut rt = RuntimeApprovals::new();
+    let abs = std::env::temp_dir();
+    rt.add_session_dir(abs.clone());
+    rt.add_session_dir(abs.clone());
+    assert_eq!(rt.session_dirs().len(), 1);
+}
+
+#[test]
+fn approvals_add_workspace_dir_dedupes_after_tilde_expansion() {
+    let mut rt = RuntimeApprovals::new();
+    rt.add_workspace_dir(std::env::temp_dir());
+    rt.add_workspace_dir(std::env::temp_dir());
+    // workspace_dirs is private; verify via dirs_approved against the temp path.
+    let temp = std::env::temp_dir();
+    let path_in = format!("{}/x", temp.to_string_lossy());
+    assert!(rt.dirs_approved(&[path_in]));
+}
+
+#[test]
+fn approvals_clear_session_removes_tools_and_dirs() {
+    let mut rt = RuntimeApprovals::new();
+    rt.add_session_tool("bash", vec![pat("git *")]);
+    rt.add_session_dir(PathBuf::from("/tmp"));
+    rt.clear_session();
+    assert!(!rt.has_pattern("bash", "git *"));
+    assert!(rt.session_dirs().is_empty());
+}
+
+#[test]
+fn approvals_clear_session_preserves_workspace_state() {
+    let mut rt = RuntimeApprovals::new();
+    let mut seed: HashMap<String, Vec<glob::Pattern>> = HashMap::new();
+    seed.insert("bash".into(), vec![pat("git *")]);
+    rt.load_workspace(seed, vec![PathBuf::from("/work")]);
+    rt.add_session_tool("bash", vec![pat("ls *")]);
+    rt.clear_session();
+    assert!(rt.has_pattern("bash", "git *"));
+    assert!(rt.dirs_approved(&["/work/x".into()]));
+}
+
+#[test]
+fn approvals_load_workspace_replaces_existing_workspace_entries() {
+    let mut rt = RuntimeApprovals::new();
+    rt.add_workspace_tool("bash", vec![pat("git *")]);
+    let mut tools: HashMap<String, Vec<glob::Pattern>> = HashMap::new();
+    tools.insert("bash".into(), vec![pat("find *")]);
+    rt.load_workspace(tools, vec![PathBuf::from("/var")]);
+    assert!(rt.has_pattern("bash", "find *"));
+    assert!(!rt.has_pattern("bash", "git *"));
+}
+
+#[test]
+fn approvals_set_session_replaces_existing_session_entries() {
+    let mut rt = RuntimeApprovals::new();
+    rt.add_session_tool("bash", vec![pat("a *")]);
+    let mut tools: HashMap<String, Vec<glob::Pattern>> = HashMap::new();
+    tools.insert("bash".into(), vec![pat("z *")]);
+    rt.set_session(tools, vec![PathBuf::from("/srv")]);
+    assert!(rt.has_pattern("bash", "z *"));
+    assert!(!rt.has_pattern("bash", "a *"));
+}
+
+#[test]
+fn approvals_session_tool_entries_returns_sorted_tools_and_patterns() {
+    let mut rt = RuntimeApprovals::new();
+    rt.add_session_tool("read", vec![pat("**")]);
+    rt.add_session_tool("bash", vec![pat("ls *"), pat("cat *")]);
+    let entries = rt.session_tool_entries();
+    let tools: Vec<&str> = entries.iter().map(|(t, _)| t.as_str()).collect();
+    assert_eq!(tools, vec!["bash", "read"]);
+}
+
+#[test]
+fn approvals_has_pattern_false_for_unknown_tool_or_pattern() {
+    let mut rt = RuntimeApprovals::new();
+    rt.add_session_tool("bash", vec![pat("git *")]);
+    assert!(!rt.has_pattern("python", "git *"));
+    assert!(!rt.has_pattern("bash", "rm *"));
+}
+
+#[test]
+fn approvals_dirs_approved_returns_true_for_empty_paths() {
+    let rt = RuntimeApprovals::new();
+    assert!(rt.dirs_approved(&[]));
+}
+
+#[test]
+fn approvals_dirs_approved_returns_false_when_no_dirs_registered() {
+    let rt = RuntimeApprovals::new();
+    assert!(!rt.dirs_approved(&["/tmp/foo".into()]));
+}
+
+#[test]
+fn approvals_dirs_approved_checks_parent_prefix_match() {
+    let mut rt = RuntimeApprovals::new();
+    rt.add_session_dir(PathBuf::from("/work"));
+    assert!(rt.dirs_approved(&["/work/sub/file.rs".into()]));
+    assert!(!rt.dirs_approved(&["/other/file.rs".into()]));
+}
+
+#[test]
+fn approvals_is_approved_blanket_session_overrides_pattern_check() {
+    let mut rt = RuntimeApprovals::new();
+    rt.add_session_tool("bash", Vec::new());
+    assert!(rt.is_approved("bash", "anything goes", None));
+}
+
+#[test]
+fn approvals_is_approved_returns_false_when_no_entry_exists() {
+    let rt = RuntimeApprovals::new();
+    assert!(!rt.is_approved("bash", "ls", None));
+}
+
+#[test]
+fn approvals_is_approved_requires_all_subcommands_match() {
+    let mut rt = RuntimeApprovals::new();
+    // Seed via set_session so the patterns actually persist.
+    let mut seed: HashMap<String, Vec<glob::Pattern>> = HashMap::new();
+    seed.insert("bash".into(), vec![pat("ls *")]);
+    rt.set_session(seed, vec![]);
+    // Only `ls` is approved; chained `rm` should fail.
+    assert!(!rt.is_approved("bash", "ls && rm -rf /", None));
+}
+
+// ── rules.rs (backfill: merge_mode / build_mode / for_mode) ─────────
+
+#[test]
+fn merge_mode_combines_default_and_mode_tools_and_subcommands() {
+    use crate::permissions::rules::{merge_mode, RawModePerms, RawRuleSet};
+    let default = RawModePerms {
+        tools: RawRuleSet {
+            allow: vec!["read".into()],
+            ask: vec!["write".into()],
+            deny: vec![],
+        },
+        subcommands: HashMap::from([(
+            "bash".into(),
+            RawRuleSet {
+                allow: vec!["ls *".into()],
+                ask: vec![],
+                deny: vec![],
+            },
+        )]),
+    };
+    let mode = RawModePerms {
+        tools: RawRuleSet {
+            allow: vec!["exec".into()],
+            ask: vec![],
+            deny: vec!["delete".into()],
+        },
+        subcommands: HashMap::from([(
+            "bash".into(),
+            RawRuleSet {
+                allow: vec!["cat *".into()],
+                ask: vec![],
+                deny: vec!["rm *".into()],
+            },
+        )]),
+    };
+    let merged = merge_mode(&default, &mode);
+    assert!(merged.tools.allow.contains(&"read".to_string()));
+    assert!(merged.tools.allow.contains(&"exec".to_string()));
+    assert!(merged.tools.ask.contains(&"write".to_string()));
+    assert!(merged.tools.deny.contains(&"delete".to_string()));
+    let bash = &merged.subcommands["bash"];
+    assert!(bash.allow.contains(&"ls *".to_string()));
+    assert!(bash.allow.contains(&"cat *".to_string()));
+    assert!(bash.deny.contains(&"rm *".to_string()));
+}
+
+#[test]
+fn merge_mode_handles_subcommand_present_only_in_default() {
+    use crate::permissions::rules::{merge_mode, RawModePerms, RawRuleSet};
+    let default = RawModePerms {
+        tools: RawRuleSet::default(),
+        subcommands: HashMap::from([(
+            "bash".into(),
+            RawRuleSet {
+                allow: vec!["ls *".into()],
+                ..Default::default()
+            },
+        )]),
+    };
+    let mode = RawModePerms {
+        tools: RawRuleSet::default(),
+        subcommands: HashMap::new(),
+    };
+    let merged = merge_mode(&default, &mode);
+    let bash = &merged.subcommands["bash"];
+    assert!(bash.allow.contains(&"ls *".to_string()));
+}
+
+#[test]
+fn merge_mode_handles_subcommand_present_only_in_mode() {
+    use crate::permissions::rules::{merge_mode, RawModePerms, RawRuleSet};
+    let default = RawModePerms {
+        tools: RawRuleSet::default(),
+        subcommands: HashMap::new(),
+    };
+    let mode = RawModePerms {
+        tools: RawRuleSet::default(),
+        subcommands: HashMap::from([(
+            "bash".into(),
+            RawRuleSet {
+                allow: vec!["git *".into()],
+                ..Default::default()
+            },
+        )]),
+    };
+    let merged = merge_mode(&default, &mode);
+    let bash = &merged.subcommands["bash"];
+    assert!(bash.allow.contains(&"git *".to_string()));
+}
+
+#[test]
+fn tool_perm_defaults_for_mode_returns_per_mode_decisions() {
+    let defaults = ToolPermDefaults {
+        normal: Some(Decision::Ask),
+        plan: Some(Decision::Allow),
+        apply: Some(Decision::Allow),
+        yolo: Some(Decision::Allow),
+    };
+    assert_eq!(defaults.for_mode(AgentMode::Normal), Some(&Decision::Ask));
+    assert_eq!(defaults.for_mode(AgentMode::Plan), Some(&Decision::Allow));
+    assert_eq!(defaults.for_mode(AgentMode::Apply), Some(&Decision::Allow));
+    assert_eq!(defaults.for_mode(AgentMode::Yolo), Some(&Decision::Allow));
+}
+
+#[test]
+fn tool_perm_defaults_for_mode_falls_back_to_none_when_unset() {
+    let defaults = ToolPermDefaults::default();
+    assert_eq!(defaults.for_mode(AgentMode::Normal), None);
+    assert_eq!(defaults.for_mode(AgentMode::Yolo), None);
+}
+
+// ── store.rs (backfill: into_approvals) ─────────────────────────────
+
+#[test]
+fn store_into_approvals_separates_directory_rules_from_tools() {
+    use crate::permissions::store::{into_approvals, Rule};
+    let rules = vec![
+        Rule {
+            tool: "bash".into(),
+            patterns: vec!["ls *".into(), "git *".into()],
+        },
+        Rule {
+            tool: "directory".into(),
+            patterns: vec!["/srv".into()],
+        },
+        Rule {
+            tool: "directory".into(),
+            patterns: vec!["/var".into()],
+        },
+    ];
+    let (tools, dirs) = into_approvals(&rules);
+    assert_eq!(tools["bash"].len(), 2);
+    assert_eq!(dirs.len(), 2);
+    assert!(dirs.contains(&PathBuf::from("/srv")));
+    assert!(dirs.contains(&PathBuf::from("/var")));
+}
+
+#[test]
+fn store_into_approvals_drops_wildcard_only_pattern_for_tools() {
+    use crate::permissions::store::{into_approvals, Rule};
+    let rules = vec![Rule {
+        tool: "bash".into(),
+        patterns: vec!["*".into(), "ls *".into()],
+    }];
+    let (tools, _) = into_approvals(&rules);
+    assert_eq!(tools["bash"].len(), 1);
+    assert_eq!(tools["bash"][0].as_str(), "ls *");
+}
+
+#[test]
+fn store_into_approvals_skips_invalid_glob_patterns() {
+    use crate::permissions::store::{into_approvals, Rule};
+    let rules = vec![Rule {
+        tool: "bash".into(),
+        // [ without ] is an invalid glob.
+        patterns: vec!["[unclosed".into(), "ls *".into()],
+    }];
+    let (tools, _) = into_approvals(&rules);
+    assert_eq!(tools["bash"].len(), 1);
+}
+
+#[test]
+fn store_into_approvals_handles_empty_rules() {
+    use crate::permissions::store::{into_approvals, Rule};
+    let rules: Vec<Rule> = vec![];
+    let (tools, dirs) = into_approvals(&rules);
+    assert!(tools.is_empty());
+    assert!(dirs.is_empty());
+}

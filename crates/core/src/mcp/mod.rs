@@ -225,26 +225,7 @@ impl McpManager {
             .map_err(|_| "MCP tool call timed out".to_string())?
             .map_err(|e| format!("MCP tool call failed: {e}"))?;
 
-        let mut parts: Vec<String> = Vec::new();
-        for item in result.content {
-            let part = match item.raw {
-                rmcp::model::RawContent::Text(text) => text.text,
-                rmcp::model::RawContent::Image(img) => {
-                    format!("[image: {}]", img.mime_type)
-                }
-                rmcp::model::RawContent::Resource(res) => match res.resource {
-                    rmcp::model::ResourceContents::TextResourceContents { text, .. } => text,
-                    rmcp::model::ResourceContents::BlobResourceContents { blob, .. } => {
-                        format!("[blob: {} bytes]", blob.len())
-                    }
-                },
-                _ => continue,
-            };
-            if !part.is_empty() {
-                parts.push(part);
-            }
-        }
-        let output = parts.join("\n");
+        let output = format_call_tool_content(result.content);
 
         if result.is_error.unwrap_or(false) {
             Err(output)
@@ -252,6 +233,33 @@ impl McpManager {
             Ok(output)
         }
     }
+}
+
+/// Flatten an MCP `call_tool` content list into a single text payload.
+/// Text and text-resource parts are kept verbatim; image and blob parts
+/// become placeholder labels; unknown variants are dropped. Empty parts
+/// are skipped so the joined output never contains blank lines.
+pub(crate) fn format_call_tool_content(content: Vec<rmcp::model::Content>) -> String {
+    let mut parts: Vec<String> = Vec::new();
+    for item in content {
+        let part = match item.raw {
+            rmcp::model::RawContent::Text(text) => text.text,
+            rmcp::model::RawContent::Image(img) => {
+                format!("[image: {}]", img.mime_type)
+            }
+            rmcp::model::RawContent::Resource(res) => match res.resource {
+                rmcp::model::ResourceContents::TextResourceContents { text, .. } => text,
+                rmcp::model::ResourceContents::BlobResourceContents { blob, .. } => {
+                    format!("[blob: {} bytes]", blob.len())
+                }
+            },
+            _ => continue,
+        };
+        if !part.is_empty() {
+            parts.push(part);
+        }
+    }
+    parts.join("\n")
 }
 
 fn sanitize_name(name: &str) -> String {
@@ -264,4 +272,191 @@ fn sanitize_name(name: &str) -> String {
             }
         })
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use rmcp::model::{Content, ResourceContents};
+    use serde_json::json;
+
+    // ── sanitize_name ────────────────────────────────────────────────
+
+    #[test]
+    fn sanitize_name_keeps_alphanumerics_and_underscores() {
+        assert_eq!(sanitize_name("foo_bar123"), "foo_bar123");
+    }
+
+    #[test]
+    fn sanitize_name_replaces_punctuation_with_underscore() {
+        assert_eq!(sanitize_name("foo-bar.baz"), "foo_bar_baz");
+        assert_eq!(sanitize_name("a/b\\c"), "a_b_c");
+        assert_eq!(sanitize_name("hello world"), "hello_world");
+    }
+
+    #[test]
+    fn sanitize_name_handles_empty_string() {
+        assert_eq!(sanitize_name(""), "");
+    }
+
+    #[test]
+    fn sanitize_name_preserves_unicode_alphanumerics() {
+        assert_eq!(sanitize_name("café_λ"), "café_λ");
+    }
+
+    // ── McpToolDef::qualified_name ───────────────────────────────────
+
+    fn tool_def(server: &str, tool: &str) -> McpToolDef {
+        McpToolDef {
+            server_name: server.into(),
+            tool_name: tool.into(),
+            description: String::new(),
+            input_schema: serde_json::Value::Null,
+            timeout: Duration::from_millis(30000),
+        }
+    }
+
+    #[test]
+    fn qualified_name_joins_server_and_tool_with_underscore() {
+        let def = tool_def("github", "create_issue");
+        assert_eq!(def.qualified_name(), "github_create_issue");
+    }
+
+    #[test]
+    fn qualified_name_sanitizes_invalid_characters() {
+        let def = tool_def("my-server", "tool.name");
+        assert_eq!(def.qualified_name(), "my_server_tool_name");
+    }
+
+    // ── default helpers ───────────────────────────────────────────────
+
+    #[test]
+    fn default_timeout_is_thirty_seconds() {
+        assert_eq!(default_timeout(), 30000);
+    }
+
+    #[test]
+    fn default_true_returns_true() {
+        assert!(default_true());
+    }
+
+    // ── McpServerConfig deserialization ──────────────────────────────
+
+    #[test]
+    fn deserialize_local_config_with_all_fields() {
+        let json = json!({
+            "type": "local",
+            "command": ["node", "server.js"],
+            "env": {"API_KEY": "secret"},
+            "timeout": 5000,
+            "enabled": false,
+        });
+        let config: McpServerConfig = serde_json::from_value(json).unwrap();
+        match config {
+            McpServerConfig::Local {
+                command,
+                env,
+                timeout,
+                enabled,
+            } => {
+                assert_eq!(command, vec!["node", "server.js"]);
+                assert_eq!(env.get("API_KEY").map(String::as_str), Some("secret"));
+                assert_eq!(timeout, 5000);
+                assert!(!enabled);
+            }
+        }
+    }
+
+    #[test]
+    fn deserialize_local_config_uses_defaults_when_omitted() {
+        let json = json!({
+            "type": "local",
+            "command": ["mcp-server"],
+        });
+        let config: McpServerConfig = serde_json::from_value(json).unwrap();
+        match config {
+            McpServerConfig::Local {
+                command,
+                env,
+                timeout,
+                enabled,
+            } => {
+                assert_eq!(command, vec!["mcp-server"]);
+                assert!(env.is_empty());
+                assert_eq!(timeout, 30000);
+                assert!(enabled);
+            }
+        }
+    }
+
+    #[test]
+    fn deserialize_unknown_type_fails() {
+        let json = json!({"type": "remote", "url": "https://example.com"});
+        assert!(serde_json::from_value::<McpServerConfig>(json).is_err());
+    }
+
+    // ── format_call_tool_content ─────────────────────────────────────
+
+    #[test]
+    fn format_empty_content_returns_empty_string() {
+        assert_eq!(format_call_tool_content(vec![]), "");
+    }
+
+    #[test]
+    fn format_text_content_passes_through_verbatim() {
+        let items = vec![Content::text("hello world")];
+        assert_eq!(format_call_tool_content(items), "hello world");
+    }
+
+    #[test]
+    fn format_image_content_emits_mime_placeholder() {
+        let items = vec![Content::image("base64data", "image/png")];
+        assert_eq!(format_call_tool_content(items), "[image: image/png]");
+    }
+
+    #[test]
+    fn format_text_resource_keeps_inner_text() {
+        let items = vec![Content::resource(ResourceContents::text(
+            "resource body",
+            "file:///x",
+        ))];
+        assert_eq!(format_call_tool_content(items), "resource body");
+    }
+
+    #[test]
+    fn format_blob_resource_emits_byte_count_placeholder() {
+        let items = vec![Content::resource(ResourceContents::blob(
+            "abcdefghij",
+            "file:///x",
+        ))];
+        assert_eq!(format_call_tool_content(items), "[blob: 10 bytes]");
+    }
+
+    #[test]
+    fn format_joins_parts_with_newline() {
+        let items = vec![
+            Content::text("first"),
+            Content::text("second"),
+            Content::image("data", "image/jpeg"),
+        ];
+        assert_eq!(
+            format_call_tool_content(items),
+            "first\nsecond\n[image: image/jpeg]"
+        );
+    }
+
+    #[test]
+    fn format_skips_empty_text_parts() {
+        let items = vec![Content::text(""), Content::text("only"), Content::text("")];
+        assert_eq!(format_call_tool_content(items), "only");
+    }
+
+    #[test]
+    fn format_skips_empty_resource_text_parts() {
+        let items = vec![
+            Content::resource(ResourceContents::text("", "file:///empty")),
+            Content::text("kept"),
+        ];
+        assert_eq!(format_call_tool_content(items), "kept");
+    }
 }

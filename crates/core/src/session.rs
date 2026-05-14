@@ -458,4 +458,265 @@ mod tests {
         let prefix = &id[..id.len().min(4)];
         assert_eq!(prefix, "abcd");
     }
+
+    use protocol::{Content, ContentPart, FunctionCall, Message, Role, ToolCall};
+
+    fn msg(role: Role, text: &str) -> Message {
+        Message {
+            role,
+            content: Some(Content::Text(text.into())),
+            reasoning_content: None,
+            tool_calls: None,
+            tool_call_id: None,
+            is_error: false,
+        }
+    }
+    fn user_msg(text: &str) -> Message {
+        msg(Role::User, text)
+    }
+    fn assistant_msg(text: &str) -> Message {
+        msg(Role::Assistant, text)
+    }
+    fn tool_msg(text: &str) -> Message {
+        msg(Role::Tool, text)
+    }
+    fn system_msg(text: &str) -> Message {
+        msg(Role::System, text)
+    }
+
+    // ── Session::new / default / fork / meta ─────────────────────────
+
+    #[test]
+    fn new_initializes_empty_fields_and_matches_created_updated() {
+        let s = Session::new();
+        assert!(!s.id.is_empty());
+        assert_eq!(s.id.len(), 64);
+        assert_eq!(s.created_at_ms, s.updated_at_ms);
+        assert!(s.messages.is_empty());
+        assert_eq!(s.session_cost_usd, 0.0);
+        assert!(s.parent_id.is_none());
+    }
+
+    #[test]
+    fn default_matches_new() {
+        let s = Session::default();
+        assert!(!s.id.is_empty());
+        assert_eq!(s.created_at_ms, s.updated_at_ms);
+    }
+
+    #[test]
+    fn meta_projects_visible_session_fields() {
+        let mut s = Session::new();
+        s.title = Some("My Title".into());
+        s.slug = Some("my-slug".into());
+        s.first_user_message = Some("hello".into());
+        s.mode = Some("ask".into());
+        s.model = Some("claude-opus".into());
+        s.cwd = Some("/work".into());
+        s.parent_id = Some("p1".into());
+        s.context_tokens = Some(1234);
+        s.messages.push(user_msg("hi"));
+
+        let m = s.meta();
+        assert_eq!(m.id, s.id);
+        assert_eq!(m.title.as_deref(), Some("My Title"));
+        assert_eq!(m.slug.as_deref(), Some("my-slug"));
+        assert_eq!(m.first_user_message.as_deref(), Some("hello"));
+        assert_eq!(m.mode.as_deref(), Some("ask"));
+        assert_eq!(m.model.as_deref(), Some("claude-opus"));
+        assert_eq!(m.cwd.as_deref(), Some("/work"));
+        assert_eq!(m.parent_id.as_deref(), Some("p1"));
+        assert_eq!(m.context_tokens, Some(1234));
+        assert_eq!(m.text_bytes, Some(2)); // "hi"
+    }
+
+    #[test]
+    fn fork_clones_messages_and_links_parent_with_fresh_id() {
+        let mut s = Session::new();
+        s.messages.push(user_msg("q1"));
+        s.messages.push(assistant_msg("a1"));
+        s.title = Some("kept".into());
+        s.context_tokens = Some(500);
+        s.session_cost_usd = 1.25;
+
+        let forked = s.fork();
+        assert_ne!(forked.id, s.id);
+        assert_eq!(forked.parent_id.as_deref(), Some(s.id.as_str()));
+        assert_eq!(forked.title.as_deref(), Some("kept"));
+        assert_eq!(forked.messages.len(), s.messages.len());
+        assert_eq!(forked.context_tokens, Some(500));
+        assert_eq!(forked.session_cost_usd, 1.25);
+        // Fork resets timestamps to "now".
+        assert!(forked.created_at_ms >= s.created_at_ms);
+    }
+
+    // ── compute_text_bytes / build_search_blob ───────────────────────
+
+    #[test]
+    fn compute_text_bytes_sums_user_assistant_content_lengths() {
+        let msgs = vec![user_msg("hello"), assistant_msg("hi there")];
+        assert_eq!(compute_text_bytes(&msgs), 13);
+    }
+
+    #[test]
+    fn compute_text_bytes_includes_reasoning_and_tool_calls() {
+        let mut msg = assistant_msg("text");
+        msg.reasoning_content = Some("thinking".into());
+        msg.tool_calls = Some(vec![ToolCall::new(
+            "id-1".into(),
+            FunctionCall {
+                name: "edit".into(),
+                arguments: "{\"path\":\"f.rs\"}".into(),
+            },
+        )]);
+        let bytes = compute_text_bytes(&[msg]);
+        // 4 (text) + 8 (reasoning) + 4 (name) + 15 (args)
+        assert_eq!(bytes, 31);
+    }
+
+    #[test]
+    fn compute_text_bytes_handles_empty_input() {
+        assert_eq!(compute_text_bytes(&[]), 0);
+    }
+
+    #[test]
+    fn build_search_blob_includes_only_user_and_assistant_text() {
+        let msgs = vec![
+            user_msg("question"),
+            assistant_msg("answer"),
+            tool_msg("tool output"),
+            system_msg("system prompt"),
+        ];
+        let blob = build_search_blob(&msgs);
+        assert!(blob.contains("question"));
+        assert!(blob.contains("answer"));
+        assert!(!blob.contains("tool output"));
+        assert!(!blob.contains("system prompt"));
+    }
+
+    #[test]
+    fn build_search_blob_skips_empty_messages() {
+        let msgs = vec![user_msg(""), assistant_msg("real")];
+        let blob = build_search_blob(&msgs);
+        assert_eq!(blob, "real\n");
+    }
+
+    // ── session_updated_at ────────────────────────────────────────────
+
+    #[test]
+    fn session_updated_at_prefers_updated_falls_back_to_created() {
+        let m = SessionMeta {
+            id: "x".into(),
+            title: None,
+            slug: None,
+            first_user_message: None,
+            created_at_ms: 100,
+            updated_at_ms: 200,
+            mode: None,
+            reasoning_effort: None,
+            model: None,
+            cwd: None,
+            parent_id: None,
+            context_tokens: None,
+            text_bytes: None,
+        };
+        assert_eq!(session_updated_at(&m), 200);
+        let m2 = SessionMeta {
+            updated_at_ms: 0,
+            ..m
+        };
+        assert_eq!(session_updated_at(&m2), 100);
+    }
+
+    // ── externalize / internalize blobs ───────────────────────────────
+
+    fn image_msg(url: &str) -> Message {
+        Message {
+            role: Role::User,
+            content: Some(Content::Parts(vec![ContentPart::ImageUrl {
+                url: url.to_string(),
+                label: None,
+            }])),
+            reasoning_content: None,
+            tool_calls: None,
+            tool_call_id: None,
+            is_error: false,
+        }
+    }
+
+    #[test]
+    fn externalize_blobs_swaps_urls_to_blob_refs() {
+        let mut msgs = vec![image_msg("data:image/png;base64,AAA")];
+        let mut map = std::collections::HashMap::new();
+        map.insert("data:image/png;base64,AAA".into(), "blob://abc".into());
+        externalize_blobs(&mut msgs, &map);
+        if let Some(Content::Parts(parts)) = &msgs[0].content {
+            if let ContentPart::ImageUrl { url, .. } = &parts[0] {
+                assert_eq!(url, "blob://abc");
+            }
+        }
+    }
+
+    #[test]
+    fn externalize_blobs_leaves_unmapped_urls_alone() {
+        let mut msgs = vec![image_msg("data:other")];
+        let map = std::collections::HashMap::new();
+        externalize_blobs(&mut msgs, &map);
+        if let Some(Content::Parts(parts)) = &msgs[0].content {
+            if let ContentPart::ImageUrl { url, .. } = &parts[0] {
+                assert_eq!(url, "data:other");
+            }
+        }
+    }
+
+    #[test]
+    fn internalize_blobs_replaces_blob_refs_with_data_urls() {
+        let mut msgs = vec![image_msg("blob://abc")];
+        let mut map = std::collections::HashMap::new();
+        map.insert("blob://abc".into(), "data:image/png;base64,AAA".into());
+        internalize_blobs(&mut msgs, &map);
+        if let Some(Content::Parts(parts)) = &msgs[0].content {
+            if let ContentPart::ImageUrl { url, .. } = &parts[0] {
+                assert_eq!(url, "data:image/png;base64,AAA");
+            }
+        }
+    }
+
+    #[test]
+    fn internalize_blobs_leaves_text_messages_unchanged() {
+        let mut msgs = vec![user_msg("hello")];
+        let mut map = std::collections::HashMap::new();
+        map.insert("foo".into(), "bar".into());
+        internalize_blobs(&mut msgs, &map);
+        if let Some(Content::Text(t)) = &msgs[0].content {
+            assert_eq!(t, "hello");
+        }
+    }
+
+    // ── atomic_write ──────────────────────────────────────────────────
+
+    #[test]
+    fn atomic_write_writes_contents_and_renames_into_place() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("data.json");
+        atomic_write(&path, b"hello", 42);
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "hello");
+        // No leftover tmp file in the directory.
+        let entries: Vec<_> = std::fs::read_dir(dir.path())
+            .unwrap()
+            .filter_map(Result::ok)
+            .map(|e| e.file_name())
+            .collect();
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].to_str(), Some("data.json"));
+    }
+
+    #[test]
+    fn atomic_write_overwrites_existing_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("data");
+        std::fs::write(&path, "old").unwrap();
+        atomic_write(&path, b"new", 1);
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "new");
+    }
 }

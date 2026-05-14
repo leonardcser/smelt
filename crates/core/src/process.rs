@@ -497,4 +497,217 @@ mod tests {
         assert!(out.timed_out);
         assert_eq!(out.exit_code, -1);
     }
+
+    #[test]
+    fn run_passes_custom_env_to_child() {
+        let mut env = HashMap::new();
+        env.insert("SMELT_TEST_VAR".into(), "from_test".into());
+        let opts = Options {
+            env,
+            ..Default::default()
+        };
+        let out = run("sh", ["-c", "echo $SMELT_TEST_VAR"], &opts).unwrap();
+        assert!(out.stdout.contains("from_test"));
+    }
+
+    #[test]
+    fn run_captures_stderr_separately() {
+        let out = run("sh", ["-c", "echo err 1>&2"], &Options::default()).unwrap();
+        assert_eq!(out.exit_code, 0);
+        assert!(out.stderr.contains("err"));
+        assert!(!out.stdout.contains("err"));
+    }
+
+    #[test]
+    fn run_returns_io_error_for_nonexistent_binary() {
+        let result = run(
+            "__definitely_no_such_command__",
+            Vec::<&str>::new(),
+            &Options::default(),
+        );
+        assert!(result.is_err());
+    }
+
+    // ── ProcessRegistry ───────────────────────────────────────────────
+
+    #[test]
+    fn registry_new_and_default_yield_empty_registry() {
+        let r1 = ProcessRegistry::new();
+        let r2 = ProcessRegistry::default();
+        assert_eq!(r1.running_count(), 0);
+        assert_eq!(r2.running_count(), 0);
+        assert!(r1.list().is_empty());
+    }
+
+    #[test]
+    fn registry_next_id_is_monotonic_and_unique() {
+        let r = ProcessRegistry::new();
+        let id1 = r.next_id();
+        let id2 = r.next_id();
+        assert!(id1.starts_with("proc_"));
+        assert!(id2.starts_with("proc_"));
+        assert_ne!(id1, id2);
+    }
+
+    #[test]
+    fn registry_read_unknown_id_returns_error() {
+        let r = ProcessRegistry::new();
+        let err = r.read("no_such_proc").unwrap_err();
+        assert!(err.contains("no_such_proc"));
+    }
+
+    #[tokio::test]
+    async fn registry_stop_unknown_id_returns_error() {
+        let r = ProcessRegistry::new();
+        let err = r.stop("nope").await.unwrap_err();
+        assert!(err.contains("nope"));
+    }
+
+    #[test]
+    fn registry_clear_empties_running_count_and_list() {
+        let r = ProcessRegistry::new();
+        r.clear();
+        assert_eq!(r.running_count(), 0);
+        assert!(r.list().is_empty());
+    }
+
+    #[test]
+    fn process_push_line_truncates_to_max_lines() {
+        // Constructed directly: registry is private, so build a Process inline.
+        let mut p = Process {
+            lines: Vec::new(),
+            read_cursor: 0,
+            finished: false,
+            exit_code: None,
+            command: "cmd".into(),
+            started_at: Instant::now(),
+            kill_tx: None,
+        };
+        for i in 0..(MAX_LINES + 5) {
+            p.push_line(format!("line{i}"));
+        }
+        assert_eq!(p.lines.len(), MAX_LINES);
+        assert_eq!(p.lines.first().map(String::as_str), Some("line5"));
+        assert_eq!(
+            p.lines.last().map(String::as_str),
+            Some(format!("line{}", MAX_LINES + 4)).as_deref()
+        );
+    }
+
+    #[test]
+    fn process_info_lists_running_processes_in_id_order() {
+        // Insert synthetic entries directly via the lock so we don't spawn real children.
+        let r = ProcessRegistry::new();
+        {
+            let mut map = r.0.lock().unwrap();
+            for i in ["proc_b", "proc_a", "proc_c"] {
+                map.insert(
+                    i.into(),
+                    Process {
+                        lines: Vec::new(),
+                        read_cursor: 0,
+                        finished: false,
+                        exit_code: None,
+                        command: format!("cmd_{i}"),
+                        started_at: Instant::now(),
+                        kill_tx: None,
+                    },
+                );
+            }
+        }
+        let infos = r.list();
+        let ids: Vec<&str> = infos.iter().map(|i| i.id.as_str()).collect();
+        assert_eq!(ids, vec!["proc_a", "proc_b", "proc_c"]);
+        assert_eq!(r.running_count(), 3);
+    }
+
+    #[test]
+    fn process_list_filters_out_finished_entries() {
+        let r = ProcessRegistry::new();
+        {
+            let mut map = r.0.lock().unwrap();
+            map.insert(
+                "live".into(),
+                Process {
+                    lines: Vec::new(),
+                    read_cursor: 0,
+                    finished: false,
+                    exit_code: None,
+                    command: "x".into(),
+                    started_at: Instant::now(),
+                    kill_tx: None,
+                },
+            );
+            map.insert(
+                "dead".into(),
+                Process {
+                    lines: Vec::new(),
+                    read_cursor: 0,
+                    finished: true,
+                    exit_code: Some(0),
+                    command: "y".into(),
+                    started_at: Instant::now(),
+                    kill_tx: None,
+                },
+            );
+        }
+        let listing = r.list();
+        let ids: Vec<&str> = listing.iter().map(|i| i.id.as_str()).collect();
+        assert_eq!(ids, vec!["live"]);
+        assert_eq!(r.running_count(), 1);
+    }
+
+    #[test]
+    fn process_read_drains_lines_and_removes_finished_entry() {
+        let r = ProcessRegistry::new();
+        {
+            let mut map = r.0.lock().unwrap();
+            map.insert(
+                "p1".into(),
+                Process {
+                    lines: vec!["a".into(), "b".into()],
+                    read_cursor: 0,
+                    finished: true,
+                    exit_code: Some(0),
+                    command: "x".into(),
+                    started_at: Instant::now(),
+                    kill_tx: None,
+                },
+            );
+        }
+        let (out, running, exit) = r.read("p1").unwrap();
+        assert_eq!(out, "a\nb");
+        assert!(!running);
+        assert_eq!(exit, Some(0));
+        // Finished entry should be removed.
+        assert!(r.read("p1").is_err());
+    }
+
+    #[test]
+    fn process_read_keeps_entry_when_still_running() {
+        let r = ProcessRegistry::new();
+        {
+            let mut map = r.0.lock().unwrap();
+            map.insert(
+                "p1".into(),
+                Process {
+                    lines: vec!["a".into()],
+                    read_cursor: 0,
+                    finished: false,
+                    exit_code: None,
+                    command: "x".into(),
+                    started_at: Instant::now(),
+                    kill_tx: None,
+                },
+            );
+        }
+        let (out, running, exit) = r.read("p1").unwrap();
+        assert_eq!(out, "a");
+        assert!(running);
+        assert_eq!(exit, None);
+        // Entry is still registered with drained lines.
+        let map = r.0.lock().unwrap();
+        assert!(map.get("p1").is_some());
+        assert!(map.get("p1").unwrap().lines.is_empty());
+    }
 }
