@@ -200,87 +200,54 @@ impl TuiApp {
     }
 
     fn cmdline_insert_char(&mut self, c: char) {
-        let payload = self.cmdline_text();
-        let cur = self
-            .cmdline_cursor_in_payload()
-            .min(payload.chars().count());
-        let chars: Vec<char> = payload.chars().collect();
-        let new: String = chars[..cur]
-            .iter()
-            .copied()
-            .chain(std::iter::once(c))
-            .chain(chars[cur..].iter().copied())
-            .collect();
-        self.cmdline_set_payload(&new, cur + 1);
+        let (new, cur) = super::cmdline_edit::insert_char(
+            &self.cmdline_text(),
+            self.cmdline_cursor_in_payload(),
+            c,
+        );
+        self.cmdline_set_payload(&new, cur);
         self.cmdline.completer = None;
     }
 
     fn cmdline_backspace(&mut self) -> Option<bool> {
-        let payload = self.cmdline_text();
-        let cur = self.cmdline_cursor_in_payload();
-        if payload.is_empty() {
-            self.close_cmdline();
-            return Some(false);
+        match super::cmdline_edit::backspace(&self.cmdline_text(), self.cmdline_cursor_in_payload())
+        {
+            None => {
+                self.close_cmdline();
+                Some(false)
+            }
+            Some((new, cur)) => {
+                self.cmdline_set_payload(&new, cur);
+                self.cmdline.completer = None;
+                Some(false)
+            }
         }
-        if cur == 0 {
-            return Some(false);
-        }
-        let chars: Vec<char> = payload.chars().collect();
-        let new: String = chars[..cur - 1]
-            .iter()
-            .copied()
-            .chain(chars[cur..].iter().copied())
-            .collect();
-        self.cmdline_set_payload(&new, cur - 1);
-        self.cmdline.completer = None;
-        Some(false)
     }
 
     fn cmdline_delete_forward(&mut self) {
-        let payload = self.cmdline_text();
-        let cur = self.cmdline_cursor_in_payload();
-        let count = payload.chars().count();
-        if cur >= count {
-            return;
-        }
-        let chars: Vec<char> = payload.chars().collect();
-        let new: String = chars[..cur]
-            .iter()
-            .copied()
-            .chain(chars[cur + 1..].iter().copied())
-            .collect();
+        let (new, cur) = super::cmdline_edit::delete_forward(
+            &self.cmdline_text(),
+            self.cmdline_cursor_in_payload(),
+        );
         self.cmdline_set_payload(&new, cur);
         self.cmdline.completer = None;
     }
 
     fn cmdline_delete_word_back(&mut self) -> Option<bool> {
-        let payload = self.cmdline_text();
-        if payload.is_empty() {
-            self.close_cmdline();
-            return Some(false);
-        }
-        let cur = self.cmdline_cursor_in_payload();
-        let chars: Vec<char> = payload.chars().collect();
-        let split = cur.min(chars.len());
-        let prefix: String = chars[..split].iter().collect();
-        let trimmed_end = prefix.trim_end();
-        let new_cursor = match trimmed_end.rfind(|c: char| !c.is_alphanumeric() && c != '_') {
-            Some(boundary) => {
-                let boundary_char_len = trimmed_end[boundary..]
-                    .chars()
-                    .next()
-                    .map(|c| c.len_utf8())
-                    .unwrap_or(0);
-                trimmed_end[..boundary + boundary_char_len].chars().count()
+        match super::cmdline_edit::delete_word_back(
+            &self.cmdline_text(),
+            self.cmdline_cursor_in_payload(),
+        ) {
+            None => {
+                self.close_cmdline();
+                Some(false)
             }
-            None => 0,
-        };
-        let head: String = chars[..new_cursor].iter().collect();
-        let tail: String = chars[split..].iter().collect();
-        let new = format!("{head}{tail}");
-        self.cmdline_set_payload(&new, new_cursor);
-        self.cmdline.completer = None;
-        Some(false)
+            Some((new, cur)) => {
+                self.cmdline_set_payload(&new, cur);
+                self.cmdline.completer = None;
+                Some(false)
+            }
+        }
     }
 
     fn cmdline_clear(&mut self) {
@@ -289,10 +256,8 @@ impl TuiApp {
     }
 
     fn cmdline_move(&mut self, delta: i32) {
-        let payload = self.cmdline_text();
-        let count = payload.chars().count() as i32;
-        let cur = self.cmdline_cursor_in_payload() as i32;
-        let new = (cur + delta).clamp(0, count) as usize;
+        let count = self.cmdline_text().chars().count();
+        let new = super::cmdline_edit::clamp_move(count, self.cmdline_cursor_in_payload(), delta);
         if let Some(win) = self.well_known.cmdline {
             if let Some(w) = self.ui.win_mut(win) {
                 w.set_cursor_col_single_line(PREFIX_LEN + new as u16);
@@ -318,41 +283,56 @@ impl TuiApp {
     }
 
     fn cmdline_history_up(&mut self) {
-        if self.cmdline.history.is_empty() {
-            return;
-        }
-        let next_idx = match self.cmdline.history_browse {
-            None => self.cmdline.history.len().saturating_sub(1),
-            Some(0) => 0,
-            Some(i) => i.saturating_sub(1),
-        };
-        if self.cmdline.history_browse.is_none() {
-            self.cmdline.history_stash = self.cmdline_text();
-        }
-        self.cmdline.history_browse = Some(next_idx);
-        let entry = self.cmdline.history[next_idx].clone();
-        let cursor = entry.chars().count();
-        self.cmdline_set_payload(&entry, cursor);
-        self.cmdline.completer = None;
+        let current = self.cmdline_text();
+        let owned =
+            super::cmdline_edit::history_up(&self.cmdline.history, self.cmdline.history_browse)
+                .into_owned();
+        self.apply_history_step(owned, current);
     }
 
     fn cmdline_history_down(&mut self) {
-        let Some(idx) = self.cmdline.history_browse else {
-            return;
-        };
-        if idx + 1 >= self.cmdline.history.len() {
-            self.cmdline.history_browse = None;
-            let stash = std::mem::take(&mut self.cmdline.history_stash);
-            let cursor = stash.chars().count();
-            self.cmdline_set_payload(&stash, cursor);
-        } else {
-            let next_idx = idx + 1;
-            self.cmdline.history_browse = Some(next_idx);
-            let entry = self.cmdline.history[next_idx].clone();
-            let cursor = entry.chars().count();
-            self.cmdline_set_payload(&entry, cursor);
+        let stash = self.cmdline.history_stash.clone();
+        let owned = super::cmdline_edit::history_down(
+            &self.cmdline.history,
+            self.cmdline.history_browse,
+            &stash,
+        )
+        .into_owned();
+        self.apply_history_step(owned, String::new());
+    }
+
+    /// Apply the result of a history-navigation step (Up/Down) back to live
+    /// cmdline state. `current_for_stash` is the live payload that should
+    /// be saved when `stash_current` is true (Up from a fresh state).
+    fn apply_history_step(
+        &mut self,
+        step: super::cmdline_edit::HistoryStepOwned,
+        current_for_stash: String,
+    ) {
+        use super::cmdline_edit::HistoryStepOwned;
+        match step {
+            HistoryStepOwned::NoHistory | HistoryStepOwned::Boundary => {}
+            HistoryStepOwned::Browse {
+                idx,
+                entry,
+                stash_current,
+            } => {
+                if stash_current {
+                    self.cmdline.history_stash = current_for_stash;
+                }
+                self.cmdline.history_browse = Some(idx);
+                let cursor = entry.chars().count();
+                self.cmdline_set_payload(&entry, cursor);
+                self.cmdline.completer = None;
+            }
+            HistoryStepOwned::Restore { stash } => {
+                self.cmdline.history_browse = None;
+                self.cmdline.history_stash = String::new();
+                let cursor = stash.chars().count();
+                self.cmdline_set_payload(&stash, cursor);
+                self.cmdline.completer = None;
+            }
         }
-        self.cmdline.completer = None;
     }
 
     fn cmdline_submit(&mut self) -> bool {
