@@ -2510,6 +2510,7 @@ dependencies = [
  "base64",
  "sha2",
  "smelt-style",
+ "tempfile",
  "unicode-width",
 ]
 

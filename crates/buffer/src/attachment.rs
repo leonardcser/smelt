@@ -206,4 +206,126 @@ mod tests {
         let id = store.insert_image("img.png".into(), "data:...".into());
         assert_eq!(store.expanded_text(id), "");
     }
+
+    // ── id lookup ─────────────────────────────────────────────────────────
+
+    #[test]
+    fn get_returns_attachment_for_known_id() {
+        let mut store = AttachmentStore::new();
+        let id = store.insert_image("a.png".into(), "data:image/png;base64,AAA".into());
+        let att = store.get(id).expect("known id resolves");
+        match att {
+            Attachment::Image { label, .. } => assert_eq!(label, "a.png"),
+        }
+    }
+
+    #[test]
+    fn get_returns_none_for_unknown_id() {
+        let store = AttachmentStore::new();
+        assert!(store.get(99999).is_none());
+    }
+
+    #[test]
+    fn display_label_for_unknown_id_returns_question_mark_placeholder() {
+        let store = AttachmentStore::new();
+        assert_eq!(store.display_label(99999), "[?]");
+    }
+
+    #[test]
+    fn expanded_text_for_unknown_id_returns_empty() {
+        let store = AttachmentStore::new();
+        assert_eq!(store.expanded_text(99999), "");
+    }
+
+    // ── clear ─────────────────────────────────────────────────────────────
+
+    #[test]
+    fn clear_removes_all_entries_and_resets_id_minting() {
+        let mut store = AttachmentStore::new();
+        let id1 = store.insert_image("a.png".into(), "data:image/png;base64,AAA".into());
+        store.insert_image("b.png".into(), "data:image/png;base64,BBB".into());
+        store.clear();
+        assert!(store.get(id1).is_none(), "old ids are gone after clear");
+        // Re-inserting the same content gets id 1 again — counter was reset.
+        let new_id = store.insert_image("a.png".into(), "data:image/png;base64,AAA".into());
+        assert_eq!(new_id, 1);
+    }
+
+    // ── Blob persistence ─────────────────────────────────────────────────
+
+    #[test]
+    fn image_blobs_filename_uses_extension_matching_mime_type() {
+        let mut store = AttachmentStore::new();
+        store.insert_image("jpg.jpg".into(), "data:image/jpeg;base64,j".into());
+        store.insert_image("gif.gif".into(), "data:image/gif;base64,g".into());
+        store.insert_image("webp.webp".into(), "data:image/webp;base64,w".into());
+        store.insert_image("svg.svg".into(), "data:image/svg+xml;base64,s".into());
+        store.insert_image("png.png".into(), "data:image/png;base64,p".into());
+        let blobs = store.image_blobs();
+        let exts: std::collections::HashSet<String> = blobs
+            .iter()
+            .filter_map(|(name, _)| name.rsplit_once('.').map(|(_, e)| e.to_string()))
+            .collect();
+        for e in ["jpg", "gif", "webp", "svg", "png"] {
+            assert!(exts.contains(e), "expected extension {e}; got {exts:?}");
+        }
+    }
+
+    #[test]
+    fn image_blobs_filenames_are_content_addressed() {
+        let mut store = AttachmentStore::new();
+        // Different *labels*, same data_url → same content hash → same filename.
+        let id_a = store.insert_image("rename1.png".into(), "data:image/png;base64,SAME".into());
+        // Same data_url, dedup will return the same id; filename is one entry.
+        let id_b = store.insert_image("rename2.png".into(), "data:image/png;base64,SAME".into());
+        assert_eq!(id_a, id_b, "dedup confirms content hash drives identity");
+        let blobs = store.image_blobs();
+        assert_eq!(blobs.len(), 1);
+        // Filename is content-derived, not label-derived: neither label appears.
+        assert!(!blobs[0].0.contains("rename1"));
+        assert!(!blobs[0].0.contains("rename2"));
+    }
+
+    #[test]
+    fn save_blobs_then_load_blobs_round_trips_data_urls() {
+        let mut store = AttachmentStore::new();
+        store.insert_image("a.png".into(), "data:image/png;base64,AAA".into());
+        store.insert_image("b.jpg".into(), "data:image/jpeg;base64,BBB".into());
+        let tmp = tempfile::tempdir().unwrap();
+        let saved = store.save_blobs(tmp.path());
+        // Save returns data_url → blob:<filename>.
+        assert_eq!(saved.len(), 2);
+        assert!(saved.values().all(|v| v.starts_with("blob:")));
+        // Load reads them back as blob:<filename> → data_url.
+        let loaded = AttachmentStore::load_blobs(tmp.path());
+        for (data_url, blob_ref) in &saved {
+            assert_eq!(loaded.get(blob_ref), Some(data_url));
+        }
+    }
+
+    #[test]
+    fn save_blobs_skips_existing_files() {
+        let mut store = AttachmentStore::new();
+        store.insert_image("a.png".into(), "data:image/png;base64,AAA".into());
+        let tmp = tempfile::tempdir().unwrap();
+        let _ = store.save_blobs(tmp.path());
+        // Mutate the file on disk; a second save_blobs must not overwrite.
+        let blob_path = std::fs::read_dir(tmp.path())
+            .unwrap()
+            .next()
+            .unwrap()
+            .unwrap()
+            .path();
+        std::fs::write(&blob_path, b"sentinel-content").unwrap();
+        let _ = store.save_blobs(tmp.path());
+        let on_disk = std::fs::read(&blob_path).unwrap();
+        assert_eq!(on_disk, b"sentinel-content");
+    }
+
+    #[test]
+    fn load_blobs_on_missing_dir_returns_empty_map() {
+        let missing = std::path::PathBuf::from("/no/such/dir/should/exist/here");
+        let loaded = AttachmentStore::load_blobs(&missing);
+        assert!(loaded.is_empty());
+    }
 }

@@ -215,4 +215,152 @@ mod tests {
         kr.set_with_source("second".into(), false, 10, 16);
         assert!(kr.yank_flash_range(Instant::now()).is_none());
     }
+
+    // ── kill (push) ───────────────────────────────────────────────────────
+
+    #[test]
+    fn kill_empty_text_is_noop() {
+        let mut kr = KillRing::new();
+        kr.kill("first".into());
+        kr.kill("".into()); // empty must not displace current
+        assert_eq!(kr.current(), "first");
+    }
+
+    #[test]
+    fn second_kill_rotates_first_into_history() {
+        let mut kr = KillRing::new();
+        kr.kill("A".into());
+        kr.kill("B".into());
+        assert_eq!(kr.current(), "B");
+        // First kill is now the most-recent history entry.
+        // We can observe history indirectly through yank_pop after a yank.
+        let mut buf = String::from("|");
+        kr.yank(&mut buf, 1);
+        assert_eq!(buf, "|B");
+        kr.yank_pop(&mut buf);
+        assert_eq!(buf, "|A");
+    }
+
+    #[test]
+    fn kill_history_cap_evicts_oldest_beyond_thirty_two() {
+        let mut kr = KillRing::new();
+        // Push 34 distinct kills: current = "k33", history holds the previous
+        // 32 ("k32" … "k1"); "k0" got dropped past the cap.
+        for i in 0..34 {
+            kr.kill(format!("k{i}"));
+        }
+        // Yank installs k33, then yank_pop cycles through history newest-first.
+        let mut buf = String::new();
+        kr.yank(&mut buf, 0);
+        assert_eq!(buf, "k33");
+        // Yank-pop 32 times — every entry in history should be reachable
+        // exactly once before it wraps. The oldest reachable should be k1.
+        let mut seen = vec![buf.clone()];
+        for _ in 0..32 {
+            kr.yank_pop(&mut buf);
+            seen.push(buf.clone());
+        }
+        assert!(seen.contains(&"k1".to_string()));
+        assert!(!seen.contains(&"k0".to_string()), "k0 evicted past cap");
+    }
+
+    // ── yank / yank_pop ───────────────────────────────────────────────────
+
+    #[test]
+    fn yank_on_empty_kill_ring_returns_none() {
+        let mut kr = KillRing::new();
+        let mut buf = String::from("hi");
+        assert!(kr.yank(&mut buf, 1).is_none());
+        assert_eq!(buf, "hi", "buffer untouched");
+    }
+
+    #[test]
+    fn yank_inserts_current_and_returns_cursor_at_end_of_inserted_text() {
+        let mut kr = KillRing::new();
+        kr.kill("xyz".into());
+        let mut buf = String::from("ab|cd");
+        let end = kr.yank(&mut buf, 3).expect("yank into 'ab|cd' at byte 3");
+        assert_eq!(buf, "ab|xyzcd");
+        assert_eq!(end, 6, "cursor lands at byte after 'xyz'");
+    }
+
+    #[test]
+    fn yank_pop_replaces_last_yank_with_next_history_entry() {
+        let mut kr = KillRing::new();
+        kr.kill("A".into());
+        kr.kill("B".into());
+        kr.kill("C".into());
+        // After 3 kills: current=C, history=[B, A] (newest first).
+        let mut buf = String::new();
+        kr.yank(&mut buf, 0);
+        assert_eq!(buf, "C");
+        kr.yank_pop(&mut buf);
+        assert_eq!(buf, "B", "first yank_pop: history[0]");
+        kr.yank_pop(&mut buf);
+        assert_eq!(buf, "A", "second yank_pop: history[1]");
+        kr.yank_pop(&mut buf);
+        assert_eq!(buf, "B", "third yank_pop wraps back to history[0]");
+    }
+
+    #[test]
+    fn yank_pop_returns_none_when_no_prior_yank() {
+        let mut kr = KillRing::new();
+        kr.kill("A".into());
+        kr.kill("B".into());
+        let mut buf = String::from("x");
+        assert!(
+            kr.yank_pop(&mut buf).is_none(),
+            "no last_yank to replace yet"
+        );
+        assert_eq!(buf, "x");
+    }
+
+    #[test]
+    fn clear_yank_disables_subsequent_yank_pop() {
+        let mut kr = KillRing::new();
+        kr.kill("A".into());
+        kr.kill("B".into());
+        let mut buf = String::new();
+        kr.yank(&mut buf, 0);
+        kr.clear_yank();
+        // last_yank is gone — yank_pop has no range to replace.
+        assert!(kr.yank_pop(&mut buf).is_none());
+    }
+
+    // ── linewise / source / accessors ─────────────────────────────────────
+
+    #[test]
+    fn take_returns_current_and_clears_it() {
+        let mut kr = KillRing::new();
+        kr.kill("payload".into());
+        assert_eq!(kr.take(), "payload");
+        assert_eq!(kr.current(), "");
+    }
+
+    #[test]
+    fn set_with_linewise_records_the_flag() {
+        let mut kr = KillRing::new();
+        kr.set_with_linewise("line\n".into(), true);
+        assert_eq!(kr.current(), "line\n");
+        assert!(kr.is_linewise());
+    }
+
+    #[test]
+    fn set_with_source_records_range_and_bumps_yank_tick() {
+        let mut kr = KillRing::new();
+        let t0 = kr.yank_tick();
+        kr.set_with_source("payload".into(), true, 5, 12);
+        assert_eq!(kr.current(), "payload");
+        assert!(kr.is_linewise());
+        assert_eq!(kr.source_range(), Some((5, 12)));
+        assert_eq!(kr.yank_tick(), t0 + 1, "tick monotonic on set_with_source");
+    }
+
+    #[test]
+    fn record_clipboard_write_round_trips() {
+        let mut kr = KillRing::new();
+        assert_eq!(kr.last_clipboard_write(), None);
+        kr.record_clipboard_write("from-system".into());
+        assert_eq!(kr.last_clipboard_write(), Some("from-system"));
+    }
 }

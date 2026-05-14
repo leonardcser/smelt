@@ -212,4 +212,131 @@ mod tests {
             assert!(CJK.is_char_boundary(once));
         }
     }
+
+    // ── prev_char_boundary / next_char_boundary ───────────────────────────
+    // The "move cursor by one char" primitives. Must be safe for any byte
+    // offset (including mid-char and past-end) without panicking.
+
+    #[test]
+    fn prev_char_boundary_steps_back_by_one_char_at_a_boundary() {
+        // "a日b" has boundaries at 0, 1, 4, 5.
+        let s = "a日b";
+        assert_eq!(prev_char_boundary(s, 5), 4);
+        assert_eq!(prev_char_boundary(s, 4), 1);
+        assert_eq!(prev_char_boundary(s, 1), 0);
+        assert_eq!(prev_char_boundary(s, 0), 0, "0 is the floor");
+    }
+
+    #[test]
+    fn prev_char_boundary_snaps_back_to_previous_boundary_from_mid_char() {
+        // Byte 2 and 3 are inside '日'; the boundary before is 1.
+        let s = "a日b";
+        assert_eq!(prev_char_boundary(s, 2), 1);
+        assert_eq!(prev_char_boundary(s, 3), 1);
+    }
+
+    #[test]
+    fn prev_char_boundary_clamps_past_end() {
+        let s = "ab";
+        assert_eq!(prev_char_boundary(s, 1000), 1);
+    }
+
+    #[test]
+    fn next_char_boundary_steps_forward_by_one_char() {
+        let s = "a日b"; // boundaries 0, 1, 4, 5
+        assert_eq!(next_char_boundary(s, 0), 1);
+        assert_eq!(next_char_boundary(s, 1), 4);
+        assert_eq!(next_char_boundary(s, 4), 5);
+        assert_eq!(next_char_boundary(s, 5), 5, "len is the ceiling");
+    }
+
+    #[test]
+    fn next_char_boundary_walks_to_next_boundary_from_mid_char() {
+        // Bytes 2, 3 are inside '日'; the next boundary is 4.
+        let s = "a日b";
+        assert_eq!(next_char_boundary(s, 2), 4);
+        assert_eq!(next_char_boundary(s, 3), 4);
+    }
+
+    #[test]
+    fn next_char_boundary_clamps_past_end() {
+        let s = "ab";
+        assert_eq!(next_char_boundary(s, 1000), 2);
+    }
+
+    // ── byte_to_cell / cell_to_byte ───────────────────────────────────────
+    // Conversions between byte offsets and terminal display columns. Wide
+    // chars (CJK, most emoji) occupy 2 cells.
+
+    #[test]
+    fn byte_to_cell_counts_terminal_columns_of_preceding_text() {
+        assert_eq!(byte_to_cell("abc", 0), 0);
+        assert_eq!(byte_to_cell("abc", 2), 2);
+        assert_eq!(
+            byte_to_cell("abc", 3),
+            3,
+            "end-of-line is at column == width"
+        );
+    }
+
+    #[test]
+    fn byte_to_cell_treats_wide_chars_as_two_columns() {
+        assert_eq!(byte_to_cell("日本", 3), 2, "after 日 we are at column 2");
+        assert_eq!(byte_to_cell("日本", 6), 4, "after 日本 we are at column 4");
+        assert_eq!(byte_to_cell("a日b", 4), 3, "a(1) + 日(2)");
+    }
+
+    #[test]
+    fn byte_to_cell_snaps_mid_char_byte_backward() {
+        // Byte 2 is inside '日' (starts at byte 0, 3 bytes long). The
+        // column should equal what's covered up to '日's start: 0.
+        assert_eq!(byte_to_cell("日本", 2), 0);
+    }
+
+    #[test]
+    fn cell_to_byte_returns_byte_at_cell_or_clamps_to_end() {
+        assert_eq!(cell_to_byte("abc", 0), 0);
+        assert_eq!(cell_to_byte("abc", 2), 2);
+        assert_eq!(cell_to_byte("abc", 100), 3, "past end clamps to len");
+    }
+
+    #[test]
+    fn cell_to_byte_lands_at_the_start_of_a_wide_char() {
+        // "a日": columns 0(a) and 1..=2(日). Cell 1 lands at byte 1 (start of 日).
+        assert_eq!(cell_to_byte("a日", 1), 1);
+    }
+
+    // ── char_pos / byte_of_char ───────────────────────────────────────────
+
+    #[test]
+    fn char_pos_counts_chars_before_a_byte_offset() {
+        assert_eq!(char_pos("abc", 0), 0);
+        assert_eq!(char_pos("abc", 2), 2);
+        assert_eq!(char_pos("日本", 3), 1, "3 is the start of 本");
+        assert_eq!(char_pos("日本", 6), 2);
+    }
+
+    #[test]
+    fn char_pos_snaps_mid_char_input_backward() {
+        // Byte 1 is inside '日'; count should be the chars before '日' = 0.
+        assert_eq!(char_pos("日本", 1), 0);
+    }
+
+    #[test]
+    fn char_pos_clamps_past_end() {
+        assert_eq!(char_pos("abc", 100), 3);
+    }
+
+    #[test]
+    fn byte_of_char_returns_byte_offset_of_nth_char() {
+        assert_eq!(byte_of_char("abc", 0), 0);
+        assert_eq!(byte_of_char("abc", 2), 2);
+        assert_eq!(byte_of_char("日本", 1), 3, "本 starts at byte 3");
+    }
+
+    #[test]
+    fn byte_of_char_past_end_returns_len() {
+        assert_eq!(byte_of_char("abc", 100), 3);
+        assert_eq!(byte_of_char("", 5), 0);
+    }
 }

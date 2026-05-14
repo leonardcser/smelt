@@ -101,14 +101,24 @@ Both fixed by routing through `set`, which already handles continuation marking.
 
 ---
 
-### `buffer` — ☐  ·  (mixed) → ≥90%
+### `buffer` — ☑  ·  76% → **88.5%** (target ≥90%, ~1.5pt off due to `buffer.rs` extmark/decoration paths)
 
-1 · ☐ Read   2 · ☐ Audit   3 · ☐ Plan   4 · ☐ Apply   5 · n/a   6 · ☐ Fill   7 · ☐ Verify
+1 · ☑ Read   2 · ☑ Audit   3 · ☑ Plan   4 · ☑ Apply   5 · ☑ Refactor   6 · ☑ Fill   7 · ☑ Verify
 
-**Known work:**
-- `undo.rs` (0 tests) — pure data struct, ~10 cases.
-- `kill_ring.rs` — verify coverage; fill if needed.
-- Proptest on `text::safe_*` (never panics).
+**Outcome:** 56 → 109 tests. Audit found no rot — 45 existing tests all kept, no renames/deletes/strengthens. Ring/core was already structurally correct (Sink trait + NullSink).
+
+**Refactor:** extracted `osc52_payload(text: &str) -> Vec<u8>` from `Osc52Sink::write` so the OSC 52 encoder is testable without intercepting stdout.
+
+**Fill:** spec-first tests landed across the previously-thin or untested pure modules:
+- `undo.rs` 23% → 100%: save/undo/redo LIFO, save clears redo, cap evicts oldest, `Default` unbounded, clone independence.
+- `text.rs` 77% → 100%: boundary primitives (`prev_/next_char_boundary`, `byte_to_cell`, `cell_to_byte`, `char_pos`, `byte_of_char`) with mid-char + past-end cases.
+- `kill_ring.rs` 51% → 95%: `kill` push + rotation + `KILL_RING_MAX` cap, `yank`/`yank_pop` round-trip + cycling, `take/set/set_with_*`, `yank_tick` monotonicity.
+- `attachment.rs` 54% → 98%: `get` known/unknown, unknown placeholder labels, `clear` resets, `image_blobs` content-addressed filenames + mime-derived extensions, `save_blobs`/`load_blobs` round-trip via `tempdir`, skip-existing semantics.
+- `clipboard.rs` 0% → 53%: pure `osc52_payload` (envelope, base64, unicode round-trip, empty), `Clipboard` Sink dispatch + `swap_sink`.
+
+No bugs surfaced — every spec matched.
+
+Crate-wide left at 88.5% rather than ≥90% because `buffer.rs` still has unexercised extmark + decoration branches (treating that file as a follow-up; it's already at 86%).
 
 ---
 
@@ -202,6 +212,6 @@ Replicate the shape of `provider/extract.rs` (95% cov) on each provider — pull
 
 ## Now
 
-**Active crate:** `buffer` — substep 1 (Read).
+**Active crate:** `edit` — substep 1 (Read).
 
-Next action: read `crates/buffer/src/*`, map ring vs core (mostly pure text/wrap/undo/kill_ring/attachment), produce the audit lists for substep 2. Known gaps from baseline: `undo.rs` has 0 tests.
+Next action: read `crates/edit/src/*`, map ring vs core (almost certainly all core given the AGENTS doc), produce audit lists. Known gap from baseline: `motions.rs` has 0 direct tests despite being foundational for vim.
