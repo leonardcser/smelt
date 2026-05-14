@@ -99,11 +99,15 @@ pub trait BufferCopy: Send + Sync {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct NsId(pub u32);
 
-/// Idempotent name → id minter. Same `name` always returns the same id.
-pub fn create_namespace(name: &str) -> NsId {
+fn namespace_registry() -> &'static std::sync::RwLock<NamespaceRegistry> {
     use std::sync::{OnceLock, RwLock};
     static REG: OnceLock<RwLock<NamespaceRegistry>> = OnceLock::new();
-    let reg = REG.get_or_init(|| RwLock::new(NamespaceRegistry::default()));
+    REG.get_or_init(|| RwLock::new(NamespaceRegistry::default()))
+}
+
+/// Idempotent name → id minter. Same `name` always returns the same id.
+pub fn create_namespace(name: &str) -> NsId {
+    let reg = namespace_registry();
     if let Some(id) = reg.read().unwrap().name_to_id.get(name).copied() {
         return id;
     }
@@ -114,6 +118,14 @@ pub fn create_namespace(name: &str) -> NsId {
     let id = NsId(w.name_to_id.len() as u32);
     w.name_to_id.insert(name.to_string(), id);
     id
+}
+
+/// Reset the process-global namespace interner. Intended for
+/// deterministic-simulation tests and fuzz harnesses that reuse one
+/// process across scenarios; in production this map grows monotonically
+/// and is never reset.
+pub fn reset_namespaces_for_test() {
+    namespace_registry().write().unwrap().name_to_id.clear();
 }
 
 #[derive(Default)]

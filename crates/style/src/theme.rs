@@ -96,6 +96,20 @@ fn anon_resolve(id: HlGroup) -> Option<Style> {
     anon_styles().read().unwrap().get(&id).copied()
 }
 
+/// Reset all process-global interners. Intended for deterministic-simulation
+/// tests and fuzz harnesses that reuse one process across scenarios; in
+/// production these maps grow monotonically and are never reset.
+///
+/// Not safe to call while other threads hold writes through `intern` or
+/// `intern_anonymous_style`.
+pub fn reset_for_test() {
+    let mut r = registry().write().unwrap();
+    r.name_to_id.clear();
+    r.id_to_name.clear();
+    anon_styles().write().unwrap().clear();
+    anon_hash_to_group().write().unwrap().clear();
+}
+
 /// Default accent palette index (`Color::AnsiValue(208)`, the "ember" preset).
 pub const DEFAULT_ACCENT: u8 = 208;
 
