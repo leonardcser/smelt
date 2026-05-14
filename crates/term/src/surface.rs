@@ -115,3 +115,56 @@ impl Surface {
         self.compositor.render_with(&self.theme, w, paint)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::layout::{Constraint, PaintId};
+
+    #[test]
+    fn area_reports_full_terminal_rect() {
+        let s = Surface::new(80, 24);
+        assert_eq!(s.area(), Rect::new(0, 0, 80, 24));
+    }
+
+    #[test]
+    fn set_terminal_size_updates_reported_size_and_area() {
+        let mut s = Surface::new(10, 5);
+        s.set_terminal_size(40, 20);
+        assert_eq!(s.terminal_size(), (40, 20));
+        assert_eq!(s.area(), Rect::new(0, 0, 40, 20));
+    }
+
+    #[test]
+    fn paint_rect_returns_leaf_rect_resolved_against_current_size() {
+        // A layout with two equal-height panes split vertically: each
+        // leaf should resolve to half the surface area.
+        let mut s = Surface::new(80, 24);
+        let top = PaintId(1);
+        let bottom = PaintId(2);
+        s.set_layout(LayoutTree::vbox(vec![
+            (Constraint::Fill, LayoutTree::leaf(top)),
+            (Constraint::Fill, LayoutTree::leaf(bottom)),
+        ]));
+        let top_rect = s.paint_rect(top).expect("top leaf resolved");
+        let bot_rect = s.paint_rect(bottom).expect("bottom leaf resolved");
+        assert_eq!(top_rect.height + bot_rect.height, 24);
+        assert_eq!(top_rect.width, 80);
+        assert_eq!(bot_rect.width, 80);
+    }
+
+    #[test]
+    fn paint_rect_returns_none_for_unknown_leaf() {
+        let s = Surface::new(80, 24);
+        assert_eq!(s.paint_rect(PaintId(999)), None);
+    }
+
+    #[test]
+    fn theme_mut_allows_in_place_mutation() {
+        use smelt_style::style::{Color, Style};
+        let mut s = Surface::new(10, 5);
+        s.theme_mut().set("Error", Style::new().fg(Color::Red));
+        // The same theme handle now resolves "Error".
+        assert_eq!(s.theme().get("Error").fg, Some(Color::Red));
+    }
+}

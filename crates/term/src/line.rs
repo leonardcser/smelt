@@ -139,4 +139,41 @@ mod tests {
         assert_eq!(l.spans[2].text, "bar");
         assert_eq!(l.spans[2].style.fg, Some(Color::Red));
     }
+
+    #[test]
+    fn span_width_counts_two_columns_per_wide_char() {
+        // CJK chars and most emoji render 2 cells wide.
+        assert_eq!(Span::raw("漢字").width(), 4);
+        assert_eq!(Span::raw("a漢b").width(), 4);
+    }
+
+    #[test]
+    fn span_width_is_zero_for_empty_text() {
+        assert_eq!(Span::raw("").width(), 0);
+    }
+
+    #[test]
+    fn line_width_zero_for_empty_and_for_all_empty_spans() {
+        assert_eq!(Line::new().width(), 0);
+        let l = Line::from_spans([Span::raw(""), Span::raw("")]);
+        assert_eq!(l.width(), 0);
+    }
+
+    #[test]
+    fn line_push_appends_a_span() {
+        let l = Line::new()
+            .push("a")
+            .push(Span::styled("b", Style::new().fg(Color::Red)));
+        assert_eq!(l.spans.len(), 2);
+        assert_eq!(l.spans[0].text, "a");
+        assert_eq!(l.spans[1].style.fg, Some(Color::Red));
+    }
+
+    #[test]
+    fn line_raw_wraps_text_in_a_single_default_span() {
+        let l = Line::raw("hello");
+        assert_eq!(l.spans.len(), 1);
+        assert_eq!(l.spans[0].text, "hello");
+        assert_eq!(l.spans[0].style, Style::default());
+    }
 }

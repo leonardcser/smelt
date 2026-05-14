@@ -551,17 +551,65 @@ mod tests {
         assert_eq!(b.cell(0, 0).symbol, 'A');
     }
 
+    // ── Wide chars ───────────────────────────────────────────────────────
+
+    #[test]
+    fn set_wide_char_marks_next_cell_as_continuation() {
+        // CJK chars have display width 2. The continuation cell carries
+        // '\0' so flush/diff can skip it.
+        let mut grid = Grid::new(5, 1);
+        grid.set(1, 0, '漢', Style::default());
+        assert_eq!(grid.cell(1, 0).symbol, '漢');
+        assert_eq!(grid.cell(2, 0).symbol, '\0');
+    }
+
+    #[test]
+    fn put_str_lays_wide_chars_two_columns_apart() {
+        let mut grid = Grid::new(10, 1);
+        grid.put_str(0, 0, "a漢b", Style::default());
+        assert_eq!(grid.cell(0, 0).symbol, 'a');
+        assert_eq!(grid.cell(1, 0).symbol, '漢');
+        assert_eq!(grid.cell(3, 0).symbol, 'b');
+    }
+
+    #[test]
+    fn wide_char_continuation_is_marked_consistently_across_paths() {
+        // Every path that writes a wide char must mark the next cell so
+        // downstream diff/flush can skip it. Otherwise a diff against a
+        // prev frame with non-empty content at the continuation slot
+        // emits a spurious update that overwrites the wide char's right
+        // half on the terminal.
+        let via_set = {
+            let mut g = Grid::new(5, 1);
+            g.set(0, 0, '漢', Style::default());
+            g
+        };
+        let via_put_str = {
+            let mut g = Grid::new(5, 1);
+            g.put_str(0, 0, "漢", Style::default());
+            g
+        };
+        let via_put_char = {
+            let mut g = Grid::new(5, 1);
+            g.put_char(0, 0, '漢', Color::Reset);
+            g
+        };
+        assert_eq!(via_set.cell(1, 0).symbol, via_put_str.cell(1, 0).symbol);
+        assert_eq!(via_set.cell(1, 0).symbol, via_put_char.cell(1, 0).symbol);
+    }
+
     #[test]
     fn diff_does_not_emit_update_for_cell_under_a_wide_char() {
-        // If prev has a real char at what becomes the continuation column
-        // and curr paints a wide char over it via put_str, diff must not
-        // yield a separate update for the continuation column — otherwise
-        // flush_diff overwrites the wide char's right half on the terminal.
+        // Regression for the wide-char bug: if prev had a real char at
+        // the continuation column and curr paints a wide char that covers
+        // it, diff must not yield an update for the continuation column —
+        // otherwise flush_diff overwrites the right half of the wide char.
         let mut prev = Grid::new(5, 1);
         prev.set(1, 0, 'X', Style::default());
         let mut curr = Grid::new(5, 1);
         curr.put_str(0, 0, "漢", Style::default());
-        let cols: Vec<u16> = curr.diff(&prev).map(|u| u.x).collect();
+        let updates: Vec<_> = curr.diff(&prev).collect();
+        let cols: Vec<u16> = updates.iter().map(|u| u.x).collect();
         assert_eq!(
             cols,
             vec![0],
@@ -571,8 +619,6 @@ mod tests {
 
     #[test]
     fn slice_put_str_lays_wide_chars_two_columns_apart() {
-        // Regression: GridSlice::put_str used to advance col by 1 per char,
-        // so a wide char overlapped the next ASCII char in the slice path.
         let mut grid = Grid::new(10, 1);
         {
             let mut slice = grid.slice_mut(Rect::new(0, 0, 10, 1));
@@ -581,5 +627,51 @@ mod tests {
         assert_eq!(grid.cell(0, 0).symbol, 'a');
         assert_eq!(grid.cell(1, 0).symbol, '漢');
         assert_eq!(grid.cell(3, 0).symbol, 'b');
+    }
+
+    #[test]
+    fn put_str_breaks_when_wide_char_would_overflow() {
+        // 4-wide grid, write "ab漢": the wide char would land at col 2 and
+        // would need col 3 too — fits. Try "abc漢" in width 4: 'c' at 2,
+        // wide char needs 3+4 → overflows, breaks before writing.
+        let mut grid = Grid::new(4, 1);
+        grid.put_str(0, 0, "abc漢", Style::default());
+        assert_eq!(grid.cell(0, 0).symbol, 'a');
+        assert_eq!(grid.cell(1, 0).symbol, 'b');
+        assert_eq!(grid.cell(2, 0).symbol, 'c');
+        // Position 3 was never written.
+        assert_eq!(grid.cell(3, 0).symbol, ' ');
+    }
+
+    // ── Diff over styles ─────────────────────────────────────────────────
+
+    #[test]
+    fn diff_picks_up_style_only_change() {
+        let mut prev = Grid::new(5, 1);
+        prev.set(0, 0, 'X', Style::default());
+        let mut curr = Grid::new(5, 1);
+        curr.set(0, 0, 'X', Style::new().fg(Color::Red));
+        let updates: Vec<_> = curr.diff(&prev).collect();
+        assert_eq!(updates.len(), 1);
+        assert_eq!(updates[0].cell.style.fg, Some(Color::Red));
+    }
+
+    // ── Bounds ───────────────────────────────────────────────────────────
+
+    #[test]
+    fn set_out_of_bounds_is_silent_noop() {
+        let mut grid = Grid::new(3, 2);
+        grid.set(99, 99, 'X', Style::default());
+        // No panic; nothing changed.
+        assert_eq!(grid.cell(0, 0).symbol, ' ');
+        assert_eq!(grid.cell(2, 1).symbol, ' ');
+    }
+
+    #[test]
+    fn put_str_skips_when_y_out_of_bounds() {
+        let mut grid = Grid::new(5, 2);
+        grid.put_str(0, 99, "hello", Style::default());
+        // First row unchanged.
+        assert_eq!(grid.cell(0, 0).symbol, ' ');
     }
 }

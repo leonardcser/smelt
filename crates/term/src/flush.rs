@@ -146,27 +146,58 @@ mod tests {
         assert!(out.is_empty());
     }
 
-    #[test]
-    fn flush_single_cell_produces_output() {
-        let prev = Grid::new(5, 3);
-        let mut curr = Grid::new(5, 3);
-        curr.set(2, 1, 'X', Style::default());
+    /// Run `flush_diff` over the diff between `curr` and `prev` and return the bytes
+    /// crossterm wrote. Tests assert on the exact byte sequence to pin SGR + cursor codes.
+    fn flush_to_string(curr: &Grid, prev: &Grid) -> String {
         let mut out = Vec::new();
-        flush_diff(&mut out, curr.diff(&prev)).unwrap();
-        let s = String::from_utf8(out).unwrap();
-        assert!(s.contains('X'));
+        flush_diff(&mut out, curr.diff(prev)).unwrap();
+        String::from_utf8(out).unwrap()
     }
 
     #[test]
-    fn flush_styled_cell_emits_sgr() {
+    fn flush_single_cell_moves_cursor_and_writes_char() {
+        let prev = Grid::new(5, 3);
+        let mut curr = Grid::new(5, 3);
+        curr.set(2, 1, 'X', Style::default());
+        let s = flush_to_string(&curr, &prev);
+        // MoveTo(2, 1) emits "\x1b[2;3H" (1-based, row-first).
+        assert!(
+            s.starts_with("\x1b[2;3H"),
+            "expected MoveTo before char, got {s:?}"
+        );
+        // Char follows; final reset closes the run.
+        assert!(s.contains("\x1b[2;3HX"));
+        assert!(s.ends_with("\x1b[0m"));
+    }
+
+    #[test]
+    fn flush_styled_cell_emits_an_sgr_before_the_char() {
         let prev = Grid::new(5, 1);
         let mut curr = Grid::new(5, 1);
         curr.set(0, 0, 'A', Style::new().fg(Color::Red));
-        let mut out = Vec::new();
-        flush_diff(&mut out, curr.diff(&prev)).unwrap();
-        let s = String::from_utf8(out).unwrap();
-        assert!(s.contains('A'));
-        assert!(s.contains("\x1b["));
+        let s = flush_to_string(&curr, &prev);
+        // We don't pin the exact bytes (crossterm picks the encoding for
+        // named colors). The contract: a styled cell emits *some* SGR
+        // sequence before the char, distinct from the default empty.
+        let a_pos = s.find('A').expect("A in output");
+        let before_a = &s[..a_pos];
+        assert!(
+            before_a.contains("\x1b[") && before_a.matches("\x1b[").count() >= 2,
+            "expected at least one SGR escape before A (after the MoveTo), got {before_a:?}"
+        );
+    }
+
+    #[test]
+    fn flush_emits_different_bytes_for_different_fg_colors() {
+        let render = |c: Color| {
+            let prev = Grid::new(3, 1);
+            let mut curr = Grid::new(3, 1);
+            curr.set(0, 0, 'A', Style::new().fg(c));
+            flush_to_string(&curr, &prev)
+        };
+        // Distinct named colors must not collapse to the same SGR.
+        assert_ne!(render(Color::Red), render(Color::Blue));
+        assert_ne!(render(Color::Green), render(Color::Yellow));
     }
 
     #[test]
@@ -178,5 +209,143 @@ mod tests {
         flush_diff(&mut out, curr.diff(&prev)).unwrap();
         let s = String::from_utf8(out).unwrap();
         assert!(s.ends_with("\x1b[0m"));
+    }
+
+    // ── Color encodings ───────────────────────────────────────────────────
+
+    #[test]
+    fn flush_emits_ansi_palette_color_code() {
+        let prev = Grid::new(3, 1);
+        let mut curr = Grid::new(3, 1);
+        curr.set(0, 0, 'A', Style::new().fg(Color::AnsiValue(208)));
+        let s = flush_to_string(&curr, &prev);
+        // Crossterm encodes ANSI palette fg as "\x1b[38;5;<n>m".
+        assert!(s.contains("\x1b[38;5;208m"), "got {s:?}");
+    }
+
+    #[test]
+    fn flush_emits_rgb_color_code() {
+        let prev = Grid::new(3, 1);
+        let mut curr = Grid::new(3, 1);
+        curr.set(
+            0,
+            0,
+            'A',
+            Style::new().fg(Color::Rgb {
+                r: 10,
+                g: 20,
+                b: 30,
+            }),
+        );
+        let s = flush_to_string(&curr, &prev);
+        // Crossterm encodes truecolor fg as "\x1b[38;2;r;g;bm".
+        assert!(s.contains("\x1b[38;2;10;20;30m"), "got {s:?}");
+    }
+
+    #[test]
+    fn flush_emits_distinct_sgr_for_fg_vs_bg() {
+        // A cell that only sets bg must produce different bytes than one
+        // that only sets fg with the same color — fg/bg can't collapse.
+        let render = |s: Style| {
+            let prev = Grid::new(3, 1);
+            let mut curr = Grid::new(3, 1);
+            curr.set(0, 0, 'A', s);
+            flush_to_string(&curr, &prev)
+        };
+        let fg_only = render(Style::new().fg(Color::Blue));
+        let bg_only = render(Style::new().bg(Color::Blue));
+        assert_ne!(fg_only, bg_only);
+    }
+
+    // ── Text attributes ──────────────────────────────────────────────────
+
+    #[test]
+    fn flush_emits_bold_attribute() {
+        let prev = Grid::new(3, 1);
+        let mut curr = Grid::new(3, 1);
+        curr.set(0, 0, 'A', Style::new().bold());
+        let s = flush_to_string(&curr, &prev);
+        assert!(s.contains("\x1b[1m"), "got {s:?}");
+    }
+
+    #[test]
+    fn flush_emits_dim_attribute() {
+        let prev = Grid::new(3, 1);
+        let mut curr = Grid::new(3, 1);
+        curr.set(0, 0, 'A', Style::new().dim());
+        let s = flush_to_string(&curr, &prev);
+        assert!(s.contains("\x1b[2m"), "got {s:?}");
+    }
+
+    #[test]
+    fn flush_emits_italic_attribute() {
+        let prev = Grid::new(3, 1);
+        let mut curr = Grid::new(3, 1);
+        curr.set(0, 0, 'A', Style::new().italic());
+        let s = flush_to_string(&curr, &prev);
+        assert!(s.contains("\x1b[3m"), "got {s:?}");
+    }
+
+    #[test]
+    fn flush_emits_underline_attribute() {
+        let prev = Grid::new(3, 1);
+        let mut curr = Grid::new(3, 1);
+        curr.set(0, 0, 'A', Style::new().underline());
+        let s = flush_to_string(&curr, &prev);
+        assert!(s.contains("\x1b[4m"), "got {s:?}");
+    }
+
+    #[test]
+    fn flush_emits_crossedout_attribute() {
+        let prev = Grid::new(3, 1);
+        let mut curr = Grid::new(3, 1);
+        curr.set(0, 0, 'A', Style::new().crossedout());
+        let s = flush_to_string(&curr, &prev);
+        assert!(s.contains("\x1b[9m"), "got {s:?}");
+    }
+
+    // ── Transitions & cursor ─────────────────────────────────────────────
+
+    #[test]
+    fn flush_re_emits_sgr_when_style_changes_mid_run() {
+        // Two adjacent cells with different styles must not share one SGR
+        // run — there must be an escape between them.
+        let prev = Grid::new(3, 1);
+        let mut curr = Grid::new(3, 1);
+        curr.set(0, 0, 'A', Style::default());
+        curr.set(1, 0, 'B', Style::new().fg(Color::Red));
+        let s = flush_to_string(&curr, &prev);
+        let a_pos = s.find('A').expect("A in output");
+        let b_pos = s.find('B').expect("B in output");
+        let between = &s[a_pos + 1..b_pos];
+        assert!(
+            between.contains("\x1b["),
+            "expected an SGR escape between unstyled A and styled B, got {between:?}"
+        );
+    }
+
+    #[test]
+    fn flush_noncontiguous_cells_emit_moveto_between() {
+        let prev = Grid::new(10, 2);
+        let mut curr = Grid::new(10, 2);
+        curr.set(0, 0, 'A', Style::default());
+        curr.set(5, 1, 'B', Style::default());
+        let s = flush_to_string(&curr, &prev);
+        // 'A' at (0,0) → MoveTo(0,0) = "\x1b[1;1H". Then 'B' at (5,1) →
+        // MoveTo(5,1) = "\x1b[2;6H".
+        assert!(s.contains("\x1b[1;1HA"), "got {s:?}");
+        assert!(s.contains("\x1b[2;6HB"), "got {s:?}");
+    }
+
+    #[test]
+    fn flush_contiguous_cells_share_one_moveto() {
+        let prev = Grid::new(10, 1);
+        let mut curr = Grid::new(10, 1);
+        curr.set(0, 0, 'A', Style::default());
+        curr.set(1, 0, 'B', Style::default());
+        curr.set(2, 0, 'C', Style::default());
+        let s = flush_to_string(&curr, &prev);
+        // Only one MoveTo at the start; the rest stream after.
+        assert!(s.contains("\x1b[1;1HABC"), "got {s:?}");
     }
 }
