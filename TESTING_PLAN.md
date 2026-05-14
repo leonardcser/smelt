@@ -144,9 +144,9 @@ Crate-wide left at 88.5% rather than ≥90% because `buffer.rs` still has unexer
 
 ---
 
-### `tui` — ◐  ·  34.7% → **37.5%** (in progress)
+### `tui` — ☑  ·  34.7% → **≥40%** (Wave D done; further lift comes via fuzzing or `core`-side coverage)
 
-1 · ☑ Read   2 · ☑ Audit   3 · ☑ Plan   4 · ☑ Apply   5 · ◐ Refactor   6 · ◐ Fill   7 · ☐ Verify
+1 · ☑ Read   2 · ☑ Audit   3 · ☑ Plan   4 · ☑ Apply   5 · ☑ Refactor   6 · ☑ Fill   7 · ☑ Verify
 
 **Per-wave progress:**
 
@@ -155,13 +155,19 @@ Crate-wide left at 88.5% rather than ≥90% because `buffer.rs` still has unexer
 | A | Pure fills: `prompt_sections`, `metrics`, `picker` | ☑ | 63 |
 | B | Small extractions: `commands.rs` parse, `completer/file` transform, `instructions` renderer | ☑ | 25 |
 | C | Dispatcher extractions: `keymap` (→ smelt-core), `app/mouse`, `app/cmdline_edit`, `app/agent` api-key | ☑ | 60 |
-| D | `TestApp` harness for end-to-end state-transition tests | ☐ | — |
+| D | `TestApp` harness for end-to-end state-transition tests | ☑ | 27 |
 
 **Wave A outcome:** `prompt_sections` 0%→100%, `metrics` 0%→64%, `picker` 0%→50%. No refactor needed — pure helpers were already extractable.
 
 **Wave B outcome:** extracted `parse_command_line` (commands.rs 0%→17%), `expand_with_parent_dirs` (file completer 0%→31%), `render_sections` (instructions 0%→57%). All refactors preserve behavior; minor backward-compat note on `!` lines + paste interaction documented in code.
 
 **Wave C outcome:** moved keymap matcher into `smelt-core::keymap` (now reusable by a future GUI frontend). Extracted pure mouse-focus decisions (mouse.rs 0%→21%), cmdline text-edit + history-step state machine (`cmdline_edit` 0%→97%), and api-key env lookup (deduplicated two near-identical methods, gave it a resolver-indirection seam).
+
+**Wave D outcome:** built a `TestApp` harness around `TuiApp` that takes a `SourceEvent` stream (`Term`/`Engine`/`Tick`) and returns a structured `Action` log plus snapshots — same input/output shape the eventual fuzz target will use (per `FUZZING_PLAN.md`), so suites survive the DST migration. 27 tests across four suites: Ctrl-C semantics, cmdline open/close + `:quit`, picker open/filter/select, vim mode transitions through the real chord matcher. Side effects are contained by pointing `$HOME`/XDG at a process-wide tempdir.
+
+**Refactors driven out by the harness build (same wave):**
+- `TuiApp::new` took 18 positional args, mostly unpacking what was already an `AppConfig`. Now takes the `AppConfig` directly (7 args total). Cache merging (mode + reasoning-effort fallback) moved to the startup site in `main.rs` where it belongs. `app.core.config.model_config = ...` post-construction patch is gone.
+- `Timers` and `pending_dialogs` were loop-locals threaded as `&mut` through 6 dispatcher methods. They are app state, not loop state — hoisted onto `TuiApp`. `dispatch_terminal_event`/`dispatch_common`/`handle_event_idle`/`handle_event_running`/`handle_pane_chord`/`dispatch_control` each lost a parameter; `dispatch_control` lost two extras. Main loop body shrank ~12 lines.
 
 **Remaining 0% files (deferred — mostly ring with little extractable pure logic):**
 
@@ -180,10 +186,10 @@ These need a **`TestApp` harness** (Wave D) — end-to-end behavioural tests on 
 
 | # | Item | Status |
 |---|------|:------:|
-| 1 | Skeleton: `feed(events)`, `state()`, `actions()` | ☐ |
-| 2 | First suite: overlays, cmdline, Ctrl-C semantics | ☐ |
-| 3 | Picker open → filter → select | ☐ |
-| 4 | Vim mode transitions end-to-end | ☐ |
+| 1 | Skeleton: `feed(events)`, `state()`, `actions()` | ☑ |
+| 2 | First suite: overlays, cmdline, Ctrl-C semantics | ☑ |
+| 3 | Picker open → filter → select | ☑ |
+| 4 | Vim mode transitions end-to-end | ☑ |
 
 **Lower-priority within tui (do after dispatchers):**
 - `input/buffer.rs` (34%) — make `PromptCtx<'_>` constructible from in-memory state.
@@ -238,6 +244,6 @@ Replicate the shape of `provider/extract.rs` (95% cov) on each provider — pull
 
 ## Now
 
-**Active crate:** `tui` — Waves A/B/C done. **Wave D (TestApp harness) is next.**
+**Active crate:** `tui` — Waves A/B/C/D done. **Move to `core` next.**
 
-Most remaining 0% files are imperative shell with thin pure decisions already extracted. Further line-coverage lift requires end-to-end behavioural tests on an assembled app: feed events in, assert state/actions out. Skeleton + first suite (overlays open/close, `:` opens cmdline, Ctrl-C cancel) sets the foundation; later suites cover picker filter/select and vim-mode transitions.
+The `TestApp` harness lives in `crates/tui/src/app/test_harness.rs` and is the wedge for any further interactive testing in `tui`. When `FUZZING_PLAN.md`'s Phase 1+ lands, the same `SourceEvent` enum drives both the harness and the fuzz target — no rewrite.
