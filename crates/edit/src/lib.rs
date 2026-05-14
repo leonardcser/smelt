@@ -3502,6 +3502,21 @@ mod tests {
         assert_eq!(ui.record_click(8, 7, t0), 1);
     }
 
+    /// Two clicks on the same cell more than 400ms apart count as fresh
+    /// singles, not a double-click. Exercising the `now` parameter directly
+    /// proves the gap check reads the host clock rather than `Instant::now`.
+    #[test]
+    fn record_click_resets_after_400ms_gap() {
+        let mut ui = make_ui();
+        let t0 = std::time::Instant::now();
+        assert_eq!(ui.record_click(5, 7, t0), 1);
+        let later = t0 + std::time::Duration::from_millis(401);
+        assert_eq!(ui.record_click(5, 7, later), 1);
+        // A follow-up within 400ms of `later` still pairs with it.
+        let still_near = later + std::time::Duration::from_millis(100);
+        assert_eq!(ui.record_click(5, 7, still_near), 2);
+    }
+
     /// Set up a single splits leaf at `(0, 0, 20, 10)` with a painted
     /// scrollbar at column 19 covering 100 rows of content. Returns
     /// the leaf's `WinId` so callers can latch capture / hit-test
