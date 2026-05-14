@@ -11,7 +11,6 @@ use crossterm::{
 };
 use protocol::Content;
 use std::io;
-use std::time::Instant;
 
 impl TuiApp {
     // ── Terminal event dispatch ───────────────────────────────────────────
@@ -240,7 +239,7 @@ impl TuiApp {
                 }
 
                 // Multi-key chord: drop stale pending sequence, then append and match.
-                let now = Instant::now();
+                let now = self.core.clock.instant_now();
                 if let Some(pending) = &self.timers.pending_chord {
                     if smelt_core::keymap::chord_expired(
                         pending.started,
@@ -382,7 +381,7 @@ impl TuiApp {
                             self.input.close_completer();
                             return EventOutcome::Redraw;
                         }
-                        self.timers.last_ctrlc = Some(Instant::now());
+                        self.timers.last_ctrlc = Some(self.core.clock.instant_now());
                         let mut pctx = crate::input::prompt_ctx_mut(&mut self.ui);
                         self.input.clear(&mut pctx);
                         return EventOutcome::Redraw;
@@ -411,7 +410,7 @@ impl TuiApp {
 
         // Record last keypress for deferred permission dialogs.
         if matches!(ev, Event::Key(_)) {
-            self.timers.last_keypress = Some(Instant::now());
+            self.timers.last_keypress = Some(self.core.clock.instant_now());
         }
 
         if let Event::Key(KeyEvent {
@@ -435,7 +434,7 @@ impl TuiApp {
                             self.input.close_completer();
                             return EventOutcome::Noop;
                         }
-                        self.timers.last_ctrlc = Some(Instant::now());
+                        self.timers.last_ctrlc = Some(self.core.clock.instant_now());
                         let mut pctx = crate::input::prompt_ctx_mut(&mut self.ui);
                         self.input.clear(&mut pctx);
                         self.queued_messages.clear();
@@ -458,11 +457,13 @@ impl TuiApp {
             } else {
                 None
             };
+            let now = self.core.clock.instant_now();
             match resolve_agent_esc(
                 cur_mode,
                 !self.queued_messages.is_empty(),
                 &mut self.timers.last_esc,
                 &mut self.timers.esc_vim_mode,
+                now,
             ) {
                 EscAction::VimToNormal => {
                     let mut pctx = crate::input::prompt_ctx_mut(&mut self.ui);

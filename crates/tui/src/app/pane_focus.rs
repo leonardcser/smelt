@@ -3,7 +3,7 @@
 use crate::app::{EventOutcome, TuiApp};
 use crossterm::event::{Event, KeyCode, KeyEvent};
 use smelt_core::{Block, BlockId, ViewState};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 /// Max inter-key gap between `Ctrl-W` and its follow-up key.
 const PANE_CHORD_WINDOW: Duration = Duration::from_millis(750);
@@ -13,8 +13,9 @@ impl TuiApp {
         use crossterm::event::KeyModifiers as M;
         let Event::Key(k) = ev else { return None };
 
+        let now = self.core.clock.instant_now();
         if let Some(started) = self.timers.pending_pane_chord {
-            if started.elapsed() < PANE_CHORD_WINDOW {
+            if now.duration_since(started) < PANE_CHORD_WINDOW {
                 let navigated = matches!(
                     (k.code, k.modifiers),
                     (KeyCode::Char('w'), _) | (KeyCode::Char('j' | 'k' | 'h' | 'l' | 'p'), M::NONE)
@@ -30,7 +31,7 @@ impl TuiApp {
         }
 
         if k.code == KeyCode::Char('w') && k.modifiers.contains(M::CONTROL) {
-            self.timers.pending_pane_chord = Some(Instant::now());
+            self.timers.pending_pane_chord = Some(now);
             return Some(EventOutcome::Noop);
         }
         None

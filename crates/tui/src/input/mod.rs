@@ -1125,13 +1125,14 @@ pub(crate) fn resolve_agent_esc(
     has_queued: bool,
     last_esc: &mut Option<std::time::Instant>,
     vim_mode_at_first_esc: &mut Option<VimMode>,
+    now: std::time::Instant,
 ) -> EscAction {
-    use std::time::{Duration, Instant};
+    use std::time::Duration;
 
     // Insert mode: switch to Normal and start the double-Esc timer (two presses total to cancel).
     if vim_mode == Some(VimMode::Insert) {
         *vim_mode_at_first_esc = Some(VimMode::Insert);
-        *last_esc = Some(Instant::now());
+        *last_esc = Some(now);
         return EscAction::VimToNormal;
     }
 
@@ -1142,7 +1143,7 @@ pub(crate) fn resolve_agent_esc(
     }
 
     if let Some(prev) = *last_esc {
-        if prev.elapsed() < Duration::from_millis(500) {
+        if now.duration_since(prev) < Duration::from_millis(500) {
             let restore = vim_mode_at_first_esc.take();
             *last_esc = None;
             return EscAction::Cancel {
@@ -1152,7 +1153,7 @@ pub(crate) fn resolve_agent_esc(
     }
 
     *vim_mode_at_first_esc = vim_mode;
-    *last_esc = Some(Instant::now());
+    *last_esc = Some(now);
     EscAction::StartTimer
 }
 
@@ -1227,8 +1228,13 @@ mod tests {
         // Single Esc while vim is in insert mode → VimToNormal.
         let mut last_esc = None;
         let mut saved_mode = None;
-        let action =
-            resolve_agent_esc(Some(VimMode::Insert), false, &mut last_esc, &mut saved_mode);
+        let action = resolve_agent_esc(
+            Some(VimMode::Insert),
+            false,
+            &mut last_esc,
+            &mut saved_mode,
+            std::time::Instant::now(),
+        );
         assert_eq!(action, EscAction::VimToNormal);
         // Timer should be started so a second Esc can cancel.
         assert!(last_esc.is_some());
@@ -1241,7 +1247,13 @@ mod tests {
         // Esc in vim normal mode with queued messages → Unqueue.
         let mut last_esc = None;
         let mut saved_mode = None;
-        let action = resolve_agent_esc(Some(VimMode::Normal), true, &mut last_esc, &mut saved_mode);
+        let action = resolve_agent_esc(
+            Some(VimMode::Normal),
+            true,
+            &mut last_esc,
+            &mut saved_mode,
+            std::time::Instant::now(),
+        );
         assert_eq!(action, EscAction::Unqueue);
     }
 
@@ -1250,14 +1262,24 @@ mod tests {
         // First Esc: vim insert → normal, timer starts.
         let mut last_esc = None;
         let mut saved_mode = None;
-        let action1 =
-            resolve_agent_esc(Some(VimMode::Insert), false, &mut last_esc, &mut saved_mode);
+        let action1 = resolve_agent_esc(
+            Some(VimMode::Insert),
+            false,
+            &mut last_esc,
+            &mut saved_mode,
+            std::time::Instant::now(),
+        );
         assert_eq!(action1, EscAction::VimToNormal);
 
         // Second Esc: now in normal mode (vim switched), timer active → Cancel.
         // Restore mode should be Insert (the mode before the sequence started).
-        let action2 =
-            resolve_agent_esc(Some(VimMode::Normal), false, &mut last_esc, &mut saved_mode);
+        let action2 = resolve_agent_esc(
+            Some(VimMode::Normal),
+            false,
+            &mut last_esc,
+            &mut saved_mode,
+            std::time::Instant::now(),
+        );
         assert_eq!(
             action2,
             EscAction::Cancel {
@@ -1271,14 +1293,24 @@ mod tests {
         // First Esc: vim already in normal, no queue → StartTimer.
         let mut last_esc = None;
         let mut saved_mode = None;
-        let action1 =
-            resolve_agent_esc(Some(VimMode::Normal), false, &mut last_esc, &mut saved_mode);
+        let action1 = resolve_agent_esc(
+            Some(VimMode::Normal),
+            false,
+            &mut last_esc,
+            &mut saved_mode,
+            std::time::Instant::now(),
+        );
         assert_eq!(action1, EscAction::StartTimer);
         assert_eq!(saved_mode, Some(VimMode::Normal));
 
         // Second Esc within 500ms → Cancel, restore to Normal.
-        let action2 =
-            resolve_agent_esc(Some(VimMode::Normal), false, &mut last_esc, &mut saved_mode);
+        let action2 = resolve_agent_esc(
+            Some(VimMode::Normal),
+            false,
+            &mut last_esc,
+            &mut saved_mode,
+            std::time::Instant::now(),
+        );
         assert_eq!(
             action2,
             EscAction::Cancel {
@@ -1298,6 +1330,7 @@ mod tests {
             true,
             &mut last_esc,
             &mut saved_mode,
+            std::time::Instant::now(),
         );
         assert_eq!(action, EscAction::Unqueue);
     }
@@ -1308,11 +1341,23 @@ mod tests {
         let mut saved_mode = None;
 
         // First Esc → StartTimer.
-        let action1 = resolve_agent_esc(None, false, &mut last_esc, &mut saved_mode);
+        let action1 = resolve_agent_esc(
+            None,
+            false,
+            &mut last_esc,
+            &mut saved_mode,
+            std::time::Instant::now(),
+        );
         assert_eq!(action1, EscAction::StartTimer);
 
         // Second Esc within 500ms → Cancel with no vim mode to restore.
-        let action2 = resolve_agent_esc(None, false, &mut last_esc, &mut saved_mode);
+        let action2 = resolve_agent_esc(
+            None,
+            false,
+            &mut last_esc,
+            &mut saved_mode,
+            std::time::Instant::now(),
+        );
         assert_eq!(action2, EscAction::Cancel { restore_vim: None });
     }
 
