@@ -262,6 +262,18 @@ mod tests {
     }
 
     #[test]
+    fn link_chain_exceeding_depth_cap_returns_default() {
+        let mut t = Theme::new();
+        // 17-hop chain L0 -> L1 -> ... -> L17, where L17 has a real style.
+        // Without the cap, get("L0") would chase to L17 and return target_style.
+        for i in 0..17 {
+            t.link(format!("L{i}"), format!("L{}", i + 1));
+        }
+        t.set("L17", Style::new().bg(Color::AnsiValue(99)));
+        assert_eq!(t.get("L0"), Style::default());
+    }
+
+    #[test]
     fn set_overwrites_existing_link() {
         let mut t = Theme::new();
         t.set("Visual", Style::new().bg(Color::AnsiValue(237)));
@@ -298,5 +310,70 @@ mod tests {
         assert_eq!(t.slug_color(), Color::AnsiValue(75));
         t.set_slug(108);
         assert_eq!(t.slug_color(), Color::AnsiValue(108));
+    }
+
+    // ── Interner ──────────────────────────────────────────────────────────
+    // The interner is process-global; tests use unique prefixed names so they
+    // don't collide with each other or with sibling tests.
+
+    #[test]
+    fn intern_returns_same_id_for_same_name() {
+        assert_eq!(
+            intern("style_audit_intern_a"),
+            intern("style_audit_intern_a")
+        );
+    }
+
+    #[test]
+    fn intern_returns_different_ids_for_different_names() {
+        assert_ne!(
+            intern("style_audit_intern_b"),
+            intern("style_audit_intern_c")
+        );
+    }
+
+    #[test]
+    fn name_of_round_trips_interned_id() {
+        let id = intern("style_audit_name_of");
+        assert_eq!(name_of(id), Some("style_audit_name_of".to_string()));
+    }
+
+    #[test]
+    fn name_of_returns_none_for_unminted_id() {
+        // u32::MAX is far past any id the test process would have minted.
+        assert_eq!(name_of(HlGroup(u32::MAX)), None);
+    }
+
+    #[test]
+    fn intern_anonymous_style_returns_same_id_for_equal_styles() {
+        let s = Style::new().fg(Color::Red).bold();
+        assert_eq!(intern_anonymous_style(s), intern_anonymous_style(s));
+    }
+
+    #[test]
+    fn intern_anonymous_style_returns_different_ids_for_distinct_styles() {
+        let s1 = Style::new().fg(Color::Red).bold();
+        let s2 = Style::new().fg(Color::Blue).bold();
+        assert_ne!(intern_anonymous_style(s1), intern_anonymous_style(s2));
+    }
+
+    #[test]
+    fn theme_resolves_anonymous_style_via_fallthrough() {
+        // A Theme with no entry for the anon id must still resolve the style
+        // by falling through to the global anon registry.
+        let t = Theme::new();
+        let style = Style::new().fg(Color::Cyan).italic();
+        let id = intern_anonymous_style(style);
+        assert_eq!(t.resolve(id), style);
+    }
+
+    #[test]
+    fn contains_reports_set_and_linked_names_only() {
+        let mut t = Theme::new();
+        t.set("style_audit_contains_a", Style::new().bold());
+        t.link("style_audit_contains_b", "style_audit_contains_a");
+        assert!(t.contains(t.id_for("style_audit_contains_a")));
+        assert!(t.contains(t.id_for("style_audit_contains_b")));
+        assert!(!t.contains(t.id_for("style_audit_contains_unknown")));
     }
 }
