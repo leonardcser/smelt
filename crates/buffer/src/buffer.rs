@@ -895,7 +895,8 @@ impl Buffer {
         self.projection_maps.as_ref()
     }
 
-    #[cfg(test)]
+    /// Monotonic counter, bumped on every `lines` mutation. Use as a cheap
+    /// fingerprint for cache invalidation tied to displayed text.
     pub fn changedtick(&self) -> u64 {
         self.changedtick
     }

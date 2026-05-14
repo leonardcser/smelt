@@ -76,10 +76,7 @@ pub fn intern_anonymous_style(style: Style) -> HlGroup {
 
     let key = format!("__anon__/{:016x}", style_hash);
     let id = intern(&key);
-    anon_hash_to_group()
-        .write()
-        .unwrap()
-        .insert(style_hash, id);
+    anon_hash_to_group().write().unwrap().insert(style_hash, id);
     anon_styles().write().unwrap().insert(id, style);
     id
 }

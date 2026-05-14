@@ -255,8 +255,7 @@ impl TuiApp {
             if cpos <= row_end {
                 let col_byte = cpos.saturating_sub(acc).min(row.len());
                 let col = row[..col_byte].chars().count();
-                let snapped =
-                    crate::content::transcript_buf::snap_col_to_selectable(buf, r, col);
+                let snapped = crate::content::transcript_buf::snap_col_to_selectable(buf, r, col);
                 if snapped == col {
                     return cpos;
                 }

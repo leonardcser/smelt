@@ -98,7 +98,7 @@ impl TranscriptProjection {
         viewport_rows: u16,
     ) -> ProjectOutput {
         let gen = history.generation();
-        let ephemeral_fingerprint = ephemeral.map(fingerprint_ephemeral);
+        let ephemeral_fingerprint = ephemeral.map(Buffer::changedtick);
         let key = ProjectKey {
             generation: gen,
             width,
@@ -370,10 +370,6 @@ fn clamp_scroll(scroll_top: u16, total_rows: u16, viewport_rows: u16) -> u16 {
     scroll_top.min(total_rows.saturating_sub(viewport_rows))
 }
 
-fn fingerprint_ephemeral(buf: &Buffer) -> u64 {
-    seahash::hash(buf.text().as_bytes())
-}
-
 fn apply_row_highlights(buf: &mut Buffer, row: usize, highlights: Vec<Span>) {
     for span in highlights {
         let meta: SpanMeta = span.meta;
@@ -427,7 +423,11 @@ pub(crate) fn copy_byte_range(buf: &Buffer, start: usize, end: usize) -> String 
         let is_first = r == sr;
         let is_last = r == er;
         let c_start = if is_first { sc } else { 0 };
-        let c_end = if is_last { ec.min(line_chars) } else { line_chars };
+        let c_end = if is_last {
+            ec.min(line_chars)
+        } else {
+            line_chars
+        };
 
         let highlights = buf.highlights_at(r);
         let unselectable_intervals = collect_unselectable(&highlights, line_chars);
