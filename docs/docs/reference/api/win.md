@@ -96,7 +96,7 @@ Subscribe `func` to event `event` on window `win_id`. Returns a callback id usab
 fun(buf_id: integer, opts: table?): integer?
 ```
 
-Open a split window over the buffer `buf_id`. `opts.region` picks the layout slot (default `"lua_overlay"`); `opts.focusable`, `opts.cursor_line_highlight`, and `opts.vim_enabled` toggle behaviour. `opts.pad_left` / `opts.pad_right` reserve gutter columns on either side. Returns the new `WinId` or `nil` if no slot was available.
+Open a split window over the buffer `buf_id`. `opts.region` picks the layout slot (default `"lua_overlay"`); `opts.focusable`, `opts.cursor_line_highlight`, and `opts.vim_enabled` toggle behaviour. `opts.pad_left` / `opts.pad_right` reserve gutter columns on either side. `opts.scrollbar` (default `true`) reserves the rightmost column for a scrollbar that paints only when content overflows — set `false` for cursor-driven UIs (lists, single-line inputs). Returns the new `WinId` or `nil` if no slot was available.
 
 ## `smelt.win.rect`
 
