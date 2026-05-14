@@ -13,7 +13,7 @@ pub(crate) use protocol::TokenUsage;
 use protocol::{Content, Message, ReasoningEffort, ToolCall};
 use reqwest::Client;
 use serde::Serialize;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 #[derive(Debug, Clone, Serialize)]
 pub struct ToolDefinition {
@@ -366,6 +366,7 @@ pub struct Provider {
     model_config: crate::config::ModelConfig,
     /// Sticky routing token for Codex: set from the first response, echoed on subsequent requests within the same turn.
     turn_state: std::sync::Arc<std::sync::Mutex<Option<String>>>,
+    clock: std::sync::Arc<dyn crate::clock::Clock>,
 }
 
 /// Ensure `tool_calls[].function.arguments` is valid JSON; some models emit malformed strings.
@@ -384,7 +385,13 @@ pub(crate) fn sanitize_tool_call_arguments(obj: &mut serde_json::Map<String, ser
 }
 
 impl Provider {
-    pub fn new(api_base: String, api_key: String, provider_type: &str, client: Client) -> Self {
+    pub fn new(
+        api_base: String,
+        api_key: String,
+        provider_type: &str,
+        client: Client,
+        clock: std::sync::Arc<dyn crate::clock::Clock>,
+    ) -> Self {
         let api_base = api_base.trim_end_matches('/').to_string();
         let kind = ProviderKind::from_config(provider_type);
         Self {
@@ -394,6 +401,7 @@ impl Provider {
             kind,
             model_config: Default::default(),
             turn_state: std::sync::Arc::new(std::sync::Mutex::new(None)),
+            clock,
         }
     }
 
@@ -549,7 +557,7 @@ impl Provider {
         let max_retries = 9;
 
         for attempt in 0..=max_retries {
-            let request_start = Instant::now();
+            let request_start = self.clock.instant_now();
 
             let mut req = self.client.post(&url).json(&body);
             if is_codex {
@@ -1660,19 +1668,37 @@ mod tests {
 
     #[test]
     fn provider_new_strips_trailing_slashes_from_api_base() {
-        let p = Provider::new("https://x/".into(), "k".into(), "openai", http_client());
+        let p = Provider::new(
+            "https://x/".into(),
+            "k".into(),
+            "openai",
+            http_client(),
+            std::sync::Arc::new(crate::clock::RealClock),
+        );
         assert_eq!(p.api_base, "https://x");
     }
 
     #[test]
     fn provider_new_resolves_kind_from_provider_type() {
-        let p = Provider::new("https://x".into(), "k".into(), "anthropic", http_client());
+        let p = Provider::new(
+            "https://x".into(),
+            "k".into(),
+            "anthropic",
+            http_client(),
+            std::sync::Arc::new(crate::clock::RealClock),
+        );
         assert_eq!(p.kind, ProviderKind::Anthropic);
     }
 
     #[test]
     fn provider_tool_calling_default_is_true() {
-        let p = Provider::new("".into(), "".into(), "openai", http_client());
+        let p = Provider::new(
+            "".into(),
+            "".into(),
+            "openai",
+            http_client(),
+            std::sync::Arc::new(crate::clock::RealClock),
+        );
         assert!(p.tool_calling());
     }
 
@@ -1682,7 +1708,14 @@ mod tests {
             tool_calling: Some(false),
             ..Default::default()
         };
-        let p = Provider::new("".into(), "".into(), "openai", http_client()).with_model_config(cfg);
+        let p = Provider::new(
+            "".into(),
+            "".into(),
+            "openai",
+            http_client(),
+            std::sync::Arc::new(crate::clock::RealClock),
+        )
+        .with_model_config(cfg);
         assert!(!p.tool_calling());
     }
 
@@ -1721,7 +1754,13 @@ mod tests {
 
     #[test]
     fn provider_reset_turn_state_clears_to_none() {
-        let p = Provider::new("".into(), "".into(), "codex", http_client());
+        let p = Provider::new(
+            "".into(),
+            "".into(),
+            "codex",
+            http_client(),
+            std::sync::Arc::new(crate::clock::RealClock),
+        );
         *p.turn_state.lock().unwrap() = Some("abc".into());
         p.reset_turn_state();
         assert!(p.turn_state.lock().unwrap().is_none());

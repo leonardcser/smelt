@@ -65,6 +65,7 @@ pub(crate) async fn engine_task(
                             &config.api, &client,
                             api_base.as_deref(), api_key.as_deref(),
                             model_config_overrides.as_ref(),
+                            std::sync::Arc::clone(&config.clock),
                         );
                         let skill_section = config.skills.as_ref().and_then(|s| s.prompt_section());
                         let system_prompt = tui_system_prompt
@@ -104,7 +105,14 @@ pub(crate) async fn engine_task(
                     }
                     UiCommand::Compact { history, instructions } => {
                         let request = config.aux_or_primary(AuxiliaryTask::Compaction);
-                        let provider = build_provider(&request.api, &client, None, None, None);
+                        let provider = build_provider(
+                            &request.api,
+                            &client,
+                            None,
+                            None,
+                            None,
+                            std::sync::Arc::clone(&config.clock),
+                        );
                         let cancel = crate::cancel::CancellationToken::new();
                         match compact::run_compact(
                             &provider,
@@ -195,7 +203,14 @@ fn spawn_title_generation(
     event_tx: &mpsc::UnboundedSender<EngineEvent>,
 ) {
     let request = config.aux_or_primary(AuxiliaryTask::Title);
-    let provider = build_provider(&request.api, client, None, None, None);
+    let provider = build_provider(
+        &request.api,
+        client,
+        None,
+        None,
+        None,
+        std::sync::Arc::clone(&config.clock),
+    );
     let pricing = PricingContext::from_api(&request.api);
     let model = request.model;
     let tx = event_tx.clone();
@@ -264,7 +279,14 @@ fn spawn_btw_request(
     event_tx: &mpsc::UnboundedSender<EngineEvent>,
 ) {
     let request = config.aux_or_primary(AuxiliaryTask::Btw);
-    let provider = build_provider(&request.api, client, None, None, None);
+    let provider = build_provider(
+        &request.api,
+        client,
+        None,
+        None,
+        None,
+        std::sync::Arc::clone(&config.clock),
+    );
     let pricing = PricingContext::from_api(&request.api);
     let model = request.model;
     let tx = event_tx.clone();
@@ -317,7 +339,14 @@ fn spawn_engine_ask(
     event_tx: &mpsc::UnboundedSender<EngineEvent>,
 ) {
     let request = config.aux_or_primary(task);
-    let provider = build_provider(&request.api, client, None, None, None);
+    let provider = build_provider(
+        &request.api,
+        client,
+        None,
+        None,
+        None,
+        std::sync::Arc::clone(&config.clock),
+    );
     let pricing = PricingContext::from_api(&request.api);
     let model = request.model;
     let tx = event_tx.clone();
@@ -351,6 +380,7 @@ fn build_provider(
     api_base: Option<&str>,
     api_key: Option<&str>,
     model_overrides: Option<&protocol::ModelConfigOverrides>,
+    clock: std::sync::Arc<dyn crate::clock::Clock>,
 ) -> Provider {
     let model_config = match model_overrides {
         Some(o) => api.model_config.clone().with_overrides(o),
@@ -361,6 +391,7 @@ fn build_provider(
         api_key.unwrap_or(&api.key).to_string(),
         &api.provider_type,
         client.clone(),
+        clock,
     )
     .with_model_config(model_config)
 }
@@ -519,7 +550,14 @@ impl<'a> Turn<'a> {
             "first message should be the system prompt"
         );
         let request = self.config.aux_or_primary(AuxiliaryTask::Compaction);
-        let provider = build_provider(&request.api, self.http_client, None, None, None);
+        let provider = build_provider(
+            &request.api,
+            self.http_client,
+            None,
+            None,
+            None,
+            std::sync::Arc::clone(&self.config.clock),
+        );
         let result = compact::run_compact(
             &provider,
             &self.messages[1..],
@@ -613,8 +651,14 @@ impl<'a> Turn<'a> {
         provider_type: String,
     ) {
         self.model = model;
-        self.provider = Provider::new(api_base, api_key, &provider_type, self.http_client.clone())
-            .with_model_config(self.config.api.model_config.clone());
+        self.provider = Provider::new(
+            api_base,
+            api_key,
+            &provider_type,
+            self.http_client.clone(),
+            std::sync::Arc::clone(&self.config.clock),
+        )
+        .with_model_config(self.config.api.model_config.clone());
     }
 
     /// Handle a command that can be processed regardless of turn state.
@@ -1848,7 +1892,14 @@ mod tests {
             base: "https://x/".into(),
             ..api_cfg()
         };
-        let p = build_provider(&api, &reqwest::Client::new(), None, None, None);
+        let p = build_provider(
+            &api,
+            &reqwest::Client::new(),
+            None,
+            None,
+            None,
+            std::sync::Arc::new(crate::clock::RealClock),
+        );
         assert_eq!(p.api_base(), "https://x");
         assert_eq!(p.api_key(), "k");
     }
@@ -1866,6 +1917,7 @@ mod tests {
             Some("override-base/"),
             Some("ok"),
             None,
+            std::sync::Arc::new(crate::clock::RealClock),
         );
         assert_eq!(p.api_base(), "override-base");
         assert_eq!(p.api_key(), "ok");
@@ -1878,7 +1930,14 @@ mod tests {
             key: "fallback-key".into(),
             ..api_cfg()
         };
-        let p = build_provider(&api, &reqwest::Client::new(), None, None, None);
+        let p = build_provider(
+            &api,
+            &reqwest::Client::new(),
+            None,
+            None,
+            None,
+            std::sync::Arc::new(crate::clock::RealClock),
+        );
         assert_eq!(p.api_base(), "fallback-base");
         assert_eq!(p.api_key(), "fallback-key");
     }
@@ -1898,7 +1957,14 @@ mod tests {
             top_k: Some(7),
             ..Default::default()
         };
-        let p = build_provider(&api, &reqwest::Client::new(), None, None, Some(&overrides));
+        let p = build_provider(
+            &api,
+            &reqwest::Client::new(),
+            None,
+            None,
+            Some(&overrides),
+            std::sync::Arc::new(crate::clock::RealClock),
+        );
         let cfg = p.model_config_for_test();
         assert_eq!(cfg.temperature, Some(0.9));
         assert_eq!(cfg.top_p, Some(0.2));

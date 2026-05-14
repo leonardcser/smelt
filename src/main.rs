@@ -414,12 +414,14 @@ async fn main() {
         let ctx_model = model.clone();
         let ctx_provider_type = initial_provider_type.clone();
         let (tx, rx) = tokio::sync::oneshot::channel();
+        let ctx_clock = Arc::clone(&clock);
         tokio::spawn(async move {
             let provider = engine::Provider::new(
                 ctx_api_base,
                 ctx_api_key,
                 &ctx_provider_type,
                 reqwest::Client::new(),
+                ctx_clock,
             );
             let _ = tx.send(provider.fetch_context_window(&ctx_model).await);
         });
