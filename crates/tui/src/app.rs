@@ -719,6 +719,9 @@ impl TuiApp {
     ) {
         crate::theme::detect_background(self.ui.theme_mut());
         crate::theme::populate_ui_theme(self.ui.theme_mut());
+        smelt_core::commands::set_command_resolver(|name| {
+            crate::lua::try_with_app(|app| app.lua.has_command(name)).unwrap_or(false)
+        });
         terminal::enable_raw_mode().ok();
         let _ = io::stdout().execute(EnterAlternateScreen);
         // Disable DECAWM — writing to the bottom-right cell must not trigger auto-scroll.
@@ -777,7 +780,7 @@ impl TuiApp {
                 if let Some(handle) = self.start_shell_escape(cmd) {
                     self.exec = Some(handle);
                 }
-            } else if trimmed.starts_with('/') && crate::completer::Completer::is_command(trimmed) {
+            } else if trimmed.starts_with('/') && smelt_core::commands::is_command(trimmed) {
                 let name = trimmed
                     .trim_start_matches('/')
                     .split_whitespace()

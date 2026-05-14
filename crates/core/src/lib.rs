@@ -5,6 +5,7 @@ extern crate self as smelt_core;
 
 pub mod app_config;
 pub mod cells;
+pub mod commands;
 pub mod config;
 pub mod confirms;
 pub mod content;

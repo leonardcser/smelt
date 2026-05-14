@@ -4,7 +4,6 @@ use smelt_core::buffer::SpanMeta;
 use smelt_core::content::builder::{display_width, LineBuilder};
 use smelt_core::content::wrap::wrap_line;
 use smelt_core::theme::intern;
-use smelt_core::transcript_model::is_command_like;
 
 /// Preprocessed user message layout: tab-expanded, blank-trimmed lines with a computed `block_w`.
 pub struct UserBlockGeometry {
@@ -45,7 +44,7 @@ pub(super) fn render(
     image_labels: &[String],
     width: usize,
 ) -> u16 {
-    let is_command = is_command_like(text.trim());
+    let is_command = smelt_core::commands::is_command(text.trim());
     let text_w = width.saturating_sub(2).max(1);
     let geom = UserBlockGeometry::new(text, text_w);
     let user_bg = intern("SmeltUserBg");

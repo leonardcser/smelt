@@ -28,18 +28,6 @@ pub(crate) fn list_commands() -> Vec<(String, Option<String>)> {
     try_with_app(|app| app.lua.list_commands_with_desc()).unwrap_or_default()
 }
 
-/// True if `input` matches a Lua-registered command name (e.g. `/pick-test arg`).
-pub(crate) fn is_lua_command(input: &str) -> bool {
-    let name = input
-        .strip_prefix('/')
-        .and_then(|s| s.split_whitespace().next())
-        .unwrap_or("");
-    if name.is_empty() {
-        return false;
-    }
-    try_with_app(|app| app.lua.has_command(name)).unwrap_or(false)
-}
-
 /// Format a `crossterm::KeyEvent` into an nvim-style chord string
 /// (`<C-g>`, `<S-Tab>`, `<M-x>`, printable `j`, etc).
 /// The result is the lookup key for `smelt.keymap.set`. Returns `None` for unrecognized chords.

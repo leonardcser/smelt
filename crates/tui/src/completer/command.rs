@@ -1,10 +1,6 @@
 use super::{Completer, CompleterKind, CompletionItem};
 
 impl Completer {
-    pub(crate) fn is_command(s: &str) -> bool {
-        crate::lua::is_lua_command(s)
-    }
-
     pub(crate) fn commands(anchor: usize) -> Self {
         let all_items: Vec<CompletionItem> = crate::lua::list_commands()
             .into_iter()

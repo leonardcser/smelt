@@ -648,9 +648,7 @@ impl TuiApp {
             CommandAction::Exec(handle) => return InputOutcome::Exec(handle),
             CommandAction::Continue => {}
         }
-        if dispatch_input.starts_with('/')
-            && crate::completer::Completer::is_command(&dispatch_input)
-        {
+        if dispatch_input.starts_with('/') && smelt_core::commands::is_command(&dispatch_input) {
             return InputOutcome::Continue;
         }
         // Shell escapes (`!cmd`) skip agent start, but pasted content starting with `!` does not.

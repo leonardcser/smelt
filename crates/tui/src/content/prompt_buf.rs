@@ -226,7 +226,7 @@ fn queued_message_rows(
     let user_bg = theme_color(theme, "SmeltUserBg");
 
     for msg in queued {
-        let is_command = crate::completer::Completer::is_command(msg.trim());
+        let is_command = smelt_core::commands::is_command(msg.trim());
         let geom = crate::content::transcript_parsers::UserBlockGeometry::new(msg, text_w);
         for line in &geom.lines {
             if line.is_empty() {
@@ -577,8 +577,7 @@ fn compute_input_area(
     let line_char_offsets = wrap_out.row_offsets;
     let single_line = !edit_buf.source().contains('\n');
     let plain_only = !single_line;
-    let is_command =
-        !plain_only && crate::completer::Completer::is_command(edit_buf.source().trim());
+    let is_command = !plain_only && smelt_core::commands::is_command(edit_buf.source().trim());
     let is_exec = !plain_only
         && matches!(edit_buf.source().as_bytes(), [b'!', c, ..] if !c.is_ascii_whitespace());
     let is_exec_invalid = !plain_only && edit_buf.source() == "!";

@@ -154,7 +154,7 @@ impl TuiApp {
             return None;
         };
 
-        if !crate::completer::Completer::is_command(&normalized) {
+        if !smelt_core::commands::is_command(&normalized) {
             return None;
         }
 

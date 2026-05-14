@@ -136,7 +136,7 @@ impl BufferParser for PromptBufferParser {
 
         // Determine if we need special command/exec styling on the first line.
         let single_line = !source.contains('\n');
-        let is_command = single_line && crate::completer::Completer::is_command(source.trim());
+        let is_command = single_line && smelt_core::commands::is_command(source.trim());
         let is_exec =
             single_line && matches!(source.as_bytes(), [b'!', c, ..] if !c.is_ascii_whitespace());
         let is_exec_invalid = single_line && source == "!";
