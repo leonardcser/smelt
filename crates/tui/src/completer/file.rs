@@ -37,8 +37,15 @@ fn git_files() -> Vec<String> {
         }
         _ => return walk_cwd_files(),
     };
+    expand_with_parent_dirs(&lines)
+}
+
+/// Given a list of relative file paths, return a sorted, deduplicated list
+/// containing every path *plus* every intermediate parent directory.
+/// Used by the file completer to offer directories as completion targets.
+fn expand_with_parent_dirs(files: &[String]) -> Vec<String> {
     let mut dirs = HashSet::new();
-    let mut entries: Vec<String> = lines
+    let mut entries: Vec<String> = files
         .iter()
         .flat_map(|l| {
             let mut parts = Vec::new();
@@ -143,4 +150,73 @@ fn walk_cwd_files() -> Vec<String> {
     }
     entries.sort();
     entries
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn paths<const N: usize>(arr: [&str; N]) -> Vec<String> {
+        arr.iter().map(|s| (*s).to_string()).collect()
+    }
+
+    #[test]
+    fn expand_with_parent_dirs_returns_empty_for_no_files() {
+        assert!(expand_with_parent_dirs(&[]).is_empty());
+    }
+
+    #[test]
+    fn expand_with_parent_dirs_keeps_top_level_files_as_is() {
+        let out = expand_with_parent_dirs(&paths(["README.md", "Cargo.toml"]));
+        assert_eq!(out, paths(["Cargo.toml", "README.md"]));
+    }
+
+    #[test]
+    fn expand_with_parent_dirs_inserts_each_intermediate_directory() {
+        let out = expand_with_parent_dirs(&paths(["src/app/events.rs"]));
+        assert_eq!(out, paths(["src", "src/app", "src/app/events.rs"]));
+    }
+
+    #[test]
+    fn expand_with_parent_dirs_deduplicates_shared_parents_across_files() {
+        let out = expand_with_parent_dirs(&paths([
+            "src/app/events.rs",
+            "src/app/mouse.rs",
+            "src/picker.rs",
+        ]));
+        // `src` and `src/app` each appear once.
+        assert_eq!(
+            out,
+            paths([
+                "src",
+                "src/app",
+                "src/app/events.rs",
+                "src/app/mouse.rs",
+                "src/picker.rs",
+            ])
+        );
+    }
+
+    #[test]
+    fn expand_with_parent_dirs_sorts_output_lexicographically() {
+        let out = expand_with_parent_dirs(&paths(["z/a.rs", "a/z.rs", "m/m.rs"]));
+        // Sorted: `a`, `a/z.rs`, `m`, `m/m.rs`, `z`, `z/a.rs`.
+        assert_eq!(out, paths(["a", "a/z.rs", "m", "m/m.rs", "z", "z/a.rs"]));
+    }
+
+    #[test]
+    fn expand_with_parent_dirs_handles_deeply_nested_paths() {
+        let out = expand_with_parent_dirs(&paths(["a/b/c/d/e/f.txt"]));
+        assert_eq!(
+            out,
+            paths([
+                "a",
+                "a/b",
+                "a/b/c",
+                "a/b/c/d",
+                "a/b/c/d/e",
+                "a/b/c/d/e/f.txt"
+            ])
+        );
+    }
 }

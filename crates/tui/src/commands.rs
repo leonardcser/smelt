@@ -14,42 +14,97 @@ pub(crate) struct ExecHandle {
     pub kill: std::sync::Arc<tokio::sync::Notify>,
 }
 
+/// Parsed shape of a raw command line typed into the prompt or cmdline.
+///
+/// The dispatcher's call site treats `Shell` specially (spawn a child); every
+/// other shape goes through the slash-command pipeline, with leading `:` or
+/// `/` stripped. Bare text like `foo bar` parses as `Slash { name: "foo",
+/// arg: Some("bar") }` and is filtered out downstream by `has_command`.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum ParsedCommand<'a> {
+    /// Empty (or whitespace-only) line.
+    Empty,
+    /// `! <script>` shell escape. `script` has its leading whitespace trimmed.
+    Shell { script: &'a str },
+    /// Slash command (`/name [arg…]`, `:name [arg…]`, or bare `name [arg…]`).
+    Slash { name: &'a str, arg: Option<&'a str> },
+}
+
+/// Classify a raw command line without dispatching it. See [`ParsedCommand`].
+pub(crate) fn parse_command_line(line: &str) -> ParsedCommand<'_> {
+    let line = line.trim();
+    if line.is_empty() {
+        return ParsedCommand::Empty;
+    }
+    if let Some(rest) = line.strip_prefix('!') {
+        return ParsedCommand::Shell {
+            script: rest.trim_start(),
+        };
+    }
+    // `:` and `/` are both slash-command sigils; everything else falls
+    // through as a "slash command" with the literal first word as `name`.
+    let body = line
+        .strip_prefix(':')
+        .or_else(|| line.strip_prefix('/'))
+        .unwrap_or(line);
+    match body.find(char::is_whitespace) {
+        Some(idx) => {
+            let name = &body[..idx];
+            let arg = body[idx + 1..].trim();
+            ParsedCommand::Slash {
+                name,
+                arg: if arg.is_empty() { None } else { Some(arg) },
+            }
+        }
+        None => ParsedCommand::Slash {
+            name: body,
+            arg: None,
+        },
+    }
+}
+
 /// Dispatch a raw command line. Leading `:` normalises to `/`. `!` lines
 /// spawn a shell escape; everything else dispatches to a Lua-registered handler.
 pub(crate) fn run_command(app: &mut TuiApp, line: &str) -> CommandAction {
     let _perf = smelt_perf::perf::begin("cmd:dispatch");
-    let line = line.trim();
-    if let Some(rest) = line.strip_prefix('!') {
+    let parsed = parse_command_line(line);
+    if let ParsedCommand::Shell { script } = parsed {
         if !app.input.skip_shell_escape() {
-            return match app.start_shell_escape(rest) {
+            return match app.start_shell_escape(script) {
                 Some(handle) => CommandAction::Exec(handle),
                 None => CommandAction::Continue,
             };
         }
     }
-    let normalized: String = if let Some(rest) = line.strip_prefix(':') {
-        format!("/{rest}")
-    } else {
-        line.to_string()
-    };
-    let name_arg = normalized.trim_start_matches('/');
-    let (name, arg) = match name_arg.find(char::is_whitespace) {
-        Some(idx) => (
-            &name_arg[..idx],
-            Some(name_arg[idx + 1..].trim().to_string()),
-        ),
-        None => (name_arg, None),
-    };
-    app.core
-        .cells
-        .set_dyn("cmd_pre", std::rc::Rc::new(name.to_string()));
-    app.drain_cells_pending();
-    if !name.is_empty() && app.lua.has_command(name) {
-        app.lua.run_command(name, arg);
+    // For non-shell input (or `!` lines being treated as plain text mid-paste),
+    // dispatch through the slash-command pipeline. Mirrors the legacy behaviour
+    // of `trim_start_matches('/')` on the trimmed line.
+    let trimmed = line.trim();
+    if trimmed.is_empty() {
+        return CommandAction::Continue;
     }
+    let body = trimmed
+        .strip_prefix(':')
+        .or_else(|| trimmed.strip_prefix('/'))
+        .unwrap_or(trimmed);
+    let (name, arg) = match body.find(char::is_whitespace) {
+        Some(idx) => {
+            let arg = body[idx + 1..].trim().to_string();
+            (
+                body[..idx].to_string(),
+                if arg.is_empty() { None } else { Some(arg) },
+            )
+        }
+        None => (body.to_string(), None),
+    };
     app.core
         .cells
-        .set_dyn("cmd_post", std::rc::Rc::new(name.to_string()));
+        .set_dyn("cmd_pre", std::rc::Rc::new(name.clone()));
+    app.drain_cells_pending();
+    if !name.is_empty() && app.lua.has_command(&name) {
+        app.lua.run_command(&name, arg);
+    }
+    app.core.cells.set_dyn("cmd_post", std::rc::Rc::new(name));
     app.drain_cells_pending();
     app.flush_lua_callbacks();
     CommandAction::Continue
@@ -278,5 +333,117 @@ impl TuiApp {
         self.core
             .engine
             .send(UiCommand::SetReasoningEffort { effort });
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn slash<'a>(name: &'a str, arg: Option<&'a str>) -> ParsedCommand<'a> {
+        ParsedCommand::Slash { name, arg }
+    }
+
+    #[test]
+    fn empty_or_whitespace_lines_parse_as_empty() {
+        assert_eq!(parse_command_line(""), ParsedCommand::Empty);
+        assert_eq!(parse_command_line("   "), ParsedCommand::Empty);
+        assert_eq!(parse_command_line("\n\t  \n"), ParsedCommand::Empty);
+    }
+
+    #[test]
+    fn bang_prefix_parses_as_shell_escape() {
+        assert_eq!(
+            parse_command_line("!echo hi"),
+            ParsedCommand::Shell { script: "echo hi" }
+        );
+    }
+
+    #[test]
+    fn shell_escape_trims_leading_whitespace_after_bang() {
+        // `! echo hi` and `!echo hi` produce the same script.
+        assert_eq!(
+            parse_command_line("!   echo hi"),
+            ParsedCommand::Shell { script: "echo hi" }
+        );
+    }
+
+    #[test]
+    fn shell_escape_keeps_an_empty_script_for_bare_bang() {
+        assert_eq!(parse_command_line("!"), ParsedCommand::Shell { script: "" });
+    }
+
+    #[test]
+    fn slash_prefix_extracts_name_with_no_arg() {
+        assert_eq!(parse_command_line("/quit"), slash("quit", None));
+    }
+
+    #[test]
+    fn slash_with_argument_splits_on_first_whitespace() {
+        assert_eq!(
+            parse_command_line("/model claude-haiku"),
+            slash("model", Some("claude-haiku"))
+        );
+    }
+
+    #[test]
+    fn slash_collapses_extra_whitespace_in_argument() {
+        // Extra interior whitespace inside the arg is preserved; only the
+        // boundary between name and arg, plus trailing whitespace, is trimmed.
+        assert_eq!(
+            parse_command_line("/cmd   a    b  "),
+            slash("cmd", Some("a    b"))
+        );
+    }
+
+    #[test]
+    fn colon_is_an_alias_for_slash() {
+        assert_eq!(parse_command_line(":quit"), slash("quit", None));
+        assert_eq!(parse_command_line(":model x"), slash("model", Some("x")));
+    }
+
+    #[test]
+    fn bare_name_without_a_sigil_still_parses_as_slash() {
+        // Preserves the legacy fall-through: any non-shell input goes
+        // through the slash pipeline so `has_command` decides whether to
+        // dispatch it.
+        assert_eq!(parse_command_line("foo bar"), slash("foo", Some("bar")));
+        assert_eq!(parse_command_line("foo"), slash("foo", None));
+    }
+
+    #[test]
+    fn slash_with_only_trailing_whitespace_has_no_arg() {
+        // `"/foo   "` is the same as `"/foo"` once trimmed.
+        assert_eq!(parse_command_line("/foo   "), slash("foo", None));
+    }
+
+    #[test]
+    fn shell_takes_priority_over_slash_when_both_prefixes_present() {
+        // The leading char wins — `!/foo` is a shell escape for `/foo`.
+        assert_eq!(
+            parse_command_line("!/foo bar"),
+            ParsedCommand::Shell { script: "/foo bar" }
+        );
+    }
+
+    #[test]
+    fn outer_whitespace_does_not_change_the_parse() {
+        assert_eq!(
+            parse_command_line("   /foo bar   "),
+            slash("foo", Some("bar"))
+        );
+        assert_eq!(
+            parse_command_line("  !echo hi  "),
+            ParsedCommand::Shell { script: "echo hi" }
+        );
+    }
+
+    #[test]
+    fn slash_name_can_contain_unicode_word_chars() {
+        // `find` uses `char::is_whitespace`, so any non-ws unicode goes in `name`.
+        assert_eq!(
+            parse_command_line("/日本語 arg"),
+            slash("日本語", Some("arg"))
+        );
     }
 }
