@@ -1,36 +1,47 @@
 -- Built-in /help command. Centered info viewer of all keybindings.
 
-local function build_lines(sections)
+local NS_DIM = smelt.buf.create_namespace("smelt.help.dim")
+
+local function build_layout(sections)
   local max_label = 0
   for _, section in ipairs(sections) do
     for _, entry in ipairs(section.entries) do
-      if #entry.label > max_label then
-        max_label = #entry.label
-      end
+      local w = smelt.text.width(entry.label)
+      if w > max_label then max_label = w end
     end
   end
   local label_col = max_label + 4
 
   local lines = {}
+  local detail_byte_cols = {}
   for si, section in ipairs(sections) do
     for _, entry in ipairs(section.entries) do
-      local padding = string.rep(" ", math.max(0, label_col - #entry.label))
-      table.insert(lines, entry.label .. padding .. entry.detail)
+      local pad = label_col - smelt.text.width(entry.label)
+      local line = entry.label .. string.rep(" ", pad) .. entry.detail
+      table.insert(lines, line)
+      table.insert(detail_byte_cols, #entry.label + pad)
     end
     if si < #sections then
       table.insert(lines, "")
+      table.insert(detail_byte_cols, 0)
     end
   end
-  return lines
+  return lines, detail_byte_cols
 end
 
 smelt.cmd.register("help", function()
   smelt.spawn(function()
     local sections = smelt.keymap.help()
-    local lines = build_lines(sections)
+    local lines, detail_byte_cols = build_layout(sections)
 
     local buf = smelt.buf.create({ readonly = true })
     smelt.buf.set_lines(buf, lines)
+    for i, line in ipairs(lines) do
+      local col = detail_byte_cols[i]
+      if col < #line then
+        smelt.buf.set_extmark(buf, NS_DIM, i, col, { end_col = #line, dim = true })
+      end
+    end
     -- `selectable = true` so mouse click-and-drag highlights text the same way
     -- it does in the transcript; vim_enabled gives keyboard nav + visual mode.
     local leaf = smelt.win.open(buf, {
