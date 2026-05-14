@@ -250,7 +250,7 @@ impl TuiApp {
                     let text = msg
                         .content
                         .as_ref()
-                        .map(|c| c.text_content())
+                        .map(|c| c.text_content().into_owned())
                         .unwrap_or_default();
                     tool_outputs.insert(
                         id.clone(),
@@ -283,7 +283,7 @@ impl TuiApp {
                         } else {
                             let image_labels = content.image_labels();
                             let display_text = if image_labels.is_empty() {
-                                text
+                                text.into_owned()
                             } else {
                                 let suffix = image_labels.join(" ");
                                 if text.is_empty() {
@@ -309,7 +309,7 @@ impl TuiApp {
                     }
                     if let Some(ref content) = msg.content {
                         self.push_block(Block::Text {
-                            content: content.text_content(),
+                            content: content.text_content().into_owned(),
                         });
                     }
                     if let Some(ref calls) = msg.tool_calls {
@@ -411,7 +411,7 @@ impl TuiApp {
                 .messages
                 .get(i)
                 .and_then(|m| m.content.as_ref())
-                .map(|c| c.text_content())
+                .map(|c| c.text_content().into_owned())
                 .unwrap_or_default(),
             _ => String::new(),
         };

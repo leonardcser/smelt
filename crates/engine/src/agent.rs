@@ -2,9 +2,9 @@ use crate::compact::{self, CompactOptions, CompactPhase, CompactReason, InitialC
 use crate::log;
 use crate::provider::{self, ChatOptions, FunctionSchema, Provider, ProviderError, ToolDefinition};
 use crate::tools::{ToolContext, ToolDispatcher, ToolResult};
-use crate::{ApiConfig, AuxiliaryTask, EngineConfig};
 #[cfg(test)]
 use crate::ModelConfig;
+use crate::{ApiConfig, AuxiliaryTask, EngineConfig};
 use protocol::Decision;
 use protocol::{
     AgentMode, Content, EngineEvent, Message, ReasoningEffort, Role, ToolOutcome, TurnMeta,

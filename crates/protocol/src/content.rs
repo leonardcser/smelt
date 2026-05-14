@@ -1,5 +1,7 @@
 //! Multipart message content (text and images).
 
+use std::borrow::Cow;
+
 use serde::{Deserialize, Serialize};
 
 /// A single part of a multipart message content block.
@@ -94,18 +96,35 @@ impl Content {
         }
     }
 
-    /// Concatenate all text parts (ignoring images).
-    pub fn text_content(&self) -> String {
+    /// Concatenate all text parts (ignoring images). Borrows when possible
+    /// (single-text variants); allocates only when multiple text parts must
+    /// be joined.
+    pub fn text_content(&self) -> Cow<'_, str> {
         match self {
-            Content::Text(s) => s.clone(),
-            Content::Parts(parts) => parts
-                .iter()
-                .filter_map(|p| match p {
+            Content::Text(s) => Cow::Borrowed(s),
+            Content::Parts(parts) => {
+                let mut texts = parts.iter().filter_map(|p| match p {
                     ContentPart::Text { text } => Some(text.as_str()),
                     _ => None,
-                })
-                .collect::<Vec<_>>()
-                .join("\n"),
+                });
+                let Some(first) = texts.next() else {
+                    return Cow::Borrowed("");
+                };
+                match texts.next() {
+                    None => Cow::Borrowed(first),
+                    Some(second) => {
+                        let mut out = String::with_capacity(first.len() + second.len() + 1);
+                        out.push_str(first);
+                        out.push('\n');
+                        out.push_str(second);
+                        for rest in texts {
+                            out.push('\n');
+                            out.push_str(rest);
+                        }
+                        Cow::Owned(out)
+                    }
+                }
+            }
         }
     }
 

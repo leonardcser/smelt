@@ -31,7 +31,7 @@ impl TuiApp {
         self.show_user_message(display, content.image_labels());
         let text = content.text_content();
         if self.core.session.first_user_message.is_none() {
-            self.core.session.first_user_message = Some(text.clone());
+            self.core.session.first_user_message = Some(text.clone().into_owned());
         }
         if !content.is_empty() {
             self.core

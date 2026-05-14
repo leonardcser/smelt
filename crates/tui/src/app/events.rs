@@ -151,7 +151,7 @@ impl TuiApp {
                 if self.is_compacting() {
                     let text = content.text_content();
                     if !text.is_empty() {
-                        self.queued_messages.push(text);
+                        self.queued_messages.push(text.into_owned());
                     }
                 } else {
                     let text = content.text_content();
@@ -512,7 +512,7 @@ impl TuiApp {
                     return outcome;
                 }
                 if !text.is_empty() {
-                    self.queued_messages.push(text);
+                    self.queued_messages.push(text.into_owned());
                 }
             }
             Action::SubmitEmpty => {

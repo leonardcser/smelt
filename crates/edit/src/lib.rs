@@ -1038,8 +1038,8 @@ impl Ui {
         SnapshotFrame::from_grid(self.surface.compositor().previous())
     }
 
-    pub fn theme(&self) -> &Theme {
-        self.surface.theme().as_ref()
+    pub fn theme(&self) -> &std::sync::Arc<Theme> {
+        self.surface.theme()
     }
 
     pub fn theme_mut(&mut self) -> &mut Theme {
