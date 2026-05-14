@@ -19,9 +19,11 @@
 use crate::app::{AppFocus, TuiApp};
 use crate::smelt_term::{OverlayId, VimMode, WinId};
 use crossterm::event::{Event, KeyCode, KeyEvent, KeyEventKind, KeyEventState, KeyModifiers};
+use engine::clock::VirtualClock;
 use engine::EngineHandle;
 use protocol::{AgentMode, EngineEvent, ReasoningEffort, UiCommand};
 use std::sync::{Arc, Mutex, OnceLock};
+use std::time::{Duration, Instant, SystemTime};
 use tempfile::TempDir;
 use tokio::sync::mpsc;
 
@@ -30,10 +32,10 @@ use tokio::sync::mpsc;
 pub(crate) enum SourceEvent {
     Term(Event),
     Engine(EngineEvent),
-    /// Advance virtual time by N milliseconds. Today's TuiApp reads
-    /// `Instant::now()` directly so this is a placeholder until Phase 1
-    /// of `FUZZING_PLAN.md` lands; included so the wire-format is stable.
-    #[allow(dead_code)]
+    /// Advance the harness `VirtualClock` by N milliseconds. Sites that
+    /// already read time through `Core::clock` see the bump immediately;
+    /// remaining `Instant::now()` callers are migrated incrementally by
+    /// `FUZZING_PLAN.md` Phase 1.
     Tick(u64),
 }
 
@@ -66,6 +68,7 @@ pub(crate) struct AppSnapshot {
 /// Test driver around a real `TuiApp`.
 pub(crate) struct TestApp {
     pub(crate) app: TuiApp,
+    pub(crate) clock: Arc<VirtualClock>,
     cmd_rx: mpsc::UnboundedReceiver<UiCommand>,
     event_tx: mpsc::UnboundedSender<EngineEvent>,
     actions: Vec<Action>,
@@ -147,6 +150,8 @@ impl TestAppBuilder {
             context_window: None,
         };
 
+        let clock = Arc::new(VirtualClock::new(Instant::now(), SystemTime::now()));
+
         let mut app = TuiApp::new(
             config,
             engine,
@@ -155,7 +160,7 @@ impl TestAppBuilder {
             None, // startup_auth_error
             lua,
             smelt_core::trust::TrustState::NoContent,
-            Arc::new(engine::clock::RealClock),
+            Arc::clone(&clock) as Arc<dyn engine::clock::Clock>,
         );
 
         // init.lua may touch TUI surfaces (overlays / wins / bufs), so it
@@ -168,6 +173,7 @@ impl TestAppBuilder {
 
         TestApp {
             app,
+            clock,
             cmd_rx,
             event_tx,
             actions: Vec::new(),
@@ -211,8 +217,8 @@ impl TestApp {
                         self.app.handle_idle_engine_event(ev);
                     }
                 }
-                SourceEvent::Tick(_ms) => {
-                    // No-op until FUZZING_PLAN Phase 1 injects a virtual Clock.
+                SourceEvent::Tick(ms) => {
+                    self.clock.advance(Duration::from_millis(ms));
                 }
             }
         }
@@ -359,6 +365,15 @@ mod tests {
         assert!(!s.agent_running);
         assert_eq!(s.app_focus, AppFocus::Prompt);
         assert!(s.queued_messages.is_empty());
+    }
+
+    #[test]
+    fn tick_event_advances_virtual_clock() {
+        let mut app = TestApp::builder().build();
+        let before = app.app.core.clock.instant_now();
+        app.feed_one(SourceEvent::Tick(500));
+        let after = app.app.core.clock.instant_now();
+        assert_eq!(after - before, Duration::from_millis(500));
     }
 
     // ── Ctrl-C semantics ───────────────────────────────────────────
