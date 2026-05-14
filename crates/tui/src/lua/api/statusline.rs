@@ -128,15 +128,14 @@ fn build_snapshot(app: &mut crate::app::TuiApp, lua: &Lua) -> LuaResult<mlua::Ta
     let working = lua.create_table()?;
     working.set("animating", app.working.is_animating())?;
     working.set("compacting", app.working.is_compacting())?;
-    let now = app.core.clock.instant_now();
-    if let Some(c) = app.working.spinner_char(now) {
+    if let Some(c) = app.working.spinner_char() {
         working.set("spinner_char", c)?;
     }
     let muted = app.ui.theme().get("Comment").fg.unwrap_or(Color::Reset);
     let muted_ansi = super::color_to_ansi(muted);
     let throbber_arr = lua.create_table()?;
     let show_tps = app.core.config.settings.show_tps;
-    for (i, item) in app.working.throbber_data(show_tps, now).iter().enumerate() {
+    for (i, item) in app.working.throbber_data(show_tps).iter().enumerate() {
         let st = lua.create_table()?;
         st.set("text", item.text.as_str())?;
         if item.is_muted {

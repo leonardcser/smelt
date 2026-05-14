@@ -48,8 +48,7 @@ impl TuiApp {
     fn dispatch_turn(&mut self, content: Content) -> TurnState {
         let Some(api_key) = self.resolve_api_key() else {
             {
-                self.working
-                    .finish(TurnOutcome::Done, self.core.clock.instant_now());
+                self.working.finish(TurnOutcome::Done);
             };
             return TurnState {
                 turn_id: 0,
@@ -59,8 +58,7 @@ impl TuiApp {
         };
 
         {
-            self.working
-                .begin(TurnPhase::Working, self.core.clock.instant_now());
+            self.working.begin(TurnPhase::Working);
         };
 
         self.core
@@ -241,8 +239,7 @@ impl TuiApp {
         }
         self.maybe_generate_title(Some(&evaluated));
         {
-            self.working
-                .begin(TurnPhase::Working, self.core.clock.instant_now());
+            self.working.begin(TurnPhase::Working);
         };
 
         let turn_id = self.next_turn_id;
@@ -280,8 +277,7 @@ impl TuiApp {
         self.core.engine.send(UiCommand::Cancel);
         self.lua.cancel_tasks();
         {
-            self.working
-                .finish(TurnOutcome::Interrupted, self.core.clock.instant_now());
+            self.working.finish(TurnOutcome::Interrupted);
         };
         self.queued_messages.clear();
     }
@@ -308,8 +304,7 @@ impl TuiApp {
         self.finish_transcript_turn();
         if cancelled {
             {
-                self.working
-                    .finish(TurnOutcome::Interrupted, self.core.clock.instant_now());
+                self.working.finish(TurnOutcome::Interrupted);
             };
             if self.pending_title {
                 self.pending_title = false;
@@ -325,16 +320,13 @@ impl TuiApp {
                 self.input.replace_text(&mut ctx, combined, None);
             }
         } else {
-            {
-                self.working
-                    .finish(TurnOutcome::Done, self.core.clock.instant_now());
-            };
+            self.working.finish(TurnOutcome::Done);
             self.clear_prompt_completer();
         }
         let meta = self
             .pending_turn_meta
             .take()
-            .or_else(|| self.working.turn_meta(self.core.clock.instant_now()));
+            .or_else(|| self.working.turn_meta());
         if let Some(meta) = meta {
             self.core
                 .session

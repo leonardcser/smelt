@@ -374,6 +374,7 @@ impl TuiApp {
             )
         };
 
+        let working_clock = Arc::clone(&clock);
         let core = smelt_core::Core::new(app_config, engine, FrontendKind::Tui, permissions, clock);
         let (lua_wakeup_tx, lua_wakeup_rx) = tokio::sync::mpsc::unbounded_channel();
         let _ = lua.shared().wakeup_tx.set(lua_wakeup_tx);
@@ -401,7 +402,7 @@ impl TuiApp {
             picker_state: HashMap::new(),
             paint_registry: crate::lua::paint::PaintRegistry::default(),
             term_focused: true,
-            working: smelt_core::working::WorkingState::new(),
+            working: smelt_core::working::WorkingState::new(working_clock),
             layout: crate::content::layout::LayoutState::default(),
             agent: None,
             sleep_inhibit: crate::sleep_inhibit::SleepInhibitor::new(),
@@ -478,7 +479,7 @@ impl TuiApp {
         self.core.cells.publish_if_changed("now", now_secs);
         let frame = self
             .working
-            .elapsed(self.core.clock.instant_now())
+            .elapsed()
             .filter(|_| self.working.is_animating())
             .map(|e| smelt_core::content::spinner_frame_index(e) as u8)
             .unwrap_or(0);

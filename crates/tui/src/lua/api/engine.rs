@@ -141,10 +141,8 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
             crate::lua::with_app(|app| {
                 if app.working.is_compacting() {
                     app.compact_epoch += 1;
-                    app.working.finish(
-                        smelt_core::working::TurnOutcome::Interrupted,
-                        app.core.clock.instant_now(),
-                    );
+                    app.working
+                        .finish(smelt_core::working::TurnOutcome::Interrupted);
                     app.notify("compaction cancelled".into());
                 } else {
                     app.core.engine.send(protocol::UiCommand::Cancel);

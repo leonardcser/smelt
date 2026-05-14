@@ -459,8 +459,7 @@ impl TuiApp {
     pub(crate) fn compact_history(&mut self, instructions: Option<String>) {
         self.pending_compact_epoch = self.compact_epoch;
         {
-            self.working
-                .begin(TurnPhase::Compacting, self.core.clock.instant_now());
+            self.working.begin(TurnPhase::Compacting);
         };
         self.core.engine.send(UiCommand::Compact {
             history: self.core.session.messages.clone(),
@@ -471,8 +470,7 @@ impl TuiApp {
     pub(crate) fn apply_compaction(&mut self, messages: Vec<protocol::Message>) {
         if messages.is_empty() {
             {
-                self.working
-                    .finish(TurnOutcome::Done, self.core.clock.instant_now());
+                self.working.finish(TurnOutcome::Done);
             };
             return;
         }
@@ -487,8 +485,7 @@ impl TuiApp {
         self.restore_screen();
         self.save_session();
         {
-            self.working
-                .finish(TurnOutcome::Done, self.core.clock.instant_now());
+            self.working.finish(TurnOutcome::Done);
         };
         self.transcript_win_mut().scroll_to_bottom();
     }
