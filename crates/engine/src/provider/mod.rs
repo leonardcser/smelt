@@ -744,7 +744,7 @@ impl Provider {
                 }
             };
 
-            let elapsed = request_start.elapsed();
+            let elapsed = self.clock.instant_now().duration_since(request_start);
             let tokens_per_sec = parsed.usage.completion_tokens.and_then(|c| {
                 if c > 0 && elapsed.as_secs_f64() >= 0.001 {
                     Some(c as f64 / elapsed.as_secs_f64())

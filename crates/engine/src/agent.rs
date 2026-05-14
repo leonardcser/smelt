@@ -483,6 +483,15 @@ impl<'a> Turn<'a> {
         }
     }
 
+    /// Milliseconds since `start` measured against the injected clock.
+    fn elapsed_ms_since(&self, start: Instant) -> u64 {
+        self.config
+            .clock
+            .instant_now()
+            .duration_since(start)
+            .as_millis() as u64
+    }
+
     /// Scrubs user/tool content when redact_secrets is enabled; passes assistant/system through.
     fn push_message(&mut self, mut msg: Message) {
         if self.config.redact_secrets && matches!(msg.role, Role::User | Role::Tool) {
@@ -635,8 +644,13 @@ impl<'a> Turn<'a> {
             let sum: f64 = self.tps_samples.iter().sum();
             Some(sum / self.tps_samples.len() as f64)
         };
+        let elapsed = self
+            .config
+            .clock
+            .instant_now()
+            .duration_since(self.started_at);
         TurnMeta {
-            elapsed_ms: self.started_at.elapsed().as_millis() as u64,
+            elapsed_ms: elapsed.as_millis() as u64,
             avg_tps,
             interrupted,
             tool_elapsed: self.tool_elapsed.clone(),
@@ -1151,6 +1165,11 @@ impl<'a> Turn<'a> {
             std::pin::Pin<Box<dyn std::future::Future<Output = (usize, ToolResult)> + Send + 'x>>;
 
         let contexts: Vec<_> = plan.slots.iter().map(|_| ToolContext).collect();
+        // Cloned once so the select! arms can compute elapsed without reborrowing `self`.
+        let clock = std::sync::Arc::clone(&self.config.clock);
+        let elapsed_ms_since = |start: Instant| -> u64 {
+            clock.instant_now().duration_since(start).as_millis() as u64
+        };
 
         let mut futs: futures_util::stream::FuturesUnordered<TaggedFut<'_>> =
             futures_util::stream::FuturesUnordered::new();
@@ -1261,8 +1280,8 @@ impl<'a> Turn<'a> {
                                              approach or ask the user for guidance."
                                         .to_string(),
                                 };
-                                let elapsed_ms =
-                                    Some(pending.tool_start.elapsed().as_millis() as u64);
+                                let tool_start = pending.tool_start;
+                                let elapsed_ms = Some(elapsed_ms_since(tool_start));
                                 let _ = self.event_tx.send(EngineEvent::ToolFinished {
                                     call_id: pending.tc.id.clone(),
                                     result: ToolOutcome {
@@ -1314,9 +1333,8 @@ impl<'a> Turn<'a> {
                                                   this tool call. Try a different approach \
                                                   or ask the user for guidance."
                                         .to_string();
-                                    let elapsed_ms = Some(
-                                        pending.tool_start.elapsed().as_millis() as u64,
-                                    );
+                                    let tool_start = pending.tool_start;
+                                    let elapsed_ms = Some(elapsed_ms_since(tool_start));
                                     let _ = self.event_tx.send(EngineEvent::ToolFinished {
                                         call_id: pending.tc.id.clone(),
                                         result: ToolOutcome {
@@ -1330,9 +1348,8 @@ impl<'a> Turn<'a> {
                                     outstanding -= 1;
                                 }
                                 Decision::Error(ref err) => {
-                                    let elapsed_ms = Some(
-                                        pending.tool_start.elapsed().as_millis() as u64,
-                                    );
+                                    let tool_start = pending.tool_start;
+                                    let elapsed_ms = Some(elapsed_ms_since(tool_start));
                                     let _ = self.event_tx.send(EngineEvent::ToolFinished {
                                         call_id: pending.tc.id.clone(),
                                         result: ToolOutcome {
@@ -1376,7 +1393,7 @@ impl<'a> Turn<'a> {
                             .position(|(rid, _, _)| *rid == request_id)
                         {
                             let (_, _, start) = plan.pending_tools.swap_remove(pos);
-                            let elapsed_ms = Some(start.elapsed().as_millis() as u64);
+                            let elapsed_ms = Some(elapsed_ms_since(start));
                             let _ = self.event_tx.send(EngineEvent::ToolFinished {
                                 call_id: call_id.clone(),
                                 result: ToolOutcome {
@@ -1434,7 +1451,7 @@ impl<'a> Turn<'a> {
 
         if cancelled {
             for (_, call_id, start) in plan.pending_tools.drain(..) {
-                let elapsed_ms = Some(start.elapsed().as_millis() as u64);
+                let elapsed_ms = Some(elapsed_ms_since(start));
                 let _ = self.event_tx.send(EngineEvent::ToolFinished {
                     call_id: call_id.clone(),
                     result: ToolOutcome {
@@ -1447,7 +1464,7 @@ impl<'a> Turn<'a> {
                 tool_results.push((call_id, "cancelled".to_string(), true));
             }
             for (_, pending) in plan.pending_tool_hooks.drain(..) {
-                let elapsed_ms = Some(pending.tool_start.elapsed().as_millis() as u64);
+                let elapsed_ms = Some(elapsed_ms_since(pending.tool_start));
                 let _ = self.event_tx.send(EngineEvent::ToolFinished {
                     call_id: pending.tc.id.clone(),
                     result: ToolOutcome {
@@ -1460,7 +1477,7 @@ impl<'a> Turn<'a> {
                 tool_results.push((pending.tc.id.clone(), "cancelled".to_string(), true));
             }
             for (_, pending) in plan.pending_tool_perms.drain(..) {
-                let elapsed_ms = Some(pending.tool_start.elapsed().as_millis() as u64);
+                let elapsed_ms = Some(elapsed_ms_since(pending.tool_start));
                 let _ = self.event_tx.send(EngineEvent::ToolFinished {
                     call_id: pending.tc.id.clone(),
                     result: ToolOutcome {
@@ -1523,7 +1540,7 @@ impl<'a> Turn<'a> {
                     }
                 }
             };
-            let elapsed_ms = Some(start.elapsed().as_millis() as u64);
+            let elapsed_ms = Some(self.elapsed_ms_since(*start));
             let _ = self.event_tx.send(EngineEvent::ToolFinished {
                 call_id: tc.id.clone(),
                 result: ToolOutcome {
@@ -1572,7 +1589,7 @@ impl<'a> Turn<'a> {
                 );
             }
 
-            let elapsed_ms = slot.start.elapsed().as_millis() as u64;
+            let elapsed_ms = self.elapsed_ms_since(slot.start);
             self.tool_elapsed.insert(slot.tc.id.clone(), elapsed_ms);
             let mut tool_content = content.clone();
             if let Some(ref msg) = slot.confirm_msg {
@@ -1783,7 +1800,7 @@ impl<'a> Turn<'a> {
                 is_error,
                 metadata: None,
             },
-            elapsed_ms: started_at.map(|t| t.elapsed().as_millis() as u64),
+            elapsed_ms: started_at.map(|t| self.elapsed_ms_since(t)),
         });
     }
 }
