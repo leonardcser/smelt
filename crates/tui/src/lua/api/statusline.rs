@@ -95,7 +95,6 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
 
 /// Build the full snapshot the Lua composer consumes once per refresh.
 fn build_snapshot(app: &mut crate::app::TuiApp, lua: &Lua) -> LuaResult<mlua::Table> {
-    use crate::smelt_term::text::byte_to_cell;
     use smelt_core::style::Color;
 
     let t = lua.create_table()?;
@@ -216,45 +215,24 @@ fn build_snapshot(app: &mut crate::app::TuiApp, lua: &Lua) -> LuaResult<mlua::Ta
     settings.set("show_tps", show_tps)?;
     t.set("settings", settings)?;
 
-    // Cursor position; nil for empty transcript.
-    let position = match app.app_focus {
-        crate::app::AppFocus::Prompt => {
-            let buf = app.prompt_buf().source();
-            let cpos = app.prompt_win().cpos.min(buf.len());
-            let line_idx = buf[..cpos].bytes().filter(|&b| b == b'\n').count();
-            let line_start = buf[..cpos].rfind('\n').map(|i| i + 1).unwrap_or(0);
-            let col_cells = byte_to_cell(&buf[line_start..], cpos - line_start);
-            let total_lines = buf.bytes().filter(|&b| b == b'\n').count() + 1;
-            let pct = if total_lines <= 1 {
-                100u8
-            } else {
-                ((line_idx as u64 * 100) / (total_lines.saturating_sub(1) as u64)) as u8
-            };
-            Some(((line_idx as u32) + 1, col_cells as u32 + 1, pct.min(100)))
+    // Cursor position: tracks the focused leaf's window (prompt, transcript, or
+    // a vim-enabled overlay like /help). All windows expose display-space
+    // cursor_abs_row / cursor_col via projection maps, and their buffer's
+    // line_count is the display-row total — same formula works for every leaf.
+    let position = app.ui.focused_window().and_then(|w| {
+        let total = app.ui.buf(w.buf).map(|b| b.line_count()).unwrap_or(0);
+        if total == 0 {
+            return None;
         }
-        crate::app::AppFocus::Content => {
-            // Read the unified buffer's row count directly — calling
-            // `full_transcript_display_text` here would materialize 50k+ Strings
-            // every paint just for this number.
-            let buf_id = app.transcript_win().buf;
-            let total = app.ui.buf(buf_id).map(|b| b.line_count()).unwrap_or(0);
-            if total == 0 {
-                None
-            } else {
-                let line_idx = app.transcript_win().cursor_abs_row();
-                let pct = if total <= 1 {
-                    100u8
-                } else {
-                    ((line_idx as u64 * 100) / (total.saturating_sub(1) as u64)) as u8
-                };
-                Some((
-                    (line_idx as u32) + 1,
-                    app.transcript_win().cursor_col() as u32 + 1,
-                    pct.min(100),
-                ))
-            }
-        }
-    };
+        let line_idx = w.cursor_abs_row();
+        let col = w.cursor_col() as usize;
+        let pct = if total <= 1 {
+            100u8
+        } else {
+            ((line_idx as u64 * 100) / (total.saturating_sub(1) as u64)) as u8
+        };
+        Some(((line_idx as u32) + 1, (col as u32) + 1, pct.min(100)))
+    });
     if let Some((line, col, scroll_pct)) = position {
         let p = lua.create_table()?;
         p.set("line", line)?;

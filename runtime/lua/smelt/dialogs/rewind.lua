@@ -31,8 +31,7 @@ smelt.cmd.register("rewind", function(args)
   smelt.spawn(function()
     local lines, prefix_widths = build_rows(turns)
     local options_leaf, options_buf = smelt.ui.dialog.options(lines, {
-      selected  = #lines,
-      pad_right = 1,
+      selected = #lines,
     })
 
     -- Dim the "N. " turn number prefix so the label stands out.

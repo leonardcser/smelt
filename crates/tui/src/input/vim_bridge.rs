@@ -1,11 +1,11 @@
 //! Bridge between `PromptState` and the vim state machine.
 //!
 //! Vim borrows the input's live `buf`/`cpos`/`attachment_ids` plus the
-//! `UndoHistory` owned by `PromptState`, the **single global** `VimMode`
-//! owned by `TuiApp`, the **single global** `Clipboard` (kill ring + platform
-//! sink) also owned by `TuiApp`, and the per-Window `curswant` +
-//! `VimWindowState` (Visual anchor, last `f`/`t`) carried on
-//! `crate::smelt_term::Window`. Vim itself holds only in-flight key-sequence state.
+//! `UndoHistory` owned by `PromptState`, the prompt `Window`'s per-window
+//! `vim_mode`, `curswant`, and `VimWindowState` (Visual anchor, last `f`/`t`,
+//! pending operator, count accumulators), and the single global `Clipboard`
+//! (kill ring + platform sink) owned by `TuiApp`. Vim itself holds no
+//! cross-call state — it's a pure function of the borrowed context.
 
 use super::{Action, History, PromptCtx, PromptState};
 use crate::smelt_term::vim::{self, VimContext};

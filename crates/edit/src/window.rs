@@ -219,12 +219,6 @@ pub struct Window {
     /// routes Down/Drag/Up through `Window::handle_mouse` + `Buffer::copy_range` when
     /// this is set.
     pub selectable: bool,
-    /// Whether `mouse_up` commits the drag end position to `cpos`. `true` for buffer-
-    /// like leaves (prompt, vim content, dialog input) where clicking should move the
-    /// caret. `false` for list/static leaves (resume rows, notifications) where `cpos`
-    /// is owned by j/k or has no meaning — mouse-drag in those leaves never writes
-    /// `cpos`, only the transient `drag_endpoint`.
-    pub cursor_follows_mouse: bool,
 
     /// Populated each frame by the host so scrollbar paint is available without a render-time channel.
     pub viewport: Option<WindowViewport>,
@@ -238,11 +232,13 @@ pub struct Window {
     /// Preferred display column for vertical motion; measured in terminal cells.
     pub curswant: Option<usize>,
     pub scroll_top: u16,
-    /// Buffer-absolute cursor row (0 = first row of the buffer, **not** of the viewport).
-    /// Derived from `cpos` via `sync_from_cpos`; never mutated directly outside this module.
+    /// Display-row index of the cursor in `buf.lines()` (0-based, buffer-absolute).
+    /// Derived from `cpos` via `sync_from_cpos`. Equals the visual row because
+    /// wrap, when needed, is done by the buffer (`Buffer::wrap_mode` /
+    /// parsers) — `buf.lines()` rows already are the visual rows.
     pub(crate) cursor_row: u16,
-    /// Cursor column within the line, in terminal cells.
-    /// Derived from `cpos` via `sync_from_cpos`; never mutated directly outside this module.
+    /// Cell-column of the cursor within its row in `buf.lines()`. Derived from
+    /// `cpos` via `sync_from_cpos`.
     pub(crate) cursor_col: u16,
     /// Keeps viewport snapped to newest row; cleared when the user scrolls away.
     pub follow_tail: bool,
@@ -265,8 +261,8 @@ pub struct Window {
     /// Moving end of an active mouse drag-select, in editable-byte space. `None`
     /// outside a drag. The renderer paints the cursor/CursorLine at this byte's
     /// projected row when set, and the selection range is `(selection_anchor,
-    /// drag_endpoint)`. `mouse_up` commits this into `cpos` only when
-    /// `cursor_follows_mouse` is true; otherwise the value is discarded and `cpos`
+    /// drag_endpoint)`. `mouse_up` commits this into `cpos` only for caret
+    /// leaves (`is_caret_leaf`); otherwise the value is discarded and `cpos`
     /// returns to its pre-drag position.
     pub(crate) drag_endpoint: Option<usize>,
 }
@@ -281,7 +277,6 @@ impl Window {
             cursor_line_highlight: false,
             mouse_scroll: false,
             selectable: false,
-            cursor_follows_mouse: true,
             viewport: None,
             cpos: 0,
             vim_enabled: false,
@@ -574,8 +569,9 @@ impl Window {
         self.drag_endpoint.unwrap_or(self.cpos)
     }
 
-    /// Row component of `effective_endpoint`, projected through `buf`. Used by the
-    /// renderer to paint CursorLine/caret at the drag end while a drag is in flight.
+    /// Display-row component of `effective_endpoint`, looked up through `buf`.
+    /// Used by the renderer to paint CursorLine / caret at the drag end while a
+    /// drag is in flight.
     pub fn effective_cursor_row(&self, buf: &Buffer) -> u16 {
         match self.drag_endpoint {
             Some(end) => buf.display_cursor_pos(end).0 as u16,
@@ -652,15 +648,14 @@ impl Window {
         event: MouseEvent,
         ctx: MouseCtx,
     ) -> (Status, Option<(usize, usize)>) {
-        let text = buf.text();
         match event.kind {
-            MouseEventKind::Down(MouseButton::Left) => {
-                (self.mouse_down(buf, event, &ctx, &text), None)
-            }
+            MouseEventKind::Down(MouseButton::Left) => (self.mouse_down(buf, event, &ctx), None),
             MouseEventKind::Drag(MouseButton::Left) => {
+                let text = buf.text();
                 (self.mouse_drag(buf, event, &ctx, &text), None)
             }
             MouseEventKind::Up(MouseButton::Left) => {
+                let text = buf.text();
                 let range = self.mouse_yank_range(buf, &ctx, &text);
                 let status = self.mouse_up(buf, ctx.viewport.rect.height);
                 (status, range)
@@ -669,23 +664,21 @@ impl Window {
         }
     }
 
-    fn mouse_down(
-        &mut self,
-        buf: &Buffer,
-        event: MouseEvent,
-        ctx: &MouseCtx,
-        _text: &str,
-    ) -> Status {
+    fn mouse_down(&mut self, buf: &Buffer, event: MouseEvent, ctx: &MouseCtx) -> Status {
         let Some(hit) = ctx.viewport.hit(event.row, event.column) else {
             return Status::Ignored;
         };
         let ViewportHit::Content {
             row: rel_row,
-            col: rel_col,
+            col: viewport_rel_col,
         } = hit
         else {
             return Status::Ignored;
         };
+        // `ViewportHit::Content` reports a column relative to `viewport.rect.left`,
+        // which includes the window's left gutter (pad_left). Selection / cursor
+        // positioning operates on source-cell columns, so subtract the gutter.
+        let rel_col = viewport_rel_col.saturating_sub(self.config.gutters.pad_left);
         let rows = buf.lines();
         if rows.is_empty() {
             return Status::Consumed;
@@ -695,7 +688,7 @@ impl Window {
         let line_idx = (self.scroll_top as usize + rel_row as usize).min(rows.len() - 1);
         let click_byte = buf.byte_at_display_pos(line_idx, rel_col as usize);
         // All leaves stage the click into `drag_endpoint`; `cpos` is committed on Up
-        // only when `cursor_follows_mouse` is set. Readers route through
+        // only for caret-bearing leaves (see `is_caret_leaf`). Readers route through
         // `effective_endpoint` so the cursor and selection track the drag without
         // perturbing the persistent `cpos` mid-gesture.
         self.drag_endpoint = Some(click_byte);
@@ -756,6 +749,7 @@ impl Window {
         let rel_col = event
             .column
             .saturating_sub(ctx.viewport.rect.left)
+            .saturating_sub(self.config.gutters.pad_left)
             .min(ctx.viewport.content_width.saturating_sub(1));
         let line_idx = (self.scroll_top as usize + rel_row as usize).min(rows.len() - 1);
         let drag_byte = buf.byte_at_display_pos(line_idx, rel_col as usize);
@@ -803,11 +797,14 @@ impl Window {
         if self.vim_enabled && matches!(self.vim_mode, VimMode::Visual | VimMode::VisualLine) {
             self.vim_state.set_mode(&mut self.vim_mode, VimMode::Normal);
         }
-        // Commit-or-discard the drag endpoint: buffer-like leaves (cursor follows
-        // mouse) push it to `cpos`; list/static leaves drop it and let `cpos` stay
-        // where j/k or the leaf owner last placed it.
+        // Commit-or-discard the drag endpoint. A "caret leaf" is any focusable,
+        // non-list-style window — its `cpos` is the visible cursor, so a click
+        // should park the caret at the release byte. List leaves (`mouse_scroll`,
+        // selection driven by an index) and non-focusable surfaces (notifications)
+        // skip the commit: their `cpos` either has no visible meaning or is
+        // owned by another widget.
         if let Some(end) = self.drag_endpoint.take() {
-            if self.cursor_follows_mouse {
+            if self.is_caret_leaf() {
                 self.cpos = end;
                 self.sync_from_cpos(buf, viewport_rows);
             }
@@ -817,6 +814,11 @@ impl Window {
         self.drag_anchor_line = None;
         self.pending_press = None;
         Status::Consumed
+    }
+
+    /// Caret-leaf predicate. Mouse-up writes `cpos` only for these.
+    fn is_caret_leaf(&self) -> bool {
+        self.focusable && !self.mouse_scroll
     }
 
     /// Extend drag by WORD units, keeping the original double-clicked word inside the selection.
@@ -891,7 +893,7 @@ impl Window {
         {
             let mut cpos = self.cpos;
             let action = if buf.readonly {
-                let mut scratch = buf.text().to_string();
+                let mut scratch = buf.text();
                 let mut scratch_history = UndoHistory::default();
                 let mut scratch_attachments = Vec::new();
                 let mut ctx = VimContext {
@@ -962,11 +964,10 @@ impl Window {
     /// buffer row changes to whatever row is now under that screen cell.
     /// To move the cursor first and reveal it afterward, use `move_cursor_by_lines`.
     pub fn pan_by_lines(&mut self, buf: &Buffer, delta: isize, viewport_rows: u16) {
-        let rows = buf.lines();
-        if rows.is_empty() || viewport_rows == 0 || delta == 0 {
+        let total = buf.lines().len() as u16;
+        if total == 0 || viewport_rows == 0 || delta == 0 {
             return;
         }
-        let total = rows.len() as u16;
         let max_scroll = total.saturating_sub(viewport_rows);
         let cur_scroll = self.scroll_top.min(max_scroll);
         let new_scroll = (cur_scroll as isize + delta).clamp(0, max_scroll as isize) as u16;
@@ -974,7 +975,7 @@ impl Window {
     }
 
     /// Set `scroll_top` as a viewport operation: preserve the cursor's screen row
-    /// and re-anchor the cursor to the buffer line now under that row.
+    /// and re-anchor the cursor to the buffer position now under that row.
     pub fn scroll_to_preserving_cursor_screen_row(
         &mut self,
         scroll_top: u16,
@@ -1004,7 +1005,8 @@ impl Window {
             self.follow_tail = new_scroll >= max_scroll;
             return;
         }
-        let target_line = (new_scroll as usize + screen_row as usize).min(rows.len() - 1);
+        let target_line =
+            (new_scroll as usize + screen_row as usize).min(rows.len().saturating_sub(1));
         let want = self.curswant.unwrap_or(self.cursor_col as usize);
         self.cpos = buf.byte_at_display_pos(target_line, want);
         let (row, col) = buf.display_cursor_pos(self.cpos);
@@ -1037,12 +1039,7 @@ impl Window {
         let scroll = self.scroll_top as usize;
         let line_count = buf.line_count();
         let pad_left = self.config.gutters.pad_left.min(width);
-        let pad_right = self
-            .config
-            .gutters
-            .pad_right
-            .min(width.saturating_sub(pad_left));
-        let content_width = width.saturating_sub(pad_left).saturating_sub(pad_right);
+        let content_width = self.config.gutters.content_width(width);
         // `cursor_line_highlight` paints `CursorLine` bg under the cursor row.
         // During an active mouse drag-select the rendered row tracks `drag_endpoint`
         // so the user sees the highlight slide with the cursor; otherwise it sits at
@@ -1074,12 +1071,8 @@ impl Window {
         let mut vt_buf: Vec<smelt_buffer::buffer::VirtualText> = Vec::new();
         let mut mask_buf: Vec<bool> = Vec::with_capacity(content_width as usize);
         for row in 0..height {
-            let idx = scroll + row as usize;
-            let decoration = if idx < line_count {
-                Some(buf.decoration_at(idx))
-            } else {
-                None
-            };
+            let line_idx = scroll + row as usize;
+            let decoration = (line_idx < line_count).then(|| buf.decoration_at(line_idx));
             let mut row_style = if cursor_screen_row == Some(row) {
                 cursor_style
             } else {
@@ -1098,10 +1091,7 @@ impl Window {
                     slice.set(col, row, ' ', row_style);
                 }
             }
-            if idx >= line_count {
-                continue;
-            }
-            let Some(line) = buf.get_line(idx) else {
+            let Some(line) = buf.get_line(line_idx) else {
                 continue;
             };
             col_to_char.clear();
@@ -1122,23 +1112,25 @@ impl Window {
             }
             let content_end_col = col;
             spans_buf.clear();
-            buf.highlights_at_into(idx, &mut spans_buf);
+            buf.highlights_at_into(line_idx, &mut spans_buf);
             for span in &spans_buf {
                 let span_style = ctx.theme.resolve(span.hl);
                 let style = merge_span_style(row_style, &span_style);
                 let start = span.col_start.min(content_width);
                 let end = span.col_end.min(content_width);
-                paint_span_cells(
-                    slice,
-                    pad_left,
-                    row,
-                    start,
-                    end,
-                    &col_to_char,
-                    &line_chars,
-                    style,
-                    None,
-                );
+                if end > start {
+                    paint_span_cells(
+                        slice,
+                        pad_left,
+                        row,
+                        start,
+                        end,
+                        &col_to_char,
+                        &line_chars,
+                        style,
+                        None,
+                    );
+                }
                 if span.hl_eol {
                     for c in end..content_width {
                         slice.set(pad_left + c, row, ' ', style);
@@ -1148,7 +1140,7 @@ impl Window {
             // Selection painting: after highlights (wins over base) but before virt-text.
             // Cells under `selectable = false` spans are skipped so chrome spans don't
             // receive the Visual bg. `spans_buf` is reused from the highlight pass above.
-            let mask_slice: Option<&[bool]> = if selection_ranges.iter().any(|r| r.line == idx)
+            let mask_slice: Option<&[bool]> = if selection_ranges.iter().any(|r| r.line == line_idx)
                 && spans_buf.iter().any(|s| !s.meta.selectable)
             {
                 mask_buf.clear();
@@ -1164,24 +1156,26 @@ impl Window {
             } else {
                 None
             };
-            for r in selection_ranges.iter().filter(|r| r.line == idx) {
+            for r in selection_ranges.iter().filter(|r| r.line == line_idx) {
                 let style = merge_span_style(row_style, &visual_style);
                 let start = r.col_start.min(content_width);
                 let end = r.col_end.min(content_width);
-                paint_span_cells(
-                    slice,
-                    pad_left,
-                    row,
-                    start,
-                    end,
-                    &col_to_char,
-                    &line_chars,
-                    style,
-                    mask_slice,
-                );
+                if end > start {
+                    paint_span_cells(
+                        slice,
+                        pad_left,
+                        row,
+                        start,
+                        end,
+                        &col_to_char,
+                        &line_chars,
+                        style,
+                        mask_slice,
+                    );
+                }
             }
             vt_buf.clear();
-            buf.virtual_text_at_into(idx, &mut vt_buf);
+            buf.virtual_text_at_into(line_idx, &mut vt_buf);
             for vt in &vt_buf {
                 let base = vt
                     .hl_group
@@ -1196,7 +1190,9 @@ impl Window {
                     .sum();
                 let start_col = match vt.pos {
                     VirtTextPos::Eol => content_end_col,
-                    VirtTextPos::Inline | VirtTextPos::Overlay => vt.col as u16,
+                    VirtTextPos::Inline | VirtTextPos::Overlay => {
+                        (vt.col as u16).min(content_width)
+                    }
                     VirtTextPos::RightAlign => content_width.saturating_sub(vt_width),
                 };
                 let mut c = start_col;
@@ -1223,15 +1219,13 @@ impl Window {
         // otherwise.
         if let CursorShape::Block { glyph, style, pos } = ctx.cursor_shape {
             let resolved = pos.or_else(|| {
-                let (logical_row, logical_col) = {
-                    let end = self.effective_endpoint();
-                    let (r, c) = buf.display_cursor_pos(end);
-                    (r as u16, c as u16)
-                };
-                logical_row
-                    .checked_sub(self.scroll_top)
+                let end = self.effective_endpoint();
+                let (r, c) = buf.display_cursor_pos(end);
+                let row = r as u16;
+                let col = c as u16;
+                row.checked_sub(self.scroll_top)
                     .filter(|rel| *rel < height)
-                    .map(|screen_row| (logical_col, screen_row))
+                    .map(|screen_row| (col, screen_row))
             });
             if let Some((col, screen_row)) = resolved {
                 if col < content_width && screen_row < height {
@@ -1252,7 +1246,6 @@ impl Window {
     }
 }
 
-/// Paint a styled span across `[start, end)` columns of `row`.
 /// Skips wide-char continuation cells: their `col_to_char` index repeats the leading
 /// cell, and `Grid::set` for a wide char also marks the next slot as `\0`, so a second
 /// paint at the continuation column would clobber the cell after the wide char.
@@ -1359,7 +1352,12 @@ mod tests {
             BufId(1),
             SplitConfig {
                 region: "test".into(),
-                gutters: Gutters::default(),
+                // Default reserves a scrollbar column; tests below assert on
+                // bare-width content layout, so opt out.
+                gutters: Gutters {
+                    scrollbar: false,
+                    ..Default::default()
+                },
             },
         )
     }
@@ -1642,7 +1640,7 @@ mod tests {
         assert!(yank.is_none());
         // Non-vim Down does not write `cpos` — it stashes the click byte in
         // `pending_press` and parks it in `drag_endpoint` for visual feedback.
-        // `cpos` is committed only on Up, and only when `cursor_follows_mouse`.
+        // `cpos` is committed only on Up, and only for caret leaves.
         assert_eq!(w.cpos, 0);
         assert_eq!(w.cursor_row, 0);
         assert_eq!(w.cursor_col, 0);

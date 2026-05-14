@@ -46,9 +46,6 @@ pub struct TuiApp {
     pub(crate) transcript: smelt_core::content::transcript::Transcript,
     pub(crate) parser: smelt_core::content::stream_parser::StreamParser,
     pub(crate) transcript_projection: crate::content::transcript_buf::TranscriptProjection,
-    /// Plain-text snapshot of visible rows captured during `project_transcript_buffer`.
-    /// Read by `compute_transcript_cursor` to look up the glyph under the soft cursor.
-    pub(crate) last_viewport_text: Vec<String>,
     pub(crate) input_history: History,
     pub(crate) input: PromptState,
     pub(crate) exec: Option<crate::commands::ExecHandle>,
@@ -305,7 +302,10 @@ impl TuiApp {
                 prompt_above_buf,
                 crate::smelt_term::SplitConfig {
                     region: "prompt_above".into(),
-                    gutters: crate::smelt_term::Gutters::default(),
+                    gutters: crate::smelt_term::Gutters {
+                        scrollbar: false,
+                        ..Default::default()
+                    },
                 },
             ));
             if let Some(w) = ui.win_mut(crate::app::PROMPT_ABOVE_WIN) {
@@ -317,9 +317,14 @@ impl TuiApp {
                 crate::smelt_term::SplitConfig {
                     region: "prompt".into(),
                     gutters: crate::smelt_term::Gutters {
+                        // The reserved scrollbar column doubles as the right gutter
+                        // when content fits, so `pad_right` stays 0 to avoid a
+                        // double-wide gap. When content overflows, the scrollbar
+                        // paints in that column and `pad_left` keeps the input
+                        // off the left edge.
                         pad_left: 1,
-                        pad_right: 1,
-                        scrollbar: false,
+                        pad_right: 0,
+                        ..Default::default()
                     },
                 },
             ));
@@ -332,7 +337,10 @@ impl TuiApp {
                 prompt_below_buf,
                 crate::smelt_term::SplitConfig {
                     region: "prompt_below".into(),
-                    gutters: crate::smelt_term::Gutters::default(),
+                    gutters: crate::smelt_term::Gutters {
+                        scrollbar: false,
+                        ..Default::default()
+                    },
                 },
             ));
             if let Some(w) = ui.win_mut(crate::app::PROMPT_BELOW_WIN) {
@@ -344,7 +352,10 @@ impl TuiApp {
                     status_buf,
                     crate::smelt_term::SplitConfig {
                         region: "status".into(),
-                        gutters: crate::smelt_term::Gutters::default(),
+                        gutters: crate::smelt_term::Gutters {
+                            scrollbar: false,
+                            ..Default::default()
+                        },
                     },
                 )
                 .expect("status buffer was just created");
@@ -383,7 +394,6 @@ impl TuiApp {
             transcript: smelt_core::content::transcript::Transcript::new(),
             parser: smelt_core::content::stream_parser::StreamParser::new(),
             transcript_projection,
-            last_viewport_text: Vec::new(),
             input_history: History::load(),
             input,
             exec: None,
@@ -678,9 +688,11 @@ impl TuiApp {
             return;
         };
         if let Some(w) = self.ui.win_mut(win) {
+            // Non-focusable surface: text-selectable for drag-copy, but the
+            // caret-leaf predicate (focusable && !mouse_scroll) keeps `cpos`
+            // untouched on click — notification rows have no meaningful caret.
             w.focusable = false;
             w.selectable = true;
-            w.cursor_follows_mouse = false;
         }
 
         let layout = crate::smelt_term::LayoutTree::vbox(vec![(
@@ -1038,7 +1050,7 @@ impl TuiApp {
                     }
 
                     if scroll_delta != 0 {
-                        self.scroll_under_mouse(scroll_row, scroll_col, scroll_delta);
+                        let _ = self.ui.scroll_at(scroll_row, scroll_col, scroll_delta);
                     }
 
                     self.render_normal(self.agent.is_some());

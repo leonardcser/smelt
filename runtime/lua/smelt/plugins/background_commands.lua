@@ -184,8 +184,8 @@ smelt.cmd.register("ps", function()
 
       smelt.ui.dialog.open({
         title = {
-          { text = " processes ", bold = true },
-          { text = "(bs: kill) ", fg = "grey", dim = true },
+          { text = "processes ", bold = true },
+          { text = "(bs: kill)", fg = "grey", dim = true },
         },
         height = 50,
         panels = { { leaf = options_leaf } },

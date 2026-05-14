@@ -91,7 +91,7 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
         &win_tbl,
         "smelt.win",
         "open",
-        "Open a split window over the buffer `buf_id`. `opts.region` picks the layout slot (default `\"lua_overlay\"`); `opts.focusable`, `opts.cursor_line_highlight`, and `opts.vim_enabled` toggle behaviour. `opts.pad_left` / `opts.pad_right` reserve gutter columns on either side. Returns the new `WinId` or `nil` if no slot was available.",
+        "Open a split window over the buffer `buf_id`. `opts.region` picks the layout slot (default `\"lua_overlay\"`); `opts.focusable`, `opts.cursor_line_highlight`, and `opts.vim_enabled` toggle behaviour. `opts.pad_left` / `opts.pad_right` reserve gutter columns on either side. `opts.scrollbar` (default `true`) reserves the rightmost column for a scrollbar that paints only when content overflows — set `false` for cursor-driven UIs (lists, single-line inputs). Returns the new `WinId` or `nil` if no slot was available.",
         &["buf_id", "opts"],
         lua,
         |_, (buf_id, opts): (u64, Option<mlua::Table>)| -> LuaResult<Option<u64>> {
@@ -108,6 +108,10 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
                     .as_ref()
                     .and_then(|t| t.get::<u64>("pad_right").ok())
                     .unwrap_or(0) as u16;
+                let scrollbar = opts
+                    .as_ref()
+                    .and_then(|t| t.get::<Option<bool>>("scrollbar").ok().flatten())
+                    .unwrap_or_else(|| crate::smelt_term::layout::Gutters::default().scrollbar);
                 let win = app.ui.win_open_split(
                     crate::smelt_term::BufId(buf_id),
                     crate::smelt_term::SplitConfig {
@@ -115,11 +119,26 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
                         gutters: crate::smelt_term::layout::Gutters {
                             pad_left,
                             pad_right,
-                            scrollbar: false,
+                            scrollbar,
                         },
                     },
                 );
                 if let Some(win_id) = win {
+                    // Lua-opened buffer windows wrap long lines by default
+                    // so /help, /stats, /btw and plugin dialogs don't
+                    // truncate content; opt out with `wrap = false`. Wrap
+                    // lives on the buffer — `Buffer::ensure_rendered_at`
+                    // reflows the user-set lines at the leaf's content width.
+                    let wrap_default = true;
+                    let wrap_enabled = opts
+                        .as_ref()
+                        .and_then(|t| t.get::<Option<bool>>("wrap").ok().flatten())
+                        .unwrap_or(wrap_default);
+                    if let Some(buf) = app.ui.buf_mut(crate::smelt_term::BufId(buf_id)) {
+                        if !buf.has_parser() {
+                            buf.set_wrap_mode(wrap_enabled);
+                        }
+                    }
                     if let Some(w) = app.ui.win_mut(win_id) {
                         if let Some(opts) = opts.as_ref() {
                             if let Ok(focusable) = opts.get::<bool>("focusable") {
@@ -135,9 +154,6 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
                             }
                             if let Ok(selectable) = opts.get::<bool>("selectable") {
                                 w.selectable = selectable;
-                            }
-                            if let Ok(follows) = opts.get::<bool>("cursor_follows_mouse") {
-                                w.cursor_follows_mouse = follows;
                             }
                         }
                     }

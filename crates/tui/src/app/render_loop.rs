@@ -49,7 +49,7 @@ impl TuiApp {
 
         {
             let _p = smelt_perf::perf::begin("compositor:transcript");
-            self.sync_transcript_layer(term_w, width, viewport_rows, has_transcript_cursor);
+            self.sync_transcript_layer(width, viewport_rows, has_transcript_cursor);
         }
         {
             let _p = smelt_perf::perf::begin("compositor:prompt_above");
@@ -149,18 +149,14 @@ impl TuiApp {
     }
 
     /// Project the transcript into its display buffer and drive `Ui::wins[TRANSCRIPT_WIN]`.
-    /// When content owns focus, surfaces a Block cursor after extmark + selection layering.
+    /// When content owns focus, surfaces a Block cursor; `Window::render` derives the
+    /// position from `effective_endpoint`, so the cursor naturally tracks the live drag.
     fn sync_transcript_layer(
         &mut self,
-        term_w: u16,
         width: usize,
         viewport_rows: u16,
         has_transcript_cursor: bool,
     ) {
-        let gutters = self.transcript_gutters();
-        let t_pad = gutters.pad_left;
-        let transcript_rect =
-            crate::smelt_term::Rect::new(0, t_pad, term_w.saturating_sub(t_pad), viewport_rows);
         let tdata = {
             let _p = smelt_perf::perf::begin("compositor:project_transcript");
             self.project_transcript_buffer(
@@ -171,32 +167,6 @@ impl TuiApp {
             )
         };
         self.transcript_win_mut().scroll_top = tdata.clamped_scroll;
-
-        let (cur_row, cur_col) = {
-            let win = self.transcript_win();
-            (win.cursor_row(), win.cursor_col())
-        };
-        let tcursor = self.compute_transcript_cursor(
-            width,
-            viewport_rows,
-            cur_row,
-            cur_col,
-            tdata.clamped_scroll,
-            has_transcript_cursor,
-            Some(&tdata.viewport),
-        );
-
-        let transcript_viewport = crate::smelt_term::WindowViewport::new(
-            transcript_rect,
-            gutters.content_width(term_w),
-            tdata.total_rows,
-            tdata.clamped_scroll,
-            crate::smelt_term::ScrollbarState::new(
-                tdata.scrollbar_col + t_pad,
-                tdata.total_rows,
-                viewport_rows,
-            ),
-        );
 
         let transcript_selection =
             self.transcript_selection_highlights(tdata.clamped_scroll, viewport_rows);
@@ -214,39 +184,12 @@ impl TuiApp {
             buf.set_selection(ranges);
         }
 
-        if let Some(c) = tcursor.soft_cursor.as_ref() {
-            let theme = self.ui.theme();
-            let (fg, bg) = if theme.is_light() {
-                (
-                    smelt_core::style::Color::White,
-                    smelt_core::style::Color::Black,
-                )
-            } else {
-                (
-                    smelt_core::style::Color::Black,
-                    smelt_core::style::Color::White,
-                )
-            };
+        if has_transcript_cursor {
             self.ui
-                .set_cursor_shape(crate::smelt_term::CursorShape::Block {
-                    glyph: c.glyph,
-                    style: crate::smelt_term::Style {
-                        fg: Some(fg),
-                        bg: Some(bg),
-                        ..Default::default()
-                    },
-                    pos: Some((c.col, c.row)),
-                });
-        } else if has_transcript_cursor {
-            // Focus is on transcript but the cursor anchor is off-screen (panned away).
-            // Hide the cursor — without this, a stale `Block` shape from the prior frame
-            // would draw a stray glyph at the viewport edge.
-            self.ui
-                .set_cursor_shape(crate::smelt_term::CursorShape::Hidden);
+                .set_cursor_shape(prompt_block_cursor(self.ui.theme()));
         }
         if let Some(win) = self.ui.win_mut(crate::app::TRANSCRIPT_WIN) {
             win.scroll_top = tdata.clamped_scroll;
-            win.viewport = Some(transcript_viewport);
         }
     }
 
@@ -291,11 +234,11 @@ impl TuiApp {
             .win(crate::app::PROMPT_WIN)
             .map(|w| w.config.gutters)
             .unwrap_or_default();
-        let pad_left = gutters.pad_left;
-        let content_width = prompt_rect
-            .width
-            .saturating_sub(pad_left)
-            .saturating_sub(gutters.pad_right);
+        // Use the same content width the auto-attach pre-pass will use — both pad
+        // gutters AND the reserved scrollbar column. Otherwise `wrap_with_offsets`
+        // wraps to a wider width than the renderer paints, so trailing chars get
+        // clipped and word wrap fires at the wrong column as the user types.
+        let content_width = gutters.content_width(prompt_rect.width);
 
         {
             let mut pctx = crate::input::prompt_ctx_mut(&mut self.ui);
@@ -306,7 +249,7 @@ impl TuiApp {
             pctx.win.last_render_cpos = Some(pctx.win.cpos);
         }
 
-        let output = {
+        {
             let theme = self.ui.theme().clone();
             let (win, buf) = self
                 .ui
@@ -318,29 +261,8 @@ impl TuiApp {
                 content_width,
                 height: prompt_rect.height,
             };
-            prompt_buf::compute_input(&inp, buf.expect("prompt edit buffer"), &theme)
-        };
-
-        let scroll_top = self.prompt_win().scroll_top;
-        let viewport = output.viewport.as_ref().map(|vp| {
-            let rect = crate::smelt_term::Rect::new(
-                prompt_rect.top,
-                prompt_rect.left + pad_left,
-                prompt_rect.width.saturating_sub(pad_left),
-                vp.rows,
-            );
-            crate::smelt_term::WindowViewport::new(
-                rect,
-                vp.content_width,
-                vp.total_rows,
-                scroll_top,
-                crate::smelt_term::ScrollbarState::new(
-                    prompt_rect.left + prompt_rect.width.saturating_sub(1),
-                    vp.total_rows,
-                    vp.rows,
-                ),
-            )
-        });
+            prompt_buf::compute_input(&inp, buf.expect("prompt edit buffer"), &theme);
+        }
 
         if has_prompt_cursor {
             let screen_row = self.prompt_win().cursor_screen_row(prompt_rect.height);
@@ -353,10 +275,6 @@ impl TuiApp {
                 self.ui
                     .set_cursor_shape(crate::smelt_term::CursorShape::Hidden);
             }
-        }
-
-        if let Some(win) = self.ui.win_mut(crate::app::PROMPT_WIN) {
-            win.viewport = viewport;
         }
     }
 

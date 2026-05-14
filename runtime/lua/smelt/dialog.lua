@@ -36,14 +36,28 @@ smelt.ui.dialog = smelt.ui.dialog or {}
 local REGION = "dialog_overlay"
 
 -- ── Buffer/leaf builders ──────────────────────────────────────────────
+--
+-- Every helper here adds a one-cell gutter on the left AND the right so dialog
+-- content never sits flush against the frame. The gutter is invariant: callers
+-- must not pass `pad_left` / `pad_right`. Custom leaves built outside these
+-- helpers and handed to `smelt.ui.dialog.open` must follow the same rule.
+--
+-- Scrollbars: buffer-viewer leaves (`markdown`, `content`) inherit the default
+-- `scrollbar = true` from `smelt.win.open` so a thumb appears when content
+-- overflows. Cursor-driven leaves (`input`, `options`, `list`) opt out — the
+-- selection cursor and key nav already convey position.
+
+local GUTTER = 1
 
 function smelt.ui.dialog.input(placeholder)
   local buf = smelt.buf.create()
   smelt.buf.set_lines(buf, { "" })
-  -- One-cell left gutter so the cursor and placeholder don't sit flush against
-  -- the dialog frame.
+  -- Single-line input: wrap=false keeps the buffer's display lines == canonical
+  -- lines, so the dim placeholder highlight isn't clobbered when the wrap path
+  -- re-renders. Highlights also stay anchored to the visible row.
   local leaf = smelt.win.open(buf, {
-    region = REGION, focusable = true, selectable = true, pad_left = 1,
+    region = REGION, focusable = true, selectable = true,
+    pad_left = GUTTER, pad_right = GUTTER, scrollbar = false, wrap = false,
   })
   if leaf then smelt.win.configure_input(leaf, placeholder or "") end
   return leaf, buf
@@ -56,16 +70,13 @@ function smelt.ui.dialog.options(labels, opts)
   if #lines == 0 then lines = { "" } end
   local buf = smelt.buf.create()
   smelt.buf.set_lines(buf, lines)
-  -- Default pad_left = 1 so options align with dialog.input's gutter; callers
-  -- can pass 0 or a larger pad explicitly to opt out.
-  local pad_left = opts.pad_left
-  if pad_left == nil then pad_left = 1 end
   local leaf = smelt.win.open(buf, {
     region     = REGION,
     focusable  = true,
     selectable = true,
-    pad_left   = pad_left,
-    pad_right  = opts.pad_right,
+    pad_left   = GUTTER,
+    pad_right  = GUTTER,
+    scrollbar  = false,
   })
   if leaf then
     local selected = tonumber(opts.selected or 1) or 1
@@ -81,6 +92,7 @@ function smelt.ui.dialog.list(buf, opts)
   if focusable == nil then focusable = true end
   local leaf = smelt.win.open(buf, {
     region = REGION, focusable = focusable, selectable = true,
+    pad_left = GUTTER, pad_right = GUTTER, scrollbar = false,
   })
   if leaf then smelt.win.configure_list(leaf, opts.selected or 0) end
   return leaf
@@ -102,6 +114,7 @@ function smelt.ui.dialog.markdown(text)
   smelt.buf.set_source(buf, text or "")
   local leaf = smelt.win.open(buf, {
     region = REGION, focusable = false, selectable = true,
+    pad_left = GUTTER, pad_right = GUTTER,
   })
   return leaf, buf
 end
@@ -122,6 +135,8 @@ function smelt.ui.dialog.content(opts)
     focusable   = focusable,
     selectable  = true,
     vim_enabled = opts.interactive or false,
+    pad_left    = GUTTER,
+    pad_right   = GUTTER,
   })
   return leaf, buf
 end
@@ -152,11 +167,25 @@ local function open_overlay(opts)
     }
   end
 
-  -- Plain string titles get padded + dimmed so they read as " title " against
-  -- the top border. Pass a table title to opt out (e.g. `{ text = "foo", bold = true }`).
+  -- The wrapper is responsible for the single-cell gutter on each side of the
+  -- title content. Callers MUST NOT pad — pass `"messages"` not `" messages "`,
+  -- and for multi-span titles drop the leading space on the first span and the
+  -- trailing space on the last span.
+  --   - bare string: rendered dim and padded with a space on each side.
+  --   - table with `text` key (single span): wrapped between two raw space spans.
+  --   - table sequence (multi-span): same — leading/trailing space spans added.
   local title = opts.title
   if type(title) == "string" and title ~= "" then
-    title = { text = " " .. title .. " ", dim = true }
+    title = { { text = " " }, { text = title, dim = true }, { text = " " } }
+  elseif type(title) == "table" then
+    if title.text ~= nil then
+      title = { { text = " " }, title, { text = " " } }
+    elseif #title > 0 then
+      local padded = { { text = " " } }
+      for _, span in ipairs(title) do table.insert(padded, span) end
+      table.insert(padded, { text = " " })
+      title = padded
+    end
   end
 
   smelt.ui.overlay.open({

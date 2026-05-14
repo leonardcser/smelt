@@ -29,7 +29,7 @@ smelt.cmd.register("messages", function()
     local body_leaf = smelt.ui.dialog.content({ buf = body_buf, interactive = true })
 
     smelt.ui.dialog.open({
-      title  = string.format(" messages (%d) ", #entries),
+      title  = string.format("messages (%d)", #entries),
       height = 40,
       panels = { { leaf = body_leaf, height = "fill" } },
       keymaps = {

@@ -22,6 +22,7 @@ pub enum ChromeZone {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum OverlayHitTarget {
     Window(super::WinId),
+    Scrollbar(super::WinId),
     Chrome(ChromeZone),
 }
 

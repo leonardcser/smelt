@@ -1,5 +1,8 @@
 ---
 source: crates/tui/tests/storybook/mod.rs
+assertion_line: 187
 expression: frame.styles_text()
 ---
-
+  0  11   1 bg=Reset
+  1  11   1 bg=Reset
+  2  11   1 bg=Reset

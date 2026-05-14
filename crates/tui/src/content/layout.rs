@@ -164,7 +164,10 @@ mod tests {
             &mut ui,
             crate::app::PROMPT_ABOVE_WIN,
             "prompt_above",
-            Gutters::default(),
+            Gutters {
+                scrollbar: false,
+                ..Default::default()
+            },
         );
         open_split(
             &mut ui,
@@ -173,14 +176,17 @@ mod tests {
             Gutters {
                 pad_left: 1,
                 pad_right: 1,
-                scrollbar: false,
+                ..Default::default()
             },
         );
         open_split(
             &mut ui,
             crate::app::PROMPT_BELOW_WIN,
             "prompt_below",
-            Gutters::default(),
+            Gutters {
+                scrollbar: false,
+                ..Default::default()
+            },
         );
         let status_buf = ui.buf_create(crate::smelt_term::BufCreateOpts::default());
         let status_win = ui
@@ -188,7 +194,10 @@ mod tests {
                 status_buf,
                 crate::smelt_term::SplitConfig {
                     region: "status".into(),
-                    gutters: Gutters::default(),
+                    gutters: Gutters {
+                        scrollbar: false,
+                        ..Default::default()
+                    },
                 },
             )
             .unwrap();
@@ -202,6 +211,16 @@ mod tests {
         );
         ui.set_layout(tree);
         (ui, status_win)
+    }
+
+    #[test]
+    fn prompt_rect_width_equals_terminal_width() {
+        let (ui, status_win) = set_up_layout(1, 1, 80, 40);
+        let layout = LayoutState::from_ui(&ui, status_win);
+        assert_eq!(
+            layout.prompt.width, 80,
+            "prompt rect spans full terminal width"
+        );
     }
 
     #[test]

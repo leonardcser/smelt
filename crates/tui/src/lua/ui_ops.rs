@@ -283,8 +283,10 @@ pub(crate) fn configure_list_leaf(app: &mut TuiApp, leaf: WinId, initial_cursor:
     let (win, buf) = app.ui.win_and_buf_mut(leaf, buf_id);
     if let (Some(win), Some(buf)) = (win, buf) {
         win.cursor_line_highlight = true;
+        // List-style leaf: `mouse_scroll = true` doubles as the caret-leaf opt-out,
+        // so mouse-up doesn't commit `cpos` here — the highlighted row is driven
+        // by j/k navigation, not the click byte.
         win.mouse_scroll = true;
-        win.cursor_follows_mouse = false;
         win.jump_to_row(buf, target, viewport);
         if target > 0 {
             win.pending_scroll_to_cursor = true;
@@ -546,30 +548,54 @@ pub(crate) fn configure_input_leaf(app: &mut TuiApp, leaf: WinId, placeholder: S
         CallbackResult::Event(WinEvent::TextChanged, Payload::Text { content: new })
     }
 
-    fn backspace(ctx: &mut crate::smelt_term::CallbackCtx<'_>) -> CallbackResult {
-        if is_placeholder(ctx) {
-            return CallbackResult::Consumed;
+    fn restore_placeholder(ctx: &mut crate::smelt_term::CallbackCtx<'_>, placeholder: &str) {
+        let buf_id = match ctx.ui.win(ctx.win) {
+            Some(w) => w.buf,
+            None => return,
+        };
+        if let Some(buf) = ctx.ui.buf_mut(buf_id) {
+            buf.set_lines(0, 1, vec![placeholder.to_string()]);
+            let end = placeholder.chars().count() as u16;
+            buf.add_highlight(0, 0, end, crate::smelt_term::SpanStyle::new().dim());
         }
-        let text = current_line(ctx);
-        let cursor = ctx
-            .ui
-            .win(ctx.win)
-            .map(|w| w.cursor_col() as usize)
-            .unwrap_or(0);
-        if cursor == 0 {
-            return CallbackResult::Consumed;
+        if let Some(win) = ctx.ui.win_mut(ctx.win) {
+            win.set_cursor_col_single_line(0);
         }
-        let chars: Vec<char> = text.chars().collect();
-        let split = cursor.min(chars.len());
-        let new: String = chars[..split.saturating_sub(1)]
-            .iter()
-            .copied()
-            .chain(chars[split..].iter().copied())
-            .collect();
-        let new_cursor_col = (split.saturating_sub(1)) as u16;
-        replace_line(ctx, new.clone(), new_cursor_col);
-        CallbackResult::Event(WinEvent::TextChanged, Payload::Text { content: new })
     }
+
+    let placeholder_for_backspace = placeholder.clone();
+    let backspace: Callback = Callback::Rust(Box::new(
+        move |ctx: &mut crate::smelt_term::CallbackCtx<'_>| -> CallbackResult {
+            if is_placeholder(ctx) {
+                return CallbackResult::Consumed;
+            }
+            let text = current_line(ctx);
+            let cursor = ctx
+                .ui
+                .win(ctx.win)
+                .map(|w| w.cursor_col() as usize)
+                .unwrap_or(0);
+            if cursor == 0 {
+                return CallbackResult::Consumed;
+            }
+            let chars: Vec<char> = text.chars().collect();
+            let split = cursor.min(chars.len());
+            let new: String = chars[..split.saturating_sub(1)]
+                .iter()
+                .copied()
+                .chain(chars[split..].iter().copied())
+                .collect();
+            let new_cursor_col = (split.saturating_sub(1)) as u16;
+            replace_line(ctx, new.clone(), new_cursor_col);
+            // Re-seed the dim placeholder when backspacing empties the line, so
+            // the input doesn't sit blank — matches the "show on empty" pattern
+            // users expect from a filter input.
+            if new.is_empty() && !placeholder_for_backspace.is_empty() {
+                restore_placeholder(ctx, &placeholder_for_backspace);
+            }
+            CallbackResult::Event(WinEvent::TextChanged, Payload::Text { content: new })
+        },
+    ));
 
     enum HMove {
         Left,
@@ -599,7 +625,7 @@ pub(crate) fn configure_input_leaf(app: &mut TuiApp, leaf: WinId, placeholder: S
     let _ = app.ui.win_set_keymap(
         leaf,
         KeyBind::new(KeyCode::Backspace, KeyModifiers::NONE),
-        Callback::Rust(Box::new(backspace)),
+        backspace,
     );
     let _ = app.ui.win_set_keymap(
         leaf,

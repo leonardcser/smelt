@@ -2,8 +2,7 @@
 //! and writes source↔display coord maps to the buffer for cursor mapping.
 
 use crate::content::selection::{
-    build_char_kinds, build_display_spans, compute_visual_line_offsets, spans_to_string, Span,
-    SpanKind,
+    build_char_kinds, build_display_spans, spans_to_string, Span, SpanKind,
 };
 use smelt_buffer::attachment::{AttachmentStore, ATTACHMENT_MARKER};
 use smelt_buffer::buffer::{Buffer, BufferCopy, BufferParser, CopyOutput, SpanMeta};
@@ -35,13 +34,25 @@ impl PromptCopier {
 }
 
 impl BufferCopy for PromptCopier {
-    fn copy(&self, buf: &Buffer, range: std::ops::Range<usize>) -> CopyOutput {
-        let raw = &buf.source()[range.start..range.end];
+    fn copy(&self, buf: &Buffer, src: &str, range: std::ops::Range<usize>) -> CopyOutput {
+        let raw = &src[range.start..range.end];
+        self.expand_attachments(buf, src, raw, range.start)
+    }
+}
+
+impl PromptCopier {
+    fn expand_attachments(
+        &self,
+        buf: &Buffer,
+        src: &str,
+        raw: &str,
+        range_start: usize,
+    ) -> CopyOutput {
         if !raw.contains(ATTACHMENT_MARKER) {
             return CopyOutput::same(raw.to_string());
         }
-        // Count markers before `range.start` to align with `buf.attachment_ids`.
-        let mut att_idx = buf.source()[..range.start]
+        // Count markers before `range_start` to align with `buf.attachment_ids`.
+        let mut att_idx = src[..range_start]
             .chars()
             .filter(|&c| c == ATTACHMENT_MARKER)
             .count();
@@ -116,17 +127,12 @@ impl BufferParser for PromptBufferParser {
 
         let display_buf = spans_to_string(&spans);
         let char_kinds = build_char_kinds(&spans);
-        let (visual_lines, _, _, _) = crate::content::selection::wrap_and_locate_cursor(
-            &display_buf,
-            &char_kinds,
-            0,
-            width as usize,
-        );
+        let wrap =
+            crate::content::selection::wrap_with_offsets(&display_buf, &char_kinds, width as usize);
+        let visual_lines = wrap.visual_lines;
+        let row_offsets = wrap.row_offsets;
 
         let lines: Vec<String> = visual_lines.iter().map(|(l, _)| l.clone()).collect();
-        // Row offsets in display chars *including* hard newlines, so they
-        // align with the s2d / d2s maps (which walk all spans char-by-char).
-        let row_offsets = compute_visual_line_offsets(&display_buf, &visual_lines);
 
         // Determine if we need special command/exec styling on the first line.
         let single_line = !source.contains('\n');
@@ -218,6 +224,30 @@ mod tests {
         let mut buf = Buffer::new(smelt_buffer::buffer::BufId(0), BufCreateOpts::default());
         buf.set_parser(parser);
         buf
+    }
+
+    #[test]
+    fn parser_reserves_trailing_row_when_line_is_full() {
+        let store = Arc::new(Mutex::new(AttachmentStore::new()));
+        let parser = Arc::new(PromptBufferParser::new(store));
+        // 78 chars at width 78: line fills, an empty trailing row is added so
+        // a cursor at end-of-line has a visible home (neovim-style wrap).
+        let mut buf = make_buf_with_parser(parser.clone());
+        buf.set_source("a".repeat(78));
+        buf.ensure_rendered_at(78);
+        assert_eq!(
+            buf.line_count(),
+            2,
+            "78 ascii chars at width 78 reserves a padding row"
+        );
+        assert_eq!(buf.get_line(0).unwrap().chars().count(), 78);
+        assert_eq!(buf.get_line(1).unwrap(), "");
+        // 79 chars wraps the last char to its own row; that row has 1 char and
+        // isn't full, so no extra padding row is appended.
+        let mut buf = make_buf_with_parser(parser.clone());
+        buf.set_source("a".repeat(79));
+        buf.ensure_rendered_at(78);
+        assert_eq!(buf.line_count(), 2, "79 ascii chars at width 78 wraps");
     }
 
     #[test]

@@ -70,8 +70,8 @@ smelt.cmd.register("permissions", function()
 
       smelt.ui.dialog.open({
         title = {
-          { text = " permissions ", bold = true },
-          { text = "(d/bs: delete) ", fg = "grey", dim = true },
+          { text = "permissions ", bold = true },
+          { text = "(d/bs: delete)", fg = "grey", dim = true },
         },
         height = 60,
         panels = { { leaf = options_leaf } },

@@ -22,7 +22,6 @@ impl TuiApp {
                 _ => None,
             };
             if let Some(owner) = scrollbar_owner {
-                self.propagate_scrollbar_scroll(owner);
                 if matches!(me.kind, MouseEventKind::Down(MouseButton::Left)) {
                     if owner == crate::app::TRANSCRIPT_WIN {
                         self.app_focus = crate::app::AppFocus::Content;
@@ -50,35 +49,49 @@ impl TuiApp {
             return EventOutcome::Noop;
         }
 
-        match me.kind {
-            MouseEventKind::ScrollUp => {
-                self.scroll_under_mouse(me.row, me.column, -3);
-                return EventOutcome::Redraw;
+        // Wheel scroll is handled generically by `Ui::dispatch_event` — when it
+        // falls through here, the wheel didn't land on a scrollable leaf and is
+        // safe to drop.
+        if matches!(
+            me.kind,
+            MouseEventKind::ScrollUp
+                | MouseEventKind::ScrollDown
+                | MouseEventKind::ScrollLeft
+                | MouseEventKind::ScrollRight
+        ) {
+            return EventOutcome::Noop;
+        }
+
+        // Region-based focus promotion on Down: the prompt block (top bar +
+        // input + bottom bar) is one focus unit, and the transcript pane is
+        // another. Doing this BEFORE per-window dispatch means click handlers
+        // on individual leaves don't have to know about app-level focus, and
+        // visually-grouped chrome (prompt's top/bottom bars) inherits the
+        // input's focus naturally.
+        let is_down = matches!(me.kind, MouseEventKind::Down(MouseButton::Left));
+        if is_down {
+            match self.layout.hit_test(me.row, me.column) {
+                HitRegion::Prompt => self.app_focus = crate::app::AppFocus::Prompt,
+                HitRegion::Transcript
+                    if self.has_transcript_content(self.core.config.settings.show_thinking) =>
+                {
+                    self.app_focus = crate::app::AppFocus::Content;
+                }
+                _ => {}
             }
-            MouseEventKind::ScrollDown => {
-                self.scroll_under_mouse(me.row, me.column, 3);
-                return EventOutcome::Redraw;
-            }
-            _ => {}
         }
 
         // `Ui::resolve_split_mouse` handles hit-test, click-count, and HitTarget capture
         // so drags stay on the originating window even if the pointer drifts.
         if let Some((win, count)) = self.ui.resolve_split_mouse(me) {
-            let is_down = matches!(me.kind, MouseEventKind::Down(MouseButton::Left));
             let is_up = matches!(me.kind, MouseEventKind::Up(MouseButton::Left));
             if win == crate::app::PROMPT_WIN {
-                if is_down {
-                    self.app_focus = crate::app::AppFocus::Prompt;
-                }
                 self.handle_prompt_mouse(me, count);
             } else if win == crate::app::TRANSCRIPT_WIN {
+                // Empty transcript: don't start a drag-select on the void.
                 if is_down && !self.has_transcript_content(self.core.config.settings.show_thinking)
                 {
                     return EventOutcome::Noop;
-                }
-                if is_down {
-                    self.app_focus = crate::app::AppFocus::Content;
                 }
                 let yank = self.handle_content_mouse(me, count);
                 if is_up {
@@ -97,21 +110,9 @@ impl TuiApp {
                     }
                 }
             }
+            // PROMPT_ABOVE_WIN and PROMPT_BELOW_WIN need no per-window handling
+            // — the region check above already promoted focus.
             return EventOutcome::Redraw;
-        }
-
-        // Down on a non-window region in the prompt/status zone: promote focus to Prompt.
-        if matches!(me.kind, MouseEventKind::Down(_))
-            && matches!(
-                self.layout.hit_test(me.row, me.column),
-                HitRegion::Prompt | HitRegion::Status
-            )
-        {
-            if self.app_focus != crate::app::AppFocus::Prompt {
-                self.app_focus = crate::app::AppFocus::Prompt;
-                return EventOutcome::Redraw;
-            }
-            return EventOutcome::Noop;
         }
 
         EventOutcome::Noop
@@ -128,49 +129,6 @@ impl TuiApp {
             .clipboard
             .kill_ring
             .set_with_linewise(out.kill_ring, false);
-    }
-
-    /// Scroll the pane under the cursor by `delta` lines, tmux-style: the viewport
-    /// pans and the cursor stays on the same screen row.
-    /// Wheel does not change `app_focus` — only clicks promote focus.
-    pub(crate) fn scroll_under_mouse(&mut self, row: u16, col: u16, delta: isize) {
-        let on_prompt = matches!(
-            self.ui.hit_test(row, col, None),
-            Some(crate::smelt_term::HitTarget::Window(w)) if w == crate::app::PROMPT_WIN
-        );
-        if on_prompt {
-            self.pan_prompt_by_lines(delta);
-            return;
-        }
-        if !self.has_transcript_content(self.core.config.settings.show_thinking) {
-            return;
-        }
-        let viewport = self.viewport_rows_estimate();
-        let win_id = self.well_known.transcript;
-        let buf_id = self.transcript_win().buf;
-        let (win, buf) = self.ui.win_and_buf_mut(win_id, buf_id);
-        win.expect("transcript window").pan_by_lines(
-            buf.expect("transcript buffer"),
-            delta,
-            viewport,
-        );
-    }
-
-    /// Pan the prompt's wrapped-row viewport by `delta`, keeping the cursor on the
-    /// same screen row. `cpos` lives in source bytes; convert through the buffer's
-    /// parser so the window pan operates on wrapped rows, then convert back.
-    fn pan_prompt_by_lines(&mut self, delta: isize) {
-        let Some(vp) = crate::smelt_term::UiHost::viewport_for(self, crate::app::PROMPT_WIN) else {
-            return;
-        };
-        let (win, buf) = self
-            .ui
-            .win_and_buf_mut(crate::app::PROMPT_WIN, crate::app::PROMPT_EDIT_BUF);
-        win.expect("prompt window").pan_by_lines(
-            buf.expect("prompt edit buffer"),
-            delta,
-            vp.rect.height,
-        );
     }
 
     /// Scroll one line when a drag cursor sits at the viewport edge (autoscroll).
@@ -327,38 +285,6 @@ impl TuiApp {
         MouseEvent {
             column: vp.rect.left.saturating_add(snapped as u16),
             ..me
-        }
-    }
-
-    /// Mirror `scroll_top` from `Ui::wins[owner]` onto the host pane state.
-    /// Transcript scrollbar drags use the same viewport-led path as wheel scroll.
-    fn propagate_scrollbar_scroll(&mut self, owner: crate::smelt_term::WinId) {
-        let Some(scroll_top) = self.ui.win(owner).map(|w| w.scroll_top) else {
-            return;
-        };
-        if owner == crate::app::TRANSCRIPT_WIN {
-            let viewport = self.viewport_rows_estimate();
-            let win_id = self.well_known.transcript;
-            let buf_id = self.transcript_win().buf;
-            let (win, buf) = self.ui.win_and_buf_mut(win_id, buf_id);
-            win.expect("transcript window")
-                .scroll_to_preserving_cursor_screen_row(
-                    scroll_top,
-                    buf.expect("transcript buffer"),
-                    viewport,
-                );
-        } else if owner == crate::app::PROMPT_WIN {
-            let Some(vp) = crate::smelt_term::UiHost::viewport_for(self, crate::app::PROMPT_WIN)
-            else {
-                return;
-            };
-            let (win, buf) = self
-                .ui
-                .win_and_buf_mut(crate::app::PROMPT_WIN, crate::app::PROMPT_EDIT_BUF);
-            let buf = buf.expect("prompt edit buffer");
-            let win = win.expect("prompt window");
-            buf.ensure_rendered_at(vp.content_width);
-            win.scroll_to_preserving_cursor_screen_row(scroll_top, buf, vp.rect.height);
         }
     }
 }

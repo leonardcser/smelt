@@ -351,12 +351,46 @@ impl Ui {
             .find_map(|(id, ov)| ov.layout.contains_leaf(focused).then_some(*id))
     }
 
+    /// Pan the wheel-scrollable leaf at `(row, col)` by `delta` visual rows.
+    /// Called from both the coalesced-wheel flush in the host and the
+    /// `MouseEventKind::Scroll{Up,Down}` arm of `dispatch_event` (which fires
+    /// when wheel events bypass coalescing, e.g. an overlay is focused).
+    /// Returns `true` when something was actually panned.
+    pub fn scroll_at(&mut self, row: u16, col: u16, delta: isize) -> bool {
+        if delta == 0 {
+            return false;
+        }
+        let target_win = match self.hit_test(row, col, None) {
+            Some(HitTarget::Window(w)) => Some(w),
+            Some(HitTarget::Scrollbar { owner }) => Some(owner),
+            _ => None,
+        };
+        let Some(w) = target_win else {
+            return false;
+        };
+        let leaf_info = self.wins.get(&w).and_then(|win| {
+            let scrollable = win.mouse_scroll || win.config.gutters.scrollbar;
+            scrollable.then(|| win.viewport.map(|vp| (win.buf, vp.rect.height)))?
+        });
+        let Some((buf_id, vp_height)) = leaf_info else {
+            return false;
+        };
+        let (win, buf) = self.win_and_buf_mut(w, buf_id);
+        if let (Some(win), Some(buf)) = (win, buf) {
+            win.pan_by_lines(buf, delta, vp_height);
+            true
+        } else {
+            false
+        }
+    }
+
     /// Hit-test a screen position. Checks overlays (topmost-z first, modal-aware)
     /// then splits leaves. Scrollbar column returns `HitTarget::Scrollbar`.
     pub fn hit_test(&self, row: u16, col: u16, cursor: Option<(u16, u16)>) -> Option<HitTarget> {
         if let Some((id, target)) = self.overlay_hit_test(row, col, cursor) {
             return Some(match target {
                 OverlayHitTarget::Window(w) => HitTarget::Window(w),
+                OverlayHitTarget::Scrollbar(w) => HitTarget::Scrollbar { owner: w },
                 OverlayHitTarget::Chrome(zone) => HitTarget::Chrome { owner: id, zone },
             });
         }
@@ -415,7 +449,17 @@ impl Ui {
             let leaf_rects = layout::resolve_layout(&ov.layout, rect);
             for (paint_id, leaf_rect) in &leaf_rects {
                 if leaf_rect.contains(row, col) {
-                    return Some((id, OverlayHitTarget::Window(WinId(paint_id.0))));
+                    let win = WinId(paint_id.0);
+                    if self
+                        .wins
+                        .get(&win)
+                        .and_then(|w| w.viewport)
+                        .and_then(|vp| vp.scrollbar.map(|bar| (vp, bar)))
+                        .is_some_and(|(vp, bar)| bar.contains(vp.rect, row, col))
+                    {
+                        return Some((id, OverlayHitTarget::Scrollbar(win)));
+                    }
+                    return Some((id, OverlayHitTarget::Window(win)));
                 }
             }
             return Some((
@@ -810,36 +854,33 @@ impl Ui {
                     continue;
                 };
                 let buf_id = win.buf;
-                let pad_left = win.config.gutters.pad_left.min(leaf_rect.width);
-                let pad_right = win
-                    .config
-                    .gutters
-                    .pad_right
-                    .min(leaf_rect.width.saturating_sub(pad_left));
-                let content_width = leaf_rect
-                    .width
-                    .saturating_sub(pad_left)
-                    .saturating_sub(pad_right);
+                let content_width = win.config.gutters.content_width(leaf_rect.width);
                 if let Some(buf) = self.bufs.get_mut(&buf_id) {
                     buf.ensure_rendered_at(content_width);
                 }
                 let total_rows = self
                     .bufs
                     .get(&buf_id)
-                    .map(|b| b.line_count() as u16)
+                    .map(|buf| buf.lines().len().min(u16::MAX as usize) as u16)
                     .unwrap_or(0);
                 if let Some(win) = self.wins.get_mut(&win_id) {
                     if win.pending_scroll_to_cursor && leaf_rect.height > 0 {
-                        let cursor_row = win.cursor_abs_row() as u16;
+                        let cursor_row = win.cursor_row;
                         win.keep_cursor_visible(cursor_row, total_rows, leaf_rect.height);
                         win.pending_scroll_to_cursor = false;
                     }
+                    let scrollbar = if win.config.gutters.scrollbar && leaf_rect.width > 0 {
+                        let bar_col = leaf_rect.left + leaf_rect.width.saturating_sub(1);
+                        window::ScrollbarState::new(bar_col, total_rows, leaf_rect.height)
+                    } else {
+                        None
+                    };
                     win.viewport = Some(window::WindowViewport::new(
                         *leaf_rect,
                         content_width,
                         total_rows,
                         win.scroll_top,
-                        None,
+                        scrollbar,
                     ));
                 }
             }
@@ -849,18 +890,29 @@ impl Ui {
                 continue;
             };
             let buf_id = win.buf;
-            let pad_left = win.config.gutters.pad_left.min(rect.width);
-            let pad_right = win
-                .config
-                .gutters
-                .pad_right
-                .min(rect.width.saturating_sub(pad_left));
-            let content_width = rect
-                .width
-                .saturating_sub(pad_left)
-                .saturating_sub(pad_right);
+            let content_width = win.config.gutters.content_width(rect.width);
             if let Some(buf) = self.bufs.get_mut(&buf_id) {
                 buf.ensure_rendered_at(content_width);
+            }
+            let total_rows = self
+                .bufs
+                .get(&buf_id)
+                .map(|buf| buf.lines().len().min(u16::MAX as usize) as u16)
+                .unwrap_or(0);
+            if let Some(win) = self.wins.get_mut(win_id) {
+                let scrollbar = if win.config.gutters.scrollbar && rect.width > 0 {
+                    let bar_col = rect.left + rect.width.saturating_sub(1);
+                    window::ScrollbarState::new(bar_col, total_rows, rect.height)
+                } else {
+                    None
+                };
+                win.viewport = Some(window::WindowViewport::new(
+                    *rect,
+                    content_width,
+                    total_rows,
+                    win.scroll_top,
+                    scrollbar,
+                ));
             }
         }
         let focus = self.focus;
@@ -981,7 +1033,15 @@ impl Ui {
         match ev {
             Event::Key(KeyEvent {
                 code, modifiers, ..
-            }) => self.dispatch_key(code, modifiers, lua_invoke),
+            }) => {
+                if let Status::Consumed = self.dispatch_key(code, modifiers, lua_invoke) {
+                    return Status::Consumed;
+                }
+                if let Status::Consumed = self.dispatch_key_fallback(code, modifiers, lua_invoke) {
+                    return Status::Consumed;
+                }
+                self.try_dismiss_modal_for_chord(code, modifiers, lua_invoke)
+            }
             Event::Resize(w, h) => {
                 self.set_terminal_size(w, h);
                 Status::Consumed
@@ -1083,34 +1143,21 @@ impl Ui {
                         | MouseEventKind::ScrollLeft
                         | MouseEventKind::ScrollRight
                 );
-                if is_scroll && self.focused_overlay().is_some() {
-                    // Inside a focused overlay, route vertical wheel to the leaf under the
-                    // cursor only if that leaf opted into `mouse_scroll` (e.g. lists via
-                    // `configure_list_leaf`). Other leaves consume silently — wheeling near
-                    // an input or on chrome shouldn't pan anything visible.
+                if is_scroll {
+                    // Route vertical wheel to the leaf under the cursor when it's
+                    // wheel-scrollable (list-style leaves or buffer viewers).
+                    // Plain inputs ignore it so wheeling near them stays inert.
+                    // When an overlay is focused, claim the event regardless so
+                    // it can't bleed through to splits underneath.
                     let delta = match me.kind {
                         MouseEventKind::ScrollUp => -3_isize,
                         MouseEventKind::ScrollDown => 3,
                         _ => 0,
                     };
-                    if delta != 0 {
-                        if let Some(HitTarget::Window(w)) = self.hit_test(me.row, me.column, None) {
-                            let leaf_info = self.wins.get(&w).and_then(|win| {
-                                if win.mouse_scroll {
-                                    win.viewport.map(|vp| (win.buf, vp.rect.height))
-                                } else {
-                                    None
-                                }
-                            });
-                            if let Some((buf_id, vp_height)) = leaf_info {
-                                let (win, buf) = self.win_and_buf_mut(w, buf_id);
-                                if let (Some(win), Some(buf)) = (win, buf) {
-                                    win.pan_by_lines(buf, delta, vp_height);
-                                }
-                            }
-                        }
+                    let consumed = self.scroll_at(me.row, me.column, delta);
+                    if consumed || self.focused_overlay().is_some() {
+                        return Status::Consumed;
                     }
-                    return Status::Consumed;
                 }
                 // Modal blocks splits hits while open; overlay hits already returned above.
                 if self.active_modal().is_some()
@@ -1181,79 +1228,97 @@ impl Ui {
         let rel_row = row.saturating_sub(vp.rect.top);
         let thumb_top = bar.thumb_top_for_click(rel_row);
         let from_top = bar.scroll_from_top_for_thumb(thumb_top);
-        if let Some(win) = self.wins.get_mut(&owner) {
-            win.scroll_top = from_top;
+        let buf_id = win.buf;
+        let viewport_rows = vp.rect.height;
+        let (win, buf) = self.win_and_buf_mut(owner, buf_id);
+        if let (Some(win), Some(buf)) = (win, buf) {
+            win.scroll_to_preserving_cursor_screen_row(from_top, buf, viewport_rows);
         }
     }
 
-    fn dispatch_key(
+    pub fn dispatch_key(
         &mut self,
         code: crossterm::event::KeyCode,
         mods: crossterm::event::KeyModifiers,
         lua_invoke: &mut LuaInvoke,
     ) -> Status {
+        // Tier 1 of the key cascade: per-window specific keymaps. Returns
+        // `Status::Ignored` when no exact chord match exists so the caller
+        // can run global Lua keymaps next, then `dispatch_key_fallback`,
+        // then `try_dismiss_modal_for_chord` as the final resort.
         let key = KeyBind::new(code, mods);
-        // `CallbackResult::Event` writes here to synthesize a WinEvent after the key callback.
-        let mut follow_up: Option<(WinEvent, Payload)> = None;
-        let result = if let Some(win) = self.focus() {
-            if let Some(mut cb) = self.callbacks.take_keymap(win, key) {
-                let r = match &mut cb {
-                    Callback::Rust(inner) => {
-                        let mut ctx = CallbackCtx {
-                            ui: self,
-                            win,
-                            payload: Payload::Key { code, mods },
-                        };
-                        let r = inner(&mut ctx);
-                        match r {
-                            CallbackResult::Consumed => Status::Consumed,
-                            CallbackResult::Pass => Status::Ignored,
-                            CallbackResult::Event(ev, payload) => {
-                                follow_up = Some((ev, payload));
-                                Status::Consumed
-                            }
-                        }
-                    }
-                    Callback::Lua(handle) => {
-                        let payload = Payload::Key { code, mods };
-                        lua_invoke(*handle, win, &payload);
-                        Status::Consumed
-                    }
-                };
-                self.callbacks.restore_keymap(win, key, cb);
-                r
-            } else if let Some(mut cb) = self.callbacks.take_key_fallback(win) {
-                let r = match &mut cb {
-                    Callback::Rust(inner) => {
-                        let mut ctx = CallbackCtx {
-                            ui: self,
-                            win,
-                            payload: Payload::Key { code, mods },
-                        };
-                        let r = inner(&mut ctx);
-                        match r {
-                            CallbackResult::Consumed => Status::Consumed,
-                            CallbackResult::Pass => Status::Ignored,
-                            CallbackResult::Event(ev, payload) => {
-                                follow_up = Some((ev, payload));
-                                Status::Consumed
-                            }
-                        }
-                    }
-                    Callback::Lua(handle) => {
-                        let payload = Payload::Key { code, mods };
-                        lua_invoke(*handle, win, &payload);
-                        Status::Consumed
-                    }
-                };
-                self.callbacks.restore_key_fallback(win, cb);
-                r
-            } else {
-                Status::Ignored
-            }
-        } else {
-            Status::Ignored
+        self.run_key_callback(
+            code,
+            mods,
+            lua_invoke,
+            |s, win| s.callbacks.take_keymap(win, key),
+            |s, win, cb| s.callbacks.restore_keymap(win, key, cb),
+        )
+    }
+
+    /// Tier 3 of the key cascade: per-window catch-all fallback (the "text
+    /// input" tier — e.g. a dialog input that inserts any printable char).
+    /// Runs only after `dispatch_event(Event::Key)` returned `Ignored` AND
+    /// global Lua keymaps declined, so site-wide chords like `?` → /help take
+    /// precedence over a leaf's blanket printable-char capture.
+    pub fn dispatch_key_fallback(
+        &mut self,
+        code: crossterm::event::KeyCode,
+        mods: crossterm::event::KeyModifiers,
+        lua_invoke: &mut LuaInvoke,
+    ) -> Status {
+        self.run_key_callback(
+            code,
+            mods,
+            lua_invoke,
+            |s, win| s.callbacks.take_key_fallback(win),
+            |s, win, cb| s.callbacks.restore_key_fallback(win, cb),
+        )
+    }
+
+    /// Shared shell for the tier-1 and tier-3 key dispatchers: look up the
+    /// callback on the focused window with `take`, invoke it (Rust or Lua),
+    /// hand it back via `restore`, and fan out any `CallbackResult::Event`
+    /// follow-up. Both tiers differ only in how they fetch the callback.
+    fn run_key_callback(
+        &mut self,
+        code: crossterm::event::KeyCode,
+        mods: crossterm::event::KeyModifiers,
+        lua_invoke: &mut LuaInvoke,
+        take: impl FnOnce(&mut Self, WinId) -> Option<Callback>,
+        restore: impl FnOnce(&mut Self, WinId, Callback),
+    ) -> Status {
+        let Some(win) = self.focus() else {
+            return Status::Ignored;
         };
+        let Some(mut cb) = take(self, win) else {
+            return Status::Ignored;
+        };
+
+        let mut follow_up: Option<(WinEvent, Payload)> = None;
+        let result = match &mut cb {
+            Callback::Rust(inner) => {
+                let mut ctx = CallbackCtx {
+                    ui: self,
+                    win,
+                    payload: Payload::Key { code, mods },
+                };
+                match inner(&mut ctx) {
+                    CallbackResult::Consumed => Status::Consumed,
+                    CallbackResult::Pass => Status::Ignored,
+                    CallbackResult::Event(ev, payload) => {
+                        follow_up = Some((ev, payload));
+                        Status::Consumed
+                    }
+                }
+            }
+            Callback::Lua(handle) => {
+                let payload = Payload::Key { code, mods };
+                lua_invoke(*handle, win, &payload);
+                Status::Consumed
+            }
+        };
+        restore(self, win, cb);
 
         if let Some((ev, payload)) = follow_up {
             if let Some(win) = self.focus() {
@@ -1261,29 +1326,42 @@ impl Ui {
             }
         }
 
-        // Leaf gets first dibs on Esc/Ctrl-C; if ignored, dismiss the active modal.
+        result
+    }
+
+    /// Final tier of the key cascade: dismiss the active modal on a bare
+    /// `Esc` or `Ctrl-C`. Returns `Status::Consumed` only when a modal was
+    /// actually dismissed. Caller runs this AFTER specific keymaps, global
+    /// Lua keymaps, leaf fallback, and any overlay-viewer handler — the
+    /// modal should close only when no one else claimed the chord.
+    pub fn try_dismiss_modal_for_chord(
+        &mut self,
+        code: crossterm::event::KeyCode,
+        mods: crossterm::event::KeyModifiers,
+        lua_invoke: &mut LuaInvoke,
+    ) -> Status {
         let is_dismiss_chord = matches!(code, crossterm::event::KeyCode::Esc)
             && mods == crossterm::event::KeyModifiers::NONE
             || matches!(code, crossterm::event::KeyCode::Char('c'))
                 && mods == crossterm::event::KeyModifiers::CONTROL;
-        if result == Status::Ignored && is_dismiss_chord {
-            if let Some(modal) = self.active_modal() {
-                if let Some(root) = self
-                    .overlay(modal)
-                    .and_then(|o| o.layout.leaves_in_order().first().copied())
-                    .map(|p| WinId(p.0))
-                {
-                    self.fire_win_event(root, WinEvent::Dismiss, Payload::None, lua_invoke);
-                }
-                // Guard: Lua dismiss handler may have already closed the overlay.
-                if self.overlay(modal).is_some() {
-                    let _ = self.overlay_close(modal);
-                }
-                return Status::Consumed;
-            }
+        if !is_dismiss_chord {
+            return Status::Ignored;
         }
-
-        result
+        let Some(modal) = self.active_modal() else {
+            return Status::Ignored;
+        };
+        if let Some(root) = self
+            .overlay(modal)
+            .and_then(|o| o.layout.leaves_in_order().first().copied())
+            .map(|p| WinId(p.0))
+        {
+            self.fire_win_event(root, WinEvent::Dismiss, Payload::None, lua_invoke);
+        }
+        // Guard: Lua dismiss handler may have already closed the overlay.
+        if self.overlay(modal).is_some() {
+            let _ = self.overlay_close(modal);
+        }
+        Status::Consumed
     }
 
     pub fn dispatch_tick(&mut self, lua_invoke: &mut LuaInvoke) {
@@ -2708,12 +2786,190 @@ mod tests {
         ui.overlay_open(Overlay::new(layout, layout::Anchor::ScreenCenter));
         let mut out = Vec::new();
         ui.render(&mut out).unwrap();
-        // Outer overlay: 42×5 (40 leaf width + 2 border, 3 leaf height +
-        // 2 border). Leaf rect width = 40 ⇒ parser called with 40.
+        // Outer overlay: 42×5 (40 leaf width + 2 border, 3 leaf height + 2
+        // border). Leaf rect width = 40, minus the 1-col scrollbar reservation
+        // from `Gutters::default()` ⇒ parser called with 39.
         let widths = calls.lock().unwrap().clone();
         assert!(
-            widths.contains(&40),
-            "parser must be invoked at the leaf's resolved width; got {widths:?}"
+            widths.contains(&39),
+            "parser must be invoked at the leaf's content width; got {widths:?}"
+        );
+    }
+
+    #[test]
+    fn overlay_leaf_with_overflowing_content_auto_attaches_scrollbar() {
+        // Verifies the post-render auto-attach path: an overlay leaf opened with
+        // the default `Gutters::default()` (scrollbar = true) and a buffer whose
+        // line count exceeds the leaf height must end up with a populated
+        // `viewport.scrollbar`. This is the contract the wheel-routing and
+        // paint_scrollbar paths rely on for /stats, /help, /messages.
+        let mut ui = make_ui(); // 80x24 terminal
+        let buf = ui.buf_create(BufCreateOpts::default());
+        if let Some(b) = ui.buf_mut(buf) {
+            let lines: Vec<String> = (0..60).map(|i| format!("line {i}")).collect();
+            b.set_all_lines(lines);
+        }
+        let win = ui
+            .win_open_split(
+                buf,
+                SplitConfig {
+                    region: "test".into(),
+                    gutters: Gutters::default(),
+                },
+            )
+            .unwrap();
+        // A 40-wide × 10-tall content area inside a single border ⇒ 42×12 overlay.
+        let layout = LayoutTree::vbox(vec![(
+            Constraint::Length(10),
+            LayoutTree::hbox(vec![(Constraint::Length(40), LayoutTree::leaf(win))]),
+        )])
+        .with_border(Border::SINGLE);
+        ui.overlay_open(Overlay::new(layout, layout::Anchor::ScreenCenter));
+        let mut out = Vec::new();
+        ui.render(&mut out).unwrap();
+        let vp = ui
+            .wins
+            .get(&win)
+            .and_then(|w| w.viewport)
+            .expect("viewport populated by pre-pass");
+        assert_eq!(vp.total_rows, 60, "total_rows must equal buf.line_count()");
+        assert_eq!(vp.rect.height, 10, "leaf height = layout-resolved height");
+        let bar = vp.scrollbar.expect(
+            "scrollbar must auto-attach: gutters.scrollbar=true and total_rows>viewport_rows",
+        );
+        assert_eq!(bar.total_rows, 60);
+        assert_eq!(bar.viewport_rows, 10);
+        // Bar column = leaf_rect.right - 1. Overlay centered: term 80, ov w=42
+        // ⇒ left=19, leaf left=20, leaf width=40 ⇒ bar_col=59.
+        assert_eq!(bar.col, 59, "scrollbar lives at rightmost column of leaf");
+    }
+
+    #[test]
+    fn wheel_over_overflowing_overlay_leaf_pans_scroll_top() {
+        // Real-world regression for /stats, /help, /messages: a mouse wheel
+        // event over a focused overlay leaf with overflowing content must
+        // update `scroll_top` (so wheel-scroll feels live).
+        let mut ui = make_ui();
+        let buf = ui.buf_create(BufCreateOpts::default());
+        if let Some(b) = ui.buf_mut(buf) {
+            let lines: Vec<String> = (0..60).map(|i| format!("line {i}")).collect();
+            b.set_all_lines(lines);
+        }
+        let win = ui
+            .win_open_split(
+                buf,
+                SplitConfig {
+                    region: "test".into(),
+                    gutters: Gutters::default(),
+                },
+            )
+            .unwrap();
+        if let Some(w) = ui.win_mut(win) {
+            w.focusable = true;
+        }
+        let layout = LayoutTree::vbox(vec![(
+            Constraint::Length(10),
+            LayoutTree::hbox(vec![(Constraint::Length(40), LayoutTree::leaf(win))]),
+        )])
+        .with_border(Border::SINGLE);
+        let ov = Overlay::new(layout, layout::Anchor::ScreenCenter);
+        let ov = Overlay { modal: true, ..ov };
+        ui.overlay_open(ov);
+        // Render once so the pre-pass populates the viewport before wheel routing
+        // hit-tests against it.
+        let mut out = Vec::new();
+        ui.render(&mut out).unwrap();
+        assert_eq!(ui.focus(), Some(win), "modal focused first leaf");
+        assert_eq!(ui.win(win).unwrap().scroll_top, 0, "starts at top");
+        // Wheel-down over a cell inside the leaf rect (centered overlay puts
+        // the leaf at left=20..60, top=7..17 on a 80x24 terminal).
+        let scroll = mouse_event(crossterm::event::MouseEventKind::ScrollDown, 10, 30);
+        let status = ui.dispatch_event(scroll, &mut |_, _, _| {});
+        assert_eq!(status, Status::Consumed);
+        assert!(
+            ui.win(win).unwrap().scroll_top > 0,
+            "wheel must advance scroll_top via pan_by_lines"
+        );
+    }
+
+    #[test]
+    fn hit_test_returns_scrollbar_for_overlay_bar_column() {
+        // Regression: previously hit_test short-circuited to HitTarget::Window for any
+        // overlay position, making the auto-attached overlay scrollbar undraggable.
+        // After the fix, the rightmost column of an overflowing overlay leaf must
+        // return HitTarget::Scrollbar so the drag-capture path fires.
+        let mut ui = make_ui();
+        let buf = ui.buf_create(BufCreateOpts::default());
+        if let Some(b) = ui.buf_mut(buf) {
+            let lines: Vec<String> = (0..60).map(|i| format!("line {i}")).collect();
+            b.set_all_lines(lines);
+        }
+        let win = ui
+            .win_open_split(
+                buf,
+                SplitConfig {
+                    region: "test".into(),
+                    gutters: Gutters::default(),
+                },
+            )
+            .unwrap();
+        let layout = LayoutTree::vbox(vec![(
+            Constraint::Length(10),
+            LayoutTree::hbox(vec![(Constraint::Length(40), LayoutTree::leaf(win))]),
+        )])
+        .with_border(Border::SINGLE);
+        ui.overlay_open(Overlay::new(layout, layout::Anchor::ScreenCenter));
+        let mut out = Vec::new();
+        ui.render(&mut out).unwrap();
+        // bar_col = 59 (see overlay_leaf_with_overflowing_content_auto_attaches_scrollbar).
+        let hit = ui
+            .hit_test(10, 59, None)
+            .expect("rightmost col hits something");
+        assert!(
+            matches!(hit, HitTarget::Scrollbar { owner } if owner == win),
+            "rightmost column of overflowing overlay leaf must be Scrollbar, got {hit:?}",
+        );
+        // Adjacent column to the left is still Window.
+        let hit = ui.hit_test(10, 58, None).expect("interior col hits window");
+        assert!(
+            matches!(hit, HitTarget::Window(w) if w == win),
+            "interior column must still be Window, got {hit:?}",
+        );
+    }
+
+    #[test]
+    fn overlay_leaf_without_overflow_has_no_scrollbar() {
+        // Companion to the above: when content fits, ScrollbarState::new returns None.
+        let mut ui = make_ui();
+        let buf = ui.buf_create(BufCreateOpts::default());
+        if let Some(b) = ui.buf_mut(buf) {
+            b.set_all_lines(vec!["short".into()]);
+        }
+        let win = ui
+            .win_open_split(
+                buf,
+                SplitConfig {
+                    region: "test".into(),
+                    gutters: Gutters::default(),
+                },
+            )
+            .unwrap();
+        let layout = LayoutTree::vbox(vec![(
+            Constraint::Length(10),
+            LayoutTree::hbox(vec![(Constraint::Length(40), LayoutTree::leaf(win))]),
+        )])
+        .with_border(Border::SINGLE);
+        ui.overlay_open(Overlay::new(layout, layout::Anchor::ScreenCenter));
+        let mut out = Vec::new();
+        ui.render(&mut out).unwrap();
+        let vp = ui
+            .wins
+            .get(&win)
+            .and_then(|w| w.viewport)
+            .expect("viewport populated");
+        assert!(
+            vp.scrollbar.is_none(),
+            "no overflow → ScrollbarState::new returns None"
         );
     }
 
@@ -2895,6 +3151,10 @@ mod tests {
     /// against it.
     fn make_scrollbar_split(ui: &mut Ui) -> WinId {
         let buf = ui.buf_create(BufCreateOpts::default());
+        if let Some(b) = ui.buf_mut(buf) {
+            let lines: Vec<String> = (0..100).map(|i| format!("line {i}")).collect();
+            b.set_all_lines(lines);
+        }
         let win = ui
             .win_open_split(
                 buf,
@@ -3119,7 +3379,10 @@ mod tests {
         let mut ui = make_ui();
         let win = make_scrollbar_split(&mut ui);
         ui.set_capture(HitTarget::Window(win));
-        ui.win_mut(win).unwrap().cursor_row = 0;
+        {
+            let w = ui.win_mut(win).unwrap();
+            w.cursor_row = 0;
+        }
         let result = ui.poll_drag_autoscroll();
         assert_eq!(result, Some((win, -1)));
         assert!(ui.drag_autoscroll_started().is_some());
@@ -3132,7 +3395,10 @@ mod tests {
         ui.set_capture(HitTarget::Window(win));
         // make_scrollbar_split paints a viewport with rect height = 10,
         // so cursor_row=9 is the bottom row.
-        ui.win_mut(win).unwrap().cursor_row = 9;
+        {
+            let w = ui.win_mut(win).unwrap();
+            w.cursor_row = 9;
+        }
         assert_eq!(ui.poll_drag_autoscroll(), Some((win, 1)));
     }
 
@@ -3141,10 +3407,16 @@ mod tests {
         let mut ui = make_ui();
         let win = make_scrollbar_split(&mut ui);
         ui.set_capture(HitTarget::Window(win));
-        ui.win_mut(win).unwrap().cursor_row = 0;
+        {
+            let w = ui.win_mut(win).unwrap();
+            w.cursor_row = 0;
+        }
         let _ = ui.poll_drag_autoscroll();
         assert!(ui.drag_autoscroll_started().is_some());
-        ui.win_mut(win).unwrap().cursor_row = 5;
+        {
+            let w = ui.win_mut(win).unwrap();
+            w.cursor_row = 5;
+        }
         assert_eq!(ui.poll_drag_autoscroll(), None);
         assert_eq!(ui.drag_autoscroll_started(), None);
     }
@@ -3154,7 +3426,10 @@ mod tests {
         let mut ui = make_ui();
         let win = make_scrollbar_split(&mut ui);
         ui.set_capture(HitTarget::Window(win));
-        ui.win_mut(win).unwrap().cursor_row = 0;
+        {
+            let w = ui.win_mut(win).unwrap();
+            w.cursor_row = 0;
+        }
         let _ = ui.poll_drag_autoscroll();
         assert!(ui.drag_autoscroll_started().is_some());
         ui.clear_capture();

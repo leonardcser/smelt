@@ -141,8 +141,8 @@ local function register_exit_plan_mode()
 
       local action = smelt.ui.dialog.open({
         title = {
-          { text = " plan ", fg = "yellow", bold = true },
-          { text = "(review and approve) ", fg = "grey", dim = true },
+          { text = "plan ", fg = "yellow", bold = true },
+          { text = "(review and approve)", fg = "grey", dim = true },
         },
         blocks_agent = true,
         height       = 80,

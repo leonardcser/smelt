@@ -1,5 +1,6 @@
 ---
 source: crates/tui/tests/storybook/mod.rs
+assertion_line: 186
 expression: frame.text()
 ---
-this line is much lo
+this line is much l

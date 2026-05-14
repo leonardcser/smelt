@@ -128,18 +128,18 @@ impl PromptState {
 
     /// Active selection range `(start_byte, end_byte)` for vim visual or shift+key selection.
     pub(crate) fn selection_range(&self, ctx: PromptCtxRef<'_>) -> Option<(usize, usize)> {
-        // Vim visual mode takes priority.
+        let endpoint = ctx.win.effective_endpoint();
         if ctx.win.vim_enabled {
             if let Some(range) = crate::smelt_term::vim::visual_range(
                 &ctx.win.vim_state,
                 ctx.buf.source(),
-                ctx.win.cpos,
+                endpoint,
                 ctx.win.vim_mode,
             ) {
                 return Some(range);
             }
         }
-        ctx.win.selection_range_at(ctx.win.cpos, ctx.buf.source())
+        ctx.win.selection_range_at(endpoint, ctx.buf.source())
     }
 
     /// Selection range for rendering. Falls back to yank-flash so vim copy ops get the
@@ -217,6 +217,13 @@ impl PromptState {
 
     pub(crate) fn set_vim_enabled(&mut self, win: &mut crate::smelt_term::Window, enabled: bool) {
         win.set_vim_enabled(enabled);
+        // Prompt is the only writable vim surface — land in Insert when vim
+        // turns on so typing works immediately. The global `VimMode` default
+        // is Normal (right for transcript / read-only overlays); the prompt
+        // overrides here.
+        if enabled {
+            win.set_vim_mode(VimMode::Insert);
+        }
     }
 
     /// Set this prompt window's vim mode and reset the in-flight key sequence.

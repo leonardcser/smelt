@@ -1,35 +1,30 @@
--- Built-in /stats and /cost commands. Centered scrollable text viewers; q/Esc dismiss.
+-- Built-in /stats and /cost commands. Docked-bottom dialogs; q/Esc dismiss.
 
-local function open_text_modal(title, text)
+local function open_text_dialog(title, text)
   smelt.spawn(function()
     local buf = smelt.buf.create({ readonly = true })
     local lines = {}
     for line in (text or ""):gmatch("([^\n]*)\n?") do table.insert(lines, line) end
     if #lines == 0 then lines = { "" } end
     smelt.buf.set_lines(buf, lines)
-    local leaf = smelt.win.open(buf, { region = "dialog_overlay", focusable = true, vim_enabled = true })
+    local leaf = smelt.ui.dialog.content({ buf = buf, interactive = true })
 
-    smelt.ui.overlay.open({
-      title     = title,
-      placement = "screen_center",
-      border    = "single",
-      modal     = true,
-      items     = { { win = leaf, height = "fill" } },
+    smelt.ui.dialog.open({
+      title   = title,
+      height  = 40,
+      panels  = { { leaf = leaf, height = "fill" } },
+      keymaps = {
+        { key = "q", on_press = function(ctx) ctx.close() end },
+        { key = "?", on_press = function(ctx) ctx.close() end },
+      },
     })
-
-    local task_id = smelt.task.alloc()
-    local function close() smelt.win.close(leaf); smelt.task.resume(task_id, nil) end
-    smelt.win.set_keymap(leaf, "q", close)
-    smelt.win.set_keymap(leaf, "?", close)
-    smelt.win.on_event(leaf, "dismiss", close)
-    smelt.task.wait(task_id)
   end)
 end
 
 smelt.cmd.register("stats", function()
-  open_text_modal("stats", smelt.metrics.stats_text())
+  open_text_dialog("stats", smelt.metrics.stats_text())
 end, { desc = "show token usage statistics" })
 
 smelt.cmd.register("cost", function()
-  open_text_modal("cost", smelt.metrics.session_cost_text())
+  open_text_dialog("cost", smelt.metrics.session_cost_text())
 end, { desc = "show session cost" })

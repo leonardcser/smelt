@@ -19,8 +19,8 @@ use smelt_buffer::attachment::ATTACHMENT_MARKER;
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum VimMode {
-    #[default]
     Insert,
+    #[default]
     Normal,
     Visual,
     VisualLine,
@@ -264,6 +264,12 @@ impl VimWindowState {
     fn reset_pending(&mut self) {
         self.sub = SubState::Ready;
         self.reset_counts();
+    }
+
+    /// True when no multi-key sequence and no count accumulator are pending,
+    /// i.e. Esc in Normal mode would be a no-op.
+    pub fn is_idle(&self) -> bool {
+        matches!(self.sub, SubState::Ready) && self.count1.is_none() && self.count2.is_none()
     }
 
     /// Set mode and clear the pending sequence.

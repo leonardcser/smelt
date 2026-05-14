@@ -31,12 +31,19 @@ smelt.cmd.register("help", function()
 
     local buf = smelt.buf.create({ readonly = true })
     smelt.buf.set_lines(buf, lines)
-    local leaf = smelt.win.open(buf, { region = "dialog_overlay", focusable = true, vim_enabled = true })
+    -- `selectable = true` so mouse click-and-drag highlights text the same way
+    -- it does in the transcript; vim_enabled gives keyboard nav + visual mode.
+    local leaf = smelt.win.open(buf, {
+      region      = "dialog_overlay",
+      focusable   = true,
+      selectable  = true,
+      vim_enabled = true,
+    })
 
     smelt.ui.overlay.open({
-      title     = "help",
+      title     = { { text = " help ", bold = true } },
       placement = "screen_center",
-      border    = "single",
+      border    = { all = "Comment" },
       modal     = true,
       items     = { { win = leaf, height = "fill" } },
     })
@@ -50,17 +57,21 @@ smelt.cmd.register("help", function()
   end)
 end, { desc = "show keybindings" })
 
--- `?` opens /help unless the prompt has content or vim is in Normal/Visual mode.
--- Returns false to let the literal `?` fall through to the buffer.
+-- `?` opens /help unless it would land as text in an editable buffer the user
+-- is actively typing into. That narrows the literal-`?` carve-out to: prompt
+-- focus AND non-empty content AND vim is in insert mode (or vim is disabled,
+-- so every keystroke is text). Vim normal/visual mode is always a "command"
+-- context — `?` opens help even when the prompt has content. Returning false
+-- passes the keystroke through to the buffer so it lands as a real `?`.
 smelt.keymap.set("", "?", function()
   if smelt.win.focus() == "prompt" then
-    local txt = smelt.prompt.text()
     local vim_mode = smelt.vim.mode()
-    if vim_mode == "normal" or vim_mode == "visual" or vim_mode == "visual_line" then
-      return false
-    end
-    if txt and txt ~= "" then
-      return false
+    local typing = vim_mode == nil or vim_mode == "insert"
+    if typing then
+      local txt = smelt.prompt.text()
+      if txt and txt ~= "" then
+        return false
+      end
     end
   end
   smelt.cmd.run("help")

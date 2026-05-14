@@ -433,11 +433,26 @@ impl Border {
     };
 }
 
-#[derive(Clone, Copy, Debug, Default)]
+#[derive(Clone, Copy, Debug)]
 pub struct Gutters {
     pub pad_left: u16,
     pub pad_right: u16,
     pub scrollbar: bool,
+}
+
+impl Default for Gutters {
+    /// Any buffer-backed window is scrollable by default. The scrollbar paints
+    /// only when content overflows; the column it occupies is reserved either
+    /// way so content width is stable across overflow transitions. Surfaces
+    /// that can't scroll by construction (single-line status strips, cursor-
+    /// driven list/option/input panels) must opt out with `scrollbar: false`.
+    fn default() -> Self {
+        Self {
+            pad_left: 0,
+            pad_right: 0,
+            scrollbar: true,
+        }
+    }
 }
 
 impl Gutters {

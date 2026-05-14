@@ -1,6 +1,6 @@
 use super::selection::{
-    build_char_kinds, build_display_spans, compute_visual_line_offsets, map_cursor,
-    spans_to_string, wrap_and_locate_cursor, wrap_line, SpanKind,
+    build_char_kinds, build_display_spans, map_cursor, spans_to_string, wrap_line,
+    wrap_with_offsets, SpanKind,
 };
 use super::status::BarSpan;
 use crate::input::PromptState;
@@ -51,16 +51,6 @@ pub(crate) struct BarInfo {
     pub(crate) context_window: Option<u32>,
     pub(crate) show_cost: bool,
     pub(crate) session_cost_usd: f64,
-}
-
-pub(crate) struct InputLeafOutput {
-    pub(crate) viewport: Option<InputViewport>,
-}
-
-pub(crate) struct InputViewport {
-    pub(crate) rows: u16,
-    pub(crate) content_width: u16,
-    pub(crate) total_rows: u16,
 }
 
 fn theme_color(theme: &crate::smelt_term::Theme, group: &str) -> Color {
@@ -127,7 +117,7 @@ pub(crate) fn compute_input(
     inp: &InputLeafInput<'_>,
     buf: &mut Buffer,
     theme: &crate::smelt_term::Theme,
-) -> InputLeafOutput {
+) {
     let usable = inp.content_width as usize;
 
     let completer_ns = buf.create_namespace(COMPLETER_NS);
@@ -142,7 +132,6 @@ pub(crate) fn compute_input(
     if buf.has_parser() {
         // Parser already built lines and highlights. Just map selection and ghost text.
         let total_lines = buf.line_count();
-        let input_row_count = total_lines.min(inp.height as usize) as u16;
 
         // Map source selection to display selection via the shared helper —
         // same code path the transcript will eventually use.
@@ -168,22 +157,10 @@ pub(crate) fn compute_input(
                 ExtmarkOpts::virt_text(text, Some("GhostText".into())),
             );
         }
-
-        return InputLeafOutput {
-            viewport: if input_row_count > 0 {
-                Some(InputViewport {
-                    rows: input_row_count,
-                    content_width: usable as u16,
-                    total_rows: total_lines as u16,
-                })
-            } else {
-                None
-            },
-        };
+        return;
     }
 
     let input_area = compute_input_area(inp, buf, usable, theme);
-    let input_row_count = input_area.visible_rows;
 
     let lines = input_area.lines.clone();
     let total_lines = lines.len();
@@ -218,18 +195,6 @@ pub(crate) fn compute_input(
             0,
             ExtmarkOpts::virt_text(text, Some("GhostText".into())),
         );
-    }
-
-    InputLeafOutput {
-        viewport: if input_row_count > 0 {
-            Some(InputViewport {
-                rows: input_row_count,
-                content_width: usable as u16,
-                total_rows: input_area.total_content_rows as u16,
-            })
-        } else {
-            None
-        },
     }
 }
 
@@ -576,8 +541,6 @@ struct InputArea {
     lines: Vec<String>,
     highlights: Vec<(usize, u16, u16, Style)>,
     selection_ranges: Vec<(usize, u16, u16)>,
-    total_content_rows: usize,
-    visible_rows: u16,
 }
 
 fn compute_input_area(
@@ -609,7 +572,9 @@ fn compute_input_area(
             let de = map_cursor(raw_end_char, edit_buf.source(), &spans);
             (ds, de)
         });
-    let (visual_lines, _, _, _) = wrap_and_locate_cursor(&display_buf, &char_kinds, 0, usable);
+    let wrap_out = wrap_with_offsets(&display_buf, &char_kinds, usable);
+    let visual_lines = wrap_out.visual_lines;
+    let line_char_offsets = wrap_out.row_offsets;
     let single_line = !edit_buf.source().contains('\n');
     let plain_only = !single_line;
     let is_command =
@@ -635,8 +600,6 @@ fn compute_input_area(
     if lines.is_empty() {
         lines.push(String::new());
     }
-
-    let line_char_offsets = compute_visual_line_offsets(&display_buf, &visual_lines);
 
     for (li, (line, kinds)) in visual_lines
         .iter()
@@ -704,8 +667,6 @@ fn compute_input_area(
         lines,
         highlights,
         selection_ranges,
-        total_content_rows,
-        visible_rows: content_rows as u16,
     }
 }
 
@@ -873,9 +834,8 @@ mod tests {
             crate::app::PROMPT_EDIT_BUF,
             crate::smelt_term::BufCreateOpts::default(),
         );
-        let output = compute_input(&inp, &mut input_buf, &test_theme());
+        compute_input(&inp, &mut input_buf, &test_theme());
         assert_eq!(input_buf.line_count(), 1);
-        assert!(output.viewport.is_some());
     }
 
     #[test]
@@ -943,7 +903,7 @@ mod tests {
                 gutters: Gutters {
                     pad_left: 1,
                     pad_right: 1,
-                    scrollbar: false,
+                    ..Default::default()
                 },
             },
         );

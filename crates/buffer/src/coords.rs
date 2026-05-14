@@ -70,9 +70,11 @@ impl ProjectionMaps {
 /// with and without a `ProjectionMaps`. Caller passes already-snapped source
 /// byte offsets; this helper does no further snapping.
 ///
-/// When `end_byte` falls past the last char on `end_row`, paints one virtual
-/// cell so an EOL cursor is visible. Only the end row gets that extension —
-/// middle rows always run to `line_chars`.
+/// Paints one virtual cell when a row is included in the selection but has
+/// nothing to highlight on its own (empty middle row, empty start row whose
+/// selection extends past it, end-of-line cursor past the last char). This
+/// mirrors vim's visible-newline behavior so multi-line selections always show
+/// the empty rows as part of the range.
 pub fn selection_to_row_ranges(
     buf: &Buffer,
     start_byte: usize,
@@ -88,7 +90,7 @@ pub fn selection_to_row_ranges(
         let line = buf.get_line(row).unwrap_or("");
         let line_chars = line.chars().count();
         let cs = if row == start_row { start_col } else { 0 };
-        let ce = if row == end_row {
+        let mut ce = if row == end_row {
             if end_col > line_chars {
                 line_chars + 1
             } else {
@@ -97,6 +99,13 @@ pub fn selection_to_row_ranges(
         } else {
             line_chars
         };
+        // A row that's part of the selection but has no chars to paint (empty
+        // middle row, or a start row whose selection extends into the next
+        // row) gets a one-cell virtual span at `cs` so the row visibly stays
+        // in the highlight.
+        if cs == ce && row != end_row {
+            ce = cs + 1;
+        }
         ranges.push(SelectionRange {
             line: row,
             col_start: cs as u16,
@@ -109,6 +118,36 @@ pub fn selection_to_row_ranges(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    use crate::buffer::{BufCreateOpts, BufId, Buffer};
+
+    #[test]
+    fn selection_paints_one_cell_on_empty_middle_row() {
+        // Source "aaa\n\nccc": row 1 is empty. Selecting bytes 0..8 spans all
+        // three rows. The empty middle row must still appear in the highlight
+        // as a 1-cell virtual span at col 0; otherwise the gap looks like a
+        // selection break.
+        let mut buf = Buffer::new(BufId(0), BufCreateOpts::default());
+        buf.set_source("aaa\n\nccc".into());
+        buf.set_all_lines(vec!["aaa".into(), "".into(), "ccc".into()]);
+        let ranges = selection_to_row_ranges(&buf, 0, 8);
+        assert_eq!(ranges.len(), 3);
+        assert_eq!((ranges[0].col_start, ranges[0].col_end), (0, 3));
+        assert_eq!((ranges[1].col_start, ranges[1].col_end), (0, 1));
+        assert_eq!((ranges[2].col_start, ranges[2].col_end), (0, 3));
+    }
+
+    #[test]
+    fn selection_paints_one_cell_on_empty_start_row() {
+        // Selection begins on an empty row and extends into the next row.
+        let mut buf = Buffer::new(BufId(0), BufCreateOpts::default());
+        buf.set_source("\nbbb".into());
+        buf.set_all_lines(vec!["".into(), "bbb".into()]);
+        let ranges = selection_to_row_ranges(&buf, 0, 3);
+        assert_eq!(ranges.len(), 2);
+        assert_eq!((ranges[0].col_start, ranges[0].col_end), (0, 1));
+        assert_eq!((ranges[1].col_start, ranges[1].col_end), (0, 2));
+    }
 
     #[test]
     fn projection_maps_round_trip_through_expansion() {

@@ -75,36 +75,9 @@ impl TuiApp {
                     // Swallow unclaimed keys so split keymaps don't fire over an open cmdline.
                     return false;
                 }
-                let lua = &self.lua;
-                let mut lua_invoke =
-                    |handle: crate::smelt_term::LuaHandle,
-                     win: crate::smelt_term::WinId,
-                     payload: &crate::smelt_term::Payload| {
-                        lua.queue_invocation(handle, win, payload);
-                    };
-                let status = self
-                    .ui
-                    .dispatch_event(crate::smelt_term::Event::Key(k), &mut lua_invoke);
-                if matches!(status, crate::smelt_term::Status::Ignored) {
-                    // Global Lua keymaps get the next shot, before the vim viewer fallthrough,
-                    // so unbound chords aren't swallowed by Insert-mode passthrough on read-only viewers.
-                    let mut consumed = false;
-                    if let Some(chord) = crate::lua::chord_string(k) {
-                        let vim_mode = self.current_vim_mode_label();
-                        use smelt_core::lua::runtime::KeymapResult;
-                        if matches!(
-                            self.lua.run_keymap(&chord, vim_mode.as_deref(), None),
-                            KeymapResult::Consumed
-                        ) {
-                            consumed = true;
-                        }
-                    }
-                    // Vim-enabled overlay leaves share the same `Window::handle_key` path
-                    // as transcript/prompt — gives viewer panels (help, stats, plugins)
-                    // vim navigation + selection + yank without per-panel keymap wiring.
-                    if !consumed {
-                        let _ = self.dispatch_overlay_viewer_key(k);
-                    }
+                if matches!(self.run_key_cascade(k), crate::smelt_term::Status::Consumed) {
+                    self.flush_lua_callbacks();
+                    return false;
                 }
                 self.flush_lua_callbacks();
                 return false;
@@ -795,9 +768,89 @@ impl TuiApp {
         }
     }
 
+    /// Orchestrates the per-key dispatch cascade when an overlay or modal is
+    /// focused. Tiers fire in order; the first to return `Consumed` wins:
+    ///   1. Specific keymap on the focused leaf (`win_set_keymap`)
+    ///   2. Global Lua keymap (`smelt.keymap.set("", chord, fn)`)
+    ///   3. Per-window catch-all fallback (`win_set_key_fallback`)
+    ///   4. Vim viewer keys on the focused leaf
+    ///   5. Modal dismiss for bare Esc / Ctrl-C
+    ///
+    /// Putting global keymaps between tiers 1 and 3 lets a site-wide chord
+    /// like `?` → /help win over a dialog input's blanket printable-char
+    /// fallback, without each leaf needing a bespoke carve-out.
+    pub(crate) fn run_key_cascade(&mut self, k: KeyEvent) -> crate::smelt_term::Status {
+        use crate::smelt_term::Status;
+
+        // Tier 1: specific keymap on the focused leaf.
+        {
+            let lua = &self.lua;
+            let mut lua_invoke =
+                |handle: crate::smelt_term::LuaHandle,
+                 win: crate::smelt_term::WinId,
+                 payload: &crate::smelt_term::Payload| {
+                    lua.queue_invocation(handle, win, payload);
+                };
+            if matches!(
+                self.ui.dispatch_key(k.code, k.modifiers, &mut lua_invoke),
+                Status::Consumed
+            ) {
+                return Status::Consumed;
+            }
+        }
+
+        // Tier 2: global Lua keymap (single-chord lookup only — overlays
+        // don't participate in the chord-buffering path).
+        if let Some(token) = crate::lua::chord_string(k) {
+            let vim_mode = self.current_vim_mode_label();
+            use smelt_core::lua::runtime::KeymapResult;
+            match self.lua.run_keymap(&token, vim_mode.as_deref(), None) {
+                KeymapResult::Consumed => {
+                    self.flush_lua_callbacks();
+                    return Status::Consumed;
+                }
+                KeymapResult::PassThrough | KeymapResult::NoBinding => {
+                    self.flush_lua_callbacks();
+                }
+            }
+        }
+
+        // Tier 3: per-window catch-all fallback (dialog inputs, etc.).
+        {
+            let lua = &self.lua;
+            let mut lua_invoke =
+                |handle: crate::smelt_term::LuaHandle,
+                 win: crate::smelt_term::WinId,
+                 payload: &crate::smelt_term::Payload| {
+                    lua.queue_invocation(handle, win, payload);
+                };
+            if matches!(
+                self.ui
+                    .dispatch_key_fallback(k.code, k.modifiers, &mut lua_invoke),
+                Status::Consumed
+            ) {
+                return Status::Consumed;
+            }
+        }
+
+        // Tier 4: vim viewer keys for vim-enabled read-only overlay leaves.
+        if self.dispatch_overlay_viewer_key(k) {
+            return Status::Consumed;
+        }
+
+        // Tier 5: bare Esc / Ctrl-C dismisses the active modal.
+        let lua = &self.lua;
+        let mut lua_invoke = |handle: crate::smelt_term::LuaHandle,
+                              win: crate::smelt_term::WinId,
+                              payload: &crate::smelt_term::Payload| {
+            lua.queue_invocation(handle, win, payload);
+        };
+        self.ui
+            .try_dismiss_modal_for_chord(k.code, k.modifiers, &mut lua_invoke)
+    }
+
     /// Forward a key to the focused overlay-leaf Window when it's vim-enabled and no keymap
-    /// absorbed the key. Forces Normal mode — Insert would passthrough `j`/`k` without moving.
-    /// Returns `true` if the Window claimed the event.
+    /// absorbed the key. Returns `true` if the Window claimed the event.
     pub(crate) fn dispatch_overlay_viewer_key(&mut self, k: KeyEvent) -> bool {
         let win = match self.ui.focus() {
             Some(w) => w,
@@ -824,8 +877,15 @@ impl TuiApp {
         if buf.lines().is_empty() {
             return false;
         }
-        if win_mut.vim_mode == crate::smelt_term::VimMode::Insert {
-            win_mut.set_vim_mode(crate::smelt_term::VimMode::Normal);
+        // Esc in idle Normal mode is a no-op for the viewer — let it fall
+        // through so the modal-dismiss tier can close the overlay. When
+        // Visual mode is active or a pending sequence is buffered, Esc still
+        // belongs to vim (exit Visual / cancel pending) and stays consumed.
+        if k.code == KeyCode::Esc
+            && win_mut.vim_mode == crate::smelt_term::VimMode::Normal
+            && win_mut.vim_state.is_idle()
+        {
+            return false;
         }
         let status = win_mut.handle_key(buf, k, &mut self.core.clipboard);
         let max_scroll = (buf.lines().len() as u16).saturating_sub(viewport_rows);

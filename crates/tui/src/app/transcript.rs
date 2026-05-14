@@ -2,7 +2,7 @@
 
 use crate::app::TuiApp;
 use crate::content::builder::LineBuilder;
-use crate::content::selection::wrap_and_locate_cursor;
+use crate::content::selection::wrap_with_offsets;
 use crate::smelt_term::{BufCreateOpts, BufId, Buffer, Theme};
 
 use crate::content::transcript_parsers as blocks;
@@ -16,22 +16,6 @@ use std::time::Duration;
 
 pub(crate) struct TranscriptData {
     pub(crate) clamped_scroll: u16,
-    pub(crate) total_rows: u16,
-    pub(crate) scrollbar_col: u16,
-    pub(crate) viewport: crate::smelt_term::WindowViewport,
-}
-
-/// Viewport-relative cursor position and glyph for the block cursor in the transcript pane.
-pub(crate) struct SoftCursor {
-    pub(crate) col: u16,
-    pub(crate) row: u16,
-    pub(crate) glyph: char,
-}
-
-pub(crate) struct TranscriptCursor {
-    /// Screen-space cursor for the renderer. `None` when the cursor is off-screen
-    /// or when the transcript doesn't own the cursor.
-    pub(crate) soft_cursor: Option<SoftCursor>,
 }
 
 impl TuiApp {
@@ -347,88 +331,8 @@ impl TuiApp {
             viewport_rows,
         );
 
-        let total_rows = out.total_rows;
-        let clamped_scroll = out.clamped_scroll;
-
-        let layer_w = gutters.layer_width(width as u16);
-        let scrollbar_col = layer_w.saturating_sub(1);
-
-        let start = clamped_scroll as usize;
-        let end = (start + viewport_rows as usize).min(buf.line_count());
-        self.last_viewport_text = buf.get_lines(start, end).to_vec();
-
-        let viewport = crate::smelt_term::WindowViewport::new(
-            crate::smelt_term::Rect::new(0, 0, tw as u16, viewport_rows),
-            tw as u16,
-            total_rows,
-            clamped_scroll,
-            crate::smelt_term::ScrollbarState::new(scrollbar_col, total_rows, viewport_rows),
-        );
-
         TranscriptData {
-            clamped_scroll,
-            total_rows,
-            scrollbar_col,
-            viewport,
-        }
-    }
-
-    #[allow(clippy::too_many_arguments)]
-    pub(crate) fn compute_transcript_cursor(
-        &self,
-        width: usize,
-        viewport_rows: u16,
-        history_cursor_row: u16,
-        history_cursor_col: u16,
-        scroll_top: u16,
-        transcript_owns_cursor: bool,
-        viewport: Option<&crate::smelt_term::WindowViewport>,
-    ) -> TranscriptCursor {
-        let gutters = self.transcript_gutters();
-        let tw = (gutters.content_width(width as u16) as usize).max(1);
-
-        if !transcript_owns_cursor || viewport_rows == 0 {
-            return TranscriptCursor { soft_cursor: None };
-        }
-
-        let visible = viewport
-            .map(|v| v.total_rows.min(viewport_rows))
-            .unwrap_or(viewport_rows);
-
-        // Buffer-absolute → screen-relative. Off-screen → no soft cursor.
-        let screen_row = match history_cursor_row.checked_sub(scroll_top) {
-            Some(r) if r < visible => r,
-            _ => {
-                return TranscriptCursor { soft_cursor: None };
-            }
-        };
-
-        let max_col = (tw as u16).saturating_sub(1);
-        let col = self
-            .last_viewport_text
-            .get(screen_row as usize)
-            .map(|row| {
-                let byte = crate::smelt_term::text::cell_to_byte(row, history_cursor_col as usize);
-                crate::smelt_term::text::byte_to_cell(row, byte) as u16
-            })
-            .unwrap_or(0)
-            .min(max_col);
-        let under: char = self
-            .last_viewport_text
-            .get(screen_row as usize)
-            .map(|row| {
-                let byte = crate::smelt_term::text::cell_to_byte(row, col as usize);
-                row[byte..].chars().next()
-            })
-            .and_then(|c| c)
-            .unwrap_or(' ');
-
-        TranscriptCursor {
-            soft_cursor: Some(SoftCursor {
-                col,
-                row: screen_row,
-                glyph: under,
-            }),
+            clamped_scroll: out.clamped_scroll,
         }
     }
 
@@ -467,16 +371,21 @@ impl TuiApp {
         }
         let text = buf.text();
         let win = self.transcript_win();
-        let cpos = win.compute_cpos(buf);
+        let endpoint = win.effective_endpoint();
         let active_selection = if win.vim_enabled {
             match win.vim_mode {
                 crate::smelt_term::VimMode::Visual | crate::smelt_term::VimMode::VisualLine => {
-                    crate::smelt_term::vim::visual_range(&win.vim_state, &text, cpos, win.vim_mode)
+                    crate::smelt_term::vim::visual_range(
+                        &win.vim_state,
+                        &text,
+                        endpoint,
+                        win.vim_mode,
+                    )
                 }
-                _ => win.selection_range_at(cpos, &text),
+                _ => win.selection_range_at(endpoint, &text),
             }
         } else {
-            win.selection_range_at(cpos, &text)
+            win.selection_range_at(endpoint, &text)
         };
         // Fall back to yank-flash range (mirrors nvim's `vim.highlight.on_yank`).
         let (s, e) = match active_selection.or_else(|| {
@@ -491,27 +400,16 @@ impl TuiApp {
         if s >= e {
             return Vec::new();
         }
+        // Route through the shared coord helper so the prompt's per-row
+        // selection painting and the transcript's stay one implementation —
+        // including the "1-cell virtual span on empty middle rows" rule.
         let first = scroll_top as usize;
-        let last = (first + viewport_rows as usize).min(rows.len());
-        let mut line_start = rows[..first].iter().map(|r| r.len() + 1).sum::<usize>();
-        let mut out = Vec::new();
-        for (idx, row) in rows.iter().enumerate().take(last).skip(first) {
-            let line_end = line_start + row.len();
-            if e > line_start && s <= line_end {
-                let clip_s = s.saturating_sub(line_start).min(row.len());
-                let clip_e = e.saturating_sub(line_start).min(row.len());
-                let start_cell = crate::smelt_term::text::byte_to_cell(row, clip_s) as u16;
-                let end_cell = crate::smelt_term::text::byte_to_cell(row, clip_e) as u16;
-                if end_cell > start_cell {
-                    out.push((idx, start_cell, end_cell));
-                } else if row.is_empty() && s <= line_start && e > line_start {
-                    // Paint one virtual cell on empty lines to show they're in the selection.
-                    out.push((idx, 0, 1));
-                }
-            }
-            line_start = line_end + 1;
-        }
-        out
+        let last = first + viewport_rows as usize;
+        smelt_buffer::coords::selection_to_row_ranges(buf, s, e)
+            .into_iter()
+            .filter(|r| r.line >= first && r.line < last)
+            .map(|r| (r.line, r.col_start, r.col_end))
+            .collect()
     }
 
     fn has_ephemeral(&self, show_thinking: bool) -> bool {
@@ -573,8 +471,8 @@ impl TuiApp {
             }
         }
 
-        let (visual_lines, _, _, _) = wrap_and_locate_cursor(edit_buf.source(), &[], 0, usable);
-        let input_rows = visual_lines.len().max(1) as u16;
+        let wrap = wrap_with_offsets(edit_buf.source(), &[], usable);
+        let input_rows = wrap.visual_lines.len().max(1) as u16;
 
         let above = queued_rows + stash + 1; // +1 = top bar
         (above, input_rows)

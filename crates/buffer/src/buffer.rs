@@ -84,14 +84,14 @@ impl CopyOutput {
     }
 }
 
-/// Per-buffer transform from a source byte range to a [`CopyOutput`].
+/// Per-buffer transform from a byte range to a [`CopyOutput`].
 ///
-/// `range` is expressed in `source` bytes and is guaranteed to be in-bounds
-/// and on char boundaries by [`Buffer::copy_range`]. The buffer itself is
-/// passed so impls can read sidecar state (attachment ids, decorations)
-/// without needing a separate holder.
+/// `src` is the resolved base string [`Buffer::copy_range`] picked (`source`
+/// when non-empty, else `text()`); `range` is in-bounds, on char boundaries,
+/// and addresses bytes in `src`. The buffer is passed alongside so impls can
+/// read sidecar state (attachment ids, decorations).
 pub trait BufferCopy: Send + Sync {
-    fn copy(&self, buf: &Buffer, range: std::ops::Range<usize>) -> CopyOutput;
+    fn copy(&self, buf: &Buffer, src: &str, range: std::ops::Range<usize>) -> CopyOutput;
 }
 
 /// Process-global namespace id. Stable for the process lifetime;
@@ -481,6 +481,14 @@ pub struct Buffer {
     /// Source↔display coord maps. Written by parsers in `parse()` when source
     /// bytes don't map 1:1 to display chars. `None` falls back to identity.
     projection_maps: Option<crate::coords::ProjectionMaps>,
+    /// When `true` and no parser is attached, `ensure_rendered_at(width)` wraps
+    /// `canonical_lines` to `width` and writes the result to `lines`. Read-only
+    /// content panes (help, stats) opt in so long lines reflow on resize.
+    wrap_mode: bool,
+    /// Pre-wrap snapshot of user-set lines for `wrap_mode` buffers. `None` when
+    /// a parser owns rendering or `wrap_mode` is off. Mutated by `set_lines` /
+    /// `set_all_lines` and consumed by the wrap pass in `ensure_rendered_at`.
+    canonical_lines: Option<Arc<Vec<String>>>,
 }
 
 impl Buffer {
@@ -513,12 +521,39 @@ impl Buffer {
             readonly: false,
             selection: Vec::new(),
             projection_maps: None,
+            wrap_mode: false,
+            canonical_lines: None,
         }
+    }
+
+    /// Toggle wrap-on-render. When enabled, `ensure_rendered_at(width)` reflows
+    /// the user-set lines (snapshotted in `canonical_lines`) to fit `width`.
+    /// Requires that no parser is attached — parsers own their own wrap.
+    pub fn set_wrap_mode(&mut self, wrap: bool) {
+        if wrap == self.wrap_mode {
+            return;
+        }
+        self.wrap_mode = wrap;
+        if wrap {
+            // Snapshot the current lines as canonical so the first
+            // `ensure_rendered_at` has something to reflow.
+            self.canonical_lines = Some(Arc::clone(&self.lines));
+        } else {
+            self.canonical_lines = None;
+        }
+        self.last_render = None;
+    }
+
+    pub fn wrap_mode(&self) -> bool {
+        self.wrap_mode
     }
 
     /// Override the per-row visual-mode selection. Empty `ranges` clears
     /// the override; `Window::render` then derives selection from its own state.
     pub fn set_selection(&mut self, ranges: Vec<SelectionRange>) {
+        if self.selection == ranges {
+            return;
+        }
         self.selection = ranges;
     }
 
@@ -596,7 +631,7 @@ impl Buffer {
         }
         let clamped = start..end;
         match self.copier.clone() {
-            Some(c) => c.copy(self, clamped),
+            Some(c) => c.copy(self, src, clamped),
             None => CopyOutput::same(src[clamped].to_string()),
         }
     }
@@ -678,12 +713,13 @@ impl Buffer {
         self.source_tick = self.source_tick.wrapping_add(1);
     }
 
-    /// Re-run the parser if `(source_tick, width)` differs from the last call.
-    /// Returns `true` when a parse actually happened.
+    /// Re-render at `width`. Three paths:
+    /// 1. With a parser: re-run the parser if `(source_tick, width)` is stale.
+    /// 2. Without a parser, `wrap_mode = true`: reflow `canonical_lines` at `width`.
+    /// 3. Without parser or wrap: no-op (caller-written lines are final).
+    ///
+    /// Returns `true` when a re-render actually happened.
     pub fn ensure_rendered_at(&mut self, width: u16) -> bool {
-        let Some(parser) = self.parser.clone() else {
-            return false;
-        };
         let fresh = match self.last_render {
             Some((tick, w)) => tick == self.source_tick && w == width,
             None => false,
@@ -691,16 +727,49 @@ impl Buffer {
         if fresh {
             return false;
         }
-        let source = std::mem::take(&mut self.source);
-        // Reset to a single seed line; `set_all_lines` clears well-known
-        // namespaces across all rows so stale highlights don't leak.
-        // Maps cleared too — parser repopulates if it needs custom mapping.
-        self.set_all_lines(vec![String::new()]);
-        self.projection_maps = None;
-        parser.parse(self, &source, width);
-        self.source = source;
-        self.last_render = Some((self.source_tick, width));
-        true
+        if let Some(parser) = self.parser.clone() {
+            let source = std::mem::take(&mut self.source);
+            // Reset to a single seed line; `set_all_lines` clears well-known
+            // namespaces across all rows so stale highlights don't leak.
+            // Maps cleared too — parser repopulates if it needs custom mapping.
+            self.set_all_lines(vec![String::new()]);
+            self.projection_maps = None;
+            parser.parse(self, &source, width);
+            self.source = source;
+            self.last_render = Some((self.source_tick, width));
+            return true;
+        }
+        if self.wrap_mode {
+            let canonical = self
+                .canonical_lines
+                .clone()
+                .unwrap_or_else(|| Arc::clone(&self.lines));
+            let mut wrapped: Vec<String> = Vec::with_capacity(canonical.len());
+            for line in canonical.iter() {
+                if line.is_empty() {
+                    wrapped.push(String::new());
+                } else {
+                    for chunk in crate::wrap::wrap_line(line, width as usize) {
+                        wrapped.push(chunk);
+                    }
+                }
+            }
+            if wrapped.is_empty() {
+                wrapped.push(String::new());
+            }
+            // Write directly: the wrap output is a re-render of `canonical_lines`,
+            // not new user-authored content. Going back through `set_all_lines`
+            // would re-snapshot the wrapped output as the new canonical source.
+            self.lines = Arc::new(wrapped);
+            for ns in [self.ns_highlights, self.ns_decorations, self.ns_virt_text] {
+                self.extmarks.clear_namespace(ns, 0, usize::MAX);
+            }
+            self.selection.clear();
+            self.changedtick += 1;
+            self.last_render = Some((self.source_tick, width));
+            return true;
+        }
+        false
     }
 
     pub fn id(&self) -> BufId {
@@ -736,6 +805,12 @@ impl Buffer {
         }
         self.selection.retain(|r| r.line < start || r.line >= end);
         self.changedtick += 1;
+        // Wrap-mode buffers without a parser: the lines just written are the
+        // canonical (pre-wrap) source for the next `ensure_rendered_at`.
+        if self.wrap_mode && self.parser.is_none() {
+            self.canonical_lines = Some(Arc::clone(&self.lines));
+            self.last_render = None;
+        }
     }
 
     pub fn set_all_lines(&mut self, lines: Vec<String>) {
@@ -751,6 +826,10 @@ impl Buffer {
         }
         self.selection.clear();
         self.changedtick += 1;
+        if self.wrap_mode && self.parser.is_none() {
+            self.canonical_lines = Some(Arc::clone(&self.lines));
+            self.last_render = None;
+        }
     }
 
     pub fn text(&self) -> String {
@@ -868,15 +947,23 @@ impl Buffer {
     /// Uses the parser-written [`ProjectionMaps`](crate::coords::ProjectionMaps)
     /// if present; otherwise walks `lines()` directly (1:1 identity mapping).
     pub fn byte_at_display_pos(&self, row: usize, col: usize) -> usize {
-        if let Some(maps) = &self.projection_maps {
-            return maps.byte_at(&self.source, row, col);
-        }
         if self.lines.is_empty() {
             return 0;
         }
-        let row = row.min(self.lines.len().saturating_sub(1));
+        let row = row.min(self.lines.len() - 1);
+        let line = &self.lines[row];
+        if let Some(maps) = &self.projection_maps {
+            // Clamp `col` to the row's display-char count. `ProjectionMaps`
+            // stores one continuous display↔source char stream, so an
+            // unclamped `col` would index past this row and resolve into the
+            // NEXT line — making click-past-EOL and "preserve screen row"
+            // scrolling onto a shorter row silently slip to the wrong byte.
+            let col = col.min(line.chars().count());
+            return maps.byte_at(&self.source, row, col);
+        }
+        // Identity path: `cell_to_byte` clamps `cell > line_width` to `line.len()`.
         let offsets = crate::text::line_start_offsets(&self.lines);
-        offsets[row] + crate::text::cell_to_byte(&self.lines[row], col)
+        offsets[row] + crate::text::cell_to_byte(line, col)
     }
 
     /// Set source↔display coord maps. Parsers call this from `parse()` when
@@ -1181,6 +1268,45 @@ mod tests {
     }
 
     #[test]
+    fn wrap_mode_reflows_long_lines_at_width() {
+        let mut buf = make_buf();
+        buf.set_wrap_mode(true);
+        buf.set_all_lines(vec!["aaaaaaaaaa bbbbbbbbbb cccccccccc".into()]);
+        buf.ensure_rendered_at(10);
+        assert_eq!(buf.line_count(), 3, "30 cells at width 10 → 3 rows");
+    }
+
+    #[test]
+    fn wrap_mode_preserves_short_lines() {
+        let mut buf = make_buf();
+        buf.set_wrap_mode(true);
+        buf.set_all_lines(vec!["short".into(), "also fits".into()]);
+        buf.ensure_rendered_at(20);
+        assert_eq!(buf.line_count(), 2);
+    }
+
+    #[test]
+    fn wrap_mode_off_is_noop() {
+        let mut buf = make_buf();
+        buf.set_all_lines(vec!["a very long line that would wrap".into()]);
+        buf.ensure_rendered_at(10);
+        // No parser, no wrap_mode → ensure_rendered_at is a no-op.
+        assert_eq!(buf.line_count(), 1);
+    }
+
+    #[test]
+    fn wrap_mode_reflows_on_width_change() {
+        let mut buf = make_buf();
+        buf.set_wrap_mode(true);
+        buf.set_all_lines(vec!["aaaa bbbb cccc dddd".into()]);
+        buf.ensure_rendered_at(10);
+        let narrow_count = buf.line_count();
+        buf.ensure_rendered_at(40);
+        assert_ne!(buf.line_count(), narrow_count);
+        assert_eq!(buf.line_count(), 1, "fits on one line at width 40");
+    }
+
+    #[test]
     fn set_all_lines_empty_keeps_one_line() {
         let mut buf = make_buf();
         buf.set_all_lines(vec![]);
@@ -1357,8 +1483,8 @@ mod tests {
     fn copy_range_dispatches_to_installed_copier() {
         struct UpperCopier;
         impl BufferCopy for UpperCopier {
-            fn copy(&self, buf: &Buffer, range: std::ops::Range<usize>) -> CopyOutput {
-                let raw = buf.source()[range].to_string();
+            fn copy(&self, _buf: &Buffer, src: &str, range: std::ops::Range<usize>) -> CopyOutput {
+                let raw = src[range].to_string();
                 CopyOutput {
                     clipboard: raw.to_uppercase(),
                     kill_ring: raw,
@@ -1561,5 +1687,30 @@ mod tests {
         assert_eq!(second.attach_count(), 1);
         assert!(buf.ensure_rendered_at(10));
         assert_eq!(second.call_log().len(), 1);
+    }
+
+    #[test]
+    fn byte_at_display_pos_clamps_col_to_row_width_under_projection() {
+        // Source "aaa\nbbb" (7 chars, 7 bytes); display char stream "aaa\nbbb"
+        // is one continuous run in the ProjectionMaps tables. Without per-row
+        // clamping, `byte_at(0, 5)` would index past row 0 (3 chars) into row
+        // 1's chars and resolve to a byte inside "bbb" — wrong row. With the
+        // clamp, the column collapses to the row's display-char count.
+        let mut buf = make_buf();
+        buf.set_source("aaa\nbbb".into());
+        buf.set_all_lines(vec!["aaa".into(), "bbb".into()]);
+        let s2d: Vec<usize> = (0..=7).collect();
+        let d2s: Vec<usize> = (0..=7).collect();
+        buf.set_projection_maps(crate::coords::ProjectionMaps {
+            source_char_to_display_char: s2d,
+            display_char_to_source_char: d2s,
+            row_offsets: vec![0, 4],
+        });
+        // Click well past EOL on row 0 must land at end of "aaa", not in "bbb".
+        assert_eq!(buf.byte_at_display_pos(0, 99), 3);
+        // Click within row 0 still resolves normally.
+        assert_eq!(buf.byte_at_display_pos(0, 1), 1);
+        // Click within row 1.
+        assert_eq!(buf.byte_at_display_pos(1, 1), 5);
     }
 }

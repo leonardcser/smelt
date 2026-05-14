@@ -128,6 +128,7 @@ local function open()
     col = 0,
     width = PANEL_W,
     height = PANEL_H,
+    border = { all = "Comment" },
     modal = false,
     blocks_agent = false,
     draggable = true,

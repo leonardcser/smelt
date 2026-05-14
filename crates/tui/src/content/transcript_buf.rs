@@ -41,7 +41,6 @@ struct ProjectKey {
 }
 
 pub(crate) struct ProjectOutput {
-    pub total_rows: u16,
     pub clamped_scroll: u16,
 }
 
@@ -109,7 +108,6 @@ impl TranscriptProjection {
         if self.project_key == Some(key) {
             let total_rows = buf.line_count() as u16;
             return ProjectOutput {
-                total_rows,
                 clamped_scroll: clamp_scroll(scroll_top, total_rows, viewport_rows),
             };
         }
@@ -207,7 +205,6 @@ impl TranscriptProjection {
         self.project_key = Some(key);
 
         ProjectOutput {
-            total_rows,
             clamped_scroll: clamp_scroll(scroll_top, total_rows, viewport_rows),
         }
     }
@@ -383,12 +380,13 @@ fn apply_row_highlights(buf: &mut Buffer, row: usize, highlights: Vec<Span>) {
 pub(crate) struct TranscriptCopier;
 
 impl smelt_core::buffer::BufferCopy for TranscriptCopier {
-    fn copy(&self, buf: &Buffer, range: std::ops::Range<usize>) -> smelt_core::buffer::CopyOutput {
-        let text = buf.text();
-        let raw = text
-            .get(range.start..range.end)
-            .map(str::to_string)
-            .unwrap_or_default();
+    fn copy(
+        &self,
+        buf: &Buffer,
+        src: &str,
+        range: std::ops::Range<usize>,
+    ) -> smelt_core::buffer::CopyOutput {
+        let raw = src[range.start..range.end].to_string();
         let clipboard = copy_byte_range(buf, range.start, range.end);
         smelt_core::buffer::CopyOutput {
             kill_ring: raw,
