@@ -144,38 +144,53 @@ Crate-wide left at 88.5% rather than ≥90% because `buffer.rs` still has unexer
 
 ---
 
-### `tui` — ☐  ·  36.5% → ≥65%
+### `tui` — ◐  ·  34.7% → **37.5%** (in progress)
 
-1 · ☐ Read   2 · ☐ Audit   3 · ☐ Plan   4 · ☐ Apply   5 · ☐ Refactor   6 · ☐ Fill   7 · ☐ Verify
+1 · ☑ Read   2 · ☑ Audit   3 · ☑ Plan   4 · ☑ Apply   5 · ◐ Refactor   6 · ◐ Fill   7 · ☐ Verify
 
-The largest job. Substep 5 is the bulk of the work and breaks down into the dispatcher extractions below.
+**Per-wave progress:**
 
-**Dispatcher `route()` extractions (substep 5):**
+| Wave | Focus | Status | Tests added |
+|------|-------|:------:|:-----------:|
+| A | Pure fills: `prompt_sections`, `metrics`, `picker` | ☑ | 63 |
+| B | Small extractions: `commands.rs` parse, `completer/file` transform, `instructions` renderer | ☑ | 25 |
+| C | Dispatcher extractions: `keymap` (→ smelt-core), `app/mouse`, `app/cmdline_edit`, `app/agent` api-key | ☑ | 60 |
+| D | `TestApp` harness for end-to-end state-transition tests | ☐ | — |
 
-| # | Module                                | LoC | Cov | Status |
-|---|---------------------------------------|----:|----:|:------:|
-| 1 | `app/events.rs` (template)            | 605 |  0% |  ☐    |
-| 2 | `app/cmdline.rs`                      | 322 |  0% |  ☐    |
-| 3 | `app/content_keys.rs`                 | 182 |  0% |  ☐    |
-| 4 | `app/mouse.rs`                        | 200 |  0% |  ☐    |
-| 5 | `picker.rs`                           | 218 |  0% |  ☐    |
-| 6 | `commands.rs`                         | 208 |  0% |  ☐    |
-| 7 | `app/engine_events.rs`                | 286 |  0% |  ☐    |
-| 8 | `app/agent.rs`                        | 615 |  0% |  ☐    |
+**Wave A outcome:** `prompt_sections` 0%→100%, `metrics` 0%→64%, `picker` 0%→50%. No refactor needed — pure helpers were already extractable.
 
-**`TestApp` harness (substep 5):**
+**Wave B outcome:** extracted `parse_command_line` (commands.rs 0%→17%), `expand_with_parent_dirs` (file completer 0%→31%), `render_sections` (instructions 0%→57%). All refactors preserve behavior; minor backward-compat note on `!` lines + paste interaction documented in code.
 
-| # | Item                                  | Status |
-|---|---------------------------------------|:------:|
-| 1 | Skeleton: `feed(events)`, `state()`, `actions()` |  ☐ |
-| 2 | First suite: overlays, cmdline, Ctrl-C semantics |  ☐ |
-| 3 | Picker open → filter → select         |  ☐    |
-| 4 | Vim mode transitions end-to-end       |  ☐    |
+**Wave C outcome:** moved keymap matcher into `smelt-core::keymap` (now reusable by a future GUI frontend). Extracted pure mouse-focus decisions (mouse.rs 0%→21%), cmdline text-edit + history-step state machine (`cmdline_edit` 0%→97%), and api-key env lookup (deduplicated two near-identical methods, gave it a resolver-indirection seam).
+
+**Remaining 0% files (deferred — mostly ring with little extractable pure logic):**
+
+| File | LoC | Notes |
+|---|--:|---|
+| `app/events.rs` (post-chord) | ~880 | Mostly key→action glue on `&mut self`; chord was the meaty piece |
+| `app/agent.rs` | 700 | Turn-state mutations + async; api-key extracted, rest is shell |
+| `app/engine_events.rs` | 286 | Exhaustive match on EngineEvent; each arm is pure ring |
+| `app/transcript.rs` | 377 | Scroll/select methods on TuiApp |
+| `app/history.rs` | 585 | Content-history rendering |
+| `app/render_loop.rs` | 309 | Async lifecycle |
+
+These need a **`TestApp` harness** (Wave D) — end-to-end behavioural tests on the assembled app catch interactions that pure unit tests can't reach.
+
+**Wave D plan:**
+
+| # | Item | Status |
+|---|------|:------:|
+| 1 | Skeleton: `feed(events)`, `state()`, `actions()` | ☐ |
+| 2 | First suite: overlays, cmdline, Ctrl-C semantics | ☐ |
+| 3 | Picker open → filter → select | ☐ |
+| 4 | Vim mode transitions end-to-end | ☐ |
 
 **Lower-priority within tui (do after dispatchers):**
 - `input/buffer.rs` (34%) — make `PromptCtx<'_>` constructible from in-memory state.
-- `metrics.rs` (0%) — extract pure accumulators.
 - `content/transcript_parsers/tools.rs` (26%) — fill parser branches.
+
+**Follow-ups recorded:**
+- Build a real Rust-side `KeymapRegistry` (trie/sorted) so the matcher queries Rust state directly instead of round-tripping through `mlua` per decay step. Today's `ChordOracle` adapter goes away. Lua handlers become opaque `HandlerRef`s the matcher returns on `Consumed`. Estimated: medium refactor, touches `tui/src/lua/keymap.rs` + every keymap-related Lua API. Driver: chord-heavy workflows hit the per-key mlua cost; testability also wins.
 
 ---
 
@@ -223,6 +238,6 @@ Replicate the shape of `provider/extract.rs` (95% cov) on each provider — pull
 
 ## Now
 
-**Active crate:** `tui` — substep 1 (Read).
+**Active crate:** `tui` — Waves A/B/C done. **Wave D (TestApp harness) is next.**
 
-Next action: read `crates/tui/src/*`, especially `app/*` dispatchers (currently 0% coverage). Substep 5 is the big lift — extract pure decisions from each dispatcher.
+Most remaining 0% files are imperative shell with thin pure decisions already extracted. Further line-coverage lift requires end-to-end behavioural tests on an assembled app: feed events in, assert state/actions out. Skeleton + first suite (overlays open/close, `:` opens cmdline, Ctrl-C cancel) sets the foundation; later suites cover picker filter/select and vim-mode transitions.
