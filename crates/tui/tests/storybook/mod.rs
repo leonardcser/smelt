@@ -121,6 +121,7 @@ impl StoryCtx {
                 viewport,
                 click_count: 0,
                 clipboard: &mut self.clipboard,
+                now: std::time::Instant::now(),
             };
             win.handle(buf, ev, ctx);
             self.vim_mode = win.vim_mode;

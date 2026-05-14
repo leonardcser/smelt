@@ -960,9 +960,9 @@ impl TuiApp {
             }
 
             self.render_normal(self.agent.is_some());
-            let last_frame = Instant::now();
+            let last_frame = self.core.clock.instant_now();
 
-            let now = Instant::now();
+            let now = self.core.clock.instant_now();
             let yank_flash_active = self
                 .core
                 .clipboard

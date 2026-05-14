@@ -41,6 +41,8 @@ pub(crate) struct InputLeafInput<'a> {
     /// Inner width after gutters; `Window::render` shifts content past the left gutter.
     pub(crate) content_width: u16,
     pub(crate) height: u16,
+    /// Host clock at render time; used to compute the yank-flash window.
+    pub(crate) now: std::time::Instant,
 }
 
 pub(crate) struct BarInfo {
@@ -136,7 +138,10 @@ pub(crate) fn compute_input(
         // Map source selection to display selection via the shared helper —
         // same code path the transcript will eventually use.
         let pctx_ref = crate::input::PromptCtxRef { buf, win: inp.win };
-        if let Some((start, end)) = inp.input.display_selection_range(pctx_ref, inp.clipboard) {
+        if let Some((start, end)) =
+            inp.input
+                .display_selection_range(pctx_ref, inp.clipboard, inp.now)
+        {
             let ranges = smelt_buffer::coords::selection_to_row_ranges(buf, start, end);
             buf.set_selection(ranges);
         } else {
@@ -564,7 +569,7 @@ fn compute_input_area(
         win: input.win,
     };
     let display_selection = state
-        .display_selection_range(pctx_ref, input.clipboard)
+        .display_selection_range(pctx_ref, input.clipboard, input.now)
         .map(|(start, end)| {
             let raw_start_char = crate::input::char_pos(edit_buf.source(), start);
             let raw_end_char = crate::input::char_pos(edit_buf.source(), end);
@@ -828,6 +833,7 @@ mod tests {
             clipboard: &test_clipboard,
             content_width: 78,
             height: 4,
+            now: std::time::Instant::now(),
         };
         let mut input_buf = Buffer::new(
             crate::app::PROMPT_EDIT_BUF,

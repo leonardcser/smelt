@@ -175,6 +175,9 @@ pub struct EventCtx<'a> {
     pub viewport: WindowViewport,
     pub click_count: u8,
     pub clipboard: &'a mut Clipboard,
+    /// Host clock at dispatch; threaded into [`VimContext::now`] so yank
+    /// flash deadlines respect the virtual clock under sim/fuzz.
+    pub now: std::time::Instant,
 }
 
 /// Per-call context for [`Window::handle_mouse`].
@@ -771,7 +774,7 @@ impl Window {
     ) -> Status {
         use super::event::Event;
         match ev {
-            Event::Key(k) => self.handle_key(buf, k, ctx.clipboard),
+            Event::Key(k) => self.handle_key(buf, k, ctx.clipboard, ctx.now),
             Event::Mouse(me) => {
                 let (status, _) = self.handle_mouse(
                     buf,
@@ -1043,6 +1046,7 @@ impl Window {
         buf: &mut Buffer,
         k: KeyEvent,
         clipboard: &mut Clipboard,
+        now: std::time::Instant,
     ) -> Status {
         let width = self.viewport.map(|v| v.content_width).unwrap_or(80);
         let viewport_rows = self.viewport.map(|v| v.rect.height).unwrap_or(1);
@@ -1061,6 +1065,7 @@ impl Window {
                     mode: &mut self.vim_mode,
                     curswant: &mut self.curswant,
                     vim_state: &mut self.vim_state,
+                    now,
                 };
                 vim::handle_key(k, &mut ctx)
             } else {
@@ -1074,6 +1079,7 @@ impl Window {
                     mode: &mut self.vim_mode,
                     curswant: &mut self.curswant,
                     vim_state: &mut self.vim_state,
+                    now,
                 };
                 vim::handle_key(k, &mut ctx)
             };
@@ -1760,7 +1766,7 @@ mod tests {
         let mut clipboard = Clipboard::null();
         // One 'k' keeps us in the bottom region (scroll_top == max_scroll == 9),
         // so follow_tail should still be true.
-        w.handle_key(&mut buf, k, &mut clipboard);
+        w.handle_key(&mut buf, k, &mut clipboard, std::time::Instant::now());
         let max_scroll = (rows.len() as u16).saturating_sub(viewport);
         w.follow_tail = w.scroll_top >= max_scroll;
         assert_eq!(w.cursor_row, 9);
@@ -1771,7 +1777,7 @@ mod tests {
         );
 
         // Second 'k' moves above max_scroll; follow_tail must clear.
-        w.handle_key(&mut buf, k, &mut clipboard);
+        w.handle_key(&mut buf, k, &mut clipboard, std::time::Instant::now());
         w.follow_tail = w.scroll_top >= max_scroll;
         assert_eq!(w.cursor_row, 8);
         assert_eq!(w.scroll_top, 8);

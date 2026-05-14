@@ -150,13 +150,14 @@ impl PromptState {
         &self,
         ctx: PromptCtxRef<'_>,
         clipboard: &crate::smelt_term::Clipboard,
+        now: std::time::Instant,
     ) -> Option<(usize, usize)> {
         if let Some(range) = self.selection_range(ctx) {
             return Some(range);
         }
         clipboard
             .kill_ring
-            .yank_flash_range(std::time::Instant::now())
+            .yank_flash_range(now)
             .map(|(s, e)| {
                 let src = ctx.buf.source();
                 (
@@ -926,6 +927,7 @@ impl PromptState {
         ev: Event,
         mut history: Option<&mut History>,
         clipboard: &mut crate::smelt_term::Clipboard,
+        now: std::time::Instant,
     ) -> Action {
         if self.completer.is_some() {
             if let Some(action) = self.handle_completer_event(ctx, &ev) {
@@ -933,7 +935,7 @@ impl PromptState {
             }
         }
 
-        match self.dispatch_vim(ctx, &ev, &mut history, clipboard) {
+        match self.dispatch_vim(ctx, &ev, &mut history, clipboard, now) {
             VimBridgeResult::Handled(action) => return action,
             VimBridgeResult::Passthrough | VimBridgeResult::NotAKey => {}
         }
@@ -2275,9 +2277,13 @@ mod tests {
                 buf: &mut input.buf,
                 win: &mut input.win,
             };
-            input
-                .state
-                .handle_event(&mut ctx, esc, None, &mut clipboard);
+            input.state.handle_event(
+                &mut ctx,
+                esc,
+                None,
+                &mut clipboard,
+                std::time::Instant::now(),
+            );
         }
         assert!(
             input

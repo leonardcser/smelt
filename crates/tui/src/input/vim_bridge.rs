@@ -29,6 +29,7 @@ impl PromptState {
         ev: &Event,
         history: &mut Option<&mut History>,
         clipboard: &mut Clipboard,
+        now: std::time::Instant,
     ) -> VimBridgeResult {
         if !ctx.win.vim_enabled {
             return VimBridgeResult::NotAKey;
@@ -50,6 +51,7 @@ impl PromptState {
                 mode: &mut ctx.win.vim_mode,
                 curswant: &mut ctx.win.curswant,
                 vim_state: &mut ctx.win.vim_state,
+                now,
             };
             vim::handle_key(key_ev, &mut vctx)
         };

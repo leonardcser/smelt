@@ -151,8 +151,10 @@ impl KillRing {
     }
 
     /// Mark the most recent kill as a yank, enabling the post-yank highlight flash.
-    pub fn mark_yanked(&mut self) {
-        self.last_yank_at = Some(Instant::now());
+    /// `now` is taken from the host clock so virtual-clock tests see the same
+    /// flash window the production renderer reads.
+    pub fn mark_yanked(&mut self, now: Instant) {
+        self.last_yank_at = Some(now);
     }
 
     /// Source range of the most recent yank if its flash window is still active.
@@ -188,32 +190,35 @@ mod tests {
     #[test]
     fn flash_range_active_only_after_mark_yanked() {
         let mut kr = KillRing::new();
+        let t0 = Instant::now();
         kr.set_with_source("hello".into(), false, 3, 8);
         // set_with_source alone (delete / change) must not flash.
-        assert!(kr.yank_flash_range(Instant::now()).is_none());
+        assert!(kr.yank_flash_range(t0).is_none());
         // Yank-only sites mark explicitly.
-        kr.mark_yanked();
-        assert_eq!(kr.yank_flash_range(Instant::now()), Some((3, 8)));
+        kr.mark_yanked(t0);
+        assert_eq!(kr.yank_flash_range(t0), Some((3, 8)));
     }
 
     #[test]
     fn flash_range_expires_after_window() {
         let mut kr = KillRing::new();
+        let t0 = Instant::now();
         kr.set_with_source("x".into(), false, 0, 1);
-        kr.mark_yanked();
-        let later = Instant::now() + YANK_FLASH_DURATION + Duration::from_millis(50);
+        kr.mark_yanked(t0);
+        let later = t0 + YANK_FLASH_DURATION + Duration::from_millis(50);
         assert!(kr.yank_flash_range(later).is_none());
     }
 
     #[test]
     fn delete_after_yank_clears_flash() {
         let mut kr = KillRing::new();
+        let t0 = Instant::now();
         kr.set_with_source("first".into(), false, 0, 5);
-        kr.mark_yanked();
-        assert!(kr.yank_flash_range(Instant::now()).is_some());
+        kr.mark_yanked(t0);
+        assert!(kr.yank_flash_range(t0).is_some());
         // Subsequent delete-style update — no mark_yanked.
         kr.set_with_source("second".into(), false, 10, 16);
-        assert!(kr.yank_flash_range(Instant::now()).is_none());
+        assert!(kr.yank_flash_range(t0).is_none());
     }
 
     // ── kill (push) ───────────────────────────────────────────────────────

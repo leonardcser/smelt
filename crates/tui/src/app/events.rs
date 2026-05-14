@@ -391,12 +391,14 @@ impl TuiApp {
             }
         }
 
+        let now = self.core.clock.instant_now();
         let mut pctx = crate::input::prompt_ctx_mut(&mut self.ui);
         let action = self.input.handle_event(
             &mut pctx,
             ev,
             Some(&mut self.input_history),
             &mut self.core.clipboard,
+            now,
         );
         self.dispatch_input_action(action)
     }
@@ -468,7 +470,7 @@ impl TuiApp {
                 EscAction::VimToNormal => {
                     let mut pctx = crate::input::prompt_ctx_mut(&mut self.ui);
                     self.input
-                        .handle_event(&mut pctx, ev, None, &mut self.core.clipboard);
+                        .handle_event(&mut pctx, ev, None, &mut self.core.clipboard, now);
                 }
                 EscAction::Unqueue => {
                     let mut pctx = crate::input::prompt_ctx_mut(&mut self.ui);
@@ -495,12 +497,14 @@ impl TuiApp {
             return EventOutcome::Noop;
         }
 
+        let now = self.core.clock.instant_now();
         let mut pctx = crate::input::prompt_ctx_mut(&mut self.ui);
         let input_action = self.input.handle_event(
             &mut pctx,
             ev,
             Some(&mut self.input_history),
             &mut self.core.clipboard,
+            now,
         );
         match input_action {
             Action::Submit {
@@ -875,6 +879,7 @@ impl TuiApp {
         )
     }
 
+
     /// Unified viewer-key dispatcher. Applies a key to `win_id`, handling in
     /// order:
     ///   1. Page motion (PageUp/Down, Ctrl-u/d/b/f/y/e) — vim Normal only for
@@ -935,7 +940,8 @@ impl TuiApp {
             let (win, buf) = self.ui.win_and_buf_mut(win_id, buf_id);
             let win = win.expect("window");
             let buf = buf.expect("buffer");
-            let status = win.handle_key(buf, k, &mut self.core.clipboard);
+            let now = self.core.clock.instant_now();
+            let status = win.handle_key(buf, k, &mut self.core.clipboard, now);
             let max_scroll = (buf.lines().len() as u16).saturating_sub(viewport_rows);
             win.follow_tail = win.scroll_top >= max_scroll;
             if matches!(status, Status::Consumed) {

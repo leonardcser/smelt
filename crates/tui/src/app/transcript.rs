@@ -362,7 +362,7 @@ impl TuiApp {
             .core
             .clipboard
             .kill_ring
-            .yank_flash_range(std::time::Instant::now())
+            .yank_flash_range(self.core.clock.instant_now())
             .is_some();
         if !vim_visual && !anchor_set && !yank_flash {
             return Vec::new();
@@ -400,7 +400,7 @@ impl TuiApp {
             self.core
                 .clipboard
                 .kill_ring
-                .yank_flash_range(std::time::Instant::now())
+                .yank_flash_range(self.core.clock.instant_now())
         }) {
             Some(range) => range,
             None => return Vec::new(),

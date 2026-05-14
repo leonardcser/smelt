@@ -57,6 +57,9 @@ pub struct VimContext<'a> {
     pub mode: &'a mut VimMode,
     pub curswant: &'a mut Option<usize>,
     pub vim_state: &'a mut VimWindowState,
+    /// Host clock at dispatch time; used to stamp yank-flash deadlines so the
+    /// flash window is observable via a virtual clock in sim/fuzz runs.
+    pub now: std::time::Instant,
 }
 
 impl VimContext<'_> {
@@ -557,7 +560,7 @@ fn handle_normal_char(c: char, ctx: &mut VimContext<'_>) -> Action {
         'Y' => {
             let (start, end) = current_line_range(ctx.buf, *ctx.cpos);
             ctx.yank_range(start, end, true);
-            ctx.clipboard.kill_ring.mark_yanked();
+            ctx.clipboard.kill_ring.mark_yanked(ctx.now);
             ctx.vim_state.reset_pending();
             Action::Consumed
         }
@@ -1148,7 +1151,7 @@ fn handle_visual_char(c: char, ctx: &mut VimContext<'_>) -> Action {
             if let Some((start, end)) = visual_range(ctx.vim_state, ctx.buf, *ctx.cpos, *ctx.mode) {
                 let linewise = *ctx.mode == VimMode::VisualLine;
                 ctx.yank_range(start, end, linewise);
-                ctx.clipboard.kill_ring.mark_yanked();
+                ctx.clipboard.kill_ring.mark_yanked(ctx.now);
                 *ctx.cpos = start;
             }
             exit_visual(ctx);
@@ -1759,7 +1762,7 @@ fn apply_charwise_op(op: Op, ctx: &mut VimContext<'_>, start: usize, end: usize)
         }
         Op::Yank => {
             ctx.yank_range(start, end, false);
-            ctx.clipboard.kill_ring.mark_yanked();
+            ctx.clipboard.kill_ring.mark_yanked(ctx.now);
             *ctx.cpos = start;
         }
     }
@@ -1810,7 +1813,7 @@ fn apply_linewise_op(op: Op, ctx: &mut VimContext<'_>, start: usize, end: usize)
         Op::Yank => {
             // Linewise yank does not reposition the cursor (vim default).
             ctx.yank_range(s, e, true);
-            ctx.clipboard.kill_ring.mark_yanked();
+            ctx.clipboard.kill_ring.mark_yanked(ctx.now);
         }
     }
     Action::Consumed
@@ -1935,6 +1938,7 @@ mod tests {
                 mode: &mut self.mode,
                 curswant: &mut self.curswant,
                 vim_state: &mut self.vim_state,
+                now: std::time::Instant::now(),
             };
             handle_key(k, &mut ctx)
         }

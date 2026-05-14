@@ -248,6 +248,7 @@ impl TuiApp {
 
         {
             let theme = self.ui.theme().clone();
+            let now = self.core.clock.instant_now();
             let (win, buf) = self
                 .ui
                 .win_and_buf_mut(crate::app::PROMPT_WIN, crate::app::PROMPT_EDIT_BUF);
@@ -257,6 +258,7 @@ impl TuiApp {
                 clipboard: &self.core.clipboard,
                 content_width,
                 height: prompt_rect.height,
+                now,
             };
             prompt_buf::compute_input(&inp, buf.expect("prompt edit buffer"), &theme);
         }
