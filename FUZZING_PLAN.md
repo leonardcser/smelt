@@ -98,6 +98,62 @@ Smallest possible PR per injection. Tests prove behavior unchanged.
 
 **Active phase:** Phase 1 — inject abstractions. Phase 0 (audit) complete; results below.
 
+### Phase 1 progress
+
+| # | PR | Commit | Status |
+|---|---|---|---|
+| 1 | `biased;` on 6 unbiased selects | `a3f33ff8` | ☑ done |
+| 2 | Sort 4 HashMap-derived `Vec`s | `0e8df6ad` | ☑ done |
+| 3 | `reset_for_test` hooks on static interners | `290750dc` | ☑ done (scope: `style/theme` + `buffer` only) |
+| 4 | `Clock` trait + first adopter | — | ◐ next |
+| 5 | `RuntimeEnv` (env+cwd+pid+home snapshot) | — | ☐ |
+| 6 | Single-threaded sim runtime + `available_parallelism` = 1 | — | ☐ |
+
+**Scope deviation on PR #3:** narrowed to the unbounded-growth interners (`HlGroupRegistry`, anon-styles maps, `NamespaceRegistry`). `EPOCH: OnceLock<Instant>` and `LOG_PATH: OnceLock<PathBuf>` deferred — they fix themselves naturally when PR #4 (`Clock`) routes `spinner_glyph` through the clock and when the `Effects` trait (Phase 3) routes log writes through an effect. `headless.rs` color caches stick to first-scenario value but don't grow — low priority.
+
+### Phase 2 progress (parallel work on `next`)
+
+`crates/tui/src/app/test_harness.rs` landed (`6b7da688`). Already pins the `SourceEvent` shape we need: `Term(crossterm::Event)`, `Engine(EngineEvent)`, `Tick(u64)`. The `Tick` arm is currently a no-op explicitly waiting on this plan's Phase 1 clock work (`test_harness.rs:193`). This means the Clock trait must:
+- expose `now() -> Instant` and `system_now() -> SystemTime` for production reads,
+- expose `advance(Duration)` on the sim impl so the `Tick(ms)` dispatch can do `clock.advance(Duration::from_millis(ms))`.
+
+### Clock trait shape (decided before PR #4)
+
+Two narrow traits + a combined alias, all in `crates/core/src/clock.rs`:
+
+```rust
+pub trait MonoClock: Send + Sync {
+    fn now(&self) -> std::time::Instant;
+}
+
+pub trait WallClock: Send + Sync {
+    fn now(&self) -> std::time::SystemTime;
+}
+
+pub trait Clock: MonoClock + WallClock {}
+impl<T: MonoClock + WallClock> Clock for T {}
+```
+
+Rationale for split:
+- `Instant` and `SystemTime` have different semantics (monotonic vs wall, never-jumps vs can-jump). Most call sites need exactly one. Forcing every mock to implement both is friction.
+- The combined `Clock` alias is for the few sites that genuinely need both (`engine/log.rs::entry` records wall-clock timestamps but compares monotonic for log-level gating; agent turn timing uses Instant only).
+
+Two impls ship with the trait:
+
+```rust
+pub struct RealClock;  // delegates to Instant::now / SystemTime::now
+
+pub struct VirtualClock { /* Mutex<Instant>, Mutex<SystemTime> */ }
+impl VirtualClock {
+    pub fn new(start_mono: Instant, start_wall: SystemTime) -> Self { ... }
+    pub fn advance(&self, dur: Duration) { ... }  // bumps both
+}
+```
+
+Tokio integration: most `tokio::time::Instant::now()` sites (`provider/codex.rs`, `provider/copilot.rs`) can be replaced with `std::time::Instant::now()` (they interop fine for deadline arithmetic). Sim runtime uses `tokio::time::pause()` + `advance` so `tokio::time::sleep`/`timeout` advance virtual time; this is orthogonal to our trait.
+
+PR #4 lands the trait + both impls + **one** adopter (likely `engine/log.rs::entry()` since it uses both Instant and SystemTime — best stress-test of the combined trait). Remaining ~46 sites migrate per-crate in follow-up PRs.
+
 ---
 
 ## Phase 0 results — determinism punch list
@@ -242,15 +298,4 @@ No `to_socket_addrs`, `lookup_host`, `notify`, `WalkDir` in prod. No action.
 
 ---
 
-## Phase 1 entry — concrete first PRs
-
-Each small, mergeable, no architectural impact:
-
-1. **Add `biased;` to 6 unbiased selects** (`core/process.rs:330`, `core/headless_app.rs:88`, `engine/provider/sse.rs:14`, `engine/provider/mod.rs:588`, `engine/agent.rs:1109`, `engine/agent.rs:1582`). Each gets the cancellation arm first.
-2. **Sort 4 HashMap iteration sites** (`core/headless_app.rs:135`, `core/lua/runtime.rs:597 + 436`, `core/mcp/mod.rs:197`).
-3. **Move static interners** (`style/theme.rs HlGroupRegistry` + anon maps, `buffer/buffer.rs NamespaceRegistry`) out of `OnceLock`s into runtime state, or expose `reset_for_test()`. Unblocks libFuzzer.
-4. **`Clock` trait** — pass `&dyn Clock` through; replace all 38 `Instant::now` + 10 `SystemTime::now` sites. Sim uses `tokio::time::pause()`.
-5. **`RuntimeEnv`** struct holding snapshotted env + home + cwd + pid. Replace 16 env reads, 16 cwd reads, 7 pid reads.
-6. **Single-threaded sim runtime** + lock `available_parallelism` to 1.
-
-Phase 2 (event unification), Phase 3 (effect indirection), and beyond build on these.
+Phase 2 (event unification), Phase 3 (effect indirection), and beyond build on these. Live progress is tracked in the table under the Status section above.
