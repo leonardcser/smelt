@@ -582,4 +582,390 @@ mod tests {
         .raw_text()
         .is_none());
     }
+
+    fn pending_state() -> ToolState {
+        ToolState {
+            status: ToolStatus::Pending,
+            elapsed: None,
+            output: None,
+            user_message: None,
+        }
+    }
+
+    #[test]
+    fn tool_state_is_terminal_for_ok_err_denied_only() {
+        for status in [ToolStatus::Ok, ToolStatus::Err, ToolStatus::Denied] {
+            let s = ToolState {
+                status,
+                ..pending_state()
+            };
+            assert!(s.is_terminal());
+        }
+        assert!(!pending_state().is_terminal());
+    }
+
+    #[test]
+    fn raw_text_for_thinking_returns_content() {
+        let block = Block::Thinking {
+            content: "ponder".into(),
+        };
+        assert_eq!(block.raw_text().as_deref(), Some("ponder"));
+    }
+
+    #[test]
+    fn raw_text_for_compacted_returns_summary() {
+        let block = Block::Compacted {
+            summary: "earlier session compacted".into(),
+        };
+        assert_eq!(
+            block.raw_text().as_deref(),
+            Some("earlier session compacted")
+        );
+    }
+
+    #[test]
+    fn raw_text_for_code_line_returns_content() {
+        let block = Block::CodeLine {
+            content: "let x = 1;".into(),
+            lang: "rust".into(),
+        };
+        assert_eq!(block.raw_text().as_deref(), Some("let x = 1;"));
+    }
+
+    #[test]
+    fn raw_text_for_exec_combines_command_and_output() {
+        let block = Block::Exec {
+            command: "ls".into(),
+            output: "foo\nbar".into(),
+        };
+        assert_eq!(block.raw_text().as_deref(), Some("$ ls\nfoo\nbar"));
+    }
+
+    #[test]
+    fn content_hash_returns_zero_for_unknown_id() {
+        let history = BlockHistory::new();
+        assert_eq!(history.content_hash(BlockId(9999)), 0);
+    }
+
+    #[test]
+    fn set_view_state_to_same_value_is_noop_and_skips_generation_bump() {
+        let mut history = BlockHistory::new();
+        let id = history.push(Block::Text {
+            content: "x".into(),
+        });
+        let g = history.generation();
+        history.set_view_state(id, ViewState::Expanded);
+        assert_eq!(history.generation(), g);
+    }
+
+    #[test]
+    fn set_view_state_to_expanded_removes_entry_and_bumps_generation() {
+        let mut history = BlockHistory::new();
+        let id = history.push(Block::Text {
+            content: "x".into(),
+        });
+        history.set_view_state(id, ViewState::Collapsed);
+        let g = history.generation();
+        history.set_view_state(id, ViewState::Expanded);
+        assert_eq!(history.view_state(id), ViewState::Expanded);
+        assert!(!history.view_states.contains_key(&id));
+        assert_ne!(history.generation(), g);
+    }
+
+    #[test]
+    fn set_view_state_to_non_expanded_inserts_and_bumps() {
+        let mut history = BlockHistory::new();
+        let id = history.push(Block::Text {
+            content: "x".into(),
+        });
+        let g = history.generation();
+        history.set_view_state(id, ViewState::TrimmedHead { keep: 5 });
+        assert_ne!(history.generation(), g);
+        assert_eq!(history.view_state(id), ViewState::TrimmedHead { keep: 5 });
+    }
+
+    #[test]
+    fn set_status_streaming_then_done_pushes_finished_block() {
+        let mut history = BlockHistory::new();
+        let id = history.push(Block::Text {
+            content: "x".into(),
+        });
+        history.set_status(id, Status::Streaming);
+        assert_eq!(history.status(id), Status::Streaming);
+        history.set_status(id, Status::Done);
+        assert_eq!(history.status(id), Status::Done);
+        assert!(history.finished_blocks.contains(&id));
+    }
+
+    #[test]
+    fn set_status_done_without_prior_streaming_does_not_push_finished() {
+        let mut history = BlockHistory::new();
+        let id = history.push(Block::Text {
+            content: "x".into(),
+        });
+        history.set_status(id, Status::Done);
+        assert!(!history.finished_blocks.contains(&id));
+    }
+
+    #[test]
+    fn rewrite_with_same_hash_skips_generation_bump() {
+        let mut history = BlockHistory::new();
+        let id = history.push(Block::Text {
+            content: "same".into(),
+        });
+        let g = history.generation();
+        history.rewrite(
+            id,
+            Block::Text {
+                content: "same".into(),
+            },
+        );
+        assert_eq!(history.generation(), g);
+    }
+
+    #[test]
+    fn rewrite_unknown_id_is_noop() {
+        let mut history = BlockHistory::new();
+        let g = history.generation();
+        history.rewrite(
+            BlockId(9999),
+            Block::Text {
+                content: "x".into(),
+            },
+        );
+        assert_eq!(history.generation(), g);
+    }
+
+    #[test]
+    fn clear_resets_everything() {
+        let mut history = BlockHistory::new();
+        let id = history.push(Block::Text {
+            content: "a".into(),
+        });
+        history.push(Block::Text {
+            content: "b".into(),
+        });
+        history.set_view_state(id, ViewState::Collapsed);
+        history.set_status(id, Status::Streaming);
+        let g = history.generation();
+        history.clear();
+        assert!(history.is_empty());
+        assert_eq!(history.next_id, 0);
+        assert!(history.view_states.is_empty());
+        assert!(history.statuses.is_empty());
+        assert!(history.tool_states.is_empty());
+        assert_ne!(history.generation(), g);
+    }
+
+    #[test]
+    fn truncate_drops_tail_and_gcs_tool_states() {
+        let mut history = BlockHistory::new();
+        history.push(Block::Text {
+            content: "a".into(),
+        });
+        history.push_with_state(
+            Block::ToolCall {
+                call_id: "tc1".into(),
+                name: "x".into(),
+                summary: "s".into(),
+                args: HashMap::new(),
+            },
+            "tc1".into(),
+            pending_state(),
+        );
+        history.push(Block::Text {
+            content: "c".into(),
+        });
+        assert_eq!(history.len(), 3);
+        assert!(history.tool_states.contains_key("tc1"));
+        // Truncate to before the ToolCall — the tool_state entry should be GC'd.
+        history.truncate(1);
+        assert_eq!(history.len(), 1);
+        assert!(!history.tool_states.contains_key("tc1"));
+    }
+
+    #[test]
+    fn truncate_past_end_is_noop() {
+        let mut history = BlockHistory::new();
+        history.push(Block::Text {
+            content: "a".into(),
+        });
+        let g = history.generation();
+        history.truncate(99);
+        assert_eq!(history.len(), 1);
+        assert_eq!(history.generation(), g);
+    }
+
+    #[test]
+    fn block_gap_is_zero_for_first_block() {
+        let mut history = BlockHistory::new();
+        history.push(Block::Text {
+            content: "a".into(),
+        });
+        assert_eq!(history.block_gap(0), 0);
+    }
+
+    #[test]
+    fn block_gap_consults_gap_between_for_subsequent_blocks() {
+        let mut history = BlockHistory::new();
+        history.push(Block::Text {
+            content: "a".into(),
+        });
+        history.push(Block::User {
+            text: "q".into(),
+            image_labels: vec![],
+        });
+        // Text -> User: 1
+        assert_eq!(history.block_gap(1), 1);
+    }
+
+    #[test]
+    fn resolve_key_substitutes_view_state_and_content_hash() {
+        let mut history = BlockHistory::new();
+        let id = history.push(Block::Text {
+            content: "x".into(),
+        });
+        history.set_view_state(id, ViewState::Collapsed);
+        let base = LayoutKey {
+            width: 80,
+            show_thinking: true,
+            view_state: ViewState::Expanded,
+            content_hash: 0,
+        };
+        let resolved = history.resolve_key(id, base);
+        assert_eq!(resolved.view_state, ViewState::Collapsed);
+        assert_eq!(resolved.content_hash, history.content_hash(id));
+        assert_eq!(resolved.width, 80);
+        assert!(resolved.show_thinking);
+    }
+
+    // ── gap_between coverage ──────────────────────────────────────────
+
+    fn text(s: &str) -> Block {
+        Block::Text { content: s.into() }
+    }
+    fn code(s: &str) -> Block {
+        Block::CodeLine {
+            content: s.into(),
+            lang: "rust".into(),
+        }
+    }
+    fn user(s: &str) -> Block {
+        Block::User {
+            text: s.into(),
+            image_labels: vec![],
+        }
+    }
+    fn thinking(s: &str) -> Block {
+        Block::Thinking { content: s.into() }
+    }
+    fn tool(call_id: &str) -> Block {
+        Block::ToolCall {
+            call_id: call_id.into(),
+            name: "x".into(),
+            summary: "s".into(),
+            args: HashMap::new(),
+        }
+    }
+    fn exec() -> Block {
+        Block::Exec {
+            command: "ls".into(),
+            output: "out".into(),
+        }
+    }
+    fn compacted() -> Block {
+        Block::Compacted {
+            summary: "sum".into(),
+        }
+    }
+
+    #[test]
+    fn gap_between_codeline_to_codeline_is_zero() {
+        assert_eq!(gap_between(&code("a"), &code("b")), 0);
+    }
+
+    #[test]
+    fn gap_between_codeline_to_other_is_one() {
+        assert_eq!(gap_between(&code("a"), &text("b")), 1);
+    }
+
+    #[test]
+    fn gap_between_text_to_codeline_zero_after_heading() {
+        assert_eq!(gap_between(&text("# heading"), &code("a")), 0);
+        // Leading whitespace before # still counts as heading.
+        assert_eq!(gap_between(&text("   ## sub"), &code("a")), 0);
+    }
+
+    #[test]
+    fn gap_between_text_to_codeline_one_otherwise() {
+        assert_eq!(gap_between(&text("plain"), &code("a")), 1);
+    }
+
+    #[test]
+    fn gap_between_other_to_codeline_is_one() {
+        assert_eq!(gap_between(&user("q"), &code("a")), 1);
+    }
+
+    #[test]
+    fn gap_between_user_blocks_are_separated_by_one() {
+        assert_eq!(gap_between(&user("a"), &text("b")), 1);
+        assert_eq!(gap_between(&text("a"), &user("b")), 1);
+    }
+
+    #[test]
+    fn gap_between_exec_blocks_are_separated_by_one() {
+        assert_eq!(gap_between(&exec(), &text("a")), 1);
+        assert_eq!(gap_between(&text("a"), &exec()), 1);
+    }
+
+    #[test]
+    fn gap_between_thinking_blocks_collapse() {
+        assert_eq!(gap_between(&thinking("a"), &thinking("b")), 0);
+    }
+
+    #[test]
+    fn gap_between_thinking_and_text_is_one() {
+        assert_eq!(gap_between(&thinking("a"), &text("b")), 1);
+        assert_eq!(gap_between(&text("a"), &thinking("b")), 1);
+    }
+
+    #[test]
+    fn gap_between_tool_calls_separated_by_one() {
+        assert_eq!(gap_between(&tool("a"), &tool("b")), 1);
+        assert_eq!(gap_between(&text("a"), &tool("b")), 1);
+        assert_eq!(gap_between(&tool("a"), &text("b")), 1);
+    }
+
+    #[test]
+    fn gap_between_compacted_separates_both_sides() {
+        assert_eq!(gap_between(&text("a"), &compacted()), 1);
+        assert_eq!(gap_between(&compacted(), &text("a")), 1);
+    }
+
+    #[test]
+    fn gap_between_text_after_heading_collapses() {
+        assert_eq!(gap_between(&text("# heading"), &text("body")), 0);
+    }
+
+    #[test]
+    fn gap_between_text_to_text_is_one_normally() {
+        assert_eq!(gap_between(&text("a"), &text("b")), 1);
+    }
+
+    // ── is_command_like ──────────────────────────────────────────────
+
+    #[test]
+    fn is_command_like_detects_slash_command() {
+        assert!(is_command_like("/help"));
+        assert!(is_command_like("/quit"));
+        assert!(is_command_like("/foo bar baz"));
+    }
+
+    #[test]
+    fn is_command_like_rejects_bare_slash_or_non_slash() {
+        assert!(!is_command_like("/"));
+        assert!(!is_command_like("/   "));
+        assert!(!is_command_like("help"));
+        assert!(!is_command_like(""));
+    }
 }

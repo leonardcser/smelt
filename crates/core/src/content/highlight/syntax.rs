@@ -304,3 +304,304 @@ fn print_split_regions(
     out.reset_style();
     col
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::content::builder::test_util::render_test;
+    use crate::content::BoxContext;
+    use crate::theme::HlGroup;
+    use syntect::highlighting::Color as SyntectColor;
+    use syntect::highlighting::FontStyle;
+
+    fn style(rgb: (u8, u8, u8)) -> Style {
+        Style {
+            foreground: SyntectColor {
+                r: rgb.0,
+                g: rgb.1,
+                b: rgb.2,
+                a: 255,
+            },
+            background: SyntectColor {
+                r: 0,
+                g: 0,
+                b: 0,
+                a: 0,
+            },
+            font_style: FontStyle::empty(),
+        }
+    }
+
+    fn join_text(block: &crate::content::builder::test_util::TestBlock) -> String {
+        block
+            .lines
+            .iter()
+            .map(|l| l.text.as_str())
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    fn bctx(inner_w: usize) -> BoxContext {
+        BoxContext {
+            left: "│ ",
+            right: " │",
+            group: HlGroup::default(),
+            inner_w,
+        }
+    }
+
+    // ── render_code_block ─────────────────────────────────────────────
+
+    #[test]
+    fn render_code_block_unknown_lang_falls_back_to_plain_text() {
+        let block = render_test(80, |out| {
+            render_code_block(
+                out,
+                &["plain line"],
+                "absolutely-no-such-lang-xyz",
+                80,
+                false,
+                None,
+                false,
+            );
+        });
+        assert_eq!(block.lines.len(), 1);
+        assert!(block.lines[0].text.contains("plain line"));
+    }
+
+    #[test]
+    fn render_code_block_expands_tabs_to_four_spaces() {
+        let block = render_test(80, |out| {
+            render_code_block(out, &["\tindented"], "rust", 80, false, None, false);
+        });
+        assert!(block.lines[0].text.contains("    indented"));
+        assert!(!block.lines[0].text.contains('\t'));
+    }
+
+    #[test]
+    fn render_code_block_dim_does_not_crash_and_emits_output() {
+        let mut rows = 0u16;
+        let block = render_test(80, |out| {
+            rows = render_code_block(out, &["let x = 1;"], "rust", 80, true, None, false);
+        });
+        assert!(rows >= 1);
+        assert!(block.lines[0].text.contains("let x = 1;"));
+    }
+
+    #[test]
+    fn render_code_block_lang_alias_maps_to_extension() {
+        // "javascript" should hit the js extension branch.
+        let block = render_test(80, |out| {
+            render_code_block(out, &["const x = 1;"], "javascript", 80, false, None, false);
+        });
+        assert!(block.lines[0].text.contains("const x = 1;"));
+    }
+
+    #[test]
+    fn render_code_block_with_box_context_prints_borders_per_row() {
+        let ctx = bctx(40);
+        let block = render_test(80, |out| {
+            render_code_block(out, &["hi"], "rust", 80, false, Some(&ctx), false);
+        });
+        let joined = join_text(&block);
+        assert!(joined.contains("│"));
+    }
+
+    #[test]
+    fn render_code_block_with_box_context_and_dim_renders() {
+        let ctx = bctx(40);
+        let mut rows = 0u16;
+        render_test(80, |out| {
+            rows = render_code_block(out, &["x"], "rust", 80, true, Some(&ctx), false);
+        });
+        assert!(rows >= 1);
+    }
+
+    #[test]
+    fn render_code_block_wraps_long_line_into_multiple_visual_rows() {
+        let long: String = "x".repeat(100);
+        let mut rows = 0u16;
+        let block = render_test(80, |out| {
+            rows = render_code_block(out, &[long.as_str()], "rust", 20, false, None, false);
+        });
+        assert!(rows >= 2);
+        // Every visual row's text contains some 'x'.
+        for line in &block.lines {
+            assert!(line.text.contains('x'));
+        }
+    }
+
+    #[test]
+    fn render_code_block_fence_attaches_source_text_per_line() {
+        let block = render_test(80, |out| {
+            render_code_block(out, &["a", "b", "c"], "rust", 80, false, None, true);
+        });
+        assert_eq!(block.lines[0].source_text.as_deref(), Some("```rust\na"));
+        assert_eq!(block.lines[1].source_text.as_deref(), Some("b"));
+        assert_eq!(block.lines[2].source_text.as_deref(), Some("c\n```"));
+    }
+
+    #[test]
+    fn render_code_block_no_fence_attaches_raw_source_per_line() {
+        let block = render_test(80, |out| {
+            render_code_block(out, &["a", "b"], "rust", 80, false, None, false);
+        });
+        assert_eq!(block.lines[0].source_text.as_deref(), Some("a"));
+        assert_eq!(block.lines[1].source_text.as_deref(), Some("b"));
+    }
+
+    // ── render_highlighted / print_syntax_file ────────────────────────
+
+    #[test]
+    fn print_syntax_file_uses_extension_from_path() {
+        let block = render_test(80, |out| {
+            print_syntax_file(out, "let x = 1;\nlet y = 2;\n", "/path/file.rs", 0, 0);
+        });
+        let joined = join_text(&block);
+        assert!(joined.contains("let x = 1;"));
+        assert!(joined.contains("let y = 2;"));
+        // Gutter shows line numbers 1 and 2.
+        assert!(joined.contains(" 1"));
+        assert!(joined.contains(" 2"));
+    }
+
+    #[test]
+    fn print_syntax_file_falls_back_to_plain_text_for_unknown_extension() {
+        let block = render_test(80, |out| {
+            print_syntax_file(out, "content\n", "/path/no_ext", 0, 0);
+        });
+        assert!(join_text(&block).contains("content"));
+    }
+
+    #[test]
+    fn print_syntax_file_ext_override_takes_precedence_over_path_extension() {
+        // Force rust highlighting on a .txt path.
+        let mut emitted_a = 0u16;
+        render_test(80, |out| {
+            emitted_a =
+                print_syntax_file_ext(out, "let x = 1;\n", "/path/file.txt", Some("rs"), 0, 0);
+        });
+        assert!(emitted_a >= 1);
+    }
+
+    #[test]
+    fn print_syntax_file_respects_max_rows_emit_limit() {
+        let content = "a\nb\nc\nd\ne\n";
+        let mut emitted = 0u16;
+        render_test(80, |out| {
+            emitted = print_syntax_file(out, content, "/path/file.txt", 0, 2);
+        });
+        assert_eq!(emitted, 2);
+    }
+
+    #[test]
+    fn print_syntax_file_skips_leading_rows() {
+        let content = "first\nsecond\nthird\n";
+        let block = render_test(80, |out| {
+            print_syntax_file(out, content, "/path/file.txt", 2, 0);
+        });
+        let joined = join_text(&block);
+        assert!(joined.contains("third"));
+        assert!(!joined.contains("first"));
+        assert!(!joined.contains("second"));
+    }
+
+    #[test]
+    fn print_syntax_file_zero_max_rows_means_unlimited() {
+        let content = "1\n2\n3\n";
+        let mut emitted = 0u16;
+        render_test(80, |out| {
+            emitted = print_syntax_file(out, content, "/path/file.txt", 0, 0);
+        });
+        assert_eq!(emitted, 3);
+    }
+
+    // ── split_regions_into_rows ───────────────────────────────────────
+
+    #[test]
+    fn split_regions_into_rows_wraps_at_max_width() {
+        render_test(80, |out| {
+            let regions = vec![(style((255, 0, 0)), "abcdefgh")];
+            let rows = split_regions_into_rows(out, &regions, 3);
+            assert_eq!(rows.len(), 3);
+            let concat: String = rows
+                .iter()
+                .flat_map(|r| r.iter().map(|(_, t)| t.as_str()))
+                .collect();
+            assert_eq!(concat, "abcdefgh");
+        });
+    }
+
+    #[test]
+    fn split_regions_into_rows_strips_trailing_newline_and_cr() {
+        render_test(80, |out| {
+            let regions = vec![(style((0, 0, 0)), "hello\r\n")];
+            let rows = split_regions_into_rows(out, &regions, 10);
+            assert_eq!(rows.len(), 1);
+            let concat: String = rows[0].iter().map(|(_, t)| t.as_str()).collect();
+            assert_eq!(concat, "hello");
+        });
+    }
+
+    #[test]
+    fn split_regions_into_rows_ignores_empty_regions() {
+        render_test(80, |out| {
+            let regions = vec![
+                (style((0, 0, 0)), ""),
+                (style((0, 0, 0)), "ab"),
+                (style((0, 0, 0)), ""),
+            ];
+            let rows = split_regions_into_rows(out, &regions, 10);
+            assert_eq!(rows.len(), 1);
+            assert_eq!(rows[0].len(), 1);
+            assert_eq!(rows[0][0].1, "ab");
+        });
+    }
+
+    #[test]
+    fn split_regions_into_rows_clamps_max_width_to_one() {
+        render_test(80, |out| {
+            let regions = vec![(style((0, 0, 0)), "ab")];
+            let rows = split_regions_into_rows(out, &regions, 0);
+            assert_eq!(rows.len(), 2);
+            assert_eq!(rows[0][0].1, "a");
+            assert_eq!(rows[1][0].1, "b");
+        });
+    }
+
+    #[test]
+    fn split_regions_into_rows_emits_empty_row_for_empty_input() {
+        render_test(80, |out| {
+            let rows = split_regions_into_rows(out, &[], 4);
+            assert_eq!(rows.len(), 1);
+            assert!(rows[0].is_empty());
+        });
+    }
+
+    // ── BashHighlighter ───────────────────────────────────────────────
+
+    #[test]
+    fn bash_highlighter_default_matches_new() {
+        let _h = BashHighlighter::default();
+    }
+
+    #[test]
+    fn bash_highlighter_print_line_emits_text_into_buffer() {
+        let mut hi = BashHighlighter::new();
+        let block = render_test(80, |out| {
+            hi.print_line(out, "echo hello");
+            out.newline();
+        });
+        assert!(block.lines[0].text.contains("echo hello"));
+    }
+
+    #[test]
+    fn bash_highlighter_print_line_strips_trailing_newline_artifacts() {
+        let mut hi = BashHighlighter::new();
+        let block = render_test(80, |out| {
+            hi.print_line(out, "ls");
+            out.newline();
+        });
+        assert_eq!(block.lines[0].text, "ls");
+    }
+}

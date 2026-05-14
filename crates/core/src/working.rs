@@ -355,3 +355,321 @@ fn avg(samples: &[f64]) -> Option<f64> {
     }
     Some(samples.iter().sum::<f64>() / samples.len() as f64)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn avg_returns_none_for_empty_samples() {
+        assert_eq!(avg(&[]), None);
+    }
+
+    #[test]
+    fn avg_computes_arithmetic_mean() {
+        assert_eq!(avg(&[1.0, 2.0, 3.0]), Some(2.0));
+        assert_eq!(avg(&[5.0]), Some(5.0));
+    }
+
+    #[test]
+    fn new_starts_idle_and_not_animating() {
+        let s = WorkingState::new();
+        assert!(!s.is_animating());
+        assert!(!s.is_compacting());
+        assert_eq!(s.elapsed(), None);
+        assert!(s.turn_meta().is_none());
+        assert!(s.spinner_char().is_none());
+        assert!(s.throbber_data(false).is_empty());
+    }
+
+    #[test]
+    fn default_matches_new() {
+        let s = WorkingState::default();
+        assert!(!s.is_animating());
+    }
+
+    #[test]
+    fn begin_working_marks_state_animating() {
+        let mut s = WorkingState::new();
+        s.begin(TurnPhase::Working);
+        assert!(s.is_animating());
+        assert!(!s.is_compacting());
+        assert!(s.elapsed().is_some());
+        assert!(s.spinner_char().is_some());
+    }
+
+    #[test]
+    fn begin_compacting_reports_compacting_flag() {
+        let mut s = WorkingState::new();
+        s.begin(TurnPhase::Compacting);
+        assert!(s.is_animating());
+        assert!(s.is_compacting());
+    }
+
+    #[test]
+    fn begin_when_already_live_swaps_phase_without_resetting_since() {
+        let mut s = WorkingState::new();
+        s.begin(TurnPhase::Working);
+        s.record_tokens_per_sec(50.0);
+        s.begin(TurnPhase::Compacting);
+        // Tokens recorded under the first phase survive the phase swap.
+        assert!(s.is_compacting());
+        let meta = s.turn_meta().unwrap();
+        assert_eq!(meta.avg_tps, Some(50.0));
+    }
+
+    #[test]
+    fn begin_clears_archived_last_turn() {
+        let mut s = WorkingState::new();
+        s.begin(TurnPhase::Working);
+        s.finish(TurnOutcome::Done);
+        assert!(s.turn_meta().is_some());
+        s.begin(TurnPhase::Working);
+        // After begin, last is cleared; turn_meta now reflects live turn.
+        let meta = s.turn_meta().unwrap();
+        assert!(!meta.interrupted);
+        assert!(meta.avg_tps.is_none());
+    }
+
+    #[test]
+    fn finish_archives_outcome_and_clears_live() {
+        let mut s = WorkingState::new();
+        s.begin(TurnPhase::Working);
+        s.record_tokens_per_sec(10.0);
+        s.record_tokens_per_sec(30.0);
+        s.finish(TurnOutcome::Done);
+        assert!(!s.is_animating());
+        let meta = s.turn_meta().unwrap();
+        assert!(!meta.interrupted);
+        assert_eq!(meta.avg_tps, Some(20.0));
+    }
+
+    #[test]
+    fn finish_interrupted_sets_interrupted_flag() {
+        let mut s = WorkingState::new();
+        s.begin(TurnPhase::Working);
+        s.finish(TurnOutcome::Interrupted);
+        let meta = s.turn_meta().unwrap();
+        assert!(meta.interrupted);
+    }
+
+    #[test]
+    fn finish_without_live_archives_zero_elapsed() {
+        let mut s = WorkingState::new();
+        s.finish(TurnOutcome::Done);
+        let meta = s.turn_meta().unwrap();
+        assert_eq!(meta.elapsed_ms, 0);
+        assert!(meta.avg_tps.is_none());
+    }
+
+    #[test]
+    fn clear_drops_both_live_and_last() {
+        let mut s = WorkingState::new();
+        s.begin(TurnPhase::Working);
+        s.finish(TurnOutcome::Done);
+        s.clear();
+        assert!(!s.is_animating());
+        assert!(s.turn_meta().is_none());
+        assert!(s.elapsed().is_none());
+    }
+
+    #[test]
+    fn record_tokens_per_sec_only_applies_while_live() {
+        let mut s = WorkingState::new();
+        s.record_tokens_per_sec(99.0); // dropped — no live turn
+        s.begin(TurnPhase::Working);
+        s.record_tokens_per_sec(1.0);
+        s.record_tokens_per_sec(3.0);
+        let meta = s.turn_meta().unwrap();
+        assert_eq!(meta.avg_tps, Some(2.0));
+    }
+
+    #[test]
+    fn set_paused_freezes_spinner_and_clears_glyph() {
+        let mut s = WorkingState::new();
+        s.begin(TurnPhase::Working);
+        assert!(s.spinner_char().is_some());
+        s.set_paused(true);
+        assert!(s.spinner_char().is_none());
+        s.set_paused(false);
+        assert!(s.spinner_char().is_some());
+    }
+
+    #[test]
+    fn set_paused_is_idempotent() {
+        let mut s = WorkingState::new();
+        s.begin(TurnPhase::Working);
+        s.set_paused(true);
+        s.set_paused(true); // no-op
+        assert!(s.spinner_char().is_none());
+        s.set_paused(false);
+        s.set_paused(false); // no-op
+        assert!(s.spinner_char().is_some());
+    }
+
+    #[test]
+    fn set_paused_without_live_turn_is_noop() {
+        let mut s = WorkingState::new();
+        s.set_paused(true);
+        s.set_paused(false);
+        assert!(!s.is_animating());
+    }
+
+    #[test]
+    fn last_spinner_frame_round_trips_while_live() {
+        let mut s = WorkingState::new();
+        assert!(s.last_spinner_frame().is_none());
+        s.begin(TurnPhase::Working);
+        // Fresh live turn defaults to usize::MAX.
+        assert_eq!(s.last_spinner_frame(), Some(usize::MAX));
+        s.set_last_spinner_frame(7);
+        assert_eq!(s.last_spinner_frame(), Some(7));
+    }
+
+    #[test]
+    fn set_last_spinner_frame_without_live_is_noop() {
+        let mut s = WorkingState::new();
+        s.set_last_spinner_frame(5);
+        assert!(s.last_spinner_frame().is_none());
+    }
+
+    #[test]
+    fn restore_from_turn_meta_archives_done_outcome() {
+        let mut s = WorkingState::new();
+        let meta = TurnMeta {
+            elapsed_ms: 1500,
+            avg_tps: Some(42.0),
+            interrupted: false,
+            tool_elapsed: std::collections::HashMap::new(),
+        };
+        s.restore_from_turn_meta(&meta);
+        assert!(!s.is_animating());
+        let round = s.turn_meta().unwrap();
+        assert_eq!(round.elapsed_ms, 1500);
+        assert_eq!(round.avg_tps, Some(42.0));
+        assert!(!round.interrupted);
+    }
+
+    #[test]
+    fn restore_from_turn_meta_archives_interrupted_outcome() {
+        let mut s = WorkingState::new();
+        let meta = TurnMeta {
+            elapsed_ms: 200,
+            avg_tps: None,
+            interrupted: true,
+            tool_elapsed: std::collections::HashMap::new(),
+        };
+        s.restore_from_turn_meta(&meta);
+        let round = s.turn_meta().unwrap();
+        assert!(round.interrupted);
+    }
+
+    #[test]
+    fn restore_from_turn_meta_discards_existing_live_turn() {
+        let mut s = WorkingState::new();
+        s.begin(TurnPhase::Working);
+        let meta = TurnMeta {
+            elapsed_ms: 0,
+            avg_tps: None,
+            interrupted: false,
+            tool_elapsed: std::collections::HashMap::new(),
+        };
+        s.restore_from_turn_meta(&meta);
+        assert!(!s.is_animating());
+    }
+
+    #[test]
+    fn throbber_data_working_emits_label_and_clock() {
+        let mut s = WorkingState::new();
+        s.begin(TurnPhase::Working);
+        let items = s.throbber_data(false);
+        assert!(items.len() >= 2);
+        assert!(items[0].text.contains("working"));
+        assert!(items[0].bold);
+        assert!(!items[0].is_muted);
+        assert!(items[1].is_muted);
+    }
+
+    #[test]
+    fn throbber_data_compacting_emits_compacting_label() {
+        let mut s = WorkingState::new();
+        s.begin(TurnPhase::Compacting);
+        let items = s.throbber_data(false);
+        assert!(items.iter().any(|i| i.text.contains("compacting")));
+    }
+
+    #[test]
+    fn throbber_data_includes_tps_when_requested_and_available() {
+        let mut s = WorkingState::new();
+        s.begin(TurnPhase::Working);
+        s.record_tokens_per_sec(12.5);
+        let with_tps = s.throbber_data(true);
+        let with_tps_text: String = with_tps.iter().map(|i| i.text.as_str()).collect();
+        assert!(with_tps_text.contains("12.5 tok/s"));
+        let without_tps = s.throbber_data(false);
+        let without_tps_text: String = without_tps.iter().map(|i| i.text.as_str()).collect();
+        assert!(!without_tps_text.contains("tok/s"));
+    }
+
+    #[test]
+    fn throbber_data_omits_tps_when_no_samples_recorded() {
+        let mut s = WorkingState::new();
+        s.begin(TurnPhase::Working);
+        let items = s.throbber_data(true);
+        let text: String = items.iter().map(|i| i.text.as_str()).collect();
+        assert!(!text.contains("tok/s"));
+    }
+
+    #[test]
+    fn throbber_data_retrying_includes_attempt_and_countdown() {
+        let mut s = WorkingState::new();
+        s.begin(TurnPhase::Retrying {
+            delay: Duration::from_secs(5),
+            attempt: 2,
+        });
+        let items = s.throbber_data(false);
+        let text: String = items.iter().map(|i| i.text.as_str()).collect();
+        assert!(text.contains("retrying"));
+        assert!(text.contains("#2"));
+        // Retrying paints the "working" label as muted.
+        let working_label = items
+            .iter()
+            .find(|i| i.text.contains("working"))
+            .expect("working label present");
+        assert!(working_label.is_muted);
+    }
+
+    #[test]
+    fn throbber_data_done_outcome_emits_done_text_and_optional_tps() {
+        let mut s = WorkingState::new();
+        s.begin(TurnPhase::Working);
+        s.record_tokens_per_sec(10.0);
+        s.finish(TurnOutcome::Done);
+        let items = s.throbber_data(true);
+        let text: String = items.iter().map(|i| i.text.as_str()).collect();
+        assert!(text.contains("done"));
+        assert!(text.contains("10.0 tok/s"));
+    }
+
+    #[test]
+    fn throbber_data_done_without_tps_omits_tok_per_sec() {
+        let mut s = WorkingState::new();
+        s.begin(TurnPhase::Working);
+        s.finish(TurnOutcome::Done);
+        let items = s.throbber_data(true);
+        let text: String = items.iter().map(|i| i.text.as_str()).collect();
+        assert!(text.contains("done"));
+        assert!(!text.contains("tok/s"));
+    }
+
+    #[test]
+    fn throbber_data_interrupted_outcome_emits_interrupted_text() {
+        let mut s = WorkingState::new();
+        s.begin(TurnPhase::Working);
+        s.finish(TurnOutcome::Interrupted);
+        let items = s.throbber_data(true);
+        let text: String = items.iter().map(|i| i.text.as_str()).collect();
+        assert!(text.contains("interrupted"));
+        assert!(!text.contains("tok/s"));
+    }
+}
