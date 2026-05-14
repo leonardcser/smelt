@@ -21,11 +21,14 @@ use crate::smelt_term::{
 use crossterm::event::{KeyCode, KeyModifiers};
 
 /// Where on the screen an overlay anchors. Carries anchor-specific extras
-/// only — no size fields.
+/// only — no size fields. Dock anchors all reserve the bottom statusline row.
 #[derive(Clone, Copy)]
 enum OverlayAnchor {
     Center,
+    DockTop,
     DockBottom,
+    DockLeft,
+    DockRight,
     /// Absolute screen position; `(row, col)` are offsets from `corner`.
     ScreenAt {
         corner: Corner,
@@ -218,6 +221,9 @@ pub(crate) fn open_overlay(app: &mut TuiApp, opts: mlua::Table) -> Result<u64, S
 fn parse_overlay_anchor(opts: &mlua::Table) -> Result<OverlayAnchor, String> {
     match opts.get::<String>("anchor").ok().as_deref() {
         Some("dock_bottom") | None => Ok(OverlayAnchor::DockBottom),
+        Some("dock_top") => Ok(OverlayAnchor::DockTop),
+        Some("dock_left") => Ok(OverlayAnchor::DockLeft),
+        Some("dock_right") => Ok(OverlayAnchor::DockRight),
         Some("center") => Ok(OverlayAnchor::Center),
         Some("screen_at") => {
             let corner =
@@ -242,7 +248,7 @@ fn parse_overlay_anchor(opts: &mlua::Table) -> Result<OverlayAnchor, String> {
             })
         }
         Some(other) => Err(format!(
-            "overlay anchor: unknown '{other}' (expected dock_bottom|center|screen_at|win)"
+            "overlay anchor: unknown '{other}' (expected dock_bottom|dock_top|dock_left|dock_right|center|screen_at|win)"
         )),
     }
 }
@@ -253,6 +259,26 @@ impl OverlayAnchor {
         match self {
             OverlayAnchor::Center => Anchor::ScreenCenter,
             OverlayAnchor::DockBottom => Anchor::ScreenBottom { above_rows: 1 },
+            // The three other docks share `ScreenAt` with the corresponding
+            // corner placed flush against the screen edge. The statusline
+            // carve-out is enforced via `anchor_extent` (which subtracts a row
+            // before size resolution runs), so the resulting rect never
+            // overlaps the statusline.
+            OverlayAnchor::DockTop => Anchor::ScreenAt {
+                row: 0,
+                col: 0,
+                corner: Corner::NW,
+            },
+            OverlayAnchor::DockLeft => Anchor::ScreenAt {
+                row: 0,
+                col: 0,
+                corner: Corner::NW,
+            },
+            OverlayAnchor::DockRight => Anchor::ScreenAt {
+                row: 0,
+                col: term_w.saturating_sub(1) as i32,
+                corner: Corner::NE,
+            },
             OverlayAnchor::ScreenAt { corner, row, col } => {
                 // Lua `(row, col)` are offsets from the named corner; translate to
                 // absolute terminal coordinates so `Anchor::ScreenAt` resolves the
@@ -291,8 +317,13 @@ impl OverlayAnchor {
 fn anchor_extent(a: OverlayAnchor, (term_w, term_h): (u16, u16)) -> (u16, u16) {
     match a {
         // Subtract the statusline row from any anchor that lives within the
-        // primary viewport.
-        OverlayAnchor::DockBottom | OverlayAnchor::Center => (term_w, term_h.saturating_sub(1)),
+        // primary viewport. Dock anchors all reserve it; `ScreenAt` / `Win` do
+        // not (callers can opt in via `height = <cells>`).
+        OverlayAnchor::DockBottom
+        | OverlayAnchor::DockTop
+        | OverlayAnchor::DockLeft
+        | OverlayAnchor::DockRight
+        | OverlayAnchor::Center => (term_w, term_h.saturating_sub(1)),
         OverlayAnchor::ScreenAt { .. } | OverlayAnchor::Win { .. } => (term_w, term_h),
     }
 }
@@ -305,9 +336,15 @@ struct AnchorDefault {
 
 fn anchor_default_size(a: OverlayAnchor) -> AnchorDefault {
     match a {
-        OverlayAnchor::DockBottom => AnchorDefault {
+        // Horizontal docks span the full width and a percentage of the height.
+        OverlayAnchor::DockBottom | OverlayAnchor::DockTop => AnchorDefault {
             width: Size::Fill,
             height: Size::Pct(60),
+        },
+        // Vertical docks span a percentage of the width and the full height.
+        OverlayAnchor::DockLeft | OverlayAnchor::DockRight => AnchorDefault {
+            width: Size::Pct(30),
+            height: Size::Fill,
         },
         OverlayAnchor::Center => AnchorDefault {
             width: Size::Pct(70),

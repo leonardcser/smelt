@@ -222,6 +222,8 @@ Overlay sizing is two orthogonal concepts:
 
 - **Anchor** — where the overlay lives. Valid values:
   - `"dock_bottom"` (default) — docked above the statusline.
+  - `"dock_top"` / `"dock_left"` / `"dock_right"` — docked to the named
+    edge. All dock anchors reserve the bottom statusline row.
   - `"center"` — centered on the screen.
   - `"screen_at"` — absolute position; pair with `corner` + `row` + `col`.
   - `"win"` — attached to another window; pair with `target` (win id),
@@ -233,8 +235,9 @@ Overlay sizing is two orthogonal concepts:
   - a `"N%"` string (percent of the anchor's available extent on that axis),
   - `"fill"` (the entire available extent).
 
-Anchor defaults: `dock_bottom` is full-width × 60% tall, `center` is 70% × 60%,
-`screen_at` / `win` require explicit width and height.
+Anchor defaults: `dock_bottom` / `dock_top` are full-width × 60% tall;
+`dock_left` / `dock_right` are 30% wide × full-height; `center` is 70% × 60%;
+`screen_at` / `win` default to 60×20 cells.
 
 For modal dialogs (a markdown panel + an option list + a free-text input, etc.)
 `smelt.ui.dialog.open` is the higher-level surface — it returns the result of

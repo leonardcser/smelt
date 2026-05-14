@@ -146,7 +146,7 @@ fn register_overlay(lua: &Lua, smelt_ui: &mlua::Table) -> LuaResult<()> {
         &overlay_tbl,
         "smelt.ui.overlay",
         "open",
-        "Open a generic overlay composed from `opts.items`. Position with `opts.anchor` (`\"dock_bottom\"` | `\"center\"` | `\"screen_at\"` | `\"win\"`); size each axis with `opts.width` / `opts.height` (fixed) or `opts.max_width` / `opts.max_height` (fit-to-content, capped). Size values accept integers (cells), `\"N%\"` (percent of the anchor's available extent), or `\"fill\"`. Returns the overlay id so it can be focused or closed via `smelt.win`.",
+        "Open a generic overlay composed from `opts.items`. Position with `opts.anchor` (`\"dock_bottom\"` | `\"dock_top\"` | `\"dock_left\"` | `\"dock_right\"` | `\"center\"` | `\"screen_at\"` | `\"win\"`); size each axis with `opts.width` / `opts.height` (fixed) or `opts.max_width` / `opts.max_height` (fit-to-content, capped). Size values accept integers (cells), `\"N%\"` (percent of the anchor's available extent), or `\"fill\"`. Dock anchors reserve the bottom statusline row. Returns the overlay id so it can be focused or closed via `smelt.win`.",
         &["opts"],
         lua,
         |_, opts: mlua::Table| -> LuaResult<u64> {
