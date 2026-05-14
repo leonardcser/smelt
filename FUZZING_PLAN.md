@@ -112,7 +112,10 @@ Smallest possible PR per injection. Tests prove behavior unchanged.
 | 4d | `WorkingState`: pure-fn `now: Instant` (turn-phase scheduling) | `7750a863` | ☑ done |
 | 4e | `tick_timers` + `now_secs` cell + `LuaRuntime::{drive_tasks,execute_tool}` | `2ad28e10` | ☑ done |
 | 4f | `Timers::{set,every}` + `lua/task.rs Sleep` + `stream_parser` tool start | `d94af7c0` | ☑ done |
-| 4g | Remaining sweep: `process.rs`, `engine/agent.rs` `.elapsed()`, `messages.rs`, `session.rs` | — | ◐ next |
+| 4g | `ProcessRegistry::spawn`, `engine/agent.rs` `Turn` `.elapsed()`, `provider/mod.rs` `request_start` | `7ec94334`, `11b97004` | ☑ done |
+| 4h | tui input timers: chord, ctrl-c, last_keypress, pane chord, esc double-tap | `b6236335` | ☑ done |
+| 4i | **Remaining decision-bearing**: `app.rs` main loop frames (`975`, `977`, `1064`, `1066`), `input/mod.rs:158` yank flash, `buffer/kill_ring.rs:155`, `edit/lib.rs:127,810`, transcript timing, `grep.rs` deadline, `process.rs` `Output::run` deadline | — | ◐ next |
+| 4j | **Deferred to Effects (Phase 3)**: `log::entry`, `pricing::now_secs`, `messages.rs` ts, `session.rs:159` `now_ms`, `http/cache.rs`, `provider/mod.rs:182 unix_now`, EPOCH `OnceLock`, OAuth tokio deadlines | — | ☐ |
 | 5 | `RuntimeEnv` (env+cwd+pid+home snapshot) | — | ☐ |
 | 6 | Single-threaded sim runtime + `available_parallelism` = 1 | — | ☐ |
 
