@@ -575,4 +575,400 @@ mod tests {
         let html = "<html><body><style>a{}</style><p>Hi</p></body></html>";
         assert_eq!(to_text(html).trim(), "Hi");
     }
+
+    // ── title ──────────────────────────────────────────────────────
+
+    #[test]
+    fn title_preserves_literal_content_per_html_rcdata_rules() {
+        // HTML5 parses <title> as RCDATA: nested tags are kept verbatim.
+        let html = "<title>a <em>b</em> c</title>";
+        assert_eq!(title(html), Some("a <em>b</em> c".into()));
+    }
+
+    #[test]
+    fn title_returns_none_when_blank() {
+        let html = "<title>   </title>";
+        assert!(title(html).is_none());
+    }
+
+    // ── links ──────────────────────────────────────────────────────
+
+    #[test]
+    fn links_without_base_returns_raw_hrefs() {
+        let html = r#"<a href="/foo">A</a><a href="/bar">B</a>"#;
+        let l = links(html, None);
+        assert_eq!(l, vec!["/foo", "/bar"]);
+    }
+
+    #[test]
+    fn links_dedupes_repeated_targets() {
+        let html = r#"<a href="x">1</a><a href="x">2</a><a href="x">3</a>"#;
+        let l = links(html, None);
+        assert_eq!(l.len(), 1);
+    }
+
+    #[test]
+    fn links_skips_missing_href() {
+        let html = r#"<a>no href</a><a href="ok">yes</a>"#;
+        let l = links(html, None);
+        assert_eq!(l, vec!["ok"]);
+    }
+
+    #[test]
+    fn links_invalid_base_falls_back_to_no_resolution() {
+        let html = r#"<a href="/foo">a</a>"#;
+        let l = links(html, Some("not-a-url"));
+        // url::Url::parse fails on "not-a-url"; base becomes None, raw href returned.
+        assert_eq!(l, vec!["/foo"]);
+    }
+
+    // ── DDG result parsing ─────────────────────────────────────────
+
+    #[test]
+    fn parse_ddg_results_extracts_basic_fields() {
+        let html = r#"
+            <div class="result">
+                <a class="result__a" href="https://example.com">Example</a>
+                <a class="result__snippet">A short description.</a>
+            </div>
+        "#;
+        let r = parse_ddg_results(html);
+        assert_eq!(r.len(), 1);
+        assert_eq!(r[0].title, "Example");
+        assert_eq!(r[0].link, "https://example.com");
+        assert_eq!(r[0].description, "A short description.");
+    }
+
+    #[test]
+    fn parse_ddg_results_extracts_url_from_uddg_param() {
+        let html = r#"
+            <div class="result">
+                <a class="result__a" href="/l/?uddg=https%3A%2F%2Freal.example%2Fpage&rut=abc">Real</a>
+            </div>
+        "#;
+        let r = parse_ddg_results(html);
+        assert_eq!(r.len(), 1);
+        assert_eq!(r[0].link, "https://real.example/page");
+    }
+
+    #[test]
+    fn parse_ddg_results_skips_empty_title() {
+        let html = r#"
+            <div class="result">
+                <a class="result__a" href="https://example.com"></a>
+            </div>
+        "#;
+        let r = parse_ddg_results(html);
+        assert!(r.is_empty());
+    }
+
+    #[test]
+    fn parse_ddg_results_skips_when_link_extraction_fails() {
+        let html = r#"
+            <div class="result">
+                <a class="result__a" href="ftp://nope">Title</a>
+            </div>
+        "#;
+        // extract_ddg_url returns "" for non-http/uddg, so the entry is dropped.
+        let r = parse_ddg_results(html);
+        assert!(r.is_empty());
+    }
+
+    #[test]
+    fn parse_ddg_results_caps_at_twenty() {
+        let mut html = String::new();
+        for i in 0..25 {
+            html.push_str(&format!(
+                r#"<div class="result"><a class="result__a" href="https://e{i}.com">t{i}</a></div>"#
+            ));
+        }
+        let r = parse_ddg_results(&html);
+        assert_eq!(r.len(), 20);
+    }
+
+    #[test]
+    fn parse_ddg_results_web_result_class_alternate_works() {
+        let html = r#"
+            <div class="web-result">
+                <a class="result__a" href="https://x.com">X</a>
+            </div>
+        "#;
+        let r = parse_ddg_results(html);
+        assert_eq!(r.len(), 1);
+        assert_eq!(r[0].link, "https://x.com");
+    }
+
+    // ── to_text ────────────────────────────────────────────────────
+
+    #[test]
+    fn to_text_inserts_newlines_between_blocks() {
+        let html = "<p>one</p><p>two</p>";
+        let t = to_text(html);
+        assert!(t.contains("one"));
+        assert!(t.contains("two"));
+        // Block elements introduce a newline between them.
+        let one = t.find("one").unwrap();
+        let two = t.find("two").unwrap();
+        assert!(t[one..two].contains('\n'));
+    }
+
+    #[test]
+    fn to_text_skips_iframes_and_svg() {
+        let html = "<p>before</p><iframe>inside-frame</iframe><svg>vector</svg><p>after</p>";
+        let t = to_text(html);
+        assert!(!t.contains("inside-frame"));
+        assert!(!t.contains("vector"));
+        assert!(t.contains("before"));
+        assert!(t.contains("after"));
+    }
+
+    // ── to_markdown — headings + paragraphs ───────────────────────
+
+    #[test]
+    fn to_markdown_renders_headings() {
+        let html = "<body><h1>Big</h1><h2>Small</h2></body>";
+        let md = to_markdown(html, None);
+        assert!(md.content.contains("# Big"));
+        assert!(md.content.contains("## Small"));
+    }
+
+    #[test]
+    fn to_markdown_renders_paragraphs() {
+        let html = "<body><p>hello</p><p>world</p></body>";
+        let md = to_markdown(html, None);
+        assert!(md.content.contains("hello"));
+        assert!(md.content.contains("world"));
+    }
+
+    #[test]
+    fn to_markdown_extracts_title_from_head() {
+        let html = "<html><head><title>Doc</title></head><body><p>x</p></body></html>";
+        let md = to_markdown(html, None);
+        assert_eq!(md.title.as_deref(), Some("Doc"));
+    }
+
+    // ── to_markdown — inline formatting ────────────────────────────
+
+    #[test]
+    fn to_markdown_emits_bold_for_strong_and_b() {
+        let html = "<body><p>a <strong>x</strong> b <b>y</b></p></body>";
+        let md = to_markdown(html, None);
+        assert!(md.content.contains("**x**"));
+        assert!(md.content.contains("**y**"));
+    }
+
+    #[test]
+    fn to_markdown_emits_italic_for_em_and_i() {
+        let html = "<body><p><em>e</em> <i>i</i></p></body>";
+        let md = to_markdown(html, None);
+        assert!(md.content.contains("*e*"));
+        assert!(md.content.contains("*i*"));
+    }
+
+    #[test]
+    fn to_markdown_emits_inline_code() {
+        let html = "<body><p>see <code>fn x()</code></p></body>";
+        let md = to_markdown(html, None);
+        assert!(md.content.contains("`fn x()`"));
+    }
+
+    // ── to_markdown — links + images ───────────────────────────────
+
+    #[test]
+    fn to_markdown_emits_markdown_link_syntax() {
+        let html = r#"<body><p><a href="https://x.com">site</a></p></body>"#;
+        let md = to_markdown(html, None);
+        assert!(md.content.contains("[site](https://x.com)"));
+    }
+
+    #[test]
+    fn to_markdown_unwraps_link_to_text_when_href_is_fragment_only() {
+        let html = r##"<body><p><a href="#anchor">text</a></p></body>"##;
+        let md = to_markdown(html, None);
+        assert!(md.content.contains("text"));
+        assert!(!md.content.contains("](#anchor"));
+    }
+
+    #[test]
+    fn to_markdown_uses_href_alone_when_link_text_is_empty() {
+        let html = r#"<body><a href="https://x.com"></a></body>"#;
+        let md = to_markdown(html, None);
+        assert!(md.content.contains("https://x.com"));
+        assert!(!md.content.contains("[]"));
+    }
+
+    #[test]
+    fn to_markdown_emits_image_syntax() {
+        let html = r#"<body><img src="pic.png" alt="cap"></body>"#;
+        let md = to_markdown(html, None);
+        assert!(md.content.contains("![cap](pic.png)"));
+    }
+
+    #[test]
+    fn to_markdown_skips_image_with_empty_src() {
+        let html = r#"<body><img alt="x"></body>"#;
+        let md = to_markdown(html, None);
+        assert!(!md.content.contains("!["));
+    }
+
+    // ── to_markdown — pre / hr / br ────────────────────────────────
+
+    #[test]
+    fn to_markdown_wraps_pre_in_triple_backticks() {
+        let html = "<body><pre>line1\nline2</pre></body>";
+        let md = to_markdown(html, None);
+        assert!(md.content.contains("```"));
+        assert!(md.content.contains("line1"));
+        assert!(md.content.contains("line2"));
+    }
+
+    #[test]
+    fn to_markdown_renders_hr() {
+        let html = "<body><p>a</p><hr><p>b</p></body>";
+        let md = to_markdown(html, None);
+        assert!(md.content.contains("---"));
+    }
+
+    #[test]
+    fn to_markdown_br_becomes_newline() {
+        let html = "<body><p>a<br>b</p></body>";
+        let md = to_markdown(html, None);
+        let a = md.content.find('a').unwrap();
+        let b = md.content.find('b').unwrap();
+        assert!(md.content[a..b].contains('\n'));
+    }
+
+    // ── to_markdown — lists ────────────────────────────────────────
+
+    #[test]
+    fn to_markdown_renders_unordered_list_with_dashes() {
+        let html = "<body><ul><li>one</li><li>two</li></ul></body>";
+        let md = to_markdown(html, None);
+        assert!(md.content.contains("- one"));
+        assert!(md.content.contains("- two"));
+    }
+
+    #[test]
+    fn to_markdown_renders_ordered_list_with_numbers() {
+        let html = "<body><ol><li>first</li><li>second</li></ol></body>";
+        let md = to_markdown(html, None);
+        assert!(md.content.contains("1. first"));
+        assert!(md.content.contains("2. second"));
+    }
+
+    // ── to_markdown — blockquote ───────────────────────────────────
+
+    #[test]
+    fn to_markdown_prefixes_blockquote_lines_with_gt() {
+        let html = "<body><blockquote>quoted text</blockquote></body>";
+        let md = to_markdown(html, None);
+        assert!(md.content.contains("> quoted text"));
+    }
+
+    // ── to_markdown — tables ───────────────────────────────────────
+
+    #[test]
+    fn to_markdown_renders_table_with_header_separator() {
+        let html = "<body><table>\
+            <tr><th>name</th><th>val</th></tr>\
+            <tr><td>a</td><td>1</td></tr>\
+            </table></body>";
+        let md = to_markdown(html, None);
+        assert!(md.content.contains("| name | val |"));
+        assert!(md.content.contains("| --- | --- |"));
+        assert!(md.content.contains("| a | 1 |"));
+    }
+
+    #[test]
+    fn to_markdown_handles_table_without_header() {
+        let html = "<body><table><tr><td>x</td><td>y</td></tr></table></body>";
+        let md = to_markdown(html, None);
+        assert!(md.content.contains("| x | y |"));
+        assert!(!md.content.contains("---"));
+    }
+
+    // ── to_markdown — links collection ─────────────────────────────
+
+    #[test]
+    fn to_markdown_collects_outbound_links_when_base_url_given() {
+        let html = r#"<body>
+            <a href="/foo">a</a>
+            <a href="https://other.com/x">b</a>
+        </body>"#;
+        let md = to_markdown(html, Some("https://example.com"));
+        assert_eq!(md.links.len(), 2);
+        assert!(md.links.contains(&"https://example.com/foo".to_string()));
+        assert!(md.links.contains(&"https://other.com/x".to_string()));
+    }
+
+    #[test]
+    fn to_markdown_drops_javascript_mailto_tel_fragment_links() {
+        let html = r##"<body>
+            <a href="javascript:void(0)">js</a>
+            <a href="mailto:x@y.com">m</a>
+            <a href="tel:+15551234">t</a>
+            <a href="#anchor">a</a>
+            <a href="https://keep.com">k</a>
+        </body>"##;
+        let md = to_markdown(html, Some("https://example.com"));
+        assert_eq!(md.links, vec!["https://keep.com/"]);
+    }
+
+    #[test]
+    fn to_markdown_strips_fragments_from_collected_links() {
+        let html = r##"<body><a href="/page#section">a</a></body>"##;
+        let md = to_markdown(html, Some("https://example.com"));
+        assert_eq!(md.links, vec!["https://example.com/page"]);
+    }
+
+    #[test]
+    fn to_markdown_dedupes_collected_links() {
+        let html = r#"<body>
+            <a href="/a">first</a>
+            <a href="/a">second</a>
+        </body>"#;
+        let md = to_markdown(html, Some("https://example.com"));
+        assert_eq!(md.links.len(), 1);
+    }
+
+    #[test]
+    fn to_markdown_caps_collected_links_at_fifty() {
+        let mut html = String::from("<body>");
+        for i in 0..70 {
+            html.push_str(&format!(r#"<a href="/p{i}">x</a>"#));
+        }
+        html.push_str("</body>");
+        let md = to_markdown(&html, Some("https://example.com"));
+        assert_eq!(md.links.len(), 50);
+    }
+
+    #[test]
+    fn to_markdown_skips_link_collection_when_no_base_url() {
+        let html = r#"<body><a href="/a">x</a></body>"#;
+        let md = to_markdown(html, None);
+        assert!(md.links.is_empty());
+    }
+
+    // ── extract_ddg_url ────────────────────────────────────────────
+
+    #[test]
+    fn extract_ddg_url_returns_direct_http_urls() {
+        assert_eq!(
+            extract_ddg_url("https://example.com/page"),
+            "https://example.com/page"
+        );
+        assert_eq!(extract_ddg_url("http://x.org"), "http://x.org");
+    }
+
+    #[test]
+    fn extract_ddg_url_returns_empty_for_unknown_scheme() {
+        assert_eq!(extract_ddg_url("ftp://x"), "");
+        assert_eq!(extract_ddg_url("/relative"), "");
+    }
+
+    #[test]
+    fn extract_ddg_url_decodes_uddg_param() {
+        let url = "/l/?uddg=https%3A%2F%2Fdest.example%2Fpath&rut=x";
+        assert_eq!(extract_ddg_url(url), "https://dest.example/path");
+    }
 }

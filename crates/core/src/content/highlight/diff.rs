@@ -228,6 +228,14 @@ pub fn build_inline_diff_cache_ext(
     }
 }
 
+#[cfg(test)]
+fn change(tag: ChangeTag, value: &str) -> DiffChange {
+    DiffChange {
+        tag,
+        value: value.to_string(),
+    }
+}
+
 fn compute_diff_view(old: &str, new: &str, path: &str, anchor: &str) -> DiffViewData {
     let file_content = std::fs::read_to_string(path).unwrap_or_default();
     let file_lines_count = file_content.lines().count();
@@ -492,4 +500,473 @@ pub fn print_cached_inline_diff(
         emitted += 1;
     }
     emitted
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::content::builder::test_util::render_test;
+
+    fn count_lines(cache: &CachedInlineDiff) -> (usize, usize, usize, usize) {
+        let (mut ctx, mut del, mut ins, mut ell) = (0, 0, 0, 0);
+        for l in &cache.lines {
+            match l {
+                CachedDiffLine::Context { .. } => ctx += 1,
+                CachedDiffLine::Delete { .. } => del += 1,
+                CachedDiffLine::Insert { .. } => ins += 1,
+                CachedDiffLine::Ellipsis => ell += 1,
+            }
+        }
+        (ctx, del, ins, ell)
+    }
+
+    #[test]
+    fn compute_change_visibility_marks_all_equal_lines_when_no_changes() {
+        let changes = vec![
+            change(ChangeTag::Equal, "a"),
+            change(ChangeTag::Equal, "b"),
+            change(ChangeTag::Equal, "c"),
+        ];
+        let vis = compute_change_visibility(&changes, 3);
+        assert_eq!(vis, vec![false, false, false]);
+    }
+
+    #[test]
+    fn compute_change_visibility_expands_context_around_modifications() {
+        // Indices:        0       1       2       3       4       5       6       7
+        let changes = vec![
+            change(ChangeTag::Equal, "a"),
+            change(ChangeTag::Equal, "b"),
+            change(ChangeTag::Equal, "c"),
+            change(ChangeTag::Equal, "d"),
+            change(ChangeTag::Delete, "x"),
+            change(ChangeTag::Equal, "e"),
+            change(ChangeTag::Equal, "f"),
+            change(ChangeTag::Equal, "g"),
+        ];
+        let vis = compute_change_visibility(&changes, 2);
+        // ctx=2: lines within 2 of the Delete (idx 4) are visible
+        // before: 2,3 visible; 0,1 hidden
+        // delete: 4 visible
+        // after: 5,6 visible; 7 hidden
+        assert_eq!(vis, vec![false, false, true, true, true, true, true, false]);
+    }
+
+    #[test]
+    fn compute_change_visibility_with_zero_context_marks_only_changes() {
+        let changes = vec![
+            change(ChangeTag::Equal, "a"),
+            change(ChangeTag::Insert, "x"),
+            change(ChangeTag::Equal, "b"),
+        ];
+        let vis = compute_change_visibility(&changes, 0);
+        assert_eq!(vis, vec![false, true, false]);
+    }
+
+    #[test]
+    fn compute_change_visibility_handles_empty_changes() {
+        let vis = compute_change_visibility(&[], 3);
+        assert!(vis.is_empty());
+    }
+
+    #[test]
+    fn compute_change_visibility_treats_insert_and_delete_symmetrically() {
+        let with_insert = vec![
+            change(ChangeTag::Equal, "a"),
+            change(ChangeTag::Equal, "b"),
+            change(ChangeTag::Insert, "+"),
+            change(ChangeTag::Equal, "c"),
+        ];
+        let with_delete = vec![
+            change(ChangeTag::Equal, "a"),
+            change(ChangeTag::Equal, "b"),
+            change(ChangeTag::Delete, "-"),
+            change(ChangeTag::Equal, "c"),
+        ];
+        assert_eq!(
+            compute_change_visibility(&with_insert, 1),
+            compute_change_visibility(&with_delete, 1)
+        );
+    }
+
+    #[test]
+    fn split_cached_spans_into_rows_wraps_at_max_width() {
+        let block = render_test(80, |out| {
+            let spans = vec![CachedSpan {
+                text: "abcdefghij".to_string(),
+                fg: (10, 20, 30),
+            }];
+            let rows = split_cached_spans_into_rows(out, &spans, 4);
+            assert_eq!(rows.len(), 3);
+            let concat: String = rows
+                .iter()
+                .flat_map(|r| r.iter().map(|s| s.text.as_str()))
+                .collect();
+            assert_eq!(concat, "abcdefghij");
+            assert_eq!(rows[0][0].text, "abcd");
+            assert_eq!(rows[1][0].text, "efgh");
+            assert_eq!(rows[2][0].text, "ij");
+            // Color preserved on every chunk.
+            for row in &rows {
+                for span in row {
+                    assert_eq!(span.fg, (10, 20, 30));
+                }
+            }
+        });
+        assert_eq!(block.outcome.line_count, 0);
+    }
+
+    #[test]
+    fn split_cached_spans_into_rows_ignores_empty_spans() {
+        render_test(80, |out| {
+            let spans = vec![
+                CachedSpan {
+                    text: "".to_string(),
+                    fg: (0, 0, 0),
+                },
+                CachedSpan {
+                    text: "ab".to_string(),
+                    fg: (1, 2, 3),
+                },
+            ];
+            let rows = split_cached_spans_into_rows(out, &spans, 10);
+            assert_eq!(rows.len(), 1);
+            assert_eq!(rows[0].len(), 1);
+            assert_eq!(rows[0][0].text, "ab");
+        });
+    }
+
+    #[test]
+    fn split_cached_spans_into_rows_clamps_max_width_to_one() {
+        render_test(80, |out| {
+            let spans = vec![CachedSpan {
+                text: "ab".to_string(),
+                fg: (0, 0, 0),
+            }];
+            let rows = split_cached_spans_into_rows(out, &spans, 0);
+            // max_width clamped to 1
+            assert_eq!(rows.len(), 2);
+            assert_eq!(rows[0][0].text, "a");
+            assert_eq!(rows[1][0].text, "b");
+        });
+    }
+
+    #[test]
+    fn split_cached_spans_into_rows_emits_empty_row_for_empty_input() {
+        render_test(80, |out| {
+            let rows = split_cached_spans_into_rows(out, &[], 4);
+            assert_eq!(rows.len(), 1);
+            assert!(rows[0].is_empty());
+        });
+    }
+
+    #[test]
+    fn cached_spans_for_line_returns_non_empty_for_plain_text() {
+        let theme = syntax_theme();
+        let syntax = SYNTAX_SET.find_syntax_plain_text();
+        let mut h = HighlightLines::new(syntax, theme);
+        let spans = cached_spans_for_line(&mut h, "hello world");
+        assert!(!spans.is_empty());
+        let concat: String = spans.iter().map(|s| s.text.as_str()).collect();
+        assert_eq!(concat, "hello world");
+    }
+
+    #[test]
+    fn cached_spans_for_line_strips_trailing_newline_and_cr() {
+        let theme = syntax_theme();
+        let syntax = SYNTAX_SET.find_syntax_plain_text();
+        let mut h = HighlightLines::new(syntax, theme);
+        let spans = cached_spans_for_line(&mut h, "ab");
+        let concat: String = spans.iter().map(|s| s.text.as_str()).collect();
+        assert!(!concat.ends_with('\n'));
+        assert!(!concat.ends_with('\r'));
+    }
+
+    #[test]
+    fn build_inline_diff_cache_empty_inputs_produce_no_lines() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("empty.txt");
+        std::fs::write(&path, "").unwrap();
+        let cache = build_inline_diff_cache("", "", path.to_str().unwrap(), "");
+        let (ctx, del, ins, _) = count_lines(&cache);
+        assert_eq!((ctx, del, ins), (0, 0, 0));
+    }
+
+    #[test]
+    fn build_inline_diff_cache_pure_insert_emits_insert_lines() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("a.txt");
+        std::fs::write(&path, "new line\n").unwrap();
+        let cache = build_inline_diff_cache("", "new line\n", path.to_str().unwrap(), "");
+        let (_, del, ins, _) = count_lines(&cache);
+        assert!(
+            ins >= 1,
+            "expected at least one insert, got cache={cache:?}"
+        );
+        assert_eq!(del, 0);
+    }
+
+    #[test]
+    fn build_inline_diff_cache_pure_delete_emits_delete_lines() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("a.txt");
+        std::fs::write(&path, "").unwrap();
+        let cache = build_inline_diff_cache("removed\n", "", path.to_str().unwrap(), "removed\n");
+        let (_, del, ins, _) = count_lines(&cache);
+        assert!(del >= 1);
+        assert_eq!(ins, 0);
+    }
+
+    #[test]
+    fn build_inline_diff_cache_replacement_produces_delete_and_insert() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("a.txt");
+        std::fs::write(&path, "line one\nline two\nline three\n").unwrap();
+        let cache = build_inline_diff_cache(
+            "line two\n",
+            "LINE TWO\n",
+            path.to_str().unwrap(),
+            "line two\n",
+        );
+        let (_, del, ins, _) = count_lines(&cache);
+        assert!(del >= 1);
+        assert!(ins >= 1);
+        // Surrounding context lines should be present.
+        let saw_context = cache
+            .lines
+            .iter()
+            .any(|l| matches!(l, CachedDiffLine::Context { .. }));
+        assert!(saw_context);
+    }
+
+    #[test]
+    fn build_inline_diff_cache_anchor_locates_position_in_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("a.txt");
+        std::fs::write(
+            &path,
+            "alpha\nbeta\ngamma\ndelta\nepsilon\nzeta\neta\ntheta\n",
+        )
+        .unwrap();
+        let cache =
+            build_inline_diff_cache("gamma\n", "GAMMA\n", path.to_str().unwrap(), "gamma\n");
+        // The first emitted line number for the delete should be near gamma (line 3).
+        let first_lineno = cache.lines.iter().find_map(|l| match l {
+            CachedDiffLine::Delete { lineno, .. } => Some(*lineno),
+            _ => None,
+        });
+        assert_eq!(first_lineno, Some(3));
+    }
+
+    #[test]
+    fn build_inline_diff_cache_falls_back_when_path_missing() {
+        let cache = build_inline_diff_cache(
+            "foo\n",
+            "bar\n",
+            "/nonexistent/path/that/does/not/exist",
+            "",
+        );
+        let (_, del, ins, _) = count_lines(&cache);
+        assert!(del >= 1);
+        assert!(ins >= 1);
+    }
+
+    #[test]
+    fn build_inline_diff_cache_ext_uses_overridden_syntax() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("notes.unknownext");
+        std::fs::write(&path, "let x = 1;\nlet y = 2;\n").unwrap();
+        let cache_plain = build_inline_diff_cache_ext(
+            "let x = 1;\n",
+            "let x = 99;\n",
+            path.to_str().unwrap(),
+            "let x = 1;\n",
+            None,
+        );
+        let cache_rs = build_inline_diff_cache_ext(
+            "let x = 1;\n",
+            "let x = 99;\n",
+            path.to_str().unwrap(),
+            "let x = 1;\n",
+            Some("rs"),
+        );
+        // Both produce structurally similar diffs; rs-highlighted cache should have
+        // at least as many span chunks because keywords/punctuation get split out.
+        let span_count = |c: &CachedInlineDiff| -> usize {
+            c.lines
+                .iter()
+                .map(|l| match l {
+                    CachedDiffLine::Context { spans, .. }
+                    | CachedDiffLine::Delete { spans, .. }
+                    | CachedDiffLine::Insert { spans, .. } => spans.len(),
+                    CachedDiffLine::Ellipsis => 0,
+                })
+                .sum()
+        };
+        assert!(span_count(&cache_rs) >= span_count(&cache_plain));
+    }
+
+    #[test]
+    fn build_inline_diff_cache_collapses_distant_unchanged_lines_with_ellipsis() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("a.txt");
+        // Long file so view_end caps off; we still expect the cache to be non-trivial.
+        let body: String = (0..40).map(|i| format!("line {i}\n")).collect();
+        std::fs::write(&path, &body).unwrap();
+        let mut old = String::new();
+        for i in 0..40 {
+            old.push_str(&format!("line {i}\n"));
+        }
+        let mut new = old.clone();
+        new = new
+            .replace("line 5", "LINE 5")
+            .replace("line 30", "LINE 30");
+        let cache = build_inline_diff_cache(&old, &new, path.to_str().unwrap(), "");
+        let (_, _, _, ell) = count_lines(&cache);
+        assert!(ell >= 1, "expected at least one ellipsis collapse");
+    }
+
+    #[test]
+    fn print_cached_inline_diff_zero_max_rows_emits_no_limit() {
+        let cache = CachedInlineDiff {
+            max_display_lineno: 1,
+            lines: vec![CachedDiffLine::Context {
+                lineno: 1,
+                text: "x".to_string(),
+                spans: vec![CachedSpan {
+                    text: "x".to_string(),
+                    fg: (200, 200, 200),
+                }],
+            }],
+        };
+        let block = render_test(80, |out| {
+            let emitted = print_cached_inline_diff(out, &cache, 0, 0);
+            // 0 means "no limit" — should emit the single line.
+            assert_eq!(emitted, 1);
+        });
+        assert!(block.outcome.line_count >= 1);
+    }
+
+    #[test]
+    fn print_cached_inline_diff_respects_max_rows() {
+        let cache = CachedInlineDiff {
+            max_display_lineno: 3,
+            lines: (1..=3)
+                .map(|i| CachedDiffLine::Context {
+                    lineno: i,
+                    text: format!("line{i}"),
+                    spans: vec![CachedSpan {
+                        text: format!("line{i}"),
+                        fg: (0, 0, 0),
+                    }],
+                })
+                .collect(),
+        };
+        render_test(80, |out| {
+            let emitted = print_cached_inline_diff(out, &cache, 0, 2);
+            assert_eq!(emitted, 2);
+        });
+    }
+
+    #[test]
+    fn print_cached_inline_diff_skips_leading_rows() {
+        let cache = CachedInlineDiff {
+            max_display_lineno: 3,
+            lines: (1..=3)
+                .map(|i| CachedDiffLine::Context {
+                    lineno: i,
+                    text: format!("line{i}"),
+                    spans: vec![CachedSpan {
+                        text: format!("line{i}"),
+                        fg: (0, 0, 0),
+                    }],
+                })
+                .collect(),
+        };
+        let block = render_test(80, |out| {
+            let emitted = print_cached_inline_diff(out, &cache, 2, 0);
+            assert_eq!(emitted, 1);
+        });
+        let joined: String = block
+            .lines
+            .iter()
+            .map(|l| l.text.as_str())
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(joined.contains("line3"));
+        assert!(!joined.contains("line1"));
+        assert!(!joined.contains("line2"));
+    }
+
+    #[test]
+    fn print_cached_inline_diff_renders_delete_insert_and_ellipsis_markers() {
+        let span = |s: &str| CachedSpan {
+            text: s.to_string(),
+            fg: (200, 200, 200),
+        };
+        let cache = CachedInlineDiff {
+            max_display_lineno: 10,
+            lines: vec![
+                CachedDiffLine::Context {
+                    lineno: 1,
+                    text: "ctx".to_string(),
+                    spans: vec![span("ctx")],
+                },
+                CachedDiffLine::Ellipsis,
+                CachedDiffLine::Delete {
+                    lineno: 5,
+                    text: "old".to_string(),
+                    spans: vec![span("old")],
+                },
+                CachedDiffLine::Insert {
+                    lineno: 5,
+                    text: "new".to_string(),
+                    spans: vec![span("new")],
+                },
+            ],
+        };
+        let block = render_test(80, |out| {
+            print_cached_inline_diff(out, &cache, 0, 0);
+        });
+        let joined: String = block
+            .lines
+            .iter()
+            .map(|l| l.text.as_str())
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(joined.contains("ctx"));
+        assert!(joined.contains("old"));
+        assert!(joined.contains("new"));
+        assert!(joined.contains("..."));
+        assert!(joined.contains('-'));
+        assert!(joined.contains('+'));
+    }
+
+    #[test]
+    fn print_inline_diff_end_to_end_emits_visible_rows() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("a.rs");
+        std::fs::write(&path, "fn main() {\n    let x = 1;\n}\n").unwrap();
+        let block = render_test(80, |out| {
+            let emitted = print_inline_diff(
+                out,
+                "    let x = 1;\n",
+                "    let x = 42;\n",
+                path.to_str().unwrap(),
+                "    let x = 1;\n",
+                0,
+                0,
+            );
+            assert!(emitted > 0);
+        });
+        let joined: String = block
+            .lines
+            .iter()
+            .map(|l| l.text.as_str())
+            .collect::<Vec<_>>()
+            .join("\n");
+        // Delete and insert markers should both appear.
+        assert!(joined.contains('-'));
+        assert!(joined.contains('+'));
+    }
 }

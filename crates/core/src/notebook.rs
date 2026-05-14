@@ -168,6 +168,60 @@ mod tests {
     fn parse_errors_on_bad_json() {
         assert!(parse("{ not json").is_err());
     }
+
+    #[test]
+    fn parse_handles_string_source() {
+        let json = r#"{"cells":[{"cell_type":"code","source":"x = 1"}]}"#;
+        let nb = parse(json).unwrap();
+        assert_eq!(nb.cells[0].source, "x = 1");
+    }
+
+    #[test]
+    fn parse_handles_missing_cells_array() {
+        let nb = parse(r#"{"nbformat":4}"#).unwrap();
+        assert!(nb.cells.is_empty());
+        assert_eq!(nb.format, Some(4));
+    }
+
+    #[test]
+    fn parse_handles_missing_nbformat() {
+        let nb = parse(r#"{"cells":[]}"#).unwrap();
+        assert_eq!(nb.format, None);
+        assert_eq!(nb.format_minor, None);
+    }
+
+    #[test]
+    fn parse_treats_unknown_cell_type_as_other_variant() {
+        let json = r#"{"cells":[{"cell_type":"weird","source":""}]}"#;
+        let nb = parse(json).unwrap();
+        assert_eq!(nb.cells[0].kind, CellKind::Other("weird".into()));
+    }
+
+    #[test]
+    fn parse_handles_cell_without_id() {
+        let json = r#"{"cells":[{"cell_type":"code","source":""}]}"#;
+        let nb = parse(json).unwrap();
+        assert_eq!(nb.cells[0].id, None);
+    }
+
+    #[test]
+    fn parse_cell_with_missing_cell_type_falls_back_to_other_unknown() {
+        let json = r#"{"cells":[{"source":""}]}"#;
+        let nb = parse(json).unwrap();
+        assert_eq!(nb.cells[0].kind, CellKind::Other("unknown".into()));
+    }
+
+    #[test]
+    fn cellkind_as_str_roundtrips_known_variants() {
+        for s in ["code", "markdown", "raw"] {
+            assert_eq!(CellKind::from_str(s).as_str(), s);
+        }
+    }
+
+    #[test]
+    fn cellkind_other_preserves_original_string() {
+        assert_eq!(CellKind::Other("xyz".into()).as_str(), "xyz");
+    }
 }
 
 // ── Notebook editing / rendering ─────────────────────────────────────────────
@@ -609,6 +663,7 @@ fn render_data_from_snapshots(
 // Editing
 // ---------------------------------------------------------------------------
 
+#[derive(Debug)]
 pub struct NotebookEditOutcome {
     pub message: String,
     pub metadata: Value,
@@ -876,6 +931,682 @@ static NEXT_CELL_ID: AtomicU64 = AtomicU64::new(1);
 fn generate_cell_id() -> String {
     let id = NEXT_CELL_ID.fetch_add(1, Ordering::Relaxed);
     format!("{:016x}", id)
+}
+
+#[cfg(test)]
+mod edit_tests {
+    use super::*;
+    use serde_json::json;
+    use tempfile::tempdir;
+
+    // ── Render data ─────────────────────────────────────────────────
+
+    fn render_data(old: Option<&str>, new: Option<&str>) -> NotebookRenderData {
+        NotebookRenderData {
+            edit_mode: "replace".into(),
+            path: "p.ipynb".into(),
+            index: 0,
+            old_type: old.map(String::from),
+            new_type: new.map(String::from),
+            cell_id: None,
+            old_source: String::new(),
+            new_source: String::new(),
+        }
+    }
+
+    #[test]
+    fn syntax_ext_returns_md_for_markdown_cell() {
+        let d = render_data(None, Some("markdown"));
+        assert_eq!(d.syntax_ext(), "md");
+    }
+
+    #[test]
+    fn syntax_ext_returns_py_for_code_cell() {
+        let d = render_data(None, Some("code"));
+        assert_eq!(d.syntax_ext(), "py");
+    }
+
+    #[test]
+    fn syntax_ext_uses_old_type_when_new_is_none() {
+        let d = render_data(Some("markdown"), None);
+        assert_eq!(d.syntax_ext(), "md");
+    }
+
+    #[test]
+    fn syntax_ext_defaults_to_py_when_no_type() {
+        let d = render_data(None, None);
+        assert_eq!(d.syntax_ext(), "py");
+    }
+
+    #[test]
+    fn title_uses_arrow_for_type_change() {
+        let d = render_data(Some("markdown"), Some("code"));
+        assert!(d.title().contains("markdown → code"));
+    }
+
+    #[test]
+    fn title_uses_single_type_when_no_change() {
+        let d = render_data(Some("code"), Some("code"));
+        assert!(d.title().contains("[code]"));
+        assert!(!d.title().contains("→"));
+    }
+
+    #[test]
+    fn title_appends_cell_id_when_present() {
+        let mut d = render_data(None, Some("code"));
+        d.cell_id = Some("abc123".into());
+        assert!(d.title().contains("id=abc123"));
+    }
+
+    #[test]
+    fn title_falls_back_to_cell_label_when_no_types() {
+        let d = render_data(None, None);
+        assert!(d.title().contains("[cell]"));
+    }
+
+    // ── resolve_cell_index ─────────────────────────────────────────
+
+    fn cells_with_ids(ids: &[&str]) -> Vec<Value> {
+        ids.iter()
+            .map(|id| json!({ "cell_type": "code", "id": id, "source": "" }))
+            .collect()
+    }
+
+    #[test]
+    fn resolve_by_id_returns_position() {
+        let cells = cells_with_ids(&["a", "b", "c"]);
+        assert_eq!(resolve_cell_index(&cells, "b", None), Some(1));
+    }
+
+    #[test]
+    fn resolve_by_id_returns_none_for_missing() {
+        let cells = cells_with_ids(&["a", "b"]);
+        assert_eq!(resolve_cell_index(&cells, "z", None), None);
+    }
+
+    #[test]
+    fn resolve_by_number_returns_usize() {
+        let cells = cells_with_ids(&["a", "b", "c"]);
+        assert_eq!(resolve_cell_index(&cells, "", Some(2)), Some(2));
+    }
+
+    #[test]
+    fn resolve_negative_cell_number_returns_none() {
+        let cells = cells_with_ids(&["a"]);
+        assert_eq!(resolve_cell_index(&cells, "", Some(-1)), None);
+    }
+
+    #[test]
+    fn resolve_id_takes_precedence_over_number() {
+        let cells = cells_with_ids(&["a", "b", "c"]);
+        // id "c" is at index 2; cell_number 0 should be ignored.
+        assert_eq!(resolve_cell_index(&cells, "c", Some(0)), Some(2));
+    }
+
+    #[test]
+    fn resolve_returns_none_when_neither_provided() {
+        let cells = cells_with_ids(&["a"]);
+        assert_eq!(resolve_cell_index(&cells, "", None), None);
+    }
+
+    // ── source_to_json ──────────────────────────────────────────────
+
+    fn arr(v: &Value) -> Vec<&str> {
+        v.as_array()
+            .unwrap()
+            .iter()
+            .map(|x| x.as_str().unwrap())
+            .collect()
+    }
+
+    #[test]
+    fn source_to_json_single_line_has_no_trailing_newline() {
+        let v = source_to_json("x = 1");
+        assert_eq!(arr(&v), vec!["x = 1"]);
+    }
+
+    #[test]
+    fn source_to_json_multiline_appends_newline_to_each_but_last() {
+        let v = source_to_json("a\nb\nc");
+        assert_eq!(arr(&v), vec!["a\n", "b\n", "c"]);
+    }
+
+    #[test]
+    fn source_to_json_trailing_newline_yields_empty_last_element() {
+        let v = source_to_json("a\nb\n");
+        assert_eq!(arr(&v), vec!["a\n", "b\n", ""]);
+    }
+
+    #[test]
+    fn source_to_json_empty_string_yields_single_empty() {
+        let v = source_to_json("");
+        assert_eq!(arr(&v), vec![""]);
+    }
+
+    // ── strip_ansi ──────────────────────────────────────────────────
+
+    #[test]
+    fn strip_ansi_removes_csi_escape() {
+        assert_eq!(strip_ansi("a\x1b[31mred\x1b[0mb"), "aredb");
+    }
+
+    #[test]
+    fn strip_ansi_removes_osc_with_bell_terminator() {
+        assert_eq!(strip_ansi("pre\x1b]0;title\x07post"), "prepost");
+    }
+
+    #[test]
+    fn strip_ansi_removes_osc_with_st_terminator() {
+        assert_eq!(strip_ansi("pre\x1b]0;title\x1b\\post"), "prepost");
+    }
+
+    #[test]
+    fn strip_ansi_preserves_plain_text() {
+        assert_eq!(strip_ansi("hello, world"), "hello, world");
+    }
+
+    #[test]
+    fn strip_ansi_handles_bare_esc_without_bracket() {
+        // Unknown escape — consume up to next alpha char.
+        assert_eq!(strip_ansi("a\x1bMb"), "ab");
+    }
+
+    // ── render_output ───────────────────────────────────────────────
+
+    fn collect_lines(output: &Value) -> Vec<String> {
+        let mut lines = Vec::new();
+        render_output(output, &mut lines);
+        lines
+    }
+
+    #[test]
+    fn render_output_stream_prefixes_output_marker() {
+        let out = json!({"output_type": "stream", "text": "hello\nworld"});
+        let lines = collect_lines(&out);
+        assert_eq!(lines, vec!["[output]", "hello", "world"]);
+    }
+
+    #[test]
+    fn render_output_stream_skips_when_empty() {
+        let out = json!({"output_type": "stream", "text": ""});
+        assert!(collect_lines(&out).is_empty());
+    }
+
+    #[test]
+    fn render_output_execute_result_text_plain() {
+        let out = json!({
+            "output_type": "execute_result",
+            "data": { "text/plain": "42" }
+        });
+        let lines = collect_lines(&out);
+        assert_eq!(lines, vec!["[output]", "42"]);
+    }
+
+    #[test]
+    fn render_output_image_png_marker() {
+        let out = json!({
+            "output_type": "display_data",
+            "data": { "image/png": "<base64>" }
+        });
+        let lines = collect_lines(&out);
+        assert!(lines.iter().any(|l| l == "[image output]"));
+    }
+
+    #[test]
+    fn render_output_html_only_when_no_text_plain() {
+        let with_text = json!({
+            "output_type": "display_data",
+            "data": { "text/plain": "p", "text/html": "<b>x</b>" }
+        });
+        assert!(!collect_lines(&with_text)
+            .iter()
+            .any(|l| l == "[html output]"));
+
+        let html_only = json!({
+            "output_type": "display_data",
+            "data": { "text/html": "<b>x</b>" }
+        });
+        assert!(collect_lines(&html_only)
+            .iter()
+            .any(|l| l == "[html output]"));
+    }
+
+    #[test]
+    fn render_output_error_includes_ename_and_evalue() {
+        let out = json!({
+            "output_type": "error",
+            "ename": "ValueError",
+            "evalue": "bad input"
+        });
+        let lines = collect_lines(&out);
+        assert!(lines[0].contains("ValueError"));
+        assert!(lines[0].contains("bad input"));
+    }
+
+    #[test]
+    fn render_output_error_traceback_strips_ansi() {
+        let out = json!({
+            "output_type": "error",
+            "ename": "E",
+            "evalue": "",
+            "traceback": ["\x1b[31mline1\x1b[0m\nline2"]
+        });
+        let lines = collect_lines(&out);
+        assert!(lines.iter().any(|l| l == "line1"));
+        assert!(lines.iter().any(|l| l == "line2"));
+        assert!(!lines.iter().any(|l| l.contains('\x1b')));
+    }
+
+    // ── Disk-backed: read_notebook ──────────────────────────────────
+
+    fn write_nb(dir: &std::path::Path, name: &str, json: Value) -> String {
+        let path = dir.join(name);
+        std::fs::write(&path, serde_json::to_string_pretty(&json).unwrap()).unwrap();
+        path.to_string_lossy().into_owned()
+    }
+
+    fn sample_nb() -> Value {
+        json!({
+            "nbformat": 4,
+            "nbformat_minor": 5,
+            "cells": [
+                {"cell_type": "markdown", "id": "intro", "source": "# Title"},
+                {"cell_type": "code", "id": "c1", "source": "print('hi')", "outputs": []}
+            ]
+        })
+    }
+
+    #[test]
+    fn read_notebook_renders_cell_markers() {
+        let dir = tempdir().unwrap();
+        let path = write_nb(dir.path(), "a.ipynb", sample_nb());
+        let r = read_notebook(&path, 1, 100);
+        assert!(!r.is_error);
+        assert!(r.content.contains("Cell 0 [markdown]"));
+        assert!(r.content.contains("# Title"));
+        assert!(r.content.contains("Cell 1 [code]"));
+        assert!(r.content.contains("print('hi')"));
+    }
+
+    #[test]
+    fn read_notebook_offset_limit_windows_lines() {
+        let dir = tempdir().unwrap();
+        let path = write_nb(dir.path(), "a.ipynb", sample_nb());
+        let full = read_notebook(&path, 1, 100).content;
+        let total_lines = full.lines().count();
+        assert!(total_lines >= 4);
+        let middle = read_notebook(&path, 2, 1).content;
+        assert_eq!(middle.lines().count(), 1);
+    }
+
+    #[test]
+    fn read_notebook_error_on_missing_file() {
+        let r = read_notebook("/nonexistent/path.ipynb", 1, 10);
+        assert!(r.is_error);
+    }
+
+    #[test]
+    fn read_notebook_error_on_invalid_json() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("bad.ipynb");
+        std::fs::write(&path, "{ not json").unwrap();
+        let r = read_notebook(path.to_str().unwrap(), 1, 10);
+        assert!(r.is_error);
+        assert!(r.content.contains("failed to parse"));
+    }
+
+    #[test]
+    fn read_notebook_ok_with_no_cells_array() {
+        let dir = tempdir().unwrap();
+        let path = write_nb(dir.path(), "a.ipynb", json!({"nbformat": 4}));
+        let r = read_notebook(&path, 1, 10);
+        assert!(!r.is_error);
+        assert!(r.content.contains("no cells"));
+    }
+
+    #[test]
+    fn read_notebook_ok_with_empty_cells() {
+        let dir = tempdir().unwrap();
+        let path = write_nb(dir.path(), "a.ipynb", json!({"nbformat": 4, "cells": []}));
+        let r = read_notebook(&path, 1, 10);
+        assert!(!r.is_error);
+        assert!(r.content.contains("empty"));
+    }
+
+    #[test]
+    fn read_notebook_offset_beyond_end_returns_marker_message() {
+        let dir = tempdir().unwrap();
+        let path = write_nb(dir.path(), "a.ipynb", sample_nb());
+        let r = read_notebook(&path, 9999, 10);
+        assert!(!r.is_error);
+        assert!(r.content.contains("offset beyond end"));
+    }
+
+    // ── preview_render_data ─────────────────────────────────────────
+
+    fn args_for(pairs: &[(&str, Value)]) -> HashMap<String, Value> {
+        pairs
+            .iter()
+            .map(|(k, v)| (k.to_string(), v.clone()))
+            .collect()
+    }
+
+    #[test]
+    fn preview_replace_returns_render_data_for_target_cell() {
+        let dir = tempdir().unwrap();
+        let path = write_nb(dir.path(), "a.ipynb", sample_nb());
+        let r = preview_render_data(&args_for(&[
+            ("notebook_path", json!(path)),
+            ("edit_mode", json!("replace")),
+            ("cell_id", json!("c1")),
+            ("new_source", json!("print('bye')")),
+        ]))
+        .unwrap();
+        assert_eq!(r.edit_mode, "replace");
+        assert_eq!(r.index, 1);
+        assert_eq!(r.old_source, "print('hi')");
+        assert_eq!(r.new_source, "print('bye')");
+        assert_eq!(r.old_type.as_deref(), Some("code"));
+    }
+
+    #[test]
+    fn preview_insert_with_no_target_inserts_at_position_zero() {
+        let dir = tempdir().unwrap();
+        let path = write_nb(dir.path(), "a.ipynb", sample_nb());
+        let r = preview_render_data(&args_for(&[
+            ("notebook_path", json!(path)),
+            ("edit_mode", json!("insert")),
+            ("cell_type", json!("code")),
+            ("new_source", json!("x=1")),
+        ]))
+        .unwrap();
+        assert_eq!(r.index, 0);
+        assert_eq!(r.edit_mode, "insert");
+    }
+
+    #[test]
+    fn preview_insert_after_target_uses_target_plus_one() {
+        let dir = tempdir().unwrap();
+        let path = write_nb(dir.path(), "a.ipynb", sample_nb());
+        let r = preview_render_data(&args_for(&[
+            ("notebook_path", json!(path)),
+            ("edit_mode", json!("insert")),
+            ("cell_id", json!("intro")),
+            ("cell_type", json!("code")),
+            ("new_source", json!("x=1")),
+        ]))
+        .unwrap();
+        assert_eq!(r.index, 1);
+    }
+
+    #[test]
+    fn preview_delete_returns_old_cell_data() {
+        let dir = tempdir().unwrap();
+        let path = write_nb(dir.path(), "a.ipynb", sample_nb());
+        let r = preview_render_data(&args_for(&[
+            ("notebook_path", json!(path)),
+            ("edit_mode", json!("delete")),
+            ("cell_id", json!("c1")),
+        ]))
+        .unwrap();
+        assert_eq!(r.edit_mode, "delete");
+        assert_eq!(r.old_source, "print('hi')");
+        assert_eq!(r.new_source, "");
+    }
+
+    #[test]
+    fn preview_missing_file_returns_none() {
+        let r = preview_render_data(&args_for(&[
+            ("notebook_path", json!("/nonexistent.ipynb")),
+            ("edit_mode", json!("replace")),
+            ("cell_id", json!("x")),
+            ("new_source", json!("y")),
+        ]));
+        assert!(r.is_none());
+    }
+
+    // ── apply_edit ──────────────────────────────────────────────────
+
+    fn prime_cache(files: &FileStateCache, path: &str) {
+        let content = std::fs::read_to_string(path).unwrap();
+        files.record_read(path, content, (1, 1000));
+    }
+
+    fn parse_file(path: &str) -> Value {
+        serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap()
+    }
+
+    #[test]
+    fn apply_replace_updates_source_in_target_cell() {
+        let dir = tempdir().unwrap();
+        let path = write_nb(dir.path(), "a.ipynb", sample_nb());
+        let files = FileStateCache::new();
+        prime_cache(&files, &path);
+
+        apply_edit(
+            &args_for(&[
+                ("notebook_path", json!(path)),
+                ("edit_mode", json!("replace")),
+                ("cell_id", json!("c1")),
+                ("new_source", json!("print('bye')")),
+            ]),
+            &files,
+        )
+        .unwrap();
+
+        let nb = parse_file(&path);
+        let cells = nb.get("cells").unwrap().as_array().unwrap();
+        let source = join_string_or_array(cells[1].get("source"));
+        assert_eq!(source, "print('bye')");
+    }
+
+    #[test]
+    fn apply_insert_adds_new_cell() {
+        let dir = tempdir().unwrap();
+        let path = write_nb(dir.path(), "a.ipynb", sample_nb());
+        let files = FileStateCache::new();
+        prime_cache(&files, &path);
+
+        apply_edit(
+            &args_for(&[
+                ("notebook_path", json!(path)),
+                ("edit_mode", json!("insert")),
+                ("cell_id", json!("intro")),
+                ("cell_type", json!("code")),
+                ("new_source", json!("z=2")),
+            ]),
+            &files,
+        )
+        .unwrap();
+
+        let nb = parse_file(&path);
+        let cells = nb.get("cells").unwrap().as_array().unwrap();
+        assert_eq!(cells.len(), 3);
+        let inserted = &cells[1];
+        assert_eq!(inserted.get("cell_type").unwrap(), "code");
+    }
+
+    #[test]
+    fn apply_delete_removes_cell() {
+        let dir = tempdir().unwrap();
+        let path = write_nb(dir.path(), "a.ipynb", sample_nb());
+        let files = FileStateCache::new();
+        prime_cache(&files, &path);
+
+        apply_edit(
+            &args_for(&[
+                ("notebook_path", json!(path)),
+                ("edit_mode", json!("delete")),
+                ("cell_id", json!("c1")),
+            ]),
+            &files,
+        )
+        .unwrap();
+
+        let nb = parse_file(&path);
+        let cells = nb.get("cells").unwrap().as_array().unwrap();
+        assert_eq!(cells.len(), 1);
+        assert_eq!(cells[0].get("id").unwrap(), "intro");
+    }
+
+    #[test]
+    fn apply_errors_when_path_empty() {
+        let files = FileStateCache::new();
+        let err = apply_edit(
+            &args_for(&[
+                ("edit_mode", json!("replace")),
+                ("cell_id", json!("x")),
+                ("new_source", json!("y")),
+            ]),
+            &files,
+        )
+        .unwrap_err();
+        assert!(err.contains("notebook_path"));
+    }
+
+    #[test]
+    fn apply_errors_on_invalid_edit_mode() {
+        let dir = tempdir().unwrap();
+        let path = write_nb(dir.path(), "a.ipynb", sample_nb());
+        let files = FileStateCache::new();
+        prime_cache(&files, &path);
+
+        let err = apply_edit(
+            &args_for(&[
+                ("notebook_path", json!(path)),
+                ("edit_mode", json!("twist")),
+                ("new_source", json!("y")),
+            ]),
+            &files,
+        )
+        .unwrap_err();
+        assert!(err.contains("invalid edit_mode"));
+    }
+
+    #[test]
+    fn apply_errors_when_new_source_missing_for_replace() {
+        let dir = tempdir().unwrap();
+        let path = write_nb(dir.path(), "a.ipynb", sample_nb());
+        let files = FileStateCache::new();
+        prime_cache(&files, &path);
+
+        let err = apply_edit(
+            &args_for(&[
+                ("notebook_path", json!(path)),
+                ("edit_mode", json!("replace")),
+                ("cell_id", json!("c1")),
+            ]),
+            &files,
+        )
+        .unwrap_err();
+        assert!(err.contains("new_source"));
+    }
+
+    #[test]
+    fn apply_errors_when_cell_type_missing_for_insert() {
+        let dir = tempdir().unwrap();
+        let path = write_nb(dir.path(), "a.ipynb", sample_nb());
+        let files = FileStateCache::new();
+        prime_cache(&files, &path);
+
+        let err = apply_edit(
+            &args_for(&[
+                ("notebook_path", json!(path)),
+                ("edit_mode", json!("insert")),
+                ("new_source", json!("y")),
+            ]),
+            &files,
+        )
+        .unwrap_err();
+        assert!(err.contains("cell_type"));
+    }
+
+    #[test]
+    fn apply_replace_clears_outputs_on_code_cell() {
+        let dir = tempdir().unwrap();
+        let nb_with_outputs = json!({
+            "cells": [{
+                "cell_type": "code",
+                "id": "c1",
+                "source": "print(1)",
+                "outputs": [{"output_type": "stream", "text": "1"}],
+                "execution_count": 5
+            }]
+        });
+        let path = write_nb(dir.path(), "a.ipynb", nb_with_outputs);
+        let files = FileStateCache::new();
+        prime_cache(&files, &path);
+
+        apply_edit(
+            &args_for(&[
+                ("notebook_path", json!(path)),
+                ("edit_mode", json!("replace")),
+                ("cell_id", json!("c1")),
+                ("new_source", json!("print(2)")),
+            ]),
+            &files,
+        )
+        .unwrap();
+
+        let nb = parse_file(&path);
+        let cell = &nb.get("cells").unwrap().as_array().unwrap()[0];
+        assert_eq!(cell.get("outputs").unwrap().as_array().unwrap().len(), 0);
+        assert!(cell.get("execution_count").unwrap().is_null());
+    }
+
+    #[test]
+    fn apply_replace_to_markdown_drops_code_fields() {
+        let dir = tempdir().unwrap();
+        let nb_code = json!({
+            "cells": [{
+                "cell_type": "code",
+                "id": "c1",
+                "source": "x=1",
+                "outputs": [],
+                "execution_count": 1
+            }]
+        });
+        let path = write_nb(dir.path(), "a.ipynb", nb_code);
+        let files = FileStateCache::new();
+        prime_cache(&files, &path);
+
+        apply_edit(
+            &args_for(&[
+                ("notebook_path", json!(path)),
+                ("edit_mode", json!("replace")),
+                ("cell_id", json!("c1")),
+                ("cell_type", json!("markdown")),
+                ("new_source", json!("# heading")),
+            ]),
+            &files,
+        )
+        .unwrap();
+
+        let nb = parse_file(&path);
+        let cell = &nb.get("cells").unwrap().as_array().unwrap()[0];
+        assert_eq!(cell.get("cell_type").unwrap(), "markdown");
+        assert!(cell.get("outputs").is_none());
+        assert!(cell.get("execution_count").is_none());
+    }
+
+    #[test]
+    fn apply_errors_without_prior_read() {
+        let dir = tempdir().unwrap();
+        let path = write_nb(dir.path(), "a.ipynb", sample_nb());
+        let files = FileStateCache::new();
+        // No prime_cache — staleness check should reject.
+        let err = apply_edit(
+            &args_for(&[
+                ("notebook_path", json!(path)),
+                ("edit_mode", json!("replace")),
+                ("cell_id", json!("c1")),
+                ("new_source", json!("y")),
+            ]),
+            &files,
+        )
+        .unwrap_err();
+        assert!(err.contains("read_file"));
+    }
 }
 
 fn write_notebook(

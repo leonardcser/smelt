@@ -200,15 +200,38 @@ These need a **`TestApp` harness** (Wave D) — end-to-end behavioural tests on 
 
 ---
 
-### `core` — ☐  ·  50.5% → ≥70%
+### `core` — ☐  ·  50.5% → **64.8%** (Wave A done; B/C pending)
 
-1 · ☐ Read   2 · ☐ Audit   3 · ☐ Plan   4 · ☐ Apply   5 · ☐ Refactor   6 · ☐ Fill   7 · ☐ Verify
+1 · ☑ Read   2 · ☑ Audit   3 · ☑ Plan   4 · ☑ Apply (Wave A)   5 · ☐ Refactor (Wave B)   6 · ☐ Fill (Wave C)   7 · ☐ Verify
 
-**Known work:**
-- `content/builder.rs` (630 LoC, 0 tests) — pure layout primitive. Fill.
-- `working.rs` (357 LoC, 0%) — extract pure file-change index from ring shell.
-- `mcp/mod.rs` (267 LoC, 0%) — ring; trust the wire, extract any pure conversions.
-- Verify `permissions/*` audit (147 tests, but quality unknown).
+**Wave A outcome:** filled the pure-core gap across markdown rendering and small helpers.
+
+| #  | Module                          | Before | After  |
+|----|---------------------------------|-------:|-------:|
+| A1 | `notebook.rs`                   |    13% |   64%  |
+| A2 | `html.rs`                       |    23% |   94%  |
+| A3 | `content/highlight/diff.rs`     |     0% |   99%  |
+| A4 | `content/highlight/inline.rs`   |    43% |   95%  |
+| A5 | `content/builder.rs`            |    63% |   98%  |
+| A6 | `content/selection.rs`          |     0% |  100%  |
+| A6 | `content/transcript.rs`         |     0% |   95%  |
+| A6 | `content/block_layout.rs`       |     0% |  100%  |
+| A6 | `content/context.rs`            |     0% |  100%  |
+| A6 | `fuzzy/score.rs`                |     0% |  100%  |
+
+Bug surfaced: documented `<title>` HTML5 RCDATA semantics (nested tags are literal, not stripped) — wrong-expectation finding, not a code bug. Test renamed to reflect the actual spec behavior.
+
+**Wave B (refactor + fill — pending):**
+- `working.rs` (357 LoC, 0%) — extract pure file-change index from ring shell; add `Clock` seam if needed.
+- `content/highlight/syntax.rs` (47%) — fenced/loose code paths.
+- `transcript_model.rs` (53%) — push remaining surface (status transitions, finished_blocks lifecycle, generation tracking).
+
+**Wave C (ring with extractable pure pieces — pending):**
+- `mcp/mod.rs` (267 LoC, 0%) — trust the wire, extract any pure conversions.
+- `engine_client`, `confirms`, `session`, `history`, `process` rings.
+
+**Wave D (audit existing — pending):**
+- `permissions/*` (147 tests; verify quality, not just quantity).
 
 ---
 
@@ -244,6 +267,6 @@ Replicate the shape of `provider/extract.rs` (95% cov) on each provider — pull
 
 ## Now
 
-**Active crate:** `tui` — Waves A/B/C/D done. **Move to `core` next.**
+**Active crate:** `core` — Wave A done (57.4% → 64.8%). **Wave B next** (`working.rs` clock seam + `transcript_model` gaps + `highlight/syntax`).
 
 The `TestApp` harness lives in `crates/tui/src/app/test_harness.rs` and is the wedge for any further interactive testing in `tui`. When `FUZZING_PLAN.md`'s Phase 1+ lands, the same `SourceEvent` enum drives both the harness and the fuzz target — no rewrite.

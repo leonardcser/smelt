@@ -1088,4 +1088,319 @@ mod tests {
         assert_eq!(block.lines.len(), 1);
         assert_eq!(block.lines[0].source_text.as_deref(), Some("let x = 1;"));
     }
+
+    // ── parse_inline_spans / wrap_inline_spans / emit_inline_spans / width ─
+
+    fn rows_to_text(rows: &[Vec<InlineSpan>]) -> Vec<String> {
+        rows.iter()
+            .map(|r| r.iter().map(|s| s.text.as_str()).collect::<String>())
+            .collect()
+    }
+
+    #[test]
+    fn parse_inline_spans_flattens_bold_and_code_with_styles() {
+        let spans = parse_inline_spans("**a** `b`", false);
+        let texts: Vec<&str> = spans.iter().map(|s| s.text.as_str()).collect();
+        assert_eq!(texts, vec!["a", " ", "b"]);
+        assert!(spans[0].style.bold);
+        assert!(!spans[0].style.italic);
+        assert!(spans[2].style.group.is_some());
+    }
+
+    #[test]
+    fn parse_inline_spans_propagates_dim_flag_to_every_span() {
+        let spans = parse_inline_spans("**a** *b*", true);
+        assert!(!spans.is_empty());
+        for s in &spans {
+            assert!(s.style.dim);
+        }
+    }
+
+    #[test]
+    fn parse_inline_spans_skips_empty_text_nodes() {
+        // Adjacent delimiters can produce empty Text nodes internally;
+        // they must not surface as zero-width spans.
+        let spans = parse_inline_spans("**a**b", false);
+        for s in &spans {
+            assert!(!s.text.is_empty());
+        }
+    }
+
+    #[test]
+    fn inline_spans_width_sums_unicode_widths() {
+        let spans = vec![
+            InlineSpan {
+                text: "ab".into(),
+                style: InlineStyle::default(),
+            },
+            InlineSpan {
+                text: "cd".into(),
+                style: InlineStyle::default(),
+            },
+        ];
+        assert_eq!(inline_spans_width(&spans), 4);
+    }
+
+    #[test]
+    fn wrap_inline_spans_zero_max_cols_returns_input_as_one_row() {
+        let spans = vec![InlineSpan {
+            text: "hello world".into(),
+            style: InlineStyle::default(),
+        }];
+        let rows = wrap_inline_spans(&spans, 0);
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].len(), 1);
+        assert_eq!(rows[0][0].text, "hello world");
+    }
+
+    #[test]
+    fn wrap_inline_spans_empty_input_returns_one_row() {
+        let rows = wrap_inline_spans(&[], 10);
+        assert_eq!(rows.len(), 1);
+        assert!(rows[0].is_empty());
+    }
+
+    #[test]
+    fn wrap_inline_spans_wraps_on_word_boundaries() {
+        let spans = parse_inline_spans("alpha beta gamma delta", false);
+        let rows = wrap_inline_spans(&spans, 12);
+        let texts = rows_to_text(&rows);
+        let joined: String = texts.join("|");
+        assert!(rows.len() >= 2, "expected wrap; got rows={texts:?}");
+        // No row exceeds max_cols by visual width.
+        for row in &rows {
+            let width: usize = row.iter().map(|s| s.text.as_str().width()).sum();
+            assert!(width <= 12, "row too wide: {row:?}");
+        }
+        // Round-trip: concatenation preserves every char (modulo trailing wrap space).
+        assert!(joined.contains("alpha"));
+        assert!(joined.contains("delta"));
+    }
+
+    #[test]
+    fn wrap_inline_spans_breaks_oversized_word_by_char() {
+        let spans = vec![InlineSpan {
+            text: "abcdefghij".into(),
+            style: InlineStyle::default(),
+        }];
+        let rows = wrap_inline_spans(&spans, 3);
+        assert!(rows.len() >= 3);
+        let concat: String = rows
+            .iter()
+            .flat_map(|r| r.iter().map(|s| s.text.as_str()))
+            .collect();
+        assert_eq!(concat, "abcdefghij");
+    }
+
+    #[test]
+    fn wrap_inline_spans_preserves_style_across_wrap_breaks() {
+        let spans = parse_inline_spans("**aaaa bbbb cccc**", false);
+        let rows = wrap_inline_spans(&spans, 6);
+        assert!(rows.len() >= 2);
+        for row in &rows {
+            for span in row {
+                assert!(span.style.bold);
+            }
+        }
+    }
+
+    #[test]
+    fn emit_inline_spans_renders_styled_text_into_buffer() {
+        let spans = parse_inline_spans("**bold** plain", false);
+        let block = render_test(80, |out| emit_inline_spans(out, &spans));
+        assert_eq!(block.lines.len(), 1);
+        let line = &block.lines[0];
+        assert!(line.text.contains("bold"));
+        assert!(line.text.contains("plain"));
+        // At least one span should be bold.
+        assert!(line.spans.iter().any(|s| s.style.bold));
+    }
+
+    // ── min_visual_width (private; reached via render_markdown_table) ─────
+    // We can't call it directly without exposing it, but we can verify the
+    // table renderer behaves consistently when min width forces stacking.
+
+    // ── wrap_cell_words via render_markdown_table ─────────────────────────
+
+    #[test]
+    fn render_markdown_table_empty_rows_returns_zero() {
+        let mut total = 0u16;
+        render_test(80, |out| {
+            total = render_markdown_table(out, &[], false, None, "");
+        });
+        assert_eq!(total, 0);
+    }
+
+    #[test]
+    fn render_markdown_table_zero_columns_returns_zero() {
+        let mut total = 0u16;
+        let rows: Vec<Vec<String>> = vec![vec![], vec![]];
+        render_test(80, |out| {
+            total = render_markdown_table(out, &rows, false, None, "");
+        });
+        assert_eq!(total, 0);
+    }
+
+    #[test]
+    fn render_markdown_table_basic_two_row_emits_borders_and_separator() {
+        let rows = vec![
+            vec!["H1".to_string(), "H2".to_string()],
+            vec!["a".to_string(), "b".to_string()],
+        ];
+        let block = render_test(80, |out| {
+            render_markdown_table(out, &rows, false, None, "");
+        });
+        let joined: String = block
+            .lines
+            .iter()
+            .map(|l| l.text.as_str())
+            .collect::<Vec<_>>()
+            .join("\n");
+        // 4 lines: top border, header, separator, data, bottom border = 5.
+        assert!(block.lines.len() >= 5);
+        // Borders use heavy box characters.
+        assert!(joined.contains('┏'));
+        assert!(joined.contains('┓'));
+        assert!(joined.contains('┗'));
+        assert!(joined.contains('┛'));
+        assert!(joined.contains('┣'));
+        assert!(joined.contains('┫'));
+        assert!(joined.contains('┃'));
+        assert!(joined.contains("H1"));
+        assert!(joined.contains('a'));
+    }
+
+    #[test]
+    fn render_markdown_table_with_indent_prefixes_each_row() {
+        let rows = vec![vec!["H".to_string()], vec!["v".to_string()]];
+        let block = render_test(80, |out| {
+            render_markdown_table(out, &rows, false, None, "  ");
+        });
+        // Indent prefixes the borders/rows.
+        for line in &block.lines {
+            if !line.text.is_empty() {
+                assert!(
+                    line.text.starts_with("  "),
+                    "expected indent prefix; got {:?}",
+                    line.text
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn render_markdown_table_dim_passes_through() {
+        let rows = vec![vec!["H".to_string()], vec!["v".to_string()]];
+        let block = render_test(80, |out| {
+            render_markdown_table(out, &rows, true, None, "");
+        });
+        // Dim shouldn't crash and should still produce table output.
+        assert!(block.lines.len() >= 4);
+    }
+
+    fn narrow_bctx(inner_w: usize) -> super::super::super::BoxContext {
+        super::super::super::BoxContext {
+            left: "",
+            right: "",
+            group: HlGroup::default(),
+            inner_w,
+        }
+    }
+
+    #[test]
+    fn render_markdown_table_shrinks_wide_columns_to_fit_width() {
+        // Wide content + narrow BoxContext forces column shrinking; table
+        // should still render the box (not stack), with extra visual rows
+        // because cell contents wrap.
+        let long = "alpha beta gamma delta epsilon zeta eta theta".to_string();
+        let rows = vec![vec!["Col".to_string()], vec![long.clone()]];
+        let bctx = narrow_bctx(30);
+        let block = render_test(80, |out| {
+            render_markdown_table(out, &rows, false, Some(&bctx), "");
+        });
+        let joined: String = block
+            .lines
+            .iter()
+            .map(|l| l.text.as_str())
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(joined.contains('┏'));
+        assert!(joined.contains("alpha"));
+        assert!(joined.contains("theta"));
+    }
+
+    #[test]
+    fn render_markdown_table_stacks_when_content_unfit_at_min_width() {
+        // Single huge unbreakable word + extremely narrow viewport forces
+        // stacking (min_total > avail).
+        let rows = vec![
+            vec!["Header".to_string(), "Other".to_string()],
+            vec![
+                "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".to_string(),
+                "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".to_string(),
+            ],
+        ];
+        let bctx = narrow_bctx(10);
+        let block = render_test(80, |out| {
+            render_markdown_table(out, &rows, false, Some(&bctx), "");
+        });
+        let joined: String = block
+            .lines
+            .iter()
+            .map(|l| l.text.as_str())
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(!joined.contains('┏'));
+        assert!(joined.contains("Header"));
+        assert!(joined.contains("Other"));
+    }
+
+    #[test]
+    fn render_markdown_table_stacked_with_multiple_data_rows_separates_by_blank_line() {
+        let rows = vec![
+            vec!["H1".to_string(), "H2".to_string()],
+            vec!["xxxxxxxxxxxxxxxxxxxxxxxxxxxx".to_string(), "y".to_string()],
+            vec!["zzzzzzzzzzzzzzzzzzzzzzzzzzzz".to_string(), "w".to_string()],
+        ];
+        let bctx = narrow_bctx(8);
+        let mut total = 0u16;
+        render_test(80, |out| {
+            total = render_markdown_table(out, &rows, false, Some(&bctx), "");
+        });
+        assert!(total > 0);
+    }
+
+    #[test]
+    fn render_markdown_table_inline_markdown_inside_cells_renders_styled() {
+        let rows = vec![
+            vec!["Name".to_string(), "Kind".to_string()],
+            vec!["**bold**".to_string(), "*italic*".to_string()],
+        ];
+        let block = render_test(80, |out| {
+            render_markdown_table(out, &rows, false, None, "");
+        });
+        // The stripped form (without markers) appears in the output, and
+        // some span carries the inline style.
+        let joined: String = block
+            .lines
+            .iter()
+            .map(|l| l.text.as_str())
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(joined.contains("bold"));
+        assert!(joined.contains("italic"));
+        assert!(!joined.contains("**bold**"));
+        let any_bold = block
+            .lines
+            .iter()
+            .flat_map(|l| l.spans.iter())
+            .any(|s| s.style.bold);
+        let any_italic = block
+            .lines
+            .iter()
+            .flat_map(|l| l.spans.iter())
+            .any(|s| s.style.italic);
+        assert!(any_bold);
+        assert!(any_italic);
+    }
 }

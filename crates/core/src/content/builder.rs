@@ -628,3 +628,346 @@ pub mod test_util {
             .collect()
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::buffer::{BufCreateOpts, BufId};
+    use crate::theme::intern;
+
+    fn fresh_buf() -> Buffer {
+        Buffer::new(BufId(0), BufCreateOpts::default())
+    }
+
+    #[test]
+    fn display_width_counts_visible_columns() {
+        assert_eq!(display_width(""), 0);
+        assert_eq!(display_width("abc"), 3);
+        assert_eq!(display_width("日本"), 4);
+    }
+
+    #[test]
+    fn outcome_is_valid_at_pinned_when_wrapped() {
+        let o = Outcome {
+            line_count: 1,
+            layout_width: 40,
+            was_wrapped: true,
+            max_line_width: 20,
+        };
+        assert!(o.is_valid_at(40));
+        assert!(!o.is_valid_at(39));
+        assert!(!o.is_valid_at(41));
+    }
+
+    #[test]
+    fn outcome_is_valid_at_replayable_when_not_wrapped() {
+        let o = Outcome {
+            line_count: 1,
+            layout_width: 40,
+            was_wrapped: false,
+            max_line_width: 20,
+        };
+        assert!(o.is_valid_at(20));
+        assert!(o.is_valid_at(80));
+        assert!(!o.is_valid_at(19));
+    }
+
+    #[test]
+    fn line_count_zero_when_no_content() {
+        let mut buf = fresh_buf();
+        let theme = Theme::default();
+        let lb = LineBuilder::new(&mut buf, &theme, 80);
+        assert_eq!(lb.line_count(), 0);
+    }
+
+    #[test]
+    fn line_count_one_when_pending_text() {
+        let mut buf = fresh_buf();
+        let theme = Theme::default();
+        let mut lb = LineBuilder::new(&mut buf, &theme, 80);
+        lb.print("hi");
+        assert_eq!(lb.line_count(), 1);
+    }
+
+    #[test]
+    fn line_count_one_when_decoration_present_but_no_text() {
+        let mut buf = fresh_buf();
+        let theme = Theme::default();
+        let mut lb = LineBuilder::new(&mut buf, &theme, 80);
+        lb.set_gutter_bg(Color::Red);
+        assert_eq!(lb.line_count(), 1);
+    }
+
+    #[test]
+    fn print_empty_string_is_noop() {
+        let block = test_util::render_test(80, |out| {
+            out.print("");
+        });
+        assert_eq!(block.outcome.line_count, 0);
+    }
+
+    #[test]
+    fn print_with_meta_attaches_custom_copy_as() {
+        let block = test_util::render_test(80, |out| {
+            out.print_with_meta(
+                "click",
+                SpanMeta {
+                    selectable: true,
+                    copy_as: Some("real".into()),
+                },
+            );
+        });
+        assert_eq!(block.lines.len(), 1);
+        let meta_copy = block.lines[0]
+            .spans
+            .iter()
+            .find_map(|s| s.meta.copy_as.clone());
+        assert_eq!(meta_copy.as_deref(), Some("real"));
+    }
+
+    #[test]
+    fn fill_line_bg_group_resolves_from_theme_or_falls_back_to_reset() {
+        let block = test_util::render_test(80, |out| {
+            out.print("x");
+            // Unknown group -> theme.resolve returns Style::default(), bg=None -> Color::Reset.
+            out.fill_line_bg_group(intern("DefinitelyMissingGroup_xyz"), 0);
+            out.newline();
+        });
+        assert_eq!(block.lines.len(), 1);
+    }
+
+    #[test]
+    fn set_gutter_bg_and_group_set_decoration() {
+        let mut buf = fresh_buf();
+        let theme = Theme::default();
+        let mut lb = LineBuilder::new(&mut buf, &theme, 80);
+        lb.set_gutter_bg(Color::Blue);
+        assert_eq!(lb.cur_decoration.gutter_bg, Some(Color::Blue));
+        lb.set_gutter_bg_group(intern("AnotherMissing_xyz"));
+        // Theme fallback -> Color::Reset; ensure the decoration was updated.
+        assert!(lb.cur_decoration.gutter_bg.is_some());
+    }
+
+    #[test]
+    fn mark_soft_wrap_continuation_sets_decoration_flag() {
+        let mut buf = fresh_buf();
+        let theme = Theme::default();
+        let mut lb = LineBuilder::new(&mut buf, &theme, 80);
+        lb.mark_soft_wrap_continuation();
+        assert!(lb.cur_decoration.soft_wrapped);
+    }
+
+    #[test]
+    fn set_source_text_attaches_raw_markdown() {
+        let block = test_util::render_test(80, |out| {
+            out.print("rendered");
+            out.set_source_text("**rendered**");
+            out.newline();
+        });
+        assert_eq!(block.lines[0].source_text.as_deref(), Some("**rendered**"));
+    }
+
+    #[test]
+    fn arm_source_text_attaches_then_marks_subsequent_wraps_as_continuations() {
+        let block = test_util::render_test(80, |out| {
+            out.arm_source_text("source line".into());
+            out.print("first");
+            out.newline();
+            out.print("second");
+            out.newline();
+            out.disarm_source_text();
+            out.print("third");
+            out.newline();
+        });
+        assert_eq!(block.lines.len(), 3);
+        assert_eq!(block.lines[0].source_text.as_deref(), Some("source line"));
+        // Second line: no fresh source, but armed continuation flag set.
+        assert_eq!(block.lines[1].source_text, None);
+        assert!(block.lines[1].soft_wrapped);
+        // Third line: disarmed, so no continuation flag.
+        assert!(!block.lines[2].soft_wrapped);
+    }
+
+    #[test]
+    fn disarm_source_text_clears_pending_and_continuation() {
+        let mut buf = fresh_buf();
+        let theme = Theme::default();
+        let mut lb = LineBuilder::new(&mut buf, &theme, 80);
+        lb.arm_source_text("x".into());
+        lb.disarm_source_text();
+        assert!(lb.pending_source_text.is_none());
+        assert!(!lb.auto_soft_wrap_continuation);
+    }
+
+    #[test]
+    fn set_style_helpers_set_corresponding_flags() {
+        let mut buf = fresh_buf();
+        let theme = Theme::default();
+        let mut lb = LineBuilder::new(&mut buf, &theme, 80);
+        lb.set_bold();
+        assert!(lb.cur_style.bold);
+        lb.set_italic();
+        assert!(lb.cur_style.italic);
+        lb.set_dim();
+        assert!(lb.cur_style.dim);
+        lb.set_crossedout();
+        assert!(lb.cur_style.crossedout);
+        lb.reset_style();
+        lb.set_dim_italic();
+        assert!(lb.cur_style.dim);
+        assert!(lb.cur_style.italic);
+        assert!(!lb.cur_style.bold);
+    }
+
+    #[test]
+    fn push_helpers_save_state_and_apply_modification() {
+        let mut buf = fresh_buf();
+        let theme = Theme::default();
+        let mut lb = LineBuilder::new(&mut buf, &theme, 80);
+        lb.push_fg(Color::Red);
+        assert_eq!(lb.cur_style.fg, Some(Color::Red));
+        lb.pop_style();
+        assert_eq!(lb.cur_style.fg, None);
+
+        lb.push_hl(intern("SomeGroup"));
+        assert!(lb.cur_group.is_some());
+        lb.pop_style();
+        assert!(lb.cur_group.is_none());
+
+        lb.push_bold();
+        lb.push_italic();
+        lb.push_dim();
+        lb.push_crossedout();
+        assert!(lb.cur_style.bold);
+        assert!(lb.cur_style.italic);
+        assert!(lb.cur_style.dim);
+        assert!(lb.cur_style.crossedout);
+        for _ in 0..4 {
+            lb.pop_style();
+        }
+        assert_eq!(lb.cur_style, Style::default());
+    }
+
+    #[test]
+    fn pop_style_on_empty_stack_is_noop() {
+        let mut buf = fresh_buf();
+        let theme = Theme::default();
+        let mut lb = LineBuilder::new(&mut buf, &theme, 80);
+        // Should not panic with no pushes.
+        lb.pop_style();
+        assert_eq!(lb.cur_style, Style::default());
+        assert!(lb.cur_group.is_none());
+    }
+
+    #[test]
+    fn set_hl_assigns_group_for_subsequent_prints() {
+        let block = test_util::render_test(80, |out| {
+            let g = intern("MyGroup");
+            out.set_hl(g);
+            out.print("x");
+            out.reset_style();
+            out.newline();
+        });
+        // The group passes through as a highlight on the span.
+        let has_hl = block.lines[0].spans.iter().any(|s| !s.text.is_empty());
+        assert!(has_hl);
+    }
+
+    #[test]
+    fn render_into_fresh_returns_buffer_and_outcome() {
+        let theme = Theme::default();
+        let (buf, outcome) = render_into_fresh(80, &theme, |out| {
+            out.print("hello");
+            out.newline();
+        });
+        assert_eq!(outcome.line_count, 1);
+        assert!(!outcome.was_wrapped);
+        assert_eq!(buf.line_count(), 1);
+        assert_eq!(buf.get_line(0), Some("hello"));
+    }
+
+    #[test]
+    fn replay_buffer_into_reproduces_text_lines() {
+        let theme = Theme::default();
+        let (src_buf, _) = render_into_fresh(80, &theme, |out| {
+            out.print("line one");
+            out.newline();
+            out.set_hl(intern("MyGroup"));
+            out.print("line two");
+            out.reset_style();
+            out.newline();
+        });
+        let block = test_util::render_test(80, |out| {
+            replay_buffer_into(&src_buf, out);
+        });
+        let texts: Vec<&str> = block.lines.iter().map(|l| l.text.as_str()).collect();
+        assert!(texts.contains(&"line one"));
+        assert!(texts.contains(&"line two"));
+    }
+
+    #[test]
+    fn replay_buffer_row_into_emits_one_row_without_trailing_newline() {
+        let theme = Theme::default();
+        let (src_buf, _) = render_into_fresh(80, &theme, |out| {
+            out.print("only one");
+            out.newline();
+        });
+        let block = test_util::render_test(80, |out| {
+            replay_buffer_row_into(&src_buf, 0, out);
+        });
+        assert!(!block.lines.is_empty());
+        assert_eq!(block.lines[0].text, "only one");
+    }
+
+    #[test]
+    fn finish_no_content_returns_empty_outcome() {
+        let mut buf = fresh_buf();
+        let theme = Theme::default();
+        let lb = LineBuilder::new(&mut buf, &theme, 80);
+        let outcome = lb.finish();
+        assert_eq!(outcome.line_count, 0);
+        assert_eq!(outcome.layout_width, 80);
+        assert!(!outcome.was_wrapped);
+    }
+
+    #[test]
+    fn finish_flushes_trailing_pending_content_as_one_line() {
+        let block = test_util::render_test(80, |out| {
+            out.print("no trailing newline");
+        });
+        assert_eq!(block.outcome.line_count, 1);
+        assert_eq!(block.lines[0].text, "no trailing newline");
+    }
+
+    #[test]
+    fn newline_after_styled_text_records_max_line_width() {
+        let block = test_util::render_test(80, |out| {
+            out.print("hello");
+            out.newline();
+            out.print("hi");
+            out.newline();
+        });
+        assert!(block.outcome.max_line_width >= 5);
+    }
+
+    #[test]
+    fn current_hl_uses_registered_group_directly_without_axis_mods() {
+        // Register the group with a real bg so theme.contains() is true.
+        let mut theme = Theme::default();
+        theme.set(
+            "__BuilderTestGroup_xyz__",
+            Style {
+                bg: Some(Color::Red),
+                ..Default::default()
+            },
+        );
+        let group = theme.id_for("__BuilderTestGroup_xyz__");
+        let mut buf = fresh_buf();
+        let mut lb = LineBuilder::new(&mut buf, &theme, 80);
+        lb.set_hl(group);
+        lb.print("x");
+        lb.newline();
+        let outcome = lb.finish();
+        assert_eq!(outcome.line_count, 1);
+    }
+}

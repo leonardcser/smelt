@@ -86,3 +86,133 @@ pub fn solve_hbox_widths(items: &[HboxItem], total: u16) -> Vec<u16> {
     }
     widths
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn item(constraint: Constraint) -> HboxItem {
+        HboxItem {
+            constraint,
+            layout: BlockLayout::Leaf(BufId(0)),
+        }
+    }
+
+    #[test]
+    fn leaves_returns_single_buf_id_for_leaf() {
+        let layout = BlockLayout::Leaf(BufId(7));
+        assert_eq!(layout.leaves(), vec![BufId(7)]);
+    }
+
+    #[test]
+    fn leaves_visits_vbox_children_in_order() {
+        let layout = BlockLayout::Vbox(vec![
+            BlockLayout::Leaf(BufId(1)),
+            BlockLayout::Leaf(BufId(2)),
+            BlockLayout::Leaf(BufId(3)),
+        ]);
+        assert_eq!(layout.leaves(), vec![BufId(1), BufId(2), BufId(3)]);
+    }
+
+    #[test]
+    fn leaves_visits_hbox_children_in_order() {
+        let layout = BlockLayout::Hbox(vec![
+            HboxItem {
+                constraint: Constraint::Length(10),
+                layout: BlockLayout::Leaf(BufId(5)),
+            },
+            HboxItem {
+                constraint: Constraint::Fill(1),
+                layout: BlockLayout::Leaf(BufId(6)),
+            },
+        ]);
+        assert_eq!(layout.leaves(), vec![BufId(5), BufId(6)]);
+    }
+
+    #[test]
+    fn leaves_walks_nested_layout_depth_first() {
+        let layout = BlockLayout::Vbox(vec![
+            BlockLayout::Leaf(BufId(1)),
+            BlockLayout::Hbox(vec![
+                HboxItem {
+                    constraint: Constraint::Length(5),
+                    layout: BlockLayout::Leaf(BufId(2)),
+                },
+                HboxItem {
+                    constraint: Constraint::Fill(1),
+                    layout: BlockLayout::Vbox(vec![
+                        BlockLayout::Leaf(BufId(3)),
+                        BlockLayout::Leaf(BufId(4)),
+                    ]),
+                },
+            ]),
+            BlockLayout::Leaf(BufId(5)),
+        ]);
+        assert_eq!(
+            layout.leaves(),
+            vec![BufId(1), BufId(2), BufId(3), BufId(4), BufId(5)]
+        );
+    }
+
+    #[test]
+    fn solve_hbox_widths_lengths_consume_fixed_columns() {
+        let items = vec![item(Constraint::Length(10)), item(Constraint::Length(5))];
+        let widths = solve_hbox_widths(&items, 30);
+        assert_eq!(widths, vec![10, 5]);
+    }
+
+    #[test]
+    fn solve_hbox_widths_clamps_length_to_remaining_total() {
+        // First column is requested 20 but total is only 15.
+        let items = vec![item(Constraint::Length(20))];
+        let widths = solve_hbox_widths(&items, 15);
+        assert_eq!(widths, vec![15]);
+    }
+
+    #[test]
+    fn solve_hbox_widths_distributes_fills_by_weight() {
+        let items = vec![item(Constraint::Fill(1)), item(Constraint::Fill(3))];
+        let widths = solve_hbox_widths(&items, 40);
+        // 40 * 1/4 = 10, 40 * 3/4 = 30
+        assert_eq!(widths, vec![10, 30]);
+    }
+
+    #[test]
+    fn solve_hbox_widths_routes_rounding_excess_to_last_fill() {
+        // 100 * 1/3 = 33 each; total 99, leftover 1 -> last col gets +1.
+        let items = vec![
+            item(Constraint::Fill(1)),
+            item(Constraint::Fill(1)),
+            item(Constraint::Fill(1)),
+        ];
+        let widths = solve_hbox_widths(&items, 100);
+        assert_eq!(widths.iter().sum::<u16>(), 100);
+        assert_eq!(widths[0], 33);
+        assert_eq!(widths[1], 33);
+        assert_eq!(widths[2], 34);
+    }
+
+    #[test]
+    fn solve_hbox_widths_mix_length_and_fill_uses_remaining_for_fill() {
+        let items = vec![
+            item(Constraint::Length(10)),
+            item(Constraint::Fill(1)),
+            item(Constraint::Fill(1)),
+        ];
+        let widths = solve_hbox_widths(&items, 50);
+        assert_eq!(widths[0], 10);
+        assert_eq!(widths[1] + widths[2], 40);
+    }
+
+    #[test]
+    fn solve_hbox_widths_returns_zero_for_fill_columns_when_total_consumed() {
+        let items = vec![item(Constraint::Length(20)), item(Constraint::Fill(1))];
+        let widths = solve_hbox_widths(&items, 20);
+        assert_eq!(widths, vec![20, 0]);
+    }
+
+    #[test]
+    fn solve_hbox_widths_empty_input_returns_empty_vec() {
+        assert!(solve_hbox_widths(&[], 80).is_empty());
+    }
+}
