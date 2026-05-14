@@ -1,6 +1,7 @@
 mod agent;
 pub mod auth;
 pub(crate) mod cancel;
+pub mod clock;
 pub(crate) mod compact;
 pub(crate) mod config;
 pub mod host;

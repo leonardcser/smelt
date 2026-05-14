@@ -119,19 +119,19 @@ Smallest possible PR per injection. Tests prove behavior unchanged.
 
 ### Clock trait shape (decided before PR #4)
 
-Two narrow traits + a combined alias, all in `crates/core/src/clock.rs`:
+Two narrow traits + a combined alias, all in `crates/engine/src/clock.rs` (engine is the lowest workspace crate with real time needs; `core` and `tui` depend on it). Method names follow the return type (`instant_now` / `system_now`) so call sites holding `&dyn Clock` don't need UFCS to disambiguate:
 
 ```rust
 pub trait MonoClock: Send + Sync {
-    fn now(&self) -> std::time::Instant;
+    fn instant_now(&self) -> std::time::Instant;
 }
 
 pub trait WallClock: Send + Sync {
-    fn now(&self) -> std::time::SystemTime;
+    fn system_now(&self) -> std::time::SystemTime;
 }
 
 pub trait Clock: MonoClock + WallClock {}
-impl<T: MonoClock + WallClock> Clock for T {}
+impl<T: MonoClock + WallClock + ?Sized> Clock for T {}
 ```
 
 Rationale for split:
