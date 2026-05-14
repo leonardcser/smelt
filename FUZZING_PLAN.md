@@ -105,7 +105,14 @@ Smallest possible PR per injection. Tests prove behavior unchanged.
 | 1 | `biased;` on 6 unbiased selects | `a3f33ff8` | ☑ done |
 | 2 | Sort 4 HashMap-derived `Vec`s | `0e8df6ad` | ☑ done |
 | 3 | `reset_for_test` hooks on static interners | `290750dc` | ☑ done (scope: `style/theme` + `buffer` only) |
-| 4 | `Clock` trait + first adopter | — | ◐ next |
+| 4 | `Clock` trait + impls | `831fbccb` | ☑ done |
+| 4a | Plumb `Arc<dyn Clock>` through `Core` + `EngineConfig` | `3714ef87` | ☑ done |
+| 4b | Plumb clock through `Provider` + aux task builders | `04be07ea` | ☑ done |
+| 4c | Wire `SourceEvent::Tick` to a `VirtualClock` in test harness | `e4c82127` | ☑ done |
+| 4d | `WorkingState`: pure-fn `now: Instant` (turn-phase scheduling) | `7750a863` | ☑ done |
+| 4e | `tick_timers` + `now_secs` cell + `LuaRuntime::{drive_tasks,execute_tool}` | `2ad28e10` | ☑ done |
+| 4f | `Timers::{set,every}` + `lua/task.rs Sleep` + `stream_parser` tool start | `d94af7c0` | ☑ done |
+| 4g | Remaining sweep: `process.rs`, `engine/agent.rs` `.elapsed()`, `messages.rs`, `session.rs` | — | ◐ next |
 | 5 | `RuntimeEnv` (env+cwd+pid+home snapshot) | — | ☐ |
 | 6 | Single-threaded sim runtime + `available_parallelism` = 1 | — | ☐ |
 
