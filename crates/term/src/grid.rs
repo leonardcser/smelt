@@ -121,8 +121,9 @@ impl Grid {
             if col + cw > self.width {
                 break;
             }
-            let idx = self.idx(col, y);
-            self.cells[idx] = Cell { symbol: ch, style };
+            // Delegate to `set` so wide-char continuation marking stays
+            // consistent across all paths that write into the grid.
+            self.set(col, y, ch, style);
             col += cw;
         }
     }
@@ -293,15 +294,19 @@ impl<'a> GridSlice<'a> {
     }
 
     pub fn put_str(&mut self, x: u16, y: u16, text: &str, style: Style) {
+        use unicode_width::UnicodeWidthChar;
         if y >= self.area.height {
             return;
         }
         let abs_y = self.area.top + y;
-        for (col, ch) in (x..).zip(text.chars()) {
-            if col >= self.area.width {
+        let mut col = x;
+        for ch in text.chars() {
+            let cw = UnicodeWidthChar::width(ch).unwrap_or(1).max(1) as u16;
+            if col + cw > self.area.width {
                 break;
             }
             self.grid.set(self.area.left + col, abs_y, ch, style);
+            col += cw;
         }
     }
 
@@ -544,5 +549,37 @@ mod tests {
         a.swap_with(&mut b);
         assert_eq!(a.cell(0, 0).symbol, 'B');
         assert_eq!(b.cell(0, 0).symbol, 'A');
+    }
+
+    #[test]
+    fn diff_does_not_emit_update_for_cell_under_a_wide_char() {
+        // If prev has a real char at what becomes the continuation column
+        // and curr paints a wide char over it via put_str, diff must not
+        // yield a separate update for the continuation column — otherwise
+        // flush_diff overwrites the wide char's right half on the terminal.
+        let mut prev = Grid::new(5, 1);
+        prev.set(1, 0, 'X', Style::default());
+        let mut curr = Grid::new(5, 1);
+        curr.put_str(0, 0, "漢", Style::default());
+        let cols: Vec<u16> = curr.diff(&prev).map(|u| u.x).collect();
+        assert_eq!(
+            cols,
+            vec![0],
+            "expected one update at the wide char's column only; got {cols:?}"
+        );
+    }
+
+    #[test]
+    fn slice_put_str_lays_wide_chars_two_columns_apart() {
+        // Regression: GridSlice::put_str used to advance col by 1 per char,
+        // so a wide char overlapped the next ASCII char in the slice path.
+        let mut grid = Grid::new(10, 1);
+        {
+            let mut slice = grid.slice_mut(Rect::new(0, 0, 10, 1));
+            slice.put_str(0, 0, "a漢b", Style::default());
+        }
+        assert_eq!(grid.cell(0, 0).symbol, 'a');
+        assert_eq!(grid.cell(1, 0).symbol, '漢');
+        assert_eq!(grid.cell(3, 0).symbol, 'b');
     }
 }
