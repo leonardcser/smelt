@@ -21,4 +21,5 @@ minijinja = "2"
 regex = "1"
 
 [dev-dependencies]
+serial_test = "3.4.0"
 tempfile.workspace = true

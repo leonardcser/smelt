@@ -99,14 +99,17 @@ pub fn git_branch(cwd: &std::path::Path) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serial_test::serial;
 
     #[test]
+    #[serial]
     fn expand_tilde_home_prefix() {
         let home = home_dir();
         assert_eq!(expand_tilde(Path::new("~/foo/bar")), home.join("foo/bar"));
     }
 
     #[test]
+    #[serial]
     fn expand_tilde_bare() {
         let home = home_dir();
         assert_eq!(expand_tilde(Path::new("~")), home);
@@ -126,6 +129,7 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn collapse_tilde_under_home() {
         let home = home_dir();
         let p = home.join("projects/rust");
@@ -133,6 +137,7 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn collapse_tilde_home_itself() {
         let home = home_dir();
         assert_eq!(collapse_tilde(&home), PathBuf::from("~"));
@@ -147,6 +152,7 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn roundtrip_expand_collapse() {
         let original = Path::new("~/syncthing/vault");
         let expanded = expand_tilde(original);
@@ -181,6 +187,7 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn home_dir_uses_home_env_when_set() {
         with_env(&[("HOME", Some("/tmp/test-home-abc"))], || {
             assert_eq!(home_dir(), PathBuf::from("/tmp/test-home-abc"));
@@ -188,6 +195,7 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn home_dir_falls_back_to_dot_when_home_unset() {
         with_env(&[("HOME", None)], || {
             assert_eq!(home_dir(), PathBuf::from("."));
@@ -195,6 +203,7 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn config_dir_uses_xdg_config_home_when_set() {
         with_env(&[("XDG_CONFIG_HOME", Some("/tmp/xdg-config"))], || {
             assert_eq!(config_dir(), PathBuf::from("/tmp/xdg-config/smelt"));
@@ -202,6 +211,7 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn config_dir_falls_back_to_home_dot_config_when_xdg_unset() {
         with_env(
             &[("XDG_CONFIG_HOME", None), ("HOME", Some("/tmp/h"))],
@@ -212,6 +222,7 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn state_dir_uses_xdg_state_home_when_set() {
         with_env(&[("XDG_STATE_HOME", Some("/tmp/state"))], || {
             assert_eq!(state_dir(), PathBuf::from("/tmp/state/smelt"));
@@ -219,6 +230,7 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn state_dir_falls_back_to_home_local_state_when_xdg_unset() {
         with_env(
             &[("XDG_STATE_HOME", None), ("HOME", Some("/tmp/h"))],
@@ -229,6 +241,7 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn cache_dir_uses_xdg_cache_home_when_set() {
         with_env(&[("XDG_CACHE_HOME", Some("/tmp/cache"))], || {
             assert_eq!(cache_dir(), PathBuf::from("/tmp/cache/smelt"));
@@ -236,6 +249,7 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn cache_dir_falls_back_to_home_cache_when_xdg_unset() {
         with_env(
             &[("XDG_CACHE_HOME", None), ("HOME", Some("/tmp/h"))],
@@ -246,6 +260,7 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn data_dir_uses_xdg_data_home_when_set() {
         with_env(&[("XDG_DATA_HOME", Some("/tmp/data"))], || {
             assert_eq!(data_dir(), PathBuf::from("/tmp/data/smelt"));
@@ -253,6 +268,7 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn data_dir_falls_back_to_home_local_share_when_xdg_unset() {
         with_env(&[("XDG_DATA_HOME", None), ("HOME", Some("/tmp/h"))], || {
             assert_eq!(data_dir(), PathBuf::from("/tmp/h/.local/share/smelt"));
