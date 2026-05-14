@@ -224,6 +224,15 @@ the user's choice. The bundled dialogs in
 [`runtime/lua/smelt/dialogs/`](https://github.com/leonardcser/smelt/tree/main/runtime/lua/smelt/dialogs)
 (`confirm`, `permissions`, `resume`, `rewind`) are the reference implementations.
 
+Dialog height has two modes:
+
+- `height = N` — fixed percentage of the screen (default `60`). Use this when
+  the body should always fill the dock regardless of content size.
+- `max_height = N` — dialog shrinks to fit its content, capped at `N` percent.
+  Panels with no explicit `height` default to `"fit"` so a single-panel dialog
+  actually shrinks; longer content triggers the panel's scrollbar at the cap.
+  Setting both `height` and `max_height` is an error.
+
 ## Tasks: tool calls, dialogs, sleeps
 
 Anything that yields — `smelt.sleep`, `smelt.ui.dialog.open`,

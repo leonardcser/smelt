@@ -16,16 +16,16 @@ impl PaintId {
 /// axis. Resolved by `resolve_constraints` against the parent's total
 /// size, in declaration order:
 ///
-/// 1. Hard sizes first (`Length`, `Percentage`, `Ratio`, `Max`)
-///    consume their exact share of the available space.
+/// 1. Hard sizes first (`Length`, `Percentage`, `Ratio`, `Max`) and
+///    `Fit` (resolved against the leaf's natural size via the active
+///    `LeafSizer`) consume their exact share of the available space.
 /// 2. `Min(n)` reserves at least `n` cells, then competes with
 ///    `Fill` for the remainder.
 /// 3. `Fill` (and any unsatisfied `Min`) splits whatever remains
 ///    evenly.
 ///
-/// `Fit` is reserved for content-natural sizing — currently behaves
-/// like `Fill`; gains true content awareness once leaves can be
-/// queried for natural size.
+/// `Fit` reports the leaf's natural size from `LeafSizer`; with the
+/// default `NoopSizer` it contributes 0 (i.e. behaves like `Fill`).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Constraint {
     /// Exactly `n` cells along the axis.
@@ -170,19 +170,53 @@ impl LayoutTree {
         }
     }
 
-    /// Natural `(width, height)` bounded by `cap`. `Fill`/`Fit` contribute `0`;
-    /// chrome (border, gap) is added on top. Result is always `<= cap`.
+    /// Natural `(width, height)` bounded by `cap`. `Fill` contributes `0`;
+    /// `Fit` contributes the leaf's natural size from the default `NoopSizer`
+    /// (also `0`); chrome (border, gap) is added on top. Result is always
+    /// `<= cap`.
     pub fn natural_size(&self, cap: (u16, u16)) -> (u16, u16) {
+        self.natural_size_with(cap, &NoopSizer)
+    }
+
+    /// Natural `(width, height)` bounded by `cap`, asking `sizer` for each
+    /// leaf's intrinsic size. `Fit` contributes the sizer's reported size on
+    /// the primary axis; `Fill` always contributes `0`. Chrome (border, gap)
+    /// is added on top. Result is always `<= cap`.
+    pub fn natural_size_with(&self, cap: (u16, u16), sizer: &dyn LeafSizer) -> (u16, u16) {
         match self {
-            // Leaves have no intrinsic size.
-            LayoutTree::Leaf(_) => (0, 0),
-            LayoutTree::Vbox { items, chrome } => natural_box(items, chrome, cap, true),
-            LayoutTree::Hbox { items, chrome } => natural_box(items, chrome, cap, false),
+            LayoutTree::Leaf(p) => sizer.leaf_natural_size(*p, cap),
+            LayoutTree::Vbox { items, chrome } => natural_box(items, chrome, cap, true, sizer),
+            LayoutTree::Hbox { items, chrome } => natural_box(items, chrome, cap, false, sizer),
         }
     }
 }
 
-fn natural_box(items: &[Item], chrome: &Chrome, cap: (u16, u16), vertical: bool) -> (u16, u16) {
+/// Resolves a leaf's natural size for `Fit` constraints and the natural-size
+/// pass. Hosts implement this against their leaf store (e.g. window buffer
+/// line counts) to drive content-aware sizing.
+pub trait LeafSizer {
+    /// Natural `(width, height)` for `id` at the given available cap. Return
+    /// `(0, 0)` for leaves with no intrinsic size.
+    fn leaf_natural_size(&self, id: PaintId, cap: (u16, u16)) -> (u16, u16);
+}
+
+/// Default sizer: every leaf reports `(0, 0)`. Used by callers that don't
+/// need content-aware sizing (split layout, tests, storybook).
+pub struct NoopSizer;
+
+impl LeafSizer for NoopSizer {
+    fn leaf_natural_size(&self, _id: PaintId, _cap: (u16, u16)) -> (u16, u16) {
+        (0, 0)
+    }
+}
+
+fn natural_box(
+    items: &[Item],
+    chrome: &Chrome,
+    cap: (u16, u16),
+    vertical: bool,
+    sizer: &dyn LeafSizer,
+) -> (u16, u16) {
     let (cap_w, cap_h) = cap;
     let (border_w, border_h) = match chrome.border {
         Some(b) => {
@@ -218,7 +252,7 @@ fn natural_box(items: &[Item], chrome: &Chrome, cap: (u16, u16), vertical: bool)
     let mut primary = 0u16;
     let mut secondary = 0u16;
     for (constraint, child) in items {
-        let (child_w, child_h) = child.natural_size(inner_cap);
+        let (child_w, child_h) = child.natural_size_with(inner_cap, sizer);
         let primary_size = match constraint {
             Constraint::Length(n) | Constraint::Max(n) | Constraint::Min(n) => *n,
             Constraint::Percentage(p) => {
@@ -232,13 +266,16 @@ fn natural_box(items: &[Item], chrome: &Chrome, cap: (u16, u16), vertical: bool)
                         as u16
                 }
             }
-            Constraint::Fill | Constraint::Fit => {
+            // `Fit` reports the leaf's natural size (via the sizer); `Fill`
+            // is elastic and contributes `0` to the parent's demand.
+            Constraint::Fit => {
                 if vertical {
                     child_h
                 } else {
                     child_w
                 }
             }
+            Constraint::Fill => 0,
         };
         let cross_size = if vertical { child_w } else { child_h };
         primary = primary.saturating_add(primary_size);
@@ -477,10 +514,23 @@ impl Gutters {
     }
 }
 
-/// Resolve the tree against `area` and return the rect of every leaf.
+/// Resolve the tree against `area` and return the rect of every leaf. `Fit`
+/// constraints contribute `0` (no leaf-size hook); use `resolve_layout_with`
+/// to drive content-aware sizing.
 pub fn resolve_layout(tree: &LayoutTree, area: Rect) -> HashMap<PaintId, Rect> {
+    resolve_layout_with(tree, area, &NoopSizer)
+}
+
+/// Resolve the tree against `area` using `sizer` to size `Fit` constraints
+/// from each leaf's natural size. `Fit` items claim their natural primary
+/// extent before `Fill` siblings split the remainder.
+pub fn resolve_layout_with(
+    tree: &LayoutTree,
+    area: Rect,
+    sizer: &dyn LeafSizer,
+) -> HashMap<PaintId, Rect> {
     let mut result = HashMap::new();
-    resolve_node(tree, area, &mut result);
+    resolve_node(tree, area, sizer, &mut result);
     result
 }
 
@@ -624,16 +674,21 @@ fn merge_title_span_style(
     }
 }
 
-fn resolve_node(node: &LayoutTree, area: Rect, out: &mut HashMap<PaintId, Rect>) {
+fn resolve_node(
+    node: &LayoutTree,
+    area: Rect,
+    sizer: &dyn LeafSizer,
+    out: &mut HashMap<PaintId, Rect>,
+) {
     match node {
         LayoutTree::Leaf(id) => {
             out.insert(*id, area);
         }
         LayoutTree::Vbox { items, chrome } => {
-            resolve_box(items, chrome, area, true, out);
+            resolve_box(items, chrome, area, true, sizer, out);
         }
         LayoutTree::Hbox { items, chrome } => {
-            resolve_box(items, chrome, area, false, out);
+            resolve_box(items, chrome, area, false, sizer, out);
         }
     }
 }
@@ -643,6 +698,7 @@ fn resolve_box(
     chrome: &Chrome,
     area: Rect,
     vertical: bool,
+    sizer: &dyn LeafSizer,
     out: &mut HashMap<PaintId, Rect>,
 ) {
     let inner = inset_for_border(area, chrome.border);
@@ -651,15 +707,39 @@ fn resolve_box(
         .gap
         .saturating_mul(items.len().saturating_sub(1) as u16);
     let available = primary_total.saturating_sub(total_gap);
-    let sizes = resolve_constraints(items, available);
+    // Pre-resolve `Fit` items against their child's natural size at the
+    // available cross-axis cap, so `resolve_constraints` can treat them as
+    // hard-sized claimants on the primary axis.
+    let resolved: Vec<Constraint> = items
+        .iter()
+        .map(|(c, child)| match c {
+            Constraint::Fit => {
+                let leaf_cap = if vertical {
+                    (inner.width, available)
+                } else {
+                    (available, inner.height)
+                };
+                let (nw, nh) = child.natural_size_with(leaf_cap, sizer);
+                let n = if vertical { nh } else { nw };
+                Constraint::Length(n.min(available))
+            }
+            other => *other,
+        })
+        .collect();
+    let resolved_items: Vec<Item> = resolved
+        .into_iter()
+        .zip(items.iter())
+        .map(|(c, (_, child))| (c, child.clone()))
+        .collect();
+    let sizes = resolve_constraints(&resolved_items, available);
     let mut offset = 0u16;
-    for (i, ((_, child), &size)) in items.iter().zip(sizes.iter()).enumerate() {
+    for (i, ((_, child), &size)) in resolved_items.iter().zip(sizes.iter()).enumerate() {
         let child_area = if vertical {
             Rect::new(inner.top + offset, inner.left, inner.width, size)
         } else {
             Rect::new(inner.top, inner.left + offset, size, inner.height)
         };
-        resolve_node(child, child_area, out);
+        resolve_node(child, child_area, sizer, out);
         offset += size;
         if i + 1 < items.len() {
             offset += chrome.gap;
@@ -971,14 +1051,64 @@ mod tests {
     }
 
     #[test]
-    fn fit_falls_back_to_fill_for_now() {
+    fn fit_with_noop_sizer_contributes_zero() {
         let tree = LayoutTree::vbox(vec![
             (Constraint::Fit, LayoutTree::leaf(A)),
             (Constraint::Fill, LayoutTree::leaf(B)),
         ]);
         let result = resolve_layout(&tree, Rect::new(0, 0, 80, 24));
-        assert_eq!(result[&A].height, 12);
-        assert_eq!(result[&B].height, 12);
+        // `NoopSizer`: A reports 0 → `Fit` claims 0, `Fill` takes the rest.
+        assert_eq!(result[&A].height, 0);
+        assert_eq!(result[&B].height, 24);
+    }
+
+    struct FixedSizer(u16);
+
+    impl LeafSizer for FixedSizer {
+        fn leaf_natural_size(&self, _id: PaintId, _cap: (u16, u16)) -> (u16, u16) {
+            (0, self.0)
+        }
+    }
+
+    #[test]
+    fn fit_with_sizer_uses_leaf_natural_height() {
+        let tree = LayoutTree::vbox(vec![
+            (Constraint::Fit, LayoutTree::leaf(A)),
+            (Constraint::Fill, LayoutTree::leaf(B)),
+        ]);
+        let sizer = FixedSizer(3);
+        let result = resolve_layout_with(&tree, Rect::new(0, 0, 80, 24), &sizer);
+        assert_eq!(result[&A].height, 3, "Fit claims sizer-reported natural");
+        assert_eq!(result[&B].height, 21, "Fill takes the remainder");
+    }
+
+    #[test]
+    fn fit_clamps_to_available_when_sizer_overflows() {
+        let tree = LayoutTree::vbox(vec![
+            (Constraint::Fit, LayoutTree::leaf(A)),
+            (Constraint::Fill, LayoutTree::leaf(B)),
+        ]);
+        // Sizer reports 50, but parent only has 10 rows.
+        let sizer = FixedSizer(50);
+        let result = resolve_layout_with(&tree, Rect::new(0, 0, 80, 10), &sizer);
+        assert_eq!(result[&A].height, 10);
+        assert_eq!(result[&B].height, 0);
+    }
+
+    #[test]
+    fn natural_size_with_sizer_reports_leaf_height() {
+        let tree = LayoutTree::vbox(vec![(Constraint::Fit, LayoutTree::leaf(A))]);
+        let sizer = FixedSizer(5);
+        assert_eq!(tree.natural_size_with((80, 24), &sizer), (0, 5));
+    }
+
+    #[test]
+    fn natural_size_fill_contributes_zero_with_sizer() {
+        let tree = LayoutTree::vbox(vec![(Constraint::Fill, LayoutTree::leaf(A))]);
+        let sizer = FixedSizer(5);
+        // Fill is elastic — even with a sizer reporting 5, it contributes 0
+        // to the parent's natural-size demand.
+        assert_eq!(tree.natural_size_with((80, 24), &sizer), (0, 0));
     }
 
     #[test]

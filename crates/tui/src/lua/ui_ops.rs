@@ -12,8 +12,15 @@ use crossterm::event::{KeyCode, KeyModifiers};
 #[derive(Clone, Copy)]
 enum OverlayPlacement {
     ScreenCenter,
+    /// Fixed-height dock at the screen bottom; spans `height_pct` of the
+    /// space above the statusline.
     DockBottom {
         height_pct: u16,
+    },
+    /// Dock at the screen bottom that sizes to its content up to
+    /// `max_height_pct`; ideal for variable-length content with `Fit` panels.
+    DockBottomFit {
+        max_height_pct: u16,
     },
     /// Covers the whole viewport except the bottom statusline row.
     Fullscreen,
@@ -49,6 +56,9 @@ pub(crate) fn open_overlay(app: &mut TuiApp, opts: mlua::Table) -> Result<u64, S
     let resizable: bool = opts.get("resizable").unwrap_or(false);
 
     let mut leaf_items: Vec<(Constraint, LayoutTree)> = Vec::new();
+    // Track the window leaves so fit-mode placements can ensure their buffers
+    // are wrapped at the dialog width before the natural-size walk runs.
+    let mut window_leaves: Vec<WinId> = Vec::new();
     for pair in items_tbl.sequence_values::<mlua::Table>() {
         let item = pair.map_err(|e| format!("overlay item: {e}"))?;
         let raw_id: u64 = item
@@ -80,7 +90,10 @@ pub(crate) fn open_overlay(app: &mut TuiApp, opts: mlua::Table) -> Result<u64, S
         let item_title = crate::lua::parse::title(item.get::<mlua::Value>("title").ok())
             .map_err(|e| format!("overlay item.title: {e}"))?;
         let mut leaf_tree = match leaf {
-            crate::lua::paint::LeafKind::Window(w) => LayoutTree::leaf(w),
+            crate::lua::paint::LeafKind::Window(w) => {
+                window_leaves.push(w);
+                LayoutTree::leaf(w)
+            }
             crate::lua::paint::LeafKind::Paint(p) => LayoutTree::leaf(p),
         };
         if let Some(b) = item_border {
@@ -117,6 +130,18 @@ pub(crate) fn open_overlay(app: &mut TuiApp, opts: mlua::Table) -> Result<u64, S
             title,
         )
     };
+    // Fit-mode counterpart: wrappers carry `Fit` so the inner tree's natural
+    // size propagates up to the natural-size walk. With `Fill`, the wrapper
+    // would contribute `0` to the parent's demand and collapse the dialog.
+    let fit_layout = |inner: LayoutTree, title: Option<Line<'static>>| -> LayoutTree {
+        with_chrome(
+            LayoutTree::vbox(vec![(
+                Constraint::Fit,
+                LayoutTree::hbox(vec![(Constraint::Fit, inner)]),
+            )]),
+            title,
+        )
+    };
     let (term_w, term_h) = app.ui.terminal_size();
     let pct = |total: u16, p: u16| ((total as u32 * p as u32) / 100).min(total as u32) as u16;
     let (anchor, layout, size_override) = match placement {
@@ -143,6 +168,36 @@ pub(crate) fn open_overlay(app: &mut TuiApp, opts: mlua::Table) -> Result<u64, S
                 Anchor::ScreenBottom { above_rows: 1 },
                 layout,
                 Some((term_w, h)),
+            )
+        }
+        OverlayPlacement::DockBottomFit { max_height_pct } => {
+            let avail_h = term_h.saturating_sub(1); // 1 row reserved for the statusline
+            let max_h = pct(avail_h, max_height_pct).max(1);
+            // Pre-render every window leaf at the dialog's content width so
+            // `buf.lines().len()` (the sizer's source) matches the wrap that
+            // the natural-size walk is about to consult. Without this, the
+            // first frame sizes the dialog from a stale (or seed) line count.
+            for &win_id in &window_leaves {
+                let content_w = app
+                    .ui
+                    .win(win_id)
+                    .map(|w| w.config.gutters.content_width(term_w))
+                    .unwrap_or(term_w);
+                if let Some(buf_id) = app.ui.win(win_id).map(|w| w.buf) {
+                    if let Some(buf) = app.ui.buf_mut(buf_id) {
+                        buf.ensure_rendered_at(content_w);
+                    }
+                }
+            }
+            let layout = fit_layout(inner, title);
+            // `natural_size_with` accounts for chrome (border rows). The result
+            // is already clamped to the cap, but we re-clamp defensively.
+            let (_, nat_h) = layout.natural_size_with((term_w, max_h), &app.ui);
+            let final_h = nat_h.max(1).min(max_h);
+            (
+                Anchor::ScreenBottom { above_rows: 1 },
+                layout,
+                Some((term_w, final_h)),
             )
         }
         OverlayPlacement::Fullscreen => {
@@ -223,6 +278,10 @@ fn parse_overlay_placement(opts: &mlua::Table) -> Result<OverlayPlacement, Strin
         Some("dock_bottom") => {
             let height_pct: u16 = opts.get("placement_height").unwrap_or(60);
             Ok(OverlayPlacement::DockBottom { height_pct })
+        }
+        Some("dock_bottom_fit") => {
+            let max_height_pct: u16 = opts.get("placement_max_height").unwrap_or(60);
+            Ok(OverlayPlacement::DockBottomFit { max_height_pct })
         }
         Some("fullscreen") => Ok(OverlayPlacement::Fullscreen),
         Some("screen_at") => {

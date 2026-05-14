@@ -10,10 +10,10 @@ local function open_text_dialog(title, text)
     local leaf = smelt.ui.dialog.content({ buf = buf, interactive = true })
 
     smelt.ui.dialog.open({
-      title   = title,
-      height  = 40,
-      panels  = { { leaf = leaf, height = "fill" } },
-      keymaps = {
+      title      = title,
+      max_height = 50,
+      panels     = { { leaf = leaf } },
+      keymaps    = {
         { key = "q", on_press = function(ctx) ctx.close() end },
         { key = "?", on_press = function(ctx) ctx.close() end },
       },

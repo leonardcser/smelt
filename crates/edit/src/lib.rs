@@ -446,7 +446,11 @@ impl Ui {
                     continue;
                 }
             }
-            let leaf_rects = layout::resolve_layout(&ov.layout, rect);
+            let sizer = UiLeafSizer {
+                wins: &self.wins,
+                bufs: &self.bufs,
+            };
+            let leaf_rects = layout::resolve_layout_with(&ov.layout, rect, &sizer);
             for (paint_id, leaf_rect) in &leaf_rects {
                 if leaf_rect.contains(row, col) {
                     let win = WinId(paint_id.0);
@@ -485,7 +489,7 @@ impl Ui {
         for (id, ov) in self.overlays_in_z_order() {
             let size = ov
                 .size_override
-                .unwrap_or_else(|| ov.layout.natural_size((term_w, term_h)));
+                .unwrap_or_else(|| ov.layout.natural_size_with((term_w, term_h), self));
             if let Some(rect) = overlay::resolve_anchor(&ov.anchor, size, &ctx) {
                 out.push((id, rect, ov));
             }
@@ -847,7 +851,11 @@ impl Ui {
         // their lines before the immutable paint walk. Also writes `Window.viewport` so
         // input dispatch (vim nav, mouse hit-test) sees the same geometry as the compositor.
         for (_id, rect, overlay) in &resolved {
-            let leaf_rects = layout::resolve_layout(&overlay.layout, *rect);
+            let sizer = UiLeafSizer {
+                wins: &self.wins,
+                bufs: &self.bufs,
+            };
+            let leaf_rects = layout::resolve_layout_with(&overlay.layout, *rect, &sizer);
             for (paint_id, leaf_rect) in &leaf_rects {
                 let win_id = WinId(paint_id.0);
                 let Some(win) = self.wins.get(&win_id) else {
@@ -971,16 +979,26 @@ impl Ui {
                     };
                     paint(id, &mut slice, &ctx);
                 };
-                paint_layout_tree(
+                let sizer = UiLeafSizer { wins, bufs };
+                smelt_term::paint_layout_tree_with(
                     grid,
                     theme,
                     &splits_tree,
                     Rect::new(0, 0, term_w, term_h),
                     term_size,
+                    &sizer,
                     &mut dispatch,
                 );
                 for (_id, rect, overlay) in &resolved {
-                    paint_overlay(grid, theme, *rect, overlay, term_size, &mut dispatch);
+                    paint_overlay(
+                        grid,
+                        theme,
+                        *rect,
+                        overlay,
+                        term_size,
+                        &sizer,
+                        &mut dispatch,
+                    );
                 }
             })
     }
@@ -1001,8 +1019,12 @@ impl Ui {
         if let Some(rect) = layout::resolve_layout(self.splits(), area).get(&id) {
             return Some(*rect);
         }
+        let sizer = UiLeafSizer {
+            wins: &self.wins,
+            bufs: &self.bufs,
+        };
         for (_oid, ov_rect, ov) in self.resolve_overlays(None) {
-            if let Some(rect) = layout::resolve_layout(&ov.layout, ov_rect).get(&id) {
+            if let Some(rect) = layout::resolve_layout_with(&ov.layout, ov_rect, &sizer).get(&id) {
                 return Some(*rect);
             }
         }
@@ -1485,10 +1507,44 @@ fn paint_overlay(
     area: Rect,
     overlay: &Overlay,
     term_size: (u16, u16),
+    sizer: &dyn layout::LeafSizer,
     paint: &mut PaintDispatch,
 ) {
     grid.clear(area);
-    paint_layout_tree(grid, theme, &overlay.layout, area, term_size, paint);
+    smelt_term::paint_layout_tree_with(grid, theme, &overlay.layout, area, term_size, sizer, paint);
+}
+
+/// Looks up each window leaf's natural size from its buffer's current
+/// (wrapped) line count. Paint regions and unknown ids report `(0, 0)`.
+/// Callers that want the line count to reflect a freshly wrapped width must
+/// run `Buffer::ensure_rendered_at` first; this sizer reads only.
+pub(crate) struct UiLeafSizer<'a> {
+    pub wins: &'a HashMap<WinId, Window>,
+    pub bufs: &'a HashMap<BufId, Buffer>,
+}
+
+impl<'a> layout::LeafSizer for UiLeafSizer<'a> {
+    fn leaf_natural_size(&self, id: PaintId, cap: (u16, u16)) -> (u16, u16) {
+        let win_id = WinId(id.0);
+        let Some(win) = self.wins.get(&win_id) else {
+            return (0, 0);
+        };
+        let Some(buf) = self.bufs.get(&win.buf) else {
+            return (0, 0);
+        };
+        let h = (buf.lines().len() as u32).min(u16::MAX as u32) as u16;
+        (cap.0, h.min(cap.1))
+    }
+}
+
+impl layout::LeafSizer for Ui {
+    fn leaf_natural_size(&self, id: PaintId, cap: (u16, u16)) -> (u16, u16) {
+        UiLeafSizer {
+            wins: &self.wins,
+            bufs: &self.bufs,
+        }
+        .leaf_natural_size(id, cap)
+    }
 }
 
 #[cfg(test)]

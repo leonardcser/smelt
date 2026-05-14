@@ -29,10 +29,10 @@ smelt.cmd.register("messages", function()
     local body_leaf = smelt.ui.dialog.content({ buf = body_buf, interactive = true })
 
     smelt.ui.dialog.open({
-      title  = string.format("messages (%d)", #entries),
-      height = 40,
-      panels = { { leaf = body_leaf, height = "fill" } },
-      keymaps = {
+      title      = string.format("messages (%d)", #entries),
+      max_height = 50,
+      panels     = { { leaf = body_leaf } },
+      keymaps    = {
         { key = "q",     on_press = function(ctx) ctx.close() end },
         { key = "<Esc>", on_press = function(ctx) ctx.close() end },
         { key = "c",     on_press = function(ctx) smelt.messages.clear(); ctx.close() end },
