@@ -7,7 +7,7 @@
 ---@class smelt.ui.overlay
 local ui_overlay = {}
 
---- Open a generic overlay composed from `opts.items` (windows, paint regions, lines). Returns the overlay id so it can be focused or closed via `smelt.win`.
+--- Open a generic overlay composed from `opts.items`. Position with `opts.anchor` (`"dock_bottom"` | `"center"` | `"screen_at"` | `"win"`); size each axis with `opts.width` / `opts.height` (fixed) or `opts.max_width` / `opts.max_height` (fit-to-content, capped). Size values accept integers (cells), `"N%"` (percent of the anchor's available extent), or `"fill"`. Returns the overlay id so it can be focused or closed via `smelt.win`.
 ---@type fun(opts: table): integer
 ui_overlay.open = nil
 

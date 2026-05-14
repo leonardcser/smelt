@@ -92,7 +92,7 @@ smelt.tools.register({
       local result = smelt.ui.dialog.open({
         title        = title,
         blocks_agent = true,
-        height       = 70,
+        height       = "70%",
         panels = {
           { leaf = md_leaf,      height = "fill" },
           { leaf = options_leaf, height = "fit"  },

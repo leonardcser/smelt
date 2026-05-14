@@ -73,7 +73,7 @@ smelt.cmd.register("permissions", function()
           { text = "permissions ", bold = true },
           { text = "(d/bs: delete)", fg = "grey", dim = true },
         },
-        height = 60,
+        height = "60%",
         panels = { { leaf = options_leaf } },
         keymaps = {
           { key = "bs", hint = "\u{232b}: delete selected", on_press = delete_selected },

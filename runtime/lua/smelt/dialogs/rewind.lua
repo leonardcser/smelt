@@ -44,7 +44,7 @@ smelt.cmd.register("rewind", function(args)
 
     local picked = smelt.ui.dialog.open({
       title  = "rewind",
-      height = 50,
+      height = "50%",
       panels = { { leaf = options_leaf } },
       on_submit = function(ctx)
         ctx.resolve((smelt.win.cursor_row(options_leaf) or 0) + 1)

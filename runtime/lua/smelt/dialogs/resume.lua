@@ -135,7 +135,7 @@ smelt.cmd.register("resume", function()
     -- while these keys drive the list cursor.
     local picked = smelt.ui.dialog.open({
       title  = "resume",
-      height = 70,
+      height = "70%",
       panels = {
         { leaf = input_leaf, height = 1      },
         { leaf = list_leaf,  height = "fill" },

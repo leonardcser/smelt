@@ -30,7 +30,7 @@ smelt.cmd.register("messages", function()
 
     smelt.ui.dialog.open({
       title      = string.format("messages (%d)", #entries),
-      max_height = 50,
+      max_height = "50%",
       panels     = { { leaf = body_leaf } },
       keymaps    = {
         { key = "q",     on_press = function(ctx) ctx.close() end },

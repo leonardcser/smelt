@@ -121,7 +121,7 @@ smelt.cmd.register("export", function()
 
     local picked = smelt.ui.dialog.open({
       title  = "export",
-      height = 30,
+      height = "30%",
       panels = { { leaf = options_leaf } },
       on_submit = function(ctx)
         ctx.resolve((smelt.win.cursor_row(options_leaf) or 0) + 1)

@@ -146,14 +146,14 @@ end
 -- Build the overlay items table from panels and open the overlay. Returns the root
 -- leaf and the array of leaves.
 --
--- Sizing modes:
---   * `opts.height` (default `60`) — dialog is exactly that percentage of the
---     screen. Panels with no `height` default to `"fill"` (split remainder).
---   * `opts.max_height` — dialog shrinks to fit content, capped at that
---     percentage. Panels with no `height` default to `"fit"` (size to
---     content) so a single-panel dialog actually shrinks. A scrollbar
---     appears automatically when content exceeds the cap.
--- Setting both is an error.
+-- Height modes (pick one; setting both is an error):
+--   * `opts.height` — dialog is exactly that size. Integer = cells; `"N%"` =
+--     percent of the screen; `"fill"` = full screen. Default `"60%"`. Panels
+--     with no `height` default to `"fill"` (split the dock's remainder).
+--   * `opts.max_height` — dialog shrinks to fit its content, capped at this
+--     size. Panels with no `height` default to `"fit"` so a single-panel
+--     dialog actually shrinks; longer content triggers the panel's scrollbar
+--     at the cap.
 local function open_overlay(opts)
   if opts.height ~= nil and opts.max_height ~= nil then
     error("smelt.ui.dialog: use `height` (fixed) or `max_height` (fit to content), not both", 3)
@@ -203,21 +203,16 @@ local function open_overlay(opts)
     end
   end
 
-  local overlay_opts = {
+  smelt.ui.overlay.open({
     title        = title,
+    anchor       = "dock_bottom",
+    height       = opts.height,        -- nil if max_height is set; anchor default kicks in
+    max_height   = opts.max_height,    -- nil unless caller opted into fit-mode
     border       = { top = "SmeltAccent" },
     modal        = true,
     blocks_agent = opts.blocks_agent or false,
     items        = overlay_items,
-  }
-  if fit_mode then
-    overlay_opts.placement            = "dock_bottom_fit"
-    overlay_opts.placement_max_height = opts.max_height
-  else
-    overlay_opts.placement        = "dock_bottom"
-    overlay_opts.placement_height = opts.height or 60
-  end
-  smelt.ui.overlay.open(overlay_opts)
+  })
 
   return leaves[1], leaves
 end

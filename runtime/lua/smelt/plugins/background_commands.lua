@@ -187,7 +187,7 @@ smelt.cmd.register("ps", function()
           { text = "processes ", bold = true },
           { text = "(bs: kill)", fg = "grey", dim = true },
         },
-        height = 50,
+        height = "50%",
         panels = { { leaf = options_leaf } },
         keymaps = {
           { key = "bs", hint = "\u{232b}: kill selected", on_press = function(ctx)

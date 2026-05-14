@@ -145,7 +145,7 @@ local function register_exit_plan_mode()
           { text = "(review and approve)", fg = "grey", dim = true },
         },
         blocks_agent = true,
-        height       = 80,
+        height       = "80%",
         panels = {
           { leaf = md_leaf,      height = "fill" },
           { leaf = options_leaf, height = "fit"  },

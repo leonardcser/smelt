@@ -52,11 +52,11 @@ smelt.cmd.register("help", function()
     })
 
     smelt.ui.overlay.open({
-      title     = { { text = " help ", bold = true } },
-      placement = "screen_center",
-      border    = { all = "Comment" },
-      modal     = true,
-      items     = { { win = leaf, height = "fill" } },
+      title  = { { text = " help ", bold = true } },
+      anchor = "center",
+      border = { all = "Comment" },
+      modal  = true,
+      items  = { { win = leaf, height = "fill" } },
     })
 
     local task_id = smelt.task.alloc()

@@ -199,8 +199,8 @@ before the plugin ever runs.
 ## Floating windows and overlays
 
 For overlays that own their own buffer and rect — picker panels, perf HUDs,
-side docks — open a buffer, attach it to a window, then mount that window in an
-overlay placement:
+side docks — open a buffer, attach it to a window, then mount that window in
+an overlay:
 
 ```lua
 local buf = smelt.buf.create()
@@ -208,15 +208,33 @@ local win = smelt.win.open(buf, { focusable = false })
 
 smelt.ui.overlay.open({
   title     = { { text = " perf ", bold = true } },
-  placement = "screen_at",
+  anchor    = "screen_at",
   corner    = "ne",
-  width     = 44,
-  height    = 14,
+  width     = 44,           -- cells
+  height    = 14,           -- cells
   modal     = false,
   draggable = true,
   items     = { { win = win, height = "fill" } },
 })
 ```
+
+Overlay sizing is two orthogonal concepts:
+
+- **Anchor** — where the overlay lives. Valid values:
+  - `"dock_bottom"` (default) — docked above the statusline.
+  - `"center"` — centered on the screen.
+  - `"screen_at"` — absolute position; pair with `corner` + `row` + `col`.
+  - `"win"` — attached to another window; pair with `target` (win id),
+    `attach` (corner), and `row_offset` / `col_offset`.
+- **Size** — `width` / `height` set a fixed extent; `max_width` /
+  `max_height` shrink-to-fit with a cap. Setting both fixed and max on the
+  same axis is an error. Each value accepts:
+  - an integer (cells),
+  - a `"N%"` string (percent of the anchor's available extent on that axis),
+  - `"fill"` (the entire available extent).
+
+Anchor defaults: `dock_bottom` is full-width × 60% tall, `center` is 70% × 60%,
+`screen_at` / `win` require explicit width and height.
 
 For modal dialogs (a markdown panel + an option list + a free-text input, etc.)
 `smelt.ui.dialog.open` is the higher-level surface — it returns the result of
@@ -226,12 +244,13 @@ the user's choice. The bundled dialogs in
 
 Dialog height has two modes:
 
-- `height = N` — fixed percentage of the screen (default `60`). Use this when
-  the body should always fill the dock regardless of content size.
-- `max_height = N` — dialog shrinks to fit its content, capped at `N` percent.
-  Panels with no explicit `height` default to `"fit"` so a single-panel dialog
-  actually shrinks; longer content triggers the panel's scrollbar at the cap.
-  Setting both `height` and `max_height` is an error.
+- `height = "N%"` (or cells, or `"fill"`) — fixed size. Default `"60%"`. Use
+  this when the body should always fill the dock regardless of content size.
+- `max_height = "N%"` (or cells, or `"fill"`) — dialog shrinks to fit its
+  content, capped at this value. Panels with no explicit `height` default to
+  `"fit"` so a single-panel dialog actually shrinks; longer content triggers
+  the panel's scrollbar at the cap. Setting both `height` and `max_height` is
+  an error.
 
 ## Tasks: tool calls, dialogs, sleeps
 
