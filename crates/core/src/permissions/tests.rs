@@ -1698,7 +1698,7 @@ fn compound_command_with_ask_subcommand_and_tool_approval() {
     let p = perms_with_workspace_bash_allow(&workspace, &["find *"]);
     let mut rt = RuntimeApprovals::new();
     rt.add_session_dir(PathBuf::from("/tmp"));
-    rt.add_session_tool("bash", vec![glob::Pattern::new("python3 *").unwrap()]);
+    rt.add_session_tool("bash", vec![glob::Pattern::new("python3").unwrap()]);
     let args = args_with("command", "find /tmp/data -name '*.py' | python3");
     assert!(rt.is_auto_approved(
         &p,
@@ -1715,47 +1715,71 @@ fn pat(s: &str) -> glob::Pattern {
     glob::Pattern::new(s).unwrap()
 }
 
-/// Documents the surprising semantics of `add_session_tool` on a fresh entry:
-/// because an empty-Vec entry signals blanket approval to `is_approved`, the
-/// first call discards its patterns and the entry stays in the blanket state.
-/// Pattern extension only kicks in when the entry was pre-populated (via
-/// `set_session` or `load_workspace`).
 #[test]
-fn approvals_add_session_tool_first_call_blankets_and_discards_patterns() {
+fn approvals_add_session_tool_stores_patterns_on_first_call() {
     let mut rt = RuntimeApprovals::new();
     rt.add_session_tool("bash", vec![pat("ls *"), pat("cat *")]);
-    // Pattern is NOT stored — the entry is empty (= blanket approval).
-    assert!(!rt.has_pattern("bash", "ls *"));
-    // Blanket approval is in effect.
+    assert!(rt.has_pattern("bash", "ls *"));
+    assert!(rt.has_pattern("bash", "cat *"));
+    // Blanket approval is NOT in effect — only patterns match.
+    assert!(rt.is_approved("bash", "ls /tmp", None));
+    assert!(!rt.is_approved("bash", "rm /tmp", None));
+}
+
+#[test]
+fn approvals_add_session_tool_with_empty_patterns_grants_blanket_approval() {
+    let mut rt = RuntimeApprovals::new();
+    rt.add_session_tool("bash", Vec::new());
     assert!(rt.is_approved("bash", "anything goes", None));
 }
 
 #[test]
-fn approvals_add_session_tool_extends_when_session_was_preloaded() {
+fn approvals_add_session_tool_empty_patterns_clears_existing_patterns() {
     let mut rt = RuntimeApprovals::new();
-    // Seed the entry through set_session so the entry is non-empty.
-    let mut seed: HashMap<String, Vec<glob::Pattern>> = HashMap::new();
-    seed.insert("bash".into(), vec![pat("ls *")]);
-    rt.set_session(seed, vec![]);
+    rt.add_session_tool("bash", vec![pat("ls *")]);
+    rt.add_session_tool("bash", Vec::new());
+    // Blanket now applies; existing patterns dropped.
+    assert!(rt.is_approved("bash", "anything", None));
+}
+
+#[test]
+fn approvals_add_session_tool_existing_blanket_beats_incoming_patterns() {
+    let mut rt = RuntimeApprovals::new();
+    rt.add_session_tool("bash", Vec::new());
+    rt.add_session_tool("bash", vec![pat("ls *")]);
+    // Stays blanket — narrowing requires explicit clear.
+    assert!(rt.is_approved("bash", "anything goes", None));
+}
+
+#[test]
+fn approvals_add_session_tool_extends_existing_pattern_list() {
+    let mut rt = RuntimeApprovals::new();
+    rt.add_session_tool("bash", vec![pat("ls *")]);
     rt.add_session_tool("bash", vec![pat("cat *")]);
     assert!(rt.has_pattern("bash", "ls *"));
     assert!(rt.has_pattern("bash", "cat *"));
 }
 
 #[test]
-fn approvals_add_workspace_tool_first_call_blankets_and_discards_patterns() {
+fn approvals_add_workspace_tool_stores_patterns_on_first_call() {
     let mut rt = RuntimeApprovals::new();
     rt.add_workspace_tool("bash", vec![pat("git *")]);
-    assert!(!rt.has_pattern("bash", "git *"));
+    assert!(rt.has_pattern("bash", "git *"));
     assert!(rt.is_approved("bash", "git status", None));
+    assert!(!rt.is_approved("bash", "rm -rf /", None));
 }
 
 #[test]
-fn approvals_add_workspace_tool_extends_when_workspace_was_preloaded() {
+fn approvals_add_workspace_tool_with_empty_patterns_grants_blanket_approval() {
     let mut rt = RuntimeApprovals::new();
-    let mut seed: HashMap<String, Vec<glob::Pattern>> = HashMap::new();
-    seed.insert("bash".into(), vec![pat("git *")]);
-    rt.load_workspace(seed, vec![]);
+    rt.add_workspace_tool("bash", Vec::new());
+    assert!(rt.is_approved("bash", "anything", None));
+}
+
+#[test]
+fn approvals_add_workspace_tool_extends_existing_pattern_list() {
+    let mut rt = RuntimeApprovals::new();
+    rt.add_workspace_tool("bash", vec![pat("git *")]);
     rt.add_workspace_tool("bash", vec![pat("ls *")]);
     assert!(rt.has_pattern("bash", "git *"));
     assert!(rt.has_pattern("bash", "ls *"));

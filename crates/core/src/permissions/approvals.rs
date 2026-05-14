@@ -23,24 +23,15 @@ impl RuntimeApprovals {
     }
 
     /// Add session-scoped tool approval patterns. Empty `patterns` = blanket approval.
+    /// An existing blanket entry beats incoming patterns (blanket is broader).
     pub fn add_session_tool(&mut self, tool: &str, patterns: Vec<glob::Pattern>) {
-        let entry = self.session_tools.entry(tool.to_string()).or_default();
-        if patterns.is_empty() || entry.is_empty() {
-            // Blanket approval: clear existing patterns.
-            entry.clear();
-        } else {
-            entry.extend(patterns);
-        }
+        add_tool_patterns(&mut self.session_tools, tool, patterns);
     }
 
     /// Add workspace-scoped tool approval patterns. Empty `patterns` = blanket approval.
+    /// An existing blanket entry beats incoming patterns (blanket is broader).
     pub fn add_workspace_tool(&mut self, tool: &str, patterns: Vec<glob::Pattern>) {
-        let entry = self.workspace_tools.entry(tool.to_string()).or_default();
-        if patterns.is_empty() || entry.is_empty() {
-            entry.clear();
-        } else {
-            entry.extend(patterns);
-        }
+        add_tool_patterns(&mut self.workspace_tools, tool, patterns);
     }
 
     pub fn add_session_dir(&mut self, dir: PathBuf) {
@@ -201,4 +192,21 @@ impl RuntimeApprovals {
                 .any(|ad| dir.starts_with(ad.as_path()) || path.starts_with(ad.as_path()))
         })
     }
+}
+
+fn add_tool_patterns(
+    tools: &mut HashMap<String, Vec<glob::Pattern>>,
+    tool: &str,
+    patterns: Vec<glob::Pattern>,
+) {
+    if patterns.is_empty() {
+        tools.insert(tool.to_string(), Vec::new());
+        return;
+    }
+    if let Some(existing) = tools.get(tool) {
+        if existing.is_empty() {
+            return;
+        }
+    }
+    tools.entry(tool.to_string()).or_default().extend(patterns);
 }
