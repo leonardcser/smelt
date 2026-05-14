@@ -11,7 +11,7 @@ use crossterm::{
 };
 use protocol::Content;
 use std::io;
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
 impl TuiApp {
     // ── Terminal event dispatch ───────────────────────────────────────────
@@ -242,9 +242,11 @@ impl TuiApp {
                 // Multi-key chord: drop stale pending sequence, then append and match.
                 let now = Instant::now();
                 if let Some(pending) = &t.pending_chord {
-                    if now.duration_since(pending.started)
-                        >= Duration::from_millis(crate::app::CHORD_TIMEOUT_MS)
-                    {
+                    if crate::app::chord::chord_expired(
+                        pending.started,
+                        now,
+                        crate::app::CHORD_TIMEOUT_MS,
+                    ) {
                         t.pending_chord = None;
                     }
                 }
@@ -265,50 +267,28 @@ impl TuiApp {
                 };
                 tokens.push(token);
 
-                let outcome = loop {
-                    let seq: String = tokens.concat();
-                    let has_longer = self.lua.chord_has_longer(&seq, vim_mode.as_deref());
-                    if tokens.len() > 1 {
-                        let ctx_pairs: Vec<(&str, String)> = vec![(
-                            "vim_mode_at_chord_start",
-                            vim_mode_at_start
-                                .map(|m| crate::lua::LuaVimMode::from(m).label().to_string())
-                                .unwrap_or_default(),
-                        )];
-                        let res = self.lua.run_keymap(
-                            &seq,
-                            vim_mode.as_deref(),
-                            Some(ctx_pairs.as_slice()),
-                        );
-                        match res {
-                            KeymapResult::Consumed => {
-                                self.flush_lua_callbacks();
-                                return Some(EventOutcome::Noop);
-                            }
-                            KeymapResult::PassThrough => {
-                                self.flush_lua_callbacks();
-                                break has_longer;
-                            }
-                            KeymapResult::NoBinding => {}
+                let mut oracle = LuaChordOracle {
+                    lua: &self.lua,
+                    vim_mode: vim_mode.as_deref(),
+                    vim_mode_at_start,
+                };
+                let outcome = crate::app::chord::match_chord(tokens, &mut oracle);
+                self.flush_lua_callbacks();
+                match outcome {
+                    crate::app::chord::ChordOutcome::Consumed => {
+                        return Some(EventOutcome::Noop);
+                    }
+                    crate::app::chord::ChordOutcome::Pending { tokens } => {
+                        if tokens.is_empty() {
+                            t.pending_chord = None;
+                        } else {
+                            t.pending_chord = Some(crate::app::PendingChord {
+                                tokens,
+                                started,
+                                vim_mode_at_start,
+                            });
                         }
                     }
-                    if has_longer {
-                        break true;
-                    }
-                    if tokens.is_empty() {
-                        break false;
-                    }
-                    tokens.remove(0);
-                    if tokens.is_empty() {
-                        break false;
-                    }
-                };
-                if outcome && !tokens.is_empty() {
-                    t.pending_chord = Some(crate::app::PendingChord {
-                        tokens,
-                        started,
-                        vim_mode_at_start,
-                    });
                 }
             }
         }
@@ -891,5 +871,30 @@ impl TuiApp {
         let max_scroll = (buf.lines().len() as u16).saturating_sub(viewport_rows);
         win_mut.follow_tail = win_mut.scroll_top >= max_scroll;
         matches!(status, crate::smelt_term::Status::Consumed)
+    }
+}
+
+/// Adapter that lets the pure [`crate::app::chord::match_chord`] loop call
+/// into the live Lua keymap registry. Carries the `vim_mode_at_chord_start`
+/// context pair that handlers see on multi-key matches.
+struct LuaChordOracle<'a> {
+    lua: &'a crate::lua::LuaRuntime,
+    vim_mode: Option<&'a str>,
+    vim_mode_at_start: Option<crate::smelt_term::VimMode>,
+}
+
+impl crate::app::chord::ChordOracle for LuaChordOracle<'_> {
+    fn has_longer(&self, seq: &str) -> bool {
+        self.lua.chord_has_longer(seq, self.vim_mode)
+    }
+    fn try_keymap(&mut self, seq: &str) -> smelt_core::lua::runtime::KeymapResult {
+        let ctx: Vec<(&str, String)> = vec![(
+            "vim_mode_at_chord_start",
+            self.vim_mode_at_start
+                .map(|m| crate::lua::LuaVimMode::from(m).label().to_string())
+                .unwrap_or_default(),
+        )];
+        self.lua
+            .run_keymap(seq, self.vim_mode, Some(ctx.as_slice()))
     }
 }
