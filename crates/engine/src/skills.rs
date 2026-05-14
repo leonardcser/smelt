@@ -229,4 +229,209 @@ mod tests {
         assert_eq!(fm.name, "quoted-name");
         assert_eq!(fm.description, "quoted desc");
     }
+
+    #[test]
+    fn split_frontmatter_returns_none_when_only_opening_delimiter() {
+        assert!(split_frontmatter("---\nname: x\nbody no closer").is_none());
+    }
+
+    #[test]
+    fn split_frontmatter_trims_leading_whitespace_before_delimiter() {
+        let (yaml, body) = split_frontmatter("\n   \n---\nname: x\n---\nbody").unwrap();
+        assert!(yaml.contains("name: x"));
+        assert_eq!(body, "body");
+    }
+
+    #[test]
+    fn parse_frontmatter_returns_none_when_name_missing() {
+        let fm = parse_frontmatter("description: only");
+        assert!(fm.is_none());
+    }
+
+    #[test]
+    fn parse_frontmatter_description_defaults_to_empty_when_absent() {
+        let fm = parse_frontmatter("name: only").unwrap();
+        assert_eq!(fm.name, "only");
+        assert_eq!(fm.description, "");
+    }
+
+    #[test]
+    fn parse_frontmatter_skips_blank_lines() {
+        let fm = parse_frontmatter("\nname: a\n\ndescription: b\n").unwrap();
+        assert_eq!(fm.name, "a");
+        assert_eq!(fm.description, "b");
+    }
+
+    #[test]
+    fn unquote_yaml_strips_matched_quotes() {
+        assert_eq!(unquote_yaml("\"x\""), "x");
+        assert_eq!(unquote_yaml("'x'"), "x");
+    }
+
+    #[test]
+    fn unquote_yaml_leaves_unquoted_or_mismatched_intact() {
+        assert_eq!(unquote_yaml("plain"), "plain");
+        assert_eq!(unquote_yaml("\"mismatched'"), "\"mismatched'");
+        assert_eq!(unquote_yaml(""), "");
+        assert_eq!(unquote_yaml("\""), "\"");
+    }
+
+    // ---- SkillLoader (constructed directly to bypass dir scanning) ----
+
+    fn loader_with(entries: Vec<(&str, &str, &str)>) -> SkillLoader {
+        let mut skills = HashMap::new();
+        for (name, description, formatted) in entries {
+            skills.insert(
+                name.to_string(),
+                SkillEntry {
+                    name: name.into(),
+                    description: description.into(),
+                    formatted: formatted.into(),
+                },
+            );
+        }
+        let prompt_section = build_prompt_section(&skills);
+        SkillLoader {
+            skills,
+            prompt_section,
+        }
+    }
+
+    #[test]
+    fn content_returns_formatted_text_for_known_skill() {
+        let l = loader_with(vec![("a", "desc", "<skill>a body</skill>")]);
+        assert_eq!(l.content("a").unwrap(), "<skill>a body</skill>");
+    }
+
+    #[test]
+    fn content_returns_err_listing_available_when_unknown() {
+        let l = loader_with(vec![("a", "d", "x"), ("b", "d", "x")]);
+        let err = l.content("missing").unwrap_err();
+        assert!(err.contains("'missing'"));
+        assert!(err.contains("a"));
+        assert!(err.contains("b"));
+    }
+
+    #[test]
+    fn content_lists_none_when_no_skills_available() {
+        let l = loader_with(vec![]);
+        let err = l.content("missing").unwrap_err();
+        assert!(err.contains("none"));
+    }
+
+    #[test]
+    fn names_returns_sorted_skill_names() {
+        let l = loader_with(vec![("z", "", ""), ("a", "", ""), ("m", "", "")]);
+        assert_eq!(l.names(), vec!["a", "m", "z"]);
+    }
+
+    #[test]
+    fn prompt_section_is_none_when_no_skills_loaded() {
+        let l = loader_with(vec![]);
+        assert!(l.prompt_section().is_none());
+    }
+
+    #[test]
+    fn prompt_section_lists_skills_with_descriptions_sorted() {
+        let l = loader_with(vec![("z", "Z desc", ""), ("a", "A desc", "")]);
+        let p = l.prompt_section().unwrap();
+        assert!(p.contains("# Skills"));
+        let a_pos = p.find("a: A desc").unwrap();
+        let z_pos = p.find("z: Z desc").unwrap();
+        assert!(a_pos < z_pos);
+    }
+
+    // ---- scan_dir / parse_skill via tempdir ----
+
+    fn write(path: &Path, content: &str) {
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent).unwrap();
+        }
+        std::fs::write(path, content).unwrap();
+    }
+
+    #[test]
+    fn scan_dir_loads_skill_from_skill_md_with_valid_frontmatter() {
+        let dir = tempfile::tempdir().unwrap();
+        let skill_dir = dir.path().join("mySkill");
+        write(
+            &skill_dir.join("SKILL.md"),
+            "---\nname: my\ndescription: cool\n---\n\nuse me wisely",
+        );
+        let mut map = HashMap::new();
+        scan_dir(dir.path(), &mut map);
+        assert!(map.contains_key("my"));
+        let entry = &map["my"];
+        assert_eq!(entry.description, "cool");
+        assert!(entry.formatted.contains("<skill name=\"my\">"));
+        assert!(entry.formatted.contains("use me wisely"));
+        assert!(entry.formatted.ends_with("</skill>"));
+    }
+
+    #[test]
+    fn scan_dir_skips_directories_without_skill_md() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("bare")).unwrap();
+        let mut map = HashMap::new();
+        scan_dir(dir.path(), &mut map);
+        assert!(map.is_empty());
+    }
+
+    #[test]
+    fn scan_dir_skips_invalid_frontmatter() {
+        let dir = tempfile::tempdir().unwrap();
+        write(&dir.path().join("nope/SKILL.md"), "no frontmatter here");
+        let mut map = HashMap::new();
+        scan_dir(dir.path(), &mut map);
+        assert!(map.is_empty());
+    }
+
+    #[test]
+    fn scan_dir_is_silent_for_missing_directory() {
+        let mut map = HashMap::new();
+        scan_dir(Path::new("/nonexistent/path/xyzzy"), &mut map);
+        assert!(map.is_empty());
+    }
+
+    #[test]
+    fn parse_skill_lists_bundled_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let skill_dir = dir.path().join("my");
+        write(
+            &skill_dir.join("SKILL.md"),
+            "---\nname: my\ndescription: d\n---\n\nbody",
+        );
+        write(&skill_dir.join("helper.sh"), "#!/bin/bash\n");
+        std::fs::create_dir_all(skill_dir.join("subdir")).unwrap();
+
+        let entry = parse_skill(&skill_dir.join("SKILL.md")).unwrap();
+        assert!(entry.formatted.contains("## Bundled files"));
+        assert!(entry.formatted.contains("- helper.sh"));
+        assert!(entry.formatted.contains("- subdir/"));
+        assert!(entry.formatted.contains("Base directory:"));
+    }
+
+    #[test]
+    fn list_bundled_files_caps_at_ten_entries() {
+        let dir = tempfile::tempdir().unwrap();
+        for i in 0..15 {
+            write(&dir.path().join(format!("f{i}.txt")), "x");
+        }
+        let files = list_bundled_files(dir.path());
+        assert_eq!(files.len(), 10);
+    }
+
+    #[test]
+    fn list_bundled_files_excludes_skill_md() {
+        let dir = tempfile::tempdir().unwrap();
+        write(&dir.path().join("SKILL.md"), "x");
+        write(&dir.path().join("other.txt"), "x");
+        let files = list_bundled_files(dir.path());
+        assert_eq!(files, vec!["other.txt"]);
+    }
+
+    #[test]
+    fn list_bundled_files_handles_missing_directory() {
+        assert!(list_bundled_files(Path::new("/no/such/dir/xyz")).is_empty());
+    }
 }

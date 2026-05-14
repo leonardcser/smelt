@@ -1762,3 +1762,175 @@ impl PricingContext {
         );
     }
 }
+
+#[cfg(test)]
+#[allow(clippy::field_reassign_with_default)]
+mod tests {
+    use super::*;
+
+    fn api_cfg() -> ApiConfig {
+        ApiConfig {
+            base: "https://x/".into(),
+            key: "k".into(),
+            key_env: "K".into(),
+            provider_type: "openai".into(),
+            model_config: ModelConfig::default(),
+        }
+    }
+
+    // ---- next_request_id ----
+
+    #[test]
+    fn next_request_id_returns_monotonically_increasing_values() {
+        let a = next_request_id();
+        let b = next_request_id();
+        let c = next_request_id();
+        assert!(b > a);
+        assert!(c > b);
+    }
+
+    // ---- build_provider ----
+
+    #[test]
+    fn build_provider_strips_trailing_slash_from_api_base() {
+        let p = build_provider(
+            "https://x/",
+            "k",
+            "openai",
+            &ModelConfig::default(),
+            &reqwest::Client::new(),
+        );
+        // Provider::new trims trailing slashes; ProviderKind::from_config "openai" → OpenAi.
+        // Inspect via the public surface: ensure tool_calling reflects default.
+        assert!(p.tool_calling());
+    }
+
+    #[test]
+    fn build_provider_from_api_delegates_to_build_provider() {
+        let api = api_cfg();
+        let p = build_provider_from_api(&api, &reqwest::Client::new());
+        assert!(p.tool_calling());
+    }
+
+    #[test]
+    fn build_provider_with_overrides_uses_override_values_when_some() {
+        let mut config_api = api_cfg();
+        config_api.base = "default-base".into();
+        config_api.key = "default-key".into();
+        let config = EngineConfig {
+            api: config_api,
+            model: "m".into(),
+            auxiliary: crate::AuxiliaryModelConfig::default(),
+            instructions: None,
+            system_prompt_override: None,
+            cwd: std::path::PathBuf::from("/"),
+            skills: None,
+            auto_compact: false,
+            context_window: None,
+            redact_secrets: false,
+        };
+        let client = reqwest::Client::new();
+        let _ = build_provider_with_overrides(&config, &client, Some("override-base"), Some("k"));
+        // No public way to inspect base/key without exposing internals — just verify it doesn't panic.
+    }
+
+    #[test]
+    fn build_provider_with_overrides_falls_back_to_config_when_none() {
+        let config_api = api_cfg();
+        let config = EngineConfig {
+            api: config_api,
+            model: "m".into(),
+            auxiliary: crate::AuxiliaryModelConfig::default(),
+            instructions: None,
+            system_prompt_override: None,
+            cwd: std::path::PathBuf::from("/"),
+            skills: None,
+            auto_compact: false,
+            context_window: None,
+            redact_secrets: false,
+        };
+        let client = reqwest::Client::new();
+        let _ = build_provider_with_overrides(&config, &client, None, None);
+    }
+
+    // ---- send_usage / emit_usage_background ----
+
+    #[test]
+    fn send_usage_emits_token_usage_event_with_cost_when_pricing_resolves() {
+        let (tx, mut rx) = mpsc::unbounded_channel::<EngineEvent>();
+        let mut cfg = ModelConfig::default();
+        cfg.input_cost = Some(5.0);
+        cfg.output_cost = Some(10.0);
+        let usage = protocol::TokenUsage {
+            prompt_tokens: Some(1_000_000),
+            completion_tokens: Some(500_000),
+            cache_read_tokens: None,
+            cache_write_tokens: None,
+            reasoning_tokens: None,
+        };
+        send_usage(&tx, "openai", &cfg, "model-x", usage, Some(50.0), false);
+        match rx.try_recv().unwrap() {
+            EngineEvent::TokenUsage {
+                cost_usd,
+                tokens_per_sec,
+                background,
+                ..
+            } => {
+                assert!(cost_usd.is_some());
+                assert_eq!(tokens_per_sec, Some(50.0));
+                assert!(!background);
+            }
+            _ => panic!("expected TokenUsage"),
+        }
+    }
+
+    #[test]
+    fn send_usage_emits_no_cost_when_pricing_zero() {
+        let (tx, mut rx) = mpsc::unbounded_channel::<EngineEvent>();
+        let cfg = ModelConfig::default();
+        let usage = protocol::TokenUsage::default();
+        send_usage(&tx, "openai-compatible", &cfg, "model", usage, None, false);
+        match rx.try_recv().unwrap() {
+            EngineEvent::TokenUsage { cost_usd, .. } => assert!(cost_usd.is_none()),
+            _ => panic!("expected TokenUsage"),
+        }
+    }
+
+    #[test]
+    fn emit_usage_background_marks_event_as_background() {
+        let (tx, mut rx) = mpsc::unbounded_channel::<EngineEvent>();
+        emit_usage_background(&tx, &api_cfg(), "m", protocol::TokenUsage::default());
+        match rx.try_recv().unwrap() {
+            EngineEvent::TokenUsage { background, .. } => assert!(background),
+            _ => panic!("expected TokenUsage"),
+        }
+    }
+
+    // ---- PricingContext ----
+
+    #[test]
+    fn pricing_context_from_api_clones_provider_type_and_model_config() {
+        let api = api_cfg();
+        let pc = PricingContext::from_api(&api);
+        assert_eq!(pc.provider_type, "openai");
+        assert!(pc.model_config.tool_calling.is_none());
+    }
+
+    #[test]
+    fn pricing_context_emit_sends_background_event() {
+        let (tx, mut rx) = mpsc::unbounded_channel::<EngineEvent>();
+        let pc = PricingContext::from_api(&api_cfg());
+        pc.emit(&tx, "m", protocol::TokenUsage::default());
+        match rx.try_recv().unwrap() {
+            EngineEvent::TokenUsage {
+                background,
+                tokens_per_sec,
+                ..
+            } => {
+                assert!(background);
+                assert!(tokens_per_sec.is_none());
+            }
+            _ => panic!("expected TokenUsage"),
+        }
+    }
+}

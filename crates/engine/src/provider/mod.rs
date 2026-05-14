@@ -1045,3 +1045,703 @@ fn normalize_short(raw: &str) -> String {
     }
     t
 }
+
+#[cfg(test)]
+#[allow(clippy::field_reassign_with_default)]
+mod tests {
+    use super::*;
+    use protocol::{Content, FunctionCall, Role, ToolCall};
+    use serde_json::json;
+
+    fn user_msg(text: &str) -> Message {
+        Message {
+            role: Role::User,
+            content: Some(Content::Text(text.into())),
+            reasoning_content: None,
+            tool_calls: None,
+            tool_call_id: None,
+            is_error: false,
+        }
+    }
+
+    // ---- non_empty ----
+
+    #[test]
+    fn non_empty_returns_none_for_empty_string() {
+        assert_eq!(non_empty(String::new()), None);
+    }
+
+    #[test]
+    fn non_empty_returns_some_for_non_empty_string() {
+        assert_eq!(non_empty("hi".into()), Some("hi".to_string()));
+    }
+
+    // ---- collect_indexed_tool_calls ----
+
+    #[test]
+    fn collect_indexed_tool_calls_returns_sorted_by_index() {
+        let mut map = std::collections::HashMap::new();
+        map.insert(2, ("c".into(), "C".into(), "{}".into()));
+        map.insert(0, ("a".into(), "A".into(), "{}".into()));
+        map.insert(1, ("b".into(), "B".into(), "{}".into()));
+        let calls = collect_indexed_tool_calls(map);
+        let names: Vec<_> = calls.iter().map(|c| c.function.name.clone()).collect();
+        assert_eq!(names, vec!["A", "B", "C"]);
+    }
+
+    #[test]
+    fn collect_indexed_tool_calls_empty_input_returns_empty_vec() {
+        let calls = collect_indexed_tool_calls(std::collections::HashMap::new());
+        assert!(calls.is_empty());
+    }
+
+    // ---- json_as_u64 ----
+
+    #[test]
+    fn json_as_u64_handles_positive_u64() {
+        assert_eq!(json_as_u64(&json!(42)), Some(42));
+    }
+
+    #[test]
+    fn json_as_u64_handles_negative_i64_via_cast() {
+        let v = json!(-1);
+        // -1 as i64 cast to u64 wraps to u64::MAX.
+        assert_eq!(json_as_u64(&v), Some(u64::MAX));
+    }
+
+    #[test]
+    fn json_as_u64_returns_none_for_non_numeric() {
+        assert_eq!(json_as_u64(&json!("nope")), None);
+        assert_eq!(json_as_u64(&json!(null)), None);
+    }
+
+    // ---- parse_retry_from_body ----
+
+    #[test]
+    fn parse_retry_from_body_seconds_default_unit() {
+        let d = parse_retry_from_body("you exceeded quota, try again in 5 seconds").unwrap();
+        assert_eq!(d, Duration::from_secs(5));
+    }
+
+    #[test]
+    fn parse_retry_from_body_ms_unit_uses_milliseconds() {
+        let d = parse_retry_from_body("try again in 250ms please").unwrap();
+        assert_eq!(d, Duration::from_millis(250));
+    }
+
+    #[test]
+    fn parse_retry_from_body_fractional_seconds() {
+        let d = parse_retry_from_body("try again in 1.5s").unwrap();
+        assert!((d.as_secs_f64() - 1.5).abs() < 1e-6);
+    }
+
+    #[test]
+    fn parse_retry_from_body_returns_none_when_phrase_absent() {
+        assert_eq!(parse_retry_from_body("rate limited"), None);
+    }
+
+    #[test]
+    fn parse_retry_from_body_returns_none_when_no_number_follows() {
+        assert_eq!(parse_retry_from_body("try again in soon"), None);
+    }
+
+    #[test]
+    fn parse_retry_from_body_case_insensitive() {
+        assert!(parse_retry_from_body("TRY AGAIN IN 3 SECONDS").is_some());
+    }
+
+    // ---- parse_resets_at ----
+
+    #[test]
+    fn parse_resets_at_extracts_from_error_object() {
+        let body = r#"{"error": {"resets_at": 1700000000}}"#;
+        assert_eq!(parse_resets_at(body), Some(1700000000));
+    }
+
+    #[test]
+    fn parse_resets_at_returns_none_for_invalid_json() {
+        assert_eq!(parse_resets_at("not json"), None);
+    }
+
+    #[test]
+    fn parse_resets_at_returns_none_when_field_absent() {
+        assert_eq!(parse_resets_at(r#"{"error": {}}"#), None);
+    }
+
+    // ---- ProviderError::is_retryable ----
+
+    #[test]
+    fn is_retryable_true_for_network_and_server_errors() {
+        assert!(ProviderError::Network("x".into()).is_retryable());
+        assert!(ProviderError::Server {
+            status: 500,
+            body: "".into()
+        }
+        .is_retryable());
+    }
+
+    #[test]
+    fn is_retryable_false_for_auth_quota_and_invalid_errors() {
+        assert!(!ProviderError::Auth("x".into()).is_retryable());
+        assert!(!ProviderError::QuotaExceeded("x".into()).is_retryable());
+        assert!(!ProviderError::InvalidResponse("x".into()).is_retryable());
+        assert!(!ProviderError::NotFound("x".into()).is_retryable());
+        assert!(!ProviderError::Cancelled.is_retryable());
+        assert!(!ProviderError::MaxRetries.is_retryable());
+        assert!(!ProviderError::RateLimited { resets_at: None }.is_retryable());
+    }
+
+    // ---- ProviderError::from_http ----
+
+    #[test]
+    fn from_http_400_is_invalid_response() {
+        let err = ProviderError::from_http(400, "bad".into(), None);
+        assert!(matches!(err, ProviderError::InvalidResponse(_)));
+    }
+
+    #[test]
+    fn from_http_401_and_403_are_auth() {
+        assert!(matches!(
+            ProviderError::from_http(401, "no".into(), None),
+            ProviderError::Auth(_)
+        ));
+        assert!(matches!(
+            ProviderError::from_http(403, "no".into(), None),
+            ProviderError::Auth(_)
+        ));
+    }
+
+    #[test]
+    fn from_http_404_is_not_found() {
+        assert!(matches!(
+            ProviderError::from_http(404, "gone".into(), None),
+            ProviderError::NotFound(_)
+        ));
+    }
+
+    #[test]
+    fn from_http_500_is_server() {
+        match ProviderError::from_http(500, "boom".into(), None) {
+            ProviderError::Server { status, body } => {
+                assert_eq!(status, 500);
+                assert_eq!(body, "boom");
+            }
+            e => panic!("expected Server, got {e:?}"),
+        }
+    }
+
+    #[test]
+    fn from_http_429_is_rate_limited_with_resets_from_body() {
+        let body = r#"{"error":{"resets_at": 999}}"#;
+        match ProviderError::from_http(429, body.into(), None) {
+            ProviderError::RateLimited { resets_at } => assert_eq!(resets_at, Some(999)),
+            e => panic!("expected RateLimited, got {e:?}"),
+        }
+    }
+
+    #[test]
+    fn from_http_429_falls_back_to_retry_after_when_body_lacks_resets() {
+        match ProviderError::from_http(429, "no body".into(), Some(Duration::from_secs(10))) {
+            ProviderError::RateLimited { resets_at: Some(_) } => {}
+            e => panic!("expected RateLimited with resets_at, got {e:?}"),
+        }
+    }
+
+    #[test]
+    fn from_http_quota_strings_promote_to_quota_exceeded_regardless_of_status() {
+        let cases = [
+            (500, "insufficient_quota"),
+            (500, "billing_not_active"),
+            (500, "your credit balance is too low"),
+            (429, "request rate exceeded"),
+        ];
+        for (code, body) in cases {
+            let err = ProviderError::from_http(code, body.into(), None);
+            assert!(
+                matches!(err, ProviderError::QuotaExceeded(_)),
+                "expected QuotaExceeded for ({code}, {body:?})"
+            );
+        }
+    }
+
+    // ---- format_rate_limit ----
+
+    #[test]
+    fn format_rate_limit_without_resets_returns_plain_message() {
+        assert_eq!(format_rate_limit(&None), "rate limited");
+    }
+
+    #[test]
+    fn format_rate_limit_with_resets_includes_try_again_phrase() {
+        let msg = format_rate_limit(&Some(1_700_000_000));
+        assert!(msg.starts_with("rate limited"));
+        assert!(msg.contains("try again at"));
+    }
+
+    // ---- format_epoch_local ----
+
+    #[cfg(unix)]
+    #[test]
+    fn format_epoch_local_produces_month_day_year_time_ampm() {
+        let s = format_epoch_local(1_700_000_000);
+        // Loose checks (depends on local TZ): contains a month abbreviation, a year, and AM/PM.
+        let has_month = [
+            "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
+        ]
+        .iter()
+        .any(|m| s.contains(m));
+        assert!(has_month, "{s}");
+        assert!(s.contains("2023"));
+        assert!(s.contains("AM") || s.contains("PM"));
+    }
+
+    // ---- backoff_delay ----
+
+    #[test]
+    fn backoff_delay_doubles_each_attempt() {
+        assert_eq!(backoff_delay(0), Duration::from_millis(500));
+        assert_eq!(backoff_delay(1), Duration::from_millis(1000));
+        assert_eq!(backoff_delay(2), Duration::from_millis(2000));
+        assert_eq!(backoff_delay(3), Duration::from_millis(4000));
+    }
+
+    // ---- ProviderKind ----
+
+    #[test]
+    fn provider_kind_from_config_recognizes_known_types() {
+        assert_eq!(ProviderKind::from_config("openai"), ProviderKind::OpenAi);
+        assert_eq!(ProviderKind::from_config("codex"), ProviderKind::Codex);
+        assert_eq!(
+            ProviderKind::from_config("anthropic"),
+            ProviderKind::Anthropic
+        );
+        assert_eq!(
+            ProviderKind::from_config("anthropic-compatible"),
+            ProviderKind::AnthropicCompatible
+        );
+        assert_eq!(ProviderKind::from_config("copilot"), ProviderKind::Copilot);
+        assert_eq!(
+            ProviderKind::from_config("github-copilot"),
+            ProviderKind::Copilot
+        );
+    }
+
+    #[test]
+    fn provider_kind_from_config_unknown_defaults_to_openai_compatible() {
+        assert_eq!(
+            ProviderKind::from_config("gibberish"),
+            ProviderKind::OpenAiCompatible
+        );
+        assert_eq!(
+            ProviderKind::from_config(""),
+            ProviderKind::OpenAiCompatible
+        );
+    }
+
+    #[test]
+    fn provider_kind_detect_from_url_matches_host_substrings() {
+        assert_eq!(
+            ProviderKind::detect_from_url("https://api.kimi.com/coding"),
+            ProviderKind::AnthropicCompatible
+        );
+        assert_eq!(
+            ProviderKind::detect_from_url("https://api.anthropic.com"),
+            ProviderKind::Anthropic
+        );
+        assert_eq!(
+            ProviderKind::detect_from_url("https://api.openai.com/v1"),
+            ProviderKind::OpenAi
+        );
+        assert_eq!(
+            ProviderKind::detect_from_url("https://chatgpt.com/backend"),
+            ProviderKind::Codex
+        );
+        assert_eq!(
+            ProviderKind::detect_from_url("https://api.githubcopilot.com"),
+            ProviderKind::Copilot
+        );
+        assert_eq!(
+            ProviderKind::detect_from_url("https://local.host"),
+            ProviderKind::OpenAiCompatible
+        );
+    }
+
+    #[test]
+    fn provider_kind_as_config_str_round_trips() {
+        for k in [
+            ProviderKind::OpenAi,
+            ProviderKind::Codex,
+            ProviderKind::Anthropic,
+            ProviderKind::AnthropicCompatible,
+            ProviderKind::Copilot,
+            ProviderKind::OpenAiCompatible,
+        ] {
+            let s = k.as_config_str();
+            assert_eq!(ProviderKind::from_config(s), k);
+        }
+    }
+
+    #[test]
+    fn default_reasoning_cycle_openai_compatible_excludes_max() {
+        let cycle = ProviderKind::OpenAiCompatible.default_reasoning_cycle();
+        assert!(!cycle.contains(&ReasoningEffort::Max));
+        assert!(cycle.contains(&ReasoningEffort::Off));
+        assert!(cycle.contains(&ReasoningEffort::High));
+    }
+
+    #[test]
+    fn default_reasoning_cycle_other_kinds_include_max() {
+        for k in [
+            ProviderKind::OpenAi,
+            ProviderKind::Codex,
+            ProviderKind::Anthropic,
+            ProviderKind::AnthropicCompatible,
+            ProviderKind::Copilot,
+        ] {
+            assert!(k.default_reasoning_cycle().contains(&ReasoningEffort::Max));
+        }
+    }
+
+    // ---- sanitize_tool_call_arguments ----
+
+    #[test]
+    fn sanitize_replaces_invalid_argument_string_with_empty_object_string() {
+        let mut obj = serde_json::Map::new();
+        obj.insert(
+            "tool_calls".into(),
+            json!([{"function": {"arguments": "not json"}}]),
+        );
+        sanitize_tool_call_arguments(&mut obj);
+        assert_eq!(obj["tool_calls"][0]["function"]["arguments"], "{}");
+    }
+
+    #[test]
+    fn sanitize_keeps_valid_argument_strings() {
+        let mut obj = serde_json::Map::new();
+        obj.insert(
+            "tool_calls".into(),
+            json!([{"function": {"arguments": "{\"a\":1}"}}]),
+        );
+        sanitize_tool_call_arguments(&mut obj);
+        assert_eq!(obj["tool_calls"][0]["function"]["arguments"], "{\"a\":1}");
+    }
+
+    #[test]
+    fn sanitize_is_noop_when_tool_calls_absent() {
+        let mut obj = serde_json::Map::new();
+        obj.insert("other".into(), json!("data"));
+        sanitize_tool_call_arguments(&mut obj);
+        assert_eq!(obj["other"], "data");
+    }
+
+    #[test]
+    fn sanitize_ignores_arguments_that_are_not_strings() {
+        let mut obj = serde_json::Map::new();
+        obj.insert(
+            "tool_calls".into(),
+            json!([{"function": {"arguments": {"a": 1}}}]),
+        );
+        sanitize_tool_call_arguments(&mut obj);
+        // Non-string arguments are left untouched.
+        assert!(obj["tool_calls"][0]["function"]["arguments"].is_object());
+    }
+
+    // ---- apply_response_format ----
+
+    fn fmt() -> ResponseFormat {
+        ResponseFormat {
+            name: "out".into(),
+            schema: json!({"type":"object"}),
+        }
+    }
+
+    #[test]
+    fn apply_response_format_openai_compatible_writes_response_format_json_schema() {
+        let mut body = json!({});
+        apply_response_format(&mut body, ProviderKind::OpenAiCompatible, &fmt());
+        assert_eq!(body["response_format"]["type"], "json_schema");
+        assert_eq!(body["response_format"]["json_schema"]["name"], "out");
+        assert_eq!(body["response_format"]["json_schema"]["strict"], true);
+    }
+
+    #[test]
+    fn apply_response_format_copilot_uses_same_shape_as_openai_compatible() {
+        let mut body = json!({});
+        apply_response_format(&mut body, ProviderKind::Copilot, &fmt());
+        assert_eq!(body["response_format"]["json_schema"]["name"], "out");
+    }
+
+    #[test]
+    fn apply_response_format_openai_writes_text_format_block() {
+        let mut body = json!({});
+        apply_response_format(&mut body, ProviderKind::OpenAi, &fmt());
+        assert_eq!(body["text"]["format"]["type"], "json_schema");
+        assert_eq!(body["text"]["format"]["name"], "out");
+    }
+
+    #[test]
+    fn apply_response_format_codex_writes_text_format_block() {
+        let mut body = json!({});
+        apply_response_format(&mut body, ProviderKind::Codex, &fmt());
+        assert_eq!(body["text"]["format"]["name"], "out");
+    }
+
+    #[test]
+    fn apply_response_format_anthropic_modern_model_creates_output_config_format() {
+        let mut body = json!({"model": "claude-sonnet-4-6"});
+        apply_response_format(&mut body, ProviderKind::Anthropic, &fmt());
+        assert_eq!(body["output_config"]["format"]["type"], "json_schema");
+    }
+
+    #[test]
+    fn apply_response_format_anthropic_merges_into_existing_output_config_object() {
+        let mut body = json!({"model": "claude-opus-4-6", "output_config": {"effort": "high"}});
+        apply_response_format(&mut body, ProviderKind::Anthropic, &fmt());
+        assert_eq!(body["output_config"]["effort"], "high");
+        assert_eq!(body["output_config"]["format"]["type"], "json_schema");
+    }
+
+    #[test]
+    fn apply_response_format_anthropic_legacy_model_does_not_write_field() {
+        let mut body = json!({"model": "claude-3-5-sonnet"});
+        apply_response_format(&mut body, ProviderKind::Anthropic, &fmt());
+        assert!(body.get("output_config").is_none());
+    }
+
+    // ---- anthropic_supports_structured_output ----
+
+    #[test]
+    fn anthropic_supports_structured_output_recognizes_4_5_4_6_and_mythos() {
+        assert!(anthropic_supports_structured_output("claude-haiku-4-5"));
+        assert!(anthropic_supports_structured_output("claude-opus-4-6"));
+        assert!(anthropic_supports_structured_output("mythos-1"));
+    }
+
+    #[test]
+    fn anthropic_supports_structured_output_rejects_older_models() {
+        assert!(!anthropic_supports_structured_output("claude-3-5-sonnet"));
+        assert!(!anthropic_supports_structured_output("claude-3-7-sonnet"));
+    }
+
+    // ---- extract_json_title_slug ----
+
+    #[test]
+    fn extract_json_title_slug_pulls_json_from_surrounding_prose() {
+        let raw = r#"sure! here it is: {"title":"Add OAuth","slug":"add-oauth"} thanks"#;
+        let (t, s) = extract_json_title_slug(raw).unwrap();
+        assert_eq!(t, "Add OAuth");
+        assert_eq!(s, "add-oauth");
+    }
+
+    #[test]
+    fn extract_json_title_slug_returns_none_without_braces() {
+        assert!(extract_json_title_slug("no json").is_none());
+    }
+
+    #[test]
+    fn extract_json_title_slug_returns_none_when_braces_misordered() {
+        assert!(extract_json_title_slug("} {").is_none());
+    }
+
+    // ---- parse_title_and_slug ----
+
+    #[test]
+    fn parse_title_and_slug_returns_from_json_object() {
+        let (t, s) = parse_title_and_slug(r#"{"title":"Fix login","slug":"fix-login"}"#);
+        assert_eq!(t, "Fix login");
+        assert_eq!(s, "fix-login");
+    }
+
+    #[test]
+    fn parse_title_and_slug_caps_slug_at_five_words() {
+        let raw = r#"{"title":"T","slug":"a-b-c-d-e-f-g"}"#;
+        let (_, s) = parse_title_and_slug(raw);
+        assert_eq!(s, "a-b-c-d-e");
+    }
+
+    #[test]
+    fn parse_title_and_slug_derives_slug_from_title_when_missing() {
+        let raw = r#"{"title":"Fix Login Button"}"#;
+        let (_, s) = parse_title_and_slug(raw);
+        assert_eq!(s, "fix-login-button");
+    }
+
+    #[test]
+    fn parse_title_and_slug_falls_back_to_raw_text_when_no_json() {
+        let (t, s) = parse_title_and_slug("just some text");
+        assert_eq!(t, "just some text");
+        assert_eq!(s, "just-some-text");
+    }
+
+    #[test]
+    fn parse_title_and_slug_truncates_long_titles() {
+        let long = "a".repeat(100);
+        let (t, _) = parse_title_and_slug(&long);
+        assert!(t.len() <= 64);
+    }
+
+    // ---- slugify ----
+
+    #[test]
+    fn slugify_lowercases_and_replaces_nonalnum_with_dashes() {
+        assert_eq!(slugify("Hello, World!"), "hello-world");
+    }
+
+    #[test]
+    fn slugify_collapses_consecutive_separators() {
+        assert_eq!(slugify("a---b   c"), "a-b-c");
+    }
+
+    #[test]
+    fn slugify_empty_string_returns_empty() {
+        assert_eq!(slugify(""), "");
+    }
+
+    // ---- normalize_short ----
+
+    #[test]
+    fn normalize_short_trims_quotes_and_collapses_whitespace() {
+        assert_eq!(normalize_short("  \"hello  world\"  "), "hello world");
+        assert_eq!(normalize_short("'single quoted'"), "single quoted");
+    }
+
+    #[test]
+    fn normalize_short_truncates_to_64_bytes() {
+        let s = normalize_short(&"x".repeat(200));
+        assert!(s.len() <= 64);
+    }
+
+    // ---- messages_have_images ----
+
+    #[test]
+    fn messages_have_images_returns_false_when_only_text() {
+        assert!(!messages_have_images(&[user_msg("hi")]));
+    }
+
+    #[test]
+    fn messages_have_images_returns_true_when_user_has_image_part() {
+        let m = Message {
+            role: Role::User,
+            content: Some(Content::Parts(vec![protocol::ContentPart::ImageUrl {
+                url: "x".into(),
+                label: None,
+            }])),
+            reasoning_content: None,
+            tool_calls: None,
+            tool_call_id: None,
+            is_error: false,
+        };
+        assert!(messages_have_images(&[m]));
+    }
+
+    #[test]
+    fn messages_have_images_ignores_assistant_and_system_roles() {
+        let m = Message {
+            role: Role::Assistant,
+            content: Some(Content::Parts(vec![protocol::ContentPart::ImageUrl {
+                url: "x".into(),
+                label: None,
+            }])),
+            reasoning_content: None,
+            tool_calls: None,
+            tool_call_id: None,
+            is_error: false,
+        };
+        assert!(!messages_have_images(&[m]));
+    }
+
+    // ---- Provider basics ----
+
+    fn http_client() -> Client {
+        Client::new()
+    }
+
+    #[test]
+    fn provider_new_strips_trailing_slashes_from_api_base() {
+        let p = Provider::new("https://x/".into(), "k".into(), "openai", http_client());
+        assert_eq!(p.api_base, "https://x");
+    }
+
+    #[test]
+    fn provider_new_resolves_kind_from_provider_type() {
+        let p = Provider::new("https://x".into(), "k".into(), "anthropic", http_client());
+        assert_eq!(p.kind, ProviderKind::Anthropic);
+    }
+
+    #[test]
+    fn provider_tool_calling_default_is_true() {
+        let p = Provider::new("".into(), "".into(), "openai", http_client());
+        assert!(p.tool_calling());
+    }
+
+    #[test]
+    fn provider_with_model_config_overrides_default() {
+        let mut cfg = crate::config::ModelConfig::default();
+        cfg.tool_calling = Some(false);
+        let p = Provider::new("".into(), "".into(), "openai", http_client()).with_model_config(cfg);
+        assert!(!p.tool_calling());
+    }
+
+    #[test]
+    fn provider_apply_model_overrides_threads_each_field() {
+        let mut p = Provider::new("".into(), "".into(), "openai", http_client());
+        let overrides = protocol::ModelConfigOverrides {
+            temperature: Some(0.1),
+            top_p: Some(0.2),
+            top_k: Some(3),
+            min_p: Some(0.4),
+            repeat_penalty: Some(1.5),
+        };
+        p.apply_model_overrides(&overrides);
+        assert_eq!(p.model_config.temperature, Some(0.1));
+        assert_eq!(p.model_config.top_p, Some(0.2));
+        assert_eq!(p.model_config.top_k, Some(3));
+        assert_eq!(p.model_config.min_p, Some(0.4));
+        assert_eq!(p.model_config.repeat_penalty, Some(1.5));
+    }
+
+    #[test]
+    fn provider_reset_turn_state_clears_to_none() {
+        let p = Provider::new("".into(), "".into(), "codex", http_client());
+        *p.turn_state.lock().unwrap() = Some("abc".into());
+        p.reset_turn_state();
+        assert!(p.turn_state.lock().unwrap().is_none());
+    }
+
+    // ---- ToolDefinition serialization ----
+
+    #[test]
+    fn tool_definition_serializes_with_function_type_tag() {
+        let t = ToolDefinition::new(FunctionSchema {
+            name: "f".into(),
+            description: "d".into(),
+            parameters: json!({}),
+        });
+        let v = serde_json::to_value(&t).unwrap();
+        assert_eq!(v["type"], "function");
+        assert_eq!(v["function"]["name"], "f");
+    }
+
+    // ---- ParsedResponse::into_response ----
+
+    #[test]
+    fn parsed_into_response_propagates_fields() {
+        let p = ParsedResponse {
+            content: Some("c".into()),
+            reasoning: Some("r".into()),
+            tool_calls: vec![ToolCall::new(
+                "id".into(),
+                FunctionCall {
+                    name: "n".into(),
+                    arguments: "{}".into(),
+                },
+            )],
+            usage: TokenUsage::default(),
+        };
+        let r = p.into_response(Some(12.5));
+        assert_eq!(r.content.as_deref(), Some("c"));
+        assert_eq!(r.reasoning_content.as_deref(), Some("r"));
+        assert_eq!(r.tool_calls.len(), 1);
+        assert_eq!(r.tokens_per_sec, Some(12.5));
+    }
+}

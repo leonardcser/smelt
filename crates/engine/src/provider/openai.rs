@@ -223,120 +223,956 @@ pub(super) fn parse_response(data: &serde_json::Value) -> Result<ParsedResponse,
     })
 }
 
+/// Accumulator for one streaming response. Mutated by `apply_sse_event`.
+#[derive(Default)]
+pub(super) struct StreamState {
+    pub(super) content: String,
+    pub(super) reasoning: String,
+    /// item_id -> (call_id, name, args)
+    pub(super) tool_calls: HashMap<String, (String, String, String)>,
+    pub(super) usage: TokenUsage,
+    pub(super) error: Option<ProviderError>,
+}
+
+impl StreamState {
+    pub(super) fn finalize(self) -> Result<ParsedResponse, ProviderError> {
+        if let Some(err) = self.error {
+            return Err(err);
+        }
+        let tool_calls: Vec<ToolCall> = self
+            .tool_calls
+            .into_values()
+            .filter(|(call_id, name, _)| !call_id.is_empty() && !name.is_empty())
+            .map(|(call_id, name, args)| {
+                ToolCall::new(
+                    call_id,
+                    FunctionCall {
+                        name,
+                        arguments: args,
+                    },
+                )
+            })
+            .collect();
+        Ok(ParsedResponse {
+            content: non_empty(self.content),
+            reasoning: non_empty(self.reasoning),
+            tool_calls,
+            usage: self.usage,
+        })
+    }
+}
+
+/// Apply one SSE event to the accumulator. Pure (modulo the on_delta callback).
+pub(super) fn apply_sse_event(
+    state: &mut StreamState,
+    ev: &serde_json::Value,
+    on_delta: &mut dyn FnMut(StreamDelta),
+) {
+    let ev_type = ev["type"].as_str().unwrap_or("");
+
+    match ev_type {
+        "response.output_item.added" if ev["item"]["type"].as_str() == Some("function_call") => {
+            let item = &ev["item"];
+            let id = item["id"].as_str().unwrap_or("").to_string();
+            let call_id = item["call_id"].as_str().unwrap_or("").to_string();
+            let name = item["name"].as_str().unwrap_or("").to_string();
+            if !id.is_empty() && !name.is_empty() {
+                state.tool_calls.insert(id, (call_id, name, String::new()));
+            }
+        }
+        "response.output_text.delta" => {
+            if let Some(text) = ev["delta"].as_str() {
+                if !text.is_empty() {
+                    state.content.push_str(text);
+                    on_delta(StreamDelta::Text(text));
+                }
+            }
+        }
+        "response.function_call_arguments.delta" => {
+            if let Some(item_id) = ev["item_id"].as_str() {
+                if let Some(entry) = state.tool_calls.get_mut(item_id) {
+                    if let Some(args) = ev["delta"].as_str() {
+                        entry.2.push_str(args);
+                    }
+                }
+            }
+        }
+        "response.function_call_arguments.done" => {
+            if let Some(item_id) = ev["item_id"].as_str() {
+                if let Some(entry) = state.tool_calls.get_mut(item_id) {
+                    entry.2 = ev["arguments"].as_str().unwrap_or("{}").to_string();
+                }
+            }
+        }
+        "response.reasoning.delta" | "response.reasoning_summary_text.delta" => {
+            if let Some(text) = ev["delta"].as_str() {
+                if !text.is_empty() {
+                    state.reasoning.push_str(text);
+                    on_delta(StreamDelta::Thinking(text));
+                }
+            }
+        }
+        "response.completed" | "response.done" => {
+            if let Some(u) = ev.get("response").and_then(|r| r.get("usage")) {
+                state.usage = parse_usage(u);
+            }
+        }
+        "response.failed" => {
+            if let Some(error) = ev.get("response").and_then(|r| r.get("error")) {
+                let code = error["code"].as_str().unwrap_or("");
+                let err_type = error["type"].as_str().unwrap_or("");
+                let message = error["message"].as_str().unwrap_or("");
+                let resets_at = super::json_as_u64(&error["resets_at"]);
+                if code == "rate_limit_exceeded" || err_type == "usage_limit_reached" {
+                    let fallback = super::parse_retry_from_body(message)
+                        .map(|d| super::unix_now() + d.as_secs());
+                    state.error = Some(ProviderError::RateLimited {
+                        resets_at: resets_at.or(fallback),
+                    });
+                } else if code == "insufficient_quota" || code == "billing_not_active" {
+                    state.error = Some(ProviderError::QuotaExceeded(message.to_string()));
+                } else if code == "context_length_exceeded" {
+                    state.error = Some(ProviderError::InvalidResponse(message.to_string()));
+                } else {
+                    state.error = Some(ProviderError::Server {
+                        status: 0,
+                        body: message.to_string(),
+                    });
+                }
+            }
+        }
+        _ => {}
+    }
+}
+
 pub(super) async fn read_stream(
     resp: reqwest::Response,
     cancel: &CancellationToken,
     on_delta: &(dyn Fn(StreamDelta) + Send + Sync),
 ) -> Result<ParsedResponse, ProviderError> {
-    let mut content = String::new();
-    let mut reasoning = String::new();
-    let mut tool_calls: HashMap<String, (String, String, String)> = HashMap::new();
-    let mut usage = TokenUsage::default();
-    let mut stream_error: Option<ProviderError> = None;
+    let mut state = StreamState::default();
 
     sse::read_events(resp, cancel, |ev| {
-        let ev_type = ev["type"].as_str().unwrap_or("");
-
-        match ev_type {
-            "response.output_item.added"
-                if ev["item"]["type"].as_str() == Some("function_call") =>
-            {
-                let item = &ev["item"];
-                let id = item["id"].as_str().unwrap_or("").to_string();
-                let call_id = item["call_id"].as_str().unwrap_or("").to_string();
-                let name = item["name"].as_str().unwrap_or("").to_string();
-                if !id.is_empty() && !name.is_empty() {
-                    tool_calls.insert(id, (call_id, name, String::new()));
-                }
-            }
-            "response.output_text.delta" => {
-                if let Some(text) = ev["delta"].as_str() {
-                    if !text.is_empty() {
-                        content.push_str(text);
-                        on_delta(StreamDelta::Text(text));
-                    }
-                }
-            }
-            "response.function_call_arguments.delta" => {
-                if let Some(item_id) = ev["item_id"].as_str() {
-                    if let Some(entry) = tool_calls.get_mut(item_id) {
-                        if let Some(args) = ev["delta"].as_str() {
-                            entry.2.push_str(args);
-                        }
-                    }
-                }
-            }
-            "response.function_call_arguments.done" => {
-                if let Some(item_id) = ev["item_id"].as_str() {
-                    if let Some(entry) = tool_calls.get_mut(item_id) {
-                        entry.2 = ev["arguments"].as_str().unwrap_or("{}").to_string();
-                    }
-                }
-            }
-            "response.reasoning.delta" | "response.reasoning_summary_text.delta" => {
-                if let Some(text) = ev["delta"].as_str() {
-                    if !text.is_empty() {
-                        reasoning.push_str(text);
-                        on_delta(StreamDelta::Thinking(text));
-                    }
-                }
-            }
-            "response.completed" | "response.done" => {
-                if let Some(u) = ev.get("response").and_then(|r| r.get("usage")) {
-                    usage = parse_usage(u);
-                }
-            }
-            "response.failed" => {
-                if let Some(error) = ev.get("response").and_then(|r| r.get("error")) {
-                    let code = error["code"].as_str().unwrap_or("");
-                    let err_type = error["type"].as_str().unwrap_or("");
-                    let message = error["message"].as_str().unwrap_or("");
-                    let resets_at = super::json_as_u64(&error["resets_at"]);
-                    if code == "rate_limit_exceeded" || err_type == "usage_limit_reached" {
-                        let fallback = super::parse_retry_from_body(message)
-                            .map(|d| super::unix_now() + d.as_secs());
-                        stream_error = Some(ProviderError::RateLimited {
-                            resets_at: resets_at.or(fallback),
-                        });
-                    } else if code == "insufficient_quota" || code == "billing_not_active" {
-                        stream_error = Some(ProviderError::QuotaExceeded(message.to_string()));
-                    } else if code == "context_length_exceeded" {
-                        stream_error = Some(ProviderError::InvalidResponse(message.to_string()));
-                    } else {
-                        stream_error = Some(ProviderError::Server {
-                            status: 0,
-                            body: message.to_string(),
-                        });
-                    }
-                }
-            }
-            _ => {}
-        }
+        apply_sse_event(&mut state, ev, &mut |d| on_delta(d));
     })
     .await?;
 
-    if let Some(err) = stream_error {
-        return Err(err);
+    state.finalize()
+}
+
+#[cfg(test)]
+#[allow(clippy::field_reassign_with_default)]
+mod tests {
+    use super::*;
+    use crate::provider::FunctionSchema;
+    use protocol::{Content, ContentPart, FunctionCall, Message, Role, ToolCall};
+    use serde_json::json;
+
+    fn user(text: &str) -> Message {
+        Message {
+            role: Role::User,
+            content: Some(Content::Text(text.into())),
+            reasoning_content: None,
+            tool_calls: None,
+            tool_call_id: None,
+            is_error: false,
+        }
     }
 
-    let tool_calls: Vec<ToolCall> = tool_calls
-        .into_values()
-        .filter(|(call_id, name, _)| !call_id.is_empty() && !name.is_empty())
-        .map(|(call_id, name, args)| {
-            ToolCall::new(
-                call_id,
-                FunctionCall {
-                    name,
-                    arguments: args,
-                },
-            )
-        })
-        .collect();
+    fn system(text: &str) -> Message {
+        Message {
+            role: Role::System,
+            content: Some(Content::Text(text.into())),
+            reasoning_content: None,
+            tool_calls: None,
+            tool_call_id: None,
+            is_error: false,
+        }
+    }
 
-    Ok(ParsedResponse {
-        content: non_empty(content),
-        reasoning: non_empty(reasoning),
-        tool_calls,
-        usage,
-    })
+    fn assistant_text(text: &str) -> Message {
+        Message {
+            role: Role::Assistant,
+            content: Some(Content::Text(text.into())),
+            reasoning_content: None,
+            tool_calls: None,
+            tool_call_id: None,
+            is_error: false,
+        }
+    }
+
+    fn assistant_calls(calls: Vec<ToolCall>) -> Message {
+        Message {
+            role: Role::Assistant,
+            content: None,
+            reasoning_content: None,
+            tool_calls: Some(calls),
+            tool_call_id: None,
+            is_error: false,
+        }
+    }
+
+    fn tool_msg(call_id: Option<&str>, output: &str) -> Message {
+        Message {
+            role: Role::Tool,
+            content: Some(Content::Text(output.into())),
+            reasoning_content: None,
+            tool_calls: None,
+            tool_call_id: call_id.map(String::from),
+            is_error: false,
+        }
+    }
+
+    fn cfg() -> ModelConfig {
+        ModelConfig::default()
+    }
+
+    // ---- parse_usage ----
+
+    #[test]
+    fn parse_usage_subtracts_cached_from_input_tokens() {
+        let v = json!({
+            "input_tokens": 100,
+            "input_tokens_details": {"cached_tokens": 30},
+            "output_tokens": 40,
+            "output_tokens_details": {"reasoning_tokens": 5},
+        });
+        let u = parse_usage(&v);
+        assert_eq!(u.prompt_tokens, Some(70));
+        assert_eq!(u.completion_tokens, Some(40));
+        assert_eq!(u.cache_read_tokens, Some(30));
+        assert_eq!(u.reasoning_tokens, Some(5));
+        assert_eq!(u.cache_write_tokens, None);
+    }
+
+    #[test]
+    fn parse_usage_handles_cached_exceeding_input_via_saturating_sub() {
+        let v = json!({
+            "input_tokens": 10,
+            "input_tokens_details": {"cached_tokens": 50},
+        });
+        assert_eq!(parse_usage(&v).prompt_tokens, Some(0));
+    }
+
+    #[test]
+    fn parse_usage_passes_through_input_when_no_cached_field() {
+        let v = json!({"input_tokens": 42});
+        assert_eq!(parse_usage(&v).prompt_tokens, Some(42));
+    }
+
+    #[test]
+    fn parse_usage_empty_object_yields_all_none() {
+        let v = json!({});
+        let u = parse_usage(&v);
+        assert_eq!(u.prompt_tokens, None);
+        assert_eq!(u.completion_tokens, None);
+        assert_eq!(u.cache_read_tokens, None);
+        assert_eq!(u.reasoning_tokens, None);
+    }
+
+    // ---- effort_label ----
+
+    #[test]
+    fn effort_label_maps_max_to_xhigh() {
+        assert_eq!(effort_label(ReasoningEffort::Max), "xhigh");
+    }
+
+    #[test]
+    fn effort_label_falls_through_for_other_levels() {
+        assert_eq!(
+            effort_label(ReasoningEffort::Low),
+            ReasoningEffort::Low.label()
+        );
+        assert_eq!(
+            effort_label(ReasoningEffort::High),
+            ReasoningEffort::High.label()
+        );
+    }
+
+    // ---- build_body ----
+
+    #[test]
+    fn build_body_collects_system_messages_into_instructions_joined_by_newline() {
+        let msgs = vec![system("a"), system("b"), user("hi")];
+        let body = build_body(&msgs, &[], "gpt-x", ReasoningEffort::Off, &cfg());
+        assert_eq!(body["instructions"], "a\nb");
+        assert_eq!(body["input"][0]["role"], "user");
+    }
+
+    #[test]
+    fn build_body_user_text_serialized_as_string() {
+        let body = build_body(&[user("hello")], &[], "m", ReasoningEffort::Off, &cfg());
+        assert_eq!(body["input"][0]["content"], "hello");
+    }
+
+    #[test]
+    fn build_body_user_parts_serialized_as_input_text_and_input_image() {
+        let m = Message {
+            role: Role::User,
+            content: Some(Content::Parts(vec![
+                ContentPart::Text {
+                    text: "see this".into(),
+                },
+                ContentPart::ImageUrl {
+                    url: "https://x/y.png".into(),
+                    label: None,
+                },
+            ])),
+            reasoning_content: None,
+            tool_calls: None,
+            tool_call_id: None,
+            is_error: false,
+        };
+        let body = build_body(&[m], &[], "m", ReasoningEffort::Off, &cfg());
+        let parts = &body["input"][0]["content"];
+        assert_eq!(parts[0]["type"], "input_text");
+        assert_eq!(parts[0]["text"], "see this");
+        assert_eq!(parts[1]["type"], "input_image");
+        assert_eq!(parts[1]["image_url"], "https://x/y.png");
+    }
+
+    #[test]
+    fn build_body_user_none_content_serialized_as_empty_string() {
+        let m = Message {
+            role: Role::User,
+            content: None,
+            reasoning_content: None,
+            tool_calls: None,
+            tool_call_id: None,
+            is_error: false,
+        };
+        let body = build_body(&[m], &[], "m", ReasoningEffort::Off, &cfg());
+        assert_eq!(body["input"][0]["content"], "");
+    }
+
+    #[test]
+    fn build_body_assistant_with_content_emits_output_text_message() {
+        let body = build_body(
+            &[assistant_text("hi back")],
+            &[],
+            "m",
+            ReasoningEffort::Off,
+            &cfg(),
+        );
+        let msg = &body["input"][0];
+        assert_eq!(msg["type"], "message");
+        assert_eq!(msg["role"], "assistant");
+        assert_eq!(msg["content"][0]["type"], "output_text");
+        assert_eq!(msg["content"][0]["text"], "hi back");
+    }
+
+    #[test]
+    fn build_body_assistant_without_content_skips_message_entry() {
+        let m = Message {
+            role: Role::Assistant,
+            content: None,
+            reasoning_content: None,
+            tool_calls: None,
+            tool_call_id: None,
+            is_error: false,
+        };
+        let body = build_body(&[m], &[], "m", ReasoningEffort::Off, &cfg());
+        assert!(body["input"].as_array().unwrap().is_empty());
+    }
+
+    #[test]
+    fn build_body_assistant_emits_function_call_entries_for_tool_calls() {
+        let calls = vec![ToolCall::new(
+            "call-1".into(),
+            FunctionCall {
+                name: "search".into(),
+                arguments: r#"{"q":"rust"}"#.into(),
+            },
+        )];
+        let body = build_body(
+            &[assistant_calls(calls)],
+            &[],
+            "m",
+            ReasoningEffort::Off,
+            &cfg(),
+        );
+        let fc = &body["input"][0];
+        assert_eq!(fc["type"], "function_call");
+        assert_eq!(fc["call_id"], "call-1");
+        assert_eq!(fc["name"], "search");
+        assert_eq!(fc["arguments"], r#"{"q":"rust"}"#);
+    }
+
+    #[test]
+    fn build_body_assistant_tool_call_arguments_default_to_empty_object_when_invalid_json() {
+        let calls = vec![ToolCall::new(
+            "id".into(),
+            FunctionCall {
+                name: "n".into(),
+                arguments: "not-json".into(),
+            },
+        )];
+        let body = build_body(
+            &[assistant_calls(calls)],
+            &[],
+            "m",
+            ReasoningEffort::Off,
+            &cfg(),
+        );
+        assert_eq!(body["input"][0]["arguments"], "{}");
+    }
+
+    #[test]
+    fn build_body_tool_message_emits_function_call_output_with_call_id() {
+        let body = build_body(
+            &[tool_msg(Some("call-x"), "result")],
+            &[],
+            "m",
+            ReasoningEffort::Off,
+            &cfg(),
+        );
+        let out = &body["input"][0];
+        assert_eq!(out["type"], "function_call_output");
+        assert_eq!(out["call_id"], "call-x");
+        assert_eq!(out["output"], "result");
+    }
+
+    #[test]
+    fn build_body_tool_message_without_call_id_uses_missing_call_id_marker() {
+        let body = build_body(
+            &[tool_msg(None, "result")],
+            &[],
+            "m",
+            ReasoningEffort::Off,
+            &cfg(),
+        );
+        assert_eq!(body["input"][0]["call_id"], "missing_call_id");
+    }
+
+    #[test]
+    fn build_body_tool_message_with_empty_call_id_uses_missing_call_id_marker() {
+        let body = build_body(
+            &[tool_msg(Some(""), "result")],
+            &[],
+            "m",
+            ReasoningEffort::Off,
+            &cfg(),
+        );
+        assert_eq!(body["input"][0]["call_id"], "missing_call_id");
+    }
+
+    #[test]
+    fn build_body_serializes_tools_when_provided() {
+        let tools = vec![ToolDefinition::new(FunctionSchema {
+            name: "do".into(),
+            description: "desc".into(),
+            parameters: json!({"type":"object"}),
+        })];
+        let body = build_body(&[user("hi")], &tools, "m", ReasoningEffort::Off, &cfg());
+        let t = &body["tools"][0];
+        assert_eq!(t["type"], "function");
+        assert_eq!(t["name"], "do");
+        assert_eq!(t["description"], "desc");
+        assert_eq!(t["parameters"]["type"], "object");
+    }
+
+    #[test]
+    fn build_body_omits_tools_field_when_none() {
+        let body = build_body(&[user("hi")], &[], "m", ReasoningEffort::Off, &cfg());
+        assert!(body.get("tools").is_none());
+    }
+
+    #[test]
+    fn build_body_sets_temperature_and_top_p_when_provided() {
+        let mut c = cfg();
+        c.temperature = Some(0.7);
+        c.top_p = Some(0.9);
+        let body = build_body(&[user("hi")], &[], "m", ReasoningEffort::Off, &c);
+        assert_eq!(body["temperature"], 0.7);
+        assert_eq!(body["top_p"], 0.9);
+    }
+
+    #[test]
+    fn build_body_omits_temperature_and_top_p_when_none() {
+        let body = build_body(&[user("hi")], &[], "m", ReasoningEffort::Off, &cfg());
+        assert!(body.get("temperature").is_none());
+        assert!(body.get("top_p").is_none());
+    }
+
+    #[test]
+    fn build_body_emits_reasoning_block_when_effort_is_not_off() {
+        let body = build_body(&[user("hi")], &[], "m", ReasoningEffort::High, &cfg());
+        assert_eq!(body["reasoning"]["effort"], ReasoningEffort::High.label());
+        assert_eq!(body["reasoning"]["summary"], "auto");
+    }
+
+    #[test]
+    fn build_body_omits_reasoning_block_when_effort_is_off() {
+        let body = build_body(&[user("hi")], &[], "m", ReasoningEffort::Off, &cfg());
+        assert!(body.get("reasoning").is_none());
+    }
+
+    #[test]
+    fn build_body_includes_model_name() {
+        let body = build_body(&[user("hi")], &[], "gpt-foo", ReasoningEffort::Off, &cfg());
+        assert_eq!(body["model"], "gpt-foo");
+    }
+
+    // ---- parse_response ----
+
+    #[test]
+    fn parse_response_returns_error_when_output_missing() {
+        let v = json!({});
+        match parse_response(&v) {
+            Err(ProviderError::InvalidResponse(_)) => {}
+            other => panic!("expected InvalidResponse, got {:?}", other.is_ok()),
+        }
+    }
+
+    #[test]
+    fn parse_response_concatenates_output_text_parts_from_message_items() {
+        let v = json!({
+            "output": [
+                {"type": "message", "content": [
+                    {"type": "output_text", "text": "hello "},
+                    {"type": "output_text", "text": "world"},
+                ]}
+            ],
+            "usage": {}
+        });
+        let r = parse_response(&v).unwrap();
+        assert_eq!(r.content.as_deref(), Some("hello world"));
+        assert!(r.reasoning.is_none());
+        assert!(r.tool_calls.is_empty());
+    }
+
+    #[test]
+    fn parse_response_extracts_function_calls() {
+        let v = json!({
+            "output": [
+                {"type": "function_call", "call_id": "c1", "name": "f", "arguments": "{\"a\":1}"}
+            ],
+            "usage": {}
+        });
+        let r = parse_response(&v).unwrap();
+        assert_eq!(r.tool_calls.len(), 1);
+        assert_eq!(r.tool_calls[0].id, "c1");
+        assert_eq!(r.tool_calls[0].function.name, "f");
+        assert_eq!(r.tool_calls[0].function.arguments, "{\"a\":1}");
+    }
+
+    #[test]
+    fn parse_response_function_call_missing_arguments_defaults_to_empty_object() {
+        let v = json!({
+            "output": [
+                {"type": "function_call", "call_id": "c1", "name": "f"}
+            ],
+            "usage": {}
+        });
+        let r = parse_response(&v).unwrap();
+        assert_eq!(r.tool_calls[0].function.arguments, "{}");
+    }
+
+    #[test]
+    fn parse_response_reasoning_prefers_summary_over_content() {
+        let v = json!({
+            "output": [
+                {"type": "reasoning",
+                 "summary": [{"text": "sum1"}, {"text": "sum2"}],
+                 "content": [{"text": "should-not-appear"}]}
+            ],
+            "usage": {}
+        });
+        let r = parse_response(&v).unwrap();
+        assert_eq!(r.reasoning.as_deref(), Some("sum1\nsum2"));
+    }
+
+    #[test]
+    fn parse_response_reasoning_falls_back_to_content_when_summary_empty() {
+        let v = json!({
+            "output": [
+                {"type": "reasoning",
+                 "summary": [],
+                 "content": [{"text": "fallback"}]}
+            ],
+            "usage": {}
+        });
+        let r = parse_response(&v).unwrap();
+        assert_eq!(r.reasoning.as_deref(), Some("fallback"));
+    }
+
+    #[test]
+    fn parse_response_reasoning_none_when_both_summary_and_content_empty() {
+        let v = json!({
+            "output": [{"type": "reasoning"}],
+            "usage": {}
+        });
+        let r = parse_response(&v).unwrap();
+        assert!(r.reasoning.is_none());
+    }
+
+    #[test]
+    fn parse_response_ignores_unknown_output_types() {
+        let v = json!({
+            "output": [{"type": "wat"}],
+            "usage": {}
+        });
+        let r = parse_response(&v).unwrap();
+        assert!(r.content.is_none());
+        assert!(r.tool_calls.is_empty());
+    }
+
+    #[test]
+    fn parse_response_propagates_usage() {
+        let v = json!({
+            "output": [],
+            "usage": {"input_tokens": 5, "output_tokens": 3}
+        });
+        let r = parse_response(&v).unwrap();
+        assert_eq!(r.usage.prompt_tokens, Some(5));
+        assert_eq!(r.usage.completion_tokens, Some(3));
+    }
+
+    // ---- apply_sse_event ----
+
+    fn step(state: &mut StreamState, ev: serde_json::Value) {
+        apply_sse_event(state, &ev, &mut |_| {});
+    }
+
+    #[test]
+    fn sse_output_text_delta_appends_to_content_and_emits_text_delta() {
+        let mut state = StreamState::default();
+        let mut deltas: Vec<String> = Vec::new();
+        apply_sse_event(
+            &mut state,
+            &json!({"type": "response.output_text.delta", "delta": "hi"}),
+            &mut |d| {
+                if let StreamDelta::Text(t) = d {
+                    deltas.push(t.into())
+                }
+            },
+        );
+        assert_eq!(state.content, "hi");
+        assert_eq!(deltas, vec!["hi".to_string()]);
+    }
+
+    #[test]
+    fn sse_output_text_delta_ignores_empty_string() {
+        let mut state = StreamState::default();
+        let mut called = false;
+        apply_sse_event(
+            &mut state,
+            &json!({"type": "response.output_text.delta", "delta": ""}),
+            &mut |_| called = true,
+        );
+        assert!(state.content.is_empty());
+        assert!(!called);
+    }
+
+    #[test]
+    fn sse_function_call_added_then_args_delta_and_done() {
+        let mut state = StreamState::default();
+        step(
+            &mut state,
+            json!({
+                "type": "response.output_item.added",
+                "item": {"type": "function_call", "id": "i1", "call_id": "c1", "name": "f"}
+            }),
+        );
+        step(
+            &mut state,
+            json!({
+                "type": "response.function_call_arguments.delta",
+                "item_id": "i1", "delta": "{\"a\":"
+            }),
+        );
+        step(
+            &mut state,
+            json!({
+                "type": "response.function_call_arguments.delta",
+                "item_id": "i1", "delta": "1}"
+            }),
+        );
+        let r = state.finalize().unwrap();
+        assert_eq!(r.tool_calls.len(), 1);
+        assert_eq!(r.tool_calls[0].id, "c1");
+        assert_eq!(r.tool_calls[0].function.name, "f");
+        assert_eq!(r.tool_calls[0].function.arguments, "{\"a\":1}");
+    }
+
+    #[test]
+    fn sse_function_call_args_done_replaces_accumulated_args() {
+        let mut state = StreamState::default();
+        step(
+            &mut state,
+            json!({
+                "type": "response.output_item.added",
+                "item": {"type": "function_call", "id": "i1", "call_id": "c1", "name": "f"}
+            }),
+        );
+        step(
+            &mut state,
+            json!({
+                "type": "response.function_call_arguments.delta",
+                "item_id": "i1", "delta": "garbage"
+            }),
+        );
+        step(
+            &mut state,
+            json!({
+                "type": "response.function_call_arguments.done",
+                "item_id": "i1", "arguments": "{\"final\":true}"
+            }),
+        );
+        let r = state.finalize().unwrap();
+        assert_eq!(r.tool_calls[0].function.arguments, "{\"final\":true}");
+    }
+
+    #[test]
+    fn sse_function_call_added_skipped_when_id_or_name_empty() {
+        let mut state = StreamState::default();
+        step(
+            &mut state,
+            json!({
+                "type": "response.output_item.added",
+                "item": {"type": "function_call", "id": "", "call_id": "c1", "name": "f"}
+            }),
+        );
+        step(
+            &mut state,
+            json!({
+                "type": "response.output_item.added",
+                "item": {"type": "function_call", "id": "i1", "call_id": "c1", "name": ""}
+            }),
+        );
+        let r = state.finalize().unwrap();
+        assert!(r.tool_calls.is_empty());
+    }
+
+    #[test]
+    fn sse_function_call_added_ignored_when_item_type_is_not_function_call() {
+        let mut state = StreamState::default();
+        step(
+            &mut state,
+            json!({
+                "type": "response.output_item.added",
+                "item": {"type": "message", "id": "i1"}
+            }),
+        );
+        assert!(state.tool_calls.is_empty());
+    }
+
+    #[test]
+    fn sse_args_delta_ignored_when_item_id_unknown() {
+        let mut state = StreamState::default();
+        step(
+            &mut state,
+            json!({
+                "type": "response.function_call_arguments.delta",
+                "item_id": "unknown", "delta": "x"
+            }),
+        );
+        assert!(state.tool_calls.is_empty());
+    }
+
+    #[test]
+    fn sse_args_done_defaults_to_empty_object_when_arguments_missing() {
+        let mut state = StreamState::default();
+        step(
+            &mut state,
+            json!({
+                "type": "response.output_item.added",
+                "item": {"type": "function_call", "id": "i1", "call_id": "c1", "name": "f"}
+            }),
+        );
+        step(
+            &mut state,
+            json!({
+                "type": "response.function_call_arguments.done",
+                "item_id": "i1"
+            }),
+        );
+        let r = state.finalize().unwrap();
+        assert_eq!(r.tool_calls[0].function.arguments, "{}");
+    }
+
+    #[test]
+    fn sse_reasoning_delta_appends_and_emits_thinking() {
+        let mut state = StreamState::default();
+        let mut thinking: Vec<String> = Vec::new();
+        apply_sse_event(
+            &mut state,
+            &json!({"type": "response.reasoning.delta", "delta": "ponder"}),
+            &mut |d| {
+                if let StreamDelta::Thinking(t) = d {
+                    thinking.push(t.into())
+                }
+            },
+        );
+        apply_sse_event(
+            &mut state,
+            &json!({"type": "response.reasoning_summary_text.delta", "delta": "ing"}),
+            &mut |d| {
+                if let StreamDelta::Thinking(t) = d {
+                    thinking.push(t.into())
+                }
+            },
+        );
+        assert_eq!(state.reasoning, "pondering");
+        assert_eq!(thinking, vec!["ponder", "ing"]);
+    }
+
+    #[test]
+    fn sse_completed_event_extracts_usage() {
+        let mut state = StreamState::default();
+        step(
+            &mut state,
+            json!({
+                "type": "response.completed",
+                "response": {"usage": {"input_tokens": 8, "output_tokens": 2}}
+            }),
+        );
+        assert_eq!(state.usage.prompt_tokens, Some(8));
+        assert_eq!(state.usage.completion_tokens, Some(2));
+    }
+
+    #[test]
+    fn sse_done_event_also_extracts_usage() {
+        let mut state = StreamState::default();
+        step(
+            &mut state,
+            json!({
+                "type": "response.done",
+                "response": {"usage": {"input_tokens": 1}}
+            }),
+        );
+        assert_eq!(state.usage.prompt_tokens, Some(1));
+    }
+
+    #[test]
+    fn sse_failed_rate_limit_sets_rate_limited_error() {
+        let mut state = StreamState::default();
+        step(
+            &mut state,
+            json!({
+                "type": "response.failed",
+                "response": {"error": {"code": "rate_limit_exceeded", "resets_at": 1234}}
+            }),
+        );
+        match state.error.unwrap() {
+            ProviderError::RateLimited { resets_at } => assert_eq!(resets_at, Some(1234)),
+            e => panic!("expected RateLimited, got {e:?}"),
+        }
+    }
+
+    #[test]
+    fn sse_failed_usage_limit_reached_also_rate_limited() {
+        let mut state = StreamState::default();
+        step(
+            &mut state,
+            json!({
+                "type": "response.failed",
+                "response": {"error": {"type": "usage_limit_reached"}}
+            }),
+        );
+        assert!(matches!(
+            state.error.unwrap(),
+            ProviderError::RateLimited { .. }
+        ));
+    }
+
+    #[test]
+    fn sse_failed_quota_codes_set_quota_exceeded() {
+        for code in ["insufficient_quota", "billing_not_active"] {
+            let mut state = StreamState::default();
+            step(
+                &mut state,
+                json!({
+                    "type": "response.failed",
+                    "response": {"error": {"code": code, "message": "nope"}}
+                }),
+            );
+            assert!(matches!(
+                state.error.unwrap(),
+                ProviderError::QuotaExceeded(_)
+            ));
+        }
+    }
+
+    #[test]
+    fn sse_failed_context_length_sets_invalid_response() {
+        let mut state = StreamState::default();
+        step(
+            &mut state,
+            json!({
+                "type": "response.failed",
+                "response": {"error": {"code": "context_length_exceeded", "message": "too long"}}
+            }),
+        );
+        assert!(matches!(
+            state.error.unwrap(),
+            ProviderError::InvalidResponse(_)
+        ));
+    }
+
+    #[test]
+    fn sse_failed_unknown_code_falls_through_to_server_error() {
+        let mut state = StreamState::default();
+        step(
+            &mut state,
+            json!({
+                "type": "response.failed",
+                "response": {"error": {"code": "wat", "message": "oops"}}
+            }),
+        );
+        match state.error.unwrap() {
+            ProviderError::Server { status, body } => {
+                assert_eq!(status, 0);
+                assert_eq!(body, "oops");
+            }
+            e => panic!("expected Server, got {e:?}"),
+        }
+    }
+
+    #[test]
+    fn sse_unknown_event_type_ignored() {
+        let mut state = StreamState::default();
+        step(&mut state, json!({"type": "something.unknown"}));
+        // No state change, no panic.
+        assert!(state.content.is_empty());
+        assert!(state.error.is_none());
+    }
+
+    // ---- finalize ----
+
+    #[test]
+    fn finalize_returns_error_when_state_error_set() {
+        let mut state = StreamState::default();
+        state.error = Some(ProviderError::QuotaExceeded("x".into()));
+        assert!(matches!(
+            state.finalize(),
+            Err(ProviderError::QuotaExceeded(_))
+        ));
+    }
+
+    #[test]
+    fn finalize_filters_tool_calls_missing_call_id_or_name() {
+        let mut state = StreamState::default();
+        state
+            .tool_calls
+            .insert("i1".into(), ("".into(), "name".into(), "{}".into()));
+        state
+            .tool_calls
+            .insert("i2".into(), ("c2".into(), "".into(), "{}".into()));
+        state
+            .tool_calls
+            .insert("i3".into(), ("c3".into(), "n3".into(), "{}".into()));
+        let r = state.finalize().unwrap();
+        assert_eq!(r.tool_calls.len(), 1);
+        assert_eq!(r.tool_calls[0].id, "c3");
+    }
+
+    #[test]
+    fn finalize_empty_content_and_reasoning_become_none() {
+        let state = StreamState::default();
+        let r = state.finalize().unwrap();
+        assert!(r.content.is_none());
+        assert!(r.reasoning.is_none());
+        assert!(r.tool_calls.is_empty());
+    }
 }

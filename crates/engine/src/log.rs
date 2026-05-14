@@ -114,3 +114,54 @@ pub fn entry(level: Level, event: &str, data: &impl Serialize) {
 
     let _ = writeln!(f, "{line}");
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ---- parse_level ----
+
+    #[test]
+    fn parse_level_matches_each_keyword_case_insensitively() {
+        assert_eq!(parse_level("debug"), Some(Level::Debug));
+        assert_eq!(parse_level("INFO"), Some(Level::Info));
+        assert_eq!(parse_level("Warn"), Some(Level::Warn));
+        assert_eq!(parse_level("warning"), Some(Level::Warn));
+        assert_eq!(parse_level("error"), Some(Level::Error));
+    }
+
+    #[test]
+    fn parse_level_trims_whitespace() {
+        assert_eq!(parse_level("  info  "), Some(Level::Info));
+    }
+
+    #[test]
+    fn parse_level_returns_none_for_unknown_values() {
+        assert_eq!(parse_level(""), None);
+        assert_eq!(parse_level("verbose"), None);
+        assert_eq!(parse_level("???"), None);
+    }
+
+    // ---- Level ordering / enabled ----
+
+    #[test]
+    fn level_enabled_obeys_atomic_threshold() {
+        let prev = LOG_LEVEL.load(Ordering::Relaxed);
+        set_level(Level::Warn);
+        assert!(!Level::Debug.enabled());
+        assert!(!Level::Info.enabled());
+        assert!(Level::Warn.enabled());
+        assert!(Level::Error.enabled());
+        LOG_LEVEL.store(prev, Ordering::Relaxed);
+    }
+
+    #[test]
+    fn set_level_round_trips_through_load() {
+        let prev = LOG_LEVEL.load(Ordering::Relaxed);
+        set_level(Level::Debug);
+        assert_eq!(LOG_LEVEL.load(Ordering::Relaxed), Level::Debug as u8);
+        set_level(Level::Error);
+        assert_eq!(LOG_LEVEL.load(Ordering::Relaxed), Level::Error as u8);
+        LOG_LEVEL.store(prev, Ordering::Relaxed);
+    }
+}

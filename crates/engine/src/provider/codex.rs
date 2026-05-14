@@ -651,3 +651,253 @@ async fn ensure_access_token(client: &reqwest::Client) -> Result<(String, Option
     let tokens = ensure_access_token_full(client).await?;
     Ok((tokens.access_token, tokens.account_id))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use base64::Engine;
+
+    fn jwt_with(payload: &serde_json::Value) -> String {
+        let header = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(b"{\"alg\":\"none\"}");
+        let body = base64::engine::general_purpose::URL_SAFE_NO_PAD
+            .encode(serde_json::to_vec(payload).unwrap());
+        format!("{header}.{body}.sig")
+    }
+
+    // ---- needs_refresh ----
+
+    fn tokens(expires_at: u64, last_refresh: u64) -> CodexTokens {
+        CodexTokens {
+            access_token: "a".into(),
+            refresh_token: "r".into(),
+            expires_at,
+            account_id: None,
+            last_refresh,
+        }
+    }
+
+    #[test]
+    fn needs_refresh_true_when_within_60_seconds_of_expiry() {
+        let t = tokens(unix_now() + 30, unix_now() - 100);
+        assert!(t.needs_refresh());
+    }
+
+    #[test]
+    fn needs_refresh_true_when_past_expiry() {
+        let t = tokens(unix_now().saturating_sub(100), unix_now() - 200);
+        assert!(t.needs_refresh());
+    }
+
+    #[test]
+    fn needs_refresh_false_when_expiry_far_and_recent_refresh() {
+        let t = tokens(unix_now() + 7200, unix_now() - 60);
+        assert!(!t.needs_refresh());
+    }
+
+    #[test]
+    fn needs_refresh_true_when_last_refresh_older_than_interval() {
+        let t = tokens(unix_now() + 7200, unix_now() - (REFRESH_INTERVAL_SECS + 1));
+        assert!(t.needs_refresh());
+    }
+
+    #[test]
+    fn needs_refresh_ignores_last_refresh_when_zero() {
+        // last_refresh == 0 means never refreshed, the time-based check is skipped.
+        let t = tokens(unix_now() + 7200, 0);
+        assert!(!t.needs_refresh());
+    }
+
+    // ---- parse_jwt_claims ----
+
+    #[test]
+    fn parse_jwt_claims_reads_chatgpt_account_id_from_top_level() {
+        let jwt = jwt_with(&serde_json::json!({"chatgpt_account_id": "acct-1"}));
+        let c = parse_jwt_claims(&jwt).unwrap();
+        assert_eq!(c.chatgpt_account_id.as_deref(), Some("acct-1"));
+    }
+
+    #[test]
+    fn parse_jwt_claims_reads_chatgpt_account_id_from_auth_ext() {
+        let jwt = jwt_with(&serde_json::json!({
+            "https://api.openai.com/auth": {"chatgpt_account_id": "from-ext"}
+        }));
+        let c = parse_jwt_claims(&jwt).unwrap();
+        assert_eq!(
+            c.auth_ext
+                .as_ref()
+                .and_then(|a| a.chatgpt_account_id.clone()),
+            Some("from-ext".to_string())
+        );
+    }
+
+    #[test]
+    fn parse_jwt_claims_returns_none_when_token_does_not_have_three_segments() {
+        assert!(parse_jwt_claims("notajwt").is_none());
+        assert!(parse_jwt_claims("a.b").is_none());
+    }
+
+    #[test]
+    fn parse_jwt_claims_returns_none_when_payload_is_not_base64() {
+        assert!(parse_jwt_claims("header.!!!.sig").is_none());
+    }
+
+    // ---- extract_account_id ----
+
+    #[test]
+    fn extract_account_id_prefers_id_token_over_access_token() {
+        let id = jwt_with(&serde_json::json!({"chatgpt_account_id": "from-id"}));
+        let access = jwt_with(&serde_json::json!({"chatgpt_account_id": "from-access"}));
+        assert_eq!(
+            extract_account_id(&access, Some(&id)).as_deref(),
+            Some("from-id")
+        );
+    }
+
+    #[test]
+    fn extract_account_id_falls_back_to_access_token_when_id_token_lacks_claim() {
+        let id = jwt_with(&serde_json::json!({}));
+        let access = jwt_with(&serde_json::json!({"chatgpt_account_id": "from-access"}));
+        assert_eq!(
+            extract_account_id(&access, Some(&id)).as_deref(),
+            Some("from-access")
+        );
+    }
+
+    #[test]
+    fn extract_account_id_returns_none_when_neither_token_has_claim() {
+        let id = jwt_with(&serde_json::json!({}));
+        let access = jwt_with(&serde_json::json!({}));
+        assert!(extract_account_id(&access, Some(&id)).is_none());
+    }
+
+    #[test]
+    fn extract_account_id_uses_auth_ext_fallback_path() {
+        let access = jwt_with(&serde_json::json!({
+            "https://api.openai.com/auth": {"chatgpt_account_id": "ext-acct"}
+        }));
+        assert_eq!(
+            extract_account_id(&access, None).as_deref(),
+            Some("ext-acct")
+        );
+    }
+
+    // ---- build_authorize_url ----
+
+    #[test]
+    fn build_authorize_url_includes_all_required_params() {
+        let pkce = PkceCodes {
+            verifier: "v".into(),
+            challenge: "ch".into(),
+        };
+        let url = build_authorize_url("http://localhost:1455/auth/callback", &pkce, "STATE");
+        assert!(url.starts_with(ISSUER));
+        assert!(url.contains("response_type=code"));
+        assert!(url.contains(&format!("client_id={CLIENT_ID}")));
+        assert!(url.contains("code_challenge=ch"));
+        assert!(url.contains("code_challenge_method=S256"));
+        assert!(url.contains("state=STATE"));
+        assert!(url.contains("originator=smelt"));
+        // redirect_uri is url-encoded.
+        assert!(url.contains("redirect_uri=http%3A%2F%2Flocalhost%3A1455%2Fauth%2Fcallback"));
+    }
+
+    // ---- html_error ----
+
+    #[test]
+    fn html_error_embeds_message_in_body() {
+        let html = html_error("boom");
+        assert!(html.contains("boom"));
+        assert!(html.contains("Authorization Failed"));
+    }
+
+    // ---- classify_refresh_error ----
+
+    #[test]
+    fn classify_refresh_error_expired() {
+        let s = classify_refresh_error(r#"{"error":"refresh_token_expired"}"#);
+        assert!(s.contains("expired"));
+        assert!(s.contains("smelt auth"));
+    }
+
+    #[test]
+    fn classify_refresh_error_reused() {
+        let s = classify_refresh_error("refresh_token_reused");
+        assert!(s.contains("already used"));
+    }
+
+    #[test]
+    fn classify_refresh_error_invalidated() {
+        let s = classify_refresh_error("refresh_token_invalidated detail");
+        assert!(s.contains("revoked"));
+    }
+
+    #[test]
+    fn classify_refresh_error_unknown_returns_raw_body_prefixed() {
+        let s = classify_refresh_error("server is on fire");
+        assert!(s.starts_with("token refresh error:"));
+        assert!(s.contains("server is on fire"));
+    }
+
+    // ---- deserialize_interval ----
+
+    #[test]
+    fn deserialize_interval_accepts_number() {
+        let r: DeviceCodeResponse = serde_json::from_value(
+            serde_json::json!({"device_auth_id":"d","user_code":"u","interval": 7}),
+        )
+        .unwrap();
+        assert_eq!(r.interval, Some(7));
+    }
+
+    #[test]
+    fn deserialize_interval_accepts_numeric_string() {
+        let r: DeviceCodeResponse = serde_json::from_value(
+            serde_json::json!({"device_auth_id":"d","user_code":"u","interval":"3"}),
+        )
+        .unwrap();
+        assert_eq!(r.interval, Some(3));
+    }
+
+    #[test]
+    fn deserialize_interval_handles_null() {
+        let r: DeviceCodeResponse = serde_json::from_value(
+            serde_json::json!({"device_auth_id":"d","user_code":"u","interval": null}),
+        )
+        .unwrap();
+        assert!(r.interval.is_none());
+    }
+
+    #[test]
+    fn deserialize_interval_defaults_to_none_when_field_missing() {
+        let r: DeviceCodeResponse =
+            serde_json::from_value(serde_json::json!({"device_auth_id":"d","user_code":"u"}))
+                .unwrap();
+        assert!(r.interval.is_none());
+    }
+
+    #[test]
+    fn deserialize_device_code_response_accepts_usercode_alias() {
+        let r: DeviceCodeResponse =
+            serde_json::from_value(serde_json::json!({"device_auth_id":"d","usercode":"alt"}))
+                .unwrap();
+        assert_eq!(r.user_code, "alt");
+    }
+
+    // ---- pkce / state helpers (smoke) ----
+
+    #[test]
+    fn generate_pkce_produces_nonempty_verifier_and_challenge() {
+        let p = generate_pkce();
+        assert!(!p.verifier.is_empty());
+        assert!(!p.challenge.is_empty());
+        assert_ne!(p.verifier, p.challenge);
+    }
+
+    #[test]
+    fn generate_state_produces_nonempty_unique_strings() {
+        let a = generate_state();
+        let b = generate_state();
+        assert!(!a.is_empty());
+        assert_ne!(a, b);
+    }
+}

@@ -19,3 +19,6 @@ rand = "0.10"
 keyring = "3"
 minijinja = "2"
 regex = "1"
+
+[dev-dependencies]
+tempfile.workspace = true

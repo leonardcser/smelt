@@ -103,3 +103,63 @@ impl ToolDispatcher for EmptyDispatcher {
         None
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn tool_result_ok_marks_is_error_false() {
+        let r = ToolResult::ok("done");
+        assert_eq!(r.content, "done");
+        assert!(!r.is_error);
+        assert!(r.metadata.is_none());
+    }
+
+    #[test]
+    fn tool_result_err_marks_is_error_true() {
+        let r = ToolResult::err("boom");
+        assert_eq!(r.content, "boom");
+        assert!(r.is_error);
+        assert!(r.metadata.is_none());
+    }
+
+    #[test]
+    fn empty_dispatcher_definitions_returns_empty_vec() {
+        let d = EmptyDispatcher::new();
+        assert!(d.definitions().is_empty());
+    }
+
+    #[test]
+    fn empty_dispatcher_contains_returns_false_for_any_name() {
+        let d = EmptyDispatcher;
+        assert!(!d.contains("anything"));
+        assert!(!d.contains(""));
+    }
+
+    #[test]
+    fn empty_dispatcher_is_mcp_returns_false() {
+        assert!(!EmptyDispatcher.is_mcp("name"));
+    }
+
+    #[test]
+    fn empty_dispatcher_default_is_visible_returns_true() {
+        // Trait-default is_visible returns true; EmptyDispatcher inherits it.
+        assert!(EmptyDispatcher.is_visible("anything", protocol::AgentMode::Plan));
+    }
+
+    #[test]
+    fn empty_dispatcher_evaluate_hooks_returns_none() {
+        let d = EmptyDispatcher;
+        let res = d.evaluate_hooks("name", &HashMap::new(), protocol::AgentMode::Plan);
+        assert!(res.is_none());
+    }
+
+    #[test]
+    fn empty_dispatcher_dispatch_returns_none() {
+        let d = EmptyDispatcher;
+        let ctx = ToolContext;
+        let res = d.dispatch("name", HashMap::new(), &ctx);
+        assert!(res.is_none());
+    }
+}

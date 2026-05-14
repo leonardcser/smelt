@@ -392,11 +392,12 @@ async fn fetch_available_models(
         .await
         .map_err(|e| format!("bad models response: {e}"))?;
 
-    let entries = data
-        .get("data")
-        .and_then(|v| v.as_array())
-        .ok_or("missing 'data' array in models response")?;
+    parse_models_response(&data).ok_or_else(|| "missing 'data' array in models response".into())
+}
 
+/// Filter, sort, and dedup chat-capable models from the `/models` endpoint payload. Pure.
+fn parse_models_response(data: &serde_json::Value) -> Option<Vec<CopilotModel>> {
+    let entries = data.get("data").and_then(|v| v.as_array())?;
     let mut out: Vec<CopilotModel> = Vec::with_capacity(entries.len());
     for m in entries {
         let capability_type = m
@@ -448,7 +449,7 @@ async fn fetch_available_models(
     }
     out.sort_by(|a, b| a.id.cmp(&b.id));
     out.dedup_by(|a, b| a.id == b.id);
-    Ok(out)
+    Some(out)
 }
 
 async fn enable_model_policy(
@@ -587,5 +588,201 @@ mod tests {
     fn base_url_from_token_returns_none_without_claim() {
         let token = "tid=abc;exp=9999;sku=x";
         assert_eq!(base_url_from_token(token), None);
+    }
+
+    #[test]
+    fn base_url_from_token_handles_host_without_proxy_prefix() {
+        let token = "proxy-ep=direct.example.com";
+        assert_eq!(
+            base_url_from_token(token).as_deref(),
+            Some("https://api.direct.example.com")
+        );
+    }
+
+    #[test]
+    fn base_url_from_token_returns_none_for_empty_token() {
+        assert_eq!(base_url_from_token(""), None);
+    }
+
+    // ---- CopilotTokens::needs_refresh ----
+
+    fn tokens(expires_at: u64) -> CopilotTokens {
+        CopilotTokens {
+            refresh_token: "r".into(),
+            access_token: "a".into(),
+            expires_at,
+            api_base: DEFAULT_COPILOT_API_BASE.into(),
+            last_refresh: 0,
+        }
+    }
+
+    #[test]
+    fn needs_refresh_true_when_within_60s_of_expiry() {
+        let t = tokens(unix_now() + 30);
+        assert!(t.needs_refresh());
+    }
+
+    #[test]
+    fn needs_refresh_true_when_past_expiry() {
+        let t = tokens(unix_now().saturating_sub(1));
+        assert!(t.needs_refresh());
+    }
+
+    #[test]
+    fn needs_refresh_false_when_expiry_far_future() {
+        let t = tokens(unix_now() + 3600);
+        assert!(!t.needs_refresh());
+    }
+
+    // ---- base_headers ----
+
+    #[test]
+    fn base_headers_includes_expected_metadata() {
+        let h = base_headers();
+        let kv: std::collections::HashMap<&str, &str> = h.iter().copied().collect();
+        assert_eq!(kv.get("User-Agent"), Some(&COPILOT_USER_AGENT));
+        assert_eq!(kv.get("Editor-Version"), Some(&EDITOR_VERSION));
+        assert_eq!(
+            kv.get("Editor-Plugin-Version"),
+            Some(&EDITOR_PLUGIN_VERSION)
+        );
+        assert_eq!(
+            kv.get("Copilot-Integration-Id"),
+            Some(&COPILOT_INTEGRATION_ID)
+        );
+    }
+
+    // ---- parse_models_response ----
+
+    fn model(id: &str, capability_type: Option<&str>, picker: Option<bool>) -> serde_json::Value {
+        let mut v = serde_json::json!({"id": id, "name": format!("{id} Name")});
+        if let Some(c) = capability_type {
+            v["capabilities"] = serde_json::json!({"type": c});
+        }
+        if let Some(p) = picker {
+            v["model_picker_enabled"] = serde_json::json!(p);
+        }
+        v
+    }
+
+    #[test]
+    fn parse_models_returns_none_when_data_array_missing() {
+        let v = serde_json::json!({});
+        assert!(parse_models_response(&v).is_none());
+    }
+
+    #[test]
+    fn parse_models_filters_out_non_chat_capabilities() {
+        let v = serde_json::json!({"data": [
+            model("a", Some("chat"), None),
+            model("b", Some("embeddings"), None),
+            model("c", Some(""), None),
+        ]});
+        let ms = parse_models_response(&v).unwrap();
+        let ids: Vec<_> = ms.iter().map(|m| m.id.as_str()).collect();
+        assert!(ids.contains(&"a"));
+        assert!(ids.contains(&"c")); // empty capability type is allowed
+        assert!(!ids.contains(&"b"));
+    }
+
+    #[test]
+    fn parse_models_filters_out_disabled_picker_entries() {
+        let v = serde_json::json!({"data": [
+            model("on", None, Some(true)),
+            model("off", None, Some(false)),
+        ]});
+        let ms = parse_models_response(&v).unwrap();
+        assert_eq!(ms.len(), 1);
+        assert_eq!(ms[0].id, "on");
+    }
+
+    #[test]
+    fn parse_models_defaults_picker_to_enabled_when_missing() {
+        let v = serde_json::json!({"data": [model("default", None, None)]});
+        let ms = parse_models_response(&v).unwrap();
+        assert_eq!(ms.len(), 1);
+    }
+
+    #[test]
+    fn parse_models_skips_entries_without_id() {
+        let v = serde_json::json!({"data": [
+            {"name": "no-id"},
+            model("ok", None, None),
+        ]});
+        let ms = parse_models_response(&v).unwrap();
+        assert_eq!(ms.len(), 1);
+        assert_eq!(ms[0].id, "ok");
+    }
+
+    #[test]
+    fn parse_models_extracts_context_window_from_max_context_window_tokens() {
+        let v = serde_json::json!({"data": [{
+            "id": "m", "model_picker_enabled": true,
+            "capabilities": {"type": "chat",
+                "limits": {"max_context_window_tokens": 128000}}
+        }]});
+        let ms = parse_models_response(&v).unwrap();
+        assert_eq!(ms[0].context_window, Some(128000));
+    }
+
+    #[test]
+    fn parse_models_falls_back_to_max_prompt_tokens_for_context_window() {
+        let v = serde_json::json!({"data": [{
+            "id": "m", "model_picker_enabled": true,
+            "capabilities": {"type": "chat",
+                "limits": {"max_prompt_tokens": 8000}}
+        }]});
+        let ms = parse_models_response(&v).unwrap();
+        assert_eq!(ms[0].context_window, Some(8000));
+    }
+
+    #[test]
+    fn parse_models_extracts_max_output_tokens() {
+        let v = serde_json::json!({"data": [{
+            "id": "m", "model_picker_enabled": true,
+            "capabilities": {"type": "chat", "limits": {"max_output_tokens": 4096}}
+        }]});
+        let ms = parse_models_response(&v).unwrap();
+        assert_eq!(ms[0].max_output_tokens, Some(4096));
+    }
+
+    #[test]
+    fn parse_models_sorts_by_id_and_dedups() {
+        let v = serde_json::json!({"data": [
+            model("zzz", None, None),
+            model("aaa", None, None),
+            model("aaa", None, None),
+            model("mmm", None, None),
+        ]});
+        let ms = parse_models_response(&v).unwrap();
+        let ids: Vec<_> = ms.iter().map(|m| m.id.as_str()).collect();
+        assert_eq!(ids, vec!["aaa", "mmm", "zzz"]);
+    }
+
+    #[test]
+    fn parse_models_uses_id_as_name_when_name_missing() {
+        let v = serde_json::json!({"data": [{
+            "id": "naked-id", "model_picker_enabled": true,
+            "capabilities": {"type": "chat"}
+        }]});
+        let ms = parse_models_response(&v).unwrap();
+        assert_eq!(ms[0].name, "naked-id");
+    }
+
+    #[test]
+    fn parse_models_captures_vendor_when_present() {
+        let v = serde_json::json!({"data": [{
+            "id": "m", "name": "M", "vendor": "openai", "model_picker_enabled": true,
+            "capabilities": {"type": "chat"}
+        }]});
+        let ms = parse_models_response(&v).unwrap();
+        assert_eq!(ms[0].vendor.as_deref(), Some("openai"));
+    }
+
+    #[test]
+    fn parse_models_vendor_none_when_absent() {
+        let v = serde_json::json!({"data": [model("m", Some("chat"), Some(true))]});
+        let ms = parse_models_response(&v).unwrap();
+        assert!(ms[0].vendor.is_none());
     }
 }

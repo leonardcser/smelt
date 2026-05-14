@@ -497,4 +497,258 @@ mod tests {
         )));
         assert!(!is_context_window_error(&ProviderError::Cancelled));
     }
+
+    // ---- reason / phase string forms ----
+
+    #[test]
+    fn compact_reason_as_str_matches_each_variant() {
+        assert_eq!(CompactReason::ContextLimit.as_str(), "context_limit");
+        assert_eq!(CompactReason::UserRequested.as_str(), "user_requested");
+    }
+
+    #[test]
+    fn compact_phase_as_str_matches_each_variant() {
+        assert_eq!(CompactPhase::MidTurn.as_str(), "mid_turn");
+        assert_eq!(CompactPhase::Manual.as_str(), "manual");
+    }
+
+    // ---- approx_token_count ----
+
+    #[test]
+    fn approx_token_count_rounds_up_via_div_ceil() {
+        assert_eq!(approx_token_count(""), 0);
+        assert_eq!(approx_token_count("abc"), 1);
+        assert_eq!(approx_token_count("abcd"), 1);
+        assert_eq!(approx_token_count("abcde"), 2);
+    }
+
+    // ---- truncate_bytes_floor ----
+
+    #[test]
+    fn truncate_bytes_floor_passthrough_when_under_limit() {
+        let s = "short text";
+        assert_eq!(truncate_bytes_floor(s, 100), "short text");
+    }
+
+    #[test]
+    fn truncate_bytes_floor_appends_marker_when_truncated() {
+        let s = "a".repeat(20);
+        let t = truncate_bytes_floor(&s, 5);
+        assert!(t.starts_with("aaaaa"));
+        assert!(t.contains("[truncated for compaction]"));
+    }
+
+    #[test]
+    fn truncate_bytes_floor_respects_char_boundary_for_multibyte() {
+        // A multi-byte character at the boundary: ensure we don't split it.
+        let s = format!("{}{}", "a".repeat(3), "é".repeat(5));
+        // 3 bytes 'a', then é (2 bytes each). Limit of 4 would split é.
+        let t = truncate_bytes_floor(&s, 4);
+        // The non-marker part must end at a char boundary.
+        let body = t.split("\n…").next().unwrap();
+        assert!(s.is_char_boundary(body.len()));
+    }
+
+    // ---- stringify_conversation ----
+
+    fn user(text: &str) -> Message {
+        Message::user(Content::text(text.to_string()))
+    }
+
+    fn assistant(
+        text: Option<&str>,
+        reasoning: Option<&str>,
+        calls: Option<Vec<protocol::ToolCall>>,
+    ) -> Message {
+        Message::assistant(
+            text.map(|t| Content::text(t.to_string())),
+            reasoning.map(|r| r.to_string()),
+            calls,
+        )
+    }
+
+    #[test]
+    fn stringify_conversation_labels_each_role() {
+        let history = vec![
+            Message::system("sys".to_string()),
+            user("hi"),
+            assistant(Some("hello"), None, None),
+        ];
+        let out = stringify_conversation(&history);
+        assert!(out.contains("System: sys"));
+        assert!(out.contains("User: hi"));
+        assert!(out.contains("Assistant: hello"));
+    }
+
+    #[test]
+    fn stringify_conversation_drops_empty_messages() {
+        let history = vec![user(""), user("kept")];
+        let out = stringify_conversation(&history);
+        assert!(out.contains("User: kept"));
+        assert_eq!(out.matches("User: ").count(), 1);
+    }
+
+    #[test]
+    fn stringify_conversation_includes_thinking_block_and_tool_calls() {
+        let calls = vec![protocol::ToolCall::new(
+            "id".into(),
+            protocol::FunctionCall {
+                name: "do_thing".into(),
+                arguments: r#"{"a":1}"#.into(),
+            },
+        )];
+        let msg = assistant(Some("body"), Some("reasoning"), Some(calls));
+        let out = stringify_conversation(&[msg]);
+        assert!(out.contains("[thinking]"));
+        assert!(out.contains("reasoning"));
+        assert!(out.contains("body"));
+        assert!(out.contains("[tool_call] do_thing("));
+        assert!(out.contains(r#"{"a":1}"#));
+    }
+
+    // ---- select_recent_user_messages ----
+
+    #[test]
+    fn select_recent_zero_budget_returns_empty() {
+        let kept = select_recent_user_messages(vec!["x".into()], 0);
+        assert!(kept.is_empty());
+    }
+
+    #[test]
+    fn select_recent_empty_input_returns_empty() {
+        let kept = select_recent_user_messages(Vec::new(), 1000);
+        assert!(kept.is_empty());
+    }
+
+    #[test]
+    fn select_recent_preserves_chronological_order_in_output() {
+        let msgs = vec!["older".into(), "middle".into(), "newest".into()];
+        let kept = select_recent_user_messages(msgs, 10_000);
+        assert_eq!(kept, vec!["older", "middle", "newest"]);
+    }
+
+    // ---- collect_user_messages ----
+
+    #[test]
+    fn collect_user_messages_skips_assistant_and_tool_roles() {
+        let history = vec![
+            user("from-user"),
+            assistant(Some("a"), None, None),
+            Message {
+                role: Role::Tool,
+                content: Some(Content::text("t".to_string())),
+                reasoning_content: None,
+                tool_calls: None,
+                tool_call_id: Some("id".into()),
+                is_error: false,
+            },
+        ];
+        let out = collect_user_messages(&history);
+        assert_eq!(out, vec!["from-user".to_string()]);
+    }
+
+    #[test]
+    fn collect_user_messages_skips_empty_user_messages() {
+        let history = vec![user(""), user("  "), user("kept")];
+        let out = collect_user_messages(&history);
+        assert_eq!(out, vec!["kept"]);
+    }
+
+    // ---- build_summarize_request ----
+
+    #[test]
+    fn build_summarize_request_appends_extra_instructions_when_present() {
+        let req = build_summarize_request(&[user("hi")], Some("note this"), "BASE_PROMPT");
+        let system_text = req[0].content.as_ref().unwrap().as_text().to_string();
+        assert!(system_text.contains("BASE_PROMPT"));
+        assert!(system_text.contains("note this"));
+        assert!(system_text.contains("special attention"));
+    }
+
+    #[test]
+    fn build_summarize_request_omits_extras_when_instructions_blank() {
+        let req = build_summarize_request(&[user("hi")], Some("   "), "BASE");
+        let system_text = req[0].content.as_ref().unwrap().as_text().to_string();
+        assert!(!system_text.contains("special attention"));
+    }
+
+    #[test]
+    fn build_summarize_request_user_message_contains_stringified_conversation() {
+        let req = build_summarize_request(&[user("the-content")], None, "BASE");
+        let user_text = req[1].content.as_ref().unwrap().as_text().to_string();
+        assert!(user_text.starts_with("Conversation to summarize:"));
+        assert!(user_text.contains("User: the-content"));
+    }
+
+    // ---- build_compacted_history ----
+
+    #[test]
+    fn build_compacted_history_replaces_empty_summary_with_placeholder() {
+        let out = build_compacted_history(Vec::new(), "   ", InitialContextInjection::DoNotInject);
+        let summary_body = out
+            .last()
+            .unwrap()
+            .content
+            .as_ref()
+            .unwrap()
+            .as_text()
+            .to_string();
+        assert!(summary_body.contains("(no summary available)"));
+    }
+
+    #[test]
+    fn build_compacted_history_prepends_user_messages_when_injecting() {
+        let out = build_compacted_history(
+            vec!["q1".into(), "q2".into()],
+            "summary",
+            InitialContextInjection::BeforeLastUserMessage,
+        );
+        assert!(out.len() >= 2);
+        // Last is summary; earlier entries are the kept user messages in order.
+        let texts: Vec<_> = out[..out.len() - 1]
+            .iter()
+            .map(|m| m.content.as_ref().unwrap().as_text().to_string())
+            .collect();
+        assert_eq!(texts, vec!["q1", "q2"]);
+    }
+
+    // ---- is_context_window_error: cover each branch ----
+
+    #[test]
+    fn is_context_window_error_recognizes_each_synonym() {
+        let synonyms = [
+            "context_length_exceeded",
+            "exceeded context length",
+            "context window saturated",
+            "maximum context exceeded",
+            "prompt is too long",
+            "prompt too long",
+            "too many tokens",
+        ];
+        for s in synonyms {
+            assert!(
+                is_context_window_error(&ProviderError::InvalidResponse(s.into())),
+                "{s}"
+            );
+        }
+    }
+
+    #[test]
+    fn is_context_window_error_checks_server_body_too() {
+        let e = ProviderError::Server {
+            status: 500,
+            body: "context_length_exceeded".into(),
+        };
+        assert!(is_context_window_error(&e));
+    }
+
+    #[test]
+    fn is_context_window_error_ignores_unrelated_error_kinds() {
+        assert!(!is_context_window_error(&ProviderError::Network(
+            "x".into()
+        )));
+        assert!(!is_context_window_error(&ProviderError::Auth(
+            "nope".into()
+        )));
+    }
 }

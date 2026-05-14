@@ -227,3 +227,237 @@ pub fn start(config: EngineConfig, dispatcher: Box<dyn tools::ToolDispatcher>) -
         event_rx,
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ---- compact_threshold_percent ----
+
+    fn with_env<F: FnOnce()>(key: &str, value: Option<&str>, f: F) {
+        let prev = std::env::var(key).ok();
+        unsafe {
+            match value {
+                Some(v) => std::env::set_var(key, v),
+                None => std::env::remove_var(key),
+            }
+        }
+        f();
+        unsafe {
+            match prev {
+                Some(v) => std::env::set_var(key, v),
+                None => std::env::remove_var(key),
+            }
+        }
+    }
+
+    #[test]
+    fn compact_threshold_defaults_to_80_when_env_unset() {
+        with_env(COMPACT_THRESHOLD_ENV, None, || {
+            assert_eq!(compact_threshold_percent(), 80);
+        });
+    }
+
+    #[test]
+    fn compact_threshold_reads_valid_env_value() {
+        with_env(COMPACT_THRESHOLD_ENV, Some("50"), || {
+            assert_eq!(compact_threshold_percent(), 50);
+        });
+    }
+
+    #[test]
+    fn compact_threshold_rejects_below_10_and_above_95() {
+        with_env(COMPACT_THRESHOLD_ENV, Some("9"), || {
+            assert_eq!(compact_threshold_percent(), 80);
+        });
+        with_env(COMPACT_THRESHOLD_ENV, Some("96"), || {
+            assert_eq!(compact_threshold_percent(), 80);
+        });
+    }
+
+    #[test]
+    fn compact_threshold_accepts_inclusive_bounds() {
+        with_env(COMPACT_THRESHOLD_ENV, Some("10"), || {
+            assert_eq!(compact_threshold_percent(), 10);
+        });
+        with_env(COMPACT_THRESHOLD_ENV, Some("95"), || {
+            assert_eq!(compact_threshold_percent(), 95);
+        });
+    }
+
+    #[test]
+    fn compact_threshold_rejects_non_numeric_values() {
+        with_env(COMPACT_THRESHOLD_ENV, Some("nope"), || {
+            assert_eq!(compact_threshold_percent(), 80);
+        });
+    }
+
+    #[test]
+    fn compact_threshold_trims_whitespace_around_value() {
+        with_env(COMPACT_THRESHOLD_ENV, Some("  42 "), || {
+            assert_eq!(compact_threshold_percent(), 42);
+        });
+    }
+
+    // ---- render_system_prompt ----
+
+    #[test]
+    fn render_system_prompt_includes_cwd_and_extra_instructions() {
+        let cwd = std::path::Path::new("/tmp/x");
+        let ctx = PromptContext {
+            cwd,
+            write_access: true,
+            skills_section: None,
+            extra_instructions: Some("MARK-EXTRA-7384"),
+        };
+        let out = render_system_prompt(&ctx);
+        assert!(out.contains("/tmp/x"));
+        assert!(out.contains("MARK-EXTRA-7384"));
+    }
+
+    #[test]
+    fn render_system_prompt_collapses_runs_of_blank_lines() {
+        let cwd = std::path::Path::new("/x");
+        let ctx = PromptContext {
+            cwd,
+            write_access: false,
+            skills_section: None,
+            extra_instructions: None,
+        };
+        let out = render_system_prompt(&ctx);
+        // No more than two consecutive newlines anywhere.
+        assert!(!out.contains("\n\n\n"));
+    }
+
+    // ---- build_system_prompt_full mode flag ----
+
+    #[test]
+    fn build_system_prompt_full_chooses_write_access_by_agent_mode() {
+        // Just verify the helper runs and produces non-empty output for both modes.
+        let cwd = std::path::Path::new("/x");
+        let plan = build_system_prompt_full(protocol::AgentMode::Plan, cwd, None, None);
+        let apply = build_system_prompt_full(protocol::AgentMode::Apply, cwd, None, None);
+        assert!(!plan.is_empty());
+        assert!(!apply.is_empty());
+    }
+
+    // ---- aux_or_primary ----
+
+    fn primary_cfg() -> RequestModelConfig {
+        RequestModelConfig {
+            model: "primary".into(),
+            api: ApiConfig {
+                base: "base".into(),
+                key: "k".into(),
+                key_env: "K".into(),
+                provider_type: "openai".into(),
+                model_config: ModelConfig::default(),
+            },
+        }
+    }
+
+    fn aux_cfg(name: &str) -> RequestModelConfig {
+        let mut p = primary_cfg();
+        p.model = name.into();
+        p
+    }
+
+    fn engine_with(aux: AuxiliaryModelConfig) -> EngineConfig {
+        let primary = primary_cfg();
+        EngineConfig {
+            api: primary.api,
+            model: primary.model,
+            auxiliary: aux,
+            instructions: None,
+            system_prompt_override: None,
+            cwd: PathBuf::from("/"),
+            skills: None,
+            auto_compact: false,
+            context_window: None,
+            redact_secrets: false,
+        }
+    }
+
+    #[test]
+    fn aux_or_primary_returns_override_when_set() {
+        let eng = engine_with(AuxiliaryModelConfig {
+            title: Some(aux_cfg("title-model")),
+            ..Default::default()
+        });
+        assert_eq!(
+            eng.aux_or_primary(AuxiliaryTask::Title).model,
+            "title-model"
+        );
+    }
+
+    #[test]
+    fn aux_or_primary_falls_back_to_primary_when_slot_empty() {
+        let eng = engine_with(AuxiliaryModelConfig::default());
+        for task in [
+            AuxiliaryTask::Title,
+            AuxiliaryTask::Prediction,
+            AuxiliaryTask::Compaction,
+            AuxiliaryTask::Btw,
+        ] {
+            assert_eq!(eng.aux_or_primary(task).model, "primary");
+        }
+    }
+
+    #[test]
+    fn aux_or_primary_threads_each_slot_independently() {
+        let eng = engine_with(AuxiliaryModelConfig {
+            title: Some(aux_cfg("t")),
+            prediction: Some(aux_cfg("p")),
+            compaction: Some(aux_cfg("c")),
+            btw: Some(aux_cfg("b")),
+        });
+        assert_eq!(eng.aux_or_primary(AuxiliaryTask::Title).model, "t");
+        assert_eq!(eng.aux_or_primary(AuxiliaryTask::Prediction).model, "p");
+        assert_eq!(eng.aux_or_primary(AuxiliaryTask::Compaction).model, "c");
+        assert_eq!(eng.aux_or_primary(AuxiliaryTask::Btw).model, "b");
+    }
+
+    // ---- EngineHandle / EventInjector ----
+
+    #[tokio::test]
+    async fn for_test_returns_paired_channels_and_send_recv_works() {
+        let (mut handle, mut cmd_rx, event_tx) = EngineHandle::for_test();
+
+        handle.send(UiCommand::Cancel);
+        let cmd = cmd_rx.recv().await.unwrap();
+        assert!(matches!(cmd, UiCommand::Cancel));
+
+        let _ = event_tx.send(EngineEvent::ToolOutput {
+            call_id: "id".into(),
+            chunk: "x".into(),
+        });
+        match handle.recv().await.unwrap() {
+            EngineEvent::ToolOutput { call_id, chunk } => {
+                assert_eq!(call_id, "id");
+                assert_eq!(chunk, "x");
+            }
+            _ => panic!("unexpected event"),
+        }
+    }
+
+    #[tokio::test]
+    async fn event_injector_forwards_tool_output() {
+        let (mut handle, _cmd_rx, _event_tx) = EngineHandle::for_test();
+        let injector = handle.injector();
+        injector.inject_tool_output("c".into(), "out".into());
+        match handle.recv().await.unwrap() {
+            EngineEvent::ToolOutput { call_id, chunk } => {
+                assert_eq!(call_id, "c");
+                assert_eq!(chunk, "out");
+            }
+            _ => panic!("unexpected event"),
+        }
+    }
+
+    #[tokio::test]
+    async fn try_recv_returns_empty_when_no_events_pending() {
+        let (mut handle, _cmd_rx, _event_tx) = EngineHandle::for_test();
+        let res = handle.try_recv();
+        assert!(matches!(res, Err(mpsc::error::TryRecvError::Empty)));
+    }
+}

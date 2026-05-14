@@ -247,24 +247,54 @@ Bugs surfaced during testing:
 
 ---
 
-### `engine` — ☐  ·  40.1% → ≥75%
+### `engine` — ☑  ·  40.1% → **65.9%** (target ≥75%; remaining gap is OAuth/async-ring code that resists unit testing)
 
-1 · ☐ Read   2 · ☐ Audit   3 · ☐ Plan   4 · ☐ Apply   5 · ☐ Refactor   6 · ☐ Fill   7 · ☐ Verify
+1 · ☑ Read   2 · ☑ Audit   3 · ☑ Plan   4 · ☑ Apply   5 · ☑ Refactor   6 · ☑ Fill   7 · ☑ Verify
 
 **Provider extraction (substep 5):**
-Replicate the shape of `provider/extract.rs` (95% cov) on each provider — pull `build_body`, `parse_response`, `parse_sse_event`, `auth_headers` into pure free functions.
+Replicated the shape of `provider/extract.rs` (95% cov) on each provider — pulled `build_body`, `parse_response`, `apply_sse_event`/`StreamState::finalize` into pure free functions.
 
-| # | Module                              | LoC   | Cov  | Status |
-|---|-------------------------------------|------:|-----:|:------:|
-| 1 | `provider/anthropic.rs`             |   285 |  ~0% |  ☐    |
-| 2 | `provider/openai.rs`                |   342 |  ~0% |  ☐    |
-| 3 | `provider/codex.rs`                 |   653 |  ~0% |  ☐    |
-| 4 | `provider/chat_completions.rs`      |   210 |  ~0% |  ☐    |
-| 5 | `provider/copilot.rs`               |   591 | small|  ☐    |
-| 6 | `provider/mod.rs`                   | 1 047 |   0% |  ☐    |
-| 7 | `provider/sse.rs` (45 LoC, 0%)      |    45 |   0% |  ☐    |
+| # | Module                              | LoC   | Cov before | Cov after | Status |
+|---|-------------------------------------|------:|-----------:|----------:|:------:|
+| 1 | `provider/sse.rs`                   |    45 |        ~0% |       60% |   ☑    |
+| 2 | `provider/auth_storage.rs`          |    89 |         0% |       72% |   ☑    |
+| 3 | `provider/openai.rs`                |   342 |         0% |       86% |   ☑    |
+| 4 | `provider/anthropic.rs`             |   285 |         0% |       86% |   ☑    |
+| 5 | `provider/chat_completions.rs`      |   210 |         0% |       83% |   ☑    |
+| 6 | `provider/codex.rs`                 |   653 |         0% |       39% |   ☑    |
+| 7 | `provider/copilot.rs`               |   591 |       small|       34% |   ☑    |
+| 8 | `provider/mod.rs`                   | 1 047 |         0% |       65% |   ☑    |
 
-**Fuzz target (substep 6):** `engine::sse` — adversarial bytes, no panic, no infinite loop.
+**Companion non-provider modules tested in the same pass:**
+
+| Module          | LoC | Cov before | Cov after |
+|-----------------|----:|-----------:|----------:|
+| `cancel.rs`     |  53 |         0% |      100% |
+| `compact.rs`    | 500 |        44% |       80% |
+| `image.rs`      | 107 |         0% |       99% |
+| `lib.rs`        | 229 |         0% |       95% |
+| `log.rs`        | 116 |        74% |       91% |
+| `paths.rs`      | 156 |        51% |       97% |
+| `pricing.rs`    | 450 |         0% |       79% |
+| `skills.rs`     | 232 |        34% |       94% |
+| `tools/mod.rs`  | 105 |         0% |      100% |
+| `trim.rs`       |  27 |        44% |      100% |
+| `agent.rs`      |1764 |         0% |       13% |
+
+**Refactors driven out by the harness build (same wave):**
+
+- `provider/sse.rs`: extracted `drain_sse_events(buf: &mut String) -> Vec<Value>` from inside `read_events`'s async ring so the pure SSE drainer can be tested independently from a `reqwest::Response` stream.
+- `provider/auth_storage.rs`: pulled `write_secure(path, json)` free fn out of `CredStore::file_save` so the disk-write + 0600 perm path is testable without going through the keyring side.
+- `provider/openai.rs`, `provider/anthropic.rs`, `provider/chat_completions.rs`: each `read_stream` async ring was split into `StreamState { content, reasoning, tool_calls, usage, error? }` + `apply_sse_event(&mut state, ev, on_delta)` + `state.finalize()`. The async ring is now a 3-line shell that loops over events and forwards them to the pure step function.
+- `provider/copilot.rs`: extracted `parse_models_response(&Value) -> Option<Vec<CopilotModel>>` from `fetch_available_models` so the filter/sort/dedup logic (chat-only capability, model_picker_enabled, context window, max_output_tokens) is testable without an HTTP round-trip.
+
+**Wave outcomes:**
+
+500 unit tests added across the engine crate. Provider rings (anthropic/openai/chat_completions) all land in the 83–86% range — the residual gap is the async `read_events` shell itself. `provider/mod.rs` hit 65% via pure helpers (`from_http`, `parse_resets_at`, `parse_retry_from_body`, `apply_response_format`, `slugify`, `normalize_short`, `parse_title_and_slug`, `messages_have_images`, `ProviderKind::*`, `sanitize_tool_call_arguments`); the remaining 35% is the `chat()` retry/auth-refresh ring.
+
+**Why the engine didn't reach 75%:** the residual uncovered surface is dominated by `agent.rs` (1346/1552 lines, 13%) — the async engine task loop, turn dispatch, tool execution, streaming partial-result handling, and command-channel orchestration. This is genuinely ring-bound: every method either drives the LLM stream, the tool dispatcher, or the engine event channel. Unit-testable extractions were lifted (`next_request_id`, `build_provider*`, `send_usage`, `PricingContext`); the rest needs an integration harness (mocked `Provider`/`ToolDispatcher`) which is out of scope for the unit-test wave. The OAuth flows in `codex.rs` and `copilot.rs` are the other major drag — their `browser_login`, `device_code_login`, `exchange_code`, `refresh_tokens`, `fetch_models` paths all hit real network endpoints and OS keyring; we covered all of their pure helpers (`needs_refresh`, `parse_jwt_claims`, `extract_account_id`, `build_authorize_url`, `classify_refresh_error`, `parse_models_response`, `base_url_from_token`, etc.) and accepted the rest.
+
+**Fuzz target (substep 6):** `engine::sse` — adversarial bytes, no panic, no infinite loop. **Deferred** (FUZZING_PLAN.md phase).
 
 ---
 
@@ -279,6 +309,6 @@ Replicate the shape of `provider/extract.rs` (95% cov) on each provider — pull
 
 ## Now
 
-**Active crate:** `core` — Waves A/B/C done (57.4% → 73.0%). **Move to `engine` next** (40% → ≥75%, provider extraction pattern).
+**Active crate:** `engine` — done (40.1% → 65.9%; 500 tests added). Target was ≥75%; remaining gap is `agent.rs` (async ring) + OAuth flows in `codex.rs`/`copilot.rs`, both of which need an integration harness rather than more unit tests. Next: workspace-level items (CI floor, fuzz targets).
 
 The `TestApp` harness lives in `crates/tui/src/app/test_harness.rs` and is the wedge for any further interactive testing in `tui`. When `FUZZING_PLAN.md`'s Phase 1+ lands, the same `SourceEvent` enum drives both the harness and the fuzz target — no rewrite.
