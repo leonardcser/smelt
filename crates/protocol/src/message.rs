@@ -141,6 +141,211 @@ impl<'de> Deserialize<'de> for AlwaysFunction {
     }
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::content::ContentPart;
+    use serde_json::json;
+
+    // ---- Message constructors ----
+
+    #[test]
+    fn system_constructor_sets_role_and_text_content() {
+        let m = Message::system("hello");
+        assert_eq!(m.role, Role::System);
+        match m.content {
+            Some(Content::Text(ref s)) => assert_eq!(s, "hello"),
+            _ => panic!("expected text content"),
+        }
+        assert!(m.tool_calls.is_none());
+        assert!(m.tool_call_id.is_none());
+        assert!(!m.is_error);
+    }
+
+    #[test]
+    fn user_constructor_preserves_content_variant() {
+        let m = Message::user(Content::Parts(vec![ContentPart::Text { text: "x".into() }]));
+        assert_eq!(m.role, Role::User);
+        assert!(matches!(m.content, Some(Content::Parts(_))));
+    }
+
+    #[test]
+    fn assistant_constructor_threads_optional_fields() {
+        let m = Message::assistant(
+            Some(Content::text("hi")),
+            Some("reasoning".into()),
+            Some(vec![ToolCall::new(
+                "id".into(),
+                FunctionCall {
+                    name: "f".into(),
+                    arguments: "{}".into(),
+                },
+            )]),
+        );
+        assert_eq!(m.role, Role::Assistant);
+        assert_eq!(m.reasoning_content.as_deref(), Some("reasoning"));
+        assert_eq!(m.tool_calls.as_ref().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn assistant_constructor_accepts_none_for_all_fields() {
+        let m = Message::assistant(None, None, None);
+        assert!(m.content.is_none());
+        assert!(m.reasoning_content.is_none());
+        assert!(m.tool_calls.is_none());
+    }
+
+    #[test]
+    fn tool_constructor_sets_call_id_and_error_flag() {
+        let m = Message::tool("call-1".into(), "out", true);
+        assert_eq!(m.role, Role::Tool);
+        assert_eq!(m.tool_call_id.as_deref(), Some("call-1"));
+        assert!(m.is_error);
+    }
+
+    // ---- Message serialization ----
+
+    #[test]
+    fn message_skips_none_and_default_fields_on_serialize() {
+        let m = Message::system("hi");
+        let v = serde_json::to_value(&m).unwrap();
+        assert!(v.get("tool_calls").is_none());
+        assert!(v.get("tool_call_id").is_none());
+        assert!(v.get("reasoning_content").is_none());
+        assert!(v.get("is_error").is_none());
+    }
+
+    #[test]
+    fn message_serializes_is_error_only_when_true() {
+        let mut m = Message::tool("c".into(), "out", true);
+        let v = serde_json::to_value(&m).unwrap();
+        assert_eq!(v["is_error"], json!(true));
+        m.is_error = false;
+        let v2 = serde_json::to_value(&m).unwrap();
+        assert!(v2.get("is_error").is_none());
+    }
+
+    #[test]
+    fn message_deserialize_defaults_missing_is_error_to_false() {
+        let m: Message = serde_json::from_value(json!({
+            "role": "tool",
+            "content": "x",
+            "tool_call_id": "c"
+        }))
+        .unwrap();
+        assert!(!m.is_error);
+    }
+
+    // ---- Role ----
+
+    #[test]
+    fn role_serializes_as_lowercase() {
+        assert_eq!(
+            serde_json::to_value(Role::Assistant).unwrap(),
+            json!("assistant")
+        );
+        assert_eq!(serde_json::to_value(Role::Tool).unwrap(), json!("tool"));
+    }
+
+    #[test]
+    fn role_deserializes_from_lowercase() {
+        let r: Role = serde_json::from_value(json!("system")).unwrap();
+        assert_eq!(r, Role::System);
+    }
+
+    // ---- ToolCall ----
+
+    #[test]
+    fn tool_call_new_pins_type_to_function() {
+        let tc = ToolCall::new(
+            "id-1".into(),
+            FunctionCall {
+                name: "f".into(),
+                arguments: "{}".into(),
+            },
+        );
+        let v = serde_json::to_value(&tc).unwrap();
+        assert_eq!(v["type"], json!("function"));
+        assert_eq!(v["id"], json!("id-1"));
+    }
+
+    #[test]
+    fn tool_call_deserialize_rejects_non_function_type() {
+        let r: Result<ToolCall, _> = serde_json::from_value(json!({
+            "id": "x",
+            "type": "code_interpreter",
+            "function": {"name": "f", "arguments": "{}"}
+        }));
+        assert!(r.is_err());
+    }
+
+    #[test]
+    fn tool_call_deserialize_accepts_function_type() {
+        let tc: ToolCall = serde_json::from_value(json!({
+            "id": "x",
+            "type": "function",
+            "function": {"name": "f", "arguments": "{}"}
+        }))
+        .unwrap();
+        assert_eq!(tc.function.name, "f");
+    }
+
+    // ---- FunctionCall.arguments deserialize ----
+
+    #[test]
+    fn function_call_arguments_accepts_string() {
+        let fc: FunctionCall =
+            serde_json::from_value(json!({"name": "f", "arguments": "{\"a\":1}"})).unwrap();
+        assert_eq!(fc.arguments, "{\"a\":1}");
+    }
+
+    #[test]
+    fn function_call_arguments_accepts_object_and_stringifies() {
+        let fc: FunctionCall =
+            serde_json::from_value(json!({"name": "f", "arguments": {"a": 1}})).unwrap();
+        let v: serde_json::Value = serde_json::from_str(&fc.arguments).unwrap();
+        assert_eq!(v["a"], json!(1));
+    }
+
+    #[test]
+    fn function_call_arguments_accepts_null_as_stringified_null() {
+        let fc: FunctionCall =
+            serde_json::from_value(json!({"name": "f", "arguments": null})).unwrap();
+        assert_eq!(fc.arguments, "null");
+    }
+
+    // ---- ToolOutcome ----
+
+    #[test]
+    fn tool_outcome_metadata_field_skipped_when_none() {
+        let o = ToolOutcome {
+            content: "x".into(),
+            is_error: false,
+            metadata: None,
+        };
+        let v = serde_json::to_value(&o).unwrap();
+        assert!(v.get("metadata").is_none());
+    }
+
+    #[test]
+    fn tool_outcome_metadata_present_when_some() {
+        let o = ToolOutcome {
+            content: "x".into(),
+            is_error: false,
+            metadata: Some(json!({"k": 1})),
+        };
+        let v = serde_json::to_value(&o).unwrap();
+        assert_eq!(v["metadata"], json!({"k": 1}));
+    }
+
+    #[test]
+    fn tool_outcome_deserializes_with_default_metadata() {
+        let o: ToolOutcome =
+            serde_json::from_value(json!({"content": "x", "is_error": false})).unwrap();
+        assert!(o.metadata.is_none());
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ToolOutcome {
     pub content: String,

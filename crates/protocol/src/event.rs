@@ -410,3 +410,199 @@ pub enum UiCommand {
     /// Cancel the current turn.
     Cancel,
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    // ---- AuxiliaryTask / ToolExecutionMode defaults + rename ----
+
+    #[test]
+    fn auxiliary_task_default_is_btw() {
+        assert_eq!(AuxiliaryTask::default(), AuxiliaryTask::Btw);
+    }
+
+    #[test]
+    fn auxiliary_task_serializes_as_snake_case() {
+        assert_eq!(
+            serde_json::to_value(AuxiliaryTask::Title).unwrap(),
+            json!("title")
+        );
+        assert_eq!(
+            serde_json::to_value(AuxiliaryTask::Compaction).unwrap(),
+            json!("compaction")
+        );
+    }
+
+    #[test]
+    fn tool_execution_mode_default_is_concurrent() {
+        assert_eq!(ToolExecutionMode::default(), ToolExecutionMode::Concurrent);
+    }
+
+    #[test]
+    fn tool_execution_mode_serializes_as_snake_case() {
+        assert_eq!(
+            serde_json::to_value(ToolExecutionMode::Sequential).unwrap(),
+            json!("sequential")
+        );
+    }
+
+    // ---- ToolHookFlags::any ----
+
+    #[test]
+    fn tool_hook_flags_any_false_when_all_unset() {
+        assert!(!ToolHookFlags::default().any());
+    }
+
+    #[test]
+    fn tool_hook_flags_any_true_when_confirm_text_set() {
+        let f = ToolHookFlags {
+            confirm_text: true,
+            ..Default::default()
+        };
+        assert!(f.any());
+    }
+
+    #[test]
+    fn tool_hook_flags_any_true_when_approval_patterns_set() {
+        let f = ToolHookFlags {
+            approval_patterns: true,
+            ..Default::default()
+        };
+        assert!(f.any());
+    }
+
+    #[test]
+    fn tool_hook_flags_any_true_when_preflight_set() {
+        let f = ToolHookFlags {
+            preflight: true,
+            ..Default::default()
+        };
+        assert!(f.any());
+    }
+
+    // ---- Decision ----
+
+    #[test]
+    fn decision_default_is_allow() {
+        assert_eq!(Decision::default(), Decision::Allow);
+    }
+
+    #[test]
+    fn decision_serializes_unit_variants_as_snake_case_strings() {
+        assert_eq!(
+            serde_json::to_value(Decision::Allow).unwrap(),
+            json!("allow")
+        );
+        assert_eq!(serde_json::to_value(Decision::Ask).unwrap(), json!("ask"));
+        assert_eq!(serde_json::to_value(Decision::Deny).unwrap(), json!("deny"));
+    }
+
+    #[test]
+    fn decision_error_variant_serializes_with_rename_tag() {
+        let v = serde_json::to_value(Decision::Error("boom".into())).unwrap();
+        assert_eq!(v, json!({"error": "boom"}));
+    }
+
+    #[test]
+    fn decision_error_roundtrips_through_json() {
+        let d = Decision::Error("x".into());
+        let v = serde_json::to_value(&d).unwrap();
+        let back: Decision = serde_json::from_value(v).unwrap();
+        assert_eq!(back, Decision::Error("x".into()));
+    }
+
+    // ---- ToolDef defaults ----
+
+    #[test]
+    fn tool_def_deserialize_defaults_optional_fields() {
+        let t: ToolDef = serde_json::from_value(json!({
+            "name": "n",
+            "description": "d",
+            "parameters": {}
+        }))
+        .unwrap();
+        assert!(t.modes.is_none());
+        assert_eq!(t.execution_mode, ToolExecutionMode::Concurrent);
+        assert!(!t.override_core);
+        assert!(!t.hooks.any());
+    }
+
+    #[test]
+    fn tool_def_skip_serializing_none_modes() {
+        let t = ToolDef {
+            name: "n".into(),
+            description: "d".into(),
+            parameters: json!({}),
+            modes: None,
+            execution_mode: ToolExecutionMode::Concurrent,
+            override_core: false,
+            hooks: ToolHookFlags::default(),
+        };
+        let v = serde_json::to_value(&t).unwrap();
+        assert!(v.get("modes").is_none());
+    }
+
+    // ---- ToolHooks ----
+
+    #[test]
+    fn tool_hooks_default_decision_is_allow() {
+        let h = ToolHooks::default();
+        assert_eq!(h.decision, Decision::Allow);
+        assert!(h.confirm_message.is_none());
+        assert!(h.approval_patterns.is_empty());
+        assert!(h.summary.is_none());
+    }
+
+    // ---- EngineEvent roundtrip sanity ----
+
+    #[test]
+    fn engine_event_token_usage_background_defaults_to_false_on_deserialize() {
+        let v = json!({
+            "TokenUsage": {
+                "usage": {},
+                "tokens_per_sec": null,
+                "cost_usd": null,
+            }
+        });
+        let e: EngineEvent = serde_json::from_value(v).unwrap();
+        match e {
+            EngineEvent::TokenUsage { background, .. } => assert!(!background),
+            _ => panic!("expected TokenUsage"),
+        }
+    }
+
+    #[test]
+    fn engine_event_ready_serializes_as_string_variant() {
+        let v = serde_json::to_value(EngineEvent::Ready).unwrap();
+        assert_eq!(v, json!("Ready"));
+    }
+
+    // ---- StartTurnPayload optional fields ----
+
+    #[test]
+    fn start_turn_payload_omits_none_overrides_on_serialize() {
+        let p = StartTurnPayload {
+            turn_id: 1,
+            content: Content::text("hi"),
+            mode: AgentMode::Normal,
+            model: "m".into(),
+            reasoning_effort: ReasoningEffort::Off,
+            history: vec![],
+            api_base: None,
+            api_key: None,
+            session_id: "s".into(),
+            session_dir: std::path::PathBuf::from("/tmp"),
+            model_config_overrides: None,
+            permission_overrides: None,
+            system_prompt: None,
+            tools: vec![],
+        };
+        let v = serde_json::to_value(&p).unwrap();
+        assert!(v.get("model_config_overrides").is_none());
+        assert!(v.get("permission_overrides").is_none());
+        assert!(v.get("system_prompt").is_none());
+        assert!(v.get("tools").is_none());
+    }
+}
