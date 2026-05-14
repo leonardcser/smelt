@@ -43,12 +43,12 @@ struct LiveTurn {
 
 impl LiveTurn {
     /// Elapsed time the user sees: frozen at the moment of pause while
-    /// `pause_started` is set, otherwise just `since.elapsed()` (which
-    /// is paused-aware because resume shifts `since` forward).
-    fn effective_elapsed(&self) -> Duration {
+    /// `pause_started` is set, otherwise `now - since` (paused-aware
+    /// because resume shifts `since` forward by the pause duration).
+    fn effective_elapsed(&self, now: Instant) -> Duration {
         match self.pause_started {
             Some(t) => t.duration_since(self.since),
-            None => self.since.elapsed(),
+            None => now.duration_since(self.since),
         }
     }
 }
@@ -74,9 +74,9 @@ impl WorkingState {
 
     /// Start a new live turn, or update the phase of the currently-
     /// running one (keeps `since` and accumulated `tps_samples`).
-    pub fn begin(&mut self, phase: TurnPhase) {
+    pub fn begin(&mut self, phase: TurnPhase, now: Instant) {
         let retry_deadline = match phase {
-            TurnPhase::Retrying { delay, .. } => Some(Instant::now() + delay),
+            TurnPhase::Retrying { delay, .. } => Some(now + delay),
             _ => None,
         };
         match self.live.as_mut() {
@@ -87,7 +87,7 @@ impl WorkingState {
             None => {
                 self.live = Some(LiveTurn {
                     phase,
-                    since: Instant::now(),
+                    since: now,
                     retry_deadline,
                     tps_samples: Vec::new(),
                     last_spinner_frame: usize::MAX,
@@ -99,9 +99,9 @@ impl WorkingState {
     }
 
     /// Archive the live turn's metadata as `last` and clear live.
-    pub fn finish(&mut self, outcome: TurnOutcome) {
+    pub fn finish(&mut self, outcome: TurnOutcome, now: Instant) {
         let (elapsed, avg_tps) = match self.live.take() {
-            Some(live) => (live.effective_elapsed(), avg(&live.tps_samples)),
+            Some(live) => (live.effective_elapsed(now), avg(&live.tps_samples)),
             None => (Duration::ZERO, None),
         };
         self.last = Some(LastTurn {
@@ -140,9 +140,9 @@ impl WorkingState {
     /// Elapsed time for the display — `since` for a live turn,
     /// archived `elapsed` otherwise. Live elapsed excludes time
     /// during which a blocking dialog paused the turn.
-    pub fn elapsed(&self) -> Option<Duration> {
+    pub fn elapsed(&self, now: Instant) -> Option<Duration> {
         if let Some(live) = self.live.as_ref() {
-            Some(live.effective_elapsed())
+            Some(live.effective_elapsed(now))
         } else {
             self.last.as_ref().map(|l| l.elapsed)
         }
@@ -150,16 +150,16 @@ impl WorkingState {
 
     /// Toggle the paused state on the live turn (if any). While paused,
     /// `effective_elapsed` and the spinner freeze. On resume, `since`
-    /// is shifted forward by the pause duration so subsequent reads of
-    /// `since.elapsed()` are still correct. Idempotent.
-    pub fn set_paused(&mut self, paused: bool) {
+    /// is shifted forward by the pause duration so subsequent elapsed
+    /// reads are still correct. Idempotent.
+    pub fn set_paused(&mut self, paused: bool, now: Instant) {
         let Some(live) = self.live.as_mut() else {
             return;
         };
         match (paused, live.pause_started) {
-            (true, None) => live.pause_started = Some(Instant::now()),
+            (true, None) => live.pause_started = Some(now),
             (false, Some(t)) => {
-                live.since += t.elapsed();
+                live.since += now.duration_since(t);
                 live.pause_started = None;
             }
             _ => {}
@@ -176,10 +176,10 @@ impl WorkingState {
         }
     }
 
-    pub fn turn_meta(&self) -> Option<TurnMeta> {
+    pub fn turn_meta(&self, now: Instant) -> Option<TurnMeta> {
         if let Some(live) = self.live.as_ref() {
             return Some(TurnMeta {
-                elapsed_ms: live.effective_elapsed().as_millis() as u64,
+                elapsed_ms: live.effective_elapsed(now).as_millis() as u64,
                 avg_tps: avg(&live.tps_samples),
                 interrupted: false,
                 tool_elapsed: std::collections::HashMap::new(),
@@ -210,20 +210,20 @@ impl WorkingState {
     /// nothing is animating *or* the turn is paused by a blocking
     /// dialog. The status bar uses `None` to drop the spinner span
     /// entirely while paused — the label still renders.
-    pub fn spinner_char(&self) -> Option<&'static str> {
+    pub fn spinner_char(&self, now: Instant) -> Option<&'static str> {
         let live = self.live.as_ref()?;
         if live.pause_started.is_some() {
             return None;
         }
-        Some(SPINNER_FRAMES[crate::content::spinner_frame_index(live.effective_elapsed())])
+        Some(SPINNER_FRAMES[crate::content::spinner_frame_index(live.effective_elapsed(now))])
     }
 
     /// Headless-safe throbber data.  The caller (statusline composer in
     /// tui) applies theme colours and builds the Lua table.
-    pub fn throbber_data(&self, show_tps: bool) -> Vec<ThrobberItem> {
+    pub fn throbber_data(&self, show_tps: bool, now: Instant) -> Vec<ThrobberItem> {
         let mut out = Vec::new();
         if let Some(live) = self.live.as_ref() {
-            let elapsed = live.effective_elapsed();
+            let elapsed = live.effective_elapsed(now);
             let idx = crate::content::spinner_frame_index(elapsed);
             match live.phase {
                 TurnPhase::Compacting => {
@@ -279,7 +279,7 @@ impl WorkingState {
                     if let TurnPhase::Retrying { delay, attempt } = live.phase {
                         let remaining = live
                             .retry_deadline
-                            .map(|t| t.saturating_duration_since(Instant::now()))
+                            .map(|t| t.saturating_duration_since(now))
                             .unwrap_or(delay)
                             .as_secs();
                         out.push(ThrobberItem {
@@ -360,6 +360,12 @@ fn avg(samples: &[f64]) -> Option<f64> {
 mod tests {
     use super::*;
 
+    /// Fixed virtual clock baseline: callers offset with `t0 + Duration`
+    /// to express advancing time without touching the real `Instant::now`.
+    fn t0() -> Instant {
+        Instant::now()
+    }
+
     #[test]
     fn avg_returns_none_for_empty_samples() {
         assert_eq!(avg(&[]), None);
@@ -373,13 +379,14 @@ mod tests {
 
     #[test]
     fn new_starts_idle_and_not_animating() {
+        let now = t0();
         let s = WorkingState::new();
         assert!(!s.is_animating());
         assert!(!s.is_compacting());
-        assert_eq!(s.elapsed(), None);
-        assert!(s.turn_meta().is_none());
-        assert!(s.spinner_char().is_none());
-        assert!(s.throbber_data(false).is_empty());
+        assert_eq!(s.elapsed(now), None);
+        assert!(s.turn_meta(now).is_none());
+        assert!(s.spinner_char(now).is_none());
+        assert!(s.throbber_data(false, now).is_empty());
     }
 
     #[test]
@@ -390,137 +397,178 @@ mod tests {
 
     #[test]
     fn begin_working_marks_state_animating() {
+        let now = t0();
         let mut s = WorkingState::new();
-        s.begin(TurnPhase::Working);
+        s.begin(TurnPhase::Working, now);
         assert!(s.is_animating());
         assert!(!s.is_compacting());
-        assert!(s.elapsed().is_some());
-        assert!(s.spinner_char().is_some());
+        assert!(s.elapsed(now).is_some());
+        assert!(s.spinner_char(now).is_some());
     }
 
     #[test]
     fn begin_compacting_reports_compacting_flag() {
+        let now = t0();
         let mut s = WorkingState::new();
-        s.begin(TurnPhase::Compacting);
+        s.begin(TurnPhase::Compacting, now);
         assert!(s.is_animating());
         assert!(s.is_compacting());
     }
 
     #[test]
     fn begin_when_already_live_swaps_phase_without_resetting_since() {
+        let now = t0();
         let mut s = WorkingState::new();
-        s.begin(TurnPhase::Working);
+        s.begin(TurnPhase::Working, now);
         s.record_tokens_per_sec(50.0);
-        s.begin(TurnPhase::Compacting);
-        // Tokens recorded under the first phase survive the phase swap.
+        s.begin(TurnPhase::Compacting, now + Duration::from_millis(10));
         assert!(s.is_compacting());
-        let meta = s.turn_meta().unwrap();
+        let meta = s.turn_meta(now + Duration::from_millis(10)).unwrap();
         assert_eq!(meta.avg_tps, Some(50.0));
     }
 
     #[test]
     fn begin_clears_archived_last_turn() {
+        let now = t0();
         let mut s = WorkingState::new();
-        s.begin(TurnPhase::Working);
-        s.finish(TurnOutcome::Done);
-        assert!(s.turn_meta().is_some());
-        s.begin(TurnPhase::Working);
-        // After begin, last is cleared; turn_meta now reflects live turn.
-        let meta = s.turn_meta().unwrap();
+        s.begin(TurnPhase::Working, now);
+        s.finish(TurnOutcome::Done, now + Duration::from_millis(5));
+        assert!(s.turn_meta(now).is_some());
+        s.begin(TurnPhase::Working, now + Duration::from_millis(10));
+        let meta = s.turn_meta(now + Duration::from_millis(10)).unwrap();
         assert!(!meta.interrupted);
         assert!(meta.avg_tps.is_none());
     }
 
     #[test]
     fn finish_archives_outcome_and_clears_live() {
+        let now = t0();
         let mut s = WorkingState::new();
-        s.begin(TurnPhase::Working);
+        s.begin(TurnPhase::Working, now);
         s.record_tokens_per_sec(10.0);
         s.record_tokens_per_sec(30.0);
-        s.finish(TurnOutcome::Done);
+        s.finish(TurnOutcome::Done, now + Duration::from_millis(5));
         assert!(!s.is_animating());
-        let meta = s.turn_meta().unwrap();
+        let meta = s.turn_meta(now).unwrap();
         assert!(!meta.interrupted);
         assert_eq!(meta.avg_tps, Some(20.0));
     }
 
     #[test]
     fn finish_interrupted_sets_interrupted_flag() {
+        let now = t0();
         let mut s = WorkingState::new();
-        s.begin(TurnPhase::Working);
-        s.finish(TurnOutcome::Interrupted);
-        let meta = s.turn_meta().unwrap();
+        s.begin(TurnPhase::Working, now);
+        s.finish(TurnOutcome::Interrupted, now);
+        let meta = s.turn_meta(now).unwrap();
         assert!(meta.interrupted);
     }
 
     #[test]
     fn finish_without_live_archives_zero_elapsed() {
+        let now = t0();
         let mut s = WorkingState::new();
-        s.finish(TurnOutcome::Done);
-        let meta = s.turn_meta().unwrap();
+        s.finish(TurnOutcome::Done, now);
+        let meta = s.turn_meta(now).unwrap();
         assert_eq!(meta.elapsed_ms, 0);
         assert!(meta.avg_tps.is_none());
     }
 
     #[test]
-    fn clear_drops_both_live_and_last() {
+    fn elapsed_reflects_advanced_now_for_live_turn() {
+        let now = t0();
         let mut s = WorkingState::new();
-        s.begin(TurnPhase::Working);
-        s.finish(TurnOutcome::Done);
+        s.begin(TurnPhase::Working, now);
+        assert_eq!(s.elapsed(now), Some(Duration::ZERO));
+        assert_eq!(
+            s.elapsed(now + Duration::from_millis(750)),
+            Some(Duration::from_millis(750))
+        );
+    }
+
+    #[test]
+    fn clear_drops_both_live_and_last() {
+        let now = t0();
+        let mut s = WorkingState::new();
+        s.begin(TurnPhase::Working, now);
+        s.finish(TurnOutcome::Done, now);
         s.clear();
         assert!(!s.is_animating());
-        assert!(s.turn_meta().is_none());
-        assert!(s.elapsed().is_none());
+        assert!(s.turn_meta(now).is_none());
+        assert!(s.elapsed(now).is_none());
     }
 
     #[test]
     fn record_tokens_per_sec_only_applies_while_live() {
+        let now = t0();
         let mut s = WorkingState::new();
         s.record_tokens_per_sec(99.0); // dropped — no live turn
-        s.begin(TurnPhase::Working);
+        s.begin(TurnPhase::Working, now);
         s.record_tokens_per_sec(1.0);
         s.record_tokens_per_sec(3.0);
-        let meta = s.turn_meta().unwrap();
+        let meta = s.turn_meta(now).unwrap();
         assert_eq!(meta.avg_tps, Some(2.0));
     }
 
     #[test]
     fn set_paused_freezes_spinner_and_clears_glyph() {
+        let now = t0();
         let mut s = WorkingState::new();
-        s.begin(TurnPhase::Working);
-        assert!(s.spinner_char().is_some());
-        s.set_paused(true);
-        assert!(s.spinner_char().is_none());
-        s.set_paused(false);
-        assert!(s.spinner_char().is_some());
+        s.begin(TurnPhase::Working, now);
+        assert!(s.spinner_char(now).is_some());
+        s.set_paused(true, now);
+        assert!(s.spinner_char(now).is_none());
+        s.set_paused(false, now);
+        assert!(s.spinner_char(now).is_some());
     }
 
     #[test]
     fn set_paused_is_idempotent() {
+        let now = t0();
         let mut s = WorkingState::new();
-        s.begin(TurnPhase::Working);
-        s.set_paused(true);
-        s.set_paused(true); // no-op
-        assert!(s.spinner_char().is_none());
-        s.set_paused(false);
-        s.set_paused(false); // no-op
-        assert!(s.spinner_char().is_some());
+        s.begin(TurnPhase::Working, now);
+        s.set_paused(true, now);
+        s.set_paused(true, now + Duration::from_millis(5)); // no-op
+        assert!(s.spinner_char(now).is_none());
+        s.set_paused(false, now + Duration::from_millis(10));
+        s.set_paused(false, now + Duration::from_millis(20)); // no-op
+        assert!(s.spinner_char(now + Duration::from_millis(30)).is_some());
     }
 
     #[test]
     fn set_paused_without_live_turn_is_noop() {
+        let now = t0();
         let mut s = WorkingState::new();
-        s.set_paused(true);
-        s.set_paused(false);
+        s.set_paused(true, now);
+        s.set_paused(false, now);
         assert!(!s.is_animating());
     }
 
     #[test]
+    fn pause_resume_shifts_since_so_elapsed_excludes_paused_window() {
+        let now = t0();
+        let mut s = WorkingState::new();
+        s.begin(TurnPhase::Working, now);
+        s.set_paused(true, now + Duration::from_millis(100));
+        // Frozen elapsed while paused.
+        assert_eq!(
+            s.elapsed(now + Duration::from_millis(500)),
+            Some(Duration::from_millis(100))
+        );
+        s.set_paused(false, now + Duration::from_millis(500));
+        // After resume, elapsed = 100ms pre-pause + (now - resume).
+        assert_eq!(
+            s.elapsed(now + Duration::from_millis(700)),
+            Some(Duration::from_millis(300))
+        );
+    }
+
+    #[test]
     fn last_spinner_frame_round_trips_while_live() {
+        let now = t0();
         let mut s = WorkingState::new();
         assert!(s.last_spinner_frame().is_none());
-        s.begin(TurnPhase::Working);
-        // Fresh live turn defaults to usize::MAX.
+        s.begin(TurnPhase::Working, now);
         assert_eq!(s.last_spinner_frame(), Some(usize::MAX));
         s.set_last_spinner_frame(7);
         assert_eq!(s.last_spinner_frame(), Some(7));
@@ -535,6 +583,7 @@ mod tests {
 
     #[test]
     fn restore_from_turn_meta_archives_done_outcome() {
+        let now = t0();
         let mut s = WorkingState::new();
         let meta = TurnMeta {
             elapsed_ms: 1500,
@@ -544,7 +593,7 @@ mod tests {
         };
         s.restore_from_turn_meta(&meta);
         assert!(!s.is_animating());
-        let round = s.turn_meta().unwrap();
+        let round = s.turn_meta(now).unwrap();
         assert_eq!(round.elapsed_ms, 1500);
         assert_eq!(round.avg_tps, Some(42.0));
         assert!(!round.interrupted);
@@ -552,6 +601,7 @@ mod tests {
 
     #[test]
     fn restore_from_turn_meta_archives_interrupted_outcome() {
+        let now = t0();
         let mut s = WorkingState::new();
         let meta = TurnMeta {
             elapsed_ms: 200,
@@ -560,14 +610,15 @@ mod tests {
             tool_elapsed: std::collections::HashMap::new(),
         };
         s.restore_from_turn_meta(&meta);
-        let round = s.turn_meta().unwrap();
+        let round = s.turn_meta(now).unwrap();
         assert!(round.interrupted);
     }
 
     #[test]
     fn restore_from_turn_meta_discards_existing_live_turn() {
+        let now = t0();
         let mut s = WorkingState::new();
-        s.begin(TurnPhase::Working);
+        s.begin(TurnPhase::Working, now);
         let meta = TurnMeta {
             elapsed_ms: 0,
             avg_tps: None,
@@ -580,9 +631,10 @@ mod tests {
 
     #[test]
     fn throbber_data_working_emits_label_and_clock() {
+        let now = t0();
         let mut s = WorkingState::new();
-        s.begin(TurnPhase::Working);
-        let items = s.throbber_data(false);
+        s.begin(TurnPhase::Working, now);
+        let items = s.throbber_data(false, now);
         assert!(items.len() >= 2);
         assert!(items[0].text.contains("working"));
         assert!(items[0].bold);
@@ -592,46 +644,52 @@ mod tests {
 
     #[test]
     fn throbber_data_compacting_emits_compacting_label() {
+        let now = t0();
         let mut s = WorkingState::new();
-        s.begin(TurnPhase::Compacting);
-        let items = s.throbber_data(false);
+        s.begin(TurnPhase::Compacting, now);
+        let items = s.throbber_data(false, now);
         assert!(items.iter().any(|i| i.text.contains("compacting")));
     }
 
     #[test]
     fn throbber_data_includes_tps_when_requested_and_available() {
+        let now = t0();
         let mut s = WorkingState::new();
-        s.begin(TurnPhase::Working);
+        s.begin(TurnPhase::Working, now);
         s.record_tokens_per_sec(12.5);
-        let with_tps = s.throbber_data(true);
+        let with_tps = s.throbber_data(true, now);
         let with_tps_text: String = with_tps.iter().map(|i| i.text.as_str()).collect();
         assert!(with_tps_text.contains("12.5 tok/s"));
-        let without_tps = s.throbber_data(false);
+        let without_tps = s.throbber_data(false, now);
         let without_tps_text: String = without_tps.iter().map(|i| i.text.as_str()).collect();
         assert!(!without_tps_text.contains("tok/s"));
     }
 
     #[test]
     fn throbber_data_omits_tps_when_no_samples_recorded() {
+        let now = t0();
         let mut s = WorkingState::new();
-        s.begin(TurnPhase::Working);
-        let items = s.throbber_data(true);
+        s.begin(TurnPhase::Working, now);
+        let items = s.throbber_data(true, now);
         let text: String = items.iter().map(|i| i.text.as_str()).collect();
         assert!(!text.contains("tok/s"));
     }
 
     #[test]
     fn throbber_data_retrying_includes_attempt_and_countdown() {
+        let now = t0();
         let mut s = WorkingState::new();
-        s.begin(TurnPhase::Retrying {
-            delay: Duration::from_secs(5),
-            attempt: 2,
-        });
-        let items = s.throbber_data(false);
+        s.begin(
+            TurnPhase::Retrying {
+                delay: Duration::from_secs(5),
+                attempt: 2,
+            },
+            now,
+        );
+        let items = s.throbber_data(false, now);
         let text: String = items.iter().map(|i| i.text.as_str()).collect();
         assert!(text.contains("retrying"));
         assert!(text.contains("#2"));
-        // Retrying paints the "working" label as muted.
         let working_label = items
             .iter()
             .find(|i| i.text.contains("working"))
@@ -640,12 +698,38 @@ mod tests {
     }
 
     #[test]
-    fn throbber_data_done_outcome_emits_done_text_and_optional_tps() {
+    fn throbber_data_retrying_countdown_drops_as_now_advances() {
+        let now = t0();
         let mut s = WorkingState::new();
-        s.begin(TurnPhase::Working);
+        s.begin(
+            TurnPhase::Retrying {
+                delay: Duration::from_secs(5),
+                attempt: 1,
+            },
+            now,
+        );
+        let early: String = s
+            .throbber_data(false, now)
+            .iter()
+            .map(|i| i.text.as_str())
+            .collect();
+        assert!(early.contains("retrying in 5s"));
+        let later: String = s
+            .throbber_data(false, now + Duration::from_secs(3))
+            .iter()
+            .map(|i| i.text.as_str())
+            .collect();
+        assert!(later.contains("retrying in 2s"));
+    }
+
+    #[test]
+    fn throbber_data_done_outcome_emits_done_text_and_optional_tps() {
+        let now = t0();
+        let mut s = WorkingState::new();
+        s.begin(TurnPhase::Working, now);
         s.record_tokens_per_sec(10.0);
-        s.finish(TurnOutcome::Done);
-        let items = s.throbber_data(true);
+        s.finish(TurnOutcome::Done, now);
+        let items = s.throbber_data(true, now);
         let text: String = items.iter().map(|i| i.text.as_str()).collect();
         assert!(text.contains("done"));
         assert!(text.contains("10.0 tok/s"));
@@ -653,10 +737,11 @@ mod tests {
 
     #[test]
     fn throbber_data_done_without_tps_omits_tok_per_sec() {
+        let now = t0();
         let mut s = WorkingState::new();
-        s.begin(TurnPhase::Working);
-        s.finish(TurnOutcome::Done);
-        let items = s.throbber_data(true);
+        s.begin(TurnPhase::Working, now);
+        s.finish(TurnOutcome::Done, now);
+        let items = s.throbber_data(true, now);
         let text: String = items.iter().map(|i| i.text.as_str()).collect();
         assert!(text.contains("done"));
         assert!(!text.contains("tok/s"));
@@ -664,10 +749,11 @@ mod tests {
 
     #[test]
     fn throbber_data_interrupted_outcome_emits_interrupted_text() {
+        let now = t0();
         let mut s = WorkingState::new();
-        s.begin(TurnPhase::Working);
-        s.finish(TurnOutcome::Interrupted);
-        let items = s.throbber_data(true);
+        s.begin(TurnPhase::Working, now);
+        s.finish(TurnOutcome::Interrupted, now);
+        let items = s.throbber_data(true, now);
         let text: String = items.iter().map(|i| i.text.as_str()).collect();
         assert!(text.contains("interrupted"));
         assert!(!text.contains("tok/s"));

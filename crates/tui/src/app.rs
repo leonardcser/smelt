@@ -475,7 +475,7 @@ impl TuiApp {
         self.core.cells.publish_if_changed("now", now_secs);
         let frame = self
             .working
-            .elapsed()
+            .elapsed(self.core.clock.instant_now())
             .filter(|_| self.working.is_animating())
             .map(|e| smelt_core::content::spinner_frame_index(e) as u8)
             .unwrap_or(0);

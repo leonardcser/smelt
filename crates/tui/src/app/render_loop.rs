@@ -65,7 +65,10 @@ impl TuiApp {
             self.sync_prompt_below_layer(term_w);
         }
         // Freeze timer/spinner while a blocking dialog is up.
-        self.working.set_paused(self.focused_overlay_blocks_agent());
+        self.working.set_paused(
+            self.focused_overlay_blocks_agent(),
+            self.core.clock.instant_now(),
+        );
         {
             let _p = smelt_perf::perf::begin("compositor:status_bar");
             self.refresh_status_bar();

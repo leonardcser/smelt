@@ -30,7 +30,8 @@ impl TuiApp {
                         self.working.record_tokens_per_sec(tps);
                     }
                     {
-                        self.working.begin(TurnPhase::Working);
+                        self.working
+                            .begin(TurnPhase::Working, self.core.clock.instant_now());
                     };
                 }
                 let cost = cost_usd.unwrap_or(0.0);
@@ -209,10 +210,14 @@ impl TuiApp {
                 request_id,
             })),
             EngineEvent::Retrying { delay_ms, attempt } => {
-                self.working.begin(TurnPhase::Retrying {
-                    delay: Duration::from_millis(delay_ms),
-                    attempt,
-                });
+                let now = self.core.clock.instant_now();
+                self.working.begin(
+                    TurnPhase::Retrying {
+                        delay: Duration::from_millis(delay_ms),
+                        attempt,
+                    },
+                    now,
+                );
                 SessionControl::Continue
             }
             EngineEvent::ProcessCompleted { id, exit_code } => {
@@ -222,7 +227,8 @@ impl TuiApp {
             EngineEvent::CompactionComplete { messages } => {
                 if self.pending_compact_epoch != self.compact_epoch {
                     {
-                        self.working.finish(TurnOutcome::Done);
+                        self.working
+                            .finish(TurnOutcome::Done, self.core.clock.instant_now());
                     };
                     return SessionControl::Continue;
                 }
@@ -273,7 +279,8 @@ impl TuiApp {
             }
             EngineEvent::TurnError { message } => {
                 {
-                    self.working.finish(TurnOutcome::Done);
+                    self.working
+                        .finish(TurnOutcome::Done, self.core.clock.instant_now());
                 };
                 self.core.cells.set_dyn(
                     "turn_error",
@@ -360,7 +367,8 @@ impl TuiApp {
         }
         EngineEvent::CompactionComplete { messages } => {
             if self.pending_compact_epoch != self.compact_epoch {
-                self.working.finish(TurnOutcome::Done);
+                self.working
+                        .finish(TurnOutcome::Done, self.core.clock.instant_now());
                 return;
             }
             self.apply_compaction(messages);
@@ -378,7 +386,8 @@ impl TuiApp {
             self.handle_process_completed(id, exit_code);
         }
         EngineEvent::TurnError { message } => {
-            self.working.finish(TurnOutcome::Done);
+            self.working
+                        .finish(TurnOutcome::Done, self.core.clock.instant_now());
             self.notify_error(message);
         }
         _ => {}

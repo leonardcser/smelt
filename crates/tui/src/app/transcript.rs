@@ -289,9 +289,10 @@ impl TuiApp {
     /// Advance spinner animation. Returns `true` if the frame changed.
     pub(crate) fn update_spinner(&mut self) -> bool {
         let mut changed = false;
-        if let (Some(elapsed), Some(prev_frame)) =
-            (self.working.elapsed(), self.working.last_spinner_frame())
-        {
+        if let (Some(elapsed), Some(prev_frame)) = (
+            self.working.elapsed(self.core.clock.instant_now()),
+            self.working.last_spinner_frame(),
+        ) {
             let frame = smelt_core::content::spinner_frame_index(elapsed);
             if frame != prev_frame {
                 self.working.set_last_spinner_frame(frame);
