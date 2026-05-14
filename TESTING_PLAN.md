@@ -42,6 +42,19 @@ Every crate goes through the same seven substeps. Order matters: think, then imp
 - **Determinism.** No `sleep`, wall-clock, random, real I/O.
 - **Snapshot quality.** `.snap` captures behaviour, not noise. If it churns on every refactor → it's pinning implementation.
 
+### Writing new tests (used in step 6)
+
+**Spec first, then code.** Write what the code *should* do, then the test, then run it. Don't read the implementation to figure out the expected output and mirror it back. When a test fails, treat it as a real question: is my expectation wrong, or is the code wrong?
+
+### Bugs surfaced during testing
+
+Writing tests against expected behaviour will turn up surprises. Two kinds:
+
+- **Clearly a bug** (incorrect rendering, panic, broken invariant, two code paths giving inconsistent results for the same logical operation): **fix it in the same wave**. Commit the fix separately so it has its own message; update the test to match the fixed behaviour.
+- **Ambiguous** (might be intentional, might be subtle): **ask the user**. State the observed behaviour, the alternative spec, and which one you'd guess. Don't pick on their behalf.
+
+Either way, the finding is the value — pin it before moving on.
+
 ## Order of crates
 
 User-facing first, but foundations before the shell to avoid re-doing work:
@@ -70,13 +83,21 @@ Each box represents one substep. Fill known work items under "Known work" as the
 
 ---
 
-### `term` — ☐  ·  86.8% → ≥90%
+### `term` — ☑  ·  86.8% → **89.8%** (target ≥90%, very close)
 
-1 · ☐ Read   2 · ☐ Audit   3 · ☐ Plan   4 · ☐ Apply   5 · n/a   6 · ☐ Fill   7 · ☐ Verify
+1 · ☑ Read   2 · ☑ Audit   3 · ☑ Plan   4 · ☑ Apply   5 · n/a   6 · ☑ Fill   7 · ☑ Verify
 
-**Known work:**
-- Add proptest on `term::layout` (sum of widths == container).
-- Storybook quality check.
+**Outcome:** 69 → 95 tests. Audit found 2 weak asserts in `flush` (strengthened) and no rot elsewhere. Filled SGR encoding, wide-char behaviour, bounds, diff-over-style, `line` width/empty, `surface` accessors + `paint_rect`, `geometry` Rect ops.
+
+**Bugs found and fixed (spec-first surfaced):**
+- `Grid::put_str` didn't mark wide-char continuation cells, while `set`/`put_char` did. With a non-empty prev frame at the continuation slot, `flush_diff` would emit a spurious update that overwrites the wide char's right half on the terminal.
+- `GridSlice::put_str` advanced col by 1 per char regardless of width — wide chars overlapped the next char.
+
+Both fixed by routing through `set`, which already handles continuation marking. Regression test in `grid::tests::diff_does_not_emit_update_for_cell_under_a_wide_char`.
+
+**Wrong-expectation findings (test updated, not a bug):** crossterm encodes named `Color::Red` as `\x1b[38;5;9m` (palette index 9), not classic SGR 31. Same for `Blue` bg. AnsiValue and Rgb match the ANSI spec. Tests now pin structure (SGR appears, distinct colors → distinct output) rather than exact bytes for named colors.
+
+**Not done (deferred to property/fuzz phase):** proptest on `layout` sum-of-widths invariant.
 
 ---
 
@@ -181,6 +202,6 @@ Replicate the shape of `provider/extract.rs` (95% cov) on each provider — pull
 
 ## Now
 
-**Active crate:** `term` — substep 1 (Read).
+**Active crate:** `buffer` — substep 1 (Read).
 
-Next action: read `crates/term/src/*`, map ring vs core (mostly pure layout + grid; some surface/flush will touch crossterm), and produce the audit lists for substep 2.
+Next action: read `crates/buffer/src/*`, map ring vs core (mostly pure text/wrap/undo/kill_ring/attachment), produce the audit lists for substep 2. Known gaps from baseline: `undo.rs` has 0 tests.

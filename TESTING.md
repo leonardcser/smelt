@@ -46,6 +46,7 @@ Each such sentence is **one** test. The test name *is* the sentence in `snake_ca
 4. Decisions are pure; effects are dumb. Dispatchers return `Action`; appliers mutate state. Test the dispatcher; snapshot the state.
 5. Speed is correctness. Fast tests get run. Unit + behavioural should be <5s combined.
 6. **The litmus test:** if you deleted this test, could you describe exactly what behaviour we stopped guaranteeing? If no, delete it.
+7. **Spec first, then code.** Write what the code *should* do, then the test, then run it. Don't read the implementation to figure out the expected output and mirror it back — that produces tests that pass forever but guarantee nothing. When a test fails, treat it as a real question: is my expectation wrong, or is the code wrong? Both are legitimate findings.
 
 ## Tiers
 
