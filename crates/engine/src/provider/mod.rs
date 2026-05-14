@@ -396,6 +396,16 @@ impl Provider {
         *self.turn_state.lock().unwrap() = None;
     }
 
+    #[cfg(test)]
+    pub(crate) fn api_base(&self) -> &str {
+        &self.api_base
+    }
+
+    #[cfg(test)]
+    pub(crate) fn api_key(&self) -> &str {
+        &self.api_key
+    }
+
     pub(crate) fn with_model_config(mut self, config: crate::config::ModelConfig) -> Self {
         self.model_config = config;
         self
@@ -1047,7 +1057,6 @@ fn normalize_short(raw: &str) -> String {
 }
 
 #[cfg(test)]
-#[allow(clippy::field_reassign_with_default)]
 mod tests {
     use super::*;
     use protocol::{Content, FunctionCall, Role, ToolCall};
@@ -1676,8 +1685,10 @@ mod tests {
 
     #[test]
     fn provider_with_model_config_overrides_default() {
-        let mut cfg = crate::config::ModelConfig::default();
-        cfg.tool_calling = Some(false);
+        let cfg = crate::config::ModelConfig {
+            tool_calling: Some(false),
+            ..Default::default()
+        };
         let p = Provider::new("".into(), "".into(), "openai", http_client()).with_model_config(cfg);
         assert!(!p.tool_calling());
     }

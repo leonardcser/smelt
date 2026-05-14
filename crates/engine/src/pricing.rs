@@ -179,8 +179,11 @@ fn parse_catalog(json: &str) -> Option<HashMap<(String, String), ModelPricing>> 
     Some(map)
 }
 
-fn lookup(provider_type: &str, model: &str) -> Option<ModelPricing> {
-    let catalog = CATALOG.get()?;
+fn lookup_in(
+    catalog: &HashMap<(String, String), ModelPricing>,
+    provider_type: &str,
+    model: &str,
+) -> Option<ModelPricing> {
     let key = catalog_key(provider_type)?;
     catalog.get(&(key.to_string(), model.to_string())).copied()
 }
@@ -200,22 +203,32 @@ pub fn resolve(
     provider_type: &str,
     config: &crate::config::ModelConfig,
 ) -> ResolvedPricing {
+    resolve_in(CATALOG.get(), model, provider_type, config)
+}
+
+fn resolve_in(
+    catalog: Option<&HashMap<(String, String), ModelPricing>>,
+    model: &str,
+    provider_type: &str,
+    config: &crate::config::ModelConfig,
+) -> ResolvedPricing {
     let has_config_override = config.input_cost.is_some() || config.output_cost.is_some();
+    let catalog_hit = catalog.and_then(|c| lookup_in(c, provider_type, model));
 
     if has_config_override {
-        let catalog = lookup(provider_type, model).unwrap_or(ZERO);
+        let base = catalog_hit.unwrap_or(ZERO);
         return ResolvedPricing {
             pricing: ModelPricing {
-                input: config.input_cost.unwrap_or(catalog.input),
-                output: config.output_cost.unwrap_or(catalog.output),
-                cache_read: config.cache_read_cost.unwrap_or(catalog.cache_read),
-                cache_write: config.cache_write_cost.unwrap_or(catalog.cache_write),
+                input: config.input_cost.unwrap_or(base.input),
+                output: config.output_cost.unwrap_or(base.output),
+                cache_read: config.cache_read_cost.unwrap_or(base.cache_read),
+                cache_write: config.cache_write_cost.unwrap_or(base.cache_write),
             },
             source: PricingSource::Config,
         };
     }
 
-    if let Some(catalog) = lookup(provider_type, model) {
+    if let Some(catalog) = catalog_hit {
         return ResolvedPricing {
             pricing: catalog,
             source: PricingSource::Catalog,
@@ -229,7 +242,6 @@ pub fn resolve(
 }
 
 #[cfg(test)]
-#[allow(clippy::field_reassign_with_default)]
 mod tests {
     use super::*;
     use protocol::TokenUsage;
@@ -461,11 +473,13 @@ mod tests {
 
     #[test]
     fn resolve_uses_config_override_when_provided() {
-        let mut cfg = crate::config::ModelConfig::default();
-        cfg.input_cost = Some(5.0);
-        cfg.output_cost = Some(10.0);
-        cfg.cache_read_cost = Some(0.5);
-        cfg.cache_write_cost = Some(2.0);
+        let cfg = crate::config::ModelConfig {
+            input_cost: Some(5.0),
+            output_cost: Some(10.0),
+            cache_read_cost: Some(0.5),
+            cache_write_cost: Some(2.0),
+            ..Default::default()
+        };
         let r = resolve("m", "openai", &cfg);
         assert_eq!(r.source, PricingSource::Config);
         assert_eq!(r.pricing.input, 5.0);
@@ -476,12 +490,90 @@ mod tests {
 
     #[test]
     fn resolve_config_override_partial_falls_back_to_zero_for_missing_fields_when_no_catalog() {
-        let mut cfg = crate::config::ModelConfig::default();
-        cfg.input_cost = Some(5.0);
+        let cfg = crate::config::ModelConfig {
+            input_cost: Some(5.0),
+            ..Default::default()
+        };
         // Only input cost set; others should fall back to ZERO catalog defaults.
         let r = resolve("m", "openai-compatible", &cfg);
         assert_eq!(r.source, PricingSource::Config);
         assert_eq!(r.pricing.input, 5.0);
         assert_eq!(r.pricing.output, 0.0);
+    }
+
+    // ---- resolve_in (catalog injected) ----
+
+    fn catalog_with(
+        entries: &[(&str, &str, ModelPricing)],
+    ) -> HashMap<(String, String), ModelPricing> {
+        entries
+            .iter()
+            .map(|(provider, model, pricing)| ((provider.to_string(), model.to_string()), *pricing))
+            .collect()
+    }
+
+    #[test]
+    fn resolve_in_uses_catalog_pricing_when_no_config_override() {
+        let pricing = ModelPricing {
+            input: 30.0,
+            output: 60.0,
+            cache_read: 1.5,
+            cache_write: 3.0,
+        };
+        let catalog = catalog_with(&[("openai", "gpt-4", pricing)]);
+        let r = resolve_in(
+            Some(&catalog),
+            "gpt-4",
+            "openai",
+            &crate::config::ModelConfig::default(),
+        );
+        assert_eq!(r.source, PricingSource::Catalog);
+        assert_eq!(r.pricing.input, 30.0);
+        assert_eq!(r.pricing.output, 60.0);
+    }
+
+    #[test]
+    fn resolve_in_falls_back_to_none_when_model_not_in_catalog() {
+        let catalog = catalog_with(&[]);
+        let r = resolve_in(
+            Some(&catalog),
+            "unknown",
+            "openai",
+            &crate::config::ModelConfig::default(),
+        );
+        assert_eq!(r.source, PricingSource::None);
+    }
+
+    #[test]
+    fn resolve_in_config_override_fills_gaps_from_catalog() {
+        let pricing = ModelPricing {
+            input: 30.0,
+            output: 60.0,
+            cache_read: 1.5,
+            cache_write: 3.0,
+        };
+        let catalog = catalog_with(&[("openai", "gpt-4", pricing)]);
+        let cfg = crate::config::ModelConfig {
+            input_cost: Some(99.0),
+            ..Default::default()
+        };
+        let r = resolve_in(Some(&catalog), "gpt-4", "openai", &cfg);
+        assert_eq!(r.source, PricingSource::Config);
+        // input from config override; the rest fall through to catalog.
+        assert_eq!(r.pricing.input, 99.0);
+        assert_eq!(r.pricing.output, 60.0);
+        assert_eq!(r.pricing.cache_read, 1.5);
+        assert_eq!(r.pricing.cache_write, 3.0);
+    }
+
+    #[test]
+    fn resolve_in_returns_none_source_when_catalog_arg_is_none_and_no_override() {
+        let r = resolve_in(
+            None,
+            "any",
+            "openai",
+            &crate::config::ModelConfig::default(),
+        );
+        assert_eq!(r.source, PricingSource::None);
     }
 }

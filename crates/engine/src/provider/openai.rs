@@ -361,66 +361,15 @@ pub(super) async fn read_stream(
 }
 
 #[cfg(test)]
-#[allow(clippy::field_reassign_with_default)]
 mod tests {
     use super::*;
     use crate::provider::FunctionSchema;
+    use crate::test_util::{assistant_text, system, tool_msg, user};
     use protocol::{Content, ContentPart, FunctionCall, Message, Role, ToolCall};
     use serde_json::json;
 
-    fn user(text: &str) -> Message {
-        Message {
-            role: Role::User,
-            content: Some(Content::Text(text.into())),
-            reasoning_content: None,
-            tool_calls: None,
-            tool_call_id: None,
-            is_error: false,
-        }
-    }
-
-    fn system(text: &str) -> Message {
-        Message {
-            role: Role::System,
-            content: Some(Content::Text(text.into())),
-            reasoning_content: None,
-            tool_calls: None,
-            tool_call_id: None,
-            is_error: false,
-        }
-    }
-
-    fn assistant_text(text: &str) -> Message {
-        Message {
-            role: Role::Assistant,
-            content: Some(Content::Text(text.into())),
-            reasoning_content: None,
-            tool_calls: None,
-            tool_call_id: None,
-            is_error: false,
-        }
-    }
-
     fn assistant_calls(calls: Vec<ToolCall>) -> Message {
-        Message {
-            role: Role::Assistant,
-            content: None,
-            reasoning_content: None,
-            tool_calls: Some(calls),
-            tool_call_id: None,
-            is_error: false,
-        }
-    }
-
-    fn tool_msg(call_id: Option<&str>, output: &str) -> Message {
-        Message {
-            role: Role::Tool,
-            content: Some(Content::Text(output.into())),
-            reasoning_content: None,
-            tool_calls: None,
-            tool_call_id: call_id.map(String::from),
-            is_error: false,
-        }
+        crate::test_util::assistant_calls(None, calls)
     }
 
     fn cfg() -> ModelConfig {
@@ -1142,8 +1091,10 @@ mod tests {
 
     #[test]
     fn finalize_returns_error_when_state_error_set() {
-        let mut state = StreamState::default();
-        state.error = Some(ProviderError::QuotaExceeded("x".into()));
+        let state = StreamState {
+            error: Some(ProviderError::QuotaExceeded("x".into())),
+            ..Default::default()
+        };
         assert!(matches!(
             state.finalize(),
             Err(ProviderError::QuotaExceeded(_))

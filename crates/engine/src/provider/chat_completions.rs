@@ -234,37 +234,19 @@ pub(super) async fn read_stream(
 }
 
 #[cfg(test)]
-#[allow(clippy::field_reassign_with_default)]
 mod tests {
     use super::*;
     use crate::provider::FunctionSchema;
-    use protocol::{Content, FunctionCall, Message, Role, ToolCall};
+    use crate::test_util::{tool_msg as tool_msg_opt, user};
+    use protocol::{FunctionCall, Message, ToolCall};
     use serde_json::json;
 
     fn cfg() -> ModelConfig {
         ModelConfig::default()
     }
 
-    fn user(text: &str) -> Message {
-        Message {
-            role: Role::User,
-            content: Some(Content::Text(text.into())),
-            reasoning_content: None,
-            tool_calls: None,
-            tool_call_id: None,
-            is_error: false,
-        }
-    }
-
     fn tool_msg(call_id: &str, output: &str) -> Message {
-        Message {
-            role: Role::Tool,
-            content: Some(Content::Text(output.into())),
-            reasoning_content: None,
-            tool_calls: None,
-            tool_call_id: Some(call_id.into()),
-            is_error: false,
-        }
+        tool_msg_opt(Some(call_id), output)
     }
 
     // ---- build_body ----
@@ -634,8 +616,10 @@ mod tests {
 
     #[test]
     fn finalize_extracts_tool_calls_from_content_markup_when_native_missing() {
-        let mut state = StreamState::default();
-        state.content = "<tool_call>\n{\"name\":\"f\",\"arguments\":{}}\n</tool_call>".into();
+        let state = StreamState {
+            content: "<tool_call>\n{\"name\":\"f\",\"arguments\":{}}\n</tool_call>".into(),
+            ..Default::default()
+        };
         let r = state.finalize();
         assert_eq!(r.tool_calls.len(), 1);
         assert_eq!(r.tool_calls[0].function.name, "f");
@@ -643,8 +627,10 @@ mod tests {
 
     #[test]
     fn finalize_extracts_tool_calls_from_reasoning_markup_when_native_missing() {
-        let mut state = StreamState::default();
-        state.reasoning = "<tool_call>\n{\"name\":\"g\",\"arguments\":{}}\n</tool_call>".into();
+        let state = StreamState {
+            reasoning: "<tool_call>\n{\"name\":\"g\",\"arguments\":{}}\n</tool_call>".into(),
+            ..Default::default()
+        };
         let r = state.finalize();
         assert_eq!(r.tool_calls.len(), 1);
         assert_eq!(r.tool_calls[0].function.name, "g");
@@ -652,9 +638,11 @@ mod tests {
 
     #[test]
     fn finalize_skips_text_extraction_when_native_tool_calls_present() {
-        let mut state = StreamState::default();
-        state.content =
-            "<tool_call>\n{\"name\":\"FROM_CONTENT\",\"arguments\":{}}\n</tool_call>".into();
+        let mut state = StreamState {
+            content: "<tool_call>\n{\"name\":\"FROM_CONTENT\",\"arguments\":{}}\n</tool_call>"
+                .into(),
+            ..Default::default()
+        };
         state
             .tool_calls
             .insert(0, ("c0".into(), "native".into(), "{}".into()));

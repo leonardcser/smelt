@@ -1764,7 +1764,6 @@ impl PricingContext {
 }
 
 #[cfg(test)]
-#[allow(clippy::field_reassign_with_default)]
 mod tests {
     use super::*;
 
@@ -1791,6 +1790,21 @@ mod tests {
 
     // ---- build_provider ----
 
+    fn engine_cfg_with(api: ApiConfig) -> EngineConfig {
+        EngineConfig {
+            api,
+            model: "m".into(),
+            auxiliary: crate::AuxiliaryModelConfig::default(),
+            instructions: None,
+            system_prompt_override: None,
+            cwd: std::path::PathBuf::from("/"),
+            skills: None,
+            auto_compact: false,
+            context_window: None,
+            redact_secrets: false,
+        }
+    }
+
     #[test]
     fn build_provider_strips_trailing_slash_from_api_base() {
         let p = build_provider(
@@ -1800,57 +1814,45 @@ mod tests {
             &ModelConfig::default(),
             &reqwest::Client::new(),
         );
-        // Provider::new trims trailing slashes; ProviderKind::from_config "openai" → OpenAi.
-        // Inspect via the public surface: ensure tool_calling reflects default.
-        assert!(p.tool_calling());
+        assert_eq!(p.api_base(), "https://x");
+        assert_eq!(p.api_key(), "k");
     }
 
     #[test]
     fn build_provider_from_api_delegates_to_build_provider() {
-        let api = api_cfg();
+        let api = ApiConfig {
+            base: "https://api.example.com/".into(),
+            ..api_cfg()
+        };
         let p = build_provider_from_api(&api, &reqwest::Client::new());
-        assert!(p.tool_calling());
+        assert_eq!(p.api_base(), "https://api.example.com");
+        assert_eq!(p.api_key(), "k");
     }
 
     #[test]
     fn build_provider_with_overrides_uses_override_values_when_some() {
-        let mut config_api = api_cfg();
-        config_api.base = "default-base".into();
-        config_api.key = "default-key".into();
-        let config = EngineConfig {
-            api: config_api,
-            model: "m".into(),
-            auxiliary: crate::AuxiliaryModelConfig::default(),
-            instructions: None,
-            system_prompt_override: None,
-            cwd: std::path::PathBuf::from("/"),
-            skills: None,
-            auto_compact: false,
-            context_window: None,
-            redact_secrets: false,
-        };
+        let config = engine_cfg_with(ApiConfig {
+            base: "default-base".into(),
+            key: "default-key".into(),
+            ..api_cfg()
+        });
         let client = reqwest::Client::new();
-        let _ = build_provider_with_overrides(&config, &client, Some("override-base"), Some("k"));
-        // No public way to inspect base/key without exposing internals — just verify it doesn't panic.
+        let p = build_provider_with_overrides(&config, &client, Some("override-base/"), Some("ok"));
+        assert_eq!(p.api_base(), "override-base");
+        assert_eq!(p.api_key(), "ok");
     }
 
     #[test]
     fn build_provider_with_overrides_falls_back_to_config_when_none() {
-        let config_api = api_cfg();
-        let config = EngineConfig {
-            api: config_api,
-            model: "m".into(),
-            auxiliary: crate::AuxiliaryModelConfig::default(),
-            instructions: None,
-            system_prompt_override: None,
-            cwd: std::path::PathBuf::from("/"),
-            skills: None,
-            auto_compact: false,
-            context_window: None,
-            redact_secrets: false,
-        };
+        let config = engine_cfg_with(ApiConfig {
+            base: "fallback-base/".into(),
+            key: "fallback-key".into(),
+            ..api_cfg()
+        });
         let client = reqwest::Client::new();
-        let _ = build_provider_with_overrides(&config, &client, None, None);
+        let p = build_provider_with_overrides(&config, &client, None, None);
+        assert_eq!(p.api_base(), "fallback-base");
+        assert_eq!(p.api_key(), "fallback-key");
     }
 
     // ---- send_usage / emit_usage_background ----
@@ -1858,9 +1860,11 @@ mod tests {
     #[test]
     fn send_usage_emits_token_usage_event_with_cost_when_pricing_resolves() {
         let (tx, mut rx) = mpsc::unbounded_channel::<EngineEvent>();
-        let mut cfg = ModelConfig::default();
-        cfg.input_cost = Some(5.0);
-        cfg.output_cost = Some(10.0);
+        let cfg = ModelConfig {
+            input_cost: Some(5.0),
+            output_cost: Some(10.0),
+            ..Default::default()
+        };
         let usage = protocol::TokenUsage {
             prompt_tokens: Some(1_000_000),
             completion_tokens: Some(500_000),

@@ -312,66 +312,12 @@ pub(super) async fn read_stream(
 mod tests {
     use super::*;
     use crate::provider::FunctionSchema;
-    use protocol::{Content, FunctionCall, Message, Role, ToolCall};
+    use crate::test_util::{assistant_calls, assistant_text, system, tool_msg, user};
+    use protocol::{FunctionCall, ToolCall};
     use serde_json::json;
 
     fn cfg() -> ModelConfig {
         ModelConfig::default()
-    }
-
-    fn user(text: &str) -> Message {
-        Message {
-            role: Role::User,
-            content: Some(Content::Text(text.into())),
-            reasoning_content: None,
-            tool_calls: None,
-            tool_call_id: None,
-            is_error: false,
-        }
-    }
-
-    fn system(text: &str) -> Message {
-        Message {
-            role: Role::System,
-            content: Some(Content::Text(text.into())),
-            reasoning_content: None,
-            tool_calls: None,
-            tool_call_id: None,
-            is_error: false,
-        }
-    }
-
-    fn assistant_text(text: &str) -> Message {
-        Message {
-            role: Role::Assistant,
-            content: Some(Content::Text(text.into())),
-            reasoning_content: None,
-            tool_calls: None,
-            tool_call_id: None,
-            is_error: false,
-        }
-    }
-
-    fn assistant_calls(content: Option<&str>, calls: Vec<ToolCall>) -> Message {
-        Message {
-            role: Role::Assistant,
-            content: content.map(|t| Content::Text(t.into())),
-            reasoning_content: None,
-            tool_calls: Some(calls),
-            tool_call_id: None,
-            is_error: false,
-        }
-    }
-
-    fn tool_msg(call_id: Option<&str>, output: &str) -> Message {
-        Message {
-            role: Role::Tool,
-            content: Some(Content::Text(output.into())),
-            reasoning_content: None,
-            tool_calls: None,
-            tool_call_id: call_id.map(String::from),
-            is_error: false,
-        }
     }
 
     // ---- supports_adaptive_thinking ----
