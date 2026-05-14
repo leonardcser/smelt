@@ -585,7 +585,12 @@ impl Window {
 
     /// Clamp `scroll_top` so `cursor_row` stays inside the viewport.
     /// Call after updating `cursor_row` (or call `sync_from_cpos` which does both).
+    /// A zero viewport (leaf laid out but not yet painted) is left alone; the host's
+    /// `pending_scroll_to_cursor` does the first-paint adjustment with real dimensions.
     pub fn keep_cursor_visible(&mut self, cursor_row: u16, total_rows: u16, viewport_rows: u16) {
+        if viewport_rows == 0 {
+            return;
+        }
         let max_scroll = total_rows.saturating_sub(viewport_rows);
         let viewport_bottom = self
             .scroll_top
