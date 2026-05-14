@@ -42,7 +42,9 @@ function smelt.ui.dialog.input(placeholder)
   smelt.buf.set_lines(buf, { "" })
   -- One-cell left gutter so the cursor and placeholder don't sit flush against
   -- the dialog frame.
-  local leaf = smelt.win.open(buf, { region = REGION, focusable = true, pad_left = 1 })
+  local leaf = smelt.win.open(buf, {
+    region = REGION, focusable = true, selectable = true, pad_left = 1,
+  })
   if leaf then smelt.win.configure_input(leaf, placeholder or "") end
   return leaf, buf
 end
@@ -59,10 +61,11 @@ function smelt.ui.dialog.options(labels, opts)
   local pad_left = opts.pad_left
   if pad_left == nil then pad_left = 1 end
   local leaf = smelt.win.open(buf, {
-    region    = REGION,
-    focusable = true,
-    pad_left  = pad_left,
-    pad_right = opts.pad_right,
+    region     = REGION,
+    focusable  = true,
+    selectable = true,
+    pad_left   = pad_left,
+    pad_right  = opts.pad_right,
   })
   if leaf then
     local selected = tonumber(opts.selected or 1) or 1
@@ -76,7 +79,9 @@ function smelt.ui.dialog.list(buf, opts)
   opts = opts or {}
   local focusable = opts.focusable
   if focusable == nil then focusable = true end
-  local leaf = smelt.win.open(buf, { region = REGION, focusable = focusable })
+  local leaf = smelt.win.open(buf, {
+    region = REGION, focusable = focusable, selectable = true,
+  })
   if leaf then smelt.win.configure_list(leaf, opts.selected or 0) end
   return leaf
 end
@@ -95,7 +100,9 @@ end
 function smelt.ui.dialog.markdown(text)
   local buf = smelt.buf.create({ mode = "markdown" })
   smelt.buf.set_source(buf, text or "")
-  local leaf = smelt.win.open(buf, { region = REGION, focusable = false })
+  local leaf = smelt.win.open(buf, {
+    region = REGION, focusable = false, selectable = true,
+  })
   return leaf, buf
 end
 
@@ -111,8 +118,9 @@ function smelt.ui.dialog.content(opts)
   local focusable = opts.focusable
   if focusable == nil then focusable = opts.interactive or false end
   local leaf = smelt.win.open(buf, {
-    region = REGION,
-    focusable = focusable,
+    region      = REGION,
+    focusable   = focusable,
+    selectable  = true,
     vim_enabled = opts.interactive or false,
   })
   return leaf, buf

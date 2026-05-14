@@ -268,18 +268,24 @@ fn parse_overlay_placement(opts: &mlua::Table) -> Result<OverlayPlacement, Strin
 /// Wire the built-in list keymap: j/k/arrows/Home/End/PgUp/PgDn navigate,
 /// Enter fires `WinEvent::Submit` with the absolute selected row.
 pub(crate) fn configure_list_leaf(app: &mut TuiApp, leaf: WinId, initial_cursor: u16) {
-    let line_count = app
+    let buf_id = match app.ui.win(leaf) {
+        Some(w) => w.buf,
+        None => return,
+    };
+    let line_count = app.ui.buf(buf_id).map(|b| b.line_count()).unwrap_or(0);
+    let viewport = app
         .ui
-        .win(leaf)
-        .map(|w| w.buf)
-        .and_then(|b| app.ui.buf(b).map(|buf| buf.line_count()))
+        .paint_rect(PaintId::from(leaf))
+        .map(|r| r.height)
         .unwrap_or(0);
-    if let Some(win) = app.ui.win_mut(leaf) {
+    let max = line_count.saturating_sub(1) as u16;
+    let target = initial_cursor.min(max);
+    let (win, buf) = app.ui.win_and_buf_mut(leaf, buf_id);
+    if let (Some(win), Some(buf)) = (win, buf) {
         win.cursor_line_highlight = true;
         win.mouse_scroll = true;
-        let max = line_count.saturating_sub(1) as u16;
-        let target = initial_cursor.min(max);
-        win.set_cursor_position(target, 0);
+        win.cursor_follows_mouse = false;
+        win.jump_to_row(buf, target, viewport);
         if target > 0 {
             win.pending_scroll_to_cursor = true;
         }
@@ -296,7 +302,8 @@ pub(crate) fn configure_list_leaf(app: &mut TuiApp, leaf: WinId, initial_cursor:
         }
         let viewport = ctx.ui.paint_rect(PaintId::from(ctx.win)).map(|r| r.height);
         let mut new_abs: Option<usize> = None;
-        if let Some(win) = ctx.ui.win_mut(ctx.win) {
+        let (win, buf) = ctx.ui.win_and_buf_mut(ctx.win, buf_id);
+        if let (Some(win), Some(buf)) = (win, buf) {
             let abs = win.cursor_row() as usize;
             let max = line_count.saturating_sub(1);
             let target = (abs as isize + delta).clamp(0, max as isize) as usize;
@@ -304,7 +311,7 @@ pub(crate) fn configure_list_leaf(app: &mut TuiApp, leaf: WinId, initial_cursor:
                 return CallbackResult::Consumed;
             }
             win.scroll_top = scroll_to_show(win.scroll_top, target as u16, viewport);
-            win.set_cursor_position(target as u16, 0);
+            win.jump_to_row(buf, target as u16, viewport.unwrap_or(0));
             new_abs = Some(target);
         }
         match new_abs {
@@ -400,16 +407,16 @@ fn apply_cursor(app: &mut TuiApp, leaf: WinId, target: u16) {
     let max = line_count.saturating_sub(1) as u16;
     let target = target.min(max);
     let viewport = app.ui.paint_rect(PaintId::from(leaf)).map(|r| r.height);
-    let win = match app.ui.win_mut(leaf) {
-        Some(w) => w,
-        None => return,
+    let (win, buf) = app.ui.win_and_buf_mut(leaf, buf_id);
+    let (Some(win), Some(buf)) = (win, buf) else {
+        return;
     };
     let abs = win.cursor_row();
     if abs == target {
         return;
     }
     win.scroll_top = scroll_to_show(win.scroll_top, target, viewport);
-    win.set_cursor_position(target, 0);
+    win.jump_to_row(buf, target, viewport.unwrap_or(0));
     let lua = &app.lua;
     let mut lua_invoke =
         |handle: crate::smelt_term::LuaHandle, win: WinId, payload: &crate::smelt_term::Payload| {
@@ -467,7 +474,7 @@ pub(crate) fn configure_input_leaf(app: &mut TuiApp, leaf: WinId, placeholder: S
         }
     }
     if let Some(win) = app.ui.win_mut(leaf) {
-        win.set_cursor_position(0, 0);
+        win.reset_cursor();
     }
 
     fn current_line(ctx: &crate::smelt_term::CallbackCtx<'_>) -> String {

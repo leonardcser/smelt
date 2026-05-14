@@ -679,6 +679,8 @@ impl TuiApp {
         };
         if let Some(w) = self.ui.win_mut(win) {
             w.focusable = false;
+            w.selectable = true;
+            w.cursor_follows_mouse = false;
         }
 
         let layout = crate::smelt_term::LayoutTree::vbox(vec![(

@@ -114,11 +114,12 @@ pub(crate) fn open(
     )?;
     let height = picker_height(items.len(), max_rows);
     let (cursor_row, scroll) = cursor_and_scroll(selected, items.len(), height, reversed, 0);
-    if let Some(w) = app.ui.win_mut(leaf) {
+    let (w, buf_ref) = app.ui.win_and_buf_mut(leaf, buf);
+    if let (Some(w), Some(buf_ref)) = (w, buf_ref) {
         w.cursor_line_highlight = true;
         w.focusable = focusable;
-        w.set_cursor_position(cursor_row, 0);
         w.scroll_top = scroll;
+        w.jump_to_row(buf_ref, cursor_row, height);
     }
 
     let layout = layout_for(leaf, height);
@@ -156,9 +157,12 @@ pub(crate) fn set_items(app: &mut TuiApp, leaf: WinId, items: Vec<PickerItem>, s
     let height = picker_height(items.len(), state.max_rows);
     let (cursor_row, scroll) =
         cursor_and_scroll(selected, items.len(), height, state.reversed, prev_scroll);
-    if let Some(w) = app.ui.win_mut(leaf) {
-        w.set_cursor_position(cursor_row, 0);
-        w.scroll_top = scroll;
+    if let Some(buf_id) = buf_id {
+        let (w, buf_ref) = app.ui.win_and_buf_mut(leaf, buf_id);
+        if let (Some(w), Some(buf_ref)) = (w, buf_ref) {
+            w.scroll_top = scroll;
+            w.jump_to_row(buf_ref, cursor_row, height);
+        }
     }
     if let Some(ov) = app.ui.overlay_mut(state.overlay) {
         ov.layout = layout_for(leaf, height);
@@ -179,9 +183,10 @@ pub(crate) fn set_selected(app: &mut TuiApp, leaf: WinId, selected: usize) {
     let prev_scroll = app.ui.win(leaf).map(|w| w.scroll_top).unwrap_or(0);
     let height = picker_height(n, state.max_rows);
     let (cursor_row, scroll) = cursor_and_scroll(selected, n, height, state.reversed, prev_scroll);
-    if let Some(w) = app.ui.win_mut(leaf) {
-        w.set_cursor_position(cursor_row, 0);
+    let (w, buf_ref) = app.ui.win_and_buf_mut(leaf, buf_id);
+    if let (Some(w), Some(buf_ref)) = (w, buf_ref) {
         w.scroll_top = scroll;
+        w.jump_to_row(buf_ref, cursor_row, height);
     }
 }
 

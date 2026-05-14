@@ -935,7 +935,7 @@ mod tests {
         let mut buf = Buffer::new(crate::app::PROMPT_EDIT_BUF, BufCreateOpts::default());
         buf.set_all_lines(vec!["hello".into()]);
 
-        let mut win = Window::new(
+        let win = Window::new(
             PROMPT_WIN,
             buf.id(),
             SplitConfig {
@@ -947,7 +947,6 @@ mod tests {
                 },
             },
         );
-        win.set_cursor_position(0, 0);
 
         let mut grid = Grid::new(10, 1);
         let mut slice = grid.slice_mut(crate::smelt_term::Rect::new(0, 0, 10, 1));

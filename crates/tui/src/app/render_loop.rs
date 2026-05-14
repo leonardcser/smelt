@@ -77,18 +77,27 @@ impl TuiApp {
             self.sync_completer_overlay();
         }
 
-        // Focused overlay leaf gets a virtual block caret when neither transcript nor prompt
-        // claimed it. The block is painted by `Window::render` from the leaf's own
-        // `cursor_col` / `cursor_screen_row`, so no absolute-screen-coord plumbing is needed.
+        // Late cursor-shape fill-ins. Each sync layer above sets `cursor_shape` for
+        // the focus context it owns (transcript / prompt). Two cross-cutting cases
+        // are decided here, after the layers have spoken, by forcing `Block` only
+        // if no layer has already claimed the cursor:
+        //   - Focused overlay leaf (dialog / picker) — leaf's own `cursor_screen_row`
+        //     paints the block via `Window::render`.
+        //   - Active mouse drag anywhere — `Ui::active_cursor_leaf` routes the block
+        //     to the dragging leaf so the cursor visibly follows the drag, even on a
+        //     non-focusable leaf like a notification.
         if matches!(
             self.ui.cursor_shape(),
             crate::smelt_term::CursorShape::Hidden
         ) {
-            if let Some(focus) = self.ui.focus() {
-                if self.ui.overlay_for_leaf(focus).is_some() {
-                    self.ui
-                        .set_cursor_shape(prompt_block_cursor(self.ui.theme()));
-                }
+            let focus_on_overlay = self
+                .ui
+                .focus()
+                .map(|f| self.ui.overlay_for_leaf(f).is_some())
+                .unwrap_or(false);
+            if focus_on_overlay || self.ui.any_drag_active() {
+                self.ui
+                    .set_cursor_shape(prompt_block_cursor(self.ui.theme()));
             }
         }
 

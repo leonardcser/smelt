@@ -435,17 +435,16 @@ impl PromptState {
     /// Sync `win.cursor_row`, `win.cursor_col`, and `win.scroll_top` from the current
     /// source `cpos` using the buffer's parser (if any) or identity mapping.
     pub(crate) fn sync_display_coords(&mut self, ctx: &mut PromptCtx<'_>, viewport_rows: u16) {
-        let (cursor_line, cursor_col) = ctx.buf.display_cursor_pos(ctx.win.cpos);
+        ctx.win.resync_display_coords(ctx.buf);
+        let cursor_line = ctx.win.cursor_row();
         let total_rows = ctx.buf.line_count() as u16;
-        ctx.win
-            .set_cursor_position(cursor_line as u16, cursor_col as u16);
         if ctx.win.pending_recenter {
             let max_scroll = total_rows.saturating_sub(viewport_rows.max(1));
-            let s = cursor_line.saturating_sub((viewport_rows.max(1) / 2) as usize);
+            let s = (cursor_line as usize).saturating_sub((viewport_rows.max(1) / 2) as usize);
             ctx.win.scroll_top = (s as u16).min(max_scroll);
         } else {
             ctx.win
-                .keep_cursor_visible(cursor_line as u16, total_rows, viewport_rows);
+                .keep_cursor_visible(cursor_line, total_rows, viewport_rows);
         }
     }
 

@@ -140,16 +140,18 @@ impl Ui {
         count
     }
 
-    /// Hit-test a primary-button Down/Drag/Up against splits leaves.
+    /// Hit-test a primary-button Down/Drag/Up against any leaf (splits or overlay).
     /// Latches capture on Down; returns `(win, click_count)` where `click_count`
     /// is 0 for Drag/Up. Up clears capture. Call only when `dispatch_event`
     /// returned `Ignored` — that method owns scrollbar drag and modal blocking.
+    /// Overlay leaves participate so a `selectable` notification or dialog body
+    /// can drive its own selection through `Window::handle_mouse`.
     pub fn resolve_split_mouse(&mut self, me: crossterm::event::MouseEvent) -> Option<(WinId, u8)> {
         use crossterm::event::{MouseButton, MouseEventKind};
         match me.kind {
             MouseEventKind::Down(MouseButton::Left) => {
                 let win = match self.hit_test(me.row, me.column, None)? {
-                    HitTarget::Window(w) if self.splits().contains_leaf(w) => w,
+                    HitTarget::Window(w) => w,
                     _ => return None,
                 };
                 self.set_capture(HitTarget::Window(win));
@@ -579,6 +581,40 @@ impl Ui {
         self.wins.get(&self.focus()?)
     }
 
+    /// Leaf that currently drives the single visible terminal cursor. During a mouse
+    /// drag-select the cursor temporarily moves to the dragging leaf (so the user sees
+    /// feedback at the drag end even on a non-focusable leaf like a notification);
+    /// otherwise it follows keyboard focus. The renderer queries this once per frame
+    /// and routes `cursor_shape` accordingly so only one leaf paints a block.
+    pub fn active_cursor_leaf(&self) -> Option<WinId> {
+        if let Some(HitTarget::Window(w)) = self.capture {
+            if self
+                .wins
+                .get(&w)
+                .and_then(|win| win.drag_endpoint)
+                .is_some()
+            {
+                return Some(w);
+            }
+        }
+        self.focus
+    }
+
+    /// `true` if any window currently has an active drag (mid-drag `drag_endpoint`).
+    /// `render_loop` reads this so the global `cursor_shape` flips to `Block` for the
+    /// duration of the drag, even when keyboard focus is on a leaf that normally has
+    /// no visible cursor.
+    pub fn any_drag_active(&self) -> bool {
+        if let Some(HitTarget::Window(w)) = self.capture {
+            return self
+                .wins
+                .get(&w)
+                .and_then(|win| win.drag_endpoint)
+                .is_some();
+        }
+        false
+    }
+
     /// Focus `win`. Returns `false` if it isn't a focusable splits leaf or overlay leaf.
     /// Re-focusing the current window is a no-op (no history push).
     pub fn set_focus(&mut self, win: WinId) -> bool {
@@ -800,7 +836,7 @@ impl Ui {
                     }
                     win.viewport = Some(window::WindowViewport::new(
                         *leaf_rect,
-                        leaf_rect.height,
+                        content_width,
                         total_rows,
                         win.scroll_top,
                         None,
@@ -828,6 +864,7 @@ impl Ui {
             }
         }
         let focus = self.focus;
+        let active_cursor = self.active_cursor_leaf();
         let cursor_shape = self.cursor_shape;
         let wins = &self.wins;
         let bufs = &self.bufs;
@@ -851,11 +888,15 @@ impl Ui {
                         if let Some(buf) = bufs.get(&win.buf) {
                             let mut slice = grid.slice_mut(area);
                             let focused = focus == Some(win_id);
+                            // Exactly one leaf paints a block cursor per frame:
+                            // the active cursor leaf (drag-active → focus). Others
+                            // receive `Hidden` regardless of focus.
+                            let owns_cursor = active_cursor == Some(win_id);
                             let ctx = DrawContext {
                                 terminal_width: term_size.0,
                                 terminal_height: term_size.1,
                                 focused,
-                                cursor_shape: if focused {
+                                cursor_shape: if owns_cursor {
                                     cursor_shape
                                 } else {
                                     CursorShape::Hidden
@@ -965,16 +1006,20 @@ impl Ui {
                             self.raise_overlay_to_front(owner);
                         }
                         // Non-focusable leaf of a draggable overlay is treated as Body chrome
-                        // so the user can grab anywhere on it to move the panel.
+                        // so the user can grab anywhere on it to move the panel. A `selectable`
+                        // leaf opts out: drag inside it produces a text selection instead.
                         let drag_target: Option<(OverlayId, overlay::ChromeZone)> = match hit {
                             Some(HitTarget::Chrome { owner, zone }) => Some((owner, zone)),
                             Some(HitTarget::Window(w)) => {
-                                let leaf_focusable =
-                                    self.wins.get(&w).map(|win| win.focusable).unwrap_or(true);
+                                let (leaf_focusable, leaf_selectable) = self
+                                    .wins
+                                    .get(&w)
+                                    .map(|win| (win.focusable, win.selectable))
+                                    .unwrap_or((true, false));
                                 self.overlay_for_leaf(w).and_then(|owner| {
                                     let ov_draggable =
                                         self.overlay(owner).map(|o| o.draggable).unwrap_or(false);
-                                    (!leaf_focusable && ov_draggable)
+                                    (!leaf_focusable && ov_draggable && !leaf_selectable)
                                         .then_some((owner, overlay::ChromeZone::Body))
                                 })
                             }
@@ -2731,7 +2776,11 @@ mod tests {
                     },
                 )
                 .unwrap();
-            host.win_mut(win).unwrap().set_cursor_position(0, 3);
+            {
+                let w = host.win_mut(win).unwrap();
+                w.cursor_row = 0;
+                w.cursor_col = 3;
+            }
             // Hosting `win` in a modal overlay both makes it focusable
             // (overlay leaf) and exercises `overlay_open`. The modal
             // also auto-focuses the first leaf — re-asserting via the
@@ -3070,7 +3119,7 @@ mod tests {
         let mut ui = make_ui();
         let win = make_scrollbar_split(&mut ui);
         ui.set_capture(HitTarget::Window(win));
-        ui.win_mut(win).unwrap().set_cursor_position(0, 0);
+        ui.win_mut(win).unwrap().cursor_row = 0;
         let result = ui.poll_drag_autoscroll();
         assert_eq!(result, Some((win, -1)));
         assert!(ui.drag_autoscroll_started().is_some());
@@ -3083,7 +3132,7 @@ mod tests {
         ui.set_capture(HitTarget::Window(win));
         // make_scrollbar_split paints a viewport with rect height = 10,
         // so cursor_row=9 is the bottom row.
-        ui.win_mut(win).unwrap().set_cursor_position(9, 0);
+        ui.win_mut(win).unwrap().cursor_row = 9;
         assert_eq!(ui.poll_drag_autoscroll(), Some((win, 1)));
     }
 
@@ -3092,10 +3141,10 @@ mod tests {
         let mut ui = make_ui();
         let win = make_scrollbar_split(&mut ui);
         ui.set_capture(HitTarget::Window(win));
-        ui.win_mut(win).unwrap().set_cursor_position(0, 0);
+        ui.win_mut(win).unwrap().cursor_row = 0;
         let _ = ui.poll_drag_autoscroll();
         assert!(ui.drag_autoscroll_started().is_some());
-        ui.win_mut(win).unwrap().set_cursor_position(5, 0);
+        ui.win_mut(win).unwrap().cursor_row = 5;
         assert_eq!(ui.poll_drag_autoscroll(), None);
         assert_eq!(ui.drag_autoscroll_started(), None);
     }
@@ -3105,7 +3154,7 @@ mod tests {
         let mut ui = make_ui();
         let win = make_scrollbar_split(&mut ui);
         ui.set_capture(HitTarget::Window(win));
-        ui.win_mut(win).unwrap().set_cursor_position(0, 0);
+        ui.win_mut(win).unwrap().cursor_row = 0;
         let _ = ui.poll_drag_autoscroll();
         assert!(ui.drag_autoscroll_started().is_some());
         ui.clear_capture();
@@ -3118,7 +3167,7 @@ mod tests {
         let mut ui = make_ui();
         let win = make_scrollbar_split(&mut ui);
         ui.set_capture(HitTarget::Scrollbar { owner: win });
-        ui.win_mut(win).unwrap().set_cursor_position(0, 0);
+        ui.win_mut(win).unwrap().cursor_row = 0;
         assert_eq!(ui.poll_drag_autoscroll(), None);
     }
 }

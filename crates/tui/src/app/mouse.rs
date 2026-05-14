@@ -86,6 +86,16 @@ impl TuiApp {
                         self.yank_to_clipboard(out);
                     }
                 }
+            } else if self.ui.win(win).is_some_and(|w| w.selectable) {
+                // Generic selectable leaf: notifications, dialog bodies, future popups.
+                // Focus is left untouched — a non-focusable selectable leaf must not
+                // steal app_focus; a focusable one was already focused by the overlay.
+                let yank = self.handle_selectable_leaf_mouse(win, me, count);
+                if is_up {
+                    if let Some(out) = yank {
+                        self.yank_to_clipboard(out);
+                    }
+                }
             }
             return EventOutcome::Redraw;
         }
@@ -204,6 +214,38 @@ impl TuiApp {
             if !out.is_empty() {
                 self.yank_to_clipboard(out);
             }
+        }
+    }
+
+    /// Generic selectable-leaf path used by notifications, dialog bodies, and any other
+    /// leaf that sets `Window::selectable = true`. Skips the snap + word/line-break
+    /// machinery the transcript needs — drag-select only, no double/triple-click
+    /// word/line expansion. Returns the yanked range on `Up` (caller copies it).
+    fn handle_selectable_leaf_mouse(
+        &mut self,
+        win: crate::smelt_term::WinId,
+        me: MouseEvent,
+        click_count: u8,
+    ) -> Option<crate::smelt_term::CopyOutput> {
+        let viewport = crate::smelt_term::UiHost::viewport_for(self, win)?;
+        let buf_id = self.ui.win(win).map(|w| w.buf)?;
+        let range = {
+            let mouse_ctx = crate::smelt_term::MouseCtx {
+                soft_breaks: &[],
+                hard_breaks: &[],
+                viewport,
+                click_count,
+            };
+            let (win_mut, buf_mut) = self.ui.win_and_buf_mut(win, buf_id);
+            let (_, range) = win_mut?.handle_mouse(buf_mut?, me, mouse_ctx);
+            range?
+        };
+        let buf = self.ui.buf(buf_id)?;
+        let out = buf.copy_range(range.0..range.1);
+        if out.is_empty() {
+            None
+        } else {
+            Some(out)
         }
     }
 

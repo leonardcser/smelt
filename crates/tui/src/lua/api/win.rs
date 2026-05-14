@@ -133,6 +133,12 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
                             if let Ok(vim_enabled) = opts.get::<bool>("vim_enabled") {
                                 w.set_vim_enabled(vim_enabled);
                             }
+                            if let Ok(selectable) = opts.get::<bool>("selectable") {
+                                w.selectable = selectable;
+                            }
+                            if let Ok(follows) = opts.get::<bool>("cursor_follows_mouse") {
+                                w.cursor_follows_mouse = follows;
+                            }
                         }
                     }
                 }

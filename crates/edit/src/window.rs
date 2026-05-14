@@ -15,9 +15,14 @@ use smelt_term::layout::{Gutters, Rect};
 pub struct DrawContext {
     pub terminal_width: u16,
     pub terminal_height: u16,
+    /// Whether keyboard focus is on this leaf. Drives focus-only paint decisions
+    /// (e.g. some highlight groups). Independent of cursor ownership — a leaf
+    /// can be focused without owning the cursor (e.g. while a drag on another
+    /// leaf has captured it) or vice versa.
     pub focused: bool,
-    /// Only meaningful when `focused` is true. `Block` paints a glyph at the
-    /// cursor position; `Hidden` paints nothing.
+    /// `Block` paints a glyph at the cursor position; `Hidden` paints nothing.
+    /// Set only on the leaf returned by `Ui::active_cursor_leaf` so exactly one
+    /// leaf renders a block per frame.
     pub cursor_shape: CursorShape,
     /// `Arc` so per-leaf construction is a pointer bump, not a clone.
     pub theme: std::sync::Arc<Theme>,
@@ -207,6 +212,19 @@ pub struct Window {
     /// so the wheel pans the rows; one-line inputs leave it off so wheeling near them
     /// stays inert. The host hit-tests on every scroll event and routes accordingly.
     pub mouse_scroll: bool,
+    /// Whether click-drag inside this leaf produces a copy selection. Independent of
+    /// `focusable`: a notification can be `selectable: true, focusable: false` so the
+    /// user can highlight its text without the leaf stealing keyboard focus. Dialog
+    /// bodies set it so a row can both be list-navigated and text-selected. The host
+    /// routes Down/Drag/Up through `Window::handle_mouse` + `Buffer::copy_range` when
+    /// this is set.
+    pub selectable: bool,
+    /// Whether `mouse_up` commits the drag end position to `cpos`. `true` for buffer-
+    /// like leaves (prompt, vim content, dialog input) where clicking should move the
+    /// caret. `false` for list/static leaves (resume rows, notifications) where `cpos`
+    /// is owned by j/k or has no meaning — mouse-drag in those leaves never writes
+    /// `cpos`, only the transient `drag_endpoint`.
+    pub cursor_follows_mouse: bool,
 
     /// Populated each frame by the host so scrollbar paint is available without a render-time channel.
     pub viewport: Option<WindowViewport>,
@@ -221,11 +239,11 @@ pub struct Window {
     pub curswant: Option<usize>,
     pub scroll_top: u16,
     /// Buffer-absolute cursor row (0 = first row of the buffer, **not** of the viewport).
-    /// Derived from `cpos` via `sync_from_cpos`; never mutated directly.
-    cursor_row: u16,
+    /// Derived from `cpos` via `sync_from_cpos`; never mutated directly outside this module.
+    pub(crate) cursor_row: u16,
     /// Cursor column within the line, in terminal cells.
-    /// Derived from `cpos` via `sync_from_cpos`; never mutated directly.
-    cursor_col: u16,
+    /// Derived from `cpos` via `sync_from_cpos`; never mutated directly outside this module.
+    pub(crate) cursor_col: u16,
     /// Keeps viewport snapped to newest row; cleared when the user scrolls away.
     pub follow_tail: bool,
     /// One-shot recenter request (vim `zz`); cleared after the next paint.
@@ -244,6 +262,13 @@ pub struct Window {
     /// Cpos of a single-click press awaiting drag; promoted to a selection on the
     /// first `Drag` event. A bare press-release with no motion leaves no selection.
     pub pending_press: Option<usize>,
+    /// Moving end of an active mouse drag-select, in editable-byte space. `None`
+    /// outside a drag. The renderer paints the cursor/CursorLine at this byte's
+    /// projected row when set, and the selection range is `(selection_anchor,
+    /// drag_endpoint)`. `mouse_up` commits this into `cpos` only when
+    /// `cursor_follows_mouse` is true; otherwise the value is discarded and `cpos`
+    /// returns to its pre-drag position.
+    pub(crate) drag_endpoint: Option<usize>,
 }
 
 impl Window {
@@ -255,6 +280,8 @@ impl Window {
             focusable: true,
             cursor_line_highlight: false,
             mouse_scroll: false,
+            selectable: false,
+            cursor_follows_mouse: true,
             viewport: None,
             cpos: 0,
             vim_enabled: false,
@@ -273,6 +300,7 @@ impl Window {
             drag_anchor_word: None,
             drag_anchor_line: None,
             pending_press: None,
+            drag_endpoint: None,
         }
     }
 
@@ -342,14 +370,25 @@ impl Window {
         self.curswant = None;
     }
 
-    /// Set the render cursor in buffer coordinates.
-    ///
-    /// This is for UI surfaces whose caller already owns the row/column mapping
-    /// (pickers, status inputs, projected panes). Text-editing paths should use
-    /// cursor movement methods so `cpos`, `curswant`, and scrolling stay coherent.
-    pub fn set_cursor_position(&mut self, row: u16, col: u16) {
-        self.cursor_row = row;
-        self.cursor_col = col;
+    /// Re-derive `cursor_row` / `cursor_col` from the persisted `cpos` using the
+    /// buffer's display mapping. The prompt layer calls this after a buffer
+    /// mutation has moved `cpos` but no scroll/recenter decision has been made
+    /// yet — it owns its own `keep_cursor_visible` vs `recenter` choice.
+    pub fn resync_display_coords(&mut self, buf: &Buffer) {
+        let (row, col) = buf.display_cursor_pos(self.cpos);
+        self.cursor_row = row as u16;
+        self.cursor_col = col as u16;
+    }
+
+    /// Place the logical cursor at line `row`, column 0, writing `cpos` so all
+    /// downstream readers (renderer's `effective_endpoint`, selection paint,
+    /// copy_range) see the same position. Used by list leaves where j/k
+    /// navigation owns the logical cursor — keeping `cpos` in sync means the
+    /// global active-cursor machinery paints the block on the correct row when
+    /// this leaf takes the cursor (e.g. when focus lands here, or when a drag
+    /// ends here).
+    pub fn jump_to_row(&mut self, buf: &Buffer, row: u16, viewport_rows: u16) {
+        self.jump_to_line_col(buf, row as usize, 0, viewport_rows);
     }
 
     /// Set `selection_anchor` to `cpos` if unset. Call before a shift-move.
@@ -370,14 +409,15 @@ impl Window {
     }
 
     pub fn selection_range(&self, buf: &Buffer) -> Option<(usize, usize)> {
-        let cpos = self.compute_cpos(buf);
+        let endpoint = self.drag_endpoint.unwrap_or_else(|| self.compute_cpos(buf));
         let text = buf.text();
         if self.vim_enabled {
-            if let Some(range) = vim::visual_range(&self.vim_state, &text, cpos, self.vim_mode) {
+            if let Some(range) = vim::visual_range(&self.vim_state, &text, endpoint, self.vim_mode)
+            {
                 return Some(range);
             }
         }
-        self.selection_range_at(cpos, &text)
+        self.selection_range_at(endpoint, &text)
     }
 
     /// Derive selection ranges from this window's own anchors; used when the buffer
@@ -393,10 +433,11 @@ impl Window {
             return Vec::new();
         }
         let buf_text = buf.text();
+        let endpoint = self.effective_endpoint();
         let range = if in_vim_visual {
-            vim::visual_range(&self.vim_state, &buf_text, self.cpos, vim_mode)
+            vim::visual_range(&self.vim_state, &buf_text, endpoint, vim_mode)
         } else {
-            self.selection_range_at(self.cpos, &buf_text)
+            self.selection_range_at(endpoint, &buf_text)
         };
         let Some((s, e)) = range else {
             return Vec::new();
@@ -462,16 +503,16 @@ impl Window {
         Some((start, end))
     }
 
-    /// Position cursor at end of `[start, end)` and anchor Visual at `start`.
-    /// Re-syncs cursor coords so the highlight pass sees the correct position.
-    fn finish_range_select(&mut self, start: usize, end: usize, buf: &Buffer, viewport_rows: u16) {
-        // vim visual_range is inclusive at cpos; non-vim selection_range_at is exclusive.
-        self.cpos = if self.vim_enabled {
-            end.saturating_sub(1).max(start)
+    /// Stage `[start, end)` as a mouse-selected range with the drag endpoint at `end`
+    /// (or the last char's start byte for vim, since `visual_range` is inclusive).
+    /// `mouse_up` decides whether to commit the endpoint into `cpos`.
+    fn finish_range_select(&mut self, start: usize, end: usize, buf: &Buffer, _viewport_rows: u16) {
+        let endpoint = if self.vim_enabled {
+            smelt_buffer::text::prev_char_boundary(&buf.text(), end).max(start)
         } else {
             end
         };
-        self.sync_from_cpos(buf, viewport_rows);
+        self.drag_endpoint = Some(endpoint);
         if self.vim_enabled {
             self.vim_state
                 .begin_visual(&mut self.vim_mode, VimMode::Visual, start);
@@ -522,6 +563,24 @@ impl Window {
 
     pub fn compute_cpos(&self, buf: &Buffer) -> usize {
         buf.byte_at_display_pos(self.cursor_row as usize, self.cursor_col as usize)
+    }
+
+    /// Byte to use as the selection/cursor endpoint. Returns `drag_endpoint` if an
+    /// active mouse drag is updating a transient endpoint (non-vim mouse path),
+    /// otherwise the persistent `cpos`. Renderer, selection-range computation, and
+    /// drag extends all read through this so they observe the drag position without
+    /// the drag having to write `cpos` mid-gesture.
+    pub fn effective_endpoint(&self) -> usize {
+        self.drag_endpoint.unwrap_or(self.cpos)
+    }
+
+    /// Row component of `effective_endpoint`, projected through `buf`. Used by the
+    /// renderer to paint CursorLine/caret at the drag end while a drag is in flight.
+    pub fn effective_cursor_row(&self, buf: &Buffer) -> u16 {
+        match self.drag_endpoint {
+            Some(end) => buf.display_cursor_pos(end).0 as u16,
+            None => self.cursor_row,
+        }
     }
 
     /// Clamp `scroll_top` so `cursor_row` stays inside the viewport.
@@ -598,7 +657,7 @@ impl Window {
             }
             MouseEventKind::Up(MouseButton::Left) => {
                 let range = self.mouse_yank_range(buf, &ctx, &text);
-                let status = self.mouse_up();
+                let status = self.mouse_up(buf, ctx.viewport.rect.height);
                 (status, range)
             }
             _ => (Status::Ignored, None),
@@ -629,21 +688,29 @@ impl Window {
 
         let viewport_rows = ctx.viewport.rect.height;
         let line_idx = (self.scroll_top as usize + rel_row as usize).min(rows.len() - 1);
-        self.jump_to_line_col(buf, line_idx, rel_col as usize, viewport_rows);
-        let cpos = self.cpos;
+        let click_byte = buf.byte_at_display_pos(line_idx, rel_col as usize);
+        // All leaves stage the click into `drag_endpoint`; `cpos` is committed on Up
+        // only when `cursor_follows_mouse` is set. Readers route through
+        // `effective_endpoint` so the cursor and selection track the drag without
+        // perturbing the persistent `cpos` mid-gesture.
+        self.drag_endpoint = Some(click_byte);
 
         match ctx.click_count {
             2 => {
-                if let Some((s, e)) =
-                    self.select_big_word_at_transparent(cpos, ctx.soft_breaks, buf, viewport_rows)
-                {
+                if let Some((s, e)) = self.select_big_word_at_transparent(
+                    click_byte,
+                    ctx.soft_breaks,
+                    buf,
+                    viewport_rows,
+                ) {
                     self.drag_anchor_word = Some((s, e));
                     self.drag_anchor_line = None;
                 }
                 Status::Capture
             }
             3 => {
-                if let Some((s, e)) = self.select_line_at(cpos, ctx.hard_breaks, buf, viewport_rows)
+                if let Some((s, e)) =
+                    self.select_line_at(click_byte, ctx.hard_breaks, buf, viewport_rows)
                 {
                     self.drag_anchor_line = Some((s, e));
                     self.drag_anchor_word = None;
@@ -659,7 +726,7 @@ impl Window {
                 {
                     self.vim_state.set_mode(&mut self.vim_mode, VimMode::Normal);
                 }
-                self.pending_press = Some(cpos);
+                self.pending_press = Some(click_byte);
                 Status::Capture
             }
         }
@@ -686,7 +753,8 @@ impl Window {
             .saturating_sub(ctx.viewport.rect.left)
             .min(ctx.viewport.content_width.saturating_sub(1));
         let line_idx = (self.scroll_top as usize + rel_row as usize).min(rows.len() - 1);
-        self.jump_to_line_col(buf, line_idx, rel_col as usize, viewport_rows);
+        let drag_byte = buf.byte_at_display_pos(line_idx, rel_col as usize);
+        self.drag_endpoint = Some(drag_byte);
 
         if self.drag_anchor_word.is_some() {
             self.extend_word_anchored_drag(buf, ctx, text);
@@ -700,9 +768,8 @@ impl Window {
                 } else {
                     self.selection_anchor = Some(press);
                 }
-            }
-            if !self.vim_enabled {
-                self.extend_selection(self.cpos);
+            } else if !self.vim_enabled {
+                self.extend_selection(self.effective_endpoint());
             }
         }
         Status::Consumed
@@ -711,15 +778,15 @@ impl Window {
     /// Selection byte range before `mouse_up` clears anchors; `None` if empty or absent.
     fn mouse_yank_range(
         &self,
-        buf: &Buffer,
+        _buf: &Buffer,
         _ctx: &MouseCtx,
         text: &str,
     ) -> Option<(usize, usize)> {
-        let cpos = self.compute_cpos(buf);
+        let endpoint = self.effective_endpoint();
         let (start, end) = if self.vim_enabled {
-            vim::visual_range(&self.vim_state, text, cpos, self.vim_mode)?
+            vim::visual_range(&self.vim_state, text, endpoint, self.vim_mode)?
         } else {
-            self.selection_range_at(cpos, text)?
+            self.selection_range_at(endpoint, text)?
         };
         if start >= end {
             return None;
@@ -727,9 +794,18 @@ impl Window {
         Some((start, end))
     }
 
-    fn mouse_up(&mut self) -> Status {
+    fn mouse_up(&mut self, buf: &Buffer, viewport_rows: u16) -> Status {
         if self.vim_enabled && matches!(self.vim_mode, VimMode::Visual | VimMode::VisualLine) {
             self.vim_state.set_mode(&mut self.vim_mode, VimMode::Normal);
+        }
+        // Commit-or-discard the drag endpoint: buffer-like leaves (cursor follows
+        // mouse) push it to `cpos`; list/static leaves drop it and let `cpos` stay
+        // where j/k or the leaf owner last placed it.
+        if let Some(end) = self.drag_endpoint.take() {
+            if self.cursor_follows_mouse {
+                self.cpos = end;
+                self.sync_from_cpos(buf, viewport_rows);
+            }
         }
         self.selection_anchor = None;
         self.drag_anchor_word = None;
@@ -739,15 +815,15 @@ impl Window {
     }
 
     /// Extend drag by WORD units, keeping the original double-clicked word inside the selection.
-    fn extend_word_anchored_drag(&mut self, buf: &Buffer, ctx: &MouseCtx, text: &str) {
+    fn extend_word_anchored_drag(&mut self, _buf: &Buffer, ctx: &MouseCtx, text: &str) {
         let Some((ws, we)) = self.drag_anchor_word else {
             return;
         };
         // Vim cursor sits on the last char's start byte; `prev_char_boundary`
         // is the correct step for ASCII and multibyte alike.
         let last_of = |end: usize| smelt_buffer::text::prev_char_boundary(text, end).max(ws);
-        let p = self.compute_cpos(buf);
-        let (new_cpos, new_anchor) = if p >= we {
+        let p = self.effective_endpoint();
+        let (new_endpoint, new_anchor) = if p >= we {
             let far = super::text::word_range_at_transparent(text, p, ctx.soft_breaks)
                 .map(|(_, e)| last_of(e))
                 .unwrap_or_else(|| p.max(last_of(we)));
@@ -760,7 +836,7 @@ impl Window {
         } else {
             (last_of(we), ws)
         };
-        self.cpos = new_cpos;
+        self.drag_endpoint = Some(new_endpoint);
         if self.vim_enabled {
             self.vim_state
                 .begin_visual(&mut self.vim_mode, VimMode::Visual, new_anchor);
@@ -769,13 +845,13 @@ impl Window {
         }
     }
 
-    fn extend_line_anchored_drag(&mut self, buf: &Buffer, ctx: &MouseCtx, text: &str) {
+    fn extend_line_anchored_drag(&mut self, _buf: &Buffer, ctx: &MouseCtx, text: &str) {
         let Some((ls, le)) = self.drag_anchor_line else {
             return;
         };
         let last_of = |end: usize| smelt_buffer::text::prev_char_boundary(text, end).max(ls);
-        let p = self.compute_cpos(buf);
-        let (new_cpos, new_anchor) = if p >= le {
+        let p = self.effective_endpoint();
+        let (new_endpoint, new_anchor) = if p >= le {
             let far = super::text::line_range_at(text, p, ctx.hard_breaks)
                 .map(|(_, e)| last_of(e))
                 .unwrap_or_else(|| p.max(last_of(le)));
@@ -788,7 +864,7 @@ impl Window {
         } else {
             (last_of(le), ls)
         };
-        self.cpos = new_cpos;
+        self.drag_endpoint = Some(new_endpoint);
         if self.vim_enabled {
             self.vim_state
                 .begin_visual(&mut self.vim_mode, VimMode::Visual, new_anchor);
@@ -963,10 +1039,14 @@ impl Window {
             .min(width.saturating_sub(pad_left));
         let content_width = width.saturating_sub(pad_left).saturating_sub(pad_right);
         // `cursor_line_highlight` paints `CursorLine` bg under the cursor row.
-        // The buffer cursor lives at `cursor_row`, which converts to a screen row via
-        // `cursor_screen_row`; off-screen → no highlight row.
+        // During an active mouse drag-select the rendered row tracks `drag_endpoint`
+        // so the user sees the highlight slide with the cursor; otherwise it sits at
+        // `cursor_row`. Off-screen → no highlight row.
         let cursor_screen_row = if self.cursor_line_highlight {
-            self.cursor_screen_row(height)
+            let effective_row = self.effective_cursor_row(buf);
+            effective_row
+                .checked_sub(self.scroll_top)
+                .filter(|rel| *rel < height)
         } else {
             None
         };
@@ -1130,26 +1210,37 @@ impl Window {
             paint_scrollbar(slice, viewport, &ctx.theme);
         }
 
-        if ctx.focused {
-            if let CursorShape::Block { glyph, style, pos } = ctx.cursor_shape {
-                let resolved = pos.or_else(|| {
-                    self.cursor_screen_row(height)
-                        .map(|row| (self.cursor_col, row))
-                });
-                if let Some((col, screen_row)) = resolved {
-                    if col < content_width && screen_row < height {
-                        // Preserve the underlying character when there is one — block-cursor
-                        // semantics are "invert the cell," not "stamp a glyph." Empty cells
-                        // (past EOL, blank gutters) fall back to `glyph` so callers control
-                        // what shows when there's nothing under the cursor.
-                        let under = slice.cell(pad_left + col, screen_row).symbol;
-                        let painted = if under == '\0' || under == ' ' {
-                            glyph
-                        } else {
-                            under
-                        };
-                        slice.set(pad_left + col, screen_row, painted, style);
-                    }
+        // `ctx.cursor_shape == Block` reaches this leaf only when it is the
+        // `Ui::active_cursor_leaf` for the frame (drag-active leaf, else focus) —
+        // exactly one leaf paints a block per frame. Position derives from
+        // `effective_endpoint`: `drag_endpoint` during a drag (so the cursor tracks
+        // the mouse, even on non-focusable leaves like notifications), `cpos`
+        // otherwise.
+        if let CursorShape::Block { glyph, style, pos } = ctx.cursor_shape {
+            let resolved = pos.or_else(|| {
+                let (logical_row, logical_col) = {
+                    let end = self.effective_endpoint();
+                    let (r, c) = buf.display_cursor_pos(end);
+                    (r as u16, c as u16)
+                };
+                logical_row
+                    .checked_sub(self.scroll_top)
+                    .filter(|rel| *rel < height)
+                    .map(|screen_row| (logical_col, screen_row))
+            });
+            if let Some((col, screen_row)) = resolved {
+                if col < content_width && screen_row < height {
+                    // Preserve the underlying character when there is one — block-cursor
+                    // semantics are "invert the cell," not "stamp a glyph." Empty cells
+                    // (past EOL, blank gutters) fall back to `glyph` so callers control
+                    // what shows when there's nothing under the cursor.
+                    let under = slice.cell(pad_left + col, screen_row).symbol;
+                    let painted = if under == '\0' || under == ' ' {
+                        glyph
+                    } else {
+                        under
+                    };
+                    slice.set(pad_left + col, screen_row, painted, style);
                 }
             }
         }
@@ -1524,7 +1615,7 @@ mod tests {
     }
 
     #[test]
-    fn click_positions_cursor_and_captures() {
+    fn click_stages_press_and_captures_without_moving_cpos() {
         let mut w = make_win();
         w.set_vim_mode(VimMode::Normal);
         let rows: Vec<String> = vec!["hello world".into(), "second line".into()];
@@ -1536,6 +1627,7 @@ mod tests {
             viewport: viewport_for(&rows, rect),
             click_count: 1,
         };
+        let click_byte = buf.byte_at_display_pos(1, 7);
         let (r, yank) = w.handle_mouse(
             &buf,
             click_event(MouseEventKind::Down(MouseButton::Left), 1, 7),
@@ -1543,12 +1635,15 @@ mod tests {
         );
         assert_eq!(r, Status::Capture);
         assert!(yank.is_none());
-        assert_eq!(w.cursor_row, 1);
-        assert_eq!(w.cursor_col, 7);
-        // Single-click Down stages a press but does not yet open a selection;
-        // the first Drag promotes `pending_press` into a selection anchor.
+        // Non-vim Down does not write `cpos` — it stashes the click byte in
+        // `pending_press` and parks it in `drag_endpoint` for visual feedback.
+        // `cpos` is committed only on Up, and only when `cursor_follows_mouse`.
+        assert_eq!(w.cpos, 0);
+        assert_eq!(w.cursor_row, 0);
+        assert_eq!(w.cursor_col, 0);
+        assert_eq!(w.pending_press, Some(click_byte));
+        assert_eq!(w.drag_endpoint, Some(click_byte));
         assert!(w.selection_anchor.is_none());
-        assert_eq!(w.pending_press, Some(w.cpos));
     }
 
     #[test]
@@ -1910,6 +2005,9 @@ mod tests {
         let mut buf = Buffer::new(BufId(1), BufCreateOpts::default());
         buf.set_all_lines(vec!["abc".into()]);
         let mut w = make_win();
+        // Block cursor position derives from `effective_endpoint` (cpos when no
+        // drag), so set cpos to the byte for column 1 of "abc".
+        w.cpos = 1;
         w.cursor_row = 0;
         w.cursor_col = 1;
         let cursor_style = crate::grid::Style::new().bg(crate::grid::Color::White);
@@ -1932,36 +2030,40 @@ mod tests {
     }
 
     #[test]
-    fn render_skips_block_cursor_when_unfocused() {
-        // Block cursor only paints on the focused window — non-focused
-        // windows (other splits, overlay leaves under modals) ignore
-        // the global cursor_shape.
+    fn render_skips_block_cursor_when_cursor_shape_hidden() {
+        // The render dispatch (`Ui::render_with_paints`) sets `cursor_shape` to
+        // `Hidden` on every leaf that isn't `Ui::active_cursor_leaf`, so exactly
+        // one leaf paints a block per frame. `Window::render` trusts that gate
+        // and paints if-and-only-if it receives a `Block` shape — the previous
+        // `ctx.focused` guard was redundant.
         let mut buf = Buffer::new(BufId(1), BufCreateOpts::default());
         buf.set_all_lines(vec!["abc".into()]);
         let mut w = make_win();
+        w.cpos = 1;
         w.cursor_row = 0;
         w.cursor_col = 1;
         let mut ctx = ctx();
         ctx.focused = false;
-        ctx.cursor_shape = CursorShape::Block {
-            glyph: 'X',
-            style: crate::grid::Style::default(),
-            pos: None,
-        };
+        ctx.cursor_shape = CursorShape::Hidden;
         let mut grid = Grid::new(10, 1);
         let mut slice = grid.slice_mut(Rect::new(0, 0, 10, 1));
         w.render(&buf, &mut slice, &ctx);
-        // Buffer text stays; no `X` painted.
+        // Buffer text stays; no block painted.
         assert_eq!(grid.cell(1, 0).symbol, 'b');
     }
 
     #[test]
     fn render_block_cursor_outside_slice_is_clipped() {
+        // Block cursor row derives from `effective_endpoint`'s projection.
+        // When `scroll_top` is past the cursor's logical row, the screen-row
+        // subtraction underflows and the block is clipped to nothing.
         let mut buf = Buffer::new(BufId(1), BufCreateOpts::default());
         buf.set_all_lines(vec!["abc".into()]);
         let mut w = make_win();
-        w.cursor_row = 5;
-        w.cursor_col = 99;
+        w.cpos = 1;
+        w.cursor_row = 0;
+        w.cursor_col = 1;
+        w.scroll_top = 100;
         let mut ctx = ctx();
         ctx.focused = true;
         ctx.cursor_shape = CursorShape::Block {
