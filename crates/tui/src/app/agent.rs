@@ -386,46 +386,15 @@ impl TuiApp {
     }
 
     pub(crate) fn resolve_api_key(&mut self) -> Option<String> {
-        if self.core.config.api_key_env.is_empty() {
-            return Some(String::new());
-        }
-        match std::env::var(&self.core.config.api_key_env) {
-            Ok(key) => Some(key),
-            Err(std::env::VarError::NotPresent) => {
-                self.notify_error(format!(
-                    "environment variable '{}' is not set but is required for API authentication",
-                    self.core.config.api_key_env
-                ));
-                None
-            }
-            Err(std::env::VarError::NotUnicode(_)) => {
-                self.notify_error(format!(
-                    "environment variable '{}' contains non-Unicode data and cannot be used as an API key",
-                    self.core.config.api_key_env
-                ));
-                None
-            }
-        }
+        let key_env = self.core.config.api_key_env.clone();
+        self.resolve_api_key_for_env(&key_env)
     }
 
     pub(crate) fn resolve_api_key_for_env(&mut self, key_env: &str) -> Option<String> {
-        if key_env.is_empty() {
-            return Some(String::new());
-        }
-        match std::env::var(key_env) {
+        match lookup_api_key(key_env, |v| std::env::var(v)) {
             Ok(key) => Some(key),
-            Err(std::env::VarError::NotPresent) => {
-                self.notify_error(format!(
-                    "environment variable '{}' is not set but is required for API authentication",
-                    key_env
-                ));
-                None
-            }
-            Err(std::env::VarError::NotUnicode(_)) => {
-                self.notify_error(format!(
-                    "environment variable '{}' contains non-Unicode data and cannot be used as an API key",
-                    key_env
-                ));
+            Err(err) => {
+                self.notify_error(err.message());
                 None
             }
         }
@@ -738,5 +707,127 @@ impl TuiApp {
                 true
             }
         }
+    }
+}
+
+/// Reason an API-key env lookup failed; carries enough context for the
+/// caller to surface a user-facing error.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum ApiKeyError {
+    /// The env var is not set in the process environment.
+    NotSet { var: String },
+    /// The env var exists but its bytes are not valid Unicode.
+    NotUnicode { var: String },
+}
+
+impl ApiKeyError {
+    pub(crate) fn message(&self) -> String {
+        match self {
+            ApiKeyError::NotSet { var } => format!(
+                "environment variable '{var}' is not set but is required for API authentication"
+            ),
+            ApiKeyError::NotUnicode { var } => format!(
+                "environment variable '{var}' contains non-Unicode data and cannot be used as an API key"
+            ),
+        }
+    }
+}
+
+/// Look up an API key value via the injected `get_env` resolver.
+///
+/// An empty `key_env` is treated as "no auth required" and returns an empty
+/// key. Otherwise the resolver is queried; `VarError::NotPresent` and
+/// `NotUnicode` map to typed errors so the dispatcher can format a stable
+/// user-facing message.
+///
+/// The resolver indirection keeps tests off the process-global env.
+pub(crate) fn lookup_api_key(
+    key_env: &str,
+    get_env: impl FnOnce(&str) -> Result<String, std::env::VarError>,
+) -> Result<String, ApiKeyError> {
+    if key_env.is_empty() {
+        return Ok(String::new());
+    }
+    match get_env(key_env) {
+        Ok(key) => Ok(key),
+        Err(std::env::VarError::NotPresent) => Err(ApiKeyError::NotSet {
+            var: key_env.to_string(),
+        }),
+        Err(std::env::VarError::NotUnicode(_)) => Err(ApiKeyError::NotUnicode {
+            var: key_env.to_string(),
+        }),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn empty_key_env_returns_empty_string_without_consulting_environment() {
+        // Callers configured with no API key (e.g. local-only models) hit
+        // this path; the resolver must never be invoked.
+        let mut called = false;
+        let out = lookup_api_key("", |_| {
+            called = true;
+            Ok("nope".into())
+        });
+        assert_eq!(out, Ok(String::new()));
+        assert!(!called, "resolver should be skipped for empty key_env");
+    }
+
+    #[test]
+    fn nonempty_key_env_returns_resolved_value() {
+        let out = lookup_api_key("MY_KEY", |var| {
+            assert_eq!(var, "MY_KEY");
+            Ok("secret".into())
+        });
+        assert_eq!(out, Ok("secret".into()));
+    }
+
+    #[test]
+    fn missing_env_var_maps_to_not_set_error_with_var_name() {
+        let out = lookup_api_key("MY_KEY", |_| Err(std::env::VarError::NotPresent));
+        assert_eq!(
+            out,
+            Err(ApiKeyError::NotSet {
+                var: "MY_KEY".into()
+            })
+        );
+    }
+
+    #[test]
+    fn non_unicode_env_var_maps_to_not_unicode_error() {
+        // `std::env::VarError::NotUnicode` carries an `OsString`; we don't
+        // care about its payload — only the variant matters for our message.
+        let out = lookup_api_key("MY_KEY", |_| {
+            Err(std::env::VarError::NotUnicode(std::ffi::OsString::new()))
+        });
+        assert_eq!(
+            out,
+            Err(ApiKeyError::NotUnicode {
+                var: "MY_KEY".into()
+            })
+        );
+    }
+
+    #[test]
+    fn not_set_error_message_names_the_missing_var() {
+        let msg = ApiKeyError::NotSet {
+            var: "OPENAI_API_KEY".into(),
+        }
+        .message();
+        assert!(msg.contains("OPENAI_API_KEY"));
+        assert!(msg.contains("not set"));
+    }
+
+    #[test]
+    fn not_unicode_error_message_names_the_var() {
+        let msg = ApiKeyError::NotUnicode {
+            var: "WEIRD_KEY".into(),
+        }
+        .message();
+        assert!(msg.contains("WEIRD_KEY"));
+        assert!(msg.contains("non-Unicode"));
     }
 }
