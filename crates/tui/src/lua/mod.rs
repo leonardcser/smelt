@@ -778,7 +778,14 @@ mod tests {
             .unwrap();
         let mut args = std::collections::HashMap::new();
         args.insert("who".into(), serde_json::json!("world"));
-        match rt.execute_tool("echo", &args, 1, "c1", test_env()) {
+        match rt.execute_tool(
+            "echo",
+            &args,
+            1,
+            "c1",
+            test_env(),
+            std::time::Instant::now(),
+        ) {
             ToolExecResult::Immediate { content, is_error } => {
                 assert_eq!(content, "hi world");
                 assert!(!is_error);
@@ -807,12 +814,19 @@ mod tests {
             .exec()
             .unwrap();
         let args = std::collections::HashMap::new();
-        match rt.execute_tool("wait_then_yes", &args, 7, "c9", test_env()) {
+        match rt.execute_tool(
+            "wait_then_yes",
+            &args,
+            7,
+            "c9",
+            test_env(),
+            std::time::Instant::now(),
+        ) {
             ToolExecResult::Pending => {}
             ToolExecResult::Immediate { .. } => panic!("expected pending after yield"),
         }
         // sleep(0) is elapsed; task resumes and completes.
-        let outs = rt.drive_tasks();
+        let outs = rt.drive_tasks(std::time::Instant::now());
         let complete = outs
             .iter()
             .find(|o| matches!(o, TaskDriveOutput::ToolComplete { .. }))

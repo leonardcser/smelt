@@ -135,7 +135,7 @@ impl TuiApp {
 
     pub(crate) fn drive_lua_tasks(&mut self) {
         self.flush_lua_callbacks();
-        let outs = self.lua.drive_tasks();
+        let outs = self.lua.drive_tasks(self.core.clock.instant_now());
         // Drain ops pushed before the coroutine yielded so `OpenLuaDialog` sees created buffers.
         self.flush_lua_callbacks();
         for out in outs {

@@ -449,7 +449,7 @@ impl TuiApp {
 
     /// Fire due timer callbacks; re-arms recurring entries and drops one-shots.
     pub(crate) fn tick_timers(&mut self) {
-        let now = std::time::Instant::now();
+        let now = self.core.clock.instant_now();
         let due = self.core.timers.drain_due(now, self.lua.lua());
         for func in due {
             let _perf = smelt_perf::perf::begin("lua:timer");
@@ -468,7 +468,10 @@ impl TuiApp {
         self.core
             .cells
             .publish_if_changed("confirms_pending", !self.core.confirms.is_clear());
-        let now_secs = std::time::SystemTime::now()
+        let now_secs = self
+            .core
+            .clock
+            .system_now()
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_secs())
             .unwrap_or(0);

@@ -786,11 +786,11 @@ impl LuaRuntime {
         rt.cancel_all(&self.lua);
     }
 
-    pub fn drive_tasks(&self) -> Vec<TaskDriveOutput> {
+    pub fn drive_tasks(&self, now: Instant) -> Vec<TaskDriveOutput> {
         let Ok(mut rt) = self.shared.tasks.lock() else {
             return Vec::new();
         };
-        let outs = rt.drive(&self.lua, Instant::now());
+        let outs = rt.drive(&self.lua, now);
         let mut forward = Vec::with_capacity(outs.len());
         for out in outs {
             match out {
@@ -1277,6 +1277,7 @@ impl LuaRuntime {
         request_id: u64,
         call_id: &str,
         env: ToolEnv<'_>,
+        now: Instant,
     ) -> ToolExecResult {
         let ToolEnv {
             mode,
@@ -1362,7 +1363,7 @@ impl LuaRuntime {
                 is_error: true,
             };
         }
-        let outputs = rt.drive(&self.lua, Instant::now());
+        let outputs = rt.drive(&self.lua, now);
         drop(rt);
 
         let mut immediate: Option<(String, bool)> = None;

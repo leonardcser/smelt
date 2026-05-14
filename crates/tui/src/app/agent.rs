@@ -367,6 +367,7 @@ impl TuiApp {
                 session_id: &session_id,
                 session_dir: &session_dir,
             },
+            self.core.clock.instant_now(),
         ) {
             crate::lua::ToolExecResult::Immediate { content, is_error } => {
                 self.core.engine.send(protocol::UiCommand::ToolResult {
