@@ -640,7 +640,11 @@ impl LuaRuntime {
         self.shared
             .commands
             .lock()
-            .map(|m| m.keys().cloned().collect())
+            .map(|m| {
+                let mut v: Vec<String> = m.keys().cloned().collect();
+                v.sort();
+                v
+            })
             .unwrap_or_default()
     }
 
@@ -799,8 +803,11 @@ impl LuaRuntime {
 
     pub fn tool_defs(&self, _mode: protocol::AgentMode) -> Vec<protocol::ToolDef> {
         let handlers = self.shared.tools.lock().unwrap_or_else(|e| e.into_inner());
+        let mut names: Vec<String> = handlers.keys().cloned().collect();
+        drop(handlers);
+        names.sort();
         let mut defs = Vec::new();
-        for name in handlers.keys() {
+        for name in &names {
             if let Ok(meta_table) = self
                 .lua
                 .named_registry_value::<mlua::Table>(&format!("__pt_meta_{name}"))

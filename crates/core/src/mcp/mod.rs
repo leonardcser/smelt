@@ -298,8 +298,15 @@ impl McpManager {
     }
 
     /// Snapshot of every discovered tool across every connected server.
+    /// Sorted by `(server_name, tool_name)` so callers see a stable order
+    /// despite the underlying `HashMap`.
     pub fn tool_defs(&self) -> Vec<McpToolDef> {
-        self.servers.values().flat_map(|s| s.tools()).collect()
+        let mut defs: Vec<McpToolDef> = self.servers.values().flat_map(|s| s.tools()).collect();
+        defs.sort_by(|a, b| {
+            (a.server_name.as_str(), a.tool_name.as_str())
+                .cmp(&(b.server_name.as_str(), b.tool_name.as_str()))
+        });
+        defs
     }
 
     /// Dispatch a tool call to the appropriate server.

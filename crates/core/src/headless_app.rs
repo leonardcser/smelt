@@ -136,10 +136,9 @@ impl HeadlessApp {
                         tool_name,
                         args,
                     } => {
-                        let summary = format!(
-                            "{tool_name}({})",
-                            args.keys().cloned().collect::<Vec<_>>().join(", ")
-                        );
+                        let mut arg_keys: Vec<String> = args.keys().cloned().collect();
+                        arg_keys.sort();
+                        let summary = format!("{tool_name}({})", arg_keys.join(", "));
                         pending_tools.insert(call_id, (tool_name, summary, String::new()));
                     }
                     EngineEvent::ToolOutput { call_id, chunk } if self.sink.verbose => {
