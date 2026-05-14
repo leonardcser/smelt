@@ -2,7 +2,9 @@ use crate::compact::{self, CompactOptions, CompactPhase, CompactReason, InitialC
 use crate::log;
 use crate::provider::{self, ChatOptions, FunctionSchema, Provider, ProviderError, ToolDefinition};
 use crate::tools::{ToolContext, ToolDispatcher, ToolResult};
-use crate::{ApiConfig, AuxiliaryTask, EngineConfig, ModelConfig};
+use crate::{ApiConfig, AuxiliaryTask, EngineConfig};
+#[cfg(test)]
+use crate::ModelConfig;
 use protocol::Decision;
 use protocol::{
     AgentMode, Content, EngineEvent, Message, ReasoningEffort, Role, ToolOutcome, TurnMeta,
@@ -54,13 +56,11 @@ pub(crate) async fn engine_task(
                             system_prompt: tui_system_prompt, tools,
                         } = *payload;
 
-                        let mut provider = build_provider_with_overrides(
-                            &config, &client,
+                        let provider = build_provider(
+                            &config.api, &client,
                             api_base.as_deref(), api_key.as_deref(),
+                            model_config_overrides.as_ref(),
                         );
-                        if let Some(overrides) = model_config_overrides {
-                            provider.apply_model_overrides(&overrides);
-                        }
                         let skill_section = config.skills.as_ref().and_then(|s| s.prompt_section());
                         let system_prompt = tui_system_prompt
                             .or_else(|| config.system_prompt_override.clone())
@@ -98,7 +98,7 @@ pub(crate) async fn engine_task(
                     }
                     UiCommand::Compact { history, instructions } => {
                         let request = config.aux_or_primary(AuxiliaryTask::Compaction);
-                        let provider = build_provider_from_api(&request.api, &client);
+                        let provider = build_provider(&request.api, &client, None, None, None);
                         let cancel = crate::cancel::CancellationToken::new();
                         match compact::run_compact(
                             &provider,
@@ -189,7 +189,7 @@ fn spawn_title_generation(
     event_tx: &mpsc::UnboundedSender<EngineEvent>,
 ) {
     let request = config.aux_or_primary(AuxiliaryTask::Title);
-    let provider = build_provider_from_api(&request.api, client);
+    let provider = build_provider(&request.api, client, None, None, None);
     let pricing = PricingContext::from_api(&request.api);
     let model = request.model;
     let tx = event_tx.clone();
@@ -258,7 +258,7 @@ fn spawn_btw_request(
     event_tx: &mpsc::UnboundedSender<EngineEvent>,
 ) {
     let request = config.aux_or_primary(AuxiliaryTask::Btw);
-    let provider = build_provider_from_api(&request.api, client);
+    let provider = build_provider(&request.api, client, None, None, None);
     let pricing = PricingContext::from_api(&request.api);
     let model = request.model;
     let tx = event_tx.clone();
@@ -311,7 +311,7 @@ fn spawn_engine_ask(
     event_tx: &mpsc::UnboundedSender<EngineEvent>,
 ) {
     let request = config.aux_or_primary(task);
-    let provider = build_provider_from_api(&request.api, client);
+    let provider = build_provider(&request.api, client, None, None, None);
     let pricing = PricingContext::from_api(&request.api);
     let model = request.model;
     let tx = event_tx.clone();
@@ -339,45 +339,24 @@ fn spawn_engine_ask(
     });
 }
 
-fn build_provider_from_api(api: &ApiConfig, client: &reqwest::Client) -> Provider {
-    build_provider(
-        &api.base,
-        &api.key,
-        &api.provider_type,
-        &api.model_config,
-        client,
-    )
-}
-
-fn build_provider_with_overrides(
-    config: &EngineConfig,
+fn build_provider(
+    api: &ApiConfig,
     client: &reqwest::Client,
     api_base: Option<&str>,
     api_key: Option<&str>,
+    model_overrides: Option<&protocol::ModelConfigOverrides>,
 ) -> Provider {
-    build_provider(
-        api_base.unwrap_or(&config.api.base),
-        api_key.unwrap_or(&config.api.key),
-        &config.api.provider_type,
-        &config.api.model_config,
-        client,
-    )
-}
-
-fn build_provider(
-    api_base: &str,
-    api_key: &str,
-    provider_type: &str,
-    model_config: &ModelConfig,
-    client: &reqwest::Client,
-) -> Provider {
+    let model_config = match model_overrides {
+        Some(o) => api.model_config.clone().with_overrides(o),
+        None => api.model_config.clone(),
+    };
     Provider::new(
-        api_base.to_string(),
-        api_key.to_string(),
-        provider_type,
+        api_base.unwrap_or(&api.base).to_string(),
+        api_key.unwrap_or(&api.key).to_string(),
+        &api.provider_type,
         client.clone(),
     )
-    .with_model_config(model_config.clone())
+    .with_model_config(model_config)
 }
 
 // ── Turn ────────────────────────────────────────────────────────────────────
@@ -500,7 +479,7 @@ impl<'a> Turn<'a> {
             "first message should be the system prompt"
         );
         let request = self.config.aux_or_primary(AuxiliaryTask::Compaction);
-        let provider = build_provider_from_api(&request.api, self.http_client);
+        let provider = build_provider(&request.api, self.http_client, None, None, None);
         let result = compact::run_compact(
             &provider,
             &self.messages[1..],
@@ -1790,69 +1769,67 @@ mod tests {
 
     // ---- build_provider ----
 
-    fn engine_cfg_with(api: ApiConfig) -> EngineConfig {
-        EngineConfig {
-            api,
-            model: "m".into(),
-            auxiliary: crate::AuxiliaryModelConfig::default(),
-            instructions: None,
-            system_prompt_override: None,
-            cwd: std::path::PathBuf::from("/"),
-            skills: None,
-            auto_compact: false,
-            context_window: None,
-            redact_secrets: false,
-        }
-    }
-
     #[test]
     fn build_provider_strips_trailing_slash_from_api_base() {
-        let p = build_provider(
-            "https://x/",
-            "k",
-            "openai",
-            &ModelConfig::default(),
-            &reqwest::Client::new(),
-        );
+        let api = ApiConfig {
+            base: "https://x/".into(),
+            ..api_cfg()
+        };
+        let p = build_provider(&api, &reqwest::Client::new(), None, None, None);
         assert_eq!(p.api_base(), "https://x");
         assert_eq!(p.api_key(), "k");
     }
 
     #[test]
-    fn build_provider_from_api_delegates_to_build_provider() {
+    fn build_provider_uses_api_base_and_key_overrides_when_some() {
         let api = ApiConfig {
-            base: "https://api.example.com/".into(),
-            ..api_cfg()
-        };
-        let p = build_provider_from_api(&api, &reqwest::Client::new());
-        assert_eq!(p.api_base(), "https://api.example.com");
-        assert_eq!(p.api_key(), "k");
-    }
-
-    #[test]
-    fn build_provider_with_overrides_uses_override_values_when_some() {
-        let config = engine_cfg_with(ApiConfig {
             base: "default-base".into(),
             key: "default-key".into(),
             ..api_cfg()
-        });
-        let client = reqwest::Client::new();
-        let p = build_provider_with_overrides(&config, &client, Some("override-base/"), Some("ok"));
+        };
+        let p = build_provider(
+            &api,
+            &reqwest::Client::new(),
+            Some("override-base/"),
+            Some("ok"),
+            None,
+        );
         assert_eq!(p.api_base(), "override-base");
         assert_eq!(p.api_key(), "ok");
     }
 
     #[test]
-    fn build_provider_with_overrides_falls_back_to_config_when_none() {
-        let config = engine_cfg_with(ApiConfig {
+    fn build_provider_falls_back_to_api_fields_when_overrides_none() {
+        let api = ApiConfig {
             base: "fallback-base/".into(),
             key: "fallback-key".into(),
             ..api_cfg()
-        });
-        let client = reqwest::Client::new();
-        let p = build_provider_with_overrides(&config, &client, None, None);
+        };
+        let p = build_provider(&api, &reqwest::Client::new(), None, None, None);
         assert_eq!(p.api_base(), "fallback-base");
         assert_eq!(p.api_key(), "fallback-key");
+    }
+
+    #[test]
+    fn build_provider_applies_model_overrides_when_some() {
+        let api = ApiConfig {
+            model_config: ModelConfig {
+                temperature: Some(0.1),
+                top_p: Some(0.2),
+                ..Default::default()
+            },
+            ..api_cfg()
+        };
+        let overrides = protocol::ModelConfigOverrides {
+            temperature: Some(0.9),
+            top_k: Some(7),
+            ..Default::default()
+        };
+        let p = build_provider(&api, &reqwest::Client::new(), None, None, Some(&overrides));
+        let cfg = p.model_config_for_test();
+        assert_eq!(cfg.temperature, Some(0.9));
+        assert_eq!(cfg.top_p, Some(0.2));
+        assert_eq!(cfg.top_k, Some(7));
     }
 
     // ---- send_usage / emit_usage_background ----

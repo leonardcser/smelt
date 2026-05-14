@@ -24,4 +24,23 @@ impl ModelConfig {
     pub(crate) fn tool_calling(&self) -> bool {
         self.tool_calling.unwrap_or(true)
     }
+
+    pub(crate) fn with_overrides(mut self, overrides: &protocol::ModelConfigOverrides) -> Self {
+        if let Some(v) = overrides.temperature {
+            self.temperature = Some(v);
+        }
+        if let Some(v) = overrides.top_p {
+            self.top_p = Some(v);
+        }
+        if let Some(v) = overrides.top_k {
+            self.top_k = Some(v);
+        }
+        if let Some(v) = overrides.min_p {
+            self.min_p = Some(v);
+        }
+        if let Some(v) = overrides.repeat_penalty {
+            self.repeat_penalty = Some(v);
+        }
+        self
+    }
 }

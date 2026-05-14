@@ -406,6 +406,11 @@ impl Provider {
         &self.api_key
     }
 
+    #[cfg(test)]
+    pub(crate) fn model_config_for_test(&self) -> &crate::config::ModelConfig {
+        &self.model_config
+    }
+
     pub(crate) fn with_model_config(mut self, config: crate::config::ModelConfig) -> Self {
         self.model_config = config;
         self
@@ -413,24 +418,6 @@ impl Provider {
 
     pub(crate) fn tool_calling(&self) -> bool {
         self.model_config.tool_calling()
-    }
-
-    pub(crate) fn apply_model_overrides(&mut self, overrides: &protocol::ModelConfigOverrides) {
-        if let Some(v) = overrides.temperature {
-            self.model_config.temperature = Some(v);
-        }
-        if let Some(v) = overrides.top_p {
-            self.model_config.top_p = Some(v);
-        }
-        if let Some(v) = overrides.top_k {
-            self.model_config.top_k = Some(v);
-        }
-        if let Some(v) = overrides.min_p {
-            self.model_config.min_p = Some(v);
-        }
-        if let Some(v) = overrides.repeat_penalty {
-            self.model_config.repeat_penalty = Some(v);
-        }
     }
 
     pub(crate) async fn chat(
@@ -1694,21 +1681,36 @@ mod tests {
     }
 
     #[test]
-    fn provider_apply_model_overrides_threads_each_field() {
-        let mut p = Provider::new("".into(), "".into(), "openai", http_client());
-        let overrides = protocol::ModelConfigOverrides {
-            temperature: Some(0.1),
-            top_p: Some(0.2),
-            top_k: Some(3),
-            min_p: Some(0.4),
-            repeat_penalty: Some(1.5),
+    fn model_config_with_overrides_threads_each_field() {
+        let cfg =
+            crate::config::ModelConfig::default().with_overrides(&protocol::ModelConfigOverrides {
+                temperature: Some(0.1),
+                top_p: Some(0.2),
+                top_k: Some(3),
+                min_p: Some(0.4),
+                repeat_penalty: Some(1.5),
+            });
+        assert_eq!(cfg.temperature, Some(0.1));
+        assert_eq!(cfg.top_p, Some(0.2));
+        assert_eq!(cfg.top_k, Some(3));
+        assert_eq!(cfg.min_p, Some(0.4));
+        assert_eq!(cfg.repeat_penalty, Some(1.5));
+    }
+
+    #[test]
+    fn model_config_with_overrides_preserves_unset_override_fields() {
+        let base = crate::config::ModelConfig {
+            temperature: Some(0.5),
+            top_p: Some(0.8),
+            ..Default::default()
         };
-        p.apply_model_overrides(&overrides);
-        assert_eq!(p.model_config.temperature, Some(0.1));
-        assert_eq!(p.model_config.top_p, Some(0.2));
-        assert_eq!(p.model_config.top_k, Some(3));
-        assert_eq!(p.model_config.min_p, Some(0.4));
-        assert_eq!(p.model_config.repeat_penalty, Some(1.5));
+        let cfg = base.with_overrides(&protocol::ModelConfigOverrides {
+            top_k: Some(42),
+            ..Default::default()
+        });
+        assert_eq!(cfg.temperature, Some(0.5));
+        assert_eq!(cfg.top_p, Some(0.8));
+        assert_eq!(cfg.top_k, Some(42));
     }
 
     #[test]
