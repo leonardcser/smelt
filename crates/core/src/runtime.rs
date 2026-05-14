@@ -49,6 +49,10 @@ pub struct Core {
     /// Lua introspection reads through this handle without locking out
     /// the engine's tool dispatch path.
     pub mcp: Option<Arc<crate::mcp::McpManager>>,
+    /// Source of monotonic + wall-clock time. Same instance backs the engine
+    /// task in production; deterministic-simulation harnesses can swap in a
+    /// [`engine::clock::VirtualClock`].
+    pub clock: Arc<dyn engine::clock::Clock>,
 }
 
 impl Core {
@@ -57,6 +61,7 @@ impl Core {
         engine: EngineHandle,
         frontend: FrontendKind,
         permissions: Arc<crate::permissions::Permissions>,
+        clock: Arc<dyn engine::clock::Clock>,
     ) -> Self {
         let cwd = std::env::current_dir()
             .ok()
@@ -90,6 +95,7 @@ impl Core {
             processes: ProcessRegistry::new(),
             permissions,
             mcp: None,
+            clock,
         }
     }
 }

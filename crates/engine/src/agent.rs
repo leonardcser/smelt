@@ -93,7 +93,7 @@ pub(crate) async fn engine_task(
                             model,
                             system_prompt,
                             tools,
-                            started_at: Instant::now(),
+                            started_at: config.clock.instant_now(),
                             tps_samples: Vec::new(),
                             tool_elapsed: HashMap::new(),
                             context_window,
@@ -978,7 +978,7 @@ impl<'a> Turn<'a> {
             let args: HashMap<String, Value> =
                 serde_json::from_str(&tc.function.arguments).unwrap_or_default();
 
-            let tool_start = Instant::now();
+            let tool_start = self.config.clock.instant_now();
             self.emit(EngineEvent::ToolStarted {
                 call_id: tc.id.clone(),
                 tool_name: tc.function.name.clone(),

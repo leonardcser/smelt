@@ -142,6 +142,10 @@ pub struct EngineConfig {
     /// `None` causes the engine to fetch this from the provider API on first use.
     pub context_window: Option<u32>,
     pub redact_secrets: bool,
+    /// Source of monotonic + wall-clock time. Production uses
+    /// [`clock::RealClock`]; deterministic-simulation harnesses inject a
+    /// [`clock::VirtualClock`] so scenarios can replay against advanced time.
+    pub clock: Arc<dyn clock::Clock>,
 }
 
 pub use protocol::AuxiliaryTask;
@@ -398,6 +402,7 @@ mod tests {
             auto_compact: false,
             context_window: None,
             redact_secrets: false,
+            clock: Arc::new(clock::RealClock),
         }
     }
 

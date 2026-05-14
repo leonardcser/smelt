@@ -155,6 +155,7 @@ impl TestAppBuilder {
             None, // startup_auth_error
             lua,
             smelt_core::trust::TrustState::NoContent,
+            Arc::new(engine::clock::RealClock),
         );
 
         // init.lua may touch TUI surfaces (overlays / wins / bufs), so it

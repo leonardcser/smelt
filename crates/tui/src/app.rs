@@ -206,6 +206,7 @@ pub(crate) struct PendingTool {
 }
 
 impl TuiApp {
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         config: smelt_core::AppConfig,
         mut engine: EngineHandle,
@@ -214,6 +215,7 @@ impl TuiApp {
         startup_auth_error: Option<String>,
         lua: crate::lua::LuaRuntime,
         project_trust: smelt_core::trust::TrustState,
+        clock: Arc<dyn engine::clock::Clock>,
     ) -> Self {
         let host_rx = engine.take_host_rx();
         let mut input = PromptState::new();
@@ -372,7 +374,7 @@ impl TuiApp {
             )
         };
 
-        let core = smelt_core::Core::new(app_config, engine, FrontendKind::Tui, permissions);
+        let core = smelt_core::Core::new(app_config, engine, FrontendKind::Tui, permissions, clock);
         let (lua_wakeup_tx, lua_wakeup_rx) = tokio::sync::mpsc::unbounded_channel();
         let _ = lua.shared().wakeup_tx.set(lua_wakeup_tx);
         Self {
