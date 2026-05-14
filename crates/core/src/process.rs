@@ -315,6 +315,7 @@ impl ProcessRegistry {
         command: &str,
         mut child: tokio::process::Child,
         done_tx: mpsc::UnboundedSender<(String, Option<i32>)>,
+        now: Instant,
     ) {
         let stdout = child.stdout.take().unwrap();
         let stderr = child.stderr.take().unwrap();
@@ -331,7 +332,7 @@ impl ProcessRegistry {
                     finished: false,
                     exit_code: None,
                     command: command.to_string(),
-                    started_at: Instant::now(),
+                    started_at: now,
                     kill_tx: Some(kill_tx),
                 },
             );

@@ -101,8 +101,10 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
             &["command"],
             lua,
             move |_, command: String| -> LuaResult<String> {
-                let registry = crate::host::try_with_core(|core| core.processes.clone())
-                    .ok_or_else(|| mlua::Error::external("process.spawn_bg: app unavailable"))?;
+                let (registry, now) = crate::host::try_with_core(|core| {
+                    (core.processes.clone(), core.clock.instant_now())
+                })
+                .ok_or_else(|| mlua::Error::external("process.spawn_bg: app unavailable"))?;
                 let shell = current_shell_spec(&shared_spawn);
                 let mut cmd = tokio::process::Command::new(&shell.program);
                 for a in &shell.args {
@@ -119,7 +121,7 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
                     .map_err(|e| mlua::Error::external(e.to_string()))?;
                 let id = registry.next_id();
                 let (done_tx, _done_rx) = tokio::sync::mpsc::unbounded_channel();
-                registry.spawn(id.clone(), &command, child, done_tx);
+                registry.spawn(id.clone(), &command, child, done_tx, now);
                 Ok(id)
             },
         )?;
