@@ -19,6 +19,7 @@ pub mod history;
 pub mod host;
 pub mod html;
 pub mod http;
+pub mod keymap;
 pub mod lua;
 pub mod mcp;
 pub mod messages;

@@ -1,5 +1,4 @@
 pub(crate) mod agent;
-pub(crate) mod chord;
 pub(crate) mod cmdline;
 pub(crate) mod content_keys;
 pub(crate) mod engine_events;

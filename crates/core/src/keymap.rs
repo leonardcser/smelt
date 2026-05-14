@@ -1,21 +1,28 @@
-//! Pure decay-loop logic for multi-key Lua keymap chords.
+//! Frontend-agnostic keymap chord matching.
 //!
-//! The TUI's `dispatch_common` (see `app/events.rs`) feeds every key through
-//! a single-key match first, then accumulates leftover tokens into
-//! [`PendingChord`](crate::app::PendingChord) until they either resolve or
-//! time out. This module owns the *decision* half of that flow — independent
-//! of `TuiApp`, Lua, and the wall clock — so the chord state machine can be
-//! exercised directly in unit tests.
+//! A "chord" is a sequence of key tokens that progressively matches against
+//! a set of registered bindings. This module owns the *decision* half of
+//! that flow: given the current pending tokens and an oracle that can look
+//! up bindings, decide whether the chord was consumed, should wait for more
+//! input, or should be cleared.
 //!
-//! Glue code in `events.rs` builds a [`ChordOracle`] backed by `self.lua`,
-//! then calls [`match_chord`] with the accumulated tokens.
+//! The oracle abstraction keeps the matcher pluggable across frontends and
+//! storage backends. The TUI today wraps `mlua` behind a [`ChordOracle`]
+//! adapter; a future GUI frontend, a headless test harness, or an in-Rust
+//! registry would do the same.
+//!
+//! Per-frontend state (when a chord started, what mode was active, the
+//! pending sequence itself) lives in the frontend — only the matching
+//! algorithm is shared.
+//!
+//! See `tui::app::events::dispatch_common` for the live caller.
 
-use smelt_core::lua::runtime::KeymapResult;
+use crate::lua::runtime::KeymapResult;
 use std::time::{Duration, Instant};
 
-/// Pluggable lookup over the keymap registry. Tests use a fake; the real
-/// implementation in `events.rs` forwards to `self.lua`.
-pub(crate) trait ChordOracle {
+/// Pluggable lookup over a keymap binding store. Tests use a fake; the TUI
+/// implementation forwards to the live Lua keymap registry.
+pub trait ChordOracle {
     /// Is there at least one binding whose key sequence *extends* `seq`?
     fn has_longer(&self, seq: &str) -> bool;
 
@@ -26,7 +33,7 @@ pub(crate) trait ChordOracle {
 
 /// What the dispatcher should do after the chord step runs.
 #[derive(Debug, PartialEq, Eq)]
-pub(crate) enum ChordOutcome {
+pub enum ChordOutcome {
     /// A multi-key handler matched and consumed the chord. Clear pending state.
     Consumed,
     /// Either no handler matched and the decay drained, or a handler passed
@@ -36,7 +43,7 @@ pub(crate) enum ChordOutcome {
 }
 
 /// Run the decay-and-match loop on `tokens` against `oracle`. Mirrors the
-/// behaviour of the inline loop in `dispatch_common`:
+/// behaviour of the inline loop the TUI used to carry directly:
 ///
 /// 1. Concatenate `tokens` and ask the oracle to run that sequence as a
 ///    multi-key handler (only when `tokens.len() > 1`, since the caller
@@ -48,7 +55,7 @@ pub(crate) enum ChordOutcome {
 ///
 /// Returns the leftover tokens to persist as pending state. An empty vector
 /// means the chord is finished.
-pub(crate) fn match_chord(mut tokens: Vec<String>, oracle: &mut impl ChordOracle) -> ChordOutcome {
+pub fn match_chord(mut tokens: Vec<String>, oracle: &mut impl ChordOracle) -> ChordOutcome {
     loop {
         let seq: String = tokens.concat();
         let has_longer = oracle.has_longer(&seq);
@@ -79,7 +86,7 @@ pub(crate) fn match_chord(mut tokens: Vec<String>, oracle: &mut impl ChordOracle
 /// `true` when a chord started at `started` has been idle longer than the
 /// configured timeout and the dispatcher should treat the next key as a
 /// fresh chord.
-pub(crate) fn chord_expired(started: Instant, now: Instant, timeout_ms: u64) -> bool {
+pub fn chord_expired(started: Instant, now: Instant, timeout_ms: u64) -> bool {
     now.duration_since(started) >= Duration::from_millis(timeout_ms)
 }
 
@@ -119,7 +126,6 @@ mod tests {
         }
         fn try_keymap(&mut self, seq: &str) -> KeymapResult {
             self.calls.push(seq.to_string());
-            // Walk the script in order; first matching entry wins.
             for (s, r) in &self.script {
                 if s == seq {
                     return *r;
@@ -137,7 +143,6 @@ mod tests {
 
     #[test]
     fn single_token_with_no_longer_binding_clears_state() {
-        // One token, no possible extension → caller can drop pending chord.
         let mut o = FakeOracle::new();
         let out = match_chord(toks(["a"]), &mut o);
         assert_eq!(out, ChordOutcome::Pending { tokens: vec![] });
@@ -148,7 +153,6 @@ mod tests {
 
     #[test]
     fn single_token_with_longer_binding_keeps_pending() {
-        // `a` is a prefix of `ab`; keep waiting for the next key.
         let mut o = FakeOracle::new().with_prefix("ab");
         let out = match_chord(toks(["a"]), &mut o);
         assert_eq!(
@@ -164,7 +168,6 @@ mod tests {
         let mut o = FakeOracle::new().keymap("ab", KeymapResult::Consumed);
         let out = match_chord(toks(["a", "b"]), &mut o);
         assert_eq!(out, ChordOutcome::Consumed);
-        // Tried the full sequence and stopped.
         assert_eq!(o.calls, vec!["ab".to_string()]);
     }
 
@@ -191,19 +194,14 @@ mod tests {
 
     #[test]
     fn multi_token_no_binding_decays_oldest_token_and_retries() {
-        // `ab` has no binding and no longer extension; drop `a`, try `b`
-        // (single-key now, so loop doesn't call try_keymap), and exit.
         let mut o = FakeOracle::new();
         let out = match_chord(toks(["a", "b"]), &mut o);
         assert_eq!(out, ChordOutcome::Pending { tokens: vec![] });
-        // Only the multi-key attempt was made.
         assert_eq!(o.calls, vec!["ab".to_string()]);
     }
 
     #[test]
     fn decay_can_uncover_a_pending_prefix_with_the_newer_token() {
-        // `ab` is unbound; after dropping `a`, the remaining `b` is a
-        // prefix of `bc`, so we wait.
         let mut o = FakeOracle::new().with_prefix("bc");
         let out = match_chord(toks(["a", "b"]), &mut o);
         assert_eq!(
@@ -223,8 +221,6 @@ mod tests {
 
     #[test]
     fn three_token_chord_decays_through_each_suffix() {
-        // No binding at any level, no longer prefix anywhere; should try
-        // `xyz`, then `yz`, then stop (since `z` is single-key).
         let mut o = FakeOracle::new();
         let _ = match_chord(toks(["x", "y", "z"]), &mut o);
         assert_eq!(o.calls, vec!["xyz".to_string(), "yz".to_string()]);
@@ -232,8 +228,6 @@ mod tests {
 
     #[test]
     fn longer_binding_short_circuits_the_decay_loop() {
-        // `xyz` has no binding but `xyzw` does → after the no-binding miss
-        // we should NOT decay, because has_longer is true.
         let mut o = FakeOracle::new().with_prefix("xyzw");
         let out = match_chord(toks(["x", "y", "z"]), &mut o);
         assert_eq!(

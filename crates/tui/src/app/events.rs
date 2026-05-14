@@ -242,7 +242,7 @@ impl TuiApp {
                 // Multi-key chord: drop stale pending sequence, then append and match.
                 let now = Instant::now();
                 if let Some(pending) = &t.pending_chord {
-                    if crate::app::chord::chord_expired(
+                    if smelt_core::keymap::chord_expired(
                         pending.started,
                         now,
                         crate::app::CHORD_TIMEOUT_MS,
@@ -272,13 +272,13 @@ impl TuiApp {
                     vim_mode: vim_mode.as_deref(),
                     vim_mode_at_start,
                 };
-                let outcome = crate::app::chord::match_chord(tokens, &mut oracle);
+                let outcome = smelt_core::keymap::match_chord(tokens, &mut oracle);
                 self.flush_lua_callbacks();
                 match outcome {
-                    crate::app::chord::ChordOutcome::Consumed => {
+                    smelt_core::keymap::ChordOutcome::Consumed => {
                         return Some(EventOutcome::Noop);
                     }
-                    crate::app::chord::ChordOutcome::Pending { tokens } => {
+                    smelt_core::keymap::ChordOutcome::Pending { tokens } => {
                         if tokens.is_empty() {
                             t.pending_chord = None;
                         } else {
@@ -874,7 +874,7 @@ impl TuiApp {
     }
 }
 
-/// Adapter that lets the pure [`crate::app::chord::match_chord`] loop call
+/// Adapter that lets the pure [`smelt_core::keymap::match_chord`] loop call
 /// into the live Lua keymap registry. Carries the `vim_mode_at_chord_start`
 /// context pair that handlers see on multi-key matches.
 struct LuaChordOracle<'a> {
@@ -883,7 +883,7 @@ struct LuaChordOracle<'a> {
     vim_mode_at_start: Option<crate::smelt_term::VimMode>,
 }
 
-impl crate::app::chord::ChordOracle for LuaChordOracle<'_> {
+impl smelt_core::keymap::ChordOracle for LuaChordOracle<'_> {
     fn has_longer(&self, seq: &str) -> bool {
         self.lua.chord_has_longer(seq, self.vim_mode)
     }
