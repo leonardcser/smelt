@@ -12,7 +12,7 @@ smelt.cmd.register("btw", function(args)
   end
 
   smelt.spawn(function()
-    local buf = smelt.buf.create({ mode = "markdown" })
+    local buf = smelt.buf.create({ mode = "markdown", readonly = true })
     local done = false
 
     local function tick()

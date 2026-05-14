@@ -29,7 +29,7 @@ smelt.cmd.register("help", function()
     local sections = smelt.keymap.help()
     local lines = build_lines(sections)
 
-    local buf = smelt.buf.create()
+    local buf = smelt.buf.create({ readonly = true })
     smelt.buf.set_lines(buf, lines)
     local leaf = smelt.win.open(buf, { region = "dialog_overlay", focusable = true, vim_enabled = true })
 

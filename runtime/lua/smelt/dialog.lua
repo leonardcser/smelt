@@ -110,7 +110,7 @@ function smelt.ui.dialog.content(opts)
   opts = opts or {}
   local buf = opts.buf
   if not buf then
-    buf = smelt.buf.create()
+    buf = smelt.buf.create({ readonly = true })
     if opts.text and opts.text ~= "" then
       smelt.buf.set_lines(buf, split_lines(opts.text))
     end

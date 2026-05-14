@@ -2,7 +2,7 @@
 
 local function open_text_modal(title, text)
   smelt.spawn(function()
-    local buf = smelt.buf.create()
+    local buf = smelt.buf.create({ readonly = true })
     local lines = {}
     for line in (text or ""):gmatch("([^\n]*)\n?") do table.insert(lines, line) end
     if #lines == 0 then lines = { "" } end
