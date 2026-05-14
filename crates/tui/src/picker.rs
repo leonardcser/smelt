@@ -325,3 +325,178 @@ fn write_buffer(app: &mut TuiApp, buf: BufId, items: &[PickerItem], reversed: bo
         }
     });
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ── picker_height ────────────────────────────────────────────────────
+
+    #[test]
+    fn picker_height_uses_item_count_when_below_cap() {
+        assert_eq!(picker_height(3, 10), 3);
+    }
+
+    #[test]
+    fn picker_height_clamps_to_max_rows_when_items_exceed_cap() {
+        assert_eq!(picker_height(50, 8), 8);
+    }
+
+    #[test]
+    fn picker_height_is_at_least_one_for_empty_lists() {
+        // An empty picker still needs a row to show "(no matches)".
+        assert_eq!(picker_height(0, 10), 1);
+    }
+
+    #[test]
+    fn picker_height_treats_a_zero_cap_as_one() {
+        // `max_rows = 0` is meaningless; fall back to a one-row picker.
+        assert_eq!(picker_height(5, 0), 1);
+    }
+
+    // ── visual_cursor ────────────────────────────────────────────────────
+
+    #[test]
+    fn visual_cursor_returns_logical_index_when_not_reversed() {
+        assert_eq!(visual_cursor(0, 5, false), 0);
+        assert_eq!(visual_cursor(3, 5, false), 3);
+    }
+
+    #[test]
+    fn visual_cursor_mirrors_index_when_reversed() {
+        // Reversed: logical 0 → last row, logical n-1 → first row.
+        assert_eq!(visual_cursor(0, 5, true), 4);
+        assert_eq!(visual_cursor(4, 5, true), 0);
+        assert_eq!(visual_cursor(2, 5, true), 2);
+    }
+
+    #[test]
+    fn visual_cursor_clamps_logical_overflow_to_last_item() {
+        assert_eq!(visual_cursor(99, 5, false), 4);
+        assert_eq!(visual_cursor(99, 5, true), 0);
+    }
+
+    #[test]
+    fn visual_cursor_returns_zero_for_empty_list() {
+        assert_eq!(visual_cursor(0, 0, false), 0);
+        assert_eq!(visual_cursor(0, 0, true), 0);
+    }
+
+    // ── cursor_and_scroll ────────────────────────────────────────────────
+
+    #[test]
+    fn cursor_and_scroll_keeps_visible_selection_without_scrolling() {
+        // 10 items, 5-row viewport, selection at row 2 already on screen.
+        let (cursor, scroll) = cursor_and_scroll(2, 10, 5, false, 0);
+        assert_eq!(cursor, 2);
+        assert_eq!(scroll, 0);
+    }
+
+    #[test]
+    fn cursor_and_scroll_scrolls_down_when_selection_falls_below_viewport() {
+        // Selection at row 7, viewport [0, 5) — needs to scroll so row 7 is visible.
+        let (cursor, scroll) = cursor_and_scroll(7, 10, 5, false, 0);
+        assert_eq!(cursor, 7);
+        // Window slides so cursor is at the bottom: scroll = 7 + 1 - 5 = 3.
+        assert_eq!(scroll, 3);
+    }
+
+    #[test]
+    fn cursor_and_scroll_scrolls_up_when_selection_falls_above_viewport() {
+        // Selection at row 1, viewport [4, 9) — needs to scroll up.
+        let (cursor, scroll) = cursor_and_scroll(1, 10, 5, false, 4);
+        assert_eq!(cursor, 1);
+        // Window slides so cursor is at the top: scroll = 1.
+        assert_eq!(scroll, 1);
+    }
+
+    #[test]
+    fn cursor_and_scroll_clamps_scroll_to_max_when_selection_is_at_end() {
+        // 10 items, 5-row viewport, selection at last item. max_scroll = 10 - 5 = 5.
+        let (cursor, scroll) = cursor_and_scroll(9, 10, 5, false, 0);
+        assert_eq!(cursor, 9);
+        assert_eq!(scroll, 5);
+    }
+
+    #[test]
+    fn cursor_and_scroll_inverts_buffer_row_in_reversed_mode() {
+        // Reversed: logical 0 → bottom of buffer. 5 items, 3-row viewport.
+        // Logical 0 → buffer row 4. Needs scroll to show: scroll = 4+1-3 = 2.
+        let (cursor, scroll) = cursor_and_scroll(0, 5, 3, true, 0);
+        assert_eq!(cursor, 4);
+        assert_eq!(scroll, 2);
+    }
+
+    // ── max_label_chars ──────────────────────────────────────────────────
+
+    #[test]
+    fn max_label_chars_sums_prefix_and_label_widths() {
+        let items = vec![
+            PickerItem::new("abc").with_prefix("# "),
+            PickerItem::new("xy").with_prefix(">> "),
+        ];
+        // "# abc" = 5 chars, ">> xy" = 5 chars. Max = 5.
+        assert_eq!(max_label_chars(&items), 5);
+    }
+
+    #[test]
+    fn max_label_chars_counts_chars_not_bytes_for_unicode() {
+        // "日本語" = 3 chars, 9 bytes. Verify chars().count() semantics.
+        let items = vec![PickerItem::new("日本語")];
+        assert_eq!(max_label_chars(&items), 3);
+    }
+
+    #[test]
+    fn max_label_chars_returns_zero_for_empty_list() {
+        assert_eq!(max_label_chars(&[]), 0);
+    }
+
+    // ── anchor_for ───────────────────────────────────────────────────────
+
+    #[test]
+    fn anchor_for_prompt_docked_attaches_above_prompt_with_negative_row_offset() {
+        let a = anchor_for(PickerPlacement::PromptDocked { max_rows: 8 }, 5);
+        match a {
+            Anchor::Win {
+                row_offset, attach, ..
+            } => {
+                // Offset is negative `height` so the overlay sits above the prompt.
+                assert_eq!(row_offset, -5);
+                assert!(matches!(attach, Corner::NW));
+            }
+            other => panic!("expected Anchor::Win, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn anchor_for_screen_center_returns_centered_anchor() {
+        assert!(matches!(
+            anchor_for(PickerPlacement::ScreenCenter, 4),
+            Anchor::ScreenCenter
+        ));
+    }
+
+    #[test]
+    fn anchor_for_cursor_places_overlay_one_row_below_cursor() {
+        match anchor_for(PickerPlacement::Cursor, 3) {
+            Anchor::Cursor {
+                row_offset,
+                col_offset,
+                corner,
+            } => {
+                assert_eq!(row_offset, 1);
+                assert_eq!(col_offset, 0);
+                assert!(matches!(corner, Corner::NW));
+            }
+            other => panic!("expected Anchor::Cursor, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn anchor_for_screen_bottom_leaves_one_row_for_the_status_bar() {
+        match anchor_for(PickerPlacement::ScreenBottom, 4) {
+            Anchor::ScreenBottom { above_rows } => assert_eq!(above_rows, 1),
+            other => panic!("expected Anchor::ScreenBottom, got {other:?}"),
+        }
+    }
+}

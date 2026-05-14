@@ -158,3 +158,147 @@ pub(crate) fn build_defaults(
 
     ps
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::path::Path;
+
+    // ── PromptSections ───────────────────────────────────────────────────
+
+    #[test]
+    fn set_appends_new_section_at_the_end() {
+        let mut ps = PromptSections::default();
+        ps.set("a", "first".into());
+        ps.set("b", "second".into());
+        assert_eq!(ps.assemble(), "first\n\nsecond");
+    }
+
+    #[test]
+    fn set_replaces_existing_section_in_place_preserving_order() {
+        let mut ps = PromptSections::default();
+        ps.set("a", "first".into());
+        ps.set("b", "second".into());
+        ps.set("a", "replaced".into());
+        // Section `a` keeps its original position; only the content changes.
+        assert_eq!(ps.assemble(), "replaced\n\nsecond");
+    }
+
+    #[test]
+    fn remove_drops_the_named_section() {
+        let mut ps = PromptSections::default();
+        ps.set("a", "first".into());
+        ps.set("b", "second".into());
+        ps.remove("a");
+        assert_eq!(ps.assemble(), "second");
+    }
+
+    #[test]
+    fn remove_is_a_noop_for_unknown_names() {
+        let mut ps = PromptSections::default();
+        ps.set("a", "first".into());
+        ps.remove("nope");
+        assert_eq!(ps.assemble(), "first");
+    }
+
+    #[test]
+    fn assemble_skips_sections_that_trim_to_empty() {
+        let mut ps = PromptSections::default();
+        ps.set("a", "first".into());
+        ps.set("blank", "   \n\t  ".into());
+        ps.set("b", "second".into());
+        assert_eq!(ps.assemble(), "first\n\nsecond");
+    }
+
+    #[test]
+    fn assemble_trims_each_section_individually() {
+        let mut ps = PromptSections::default();
+        ps.set("a", "  first  \n".into());
+        ps.set("b", "\n\nsecond\n\n".into());
+        assert_eq!(ps.assemble(), "first\n\nsecond");
+    }
+
+    #[test]
+    fn assemble_of_empty_collection_is_empty_string() {
+        let ps = PromptSections::default();
+        assert_eq!(ps.assemble(), "");
+    }
+
+    // ── build_defaults ────────────────────────────────────────────────────
+
+    fn names(ps: &PromptSections) -> Vec<&str> {
+        ps.sections.iter().map(|(n, _)| n.as_str()).collect()
+    }
+
+    #[test]
+    fn build_defaults_includes_base_and_behavior_for_normal_mode() {
+        let ps = build_defaults(Path::new("/work"), AgentMode::Normal, true, None, None);
+        assert_eq!(names(&ps), vec!["base", "behavior"]);
+    }
+
+    #[test]
+    fn build_defaults_picks_interactive_vs_autonomous_behavior_section() {
+        let interactive = build_defaults(Path::new("/w"), AgentMode::Normal, true, None, None);
+        let autonomous = build_defaults(Path::new("/w"), AgentMode::Normal, false, None, None);
+        let i_body = &interactive
+            .sections
+            .iter()
+            .find(|(n, _)| n == "behavior")
+            .unwrap()
+            .1;
+        let a_body = &autonomous
+            .sections
+            .iter()
+            .find(|(n, _)| n == "behavior")
+            .unwrap()
+            .1;
+        assert!(i_body.contains("collaborators"));
+        assert!(a_body.contains("autonomously"));
+        assert_ne!(i_body, a_body);
+    }
+
+    #[test]
+    fn build_defaults_adds_write_access_for_apply_and_yolo_modes() {
+        let apply = build_defaults(Path::new("/w"), AgentMode::Apply, true, None, None);
+        let yolo = build_defaults(Path::new("/w"), AgentMode::Yolo, true, None, None);
+        let read = build_defaults(Path::new("/w"), AgentMode::Normal, true, None, None);
+        assert!(names(&apply).contains(&"write_access"));
+        assert!(names(&yolo).contains(&"write_access"));
+        assert!(!names(&read).contains(&"write_access"));
+    }
+
+    #[test]
+    fn build_defaults_appends_skill_and_instruction_sections_when_provided() {
+        let ps = build_defaults(
+            Path::new("/w"),
+            AgentMode::Normal,
+            true,
+            Some("# Skills\nfoo"),
+            Some("Project rules: be terse."),
+        );
+        let n = names(&ps);
+        assert!(n.contains(&"skills"));
+        assert!(n.contains(&"instructions"));
+    }
+
+    #[test]
+    fn build_defaults_skips_empty_skill_and_instruction_strings() {
+        let ps = build_defaults(Path::new("/w"), AgentMode::Normal, true, Some(""), Some(""));
+        let n = names(&ps);
+        assert!(!n.contains(&"skills"));
+        assert!(!n.contains(&"instructions"));
+    }
+
+    #[test]
+    fn build_defaults_base_section_embeds_the_cwd() {
+        let ps = build_defaults(
+            Path::new("/some/where"),
+            AgentMode::Normal,
+            true,
+            None,
+            None,
+        );
+        let base = &ps.sections.iter().find(|(n, _)| n == "base").unwrap().1;
+        assert!(base.contains("/some/where"), "got: {base}");
+    }
+}
