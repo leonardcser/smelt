@@ -1,4 +1,4 @@
-use crate::app::{CommandAction, EventOutcome, InputOutcome, Timers, TuiApp};
+use crate::app::{CommandAction, EventOutcome, InputOutcome, TuiApp};
 
 use crate::input::{resolve_agent_esc, Action, EscAction};
 use crate::keymap::{self, KeyAction};
@@ -17,7 +17,7 @@ impl TuiApp {
     // ── Terminal event dispatch ───────────────────────────────────────────
 
     /// Returns `true` if the app should quit.
-    pub(crate) fn dispatch_terminal_event(&mut self, ev: Event, t: &mut Timers) -> bool {
+    pub(crate) fn dispatch_terminal_event(&mut self, ev: Event) -> bool {
         if matches!(ev, Event::FocusGained | Event::FocusLost) {
             let focused = matches!(ev, Event::FocusGained);
             if self.term_focused != focused {
@@ -106,9 +106,9 @@ impl TuiApp {
         }
 
         let outcome = if self.agent.is_some() {
-            self.handle_event_running(ev, t)
+            self.handle_event_running(ev)
         } else {
-            self.handle_event_idle(ev, t)
+            self.handle_event_idle(ev)
         };
 
         // Notify Lua subscribers if the prompt buffer changed (drives filter-as-you-type pickers).
@@ -188,7 +188,7 @@ impl TuiApp {
     /// Returns `Some(outcome)` when consumed; `None` to continue with path-specific logic.
     ///
     /// Dispatch priority: resize/mouse → Lua keymaps → pane chords → cmdline `:` → content focus → overlay keys.
-    fn dispatch_common(&mut self, ev: &Event, t: &mut Timers) -> Option<EventOutcome> {
+    fn dispatch_common(&mut self, ev: &Event) -> Option<EventOutcome> {
         if matches!(ev, Event::Paste(_)) {
             self.clear_prompt_completer();
         }
@@ -221,7 +221,7 @@ impl TuiApp {
         }
 
         // Global Lua keymaps. Handlers may return `false` to fall through.
-        // Multi-key sequences accumulate in `t.pending_chord` until exact-matched or timed out.
+        // Multi-key sequences accumulate in `self.timers.pending_chord` until exact-matched or timed out.
         if let Event::Key(k) = *ev {
             if let Some(token) = crate::lua::chord_string(k) {
                 let vim_mode = self.current_vim_mode_label();
@@ -230,7 +230,7 @@ impl TuiApp {
                 // Single-key first — allocation-free common case.
                 match self.lua.run_keymap(&token, vim_mode.as_deref(), None) {
                     KeymapResult::Consumed => {
-                        t.pending_chord = None;
+                        self.timers.pending_chord = None;
                         self.flush_lua_callbacks();
                         return Some(EventOutcome::Noop);
                     }
@@ -241,17 +241,17 @@ impl TuiApp {
 
                 // Multi-key chord: drop stale pending sequence, then append and match.
                 let now = Instant::now();
-                if let Some(pending) = &t.pending_chord {
+                if let Some(pending) = &self.timers.pending_chord {
                     if smelt_core::keymap::chord_expired(
                         pending.started,
                         now,
                         crate::app::CHORD_TIMEOUT_MS,
                     ) {
-                        t.pending_chord = None;
+                        self.timers.pending_chord = None;
                     }
                 }
-                if t.pending_chord.is_none() {
-                    t.pending_chord = Some(crate::app::PendingChord {
+                if self.timers.pending_chord.is_none() {
+                    self.timers.pending_chord = Some(crate::app::PendingChord {
                         tokens: Vec::new(),
                         started: now,
                         vim_mode_at_start: if self.input.vim_enabled(self.prompt_win()) {
@@ -262,7 +262,7 @@ impl TuiApp {
                     });
                 }
                 let (mut tokens, started, vim_mode_at_start) = {
-                    let p = t.pending_chord.take().unwrap();
+                    let p = self.timers.pending_chord.take().unwrap();
                     (p.tokens, p.started, p.vim_mode_at_start)
                 };
                 tokens.push(token);
@@ -280,9 +280,9 @@ impl TuiApp {
                     }
                     smelt_core::keymap::ChordOutcome::Pending { tokens } => {
                         if tokens.is_empty() {
-                            t.pending_chord = None;
+                            self.timers.pending_chord = None;
                         } else {
-                            t.pending_chord = Some(crate::app::PendingChord {
+                            self.timers.pending_chord = Some(crate::app::PendingChord {
                                 tokens,
                                 started,
                                 vim_mode_at_start,
@@ -292,7 +292,7 @@ impl TuiApp {
                 }
             }
         }
-        if let Some(outcome) = self.handle_pane_chord(ev, t) {
+        if let Some(outcome) = self.handle_pane_chord(ev) {
             return Some(outcome);
         }
         // `:` opens the cmdline unless in insert mode.
@@ -323,8 +323,8 @@ impl TuiApp {
         None
     }
 
-    fn handle_event_idle(&mut self, ev: Event, t: &mut Timers) -> EventOutcome {
-        if let Some(outcome) = self.dispatch_common(&ev, t) {
+    fn handle_event_idle(&mut self, ev: Event) -> EventOutcome {
+        if let Some(outcome) = self.dispatch_common(&ev) {
             return outcome;
         }
 
@@ -382,7 +382,7 @@ impl TuiApp {
                             self.input.close_completer();
                             return EventOutcome::Redraw;
                         }
-                        t.last_ctrlc = Some(Instant::now());
+                        self.timers.last_ctrlc = Some(Instant::now());
                         let mut pctx = crate::input::prompt_ctx_mut(&mut self.ui);
                         self.input.clear(&mut pctx);
                         return EventOutcome::Redraw;
@@ -404,14 +404,14 @@ impl TuiApp {
 
     // ── Running event handler ────────────────────────────────────────────
 
-    fn handle_event_running(&mut self, ev: Event, t: &mut Timers) -> EventOutcome {
-        if let Some(outcome) = self.dispatch_common(&ev, t) {
+    fn handle_event_running(&mut self, ev: Event) -> EventOutcome {
+        if let Some(outcome) = self.dispatch_common(&ev) {
             return outcome;
         }
 
         // Record last keypress for deferred permission dialogs.
         if matches!(ev, Event::Key(_)) {
-            t.last_keypress = Some(Instant::now());
+            self.timers.last_keypress = Some(Instant::now());
         }
 
         if let Event::Key(KeyEvent {
@@ -435,7 +435,7 @@ impl TuiApp {
                             self.input.close_completer();
                             return EventOutcome::Noop;
                         }
-                        t.last_ctrlc = Some(Instant::now());
+                        self.timers.last_ctrlc = Some(Instant::now());
                         let mut pctx = crate::input::prompt_ctx_mut(&mut self.ui);
                         self.input.clear(&mut pctx);
                         self.queued_messages.clear();
@@ -461,8 +461,8 @@ impl TuiApp {
             match resolve_agent_esc(
                 cur_mode,
                 !self.queued_messages.is_empty(),
-                &mut t.last_esc,
-                &mut t.esc_vim_mode,
+                &mut self.timers.last_esc,
+                &mut self.timers.esc_vim_mode,
             ) {
                 EscAction::VimToNormal => {
                     let mut pctx = crate::input::prompt_ctx_mut(&mut self.ui);

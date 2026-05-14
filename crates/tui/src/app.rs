@@ -11,12 +11,13 @@ pub(crate) mod mouse;
 pub(crate) mod pane_focus;
 pub(crate) mod render_loop;
 pub(crate) mod status_bar;
+#[cfg(test)]
+pub(crate) mod test_harness;
 pub(crate) mod transcript;
 pub(crate) mod ui_host;
 pub(crate) mod well_known;
 
 use crate::input::PromptState;
-use crate::state;
 use engine::EngineHandle;
 use protocol::Content;
 use smelt_core::history::History;
@@ -98,6 +99,10 @@ pub struct TuiApp {
     pub(crate) prompt_sections: crate::prompt_sections::PromptSections,
     pub ui: crate::smelt_term::Ui,
     pub(crate) well_known: WellKnown,
+    /// Timers + chord state observed and updated by event dispatch.
+    pub(crate) timers: Timers,
+    /// Confirm/dialog requests deferred while the user is still typing.
+    pub(crate) pending_dialogs: VecDeque<DeferredDialog>,
 }
 
 pub use well_known::{
@@ -196,62 +201,25 @@ pub(crate) struct PendingTool {
 }
 
 impl TuiApp {
-    #[allow(clippy::too_many_arguments)]
     pub fn new(
-        model: String,
-        api_base: String,
-        api_key_env: String,
-        provider_type: String,
-        permissions: Arc<smelt_core::permissions::Permissions>,
+        config: smelt_core::AppConfig,
         engine: EngineHandle,
-        settings: smelt_core::config::ResolvedSettings,
-        reasoning_effort: protocol::ReasoningEffort,
-        reasoning_cycle: Vec<protocol::ReasoningEffort>,
-        mode_cycle: Vec<protocol::AgentMode>,
+        permissions: Arc<smelt_core::permissions::Permissions>,
         shared_session: Arc<Mutex<Option<Session>>>,
-        available_models: Vec<smelt_core::config::ResolvedModel>,
-        cli_model_override: bool,
-        cli_api_base_override: bool,
-        cli_api_key_env_override: bool,
         startup_auth_error: Option<String>,
         lua: crate::lua::LuaRuntime,
         project_trust: smelt_core::trust::TrustState,
-        cache: state::SessionCache,
     ) -> Self {
-        let mode = cache.mode();
         let mut input = PromptState::new();
-        let vim_enabled = settings.vim;
+        let vim_enabled = config.settings.vim;
         input.command_arg_sources = Vec::new();
-        let reasoning_effort = if reasoning_effort == protocol::ReasoningEffort::Off
-            && cache.reasoning_effort != protocol::ReasoningEffort::Off
-        {
-            cache.reasoning_effort
-        } else {
-            reasoning_effort
-        };
 
         let cwd = std::env::current_dir()
             .ok()
             .and_then(|p| p.to_str().map(String::from))
             .unwrap_or_default();
 
-        let app_config = smelt_core::AppConfig {
-            model,
-            api_base,
-            api_key_env,
-            provider_type,
-            available_models,
-            model_config: engine::ModelConfig::default(),
-            cli_model_override,
-            cli_api_base_override,
-            cli_api_key_env_override,
-            mode,
-            mode_cycle,
-            reasoning_effort,
-            reasoning_cycle,
-            settings,
-            context_window: None,
-        };
+        let app_config = config;
 
         let transcript_projection = crate::content::transcript_buf::TranscriptProjection::new();
         let (term_w, term_h) = terminal::size().unwrap_or((80, 24));
@@ -433,6 +401,15 @@ impl TuiApp {
             prompt_sections: crate::prompt_sections::PromptSections::default(),
             ui,
             well_known,
+            timers: Timers {
+                last_esc: None,
+                esc_vim_mode: None,
+                last_ctrlc: None,
+                last_keypress: None,
+                pending_pane_chord: None,
+                pending_chord: None,
+            },
+            pending_dialogs: VecDeque::new(),
         }
     }
 
@@ -821,15 +798,6 @@ impl TuiApp {
             }
         }
 
-        let mut t = Timers {
-            last_esc: None,
-            esc_vim_mode: None,
-            last_ctrlc: None,
-            last_keypress: None,
-            pending_pane_chord: None,
-            pending_chord: None,
-        };
-        let mut pending_dialogs: VecDeque<DeferredDialog> = VecDeque::new();
         const MIN_FRAME_INTERVAL: Duration = Duration::from_millis(16);
 
         'main: loop {
@@ -886,12 +854,7 @@ impl TuiApp {
                 };
                 let action = if let Some(mut ag) = self.agent.take() {
                     let ctrl = self.handle_engine_event(ev, ag.turn_id, &mut ag.pending);
-                    let action = self.dispatch_control(
-                        ctrl,
-                        &ag.pending,
-                        &mut pending_dialogs,
-                        t.last_keypress,
-                    );
+                    let action = self.dispatch_control(ctrl, &ag.pending);
                     self.agent = Some(ag);
                     action
                 } else {
@@ -914,42 +877,38 @@ impl TuiApp {
                 }
             }
 
-            if self.agent.is_none() && !pending_dialogs.is_empty() {
-                pending_dialogs.clear();
+            if self.agent.is_none() && !self.pending_dialogs.is_empty() {
+                self.pending_dialogs.clear();
                 self.pending_dialog = false;
             }
-            if !pending_dialogs.is_empty()
+            if !self.pending_dialogs.is_empty()
                 && !self.focused_overlay_blocks_agent()
                 && self.agent.is_some()
             {
-                let idle = t
+                let idle = self
+                    .timers
                     .last_keypress
                     .map(|lk| lk.elapsed() >= Duration::from_millis(CONFIRM_DEFER_MS))
                     .unwrap_or(true);
                 while idle
-                    && !pending_dialogs.is_empty()
+                    && !self.pending_dialogs.is_empty()
                     && !self.focused_overlay_blocks_agent()
                     && self.agent.is_some()
                 {
-                    let deferred = pending_dialogs.pop_front().unwrap();
+                    let deferred = self.pending_dialogs.pop_front().unwrap();
                     let ctrl = match deferred {
                         DeferredDialog::Confirm(req) => SessionControl::NeedsConfirm(req),
                     };
                     let taken = self.agent.take();
                     let pending_ref: &[PendingTool] =
                         taken.as_ref().map(|a| a.pending.as_slice()).unwrap_or(&[]);
-                    let action = self.dispatch_control(
-                        ctrl,
-                        pending_ref,
-                        &mut pending_dialogs,
-                        t.last_keypress,
-                    );
+                    let action = self.dispatch_control(ctrl, pending_ref);
                     self.agent = taken;
                     if !action {
                         self.discard_turn(false);
                     }
                 }
-                self.pending_dialog = !pending_dialogs.is_empty();
+                self.pending_dialog = !self.pending_dialogs.is_empty();
             }
 
             // Recompute statusline after engine events drain so a turn ending mid-iteration
@@ -1030,7 +989,7 @@ impl TuiApp {
                         &mut scroll_row,
                         &mut scroll_col,
                     ) {
-                        if self.dispatch_terminal_event(ev, &mut t) {
+                        if self.dispatch_terminal_event(ev) {
                             break 'main;
                         }
                     }
@@ -1043,7 +1002,7 @@ impl TuiApp {
                                 &mut scroll_row,
                                 &mut scroll_col,
                             ) {
-                                if self.dispatch_terminal_event(ev, &mut t) {
+                                if self.dispatch_terminal_event(ev) {
                                     break 'main;
                                 }
                             }
@@ -1061,12 +1020,7 @@ impl TuiApp {
                     if let Some(mut ag) = self.agent.take() {
                         let ctrl =
                             self.handle_engine_event(ev, ag.turn_id, &mut ag.pending);
-                        let action = self.dispatch_control(
-                            ctrl,
-                            &ag.pending,
-                            &mut pending_dialogs,
-                            t.last_keypress,
-                        );
+                        let action = self.dispatch_control(ctrl, &ag.pending);
                         self.agent = Some(ag);
                         if !action {
                             self.discard_turn(false);

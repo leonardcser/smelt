@@ -434,28 +434,42 @@ async fn main() {
             .run_oneshot(args.message.unwrap(), headless_cancel)
             .await;
     } else {
-        let mut app = tui::app::TuiApp::new(
+        // Merge CLI/startup defaults with the persisted SessionCache: the
+        // cache always provides the initial agent mode; it overrides the
+        // reasoning effort only when the CLI/startup side passed `Off`.
+        let reasoning_effort = if reasoning_effort == protocol::ReasoningEffort::Off
+            && cache.reasoning_effort != protocol::ReasoningEffort::Off
+        {
+            cache.reasoning_effort
+        } else {
+            reasoning_effort
+        };
+        let app_config = smelt_core::AppConfig {
             model,
-            initial_api_base,
+            api_base: initial_api_base,
             api_key_env,
-            initial_provider_type,
-            Arc::clone(&permissions),
-            engine_handle,
-            settings,
+            provider_type: initial_provider_type,
+            available_models,
+            model_config: (&model_config).into(),
+            cli_model_override: args.model.is_some(),
+            cli_api_base_override: args.api_base.is_some(),
+            cli_api_key_env_override: args.api_key_env.is_some(),
+            mode: cache.mode(),
+            mode_cycle,
             reasoning_effort,
             reasoning_cycle,
-            mode_cycle,
+            settings,
+            context_window: None,
+        };
+        let mut app = tui::app::TuiApp::new(
+            app_config,
+            engine_handle,
+            Arc::clone(&permissions),
             shared_session,
-            available_models,
-            args.model.is_some(),
-            args.api_base.is_some(),
-            args.api_key_env.is_some(),
             startup_auth_error.take(),
             lua_runtime,
             project_trust,
-            cache,
         );
-        app.core.config.model_config = (&model_config).into();
         app.core.skills = Some(tui_skill_loader.clone());
         app.extra_instructions = tui_instructions;
         app.skill_section = tui_skill_section;

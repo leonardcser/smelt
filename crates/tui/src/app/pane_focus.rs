@@ -1,6 +1,6 @@
 //! Pane focus and block-scoped key dispatch.
 
-use crate::app::{EventOutcome, Timers, TuiApp};
+use crate::app::{EventOutcome, TuiApp};
 use crossterm::event::{Event, KeyCode, KeyEvent};
 use smelt_core::{Block, BlockId, ViewState};
 use std::time::{Duration, Instant};
@@ -9,28 +9,28 @@ use std::time::{Duration, Instant};
 const PANE_CHORD_WINDOW: Duration = Duration::from_millis(750);
 
 impl TuiApp {
-    pub(crate) fn handle_pane_chord(&mut self, ev: &Event, t: &mut Timers) -> Option<EventOutcome> {
+    pub(crate) fn handle_pane_chord(&mut self, ev: &Event) -> Option<EventOutcome> {
         use crossterm::event::KeyModifiers as M;
         let Event::Key(k) = ev else { return None };
 
-        if let Some(started) = t.pending_pane_chord {
+        if let Some(started) = self.timers.pending_pane_chord {
             if started.elapsed() < PANE_CHORD_WINDOW {
                 let navigated = matches!(
                     (k.code, k.modifiers),
                     (KeyCode::Char('w'), _) | (KeyCode::Char('j' | 'k' | 'h' | 'l' | 'p'), M::NONE)
                 );
-                t.pending_pane_chord = None;
+                self.timers.pending_pane_chord = None;
                 if navigated {
                     self.toggle_pane_focus();
                     return Some(EventOutcome::Redraw);
                 }
                 return None;
             }
-            t.pending_pane_chord = None;
+            self.timers.pending_pane_chord = None;
         }
 
         if k.code == KeyCode::Char('w') && k.modifiers.contains(M::CONTROL) {
-            t.pending_pane_chord = Some(Instant::now());
+            self.timers.pending_pane_chord = Some(Instant::now());
             return Some(EventOutcome::Noop);
         }
         None

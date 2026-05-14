@@ -4,9 +4,9 @@ use crate::app::{
 use protocol::{Content, Decision, Message, UiCommand};
 use smelt_core::working::{TurnOutcome, TurnPhase};
 use smelt_core::*;
-use std::collections::{HashMap, VecDeque};
+use std::collections::HashMap;
 use std::path::PathBuf;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 impl TuiApp {
     /// Send a permission decision to the local engine.
@@ -603,10 +603,10 @@ impl TuiApp {
         &mut self,
         ctrl: SessionControl,
         pending: &[PendingTool],
-        pending_dialogs: &mut VecDeque<DeferredDialog>,
-        last_keypress: Option<Instant>,
     ) -> bool {
-        let should_queue = last_keypress
+        let should_queue = self
+            .timers
+            .last_keypress
             .is_some_and(|t| t.elapsed() < Duration::from_millis(CONFIRM_DEFER_MS))
             && !self.prompt_buf().source().is_empty();
 
@@ -652,7 +652,7 @@ impl TuiApp {
                 if should_queue {
                     self.set_active_status(&req.call_id, ToolStatus::Confirm);
                     self.pending_dialog = true;
-                    pending_dialogs.push_back(DeferredDialog::Confirm(req));
+                    self.pending_dialogs.push_back(DeferredDialog::Confirm(req));
                     return true;
                 }
 
