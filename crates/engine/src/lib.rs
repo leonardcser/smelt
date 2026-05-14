@@ -13,6 +13,8 @@ pub mod provider;
 pub mod redact;
 pub(crate) mod result_dedup;
 pub(crate) mod skills;
+#[cfg(test)]
+pub(crate) mod test_util;
 pub mod tools;
 pub(crate) mod trim;
 

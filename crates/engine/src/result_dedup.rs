@@ -48,17 +48,11 @@ pub(crate) fn dedup_stub(prior_call_id: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use protocol::{Content, Message, Role};
+    use crate::test_util::tool_msg_with_error;
+    use protocol::{Content, Message};
 
     fn tool_msg(call_id: &str, content: &str, is_error: bool) -> Message {
-        Message {
-            role: Role::Tool,
-            content: Some(Content::text(content)),
-            reasoning_content: None,
-            tool_calls: None,
-            tool_call_id: Some(call_id.to_string()),
-            is_error,
-        }
+        tool_msg_with_error(Some(call_id), content, is_error)
     }
 
     fn big(prefix: &str) -> String {
