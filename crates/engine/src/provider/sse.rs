@@ -37,6 +37,7 @@ pub(super) async fn read_events(
 
     loop {
         let chunk = tokio::select! {
+            biased;
             _ = cancel.cancelled() => return Err(ProviderError::Cancelled),
             chunk = stream.next() => chunk,
         };

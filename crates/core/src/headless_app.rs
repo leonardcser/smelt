@@ -91,15 +91,16 @@ impl HeadlessApp {
         let mut interrupted = false;
         loop {
             let ev = tokio::select! {
-                ev = self.core.engine.recv() => match ev {
-                    Some(ev) => ev,
-                    None => break,
-                },
+                biased;
                 _ = cancel.notified() => {
                     self.core.engine.send(protocol::UiCommand::Cancel);
                     interrupted = true;
                     break;
                 }
+                ev = self.core.engine.recv() => match ev {
+                    Some(ev) => ev,
+                    None => break,
+                },
             };
             match self.sink.format {
                 OutputFormat::Json => {

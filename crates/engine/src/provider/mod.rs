@@ -588,6 +588,7 @@ impl Provider {
             }
 
             let resp = tokio::select! {
+                biased;
                 _ = opts.cancel.cancelled() => {
                     return Err(ProviderError::Cancelled);
                 }

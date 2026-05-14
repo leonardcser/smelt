@@ -1144,18 +1144,7 @@ impl<'a> Turn<'a> {
                 break false;
             }
             tokio::select! {
-                Some((idx, result)) = futs.next(), if !futs.is_empty() => {
-                    completed[idx] = Some(result);
-                    outstanding -= 1;
-                }
-                Some((req_id, result)) = side_futs.next(), if !side_futs.is_empty() => {
-                    let _ = self.event_tx.send(EngineEvent::CoreToolResult {
-                        request_id: req_id,
-                        content: result.content,
-                        is_error: result.is_error,
-                        metadata: result.metadata,
-                    });
-                }
+                biased;
                 _ = cancel.cancelled() => break true,
                 Some(cmd) = cmd_rx.recv() => match cmd {
                     UiCommand::Cancel => cancel.cancel(),
@@ -1384,6 +1373,18 @@ impl<'a> Turn<'a> {
                     | UiCommand::SetModel { .. } => deferred.push(cmd),
                     _ => {}
                 },
+                Some((idx, result)) = futs.next(), if !futs.is_empty() => {
+                    completed[idx] = Some(result);
+                    outstanding -= 1;
+                }
+                Some((req_id, result)) = side_futs.next(), if !side_futs.is_empty() => {
+                    let _ = self.event_tx.send(EngineEvent::CoreToolResult {
+                        request_id: req_id,
+                        content: result.content,
+                        is_error: result.is_error,
+                        metadata: result.metadata,
+                    });
+                }
             }
         };
 
@@ -1630,6 +1631,7 @@ impl<'a> Turn<'a> {
                     break (&mut chat_future).await;
                 }
                 tokio::select! {
+                    biased;
                     result = &mut chat_future => break result,
                     Some(cmd) = self.cmd_rx.recv() => match cmd {
                         UiCommand::Cancel => {

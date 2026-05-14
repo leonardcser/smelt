@@ -350,6 +350,11 @@ impl ProcessRegistry {
                     break;
                 }
                 tokio::select! {
+                    biased;
+                    _ = kill_rx.recv() => {
+                        kill_group_sigkill(&child);
+                        break;
+                    }
                     line = stdout_reader.next_line(), if !stdout_done => {
                         match line {
                             Ok(Some(line)) => {
@@ -371,10 +376,6 @@ impl ProcessRegistry {
                             }
                             _ => stderr_done = true,
                         }
-                    }
-                    _ = kill_rx.recv() => {
-                        kill_group_sigkill(&child);
-                        break;
                     }
                 }
             }
