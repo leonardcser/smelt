@@ -1808,7 +1808,6 @@ fn enter_normal(ctx: &mut VimContext<'_>) {
 // ── Tests ───────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
-#[allow(unused_assignments)]
 mod tests {
     use super::*;
     use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyEventState, KeyModifiers};
