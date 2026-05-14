@@ -107,8 +107,11 @@ Smallest possible PR per injection. Tests prove behavior unchanged.
 | 3 | `reset_for_test` hooks on the two unbounded-growth interners (`style/theme`, `buffer`) | ☑ |
 | 4 | `Clock` trait + `RealClock` + `VirtualClock` impls plumbed through `Core`, `EngineConfig`, `Provider`, aux builders, `Turn`, `ProcessRegistry`, `Timers`, `WorkingState`, lua sleep/tasks, tui chord/esc/keypress timers, harness `Tick` | ☑ |
 | 4-state | `WorkingState` and `Timers` own `Arc<dyn Clock>` (no per-call `now: Instant`); determinism tests use `VirtualClock` + `advance()` fixture | ☑ |
-| 4-tail | Remaining decision-bearing reads on `Instant::now()`: `app.rs` main loop frames, `input/mod.rs:158` yank flash, `buffer/kill_ring.rs:155`, `edit/lib.rs:127,810`, transcript timing, `grep.rs` deadline, `process.rs::Output::run` deadline | ◐ next |
-| 4-defer | Deferred to Effects (Phase 3): `log::entry`, `pricing::now_secs`, `messages.rs` ts, `session.rs::now_ms`, `http/cache.rs`, `provider/mod.rs::unix_now`, content `EPOCH` `OnceLock`, OAuth tokio deadlines | ☐ |
+| 4-yank | `buffer::KillRing::mark_yanked` + `edit::VimContext` + `edit::Window::handle_key`/`EventCtx` + tui `display_selection_range` thread `now: Instant` end-to-end so yank-flash window observes the host clock | ☑ |
+| 4-frame | tui `app.rs` per-frame `last_frame` + `yank_flash_active` read from `core.clock` | ☑ |
+| 4-click | `edit::Ui::resolve_split_mouse` / `record_click` take `now: Instant`; tui mouse handler feeds `core.clock` so double-click counting is deterministic | ☑ |
+| 4-tail | Cosmetic-only `Instant::now()` left in prod: `edit::lib.rs:810` (`drag_autoscroll_since` ramp), `tui/input/mod.rs::ESC chord` ramp timestamps. No state decision depends on them — defer | ◐ low |
+| 4-defer | Deferred to Effects (Phase 3) — these guard real I/O, never run in sim: `grep.rs` rg subprocess deadline, `process.rs::Output::run` blocking deadline, `log::entry`, `pricing::now_secs`, `messages.rs` ts, `session.rs::now_ms`, `http/cache.rs`, `provider/mod.rs::unix_now`, content `EPOCH` `OnceLock`, OAuth tokio deadlines | ☐ |
 | 5 | `RuntimeEnv` (env+cwd+pid+home snapshot) | ☐ |
 | 6 | Single-threaded sim runtime + `available_parallelism = 1` | ☐ |
 
