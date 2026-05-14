@@ -103,24 +103,26 @@ modes.
 Executes a non-interactive bash command and returns its output. The working
 directory persists between calls.
 
-| Parameter           | Description                                                                                   |
-| ------------------- | --------------------------------------------------------------------------------------------- |
-| `command`           | Shell command to execute (required)                                                           |
-| `description`      | Short (max 10 words) description of what this command does                                    |
-| `timeout_ms`        | Timeout in milliseconds (default: 120000, max: 600000)                                        |
-| `run_in_background` | Run asynchronously and return a process ID                                                    |
+| Parameter      | Description                                                |
+| -------------- | ---------------------------------------------------------- |
+| `command`      | Shell command to execute (required)                        |
+| `description`  | Short (max 10 words) description of what this command does |
+| `timeout_ms`   | Timeout in milliseconds (default: 120000, max: 600000)     |
 
 **Behavior:**
 
 - Interactive commands (editors, pagers, interactive rebases) are blocked
-- Shell backgrounding (`&`) in the command string is rejected — use
-  `run_in_background` instead
+- Shell backgrounding (`&`) in the command string is rejected
 - Output is line-buffered (stdout and stderr multiplexed)
 - A non-zero exit code is flagged as an error
 - The call can be cancelled from the UI
-- When `run_in_background` is true, the tool returns immediately with a
-  process id. Use `read_process_output` and `stop_process` to manage it, and
-  `/ps` to list all background processes.
+
+The [`background_commands`
+plugin](../guide/plugins.md#bundled-plugins) — **experimental**, opt-in — adds
+a `run_in_background` parameter to `bash` and registers the
+`read_process_output`, `stop_process`, and `/ps` interfaces described below.
+Enable it from `init.lua` with
+`require("smelt.plugins.background_commands")`.
 
 ### `read_process_output`
 
@@ -200,9 +202,12 @@ configuration reference for how to create and organize skills.
 
 ### `exit_plan_mode`
 
-Plan mode only. Called by the agent when its plan is finalized and ready for
-your review. The confirm dialog renders the plan as markdown; approving
-either keeps the current mode or switches to Apply.
+Plan mode only. Provided by the [`plan_mode`
+plugin](../guide/plugins.md#bundled-plugins) (opt-in — enable with
+`require("smelt.plugins.plan_mode")` in `init.lua`). Called by the agent when
+its plan is finalized and ready for your review. The confirm dialog renders
+the plan as markdown; approving either keeps the current mode or switches to
+Apply.
 
 | Parameter      | Description                                                            |
 | -------------- | ---------------------------------------------------------------------- |

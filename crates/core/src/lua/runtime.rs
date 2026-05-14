@@ -30,6 +30,13 @@ const BOOTSTRAP_FILES: &[&str] = &[
 /// Subdirectories whose files are `require`'d at startup as side-effect registrations.
 const AUTOLOAD_DIRS: &[&str] = &["tools", "commands", "plugins", "dialogs"];
 
+/// Bundled plugins that ship with smelt but are NOT autoloaded. Users opt in by
+/// calling `require("smelt.plugins.<name>")` from their `init.lua`.
+const OPTIONAL_PLUGINS: &[&str] = &[
+    "smelt.plugins.background_commands",
+    "smelt.plugins.plan_mode",
+];
+
 /// Outcome of dispatching a keymap chord.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum KeymapResult {
@@ -1145,6 +1152,7 @@ pub fn autoload_modules() -> Vec<String> {
             .filter(|f| f.path().extension().and_then(|s| s.to_str()) == Some("lua"))
             .filter_map(|f| f.path().to_str().map(path_to_module))
             .filter(|m| !bootstrap_modules.contains(m))
+            .filter(|m| !OPTIONAL_PLUGINS.contains(&m.as_str()))
             .collect();
         names.sort();
         out.extend(names);
@@ -1263,7 +1271,25 @@ mod tests {
         let modules = autoload_modules();
         assert!(modules.contains(&"smelt.tools.bash".to_string()));
         assert!(modules.contains(&"smelt.commands.btw".to_string()));
-        assert!(modules.contains(&"smelt.plugins.background_commands".to_string()));
+        assert!(modules.contains(&"smelt.plugins.esc_chord".to_string()));
+    }
+
+    #[test]
+    fn autoload_excludes_optional_plugins() {
+        let modules = autoload_modules();
+        for optional in OPTIONAL_PLUGINS {
+            assert!(
+                !modules.contains(&optional.to_string()),
+                "optional plugin must not be autoloaded: {optional}"
+            );
+        }
+        for optional in OPTIONAL_PLUGINS {
+            let rel = optional.strip_prefix("smelt.").unwrap().replace('.', "/") + ".lua";
+            assert!(
+                EMBEDDED_LUA.get_file(&rel).is_some(),
+                "optional plugin must still be embedded so users can require it: {optional}"
+            );
+        }
     }
 
     #[test]

@@ -33,8 +33,29 @@ require("hello")               -- yours, under ~/.config/smelt/
 
 For a real walkthrough, the bundled plugins under
 [`runtime/lua/smelt/plugins/`](https://github.com/leonardcser/smelt/tree/main/runtime/lua/smelt/plugins)
-(`background_commands`, `plan_mode`, `perf_panel`, `predict`, `esc_chord`) are
-the canonical examples — every pattern below comes straight from them.
+are the canonical examples — every pattern below comes straight from them.
+
+## Bundled plugins
+
+| Plugin | Autoloaded | What it does |
+| --- | --- | --- |
+| `esc_chord` | yes | `<Esc><Esc>` to cancel `/compact` or rewind a turn |
+| `perf_panel` | yes | F12 overlay with live duration percentiles |
+| `predict` | yes | After each turn, predicts your next message and shows it as ghost text |
+| `background_commands` | **opt-in** (experimental) | Adds `run_in_background` to `bash`, plus `read_process_output`, `stop_process`, and `/ps` |
+| `plan_mode` | **opt-in** | Wires up plan mode — registers `exit_plan_mode` and injects the plan-mode system prompt |
+
+To enable an opt-in plugin, `require` it from `~/.config/smelt/init.lua`:
+
+```lua
+require("smelt.plugins.background_commands")
+require("smelt.plugins.plan_mode")
+```
+
+`background_commands` is **experimental** — the background-process model is
+still evolving and the tool surface (`run_in_background`, `read_process_output`,
+`stop_process`) may change. Without `plan_mode` enabled, switching to plan mode
+has no effect on the agent.
 
 ## IDE completion
 

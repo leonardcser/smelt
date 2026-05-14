@@ -1,6 +1,10 @@
 -- Example init.lua configuration.
 -- Copy into ~/.config/smelt/init.lua (or dofile this from there).
 
+-- Optional bundled plugins (uncomment to enable).
+-- require("smelt.plugins.plan_mode")            -- enables `plan` agent mode
+-- require("smelt.plugins.background_commands")  -- experimental: bash run_in_background, /ps
+
 -- Providers
 smelt.provider.register("ollama", {
   type = "openai-compatible",
