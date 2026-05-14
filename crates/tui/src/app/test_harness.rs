@@ -761,6 +761,7 @@ mod tests {
         assert!(lines[0].contains("apple"));
     }
 
+<<<<<<< HEAD
     // ── Named-resource hot-reload refresh ───────────────────────────
 
     /// Reproduces the perf_panel hot-reload flow: re-call `overlay.open`
@@ -1578,6 +1579,41 @@ mod tests {
             ov.size_override,
             Some((50, 18)),
             "user resize preserved across reload"
+        );
+    }
+
+    // ── Determinism: clock-threaded state changes are observable via Tick ─
+
+    /// End-to-end proof of the yank-flash clock plumbing: yank a line in vim,
+    /// observe the flash window is active, advance the virtual clock past the
+    /// window, and verify the flash deadline has cleared. If any link in the
+    /// chain (`KillRing::mark_yanked` → `VimContext::now` → `EventCtx::now` →
+    /// `Window::handle_key`) regresses to wall-clock reads, this test breaks.
+    #[test]
+    fn vim_yy_yank_flash_expires_after_tick() {
+        let mut app = TestApp::builder().with_vim(true).build();
+        // Type a line in insert mode, return to normal, then yank-line with `yy`.
+        app.type_char('i');
+        app.type_text("hello");
+        app.press(KeyCode::Esc);
+        app.type_char('y');
+        app.type_char('y');
+
+        let now = app.app.core.clock.instant_now();
+        let flash = app.app.core.clipboard.kill_ring.yank_flash_range(now);
+        assert!(
+            flash.is_some(),
+            "yank flash range should be active right after yy"
+        );
+
+        // Advance past the 200ms flash window. If the clock chain is wired
+        // correctly, the flash deadline now sits in the virtual past.
+        app.feed_one(SourceEvent::Tick(300));
+        let now = app.app.core.clock.instant_now();
+        let flash = app.app.core.clipboard.kill_ring.yank_flash_range(now);
+        assert!(
+            flash.is_none(),
+            "flash should expire after Tick past the window"
         );
     }
 }
