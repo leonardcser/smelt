@@ -9,11 +9,19 @@ cargo nextest run --workspace
 
 # format and lint
 cargo fmt && cargo clippy --workspace --all-targets -- -D warnings
+
+# coverage (requires `cargo install cargo-llvm-cov`)
+cargo llvm-cov nextest --workspace --summary-only
+
+# regenerate Lua API stubs + reference docs (commit the result)
+cargo xtask gen-lua-docs
 ```
 
 Whenever you add a new user-facing feature or change user-facing behavior,
 update the README.md and the docs/ folder. Don't document internal
-implementation details — only things end users need to know.
+implementation details — only things end users need to know. When you
+change the Lua API surface, run `cargo xtask gen-lua-docs` and commit the
+regenerated files — CI fails if they're out of sync.
 
 ## Conventions
 

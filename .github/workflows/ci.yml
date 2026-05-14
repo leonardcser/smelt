@@ -32,9 +32,17 @@ jobs:
 
       - name: Set up Rust
         uses: dtolnay/rust-toolchain@stable
+        with:
+          components: llvm-tools-preview
 
       - name: Cache dependencies
         uses: Swatinem/rust-cache@v2
+
+      - name: Install cargo-nextest
+        uses: taiki-e/install-action@nextest
+
+      - name: Install cargo-llvm-cov
+        uses: taiki-e/install-action@cargo-llvm-cov
 
       - name: Check formatting
         run: cargo fmt -- --check
@@ -45,8 +53,8 @@ jobs:
       - name: Build
         run: cargo build --workspace
 
-      - name: Run tests
-        run: cargo test --workspace
+      - name: Run tests with coverage floor
+        run: cargo llvm-cov nextest --workspace --fail-under-lines 65
 
       - name: Check Lua API docs are in sync
         run: |
