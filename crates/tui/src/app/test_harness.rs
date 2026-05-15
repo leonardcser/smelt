@@ -606,16 +606,35 @@ fn cmdline_text(app: &TuiApp) -> String {
 
 static TEST_HOME: OnceLock<TempDir> = OnceLock::new();
 
+/// Initialize `$HOME` + XDG env vars on first call, then wipe the
+/// directory's contents on every call so each `TestApp::build` starts
+/// against an empty filesystem. Without this, session / history / state
+/// files written by one scenario survive into the next — a real source
+/// of nondeterminism for libFuzzer, which runs every iteration in the
+/// same process.
 fn ensure_test_home() {
     let dir = TEST_HOME.get_or_init(|| TempDir::new().expect("create test $HOME tempdir"));
     let home = dir.path();
-    // SAFETY: tests share the process-wide tempdir; this is set once
-    // and never mutated, so concurrent reads from other threads are safe.
+    // SAFETY: env vars are set to the same constant path on every call;
+    // concurrent reads from other threads see a stable value.
     std::env::set_var("HOME", home);
     std::env::set_var("XDG_CONFIG_HOME", home.join("config"));
     std::env::set_var("XDG_STATE_HOME", home.join("state"));
     std::env::set_var("XDG_CACHE_HOME", home.join("cache"));
     std::env::set_var("XDG_DATA_HOME", home.join("data"));
+    // Wipe everything in `home` so the next scenario sees an empty
+    // filesystem. We can't `remove_dir_all` `home` itself (it'd drop the
+    // tempdir backing path), so iterate one level down.
+    if let Ok(entries) = std::fs::read_dir(home) {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            let _ = if entry.file_type().is_ok_and(|t| t.is_dir()) {
+                std::fs::remove_dir_all(&path)
+            } else {
+                std::fs::remove_file(&path)
+            };
+        }
+    }
 }
 
 // ── Suites ──────────────────────────────────────────────────────────
