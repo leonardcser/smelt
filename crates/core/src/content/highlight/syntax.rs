@@ -131,14 +131,13 @@ pub(super) fn render_highlighted(
     max_rows: u16,
 ) -> u16 {
     let _perf = smelt_perf::perf::begin("render:highlighted");
-    let indent = "  ";
     let theme = syntax_theme();
-    let gutter_width = format!("{}", lines.len()).len();
-    let prefix_len = indent.len() + 1 + gutter_width + 3;
-    let max_content = default_width().saturating_sub(prefix_len + 1).max(1);
+    // Reserve gutter space so wrap math accounts for the consumer-side gutter:
+    // line-number width + 2 cells of padding (" N ").
+    let gutter_width = format!("{}", lines.len()).len() + 2;
+    let max_content = default_width().saturating_sub(gutter_width + 1).max(1);
     let limit = lines.len();
 
-    let blank_gutter = " ".repeat(1 + gutter_width + 3);
     let mut total_rows = 0u16;
     let mut emitted = 0u16;
     let emit_limit = if max_rows == 0 { u16::MAX } else { max_rows };
@@ -154,18 +153,12 @@ pub(super) fn render_highlighted(
         let visual_rows = split_regions_into_rows(out, &regions, max_content);
         for (vi, vrow) in visual_rows.iter().enumerate() {
             if total_rows >= skip && emitted < emit_limit {
-                out.print_gutter(indent);
                 if vi == 0 {
                     out.set_source_line(smelt_buffer::buffer::SourceLine::Linear {
                         lineno: (i + 1) as u32,
                     });
-                    out.set_fg(Color::DarkGrey);
-                    out.print_gutter(&format!(" {:>w$}", i + 1, w = gutter_width));
-                    out.reset_style();
-                    out.print_gutter("   ");
                 } else {
                     out.set_source_line(smelt_buffer::buffer::SourceLine::Synthetic);
-                    out.print_gutter(&blank_gutter);
                 }
                 print_split_regions(out, vrow, None);
                 out.newline();

@@ -264,6 +264,12 @@ impl TuiApp {
             ));
             if let Some(w) = ui.win_mut(crate::app::TRANSCRIPT_WIN) {
                 w.set_vim_enabled(vim_enabled);
+                // Transcript blocks (code, diff) stamp `SourceLine` per row;
+                // `LineNumberGutter` is strict — text/markdown rows leave no
+                // stamp and contribute no gutter width.
+                w.gutter = Some(std::sync::Arc::new(
+                    crate::smelt_term::gutter::LineNumberGutter,
+                ));
             }
             let prompt_above_buf = ui.buf_create(crate::smelt_term::BufCreateOpts::default());
             assert!(ui.win_open_split_at(

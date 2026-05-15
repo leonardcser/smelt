@@ -11,7 +11,7 @@ local syntax = {}
 ---@type fun(buf_id: integer, opts: table): nil
 syntax.render = nil
 
---- Paint `opts.content` into the buffer with the file-view layout — numbered gutter and indent. Pick the syntax via `opts.lang` or `opts.path`. Use this for write_file / notebook diffs; prefer `smelt.syntax.render` for plain snippets.
+--- Paint `opts.content` into the buffer with file-view metadata: each row gets `SourceLine::Linear` stamped so a `gutter = "line_numbers"` window draws the gutter. Pick the syntax via `opts.lang` or `opts.path`. Use this for write_file / notebook diffs; prefer `smelt.syntax.render` for plain snippets.
 ---@see smelt.syntax.render
 ---@type fun(buf_id: integer, opts: table): nil
 syntax.render_file = nil

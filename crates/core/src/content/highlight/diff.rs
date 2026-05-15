@@ -441,12 +441,17 @@ pub fn print_cached_inline_diff(
 ) -> u16 {
     let _perf = smelt_perf::perf::begin("render:inline_diff_cached");
 
-    let indent = "  ";
+    // Reserve gutter space so wrap math accounts for the consumer-side gutter:
+    // diff layout is " O  N " (old_w + 2 + new_w + 2 cells) plus the per-row
+    // "X " sign prefix.
     let gutter_width = format!("{}", cache.max_display_lineno).len();
-    let prefix_len = indent.len() + 1 + gutter_width + 3;
-    let right_margin = indent.len();
+    let consumer_gutter = gutter_width + 2 + gutter_width + 2;
+    let sign_prefix = 2;
+    let right_margin = 2;
     let tw = default_width();
-    let max_content = tw.saturating_sub(prefix_len + right_margin).max(1);
+    let max_content = tw
+        .saturating_sub(consumer_gutter + sign_prefix + right_margin)
+        .max(1);
     // Content re-wraps per row from default_width(), so the layout is width-pinned.
     out.mark_wrapped();
     let emit_limit = if max_rows == 0 { u16::MAX } else { max_rows };
@@ -460,7 +465,6 @@ pub fn print_cached_inline_diff(
         g: 50,
         b: 20,
     };
-    let blank_gutter = " ".repeat(1 + gutter_width + 3);
 
     let mut emitted = 0u16;
     for (row_idx, line) in cache.lines.iter().enumerate() {
@@ -473,21 +477,19 @@ pub fn print_cached_inline_diff(
         match line {
             CachedDiffLine::Ellipsis => {
                 out.set_source_line(smelt_buffer::buffer::SourceLine::Synthetic);
-                out.print_gutter(indent);
                 out.set_fg(Color::DarkGrey);
-                out.print_gutter(&format!("{:>w$}", "...", w = 1 + gutter_width));
+                out.print("...");
                 out.reset_style();
                 out.newline();
             }
             _ => {
-                let (display_lineno, source_line, sign, bg, spans) = match line {
+                let (source_line, sign, bg, spans) = match line {
                     CachedDiffLine::Context {
                         old_lineno,
                         new_lineno,
                         spans,
                         ..
                     } => (
-                        *new_lineno,
                         smelt_buffer::buffer::SourceLine::Diff {
                             old: Some(*old_lineno as u32),
                             new: Some(*new_lineno as u32),
@@ -497,7 +499,6 @@ pub fn print_cached_inline_diff(
                         spans,
                     ),
                     CachedDiffLine::Delete { lineno, spans, .. } => (
-                        *lineno,
                         smelt_buffer::buffer::SourceLine::Diff {
                             old: Some(*lineno as u32),
                             new: None,
@@ -507,7 +508,6 @@ pub fn print_cached_inline_diff(
                         spans,
                     ),
                     CachedDiffLine::Insert { lineno, spans, .. } => (
-                        *lineno,
                         smelt_buffer::buffer::SourceLine::Diff {
                             old: None,
                             new: Some(*lineno as u32),
@@ -525,34 +525,20 @@ pub fn print_cached_inline_diff(
                     } else {
                         out.set_source_line(smelt_buffer::buffer::SourceLine::Synthetic);
                     }
-                    out.print_gutter(indent);
                     if let Some((ch, color)) = sign {
                         let bgv = bg.unwrap();
                         out.set_bg(bgv);
                         if vi == 0 {
                             out.set_fg(color);
-                            out.print_gutter(&format!(
-                                " {:>w$} ",
-                                display_lineno,
-                                w = gutter_width
-                            ));
-                            out.set_fg(color);
-                            out.print_gutter(&format!("{} ", ch));
+                            out.print(&format!("{} ", ch));
                         } else {
-                            out.print_gutter(&blank_gutter);
+                            out.print("  ");
                         }
                         let _content_cols = print_cached_spans(out, vrow, bg);
                         out.fill_line_bg(bgv, right_margin as u16);
                         out.reset_style();
                     } else {
-                        if vi == 0 {
-                            out.set_fg(Color::DarkGrey);
-                            out.print_gutter(&format!(" {:>w$}", display_lineno, w = gutter_width));
-                            out.reset_style();
-                            out.print_gutter("   ");
-                        } else {
-                            out.print_gutter(&blank_gutter);
-                        }
+                        out.print("  ");
                         print_cached_spans(out, vrow, None);
                     }
                     out.newline();

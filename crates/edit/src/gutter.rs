@@ -62,14 +62,13 @@ fn digits_of(n: u32) -> u16 {
 }
 
 impl LineNumberGutter {
+    /// Widen the gutter to fit explicit `SourceLine::Linear` / `SourceLine::Diff`
+    /// stamps. Rows with no stamp (or `Synthetic`) contribute no width — a buffer
+    /// whose rows are all unstamped/synthetic gets a zero-width gutter so unrelated
+    /// content (e.g. transcript text rows) doesn't lose horizontal space.
     fn widths(&self, buf: &Buffer) -> Widths {
-        let n = buf.line_count();
         let mut w = Widths::default();
-        // Default fallback: row+1 sets new_digits.
-        if n > 0 {
-            w.new_digits = digits_of(n as u32);
-        }
-        for row in 0..n {
+        for row in 0..buf.line_count() {
             match buf.source_line_at(row) {
                 Some(SourceLine::Linear { lineno }) => {
                     w.new_digits = w.new_digits.max(digits_of(lineno));
@@ -92,7 +91,10 @@ impl LineNumberGutter {
 impl GutterProvider for LineNumberGutter {
     fn width(&self, buf: &Buffer) -> u16 {
         let w = self.widths(buf);
-        if w.old_digits == 0 {
+        if w.new_digits == 0 && w.old_digits == 0 {
+            // No stamped rows → no gutter column.
+            0
+        } else if w.old_digits == 0 {
             // Plain: " N "
             w.new_digits + 2
         } else {
@@ -106,9 +108,15 @@ impl GutterProvider for LineNumberGutter {
             return None;
         }
         let widths = self.widths(buf);
+        let total_width = self.width(buf) as usize;
+        if total_width == 0 {
+            return None;
+        }
         let style = theme.get("Comment");
         let text = match buf.source_line_at(row) {
-            Some(SourceLine::Synthetic) => " ".repeat(self.width(buf) as usize),
+            // Rows without an explicit stamp render as blanks of the full width
+            // so neighbouring stamped rows align cleanly.
+            Some(SourceLine::Synthetic) | None => " ".repeat(total_width),
             Some(SourceLine::Diff { old, new }) => {
                 if widths.old_digits == 0 {
                     // Defensive: caller marked Diff but no old digits found.
@@ -122,14 +130,6 @@ impl GutterProvider for LineNumberGutter {
                     format_one(lineno, widths.new_digits)
                 } else {
                     // Linear row inside a diff buffer: align under the "new" column.
-                    format_two(None, Some(lineno), widths.old_digits, widths.new_digits)
-                }
-            }
-            None => {
-                let lineno = row as u32 + 1;
-                if widths.old_digits == 0 {
-                    format_one(lineno, widths.new_digits)
-                } else {
                     format_two(None, Some(lineno), widths.old_digits, widths.new_digits)
                 }
             }
@@ -175,22 +175,28 @@ mod tests {
     }
 
     #[test]
-    fn plain_buffer_width_scales_with_count() {
+    fn unstamped_buffer_has_no_gutter() {
         let g = LineNumberGutter;
-        assert_eq!(g.width(&buf_with_lines(1)), 3); // " 1 "
-        assert_eq!(g.width(&buf_with_lines(9)), 3);
-        assert_eq!(g.width(&buf_with_lines(10)), 4); // " 10 "
-        assert_eq!(g.width(&buf_with_lines(100)), 5);
+        // Without any `SourceLine` stamps the gutter is zero-width and
+        // produces no per-row cell — text-only buffers don't lose horizontal
+        // space to an empty column.
+        let buf = buf_with_lines(12);
+        let theme = Theme::new();
+        assert_eq!(g.width(&buf), 0);
+        assert!(g.cell(&buf, &theme, 0).is_none());
     }
 
     #[test]
-    fn plain_buffer_falls_back_to_row_plus_one() {
+    fn plain_buffer_width_scales_with_stamped_linenos() {
         let g = LineNumberGutter;
-        let buf = buf_with_lines(12);
         let theme = Theme::new();
-        assert_eq!(g.cell(&buf, &theme, 0).unwrap().text, "  1 ");
-        assert_eq!(g.cell(&buf, &theme, 11).unwrap().text, " 12 ");
-        assert!(g.cell(&buf, &theme, 12).is_none());
+        let mut single = buf_with_lines(1);
+        stamp_source_line(&mut single, 0, SourceLine::Linear { lineno: 1 });
+        assert_eq!(g.width(&single), 3); // " 1 "
+        let mut wide = buf_with_lines(1);
+        stamp_source_line(&mut wide, 0, SourceLine::Linear { lineno: 100 });
+        assert_eq!(g.width(&wide), 5); // " 100 "
+        assert_eq!(g.cell(&wide, &theme, 0).unwrap().text, " 100 ");
     }
 
     #[test]
