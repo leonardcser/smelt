@@ -47,6 +47,16 @@ pub struct AppSnapshot {
     pub pending_quit: bool,
 }
 
+/// Snapshot of the streaming buffers (`text`, `thinking`, `exec`) at one
+/// point in time. Used by fuzz-time transitional invariants that need to
+/// assert a specific event flushed the relevant buffer.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct StreamingState {
+    pub text: bool,
+    pub thinking: bool,
+    pub exec: bool,
+}
+
 /// Per-event allocation delta captured by `TestApp::feed_one`. Snapshots
 /// `(alloc_count, alloc_bytes_grown)` for the calling thread before and after
 /// the event runs and stores the difference. Per-thread TLS counters mean
@@ -333,6 +343,17 @@ impl TestApp {
             .as_ref()
             .map(|ag| ag.pending.iter().map(|pt| pt.call_id.clone()).collect())
             .unwrap_or_default()
+    }
+
+    /// Whether streaming `text` / `thinking` / exec buffers currently hold
+    /// uncommitted content. Used by post-event invariants that assert a
+    /// specific event flushed the relevant buffer.
+    pub fn streaming_state(&self) -> StreamingState {
+        StreamingState {
+            text: self.app.parser.has_active_text(),
+            thinking: self.app.parser.has_active_thinking(),
+            exec: self.app.parser.has_active_exec(),
+        }
     }
 
     /// Render one frame to real stdout. Drives the same compositor

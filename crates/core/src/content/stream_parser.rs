@@ -51,6 +51,10 @@ impl StreamParser {
         self.active_thinking.is_some()
     }
 
+    pub fn has_active_text(&self) -> bool {
+        self.active_text.is_some()
+    }
+
     pub fn active_thinking(&self) -> Option<&ActiveThinking> {
         self.active_thinking.as_ref()
     }

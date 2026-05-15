@@ -179,7 +179,24 @@ pub fn apply(app: &mut TestApp, op: FuzzOp) {
         }
 
         FuzzOp::EngineReady => SourceEvent::Engine(EngineEvent::Ready),
-        FuzzOp::EngineText(s) => SourceEvent::Engine(EngineEvent::Text { content: s }),
+        FuzzOp::EngineText(s) => {
+            let was_active = app.agent_running();
+            app.feed_one_within_budget(
+                SourceEvent::Engine(EngineEvent::Text { content: s }),
+                AllocBudget::DEFAULT,
+            );
+            // Text commits any streaming text buffer in the active-turn path.
+            // Idle dispatch is a no-op for Text, so only enforce on active turns.
+            if was_active {
+                let ss = app.streaming_state();
+                assert!(
+                    !ss.text,
+                    "EngineEvent::Text left streaming text active: {ss:?}",
+                );
+            }
+            app.assert_invariants();
+            return;
+        }
         FuzzOp::EngineTextDelta(s) => SourceEvent::Engine(EngineEvent::TextDelta { delta: s }),
         FuzzOp::EngineThinkingDelta(s) => {
             SourceEvent::Engine(EngineEvent::ThinkingDelta { delta: s })
@@ -187,11 +204,35 @@ pub fn apply(app: &mut TestApp, op: FuzzOp) {
         FuzzOp::EngineToolStart {
             call_id,
             tool_name,
-        } => SourceEvent::Engine(EngineEvent::ToolStarted {
-            call_id: call_id_string(call_id),
-            tool_name,
-            args: HashMap::new(),
-        }),
+        } => {
+            let cid = call_id_string(call_id);
+            let was_active = app.agent_running();
+            app.feed_one_within_budget(
+                SourceEvent::Engine(EngineEvent::ToolStarted {
+                    call_id: cid.clone(),
+                    tool_name,
+                    args: HashMap::new(),
+                }),
+                AllocBudget::DEFAULT,
+            );
+            // ToolStarted is gated on an active turn. When active, it must
+            // flush both streaming buffers (text + thinking) before pushing
+            // the tool block, and the call_id must land in `pending`.
+            if was_active {
+                let ss = app.streaming_state();
+                assert!(
+                    !ss.text && !ss.thinking,
+                    "ToolStarted({cid}) left streaming active: {ss:?}",
+                );
+                let pending = app.pending_tool_call_ids();
+                assert!(
+                    pending.iter().any(|p| p == &cid),
+                    "ToolStarted({cid}) did not appear in pending: {pending:?}",
+                );
+            }
+            app.assert_invariants();
+            return;
+        }
         FuzzOp::EngineToolOutput { call_id, chunk } => {
             SourceEvent::Engine(EngineEvent::ToolOutput {
                 call_id: call_id_string(call_id),
@@ -234,7 +275,19 @@ pub fn apply(app: &mut TestApp, op: FuzzOp) {
             return;
         }
         FuzzOp::ExecOutput(s) => SourceEvent::ExecOutput(s),
-        FuzzOp::ExecDone(code) => SourceEvent::ExecDone(code),
+        FuzzOp::ExecDone(code) => {
+            app.feed_one_within_budget(SourceEvent::ExecDone(code), AllocBudget::DEFAULT);
+            // ExecDone runs `finish_exec` + `finalize_exec` unconditionally;
+            // the latter clears `stream_exec_id`. Active-exec state must be
+            // empty after dispatch, irrespective of turn state.
+            let ss = app.streaming_state();
+            assert!(
+                !ss.exec,
+                "ExecDone left active-exec state: {ss:?}",
+            );
+            app.assert_invariants();
+            return;
+        }
     };
     app.feed_one_within_budget(ev, AllocBudget::DEFAULT);
     app.assert_invariants();
