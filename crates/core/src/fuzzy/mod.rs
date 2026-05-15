@@ -6,8 +6,8 @@ pub mod score;
 /// haystacks under 8 bytes. Materializing the input into a `String` with
 /// capacity ≥ 8 keeps the over-read inside the allocation.
 ///
-/// TODO: drop this workaround once upstream neo_frizbee fixes the load
-/// path (issue link to be added).
+/// TODO: drop this workaround once the upstream fix lands and
+/// neo_frizbee rebases: https://github.com/saghen/frizbee/pull/78
 const SIMD_MIN_CAP: usize = 8;
 
 fn pad_short(s: &str) -> String {
