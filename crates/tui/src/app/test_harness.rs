@@ -1,18 +1,10 @@
 //! End-to-end test harness for `TuiApp`.
 //!
 //! Input is a `SourceEvent` stream (Term / Engine / Tick); output is a
-//! structured `Action` log plus snapshots of inspectable state. The
-//! input/output shape is the same one the eventual fuzz target will
-//! use (see `FUZZING_PLAN.md`), so suites written against this harness
-//! survive when the DST architecture lands.
+//! structured `Action` log plus snapshots of inspectable state.
 //!
 //! Side effects are contained by pointing every `$HOME`/XDG path at a
 //! process-wide tempdir.
-//!
-//! Several helpers (`feed`, `inject_engine`, `actions`, `clear_actions`,
-//! `Tick`, `Action::Quit`, etc.) are intentionally part of the public
-//! shape even before any suite consumes them — they're the load-bearing
-//! seams future suites and the eventual fuzz target plug into.
 
 #![allow(dead_code)]
 
@@ -27,11 +19,11 @@ use std::time::{Duration, Instant, SystemTime};
 use tempfile::TempDir;
 use tokio::sync::mpsc;
 
-pub(crate) use crate::event_source::SourceEvent;
+pub use crate::event_source::SourceEvent;
 
 /// One observed out-bound effect of a `SourceEvent`.
 #[derive(Debug, Clone)]
-pub(crate) enum Action {
+pub enum Action {
     /// A `UiCommand` was sent on the engine channel.
     EngineSend(UiCommand),
     /// The event dispatch asked the app to quit.
@@ -40,19 +32,19 @@ pub(crate) enum Action {
 
 /// Immutable snapshot of state observable by tests.
 #[derive(Debug, Clone)]
-pub(crate) struct AppSnapshot {
-    pub(crate) app_focus: AppFocus,
-    pub(crate) vim_mode: VimMode,
-    pub(crate) cmdline_open: bool,
-    pub(crate) cmdline_text: String,
-    pub(crate) focused_overlay: Option<OverlayId>,
-    pub(crate) prompt_text: String,
-    pub(crate) queued_messages: Vec<String>,
-    pub(crate) agent_running: bool,
-    pub(crate) term_focused: bool,
-    pub(crate) quit_requested: bool,
-    pub(crate) notification: Option<WinId>,
-    pub(crate) pending_quit: bool,
+pub struct AppSnapshot {
+    pub app_focus: AppFocus,
+    pub vim_mode: VimMode,
+    pub cmdline_open: bool,
+    pub cmdline_text: String,
+    pub focused_overlay: Option<OverlayId>,
+    pub prompt_text: String,
+    pub queued_messages: Vec<String>,
+    pub agent_running: bool,
+    pub term_focused: bool,
+    pub quit_requested: bool,
+    pub notification: Option<WinId>,
+    pub pending_quit: bool,
 }
 
 /// Per-event allocation delta captured by `TestApp::feed_one`. Snapshots
@@ -60,33 +52,33 @@ pub(crate) struct AppSnapshot {
 /// the event runs and stores the difference. Per-thread TLS counters mean
 /// parallel `nextest` workers do not contaminate each other's numbers.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub(crate) struct AllocDelta {
-    pub(crate) allocs: u64,
-    pub(crate) bytes_grown: u64,
+pub struct AllocDelta {
+    pub allocs: u64,
+    pub bytes_grown: u64,
 }
 
-/// Tunable per-event allocation budget. The fuzz target (Phase 5) fails a
-/// scenario when any single `SourceEvent` exceeds either field. Tests can
-/// also use [`TestApp::feed_one_within_budget`] for the same enforcement.
+/// Tunable per-event allocation budget. [`TestApp::feed_one_within_budget`]
+/// panics when any single `SourceEvent` exceeds either field; external
+/// drivers can use the same seam to flag runaway-allocation scenarios.
 #[derive(Debug, Clone, Copy)]
-pub(crate) struct AllocBudget {
-    pub(crate) max_allocs: u64,
-    pub(crate) max_bytes: u64,
+pub struct AllocBudget {
+    pub max_allocs: u64,
+    pub max_bytes: u64,
 }
 
 impl AllocBudget {
     /// Default per-event budget. Generous enough to ignore normal large-paste
     /// cases but tight enough to catch unbounded per-keystroke growth.
-    pub(crate) const DEFAULT: AllocBudget = AllocBudget {
+    pub const DEFAULT: AllocBudget = AllocBudget {
         max_allocs: 10_000,
         max_bytes: 4 * 1024 * 1024,
     };
 }
 
 /// Test driver around a real `TuiApp`.
-pub(crate) struct TestApp {
-    pub(crate) app: TuiApp,
-    pub(crate) clock: Arc<VirtualClock>,
+pub struct TestApp {
+    pub app: TuiApp,
+    pub clock: Arc<VirtualClock>,
     cmd_rx: mpsc::UnboundedReceiver<UiCommand>,
     event_tx: mpsc::UnboundedSender<EngineEvent>,
     actions: Vec<Action>,
@@ -96,7 +88,7 @@ pub(crate) struct TestApp {
     last_alloc: Option<AllocDelta>,
 }
 
-pub(crate) struct TestAppBuilder {
+pub struct TestAppBuilder {
     vim: bool,
     mode: AgentMode,
     init_lua: Option<std::path::PathBuf>,
@@ -114,24 +106,24 @@ impl Default for TestAppBuilder {
 
 impl TestAppBuilder {
     /// Enable vim-mode on the prompt window.
-    pub(crate) fn with_vim(mut self, vim: bool) -> Self {
+    pub fn with_vim(mut self, vim: bool) -> Self {
         self.vim = vim;
         self
     }
 
-    pub(crate) fn with_mode(mut self, mode: AgentMode) -> Self {
+    pub fn with_mode(mut self, mode: AgentMode) -> Self {
         self.mode = mode;
         self
     }
 
     /// Run user `init.lua` from this path during build, and from the same
     /// path again on every `reload_lua()`.
-    pub(crate) fn with_init_lua(mut self, path: impl Into<std::path::PathBuf>) -> Self {
+    pub fn with_init_lua(mut self, path: impl Into<std::path::PathBuf>) -> Self {
         self.init_lua = Some(path.into());
         self
     }
 
-    pub(crate) fn build(self) -> TestApp {
+    pub fn build(self) -> TestApp {
         ensure_test_home();
 
         let (engine, cmd_rx, event_tx) = EngineHandle::for_test();
@@ -220,14 +212,14 @@ impl TestAppBuilder {
 }
 
 impl TestApp {
-    pub(crate) fn builder() -> TestAppBuilder {
+    pub fn builder() -> TestAppBuilder {
         TestAppBuilder::default()
     }
 
     /// Feed a single event. Drains any engine commands the dispatch
     /// produced into the action log. Captures the per-thread allocation
     /// delta for this event into [`Self::last_alloc_delta`].
-    pub(crate) fn feed_one(&mut self, ev: SourceEvent) {
+    pub fn feed_one(&mut self, ev: SourceEvent) {
         let (a0, b0) = smelt_perf::alloc::thread_snapshot();
         {
             // Install the TLS app pointer so Lua bindings (e.g. `:quit`
@@ -287,10 +279,9 @@ impl TestApp {
     }
 
     /// Feed a single event and panic if the per-event allocation delta
-    /// exceeds `budget`. The eventual fuzz target uses this seam to flag
-    /// runaway-allocation scenarios; tests can use it as a regression guard
-    /// against accidental per-keystroke growth.
-    pub(crate) fn feed_one_within_budget(&mut self, ev: SourceEvent, budget: AllocBudget) {
+    /// exceeds `budget`. Useful as a regression guard against accidental
+    /// per-keystroke growth and as a hard cap for external scenario drivers.
+    pub fn feed_one_within_budget(&mut self, ev: SourceEvent, budget: AllocBudget) {
         self.feed_one(ev);
         let delta = self.last_alloc.expect("feed_one populates last_alloc");
         assert!(
@@ -310,11 +301,11 @@ impl TestApp {
     }
 
     /// Allocation delta captured by the most recent [`Self::feed_one`].
-    pub(crate) fn last_alloc_delta(&self) -> Option<AllocDelta> {
+    pub fn last_alloc_delta(&self) -> Option<AllocDelta> {
         self.last_alloc
     }
 
-    pub(crate) fn feed<I>(&mut self, events: I)
+    pub fn feed<I>(&mut self, events: I)
     where
         I: IntoIterator<Item = SourceEvent>,
     {
@@ -324,22 +315,22 @@ impl TestApp {
     }
 
     /// Type a single character key with no modifiers.
-    pub(crate) fn type_char(&mut self, c: char) {
+    pub fn type_char(&mut self, c: char) {
         self.press_mod(KeyCode::Char(c), KeyModifiers::NONE);
     }
 
     /// Type each char of `s` as a separate keystroke.
-    pub(crate) fn type_text(&mut self, s: &str) {
+    pub fn type_text(&mut self, s: &str) {
         for c in s.chars() {
             self.type_char(c);
         }
     }
 
-    pub(crate) fn press(&mut self, code: KeyCode) {
+    pub fn press(&mut self, code: KeyCode) {
         self.press_mod(code, KeyModifiers::NONE);
     }
 
-    pub(crate) fn press_mod(&mut self, code: KeyCode, mods: KeyModifiers) {
+    pub fn press_mod(&mut self, code: KeyCode, mods: KeyModifiers) {
         let ev = Event::Key(KeyEvent {
             code,
             modifiers: mods,
@@ -349,7 +340,7 @@ impl TestApp {
         self.feed_one(SourceEvent::Term(ev));
     }
 
-    pub(crate) fn inject_engine(&self, ev: EngineEvent) -> Result<(), Box<EngineEvent>> {
+    pub fn inject_engine(&self, ev: EngineEvent) -> Result<(), Box<EngineEvent>> {
         self.event_tx.send(ev).map_err(|e| Box::new(e.0))
     }
 
@@ -360,20 +351,20 @@ impl TestApp {
         }
     }
 
-    pub(crate) fn actions(&self) -> &[Action] {
+    pub fn actions(&self) -> &[Action] {
         &self.actions
     }
 
-    pub(crate) fn clear_actions(&mut self) {
+    pub fn clear_actions(&mut self) {
         self.actions.clear();
     }
 
-    pub(crate) fn quit_requested(&self) -> bool {
+    pub fn quit_requested(&self) -> bool {
         self.quit
     }
 
     /// Snapshot the public-facing state at this instant.
-    pub(crate) fn state(&self) -> AppSnapshot {
+    pub fn state(&self) -> AppSnapshot {
         let cmdline_open = self.app.well_known.cmdline.is_some();
         let cmdline_text = if cmdline_open {
             cmdline_text(&self.app)

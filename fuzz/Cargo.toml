@@ -1,0 +1,27 @@
+[package]
+name = "smelt-fuzz"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+[workspace]
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+arbitrary = { version = "1", features = ["derive"] }
+tui = { path = "../crates/tui", features = ["harness"] }
+smelt-buffer = { path = "../crates/buffer" }
+crossterm = { version = "0.29", features = ["event-stream", "bracketed-paste"] }
+
+[[bin]]
+name = "smelt_loop"
+path = "fuzz_targets/smelt_loop.rs"
+test = false
+doc = false
+bench = false
+
+[profile.release]
+debug = 1

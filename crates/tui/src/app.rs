@@ -12,8 +12,8 @@ pub(crate) mod mouse;
 pub(crate) mod pane_focus;
 pub(crate) mod render_loop;
 pub(crate) mod status_bar;
-#[cfg(test)]
-pub(crate) mod test_harness;
+#[cfg(any(test, feature = "harness"))]
+pub mod test_harness;
 pub(crate) mod transcript;
 pub(crate) mod ui_host;
 pub(crate) mod well_known;
@@ -126,7 +126,7 @@ pub(crate) struct WellKnown {
 
 /// Which pane currently holds focus.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum AppFocus {
+pub enum AppFocus {
     Prompt,
     Content,
 }

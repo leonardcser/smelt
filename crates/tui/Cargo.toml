@@ -26,3 +26,8 @@ tempfile = { workspace = true }
 
 [dev-dependencies]
 insta = { workspace = true }
+
+[features]
+# Expose the in-process `TestApp` harness to external binaries that need to
+# drive a `TuiApp` through scripted `SourceEvent` streams.
+harness = []
