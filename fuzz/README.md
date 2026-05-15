@@ -10,8 +10,11 @@ cargo install cargo-fuzz
 ## Commands
 
 ```bash
-# Fuzz
+# Fuzz (seeds from seed_corpus/smelt_loop/)
 cargo +nightly fuzz run smelt_loop -- -max_len=4096 -max_total_time=300
+
+# Minimize the corpus after a run
+cargo +nightly fuzz cmin smelt_loop seed_corpus/smelt_loop
 
 # Crash → JSON
 cargo run --bin crash_to_scenario -- artifacts/smelt_loop/<file> out.json
