@@ -247,7 +247,14 @@ impl TuiApp {
                 SessionControl::Continue
             }
             EngineEvent::CompactionComplete { messages } => {
-                if self.pending_compact_epoch != self.compact_epoch {
+                // Refuse to apply compaction while tools are still in flight:
+                // `apply_compaction` rebuilds the transcript from scratch,
+                // which clears `tool_states` for every pending tool and
+                // leaves their widgets orphaned in `agent.pending` forever.
+                // The conversation stays uncompacted this round; the engine
+                // can resend after the turn settles.
+                let pending_tools = !pending.is_empty();
+                if self.pending_compact_epoch != self.compact_epoch || pending_tools {
                     {
                         self.working.finish(TurnOutcome::Done);
                     };

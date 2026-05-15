@@ -741,12 +741,16 @@ fn run_check(check: PostCheck, pre: &Snapshot, post: &Snapshot, new_actions: &[A
             }
         }
         PostCheck::CompactionApplied { msg_count } => {
-            // The apply path runs only on epoch match. A non-empty payload
-            // replaces the conversation and clears snapshot vectors. Idle
-            // dispatch also routes non-empty payloads through the apply
-            // path, but skip the assertions when we can't tell which arm
-            // ran (e.g. an active turn that wasn't compacting).
-            if pre.compact_epoch_match && msg_count > 0 {
+            // The apply path runs only on epoch match AND no pending tools.
+            // When pending tools exist, the active-turn handler refuses
+            // compaction (would orphan tool widgets). A non-empty payload
+            // on the apply path replaces the conversation and clears
+            // snapshot vectors. Idle dispatch also routes non-empty
+            // payloads through the apply path, but skip the assertions
+            // when we can't tell which arm ran (e.g. an active turn that
+            // wasn't compacting).
+            let pending_tools = !pre.pending.is_empty();
+            if pre.compact_epoch_match && msg_count > 0 && !pending_tools {
                 assert_eq!(
                     post.session_messages, msg_count,
                     "CompactionComplete did not replace session.messages: pre {} → post {} (expected {msg_count})",
