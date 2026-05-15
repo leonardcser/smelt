@@ -73,6 +73,15 @@ pub enum FuzzOp {
     EngineCompactionComplete {
         msg_count: u8,
     },
+    /// Emit `TurnComplete` against the currently-active turn (when any),
+    /// carrying `msg_count` synthetic messages and a zero `TurnMeta`. Idle
+    /// dispatch also accepts this and replaces history when non-empty.
+    EngineTurnComplete {
+        msg_count: u8,
+    },
+    /// Emit `TurnError`. Active-turn dispatch ends the turn; idle dispatch
+    /// surfaces a notification.
+    EngineTurnError(String),
 }
 
 #[derive(Arbitrary, Debug, Clone, Copy, Serialize, Deserialize)]
@@ -223,6 +232,14 @@ enum PostCheck {
     /// had a matching compact epoch and `msg_count > 0`, the apply path
     /// must replace `session.messages` and drain all snapshot vectors.
     CompactionApplied { msg_count: usize },
+    /// `TurnComplete` against the active turn. Non-empty messages replace
+    /// session.messages; an active turn ends.
+    TurnCompleted {
+        msg_count: usize,
+        targeted_active: bool,
+    },
+    /// `TurnError`. When an active turn was running, it ends.
+    TurnErrored,
 }
 
 fn run_check(check: PostCheck, pre: &Snapshot, post: &Snapshot) {
@@ -294,6 +311,35 @@ fn run_check(check: PostCheck, pre: &Snapshot, post: &Snapshot) {
                 "ExecDone left active-exec state: {:?}",
                 post.streaming
             );
+        }
+        PostCheck::TurnCompleted {
+            msg_count,
+            targeted_active,
+        } => {
+            // Either active-turn dispatch (matching turn_id) or idle
+            // dispatch with non-empty messages replaces history.
+            let history_path = targeted_active || msg_count > 0;
+            if history_path {
+                assert_eq!(
+                    post.session_messages, msg_count,
+                    "TurnComplete did not replace session.messages: post {} (expected {msg_count})",
+                    post.session_messages,
+                );
+            }
+            if targeted_active {
+                assert!(
+                    !post.agent_running,
+                    "TurnComplete against active turn did not end it",
+                );
+            }
+        }
+        PostCheck::TurnErrored => {
+            if pre.agent_running {
+                assert!(
+                    !post.agent_running,
+                    "TurnError did not end the active turn",
+                );
+            }
         }
         PostCheck::CompactionApplied { msg_count } => {
             // The apply path runs only on epoch match. A non-empty payload
@@ -419,6 +465,15 @@ fn plan(op: FuzzOp) -> (Option<SourceEvent>, PostCheck) {
             });
             (Some(ev), PostCheck::CompactionApplied { msg_count: count })
         }
+        FuzzOp::EngineTurnComplete { .. } => {
+            // Needs the live turn_id (not accessible here); handled
+            // inline in `apply` before reaching `plan`.
+            unreachable!("EngineTurnComplete handled inline in apply()")
+        }
+        FuzzOp::EngineTurnError(message) => {
+            let ev = SourceEvent::Engine(EngineEvent::TurnError { message });
+            (Some(ev), PostCheck::TurnErrored)
+        }
     }
 }
 
@@ -442,7 +497,28 @@ pub fn apply(app: &mut TestApp, op: FuzzOp) {
     }
 
     let pre = Snapshot::capture(app);
-    let (ev, check) = plan(op);
+    // `TurnComplete` is gated on `turn_id` matching the live agent — read
+    // it here so the dispatched event hits the active arm whenever a turn
+    // is running. Idle dispatch still applies for the `agent_running ==
+    // false` case.
+    let (ev, check) = if let FuzzOp::EngineTurnComplete { msg_count } = op {
+        let count = usize::from(msg_count);
+        let id = app.current_turn_id().unwrap_or(0);
+        let ev = SourceEvent::Engine(EngineEvent::TurnComplete {
+            turn_id: id,
+            messages: synth_messages(count),
+            meta: None,
+        });
+        (
+            Some(ev),
+            PostCheck::TurnCompleted {
+                msg_count: count,
+                targeted_active: pre.agent_running,
+            },
+        )
+    } else {
+        plan(op)
+    };
     if let Some(ev) = ev {
         app.feed_one_within_budget(ev, AllocBudget::DEFAULT);
     }

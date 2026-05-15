@@ -388,6 +388,13 @@ impl TestApp {
         self.app.pending_compact_epoch = self.app.compact_epoch;
     }
 
+    /// `turn_id` of the active agent turn, if any. Used by fuzz ops that
+    /// synthesize engine events whose dispatch is gated on a matching id
+    /// (e.g. `TurnComplete`, `Messages`).
+    pub fn current_turn_id(&self) -> Option<u64> {
+        self.app.agent.as_ref().map(|ag| ag.turn_id)
+    }
+
     /// Render one frame to real stdout. Drives the same compositor
     /// pipeline production uses (`TuiApp::render_normal`). The caller is
     /// responsible for terminal setup (raw mode, alternate screen).
