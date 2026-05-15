@@ -8,6 +8,12 @@
 #   ./fuzz/fuzz-loop.sh                  # default 600s cycles, cmin every 10
 #   ./fuzz/fuzz-loop.sh 1200             # 20-minute cycles
 #   ./fuzz/fuzz-loop.sh 600 5            # 10-minute cycles, cmin every 5
+#   ./fuzz/fuzz-loop.sh 600 5 12         # … with 12 parallel fork workers
+#
+# Parallelism: libFuzzer's `-fork=N` runs N worker processes that share the
+# corpus; the parent re-spawns any that crash and keeps running for the
+# cycle's full `-max_total_time`. Default is `nproc/2` capped at 12. Pass 1
+# to disable. Workers each report into the parent's stdout (one log to tail).
 #
 # Exit codes:
 #   0   clean stop on SIGINT/SIGTERM
@@ -17,6 +23,21 @@ set -uo pipefail
 
 SECS_PER_CYCLE="${1:-600}"
 CMIN_EVERY="${2:-10}"
+default_fork() {
+  local n
+  if command -v nproc >/dev/null 2>&1; then
+    n=$(nproc)
+  elif command -v sysctl >/dev/null 2>&1; then
+    n=$(sysctl -n hw.ncpu 2>/dev/null || echo 2)
+  else
+    n=2
+  fi
+  local half=$(( n / 2 ))
+  (( half < 1 )) && half=1
+  (( half > 12 )) && half=12
+  echo "$half"
+}
+FORK="${3:-$(default_fork)}"
 
 cd "$(dirname "$0")"
 
@@ -40,8 +61,8 @@ trap on_interrupt INT TERM
 while (( INTERRUPTED == 0 )); do
   ITERATIONS=$((ITERATIONS + 1))
   ELAPSED=$(( $(date +%s) - START_EPOCH ))
-  printf '\n=== fuzz-loop cycle %d | elapsed %ds | crashes %d ===\n' \
-    "$ITERATIONS" "$ELAPSED" "$CRASHES"
+  printf '\n=== fuzz-loop cycle %d | elapsed %ds | crashes %d | fork=%d ===\n' \
+    "$ITERATIONS" "$ELAPSED" "$CRASHES" "$FORK"
 
   # Snapshot existing artifacts so we only archive *new* crashes from this cycle.
   PRE_ARTIFACTS=$(ls -1 artifacts/smelt_loop 2>/dev/null | sort)
@@ -50,7 +71,8 @@ while (( INTERRUPTED == 0 )); do
   cargo +nightly fuzz run smelt_loop seed_corpus/smelt_loop -- \
     -max_len=4096 \
     -max_total_time="$SECS_PER_CYCLE" \
-    -timeout=10
+    -timeout=10 \
+    -fork="$FORK"
   RC=$?
   set -e
 
