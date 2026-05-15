@@ -176,7 +176,10 @@ pub(crate) fn find_char(buf: &str, cpos: usize, kind: FindKind, ch: char) -> Opt
 
     match kind {
         FindKind::Forward | FindKind::ForwardTill => {
-            let start = next_char_boundary(buf, cpos);
+            // When `cpos` sits on the line's terminating `\n` (insert mode at
+            // end-of-line),  `next_char_boundary` advances past the newline
+            // while `eol` stays put, which inverts the slice range. Clamp.
+            let start = next_char_boundary(buf, cpos).min(eol);
             for (i, c) in buf[start..eol].char_indices() {
                 if c == ch {
                     let pos = start + i;
