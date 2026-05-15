@@ -133,6 +133,13 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
                         .unwrap_or(true);
                     if let Some(w) = app.ui.win_mut(win_id) {
                         w.wrap = wrap_enabled;
+                        // Default gutter is `LineNumberGutter` (strict): buffers
+                        // without `SourceLine` stamps get a zero-width column,
+                        // so text/list panes pay no visual cost. Code/diff
+                        // buffers automatically show their line numbers.
+                        w.gutter = Some(std::sync::Arc::new(
+                            crate::smelt_term::gutter::LineNumberGutter,
+                        ));
                         if let Some(opts) = opts.as_ref() {
                             if let Ok(focusable) = opts.get::<bool>("focusable") {
                                 w.focusable = focusable;
