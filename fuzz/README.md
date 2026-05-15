@@ -5,6 +5,15 @@
 ```bash
 rustup toolchain install nightly
 cargo install cargo-fuzz
+tar -xzf seed_corpus.tar.gz   # warm cache for the fuzzer
+```
+
+The corpus is tracked as a single tarball; the unpacked `seed_corpus/` dir is
+gitignored. After a long fuzz session, repack with:
+
+```bash
+cargo +nightly fuzz cmin smelt_loop seed_corpus/smelt_loop
+tar -czf seed_corpus.tar.gz seed_corpus
 ```
 
 ## Commands
