@@ -394,7 +394,12 @@ impl<'a> LineBuilder<'a> {
         let buf_len = self.buf.line_count();
         let text = std::mem::take(&mut self.cur_text);
         let highlights = std::mem::take(&mut self.cur_highlights);
-        let decoration = std::mem::take(&mut self.cur_decoration);
+        let mut decoration = std::mem::take(&mut self.cur_decoration);
+        // LineBuilder output is intrinsically pre-formatted: callers (parsers,
+        // markdown, code, diff) have already laid this row out at the chosen
+        // width. The host window's `WrappedLayout` keys off this so it doesn't
+        // re-wrap parser-produced rows.
+        decoration.pre_formatted = true;
 
         if target_row < buf_len {
             self.buf.set_lines(target_row, target_row + 1, vec![text]);
@@ -409,9 +414,7 @@ impl<'a> LineBuilder<'a> {
             self.buf
                 .add_highlight_group_with_meta(target_row, col_start, col_end, hl, meta);
         }
-        if has_decoration(&decoration) {
-            self.buf.set_decoration(target_row, decoration);
-        }
+        self.buf.set_decoration(target_row, decoration);
 
         self.lines_committed += 1;
         self.has_pending_content = false;

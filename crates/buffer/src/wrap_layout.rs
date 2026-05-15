@@ -6,6 +6,7 @@
 //! mutating the buffer and so coordinate translations (logical ↔ visual) are
 //! single-source.
 
+use crate::buffer::Buffer;
 use crate::wrap::wrap_line_ranges;
 
 /// Mapping from logical lines to visual rows at a specific width.
@@ -26,12 +27,26 @@ impl WrappedLayout {
     /// Build a layout for `lines` at `width`. When `wrap` is false every logical
     /// row contributes exactly one identity chunk regardless of width.
     pub fn from_lines(lines: &[String], width: u16, wrap: bool) -> Self {
+        Self::from_lines_with(lines, width, |_| wrap)
+    }
+
+    /// Build a layout against `buf`'s lines, consulting each row's
+    /// `decoration_at(row).pre_formatted` flag. Pre-formatted rows always
+    /// contribute an identity chunk so the producer's layout (parser output,
+    /// markdown tables, diff hunks) is preserved verbatim.
+    pub fn from_buffer(buf: &Buffer, width: u16, wrap: bool) -> Self {
+        Self::from_lines_with(buf.lines(), width, |row| {
+            wrap && !buf.decoration_at(row).pre_formatted
+        })
+    }
+
+    fn from_lines_with<F: Fn(usize) -> bool>(lines: &[String], width: u16, row_wraps: F) -> Self {
         let mut chunks_per_row: Vec<Vec<(usize, usize)>> = Vec::with_capacity(lines.len());
         let mut row_starts: Vec<usize> = Vec::with_capacity(lines.len());
         let mut visual_count = 0usize;
-        for line in lines {
+        for (idx, line) in lines.iter().enumerate() {
             row_starts.push(visual_count);
-            let chunks = if !wrap || line.is_empty() {
+            let chunks = if !row_wraps(idx) || line.is_empty() {
                 vec![(0, line.len())]
             } else {
                 wrap_line_ranges(line, width as usize)

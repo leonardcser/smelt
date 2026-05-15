@@ -340,23 +340,16 @@ impl Window {
     }
 
     /// Rebuild `layout` if the buffer's content or width changed. Called by the
-    /// host before paint so render and hit-test see a consistent view.
-    /// Parser-driven buffers manage their own wrap, so layout stays identity
-    /// over their lines regardless of `self.wrap`.
+    /// host before paint so render and hit-test see a consistent view. Rows
+    /// whose decoration sets `pre_formatted = true` (parser output, markdown
+    /// tables, diff hunks) stay as identity chunks regardless of `self.wrap`.
     pub fn ensure_layout(&mut self, buf: &Buffer, width: u16) {
-        let wrap = self.wrap && !buf.has_parser();
-        let key = (buf.changedtick(), width, wrap);
+        let key = (buf.changedtick(), width, self.wrap);
         if self.layout_key == Some(key) {
             return;
         }
-        self.layout = WrappedLayout::from_lines(buf.lines(), width, wrap);
+        self.layout = WrappedLayout::from_buffer(buf, width, self.wrap);
         self.layout_key = Some(key);
-    }
-
-    /// Wrap-flag used when computing `layout` against `buf`. Mirrors the logic
-    /// in `ensure_layout` so render's fallback layout matches.
-    fn layout_wrap(&self, buf: &Buffer) -> bool {
-        self.wrap && !buf.has_parser()
     }
 
     /// `true` when `self.layout` is in sync with `buf` (logical row count matches).
@@ -1176,12 +1169,11 @@ impl Window {
         // The host's prep pass refreshes the layout before paint. Tests that
         // skip the prep pass build a one-shot fallback so render stays correct
         // without requiring &mut self.
-        let wrap = self.layout_wrap(buf);
         let fallback_layout;
-        let layout = if self.layout_key == Some((buf.changedtick(), content_width, wrap)) {
+        let layout = if self.layout_key == Some((buf.changedtick(), content_width, self.wrap)) {
             &self.layout
         } else {
-            fallback_layout = WrappedLayout::from_lines(buf.lines(), content_width, wrap);
+            fallback_layout = WrappedLayout::from_buffer(buf, content_width, self.wrap);
             &fallback_layout
         };
         let line_count = layout.visual_count();

@@ -164,6 +164,11 @@ pub struct LineDecoration {
     pub source_text: Option<String>,
     /// Logical line mapping for this row. `None` = fall back to `row + 1`.
     pub source_line: Option<SourceLine>,
+    /// `true` when the row's content was already laid out at the producer's
+    /// chosen width (parser output, markdown tables, diff hunks). The host
+    /// window's `WrappedLayout` skips wrapping these rows so the producer's
+    /// layout is preserved verbatim.
+    pub pre_formatted: bool,
 }
 
 pub type SpanStyle = Style;
@@ -1152,6 +1157,7 @@ impl Buffer {
             soft_wrapped: false,
             source_text: None,
             source_line: None,
+            pre_formatted: false,
         };
         let Some(state) = self.extmarks.ns(self.ns_decorations) else {
             return &DEFAULT;
