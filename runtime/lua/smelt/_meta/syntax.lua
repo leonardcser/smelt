@@ -7,8 +7,13 @@
 ---@class smelt.syntax
 local syntax = {}
 
---- Paint syntect-highlighted code from `opts.content` into the buffer, picking the syntax from `opts.path`'s file extension. Falls back to plain text when no syntax matches.
+--- Paint syntect-highlighted code from `opts.content` into the buffer as a plain block — one source line per row, no gutter, no line numbers. Indentation is the caller's responsibility. Pick the syntax via `opts.lang` (`"bash"`, `"rust"`, `"py"`, …) or `opts.path` (extension-sniffed); `lang` wins when both are set. Unknown languages fall back to plain text.
 ---@type fun(buf_id: integer, opts: table): nil
 syntax.render = nil
+
+--- Paint `opts.content` into the buffer with the file-view layout — numbered gutter and indent. Pick the syntax via `opts.lang` or `opts.path`. Use this for write_file / notebook diffs; prefer `smelt.syntax.render` for plain snippets.
+---@see smelt.syntax.render
+---@type fun(buf_id: integer, opts: table): nil
+syntax.render_file = nil
 
 return syntax

@@ -45,9 +45,9 @@ smelt.tools.register({
       return smelt.layout.text(output.content, { is_error = true })
     end
     local buf = smelt.buf.create()
-    smelt.syntax.render(buf, {
+    smelt.syntax.render_file(buf, {
       content = args.content or "",
-      path = args.file_path or "",
+      path    = args.file_path or "",
     })
     return smelt.layout.leaf(buf)
   end,
@@ -56,7 +56,7 @@ smelt.tools.register({
     return p ~= "" and { p } or {}
   end,
   preview = function(buf, args)
-    smelt.syntax.render(buf, {
+    smelt.syntax.render_file(buf, {
       content = args.content or "",
       path    = args.file_path or "",
     })

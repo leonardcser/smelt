@@ -4,7 +4,7 @@
 
 **Tier:** `UiHost` — Requires a terminal UI; calling these from headless mode raises.
 
-Confirm dialog primitives — render title, preview, back-tab cycling, and choice resolution. UiHost-only.
+Confirm dialog primitives — preview dispatch, back-tab cycling, and choice resolution. UiHost-only.
 
 ## `smelt.confirm._back_tab`
 
@@ -21,14 +21,6 @@ fun(buf_id: integer, handle_id: integer): boolean
 ```
 
 smelt.confirm._render_preview(buf_id, handle_id) → bool. Calls the tool's `preview` callback if registered. Returns false if none registered.
-
-## `smelt.confirm._render_title`
-
-```lua
-fun(buf_id: integer, handle_id: integer): nil
-```
-
-smelt.confirm._render_title(buf_id, handle_id)
 
 ## `smelt.confirm._resolve`
 

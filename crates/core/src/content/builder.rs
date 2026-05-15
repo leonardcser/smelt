@@ -238,8 +238,15 @@ impl<'a> LineBuilder<'a> {
         self.cur_style = style;
     }
 
-    fn push_clone(&mut self) {
+    /// Snapshot the current (group, style) onto the stack without changing it. Pair with
+    /// `pop_style` to restore. Use this when emitting a run that mutates style state
+    /// (e.g. per-region syntax colors) without clobbering what the caller had set.
+    pub fn save_style(&mut self) {
         self.style_stack.push((self.cur_group, self.cur_style));
+    }
+
+    fn push_clone(&mut self) {
+        self.save_style();
     }
 
     pub fn pop_style(&mut self) {

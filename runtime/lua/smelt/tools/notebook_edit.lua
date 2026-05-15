@@ -57,9 +57,9 @@ smelt.tools.register({
     local meta = output.metadata or {}
     local buf = smelt.buf.create()
     if meta.edit_mode == "insert" then
-      smelt.syntax.render(buf, {
+      smelt.syntax.render_file(buf, {
         content = meta.new_source or "",
-        path = (meta.path or "") .. ".py",
+        path    = (meta.path or "") .. ".py",
       })
     else
       smelt.diff.render(buf, {

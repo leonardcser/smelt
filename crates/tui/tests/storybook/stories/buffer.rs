@@ -80,6 +80,7 @@ story!(highlight_hl_eol_paints_to_line_end, |ctx| {
                 hl_eol: true,
                 hl_mode: HlMode::default(),
                 conceal: None,
+                on_cursor_row: false,
             },
             priority: 0,
             right_gravity: true,

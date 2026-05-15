@@ -1,20 +1,18 @@
 //! `smelt.confirm._*` primitives consumed by
-//! `runtime/lua/smelt/confirm.lua`.
+//! `runtime/lua/smelt/dialogs/confirm.lua`.
 //!
 //! The Lua side owns dialog orchestration (open the overlay, attach
-//! keymaps, route Submit / Dismiss) and composes the summary + preview
-//! buffers itself via `smelt.{diff,syntax,bash,notebook}.render`. The
-//! request payload (tool name / desc / args / options / approval
-//! patterns / outside dir / cwd label) flows through the
-//! `confirm_requested` cell, so the dialog reads it once via
-//! `smelt.cell("confirm_requested"):get()` instead of polling Rust by
-//! handle. Rust exposes:
+//! keymaps, route Submit / Dismiss) and composes the title / summary /
+//! preview buffers itself via `smelt.buf.set_styled_lines`,
+//! `smelt.syntax.render`, and friends. The request payload (tool name /
+//! desc / args / options / approval patterns / outside dir / cwd label)
+//! flows through the `confirm_requested` cell, so the dialog reads it
+//! once via `smelt.cell("confirm_requested"):get()` instead of polling
+//! Rust by handle. Rust exposes:
 //!
-//! - `_render_title(buf_id, handle_id)` — fills the title buffer.
-//!   Stays Rust-side because the title's inline bash-highlight on the
-//!   desc needs span-level composition we don't expose to Lua yet.
 //! - `_back_tab` — toggles app mode + auto-allows when the new mode
 //!   covers this request.
+//! - `_render_preview` — dispatches to the tool's `preview` callback.
 //! - `_resolve` — final pick, removes the registry entry.
 //!
 //! Per-panel control (`scroll_by`, `focus`, …) goes through the
@@ -23,41 +21,18 @@
 
 use mlua::prelude::*;
 
-use crate::app::TuiApp;
-use crate::content::to_buffer::render_into_buffer;
-use crate::smelt_term::BufId;
 use lua_doc_derive::lua_module;
 use smelt_core::cells::ConfirmResolved;
 use smelt_core::lua::doc::register_ui_fn;
-use smelt_core::theme::intern;
 use smelt_core::transcript_model::{ApprovalScope, ConfirmChoice, ConfirmRequest};
 
 /// Register `smelt.confirm.*` primitives.
 #[lua_module(
     name = "smelt.confirm",
-    doc = "Confirm dialog primitives — render title, preview, back-tab cycling, and choice resolution. UiHost-only."
+    doc = "Confirm dialog primitives — preview dispatch, back-tab cycling, and choice resolution. UiHost-only."
 )]
 pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
     let confirm_tbl = lua.create_table()?;
-    // smelt.confirm._render_title(buf_id, handle_id)
-    register_ui_fn(
-        &confirm_tbl,
-        "smelt.confirm",
-        "_render_title",
-        "smelt.confirm._render_title(buf_id, handle_id)",
-        &["buf_id", "handle_id"],
-        lua,
-        |_, (buf_id, handle_id): (u64, u64)| -> LuaResult<()> {
-            crate::lua::with_app(|app| {
-                let req = match app.core.confirms.get(handle_id) {
-                    Some(e) => e.req.clone(),
-                    None => return,
-                };
-                render_title_into_buf(app, BufId(buf_id), &req);
-            });
-            Ok(())
-        },
-    )?;
 
     // smelt.confirm._back_tab(handle_id) → bool. Cycles app mode and returns true if the
     // new mode auto-allows the request. The with_app borrow must be released before calling
@@ -232,29 +207,4 @@ fn outside_dir_string(req: &ConfirmRequest) -> String {
         .as_ref()
         .map(|p| p.to_string_lossy().into_owned())
         .unwrap_or_default()
-}
-
-/// Render the confirm title line into `buf_id`. Multi-line descriptions show only the first line.
-fn render_title_into_buf(app: &mut TuiApp, buf_id: BufId, req: &ConfirmRequest) {
-    let theme_snap = app.ui.theme().clone();
-    let width = crate::content::term_width() as u16;
-    let shown = req
-        .desc
-        .lines()
-        .next()
-        .map(|s| s.to_string())
-        .unwrap_or_else(|| req.desc.clone());
-
-    if let Some(buf) = app.ui.buf_mut(buf_id) {
-        render_into_buffer(buf, width, &theme_snap, |sink| {
-            sink.print(" ");
-            sink.push_hl(intern("SmeltAccent"));
-            sink.print(&req.tool_name);
-            sink.pop_style();
-            sink.print(": ");
-            sink.print(&shown);
-            sink.print(" Allow?");
-            sink.newline();
-        });
-    }
 }

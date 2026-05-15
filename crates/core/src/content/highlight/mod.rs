@@ -44,4 +44,7 @@ pub use inline::{
     emit_inline_spans, inline_spans_width, parse_inline_spans, render_markdown_table,
     wrap_inline_spans, InlineSpan, InlineStyle,
 };
-pub use syntax::{print_syntax_file, print_syntax_file_ext, render_code_block, BashHighlighter};
+pub use syntax::{
+    lang_to_ext, print_code_lines, print_syntax_file, print_syntax_file_ext, render_code_block,
+    syntax_for_lang, InlineSyntax,
+};

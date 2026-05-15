@@ -18,6 +18,7 @@
 ---@field dim? boolean Force-dim the highlight.
 ---@field italic? boolean Force-italic the highlight.
 ---@field hl_eol? boolean Extend the highlight past the last column to fill the EOL.
+---@field on_cursor_row? boolean Paint this highlight only on the window's cursor row. Lets you decorate the selected list item (or any selection-aware sub-range) without re-rendering on every selection change.
 ---@field virt_text? string Virtual-text chunk to render alongside the line.
 ---@field virt_text_hl? string Theme group applied to the virt-text chunk.
 ---@field virt_text_pos? smelt.buf.VirtTextPos Where the virt-text appears relative to the line.

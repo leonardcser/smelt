@@ -1,6 +1,9 @@
 -- Built-in tool-approval dialog. Override `smelt.confirm.open` in init.lua to
 -- swap the default UI. Tool `preview` callbacks live in each tool's Lua definition.
 
+local NS_NUM = smelt.buf.create_namespace("smelt.confirm.num")
+local NS_SEL = smelt.buf.create_namespace("smelt.confirm.sel")
+
 -- `~/`-rewrite of the process cwd for workspace-scoped "always allow" labels.
 local function pretty_cwd()
   local cwd = smelt.os.cwd() or ""
@@ -52,28 +55,66 @@ local function build_options(req)
   return labels, decisions
 end
 
+-- Compose the body header: command (syntax-highlit for known langs), optional
+-- description, blank, dim "Allow?". The tool name itself lives in the overlay
+-- border title — not the body.
+local function render_header(buf, req)
+  local first_line = (req.desc or ""):match("([^\n]*)") or ""
+  local syntax_lang = req.tool_name == "bash" and "bash" or nil
+  local summary = req.summary
+  if summary == "" then summary = nil end
+
+  local lines = {
+    { { text = first_line, syntax = syntax_lang } },
+  }
+  if summary then
+    lines[#lines + 1] = { { text = summary, style = { dim = true } } }
+  end
+  lines[#lines + 1] = {}
+  lines[#lines + 1] = { { text = "Allow?", style = { dim = true } } }
+  smelt.buf.set_styled_lines(buf, lines)
+end
+
+-- Paint " N. " dim numbering prefixes on each option row and stamp a cursor-row-only
+-- accent extmark over the label so the selected option's label flips to SmeltAccent.
+local function render_options(buf, labels)
+  local rendered = {}
+  local label_starts = {}
+  for i, label in ipairs(labels) do
+    local prefix = string.format(" %d. ", i)
+    rendered[i] = prefix .. label
+    label_starts[i] = #prefix
+  end
+  smelt.buf.set_lines(buf, rendered)
+  smelt.buf.clear_namespace(buf, NS_NUM)
+  smelt.buf.clear_namespace(buf, NS_SEL)
+  for i, start in ipairs(label_starts) do
+    smelt.buf.set_extmark(buf, NS_NUM, i, 0, { end_col = start, dim = true })
+    smelt.buf.set_extmark(buf, NS_SEL, i, start, {
+      end_col       = #rendered[i],
+      hl_group      = "SmeltAccent",
+      on_cursor_row = true,
+    })
+  end
+end
+
 function smelt.confirm.open(handle_id)
   -- Bail if the cell doesn't match this handle; a newer request may have
   -- replaced it before this dialog opened.
   local req = smelt.cell("confirm_requested"):get()
   if not req or req.handle_id ~= handle_id then return end
 
-  -- Title / summary / preview content buffers (consumer-built).
-  local title_buf   = smelt.buf.create()
-  local summary_buf = smelt.buf.create()
+  local header_buf  = smelt.buf.create()
   local preview_buf = smelt.buf.create()
-  smelt.confirm._render_title(title_buf, handle_id)
-  if req.summary and req.summary ~= "" then
-    smelt.buf.set_lines(summary_buf, { " " .. req.summary })
-  end
+  render_header(header_buf, req)
   smelt.confirm._render_preview(preview_buf, handle_id)
 
   local labels, decisions = build_options(req)
 
-  local title_leaf   = smelt.ui.dialog.content({ buf = title_buf })
-  local summary_leaf = smelt.ui.dialog.content({ buf = summary_buf })
+  local header_leaf  = smelt.ui.dialog.content({ buf = header_buf, wrap = false })
   local preview_leaf = smelt.ui.dialog.content({ buf = preview_buf, interactive = true })
-  local options_leaf = smelt.ui.dialog.options(labels)
+  local options_leaf, options_buf = smelt.ui.dialog.options(labels)
+  render_options(options_buf, labels)
   local reason_leaf, reason_buf = smelt.ui.dialog.input("reason (optional)…")
 
   local typed_reason = false
@@ -88,13 +129,13 @@ function smelt.confirm.open(handle_id)
 
   local handle = smelt.ui.dialog.open_handle({
     blocks_agent = true,
-    height       = "fill",
+    max_height   = "fill",
+    title        = req.tool_name,
     panels = {
-      { leaf = title_leaf,   height = "fit"                                       },
-      { leaf = summary_leaf, height = "fit",  collapse_when_empty = true          },
-      { leaf = preview_leaf, height = "fill", collapse_when_empty = true          },
-      { leaf = options_leaf                                                        },
-      { leaf = reason_leaf,                   collapse_when_empty = true          },
+      { leaf = header_leaf,  height = "fit"                              },
+      { leaf = preview_leaf, height = "fit", collapse_when_empty = true  },
+      { leaf = options_leaf, height = "fit"                              },
+      { leaf = reason_leaf,                  collapse_when_empty = true  },
     },
     focus = options_leaf,
     keymaps = {

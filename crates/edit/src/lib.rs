@@ -5,6 +5,7 @@
 
 pub mod callback;
 pub(crate) mod event;
+pub mod gutter;
 pub(crate) mod motions;
 pub(crate) mod overlay;
 pub mod text;
@@ -862,7 +863,17 @@ impl Ui {
                     continue;
                 };
                 let buf_id = win.buf;
-                let content_width = win.config.gutters.content_width(leaf_rect.width);
+                let gutter_width = self
+                    .bufs
+                    .get(&buf_id)
+                    .map(|buf| win.gutter_width(buf))
+                    .unwrap_or(0)
+                    .min(leaf_rect.width);
+                let content_width = win
+                    .config
+                    .gutters
+                    .content_width(leaf_rect.width)
+                    .min(leaf_rect.width.saturating_sub(gutter_width));
                 if let Some(buf) = self.bufs.get_mut(&buf_id) {
                     buf.ensure_rendered_at(content_width);
                 }
@@ -883,13 +894,16 @@ impl Ui {
                     } else {
                         None
                     };
-                    win.viewport = Some(window::WindowViewport::new(
-                        *leaf_rect,
-                        content_width,
-                        total_rows,
-                        win.scroll_top,
-                        scrollbar,
-                    ));
+                    win.viewport = Some(
+                        window::WindowViewport::new(
+                            *leaf_rect,
+                            content_width,
+                            total_rows,
+                            win.scroll_top,
+                            scrollbar,
+                        )
+                        .with_gutter_width(gutter_width),
+                    );
                 }
             }
         }
@@ -898,7 +912,17 @@ impl Ui {
                 continue;
             };
             let buf_id = win.buf;
-            let content_width = win.config.gutters.content_width(rect.width);
+            let gutter_width = self
+                .bufs
+                .get(&buf_id)
+                .map(|buf| win.gutter_width(buf))
+                .unwrap_or(0)
+                .min(rect.width);
+            let content_width = win
+                .config
+                .gutters
+                .content_width(rect.width)
+                .min(rect.width.saturating_sub(gutter_width));
             if let Some(buf) = self.bufs.get_mut(&buf_id) {
                 buf.ensure_rendered_at(content_width);
             }
@@ -914,13 +938,16 @@ impl Ui {
                 } else {
                     None
                 };
-                win.viewport = Some(window::WindowViewport::new(
-                    *rect,
-                    content_width,
-                    total_rows,
-                    win.scroll_top,
-                    scrollbar,
-                ));
+                win.viewport = Some(
+                    window::WindowViewport::new(
+                        *rect,
+                        content_width,
+                        total_rows,
+                        win.scroll_top,
+                        scrollbar,
+                    )
+                    .with_gutter_width(gutter_width),
+                );
             }
         }
         let focus = self.focus;

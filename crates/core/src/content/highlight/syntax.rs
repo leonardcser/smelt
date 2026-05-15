@@ -1,15 +1,41 @@
 //! Syntax-highlighted code blocks and source files plus the shared
-//! `BashHighlighter` used in confirm dialogs and the transcript.
+//! `InlineSyntax` highlighter used in confirm dialogs and the transcript.
 
 use std::path::Path;
 use syntect::easy::HighlightLines;
 use syntect::highlighting::Style;
+use syntect::parsing::SyntaxReference;
 
 use super::{syntax_theme, SYNTAX_SET};
 use crate::content::builder::LineBuilder;
 use crate::content::default_width;
 use crate::style::Color;
 use crate::theme::intern;
+
+/// Map a language token (`"bash"`, `"rust"`, `"ts"`, …) to a syntect-friendly file extension.
+/// Unknown tokens fall through unchanged so syntect can attempt a direct extension lookup.
+pub fn lang_to_ext(lang: &str) -> &str {
+    match lang {
+        "" => "txt",
+        "js" | "javascript" => "js",
+        "ts" | "typescript" => "ts",
+        "py" | "python" => "py",
+        "rb" | "ruby" => "rb",
+        "rs" | "rust" => "rs",
+        "sh" | "bash" | "zsh" | "shell" => "sh",
+        "yml" => "yaml",
+        other => other,
+    }
+}
+
+/// Resolve a syntect `SyntaxReference` from a language token. Falls back to plain text.
+pub fn syntax_for_lang(lang: &str) -> &'static SyntaxReference {
+    let ext = lang_to_ext(lang);
+    SYNTAX_SET
+        .find_syntax_by_extension(ext)
+        .or_else(|| SYNTAX_SET.find_syntax_by_name(lang))
+        .unwrap_or_else(|| SYNTAX_SET.find_syntax_plain_text())
+}
 
 /// Render a code block. When `fence` is true, each line's `source_text` carries the fenced
 /// markdown form so partial selections can round-trip back to raw markdown.
@@ -23,21 +49,7 @@ pub fn render_code_block(
     fence: bool,
 ) -> u16 {
     let _perf = smelt_perf::perf::begin("render:code_block");
-    let ext = match lang {
-        "" => "txt",
-        "js" | "javascript" => "js",
-        "ts" | "typescript" => "ts",
-        "py" | "python" => "py",
-        "rb" | "ruby" => "rb",
-        "rs" | "rust" => "rs",
-        "sh" | "bash" | "zsh" | "shell" => "sh",
-        "yml" => "yaml",
-        other => other,
-    };
-    let syntax = SYNTAX_SET
-        .find_syntax_by_extension(ext)
-        .or_else(|| SYNTAX_SET.find_syntax_by_name(lang))
-        .unwrap_or_else(|| SYNTAX_SET.find_syntax_plain_text());
+    let syntax = syntax_for_lang(lang);
     let theme = syntax_theme();
     let content_width = if let Some(b) = bctx { b.inner_w } else { width };
     let text_w = content_width.max(1);
@@ -233,35 +245,30 @@ fn split_regions_into_rows(
     rows
 }
 
-/// Stateful bash/shell syntax highlighter.
-pub struct BashHighlighter<'a> {
+/// Stateful single-line syntax highlighter. The language token feeds `syntax_for_lang`,
+/// so `"bash"`, `"rust"`, `"py"`, etc. all work.
+pub struct InlineSyntax<'a> {
     h: HighlightLines<'a>,
 }
 
-impl<'a> Default for BashHighlighter<'a> {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-impl<'a> BashHighlighter<'a> {
-    pub fn new() -> Self {
-        let syntax = SYNTAX_SET
-            .find_syntax_by_extension("sh")
-            .unwrap_or_else(|| SYNTAX_SET.find_syntax_plain_text());
+impl<'a> InlineSyntax<'a> {
+    pub fn new(lang: &str) -> Self {
         let theme = syntax_theme();
         Self {
-            h: HighlightLines::new(syntax, theme),
+            h: HighlightLines::new(syntax_for_lang(lang), theme),
         }
     }
 
     /// Print a single line with syntax highlighting; does not emit a newline.
+    /// Snapshots the caller's style on entry and restores it on exit, so per-region
+    /// fg mutations don't leak (other axes — dim/bold/italic/group — stay in effect).
     pub fn print_line(&mut self, out: &mut LineBuilder, line: &str) {
         let line_with_nl = format!("{}\n", line);
         let regions = self
             .h
             .highlight_line(&line_with_nl, &SYNTAX_SET)
             .unwrap_or_default();
+        out.save_style();
         for (style, text) in &regions {
             let text = text.trim_end_matches('\n').trim_end_matches('\r');
             if text.is_empty() {
@@ -275,7 +282,21 @@ impl<'a> BashHighlighter<'a> {
             out.set_fg(fg);
             out.print(text);
         }
-        out.reset_style();
+        out.pop_style();
+    }
+}
+
+/// Render `content` as a plain code block — one source line per row, no gutter, no line
+/// numbers, no soft wrap. Indentation is the caller's responsibility (panel `pad_left`,
+/// composed leading spaces, etc.). Suited to inline command previews and other
+/// "show this snippet" cases where the file-view gutter from `print_syntax_file`
+/// would be too heavy.
+pub fn print_code_lines(out: &mut LineBuilder, content: &str, lang: &str) {
+    let _perf = smelt_perf::perf::begin("render:code_lines");
+    let mut hi = InlineSyntax::new(lang);
+    for line in content.lines() {
+        hi.print_line(out, line);
+        out.newline();
     }
 }
 
@@ -578,16 +599,11 @@ mod tests {
         });
     }
 
-    // ── BashHighlighter ───────────────────────────────────────────────
+    // ── InlineSyntax ──────────────────────────────────────────────────
 
     #[test]
-    fn bash_highlighter_default_matches_new() {
-        let _h = BashHighlighter::default();
-    }
-
-    #[test]
-    fn bash_highlighter_print_line_emits_text_into_buffer() {
-        let mut hi = BashHighlighter::new();
+    fn inline_syntax_print_line_emits_text_into_buffer() {
+        let mut hi = InlineSyntax::new("bash");
         let block = render_test(80, |out| {
             hi.print_line(out, "echo hello");
             out.newline();
@@ -596,12 +612,31 @@ mod tests {
     }
 
     #[test]
-    fn bash_highlighter_print_line_strips_trailing_newline_artifacts() {
-        let mut hi = BashHighlighter::new();
+    fn inline_syntax_print_line_strips_trailing_newline_artifacts() {
+        let mut hi = InlineSyntax::new("bash");
         let block = render_test(80, |out| {
             hi.print_line(out, "ls");
             out.newline();
         });
         assert_eq!(block.lines[0].text, "ls");
+    }
+
+    #[test]
+    fn print_code_lines_renders_each_line_without_gutter() {
+        let block = render_test(80, |out| {
+            print_code_lines(out, "echo hi\nls\n", "bash");
+        });
+        assert_eq!(block.lines.len(), 2);
+        assert_eq!(block.lines[0].text, "echo hi");
+        assert_eq!(block.lines[1].text, "ls");
+    }
+
+    #[test]
+    fn lang_to_ext_normalizes_common_aliases() {
+        assert_eq!(lang_to_ext("bash"), "sh");
+        assert_eq!(lang_to_ext("rust"), "rs");
+        assert_eq!(lang_to_ext("python"), "py");
+        assert_eq!(lang_to_ext(""), "txt");
+        assert_eq!(lang_to_ext("unknown"), "unknown");
     }
 }

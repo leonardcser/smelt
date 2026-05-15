@@ -9,7 +9,7 @@ use crate::smelt_term::{Buffer, BufferParser};
 use std::sync::Arc;
 
 use crate::content::builder::LineBuilder;
-use crate::content::highlight::{print_inline_diff, print_syntax_file, BashHighlighter};
+use crate::content::highlight::{print_inline_diff, print_syntax_file, InlineSyntax};
 use crate::content::to_buffer::render_into_buffer;
 
 /// Content kind a parser-backed buffer renders.
@@ -122,10 +122,10 @@ fn render_plain(out: &mut LineBuilder, source: &str, width: u16) {
 
 fn render_bash(out: &mut LineBuilder, source: &str, width: u16) {
     let width = width.max(1) as usize;
-    let mut bh = BashHighlighter::new();
+    let mut hi = InlineSyntax::new("bash");
     for line in source.lines() {
         emit_wrapped_line(out, line, width, |sink, segment| {
-            bh.print_line(sink, segment);
+            hi.print_line(sink, segment);
         });
     }
 }

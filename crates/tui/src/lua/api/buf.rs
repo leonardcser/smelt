@@ -67,6 +67,10 @@ pub struct LuaExtmarkOpts {
     pub italic: Option<bool>,
     /// Extend the highlight past the last column to fill the EOL.
     pub hl_eol: Option<bool>,
+    /// Paint this highlight only on the window's cursor row. Lets you decorate
+    /// the selected list item (or any selection-aware sub-range) without re-rendering
+    /// on every selection change.
+    pub on_cursor_row: Option<bool>,
 
     /// Virtual-text chunk to render alongside the line.
     pub virt_text: Option<String>,
@@ -242,6 +246,16 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
     register_ui_fn(
         &buf_tbl,
         "smelt.buf",
+        "set_styled_lines",
+        "Replace the buffer with a list of styled lines. Each line is a sequence of span tables: `{ text, style?, syntax? }`. `style = { hl?, dim?, bold?, italic?, fg?, bg? }` — `hl` is a theme group name; `fg`/`bg` are theme group names whose fg/bg axis is extracted (matches `set_extmark`). `syntax` runs the span text through the inline syntax highlighter (`\"bash\"`, `\"rust\"`, …) and overrides per-character fg; `style` modifiers still apply. An empty span list emits a blank line.",
+        &["buf", "lines"],
+        lua,
+        set_styled_lines,
+    )?;
+
+    register_ui_fn(
+        &buf_tbl,
+        "smelt.buf",
         "set_extmark",
         "Place a highlight or virt-text extmark at `(row, col)` (row is 1-based). `opts` mirrors `nvim_buf_set_extmark`'s keyset; pass `opts.id` to retarget an existing mark. Returns the new extmark id.",
         &["buf", "ns", "row", "col", "opts"],
@@ -289,6 +303,125 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
     Ok(())
 }
 
+/// `smelt.buf.set_styled_lines(buf, lines)`.
+///
+/// Each line is a sequence of span tables; each span carries `text` plus optional
+/// `style = { hl?, dim?, bold?, italic?, fg?, bg? }` and `syntax` (language token
+/// routed through `InlineSyntax`). Replaces the buffer's contents wholesale.
+fn set_styled_lines(_: &Lua, (id, lines): (u64, mlua::Table)) -> LuaResult<()> {
+    use crate::content::to_buffer::render_into_buffer;
+    use crate::smelt_term::BufId;
+    use smelt_core::content::highlight::InlineSyntax;
+    use smelt_core::style::Style;
+    use smelt_core::theme::intern;
+
+    struct SpanStyle {
+        hl: Option<String>,
+        dim: bool,
+        bold: bool,
+        italic: bool,
+        fg: Option<String>,
+        bg: Option<String>,
+    }
+
+    struct Span {
+        text: String,
+        style: SpanStyle,
+        syntax: Option<String>,
+    }
+
+    fn decode_style(tbl: Option<mlua::Table>) -> LuaResult<SpanStyle> {
+        let Some(tbl) = tbl else {
+            return Ok(SpanStyle {
+                hl: None,
+                dim: false,
+                bold: false,
+                italic: false,
+                fg: None,
+                bg: None,
+            });
+        };
+        Ok(SpanStyle {
+            hl: tbl.get::<Option<String>>("hl")?,
+            dim: tbl.get::<Option<bool>>("dim")?.unwrap_or(false),
+            bold: tbl.get::<Option<bool>>("bold")?.unwrap_or(false),
+            italic: tbl.get::<Option<bool>>("italic")?.unwrap_or(false),
+            fg: tbl.get::<Option<String>>("fg")?,
+            bg: tbl.get::<Option<String>>("bg")?,
+        })
+    }
+
+    let mut decoded: Vec<Vec<Span>> = Vec::new();
+    for value in lines.sequence_values::<mlua::Value>() {
+        let value = value?;
+        let line_tbl = match value {
+            mlua::Value::Table(t) => t,
+            mlua::Value::Nil => {
+                decoded.push(Vec::new());
+                continue;
+            }
+            other => {
+                return Err(mlua::Error::external(format!(
+                    "smelt.buf.set_styled_lines: expected line to be a table of spans, got {}",
+                    other.type_name()
+                )));
+            }
+        };
+        let mut spans: Vec<Span> = Vec::new();
+        for span_val in line_tbl.sequence_values::<mlua::Table>() {
+            let span_tbl = span_val?;
+            let style = decode_style(span_tbl.get::<Option<mlua::Table>>("style")?)?;
+            spans.push(Span {
+                text: span_tbl.get::<Option<String>>("text")?.unwrap_or_default(),
+                style,
+                syntax: span_tbl.get::<Option<String>>("syntax")?,
+            });
+        }
+        decoded.push(spans);
+    }
+
+    crate::lua::with_app(|app| {
+        let theme_snap = app.ui.theme().clone();
+        let width = crate::content::term_width() as u16;
+        let Some(buf) = app.ui.buf_mut(BufId(id)) else {
+            return;
+        };
+        // Wipe pre-existing content; render_into_buffer otherwise appends past the seed.
+        buf.set_all_lines(Vec::new());
+        render_into_buffer(buf, width, &theme_snap, |sink| {
+            for spans in &decoded {
+                for span in spans {
+                    let group = span.style.hl.as_deref().map(intern);
+                    let mut style = Style::new();
+                    style.dim = span.style.dim;
+                    style.bold = span.style.bold;
+                    style.italic = span.style.italic;
+                    if let Some(fg_group) = &span.style.fg {
+                        if let Some(fg) = sink.theme().get(fg_group).fg {
+                            style.fg = Some(fg);
+                        }
+                    }
+                    if let Some(bg_group) = &span.style.bg {
+                        if let Some(bg) = sink.theme().get(bg_group).bg {
+                            style.bg = Some(bg);
+                        }
+                    }
+                    sink.push(group, style);
+                    if let Some(lang) = &span.syntax {
+                        let mut hi = InlineSyntax::new(lang);
+                        hi.print_line(sink, &span.text);
+                    } else {
+                        sink.print(&span.text);
+                    }
+                    sink.pop_style();
+                }
+                sink.newline();
+            }
+        });
+    });
+    Ok(())
+}
+
 /// `smelt.buf.set_extmark(buf, ns, row, col, opts) -> extmark_id`.
 /// `row` is 1-based. `opts.id` retargets an existing mark.
 /// Highlight: `hl_group` applies a full style; `fg`/`bg` override individual axes;
@@ -329,6 +462,9 @@ fn set_extmark(
         let mut o = ExtmarkOpts::highlight(end_col.unwrap_or(col0), style, meta);
         if opts.hl_eol == Some(true) {
             o = o.with_hl_eol(true);
+        }
+        if opts.on_cursor_row == Some(true) {
+            o = o.with_on_cursor_row(true);
         }
         o
     };

@@ -1,4 +1,5 @@
 use super::event::Status;
+use super::gutter::GutterProvider;
 use super::text::{self, byte_to_cell};
 use super::vim::{self, Action, VimContext, VimMode, VimWindowState};
 use super::Buffer;
@@ -9,6 +10,7 @@ use crossterm::event::{KeyEvent, MouseButton, MouseEvent, MouseEventKind};
 use smelt_buffer::buffer::VirtTextPos;
 use smelt_term::grid::{GridSlice, Style};
 use smelt_term::layout::{Gutters, Rect};
+use std::sync::Arc;
 
 /// Per-frame paint context for `Window::render`.
 #[derive(Default, Clone)]
@@ -113,6 +115,9 @@ pub struct WindowViewport {
     pub total_rows: u16,
     pub scroll_top: u16,
     pub scrollbar: Option<ScrollbarState>,
+    /// Cells reserved on the left for the data-driven gutter column (line numbers, signs, …),
+    /// before `Gutters::pad_left`. Zero when no `GutterProvider` is attached.
+    pub gutter_width: u16,
 }
 
 impl WindowViewport {
@@ -129,7 +134,13 @@ impl WindowViewport {
             total_rows,
             scroll_top,
             scrollbar,
+            gutter_width: 0,
         }
+    }
+
+    pub fn with_gutter_width(mut self, gutter_width: u16) -> Self {
+        self.gutter_width = gutter_width;
+        self
     }
 
     fn contains(&self, row: u16, col: u16) -> bool {
@@ -204,6 +215,10 @@ pub struct Window {
     pub(crate) id: WinId,
     pub buf: BufId,
     pub config: SplitConfig,
+    /// Optional per-row gutter (line numbers, signs, …). Paints into the leftmost
+    /// `gutter_width()` cells of each row; content paint shifts right by the same.
+    /// `None` = no gutter column, no width reserved.
+    pub gutter: Option<Arc<dyn GutterProvider>>,
     pub focusable: bool,
     /// Paints `CursorLine` bg on the cursor row when focused. Off by default; list-shaped
     /// windows opt in so the selected row is visible regardless of focus.
@@ -273,6 +288,7 @@ impl Window {
             id,
             buf,
             config,
+            gutter: None,
             focusable: true,
             cursor_line_highlight: false,
             mouse_scroll: false,
@@ -301,6 +317,11 @@ impl Window {
 
     pub fn id(&self) -> WinId {
         self.id
+    }
+
+    /// Reserved cells for the gutter column for this buffer; `0` when no provider attached.
+    pub fn gutter_width(&self, buf: &Buffer) -> u16 {
+        self.gutter.as_ref().map(|g| g.width(buf)).unwrap_or(0)
     }
 
     // ── Vim ────────────────────────────────────────────────────────────
@@ -676,9 +697,11 @@ impl Window {
             return Status::Ignored;
         };
         // `ViewportHit::Content` reports a column relative to `viewport.rect.left`,
-        // which includes the window's left gutter (pad_left). Selection / cursor
-        // positioning operates on source-cell columns, so subtract the gutter.
-        let rel_col = viewport_rel_col.saturating_sub(self.config.gutters.pad_left);
+        // which includes the data gutter and the window's left pad. Selection / cursor
+        // positioning operates on source-cell columns, so subtract both.
+        let rel_col = viewport_rel_col
+            .saturating_sub(ctx.viewport.gutter_width)
+            .saturating_sub(self.config.gutters.pad_left);
         let rows = buf.lines();
         if rows.is_empty() {
             return Status::Consumed;
@@ -749,6 +772,7 @@ impl Window {
         let rel_col = event
             .column
             .saturating_sub(ctx.viewport.rect.left)
+            .saturating_sub(ctx.viewport.gutter_width)
             .saturating_sub(self.config.gutters.pad_left)
             .min(ctx.viewport.content_width.saturating_sub(1));
         let line_idx = (self.scroll_top as usize + rel_row as usize).min(rows.len() - 1);
@@ -1038,8 +1062,19 @@ impl Window {
         let height = slice.height();
         let scroll = self.scroll_top as usize;
         let line_count = buf.line_count();
-        let pad_left = self.config.gutters.pad_left.min(width);
-        let content_width = self.config.gutters.content_width(width);
+        let gutter_width = self.gutter_width(buf).min(width);
+        let pad_left = self
+            .config
+            .gutters
+            .pad_left
+            .min(width.saturating_sub(gutter_width));
+        // `content_offset` is where source text begins on each row.
+        let content_offset = gutter_width + pad_left;
+        let content_width = self
+            .config
+            .gutters
+            .content_width(width)
+            .min(width.saturating_sub(content_offset));
         // `cursor_line_highlight` paints `CursorLine` bg under the cursor row.
         // During an active mouse drag-select the rendered row tracks `drag_endpoint`
         // so the user sees the highlight slide with the cursor; otherwise it sits at
@@ -1091,6 +1126,29 @@ impl Window {
                     slice.set(col, row, ' ', row_style);
                 }
             }
+            if let Some(provider) = self.gutter.as_ref() {
+                if gutter_width > 0 {
+                    let cell = (line_idx < line_count)
+                        .then(|| provider.cell(buf, &ctx.theme, line_idx))
+                        .flatten();
+                    if let Some(g) = cell {
+                        let style = merge_styles(row_style, g.style);
+                        let mut c: u16 = 0;
+                        for ch in g.text.chars() {
+                            let cw = UnicodeWidthChar::width(ch).unwrap_or(0).max(1) as u16;
+                            if c + cw > gutter_width {
+                                break;
+                            }
+                            slice.set(c, row, ch, style);
+                            c += cw;
+                        }
+                        // Pad to gutter_width so partial cells inherit row_style cleanly.
+                        for fill in c..gutter_width {
+                            slice.set(fill, row, ' ', row_style);
+                        }
+                    }
+                }
+            }
             let Some(line) = buf.get_line(line_idx) else {
                 continue;
             };
@@ -1103,7 +1161,7 @@ impl Window {
                 if col + cw > content_width {
                     break;
                 }
-                slice.set(pad_left + col, row, *ch, row_style);
+                slice.set(content_offset + col, row, *ch, row_style);
                 col_to_char.push(ci);
                 for _ in 1..cw {
                     col_to_char.push(ci);
@@ -1113,7 +1171,11 @@ impl Window {
             let content_end_col = col;
             spans_buf.clear();
             buf.highlights_at_into(line_idx, &mut spans_buf);
+            let is_cursor_row = cursor_screen_row == Some(row);
             for span in &spans_buf {
+                if span.on_cursor_row && !is_cursor_row {
+                    continue;
+                }
                 let span_style = ctx.theme.resolve(span.hl);
                 let style = merge_span_style(row_style, &span_style);
                 let start = span.col_start.min(content_width);
@@ -1121,7 +1183,7 @@ impl Window {
                 if end > start {
                     paint_span_cells(
                         slice,
-                        pad_left,
+                        content_offset,
                         row,
                         start,
                         end,
@@ -1133,7 +1195,7 @@ impl Window {
                 }
                 if span.hl_eol {
                     for c in end..content_width {
-                        slice.set(pad_left + c, row, ' ', style);
+                        slice.set(content_offset + c, row, ' ', style);
                     }
                 }
             }
@@ -1163,7 +1225,7 @@ impl Window {
                 if end > start {
                     paint_span_cells(
                         slice,
-                        pad_left,
+                        content_offset,
                         row,
                         start,
                         end,
@@ -1201,7 +1263,7 @@ impl Window {
                     if c + cw > content_width {
                         break;
                     }
-                    slice.set(pad_left + c, row, ch, style);
+                    slice.set(content_offset + c, row, ch, style);
                     c += cw;
                 }
             }
@@ -1233,13 +1295,13 @@ impl Window {
                     // semantics are "invert the cell," not "stamp a glyph." Empty cells
                     // (past EOL, blank gutters) fall back to `glyph` so callers control
                     // what shows when there's nothing under the cursor.
-                    let under = slice.cell(pad_left + col, screen_row).symbol;
+                    let under = slice.cell(content_offset + col, screen_row).symbol;
                     let painted = if under == '\0' || under == ' ' {
                         glyph
                     } else {
                         under
                     };
-                    slice.set(pad_left + col, screen_row, painted, style);
+                    slice.set(content_offset + col, screen_row, painted, style);
                 }
             }
         }

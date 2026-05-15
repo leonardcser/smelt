@@ -91,7 +91,7 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
         &win_tbl,
         "smelt.win",
         "open",
-        "Open a split window over the buffer `buf_id`. `opts.region` picks the layout slot (default `\"lua_overlay\"`); `opts.focusable`, `opts.cursor_line_highlight`, and `opts.vim_enabled` toggle behaviour. `opts.pad_left` / `opts.pad_right` reserve gutter columns on either side. `opts.scrollbar` (default `true`) reserves the rightmost column for a scrollbar that paints only when content overflows — set `false` for cursor-driven UIs (lists, single-line inputs). Returns the new `WinId` or `nil` if no slot was available.",
+        "Open a split window over the buffer `buf_id`. `opts.region` picks the layout slot (default `\"lua_overlay\"`); `opts.focusable`, `opts.cursor_line_highlight`, and `opts.vim_enabled` toggle behaviour. `opts.pad_left` / `opts.pad_right` reserve padding columns on either side. `opts.scrollbar` (default `true`) reserves the rightmost column for a scrollbar that paints only when content overflows — set `false` for cursor-driven UIs (lists, single-line inputs). `opts.gutter` enables a data-driven gutter column to the left of content: `\"line_numbers\"` installs the standard line-number gutter (diff-aware when the buffer carries diff `SourceLine` metadata); `\"none\"` / omitted disables it. Returns the new `WinId` or `nil` if no slot was available.",
         &["buf_id", "opts"],
         lua,
         |_, (buf_id, opts): (u64, Option<mlua::Table>)| -> LuaResult<Option<u64>> {
@@ -154,6 +154,15 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
                             }
                             if let Ok(selectable) = opts.get::<bool>("selectable") {
                                 w.selectable = selectable;
+                            }
+                            if let Ok(Some(gutter)) = opts.get::<Option<String>>("gutter") {
+                                w.gutter = match gutter.as_str() {
+                                    "line_numbers" => Some(std::sync::Arc::new(
+                                        crate::smelt_term::gutter::LineNumberGutter,
+                                    )),
+                                    "none" | "" => None,
+                                    _ => None,
+                                };
                             }
                         }
                     }

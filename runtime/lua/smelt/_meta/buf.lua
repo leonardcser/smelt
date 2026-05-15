@@ -39,6 +39,10 @@ buf.set_readonly = nil
 ---@type fun(buf: integer, source: string): nil
 buf.set_source = nil
 
+--- Replace the buffer with a list of styled lines. Each line is a sequence of span tables: `{ text, style?, syntax? }`. `style = { hl?, dim?, bold?, italic?, fg?, bg? }` — `hl` is a theme group name; `fg`/`bg` are theme group names whose fg/bg axis is extracted (matches `set_extmark`). `syntax` runs the span text through the inline syntax highlighter (`"bash"`, `"rust"`, …) and overrides per-character fg; `style` modifiers still apply. An empty span list emits a blank line.
+---@type fun(buf: integer, lines: table): nil
+buf.set_styled_lines = nil
+
 --- Return the buffer's full source as a string. `nil` if no buffer has that id.
 ---@type fun(buf: integer): string?
 buf.text = nil

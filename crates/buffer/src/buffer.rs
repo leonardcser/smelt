@@ -140,6 +140,21 @@ impl Default for SpanMeta {
     }
 }
 
+/// Per-row mapping back to a "source line number" — what a gutter provider
+/// (`LineNumberGutter`) renders for that row. `None` on the decoration falls back
+/// to the row index + 1 so a plain text buffer needs no setup.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SourceLine {
+    /// 1-based file line number. Use for plain code buffers and the post-edit side
+    /// of a diff where every row corresponds to a real file line.
+    Linear { lineno: u32 },
+    /// Both old and new line numbers. Either side is `None` when the row exists only
+    /// on the other (added: `old=None`; removed: `new=None`).
+    Diff { old: Option<u32>, new: Option<u32> },
+    /// Header / hunk-separator / blank divider rows that aren't line-numbered.
+    Synthetic,
+}
+
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct LineDecoration {
     pub gutter_bg: Option<Color>,
@@ -147,6 +162,8 @@ pub struct LineDecoration {
     pub fill_right_margin: u16,
     pub soft_wrapped: bool,
     pub source_text: Option<String>,
+    /// Logical line mapping for this row. `None` = fall back to `row + 1`.
+    pub source_line: Option<SourceLine>,
 }
 
 pub type SpanStyle = Style;
@@ -161,6 +178,9 @@ pub struct Span {
     pub meta: SpanMeta,
     /// When true, background extends past `col_end` to the right edge of the row.
     pub hl_eol: bool,
+    /// When true, the renderer applies this span only on the window's cursor row.
+    /// Use for selection-aware decoration (e.g. accent fg on the selected option in a list).
+    pub on_cursor_row: bool,
 }
 
 /// One-line virtual text overlay. Derived from `ExtmarkPayload::VirtText` marks.
@@ -240,6 +260,10 @@ pub enum ExtmarkPayload {
         hl_mode: HlMode,
         /// Replace each visible cell in the range with this string (single grapheme).
         conceal: Option<String>,
+        /// When true, paint only on the window's cursor row. Used for selection-aware
+        /// decoration (e.g. accent fg on a list's selected label) without per-event
+        /// re-rendering.
+        on_cursor_row: bool,
     },
     Decoration(LineDecoration),
     VirtText {
@@ -279,6 +303,7 @@ impl ExtmarkOpts {
                 hl_eol: false,
                 hl_mode: HlMode::Replace,
                 conceal: None,
+                on_cursor_row: false,
             },
             priority: 0,
             right_gravity: true,
@@ -324,6 +349,19 @@ impl ExtmarkOpts {
     /// Re-target an existing extmark id instead of minting a new one.
     pub fn with_id(mut self, id: ExtmarkId) -> Self {
         self.id = Some(id);
+        self
+    }
+
+    /// Limit this highlight to the cursor row of whatever window is rendering the buffer.
+    /// No-op for non-Highlight payloads.
+    pub fn with_on_cursor_row(mut self, on_cursor_row: bool) -> Self {
+        if let ExtmarkPayload::Highlight {
+            on_cursor_row: ref mut flag,
+            ..
+        } = &mut self.payload
+        {
+            *flag = on_cursor_row;
+        }
         self
     }
 
@@ -1106,7 +1144,11 @@ impl Buffer {
             for (ns, state) in self.extmarks.namespaces.iter() {
                 for (id, mark) in state.marks_at(line) {
                     if let ExtmarkPayload::Highlight {
-                        hl, meta, hl_eol, ..
+                        hl,
+                        meta,
+                        hl_eol,
+                        on_cursor_row,
+                        ..
                     } = &mark.payload
                     {
                         buf.push((
@@ -1119,6 +1161,7 @@ impl Buffer {
                                 hl: *hl,
                                 meta: meta.clone(),
                                 hl_eol: *hl_eol,
+                                on_cursor_row: *on_cursor_row,
                             },
                         ));
                     }
@@ -1127,6 +1170,12 @@ impl Buffer {
             buf.sort_by_key(|(p, n, i, _)| (*p, *n, *i));
             out.extend(buf.drain(..).map(|(_, _, _, s)| s));
         });
+    }
+
+    /// Logical line mapping for `row`, used by gutter providers like `LineNumberGutter`.
+    /// Falls through to the per-row decoration's `source_line`; `None` means "use row + 1".
+    pub fn source_line_at(&self, row: usize) -> Option<SourceLine> {
+        self.decoration_at(row).source_line
     }
 
     pub fn set_decoration(&mut self, line: usize, decoration: LineDecoration) {
@@ -1151,6 +1200,7 @@ impl Buffer {
             fill_right_margin: 0,
             soft_wrapped: false,
             source_text: None,
+            source_line: None,
         };
         let Some(state) = self.extmarks.ns(self.ns_decorations) else {
             return &DEFAULT;

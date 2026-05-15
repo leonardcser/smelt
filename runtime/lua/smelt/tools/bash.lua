@@ -134,7 +134,7 @@ smelt.tools.register({
   preview = function(buf, args)
     local cmd = args.command or ""
     if cmd:find("\n") then
-      smelt.bash.render(buf, cmd)
+      smelt.syntax.render(buf, { content = cmd, lang = "bash" })
     end
   end,
   execute = M.execute,

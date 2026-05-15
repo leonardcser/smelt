@@ -25,6 +25,7 @@ Options accepted by `smelt.buf.set_extmark`. Mirrors a useful subset of `nvim_bu
 | `dim` | `boolean` |  | Force-dim the highlight. |
 | `italic` | `boolean` |  | Force-italic the highlight. |
 | `hl_eol` | `boolean` |  | Extend the highlight past the last column to fill the EOL. |
+| `on_cursor_row` | `boolean` |  | Paint this highlight only on the window's cursor row. Lets you decorate the selected list item (or any selection-aware sub-range) without re-rendering on every selection change. |
 | `virt_text` | `string` |  | Virtual-text chunk to render alongside the line. |
 | `virt_text_hl` | `string` |  | Theme group applied to the virt-text chunk. |
 | `virt_text_pos` | [smelt.buf.VirtTextPos](types.md#smeltbufvirttextpos) |  | Where the virt-text appears relative to the line. |

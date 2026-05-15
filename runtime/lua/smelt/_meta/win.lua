@@ -47,7 +47,7 @@ win.move_cursor = nil
 ---@type fun(win_id: integer, event: smelt.win.Event, func: fun(value: table)): integer
 win.on_event = nil
 
---- Open a split window over the buffer `buf_id`. `opts.region` picks the layout slot (default `"lua_overlay"`); `opts.focusable`, `opts.cursor_line_highlight`, and `opts.vim_enabled` toggle behaviour. `opts.pad_left` / `opts.pad_right` reserve gutter columns on either side. `opts.scrollbar` (default `true`) reserves the rightmost column for a scrollbar that paints only when content overflows — set `false` for cursor-driven UIs (lists, single-line inputs). Returns the new `WinId` or `nil` if no slot was available.
+--- Open a split window over the buffer `buf_id`. `opts.region` picks the layout slot (default `"lua_overlay"`); `opts.focusable`, `opts.cursor_line_highlight`, and `opts.vim_enabled` toggle behaviour. `opts.pad_left` / `opts.pad_right` reserve padding columns on either side. `opts.scrollbar` (default `true`) reserves the rightmost column for a scrollbar that paints only when content overflows — set `false` for cursor-driven UIs (lists, single-line inputs). `opts.gutter` enables a data-driven gutter column to the left of content: `"line_numbers"` installs the standard line-number gutter (diff-aware when the buffer carries diff `SourceLine` metadata); `"none"` / omitted disables it. Returns the new `WinId` or `nil` if no slot was available.
 ---@type fun(buf_id: integer, opts: table?): integer?
 win.open = nil
 

@@ -1,7 +1,6 @@
 //! UiHost-tier Lua API bindings (require a terminal UI context).
 //! Host-tier bindings are registered first via `smelt_core::lua::api::register_host_api`.
 
-mod bash;
 mod buf;
 mod confirm;
 mod diff;
@@ -62,7 +61,6 @@ impl LuaRuntime {
         paint::register(lua, &smelt, shared)?;
         diff::register(lua, &smelt)?;
         syntax::register(lua, &smelt)?;
-        bash::register(lua, &smelt)?;
         text::register(lua, &smelt)?;
         markdown::register(lua, &smelt)?;
         engine::register(lua, &smelt, shared)?;

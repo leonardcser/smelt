@@ -130,6 +130,9 @@ function smelt.ui.dialog.content(opts)
   end
   local focusable = opts.focusable
   if focusable == nil then focusable = opts.interactive or false end
+  -- `wrap` defaults to true (matches `smelt.win.open`); pass `wrap = false` when
+  -- the buffer was painted with styled highlights (e.g. via `smelt.buf.set_styled_lines`)
+  -- since the wrap pass clears extmarks to avoid stale-position bugs on re-flow.
   local leaf = smelt.win.open(buf, {
     region      = REGION,
     focusable   = focusable,
@@ -137,6 +140,7 @@ function smelt.ui.dialog.content(opts)
     vim_enabled = opts.interactive or false,
     pad_left    = GUTTER,
     pad_right   = GUTTER,
+    wrap        = opts.wrap,
   })
   return leaf, buf
 end

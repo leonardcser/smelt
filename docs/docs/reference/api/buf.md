@@ -72,6 +72,14 @@ fun(buf: integer, source: string): nil
 
 Replace the buffer's full source text in one call. Cheaper than `set_lines` when you already have the joined string.
 
+## `smelt.buf.set_styled_lines`
+
+```lua
+fun(buf: integer, lines: table): nil
+```
+
+Replace the buffer with a list of styled lines. Each line is a sequence of span tables: `{ text, style?, syntax? }`. `style = { hl?, dim?, bold?, italic?, fg?, bg? }` — `hl` is a theme group name; `fg`/`bg` are theme group names whose fg/bg axis is extracted (matches `set_extmark`). `syntax` runs the span text through the inline syntax highlighter (`"bash"`, `"rust"`, …) and overrides per-character fg; `style` modifiers still apply. An empty span list emits a blank line.
+
 ## `smelt.buf.text`
 
 ```lua

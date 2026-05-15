@@ -1,0 +1,254 @@
+//! Per-row gutter column rendered to the left of buffer content.
+//!
+//! A [`GutterProvider`] is queried by the window renderer at paint time. It owns the
+//! width of the reserved column and produces a [`GutterCell`] per row — text plus a
+//! pre-resolved style. The window paints the gutter cells into the leftmost cells of
+//! each row; content paint shifts right by `gutter_width`.
+//!
+//! Use this for line numbers, diff old/new line numbers, signs, fold markers — anything
+//! that's per-row metadata distinct from the buffer's text content. The provider can
+//! read the buffer and theme; it cannot mutate them.
+//!
+//! Provider impls **must** return cells of exactly `width()` display columns. The
+//! renderer pads with spaces if the text is shorter and truncates if longer.
+
+use smelt_buffer::buffer::{Buffer, SourceLine};
+use smelt_buffer::style::Style;
+use smelt_buffer::theme::Theme;
+
+/// A single row's gutter content.
+#[derive(Clone, Debug)]
+pub struct GutterCell {
+    pub text: String,
+    pub style: Style,
+}
+
+/// Computes a fixed-width gutter column for a buffer. The width is buffer-dependent
+/// (e.g. line numbers scale with line count) but stable per render frame; the renderer
+/// caches it once per paint via [`GutterProvider::width`].
+pub trait GutterProvider: Send + Sync {
+    /// Reserved column count for the gutter. Queried once per render.
+    fn width(&self, buf: &Buffer) -> u16;
+    /// Cell content for an absolute buffer row. `None` → blank cells.
+    fn cell(&self, buf: &Buffer, theme: &Theme, row: usize) -> Option<GutterCell>;
+}
+
+/// Line numbers, derived from each row's `SourceLine` metadata. Plain buffers with no
+/// mapping fall back to `row + 1`. Diff buffers automatically render old + new columns
+/// — the same provider works for both.
+///
+/// Layout:
+/// - plain (all rows linear or unset): `" N "` (one pad each side).
+/// - diff (any row carries `Diff`): `" O  N "` — old column, gap, new column.
+/// - synthetic rows render as blanks of the full width.
+pub struct LineNumberGutter;
+
+/// Scan source-line metadata across the buffer to size the gutter columns. `old_digits`
+/// is 0 for non-diff buffers; `new_digits` is always set.
+#[derive(Default, Clone, Copy)]
+struct Widths {
+    old_digits: u16,
+    new_digits: u16,
+}
+
+fn digits_of(n: u32) -> u16 {
+    let mut d: u16 = 1;
+    let mut n = n.max(1);
+    while n >= 10 {
+        n /= 10;
+        d += 1;
+    }
+    d
+}
+
+impl LineNumberGutter {
+    fn widths(&self, buf: &Buffer) -> Widths {
+        let n = buf.line_count();
+        let mut w = Widths::default();
+        // Default fallback: row+1 sets new_digits.
+        if n > 0 {
+            w.new_digits = digits_of(n as u32);
+        }
+        for row in 0..n {
+            match buf.source_line_at(row) {
+                Some(SourceLine::Linear { lineno }) => {
+                    w.new_digits = w.new_digits.max(digits_of(lineno));
+                }
+                Some(SourceLine::Diff { old, new }) => {
+                    if let Some(o) = old {
+                        w.old_digits = w.old_digits.max(digits_of(o));
+                    }
+                    if let Some(nn) = new {
+                        w.new_digits = w.new_digits.max(digits_of(nn));
+                    }
+                }
+                Some(SourceLine::Synthetic) | None => {}
+            }
+        }
+        w
+    }
+}
+
+impl GutterProvider for LineNumberGutter {
+    fn width(&self, buf: &Buffer) -> u16 {
+        let w = self.widths(buf);
+        if w.old_digits == 0 {
+            // Plain: " N "
+            w.new_digits + 2
+        } else {
+            // Diff: " O  N "
+            w.old_digits + 2 + w.new_digits + 2
+        }
+    }
+
+    fn cell(&self, buf: &Buffer, theme: &Theme, row: usize) -> Option<GutterCell> {
+        if row >= buf.line_count() {
+            return None;
+        }
+        let widths = self.widths(buf);
+        let style = theme.get("Comment");
+        let text = match buf.source_line_at(row) {
+            Some(SourceLine::Synthetic) => " ".repeat(self.width(buf) as usize),
+            Some(SourceLine::Diff { old, new }) => {
+                if widths.old_digits == 0 {
+                    // Defensive: caller marked Diff but no old digits found.
+                    format_one(new.unwrap_or(row as u32 + 1), widths.new_digits)
+                } else {
+                    format_two(old, new, widths.old_digits, widths.new_digits)
+                }
+            }
+            Some(SourceLine::Linear { lineno }) => {
+                if widths.old_digits == 0 {
+                    format_one(lineno, widths.new_digits)
+                } else {
+                    // Linear row inside a diff buffer: align under the "new" column.
+                    format_two(None, Some(lineno), widths.old_digits, widths.new_digits)
+                }
+            }
+            None => {
+                let lineno = row as u32 + 1;
+                if widths.old_digits == 0 {
+                    format_one(lineno, widths.new_digits)
+                } else {
+                    format_two(None, Some(lineno), widths.old_digits, widths.new_digits)
+                }
+            }
+        };
+        Some(GutterCell { text, style })
+    }
+}
+
+fn format_one(n: u32, digits: u16) -> String {
+    format!(" {n:>w$} ", w = digits as usize)
+}
+
+fn format_two(old: Option<u32>, new: Option<u32>, old_w: u16, new_w: u16) -> String {
+    let old_cell = match old {
+        Some(n) => format!("{n:>w$}", w = old_w as usize),
+        None => " ".repeat(old_w as usize),
+    };
+    let new_cell = match new {
+        Some(n) => format!("{n:>w$}", w = new_w as usize),
+        None => " ".repeat(new_w as usize),
+    };
+    format!(" {old_cell}  {new_cell} ")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use smelt_buffer::buffer::{BufCreateOpts, BufId, Buffer, LineDecoration};
+
+    fn buf_with_lines(n: usize) -> Buffer {
+        let mut buf = Buffer::new(BufId(0), BufCreateOpts::default());
+        let lines: Vec<String> = (0..n).map(|i| format!("line {i}")).collect();
+        buf.set_all_lines(lines);
+        buf
+    }
+
+    fn stamp_source_line(buf: &mut Buffer, row: usize, sl: SourceLine) {
+        let dec = LineDecoration {
+            source_line: Some(sl),
+            ..buf.decoration_at(row).clone()
+        };
+        buf.set_decoration(row, dec);
+    }
+
+    #[test]
+    fn plain_buffer_width_scales_with_count() {
+        let g = LineNumberGutter;
+        assert_eq!(g.width(&buf_with_lines(1)), 3); // " 1 "
+        assert_eq!(g.width(&buf_with_lines(9)), 3);
+        assert_eq!(g.width(&buf_with_lines(10)), 4); // " 10 "
+        assert_eq!(g.width(&buf_with_lines(100)), 5);
+    }
+
+    #[test]
+    fn plain_buffer_falls_back_to_row_plus_one() {
+        let g = LineNumberGutter;
+        let buf = buf_with_lines(12);
+        let theme = Theme::new();
+        assert_eq!(g.cell(&buf, &theme, 0).unwrap().text, "  1 ");
+        assert_eq!(g.cell(&buf, &theme, 11).unwrap().text, " 12 ");
+        assert!(g.cell(&buf, &theme, 12).is_none());
+    }
+
+    #[test]
+    fn linear_source_line_overrides_row_index() {
+        let g = LineNumberGutter;
+        let mut buf = buf_with_lines(2);
+        stamp_source_line(&mut buf, 0, SourceLine::Linear { lineno: 42 });
+        stamp_source_line(&mut buf, 1, SourceLine::Linear { lineno: 43 });
+        let theme = Theme::new();
+        assert_eq!(g.cell(&buf, &theme, 0).unwrap().text, " 42 ");
+        assert_eq!(g.cell(&buf, &theme, 1).unwrap().text, " 43 ");
+    }
+
+    #[test]
+    fn diff_buffer_renders_old_and_new_columns() {
+        let g = LineNumberGutter;
+        let mut buf = buf_with_lines(3);
+        stamp_source_line(
+            &mut buf,
+            0,
+            SourceLine::Diff {
+                old: Some(10),
+                new: Some(10),
+            },
+        );
+        stamp_source_line(
+            &mut buf,
+            1,
+            SourceLine::Diff {
+                old: None,
+                new: Some(11),
+            },
+        );
+        stamp_source_line(
+            &mut buf,
+            2,
+            SourceLine::Diff {
+                old: Some(11),
+                new: None,
+            },
+        );
+        let theme = Theme::new();
+        // widths: old_digits = 2 (max 11), new_digits = 2 (max 11).
+        // layout: " OO  NN "
+        assert_eq!(g.cell(&buf, &theme, 0).unwrap().text, " 10  10 ");
+        assert_eq!(g.cell(&buf, &theme, 1).unwrap().text, "     11 ");
+        assert_eq!(g.cell(&buf, &theme, 2).unwrap().text, " 11     ");
+    }
+
+    #[test]
+    fn synthetic_row_renders_blank() {
+        let g = LineNumberGutter;
+        let mut buf = buf_with_lines(2);
+        stamp_source_line(&mut buf, 0, SourceLine::Linear { lineno: 1 });
+        stamp_source_line(&mut buf, 1, SourceLine::Synthetic);
+        let theme = Theme::new();
+        let cell = g.cell(&buf, &theme, 1).unwrap();
+        let w = g.width(&buf) as usize;
+        assert_eq!(cell.text, " ".repeat(w));
+    }
+}
