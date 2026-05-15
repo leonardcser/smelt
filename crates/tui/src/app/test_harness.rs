@@ -517,6 +517,57 @@ mod tests {
     }
 
     #[test]
+    fn picker_wheel_pans_viewport_when_unfocused() {
+        use crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
+        let mut app = TestApp::builder().build();
+        let items: Vec<crate::picker::PickerItem> = (0..40)
+            .map(|i| crate::picker::PickerItem::new(format!("item {i}")))
+            .collect();
+        let _guard = crate::lua::install_app_ptr(&mut app.app);
+        let leaf = crate::picker::open(
+            &mut app.app,
+            items,
+            0,
+            crate::picker::PickerPlacement::ScreenCenter,
+            false, // non-focusable: focus stays on prompt
+            false,
+            10,
+        )
+        .expect("picker leaf created");
+        drop(_guard);
+
+        // Render to populate the viewport.
+        app.app.render_normal(false);
+        assert_eq!(app.app.ui.win(leaf).map(|w| w.scroll_top), Some(0));
+
+        let leaf_rect = app
+            .app
+            .ui
+            .paint_rect(crate::smelt_term::PaintId::from(leaf))
+            .expect("picker leaf has a rect after render");
+        // Pick a cell inside the picker rect.
+        let row = leaf_rect.top + 1;
+        let col = leaf_rect.left + 1;
+
+        let scroll = MouseEvent {
+            kind: MouseEventKind::ScrollDown,
+            row,
+            column: col,
+            modifiers: crossterm::event::KeyModifiers::empty(),
+        };
+        let _ = scroll; // silence unused-warning if path below ignores it
+        let _ = MouseButton::Left;
+
+        let pre_scroll = app.app.ui.win(leaf).unwrap().scroll_top;
+        let _ = app.app.ui.scroll_at(row, col, 3);
+        let post_scroll = app.app.ui.win(leaf).unwrap().scroll_top;
+        assert!(
+            post_scroll > pre_scroll,
+            "wheel over unfocused picker must pan scroll_top (pre={pre_scroll}, post={post_scroll})",
+        );
+    }
+
+    #[test]
     fn picker_forget_drops_state() {
         let mut app = TestApp::builder().build();
         let leaf = open_test_picker(&mut app, &["a", "b"], 0);

@@ -14,7 +14,7 @@ use crate::app::PROMPT_ABOVE_WIN;
 use crate::smelt_term::layout::Anchor;
 use crate::smelt_term::BufCreateOpts;
 use crate::smelt_term::{
-    BufId, Constraint, Corner, LayoutTree, Overlay, OverlayId, SplitConfig, WinId,
+    BufId, Constraint, Corner, Gutters, LayoutTree, Overlay, OverlayId, SplitConfig, WinId,
 };
 use smelt_core::content::builder::render_into;
 use smelt_core::style::Style;
@@ -109,7 +109,10 @@ pub(crate) fn open(
         buf,
         SplitConfig {
             region: "picker_overlay".into(),
-            gutters: Default::default(),
+            gutters: Gutters {
+                scrollbar: false,
+                ..Gutters::default()
+            },
         },
     )?;
     let height = picker_height(items.len(), max_rows);
@@ -117,6 +120,10 @@ pub(crate) fn open(
     let (w, buf_ref) = app.ui.win_and_buf_mut(leaf, buf);
     if let (Some(w), Some(buf_ref)) = (w, buf_ref) {
         w.cursor_line_highlight = true;
+        // Mouse-scroll opt-in: doubles as the caret-leaf opt-out so a click
+        // doesn't commit `cpos` mid-line. Wheel pans the viewport and shifts
+        // the highlight visually (same as `dialog.list` / resume).
+        w.mouse_scroll = true;
         w.focusable = focusable;
         w.scroll_top = scroll;
         w.jump_to_row(buf_ref, cursor_row, height);
@@ -194,6 +201,22 @@ pub(crate) fn set_selected(app: &mut TuiApp, leaf: WinId, selected: usize) {
 /// by `Ui::win_close → overlay_close`.
 pub(crate) fn forget(app: &mut TuiApp, leaf: WinId) {
     app.picker_state.remove(&leaf);
+}
+
+/// Current logical selection index (0-based) for `leaf`. Resolves the buffer
+/// cursor row through the picker's `reversed` mapping. `None` when `leaf` is
+/// not a known picker or has no items.
+pub(crate) fn selected_index(app: &TuiApp, leaf: WinId) -> Option<usize> {
+    let state = app.picker_state.get(&leaf)?;
+    let win = app.ui.win(leaf)?;
+    let buf = app.ui.buf(win.buf)?;
+    let n = buf.line_count();
+    if n == 0 {
+        return None;
+    }
+    let row = win.cursor_row() as usize;
+    let row = row.min(n - 1);
+    Some(if state.reversed { n - 1 - row } else { row })
 }
 
 fn picker_height(item_count: usize, max_rows: u16) -> u16 {

@@ -30,6 +30,14 @@ fun(msg: string): nil
 
 Show an error notification in the status area (highlighted with the error color).
 
+## `smelt.ui.selected`
+
+```lua
+fun(win_id: integer): integer?
+```
+
+Return the picker `win_id`'s current logical selection (0-based). Resolves the buffer cursor through the picker's reversed mapping, so wheel-pan and keyboard nav agree. `nil` for non-picker windows or empty pickers.
+
 ## `smelt.ui.set`
 
 ```lua

@@ -132,6 +132,21 @@ fn register_picker(lua: &Lua, smelt_ui: &mlua::Table) -> LuaResult<()> {
             Ok(())
         },
     )?;
+    register_ui_fn(
+        &picker_tbl,
+        "smelt.ui",
+        "selected",
+        "Return the picker `win_id`'s current logical selection (0-based). Resolves the buffer cursor through the picker's reversed mapping, so wheel-pan and keyboard nav agree. `nil` for non-picker windows or empty pickers.",
+        &["win_id"],
+        lua,
+        |_, win_id: u64| -> LuaResult<Option<u64>> {
+            let idx = crate::lua::try_with_app(|app| {
+                crate::picker::selected_index(app, crate::smelt_term::WinId(win_id))
+            })
+            .flatten();
+            Ok(idx.map(|i| i as u64))
+        },
+    )?;
     smelt_ui.set("picker", picker_tbl)?;
     Ok(())
 }

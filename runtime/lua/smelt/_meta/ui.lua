@@ -19,6 +19,10 @@ ui.notify = nil
 ---@type fun(msg: string): nil
 ui.notify_error = nil
 
+--- Return the picker `win_id`'s current logical selection (0-based). Resolves the buffer cursor through the picker's reversed mapping, so wheel-pan and keyboard nav agree. `nil` for non-picker windows or empty pickers.
+---@type fun(win_id: integer): integer?
+ui.selected = nil
+
 --- Set the prompt's ghost text (the dim suggestion shown after the cursor). Replaces any existing ghost completion.
 ---@type fun(text: string): nil
 ui.set = nil
