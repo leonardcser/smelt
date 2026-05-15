@@ -22,6 +22,11 @@ tar -czf seed_corpus.tar.gz seed_corpus
 # Full local cycle: unpack → fuzz → cmin → repack tarball (default 300s)
 cargo xtask fuzz [seconds]
 
+# Indefinite fuzzing — runs cycles forever, archives crashes under
+# `fuzz/crashes/<timestamp>/`, cmin's the corpus every N cycles. Stop with
+# Ctrl-C; safe to leave running overnight.
+./fuzz/fuzz-loop.sh [secs_per_cycle] [cmin_every_n_cycles]   # defaults: 600 10
+
 # Lower-level pieces:
 cargo +nightly fuzz run smelt_loop -- -max_len=4096 -max_total_time=300
 cargo +nightly fuzz cmin smelt_loop seed_corpus/smelt_loop
