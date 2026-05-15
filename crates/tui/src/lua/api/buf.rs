@@ -386,6 +386,9 @@ fn set_styled_lines(_: &Lua, (id, lines): (u64, mlua::Table)) -> LuaResult<()> {
         let Some(buf) = app.ui.buf_mut(BufId(id)) else {
             return;
         };
+        // Caller is composing exact lines; wrap reflow would clobber the highlights
+        // we're about to emit, so this primitive owns the buffer's wrap setting.
+        buf.set_wrap_mode(false);
         // Wipe pre-existing content; render_into_buffer otherwise appends past the seed.
         buf.set_all_lines(Vec::new());
         render_into_buffer(buf, width, &theme_snap, |sink| {
