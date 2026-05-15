@@ -11,7 +11,9 @@ use crossterm::event::{
 use protocol::{AgentMode, EngineEvent, ToolOutcome};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use tui::app::test_harness::{AllocBudget, SourceEvent, TestApp};
+use tui::app::test_harness::{AllocBudget, SourceEvent};
+
+pub use tui::app::test_harness::TestApp;
 
 /// One unit of fuzz input. Each variant either translates to a
 /// `SourceEvent` or invokes a harness side channel (`StartTurn`).
@@ -214,6 +216,29 @@ pub fn apply(app: &mut TestApp, op: FuzzOp) {
     };
     app.feed_one_within_budget(ev, AllocBudget::DEFAULT);
     app.assert_invariants();
+}
+
+/// Build a fresh `TestApp` configured for the scenario's initial state.
+/// Bypasses the invariant-only path so visual replay code can advance
+/// step-by-step.
+pub fn build_app(scenario: &Scenario) -> TestApp {
+    TestApp::builder()
+        .with_vim(scenario.vim)
+        .with_mode(scenario.mode.into())
+        .build()
+}
+
+/// Apply the first `n` ops from `scenario` to `app`. Used by replay
+/// drivers that need to rewind to an earlier step by rebuilding and
+/// fast-forwarding.
+pub fn apply_n(app: &mut TestApp, scenario: &Scenario, n: usize) {
+    let n = n.min(scenario.ops.len()).min(MAX_OPS);
+    for op in scenario.ops.iter().take(n).cloned() {
+        apply(app, op);
+        if app.quit_requested() {
+            break;
+        }
+    }
 }
 
 /// Drive a fresh `TestApp` through a scenario from start to finish.

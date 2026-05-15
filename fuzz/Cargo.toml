@@ -44,5 +44,12 @@ test = false
 doc = false
 bench = false
 
+[[bin]]
+name = "play_scenario"
+path = "src/bin/play_scenario.rs"
+test = false
+doc = false
+bench = false
+
 [profile.release]
 debug = 1

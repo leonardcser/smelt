@@ -325,6 +325,21 @@ impl TestApp {
         self.app.agent.is_some()
     }
 
+    /// Render one frame to real stdout. Drives the same compositor
+    /// pipeline production uses (`TuiApp::render_normal`). The caller is
+    /// responsible for terminal setup (raw mode, alternate screen).
+    pub fn render(&mut self) {
+        let agent_running = self.app.agent.is_some();
+        self.app.render_normal(agent_running);
+    }
+
+    /// Resize the app's surface to `(width, height)`. Used by replay
+    /// drivers that own a real terminal and need to match the app's
+    /// internal grid to the OS-reported size.
+    pub fn set_terminal_size(&mut self, width: u16, height: u16) {
+        self.app.handle_resize(width, height);
+    }
+
     /// Cheap structural invariants over every live `(Buffer, Window)` pair
     /// plus side-car state that holds byte offsets across mutations.
     /// Panics on the first violation. Safe to call after every dispatched

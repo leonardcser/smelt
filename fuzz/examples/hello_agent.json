@@ -1,0 +1,26 @@
+{
+  "vim": false,
+  "mode": "normal",
+  "ops": [
+    { "kind": "key_unicode", "data": 104 },
+    { "kind": "key_unicode", "data": 101 },
+    { "kind": "key_unicode", "data": 108 },
+    { "kind": "key_unicode", "data": 108 },
+    { "kind": "key_unicode", "data": 111 },
+    { "kind": "key_unicode", "data": 32 },
+    { "kind": "key_unicode", "data": 119 },
+    { "kind": "key_unicode", "data": 111 },
+    { "kind": "key_unicode", "data": 114 },
+    { "kind": "key_unicode", "data": 108 },
+    { "kind": "key_unicode", "data": 100 },
+    { "kind": "tick", "data": 100 },
+    { "kind": "start_turn", "data": 1 },
+    { "kind": "engine_ready" },
+    { "kind": "engine_text_delta", "data": "Hi " },
+    { "kind": "engine_text_delta", "data": "there! " },
+    { "kind": "engine_text_delta", "data": "This is " },
+    { "kind": "engine_text_delta", "data": "a streamed " },
+    { "kind": "engine_text_delta", "data": "response." },
+    { "kind": "tick", "data": 200 }
+  ]
+}
