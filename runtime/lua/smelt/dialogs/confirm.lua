@@ -111,7 +111,7 @@ function smelt.confirm.open(handle_id)
 
   local labels, decisions = build_options(req)
 
-  local header_leaf  = smelt.ui.dialog.content({ buf = header_buf })
+  local header_leaf  = smelt.ui.dialog.content({ buf = header_buf, wrap = false })
   local preview_leaf = smelt.ui.dialog.content({ buf = preview_buf, interactive = true })
   local options_leaf, options_buf = smelt.ui.dialog.options(labels)
   render_options(options_buf, labels)
