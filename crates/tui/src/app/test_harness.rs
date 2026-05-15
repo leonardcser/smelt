@@ -86,11 +86,12 @@ pub struct AllocBudget {
 }
 
 impl AllocBudget {
-    /// Default per-event budget. Generous enough to ignore normal large-paste
-    /// cases but tight enough to catch unbounded per-keystroke growth.
+    /// Default per-event budget. Tight enough to surface runaway per-event
+    /// growth; loose enough that normal large pastes / engine deltas pass.
+    /// Ratcheted down after initial fuzz waves cleared.
     pub const DEFAULT: AllocBudget = AllocBudget {
-        max_allocs: 10_000,
-        max_bytes: 4 * 1024 * 1024,
+        max_allocs: 5_000,
+        max_bytes: 2 * 1024 * 1024,
     };
 }
 
