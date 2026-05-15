@@ -366,6 +366,22 @@ impl TestApp {
                 continue;
             };
             let src = buf.source();
+            // The buffer crate carries two representations: source-based
+            // buffers (prompt, transcript) maintain `source` as the
+            // canonical byte stream and feed `cpos` into it directly;
+            // line-based buffers (cmdline, picker, status bar, list
+            // overlays) write through `set_lines` / `set_all_lines` and
+            // leave `source` empty — content lives in `lines` and `cpos`
+            // is set via cell-column helpers, not byte arithmetic on
+            // `source`. The source-based invariants below don't apply to
+            // that mode, so skip when the buffer has empty source but
+            // non-empty line content.
+            let line_based = src.is_empty()
+                && (buf.line_count() > 1
+                    || buf.get_line(0).is_some_and(|l| !l.is_empty()));
+            if line_based {
+                continue;
+            }
             assert!(
                 win.cpos <= src.len(),
                 "window {:?} cpos {} > source len {}",
@@ -828,6 +844,22 @@ mod tests {
         app.type_text("quit");
         app.press(KeyCode::Enter);
         assert!(app.state().pending_quit);
+    }
+
+    /// Regression: typing into the cmdline grows its line-based buffer
+    /// and the cmdline window's `cpos` past `source.len()` (the cmdline
+    /// stays empty because content lives in `lines`). The invariant
+    /// scoping must recognize this as a line-based buffer and skip the
+    /// source-bounded cursor check rather than fire spuriously.
+    #[test]
+    fn cmdline_typed_payload_does_not_trip_cursor_invariant() {
+        let mut app = TestApp::builder().with_vim(true).build();
+        app.press(KeyCode::Esc);
+        app.type_char(':');
+        // Type more than any single-line buffer could ever encode in
+        // source byte arithmetic from cell position alone.
+        app.type_text("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa");
+        app.assert_invariants();
     }
 
     // ── Picker open/filter/select ───────────────────────────────────
