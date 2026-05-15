@@ -1,0 +1,61 @@
+name: Fuzz
+
+on:
+  schedule:
+    - cron: '17 5 * * *'
+  pull_request:
+    branches: [main]
+    paths:
+      - 'crates/**'
+      - 'fuzz/**'
+      - '.github/workflows/fuzz.yml'
+  workflow_dispatch:
+    inputs:
+      duration:
+        description: 'Fuzz runtime in seconds'
+        required: false
+        default: '600'
+
+jobs:
+  smelt-loop:
+    name: smelt_loop
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v6
+
+      - name: Set up Rust nightly
+        uses: dtolnay/rust-toolchain@nightly
+        with:
+          components: rust-src
+
+      - name: Cache dependencies
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: fuzz
+
+      - name: Install cargo-fuzz
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-fuzz
+
+      - name: Unpack seed corpus
+        working-directory: fuzz
+        run: tar -xzf seed_corpus.tar.gz
+
+      - name: Run fuzzer
+        working-directory: fuzz
+        env:
+          DURATION: ${{ github.event.inputs.duration || '600' }}
+        run: cargo +nightly fuzz run smelt_loop seed_corpus/smelt_loop -- -max_len=4096 -max_total_time=$DURATION
+
+      - name: Upload crash artifacts on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: smelt_loop-crash-artifacts
+          path: fuzz/artifacts/
+          if-no-files-found: ignore
+          retention-days: 30

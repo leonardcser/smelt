@@ -36,3 +36,9 @@ cargo run --bin play_scenario -- examples/hello_agent.json
 ```
 
 `play_scenario` controls: `space`/`→` next, `b`/`←` back, `r` reset, `s` state dump, `q`/`Esc` quit.
+
+## CI
+
+A nightly GitHub Actions job (`.github/workflows/fuzz.yml`) runs `smelt_loop`
+for 10 minutes against the committed corpus. PRs touching `crates/**` or
+`fuzz/**` trigger the same job. Failures upload crash artifacts to the run.
