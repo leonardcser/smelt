@@ -106,6 +106,25 @@ pub enum FuzzOp {
     /// Side channel: push a synthetic entry onto `queued_messages` so
     /// `Steered` has something to drain.
     PushQueuedMessage(String),
+    /// Side channel: flip `pending_title` so a subsequent `TitleGenerated`
+    /// applies instead of being dropped.
+    PrimePendingTitle,
+    /// Emit `ProcessCompleted { id, exit_code }`. Pushes a transcript
+    /// block describing the exit.
+    EngineProcessCompleted {
+        id: String,
+        exit_code: Option<i32>,
+    },
+    /// Emit `Messages` against the currently-active turn (when any),
+    /// carrying `msg_count` synthetic messages. Doesn't end the turn.
+    EngineMessages {
+        msg_count: u8,
+    },
+    /// Emit `TitleGenerated`. Applies only when `pending_title` is set.
+    EngineTitleGenerated {
+        title: String,
+        slug: String,
+    },
 }
 
 #[derive(Arbitrary, Debug, Clone, Copy, Serialize, Deserialize)]
@@ -219,6 +238,10 @@ struct Snapshot {
     working: tui::app::test_harness::WorkingSnapshot,
     session_cost_usd: f64,
     context_tokens: Option<u32>,
+    transcript_blocks: usize,
+    pending_title: bool,
+    session_title: Option<String>,
+    session_slug: Option<String>,
 }
 
 impl Snapshot {
@@ -234,6 +257,10 @@ impl Snapshot {
             working: app.working_state(),
             session_cost_usd: app.session_cost_usd(),
             context_tokens: app.context_tokens(),
+            transcript_blocks: app.transcript_block_count(),
+            pending_title: app.pending_title(),
+            session_title: app.session_title(),
+            session_slug: app.session_slug(),
         }
     }
 }
@@ -285,6 +312,16 @@ enum PostCheck {
         cost_usd: f64,
         background: bool,
     },
+    /// `ProcessCompleted` pushes one transcript block describing the exit.
+    ProcessCompleted,
+    /// `Messages` against the active turn (matching turn_id) replaces
+    /// `session.messages` mid-turn; idle dispatch is a no-op.
+    MessagesReplaced {
+        msg_count: usize,
+        targeted_active: bool,
+    },
+    /// `TitleGenerated` only applies when `pending_title` was set.
+    TitleApplied { title: String, slug: String },
 }
 
 fn run_check(check: PostCheck, pre: &Snapshot, post: &Snapshot) {
@@ -413,6 +450,66 @@ fn run_check(check: PostCheck, pre: &Snapshot, post: &Snapshot) {
                 assert_eq!(
                     post.session_cost_usd, pre.session_cost_usd,
                     "TokenUsage in idle dispatch should not accumulate cost",
+                );
+            }
+        }
+        PostCheck::ProcessCompleted => {
+            assert_eq!(
+                post.transcript_blocks,
+                pre.transcript_blocks + 1,
+                "ProcessCompleted did not push exactly one transcript block: pre {} → post {}",
+                pre.transcript_blocks,
+                post.transcript_blocks,
+            );
+        }
+        PostCheck::MessagesReplaced {
+            msg_count,
+            targeted_active,
+        } => {
+            // Only the active-turn arm with matching turn_id calls
+            // set_history; idle dispatch is an explicit no-op.
+            if targeted_active {
+                assert_eq!(
+                    post.session_messages, msg_count,
+                    "Messages did not replace session.messages: post {} (expected {msg_count})",
+                    post.session_messages,
+                );
+                // Doesn't end the turn.
+                assert!(
+                    post.agent_running,
+                    "Messages on active turn ended it unexpectedly",
+                );
+            } else {
+                assert_eq!(
+                    post.session_messages, pre.session_messages,
+                    "Messages in idle dispatch should not change session.messages",
+                );
+            }
+        }
+        PostCheck::TitleApplied { title, slug } => {
+            if pre.pending_title {
+                assert_eq!(
+                    post.session_title.as_deref(),
+                    Some(title.as_str()),
+                    "TitleGenerated did not set session.title",
+                );
+                assert_eq!(
+                    post.session_slug.as_deref(),
+                    Some(slug.as_str()),
+                    "TitleGenerated did not set session.slug",
+                );
+                assert!(
+                    !post.pending_title,
+                    "TitleGenerated did not clear pending_title flag",
+                );
+            } else {
+                assert_eq!(
+                    post.session_title, pre.session_title,
+                    "TitleGenerated without pending_title should not change title",
+                );
+                assert_eq!(
+                    post.session_slug, pre.session_slug,
+                    "TitleGenerated without pending_title should not change slug",
                 );
             }
         }
@@ -630,6 +727,23 @@ fn plan(op: FuzzOp) -> (Option<SourceEvent>, PostCheck) {
         FuzzOp::PushQueuedMessage(_) => {
             unreachable!("PushQueuedMessage handled inline in apply()")
         }
+        FuzzOp::PrimePendingTitle => unreachable!("PrimePendingTitle handled inline in apply()"),
+        FuzzOp::EngineProcessCompleted { id, exit_code } => {
+            let ev = SourceEvent::Engine(EngineEvent::ProcessCompleted { id, exit_code });
+            (Some(ev), PostCheck::ProcessCompleted)
+        }
+        FuzzOp::EngineMessages { .. } => {
+            // Needs the live turn_id; handled inline in `apply` before
+            // reaching `plan`.
+            unreachable!("EngineMessages handled inline in apply()")
+        }
+        FuzzOp::EngineTitleGenerated { title, slug } => {
+            let ev = SourceEvent::Engine(EngineEvent::TitleGenerated {
+                title: title.clone(),
+                slug: slug.clone(),
+            });
+            (Some(ev), PostCheck::TitleApplied { title, slug })
+        }
     }
 }
 
@@ -656,6 +770,11 @@ pub fn apply(app: &mut TestApp, op: FuzzOp) {
             app.assert_invariants();
             return;
         }
+        FuzzOp::PrimePendingTitle => {
+            app.prime_pending_title();
+            app.assert_invariants();
+            return;
+        }
         _ => {}
     }
 
@@ -664,23 +783,39 @@ pub fn apply(app: &mut TestApp, op: FuzzOp) {
     // it here so the dispatched event hits the active arm whenever a turn
     // is running. Idle dispatch still applies for the `agent_running ==
     // false` case.
-    let (ev, check) = if let FuzzOp::EngineTurnComplete { msg_count } = op {
-        let count = usize::from(msg_count);
-        let id = app.current_turn_id().unwrap_or(0);
-        let ev = SourceEvent::Engine(EngineEvent::TurnComplete {
-            turn_id: id,
-            messages: synth_messages(count),
-            meta: None,
-        });
-        (
-            Some(ev),
-            PostCheck::TurnCompleted {
-                msg_count: count,
-                targeted_active: pre.agent_running,
-            },
-        )
-    } else {
-        plan(op)
+    let (ev, check) = match op {
+        FuzzOp::EngineTurnComplete { msg_count } => {
+            let count = usize::from(msg_count);
+            let id = app.current_turn_id().unwrap_or(0);
+            let ev = SourceEvent::Engine(EngineEvent::TurnComplete {
+                turn_id: id,
+                messages: synth_messages(count),
+                meta: None,
+            });
+            (
+                Some(ev),
+                PostCheck::TurnCompleted {
+                    msg_count: count,
+                    targeted_active: pre.agent_running,
+                },
+            )
+        }
+        FuzzOp::EngineMessages { msg_count } => {
+            let count = usize::from(msg_count);
+            let id = app.current_turn_id().unwrap_or(0);
+            let ev = SourceEvent::Engine(EngineEvent::Messages {
+                turn_id: id,
+                messages: synth_messages(count),
+            });
+            (
+                Some(ev),
+                PostCheck::MessagesReplaced {
+                    msg_count: count,
+                    targeted_active: pre.agent_running,
+                },
+            )
+        }
+        op => plan(op),
     };
     if let Some(ev) = ev {
         app.feed_one_within_budget(ev, AllocBudget::DEFAULT);

@@ -439,6 +439,31 @@ impl TestApp {
         self.app.core.session.context_tokens
     }
 
+    /// Number of transcript blocks. Used by event invariants that assert
+    /// a block was pushed (e.g. `ProcessCompleted`).
+    pub fn transcript_block_count(&self) -> usize {
+        self.app.transcript.history.len()
+    }
+
+    /// Session title / slug. Used by `TitleGenerated` invariants.
+    pub fn session_title(&self) -> Option<String> {
+        self.app.core.session.title.clone()
+    }
+    pub fn session_slug(&self) -> Option<String> {
+        self.app.core.session.slug.clone()
+    }
+    pub fn pending_title(&self) -> bool {
+        self.app.pending_title
+    }
+
+    /// Side-channel: prime the `pending_title` flag so a subsequent
+    /// `TitleGenerated` event applies. In production `pending_title` is
+    /// set when the UI sends `UiCommand::GenerateTitle`; the harness
+    /// short-circuits that flow.
+    pub fn prime_pending_title(&mut self) {
+        self.app.pending_title = true;
+    }
+
     /// Render one frame to real stdout. Drives the same compositor
     /// pipeline production uses (`TuiApp::render_normal`). The caller is
     /// responsible for terminal setup (raw mode, alternate screen).
