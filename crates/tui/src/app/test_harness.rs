@@ -336,6 +336,15 @@ impl TestApp {
             pending: Vec::new(),
             _perf: smelt_perf::perf::begin("test_harness:turn"),
         });
+        // Production `dispatch_turn` flips `working` into `Working` phase
+        // at the same point it sets `agent = Some(...)`. The harness short-
+        // circuits the HTTP-bearing dispatch path; we still need to mirror
+        // the working-state transition so the
+        // `working.is_animating() => agent.is_some()` invariant in
+        // `assert_invariants` holds in both directions.
+        self.app
+            .working
+            .begin(smelt_core::working::TurnPhase::Working);
     }
 
     /// Whether an agent turn is currently active.
@@ -483,6 +492,26 @@ impl TestApp {
     /// `should_queue` branch in `dispatch_control` was actually hit.
     pub fn pending_deferred_dialog_count(&self) -> usize {
         self.app.pending_dialogs.len()
+    }
+
+    /// Count of `UiCommand::ToolResult` entries in the action log. Used by
+    /// `ToolDispatch` invariants — every dispatch either resolves
+    /// immediately (one `ToolResult`) or stays pending in the Lua task
+    /// queue.
+    pub fn tool_result_count(&self) -> usize {
+        self.actions
+            .iter()
+            .filter(|a| matches!(a, Action::EngineSend(UiCommand::ToolResult { .. })))
+            .count()
+    }
+
+    /// Count of `UiCommand::ToolHooksResponse` entries in the action log.
+    /// `ToolHooksRequest` always produces exactly one of these.
+    pub fn tool_hooks_response_count(&self) -> usize {
+        self.actions
+            .iter()
+            .filter(|a| matches!(a, Action::EngineSend(UiCommand::ToolHooksResponse { .. })))
+            .count()
     }
 
     /// Count of `UiCommand::PermissionDecision` entries in the action log.
@@ -698,7 +727,55 @@ impl TestApp {
                     pt.call_id,
                     ag.turn_id
                 );
+                // Every pending call_id must have a matching `ToolState`
+                // sidecar that's still in flight. A missing entry means
+                // the transcript was rebuilt without restoring the tool
+                // state; a terminal status means the pending bookkeeping
+                // wasn't cleared when the tool finished — both corrupt
+                // the tool widget.
+                let state = self.app.transcript.history.tool_states.get(&pt.call_id);
+                assert!(
+                    state.is_some(),
+                    "pending tool {:?} has no ToolState entry in transcript history",
+                    pt.call_id,
+                );
+                if let Some(state) = state {
+                    assert!(
+                        !state.is_terminal(),
+                        "pending tool {:?} has terminal ToolState",
+                        pt.call_id,
+                    );
+                }
             }
+        }
+
+        // Working-state coherence. The animation only spins inside a turn:
+        // `begin_agent_turn` / harness `start_turn` flip it on alongside
+        // `agent = Some(...)`, and `discard_turn` always calls
+        // `working.finish` before nulling `agent`. The reverse direction
+        // (agent.is_some() => working.is_animating) does NOT hold —
+        // stale-epoch `CompactionComplete` legitimately finishes working
+        // while the turn keeps running — so we only assert one way.
+        if self.app.working.is_animating() {
+            assert!(
+                self.app.agent.is_some(),
+                "working is animating without an active agent turn",
+            );
+        }
+
+        // Idle streaming coherence. With no agent, `finish_turn` has
+        // already flushed `text` and `thinking` buffers; the idle event
+        // handler never appends to them. `exec` is independent of turns
+        // (vim bang-shell) so it's deliberately excluded.
+        if self.app.agent.is_none() {
+            assert!(
+                !self.app.parser.has_active_text(),
+                "streaming text buffer non-empty with no agent turn",
+            );
+            assert!(
+                !self.app.parser.has_active_thinking(),
+                "streaming thinking buffer non-empty with no agent turn",
+            );
         }
 
         // Kill-ring source range is well-formed even if we can't validate

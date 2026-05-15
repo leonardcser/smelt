@@ -179,6 +179,7 @@ fn op_label(op: &smelt_fuzz::FuzzOp) -> String {
         EngineReady => "engine ready".into(),
         EngineText(_) => "engine text".into(),
         EngineTextDelta(_) => "engine text delta".into(),
+        EngineThinking(_) => "engine thinking".into(),
         EngineThinkingDelta(_) => "engine thinking delta".into(),
         EngineToolStart { tool_name, .. } => format!("tool start {tool_name}"),
         EngineToolOutput { .. } => "tool output".into(),
@@ -191,5 +192,26 @@ fn op_label(op: &smelt_fuzz::FuzzOp) -> String {
         }
         ExecOutput(_) => "exec output".into(),
         ExecDone(code) => format!("exec done {code:?}"),
+        BeginCompaction => "begin compaction".into(),
+        EngineCompactionComplete { msg_count } => {
+            format!("compaction complete ({msg_count} msgs)")
+        }
+        EngineTurnComplete { msg_count } => format!("turn complete ({msg_count} msgs)"),
+        EngineTurnError(_) => "turn error".into(),
+        EngineSteered { count, .. } => format!("steered (drain {count})"),
+        EngineRetrying { attempt, .. } => format!("retrying (attempt {attempt})"),
+        EngineTokenUsage { prompt, .. } => format!("token usage (prompt {prompt})"),
+        PushQueuedMessage(_) => "push queued message".into(),
+        PrimePendingTitle => "prime pending title".into(),
+        EngineProcessCompleted { id, .. } => format!("process completed {id}"),
+        EngineMessages { msg_count } => format!("messages ({msg_count})"),
+        EngineTitleGenerated { .. } => "title generated".into(),
+        EngineRequestPermission { tool_name, .. } => format!("request permission {tool_name}"),
+        ApproveFirstConfirm => "approve confirm".into(),
+        DenyFirstConfirm { .. } => "deny confirm".into(),
+        EngineToolDispatch { tool_name, .. } => format!("tool dispatch {tool_name}"),
+        EngineToolHooksRequest { tool_name, .. } => format!("tool hooks {tool_name}"),
+        EngineCoreToolResult { .. } => "core tool result".into(),
+        EngineShutdown { .. } => "shutdown".into(),
     }
 }

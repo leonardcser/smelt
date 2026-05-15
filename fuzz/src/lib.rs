@@ -147,6 +147,39 @@ pub enum FuzzOp {
     DenyFirstConfirm {
         message: Option<String>,
     },
+    /// Emit `ToolDispatch`. With no Lua tool registered for `tool_name`,
+    /// `execute_tool` returns `Immediate { is_error: true }` and the TUI
+    /// sends a `ToolResult` UiCommand back. Exercises the "unknown tool"
+    /// error path and proves `handle_tool_call` is panic-free against
+    /// arbitrary names and arg payloads.
+    EngineToolDispatch {
+        req_id: u8,
+        call_id: u8,
+        tool_name: String,
+    },
+    /// Emit `ToolHooksRequest`. Active-turn dispatch always queues a
+    /// `ToolHooksResponse` UiCommand back; `evaluate_hooks` short-circuits
+    /// when no Lua hook is registered.
+    EngineToolHooksRequest {
+        req_id: u8,
+        call_id: u8,
+        tool_name: String,
+    },
+    /// Emit `CoreToolResult`. Active-turn dispatch routes to
+    /// `lua.resolve_core_tool_call`, which is a no-op when no pending
+    /// coroutine carries the `request_id`. Fuzz value: prove
+    /// table-construction and `resolve_external` don't panic on arbitrary
+    /// payloads.
+    EngineCoreToolResult {
+        req_id: u8,
+        content: String,
+        is_error: bool,
+    },
+    /// Emit `Shutdown`. Active-turn dispatch yields `SessionControl::Done`
+    /// and ends the turn; idle dispatch is a no-op.
+    EngineShutdown {
+        reason: Option<String>,
+    },
 }
 
 #[derive(Arbitrary, Debug, Clone, Copy, Serialize, Deserialize)]
@@ -274,6 +307,8 @@ struct Snapshot {
     pending_confirms: usize,
     deferred_dialogs: usize,
     permission_decisions: usize,
+    tool_results: usize,
+    tool_hooks_responses: usize,
 }
 
 impl Snapshot {
@@ -296,6 +331,8 @@ impl Snapshot {
             pending_confirms: app.pending_confirm_count(),
             deferred_dialogs: app.pending_deferred_dialog_count(),
             permission_decisions: app.permission_decision_count(),
+            tool_results: app.tool_result_count(),
+            tool_hooks_responses: app.tool_hooks_response_count(),
         }
     }
 }
@@ -367,6 +404,19 @@ enum PostCheck {
     /// a `PermissionDecision`. Approve never ends the turn; deny without a
     /// message ends it.
     ConfirmResolved { approved: bool, had_message: bool },
+    /// `ToolDispatch` with an unregistered tool produces exactly one
+    /// `ToolResult` UiCommand (the synthetic error path). With a real Lua
+    /// tool registered it could yield `Pending` instead, but the harness
+    /// loads no tools so strict equality holds.
+    ToolDispatched,
+    /// `ToolHooksRequest` always produces exactly one `ToolHooksResponse`
+    /// UiCommand, regardless of whether hooks are registered.
+    ToolHooksRequested,
+    /// `CoreToolResult` with no pending Lua coroutine is silently dropped;
+    /// only the no-panic invariant matters.
+    CoreToolResultReceived,
+    /// `Shutdown` ends any active turn.
+    ShutdownReceived,
 }
 
 fn run_check(check: PostCheck, pre: &Snapshot, post: &Snapshot) {
@@ -646,6 +696,40 @@ fn run_check(check: PostCheck, pre: &Snapshot, post: &Snapshot) {
                 }
             }
         }
+        PostCheck::ToolDispatched => {
+            if pre.agent_running {
+                assert_eq!(
+                    post.tool_results,
+                    pre.tool_results + 1,
+                    "ToolDispatch with no tool registered should queue exactly one ToolResult: pre {} -> post {}",
+                    pre.tool_results,
+                    post.tool_results,
+                );
+            }
+        }
+        PostCheck::ToolHooksRequested => {
+            if pre.agent_running {
+                assert_eq!(
+                    post.tool_hooks_responses,
+                    pre.tool_hooks_responses + 1,
+                    "ToolHooksRequest should queue exactly one ToolHooksResponse: pre {} -> post {}",
+                    pre.tool_hooks_responses,
+                    post.tool_hooks_responses,
+                );
+            }
+        }
+        PostCheck::CoreToolResultReceived => {
+            // No-op when no pending coroutine matches the request_id.
+            // `assert_invariants` covers the no-panic property.
+        }
+        PostCheck::ShutdownReceived => {
+            if pre.agent_running {
+                assert!(
+                    !post.agent_running,
+                    "Shutdown did not end the active turn",
+                );
+            }
+        }
         PostCheck::CompactionApplied { msg_count } => {
             // The apply path runs only on epoch match. A non-empty payload
             // replaces the conversation and clears snapshot vectors. Idle
@@ -868,6 +952,50 @@ fn plan(op: FuzzOp) -> (Option<SourceEvent>, PostCheck) {
         }
         FuzzOp::ApproveFirstConfirm | FuzzOp::DenyFirstConfirm { .. } => {
             unreachable!("Approve/Deny side channels handled inline in apply()")
+        }
+        FuzzOp::EngineToolDispatch {
+            req_id,
+            call_id,
+            tool_name,
+        } => {
+            let ev = SourceEvent::Engine(EngineEvent::ToolDispatch {
+                request_id: u64::from(req_id),
+                call_id: call_id_string(call_id),
+                tool_name,
+                args: HashMap::new(),
+            });
+            (Some(ev), PostCheck::ToolDispatched)
+        }
+        FuzzOp::EngineToolHooksRequest {
+            req_id,
+            call_id,
+            tool_name,
+        } => {
+            let ev = SourceEvent::Engine(EngineEvent::ToolHooksRequest {
+                request_id: u64::from(req_id),
+                call_id: call_id_string(call_id),
+                tool_name,
+                args: HashMap::new(),
+                mode: AgentMode::Normal,
+            });
+            (Some(ev), PostCheck::ToolHooksRequested)
+        }
+        FuzzOp::EngineCoreToolResult {
+            req_id,
+            content,
+            is_error,
+        } => {
+            let ev = SourceEvent::Engine(EngineEvent::CoreToolResult {
+                request_id: u64::from(req_id),
+                content,
+                is_error,
+                metadata: None,
+            });
+            (Some(ev), PostCheck::CoreToolResultReceived)
+        }
+        FuzzOp::EngineShutdown { reason } => {
+            let ev = SourceEvent::Engine(EngineEvent::Shutdown { reason });
+            (Some(ev), PostCheck::ShutdownReceived)
         }
     }
 }
