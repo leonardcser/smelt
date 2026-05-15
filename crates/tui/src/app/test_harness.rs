@@ -584,26 +584,32 @@ impl TestApp {
     }
 
     /// Cheap structural invariants over every live `(Buffer, Window)` pair
-    /// plus side-car state that holds byte offsets across mutations.
-    /// Panics on the first violation. Safe to call after every dispatched
-    /// event.
+    /// plus side-car state. Panics on the first violation; safe to call
+    /// after every dispatched event.
     ///
-    /// Checks per window:
-    /// - `cpos` is in `0..=source.len()`.
-    /// - `cpos` lands on a UTF-8 char boundary.
-    /// - `selection_anchor`, when set, satisfies the same two constraints.
+    /// Composed of four focused groups so a regression points at one
+    /// category and so individual groups can be reused in unit tests:
+    /// - [`Self::assert_text_invariants`] — UTF-8 / byte-offset correctness
+    ///   for window cpos, undo/redo entries, kill-ring, completer anchor.
+    /// - [`Self::assert_ui_invariants`] — terminal size, focus reachability.
+    /// - [`Self::assert_session_invariants`] — agent / working / streaming
+    ///   coherence plus pending-tool bookkeeping.
+    /// - [`Self::assert_resource_invariants`] — bounded queues and other
+    ///   leak floors.
     ///
-    /// Checks per buffer:
-    /// - Every saved undo and redo `UndoEntry.cpos` is in-bounds and on a
-    ///   UTF-8 boundary relative to its own `entry.buf` snapshot.
-    /// - When a cap is set, `undo_len() <= cap` (cap honored after push).
-    ///
-    /// Plus globals:
-    /// - Terminal width and height non-zero.
-    /// - Kill-ring `source_range`, when set, is well-formed (`start <= end`).
-    /// - Prompt completer anchor, when active, is in-bounds and on a UTF-8
-    ///   boundary in the prompt-edit buffer.
+    /// Panic messages are prefixed with `INV-NN:` so a corpus replay can
+    /// be classified at a glance.
     pub fn assert_invariants(&self) {
+        self.assert_text_invariants();
+        self.assert_ui_invariants();
+        self.assert_session_invariants();
+        self.assert_resource_invariants();
+    }
+
+    /// UTF-8 / byte-offset correctness across every place a stale offset
+    /// could land mid-character: window cpos and selection anchor, undo
+    /// and redo entries, kill-ring source range, prompt completer anchor.
+    pub fn assert_text_invariants(&self) {
         for (wid, win) in self.app.ui.iter_wins() {
             let Some(buf) = self.app.ui.buf(win.buf) else {
                 continue;
@@ -626,7 +632,7 @@ impl TestApp {
             }
             assert!(
                 win.cpos <= src.len(),
-                "window {:?} cpos {} > source len {}",
+                "INV-01: window {:?} cpos {} > source len {}",
                 wid,
                 win.cpos,
                 src.len()
@@ -634,13 +640,13 @@ impl TestApp {
             let snapped = smelt_buffer::text::snap(src, win.cpos);
             assert_eq!(
                 snapped, win.cpos,
-                "window {:?} cpos {} not on UTF-8 char boundary (snapped {})",
+                "INV-02: window {:?} cpos {} not on UTF-8 char boundary (snapped {})",
                 wid, win.cpos, snapped
             );
             if let Some(anchor) = win.selection_anchor {
                 assert!(
                     anchor <= src.len(),
-                    "window {:?} selection_anchor {} > source len {}",
+                    "INV-03: window {:?} selection_anchor {} > source len {}",
                     wid,
                     anchor,
                     src.len()
@@ -648,7 +654,7 @@ impl TestApp {
                 let snapped = smelt_buffer::text::snap(src, anchor);
                 assert_eq!(
                     snapped, anchor,
-                    "window {:?} selection_anchor {} not on UTF-8 char boundary (snapped {})",
+                    "INV-04: window {:?} selection_anchor {} not on UTF-8 char boundary (snapped {})",
                     wid, anchor, snapped
                 );
             }
@@ -662,7 +668,7 @@ impl TestApp {
             for (i, entry) in buf.history.iter_undo().enumerate() {
                 assert!(
                     entry.cpos <= entry.buf.len(),
-                    "buf {:?} undo[{}] cpos {} > snapshot len {}",
+                    "INV-05: buf {:?} undo[{}] cpos {} > snapshot len {}",
                     bid,
                     i,
                     entry.cpos,
@@ -671,14 +677,14 @@ impl TestApp {
                 let snapped = smelt_buffer::text::snap(&entry.buf, entry.cpos);
                 assert_eq!(
                     snapped, entry.cpos,
-                    "buf {:?} undo[{}] cpos {} not on UTF-8 char boundary",
+                    "INV-06: buf {:?} undo[{}] cpos {} not on UTF-8 char boundary",
                     bid, i, entry.cpos
                 );
             }
             for (i, entry) in buf.history.iter_redo().enumerate() {
                 assert!(
                     entry.cpos <= entry.buf.len(),
-                    "buf {:?} redo[{}] cpos {} > snapshot len {}",
+                    "INV-07: buf {:?} redo[{}] cpos {} > snapshot len {}",
                     bid,
                     i,
                     entry.cpos,
@@ -687,14 +693,14 @@ impl TestApp {
                 let snapped = smelt_buffer::text::snap(&entry.buf, entry.cpos);
                 assert_eq!(
                     snapped, entry.cpos,
-                    "buf {:?} redo[{}] cpos {} not on UTF-8 char boundary",
+                    "INV-08: buf {:?} redo[{}] cpos {} not on UTF-8 char boundary",
                     bid, i, entry.cpos
                 );
             }
             if let Some(cap) = buf.history.cap() {
                 assert!(
                     buf.history.undo_len() <= cap,
-                    "buf {:?} undo stack {} > cap {}",
+                    "INV-09: buf {:?} undo stack {} > cap {}",
                     bid,
                     buf.history.undo_len(),
                     cap
@@ -702,18 +708,60 @@ impl TestApp {
             }
         }
 
+        // Kill-ring source range is well-formed even if we can't validate
+        // it against a specific buffer (the ring doesn't track which buffer
+        // it came from). `start <= end` is the floor.
+        if let Some((start, end)) = self.app.core.clipboard.kill_ring.source_range() {
+            assert!(
+                start <= end,
+                "INV-10: kill-ring source_range {} > {} (inverted)",
+                start,
+                end
+            );
+        }
+
+        // Completer anchor lives in the prompt-edit buffer. When active,
+        // it must still resolve to a valid byte boundary after every
+        // mutation — that's the exact stale-offset trap fuzzing should
+        // catch.
+        if let Some(session) = self.app.input.completer.as_ref() {
+            if let Some(prompt) = self.app.ui.buf(crate::app::PROMPT_EDIT_BUF) {
+                let src = prompt.source();
+                let anchor = session.completer.anchor;
+                assert!(
+                    anchor <= src.len(),
+                    "INV-11: completer anchor {} > prompt source len {}",
+                    anchor,
+                    src.len()
+                );
+                let snapped = smelt_buffer::text::snap(src, anchor);
+                assert_eq!(
+                    snapped, anchor,
+                    "INV-12: completer anchor {} not on UTF-8 char boundary (snapped {})",
+                    anchor, snapped
+                );
+            }
+        }
+    }
+
+    /// UI structural integrity: terminal extent non-zero and focus is
+    /// not stale.
+    pub fn assert_ui_invariants(&self) {
         let (w, h) = self.app.ui.terminal_size();
-        assert!(w > 0 && h > 0, "terminal size collapsed to {w}x{h}");
+        assert!(w > 0 && h > 0, "INV-20: terminal size collapsed to {w}x{h}");
 
         // Focused window, when set, must still be alive. A stale `focus`
         // pointing at a closed leaf is a use-after-free in waiting.
         if let Some(focused) = self.app.ui.focus() {
             assert!(
                 self.app.ui.win(focused).is_some(),
-                "focus points at dead window {focused:?}"
+                "INV-21: focus points at dead window {focused:?}"
             );
         }
+    }
 
+    /// Agent / working / streaming coherence plus pending-tool bookkeeping.
+    pub fn assert_session_invariants(&self) {
         // Active agent turn: pending tool call_ids must be unique. A
         // duplicate means `ToolStarted` was processed twice for the same
         // call without an intervening `ToolFinished`, which corrupts the
@@ -723,7 +771,7 @@ impl TestApp {
             for pt in &ag.pending {
                 assert!(
                     seen.insert(pt.call_id.as_str()),
-                    "duplicate pending tool call_id {:?} in turn {}",
+                    "INV-30: duplicate pending tool call_id {:?} in turn {}",
                     pt.call_id,
                     ag.turn_id
                 );
@@ -736,13 +784,13 @@ impl TestApp {
                 let state = self.app.transcript.history.tool_states.get(&pt.call_id);
                 assert!(
                     state.is_some(),
-                    "pending tool {:?} has no ToolState entry in transcript history",
+                    "INV-31: pending tool {:?} has no ToolState entry in transcript history",
                     pt.call_id,
                 );
                 if let Some(state) = state {
                     assert!(
                         !state.is_terminal(),
-                        "pending tool {:?} has terminal ToolState",
+                        "INV-32: pending tool {:?} has terminal ToolState",
                         pt.call_id,
                     );
                 }
@@ -759,7 +807,7 @@ impl TestApp {
         if self.app.working.is_animating() {
             assert!(
                 self.app.agent.is_some(),
-                "working is animating without an active agent turn",
+                "INV-33: working is animating without an active agent turn",
             );
         }
 
@@ -770,49 +818,18 @@ impl TestApp {
         if self.app.agent.is_none() {
             assert!(
                 !self.app.parser.has_active_text(),
-                "streaming text buffer non-empty with no agent turn",
+                "INV-34: streaming text buffer non-empty with no agent turn",
             );
             assert!(
                 !self.app.parser.has_active_thinking(),
-                "streaming thinking buffer non-empty with no agent turn",
+                "INV-35: streaming thinking buffer non-empty with no agent turn",
             );
-        }
-
-        // Kill-ring source range is well-formed even if we can't validate
-        // it against a specific buffer (the ring doesn't track which buffer
-        // it came from). `start <= end` is the floor.
-        if let Some((start, end)) = self.app.core.clipboard.kill_ring.source_range() {
-            assert!(
-                start <= end,
-                "kill-ring source_range {} > {} (inverted)",
-                start,
-                end
-            );
-        }
-
-        // Completer anchor lives in the prompt-edit buffer. When active,
-        // it must still resolve to a valid byte boundary after every
-        // mutation — that's the exact stale-offset trap fuzzing should
-        // catch.
-        if let Some(session) = self.app.input.completer.as_ref() {
-            if let Some(prompt) = self.app.ui.buf(crate::app::PROMPT_EDIT_BUF) {
-                let src = prompt.source();
-                let anchor = session.completer.anchor;
-                assert!(
-                    anchor <= src.len(),
-                    "completer anchor {} > prompt source len {}",
-                    anchor,
-                    src.len()
-                );
-                let snapped = smelt_buffer::text::snap(src, anchor);
-                assert_eq!(
-                    snapped, anchor,
-                    "completer anchor {} not on UTF-8 char boundary (snapped {})",
-                    anchor, snapped
-                );
-            }
         }
     }
+
+    /// Bounded resources and leak floors. Currently a placeholder hook;
+    /// queue caps live here once added.
+    pub fn assert_resource_invariants(&self) {}
 
     pub fn feed<I>(&mut self, events: I)
     where
