@@ -71,7 +71,12 @@ Smallest possible PR per injection. Tests prove behavior unchanged.
 - [ ] `Scenario { initial: InitialState, events: Vec<SourceEvent>, responses: Vec<EffectResponse> }` with serde.
 - [ ] JSON for archives, postcard for the libFuzzer corpus; converter both ways.
 - [ ] `fuzz/` crate with `cargo-fuzz`. Target generates `Scenario` via `Arbitrary`, runs `step()` in a loop, asserts invariants.
-- [ ] Invariants: cursor on UTF-8 boundary, cursor in `0..=source.len()`, viewport bounds, grid width×height, wide-char continuation, undo cap, picker index in range. Step budget per event (default 1000).
+- [ ] State invariants: cursor on UTF-8 boundary, cursor in `0..=source.len()`, viewport bounds, grid width×height, wide-char continuation, undo cap, picker index in range. Step budget per event (default 1000).
+- [ ] Resource invariants — fail the scenario when smelt misbehaves at the allocator level, not just at the state level:
+  - Per-event allocation budget. Use a custom global allocator (e.g. `cap` or a hand-rolled wrapper around `System`) that tracks `alloc_count` and `bytes_in_use` on TLS. `step()` snapshots both before and after each `SourceEvent`; the harness fails the scenario when `Δ alloc_count` or `Δ bytes_in_use` exceeds a tunable cap (default: `Δ alloc_count ≤ 10_000` per event, `Δ bytes_in_use ≤ 4 MiB`). The cap is generous enough not to flag normal large-paste cases but catches per-keystroke unbounded growth.
+  - Steady-state leak detector. Track `bytes_in_use` and `alloc_count` after each scenario completes, with two checks: (1) running-max bytes within a scenario must not exceed `MAX_RSS_BUDGET` (default: 64 MiB); (2) across `N` repeated identical scenarios (default `N=5`), peak `bytes_in_use` must not grow monotonically — a strict-monotone increase of more than 5% scenario-over-scenario is a leak signal. Static interners (`HlGroupRegistry`, `NamespaceRegistry`) need `reset_for_test` hooks called between scenarios for this to be sound (already shipped per PR #3).
+  - Static-state leak invariant. Snapshot `theme::HlGroupRegistry::len()` and `buffer::NamespaceRegistry::len()` before scenario `N=1` and after `N=5`; assert delta is zero. Same for the `NEXT_*` atomic counters listed in the Phase 0 audit.
+  - Honor the libFuzzer `-rss_limit_mb` flag so the harness fails fast on raw RSS blow-ups in addition to our own counters.
 - [ ] Seed corpus from existing storybook stories.
 
 ### Phase 6 — Replay binary
@@ -110,6 +115,7 @@ Smallest possible PR per injection. Tests prove behavior unchanged.
 | 4-yank | `buffer::KillRing::mark_yanked` + `edit::VimContext` + `edit::Window::handle_key`/`EventCtx` + tui `display_selection_range` thread `now: Instant` end-to-end so yank-flash window observes the host clock | ☑ |
 | 4-frame | tui `app.rs` per-frame `last_frame` + `yank_flash_active` read from `core.clock` | ☑ |
 | 4-click | `edit::Ui::resolve_split_mouse` / `record_click` take `now: Instant`; tui mouse handler feeds `core.clock` so double-click counting is deterministic | ☑ |
+| 4-harness | End-to-end harness tests proving clock plumbing via `Tick`: `vim_yy_yank_flash_expires_after_tick` (kill-ring chain), `ctrl_w_pane_chord_expires_after_tick_past_window` (pane chord), `record_click_resets_after_400ms_gap` (double-click gap) | ☑ |
 | 4-tail | Cosmetic-only `Instant::now()` left in prod: `edit::lib.rs:810` (`drag_autoscroll_since` ramp), `tui/input/mod.rs::ESC chord` ramp timestamps. No state decision depends on them — defer | ◐ low |
 | 4-defer | Deferred to Effects (Phase 3) — these guard real I/O, never run in sim: `grep.rs` rg subprocess deadline, `process.rs::Output::run` blocking deadline, `log::entry`, `pricing::now_secs`, `messages.rs` ts, `session.rs::now_ms`, `http/cache.rs`, `provider/mod.rs::unix_now`, content `EPOCH` `OnceLock`, OAuth tokio deadlines | ☐ |
 | 5 | `RuntimeEnv` (env+cwd+pid+home snapshot) | ☐ |
