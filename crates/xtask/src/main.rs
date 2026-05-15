@@ -1,5 +1,6 @@
 //! Dev tooling. Invoke as `cargo xtask <command>` (see `.cargo/config.toml`).
 
+mod fuzz;
 mod gen_lua_docs;
 mod synth;
 
@@ -9,6 +10,7 @@ fn main() {
     match cmd.as_deref() {
         Some("gen-lua-docs") => gen_lua_docs::run(),
         Some("synth") => synth::run(),
+        Some("fuzz") => fuzz::run(args.collect()),
         Some(other) => {
             eprintln!("xtask: unknown command `{other}`");
             print_usage();
@@ -27,4 +29,5 @@ fn print_usage() {
     eprintln!("commands:");
     eprintln!("  gen-lua-docs   regenerate Lua API stubs + reference docs");
     eprintln!("  synth          generate a synthetic session for perf testing");
+    eprintln!("  fuzz [secs]    unpack corpus → fuzz → cmin → repack (default 300s)");
 }

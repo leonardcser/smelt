@@ -19,10 +19,11 @@ tar -czf seed_corpus.tar.gz seed_corpus
 ## Commands
 
 ```bash
-# Fuzz (seeds from seed_corpus/smelt_loop/)
-cargo +nightly fuzz run smelt_loop -- -max_len=4096 -max_total_time=300
+# Full local cycle: unpack → fuzz → cmin → repack tarball (default 300s)
+cargo xtask fuzz [seconds]
 
-# Minimize the corpus after a run
+# Lower-level pieces:
+cargo +nightly fuzz run smelt_loop -- -max_len=4096 -max_total_time=300
 cargo +nightly fuzz cmin smelt_loop seed_corpus/smelt_loop
 
 # Crash → JSON
@@ -36,9 +37,3 @@ cargo run --bin play_scenario -- examples/hello_agent.json
 ```
 
 `play_scenario` controls: `space`/`→` next, `b`/`←` back, `r` reset, `s` state dump, `q`/`Esc` quit.
-
-## CI
-
-A nightly GitHub Actions job (`.github/workflows/fuzz.yml`) runs `smelt_loop`
-for 10 minutes against the committed corpus. PRs touching `crates/**` or
-`fuzz/**` trigger the same job. Failures upload crash artifacts to the run.
