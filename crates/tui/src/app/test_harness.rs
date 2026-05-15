@@ -27,17 +27,7 @@ use std::time::{Duration, Instant, SystemTime};
 use tempfile::TempDir;
 use tokio::sync::mpsc;
 
-/// One unit of input to the TestApp loop.
-#[derive(Debug, Clone)]
-pub(crate) enum SourceEvent {
-    Term(Event),
-    Engine(EngineEvent),
-    /// Advance the harness `VirtualClock` by N milliseconds. Sites that
-    /// already read time through `Core::clock` see the bump immediately;
-    /// remaining `Instant::now()` callers are migrated incrementally by
-    /// `FUZZING_PLAN.md` Phase 1.
-    Tick(u64),
-}
+pub(crate) use crate::event_source::SourceEvent;
 
 /// One observed out-bound effect of a `SourceEvent`.
 #[derive(Debug, Clone)]
@@ -268,6 +258,23 @@ impl TestApp {
                 }
                 SourceEvent::Tick(ms) => {
                     self.clock.advance(Duration::from_millis(ms));
+                }
+                SourceEvent::LuaWakeup => {
+                    self.app.flush_lua_callbacks();
+                    self.app.drive_lua_tasks();
+                }
+                SourceEvent::ExecOutput(line) => {
+                    self.app.append_exec_output(&line);
+                }
+                SourceEvent::ExecDone(code) => {
+                    self.app.finish_exec(code);
+                    self.app.finalize_exec();
+                    self.app.exec = None;
+                }
+                SourceEvent::Resize => {
+                    let w = self.app.last_width;
+                    let h = self.app.last_height;
+                    self.app.handle_resize(w, h);
                 }
             }
         }

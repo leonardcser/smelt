@@ -50,9 +50,9 @@ Smallest possible PR per injection. Tests prove behavior unchanged.
 
 ### Phase 2 — Event unification
 
-- [ ] `SourceEvent` enum covering: `Term`, `Engine`, `Lua`, `Exec`, `Tick`, `Signal`.
-- [ ] `EventSource` trait. Prod impl wraps current `tokio::select!`; sim impl iterates a `Vec`.
-- [ ] Funnel current event loop through `EventSource::next()` (no behavior change).
+- [x] `SourceEvent` enum covering `Term`, `Engine`, `LuaWakeup`, `ExecOutput`, `ExecDone`, `Tick`, `Resize`. Lives in `tui::event_source`; the harness re-exports it so production and tests share one shape.
+- [x] `EventSource` trait + `ScriptedSource` impl (scripted-vec driver) for tests / replay binary.
+- [ ] Funnel the production main loop through `EventSource::next()`. The current `tokio::select!` in `tui/src/app.rs` produces and immediately consumes each arm inline; the migration is to lift each arm into a `SourceEvent` emit, drop a single `dispatch(event)` step at the bottom, and have prod's `LiveSource` wrap the existing `select!`. Behavior-preserving; touches the main loop and is risky enough to land as its own PR.
 
 ### Phase 3 — Effect indirection
 

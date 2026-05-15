@@ -11,6 +11,7 @@ pub mod app;
 pub(crate) mod commands;
 pub(crate) mod completer;
 pub(crate) mod content;
+pub mod event_source;
 pub(crate) mod format;
 pub use smelt_core::fuzzy;
 pub mod instructions;
