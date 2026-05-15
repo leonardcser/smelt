@@ -8,6 +8,7 @@ pub mod kill_ring;
 pub mod text;
 pub mod undo;
 pub mod wrap;
+pub mod wrap_layout;
 
 pub use attachment::ATTACHMENT_MARKER;
 pub use clipboard::{Clipboard, NullSink, Osc52Sink, Sink, SystemSink};

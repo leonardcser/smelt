@@ -782,22 +782,10 @@ impl Buffer {
                 .canonical_lines
                 .clone()
                 .unwrap_or_else(|| Arc::clone(&self.lines));
-            let mut wrapped: Vec<String> = Vec::with_capacity(canonical.len());
-            for line in canonical.iter() {
-                if line.is_empty() {
-                    wrapped.push(String::new());
-                } else {
-                    for chunk in crate::wrap::wrap_line(line, width as usize) {
-                        wrapped.push(chunk);
-                    }
-                }
-            }
-            if wrapped.is_empty() {
-                wrapped.push(String::new());
-            }
-            // Write directly: the wrap output is a re-render of `canonical_lines`,
-            // not new user-authored content. Going back through `set_all_lines`
-            // would re-snapshot the wrapped output as the new canonical source.
+            let layout = crate::wrap_layout::WrappedLayout::from_lines(&canonical, width, true);
+            let wrapped: Vec<String> = layout.visual_lines(&canonical).map(String::from).collect();
+            // Direct write: the wrapped output is a re-render of `canonical_lines`,
+            // not new content — going through `set_all_lines` would re-snapshot it.
             self.lines = Arc::new(wrapped);
             for ns in [self.ns_highlights, self.ns_decorations, self.ns_virt_text] {
                 self.extmarks.clear_namespace(ns, 0, usize::MAX);
