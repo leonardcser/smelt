@@ -8,7 +8,7 @@ use arbitrary::Arbitrary;
 use crossterm::event::{
     Event as TermEvent, KeyCode, KeyEvent, KeyEventKind, KeyEventState, KeyModifiers,
 };
-use protocol::{AgentMode, Content, EngineEvent, Message, ToolOutcome};
+use protocol::{AgentMode, Content, EngineEvent, Message, TokenUsage, ToolOutcome};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use tui::app::test_harness::{AllocBudget, SourceEvent};
@@ -87,6 +87,21 @@ pub enum FuzzOp {
     EngineSteered {
         text: String,
         count: u8,
+    },
+    /// Emit `Retrying { delay_ms, attempt }`. Active-turn dispatch puts
+    /// the working bar into `TurnPhase::Retrying`.
+    EngineRetrying {
+        delay_ms: u16,
+        attempt: u8,
+    },
+    /// Emit `TokenUsage`. Active-turn dispatch accumulates cost, updates
+    /// `context_tokens`, and re-enters `TurnPhase::Working`.
+    EngineTokenUsage {
+        prompt: u16,
+        completion: u16,
+        tps: u16,
+        cost_cents: u8,
+        background: bool,
     },
     /// Side channel: push a synthetic entry onto `queued_messages` so
     /// `Steered` has something to drain.
@@ -201,6 +216,9 @@ struct Snapshot {
     compact_epoch_match: bool,
     snapshot_counts: (usize, usize, usize),
     queued_messages: usize,
+    working: tui::app::test_harness::WorkingSnapshot,
+    session_cost_usd: f64,
+    context_tokens: Option<u32>,
 }
 
 impl Snapshot {
@@ -213,6 +231,9 @@ impl Snapshot {
             compact_epoch_match: app.compact_epoch_match(),
             snapshot_counts: app.snapshot_counts(),
             queued_messages: app.queued_message_count(),
+            working: app.working_state(),
+            session_cost_usd: app.session_cost_usd(),
+            context_tokens: app.context_tokens(),
         }
     }
 }
@@ -254,6 +275,16 @@ enum PostCheck {
     /// `Steered`. Active-turn dispatch flushes streams and drains up to
     /// `count` queued messages.
     Steered { count: usize },
+    /// `Retrying`. Active-turn dispatch moves working into `Retrying`
+    /// phase (still animating).
+    Retrying,
+    /// `TokenUsage`. Accumulates cost monotonically and (when non-background
+    /// and prompt > 0) updates `context_tokens`.
+    TokenUsageReceived {
+        prompt: u32,
+        cost_usd: f64,
+        background: bool,
+    },
 }
 
 fn run_check(check: PostCheck, pre: &Snapshot, post: &Snapshot) {
@@ -355,6 +386,45 @@ fn run_check(check: PostCheck, pre: &Snapshot, post: &Snapshot) {
                 );
             }
         }
+        PostCheck::TokenUsageReceived {
+            prompt,
+            cost_usd,
+            background,
+        } => {
+            // Idle dispatch drops TokenUsage entirely (falls through to
+            // the `_ => {}` arm); only the active-turn path mutates
+            // session state.
+            if pre.agent_running {
+                let expected = pre.session_cost_usd + cost_usd;
+                assert!(
+                    (post.session_cost_usd - expected).abs() < 1e-6,
+                    "TokenUsage did not add cost {cost_usd}: pre {} → post {} (expected {expected})",
+                    pre.session_cost_usd,
+                    post.session_cost_usd,
+                );
+                if !background && prompt > 0 {
+                    assert_eq!(
+                        post.context_tokens,
+                        Some(prompt),
+                        "TokenUsage(prompt={prompt}, background=false) did not set context_tokens",
+                    );
+                }
+            } else {
+                assert_eq!(
+                    post.session_cost_usd, pre.session_cost_usd,
+                    "TokenUsage in idle dispatch should not accumulate cost",
+                );
+            }
+        }
+        PostCheck::Retrying => {
+            if pre.agent_running {
+                assert!(
+                    post.working.animating,
+                    "Retrying on active turn left working idle: {:?}",
+                    post.working
+                );
+            }
+        }
         PostCheck::Steered { count } => {
             // Idle dispatch is a no-op for Steered; only enforce on active.
             if pre.agent_running {
@@ -391,6 +461,12 @@ fn run_check(check: PostCheck, pre: &Snapshot, post: &Snapshot) {
                     (0, 0, 0),
                     "CompactionComplete did not clear snapshot vectors: {:?}",
                     post.snapshot_counts,
+                );
+                // apply_compaction calls working.finish(Done): live → None.
+                assert!(
+                    !post.working.compacting,
+                    "CompactionComplete left working in compacting phase: {:?}",
+                    post.working,
                 );
             }
         }
@@ -511,6 +587,45 @@ fn plan(op: FuzzOp) -> (Option<SourceEvent>, PostCheck) {
             let n = usize::from(count);
             let ev = SourceEvent::Engine(EngineEvent::Steered { text, count: n });
             (Some(ev), PostCheck::Steered { count: n })
+        }
+        FuzzOp::EngineRetrying { delay_ms, attempt } => {
+            let ev = SourceEvent::Engine(EngineEvent::Retrying {
+                delay_ms: u64::from(delay_ms),
+                attempt: u32::from(attempt),
+            });
+            (Some(ev), PostCheck::Retrying)
+        }
+        FuzzOp::EngineTokenUsage {
+            prompt,
+            completion,
+            tps,
+            cost_cents,
+            background,
+        } => {
+            let prompt = u32::from(prompt);
+            let completion = u32::from(completion);
+            let cost_usd = f64::from(cost_cents) / 100.0;
+            let usage = TokenUsage {
+                prompt_tokens: Some(prompt),
+                completion_tokens: Some(completion),
+                cache_read_tokens: None,
+                cache_write_tokens: None,
+                reasoning_tokens: None,
+            };
+            let ev = SourceEvent::Engine(EngineEvent::TokenUsage {
+                usage,
+                tokens_per_sec: Some(f64::from(tps)),
+                cost_usd: Some(cost_usd),
+                background,
+            });
+            (
+                Some(ev),
+                PostCheck::TokenUsageReceived {
+                    prompt,
+                    cost_usd,
+                    background,
+                },
+            )
         }
         FuzzOp::PushQueuedMessage(_) => {
             unreachable!("PushQueuedMessage handled inline in apply()")

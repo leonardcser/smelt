@@ -57,6 +57,15 @@ pub struct StreamingState {
     pub exec: bool,
 }
 
+/// Snapshot of `WorkingState`. `animating` means a live turn exists;
+/// `compacting` is true iff the live phase is `Compacting`. The two are
+/// always either both `false` or `animating == true` with one phase flag.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct WorkingSnapshot {
+    pub animating: bool,
+    pub compacting: bool,
+}
+
 /// Per-event allocation delta captured by `TestApp::feed_one`. Snapshots
 /// `(alloc_count, alloc_bytes_grown)` for the calling thread before and after
 /// the event runs and stores the difference. Per-thread TLS counters mean
@@ -406,6 +415,28 @@ impl TestApp {
     /// turn is active; the harness short-circuits that flow.
     pub fn push_queued_message(&mut self, text: String) {
         self.app.queued_messages.push(text);
+    }
+
+    /// Snapshot of the working-status bar's live state. Used by fuzz
+    /// invariants that assert phase transitions (e.g. compaction ends with
+    /// `animating == false`, `Retrying` event leaves `animating == true`).
+    pub fn working_state(&self) -> WorkingSnapshot {
+        WorkingSnapshot {
+            animating: self.app.working.is_animating(),
+            compacting: self.app.working.is_compacting(),
+        }
+    }
+
+    /// Accumulated session cost in USD. Used by `TokenUsage` invariants
+    /// asserting cost is monotonically non-decreasing.
+    pub fn session_cost_usd(&self) -> f64 {
+        self.app.core.session.session_cost_usd
+    }
+
+    /// Current context-tokens estimate, when a non-background usage report
+    /// has set it.
+    pub fn context_tokens(&self) -> Option<u32> {
+        self.app.core.session.context_tokens
     }
 
     /// Render one frame to real stdout. Drives the same compositor
