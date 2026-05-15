@@ -1177,18 +1177,17 @@ impl Window {
             &fallback_layout
         };
         let line_count = layout.visual_count();
-        // `cursor_line_highlight` paints `CursorLine` bg under the cursor row.
-        // During an active mouse drag-select the rendered row tracks `drag_endpoint`
-        // so the user sees the highlight slide with the cursor; otherwise it sits at
-        // `cursor_row`. Off-screen → no highlight row.
-        let cursor_screen_row = if self.cursor_line_highlight {
+        // Screen row of the cursor (or drag endpoint mid-gesture). Drives the
+        // `CursorLine` bg fill below when `cursor_line_highlight` is on, and
+        // gates `on_cursor_row` extmark painting regardless of that flag so
+        // selection-aware spans always work.
+        let cursor_screen_row = {
             let effective_row = self.effective_cursor_row(buf);
             effective_row
                 .checked_sub(self.scroll_top)
                 .filter(|rel| *rel < height)
-        } else {
-            None
         };
+        let fill_cursor_row = self.cursor_line_highlight;
         let normal_style = ctx.theme.get("Normal");
         let cursor_style = ctx.theme.get("CursorLine");
         let visual_style = ctx.theme.get("Visual");
@@ -1226,7 +1225,7 @@ impl Window {
                 0
             };
             let decoration = logical.map(|_| buf.decoration_at(logical_row));
-            let mut row_style = if cursor_screen_row == Some(row) {
+            let mut row_style = if fill_cursor_row && cursor_screen_row == Some(row) {
                 cursor_style
             } else {
                 normal_style
