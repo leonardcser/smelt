@@ -8,7 +8,7 @@ use arbitrary::Arbitrary;
 use crossterm::event::{
     Event as TermEvent, KeyCode, KeyEvent, KeyEventKind, KeyEventState, KeyModifiers,
 };
-use protocol::{AgentMode, EngineEvent, ToolOutcome};
+use protocol::{AgentMode, Content, EngineEvent, Message, ToolOutcome};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use tui::app::test_harness::{AllocBudget, SourceEvent};
@@ -62,6 +62,17 @@ pub enum FuzzOp {
     },
     ExecOutput(String),
     ExecDone(Option<i32>),
+
+    /// Side channel: prime the compact epoch so the next
+    /// `CompactionComplete` is treated as fresh (apply path) rather than
+    /// stale (fast-finish path). Mirrors what a real `compact_history`
+    /// call does, without engaging the engine.
+    BeginCompaction,
+    /// Synthesize a `CompactionComplete` carrying `msg_count` user/
+    /// assistant messages. Empty payload exercises the early-return arm.
+    EngineCompactionComplete {
+        msg_count: u8,
+    },
 }
 
 #[derive(Arbitrary, Debug, Clone, Copy, Serialize, Deserialize)]
@@ -144,6 +155,23 @@ fn call_id_string(id: u8) -> String {
     format!("call-{id:02x}")
 }
 
+/// Synthesize a deterministic, lightweight message vector for compaction
+/// payloads. Alternating user/assistant content keeps the rebuild-screen
+/// path through `restore_screen` honest without coupling to engine
+/// internals.
+fn synth_messages(count: usize) -> Vec<Message> {
+    (0..count)
+        .map(|i| {
+            let body = format!("compacted-{i}");
+            if i % 2 == 0 {
+                Message::user(Content::text(body))
+            } else {
+                Message::assistant(Some(Content::text(body)), None, None)
+            }
+        })
+        .collect()
+}
+
 /// Cheap snapshot of state needed by event-specific post-checks. Captured
 /// before dispatch so a `PostCheck` can compare pre/post without re-deriving
 /// what it cares about from scratch.
@@ -151,6 +179,9 @@ struct Snapshot {
     agent_running: bool,
     pending: Vec<String>,
     streaming: tui::app::test_harness::StreamingState,
+    session_messages: usize,
+    compact_epoch_match: bool,
+    snapshot_counts: (usize, usize, usize),
 }
 
 impl Snapshot {
@@ -159,6 +190,9 @@ impl Snapshot {
             agent_running: app.agent_running(),
             pending: app.pending_tool_call_ids(),
             streaming: app.streaming_state(),
+            session_messages: app.session_message_count(),
+            compact_epoch_match: app.compact_epoch_match(),
+            snapshot_counts: app.snapshot_counts(),
         }
     }
 }
@@ -185,6 +219,10 @@ enum PostCheck {
     ToolFinished { call_id: String },
     /// `ExecDone` runs `finalize_exec`, which clears `stream_exec_id`.
     ExecCleared,
+    /// `CompactionComplete` with `msg_count` messages. When the pre-state
+    /// had a matching compact epoch and `msg_count > 0`, the apply path
+    /// must replace `session.messages` and drain all snapshot vectors.
+    CompactionApplied { msg_count: usize },
 }
 
 fn run_check(check: PostCheck, pre: &Snapshot, post: &Snapshot) {
@@ -256,6 +294,26 @@ fn run_check(check: PostCheck, pre: &Snapshot, post: &Snapshot) {
                 "ExecDone left active-exec state: {:?}",
                 post.streaming
             );
+        }
+        PostCheck::CompactionApplied { msg_count } => {
+            // The apply path runs only on epoch match. A non-empty payload
+            // replaces the conversation and clears snapshot vectors. Idle
+            // dispatch also routes non-empty payloads through the apply
+            // path, but skip the assertions when we can't tell which arm
+            // ran (e.g. an active turn that wasn't compacting).
+            if pre.compact_epoch_match && msg_count > 0 {
+                assert_eq!(
+                    post.session_messages, msg_count,
+                    "CompactionComplete did not replace session.messages: pre {} → post {} (expected {msg_count})",
+                    pre.session_messages, post.session_messages,
+                );
+                assert_eq!(
+                    post.snapshot_counts,
+                    (0, 0, 0),
+                    "CompactionComplete did not clear snapshot vectors: {:?}",
+                    post.snapshot_counts,
+                );
+            }
         }
     }
 }
@@ -352,6 +410,15 @@ fn plan(op: FuzzOp) -> (Option<SourceEvent>, PostCheck) {
         }
         FuzzOp::ExecOutput(s) => (Some(SourceEvent::ExecOutput(s)), PostCheck::None),
         FuzzOp::ExecDone(code) => (Some(SourceEvent::ExecDone(code)), PostCheck::ExecCleared),
+        // Side-channel: not a SourceEvent.
+        FuzzOp::BeginCompaction => (None, PostCheck::None),
+        FuzzOp::EngineCompactionComplete { msg_count } => {
+            let count = usize::from(msg_count);
+            let ev = SourceEvent::Engine(EngineEvent::CompactionComplete {
+                messages: synth_messages(count),
+            });
+            (Some(ev), PostCheck::CompactionApplied { msg_count: count })
+        }
     }
 }
 
@@ -359,12 +426,19 @@ fn plan(op: FuzzOp) -> (Option<SourceEvent>, PostCheck) {
 /// pre-snapshot → feed event (or side-channel) → post-snapshot → check →
 /// global invariants.
 pub fn apply(app: &mut TestApp, op: FuzzOp) {
-    // `StartTurn` is the one side channel: it pokes the harness directly
-    // instead of going through `feed_one_within_budget`.
-    if let FuzzOp::StartTurn(id) = op {
-        app.start_turn(u64::from(id));
-        app.assert_invariants();
-        return;
+    // Side channels — pokes that bypass `feed_one_within_budget`.
+    match &op {
+        FuzzOp::StartTurn(id) => {
+            app.start_turn(u64::from(*id));
+            app.assert_invariants();
+            return;
+        }
+        FuzzOp::BeginCompaction => {
+            app.begin_compaction();
+            app.assert_invariants();
+            return;
+        }
+        _ => {}
     }
 
     let pre = Snapshot::capture(app);

@@ -356,6 +356,38 @@ impl TestApp {
         }
     }
 
+    /// Length of `session.messages`. Used by post-event invariants that
+    /// assert compaction or `set_history` replaced the conversation.
+    pub fn session_message_count(&self) -> usize {
+        self.app.core.session.messages.len()
+    }
+
+    /// Whether `pending_compact_epoch == compact_epoch`. When true, an
+    /// incoming `CompactionComplete` hits the apply path; when false, it
+    /// hits the stale fast-finish path.
+    pub fn compact_epoch_match(&self) -> bool {
+        self.app.pending_compact_epoch == self.app.compact_epoch
+    }
+
+    /// Counts of token / cost / turn-meta snapshots. Used by compaction
+    /// invariants — `apply_compaction` clears all three when the messages
+    /// payload is non-empty.
+    pub fn snapshot_counts(&self) -> (usize, usize, usize) {
+        let s = &self.app.core.session;
+        (
+            s.token_snapshots.len(),
+            s.cost_snapshots.len(),
+            s.turn_metas.len(),
+        )
+    }
+
+    /// Side-channel: prime the compact epoch so a subsequent
+    /// `CompactionComplete` lands on the apply path. Mirrors what
+    /// `compact_history` does without emitting `UiCommand::Compact`.
+    pub fn begin_compaction(&mut self) {
+        self.app.pending_compact_epoch = self.app.compact_epoch;
+    }
+
     /// Render one frame to real stdout. Drives the same compositor
     /// pipeline production uses (`TuiApp::render_normal`). The caller is
     /// responsible for terminal setup (raw mode, alternate screen).
