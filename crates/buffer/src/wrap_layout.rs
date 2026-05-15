@@ -102,6 +102,38 @@ impl WrappedLayout {
         let chunk_idx = vrow - self.row_starts[crow];
         Some((crow, chunk_idx))
     }
+
+    /// Project a logical `(row, byte_col)` to its visual `(row, byte_col)`. The
+    /// returned column is the byte offset inside the visual row's content (still
+    /// pre-`byte_to_cell`). Out-of-range inputs clamp to the last chunk.
+    pub fn visual_for_logical(&self, crow: usize, byte_col: usize) -> (usize, usize) {
+        let chunks = match self.chunks_per_row.get(crow) {
+            Some(c) if !c.is_empty() => c,
+            _ => return (self.row_starts.get(crow).copied().unwrap_or(0), 0),
+        };
+        for (i, &(s, e)) in chunks.iter().enumerate() {
+            if byte_col < e || (s == e && byte_col == s) {
+                let new_col = byte_col.saturating_sub(s);
+                return (self.row_starts[crow] + i, new_col);
+            }
+        }
+        let last = chunks.len() - 1;
+        let (ls, le) = chunks[last];
+        (self.row_starts[crow] + last, le - ls)
+    }
+
+    /// Project a visual `(row, byte_col_in_visual)` back to a logical
+    /// `(row, byte_col)`. Out-of-range visual row falls back to the buffer's
+    /// last logical row.
+    pub fn logical_for_visual(&self, vrow: usize, byte_col: usize) -> (usize, usize) {
+        let Some((crow, chunk_idx)) = self.logical_at_visual(vrow) else {
+            let last = self.chunks_per_row.len().saturating_sub(1);
+            return (last, 0);
+        };
+        let chunks = &self.chunks_per_row[crow];
+        let (s, _e) = chunks[chunk_idx];
+        (crow, s + byte_col)
+    }
 }
 
 #[cfg(test)]

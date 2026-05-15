@@ -52,9 +52,8 @@ local GUTTER = 1
 function smelt.ui.dialog.input(placeholder)
   local buf = smelt.buf.create()
   smelt.buf.set_lines(buf, { "" })
-  -- Single-line input: wrap=false keeps the buffer's display lines == canonical
-  -- lines, so the dim placeholder highlight isn't clobbered when the wrap path
-  -- re-renders. Highlights also stay anchored to the visible row.
+  -- Single-line input: wrap=false keeps long entries on one row so the caret
+  -- can scroll horizontally instead of jumping to a wrapped continuation.
   local leaf = smelt.win.open(buf, {
     region = REGION, focusable = true, selectable = true,
     pad_left = GUTTER, pad_right = GUTTER, scrollbar = false, wrap = false,
@@ -130,9 +129,9 @@ function smelt.ui.dialog.content(opts)
   end
   local focusable = opts.focusable
   if focusable == nil then focusable = opts.interactive or false end
-  -- `wrap` defaults to true (matches `smelt.win.open`); pass `wrap = false` when
-  -- the buffer was painted with styled highlights (e.g. via `smelt.buf.set_styled_lines`)
-  -- since the wrap pass clears extmarks to avoid stale-position bugs on re-flow.
+  -- `wrap` defaults to true (matches `smelt.win.open`); pass `wrap = false` to
+  -- show pre-styled content (e.g. via `smelt.buf.set_styled_lines`) at its
+  -- intrinsic width without soft-wrapping the row.
   local leaf = smelt.win.open(buf, {
     region      = REGION,
     focusable   = focusable,

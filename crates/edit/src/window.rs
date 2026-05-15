@@ -257,13 +257,13 @@ pub struct Window {
     /// Preferred display column for vertical motion; measured in terminal cells.
     pub curswant: Option<usize>,
     pub scroll_top: u16,
-    /// Display-row index of the cursor in `buf.lines()` (0-based, buffer-absolute).
-    /// Derived from `cpos` via `sync_from_cpos`. Equals the visual row because
-    /// wrap, when needed, is done by the buffer (`Buffer::wrap_mode` /
-    /// parsers) — `buf.lines()` rows already are the visual rows.
+    /// Visual-row index of the cursor (0-based, in the same space as `scroll_top`).
+    /// Derived from `cpos` via `sync_from_cpos`, projected through `self.layout`
+    /// so it tracks visual rows when wrap splits a logical row into multiple
+    /// visual rows.
     pub(crate) cursor_row: u16,
-    /// Cell-column of the cursor within its row in `buf.lines()`. Derived from
-    /// `cpos` via `sync_from_cpos`.
+    /// Cell-column of the cursor within its visual row. Derived from `cpos`
+    /// via `sync_from_cpos`.
     pub(crate) cursor_col: u16,
     /// Keeps viewport snapped to newest row; cleared when the user scrolls away.
     pub follow_tail: bool,
@@ -299,7 +299,9 @@ impl Window {
             buf,
             config,
             gutter: None,
-            wrap: true,
+            // Direct callers (host code, tests) default to no-wrap; the Lua API
+            // overrides this to `true` so end-user content panes wrap by default.
+            wrap: false,
             layout: WrappedLayout::default(),
             layout_key: None,
             focusable: true,
@@ -339,13 +341,80 @@ impl Window {
 
     /// Rebuild `layout` if the buffer's content or width changed. Called by the
     /// host before paint so render and hit-test see a consistent view.
+    /// Parser-driven buffers manage their own wrap, so layout stays identity
+    /// over their lines regardless of `self.wrap`.
     pub fn ensure_layout(&mut self, buf: &Buffer, width: u16) {
-        let key = (buf.changedtick(), width, false);
+        let wrap = self.wrap && !buf.has_parser();
+        let key = (buf.changedtick(), width, wrap);
         if self.layout_key == Some(key) {
             return;
         }
-        self.layout = WrappedLayout::from_lines(buf.lines(), width, false);
+        self.layout = WrappedLayout::from_lines(buf.lines(), width, wrap);
         self.layout_key = Some(key);
+    }
+
+    /// Wrap-flag used when computing `layout` against `buf`. Mirrors the logic
+    /// in `ensure_layout` so render's fallback layout matches.
+    fn layout_wrap(&self, buf: &Buffer) -> bool {
+        self.wrap && !buf.has_parser()
+    }
+
+    /// `true` when `self.layout` is in sync with `buf` (logical row count matches).
+    /// `false` falls back to identity inside `cursor_visual` / `cpos_at_visual` /
+    /// `visual_row_total` so callers that haven't run `ensure_layout` (tests,
+    /// first-frame window setup) still compute correct coordinates.
+    fn layout_matches(&self, buf: &Buffer) -> bool {
+        self.layout.visual_count() > 0 && self.layout.logical_count() == buf.lines().len()
+    }
+
+    /// Total visual rows for scroll/keep-visible math. Falls back to the
+    /// buffer's logical row count when `layout` hasn't been refreshed yet.
+    fn visual_row_total(&self, buf: &Buffer) -> u16 {
+        if self.layout_matches(buf) {
+            self.layout.visual_count() as u16
+        } else {
+            buf.lines().len() as u16
+        }
+    }
+
+    /// Project `cpos` to a visual `(row, cell_col)` through this window's
+    /// layout. Used by cursor sync after navigation/edit so `cursor_row` is in
+    /// the same coordinate space as `scroll_top`.
+    fn cursor_visual(&self, buf: &Buffer, cpos: usize) -> (u16, u16) {
+        let (lrow, byte_col) = buf.display_byte_pos(cpos);
+        if !self.layout_matches(buf) {
+            let line = buf.get_line(lrow).unwrap_or("");
+            let cell_col = smelt_buffer::text::byte_to_cell(line, byte_col);
+            return (lrow as u16, cell_col as u16);
+        }
+        let (vrow, byte_in_chunk) = self.layout.visual_for_logical(lrow, byte_col);
+        let line = self.layout.visual_line(buf.lines(), vrow).unwrap_or("");
+        let cell_col = smelt_buffer::text::byte_to_cell(line, byte_in_chunk);
+        (vrow as u16, cell_col as u16)
+    }
+
+    /// Project a visual `(row, cell_col)` hit to a buffer cpos via the layout.
+    /// Used by mouse hit-test and pan-preserving-cursor.
+    fn cpos_at_visual(&self, buf: &Buffer, vrow: usize, vcell: usize) -> usize {
+        if buf.lines().is_empty() {
+            return 0;
+        }
+        let last_logical = buf.lines().len() - 1;
+        if !self.layout_matches(buf) {
+            let lrow = vrow.min(last_logical);
+            return buf.byte_at_display_pos(lrow, vcell);
+        }
+        let (lrow, chunk_idx) = match self.layout.logical_at_visual(vrow) {
+            Some(p) => p,
+            None => return buf.byte_at_display_pos(last_logical, 0),
+        };
+        let chunks = self.layout.chunks_of(lrow);
+        let Some(&(chunk_start_byte, _)) = chunks.get(chunk_idx) else {
+            return buf.byte_at_display_pos(lrow, 0);
+        };
+        let logical_line = buf.lines().get(lrow).map(String::as_str).unwrap_or("");
+        let chunk_start_cell = smelt_buffer::text::byte_to_cell(logical_line, chunk_start_byte);
+        buf.byte_at_display_pos(lrow, chunk_start_cell + vcell)
     }
 
     /// Read access to the most recent layout. Always populated after the first
@@ -421,9 +490,9 @@ impl Window {
     /// mutation has moved `cpos` but no scroll/recenter decision has been made
     /// yet — it owns its own `keep_cursor_visible` vs `recenter` choice.
     pub fn resync_display_coords(&mut self, buf: &Buffer) {
-        let (row, col) = buf.display_cursor_pos(self.cpos);
-        self.cursor_row = row as u16;
-        self.cursor_col = col as u16;
+        let (row, col) = self.cursor_visual(buf, self.cpos);
+        self.cursor_row = row;
+        self.cursor_col = col;
     }
 
     /// Place the logical cursor at line `row`, column 0, writing `cpos` so all
@@ -608,7 +677,7 @@ impl Window {
     // ── Navigation ─────────────────────────────────────────────────────
 
     pub fn compute_cpos(&self, buf: &Buffer) -> usize {
-        buf.byte_at_display_pos(self.cursor_row as usize, self.cursor_col as usize)
+        self.cpos_at_visual(buf, self.cursor_row as usize, self.cursor_col as usize)
     }
 
     /// Byte to use as the selection/cursor endpoint. Returns `drag_endpoint` if an
@@ -625,7 +694,7 @@ impl Window {
     /// drag is in flight.
     pub fn effective_cursor_row(&self, buf: &Buffer) -> u16 {
         match self.drag_endpoint {
-            Some(end) => buf.display_cursor_pos(end).0 as u16,
+            Some(end) => self.cursor_visual(buf, end).0,
             None => self.cursor_row,
         }
     }
@@ -652,10 +721,10 @@ impl Window {
     }
 
     fn sync_from_cpos(&mut self, buf: &Buffer, viewport_rows: u16) {
-        let (row, col) = buf.display_cursor_pos(self.cpos);
-        self.cursor_row = row as u16;
-        self.cursor_col = col as u16;
-        let total_rows = buf.lines().len() as u16;
+        let (row, col) = self.cursor_visual(buf, self.cpos);
+        self.cursor_row = row;
+        self.cursor_col = col;
+        let total_rows = self.visual_row_total(buf);
         self.keep_cursor_visible(self.cursor_row, total_rows, viewport_rows);
     }
 
@@ -732,14 +801,14 @@ impl Window {
         let rel_col = viewport_rel_col
             .saturating_sub(ctx.viewport.gutter_width)
             .saturating_sub(self.config.gutters.pad_left);
-        let rows = buf.lines();
-        if rows.is_empty() {
+        if buf.lines().is_empty() {
             return Status::Consumed;
         }
 
         let viewport_rows = ctx.viewport.rect.height;
-        let line_idx = (self.scroll_top as usize + rel_row as usize).min(rows.len() - 1);
-        let click_byte = buf.byte_at_display_pos(line_idx, rel_col as usize);
+        let visual_total = (self.visual_row_total(buf) as usize).max(1);
+        let vrow = (self.scroll_top as usize + rel_row as usize).min(visual_total - 1);
+        let click_byte = self.cpos_at_visual(buf, vrow, rel_col as usize);
         // All leaves stage the click into `drag_endpoint`; `cpos` is committed on Up
         // only for caret-bearing leaves (see `is_caret_leaf`). Readers route through
         // `effective_endpoint` so the cursor and selection track the drag without
@@ -791,8 +860,7 @@ impl Window {
         text: &str,
     ) -> Status {
         let viewport_rows = ctx.viewport.rect.height;
-        let rows = buf.lines();
-        if viewport_rows == 0 || rows.is_empty() {
+        if viewport_rows == 0 || buf.lines().is_empty() {
             return Status::Consumed;
         }
         let rel_row = event
@@ -805,8 +873,9 @@ impl Window {
             .saturating_sub(ctx.viewport.gutter_width)
             .saturating_sub(self.config.gutters.pad_left)
             .min(ctx.viewport.content_width.saturating_sub(1));
-        let line_idx = (self.scroll_top as usize + rel_row as usize).min(rows.len() - 1);
-        let drag_byte = buf.byte_at_display_pos(line_idx, rel_col as usize);
+        let visual_total = (self.visual_row_total(buf) as usize).max(1);
+        let vrow = (self.scroll_top as usize + rel_row as usize).min(visual_total - 1);
+        let drag_byte = self.cpos_at_visual(buf, vrow, rel_col as usize);
         self.drag_endpoint = Some(drag_byte);
 
         if self.drag_anchor_word.is_some() {
@@ -986,10 +1055,13 @@ impl Window {
         if !buf.readonly {
             buf.sync_after_edit(width);
         }
-        let (row, col) = buf.display_cursor_pos(self.cpos);
-        self.cursor_row = row as u16;
-        self.cursor_col = col as u16;
-        let total_rows = buf.lines().len() as u16;
+        // Refresh layout for the possibly-mutated buffer so cursor projection
+        // uses the post-edit chunk map.
+        self.ensure_layout(buf, width);
+        let (row, col) = self.cursor_visual(buf, self.cpos);
+        self.cursor_row = row;
+        self.cursor_col = col;
+        let total_rows = self.visual_row_total(buf);
         self.keep_cursor_visible(self.cursor_row, total_rows, viewport_rows);
         Status::Consumed
     }
@@ -997,8 +1069,7 @@ impl Window {
     /// Cursor-led vertical motion: move `cpos` by `delta` rows; viewport pans only
     /// when the cursor would otherwise leave it. Used by j/k, arrow keys, Ctrl-U/D.
     pub fn move_cursor_by_lines(&mut self, buf: &Buffer, delta: isize, viewport_rows: u16) {
-        let rows = buf.lines();
-        if rows.is_empty() || viewport_rows == 0 || delta == 0 {
+        if buf.lines().is_empty() || viewport_rows == 0 || delta == 0 {
             return;
         }
         let text = buf.text();
@@ -1009,7 +1080,7 @@ impl Window {
             self.vim_state.set_mode(&mut self.vim_mode, VimMode::Normal);
         }
         self.sync_from_cpos(buf, viewport_rows);
-        let max_scroll = (rows.len() as u16).saturating_sub(viewport_rows);
+        let max_scroll = (self.visual_row_total(buf)).saturating_sub(viewport_rows);
         self.follow_tail = self.scroll_top >= max_scroll;
     }
 
@@ -1018,7 +1089,7 @@ impl Window {
     /// buffer row changes to whatever row is now under that screen cell.
     /// To move the cursor first and reveal it afterward, use `move_cursor_by_lines`.
     pub fn pan_by_lines(&mut self, buf: &Buffer, delta: isize, viewport_rows: u16) {
-        let total = buf.lines().len() as u16;
+        let total = self.visual_row_total(buf);
         if total == 0 || viewport_rows == 0 || delta == 0 {
             return;
         }
@@ -1036,12 +1107,11 @@ impl Window {
         buf: &Buffer,
         viewport_rows: u16,
     ) {
-        let rows = buf.lines();
-        if rows.is_empty() || viewport_rows == 0 {
+        let total_visual = self.visual_row_total(buf);
+        if total_visual == 0 || viewport_rows == 0 {
             return;
         }
-        let total = rows.len() as u16;
-        let max_scroll = total.saturating_sub(viewport_rows);
+        let max_scroll = total_visual.saturating_sub(viewport_rows);
         let cur_scroll = self.scroll_top.min(max_scroll);
 
         let screen_row = self
@@ -1059,13 +1129,12 @@ impl Window {
             self.follow_tail = new_scroll >= max_scroll;
             return;
         }
-        let target_line =
-            (new_scroll as usize + screen_row as usize).min(rows.len().saturating_sub(1));
+        let target_vrow = (new_scroll + screen_row).min(total_visual.saturating_sub(1)) as usize;
         let want = self.curswant.unwrap_or(self.cursor_col as usize);
-        self.cpos = buf.byte_at_display_pos(target_line, want);
-        let (row, col) = buf.display_cursor_pos(self.cpos);
-        self.cursor_row = row as u16;
-        self.cursor_col = col as u16;
+        self.cpos = self.cpos_at_visual(buf, target_vrow, want);
+        let (row, col) = self.cursor_visual(buf, self.cpos);
+        self.cursor_row = row;
+        self.cursor_col = col;
         self.curswant = Some(want);
         self.scroll_top = new_scroll;
         self.follow_tail = new_scroll >= max_scroll;
@@ -1081,7 +1150,7 @@ impl Window {
         let landed_col = buf.display_cursor_pos(self.cpos).1;
         self.curswant = Some(landed_col);
         self.sync_from_cpos(buf, viewport_rows);
-        let max_scroll = (rows.len() as u16).saturating_sub(viewport_rows);
+        let max_scroll = (self.visual_row_total(buf)).saturating_sub(viewport_rows);
         self.follow_tail = self.scroll_top >= max_scroll;
     }
 
@@ -1107,11 +1176,12 @@ impl Window {
         // The host's prep pass refreshes the layout before paint. Tests that
         // skip the prep pass build a one-shot fallback so render stays correct
         // without requiring &mut self.
+        let wrap = self.layout_wrap(buf);
         let fallback_layout;
-        let layout = if self.layout_key == Some((buf.changedtick(), content_width, false)) {
+        let layout = if self.layout_key == Some((buf.changedtick(), content_width, wrap)) {
             &self.layout
         } else {
-            fallback_layout = WrappedLayout::from_lines(buf.lines(), content_width, false);
+            fallback_layout = WrappedLayout::from_lines(buf.lines(), content_width, wrap);
             &fallback_layout
         };
         let line_count = layout.visual_count();
@@ -1146,8 +1216,24 @@ impl Window {
         let mut vt_buf: Vec<smelt_buffer::buffer::VirtualText> = Vec::new();
         let mut mask_buf: Vec<bool> = Vec::with_capacity(content_width as usize);
         for row in 0..height {
-            let line_idx = scroll + row as usize;
-            let decoration = (line_idx < line_count).then(|| buf.decoration_at(line_idx));
+            let visual_row = scroll + row as usize;
+            // Map visual → logical for extmark lookup. `chunk_cell_offset` is how
+            // many cells the preceding chunks of this logical line occupy; spans
+            // and selections (stored in logical-line cells) shift by `-offset`
+            // to land in this chunk's cell space.
+            let logical = (visual_row < line_count)
+                .then(|| layout.logical_at_visual(visual_row))
+                .flatten();
+            let (logical_row, chunk_idx) = logical.unwrap_or((0, 0));
+            let chunk_cell_offset: u16 = if logical.is_some() && chunk_idx > 0 {
+                let logical_line = buf.get_line(logical_row).unwrap_or("");
+                let chunks = layout.chunks_of(logical_row);
+                let (cs, _) = chunks[chunk_idx];
+                smelt_buffer::text::byte_to_cell(logical_line, cs) as u16
+            } else {
+                0
+            };
+            let decoration = logical.map(|_| buf.decoration_at(logical_row));
             let mut row_style = if cursor_screen_row == Some(row) {
                 cursor_style
             } else {
@@ -1168,9 +1254,13 @@ impl Window {
             }
             if let Some(provider) = self.gutter.as_ref() {
                 if gutter_width > 0 {
-                    let cell = (line_idx < line_count)
-                        .then(|| provider.cell(buf, &ctx.theme, line_idx))
-                        .flatten();
+                    // Continuation chunks (`chunk_idx > 0`) leave the gutter blank
+                    // so a wrapped logical line doesn't repeat its line number.
+                    let cell = if logical.is_some() && chunk_idx == 0 {
+                        provider.cell(buf, &ctx.theme, logical_row)
+                    } else {
+                        None
+                    };
                     if let Some(g) = cell {
                         let style = merge_styles(row_style, g.style);
                         let mut c: u16 = 0;
@@ -1189,7 +1279,7 @@ impl Window {
                     }
                 }
             }
-            let Some(line) = layout.visual_line(buf.lines(), line_idx) else {
+            let Some(line) = layout.visual_line(buf.lines(), visual_row) else {
                 continue;
             };
             col_to_char.clear();
@@ -1210,7 +1300,9 @@ impl Window {
             }
             let content_end_col = col;
             spans_buf.clear();
-            buf.highlights_at_into(line_idx, &mut spans_buf);
+            if logical.is_some() {
+                buf.highlights_at_into(logical_row, &mut spans_buf);
+            }
             let is_cursor_row = cursor_screen_row == Some(row);
             for span in &spans_buf {
                 if span.on_cursor_row && !is_cursor_row {
@@ -1218,8 +1310,14 @@ impl Window {
                 }
                 let span_style = ctx.theme.resolve(span.hl);
                 let style = merge_span_style(row_style, &span_style);
-                let start = span.col_start.min(content_width);
-                let end = span.col_end.min(content_width);
+                let start = span
+                    .col_start
+                    .saturating_sub(chunk_cell_offset)
+                    .min(content_width);
+                let end = span
+                    .col_end
+                    .saturating_sub(chunk_cell_offset)
+                    .min(content_width);
                 if end > start {
                     paint_span_cells(
                         slice,
@@ -1242,42 +1340,60 @@ impl Window {
             // Selection painting: after highlights (wins over base) but before virt-text.
             // Cells under `selectable = false` spans are skipped so chrome spans don't
             // receive the Visual bg. `spans_buf` is reused from the highlight pass above.
-            let mask_slice: Option<&[bool]> = if selection_ranges.iter().any(|r| r.line == line_idx)
-                && spans_buf.iter().any(|s| !s.meta.selectable)
-            {
-                mask_buf.clear();
-                mask_buf.resize(content_width as usize, true);
-                for span in spans_buf.iter().filter(|s| !s.meta.selectable) {
-                    let start = span.col_start.min(content_width) as usize;
-                    let end = span.col_end.min(content_width) as usize;
-                    for slot in mask_buf.iter_mut().take(end).skip(start) {
-                        *slot = false;
+            let line_has_selection = selection_ranges.iter().any(|r| r.line == logical_row);
+            let mask_slice: Option<&[bool]> =
+                if line_has_selection && spans_buf.iter().any(|s| !s.meta.selectable) {
+                    mask_buf.clear();
+                    mask_buf.resize(content_width as usize, true);
+                    for span in spans_buf.iter().filter(|s| !s.meta.selectable) {
+                        let start = span
+                            .col_start
+                            .saturating_sub(chunk_cell_offset)
+                            .min(content_width) as usize;
+                        let end = span
+                            .col_end
+                            .saturating_sub(chunk_cell_offset)
+                            .min(content_width) as usize;
+                        for slot in mask_buf.iter_mut().take(end).skip(start) {
+                            *slot = false;
+                        }
                     }
-                }
-                Some(mask_buf.as_slice())
-            } else {
-                None
-            };
-            for r in selection_ranges.iter().filter(|r| r.line == line_idx) {
-                let style = merge_span_style(row_style, &visual_style);
-                let start = r.col_start.min(content_width);
-                let end = r.col_end.min(content_width);
-                if end > start {
-                    paint_span_cells(
-                        slice,
-                        content_offset,
-                        row,
-                        start,
-                        end,
-                        &col_to_char,
-                        &line_chars,
-                        style,
-                        mask_slice,
-                    );
+                    Some(mask_buf.as_slice())
+                } else {
+                    None
+                };
+            if logical.is_some() {
+                for r in selection_ranges.iter().filter(|r| r.line == logical_row) {
+                    let style = merge_span_style(row_style, &visual_style);
+                    let start = r
+                        .col_start
+                        .saturating_sub(chunk_cell_offset)
+                        .min(content_width);
+                    let end = r
+                        .col_end
+                        .saturating_sub(chunk_cell_offset)
+                        .min(content_width);
+                    if end > start {
+                        paint_span_cells(
+                            slice,
+                            content_offset,
+                            row,
+                            start,
+                            end,
+                            &col_to_char,
+                            &line_chars,
+                            style,
+                            mask_slice,
+                        );
+                    }
                 }
             }
             vt_buf.clear();
-            buf.virtual_text_at_into(line_idx, &mut vt_buf);
+            // Virtual text attaches to the logical row's first chunk only; we
+            // don't want EOL/RightAlign virt-text duplicated on every wrapped row.
+            if logical.is_some() && chunk_idx == 0 {
+                buf.virtual_text_at_into(logical_row, &mut vt_buf);
+            }
             for vt in &vt_buf {
                 let base = vt
                     .hl_group
@@ -1322,9 +1438,7 @@ impl Window {
         if let CursorShape::Block { glyph, style, pos } = ctx.cursor_shape {
             let resolved = pos.or_else(|| {
                 let end = self.effective_endpoint();
-                let (r, c) = buf.display_cursor_pos(end);
-                let row = r as u16;
-                let col = c as u16;
+                let (row, col) = self.cursor_visual(buf, end);
                 row.checked_sub(self.scroll_top)
                     .filter(|rel| *rel < height)
                     .map(|screen_row| (col, screen_row))

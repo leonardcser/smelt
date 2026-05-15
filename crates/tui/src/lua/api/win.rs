@@ -126,16 +126,11 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
                 if let Some(win_id) = win {
                     // Wrap defaults to true so /help, /stats, /btw and plugin
                     // dialogs don't truncate. Parser-driven buffers manage their
-                    // own wrap.
+                    // own wrap; the window's wrap flag is a no-op there.
                     let wrap_enabled = opts
                         .as_ref()
                         .and_then(|t| t.get::<Option<bool>>("wrap").ok().flatten())
                         .unwrap_or(true);
-                    if let Some(buf) = app.ui.buf_mut(crate::smelt_term::BufId(buf_id)) {
-                        if !buf.has_parser() {
-                            buf.set_wrap_mode(wrap_enabled);
-                        }
-                    }
                     if let Some(w) = app.ui.win_mut(win_id) {
                         w.wrap = wrap_enabled;
                         if let Some(opts) = opts.as_ref() {
