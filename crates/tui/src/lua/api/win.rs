@@ -124,22 +124,20 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
                     },
                 );
                 if let Some(win_id) = win {
-                    // Lua-opened buffer windows wrap long lines by default
-                    // so /help, /stats, /btw and plugin dialogs don't
-                    // truncate content; opt out with `wrap = false`. Wrap
-                    // lives on the buffer — `Buffer::ensure_rendered_at`
-                    // reflows the user-set lines at the leaf's content width.
-                    let wrap_default = true;
+                    // Wrap defaults to true so /help, /stats, /btw and plugin
+                    // dialogs don't truncate. Parser-driven buffers manage their
+                    // own wrap.
                     let wrap_enabled = opts
                         .as_ref()
                         .and_then(|t| t.get::<Option<bool>>("wrap").ok().flatten())
-                        .unwrap_or(wrap_default);
+                        .unwrap_or(true);
                     if let Some(buf) = app.ui.buf_mut(crate::smelt_term::BufId(buf_id)) {
                         if !buf.has_parser() {
                             buf.set_wrap_mode(wrap_enabled);
                         }
                     }
                     if let Some(w) = app.ui.win_mut(win_id) {
+                        w.wrap = wrap_enabled;
                         if let Some(opts) = opts.as_ref() {
                             if let Ok(focusable) = opts.get::<bool>("focusable") {
                                 w.focusable = focusable;

@@ -219,6 +219,8 @@ pub struct Window {
     /// `gutter_width()` cells of each row; content paint shifts right by the same.
     /// `None` = no gutter column, no width reserved.
     pub gutter: Option<Arc<dyn GutterProvider>>,
+    /// Whether long lines wrap to the window's content width on render.
+    pub wrap: bool,
     pub focusable: bool,
     /// Paints `CursorLine` bg on the cursor row when focused. Off by default; list-shaped
     /// windows opt in so the selected row is visible regardless of focus.
@@ -289,6 +291,7 @@ impl Window {
             buf,
             config,
             gutter: None,
+            wrap: true,
             focusable: true,
             cursor_line_highlight: false,
             mouse_scroll: false,
