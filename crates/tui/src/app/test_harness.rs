@@ -300,6 +300,31 @@ impl TestApp {
         self.last_alloc
     }
 
+    /// Force the app into "agent turn active" state with the given
+    /// `turn_id`. Subsequent `SourceEvent::Engine(_)` events flow through
+    /// the active-turn dispatch path (`handle_engine_event` and
+    /// `dispatch_control` with tool tracking) instead of the idle
+    /// handler. No-op if a turn is already running.
+    ///
+    /// Used by the fuzz target to reach engine code paths a user would
+    /// reach by submitting a prompt, without going through the full
+    /// HTTP/auth-bearing `begin_agent_turn` flow.
+    pub fn start_turn(&mut self, turn_id: u64) {
+        if self.app.agent.is_some() {
+            return;
+        }
+        self.app.agent = Some(crate::app::TurnState {
+            turn_id,
+            pending: Vec::new(),
+            _perf: smelt_perf::perf::begin("test_harness:turn"),
+        });
+    }
+
+    /// Whether an agent turn is currently active.
+    pub fn agent_running(&self) -> bool {
+        self.app.agent.is_some()
+    }
+
     /// Cheap structural invariants over every live `(Buffer, Window)` pair
     /// plus side-car state that holds byte offsets across mutations.
     /// Panics on the first violation. Safe to call after every dispatched
@@ -414,6 +439,22 @@ impl TestApp {
                 self.app.ui.win(focused).is_some(),
                 "focus points at dead window {focused:?}"
             );
+        }
+
+        // Active agent turn: pending tool call_ids must be unique. A
+        // duplicate means `ToolStarted` was processed twice for the same
+        // call without an intervening `ToolFinished`, which corrupts the
+        // tool-widget state.
+        if let Some(ag) = self.app.agent.as_ref() {
+            let mut seen = std::collections::HashSet::with_capacity(ag.pending.len());
+            for pt in &ag.pending {
+                assert!(
+                    seen.insert(pt.call_id.as_str()),
+                    "duplicate pending tool call_id {:?} in turn {}",
+                    pt.call_id,
+                    ag.turn_id
+                );
+            }
         }
 
         // Kill-ring source range is well-formed even if we can't validate

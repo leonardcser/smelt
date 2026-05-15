@@ -45,6 +45,11 @@ enum FuzzOp {
     /// Terminal resize. Width and height are clamped into `[1, 400]`.
     Resize { w: u16, h: u16 },
 
+    // ── Agent state machine activation ────────────────────────────────
+    /// Synthesize an active agent turn so subsequent engine events flow
+    /// through the active-turn dispatch path instead of the idle handler.
+    StartTurn(u8),
+
     // ── Engine-emitted events ─────────────────────────────────────────
     /// Engine `Ready` signal.
     EngineReady,
@@ -155,8 +160,12 @@ fn call_id_string(id: u8) -> String {
     format!("call-{id:02x}")
 }
 
-fn translate(op: FuzzOp) -> SourceEvent {
-    match op {
+/// Apply one `FuzzOp` to the harness. Most ops translate to a `SourceEvent`
+/// fed through `feed_one_within_budget`; `StartTurn` is a side-channel
+/// affordance that activates the agent state machine without going through
+/// the production submit-prompt path.
+fn apply(app: &mut TestApp, op: FuzzOp) {
+    let ev = match op {
         FuzzOp::KeyUnicode(raw) => {
             let c = decode_codepoint(raw);
             SourceEvent::Term(key_event(KeyCode::Char(c), KeyModifiers::NONE))
@@ -180,6 +189,12 @@ fn translate(op: FuzzOp) -> SourceEvent {
             width: clamp_dim(w),
             height: clamp_dim(h),
         },
+
+        FuzzOp::StartTurn(id) => {
+            app.start_turn(u64::from(id));
+            app.assert_invariants();
+            return;
+        }
 
         FuzzOp::EngineReady => SourceEvent::Engine(EngineEvent::Ready),
         FuzzOp::EngineText(s) => SourceEvent::Engine(EngineEvent::Text { content: s }),
@@ -216,7 +231,9 @@ fn translate(op: FuzzOp) -> SourceEvent {
         }),
         FuzzOp::ExecOutput(s) => SourceEvent::ExecOutput(s),
         FuzzOp::ExecDone(code) => SourceEvent::ExecDone(code),
-    }
+    };
+    app.feed_one_within_budget(ev, AllocBudget::DEFAULT);
+    app.assert_invariants();
 }
 
 fuzz_target!(|input: FuzzInput| {
@@ -229,9 +246,7 @@ fuzz_target!(|input: FuzzInput| {
 
     let take = input.ops.len().min(MAX_OPS);
     for op in input.ops.into_iter().take(take) {
-        let ev = translate(op);
-        app.feed_one_within_budget(ev, AllocBudget::DEFAULT);
-        app.assert_invariants();
+        apply(&mut app, op);
         if app.quit_requested() {
             break;
         }
