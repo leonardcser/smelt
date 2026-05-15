@@ -82,7 +82,9 @@ impl TuiApp {
             if let Some(owner) =
                 scrollbar_owner_from_capture_transition(cap_before, self.ui.capture())
             {
-                if is_left_down(me.kind) {
+                // While a modal is open, the modal keeps focus — scrolling a
+                // background pane's scrollbar must not steal it.
+                if is_left_down(me.kind) && self.ui.active_modal().is_none() {
                     if let Some(focus) = app_focus_for_owner(owner) {
                         self.app_focus = focus;
                     }
@@ -113,7 +115,7 @@ impl TuiApp {
         // on individual leaves don't have to know about app-level focus, and
         // visually-grouped chrome (prompt's top/bottom bars) inherits the
         // input's focus naturally.
-        if is_left_down(me.kind) {
+        if is_left_down(me.kind) && self.ui.active_modal().is_none() {
             let region = self.layout.hit_test(me.row, me.column);
             let has_content = self.has_transcript_content(self.core.config.settings.show_thinking);
             if let Some(focus) = focus_for_region_click(region, has_content) {

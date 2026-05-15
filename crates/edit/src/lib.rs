@@ -1075,8 +1075,10 @@ impl Ui {
 
     /// Route a terminal event. Key: fires keymaps; bare Esc/Ctrl-C on a modal dismisses it.
     /// Resize: updates terminal size. Mouse: owns scrollbar drag and chrome drag; absorbs
-    /// wheel on focused overlays and clicks blocked by a modal. Returns `Ignored` for
-    /// everything else so the host can continue routing.
+    /// wheel on focused overlays. Clicks outside a modal pass through to the host so
+    /// drag-select on background splits still works — the host is expected to skip
+    /// `app_focus` promotion while a modal is active, leaving the modal focused.
+    /// Returns `Ignored` for everything else so the host can continue routing.
     pub fn dispatch_event(&mut self, ev: Event, lua_invoke: &mut LuaInvoke) -> Status {
         use crossterm::event::{KeyEvent, MouseButton, MouseEventKind};
         match ev {
@@ -1208,12 +1210,12 @@ impl Ui {
                         return Status::Consumed;
                     }
                 }
-                // Modal blocks splits hits while open; overlay hits already returned above.
-                if self.active_modal().is_some()
-                    && self.overlay_hit_test(me.row, me.column, None).is_none()
-                {
-                    return Status::Consumed;
-                }
+                // A modal grabs keyboard focus and Esc/Ctrl-C, but mouse events
+                // outside its rect still flow to the splits underneath so the
+                // user can drag-select transcript content. The caller is
+                // responsible for not promoting `app_focus` while a modal is
+                // active — keeping the modal as the focused overlay produces
+                // the natural snap-back-after-drag behavior.
                 Status::Ignored
             }
             Event::FocusGained | Event::FocusLost | Event::Paste(_) => Status::Ignored,
