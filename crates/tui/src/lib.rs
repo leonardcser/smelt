@@ -1,3 +1,12 @@
+/// Route the tui test binary through the workspace's counting global allocator
+/// so per-event allocation tracking inside [`crate::app::test_harness::TestApp`]
+/// sees real numbers. Production builds keep the allocator installed in
+/// `src/main.rs`; this declaration only takes effect when `cargo test` builds
+/// the tui lib as its own binary.
+#[cfg(test)]
+#[global_allocator]
+static ALLOCATOR: smelt_perf::alloc::Counting = smelt_perf::alloc::Counting;
+
 pub mod app;
 pub(crate) mod commands;
 pub(crate) mod completer;

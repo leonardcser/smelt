@@ -65,6 +65,34 @@ pub(crate) struct AppSnapshot {
     pub(crate) pending_quit: bool,
 }
 
+/// Per-event allocation delta captured by `TestApp::feed_one`. Snapshots
+/// `(alloc_count, alloc_bytes_grown)` for the calling thread before and after
+/// the event runs and stores the difference. Per-thread TLS counters mean
+/// parallel `nextest` workers do not contaminate each other's numbers.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) struct AllocDelta {
+    pub(crate) allocs: u64,
+    pub(crate) bytes_grown: u64,
+}
+
+/// Tunable per-event allocation budget. The fuzz target (Phase 5) fails a
+/// scenario when any single `SourceEvent` exceeds either field. Tests can
+/// also use [`TestApp::feed_one_within_budget`] for the same enforcement.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct AllocBudget {
+    pub(crate) max_allocs: u64,
+    pub(crate) max_bytes: u64,
+}
+
+impl AllocBudget {
+    /// Default per-event budget. Generous enough to ignore normal large-paste
+    /// cases but tight enough to catch unbounded per-keystroke growth.
+    pub(crate) const DEFAULT: AllocBudget = AllocBudget {
+        max_allocs: 10_000,
+        max_bytes: 4 * 1024 * 1024,
+    };
+}
+
 /// Test driver around a real `TuiApp`.
 pub(crate) struct TestApp {
     pub(crate) app: TuiApp,
@@ -73,6 +101,9 @@ pub(crate) struct TestApp {
     event_tx: mpsc::UnboundedSender<EngineEvent>,
     actions: Vec<Action>,
     quit: bool,
+    /// Allocation delta for the most recent `feed_one`. `None` when no event
+    /// has been fed yet.
+    last_alloc: Option<AllocDelta>,
 }
 
 pub(crate) struct TestAppBuilder {
@@ -171,6 +202,10 @@ impl TestAppBuilder {
             app.lua.load_user_config();
         }
 
+        // Turn on per-thread allocation counters so `feed_one` snapshots see
+        // real numbers. Idempotent; cheap when re-called.
+        smelt_perf::alloc::enable();
+
         TestApp {
             app,
             clock,
@@ -178,6 +213,7 @@ impl TestAppBuilder {
             event_tx,
             actions: Vec::new(),
             quit: false,
+            last_alloc: None,
         }
     }
 }
@@ -188,8 +224,10 @@ impl TestApp {
     }
 
     /// Feed a single event. Drains any engine commands the dispatch
-    /// produced into the action log.
+    /// produced into the action log. Captures the per-thread allocation
+    /// delta for this event into [`Self::last_alloc_delta`].
     pub(crate) fn feed_one(&mut self, ev: SourceEvent) {
+        let (a0, b0) = smelt_perf::alloc::thread_snapshot();
         {
             // Install the TLS app pointer so Lua bindings (e.g. `:quit`
             // setting `pending_quit`) can call back into the app, mirroring
@@ -223,6 +261,39 @@ impl TestApp {
             }
         }
         self.drain_cmd();
+        let (a1, b1) = smelt_perf::alloc::thread_snapshot();
+        self.last_alloc = Some(AllocDelta {
+            allocs: a1.saturating_sub(a0),
+            bytes_grown: b1.saturating_sub(b0),
+        });
+    }
+
+    /// Feed a single event and panic if the per-event allocation delta
+    /// exceeds `budget`. The eventual fuzz target uses this seam to flag
+    /// runaway-allocation scenarios; tests can use it as a regression guard
+    /// against accidental per-keystroke growth.
+    pub(crate) fn feed_one_within_budget(&mut self, ev: SourceEvent, budget: AllocBudget) {
+        self.feed_one(ev);
+        let delta = self.last_alloc.expect("feed_one populates last_alloc");
+        assert!(
+            delta.allocs <= budget.max_allocs,
+            "event exceeded alloc-count budget: {} > {} ({} bytes grown)",
+            delta.allocs,
+            budget.max_allocs,
+            delta.bytes_grown
+        );
+        assert!(
+            delta.bytes_grown <= budget.max_bytes,
+            "event exceeded bytes-grown budget: {} > {} ({} allocs)",
+            delta.bytes_grown,
+            budget.max_bytes,
+            delta.allocs
+        );
+    }
+
+    /// Allocation delta captured by the most recent [`Self::feed_one`].
+    pub(crate) fn last_alloc_delta(&self) -> Option<AllocDelta> {
+        self.last_alloc
     }
 
     pub(crate) fn feed<I>(&mut self, events: I)
@@ -365,6 +436,55 @@ mod tests {
         assert!(!s.agent_running);
         assert_eq!(s.app_focus, AppFocus::Prompt);
         assert!(s.queued_messages.is_empty());
+    }
+
+    // ── Resource invariants: per-event allocation tracking ────────────
+
+    /// `feed_one` captures a non-negative allocation delta on every event,
+    /// and a `Tick` (pure clock advance) allocates next to nothing — the
+    /// floor sanity-check that the counting allocator is actually wired
+    /// into the test binary. If `Counting` regresses to `System`, the
+    /// snapshots stay zero and this still passes; pair with the keystroke
+    /// budget test below to catch that.
+    #[test]
+    fn feed_one_records_alloc_delta_with_tick_near_zero() {
+        let mut app = TestApp::builder().build();
+        assert!(app.last_alloc_delta().is_none());
+        app.feed_one(SourceEvent::Tick(10));
+        let delta = app.last_alloc_delta().expect("delta after first event");
+        assert!(
+            delta.allocs < 32,
+            "Tick should allocate near zero, got {} allocs / {} bytes",
+            delta.allocs,
+            delta.bytes_grown
+        );
+    }
+
+    /// One keystroke through the dispatch chain stays well under the default
+    /// budget. If this trips, either we have a real per-keystroke regression
+    /// or the budget needs revisiting — both worth noticing.
+    #[test]
+    fn keystroke_stays_within_default_alloc_budget() {
+        let mut app = TestApp::builder().build();
+        // Warm caches with a discarded first keystroke so this test
+        // measures steady-state cost, not first-event init.
+        app.type_char('a');
+        app.feed_one_within_budget(
+            SourceEvent::Term(Event::Key(KeyEvent {
+                code: KeyCode::Char('b'),
+                modifiers: KeyModifiers::NONE,
+                kind: KeyEventKind::Press,
+                state: KeyEventState::NONE,
+            })),
+            AllocBudget::DEFAULT,
+        );
+        let delta = app.last_alloc_delta().expect("delta recorded");
+        // Print observed steady-state cost so it's visible in `cargo test
+        // -- --nocapture` runs and during budget-tuning sweeps.
+        eprintln!(
+            "steady-state keystroke delta: {} allocs / {} bytes",
+            delta.allocs, delta.bytes_grown
+        );
     }
 
     #[test]
@@ -761,7 +881,6 @@ mod tests {
         assert!(lines[0].contains("apple"));
     }
 
-<<<<<<< HEAD
     // ── Named-resource hot-reload refresh ───────────────────────────
 
     /// Reproduces the perf_panel hot-reload flow: re-call `overlay.open`
