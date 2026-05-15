@@ -78,6 +78,7 @@ fn cached_spans_for_line(h: &mut HighlightLines, line: &str) -> Vec<CachedSpan> 
         .collect()
 }
 
+#[cfg(test)]
 pub(crate) fn build_inline_diff_cache(
     old: &str,
     new: &str,
@@ -336,6 +337,7 @@ fn compute_change_visibility(changes: &[DiffChange], ctx: usize) -> Vec<bool> {
 }
 
 /// Render a syntax-highlighted inline diff; `skip` rows are skipped, at most `max_rows` emitted.
+/// Syntax is inferred from `path`'s extension.
 pub fn print_inline_diff(
     out: &mut LineBuilder,
     old: &str,
@@ -345,8 +347,24 @@ pub fn print_inline_diff(
     skip: u16,
     max_rows: u16,
 ) -> u16 {
+    print_inline_diff_ext(out, old, new, path, anchor, None, skip, max_rows)
+}
+
+/// Like [`print_inline_diff`] but with an explicit syntect language/extension token,
+/// bypassing the `path`-based extension sniff.
+#[allow(clippy::too_many_arguments)]
+pub fn print_inline_diff_ext(
+    out: &mut LineBuilder,
+    old: &str,
+    new: &str,
+    path: &str,
+    anchor: &str,
+    syntax_ext: Option<&str>,
+    skip: u16,
+    max_rows: u16,
+) -> u16 {
     let _perf = smelt_perf::perf::begin("render:inline_diff_cold");
-    let cache = build_inline_diff_cache(old, new, path, anchor);
+    let cache = build_inline_diff_cache_ext(old, new, path, anchor, syntax_ext);
     print_cached_inline_diff(out, &cache, skip, max_rows)
 }
 
