@@ -3,7 +3,7 @@
 //! against the supplied [`Theme`] and writes lines + highlights + decorations into a [`Buffer`].
 //! On [`LineBuilder::finish`] the trailing incomplete line is flushed and an [`Outcome`] returned.
 
-use crate::buffer::{Buffer, LineDecoration, SpanMeta};
+use crate::buffer::{Buffer, LineDecoration, SourceLine, SpanMeta};
 use crate::style::{Color, Style};
 use crate::theme::{intern_anonymous_style, HlGroup, Theme};
 use unicode_width::UnicodeWidthStr;
@@ -215,6 +215,12 @@ impl<'a> LineBuilder<'a> {
     /// Attach raw source text to the current line so copy emits markdown rather than display text.
     pub fn set_source_text(&mut self, text: &str) {
         self.cur_decoration.source_text = Some(text.to_string());
+    }
+
+    /// Stamp the current line's logical source-line mapping. Gutter providers
+    /// like `LineNumberGutter` read this to render per-row line numbers.
+    pub fn set_source_line(&mut self, source_line: SourceLine) {
+        self.cur_decoration.source_line = Some(source_line);
     }
 
     /// Attach `source` to the next committed line; subsequent `newline()` calls become soft-wrap

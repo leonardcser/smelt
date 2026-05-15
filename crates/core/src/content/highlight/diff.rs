@@ -42,7 +42,8 @@ pub(crate) struct CachedSpan {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub(crate) enum CachedDiffLine {
     Context {
-        lineno: usize,
+        old_lineno: usize,
+        new_lineno: usize,
         text: String,
         spans: Vec<CachedSpan>,
     },
@@ -142,7 +143,8 @@ pub fn build_inline_diff_cache_ext(
         .enumerate()
     {
         lines.push(CachedDiffLine::Context {
-            lineno: ctx_before_start + idx + 1,
+            old_lineno: ctx_before_start + idx + 1,
+            new_lineno: ctx_before_start + idx + 1,
             text: (*line).to_string(),
             spans: cached_spans_for_line(&mut h, line),
         });
@@ -168,7 +170,8 @@ pub fn build_inline_diff_cache_ext(
                     }
                     if new_lineno >= dv.view_start && new_lineno < dv.view_end {
                         lines.push(CachedDiffLine::Context {
-                            lineno: new_lineno + 1,
+                            old_lineno: old_lineno + 1,
+                            new_lineno: new_lineno + 1,
                             text: raw,
                             spans,
                         });
@@ -217,7 +220,8 @@ pub fn build_inline_diff_cache_ext(
         .enumerate()
     {
         lines.push(CachedDiffLine::Context {
-            lineno: after_start + idx + 1,
+            old_lineno: after_start + idx + 1,
+            new_lineno: after_start + idx + 1,
             text: (*line).to_string(),
             spans: cached_spans_for_line(&mut h, line),
         });
@@ -468,30 +472,70 @@ pub fn print_cached_inline_diff(
         }
         match line {
             CachedDiffLine::Ellipsis => {
+                out.set_source_line(smelt_buffer::buffer::SourceLine::Synthetic);
                 out.print_gutter(indent);
                 out.set_fg(Color::DarkGrey);
                 out.print_gutter(&format!("{:>w$}", "...", w = 1 + gutter_width));
                 out.reset_style();
                 out.newline();
             }
-            CachedDiffLine::Context { lineno, spans, .. }
-            | CachedDiffLine::Delete { lineno, spans, .. }
-            | CachedDiffLine::Insert { lineno, spans, .. } => {
-                let visual_rows = split_cached_spans_into_rows(out, spans, max_content);
-                let (sign, bg) = match line {
-                    CachedDiffLine::Context { .. } => (None, None),
-                    CachedDiffLine::Delete { .. } => (Some(('-', Color::Red)), Some(bg_del)),
-                    CachedDiffLine::Insert { .. } => (Some(('+', Color::Green)), Some(bg_add)),
+            _ => {
+                let (display_lineno, source_line, sign, bg, spans) = match line {
+                    CachedDiffLine::Context {
+                        old_lineno,
+                        new_lineno,
+                        spans,
+                        ..
+                    } => (
+                        *new_lineno,
+                        smelt_buffer::buffer::SourceLine::Diff {
+                            old: Some(*old_lineno as u32),
+                            new: Some(*new_lineno as u32),
+                        },
+                        None,
+                        None,
+                        spans,
+                    ),
+                    CachedDiffLine::Delete { lineno, spans, .. } => (
+                        *lineno,
+                        smelt_buffer::buffer::SourceLine::Diff {
+                            old: Some(*lineno as u32),
+                            new: None,
+                        },
+                        Some(('-', Color::Red)),
+                        Some(bg_del),
+                        spans,
+                    ),
+                    CachedDiffLine::Insert { lineno, spans, .. } => (
+                        *lineno,
+                        smelt_buffer::buffer::SourceLine::Diff {
+                            old: None,
+                            new: Some(*lineno as u32),
+                        },
+                        Some(('+', Color::Green)),
+                        Some(bg_add),
+                        spans,
+                    ),
                     CachedDiffLine::Ellipsis => unreachable!(),
                 };
+                let visual_rows = split_cached_spans_into_rows(out, spans, max_content);
                 for (vi, vrow) in visual_rows.iter().enumerate() {
+                    if vi == 0 {
+                        out.set_source_line(source_line);
+                    } else {
+                        out.set_source_line(smelt_buffer::buffer::SourceLine::Synthetic);
+                    }
                     out.print_gutter(indent);
                     if let Some((ch, color)) = sign {
                         let bgv = bg.unwrap();
                         out.set_bg(bgv);
                         if vi == 0 {
                             out.set_fg(color);
-                            out.print_gutter(&format!(" {:>w$} ", lineno, w = gutter_width));
+                            out.print_gutter(&format!(
+                                " {:>w$} ",
+                                display_lineno,
+                                w = gutter_width
+                            ));
                             out.set_fg(color);
                             out.print_gutter(&format!("{} ", ch));
                         } else {
@@ -503,7 +547,7 @@ pub fn print_cached_inline_diff(
                     } else {
                         if vi == 0 {
                             out.set_fg(Color::DarkGrey);
-                            out.print_gutter(&format!(" {:>w$}", lineno, w = gutter_width));
+                            out.print_gutter(&format!(" {:>w$}", display_lineno, w = gutter_width));
                             out.reset_style();
                             out.print_gutter("   ");
                         } else {
@@ -849,7 +893,8 @@ mod tests {
         let cache = CachedInlineDiff {
             max_display_lineno: 1,
             lines: vec![CachedDiffLine::Context {
-                lineno: 1,
+                old_lineno: 1,
+                new_lineno: 1,
                 text: "x".to_string(),
                 spans: vec![CachedSpan {
                     text: "x".to_string(),
@@ -871,7 +916,8 @@ mod tests {
             max_display_lineno: 3,
             lines: (1..=3)
                 .map(|i| CachedDiffLine::Context {
-                    lineno: i,
+                    old_lineno: i,
+                    new_lineno: i,
                     text: format!("line{i}"),
                     spans: vec![CachedSpan {
                         text: format!("line{i}"),
@@ -892,7 +938,8 @@ mod tests {
             max_display_lineno: 3,
             lines: (1..=3)
                 .map(|i| CachedDiffLine::Context {
-                    lineno: i,
+                    old_lineno: i,
+                    new_lineno: i,
                     text: format!("line{i}"),
                     spans: vec![CachedSpan {
                         text: format!("line{i}"),
@@ -926,7 +973,8 @@ mod tests {
             max_display_lineno: 10,
             lines: vec![
                 CachedDiffLine::Context {
-                    lineno: 1,
+                    old_lineno: 1,
+                    new_lineno: 1,
                     text: "ctx".to_string(),
                     spans: vec![span("ctx")],
                 },

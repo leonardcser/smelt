@@ -156,11 +156,15 @@ pub(super) fn render_highlighted(
             if total_rows >= skip && emitted < emit_limit {
                 out.print_gutter(indent);
                 if vi == 0 {
+                    out.set_source_line(smelt_buffer::buffer::SourceLine::Linear {
+                        lineno: (i + 1) as u32,
+                    });
                     out.set_fg(Color::DarkGrey);
                     out.print_gutter(&format!(" {:>w$}", i + 1, w = gutter_width));
                     out.reset_style();
                     out.print_gutter("   ");
                 } else {
+                    out.set_source_line(smelt_buffer::buffer::SourceLine::Synthetic);
                     out.print_gutter(&blank_gutter);
                 }
                 print_split_regions(out, vrow, None);
