@@ -143,153 +143,197 @@ fn call_id_string(id: u8) -> String {
     format!("call-{id:02x}")
 }
 
-/// Apply one `FuzzOp` to a `TestApp`. Most ops translate to a
-/// `SourceEvent` fed through `feed_one_within_budget`; `StartTurn` is a
-/// side-channel affordance.
-pub fn apply(app: &mut TestApp, op: FuzzOp) {
-    let ev = match op {
+/// Cheap snapshot of state needed by event-specific post-checks. Captured
+/// before dispatch so a `PostCheck` can compare pre/post without re-deriving
+/// what it cares about from scratch.
+struct Snapshot {
+    agent_running: bool,
+    pending: Vec<String>,
+    streaming: tui::app::test_harness::StreamingState,
+}
+
+impl Snapshot {
+    fn capture(app: &TestApp) -> Self {
+        Self {
+            agent_running: app.agent_running(),
+            pending: app.pending_tool_call_ids(),
+            streaming: app.streaming_state(),
+        }
+    }
+}
+
+/// Post-dispatch invariant tied to a specific `FuzzOp`. Holds just the
+/// payload the check needs (e.g. `call_id`); the pre/post `Snapshot`s carry
+/// everything else. Variants gated on `agent_running` self-skip in idle
+/// dispatch, where the relevant event arms are no-ops.
+enum PostCheck {
+    None,
+    /// `Text` commits any streaming text buffer.
+    TextFlushed,
+    /// `ToolStarted` flushes streaming text + thinking and adds `call_id`
+    /// to pending.
+    ToolStarted { call_id: String },
+    /// `ToolFinished` clears `call_id` from pending — but only verifiable
+    /// when it was actually present beforehand.
+    ToolFinished { call_id: String },
+    /// `ExecDone` runs `finalize_exec`, which clears `stream_exec_id`.
+    ExecCleared,
+}
+
+fn run_check(check: PostCheck, pre: &Snapshot, post: &Snapshot) {
+    match check {
+        PostCheck::None => {}
+        PostCheck::TextFlushed => {
+            if pre.agent_running {
+                assert!(
+                    !post.streaming.text,
+                    "EngineEvent::Text left streaming text active: {:?}",
+                    post.streaming
+                );
+            }
+        }
+        PostCheck::ToolStarted { call_id } => {
+            if pre.agent_running {
+                assert!(
+                    !post.streaming.text && !post.streaming.thinking,
+                    "ToolStarted({call_id}) left streaming active: {:?}",
+                    post.streaming
+                );
+                assert!(
+                    post.pending.iter().any(|p| p == &call_id),
+                    "ToolStarted({call_id}) did not appear in pending: {:?}",
+                    post.pending
+                );
+            }
+        }
+        PostCheck::ToolFinished { call_id } => {
+            if pre.pending.iter().any(|p| p == &call_id) {
+                assert!(
+                    !post.pending.iter().any(|p| p == &call_id),
+                    "ToolFinished({call_id}) left pending entry: {:?}",
+                    post.pending
+                );
+            }
+        }
+        PostCheck::ExecCleared => {
+            assert!(
+                !post.streaming.exec,
+                "ExecDone left active-exec state: {:?}",
+                post.streaming
+            );
+        }
+    }
+}
+
+/// Translate a `FuzzOp` into the `SourceEvent` to feed and the post-check
+/// to run after. `None` for the event means the op was handled inline (via
+/// a harness side channel) and the caller should not feed anything.
+fn plan(op: FuzzOp) -> (Option<SourceEvent>, PostCheck) {
+    match op {
         FuzzOp::KeyUnicode(raw) => {
             let c = decode_codepoint(raw);
-            SourceEvent::Term(key_event(KeyCode::Char(c), KeyModifiers::NONE))
+            let ev = SourceEvent::Term(key_event(KeyCode::Char(c), KeyModifiers::NONE));
+            (Some(ev), PostCheck::None)
         }
         FuzzOp::KeyCtrl(b) => {
             let c = (b'a' + (b % 26)) as char;
-            SourceEvent::Term(key_event(KeyCode::Char(c), KeyModifiers::CONTROL))
+            let ev = SourceEvent::Term(key_event(KeyCode::Char(c), KeyModifiers::CONTROL));
+            (Some(ev), PostCheck::None)
         }
         FuzzOp::KeyShift(b) => {
             let c = (b'a' + (b % 26)) as char;
-            SourceEvent::Term(key_event(KeyCode::Char(c), KeyModifiers::SHIFT))
+            let ev = SourceEvent::Term(key_event(KeyCode::Char(c), KeyModifiers::SHIFT));
+            (Some(ev), PostCheck::None)
         }
         FuzzOp::KeySpecial(which) => {
             let code = SPECIALS[(which as usize) % SPECIALS.len()];
-            SourceEvent::Term(key_event(code, KeyModifiers::NONE))
+            (
+                Some(SourceEvent::Term(key_event(code, KeyModifiers::NONE))),
+                PostCheck::None,
+            )
         }
-        FuzzOp::Paste(s) => SourceEvent::Term(TermEvent::Paste(s)),
-        FuzzOp::Tick(ms) => SourceEvent::Tick(u64::from(ms)),
-        FuzzOp::LuaWakeup => SourceEvent::LuaWakeup,
-        FuzzOp::Resize { w, h } => SourceEvent::Resize {
-            width: clamp_dim(w),
-            height: clamp_dim(h),
-        },
-
-        FuzzOp::StartTurn(id) => {
-            app.start_turn(u64::from(id));
-            app.assert_invariants();
-            return;
-        }
-
-        FuzzOp::EngineReady => SourceEvent::Engine(EngineEvent::Ready),
-        FuzzOp::EngineText(s) => {
-            let was_active = app.agent_running();
-            app.feed_one_within_budget(
-                SourceEvent::Engine(EngineEvent::Text { content: s }),
-                AllocBudget::DEFAULT,
-            );
-            // Text commits any streaming text buffer in the active-turn path.
-            // Idle dispatch is a no-op for Text, so only enforce on active turns.
-            if was_active {
-                let ss = app.streaming_state();
-                assert!(
-                    !ss.text,
-                    "EngineEvent::Text left streaming text active: {ss:?}",
-                );
-            }
-            app.assert_invariants();
-            return;
-        }
-        FuzzOp::EngineTextDelta(s) => SourceEvent::Engine(EngineEvent::TextDelta { delta: s }),
-        FuzzOp::EngineThinkingDelta(s) => {
-            SourceEvent::Engine(EngineEvent::ThinkingDelta { delta: s })
-        }
-        FuzzOp::EngineToolStart {
-            call_id,
-            tool_name,
-        } => {
+        FuzzOp::Paste(s) => (Some(SourceEvent::Term(TermEvent::Paste(s))), PostCheck::None),
+        FuzzOp::Tick(ms) => (Some(SourceEvent::Tick(u64::from(ms))), PostCheck::None),
+        FuzzOp::LuaWakeup => (Some(SourceEvent::LuaWakeup), PostCheck::None),
+        FuzzOp::Resize { w, h } => (
+            Some(SourceEvent::Resize {
+                width: clamp_dim(w),
+                height: clamp_dim(h),
+            }),
+            PostCheck::None,
+        ),
+        // Side-channel: not a SourceEvent.
+        FuzzOp::StartTurn(_) => (None, PostCheck::None),
+        FuzzOp::EngineReady => (Some(SourceEvent::Engine(EngineEvent::Ready)), PostCheck::None),
+        FuzzOp::EngineText(s) => (
+            Some(SourceEvent::Engine(EngineEvent::Text { content: s })),
+            PostCheck::TextFlushed,
+        ),
+        FuzzOp::EngineTextDelta(s) => (
+            Some(SourceEvent::Engine(EngineEvent::TextDelta { delta: s })),
+            PostCheck::None,
+        ),
+        FuzzOp::EngineThinkingDelta(s) => (
+            Some(SourceEvent::Engine(EngineEvent::ThinkingDelta { delta: s })),
+            PostCheck::None,
+        ),
+        FuzzOp::EngineToolStart { call_id, tool_name } => {
             let cid = call_id_string(call_id);
-            let was_active = app.agent_running();
-            app.feed_one_within_budget(
-                SourceEvent::Engine(EngineEvent::ToolStarted {
-                    call_id: cid.clone(),
-                    tool_name,
-                    args: HashMap::new(),
-                }),
-                AllocBudget::DEFAULT,
-            );
-            // ToolStarted is gated on an active turn. When active, it must
-            // flush both streaming buffers (text + thinking) before pushing
-            // the tool block, and the call_id must land in `pending`.
-            if was_active {
-                let ss = app.streaming_state();
-                assert!(
-                    !ss.text && !ss.thinking,
-                    "ToolStarted({cid}) left streaming active: {ss:?}",
-                );
-                let pending = app.pending_tool_call_ids();
-                assert!(
-                    pending.iter().any(|p| p == &cid),
-                    "ToolStarted({cid}) did not appear in pending: {pending:?}",
-                );
-            }
-            app.assert_invariants();
-            return;
+            let ev = SourceEvent::Engine(EngineEvent::ToolStarted {
+                call_id: cid.clone(),
+                tool_name,
+                args: HashMap::new(),
+            });
+            (Some(ev), PostCheck::ToolStarted { call_id: cid })
         }
-        FuzzOp::EngineToolOutput { call_id, chunk } => {
-            SourceEvent::Engine(EngineEvent::ToolOutput {
+        FuzzOp::EngineToolOutput { call_id, chunk } => (
+            Some(SourceEvent::Engine(EngineEvent::ToolOutput {
                 call_id: call_id_string(call_id),
                 chunk,
-            })
-        }
+            })),
+            PostCheck::None,
+        ),
         FuzzOp::EngineToolFinish {
             call_id,
             is_error,
             content,
         } => {
             let cid = call_id_string(call_id);
-            let was_pending = app
-                .pending_tool_call_ids()
-                .iter()
-                .any(|p| p == &cid);
-            app.feed_one_within_budget(
-                SourceEvent::Engine(EngineEvent::ToolFinished {
-                    call_id: cid.clone(),
-                    result: ToolOutcome {
-                        content,
-                        is_error,
-                        metadata: None,
-                    },
-                    elapsed_ms: Some(0),
-                }),
-                AllocBudget::DEFAULT,
-            );
-            // Transitional invariant: if the call_id was pending before
-            // dispatch, ToolFinished must have removed it. If it wasn't
-            // pending (no matching ToolStarted), nothing to verify.
-            if was_pending {
-                let still = app.pending_tool_call_ids();
-                assert!(
-                    !still.iter().any(|p| p == &cid),
-                    "ToolFinished({cid}) left pending entry: {still:?}",
-                );
-            }
-            app.assert_invariants();
-            return;
+            let ev = SourceEvent::Engine(EngineEvent::ToolFinished {
+                call_id: cid.clone(),
+                result: ToolOutcome {
+                    content,
+                    is_error,
+                    metadata: None,
+                },
+                elapsed_ms: Some(0),
+            });
+            (Some(ev), PostCheck::ToolFinished { call_id: cid })
         }
-        FuzzOp::ExecOutput(s) => SourceEvent::ExecOutput(s),
-        FuzzOp::ExecDone(code) => {
-            app.feed_one_within_budget(SourceEvent::ExecDone(code), AllocBudget::DEFAULT);
-            // ExecDone runs `finish_exec` + `finalize_exec` unconditionally;
-            // the latter clears `stream_exec_id`. Active-exec state must be
-            // empty after dispatch, irrespective of turn state.
-            let ss = app.streaming_state();
-            assert!(
-                !ss.exec,
-                "ExecDone left active-exec state: {ss:?}",
-            );
-            app.assert_invariants();
-            return;
-        }
-    };
-    app.feed_one_within_budget(ev, AllocBudget::DEFAULT);
+        FuzzOp::ExecOutput(s) => (Some(SourceEvent::ExecOutput(s)), PostCheck::None),
+        FuzzOp::ExecDone(code) => (Some(SourceEvent::ExecDone(code)), PostCheck::ExecCleared),
+    }
+}
+
+/// Apply one `FuzzOp` to a `TestApp`. Every op rolls through the same path:
+/// pre-snapshot → feed event (or side-channel) → post-snapshot → check →
+/// global invariants.
+pub fn apply(app: &mut TestApp, op: FuzzOp) {
+    // `StartTurn` is the one side channel: it pokes the harness directly
+    // instead of going through `feed_one_within_budget`.
+    if let FuzzOp::StartTurn(id) = op {
+        app.start_turn(u64::from(id));
+        app.assert_invariants();
+        return;
+    }
+
+    let pre = Snapshot::capture(app);
+    let (ev, check) = plan(op);
+    if let Some(ev) = ev {
+        app.feed_one_within_budget(ev, AllocBudget::DEFAULT);
+    }
+    let post = Snapshot::capture(app);
+    run_check(check, &pre, &post);
     app.assert_invariants();
 }
 
