@@ -2297,6 +2297,8 @@ dependencies = [
  "crossterm",
  "libfuzzer-sys",
  "protocol",
+ "serde",
+ "serde_json",
  "smelt-buffer",
  "smelt-style",
  "tui",
