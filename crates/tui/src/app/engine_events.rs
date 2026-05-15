@@ -108,6 +108,7 @@ impl TuiApp {
                 SessionControl::Continue
             }
             EngineEvent::Thinking { content } => {
+                self.flush_streaming_thinking();
                 self.push_block(Block::Thinking { content });
                 SessionControl::Continue
             }
