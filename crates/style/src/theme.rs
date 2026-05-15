@@ -110,6 +110,15 @@ pub fn reset_for_test() {
     anon_hash_to_group().write().unwrap().clear();
 }
 
+/// Total entries in the interner — interned named groups plus anonymous
+/// style entries. Used by leak invariants to confirm registries don't
+/// grow across scenario repeats.
+pub fn registry_len() -> usize {
+    let named = registry().read().unwrap().id_to_name.len();
+    let anon = anon_styles().read().unwrap().len();
+    named + anon
+}
+
 /// Default accent palette index (`Color::AnsiValue(208)`, the "ember" preset).
 pub const DEFAULT_ACCENT: u8 = 208;
 

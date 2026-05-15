@@ -14,6 +14,7 @@ libfuzzer-sys = "0.4"
 arbitrary = { version = "1", features = ["derive"] }
 tui = { path = "../crates/tui", features = ["harness"] }
 smelt-buffer = { path = "../crates/buffer" }
+smelt-style = { path = "../crates/style" }
 crossterm = { version = "0.29", features = ["event-stream", "bracketed-paste"] }
 
 [[bin]]

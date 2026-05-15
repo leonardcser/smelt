@@ -305,6 +305,55 @@ impl TestApp {
         self.last_alloc
     }
 
+    /// Cheap structural invariants over every live `(Buffer, Window)` pair.
+    /// Panics on the first violation with a message identifying the offending
+    /// window. Safe to call after every dispatched event.
+    ///
+    /// Checks per window:
+    /// - `cpos` is in `0..=source.len()`.
+    /// - `cpos` lands on a UTF-8 char boundary.
+    /// - `selection_anchor`, when set, satisfies the same two constraints.
+    ///
+    /// Plus a global sanity check that terminal width and height are non-zero.
+    pub fn assert_invariants(&self) {
+        for (wid, win) in self.app.ui.iter_wins() {
+            let Some(buf) = self.app.ui.buf(win.buf) else {
+                continue;
+            };
+            let src = buf.source();
+            assert!(
+                win.cpos <= src.len(),
+                "window {:?} cpos {} > source len {}",
+                wid,
+                win.cpos,
+                src.len()
+            );
+            let snapped = smelt_buffer::text::snap(src, win.cpos);
+            assert_eq!(
+                snapped, win.cpos,
+                "window {:?} cpos {} not on UTF-8 char boundary (snapped {})",
+                wid, win.cpos, snapped
+            );
+            if let Some(anchor) = win.selection_anchor {
+                assert!(
+                    anchor <= src.len(),
+                    "window {:?} selection_anchor {} > source len {}",
+                    wid,
+                    anchor,
+                    src.len()
+                );
+                let snapped = smelt_buffer::text::snap(src, anchor);
+                assert_eq!(
+                    snapped, anchor,
+                    "window {:?} selection_anchor {} not on UTF-8 char boundary (snapped {})",
+                    wid, anchor, snapped
+                );
+            }
+        }
+        let (w, h) = self.app.ui.terminal_size();
+        assert!(w > 0 && h > 0, "terminal size collapsed to {w}x{h}");
+    }
+
     pub fn feed<I>(&mut self, events: I)
     where
         I: IntoIterator<Item = SourceEvent>,

@@ -1,21 +1,21 @@
 #![no_main]
 
 //! Drive `TestApp` through arbitrary `SourceEvent` streams and assert
-//! that core text-buffer invariants always hold.
+//! that core text-buffer + registry invariants always hold.
 //!
 //! Each fuzz iteration:
-//!   1. Builds a fresh `TestApp` (vim toggled by the first input byte).
-//!   2. Translates a sequence of `FuzzOp` values into `SourceEvent`s.
-//!   3. Feeds each event under the default per-event allocation budget,
-//!      so runaway-allocation regressions fail the corpus entry.
-//!   4. After every event, checks that the prompt buffer's source is
-//!      still valid UTF-8 and its cursor sits on a char boundary
-//!      inside `[0, source.len()]`.
+//!   1. Snapshots baseline sizes of process-global interners.
+//!   2. Builds a fresh `TestApp` (vim toggled by the first input byte).
+//!   3. Translates a sequence of `FuzzOp` values into `SourceEvent`s.
+//!   4. Feeds each event under the default per-event allocation budget
+//!      and runs `TestApp::assert_invariants` after every event.
+//!   5. After teardown, confirms the static interners did not grow past a
+//!      small slack — a runaway intern leak shows up as a strictly growing
+//!      baseline across libFuzzer iterations.
 
 use arbitrary::Arbitrary;
 use libfuzzer_sys::fuzz_target;
 use tui::app::test_harness::{AllocBudget, SourceEvent, TestApp};
-use tui::app::{PROMPT_EDIT_BUF, PROMPT_WIN};
 
 use crossterm::event::{
     Event as TermEvent, KeyCode, KeyEvent, KeyEventKind, KeyEventState, KeyModifiers,
@@ -58,6 +58,11 @@ const SPECIALS: &[KeyCode] = &[
 
 const MAX_OPS: usize = 256;
 
+/// Slack allowed on top of the post-build interner baseline. Some scenarios
+/// legitimately intern a few new highlight groups (picker rows, dialog
+/// styles) — the leak signal is unbounded growth, not a handful of new ids.
+const INTERN_SLACK: usize = 64;
+
 fn key_event(code: KeyCode, mods: KeyModifiers) -> TermEvent {
     TermEvent::Key(KeyEvent {
         code,
@@ -70,7 +75,6 @@ fn key_event(code: KeyCode, mods: KeyModifiers) -> TermEvent {
 fn translate(op: &FuzzOp) -> SourceEvent {
     match op {
         FuzzOp::KeyChar(b) => {
-            // Map into printable ASCII [0x20, 0x7e].
             let c = (0x20u8 + (b % 0x5f)) as char;
             SourceEvent::Term(key_event(KeyCode::Char(c), KeyModifiers::NONE))
         }
@@ -88,34 +92,14 @@ fn translate(op: &FuzzOp) -> SourceEvent {
     }
 }
 
-fn assert_prompt_invariants(app: &TestApp) {
-    let source = app
-        .app
-        .ui
-        .buf(PROMPT_EDIT_BUF)
-        .map(|b| b.source().to_string())
-        .unwrap_or_default();
-
-    // Cursor must sit on a UTF-8 char boundary inside the source bytes.
-    if let Some(win) = app.app.ui.win(PROMPT_WIN) {
-        let cpos = win.cpos;
-        assert!(
-            cpos <= source.len(),
-            "prompt cpos {} out of bounds (source len {})",
-            cpos,
-            source.len()
-        );
-        let snapped = smelt_buffer::text::snap(&source, cpos);
-        assert_eq!(
-            snapped, cpos,
-            "prompt cpos {} not on a UTF-8 char boundary (snapped to {})",
-            cpos, snapped
-        );
-    }
-}
-
 fuzz_target!(|input: FuzzInput| {
     let mut app = TestApp::builder().with_vim(input.vim).build();
+    // Snapshot AFTER build so theme/namespace setup done by autoload counts as
+    // baseline. Any growth past `baseline + INTERN_SLACK` during the scenario
+    // is the leak signal.
+    let theme_baseline = smelt_style::theme::registry_len();
+    let ns_baseline = smelt_buffer::buffer::namespace_count();
+
     let ops = if input.ops.len() > MAX_OPS {
         &input.ops[..MAX_OPS]
     } else {
@@ -124,9 +108,26 @@ fuzz_target!(|input: FuzzInput| {
     for op in ops {
         let ev = translate(op);
         app.feed_one_within_budget(ev, AllocBudget::DEFAULT);
-        assert_prompt_invariants(&app);
+        app.assert_invariants();
         if app.quit_requested() {
             break;
         }
     }
+
+    let theme_end = smelt_style::theme::registry_len();
+    let ns_end = smelt_buffer::buffer::namespace_count();
+    assert!(
+        theme_end <= theme_baseline + INTERN_SLACK,
+        "theme registry leaked: {} -> {} (slack {})",
+        theme_baseline,
+        theme_end,
+        INTERN_SLACK
+    );
+    assert!(
+        ns_end <= ns_baseline + INTERN_SLACK,
+        "namespace registry leaked: {} -> {} (slack {})",
+        ns_baseline,
+        ns_end,
+        INTERN_SLACK
+    );
 });

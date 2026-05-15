@@ -870,6 +870,18 @@ impl Ui {
         self.wins.get_mut(&id)
     }
 
+    /// Read-only iterator over every live `(WinId, &Window)` pair. Order
+    /// is unspecified (backed by `HashMap`), so callers must not rely on it.
+    pub fn iter_wins(&self) -> impl Iterator<Item = (WinId, &Window)> {
+        self.wins.iter().map(|(id, w)| (*id, w))
+    }
+
+    /// Read-only iterator over every live `(BufId, &Buffer)` pair. Order
+    /// is unspecified (backed by `HashMap`), so callers must not rely on it.
+    pub fn iter_bufs(&self) -> impl Iterator<Item = (BufId, &Buffer)> {
+        self.bufs.iter().map(|(id, b)| (*id, b))
+    }
+
     pub fn set_terminal_size(&mut self, w: u16, h: u16) {
         self.surface.set_terminal_size(w, h);
     }

@@ -128,6 +128,12 @@ pub fn reset_namespaces_for_test() {
     namespace_registry().write().unwrap().name_to_id.clear();
 }
 
+/// Current number of interned namespace ids. Used by leak invariants to
+/// confirm that scenario teardown returns the registry to its baseline.
+pub fn namespace_count() -> usize {
+    namespace_registry().read().unwrap().name_to_id.len()
+}
+
 #[derive(Default)]
 struct NamespaceRegistry {
     name_to_id: HashMap<String, NsId>,
