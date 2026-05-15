@@ -54,6 +54,22 @@ impl Confirms {
     pub fn is_clear_flag(&self) -> Arc<AtomicBool> {
         self.is_clear_flag.clone()
     }
+
+    /// Number of pending confirm requests. Used by the test harness to
+    /// assert dispatch effects without poking at internal state.
+    pub fn len(&self) -> usize {
+        self.pending.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.pending.is_empty()
+    }
+
+    /// Smallest pending handle (oldest registration that hasn't been
+    /// taken). `None` when no confirms are pending.
+    pub fn first_handle(&self) -> Option<u64> {
+        self.pending.keys().min().copied()
+    }
 }
 
 #[cfg(test)]

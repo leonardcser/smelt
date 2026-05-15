@@ -465,6 +465,80 @@ impl TestApp {
         self.app.pending_title = true;
     }
 
+    /// Number of confirm dialogs currently registered with the core. Used
+    /// by `RequestPermission` invariants to assert the dispatch either
+    /// auto-approved (no confirm registered) or registered exactly one.
+    pub fn pending_confirm_count(&self) -> usize {
+        self.app.core.confirms.len()
+    }
+
+    /// Lowest-numbered pending confirm handle. Used by the resolve
+    /// side-channel to pick a victim deterministically.
+    pub fn first_pending_confirm(&self) -> Option<u64> {
+        self.app.core.confirms.first_handle()
+    }
+
+    /// Number of dialogs deferred because a recent keystroke gated them.
+    /// They get replayed on the next idle tick. Used to confirm the
+    /// `should_queue` branch in `dispatch_control` was actually hit.
+    pub fn pending_deferred_dialog_count(&self) -> usize {
+        self.app.pending_dialogs.len()
+    }
+
+    /// Count of `UiCommand::PermissionDecision` entries in the action log.
+    /// Increments whenever an auto-approval fires inline during
+    /// `dispatch_control` or a `resolve_confirm` resolves a registered
+    /// dialog.
+    pub fn permission_decision_count(&self) -> usize {
+        self.actions
+            .iter()
+            .filter(|a| matches!(a, Action::EngineSend(UiCommand::PermissionDecision { .. })))
+            .count()
+    }
+
+    /// Latest `PermissionDecision` action, if any. Used to verify the
+    /// `(request_id, approved)` pair after a resolve.
+    pub fn last_permission_decision(&self) -> Option<(u64, bool, Option<String>)> {
+        self.actions.iter().rev().find_map(|a| match a {
+            Action::EngineSend(UiCommand::PermissionDecision {
+                request_id,
+                approved,
+                message,
+            }) => Some((*request_id, *approved, message.clone())),
+            _ => None,
+        })
+    }
+
+    /// Side-channel: resolve the first pending confirm with `Yes` or
+    /// `No`. Mirrors what the Lua dialog calls into via
+    /// `lua_handlers::handle_dialog_decision` without going through the
+    /// Lua layer. Returns `true` when a confirm was consumed.
+    pub fn resolve_first_confirm(&mut self, approve: bool, message: Option<String>) -> bool {
+        let Some(handle_id) = self.first_pending_confirm() else {
+            return false;
+        };
+        let Some(entry) = self.app.core.confirms.take(handle_id) else {
+            return false;
+        };
+        let req = entry.req;
+        let choice = if approve {
+            smelt_core::transcript_model::ConfirmChoice::Yes
+        } else {
+            smelt_core::transcript_model::ConfirmChoice::No
+        };
+        let cancel = self.app.resolve_confirm(
+            (choice, message),
+            &req.call_id,
+            req.request_id,
+            &req.tool_name,
+        );
+        if cancel {
+            self.app.discard_turn(false);
+        }
+        self.drain_cmd();
+        true
+    }
+
     /// Render one frame to real stdout. Drives the same compositor
     /// pipeline production uses (`TuiApp::render_normal`). The caller is
     /// responsible for terminal setup (raw mode, alternate screen).

@@ -125,6 +125,28 @@ pub enum FuzzOp {
         title: String,
         slug: String,
     },
+    /// Emit `RequestPermission`. Active-turn dispatch either auto-approves
+    /// (queuing a `PermissionDecision`), defers the dialog onto the
+    /// `pending_dialogs` queue (when a keystroke landed within
+    /// `CONFIRM_DEFER_MS`), or registers a confirm dialog the user
+    /// resolves. `request_id` is derived from `req_id` to round-trip
+    /// through `PermissionDecision`.
+    EngineRequestPermission {
+        req_id: u8,
+        call_id: u8,
+        tool_name: String,
+        confirm_message: String,
+    },
+    /// Side channel: approve the oldest pending confirm. Mirrors what
+    /// `lua_handlers::handle_dialog_decision` does with `ConfirmChoice::Yes`.
+    /// No-op when no confirm is pending.
+    ApproveFirstConfirm,
+    /// Side channel: deny the oldest pending confirm with `ConfirmChoice::No`.
+    /// When `message` is `None`, denying cancels the agent turn (production
+    /// `resolve_confirm` returns `true`); when `Some`, the turn continues.
+    DenyFirstConfirm {
+        message: Option<String>,
+    },
 }
 
 #[derive(Arbitrary, Debug, Clone, Copy, Serialize, Deserialize)]
@@ -249,6 +271,9 @@ struct Snapshot {
     pending_title: bool,
     session_title: Option<String>,
     session_slug: Option<String>,
+    pending_confirms: usize,
+    deferred_dialogs: usize,
+    permission_decisions: usize,
 }
 
 impl Snapshot {
@@ -268,6 +293,9 @@ impl Snapshot {
             pending_title: app.pending_title(),
             session_title: app.session_title(),
             session_slug: app.session_slug(),
+            pending_confirms: app.pending_confirm_count(),
+            deferred_dialogs: app.pending_deferred_dialog_count(),
+            permission_decisions: app.permission_decision_count(),
         }
     }
 }
@@ -329,6 +357,16 @@ enum PostCheck {
     },
     /// `TitleGenerated` only applies when `pending_title` was set.
     TitleApplied { title: String, slug: String },
+    /// `RequestPermission` against an active turn lands on exactly one of
+    /// three branches: auto-approve (one new `PermissionDecision`,
+    /// no new confirm), defer (one new `pending_dialogs` entry, no new
+    /// confirm or decision), or register (one new entry in `core.confirms`,
+    /// no decision yet).
+    PermissionRequested,
+    /// Approving / denying a confirm consumes one pending entry and queues
+    /// a `PermissionDecision`. Approve never ends the turn; deny without a
+    /// message ends it.
+    ConfirmResolved { approved: bool, had_message: bool },
 }
 
 fn run_check(check: PostCheck, pre: &Snapshot, post: &Snapshot) {
@@ -548,6 +586,66 @@ fn run_check(check: PostCheck, pre: &Snapshot, post: &Snapshot) {
                 );
             }
         }
+        PostCheck::PermissionRequested => {
+            // Idle dispatch falls through to the `_ => {}` arm in
+            // `handle_idle_engine_event` — no state change. Only enforce
+            // the trichotomy when a turn was running.
+            if pre.agent_running {
+                let new_confirms = post.pending_confirms.saturating_sub(pre.pending_confirms);
+                let new_deferred = post.deferred_dialogs.saturating_sub(pre.deferred_dialogs);
+                let new_decisions = post
+                    .permission_decisions
+                    .saturating_sub(pre.permission_decisions);
+                let total = new_confirms + new_deferred + new_decisions;
+                assert_eq!(
+                    total, 1,
+                    "RequestPermission produced {total} effects (confirms={new_confirms}, deferred={new_deferred}, decisions={new_decisions}), expected exactly 1",
+                );
+            }
+        }
+        PostCheck::ConfirmResolved {
+            approved,
+            had_message,
+        } => {
+            // Side-channel returns false when no confirm was pending —
+            // skip in that case.
+            if pre.pending_confirms == 0 {
+                return;
+            }
+            assert_eq!(
+                post.pending_confirms,
+                pre.pending_confirms - 1,
+                "Resolve did not remove one confirm: pre {} -> post {}",
+                pre.pending_confirms,
+                post.pending_confirms,
+            );
+            assert_eq!(
+                post.permission_decisions,
+                pre.permission_decisions + 1,
+                "Resolve did not queue a PermissionDecision: pre {} -> post {}",
+                pre.permission_decisions,
+                post.permission_decisions,
+            );
+            // Approve never ends the turn. Deny without a message ends it
+            // (resolve_confirm returns true → discard_turn). Deny with a
+            // message keeps the turn alive — the user sent steering text
+            // instead of stopping.
+            if pre.agent_running {
+                let should_end = !approved && !had_message;
+                if should_end {
+                    assert!(
+                        !post.agent_running,
+                        "Deny without message did not end the turn",
+                    );
+                } else {
+                    assert!(
+                        post.agent_running,
+                        "{} ended the turn unexpectedly",
+                        if approved { "Approve" } else { "Deny with message" },
+                    );
+                }
+            }
+        }
         PostCheck::CompactionApplied { msg_count } => {
             // The apply path runs only on epoch match. A non-empty payload
             // replaces the conversation and clears snapshot vectors. Idle
@@ -751,6 +849,26 @@ fn plan(op: FuzzOp) -> (Option<SourceEvent>, PostCheck) {
             });
             (Some(ev), PostCheck::TitleApplied { title, slug })
         }
+        FuzzOp::EngineRequestPermission {
+            req_id,
+            call_id,
+            tool_name,
+            confirm_message,
+        } => {
+            let ev = SourceEvent::Engine(EngineEvent::RequestPermission {
+                request_id: u64::from(req_id),
+                call_id: call_id_string(call_id),
+                tool_name,
+                args: HashMap::new(),
+                confirm_message,
+                approval_patterns: Vec::new(),
+                summary: None,
+            });
+            (Some(ev), PostCheck::PermissionRequested)
+        }
+        FuzzOp::ApproveFirstConfirm | FuzzOp::DenyFirstConfirm { .. } => {
+            unreachable!("Approve/Deny side channels handled inline in apply()")
+        }
     }
 }
 
@@ -763,6 +881,23 @@ pub fn apply(app: &mut TestApp, op: FuzzOp) {
     // with `if let` so they take ownership; the rest match by reference.
     if let FuzzOp::PushQueuedMessage(text) = op {
         app.push_queued_message(text);
+        app.assert_invariants();
+        return;
+    }
+    if let FuzzOp::DenyFirstConfirm { message } = op {
+        let pre = Snapshot::capture(app);
+        let had_message = message.is_some();
+        app.resolve_first_confirm(false, message);
+        let post = Snapshot::capture(app);
+        run_check(
+            PostCheck::ConfirmResolved {
+                approved: false,
+                had_message,
+            },
+            &pre,
+            &post,
+        );
+        check_turn_end_invariants(&pre, &post);
         app.assert_invariants();
         return;
     }
@@ -779,6 +914,22 @@ pub fn apply(app: &mut TestApp, op: FuzzOp) {
         }
         FuzzOp::PrimePendingTitle => {
             app.prime_pending_title();
+            app.assert_invariants();
+            return;
+        }
+        FuzzOp::ApproveFirstConfirm => {
+            let pre = Snapshot::capture(app);
+            app.resolve_first_confirm(true, None);
+            let post = Snapshot::capture(app);
+            run_check(
+                PostCheck::ConfirmResolved {
+                    approved: true,
+                    had_message: false,
+                },
+                &pre,
+                &post,
+            );
+            check_turn_end_invariants(&pre, &post);
             app.assert_invariants();
             return;
         }
