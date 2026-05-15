@@ -299,6 +299,12 @@ impl TuiApp {
             ));
             if let Some(w) = ui.win_mut(crate::app::PROMPT_WIN) {
                 w.set_vim_enabled(vim_enabled);
+                // Chat input ergonomics: the prompt is for typing, so even with vim
+                // enabled the first keystroke after startup should insert, not act
+                // as a Normal-mode motion. Other vim-enabled leaves keep the default.
+                if vim_enabled {
+                    w.set_vim_mode(crate::smelt_term::VimMode::Insert);
+                }
             }
             let prompt_below_buf = ui.buf_create(crate::smelt_term::BufCreateOpts::default());
             assert!(ui.win_open_split_at(

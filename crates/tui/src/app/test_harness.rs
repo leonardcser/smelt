@@ -383,16 +383,17 @@ mod tests {
     }
 
     #[test]
-    fn fresh_vim_prompt_starts_in_normal_mode() {
+    fn fresh_vim_prompt_starts_in_insert_mode() {
+        // Chat input ergonomics: even with vim enabled, the prompt starts
+        // in Insert so the first keystroke types instead of navigating.
         let app = TestApp::builder().with_vim(true).build();
-        assert_eq!(app.state().vim_mode, VimMode::Normal);
+        assert_eq!(app.state().vim_mode, VimMode::Insert);
     }
 
     #[test]
     fn colon_in_vim_insert_mode_does_not_open_cmdline() {
         let mut app = TestApp::builder().with_vim(true).build();
-        // Enter Insert mode.
-        app.type_char('i');
+        // Fresh prompt is already in Insert.
         assert_eq!(app.state().vim_mode, VimMode::Insert);
 
         app.type_char(':');
@@ -404,7 +405,8 @@ mod tests {
     #[test]
     fn colon_in_vim_normal_mode_opens_cmdline() {
         let mut app = TestApp::builder().with_vim(true).build();
-        // Fresh vim window starts in Normal.
+        // Drop to Normal first since the prompt starts in Insert.
+        app.press(KeyCode::Esc);
         app.type_char(':');
         let s = app.state();
         assert!(s.cmdline_open);
@@ -414,6 +416,7 @@ mod tests {
     #[test]
     fn typing_into_cmdline_appends_to_payload() {
         let mut app = TestApp::builder().with_vim(true).build();
+        app.press(KeyCode::Esc);
         app.type_char(':');
         app.type_text("help");
         assert_eq!(app.state().cmdline_text, "help");
@@ -422,6 +425,7 @@ mod tests {
     #[test]
     fn esc_closes_cmdline() {
         let mut app = TestApp::builder().with_vim(true).build();
+        app.press(KeyCode::Esc);
         app.type_char(':');
         assert!(app.state().cmdline_open);
 
@@ -432,6 +436,7 @@ mod tests {
     #[test]
     fn cmdline_quit_command_requests_quit() {
         let mut app = TestApp::builder().with_vim(true).build();
+        app.press(KeyCode::Esc);
         app.type_char(':');
         app.type_text("quit");
         app.press(KeyCode::Enter);
@@ -582,6 +587,7 @@ mod tests {
     #[test]
     fn vim_i_enters_insert_from_normal() {
         let mut app = TestApp::builder().with_vim(true).build();
+        app.press(KeyCode::Esc);
         assert_eq!(app.state().vim_mode, VimMode::Normal);
 
         app.type_char('i');
@@ -591,6 +597,7 @@ mod tests {
     #[test]
     fn vim_a_enters_insert_after_cursor() {
         let mut app = TestApp::builder().with_vim(true).build();
+        app.press(KeyCode::Esc);
         app.type_char('a');
         assert_eq!(app.state().vim_mode, VimMode::Insert);
     }
@@ -598,7 +605,7 @@ mod tests {
     #[test]
     fn vim_esc_returns_insert_to_normal() {
         let mut app = TestApp::builder().with_vim(true).build();
-        app.type_char('i');
+        // Prompt starts in Insert; type directly.
         app.type_text("hello");
         assert_eq!(app.state().vim_mode, VimMode::Insert);
         assert_eq!(app.state().prompt_text, "hello");
@@ -610,7 +617,6 @@ mod tests {
     #[test]
     fn vim_v_enters_visual_from_normal() {
         let mut app = TestApp::builder().with_vim(true).build();
-        app.type_char('i');
         app.type_text("abc");
         app.press(KeyCode::Esc);
         assert_eq!(app.state().vim_mode, VimMode::Normal);
@@ -622,7 +628,6 @@ mod tests {
     #[test]
     fn vim_shift_v_enters_visual_line() {
         let mut app = TestApp::builder().with_vim(true).build();
-        app.type_char('i');
         app.type_text("abc");
         app.press(KeyCode::Esc);
 
@@ -633,7 +638,6 @@ mod tests {
     #[test]
     fn vim_esc_from_visual_returns_to_normal() {
         let mut app = TestApp::builder().with_vim(true).build();
-        app.type_char('i');
         app.type_text("abc");
         app.press(KeyCode::Esc);
         app.type_char('v');
@@ -646,6 +650,7 @@ mod tests {
     #[test]
     fn vim_full_cycle_normal_insert_normal_visual_normal() {
         let mut app = TestApp::builder().with_vim(true).build();
+        app.press(KeyCode::Esc);
         assert_eq!(app.state().vim_mode, VimMode::Normal);
 
         app.type_char('i');
@@ -667,6 +672,7 @@ mod tests {
         let mut app = TestApp::builder().with_vim(true).build();
         // Normal-mode 'h' / 'l' are motions, not characters — should not
         // land in the prompt buffer.
+        app.press(KeyCode::Esc);
         app.type_text("hl");
         assert_eq!(app.state().prompt_text, "");
         assert_eq!(app.state().vim_mode, VimMode::Normal);
@@ -675,7 +681,7 @@ mod tests {
     #[test]
     fn vim_typing_in_insert_mode_appends_to_buffer() {
         let mut app = TestApp::builder().with_vim(true).build();
-        app.type_char('i');
+        // Prompt starts in Insert.
         app.type_text("hello world");
         assert_eq!(app.state().prompt_text, "hello world");
     }
@@ -683,7 +689,6 @@ mod tests {
     #[test]
     fn vim_dd_in_normal_deletes_line() {
         let mut app = TestApp::builder().with_vim(true).build();
-        app.type_char('i');
         app.type_text("line one");
         app.press(KeyCode::Esc);
         assert_eq!(app.state().prompt_text, "line one");
