@@ -11,7 +11,8 @@ use crossterm::event::{
 use protocol::{AgentMode, Content, EngineEvent, Message, TokenUsage, ToolOutcome};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use tui::app::test_harness::{AllocBudget, SourceEvent};
+use protocol::UiCommand;
+use tui::app::test_harness::{Action, AllocBudget, SourceEvent};
 
 pub use tui::app::test_harness::TestApp;
 
@@ -306,9 +307,11 @@ struct Snapshot {
     session_slug: Option<String>,
     pending_confirms: usize,
     deferred_dialogs: usize,
-    permission_decisions: usize,
-    tool_results: usize,
-    tool_hooks_responses: usize,
+    /// Length of the harness's action log at capture time. Use
+    /// `app.actions_since(snapshot.action_count)` to inspect actions
+    /// produced after the snapshot, replacing the previous per-UiCommand
+    /// counter fields.
+    action_count: usize,
 }
 
 impl Snapshot {
@@ -330,11 +333,19 @@ impl Snapshot {
             session_slug: app.session_slug(),
             pending_confirms: app.pending_confirm_count(),
             deferred_dialogs: app.pending_deferred_dialog_count(),
-            permission_decisions: app.permission_decision_count(),
-            tool_results: app.tool_result_count(),
-            tool_hooks_responses: app.tool_hooks_response_count(),
+            action_count: app.actions().len(),
         }
     }
+}
+
+fn count_action<F>(actions: &[Action], pred: F) -> usize
+where
+    F: Fn(&UiCommand) -> bool,
+{
+    actions
+        .iter()
+        .filter(|a| matches!(a, Action::EngineSend(cmd) if pred(cmd)))
+        .count()
 }
 
 /// Post-dispatch invariant tied to a specific `FuzzOp`. Holds just the
@@ -419,7 +430,7 @@ enum PostCheck {
     ShutdownReceived,
 }
 
-fn run_check(check: PostCheck, pre: &Snapshot, post: &Snapshot) {
+fn run_check(check: PostCheck, pre: &Snapshot, post: &Snapshot, new_actions: &[Action]) {
     match check {
         PostCheck::None => {}
         PostCheck::TextFlushed => {
@@ -643,9 +654,9 @@ fn run_check(check: PostCheck, pre: &Snapshot, post: &Snapshot) {
             if pre.agent_running {
                 let new_confirms = post.pending_confirms.saturating_sub(pre.pending_confirms);
                 let new_deferred = post.deferred_dialogs.saturating_sub(pre.deferred_dialogs);
-                let new_decisions = post
-                    .permission_decisions
-                    .saturating_sub(pre.permission_decisions);
+                let new_decisions = count_action(new_actions, |c| {
+                    matches!(c, UiCommand::PermissionDecision { .. })
+                });
                 let total = new_confirms + new_deferred + new_decisions;
                 assert_eq!(
                     total, 1,
@@ -669,12 +680,12 @@ fn run_check(check: PostCheck, pre: &Snapshot, post: &Snapshot) {
                 pre.pending_confirms,
                 post.pending_confirms,
             );
+            let new_decisions = count_action(new_actions, |c| {
+                matches!(c, UiCommand::PermissionDecision { .. })
+            });
             assert_eq!(
-                post.permission_decisions,
-                pre.permission_decisions + 1,
-                "Resolve did not queue a PermissionDecision: pre {} -> post {}",
-                pre.permission_decisions,
-                post.permission_decisions,
+                new_decisions, 1,
+                "Resolve did not queue exactly one PermissionDecision (got {new_decisions})",
             );
             // Approve never ends the turn. Deny without a message ends it
             // (resolve_confirm returns true → discard_turn). Deny with a
@@ -698,23 +709,22 @@ fn run_check(check: PostCheck, pre: &Snapshot, post: &Snapshot) {
         }
         PostCheck::ToolDispatched => {
             if pre.agent_running {
+                let new_results =
+                    count_action(new_actions, |c| matches!(c, UiCommand::ToolResult { .. }));
                 assert_eq!(
-                    post.tool_results,
-                    pre.tool_results + 1,
-                    "ToolDispatch with no tool registered should queue exactly one ToolResult: pre {} -> post {}",
-                    pre.tool_results,
-                    post.tool_results,
+                    new_results, 1,
+                    "ToolDispatch with no tool registered should queue exactly one ToolResult (got {new_results})",
                 );
             }
         }
         PostCheck::ToolHooksRequested => {
             if pre.agent_running {
+                let new_responses = count_action(new_actions, |c| {
+                    matches!(c, UiCommand::ToolHooksResponse { .. })
+                });
                 assert_eq!(
-                    post.tool_hooks_responses,
-                    pre.tool_hooks_responses + 1,
-                    "ToolHooksRequest should queue exactly one ToolHooksResponse: pre {} -> post {}",
-                    pre.tool_hooks_responses,
-                    post.tool_hooks_responses,
+                    new_responses, 1,
+                    "ToolHooksRequest should queue exactly one ToolHooksResponse (got {new_responses})",
                 );
             }
         }
@@ -1017,6 +1027,7 @@ pub fn apply(app: &mut TestApp, op: FuzzOp) {
         let had_message = message.is_some();
         app.resolve_first_confirm(false, message);
         let post = Snapshot::capture(app);
+        let new_actions = app.actions_since(pre.action_count);
         run_check(
             PostCheck::ConfirmResolved {
                 approved: false,
@@ -1024,6 +1035,7 @@ pub fn apply(app: &mut TestApp, op: FuzzOp) {
             },
             &pre,
             &post,
+            new_actions,
         );
         check_turn_end_invariants(&pre, &post);
         app.assert_invariants();
@@ -1049,6 +1061,7 @@ pub fn apply(app: &mut TestApp, op: FuzzOp) {
             let pre = Snapshot::capture(app);
             app.resolve_first_confirm(true, None);
             let post = Snapshot::capture(app);
+            let new_actions = app.actions_since(pre.action_count);
             run_check(
                 PostCheck::ConfirmResolved {
                     approved: true,
@@ -1056,6 +1069,7 @@ pub fn apply(app: &mut TestApp, op: FuzzOp) {
                 },
                 &pre,
                 &post,
+                new_actions,
             );
             check_turn_end_invariants(&pre, &post);
             app.assert_invariants();
@@ -1107,7 +1121,8 @@ pub fn apply(app: &mut TestApp, op: FuzzOp) {
         app.feed_one_within_budget(ev, AllocBudget::DEFAULT);
     }
     let post = Snapshot::capture(app);
-    run_check(check, &pre, &post);
+    let new_actions = app.actions_since(pre.action_count);
+    run_check(check, &pre, &post, new_actions);
     check_turn_end_invariants(&pre, &post);
     app.assert_invariants();
 }

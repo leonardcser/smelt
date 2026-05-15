@@ -494,48 +494,15 @@ impl TestApp {
         self.app.pending_dialogs.len()
     }
 
-    /// Count of `UiCommand::ToolResult` entries in the action log. Used by
-    /// `ToolDispatch` invariants — every dispatch either resolves
-    /// immediately (one `ToolResult`) or stays pending in the Lua task
-    /// queue.
-    pub fn tool_result_count(&self) -> usize {
-        self.actions
-            .iter()
-            .filter(|a| matches!(a, Action::EngineSend(UiCommand::ToolResult { .. })))
-            .count()
-    }
-
-    /// Count of `UiCommand::ToolHooksResponse` entries in the action log.
-    /// `ToolHooksRequest` always produces exactly one of these.
-    pub fn tool_hooks_response_count(&self) -> usize {
-        self.actions
-            .iter()
-            .filter(|a| matches!(a, Action::EngineSend(UiCommand::ToolHooksResponse { .. })))
-            .count()
-    }
-
-    /// Count of `UiCommand::PermissionDecision` entries in the action log.
-    /// Increments whenever an auto-approval fires inline during
-    /// `dispatch_control` or a `resolve_confirm` resolves a registered
-    /// dialog.
-    pub fn permission_decision_count(&self) -> usize {
-        self.actions
-            .iter()
-            .filter(|a| matches!(a, Action::EngineSend(UiCommand::PermissionDecision { .. })))
-            .count()
-    }
-
-    /// Latest `PermissionDecision` action, if any. Used to verify the
-    /// `(request_id, approved)` pair after a resolve.
-    pub fn last_permission_decision(&self) -> Option<(u64, bool, Option<String>)> {
-        self.actions.iter().rev().find_map(|a| match a {
-            Action::EngineSend(UiCommand::PermissionDecision {
-                request_id,
-                approved,
-                message,
-            }) => Some((*request_id, *approved, message.clone())),
-            _ => None,
-        })
+    /// Slice of `Action`s appended since `idx`. PostChecks use this to
+    /// count or inspect specific `UiCommand` variants without each one
+    /// growing a dedicated Snapshot field per variant. Pair with
+    /// `Snapshot::action_count`: capture the index before dispatch, then
+    /// call `actions_since(pre.action_count)` after.
+    pub fn actions_since(&self, idx: usize) -> &[Action] {
+        let len = self.actions.len();
+        let start = idx.min(len);
+        &self.actions[start..len]
     }
 
     /// Side-channel: resolve the first pending confirm with `Yes` or
