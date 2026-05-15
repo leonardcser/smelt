@@ -7,16 +7,35 @@ use mlua::prelude::*;
 use std::collections::HashSet;
 use std::sync::Mutex;
 
-// `smelt_perf::perf::begin` takes a `&'static str` so the sample map can key
-// labels without copying. Interning here means each distinct label leaks
-// exactly once instead of once per `smelt.perf.time` call — a Lua plugin
-// spamming `time(label, fn)` no longer grows memory unboundedly.
+// `smelt_perf::perf::begin` takes a `&'static str` so the sample map can
+// key labels without copying. We accept labels that look like real
+// identifiers (alphanumeric / `_` / `:` / `-`, ≤ 64 chars) and intern them
+// — a real plugin's bounded set of buckets leaks at most once each. Anything
+// else (random binary bytes, oversized labels) buckets into a single static
+// fallback so callers can't make us malloc per call.
+const FALLBACK: &str = "lua:user";
+const MAX_LABEL_LEN: usize = 64;
+const MAX_DISTINCT_LABELS: usize = 256;
+
+fn label_is_clean(s: &str) -> bool {
+    !s.is_empty()
+        && s.len() <= MAX_LABEL_LEN
+        && s.bytes()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'_' | b':' | b'-' | b'.'))
+}
+
 fn intern_label(label: &str) -> &'static str {
+    if !label_is_clean(label) {
+        return FALLBACK;
+    }
     static INTERNED: Mutex<Option<HashSet<&'static str>>> = Mutex::new(None);
     let mut guard = INTERNED.lock().unwrap();
     let set = guard.get_or_insert_with(HashSet::new);
     if let Some(&existing) = set.get(label) {
         return existing;
+    }
+    if set.len() >= MAX_DISTINCT_LABELS {
+        return FALLBACK;
     }
     let leaked: &'static str = Box::leak(label.to_owned().into_boxed_str());
     set.insert(leaked);
