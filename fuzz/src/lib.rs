@@ -194,14 +194,22 @@ fn run_check(check: PostCheck, pre: &Snapshot, post: &Snapshot) {
         }
         PostCheck::ToolStarted { call_id } => {
             if pre.agent_running {
+                let was_pending = pre.pending.iter().any(|p| p == &call_id);
+                if !was_pending {
+                    // Fresh ToolStarted flushes streaming text + thinking
+                    // before pushing the tool block.
+                    assert!(
+                        !post.streaming.text && !post.streaming.thinking,
+                        "ToolStarted({call_id}) left streaming active: {:?}",
+                        post.streaming
+                    );
+                }
+                // Duplicate dispatch must be a no-op on pending; either way,
+                // the call_id ends up in `pending` exactly once.
+                let count = post.pending.iter().filter(|p| *p == &call_id).count();
                 assert!(
-                    !post.streaming.text && !post.streaming.thinking,
-                    "ToolStarted({call_id}) left streaming active: {:?}",
-                    post.streaming
-                );
-                assert!(
-                    post.pending.iter().any(|p| p == &call_id),
-                    "ToolStarted({call_id}) did not appear in pending: {:?}",
+                    count == 1,
+                    "ToolStarted({call_id}) yields {count} pending entries, expected 1: {:?}",
                     post.pending
                 );
             }
@@ -334,7 +342,21 @@ pub fn apply(app: &mut TestApp, op: FuzzOp) {
     }
     let post = Snapshot::capture(app);
     run_check(check, &pre, &post);
+    check_turn_end_invariants(&pre, &post);
     app.assert_invariants();
+}
+
+/// Cross-cutting invariants for any op that ends an active turn.
+/// `finish_turn` always flushes streaming text + thinking before clearing
+/// the agent; if either survives, the flush path was skipped.
+fn check_turn_end_invariants(pre: &Snapshot, post: &Snapshot) {
+    if pre.agent_running && !post.agent_running {
+        assert!(
+            !post.streaming.text && !post.streaming.thinking,
+            "turn ended with streaming active: {:?}",
+            post.streaming
+        );
+    }
 }
 
 /// Build a fresh `TestApp` configured for the scenario's initial state.
