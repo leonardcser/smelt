@@ -26,8 +26,9 @@ pub enum SourceEvent {
     /// Advance the virtual clock by `ms` milliseconds. Production never
     /// emits this; only scripted sources do.
     Tick(u64),
-    /// Terminal window resize (SIGWINCH on Unix).
-    Resize,
+    /// Terminal window resize (SIGWINCH on Unix). Carries the new
+    /// dimensions in cells; production reads them from crossterm.
+    Resize { width: u16, height: u16 },
 }
 
 /// Async iterator over [`SourceEvent`]s. Returns `None` to signal end of
@@ -82,7 +83,16 @@ mod tests {
     async fn scripted_source_supports_late_push() {
         let mut src = ScriptedSource::new(std::iter::empty());
         assert!(src.is_empty());
-        src.push(SourceEvent::Resize);
-        assert!(matches!(src.next().await, Some(SourceEvent::Resize)));
+        src.push(SourceEvent::Resize {
+            width: 80,
+            height: 24,
+        });
+        assert!(matches!(
+            src.next().await,
+            Some(SourceEvent::Resize {
+                width: 80,
+                height: 24
+            })
+        ));
     }
 }

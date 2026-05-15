@@ -195,6 +195,14 @@ impl TestAppBuilder {
             app.lua.load_user_config();
         }
 
+        // Production wires the Tui frontend to `Osc52Sink`, which writes
+        // `\x1b]52;c;...` to real stdout on every kill-ring copy. Inside the
+        // harness that's a ring leak — corrupts test stdout, slows the fuzz
+        // target, and has no semantic value. Swap to `NullSink` immediately.
+        app.core
+            .clipboard
+            .swap_sink(Box::new(smelt_core::NullSink));
+
         // Turn on per-thread allocation counters so `feed_one` snapshots see
         // real numbers. Idempotent; cheap when re-called.
         smelt_perf::alloc::enable();
@@ -235,18 +243,7 @@ impl TestApp {
                     }
                 }
                 SourceEvent::Engine(ev) => {
-                    if let Some(mut ag) = self.app.agent.take() {
-                        let ctrl = self
-                            .app
-                            .handle_engine_event(ev, ag.turn_id, &mut ag.pending);
-                        let cont = self.app.dispatch_control(ctrl, &ag.pending);
-                        self.app.agent = Some(ag);
-                        if !cont {
-                            self.app.discard_turn(false);
-                        }
-                    } else {
-                        self.app.handle_idle_engine_event(ev);
-                    }
+                    self.app.dispatch_engine_event(ev);
                 }
                 SourceEvent::Tick(ms) => {
                     self.clock.advance(Duration::from_millis(ms));
@@ -263,10 +260,8 @@ impl TestApp {
                     self.app.finalize_exec();
                     self.app.exec = None;
                 }
-                SourceEvent::Resize => {
-                    let w = self.app.last_width;
-                    let h = self.app.last_height;
-                    self.app.handle_resize(w, h);
+                SourceEvent::Resize { width, height } => {
+                    self.app.handle_resize(width, height);
                 }
             }
         }

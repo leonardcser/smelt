@@ -1054,17 +1054,7 @@ impl TuiApp {
                 }
 
                 Some(ev) = self.core.engine.recv() => {
-                    if let Some(mut ag) = self.agent.take() {
-                        let ctrl =
-                            self.handle_engine_event(ev, ag.turn_id, &mut ag.pending);
-                        let action = self.dispatch_control(ctrl, &ag.pending);
-                        self.agent = Some(ag);
-                        if !action {
-                            self.discard_turn(false);
-                        }
-                    } else {
-                        self.handle_idle_engine_event(ev);
-                    }
+                    self.dispatch_engine_event(ev);
                 }
 
                 Some(call) = self.host_rx.recv() => {

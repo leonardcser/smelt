@@ -6,6 +6,25 @@ use smelt_core::ConfirmRequest;
 use std::time::Duration;
 
 impl TuiApp {
+    /// Route an `EngineEvent` through the correct branch of the agent
+    /// state machine. When a turn is active, delegates to
+    /// `handle_engine_event` + `dispatch_control` and discards the turn on
+    /// a stop signal; when idle, falls through to `handle_idle_engine_event`.
+    /// Shared by the production main loop, the test harness, and the
+    /// scenario replay binary so all three drive identical state.
+    pub fn dispatch_engine_event(&mut self, ev: EngineEvent) {
+        if let Some(mut ag) = self.agent.take() {
+            let ctrl = self.handle_engine_event(ev, ag.turn_id, &mut ag.pending);
+            let cont = self.dispatch_control(ctrl, &ag.pending);
+            self.agent = Some(ag);
+            if !cont {
+                self.discard_turn(false);
+            }
+        } else {
+            self.handle_idle_engine_event(ev);
+        }
+    }
+
     pub(crate) fn handle_engine_event(
         &mut self,
         ev: EngineEvent,

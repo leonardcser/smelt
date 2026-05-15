@@ -2296,6 +2296,7 @@ dependencies = [
  "arbitrary",
  "crossterm",
  "libfuzzer-sys",
+ "protocol",
  "smelt-buffer",
  "smelt-style",
  "tui",
