@@ -877,6 +877,10 @@ impl Ui {
                 if let Some(buf) = self.bufs.get_mut(&buf_id) {
                     buf.ensure_rendered_at(content_width);
                 }
+                if let (Some(buf), Some(win)) = (self.bufs.get(&buf_id), self.wins.get_mut(&win_id))
+                {
+                    win.ensure_layout(buf, content_width);
+                }
                 let total_rows = self
                     .bufs
                     .get(&buf_id)
@@ -925,6 +929,9 @@ impl Ui {
                 .min(rect.width.saturating_sub(gutter_width));
             if let Some(buf) = self.bufs.get_mut(&buf_id) {
                 buf.ensure_rendered_at(content_width);
+            }
+            if let (Some(buf), Some(win)) = (self.bufs.get(&buf_id), self.wins.get_mut(win_id)) {
+                win.ensure_layout(buf, content_width);
             }
             let total_rows = self
                 .bufs

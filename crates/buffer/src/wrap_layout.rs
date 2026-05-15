@@ -70,6 +70,13 @@ impl WrappedLayout {
             })
     }
 
+    /// Random-access visual-row lookup. `None` when `vrow >= visual_count`.
+    pub fn visual_line<'a>(&self, lines: &'a [String], vrow: usize) -> Option<&'a str> {
+        let (crow, chunk_idx) = self.logical_at_visual(vrow)?;
+        let (s, e) = *self.chunks_per_row.get(crow)?.get(chunk_idx)?;
+        lines.get(crow).map(|l| &l.as_str()[s..e])
+    }
+
     /// Byte ranges for the chunks of logical row `crow`.
     pub fn chunks_of(&self, crow: usize) -> &[(usize, usize)] {
         self.chunks_per_row

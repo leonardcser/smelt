@@ -8,6 +8,7 @@ use super::{BufId, UndoHistory, WinId};
 use crate::Theme;
 use crossterm::event::{KeyEvent, MouseButton, MouseEvent, MouseEventKind};
 use smelt_buffer::buffer::VirtTextPos;
+use smelt_buffer::wrap_layout::WrappedLayout;
 use smelt_term::grid::{GridSlice, Style};
 use smelt_term::layout::{Gutters, Rect};
 use std::sync::Arc;
@@ -221,6 +222,13 @@ pub struct Window {
     pub gutter: Option<Arc<dyn GutterProvider>>,
     /// Whether long lines wrap to the window's content width on render.
     pub wrap: bool,
+    /// Visual-row layout derived from the buffer's lines + this window's width.
+    /// Refreshed by `ensure_layout` before paint; render and coordinate helpers
+    /// read it instead of indexing the buffer directly.
+    pub(crate) layout: WrappedLayout,
+    /// `(source_tick, width, wrap)` last used to compute `layout`; `None` forces
+    /// a rebuild on the next `ensure_layout`.
+    layout_key: Option<(u64, u16, bool)>,
     pub focusable: bool,
     /// Paints `CursorLine` bg on the cursor row when focused. Off by default; list-shaped
     /// windows opt in so the selected row is visible regardless of focus.
@@ -292,6 +300,8 @@ impl Window {
             config,
             gutter: None,
             wrap: true,
+            layout: WrappedLayout::default(),
+            layout_key: None,
             focusable: true,
             cursor_line_highlight: false,
             mouse_scroll: false,
@@ -325,6 +335,23 @@ impl Window {
     /// Reserved cells for the gutter column for this buffer; `0` when no provider attached.
     pub fn gutter_width(&self, buf: &Buffer) -> u16 {
         self.gutter.as_ref().map(|g| g.width(buf)).unwrap_or(0)
+    }
+
+    /// Rebuild `layout` if the buffer's content or width changed. Called by the
+    /// host before paint so render and hit-test see a consistent view.
+    pub fn ensure_layout(&mut self, buf: &Buffer, width: u16) {
+        let key = (buf.changedtick(), width, false);
+        if self.layout_key == Some(key) {
+            return;
+        }
+        self.layout = WrappedLayout::from_lines(buf.lines(), width, false);
+        self.layout_key = Some(key);
+    }
+
+    /// Read access to the most recent layout. Always populated after the first
+    /// `ensure_layout`; before that it's an empty identity layout.
+    pub fn layout(&self) -> &WrappedLayout {
+        &self.layout
     }
 
     // ── Vim ────────────────────────────────────────────────────────────
@@ -1064,7 +1091,6 @@ impl Window {
         let width = slice.width();
         let height = slice.height();
         let scroll = self.scroll_top as usize;
-        let line_count = buf.line_count();
         let gutter_width = self.gutter_width(buf).min(width);
         let pad_left = self
             .config
@@ -1078,6 +1104,17 @@ impl Window {
             .gutters
             .content_width(width)
             .min(width.saturating_sub(content_offset));
+        // The host's prep pass refreshes the layout before paint. Tests that
+        // skip the prep pass build a one-shot fallback so render stays correct
+        // without requiring &mut self.
+        let fallback_layout;
+        let layout = if self.layout_key == Some((buf.changedtick(), content_width, false)) {
+            &self.layout
+        } else {
+            fallback_layout = WrappedLayout::from_lines(buf.lines(), content_width, false);
+            &fallback_layout
+        };
+        let line_count = layout.visual_count();
         // `cursor_line_highlight` paints `CursorLine` bg under the cursor row.
         // During an active mouse drag-select the rendered row tracks `drag_endpoint`
         // so the user sees the highlight slide with the cursor; otherwise it sits at
@@ -1152,7 +1189,7 @@ impl Window {
                     }
                 }
             }
-            let Some(line) = buf.get_line(line_idx) else {
+            let Some(line) = layout.visual_line(buf.lines(), line_idx) else {
                 continue;
             };
             col_to_char.clear();
