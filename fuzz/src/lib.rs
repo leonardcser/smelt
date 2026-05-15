@@ -203,8 +203,15 @@ fn clamp_dim(d: u16) -> u16 {
     d.clamp(RESIZE_MIN, RESIZE_MAX)
 }
 
+/// Compress the random `u8` call-id space down to `CALL_ID_BUCKETS` so
+/// `ToolStarted` and `ToolFinished` actually pair up under random fuzz
+/// inputs. Without this, collisions happen at 1/256 per pair, which the
+/// coverage report shows is too rare to ever exercise the matching
+/// branches in `handle_engine_event`.
+const CALL_ID_BUCKETS: u8 = 8;
+
 fn call_id_string(id: u8) -> String {
-    format!("call-{id:02x}")
+    format!("call-{:02x}", id % CALL_ID_BUCKETS)
 }
 
 /// Synthesize a deterministic, lightweight message vector for compaction
