@@ -1584,6 +1584,32 @@ mod tests {
 
     // ── Determinism: clock-threaded state changes are observable via Tick ─
 
+    /// Press `Ctrl-W` to arm the pane-focus chord, advance the virtual clock
+    /// past `PANE_CHORD_WINDOW` (750ms), then press a follow-up key. The
+    /// expired-chord branch in `handle_pane_chord` drops `pending_pane_chord`
+    /// back to `None`; if the chord-window check leaked to wall-clock reads,
+    /// the follow-up would still see the stale `Some(...)` and could spuriously
+    /// toggle focus.
+    #[test]
+    fn ctrl_w_pane_chord_expires_after_tick_past_window() {
+        let mut app = TestApp::builder().build();
+        app.press_mod(KeyCode::Char('w'), KeyModifiers::CONTROL);
+        assert!(
+            app.app.timers.pending_pane_chord.is_some(),
+            "Ctrl-W arms the pane chord"
+        );
+
+        // 1000ms > PANE_CHORD_WINDOW (750ms).
+        app.feed_one(SourceEvent::Tick(1000));
+        // Follow-up key after expiry: handler drops the pending chord and
+        // returns None so the key falls through to normal dispatch.
+        app.press(KeyCode::Char('j'));
+        assert!(
+            app.app.timers.pending_pane_chord.is_none(),
+            "expired pane chord should be cleared on the next key"
+        );
+    }
+
     /// End-to-end proof of the yank-flash clock plumbing: yank a line in vim,
     /// observe the flash window is active, advance the virtual clock past the
     /// window, and verify the flash deadline has cleared. If any link in the
