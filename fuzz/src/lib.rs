@@ -202,15 +202,37 @@ pub fn apply(app: &mut TestApp, op: FuzzOp) {
             call_id,
             is_error,
             content,
-        } => SourceEvent::Engine(EngineEvent::ToolFinished {
-            call_id: call_id_string(call_id),
-            result: ToolOutcome {
-                content,
-                is_error,
-                metadata: None,
-            },
-            elapsed_ms: Some(0),
-        }),
+        } => {
+            let cid = call_id_string(call_id);
+            let was_pending = app
+                .pending_tool_call_ids()
+                .iter()
+                .any(|p| p == &cid);
+            app.feed_one_within_budget(
+                SourceEvent::Engine(EngineEvent::ToolFinished {
+                    call_id: cid.clone(),
+                    result: ToolOutcome {
+                        content,
+                        is_error,
+                        metadata: None,
+                    },
+                    elapsed_ms: Some(0),
+                }),
+                AllocBudget::DEFAULT,
+            );
+            // Transitional invariant: if the call_id was pending before
+            // dispatch, ToolFinished must have removed it. If it wasn't
+            // pending (no matching ToolStarted), nothing to verify.
+            if was_pending {
+                let still = app.pending_tool_call_ids();
+                assert!(
+                    !still.iter().any(|p| p == &cid),
+                    "ToolFinished({cid}) left pending entry: {still:?}",
+                );
+            }
+            app.assert_invariants();
+            return;
+        }
         FuzzOp::ExecOutput(s) => SourceEvent::ExecOutput(s),
         FuzzOp::ExecDone(code) => SourceEvent::ExecDone(code),
     };

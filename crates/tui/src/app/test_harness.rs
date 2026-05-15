@@ -199,9 +199,7 @@ impl TestAppBuilder {
         // `\x1b]52;c;...` to real stdout on every kill-ring copy. Inside the
         // harness that's a ring leak — corrupts test stdout, slows the fuzz
         // target, and has no semantic value. Swap to `NullSink` immediately.
-        app.core
-            .clipboard
-            .swap_sink(Box::new(smelt_core::NullSink));
+        app.core.clipboard.swap_sink(Box::new(smelt_core::NullSink));
 
         // Turn on per-thread allocation counters so `feed_one` snapshots see
         // real numbers. Idempotent; cheap when re-called.
@@ -325,6 +323,18 @@ impl TestApp {
         self.app.agent.is_some()
     }
 
+    /// Snapshot the pending tool `call_id`s on the active turn. Empty
+    /// vector when no turn is active. Used by transitional invariants
+    /// that need to compare pending state before vs. after an event
+    /// (e.g. asserting a `ToolFinished` actually cleared its entry).
+    pub fn pending_tool_call_ids(&self) -> Vec<String> {
+        self.app
+            .agent
+            .as_ref()
+            .map(|ag| ag.pending.iter().map(|pt| pt.call_id.clone()).collect())
+            .unwrap_or_default()
+    }
+
     /// Render one frame to real stdout. Drives the same compositor
     /// pipeline production uses (`TuiApp::render_normal`). The caller is
     /// responsible for terminal setup (raw mode, alternate screen).
@@ -377,8 +387,7 @@ impl TestApp {
             // that mode, so skip when the buffer has empty source but
             // non-empty line content.
             let line_based = src.is_empty()
-                && (buf.line_count() > 1
-                    || buf.get_line(0).is_some_and(|l| !l.is_empty()));
+                && (buf.line_count() > 1 || buf.get_line(0).is_some_and(|l| !l.is_empty()));
             if line_based {
                 continue;
             }
