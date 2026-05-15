@@ -81,7 +81,7 @@ impl TuiApp {
         self.save_session();
         self.flush_persist();
         let original_id = self.core.session.id.clone();
-        let forked = self.core.session.fork();
+        let forked = self.core.session.fork(self.core.env.pid());
         self.core.session = forked;
         self.save_session();
         self.flush_persist();
@@ -125,7 +125,7 @@ impl TuiApp {
         self.input.clear(&mut pctx);
         self.input.store.lock().unwrap().clear();
         self.core.processes.clear();
-        self.core.session = session::Session::new();
+        self.core.session = session::Session::new(self.core.env.pid(), self.core.env.cwd());
         self.pending_title = false;
         self.compact_epoch += 1;
         if let Ok(mut guard) = self.shared_session.lock() {

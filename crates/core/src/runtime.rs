@@ -49,10 +49,14 @@ pub struct Core {
     /// Lua introspection reads through this handle without locking out
     /// the engine's tool dispatch path.
     pub mcp: Option<Arc<crate::mcp::McpManager>>,
-    /// Source of monotonic + wall-clock time. Same instance backs the engine
-    /// task in production; deterministic-simulation harnesses can swap in a
-    /// [`engine::clock::VirtualClock`].
+    /// Source of monotonic + wall-clock time. Same instance backs the
+    /// engine task; swap in [`engine::clock::VirtualClock`] for tests
+    /// that need to drive time deterministically.
     pub clock: Arc<dyn engine::clock::Clock>,
+    /// Process-level env snapshot: pid, home, xdg dirs, working directory,
+    /// available parallelism. Callers read here instead of touching
+    /// `std::env` / `std::process` directly.
+    pub env: Arc<engine::env::RuntimeEnv>,
 }
 
 impl Core {
@@ -62,11 +66,9 @@ impl Core {
         frontend: FrontendKind,
         permissions: Arc<crate::permissions::Permissions>,
         clock: Arc<dyn engine::clock::Clock>,
+        env: Arc<engine::env::RuntimeEnv>,
     ) -> Self {
-        let cwd = std::env::current_dir()
-            .ok()
-            .and_then(|p| p.to_str().map(String::from))
-            .unwrap_or_default();
+        let cwd = env.cwd().to_str().map(String::from).unwrap_or_default();
         let cells = cells::build_with_builtins(cells::BuiltinSeeds {
             vim_mode: "Insert".to_string(),
             agent_mode: config.mode.as_str().to_string(),
@@ -80,7 +82,7 @@ impl Core {
         let confirms_flag = confirms.is_clear_flag();
         Self {
             config,
-            session: Session::new(),
+            session: Session::new(env.pid(), env.cwd()),
             confirms,
             clipboard: crate::Clipboard::new(match frontend {
                 FrontendKind::Tui => Box::new(Osc52Sink),
@@ -96,6 +98,7 @@ impl Core {
             permissions,
             mcp: None,
             clock,
+            env,
         }
     }
 }

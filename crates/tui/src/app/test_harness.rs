@@ -182,6 +182,16 @@ impl TestAppBuilder {
         };
 
         let clock = Arc::new(VirtualClock::new(Instant::now(), SystemTime::now()));
+        let env = Arc::new(engine::env::RuntimeEnv::scripted(
+            4242,
+            std::path::PathBuf::from("/tmp/smelt-test/home"),
+            std::path::PathBuf::from("/tmp/smelt-test/home/.config"),
+            std::path::PathBuf::from("/tmp/smelt-test/home/.state"),
+            std::path::PathBuf::from("/tmp/smelt-test/home/.cache"),
+            std::path::PathBuf::from("/tmp/smelt-test/home/.data"),
+            std::path::PathBuf::from("/tmp/smelt-test/cwd"),
+            std::num::NonZeroUsize::new(1).unwrap(),
+        ));
 
         let mut app = TuiApp::new(
             config,
@@ -192,6 +202,7 @@ impl TestAppBuilder {
             lua,
             smelt_core::trust::TrustState::NoContent,
             Arc::clone(&clock) as Arc<dyn engine::clock::Clock>,
+            env,
         );
 
         // init.lua may touch TUI surfaces (overlays / wins / bufs), so it

@@ -79,19 +79,13 @@ pub struct SessionMeta {
     pub text_bytes: Option<u64>,
 }
 
-impl Default for Session {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
 impl Session {
-    pub fn new() -> Self {
+    /// Create a fresh session. `pid` mixes into the session id; `cwd`
+    /// is recorded as the session's working directory.
+    pub fn new(pid: u32, cwd: std::path::PathBuf) -> Self {
         let now = now_ms();
-        let id = new_session_id(now);
-        let cwd = std::env::current_dir()
-            .ok()
-            .and_then(|p| p.to_str().map(String::from));
+        let id = new_session_id(now, pid);
+        let cwd = cwd.to_str().map(String::from);
         Self {
             id,
             title: None,
@@ -131,10 +125,10 @@ impl Session {
         }
     }
 
-    pub fn fork(&self) -> Self {
+    pub fn fork(&self, pid: u32) -> Self {
         let now = now_ms();
         Self {
-            id: new_session_id(now),
+            id: new_session_id(now, pid),
             title: self.title.clone(),
             slug: self.slug.clone(),
             first_user_message: self.first_user_message.clone(),
@@ -420,16 +414,12 @@ fn sessions_dir() -> PathBuf {
     config::state_dir().join("sessions")
 }
 
-fn new_session_id(now_ms: u64) -> String {
+fn new_session_id(now_ms: u64, pid: u32) -> String {
     let counter = SESSION_COUNTER.fetch_add(1, Ordering::Relaxed);
-    let pid = std::process::id();
     let mut hasher = Sha256::new();
     hasher.update(now_ms.to_le_bytes());
     hasher.update(pid.to_le_bytes());
     hasher.update(counter.to_le_bytes());
-    // Mix in some randomness from the stack address.
-    let entropy = &hasher as *const _ as usize;
-    hasher.update(entropy.to_le_bytes());
     format!("{:x}", hasher.finalize())
 }
 
@@ -439,16 +429,28 @@ mod tests {
 
     #[test]
     fn session_id_is_full_sha256_hex() {
-        let id = new_session_id(123456789);
+        let id = new_session_id(123456789, 4242);
         assert_eq!(id.len(), 64);
         assert!(id.chars().all(|c| c.is_ascii_hexdigit()));
     }
 
     #[test]
     fn session_ids_are_unique() {
-        let id1 = new_session_id(100);
-        let id2 = new_session_id(100);
+        let id1 = new_session_id(100, 4242);
+        let id2 = new_session_id(100, 4242);
         assert_ne!(id1, id2);
+    }
+
+    #[test]
+    fn session_id_is_deterministic_for_fixed_inputs() {
+        // Same (now_ms, pid) at adjacent counter values produces stable
+        // ids — so a sim scenario that scripts both replays bit-identical.
+        let now = 1_700_000_000_000;
+        let pid = 7;
+        let a = new_session_id(now, pid);
+        let b = new_session_id(now, pid);
+        assert_ne!(a, b, "counter should still vary within a process");
+        assert_eq!(a.len(), b.len());
     }
 
     #[test]
@@ -484,29 +486,27 @@ mod tests {
         msg(Role::System, text)
     }
 
-    // ── Session::new / default / fork / meta ─────────────────────────
+    // ── Session::new / fork / meta ───────────────────────────────────
+
+    fn fixture_session() -> Session {
+        Session::new(4242, std::path::PathBuf::from("/work"))
+    }
 
     #[test]
     fn new_initializes_empty_fields_and_matches_created_updated() {
-        let s = Session::new();
+        let s = fixture_session();
         assert!(!s.id.is_empty());
         assert_eq!(s.id.len(), 64);
         assert_eq!(s.created_at_ms, s.updated_at_ms);
         assert!(s.messages.is_empty());
         assert_eq!(s.session_cost_usd, 0.0);
         assert!(s.parent_id.is_none());
-    }
-
-    #[test]
-    fn default_matches_new() {
-        let s = Session::default();
-        assert!(!s.id.is_empty());
-        assert_eq!(s.created_at_ms, s.updated_at_ms);
+        assert_eq!(s.cwd.as_deref(), Some("/work"));
     }
 
     #[test]
     fn meta_projects_visible_session_fields() {
-        let mut s = Session::new();
+        let mut s = fixture_session();
         s.title = Some("My Title".into());
         s.slug = Some("my-slug".into());
         s.first_user_message = Some("hello".into());
@@ -532,14 +532,14 @@ mod tests {
 
     #[test]
     fn fork_clones_messages_and_links_parent_with_fresh_id() {
-        let mut s = Session::new();
+        let mut s = fixture_session();
         s.messages.push(user_msg("q1"));
         s.messages.push(assistant_msg("a1"));
         s.title = Some("kept".into());
         s.context_tokens = Some(500);
         s.session_cost_usd = 1.25;
 
-        let forked = s.fork();
+        let forked = s.fork(4242);
         assert_ne!(forked.id, s.id);
         assert_eq!(forked.parent_id.as_deref(), Some(s.id.as_str()));
         assert_eq!(forked.title.as_deref(), Some("kept"));

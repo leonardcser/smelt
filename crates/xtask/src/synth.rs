@@ -61,7 +61,8 @@ fn print_usage() {
 }
 
 fn generate(turns: usize, words: usize, title: Option<String>) {
-    let mut session = Session::new();
+    let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
+    let mut session = Session::new(std::process::id(), cwd);
     let stamp = session.id.clone();
     session.title =
         Some(title.unwrap_or_else(|| format!("synth fixture · {turns} turns × {words} words")));

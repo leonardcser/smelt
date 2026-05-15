@@ -173,6 +173,7 @@ async fn main() {
     lua_runtime.load_user_config();
     lua_runtime.load_global_plugins();
     let clock: Arc<dyn engine::clock::Clock> = Arc::new(engine::clock::RealClock);
+    let env = Arc::new(engine::env::RuntimeEnv::snapshot());
     let project_trust = lua_runtime.load_project_config(&cwd);
     let lua_cfg = lua_runtime.to_config();
     let lua_permission_rules = lua_runtime.take_permission_rules();
@@ -464,6 +465,7 @@ async fn main() {
             smelt_core::FrontendKind::Headless,
             Arc::clone(&permissions),
             Arc::clone(&clock),
+            Arc::clone(&env),
         );
         core.skills = Some(tui_skill_loader.clone());
         core.mcp = mcp_manager.clone();
@@ -509,6 +511,7 @@ async fn main() {
             lua_runtime,
             project_trust,
             Arc::clone(&clock),
+            Arc::clone(&env),
         );
         app.core.skills = Some(tui_skill_loader.clone());
         app.core.mcp = mcp_manager.clone();

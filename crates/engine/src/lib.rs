@@ -4,6 +4,7 @@ pub(crate) mod cancel;
 pub mod clock;
 pub(crate) mod compact;
 pub(crate) mod config;
+pub mod env;
 pub mod host;
 pub mod image;
 pub mod log;

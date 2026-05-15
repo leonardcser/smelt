@@ -216,6 +216,7 @@ impl TuiApp {
         lua: crate::lua::LuaRuntime,
         project_trust: smelt_core::trust::TrustState,
         clock: Arc<dyn engine::clock::Clock>,
+        env: Arc<engine::env::RuntimeEnv>,
     ) -> Self {
         let host_rx = engine.take_host_rx();
         let mut input = PromptState::new();
@@ -375,7 +376,14 @@ impl TuiApp {
         };
 
         let working_clock = Arc::clone(&clock);
-        let core = smelt_core::Core::new(app_config, engine, FrontendKind::Tui, permissions, clock);
+        let core = smelt_core::Core::new(
+            app_config,
+            engine,
+            FrontendKind::Tui,
+            permissions,
+            clock,
+            env,
+        );
         let (lua_wakeup_tx, lua_wakeup_rx) = tokio::sync::mpsc::unbounded_channel();
         let _ = lua.shared().wakeup_tx.set(lua_wakeup_tx);
         Self {
