@@ -395,6 +395,19 @@ impl TestApp {
         self.app.agent.as_ref().map(|ag| ag.turn_id)
     }
 
+    /// Number of user messages waiting to be sent on the next turn. Used
+    /// by `Steered` invariants that assert the drain semantics.
+    pub fn queued_message_count(&self) -> usize {
+        self.app.queued_messages.len()
+    }
+
+    /// Side-channel: push a synthetic queued message. In production
+    /// `queued_messages` is filled by pressing Enter on the prompt while a
+    /// turn is active; the harness short-circuits that flow.
+    pub fn push_queued_message(&mut self, text: String) {
+        self.app.queued_messages.push(text);
+    }
+
     /// Render one frame to real stdout. Drives the same compositor
     /// pipeline production uses (`TuiApp::render_normal`). The caller is
     /// responsible for terminal setup (raw mode, alternate screen).

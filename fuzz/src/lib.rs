@@ -82,6 +82,15 @@ pub enum FuzzOp {
     /// Emit `TurnError`. Active-turn dispatch ends the turn; idle dispatch
     /// surfaces a notification.
     EngineTurnError(String),
+    /// Emit `Steered { text, count }`. Active-turn dispatch flushes both
+    /// streams and drains up to `count` queued messages.
+    EngineSteered {
+        text: String,
+        count: u8,
+    },
+    /// Side channel: push a synthetic entry onto `queued_messages` so
+    /// `Steered` has something to drain.
+    PushQueuedMessage(String),
 }
 
 #[derive(Arbitrary, Debug, Clone, Copy, Serialize, Deserialize)]
@@ -191,6 +200,7 @@ struct Snapshot {
     session_messages: usize,
     compact_epoch_match: bool,
     snapshot_counts: (usize, usize, usize),
+    queued_messages: usize,
 }
 
 impl Snapshot {
@@ -202,6 +212,7 @@ impl Snapshot {
             session_messages: app.session_message_count(),
             compact_epoch_match: app.compact_epoch_match(),
             snapshot_counts: app.snapshot_counts(),
+            queued_messages: app.queued_message_count(),
         }
     }
 }
@@ -240,6 +251,9 @@ enum PostCheck {
     },
     /// `TurnError`. When an active turn was running, it ends.
     TurnErrored,
+    /// `Steered`. Active-turn dispatch flushes streams and drains up to
+    /// `count` queued messages.
+    Steered { count: usize },
 }
 
 fn run_check(check: PostCheck, pre: &Snapshot, post: &Snapshot) {
@@ -338,6 +352,25 @@ fn run_check(check: PostCheck, pre: &Snapshot, post: &Snapshot) {
                 assert!(
                     !post.agent_running,
                     "TurnError did not end the active turn",
+                );
+            }
+        }
+        PostCheck::Steered { count } => {
+            // Idle dispatch is a no-op for Steered; only enforce on active.
+            if pre.agent_running {
+                assert!(
+                    !post.streaming.text && !post.streaming.thinking,
+                    "Steered left streaming active: {:?}",
+                    post.streaming
+                );
+                let drained = count.min(pre.queued_messages);
+                assert_eq!(
+                    post.queued_messages,
+                    pre.queued_messages - drained,
+                    "Steered(count={count}) drain mismatch: pre {} → post {} (expected drain {})",
+                    pre.queued_messages,
+                    post.queued_messages,
+                    drained,
                 );
             }
         }
@@ -474,6 +507,14 @@ fn plan(op: FuzzOp) -> (Option<SourceEvent>, PostCheck) {
             let ev = SourceEvent::Engine(EngineEvent::TurnError { message });
             (Some(ev), PostCheck::TurnErrored)
         }
+        FuzzOp::EngineSteered { text, count } => {
+            let n = usize::from(count);
+            let ev = SourceEvent::Engine(EngineEvent::Steered { text, count: n });
+            (Some(ev), PostCheck::Steered { count: n })
+        }
+        FuzzOp::PushQueuedMessage(_) => {
+            unreachable!("PushQueuedMessage handled inline in apply()")
+        }
     }
 }
 
@@ -481,7 +522,14 @@ fn plan(op: FuzzOp) -> (Option<SourceEvent>, PostCheck) {
 /// pre-snapshot → feed event (or side-channel) → post-snapshot → check →
 /// global invariants.
 pub fn apply(app: &mut TestApp, op: FuzzOp) {
-    // Side channels — pokes that bypass `feed_one_within_budget`.
+    // Side channels — pokes that bypass `feed_one_within_budget`. Variants
+    // carrying owned data (e.g. PushQueuedMessage(String)) are handled
+    // with `if let` so they take ownership; the rest match by reference.
+    if let FuzzOp::PushQueuedMessage(text) = op {
+        app.push_queued_message(text);
+        app.assert_invariants();
+        return;
+    }
     match &op {
         FuzzOp::StartTurn(id) => {
             app.start_turn(u64::from(*id));
