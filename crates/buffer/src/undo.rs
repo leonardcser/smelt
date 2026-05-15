@@ -74,6 +74,32 @@ impl UndoHistory {
         self.undo.push(current);
         Some(entry)
     }
+
+    /// Read-only iterator over saved undo snapshots, oldest first.
+    pub fn iter_undo(&self) -> impl Iterator<Item = &UndoEntry> {
+        self.undo.iter()
+    }
+
+    /// Read-only iterator over saved redo snapshots, oldest first.
+    pub fn iter_redo(&self) -> impl Iterator<Item = &UndoEntry> {
+        self.redo.iter()
+    }
+
+    /// Number of saved undo snapshots. Used by invariant checks to assert
+    /// the cap is honored.
+    pub fn undo_len(&self) -> usize {
+        self.undo.len()
+    }
+
+    /// Number of saved redo snapshots.
+    pub fn redo_len(&self) -> usize {
+        self.redo.len()
+    }
+
+    /// Configured cap, if any. `None` means unbounded.
+    pub fn cap(&self) -> Option<usize> {
+        self.cap
+    }
 }
 
 #[cfg(test)]

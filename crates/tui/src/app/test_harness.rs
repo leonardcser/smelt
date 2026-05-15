@@ -300,16 +300,26 @@ impl TestApp {
         self.last_alloc
     }
 
-    /// Cheap structural invariants over every live `(Buffer, Window)` pair.
-    /// Panics on the first violation with a message identifying the offending
-    /// window. Safe to call after every dispatched event.
+    /// Cheap structural invariants over every live `(Buffer, Window)` pair
+    /// plus side-car state that holds byte offsets across mutations.
+    /// Panics on the first violation. Safe to call after every dispatched
+    /// event.
     ///
     /// Checks per window:
     /// - `cpos` is in `0..=source.len()`.
     /// - `cpos` lands on a UTF-8 char boundary.
     /// - `selection_anchor`, when set, satisfies the same two constraints.
     ///
-    /// Plus a global sanity check that terminal width and height are non-zero.
+    /// Checks per buffer:
+    /// - Every saved undo and redo `UndoEntry.cpos` is in-bounds and on a
+    ///   UTF-8 boundary relative to its own `entry.buf` snapshot.
+    /// - When a cap is set, `undo_len() <= cap` (cap honored after push).
+    ///
+    /// Plus globals:
+    /// - Terminal width and height non-zero.
+    /// - Kill-ring `source_range`, when set, is well-formed (`start <= end`).
+    /// - Prompt completer anchor, when active, is in-bounds and on a UTF-8
+    ///   boundary in the prompt-edit buffer.
     pub fn assert_invariants(&self) {
         for (wid, win) in self.app.ui.iter_wins() {
             let Some(buf) = self.app.ui.buf(win.buf) else {
@@ -345,8 +355,101 @@ impl TestApp {
                 );
             }
         }
+
+        for (bid, buf) in self.app.ui.iter_bufs() {
+            // Undo/redo snapshots are self-contained: each entry's `cpos`
+            // is an offset into that entry's own `buf` string, not the
+            // current source. A stale `cpos` lurking in an undo entry
+            // surfaces here before the user ever steps back into it.
+            for (i, entry) in buf.history.iter_undo().enumerate() {
+                assert!(
+                    entry.cpos <= entry.buf.len(),
+                    "buf {:?} undo[{}] cpos {} > snapshot len {}",
+                    bid,
+                    i,
+                    entry.cpos,
+                    entry.buf.len()
+                );
+                let snapped = smelt_buffer::text::snap(&entry.buf, entry.cpos);
+                assert_eq!(
+                    snapped, entry.cpos,
+                    "buf {:?} undo[{}] cpos {} not on UTF-8 char boundary",
+                    bid, i, entry.cpos
+                );
+            }
+            for (i, entry) in buf.history.iter_redo().enumerate() {
+                assert!(
+                    entry.cpos <= entry.buf.len(),
+                    "buf {:?} redo[{}] cpos {} > snapshot len {}",
+                    bid,
+                    i,
+                    entry.cpos,
+                    entry.buf.len()
+                );
+                let snapped = smelt_buffer::text::snap(&entry.buf, entry.cpos);
+                assert_eq!(
+                    snapped, entry.cpos,
+                    "buf {:?} redo[{}] cpos {} not on UTF-8 char boundary",
+                    bid, i, entry.cpos
+                );
+            }
+            if let Some(cap) = buf.history.cap() {
+                assert!(
+                    buf.history.undo_len() <= cap,
+                    "buf {:?} undo stack {} > cap {}",
+                    bid,
+                    buf.history.undo_len(),
+                    cap
+                );
+            }
+        }
+
         let (w, h) = self.app.ui.terminal_size();
         assert!(w > 0 && h > 0, "terminal size collapsed to {w}x{h}");
+
+        // Focused window, when set, must still be alive. A stale `focus`
+        // pointing at a closed leaf is a use-after-free in waiting.
+        if let Some(focused) = self.app.ui.focus() {
+            assert!(
+                self.app.ui.win(focused).is_some(),
+                "focus points at dead window {focused:?}"
+            );
+        }
+
+        // Kill-ring source range is well-formed even if we can't validate
+        // it against a specific buffer (the ring doesn't track which buffer
+        // it came from). `start <= end` is the floor.
+        if let Some((start, end)) = self.app.core.clipboard.kill_ring.source_range() {
+            assert!(
+                start <= end,
+                "kill-ring source_range {} > {} (inverted)",
+                start,
+                end
+            );
+        }
+
+        // Completer anchor lives in the prompt-edit buffer. When active,
+        // it must still resolve to a valid byte boundary after every
+        // mutation — that's the exact stale-offset trap fuzzing should
+        // catch.
+        if let Some(session) = self.app.input.completer.as_ref() {
+            if let Some(prompt) = self.app.ui.buf(crate::app::PROMPT_EDIT_BUF) {
+                let src = prompt.source();
+                let anchor = session.completer.anchor;
+                assert!(
+                    anchor <= src.len(),
+                    "completer anchor {} > prompt source len {}",
+                    anchor,
+                    src.len()
+                );
+                let snapped = smelt_buffer::text::snap(src, anchor);
+                assert_eq!(
+                    snapped, anchor,
+                    "completer anchor {} not on UTF-8 char boundary (snapped {})",
+                    anchor, snapped
+                );
+            }
+        }
     }
 
     pub fn feed<I>(&mut self, events: I)
