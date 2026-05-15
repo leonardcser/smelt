@@ -45,6 +45,7 @@ pub enum FuzzOp {
     EngineReady,
     EngineText(String),
     EngineTextDelta(String),
+    EngineThinking(String),
     EngineThinkingDelta(String),
     EngineToolStart {
         call_id: u8,
@@ -168,11 +169,17 @@ impl Snapshot {
 /// dispatch, where the relevant event arms are no-ops.
 enum PostCheck {
     None,
-    /// `Text` commits any streaming text buffer.
+    /// `Text` commits any streaming text buffer. Cascade: `flush_streaming_text`
+    /// also flushes thinking, so both buffers must be empty after.
     TextFlushed,
+    /// `Thinking { content }` commits any streaming thinking buffer.
+    ThinkingFlushed,
     /// `ToolStarted` flushes streaming text + thinking and adds `call_id`
     /// to pending.
     ToolStarted { call_id: String },
+    /// `ToolOutput` for an already-pending `call_id` is a pure append to
+    /// that tool's output; the pending entry stays put.
+    ToolOutput { call_id: String },
     /// `ToolFinished` clears `call_id` from pending — but only verifiable
     /// when it was actually present beforehand.
     ToolFinished { call_id: String },
@@ -186,9 +193,29 @@ fn run_check(check: PostCheck, pre: &Snapshot, post: &Snapshot) {
         PostCheck::TextFlushed => {
             if pre.agent_running {
                 assert!(
-                    !post.streaming.text,
-                    "EngineEvent::Text left streaming text active: {:?}",
+                    !post.streaming.text && !post.streaming.thinking,
+                    "EngineEvent::Text left streaming active: {:?}",
                     post.streaming
+                );
+            }
+        }
+        PostCheck::ThinkingFlushed => {
+            if pre.agent_running {
+                assert!(
+                    !post.streaming.thinking,
+                    "EngineEvent::Thinking left streaming thinking active: {:?}",
+                    post.streaming
+                );
+            }
+        }
+        PostCheck::ToolOutput { call_id } => {
+            if pre.pending.iter().any(|p| p == &call_id) {
+                let count = post.pending.iter().filter(|p| *p == &call_id).count();
+                assert!(
+                    count == 1,
+                    "ToolOutput({call_id}) disturbed pending entry: {count} entries, pre {:?} post {:?}",
+                    pre.pending,
+                    post.pending
                 );
             }
         }
@@ -281,6 +308,10 @@ fn plan(op: FuzzOp) -> (Option<SourceEvent>, PostCheck) {
             Some(SourceEvent::Engine(EngineEvent::TextDelta { delta: s })),
             PostCheck::None,
         ),
+        FuzzOp::EngineThinking(s) => (
+            Some(SourceEvent::Engine(EngineEvent::Thinking { content: s })),
+            PostCheck::ThinkingFlushed,
+        ),
         FuzzOp::EngineThinkingDelta(s) => (
             Some(SourceEvent::Engine(EngineEvent::ThinkingDelta { delta: s })),
             PostCheck::None,
@@ -294,13 +325,14 @@ fn plan(op: FuzzOp) -> (Option<SourceEvent>, PostCheck) {
             });
             (Some(ev), PostCheck::ToolStarted { call_id: cid })
         }
-        FuzzOp::EngineToolOutput { call_id, chunk } => (
-            Some(SourceEvent::Engine(EngineEvent::ToolOutput {
-                call_id: call_id_string(call_id),
+        FuzzOp::EngineToolOutput { call_id, chunk } => {
+            let cid = call_id_string(call_id);
+            let ev = SourceEvent::Engine(EngineEvent::ToolOutput {
+                call_id: cid.clone(),
                 chunk,
-            })),
-            PostCheck::None,
-        ),
+            });
+            (Some(ev), PostCheck::ToolOutput { call_id: cid })
+        }
         FuzzOp::EngineToolFinish {
             call_id,
             is_error,
@@ -387,6 +419,17 @@ pub fn apply_n(app: &mut TestApp, scenario: &Scenario, n: usize) {
 /// Used by the fuzz target itself and by any external replay code that
 /// just wants to re-run a scenario to confirm a crash.
 pub fn run_scenario(scenario: Scenario) {
+    // Vim bang escape (`!cmd<CR>`) spawns a shell via `tokio::spawn`. With
+    // no runtime entered, that panics. We use a current-thread runtime
+    // that never drives the task queue, so spawn succeeds and the queued
+    // shell command never actually runs — keeping fuzz iterations free
+    // of real process / fs side effects.
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("build tokio runtime for fuzz harness");
+    let _guard = runtime.enter();
+
     let mut app = TestApp::builder()
         .with_vim(scenario.vim)
         .with_mode(scenario.mode.into())
