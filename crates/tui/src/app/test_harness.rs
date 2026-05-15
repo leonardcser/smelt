@@ -711,8 +711,9 @@ impl TestApp {
         }
     }
 
-    /// UI structural integrity: terminal extent non-zero and focus is
-    /// not stale.
+    /// UI structural integrity: terminal extent non-zero, focus is not
+    /// stale, every live window's buf points at a live buffer, and the
+    /// notification overlay (when set) points at a live window.
     pub fn assert_ui_invariants(&self) {
         let (w, h) = self.app.ui.terminal_size();
         assert!(w > 0 && h > 0, "INV-20: terminal size collapsed to {w}x{h}");
@@ -723,6 +724,29 @@ impl TestApp {
             assert!(
                 self.app.ui.win(focused).is_some(),
                 "INV-21: focus points at dead window {focused:?}"
+            );
+        }
+
+        // Every live window's `buf` field must resolve to an existing
+        // buffer. A dangling buf ref means the rendering pass reads from
+        // a phantom buffer — visually invisible until the cell layout
+        // tries to query content.
+        for (wid, win) in self.app.ui.iter_wins() {
+            assert!(
+                self.app.ui.buf(win.buf).is_some(),
+                "INV-22: window {wid:?} buf {:?} points at non-existent buffer",
+                win.buf,
+            );
+        }
+
+        // Notification overlay's WinId, when set, must still resolve.
+        // `dismiss_notification` and `open_notification` always pair the
+        // `Option<WinId>` with the underlying overlay leaf; if they ever
+        // get out of sync, the next render walks a dead window.
+        if let Some(win) = self.app.notification {
+            assert!(
+                self.app.ui.win(win).is_some(),
+                "INV-23: notification points at dead window {win:?}",
             );
         }
     }
@@ -764,6 +788,26 @@ impl TestApp {
             }
         }
 
+        // Reverse direction of INV-31: every `ToolState` key must
+        // correspond to a `Block::ToolCall` in transcript history. A
+        // missing block means `gc_tool_states` failed to drop a state
+        // that no longer has a live block, or `set_history` left state
+        // behind.
+        for call_id in self.app.transcript.history.tool_states.keys() {
+            let exists = self.app.transcript.history.blocks.values().any(|b| {
+                matches!(
+                    b,
+                    smelt_core::transcript_model::Block::ToolCall { call_id: cid, .. }
+                        if cid == call_id
+                )
+            });
+            assert!(
+                exists,
+                "INV-36: tool_state {:?} has no matching Block::ToolCall in history",
+                call_id,
+            );
+        }
+
         // Working-state coherence. The animation only spins inside a turn:
         // `begin_agent_turn` / harness `start_turn` flip it on alongside
         // `agent = Some(...)`, and `discard_turn` always calls
@@ -775,6 +819,16 @@ impl TestApp {
             assert!(
                 self.app.agent.is_some(),
                 "INV-33: working is animating without an active agent turn",
+            );
+        }
+
+        // Compacting is one of the live phases — it can't be true unless
+        // working is animating. A divergence means a phase setter ran
+        // without going through `working.begin(Compacting)`.
+        if self.app.working.is_compacting() {
+            assert!(
+                self.app.working.is_animating(),
+                "INV-37: working.is_compacting without is_animating",
             );
         }
 
@@ -794,9 +848,26 @@ impl TestApp {
         }
     }
 
-    /// Bounded resources and leak floors. Currently a placeholder hook;
-    /// queue caps live here once added.
-    pub fn assert_resource_invariants(&self) {}
+    /// Bounded resources and leak floors. Caps are generous — they catch
+    /// runaway accumulation under pathological event sequences without
+    /// flagging legitimate burst traffic.
+    pub fn assert_resource_invariants(&self) {
+        const QUEUED_MESSAGES_CAP: usize = 1_024;
+        const PENDING_DIALOGS_CAP: usize = 1_024;
+
+        assert!(
+            self.app.queued_messages.len() <= QUEUED_MESSAGES_CAP,
+            "INV-40: queued_messages {} > cap {}",
+            self.app.queued_messages.len(),
+            QUEUED_MESSAGES_CAP,
+        );
+        assert!(
+            self.app.pending_dialogs.len() <= PENDING_DIALOGS_CAP,
+            "INV-41: pending_dialogs {} > cap {}",
+            self.app.pending_dialogs.len(),
+            PENDING_DIALOGS_CAP,
+        );
+    }
 
     pub fn feed<I>(&mut self, events: I)
     where
