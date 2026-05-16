@@ -13,15 +13,16 @@ pub struct McpDispatcher {
 }
 
 impl McpDispatcher {
-    pub async fn start(
-        configs: &HashMap<String, crate::mcp::McpServerConfig>,
+    /// Wrap an existing `McpManager` for use as the engine's tool
+    /// dispatcher. Callers typically build the manager via
+    /// [`McpManager::start`] and pass a clone of the `Arc` here, keeping
+    /// a second clone on `Core` for Lua introspection.
+    pub fn new(
+        manager: Arc<McpManager>,
         permissions: Arc<crate::permissions::Permissions>,
     ) -> Option<Self> {
-        if configs.is_empty() {
-            return None;
-        }
-        let manager = crate::mcp::McpManager::start(configs).await;
-        let defs = manager.tool_defs().await;
+        manager.servers().next()?;
+        let defs = manager.tool_defs();
         Some(Self {
             manager,
             defs,

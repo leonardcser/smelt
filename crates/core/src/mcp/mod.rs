@@ -7,7 +7,7 @@ use rmcp::transport::TokioChildProcess;
 use rmcp::ServiceExt;
 use serde::Deserialize;
 use std::collections::HashMap;
-use std::sync::Arc;
+use std::sync::{Arc, RwLock as StdRwLock};
 use std::time::Duration;
 use tokio::process::Command;
 use tokio::sync::RwLock;
@@ -38,12 +38,12 @@ fn default_true() -> bool {
 
 /// A discovered MCP tool definition (before wrapping as a Tool trait object).
 #[derive(Debug, Clone)]
-pub(crate) struct McpToolDef {
-    pub(crate) server_name: String,
-    pub(crate) tool_name: String,
-    pub(crate) description: String,
-    pub(crate) input_schema: serde_json::Value,
-    pub(crate) timeout: Duration,
+pub struct McpToolDef {
+    pub server_name: String,
+    pub tool_name: String,
+    pub description: String,
+    pub input_schema: serde_json::Value,
+    pub timeout: Duration,
 }
 
 impl McpToolDef {
@@ -52,167 +52,185 @@ impl McpToolDef {
     }
 }
 
-struct McpConnection {
-    client: RunningService<rmcp::RoleClient, ()>,
-    tools: Vec<McpToolDef>,
+/// Per-server lifecycle state. Updated by `McpServer::connect`; read
+/// synchronously by Lua introspection. Carries Unix-epoch timestamps so
+/// callers can render "since 12s ago" without holding a clock.
+#[derive(Debug, Clone)]
+pub enum McpStatus {
+    /// `enabled = false` in config; the connector never ran.
+    Disabled,
+    /// `connect_server` is in flight (between spawn and handshake).
+    Connecting,
+    /// Handshake + initial tool listing succeeded.
+    Connected { since_ms: u64 },
+    /// Spawn / handshake / list_tools failed.
+    Error { message: String, at_ms: u64 },
 }
 
-/// Manages all MCP server connections and their tools.
-pub(crate) struct McpManager {
-    connections: RwLock<HashMap<String, McpConnection>>,
-}
-
-impl McpManager {
-    /// Connect to all configured servers concurrently; failures are logged and skipped.
-    pub(crate) async fn start(configs: &HashMap<String, McpServerConfig>) -> Arc<Self> {
-        let manager = Arc::new(Self {
-            connections: RwLock::new(HashMap::new()),
-        });
-
-        let mut handles = Vec::new();
-        for (name, config) in configs {
-            let name = name.clone();
-            let config = config.clone();
-            let mgr = Arc::clone(&manager);
-            handles.push(tokio::spawn(async move {
-                mgr.connect_server(&name, &config).await;
-            }));
+impl McpStatus {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Disabled => "disabled",
+            Self::Connecting => "connecting",
+            Self::Connected { .. } => "connected",
+            Self::Error { .. } => "error",
         }
-
-        for h in handles {
-            let _ = h.await;
-        }
-
-        manager
     }
+}
 
-    async fn connect_server(&self, name: &str, config: &McpServerConfig) {
-        match config {
-            McpServerConfig::Local {
-                command,
-                env,
-                timeout,
-                enabled,
-            } => {
-                if !enabled || command.is_empty() {
-                    return;
-                }
+fn now_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0)
+}
 
-                let timeout_dur = Duration::from_millis(*timeout);
+/// Per-server state. Splits sync-readable status/tools (`std::RwLock`)
+/// from the async-only client handle (`tokio::RwLock`). Lua bindings
+/// hit the sync locks without entering the tokio runtime; `call_tool`
+/// uses the async lock once per invocation.
+pub struct McpServer {
+    pub name: String,
+    pub config: McpServerConfig,
+    status: StdRwLock<McpStatus>,
+    tools: StdRwLock<Vec<McpToolDef>>,
+    client: RwLock<Option<RunningService<rmcp::RoleClient, ()>>>,
+}
 
-                log::entry(
-                    log::Level::Info,
-                    "mcp_connecting",
-                    &serde_json::json!({"server": name, "command": command}),
-                );
-
-                let mut cmd = Command::new(&command[0]);
-                cmd.args(&command[1..]);
-                for (k, v) in env {
-                    cmd.env(k, v);
-                }
-
-                let transport = match TokioChildProcess::new(cmd) {
-                    Ok(t) => t,
-                    Err(e) => {
-                        return self
-                            .record_failure(name, format!("failed to spawn: {e}"))
-                            .await
-                    }
-                };
-
-                let client = match tokio::time::timeout(timeout_dur, ().serve(transport)).await {
-                    Ok(Ok(c)) => c,
-                    Ok(Err(e)) => {
-                        return self
-                            .record_failure(name, format!("handshake failed: {e}"))
-                            .await
-                    }
-                    Err(_) => {
-                        return self
-                            .record_failure(name, "connection timed out".into())
-                            .await
-                    }
-                };
-
-                let mcp_tools =
-                    match tokio::time::timeout(timeout_dur, client.list_all_tools()).await {
-                        Ok(Ok(t)) => t,
-                        Ok(Err(e)) => {
-                            return self
-                                .record_failure(name, format!("list_tools failed: {e}"))
-                                .await
-                        }
-                        Err(_) => {
-                            return self
-                                .record_failure(name, "list_tools timed out".into())
-                                .await
-                        }
-                    };
-
-                let tool_defs: Vec<McpToolDef> = mcp_tools
-                    .into_iter()
-                    .map(|t| {
-                        let tool_name = t.name.to_string();
-                        let input_schema = t.schema_as_json_value();
-                        let description = t.description.unwrap_or_default().to_string();
-                        McpToolDef {
-                            server_name: name.to_string(),
-                            tool_name,
-                            description,
-                            input_schema,
-                            timeout: timeout_dur,
-                        }
-                    })
-                    .collect();
-
-                log::entry(
-                    log::Level::Info,
-                    "mcp_connected",
-                    &serde_json::json!({
-                        "server": name,
-                        "tools": tool_defs.iter().map(|t| t.qualified_name()).collect::<Vec<_>>(),
-                    }),
-                );
-
-                self.connections.write().await.insert(
-                    name.to_string(),
-                    McpConnection {
-                        client,
-                        tools: tool_defs,
-                    },
-                );
-            }
+impl McpServer {
+    fn new(name: String, config: McpServerConfig) -> Self {
+        let initial = match &config {
+            McpServerConfig::Local { enabled, .. } if !*enabled => McpStatus::Disabled,
+            _ => McpStatus::Connecting,
+        };
+        Self {
+            name,
+            config,
+            status: StdRwLock::new(initial),
+            tools: StdRwLock::new(Vec::new()),
+            client: RwLock::new(None),
         }
     }
 
-    async fn record_failure(&self, name: &str, msg: String) {
+    pub fn status(&self) -> McpStatus {
+        self.status
+            .read()
+            .map(|s| s.clone())
+            .unwrap_or(McpStatus::Disabled)
+    }
+
+    pub fn tools(&self) -> Vec<McpToolDef> {
+        self.tools.read().map(|t| t.clone()).unwrap_or_default()
+    }
+
+    fn set_status(&self, status: McpStatus) {
+        if let Ok(mut s) = self.status.write() {
+            *s = status;
+        }
+    }
+
+    fn set_tools(&self, tools: Vec<McpToolDef>) {
+        if let Ok(mut t) = self.tools.write() {
+            *t = tools;
+        }
+    }
+
+    async fn record_failure(&self, msg: String) {
         log::entry(
             log::Level::Warn,
             "mcp_error",
-            &serde_json::json!({"server": name, "error": &msg}),
+            &serde_json::json!({"server": &self.name, "error": &msg}),
         );
+        self.set_status(McpStatus::Error {
+            message: msg,
+            at_ms: now_ms(),
+        });
     }
 
-    pub async fn tool_defs(&self) -> Vec<McpToolDef> {
-        let conns = self.connections.read().await;
-        conns.values().flat_map(|c| c.tools.clone()).collect()
+    async fn connect(&self) {
+        let McpServerConfig::Local {
+            command,
+            env,
+            timeout,
+            enabled,
+        } = &self.config;
+        if !enabled || command.is_empty() {
+            return;
+        }
+
+        let timeout_dur = Duration::from_millis(*timeout);
+
+        log::entry(
+            log::Level::Info,
+            "mcp_connecting",
+            &serde_json::json!({"server": &self.name, "command": command}),
+        );
+
+        let mut cmd = Command::new(&command[0]);
+        cmd.args(&command[1..]);
+        for (k, v) in env {
+            cmd.env(k, v);
+        }
+
+        let transport = match TokioChildProcess::new(cmd) {
+            Ok(t) => t,
+            Err(e) => return self.record_failure(format!("failed to spawn: {e}")).await,
+        };
+
+        let client = match tokio::time::timeout(timeout_dur, ().serve(transport)).await {
+            Ok(Ok(c)) => c,
+            Ok(Err(e)) => return self.record_failure(format!("handshake failed: {e}")).await,
+            Err(_) => return self.record_failure("connection timed out".into()).await,
+        };
+
+        let mcp_tools = match tokio::time::timeout(timeout_dur, client.list_all_tools()).await {
+            Ok(Ok(t)) => t,
+            Ok(Err(e)) => return self.record_failure(format!("list_tools failed: {e}")).await,
+            Err(_) => return self.record_failure("list_tools timed out".into()).await,
+        };
+
+        let tool_defs: Vec<McpToolDef> = mcp_tools
+            .into_iter()
+            .map(|t| {
+                let tool_name = t.name.to_string();
+                let input_schema = t.schema_as_json_value();
+                let description = t.description.unwrap_or_default().to_string();
+                McpToolDef {
+                    server_name: self.name.clone(),
+                    tool_name,
+                    description,
+                    input_schema,
+                    timeout: timeout_dur,
+                }
+            })
+            .collect();
+
+        log::entry(
+            log::Level::Info,
+            "mcp_connected",
+            &serde_json::json!({
+                "server": &self.name,
+                "tools": tool_defs.iter().map(|t| t.qualified_name()).collect::<Vec<_>>(),
+            }),
+        );
+
+        self.set_tools(tool_defs);
+        *self.client.write().await = Some(client);
+        self.set_status(McpStatus::Connected { since_ms: now_ms() });
     }
 
-    /// Call a tool on the appropriate MCP server. Clones the client handle before releasing the lock.
-    pub async fn call_tool(
+    async fn call_tool(
         &self,
-        server_name: &str,
         tool_name: &str,
         args: serde_json::Value,
         timeout: Duration,
     ) -> Result<String, String> {
-        let client = {
-            let conns = self.connections.read().await;
-            let conn = conns
-                .get(server_name)
-                .ok_or_else(|| format!("MCP server '{}' not connected", server_name))?;
-            conn.client.clone()
+        let peer = {
+            let guard = self.client.read().await;
+            guard
+                .as_ref()
+                .map(|svc| svc.peer().clone())
+                .ok_or_else(|| format!("MCP server '{}' not connected", self.name))?
         };
 
         let mut params = CallToolRequestParams::new(tool_name.to_string());
@@ -220,7 +238,7 @@ impl McpManager {
             params = params.with_arguments(obj.clone());
         }
 
-        let result = tokio::time::timeout(timeout, client.call_tool(params))
+        let result = tokio::time::timeout(timeout, peer.call_tool(params))
             .await
             .map_err(|_| "MCP tool call timed out".to_string())?
             .map_err(|e| format!("MCP tool call failed: {e}"))?;
@@ -232,6 +250,71 @@ impl McpManager {
         } else {
             Ok(output)
         }
+    }
+}
+
+/// Owns the set of `McpServer`s. Held by both `Core` (for Lua
+/// introspection) and `McpDispatcher` (for tool dispatch) via `Arc`.
+/// The server map is populated once at `start`; lookups are lock-free
+/// after that — each `McpServer` carries its own per-field locks.
+pub struct McpManager {
+    servers: HashMap<String, Arc<McpServer>>,
+}
+
+impl McpManager {
+    /// Connect to every configured server concurrently. Returns once
+    /// every connector future has resolved (success or failure); status
+    /// is queryable via [`McpServer::status`] afterwards.
+    pub async fn start(configs: &HashMap<String, McpServerConfig>) -> Arc<Self> {
+        let mut servers = HashMap::with_capacity(configs.len());
+        for (name, config) in configs {
+            servers.insert(
+                name.clone(),
+                Arc::new(McpServer::new(name.clone(), config.clone())),
+            );
+        }
+        let manager = Arc::new(Self { servers });
+
+        let mut handles = Vec::new();
+        for server in manager.servers.values() {
+            let server = Arc::clone(server);
+            handles.push(tokio::spawn(async move { server.connect().await }));
+        }
+        for h in handles {
+            let _ = h.await;
+        }
+
+        manager
+    }
+
+    /// All servers in arbitrary order.
+    pub fn servers(&self) -> impl Iterator<Item = &Arc<McpServer>> {
+        self.servers.values()
+    }
+
+    /// Look up one server by registered name.
+    pub fn server(&self, name: &str) -> Option<&Arc<McpServer>> {
+        self.servers.get(name)
+    }
+
+    /// Snapshot of every discovered tool across every connected server.
+    pub fn tool_defs(&self) -> Vec<McpToolDef> {
+        self.servers.values().flat_map(|s| s.tools()).collect()
+    }
+
+    /// Dispatch a tool call to the appropriate server.
+    pub async fn call_tool(
+        &self,
+        server_name: &str,
+        tool_name: &str,
+        args: serde_json::Value,
+        timeout: Duration,
+    ) -> Result<String, String> {
+        let server = self
+            .servers
+            .get(server_name)
+            .ok_or_else(|| format!("MCP server '{}' not connected", server_name))?;
+        server.call_tool(tool_name, args, timeout).await
     }
 }
 

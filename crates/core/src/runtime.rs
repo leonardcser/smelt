@@ -44,6 +44,11 @@ pub struct Core {
     pub files: crate::fs::FileStateCache,
     pub processes: ProcessRegistry,
     pub permissions: Arc<crate::permissions::Permissions>,
+    /// MCP server registry. Shared `Arc` with the engine's
+    /// `McpDispatcher`; `None` when the user declared no MCP servers.
+    /// Lua introspection reads through this handle without locking out
+    /// the engine's tool dispatch path.
+    pub mcp: Option<Arc<crate::mcp::McpManager>>,
 }
 
 impl Core {
@@ -84,6 +89,7 @@ impl Core {
             files: crate::fs::FileStateCache::new(),
             processes: ProcessRegistry::new(),
             permissions,
+            mcp: None,
         }
     }
 }
