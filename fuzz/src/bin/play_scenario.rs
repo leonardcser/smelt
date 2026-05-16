@@ -172,6 +172,7 @@ fn op_label(op: &smelt_fuzz::FuzzOp) -> String {
         KeyShift(b) => format!("shift-{}", (b'a' + (b % 26)) as char),
         KeySpecial(_) => "special".into(),
         Paste(s) => format!("paste {} chars", s.chars().count()),
+        Mouse(m) => format!("mouse k={} b={} {},{}", m.kind, m.button, m.col, m.row),
         Tick(ms) => format!("tick {ms}ms"),
         LuaWakeup => "lua wakeup".into(),
         Resize { w, h } => format!("resize {w}x{h}"),

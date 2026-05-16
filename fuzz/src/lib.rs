@@ -4,9 +4,10 @@
 //! produces, so a crash artifact round-trips into a readable file with no
 //! lossy translation.
 
-use arbitrary::Arbitrary;
+use arbitrary::{Arbitrary, Unstructured};
 use crossterm::event::{
-    Event as TermEvent, KeyCode, KeyEvent, KeyEventKind, KeyEventState, KeyModifiers,
+    Event as TermEvent, KeyCode, KeyEvent, KeyEventKind, KeyEventState, KeyModifiers, MouseButton,
+    MouseEvent, MouseEventKind,
 };
 use protocol::{AgentMode, Content, EngineEvent, Message, TokenUsage, ToolOutcome};
 use serde::{Deserialize, Serialize};
@@ -15,6 +16,123 @@ use protocol::UiCommand;
 use tui::app::test_harness::{Action, AllocBudget, SourceEvent};
 
 pub use tui::app::test_harness::TestApp;
+
+/// Bounded JSON value tree for tool argument fuzzing. Production paths
+/// (`evaluate_hooks`, `permissions.decide`, pattern matching in
+/// `RequestPermission`) consume `HashMap<String, serde_json::Value>` —
+/// feeding them all-empty bags reaches none of that logic. The
+/// `Arbitrary` impl synthesises small (≤ 6 keys, depth ≤ 3) trees so
+/// each op stays cheap.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct ArgsBag(pub HashMap<String, serde_json::Value>);
+
+impl ArgsBag {
+    pub fn into_map(self) -> HashMap<String, serde_json::Value> {
+        self.0
+    }
+}
+
+impl<'a> Arbitrary<'a> for ArgsBag {
+    fn arbitrary(u: &mut Unstructured<'a>) -> arbitrary::Result<Self> {
+        let n = u.int_in_range(0u8..=6)? as usize;
+        let mut map = HashMap::with_capacity(n);
+        for _ in 0..n {
+            let key: String = arb_short_string(u, 16)?;
+            let val = arb_json(u, 3)?;
+            map.insert(key, val);
+        }
+        Ok(ArgsBag(map))
+    }
+}
+
+fn arb_short_string(u: &mut Unstructured<'_>, max_bytes: usize) -> arbitrary::Result<String> {
+    let len = u.int_in_range(0..=max_bytes)?;
+    let bytes: Vec<u8> = (0..len).map(|_| u.arbitrary::<u8>()).collect::<Result<_, _>>()?;
+    Ok(String::from_utf8_lossy(&bytes).into_owned())
+}
+
+fn arb_json(u: &mut Unstructured<'_>, depth: u8) -> arbitrary::Result<serde_json::Value> {
+    if depth == 0 || u.is_empty() {
+        return arb_json_leaf(u);
+    }
+    match u.int_in_range(0u8..=5)? {
+        0 => arb_json_leaf(u),
+        1 => Ok(serde_json::Value::String(arb_short_string(u, 16)?)),
+        2 => {
+            let n = u.int_in_range(0u8..=4)? as usize;
+            let mut v = Vec::with_capacity(n);
+            for _ in 0..n {
+                v.push(arb_json(u, depth - 1)?);
+            }
+            Ok(serde_json::Value::Array(v))
+        }
+        3 => {
+            let n = u.int_in_range(0u8..=4)? as usize;
+            let mut m = serde_json::Map::with_capacity(n);
+            for _ in 0..n {
+                m.insert(arb_short_string(u, 16)?, arb_json(u, depth - 1)?);
+            }
+            Ok(serde_json::Value::Object(m))
+        }
+        _ => arb_json_leaf(u),
+    }
+}
+
+fn arb_json_leaf(u: &mut Unstructured<'_>) -> arbitrary::Result<serde_json::Value> {
+    match u.int_in_range(0u8..=4)? {
+        0 => Ok(serde_json::Value::Null),
+        1 => Ok(serde_json::Value::Bool(u.arbitrary()?)),
+        2 => Ok(serde_json::json!(u.arbitrary::<i64>()?)),
+        3 => {
+            let f: f64 = u.arbitrary()?;
+            Ok(serde_json::Number::from_f64(f)
+                .map(serde_json::Value::Number)
+                .unwrap_or(serde_json::Value::Null))
+        }
+        _ => Ok(serde_json::Value::String(arb_short_string(u, 16)?)),
+    }
+}
+
+/// Mouse event payload. `kind`/`button`/`mods` index lookup tables
+/// declared below so `arbitrary` byte-budget stays tiny.
+#[derive(Arbitrary, Debug, Clone, Serialize, Deserialize)]
+pub struct MouseFuzz {
+    pub kind: u8,
+    pub button: u8,
+    pub col: u8,
+    pub row: u8,
+    pub mods: u8,
+}
+
+const MOUSE_BUTTONS: &[MouseButton] = &[MouseButton::Left, MouseButton::Right, MouseButton::Middle];
+
+fn decode_mouse_kind(kind: u8, button: u8) -> MouseEventKind {
+    let btn = MOUSE_BUTTONS[(button as usize) % MOUSE_BUTTONS.len()];
+    match kind % 8 {
+        0 => MouseEventKind::Down(btn),
+        1 => MouseEventKind::Up(btn),
+        2 => MouseEventKind::Drag(btn),
+        3 => MouseEventKind::Moved,
+        4 => MouseEventKind::ScrollDown,
+        5 => MouseEventKind::ScrollUp,
+        6 => MouseEventKind::ScrollLeft,
+        _ => MouseEventKind::ScrollRight,
+    }
+}
+
+fn decode_mouse_mods(mods: u8) -> KeyModifiers {
+    let mut m = KeyModifiers::NONE;
+    if mods & 0b001 != 0 {
+        m |= KeyModifiers::CONTROL;
+    }
+    if mods & 0b010 != 0 {
+        m |= KeyModifiers::SHIFT;
+    }
+    if mods & 0b100 != 0 {
+        m |= KeyModifiers::ALT;
+    }
+    m
+}
 
 /// One unit of fuzz input. Each variant either translates to a
 /// `SourceEvent` or invokes a harness side channel (`StartTurn`).
@@ -32,6 +150,11 @@ pub enum FuzzOp {
     KeySpecial(u8),
     /// Bracketed paste with arbitrary UTF-8 payload.
     Paste(String),
+    /// Mouse event (click/drag/wheel/move). Routes through
+    /// `dispatch_terminal_event` → `handle_mouse` so the scrollbar,
+    /// click-to-focus, drag-selection, and viewport-pan paths are
+    /// reachable from fuzzing.
+    Mouse(MouseFuzz),
     /// Advance the virtual clock by `ms` milliseconds.
     Tick(u16),
     /// Wake any pending Lua callbacks.
@@ -51,6 +174,7 @@ pub enum FuzzOp {
     EngineToolStart {
         call_id: u8,
         tool_name: String,
+        args: ArgsBag,
     },
     EngineToolOutput {
         call_id: u8,
@@ -137,6 +261,7 @@ pub enum FuzzOp {
         call_id: u8,
         tool_name: String,
         confirm_message: String,
+        args: ArgsBag,
     },
     /// Side channel: approve the oldest pending confirm. Mirrors what
     /// `lua_handlers::handle_dialog_decision` does with `ConfirmChoice::Yes`.
@@ -157,6 +282,7 @@ pub enum FuzzOp {
         req_id: u8,
         call_id: u8,
         tool_name: String,
+        args: ArgsBag,
     },
     /// Emit `ToolHooksRequest`. Active-turn dispatch always queues a
     /// `ToolHooksResponse` UiCommand back; `evaluate_hooks` short-circuits
@@ -165,6 +291,7 @@ pub enum FuzzOp {
         req_id: u8,
         call_id: u8,
         tool_name: String,
+        args: ArgsBag,
     },
     /// Emit `CoreToolResult`. Active-turn dispatch routes to
     /// `lua.resolve_core_tool_call`, which is a no-op when no pending
@@ -741,16 +868,19 @@ fn run_check(check: PostCheck, pre: &Snapshot, post: &Snapshot, new_actions: &[A
             }
         }
         PostCheck::CompactionApplied { msg_count } => {
-            // The apply path runs only on epoch match AND no pending tools.
-            // When pending tools exist, the active-turn handler refuses
-            // compaction (would orphan tool widgets). A non-empty payload
-            // on the apply path replaces the conversation and clears
-            // snapshot vectors. Idle dispatch also routes non-empty
-            // payloads through the apply path, but skip the assertions
-            // when we can't tell which arm ran (e.g. an active turn that
-            // wasn't compacting).
+            // Arms (active-turn dispatch in engine_events.rs:211, idle
+            // dispatch at :355):
+            //   A) epoch match + no pending tools           → apply
+            //   B) epoch match + pending tools (active turn) → refuse
+            //   C) epoch stale                              → refuse
+            //   D) idle + epoch match (any pending state)   → apply
+            // The apply path inside `apply_compaction` itself has an
+            // early-return for `messages.is_empty()` — so msg_count==0
+            // even on the apply arm is a structural no-op.
             let pending_tools = !pre.pending.is_empty();
-            if pre.compact_epoch_match && msg_count > 0 && !pending_tools {
+            let apply_arm = pre.compact_epoch_match && (!pre.agent_running || !pending_tools);
+            let refuse_arm = !pre.compact_epoch_match || (pre.agent_running && pending_tools);
+            if apply_arm && msg_count > 0 {
                 assert_eq!(
                     post.session_messages, msg_count,
                     "CompactionComplete did not replace session.messages: pre {} → post {} (expected {msg_count})",
@@ -766,6 +896,27 @@ fn run_check(check: PostCheck, pre: &Snapshot, post: &Snapshot, new_actions: &[A
                 assert!(
                     !post.working.compacting,
                     "CompactionComplete left working in compacting phase: {:?}",
+                    post.working,
+                );
+            }
+            if (apply_arm && msg_count == 0) || refuse_arm {
+                // No-op branches: apply_compaction's empty-messages
+                // early-return, and both refuse arms must leave
+                // session.messages and snapshot vectors untouched.
+                assert_eq!(
+                    post.session_messages, pre.session_messages,
+                    "CompactionComplete no-op arm mutated session.messages: pre {} → post {}",
+                    pre.session_messages, post.session_messages,
+                );
+                assert_eq!(
+                    post.snapshot_counts, pre.snapshot_counts,
+                    "CompactionComplete no-op arm mutated snapshot vectors: pre {:?} → post {:?}",
+                    pre.snapshot_counts, post.snapshot_counts,
+                );
+                // All no-op arms call working.finish(Done) explicitly.
+                assert!(
+                    !post.working.compacting,
+                    "CompactionComplete no-op arm left working compacting: {:?}",
                     post.working,
                 );
             }
@@ -801,6 +952,18 @@ fn plan(op: FuzzOp) -> (Option<SourceEvent>, PostCheck) {
             )
         }
         FuzzOp::Paste(s) => (Some(SourceEvent::Term(TermEvent::Paste(s))), PostCheck::None),
+        FuzzOp::Mouse(m) => {
+            let ev = MouseEvent {
+                kind: decode_mouse_kind(m.kind, m.button),
+                column: u16::from(m.col),
+                row: u16::from(m.row),
+                modifiers: decode_mouse_mods(m.mods),
+            };
+            (
+                Some(SourceEvent::Term(TermEvent::Mouse(ev))),
+                PostCheck::None,
+            )
+        }
         FuzzOp::Tick(ms) => (Some(SourceEvent::Tick(u64::from(ms))), PostCheck::None),
         FuzzOp::LuaWakeup => (Some(SourceEvent::LuaWakeup), PostCheck::None),
         FuzzOp::Resize { w, h } => (
@@ -829,12 +992,16 @@ fn plan(op: FuzzOp) -> (Option<SourceEvent>, PostCheck) {
             Some(SourceEvent::Engine(EngineEvent::ThinkingDelta { delta: s })),
             PostCheck::None,
         ),
-        FuzzOp::EngineToolStart { call_id, tool_name } => {
+        FuzzOp::EngineToolStart {
+            call_id,
+            tool_name,
+            args,
+        } => {
             let cid = call_id_string(call_id);
             let ev = SourceEvent::Engine(EngineEvent::ToolStarted {
                 call_id: cid.clone(),
                 tool_name,
-                args: HashMap::new(),
+                args: args.into_map(),
             });
             (Some(ev), PostCheck::ToolStarted { call_id: cid })
         }
@@ -952,12 +1119,13 @@ fn plan(op: FuzzOp) -> (Option<SourceEvent>, PostCheck) {
             call_id,
             tool_name,
             confirm_message,
+            args,
         } => {
             let ev = SourceEvent::Engine(EngineEvent::RequestPermission {
                 request_id: u64::from(req_id),
                 call_id: call_id_string(call_id),
                 tool_name,
-                args: HashMap::new(),
+                args: args.into_map(),
                 confirm_message,
                 approval_patterns: Vec::new(),
                 summary: None,
@@ -971,12 +1139,13 @@ fn plan(op: FuzzOp) -> (Option<SourceEvent>, PostCheck) {
             req_id,
             call_id,
             tool_name,
+            args,
         } => {
             let ev = SourceEvent::Engine(EngineEvent::ToolDispatch {
                 request_id: u64::from(req_id),
                 call_id: call_id_string(call_id),
                 tool_name,
-                args: HashMap::new(),
+                args: args.into_map(),
             });
             (Some(ev), PostCheck::ToolDispatched)
         }
@@ -984,12 +1153,13 @@ fn plan(op: FuzzOp) -> (Option<SourceEvent>, PostCheck) {
             req_id,
             call_id,
             tool_name,
+            args,
         } => {
             let ev = SourceEvent::Engine(EngineEvent::ToolHooksRequest {
                 request_id: u64::from(req_id),
                 call_id: call_id_string(call_id),
                 tool_name,
-                args: HashMap::new(),
+                args: args.into_map(),
                 mode: AgentMode::Normal,
             });
             (Some(ev), PostCheck::ToolHooksRequested)

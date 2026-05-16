@@ -848,12 +848,13 @@ impl TestApp {
         }
     }
 
-    /// Bounded resources and leak floors. Caps are generous — they catch
-    /// runaway accumulation under pathological event sequences without
-    /// flagging legitimate burst traffic.
+    /// Bounded resources and leak floors. The caps sit just above what
+    /// any sensible burst would need (a handful of queued user messages,
+    /// a handful of in-flight confirms) so a true unbounded leak trips
+    /// well before the 256-op fuzz budget runs out.
     pub fn assert_resource_invariants(&self) {
-        const QUEUED_MESSAGES_CAP: usize = 1_024;
-        const PENDING_DIALOGS_CAP: usize = 1_024;
+        const QUEUED_MESSAGES_CAP: usize = 64;
+        const PENDING_DIALOGS_CAP: usize = 64;
 
         assert!(
             self.app.queued_messages.len() <= QUEUED_MESSAGES_CAP,

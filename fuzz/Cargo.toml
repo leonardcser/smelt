@@ -32,6 +32,13 @@ doc = false
 bench = false
 
 [[bin]]
+name = "text_ops"
+path = "fuzz_targets/text_ops.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
 name = "crash_to_scenario"
 path = "src/bin/crash_to_scenario.rs"
 test = false
