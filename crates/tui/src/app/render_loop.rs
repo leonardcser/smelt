@@ -211,20 +211,16 @@ impl TuiApp {
             width: term_w,
         };
         let theme = self.ui.theme().clone();
-        let buf = self
-            .ui
-            .win_buf_mut(self.well_known.prompt_above)
-            .expect("prompt-above window registered at startup");
-        prompt_buf::compute_prompt_above(&pa, buf, &theme);
+        if let Some(buf) = self.ui.win_buf_mut(self.well_known.prompt_above) {
+            prompt_buf::compute_prompt_above(&pa, buf, &theme);
+        }
     }
 
     fn sync_prompt_below_layer(&mut self, term_w: u16) {
         let theme = self.ui.theme().clone();
-        let buf = self
-            .ui
-            .win_buf_mut(self.well_known.prompt_below)
-            .expect("prompt-below window registered at startup");
-        prompt_buf::compute_prompt_below(term_w, buf, &theme);
+        if let Some(buf) = self.ui.win_buf_mut(self.well_known.prompt_below) {
+            prompt_buf::compute_prompt_below(term_w, buf, &theme);
+        }
     }
 
     /// Populate the input-leaf buffer, cursor, and viewport. Cursor positions are content-local;

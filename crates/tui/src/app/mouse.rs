@@ -144,8 +144,13 @@ impl TuiApp {
                 }
             } else if self.ui.win(win).is_some_and(|w| w.selectable) {
                 // Generic selectable leaf: notifications, dialog bodies, future popups.
-                // Focus is left untouched — a non-focusable selectable leaf must not
-                // steal app_focus; a focusable one was already focused by the overlay.
+                // On Down, promote keyboard focus to this leaf if it's focusable —
+                // overlays with multiple leaves (e.g. side-by-side panes) need click
+                // to follow keyboard focus, not just the first leaf the overlay opened.
+                // A non-focusable selectable leaf must not steal app_focus.
+                if is_down && self.ui.win(win).is_some_and(|w| w.focusable) {
+                    self.ui.set_focus(win);
+                }
                 let yank = self.handle_selectable_leaf_mouse(win, me, count);
                 if is_up {
                     if let Some(out) = yank {
@@ -230,10 +235,16 @@ impl TuiApp {
     ) -> Option<crate::smelt_term::CopyOutput> {
         let viewport = crate::smelt_term::UiHost::viewport_for(self, win)?;
         let buf_id = self.ui.win(win).map(|w| w.buf)?;
+        // Triple-click selects the line at the cursor; without hard breaks
+        // `line_range_at` falls through to "whole buffer". Index newlines once.
+        let hard_breaks: Vec<usize> = {
+            let buf = self.ui.buf(buf_id)?;
+            buf.source().match_indices('\n').map(|(i, _)| i).collect()
+        };
         let range = {
             let mouse_ctx = crate::smelt_term::MouseCtx {
                 soft_breaks: &[],
-                hard_breaks: &[],
+                hard_breaks: &hard_breaks,
                 viewport,
                 click_count,
             };

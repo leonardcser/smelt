@@ -34,8 +34,9 @@ local function close()
 	if not STATE then
 		return
 	end
-	if STATE.overlay then
-		smelt.win.close(STATE.overlay)
+	-- `win.close(leaf)` closes the whole overlay when the leaf belongs to one.
+	if STATE.left_win then
+		smelt.win.close(STATE.left_win)
 	end
 	STATE = nil
 end
@@ -122,10 +123,13 @@ local function open(filepath)
 
 	smelt.win.link_scroll({ left_win, right_win })
 
-	for _, w in ipairs({ left_win, right_win }) do
-		smelt.win.set_keymap(w, "<Esc>", close)
-		smelt.win.set_keymap(w, "q", close)
-	end
+	-- No Esc keymap: with `modal = true`, Tier 5 of the key cascade dismisses
+	-- the overlay on bare Esc / Ctrl-C — and only when vim is in idle Normal
+	-- (so Esc in Visual still exits Visual instead of closing the dialog).
+	-- We listen for `close` to keep STATE in sync once the overlay tears down.
+	smelt.win.on_event(left_win, "close", function()
+		STATE = nil
+	end)
 	smelt.win.set_focus(left_win)
 end
 
