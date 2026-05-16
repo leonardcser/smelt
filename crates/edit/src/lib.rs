@@ -219,16 +219,10 @@ impl Ui {
                 })
                 .collect();
             // Vertical axis.
-            let v_leader = now
-                .iter()
-                .zip(g.last.iter())
-                .position(|(n, l)| n.0 != l.0);
+            let v_leader = now.iter().zip(g.last.iter()).position(|(n, l)| n.0 != l.0);
             let v_target = v_leader.map(|i| now[i].0);
             // Horizontal axis.
-            let h_leader = now
-                .iter()
-                .zip(g.last.iter())
-                .position(|(n, l)| n.1 != l.1);
+            let h_leader = now.iter().zip(g.last.iter()).position(|(n, l)| n.1 != l.1);
             let h_target = h_leader.map(|i| now[i].1);
             for (i, wid) in g.members.iter().enumerate() {
                 if let Some(w) = self.wins.get_mut(wid) {

@@ -723,12 +723,7 @@ impl Window {
     /// cached layout's widest visual row; vertical bounds use the caller-
     /// supplied `total_rows` so wrap-aware paths pass `visual_row_total` and
     /// plain row counters pass `lines().len()`.
-    pub fn keep_cursor_visible(
-        &mut self,
-        total_rows: u16,
-        viewport_rows: u16,
-        viewport_cols: u16,
-    ) {
+    pub fn keep_cursor_visible(&mut self, total_rows: u16, viewport_rows: u16, viewport_cols: u16) {
         if viewport_rows > 0 {
             let max_scroll = total_rows.saturating_sub(viewport_rows);
             let viewport_bottom = self

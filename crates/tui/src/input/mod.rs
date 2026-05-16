@@ -451,11 +451,7 @@ impl PromptState {
             let s = (cursor_line as usize).saturating_sub((viewport_rows.max(1) / 2) as usize);
             ctx.win.scroll_top = (s as u16).min(max_scroll);
         } else {
-            let viewport_cols = ctx
-                .win
-                .viewport
-                .map(|v| v.content_width)
-                .unwrap_or(0);
+            let viewport_cols = ctx.win.viewport.map(|v| v.content_width).unwrap_or(0);
             ctx.win
                 .keep_cursor_visible(total_rows, viewport_rows, viewport_cols);
         }
