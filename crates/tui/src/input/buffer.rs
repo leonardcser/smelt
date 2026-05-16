@@ -53,6 +53,7 @@ impl PromptState {
         }
         let p = safe_insert(ctx.buf.source_mut(), ctx.win.cpos, c);
         ctx.win.cpos = p + c.len_utf8();
+        ctx.win.clamp_anchors_to_source(ctx.buf.source());
         self.recompute_completer(ctx.as_ref());
     }
 
@@ -337,6 +338,7 @@ impl PromptState {
         }
         let p = safe_insert_str(ctx.buf.source_mut(), ctx.win.cpos, &data);
         ctx.win.cpos = p + data.len();
+        ctx.win.clamp_anchors_to_source(ctx.buf.source());
     }
 
     pub(super) fn insert_attachment_id(&mut self, ctx: &mut PromptCtx<'_>, id: AttachmentId) {
@@ -347,6 +349,7 @@ impl PromptState {
         ctx.buf.attachment_ids.insert(idx, id);
         let p = safe_insert(ctx.buf.source_mut(), ctx.win.cpos, ATTACHMENT_MARKER);
         ctx.win.cpos = p + ATTACHMENT_MARKER.len_utf8();
+        ctx.win.clamp_anchors_to_source(ctx.buf.source());
     }
 
     pub(super) fn move_to_line(&mut self, ctx: &mut PromptCtx<'_>, target_line: usize) {
