@@ -455,7 +455,7 @@ pub(crate) fn configure_list_leaf(app: &mut TuiApp, leaf: WinId, initial_cursor:
     let target = initial_cursor.min(max);
     let (win, buf) = app.ui.win_and_buf_mut(leaf, buf_id);
     if let (Some(win), Some(buf)) = (win, buf) {
-        win.cursor_line_highlight = true;
+        win.selection_highlight = true;
         // List-style leaf: `mouse_scroll = true` doubles as the caret-leaf opt-out,
         // so mouse-up doesn't commit `cpos` here — the highlighted row is driven
         // by j/k navigation, not the click byte.

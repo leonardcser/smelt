@@ -827,20 +827,27 @@ impl TuiApp {
             .try_dismiss_modal_for_chord(k.code, k.modifiers, &mut lua_invoke)
     }
 
-    /// Forward a key to the focused overlay-leaf Window when it's vim-enabled and no keymap
-    /// absorbed the key. Returns `true` if the Window claimed the event.
+    /// Forward a key to the focused leaf Window. Two distinct cases:
+    ///   1. PageUp / PageDown — work on any focused window with a viewport,
+    ///      vim or not. Lets non-vim users still scroll a code/help/diff view.
+    ///   2. Everything else — only routes when the focused window is
+    ///      `vim_enabled`. Esc in idle Normal mode falls through so the
+    ///      modal-dismiss tier can close the overlay; vim's half/full-page
+    ///      Ctrl- scroll is wired here so the host owns viewport arithmetic.
     pub(crate) fn dispatch_overlay_viewer_key(&mut self, k: KeyEvent) -> bool {
         let win = match self.ui.focus() {
             Some(w) => w,
             None => return false,
         };
         let (vim_enabled, buf_id, viewport_rows) = match self.ui.win(win) {
-            Some(w) if w.vim_enabled => {
-                (true, w.buf, w.viewport.map(|v| v.rect.height).unwrap_or(0))
-            }
-            _ => return false,
+            Some(w) => (
+                w.vim_enabled,
+                w.buf,
+                w.viewport.map(|v| v.rect.height).unwrap_or(0),
+            ),
+            None => return false,
         };
-        if !vim_enabled || viewport_rows == 0 {
+        if viewport_rows == 0 {
             return false;
         }
         let (win_mut, buf) = self.ui.win_and_buf_mut(win, buf_id);
@@ -855,6 +862,32 @@ impl TuiApp {
         if buf.lines().is_empty() {
             return false;
         }
+        // (1) Page motion: always available. For vim windows, only fire
+        // outside Insert mode so typing a literal PageUp inside an editable
+        // input still inserts/edits — overlay viewers are read-only so this
+        // is a no-op for them, but the same path serves future editable
+        // vim leaves too. The `Ctrl-` variants must stay gated on Normal
+        // because vim Insert handlers may want them later.
+        let in_insert = vim_enabled && win_mut.vim_mode == crate::smelt_term::VimMode::Insert;
+        if !in_insert {
+            let is_ctrl_motion = k
+                .modifiers
+                .contains(crossterm::event::KeyModifiers::CONTROL);
+            let allow = !is_ctrl_motion
+                || !vim_enabled
+                || win_mut.vim_mode == crate::smelt_term::VimMode::Normal;
+            if allow {
+                if let Some(d) = crate::smelt_term::vim::page_motion_delta(k, viewport_rows) {
+                    win_mut.move_cursor_by_lines(buf, d, viewport_rows);
+                    let max_scroll = (buf.lines().len() as u16).saturating_sub(viewport_rows);
+                    win_mut.follow_tail = win_mut.scroll_top >= max_scroll;
+                    return true;
+                }
+            }
+        }
+        if !vim_enabled {
+            return false;
+        }
         // Esc in idle Normal mode is a no-op for the viewer — let it fall
         // through so the modal-dismiss tier can close the overlay. When
         // Visual mode is active or a pending sequence is buffered, Esc still
@@ -864,17 +897,6 @@ impl TuiApp {
             && win_mut.vim_state.is_idle()
         {
             return false;
-        }
-        // Vim half/full-page scroll. The vim engine passes these through
-        // (`Action::Passthrough`) because the host owns viewport arithmetic;
-        // both the transcript pane and overlay leaves share the same mapping.
-        if win_mut.vim_mode == crate::smelt_term::VimMode::Normal {
-            if let Some(d) = crate::smelt_term::vim::page_motion_delta(k, viewport_rows) {
-                win_mut.move_cursor_by_lines(buf, d, viewport_rows);
-                let max_scroll = (buf.lines().len() as u16).saturating_sub(viewport_rows);
-                win_mut.follow_tail = win_mut.scroll_top >= max_scroll;
-                return true;
-            }
         }
         let status = win_mut.handle_key(buf, k, &mut self.core.clipboard);
         let max_scroll = (buf.lines().len() as u16).saturating_sub(viewport_rows);

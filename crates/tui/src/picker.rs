@@ -119,7 +119,7 @@ pub(crate) fn open(
     let (cursor_row, scroll) = cursor_and_scroll(selected, items.len(), height, reversed, 0);
     let (w, buf_ref) = app.ui.win_and_buf_mut(leaf, buf);
     if let (Some(w), Some(buf_ref)) = (w, buf_ref) {
-        w.cursor_line_highlight = true;
+        w.selection_highlight = true;
         // Mouse-scroll opt-in: doubles as the caret-leaf opt-out so a click
         // doesn't commit `cpos` mid-line. Wheel pans the viewport and shifts
         // the highlight visually (same as `dialog.list` / resume).

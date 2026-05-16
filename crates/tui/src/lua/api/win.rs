@@ -91,7 +91,7 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
         &win_tbl,
         "smelt.win",
         "open",
-        "Open a split window over the buffer `buf_id`. `opts.region` picks the layout slot (default `\"lua_overlay\"`); `opts.focusable`, `opts.cursor_line_highlight`, and `opts.vim_enabled` toggle behaviour. `opts.pad_left` / `opts.pad_right` reserve padding columns on either side. `opts.scrollbar` (default `true`) reserves the rightmost column for a scrollbar that paints only when content overflows — set `false` for cursor-driven UIs (lists, single-line inputs). `opts.wrap` (default `true`) soft-wraps long logical lines onto multiple visual rows; rows the renderer marked `pre_formatted` (e.g. syntax-highlighted code) are not re-wrapped. The line-number gutter is on by default and shows numbers only for rows stamped with `SourceLine` metadata (so text/list panes pay no column cost while code/diff buffers number automatically); pass `opts.gutter = \"none\"` to disable. Returns the new `WinId` or `nil` if no slot was available.",
+        "Open a split window over the buffer `buf_id`. `opts.region` picks the layout slot (default `\"lua_overlay\"`); `opts.focusable` and `opts.vim_enabled` toggle keyboard behaviour. Row-highlight is two-opt: `opts.cursor_line` (paints the row at the cursor only while this window is focused — caret leaves like code/diff viewers) and `opts.selection_highlight` (paints the row at `cursor_row` regardless of focus — list leaves like pickers driven by an external input). `opts.pad_left` / `opts.pad_right` reserve padding columns on either side. `opts.scrollbar` (default `true`) reserves the rightmost column for a scrollbar that paints only when content overflows — set `false` for cursor-driven UIs (lists, single-line inputs). `opts.wrap` (default `true`) soft-wraps long logical lines onto multiple visual rows; rows the renderer marked `pre_formatted` (e.g. syntax-highlighted code) are not re-wrapped. The line-number gutter is on by default and shows numbers only for rows stamped with `SourceLine` metadata (so text/list panes pay no column cost while code/diff buffers number automatically); pass `opts.gutter = \"none\"` to disable. Returns the new `WinId` or `nil` if no slot was available.",
         &["buf_id", "opts"],
         lua,
         |_, (buf_id, opts): (u64, Option<mlua::Table>)| -> LuaResult<Option<u64>> {
@@ -144,10 +144,13 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
                             if let Ok(focusable) = opts.get::<bool>("focusable") {
                                 w.focusable = focusable;
                             }
-                            if let Ok(cursor_line_highlight) =
-                                opts.get::<bool>("cursor_line_highlight")
+                            if let Ok(cursor_line) = opts.get::<bool>("cursor_line") {
+                                w.cursor_line = cursor_line;
+                            }
+                            if let Ok(selection_highlight) =
+                                opts.get::<bool>("selection_highlight")
                             {
-                                w.cursor_line_highlight = cursor_line_highlight;
+                                w.selection_highlight = selection_highlight;
                             }
                             if let Ok(vim_enabled) = opts.get::<bool>("vim_enabled") {
                                 w.set_vim_enabled(vim_enabled);

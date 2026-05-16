@@ -236,10 +236,23 @@ impl TuiApp {
         let viewport = crate::smelt_term::UiHost::viewport_for(self, win)?;
         let buf_id = self.ui.win(win).map(|w| w.buf)?;
         // Triple-click selects the line at the cursor; without hard breaks
-        // `line_range_at` falls through to "whole buffer". Index newlines once.
+        // `line_range_at` falls through to "whole buffer". Compute byte
+        // offsets of every `\n` in the joined text — matches `Buffer::text`'s
+        // `lines.join("\n")` layout. `buf.source()` is empty for buffers
+        // populated via the line/decoration API (rendered diffs, etc.).
         let hard_breaks: Vec<usize> = {
             let buf = self.ui.buf(buf_id)?;
-            buf.source().match_indices('\n').map(|(i, _)| i).collect()
+            let lines = buf.lines();
+            let mut breaks = Vec::with_capacity(lines.len().saturating_sub(1));
+            let mut acc: usize = 0;
+            for (i, line) in lines.iter().enumerate() {
+                if i + 1 < lines.len() {
+                    acc += line.len();
+                    breaks.push(acc);
+                    acc += 1; // the joining '\n'
+                }
+            }
+            breaks
         };
         let range = {
             let mouse_ctx = crate::smelt_term::MouseCtx {

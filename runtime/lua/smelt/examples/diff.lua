@@ -89,7 +89,7 @@ local function open(filepath)
 	local win_opts = {
 		focusable = true,
 		vim_enabled = vim,
-		cursor_line_highlight = true,
+		cursor_line = true,
 		selectable = true,
 	}
 	local left_win = smelt.win.open(left_buf, win_opts)

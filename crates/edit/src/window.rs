@@ -230,9 +230,18 @@ pub struct Window {
     /// a rebuild on the next `ensure_layout`.
     layout_key: Option<(u64, u16, bool)>,
     pub focusable: bool,
-    /// Paints `CursorLine` bg on the cursor row when focused. Off by default; list-shaped
-    /// windows opt in so the selected row is visible regardless of focus.
-    pub cursor_line_highlight: bool,
+    /// Caret-style cursorline: paints `CursorLine` bg on the cursor row
+    /// **only when this window is focused**. Models Neovim's `'cursorline'`
+    /// — the cursor lives in this window, this is where it is. Off by
+    /// default. Set on caret leaves (transcript, code/diff viewers) where
+    /// an unfocused sibling pane should not show a stale cursor row.
+    pub cursor_line: bool,
+    /// List-style selection highlight: paints `CursorLine` bg on the row at
+    /// `cursor_row` **regardless of focus**. Models "this is the active
+    /// option in the picker." Off by default. Set on list-shaped leaves
+    /// whose selection state needs to remain visible while an external
+    /// input (e.g. a sibling search box) drives navigation.
+    pub selection_highlight: bool,
     /// Whether mouse-wheel events over this leaf scroll the viewport. List leaves opt in
     /// so the wheel pans the rows; one-line inputs leave it off so wheeling near them
     /// stays inert. The host hit-tests on every scroll event and routes accordingly.
@@ -305,7 +314,8 @@ impl Window {
             layout: WrappedLayout::default(),
             layout_key: None,
             focusable: true,
-            cursor_line_highlight: false,
+            cursor_line: false,
+            selection_highlight: false,
             mouse_scroll: false,
             selectable: false,
             viewport: None,
@@ -1186,8 +1196,8 @@ impl Window {
         };
         let line_count = layout.visual_count();
         // Screen row of the cursor (or drag endpoint mid-gesture). Drives the
-        // `CursorLine` bg fill below when `cursor_line_highlight` is on, and
-        // gates `on_cursor_row` extmark painting regardless of that flag so
+        // `CursorLine` bg fill below when `cursor_line` / `selection_highlight`
+        // is on, and gates `on_cursor_row` extmark painting regardless so
         // selection-aware spans always work.
         let cursor_screen_row = {
             let effective_row = self.effective_cursor_row(buf);
@@ -1195,7 +1205,9 @@ impl Window {
                 .checked_sub(self.scroll_top)
                 .filter(|rel| *rel < height)
         };
-        let fill_cursor_row = self.cursor_line_highlight;
+        // Two opt-ins; `selection_highlight` always paints (picker semantics),
+        // `cursor_line` paints only when this window owns focus (caret semantics).
+        let fill_cursor_row = self.selection_highlight || (self.cursor_line && ctx.focused);
         let normal_style = ctx.theme.get("Normal");
         let cursor_style = ctx.theme.get("CursorLine");
         let visual_style = ctx.theme.get("Visual");
@@ -1935,13 +1947,13 @@ mod tests {
 
     #[test]
     fn render_highlights_cursor_row_when_opted_in_and_focused() {
-        // List-shaped Window with `cursor_line_highlight = true`:
-        // the row at `cursor_row` (buffer-absolute, converted to screen row) gets
-        // the `CursorLine` theme bg.
+        // Caret-style Window with `cursor_line = true`: the row at
+        // `cursor_row` (buffer-absolute, converted to screen row) gets the
+        // `CursorLine` theme bg whenever this window owns focus.
         let mut buf = Buffer::new(BufId(1), BufCreateOpts::default());
         buf.set_all_lines(vec!["alpha".into(), "bravo".into(), "charlie".into()]);
         let mut w = make_win();
-        w.cursor_line_highlight = true;
+        w.cursor_line = true;
         w.cursor_row = 1; // second visible row
         let mut theme = Theme::default();
         let bg = crate::grid::Style::new().bg(crate::grid::Color::AnsiValue(238));
@@ -1969,8 +1981,8 @@ mod tests {
 
     #[test]
     fn render_skips_cursor_highlight_without_opt_in() {
-        // Default `cursor_line_highlight = false` — focused content
-        // viewers (transcript, /help, /btw) stay clean.
+        // Both `cursor_line` and `selection_highlight` default to false —
+        // focused content viewers (transcript, /help, /btw) stay clean.
         let mut buf = Buffer::new(BufId(1), BufCreateOpts::default());
         buf.set_all_lines(vec!["alpha".into(), "bravo".into()]);
         let w = make_win();
@@ -2060,14 +2072,14 @@ mod tests {
 
     #[test]
     fn render_layers_highlight_attributes_on_cursor_row_bg() {
-        // When `cursor_line_highlight` paints the cursor row with a
-        // bg, a span's bold attribute layers on top: that cell ends
-        // up bg=cursor and bold=true.
+        // When `cursor_line` paints the cursor row with a bg, a span's
+        // bold attribute layers on top: that cell ends up bg=cursor and
+        // bold=true.
         let mut buf = Buffer::new(BufId(1), BufCreateOpts::default());
         buf.set_all_lines(vec!["hello".into()]);
         buf.add_highlight(0, 0, 3, crate::SpanStyle::new().bold());
         let mut w = make_win();
-        w.cursor_line_highlight = true;
+        w.cursor_line = true;
         w.cursor_row = 0;
         let mut theme = Theme::default();
         let bg = crate::grid::Style::new().bg(crate::grid::Color::AnsiValue(238));
@@ -2092,14 +2104,14 @@ mod tests {
     }
 
     #[test]
-    fn render_paints_cursor_highlight_unfocused() {
-        // List-shaped windows (`cursor_line_highlight = true`) keep
-        // selection painted regardless of focus — picker overlays are
-        // non-focusable yet still need to show the selected row.
+    fn render_paints_selection_highlight_unfocused() {
+        // List-shaped windows (`selection_highlight = true`) keep selection
+        // painted regardless of focus — picker overlays may be driven by an
+        // external input yet still need to show the selected row.
         let mut buf = Buffer::new(BufId(1), BufCreateOpts::default());
         buf.set_all_lines(vec!["alpha".into(), "bravo".into()]);
         let mut w = make_win();
-        w.cursor_line_highlight = true;
+        w.selection_highlight = true;
         let mut theme = Theme::default();
         let bg = crate::grid::Style::new().bg(crate::grid::Color::AnsiValue(238));
         theme.set("CursorLine", bg);
@@ -2212,7 +2224,7 @@ mod tests {
         buf.set_all_lines(vec!["".into()]);
         buf.set_virtual_text(0, "g".into(), Some("Ghost".into()));
         let mut w = make_win();
-        w.cursor_line_highlight = true;
+        w.cursor_line = true;
         w.cursor_row = 0;
         let mut theme = Theme::default();
         let bg = crate::grid::Style::new().bg(crate::grid::Color::AnsiValue(238));

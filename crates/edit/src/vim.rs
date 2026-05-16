@@ -286,20 +286,24 @@ impl VimWindowState {
     }
 }
 
-/// Vim viewport-scroll line delta for a Ctrl-prefixed chord, or `None`
-/// when the chord isn't a page-motion key. The vim engine itself passes
-/// these through (`Action::Passthrough`) because the host owns the
-/// viewport-relative arithmetic; this is the one shared mapping.
+/// Viewport-scroll line delta for a page-motion chord, or `None` when
+/// the chord isn't one. Shared between transcript and overlay viewers so
+/// every focused buffer with vim enabled scrolls consistently.
 ///
-///   Ctrl-U → −½ page,  Ctrl-D → +½ page
-///   Ctrl-B → −1 page,  Ctrl-F → +1 page
-///   Ctrl-Y → −1 line,  Ctrl-E → +1 line
+///   PageUp     → −1 page,  PageDown → +1 page  (no modifiers)
+///   Ctrl-U     → −½ page,  Ctrl-D   → +½ page
+///   Ctrl-B     → −1 page,  Ctrl-F   → +1 page
+///   Ctrl-Y     → −1 line,  Ctrl-E   → +1 line
 pub fn page_motion_delta(k: KeyEvent, viewport_rows: u16) -> Option<isize> {
-    if !k.modifiers.contains(KeyModifiers::CONTROL) {
-        return None;
-    }
     let half = (viewport_rows / 2).max(1) as isize;
     let full = (viewport_rows as isize).max(1);
+    if !k.modifiers.contains(KeyModifiers::CONTROL) {
+        return match k.code {
+            KeyCode::PageUp => Some(-full),
+            KeyCode::PageDown => Some(full),
+            _ => None,
+        };
+    }
     match k.code {
         KeyCode::Char('u') => Some(-half),
         KeyCode::Char('d') => Some(half),

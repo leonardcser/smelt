@@ -110,7 +110,7 @@ smelt.cmd.register("resume", function()
     local query         = ""
     local filtered      = filter_entries(entries, query, workspace_only, current_cwd)
 
-    -- List: passive display, non-focusable; selection shown via cursor_line_highlight.
+    -- List: passive display, non-focusable; selection shown via selection_highlight.
     local list_buf = smelt.buf.create()
     refresh_list(list_buf, filtered, now_ms)
     local list_leaf = smelt.ui.dialog.list(list_buf, { focusable = false })
