@@ -61,3 +61,8 @@ bench = false
 
 [profile.release]
 debug = 1
+lto = true
+codegen-units = 1
+
+[profile.release.build-override]
+opt-level = 0

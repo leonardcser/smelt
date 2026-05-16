@@ -68,7 +68,7 @@ while (( INTERRUPTED == 0 )); do
   PRE_ARTIFACTS=$(ls -1 artifacts/smelt_loop 2>/dev/null | sort)
 
   set +e
-  cargo +nightly fuzz run smelt_loop seed_corpus/smelt_loop -- \
+  cargo +nightly fuzz run --sanitizer none smelt_loop seed_corpus/smelt_loop -- \
     -max_len=4096 \
     -max_total_time="$SECS_PER_CYCLE" \
     -timeout=10 \
@@ -109,7 +109,7 @@ while (( INTERRUPTED == 0 )); do
   if (( ITERATIONS % CMIN_EVERY == 0 )) && (( INTERRUPTED == 0 )); then
     echo "fuzz-loop: cmin (cycle $ITERATIONS)"
     set +e
-    cargo +nightly fuzz cmin smelt_loop seed_corpus/smelt_loop
+    cargo +nightly fuzz cmin --sanitizer none smelt_loop seed_corpus/smelt_loop
     set -e
   fi
 done
