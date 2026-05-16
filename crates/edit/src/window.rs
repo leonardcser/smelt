@@ -1092,7 +1092,15 @@ impl Window {
         if self.vim_enabled && self.vim_mode == VimMode::Insert {
             self.vim_state.set_mode(&mut self.vim_mode, VimMode::Normal);
         }
-        if !buf.readonly {
+        if buf.readonly {
+            // Insertion-mode-entering keys (o, O, i, a, ...) run against a
+            // scratch built from `buf.text()` and discard the write, but vim
+            // still advances `cpos` past the scratch's appended bytes. Snap
+            // back into the persistent text-space so the cursor stays valid
+            // for follow-up renders and invariant checks.
+            let text = buf.text();
+            self.cpos = text::snap(&text, self.cpos.min(text.len()));
+        } else {
             buf.sync_after_edit(width);
         }
         // Refresh layout for the possibly-mutated buffer so cursor projection

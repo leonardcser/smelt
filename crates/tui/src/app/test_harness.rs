@@ -581,18 +581,25 @@ impl TestApp {
             let Some(buf) = self.app.ui.buf(win.buf) else {
                 continue;
             };
-            let src = buf.source();
             // The buffer crate carries two representations: source-based
-            // buffers (prompt, transcript) maintain `source` as the
-            // canonical byte stream and feed `cpos` into it directly;
-            // line-based buffers (cmdline, picker, status bar, list
-            // overlays) write through `set_lines` / `set_all_lines` and
-            // leave `source` empty — content lives in `lines` and `cpos`
-            // is set via cell-column helpers, not byte arithmetic on
-            // `source`. The source-based invariants below don't apply to
-            // that mode, so skip when the buffer has empty source but
-            // non-empty line content.
-            let line_based = src.is_empty()
+            // buffers (prompt) maintain `source` as the canonical byte
+            // stream and feed `cpos` into it directly; line-based buffers
+            // (cmdline, picker, status bar, list overlays) write through
+            // `set_lines` / `set_all_lines` and leave `source` empty —
+            // content lives in `lines` and `cpos` is set via cell-column
+            // helpers, not byte arithmetic on `source`. Readonly buffers
+            // (transcript) are line-based but vim operates on a scratch
+            // built from `text()` (`lines.join("\n")`), so `cpos` lives in
+            // text space, not source space.
+            let src_owned;
+            let src = if buf.readonly {
+                src_owned = buf.text();
+                src_owned.as_str()
+            } else {
+                buf.source()
+            };
+            let line_based = !buf.readonly
+                && src.is_empty()
                 && (buf.line_count() > 1 || buf.get_line(0).is_some_and(|l| !l.is_empty()));
             if line_based {
                 continue;
