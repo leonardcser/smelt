@@ -22,6 +22,14 @@ impl PromptState {
     }
 
     pub(super) fn insert_char(&mut self, ctx: &mut PromptCtx<'_>, c: char) {
+        // ATTACHMENT_MARKER is a private sentinel that must only enter the
+        // buffer through `insert_attachment_id`, which keeps source markers
+        // and `attachment_ids` in 1:1 sync. A raw keystroke or paste of the
+        // sentinel char would desync the two and break every downstream
+        // attachment indexing path.
+        if c == ATTACHMENT_MARKER {
+            return;
+        }
         self.from_paste = false;
         if self.selection_range(ctx.as_ref()).is_some() {
             self.save_undo(ctx);
@@ -273,7 +281,13 @@ impl PromptState {
 
     pub(super) fn insert_paste(&mut self, ctx: &mut PromptCtx<'_>, data: String) {
         // Normalize `\r\n` and lone `\r` to `\n` (terminals in bracketed-paste mode send `\r`).
-        let data = data.replace("\r\n", "\n").replace('\r', "\n");
+        // Also strip ATTACHMENT_MARKER — that sentinel must only enter the
+        // buffer through `insert_attachment_id` so source markers and
+        // `attachment_ids` stay in 1:1 sync.
+        let data = data
+            .replace("\r\n", "\n")
+            .replace('\r', "\n")
+            .replace(ATTACHMENT_MARKER, "");
 
         if data.is_empty() {
             return;
