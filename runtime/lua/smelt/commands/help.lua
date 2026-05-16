@@ -43,12 +43,13 @@ smelt.cmd.register("help", function()
       end
     end
     -- `selectable = true` so mouse click-and-drag highlights text the same way
-    -- it does in the transcript; vim_enabled gives keyboard nav + visual mode.
+    -- it does in the transcript; vim_enabled tracks the user's global setting so
+    -- non-vim users don't get dropped into normal mode here.
     local leaf = smelt.win.open(buf, {
       region      = "dialog_overlay",
       focusable   = true,
       selectable  = true,
-      vim_enabled = true,
+      vim_enabled = smelt.settings.vim and true or false,
     })
 
     smelt.ui.overlay.open({

@@ -142,7 +142,7 @@ function smelt.ui.dialog.content(opts)
     region      = REGION,
     focusable   = focusable,
     selectable  = true,
-    vim_enabled = opts.interactive or false,
+    vim_enabled = (opts.interactive and smelt.settings.vim) and true or false,
     pad_left    = GUTTER,
     pad_right   = GUTTER,
     wrap        = opts.wrap,

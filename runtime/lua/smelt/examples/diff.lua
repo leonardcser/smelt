@@ -84,8 +84,9 @@ local function open(filepath)
 	smelt.buf.set_readonly(left_buf, true)
 	smelt.buf.set_readonly(right_buf, true)
 
-	local left_win = smelt.win.open(left_buf, { focusable = true, vim_enabled = true, cursor_line_highlight = true })
-	local right_win = smelt.win.open(right_buf, { focusable = true, vim_enabled = true, cursor_line_highlight = true })
+	local vim = smelt.settings.vim and true or false
+	local left_win = smelt.win.open(left_buf, { focusable = true, vim_enabled = vim, cursor_line_highlight = true })
+	local right_win = smelt.win.open(right_buf, { focusable = true, vim_enabled = vim, cursor_line_highlight = true })
 
 	local overlay = smelt.ui.overlay.open({
 		title = {
