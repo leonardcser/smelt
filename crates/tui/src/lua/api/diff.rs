@@ -7,12 +7,12 @@
 //!   paints aligned side-by-side views into two buffers — synthetic padding
 //!   rows on whichever side is shorter so both buffers share a row count.
 
-use crate::content::highlight::{print_inline_diff, print_split_diff};
+use crate::content::highlight::{compute_split_diff, print_inline_diff, print_split_diff_side};
 use crate::content::to_buffer::render_into_buffer;
 use crate::smelt_term::BufId;
 use lua_doc_derive::lua_module;
 use mlua::prelude::*;
-use smelt_core::content::highlight::lang_to_ext;
+use smelt_core::content::highlight::{lang_to_ext, SplitSide};
 use smelt_core::lua::doc::register_ui_fn;
 
 #[lua_module(
@@ -81,9 +81,9 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
     Ok(())
 }
 
-/// Render the split diff into both buffers in a single pass. Two buffers are
-/// borrowed sequentially (not simultaneously), so we cache `LineBuilder`
-/// output in scratch buffers and replay onto the targets.
+/// Render the split diff into both buffers. The diff plan is computed
+/// once and replayed per side, so each side renders directly into its
+/// target buffer — no scratch copy, no lost highlight extmarks.
 fn render_split_into_pair(
     app: &mut crate::app::TuiApp,
     left_id: BufId,
@@ -92,38 +92,17 @@ fn render_split_into_pair(
     new: &str,
     ext: Option<&str>,
 ) {
-    use smelt_buffer::buffer::{BufCreateOpts, BufId as InnerBufId, Buffer};
     let theme = app.ui.theme().clone();
     let width = crate::content::term_width() as u16;
-    let mut scratch_left = Buffer::new(InnerBufId(u64::MAX - 1), BufCreateOpts::default());
-    let mut scratch_right = Buffer::new(InnerBufId(u64::MAX - 2), BufCreateOpts::default());
-    // Two paired `render_into_buffer` calls share a `LineBuilder` per buffer;
-    // `print_split_diff` writes to both within one walk so the two builders
-    // need to live concurrently. `render_into_buffer` takes a closure that
-    // owns its sink, so to get TWO sinks we nest the calls.
-    render_into_buffer(&mut scratch_left, width, &theme, |left_sink| {
-        render_into_buffer(&mut scratch_right, width, &theme, |right_sink| {
-            print_split_diff(left_sink, right_sink, old, new, ext);
+    let plan = compute_split_diff(old, new);
+    if let Some(buf) = app.ui.buf_mut(left_id) {
+        render_into_buffer(buf, width, &theme, |sink| {
+            print_split_diff_side(sink, &plan, ext, SplitSide::Left);
         });
-    });
-    // Now copy each scratch into the corresponding real buffer by replacing
-    // its contents wholesale. We use `take_contents_from` to move lines +
-    // decorations; falls back to a manual replay if that doesn't exist.
-    replace_buffer_with(app, left_id, scratch_left);
-    replace_buffer_with(app, right_id, scratch_right);
-}
-
-fn replace_buffer_with(
-    app: &mut crate::app::TuiApp,
-    target: BufId,
-    source: smelt_buffer::buffer::Buffer,
-) {
-    if let Some(dst) = app.ui.buf_mut(target) {
-        let lines: Vec<String> = source.lines().to_vec();
-        dst.set_all_lines(lines);
-        for row in 0..source.line_count() {
-            let dec = source.decoration_at(row).clone();
-            dst.set_decoration(row, dec);
-        }
+    }
+    if let Some(buf) = app.ui.buf_mut(right_id) {
+        render_into_buffer(buf, width, &theme, |sink| {
+            print_split_diff_side(sink, &plan, ext, SplitSide::Right);
+        });
     }
 }

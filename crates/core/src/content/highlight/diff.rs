@@ -548,16 +548,114 @@ pub fn print_cached_inline_diff(
 
 // ─── Side-by-side diff renderer ──────────────────────────────────────
 //
-// Walks the same line-level diff as the inline renderer but emits two
-// aligned streams — one per side — into separate `LineBuilder`s. Each
-// consecutive delete/insert block is paired: matched rows on the same
-// visual row, unmatched rows balanced with `Synthetic` padding on the
-// other side so both buffers always have identical visual-row counts.
+// Decoupled from output: `compute_split_diff` returns a `SplitDiffPlan`
+// describing every row on both sides; `print_split_diff_side` paints one
+// side from the plan. Two passes share the same plan, so callers can
+// render to two buffers without holding both `LineBuilder`s live at once.
+// The convenience `print_split_diff` wraps both passes when the caller
+// can hand over both sinks simultaneously (used in tests).
 
-#[derive(Clone)]
-struct PendingChange {
-    text: String,
-    lineno: u32,
+/// One visual row of a side-by-side diff. Synthesised lines (padding
+/// where one side has fewer rows in a delete/insert block) are encoded as
+/// `None`; concrete rows carry the source line number for the gutter and
+/// a `removed` flag that controls per-line bg + syntax-highlight scope.
+#[derive(Clone, Debug)]
+pub struct SplitDiffRow {
+    pub left: Option<SplitDiffCell>,
+    pub right: Option<SplitDiffCell>,
+}
+
+#[derive(Clone, Debug)]
+pub struct SplitDiffCell {
+    pub text: String,
+    pub lineno: u32,
+    /// True for delete/insert rows (paints the row-fill bg); false for
+    /// `Equal` context rows.
+    pub changed: bool,
+}
+
+/// Self-contained diff IR. Computed once, then replayed per side.
+#[derive(Clone, Debug)]
+pub struct SplitDiffPlan {
+    pub rows: Vec<SplitDiffRow>,
+}
+
+/// Walk `old` vs `new` at line granularity and produce the aligned
+/// row plan. Consecutive delete/insert blocks are paired one-to-one
+/// (zip); whichever side has fewer rows in the block gets `None`
+/// padding to keep both sides on the same visual row.
+pub fn compute_split_diff(old: &str, new: &str) -> SplitDiffPlan {
+    let _perf = smelt_perf::perf::begin("render:compute_split_diff");
+    let diff = TextDiff::from_lines(old, new);
+    let mut rows: Vec<SplitDiffRow> = Vec::new();
+    let mut old_lineno: u32 = 0;
+    let mut new_lineno: u32 = 0;
+    let mut pending_dels: Vec<SplitDiffCell> = Vec::new();
+    let mut pending_ins: Vec<SplitDiffCell> = Vec::new();
+
+    let flush = |rows: &mut Vec<SplitDiffRow>,
+                 dels: &mut Vec<SplitDiffCell>,
+                 ins: &mut Vec<SplitDiffCell>| {
+        let n = dels.len().max(ins.len());
+        for i in 0..n {
+            rows.push(SplitDiffRow {
+                left: dels.get(i).cloned(),
+                right: ins.get(i).cloned(),
+            });
+        }
+        dels.clear();
+        ins.clear();
+    };
+
+    for change in diff.iter_all_changes() {
+        let text = change.value().trim_end_matches('\n').replace('\t', "    ");
+        match change.tag() {
+            ChangeTag::Equal => {
+                flush(&mut rows, &mut pending_dels, &mut pending_ins);
+                old_lineno += 1;
+                new_lineno += 1;
+                let left = SplitDiffCell {
+                    text: text.clone(),
+                    lineno: old_lineno,
+                    changed: false,
+                };
+                let right = SplitDiffCell {
+                    text,
+                    lineno: new_lineno,
+                    changed: false,
+                };
+                rows.push(SplitDiffRow {
+                    left: Some(left),
+                    right: Some(right),
+                });
+            }
+            ChangeTag::Delete => {
+                old_lineno += 1;
+                pending_dels.push(SplitDiffCell {
+                    text,
+                    lineno: old_lineno,
+                    changed: true,
+                });
+            }
+            ChangeTag::Insert => {
+                new_lineno += 1;
+                pending_ins.push(SplitDiffCell {
+                    text,
+                    lineno: new_lineno,
+                    changed: true,
+                });
+            }
+        }
+    }
+    flush(&mut rows, &mut pending_dels, &mut pending_ins);
+    SplitDiffPlan { rows }
+}
+
+/// Which side of the plan to render.
+#[derive(Clone, Copy)]
+pub enum SplitSide {
+    Left,
+    Right,
 }
 
 fn paint_diff_line(
@@ -566,10 +664,9 @@ fn paint_diff_line(
     h: &mut HighlightLines,
     bg: Option<Color>,
     source_line: smelt_buffer::buffer::SourceLine,
-    right_margin: u16,
 ) {
     if let Some(bg) = bg {
-        out.fill_line_bg(bg, right_margin);
+        out.fill_line_bg(bg, 0);
     }
     out.set_source_line(source_line);
     let line_with_nl = format!("{}\n", text);
@@ -596,74 +693,56 @@ fn paint_synthetic_row(out: &mut LineBuilder) {
     out.newline();
 }
 
-/// Mutable rendering state for a split-diff pass. Bundles the two output
-/// `LineBuilder`s, their syntect highlighters, and the row-fill colors so
-/// the per-block flush helper stays under clippy's arg limit.
-struct SplitCtx<'a, 'l, 'r> {
-    left: &'a mut LineBuilder<'l>,
-    right: &'a mut LineBuilder<'r>,
-    h_left: &'a mut HighlightLines<'static>,
-    h_right: &'a mut HighlightLines<'static>,
-    bg_del: Color,
-    bg_add: Color,
-}
-
-fn flush_pending(ctx: &mut SplitCtx, dels: &mut Vec<PendingChange>, ins: &mut Vec<PendingChange>) {
-    let n = dels.len().max(ins.len());
-    for i in 0..n {
-        match (dels.get(i), ins.get(i)) {
-            (Some(d), Some(i_)) => {
-                paint_diff_line(
-                    ctx.left,
-                    &d.text,
-                    ctx.h_left,
-                    Some(ctx.bg_del),
-                    smelt_buffer::buffer::SourceLine::Linear { lineno: d.lineno },
-                    0,
-                );
-                paint_diff_line(
-                    ctx.right,
-                    &i_.text,
-                    ctx.h_right,
-                    Some(ctx.bg_add),
-                    smelt_buffer::buffer::SourceLine::Linear { lineno: i_.lineno },
-                    0,
-                );
-            }
-            (Some(d), None) => {
-                paint_diff_line(
-                    ctx.left,
-                    &d.text,
-                    ctx.h_left,
-                    Some(ctx.bg_del),
-                    smelt_buffer::buffer::SourceLine::Linear { lineno: d.lineno },
-                    0,
-                );
-                paint_synthetic_row(ctx.right);
-            }
-            (None, Some(i_)) => {
-                paint_synthetic_row(ctx.left);
-                paint_diff_line(
-                    ctx.right,
-                    &i_.text,
-                    ctx.h_right,
-                    Some(ctx.bg_add),
-                    smelt_buffer::buffer::SourceLine::Linear { lineno: i_.lineno },
-                    0,
-                );
-            }
-            (None, None) => unreachable!(),
+/// Render one side of `plan` into `out`. Delete rows get the dark-red
+/// row fill on the left side, insert rows the dark-green fill on the
+/// right; equal rows are highlighted but not filled; `None` cells emit
+/// a synthetic padding row.
+pub fn print_split_diff_side(
+    out: &mut LineBuilder,
+    plan: &SplitDiffPlan,
+    syntax_ext: Option<&str>,
+    side: SplitSide,
+) {
+    let _perf = smelt_perf::perf::begin("render:split_diff_side");
+    let ext = syntax_ext.unwrap_or("txt");
+    let syntax = SYNTAX_SET
+        .find_syntax_by_extension(ext)
+        .unwrap_or_else(|| SYNTAX_SET.find_syntax_plain_text());
+    let theme = syntax_theme();
+    let mut h = HighlightLines::new(syntax, theme);
+    let bg_changed = match side {
+        SplitSide::Left => Color::Rgb {
+            r: 60,
+            g: 20,
+            b: 20,
+        },
+        SplitSide::Right => Color::Rgb {
+            r: 20,
+            g: 50,
+            b: 20,
+        },
+    };
+    for row in &plan.rows {
+        let cell = match side {
+            SplitSide::Left => row.left.as_ref(),
+            SplitSide::Right => row.right.as_ref(),
+        };
+        match cell {
+            Some(c) => paint_diff_line(
+                out,
+                &c.text,
+                &mut h,
+                if c.changed { Some(bg_changed) } else { None },
+                smelt_buffer::buffer::SourceLine::Linear { lineno: c.lineno },
+            ),
+            None => paint_synthetic_row(out),
         }
     }
-    dels.clear();
-    ins.clear();
 }
 
-/// Render `old` vs `new` as two aligned streams: `left` gets the pre-edit
-/// view, `right` the post-edit view, with `Synthetic` padding on whichever
-/// side has fewer rows in any given delete/insert block so both buffers
-/// share an identical row count. `syntax_ext` picks the syntect grammar
-/// (e.g. `"rs"`, `"py"`); falls back to plain text on unknown extensions.
+/// Convenience: render both sides in one call when the caller can hold
+/// both `LineBuilder`s simultaneously. Equivalent to computing the plan
+/// once and calling [`print_split_diff_side`] for each side.
 pub fn print_split_diff(
     left: &mut LineBuilder,
     right: &mut LineBuilder,
@@ -671,82 +750,9 @@ pub fn print_split_diff(
     new: &str,
     syntax_ext: Option<&str>,
 ) {
-    let _perf = smelt_perf::perf::begin("render:split_diff");
-    let ext = syntax_ext.unwrap_or("txt");
-    let syntax = SYNTAX_SET
-        .find_syntax_by_extension(ext)
-        .unwrap_or_else(|| SYNTAX_SET.find_syntax_plain_text());
-    let theme = syntax_theme();
-    let mut h_left = HighlightLines::new(syntax, theme);
-    let mut h_right = HighlightLines::new(syntax, theme);
-
-    // Subtle dark-red / dark-green row fills, matching the inline renderer.
-    let bg_del = Color::Rgb {
-        r: 60,
-        g: 20,
-        b: 20,
-    };
-    let bg_add = Color::Rgb {
-        r: 20,
-        g: 50,
-        b: 20,
-    };
-
-    let diff = TextDiff::from_lines(old, new);
-    let mut old_lineno: u32 = 0;
-    let mut new_lineno: u32 = 0;
-    let mut pending_dels: Vec<PendingChange> = Vec::new();
-    let mut pending_ins: Vec<PendingChange> = Vec::new();
-    let mut ctx = SplitCtx {
-        left,
-        right,
-        h_left: &mut h_left,
-        h_right: &mut h_right,
-        bg_del,
-        bg_add,
-    };
-
-    for change in diff.iter_all_changes() {
-        let text = change.value().trim_end_matches('\n').replace('\t', "    ");
-        match change.tag() {
-            ChangeTag::Equal => {
-                flush_pending(&mut ctx, &mut pending_dels, &mut pending_ins);
-                old_lineno += 1;
-                new_lineno += 1;
-                paint_diff_line(
-                    ctx.left,
-                    &text,
-                    ctx.h_left,
-                    None,
-                    smelt_buffer::buffer::SourceLine::Linear { lineno: old_lineno },
-                    0,
-                );
-                paint_diff_line(
-                    ctx.right,
-                    &text,
-                    ctx.h_right,
-                    None,
-                    smelt_buffer::buffer::SourceLine::Linear { lineno: new_lineno },
-                    0,
-                );
-            }
-            ChangeTag::Delete => {
-                old_lineno += 1;
-                pending_dels.push(PendingChange {
-                    text,
-                    lineno: old_lineno,
-                });
-            }
-            ChangeTag::Insert => {
-                new_lineno += 1;
-                pending_ins.push(PendingChange {
-                    text,
-                    lineno: new_lineno,
-                });
-            }
-        }
-    }
-    flush_pending(&mut ctx, &mut pending_dels, &mut pending_ins);
+    let plan = compute_split_diff(old, new);
+    print_split_diff_side(left, &plan, syntax_ext, SplitSide::Left);
+    print_split_diff_side(right, &plan, syntax_ext, SplitSide::Right);
 }
 
 #[cfg(test)]

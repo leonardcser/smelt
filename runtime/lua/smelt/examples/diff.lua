@@ -85,8 +85,14 @@ local function open(filepath)
 	smelt.buf.set_readonly(right_buf, true)
 
 	local vim = smelt.settings.vim and true or false
-	local left_win = smelt.win.open(left_buf, { focusable = true, vim_enabled = vim, cursor_line_highlight = true })
-	local right_win = smelt.win.open(right_buf, { focusable = true, vim_enabled = vim, cursor_line_highlight = true })
+	local win_opts = {
+		focusable = true,
+		vim_enabled = vim,
+		cursor_line_highlight = true,
+		selectable = true,
+	}
+	local left_win = smelt.win.open(left_buf, win_opts)
+	local right_win = smelt.win.open(right_buf, win_opts)
 
 	local overlay = smelt.ui.overlay.open({
 		title = {
@@ -94,11 +100,18 @@ local function open(filepath)
 			{ text = rel .. " ", fg = "white" },
 			{ text = "(esc to close) ", fg = "grey", dim = true },
 		},
+		anchor = "center",
 		width = "90%",
 		height = "85%",
 		layout = smelt.ui.layout.hbox({
-			{ smelt.ui.layout.leaf(left_win, { title = { { text = " HEAD ", fg = "red", dim = true } } }), width = "fill" },
-			{ smelt.ui.layout.leaf(right_win, { title = { { text = " working ", fg = "green", dim = true } } }), width = "fill" },
+			{
+				smelt.ui.layout.leaf(left_win, { title = { { text = " HEAD ", fg = "red", dim = true } } }),
+				width = "fill",
+			},
+			{
+				smelt.ui.layout.leaf(right_win, { title = { { text = " working ", fg = "green", dim = true } } }),
+				width = "fill",
+			},
 		}, { gap = 1 }),
 		modal = true,
 		draggable = true,
