@@ -403,6 +403,14 @@ impl PromptState {
         label: String,
         data_url: String,
     ) {
+        // Mirror `insert_char`: an active selection is replaced by the new
+        // attachment. Without this, a stale `selection_anchor` survives the
+        // source mutation below and ends up mid-codepoint when the inserted
+        // ATTACHMENT_MARKER (3 bytes) shifts byte offsets after the anchor.
+        if self.selection_range(ctx.as_ref()).is_some() {
+            self.save_undo(ctx);
+            self.delete_selection(ctx);
+        }
         let id = self.store.lock().unwrap().insert_image(label, data_url);
         self.insert_attachment_id(ctx, id);
     }
