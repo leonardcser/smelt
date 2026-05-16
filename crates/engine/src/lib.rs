@@ -3,6 +3,7 @@ pub mod auth;
 pub(crate) mod cancel;
 pub(crate) mod compact;
 pub(crate) mod config;
+pub mod host;
 pub mod image;
 pub mod log;
 
@@ -18,6 +19,7 @@ pub(crate) mod test_util;
 pub mod tools;
 pub(crate) mod trim;
 
+pub use host::{HostCall, PermissionDecision};
 use protocol::{EngineEvent, UiCommand};
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -163,6 +165,10 @@ pub struct EngineHandle {
     cmd_tx: mpsc::UnboundedSender<UiCommand>,
     event_tx: mpsc::UnboundedSender<EngineEvent>,
     event_rx: mpsc::UnboundedReceiver<EngineEvent>,
+    /// Inbound host-callback requests. Held by the consumer (TUI /
+    /// headless app), drained on the main thread, and replied to via
+    /// the per-call `oneshot::Sender` embedded in each variant.
+    host_rx: mpsc::UnboundedReceiver<HostCall>,
 }
 
 impl EngineHandle {
@@ -176,6 +182,14 @@ impl EngineHandle {
 
     pub fn try_recv(&mut self) -> Result<EngineEvent, mpsc::error::TryRecvError> {
         self.event_rx.try_recv()
+    }
+
+    /// Take ownership of the host-callback receiver. The consumer
+    /// holds onto this receiver directly so it can be polled in the
+    /// same `tokio::select!` block as `EngineHandle::recv` without
+    /// hitting borrow-checker conflicts on `&mut self`.
+    pub fn take_host_rx(&mut self) -> mpsc::UnboundedReceiver<HostCall> {
+        std::mem::replace(&mut self.host_rx, mpsc::unbounded_channel().1)
     }
 
     pub fn injector(&self) -> EventInjector {
@@ -193,10 +207,12 @@ impl EngineHandle {
     ) {
         let (cmd_tx, cmd_rx) = mpsc::unbounded_channel();
         let (event_tx, event_rx) = mpsc::unbounded_channel();
+        let (_host_tx, host_rx) = mpsc::unbounded_channel();
         let handle = EngineHandle {
             cmd_tx,
             event_tx: event_tx.clone(),
             event_rx,
+            host_rx,
         };
         (handle, cmd_rx, event_tx)
     }
@@ -219,14 +235,18 @@ impl EventInjector {
 pub fn start(config: EngineConfig, dispatcher: Box<dyn tools::ToolDispatcher>) -> EngineHandle {
     let (cmd_tx, cmd_rx) = mpsc::unbounded_channel();
     let (event_tx, event_rx) = mpsc::unbounded_channel();
+    let (host_tx, host_rx) = mpsc::unbounded_channel();
 
     let event_tx_clone = event_tx.clone();
-    tokio::spawn(agent::engine_task(config, dispatcher, cmd_rx, event_tx));
+    tokio::spawn(agent::engine_task(
+        config, dispatcher, cmd_rx, event_tx, host_tx,
+    ));
 
     EngineHandle {
         cmd_tx,
         event_tx: event_tx_clone,
         event_rx,
+        host_rx,
     }
 }
 

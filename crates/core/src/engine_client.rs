@@ -1,6 +1,6 @@
 //! Thin wrapper around `EngineHandle` that gates `recv`/`try_recv` on the confirms-clear flag.
 
-use engine::EngineHandle;
+use engine::{EngineHandle, HostCall};
 use protocol::{EngineEvent, UiCommand};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -39,6 +39,14 @@ impl EngineClient {
         } else {
             self.handle.try_recv()
         }
+    }
+
+    /// Move out the host-callback receiver. Caller stores it as a
+    /// sibling field so the engine event loop and the host-callback
+    /// loop can be polled in the same `tokio::select!` without
+    /// borrowing `EngineClient` twice.
+    pub fn take_host_rx(&mut self) -> mpsc::UnboundedReceiver<HostCall> {
+        self.handle.take_host_rx()
     }
 
     pub(crate) fn injector(&self) -> engine::EventInjector {

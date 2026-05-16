@@ -31,7 +31,12 @@ pub(crate) async fn engine_task(
     dispatcher: Box<dyn crate::tools::ToolDispatcher>,
     mut cmd_rx: mpsc::UnboundedReceiver<UiCommand>,
     event_tx: mpsc::UnboundedSender<EngineEvent>,
+    host_tx: mpsc::UnboundedSender<crate::host::HostCall>,
 ) {
+    // Phase A: `host_tx` is plumbed into each `Turn` for provider
+    // request/response hooks. Phase B migrates the existing
+    // ToolDispatch / ToolHooks / RequestPermission RPCs onto it and
+    // removes their `UiCommand::*Response` variants.
     // Some openai-compatible endpoints gate on User-Agent (e.g. api.kimi.com).
     // Per-request header() calls (Copilot, Codex) still override this.
     let client = reqwest::Client::builder()
@@ -77,6 +82,7 @@ pub(crate) async fn engine_task(
                             dispatcher: &*dispatcher,
                             cmd_rx: &mut cmd_rx,
                             event_tx: &event_tx,
+                            host_tx: &host_tx,
                             config: &config,
                             http_client: &client,
                             cancel: crate::cancel::CancellationToken::new(),
@@ -390,6 +396,10 @@ struct Turn<'a> {
     dispatcher: &'a dyn ToolDispatcher,
     cmd_rx: &'a mut mpsc::UnboundedReceiver<UiCommand>,
     event_tx: &'a mpsc::UnboundedSender<EngineEvent>,
+    /// Host-callback channel. Used for `smelt.provider.middleware` round-trips
+    /// (and, in Phase B, the legacy `ToolDispatch`/`ToolHooks`/`Permission`
+    /// RPCs once they're migrated off `EngineEvent::*Request`/`UiCommand::*Response`).
+    host_tx: &'a mpsc::UnboundedSender<crate::host::HostCall>,
     config: &'a EngineConfig,
     http_client: &'a reqwest::Client,
     cancel: crate::cancel::CancellationToken,
@@ -410,6 +420,36 @@ struct Turn<'a> {
 impl<'a> Turn<'a> {
     fn emit(&self, event: EngineEvent) {
         let _ = self.event_tx.send(event);
+    }
+
+    /// Fire a `HostCall` and await its `oneshot::Sender<Reply>`. Returns
+    /// `None` if the host dropped the reply (channel closed) — callers
+    /// treat that as "no mutation, proceed with the original value".
+    async fn host_call<Reply, F>(&self, build: F) -> Option<Reply>
+    where
+        F: FnOnce(tokio::sync::oneshot::Sender<Reply>) -> crate::host::HostCall,
+    {
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        if self.host_tx.send(build(tx)).is_err() {
+            return None;
+        }
+        rx.await.ok()
+    }
+
+    /// Run `smelt.provider.middleware{on_response=...}` hooks against
+    /// the assembled assistant `Message`. Returns the replacement when
+    /// any hook produced one; otherwise the original.
+    async fn apply_response_hooks(&self, message: Message) -> Message {
+        match self
+            .host_call(|reply| crate::host::HostCall::ProviderResponse {
+                message: message.clone(),
+                reply,
+            })
+            .await
+        {
+            Some(Some(replacement)) => replacement,
+            _ => message,
+        }
     }
 
     /// Scrubs user/tool content when redact_secrets is enabled; passes assistant/system through.
@@ -757,6 +797,18 @@ impl<'a> Turn<'a> {
                 return;
             }
 
+            // Fire `smelt.provider.middleware{on_request=...}` hooks
+            // and accept any mutation they apply to the message slice.
+            if let Some(Some(replacement)) = self
+                .host_call(|reply| crate::host::HostCall::ProviderRequest {
+                    messages: self.messages.clone(),
+                    reply,
+                })
+                .await
+            {
+                self.messages = replacement;
+            }
+
             let (result, partial_text, partial_reasoning) = self.call_llm(&tool_defs).await;
             let (resp, had_injected) = match result {
                 Ok(r) => r,
@@ -863,19 +915,24 @@ impl<'a> Turn<'a> {
                     continue;
                 }
 
-                self.messages
-                    .push(Message::assistant(content, reasoning, None));
+                let msg = self
+                    .apply_response_hooks(Message::assistant(content, reasoning, None))
+                    .await;
+                self.messages.push(msg);
                 self.emit_messages_snapshot();
                 self.emit_turn_complete(false);
                 return;
             }
 
             empty_retries = 0;
-            self.messages.push(Message::assistant(
-                content,
-                reasoning,
-                Some(tool_calls.clone()),
-            ));
+            let msg = self
+                .apply_response_hooks(Message::assistant(
+                    content,
+                    reasoning,
+                    Some(tool_calls.clone()),
+                ))
+                .await;
+            self.messages.push(msg);
             self.emit_messages_snapshot();
 
             let mut plan = self.classify_tools(&tool_calls);
