@@ -1,5 +1,6 @@
 //! Pure-data UI primitives. No terminal deps, no async runtime, no Lua.
 
+pub mod attached;
 pub mod attachment;
 pub mod buffer;
 pub mod clipboard;
