@@ -186,7 +186,16 @@ impl TuiApp {
             return;
         };
         if win == crate::app::TRANSCRIPT_WIN && self.app_focus == crate::app::AppFocus::Content {
-            self.move_content_cursor_by_lines(delta);
+            let viewport = self.viewport_rows_estimate();
+            let win_id = self.well_known.transcript;
+            let buf_id = self.transcript_win().buf;
+            let (win, buf) = self.ui.win_and_buf_mut(win_id, buf_id);
+            win.expect("transcript window").move_cursor_by_lines(
+                buf.expect("transcript buffer"),
+                delta,
+                viewport,
+            );
+            self.snap_transcript_cursor();
         }
     }
 

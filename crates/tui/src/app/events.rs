@@ -842,81 +842,248 @@ impl TuiApp {
             .try_dismiss_modal_for_chord(k.code, k.modifiers, &mut lua_invoke)
     }
 
-    /// Forward a key to the focused leaf Window. Two distinct cases:
-    ///   1. PageUp / PageDown — work on any focused window with a viewport,
-    ///      vim or not. Lets non-vim users still scroll a code/help/diff view.
-    ///   2. Everything else — only routes when the focused window is
-    ///      `vim_enabled`. Esc in idle Normal mode falls through so the
-    ///      modal-dismiss tier can close the overlay; vim's half/full-page
-    ///      Ctrl- scroll is wired here so the host owns viewport arithmetic.
+    /// Overlay-focus key cascade tier 4. Wraps the shared
+    /// [`Self::dispatch_window_viewer_key`] with two overlay-specific gates:
+    ///   * Insert-mode skip — typing inside an editable overlay leaf must
+    ///     not bubble nav keys here.
+    ///   * Esc-in-idle-Normal falls through so the modal-dismiss tier (5)
+    ///     can close the overlay; Visual / pending-sequence Esc stays with vim.
     pub(crate) fn dispatch_overlay_viewer_key(&mut self, k: KeyEvent) -> bool {
         let win = match self.ui.focus() {
             Some(w) => w,
             None => return false,
         };
-        let (vim_enabled, buf_id, viewport_rows) = match self.ui.win(win) {
-            Some(w) => (
-                w.vim_enabled,
-                w.buf,
-                w.viewport.map(|v| v.rect.height).unwrap_or(0),
-            ),
+        let (vim_enabled, vim_mode, vim_idle) = match self.ui.win(win) {
+            Some(w) => (w.vim_enabled, w.vim_mode, w.vim_state.is_idle()),
             None => return false,
         };
-        if viewport_rows == 0 {
+        let in_insert = vim_enabled && vim_mode == crate::smelt_term::VimMode::Insert;
+        if in_insert {
             return false;
         }
-        let (win_mut, buf) = self.ui.win_and_buf_mut(win, buf_id);
-        let win_mut = match win_mut {
-            Some(w) => w,
-            None => return false,
-        };
-        let buf = match buf {
-            Some(b) => b,
-            None => return false,
-        };
-        if buf.lines().is_empty() {
-            return false;
-        }
-        // (1) Page motion: always available. For vim windows, only fire
-        // outside Insert mode so typing a literal PageUp inside an editable
-        // input still inserts/edits — overlay viewers are read-only so this
-        // is a no-op for them, but the same path serves future editable
-        // vim leaves too. The `Ctrl-` variants must stay gated on Normal
-        // because vim Insert handlers may want them later.
-        let in_insert = vim_enabled && win_mut.vim_mode == crate::smelt_term::VimMode::Insert;
-        if !in_insert {
-            let is_ctrl_motion = k
-                .modifiers
-                .contains(crossterm::event::KeyModifiers::CONTROL);
-            let allow = !is_ctrl_motion
-                || !vim_enabled
-                || win_mut.vim_mode == crate::smelt_term::VimMode::Normal;
-            if allow {
-                if let Some(d) = crate::smelt_term::vim::page_motion_delta(k, viewport_rows) {
-                    win_mut.move_cursor_by_lines(buf, d, viewport_rows);
-                    let max_scroll = (buf.lines().len() as u16).saturating_sub(viewport_rows);
-                    win_mut.follow_tail = win_mut.scroll_top >= max_scroll;
-                    return true;
-                }
-            }
-        }
-        if !vim_enabled {
-            return false;
-        }
-        // Esc in idle Normal mode is a no-op for the viewer — let it fall
-        // through so the modal-dismiss tier can close the overlay. When
-        // Visual mode is active or a pending sequence is buffered, Esc still
-        // belongs to vim (exit Visual / cancel pending) and stays consumed.
         if k.code == KeyCode::Esc
-            && win_mut.vim_mode == crate::smelt_term::VimMode::Normal
-            && win_mut.vim_state.is_idle()
+            && vim_enabled
+            && vim_mode == crate::smelt_term::VimMode::Normal
+            && vim_idle
         {
             return false;
         }
-        let status = win_mut.handle_key(buf, k, &mut self.core.clipboard);
-        let max_scroll = (buf.lines().len() as u16).saturating_sub(viewport_rows);
-        win_mut.follow_tail = win_mut.scroll_top >= max_scroll;
-        matches!(status, crate::smelt_term::Status::Consumed)
+        matches!(
+            self.dispatch_window_viewer_key(win, k),
+            crate::smelt_term::Status::Consumed
+        )
+    }
+
+    /// Unified viewer-key dispatcher. Applies a key to `win_id`, handling in
+    /// order:
+    ///   1. Page motion (PageUp/Down, Ctrl-u/d/b/f/y/e) — vim Normal only for
+    ///      the Ctrl- variants so an Insert handler can still see them.
+    ///   2. Vim engine (when `vim_enabled`).
+    ///   3. Non-vim OS-style navigation: arrows, Home/End, Ctrl/Alt-arrows for
+    ///      word, shift+nav for selection-extend, Ctrl-C / Cmd-C for copy.
+    ///
+    /// One code path serves overlay leaves, the transcript pane, and any
+    /// future scrollable window. The caller stays responsible for any
+    /// site-specific post-processing (e.g. transcript cursor snapping).
+    pub(crate) fn dispatch_window_viewer_key(
+        &mut self,
+        win_id: crate::smelt_term::WinId,
+        k: KeyEvent,
+    ) -> crate::smelt_term::Status {
+        use crate::smelt_term::Status;
+        let (vim_enabled, vim_mode, buf_id, viewport_rows) = match self.ui.win(win_id) {
+            Some(w) => (
+                w.vim_enabled,
+                w.vim_mode,
+                w.buf,
+                w.viewport.map(|v| v.rect.height).unwrap_or(0),
+            ),
+            None => return Status::Ignored,
+        };
+        if viewport_rows == 0 {
+            return Status::Ignored;
+        }
+        let buf_empty = self
+            .ui
+            .buf(buf_id)
+            .map(|b| b.lines().is_empty())
+            .unwrap_or(true);
+        if buf_empty {
+            return Status::Ignored;
+        }
+
+        // (1) Page motion — Ctrl- variants gated on vim Normal so future
+        // Insert handlers can claim them; plain PageUp/Down always fires.
+        let is_ctrl_motion = k.modifiers.contains(KeyModifiers::CONTROL);
+        let allow_ctrl =
+            !is_ctrl_motion || !vim_enabled || vim_mode == crate::smelt_term::VimMode::Normal;
+        if allow_ctrl {
+            if let Some(d) = crate::smelt_term::vim::page_motion_delta(k, viewport_rows) {
+                let (win, buf) = self.ui.win_and_buf_mut(win_id, buf_id);
+                let win = win.expect("window");
+                let buf = buf.expect("buffer");
+                win.move_cursor_by_lines(buf, d, viewport_rows);
+                let max_scroll = (buf.lines().len() as u16).saturating_sub(viewport_rows);
+                win.follow_tail = win.scroll_top >= max_scroll;
+                return Status::Consumed;
+            }
+        }
+
+        // (2) Vim engine.
+        if vim_enabled {
+            let (win, buf) = self.ui.win_and_buf_mut(win_id, buf_id);
+            let win = win.expect("window");
+            let buf = buf.expect("buffer");
+            let status = win.handle_key(buf, k, &mut self.core.clipboard);
+            let max_scroll = (buf.lines().len() as u16).saturating_sub(viewport_rows);
+            win.follow_tail = win.scroll_top >= max_scroll;
+            if matches!(status, Status::Consumed) {
+                return Status::Consumed;
+            }
+            // Vim Passthrough (e.g. shift+arrows) falls through to the
+            // OS-style nav layer so selection-extend keeps working in vim
+            // mode too — matches the prompt's behaviour.
+        }
+
+        // (3) OS-style navigation.
+        self.apply_nonvim_nav_key(win_id, buf_id, k, viewport_rows)
+    }
+
+    /// KeyAction-driven non-vim navigation: arrows, Home/End, Ctrl/Alt-arrows
+    /// for word motion, shift+nav for selection extension, Ctrl-C / Cmd-C for
+    /// copy. Operates on any window — the transcript wraps this with
+    /// `snap_transcript_cursor` for its non-selectable cell skipping.
+    fn apply_nonvim_nav_key(
+        &mut self,
+        win_id: crate::smelt_term::WinId,
+        buf_id: crate::smelt_term::BufId,
+        k: KeyEvent,
+        viewport_rows: u16,
+    ) -> crate::smelt_term::Status {
+        use crate::keymap::{lookup, KeyAction, KeyContext};
+        use crate::smelt_term::Status;
+
+        let buf_empty = self
+            .ui
+            .buf(buf_id)
+            .map(|b| b.text().is_empty())
+            .unwrap_or(true);
+        let ctx = KeyContext {
+            buf_empty,
+            vim_non_insert: false,
+            vim_enabled: false,
+            agent_running: false,
+            ghost_text_visible: false,
+        };
+        let Some(action) = lookup(k.code, k.modifiers, &ctx) else {
+            return Status::Ignored;
+        };
+
+        let extending = matches!(
+            action,
+            KeyAction::SelectLeft
+                | KeyAction::SelectRight
+                | KeyAction::SelectUp
+                | KeyAction::SelectDown
+                | KeyAction::SelectWordForward
+                | KeyAction::SelectWordBackward
+                | KeyAction::SelectStartOfLine
+                | KeyAction::SelectEndOfLine
+        );
+
+        let cpos_before = match self.ui.win(win_id) {
+            Some(w) => w.cpos,
+            None => return Status::Ignored,
+        };
+        let win = self.ui.win_mut(win_id).expect("window");
+        match action {
+            KeyAction::MoveLeft
+            | KeyAction::MoveRight
+            | KeyAction::MoveUp
+            | KeyAction::MoveDown
+            | KeyAction::MoveStartOfLine
+            | KeyAction::MoveEndOfLine
+            | KeyAction::MoveWordForward
+            | KeyAction::MoveWordBackward => {
+                win.selection_anchor = None;
+            }
+            _ if extending => {
+                win.extend_selection(cpos_before);
+            }
+            _ => {}
+        }
+
+        let delta: Option<isize> = match action {
+            KeyAction::MoveUp | KeyAction::SelectUp => Some(-1),
+            KeyAction::MoveDown | KeyAction::SelectDown => Some(1),
+            _ => None,
+        };
+        if let Some(d) = delta {
+            let (win, buf) = self.ui.win_and_buf_mut(win_id, buf_id);
+            win.expect("window")
+                .move_cursor_by_lines(buf.expect("buffer"), d, viewport_rows);
+            return Status::Consumed;
+        }
+
+        let buf = match self.ui.buf(buf_id) {
+            Some(b) => b,
+            None => return Status::Ignored,
+        };
+        let text = buf.text().to_string();
+        let cpos = self.ui.win(win_id).expect("window").cpos;
+        let mv: Option<usize> = match action {
+            KeyAction::MoveLeft | KeyAction::SelectLeft => {
+                Some(crate::smelt_term::text::prev_char_boundary(&text, cpos))
+            }
+            KeyAction::MoveRight | KeyAction::SelectRight => {
+                Some(crate::smelt_term::text::next_char_boundary(&text, cpos))
+            }
+            KeyAction::MoveStartOfLine | KeyAction::SelectStartOfLine => {
+                Some(crate::smelt_term::text::line_start(&text, cpos))
+            }
+            KeyAction::MoveEndOfLine | KeyAction::SelectEndOfLine => {
+                Some(crate::smelt_term::text::line_end(&text, cpos))
+            }
+            KeyAction::MoveWordForward | KeyAction::SelectWordForward => {
+                Some(crate::smelt_term::text::word_forward_pos(
+                    &text,
+                    cpos,
+                    crate::smelt_term::text::CharClass::Word,
+                ))
+            }
+            KeyAction::MoveWordBackward | KeyAction::SelectWordBackward => {
+                Some(crate::smelt_term::text::word_backward_pos(
+                    &text,
+                    cpos,
+                    crate::smelt_term::text::CharClass::Word,
+                ))
+            }
+            KeyAction::CopySelection => {
+                let win = self.ui.win(win_id).expect("window");
+                if let Some((s, e)) = win.selection_range(buf) {
+                    let s = crate::smelt_term::text::snap(&text, s);
+                    let e = crate::smelt_term::text::snap(&text, e);
+                    if s < e {
+                        let out = buf.copy_range(s..e);
+                        if !out.clipboard.is_empty() {
+                            let _ = self.core.clipboard.write(&out.clipboard);
+                        }
+                    }
+                }
+                return Status::Consumed;
+            }
+            _ => None,
+        };
+        drop(text);
+        if let Some(new_cpos) = mv {
+            let (win, buf) = self.ui.win_and_buf_mut(win_id, buf_id);
+            let win = win.expect("window");
+            let buf = buf.expect("buffer");
+            win.cpos = new_cpos;
+            win.resync(buf, viewport_rows);
+            return Status::Consumed;
+        }
+        Status::Ignored
     }
 }
 
