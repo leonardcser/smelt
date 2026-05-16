@@ -12,7 +12,9 @@
 //! Provider impls **must** return cells of exactly `width()` display columns. The
 //! renderer pads with spaces if the text is shorter and truncates if longer.
 
-use smelt_buffer::buffer::{Buffer, SourceLine};
+use std::sync::Mutex;
+
+use smelt_buffer::buffer::{BufId, Buffer, SourceLine};
 use smelt_buffer::style::Style;
 use smelt_buffer::theme::Theme;
 
@@ -41,7 +43,33 @@ pub trait GutterProvider: Send + Sync {
 /// - plain (all rows linear or unset): `" N "` (one pad each side).
 /// - diff (any row carries `Diff`): `" O  N "` — old column, gap, new column.
 /// - synthetic rows render as blanks of the full width.
-pub struct LineNumberGutter;
+///
+/// Widths are cached by `(BufId, changedtick)` so the full-buffer scan runs once per
+/// buffer mutation, not once per paint × row.
+pub struct LineNumberGutter {
+    cache: Mutex<Option<WidthsCache>>,
+}
+
+#[derive(Clone, Copy)]
+struct WidthsCache {
+    buf_id: BufId,
+    changedtick: u64,
+    widths: Widths,
+}
+
+impl Default for LineNumberGutter {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl LineNumberGutter {
+    pub const fn new() -> Self {
+        Self {
+            cache: Mutex::new(None),
+        }
+    }
+}
 
 /// Scan source-line metadata across the buffer to size the gutter columns. `old_digits`
 /// is 0 for non-diff buffers; `new_digits` is always set.
@@ -66,7 +94,31 @@ impl LineNumberGutter {
     /// stamps. Rows with no stamp (or `Synthetic`) contribute no width — a buffer
     /// whose rows are all unstamped/synthetic gets a zero-width gutter so unrelated
     /// content (e.g. transcript text rows) doesn't lose horizontal space.
+    ///
+    /// Cached by `(BufId, changedtick)`: a stable buffer hits the cache on every
+    /// subsequent `width()` / `cell()` call within a paint and across paints.
     fn widths(&self, buf: &Buffer) -> Widths {
+        let buf_id = buf.id();
+        let changedtick = buf.changedtick();
+        if let Ok(guard) = self.cache.lock() {
+            if let Some(entry) = guard.as_ref() {
+                if entry.buf_id == buf_id && entry.changedtick == changedtick {
+                    return entry.widths;
+                }
+            }
+        }
+        let widths = self.compute_widths(buf);
+        if let Ok(mut guard) = self.cache.lock() {
+            *guard = Some(WidthsCache {
+                buf_id,
+                changedtick,
+                widths,
+            });
+        }
+        widths
+    }
+
+    fn compute_widths(&self, buf: &Buffer) -> Widths {
         let mut w = Widths::default();
         for row in 0..buf.line_count() {
             match buf.source_line_at(row) {
@@ -159,8 +211,8 @@ mod tests {
     use super::*;
     use smelt_buffer::buffer::{BufCreateOpts, BufId, Buffer, LineDecoration};
 
-    fn buf_with_lines(n: usize) -> Buffer {
-        let mut buf = Buffer::new(BufId(0), BufCreateOpts::default());
+    fn buf_with_lines(id: u64, n: usize) -> Buffer {
+        let mut buf = Buffer::new(BufId(id), BufCreateOpts::default());
         let lines: Vec<String> = (0..n).map(|i| format!("line {i}")).collect();
         buf.set_all_lines(lines);
         buf
@@ -176,11 +228,11 @@ mod tests {
 
     #[test]
     fn unstamped_buffer_has_no_gutter() {
-        let g = LineNumberGutter;
+        let g = LineNumberGutter::new();
         // Without any `SourceLine` stamps the gutter is zero-width and
         // produces no per-row cell — text-only buffers don't lose horizontal
         // space to an empty column.
-        let buf = buf_with_lines(12);
+        let buf = buf_with_lines(0, 12);
         let theme = Theme::new();
         assert_eq!(g.width(&buf), 0);
         assert!(g.cell(&buf, &theme, 0).is_none());
@@ -188,12 +240,12 @@ mod tests {
 
     #[test]
     fn plain_buffer_width_scales_with_stamped_linenos() {
-        let g = LineNumberGutter;
+        let g = LineNumberGutter::new();
         let theme = Theme::new();
-        let mut single = buf_with_lines(1);
+        let mut single = buf_with_lines(0, 1);
         stamp_source_line(&mut single, 0, SourceLine::Linear { lineno: 1 });
         assert_eq!(g.width(&single), 3); // " 1 "
-        let mut wide = buf_with_lines(1);
+        let mut wide = buf_with_lines(1, 1);
         stamp_source_line(&mut wide, 0, SourceLine::Linear { lineno: 100 });
         assert_eq!(g.width(&wide), 5); // " 100 "
         assert_eq!(g.cell(&wide, &theme, 0).unwrap().text, " 100 ");
@@ -201,8 +253,8 @@ mod tests {
 
     #[test]
     fn linear_source_line_overrides_row_index() {
-        let g = LineNumberGutter;
-        let mut buf = buf_with_lines(2);
+        let g = LineNumberGutter::new();
+        let mut buf = buf_with_lines(0, 2);
         stamp_source_line(&mut buf, 0, SourceLine::Linear { lineno: 42 });
         stamp_source_line(&mut buf, 1, SourceLine::Linear { lineno: 43 });
         let theme = Theme::new();
@@ -212,8 +264,8 @@ mod tests {
 
     #[test]
     fn diff_buffer_renders_old_and_new_columns() {
-        let g = LineNumberGutter;
-        let mut buf = buf_with_lines(3);
+        let g = LineNumberGutter::new();
+        let mut buf = buf_with_lines(0, 3);
         stamp_source_line(
             &mut buf,
             0,
@@ -248,13 +300,24 @@ mod tests {
 
     #[test]
     fn synthetic_row_renders_blank() {
-        let g = LineNumberGutter;
-        let mut buf = buf_with_lines(2);
+        let g = LineNumberGutter::new();
+        let mut buf = buf_with_lines(0, 2);
         stamp_source_line(&mut buf, 0, SourceLine::Linear { lineno: 1 });
         stamp_source_line(&mut buf, 1, SourceLine::Synthetic);
         let theme = Theme::new();
         let cell = g.cell(&buf, &theme, 1).unwrap();
         let w = g.width(&buf) as usize;
         assert_eq!(cell.text, " ".repeat(w));
+    }
+
+    #[test]
+    fn widths_recompute_when_changedtick_advances() {
+        let g = LineNumberGutter::new();
+        let mut buf = buf_with_lines(0, 1);
+        stamp_source_line(&mut buf, 0, SourceLine::Linear { lineno: 1 });
+        assert_eq!(g.width(&buf), 3); // " 1 "
+                                      // Mutate to require more digits — cache must invalidate via changedtick.
+        stamp_source_line(&mut buf, 0, SourceLine::Linear { lineno: 9999 });
+        assert_eq!(g.width(&buf), 6); // " 9999 "
     }
 }

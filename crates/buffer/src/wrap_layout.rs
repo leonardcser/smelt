@@ -203,4 +203,29 @@ mod tests {
         assert_eq!(layout.visual_count(), 1);
         assert_eq!(layout.logical_count(), 1);
     }
+
+    #[test]
+    fn pre_formatted_row_skips_wrap_even_when_window_wraps() {
+        use crate::buffer::{BufCreateOpts, BufId, Buffer, LineDecoration};
+        let mut buf = Buffer::new(BufId(0), BufCreateOpts::default());
+        buf.set_all_lines(vec![
+            "this row is far too long for the narrow width".to_string(),
+            "wrappable row that should split".to_string(),
+        ]);
+        let pre = LineDecoration {
+            pre_formatted: true,
+            ..LineDecoration::default()
+        };
+        buf.set_decoration(0, pre);
+        let layout = WrappedLayout::from_buffer(&buf, 5, true);
+        assert_eq!(
+            layout.chunks_of(0).len(),
+            1,
+            "pre_formatted row must not wrap"
+        );
+        assert!(
+            layout.chunks_of(1).len() > 1,
+            "neighbouring non-pre_formatted row should still wrap"
+        );
+    }
 }

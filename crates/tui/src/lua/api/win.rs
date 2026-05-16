@@ -138,7 +138,7 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
                         // so text/list panes pay no visual cost. Code/diff
                         // buffers automatically show their line numbers.
                         w.gutter = Some(std::sync::Arc::new(
-                            crate::smelt_term::gutter::LineNumberGutter,
+                            crate::smelt_term::gutter::LineNumberGutter::new(),
                         ));
                         if let Some(opts) = opts.as_ref() {
                             if let Ok(focusable) = opts.get::<bool>("focusable") {
@@ -158,7 +158,7 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
                             if let Ok(Some(gutter)) = opts.get::<Option<String>>("gutter") {
                                 w.gutter = match gutter.as_str() {
                                     "line_numbers" => Some(std::sync::Arc::new(
-                                        crate::smelt_term::gutter::LineNumberGutter,
+                                        crate::smelt_term::gutter::LineNumberGutter::new(),
                                     )),
                                     "none" | "" => None,
                                     _ => None,

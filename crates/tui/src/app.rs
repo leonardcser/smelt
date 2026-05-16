@@ -268,7 +268,7 @@ impl TuiApp {
                 // `LineNumberGutter` is strict — text/markdown rows leave no
                 // stamp and contribute no gutter width.
                 w.gutter = Some(std::sync::Arc::new(
-                    crate::smelt_term::gutter::LineNumberGutter,
+                    crate::smelt_term::gutter::LineNumberGutter::new(),
                 ));
             }
             let prompt_above_buf = ui.buf_create(crate::smelt_term::BufCreateOpts::default());

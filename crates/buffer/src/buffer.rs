@@ -976,8 +976,9 @@ impl Buffer {
         self.projection_maps.as_ref()
     }
 
-    /// Monotonic counter, bumped on every `lines` mutation. Use as a cheap
-    /// fingerprint for cache invalidation tied to displayed text.
+    /// Monotonic counter, bumped on every mutation that affects rendering —
+    /// `lines` edits plus decoration changes. Use as a cheap fingerprint for
+    /// cache invalidation tied to displayed output.
     pub fn changedtick(&self) -> u64 {
         self.changedtick
     }
@@ -1147,6 +1148,10 @@ impl Buffer {
             self.extmarks.del_extmark(ns, id);
         }
         self.set_extmark(ns, line, 0, ExtmarkOpts::decoration(decoration));
+        // Decorations affect rendering (gutter widths, pre_formatted wrap policy,
+        // bg fills). Bump the tick so caches keyed on it (LineNumberGutter widths,
+        // Window wrap layout) invalidate.
+        self.changedtick += 1;
     }
 
     pub fn decoration_at(&self, line: usize) -> &LineDecoration {
