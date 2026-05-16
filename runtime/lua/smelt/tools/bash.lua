@@ -131,12 +131,6 @@ smelt.tools.register({
     if tool == "allow" and sub == "ask" then return "ask" end
     return sub
   end,
-  preview = function(buf, args)
-    local cmd = args.command or ""
-    if cmd:find("\n") then
-      smelt.syntax.render(buf, { content = cmd, lang = "bash" })
-    end
-  end,
   execute = M.execute,
 })
 
