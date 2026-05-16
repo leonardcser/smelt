@@ -250,6 +250,12 @@ impl VimWindowState {
         self.visual_anchor
     }
 
+    /// Reset the visual anchor to 0. Call after wholesale source swaps so
+    /// stale anchors can't outlive the bytes they pointed at.
+    pub fn clear_visual_anchor(&mut self) {
+        self.visual_anchor = 0;
+    }
+
     /// Pop count1 (default 1), clearing both accumulators.
     fn take_count(&mut self) -> usize {
         let n = self.count1.unwrap_or(1);

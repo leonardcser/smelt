@@ -257,25 +257,30 @@ impl PromptState {
     /// boundary, clears `selection_anchor`, and closes the completer — its
     /// anchor was indexed into the old source and would otherwise outlive
     /// it. Callers that still want a completer call `recompute_completer` /
-    /// `sync_completer` afterward. Attachments / paste-state / undo differ
-    /// per site so callers manage those themselves.
+    /// Wholesale source swap. Resets every piece of state whose validity
+    /// depended on the old bytes: cpos snap, selection anchor, attachment
+    /// ids, vim visual anchor, completer. Callers that need a fresh
+    /// attachment set (e.g. rewind, stash restore) must repopulate
+    /// `attachment_ids` after this returns. Paste-state and undo differ
+    /// per site so callers still manage those themselves.
     pub(crate) fn install_source(&mut self, ctx: &mut PromptCtx<'_>, text: String, cpos: usize) {
         ctx.buf.set_source(text);
         let source = ctx.buf.source();
         ctx.win.cpos = crate::smelt_term::text::snap(source, cpos);
         ctx.win.selection_anchor = None;
+        ctx.win.vim_state.clear_visual_anchor();
+        ctx.buf.attachment_ids.clear();
         self.close_completer();
     }
 
     pub(crate) fn clear(&mut self, ctx: &mut PromptCtx<'_>) {
         self.install_source(ctx, String::new(), 0);
-        ctx.buf.attachment_ids.clear();
-        self.close_completer();
         self.from_paste = false;
         // Stash and store are intentionally preserved.
     }
 
-    /// Replace the buffer wholesale: snapshot undo, clear attachments/selection/paste-state,
+    /// Replace the buffer wholesale: snapshot undo, install new source
+    /// (which resets attachments/selection/vim anchor), reset paste-state,
     /// re-derive completer. Direct `source` writes bypass these invariants.
     pub(crate) fn replace_text(
         &mut self,
@@ -286,9 +291,7 @@ impl PromptState {
         self.save_undo(ctx);
         let cpos = cursor.unwrap_or(text.len());
         self.install_source(ctx, text, cpos);
-        ctx.buf.attachment_ids.clear();
         self.from_paste = false;
-        self.close_completer();
         self.recompute_completer(ctx.as_ref());
     }
 
@@ -428,6 +431,10 @@ impl PromptState {
         if self.selection_range(ctx.as_ref()).is_some() {
             self.save_undo(ctx);
             self.delete_selection(ctx);
+            // delete_selection can shrink source past the completer's
+            // anchor; the completer is meaningless after a non-textual
+            // image insert anyway, so just dismiss it.
+            self.close_completer();
         }
         let id = self.store.lock().unwrap().insert_image(label, data_url);
         self.insert_attachment_id(ctx, id);
@@ -625,7 +632,7 @@ impl PromptState {
                     self.recompute_completer(ctx.as_ref());
                     Action::Redraw
                 } else if let Some(entry) = history.and_then(|h| h.up(ctx.buf.source())) {
-                    let text = entry.to_string();
+                    let text = entry.replace(ATTACHMENT_MARKER, "");
                     self.install_source(ctx, text, 0);
                     ctx.win.curswant = None;
                     self.sync_completer(ctx.as_ref());
@@ -645,7 +652,7 @@ impl PromptState {
                     self.recompute_completer(ctx.as_ref());
                     Action::Redraw
                 } else if let Some(entry) = history.and_then(|h| h.down()) {
-                    let s = entry.to_string();
+                    let s = entry.replace(ATTACHMENT_MARKER, "");
                     let cpos = s.len();
                     self.install_source(ctx, s, cpos);
                     ctx.win.curswant = None;
@@ -679,7 +686,7 @@ impl PromptState {
             }
             KeyAction::HistoryPrev => {
                 if let Some(entry) = history.and_then(|h| h.up(ctx.buf.source())) {
-                    let text = entry.to_string();
+                    let text = entry.replace(ATTACHMENT_MARKER, "");
                     self.install_source(ctx, text, 0);
                     self.sync_completer(ctx.as_ref());
                     Action::Redraw
@@ -689,7 +696,7 @@ impl PromptState {
             }
             KeyAction::HistoryNext => {
                 if let Some(entry) = history.and_then(|h| h.down()) {
-                    let s = entry.to_string();
+                    let s = entry.replace(ATTACHMENT_MARKER, "");
                     let cpos = s.len();
                     self.install_source(ctx, s, cpos);
                     self.sync_completer(ctx.as_ref());
