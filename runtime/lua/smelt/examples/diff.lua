@@ -58,7 +58,7 @@ local function open(filepath)
 
 	local abs = filepath
 	if not smelt.path.is_absolute(abs) then
-		abs = smelt.path.normalize(smelt.path.join({ root, filepath }))
+		abs = smelt.path.normalize(smelt.path.join(root, filepath))
 	end
 	local rel = smelt.path.relative(root, abs)
 
