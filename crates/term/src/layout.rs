@@ -914,10 +914,10 @@ pub fn resolve_constraints_with_fit_caps(
                 .filter(|(_, &(_, f, _))| f > 0)
                 .map(|(k, _)| shares[k] as u32)
                 .sum();
-            if floored_total > 0 {
+            if let Some(divisor) = std::num::NonZeroU32::new(floored_total) {
                 for (k, &(_, f, _)) in elastic.iter().enumerate() {
                     if f > 0 {
-                        let take = ((shares[k] as u32 * over as u32) / floored_total) as u16;
+                        let take = ((shares[k] as u32 * over as u32) / divisor) as u16;
                         shares[k] = shares[k].saturating_sub(take);
                     }
                 }
