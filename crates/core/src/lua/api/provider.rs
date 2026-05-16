@@ -194,23 +194,23 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
             "smelt.provider",
             "middleware",
             "Register provider middleware. `mw` is a table of \
-`{ on_request = fn?, on_response = fn?, on_delta = fn? }`:\n\n\
-- `on_request(payload, ctx)` — runs before the outbound HTTP request. Return a table to replace the payload; any other return is no-op.\n\
-- `on_response(msg, ctx)` — runs after the full assistant message is assembled. Return a table `{ content?, thinking?, tool_calls?, stop_reason?, usage? }` to replace the message.\n\
-- `on_delta(d)` — runs for every streaming delta. Return a table to replace the delta; `text` and `thinking` deltas are safe to mutate, `tool_args` JSON fragments are NOT (mutating them can corrupt the parser).\n\n\
-Hooks fire in registration order. Returns an `off()` function that removes this middleware. NOTE: engine wiring for these hooks is staged — the registry stores them but the engine's request/response/stream path is not yet hooked through.",
+`{ on_request = fn?, on_response = fn? }`:\n\n\
+- `on_request(messages)` — runs just before the engine calls the provider. `messages` is the full conversation history (an array of `{ role, content, tool_calls? }` rows including the system prompt at index 1). Return a replacement array to mutate it; any other return value leaves the history untouched.\n\
+- `on_response(message)` — runs after the assistant message is fully assembled but before it's appended to history. `message` is the same `{ role = \"assistant\", content?, tool_calls? }` shape used everywhere else. Return a replacement table to mutate it; any other return leaves it as-is.\n\n\
+Hooks fire in registration order. Each hook sees the previous hook's replacement. Returns an `off()` function that removes this middleware.\n\n\
+For streaming observation use `smelt.cell.subscribe(\"stream_delta\", ...)` — synchronous mutation of mid-stream tokens isn't safe because the parser owns the partial state.",
             &["mw"],
             lua,
             move |lua, mw: mlua::Table| -> LuaResult<mlua::Function> {
                 let on_request: Option<mlua::Function> = mw.get("on_request").ok();
                 let on_response: Option<mlua::Function> = mw.get("on_response").ok();
-                let on_delta: Option<mlua::Function> = mw.get("on_delta").ok();
-                if on_request.is_none() && on_response.is_none() && on_delta.is_none() {
+                if on_request.is_none() && on_response.is_none() {
                     return Err(LuaError::RuntimeError(
-                        "provider.middleware: at least one of on_request/on_response/on_delta is required".to_string(),
+                        "provider.middleware: at least one of on_request/on_response is required"
+                            .to_string(),
                     ));
                 }
-                let mut parts = Vec::with_capacity(3);
+                let mut parts = Vec::with_capacity(2);
                 if let Some(f) = on_request {
                     let id = s.hooks.provider_request.register(lua, f, "")?;
                     parts.push((Arc::clone(&s.hooks.provider_request), id));
@@ -218,10 +218,6 @@ Hooks fire in registration order. Returns an `off()` function that removes this 
                 if let Some(f) = on_response {
                     let id = s.hooks.provider_response.register(lua, f, "")?;
                     parts.push((Arc::clone(&s.hooks.provider_response), id));
-                }
-                if let Some(f) = on_delta {
-                    let id = s.hooks.provider_delta.register(lua, f, "")?;
-                    parts.push((Arc::clone(&s.hooks.provider_delta), id));
                 }
                 composite_off(lua, parts)
             },

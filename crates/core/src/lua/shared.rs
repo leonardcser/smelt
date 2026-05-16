@@ -141,8 +141,6 @@ pub struct Hooks {
     pub provider_request: Arc<HookRegistry>,
     /// `provider.middleware{on_response=...}` registry.
     pub provider_response: Arc<HookRegistry>,
-    /// `provider.middleware{on_delta=...}` registry.
-    pub provider_delta: Arc<HookRegistry>,
 }
 
 /// Spec for a Lua-declared CLI flag. Mirrors the subset of clap we need.
