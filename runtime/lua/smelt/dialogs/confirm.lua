@@ -55,20 +55,33 @@ local function build_options(req)
   return labels, decisions
 end
 
--- Compose the body header: command (syntax-highlit for known langs), optional
--- description, blank, dim "Allow?". The tool name itself lives in the overlay
--- border title — not the body.
+-- Compose the body header: every command line (syntax-highlit for known langs),
+-- optional subtitle, blank, dim "Allow?". The tool name itself lives in the
+-- overlay border title — not the body.
+--
+-- Subtitle source: for `bash`, use the model's `args.description` (a short
+-- human-readable gloss of what the command does); for other tools, fall back
+-- to whatever the tool's `summary(args)` hook returned. The description
+-- field exists in bash's schema specifically to feed this dialog.
 local function render_header(buf, req)
-  local first_line = (req.desc or ""):match("([^\n]*)") or ""
   local syntax_lang = req.tool_name == "bash" and "bash" or nil
-  local summary = req.summary
-  if summary == "" then summary = nil end
+  local subtitle = nil
+  if req.tool_name == "bash" and req.args and req.args.description and req.args.description ~= "" then
+    subtitle = req.args.description
+  elseif req.summary and req.summary ~= "" then
+    subtitle = req.summary
+  end
 
-  local lines = {
-    { { text = first_line, syntax = syntax_lang } },
-  }
-  if summary then
-    lines[#lines + 1] = { { text = summary, style = { dim = true } } }
+  local lines = {}
+  local desc = req.desc or ""
+  for cmd_line in (desc .. "\n"):gmatch("([^\n]*)\n") do
+    lines[#lines + 1] = { { text = cmd_line, syntax = syntax_lang } }
+  end
+  if #lines == 0 then
+    lines[#lines + 1] = { { text = "", syntax = syntax_lang } }
+  end
+  if subtitle then
+    lines[#lines + 1] = { { text = subtitle, style = { dim = true } } }
   end
   lines[#lines + 1] = {}
   lines[#lines + 1] = { { text = "Allow?", style = { dim = true } } }

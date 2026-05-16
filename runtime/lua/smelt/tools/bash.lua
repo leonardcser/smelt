@@ -106,8 +106,8 @@ smelt.tools.register({
   confirm_text = function(args) return args.command or "" end,
   approval_patterns = M.approval_patterns,
   summary = function(args)
-    local d = args.description or ""
-    return d ~= "" and d or nil
+    local cmd = args.command or ""
+    return cmd ~= "" and cmd or nil
   end,
   render = function(args, output, ctx)
     local items = {}

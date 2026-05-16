@@ -2,12 +2,23 @@ use super::MAX_TOOL_BLOCK_ROWS;
 use smelt_core::buffer::SpanMeta;
 use smelt_core::content::block_layout::BlockLayout;
 use smelt_core::content::builder::{replay_buffer_row_into, LineBuilder};
+use smelt_core::content::highlight::InlineSyntax;
 use smelt_core::content::wrap::wrap_line;
 use smelt_core::theme::{intern, HlGroup};
 use smelt_core::transcript_model::{ToolOutput, ToolStatus};
 use smelt_core::utils::format_duration;
 use std::collections::HashMap;
 use std::time::Duration;
+
+/// Pick the inline-syntax language used to colorize a tool's summary
+/// header. Concentrated here so all tool-specific renderer special-cases
+/// live in one place.
+fn summary_syntax_lang(name: &str) -> Option<&'static str> {
+    match name {
+        "bash" => Some("bash"),
+        _ => None,
+    }
+}
 
 #[allow(clippy::too_many_arguments)]
 pub(super) fn render_tool(
@@ -109,6 +120,7 @@ fn print_tool_line(
     let show = total.min(MAX_TOOL_BLOCK_ROWS);
     let mut rows = 0u16;
 
+    let mut hi = summary_syntax_lang(name).map(InlineSyntax::new);
     for (idx, seg) in wrapped[..show].iter().enumerate() {
         if idx > 0 {
             out.print_gutter(&" ".repeat(ly.prefix_len));
@@ -119,7 +131,10 @@ fn print_tool_line(
         if idx == 0 {
             out.set_source_text(summary);
         }
-        out.print(seg);
+        match hi.as_mut() {
+            Some(h) => h.print_line(out, seg),
+            None => out.print(seg),
+        }
         if idx == 0 {
             print_dim_non_selectable(out, &time_str);
         }
