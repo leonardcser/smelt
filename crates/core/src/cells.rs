@@ -218,6 +218,16 @@ impl Cells {
         !self.pending.is_empty()
     }
 
+    /// Drop every Lua subscriber (direct + glob) plus queued fires.
+    /// Dropping `pending` too prevents one stale post-reload firing.
+    pub fn clear_lua_subscribers(&mut self) {
+        for slot in self.slots.values_mut() {
+            slot.subscribers.clear();
+        }
+        self.glob_subs.clear();
+        self.pending.clear();
+    }
+
     /// Publish `value` only when it differs from the current slot. Skips subscribers on no-op writes.
     pub fn publish_if_changed<T>(&mut self, name: &str, value: T) -> bool
     where
@@ -616,8 +626,7 @@ mod tests {
 
     fn handle(lua: &Lua, src: &str) -> Rc<LuaHandle> {
         let func: mlua::Function = lua.load(src).eval().expect("load");
-        let key = lua.create_registry_value(func).expect("registry");
-        Rc::new(LuaHandle { key })
+        Rc::new(LuaHandle::from_func(lua, func).expect("registry"))
     }
 
     #[test]

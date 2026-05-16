@@ -6,6 +6,12 @@ use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicU64, AtomicU8, Ordering};
 use std::sync::{Arc, Mutex};
 
+/// Lua-allocated `BufId`s start here so they can never collide with the
+/// Rust-side block-buffer id space (which begins at 1 and grows slowly).
+/// `Ui::reap_anonymous` uses this threshold to decide which anonymous
+/// bufs are safe to sweep on `/reload`.
+pub const LUA_BUF_ID_BASE: u64 = 1u64 << 32;
+
 /// Boot-time phase. Used by Lua API guards to refuse phase-sensitive
 /// calls outside their valid window (e.g. `cli.register_flag` only runs
 /// in `Early`).
@@ -77,7 +83,7 @@ pub struct LuaShared {
     pub tools: Mutex<HashMap<String, ToolHandles>>,
     pub callbacks: Mutex<HashMap<u64, LuaHandle>>,
     pub next_id: AtomicU64,
-    /// Starts at `1 << 32` so Lua-allocated `BufId`s never collide with Rust-side buffers.
+    /// Starts at `LUA_BUF_ID_BASE` so Lua-allocated `BufId`s never collide with Rust-side buffers.
     pub next_buf_id: AtomicU64,
     /// Lives on the shared arc (not `LuaTaskRuntime`) so a coroutine inside `drive_tasks`
     /// can mint an id without re-entering the `tasks` mutex.
@@ -100,6 +106,9 @@ pub struct LuaShared {
     /// to skip the matching `require()` calls. Names use the dotted module
     /// form, e.g. `"smelt.tools.web_search"`, `"smelt.commands.compact"`.
     pub disabled_modules: Mutex<HashSet<String>>,
+    /// `package.loaded` keys present right after `Lua::new()` — the
+    /// stdlib. `/reload` wipes everything outside this set.
+    pub native_module_names: Mutex<HashSet<String>>,
     /// CLI flag specs registered from `early.lua` via `smelt.cli.register_flag`.
     /// The main binary reads this after the early phase and re-runs clap with
     /// the merged surface.
@@ -187,7 +196,7 @@ impl Default for LuaShared {
             tools: Mutex::new(HashMap::new()),
             callbacks: Mutex::new(HashMap::new()),
             next_id: AtomicU64::new(1),
-            next_buf_id: AtomicU64::new(1 << 32),
+            next_buf_id: AtomicU64::new(LUA_BUF_ID_BASE),
             next_external_id: AtomicU64::new(1),
             tasks: Mutex::new(LuaTaskRuntime::new()),
             task_inbox: Mutex::new(Vec::new()),
@@ -200,6 +209,7 @@ impl Default for LuaShared {
             tool_defaults: Mutex::new(crate::permissions::rules::ToolDefaults::default()),
             messages: Mutex::new(crate::messages::Messages::new()),
             disabled_modules: Mutex::new(HashSet::new()),
+            native_module_names: Mutex::new(HashSet::new()),
             cli_flag_specs: Mutex::new(Vec::new()),
             cli_flag_values: Mutex::new(HashMap::new()),
             hooks: Hooks::default(),
@@ -215,6 +225,30 @@ impl LuaShared {
     }
     pub fn set_phase(&self, p: Phase) {
         self.phase.store(p as u8, Ordering::Release);
+    }
+
+    /// Drop every Lua handle from the registries `/reload` repopulates:
+    /// commands, keymaps, statusline sources, tools, callbacks, hooks.
+    pub fn clear_lua_handles(&self) {
+        if let Ok(mut m) = self.commands.lock() {
+            m.clear();
+        }
+        if let Ok(mut m) = self.keymaps.lock() {
+            m.clear();
+        }
+        if let Ok(mut v) = self.statusline_sources.lock() {
+            v.clear();
+        }
+        if let Ok(mut m) = self.tools.lock() {
+            m.clear();
+        }
+        if let Ok(mut m) = self.callbacks.lock() {
+            m.clear();
+        }
+        self.hooks.tool_before.clear();
+        self.hooks.tool_after.clear();
+        self.hooks.provider_request.clear();
+        self.hooks.provider_response.clear();
     }
 }
 

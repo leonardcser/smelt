@@ -97,6 +97,7 @@ impl LuaRuntime {
                 rt.load_error = Some(format!("embedded searcher: {e}"));
             }
         }
+        rt.snapshot_native_modules();
 
         rt
     }
@@ -119,6 +120,7 @@ impl LuaRuntime {
                 rt.load_error = Some(format!("embedded searcher: {e}"));
             }
         }
+        rt.snapshot_native_modules();
 
         rt
     }
@@ -244,6 +246,95 @@ impl LuaRuntime {
     }
     pub fn current_phase(&self) -> crate::lua::Phase {
         self.shared.phase()
+    }
+
+    /// Stash the stdlib keys in `package.loaded` so `/reload` knows what
+    /// not to wipe. Called once from the constructor.
+    fn snapshot_native_modules(&self) {
+        let names: std::collections::HashSet<String> = (|| -> LuaResult<_> {
+            let package: mlua::Table = self.lua.globals().get("package")?;
+            let loaded: mlua::Table = package.get("loaded")?;
+            let mut out = std::collections::HashSet::new();
+            for (k, _) in loaded.pairs::<String, mlua::Value>().flatten() {
+                out.insert(k);
+            }
+            Ok(out)
+        })()
+        .unwrap_or_default();
+        if let Ok(mut set) = self.shared.native_module_names.lock() {
+            *set = names;
+        }
+    }
+
+    /// Nil out every `package.loaded` entry outside the stdlib snapshot
+    /// so the next `require()` re-runs the module body.
+    fn wipe_loaded_modules(&self) {
+        let snapshot = match self.shared.native_module_names.lock() {
+            Ok(s) => s.clone(),
+            Err(_) => return,
+        };
+        let _ = (|| -> LuaResult<()> {
+            let package: mlua::Table = self.lua.globals().get("package")?;
+            let loaded: mlua::Table = package.get("loaded")?;
+            let mut to_drop = Vec::new();
+            for (k, _) in loaded.pairs::<String, mlua::Value>().flatten() {
+                if !snapshot.contains(&k) {
+                    to_drop.push(k);
+                }
+            }
+            for k in to_drop {
+                loaded.set(k, mlua::Value::Nil)?;
+            }
+            Ok(())
+        })();
+    }
+
+    /// Move phase from `Early` to `Init`, then `require` every autoload
+    /// module (modulo `smelt.builtins.disable{}` opt-outs from
+    /// `early.lua`). First failure short-circuits onto `load_error`.
+    pub fn load_autoload(&mut self) {
+        if self.load_error.is_some() {
+            return;
+        }
+        self.mark_init();
+        let disabled = self.disabled_modules();
+        for name in autoload_modules_filtered(&disabled) {
+            let code = format!("require('{name}')");
+            if let Err(e) = self.lua.load(&code).set_name(name.as_str()).exec() {
+                self.load_error = Some(format!("autoload {name}: {e}"));
+                return;
+            }
+        }
+    }
+
+    /// Clear every Lua-owned registry, wipe non-stdlib `package.loaded`,
+    /// re-run bootstrap (idempotent), then re-run autoload → user init →
+    /// global plugins → project config. After loading, sweep stale
+    /// `smelt.state` slots no plugin touched this cycle. `early.lua` is
+    /// skipped (CLI flags and `builtins.disable` are startup-only).
+    /// Returns any load error.
+    pub fn reload(&mut self, cwd: Option<&std::path::Path>) -> Option<String> {
+        self.load_error = None;
+        // Cancel + drop any in-flight Lua coroutines before wiping the
+        // registries they reference — letting them resume on the next
+        // drive tick would invoke stale handles.
+        if let Ok(mut tasks) = self.shared.tasks.lock() {
+            tasks.cancel_and_clear();
+        }
+        self.shared.clear_lua_handles();
+        self.wipe_loaded_modules();
+        if let Err(e) = load_bootstrap_chunks(&self.lua) {
+            self.load_error = Some(format!("bootstrap: {e}"));
+            return self.load_error.clone();
+        }
+        self.load_autoload();
+        self.load_user_config();
+        self.load_global_plugins();
+        if let Some(cwd) = cwd {
+            let _ = self.load_project_config(cwd);
+        }
+        let _ = self.lua.load("smelt.__sweep_state()").exec();
+        self.load_error.clone()
     }
 
     pub fn load_init(&mut self, path: &std::path::Path) -> LuaResult<()> {
@@ -1488,9 +1579,28 @@ fn module_to_relpath(module: &str) -> PathBuf {
     path
 }
 
-/// Override search roots in priority order: `.smelt/runtime/` then `<XDG_DATA_HOME>/smelt/runtime/`.
+/// Override search roots in priority order:
+/// 1. `$SMELT_RUNTIME_DIR` (when set) — explicit dev override.
+/// 2. Workspace `runtime/lua/` (debug builds only, when the path exists) —
+///    so `cargo run` + `/reload` picks up unbuilt edits to bundled plugins.
+/// 3. `.smelt/runtime/` in cwd — project overrides.
+/// 4. `<XDG_DATA_HOME>/smelt/runtime/` — user overrides.
 fn module_overlay_roots() -> Vec<PathBuf> {
     let mut roots = Vec::new();
+    if let Some(dir) = std::env::var_os("SMELT_RUNTIME_DIR") {
+        roots.push(PathBuf::from(dir));
+    }
+    #[cfg(debug_assertions)]
+    {
+        let dev_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("..")
+            .join("..")
+            .join("runtime")
+            .join("lua");
+        if dev_root.is_dir() {
+            roots.push(dev_root);
+        }
+    }
     if let Ok(cwd) = std::env::current_dir() {
         roots.push(cwd.join(".smelt").join("runtime"));
     }
@@ -1640,6 +1750,58 @@ mod tests {
         assert!(init_ran, "project init.lua must run after trust");
         assert!(plugin_ran, "project plugins/*.lua must run after trust");
     }
+
+    #[test]
+    fn clear_lua_handles_drops_every_registry() {
+        let rt = LuaRuntime::new();
+        rt.lua
+            .load(
+                r#"
+                smelt.cmd.register("plug_cmd", function() end)
+                smelt.tools.middleware("bash", { before = function(ctx) return ctx end })
+                "#,
+            )
+            .exec()
+            .expect("register");
+        assert!(rt.shared.commands.lock().unwrap().contains_key("plug_cmd"));
+        assert!(!rt.shared.hooks.tool_before.is_empty());
+
+        rt.shared.clear_lua_handles();
+        assert!(rt.shared.commands.lock().unwrap().is_empty());
+        assert!(rt.shared.hooks.tool_before.is_empty());
+    }
+
+    #[test]
+    fn wipe_loaded_modules_keeps_native_stdlib() {
+        let rt = LuaRuntime::new();
+        rt.lua
+            .load("package.loaded['user_mod'] = { v = 1 }")
+            .exec()
+            .unwrap();
+        let stdlib_before: bool = rt
+            .lua
+            .load("return package.loaded['string'] ~= nil")
+            .eval()
+            .unwrap();
+        assert!(stdlib_before, "stdlib must be in package.loaded");
+
+        rt.wipe_loaded_modules();
+        let stdlib_after: bool = rt
+            .lua
+            .load("return package.loaded['string'] ~= nil")
+            .eval()
+            .unwrap();
+        assert!(stdlib_after, "stdlib must survive wipe");
+        let user_after: bool = rt
+            .lua
+            .load("return package.loaded['user_mod'] ~= nil")
+            .eval()
+            .unwrap();
+        assert!(!user_after, "user module must be wiped");
+    }
+
+    // End-to-end `reload()` lives in `tui::lua::tests::reload_clears_tui_surfaces`
+    // — the bundled autoload modules need the TUI Lua API to run.
 
     #[test]
     fn overlay_file_overrides_embedded_module() {

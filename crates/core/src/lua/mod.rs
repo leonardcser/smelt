@@ -12,7 +12,7 @@ pub use hooks::{composite_off, HookEntry, HookRegistry};
 pub use runtime::{autoload_modules, autoload_modules_filtered, LuaRuntime};
 pub use shared::{
     CliFlagKind, CliFlagSpec, CliFlagValue, DefaultShell, Hooks, LuaResumeSink, LuaShared, Phase,
-    RegisteredCommand, StatusSource, ToolHandles,
+    RegisteredCommand, StatusSource, ToolHandles, LUA_BUF_ID_BASE,
 };
 pub use task::{
     current_task_cancel, with_task_cancel, LuaTaskRuntime, TaskCompletion, TaskDriveOutput,
@@ -29,9 +29,17 @@ pub enum ToolExecResult {
 
 use mlua::prelude::*;
 
-/// A Lua callable stored as a `RegistryKey` so it survives GC cycles.
+/// A Lua callable parked in the registry so it survives GC.
 pub struct LuaHandle {
     pub key: mlua::RegistryKey,
+}
+
+impl LuaHandle {
+    pub fn from_func(lua: &Lua, func: mlua::Function) -> LuaResult<Self> {
+        Ok(Self {
+            key: lua.create_registry_value(func)?,
+        })
+    }
 }
 
 /// Serialize a `Serialize` value through JSON into a Lua value. Convenience

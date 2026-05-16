@@ -17,6 +17,11 @@ use crate::smelt_term::{
 use crossterm::event::{KeyCode, KeyModifiers};
 
 pub(crate) fn open_overlay(app: &mut TuiApp, opts: mlua::Table) -> Result<u64, String> {
+    // Parse the full opts up front so a named re-open refreshes the whole
+    // layout (not just title/border) — structural edits to a plugin's
+    // overlay tree hot-reload in place. `size_override` on the existing
+    // overlay is left intact so user-resized panels stay resized.
+    let name: Option<String> = opts.get::<Option<String>>("name").ok().flatten();
     let title = crate::lua::parse::title(opts.get::<mlua::Value>("title").ok())
         .map_err(|e| format!("overlay title: {e}"))?;
     let layout_ud: mlua::AnyUserData = opts
@@ -48,6 +53,21 @@ pub(crate) fn open_overlay(app: &mut TuiApp, opts: mlua::Table) -> Result<u64, S
         layout = layout.with_title(t);
     }
 
+    if let Some(ref n) = name {
+        if let Some(existing) = app.ui.named_overlay(n) {
+            if let Some(ov) = app.ui.overlay_mut(existing) {
+                ov.layout = layout;
+                ov.anchor = anchor;
+                ov.z = z;
+                ov.modal = modal;
+                ov.blocks_agent = blocks_agent;
+                ov.draggable = draggable;
+                ov.resizable = resizable;
+                return Ok(existing.0 as u64);
+            }
+        }
+    }
+
     // First-frame prime: render every window leaf's buffer at the terminal
     // width so wrap-driven gutters and intra-frame paints have something to
     // read. Subsequent frames hit the buffer's wrap cache.
@@ -71,6 +91,9 @@ pub(crate) fn open_overlay(app: &mut TuiApp, opts: mlua::Table) -> Result<u64, S
         .draggable(draggable)
         .resizable(resizable);
     let id = app.ui.overlay_open(overlay);
+    if let Some(n) = name {
+        app.ui.name_overlay(n, id);
+    }
     Ok(id.0 as u64)
 }
 

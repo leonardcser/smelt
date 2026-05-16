@@ -42,9 +42,9 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
                     .and_then(|o| o.align)
                     .map(|s| s == "right")
                     .unwrap_or(false);
-                let key = lua.create_registry_value(handler.into_inner())?;
+                let handle = LuaHandle::from_func(lua, handler.into_inner())?;
                 let source = StatusSource {
-                    handle: LuaHandle { key },
+                    handle,
                     default_align_right,
                 };
                 if let Ok(mut sources) = s.statusline_sources.lock() {

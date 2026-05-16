@@ -11,7 +11,7 @@ local buf = {}
 ---@type fun(buf: integer, ns: integer, line_start: integer?, line_end: integer?): nil
 buf.clear_namespace = nil
 
---- Create a new buffer and return its id. `opts.mode` selects a `BufFormat` parser; `opts.readonly` blocks edits via the public mutators.
+--- Create a new buffer and return its id. `opts.mode` selects a `BufFormat` parser; `opts.readonly` blocks edits via the public mutators. `opts.name` opts the buffer into hot-reload survival: re-calling `create` with the same name returns the existing buffer (its contents/extmarks/cursor are preserved) with `readonly`/`mode` re-applied. Anonymous buffers are reaped on `/reload`.
 ---@type fun(opts: table?): integer
 buf.create = nil
 
@@ -22,6 +22,10 @@ buf.create_namespace = nil
 --- Read a single line by 1-based index. Returns `nil` when out of range.
 ---@type fun(buf: integer, line: integer): string?
 buf.get_line = nil
+
+--- Look up the buffer id registered under `name` (i.e. previously created via `buf.create({ name = name })`). Returns `nil` when no such buffer is open. Used by plugins to recover their named buffer ids without re-calling `create`.
+---@type fun(name: string): integer?
+buf.named = nil
 
 --- Place a highlight or virt-text extmark at `(row, col)` (row is 1-based). `opts` mirrors `nvim_buf_set_extmark`'s keyset; pass `opts.id` to retarget an existing mark. Returns the new extmark id.
 ---@type fun(buf: integer, ns: integer, row: integer, col: integer, opts: smelt.buf.ExtmarkOpts?): integer

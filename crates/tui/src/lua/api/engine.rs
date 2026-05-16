@@ -172,6 +172,25 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
     register_ui_fn(
         &engine_tbl,
         "smelt.engine",
+        "reload",
+        "Re-evaluate every Lua surface: clears every command, keymap, statusline source, tool, hook, timer, and cell subscriber, wipes non-stdlib `package.loaded` entries, then re-runs the bundled autoload modules, `init.lua`, global plugins, and `.smelt/init.lua` + `.smelt/plugins/*`. `early.lua` is intentionally skipped — its CLI-flag and `smelt.builtins.disable` effects are startup-only.",
+        &[],
+        lua,
+        |_, ()| -> LuaResult<()> {
+            crate::lua::with_app(|app| {
+                if app.agent.is_some() {
+                    app.notify_error("cannot reload while agent is working".into());
+                    return;
+                }
+                app.reload_lua();
+            });
+            Ok(())
+        },
+    )?;
+
+    register_ui_fn(
+        &engine_tbl,
+        "smelt.engine",
         "compact",
         "Start a transcript compaction with optional extra `instructions` for the summarizer. Notifies and no-ops if compaction is unavailable in the current state.",
         &["instructions"],
@@ -245,9 +264,9 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
                 let id = s.next_id.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
 
                 if let Some(cb) = spec.on_response {
-                    let key = lua.create_registry_value(cb.into_inner())?;
+                    let handle = LuaHandle::from_func(lua, cb.into_inner())?;
                     if let Ok(mut cbs) = s.callbacks.lock() {
-                        cbs.insert(id, LuaHandle { key });
+                        cbs.insert(id, handle);
                     }
                 }
 

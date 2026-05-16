@@ -23,10 +23,9 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
         &["ms", "handler"],
         lua,
         |lua, (ms, handler): (u64, TimerHandler)| -> LuaResult<u64> {
-            let key = lua.create_registry_value(handler.into_inner())?;
+            let handle = LuaHandle::from_func(lua, handler.into_inner())?;
             Ok(crate::host::try_with_core(|core| {
-                core.timers
-                    .set(Duration::from_millis(ms), LuaHandle { key })
+                core.timers.set(Duration::from_millis(ms), handle)
             })
             .unwrap_or(0))
         },
@@ -44,10 +43,9 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
                     "smelt.timer.every: period must be > 0".into(),
                 ));
             }
-            let key = lua.create_registry_value(handler.into_inner())?;
+            let handle = LuaHandle::from_func(lua, handler.into_inner())?;
             Ok(crate::host::try_with_core(|core| {
-                core.timers
-                    .every(Duration::from_millis(ms), LuaHandle { key })
+                core.timers.every(Duration::from_millis(ms), handle)
             })
             .unwrap_or(0))
         },
@@ -71,10 +69,9 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
         &["ms", "handler"],
         lua,
         |lua, (ms, handler): (u64, TimerHandler)|  -> LuaResult<()>{
-            let key = lua.create_registry_value(handler.into_inner())?;
+            let handle = LuaHandle::from_func(lua, handler.into_inner())?;
             crate::host::try_with_core(|core| {
-                core.timers
-                    .set(Duration::from_millis(ms), LuaHandle { key })
+                core.timers.set(Duration::from_millis(ms), handle)
             });
             Ok(())
         },

@@ -10,10 +10,10 @@ impl LuaRuntime {
     /// [`crate::lua::register_callback_handle`] directly.
     #[cfg(test)]
     pub(super) fn register_callback(&self, func: mlua::Function) -> mlua::Result<u64> {
-        let key = self.lua.create_registry_value(func)?;
+        let handle = smelt_core::lua::LuaHandle::from_func(&self.lua, func)?;
         let id = self.shared.next_id.fetch_add(1, Ordering::Relaxed);
         if let Ok(mut cbs) = self.shared.callbacks.lock() {
-            cbs.insert(id, smelt_core::lua::LuaHandle { key });
+            cbs.insert(id, handle);
         }
         Ok(id)
     }

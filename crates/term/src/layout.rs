@@ -99,11 +99,19 @@ impl LayoutTree {
         }
     }
 
-    fn chrome_mut(&mut self) -> &mut Chrome {
+    pub fn chrome_mut(&mut self) -> &mut Chrome {
         match self {
-            Self::Leaf { chrome, .. }
-            | Self::Vbox { chrome, .. }
-            | Self::Hbox { chrome, .. } => chrome,
+            Self::Leaf { chrome, .. } | Self::Vbox { chrome, .. } | Self::Hbox { chrome, .. } => {
+                chrome
+            }
+        }
+    }
+
+    pub fn chrome(&self) -> &Chrome {
+        match self {
+            Self::Leaf { chrome, .. } | Self::Vbox { chrome, .. } | Self::Hbox { chrome, .. } => {
+                chrome
+            }
         }
     }
 
@@ -120,6 +128,16 @@ impl LayoutTree {
     pub fn with_title(mut self, t: impl Into<crate::line::Line<'static>>) -> Self {
         self.chrome_mut().title = Some(t.into());
         self
+    }
+
+    /// Replace the root chrome's title in place.
+    pub fn set_title(&mut self, t: Option<crate::line::Line<'static>>) {
+        self.chrome_mut().title = t;
+    }
+
+    /// Replace the root chrome's border.
+    pub fn set_border(&mut self, b: Option<Border>) {
+        self.chrome_mut().border = b;
     }
 
     /// Whether `id` appears as a leaf in this tree (depth-first structural check).
@@ -1181,7 +1199,8 @@ mod tests {
             let result = resolve_layout_with(&tree, Rect::new(0, 0, 80, h), &sizer);
             let used: u16 = result.values().map(|r| r.height).sum();
             assert_eq!(
-                used, h,
+                used,
+                h,
                 "h={h}: panels used {used} rows, leaving {} unused",
                 h - used
             );

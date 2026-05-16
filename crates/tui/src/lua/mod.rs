@@ -225,12 +225,12 @@ pub(crate) fn register_callback_handle(
     lua: &Lua,
     func: mlua::Function,
 ) -> mlua::Result<u64> {
-    let key = lua.create_registry_value(func)?;
+    let handle = smelt_core::lua::LuaHandle::from_func(lua, func)?;
     let id = shared
         .next_id
         .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     if let Ok(mut cbs) = shared.callbacks.lock() {
-        cbs.insert(id, smelt_core::lua::LuaHandle { key });
+        cbs.insert(id, handle);
     }
     Ok(id)
 }
@@ -352,24 +352,6 @@ impl LuaRuntime {
 
     pub(crate) fn take_load_error(&mut self) -> Option<String> {
         self.core.load_error.take()
-    }
-
-    /// Load embedded autoload plugins. Skips modules the user has marked
-    /// disabled via `smelt.builtins.disable{}` in `early.lua`. Promotes
-    /// the phase from `Early` to `Init` before requiring anything.
-    pub fn load_autoload(&mut self) {
-        if self.core.load_error.is_some() {
-            return;
-        }
-        self.core.mark_init();
-        let disabled = self.core.disabled_modules();
-        for name in smelt_core::lua::autoload_modules_filtered(&disabled) {
-            let code = format!("require('{name}')");
-            if let Err(e) = self.core.lua.load(&code).set_name(name.as_str()).exec() {
-                self.core.load_error = Some(format!("autoload {name}: {e}"));
-                return;
-            }
-        }
     }
 
     /// Evaluate `~/.config/smelt/early.lua` (if present). Call BEFORE
@@ -921,6 +903,63 @@ mod tests {
             rt.run_keymap("<C-x>", Some("Normal"), None),
             KeymapResult::NoBinding
         );
+    }
+
+    #[test]
+    fn reload_clears_tui_surfaces() {
+        // End-to-end reload across core (cmd) + TUI (keymap, statusline)
+        // registries. Catches the case where a new surface is added to
+        // `LuaShared` and someone forgets to extend `clear_lua_handles`.
+        let tmp = tempfile::tempdir().unwrap();
+        let init = tmp.path().join("init.lua");
+        std::fs::write(
+            &init,
+            r#"
+                smelt.cmd.register("plug_cmd", function() end)
+                smelt.keymap.set("n", "<C-g>", function() end)
+                smelt.statusline.register("plug_src", function() return {} end)
+            "#,
+        )
+        .unwrap();
+
+        let mut rt = LuaRuntime::new();
+        rt.set_init_lua_path(init.clone());
+        rt.load_user_config();
+        assert!(
+            rt.load_error().is_none(),
+            "first load: {:?}",
+            rt.load_error()
+        );
+
+        let shared = rt.shared.clone();
+        assert!(shared.commands.lock().unwrap().contains_key("plug_cmd"));
+        let has_user_chord = |k: &std::collections::HashMap<(String, String), _>| {
+            k.keys().any(|(_, c)| c == "<C-g>")
+        };
+        assert!(has_user_chord(&shared.keymaps.lock().unwrap()));
+        assert!(shared
+            .statusline_sources
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|(n, _)| n == "plug_src"));
+
+        // Reload to an empty body: the user-registered command, keymap, and
+        // statusline source must disappear. Autoload-registered keymaps
+        // (e.g. F5/reload, F12/perf_panel) come back, so we only assert the
+        // user chord is gone.
+        std::fs::write(&init, "").unwrap();
+        let err = rt.reload(None);
+        assert!(err.is_none(), "reload: {err:?}");
+
+        assert!(!shared.commands.lock().unwrap().contains_key("plug_cmd"));
+        assert!(!has_user_chord(&shared.keymaps.lock().unwrap()));
+        assert!(!shared
+            .statusline_sources
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|(n, _)| n == "plug_src"));
     }
 
     #[test]

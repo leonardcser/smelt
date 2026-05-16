@@ -35,6 +35,29 @@ For a real walkthrough, the bundled plugins under
 [`runtime/lua/smelt/plugins/`](https://github.com/leonardcser/smelt/tree/main/runtime/lua/smelt/plugins)
 are the canonical examples — every pattern below comes straight from them.
 
+## Hot reload
+
+Edit any Lua file — your `init.lua`, plugins under `~/.config/smelt/plugins/` /
+`.smelt/plugins/`, or even a bundled file you've overlayed under
+`~/.config/smelt/lua/smelt/...` — then press `F5` or run `/reload`. smelt
+clears every command, keymap, statusline source, tool, hook, timer, and cell
+subscriber, wipes non-stdlib entries from `package.loaded`, and re-runs the
+bundled autoload modules followed by your config from scratch. The current
+transcript and agent state are untouched. `early.lua` is intentionally skipped
+— its CLI flag declarations and `smelt.builtins.disable{}` opt-outs only take
+effect at startup, so changes there need a real restart.
+
+A reload that fails partway (syntax error in `init.lua`, missing require)
+leaves you with built-ins only until you fix the file and reload again — the
+old registrations have already been dropped. The error message lands in
+`/messages`.
+
+Bootstrap files (`_bootstrap.lua`, `cmd.lua`, `status.lua`, `modes.lua`,
+`dialog.lua`, `widgets/picker.lua`, `widgets/prompt_picker.lua`,
+`dialogs/confirm.lua`) install utilities on the `smelt` global table at
+startup. Those definitions persist across reload — overlaying one of these
+files won't take effect until you restart smelt.
+
 ## Bundled plugins
 
 | Plugin | Autoloaded | What it does |

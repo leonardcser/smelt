@@ -6,11 +6,19 @@
 
 Generic overlay composition from items and paint regions. UiHost-only.
 
+## `smelt.ui.overlay.close`
+
+```lua
+fun(name: string): nil
+```
+
+Close the overlay registered under `name` (opened via `smelt.ui.overlay.open` with `opts.name = name`). No-op when the name doesn't resolve to an open overlay. Anonymous overlays are closed via `smelt.win.close` on a leaf instead.
+
 ## `smelt.ui.overlay.open`
 
 ```lua
 fun(opts: table): integer
 ```
 
-Open a generic overlay rendered from `opts.layout` — a layout-tree userdata built via `smelt.ui.layout.leaf` / `.vbox` / `.hbox`. Position with `opts.anchor` (`"dock_bottom"` | `"dock_top"` | `"dock_left"` | `"dock_right"` | `"center"` | `"screen_at"` | `"win"`); size each axis with `opts.width` / `opts.height` (fixed) or `opts.max_width` / `opts.max_height` (fit-to-content, capped). Size values accept integers (cells), `"N%"` (percent of the anchor's available extent), or `"fill"`. Dock anchors reserve the bottom statusline row. Returns the overlay id so it can be focused or closed via `smelt.win`.
+Open a generic overlay rendered from `opts.layout` — a layout-tree userdata built via `smelt.ui.layout.leaf` / `.vbox` / `.hbox`. Position with `opts.anchor` (`"dock_bottom"` | `"dock_top"` | `"dock_left"` | `"dock_right"` | `"center"` | `"screen_at"` | `"win"`); size each axis with `opts.width` / `opts.height` (fixed) or `opts.max_width` / `opts.max_height` (fit-to-content, capped). Size values accept integers (cells), `"N%"` (percent of the anchor's available extent), or `"fill"`. Dock anchors reserve the bottom statusline row. `opts.name` opts the overlay into hot-reload survival: re-calling with the same name refreshes the mutable subset (`title`, `border`, `modal`, `blocks_agent`, `draggable`, `resizable`, `z`) in place — cursor, scroll, and resize state are preserved. Anonymous overlays are reaped on `/reload`. Returns the overlay id.
 

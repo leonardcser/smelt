@@ -141,10 +141,10 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
         |lua,
          (name, handler): (LuaCellName, LuaCallback<mlua::Value, ()>)|
          -> LuaResult<Option<mlua::Function>> {
-            let key = lua.create_registry_value(handler.into_inner())?;
+            let handle = LuaHandle::from_func(lua, handler.into_inner())?;
             let id = crate::host::try_with_core(|core| {
                 core.cells
-                    .subscribe_kind(&name, SubscriberKind::Lua(Rc::new(LuaHandle { key })))
+                    .subscribe_kind(&name, SubscriberKind::Lua(Rc::new(handle)))
             })
             .flatten();
             let Some(id) = id else { return Ok(None) };
@@ -186,10 +186,10 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
          -> LuaResult<mlua::Function> {
             let pat = glob::Pattern::new(&pattern)
                 .map_err(|e| LuaError::RuntimeError(format!("invalid glob `{pattern}`: {e}")))?;
-            let key = lua.create_registry_value(handler.into_inner())?;
+            let handle = LuaHandle::from_func(lua, handler.into_inner())?;
             let id = crate::host::try_with_core(|core| {
                 core.cells
-                    .glob_subscribe(pat, SubscriberKind::Lua(Rc::new(LuaHandle { key })))
+                    .glob_subscribe(pat, SubscriberKind::Lua(Rc::new(handle)))
             })
             .unwrap_or(0);
             let off = lua.create_function(move |_, ()| -> LuaResult<bool> {
@@ -256,10 +256,10 @@ impl mlua::UserData for CellHandle {
         methods.add_method(
             "subscribe",
             |lua, this, handler: mlua::Function| -> LuaResult<mlua::Value> {
-                let key = lua.create_registry_value(handler)?;
+                let handle = LuaHandle::from_func(lua, handler)?;
                 let id = crate::host::try_with_core(|core| {
                     core.cells
-                        .subscribe_kind(&this.name, SubscriberKind::Lua(Rc::new(LuaHandle { key })))
+                        .subscribe_kind(&this.name, SubscriberKind::Lua(Rc::new(handle)))
                 })
                 .flatten();
                 let Some(id) = id else {

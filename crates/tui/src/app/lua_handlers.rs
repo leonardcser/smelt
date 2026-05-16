@@ -14,6 +14,32 @@ impl TuiApp {
         }
     }
 
+    /// `/reload` entry point. Clears append-only Lua registries held on
+    /// `Core` (cells, timers) and the TUI's `PaintRegistry`, then runs
+    /// [`LuaRuntime::reload`] for the `LuaShared` registries + module
+    /// re-evaluation. Rust-owned UI state — overlays, windows, buffers
+    /// — is left in place; plugins re-attach to it via `smelt.state`.
+    pub(crate) fn reload_lua(&mut self) {
+        self.core.cells.clear_lua_subscribers();
+        self.core.timers.clear();
+        self.paint_registry.clear();
+        // Tear down anonymous overlays/wins/bufs from the previous cycle.
+        // Named resources (`opts.name = "..."`) survive — plugins recover
+        // them by re-passing the same name on re-open.
+        let dropped = self.ui.reap_anonymous(smelt_core::lua::LUA_BUF_ID_BASE);
+        for id in dropped {
+            self.lua.remove_callback(id);
+        }
+        self.picker_state.clear();
+        let cwd = std::env::current_dir().ok();
+        let err = self.lua.reload(cwd.as_deref());
+        match err {
+            Some(e) => self.notify_error(format!("lua reload: {e}")),
+            None => self.notify("lua reloaded".into()),
+        }
+        self.input.command_arg_sources = self.lua.list_command_args();
+    }
+
     pub(crate) fn compact_or_notify(&mut self, instructions: Option<String>) {
         if self.core.session.messages.is_empty() {
             self.notify_error("nothing to compact".into());

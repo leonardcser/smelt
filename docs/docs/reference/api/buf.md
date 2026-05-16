@@ -20,7 +20,7 @@ Drop every extmark owned by `ns` between `[line_start, line_end)` (1-based, incl
 fun(opts: table?): integer
 ```
 
-Create a new buffer and return its id. `opts.mode` selects a `BufFormat` parser; `opts.readonly` blocks edits via the public mutators.
+Create a new buffer and return its id. `opts.mode` selects a `BufFormat` parser; `opts.readonly` blocks edits via the public mutators. `opts.name` opts the buffer into hot-reload survival: re-calling `create` with the same name returns the existing buffer (its contents/extmarks/cursor are preserved) with `readonly`/`mode` re-applied. Anonymous buffers are reaped on `/reload`.
 
 ## `smelt.buf.create_namespace`
 
@@ -37,6 +37,14 @@ fun(buf: integer, line: integer): string?
 ```
 
 Read a single line by 1-based index. Returns `nil` when out of range.
+
+## `smelt.buf.named`
+
+```lua
+fun(name: string): integer?
+```
+
+Look up the buffer id registered under `name` (i.e. previously created via `buf.create({ name = name })`). Returns `nil` when no such buffer is open. Used by plugins to recover their named buffer ids without re-calling `create`.
 
 ## `smelt.buf.set_extmark`
 

@@ -76,6 +76,15 @@ pub struct Ui {
     /// Insertion order is the secondary z-order sort key; see [`Self::overlays_in_z_order`].
     overlays: Vec<(OverlayId, Overlay)>,
     next_overlay_id: u32,
+    /// Stable-name → resource-id maps for the hot-reload path. Plugins
+    /// that pass `opts.name = "foo"` to `buf_create` / `win_open_*` /
+    /// `overlay_open` get the same id back on every (re-)load, so
+    /// `/reload` can mutate the resource in place instead of tearing
+    /// it down and losing scroll/cursor/size. Anonymous resources
+    /// (`opts.name == nil`) skip these maps and are reaped on reload.
+    named_bufs: HashMap<String, BufId>,
+    named_wins: HashMap<String, WinId>,
+    named_overlays: HashMap<String, OverlayId>,
     /// `set_focus` pushes the outgoing focus here; overlay-close walks it back.
     focus_history: Vec<WinId>,
     focus: Option<WinId>,
@@ -127,6 +136,9 @@ impl Ui {
             callbacks: Callbacks::new(),
             overlays: Vec::new(),
             next_overlay_id: 1,
+            named_bufs: HashMap::new(),
+            named_wins: HashMap::new(),
+            named_overlays: HashMap::new(),
             focus_history: Vec::new(),
             focus: None,
             capture: None,
@@ -366,6 +378,70 @@ impl Ui {
         self.bufs.remove(&id)
     }
 
+    // ── Named resources (hot-reload-survivable handles) ──────────────
+
+    pub fn named_buf(&self, name: &str) -> Option<BufId> {
+        self.named_bufs.get(name).copied()
+    }
+
+    pub fn name_buf(&mut self, name: impl Into<String>, id: BufId) {
+        self.named_bufs.insert(name.into(), id);
+    }
+
+    pub fn named_win(&self, name: &str) -> Option<WinId> {
+        self.named_wins.get(name).copied()
+    }
+
+    pub fn name_win(&mut self, name: impl Into<String>, id: WinId) {
+        self.named_wins.insert(name.into(), id);
+    }
+
+    pub fn named_overlay(&self, name: &str) -> Option<OverlayId> {
+        self.named_overlays.get(name).copied()
+    }
+
+    pub fn name_overlay(&mut self, name: impl Into<String>, id: OverlayId) {
+        self.named_overlays.insert(name.into(), id);
+    }
+
+    /// Close every overlay whose id isn't in `named_overlays` and remove
+    /// every Lua-created buffer (id ≥ `lua_buf_threshold`) that no
+    /// surviving window references. Used by `/reload` so anonymous
+    /// dialogs/pickers from the previous cycle don't linger as ghost
+    /// overlays. Named resources are left untouched — plugins recover
+    /// them by passing the same `opts.name` on re-open. Returns the
+    /// union of Lua callback ids the caller must release.
+    pub fn reap_anonymous(&mut self, lua_buf_threshold: u64) -> Vec<u64> {
+        let keep_overlays: std::collections::HashSet<OverlayId> =
+            self.named_overlays.values().copied().collect();
+        let doomed: Vec<WinId> = self
+            .overlays
+            .iter()
+            .filter(|(id, _)| !keep_overlays.contains(id))
+            .filter_map(|(_, ov)| ov.layout.leaves_in_order().into_iter().next())
+            .map(|p| WinId(p.0))
+            .collect();
+        let mut ids = Vec::new();
+        for leaf in doomed {
+            ids.extend(self.win_close(leaf));
+        }
+        let referenced: std::collections::HashSet<BufId> =
+            self.wins.values().map(|w| w.buf).collect();
+        let named_bufs: std::collections::HashSet<BufId> =
+            self.named_bufs.values().copied().collect();
+        let drop_bufs: Vec<BufId> = self
+            .bufs
+            .keys()
+            .copied()
+            .filter(|id| id.0 >= lua_buf_threshold)
+            .filter(|id| !referenced.contains(id) && !named_bufs.contains(id))
+            .collect();
+        for id in drop_bufs {
+            self.bufs.remove(&id);
+        }
+        ids
+    }
+
     pub fn win_buf_mut(&mut self, win: WinId) -> Option<&mut Buffer> {
         let id = self.wins.get(&win)?.buf;
         self.bufs.get_mut(&id)
@@ -451,6 +527,10 @@ impl Ui {
         self.overlays
             .iter_mut()
             .find_map(|(oid, ov)| (*oid == id).then_some(ov))
+    }
+
+    pub fn overlay_count(&self) -> usize {
+        self.overlays.len()
     }
 
     fn overlays_in_z_order(&self) -> Vec<(OverlayId, &Overlay)> {

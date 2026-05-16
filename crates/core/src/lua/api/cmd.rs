@@ -49,12 +49,12 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
             )|
                   -> LuaResult<()> {
                 let opts = opts.unwrap_or_default();
-                let key = lua.create_registry_value(handler.into_inner())?;
+                let handle = LuaHandle::from_func(lua, handler.into_inner())?;
                 if let Ok(mut map) = s.commands.lock() {
                     map.insert(
                         name,
                         RegisteredCommand {
-                            handle: LuaHandle { key },
+                            handle,
                             description: opts.desc,
                             args: opts.args,
                             while_busy: opts.while_busy.unwrap_or(true),

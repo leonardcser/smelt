@@ -91,11 +91,24 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
         &win_tbl,
         "smelt.win",
         "open",
-        "Open a split window over the buffer `buf_id`. `opts.region` picks the layout slot (default `\"lua_overlay\"`); `opts.focusable` and `opts.vim_enabled` toggle keyboard behaviour. Row-highlight is two-opt: `opts.cursor_line` (paints the row at the cursor only while this window is focused — caret leaves like code/diff viewers) and `opts.selection_highlight` (paints the row at `cursor_row` regardless of focus — list leaves like pickers driven by an external input). `opts.pad_left` / `opts.pad_right` reserve padding columns on either side. `opts.scrollbar` (default `true`) reserves the rightmost column for a scrollbar that paints only when content overflows — set `false` for cursor-driven UIs (lists, single-line inputs). `opts.wrap` (default `true`) soft-wraps long logical lines onto multiple visual rows; rows the renderer marked `pre_formatted` (e.g. syntax-highlighted code) are not re-wrapped. The line-number gutter is on by default and shows numbers only for rows stamped with `SourceLine` metadata (so text/list panes pay no column cost while code/diff buffers number automatically); pass `opts.gutter = \"none\"` to disable. Returns the new `WinId` or `nil` if no slot was available.",
+        "Open a split window over the buffer `buf_id`. `opts.region` picks the layout slot (default `\"lua_overlay\"`); `opts.focusable` and `opts.vim_enabled` toggle keyboard behaviour. Row-highlight is two-opt: `opts.cursor_line` (paints the row at the cursor only while this window is focused — caret leaves like code/diff viewers) and `opts.selection_highlight` (paints the row at `cursor_row` regardless of focus — list leaves like pickers driven by an external input). `opts.pad_left` / `opts.pad_right` reserve padding columns on either side. `opts.scrollbar` (default `true`) reserves the rightmost column for a scrollbar that paints only when content overflows — set `false` for cursor-driven UIs (lists, single-line inputs). `opts.wrap` (default `true`) soft-wraps long logical lines onto multiple visual rows; rows the renderer marked `pre_formatted` (e.g. syntax-highlighted code) are not re-wrapped. The line-number gutter is on by default and shows numbers only for rows stamped with `SourceLine` metadata (so text/list panes pay no column cost while code/diff buffers number automatically); pass `opts.gutter = \"none\"` to disable. `opts.name` opts the window into hot-reload survival: re-calling with the same name returns the existing window (cursor/scroll preserved) with the mutable flags re-applied. Returns the `WinId` or `nil` if no slot was available.",
         &["buf_id", "opts"],
         lua,
         |_, (buf_id, opts): (u64, Option<mlua::Table>)| -> LuaResult<Option<u64>> {
             let win = crate::lua::with_app(|app| {
+                let name: Option<String> = opts
+                    .as_ref()
+                    .and_then(|t| t.get::<Option<String>>("name").ok())
+                    .flatten();
+                // Named window already exists → refresh mutable flags, return its id.
+                if let Some(ref n) = name {
+                    if let Some(existing) = app.ui.named_win(n) {
+                        if let Some(opts_ref) = opts.as_ref() {
+                            apply_window_opts(app, existing, opts_ref);
+                        }
+                        return Some(existing.0);
+                    }
+                }
                 let region = opts
                     .as_ref()
                     .and_then(|t| t.get::<String>("region").ok())
@@ -124,15 +137,7 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
                     },
                 );
                 if let Some(win_id) = win {
-                    // Wrap defaults to true so /help, /stats, /btw and plugin
-                    // dialogs don't truncate. Parser-driven buffers manage their
-                    // own wrap; the window's wrap flag is a no-op there.
-                    let wrap_enabled = opts
-                        .as_ref()
-                        .and_then(|t| t.get::<Option<bool>>("wrap").ok().flatten())
-                        .unwrap_or(true);
                     if let Some(w) = app.ui.win_mut(win_id) {
-                        w.wrap = wrap_enabled;
                         // Default gutter is `LineNumberGutter` (strict): buffers
                         // without `SourceLine` stamps get a zero-width column,
                         // so text/list panes pay no visual cost. Code/diff
@@ -140,34 +145,12 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
                         w.gutter = Some(std::sync::Arc::new(
                             crate::smelt_term::gutter::LineNumberGutter::new(),
                         ));
-                        if let Some(opts) = opts.as_ref() {
-                            if let Ok(focusable) = opts.get::<bool>("focusable") {
-                                w.focusable = focusable;
-                            }
-                            if let Ok(cursor_line) = opts.get::<bool>("cursor_line") {
-                                w.cursor_line = cursor_line;
-                            }
-                            if let Ok(selection_highlight) =
-                                opts.get::<bool>("selection_highlight")
-                            {
-                                w.selection_highlight = selection_highlight;
-                            }
-                            if let Ok(vim_enabled) = opts.get::<bool>("vim_enabled") {
-                                w.set_vim_enabled(vim_enabled);
-                            }
-                            if let Ok(selectable) = opts.get::<bool>("selectable") {
-                                w.selectable = selectable;
-                            }
-                            if let Ok(Some(gutter)) = opts.get::<Option<String>>("gutter") {
-                                w.gutter = match gutter.as_str() {
-                                    "line_numbers" => Some(std::sync::Arc::new(
-                                        crate::smelt_term::gutter::LineNumberGutter::new(),
-                                    )),
-                                    "none" | "" => None,
-                                    _ => None,
-                                };
-                            }
-                        }
+                    }
+                    if let Some(opts_ref) = opts.as_ref() {
+                        apply_window_opts(app, win_id, opts_ref);
+                    }
+                    if let Some(ref n) = name {
+                        app.ui.name_win(n.clone(), win_id);
                     }
                 }
                 win.map(|w| w.0)
@@ -175,6 +158,21 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
             Ok(win)
         },
     )?;
+    register_ui_fn(
+        &win_tbl,
+        "smelt.win",
+        "named",
+        "Look up the window id registered under `name` (i.e. previously opened via `win.open(buf, { name = name, ... })`). Returns `nil` when no such window is open.",
+        &["name"],
+        lua,
+        |_, name: String| -> LuaResult<Option<u64>> {
+            Ok(crate::lua::try_with_app(|app| {
+                app.ui.named_win(&name).map(|w| w.0)
+            })
+            .flatten())
+        },
+    )?;
+
     register_ui_fn(
         &win_tbl,
         "smelt.win",
@@ -439,4 +437,47 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
     )?;
     smelt.set("win", win_tbl)?;
     Ok(())
+}
+
+/// Apply the mutable subset of window opts to an existing window. Used
+/// by `smelt.win.open` on both the create and the named-refresh paths
+/// so a re-call with `opts.name = "foo"` (the hot-reload pattern)
+/// re-applies the same flags as the original open.
+fn apply_window_opts(
+    app: &mut crate::app::TuiApp,
+    win_id: crate::smelt_term::WinId,
+    opts: &mlua::Table,
+) {
+    let Some(w) = app.ui.win_mut(win_id) else {
+        return;
+    };
+    if let Ok(Some(wrap)) = opts.get::<Option<bool>>("wrap") {
+        w.wrap = wrap;
+    } else if !opts.contains_key("wrap").unwrap_or(true) {
+        w.wrap = true;
+    }
+    if let Ok(focusable) = opts.get::<bool>("focusable") {
+        w.focusable = focusable;
+    }
+    if let Ok(cursor_line) = opts.get::<bool>("cursor_line") {
+        w.cursor_line = cursor_line;
+    }
+    if let Ok(selection_highlight) = opts.get::<bool>("selection_highlight") {
+        w.selection_highlight = selection_highlight;
+    }
+    if let Ok(vim_enabled) = opts.get::<bool>("vim_enabled") {
+        w.set_vim_enabled(vim_enabled);
+    }
+    if let Ok(selectable) = opts.get::<bool>("selectable") {
+        w.selectable = selectable;
+    }
+    if let Ok(Some(gutter)) = opts.get::<Option<String>>("gutter") {
+        w.gutter = match gutter.as_str() {
+            "line_numbers" => Some(std::sync::Arc::new(
+                crate::smelt_term::gutter::LineNumberGutter::new(),
+            )),
+            "none" | "" => None,
+            _ => None,
+        };
+    }
 }

@@ -27,6 +27,11 @@ engine.is_compacting = nil
 ---@type fun(): boolean
 engine.is_running = nil
 
+--- Re-evaluate every Lua surface: clears every command, keymap, statusline source, tool, hook, timer, and cell subscriber, wipes non-stdlib `package.loaded` entries, then re-runs the bundled autoload modules, `init.lua`, global plugins, and `.smelt/init.lua` + `.smelt/plugins/*`. `early.lua` is intentionally skipped — its CLI-flag and `smelt.builtins.disable` effects are startup-only.
+---@see smelt.builtins.disable
+---@type fun(): nil
+engine.reload = nil
+
 --- Start an agent turn from a Lua-defined custom command (`/name`). Notifies and no-ops if an agent is already running. See `smelt.engine.CommandOverrides` for the override shape.
 ---@see smelt.engine.CommandOverrides
 ---@type fun(name: string, body: string, overrides: smelt.engine.CommandOverrides?): nil

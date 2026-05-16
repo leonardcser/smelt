@@ -55,12 +55,12 @@ impl HookRegistry {
         name: impl Into<String>,
     ) -> LuaResult<u64> {
         let id = self.next_id.fetch_add(1, Ordering::Relaxed);
-        let key = lua.create_registry_value(func)?;
+        let handle = LuaHandle::from_func(lua, func)?;
         if let Ok(mut v) = self.entries.lock() {
             v.push(HookEntry {
                 id,
                 name: name.into(),
-                handle: LuaHandle { key },
+                handle,
             });
         }
         Ok(id)
@@ -107,6 +107,13 @@ impl HookRegistry {
     /// machinery when nobody is listening.
     pub fn is_empty(&self) -> bool {
         self.entries.lock().map(|v| v.is_empty()).unwrap_or(true)
+    }
+
+    /// Drop every entry. Used by `/reload`.
+    pub fn clear(&self) {
+        if let Ok(mut v) = self.entries.lock() {
+            v.clear();
+        }
     }
 }
 

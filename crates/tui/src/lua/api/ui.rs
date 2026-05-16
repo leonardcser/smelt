@@ -162,13 +162,35 @@ fn register_overlay(lua: &Lua, smelt_ui: &mlua::Table) -> LuaResult<()> {
         &overlay_tbl,
         "smelt.ui.overlay",
         "open",
-        "Open a generic overlay rendered from `opts.layout` — a layout-tree userdata built via `smelt.ui.layout.leaf` / `.vbox` / `.hbox`. Position with `opts.anchor` (`\"dock_bottom\"` | `\"dock_top\"` | `\"dock_left\"` | `\"dock_right\"` | `\"center\"` | `\"screen_at\"` | `\"win\"`). The overlay's size is the natural size of its layout tree, re-evaluated against the current terminal every frame — to pin a width or height, wrap your inner tree in a one-slot vbox/hbox with an integer (cells) or `\"N%\"` constraint. `dock_bottom` reserves the bottom statusline row. Returns the overlay id so it can be focused or closed via `smelt.win`.",
+        "Open a generic overlay rendered from `opts.layout` — a layout-tree userdata built via `smelt.ui.layout.leaf` / `.vbox` / `.hbox`. Position with `opts.anchor` (`\"dock_bottom\"` | `\"dock_top\"` | `\"dock_left\"` | `\"dock_right\"` | `\"center\"` | `\"screen_at\"` | `\"win\"`). The overlay's size is the natural size of its layout tree, re-evaluated against the current terminal every frame — to pin a width or height, wrap your inner tree in a one-slot vbox/hbox with an integer (cells) or `\"N%\"` constraint. `dock_bottom` reserves the bottom statusline row. `opts.name` opts the overlay into hot-reload survival: re-calling with the same name refreshes the layout and the mutable subset (`title`, `border`, `modal`, `blocks_agent`, `draggable`, `resizable`, `z`) in place — cursor, scroll, and resize state are preserved. Anonymous overlays are reaped on `/reload`. Returns the overlay id so it can be focused or closed via `smelt.win`.",
         &["opts"],
         lua,
         |_, opts: mlua::Table| -> LuaResult<u64> {
             let id = crate::lua::with_app(|app| crate::lua::ui_ops::open_overlay(app, opts))
                 .map_err(|e| LuaError::RuntimeError(format!("overlay.open: {e}")))?;
             Ok(id)
+        },
+    )?;
+    register_ui_fn(
+        &overlay_tbl,
+        "smelt.ui.overlay",
+        "close",
+        "Close the overlay registered under `name` (opened via `smelt.ui.overlay.open` with `opts.name = name`). No-op when the name doesn't resolve to an open overlay. Anonymous overlays are closed via `smelt.win.close` on a leaf instead.",
+        &["name"],
+        lua,
+        |_, name: String| -> LuaResult<()> {
+            crate::lua::with_app(|app| {
+                if let Some(id) = app.ui.named_overlay(&name) {
+                    if let Some(leaf) = app
+                        .ui
+                        .overlay(id)
+                        .and_then(|ov| ov.layout.leaves_in_order().into_iter().next())
+                    {
+                        app.close_overlay_leaf(crate::smelt_term::WinId(leaf.0));
+                    }
+                }
+            });
+            Ok(())
         },
     )?;
 

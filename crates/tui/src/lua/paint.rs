@@ -69,6 +69,13 @@ impl PaintRegistry {
     pub(crate) fn contains(&self, id: PaintId) -> bool {
         self.handles.contains_key(&id)
     }
+
+    /// Drop every paint→handle mapping. Used by `/reload` so extmarks
+    /// don't dispatch to handle ids whose Lua function was wiped from
+    /// `LuaShared::callbacks`. Plugins re-register painters on re-load.
+    pub(crate) fn clear(&mut self) {
+        self.handles.clear();
+    }
 }
 
 thread_local! {

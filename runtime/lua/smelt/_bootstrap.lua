@@ -72,14 +72,14 @@ function smelt.tools.default_summary(args)
   return ""
 end
 
-do
-  local raw_register = smelt.tools.register
-  smelt.tools.register = function(def)
-    if type(def) == "table" and def.summary == nil then
-      def.summary = smelt.tools.default_summary
-    end
-    return raw_register(def)
+-- Idempotent across `/reload`: cache the raw register in a global so each
+-- bootstrap run re-wraps the same raw — never the previous wrap.
+__smelt_raw_tools_register__ = __smelt_raw_tools_register__ or smelt.tools.register
+smelt.tools.register = function(def)
+  if type(def) == "table" and def.summary == nil then
+    def.summary = smelt.tools.default_summary
   end
+  return __smelt_raw_tools_register__(def)
 end
 
 -- Build a leaf layout from a string. Common pattern for `render` callbacks.
@@ -101,5 +101,29 @@ end
 -- Install custom colorschemes at `runtime/lua/smelt/colorschemes/<name>.lua`.
 function smelt.theme.use(name)
   return require("smelt.colorschemes." .. name)
+end
+
+-- Per-name persistent state. Survives `/reload` so the new module body
+-- can find resources the old body opened. Bootstrap runs on every reload,
+-- so `__smelt_state_touched__` is reset each cycle; the Rust side then
+-- calls `smelt.__sweep_state()` after autoload to prune slots no plugin
+-- touched (i.e. removed plugins don't leak state).
+__smelt_state__ = __smelt_state__ or {}
+__smelt_state_touched__ = {}
+function smelt.state(name)
+  __smelt_state_touched__[name] = true
+  local s = __smelt_state__[name]
+  if not s then
+    s = {}
+    __smelt_state__[name] = s
+  end
+  return s
+end
+function smelt.__sweep_state()
+  for k in pairs(__smelt_state__) do
+    if not __smelt_state_touched__[k] then
+      __smelt_state__[k] = nil
+    end
+  end
 end
 

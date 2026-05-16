@@ -117,6 +117,17 @@ impl LuaTaskRuntime {
         }
     }
 
+    /// Cancel every task and drop the entries immediately. Used by
+    /// `/reload`: the surviving Lua handles are about to be wiped, so
+    /// letting tasks resume on the next `drive()` would invoke stale
+    /// closures.
+    pub fn cancel_and_clear(&mut self) {
+        for task in &mut self.tasks {
+            task.cancel.cancel();
+        }
+        self.tasks.clear();
+    }
+
     pub fn drive(&mut self, lua: &Lua, now: Instant) -> Vec<TaskDriveOutput> {
         let mut outputs = Vec::new();
         let mut i = 0;

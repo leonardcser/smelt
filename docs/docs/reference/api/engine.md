@@ -48,6 +48,14 @@ fun(): boolean
 
 Return `true` if an agent turn is currently in flight (a request is being streamed or a tool is executing).
 
+## `smelt.engine.reload`
+
+```lua
+fun(): nil
+```
+
+Re-evaluate every Lua surface: clears every command, keymap, statusline source, tool, hook, timer, and cell subscriber, wipes non-stdlib `package.loaded` entries, then re-runs the bundled autoload modules, `init.lua`, global plugins, and `.smelt/init.lua` + `.smelt/plugins/*`. `early.lua` is intentionally skipped — its CLI-flag and `smelt.builtins.disable` effects are startup-only.
+
 ## `smelt.engine.submit_command`
 
 ```lua

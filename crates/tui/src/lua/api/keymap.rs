@@ -74,9 +74,9 @@ pub(super) fn register(
                             "keymap.set: unknown chord `{chord}`"
                         ))
                     })?;
-                let key = lua.create_registry_value(handler.into_inner())?;
+                let handle = LuaHandle::from_func(lua, handler.into_inner())?;
                 if let Ok(mut map) = s.keymaps.lock() {
-                    map.insert((canonical_mode, canonical_chord), LuaHandle { key });
+                    map.insert((canonical_mode, canonical_chord), handle);
                 }
                 Ok(())
             },

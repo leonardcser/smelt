@@ -112,7 +112,7 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
             lua,
             move |lua, def: LuaToolDef| -> LuaResult<()> {
                 let name = def.name;
-                let key = lua.create_registry_value(def.execute)?;
+                let execute_handle = LuaHandle::from_func(lua, def.execute)?;
 
                 if let Some(perms) = def.permission_defaults {
                     let mut defaults = s.tool_defaults.lock().unwrap_or_else(|e| e.into_inner());
@@ -137,9 +137,7 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
                 }
 
                 let stash = |f: mlua::Function| -> LuaResult<LuaHandle> {
-                    Ok(LuaHandle {
-                        key: lua.create_registry_value(f)?,
-                    })
+                    LuaHandle::from_func(lua, f)
                 };
                 let approval_patterns_handle = def.approval_patterns.map(stash).transpose()?;
                 let preflight_handle = def.preflight.map(stash).transpose()?;
@@ -180,7 +178,7 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
                     map.insert(
                         name,
                         ToolHandles {
-                            execute: LuaHandle { key },
+                            execute: execute_handle,
                             approval_patterns: approval_patterns_handle,
                             preflight: preflight_handle,
                             render: render_handle,

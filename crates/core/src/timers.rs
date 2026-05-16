@@ -87,6 +87,11 @@ impl Timers {
     pub fn is_empty(&self) -> bool {
         self.entries.is_empty()
     }
+
+    /// Cancel every scheduled timer. Used by `/reload`.
+    pub fn clear(&mut self) {
+        self.entries.clear();
+    }
 }
 
 #[cfg(test)]
@@ -96,8 +101,7 @@ mod tests {
 
     fn handle(lua: &Lua, src: &str) -> LuaHandle {
         let func: mlua::Function = lua.load(src).eval().expect("load");
-        let key = lua.create_registry_value(func).expect("registry");
-        LuaHandle { key }
+        LuaHandle::from_func(lua, func).expect("registry")
     }
 
     #[test]

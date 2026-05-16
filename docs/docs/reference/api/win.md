@@ -88,6 +88,14 @@ fun(win_id: integer, delta: integer): nil
 
 Move `win_id`'s cursor by `delta` rows (clamped to the buffer's line count), keep the row on-screen by adjusting `scroll_top`, and emit `selection_changed`. Lets an external panel (e.g. a docked search input) drive a list without holding focus.
 
+## `smelt.win.named`
+
+```lua
+fun(name: string): integer?
+```
+
+Look up the window id registered under `name` (i.e. previously opened via `win.open(buf, { name = name, ... })`). Returns `nil` when no such window is open.
+
 ## `smelt.win.on_event`
 
 ```lua
@@ -104,7 +112,7 @@ Subscribe `func` to event `event` on window `win_id`. Returns a callback id usab
 fun(buf_id: integer, opts: table?): integer?
 ```
 
-Open a split window over the buffer `buf_id`. `opts.region` picks the layout slot (default `"lua_overlay"`); `opts.focusable` and `opts.vim_enabled` toggle keyboard behaviour. Row-highlight is two-opt: `opts.cursor_line` (paints the row at the cursor only while this window is focused — caret leaves like code/diff viewers) and `opts.selection_highlight` (paints the row at `cursor_row` regardless of focus — list leaves like pickers driven by an external input). `opts.pad_left` / `opts.pad_right` reserve padding columns on either side. `opts.scrollbar` (default `true`) reserves the rightmost column for a scrollbar that paints only when content overflows — set `false` for cursor-driven UIs (lists, single-line inputs). `opts.wrap` (default `true`) soft-wraps long logical lines onto multiple visual rows; rows the renderer marked `pre_formatted` (e.g. syntax-highlighted code) are not re-wrapped. The line-number gutter is on by default and shows numbers only for rows stamped with `SourceLine` metadata (so text/list panes pay no column cost while code/diff buffers number automatically); pass `opts.gutter = "none"` to disable. Returns the new `WinId` or `nil` if no slot was available.
+Open a split window over the buffer `buf_id`. `opts.region` picks the layout slot (default `"lua_overlay"`); `opts.focusable` and `opts.vim_enabled` toggle keyboard behaviour. Row-highlight is two-opt: `opts.cursor_line` (paints the row at the cursor only while this window is focused — caret leaves like code/diff viewers) and `opts.selection_highlight` (paints the row at `cursor_row` regardless of focus — list leaves like pickers driven by an external input). `opts.pad_left` / `opts.pad_right` reserve padding columns on either side. `opts.scrollbar` (default `true`) reserves the rightmost column for a scrollbar that paints only when content overflows — set `false` for cursor-driven UIs (lists, single-line inputs). `opts.wrap` (default `true`) soft-wraps long logical lines onto multiple visual rows; rows the renderer marked `pre_formatted` (e.g. syntax-highlighted code) are not re-wrapped. The line-number gutter is on by default and shows numbers only for rows stamped with `SourceLine` metadata (so text/list panes pay no column cost while code/diff buffers number automatically); pass `opts.gutter = "none"` to disable. `opts.name` opts the window into hot-reload survival: re-calling with the same name returns the existing window (cursor/scroll preserved) with the mutable flags re-applied. Returns the `WinId` or `nil` if no slot was available.
 
 ## `smelt.win.rect`
 

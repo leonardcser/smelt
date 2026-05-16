@@ -114,7 +114,7 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
             &buf_tbl,
             "smelt.buf",
             "create",
-            "Create a new buffer and return its id. `opts.mode` selects a `BufFormat` parser; `opts.readonly` blocks edits via the public mutators.",
+            "Create a new buffer and return its id. `opts.mode` selects a `BufFormat` parser; `opts.readonly` blocks edits via the public mutators. `opts.name` opts the buffer into hot-reload survival: re-calling `create` with the same name returns the existing buffer (its contents/extmarks/cursor are preserved) with `readonly`/`mode` re-applied. Anonymous buffers are reaped on `/reload`.",
             &["opts"],
             lua,
             move |_, (opts,): (Option<mlua::Table>,)| -> LuaResult<u64> {
@@ -141,10 +141,26 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
                     .and_then(|t| t.get::<Option<u64>>("undo").ok())
                     .flatten()
                     .map(|n| n as usize);
-                let id = s
-                    .next_buf_id
-                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                crate::lua::with_app(|app| {
+                let name: Option<String> = opts
+                    .as_ref()
+                    .and_then(|t| t.get::<Option<String>>("name").ok())
+                    .flatten();
+                let result_id = crate::lua::with_app(|app| -> u64 {
+                    // Named buffer that already exists — return existing id, refresh mutable opts.
+                    if let Some(ref n) = name {
+                        if let Some(bid) = app.ui.named_buf(n) {
+                            if let Some(buf) = app.ui.buf_mut(bid) {
+                                buf.readonly = readonly;
+                                if let Some(fmt) = format {
+                                    buf.set_parser(fmt.into_parser());
+                                }
+                            }
+                            return bid.0;
+                        }
+                    }
+                    let id = s
+                        .next_buf_id
+                        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                     match app.ui.buf_create_with_id(
                         crate::smelt_term::BufId(id),
                         crate::smelt_term::BufCreateOpts::default(),
@@ -160,16 +176,36 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
                                     buf.history = crate::smelt_term::UndoHistory::new(limit);
                                 }
                             }
+                            if let Some(ref n) = name {
+                                app.ui.name_buf(n.clone(), bid);
+                            }
+                            id
                         }
                         Err(clash) => {
                             app.notify_error(format!("buf.create: id {} already in use", clash.0));
+                            0
                         }
                     }
                 });
-                Ok(id)
+                Ok(result_id)
             },
         )?;
     }
+
+    register_ui_fn(
+        &buf_tbl,
+        "smelt.buf",
+        "named",
+        "Look up the buffer id registered under `name` (i.e. previously created via `buf.create({ name = name })`). Returns `nil` when no such buffer is open. Used by plugins to recover their named buffer ids without re-calling `create`.",
+        &["name"],
+        lua,
+        |_, name: String| -> LuaResult<Option<u64>> {
+            Ok(crate::lua::try_with_app(|app| {
+                app.ui.named_buf(&name).map(|b| b.0)
+            })
+            .flatten())
+        },
+    )?;
 
     register_ui_fn(
         &buf_tbl,

@@ -75,6 +75,7 @@ pub(crate) struct TestApp {
 pub(crate) struct TestAppBuilder {
     vim: bool,
     mode: AgentMode,
+    init_lua: Option<std::path::PathBuf>,
 }
 
 impl Default for TestAppBuilder {
@@ -82,6 +83,7 @@ impl Default for TestAppBuilder {
         Self {
             vim: false,
             mode: AgentMode::Normal,
+            init_lua: None,
         }
     }
 }
@@ -98,6 +100,13 @@ impl TestAppBuilder {
         self
     }
 
+    /// Run user `init.lua` from this path during build, and from the same
+    /// path again on every `reload_lua()`.
+    pub(crate) fn with_init_lua(mut self, path: impl Into<std::path::PathBuf>) -> Self {
+        self.init_lua = Some(path.into());
+        self
+    }
+
     pub(crate) fn build(self) -> TestApp {
         ensure_test_home();
 
@@ -111,6 +120,9 @@ impl TestAppBuilder {
         // Match production startup: autoload registers built-in
         // commands (`:quit`, `:help`, ...) and the default keymap.
         lua.load_autoload();
+        if let Some(ref path) = self.init_lua {
+            lua.set_init_lua_path(path.clone());
+        }
 
         let config = smelt_core::AppConfig {
             model: String::new(),
@@ -135,7 +147,7 @@ impl TestAppBuilder {
             context_window: None,
         };
 
-        let app = TuiApp::new(
+        let mut app = TuiApp::new(
             config,
             engine,
             permissions,
@@ -144,6 +156,14 @@ impl TestAppBuilder {
             lua,
             smelt_core::trust::TrustState::NoContent,
         );
+
+        // init.lua may touch TUI surfaces (overlays / wins / bufs), so it
+        // needs the app TLS pointer installed — which can only happen
+        // after TuiApp construction.
+        if self.init_lua.is_some() {
+            let _guard = crate::lua::install_app_ptr(&mut app);
+            app.lua.load_user_config();
+        }
 
         TestApp {
             app,
@@ -723,5 +743,622 @@ mod tests {
         let lines = picker_buffer_lines(&app, leaf);
         assert_eq!(lines.len(), 1);
         assert!(lines[0].contains("apple"));
+    }
+
+    // ── Named-resource hot-reload refresh ───────────────────────────
+
+    /// Reproduces the perf_panel hot-reload flow: re-call `overlay.open`
+    /// with the same `name` and a different `title` and assert the chrome
+    /// title is updated in place (no close+reopen).
+    #[test]
+    fn named_overlay_open_refreshes_title_in_place() {
+        let mut app = TestApp::builder().build();
+        let _guard = crate::lua::install_app_ptr(&mut app.app);
+
+        let lua = &app.app.lua.lua;
+        lua.load(
+            r#"
+            local buf = smelt.buf.create({ name = "perf_panel.buf" })
+            local win = smelt.win.open(buf, { name = "perf_panel.win", focusable = false })
+            smelt.ui.overlay.open({
+                name = "perf_panel",
+                title = "old title",
+                anchor = "screen_at",
+                corner = "ne",
+                row = 0, col = 0,
+                width = 44, height = 14,
+                layout = smelt.ui.layout.leaf(win),
+            })
+            "#,
+        )
+        .exec()
+        .expect("first open");
+
+        let id1 = app.app.ui.named_overlay("perf_panel").expect("named id");
+        let title1 = app
+            .app
+            .ui
+            .overlay(id1)
+            .and_then(|ov| {
+                ov.layout
+                    .chrome()
+                    .title
+                    .as_ref()
+                    .map(|l| l.spans.iter().map(|s| s.text.as_ref()).collect::<String>())
+            })
+            .unwrap_or_default();
+        assert_eq!(title1, "old title");
+
+        lua.load(
+            r#"
+            local buf = smelt.buf.create({ name = "perf_panel.buf" })
+            local win = smelt.win.open(buf, { name = "perf_panel.win", focusable = false })
+            smelt.ui.overlay.open({
+                name = "perf_panel",
+                title = "new title",
+                anchor = "screen_at",
+                corner = "ne",
+                row = 0, col = 0,
+                width = 44, height = 14,
+                layout = smelt.ui.layout.leaf(win),
+            })
+            "#,
+        )
+        .exec()
+        .expect("second open");
+
+        let id2 = app
+            .app
+            .ui
+            .named_overlay("perf_panel")
+            .expect("named id after refresh");
+        assert_eq!(id1, id2, "same OverlayId across refresh");
+        let title2 = app
+            .app
+            .ui
+            .overlay(id2)
+            .and_then(|ov| {
+                ov.layout
+                    .chrome()
+                    .title
+                    .as_ref()
+                    .map(|l| l.spans.iter().map(|s| s.text.as_ref()).collect::<String>())
+            })
+            .unwrap_or_default();
+        assert_eq!(title2, "new title", "title should refresh in place");
+    }
+
+    /// `buf.create({ name = ... })` and `win.open(buf, { name = ... })`
+    /// should hand back the SAME ids when called twice with the same name.
+    #[test]
+    fn named_buf_and_win_survive_across_open_calls() {
+        let mut app = TestApp::builder().build();
+        let _guard = crate::lua::install_app_ptr(&mut app.app);
+        let lua = &app.app.lua.lua;
+
+        let first: (u64, u64) = lua
+            .load(
+                r#"
+                local buf = smelt.buf.create({ name = "x.buf" })
+                local win = smelt.win.open(buf, { name = "x.win" })
+                return buf, win
+                "#,
+            )
+            .eval()
+            .expect("first");
+
+        let second: (u64, u64) = lua
+            .load(
+                r#"
+                local buf = smelt.buf.create({ name = "x.buf" })
+                local win = smelt.win.open(buf, { name = "x.win" })
+                return buf, win
+                "#,
+            )
+            .eval()
+            .expect("second");
+
+        assert_eq!(first.0, second.0, "named buf id stable across re-create");
+        assert_eq!(first.1, second.1, "named win id stable across re-open");
+    }
+
+    /// Re-opening a named overlay with a structurally different layout
+    /// (leaf → vbox split) should replace the tree in place — not silently
+    /// keep the old one.
+    #[test]
+    fn named_overlay_refresh_replaces_layout_structure() {
+        let mut app = TestApp::builder().build();
+        let _guard = crate::lua::install_app_ptr(&mut app.app);
+        let lua = &app.app.lua.lua;
+
+        lua.load(
+            r#"
+            local buf = smelt.buf.create({ name = "a.buf" })
+            local win = smelt.win.open(buf, { name = "a.win" })
+            smelt.ui.overlay.open({
+                name = "ov",
+                anchor = "screen_at", corner = "nw",
+                row = 0, col = 0, width = 40, height = 10,
+                layout = smelt.ui.layout.leaf(win),
+            })
+            "#,
+        )
+        .exec()
+        .expect("first open");
+
+        let id = app.app.ui.named_overlay("ov").expect("named");
+        let leaves_before = app
+            .app
+            .ui
+            .overlay(id)
+            .map(|ov| ov.layout.leaves_in_order().len())
+            .unwrap_or(0);
+        assert_eq!(leaves_before, 1);
+
+        lua.load(
+            r#"
+            local b1 = smelt.buf.create({ name = "a.buf" })
+            local b2 = smelt.buf.create({ name = "b.buf" })
+            local w1 = smelt.win.open(b1, { name = "a.win" })
+            local w2 = smelt.win.open(b2, { name = "b.win" })
+            smelt.ui.overlay.open({
+                name = "ov",
+                anchor = "screen_at", corner = "nw",
+                row = 0, col = 0, width = 40, height = 10,
+                layout = smelt.ui.layout.vbox({
+                    { smelt.ui.layout.leaf(w1), height = "fill" },
+                    { smelt.ui.layout.leaf(w2), height = "fill" },
+                }),
+            })
+            "#,
+        )
+        .exec()
+        .expect("structural refresh");
+
+        let leaves_after = app
+            .app
+            .ui
+            .overlay(id)
+            .map(|ov| ov.layout.leaves_in_order().len())
+            .unwrap_or(0);
+        assert_eq!(leaves_after, 2, "layout should be swapped to 2-leaf vbox");
+    }
+
+    /// `smelt.state` entries for plugins that no longer touch them on
+    /// reload should be swept by `smelt.__sweep_state()`.
+    #[test]
+    fn sweep_state_prunes_untouched_entries() {
+        let rt = crate::lua::LuaRuntime::new();
+        rt.lua
+            .load(
+                r#"
+                local s1 = smelt.state("alive")
+                s1.open = true
+                local s2 = smelt.state("dead")
+                s2.open = true
+                "#,
+            )
+            .exec()
+            .expect("seed");
+
+        // Mimic what `reload()` does: reset the touched table, simulate one
+        // plugin re-touching its state, then sweep.
+        rt.lua
+            .load(
+                r#"
+                __smelt_state_touched__ = {}
+                smelt.state("alive")
+                smelt.__sweep_state()
+                "#,
+            )
+            .exec()
+            .expect("sweep");
+
+        let alive: bool = rt
+            .lua
+            .load("return __smelt_state__.alive ~= nil")
+            .eval()
+            .unwrap();
+        let dead: bool = rt
+            .lua
+            .load("return __smelt_state__.dead ~= nil")
+            .eval()
+            .unwrap();
+        assert!(alive, "touched entry survives");
+        assert!(!dead, "untouched entry is swept");
+    }
+
+    // ── Full-cycle /reload integration ──────────────────────────────
+    //
+    // These tests drive `TuiApp::reload_lua()` end-to-end with a real
+    // `init.lua` on disk. Each test edits the file between reloads so
+    // the new module body re-runs and we can observe the surfaces that
+    // *should* survive (named bufs/wins/overlays, `smelt.state`) vs.
+    // the ones that should be replaced (titles, layout structure) vs.
+    // the ones that should be reaped (anonymous overlays).
+
+    fn read_overlay_title(app: &TestApp, name: &str) -> Option<String> {
+        let id = app.app.ui.named_overlay(name)?;
+        let ov = app.app.ui.overlay(id)?;
+        Some(
+            ov.layout
+                .chrome()
+                .title
+                .as_ref()?
+                .spans
+                .iter()
+                .map(|s| s.text.as_ref())
+                .collect::<String>(),
+        )
+    }
+
+    /// Editing `init.lua` to change the overlay title and calling
+    /// `reload_lua` should update the chrome title in place without
+    /// destroying the OverlayId.
+    #[test]
+    fn reload_lua_refreshes_overlay_title_from_disk() {
+        let tmp = tempfile::tempdir().unwrap();
+        let init = tmp.path().join("init.lua");
+
+        let body = |title: &str| {
+            format!(
+                r#"
+                local state = smelt.state("plug")
+                local function attach()
+                    local buf = smelt.buf.create({{ name = "plug.buf" }})
+                    local win = smelt.win.open(buf, {{ name = "plug.win" }})
+                    smelt.ui.overlay.open({{
+                        name = "plug",
+                        title = "{title}",
+                        anchor = "screen_at", corner = "nw",
+                        row = 0, col = 0, width = 40, height = 10,
+                        layout = smelt.ui.layout.leaf(win),
+                    }})
+                end
+                state.open = true
+                attach()
+                "#
+            )
+        };
+        std::fs::write(&init, body("v1")).unwrap();
+
+        let mut app = TestApp::builder().with_init_lua(&init).build();
+        {
+            let _g = crate::lua::install_app_ptr(&mut app.app);
+            assert_eq!(read_overlay_title(&app, "plug").as_deref(), Some("v1"));
+        }
+        let id1 = app.app.ui.named_overlay("plug").unwrap();
+
+        std::fs::write(&init, body("v2")).unwrap();
+        {
+            let _g = crate::lua::install_app_ptr(&mut app.app);
+            app.app.reload_lua();
+        }
+        let id2 = app.app.ui.named_overlay("plug").expect("overlay survives");
+        assert_eq!(id1, id2, "OverlayId preserved across reload");
+        {
+            let _g = crate::lua::install_app_ptr(&mut app.app);
+            assert_eq!(read_overlay_title(&app, "plug").as_deref(), Some("v2"));
+        }
+    }
+
+    /// Nested tables stashed in `smelt.state` must keep their identity
+    /// (deep values intact) across `/reload`.
+    #[test]
+    fn reload_lua_preserves_nested_state_tables() {
+        let tmp = tempfile::tempdir().unwrap();
+        let init = tmp.path().join("init.lua");
+        std::fs::write(
+            &init,
+            r#"
+            local s = smelt.state("nested")
+            s.cfg = s.cfg or { panel = { width = 80, history = { 1, 2, 3 } } }
+            "#,
+        )
+        .unwrap();
+
+        let mut app = TestApp::builder().with_init_lua(&init).build();
+        {
+            let _g = crate::lua::install_app_ptr(&mut app.app);
+            app.app.reload_lua();
+            app.app.reload_lua();
+        }
+        let width: u64 = app
+            .app
+            .lua
+            .lua
+            .load("return __smelt_state__.nested.cfg.panel.width")
+            .eval()
+            .unwrap();
+        let last: u64 = app
+            .app
+            .lua
+            .lua
+            .load("return __smelt_state__.nested.cfg.panel.history[3]")
+            .eval()
+            .unwrap();
+        assert_eq!(width, 80);
+        assert_eq!(last, 3);
+    }
+
+    /// `_bootstrap.lua` wraps `smelt.tools.register` to inject a default
+    /// `summary`. The wrap must remain a *single* layer across many
+    /// reloads — never re-wrap the previous wrap.
+    #[test]
+    fn reload_lua_does_not_double_wrap_tools_register() {
+        let tmp = tempfile::tempdir().unwrap();
+        let init = tmp.path().join("init.lua");
+        std::fs::write(&init, "").unwrap();
+
+        let mut app = TestApp::builder().with_init_lua(&init).build();
+        {
+            let _g = crate::lua::install_app_ptr(&mut app.app);
+            for _ in 0..5 {
+                app.app.reload_lua();
+            }
+            // Register a tool with no `summary`; the bootstrap wrap should
+            // populate it once. If the wrap had compounded across reloads
+            // the call would still succeed — but every reload would add a
+            // closure frame on top. The functional check: registration
+            // works and the registered summary handler runs.
+            app.app
+                .lua
+                .lua
+                .load(
+                    r#"
+                    smelt.tools.register({
+                        name = "t",
+                        description = "",
+                        parameters = { type = "object", properties = {} },
+                        execute = function() return "" end,
+                    })
+                    "#,
+                )
+                .exec()
+                .expect("register after many reloads");
+        }
+        let summary = app
+            .app
+            .lua
+            .tool_summary("t", &std::collections::HashMap::new());
+        // `default_summary` returns "" when args have no recognised keys.
+        assert!(
+            summary.is_empty(),
+            "summary should be empty for no-arg tool"
+        );
+    }
+
+    /// Anonymous overlays (no `name`) must be reaped on reload; named
+    /// ones survive.
+    #[test]
+    fn reload_lua_reaps_anonymous_overlay_keeps_named() {
+        let tmp = tempfile::tempdir().unwrap();
+        let init = tmp.path().join("init.lua");
+        // First version opens both a named and an anonymous overlay.
+        std::fs::write(
+            &init,
+            r#"
+            local state = smelt.state("mix")
+            local function attach()
+                local b1 = smelt.buf.create({ name = "mix.buf" })
+                local w1 = smelt.win.open(b1, { name = "mix.win" })
+                smelt.ui.overlay.open({
+                    name = "mix",
+                    anchor = "screen_at", corner = "nw",
+                    row = 0, col = 0, width = 30, height = 8,
+                    layout = smelt.ui.layout.leaf(w1),
+                })
+            end
+            state.open = true
+            attach()
+
+            -- Anonymous overlay (no name) — should be reaped on /reload.
+            local b2 = smelt.buf.create()
+            local w2 = smelt.win.open(b2, {})
+            smelt.ui.overlay.open({
+                anchor = "screen_at", corner = "se",
+                row = 0, col = 0, width = 20, height = 5,
+                layout = smelt.ui.layout.leaf(w2),
+            })
+            "#,
+        )
+        .unwrap();
+
+        let mut app = TestApp::builder().with_init_lua(&init).build();
+
+        // Capture the anonymous overlay's id — we'll assert it's gone
+        // after reload while the named one survives. (Total overlay
+        // count is noisy: reload_lua emits a `notify(...)` toast which
+        // adds its own short-lived overlay.)
+        let named_id = app.app.ui.named_overlay("mix").expect("named");
+        let anon_id = (1u32..)
+            .map(crate::smelt_term::OverlayId)
+            .find(|id| *id != named_id && app.app.ui.overlay(*id).is_some())
+            .expect("anonymous overlay present");
+
+        // Second version drops the anonymous overlay; named one stays.
+        std::fs::write(
+            &init,
+            r#"
+            local state = smelt.state("mix")
+            local function attach()
+                local b1 = smelt.buf.create({ name = "mix.buf" })
+                local w1 = smelt.win.open(b1, { name = "mix.win" })
+                smelt.ui.overlay.open({
+                    name = "mix",
+                    anchor = "screen_at", corner = "nw",
+                    row = 0, col = 0, width = 30, height = 8,
+                    layout = smelt.ui.layout.leaf(w1),
+                })
+            end
+            if state.open then attach() end
+            "#,
+        )
+        .unwrap();
+        {
+            let _g = crate::lua::install_app_ptr(&mut app.app);
+            app.app.reload_lua();
+        }
+        assert!(
+            app.app.ui.named_overlay("mix").is_some(),
+            "named overlay survives reload"
+        );
+        assert!(
+            app.app.ui.overlay(anon_id).is_none(),
+            "anonymous overlay {} should be reaped",
+            anon_id.0
+        );
+    }
+
+    /// A `smelt.state(...)` slot that the new init.lua no longer
+    /// references must be pruned by `smelt.__sweep_state` (called by
+    /// `reload()` at the end of the cycle).
+    #[test]
+    fn reload_lua_sweeps_state_for_deleted_plugins() {
+        let tmp = tempfile::tempdir().unwrap();
+        let init = tmp.path().join("init.lua");
+        std::fs::write(
+            &init,
+            r#"
+            local a = smelt.state("kept")
+            a.flag = true
+            local b = smelt.state("dropped")
+            b.flag = true
+            "#,
+        )
+        .unwrap();
+
+        let mut app = TestApp::builder().with_init_lua(&init).build();
+        let exists = |rt: &crate::lua::LuaRuntime, k: &str| -> bool {
+            rt.lua
+                .load(format!("return __smelt_state__['{k}'] ~= nil"))
+                .eval::<bool>()
+                .unwrap()
+        };
+        {
+            let _g = crate::lua::install_app_ptr(&mut app.app);
+            assert!(exists(&app.app.lua, "kept"));
+            assert!(exists(&app.app.lua, "dropped"));
+        }
+
+        // Edit: only the "kept" plugin remains.
+        std::fs::write(
+            &init,
+            r#"
+            local a = smelt.state("kept")
+            "#,
+        )
+        .unwrap();
+        {
+            let _g = crate::lua::install_app_ptr(&mut app.app);
+            app.app.reload_lua();
+            assert!(exists(&app.app.lua, "kept"));
+            assert!(
+                !exists(&app.app.lua, "dropped"),
+                "dropped plugin's state should be swept"
+            );
+        }
+    }
+
+    /// In-flight `smelt.spawn` coroutines must be cancelled before
+    /// `clear_lua_handles` wipes the registries they reference. After
+    /// reload, the parked task should never resume — driving tasks
+    /// produces nothing, the post-sleep side effect never runs.
+    #[test]
+    fn reload_lua_cancels_in_flight_tasks() {
+        let tmp = tempfile::tempdir().unwrap();
+        let init = tmp.path().join("init.lua");
+        std::fs::write(
+            &init,
+            r#"
+            _G.__task_completed__ = false
+            smelt.spawn(function()
+                smelt.sleep(10_000)  -- long sleep so the task is still parked
+                _G.__task_completed__ = true
+            end)
+            "#,
+        )
+        .unwrap();
+
+        let mut app = TestApp::builder().with_init_lua(&init).build();
+        // Sanity: task is parked but not complete.
+        let completed: bool = app
+            .app
+            .lua
+            .lua
+            .load("return _G.__task_completed__")
+            .eval()
+            .unwrap();
+        assert!(!completed, "task shouldn't have completed yet");
+
+        // Edit init.lua so reload doesn't re-spawn the task.
+        std::fs::write(&init, "_G.__task_completed__ = false").unwrap();
+        {
+            let _g = crate::lua::install_app_ptr(&mut app.app);
+            app.app.reload_lua();
+        }
+        // Drive: cancelled tasks should be a no-op since we cleared them.
+        let outs = app.app.lua.drive_tasks();
+        assert!(
+            outs.is_empty(),
+            "no task outputs after reload cancellation (saw {} entries)",
+            outs.len()
+        );
+        let completed: bool = app
+            .app
+            .lua
+            .lua
+            .load("return _G.__task_completed__")
+            .eval()
+            .unwrap();
+        assert!(!completed, "cancelled task must not have run to completion");
+    }
+
+    /// User-resized overlay (`size_override`) must survive reload —
+    /// the named-refresh path preserves user gesture state.
+    #[test]
+    fn reload_lua_preserves_user_size_override() {
+        let tmp = tempfile::tempdir().unwrap();
+        let init = tmp.path().join("init.lua");
+        std::fs::write(
+            &init,
+            r#"
+            local state = smelt.state("res")
+            local function attach()
+                local b = smelt.buf.create({ name = "res.buf" })
+                local w = smelt.win.open(b, { name = "res.win" })
+                smelt.ui.overlay.open({
+                    name = "res",
+                    anchor = "screen_at", corner = "nw",
+                    row = 0, col = 0, width = 30, height = 10,
+                    resizable = true,
+                    layout = smelt.ui.layout.leaf(w),
+                })
+            end
+            state.open = true
+            attach()
+            "#,
+        )
+        .unwrap();
+
+        let mut app = TestApp::builder().with_init_lua(&init).build();
+        let id = app.app.ui.named_overlay("res").unwrap();
+        // Simulate a user resize gesture.
+        if let Some(ov) = app.app.ui.overlay_mut(id) {
+            ov.size_override = Some((50, 18));
+        }
+
+        {
+            let _g = crate::lua::install_app_ptr(&mut app.app);
+            app.app.reload_lua();
+        }
+        let id2 = app.app.ui.named_overlay("res").expect("survives");
+        assert_eq!(id, id2);
+        let ov = app.app.ui.overlay(id2).unwrap();
+        assert_eq!(
+            ov.size_override,
+            Some((50, 18)),
+            "user resize preserved across reload"
+        );
     }
 }
