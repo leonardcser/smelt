@@ -88,6 +88,12 @@ pub fn entry(level: Level, event: &str, data: &impl Serialize) {
     if !level.enabled() {
         return;
     }
+    // Tests don't isolate `XDG_STATE_HOME`; writing to the real (or cwd-relative)
+    // state dir from a unit test leaves stray `.local/state/smelt/logs/...jsonl`
+    // files behind. Disk logging is a side effect tests have no reason to want.
+    if cfg!(test) {
+        return;
+    }
     let ts = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
