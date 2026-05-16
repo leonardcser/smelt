@@ -187,7 +187,7 @@ local function deactivate()
   unregister_exit_plan_mode()
 end
 
-smelt.au.subscribe("agent_mode", function(mode)
+smelt.cell.subscribe("agent_mode", function(mode)
   if mode == "plan" then
     activate()
   else
@@ -195,6 +195,6 @@ smelt.au.subscribe("agent_mode", function(mode)
   end
 end)
 
-smelt.au.subscribe("session_started", function()
+smelt.cell.subscribe("session_started", function()
   if smelt.mode.get() == "plan" then activate() end
 end)

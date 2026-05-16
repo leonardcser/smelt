@@ -84,7 +84,7 @@ per-namespace page calls it out in the header.
 
 - **Host** — works everywhere, including headless mode (`smelt --headless`).
   Examples: `smelt.fs`, `smelt.http`, `smelt.process`, `smelt.cell`,
-  `smelt.au`, `smelt.tools`.
+  `smelt.tools`.
 - **UiHost** — requires a live terminal UI. Calling a UiHost function from
   headless mode raises. Examples: `smelt.win`, `smelt.buf`, `smelt.theme`,
   `smelt.ui`, `smelt.statusline`, `smelt.keymap`.
@@ -116,10 +116,10 @@ that path.
 
 ## Lifecycle events
 
-`smelt.au.on(name, handler)` subscribes to runtime cells — agent turns, session
-load, mode changes, tool start/end, and so on. Some carry a payload, some are
-bare signals. The full list is the `smelt.cell.Name` alias in
-[`_types.lua`](https://github.com/leonardcser/smelt/blob/main/runtime/lua/smelt/_meta/_types.lua);
+`smelt.cell.subscribe(name, handler)` subscribes to runtime cells — agent
+turns, session load, mode changes, tool start/end, and so on. Some carry a
+payload, some are bare signals. The full list is the `smelt.cell.Name` alias
+in [`_types.lua`](https://github.com/leonardcser/smelt/blob/main/runtime/lua/smelt/_meta/_types.lua);
 common ones:
 
 | Event | Payload | When |
@@ -134,19 +134,19 @@ common ones:
 | `shutdown` | — | App is about to quit |
 
 ```lua
-smelt.au.on("turn_end", function(payload)
+smelt.cell.subscribe("turn_end", function(payload)
   if payload.cancelled then return end
   -- ... e.g. kick off a prediction call
 end)
 
-smelt.au.on("agent_mode", function(mode)
+smelt.cell.subscribe("agent_mode", function(mode)
   if mode == "plan" then activate() else deactivate() end
 end)
 ```
 
-`smelt.au` is the Neovim-style alias of `smelt.cell.subscribe` / `set`. You can
-also declare your own cells with `smelt.cell.new("my_plugin:state", initial)`
-and broadcast updates with `smelt.au.fire`.
+You can also declare your own cells with `smelt.cell.new("my_plugin:state",
+initial)` and broadcast updates with `smelt.cell.set("my_plugin:state",
+value)`.
 
 ## Keymaps
 

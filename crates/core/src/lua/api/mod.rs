@@ -9,7 +9,6 @@ macro_rules! host_read {
     }};
 }
 
-mod au;
 mod builtins;
 pub(crate) mod cell;
 mod cli;
@@ -121,7 +120,6 @@ pub fn register_host_api(
     _smelt_keymap: &mlua::Table,
     shared: &Arc<crate::lua::LuaShared>,
 ) -> LuaResult<()> {
-    au::register(lua, smelt)?;
     builtins::register(lua, smelt, shared)?;
     cell::register(lua, smelt)?;
     cli::register(lua, smelt, shared)?;

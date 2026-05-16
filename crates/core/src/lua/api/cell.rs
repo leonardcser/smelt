@@ -63,8 +63,8 @@ impl std::ops::Deref for LuaCellName {
     name = "smelt.cell",
     doc = "Typed reactive cell registry. Surface is a flat table for one-shot \
 reads/writes and a callable that hands back a sticky handle for repeated \
-access (`local c = smelt.cell(\"foo\"); c:set(1)`). \
-[`smelt.au`](au.md) is an nvim-shaped alias of `subscribe`/`set`."
+access (`local c = smelt.cell(\"foo\"); c:set(1)`). Subscribers fire on \
+every `set` to the cell name."
 )]
 pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
     use crate::cells::{LuaCellValue, SubscriberKind};
@@ -262,7 +262,9 @@ impl mlua::UserData for CellHandle {
                         .subscribe_kind(&this.name, SubscriberKind::Lua(Rc::new(LuaHandle { key })))
                 })
                 .flatten();
-                let Some(id) = id else { return Ok(mlua::Value::Nil) };
+                let Some(id) = id else {
+                    return Ok(mlua::Value::Nil);
+                };
                 let name_owned = this.name.clone();
                 let off = lua.create_function(move |_, ()| -> LuaResult<bool> {
                     Ok(

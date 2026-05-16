@@ -139,12 +139,12 @@ smelt.cmd.register("hello", function(arg)
 end, { desc = "say hi" })
 ```
 
-## Autocommands
+## Reacting to events
 
-React to engine and UI events with `smelt.au.on(event, handler)`:
+Subscribe to engine and UI events with `smelt.cell.subscribe(name, handler)`:
 
 ```lua
-smelt.au.on("turn_end", function(_, data)
+smelt.cell.subscribe("turn_end", function(data)
   if not data.cancelled then smelt.ui.notify("done") end
 end)
 ```
