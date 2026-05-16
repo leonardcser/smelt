@@ -16,6 +16,7 @@ impl TuiApp {
         let show_queued = agent_running || self.is_compacting();
 
         self.adjust_tail_scroll();
+        self.ui.sync_scroll_links();
 
         let queued_owned: Vec<String> = if show_queued {
             self.queued_messages.clone()

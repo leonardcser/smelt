@@ -107,6 +107,8 @@ local function open(filepath)
 
 	STATE = { overlay = overlay, left_win = left_win, right_win = right_win }
 
+	smelt.win.link_scroll({ left_win, right_win })
+
 	for _, w in ipairs({ left_win, right_win }) do
 		smelt.win.set_keymap(w, "<Esc>", close)
 		smelt.win.set_keymap(w, "q", close)

@@ -39,6 +39,10 @@ win.cursor_row = nil
 ---@type fun(): string
 win.focus = nil
 
+--- Mirror `scroll_top` across `wins` — every member of the array follows whichever member the user scrolls. Re-linking a window that's already in a group merges the new ids into the existing group; closing any member auto-removes it (the group is dropped once fewer than two live members remain).
+---@type fun(wins: table): nil
+win.link_scroll = nil
+
 --- Move `win_id`'s cursor by `delta` rows (clamped to the buffer's line count), keep the row on-screen by adjusting `scroll_top`, and emit `selection_changed`. Lets an external panel (e.g. a docked search input) drive a list without holding focus.
 ---@type fun(win_id: integer, delta: integer): nil
 win.move_cursor = nil

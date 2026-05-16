@@ -72,6 +72,14 @@ fun(): string
 
 Return which top-level pane currently has focus: `"transcript"` or `"prompt"`.
 
+## `smelt.win.link_scroll`
+
+```lua
+fun(wins: table): nil
+```
+
+Mirror `scroll_top` across `wins` — every member of the array follows whichever member the user scrolls. Re-linking a window that's already in a group merges the new ids into the existing group; closing any member auto-removes it (the group is dropped once fewer than two live members remain).
+
 ## `smelt.win.move_cursor`
 
 ```lua

@@ -90,6 +90,19 @@ pub struct Ui {
     drag_autoscroll_since: Option<std::time::Instant>,
     /// In-flight chrome drag/resize gesture; `None` when idle.
     chrome_drag: Option<ChromeDrag>,
+    /// Groups of windows whose `scroll_top` is mirrored. Each group tracks the
+    /// last value observed per member; the side that moved this frame becomes
+    /// the leader and its value is copied to all others. Synced once per
+    /// frame via [`Ui::sync_scroll_links`] before paint.
+    scroll_groups: Vec<ScrollGroup>,
+}
+
+/// One scroll-mirror group. `members` lists the participating window ids;
+/// `last` is the post-sync `scroll_top` of each member captured the previous
+/// frame, used to detect which side moved this frame.
+struct ScrollGroup {
+    members: Vec<WinId>,
+    last: Vec<u16>,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -119,7 +132,96 @@ impl Ui {
             cursor_shape: CursorShape::Hidden,
             drag_autoscroll_since: None,
             chrome_drag: None,
+            scroll_groups: Vec::new(),
         }
+    }
+
+    /// Link `wins` into a single scroll-mirror group. Any existing groups that
+    /// overlap with `wins` are merged into one. Duplicates and unknown ids are
+    /// dropped silently. A group with fewer than two live members is discarded.
+    pub fn link_scroll(&mut self, wins: &[WinId]) {
+        let mut next: Vec<WinId> = Vec::new();
+        for w in wins {
+            if self.wins.contains_key(w) && !next.contains(w) {
+                next.push(*w);
+            }
+        }
+        if next.len() < 2 {
+            return;
+        }
+        // Merge any existing group whose members intersect `next`.
+        let mut keep: Vec<ScrollGroup> = Vec::with_capacity(self.scroll_groups.len());
+        for g in std::mem::take(&mut self.scroll_groups) {
+            if g.members.iter().any(|m| next.contains(m)) {
+                for m in g.members {
+                    if !next.contains(&m) {
+                        next.push(m);
+                    }
+                }
+            } else {
+                keep.push(g);
+            }
+        }
+        let last = next
+            .iter()
+            .map(|w| self.wins.get(w).map(|win| win.scroll_top).unwrap_or(0))
+            .collect();
+        keep.push(ScrollGroup {
+            members: next,
+            last,
+        });
+        self.scroll_groups = keep;
+    }
+
+    /// Mirror `scroll_top` across every group. Pruning rules:
+    /// - drop members whose window no longer exists;
+    /// - drop the whole group once it has fewer than two live members.
+    ///
+    /// Leader-detection within a group: the first member whose current
+    /// `scroll_top` differs from `last` wins; ties (everyone equal) are a
+    /// no-op. The leader's value is written to every other member and to
+    /// each `last` entry.
+    pub fn sync_scroll_links(&mut self) {
+        if self.scroll_groups.is_empty() {
+            return;
+        }
+        let mut groups = std::mem::take(&mut self.scroll_groups);
+        groups.retain_mut(|g| {
+            // Prune dead members and keep `last` aligned.
+            let mut i = 0;
+            while i < g.members.len() {
+                if self.wins.contains_key(&g.members[i]) {
+                    i += 1;
+                } else {
+                    g.members.remove(i);
+                    g.last.remove(i);
+                }
+            }
+            if g.members.len() < 2 {
+                return false;
+            }
+            let now: Vec<u16> = g
+                .members
+                .iter()
+                .map(|w| self.wins.get(w).map(|win| win.scroll_top).unwrap_or(0))
+                .collect();
+            // Leader = first member whose value drifted from last; else no-op.
+            let leader_idx = now.iter().zip(g.last.iter()).position(|(n, l)| n != l);
+            let target = match leader_idx {
+                Some(i) => now[i],
+                None => return true,
+            };
+            for (i, wid) in g.members.iter().enumerate() {
+                if now[i] != target {
+                    if let Some(w) = self.wins.get_mut(wid) {
+                        w.scroll_top = target;
+                    }
+                }
+                g.last[i] = target;
+            }
+            true
+        });
+        self.scroll_groups = groups;
     }
 
     /// Returns 1/2/3 for successive Downs on the same cell within 400ms; wraps at 4.

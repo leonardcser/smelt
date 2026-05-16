@@ -305,6 +305,25 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
     register_ui_fn(
         &win_tbl,
         "smelt.win",
+        "link_scroll",
+        "Mirror `scroll_top` across `wins` — every member of the array follows whichever member the user scrolls. Re-linking a window that's already in a group merges the new ids into the existing group; closing any member auto-removes it (the group is dropped once fewer than two live members remain).",
+        &["wins"],
+        lua,
+        |_, wins: mlua::Table| -> LuaResult<()> {
+            let ids: Vec<crate::smelt_term::WinId> = wins
+                .sequence_values::<u64>()
+                .filter_map(|v| v.ok())
+                .map(crate::smelt_term::WinId)
+                .collect();
+            crate::lua::with_app(|app| {
+                app.ui.link_scroll(&ids);
+            });
+            Ok(())
+        },
+    )?;
+    register_ui_fn(
+        &win_tbl,
+        "smelt.win",
         "set_focus",
         "Move keyboard focus to window `id`. No-op if the window is not focusable or does not exist.",
         &["id"],
