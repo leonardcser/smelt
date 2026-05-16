@@ -39,7 +39,7 @@ pub(super) fn syntax_theme() -> &'static syntect::highlighting::Theme {
 
 pub use diff::{
     build_inline_diff_cache_ext, print_cached_inline_diff, print_inline_diff,
-    print_inline_diff_ext, CachedInlineDiff,
+    print_inline_diff_ext, print_split_diff, CachedInlineDiff,
 };
 pub use inline::{
     emit_inline_spans, inline_spans_width, parse_inline_spans, render_markdown_table,

@@ -4,7 +4,7 @@
 
 **Tier:** `UiHost` — Requires a terminal UI; calling these from headless mode raises.
 
-Paint an inline diff into a Buffer. UiHost-only.
+Paint diffs into Buffers — inline (one buffer) or split side-by-side (two buffers). UiHost-only.
 
 ## `smelt.diff.render`
 
@@ -13,4 +13,12 @@ fun(buf_id: integer, opts: table): nil
 ```
 
 Paint an inline diff between `opts.old` and `opts.new` into the buffer, syntax-highlighted by `opts.path`'s extension. Mirrors the pipeline used by the built-in confirm dialog.
+
+## `smelt.diff.render_split`
+
+```lua
+fun(left_buf_id: integer, right_buf_id: integer, opts: table): nil
+```
+
+Paint a side-by-side diff between `opts.old` and `opts.new` into two buffers — `left_buf_id` gets the pre-edit view, `right_buf_id` gets the post-edit view. Both buffers end up with the same row count: synthetic padding rows fill in wherever one side has fewer changes than the other, so vertical alignment between sides is exact. Pick the syntax via `opts.lang` (`"rust"`, `"py"`, …) or `opts.path` (extension-sniffed); `lang` wins when both are set.
 

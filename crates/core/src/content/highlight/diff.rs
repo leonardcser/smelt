@@ -546,6 +546,268 @@ pub fn print_cached_inline_diff(
     emitted
 }
 
+// ─── Side-by-side diff renderer ──────────────────────────────────────
+//
+// Walks the same line-level diff as the inline renderer but emits two
+// aligned streams — one per side — into separate `LineBuilder`s. Each
+// consecutive delete/insert block is paired: matched rows on the same
+// visual row, unmatched rows balanced with `Synthetic` padding on the
+// other side so both buffers always have identical visual-row counts.
+
+#[derive(Clone)]
+struct PendingChange {
+    text: String,
+    lineno: u32,
+}
+
+fn paint_diff_line(
+    out: &mut LineBuilder,
+    text: &str,
+    h: &mut HighlightLines,
+    bg: Option<Color>,
+    source_line: smelt_buffer::buffer::SourceLine,
+    right_margin: u16,
+) {
+    if let Some(bg) = bg {
+        out.fill_line_bg(bg, right_margin);
+    }
+    out.set_source_line(source_line);
+    let line_with_nl = format!("{}\n", text);
+    if let Ok(regions) = h.highlight_line(&line_with_nl, &SYNTAX_SET) {
+        for (style, span) in regions {
+            let span = span.trim_end_matches('\n').trim_end_matches('\r');
+            if span.is_empty() {
+                continue;
+            }
+            out.set_fg(Color::Rgb {
+                r: style.foreground.r,
+                g: style.foreground.g,
+                b: style.foreground.b,
+            });
+            out.print(span);
+        }
+    }
+    out.reset_style();
+    out.newline();
+}
+
+fn paint_synthetic_row(out: &mut LineBuilder) {
+    out.set_source_line(smelt_buffer::buffer::SourceLine::Synthetic);
+    out.newline();
+}
+
+/// Mutable rendering state for a split-diff pass. Bundles the two output
+/// `LineBuilder`s, their syntect highlighters, and the row-fill colors so
+/// the per-block flush helper stays under clippy's arg limit.
+struct SplitCtx<'a, 'l, 'r> {
+    left: &'a mut LineBuilder<'l>,
+    right: &'a mut LineBuilder<'r>,
+    h_left: &'a mut HighlightLines<'static>,
+    h_right: &'a mut HighlightLines<'static>,
+    bg_del: Color,
+    bg_add: Color,
+}
+
+fn flush_pending(ctx: &mut SplitCtx, dels: &mut Vec<PendingChange>, ins: &mut Vec<PendingChange>) {
+    let n = dels.len().max(ins.len());
+    for i in 0..n {
+        match (dels.get(i), ins.get(i)) {
+            (Some(d), Some(i_)) => {
+                paint_diff_line(
+                    ctx.left,
+                    &d.text,
+                    ctx.h_left,
+                    Some(ctx.bg_del),
+                    smelt_buffer::buffer::SourceLine::Linear { lineno: d.lineno },
+                    0,
+                );
+                paint_diff_line(
+                    ctx.right,
+                    &i_.text,
+                    ctx.h_right,
+                    Some(ctx.bg_add),
+                    smelt_buffer::buffer::SourceLine::Linear { lineno: i_.lineno },
+                    0,
+                );
+            }
+            (Some(d), None) => {
+                paint_diff_line(
+                    ctx.left,
+                    &d.text,
+                    ctx.h_left,
+                    Some(ctx.bg_del),
+                    smelt_buffer::buffer::SourceLine::Linear { lineno: d.lineno },
+                    0,
+                );
+                paint_synthetic_row(ctx.right);
+            }
+            (None, Some(i_)) => {
+                paint_synthetic_row(ctx.left);
+                paint_diff_line(
+                    ctx.right,
+                    &i_.text,
+                    ctx.h_right,
+                    Some(ctx.bg_add),
+                    smelt_buffer::buffer::SourceLine::Linear { lineno: i_.lineno },
+                    0,
+                );
+            }
+            (None, None) => unreachable!(),
+        }
+    }
+    dels.clear();
+    ins.clear();
+}
+
+/// Render `old` vs `new` as two aligned streams: `left` gets the pre-edit
+/// view, `right` the post-edit view, with `Synthetic` padding on whichever
+/// side has fewer rows in any given delete/insert block so both buffers
+/// share an identical row count. `syntax_ext` picks the syntect grammar
+/// (e.g. `"rs"`, `"py"`); falls back to plain text on unknown extensions.
+pub fn print_split_diff(
+    left: &mut LineBuilder,
+    right: &mut LineBuilder,
+    old: &str,
+    new: &str,
+    syntax_ext: Option<&str>,
+) {
+    let _perf = smelt_perf::perf::begin("render:split_diff");
+    let ext = syntax_ext.unwrap_or("txt");
+    let syntax = SYNTAX_SET
+        .find_syntax_by_extension(ext)
+        .unwrap_or_else(|| SYNTAX_SET.find_syntax_plain_text());
+    let theme = syntax_theme();
+    let mut h_left = HighlightLines::new(syntax, theme);
+    let mut h_right = HighlightLines::new(syntax, theme);
+
+    // Subtle dark-red / dark-green row fills, matching the inline renderer.
+    let bg_del = Color::Rgb {
+        r: 60,
+        g: 20,
+        b: 20,
+    };
+    let bg_add = Color::Rgb {
+        r: 20,
+        g: 50,
+        b: 20,
+    };
+
+    let diff = TextDiff::from_lines(old, new);
+    let mut old_lineno: u32 = 0;
+    let mut new_lineno: u32 = 0;
+    let mut pending_dels: Vec<PendingChange> = Vec::new();
+    let mut pending_ins: Vec<PendingChange> = Vec::new();
+    let mut ctx = SplitCtx {
+        left,
+        right,
+        h_left: &mut h_left,
+        h_right: &mut h_right,
+        bg_del,
+        bg_add,
+    };
+
+    for change in diff.iter_all_changes() {
+        let text = change.value().trim_end_matches('\n').replace('\t', "    ");
+        match change.tag() {
+            ChangeTag::Equal => {
+                flush_pending(&mut ctx, &mut pending_dels, &mut pending_ins);
+                old_lineno += 1;
+                new_lineno += 1;
+                paint_diff_line(
+                    ctx.left,
+                    &text,
+                    ctx.h_left,
+                    None,
+                    smelt_buffer::buffer::SourceLine::Linear { lineno: old_lineno },
+                    0,
+                );
+                paint_diff_line(
+                    ctx.right,
+                    &text,
+                    ctx.h_right,
+                    None,
+                    smelt_buffer::buffer::SourceLine::Linear { lineno: new_lineno },
+                    0,
+                );
+            }
+            ChangeTag::Delete => {
+                old_lineno += 1;
+                pending_dels.push(PendingChange {
+                    text,
+                    lineno: old_lineno,
+                });
+            }
+            ChangeTag::Insert => {
+                new_lineno += 1;
+                pending_ins.push(PendingChange {
+                    text,
+                    lineno: new_lineno,
+                });
+            }
+        }
+    }
+    flush_pending(&mut ctx, &mut pending_dels, &mut pending_ins);
+}
+
+#[cfg(test)]
+mod split_tests {
+    use super::*;
+    use crate::content::builder::render_into;
+    use smelt_buffer::buffer::{BufCreateOpts, BufId, Buffer, SourceLine};
+    use smelt_buffer::theme::Theme;
+
+    fn split(old: &str, new: &str) -> (Buffer, Buffer) {
+        let theme = Theme::default();
+        let mut left = Buffer::new(BufId(0), BufCreateOpts::default());
+        let mut right = Buffer::new(BufId(1), BufCreateOpts::default());
+        render_into(&mut left, 80, &theme, |lsink| {
+            render_into(&mut right, 80, &theme, |rsink| {
+                print_split_diff(lsink, rsink, old, new, Some("txt"));
+            });
+        });
+        (left, right)
+    }
+
+    fn texts(buf: &Buffer) -> Vec<String> {
+        (0..buf.line_count())
+            .map(|r| buf.get_line(r).unwrap_or("").to_string())
+            .collect()
+    }
+
+    fn source_lines(buf: &Buffer) -> Vec<Option<SourceLine>> {
+        (0..buf.line_count())
+            .map(|r| buf.decoration_at(r).source_line)
+            .collect()
+    }
+
+    #[test]
+    fn split_diff_pairs_one_to_one_change() {
+        let (l, r) = split("alpha\nbeta\ngamma\n", "alpha\nBETA\ngamma\n");
+        assert_eq!(l.line_count(), r.line_count());
+        assert_eq!(texts(&l), vec!["alpha", "beta", "gamma"]);
+        assert_eq!(texts(&r), vec!["alpha", "BETA", "gamma"]);
+        for sl in source_lines(&l).iter().chain(source_lines(&r).iter()) {
+            assert!(matches!(sl, Some(SourceLine::Linear { .. })));
+        }
+    }
+
+    #[test]
+    fn split_diff_pads_with_synthetic_when_one_side_only_inserts() {
+        let (l, r) = split("alpha\ngamma\n", "alpha\nNEW\ngamma\n");
+        assert_eq!(l.line_count(), r.line_count());
+        assert_eq!(l.line_count(), 3);
+        assert!(matches!(source_lines(&l)[1], Some(SourceLine::Synthetic)));
+    }
+
+    #[test]
+    fn split_diff_pads_with_synthetic_when_one_side_only_deletes() {
+        let (l, r) = split("alpha\nOLD\ngamma\n", "alpha\ngamma\n");
+        assert_eq!(l.line_count(), r.line_count());
+        assert_eq!(l.line_count(), 3);
+        assert!(matches!(source_lines(&r)[1], Some(SourceLine::Synthetic)));
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
