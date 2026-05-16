@@ -50,14 +50,19 @@ local REGION = "dialog_overlay"
 
 local GUTTER = 1
 
-function smelt.ui.dialog.input(placeholder)
+function smelt.ui.dialog.input(placeholder, opts)
+  opts = opts or {}
   local buf = smelt.buf.create()
   smelt.buf.set_lines(buf, { "" })
   -- Single-line input: wrap=false keeps long entries on one row so the caret
   -- can scroll horizontally instead of jumping to a wrapped continuation.
+  -- `opts.pad_left` / `opts.pad_right` override the dialog gutter for callers
+  -- that want extra indent (e.g. nested inputs visually grouped under a list).
   local leaf = smelt.win.open(buf, {
     region = REGION, focusable = true, selectable = true,
-    pad_left = GUTTER, pad_right = GUTTER, scrollbar = false, wrap = false,
+    pad_left = opts.pad_left or GUTTER,
+    pad_right = opts.pad_right or GUTTER,
+    scrollbar = false, wrap = false,
   })
   if leaf then smelt.win.configure_input(leaf, placeholder or "") end
   return leaf, buf

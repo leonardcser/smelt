@@ -115,7 +115,12 @@ function smelt.confirm.open(handle_id)
   local preview_leaf = smelt.ui.dialog.content({ buf = preview_buf, interactive = true })
   local options_leaf, options_buf = smelt.ui.dialog.options(labels)
   render_options(options_buf, labels)
-  local reason_leaf, reason_buf = smelt.ui.dialog.input("reason (optional)…")
+  local reason_leaf, reason_buf =
+      smelt.ui.dialog.input("press tab to add a reason…", { pad_left = 2 })
+
+  -- Empty 1-row spacer panel that visually separates the options list from
+  -- the reason input.
+  local spacer_leaf = smelt.ui.dialog.content({ text = "", wrap = false })
 
   local typed_reason = false
   smelt.win.on_event(reason_leaf, "text_changed", function() typed_reason = true end)
@@ -135,6 +140,7 @@ function smelt.confirm.open(handle_id)
       { leaf = header_leaf,  height = "fit"                              },
       { leaf = preview_leaf, height = "fit", collapse_when_empty = true  },
       { leaf = options_leaf, height = "fit"                              },
+      { leaf = spacer_leaf,  height = "fit"                              },
       { leaf = reason_leaf,                  collapse_when_empty = true  },
     },
     focus = options_leaf,
