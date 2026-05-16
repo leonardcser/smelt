@@ -36,12 +36,20 @@ There is exactly **one** module for UTF-8 boundary handling:
 `smelt_buffer::text`. Don't introduce snapping logic elsewhere; don't
 duplicate these primitives in other crates.
 
-**Reads** — use `safe_slice(s, range)`. Snaps endpoints and clamps to
-`s.len()`; inverted ranges return `""`. Never write `&source()[a..b]`
-against a possibly-stale offset.
+**Reads** — use `smelt_buffer::text::slice(s, range)`. Snaps endpoints
+and clamps to `s.len()`; inverted ranges return `""`. Never write
+`&source()[a..b]` against a possibly-stale offset.
 
-**Mutations** — use `safe_drain` / `safe_replace_range`. Never call
-`source_mut().drain(...)` or `source_mut().replace_range(...)` directly.
+**Pure-text mutations** — use `smelt_buffer::text::replace_range`,
+`text::insert`, `text::insert_str`. Never call `source_mut().drain(...)`
+or `source_mut().replace_range(...)` directly.
+
+**Attached-text mutations** (source + `attachment_ids` together) — use
+`Buffer::text_mut()` which yields a `smelt_buffer::attached::AttachedTextMut`.
+Its `replace_range`, `insert_str`, `insert`, `insert_marker`, `install`,
+`set_ids`, `strip_attachments`, `clear` methods are the **only** safe
+mutation entry points. They keep marker count and id count in lockstep
+(INV-15) and a debug-assert verifies the invariant after every call.
 
 **Boundary math** — `snap`, `prev_char_boundary`, `next_char_boundary`,
 `byte_to_cell`, `cell_to_byte`, `char_pos`, `byte_of_char` all live in
