@@ -98,7 +98,11 @@ impl VimContext<'_> {
     /// vim out of the system clipboard means raw markers stay in the kill
     /// ring for paste-back fidelity, while the clipboard gets `[label]` etc.
     fn yank_range(&mut self, start: usize, end: usize, linewise: bool) {
-        let text = self.buf[start..end].to_string();
+        // The kill ring carries plain text only; an attachment id has no
+        // representation here. If the yanked range covers an
+        // ATTACHMENT_MARKER, dropping the marker is the only way to keep
+        // a later `p`/`P` from producing orphan marker bytes in source.
+        let text = self.buf[start..end].replace(ATTACHMENT_MARKER, "");
         self.clipboard
             .kill_ring
             .set_with_source(text, linewise, start, end);
@@ -153,6 +157,7 @@ impl VimContext<'_> {
             let drain_start = before.min(drain_end);
             self.attachments.drain(drain_start..drain_end);
         }
+        self.vim_state.clamp_visual_anchor(self.buf);
     }
 
     /// Replace `buf[start..end]` with `text`, removing any attachment markers in
@@ -178,6 +183,7 @@ impl VimContext<'_> {
         } else {
             self.buf.replace_range(start..end, text);
         }
+        self.vim_state.clamp_visual_anchor(self.buf);
     }
 }
 
@@ -254,6 +260,16 @@ impl VimWindowState {
     /// stale anchors can't outlive the bytes they pointed at.
     pub fn clear_visual_anchor(&mut self) {
         self.visual_anchor = 0;
+    }
+
+    /// Clamp the visual anchor into `source` and snap it to a char
+    /// boundary. Call after any in-place source shrink so the anchor
+    /// preserved for `gv` can never outlive its bytes or land mid-UTF-8.
+    pub fn clamp_visual_anchor(&mut self, source: &str) {
+        if self.visual_anchor > source.len() {
+            self.visual_anchor = source.len();
+        }
+        self.visual_anchor = smelt_buffer::text::snap(source, self.visual_anchor);
     }
 
     /// Pop count1 (default 1), clearing both accumulators.

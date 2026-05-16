@@ -533,6 +533,27 @@ impl Window {
         }
     }
 
+    /// Snap-clamp every byte-offset anchor (`cpos`, `selection_anchor`,
+    /// `vim_state.visual_anchor`) into `source` and onto a char boundary.
+    /// Call after any in-place source shrink so a delete that consumed the
+    /// bytes those offsets used to point at can't outlive them. Wholesale
+    /// swaps belong in `PromptState::install_source`; this is for
+    /// surgical edits (drains, replace-range) where keeping the cursor's
+    /// neighborhood is the point.
+    pub fn clamp_anchors_to_source(&mut self, source: &str) {
+        let len = source.len();
+        self.cpos = text::snap(source, self.cpos.min(len));
+        if let Some(a) = self.selection_anchor {
+            let snapped = text::snap(source, a.min(len));
+            self.selection_anchor = if snapped == self.cpos {
+                None
+            } else {
+                Some(snapped)
+            };
+        }
+        self.vim_state.clamp_visual_anchor(source);
+    }
+
     /// Resolve the shift-selection range against `src`. Both endpoints are clamped to
     /// `src.len()` and snapped to char boundaries — a stale anchor that survived a
     /// source mutation degrades to `None` instead of producing an out-of-bounds slice.

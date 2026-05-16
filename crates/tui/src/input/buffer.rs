@@ -1,7 +1,7 @@
 //! Low-level buffer editing primitives for `PromptState`.
 
 use super::{PromptCtx, PromptCtxRef, PromptState, ATTACHMENT_MARKER};
-use crate::smelt_term::{Buffer, VimMode};
+use crate::smelt_term::VimMode;
 use smelt_buffer::text::{
     next_char_boundary, prev_char_boundary, safe_drain, safe_insert, safe_insert_str,
     safe_replace_range, safe_slice,
@@ -9,6 +9,22 @@ use smelt_buffer::text::{
 use smelt_core::attachment::AttachmentId;
 
 impl PromptState {
+    /// Shrink prompt source over `range` and keep every byte-offset
+    /// anchor valid: drop attachment_ids whose markers lived in the range,
+    /// drain the source bytes, then clamp cpos / selection_anchor /
+    /// visual_anchor onto the new source. Use this instead of bare
+    /// `safe_drain` whenever the range is computed from offsets that
+    /// might also live in other anchors.
+    pub(super) fn safe_shrink(
+        &mut self,
+        ctx: &mut PromptCtx<'_>,
+        range: std::ops::Range<usize>,
+    ) {
+        ctx.buf.remove_attachments_in_range(range.start, range.end);
+        safe_drain(ctx.buf.source_mut(), range);
+        ctx.win.clamp_anchors_to_source(ctx.buf.source());
+    }
+
     /// Save undo state. Skips during vim Insert — the session entry saved on insert-entry covers it.
     pub(crate) fn save_undo(&mut self, ctx: &mut PromptCtx<'_>) {
         if ctx.win.vim_enabled && ctx.win.vim_mode == VimMode::Insert {
@@ -59,7 +75,8 @@ impl PromptState {
             if start == 0 {
                 self.from_paste = false;
             }
-            safe_drain(ctx.buf.source_mut(), start..ctx.win.cpos);
+            let cpos = ctx.win.cpos;
+            self.safe_shrink(ctx, start..cpos);
             ctx.win.cpos = start;
             self.recompute_completer(ctx.as_ref());
             return;
@@ -68,8 +85,8 @@ impl PromptState {
         if prev == 0 {
             self.from_paste = false;
         }
-        self.maybe_remove_attachment(ctx.buf, prev);
-        safe_drain(ctx.buf.source_mut(), prev..ctx.win.cpos);
+        let cpos = ctx.win.cpos;
+        self.safe_shrink(ctx, prev..cpos);
         ctx.win.cpos = prev;
         self.recompute_completer(ctx.as_ref());
     }
@@ -104,8 +121,8 @@ impl PromptState {
         if target == 0 {
             self.from_paste = false;
         }
-        self.remove_attachments_in_range(ctx.buf, target, ctx.win.cpos);
-        safe_drain(ctx.buf.source_mut(), target..ctx.win.cpos);
+        let cpos = ctx.win.cpos;
+        self.safe_shrink(ctx, target..cpos);
         ctx.win.cpos = target;
         self.recompute_completer(ctx.as_ref());
     }
@@ -114,9 +131,9 @@ impl PromptState {
         if ctx.win.cpos >= ctx.buf.source().len() {
             return;
         }
-        self.maybe_remove_attachment(ctx.buf, ctx.win.cpos);
-        let next = next_char_boundary(ctx.buf.source(), ctx.win.cpos);
-        safe_drain(ctx.buf.source_mut(), ctx.win.cpos..next);
+        let cpos = ctx.win.cpos;
+        let next = next_char_boundary(ctx.buf.source(), cpos);
+        self.safe_shrink(ctx, cpos..next);
         self.recompute_completer(ctx.as_ref());
     }
 
@@ -129,8 +146,8 @@ impl PromptState {
             ctx.win.cpos,
             crate::smelt_term::text::CharClass::Word,
         );
-        self.remove_attachments_in_range(ctx.buf, ctx.win.cpos, target);
-        safe_drain(ctx.buf.source_mut(), ctx.win.cpos..target);
+        let cpos = ctx.win.cpos;
+        self.safe_shrink(ctx, cpos..target);
         self.recompute_completer(ctx.as_ref());
     }
 
@@ -145,8 +162,7 @@ impl PromptState {
             .map(|i| cpos + i)
             .unwrap_or(ctx.buf.source().len());
         let killed = ctx.buf.copy_range(cpos..end);
-        self.remove_attachments_in_range(ctx.buf, cpos, end);
-        safe_drain(ctx.buf.source_mut(), cpos..end);
+        self.safe_shrink(ctx, cpos..end);
         self.kill_and_copy(killed, clipboard);
         self.recompute_completer(ctx.as_ref());
     }
@@ -160,9 +176,9 @@ impl PromptState {
             .rfind('\n')
             .map(|i| i + 1)
             .unwrap_or(0);
-        let killed = ctx.buf.copy_range(start..ctx.win.cpos);
-        self.remove_attachments_in_range(ctx.buf, start, ctx.win.cpos);
-        safe_drain(ctx.buf.source_mut(), start..ctx.win.cpos);
+        let cpos = ctx.win.cpos;
+        let killed = ctx.buf.copy_range(start..cpos);
+        self.safe_shrink(ctx, start..cpos);
         ctx.win.cpos = start;
         self.kill_and_copy(killed, clipboard);
         self.recompute_completer(ctx.as_ref());
@@ -173,8 +189,8 @@ impl PromptState {
             .rfind('\n')
             .map(|i| i + 1)
             .unwrap_or(0);
-        self.remove_attachments_in_range(ctx.buf, start, ctx.win.cpos);
-        safe_drain(ctx.buf.source_mut(), start..ctx.win.cpos);
+        let cpos = ctx.win.cpos;
+        self.safe_shrink(ctx, start..cpos);
         ctx.win.cpos = start;
         self.recompute_completer(ctx.as_ref());
     }
@@ -188,9 +204,16 @@ impl PromptState {
         if end == ctx.win.cpos {
             return;
         }
-        let upper: String = safe_slice(ctx.buf.source(), ctx.win.cpos..end).to_uppercase();
-        safe_replace_range(ctx.buf.source_mut(), ctx.win.cpos..end, &upper);
-        ctx.win.cpos += upper.len();
+        let cpos = ctx.win.cpos;
+        let upper: String = safe_slice(ctx.buf.source(), cpos..end).to_uppercase();
+        let new_len = upper.len();
+        // ATTACHMENT_MARKER has no case mapping so any marker in the
+        // range survives at the same chars()-index → attachment_ids
+        // stays aligned. We still clamp anchors because case mapping
+        // can change byte length (e.g. ß → SS).
+        safe_replace_range(ctx.buf.source_mut(), cpos..end, &upper);
+        ctx.win.cpos = cpos + new_len;
+        ctx.win.clamp_anchors_to_source(ctx.buf.source());
         self.recompute_completer(ctx.as_ref());
     }
 
@@ -203,9 +226,12 @@ impl PromptState {
         if end == ctx.win.cpos {
             return;
         }
-        let lower: String = safe_slice(ctx.buf.source(), ctx.win.cpos..end).to_lowercase();
-        safe_replace_range(ctx.buf.source_mut(), ctx.win.cpos..end, &lower);
-        ctx.win.cpos += lower.len();
+        let cpos = ctx.win.cpos;
+        let lower: String = safe_slice(ctx.buf.source(), cpos..end).to_lowercase();
+        let new_len = lower.len();
+        safe_replace_range(ctx.buf.source_mut(), cpos..end, &lower);
+        ctx.win.cpos = cpos + new_len;
+        ctx.win.clamp_anchors_to_source(ctx.buf.source());
         self.recompute_completer(ctx.as_ref());
     }
 
@@ -229,8 +255,11 @@ impl PromptState {
                 cap.push(c);
             }
         }
-        safe_replace_range(ctx.buf.source_mut(), ctx.win.cpos..end, &cap);
-        ctx.win.cpos += cap.len();
+        let cpos = ctx.win.cpos;
+        let cap_len = cap.len();
+        safe_replace_range(ctx.buf.source_mut(), cpos..end, &cap);
+        ctx.win.cpos = cpos + cap_len;
+        ctx.win.clamp_anchors_to_source(ctx.buf.source());
         self.recompute_completer(ctx.as_ref());
     }
 
@@ -318,19 +347,6 @@ impl PromptState {
         ctx.buf.attachment_ids.insert(idx, id);
         let p = safe_insert(ctx.buf.source_mut(), ctx.win.cpos, ATTACHMENT_MARKER);
         ctx.win.cpos = p + ATTACHMENT_MARKER.len_utf8();
-    }
-
-    pub(super) fn remove_attachments_in_range(
-        &mut self,
-        buf: &mut Buffer,
-        start: usize,
-        end: usize,
-    ) {
-        buf.remove_attachments_in_range(start, end);
-    }
-
-    pub(super) fn maybe_remove_attachment(&mut self, buf: &mut Buffer, byte_pos: usize) {
-        buf.remove_attachment_at(byte_pos);
     }
 
     pub(super) fn move_to_line(&mut self, ctx: &mut PromptCtx<'_>, target_line: usize) {

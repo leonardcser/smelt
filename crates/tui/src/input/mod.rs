@@ -205,6 +205,7 @@ impl PromptState {
         smelt_buffer::text::safe_drain(ctx.buf.source_mut(), start..end);
         ctx.win.cpos = start;
         ctx.win.selection_anchor = None;
+        ctx.win.clamp_anchors_to_source(ctx.buf.source());
         Some(deleted)
     }
 
@@ -341,6 +342,7 @@ impl PromptState {
                     from_paste: self.from_paste,
                 });
                 ctx.win.selection_anchor = None;
+                ctx.win.vim_state.clear_visual_anchor();
                 self.close_completer();
             }
         }
