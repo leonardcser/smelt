@@ -130,21 +130,48 @@ async fn main() {
         eprintln!("{info}");
     }));
 
-    let mut args = Args::parse();
+    // Two-pass startup so `early.lua` can declare extra CLI flags
+    // before argv is parsed:
+    //
+    //   1. Build a Lua runtime and run `early.lua` (restricted `smelt`
+    //      table, only `cli`/`builtins`/`provider`/`phase` available).
+    //      Any `smelt.cli.register_flag{}` calls push specs onto
+    //      `LuaShared::cli_flag_specs`.
+    //   2. Extend the auto-derived clap `Command` with those specs and
+    //      parse argv. Static flags from `Args` still resolve through
+    //      the derive; Lua flag values land in `cli_flag_values` for
+    //      `smelt.cli.get(name)` to read back.
+    //
+    // We do the early run BEFORE detecting the `auth` subcommand
+    // because clap can't know about Lua flags until early has fired.
+    let mut lua_runtime = tui::lua::LuaRuntime::new();
+    lua_runtime.load_early_init();
+    let cwd = std::env::current_dir().unwrap_or_default();
+    lua_runtime.load_project_early_init(&cwd);
+
+    let lua_flag_specs: Vec<tui::CliFlagSpec> = lua_runtime
+        .core_shared()
+        .cli_flag_specs
+        .lock()
+        .map(|s| s.clone())
+        .unwrap_or_default();
+
+    let (mut args, lua_flag_values) = parse_with_lua_flags(&lua_flag_specs);
+    if let Ok(mut map) = lua_runtime.core_shared().cli_flag_values.lock() {
+        *map = lua_flag_values;
+    }
 
     if let Some(Commands::Auth) = args.command {
         setup::run_auth_command().await;
         return;
     }
 
-    let mut lua_runtime = tui::lua::LuaRuntime::new();
     if let Some(ref path) = args.config {
         lua_runtime.set_init_lua_path(std::path::PathBuf::from(path));
     }
     lua_runtime.load_autoload();
     lua_runtime.load_user_config();
     lua_runtime.load_global_plugins();
-    let cwd = std::env::current_dir().unwrap_or_default();
     let project_trust = lua_runtime.load_project_config(&cwd);
     let lua_cfg = lua_runtime.to_config();
     let lua_permission_rules = lua_runtime.take_permission_rules();
@@ -511,6 +538,72 @@ async fn main() {
         }
     }
     smelt_perf::perf::print_summary();
+}
+
+/// Parse argv with the static [`Args`] surface augmented by every
+/// `smelt.cli.register_flag{}` spec declared from `early.lua`. Returns
+/// the resolved `Args` plus a `name -> value` map for the Lua flags;
+/// the caller stashes the map back onto `LuaShared::cli_flag_values`
+/// so `smelt.cli.get(name)` can read it later.
+///
+/// On parse error / `--help` / `--version` clap exits the process via
+/// `get_matches()` — matching the original `Args::parse()` behavior.
+fn parse_with_lua_flags(
+    specs: &[tui::CliFlagSpec],
+) -> (Args, std::collections::HashMap<String, tui::CliFlagValue>) {
+    use clap::{Arg, ArgAction, CommandFactory, FromArgMatches};
+
+    // clap's Arg API expects `&'static str`. Specs live for the
+    // process lifetime once parsed, so leaking is the simplest contract.
+    fn leak(s: &str) -> &'static str {
+        Box::leak(s.to_string().into_boxed_str())
+    }
+
+    let mut cmd = <Args as CommandFactory>::command();
+    for spec in specs {
+        let name_static: &'static str = leak(&spec.name);
+        let long_static: &'static str = leak(spec.long.as_deref().unwrap_or(&spec.name));
+        let mut arg = Arg::new(name_static).long(long_static);
+        if let Some(short) = spec.short {
+            arg = arg.short(short);
+        }
+        if let Some(ref desc) = spec.description {
+            arg = arg.help(leak(desc));
+        }
+        arg = match spec.kind {
+            tui::CliFlagKind::Boolean => arg.action(ArgAction::SetTrue),
+            tui::CliFlagKind::String => arg.action(ArgAction::Set),
+            tui::CliFlagKind::Integer => arg
+                .action(ArgAction::Set)
+                .value_parser(clap::value_parser!(i64)),
+        };
+        cmd = cmd.arg(arg);
+    }
+
+    let matches = cmd.get_matches();
+    let args = <Args as FromArgMatches>::from_arg_matches(&matches)
+        .expect("Args parser must succeed after clap match");
+
+    let mut values = std::collections::HashMap::with_capacity(specs.len());
+    for spec in specs {
+        let key = spec.name.as_str();
+        let val = match spec.kind {
+            tui::CliFlagKind::Boolean => tui::CliFlagValue::Boolean(matches.get_flag(key)),
+            tui::CliFlagKind::String => matches
+                .get_one::<String>(key)
+                .cloned()
+                .map(tui::CliFlagValue::String)
+                .unwrap_or_else(|| spec.default.clone()),
+            tui::CliFlagKind::Integer => matches
+                .get_one::<i64>(key)
+                .copied()
+                .map(tui::CliFlagValue::Integer)
+                .unwrap_or_else(|| spec.default.clone()),
+        };
+        values.insert(spec.name.clone(), val);
+    }
+
+    (args, values)
 }
 
 /// Assemble the `AppConfig` for a headless frontend from resolved CLI and config inputs.

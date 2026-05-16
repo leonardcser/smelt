@@ -339,6 +339,13 @@ impl LuaRuntime {
         &self.shared
     }
 
+    /// Borrow the underlying `smelt_core` shared registry. Used by the
+    /// main binary to read `cli_flag_specs` after `early.lua` runs and
+    /// write back parsed `cli_flag_values`.
+    pub fn core_shared(&self) -> &Arc<smelt_core::lua::LuaShared> {
+        &self.shared.core
+    }
+
     pub(crate) fn lua(&self) -> &Lua {
         &self.core.lua
     }

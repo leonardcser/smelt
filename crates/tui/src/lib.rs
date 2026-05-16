@@ -21,6 +21,7 @@ pub mod theme;
 pub use ::smelt_edit as smelt_term;
 
 pub use smelt_core::attachment;
+pub use smelt_core::lua::{CliFlagKind, CliFlagSpec, CliFlagValue};
 pub use smelt_core::session;
 
 pub fn print_resume_hint(session_id: &str) {
