@@ -153,13 +153,12 @@ pub(super) fn render_highlighted(
         let visual_rows = split_regions_into_rows(out, &regions, max_content);
         for (vi, vrow) in visual_rows.iter().enumerate() {
             if total_rows >= skip && emitted < emit_limit {
-                if vi == 0 {
-                    out.set_source_line(smelt_buffer::buffer::SourceLine::Linear {
+                out.stamp_chunk(
+                    vi,
+                    smelt_buffer::buffer::SourceLine::Linear {
                         lineno: (i + 1) as u32,
-                    });
-                } else {
-                    out.set_source_line(smelt_buffer::buffer::SourceLine::Synthetic);
-                }
+                    },
+                );
                 print_split_regions(out, vrow, None);
                 out.newline();
                 emitted += 1;

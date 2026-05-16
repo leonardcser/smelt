@@ -223,6 +223,18 @@ impl<'a> LineBuilder<'a> {
         self.cur_decoration.source_line = Some(source_line);
     }
 
+    /// Stamp `head` on the first visual chunk of a wrapped logical line and
+    /// `SourceLine::Synthetic` on every continuation chunk. Used by the syntax
+    /// and diff renderers — `chunk_idx == 0` carries the lineno, the rest fill
+    /// blank in the gutter so the column stays aligned.
+    pub fn stamp_chunk(&mut self, chunk_idx: usize, head: SourceLine) {
+        self.set_source_line(if chunk_idx == 0 {
+            head
+        } else {
+            SourceLine::Synthetic
+        });
+    }
+
     /// Attach `source` to the next committed line; subsequent `newline()` calls become soft-wrap
     /// continuations until `disarm_source_text` is called.
     pub fn arm_source_text(&mut self, source: String) {

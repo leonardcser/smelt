@@ -520,11 +520,7 @@ pub fn print_cached_inline_diff(
                 };
                 let visual_rows = split_cached_spans_into_rows(out, spans, max_content);
                 for (vi, vrow) in visual_rows.iter().enumerate() {
-                    if vi == 0 {
-                        out.set_source_line(source_line);
-                    } else {
-                        out.set_source_line(smelt_buffer::buffer::SourceLine::Synthetic);
-                    }
+                    out.stamp_chunk(vi, source_line);
                     if let Some((ch, color)) = sign {
                         let bgv = bg.unwrap();
                         out.set_bg(bgv);
