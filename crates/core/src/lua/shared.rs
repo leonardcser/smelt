@@ -1,5 +1,6 @@
 //! Shared Lua state: the `Arc<LuaShared>` that outlives callbacks and lets tokio tasks post resume payloads.
 
+use super::hooks::HookRegistry;
 use super::{LuaHandle, LuaTaskRuntime, TaskEvent};
 use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicU64, AtomicU8, Ordering};
@@ -107,19 +108,11 @@ pub struct LuaShared {
     /// CLI flag *values* parsed from argv after `early.lua` declared them.
     /// Populated by the main binary; read by `smelt.cli.get(name)`.
     pub cli_flag_values: Mutex<HashMap<String, CliFlagValue>>,
-    /// Provider middleware (request payload mutators). Each `HookEntry`
-    /// uses an empty `name` (provider hooks aren't per-tool) and the
-    /// shared `id` lets `off()` remove exactly the right hook.
-    pub provider_request_hooks: Mutex<Vec<HookEntry>>,
-    /// Provider middleware (per-message response mutators).
-    pub provider_response_hooks: Mutex<Vec<HookEntry>>,
-    /// Provider middleware (per-delta response mutators).
-    pub provider_delta_hooks: Mutex<Vec<HookEntry>>,
-    /// Per-tool before/after middleware. Each entry carries its own
-    /// id so `off()` can remove exactly the right hook without relying
-    /// on insertion order. Name `""` matches every tool.
-    pub tool_before_hooks: Mutex<Vec<HookEntry>>,
-    pub tool_after_hooks: Mutex<Vec<HookEntry>>,
+    /// Every middleware/callback-list surface, grouped under one struct
+    /// so the registry pattern is centralized and surfaces like
+    /// `tools.middleware` / `provider.middleware` just allocate ids on
+    /// the relevant `Arc<HookRegistry>`.
+    pub hooks: Hooks,
     /// Default shell + argv for `smelt.process.run`/`run_streaming` when no
     /// explicit shell is given. `None` means hardcoded `sh -c`.
     pub default_shell: Mutex<Option<DefaultShell>>,
@@ -130,13 +123,26 @@ pub struct LuaShared {
     phase: AtomicU8,
 }
 
-/// Entry in a middleware/hook list. `id` is monotonic per registry and
-/// passed back as the off() handle so callers can remove their own
-/// hook without touching the others.
-pub struct HookEntry {
-    pub id: u64,
-    pub name: String,
-    pub handle: LuaHandle,
+/// Every hook-registry surface bundled into one struct. New middleware
+/// streams (e.g. an `agent.middleware`) get a field here rather than a
+/// fresh `Mutex<Vec<HookEntry>>` on `LuaShared`. Cheap to clone the
+/// inner `Arc`s; consumers grab `Arc::clone(&shared.hooks.tool_before)`
+/// when they need a long-lived handle.
+#[derive(Default)]
+pub struct Hooks {
+    /// `tools.middleware{before=...}` registry. Per-tool name; `""`
+    /// matches every tool.
+    pub tool_before: Arc<HookRegistry>,
+    /// `tools.middleware{after=...}` registry. Per-tool name; `""`
+    /// matches every tool.
+    pub tool_after: Arc<HookRegistry>,
+    /// `provider.middleware{on_request=...}` registry. Provider hooks
+    /// always use `name = ""`.
+    pub provider_request: Arc<HookRegistry>,
+    /// `provider.middleware{on_response=...}` registry.
+    pub provider_response: Arc<HookRegistry>,
+    /// `provider.middleware{on_delta=...}` registry.
+    pub provider_delta: Arc<HookRegistry>,
 }
 
 /// Spec for a Lua-declared CLI flag. Mirrors the subset of clap we need.
@@ -199,11 +205,7 @@ impl Default for LuaShared {
             disabled_modules: Mutex::new(HashSet::new()),
             cli_flag_specs: Mutex::new(Vec::new()),
             cli_flag_values: Mutex::new(HashMap::new()),
-            provider_request_hooks: Mutex::new(Vec::new()),
-            provider_response_hooks: Mutex::new(Vec::new()),
-            provider_delta_hooks: Mutex::new(Vec::new()),
-            tool_before_hooks: Mutex::new(Vec::new()),
-            tool_after_hooks: Mutex::new(Vec::new()),
+            hooks: Hooks::default(),
             default_shell: Mutex::new(None),
             phase: AtomicU8::new(Phase::Early as u8),
         }

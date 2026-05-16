@@ -2,6 +2,7 @@
 
 use super::{lua_table_to_args, lua_table_to_json};
 use crate::lua::doc::register_fn;
+use crate::lua::hooks::composite_off;
 use crate::lua::{LuaHandle, LuaShared, ToolHandles};
 use lua_doc_derive::{lua_module, LuaAlias, LuaOpts};
 use mlua::prelude::*;
@@ -257,50 +258,16 @@ Hooks fire in registration order; an earlier hook's replacement is visible to la
                             .to_string(),
                     ));
                 }
-                let id = s.next_id.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                let mut parts = Vec::with_capacity(2);
                 if let Some(f) = before_fn {
-                    let key = lua.create_registry_value(f)?;
-                    if let Ok(mut v) = s.tool_before_hooks.lock() {
-                        v.push(crate::lua::HookEntry {
-                            id,
-                            name: name.clone(),
-                            handle: crate::lua::LuaHandle { key },
-                        });
-                    }
+                    let id = s.hooks.tool_before.register(lua, f, name.clone())?;
+                    parts.push((Arc::clone(&s.hooks.tool_before), id));
                 }
                 if let Some(f) = after_fn {
-                    let key = lua.create_registry_value(f)?;
-                    if let Ok(mut v) = s.tool_after_hooks.lock() {
-                        v.push(crate::lua::HookEntry {
-                            id,
-                            name: name.clone(),
-                            handle: crate::lua::LuaHandle { key },
-                        });
-                    }
+                    let id = s.hooks.tool_after.register(lua, f, name.clone())?;
+                    parts.push((Arc::clone(&s.hooks.tool_after), id));
                 }
-                let s2 = s.clone();
-                let off = lua.create_function(move |_, ()| -> LuaResult<bool> {
-                    let removed_before = s2
-                        .tool_before_hooks
-                        .lock()
-                        .map(|mut v| {
-                            let before_len = v.len();
-                            v.retain(|e| e.id != id);
-                            v.len() != before_len
-                        })
-                        .unwrap_or(false);
-                    let removed_after = s2
-                        .tool_after_hooks
-                        .lock()
-                        .map(|mut v| {
-                            let before_len = v.len();
-                            v.retain(|e| e.id != id);
-                            v.len() != before_len
-                        })
-                        .unwrap_or(false);
-                    Ok(removed_before || removed_after)
-                })?;
-                Ok(off)
+                composite_off(lua, parts)
             },
         )?;
     }

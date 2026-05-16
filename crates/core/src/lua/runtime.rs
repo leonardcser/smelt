@@ -1083,26 +1083,20 @@ impl LuaRuntime {
         args: &mut mlua::Table,
         ctx: &mlua::Table,
     ) -> Option<ToolExecResult> {
-        let funcs: Vec<mlua::Function> = self
+        let funcs = self
             .shared
-            .tool_before_hooks
-            .lock()
-            .map(|v| {
-                v.iter()
-                    .filter(|e| e.name.is_empty() || e.name == tool_name)
-                    .filter_map(|e| self.lua.registry_value::<mlua::Function>(&e.handle.key).ok())
-                    .collect()
-            })
-            .unwrap_or_default();
+            .hooks
+            .tool_before
+            .snapshot_for(&self.lua, tool_name);
         for func in funcs {
             let result: mlua::Result<mlua::Value> = func.call((args.clone(), ctx.clone()));
             match result {
                 Ok(mlua::Value::Table(t)) => {
                     let deny: bool = t.get("deny").unwrap_or(false);
                     if deny {
-                        let reason: String = t.get("reason").unwrap_or_else(|_| {
-                            format!("tool `{tool_name}` denied by middleware")
-                        });
+                        let reason: String = t
+                            .get("reason")
+                            .unwrap_or_else(|_| format!("tool `{tool_name}` denied by middleware"));
                         return Some(ToolExecResult::Immediate {
                             content: reason,
                             is_error: true,
@@ -1132,17 +1126,11 @@ impl LuaRuntime {
         content: &mut String,
         is_error: &mut bool,
     ) {
-        let funcs: Vec<mlua::Function> = self
+        let funcs = self
             .shared
-            .tool_after_hooks
-            .lock()
-            .map(|v| {
-                v.iter()
-                    .filter(|e| e.name.is_empty() || e.name == tool_name)
-                    .filter_map(|e| self.lua.registry_value::<mlua::Function>(&e.handle.key).ok())
-                    .collect()
-            })
-            .unwrap_or_default();
+            .hooks
+            .tool_after
+            .snapshot_for(&self.lua, tool_name);
         if funcs.is_empty() {
             return;
         }

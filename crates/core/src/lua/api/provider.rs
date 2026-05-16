@@ -5,6 +5,7 @@ use std::sync::Arc;
 
 use crate::config::{ModelConfig, ProviderConfig};
 use crate::lua::doc::register_fn;
+use crate::lua::hooks::composite_off;
 use crate::lua::lua_type::{LuaType, LuaTypeTuple};
 use crate::lua::LuaShared;
 use lua_doc_derive::{lua_module, LuaOpts};
@@ -209,58 +210,20 @@ Hooks fire in registration order. Returns an `off()` function that removes this 
                         "provider.middleware: at least one of on_request/on_response/on_delta is required".to_string(),
                     ));
                 }
-                let id = s.next_id.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                let mut parts = Vec::with_capacity(3);
                 if let Some(f) = on_request {
-                    let key = lua.create_registry_value(f)?;
-                    if let Ok(mut v) = s.provider_request_hooks.lock() {
-                        v.push(crate::lua::HookEntry {
-                            id,
-                            name: String::new(),
-                            handle: crate::lua::LuaHandle { key },
-                        });
-                    }
+                    let id = s.hooks.provider_request.register(lua, f, "")?;
+                    parts.push((Arc::clone(&s.hooks.provider_request), id));
                 }
                 if let Some(f) = on_response {
-                    let key = lua.create_registry_value(f)?;
-                    if let Ok(mut v) = s.provider_response_hooks.lock() {
-                        v.push(crate::lua::HookEntry {
-                            id,
-                            name: String::new(),
-                            handle: crate::lua::LuaHandle { key },
-                        });
-                    }
+                    let id = s.hooks.provider_response.register(lua, f, "")?;
+                    parts.push((Arc::clone(&s.hooks.provider_response), id));
                 }
                 if let Some(f) = on_delta {
-                    let key = lua.create_registry_value(f)?;
-                    if let Ok(mut v) = s.provider_delta_hooks.lock() {
-                        v.push(crate::lua::HookEntry {
-                            id,
-                            name: String::new(),
-                            handle: crate::lua::LuaHandle { key },
-                        });
-                    }
+                    let id = s.hooks.provider_delta.register(lua, f, "")?;
+                    parts.push((Arc::clone(&s.hooks.provider_delta), id));
                 }
-                let s2 = s.clone();
-                let off = lua.create_function(move |_, ()| -> LuaResult<bool> {
-                    let mut removed = false;
-                    if let Ok(mut v) = s2.provider_request_hooks.lock() {
-                        let n = v.len();
-                        v.retain(|e| e.id != id);
-                        removed |= v.len() != n;
-                    }
-                    if let Ok(mut v) = s2.provider_response_hooks.lock() {
-                        let n = v.len();
-                        v.retain(|e| e.id != id);
-                        removed |= v.len() != n;
-                    }
-                    if let Ok(mut v) = s2.provider_delta_hooks.lock() {
-                        let n = v.len();
-                        v.retain(|e| e.id != id);
-                        removed |= v.len() != n;
-                    }
-                    Ok(removed)
-                })?;
-                Ok(off)
+                composite_off(lua, parts)
             },
         )?;
     }
