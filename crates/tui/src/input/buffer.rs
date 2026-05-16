@@ -3,8 +3,8 @@
 use super::{PromptCtx, PromptCtxRef, PromptState, ATTACHMENT_MARKER};
 use crate::smelt_term::VimMode;
 use smelt_buffer::text::{
-    next_char_boundary, prev_char_boundary, safe_drain, safe_insert, safe_insert_str,
-    safe_replace_range, safe_slice,
+    next_char_boundary, prev_char_boundary, safe_insert, safe_insert_str, safe_replace_range,
+    safe_slice,
 };
 use smelt_core::attachment::AttachmentId;
 
@@ -12,16 +12,15 @@ impl PromptState {
     /// Shrink prompt source over `range` and keep every byte-offset
     /// anchor valid: drop attachment_ids whose markers lived in the range,
     /// drain the source bytes, then clamp cpos / selection_anchor /
-    /// visual_anchor onto the new source. Use this instead of bare
-    /// `safe_drain` whenever the range is computed from offsets that
-    /// might also live in other anchors.
+    /// visual_anchor onto the new source. Use this whenever the range is
+    /// computed from offsets that might also live in other anchors.
     pub(super) fn safe_shrink(
         &mut self,
         ctx: &mut PromptCtx<'_>,
         range: std::ops::Range<usize>,
     ) {
         ctx.buf.remove_attachments_in_range(range.start, range.end);
-        safe_drain(ctx.buf.source_mut(), range);
+        safe_replace_range(ctx.buf.source_mut(), range, "");
         ctx.win.clamp_anchors_to_source(ctx.buf.source());
     }
 

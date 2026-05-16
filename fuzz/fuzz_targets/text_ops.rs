@@ -19,8 +19,7 @@ use arbitrary::Arbitrary;
 use libfuzzer_sys::fuzz_target;
 use smelt_buffer::text::{
     byte_of_char, byte_to_cell, cell_to_byte, char_pos, line_start_offsets, next_char_boundary,
-    prev_char_boundary, safe_drain, safe_insert, safe_insert_str, safe_replace_range, safe_slice,
-    snap,
+    prev_char_boundary, safe_insert, safe_insert_str, safe_replace_range, safe_slice, snap,
 };
 
 #[derive(Arbitrary, Debug)]
@@ -33,8 +32,6 @@ enum TextOp {
     Next { pos: u32 },
     /// `safe_slice` must not panic; returned slice must be a substring.
     Slice { start: u32, end: u32 },
-    /// `safe_drain` must keep source valid UTF-8 and shrink it.
-    Drain { start: u32, end: u32 },
     /// `safe_replace_range` must contain the replacement at the snapped start.
     Replace {
         start: u32,
@@ -98,16 +95,6 @@ fn run(initial: String, ops: Vec<TextOp>) {
                         "safe_slice produced non-substring {slice:?} of {s:?}"
                     );
                 }
-            }
-            TextOp::Drain { start, end } => {
-                let pre_len = s.len();
-                let drained = safe_drain(&mut s, (start as usize)..(end as usize));
-                assert!(s.is_char_boundary(0)); // valid UTF-8 still
-                assert_eq!(
-                    s.len() + drained.len(),
-                    pre_len,
-                    "safe_drain lost or grew bytes"
-                );
             }
             TextOp::Replace { start, end, with } => {
                 let with_clone = with.clone();

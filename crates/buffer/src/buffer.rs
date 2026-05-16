@@ -1531,7 +1531,7 @@ mod tests {
                     let _ = crate::text::safe_slice(buf.source(), a..b);
 
                     let mut s = buf.source().to_string();
-                    let _ = crate::text::safe_drain(&mut s, a..b);
+                    crate::text::safe_replace_range(&mut s, a..b, "");
                     let mut s = buf.source().to_string();
                     crate::text::safe_replace_range(&mut s, a..b, "X");
 

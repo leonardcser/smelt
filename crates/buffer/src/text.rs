@@ -98,17 +98,6 @@ pub fn safe_slice(s: &str, range: core::ops::Range<usize>) -> &str {
     &s[start..end]
 }
 
-/// Drain `s[range]` with the same snap/clamp behavior as [`safe_slice`].
-/// Returns the removed substring; never panics.
-pub fn safe_drain(s: &mut String, range: core::ops::Range<usize>) -> String {
-    let start = snap(s, range.start);
-    let end = snap(s, range.end);
-    if start >= end {
-        return String::new();
-    }
-    s.drain(start..end).collect()
-}
-
 /// Replace `s[range]` with `with`. Snaps endpoints to char boundaries and
 /// clamps to `s.len()`. Inverted ranges insert `with` at the snapped start
 /// (so a degenerate input still does the closest sane thing instead of
@@ -164,10 +153,9 @@ mod tests {
     }
 
     #[test]
-    fn safe_drain_does_not_panic_on_stale_offsets() {
+    fn safe_replace_range_with_empty_drains_snapped_range() {
         let mut s = format!("a{CJK}b");
-        let removed = safe_drain(&mut s, 2..5);
-        assert_eq!(removed, "日");
+        safe_replace_range(&mut s, 2..5, "");
         assert_eq!(s, "a本語b");
     }
 

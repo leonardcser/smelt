@@ -202,7 +202,7 @@ impl PromptState {
         let (start, end) = self.selection_range(ctx.as_ref())?;
         let deleted = ctx.buf.copy_range(start..end);
         ctx.buf.remove_attachments_in_range(start, end);
-        smelt_buffer::text::safe_drain(ctx.buf.source_mut(), start..end);
+        smelt_buffer::text::safe_replace_range(ctx.buf.source_mut(), start..end, "");
         ctx.win.cpos = start;
         ctx.win.selection_anchor = None;
         ctx.win.clamp_anchors_to_source(ctx.buf.source());
