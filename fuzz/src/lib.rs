@@ -263,7 +263,7 @@ pub enum FuzzOp {
         req_id: u8,
         call_id: u8,
         tool_name: String,
-        confirm_message: String,
+        summary: String,
         args: ArgsBag,
     },
     /// Side channel: approve the oldest pending confirm. Mirrors what
@@ -1139,7 +1139,7 @@ fn plan(op: FuzzOp) -> (Option<SourceEvent>, PostCheck) {
             req_id,
             call_id,
             tool_name,
-            confirm_message,
+            summary,
             args,
         } => {
             let ev = SourceEvent::Engine(EngineEvent::RequestPermission {
@@ -1147,9 +1147,8 @@ fn plan(op: FuzzOp) -> (Option<SourceEvent>, PostCheck) {
                 call_id: call_id_string(call_id),
                 tool_name,
                 args: args.into_map(),
-                confirm_message,
                 approval_patterns: Vec::new(),
-                summary: None,
+                summary: protocol::style::StyledLines::from_plain(summary),
             });
             (Some(ev), PostCheck::PermissionRequested)
         }
