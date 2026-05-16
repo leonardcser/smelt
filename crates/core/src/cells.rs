@@ -305,18 +305,24 @@ pub struct ConfirmRequested {
 }
 
 /// Payload for the `stream_delta` cell. Emitted for every streaming
-/// chunk arriving from the provider — text, thinking, and tool-arg
-/// JSON fragments. Use the `bytes` field for cheap counters (live TPS);
-/// `text` is `None` unless `SMELT_STREAM_INCLUDE_TEXT=1` is set, since
-/// the full text payload is duplicative of the transcript buffer.
+/// chunk arriving from the provider — text, thinking, and tool-call
+/// argument JSON fragments. Use `bytes` for cheap counters (live TPS);
+/// `text` carries the raw delta. For `kind == "tool_args"`, `call_id`
+/// and `tool_name` identify which tool call the fragment belongs to.
 #[derive(Debug, Clone)]
 pub struct StreamDelta {
     /// `"text" | "thinking" | "tool_args"`.
     pub kind: String,
     /// UTF-8 byte length of the delta.
     pub bytes: usize,
-    /// Raw delta text, gated by env var to avoid allocator churn.
-    pub text: Option<String>,
+    /// Raw delta bytes.
+    pub text: String,
+    /// `call_id` of the tool call this fragment belongs to. Populated
+    /// only when `kind == "tool_args"`.
+    pub call_id: Option<String>,
+    /// `tool_name` of the tool call this fragment belongs to. Populated
+    /// only when `kind == "tool_args"`.
+    pub tool_name: Option<String>,
 }
 
 /// Built-in cell names declared by [`build_with_builtins`]. Surfaces in
@@ -470,8 +476,12 @@ pub(crate) fn build_with_builtins(seeds: BuiltinSeeds) -> Cells {
         };
         let _ = t.set("kind", d.kind.as_str());
         let _ = t.set("bytes", d.bytes);
-        if let Some(text) = &d.text {
-            let _ = t.set("text", text.as_str());
+        let _ = t.set("text", d.text.as_str());
+        if let Some(cid) = &d.call_id {
+            let _ = t.set("call_id", cid.as_str());
+        }
+        if let Some(name) = &d.tool_name {
+            let _ = t.set("tool_name", name.as_str());
         }
         mlua::Value::Table(t)
     });

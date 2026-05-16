@@ -32,8 +32,8 @@ impl TuiApp {
     pub(crate) fn dispatch_host_call(&mut self, call: HostCall) {
         match call {
             HostCall::ProviderRequest { messages, reply } => {
-                let mutated = self
-                    .run_middleware_chain::<Vec<Message>>(messages, "on_request", |s| {
+                let mutated =
+                    self.run_middleware_chain::<Vec<Message>>(messages, "on_request", |s| {
                         &s.hooks.provider_request
                     });
                 let _ = reply.send(mutated);

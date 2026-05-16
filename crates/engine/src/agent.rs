@@ -1594,6 +1594,17 @@ impl<'a> Turn<'a> {
                         delta: text.to_string(),
                     });
                 }
+                provider::StreamDelta::ToolArgs {
+                    call_id,
+                    tool_name,
+                    delta,
+                } => {
+                    let _ = self.event_tx.send(EngineEvent::ToolArgsDelta {
+                        call_id: call_id.to_string(),
+                        tool_name: tool_name.to_string(),
+                        delta: delta.to_string(),
+                    });
+                }
             };
             let opts = ChatOptions {
                 cancel: &self.cancel,

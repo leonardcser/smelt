@@ -101,6 +101,11 @@ pub(crate) fn collect_indexed_tool_calls(
 pub(crate) enum StreamDelta<'a> {
     Text(&'a str),
     Thinking(&'a str),
+    ToolArgs {
+        call_id: &'a str,
+        tool_name: &'a str,
+        delta: &'a str,
+    },
 }
 
 pub(crate) struct LLMResponse {

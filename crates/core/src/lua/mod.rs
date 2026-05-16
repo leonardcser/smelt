@@ -48,10 +48,7 @@ pub fn serde_to_lua<T: serde::Serialize>(lua: &Lua, value: &T) -> LuaResult<mlua
 /// conversion drops fields the deserializer requires, or the JSON
 /// doesn't match the target shape. Callers treat `None` as "no
 /// mutation" (the original payload stays in flight).
-pub fn lua_to_serde<T: serde::de::DeserializeOwned>(
-    lua: &Lua,
-    value: &mlua::Value,
-) -> Option<T> {
+pub fn lua_to_serde<T: serde::de::DeserializeOwned>(lua: &Lua, value: &mlua::Value) -> Option<T> {
     let json = match value {
         mlua::Value::Table(t) => api::lua_table_to_json(lua, t),
         mlua::Value::Nil => serde_json::Value::Null,

@@ -292,7 +292,14 @@ pub(super) fn apply_sse_event(
             if let Some(item_id) = ev["item_id"].as_str() {
                 if let Some(entry) = state.tool_calls.get_mut(item_id) {
                     if let Some(args) = ev["delta"].as_str() {
-                        entry.2.push_str(args);
+                        if !args.is_empty() {
+                            entry.2.push_str(args);
+                            on_delta(StreamDelta::ToolArgs {
+                                call_id: &entry.0,
+                                tool_name: &entry.1,
+                                delta: args,
+                            });
+                        }
                     }
                 }
             }

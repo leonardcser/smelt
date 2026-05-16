@@ -211,8 +211,25 @@ pub(super) fn apply_sse_event(
                 let name = tc["function"]["name"].as_str().unwrap_or("").to_string();
                 (id, name, String::new())
             });
+            if let Some(id) = tc["id"].as_str() {
+                if !id.is_empty() && entry.0.is_empty() {
+                    entry.0 = id.to_string();
+                }
+            }
+            if let Some(name) = tc["function"]["name"].as_str() {
+                if !name.is_empty() && entry.1.is_empty() {
+                    entry.1 = name.to_string();
+                }
+            }
             if let Some(args) = tc["function"]["arguments"].as_str() {
-                entry.2.push_str(args);
+                if !args.is_empty() {
+                    entry.2.push_str(args);
+                    on_delta(StreamDelta::ToolArgs {
+                        call_id: &entry.0,
+                        tool_name: &entry.1,
+                        delta: args,
+                    });
+                }
             }
         }
     }

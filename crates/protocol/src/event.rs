@@ -160,6 +160,15 @@ pub enum EngineEvent {
     /// Incremental text token from the LLM (streaming delta).
     TextDelta { delta: String },
 
+    /// Incremental tool-call argument fragment streamed from the LLM.
+    /// Observers reassemble the JSON; the engine has already accumulated
+    /// it internally and will dispatch on the completed call.
+    ToolArgsDelta {
+        call_id: String,
+        tool_name: String,
+        delta: String,
+    },
+
     /// A queued user message was consumed by the engine.
     Steered { text: String, count: usize },
 

@@ -270,9 +270,16 @@ pub(super) fn apply_sse_event(
                     }
                     Some("input_json_delta") => {
                         if let Some(partial_json) = delta["partial_json"].as_str() {
-                            if let Some(idx) = ev["index"].as_u64() {
-                                if let Some(entry) = state.tool_calls.get_mut(&(idx as usize)) {
-                                    entry.2.push_str(partial_json);
+                            if !partial_json.is_empty() {
+                                if let Some(idx) = ev["index"].as_u64() {
+                                    if let Some(entry) = state.tool_calls.get_mut(&(idx as usize)) {
+                                        entry.2.push_str(partial_json);
+                                        on_delta(StreamDelta::ToolArgs {
+                                            call_id: &entry.0,
+                                            tool_name: &entry.1,
+                                            delta: partial_json,
+                                        });
+                                    }
                                 }
                             }
                         }

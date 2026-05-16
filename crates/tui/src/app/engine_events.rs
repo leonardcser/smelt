@@ -5,16 +5,6 @@ use smelt_core::working::{TurnOutcome, TurnPhase};
 use smelt_core::ConfirmRequest;
 use std::time::Duration;
 
-/// Whether to populate `StreamDelta::text` with the raw delta bytes.
-/// Off by default — most consumers only want `bytes` for live TPS-style
-/// counters, and skipping the string allocation keeps per-token overhead
-/// negligible. Set `SMELT_STREAM_INCLUDE_TEXT=1` to opt in.
-fn stream_text_enabled() -> bool {
-    std::env::var_os("SMELT_STREAM_INCLUDE_TEXT")
-        .map(|v| v != "0" && !v.is_empty())
-        .unwrap_or(false)
-}
-
 impl TuiApp {
     pub(crate) fn handle_engine_event(
         &mut self,
@@ -91,11 +81,9 @@ impl TuiApp {
                     std::rc::Rc::new(smelt_core::cells::StreamDelta {
                         kind: "thinking".to_string(),
                         bytes,
-                        text: if stream_text_enabled() {
-                            Some(delta)
-                        } else {
-                            None
-                        },
+                        text: delta,
+                        call_id: None,
+                        tool_name: None,
                     }),
                 );
                 SessionControl::Continue
@@ -112,11 +100,27 @@ impl TuiApp {
                     std::rc::Rc::new(smelt_core::cells::StreamDelta {
                         kind: "text".to_string(),
                         bytes,
-                        text: if stream_text_enabled() {
-                            Some(delta)
-                        } else {
-                            None
-                        },
+                        text: delta,
+                        call_id: None,
+                        tool_name: None,
+                    }),
+                );
+                SessionControl::Continue
+            }
+            EngineEvent::ToolArgsDelta {
+                call_id,
+                tool_name,
+                delta,
+            } => {
+                let bytes = delta.len();
+                self.core.cells.set_dyn(
+                    "stream_delta",
+                    std::rc::Rc::new(smelt_core::cells::StreamDelta {
+                        kind: "tool_args".to_string(),
+                        bytes,
+                        text: delta,
+                        call_id: Some(call_id),
+                        tool_name: Some(tool_name),
                     }),
                 );
                 SessionControl::Continue
