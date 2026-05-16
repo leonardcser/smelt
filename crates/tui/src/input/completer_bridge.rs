@@ -114,10 +114,9 @@ impl PromptState {
             // since capture, the stored anchor can land mid-char.
             let start = smelt_buffer::text::snap(ctx.buf.source(), comp.anchor);
             let end = ctx.win.cpos.max(start);
-            ctx.buf.remove_attachments_in_range(start, end);
             if comp.kind == CompleterKind::CommandArg {
                 // Replace just the argument portion after the command prefix.
-                smelt_buffer::text::replace_range(ctx.buf.source_mut(), start..end, label);
+                ctx.buf.text_mut().replace_range(start..end, label);
                 ctx.win.cpos = start + label.len();
             } else {
                 let trigger = slice(ctx.buf.source(), start..start + 1);
@@ -128,7 +127,7 @@ impl PromptState {
                 } else {
                     format!("@{} ", label)
                 };
-                smelt_buffer::text::replace_range(ctx.buf.source_mut(), start..end, &replacement);
+                ctx.buf.text_mut().replace_range(start..end, &replacement);
                 ctx.win.cpos = start + replacement.len();
             }
         }

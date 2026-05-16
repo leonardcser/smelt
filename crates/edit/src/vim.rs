@@ -9,10 +9,10 @@ use super::text::{
     word_forward_pos, CharClass,
 };
 use super::text_objects::text_object;
-use super::AttachmentId;
 use super::Clipboard;
 use super::{UndoEntry, UndoHistory};
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+use smelt_buffer::attached::AttachedTextMut;
 use smelt_buffer::attachment::ATTACHMENT_MARKER;
 
 // ── Public types ────────────────────────────────────────────────────────────
@@ -48,10 +48,12 @@ pub enum Action {
 }
 
 /// Shared mutable state for vim operations. Borrowed from the host per keypress.
+/// `buf` exposes source + attachment ids together as one wrapper — there is no
+/// `&mut String` to grab, so every text mutation goes through methods that keep
+/// the two halves in sync.
 pub struct VimContext<'a> {
-    pub buf: &'a mut String,
+    pub buf: AttachedTextMut<'a>,
     pub cpos: &'a mut usize,
-    pub attachments: &'a mut Vec<AttachmentId>,
     pub history: &'a mut UndoHistory,
     pub clipboard: &'a mut Clipboard,
     pub mode: &'a mut VimMode,
@@ -65,29 +67,34 @@ pub struct VimContext<'a> {
 impl VimContext<'_> {
     /// Snapshot to undo history before mutating.
     fn save_undo(&mut self) {
-        self.history
-            .save(UndoEntry::snapshot(self.buf, *self.cpos, self.attachments));
+        self.history.save(UndoEntry::snapshot(
+            self.buf.as_str(),
+            *self.cpos,
+            self.buf.ids(),
+        ));
     }
 
     /// Undo: pop the most recent snapshot, stash current state for redo.
     fn undo(&mut self) {
-        let current = UndoEntry::snapshot(self.buf, *self.cpos, self.attachments);
+        let current = UndoEntry::snapshot(self.buf.as_str(), *self.cpos, self.buf.ids());
         if let Some(entry) = self.history.undo(current) {
-            *self.buf = entry.buf;
+            self.buf.install(entry.buf, entry.attachments);
             *self.cpos = entry.cpos;
-            *self.attachments = entry.attachments;
-            clamp_normal(self.buf, self.cpos);
+            let mut cpos = *self.cpos;
+            clamp_normal(self.buf.as_str(), &mut cpos);
+            *self.cpos = cpos;
         }
     }
 
     /// Redo: pop the most recent redo, stash current state for undo.
     fn redo(&mut self) {
-        let current = UndoEntry::snapshot(self.buf, *self.cpos, self.attachments);
+        let current = UndoEntry::snapshot(self.buf.as_str(), *self.cpos, self.buf.ids());
         if let Some(entry) = self.history.redo(current) {
-            *self.buf = entry.buf;
+            self.buf.install(entry.buf, entry.attachments);
             *self.cpos = entry.cpos;
-            *self.attachments = entry.attachments;
-            clamp_normal(self.buf, self.cpos);
+            let mut cpos = *self.cpos;
+            clamp_normal(self.buf.as_str(), &mut cpos);
+            *self.cpos = cpos;
         }
     }
 
@@ -102,7 +109,7 @@ impl VimContext<'_> {
         // representation here. If the yanked range covers an
         // ATTACHMENT_MARKER, dropping the marker is the only way to keep
         // a later `p`/`P` from producing orphan marker bytes in source.
-        let text = self.buf[start..end].replace(ATTACHMENT_MARKER, "");
+        let text = self.buf.as_str()[start..end].replace(ATTACHMENT_MARKER, "");
         self.clipboard
             .kill_ring
             .set_with_source(text, linewise, start, end);
@@ -135,59 +142,20 @@ impl VimContext<'_> {
         self.clipboard.kill_ring.record_clipboard_write(text);
     }
 
-    /// Delete `buf[start..end]`, dropping any attachment markers in that range.
-    /// Endpoints are snapped.
+    /// Delete `buf[start..end]`. Attachment ids whose markers lived in the
+    /// range are dropped automatically. Endpoints are snapped.
     fn delete_range(&mut self, start: usize, end: usize) {
-        let start = smelt_buffer::text::snap(self.buf, start);
-        let end = smelt_buffer::text::snap(self.buf, end);
-        if start >= end {
-            return;
-        }
-        let before = self.buf[..start]
-            .chars()
-            .filter(|&c| c == ATTACHMENT_MARKER)
-            .count();
-        let in_range = self.buf[start..end]
-            .chars()
-            .filter(|&c| c == ATTACHMENT_MARKER)
-            .count();
-        self.buf.drain(start..end);
-        if in_range > 0 {
-            let drain_end = (before + in_range).min(self.attachments.len());
-            let drain_start = before.min(drain_end);
-            self.attachments.drain(drain_start..drain_end);
-        }
-        self.vim_state.clamp_visual_anchor(self.buf);
+        self.buf.replace_range(start..end, "");
+        self.vim_state.clamp_visual_anchor(self.buf.as_str());
     }
 
-    /// Replace `buf[start..end]` with `text`. Attachment markers that survive
-    /// into `text` (e.g. case-mapping a marker yields the same marker) keep
-    /// their attachment_ids; only markers that are actually removed get
-    /// drained. Endpoints are snapped.
+    /// Replace `buf[start..end]` with `text`. Attachment ids whose markers
+    /// survive into `text` (e.g. case-mapped markers fold to themselves)
+    /// keep their ids; only markers actually removed are dropped. Endpoints
+    /// are snapped.
     fn replace_range(&mut self, start: usize, end: usize, text: &str) {
-        let start = smelt_buffer::text::snap(self.buf, start);
-        let end = smelt_buffer::text::snap(self.buf, end).max(start);
-        if start < end {
-            let before = self.buf[..start]
-                .chars()
-                .filter(|&c| c == ATTACHMENT_MARKER)
-                .count();
-            let in_range = self.buf[start..end]
-                .chars()
-                .filter(|&c| c == ATTACHMENT_MARKER)
-                .count();
-            let kept = text.chars().filter(|&c| c == ATTACHMENT_MARKER).count();
-            let drop = in_range.saturating_sub(kept);
-            self.buf.replace_range(start..end, text);
-            if drop > 0 {
-                let drain_end = (before + drop).min(self.attachments.len());
-                let drain_start = before.min(drain_end);
-                self.attachments.drain(drain_start..drain_end);
-            }
-        } else {
-            self.buf.replace_range(start..end, text);
-        }
-        self.vim_state.clamp_visual_anchor(self.buf);
+        self.buf.replace_range(start..end, text);
+        self.vim_state.clamp_visual_anchor(self.buf.as_str());
     }
 }
 
@@ -520,25 +488,25 @@ fn handle_normal(key: KeyEvent, ctx: &mut VimContext<'_>) -> Action {
         }
         KeyCode::Enter => Action::Submit,
         KeyCode::Left => {
-            *ctx.cpos = move_left(ctx.buf, *ctx.cpos);
+            *ctx.cpos = move_left(ctx.buf.as_str(), *ctx.cpos);
             Action::Consumed
         }
         KeyCode::Right => {
-            *ctx.cpos = move_right_normal(ctx.buf, *ctx.cpos);
+            *ctx.cpos = move_right_normal(ctx.buf.as_str(), *ctx.cpos);
             Action::Consumed
         }
         KeyCode::Up => Action::HistoryPrev,
         KeyCode::Down => Action::HistoryNext,
         KeyCode::Home => {
-            *ctx.cpos = line_start(ctx.buf, *ctx.cpos);
+            *ctx.cpos = line_start(ctx.buf.as_str(), *ctx.cpos);
             Action::Consumed
         }
         KeyCode::End => {
-            *ctx.cpos = line_end_normal(ctx.buf, *ctx.cpos);
+            *ctx.cpos = line_end_normal(ctx.buf.as_str(), *ctx.cpos);
             Action::Consumed
         }
         KeyCode::Backspace => {
-            *ctx.cpos = move_left(ctx.buf, *ctx.cpos);
+            *ctx.cpos = move_left(ctx.buf.as_str(), *ctx.cpos);
             Action::Consumed
         }
         _ => Action::Consumed,
@@ -574,23 +542,23 @@ fn handle_normal_char(c: char, ctx: &mut VimContext<'_>) -> Action {
         // ── Operator shortcuts ──────────────────────────────────────
         'D' => {
             ctx.save_undo();
-            let end = line_end(ctx.buf, *ctx.cpos);
+            let end = line_end(ctx.buf.as_str(), *ctx.cpos);
             ctx.yank_range(*ctx.cpos, end, false);
             ctx.delete_range(*ctx.cpos, end);
-            clamp_normal(ctx.buf, ctx.cpos);
+            clamp_normal(ctx.buf.as_str(), ctx.cpos);
             ctx.vim_state.reset_pending();
             Action::Consumed
         }
         'C' => {
             ctx.save_undo();
-            let end = line_end(ctx.buf, *ctx.cpos);
+            let end = line_end(ctx.buf.as_str(), *ctx.cpos);
             ctx.yank_range(*ctx.cpos, end, false);
             ctx.delete_range(*ctx.cpos, end);
             enter_insert_mode(ctx);
             Action::Consumed
         }
         'Y' => {
-            let (start, end) = current_line_range(ctx.buf, *ctx.cpos);
+            let (start, end) = current_line_range(ctx.buf.as_str(), *ctx.cpos);
             ctx.yank_range(start, end, true);
             ctx.clipboard.kill_ring.mark_yanked(ctx.now);
             ctx.vim_state.reset_pending();
@@ -602,10 +570,10 @@ fn handle_normal_char(c: char, ctx: &mut VimContext<'_>) -> Action {
             let n = ctx.vim_state.take_count();
             if !ctx.buf.is_empty() && *ctx.cpos < ctx.buf.len() {
                 ctx.save_undo();
-                let end = advance_chars(ctx.buf, *ctx.cpos, n);
+                let end = advance_chars(ctx.buf.as_str(), *ctx.cpos, n);
                 ctx.yank_range(*ctx.cpos, end, false);
                 ctx.delete_range(*ctx.cpos, end);
-                clamp_normal(ctx.buf, ctx.cpos);
+                clamp_normal(ctx.buf.as_str(), ctx.cpos);
             }
             ctx.vim_state.reset_pending();
             Action::Consumed
@@ -614,11 +582,11 @@ fn handle_normal_char(c: char, ctx: &mut VimContext<'_>) -> Action {
             let n = ctx.vim_state.take_count();
             if *ctx.cpos > 0 {
                 ctx.save_undo();
-                let start = retreat_chars(ctx.buf, *ctx.cpos, n);
+                let start = retreat_chars(ctx.buf.as_str(), *ctx.cpos, n);
                 ctx.yank_range(start, *ctx.cpos, false);
                 ctx.delete_range(start, *ctx.cpos);
                 *ctx.cpos = start;
-                clamp_normal(ctx.buf, ctx.cpos);
+                clamp_normal(ctx.buf.as_str(), ctx.cpos);
             }
             ctx.vim_state.reset_pending();
             Action::Consumed
@@ -627,7 +595,7 @@ fn handle_normal_char(c: char, ctx: &mut VimContext<'_>) -> Action {
             let n = ctx.vim_state.take_count();
             ctx.save_undo();
             if !ctx.buf.is_empty() && *ctx.cpos < ctx.buf.len() {
-                let end = advance_chars(ctx.buf, *ctx.cpos, n);
+                let end = advance_chars(ctx.buf.as_str(), *ctx.cpos, n);
                 ctx.yank_range(*ctx.cpos, end, false);
                 ctx.delete_range(*ctx.cpos, end);
             }
@@ -636,7 +604,7 @@ fn handle_normal_char(c: char, ctx: &mut VimContext<'_>) -> Action {
         }
         'S' => {
             ctx.save_undo();
-            let (start, end) = current_line_content_range(ctx.buf, *ctx.cpos);
+            let (start, end) = current_line_content_range(ctx.buf.as_str(), *ctx.cpos);
             ctx.yank_range(start, end, false);
             ctx.delete_range(start, end);
             *ctx.cpos = start;
@@ -655,7 +623,7 @@ fn handle_normal_char(c: char, ctx: &mut VimContext<'_>) -> Action {
                     if *ctx.cpos >= ctx.buf.len() {
                         break;
                     }
-                    let ch = ctx.buf[*ctx.cpos..].chars().next().unwrap();
+                    let ch = ctx.buf.as_str()[*ctx.cpos..].chars().next().unwrap();
                     let end = *ctx.cpos + ch.len_utf8();
                     let toggled: String = if ch.is_uppercase() {
                         ch.to_lowercase().collect()
@@ -665,7 +633,7 @@ fn handle_normal_char(c: char, ctx: &mut VimContext<'_>) -> Action {
                     ctx.replace_range(*ctx.cpos, end, &toggled);
                     *ctx.cpos += toggled.len();
                 }
-                clamp_normal(ctx.buf, ctx.cpos);
+                clamp_normal(ctx.buf.as_str(), ctx.cpos);
             }
             ctx.vim_state.reset_pending();
             Action::Consumed
@@ -677,23 +645,23 @@ fn handle_normal_char(c: char, ctx: &mut VimContext<'_>) -> Action {
             if !ctx.register().is_empty() {
                 ctx.save_undo();
                 if ctx.register_linewise() {
-                    let eol = line_end(ctx.buf, *ctx.cpos);
+                    let eol = line_end(ctx.buf.as_str(), *ctx.cpos);
                     let text = ctx.register().to_string();
                     let insert = format!("\n{}", text);
-                    let p = smelt_buffer::text::insert_str(ctx.buf, eol, &insert);
+                    let p = ctx.buf.insert_str(eol, &insert);
                     *ctx.cpos = p + 1;
                     // Move to first non-blank.
-                    *ctx.cpos += ctx.buf[*ctx.cpos..]
+                    *ctx.cpos += ctx.buf.as_str()[*ctx.cpos..]
                         .bytes()
                         .take_while(|b| *b == b' ' || *b == b'\t')
                         .count();
                 } else {
-                    let after = advance_chars(ctx.buf, *ctx.cpos, 1).min(ctx.buf.len());
+                    let after = advance_chars(ctx.buf.as_str(), *ctx.cpos, 1).min(ctx.buf.len());
                     let text = ctx.register().to_string();
-                    let p = smelt_buffer::text::insert_str(ctx.buf, after, &text);
+                    let p = ctx.buf.insert_str(after, &text);
                     let paste_end = p + text.len();
-                    *ctx.cpos = prev_char_boundary(ctx.buf, paste_end).max(p);
-                    clamp_normal(ctx.buf, ctx.cpos);
+                    *ctx.cpos = prev_char_boundary(ctx.buf.as_str(), paste_end).max(p);
+                    clamp_normal(ctx.buf.as_str(), ctx.cpos);
                 }
             }
             Action::Consumed
@@ -703,23 +671,23 @@ fn handle_normal_char(c: char, ctx: &mut VimContext<'_>) -> Action {
             if !ctx.register().is_empty() {
                 ctx.save_undo();
                 if ctx.register_linewise() {
-                    let sol = line_start(ctx.buf, *ctx.cpos);
+                    let sol = line_start(ctx.buf.as_str(), *ctx.cpos);
                     let text = ctx.register().to_string();
                     let insert = format!("{}\n", text);
-                    let p = smelt_buffer::text::insert_str(ctx.buf, sol, &insert);
+                    let p = ctx.buf.insert_str(sol, &insert);
                     *ctx.cpos = p;
-                    *ctx.cpos += ctx.buf[*ctx.cpos..]
+                    *ctx.cpos += ctx.buf.as_str()[*ctx.cpos..]
                         .bytes()
                         .take_while(|b| *b == b' ' || *b == b'\t')
                         .count();
                 } else {
                     let text = ctx.register().to_string();
-                    let p = smelt_buffer::text::insert_str(ctx.buf, *ctx.cpos, &text);
+                    let p = ctx.buf.insert_str(*ctx.cpos, &text);
                     let plen = text.len();
                     if plen > 0 {
                         let paste_end = p + plen;
-                        *ctx.cpos = prev_char_boundary(ctx.buf, paste_end).max(p);
-                        clamp_normal(ctx.buf, ctx.cpos);
+                        *ctx.cpos = prev_char_boundary(ctx.buf.as_str(), paste_end).max(p);
+                        clamp_normal(ctx.buf.as_str(), ctx.cpos);
                     } else {
                         *ctx.cpos = p;
                     }
@@ -758,7 +726,7 @@ fn handle_normal_char(c: char, ctx: &mut VimContext<'_>) -> Action {
         'I' => {
             ctx.vim_state.take_count();
             ctx.save_undo();
-            *ctx.cpos = first_non_blank(ctx.buf, *ctx.cpos);
+            *ctx.cpos = first_non_blank(ctx.buf.as_str(), *ctx.cpos);
             enter_insert_mode(ctx);
             Action::Consumed
         }
@@ -766,7 +734,7 @@ fn handle_normal_char(c: char, ctx: &mut VimContext<'_>) -> Action {
             ctx.vim_state.take_count();
             ctx.save_undo();
             if !ctx.buf.is_empty() && *ctx.cpos < ctx.buf.len() {
-                *ctx.cpos = advance_chars(ctx.buf, *ctx.cpos, 1);
+                *ctx.cpos = advance_chars(ctx.buf.as_str(), *ctx.cpos, 1);
             }
             enter_insert_mode(ctx);
             Action::Consumed
@@ -774,22 +742,22 @@ fn handle_normal_char(c: char, ctx: &mut VimContext<'_>) -> Action {
         'A' => {
             ctx.vim_state.take_count();
             ctx.save_undo();
-            *ctx.cpos = line_end(ctx.buf, *ctx.cpos);
+            *ctx.cpos = line_end(ctx.buf.as_str(), *ctx.cpos);
             enter_insert_mode(ctx);
             Action::Consumed
         }
         'o' => {
             ctx.save_undo();
-            let eol = line_end(ctx.buf, *ctx.cpos);
-            let p = smelt_buffer::text::insert(ctx.buf, eol, '\n');
+            let eol = line_end(ctx.buf.as_str(), *ctx.cpos);
+            let p = ctx.buf.insert(eol, '\n');
             *ctx.cpos = p + 1;
             enter_insert_mode(ctx);
             Action::Consumed
         }
         'O' => {
             ctx.save_undo();
-            let sol = line_start(ctx.buf, *ctx.cpos);
-            let p = smelt_buffer::text::insert(ctx.buf, sol, '\n');
+            let sol = line_start(ctx.buf.as_str(), *ctx.cpos);
+            let p = ctx.buf.insert(sol, '\n');
             *ctx.cpos = p;
             enter_insert_mode(ctx);
             Action::Consumed
@@ -815,7 +783,7 @@ fn handle_normal_char(c: char, ctx: &mut VimContext<'_>) -> Action {
         ';' => {
             if let Some((kind, ch)) = ctx.vim_state.last_find {
                 let n = ctx.vim_state.take_count();
-                *ctx.cpos = repeat_find(ctx.buf, *ctx.cpos, kind, ch, n);
+                *ctx.cpos = repeat_find(ctx.buf.as_str(), *ctx.cpos, kind, ch, n);
             }
             ctx.vim_state.reset_pending();
             Action::Consumed
@@ -823,7 +791,7 @@ fn handle_normal_char(c: char, ctx: &mut VimContext<'_>) -> Action {
         ',' => {
             if let Some((kind, ch)) = ctx.vim_state.last_find {
                 let n = ctx.vim_state.take_count();
-                *ctx.cpos = repeat_find(ctx.buf, *ctx.cpos, kind.reversed(), ch, n);
+                *ctx.cpos = repeat_find(ctx.buf.as_str(), *ctx.cpos, kind.reversed(), ch, n);
             }
             ctx.vim_state.reset_pending();
             Action::Consumed
@@ -843,21 +811,21 @@ fn handle_normal_char(c: char, ctx: &mut VimContext<'_>) -> Action {
         'h' => {
             let n = ctx.vim_state.take_count();
             for _ in 0..n {
-                *ctx.cpos = move_left(ctx.buf, *ctx.cpos);
+                *ctx.cpos = move_left(ctx.buf.as_str(), *ctx.cpos);
             }
             Action::Consumed
         }
         'l' => {
             let n = ctx.vim_state.take_count();
             for _ in 0..n {
-                *ctx.cpos = move_right_normal(ctx.buf, *ctx.cpos);
+                *ctx.cpos = move_right_normal(ctx.buf.as_str(), *ctx.cpos);
             }
             Action::Consumed
         }
         'j' => {
             let n = ctx.vim_state.take_count();
             if ctx.buf.contains('\n') {
-                let (new_pos, col) = move_down_col(ctx.buf, *ctx.cpos, *ctx.curswant);
+                let (new_pos, col) = move_down_col(ctx.buf.as_str(), *ctx.cpos, *ctx.curswant);
                 if new_pos == *ctx.cpos && n <= 1 {
                     ctx.vim_state.reset_pending();
                     return Action::HistoryNext;
@@ -865,9 +833,9 @@ fn handle_normal_char(c: char, ctx: &mut VimContext<'_>) -> Action {
                 *ctx.curswant = Some(col);
                 *ctx.cpos = new_pos;
                 for _ in 1..n {
-                    (*ctx.cpos, _) = move_down_col(ctx.buf, *ctx.cpos, *ctx.curswant);
+                    (*ctx.cpos, _) = move_down_col(ctx.buf.as_str(), *ctx.cpos, *ctx.curswant);
                 }
-                clamp_normal(ctx.buf, ctx.cpos);
+                clamp_normal(ctx.buf.as_str(), ctx.cpos);
                 return Action::Consumed;
             }
             ctx.vim_state.reset_pending();
@@ -880,7 +848,7 @@ fn handle_normal_char(c: char, ctx: &mut VimContext<'_>) -> Action {
         'k' => {
             let n = ctx.vim_state.take_count();
             if ctx.buf.contains('\n') {
-                let (new_pos, col) = move_up_col(ctx.buf, *ctx.cpos, *ctx.curswant);
+                let (new_pos, col) = move_up_col(ctx.buf.as_str(), *ctx.cpos, *ctx.curswant);
                 if new_pos == *ctx.cpos && n <= 1 {
                     ctx.vim_state.reset_pending();
                     return Action::HistoryPrev;
@@ -888,9 +856,9 @@ fn handle_normal_char(c: char, ctx: &mut VimContext<'_>) -> Action {
                 *ctx.curswant = Some(col);
                 *ctx.cpos = new_pos;
                 for _ in 1..n {
-                    (*ctx.cpos, _) = move_up_col(ctx.buf, *ctx.cpos, *ctx.curswant);
+                    (*ctx.cpos, _) = move_up_col(ctx.buf.as_str(), *ctx.cpos, *ctx.curswant);
                 }
-                clamp_normal(ctx.buf, ctx.cpos);
+                clamp_normal(ctx.buf.as_str(), ctx.cpos);
                 return Action::Consumed;
             }
             ctx.vim_state.reset_pending();
@@ -903,84 +871,84 @@ fn handle_normal_char(c: char, ctx: &mut VimContext<'_>) -> Action {
         'w' => {
             let n = ctx.vim_state.take_count();
             for _ in 0..n {
-                *ctx.cpos = word_forward_pos(ctx.buf, *ctx.cpos, CharClass::Word);
+                *ctx.cpos = word_forward_pos(ctx.buf.as_str(), *ctx.cpos, CharClass::Word);
             }
-            clamp_normal(ctx.buf, ctx.cpos);
+            clamp_normal(ctx.buf.as_str(), ctx.cpos);
             Action::Consumed
         }
         'W' => {
             let n = ctx.vim_state.take_count();
             for _ in 0..n {
-                *ctx.cpos = word_forward_pos(ctx.buf, *ctx.cpos, CharClass::WORD);
+                *ctx.cpos = word_forward_pos(ctx.buf.as_str(), *ctx.cpos, CharClass::WORD);
             }
-            clamp_normal(ctx.buf, ctx.cpos);
+            clamp_normal(ctx.buf.as_str(), ctx.cpos);
             Action::Consumed
         }
         'b' => {
             let n = ctx.vim_state.take_count();
             for _ in 0..n {
-                *ctx.cpos = word_backward_pos(ctx.buf, *ctx.cpos, CharClass::Word);
+                *ctx.cpos = word_backward_pos(ctx.buf.as_str(), *ctx.cpos, CharClass::Word);
             }
             Action::Consumed
         }
         'B' => {
             let n = ctx.vim_state.take_count();
             for _ in 0..n {
-                *ctx.cpos = word_backward_pos(ctx.buf, *ctx.cpos, CharClass::WORD);
+                *ctx.cpos = word_backward_pos(ctx.buf.as_str(), *ctx.cpos, CharClass::WORD);
             }
             Action::Consumed
         }
         'e' => {
             let n = ctx.vim_state.take_count();
             for _ in 0..n {
-                *ctx.cpos = word_end_pos(ctx.buf, *ctx.cpos, CharClass::Word);
+                *ctx.cpos = word_end_pos(ctx.buf.as_str(), *ctx.cpos, CharClass::Word);
             }
-            clamp_normal(ctx.buf, ctx.cpos);
+            clamp_normal(ctx.buf.as_str(), ctx.cpos);
             Action::Consumed
         }
         'E' => {
             let n = ctx.vim_state.take_count();
             for _ in 0..n {
-                *ctx.cpos = word_end_pos(ctx.buf, *ctx.cpos, CharClass::WORD);
+                *ctx.cpos = word_end_pos(ctx.buf.as_str(), *ctx.cpos, CharClass::WORD);
             }
-            clamp_normal(ctx.buf, ctx.cpos);
+            clamp_normal(ctx.buf.as_str(), ctx.cpos);
             Action::Consumed
         }
         '0' => {
-            *ctx.cpos = line_start(ctx.buf, *ctx.cpos);
+            *ctx.cpos = line_start(ctx.buf.as_str(), *ctx.cpos);
             *ctx.curswant = None;
             ctx.vim_state.reset_pending();
             Action::Consumed
         }
         '^' | '_' => {
-            *ctx.cpos = first_non_blank(ctx.buf, *ctx.cpos);
+            *ctx.cpos = first_non_blank(ctx.buf.as_str(), *ctx.cpos);
             ctx.vim_state.reset_pending();
             Action::Consumed
         }
         '$' => {
             let n = ctx.vim_state.take_count();
             for _ in 1..n {
-                *ctx.cpos = move_down(ctx.buf, *ctx.cpos);
+                *ctx.cpos = move_down(ctx.buf.as_str(), *ctx.cpos);
             }
-            *ctx.cpos = line_end_normal(ctx.buf, *ctx.cpos);
+            *ctx.cpos = line_end_normal(ctx.buf.as_str(), *ctx.cpos);
             Action::Consumed
         }
         'G' => {
             let had_count = ctx.vim_state.count1.is_some();
             let n = ctx.vim_state.take_count();
             *ctx.cpos = if had_count {
-                goto_line(ctx.buf, n.saturating_sub(1))
+                goto_line(ctx.buf.as_str(), n.saturating_sub(1))
             } else {
                 ctx.buf.len()
             };
-            clamp_normal(ctx.buf, ctx.cpos);
+            clamp_normal(ctx.buf.as_str(), ctx.cpos);
             Action::Consumed
         }
 
         // ── Match bracket ────────────────────────────────────────────
         '%' => {
             ctx.vim_state.reset_counts();
-            if let Some(p) = find_matching_bracket(ctx.buf, *ctx.cpos) {
+            if let Some(p) = find_matching_bracket(ctx.buf.as_str(), *ctx.cpos) {
                 *ctx.cpos = p;
             }
             Action::Consumed
@@ -988,12 +956,12 @@ fn handle_normal_char(c: char, ctx: &mut VimContext<'_>) -> Action {
 
         'J' => {
             let count = ctx.vim_state.take_count().max(2);
-            let eol = line_end(ctx.buf, *ctx.cpos);
+            let eol = line_end(ctx.buf.as_str(), *ctx.cpos);
             if eol < ctx.buf.len() {
                 ctx.save_undo();
                 let mut join_pos = *ctx.cpos;
                 for _ in 1..count {
-                    let after = &ctx.buf[join_pos..];
+                    let after = &ctx.buf.as_str()[join_pos..];
                     if let Some(nl) = after.find('\n') {
                         let abs = join_pos + nl;
                         let mut end = abs + 1;
@@ -1024,7 +992,7 @@ fn handle_visual(key: KeyEvent, ctx: &mut VimContext<'_>) -> Action {
     if let SubState::WaitingVisualTextObj(inner) = ctx.vim_state.sub {
         ctx.vim_state.sub = SubState::Ready;
         if let KeyCode::Char(c) = key.code {
-            if let Some((start, end)) = text_object(ctx.buf, *ctx.cpos, inner, c) {
+            if let Some((start, end)) = text_object(ctx.buf.as_str(), *ctx.cpos, inner, c) {
                 ctx.vim_state.visual_anchor = start;
                 *ctx.cpos = end.saturating_sub(1);
             }
@@ -1068,27 +1036,27 @@ fn handle_visual(key: KeyEvent, ctx: &mut VimContext<'_>) -> Action {
             Action::Consumed
         }
         KeyCode::Left => {
-            *ctx.cpos = move_left(ctx.buf, *ctx.cpos);
+            *ctx.cpos = move_left(ctx.buf.as_str(), *ctx.cpos);
             Action::Consumed
         }
         KeyCode::Right => {
-            *ctx.cpos = move_right_normal(ctx.buf, *ctx.cpos);
+            *ctx.cpos = move_right_normal(ctx.buf.as_str(), *ctx.cpos);
             Action::Consumed
         }
         KeyCode::Up => {
-            *ctx.cpos = move_up(ctx.buf, *ctx.cpos);
+            *ctx.cpos = move_up(ctx.buf.as_str(), *ctx.cpos);
             Action::Consumed
         }
         KeyCode::Down => {
-            *ctx.cpos = move_down(ctx.buf, *ctx.cpos);
+            *ctx.cpos = move_down(ctx.buf.as_str(), *ctx.cpos);
             Action::Consumed
         }
         KeyCode::Home => {
-            *ctx.cpos = line_start(ctx.buf, *ctx.cpos);
+            *ctx.cpos = line_start(ctx.buf.as_str(), *ctx.cpos);
             Action::Consumed
         }
         KeyCode::End => {
-            *ctx.cpos = line_end_normal(ctx.buf, *ctx.cpos);
+            *ctx.cpos = line_end_normal(ctx.buf.as_str(), *ctx.cpos);
             Action::Consumed
         }
         _ => Action::Consumed,
@@ -1128,7 +1096,9 @@ fn handle_visual_char(c: char, ctx: &mut VimContext<'_>) -> Action {
 
         // ── Operators on selection ──────────────────────────────────
         'd' | 'x' => {
-            if let Some((start, end)) = visual_range(ctx.vim_state, ctx.buf, *ctx.cpos, *ctx.mode) {
+            if let Some((start, end)) =
+                visual_range(ctx.vim_state, ctx.buf.as_str(), *ctx.cpos, *ctx.mode)
+            {
                 let linewise = *ctx.mode == VimMode::VisualLine;
                 ctx.save_undo();
                 ctx.yank_range(start, end, linewise);
@@ -1139,9 +1109,12 @@ fn handle_visual_char(c: char, ctx: &mut VimContext<'_>) -> Action {
                         let s = start - 1;
                         ctx.delete_range(s, end);
                         *ctx.cpos = s.min(ctx.buf.len());
-                        clamp_normal(ctx.buf, ctx.cpos);
+                        clamp_normal(ctx.buf.as_str(), ctx.cpos);
                         if !ctx.buf.is_empty() && *ctx.cpos < ctx.buf.len() {
-                            *ctx.cpos = first_non_blank_at(ctx.buf, line_start(ctx.buf, *ctx.cpos));
+                            *ctx.cpos = first_non_blank_at(
+                                ctx.buf.as_str(),
+                                line_start(ctx.buf.as_str(), *ctx.cpos),
+                            );
                         }
                         exit_visual(ctx);
                         return Action::Consumed;
@@ -1153,18 +1126,20 @@ fn handle_visual_char(c: char, ctx: &mut VimContext<'_>) -> Action {
                     ctx.delete_range(start, end);
                 }
                 *ctx.cpos = start.min(ctx.buf.len());
-                clamp_normal(ctx.buf, ctx.cpos);
+                clamp_normal(ctx.buf.as_str(), ctx.cpos);
             }
             exit_visual(ctx);
             Action::Consumed
         }
         'c' => {
-            if let Some((start, end)) = visual_range(ctx.vim_state, ctx.buf, *ctx.cpos, *ctx.mode) {
+            if let Some((start, end)) =
+                visual_range(ctx.vim_state, ctx.buf.as_str(), *ctx.cpos, *ctx.mode)
+            {
                 let linewise = *ctx.mode == VimMode::VisualLine;
                 ctx.save_undo();
                 ctx.yank_range(start, end, linewise);
                 if linewise {
-                    let content_start = first_non_blank_at(ctx.buf, start);
+                    let content_start = first_non_blank_at(ctx.buf.as_str(), start);
                     ctx.delete_range(content_start, end);
                     *ctx.cpos = content_start;
                 } else {
@@ -1180,7 +1155,9 @@ fn handle_visual_char(c: char, ctx: &mut VimContext<'_>) -> Action {
             Action::Consumed
         }
         'y' => {
-            if let Some((start, end)) = visual_range(ctx.vim_state, ctx.buf, *ctx.cpos, *ctx.mode) {
+            if let Some((start, end)) =
+                visual_range(ctx.vim_state, ctx.buf.as_str(), *ctx.cpos, *ctx.mode)
+            {
                 let linewise = *ctx.mode == VimMode::VisualLine;
                 ctx.yank_range(start, end, linewise);
                 ctx.clipboard.kill_ring.mark_yanked(ctx.now);
@@ -1192,9 +1169,11 @@ fn handle_visual_char(c: char, ctx: &mut VimContext<'_>) -> Action {
 
         // ── Case toggling on selection ─────────────────────────────
         '~' => {
-            if let Some((start, end)) = visual_range(ctx.vim_state, ctx.buf, *ctx.cpos, *ctx.mode) {
+            if let Some((start, end)) =
+                visual_range(ctx.vim_state, ctx.buf.as_str(), *ctx.cpos, *ctx.mode)
+            {
                 ctx.save_undo();
-                let toggled: String = ctx.buf[start..end]
+                let toggled: String = ctx.buf.as_str()[start..end]
                     .chars()
                     .map(|ch| {
                         if ch.is_uppercase() {
@@ -1210,18 +1189,22 @@ fn handle_visual_char(c: char, ctx: &mut VimContext<'_>) -> Action {
             Action::Consumed
         }
         'U' => {
-            if let Some((start, end)) = visual_range(ctx.vim_state, ctx.buf, *ctx.cpos, *ctx.mode) {
+            if let Some((start, end)) =
+                visual_range(ctx.vim_state, ctx.buf.as_str(), *ctx.cpos, *ctx.mode)
+            {
                 ctx.save_undo();
-                let upper = ctx.buf[start..end].to_uppercase();
+                let upper = ctx.buf.as_str()[start..end].to_uppercase();
                 ctx.replace_range(start, end, &upper);
             }
             exit_visual(ctx);
             Action::Consumed
         }
         'u' => {
-            if let Some((start, end)) = visual_range(ctx.vim_state, ctx.buf, *ctx.cpos, *ctx.mode) {
+            if let Some((start, end)) =
+                visual_range(ctx.vim_state, ctx.buf.as_str(), *ctx.cpos, *ctx.mode)
+            {
                 ctx.save_undo();
-                let lower = ctx.buf[start..end].to_lowercase();
+                let lower = ctx.buf.as_str()[start..end].to_lowercase();
                 ctx.replace_range(start, end, &lower);
             }
             exit_visual(ctx);
@@ -1230,12 +1213,15 @@ fn handle_visual_char(c: char, ctx: &mut VimContext<'_>) -> Action {
 
         // ── Join lines ─────────────────────────────────────────────
         'J' => {
-            if let Some((start, end)) = visual_range(ctx.vim_state, ctx.buf, *ctx.cpos, *ctx.mode) {
+            if let Some((start, end)) =
+                visual_range(ctx.vim_state, ctx.buf.as_str(), *ctx.cpos, *ctx.mode)
+            {
                 ctx.save_undo();
                 let mut pos = start;
                 let mut remaining = end;
                 while pos < remaining.min(ctx.buf.len()) {
-                    if let Some(nl) = ctx.buf[pos..remaining.min(ctx.buf.len())].find('\n') {
+                    if let Some(nl) = ctx.buf.as_str()[pos..remaining.min(ctx.buf.len())].find('\n')
+                    {
                         let abs = pos + nl;
                         let mut ws_end = abs + 1;
                         while ws_end < ctx.buf.len() && ctx.buf.as_bytes()[ws_end] == b' ' {
@@ -1260,14 +1246,14 @@ fn handle_visual_char(c: char, ctx: &mut VimContext<'_>) -> Action {
             ctx.sync_paste_from_clipboard();
             if !ctx.register().is_empty() {
                 if let Some((start, end)) =
-                    visual_range(ctx.vim_state, ctx.buf, *ctx.cpos, *ctx.mode)
+                    visual_range(ctx.vim_state, ctx.buf.as_str(), *ctx.cpos, *ctx.mode)
                 {
                     ctx.save_undo();
-                    let old = ctx.buf[start..end].to_string();
+                    let old = ctx.buf.as_str()[start..end].to_string();
                     let text = ctx.register().to_string();
                     ctx.replace_range(start, end, &text);
                     *ctx.cpos = start;
-                    clamp_normal(ctx.buf, ctx.cpos);
+                    clamp_normal(ctx.buf.as_str(), ctx.cpos);
                     // Replaced text goes into register; mirror to clipboard.
                     ctx.clipboard
                         .kill_ring
@@ -1285,14 +1271,14 @@ fn handle_visual_char(c: char, ctx: &mut VimContext<'_>) -> Action {
         'h' => {
             let n = ctx.vim_state.take_count();
             for _ in 0..n {
-                *ctx.cpos = move_left(ctx.buf, *ctx.cpos);
+                *ctx.cpos = move_left(ctx.buf.as_str(), *ctx.cpos);
             }
             Action::Consumed
         }
         'l' => {
             let n = ctx.vim_state.take_count();
             for _ in 0..n {
-                *ctx.cpos = move_right_normal(ctx.buf, *ctx.cpos);
+                *ctx.cpos = move_right_normal(ctx.buf.as_str(), *ctx.cpos);
             }
             Action::Consumed
         }
@@ -1300,94 +1286,94 @@ fn handle_visual_char(c: char, ctx: &mut VimContext<'_>) -> Action {
             let n = ctx.vim_state.take_count();
             for _ in 0..n {
                 let col;
-                (*ctx.cpos, col) = move_down_col(ctx.buf, *ctx.cpos, *ctx.curswant);
+                (*ctx.cpos, col) = move_down_col(ctx.buf.as_str(), *ctx.cpos, *ctx.curswant);
                 *ctx.curswant = Some(col);
             }
-            clamp_normal(ctx.buf, ctx.cpos);
+            clamp_normal(ctx.buf.as_str(), ctx.cpos);
             Action::Consumed
         }
         'k' => {
             let n = ctx.vim_state.take_count();
             for _ in 0..n {
                 let col;
-                (*ctx.cpos, col) = move_up_col(ctx.buf, *ctx.cpos, *ctx.curswant);
+                (*ctx.cpos, col) = move_up_col(ctx.buf.as_str(), *ctx.cpos, *ctx.curswant);
                 *ctx.curswant = Some(col);
             }
-            clamp_normal(ctx.buf, ctx.cpos);
+            clamp_normal(ctx.buf.as_str(), ctx.cpos);
             Action::Consumed
         }
         'w' => {
             let n = ctx.vim_state.take_count();
             for _ in 0..n {
-                *ctx.cpos = word_forward_pos(ctx.buf, *ctx.cpos, CharClass::Word);
+                *ctx.cpos = word_forward_pos(ctx.buf.as_str(), *ctx.cpos, CharClass::Word);
             }
-            clamp_normal(ctx.buf, ctx.cpos);
+            clamp_normal(ctx.buf.as_str(), ctx.cpos);
             Action::Consumed
         }
         'W' => {
             let n = ctx.vim_state.take_count();
             for _ in 0..n {
-                *ctx.cpos = word_forward_pos(ctx.buf, *ctx.cpos, CharClass::WORD);
+                *ctx.cpos = word_forward_pos(ctx.buf.as_str(), *ctx.cpos, CharClass::WORD);
             }
-            clamp_normal(ctx.buf, ctx.cpos);
+            clamp_normal(ctx.buf.as_str(), ctx.cpos);
             Action::Consumed
         }
         'b' => {
             let n = ctx.vim_state.take_count();
             for _ in 0..n {
-                *ctx.cpos = word_backward_pos(ctx.buf, *ctx.cpos, CharClass::Word);
+                *ctx.cpos = word_backward_pos(ctx.buf.as_str(), *ctx.cpos, CharClass::Word);
             }
             Action::Consumed
         }
         'B' => {
             let n = ctx.vim_state.take_count();
             for _ in 0..n {
-                *ctx.cpos = word_backward_pos(ctx.buf, *ctx.cpos, CharClass::WORD);
+                *ctx.cpos = word_backward_pos(ctx.buf.as_str(), *ctx.cpos, CharClass::WORD);
             }
             Action::Consumed
         }
         'e' => {
             let n = ctx.vim_state.take_count();
             for _ in 0..n {
-                *ctx.cpos = word_end_pos(ctx.buf, *ctx.cpos, CharClass::Word);
+                *ctx.cpos = word_end_pos(ctx.buf.as_str(), *ctx.cpos, CharClass::Word);
             }
-            clamp_normal(ctx.buf, ctx.cpos);
+            clamp_normal(ctx.buf.as_str(), ctx.cpos);
             Action::Consumed
         }
         'E' => {
             let n = ctx.vim_state.take_count();
             for _ in 0..n {
-                *ctx.cpos = word_end_pos(ctx.buf, *ctx.cpos, CharClass::WORD);
+                *ctx.cpos = word_end_pos(ctx.buf.as_str(), *ctx.cpos, CharClass::WORD);
             }
-            clamp_normal(ctx.buf, ctx.cpos);
+            clamp_normal(ctx.buf.as_str(), ctx.cpos);
             Action::Consumed
         }
         '0' => {
-            *ctx.cpos = line_start(ctx.buf, *ctx.cpos);
+            *ctx.cpos = line_start(ctx.buf.as_str(), *ctx.cpos);
             Action::Consumed
         }
         '^' | '_' => {
-            *ctx.cpos = first_non_blank(ctx.buf, *ctx.cpos);
+            *ctx.cpos = first_non_blank(ctx.buf.as_str(), *ctx.cpos);
             Action::Consumed
         }
         '$' => {
-            *ctx.cpos = line_end_normal(ctx.buf, *ctx.cpos);
+            *ctx.cpos = line_end_normal(ctx.buf.as_str(), *ctx.cpos);
             Action::Consumed
         }
         'G' => {
             let had_count = ctx.vim_state.count1.is_some();
             let n = ctx.vim_state.take_count();
             *ctx.cpos = if had_count {
-                goto_line(ctx.buf, n.saturating_sub(1))
+                goto_line(ctx.buf.as_str(), n.saturating_sub(1))
             } else {
                 ctx.buf.len()
             };
-            clamp_normal(ctx.buf, ctx.cpos);
+            clamp_normal(ctx.buf.as_str(), ctx.cpos);
             Action::Consumed
         }
         '%' => {
             ctx.vim_state.reset_counts();
-            if let Some(p) = find_matching_bracket(ctx.buf, *ctx.cpos) {
+            if let Some(p) = find_matching_bracket(ctx.buf.as_str(), *ctx.cpos) {
                 *ctx.cpos = p;
             }
             Action::Consumed
@@ -1415,14 +1401,14 @@ fn handle_visual_char(c: char, ctx: &mut VimContext<'_>) -> Action {
         ';' => {
             if let Some((kind, ch)) = ctx.vim_state.last_find {
                 let n = ctx.vim_state.take_count();
-                *ctx.cpos = repeat_find(ctx.buf, *ctx.cpos, kind, ch, n);
+                *ctx.cpos = repeat_find(ctx.buf.as_str(), *ctx.cpos, kind, ch, n);
             }
             Action::Consumed
         }
         ',' => {
             if let Some((kind, ch)) = ctx.vim_state.last_find {
                 let n = ctx.vim_state.take_count();
-                *ctx.cpos = repeat_find(ctx.buf, *ctx.cpos, kind.reversed(), ch, n);
+                *ctx.cpos = repeat_find(ctx.buf.as_str(), *ctx.cpos, kind.reversed(), ch, n);
             }
             Action::Consumed
         }
@@ -1440,7 +1426,7 @@ fn handle_visual_char(c: char, ctx: &mut VimContext<'_>) -> Action {
             // buffer mutations (e.g. a paste that replaces the visual
             // selection shrinks `source` below the old anchor), and a raw
             // swap would land `cpos` past `source.len()`.
-            let anchor = ctx.vim_state.visual_anchor_at(ctx.buf);
+            let anchor = ctx.vim_state.visual_anchor_at(ctx.buf.as_str());
             ctx.vim_state.visual_anchor = *ctx.cpos;
             *ctx.cpos = anchor;
             Action::Consumed
@@ -1478,14 +1464,14 @@ fn handle_waiting_r(key: KeyEvent, ctx: &mut VimContext<'_>) -> Action {
                 if pos >= ctx.buf.len() {
                     break;
                 }
-                let old = ctx.buf[pos..].chars().next().unwrap();
+                let old = ctx.buf.as_str()[pos..].chars().next().unwrap();
                 let end = pos + old.len_utf8();
                 let replacement = c.to_string();
                 ctx.replace_range(pos, end, &replacement);
                 pos += replacement.len();
             }
-            *ctx.cpos = prev_char_boundary(ctx.buf, pos).max(*ctx.cpos);
-            clamp_normal(ctx.buf, ctx.cpos);
+            *ctx.cpos = prev_char_boundary(ctx.buf.as_str(), pos).max(*ctx.cpos);
+            clamp_normal(ctx.buf.as_str(), ctx.cpos);
         }
     }
     ctx.vim_state.reset_pending();
@@ -1499,7 +1485,7 @@ fn handle_waiting_find(key: KeyEvent, kind: FindKind, ctx: &mut VimContext<'_>) 
         ctx.vim_state.last_find = Some((kind, ch));
         let mut pos = *ctx.cpos;
         for _ in 0..n {
-            if let Some(p) = find_char(ctx.buf, pos, kind, ch) {
+            if let Some(p) = find_char(ctx.buf.as_str(), pos, kind, ch) {
                 pos = p;
             }
         }
@@ -1527,16 +1513,16 @@ fn handle_waiting_op_find(
         };
         let mut pos = origin;
         for _ in 0..n {
-            if let Some(p) = find_char(ctx.buf, pos, raw_kind, ch) {
+            if let Some(p) = find_char(ctx.buf.as_str(), pos, raw_kind, ch) {
                 pos = p;
             }
         }
         if pos != origin {
             let (start, end) = match kind {
-                FindKind::Forward => (*ctx.cpos, advance_chars(ctx.buf, pos, 1)),
+                FindKind::Forward => (*ctx.cpos, advance_chars(ctx.buf.as_str(), pos, 1)),
                 FindKind::ForwardTill => (*ctx.cpos, pos),
                 FindKind::Backward => (pos, *ctx.cpos),
-                FindKind::BackwardTill => (advance_chars(ctx.buf, pos, 1), *ctx.cpos),
+                FindKind::BackwardTill => (advance_chars(ctx.buf.as_str(), pos, 1), *ctx.cpos),
             };
             if start < end {
                 return apply_charwise_op(op, ctx, start, end);
@@ -1552,7 +1538,7 @@ fn handle_waiting_g(key: KeyEvent, ctx: &mut VimContext<'_>) -> Action {
     let action = match key.code {
         KeyCode::Char('g') => {
             if let Some(n) = ctx.vim_state.count1.take() {
-                *ctx.cpos = goto_line(ctx.buf, n.saturating_sub(1));
+                *ctx.cpos = goto_line(ctx.buf.as_str(), n.saturating_sub(1));
             } else {
                 *ctx.cpos = 0;
             }
@@ -1569,7 +1555,7 @@ fn handle_waiting_op_g(key: KeyEvent, op: Op, ctx: &mut VimContext<'_>) -> Actio
     ctx.vim_state.sub = SubState::Ready;
     if let KeyCode::Char('g') = key.code {
         let target = if let Some(n) = ctx.vim_state.count1.take() {
-            goto_line(ctx.buf, n.saturating_sub(1))
+            goto_line(ctx.buf.as_str(), n.saturating_sub(1))
         } else {
             0
         };
@@ -1580,8 +1566,8 @@ fn handle_waiting_op_g(key: KeyEvent, op: Op, ctx: &mut VimContext<'_>) -> Actio
             } else {
                 (origin, target)
             };
-            let ls = line_start(ctx.buf, s);
-            let le = line_end(ctx.buf, e);
+            let ls = line_start(ctx.buf.as_str(), s);
+            let le = line_end(ctx.buf.as_str(), e);
             ctx.vim_state.reset_pending();
             return apply_linewise_op(op, ctx, ls, le);
         }
@@ -1593,7 +1579,7 @@ fn handle_waiting_op_g(key: KeyEvent, op: Op, ctx: &mut VimContext<'_>) -> Actio
 fn handle_waiting_textobj(key: KeyEvent, op: Op, inner: bool, ctx: &mut VimContext<'_>) -> Action {
     ctx.vim_state.sub = SubState::Ready;
     if let KeyCode::Char(c) = key.code {
-        if let Some((start, end)) = text_object(ctx.buf, *ctx.cpos, inner, c) {
+        if let Some((start, end)) = text_object(ctx.buf.as_str(), *ctx.cpos, inner, c) {
             let n = ctx.vim_state.effective_count();
             let _ = n;
             return apply_charwise_op(op, ctx, start, end);
@@ -1613,28 +1599,28 @@ fn execute_op_motion(key: KeyEvent, op: Op, ctx: &mut VimContext<'_>) -> Action 
         KeyCode::Char('h') | KeyCode::Left | KeyCode::Backspace => {
             let mut p = origin;
             for _ in 0..n {
-                p = move_left(ctx.buf, p);
+                p = move_left(ctx.buf.as_str(), p);
             }
             (Some(p), false)
         }
         KeyCode::Char('l') | KeyCode::Right => {
             let mut p = origin;
             for _ in 0..n {
-                p = move_right_inclusive(ctx.buf, p);
+                p = move_right_inclusive(ctx.buf.as_str(), p);
             }
             (Some(p), false)
         }
         KeyCode::Char('j') => {
             let mut p = origin;
             for _ in 0..n {
-                p = move_down(ctx.buf, p);
+                p = move_down(ctx.buf.as_str(), p);
             }
             (Some(p), true)
         }
         KeyCode::Char('k') => {
             let mut p = origin;
             for _ in 0..n {
-                p = move_up(ctx.buf, p);
+                p = move_up(ctx.buf.as_str(), p);
             }
             (Some(p), true)
         }
@@ -1643,13 +1629,16 @@ fn execute_op_motion(key: KeyEvent, op: Op, ctx: &mut VimContext<'_>) -> Action 
             // vim special case: cw behaves like ce when cursor is on a word char.
             let use_end = op == Op::Change
                 && p < ctx.buf.len()
-                && char_class(ctx.buf[p..].chars().next().unwrap(), CharClass::Word) != 0;
+                && char_class(
+                    ctx.buf.as_str()[p..].chars().next().unwrap(),
+                    CharClass::Word,
+                ) != 0;
             for _ in 0..n {
                 if use_end {
-                    p = word_end_pos(ctx.buf, p, CharClass::Word);
-                    p = advance_chars(ctx.buf, p, 1); // inclusive end
+                    p = word_end_pos(ctx.buf.as_str(), p, CharClass::Word);
+                    p = advance_chars(ctx.buf.as_str(), p, 1); // inclusive end
                 } else {
-                    p = word_forward_pos(ctx.buf, p, CharClass::Word);
+                    p = word_forward_pos(ctx.buf.as_str(), p, CharClass::Word);
                 }
             }
             (Some(p), false)
@@ -1658,13 +1647,16 @@ fn execute_op_motion(key: KeyEvent, op: Op, ctx: &mut VimContext<'_>) -> Action 
             let mut p = origin;
             let use_end = op == Op::Change
                 && p < ctx.buf.len()
-                && char_class(ctx.buf[p..].chars().next().unwrap(), CharClass::WORD) != 0;
+                && char_class(
+                    ctx.buf.as_str()[p..].chars().next().unwrap(),
+                    CharClass::WORD,
+                ) != 0;
             for _ in 0..n {
                 if use_end {
-                    p = word_end_pos(ctx.buf, p, CharClass::WORD);
-                    p = advance_chars(ctx.buf, p, 1);
+                    p = word_end_pos(ctx.buf.as_str(), p, CharClass::WORD);
+                    p = advance_chars(ctx.buf.as_str(), p, 1);
                 } else {
-                    p = word_forward_pos(ctx.buf, p, CharClass::WORD);
+                    p = word_forward_pos(ctx.buf.as_str(), p, CharClass::WORD);
                 }
             }
             (Some(p), false)
@@ -1672,38 +1664,38 @@ fn execute_op_motion(key: KeyEvent, op: Op, ctx: &mut VimContext<'_>) -> Action 
         KeyCode::Char('b') => {
             let mut p = origin;
             for _ in 0..n {
-                p = word_backward_pos(ctx.buf, p, CharClass::Word);
+                p = word_backward_pos(ctx.buf.as_str(), p, CharClass::Word);
             }
             (Some(p), false)
         }
         KeyCode::Char('B') => {
             let mut p = origin;
             for _ in 0..n {
-                p = word_backward_pos(ctx.buf, p, CharClass::WORD);
+                p = word_backward_pos(ctx.buf.as_str(), p, CharClass::WORD);
             }
             (Some(p), false)
         }
         KeyCode::Char('e') => {
             let mut p = origin;
             for _ in 0..n {
-                p = word_end_pos(ctx.buf, p, CharClass::Word);
+                p = word_end_pos(ctx.buf.as_str(), p, CharClass::Word);
             }
-            (Some(advance_chars(ctx.buf, p, 1)), false)
+            (Some(advance_chars(ctx.buf.as_str(), p, 1)), false)
         }
         KeyCode::Char('E') => {
             let mut p = origin;
             for _ in 0..n {
-                p = word_end_pos(ctx.buf, p, CharClass::WORD);
+                p = word_end_pos(ctx.buf.as_str(), p, CharClass::WORD);
             }
-            (Some(advance_chars(ctx.buf, p, 1)), false)
+            (Some(advance_chars(ctx.buf.as_str(), p, 1)), false)
         }
-        KeyCode::Char('0') => (Some(line_start(ctx.buf, origin)), false),
-        KeyCode::Char('^' | '_') => (Some(first_non_blank(ctx.buf, origin)), false),
-        KeyCode::Char('$') => (Some(line_end(ctx.buf, origin)), false),
+        KeyCode::Char('0') => (Some(line_start(ctx.buf.as_str(), origin)), false),
+        KeyCode::Char('^' | '_') => (Some(first_non_blank(ctx.buf.as_str(), origin)), false),
+        KeyCode::Char('$') => (Some(line_end(ctx.buf.as_str(), origin)), false),
         KeyCode::Char('%') => {
-            if let Some(t) = find_matching_bracket(ctx.buf, origin) {
+            if let Some(t) = find_matching_bracket(ctx.buf.as_str(), origin) {
                 let lo = origin.min(t);
-                let hi = advance_chars(ctx.buf, origin.max(t), 1);
+                let hi = advance_chars(ctx.buf.as_str(), origin.max(t), 1);
                 return apply_charwise_op(op, ctx, lo, hi);
             }
             (None, false)
@@ -1729,8 +1721,8 @@ fn execute_op_motion(key: KeyEvent, op: Op, ctx: &mut VimContext<'_>) -> Action 
             ctx.vim_state.sub = SubState::WaitingOpFind(op, FindKind::BackwardTill);
             return Action::Consumed;
         }
-        KeyCode::Home => (Some(line_start(ctx.buf, origin)), false),
-        KeyCode::End => (Some(line_end(ctx.buf, origin)), false),
+        KeyCode::Home => (Some(line_start(ctx.buf.as_str(), origin)), false),
+        KeyCode::End => (Some(line_end(ctx.buf.as_str(), origin)), false),
         _ => (None, false),
     };
 
@@ -1744,8 +1736,8 @@ fn execute_op_motion(key: KeyEvent, op: Op, ctx: &mut VimContext<'_>) -> Action 
         } else {
             (origin, target)
         };
-        let ls = line_start(ctx.buf, start);
-        let le = line_end(ctx.buf, end);
+        let ls = line_start(ctx.buf.as_str(), start);
+        let le = line_end(ctx.buf.as_str(), end);
         return apply_linewise_op(op, ctx, ls, le);
     }
 
@@ -1767,15 +1759,15 @@ fn execute_linewise_op(op: Op, ctx: &mut VimContext<'_>) -> Action {
     ctx.vim_state.reset_counts();
     ctx.vim_state.sub = SubState::Ready;
 
-    let start = line_start(ctx.buf, *ctx.cpos);
+    let start = line_start(ctx.buf.as_str(), *ctx.cpos);
     let mut end_pos = *ctx.cpos;
     for _ in 1..n {
-        let next = line_end(ctx.buf, end_pos);
+        let next = line_end(ctx.buf.as_str(), end_pos);
         if next < ctx.buf.len() {
             end_pos = next + 1;
         }
     }
-    let end = line_end(ctx.buf, end_pos);
+    let end = line_end(ctx.buf.as_str(), end_pos);
     apply_linewise_op(op, ctx, start, end)
 }
 
@@ -1787,7 +1779,7 @@ fn apply_charwise_op(op: Op, ctx: &mut VimContext<'_>, start: usize, end: usize)
             ctx.yank_range(start, end, false);
             ctx.delete_range(start, end);
             *ctx.cpos = start;
-            clamp_normal(ctx.buf, ctx.cpos);
+            clamp_normal(ctx.buf.as_str(), ctx.cpos);
         }
         Op::Change => {
             ctx.save_undo();
@@ -1816,7 +1808,7 @@ fn apply_linewise_op(op: Op, ctx: &mut VimContext<'_>, start: usize, end: usize)
         e += 1;
         has_trailing_nl = true;
     } else if e < ctx.buf.len() {
-        e = line_end(ctx.buf, e);
+        e = line_end(ctx.buf.as_str(), e);
         if e < ctx.buf.len() {
             e += 1;
             has_trailing_nl = true;
@@ -1834,14 +1826,14 @@ fn apply_linewise_op(op: Op, ctx: &mut VimContext<'_>, start: usize, end: usize)
             ctx.delete_range(s, e);
             *ctx.cpos = s.min(ctx.buf.len());
             if !ctx.buf.is_empty() && *ctx.cpos < ctx.buf.len() {
-                *ctx.cpos = first_non_blank_at(ctx.buf, *ctx.cpos);
+                *ctx.cpos = first_non_blank_at(ctx.buf.as_str(), *ctx.cpos);
             }
-            clamp_normal(ctx.buf, ctx.cpos);
+            clamp_normal(ctx.buf.as_str(), ctx.cpos);
         }
         Op::Change => {
             ctx.save_undo();
-            let content_start = first_non_blank_at(ctx.buf, s);
-            let content_end = line_end(ctx.buf, e.saturating_sub(1).max(s));
+            let content_start = first_non_blank_at(ctx.buf.as_str(), s);
+            let content_end = line_end(ctx.buf.as_str(), e.saturating_sub(1).max(s));
             ctx.yank_range(content_start, content_end, true);
             ctx.delete_range(content_start, content_end);
             *ctx.cpos = content_start;
@@ -1874,11 +1866,11 @@ fn enter_normal(ctx: &mut VimContext<'_>) {
     ctx.vim_state.sub = SubState::Ready;
     ctx.vim_state.reset_counts();
     // Leaving insert mode moves cursor left one, unless at start of line.
-    let sol = line_start(ctx.buf, *ctx.cpos);
+    let sol = line_start(ctx.buf.as_str(), *ctx.cpos);
     if *ctx.cpos > sol {
-        *ctx.cpos = prev_char_boundary(ctx.buf, *ctx.cpos);
+        *ctx.cpos = prev_char_boundary(ctx.buf.as_str(), *ctx.cpos);
     }
-    clamp_normal(ctx.buf, ctx.cpos);
+    clamp_normal(ctx.buf.as_str(), ctx.cpos);
 }
 
 // ── Tests ───────────────────────────────────────────────────────────────────
@@ -1940,7 +1932,7 @@ mod tests {
     struct TestHarness {
         buf: String,
         cpos: usize,
-        attachments: Vec<AttachmentId>,
+        attachments: Vec<smelt_buffer::attachment::AttachmentId>,
         clipboard: Clipboard,
         history: UndoHistory,
         mode: VimMode,
@@ -1968,9 +1960,8 @@ mod tests {
 
         fn handle(&mut self, k: KeyEvent) -> Action {
             let mut ctx = VimContext {
-                buf: &mut self.buf,
+                buf: AttachedTextMut::new(&mut self.buf, &mut self.attachments),
                 cpos: &mut self.cpos,
-                attachments: &mut self.attachments,
                 history: &mut self.history,
                 clipboard: &mut self.clipboard,
                 mode: &mut self.mode,

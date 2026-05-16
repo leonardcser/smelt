@@ -2324,7 +2324,7 @@ mod tests {
             app.app.reload_lua();
         }
         // Drive: cancelled tasks should be a no-op since we cleared them.
-        let outs = app.app.lua.drive_tasks();
+        let outs = app.app.lua.drive_tasks(app.app.core.clock.instant_now());
         assert!(
             outs.is_empty(),
             "no task outputs after reload cancellation (saw {} entries)",

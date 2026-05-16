@@ -41,11 +41,10 @@ impl PromptState {
 
         let yank_tick_before = clipboard.kill_ring.yank_tick();
         let result = {
-            let (src, hist, attachments) = ctx.buf.edit_refs();
+            let (text, hist) = ctx.buf.edit_refs();
             let mut vctx = VimContext {
-                buf: src,
+                buf: text,
                 cpos: &mut ctx.win.cpos,
-                attachments,
                 history: hist,
                 clipboard,
                 mode: &mut ctx.win.vim_mode,

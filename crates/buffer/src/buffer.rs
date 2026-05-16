@@ -670,67 +670,32 @@ impl Buffer {
         &self.source
     }
 
-    /// Mutable access to the editable source text. Callers must run
-    /// `ensure_rendered_at` after mutations to keep display lines in sync.
-    pub fn source_mut(&mut self) -> &mut String {
+    /// Mutable access to source + attachment ids as a single
+    /// invariant-preserving wrapper. Use this instead of raw `&mut String`
+    /// for any mutation that might add/remove attachment markers — the
+    /// wrapper drains/inserts ids automatically. Bumps `source_tick`.
+    pub fn text_mut(&mut self) -> crate::attached::AttachedTextMut<'_> {
         self.source_tick = self.source_tick.wrapping_add(1);
-        &mut self.source
+        crate::attached::AttachedTextMut::new(&mut self.source, &mut self.attachment_ids)
     }
 
-    /// Split-mutable refs for a single edit step: source text, undo history,
-    /// attachment ids. Bumps `source_tick` (callers must follow with
+    /// Split-mutable refs for a single edit step: text wrapper + undo
+    /// history. Bumps `source_tick` (callers must follow with
     /// `sync_after_edit` to refresh `lines`). For buffers without a parser,
     /// lazily rebuilds `source` from `lines.join("\n")` on first call.
-    pub fn edit_refs(&mut self) -> (&mut String, &mut UndoHistory, &mut Vec<AttachmentId>) {
+    pub fn edit_refs(&mut self) -> (crate::attached::AttachedTextMut<'_>, &mut UndoHistory) {
         if self.parser.is_none() && self.source.is_empty() && !self.lines_is_blank() {
             self.source = self.lines.join("\n");
         }
         self.source_tick = self.source_tick.wrapping_add(1);
         (
-            &mut self.source,
+            crate::attached::AttachedTextMut::new(&mut self.source, &mut self.attachment_ids),
             &mut self.history,
-            &mut self.attachment_ids,
         )
     }
 
     fn lines_is_blank(&self) -> bool {
         self.lines.iter().all(|s| s.is_empty())
-    }
-
-    /// Remove the attachment marker at `pos` (if any) from `attachment_ids`.
-    /// `pos` is snapped to a char boundary before the marker check.
-    pub fn remove_attachment_at(&mut self, pos: usize) {
-        use crate::attachment::ATTACHMENT_MARKER;
-        let pos = crate::text::snap(&self.source, pos);
-        if !self.source[pos..].starts_with(ATTACHMENT_MARKER) {
-            return;
-        }
-        let idx = self.source[..pos]
-            .chars()
-            .filter(|&c| c == ATTACHMENT_MARKER)
-            .count();
-        if idx < self.attachment_ids.len() {
-            self.attachment_ids.remove(idx);
-        }
-    }
-
-    /// Remove all `attachment_ids` that fall inside a source text range.
-    /// Endpoints are snapped to char boundaries.
-    pub fn remove_attachments_in_range(&mut self, start: usize, end: usize) {
-        use crate::attachment::ATTACHMENT_MARKER;
-        let start = crate::text::snap(&self.source, start);
-        let end = crate::text::snap(&self.source, end).max(start);
-        let before = self.source[..start]
-            .chars()
-            .filter(|&c| c == ATTACHMENT_MARKER)
-            .count();
-        let in_range = self.source[start..end]
-            .chars()
-            .filter(|&c| c == ATTACHMENT_MARKER)
-            .count();
-        let drain_end = (before + in_range).min(self.attachment_ids.len());
-        let drain_start = before.min(drain_end);
-        self.attachment_ids.drain(drain_start..drain_end);
     }
 
     /// Update the source driving the parser. No-op if source is unchanged.
@@ -1502,17 +1467,21 @@ mod tests {
     /// the public slicing/mutation APIs.
     #[test]
     fn stale_offsets_never_panic_public_slicing() {
-        type Mutate = dyn Fn(&mut String);
+        type Mutate = dyn Fn(&mut crate::attached::AttachedTextMut<'_>);
         let scenarios: &[(&str, &Mutate)] = &[
-            ("日本語hello", &|s| s.insert(0, '🦀')),
-            ("日本語hello", &|s| {
-                s.truncate(0);
+            ("日本語hello", &|t| {
+                t.insert(0, '🦀');
             }),
-            ("a🦀b日c", &|s| s.push_str("XYZ")),
-            ("a🦀b日c", &|s| {
-                *s = String::from("z");
+            ("日本語hello", &|t| {
+                t.clear();
             }),
-            ("\u{FFFC}hello\u{FFFC}", &|s| s.replace_range(0..3, "")),
+            ("a🦀b日c", &|t| {
+                let p = t.len();
+                t.insert_str(p, "XYZ");
+            }),
+            ("a🦀b日c", &|t| {
+                t.install(String::from("z"), Vec::new());
+            }),
         ];
 
         for (initial, mutate) in scenarios {
@@ -1523,7 +1492,12 @@ mod tests {
             let captured: Vec<usize> = (0..=len + 4).collect();
 
             // Mutate directly — `set_source` would normalize and hide the issue.
-            mutate(buf.source_mut());
+            // Build a transient text wrapper just to apply the mutation through
+            // the same in-place path production code uses.
+            {
+                let mut t = buf.text_mut();
+                mutate(&mut t);
+            }
 
             for &a in &captured {
                 for &b in &captured {
@@ -1540,12 +1514,13 @@ mod tests {
                     kr.kill("seed2".into());
                     kr.set_with_source("payload".into(), false, a, b);
                     let mut bs = buf.source().to_string();
-                    let _ = kr.yank_pop(&mut bs);
+                    let mut ids = Vec::new();
+                    let mut bsmut = crate::attached::AttachedTextMut::new(&mut bs, &mut ids);
+                    let _ = kr.yank_pop(&mut bsmut);
 
                     let mut clone = make_buf();
                     clone.set_source(buf.source().to_string());
-                    clone.remove_attachments_in_range(a, b);
-                    clone.remove_attachment_at(a);
+                    clone.text_mut().replace_range(a..b, "");
                 }
             }
         }

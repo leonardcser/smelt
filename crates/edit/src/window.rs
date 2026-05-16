@@ -1078,9 +1078,11 @@ impl Window {
                 let mut scratch_history = UndoHistory::default();
                 let mut scratch_attachments = Vec::new();
                 let mut ctx = VimContext {
-                    buf: &mut scratch,
+                    buf: smelt_buffer::attached::AttachedTextMut::new(
+                        &mut scratch,
+                        &mut scratch_attachments,
+                    ),
                     cpos: &mut cpos,
-                    attachments: &mut scratch_attachments,
                     history: &mut scratch_history,
                     clipboard,
                     mode: &mut self.vim_mode,
@@ -1090,11 +1092,10 @@ impl Window {
                 };
                 vim::handle_key(k, &mut ctx)
             } else {
-                let (text, history, attachments) = buf.edit_refs();
+                let (text, history) = buf.edit_refs();
                 let mut ctx = VimContext {
                     buf: text,
                     cpos: &mut cpos,
-                    attachments,
                     history,
                     clipboard,
                     mode: &mut self.vim_mode,

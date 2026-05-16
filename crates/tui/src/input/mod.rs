@@ -201,8 +201,7 @@ impl PromptState {
     ) -> Option<crate::smelt_term::CopyOutput> {
         let (start, end) = self.selection_range(ctx.as_ref())?;
         let deleted = ctx.buf.copy_range(start..end);
-        ctx.buf.remove_attachments_in_range(start, end);
-        smelt_buffer::text::replace_range(ctx.buf.source_mut(), start..end, "");
+        ctx.buf.text_mut().replace_range(start..end, "");
         ctx.win.cpos = start;
         ctx.win.selection_anchor = None;
         ctx.win.clamp_anchors_to_source(ctx.buf.source());
@@ -306,7 +305,7 @@ impl PromptState {
         }
         self.save_undo(ctx);
         let inserted = prefix.len();
-        smelt_buffer::text::insert_str(ctx.buf.source_mut(), 0, &prefix);
+        ctx.buf.text_mut().insert_str(0, &prefix);
         ctx.win.cpos += inserted;
         ctx.win.selection_anchor = None;
         self.from_paste = false;
@@ -329,11 +328,14 @@ impl PromptState {
             let source_empty = ctx.buf.source().is_empty();
             let no_attachments = ctx.buf.attachment_ids.is_empty();
             if !source_empty || !no_attachments {
-                let attachments = std::mem::take(&mut ctx.buf.attachment_ids)
-                    .into_iter()
-                    .filter_map(|id| self.store.lock().unwrap().get(id).cloned())
+                let attachments: Vec<_> = ctx
+                    .buf
+                    .attachment_ids
+                    .iter()
+                    .filter_map(|&id| self.store.lock().unwrap().get(id).cloned())
                     .collect();
-                let stashed = std::mem::take(ctx.buf.source_mut());
+                let stashed = ctx.buf.source().to_string();
+                ctx.buf.text_mut().clear();
                 let cpos = std::mem::replace(&mut ctx.win.cpos, 0);
                 self.stash = Some(InputSnapshot {
                     buf: stashed,
@@ -578,7 +580,7 @@ impl PromptState {
                     self.save_undo(ctx);
                     self.delete_selection(ctx);
                 }
-                let p = smelt_buffer::text::insert(ctx.buf.source_mut(), ctx.win.cpos, '\n');
+                let p = ctx.buf.text_mut().insert(ctx.win.cpos, '\n');
                 ctx.win.cpos = p + 1;
                 self.close_completer();
                 Action::Redraw
@@ -780,14 +782,14 @@ impl PromptState {
                 }
                 Self::sync_kill_ring_from_clipboard(clipboard);
                 let cpos = ctx.win.cpos;
-                if let Some(new_cpos) = clipboard.kill_ring.yank(ctx.buf.source_mut(), cpos) {
+                if let Some(new_cpos) = clipboard.kill_ring.yank(&mut ctx.buf.text_mut(), cpos) {
                     ctx.win.cpos = new_cpos;
                     self.recompute_completer(ctx.as_ref());
                 }
                 Action::Redraw
             }
             KeyAction::YankPop => {
-                if let Some(new_cpos) = clipboard.kill_ring.yank_pop(ctx.buf.source_mut()) {
+                if let Some(new_cpos) = clipboard.kill_ring.yank_pop(&mut ctx.buf.text_mut()) {
                     ctx.win.cpos = new_cpos;
                     self.recompute_completer(ctx.as_ref());
                 }

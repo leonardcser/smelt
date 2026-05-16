@@ -70,11 +70,15 @@ impl KillRing {
 
     /// Yank the current kill into `buf` at `cpos`. Returns new cpos.
     /// `cpos` is snapped to a char boundary.
-    pub fn yank(&mut self, buf: &mut String, cpos: usize) -> Option<usize> {
+    pub fn yank(
+        &mut self,
+        buf: &mut crate::attached::AttachedTextMut<'_>,
+        cpos: usize,
+    ) -> Option<usize> {
         if self.current.is_empty() {
             return None;
         }
-        let cpos = crate::text::insert_str(buf, cpos, &self.current);
+        let cpos = buf.insert_str(cpos, &self.current);
         let end = cpos + self.current.len();
         self.last_yank = Some((cpos, end));
         self.pop_idx = 0;
@@ -82,16 +86,16 @@ impl KillRing {
     }
 
     /// Replace the last yank with the next history entry. Returns new cpos.
-    pub fn yank_pop(&mut self, buf: &mut String) -> Option<usize> {
+    pub fn yank_pop(&mut self, buf: &mut crate::attached::AttachedTextMut<'_>) -> Option<usize> {
         let (start, end) = self.last_yank?;
         if self.history.is_empty() {
             return None;
         }
-        let start = crate::text::snap(buf, start);
-        let end = crate::text::snap(buf, end).max(start);
+        let start = crate::text::snap(buf.as_str(), start);
+        let end = crate::text::snap(buf.as_str(), end).max(start);
         let text = self.history[self.pop_idx % self.history.len()].clone();
         let new_end = start + text.len();
-        crate::text::replace_range(buf, start..end, &text);
+        buf.replace_range(start..end, &text);
         self.last_yank = Some((start, new_end));
         self.pop_idx = (self.pop_idx + 1) % self.history.len();
         Some(new_end)
@@ -186,6 +190,19 @@ impl KillRing {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::attached::AttachedTextMut;
+    use crate::attachment::AttachmentId;
+
+    /// Mutate `buf` (a `String`) as if it were an attached text — empty ids.
+    /// Returns the closure result.
+    fn with_attached<F, R>(buf: &mut String, f: F) -> R
+    where
+        F: FnOnce(&mut AttachedTextMut<'_>) -> R,
+    {
+        let mut ids: Vec<AttachmentId> = Vec::new();
+        let mut a = AttachedTextMut::new(buf, &mut ids);
+        f(&mut a)
+    }
 
     #[test]
     fn flash_range_active_only_after_mark_yanked() {
@@ -240,9 +257,9 @@ mod tests {
         // First kill is now the most-recent history entry.
         // We can observe history indirectly through yank_pop after a yank.
         let mut buf = String::from("|");
-        kr.yank(&mut buf, 1);
+        with_attached(&mut buf, |a| kr.yank(a, 1));
         assert_eq!(buf, "|B");
-        kr.yank_pop(&mut buf);
+        with_attached(&mut buf, |a| kr.yank_pop(a));
         assert_eq!(buf, "|A");
     }
 
@@ -256,13 +273,13 @@ mod tests {
         }
         // Yank installs k33, then yank_pop cycles through history newest-first.
         let mut buf = String::new();
-        kr.yank(&mut buf, 0);
+        with_attached(&mut buf, |a| kr.yank(a, 0));
         assert_eq!(buf, "k33");
         // Yank-pop 32 times — every entry in history should be reachable
         // exactly once before it wraps. The oldest reachable should be k1.
         let mut seen = vec![buf.clone()];
         for _ in 0..32 {
-            kr.yank_pop(&mut buf);
+            with_attached(&mut buf, |a| kr.yank_pop(a));
             seen.push(buf.clone());
         }
         assert!(seen.contains(&"k1".to_string()));
@@ -275,7 +292,7 @@ mod tests {
     fn yank_on_empty_kill_ring_returns_none() {
         let mut kr = KillRing::new();
         let mut buf = String::from("hi");
-        assert!(kr.yank(&mut buf, 1).is_none());
+        assert!(with_attached(&mut buf, |a| kr.yank(a, 1)).is_none());
         assert_eq!(buf, "hi", "buffer untouched");
     }
 
@@ -284,7 +301,7 @@ mod tests {
         let mut kr = KillRing::new();
         kr.kill("xyz".into());
         let mut buf = String::from("ab|cd");
-        let end = kr.yank(&mut buf, 3).expect("yank into 'ab|cd' at byte 3");
+        let end = with_attached(&mut buf, |a| kr.yank(a, 3)).expect("yank into 'ab|cd' at byte 3");
         assert_eq!(buf, "ab|xyzcd");
         assert_eq!(end, 6, "cursor lands at byte after 'xyz'");
     }
@@ -297,13 +314,13 @@ mod tests {
         kr.kill("C".into());
         // After 3 kills: current=C, history=[B, A] (newest first).
         let mut buf = String::new();
-        kr.yank(&mut buf, 0);
+        with_attached(&mut buf, |a| kr.yank(a, 0));
         assert_eq!(buf, "C");
-        kr.yank_pop(&mut buf);
+        with_attached(&mut buf, |a| kr.yank_pop(a));
         assert_eq!(buf, "B", "first yank_pop: history[0]");
-        kr.yank_pop(&mut buf);
+        with_attached(&mut buf, |a| kr.yank_pop(a));
         assert_eq!(buf, "A", "second yank_pop: history[1]");
-        kr.yank_pop(&mut buf);
+        with_attached(&mut buf, |a| kr.yank_pop(a));
         assert_eq!(buf, "B", "third yank_pop wraps back to history[0]");
     }
 
@@ -314,7 +331,7 @@ mod tests {
         kr.kill("B".into());
         let mut buf = String::from("x");
         assert!(
-            kr.yank_pop(&mut buf).is_none(),
+            with_attached(&mut buf, |a| kr.yank_pop(a)).is_none(),
             "no last_yank to replace yet"
         );
         assert_eq!(buf, "x");
@@ -326,10 +343,10 @@ mod tests {
         kr.kill("A".into());
         kr.kill("B".into());
         let mut buf = String::new();
-        kr.yank(&mut buf, 0);
+        with_attached(&mut buf, |a| kr.yank(a, 0));
         kr.clear_yank();
         // last_yank is gone — yank_pop has no range to replace.
-        assert!(kr.yank_pop(&mut buf).is_none());
+        assert!(with_attached(&mut buf, |a| kr.yank_pop(a)).is_none());
     }
 
     // ── linewise / source / accessors ─────────────────────────────────────

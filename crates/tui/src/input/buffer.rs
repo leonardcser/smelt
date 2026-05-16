@@ -2,9 +2,7 @@
 
 use super::{PromptCtx, PromptCtxRef, PromptState, ATTACHMENT_MARKER};
 use crate::smelt_term::VimMode;
-use smelt_buffer::text::{
-    insert, insert_str, next_char_boundary, prev_char_boundary, replace_range, slice,
-};
+use smelt_buffer::text::{next_char_boundary, prev_char_boundary, slice};
 use smelt_core::attachment::AttachmentId;
 
 impl PromptState {
@@ -14,8 +12,7 @@ impl PromptState {
     /// visual_anchor onto the new source. Use this whenever the range is
     /// computed from offsets that might also live in other anchors.
     pub(super) fn safe_shrink(&mut self, ctx: &mut PromptCtx<'_>, range: std::ops::Range<usize>) {
-        ctx.buf.remove_attachments_in_range(range.start, range.end);
-        replace_range(ctx.buf.source_mut(), range, "");
+        ctx.buf.text_mut().replace_range(range, "");
         ctx.win.clamp_anchors_to_source(ctx.buf.source());
     }
 
@@ -45,7 +42,7 @@ impl PromptState {
             self.save_undo(ctx);
             self.delete_selection(ctx);
         }
-        let p = insert(ctx.buf.source_mut(), ctx.win.cpos, c);
+        let p = ctx.buf.text_mut().insert(ctx.win.cpos, c);
         ctx.win.cpos = p + c.len_utf8();
         ctx.win.clamp_anchors_to_source(ctx.buf.source());
         self.recompute_completer(ctx.as_ref());
@@ -202,11 +199,11 @@ impl PromptState {
         let cpos = ctx.win.cpos;
         let upper: String = slice(ctx.buf.source(), cpos..end).to_uppercase();
         let new_len = upper.len();
-        // ATTACHMENT_MARKER has no case mapping so any marker in the
-        // range survives at the same chars()-index → attachment_ids
-        // stays aligned. We still clamp anchors because case mapping
-        // can change byte length (e.g. ß → SS).
-        replace_range(ctx.buf.source_mut(), cpos..end, &upper);
+        // Case mapping leaves ATTACHMENT_MARKER unchanged; `AttachedTextMut`'s
+        // marker-preserving `replace_range` keeps the matching ids. Anchors
+        // still need a clamp because case mapping can change byte length
+        // (e.g. ß → SS).
+        ctx.buf.text_mut().replace_range(cpos..end, &upper);
         ctx.win.cpos = cpos + new_len;
         ctx.win.clamp_anchors_to_source(ctx.buf.source());
         self.recompute_completer(ctx.as_ref());
@@ -224,7 +221,7 @@ impl PromptState {
         let cpos = ctx.win.cpos;
         let lower: String = slice(ctx.buf.source(), cpos..end).to_lowercase();
         let new_len = lower.len();
-        replace_range(ctx.buf.source_mut(), cpos..end, &lower);
+        ctx.buf.text_mut().replace_range(cpos..end, &lower);
         ctx.win.cpos = cpos + new_len;
         ctx.win.clamp_anchors_to_source(ctx.buf.source());
         self.recompute_completer(ctx.as_ref());
@@ -252,7 +249,7 @@ impl PromptState {
         }
         let cpos = ctx.win.cpos;
         let cap_len = cap.len();
-        replace_range(ctx.buf.source_mut(), cpos..end, &cap);
+        ctx.buf.text_mut().replace_range(cpos..end, &cap);
         ctx.win.cpos = cpos + cap_len;
         ctx.win.clamp_anchors_to_source(ctx.buf.source());
         self.recompute_completer(ctx.as_ref());
@@ -266,7 +263,7 @@ impl PromptState {
         );
         if let Some(entry) = ctx.buf.history.undo(current) {
             self.install_source(ctx, entry.buf, entry.cpos);
-            ctx.buf.attachment_ids = entry.attachments;
+            ctx.buf.text_mut().set_ids(entry.attachments);
         }
         self.recompute_completer(ctx.as_ref());
     }
@@ -330,18 +327,13 @@ impl PromptState {
         if ctx.win.cpos == line_start {
             self.from_paste = true;
         }
-        let p = insert_str(ctx.buf.source_mut(), ctx.win.cpos, &data);
+        let p = ctx.buf.text_mut().insert_str(ctx.win.cpos, &data);
         ctx.win.cpos = p + data.len();
         ctx.win.clamp_anchors_to_source(ctx.buf.source());
     }
 
     pub(super) fn insert_attachment_id(&mut self, ctx: &mut PromptCtx<'_>, id: AttachmentId) {
-        let idx = slice(ctx.buf.source(), 0..ctx.win.cpos)
-            .chars()
-            .filter(|&c| c == ATTACHMENT_MARKER)
-            .count();
-        ctx.buf.attachment_ids.insert(idx, id);
-        let p = insert(ctx.buf.source_mut(), ctx.win.cpos, ATTACHMENT_MARKER);
+        let p = ctx.buf.text_mut().insert_marker(ctx.win.cpos, id);
         ctx.win.cpos = p + ATTACHMENT_MARKER.len_utf8();
         ctx.win.clamp_anchors_to_source(ctx.buf.source());
     }
