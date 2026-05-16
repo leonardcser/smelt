@@ -60,7 +60,6 @@ pub struct StatusSource {
 
 pub struct ToolHandles {
     pub execute: LuaHandle,
-    pub confirm_text: Option<LuaHandle>,
     pub approval_patterns: Option<LuaHandle>,
     pub preflight: Option<LuaHandle>,
     pub render: Option<LuaHandle>,

@@ -64,11 +64,10 @@ mod tests {
         ConfirmRequest {
             call_id: format!("call-{id}"),
             tool_name: "test".into(),
-            desc: "test".into(),
             args: Default::default(),
             approval_patterns: vec![],
             outside_dir: None,
-            summary: None,
+            summary: protocol::StyledLines::from_plain("test"),
             request_id: id,
         }
     }

@@ -22,11 +22,13 @@ impl ActiveTool {
 pub struct ConfirmRequest {
     pub call_id: String,
     pub tool_name: String,
-    pub desc: String,
     pub args: std::collections::HashMap<String, serde_json::Value>,
     pub approval_patterns: Vec<String>,
     pub outside_dir: Option<std::path::PathBuf>,
-    pub summary: Option<String>,
+    /// Styled summary of the pending call. Sole source for the dialog
+    /// body header; the plain-text projection is what auto-approval
+    /// pattern matching compares against.
+    pub summary: protocol::StyledLines,
     pub request_id: u64,
 }
 
@@ -88,7 +90,10 @@ pub enum Block {
     ToolCall {
         call_id: String,
         name: String,
-        summary: String,
+        /// Styled summary, produced by the tool's `summary(args)` Lua
+        /// hook. The renderer consumes the styled spans; for plain-text
+        /// callers (copy, search, snapshots) call `summary.as_plain_text()`.
+        summary: protocol::StyledLines,
         args: HashMap<String, serde_json::Value>,
     },
     Exec {

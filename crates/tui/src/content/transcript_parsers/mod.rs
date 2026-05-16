@@ -274,7 +274,7 @@ mod tests {
         Block::ToolCall {
             call_id: String::new(),
             name: String::new(),
-            summary: String::new(),
+            summary: protocol::StyledLines::default(),
             args: HashMap::new(),
         }
     }
@@ -285,7 +285,7 @@ mod tests {
         Block::ToolCall {
             call_id: "call-1".into(),
             name: "bash".into(),
-            summary: "ls".into(),
+            summary: protocol::StyledLines::from_plain("ls"),
             args,
         }
     }

@@ -132,7 +132,7 @@ smelt.tools.register({
     },
     required = { "pattern" },
   },
-  confirm_text = function(args)
+  summary = function(args)
     local pattern = args.pattern or ""
     local path = args.path or ""
     if path == "" then return pattern end

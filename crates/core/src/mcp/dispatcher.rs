@@ -65,19 +65,18 @@ impl ToolDispatcher for McpDispatcher {
         mode: AgentMode,
     ) -> Option<ToolHooks> {
         let def = self.defs.iter().find(|d| d.qualified_name() == name)?;
-        let confirm_message = format!("MCP {}_{}", def.server_name, def.tool_name);
+        let summary_text = format!("MCP {}_{}", def.server_name, def.tool_name);
         let mut decision = self.permissions.decide(mode, name, args, true);
         if decision == protocol::Decision::Ask {
             let rt = self.permissions.approvals.read().unwrap();
-            if rt.is_auto_approved(&self.permissions, mode, name, args, &confirm_message) {
+            if rt.is_auto_approved(&self.permissions, mode, name, args, &summary_text) {
                 decision = protocol::Decision::Allow;
             }
         }
         Some(ToolHooks {
             decision,
-            confirm_message: Some(confirm_message),
             approval_patterns: Vec::new(),
-            summary: None,
+            summary: protocol::StyledLines::from_plain(summary_text),
         })
     }
 

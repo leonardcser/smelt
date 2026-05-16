@@ -721,7 +721,6 @@ impl LuaRuntime {
                     })
                     .unwrap_or_default();
                 let hooks = protocol::ToolHookFlags {
-                    confirm_text: meta_table.get("hook_confirm_text").unwrap_or(false),
                     approval_patterns: meta_table.get("hook_approval_patterns").unwrap_or(false),
                     preflight: meta_table.get("hook_preflight").unwrap_or(false),
                 };
@@ -863,35 +862,46 @@ impl LuaRuntime {
         true
     }
 
+    /// Invoke the tool's `summary(args)` Lua hook. The hook may return:
+    ///   * `nil` / no value — empty summary (no header text)
+    ///   * a `string` — wrapped as a single plain span (each `\n`-line one row)
+    ///   * a table of `{ {span, span}, {span, span} }` — multi-line styled output;
+    ///     span shape matches `smelt.buf.set_styled_lines` (`{ text, syntax?, style? }`).
     pub fn tool_summary(
         &self,
         tool_name: &str,
         args: &HashMap<String, serde_json::Value>,
-    ) -> String {
+    ) -> protocol::StyledLines {
         let meta = match self
             .lua
             .named_registry_value::<mlua::Table>(&format!("__pt_meta_{tool_name}"))
         {
             Ok(meta) => meta,
-            Err(_) => return String::new(),
+            Err(_) => return protocol::StyledLines::empty(),
         };
         let func = match meta.get::<mlua::Function>("summary") {
             Ok(func) => func,
-            Err(_) => return String::new(),
+            Err(_) => return protocol::StyledLines::empty(),
         };
         let args_table = match self.args_to_lua_table(args) {
             Ok(t) => t,
             Err(e) => {
                 self.record_error(format!("tool summary: build args: {e}"));
-                return String::new();
+                return protocol::StyledLines::empty();
             }
         };
         let _perf = smelt_perf::perf::begin("lua:tool");
-        match func.call::<String>(args_table) {
-            Ok(summary) => summary,
+        match func.call::<mlua::Value>(args_table) {
+            Ok(v) => match decode_styled_lines(v) {
+                Ok(lines) => lines,
+                Err(e) => {
+                    self.record_error(format!("tool summary `{tool_name}`: {e}"));
+                    protocol::StyledLines::empty()
+                }
+            },
             Err(e) => {
                 self.record_error(format!("tool summary `{tool_name}`: {e}"));
-                String::new()
+                protocol::StyledLines::empty()
             }
         }
     }
@@ -903,15 +913,11 @@ impl LuaRuntime {
     ) -> protocol::ToolHooks {
         let mut out = protocol::ToolHooks::default();
 
-        let (confirm_text_fn, approval_patterns_fn, preflight_fn) = {
+        let (approval_patterns_fn, preflight_fn) = {
             let handlers = self.shared.tools.lock().unwrap_or_else(|e| e.into_inner());
             let Some(h) = handlers.get(tool_name) else {
                 return out;
             };
-            let nc = h
-                .confirm_text
-                .as_ref()
-                .and_then(|h| self.lua.registry_value::<mlua::Function>(&h.key).ok());
             let ap = h
                 .approval_patterns
                 .as_ref()
@@ -920,7 +926,7 @@ impl LuaRuntime {
                 .preflight
                 .as_ref()
                 .and_then(|h| self.lua.registry_value::<mlua::Function>(&h.key).ok());
-            (nc, ap, pf)
+            (ap, pf)
         };
 
         let args_table = match self.args_to_lua_table(args) {
@@ -931,13 +937,6 @@ impl LuaRuntime {
             }
         };
 
-        if let Some(func) = confirm_text_fn {
-            let _perf = smelt_perf::perf::begin("lua:tool");
-            match func.call::<Option<String>>(args_table.clone()) {
-                Ok(s) => out.confirm_message = s,
-                Err(e) => self.record_error(format!("tool hook confirm_text: {e}")),
-            }
-        }
         if let Some(func) = approval_patterns_fn {
             let _perf = smelt_perf::perf::begin("lua:tool");
             match func.call::<Option<mlua::Table>>(args_table.clone()) {
@@ -960,11 +959,7 @@ impl LuaRuntime {
             }
         }
 
-        let summary = self.tool_summary(tool_name, args);
-        if !summary.is_empty() {
-            out.summary = Some(summary);
-        }
-
+        out.summary = self.tool_summary(tool_name, args);
         out
     }
 
@@ -1296,6 +1291,84 @@ impl LuaRuntime {
         lua.globals().set("smelt_keymap", smelt_keymap)?;
 
         Ok(())
+    }
+}
+
+/// Decode a Lua return value into `protocol::StyledLines`.
+///
+/// Accepted shapes:
+///   * `nil` — empty
+///   * `string` — wrapped as one or more plain-text lines (split on `\n`)
+///   * `table` — must be a 2D sequence: outer list is lines, each line is a
+///     list of span tables of shape `{ text, syntax?, style? = { hl?, dim?,
+///     bold?, italic?, fg?, bg? } }`. Mirrors `smelt.buf.set_styled_lines`.
+fn decode_styled_lines(value: mlua::Value) -> Result<protocol::StyledLines, String> {
+    use protocol::{StyledLines, StyledSpan};
+    match value {
+        mlua::Value::Nil => Ok(StyledLines::empty()),
+        mlua::Value::String(s) => Ok(StyledLines::from_plain(s.to_string_lossy())),
+        mlua::Value::Table(t) => {
+            let mut lines: Vec<Vec<StyledSpan>> = Vec::new();
+            for line_val in t.sequence_values::<mlua::Value>() {
+                let line_val = line_val.map_err(|e| format!("decode line: {e}"))?;
+                let line_tbl = match line_val {
+                    mlua::Value::Table(l) => l,
+                    mlua::Value::Nil => {
+                        lines.push(Vec::new());
+                        continue;
+                    }
+                    other => {
+                        return Err(format!("expected line table, got {}", other.type_name()));
+                    }
+                };
+                let mut spans: Vec<StyledSpan> = Vec::new();
+                for span_val in line_tbl.sequence_values::<mlua::Table>() {
+                    let span_tbl = span_val.map_err(|e| format!("decode span: {e}"))?;
+                    let style_tbl = span_tbl
+                        .get::<Option<mlua::Table>>("style")
+                        .map_err(|e| format!("decode span style: {e}"))?;
+                    let (hl, dim, bold, italic, fg, bg) = if let Some(s) = style_tbl {
+                        (
+                            s.get::<Option<String>>("hl").ok().flatten(),
+                            s.get::<Option<bool>>("dim").ok().flatten().unwrap_or(false),
+                            s.get::<Option<bool>>("bold")
+                                .ok()
+                                .flatten()
+                                .unwrap_or(false),
+                            s.get::<Option<bool>>("italic")
+                                .ok()
+                                .flatten()
+                                .unwrap_or(false),
+                            s.get::<Option<String>>("fg").ok().flatten(),
+                            s.get::<Option<String>>("bg").ok().flatten(),
+                        )
+                    } else {
+                        (None, false, false, false, None, None)
+                    };
+                    spans.push(StyledSpan {
+                        text: span_tbl
+                            .get::<Option<String>>("text")
+                            .map_err(|e| format!("decode span text: {e}"))?
+                            .unwrap_or_default(),
+                        syntax: span_tbl
+                            .get::<Option<String>>("syntax")
+                            .map_err(|e| format!("decode span syntax: {e}"))?,
+                        hl,
+                        fg,
+                        bg,
+                        dim,
+                        bold,
+                        italic,
+                    });
+                }
+                lines.push(spans);
+            }
+            Ok(StyledLines(lines))
+        }
+        other => Err(format!(
+            "expected nil | string | table, got {}",
+            other.type_name()
+        )),
     }
 }
 

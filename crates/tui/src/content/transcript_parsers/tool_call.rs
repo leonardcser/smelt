@@ -12,7 +12,7 @@ pub(super) fn render(
     out: &mut LineBuilder,
     call_id: &str,
     name: &str,
-    summary: &str,
+    summary: &protocol::StyledLines,
     args: &HashMap<String, serde_json::Value>,
     status: ToolStatus,
     elapsed: Option<Duration>,

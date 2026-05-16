@@ -323,7 +323,7 @@ Set `override = true` to replace a built-in tool of the same name (this is how
 `background_commands.lua` adds `run_in_background` to `bash`). Use
 `smelt.tools.unregister(name)` to take it back out.
 
-For tool-authoring conventions (parameter shape, `confirm_text`,
+For tool-authoring conventions (parameter shape, `summary`,
 `approval_patterns`, `preflight`, `paths_for_workspace`), the implementations
 under [`runtime/lua/smelt/tools/`](https://github.com/leonardcser/smelt/tree/main/runtime/lua/smelt/tools)
 are the source of truth.

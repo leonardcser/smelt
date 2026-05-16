@@ -365,7 +365,7 @@ impl StreamParser {
         history: &mut BlockHistory,
         call_id: String,
         name: String,
-        summary: String,
+        summary: protocol::StyledLines,
         args: HashMap<String, serde_json::Value>,
     ) {
         let start_time = Instant::now();

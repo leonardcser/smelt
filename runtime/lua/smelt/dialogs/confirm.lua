@@ -55,30 +55,30 @@ local function build_options(req)
   return labels, decisions
 end
 
--- Compose the body header: every command line (syntax-highlit for known langs),
--- optional subtitle, blank, dim "Allow?". The tool name itself lives in the
+-- Compose the body header: the tool's `summary(args)` output (already a
+-- styled-lines payload — each span carries its own syntax/style), an optional
+-- subtitle, a blank, then a dim "Allow?". The tool name itself lives in the
 -- overlay border title — not the body.
 --
--- Subtitle source: for `bash`, use the model's `args.description` (a short
--- human-readable gloss of what the command does); for other tools, fall back
--- to whatever the tool's `summary(args)` hook returned. The description
--- field exists in bash's schema specifically to feed this dialog.
+-- Subtitle convention: if the tool's arguments include a non-empty
+-- `description` string, surface it dimmed under the body. Tools opt in by
+-- declaring `description` in their parameter schema (bash does this to carry
+-- the model's short gloss of what the command does); no other wiring needed.
 local function render_header(buf, req)
-  local syntax_lang = req.tool_name == "bash" and "bash" or nil
   local subtitle = nil
-  if req.tool_name == "bash" and req.args and req.args.description and req.args.description ~= "" then
-    subtitle = req.args.description
-  elseif req.summary and req.summary ~= "" then
-    subtitle = req.summary
+  local desc = req.args and req.args.description
+  if type(desc) == "string" and desc ~= "" then
+    subtitle = desc
   end
 
   local lines = {}
-  local desc = req.desc or ""
-  for cmd_line in (desc .. "\n"):gmatch("([^\n]*)\n") do
-    lines[#lines + 1] = { { text = cmd_line, syntax = syntax_lang } }
+  if req.summary then
+    for _, line in ipairs(req.summary) do
+      lines[#lines + 1] = line
+    end
   end
   if #lines == 0 then
-    lines[#lines + 1] = { { text = "", syntax = syntax_lang } }
+    lines[#lines + 1] = { { text = "" } }
   end
   if subtitle then
     lines[#lines + 1] = { { text = subtitle, style = { dim = true } } }

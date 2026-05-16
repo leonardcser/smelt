@@ -1066,18 +1066,19 @@ impl<'a> Turn<'a> {
                     self.push_tool_result(&tc.id, err, true, None);
                 }
                 Decision::Ask => {
-                    let desc = hooks
-                        .confirm_message
-                        .unwrap_or_else(|| tc.function.name.clone());
+                    let summary = if hooks.summary.is_empty() {
+                        protocol::StyledLines::from_plain(&tc.function.name)
+                    } else {
+                        hooks.summary
+                    };
                     let request_id = next_request_id();
                     self.emit(EngineEvent::RequestPermission {
                         request_id,
                         call_id: tc.id.clone(),
                         tool_name: tc.function.name.clone(),
                         args: args.clone(),
-                        confirm_message: desc,
                         approval_patterns: hooks.approval_patterns,
-                        summary: hooks.summary,
+                        summary,
                     });
                     plan.slots.push(ToolSlot {
                         tc,
@@ -1312,10 +1313,13 @@ impl<'a> Turn<'a> {
                                     outstanding -= 1;
                                 }
                                 Decision::Ask => {
-                                    let confirm_msg = hooks
-                                        .confirm_message
-                                        .clone()
-                                        .unwrap_or_else(|| pending.tc.function.name.clone());
+                                    let summary = if hooks.summary.is_empty() {
+                                        protocol::StyledLines::from_plain(
+                                            &pending.tc.function.name,
+                                        )
+                                    } else {
+                                        hooks.summary.clone()
+                                    };
                                     let rid = next_request_id();
                                     let _ = self
                                         .event_tx
@@ -1324,9 +1328,8 @@ impl<'a> Turn<'a> {
                                             call_id: pending.tc.id.clone(),
                                             tool_name: pending.tc.function.name.clone(),
                                             args: pending.args.clone(),
-                                            confirm_message: confirm_msg,
                                             approval_patterns: hooks.approval_patterns,
-                                            summary: hooks.summary,
+                                            summary,
                                         });
                                     plan.pending_tool_perms.push((rid, pending));
                                 }

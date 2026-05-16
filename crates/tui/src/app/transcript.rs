@@ -78,7 +78,7 @@ impl TuiApp {
         &mut self,
         call_id: String,
         name: String,
-        summary: String,
+        summary: ::protocol::StyledLines,
         args: HashMap<String, serde_json::Value>,
     ) {
         self.parser

@@ -72,10 +72,12 @@ pub struct LuaToolDef {
     pub modes: Option<mlua::Table>,
     /// `"concurrent"` (default) or `"sequential"`.
     pub execution_mode: Option<String>,
-    /// `summary(args, result) -> string` — short label for the picker.
+    /// `summary(args) -> string | styled_lines | nil` — styled label
+    /// rendered in the transcript header AND confirm dialog body header.
+    /// Plain string is auto-wrapped as one plain span; the styled-lines
+    /// form is `{ { { text, syntax?, style? }, ... }, ... }` — same span
+    /// shape as `smelt.buf.set_styled_lines`.
     pub summary: Option<mlua::Function>,
-    /// `confirm_text(args, ctx) -> string` — prompt body shown in the approval modal.
-    pub confirm_text: Option<mlua::Function>,
     /// `approval_patterns(args, ctx) -> string[]` — patterns offered as one-click approvals.
     pub approval_patterns: Option<mlua::Function>,
     /// `preflight(args, ctx) -> table?` — validation hook; nil result skips.
@@ -139,7 +141,6 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
                         key: lua.create_registry_value(f)?,
                     })
                 };
-                let confirm_text_handle = def.confirm_text.map(stash).transpose()?;
                 let approval_patterns_handle = def.approval_patterns.map(stash).transpose()?;
                 let preflight_handle = def.preflight.map(stash).transpose()?;
                 let render_handle = def.render.map(stash).transpose()?;
@@ -160,7 +161,6 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
                 if let Some(mode_str) = def.execution_mode {
                     meta.set("execution_mode", mode_str)?;
                 }
-                meta.set("hook_confirm_text", confirm_text_handle.is_some())?;
                 meta.set("hook_approval_patterns", approval_patterns_handle.is_some())?;
                 meta.set("hook_preflight", preflight_handle.is_some())?;
                 meta.set("hook_render", render_handle.is_some())?;
@@ -181,7 +181,6 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
                         name,
                         ToolHandles {
                             execute: LuaHandle { key },
-                            confirm_text: confirm_text_handle,
                             approval_patterns: approval_patterns_handle,
                             preflight: preflight_handle,
                             render: render_handle,

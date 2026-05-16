@@ -758,7 +758,10 @@ mod tests {
             .unwrap();
         let mut args = std::collections::HashMap::new();
         args.insert("label".into(), serde_json::json!("ok"));
-        assert_eq!(rt.tool_summary("echo_summary", &args), "lua:ok");
+        assert_eq!(
+            rt.tool_summary("echo_summary", &args).as_plain_text(),
+            "lua:ok"
+        );
     }
 
     #[test]

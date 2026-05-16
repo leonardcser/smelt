@@ -34,7 +34,7 @@ smelt.tools.register({
     },
     required = { "file_path", "content" },
   },
-  confirm_text = function(args)
+  summary = function(args)
     return smelt.path.display(args.file_path or "")
   end,
   preflight = function(args)

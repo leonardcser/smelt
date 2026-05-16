@@ -3,6 +3,7 @@
 use crate::content::Content;
 use crate::message::{Message, ToolOutcome};
 use crate::mode::{AgentMode, ReasoningEffort};
+use crate::style::StyledLines;
 use crate::usage::{ModelConfigOverrides, PermissionOverrides, TokenUsage, TurnMeta};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -72,10 +73,12 @@ pub struct ToolDef {
 /// Which permission hooks a tool has registered. Sent with
 /// `ToolDef` so the engine knows whether to ask the TUI to
 /// evaluate them per-call.
+///
+/// `summary` is always evaluated regardless of this flag set — it's a
+/// display concern, not a permission hook. The flags here gate the
+/// `ToolHooksRequest` round-trip that produces a `ToolHooks` reply.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct ToolHookFlags {
-    #[serde(default)]
-    pub confirm_text: bool,
     #[serde(default)]
     pub approval_patterns: bool,
     #[serde(default)]
@@ -86,7 +89,7 @@ impl ToolHookFlags {
     /// True when at least one hook is registered — i.e. the engine must
     /// round-trip through `ToolHooksRequest` before dispatch.
     pub fn any(&self) -> bool {
-        self.confirm_text || self.approval_patterns || self.preflight
+        self.approval_patterns || self.preflight
     }
 }
 
@@ -116,20 +119,16 @@ pub struct ToolHooks {
     /// Final permission decision.
     #[serde(default)]
     pub decision: Decision,
-    /// Confirm dialog message; used when `decision == Ask`.
-    /// `None` falls back to the tool name.
-    #[serde(default)]
-    pub confirm_message: Option<String>,
     /// Approval patterns to offer "always allow" for.
     /// Used when `decision == Ask`.
     #[serde(default)]
     pub approval_patterns: Vec<String>,
-    /// One-line human summary of this invocation. Comes from the
-    /// tool's `summary(args)` Lua callback. Used by the confirm
-    /// dialog header and the engine's `RequestPermission.summary`
-    /// — the engine never extracts arg fields by tool name.
+    /// Styled one-line-or-more summary of this invocation. Comes from
+    /// the tool's `summary(args)` Lua callback. Sole source of truth
+    /// for the transcript header AND confirm dialog body header — the
+    /// engine never extracts arg fields by tool name.
     #[serde(default)]
-    pub summary: Option<String>,
+    pub summary: StyledLines,
 }
 
 /// Events emitted by the engine. The UI consumes these to update its display.
@@ -195,9 +194,10 @@ pub enum EngineEvent {
         call_id: String,
         tool_name: String,
         args: HashMap<String, serde_json::Value>,
-        confirm_message: String,
         approval_patterns: Vec<String>,
-        summary: Option<String>,
+        /// Styled summary of the pending call — both the dialog body
+        /// header and any auto-approval pattern matching read this.
+        summary: StyledLines,
     },
 
     /// Token usage update after an LLM call.
@@ -257,7 +257,7 @@ pub enum EngineEvent {
     },
 
     /// Engine asks the TUI to evaluate a tool's permission
-    /// hooks (`confirm_text`, `approval_patterns`, `preflight`) for a
+    /// hooks (`summary`, `approval_patterns`, `preflight`) for a
     /// specific invocation. The TUI replies with
     /// `UiCommand::ToolHooksResponse`, after which the engine
     /// resumes the standard Allow / Deny / Ask flow.
@@ -465,15 +465,6 @@ mod tests {
     }
 
     #[test]
-    fn tool_hook_flags_any_true_when_confirm_text_set() {
-        let f = ToolHookFlags {
-            confirm_text: true,
-            ..Default::default()
-        };
-        assert!(f.any());
-    }
-
-    #[test]
     fn tool_hook_flags_any_true_when_approval_patterns_set() {
         let f = ToolHookFlags {
             approval_patterns: true,
@@ -559,9 +550,8 @@ mod tests {
     fn tool_hooks_default_decision_is_allow() {
         let h = ToolHooks::default();
         assert_eq!(h.decision, Decision::Allow);
-        assert!(h.confirm_message.is_none());
         assert!(h.approval_patterns.is_empty());
-        assert!(h.summary.is_none());
+        assert!(h.summary.is_empty());
     }
 
     // ---- EngineEvent roundtrip sanity ----

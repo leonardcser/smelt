@@ -618,6 +618,7 @@ impl TuiApp {
                     req.tool_name = pending.last().map(|p| p.name.clone()).unwrap_or_default();
                 }
 
+                let summary_plain = req.summary.as_plain_text();
                 let auto_approved = {
                     let rt = self.core.permissions.approvals.read().unwrap();
                     rt.is_auto_approved(
@@ -625,7 +626,7 @@ impl TuiApp {
                         self.core.config.mode,
                         &req.tool_name,
                         &req.args,
-                        &req.desc,
+                        &summary_plain,
                     )
                 };
                 if auto_approved {
@@ -686,7 +687,6 @@ impl TuiApp {
                 let snapshot = smelt_core::cells::ConfirmRequested {
                     handle_id: 0,
                     tool_name: req.tool_name.clone(),
-                    desc: req.desc.clone(),
                     summary: req.summary.clone(),
                     args: req.args.clone(),
                     outside_dir: req

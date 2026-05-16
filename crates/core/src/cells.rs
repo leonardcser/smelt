@@ -297,8 +297,8 @@ pub struct ToolEnd {
 pub struct ConfirmRequested {
     pub handle_id: u64,
     pub tool_name: String,
-    pub desc: String,
-    pub summary: Option<String>,
+    /// Styled summary — the sole source of truth for the dialog body header.
+    pub summary: protocol::StyledLines,
     pub args: std::collections::HashMap<String, serde_json::Value>,
     pub outside_dir: Option<String>,
     pub approval_patterns: Vec<String>,
@@ -361,6 +361,62 @@ pub const SEEDED_CELL_NAMES: &[&str] = &[
     "turn_start",
     "vim_mode",
 ];
+
+/// Project a `StyledLines` payload into the same shape Lua sees from
+/// `smelt.buf.set_styled_lines` — a sequence of lines, each a sequence
+/// of `{ text, syntax?, style? = { hl?, dim?, bold?, italic?, fg?, bg? } }`
+/// span tables. Empty lines come through as `{}`.
+fn styled_lines_to_lua(lua: &mlua::Lua, sl: &protocol::StyledLines) -> mlua::Value {
+    let Ok(out) = lua.create_table() else {
+        return mlua::Value::Nil;
+    };
+    for (i, line) in sl.0.iter().enumerate() {
+        let Ok(line_tbl) = lua.create_table() else {
+            continue;
+        };
+        for (j, span) in line.iter().enumerate() {
+            let Ok(span_tbl) = lua.create_table() else {
+                continue;
+            };
+            let _ = span_tbl.set("text", span.text.as_str());
+            if let Some(s) = &span.syntax {
+                let _ = span_tbl.set("syntax", s.as_str());
+            }
+            let needs_style = span.hl.is_some()
+                || span.fg.is_some()
+                || span.bg.is_some()
+                || span.dim
+                || span.bold
+                || span.italic;
+            if needs_style {
+                if let Ok(style_tbl) = lua.create_table() {
+                    if let Some(h) = &span.hl {
+                        let _ = style_tbl.set("hl", h.as_str());
+                    }
+                    if let Some(f) = &span.fg {
+                        let _ = style_tbl.set("fg", f.as_str());
+                    }
+                    if let Some(b) = &span.bg {
+                        let _ = style_tbl.set("bg", b.as_str());
+                    }
+                    if span.dim {
+                        let _ = style_tbl.set("dim", true);
+                    }
+                    if span.bold {
+                        let _ = style_tbl.set("bold", true);
+                    }
+                    if span.italic {
+                        let _ = style_tbl.set("italic", true);
+                    }
+                    let _ = span_tbl.set("style", style_tbl);
+                }
+            }
+            let _ = line_tbl.set(j + 1, span_tbl);
+        }
+        let _ = out.set(i + 1, line_tbl);
+    }
+    mlua::Value::Table(out)
+}
 
 /// Register projectors and declare all built-in cells with their initial values.
 pub(crate) fn build_with_builtins(seeds: BuiltinSeeds) -> Cells {
@@ -491,8 +547,7 @@ pub(crate) fn build_with_builtins(seeds: BuiltinSeeds) -> Cells {
         };
         let _ = t.set("handle_id", r.handle_id);
         let _ = t.set("tool_name", r.tool_name.as_str());
-        let _ = t.set("desc", r.desc.as_str());
-        let _ = t.set("summary", r.summary.clone().unwrap_or_default());
+        let _ = t.set("summary", styled_lines_to_lua(lua, &r.summary));
         match &r.outside_dir {
             Some(s) => {
                 let _ = t.set("outside_dir", s.as_str());
@@ -1027,8 +1082,7 @@ mod tests {
             Rc::new(ConfirmRequested {
                 handle_id: 42,
                 tool_name: "bash".into(),
-                desc: "ls".into(),
-                summary: None,
+                summary: protocol::StyledLines::from_plain("ls"),
                 args: std::collections::HashMap::new(),
                 outside_dir: None,
                 approval_patterns: vec!["bash:ls".into()],
@@ -1073,7 +1127,10 @@ mod tests {
             mlua::Value::Table(t) => {
                 assert_eq!(t.get::<i64>("handle_id").unwrap(), 42);
                 assert_eq!(t.get::<String>("tool_name").unwrap(), "bash");
-                assert_eq!(t.get::<String>("desc").unwrap(), "ls");
+                let summary: mlua::Table = t.get("summary").unwrap();
+                let line: mlua::Table = summary.get(1).unwrap();
+                let span: mlua::Table = line.get(1).unwrap();
+                assert_eq!(span.get::<String>("text").unwrap(), "ls");
                 let patterns: mlua::Table = t.get("approval_patterns").unwrap();
                 assert_eq!(patterns.get::<String>(1).unwrap(), "bash:ls");
                 assert!(matches!(
@@ -1159,8 +1216,7 @@ mod tests {
             Rc::new(ConfirmRequested {
                 handle_id: 1,
                 tool_name: "bash".into(),
-                desc: "ls".into(),
-                summary: None,
+                summary: protocol::StyledLines::from_plain("ls"),
                 args: std::collections::HashMap::new(),
                 outside_dir: None,
                 approval_patterns: vec![],

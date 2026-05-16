@@ -1,31 +1,22 @@
 use super::MAX_TOOL_BLOCK_ROWS;
+use protocol::{StyledLines, StyledSpan};
 use smelt_core::buffer::SpanMeta;
 use smelt_core::content::block_layout::BlockLayout;
 use smelt_core::content::builder::{replay_buffer_row_into, LineBuilder};
 use smelt_core::content::highlight::InlineSyntax;
-use smelt_core::content::wrap::wrap_line;
+use smelt_core::content::wrap::{wrap_line, wrap_line_ranges};
 use smelt_core::theme::{intern, HlGroup};
 use smelt_core::transcript_model::{ToolOutput, ToolStatus};
 use smelt_core::utils::format_duration;
 use std::collections::HashMap;
 use std::time::Duration;
 
-/// Pick the inline-syntax language used to colorize a tool's summary
-/// header. Concentrated here so all tool-specific renderer special-cases
-/// live in one place.
-fn summary_syntax_lang(name: &str) -> Option<&'static str> {
-    match name {
-        "bash" => Some("bash"),
-        _ => None,
-    }
-}
-
 #[allow(clippy::too_many_arguments)]
 pub(super) fn render_tool(
     out: &mut LineBuilder,
     call_id: &str,
     name: &str,
-    summary: &str,
+    summary: &StyledLines,
     args: &HashMap<String, serde_json::Value>,
     status: ToolStatus,
     elapsed: Option<Duration>,
@@ -82,7 +73,7 @@ fn tool_line_layout(name: &str, suffix_len: usize, width: usize) -> ToolLineLayo
 fn print_tool_line(
     out: &mut LineBuilder,
     name: &str,
-    summary: &str,
+    summary: &StyledLines,
     pill_color: HlGroup,
     elapsed: Option<Duration>,
     width: usize,
@@ -99,47 +90,120 @@ fn print_tool_line(
 
     print_dim(out, &format!(" {} ", name));
 
-    let raw_lines: Vec<&str> = summary.lines().collect();
-    let mut wrapped: Vec<String> = Vec::new();
-    let mut is_soft_wrap = Vec::new();
-    for line in &raw_lines {
-        let segs = wrap_line(line, ly.max_summary.max(1));
-        if segs.len() > 1 {
-            out.mark_wrapped();
-        }
-        for (si, seg) in segs.into_iter().enumerate() {
-            is_soft_wrap.push(si > 0);
-            wrapped.push(seg);
-        }
-    }
-    if wrapped.is_empty() {
-        wrapped.push(String::new());
-        is_soft_wrap.push(false);
-    }
-    let total = wrapped.len();
-    let show = total.min(MAX_TOOL_BLOCK_ROWS);
-    let mut rows = 0u16;
+    let max_seg = ly.max_summary.max(1);
 
-    let mut hi = summary_syntax_lang(name).map(InlineSyntax::new);
-    for (idx, seg) in wrapped[..show].iter().enumerate() {
-        if idx > 0 {
-            out.print_gutter(&" ".repeat(ly.prefix_len));
-            if is_soft_wrap[idx] {
-                out.mark_soft_wrap_continuation();
+    struct Wrapped {
+        // Cumulative byte offsets: span i covers the concatenated plain at offs[i]..offs[i+1].
+        offs: Vec<usize>,
+        // Wrap segments as byte ranges into the concatenated plain text.
+        ranges: Vec<(usize, usize)>,
+    }
+
+    let mut wlines: Vec<Wrapped> = summary
+        .0
+        .iter()
+        .map(|spans| {
+            let mut plain = String::new();
+            let mut offs = Vec::with_capacity(spans.len() + 1);
+            offs.push(0);
+            for s in spans {
+                plain.push_str(&s.text);
+                offs.push(plain.len());
             }
+            let ranges = wrap_line_ranges(&plain, max_seg);
+            Wrapped { offs, ranges }
+        })
+        .collect();
+    if wlines.is_empty() {
+        wlines.push(Wrapped {
+            offs: vec![0],
+            ranges: vec![(0, 0)],
+        });
+    }
+
+    if wlines.iter().any(|w| w.ranges.len() > 1) {
+        out.mark_wrapped();
+    }
+
+    let total: usize = wlines.iter().map(|w| w.ranges.len()).sum();
+    let show = total.min(MAX_TOOL_BLOCK_ROWS);
+    let plain_source = summary.as_plain_text();
+    let mut rows = 0u16;
+    let mut emitted = 0usize;
+
+    'outer: for (li, w) in wlines.iter().enumerate() {
+        let spans: &[StyledSpan] = summary
+            .0
+            .get(li)
+            .map(Vec::as_slice)
+            .unwrap_or(&[] as &[StyledSpan]);
+        // One InlineSyntax per span — state carries across wrap segments of the
+        // same span so syntax context survives soft-wraps.
+        let mut syntaxes: Vec<Option<InlineSyntax<'static>>> = spans
+            .iter()
+            .map(|s| s.syntax.as_deref().map(InlineSyntax::new))
+            .collect();
+
+        for (seg_idx, &(rs, re)) in w.ranges.iter().enumerate() {
+            if emitted >= show {
+                break 'outer;
+            }
+            let is_first = emitted == 0;
+            if !is_first {
+                out.print_gutter(&" ".repeat(ly.prefix_len));
+                if seg_idx > 0 {
+                    out.mark_soft_wrap_continuation();
+                }
+            }
+            if is_first {
+                out.set_source_text(&plain_source);
+            }
+
+            for (sp_idx, span) in spans.iter().enumerate() {
+                let sp_start = w.offs[sp_idx];
+                let sp_end = w.offs[sp_idx + 1];
+                let lo = sp_start.max(rs);
+                let hi = sp_end.min(re);
+                if lo >= hi {
+                    continue;
+                }
+                let piece = &span.text[lo - sp_start..hi - sp_start];
+
+                let fg_color = span.fg.as_deref().and_then(|name| out.theme().get(name).fg);
+                let bg_color = span.bg.as_deref().and_then(|name| out.theme().get(name).bg);
+                out.save_style();
+                if let Some(group) = span.hl.as_deref() {
+                    out.set_hl(intern(group));
+                }
+                if let Some(c) = fg_color {
+                    out.set_fg(c);
+                }
+                if let Some(c) = bg_color {
+                    out.set_bg(c);
+                }
+                if span.dim {
+                    out.set_dim();
+                }
+                if span.bold {
+                    out.set_bold();
+                }
+                if span.italic {
+                    out.set_italic();
+                }
+                match syntaxes[sp_idx].as_mut() {
+                    Some(h) => h.print_line(out, piece),
+                    None => out.print(piece),
+                }
+                out.pop_style();
+            }
+
+            if is_first {
+                print_dim_non_selectable(out, &time_str);
+            }
+            out.newline();
+            rows += 1;
+            emitted += 1;
         }
-        if idx == 0 {
-            out.set_source_text(summary);
-        }
-        match hi.as_mut() {
-            Some(h) => h.print_line(out, seg),
-            None => out.print(seg),
-        }
-        if idx == 0 {
-            print_dim_non_selectable(out, &time_str);
-        }
-        out.newline();
-        rows += 1;
     }
 
     if total > MAX_TOOL_BLOCK_ROWS {
@@ -161,7 +225,7 @@ fn call_render_layout(
     name: &str,
     args: &HashMap<String, serde_json::Value>,
     output: Option<&ToolOutput>,
-    summary: &str,
+    summary: &StyledLines,
     status: ToolStatus,
     elapsed: Option<Duration>,
     call_id: &str,
@@ -180,6 +244,7 @@ fn call_render_layout(
     } else {
         Some(call_id)
     };
+    let summary_plain = summary.as_plain_text();
     crate::lua::app_ref::try_with_app(|app| {
         app.lua.render_tool_layout(
             name,
@@ -187,7 +252,7 @@ fn call_render_layout(
             output,
             smelt_core::lua::runtime::ToolRenderCtx {
                 width,
-                summary,
+                summary: &summary_plain,
                 status: status_label,
                 elapsed_secs,
                 call_id: cid,

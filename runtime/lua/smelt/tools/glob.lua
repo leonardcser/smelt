@@ -1,6 +1,6 @@
 -- Built-in glob tool. Gitignore-aware pattern matching; results sorted newest-first.
 
-local function confirm_message(args)
+local function describe(args)
   local pattern = args.pattern or ""
   local path = args.path or ""
   if path == "" then
@@ -28,8 +28,8 @@ smelt.tools.register({
     },
     required = { "pattern" },
   },
-  confirm_text = function(args)
-    return confirm_message(args)
+  summary = function(args)
+    return describe(args)
   end,
   render = function(args, output, ctx)
     local content = output.content or ""

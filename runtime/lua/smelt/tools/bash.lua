@@ -103,11 +103,18 @@ smelt.tools.register({
     },
     required = { "command" },
   },
-  confirm_text = function(args) return args.command or "" end,
   approval_patterns = M.approval_patterns,
+  -- `summary` doubles as both the transcript header and the confirm dialog body.
+  -- Returning styled-lines (same shape as `smelt.buf.set_styled_lines`) lets us
+  -- syntax-highlight the command without the renderer hard-coding bash.
   summary = function(args)
     local cmd = args.command or ""
-    return cmd ~= "" and cmd or nil
+    if cmd == "" then return nil end
+    local lines = {}
+    for line in (cmd .. "\n"):gmatch("([^\n]*)\n") do
+      lines[#lines + 1] = { { text = line, syntax = "bash" } }
+    end
+    return lines
   end,
   render = function(args, output, ctx)
     local items = {}

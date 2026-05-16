@@ -31,7 +31,7 @@ pub enum HostCall {
     },
 
     /// Evaluate a Lua tool's permission hooks
-    /// (`confirm_text`, `approval_patterns`, `preflight`).
+    /// (`summary`, `approval_patterns`, `preflight`).
     EvalHooks {
         call_id: String,
         tool_name: String,

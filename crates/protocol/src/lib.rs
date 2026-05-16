@@ -11,6 +11,7 @@ pub mod content;
 pub mod event;
 pub mod message;
 pub mod mode;
+pub mod style;
 pub mod usage;
 
 pub use content::{Content, ContentPart};
@@ -20,4 +21,5 @@ pub use event::{
 };
 pub use message::{FunctionCall, Message, Role, ToolCall, ToolOutcome};
 pub use mode::{AgentMode, ReasoningEffort};
+pub use style::{StyledLines, StyledSpan};
 pub use usage::{ModelConfigOverrides, PermissionOverrides, RuleSetOverride, TokenUsage, TurnMeta};

@@ -186,8 +186,7 @@
 ---@field subpattern_parser? string Built-in subpattern parser kind (e.g. `"bash"`).
 ---@field modes? table Agent modes the tool is available in; nil means all modes.
 ---@field execution_mode? string `"concurrent"` (default) or `"sequential"`.
----@field summary? function `summary(args, result) -> string` — short label for the picker.
----@field confirm_text? function `confirm_text(args, ctx) -> string` — prompt body shown in the approval modal.
+---@field summary? function `summary(args) -> string | styled_lines | nil` — styled label rendered in the transcript header AND confirm dialog body header. Plain string is auto-wrapped as one plain span; the styled-lines form is `{ { { text, syntax?, style? }, ... }, ... }` — same span shape as `smelt.buf.set_styled_lines`.
 ---@field approval_patterns? function `approval_patterns(args, ctx) -> string[]` — patterns offered as one-click approvals.
 ---@field preflight? function `preflight(args, ctx) -> table?` — validation hook; nil result skips.
 ---@field render? function `render(buf, args, result)` — custom transcript render.

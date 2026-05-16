@@ -45,7 +45,15 @@ smelt.tools.register({
     },
     required = { "command" },
   },
-  confirm_text = function(args) return args.command or "" end,
+  summary = function(args)
+    local cmd = args.command or ""
+    if cmd == "" then return nil end
+    local lines = {}
+    for line in (cmd .. "\n"):gmatch("([^\n]*)\n") do
+      lines[#lines + 1] = { { text = line, syntax = "bash" } }
+    end
+    return lines
+  end,
   approval_patterns = bash.approval_patterns,
   execute = execute,
 })

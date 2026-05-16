@@ -197,13 +197,11 @@ impl TuiApp {
                 call_id,
                 tool_name,
                 args,
-                confirm_message,
                 approval_patterns,
                 summary,
             } => SessionControl::NeedsConfirm(Box::new(ConfirmRequest {
                 call_id,
                 tool_name,
-                desc: confirm_message,
                 args,
                 approval_patterns,
                 outside_dir: None,
@@ -312,17 +310,19 @@ impl TuiApp {
                     let decision = self.core.permissions.decide(mode, &tool_name, &args, false);
                     let mut decision = decision;
                     if decision == protocol::Decision::Ask {
-                        let desc = hooks
-                            .confirm_message
-                            .clone()
-                            .unwrap_or_else(|| tool_name.clone());
+                        let summary_text = hooks.summary.as_plain_text();
+                        let label = if summary_text.is_empty() {
+                            tool_name.clone()
+                        } else {
+                            summary_text
+                        };
                         let rt = self.core.permissions.approvals.read().unwrap();
                         if rt.is_auto_approved(
                             &self.core.permissions,
                             mode,
                             &tool_name,
                             &args,
-                            &desc,
+                            &label,
                         ) {
                             decision = protocol::Decision::Allow;
                         }

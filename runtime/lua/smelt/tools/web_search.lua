@@ -22,7 +22,7 @@ smelt.tools.register({
     },
     required = { "query" },
   },
-  confirm_text = function(args)
+  summary = function(args)
     return args.query or ""
   end,
   render = function(args, output, ctx)
