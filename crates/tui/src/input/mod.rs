@@ -205,6 +205,7 @@ impl PromptState {
         ctx.win.cpos = start;
         ctx.win.selection_anchor = None;
         ctx.win.clamp_anchors_to_source(ctx.buf.source());
+        self.recompute_completer(ctx.as_ref());
         Some(deleted)
     }
 
