@@ -47,16 +47,18 @@ pub(crate) fn parse_command_line(line: &str) -> ParsedCommand<'_> {
         .strip_prefix(':')
         .or_else(|| line.strip_prefix('/'))
         .unwrap_or(line);
-    match body.find(char::is_whitespace) {
-        Some(idx) => {
-            let name = &body[..idx];
-            let arg = body[idx + 1..].trim();
+    // `idx` is the byte offset of a whitespace char; the char itself may be
+    // multi-byte (e.g. U+2000 EN QUAD is 3 bytes), so split via `splitn` to
+    // step past one whole char instead of `idx + 1` slicing mid-codepoint.
+    match body.splitn(2, char::is_whitespace).collect::<Vec<_>>()[..] {
+        [name, arg] => {
+            let arg = arg.trim();
             ParsedCommand::Slash {
                 name,
                 arg: if arg.is_empty() { None } else { Some(arg) },
             }
         }
-        None => ParsedCommand::Slash {
+        _ => ParsedCommand::Slash {
             name: body,
             arg: None,
         },
@@ -87,15 +89,15 @@ pub(crate) fn run_command(app: &mut TuiApp, line: &str) -> CommandAction {
         .strip_prefix(':')
         .or_else(|| trimmed.strip_prefix('/'))
         .unwrap_or(trimmed);
-    let (name, arg) = match body.find(char::is_whitespace) {
-        Some(idx) => {
-            let arg = body[idx + 1..].trim().to_string();
+    let (name, arg) = match body.splitn(2, char::is_whitespace).collect::<Vec<_>>()[..] {
+        [n, a] => {
+            let a = a.trim().to_string();
             (
-                body[..idx].to_string(),
-                if arg.is_empty() { None } else { Some(arg) },
+                n.to_string(),
+                if a.is_empty() { None } else { Some(a) },
             )
         }
-        None => (body.to_string(), None),
+        _ => (body.to_string(), None),
     };
     app.core
         .cells

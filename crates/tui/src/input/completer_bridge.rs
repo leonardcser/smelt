@@ -148,6 +148,7 @@ impl PromptState {
                 let query = self.arg_query(ctx, arg_anchor);
                 self.set_or_update_completer(
                     CompleterKind::CommandArg,
+                    arg_anchor,
                     || Completer::command_args(arg_anchor, &items),
                     query,
                 );
@@ -157,6 +158,7 @@ impl PromptState {
                 let query = safe_slice(ctx.buf.source(), 1..ctx.win.cpos).to_string();
                 self.set_or_update_completer(
                     CompleterKind::Command,
+                    0,
                     || Completer::commands(0),
                     query,
                 );
@@ -198,6 +200,7 @@ impl PromptState {
                 let query = self.arg_query(ctx, arg_anchor);
                 self.set_or_update_completer(
                     CompleterKind::CommandArg,
+                    arg_anchor,
                     || Completer::command_args(arg_anchor, &items),
                     query,
                 );
@@ -210,6 +213,7 @@ impl PromptState {
                 let query = safe_slice(ctx.buf.source(), 1..end).to_string();
                 self.set_or_update_completer(
                     CompleterKind::Command,
+                    0,
                     || Completer::commands(0),
                     query,
                 );
@@ -219,15 +223,23 @@ impl PromptState {
         self.close_completer();
     }
 
-    /// Reuse the current completer if it matches `kind`, otherwise create a new
-    /// one via `make`. Either way, update the query.
+    /// Reuse the current completer if it matches `kind` and `anchor`, otherwise
+    /// create a new one via `make`. Either way, update the query. The anchor
+    /// check matters when the buffer shrinks (history scroll, vim ops): an
+    /// existing completer's anchor would otherwise outlive the source it points
+    /// into and INV-11 would fire on the next assert.
     fn set_or_update_completer(
         &mut self,
         kind: CompleterKind,
+        anchor: usize,
         make: impl FnOnce() -> Completer,
         query: String,
     ) {
-        if self.completer.as_ref().is_some_and(|c| c.kind == kind) {
+        if self
+            .completer
+            .as_ref()
+            .is_some_and(|c| c.kind == kind && c.anchor == anchor)
+        {
             self.completer.as_mut().unwrap().update_query(query);
         } else {
             let mut comp = make();

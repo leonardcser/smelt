@@ -253,15 +253,18 @@ impl PromptState {
         clipboard.kill_ring.record_clipboard_write(text);
     }
 
-    /// Single seam for replacing `source` wholesale. Clamps `cpos` to a char boundary
-    /// and clears `selection_anchor` — the only invariants every replacement must
-    /// uphold. Callers manage attachments / paste-state / completer / undo since
-    /// those differ per site.
+    /// Single seam for replacing `source` wholesale. Clamps `cpos` to a char
+    /// boundary, clears `selection_anchor`, and closes the completer — its
+    /// anchor was indexed into the old source and would otherwise outlive
+    /// it. Callers that still want a completer call `recompute_completer` /
+    /// `sync_completer` afterward. Attachments / paste-state / undo differ
+    /// per site so callers manage those themselves.
     pub(crate) fn install_source(&mut self, ctx: &mut PromptCtx<'_>, text: String, cpos: usize) {
         ctx.buf.set_source(text);
         let source = ctx.buf.source();
         ctx.win.cpos = crate::smelt_term::text::snap(source, cpos);
         ctx.win.selection_anchor = None;
+        self.close_completer();
     }
 
     pub(crate) fn clear(&mut self, ctx: &mut PromptCtx<'_>) {
@@ -951,6 +954,7 @@ impl PromptState {
                         Ok(url) => {
                             let label = engine::image::image_label_from_path(&path);
                             self.insert_image(ctx, label, url);
+                            self.recompute_completer(ctx.as_ref());
                             return Action::Redraw;
                         }
                         Err(e) => {
@@ -962,10 +966,12 @@ impl PromptState {
             if data.trim().is_empty() {
                 if let Some(url) = clipboard_image_to_data_url() {
                     self.insert_image(ctx, "clipboard.png".into(), url);
+                    self.recompute_completer(ctx.as_ref());
                     return Action::Redraw;
                 }
             }
             self.insert_paste(ctx, data);
+            self.recompute_completer(ctx.as_ref());
             return Action::Redraw;
         }
 
