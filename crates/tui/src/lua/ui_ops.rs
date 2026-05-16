@@ -11,9 +11,7 @@
 
 use crate::app::TuiApp;
 use crate::smelt_term::layout::{Anchor, Corner, PaintId};
-use crate::smelt_term::{
-    Callback, CallbackResult, KeyBind, Overlay, Payload, WinEvent, WinId,
-};
+use crate::smelt_term::{Callback, CallbackResult, KeyBind, Overlay, Payload, WinEvent, WinId};
 use crossterm::event::{KeyCode, KeyModifiers};
 
 pub(crate) fn open_overlay(app: &mut TuiApp, opts: mlua::Table) -> Result<u64, String> {
@@ -101,11 +99,7 @@ pub(crate) fn open_overlay(app: &mut TuiApp, opts: mlua::Table) -> Result<u64, S
 /// trusting the layout's natural size to stay within `term_h - 1` (top/left/
 /// right is uncommon — callers expressing a docked top/side dialog generally
 /// also pin a height via a `Length` slot in the layout).
-fn parse_overlay_anchor(
-    opts: &mlua::Table,
-    term_w: u16,
-    term_h: u16,
-) -> Result<Anchor, String> {
+fn parse_overlay_anchor(opts: &mlua::Table, term_w: u16, term_h: u16) -> Result<Anchor, String> {
     match opts.get::<String>("anchor").ok().as_deref() {
         Some("dock_bottom") | None => Ok(Anchor::ScreenBottom {
             above_rows: crate::content::layout::STATUSLINE_ROWS,
