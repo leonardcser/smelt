@@ -1404,7 +1404,13 @@ fn handle_visual_char(c: char, ctx: &mut VimContext<'_>) -> Action {
 
         // ── Swap anchor and cursor ─────────────────────────────────
         'o' => {
-            std::mem::swap(&mut ctx.vim_state.visual_anchor, ctx.cpos);
+            // Snap through `visual_anchor_at` first: the raw field outlives
+            // buffer mutations (e.g. a paste that replaces the visual
+            // selection shrinks `source` below the old anchor), and a raw
+            // swap would land `cpos` past `source.len()`.
+            let anchor = ctx.vim_state.visual_anchor_at(ctx.buf);
+            ctx.vim_state.visual_anchor = *ctx.cpos;
+            *ctx.cpos = anchor;
             Action::Consumed
         }
 
