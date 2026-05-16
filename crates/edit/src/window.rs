@@ -352,12 +352,20 @@ impl Window {
         self.layout_key = Some(key);
     }
 
-    /// `true` when `self.layout` is in sync with `buf` (logical row count matches).
-    /// `false` falls back to identity inside `cursor_visual` / `cpos_at_visual` /
-    /// `visual_row_total` so callers that haven't run `ensure_layout` (tests,
-    /// first-frame window setup) still compute correct coordinates.
+    /// `true` when `self.layout` was built against `buf`'s current
+    /// `changedtick`. Row count alone isn't enough — a row whose text shrank in
+    /// place (e.g. transcript reset, prompt clear) keeps the row count but
+    /// invalidates the cached chunk byte offsets, so slicing the layout's
+    /// chunks against the fresh `lines` panics. Callers that haven't run
+    /// `ensure_layout` (tests, first-frame setup) fall back to identity
+    /// coordinates in `cursor_visual` / `cpos_at_visual` / `visual_row_total`.
     fn layout_matches(&self, buf: &Buffer) -> bool {
-        self.layout.visual_count() > 0 && self.layout.logical_count() == buf.lines().len()
+        match self.layout_key {
+            Some((tick, _, _)) => {
+                tick == buf.changedtick() && self.layout.logical_count() == buf.lines().len()
+            }
+            None => false,
+        }
     }
 
     /// Total visual rows for scroll/keep-visible math. Falls back to the
@@ -1588,6 +1596,23 @@ mod tests {
             theme: std::sync::Arc::new(Theme::default()),
             vim_mode: VimMode::default(),
         }
+    }
+
+    #[test]
+    fn cursor_visual_survives_in_place_line_shrink() {
+        // Regression: a line that mutates to be shorter than the cached chunk's
+        // end byte must not slice into a stale `(start, end)` range. Before
+        // tightening `layout_matches` to compare on `changedtick`, this panicked
+        // with "end byte index N is out of bounds of empty string" because the
+        // logical row count stayed the same.
+        let mut w = make_win();
+        w.wrap = true;
+        let mut buf = make_buf(vec!["hello world hello world".to_string()]);
+        w.ensure_layout(&buf, 10);
+        // Mutate the line in place to empty (e.g. prompt clear after submit).
+        buf.set_all_lines(vec![String::new()]);
+        // No new `ensure_layout` yet — must not panic.
+        let _ = w.cursor_visual(&buf, 0);
     }
 
     #[test]
