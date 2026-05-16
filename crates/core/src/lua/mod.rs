@@ -34,6 +34,36 @@ pub struct LuaHandle {
     pub key: mlua::RegistryKey,
 }
 
+/// Serialize a `Serialize` value through JSON into a Lua value. Convenience
+/// for crossing the engine↔Lua boundary without hand-rolling a per-type
+/// converter — used by `host_dispatch` to ship `protocol::Message`
+/// payloads to provider middleware hooks.
+pub fn serde_to_lua<T: serde::Serialize>(lua: &Lua, value: &T) -> LuaResult<mlua::Value> {
+    let json = serde_json::to_value(value).map_err(mlua::Error::external)?;
+    json_to_lua(lua, &json)
+}
+
+/// Deserialize a Lua value into a `DeserializeOwned` Rust type via JSON.
+/// Inverse of [`serde_to_lua`]. Returns `None` if either the Lua→JSON
+/// conversion drops fields the deserializer requires, or the JSON
+/// doesn't match the target shape. Callers treat `None` as "no
+/// mutation" (the original payload stays in flight).
+pub fn lua_to_serde<T: serde::de::DeserializeOwned>(
+    lua: &Lua,
+    value: &mlua::Value,
+) -> Option<T> {
+    let json = match value {
+        mlua::Value::Table(t) => api::lua_table_to_json(lua, t),
+        mlua::Value::Nil => serde_json::Value::Null,
+        mlua::Value::Boolean(b) => serde_json::Value::Bool(*b),
+        mlua::Value::Integer(i) => serde_json::json!(*i),
+        mlua::Value::Number(n) => serde_json::json!(*n),
+        mlua::Value::String(s) => serde_json::Value::String(s.to_string_lossy().to_string()),
+        _ => return None,
+    };
+    serde_json::from_value(json).ok()
+}
+
 pub fn json_to_lua(lua: &Lua, v: &serde_json::Value) -> LuaResult<mlua::Value> {
     match v {
         serde_json::Value::Null => Ok(mlua::Value::Nil),

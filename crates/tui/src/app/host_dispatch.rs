@@ -12,8 +12,9 @@
 
 use crate::app::TuiApp;
 use engine::HostCall;
-use mlua::prelude::*;
 use protocol::Message;
+use smelt_core::lua::{HookRegistry, LuaShared};
+use std::sync::Arc;
 
 impl TuiApp {
     /// Pull every pending `HostCall` and dispatch it. Non-blocking;
@@ -31,11 +32,16 @@ impl TuiApp {
     pub(crate) fn dispatch_host_call(&mut self, call: HostCall) {
         match call {
             HostCall::ProviderRequest { messages, reply } => {
-                let mutated = self.run_provider_request_hooks(messages);
+                let mutated = self
+                    .run_middleware_chain::<Vec<Message>>(messages, "on_request", |s| {
+                        &s.hooks.provider_request
+                    });
                 let _ = reply.send(mutated);
             }
             HostCall::ProviderResponse { message, reply } => {
-                let mutated = self.run_provider_response_hooks(message);
+                let mutated = self.run_middleware_chain::<Message>(message, "on_response", |s| {
+                    &s.hooks.provider_response
+                });
                 let _ = reply.send(mutated);
             }
             // Phase B targets. The engine doesn't emit these on the host
@@ -49,106 +55,44 @@ impl TuiApp {
         }
     }
 
-    fn run_provider_request_hooks(&self, messages: Vec<Message>) -> Option<Vec<Message>> {
+    /// Snapshot a `HookRegistry`, serialize `payload` into Lua via serde,
+    /// call each hook in registration order (passing the previous hook's
+    /// returned table as input), and deserialize the final value back
+    /// into `T`. Returns `None` when no hook is registered or no hook
+    /// returned a replacement table — caller treats `None` as "no
+    /// mutation, proceed with the original payload".
+    fn run_middleware_chain<T>(
+        &self,
+        payload: T,
+        label: &'static str,
+        registry: impl Fn(&LuaShared) -> &Arc<HookRegistry>,
+    ) -> Option<T>
+    where
+        T: serde::Serialize + serde::de::DeserializeOwned,
+    {
         let lua = self.lua.lua();
-        let funcs = self
-            .lua
-            .core_shared()
-            .hooks
-            .provider_request
-            .snapshot_for(lua, "");
+        let funcs = registry(self.lua.core_shared()).snapshot_for(lua, "");
         if funcs.is_empty() {
             return None;
         }
-
-        let payload = match messages_to_lua(lua, &messages) {
-            Ok(t) => t,
-            Err(_) => return None,
-        };
-        let mut current = payload;
+        let mut current = smelt_core::lua::serde_to_lua(lua, &payload).ok()?;
         let mut mutated = false;
         for func in funcs {
             match func.call::<mlua::Value>(current.clone()) {
                 Ok(mlua::Value::Table(t)) => {
-                    current = t;
+                    current = mlua::Value::Table(t);
                     mutated = true;
                 }
                 Ok(_) => {}
                 Err(e) => {
                     self.lua
-                        .record_error(format!("provider.middleware on_request: {e}"));
+                        .record_error(format!("provider.middleware {label}: {e}"));
                 }
             }
         }
         if !mutated {
             return None;
         }
-        lua_to_messages(lua, &current)
+        smelt_core::lua::lua_to_serde::<T>(lua, &current)
     }
-
-    fn run_provider_response_hooks(&self, message: Message) -> Option<Message> {
-        let lua = self.lua.lua();
-        let funcs = self
-            .lua
-            .core_shared()
-            .hooks
-            .provider_response
-            .snapshot_for(lua, "");
-        if funcs.is_empty() {
-            return None;
-        }
-        let table = match message_to_lua(lua, &message) {
-            Ok(t) => t,
-            Err(_) => return None,
-        };
-        let mut current = table;
-        let mut mutated = false;
-        for func in funcs {
-            match func.call::<mlua::Value>(current.clone()) {
-                Ok(mlua::Value::Table(t)) => {
-                    current = t;
-                    mutated = true;
-                }
-                Ok(_) => {}
-                Err(e) => {
-                    self.lua
-                        .record_error(format!("provider.middleware on_response: {e}"));
-                }
-            }
-        }
-        if !mutated {
-            return None;
-        }
-        lua_to_message(lua, &current)
-    }
-}
-
-fn message_to_lua(lua: &Lua, msg: &Message) -> LuaResult<mlua::Table> {
-    let value = serde_json::to_value(msg).map_err(mlua::Error::external)?;
-    match smelt_core::lua::json_to_lua(lua, &value)? {
-        mlua::Value::Table(t) => Ok(t),
-        _ => Err(mlua::Error::RuntimeError(
-            "Message did not serialize to a table".into(),
-        )),
-    }
-}
-
-fn messages_to_lua(lua: &Lua, msgs: &[Message]) -> LuaResult<mlua::Table> {
-    let value = serde_json::to_value(msgs).map_err(mlua::Error::external)?;
-    match smelt_core::lua::json_to_lua(lua, &value)? {
-        mlua::Value::Table(t) => Ok(t),
-        _ => Err(mlua::Error::RuntimeError(
-            "Vec<Message> did not serialize to a table".into(),
-        )),
-    }
-}
-
-fn lua_to_message(lua: &Lua, table: &mlua::Table) -> Option<Message> {
-    let value = smelt_core::lua::api::lua_table_to_json(lua, table);
-    serde_json::from_value(value).ok()
-}
-
-fn lua_to_messages(lua: &Lua, table: &mlua::Table) -> Option<Vec<Message>> {
-    let value = smelt_core::lua::api::lua_table_to_json(lua, table);
-    serde_json::from_value(value).ok()
 }
