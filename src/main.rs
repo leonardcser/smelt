@@ -336,12 +336,18 @@ async fn main() {
     let tui_skill_loader = skill_loader.clone();
     let tui_instructions = instructions.clone();
 
-    let mcp_dispatcher =
-        smelt_core::mcp::dispatcher::McpDispatcher::start(&cfg.mcp, Arc::clone(&permissions)).await;
-    let dispatcher: Box<dyn engine::tools::ToolDispatcher> = match mcp_dispatcher {
-        Some(d) => Box::new(d),
-        None => Box::new(engine::tools::EmptyDispatcher::new()),
+    let mcp_manager = if cfg.mcp.is_empty() {
+        None
+    } else {
+        Some(smelt_core::mcp::McpManager::start(&cfg.mcp).await)
     };
+    let dispatcher: Box<dyn engine::tools::ToolDispatcher> =
+        match mcp_manager.as_ref().and_then(|m| {
+            smelt_core::mcp::dispatcher::McpDispatcher::new(Arc::clone(m), Arc::clone(&permissions))
+        }) {
+            Some(d) => Box::new(d),
+            None => Box::new(engine::tools::EmptyDispatcher::new()),
+        };
 
     let engine_handle = engine::start(
         engine::EngineConfig {
@@ -428,6 +434,7 @@ async fn main() {
             Arc::clone(&permissions),
         );
         core.skills = Some(tui_skill_loader.clone());
+        core.mcp = mcp_manager.clone();
         let sink = smelt_core::HeadlessSink::new(output_format, color_mode, args.verbose);
         let mut headless = smelt_core::HeadlessApp::new(core, sink);
         headless
@@ -471,6 +478,7 @@ async fn main() {
             project_trust,
         );
         app.core.skills = Some(tui_skill_loader.clone());
+        app.core.mcp = mcp_manager.clone();
         app.extra_instructions = tui_instructions;
         app.skill_section = tui_skill_section;
         if let Some(accent) = cfg_accent {
