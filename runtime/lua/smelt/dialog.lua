@@ -19,8 +19,9 @@
 --     the dialog (e.g. Alt-W, Ctrl-D).
 --   - To scope a key to a specific panel, install it directly on that leaf via
 --     `smelt.win.set_keymap(leaf, key, fn)` after `open_handle` returns. Example:
---     the confirm dialog binds `e` only on the options leaf so that typing `e` while
---     editing the reason input still types a literal `e`.
+--     the confirm dialog binds `tab` only on the options leaf (jump into the
+--     reason input) and `esc` only on the reason leaf (pop focus back to the
+--     options leaf instead of dismissing the dialog).
 --
 -- Buffer helpers:
 --   smelt.ui.dialog.input(placeholder)         -> leaf, buf  (single-line input)

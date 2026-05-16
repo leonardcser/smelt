@@ -162,11 +162,16 @@ function smelt.confirm.open(handle_id)
     end,
   })
 
-  -- `e` only fires when the options panel has focus: it switches focus to the
-  -- reason input. Installing on the options leaf scopes it correctly so typing
-  -- `e` while editing the reason still types a literal `e`.
-  smelt.win.set_keymap(options_leaf, "e", function()
+  -- Tab from the options leaf jumps focus into the reason input; Esc inside
+  -- the reason input pops focus back to the options leaf (instead of
+  -- dismissing the dialog — that still works from the options leaf). Scoping
+  -- both keymaps per-leaf means typing literal Tab/Esc characters in the
+  -- input would only ever do the configured action.
+  smelt.win.set_keymap(options_leaf, "tab", function()
     smelt.win.set_focus(reason_leaf)
+  end)
+  smelt.win.set_keymap(reason_leaf, "esc", function()
+    smelt.win.set_focus(options_leaf)
   end)
 
   return handle
