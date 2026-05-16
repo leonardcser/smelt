@@ -74,54 +74,17 @@ pub fn paint_layout_tree_with(
     paint: &mut PaintDispatch,
 ) {
     match node {
-        LayoutTree::Leaf(id) => {
-            paint(*id, area, grid, theme, term_size);
+        LayoutTree::Leaf { id, chrome } => {
+            layout::paint_chrome(grid, area, chrome, theme);
+            let inner = layout::inset_for_border(area, chrome.border);
+            paint(*id, inner, grid, theme, term_size);
         }
         LayoutTree::Vbox { items, chrome } | LayoutTree::Hbox { items, chrome } => {
             layout::paint_chrome(grid, area, chrome, theme);
             let vertical = matches!(node, LayoutTree::Vbox { .. });
-            let inner = layout::inset_for_border(area, chrome.border);
-            let primary_total = if vertical { inner.height } else { inner.width };
-            let total_gap = chrome
-                .gap
-                .saturating_mul(items.len().saturating_sub(1) as u16);
-            let available = primary_total.saturating_sub(total_gap);
-            // Pre-resolve `Fit` items so the painted rects match the rects
-            // produced by `resolve_layout_with` (hit-test/viewport).
-            let resolved: Vec<Constraint> = items
-                .iter()
-                .map(|(c, child)| match c {
-                    Constraint::Fit => {
-                        let leaf_cap = if vertical {
-                            (inner.width, available)
-                        } else {
-                            (available, inner.height)
-                        };
-                        let (nw, nh) = child.natural_size_with(leaf_cap, sizer);
-                        let n = if vertical { nh } else { nw };
-                        Constraint::Length(n.min(available))
-                    }
-                    other => *other,
-                })
-                .collect();
-            let resolved_items: Vec<layout::Item> = resolved
-                .into_iter()
-                .zip(items.iter())
-                .map(|(c, (_, child))| (c, child.clone()))
-                .collect();
-            let sizes = layout::resolve_constraints(&resolved_items, available);
-            let mut offset = 0u16;
-            for (i, ((_, child), &size)) in resolved_items.iter().zip(sizes.iter()).enumerate() {
-                let child_area = if vertical {
-                    Rect::new(inner.top + offset, inner.left, inner.width, size)
-                } else {
-                    Rect::new(inner.top, inner.left + offset, size, inner.height)
-                };
-                paint_layout_tree_with(grid, theme, child, child_area, term_size, sizer, paint);
-                offset += size;
-                if i + 1 < items.len() {
-                    offset += chrome.gap;
-                }
+            let (_, rects) = layout::layout_box_children(items, chrome, area, vertical, sizer);
+            for ((_, child), &rect) in items.iter().zip(rects.iter()) {
+                paint_layout_tree_with(grid, theme, child, rect, term_size, sizer, paint);
             }
         }
     }

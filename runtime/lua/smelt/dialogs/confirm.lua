@@ -55,34 +55,44 @@ local function build_options(req)
   return labels, decisions
 end
 
--- Compose the body header: the tool's `summary(args)` output (already a
--- styled-lines payload — each span carries its own syntax/style) plus an
--- optional subtitle. The tool name itself lives in the overlay border title;
--- "Allow?" lives in its own panel below the preview.
---
--- Subtitle convention: if the tool's arguments include a non-empty
--- `description` string, surface it dimmed under the body. Tools opt in by
--- declaring `description` in their parameter schema (bash does this to carry
--- the model's short gloss of what the command does); no other wiring needed.
+-- Compose the body header: `tool_name: ` (name in SmeltAccent) followed by
+-- the tool's `summary(args)` output. Continuation lines of a multi-line
+-- summary are indented to align under the first character after the colon.
+-- An optional dim subtitle from `args.description` follows.
 local function render_header(buf, req)
-  local subtitle = nil
-  local desc = req.args and req.args.description
-  if type(desc) == "string" and desc ~= "" then
-    subtitle = desc
-  end
+  local tool_name = req.tool_name or ""
+  local indent = string.rep(" ", #tool_name + 2)
 
   local lines = {}
-  if req.summary then
-    for _, line in ipairs(req.summary) do
-      lines[#lines + 1] = line
+  local summary_lines = req.summary or {}
+  if #summary_lines == 0 then
+    lines[#lines + 1] = {
+      { text = tool_name, style = { hl = "SmeltAccent" } },
+      { text = ":" },
+    }
+  else
+    for i, line in ipairs(summary_lines) do
+      local new_line
+      if i == 1 then
+        new_line = {
+          { text = tool_name, style = { hl = "SmeltAccent" } },
+          { text = ": " },
+        }
+      else
+        new_line = { { text = indent } }
+      end
+      for _, span in ipairs(line) do
+        new_line[#new_line + 1] = span
+      end
+      lines[#lines + 1] = new_line
     end
   end
-  if #lines == 0 then
-    lines[#lines + 1] = { { text = "" } }
+
+  local desc = req.args and req.args.description
+  if type(desc) == "string" and desc ~= "" then
+    lines[#lines + 1] = { { text = desc, style = { dim = true } } }
   end
-  if subtitle then
-    lines[#lines + 1] = { { text = subtitle, style = { dim = true } } }
-  end
+
   smelt.buf.set_styled_lines(buf, lines)
 end
 
@@ -119,15 +129,20 @@ function smelt.confirm.open(handle_id)
   local preview_buf = smelt.buf.create()
   render_header(header_buf, req)
   smelt.confirm._render_preview(preview_buf, handle_id)
+  local first_preview = smelt.buf.get_line(preview_buf, 1)
+  local has_preview = first_preview ~= nil and first_preview ~= ""
 
   local labels, decisions = build_options(req)
 
   local header_leaf  = smelt.ui.dialog.content({ buf = header_buf, wrap = false })
   local preview_leaf = smelt.ui.dialog.content({ buf = preview_buf, interactive = true })
   local allow_leaf, allow_buf = smelt.ui.dialog.content({ wrap = false })
-  smelt.buf.set_styled_lines(allow_buf, {
-    { { text = "Allow?", style = { dim = true } } },
-  })
+  local allow_lines = {}
+  if not has_preview then
+    allow_lines[#allow_lines + 1] = {}
+  end
+  allow_lines[#allow_lines + 1] = { { text = "Allow?", style = { dim = true } } }
+  smelt.buf.set_styled_lines(allow_buf, allow_lines)
   local options_leaf, options_buf = smelt.ui.dialog.options(labels)
   render_options(options_buf, labels)
   local reason_leaf, reason_buf =
@@ -150,7 +165,6 @@ function smelt.confirm.open(handle_id)
   local handle = smelt.ui.dialog.open_handle({
     blocks_agent = true,
     max_height   = "fill",
-    title        = req.tool_name,
     panels = {
       { leaf = header_leaf,  height = "fit"                              },
       { leaf = preview_leaf, height = "fit", collapse_when_empty = true,

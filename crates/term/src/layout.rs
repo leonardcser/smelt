@@ -65,7 +65,9 @@ pub struct Chrome {
 #[derive(Clone, Debug)]
 pub enum LayoutTree {
     /// Terminal node; the host matches on `PaintId` in its paint dispatcher.
-    Leaf(PaintId),
+    /// Carries its own `Chrome` so leaves can have a border/title without a
+    /// synthetic wrapper container.
+    Leaf { id: PaintId, chrome: Chrome },
     /// Vertical container; children stack top-to-bottom.
     Vbox { items: Vec<Item>, chrome: Chrome },
     /// Horizontal container; children pack left-to-right.
@@ -91,51 +93,33 @@ impl LayoutTree {
 
     /// Terminal leaf. Accepts anything `Into<PaintId>`.
     pub fn leaf(id: impl Into<PaintId>) -> Self {
-        Self::Leaf(id.into())
+        Self::Leaf {
+            id: id.into(),
+            chrome: Chrome::default(),
+        }
     }
 
-    fn chrome_mut(&mut self) -> Option<&mut Chrome> {
+    fn chrome_mut(&mut self) -> &mut Chrome {
         match self {
-            Self::Vbox { chrome, .. } | Self::Hbox { chrome, .. } => Some(chrome),
-            Self::Leaf(_) => None,
+            Self::Leaf { chrome, .. }
+            | Self::Vbox { chrome, .. }
+            | Self::Hbox { chrome, .. } => chrome,
         }
     }
 
-    /// If `self` is a `Leaf`, wraps it in a single-item `Vbox` so chrome
-    /// methods work uniformly. Inner constraint is `Fit` so the wrapper
-    /// reports `leaf_natural + border` as its natural size.
-    fn ensure_chrome_capable(self) -> Self {
-        match self {
-            Self::Leaf(_) => Self::Vbox {
-                items: vec![(Constraint::Fit, self)],
-                chrome: Chrome::default(),
-            },
-            other => other,
-        }
+    pub fn with_gap(mut self, g: u16) -> Self {
+        self.chrome_mut().gap = g;
+        self
     }
 
-    pub fn with_gap(self, g: u16) -> Self {
-        let mut tree = self.ensure_chrome_capable();
-        if let Some(c) = tree.chrome_mut() {
-            c.gap = g;
-        }
-        tree
+    pub fn with_border(mut self, b: Border) -> Self {
+        self.chrome_mut().border = Some(b);
+        self
     }
 
-    pub fn with_border(self, b: Border) -> Self {
-        let mut tree = self.ensure_chrome_capable();
-        if let Some(c) = tree.chrome_mut() {
-            c.border = Some(b);
-        }
-        tree
-    }
-
-    pub fn with_title(self, t: impl Into<crate::line::Line<'static>>) -> Self {
-        let mut tree = self.ensure_chrome_capable();
-        if let Some(c) = tree.chrome_mut() {
-            c.title = Some(t.into());
-        }
-        tree
+    pub fn with_title(mut self, t: impl Into<crate::line::Line<'static>>) -> Self {
+        self.chrome_mut().title = Some(t.into());
+        self
     }
 
     /// Whether `id` appears as a leaf in this tree (depth-first structural check).
@@ -146,7 +130,7 @@ impl LayoutTree {
 
     fn contains_leaf_id(&self, id: PaintId) -> bool {
         match self {
-            LayoutTree::Leaf(p) => *p == id,
+            LayoutTree::Leaf { id: p, .. } => *p == id,
             LayoutTree::Vbox { items, .. } | LayoutTree::Hbox { items, .. } => {
                 items.iter().any(|(_, child)| child.contains_leaf_id(id))
             }
@@ -162,7 +146,7 @@ impl LayoutTree {
 
     fn collect_leaves(&self, out: &mut Vec<PaintId>) {
         match self {
-            LayoutTree::Leaf(p) => out.push(*p),
+            LayoutTree::Leaf { id, .. } => out.push(*id),
             LayoutTree::Vbox { items, .. } | LayoutTree::Hbox { items, .. } => {
                 for (_, child) in items {
                     child.collect_leaves(out);
@@ -185,7 +169,12 @@ impl LayoutTree {
     /// is added on top. Result is always `<= cap`.
     pub fn natural_size_with(&self, cap: (u16, u16), sizer: &dyn LeafSizer) -> (u16, u16) {
         match self {
-            LayoutTree::Leaf(p) => sizer.leaf_natural_size(*p, cap),
+            LayoutTree::Leaf { id, chrome } => {
+                let (bw, bh) = chrome_border_dims(chrome);
+                let inner_cap = (cap.0.saturating_sub(bw), cap.1.saturating_sub(bh));
+                let (w, h) = sizer.leaf_natural_size(*id, inner_cap);
+                ((w + bw).min(cap.0), (h + bh).min(cap.1))
+            }
             LayoutTree::Vbox { items, chrome } => natural_box(items, chrome, cap, true, sizer),
             LayoutTree::Hbox { items, chrome } => natural_box(items, chrome, cap, false, sizer),
         }
@@ -211,6 +200,16 @@ impl LeafSizer for NoopSizer {
     }
 }
 
+/// `(width, height)` reserved by `chrome.border`'s per-side toggles.
+fn chrome_border_dims(chrome: &Chrome) -> (u16, u16) {
+    let Some(b) = chrome.border else {
+        return (0, 0);
+    };
+    let bw = u16::from(b.left.is_some()) + u16::from(b.right.is_some());
+    let bh = u16::from(b.top.is_some()) + u16::from(b.bottom.is_some());
+    (bw, bh)
+}
+
 fn natural_box(
     items: &[Item],
     chrome: &Chrome,
@@ -219,14 +218,7 @@ fn natural_box(
     sizer: &dyn LeafSizer,
 ) -> (u16, u16) {
     let (cap_w, cap_h) = cap;
-    let (border_w, border_h) = match chrome.border {
-        Some(b) => {
-            let bw = u16::from(b.left.is_some()) + u16::from(b.right.is_some());
-            let bh = u16::from(b.top.is_some()) + u16::from(b.bottom.is_some());
-            (bw, bh)
-        }
-        None => (0, 0),
-    };
+    let (border_w, border_h) = chrome_border_dims(chrome);
     let gaps = chrome
         .gap
         .saturating_mul(items.len().saturating_sub(1) as u16);
@@ -685,8 +677,8 @@ fn resolve_node(
     out: &mut HashMap<PaintId, Rect>,
 ) {
     match node {
-        LayoutTree::Leaf(id) => {
-            out.insert(*id, area);
+        LayoutTree::Leaf { id, chrome } => {
+            out.insert(*id, inset_for_border(area, chrome.border));
         }
         LayoutTree::Vbox { items, chrome } => {
             resolve_box(items, chrome, area, true, sizer, out);
@@ -697,24 +689,25 @@ fn resolve_node(
     }
 }
 
-fn resolve_box(
+/// Lay out a container's children. Returns `(inner_area, child_rects)`. Both
+/// `resolve_box` and the renderer in `term::paint_layout_tree_with` call this
+/// to keep their geometry in sync (hit-test rects must match painted rects).
+pub fn layout_box_children(
     items: &[Item],
     chrome: &Chrome,
     area: Rect,
     vertical: bool,
     sizer: &dyn LeafSizer,
-    out: &mut HashMap<PaintId, Rect>,
-) {
+) -> (Rect, Vec<Rect>) {
     let inner = inset_for_border(area, chrome.border);
-    let primary_total = if vertical { inner.height } else { inner.width };
     let total_gap = chrome
         .gap
         .saturating_mul(items.len().saturating_sub(1) as u16);
+    let primary_total = if vertical { inner.height } else { inner.width };
     let available = primary_total.saturating_sub(total_gap);
-    // Pre-resolve `Fit` items against their child's natural size at the
-    // available cross-axis cap, so `resolve_constraints` can treat them as
-    // hard-sized claimants on the primary axis.
-    let resolved: Vec<Constraint> = items
+
+    // Compute `Fit` children's natural caps along the primary axis.
+    let fit_caps: Vec<Option<u16>> = items
         .iter()
         .map(|(c, child)| match c {
             Constraint::Fit => {
@@ -724,42 +717,67 @@ fn resolve_box(
                     (available, inner.height)
                 };
                 let (nw, nh) = child.natural_size_with(leaf_cap, sizer);
-                let n = if vertical { nh } else { nw };
-                Constraint::Length(n.min(available))
+                Some(if vertical { nh } else { nw })
             }
-            other => *other,
+            _ => None,
         })
         .collect();
-    let resolved_items: Vec<Item> = resolved
-        .into_iter()
-        .zip(items.iter())
-        .map(|(c, (_, child))| (c, child.clone()))
-        .collect();
-    let sizes = resolve_constraints(&resolved_items, available);
+
+    let sizes = resolve_constraints_with_fit_caps(items, available, &fit_caps);
+    let mut rects = Vec::with_capacity(items.len());
     let mut offset = 0u16;
-    for (i, ((_, child), &size)) in resolved_items.iter().zip(sizes.iter()).enumerate() {
-        let child_area = if vertical {
+    for (i, &size) in sizes.iter().enumerate() {
+        let r = if vertical {
             Rect::new(inner.top + offset, inner.left, inner.width, size)
         } else {
             Rect::new(inner.top, inner.left + offset, size, inner.height)
         };
-        resolve_node(child, child_area, sizer, out);
+        rects.push(r);
         offset += size;
         if i + 1 < items.len() {
             offset += chrome.gap;
         }
     }
+    (inner, rects)
+}
+
+fn resolve_box(
+    items: &[Item],
+    chrome: &Chrome,
+    area: Rect,
+    vertical: bool,
+    sizer: &dyn LeafSizer,
+    out: &mut HashMap<PaintId, Rect>,
+) {
+    let (_, rects) = layout_box_children(items, chrome, area, vertical, sizer);
+    for ((_, child), &rect) in items.iter().zip(rects.iter()) {
+        resolve_node(child, rect, sizer, out);
+    }
 }
 
 pub fn resolve_constraints(items: &[Item], total: u16) -> Vec<u16> {
+    let caps: Vec<Option<u16>> = vec![None; items.len()];
+    resolve_constraints_with_fit_caps(items, total, &caps)
+}
+
+/// Resolve item sizes given pre-computed natural-size caps for `Fit` children.
+/// `fit_caps[i]` is the natural size along the primary axis for a `Fit` child;
+/// `None` means uncapped (used for non-Fit children or when the caller has no
+/// sizer). Container resolvers (`resolve_box`, `paint_layout_tree_with`)
+/// compute these and pass them through; the bare `resolve_constraints` wrapper
+/// treats `Fit` as uncapped (equivalent to `Fill`).
+pub fn resolve_constraints_with_fit_caps(
+    items: &[Item],
+    total: u16,
+    fit_caps: &[Option<u16>],
+) -> Vec<u16> {
     let mut sizes = vec![0u16; items.len()];
     let mut remaining = total;
 
-    // Pass 1: hard-sized constraints (`Length`, `Max`, `Percentage`) consume their share first.
-    // `Min(n)` is not hard-sized — it competes with `Fill` in pass 3.
+    // Pass 1: hard claimants (`Length`, `Percentage`) take their exact share.
     for (i, (c, _)) in items.iter().enumerate() {
         match c {
-            Constraint::Length(n) | Constraint::Max(n) => {
+            Constraint::Length(n) => {
                 let n = (*n).min(remaining);
                 sizes[i] = n;
                 remaining -= n;
@@ -773,7 +791,7 @@ pub fn resolve_constraints(items: &[Item], total: u16) -> Vec<u16> {
         }
     }
 
-    // Pass 2: `Ratio` siblings split the remaining pool proportionally.
+    // Pass 2: `Ratio` siblings split a sub-pool proportionally.
     let ratio_total: u32 = items
         .iter()
         .filter_map(|(c, _)| match c {
@@ -794,71 +812,105 @@ pub fn resolve_constraints(items: &[Item], total: u16) -> Vec<u16> {
     }
     remaining -= consumed.min(remaining);
 
-    // Pass 3: `Fill`, `Fit`, and `Min` share the remainder equally.
-    // `Min(n)` clamps its share up to `n`; if floors push the total over
-    // budget, surplus is taken from non-Min children first, then Min
-    // children proportionally.
-    let flex_indices: Vec<usize> = items
+    // Pass 3: elastic children (`Fill`, `Fit`, `Min`, `Max`) share the remainder.
+    // Each elastic child has a `(floor, cap)`:
+    //   * `Fill`     → `(0, MAX)`
+    //   * `Fit`      → `(0, natural)`     — natural comes from `fit_caps`
+    //   * `Min(n)`   → `(n, MAX)`
+    //   * `Max(n)`   → `(0, n)`
+    // Equal-share baseline; clamp to caps; surplus from cap-hit children
+    // redistributes to siblings with headroom; floors raising the total over
+    // budget claw back proportionally.
+    let elastic: Vec<(usize, u16, u16)> = items
         .iter()
         .enumerate()
         .filter_map(|(i, (c, _))| {
-            matches!(c, Constraint::Fill | Constraint::Fit | Constraint::Min(_)).then_some(i)
+            elastic_bounds(*c, fit_caps.get(i).copied().flatten()).map(|(f, cap)| (i, f, cap))
         })
         .collect();
-    let flex_count = flex_indices.len() as u16;
-    if flex_count == 0 || remaining == 0 {
+    if elastic.is_empty() || remaining == 0 {
+        // Still need to honor floors (`Min(n)`) even when no remainder — they
+        // can claim space by displacing earlier hard claimants? No: passes
+        // 1-2 already locked those in. Min with no remainder gets 0.
         return sizes;
     }
 
-    let per = remaining / flex_count;
-    let mut leftover = remaining % flex_count;
-    let mut shares = vec![0u16; flex_indices.len()];
-    for share in shares.iter_mut() {
-        *share = per + u16::from(leftover > 0);
-        leftover = leftover.saturating_sub(1);
-    }
-    for (k, &i) in flex_indices.iter().enumerate() {
-        if let Constraint::Min(n) = items[i].0 {
-            if shares[k] < n {
-                shares[k] = n;
-            }
+    // Distribute `remaining` across elastic children, never exceeding each
+    // child's cap. Each round pours an equal portion to children with
+    // headroom, clipping at their cap; any unallocated residue (because
+    // someone's headroom was smaller than its share) rolls into the next
+    // round and goes to the remaining uncapped siblings. Terminates when
+    // either the budget is exhausted or every child is at its cap.
+    let mut shares = vec![0u16; elastic.len()];
+    let caps: Vec<u32> = elastic.iter().map(|&(_, _, c)| c as u32).collect();
+    let mut to_allocate = remaining as u32;
+    loop {
+        let uncapped: Vec<usize> = (0..elastic.len())
+            .filter(|&k| (shares[k] as u32) < caps[k])
+            .collect();
+        if uncapped.is_empty() || to_allocate == 0 {
+            break;
         }
+        let m = uncapped.len() as u32;
+        let per = to_allocate / m;
+        let mut leftover = to_allocate % m;
+        let mut allocated: u32 = 0;
+        for &k in &uncapped {
+            let want = per + u32::from(leftover > 0);
+            leftover = leftover.saturating_sub(1);
+            let room = caps[k] - shares[k] as u32;
+            let take = want.min(room);
+            shares[k] = shares[k].saturating_add(take as u16);
+            allocated += take;
+        }
+        if allocated == 0 {
+            break; // every remaining uncapped child has zero room (defensive)
+        }
+        to_allocate = to_allocate.saturating_sub(allocated);
     }
 
+    // Apply floors. If floors push total over `remaining`, take back from
+    // non-floored children first, then proportionally from floored ones.
+    for (k, &(_, floor, _)) in elastic.iter().enumerate() {
+        if shares[k] < floor {
+            shares[k] = floor;
+        }
+    }
     let total_shares: u32 = shares.iter().map(|&v| v as u32).sum();
     if total_shares > remaining as u32 {
-        let mut surplus = (total_shares - remaining as u32) as u16;
-        for (k, &i) in flex_indices.iter().enumerate() {
-            if surplus == 0 {
+        let mut over = (total_shares - remaining as u32) as u16;
+        for (k, &(_, floor, _)) in elastic.iter().enumerate() {
+            if over == 0 {
                 break;
             }
-            if !matches!(items[i].0, Constraint::Min(_)) {
-                let take = shares[k].min(surplus);
+            if floor == 0 {
+                let take = shares[k].min(over);
                 shares[k] -= take;
-                surplus -= take;
+                over -= take;
             }
         }
-        if surplus > 0 {
-            let min_total: u32 = flex_indices
+        if over > 0 {
+            let floored_total: u32 = elastic
                 .iter()
                 .enumerate()
-                .filter(|(_, &i)| matches!(items[i].0, Constraint::Min(_)))
+                .filter(|(_, &(_, f, _))| f > 0)
                 .map(|(k, _)| shares[k] as u32)
                 .sum();
-            if let Some(divisor) = (min_total > 0).then_some(min_total) {
-                for (k, &i) in flex_indices.iter().enumerate() {
-                    if matches!(items[i].0, Constraint::Min(_)) {
-                        let take = ((shares[k] as u32 * surplus as u32) / divisor) as u16;
+            if floored_total > 0 {
+                for (k, &(_, f, _)) in elastic.iter().enumerate() {
+                    if f > 0 {
+                        let take = ((shares[k] as u32 * over as u32) / floored_total) as u16;
                         shares[k] = shares[k].saturating_sub(take);
                     }
                 }
+                // Mop up rounding residual from any floored child.
                 let new_total: u32 = shares.iter().map(|&v| v as u32).sum();
                 let mut residual = new_total.saturating_sub(remaining as u32) as u16;
-                for (k, &i) in flex_indices.iter().enumerate() {
+                for (k, &(_, f, _)) in elastic.iter().enumerate() {
                     if residual == 0 {
                         break;
                     }
-                    if matches!(items[i].0, Constraint::Min(_)) {
+                    if f > 0 {
                         let take = shares[k].min(residual);
                         shares[k] -= take;
                         residual -= take;
@@ -868,11 +920,22 @@ pub fn resolve_constraints(items: &[Item], total: u16) -> Vec<u16> {
         }
     }
 
-    for (k, &i) in flex_indices.iter().enumerate() {
+    for (k, &(i, _, _)) in elastic.iter().enumerate() {
         sizes[i] = shares[k];
     }
-
     sizes
+}
+
+/// `(floor, cap)` bounds for an elastic constraint. `Length`/`Percentage`/`Ratio`
+/// return `None` — they're hard claimants resolved in earlier passes.
+fn elastic_bounds(c: Constraint, fit_cap: Option<u16>) -> Option<(u16, u16)> {
+    match c {
+        Constraint::Fill => Some((0, u16::MAX)),
+        Constraint::Fit => Some((0, fit_cap.unwrap_or(u16::MAX))),
+        Constraint::Min(n) => Some((n, u16::MAX)),
+        Constraint::Max(n) => Some((0, n)),
+        Constraint::Length(_) | Constraint::Percentage(_) | Constraint::Ratio(_, _) => None,
+    }
 }
 
 #[cfg(test)]
@@ -1074,6 +1137,105 @@ mod tests {
         }
     }
 
+    /// Per-leaf-id natural heights, capped at the available extent.
+    struct PerLeafSizer(std::collections::HashMap<PaintId, u16>);
+
+    impl LeafSizer for PerLeafSizer {
+        fn leaf_natural_size(&self, id: PaintId, cap: (u16, u16)) -> (u16, u16) {
+            (0, self.0.get(&id).copied().unwrap_or(0).min(cap.1))
+        }
+    }
+
+    /// Confirm-dialog-shaped vbox: small leaf Fits + one elastic Fit panel
+    /// (the preview). At every terminal height the panels must collectively
+    /// consume the entire dialog inner area — no leftover rows below the last
+    /// panel (that's the "3 whitespaces under reason" bug).
+    #[test]
+    fn confirm_dialog_layout_consumes_all_rows_at_varying_heights() {
+        let header = PaintId(101);
+        let preview = PaintId(102);
+        let allow = PaintId(103);
+        let options = PaintId(104);
+        let spacer = PaintId(105);
+        let reason = PaintId(106);
+
+        let mut naturals = std::collections::HashMap::new();
+        naturals.insert(header, 1);
+        naturals.insert(preview, 50); // big content (file diff/text)
+        naturals.insert(allow, 1);
+        naturals.insert(options, 4);
+        naturals.insert(spacer, 1);
+        naturals.insert(reason, 1);
+        let sizer = PerLeafSizer(naturals);
+
+        let tree = LayoutTree::vbox(vec![
+            (Constraint::Fit, LayoutTree::leaf(header)),
+            (Constraint::Fit, LayoutTree::leaf(preview)),
+            (Constraint::Fit, LayoutTree::leaf(allow)),
+            (Constraint::Fit, LayoutTree::leaf(options)),
+            (Constraint::Fit, LayoutTree::leaf(spacer)),
+            (Constraint::Fit, LayoutTree::leaf(reason)),
+        ]);
+
+        for h in [8u16, 10, 12, 15, 18, 20, 24, 30, 40] {
+            let result = resolve_layout_with(&tree, Rect::new(0, 0, 80, h), &sizer);
+            let used: u16 = result.values().map(|r| r.height).sum();
+            assert_eq!(
+                used, h,
+                "h={h}: panels used {used} rows, leaving {} unused",
+                h - used
+            );
+            // Smalls keep their natural; preview absorbs the slack.
+            assert_eq!(result[&header].height, 1, "h={h}: header");
+            assert_eq!(result[&allow].height, 1, "h={h}: allow");
+            assert_eq!(result[&spacer].height, 1, "h={h}: spacer");
+            assert_eq!(result[&reason].height, 1, "h={h}: reason");
+        }
+    }
+
+    /// Same layout, but the preview has no content (`bash`-style confirm).
+    /// Without an elastic outlet for surplus, smaller terminals must still
+    /// pack the smalls tightly with zero whitespace below the last panel.
+    #[test]
+    fn confirm_dialog_no_preview_packs_tight_at_varying_heights() {
+        let header = PaintId(101);
+        let preview = PaintId(102);
+        let allow = PaintId(103);
+        let options = PaintId(104);
+        let spacer = PaintId(105);
+        let reason = PaintId(106);
+
+        let mut naturals = std::collections::HashMap::new();
+        naturals.insert(header, 1);
+        naturals.insert(preview, 0); // collapses (no content)
+        naturals.insert(allow, 1);
+        naturals.insert(options, 4);
+        naturals.insert(spacer, 1);
+        naturals.insert(reason, 1);
+        let sizer = PerLeafSizer(naturals);
+
+        let tree = LayoutTree::vbox(vec![
+            (Constraint::Fit, LayoutTree::leaf(header)),
+            (Constraint::Fit, LayoutTree::leaf(preview)),
+            (Constraint::Fit, LayoutTree::leaf(allow)),
+            (Constraint::Fit, LayoutTree::leaf(options)),
+            (Constraint::Fit, LayoutTree::leaf(spacer)),
+            (Constraint::Fit, LayoutTree::leaf(reason)),
+        ]);
+
+        // Natural sum is 8; with the dialog sized via max_height it picks
+        // min(8, terminal). For terminals >= 8 the dialog should be 8 tall
+        // and every panel takes its natural.
+        for h in [8u16, 10, 12, 15, 20, 24] {
+            let nat = tree.natural_size_with((80, h), &sizer);
+            assert_eq!(nat.1, 8, "h={h}: dialog natural should equal sum-of-smalls");
+            let dialog_h = nat.1.min(h);
+            let result = resolve_layout_with(&tree, Rect::new(0, 0, 80, dialog_h), &sizer);
+            let used: u16 = result.values().map(|r| r.height).sum();
+            assert_eq!(used, dialog_h, "h={h}: total {used} != dialog_h {dialog_h}");
+        }
+    }
+
     #[test]
     fn fit_with_sizer_uses_leaf_natural_height() {
         let tree = LayoutTree::vbox(vec![
@@ -1087,7 +1249,9 @@ mod tests {
     }
 
     #[test]
-    fn fit_clamps_to_available_when_sizer_overflows() {
+    fn fit_shares_with_fill_when_sizer_overflows() {
+        // `Fit` is elastic-with-cap; when its natural exceeds the budget it
+        // still shares fairly with `Fill` siblings instead of starving them.
         let tree = LayoutTree::vbox(vec![
             (Constraint::Fit, LayoutTree::leaf(A)),
             (Constraint::Fill, LayoutTree::leaf(B)),
@@ -1095,8 +1259,8 @@ mod tests {
         // Sizer reports 50, but parent only has 10 rows.
         let sizer = FixedSizer(50);
         let result = resolve_layout_with(&tree, Rect::new(0, 0, 80, 10), &sizer);
-        assert_eq!(result[&A].height, 10);
-        assert_eq!(result[&B].height, 0);
+        assert_eq!(result[&A].height, 5);
+        assert_eq!(result[&B].height, 5);
     }
 
     #[test]
@@ -1257,18 +1421,18 @@ mod tests {
     }
 
     #[test]
-    fn leaf_with_border_auto_wraps_and_keeps_id_resolvable() {
+    fn leaf_carries_its_own_chrome() {
         let tree = LayoutTree::leaf(A)
             .with_border(Border::SINGLE)
             .with_title("hi");
         assert_eq!(tree.leaves_in_order(), vec![A]);
         assert!(tree.contains_leaf(A));
         match &tree {
-            LayoutTree::Vbox { chrome, .. } => {
+            LayoutTree::Leaf { chrome, .. } => {
                 assert!(chrome.border.is_some());
                 assert!(chrome.title.is_some());
             }
-            _ => panic!("expected Vbox wrapper"),
+            _ => panic!("expected Leaf with chrome"),
         }
     }
 
