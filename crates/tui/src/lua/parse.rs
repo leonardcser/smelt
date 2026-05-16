@@ -285,9 +285,10 @@ pub(crate) fn border(opts: &mlua::Table) -> Result<Option<Border>, String> {
                 None | Some("single") => BorderStyle::Single,
                 Some("rounded") => BorderStyle::Rounded,
                 Some("double") => BorderStyle::Double,
+                Some("dashed") => BorderStyle::Dashed,
                 Some(other) => {
                     return Err(format!(
-                        "unknown border style '{other}' (expected single|rounded|double)"
+                        "unknown border style '{other}' (expected single|rounded|double|dashed)"
                     ))
                 }
             };

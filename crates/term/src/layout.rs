@@ -102,11 +102,12 @@ impl LayoutTree {
     }
 
     /// If `self` is a `Leaf`, wraps it in a single-item `Vbox` so chrome
-    /// methods work uniformly. No-op for `Vbox`/`Hbox`.
+    /// methods work uniformly. Inner constraint is `Fit` so the wrapper
+    /// reports `leaf_natural + border` as its natural size.
     fn ensure_chrome_capable(self) -> Self {
         match self {
             Self::Leaf(_) => Self::Vbox {
-                items: vec![(Constraint::Fill, self)],
+                items: vec![(Constraint::Fit, self)],
                 chrome: Chrome::default(),
             },
             other => other,
@@ -338,6 +339,8 @@ pub enum BorderStyle {
     Single,
     Double,
     Rounded,
+    /// Light double-dash (`╌` / `╎`). Corners fall back to single-style.
+    Dashed,
 }
 
 /// Styling for one edge of a `Border`. Currently only `color` (a theme highlight
@@ -575,6 +578,7 @@ pub fn paint_chrome(
         BorderStyle::Single => ('─', '│', '┌', '┐', '└', '┘'),
         BorderStyle::Double => ('═', '║', '╔', '╗', '╚', '╝'),
         BorderStyle::Rounded => ('─', '│', '╭', '╮', '╰', '╯'),
+        BorderStyle::Dashed => ('╌', '╎', '┌', '┐', '└', '┘'),
     };
     let edge_style = |e: Option<EdgeStyle>| -> super::grid::Style {
         match e.and_then(|s| s.color) {

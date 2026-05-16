@@ -56,9 +56,9 @@ local function build_options(req)
 end
 
 -- Compose the body header: the tool's `summary(args)` output (already a
--- styled-lines payload — each span carries its own syntax/style), an optional
--- subtitle, a blank, then a dim "Allow?". The tool name itself lives in the
--- overlay border title — not the body.
+-- styled-lines payload — each span carries its own syntax/style) plus an
+-- optional subtitle. The tool name itself lives in the overlay border title;
+-- "Allow?" lives in its own panel below the preview.
 --
 -- Subtitle convention: if the tool's arguments include a non-empty
 -- `description` string, surface it dimmed under the body. Tools opt in by
@@ -83,8 +83,6 @@ local function render_header(buf, req)
   if subtitle then
     lines[#lines + 1] = { { text = subtitle, style = { dim = true } } }
   end
-  lines[#lines + 1] = {}
-  lines[#lines + 1] = { { text = "Allow?", style = { dim = true } } }
   smelt.buf.set_styled_lines(buf, lines)
 end
 
@@ -126,6 +124,10 @@ function smelt.confirm.open(handle_id)
 
   local header_leaf  = smelt.ui.dialog.content({ buf = header_buf, wrap = false })
   local preview_leaf = smelt.ui.dialog.content({ buf = preview_buf, interactive = true })
+  local allow_leaf, allow_buf = smelt.ui.dialog.content({ wrap = false })
+  smelt.buf.set_styled_lines(allow_buf, {
+    { { text = "Allow?", style = { dim = true } } },
+  })
   local options_leaf, options_buf = smelt.ui.dialog.options(labels)
   render_options(options_buf, labels)
   local reason_leaf, reason_buf =
@@ -151,7 +153,9 @@ function smelt.confirm.open(handle_id)
     title        = req.tool_name,
     panels = {
       { leaf = header_leaf,  height = "fit"                              },
-      { leaf = preview_leaf, height = "fit", collapse_when_empty = true  },
+      { leaf = preview_leaf, height = "fit", collapse_when_empty = true,
+        border = { style = "dashed", top = "Comment", bottom = "Comment" } },
+      { leaf = allow_leaf,   height = "fit"                              },
       { leaf = options_leaf, height = "fit"                              },
       { leaf = spacer_leaf,  height = "fit"                              },
       { leaf = reason_leaf,                  collapse_when_empty = true  },
