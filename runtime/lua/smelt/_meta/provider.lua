@@ -11,13 +11,14 @@ local provider = {}
 ---@type fun(): table
 provider.list = nil
 
---- Register provider middleware. `mw` is a table of `{ on_request = fn?, on_response = fn?, on_delta = fn? }`:
+--- Register provider middleware. `mw` is a table of `{ on_request = fn?, on_response = fn? }`:
 --- 
---- - `on_request(payload, ctx)` — runs before the outbound HTTP request. Return a table to replace the payload; any other return is no-op.
---- - `on_response(msg, ctx)` — runs after the full assistant message is assembled. Return a table `{ content?, thinking?, tool_calls?, stop_reason?, usage? }` to replace the message.
---- - `on_delta(d)` — runs for every streaming delta. Return a table to replace the delta; `text` and `thinking` deltas are safe to mutate, `tool_args` JSON fragments are NOT (mutating them can corrupt the parser).
+--- - `on_request(messages)` — runs just before the engine calls the provider. `messages` is the full conversation history (an array of `{ role, content, tool_calls? }` rows including the system prompt at index 1). Return a replacement array to mutate it; any other return value leaves the history untouched.
+--- - `on_response(message)` — runs after the assistant message is fully assembled but before it's appended to history. `message` is the same `{ role = "assistant", content?, tool_calls? }` shape used everywhere else. Return a replacement table to mutate it; any other return leaves it as-is.
 --- 
---- Hooks fire in registration order. Returns an `off()` function that removes this middleware. NOTE: engine wiring for these hooks is staged — the registry stores them but the engine's request/response/stream path is not yet hooked through.
+--- Hooks fire in registration order. Each hook sees the previous hook's replacement. Returns an `off()` function that removes this middleware.
+--- 
+--- For streaming observation use `smelt.cell.subscribe("stream_delta", ...)` — synchronous mutation of mid-stream tokens isn't safe because the parser owns the partial state.
 ---@type fun(mw: table): function
 provider.middleware = nil
 
