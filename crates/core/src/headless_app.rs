@@ -16,7 +16,12 @@ pub struct HeadlessApp {
 }
 
 impl HeadlessApp {
-    pub fn new(core: Core, sink: HeadlessSink) -> Self {
+    pub fn new(mut core: Core, sink: HeadlessSink) -> Self {
+        // Drop the host-callback receiver so the engine sees a closed channel
+        // and `host_call` returns `None` instead of deadlocking on the
+        // unanswered `oneshot::Receiver`. Provider middleware is a TUI-only
+        // feature today; headless runs proceed with unmutated payloads.
+        let _ = core.engine.take_host_rx();
         Self {
             core,
             sink,
