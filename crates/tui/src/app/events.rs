@@ -865,6 +865,17 @@ impl TuiApp {
         {
             return false;
         }
+        // Vim half/full-page scroll. The vim engine passes these through
+        // (`Action::Passthrough`) because the host owns viewport arithmetic;
+        // both the transcript pane and overlay leaves share the same mapping.
+        if win_mut.vim_mode == crate::smelt_term::VimMode::Normal {
+            if let Some(d) = crate::smelt_term::vim::page_motion_delta(k, viewport_rows) {
+                win_mut.move_cursor_by_lines(buf, d, viewport_rows);
+                let max_scroll = (buf.lines().len() as u16).saturating_sub(viewport_rows);
+                win_mut.follow_tail = win_mut.scroll_top >= max_scroll;
+                return true;
+            }
+        }
         let status = win_mut.handle_key(buf, k, &mut self.core.clipboard);
         let max_scroll = (buf.lines().len() as u16).saturating_sub(viewport_rows);
         win_mut.follow_tail = win_mut.scroll_top >= max_scroll;

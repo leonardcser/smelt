@@ -16,22 +16,11 @@ impl TuiApp {
             return EventOutcome::Redraw;
         }
 
-        if k.modifiers.contains(M::CONTROL) {
-            let half = (self.viewport_rows_estimate() / 2).max(1) as isize;
-            let full = (self.viewport_rows_estimate() as isize).max(1);
-            let delta: Option<isize> = match k.code {
-                KeyCode::Char('u') => Some(-half),
-                KeyCode::Char('d') => Some(half),
-                KeyCode::Char('b') => Some(-full),
-                KeyCode::Char('f') => Some(full),
-                KeyCode::Char('y') => Some(-1),
-                KeyCode::Char('e') => Some(1),
-                _ => None,
-            };
-            if let Some(dn) = delta {
-                self.move_content_cursor_by_lines(dn);
-                return EventOutcome::Redraw;
-            }
+        if let Some(dn) =
+            crate::smelt_term::vim::page_motion_delta(k, self.viewport_rows_estimate())
+        {
+            self.move_content_cursor_by_lines(dn);
+            return EventOutcome::Redraw;
         }
 
         if k.modifiers.contains(M::SHIFT)
