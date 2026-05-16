@@ -162,7 +162,7 @@ fn register_overlay(lua: &Lua, smelt_ui: &mlua::Table) -> LuaResult<()> {
         &overlay_tbl,
         "smelt.ui.overlay",
         "open",
-        "Open a generic overlay rendered from `opts.layout` — a layout-tree userdata built via `smelt.ui.layout.leaf` / `.vbox` / `.hbox`. Position with `opts.anchor` (`\"dock_bottom\"` | `\"dock_top\"` | `\"dock_left\"` | `\"dock_right\"` | `\"center\"` | `\"screen_at\"` | `\"win\"`); size each axis with `opts.width` / `opts.height` (fixed) or `opts.max_width` / `opts.max_height` (fit-to-content, capped). Size values accept integers (cells), `\"N%\"` (percent of the anchor's available extent), or `\"fill\"`. Dock anchors reserve the bottom statusline row. Returns the overlay id so it can be focused or closed via `smelt.win`.",
+        "Open a generic overlay rendered from `opts.layout` — a layout-tree userdata built via `smelt.ui.layout.leaf` / `.vbox` / `.hbox`. Position with `opts.anchor` (`\"dock_bottom\"` | `\"dock_top\"` | `\"dock_left\"` | `\"dock_right\"` | `\"center\"` | `\"screen_at\"` | `\"win\"`). The overlay's size is the natural size of its layout tree, re-evaluated against the current terminal every frame — to pin a width or height, wrap your inner tree in a one-slot vbox/hbox with an integer (cells) or `\"N%\"` constraint. `dock_bottom` reserves the bottom statusline row. Returns the overlay id so it can be focused or closed via `smelt.win`.",
         &["opts"],
         lua,
         |_, opts: mlua::Table| -> LuaResult<u64> {

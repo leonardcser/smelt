@@ -1,89 +1,20 @@
-//! Lua → ui helpers: overlay anchor + size resolution, picker construction,
-//! list/input window recipes.
+//! Lua → ui helpers: overlay open, picker construction, list/input window
+//! recipes.
 //!
-//! Overlay sizing is two orthogonal concepts:
-//!
-//! 1. **Anchor** — where on the screen the overlay sits. Parsed from
-//!    `opts.anchor`. Anchor-specific extras (corner, target window, offsets)
-//!    travel with the anchor.
-//! 2. **Size** — how big each axis is. Parsed per-axis from
-//!    `opts.width` / `opts.height` (fixed) or `opts.max_width` /
-//!    `opts.max_height` (fit-to-content, capped). Each axis accepts an integer
-//!    (cells) or a `"N%"` string (percent of the anchor's available extent),
-//!    or `"fill"`. If both fixed and max are set on the same axis, that's a
-//!    Lua-side error. If neither is set, the anchor's default applies.
+//! Overlay sizing is driven entirely by `opts.layout` — a `LayoutTree` built
+//! from `smelt.ui.layout.leaf` / `.vbox` / `.hbox`. The overlay's outer size
+//! comes from `LayoutTree::natural_size_with` evaluated against the current
+//! terminal extent every frame; resize tracks automatically. To pin a width or
+//! height, wrap the inner tree in a one-slot vbox/hbox with a `Length(N)` /
+//! `Percentage(N)` constraint. The manual resize-drag gesture is the only
+//! writer of `Overlay::size_override`.
 
 use crate::app::TuiApp;
-use crate::smelt_term::layout::{Anchor, Corner, LeafSizer, PaintId};
+use crate::smelt_term::layout::{Anchor, Corner, PaintId};
 use crate::smelt_term::{
-    Callback, CallbackResult, KeyBind, LayoutTree, Overlay, Payload, WinEvent, WinId,
+    Callback, CallbackResult, KeyBind, Overlay, Payload, WinEvent, WinId,
 };
 use crossterm::event::{KeyCode, KeyModifiers};
-
-/// Where on the screen an overlay anchors. Carries anchor-specific extras
-/// only — no size fields. Dock anchors all reserve the bottom statusline row.
-#[derive(Clone, Copy)]
-enum OverlayAnchor {
-    Center,
-    DockTop,
-    DockBottom,
-    DockLeft,
-    DockRight,
-    /// Absolute screen position; `(row, col)` are offsets from `corner`.
-    ScreenAt {
-        corner: Corner,
-        row: u16,
-        col: u16,
-    },
-    /// Attached to another window's corner with an offset.
-    Win {
-        target: WinId,
-        attach: Corner,
-        row_offset: i32,
-        col_offset: i32,
-    },
-}
-
-/// One-axis size knob. `Cells` is absolute; `Pct` is percent of the anchor's
-/// available extent on that axis; `Fill` is the full extent.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum Size {
-    Cells(u16),
-    Pct(u16),
-    Fill,
-}
-
-/// How an axis derives its final cell count.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum SizeMode {
-    /// User pinned the axis to exactly this size.
-    Fixed(Size),
-    /// Shrink to the leaf's natural size, capped at this value.
-    FitCap(Size),
-    /// Use the anchor's default for this axis (resolved at apply time).
-    Default,
-}
-
-#[derive(Clone, Copy)]
-struct OverlaySize {
-    width: SizeMode,
-    height: SizeMode,
-}
-
-#[derive(Clone, Copy)]
-enum Axis {
-    W,
-    H,
-}
-
-impl Axis {
-    fn pick(self, pair: (u16, u16)) -> u16 {
-        match self {
-            Axis::W => pair.0,
-            Axis::H => pair.1,
-        }
-    }
-}
 
 pub(crate) fn open_overlay(app: &mut TuiApp, opts: mlua::Table) -> Result<u64, String> {
     let title = crate::lua::parse::title(opts.get::<mlua::Value>("title").ok())
@@ -97,8 +28,8 @@ pub(crate) fn open_overlay(app: &mut TuiApp, opts: mlua::Table) -> Result<u64, S
             .map_err(|e| format!("overlay.open: `layout` must be a smelt.ui.layout node: {e}"))?;
         borrowed.0.clone()
     };
-    let anchor_kind = parse_overlay_anchor(&opts)?;
-    let size = parse_overlay_size(&opts)?.with_anchor_defaults(anchor_kind);
+    let (term_w, term_h) = app.ui.terminal_size();
+    let anchor = parse_overlay_anchor(&opts, term_w, term_h)?;
     let border = crate::lua::parse::border(&opts).map_err(|e| format!("overlay border: {e}"))?;
     let blocks_agent: bool = opts.get("blocks_agent").unwrap_or(false);
     let modal: bool = opts.get("modal").unwrap_or(true);
@@ -106,15 +37,9 @@ pub(crate) fn open_overlay(app: &mut TuiApp, opts: mlua::Table) -> Result<u64, S
     let draggable: bool = opts.get("draggable").unwrap_or(false);
     let resizable: bool = opts.get("resizable").unwrap_or(false);
 
-    // Walk the Lua-side tree into a `LayoutTree`. The walk records every
-    // window-id leaf so the pre-render pass below can prime their wrap layout
-    // for fit-mode resolution.
     let mut window_leaves: Vec<WinId> = Vec::new();
     let (_root_constraint, inner) =
         crate::lua::api::ui_layout::build_layout_tree(app, &layout_node, &mut window_leaves)?;
-    // Wrap the inner tree with the overlay's own border + title. The resulting
-    // tree is what the natural-size walk inspects (for `FitCap`) and what
-    // `resolve_layout_with` carves rects out of at paint time.
     let mut layout = inner;
     if let Some(b) = border {
         layout = layout.with_border(b);
@@ -123,70 +48,79 @@ pub(crate) fn open_overlay(app: &mut TuiApp, opts: mlua::Table) -> Result<u64, S
         layout = layout.with_title(t);
     }
 
-    let (term_w, term_h) = app.ui.terminal_size();
-    let extent = anchor_extent(anchor_kind, (term_w, term_h));
-
-    // Pre-render every window leaf at the dialog's expected content width so
-    // `buf.lines().len()` matches what the natural-size walk reads next. The
-    // overlay's outer width is `Fixed/Fill` (resolves immediately) or `FitCap`
-    // (we use the cap as the pre-render width — a strict upper bound), so this
-    // single pass is right for both cases.
-    let width_for_prerender = match size.width {
-        SizeMode::Fixed(v) | SizeMode::FitCap(v) => resolve_size_value(v, Axis::W, extent),
-        SizeMode::Default => unreachable!("Default substituted by with_anchor_defaults"),
-    };
-    if matches!(size.height, SizeMode::FitCap(_)) || matches!(size.width, SizeMode::FitCap(_)) {
-        for &win_id in &window_leaves {
-            let content_w = app
-                .ui
-                .win(win_id)
-                .map(|w| w.config.gutters.content_width(width_for_prerender))
-                .unwrap_or(width_for_prerender);
-            if let Some(buf_id) = app.ui.win(win_id).map(|w| w.buf) {
-                if let Some(buf) = app.ui.buf_mut(buf_id) {
-                    buf.ensure_rendered_at(content_w);
-                }
+    // First-frame prime: render every window leaf's buffer at the terminal
+    // width so wrap-driven gutters and intra-frame paints have something to
+    // read. Subsequent frames hit the buffer's wrap cache.
+    for &win_id in &window_leaves {
+        let content_w = app
+            .ui
+            .win(win_id)
+            .map(|w| w.config.gutters.content_width(term_w))
+            .unwrap_or(term_w);
+        if let Some(buf_id) = app.ui.win(win_id).map(|w| w.buf) {
+            if let Some(buf) = app.ui.buf_mut(buf_id) {
+                buf.ensure_rendered_at(content_w);
             }
         }
     }
-
-    let resolved_w = resolve_axis(size.width, Axis::W, extent, &layout, &app.ui, None);
-    let resolved_h = resolve_axis(
-        size.height,
-        Axis::H,
-        extent,
-        &layout,
-        &app.ui,
-        Some(resolved_w),
-    );
-
-    let anchor = anchor_kind.to_term_anchor(term_w, term_h);
 
     let overlay = Overlay::new(layout, anchor)
         .with_z(z)
         .modal(modal)
         .blocks_agent(blocks_agent)
         .draggable(draggable)
-        .resizable(resizable)
-        .with_size((resolved_w, resolved_h));
+        .resizable(resizable);
     let id = app.ui.overlay_open(overlay);
     Ok(id.0 as u64)
 }
 
-/// Parse the `anchor` option (plus anchor-specific extras) from an overlay-open opts table.
-fn parse_overlay_anchor(opts: &mlua::Table) -> Result<OverlayAnchor, String> {
+/// Parse `opts.anchor` (plus anchor-specific extras) directly into a
+/// `term::Anchor`. The four dock variants reserve the bottom statusline row
+/// via `ScreenBottom { above_rows: 1 }` (bottom) or by anchoring at row 0 +
+/// trusting the layout's natural size to stay within `term_h - 1` (top/left/
+/// right is uncommon — callers expressing a docked top/side dialog generally
+/// also pin a height via a `Length` slot in the layout).
+fn parse_overlay_anchor(
+    opts: &mlua::Table,
+    term_w: u16,
+    term_h: u16,
+) -> Result<Anchor, String> {
     match opts.get::<String>("anchor").ok().as_deref() {
-        Some("dock_bottom") | None => Ok(OverlayAnchor::DockBottom),
-        Some("dock_top") => Ok(OverlayAnchor::DockTop),
-        Some("dock_left") => Ok(OverlayAnchor::DockLeft),
-        Some("dock_right") => Ok(OverlayAnchor::DockRight),
-        Some("center") => Ok(OverlayAnchor::Center),
+        Some("dock_bottom") | None => Ok(Anchor::ScreenBottom { above_rows: 1 }),
+        Some("dock_top") => Ok(Anchor::ScreenAt {
+            row: 0,
+            col: 0,
+            corner: Corner::NW,
+        }),
+        Some("dock_left") => Ok(Anchor::ScreenAt {
+            row: 0,
+            col: 0,
+            corner: Corner::NW,
+        }),
+        Some("dock_right") => Ok(Anchor::ScreenAt {
+            row: 0,
+            col: term_w.saturating_sub(1) as i32,
+            corner: Corner::NE,
+        }),
+        Some("center") => Ok(Anchor::ScreenCenter),
         Some("screen_at") => {
             let corner =
                 crate::lua::parse::corner(opts.get::<String>("corner").ok().as_deref(), Corner::NW);
             let row: u16 = opts.get("row").unwrap_or(0);
             let col: u16 = opts.get("col").unwrap_or(0);
-            Ok(OverlayAnchor::ScreenAt { corner, row, col })
+            let abs_row = match corner {
+                Corner::NW | Corner::NE => row as i32,
+                Corner::SW | Corner::SE => term_h.saturating_sub(1) as i32 - row as i32,
+            };
+            let abs_col = match corner {
+                Corner::NW | Corner::SW => col as i32,
+                Corner::NE | Corner::SE => term_w.saturating_sub(1) as i32 - col as i32,
+            };
+            Ok(Anchor::ScreenAt {
+                row: abs_row,
+                col: abs_col,
+                corner,
+            })
         }
         Some("win") => {
             let target_id: u64 = opts
@@ -196,8 +130,8 @@ fn parse_overlay_anchor(opts: &mlua::Table) -> Result<OverlayAnchor, String> {
                 crate::lua::parse::corner(opts.get::<String>("attach").ok().as_deref(), Corner::NW);
             let row_offset: i32 = opts.get("row_offset").unwrap_or(0);
             let col_offset: i32 = opts.get("col_offset").unwrap_or(0);
-            Ok(OverlayAnchor::Win {
-                target: WinId(target_id),
+            Ok(Anchor::Win {
+                target: PaintId::from(WinId(target_id)),
                 attach,
                 row_offset,
                 col_offset,
@@ -206,235 +140,6 @@ fn parse_overlay_anchor(opts: &mlua::Table) -> Result<OverlayAnchor, String> {
         Some(other) => Err(format!(
             "overlay anchor: unknown '{other}' (expected dock_bottom|dock_top|dock_left|dock_right|center|screen_at|win)"
         )),
-    }
-}
-
-impl OverlayAnchor {
-    /// Translate the anchor (with its extras) into a `smelt-term` `Anchor`.
-    fn to_term_anchor(self, term_w: u16, term_h: u16) -> Anchor {
-        match self {
-            OverlayAnchor::Center => Anchor::ScreenCenter,
-            OverlayAnchor::DockBottom => Anchor::ScreenBottom { above_rows: 1 },
-            // The three other docks share `ScreenAt` with the corresponding
-            // corner placed flush against the screen edge. The statusline
-            // carve-out is enforced via `anchor_extent` (which subtracts a row
-            // before size resolution runs), so the resulting rect never
-            // overlaps the statusline.
-            OverlayAnchor::DockTop => Anchor::ScreenAt {
-                row: 0,
-                col: 0,
-                corner: Corner::NW,
-            },
-            OverlayAnchor::DockLeft => Anchor::ScreenAt {
-                row: 0,
-                col: 0,
-                corner: Corner::NW,
-            },
-            OverlayAnchor::DockRight => Anchor::ScreenAt {
-                row: 0,
-                col: term_w.saturating_sub(1) as i32,
-                corner: Corner::NE,
-            },
-            OverlayAnchor::ScreenAt { corner, row, col } => {
-                // Lua `(row, col)` are offsets from the named corner; translate to
-                // absolute terminal coordinates so `Anchor::ScreenAt` resolves the
-                // user-visible corner.
-                let abs_row = match corner {
-                    Corner::NW | Corner::NE => row as i32,
-                    Corner::SW | Corner::SE => term_h.saturating_sub(1) as i32 - row as i32,
-                };
-                let abs_col = match corner {
-                    Corner::NW | Corner::SW => col as i32,
-                    Corner::NE | Corner::SE => term_w.saturating_sub(1) as i32 - col as i32,
-                };
-                Anchor::ScreenAt {
-                    row: abs_row,
-                    col: abs_col,
-                    corner,
-                }
-            }
-            OverlayAnchor::Win {
-                target,
-                attach,
-                row_offset,
-                col_offset,
-            } => Anchor::Win {
-                target: PaintId::from(target),
-                attach,
-                row_offset,
-                col_offset,
-            },
-        }
-    }
-}
-
-/// Available `(width, height)` extent the anchor offers to its overlay. Used as
-/// the cap for percentage and fit-mode resolution.
-fn anchor_extent(a: OverlayAnchor, (term_w, term_h): (u16, u16)) -> (u16, u16) {
-    match a {
-        // Subtract the statusline row from any anchor that lives within the
-        // primary viewport. Dock anchors all reserve it; `ScreenAt` / `Win` do
-        // not (callers can opt in via `height = <cells>`).
-        OverlayAnchor::DockBottom
-        | OverlayAnchor::DockTop
-        | OverlayAnchor::DockLeft
-        | OverlayAnchor::DockRight
-        | OverlayAnchor::Center => (term_w, term_h.saturating_sub(1)),
-        OverlayAnchor::ScreenAt { .. } | OverlayAnchor::Win { .. } => (term_w, term_h),
-    }
-}
-
-/// Anchor's per-axis defaults when neither `width`/`height` nor `max_*` was set.
-struct AnchorDefault {
-    width: Size,
-    height: Size,
-}
-
-fn anchor_default_size(a: OverlayAnchor) -> AnchorDefault {
-    match a {
-        // Horizontal docks span the full width and a percentage of the height.
-        OverlayAnchor::DockBottom | OverlayAnchor::DockTop => AnchorDefault {
-            width: Size::Fill,
-            height: Size::Pct(60),
-        },
-        // Vertical docks span a percentage of the width and the full height.
-        OverlayAnchor::DockLeft | OverlayAnchor::DockRight => AnchorDefault {
-            width: Size::Pct(30),
-            height: Size::Fill,
-        },
-        OverlayAnchor::Center => AnchorDefault {
-            width: Size::Pct(70),
-            height: Size::Pct(60),
-        },
-        // `screen_at` and `win` historically default to 60×20 cells.
-        OverlayAnchor::ScreenAt { .. } | OverlayAnchor::Win { .. } => AnchorDefault {
-            width: Size::Cells(60),
-            height: Size::Cells(20),
-        },
-    }
-}
-
-/// Parse `width` / `height` / `max_width` / `max_height` into an `OverlaySize`.
-/// Errors when both `width` and `max_width` (or `height` / `max_height`) are
-/// set on the same axis. Unspecified axes return `SizeMode::Default`, which
-/// the caller substitutes with the anchor's default.
-fn parse_overlay_size(opts: &mlua::Table) -> Result<OverlaySize, String> {
-    let parse_axis = |fixed_key: &str, max_key: &str| -> Result<SizeMode, String> {
-        let fixed = opts.get::<mlua::Value>(fixed_key).ok();
-        let max = opts.get::<mlua::Value>(max_key).ok();
-        let fixed_is_set = !matches!(fixed, None | Some(mlua::Value::Nil));
-        let max_is_set = !matches!(max, None | Some(mlua::Value::Nil));
-        if fixed_is_set && max_is_set {
-            return Err(format!(
-                "overlay {fixed_key}: cannot set both `{fixed_key}` (fixed) and `{max_key}` (fit-to-content)"
-            ));
-        }
-        if fixed_is_set {
-            return Ok(SizeMode::Fixed(parse_size(fixed.unwrap(), fixed_key)?));
-        }
-        if max_is_set {
-            return Ok(SizeMode::FitCap(parse_size(max.unwrap(), max_key)?));
-        }
-        Ok(SizeMode::Default)
-    };
-    let width = parse_axis("width", "max_width")?;
-    let height = parse_axis("height", "max_height")?;
-    Ok(OverlaySize { width, height })
-}
-
-/// Parse a single size value: integer → cells, `"N%"` → percent, `"fill"` →
-/// fill the axis.
-fn parse_size(v: mlua::Value, ctx: &str) -> Result<Size, String> {
-    match v {
-        mlua::Value::Integer(n) if n > 0 => Ok(Size::Cells(n as u16)),
-        mlua::Value::Number(n) if n > 0.0 => Ok(Size::Cells(n as u16)),
-        mlua::Value::String(s) => {
-            let raw = s.to_str().map_err(|e| e.to_string())?.to_string();
-            let trimmed = raw.trim();
-            if trimmed == "fill" {
-                return Ok(Size::Fill);
-            }
-            if let Some(rest) = trimmed.strip_suffix('%') {
-                let p: u16 = rest
-                    .trim()
-                    .parse()
-                    .map_err(|e| format!("{ctx}: cannot parse percent '{trimmed}': {e}"))?;
-                return Ok(Size::Pct(p));
-            }
-            Err(format!(
-                "{ctx}: expected positive int (cells), 'N%' (percent), or 'fill'; got '{trimmed}'"
-            ))
-        }
-        other => Err(format!(
-            "{ctx}: expected positive int, 'N%' string, or 'fill'; got {}",
-            other.type_name()
-        )),
-    }
-}
-
-/// Resolve a `Size` literal against an extent. `Fill` and `Pct(N)` both depend
-/// on the extent; `Cells(n)` is absolute.
-fn resolve_size_value(v: Size, axis: Axis, extent: (u16, u16)) -> u16 {
-    let ext = axis.pick(extent);
-    let pct = |total: u16, p: u16| ((total as u32 * p as u32) / 100).min(total as u32) as u16;
-    let raw = match v {
-        Size::Cells(n) => n,
-        Size::Pct(p) => pct(ext, p),
-        Size::Fill => ext,
-    };
-    raw.min(ext)
-}
-
-/// Resolve one axis of an `OverlaySize`. For `FitCap`, calls into
-/// `LayoutTree::natural_size_with` with the cap as the axis bound and the
-/// other axis's pre-resolved size as its cross-axis bound.
-fn resolve_axis(
-    mode: SizeMode,
-    axis: Axis,
-    extent: (u16, u16),
-    layout: &LayoutTree,
-    sizer: &dyn LeafSizer,
-    other_axis_resolved: Option<u16>,
-) -> u16 {
-    let materialise = |v: Size| resolve_size_value(v, axis, extent);
-    match mode {
-        SizeMode::Fixed(v) => materialise(v),
-        SizeMode::FitCap(v) => {
-            let cap = materialise(v).max(1);
-            let other = other_axis_resolved.unwrap_or_else(|| axis_other(axis).pick(extent));
-            let nat_cap = match axis {
-                Axis::W => (cap, other),
-                Axis::H => (other, cap),
-            };
-            let nat = layout.natural_size_with(nat_cap, sizer);
-            axis.pick(nat).max(1).min(cap)
-        }
-        SizeMode::Default => unreachable!("Default must be substituted before resolve_axis"),
-    }
-}
-
-fn axis_other(a: Axis) -> Axis {
-    match a {
-        Axis::W => Axis::H,
-        Axis::H => Axis::W,
-    }
-}
-
-impl OverlaySize {
-    /// Substitute `SizeMode::Default` with the anchor's defaults so the resolver
-    /// only sees `Fixed`/`FitCap`.
-    fn with_anchor_defaults(self, anchor: OverlayAnchor) -> Self {
-        let d = anchor_default_size(anchor);
-        Self {
-            width: match self.width {
-                SizeMode::Default => SizeMode::Fixed(d.width),
-                other => other,
-            },
-            height: match self.height {
-                SizeMode::Default => SizeMode::Fixed(d.height),
-                other => other,
-            },
-        }
     }
 }
 

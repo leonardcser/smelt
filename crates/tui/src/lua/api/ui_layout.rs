@@ -6,8 +6,9 @@
 //! diffs, master/detail, etc).
 //!
 //! Constraint vocabulary on item slots matches `Constraint`:
-//! integer (cells), `"fit"`, `"fill"`, `"min:N"`, `"max:N"`, `"pct:N"`,
-//! `"ratio:N/M"`, or the long table form `{ kind = "...", n = N }`.
+//! integer (cells), `"fit"`, `"fill"`, `"N%"` (shorthand for `"pct:N"`),
+//! `"min:N"`, `"max:N"`, `"pct:N"`, `"ratio:N/M"`, or the long table form
+//! `{ kind = "...", n = N }`.
 
 use crate::smelt_term::layout::Border;
 use crate::smelt_term::{Constraint, LayoutTree};

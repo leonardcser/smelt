@@ -163,6 +163,14 @@ end
 --     size. Panels with no `height` default to `"fit"` so a single-panel
 --     dialog actually shrinks; longer content triggers the panel's scrollbar
 --     at the cap.
+--
+-- Translation: both modes desugar to a `smelt.ui.layout` wrapper around the
+-- panel vbox before opening the overlay. The overlay itself has no `width` /
+-- `height` knobs — its size is whatever the layout-tree's natural size
+-- resolves to against the current terminal, re-evaluated every frame. The
+-- height literal (integer cells / `"N%"` / `"fill"` / `"fit"`) is passed
+-- straight through to `smelt.ui.layout.vbox`, which understands all of these.
+
 local function open_overlay(opts)
   if opts.height ~= nil and opts.max_height ~= nil then
     error("smelt.ui.dialog: use `height` (fixed) or `max_height` (fit to content), not both", 3)
@@ -211,15 +219,31 @@ local function open_overlay(opts)
     end
   end
 
+  -- The panel vbox is the inner layout. Wrap it in an outer vbox slot whose
+  -- height constraint encodes the dialog-level sizing rule:
+  --   * `height = H`     -> outer constraint H — dialog is exactly that tall
+  --   * `max_height` set -> outer `fit`        — dialog shrinks to content, capped at the anchor extent
+  --   * neither          -> outer `"60%"`      — dock_bottom anchor default
+  local panel_vbox = smelt.ui.layout.vbox(layout_items)
+  local outer_height
+  if opts.max_height ~= nil then
+    outer_height = "fit"
+  elseif opts.height ~= nil then
+    outer_height = opts.height
+  else
+    outer_height = "60%"
+  end
+  local outer = smelt.ui.layout.vbox({
+    { panel_vbox, height = outer_height },
+  })
+
   smelt.ui.overlay.open({
     title        = title,
     anchor       = "dock_bottom",
-    height       = opts.height,        -- nil if max_height is set; anchor default kicks in
-    max_height   = opts.max_height,    -- nil unless caller opted into fit-mode
     border       = { top = "SmeltAccent" },
     modal        = true,
     blocks_agent = opts.blocks_agent or false,
-    layout       = smelt.ui.layout.vbox(layout_items),
+    layout       = outer,
   })
 
   return leaves[1], leaves

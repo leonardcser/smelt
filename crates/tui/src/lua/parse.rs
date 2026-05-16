@@ -160,6 +160,7 @@ pub(crate) fn title(v: Option<mlua::Value>) -> Result<Option<Line<'static>>, Str
 /// - omitted / `nil` → `Fill`
 /// - integer `n > 0` → `Length(n)`
 /// - string `"fill"` / `"fit"` → `Fill` / `Fit`
+/// - string `"N%"` → `Percentage(N)` (shorthand for the common case)
 /// - string `"min:N"` / `"max:N"` / `"pct:N"` / `"ratio:N/M"` →
 ///   matching variant; `"length:N"` / `"len:N"` are aliases of an
 ///   integer literal.
@@ -189,6 +190,9 @@ fn constraint_str(raw: &str, ctx: &str) -> Result<Constraint, String> {
     if s == "fit" {
         return Ok(Constraint::Fit);
     }
+    if let Some(rest) = s.strip_suffix('%') {
+        return parse_u16(rest.trim(), ctx).map(Constraint::Percentage);
+    }
     if let Some((kind, rest)) = s.split_once(':') {
         let rest = rest.trim();
         return match kind.trim() {
@@ -211,7 +215,7 @@ fn constraint_str(raw: &str, ctx: &str) -> Result<Constraint, String> {
         };
     }
     Err(format!(
-        "{ctx}: unknown value '{s}' (expected fit|fill|'<kind>:<n>')"
+        "{ctx}: unknown value '{s}' (expected fit|fill|'N%'|'<kind>:<n>')"
     ))
 }
 
@@ -595,6 +599,11 @@ mod tests {
             (r#"return "min:5""#, Constraint::Min(5)),
             (r#"return "max:10""#, Constraint::Max(10)),
             (r#"return "pct:30""#, Constraint::Percentage(30)),
+            // `"N%"` is the percentage shorthand. Same Percentage variant as
+            // `"pct:N"`; both exist so users coming from CSS-style sizing get
+            // the obvious form.
+            (r#"return "30%""#, Constraint::Percentage(30)),
+            (r#"return "100%""#, Constraint::Percentage(100)),
             (r#"return "ratio:1/3""#, Constraint::Ratio(1, 3)),
             (r#"return "length:7""#, Constraint::Length(7)),
         ] {
