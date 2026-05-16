@@ -160,8 +160,10 @@ impl VimContext<'_> {
         self.vim_state.clamp_visual_anchor(self.buf);
     }
 
-    /// Replace `buf[start..end]` with `text`, removing any attachment markers in
-    /// that range from `self.attachments`. Endpoints are snapped.
+    /// Replace `buf[start..end]` with `text`. Attachment markers that survive
+    /// into `text` (e.g. case-mapping a marker yields the same marker) keep
+    /// their attachment_ids; only markers that are actually removed get
+    /// drained. Endpoints are snapped.
     fn replace_range(&mut self, start: usize, end: usize, text: &str) {
         let start = smelt_buffer::text::snap(self.buf, start);
         let end = smelt_buffer::text::snap(self.buf, end).max(start);
@@ -174,9 +176,11 @@ impl VimContext<'_> {
                 .chars()
                 .filter(|&c| c == ATTACHMENT_MARKER)
                 .count();
+            let kept = text.chars().filter(|&c| c == ATTACHMENT_MARKER).count();
+            let drop = in_range.saturating_sub(kept);
             self.buf.replace_range(start..end, text);
-            if in_range > 0 {
-                let drain_end = (before + in_range).min(self.attachments.len());
+            if drop > 0 {
+                let drain_end = (before + drop).min(self.attachments.len());
                 let drain_start = before.min(drain_end);
                 self.attachments.drain(drain_start..drain_end);
             }
