@@ -828,6 +828,48 @@ mod tests {
         assert_eq!(title2, "new title", "title should refresh in place");
     }
 
+    /// `apply_window_opts` should only mutate fields that are present in
+    /// opts. A named refresh that omits `wrap` must NOT silently reset
+    /// wrap to its default — that would clobber the prior value.
+    #[test]
+    fn named_win_refresh_preserves_wrap_when_omitted() {
+        let mut app = TestApp::builder().build();
+        let _guard = crate::lua::install_app_ptr(&mut app.app);
+        let lua = &app.app.lua.lua;
+
+        let win_id: u64 = lua
+            .load(
+                r#"
+                local buf = smelt.buf.create({ name = "w.buf" })
+                local win = smelt.win.open(buf, { name = "w.win", wrap = false })
+                return win
+                "#,
+            )
+            .eval()
+            .expect("first open");
+
+        let wid = crate::smelt_term::WinId(win_id);
+        assert!(
+            !app.app.ui.win(wid).unwrap().wrap,
+            "wrap should be false after explicit open"
+        );
+
+        // Re-open with the same name but no `wrap` key → wrap should stay false.
+        lua.load(
+            r#"
+            local buf = smelt.buf.create({ name = "w.buf" })
+            smelt.win.open(buf, { name = "w.win" })
+            "#,
+        )
+        .exec()
+        .expect("refresh");
+
+        assert!(
+            !app.app.ui.win(wid).unwrap().wrap,
+            "wrap must be preserved across named refresh (regression)"
+        );
+    }
+
     /// `buf.create({ name = ... })` and `win.open(buf, { name = ... })`
     /// should hand back the SAME ids when called twice with the same name.
     #[test]
@@ -1258,6 +1300,167 @@ mod tests {
                 "dropped plugin's state should be swept"
             );
         }
+    }
+
+    /// **Single ledger** for "what does `/reload` clear?" Touches every
+    /// Lua-side surface, triggers reload, asserts each is in the expected
+    /// post-reload state. New `LuaShared` registries or TUI-side caches
+    /// that hold Lua handles MUST add a check here — otherwise the
+    /// reload contract is silently broken.
+    #[test]
+    fn reload_clears_every_lua_surface() {
+        let tmp = tempfile::tempdir().unwrap();
+        let init = tmp.path().join("init.lua");
+        // Populate every observable surface from user init.lua so the
+        // reload-with-empty-init test below can assert each is empty.
+        std::fs::write(
+            &init,
+            r#"
+            -- LuaShared registries
+            smelt.cmd.register("seed_cmd", function() end)
+            smelt.keymap.set("n", "<C-g>", function() end)
+            smelt.statusline.register("seed_src", function() return {} end)
+            smelt.tools.register({
+                name = "seed_tool",
+                description = "",
+                parameters = { type = "object", properties = {} },
+                execute = function() return "" end,
+            })
+            smelt.tools.middleware("", { before = function() end })
+            smelt.provider.middleware({ on_request = function() end })
+
+            -- core::timers (Lua-side)
+            smelt.timer.every(100000, function() end)
+
+            -- in-flight task (cancel_and_clear path)
+            smelt.spawn(function()
+                smelt.sleep(100000)
+            end)
+
+            -- Anonymous + named UI resources
+            local b1 = smelt.buf.create({ name = "seed.buf" })
+            local w1 = smelt.win.open(b1, { name = "seed.win" })
+            smelt.ui.overlay.open({
+                name = "seed.ov",
+                anchor = "screen_at", corner = "nw",
+                row = 0, col = 0, width = 30, height = 8,
+                layout = smelt.ui.layout.leaf(w1),
+            })
+            local b2 = smelt.buf.create()
+            local w2 = smelt.win.open(b2, {})
+            smelt.ui.overlay.open({
+                anchor = "screen_at", corner = "se",
+                row = 0, col = 0, width = 20, height = 5,
+                layout = smelt.ui.layout.leaf(w2),
+            })
+
+            -- smelt.state slot
+            local s = smelt.state("seed_plugin")
+            s.open = true
+            "#,
+        )
+        .unwrap();
+
+        let mut app = TestApp::builder().with_init_lua(&init).build();
+        let shared = app.app.lua.shared().core.clone();
+
+        // Pre-reload: every surface has at least the seeded entry.
+        assert!(shared.commands.lock().unwrap().contains_key("seed_cmd"));
+        assert!(shared
+            .keymaps
+            .lock()
+            .unwrap()
+            .keys()
+            .any(|(_, c)| c == "<C-g>"));
+        assert!(shared
+            .statusline_sources
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|(n, _)| n == "seed_src"));
+        assert!(shared.tools.lock().unwrap().contains_key("seed_tool"));
+        assert!(!shared.hooks.tool_before.is_empty());
+        assert!(!shared.hooks.provider_request.is_empty());
+        assert!(!app.app.core.timers.is_empty());
+        assert!(!shared.tasks.lock().unwrap().is_empty());
+        let anon_overlay = (1u32..)
+            .map(crate::smelt_term::OverlayId)
+            .find(|id| {
+                Some(*id) != app.app.ui.named_overlay("seed.ov")
+                    && app.app.ui.overlay(*id).is_some()
+            })
+            .expect("anonymous overlay present");
+
+        // Edit init.lua to empty + drop the "seed_plugin" state slot.
+        std::fs::write(&init, "").unwrap();
+        {
+            let _g = crate::lua::install_app_ptr(&mut app.app);
+            app.app.reload_lua();
+        }
+
+        // Post-reload: every "user-registered" surface is empty; named UI
+        // resources survive; anonymous ones are reaped; state slot for
+        // the dropped plugin is swept.
+        assert!(
+            !shared.commands.lock().unwrap().contains_key("seed_cmd"),
+            "user command cleared"
+        );
+        assert!(
+            !shared
+                .keymaps
+                .lock()
+                .unwrap()
+                .keys()
+                .any(|(_, c)| c == "<C-g>"),
+            "user keymap cleared"
+        );
+        assert!(
+            !shared
+                .statusline_sources
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|(n, _)| n == "seed_src"),
+            "user statusline source cleared"
+        );
+        assert!(
+            !shared.tools.lock().unwrap().contains_key("seed_tool"),
+            "user tool cleared"
+        );
+        assert!(
+            shared.hooks.tool_before.is_empty(),
+            "tool middleware cleared"
+        );
+        assert!(
+            shared.hooks.provider_request.is_empty(),
+            "provider middleware cleared"
+        );
+        assert!(app.app.core.timers.is_empty(), "timers cleared");
+        assert!(shared.tasks.lock().unwrap().is_empty(), "tasks cleared");
+        assert!(
+            shared.task_inbox.lock().unwrap().is_empty(),
+            "task_inbox drained"
+        );
+        assert!(
+            shared.json_inbox.lock().unwrap().is_empty(),
+            "json_inbox drained"
+        );
+        assert!(
+            app.app.ui.named_overlay("seed.ov").is_some(),
+            "named overlay survives"
+        );
+        assert!(
+            app.app.ui.overlay(anon_overlay).is_none(),
+            "anonymous overlay reaped"
+        );
+        let dropped_state: bool = app
+            .app
+            .lua
+            .lua
+            .load("return __smelt_state__.seed_plugin ~= nil")
+            .eval()
+            .unwrap();
+        assert!(!dropped_state, "dropped-plugin state slot swept");
     }
 
     /// In-flight `smelt.spawn` coroutines must be cancelled before

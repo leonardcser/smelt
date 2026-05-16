@@ -404,6 +404,28 @@ impl Ui {
         self.named_overlays.insert(name.into(), id);
     }
 
+    // ── Named-refresh shortcuts ──────────────────────────────────────
+    //
+    // Each `lookup_named_X_mut` fuses the two-step `named_X` →
+    // `X_mut` Option chain that every Lua refresh path needs. Callers
+    // get both the stable id (to return to Lua) and a mutable reference
+    // (to apply opts) in one go.
+
+    pub fn lookup_named_buf_mut(&mut self, name: &str) -> Option<(BufId, &mut Buffer)> {
+        let bid = self.named_bufs.get(name).copied()?;
+        let buf = self.bufs.get_mut(&bid)?;
+        Some((bid, buf))
+    }
+
+    pub fn lookup_named_overlay_mut(&mut self, name: &str) -> Option<(OverlayId, &mut Overlay)> {
+        let id = self.named_overlays.get(name).copied()?;
+        let ov = self
+            .overlays
+            .iter_mut()
+            .find_map(|(oid, ov)| (*oid == id).then_some(ov))?;
+        Some((id, ov))
+    }
+
     /// Close every overlay whose id isn't in `named_overlays` and remove
     /// every Lua-created buffer (id ≥ `lua_buf_threshold`) that no
     /// surviving window references. Used by `/reload` so anonymous

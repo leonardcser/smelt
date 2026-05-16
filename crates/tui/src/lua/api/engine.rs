@@ -182,6 +182,13 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
                     app.notify_error("cannot reload while agent is working".into());
                     return;
                 }
+                if app.ui.active_modal().is_some() {
+                    // Modal overlays (dialogs, confirm pickers) hold Lua
+                    // callbacks; clearing them mid-flight would invalidate
+                    // the user's pending action.
+                    app.notify_error("cannot reload while a modal dialog is open".into());
+                    return;
+                }
                 app.reload_lua();
             });
             Ok(())

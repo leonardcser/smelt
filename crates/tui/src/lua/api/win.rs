@@ -145,6 +145,9 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
                         w.gutter = Some(std::sync::Arc::new(
                             crate::smelt_term::gutter::LineNumberGutter::new(),
                         ));
+                        // Lua API default: soft-wrap on. `apply_window_opts`
+                        // below overrides this only when `opts.wrap` is set.
+                        w.wrap = true;
                     }
                     if let Some(opts_ref) = opts.as_ref() {
                         apply_window_opts(app, win_id, opts_ref);
@@ -451,10 +454,8 @@ fn apply_window_opts(
     let Some(w) = app.ui.win_mut(win_id) else {
         return;
     };
-    if let Ok(Some(wrap)) = opts.get::<Option<bool>>("wrap") {
+    if let Ok(wrap) = opts.get::<bool>("wrap") {
         w.wrap = wrap;
-    } else if !opts.contains_key("wrap").unwrap_or(true) {
-        w.wrap = true;
     }
     if let Ok(focusable) = opts.get::<bool>("focusable") {
         w.focusable = focusable;

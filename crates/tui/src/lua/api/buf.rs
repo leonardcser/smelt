@@ -148,12 +148,10 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
                 let result_id = crate::lua::with_app(|app| -> u64 {
                     // Named buffer that already exists — return existing id, refresh mutable opts.
                     if let Some(ref n) = name {
-                        if let Some(bid) = app.ui.named_buf(n) {
-                            if let Some(buf) = app.ui.buf_mut(bid) {
-                                buf.readonly = readonly;
-                                if let Some(fmt) = format {
-                                    buf.set_parser(fmt.into_parser());
-                                }
+                        if let Some((bid, buf)) = app.ui.lookup_named_buf_mut(n) {
+                            buf.readonly = readonly;
+                            if let Some(fmt) = format {
+                                buf.set_parser(fmt.into_parser());
                             }
                             return bid.0;
                         }

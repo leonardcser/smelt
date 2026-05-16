@@ -54,17 +54,15 @@ pub(crate) fn open_overlay(app: &mut TuiApp, opts: mlua::Table) -> Result<u64, S
     }
 
     if let Some(ref n) = name {
-        if let Some(existing) = app.ui.named_overlay(n) {
-            if let Some(ov) = app.ui.overlay_mut(existing) {
-                ov.layout = layout;
-                ov.anchor = anchor;
-                ov.z = z;
-                ov.modal = modal;
-                ov.blocks_agent = blocks_agent;
-                ov.draggable = draggable;
-                ov.resizable = resizable;
-                return Ok(existing.0 as u64);
-            }
+        if let Some((id, ov)) = app.ui.lookup_named_overlay_mut(n) {
+            ov.layout = layout;
+            ov.anchor = anchor;
+            ov.z = z;
+            ov.modal = modal;
+            ov.blocks_agent = blocks_agent;
+            ov.draggable = draggable;
+            ov.resizable = resizable;
+            return Ok(id.0 as u64);
         }
     }
 

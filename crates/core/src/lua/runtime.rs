@@ -315,14 +315,7 @@ impl LuaRuntime {
     /// Returns any load error.
     pub fn reload(&mut self, cwd: Option<&std::path::Path>) -> Option<String> {
         self.load_error = None;
-        // Cancel + drop any in-flight Lua coroutines before wiping the
-        // registries they reference — letting them resume on the next
-        // drive tick would invoke stale handles.
-        if let Ok(mut tasks) = self.shared.tasks.lock() {
-            tasks.cancel_and_clear();
-        }
-        self.shared.clear_lua_handles();
-        self.wipe_loaded_modules();
+        self.clear_for_reload();
         if let Err(e) = load_bootstrap_chunks(&self.lua) {
             self.load_error = Some(format!("bootstrap: {e}"));
             return self.load_error.clone();
@@ -335,6 +328,29 @@ impl LuaRuntime {
         }
         let _ = self.lua.load("smelt.__sweep_state()").exec();
         self.load_error.clone()
+    }
+
+    /// **Single ledger** of every Lua-side surface wiped at the top of a
+    /// `/reload` cycle. Add new `LuaShared` registries here — `reload()`
+    /// is the only caller, and the matching reload-survival test asserts
+    /// every clearable surface is empty after calling this.
+    ///
+    /// Order matters: cancel in-flight tasks *before* clearing handles so
+    /// no parked coroutine resumes with stale registry keys; drain inboxes
+    /// before re-running modules so the new cycle starts with an empty
+    /// resume queue.
+    fn clear_for_reload(&mut self) {
+        if let Ok(mut tasks) = self.shared.tasks.lock() {
+            tasks.cancel_and_clear();
+        }
+        if let Ok(mut q) = self.shared.task_inbox.lock() {
+            q.clear();
+        }
+        if let Ok(mut q) = self.shared.json_inbox.lock() {
+            q.clear();
+        }
+        self.shared.clear_lua_handles();
+        self.wipe_loaded_modules();
     }
 
     pub fn load_init(&mut self, path: &std::path::Path) -> LuaResult<()> {
