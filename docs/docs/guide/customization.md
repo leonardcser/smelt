@@ -184,6 +184,53 @@ processes and their tools become available to the agent. Register them in
 [Configuration Reference](../reference/configuration.md#mcp-model-context-protocol)
 for setup.
 
+Inspect connected servers at runtime with `smelt.mcp.list()`,
+`smelt.mcp.tools(server?)`, and `smelt.mcp.status(name)`. Useful for
+statusline indicators and conditional keymaps.
+
+## Provider Middleware
+
+Hook into the provider request/response cycle to log, redact, or rewrite
+payloads:
+
+```lua
+smelt.provider.middleware({
+  on_request = function(messages)
+    -- inspect or return a replacement messages array
+  end,
+  on_response = function(message)
+    -- inspect or return a replacement assistant message
+  end,
+})
+```
+
+Hooks fire in registration order; each hook sees the previous one's
+replacement. To observe streaming tokens without mutating mid-stream, use
+`smelt.cell.subscribe("stream_delta", ...)`. See the
+[`smelt.provider` reference](../reference/api/provider.md) for details.
+
+## Early-Phase Config (`early.lua`)
+
+Drop a `~/.config/smelt/early.lua` (or `.smelt/early.lua`) that runs *before*
+the binary parses argv. Use it to declare CLI flags or disable bundled
+modules. The rest of `init.lua` still runs as normal afterwards.
+
+```lua
+-- ~/.config/smelt/early.lua
+smelt.cli.register_flag({ name = "experimental", kind = "boolean" })
+smelt.builtins.disable("tools.web_fetch")
+```
+
+```lua
+-- ~/.config/smelt/init.lua
+if smelt.cli.get("experimental") then
+  -- ...
+end
+```
+
+See [`smelt.cli`](../reference/api/cli.md) and
+[`smelt.builtins`](../reference/api/builtins.md).
+
 ## Custom Instructions (AGENTS.md)
 
 Place an `AGENTS.md` file in your project root (or `~/.config/smelt/AGENTS.md`
