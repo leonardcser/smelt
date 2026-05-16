@@ -47,6 +47,10 @@ impl PromptState {
             self.recompute_completer(ctx.as_ref());
             return;
         }
+        // A degenerate `selection_anchor` (set by a shift-key whose motion
+        // resolved to no movement, e.g. Shift+End at EOL) lingers as a
+        // byte position that the source mutation below would orphan.
+        ctx.win.selection_anchor = None;
         if ctx.win.cpos == 0 {
             return;
         }

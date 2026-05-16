@@ -1087,6 +1087,14 @@ impl TuiApp {
             let win = win.expect("window");
             let buf = buf.expect("buffer");
             win.cpos = new_cpos;
+            // A shift-motion that resolved to no movement (e.g. Shift+End at
+            // EOL) leaves `selection_anchor == cpos` — a degenerate, empty
+            // selection that downstream code treats as "no selection" but
+            // whose anchor still points into the buffer. Clear it so a
+            // follow-up source-shrinking edit can't orphan it.
+            if win.selection_anchor == Some(win.cpos) {
+                win.selection_anchor = None;
+            }
             win.resync(buf, viewport_rows);
             return Status::Consumed;
         }
