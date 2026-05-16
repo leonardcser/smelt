@@ -92,10 +92,7 @@ pub(crate) fn run_command(app: &mut TuiApp, line: &str) -> CommandAction {
     let (name, arg) = match body.splitn(2, char::is_whitespace).collect::<Vec<_>>()[..] {
         [n, a] => {
             let a = a.trim().to_string();
-            (
-                n.to_string(),
-                if a.is_empty() { None } else { Some(a) },
-            )
+            (n.to_string(), if a.is_empty() { None } else { Some(a) })
         }
         _ => (body.to_string(), None),
     };

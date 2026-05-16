@@ -89,7 +89,7 @@ pub fn byte_of_char(s: &str, n: usize) -> usize {
 
 /// Borrowed slice that never panics. Out-of-range / non-boundary endpoints
 /// snap to the nearest valid positions; an inverted range yields `""`.
-pub fn safe_slice(s: &str, range: core::ops::Range<usize>) -> &str {
+pub fn slice(s: &str, range: core::ops::Range<usize>) -> &str {
     let start = snap(s, range.start);
     let end = snap(s, range.end);
     if start >= end {
@@ -102,7 +102,7 @@ pub fn safe_slice(s: &str, range: core::ops::Range<usize>) -> &str {
 /// clamps to `s.len()`. Inverted ranges insert `with` at the snapped start
 /// (so a degenerate input still does the closest sane thing instead of
 /// silently dropping the write).
-pub fn safe_replace_range(s: &mut String, range: core::ops::Range<usize>, with: &str) {
+pub fn replace_range(s: &mut String, range: core::ops::Range<usize>, with: &str) {
     let start = snap(s, range.start);
     let end = snap(s, range.end).max(start);
     s.replace_range(start..end, with);
@@ -110,7 +110,7 @@ pub fn safe_replace_range(s: &mut String, range: core::ops::Range<usize>, with: 
 
 /// Insert `ch` at `pos`. Snaps and clamps; returns the snapped insertion point
 /// so callers can advance cursors correctly.
-pub fn safe_insert(s: &mut String, pos: usize, ch: char) -> usize {
+pub fn insert(s: &mut String, pos: usize, ch: char) -> usize {
     let p = snap(s, pos);
     s.insert(p, ch);
     p
@@ -118,7 +118,7 @@ pub fn safe_insert(s: &mut String, pos: usize, ch: char) -> usize {
 
 /// Insert `ins` at `pos`. Snaps and clamps; returns the snapped insertion point
 /// so callers can advance cursors correctly.
-pub fn safe_insert_str(s: &mut String, pos: usize, ins: &str) -> usize {
+pub fn insert_str(s: &mut String, pos: usize, ins: &str) -> usize {
     let p = snap(s, pos);
     s.insert_str(p, ins);
     p
@@ -132,62 +132,62 @@ mod tests {
     const CJK: &str = "日本語";
 
     #[test]
-    fn safe_slice_snaps_non_boundary_endpoints() {
+    fn slice_snaps_non_boundary_endpoints() {
         // Mid-char start (inside '日'), mid-char end (inside '語') → "日本".
-        let out = safe_slice(CJK, 1..7);
+        let out = slice(CJK, 1..7);
         assert_eq!(out, "日本");
     }
 
     #[test]
-    fn safe_slice_clamps_past_end() {
-        assert_eq!(safe_slice(CJK, 0..9999), CJK);
-        assert_eq!(safe_slice(CJK, 100..200), "");
+    fn slice_clamps_past_end() {
+        assert_eq!(slice(CJK, 0..9999), CJK);
+        assert_eq!(slice(CJK, 100..200), "");
     }
 
     #[test]
-    fn safe_slice_inverted_range_returns_empty() {
+    fn slice_inverted_range_returns_empty() {
         // `#[allow]` because the empty range is the point of the test.
         #[allow(clippy::reversed_empty_ranges)]
         let r = 4..2;
-        assert_eq!(safe_slice("hello", r), "");
+        assert_eq!(slice("hello", r), "");
     }
 
     #[test]
-    fn safe_replace_range_with_empty_drains_snapped_range() {
+    fn replace_range_with_empty_drains_snapped_range() {
         let mut s = format!("a{CJK}b");
-        safe_replace_range(&mut s, 2..5, "");
+        replace_range(&mut s, 2..5, "");
         assert_eq!(s, "a本語b");
     }
 
     #[test]
-    fn safe_replace_range_handles_inverted_input() {
+    fn replace_range_handles_inverted_input() {
         let mut s = String::from("abc");
         #[allow(clippy::reversed_empty_ranges)]
         let r = 2..1;
         // Degenerate ranges insert at the snapped start.
-        safe_replace_range(&mut s, r, "X");
+        replace_range(&mut s, r, "X");
         assert_eq!(s, "abXc");
     }
 
     #[test]
-    fn safe_replace_range_clamps_past_end_and_snaps() {
+    fn replace_range_clamps_past_end_and_snaps() {
         let mut s = CJK.to_string();
-        safe_replace_range(&mut s, 4..200, "_");
+        replace_range(&mut s, 4..200, "_");
         assert_eq!(s, "日_");
     }
 
     #[test]
-    fn safe_insert_snaps_non_boundary_pos() {
+    fn insert_snaps_non_boundary_pos() {
         let mut s = CJK.to_string();
-        let actual = safe_insert(&mut s, 4, 'X');
+        let actual = insert(&mut s, 4, 'X');
         assert_eq!(actual, 3);
         assert_eq!(s, "日X本語");
     }
 
     #[test]
-    fn safe_insert_str_snaps_and_clamps() {
+    fn insert_str_snaps_and_clamps() {
         let mut s = CJK.to_string();
-        let actual = safe_insert_str(&mut s, 9999, "_end");
+        let actual = insert_str(&mut s, 9999, "_end");
         assert_eq!(actual, s.len() - "_end".len());
         assert_eq!(s, "日本語_end");
     }

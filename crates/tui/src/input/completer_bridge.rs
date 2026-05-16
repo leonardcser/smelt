@@ -3,7 +3,7 @@
 use super::{cursor_in_at_zone, find_slash_anchor, Action, PromptCtx, PromptCtxRef, PromptState};
 use crate::completer::{Completer, CompleterKind};
 use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
-use smelt_buffer::text::safe_slice;
+use smelt_buffer::text::slice;
 
 impl PromptState {
     /// Handle event as completer navigation. Returns `Some` if consumed.
@@ -117,10 +117,10 @@ impl PromptState {
             ctx.buf.remove_attachments_in_range(start, end);
             if comp.kind == CompleterKind::CommandArg {
                 // Replace just the argument portion after the command prefix.
-                smelt_buffer::text::safe_replace_range(ctx.buf.source_mut(), start..end, label);
+                smelt_buffer::text::replace_range(ctx.buf.source_mut(), start..end, label);
                 ctx.win.cpos = start + label.len();
             } else {
-                let trigger = safe_slice(ctx.buf.source(), start..start + 1);
+                let trigger = slice(ctx.buf.source(), start..start + 1);
                 let replacement = if trigger == "/" {
                     format!("/{} ", label)
                 } else if label.contains(' ') {
@@ -128,11 +128,7 @@ impl PromptState {
                 } else {
                     format!("@{} ", label)
                 };
-                smelt_buffer::text::safe_replace_range(
-                    ctx.buf.source_mut(),
-                    start..end,
-                    &replacement,
-                );
+                smelt_buffer::text::replace_range(ctx.buf.source_mut(), start..end, &replacement);
                 ctx.win.cpos = start + replacement.len();
             }
         }
@@ -156,7 +152,7 @@ impl PromptState {
                 return;
             }
             if find_slash_anchor(ctx.buf.source(), ctx.win.cpos).is_some() {
-                let query = safe_slice(ctx.buf.source(), 1..ctx.win.cpos).to_string();
+                let query = slice(ctx.buf.source(), 1..ctx.win.cpos).to_string();
                 self.set_or_update_completer(
                     CompleterKind::Command,
                     0,
@@ -175,7 +171,7 @@ impl PromptState {
     pub(super) fn recompute_completer(&mut self, ctx: PromptCtxRef<'_>) {
         if let Some(at_pos) = cursor_in_at_zone(ctx.buf.source(), ctx.win.cpos) {
             let query = if ctx.win.cpos > at_pos + 1 {
-                safe_slice(ctx.buf.source(), at_pos + 1..ctx.win.cpos).to_string()
+                slice(ctx.buf.source(), at_pos + 1..ctx.win.cpos).to_string()
             } else {
                 String::new()
             };
@@ -211,7 +207,7 @@ impl PromptState {
                 || (ctx.win.cpos == 0 && ctx.buf.source().starts_with('/'))
             {
                 let end = ctx.win.cpos.max(1);
-                let query = safe_slice(ctx.buf.source(), 1..end).to_string();
+                let query = slice(ctx.buf.source(), 1..end).to_string();
                 self.set_or_update_completer(
                     CompleterKind::Command,
                     0,
@@ -251,7 +247,7 @@ impl PromptState {
 
     fn arg_query(&self, ctx: PromptCtxRef<'_>, anchor: usize) -> String {
         if ctx.win.cpos > anchor {
-            safe_slice(ctx.buf.source(), anchor..ctx.win.cpos).to_string()
+            slice(ctx.buf.source(), anchor..ctx.win.cpos).to_string()
         } else {
             String::new()
         }

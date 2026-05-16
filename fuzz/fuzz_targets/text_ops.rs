@@ -12,14 +12,14 @@
 //!  - source is valid UTF-8
 //!  - every returned/derived byte offset lies on a char boundary
 //!  - inverted ranges produce empty / clamped results, never panics
-//!  - safe_replace_range round-trips: result.contains(replacement)
+//!  - replace_range round-trips: result.contains(replacement)
 //!  - boundary helpers are monotonic relative to input
 
 use arbitrary::Arbitrary;
 use libfuzzer_sys::fuzz_target;
 use smelt_buffer::text::{
     byte_of_char, byte_to_cell, cell_to_byte, char_pos, line_start_offsets, next_char_boundary,
-    prev_char_boundary, safe_insert, safe_insert_str, safe_replace_range, safe_slice, snap,
+    prev_char_boundary, insert, insert_str, replace_range, slice, snap,
 };
 
 #[derive(Arbitrary, Debug)]
@@ -30,17 +30,17 @@ enum TextOp {
     Prev { pos: u32 },
     /// `next_char_boundary` must be ≥ pos and on a boundary.
     Next { pos: u32 },
-    /// `safe_slice` must not panic; returned slice must be a substring.
+    /// `slice` must not panic; returned slice must be a substring.
     Slice { start: u32, end: u32 },
-    /// `safe_replace_range` must contain the replacement at the snapped start.
+    /// `replace_range` must contain the replacement at the snapped start.
     Replace {
         start: u32,
         end: u32,
         with: String,
     },
-    /// `safe_insert` returns the insertion offset on a boundary.
+    /// `insert` returns the insertion offset on a boundary.
     InsertChar { pos: u32, ch: u32 },
-    /// `safe_insert_str` returns the insertion offset on a boundary.
+    /// `insert_str` returns the insertion offset on a boundary.
     InsertStr { pos: u32, s: String },
     /// `byte_to_cell` ↔ `cell_to_byte` round-trip on a single line.
     ByteCell { byte: u32 },
@@ -87,36 +87,36 @@ fn run(initial: String, ops: Vec<TextOp>) {
                 assert!(p >= snap(&s, pos as usize), "next < snap(pos)");
             }
             TextOp::Slice { start, end } => {
-                let slice = safe_slice(&s, (start as usize)..(end as usize));
+                let slice = slice(&s, (start as usize)..(end as usize));
                 // Slice must be a contiguous substring (or empty).
                 if !slice.is_empty() {
                     assert!(
                         s.contains(slice),
-                        "safe_slice produced non-substring {slice:?} of {s:?}"
+                        "slice produced non-substring {slice:?} of {s:?}"
                     );
                 }
             }
             TextOp::Replace { start, end, with } => {
                 let with_clone = with.clone();
-                safe_replace_range(&mut s, (start as usize)..(end as usize), &with);
+                replace_range(&mut s, (start as usize)..(end as usize), &with);
                 if !with_clone.is_empty() {
                     assert!(
                         s.contains(&with_clone),
-                        "safe_replace_range dropped replacement"
+                        "replace_range dropped replacement"
                     );
                 }
             }
             TextOp::InsertChar { pos, ch } => {
                 let c = char::from_u32(ch).unwrap_or('?');
                 let pre_len = s.len();
-                let p = safe_insert(&mut s, pos as usize, c);
-                assert_boundary(&s, p, "safe_insert");
+                let p = insert(&mut s, pos as usize, c);
+                assert_boundary(&s, p, "insert");
                 assert_eq!(s.len(), pre_len + c.len_utf8());
             }
             TextOp::InsertStr { pos, s: ins } => {
                 let pre_len = s.len();
-                let p = safe_insert_str(&mut s, pos as usize, &ins);
-                assert_boundary(&s, p, "safe_insert_str");
+                let p = insert_str(&mut s, pos as usize, &ins);
+                assert_boundary(&s, p, "insert_str");
                 assert_eq!(s.len(), pre_len + ins.len());
             }
             TextOp::ByteCell { byte } => {

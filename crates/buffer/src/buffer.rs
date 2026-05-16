@@ -1528,12 +1528,12 @@ mod tests {
             for &a in &captured {
                 for &b in &captured {
                     let _ = buf.copy_range(a..b);
-                    let _ = crate::text::safe_slice(buf.source(), a..b);
+                    let _ = crate::text::slice(buf.source(), a..b);
 
                     let mut s = buf.source().to_string();
-                    crate::text::safe_replace_range(&mut s, a..b, "");
+                    crate::text::replace_range(&mut s, a..b, "");
                     let mut s = buf.source().to_string();
-                    crate::text::safe_replace_range(&mut s, a..b, "X");
+                    crate::text::replace_range(&mut s, a..b, "X");
 
                     let mut kr = crate::kill_ring::KillRing::new();
                     kr.kill("seed".into());

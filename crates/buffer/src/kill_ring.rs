@@ -74,7 +74,7 @@ impl KillRing {
         if self.current.is_empty() {
             return None;
         }
-        let cpos = crate::text::safe_insert_str(buf, cpos, &self.current);
+        let cpos = crate::text::insert_str(buf, cpos, &self.current);
         let end = cpos + self.current.len();
         self.last_yank = Some((cpos, end));
         self.pop_idx = 0;
@@ -91,7 +91,7 @@ impl KillRing {
         let end = crate::text::snap(buf, end).max(start);
         let text = self.history[self.pop_idx % self.history.len()].clone();
         let new_end = start + text.len();
-        crate::text::safe_replace_range(buf, start..end, &text);
+        crate::text::replace_range(buf, start..end, &text);
         self.last_yank = Some((start, new_end));
         self.pop_idx = (self.pop_idx + 1) % self.history.len();
         Some(new_end)

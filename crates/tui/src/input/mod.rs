@@ -202,7 +202,7 @@ impl PromptState {
         let (start, end) = self.selection_range(ctx.as_ref())?;
         let deleted = ctx.buf.copy_range(start..end);
         ctx.buf.remove_attachments_in_range(start, end);
-        smelt_buffer::text::safe_replace_range(ctx.buf.source_mut(), start..end, "");
+        smelt_buffer::text::replace_range(ctx.buf.source_mut(), start..end, "");
         ctx.win.cpos = start;
         ctx.win.selection_anchor = None;
         ctx.win.clamp_anchors_to_source(ctx.buf.source());
@@ -306,7 +306,7 @@ impl PromptState {
         }
         self.save_undo(ctx);
         let inserted = prefix.len();
-        smelt_buffer::text::safe_insert_str(ctx.buf.source_mut(), 0, &prefix);
+        smelt_buffer::text::insert_str(ctx.buf.source_mut(), 0, &prefix);
         ctx.win.cpos += inserted;
         ctx.win.selection_anchor = None;
         self.from_paste = false;
@@ -578,7 +578,7 @@ impl PromptState {
                     self.save_undo(ctx);
                     self.delete_selection(ctx);
                 }
-                let p = smelt_buffer::text::safe_insert(ctx.buf.source_mut(), ctx.win.cpos, '\n');
+                let p = smelt_buffer::text::insert(ctx.buf.source_mut(), ctx.win.cpos, '\n');
                 ctx.win.cpos = p + 1;
                 self.close_completer();
                 Action::Redraw

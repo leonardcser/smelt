@@ -878,7 +878,6 @@ impl TuiApp {
         )
     }
 
-
     /// Unified viewer-key dispatcher. Applies a key to `win_id`, handling in
     /// order:
     ///   1. Page motion (PageUp/Down, Ctrl-u/d/b/f/y/e) — vim Normal only for

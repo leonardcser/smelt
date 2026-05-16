@@ -3,8 +3,7 @@
 use super::{PromptCtx, PromptCtxRef, PromptState, ATTACHMENT_MARKER};
 use crate::smelt_term::VimMode;
 use smelt_buffer::text::{
-    next_char_boundary, prev_char_boundary, safe_insert, safe_insert_str, safe_replace_range,
-    safe_slice,
+    insert, insert_str, next_char_boundary, prev_char_boundary, replace_range, slice,
 };
 use smelt_core::attachment::AttachmentId;
 
@@ -14,13 +13,9 @@ impl PromptState {
     /// drain the source bytes, then clamp cpos / selection_anchor /
     /// visual_anchor onto the new source. Use this whenever the range is
     /// computed from offsets that might also live in other anchors.
-    pub(super) fn safe_shrink(
-        &mut self,
-        ctx: &mut PromptCtx<'_>,
-        range: std::ops::Range<usize>,
-    ) {
+    pub(super) fn safe_shrink(&mut self, ctx: &mut PromptCtx<'_>, range: std::ops::Range<usize>) {
         ctx.buf.remove_attachments_in_range(range.start, range.end);
-        safe_replace_range(ctx.buf.source_mut(), range, "");
+        replace_range(ctx.buf.source_mut(), range, "");
         ctx.win.clamp_anchors_to_source(ctx.buf.source());
     }
 
@@ -50,7 +45,7 @@ impl PromptState {
             self.save_undo(ctx);
             self.delete_selection(ctx);
         }
-        let p = safe_insert(ctx.buf.source_mut(), ctx.win.cpos, c);
+        let p = insert(ctx.buf.source_mut(), ctx.win.cpos, c);
         ctx.win.cpos = p + c.len_utf8();
         ctx.win.clamp_anchors_to_source(ctx.buf.source());
         self.recompute_completer(ctx.as_ref());
@@ -94,13 +89,13 @@ impl PromptState {
     /// Byte offset of the opening `"` when the cursor is just after the closing `"` of a `"@path"` token.
     pub(super) fn quoted_at_ref_start(&self, ctx: PromptCtxRef<'_>) -> Option<usize> {
         let src = ctx.buf.source();
-        let before = safe_slice(src, 0..ctx.win.cpos);
+        let before = slice(src, 0..ctx.win.cpos);
         if !before.ends_with('"') {
             return None;
         }
         let inner = &before[..before.len() - 1];
         let at_pos = inner.rfind("@\"")?;
-        if at_pos > 0 && !safe_slice(src, 0..at_pos).ends_with(char::is_whitespace) {
+        if at_pos > 0 && !slice(src, 0..at_pos).ends_with(char::is_whitespace) {
             return None;
         }
         if inner[at_pos + 2..].contains('"') {
@@ -157,7 +152,7 @@ impl PromptState {
         clipboard: &mut crate::smelt_term::Clipboard,
     ) {
         let cpos = ctx.win.cpos;
-        let end = safe_slice(ctx.buf.source(), cpos..ctx.buf.source().len())
+        let end = slice(ctx.buf.source(), cpos..ctx.buf.source().len())
             .find('\n')
             .map(|i| cpos + i)
             .unwrap_or(ctx.buf.source().len());
@@ -172,7 +167,7 @@ impl PromptState {
         ctx: &mut PromptCtx<'_>,
         clipboard: &mut crate::smelt_term::Clipboard,
     ) {
-        let start = safe_slice(ctx.buf.source(), 0..ctx.win.cpos)
+        let start = slice(ctx.buf.source(), 0..ctx.win.cpos)
             .rfind('\n')
             .map(|i| i + 1)
             .unwrap_or(0);
@@ -185,7 +180,7 @@ impl PromptState {
     }
 
     pub(super) fn delete_to_start_of_line(&mut self, ctx: &mut PromptCtx<'_>) {
-        let start = safe_slice(ctx.buf.source(), 0..ctx.win.cpos)
+        let start = slice(ctx.buf.source(), 0..ctx.win.cpos)
             .rfind('\n')
             .map(|i| i + 1)
             .unwrap_or(0);
@@ -205,13 +200,13 @@ impl PromptState {
             return;
         }
         let cpos = ctx.win.cpos;
-        let upper: String = safe_slice(ctx.buf.source(), cpos..end).to_uppercase();
+        let upper: String = slice(ctx.buf.source(), cpos..end).to_uppercase();
         let new_len = upper.len();
         // ATTACHMENT_MARKER has no case mapping so any marker in the
         // range survives at the same chars()-index → attachment_ids
         // stays aligned. We still clamp anchors because case mapping
         // can change byte length (e.g. ß → SS).
-        safe_replace_range(ctx.buf.source_mut(), cpos..end, &upper);
+        replace_range(ctx.buf.source_mut(), cpos..end, &upper);
         ctx.win.cpos = cpos + new_len;
         ctx.win.clamp_anchors_to_source(ctx.buf.source());
         self.recompute_completer(ctx.as_ref());
@@ -227,9 +222,9 @@ impl PromptState {
             return;
         }
         let cpos = ctx.win.cpos;
-        let lower: String = safe_slice(ctx.buf.source(), cpos..end).to_lowercase();
+        let lower: String = slice(ctx.buf.source(), cpos..end).to_lowercase();
         let new_len = lower.len();
-        safe_replace_range(ctx.buf.source_mut(), cpos..end, &lower);
+        replace_range(ctx.buf.source_mut(), cpos..end, &lower);
         ctx.win.cpos = cpos + new_len;
         ctx.win.clamp_anchors_to_source(ctx.buf.source());
         self.recompute_completer(ctx.as_ref());
@@ -244,7 +239,7 @@ impl PromptState {
         if end == ctx.win.cpos {
             return;
         }
-        let word = safe_slice(ctx.buf.source(), ctx.win.cpos..end);
+        let word = slice(ctx.buf.source(), ctx.win.cpos..end);
         let mut cap = String::with_capacity(word.len());
         let mut first = true;
         for c in word.chars() {
@@ -257,7 +252,7 @@ impl PromptState {
         }
         let cpos = ctx.win.cpos;
         let cap_len = cap.len();
-        safe_replace_range(ctx.buf.source_mut(), cpos..end, &cap);
+        replace_range(ctx.buf.source_mut(), cpos..end, &cap);
         ctx.win.cpos = cpos + cap_len;
         ctx.win.clamp_anchors_to_source(ctx.buf.source());
         self.recompute_completer(ctx.as_ref());
@@ -328,25 +323,25 @@ impl PromptState {
 
         // Mark from_paste when inserting at the beginning of the current line
         // so pasted content starting with `!` isn't treated as a shell escape.
-        let line_start = safe_slice(ctx.buf.source(), 0..ctx.win.cpos)
+        let line_start = slice(ctx.buf.source(), 0..ctx.win.cpos)
             .rfind('\n')
             .map(|i| i + 1)
             .unwrap_or(0);
         if ctx.win.cpos == line_start {
             self.from_paste = true;
         }
-        let p = safe_insert_str(ctx.buf.source_mut(), ctx.win.cpos, &data);
+        let p = insert_str(ctx.buf.source_mut(), ctx.win.cpos, &data);
         ctx.win.cpos = p + data.len();
         ctx.win.clamp_anchors_to_source(ctx.buf.source());
     }
 
     pub(super) fn insert_attachment_id(&mut self, ctx: &mut PromptCtx<'_>, id: AttachmentId) {
-        let idx = safe_slice(ctx.buf.source(), 0..ctx.win.cpos)
+        let idx = slice(ctx.buf.source(), 0..ctx.win.cpos)
             .chars()
             .filter(|&c| c == ATTACHMENT_MARKER)
             .count();
         ctx.buf.attachment_ids.insert(idx, id);
-        let p = safe_insert(ctx.buf.source_mut(), ctx.win.cpos, ATTACHMENT_MARKER);
+        let p = insert(ctx.buf.source_mut(), ctx.win.cpos, ATTACHMENT_MARKER);
         ctx.win.cpos = p + ATTACHMENT_MARKER.len_utf8();
         ctx.win.clamp_anchors_to_source(ctx.buf.source());
     }

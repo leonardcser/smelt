@@ -480,7 +480,10 @@ impl TestApp {
     /// attachment_ids ↔ marker invariant (INV-15) under interleaved
     /// mutations.
     pub fn insert_attachment(&mut self, label: String) {
-        let data_url = format!("data:image/png;base64,FUZZ-{}", self.app.input.completer.is_some() as u8);
+        let data_url = format!(
+            "data:image/png;base64,FUZZ-{}",
+            self.app.input.completer.is_some() as u8
+        );
         let mut ctx = crate::input::prompt_ctx_mut(&mut self.app.ui);
         self.app.input.insert_image(&mut ctx, label, data_url);
     }

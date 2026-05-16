@@ -680,7 +680,7 @@ fn handle_normal_char(c: char, ctx: &mut VimContext<'_>) -> Action {
                     let eol = line_end(ctx.buf, *ctx.cpos);
                     let text = ctx.register().to_string();
                     let insert = format!("\n{}", text);
-                    let p = smelt_buffer::text::safe_insert_str(ctx.buf, eol, &insert);
+                    let p = smelt_buffer::text::insert_str(ctx.buf, eol, &insert);
                     *ctx.cpos = p + 1;
                     // Move to first non-blank.
                     *ctx.cpos += ctx.buf[*ctx.cpos..]
@@ -690,7 +690,7 @@ fn handle_normal_char(c: char, ctx: &mut VimContext<'_>) -> Action {
                 } else {
                     let after = advance_chars(ctx.buf, *ctx.cpos, 1).min(ctx.buf.len());
                     let text = ctx.register().to_string();
-                    let p = smelt_buffer::text::safe_insert_str(ctx.buf, after, &text);
+                    let p = smelt_buffer::text::insert_str(ctx.buf, after, &text);
                     let paste_end = p + text.len();
                     *ctx.cpos = prev_char_boundary(ctx.buf, paste_end).max(p);
                     clamp_normal(ctx.buf, ctx.cpos);
@@ -706,7 +706,7 @@ fn handle_normal_char(c: char, ctx: &mut VimContext<'_>) -> Action {
                     let sol = line_start(ctx.buf, *ctx.cpos);
                     let text = ctx.register().to_string();
                     let insert = format!("{}\n", text);
-                    let p = smelt_buffer::text::safe_insert_str(ctx.buf, sol, &insert);
+                    let p = smelt_buffer::text::insert_str(ctx.buf, sol, &insert);
                     *ctx.cpos = p;
                     *ctx.cpos += ctx.buf[*ctx.cpos..]
                         .bytes()
@@ -714,7 +714,7 @@ fn handle_normal_char(c: char, ctx: &mut VimContext<'_>) -> Action {
                         .count();
                 } else {
                     let text = ctx.register().to_string();
-                    let p = smelt_buffer::text::safe_insert_str(ctx.buf, *ctx.cpos, &text);
+                    let p = smelt_buffer::text::insert_str(ctx.buf, *ctx.cpos, &text);
                     let plen = text.len();
                     if plen > 0 {
                         let paste_end = p + plen;
@@ -781,7 +781,7 @@ fn handle_normal_char(c: char, ctx: &mut VimContext<'_>) -> Action {
         'o' => {
             ctx.save_undo();
             let eol = line_end(ctx.buf, *ctx.cpos);
-            let p = smelt_buffer::text::safe_insert(ctx.buf, eol, '\n');
+            let p = smelt_buffer::text::insert(ctx.buf, eol, '\n');
             *ctx.cpos = p + 1;
             enter_insert_mode(ctx);
             Action::Consumed
@@ -789,7 +789,7 @@ fn handle_normal_char(c: char, ctx: &mut VimContext<'_>) -> Action {
         'O' => {
             ctx.save_undo();
             let sol = line_start(ctx.buf, *ctx.cpos);
-            let p = smelt_buffer::text::safe_insert(ctx.buf, sol, '\n');
+            let p = smelt_buffer::text::insert(ctx.buf, sol, '\n');
             *ctx.cpos = p;
             enter_insert_mode(ctx);
             Action::Consumed
