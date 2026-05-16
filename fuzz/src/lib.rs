@@ -148,6 +148,9 @@ pub enum FuzzOp {
     KeyShift(u8),
     /// Bare special key chosen by `which % SPECIALS.len()`.
     KeySpecial(u8),
+    /// Shift-modified special key — drives shift+arrow / shift+Home/End
+    /// selection-extend code paths that plain `KeySpecial` skips.
+    KeySpecialShift(u8),
     /// Bracketed paste with arbitrary UTF-8 payload.
     Paste(String),
     /// Mouse event (click/drag/wheel/move). Routes through
@@ -308,6 +311,17 @@ pub enum FuzzOp {
     EngineShutdown {
         reason: Option<String>,
     },
+    /// Side-channel: insert a synthetic image attachment at the prompt
+    /// cursor through the real `Input::insert_image` path. Exercises the
+    /// attachment_ids ↔ marker invariant under interleaved key + paste
+    /// events.
+    InsertAttachment {
+        label: String,
+    },
+    /// Side-channel: flip pane focus between Prompt and Content. The Ctrl-W
+    /// chord that reaches the same code path requires two keystrokes inside
+    /// `PANE_CHORD_WINDOW`, which random fuzz inputs rarely hit.
+    TogglePaneFocus,
 }
 
 #[derive(Arbitrary, Debug, Clone, Copy, Serialize, Deserialize)]
@@ -951,6 +965,13 @@ fn plan(op: FuzzOp) -> (Option<SourceEvent>, PostCheck) {
                 PostCheck::None,
             )
         }
+        FuzzOp::KeySpecialShift(which) => {
+            let code = SPECIALS[(which as usize) % SPECIALS.len()];
+            (
+                Some(SourceEvent::Term(key_event(code, KeyModifiers::SHIFT))),
+                PostCheck::None,
+            )
+        }
         FuzzOp::Paste(s) => (Some(SourceEvent::Term(TermEvent::Paste(s))), PostCheck::None),
         FuzzOp::Mouse(m) => {
             let ev = MouseEvent {
@@ -1181,6 +1202,9 @@ fn plan(op: FuzzOp) -> (Option<SourceEvent>, PostCheck) {
             let ev = SourceEvent::Engine(EngineEvent::Shutdown { reason });
             (Some(ev), PostCheck::ShutdownReceived)
         }
+        FuzzOp::InsertAttachment { .. } | FuzzOp::TogglePaneFocus => {
+            unreachable!("InsertAttachment / TogglePaneFocus side channels handled inline in apply()")
+        }
     }
 }
 
@@ -1193,6 +1217,11 @@ pub fn apply(app: &mut TestApp, op: FuzzOp) {
     // with `if let` so they take ownership; the rest match by reference.
     if let FuzzOp::PushQueuedMessage(text) = op {
         app.push_queued_message(text);
+        app.assert_invariants();
+        return;
+    }
+    if let FuzzOp::InsertAttachment { label } = op {
+        app.insert_attachment(label);
         app.assert_invariants();
         return;
     }
@@ -1228,6 +1257,11 @@ pub fn apply(app: &mut TestApp, op: FuzzOp) {
         }
         FuzzOp::PrimePendingTitle => {
             app.prime_pending_title();
+            app.assert_invariants();
+            return;
+        }
+        FuzzOp::TogglePaneFocus => {
+            app.toggle_pane_focus();
             app.assert_invariants();
             return;
         }

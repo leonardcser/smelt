@@ -474,6 +474,25 @@ impl TestApp {
         self.app.pending_title = true;
     }
 
+    /// Side-channel: insert a synthetic image attachment at the prompt
+    /// cursor. Mirrors clipboard-image paste / `:image` paths without
+    /// needing a real terminal clipboard. Exercises the
+    /// attachment_ids ↔ marker invariant (INV-15) under interleaved
+    /// mutations.
+    pub fn insert_attachment(&mut self, label: String) {
+        let data_url = format!("data:image/png;base64,FUZZ-{}", self.app.input.completer.is_some() as u8);
+        let mut ctx = crate::input::prompt_ctx_mut(&mut self.app.ui);
+        self.app.input.insert_image(&mut ctx, label, data_url);
+    }
+
+    /// Side-channel: flip pane focus between Prompt and Content. In
+    /// production this requires a Ctrl-W chord inside `PANE_CHORD_WINDOW`;
+    /// the harness bypasses the timing gate so coverage doesn't depend on
+    /// random key collisions.
+    pub fn toggle_pane_focus(&mut self) {
+        self.app.toggle_pane_focus();
+    }
+
     /// Number of confirm dialogs currently registered with the core. Used
     /// by `RequestPermission` invariants to assert the dispatch either
     /// auto-approved (no confirm registered) or registered exactly one.

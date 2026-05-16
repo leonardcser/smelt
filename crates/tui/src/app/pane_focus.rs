@@ -37,7 +37,7 @@ impl TuiApp {
         None
     }
 
-    fn toggle_pane_focus(&mut self) {
+    pub(crate) fn toggle_pane_focus(&mut self) {
         let target = match self.app_focus {
             crate::app::AppFocus::Prompt => crate::app::AppFocus::Content,
             crate::app::AppFocus::Content => crate::app::AppFocus::Prompt,

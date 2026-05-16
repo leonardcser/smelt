@@ -171,6 +171,7 @@ fn op_label(op: &smelt_fuzz::FuzzOp) -> String {
         KeyCtrl(b) => format!("ctrl-{}", (b'a' + (b % 26)) as char),
         KeyShift(b) => format!("shift-{}", (b'a' + (b % 26)) as char),
         KeySpecial(_) => "special".into(),
+        KeySpecialShift(_) => "shift+special".into(),
         Paste(s) => format!("paste {} chars", s.chars().count()),
         Mouse(m) => format!("mouse k={} b={} {},{}", m.kind, m.button, m.col, m.row),
         Tick(ms) => format!("tick {ms}ms"),
@@ -214,5 +215,7 @@ fn op_label(op: &smelt_fuzz::FuzzOp) -> String {
         EngineToolHooksRequest { tool_name, .. } => format!("tool hooks {tool_name}"),
         EngineCoreToolResult { .. } => "core tool result".into(),
         EngineShutdown { .. } => "shutdown".into(),
+        InsertAttachment { label } => format!("insert attachment {label}"),
+        TogglePaneFocus => "toggle pane focus".into(),
     }
 }
