@@ -133,7 +133,7 @@ local function open()
     blocks_agent = false,
     draggable = true,
     resizable = true,
-    items = { { win = win, height = "fill" } },
+    layout = smelt.ui.layout.leaf(win),
   })
   local timer = smelt.timer.every(250, paint_panel)
   PANEL = { buf = buf, win = win, timer = timer }

@@ -279,10 +279,10 @@ local function open()
 		},
 		width = OVERLAY_W,
 		height = OVERLAY_H,
-		items = {
-			{ win = STATE.paint_id, height = "fill" },
-			{ win = STATE.win, height = 1 },
-		},
+		layout = smelt.ui.layout.vbox({
+			{ smelt.ui.layout.leaf(STATE.paint_id), height = "fill" },
+			{ smelt.ui.layout.leaf(STATE.win),      height = 1      },
+		}),
 		modal = false,
 		draggable = true,
 		resizable = false,

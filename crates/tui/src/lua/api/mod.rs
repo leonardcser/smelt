@@ -22,6 +22,7 @@ mod text;
 mod theme;
 mod transcript;
 mod ui;
+pub(crate) mod ui_layout;
 pub(crate) mod vim;
 mod win;
 

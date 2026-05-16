@@ -16,7 +16,7 @@
 use crate::app::TuiApp;
 use crate::smelt_term::layout::{Anchor, Corner, LeafSizer, PaintId};
 use crate::smelt_term::{
-    Callback, CallbackResult, Constraint, KeyBind, LayoutTree, Overlay, Payload, WinEvent, WinId,
+    Callback, CallbackResult, KeyBind, LayoutTree, Overlay, Payload, WinEvent, WinId,
 };
 use crossterm::event::{KeyCode, KeyModifiers};
 
@@ -88,12 +88,16 @@ impl Axis {
 pub(crate) fn open_overlay(app: &mut TuiApp, opts: mlua::Table) -> Result<u64, String> {
     let title = crate::lua::parse::title(opts.get::<mlua::Value>("title").ok())
         .map_err(|e| format!("overlay title: {e}"))?;
-    let items_tbl: mlua::Table = opts
-        .get("items")
-        .map_err(|e| format!("overlay items: {e}"))?;
+    let layout_ud: mlua::AnyUserData = opts
+        .get("layout")
+        .map_err(|_| "overlay.open: missing `layout = <smelt.ui.layout.* userdata>`".to_string())?;
+    let layout_node = {
+        let borrowed = layout_ud
+            .borrow::<crate::lua::api::ui_layout::LuaUiLayout>()
+            .map_err(|e| format!("overlay.open: `layout` must be a smelt.ui.layout node: {e}"))?;
+        borrowed.0.clone()
+    };
     let anchor_kind = parse_overlay_anchor(&opts)?;
-    // `SizeMode::Default` is substituted to `Fixed(<anchor default>)` here so
-    // downstream code only sees `Fixed` / `FitCap`.
     let size = parse_overlay_size(&opts)?.with_anchor_defaults(anchor_kind);
     let border = crate::lua::parse::border(&opts).map_err(|e| format!("overlay border: {e}"))?;
     let blocks_agent: bool = opts.get("blocks_agent").unwrap_or(false);
@@ -102,63 +106,15 @@ pub(crate) fn open_overlay(app: &mut TuiApp, opts: mlua::Table) -> Result<u64, S
     let draggable: bool = opts.get("draggable").unwrap_or(false);
     let resizable: bool = opts.get("resizable").unwrap_or(false);
 
-    let mut leaf_items: Vec<(Constraint, LayoutTree)> = Vec::new();
-    // Track the window leaves so fit-mode placements can ensure their buffers
-    // are wrapped at the dialog width before the natural-size walk runs.
+    // Walk the Lua-side tree into a `LayoutTree`. The walk records every
+    // window-id leaf so the pre-render pass below can prime their wrap layout
+    // for fit-mode resolution.
     let mut window_leaves: Vec<WinId> = Vec::new();
-    for pair in items_tbl.sequence_values::<mlua::Table>() {
-        let item = pair.map_err(|e| format!("overlay item: {e}"))?;
-        let raw_id: u64 = item
-            .get::<u64>("win")
-            .map_err(|e| format!("overlay item.win: {e}"))?;
-        // `resolve_leaf_id` disambiguates WinId vs PaintId via the PAINT_ID_BASE partition.
-        let leaf = app
-            .resolve_leaf_id(raw_id)
-            .ok_or_else(|| format!("overlay item references missing window/paint id {raw_id}"))?;
-        let collapse_when_empty: bool = item.get("collapse_when_empty").unwrap_or(false);
-        let constraint = match leaf {
-            crate::lua::paint::LeafKind::Window(win)
-                if collapse_when_empty && window_buffer_empty(app, win) =>
-            {
-                Constraint::Length(0)
-            }
-            _ => crate::lua::parse::constraint(
-                item.get::<mlua::Value>("height").ok(),
-                "overlay item.height",
-            )?,
-        };
-        // Per-leaf border/title lets individual rows in a multi-pane overlay carry their own frame.
-        let item_border = match item.get::<mlua::Value>("border").ok() {
-            None | Some(mlua::Value::Nil) => None,
-            _ => {
-                crate::lua::parse::border(&item).map_err(|e| format!("overlay item.border: {e}"))?
-            }
-        };
-        let item_title = crate::lua::parse::title(item.get::<mlua::Value>("title").ok())
-            .map_err(|e| format!("overlay item.title: {e}"))?;
-        let mut leaf_tree = match leaf {
-            crate::lua::paint::LeafKind::Window(w) => {
-                window_leaves.push(w);
-                LayoutTree::leaf(w)
-            }
-            crate::lua::paint::LeafKind::Paint(p) => LayoutTree::leaf(p),
-        };
-        if let Some(b) = item_border {
-            leaf_tree = leaf_tree.with_border(b);
-        }
-        if let Some(t) = item_title {
-            leaf_tree = leaf_tree.with_title(t);
-        }
-        leaf_items.push((constraint, leaf_tree));
-    }
-    if leaf_items.is_empty() {
-        return Err("overlay must have at least one item".into());
-    }
-
-    let inner = LayoutTree::vbox(leaf_items);
-    // Wrap the inner panel tree with the overlay's own border + title. The
-    // resulting tree is what the natural-size walk inspects (for `FitCap`)
-    // and what `resolve_layout_with` carves rects out of at paint time.
+    let (_root_constraint, inner) =
+        crate::lua::api::ui_layout::build_layout_tree(app, &layout_node, &mut window_leaves)?;
+    // Wrap the inner tree with the overlay's own border + title. The resulting
+    // tree is what the natural-size walk inspects (for `FitCap`) and what
+    // `resolve_layout_with` carves rects out of at paint time.
     let mut layout = inner;
     if let Some(b) = border {
         layout = layout.with_border(b);
@@ -974,6 +930,10 @@ pub(crate) fn parse_picker_item(v: &mlua::Value) -> Result<crate::picker::Picker
             other.type_name()
         )),
     }
+}
+
+pub(crate) fn window_buffer_empty_pub(app: &TuiApp, win: WinId) -> bool {
+    window_buffer_empty(app, win)
 }
 
 fn window_buffer_empty(app: &TuiApp, win: WinId) -> bool {

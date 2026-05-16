@@ -176,19 +176,18 @@ local function open_overlay(opts)
   end
 
   local leaves = {}
-  local overlay_items = {}
+  local layout_items = {}
   for i, p in ipairs(panels) do
     if type(p) ~= "table" or p.leaf == nil then
       error("smelt.ui.dialog: panel " .. i .. " requires a `leaf`", 3)
     end
     leaves[i] = p.leaf
-    overlay_items[i] = {
-      win                 = p.leaf,
-      height              = p.height or default_panel_height,
-      collapse_when_empty = p.collapse_when_empty or false,
+    local leaf_node = smelt.ui.layout.leaf(p.leaf, {
       border              = p.border,
       title               = p.title,
-    }
+      collapse_when_empty = p.collapse_when_empty or false,
+    })
+    layout_items[i] = { leaf_node, height = p.height or default_panel_height }
   end
 
   -- The wrapper is responsible for the single-cell gutter on each side of the
@@ -220,7 +219,7 @@ local function open_overlay(opts)
     border       = { top = "SmeltAccent" },
     modal        = true,
     blocks_agent = opts.blocks_agent or false,
-    items        = overlay_items,
+    layout       = smelt.ui.layout.vbox(layout_items),
   })
 
   return leaves[1], leaves

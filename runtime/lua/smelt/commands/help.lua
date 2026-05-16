@@ -56,7 +56,7 @@ smelt.cmd.register("help", function()
       anchor = "center",
       border = { all = "Comment" },
       modal  = true,
-      items  = { { win = leaf, height = "fill" } },
+      layout = smelt.ui.layout.leaf(leaf),
     })
 
     local task_id = smelt.task.alloc()

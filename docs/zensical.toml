@@ -76,6 +76,7 @@ nav = [
     { "`smelt.transcript`" = "reference/api/transcript.md" },
     { "`smelt.trust`" = "reference/api/trust.md" },
     { "`smelt.ui`" = "reference/api/ui.md" },
+    { "`smelt.ui.layout`" = "reference/api/ui_layout.md" },
     { "`smelt.ui.overlay`" = "reference/api/ui_overlay.md" },
     { "`smelt.ui.picker`" = "reference/api/ui_picker.md" },
     { "`smelt.ui.spinner`" = "reference/api/ui_spinner.md" },
