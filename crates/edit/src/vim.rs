@@ -244,6 +244,12 @@ impl VimWindowState {
         smelt_buffer::text::snap(buf, self.visual_anchor)
     }
 
+    /// Raw stored anchor without snapping. For invariant checks that
+    /// want to detect drift past `text().len()` before the snap happens.
+    pub fn visual_anchor_raw(&self) -> usize {
+        self.visual_anchor
+    }
+
     /// Pop count1 (default 1), clearing both accumulators.
     fn take_count(&mut self) -> usize {
         let n = self.count1.unwrap_or(1);

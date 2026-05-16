@@ -716,6 +716,55 @@ impl TestApp {
                 );
             }
         }
+
+        // Vim visual_anchor must stay on a UTF-8 char boundary in the
+        // buffer's text-space. Visual ops snap before reading (see
+        // `visual_anchor_at`), but the stored offset can still drift past
+        // `text().len()` if the buffer shrinks under the anchor without
+        // the window noticing — that's the trap fuzzing should catch.
+        for (wid, win) in self.app.ui.iter_wins() {
+            if !win.vim_enabled {
+                continue;
+            }
+            let Some(buf) = self.app.ui.buf(win.buf) else {
+                continue;
+            };
+            let text = if buf.readonly {
+                buf.text()
+            } else {
+                buf.source().to_string()
+            };
+            let anchor = win.vim_state.visual_anchor_raw();
+            assert!(
+                anchor <= text.len(),
+                "INV-13: window {:?} vim visual_anchor {} > text len {}",
+                wid,
+                anchor,
+                text.len()
+            );
+            let snapped = smelt_buffer::text::snap(&text, anchor);
+            assert_eq!(
+                snapped, anchor,
+                "INV-14: window {:?} vim visual_anchor {} not on UTF-8 char boundary (snapped {})",
+                wid, anchor, snapped
+            );
+        }
+
+        // Prompt-buffer attachment_ids must be in 1:1 correspondence with
+        // the `\u{FFFC}` markers in the source. A divergence means an
+        // insert/delete path didn't keep them in sync — the next paste or
+        // copy will read off the end of the vec.
+        if let Some(prompt) = self.app.ui.buf(crate::app::PROMPT_EDIT_BUF) {
+            let src = prompt.source();
+            let marker_count = src.chars().filter(|c| *c == '\u{FFFC}').count();
+            assert_eq!(
+                marker_count,
+                prompt.attachment_ids.len(),
+                "INV-15: prompt has {} attachment markers but {} attachment_ids",
+                marker_count,
+                prompt.attachment_ids.len()
+            );
+        }
     }
 
     /// UI structural integrity: terminal extent non-zero, focus is not
