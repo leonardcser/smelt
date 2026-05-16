@@ -104,19 +104,39 @@ where
 }
 
 #[derive(Debug, Clone)]
-pub(crate) struct StreamOutput {
+pub struct StreamOutput {
     /// stdout + stderr lines interleaved in arrival order, joined by '\n'.
-    pub(crate) content: String,
-    pub(crate) is_error: bool,
-    pub(crate) timed_out: bool,
+    pub content: String,
+    pub is_error: bool,
+    pub timed_out: bool,
 }
 
-/// Spawn `sh -c command`, stream lines through `on_line`, return aggregated
-/// output once the child exits or the timeout expires. Child runs in its
-/// own process group so the whole group can be signalled on cancel/timeout.
-pub(crate) async fn run_streaming(
+/// Shell used to run a string-form command (`sh -c <cmd>` by default).
+/// Pass `Some(("/bin/zsh", &["-fc"]))` to swap the shell wholesale.
+#[derive(Clone, Debug)]
+pub struct ShellSpec {
+    pub program: String,
+    pub args: Vec<String>,
+}
+
+impl Default for ShellSpec {
+    fn default() -> Self {
+        Self {
+            program: "sh".into(),
+            args: vec!["-c".into()],
+        }
+    }
+}
+
+/// Spawn `<shell> <args...> command`, stream lines through `on_line`, return
+/// aggregated output once the child exits or the timeout expires. Child runs
+/// in its own process group so the whole group can be signalled on cancel/timeout.
+/// `shell` is the wrapping program (default `sh -c`); callers swap it to e.g.
+/// `("/bin/zsh", &["-fc"])` to run user-shell commands.
+pub async fn run_streaming_with_shell(
     command: &str,
     timeout: Duration,
+    shell: ShellSpec,
     mut on_line: impl FnMut(String),
     cancel: Option<CancellationToken>,
 ) -> StreamOutput {
@@ -128,9 +148,11 @@ pub(crate) async fn run_streaming(
         };
     }
 
-    let mut cmd = tokio::process::Command::new("sh");
-    cmd.arg("-c")
-        .arg(command)
+    let mut cmd = tokio::process::Command::new(&shell.program);
+    for a in &shell.args {
+        cmd.arg(a);
+    }
+    cmd.arg(command)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
@@ -212,6 +234,7 @@ pub(crate) async fn run_streaming(
         timed_out: false,
     }
 }
+
 
 #[cfg(unix)]
 fn kill_process_group(child: &tokio::process::Child) {

@@ -186,6 +186,85 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
         )?;
     }
 
+    {
+        let s = shared.clone();
+        register_fn(
+            &tbl,
+            "smelt.provider",
+            "middleware",
+            "Register provider middleware. `mw` is a table of \
+`{ on_request = fn?, on_response = fn?, on_delta = fn? }`:\n\n\
+- `on_request(payload, ctx)` — runs before the outbound HTTP request. Return a table to replace the payload; any other return is no-op.\n\
+- `on_response(msg, ctx)` — runs after the full assistant message is assembled. Return a table `{ content?, thinking?, tool_calls?, stop_reason?, usage? }` to replace the message.\n\
+- `on_delta(d)` — runs for every streaming delta. Return a table to replace the delta; `text` and `thinking` deltas are safe to mutate, `tool_args` JSON fragments are NOT (mutating them can corrupt the parser).\n\n\
+Hooks fire in registration order. Returns an `off()` function that removes this middleware. NOTE: engine wiring for these hooks is staged — the registry stores them but the engine's request/response/stream path is not yet hooked through.",
+            &["mw"],
+            lua,
+            move |lua, mw: mlua::Table| -> LuaResult<mlua::Function> {
+                let on_request: Option<mlua::Function> = mw.get("on_request").ok();
+                let on_response: Option<mlua::Function> = mw.get("on_response").ok();
+                let on_delta: Option<mlua::Function> = mw.get("on_delta").ok();
+                if on_request.is_none() && on_response.is_none() && on_delta.is_none() {
+                    return Err(LuaError::RuntimeError(
+                        "provider.middleware: at least one of on_request/on_response/on_delta is required".to_string(),
+                    ));
+                }
+                let id = s.next_id.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                if let Some(f) = on_request {
+                    let key = lua.create_registry_value(f)?;
+                    if let Ok(mut v) = s.provider_request_hooks.lock() {
+                        v.push(crate::lua::HookEntry {
+                            id,
+                            name: String::new(),
+                            handle: crate::lua::LuaHandle { key },
+                        });
+                    }
+                }
+                if let Some(f) = on_response {
+                    let key = lua.create_registry_value(f)?;
+                    if let Ok(mut v) = s.provider_response_hooks.lock() {
+                        v.push(crate::lua::HookEntry {
+                            id,
+                            name: String::new(),
+                            handle: crate::lua::LuaHandle { key },
+                        });
+                    }
+                }
+                if let Some(f) = on_delta {
+                    let key = lua.create_registry_value(f)?;
+                    if let Ok(mut v) = s.provider_delta_hooks.lock() {
+                        v.push(crate::lua::HookEntry {
+                            id,
+                            name: String::new(),
+                            handle: crate::lua::LuaHandle { key },
+                        });
+                    }
+                }
+                let s2 = s.clone();
+                let off = lua.create_function(move |_, ()| -> LuaResult<bool> {
+                    let mut removed = false;
+                    if let Ok(mut v) = s2.provider_request_hooks.lock() {
+                        let n = v.len();
+                        v.retain(|e| e.id != id);
+                        removed |= v.len() != n;
+                    }
+                    if let Ok(mut v) = s2.provider_response_hooks.lock() {
+                        let n = v.len();
+                        v.retain(|e| e.id != id);
+                        removed |= v.len() != n;
+                    }
+                    if let Ok(mut v) = s2.provider_delta_hooks.lock() {
+                        let n = v.len();
+                        v.retain(|e| e.id != id);
+                        removed |= v.len() != n;
+                    }
+                    Ok(removed)
+                })?;
+                Ok(off)
+            },
+        )?;
+    }
+
     smelt.set("provider", tbl)?;
     Ok(())
 }

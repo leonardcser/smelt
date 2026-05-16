@@ -55,7 +55,7 @@ pub(super) fn register(
             smelt_keymap,
             "smelt.keymap",
             "set",
-            "Bind `chord` in `mode` to a Lua callback. `mode` is `\"n\"|\"i\"|\"v\"|\"\"` (or the long form `normal`/`insert`/`visual`); the chord is canonicalized at registration and unknown values raise immediately.",
+            "Bind `chord` in `mode` to a Lua callback. `mode` is `\"n\"|\"i\"|\"v\"|\"\"` (or the long form `normal`/`insert`/`visual`); the chord is canonicalized at registration and unknown values raise immediately. Re-binding the same `(mode, chord)` overwrites the prior handler.",
             &["mode", "chord", "handler"],
             lua,
             move |lua,
@@ -79,6 +79,59 @@ pub(super) fn register(
                     map.insert((canonical_mode, canonical_chord), LuaHandle { key });
                 }
                 Ok(())
+            },
+        )?;
+    }
+    {
+        let s = shared.clone();
+        register_ui_fn(
+            smelt_keymap,
+            "smelt.keymap",
+            "unset",
+            "Drop the binding for `chord` in `mode`. `mode` accepts the same forms as `set`. Returns `true` if a binding was removed.",
+            &["mode", "chord"],
+            lua,
+            move |_, (mode, chord): (String, String)| -> LuaResult<bool> {
+                let canonical_mode = crate::lua::normalize_mode(&mode).ok_or_else(|| {
+                    LuaError::RuntimeError(format!(
+                        "keymap.unset: unknown mode `{mode}` (expected \"n\"|\"i\"|\"v\"|\"\" or \"normal\"|\"insert\"|\"visual\")"
+                    ))
+                })?;
+                let canonical_chord = crate::lua::canonicalize_chord_sequence(&chord)
+                    .ok_or_else(|| {
+                        LuaError::RuntimeError(format!("keymap.unset: unknown chord `{chord}`"))
+                    })?;
+                Ok(s.keymaps
+                    .lock()
+                    .map(|mut m| m.remove(&(canonical_mode, canonical_chord)).is_some())
+                    .unwrap_or(false))
+            },
+        )?;
+    }
+    {
+        let s = shared.clone();
+        register_ui_fn(
+            smelt_keymap,
+            "smelt.keymap",
+            "list",
+            "Return the set of currently-bound `{ mode, chord }` rows. `mode` is the canonical short form (`\"n\"`/`\"i\"`/`\"v\"`/`\"\"`).",
+            &[],
+            lua,
+            move |lua, ()| -> LuaResult<mlua::Table> {
+                let mut rows: Vec<(String, String)> = s
+                    .keymaps
+                    .lock()
+                    .map(|m| m.keys().cloned().collect())
+                    .unwrap_or_default();
+                rows.sort();
+                let out = lua.create_table()?;
+                for (i, (mode, chord)) in rows.into_iter().enumerate() {
+                    let row = lua.create_table()?;
+                    row.set("mode", mode)?;
+                    row.set("chord", chord)?;
+                    out.set(i + 1, row)?;
+                }
+                Ok(out)
             },
         )?;
     }

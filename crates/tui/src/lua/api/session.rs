@@ -143,13 +143,52 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
         &session_tbl,
         "smelt.session",
         "messages",
-        "Snapshot the current session messages as `{ role, content?, tool_calls?, tool_call_id?, is_error? }` rows. Roles are `system`/`user`/`assistant`/`tool`.",
-        &[],
+        "Snapshot the current session messages as `{ role, content?, tool_calls?, tool_call_id?, is_error? }` rows. Roles are `system`/`user`/`assistant`/`tool`. `opts.roles` (array of role strings) filters by role; `opts.include_tool = false` drops `role = \"tool\"` rows; `opts.since_index` returns rows with 1-based index `>= since_index`; `opts.limit` caps row count from the start of the (filtered) result.",
+        &["opts"],
         lua,
-        |lua, ()| -> LuaResult<mlua::Table> {
+        |lua, opts: Option<mlua::Table>| -> LuaResult<mlua::Table> {
             let messages = crate::lua::try_with_app(|app| app.core.session.messages.clone())
                 .unwrap_or_default();
-            messages_to_lua(lua, &messages)
+            let (roles, include_tool, since_index, limit) = match opts {
+                Some(t) => (
+                    t.get::<Option<Vec<String>>>("roles")?,
+                    t.get::<Option<bool>>("include_tool")?.unwrap_or(true),
+                    t.get::<Option<usize>>("since_index")?,
+                    t.get::<Option<usize>>("limit")?,
+                ),
+                None => (None, true, None, None),
+            };
+            let role_filter: Option<std::collections::HashSet<String>> =
+                roles.map(|v| v.into_iter().collect());
+            let filtered: Vec<protocol::Message> = messages
+                .into_iter()
+                .enumerate()
+                .filter(|(idx, m)| {
+                    if let Some(ref s) = since_index {
+                        if idx + 1 < *s {
+                            return false;
+                        }
+                    }
+                    if !include_tool && matches!(m.role, protocol::Role::Tool) {
+                        return false;
+                    }
+                    if let Some(ref rf) = role_filter {
+                        let r = match m.role {
+                            protocol::Role::System => "system",
+                            protocol::Role::User => "user",
+                            protocol::Role::Assistant => "assistant",
+                            protocol::Role::Tool => "tool",
+                        };
+                        if !rf.contains(r) {
+                            return false;
+                        }
+                    }
+                    true
+                })
+                .map(|(_, m)| m)
+                .take(limit.unwrap_or(usize::MAX))
+                .collect();
+            messages_to_lua(lua, &filtered)
         },
     )?;
     register_ui_fn(

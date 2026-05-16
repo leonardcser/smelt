@@ -1,9 +1,43 @@
 //! Shared Lua state: the `Arc<LuaShared>` that outlives callbacks and lets tokio tasks post resume payloads.
 
 use super::{LuaHandle, LuaTaskRuntime, TaskEvent};
-use std::collections::HashMap;
-use std::sync::atomic::AtomicU64;
+use std::collections::{HashMap, HashSet};
+use std::sync::atomic::{AtomicU64, AtomicU8, Ordering};
 use std::sync::{Arc, Mutex};
+
+/// Boot-time phase. Used by Lua API guards to refuse phase-sensitive
+/// calls outside their valid window (e.g. `cli.register_flag` only runs
+/// in `Early`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Phase {
+    /// `early.lua` is being evaluated. Only a restricted `smelt` table
+    /// is visible; phase-sensitive APIs (`builtins`, `cli`, future
+    /// pre-boot interceptors) are usable here.
+    Early = 0,
+    /// Autoload has run and `init.lua` is being evaluated. Full `smelt`
+    /// surface is available.
+    Init = 1,
+    /// Steady state — the agent is running. Plugins added at this stage
+    /// (e.g. from a `/cmd` handler) execute the same way as `Init`.
+    Running = 2,
+}
+
+impl Phase {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Phase::Early => "early",
+            Phase::Init => "init",
+            Phase::Running => "running",
+        }
+    }
+    fn from_u8(n: u8) -> Self {
+        match n {
+            0 => Phase::Early,
+            1 => Phase::Init,
+            _ => Phase::Running,
+        }
+    }
+}
 
 pub struct RegisteredCommand {
     pub handle: LuaHandle,
@@ -61,6 +95,84 @@ pub struct LuaShared {
     pub settings_overrides: Mutex<HashMap<String, bool>>,
     pub tool_defaults: Mutex<crate::permissions::rules::ToolDefaults>,
     pub messages: Mutex<crate::messages::Messages>,
+    /// Bundled `smelt.<dotted>` module names the user has opted out of via
+    /// `smelt.builtins.disable{}` in `early.lua`. Read by `autoload_modules`
+    /// to skip the matching `require()` calls. Names use the dotted module
+    /// form, e.g. `"smelt.tools.web_search"`, `"smelt.commands.compact"`.
+    pub disabled_modules: Mutex<HashSet<String>>,
+    /// CLI flag specs registered from `early.lua` via `smelt.cli.register_flag`.
+    /// The main binary reads this after the early phase and re-runs clap with
+    /// the merged surface.
+    pub cli_flag_specs: Mutex<Vec<CliFlagSpec>>,
+    /// CLI flag *values* parsed from argv after `early.lua` declared them.
+    /// Populated by the main binary; read by `smelt.cli.get(name)`.
+    pub cli_flag_values: Mutex<HashMap<String, CliFlagValue>>,
+    /// Provider middleware (request payload mutators). Each `HookEntry`
+    /// uses an empty `name` (provider hooks aren't per-tool) and the
+    /// shared `id` lets `off()` remove exactly the right hook.
+    pub provider_request_hooks: Mutex<Vec<HookEntry>>,
+    /// Provider middleware (per-message response mutators).
+    pub provider_response_hooks: Mutex<Vec<HookEntry>>,
+    /// Provider middleware (per-delta response mutators).
+    pub provider_delta_hooks: Mutex<Vec<HookEntry>>,
+    /// Per-tool before/after middleware. Each entry carries its own
+    /// id so `off()` can remove exactly the right hook without relying
+    /// on insertion order. Name `""` matches every tool.
+    pub tool_before_hooks: Mutex<Vec<HookEntry>>,
+    pub tool_after_hooks: Mutex<Vec<HookEntry>>,
+    /// Default shell + argv for `smelt.process.run`/`run_streaming` when no
+    /// explicit shell is given. `None` means hardcoded `sh -c`.
+    pub default_shell: Mutex<Option<DefaultShell>>,
+    /// Current boot phase. Phase-sensitive APIs use this to gate their
+    /// behavior (refuse-when-late or warn-when-late). Defaults to `Early`
+    /// — the runtime promotes it to `Init` before autoload and `Running`
+    /// once the agent loop is live.
+    phase: AtomicU8,
+}
+
+/// Entry in a middleware/hook list. `id` is monotonic per registry and
+/// passed back as the off() handle so callers can remove their own
+/// hook without touching the others.
+pub struct HookEntry {
+    pub id: u64,
+    pub name: String,
+    pub handle: LuaHandle,
+}
+
+/// Spec for a Lua-declared CLI flag. Mirrors the subset of clap we need.
+#[derive(Clone, Debug)]
+pub struct CliFlagSpec {
+    pub name: String,
+    pub kind: CliFlagKind,
+    pub default: CliFlagValue,
+    pub description: Option<String>,
+    pub short: Option<char>,
+    pub long: Option<String>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CliFlagKind {
+    Boolean,
+    String,
+    Integer,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub enum CliFlagValue {
+    Boolean(bool),
+    String(String),
+    Integer(i64),
+    None,
+}
+
+/// Default shell used by `smelt.process.run`/`run_streaming` when no
+/// per-call override is provided. `program` is the executable; `args`
+/// are the leading argv slots before the command string is appended
+/// (e.g. `{ "-fc" }`, `{ "-c" }`).
+#[derive(Clone, Debug)]
+pub struct DefaultShell {
+    pub program: String,
+    pub args: Vec<String>,
 }
 
 impl Default for LuaShared {
@@ -84,7 +196,26 @@ impl Default for LuaShared {
             settings_overrides: Mutex::new(HashMap::new()),
             tool_defaults: Mutex::new(crate::permissions::rules::ToolDefaults::default()),
             messages: Mutex::new(crate::messages::Messages::new()),
+            disabled_modules: Mutex::new(HashSet::new()),
+            cli_flag_specs: Mutex::new(Vec::new()),
+            cli_flag_values: Mutex::new(HashMap::new()),
+            provider_request_hooks: Mutex::new(Vec::new()),
+            provider_response_hooks: Mutex::new(Vec::new()),
+            provider_delta_hooks: Mutex::new(Vec::new()),
+            tool_before_hooks: Mutex::new(Vec::new()),
+            tool_after_hooks: Mutex::new(Vec::new()),
+            default_shell: Mutex::new(None),
+            phase: AtomicU8::new(Phase::Early as u8),
         }
+    }
+}
+
+impl LuaShared {
+    pub fn phase(&self) -> Phase {
+        Phase::from_u8(self.phase.load(Ordering::Acquire))
+    }
+    pub fn set_phase(&self, p: Phase) {
+        self.phase.store(p as u8, Ordering::Release);
     }
 }
 

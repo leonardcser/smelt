@@ -347,18 +347,34 @@ impl LuaRuntime {
         self.core.load_error.take()
     }
 
-    /// Load embedded autoload plugins.
+    /// Load embedded autoload plugins. Skips modules the user has marked
+    /// disabled via `smelt.builtins.disable{}` in `early.lua`. Promotes
+    /// the phase from `Early` to `Init` before requiring anything.
     pub fn load_autoload(&mut self) {
         if self.core.load_error.is_some() {
             return;
         }
-        for name in smelt_core::lua::autoload_modules() {
+        self.core.mark_init();
+        let disabled = self.core.disabled_modules();
+        for name in smelt_core::lua::autoload_modules_filtered(&disabled) {
             let code = format!("require('{name}')");
             if let Err(e) = self.core.lua.load(&code).set_name(name.as_str()).exec() {
                 self.core.load_error = Some(format!("autoload {name}: {e}"));
                 return;
             }
         }
+    }
+
+    /// Evaluate `~/.config/smelt/early.lua` (if present). Call BEFORE
+    /// [`Self::load_autoload`] so user opt-outs take effect.
+    pub fn load_early_init(&mut self) {
+        self.core.load_early_init();
+    }
+
+    /// Evaluate `.smelt/early.lua` (if present and the project is trusted).
+    /// Call BEFORE [`Self::load_autoload`].
+    pub fn load_project_early_init(&mut self, cwd: &std::path::Path) {
+        self.core.load_project_early_init(cwd);
     }
 
     /// Call every registered statusline source, returning combined items and per-source errors.

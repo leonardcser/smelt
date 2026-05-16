@@ -150,6 +150,102 @@ impl LuaRuntime {
         }
     }
 
+    /// Evaluate `~/.config/smelt/early.lua` if present. Intended to run
+    /// BEFORE [`autoload_modules`] so a user can call
+    /// `smelt.builtins.disable{}` / `smelt.cli.register_flag{}` and
+    /// have them take effect on the upcoming auto-load and argv parse.
+    /// During evaluation the global `smelt` table is swapped for a
+    /// restricted view exposing only the phase-zero namespaces
+    /// (`builtins`, `cli`, `phase`, `provider`). Calls to any other
+    /// namespace error with a clear message. The full `smelt` is
+    /// restored afterward. No-op when the file is missing.
+    pub fn load_early_init(&mut self) {
+        if self.load_error.is_some() {
+            return;
+        }
+        let Some(path) = early_lua_path() else {
+            return;
+        };
+        if !path.exists() {
+            return;
+        }
+        if let Err(e) = self.run_early_phase(&path, "early.lua") {
+            self.load_error = Some(format!("{}: {e}", path.display()));
+        }
+    }
+
+    /// Evaluate `.smelt/early.lua` if present and the project is trusted.
+    /// Companion to [`Self::load_early_init`] for project-scoped early
+    /// config. No-op when the file is missing or the project is not
+    /// trusted.
+    pub fn load_project_early_init(&mut self, cwd: &std::path::Path) {
+        if self.load_error.is_some() {
+            return;
+        }
+        let state = crate::trust::project_trust_state(cwd);
+        if !matches!(state, crate::trust::TrustState::Trusted { .. }) {
+            return;
+        }
+        let path = cwd.join(".smelt").join("early.lua");
+        if !path.exists() {
+            return;
+        }
+        if let Err(e) = self.run_early_phase(&path, ".smelt/early.lua") {
+            self.load_error = Some(format!("{}: {e}", path.display()));
+        }
+    }
+
+    fn run_early_phase(&mut self, path: &std::path::Path, name: &str) -> LuaResult<()> {
+        let src = std::fs::read_to_string(path)
+            .map_err(|e| LuaError::RuntimeError(format!("read {name}: {e}")))?;
+        // Save full smelt, install restricted view, eval, restore.
+        let full_smelt: mlua::Table = self.lua.globals().get("smelt")?;
+        let restricted = self.build_early_smelt_view(&full_smelt)?;
+        self.lua.globals().set("smelt", restricted)?;
+        self.shared.set_phase(crate::lua::Phase::Early);
+        let result = self.lua.load(&src).set_name(name).exec();
+        self.lua.globals().set("smelt", full_smelt)?;
+        result
+    }
+
+    /// Build the restricted `smelt` table seen by `early.lua`. Exposes
+    /// only the phase-zero namespaces; access to anything else returns
+    /// nil, so calling e.g. `smelt.cmd.register(...)` from early.lua
+    /// errors with "attempt to call nil" — loud, immediate, traceable.
+    fn build_early_smelt_view(&self, full: &mlua::Table) -> LuaResult<mlua::Table> {
+        const ALLOWED: &[&str] = &["builtins", "cli", "phase", "provider"];
+        let view = self.lua.create_table()?;
+        for ns in ALLOWED {
+            if let Ok(v) = full.get::<mlua::Value>(*ns) {
+                view.set(*ns, v)?;
+            }
+        }
+        Ok(view)
+    }
+
+    /// Snapshot of the modules a user has disabled via `smelt.builtins.disable`.
+    pub fn disabled_modules(&self) -> std::collections::HashSet<String> {
+        self.shared
+            .disabled_modules
+            .lock()
+            .map(|set| set.clone())
+            .unwrap_or_default()
+    }
+
+    /// Promote the boot phase. The host loop should call:
+    /// 1. nothing (`Early` is the default at construction)
+    /// 2. `mark_init()` after `early.lua` has run and before autoload
+    /// 3. `mark_running()` once the agent loop is live
+    pub fn mark_init(&self) {
+        self.shared.set_phase(crate::lua::Phase::Init);
+    }
+    pub fn mark_running(&self) {
+        self.shared.set_phase(crate::lua::Phase::Running);
+    }
+    pub fn current_phase(&self) -> crate::lua::Phase {
+        self.shared.phase()
+    }
+
     pub fn load_init(&mut self, path: &std::path::Path) -> LuaResult<()> {
         let src = std::fs::read_to_string(path)
             .map_err(|e| LuaError::RuntimeError(format!("read init.lua: {e}")))?;
@@ -975,6 +1071,108 @@ impl LuaRuntime {
         Ok(t)
     }
 
+    /// Run all `tools.middleware{before=...}` hooks for `tool_name`, in
+    /// registration order. Hooks registered with `name = ""` match every
+    /// tool. Each handler receives `(args, ctx)`; returning a table
+    /// replaces `args`; returning `{ deny = true, reason }` short-circuits
+    /// with an error result. Returns `Some(deny_result)` on deny; `None`
+    /// otherwise (and `args` is rewritten in-place when applicable).
+    fn run_before_hooks(
+        &self,
+        tool_name: &str,
+        args: &mut mlua::Table,
+        ctx: &mlua::Table,
+    ) -> Option<ToolExecResult> {
+        let funcs: Vec<mlua::Function> = self
+            .shared
+            .tool_before_hooks
+            .lock()
+            .map(|v| {
+                v.iter()
+                    .filter(|e| e.name.is_empty() || e.name == tool_name)
+                    .filter_map(|e| self.lua.registry_value::<mlua::Function>(&e.handle.key).ok())
+                    .collect()
+            })
+            .unwrap_or_default();
+        for func in funcs {
+            let result: mlua::Result<mlua::Value> = func.call((args.clone(), ctx.clone()));
+            match result {
+                Ok(mlua::Value::Table(t)) => {
+                    let deny: bool = t.get("deny").unwrap_or(false);
+                    if deny {
+                        let reason: String = t.get("reason").unwrap_or_else(|_| {
+                            format!("tool `{tool_name}` denied by middleware")
+                        });
+                        return Some(ToolExecResult::Immediate {
+                            content: reason,
+                            is_error: true,
+                        });
+                    }
+                    *args = t;
+                }
+                Ok(_) => {}
+                Err(e) => {
+                    self.record_error(format!("tools.middleware before `{tool_name}`: {e}"));
+                }
+            }
+        }
+        None
+    }
+
+    /// Run all `tools.middleware{after=...}` hooks for `tool_name` against
+    /// a synchronous tool result. Each handler receives `(args, ctx, result)`
+    /// where `result` is `{ content, is_error }`. A returned table replaces
+    /// the result. Pending/yielding tools currently bypass this path —
+    /// only Immediate results go through `run_after_hooks`.
+    fn run_after_hooks(
+        &self,
+        tool_name: &str,
+        args: &mlua::Table,
+        ctx: &mlua::Table,
+        content: &mut String,
+        is_error: &mut bool,
+    ) {
+        let funcs: Vec<mlua::Function> = self
+            .shared
+            .tool_after_hooks
+            .lock()
+            .map(|v| {
+                v.iter()
+                    .filter(|e| e.name.is_empty() || e.name == tool_name)
+                    .filter_map(|e| self.lua.registry_value::<mlua::Function>(&e.handle.key).ok())
+                    .collect()
+            })
+            .unwrap_or_default();
+        if funcs.is_empty() {
+            return;
+        }
+        let Ok(result_tbl) = self.lua.create_table() else {
+            return;
+        };
+        let _ = result_tbl.set("content", content.as_str());
+        let _ = result_tbl.set("is_error", *is_error);
+        let mut current = result_tbl;
+        for func in funcs {
+            let res: mlua::Result<mlua::Value> =
+                func.call((args.clone(), ctx.clone(), current.clone()));
+            match res {
+                Ok(mlua::Value::Table(t)) => {
+                    current = t;
+                }
+                Ok(_) => {}
+                Err(e) => {
+                    self.record_error(format!("tools.middleware after `{tool_name}`: {e}"));
+                }
+            }
+        }
+        if let Ok(c) = current.get::<String>("content") {
+            *content = c;
+        }
+        if let Ok(e) = current.get::<bool>("is_error") {
+            *is_error = e;
+        }
+    }
+
     pub fn execute_tool(
         &self,
         tool_name: &str,
@@ -1010,7 +1208,7 @@ impl LuaRuntime {
             }
         };
 
-        let args_table = match self.args_to_lua_table(args) {
+        let mut args_table = match self.args_to_lua_table(args) {
             Ok(t) => t,
             Err(e) => {
                 return ToolExecResult::Immediate {
@@ -1029,6 +1227,16 @@ impl LuaRuntime {
                 };
             }
         };
+
+        if let Some(result) = self.run_before_hooks(tool_name, &mut args_table, &ctx_table) {
+            return result;
+        }
+
+        // Keep clones for `run_after_hooks` — `mlua::Table` is Rc-backed
+        // internally, so this is cheap and the originals are consumed by
+        // the task-spawn MultiValue below.
+        let args_for_after = args_table.clone();
+        let ctx_for_after = ctx_table.clone();
 
         let mut initial = mlua::MultiValue::new();
         initial.push_back(mlua::Value::Table(args_table));
@@ -1076,7 +1284,16 @@ impl LuaRuntime {
             }
         }
         match immediate {
-            Some((content, is_error)) => ToolExecResult::Immediate { content, is_error },
+            Some((mut content, mut is_error)) => {
+                self.run_after_hooks(
+                    tool_name,
+                    &args_for_after,
+                    &ctx_for_after,
+                    &mut content,
+                    &mut is_error,
+                );
+                ToolExecResult::Immediate { content, is_error }
+            }
             None => ToolExecResult::Pending,
         }
     }
@@ -1139,7 +1356,11 @@ fn path_to_module(rel: &str) -> String {
 }
 
 /// Modules to `require` at startup; sorted per directory, bootstrap files excluded.
-pub fn autoload_modules() -> Vec<String> {
+///
+/// `disabled` lets callers (typically the TUI runtime after `early.lua`
+/// has run) skip a user-opted-out module. Pass an empty set for
+/// no-filter behavior.
+pub fn autoload_modules_filtered(disabled: &std::collections::HashSet<String>) -> Vec<String> {
     let bootstrap_modules: std::collections::HashSet<String> =
         BOOTSTRAP_FILES.iter().map(|p| path_to_module(p)).collect();
     let mut out = Vec::new();
@@ -1153,11 +1374,19 @@ pub fn autoload_modules() -> Vec<String> {
             .filter_map(|f| f.path().to_str().map(path_to_module))
             .filter(|m| !bootstrap_modules.contains(m))
             .filter(|m| !OPTIONAL_PLUGINS.contains(&m.as_str()))
+            .filter(|m| !disabled.contains(m))
             .collect();
         names.sort();
         out.extend(names);
     }
     out
+}
+
+/// Backwards-compatible wrapper that applies no user filter. Prefer
+/// `autoload_modules_filtered` when a `LuaShared::disabled_modules` set
+/// is available.
+pub fn autoload_modules() -> Vec<String> {
+    autoload_modules_filtered(&std::collections::HashSet::new())
 }
 
 fn register_embedded_searcher(lua: &Lua) -> LuaResult<()> {
@@ -1227,6 +1456,13 @@ fn init_lua_path() -> Option<PathBuf> {
         .map(PathBuf::from)
         .or_else(|| dirs::home_dir().map(|h| h.join(".config")))?;
     Some(base.join("smelt").join("init.lua"))
+}
+
+fn early_lua_path() -> Option<PathBuf> {
+    let base = std::env::var_os("XDG_CONFIG_HOME")
+        .map(PathBuf::from)
+        .or_else(|| dirs::home_dir().map(|h| h.join(".config")))?;
+    Some(base.join("smelt").join("early.lua"))
 }
 
 fn build_tool_ctx(

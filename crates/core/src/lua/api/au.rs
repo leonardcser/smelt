@@ -15,8 +15,8 @@ use mlua::prelude::*;
 
 #[lua_module(
     name = "smelt.au",
-    doc = "Nvim-shaped surface aliases for [`smelt.cell`](cell.md). \
-`au.on(name, handler)` is `smelt.cell.subscribe`; \
+    doc = "Alias namespace for [`smelt.cell`](cell.md). \
+`au.subscribe(name, handler)` is `smelt.cell.subscribe`; \
 `au.fire(name, payload)` is `smelt.cell.set`. Both share the same \
 underlying registry — pick whichever name fits your plugin."
 )]
@@ -28,20 +28,28 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
     register_fn(
         &au_tbl,
         "smelt.au",
-        "on",
-        "Alias of [`smelt.cell.subscribe`](cell.md#smeltcellsubscribe).",
+        "subscribe",
+        "Alias of [`smelt.cell.subscribe`](cell.md#smeltcellsubscribe). Returns an `off()` function that removes the subscription.",
         &["name", "handler"],
         lua,
         |lua,
          (name, handler): (LuaCellName, LuaCallback<mlua::Value, ()>)|
-         -> LuaResult<Option<i64>> {
+         -> LuaResult<Option<mlua::Function>> {
             let key = lua.create_registry_value(handler.into_inner())?;
             let id = crate::host::try_with_core(|core| {
                 core.cells
                     .subscribe_kind(&name, SubscriberKind::Lua(Rc::new(LuaHandle { key })))
             })
             .flatten();
-            Ok(id.map(|n| n as i64))
+            let Some(id) = id else { return Ok(None) };
+            let name_owned = name.0.clone();
+            let off = lua.create_function(move |_, ()| -> LuaResult<bool> {
+                Ok(
+                    crate::host::try_with_core(|core| core.cells.unsubscribe(&name_owned, id))
+                        .unwrap_or(false),
+                )
+            })?;
+            Ok(Some(off))
         },
     )?;
 
@@ -58,6 +66,21 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
                 core.cells.set_dyn(&name, Rc::new(LuaCellValue { key }))
             })
             .unwrap_or(false))
+        },
+    )?;
+
+    register_fn(
+        &au_tbl,
+        "smelt.au",
+        "unsubscribe",
+        "Alias of [`smelt.cell.unsubscribe`](cell.md#smeltcellunsubscribe). Drop the subscription with id `id` from `name`. Prefer the `off()` function returned by `subscribe`.",
+        &["name", "id"],
+        lua,
+        |_, (name, id): (LuaCellName, u64)| -> LuaResult<bool> {
+            Ok(
+                crate::host::try_with_core(|core| core.cells.unsubscribe(&name, id))
+                    .unwrap_or(false),
+            )
         },
     )?;
 

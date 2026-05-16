@@ -304,6 +304,21 @@ pub struct ConfirmRequested {
     pub approval_patterns: Vec<String>,
 }
 
+/// Payload for the `stream_delta` cell. Emitted for every streaming
+/// chunk arriving from the provider — text, thinking, and tool-arg
+/// JSON fragments. Use the `bytes` field for cheap counters (live TPS);
+/// `text` is `None` unless `SMELT_STREAM_INCLUDE_TEXT=1` is set, since
+/// the full text payload is duplicative of the transcript buffer.
+#[derive(Debug, Clone)]
+pub struct StreamDelta {
+    /// `"text" | "thinking" | "tool_args"`.
+    pub kind: String,
+    /// UTF-8 byte length of the delta.
+    pub bytes: usize,
+    /// Raw delta text, gated by env var to avoid allocator churn.
+    pub text: Option<String>,
+}
+
 /// Built-in cell names declared by [`build_with_builtins`]. Surfaces in
 /// the `smelt.cell.Name` LuaCATS alias as IDE autocomplete hints.
 /// Keep in lockstep with the `cells.declare(...)` calls below — both
@@ -330,6 +345,7 @@ pub const SEEDED_CELL_NAMES: &[&str] = &[
     "session_title",
     "shutdown",
     "spinner_frame",
+    "stream_delta",
     "tokens_used",
     "tool_end",
     "tool_start",
@@ -448,6 +464,17 @@ pub(crate) fn build_with_builtins(seeds: BuiltinSeeds) -> Cells {
         }
         mlua::Value::Table(t)
     });
+    cells.register_lua_projector::<StreamDelta, _>(|d, lua| {
+        let Ok(t) = lua.create_table() else {
+            return mlua::Value::Nil;
+        };
+        let _ = t.set("kind", d.kind.as_str());
+        let _ = t.set("bytes", d.bytes);
+        if let Some(text) = &d.text {
+            let _ = t.set("text", text.as_str());
+        }
+        mlua::Value::Table(t)
+    });
     cells.register_lua_projector::<ConfirmRequested, _>(|r, lua| {
         let Ok(t) = lua.create_table() else {
             return mlua::Value::Nil;
@@ -510,6 +537,8 @@ pub(crate) fn build_with_builtins(seeds: BuiltinSeeds) -> Cells {
     cells.declare("turn_end", EventStub);
     cells.declare("tool_start", EventStub);
     cells.declare("tool_end", EventStub);
+    cells.declare("stream_delta", EventStub);
+    cells.declare("stream_phase", EventStub);
     cells.declare("input_submit", String::new());
 
     cells
@@ -889,6 +918,7 @@ mod tests {
                 | "turn_end"
                 | "tool_start"
                 | "tool_end"
+                | "stream_delta"
         )
     }
 

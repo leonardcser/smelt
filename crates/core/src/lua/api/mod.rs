@@ -10,7 +10,9 @@ macro_rules! host_read {
 }
 
 mod au;
+mod builtins;
 pub(crate) mod cell;
+mod cli;
 mod clipboard;
 mod cmd;
 mod frontend;
@@ -28,6 +30,7 @@ mod os;
 mod parse;
 mod path;
 mod perf;
+mod phase;
 mod process;
 mod provider;
 pub mod reasoning;
@@ -119,7 +122,9 @@ pub fn register_host_api(
     shared: &Arc<crate::lua::LuaShared>,
 ) -> LuaResult<()> {
     au::register(lua, smelt)?;
+    builtins::register(lua, smelt, shared)?;
     cell::register(lua, smelt)?;
+    cli::register(lua, smelt, shared)?;
     clipboard::register(lua, smelt)?;
     cmd::register(lua, smelt, shared)?;
     frontend::register(lua, smelt)?;
@@ -138,6 +143,7 @@ pub fn register_host_api(
     parse::register(lua, smelt)?;
     path::register(lua, smelt)?;
     perf::register(lua, smelt)?;
+    phase::register(lua, smelt, shared)?;
     process::register(lua, smelt, shared)?;
     provider::register(lua, smelt, shared)?;
     shell::register(lua, smelt)?;

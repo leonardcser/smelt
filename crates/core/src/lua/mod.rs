@@ -7,8 +7,11 @@ pub mod runtime;
 mod shared;
 mod task;
 
-pub use runtime::{autoload_modules, LuaRuntime};
-pub use shared::{LuaResumeSink, LuaShared, RegisteredCommand, StatusSource, ToolHandles};
+pub use runtime::{autoload_modules, autoload_modules_filtered, LuaRuntime};
+pub use shared::{
+    CliFlagKind, CliFlagSpec, CliFlagValue, DefaultShell, HookEntry, LuaResumeSink, LuaShared,
+    Phase, RegisteredCommand, StatusSource, ToolHandles,
+};
 pub use task::{
     current_task_cancel, with_task_cancel, LuaTaskRuntime, TaskCompletion, TaskDriveOutput,
     TaskEvent, ToolEnv,

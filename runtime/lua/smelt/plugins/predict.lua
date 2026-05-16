@@ -6,7 +6,7 @@ local SYSTEM = "You predict what a user will type next in a coding assistant con
   .. "no preamble. Keep it short (one sentence max). If you cannot predict, "
   .. "reply with an empty string."
 
-smelt.au.on("turn_end", function(payload)
+smelt.au.subscribe("turn_end", function(payload)
   if payload.cancelled then
     return
   end

@@ -200,14 +200,107 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
             &tools_tbl,
             "smelt.tools",
             "unregister",
-            "Unregister a previously-registered tool by `name`. No-op if no tool with that name is registered.",
+            "Unregister a previously-registered tool by `name`. Returns `true` if a tool was removed, `false` otherwise.",
             &["name"],
             lua,
-            move |_, name: String| -> LuaResult<()> {
-                if let Ok(mut map) = s.tools.lock() {
-                    map.remove(&name);
+            move |_, name: String| -> LuaResult<bool> {
+                Ok(s.tools
+                    .lock()
+                    .map(|mut m| m.remove(&name).is_some())
+                    .unwrap_or(false))
+            },
+        )?;
+    }
+    {
+        let s = shared.clone();
+        register_fn(
+            &tools_tbl,
+            "smelt.tools",
+            "list",
+            "Return the names of every registered plugin tool, sorted.",
+            &[],
+            lua,
+            move |lua, ()| -> LuaResult<mlua::Table> {
+                let mut names: Vec<String> = s
+                    .tools
+                    .lock()
+                    .map(|m| m.keys().cloned().collect())
+                    .unwrap_or_default();
+                names.sort();
+                let table = lua.create_table()?;
+                for (i, name) in names.iter().enumerate() {
+                    table.set(i + 1, name.as_str())?;
                 }
-                Ok(())
+                Ok(table)
+            },
+        )?;
+    }
+    {
+        let s = shared.clone();
+        register_fn(
+            &tools_tbl,
+            "smelt.tools",
+            "middleware",
+            "Register middleware for tool `name`. Pass `\"\"` (empty string) as `name` to match every tool. \
+`mw` is a table of `{ before = fn?, after = fn? }`:\n\n\
+- `before(args, ctx)` runs synchronously before the tool executes. Return a table to replace `args`; return `{ deny = true, reason = \"...\" }` to short-circuit with an error result. Any other return is no-op.\n\
+- `after(args, ctx, result)` runs after the tool completes and may return `{ content, is_error }` to replace the result. NOTE: `after` currently only fires for tools that complete synchronously; yielding tools (most builtins) skip it until the task-runtime path is wired.\n\n\
+Hooks fire in registration order; an earlier hook's replacement is visible to later hooks. Returns an `off()` function that removes this middleware.",
+            &["name", "mw"],
+            lua,
+            move |lua, (name, mw): (String, mlua::Table)| -> LuaResult<mlua::Function> {
+                let before_fn: Option<mlua::Function> = mw.get("before").ok();
+                let after_fn: Option<mlua::Function> = mw.get("after").ok();
+                if before_fn.is_none() && after_fn.is_none() {
+                    return Err(LuaError::RuntimeError(
+                        "tools.middleware: at least one of `before` or `after` is required"
+                            .to_string(),
+                    ));
+                }
+                let id = s.next_id.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                if let Some(f) = before_fn {
+                    let key = lua.create_registry_value(f)?;
+                    if let Ok(mut v) = s.tool_before_hooks.lock() {
+                        v.push(crate::lua::HookEntry {
+                            id,
+                            name: name.clone(),
+                            handle: crate::lua::LuaHandle { key },
+                        });
+                    }
+                }
+                if let Some(f) = after_fn {
+                    let key = lua.create_registry_value(f)?;
+                    if let Ok(mut v) = s.tool_after_hooks.lock() {
+                        v.push(crate::lua::HookEntry {
+                            id,
+                            name: name.clone(),
+                            handle: crate::lua::LuaHandle { key },
+                        });
+                    }
+                }
+                let s2 = s.clone();
+                let off = lua.create_function(move |_, ()| -> LuaResult<bool> {
+                    let removed_before = s2
+                        .tool_before_hooks
+                        .lock()
+                        .map(|mut v| {
+                            let before_len = v.len();
+                            v.retain(|e| e.id != id);
+                            v.len() != before_len
+                        })
+                        .unwrap_or(false);
+                    let removed_after = s2
+                        .tool_after_hooks
+                        .lock()
+                        .map(|mut v| {
+                            let before_len = v.len();
+                            v.retain(|e| e.id != id);
+                            v.len() != before_len
+                        })
+                        .unwrap_or(false);
+                    Ok(removed_before || removed_after)
+                })?;
+                Ok(off)
             },
         )?;
     }

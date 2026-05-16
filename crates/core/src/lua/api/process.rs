@@ -6,9 +6,23 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use crate::lua::doc::register_fn;
+use crate::lua::shared::DefaultShell;
 use crate::lua::LuaShared;
 use crate::process;
 use lua_doc_derive::lua_module;
+
+fn current_shell_spec(shared: &Arc<LuaShared>) -> process::ShellSpec {
+    shared
+        .default_shell
+        .lock()
+        .ok()
+        .and_then(|s| s.clone())
+        .map(|s| process::ShellSpec {
+            program: s.program,
+            args: s.args,
+        })
+        .unwrap_or_default()
+}
 
 #[lua_module(
     name = "smelt.process",
@@ -77,33 +91,39 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
             }
         },
     )?;
-    register_fn(
-        &process_tbl,
-        "smelt.process",
-        "spawn_bg",
-        "Spawn `command` as a background `sh -c` child registered with the process registry. Returns the process id; raises if no host is installed or the spawn fails.",
-        &["command"],
-        lua,
-        |_, command: String| -> LuaResult<String> {
-            let registry = crate::host::try_with_core(|core| core.processes.clone())
-                .ok_or_else(|| mlua::Error::external("process.spawn_bg: app unavailable"))?;
-            let mut cmd = tokio::process::Command::new("sh");
-            cmd.arg("-c")
-                .arg(&command)
-                .stdin(std::process::Stdio::null())
-                .stdout(std::process::Stdio::piped())
-                .stderr(std::process::Stdio::piped());
-            #[cfg(unix)]
-            cmd.process_group(0);
-            let child = cmd
-                .spawn()
-                .map_err(|e| mlua::Error::external(e.to_string()))?;
-            let id = registry.next_id();
-            let (done_tx, _done_rx) = tokio::sync::mpsc::unbounded_channel();
-            registry.spawn(id.clone(), &command, child, done_tx);
-            Ok(id)
-        },
-    )?;
+    {
+        let shared_spawn = Arc::clone(shared);
+        register_fn(
+            &process_tbl,
+            "smelt.process",
+            "spawn_bg",
+            "Spawn `command` as a background child registered with the process registry. The wrapping shell defaults to `sh -c` and can be overridden process-wide via `smelt.process.set_default_shell`. Returns the process id; raises if no host is installed or the spawn fails.",
+            &["command"],
+            lua,
+            move |_, command: String| -> LuaResult<String> {
+                let registry = crate::host::try_with_core(|core| core.processes.clone())
+                    .ok_or_else(|| mlua::Error::external("process.spawn_bg: app unavailable"))?;
+                let shell = current_shell_spec(&shared_spawn);
+                let mut cmd = tokio::process::Command::new(&shell.program);
+                for a in &shell.args {
+                    cmd.arg(a);
+                }
+                cmd.arg(&command)
+                    .stdin(std::process::Stdio::null())
+                    .stdout(std::process::Stdio::piped())
+                    .stderr(std::process::Stdio::piped());
+                #[cfg(unix)]
+                cmd.process_group(0);
+                let child = cmd
+                    .spawn()
+                    .map_err(|e| mlua::Error::external(e.to_string()))?;
+                let id = registry.next_id();
+                let (done_tx, _done_rx) = tokio::sync::mpsc::unbounded_channel();
+                registry.spawn(id.clone(), &command, child, done_tx);
+                Ok(id)
+            },
+        )?;
+    }
     register_fn(
         &process_tbl,
         "smelt.process",
@@ -137,12 +157,19 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
                 let sink = shared_run_streaming.resume_sink();
                 let cancel = crate::lua::current_task_cancel();
                 let timeout = std::time::Duration::from_millis(timeout_ms);
+                let shell = current_shell_spec(&shared_run_streaming);
                 tokio::spawn(async move {
                     let on_line = |line: String| {
                         injector.inject_tool_output(call_id.clone(), line);
                     };
-                    let out =
-                        process::run_streaming(&command, timeout, on_line, cancel.clone()).await;
+                    let out = process::run_streaming_with_shell(
+                        &command,
+                        timeout,
+                        shell,
+                        on_line,
+                        cancel.clone(),
+                    )
+                    .await;
                     if cancel.as_ref().is_some_and(|c| c.is_cancelled()) {
                         let payload = serde_json::json!({ "__cancelled": true });
                         sink.resolve_json(task_id, payload);
@@ -156,6 +183,57 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
                     sink.resolve_json(task_id, payload);
                 });
                 Ok(())
+            },
+        )?;
+    }
+
+    {
+        let s = shared.clone();
+        register_fn(
+            &process_tbl,
+            "smelt.process",
+            "set_default_shell",
+            "Override the wrapping shell used by `spawn_bg` and `run_streaming` for string-form commands. `opts.program` is the executable (e.g. `\"/bin/zsh\"`); `opts.args` is the leading argv (e.g. `{ \"-fc\" }`) — the command string is appended after these. Pass `nil` (no args) to revert to the default `sh -c`.",
+            &["opts"],
+            lua,
+            move |_, opts: Option<mlua::Table>| -> LuaResult<()> {
+                let Some(t) = opts else {
+                    if let Ok(mut slot) = s.default_shell.lock() {
+                        *slot = None;
+                    }
+                    return Ok(());
+                };
+                let program: String = t.get("program")?;
+                let args: Vec<String> = t.get::<Option<Vec<String>>>("args")?.unwrap_or_default();
+                if let Ok(mut slot) = s.default_shell.lock() {
+                    *slot = Some(DefaultShell { program, args });
+                }
+                Ok(())
+            },
+        )?;
+    }
+    {
+        let s = shared.clone();
+        register_fn(
+            &process_tbl,
+            "smelt.process",
+            "get_default_shell",
+            "Return the current default shell as `{ program, args }`, or `nil` when the built-in `sh -c` default is in effect.",
+            &[],
+            lua,
+            move |lua, ()| -> LuaResult<mlua::Value> {
+                let snapshot = s.default_shell.lock().ok().and_then(|s| s.clone());
+                let Some(spec) = snapshot else {
+                    return Ok(mlua::Value::Nil);
+                };
+                let t = lua.create_table()?;
+                t.set("program", spec.program)?;
+                let args = lua.create_table()?;
+                for (i, a) in spec.args.iter().enumerate() {
+                    args.set(i + 1, a.as_str())?;
+                }
+                t.set("args", args)?;
+                Ok(mlua::Value::Table(t))
             },
         )?;
     }

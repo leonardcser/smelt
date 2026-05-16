@@ -76,8 +76,8 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
         fields: crate::class_methods! {
             "get" => fn() -> mlua::Value, "Return the current cell value, or `nil` when the cell isn't declared.",
             "set" => fn(value: mlua::Value) -> bool, "Publish a new value. Returns `true` on success.",
-            "subscribe" => fn(handler: LuaCallback<mlua::Value, ()>) -> Option<i64>, "Register handler(value) to fire on every set. Returns subscription id or `nil`.",
-            "unsubscribe" => fn(id: i64) -> bool, "Drop the subscription with id. Returns `true` on success.",
+            "subscribe" => fn(handler: LuaCallback<mlua::Value, ()>) -> Option<mlua::Function>, "Register handler(value) to fire on every set. Returns an `off()` function that removes the subscription, or `nil` when the runtime has no host.",
+            "unsubscribe" => fn(id: i64) -> bool, "Drop the subscription with id. Returns `true` on success. Prefer the `off()` function returned by `subscribe`.",
             "name" => fn() -> String, "Return the cell name.",
         },
     });
@@ -135,19 +135,27 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
         &cell_tbl,
         "smelt.cell",
         "subscribe",
-        "Register `handler(value)` to fire on every `set`. Returns a subscription id (integer) or `nil` if the runtime has no host.",
+        "Register `handler(value)` to fire on every `set`. Returns an `off()` function that, when called, removes the subscription. Returns `nil` when the runtime has no host or the cell is undeclared.",
         &["name", "handler"],
         lua,
         |lua,
          (name, handler): (LuaCellName, LuaCallback<mlua::Value, ()>)|
-         -> LuaResult<Option<i64>> {
+         -> LuaResult<Option<mlua::Function>> {
             let key = lua.create_registry_value(handler.into_inner())?;
             let id = crate::host::try_with_core(|core| {
                 core.cells
                     .subscribe_kind(&name, SubscriberKind::Lua(Rc::new(LuaHandle { key })))
             })
             .flatten();
-            Ok(id.map(|n| n as i64))
+            let Some(id) = id else { return Ok(None) };
+            let name_owned = name.0.clone();
+            let off = lua.create_function(move |_, ()| -> LuaResult<bool> {
+                Ok(
+                    crate::host::try_with_core(|core| core.cells.unsubscribe(&name_owned, id))
+                        .unwrap_or(false),
+                )
+            })?;
+            Ok(Some(off))
         },
     )?;
 
@@ -155,7 +163,7 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
         &cell_tbl,
         "smelt.cell",
         "unsubscribe",
-        "Drop the subscription with id `id` from `name`. Returns `true` on success.",
+        "Drop the subscription with id `id` from `name`. Returns `true` on success. Prefer the `off()` function returned by `subscribe`; this form is for cases where the id is tracked externally.",
         &["name", "id"],
         lua,
         |_, (name, id): (LuaCellName, u64)| -> LuaResult<bool> {
@@ -170,20 +178,27 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
         &cell_tbl,
         "smelt.cell",
         "glob_subscribe",
-        "Register `handler(name, value)` for every cell whose name matches `pattern` (glob syntax). Returns a glob-subscription id.",
+        "Register `handler(name, value)` for every cell whose name matches `pattern` (glob syntax). Returns an `off()` function that removes the glob subscription.",
         &["pattern", "handler"],
         lua,
         |lua,
          (pattern, handler): (String, LuaCallback<(String, mlua::Value), ()>)|
-         -> LuaResult<u64> {
+         -> LuaResult<mlua::Function> {
             let pat = glob::Pattern::new(&pattern)
                 .map_err(|e| LuaError::RuntimeError(format!("invalid glob `{pattern}`: {e}")))?;
             let key = lua.create_registry_value(handler.into_inner())?;
-            Ok(crate::host::try_with_core(|core| {
+            let id = crate::host::try_with_core(|core| {
                 core.cells
                     .glob_subscribe(pat, SubscriberKind::Lua(Rc::new(LuaHandle { key })))
             })
-            .unwrap_or(0))
+            .unwrap_or(0);
+            let off = lua.create_function(move |_, ()| -> LuaResult<bool> {
+                Ok(
+                    crate::host::try_with_core(|core| core.cells.unsubscribe_glob(id))
+                        .unwrap_or(false),
+                )
+            })?;
+            Ok(off)
         },
     )?;
 
@@ -191,7 +206,7 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
         &cell_tbl,
         "smelt.cell",
         "glob_unsubscribe",
-        "Drop the glob subscription with id `id`. Returns `true` on success.",
+        "Drop the glob subscription with id `id`. Returns `true` on success. Prefer the `off()` function returned by `glob_subscribe`.",
         &["id"],
         lua,
         |_, id: u64| -> LuaResult<bool> {
@@ -247,10 +262,15 @@ impl mlua::UserData for CellHandle {
                         .subscribe_kind(&this.name, SubscriberKind::Lua(Rc::new(LuaHandle { key })))
                 })
                 .flatten();
-                Ok(match id {
-                    Some(id) => mlua::Value::Integer(id as i64),
-                    None => mlua::Value::Nil,
-                })
+                let Some(id) = id else { return Ok(mlua::Value::Nil) };
+                let name_owned = this.name.clone();
+                let off = lua.create_function(move |_, ()| -> LuaResult<bool> {
+                    Ok(
+                        crate::host::try_with_core(|core| core.cells.unsubscribe(&name_owned, id))
+                            .unwrap_or(false),
+                    )
+                })?;
+                Ok(mlua::Value::Function(off))
             },
         );
 
