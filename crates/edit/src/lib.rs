@@ -98,11 +98,13 @@ pub struct Ui {
 }
 
 /// One scroll-mirror group. `members` lists the participating window ids;
-/// `last` is the post-sync `scroll_top` of each member captured the previous
-/// frame, used to detect which side moved this frame.
+/// `last` is the post-sync `(scroll_top, scroll_left)` of each member captured
+/// the previous frame, used to detect which side moved on which axis this
+/// frame. Each axis is leader-detected independently — a horizontal pan on
+/// one member mirrors only horizontally, leaving vertical positions untouched.
 struct ScrollGroup {
     members: Vec<WinId>,
-    last: Vec<u16>,
+    last: Vec<(u16, u16)>,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -164,7 +166,12 @@ impl Ui {
         }
         let last = next
             .iter()
-            .map(|w| self.wins.get(w).map(|win| win.scroll_top).unwrap_or(0))
+            .map(|w| {
+                self.wins
+                    .get(w)
+                    .map(|win| (win.scroll_top, win.scroll_left))
+                    .unwrap_or((0, 0))
+            })
             .collect();
         keep.push(ScrollGroup {
             members: next,
@@ -173,14 +180,15 @@ impl Ui {
         self.scroll_groups = keep;
     }
 
-    /// Mirror `scroll_top` across every group. Pruning rules:
+    /// Mirror `(scroll_top, scroll_left)` across every group, axis-by-axis.
+    /// Pruning rules:
     /// - drop members whose window no longer exists;
     /// - drop the whole group once it has fewer than two live members.
     ///
-    /// Leader-detection within a group: the first member whose current
-    /// `scroll_top` differs from `last` wins; ties (everyone equal) are a
-    /// no-op. The leader's value is written to every other member and to
-    /// each `last` entry.
+    /// Each axis is leader-detected independently: the first member whose
+    /// current value drifted from `last` wins on that axis. The leader's
+    /// value is written to every other member and to each `last` entry.
+    /// Ties (everyone equal on an axis) are a no-op on that axis.
     pub fn sync_scroll_links(&mut self) {
         if self.scroll_groups.is_empty() {
             return;
@@ -200,24 +208,44 @@ impl Ui {
             if g.members.len() < 2 {
                 return false;
             }
-            let now: Vec<u16> = g
+            let now: Vec<(u16, u16)> = g
                 .members
                 .iter()
-                .map(|w| self.wins.get(w).map(|win| win.scroll_top).unwrap_or(0))
+                .map(|w| {
+                    self.wins
+                        .get(w)
+                        .map(|win| (win.scroll_top, win.scroll_left))
+                        .unwrap_or((0, 0))
+                })
                 .collect();
-            // Leader = first member whose value drifted from last; else no-op.
-            let leader_idx = now.iter().zip(g.last.iter()).position(|(n, l)| n != l);
-            let target = match leader_idx {
-                Some(i) => now[i],
-                None => return true,
-            };
+            // Vertical axis.
+            let v_leader = now
+                .iter()
+                .zip(g.last.iter())
+                .position(|(n, l)| n.0 != l.0);
+            let v_target = v_leader.map(|i| now[i].0);
+            // Horizontal axis.
+            let h_leader = now
+                .iter()
+                .zip(g.last.iter())
+                .position(|(n, l)| n.1 != l.1);
+            let h_target = h_leader.map(|i| now[i].1);
             for (i, wid) in g.members.iter().enumerate() {
-                if now[i] != target {
-                    if let Some(w) = self.wins.get_mut(wid) {
-                        w.scroll_top = target;
+                if let Some(w) = self.wins.get_mut(wid) {
+                    if let Some(t) = v_target {
+                        if now[i].0 != t {
+                            w.scroll_top = t;
+                        }
+                    }
+                    if let Some(t) = h_target {
+                        if now[i].1 != t {
+                            w.scroll_left = t;
+                        }
                     }
                 }
-                g.last[i] = target;
+                let row = v_target.unwrap_or(now[i].0);
+                let col = h_target.unwrap_or(now[i].1);
+                g.last[i] = (row, col);
             }
             true
         });
@@ -481,6 +509,35 @@ impl Ui {
         let (win, buf) = self.win_and_buf_mut(w, buf_id);
         if let (Some(win), Some(buf)) = (win, buf) {
             win.pan_by_lines(buf, delta, vp_height);
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Horizontal twin of [`Self::scroll_at`]. Routes a column-delta to the
+    /// hit window's `pan_by_columns`. Returns whether anything panned.
+    pub fn scroll_at_horizontal(&mut self, row: u16, col: u16, delta: isize) -> bool {
+        if delta == 0 {
+            return false;
+        }
+        let target_win = match self.hit_test(row, col, None) {
+            Some(HitTarget::Window(w)) => Some(w),
+            Some(HitTarget::Scrollbar { owner }) => Some(owner),
+            _ => None,
+        };
+        let Some(w) = target_win else {
+            return false;
+        };
+        let vp_width = self.wins.get(&w).and_then(|win| {
+            let scrollable = win.mouse_scroll || win.config.gutters.scrollbar;
+            scrollable.then(|| win.viewport.map(|vp| vp.content_width))?
+        });
+        let Some(vp_width) = vp_width else {
+            return false;
+        };
+        if let Some(win) = self.wins.get_mut(&w) {
+            win.pan_by_columns(delta, vp_width);
             true
         } else {
             false
@@ -990,8 +1047,7 @@ impl Ui {
                     .unwrap_or(0);
                 if let Some(win) = self.wins.get_mut(&win_id) {
                     if win.pending_scroll_to_cursor && leaf_rect.height > 0 {
-                        let cursor_row = win.cursor_row;
-                        win.keep_cursor_visible(cursor_row, total_rows, leaf_rect.height);
+                        win.keep_cursor_visible(total_rows, leaf_rect.height, content_width);
                         win.pending_scroll_to_cursor = false;
                     }
                     let scrollbar = if win.config.gutters.scrollbar && leaf_rect.width > 0 {
@@ -1304,17 +1360,24 @@ impl Ui {
                         | MouseEventKind::ScrollRight
                 );
                 if is_scroll {
-                    // Route vertical wheel to the leaf under the cursor when it's
-                    // wheel-scrollable (list-style leaves or buffer viewers).
-                    // Plain inputs ignore it so wheeling near them stays inert.
-                    // When an overlay is focused, claim the event regardless so
-                    // it can't bleed through to splits underneath.
-                    let delta = match me.kind {
-                        MouseEventKind::ScrollUp => -3_isize,
-                        MouseEventKind::ScrollDown => 3,
-                        _ => 0,
+                    // Route the wheel direction to the appropriate axis on the
+                    // leaf under the cursor (when it's wheel-scrollable). When
+                    // an overlay is focused, claim the event regardless so it
+                    // can't bleed through to splits underneath.
+                    let (vdelta, hdelta) = match me.kind {
+                        MouseEventKind::ScrollUp => (-3_isize, 0),
+                        MouseEventKind::ScrollDown => (3, 0),
+                        MouseEventKind::ScrollLeft => (0, -3),
+                        MouseEventKind::ScrollRight => (0, 3),
+                        _ => (0, 0),
                     };
-                    let consumed = self.scroll_at(me.row, me.column, delta);
+                    let mut consumed = false;
+                    if vdelta != 0 {
+                        consumed |= self.scroll_at(me.row, me.column, vdelta);
+                    }
+                    if hdelta != 0 {
+                        consumed |= self.scroll_at_horizontal(me.row, me.column, hdelta);
+                    }
                     if consumed || self.focused_overlay().is_some() {
                         return Status::Consumed;
                     }

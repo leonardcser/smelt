@@ -39,6 +39,10 @@ pub enum Action {
     HistoryNext,
     /// Center the input viewport on the cursor (zz).
     CenterScroll,
+    /// Pan the viewport horizontally by `delta` cells (vim `zh`/`zl`).
+    /// Positive = pan right, negative = pan left. Cursor stays put — same
+    /// semantics as nvim's `zh`/`zl`.
+    PanColumns(isize),
     /// Key not handled — caller should use its own logic.
     Passthrough,
 }
@@ -430,10 +434,11 @@ fn handle_normal(key: KeyEvent, ctx: &mut VimContext<'_>) -> Action {
         SubState::WaitingR => return handle_waiting_r(key, ctx),
         SubState::WaitingZ => {
             ctx.vim_state.sub = SubState::Ready;
-            return if matches!(key.code, KeyCode::Char('z')) {
-                Action::CenterScroll
-            } else {
-                Action::Consumed
+            return match key.code {
+                KeyCode::Char('z') => Action::CenterScroll,
+                KeyCode::Char('h') => Action::PanColumns(-1),
+                KeyCode::Char('l') => Action::PanColumns(1),
+                _ => Action::Consumed,
             };
         }
         SubState::WaitingFind(kind) => return handle_waiting_find(key, kind, ctx),
@@ -999,10 +1004,11 @@ fn handle_visual(key: KeyEvent, ctx: &mut VimContext<'_>) -> Action {
     }
     if let SubState::WaitingZ = ctx.vim_state.sub {
         ctx.vim_state.sub = SubState::Ready;
-        return if matches!(key.code, KeyCode::Char('z')) {
-            Action::CenterScroll
-        } else {
-            Action::Consumed
+        return match key.code {
+            KeyCode::Char('z') => Action::CenterScroll,
+            KeyCode::Char('h') => Action::PanColumns(-1),
+            KeyCode::Char('l') => Action::PanColumns(1),
+            _ => Action::Consumed,
         };
     }
 

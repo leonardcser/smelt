@@ -275,6 +275,11 @@ pub struct Window {
     /// via `sync_from_cpos`.
     pub(crate) cursor_col: u16,
     /// Keeps viewport snapped to newest row; cleared when the user scrolls away.
+    /// Leftmost visible cell column. `0` means the row starts at its first
+    /// character; non-zero values pan the viewport rightward. Wrapped rows
+    /// stay at `0` (wrapping moves overflow to the next visual row); pre-
+    /// formatted rows are the primary user of horizontal scroll.
+    pub scroll_left: u16,
     pub follow_tail: bool,
     /// One-shot recenter request (vim `zz`); cleared after the next paint.
     pub pending_recenter: bool,
@@ -326,6 +331,7 @@ impl Window {
             selection_anchor: None,
             curswant: None,
             scroll_top: 0,
+            scroll_left: 0,
             cursor_row: 0,
             cursor_col: 0,
             follow_tail: true,
@@ -710,24 +716,44 @@ impl Window {
         }
     }
 
-    /// Clamp `scroll_top` so `cursor_row` stays inside the viewport.
-    /// Call after updating `cursor_row` (or call `sync_from_cpos` which does both).
-    /// A zero viewport (leaf laid out but not yet painted) is left alone; the host's
-    /// `pending_scroll_to_cursor` does the first-paint adjustment with real dimensions.
-    pub fn keep_cursor_visible(&mut self, cursor_row: u16, total_rows: u16, viewport_rows: u16) {
-        if viewport_rows == 0 {
-            return;
+    /// Pan `scroll_top` and `scroll_left` so the cursor stays inside the
+    /// viewport on both axes. Zero on either dimension treats that axis as
+    /// "no viewport yet" and skips it — the host's `pending_scroll_to_cursor`
+    /// retries once real dimensions land. Horizontal bounds come from the
+    /// cached layout's widest visual row; vertical bounds use the caller-
+    /// supplied `total_rows` so wrap-aware paths pass `visual_row_total` and
+    /// plain row counters pass `lines().len()`.
+    pub fn keep_cursor_visible(
+        &mut self,
+        total_rows: u16,
+        viewport_rows: u16,
+        viewport_cols: u16,
+    ) {
+        if viewport_rows > 0 {
+            let max_scroll = total_rows.saturating_sub(viewport_rows);
+            let viewport_bottom = self
+                .scroll_top
+                .saturating_add(viewport_rows.saturating_sub(1));
+            if self.cursor_row > viewport_bottom {
+                self.scroll_top = self
+                    .cursor_row
+                    .saturating_sub(viewport_rows.saturating_sub(1))
+                    .min(max_scroll);
+            } else if self.cursor_row < self.scroll_top {
+                self.scroll_top = self.cursor_row;
+            }
         }
-        let max_scroll = total_rows.saturating_sub(viewport_rows);
-        let viewport_bottom = self
-            .scroll_top
-            .saturating_add(viewport_rows.saturating_sub(1));
-        if cursor_row > viewport_bottom {
-            self.scroll_top = cursor_row
-                .saturating_sub(viewport_rows.saturating_sub(1))
-                .min(max_scroll);
-        } else if cursor_row < self.scroll_top {
-            self.scroll_top = cursor_row;
+        if viewport_cols > 0 {
+            let viewport_right = self
+                .scroll_left
+                .saturating_add(viewport_cols.saturating_sub(1));
+            if self.cursor_col > viewport_right {
+                self.scroll_left = self
+                    .cursor_col
+                    .saturating_sub(viewport_cols.saturating_sub(1));
+            } else if self.cursor_col < self.scroll_left {
+                self.scroll_left = self.cursor_col;
+            }
         }
     }
 
@@ -736,7 +762,8 @@ impl Window {
         self.cursor_row = row;
         self.cursor_col = col;
         let total_rows = self.visual_row_total(buf);
-        self.keep_cursor_visible(self.cursor_row, total_rows, viewport_rows);
+        let viewport_cols = self.viewport.map(|v| v.content_width).unwrap_or(0);
+        self.keep_cursor_visible(total_rows, viewport_rows, viewport_cols);
     }
 
     // ── Event dispatch ────────────────────────────────────────────────
@@ -1024,7 +1051,7 @@ impl Window {
     ) -> Status {
         let width = self.viewport.map(|v| v.content_width).unwrap_or(80);
         let viewport_rows = self.viewport.map(|v| v.rect.height).unwrap_or(1);
-        {
+        let action = {
             let mut cpos = self.cpos;
             let action = if buf.readonly {
                 let mut scratch = buf.text();
@@ -1059,7 +1086,8 @@ impl Window {
             if matches!(action, Action::Passthrough) {
                 return Status::Ignored;
             }
-        }
+            action
+        };
         if self.vim_enabled && self.vim_mode == VimMode::Insert {
             self.vim_state.set_mode(&mut self.vim_mode, VimMode::Normal);
         }
@@ -1073,8 +1101,35 @@ impl Window {
         self.cursor_row = row;
         self.cursor_col = col;
         let total_rows = self.visual_row_total(buf);
-        self.keep_cursor_visible(self.cursor_row, total_rows, viewport_rows);
+        let viewport_cols = self.viewport.map(|v| v.content_width).unwrap_or(0);
+        match action {
+            // `zz` recenters the cursor row; horizontal still tracks the cursor.
+            Action::CenterScroll => {
+                self.recenter_on_cursor(total_rows, viewport_rows);
+                self.keep_cursor_visible(total_rows, 0, viewport_cols);
+            }
+            // `zh`/`zl` pan the horizontal viewport without moving the cursor —
+            // the cursor is allowed to scroll off-screen, matching nvim.
+            Action::PanColumns(delta) => {
+                self.pan_by_columns(delta, viewport_cols);
+                self.keep_cursor_visible(total_rows, viewport_rows, 0);
+            }
+            _ => self.keep_cursor_visible(total_rows, viewport_rows, viewport_cols),
+        }
         Status::Consumed
+    }
+
+    /// Vim `zz`: scroll so the cursor row sits at the vertical middle of the
+    /// viewport, clamped to the available scroll range.
+    fn recenter_on_cursor(&mut self, total_rows: u16, viewport_rows: u16) {
+        if viewport_rows == 0 {
+            return;
+        }
+        let half = viewport_rows / 2;
+        let want = self.cursor_row.saturating_sub(half);
+        let max_scroll = total_rows.saturating_sub(viewport_rows);
+        self.scroll_top = want.min(max_scroll);
+        self.follow_tail = self.scroll_top >= max_scroll;
     }
 
     /// Cursor-led vertical motion: move `cpos` by `delta` rows; viewport pans only
@@ -1093,6 +1148,25 @@ impl Window {
         self.sync_from_cpos(buf, viewport_rows);
         let max_scroll = (self.visual_row_total(buf)).saturating_sub(viewport_rows);
         self.follow_tail = self.scroll_top >= max_scroll;
+    }
+
+    /// Viewport-led horizontal pan: bump `scroll_left` by `delta` cells,
+    /// clamped to `[0, max_row_width - viewport_cols]`. The cursor's source-row
+    /// column is unchanged; if it would land off-viewport after the pan, the
+    /// caller is responsible for tugging it back (vim `zh/zl` keeps the cursor
+    /// where it is by design — same as nvim).
+    ///
+    /// Assumes `ensure_layout` ran this frame; otherwise `max_row_width` is
+    /// stale. The host's prep pass guarantees that for any window with a live
+    /// viewport — tests that bypass the prep pass should call `ensure_layout`
+    /// themselves before calling this.
+    pub fn pan_by_columns(&mut self, delta: isize, viewport_cols: u16) {
+        if viewport_cols == 0 || delta == 0 {
+            return;
+        }
+        let max_scroll = self.layout.max_row_width().saturating_sub(viewport_cols);
+        let cur = self.scroll_left.min(max_scroll);
+        self.scroll_left = (cur as isize + delta).clamp(0, max_scroll as isize) as u16;
     }
 
     /// Viewport-led pan (mouse wheel / tmux copy-mode semantics): bump `scroll_top`
@@ -1296,20 +1370,48 @@ impl Window {
             col_to_char.clear();
             line_chars.clear();
             line_chars.extend(line.chars());
-            let mut col: u16 = 0;
+            // Two-axis pan: `src_col` walks the source row in cell space (drives
+            // skip/clip against `scroll_left`); `dst_col` is where each surviving
+            // glyph lands in the viewport. A wide char straddling the left edge
+            // collapses to a leading space so wide-char cells aren't smeared.
+            //
+            // `to_viewport_col` translates a span/selection column (in source-row
+            // cell space, after chunk_cell_offset for wrapped continuations) into
+            // the viewport's cell space — clamped so out-of-view spans collapse
+            // to a no-op range rather than panicking on subtraction.
+            let scroll_left = self.scroll_left;
+            let to_viewport_col = |source: u16| -> u16 {
+                source
+                    .saturating_sub(chunk_cell_offset)
+                    .saturating_sub(scroll_left)
+                    .min(content_width)
+            };
+            let mut src_col: u16 = 0;
+            let mut dst_col: u16 = 0;
             for (ci, ch) in line_chars.iter().enumerate() {
                 let cw = UnicodeWidthChar::width(*ch).unwrap_or(0).max(1) as u16;
-                if col + cw > content_width {
+                if src_col.saturating_add(cw) <= scroll_left {
+                    src_col = src_col.saturating_add(cw);
+                    continue;
+                }
+                let (painted, eff_cw) = if src_col < scroll_left {
+                    let visible = src_col.saturating_add(cw).saturating_sub(scroll_left);
+                    (' ', visible)
+                } else {
+                    (*ch, cw)
+                };
+                if dst_col.saturating_add(eff_cw) > content_width {
                     break;
                 }
-                slice.set(content_offset + col, row, *ch, row_style);
+                slice.set(content_offset + dst_col, row, painted, row_style);
                 col_to_char.push(ci);
-                for _ in 1..cw {
+                for _ in 1..eff_cw {
                     col_to_char.push(ci);
                 }
-                col += cw;
+                dst_col = dst_col.saturating_add(eff_cw);
+                src_col = src_col.saturating_add(cw);
             }
-            let content_end_col = col;
+            let content_end_col = dst_col;
             spans_buf.clear();
             if logical.is_some() {
                 buf.highlights_at_into(logical_row, &mut spans_buf);
@@ -1321,14 +1423,8 @@ impl Window {
                 }
                 let span_style = ctx.theme.resolve(span.hl);
                 let style = merge_span_style(row_style, &span_style);
-                let start = span
-                    .col_start
-                    .saturating_sub(chunk_cell_offset)
-                    .min(content_width);
-                let end = span
-                    .col_end
-                    .saturating_sub(chunk_cell_offset)
-                    .min(content_width);
+                let start = to_viewport_col(span.col_start);
+                let end = to_viewport_col(span.col_end);
                 if end > start {
                     paint_span_cells(
                         slice,
@@ -1357,14 +1453,8 @@ impl Window {
                     mask_buf.clear();
                     mask_buf.resize(content_width as usize, true);
                     for span in spans_buf.iter().filter(|s| !s.meta.selectable) {
-                        let start = span
-                            .col_start
-                            .saturating_sub(chunk_cell_offset)
-                            .min(content_width) as usize;
-                        let end = span
-                            .col_end
-                            .saturating_sub(chunk_cell_offset)
-                            .min(content_width) as usize;
+                        let start = to_viewport_col(span.col_start) as usize;
+                        let end = to_viewport_col(span.col_end) as usize;
                         for slot in mask_buf.iter_mut().take(end).skip(start) {
                             *slot = false;
                         }
@@ -1376,14 +1466,8 @@ impl Window {
             if logical.is_some() {
                 for r in selection_ranges.iter().filter(|r| r.line == logical_row) {
                     let style = merge_span_style(row_style, &visual_style);
-                    let start = r
-                        .col_start
-                        .saturating_sub(chunk_cell_offset)
-                        .min(content_width);
-                    let end = r
-                        .col_end
-                        .saturating_sub(chunk_cell_offset)
-                        .min(content_width);
+                    let start = to_viewport_col(r.col_start);
+                    let end = to_viewport_col(r.col_end);
                     if end > start {
                         paint_span_cells(
                             slice,
@@ -1419,9 +1503,9 @@ impl Window {
                     .sum();
                 let start_col = match vt.pos {
                     VirtTextPos::Eol => content_end_col,
-                    VirtTextPos::Inline | VirtTextPos::Overlay => {
-                        (vt.col as u16).min(content_width)
-                    }
+                    VirtTextPos::Inline | VirtTextPos::Overlay => (vt.col as u16)
+                        .saturating_sub(scroll_left)
+                        .min(content_width),
                     VirtTextPos::RightAlign => content_width.saturating_sub(vt_width),
                 };
                 let mut c = start_col;
@@ -1455,18 +1539,19 @@ impl Window {
                     .map(|screen_row| (col, screen_row))
             });
             if let Some((col, screen_row)) = resolved {
-                if col < content_width && screen_row < height {
-                    // Preserve the underlying character when there is one — block-cursor
-                    // semantics are "invert the cell," not "stamp a glyph." Empty cells
-                    // (past EOL, blank gutters) fall back to `glyph` so callers control
-                    // what shows when there's nothing under the cursor.
-                    let under = slice.cell(content_offset + col, screen_row).symbol;
-                    let painted = if under == '\0' || under == ' ' {
-                        glyph
-                    } else {
-                        under
-                    };
-                    slice.set(content_offset + col, screen_row, painted, style);
+                // `col` is in source-row cells; shift into viewport coords. Off
+                // either side of the horizontal viewport drops the caret paint.
+                if col >= self.scroll_left && screen_row < height {
+                    let dst_col = col - self.scroll_left;
+                    if dst_col < content_width {
+                        let under = slice.cell(content_offset + dst_col, screen_row).symbol;
+                        let painted = if under == '\0' || under == ' ' {
+                            glyph
+                        } else {
+                            under
+                        };
+                        slice.set(content_offset + dst_col, screen_row, painted, style);
+                    }
                 }
             }
         }
@@ -1779,6 +1864,62 @@ mod tests {
         w.pan_by_lines(&buf, -3, viewport);
         assert_eq!(w.scroll_top, max_scroll - 3);
         assert!(!w.follow_tail);
+    }
+
+    #[test]
+    fn pan_by_columns_pans_viewport_without_moving_cursor() {
+        // `zh`/`zl` and wheel-horizontal: pan the column viewport without
+        // touching cpos. The cursor can scroll off-screen — that's what the
+        // bindings are for.
+        let mut w = make_win();
+        let row = "x".repeat(100);
+        let buf = make_buf(vec![row]);
+        w.ensure_layout(&buf, 100);
+        w.cpos = 0;
+        w.pan_by_columns(10, 20);
+        assert_eq!(w.scroll_left, 10);
+        assert_eq!(w.cpos, 0, "pan must not touch cpos");
+    }
+
+    #[test]
+    fn pan_by_columns_clamps_at_left_edge() {
+        let mut w = make_win();
+        let row = "x".repeat(100);
+        let buf = make_buf(vec![row]);
+        w.ensure_layout(&buf, 100);
+        w.pan_by_columns(-5, 20);
+        assert_eq!(w.scroll_left, 0);
+    }
+
+    #[test]
+    fn pan_by_columns_clamps_to_max_row_width_minus_viewport() {
+        let mut w = make_win();
+        let row = "x".repeat(100);
+        let buf = make_buf(vec![row]);
+        w.ensure_layout(&buf, 100);
+        w.pan_by_columns(1000, 20);
+        assert_eq!(
+            w.scroll_left, 80,
+            "scroll_left clamps to max_row_width - viewport_cols"
+        );
+    }
+
+    #[test]
+    fn keep_cursor_visible_pans_horizontally_when_off_right() {
+        let mut w = make_win();
+        w.scroll_left = 0;
+        w.cursor_col = 95;
+        w.keep_cursor_visible(0, 0, 20);
+        assert_eq!(w.scroll_left, 76);
+    }
+
+    #[test]
+    fn keep_cursor_visible_snaps_back_horizontally_when_off_left() {
+        let mut w = make_win();
+        w.scroll_left = 50;
+        w.cursor_col = 10;
+        w.keep_cursor_visible(0, 0, 20);
+        assert_eq!(w.scroll_left, 10);
     }
 
     #[test]

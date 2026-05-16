@@ -527,6 +527,9 @@ impl TuiApp {
             Action::CenterScroll => {
                 self.prompt_win_mut().pending_recenter = true;
             }
+            Action::PanColumns(d) => {
+                self.pan_prompt_columns(d);
+            }
             Action::NotifyError(msg) => {
                 self.notify_error(msg);
             }
@@ -549,12 +552,24 @@ impl TuiApp {
                 self.prompt_win_mut().pending_recenter = true;
                 EventOutcome::Noop
             }
+            Action::PanColumns(d) => {
+                self.pan_prompt_columns(d);
+                EventOutcome::Redraw
+            }
             Action::Redraw => EventOutcome::Redraw,
             Action::NotifyError(msg) => {
                 self.notify_error(msg);
                 EventOutcome::Redraw
             }
             Action::Noop => EventOutcome::Noop,
+        }
+    }
+
+    fn pan_prompt_columns(&mut self, delta: isize) {
+        let win_id = crate::app::PROMPT_WIN;
+        if let Some(win) = self.ui.win_mut(win_id) {
+            let viewport_cols = win.viewport.map(|v| v.content_width).unwrap_or(0);
+            win.pan_by_columns(delta, viewport_cols);
         }
     }
 

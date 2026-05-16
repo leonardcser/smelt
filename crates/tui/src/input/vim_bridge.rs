@@ -93,6 +93,7 @@ impl PromptState {
                 VimBridgeResult::Handled(Action::Redraw)
             }
             vim::Action::CenterScroll => VimBridgeResult::Handled(Action::CenterScroll),
+            vim::Action::PanColumns(d) => VimBridgeResult::Handled(Action::PanColumns(d)),
             vim::Action::Passthrough => VimBridgeResult::Passthrough,
         }
     }

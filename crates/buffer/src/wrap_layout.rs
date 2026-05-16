@@ -8,6 +8,7 @@
 
 use crate::buffer::Buffer;
 use crate::wrap::wrap_line_ranges;
+use unicode_width::UnicodeWidthStr;
 
 /// Mapping from logical lines to visual rows at a specific width.
 #[derive(Clone, Debug, Default)]
@@ -21,6 +22,11 @@ pub struct WrappedLayout {
     row_starts: Vec<usize>,
     /// Total visual row count.
     visual_count: usize,
+    /// Widest visual row, in terminal cells. Drives horizontal scroll math:
+    /// callers clamp `scroll_left` to `max_row_width - viewport_cols` so the
+    /// content never pans past its rightmost cell. Pre-formatted (non-wrapped)
+    /// rows can exceed the viewport — that's exactly what `scroll_left` is for.
+    max_row_width: u16,
 }
 
 impl WrappedLayout {
@@ -44,6 +50,7 @@ impl WrappedLayout {
         let mut chunks_per_row: Vec<Vec<(usize, usize)>> = Vec::with_capacity(lines.len());
         let mut row_starts: Vec<usize> = Vec::with_capacity(lines.len());
         let mut visual_count = 0usize;
+        let mut max_row_width: usize = 0;
         for (idx, line) in lines.iter().enumerate() {
             row_starts.push(visual_count);
             let chunks = if !row_wraps(idx) || line.is_empty() {
@@ -51,6 +58,12 @@ impl WrappedLayout {
             } else {
                 wrap_line_ranges(line, width as usize)
             };
+            for &(s, e) in &chunks {
+                let w = UnicodeWidthStr::width(&line[s..e]);
+                if w > max_row_width {
+                    max_row_width = w;
+                }
+            }
             visual_count += chunks.len();
             chunks_per_row.push(chunks);
         }
@@ -63,6 +76,7 @@ impl WrappedLayout {
             chunks_per_row,
             row_starts,
             visual_count,
+            max_row_width: max_row_width.min(u16::MAX as usize) as u16,
         }
     }
 
@@ -72,6 +86,12 @@ impl WrappedLayout {
 
     pub fn logical_count(&self) -> usize {
         self.chunks_per_row.len()
+    }
+
+    /// Widest visual row in terminal cells. Used to clamp `scroll_left` so
+    /// horizontal pan stops at the last content column.
+    pub fn max_row_width(&self) -> u16 {
+        self.max_row_width
     }
 
     /// Visual-row slices of `lines`. One iteration step per visual row, in order.
@@ -194,6 +214,29 @@ mod tests {
         let layout = WrappedLayout::from_lines(&ls, 5, true);
         assert_eq!(layout.visual_count(), 1);
         assert_eq!(layout.chunks_of(0), &[(0, 0)]);
+    }
+
+    #[test]
+    fn max_row_width_tracks_widest_visual_row_when_wrap_disabled() {
+        let ls = lines(&["short", "much longer line"]);
+        let layout = WrappedLayout::from_lines(&ls, 80, false);
+        assert_eq!(layout.max_row_width(), 16);
+    }
+
+    #[test]
+    fn max_row_width_clamps_to_wrap_width_when_wrap_enabled() {
+        let ls = lines(&["aaaa aaaa aaaa"]);
+        let layout = WrappedLayout::from_lines(&ls, 5, true);
+        // Each wrapped chunk is ≤ 5 cells.
+        assert!(layout.max_row_width() <= 5);
+    }
+
+    #[test]
+    fn max_row_width_counts_cells_not_bytes_for_wide_chars() {
+        // CJK glyphs are width-2 in terminal cells.
+        let ls = lines(&["漢字"]);
+        let layout = WrappedLayout::from_lines(&ls, 80, false);
+        assert_eq!(layout.max_row_width(), 4);
     }
 
     #[test]
