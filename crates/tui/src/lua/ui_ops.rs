@@ -86,7 +86,9 @@ fn parse_overlay_anchor(
     term_h: u16,
 ) -> Result<Anchor, String> {
     match opts.get::<String>("anchor").ok().as_deref() {
-        Some("dock_bottom") | None => Ok(Anchor::ScreenBottom { above_rows: 1 }),
+        Some("dock_bottom") | None => Ok(Anchor::ScreenBottom {
+            above_rows: crate::content::layout::STATUSLINE_ROWS,
+        }),
         Some("dock_top") => Ok(Anchor::ScreenAt {
             row: 0,
             col: 0,

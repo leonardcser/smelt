@@ -1,5 +1,10 @@
 pub(crate) use crate::smelt_term::Rect;
 
+/// Rows reserved for the bottom statusline in the main splits layout. Overlays
+/// docked at the bottom (`Anchor::ScreenBottom { above_rows: STATUSLINE_ROWS }`)
+/// use this to avoid covering it.
+pub(crate) const STATUSLINE_ROWS: u16 = 1;
+
 #[derive(Clone, Debug, Default)]
 pub(crate) struct LayoutState {
     pub(crate) transcript: Rect,
@@ -31,8 +36,7 @@ pub(crate) fn build_layout_tree(
 
     let above = prompt_above_rows.max(1);
     let below = 1u16;
-    let status = 1u16;
-    let chrome = above + below + status;
+    let chrome = above + below + STATUSLINE_ROWS;
     // Cap prompt block at half the terminal so the transcript always has room.
     let max_block = (term_height / 2).max(chrome + 1);
     let input_rows = prompt_input_rows
@@ -62,7 +66,7 @@ pub(crate) fn build_layout_tree(
                     crate::smelt_term::LayoutTree::leaf(crate::app::PROMPT_BELOW_WIN),
                 ),
                 (
-                    crate::smelt_term::Constraint::Length(status),
+                    crate::smelt_term::Constraint::Length(STATUSLINE_ROWS),
                     crate::smelt_term::LayoutTree::leaf(status_win),
                 ),
             ]),

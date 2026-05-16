@@ -281,7 +281,9 @@ fn anchor_for(placement: PickerPlacement, height: u16) -> Anchor {
             row_offset: 1,
             col_offset: 0,
         },
-        PickerPlacement::ScreenBottom => Anchor::ScreenBottom { above_rows: 1 },
+        PickerPlacement::ScreenBottom => Anchor::ScreenBottom {
+            above_rows: crate::content::layout::STATUSLINE_ROWS,
+        },
     }
 }
 
