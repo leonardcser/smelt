@@ -6,6 +6,14 @@
 
 Config-time MCP server registration. Unknown fields raise errors.
 
+## `smelt.mcp.list`
+
+```lua
+fun(): table
+```
+
+Snapshot every declared MCP server. Each row is `{ name, config, status, tool_count }` where `status` is `{ kind = "disabled"|"connecting"|"connected"|"error", since_ms?, error?, at_ms? }`. Lifecycle reads are sync — safe to call from a status renderer or keymap.
+
 ## `smelt.mcp.register`
 
 ```lua
@@ -15,4 +23,20 @@ fun(name: string, cfg: smelt.mcp.Config): nil
 Types: [`smelt.mcp.Config`](types.md#smeltmcpconfig)
 
 Declare an MCP server named `name`. See [`smelt.mcp.Config`](types.md#smeltmcpconfig).
+
+## `smelt.mcp.status`
+
+```lua
+fun(name: string): string?
+```
+
+Return the lifecycle status for server `name`: `"disabled"`, `"connecting"`, `"connected"`, or `"error"`. Returns `nil` when no server with that name is declared.
+
+## `smelt.mcp.tools`
+
+```lua
+fun(server: string?): table
+```
+
+Snapshot every discovered MCP tool. Each row is `{ server, name, qualified_name, description, schema }`. When `server` is provided, only that server's tools are returned; otherwise tools from every connected server.
 

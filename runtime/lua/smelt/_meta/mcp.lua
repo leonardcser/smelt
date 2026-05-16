@@ -7,9 +7,21 @@
 ---@class smelt.mcp
 local mcp = {}
 
+--- Snapshot every declared MCP server. Each row is `{ name, config, status, tool_count }` where `status` is `{ kind = "disabled"|"connecting"|"connected"|"error", since_ms?, error?, at_ms? }`. Lifecycle reads are sync — safe to call from a status renderer or keymap.
+---@type fun(): table
+mcp.list = nil
+
 --- Declare an MCP server named `name`. See `smelt.mcp.Config`.
 ---@see smelt.mcp.Config
 ---@type fun(name: string, cfg: smelt.mcp.Config): nil
 mcp.register = nil
+
+--- Return the lifecycle status for server `name`: `"disabled"`, `"connecting"`, `"connected"`, or `"error"`. Returns `nil` when no server with that name is declared.
+---@type fun(name: string): string?
+mcp.status = nil
+
+--- Snapshot every discovered MCP tool. Each row is `{ server, name, qualified_name, description, schema }`. When `server` is provided, only that server's tools are returned; otherwise tools from every connected server.
+---@type fun(server: string?): table
+mcp.tools = nil
 
 return mcp
