@@ -292,6 +292,24 @@ impl PromptState {
         self.recompute_completer(ctx.as_ref());
     }
 
+    /// Prepend `prefix` to the buffer, snapshot undo, shift cpos forward.
+    /// Existing source bytes (including ATTACHMENT_MARKERs) and their
+    /// `attachment_ids` are preserved — unlike `replace_text`, which wipes
+    /// attachments by assuming the new text fully supplants the old.
+    pub(crate) fn prepend_text(&mut self, ctx: &mut PromptCtx<'_>, prefix: String) {
+        if prefix.is_empty() {
+            return;
+        }
+        self.save_undo(ctx);
+        let inserted = prefix.len();
+        smelt_buffer::text::safe_insert_str(ctx.buf.source_mut(), 0, &prefix);
+        ctx.win.cpos += inserted;
+        ctx.win.selection_anchor = None;
+        self.from_paste = false;
+        self.close_completer();
+        self.recompute_completer(ctx.as_ref());
+    }
+
     /// Toggle stash. Attachments are cloned out of the store so the stash survives store clears.
     fn toggle_stash(&mut self, ctx: &mut PromptCtx<'_>) {
         if let Some(snap) = self.stash.take() {

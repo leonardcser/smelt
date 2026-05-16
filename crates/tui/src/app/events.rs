@@ -474,12 +474,11 @@ impl TuiApp {
                 }
                 EscAction::Unqueue => {
                     let mut pctx = crate::input::prompt_ctx_mut(&mut self.ui);
-                    let mut combined = self.queued_messages.join("\n");
-                    if !pctx.buf.source().is_empty() {
-                        combined.push('\n');
-                        combined.push_str(pctx.buf.source());
+                    let mut prefix = self.queued_messages.join("\n");
+                    if !prefix.is_empty() && !pctx.buf.source().is_empty() {
+                        prefix.push('\n');
                     }
-                    self.input.replace_text(&mut pctx, combined, None);
+                    self.input.prepend_text(&mut pctx, prefix);
                     self.queued_messages.clear();
                 }
                 EscAction::Cancel { restore_vim } => {
