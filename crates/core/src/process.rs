@@ -235,7 +235,6 @@ pub async fn run_streaming_with_shell(
     }
 }
 
-
 #[cfg(unix)]
 fn kill_process_group(child: &tokio::process::Child) {
     if let Some(pid) = child.id() {

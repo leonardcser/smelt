@@ -78,31 +78,48 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
             &[],
             lua,
             move |lua, ()| -> LuaResult<mlua::Table> {
-                let rows: Vec<(String, Option<String>, Vec<String>, bool, bool, bool, bool)> = s
+                struct Row {
+                    name: String,
+                    desc: Option<String>,
+                    args: Vec<String>,
+                    while_busy: bool,
+                    queue_when_busy: bool,
+                    startup_ok: bool,
+                    hidden: bool,
+                }
+                let rows: Vec<Row> = s
                     .commands
                     .lock()
                     .map(|m| {
-                        let mut rows: Vec<_> = m
+                        let mut rows: Vec<Row> = m
                             .iter()
-                            .map(|(name, cmd)| {
-                                (
-                                    name.clone(),
-                                    cmd.description.clone(),
-                                    cmd.args.clone(),
-                                    cmd.while_busy,
-                                    cmd.queue_when_busy,
-                                    cmd.startup_ok,
-                                    cmd.hidden,
-                                )
+                            .map(|(name, cmd)| Row {
+                                name: name.clone(),
+                                desc: cmd.description.clone(),
+                                args: cmd.args.clone(),
+                                while_busy: cmd.while_busy,
+                                queue_when_busy: cmd.queue_when_busy,
+                                startup_ok: cmd.startup_ok,
+                                hidden: cmd.hidden,
                             })
                             .collect();
-                        rows.sort_by(|a, b| a.0.cmp(&b.0));
+                        rows.sort_by(|a, b| a.name.cmp(&b.name));
                         rows
                     })
                     .unwrap_or_default();
                 let table = lua.create_table()?;
-                for (i, (name, desc, args, while_busy, queue_when_busy, startup_ok, hidden)) in
-                    rows.into_iter().enumerate()
+                for (
+                    i,
+                    Row {
+                        name,
+                        desc,
+                        args,
+                        while_busy,
+                        queue_when_busy,
+                        startup_ok,
+                        hidden,
+                    },
+                ) in rows.into_iter().enumerate()
                 {
                     let row = lua.create_table()?;
                     row.set("name", name)?;
