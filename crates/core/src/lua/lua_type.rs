@@ -240,15 +240,14 @@ impl_lua_type_for_tuple!(0: A, 1: B, 2: C, 3: D, 4: E, 5: F, 6: G, 7: H);
 
 impl<T: LuaType> LuaType for mlua::Variadic<T> {
     fn lua_type() -> String {
-        format!("{}[]", T::lua_type())
+        T::lua_type()
     }
 }
 
 impl<T: LuaType> LuaTypeTuple for mlua::Variadic<T> {
     const ARITY: usize = 1;
-    fn lua_param_list(param_names: &[&'static str]) -> String {
-        let name = param_names.first().copied().unwrap_or("...");
-        format!("{}: {}", name, <mlua::Variadic<T> as LuaType>::lua_type())
+    fn lua_param_list(_param_names: &[&'static str]) -> String {
+        format!("...: {}", T::lua_type())
     }
 }
 

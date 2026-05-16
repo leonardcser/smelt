@@ -73,7 +73,7 @@ Return `true` if `p` is an absolute path on the current platform.
 ## `smelt.path.join`
 
 ```lua
-fun(parts: string[]): string
+fun(...: string): string
 ```
 
 Join the variadic `parts` into a single path using the platform separator.

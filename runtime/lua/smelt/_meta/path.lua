@@ -40,7 +40,7 @@ path.extension = nil
 path.is_absolute = nil
 
 --- Join the variadic `parts` into a single path using the platform separator.
----@type fun(parts: string[]): string
+---@type fun(...: string): string
 path.join = nil
 
 --- Normalize `p` by collapsing redundant `.`, `..`, and separator components without touching the filesystem.
