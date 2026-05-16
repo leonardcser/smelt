@@ -7,6 +7,10 @@
 ---@class smelt.process
 local process = {}
 
+--- Return the current default shell as `{ program, args }`, or `nil` when the built-in `sh -c` default is in effect.
+---@type fun(): any
+process.get_default_shell = nil
+
 --- Stop the registered process with `id`. Schedules the kill asynchronously; no-op when no host is installed.
 ---@type fun(id: string): nil
 process.kill = nil
@@ -27,7 +31,12 @@ process.run = nil
 ---@type fun(task_id: integer, call_id: string, command: string, timeout_ms: integer): nil
 process.run_streaming = nil
 
---- Spawn `command` as a background `sh -c` child registered with the process registry. Returns the process id; raises if no host is installed or the spawn fails.
+--- Override the wrapping shell used by `spawn_bg` and `run_streaming` for string-form commands. `opts.program` is the executable (e.g. `"/bin/zsh"`); `opts.args` is the leading argv (e.g. `{ "-fc" }`) — the command string is appended after these. Pass `nil` (no args) to revert to the default `sh -c`.
+---@type fun(opts: table?): nil
+process.set_default_shell = nil
+
+--- Spawn `command` as a background child registered with the process registry. The wrapping shell defaults to `sh -c` and can be overridden process-wide via `smelt.process.set_default_shell`. Returns the process id; raises if no host is installed or the spawn fails.
+---@see smelt.process.set_default_shell
 ---@type fun(command: string): string
 process.spawn_bg = nil
 

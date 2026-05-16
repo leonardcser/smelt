@@ -4,7 +4,7 @@
 
 **Tier:** `Host` — Available in every runtime, including headless mode.
 
-Typed reactive cell registry. Surface is a flat table for one-shot reads/writes and a callable that hands back a sticky handle for repeated access (`local c = smelt.cell("foo"); c:set(1)`). [`smelt.au`](au.md) is an nvim-shaped alias of `subscribe`/`set`.
+Typed reactive cell registry. Surface is a flat table for one-shot reads/writes and a callable that hands back a sticky handle for repeated access (`local c = smelt.cell("foo"); c:set(1)`). Subscribers fire on every `set` to the cell name.
 
 ## `smelt.cell.get`
 
@@ -19,10 +19,10 @@ Return the current value of `name`, or `nil` when the cell isn't declared.
 ## `smelt.cell.glob_subscribe`
 
 ```lua
-fun(pattern: string, handler: fun(arg1: string, arg2: any)): integer
+fun(pattern: string, handler: fun(arg1: string, arg2: any)): function
 ```
 
-Register `handler(name, value)` for every cell whose name matches `pattern` (glob syntax). Returns a glob-subscription id.
+Register `handler(name, value)` for every cell whose name matches `pattern` (glob syntax). Returns an `off()` function that removes the glob subscription.
 
 ## `smelt.cell.glob_unsubscribe`
 
@@ -30,7 +30,7 @@ Register `handler(name, value)` for every cell whose name matches `pattern` (glo
 fun(id: integer): boolean
 ```
 
-Drop the glob subscription with id `id`. Returns `true` on success.
+Drop the glob subscription with id `id`. Returns `true` on success. Prefer the `off()` function returned by `glob_subscribe`.
 
 ## `smelt.cell.new`
 
@@ -55,12 +55,12 @@ Publish a new value to `name`. Returns `true` on success, `false` when the runti
 ## `smelt.cell.subscribe`
 
 ```lua
-fun(name: smelt.cell.Name, handler: fun(value: any)): integer?
+fun(name: smelt.cell.Name, handler: fun(value: any)): function?
 ```
 
 Types: [`smelt.cell.Name`](types.md#smeltcellname)
 
-Register `handler(value)` to fire on every `set`. Returns a subscription id (integer) or `nil` if the runtime has no host.
+Register `handler(value)` to fire on every `set`. Returns an `off()` function that, when called, removes the subscription. Returns `nil` when the runtime has no host or the cell is undeclared.
 
 ## `smelt.cell.unsubscribe`
 
@@ -70,5 +70,5 @@ fun(name: smelt.cell.Name, id: integer): boolean
 
 Types: [`smelt.cell.Name`](types.md#smeltcellname)
 
-Drop the subscription with id `id` from `name`. Returns `true` on success.
+Drop the subscription with id `id` from `name`. Returns `true` on success. Prefer the `off()` function returned by `subscribe`; this form is for cases where the id is tracked externally.
 

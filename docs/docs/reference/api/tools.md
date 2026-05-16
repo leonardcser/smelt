@@ -6,6 +6,27 @@
 
 Register, unregister, and resolve plugin tools for the engine.
 
+## `smelt.tools.list`
+
+```lua
+fun(): table
+```
+
+Return the names of every registered plugin tool, sorted.
+
+## `smelt.tools.middleware`
+
+```lua
+fun(name: string, mw: table): function
+```
+
+Register middleware for tool `name`. Pass `""` (empty string) as `name` to match every tool. `mw` is a table of `{ before = fn?, after = fn? }`:
+
+- `before(args, ctx)` runs synchronously before the tool executes. Return a table to replace `args`; return `{ deny = true, reason = "..." }` to short-circuit with an error result. Any other return is no-op.
+- `after(args, ctx, result)` runs after the tool completes and may return `{ content, is_error }` to replace the result. NOTE: `after` currently only fires for tools that complete synchronously; yielding tools (most builtins) skip it until the task-runtime path is wired.
+
+Hooks fire in registration order; an earlier hook's replacement is visible to later hooks. Returns an `off()` function that removes this middleware.
+
 ## `smelt.tools.register`
 
 ```lua
@@ -27,8 +48,8 @@ Resolve the pending tool call `call_id` from request `request_id` with `{ conten
 ## `smelt.tools.unregister`
 
 ```lua
-fun(name: string): nil
+fun(name: string): boolean
 ```
 
-Unregister a previously-registered tool by `name`. No-op if no tool with that name is registered.
+Unregister a previously-registered tool by `name`. Returns `true` if a tool was removed, `false` otherwise.
 

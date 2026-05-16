@@ -55,9 +55,7 @@ pub struct LuaRegisterFlagOpts {
 fn value_from_lua(kind: CliFlagKind, v: &mlua::Value) -> LuaResult<CliFlagValue> {
     Ok(match (kind, v) {
         (CliFlagKind::Boolean, mlua::Value::Boolean(b)) => CliFlagValue::Boolean(*b),
-        (CliFlagKind::String, mlua::Value::String(s)) => {
-            CliFlagValue::String(s.to_string_lossy())
-        }
+        (CliFlagKind::String, mlua::Value::String(s)) => CliFlagValue::String(s.to_string_lossy()),
         (CliFlagKind::Integer, mlua::Value::Integer(i)) => CliFlagValue::Integer(*i),
         (CliFlagKind::Boolean, mlua::Value::Nil) => CliFlagValue::Boolean(false),
         (CliFlagKind::String, mlua::Value::Nil) => CliFlagValue::None,

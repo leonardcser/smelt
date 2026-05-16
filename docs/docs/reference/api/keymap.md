@@ -14,11 +14,27 @@ fun(): table
 
 Return layered keybinding help as `{ title, entries = { { label, detail } } }` rows. Filters vim-only chords when vim mode is disabled.
 
+## `smelt.keymap.list`
+
+```lua
+fun(): table
+```
+
+Return the set of currently-bound `{ mode, chord }` rows. `mode` is the canonical short form (`"n"`/`"i"`/`"v"`/`""`).
+
 ## `smelt.keymap.set`
 
 ```lua
 fun(mode: string, chord: string, handler: fun()): nil
 ```
 
-Bind `chord` in `mode` to a Lua callback. `mode` is `"n"|"i"|"v"|""` (or the long form `normal`/`insert`/`visual`); the chord is canonicalized at registration and unknown values raise immediately.
+Bind `chord` in `mode` to a Lua callback. `mode` is `"n"|"i"|"v"|""` (or the long form `normal`/`insert`/`visual`); the chord is canonicalized at registration and unknown values raise immediately. Re-binding the same `(mode, chord)` overwrites the prior handler.
+
+## `smelt.keymap.unset`
+
+```lua
+fun(mode: string, chord: string): boolean
+```
+
+Drop the binding for `chord` in `mode`. `mode` accepts the same forms as `set`. Returns `true` if a binding was removed.
 

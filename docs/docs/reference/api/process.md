@@ -6,6 +6,14 @@
 
 Run, spawn, list, and kill processes against the `ProcessRegistry`. spawned processes are non-blocking; run processes wait for completion.
 
+## `smelt.process.get_default_shell`
+
+```lua
+fun(): any
+```
+
+Return the current default shell as `{ program, args }`, or `nil` when the built-in `sh -c` default is in effect.
+
 ## `smelt.process.kill`
 
 ```lua
@@ -46,11 +54,19 @@ fun(task_id: integer, call_id: string, command: string, timeout_ms: integer): ni
 
 Run `command` with a `timeout_ms` deadline, streaming each output line into the live tool call `call_id` and resolving task `task_id` with `{ content, is_error, timed_out }` (or `{ __cancelled = true }` if cancelled).
 
+## `smelt.process.set_default_shell`
+
+```lua
+fun(opts: table?): nil
+```
+
+Override the wrapping shell used by `spawn_bg` and `run_streaming` for string-form commands. `opts.program` is the executable (e.g. `"/bin/zsh"`); `opts.args` is the leading argv (e.g. `{ "-fc" }`) — the command string is appended after these. Pass `nil` (no args) to revert to the default `sh -c`.
+
 ## `smelt.process.spawn_bg`
 
 ```lua
 fun(command: string): string
 ```
 
-Spawn `command` as a background `sh -c` child registered with the process registry. Returns the process id; raises if no host is installed or the spawn fails.
+Spawn `command` as a background child registered with the process registry. The wrapping shell defaults to `sh -c` and can be overridden process-wide via `smelt.process.set_default_shell`. Returns the process id; raises if no host is installed or the spawn fails.
 

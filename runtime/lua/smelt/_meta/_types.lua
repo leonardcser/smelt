@@ -25,13 +25,30 @@
 ---@field selectable? boolean If false, the range is skipped by mouse selection.
 ---@field yank_as? string Override the yanked string when the user copies this range.
 
+--- Selector accepted by `smelt.builtins.disable` / `enable`. Each list is a set of bundled module short-names — see the table below for the `smelt.<dotted>` form each one expands to. | field | expansion | |---|---| | `tools = { "web_search" }` | `smelt.tools.web_search` | | `commands = { "compact" }` | `smelt.commands.compact` | | `plugins = { "predict" }` | `smelt.plugins.predict` | | `dialogs = { "resume" }` | `smelt.dialogs.resume` | | `modules = { "smelt.foo.bar" }` | passed through verbatim |
+---@class smelt.builtins.Selector
+---@field tools? string[] Short tool names under `smelt.tools.*` (e.g. `"bash"`, `"web_search"`).
+---@field commands? string[] Short command names under `smelt.commands.*` (e.g. `"compact"`).
+---@field plugins? string[] Short plugin names under `smelt.plugins.*` (e.g. `"predict"`).
+---@field dialogs? string[] Short dialog names under `smelt.dialogs.*` (e.g. `"resume"`).
+---@field modules? string[] Fully-qualified `smelt.<dotted>` module names, passed through verbatim.
+
 --- Sticky handle returned by `smelt.cell(name)`. Provides `:get()`, `:set(value)`, `:subscribe(handler)`, `:unsubscribe(id)`, and `:name()` methods.
 ---@class smelt.cell.CellHandle
 ---@field get fun(): any Return the current cell value, or `nil` when the cell isn't declared.
 ---@field set fun(value: any): boolean Publish a new value. Returns `true` on success.
----@field subscribe fun(handler: fun(value: any)): integer? Register handler(value) to fire on every set. Returns subscription id or `nil`.
----@field unsubscribe fun(id: integer): boolean Drop the subscription with id. Returns `true` on success.
+---@field subscribe fun(handler: fun(value: any)): function? Register handler(value) to fire on every set. Returns an `off()` function that removes the subscription, or `nil` when the runtime has no host.
+---@field unsubscribe fun(id: integer): boolean Drop the subscription with id. Returns `true` on success. Prefer the `off()` function returned by `subscribe`.
 ---@field name fun(): string Return the cell name.
+
+--- Flag specification accepted by `smelt.cli.register_flag`.
+---@class smelt.cli.RegisterFlagOpts
+---@field name string Flag name without `--`. Used as the key for `smelt.cli.get`.
+---@field kind smelt.cli.FlagKind `"boolean"` (default `false`), `"string"`, or `"integer"`.
+---@field default? any Default value when the flag is absent from argv. Type must match `kind`.
+---@field short? string Short flag character (e.g. `"u"` for `-u`). Optional.
+---@field long? string Long flag name override. Defaults to `name` when absent.
+---@field description? string Human-readable description for `--help`.
 
 --- Options accepted by `smelt.cmd.register`.
 ---@class smelt.cmd.RegisterOpts
@@ -183,7 +200,10 @@
 ---@alias smelt.buf.VirtTextPos "inline"|"overlay"|"right_align"|"eol"
 
 --- Name of a reactive cell. Open alias — plugin-defined cells declared via `smelt.cell.new` are accepted alongside the well-known runtime cells listed here.
----@alias smelt.cell.Name string|"agent_mode"|"block_done"|"branch"|"cmd_post"|"cmd_pre"|"confirm_requested"|"confirm_resolved"|"confirms_pending"|"cwd"|"errors"|"history"|"input_submit"|"model"|"now"|"reasoning"|"session_ended"|"session_started"|"session_title"|"shutdown"|"spinner_frame"|"tokens_used"|"tool_end"|"tool_start"|"turn_complete"|"turn_end"|"turn_error"|"turn_start"|"vim_mode"
+---@alias smelt.cell.Name string|"agent_mode"|"block_done"|"branch"|"cmd_post"|"cmd_pre"|"confirm_requested"|"confirm_resolved"|"confirms_pending"|"cwd"|"errors"|"history"|"input_submit"|"model"|"now"|"reasoning"|"session_ended"|"session_started"|"session_title"|"shutdown"|"spinner_frame"|"stream_delta"|"tokens_used"|"tool_end"|"tool_start"|"turn_complete"|"turn_end"|"turn_error"|"turn_start"|"vim_mode"
+
+--- Type of CLI flag declared via `smelt.cli.register_flag`. Matches the subset of clap that we expose to Lua.
+---@alias smelt.cli.FlagKind "boolean"|"string"|"integer"
 
 --- Auxiliary task tag accepted by `smelt.engine.ask`. Routes the request to a dedicated auxiliary model when one is configured.
 ---@alias smelt.engine.AskTask "title"|"prediction"|"compaction"|"btw"

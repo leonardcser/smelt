@@ -15,9 +15,8 @@ use std::sync::Arc;
 
 pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) -> LuaResult<()> {
     let s = shared.clone();
-    let phase_fn = lua.create_function(move |_, ()| -> LuaResult<&'static str> {
-        Ok(s.phase().as_str())
-    })?;
+    let phase_fn =
+        lua.create_function(move |_, ()| -> LuaResult<&'static str> { Ok(s.phase().as_str()) })?;
     smelt.set("phase", phase_fn)?;
     Ok(())
 }

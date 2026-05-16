@@ -7,6 +7,19 @@
 ---@class smelt.tools
 local tools = {}
 
+--- Return the names of every registered plugin tool, sorted.
+---@type fun(): table
+tools.list = nil
+
+--- Register middleware for tool `name`. Pass `""` (empty string) as `name` to match every tool. `mw` is a table of `{ before = fn?, after = fn? }`:
+--- 
+--- - `before(args, ctx)` runs synchronously before the tool executes. Return a table to replace `args`; return `{ deny = true, reason = "..." }` to short-circuit with an error result. Any other return is no-op.
+--- - `after(args, ctx, result)` runs after the tool completes and may return `{ content, is_error }` to replace the result. NOTE: `after` currently only fires for tools that complete synchronously; yielding tools (most builtins) skip it until the task-runtime path is wired.
+--- 
+--- Hooks fire in registration order; an earlier hook's replacement is visible to later hooks. Returns an `off()` function that removes this middleware.
+---@type fun(name: string, mw: table): function
+tools.middleware = nil
+
 --- Register a plugin tool. See `smelt.tools.ToolDef` for every supported field; only `name` and `execute` are required.
 ---@see smelt.tools.ToolDef
 ---@type fun(def: smelt.tools.ToolDef): nil
@@ -16,8 +29,8 @@ tools.register = nil
 ---@type fun(request_id: integer, call_id: string, result: table): nil
 tools.resolve = nil
 
---- Unregister a previously-registered tool by `name`. No-op if no tool with that name is registered.
----@type fun(name: string): nil
+--- Unregister a previously-registered tool by `name`. Returns `true` if a tool was removed, `false` otherwise.
+---@type fun(name: string): boolean
 tools.unregister = nil
 
 return tools

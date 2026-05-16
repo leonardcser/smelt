@@ -12,7 +12,7 @@ Register and list slash commands. `cmd.run` is injected by the TUI layer so it c
 fun(): table
 ```
 
-Return the names of every registered slash command as a Lua array.
+Return every registered slash command as a Lua array of `{ name, desc, args, while_busy, queue_when_busy, startup_ok, hidden }` rows. Sorted by name.
 
 ## `smelt.cmd.register`
 
@@ -31,4 +31,12 @@ fun(line: string): nil
 ```
 
 Execute the slash-command line `line` (with or without leading `/`) as if the user had typed it. Errors are surfaced as in-app notifications.
+
+## `smelt.cmd.unregister`
+
+```lua
+fun(name: string): boolean
+```
+
+Drop the slash command `name` from the registry. Returns `true` if a command was removed, `false` if no command with that name existed.
 

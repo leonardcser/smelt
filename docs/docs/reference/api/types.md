@@ -32,6 +32,18 @@ Options accepted by `smelt.buf.set_extmark`. Mirrors a useful subset of `nvim_bu
 | `selectable` | `boolean` |  | If false, the range is skipped by mouse selection. |
 | `yank_as` | `string` |  | Override the yanked string when the user copies this range. |
 
+### `smelt.builtins.Selector`
+
+Selector accepted by `smelt.builtins.disable` / `enable`. Each list is a set of bundled module short-names — see the table below for the `smelt.<dotted>` form each one expands to. | field | expansion | |---|---| | `tools = { "web_search" }` | `smelt.tools.web_search` | | `commands = { "compact" }` | `smelt.commands.compact` | | `plugins = { "predict" }` | `smelt.plugins.predict` | | `dialogs = { "resume" }` | `smelt.dialogs.resume` | | `modules = { "smelt.foo.bar" }` | passed through verbatim |
+
+| Field | Type | Required | Description |
+| --- | --- | --- | --- |
+| `tools` | `string[]` |  | Short tool names under `smelt.tools.*` (e.g. `"bash"`, `"web_search"`). |
+| `commands` | `string[]` |  | Short command names under `smelt.commands.*` (e.g. `"compact"`). |
+| `plugins` | `string[]` |  | Short plugin names under `smelt.plugins.*` (e.g. `"predict"`). |
+| `dialogs` | `string[]` |  | Short dialog names under `smelt.dialogs.*` (e.g. `"resume"`). |
+| `modules` | `string[]` |  | Fully-qualified `smelt.<dotted>` module names, passed through verbatim. |
+
 ### `smelt.cell.CellHandle`
 
 Sticky handle returned by `smelt.cell(name)`. Provides `:get()`, `:set(value)`, `:subscribe(handler)`, `:unsubscribe(id)`, and `:name()` methods.
@@ -40,9 +52,22 @@ Sticky handle returned by `smelt.cell(name)`. Provides `:get()`, `:set(value)`, 
 | --- | --- | --- | --- |
 | `get` | `fun(): any` | yes | Return the current cell value, or `nil` when the cell isn't declared. |
 | `set` | `fun(value: any): boolean` | yes | Publish a new value. Returns `true` on success. |
-| `subscribe` | `fun(handler: fun(value: any)): integer?` | yes | Register handler(value) to fire on every set. Returns subscription id or `nil`. |
-| `unsubscribe` | `fun(id: integer): boolean` | yes | Drop the subscription with id. Returns `true` on success. |
+| `subscribe` | `fun(handler: fun(value: any)): function?` | yes | Register handler(value) to fire on every set. Returns an `off()` function that removes the subscription, or `nil` when the runtime has no host. |
+| `unsubscribe` | `fun(id: integer): boolean` | yes | Drop the subscription with id. Returns `true` on success. Prefer the `off()` function returned by `subscribe`. |
 | `name` | `fun(): string` | yes | Return the cell name. |
+
+### `smelt.cli.RegisterFlagOpts`
+
+Flag specification accepted by `smelt.cli.register_flag`.
+
+| Field | Type | Required | Description |
+| --- | --- | --- | --- |
+| `name` | `string` | yes | Flag name without `--`. Used as the key for `smelt.cli.get`. |
+| `kind` | [smelt.cli.FlagKind](types.md#smeltcliflagkind) | yes | `"boolean"` (default `false`), `"string"`, or `"integer"`. |
+| `default` | `any` |  | Default value when the flag is absent from argv. Type must match `kind`. |
+| `short` | `string` |  | Short flag character (e.g. `"u"` for `-u`). Optional. |
+| `long` | `string` |  | Long flag name override. Defaults to `name` when absent. |
+| `description` | `string` |  | Human-readable description for `--help`. |
 
 ### `smelt.cmd.RegisterOpts`
 
@@ -274,7 +299,13 @@ Variants: `"inline"` \| `"overlay"` \| `"right_align"` \| `"eol"`
 
 Name of a reactive cell. Open alias — plugin-defined cells declared via `smelt.cell.new` are accepted alongside the well-known runtime cells listed here.
 
-Open alias — accepts any `string`. Well-known names: `"agent_mode"` \| `"block_done"` \| `"branch"` \| `"cmd_post"` \| `"cmd_pre"` \| `"confirm_requested"` \| `"confirm_resolved"` \| `"confirms_pending"` \| `"cwd"` \| `"errors"` \| `"history"` \| `"input_submit"` \| `"model"` \| `"now"` \| `"reasoning"` \| `"session_ended"` \| `"session_started"` \| `"session_title"` \| `"shutdown"` \| `"spinner_frame"` \| `"tokens_used"` \| `"tool_end"` \| `"tool_start"` \| `"turn_complete"` \| `"turn_end"` \| `"turn_error"` \| `"turn_start"` \| `"vim_mode"`.
+Open alias — accepts any `string`. Well-known names: `"agent_mode"` \| `"block_done"` \| `"branch"` \| `"cmd_post"` \| `"cmd_pre"` \| `"confirm_requested"` \| `"confirm_resolved"` \| `"confirms_pending"` \| `"cwd"` \| `"errors"` \| `"history"` \| `"input_submit"` \| `"model"` \| `"now"` \| `"reasoning"` \| `"session_ended"` \| `"session_started"` \| `"session_title"` \| `"shutdown"` \| `"spinner_frame"` \| `"stream_delta"` \| `"tokens_used"` \| `"tool_end"` \| `"tool_start"` \| `"turn_complete"` \| `"turn_end"` \| `"turn_error"` \| `"turn_start"` \| `"vim_mode"`.
+
+### `smelt.cli.FlagKind`
+
+Type of CLI flag declared via `smelt.cli.register_flag`. Matches the subset of clap that we expose to Lua.
+
+Variants: `"boolean"` \| `"string"` \| `"integer"`
 
 ### `smelt.engine.AskTask`
 

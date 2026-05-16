@@ -51,8 +51,8 @@ session.list = nil
 ---@type fun(id: string): nil
 session.load = nil
 
---- Snapshot the current session messages as `{ role, content?, tool_calls?, tool_call_id?, is_error? }` rows. Roles are `system`/`user`/`assistant`/`tool`.
----@type fun(): table
+--- Snapshot the current session messages as `{ role, content?, tool_calls?, tool_call_id?, is_error? }` rows. Roles are `system`/`user`/`assistant`/`tool`. `opts.roles` (array of role strings) filters by role; `opts.include_tool = false` drops `role = "tool"` rows; `opts.since_index` returns rows with 1-based index `>= since_index`; `opts.limit` caps row count from the start of the (filtered) result.
+---@type fun(opts: table?): table
 session.messages = nil
 
 --- Cancel any in-flight agent and clear the session to a blank slate. Logs an `agent_stop` event with reason `user_cancel_and_clear`.

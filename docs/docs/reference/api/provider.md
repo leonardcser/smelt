@@ -14,6 +14,20 @@ fun(): table
 
 Return every registered provider as an array of tables. Each entry has `name`, `type`, `api_base`, `api_key_env`, and a `models` array.
 
+## `smelt.provider.middleware`
+
+```lua
+fun(mw: table): function
+```
+
+Register provider middleware. `mw` is a table of `{ on_request = fn?, on_response = fn?, on_delta = fn? }`:
+
+- `on_request(payload, ctx)` — runs before the outbound HTTP request. Return a table to replace the payload; any other return is no-op.
+- `on_response(msg, ctx)` — runs after the full assistant message is assembled. Return a table `{ content?, thinking?, tool_calls?, stop_reason?, usage? }` to replace the message.
+- `on_delta(d)` — runs for every streaming delta. Return a table to replace the delta; `text` and `thinking` deltas are safe to mutate, `tool_args` JSON fragments are NOT (mutating them can corrupt the parser).
+
+Hooks fire in registration order. Returns an `off()` function that removes this middleware. NOTE: engine wiring for these hooks is staged — the registry stores them but the engine's request/response/stream path is not yet hooked through.
+
 ## `smelt.provider.register`
 
 ```lua

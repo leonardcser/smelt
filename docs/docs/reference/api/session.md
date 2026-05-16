@@ -97,10 +97,10 @@ Switch the UI to the persisted session with `id`. Replays its message log and re
 ## `smelt.session.messages`
 
 ```lua
-fun(): table
+fun(opts: table?): table
 ```
 
-Snapshot the current session messages as `{ role, content?, tool_calls?, tool_call_id?, is_error? }` rows. Roles are `system`/`user`/`assistant`/`tool`.
+Snapshot the current session messages as `{ role, content?, tool_calls?, tool_call_id?, is_error? }` rows. Roles are `system`/`user`/`assistant`/`tool`. `opts.roles` (array of role strings) filters by role; `opts.include_tool = false` drops `role = "tool"` rows; `opts.since_index` returns rows with 1-based index `>= since_index`; `opts.limit` caps row count from the start of the (filtered) result.
 
 ## `smelt.session.reset`
 

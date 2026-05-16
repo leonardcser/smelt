@@ -7,7 +7,7 @@
 ---@class smelt.cmd
 local cmd = {}
 
---- Return the names of every registered slash command as a Lua array.
+--- Return every registered slash command as a Lua array of `{ name, desc, args, while_busy, queue_when_busy, startup_ok, hidden }` rows. Sorted by name.
 ---@type fun(): table
 cmd.list = nil
 
@@ -18,5 +18,9 @@ cmd.register = nil
 --- Execute the slash-command line `line` (with or without leading `/`) as if the user had typed it. Errors are surfaced as in-app notifications.
 ---@type fun(line: string): nil
 cmd.run = nil
+
+--- Drop the slash command `name` from the registry. Returns `true` if a command was removed, `false` if no command with that name existed.
+---@type fun(name: string): boolean
+cmd.unregister = nil
 
 return cmd

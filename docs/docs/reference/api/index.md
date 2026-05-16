@@ -4,7 +4,7 @@
 
 Reference for every namespace exposed under the global `smelt` table. Signatures are derived from the Rust closure's argument tuple and return type, so the LuaCATS-style annotation always matches what mlua actually marshals.
 
-**Coverage:** 57 namespace(s), 240 function(s), 20 class(es), 8 alias(es).
+**Coverage:** 58 namespace(s), 252 function(s), 22 class(es), 9 alias(es).
 
 ## IDE completion
 
@@ -14,10 +14,11 @@ Stubs land in `runtime/lua/smelt/_meta/` (one file per namespace, plus `_types.l
 
 Available in every runtime, including headless mode.
 
-- [`smelt.au`](au.md) — 2 function(s)
+- [`smelt.builtins`](builtins.md) — 4 function(s)
 - [`smelt.cell`](cell.md) — 7 function(s)
+- [`smelt.cli`](cli.md) — 3 function(s)
 - [`smelt.clipboard`](clipboard.md) — 2 function(s)
-- [`smelt.cmd`](cmd.md) — 3 function(s)
+- [`smelt.cmd`](cmd.md) — 4 function(s)
 - [`smelt.frontend`](frontend.md) — 2 function(s)
 - [`smelt.fs`](fs.md) — 22 function(s)
 - [`smelt.fuzzy`](fuzzy.md) — 2 function(s)
@@ -33,14 +34,14 @@ Available in every runtime, including headless mode.
 - [`smelt.parse`](parse.md) — 1 function(s)
 - [`smelt.path`](path.md) — 12 function(s)
 - [`smelt.perf`](perf.md) — 1 function(s)
-- [`smelt.process`](process.md) — 6 function(s)
-- [`smelt.provider`](provider.md) — 2 function(s)
+- [`smelt.process`](process.md) — 8 function(s)
+- [`smelt.provider`](provider.md) — 3 function(s)
 - [`smelt.reasoning`](reasoning.md) — 4 function(s)
 - [`smelt.shell`](shell.md) — 5 function(s)
 - [`smelt.skills`](skills.md) — 2 function(s)
 - [`smelt.task`](task.md) — 2 function(s)
 - [`smelt.timer`](timer.md) — 4 function(s)
-- [`smelt.tools`](tools.md) — 4 function(s)
+- [`smelt.tools`](tools.md) — 6 function(s)
 - [`smelt.trust`](trust.md) — 2 function(s)
 
 ## UiHost namespaces
@@ -53,7 +54,7 @@ Requires a terminal UI; calling these from headless mode raises.
 - [`smelt.diff`](diff.md) — 2 function(s)
 - [`smelt.engine`](engine.md) — 6 function(s)
 - [`smelt.history`](history.md) — 2 function(s)
-- [`smelt.keymap`](keymap.md) — 2 function(s)
+- [`smelt.keymap`](keymap.md) — 4 function(s)
 - [`smelt.markdown`](markdown.md) — 1 function(s)
 - [`smelt.metrics`](metrics.md) — 2 function(s)
 - [`smelt.metrics.perf`](metrics_perf.md) — 3 function(s)
@@ -75,7 +76,7 @@ Requires a terminal UI; calling these from headless mode raises.
 - [`smelt.ui.picker`](ui_picker.md) — 1 function(s)
 - [`smelt.ui.spinner`](ui_spinner.md) — 2 function(s)
 - [`smelt.vim`](vim.md) — 2 function(s)
-- [`smelt.win`](win.md) — 16 function(s)
+- [`smelt.win`](win.md) — 15 function(s)
 
 ## Types
 
