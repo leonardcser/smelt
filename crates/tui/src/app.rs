@@ -5,6 +5,7 @@ pub(crate) mod content_keys;
 pub(crate) mod engine_events;
 pub(crate) mod events;
 pub(crate) mod history;
+pub(crate) mod host_dispatch;
 pub(crate) mod lua_bridge;
 pub(crate) mod lua_handlers;
 pub(crate) mod mouse;
@@ -53,6 +54,10 @@ pub struct TuiApp {
     pub(crate) exec: Option<crate::commands::ExecHandle>,
     /// Wakeup from cross-thread tasks that pushed to the Lua inbox. Drains the inbox so parked coroutines resume.
     lua_wakeup_rx: tokio::sync::mpsc::UnboundedReceiver<()>,
+    /// Host-callback receiver from the engine task. Lives next to the
+    /// engine's event receiver but is moved out at construction time so
+    /// the two can be polled in the same `tokio::select!`.
+    pub(crate) host_rx: tokio::sync::mpsc::UnboundedReceiver<engine::HostCall>,
     pub(crate) queued_messages: Vec<String>,
     /// Current working directory (cached at startup).
     pub(crate) cwd: String,
@@ -203,13 +208,14 @@ pub(crate) struct PendingTool {
 impl TuiApp {
     pub fn new(
         config: smelt_core::AppConfig,
-        engine: EngineHandle,
+        mut engine: EngineHandle,
         permissions: Arc<smelt_core::permissions::Permissions>,
         shared_session: Arc<Mutex<Option<Session>>>,
         startup_auth_error: Option<String>,
         lua: crate::lua::LuaRuntime,
         project_trust: smelt_core::trust::TrustState,
     ) -> Self {
+        let host_rx = engine.take_host_rx();
         let mut input = PromptState::new();
         let vim_enabled = config.settings.vim;
         input.command_arg_sources = Vec::new();
@@ -379,6 +385,7 @@ impl TuiApp {
             input,
             exec: None,
             lua_wakeup_rx,
+            host_rx,
             queued_messages: Vec::new(),
             cwd,
             shared_session,
@@ -850,6 +857,8 @@ impl TuiApp {
                 }
             }
 
+            self.drain_host_calls();
+
             loop {
                 let ev = match self.core.engine.try_recv() {
                     Ok(ev) => ev,
@@ -1043,6 +1052,13 @@ impl TuiApp {
                     } else {
                         self.handle_idle_engine_event(ev);
                     }
+                }
+
+                Some(call) = self.host_rx.recv() => {
+                    self.dispatch_host_call(call);
+                    // Drain any pending follow-ups in the same wake so
+                    // multiple host calls don't serialise on one tick.
+                    self.drain_host_calls();
                 }
 
                 Some(_) = self.lua_wakeup_rx.recv() => {
