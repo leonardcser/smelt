@@ -37,26 +37,10 @@ are the canonical examples — every pattern below comes straight from them.
 
 ## Hot reload
 
-Edit any Lua file — your `init.lua`, plugins under `~/.config/smelt/plugins/` /
-`.smelt/plugins/`, or even a bundled file you've overlayed under
-`~/.config/smelt/lua/smelt/...` — then press `F5` or run `/reload`. smelt
-clears every command, keymap, statusline source, tool, hook, timer, and cell
-subscriber, wipes non-stdlib entries from `package.loaded`, and re-runs the
-bundled autoload modules followed by your config from scratch. The current
-transcript and agent state are untouched. `early.lua` is intentionally skipped
-— its CLI flag declarations and `smelt.builtins.disable{}` opt-outs only take
-effect at startup, so changes there need a real restart.
-
-A reload that fails partway (syntax error in `init.lua`, missing require)
-leaves you with built-ins only until you fix the file and reload again — the
-old registrations have already been dropped. The error message lands in
-`/messages`.
-
-Bootstrap files (`_bootstrap.lua`, `cmd.lua`, `status.lua`, `modes.lua`,
-`dialog.lua`, `widgets/picker.lua`, `widgets/prompt_picker.lua`,
-`dialogs/confirm.lua`) install utilities on the `smelt` global table at
-startup. Those definitions persist across reload — overlaying one of these
-files won't take effect until you restart smelt.
+Edit any Lua file, then press `F5` or run `/reload`. Your config re-runs from
+scratch; the current transcript and agent state stay put. Errors land in
+`/messages`. Changes to
+[`early.lua`](customization.md#early-phase-config) need a real restart.
 
 ## Bundled plugins
 
@@ -79,25 +63,6 @@ require("smelt.plugins.plan_mode")
 still evolving and the tool surface (`run_in_background`, `read_process_output`,
 `stop_process`) may change. Without `plan_mode` enabled, switching to plan mode
 has no effect on the agent.
-
-## IDE completion
-
-Every public function, opts record, and string-literal alias is generated from
-the Rust source by `cargo xtask gen-lua-docs`. The output lands in two trees:
-
-- `runtime/lua/smelt/_meta/<namespace>.lua` — `---@meta` stubs consumed by
-  [lua-language-server](https://github.com/LuaLS/lua-language-server) for
-  completion, hover docs, and type checks.
-- `runtime/lua/smelt/_meta/_types.lua` — shared `---@class` records and
-  `---@alias` string-literal unions referenced from the per-namespace stubs.
-
-Point lua-language-server at the `_meta` directory in your editor. The shipped
-[`runtime/.luarc.json`](https://github.com/leonardcser/smelt/blob/main/runtime/.luarc.json)
-is a working config — copy it next to your `init.lua` (or set
-`workspace.library` to the smelt checkout's `runtime/lua/smelt/_meta` path).
-With that in place, typing `smelt.win.on_event(` brings up the
-`smelt.win.Event` string-literal union, and `smelt.buf.set_extmark`
-autocompletes each field of `smelt.buf.ExtmarkOpts`.
 
 ## Host vs UiHost
 
@@ -376,12 +341,3 @@ and PascalCase variants like `"Insert"` are not accepted). Open aliases (e.g.
 [`smelt.cell.Name`](../reference/api/types.md#smeltcellname)) keep accepting
 any string and just expose well-known names as completion hints.
 
-## Regenerating docs and stubs
-
-```bash
-cargo xtask gen-lua-docs
-```
-
-Run this after editing any `register_fn`/`register_ui_fn` site or an opts
-struct. It rewrites `runtime/lua/smelt/_meta/`, the `docs/docs/reference/api/`
-Markdown pages, and the navigation block in `docs/zensical.toml`.

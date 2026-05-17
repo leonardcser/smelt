@@ -1,29 +1,32 @@
 # Customization
 
-## Config File
+## Config files
 
-The config lives at `~/.config/smelt/init.lua` (respects `$XDG_CONFIG_HOME`).
-Load a different file with `--config <path>`. If no config exists on first
-launch, an interactive setup wizard creates one for you.
+smelt loads Lua from a fixed sequence of files. Each one is optional; if it
+doesn't exist, smelt moves on.
 
-`init.lua` is evaluated at startup before the engine starts. It registers
-providers, MCP servers, settings, permission rules, and any plugin code
-(keymaps, commands, autocmds, custom tools, statusline sources).
+| Order | File | What it's for |
+| ----- | ---- | ------------- |
+| 1 | `~/.config/smelt/early.lua` | Runs before argv is parsed. Restricted API — only `smelt.cli.register_flag` and `smelt.builtins.disable`. See [Early-phase config](#early-phase-config). |
+| 2 | `.smelt/early.lua` | Project-scoped early phase. Same restrictions; requires trust. |
+| 3 | `~/.config/smelt/init.lua` | Your main config — providers, settings, permissions, MCP, keymaps, commands, custom tools. |
+| 4 | `~/.config/smelt/plugins/*.lua` | Loaded after `init.lua`. One file per plugin. |
+| 5 | `.smelt/init.lua` | Project-local override. Requires trust. |
+| 6 | `.smelt/plugins/*.lua` | Project-local plugins. Requires trust. |
+
+`~/.config/smelt` honors `$XDG_CONFIG_HOME`. Override the `init.lua` path with
+`--config <path>`. If no config exists on first launch, the setup wizard
+creates one for you.
+
+Project-local files (`.smelt/*`) are gated by the trust prompt — accept the
+directory the first time you open it. Use them for repo-specific keymaps,
+slash commands, permission rules, or MCP servers without polluting your
+global config.
 
 The [Getting Started](getting-started.md) guide covers basic provider setup.
 See the [Configuration Reference](../reference/configuration.md) for every
 provider/setting field, and the [Plugin Authoring](plugins.md) guide for
 writing larger extensions against the `smelt` Lua API.
-
-## Project-Local Config
-
-When you launch smelt inside a directory that contains a `.smelt/init.lua` or
-files under `.smelt/plugins/*.lua`, smelt loads them after your global
-`init.lua`. Project-local config is gated by the trust prompt — accept the
-directory the first time you open it.
-
-Use this for repo-specific keymaps, slash commands, permission rules, or MCP
-servers without polluting your global config.
 
 ## Runtime Settings
 
@@ -209,11 +212,11 @@ replacement. To observe streaming tokens without mutating mid-stream, use
 `smelt.cell.subscribe("stream_delta", ...)`. See the
 [`smelt.provider` reference](../reference/api/provider.md) for details.
 
-## Early-Phase Config (`early.lua`)
+## Early-phase config
 
-Drop a `~/.config/smelt/early.lua` (or `.smelt/early.lua`) that runs *before*
-the binary parses argv. Use it to declare CLI flags or disable bundled
-modules. The rest of `init.lua` still runs as normal afterwards.
+`early.lua` runs *before* the binary parses argv, so it's the only place where
+you can declare new CLI flags or opt out of bundled modules. The rest of
+`init.lua` runs as normal afterwards.
 
 ```lua
 -- ~/.config/smelt/early.lua
@@ -228,8 +231,9 @@ if smelt.cli.get("experimental") then
 end
 ```
 
-See [`smelt.cli`](../reference/api/cli.md) and
-[`smelt.builtins`](../reference/api/builtins.md).
+Only `smelt.cli` and `smelt.builtins` are available here — calling anything
+else raises. See [`smelt.cli`](../reference/api/cli.md) and
+[`smelt.builtins`](../reference/api/builtins.md) for the full surface.
 
 ## Custom Instructions (AGENTS.md)
 

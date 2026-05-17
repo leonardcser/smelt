@@ -1,6 +1,6 @@
 [project]
 site_name = "smelt"
-site_description = "A Rust TUI coding agent. Connects to any OpenAI-compatible API and provides an interactive terminal interface for code generation, analysis, and assistance."
+site_description = "A hackable coding agent for the terminal. Rust core, scriptable in Lua."
 site_author = "Leonard Cseres"
 site_url = "https://leonardcser.github.io/smelt/"
 repo_url = "https://github.com/leonardcser/smelt"

@@ -101,10 +101,12 @@ SGLang, llama.cpp.
           --api-key-env OPENROUTER_API_KEY
     ```
 
-## Writing a Config File
+## Configure with Lua
 
-Once you have a setup you like, save it to `~/.config/smelt/init.lua` so you
-don't need CLI flags every time:
+smelt's config lives at `~/.config/smelt/init.lua`. It's a real Lua file, not a
+schema — anything you can call on the `smelt` table runs at startup. Once you
+have a setup you like, save it there and run `smelt` with no flags from then
+on.
 
 ```lua
 smelt.provider.register("ollama", {
@@ -120,20 +122,18 @@ smelt.provider.register("openai", {
   models = { "gpt-5.4" },
 })
 
-smelt.provider.register("anthropic", {
-  type = "anthropic",
-  api_base = "https://api.anthropic.com/v1",
-  api_key_env = "ANTHROPIC_API_KEY",
-  models = { "claude-opus-4-6" },
-})
+smelt.settings.vim = true
 ```
 
-Now just run `smelt` — it connects to your default model automatically. Switch
-models at runtime with `/model`. See the
-[Configuration Reference](../reference/configuration.md) for all options.
+The same file is where you add keymaps, custom slash commands, MCP servers,
+permission rules, statusline segments, and your own tools. Switch models at
+runtime with `/model`.
 
 ## Next Steps
 
 - [Usage Guide](usage.md) — modes, tools, sessions, and the full daily workflow
-- [Customization](customization.md) — themes, settings, custom commands
+- [Customization](customization.md) — themes, keymaps, custom commands, MCP
+- [Plugin Authoring](plugins.md) — write larger extensions against the Lua API
+- [Configuration Reference](../reference/configuration.md) — every provider and
+  setting field
 - [CLI Reference](../reference/cli.md) — all command-line flags
