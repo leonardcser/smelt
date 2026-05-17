@@ -230,9 +230,11 @@ fn queued_message_rows(
     let mut rows = Vec::new();
     let user_bg = theme_color(theme, "SmeltUserBg");
 
+    let comment_fg = theme_color(theme, "Comment");
     for msg in queued {
         let is_command = smelt_core::commands::is_command(msg.trim());
         let geom = crate::content::transcript_parsers::UserBlockGeometry::new(msg, text_w);
+        let mut first_chunk = true;
         for line in &geom.lines {
             if line.is_empty() {
                 let fill_w = if geom.block_w > 0 {
@@ -261,6 +263,7 @@ fn queued_message_rows(
                 };
                 let bg_style = Style {
                     bg: Some(user_bg),
+                    fg: Some(comment_fg),
                     bold: true,
                     ..Style::default()
                 };
@@ -269,8 +272,9 @@ fn queued_message_rows(
                     text: " ".repeat(indent),
                     style: Style::default(),
                 }];
+                let prefix = if first_chunk { "↪ " } else { "  " };
                 segs.push(StyledSegment {
-                    text: " ".into(),
+                    text: prefix.into(),
                     style: bg_style,
                 });
 
@@ -282,6 +286,7 @@ fn queued_message_rows(
                     style: bg_style,
                 });
                 rows.push(WindowRow::styled(segs));
+                first_chunk = false;
             }
         }
     }
@@ -311,7 +316,7 @@ fn user_highlight_segments(
 }
 
 fn stash_row(_usable: usize, theme: &crate::smelt_term::Theme) -> WindowRow {
-    let text = "› Stashed (ctrl+s to unstash)";
+    let text = "» Stashed (ctrl+s to unstash)";
     let display: String = text.chars().take(_usable).collect();
     WindowRow::styled(vec![
         StyledSegment {
@@ -322,7 +327,6 @@ fn stash_row(_usable: usize, theme: &crate::smelt_term::Theme) -> WindowRow {
             text: display,
             style: Style {
                 fg: Some(theme_color(theme, "Comment")),
-                dim: true,
                 ..Style::default()
             },
         },
