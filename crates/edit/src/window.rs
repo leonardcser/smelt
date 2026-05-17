@@ -1,6 +1,6 @@
 use super::event::Status;
 use super::gutter::GutterProvider;
-use super::text::{self, byte_to_cell};
+use super::text;
 use super::vim::{self, Action, VimContext, VimMode, VimWindowState};
 use super::Buffer;
 use super::Clipboard;
@@ -612,35 +612,7 @@ impl Window {
         let Some((s, e)) = range else {
             return Vec::new();
         };
-        if s >= e {
-            return Vec::new();
-        }
-        let mut out = Vec::new();
-        let mut line_start = 0usize;
-        for (idx, line) in buf.lines().iter().enumerate() {
-            let line_end = line_start + line.len();
-            if e > line_start && s <= line_end {
-                let clip_s = s.saturating_sub(line_start).min(line.len());
-                let clip_e = e.saturating_sub(line_start).min(line.len());
-                let start_cell = byte_to_cell(line, clip_s) as u16;
-                let end_cell = byte_to_cell(line, clip_e) as u16;
-                if end_cell > start_cell {
-                    out.push(smelt_buffer::buffer::SelectionRange {
-                        line: idx,
-                        col_start: start_cell,
-                        col_end: end_cell,
-                    });
-                } else if line.is_empty() && s <= line_start && e > line_start {
-                    out.push(smelt_buffer::buffer::SelectionRange {
-                        line: idx,
-                        col_start: 0,
-                        col_end: 1,
-                    });
-                }
-            }
-            line_start = line_end + 1;
-        }
-        out
+        smelt_buffer::coords::selection_to_row_ranges(buf, s, e)
     }
 
     /// Select the WORD (whitespace-delimited, punctuation included) at `cpos`.
@@ -1490,11 +1462,16 @@ impl Window {
                 }
             }
             // Selection painting: after highlights (wins over base) but before virt-text.
-            // Cells under `selectable = false` spans are skipped so chrome spans don't
-            // receive the Visual bg. `spans_buf` is reused from the highlight pass above.
+            // Mask out cells under `selectable = false` spans so chrome (e.g. inline
+            // gutter, line-number column) doesn't receive the Visual bg. Skip the mask
+            // when the row has only chrome and no selectable cells — that's a padding
+            // row (e.g. user-block bg blank) whose 1-cell virtual selection span must
+            // still paint so a multi-line selection stays visually continuous.
             let line_has_selection = selection_ranges.iter().any(|r| r.line == logical_row);
+            let any_chrome = spans_buf.iter().any(|s| !s.meta.selectable);
+            let any_selectable = spans_buf.iter().any(|s| s.meta.selectable);
             let mask_slice: Option<&[bool]> =
-                if line_has_selection && spans_buf.iter().any(|s| !s.meta.selectable) {
+                if line_has_selection && any_chrome && any_selectable {
                     mask_buf.clear();
                     mask_buf.resize(content_width as usize, true);
                     for span in spans_buf.iter().filter(|s| !s.meta.selectable) {
@@ -2894,5 +2871,62 @@ mod tests {
         assert_eq!(snap_col_past_chrome(&buf, 0, 0), 0);
         assert_eq!(snap_col_past_chrome(&buf, 0, 20), 0);
         assert_eq!(snap_col_past_chrome(&buf, 0, 39), 0);
+    }
+
+    #[test]
+    fn selection_paints_through_all_chrome_padding_row() {
+        // Regression: a multi-line selection that passes through a row whose
+        // only spans are non-selectable (e.g. the user-block bg padding row)
+        // must still paint the 1-cell virtual selection span at col 0, so the
+        // selection looks continuous. Before the paint-mask fix, the all-chrome
+        // mask blocked every cell on the row and the selection visibly broke.
+        let mut buf = Buffer::new(BufId(1), BufCreateOpts::default());
+        buf.set_all_lines(vec!["alpha".into(), " ".repeat(10), "bravo".into()]);
+        let chrome = smelt_buffer::buffer::SpanMeta {
+            selectable: false,
+            ..Default::default()
+        };
+        buf.add_highlight_with_meta(1, 0, 10, crate::SpanStyle::new(), chrome);
+        buf.set_selection(vec![
+            smelt_buffer::buffer::SelectionRange {
+                line: 0,
+                col_start: 0,
+                col_end: 5,
+            },
+            smelt_buffer::buffer::SelectionRange {
+                line: 1,
+                col_start: 0,
+                col_end: 1,
+            },
+            smelt_buffer::buffer::SelectionRange {
+                line: 2,
+                col_start: 0,
+                col_end: 5,
+            },
+        ]);
+
+        let w = make_win();
+        let mut theme = Theme::default();
+        let visual_bg = crate::grid::Style::new().bg(crate::grid::Color::AnsiValue(60));
+        theme.set("Visual", visual_bg);
+        let ctx = DrawContext {
+            terminal_width: 40,
+            terminal_height: 10,
+            focused: true,
+            cursor_shape: CursorShape::Hidden,
+            theme: std::sync::Arc::new(theme),
+            vim_mode: VimMode::default(),
+        };
+        let mut grid = Grid::new(10, 3);
+        let mut slice = grid.slice_mut(Rect::new(0, 0, 10, 3));
+        w.render(&buf, &mut slice, &ctx);
+
+        assert_eq!(grid.cell(0, 0).style.bg, visual_bg.bg, "row 0 selected");
+        assert_eq!(
+            grid.cell(0, 1).style.bg,
+            visual_bg.bg,
+            "row 1 virtual cell selected despite being all-chrome"
+        );
+        assert_eq!(grid.cell(0, 2).style.bg, visual_bg.bg, "row 2 selected");
     }
 }
