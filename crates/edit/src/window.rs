@@ -973,6 +973,9 @@ impl Window {
             if self.is_caret_leaf() {
                 self.cpos = end;
                 self.sync_from_cpos(buf, viewport_rows);
+                // Mirror vim: a click or drag-release stamps curswant at the
+                // landing column so a subsequent j/k keeps that column.
+                self.curswant = Some(self.cursor_col as usize);
             }
         }
         self.selection_anchor = None;
@@ -2644,6 +2647,73 @@ mod tests {
         assert!(yank.is_none(), "bare click must not produce a yank range");
         assert!(w.selection_anchor.is_none());
         assert!(w.pending_press.is_none(), "Up clears the staged press");
+    }
+
+    #[test]
+    fn mouse_click_stamps_curswant_at_landing_col() {
+        // Click at col 4 must set curswant = 4 so a subsequent j/k keeps that
+        // column rather than snapping back to whatever curswant was before.
+        let mut w = make_win();
+        w.set_vim_mode(VimMode::Normal);
+        w.vim_enabled = true;
+        w.curswant = Some(10);
+        let rows: Vec<String> = vec!["hello world".into(), "second line".into()];
+        let buf = make_buf(rows.clone());
+        let rect = Rect::new(0, 0, 20, 5);
+        let viewport = viewport_for(&rows, rect);
+        let hb = hard_breaks(&rows);
+        let mk_ctx = || MouseCtx {
+            soft_breaks: &[],
+            hard_breaks: &hb,
+            viewport,
+            click_count: 1,
+        };
+        let _ = w.handle_mouse(
+            &buf,
+            click_event(MouseEventKind::Down(MouseButton::Left), 0, 4),
+            mk_ctx(),
+        );
+        let _ = w.handle_mouse(
+            &buf,
+            click_event(MouseEventKind::Up(MouseButton::Left), 0, 4),
+            mk_ctx(),
+        );
+        assert_eq!(w.curswant, Some(4));
+    }
+
+    #[test]
+    fn mouse_drag_release_stamps_curswant_at_endpoint_col() {
+        // Drag from col 0 to col 7 — curswant must follow the endpoint, not
+        // stay at the drag start.
+        let mut w = make_win();
+        w.set_vim_mode(VimMode::Normal);
+        let rows: Vec<String> = vec!["hello world".into(), "second line".into()];
+        let buf = make_buf(rows.clone());
+        let rect = Rect::new(0, 0, 20, 5);
+        let viewport = viewport_for(&rows, rect);
+        let hb = hard_breaks(&rows);
+        let mk_ctx = || MouseCtx {
+            soft_breaks: &[],
+            hard_breaks: &hb,
+            viewport,
+            click_count: 1,
+        };
+        let _ = w.handle_mouse(
+            &buf,
+            click_event(MouseEventKind::Down(MouseButton::Left), 0, 0),
+            mk_ctx(),
+        );
+        let _ = w.handle_mouse(
+            &buf,
+            click_event(MouseEventKind::Drag(MouseButton::Left), 0, 7),
+            mk_ctx(),
+        );
+        let _ = w.handle_mouse(
+            &buf,
+            click_event(MouseEventKind::Up(MouseButton::Left), 0, 7),
+            mk_ctx(),
+        );
+        assert_eq!(w.curswant, Some(7));
     }
 
     #[test]
