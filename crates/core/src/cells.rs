@@ -596,7 +596,7 @@ pub(crate) fn build_with_builtins(seeds: BuiltinSeeds) -> Cells {
     cells.declare("now", 0u64);
     cells.declare("spinner_frame", 0u8);
 
-    // Event-shaped cells: declared with an `EventStub` placeholder so `smelt.cell.subscribe` works.
+    // Event-shaped cells: declared with an `EventStub` placeholder so `smelt.cell(name):subscribe` works.
     cells.declare("history", EventStub);
     cells.declare("turn_complete", EventStub);
     cells.declare("turn_error", EventStub);

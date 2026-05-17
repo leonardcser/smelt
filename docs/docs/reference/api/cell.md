@@ -4,33 +4,17 @@
 
 **Tier:** `Host` — Available in every runtime, including headless mode.
 
-Typed reactive cell registry. Surface is a flat table for one-shot reads/writes and a callable that hands back a sticky handle for repeated access (`local c = smelt.cell("foo"); c:set(1)`). Subscribers fire on every `set` to the cell name.
+Typed reactive cell registry. `smelt.cell(name)` returns a sticky `Cell` handle with `:get`, `:set`, `:subscribe`, `:name`. `smelt.cell.new` declares a cell with an initial value. `smelt.cell.glob` subscribes across every name matching a glob pattern.
 
-## `smelt.cell.get`
-
-```lua
-fun(name: smelt.cell.Name): any
-```
-
-Types: [`smelt.cell.Name`](types.md#smeltcellname)
-
-Return the current value of `name`, or `nil` when the cell isn't declared.
-
-## `smelt.cell.glob_subscribe`
+## `smelt.cell.glob`
 
 ```lua
-fun(pattern: string, handler: fun(arg1: string, arg2: any)): function
+fun(pattern: string, handler: fun(arg1: string, arg2: any)): smelt.Reg
 ```
 
-Register `handler(name, value)` for every cell whose name matches `pattern` (glob syntax). Returns an `off()` function that removes the glob subscription.
+Types: [`smelt.Reg`](types.md#smeltreg)
 
-## `smelt.cell.glob_unsubscribe`
-
-```lua
-fun(id: integer): boolean
-```
-
-Drop the glob subscription with id `id`. Returns `true` on success. Prefer the `off()` function returned by `glob_subscribe`.
+Register `handler(name, value)` for every cell whose name matches `pattern` (glob syntax). Returns a `Reg` whose `:remove()` drops the glob subscription.
 
 ## `smelt.cell.new`
 
@@ -41,34 +25,4 @@ fun(name: smelt.cell.Name, initial: any): nil
 Types: [`smelt.cell.Name`](types.md#smeltcellname)
 
 Declare a cell named `name` with `initial` as its starting value. No-op if the cell already exists.
-
-## `smelt.cell.set`
-
-```lua
-fun(name: smelt.cell.Name, value: any): boolean
-```
-
-Types: [`smelt.cell.Name`](types.md#smeltcellname)
-
-Publish a new value to `name`. Returns `true` on success, `false` when the runtime has no host or the cell is undeclared.
-
-## `smelt.cell.subscribe`
-
-```lua
-fun(name: smelt.cell.Name, handler: fun(value: any)): function?
-```
-
-Types: [`smelt.cell.Name`](types.md#smeltcellname)
-
-Register `handler(value)` to fire on every `set`. Returns an `off()` function that, when called, removes the subscription. Returns `nil` when the runtime has no host or the cell is undeclared.
-
-## `smelt.cell.unsubscribe`
-
-```lua
-fun(name: smelt.cell.Name, id: integer): boolean
-```
-
-Types: [`smelt.cell.Name`](types.md#smeltcellname)
-
-Drop the subscription with id `id` from `name`. Returns `true` on success. Prefer the `off()` function returned by `subscribe`; this form is for cases where the id is tracked externally.
 

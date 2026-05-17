@@ -8,7 +8,7 @@ Records and string-literal unions referenced from the namespace pages. Generated
 
 ### `smelt.Reg`
 
-Registration handle returned by every callback-binding API. `:remove()` undoes the binding and frees the underlying Lua callback. Idempotent: subsequent calls return `false`.
+Registration handle returned by every reactive-subscription API. `:remove()` undoes the binding (frees the underlying callback / cancels the timer / drops the subscription). Idempotent: subsequent calls return `false`.
 
 | Field | Type | Required | Description |
 | --- | --- | --- | --- |
@@ -66,16 +66,15 @@ Selector accepted by `smelt.builtins.disable` / `enable`. Each list is a set of 
 | `dialogs` | `string[]` |  | Short dialog names under `smelt.dialogs.*` (e.g. `"resume"`). |
 | `modules` | `string[]` |  | Fully-qualified `smelt.<dotted>` module names, passed through verbatim. |
 
-### `smelt.cell.CellHandle`
+### `smelt.cell.Cell`
 
-Sticky handle returned by `smelt.cell(name)`. Provides `:get()`, `:set(value)`, `:subscribe(handler)`, `:unsubscribe(id)`, and `:name()` methods.
+Sticky handle returned by `smelt.cell(name)`. Setters return the handle for chaining; `:subscribe` returns a `Reg`.
 
 | Field | Type | Required | Description |
 | --- | --- | --- | --- |
 | `get` | `fun(): any` | yes | Return the current cell value, or `nil` when the cell isn't declared. |
-| `set` | `fun(value: any): boolean` | yes | Publish a new value. Returns `true` on success. |
-| `subscribe` | `fun(handler: fun(value: any)): function?` | yes | Register handler(value) to fire on every set. Returns an `off()` function that removes the subscription, or `nil` when the runtime has no host. |
-| `unsubscribe` | `fun(id: integer): boolean` | yes | Drop the subscription with id. Returns `true` on success. Prefer the `off()` function returned by `subscribe`. |
+| `set` | `fun(value: any): smelt.cell.Cell` | yes | Publish a new value. Returns the handle for chaining. |
+| `subscribe` | `fun(handler: fun(value: any)): smelt.Reg?` | yes | Register `handler(value)` to fire on every `set`. Returns a `Reg` whose `:remove()` drops the subscription, or `nil` if the runtime has no host. |
 | `name` | `fun(): string` | yes | Return the cell name. |
 
 ### `smelt.cli.RegisterFlagOpts`

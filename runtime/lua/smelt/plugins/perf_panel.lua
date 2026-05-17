@@ -123,7 +123,7 @@ local function attach()
 		layout = smelt.ui.layout.leaf(state.win),
 	})
 	-- Cancel any prior timer (hot-reload survival) before re-arming.
-	if state.timer then smelt.timer.cancel(state.timer) end
+	if state.timer then state.timer:remove() end
 	state.timer = smelt.timer.every(250, paint)
 	paint()
 end
@@ -137,7 +137,7 @@ end
 
 local function close()
 	state.open = false
-	if state.timer then smelt.timer.cancel(state.timer); state.timer = nil end
+	if state.timer then state.timer:remove(); state.timer = nil end
 	if state.overlay then state.overlay:close(); state.overlay = nil end
 	state.win = nil
 	-- Named buf survives for next open by design.

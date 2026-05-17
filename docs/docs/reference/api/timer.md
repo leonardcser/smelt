@@ -4,37 +4,25 @@
 
 **Tier:** `Host` — Available in every runtime, including headless mode.
 
-One-shot and recurring timer callbacks. `defer` is a fire-and-forget alias of `timer.set`.
-
-## `smelt.timer.cancel`
-
-```lua
-fun(id: integer): boolean
-```
-
-Cancel a previously scheduled timer by `id`. Returns `true` if a timer was cancelled, `false` if none matched or no host is installed.
-
-## `smelt.timer.defer`
-
-```lua
-fun(ms: integer, handler: fun()): nil
-```
-
-Schedule `handler` to run once after `ms` milliseconds. Fire-and-forget alias of `timer.set` that does not return an id.
+One-shot and recurring timer callbacks. Each call returns a `Reg` whose `:remove()` cancels the timer.
 
 ## `smelt.timer.every`
 
 ```lua
-fun(ms: integer, handler: fun()): integer
+fun(ms: integer, handler: fun()): smelt.Reg
 ```
 
-Schedule `handler` to fire repeatedly every `ms` milliseconds. Returns the timer id; raises if `ms` is `0`.
+Types: [`smelt.Reg`](types.md#smeltreg)
+
+Schedule `handler` to fire repeatedly every `ms` milliseconds. Returns a `Reg` whose `:remove()` stops the timer. Raises if `ms` is `0`.
 
 ## `smelt.timer.set`
 
 ```lua
-fun(ms: integer, handler: fun()): integer
+fun(ms: integer, handler: fun()): smelt.Reg
 ```
 
-Schedule `handler` to run once after `ms` milliseconds. Returns the timer id, or `0` if no host is installed.
+Types: [`smelt.Reg`](types.md#smeltreg)
+
+Schedule `handler` to run once after `ms` milliseconds. Returns a `Reg` whose `:remove()` cancels the timer before it fires.
 

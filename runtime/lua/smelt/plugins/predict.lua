@@ -6,7 +6,7 @@ local SYSTEM = "You predict what a user will type next in a coding assistant con
   .. "no preamble. Keep it short (one sentence max). If you cannot predict, "
   .. "reply with an empty string."
 
-smelt.cell.subscribe("turn_end", function(payload)
+smelt.cell("turn_end"):subscribe(function(payload)
   if payload.cancelled then
     return
   end

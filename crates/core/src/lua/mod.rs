@@ -4,9 +4,12 @@ pub mod api;
 pub mod doc;
 pub mod hooks;
 pub mod lua_type;
+pub mod reg;
 pub mod runtime;
 mod shared;
 mod task;
+
+pub use reg::LuaReg;
 
 pub use hooks::{composite_off, HookEntry, HookRegistry};
 pub use runtime::{autoload_modules, autoload_modules_filtered, LuaRuntime};

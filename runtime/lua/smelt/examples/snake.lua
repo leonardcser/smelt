@@ -234,7 +234,7 @@ local function close()
 		return
 	end
 	if STATE.timer then
-		smelt.timer.cancel(STATE.timer)
+		STATE.timer:remove()
 	end
 	if STATE.paint_id then
 		smelt.paint.unregister(STATE.paint_id)

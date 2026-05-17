@@ -18,7 +18,7 @@ provider.list = nil
 --- 
 --- Hooks fire in registration order. Each hook sees the previous hook's replacement. Returns an `off()` function that removes this middleware.
 --- 
---- For streaming observation use `smelt.cell.subscribe("stream_delta", ...)` — synchronous mutation of mid-stream tokens isn't safe because the parser owns the partial state.
+--- For streaming observation use `smelt.cell("stream_delta"):subscribe( ...)` — synchronous mutation of mid-stream tokens isn't safe because the parser owns the partial state.
 ---@type fun(mw: table): function
 provider.middleware = nil
 

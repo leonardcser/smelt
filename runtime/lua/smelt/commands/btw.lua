@@ -18,7 +18,7 @@ smelt.cmd.register("btw", function(args)
     local function tick()
       if done then return end
       buf:source(smelt.ui.spinner.glyph() .. " working")
-      smelt.defer(smelt.ui.spinner.period_ms(), tick)
+      smelt.timer.set(smelt.ui.spinner.period_ms(), tick)
     end
     tick()
 

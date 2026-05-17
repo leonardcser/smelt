@@ -120,6 +120,7 @@ pub fn register_host_api(
     _smelt_keymap: &mlua::Table,
     shared: &Arc<crate::lua::LuaShared>,
 ) -> LuaResult<()> {
+    crate::lua::reg::register_class_doc();
     builtins::register(lua, smelt, shared)?;
     cell::register(lua, smelt)?;
     cli::register(lua, smelt, shared)?;

@@ -13,6 +13,7 @@ use lua_doc_derive::LuaAlias;
 use mlua::prelude::*;
 use smelt_core::lua::doc::{record_class, record_module_doc};
 use smelt_core::lua::lua_type::{LuaCallback, LuaClassDecl, LuaType};
+use smelt_core::lua::reg::LuaReg;
 use std::sync::Arc;
 
 /// Window-event names accepted by `win:on(event, fn)`. Maps onto the
@@ -196,14 +197,20 @@ impl mlua::UserData for LuaWin {
                 crate::lua::with_app(|app| {
                     let prev = app.ui.win_set_keymap(
                         this.id,
-                        key.clone(),
+                        key,
                         crate::smelt_term::Callback::Lua(crate::smelt_term::LuaHandle(id)),
                     );
                     crate::lua::drop_displaced_lua_handle(app, prev);
                 });
-                Ok(LuaReg(RegKind::WinKey {
-                    win: this.id,
-                    chord,
+                let win = this.id;
+                Ok(LuaReg::new(move || {
+                    let mut removed = false;
+                    crate::lua::with_app(|app| {
+                        let prev = app.ui.win_clear_keymap(win, key);
+                        removed = prev.is_some();
+                        crate::lua::drop_displaced_lua_handle(app, prev);
+                    });
+                    removed
                 }))
             },
         );
@@ -221,17 +228,23 @@ impl mlua::UserData for LuaWin {
                 let this = *this_ud.borrow::<LuaWin>()?;
                 let shared = current_shared(lua)?;
                 let id = crate::lua::register_callback_handle(&shared, lua, func.into_inner())?;
+                let event: crate::smelt_term::WinEvent = event.into();
                 crate::lua::with_app(|app| {
                     app.ui.win_on_event(
                         this.id,
-                        event.into(),
+                        event,
                         crate::smelt_term::Callback::Lua(crate::smelt_term::LuaHandle(id)),
                     );
                 });
-                Ok(LuaReg(RegKind::WinEvent {
-                    win: this.id,
-                    event: event.into(),
-                    id,
+                let win = this.id;
+                Ok(LuaReg::new(move || {
+                    let mut removed = false;
+                    crate::lua::with_app(|app| {
+                        let prev = app.ui.win_clear_event_by_id(win, event, id);
+                        removed = prev.is_some();
+                        crate::lua::drop_displaced_lua_handle(app, prev);
+                    });
+                    removed
                 }))
             },
         );
@@ -253,79 +266,6 @@ impl mlua::UserData for LuaWin {
                 Ok(this_ud)
             },
         );
-    }
-}
-
-/// What a `Reg` knows how to undo. Each variant carries enough to
-/// reverse the registration regardless of which Win/event it was on.
-#[derive(Debug)]
-enum RegKind {
-    WinKey {
-        win: crate::smelt_term::WinId,
-        chord: String,
-    },
-    WinEvent {
-        win: crate::smelt_term::WinId,
-        event: crate::smelt_term::WinEvent,
-        id: u64,
-    },
-}
-
-/// Lua-side registration handle. The result of any callback-binding
-/// API call (`win:key`, `win:on`); calling `:remove()` frees the
-/// binding (and the underlying Lua callback).
-pub struct LuaReg(RegKind);
-
-impl LuaType for LuaReg {
-    fn lua_type() -> String {
-        "smelt.Reg".into()
-    }
-}
-
-impl mlua::UserData for LuaReg {
-    fn add_methods<M: mlua::UserDataMethods<Self>>(methods: &mut M) {
-        methods.add_method_mut("remove", |_, this, ()| -> LuaResult<bool> {
-            // Take ownership of the inner kind to make `:remove()`
-            // idempotent — a second call yields `false` without
-            // re-firing the underlying ui mutation.
-            let kind = std::mem::replace(
-                &mut this.0,
-                RegKind::WinKey {
-                    win: crate::smelt_term::WinId(0),
-                    chord: String::new(),
-                },
-            );
-            Ok(reg_remove(kind))
-        });
-    }
-}
-
-fn reg_remove(kind: RegKind) -> bool {
-    match kind {
-        RegKind::WinKey { win, chord } => {
-            if chord.is_empty() {
-                return false;
-            }
-            let Some(key) = parse_keybind(&chord) else {
-                return false;
-            };
-            let mut removed = false;
-            crate::lua::with_app(|app| {
-                let prev = app.ui.win_clear_keymap(win, key);
-                removed = prev.is_some();
-                crate::lua::drop_displaced_lua_handle(app, prev);
-            });
-            removed
-        }
-        RegKind::WinEvent { win, event, id } => {
-            let mut removed = false;
-            crate::lua::with_app(|app| {
-                let prev = app.ui.win_clear_event_by_id(win, event, id);
-                removed = prev.is_some();
-                crate::lua::drop_displaced_lua_handle(app, prev);
-            });
-            removed
-        }
     }
 }
 
@@ -377,14 +317,6 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
             "key" => fn(chord: String, func: LuaCallback<mlua::Table, ()>) -> LuaReg, "Bind `func` to `chord` on this window. Returns a Reg handle whose `:remove()` undoes the binding. Raises on unknown chords.",
             "on" => fn(event: LuaWinEvent, func: LuaCallback<mlua::Table, ()>) -> LuaReg, "Subscribe `func` to `event` on this window. Returns a Reg handle whose `:remove()` undoes the subscription.",
             "link_scroll" => fn(others: mlua::Variadic<LuaWin>) -> LuaWin, "Link `scroll_top` between this window and the variadic `others`. Closing any member auto-removes it. Returns the handle for chaining.",
-        },
-    });
-
-    record_class(LuaClassDecl {
-        name: "smelt.Reg",
-        doc: "Registration handle returned by every callback-binding API. `:remove()` undoes the binding and frees the underlying Lua callback. Idempotent: subsequent calls return `false`.",
-        fields: smelt_core::class_methods! {
-            "remove" => fn() -> bool, "Undo the registration. Returns `true` the first time; `false` on subsequent calls or when the underlying target is already gone.",
         },
     });
 
