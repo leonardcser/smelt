@@ -1369,6 +1369,9 @@ impl Window {
             } else {
                 normal_style
             };
+            let fill_right_margin = decoration
+                .and_then(|d| d.fill_bg.map(|_| d.fill_right_margin))
+                .unwrap_or(0);
             if let Some(dec) = decoration {
                 if let Some(bg) = dec.fill_bg {
                     row_style = Style {
@@ -1378,7 +1381,8 @@ impl Window {
                 }
             }
             if row_style != Style::default() {
-                for col in 0..width {
+                let fill_end = width.saturating_sub(fill_right_margin);
+                for col in 0..fill_end {
                     slice.set(col, row, ' ', row_style);
                 }
             }
@@ -2118,6 +2122,35 @@ mod tests {
     fn follow_tail_default_true() {
         let w = make_win();
         assert!(w.follow_tail);
+    }
+
+    #[test]
+    fn fill_line_bg_respects_right_margin() {
+        use smelt_buffer::buffer::LineDecoration;
+        let mut buf = Buffer::new(BufId(1), BufCreateOpts::default());
+        buf.set_all_lines(vec!["x".into()]);
+        buf.set_decoration(
+            0,
+            LineDecoration {
+                fill_bg: Some(crate::grid::Color::Red),
+                fill_right_margin: 1,
+                ..LineDecoration::default()
+            },
+        );
+        let w = make_win();
+        let mut grid = Grid::new(10, 1);
+        let mut slice = grid.slice_mut(Rect::new(0, 0, 10, 1));
+        w.render(&buf, &mut slice, &ctx());
+        assert_eq!(
+            grid.cell(8, 0).style.bg,
+            Some(crate::grid::Color::Red),
+            "cell before margin should have fill bg"
+        );
+        assert_ne!(
+            grid.cell(9, 0).style.bg,
+            Some(crate::grid::Color::Red),
+            "rightmost cell (within right_margin) must not be bg-filled"
+        );
     }
 
     #[test]

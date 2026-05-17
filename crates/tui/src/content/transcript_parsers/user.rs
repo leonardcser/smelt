@@ -53,14 +53,19 @@ pub(super) fn render(
         selectable: false,
         copy_as: None,
     };
+    let row_w = width.max(1);
+    let blank_row = |out: &mut LineBuilder| {
+        out.set_hl(user_bg);
+        out.print_with_meta(&" ".repeat(row_w), pad_meta.clone());
+        out.reset_style();
+        out.set_gutter_bg_group(user_bg);
+        out.newline();
+    };
+    blank_row(out);
+    rows += 1;
     for logical_line in &geom.lines {
         if logical_line.is_empty() {
-            let fill = if geom.block_w > 0 { geom.block_w } else { 1 };
-            out.set_hl(user_bg);
-            out.print_with_meta(&" ".repeat(fill + 1), pad_meta.clone());
-            out.reset_style();
-            out.set_gutter_bg_group(user_bg);
-            out.newline();
+            blank_row(out);
             rows += 1;
             continue;
         }
@@ -70,11 +75,7 @@ pub(super) fn render(
         }
         for chunk in &chunks {
             let chunk_w = display_width(chunk);
-            let trailing = if geom.block_w > 0 {
-                geom.block_w.saturating_sub(chunk_w)
-            } else {
-                1
-            };
+            let trailing = row_w.saturating_sub(1 + chunk_w);
             out.set_hl(user_bg);
             out.print_with_meta(" ", pad_meta.clone());
             out.set_bold();
@@ -86,6 +87,8 @@ pub(super) fn render(
             rows += 1;
         }
     }
+    blank_row(out);
+    rows += 1;
     rows
 }
 

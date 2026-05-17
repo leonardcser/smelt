@@ -8,7 +8,7 @@ use std::path::Path;
 use syntect::easy::HighlightLines;
 
 use super::{syntax_theme, GutterStyle, SYNTAX_SET};
-use crate::content::builder::LineBuilder;
+use crate::content::builder::{display_width, LineBuilder};
 use crate::content::default_width;
 use crate::style::Color;
 
@@ -484,7 +484,6 @@ pub fn print_cached_inline_diff(
         GutterStyle::None => 0,
     };
     let sign_prefix = 2;
-    let right_margin = 2;
     let indent = indent_cells as usize;
     let indent_str = " ".repeat(indent);
     let layout_width = if out.layout_width() == 0 {
@@ -492,9 +491,8 @@ pub fn print_cached_inline_diff(
     } else {
         out.layout_width() as usize
     };
-    let max_content = layout_width
-        .saturating_sub(indent + prefix_cells + sign_prefix + right_margin)
-        .max(1);
+    let chrome_cells = indent + prefix_cells + sign_prefix;
+    let max_content = layout_width.saturating_sub(chrome_cells).max(1);
     let blank_prefix = " ".repeat(prefix_cells);
     // Content re-wraps per row at `layout_width`, so the layout is width-pinned.
     out.mark_wrapped();
@@ -591,10 +589,18 @@ pub fn print_cached_inline_diff(
                             out.print("  ");
                         }
                         print_cached_spans(out, vrow, bg);
-                        // Bg trails via `fill_line_bg` — a per-row decoration on the
-                        // worker's block buffer, propagated verbatim by the projection
-                        // step into the transcript buffer (no scratch-buffer seam).
-                        out.fill_line_bg(bgv, right_margin as u16);
+                        // Trailing bg-styled spaces pad the row to `layout_width`.
+                        // Same mechanism the user block uses, so both stop exactly
+                        // at the content edge — no row-fill decoration, no chance
+                        // for the bg to bleed under the scrollbar gutter.
+                        let chunk_w: usize =
+                            vrow.iter().map(|s| display_width(&s.text)).sum();
+                        let trailing = layout_width
+                            .saturating_sub(chrome_cells + chunk_w);
+                        if trailing > 0 {
+                            out.set_bg(bgv);
+                            out.print(&" ".repeat(trailing));
+                        }
                         out.reset_style();
                     } else {
                         out.print("  ");
