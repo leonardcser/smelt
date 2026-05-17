@@ -4,15 +4,7 @@
 
 **Tier:** `Host` — Available in every runtime, including headless mode.
 
-Agent mode read/cycle. `mode.set` and `mode.cycle` are injected by the TUI layer so they can access the live app state.
-
-## `smelt.mode.cycle`
-
-```lua
-fun(): nil
-```
-
-Advance to the next agent mode in the configured cycle. No-op stub in core; the TUI overrides this binding.
+Agent-mode selector. `smelt.mode()` reads the active mode; `smelt.mode(v)` sets it (overridden by the TUI to apply the change). `smelt.mode.cycle_list()` lists the configured cycle.
 
 ## `smelt.mode.cycle_list`
 
@@ -23,24 +15,4 @@ fun(): smelt.mode.Mode[]
 Types: [`smelt.mode.Mode`](types.md#smeltmodemode)
 
 Return the configured agent-mode cycle; falls back to all known modes when the user has not customized one.
-
-## `smelt.mode.get`
-
-```lua
-fun(): smelt.mode.Mode
-```
-
-Types: [`smelt.mode.Mode`](types.md#smeltmodemode)
-
-Return the active agent mode (e.g. `"normal"`, `"plan"`, `"apply"`, `"yolo"`).
-
-## `smelt.mode.set`
-
-```lua
-fun(mode: smelt.mode.Mode): nil
-```
-
-Types: [`smelt.mode.Mode`](types.md#smeltmodemode)
-
-Switch the agent mode. Raises a Lua error on unknown values.
 

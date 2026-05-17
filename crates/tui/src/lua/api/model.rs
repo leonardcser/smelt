@@ -1,43 +1,22 @@
-//! `smelt.model` — `get / set / list` over the configured provider/model
-//! triple. Mirrors `smelt.mode` / `smelt.reasoning`; lives at top-level so
-//! `init.lua`'s `smelt.model.set(name)` reads naturally.
+//! `smelt.model` — callable selector for the configured provider/model.
+//! `smelt.model()` reads the active key, `smelt.model(v)` switches,
+//! `smelt.model.list()` returns the available models.
 
 use lua_doc_derive::lua_module;
 use mlua::prelude::*;
-use smelt_core::lua::doc::register_ui_fn;
+use smelt_core::lua::doc::{record_module_doc, register_ui_fn};
 
 #[lua_module(
     name = "smelt.model",
-    doc = "Get, set, and list the configured provider/model triple. Mirrors smelt.mode and smelt.reasoning."
+    doc = "Model selector. `smelt.model()` reads, `smelt.model(v)` switches, `smelt.model.list()` lists available models."
 )]
 pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
+    record_module_doc(
+        "smelt.model",
+        "Model selector. `smelt.model()` reads the active model key, `smelt.model(v)` switches, `smelt.model.list()` returns the available models.",
+    );
+
     let model_tbl = lua.create_table()?;
-    register_ui_fn(
-        &model_tbl,
-        "smelt.model",
-        "get",
-        "Return the active model key (matches an entry in `list()`).",
-        &[],
-        lua,
-        |_, ()| -> LuaResult<String> {
-            Ok(crate::lua::try_with_app(|app| app.core.config.model.clone()).unwrap_or_default())
-        },
-    )?;
-
-    register_ui_fn(
-        &model_tbl,
-        "smelt.model",
-        "set",
-        "Switch to model `v` by key. Re-resolves the provider/model triple, propagates the change to the engine, and persists it to session config.",
-        &["v"],
-        lua,
-        |_, v: String|  -> LuaResult<()>{
-            crate::lua::with_app(|app| app.apply_model(&v));
-            Ok(())
-        },
-    )?;
-
-    // `list()` returns `{key, name, provider}` entries for available models.
     register_ui_fn(
         &model_tbl,
         "smelt.model",
@@ -62,6 +41,26 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
             Ok(out)
         },
     )?;
+
+    // `__call(v?)`: read when no arg, switch when arg.
+    let f = lua.create_function(
+        |lua, (_tbl, v): (mlua::Table, Option<String>)| -> LuaResult<mlua::Value> {
+            match v {
+                Some(name) => {
+                    crate::lua::with_app(|app| app.apply_model(&name));
+                    Ok(mlua::Value::Nil)
+                }
+                None => {
+                    let cur = crate::lua::try_with_app(|app| app.core.config.model.clone())
+                        .unwrap_or_default();
+                    Ok(mlua::Value::String(lua.create_string(&cur)?))
+                }
+            }
+        },
+    )?;
+    let mt = lua.create_table()?;
+    mt.set("__call", f)?;
+    model_tbl.set_metatable(Some(mt))?;
 
     smelt.set("model", model_tbl)?;
     Ok(())

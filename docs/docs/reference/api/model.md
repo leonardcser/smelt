@@ -4,15 +4,7 @@
 
 **Tier:** `UiHost` — Requires a terminal UI; calling these from headless mode raises.
 
-Get, set, and list the configured provider/model triple. Mirrors smelt.mode and smelt.reasoning.
-
-## `smelt.model.get`
-
-```lua
-fun(): string
-```
-
-Return the active model key (matches an entry in `list()`).
+Model selector. `smelt.model()` reads the active model key, `smelt.model(v)` switches, `smelt.model.list()` returns the available models.
 
 ## `smelt.model.list`
 
@@ -21,12 +13,4 @@ fun(): table
 ```
 
 Return an array of `{ key, name, provider }` records for every model the active config can switch to.
-
-## `smelt.model.set`
-
-```lua
-fun(v: string): nil
-```
-
-Switch to model `v` by key. Re-resolves the provider/model triple, propagates the change to the engine, and persists it to session config.
 

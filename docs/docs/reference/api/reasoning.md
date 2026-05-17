@@ -4,15 +4,7 @@
 
 **Tier:** `Host` — Available in every runtime, including headless mode.
 
-Reasoning effort read/cycle. `reasoning.set` and `reasoning.cycle` are injected by the TUI layer so they can access the live app state.
-
-## `smelt.reasoning.cycle`
-
-```lua
-fun(): nil
-```
-
-Advance to the next reasoning effort in the configured cycle. No-op stub in core; the TUI overrides this binding.
+Reasoning-effort selector. `smelt.reasoning()` reads the active effort; `smelt.reasoning(v)` sets it (overridden by the TUI to apply the change). `smelt.reasoning.cycle_list()` lists the configured cycle.
 
 ## `smelt.reasoning.cycle_list`
 
@@ -23,24 +15,4 @@ fun(): smelt.reasoning.Effort[]
 Types: [`smelt.reasoning.Effort`](types.md#smeltreasoningeffort)
 
 Return the configured reasoning-effort cycle.
-
-## `smelt.reasoning.get`
-
-```lua
-fun(): smelt.reasoning.Effort
-```
-
-Types: [`smelt.reasoning.Effort`](types.md#smeltreasoningeffort)
-
-Return the current reasoning effort label (e.g. `"low"`, `"medium"`, `"high"`).
-
-## `smelt.reasoning.set`
-
-```lua
-fun(effort: smelt.reasoning.Effort): nil
-```
-
-Types: [`smelt.reasoning.Effort`](types.md#smeltreasoningeffort)
-
-Set the reasoning effort (`off`, `low`, `medium`, `high`).
 

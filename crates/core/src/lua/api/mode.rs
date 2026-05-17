@@ -1,7 +1,9 @@
-//! `smelt.mode` — get/set/cycle agent mode. `set` and `cycle` are stubs here; TUI/Lua override them.
+//! `smelt.mode` — callable selector for the agent mode.
+//! `smelt.mode()` reads, `smelt.mode(v)` sets (TUI override), and
+//! `smelt.mode.cycle_list()` returns the configured cycle.
 
-use crate::lua::doc::register_fn;
-use lua_doc_derive::{lua_module, LuaAlias};
+use crate::lua::doc::{record_module_doc, register_fn};
+use lua_doc_derive::LuaAlias;
 use mlua::prelude::*;
 
 /// Agent mode string literal.
@@ -14,40 +16,13 @@ pub enum LuaAgentMode {
     Yolo,
 }
 
-#[lua_module(
-    name = "smelt.mode",
-    doc = "Agent mode read/cycle. `mode.set` and `mode.cycle` are injected by the TUI layer so they can access the live app state."
-)]
 pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
+    record_module_doc(
+        "smelt.mode",
+        "Agent-mode selector. `smelt.mode()` reads the active mode; `smelt.mode(v)` sets it (overridden by the TUI to apply the change). `smelt.mode.cycle_list()` lists the configured cycle.",
+    );
+
     let mode_tbl = lua.create_table()?;
-    register_fn(
-        &mode_tbl,
-        "smelt.mode",
-        "get",
-        "Return the active agent mode (e.g. `\"normal\"`, `\"plan\"`, `\"apply\"`, `\"yolo\"`).",
-        &[],
-        lua,
-        |_, ()| -> LuaResult<LuaAgentMode> {
-            Ok(
-                crate::host::try_with_core(|core| LuaAgentMode::from(core.config.mode))
-                    .unwrap_or(LuaAgentMode::Normal),
-            )
-        },
-    )?;
-
-    register_fn(
-        &mode_tbl,
-        "smelt.mode",
-        "set",
-        "Set the active agent mode. No-op in core; the TUI overrides this binding.",
-        &["mode"],
-        lua,
-        |_, _mode: LuaAgentMode| -> LuaResult<()> {
-            // No-op in core; TUI overrides this binding.
-            Ok(())
-        },
-    )?;
-
     register_fn(
         &mode_tbl,
         "smelt.mode",
@@ -68,15 +43,20 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
         },
     )?;
 
-    register_fn(
-        &mode_tbl,
-        "smelt.mode",
-        "cycle",
-        "Advance to the next agent mode in the configured cycle. No-op stub in core; the TUI overrides this binding.",
-        &[],
-        lua,
-        |_, ()| Ok(()),
+    // `__call`: get when no arg, no-op set stub here (TUI overrides).
+    let f = lua.create_function(
+        |lua, (_tbl, v): (mlua::Table, Option<LuaAgentMode>)| -> LuaResult<mlua::Value> {
+            if v.is_some() {
+                return Ok(mlua::Value::Nil);
+            }
+            let cur = crate::host::try_with_core(|core| LuaAgentMode::from(core.config.mode))
+                .unwrap_or(LuaAgentMode::Normal);
+            cur.into_lua(lua)
+        },
     )?;
+    let mt = lua.create_table()?;
+    mt.set("__call", f)?;
+    mode_tbl.set_metatable(Some(mt))?;
 
     smelt.set("mode", mode_tbl)?;
     Ok(())

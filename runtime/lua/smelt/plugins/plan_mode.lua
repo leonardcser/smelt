@@ -129,7 +129,7 @@ local function register_exit_plan_mode()
       local summary = args.plan_summary or ""
 
       local options = {
-        { label = "yes, and auto-apply", action = "approve", on_select = function() smelt.mode.set("apply") end },
+        { label = "yes, and auto-apply", action = "approve", on_select = function() smelt.mode("apply") end },
         { label = "yes",                 action = "approve" },
         { label = "no",                  action = "deny"    },
       }
@@ -196,5 +196,5 @@ smelt.cell("agent_mode"):subscribe(function(mode)
 end)
 
 smelt.cell("session_started"):subscribe(function()
-  if smelt.mode.get() == "plan" then activate() end
+  if smelt.mode() == "plan" then activate() end
 end)

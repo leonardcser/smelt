@@ -27,14 +27,14 @@ end
 smelt.mode.cycle = function()
   local list = smelt.mode.cycle_list()
   if not list or #list == 0 then return end
-  local nxt = next_in_cycle(list, smelt.mode.get())
-  if nxt then smelt.mode.set(nxt) end
+  local nxt = next_in_cycle(list, smelt.mode())
+  if nxt then smelt.mode(nxt) end
 end
 
 smelt.reasoning.cycle = function()
   local list = smelt.reasoning.cycle_list()
   -- Empty list = no configured cycle; leave effort unchanged.
   if not list or #list == 0 then return end
-  local nxt = next_in_cycle(list, smelt.reasoning.get())
-  if nxt then smelt.reasoning.set(nxt) end
+  local nxt = next_in_cycle(list, smelt.reasoning())
+  if nxt then smelt.reasoning(nxt) end
 end
