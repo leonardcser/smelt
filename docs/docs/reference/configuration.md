@@ -146,22 +146,6 @@ effort is always included in the cycle.
 Toggle full thinking blocks at runtime with `/thinking` (or the
 `show_thinking` setting).
 
-## Auxiliary Model
-
-The auxiliary model handles small background/meta requests:
-
-| Task         | Description                                      |
-| ------------ | ------------------------------------------------ |
-| `title`      | Generate the session title and slug              |
-| `prediction` | Input prediction / ghost text                    |
-| `compaction` | Explicit `/compact` and automatic history shrink |
-| `btw`        | `/btw` side-question requests                    |
-
-When no auxiliary model is configured, all tasks fall back to the primary
-model. Each task can be individually disabled via `auxiliary.use_for.<task> =
-false` so it routes back to the primary model. The auxiliary model reference
-follows the same `provider/model` or bare-model resolution as the primary.
-
 ## Settings
 
 Set boolean preferences in `init.lua` by writing to `smelt.settings`:

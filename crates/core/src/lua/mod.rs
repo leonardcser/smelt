@@ -14,7 +14,9 @@ pub mod watchers;
 pub use reg::LuaReg;
 
 pub use hooks::{composite_off, HookEntry, HookRegistry};
-pub use runtime::{autoload_modules, autoload_modules_filtered, load_bootstrap_chunks, LuaRuntime};
+pub use runtime::{
+    autoload_modules, autoload_modules_filtered, init_lua_path, load_bootstrap_chunks, LuaRuntime,
+};
 pub use shared::{
     CliFlagKind, CliFlagSpec, CliFlagValue, DefaultShell, Hooks, LuaResumeSink, LuaShared, Phase,
     RegisteredCommand, StatusSource, ToolHandles, LUA_BUF_ID_BASE,

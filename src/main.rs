@@ -169,6 +169,23 @@ async fn main() {
     if let Some(ref path) = args.config {
         lua_runtime.set_init_lua_path(std::path::PathBuf::from(path));
     }
+
+    // First-run wizard: if no init.lua exists and the user didn't bypass it
+    // with --api-base, walk them through writing a starter config. The
+    // wizard writes to init.lua; load_user_config picks it up below.
+    let init_lua = args
+        .config
+        .as_deref()
+        .map(std::path::PathBuf::from)
+        .or_else(smelt_core::lua::init_lua_path);
+    if !args.headless
+        && args.api_base.is_none()
+        && init_lua.as_deref().is_some_and(|p| !p.exists())
+        && !setup::run_initial_setup(init_lua.as_deref().unwrap()).await
+    {
+        std::process::exit(1);
+    }
+
     lua_runtime.load_autoload();
     lua_runtime.load_user_config();
     lua_runtime.load_global_plugins();
@@ -240,18 +257,6 @@ async fn main() {
         );
         std::process::exit(1);
     }
-
-    let cfg_accent: Option<u8> = cfg.theme.accent.as_ref().map(|accent| {
-        if let Ok(v) = accent.parse::<u8>() {
-            v
-        } else {
-            tui::theme::PRESETS
-                .iter()
-                .find(|(name, _, _)| name.eq_ignore_ascii_case(accent))
-                .map(|(_, _, value)| *value)
-                .unwrap_or(tui::theme::DEFAULT_ACCENT)
-        }
-    });
 
     let shared_session: Arc<Mutex<Option<smelt_core::session::Session>>> =
         Arc::new(Mutex::new(None));
@@ -362,12 +367,7 @@ async fn main() {
     let initial_provider_type = provider_type.clone();
 
     let skill_loader = {
-        let extra_paths: Vec<std::path::PathBuf> = cfg
-            .skills
-            .paths
-            .iter()
-            .map(std::path::PathBuf::from)
-            .collect();
+        let extra_paths: Vec<std::path::PathBuf> = Vec::new();
         Arc::new(engine::SkillLoader::load(&extra_paths))
     };
     let tui_skill_section = skill_loader.prompt_section().map(String::from);
@@ -403,13 +403,13 @@ async fn main() {
             cwd: cwd.clone(),
             skills: Some(skill_loader),
             auto_compact: settings.auto_compact,
-            context_window: cfg.settings.context_window,
+            context_window: None,
             redact_secrets: settings.redact_secrets,
             clock: Arc::clone(&clock),
         },
         dispatcher,
     );
-    let ctx_rx = if !args.headless && cfg.settings.context_window.is_none() {
+    let ctx_rx = if !args.headless {
         let ctx_api_base = args
             .api_base
             .clone()
@@ -467,7 +467,6 @@ async fn main() {
             reasoning_effort,
             reasoning_cycle,
             settings,
-            cfg.settings.context_window,
         );
         let mut core = smelt_core::Core::new(
             app_config,
@@ -527,9 +526,6 @@ async fn main() {
         app.core.mcp = mcp_manager.clone();
         app.extra_instructions = tui_instructions;
         app.skill_section = tui_skill_section;
-        if let Some(accent) = cfg_accent {
-            app.ui.theme_mut().set_accent(accent);
-        }
         if let Some(mode) = mode_override {
             app.core.config.mode = mode;
         }
@@ -642,7 +638,6 @@ fn build_headless_config(
     reasoning_effort: protocol::ReasoningEffort,
     reasoning_cycle: Vec<protocol::ReasoningEffort>,
     settings: smelt_core::config::ResolvedSettings,
-    context_window: Option<u32>,
 ) -> smelt_core::AppConfig {
     let mode = mode_override.unwrap_or(protocol::AgentMode::Normal);
     let mut mode_cycle = mode_cycle;
@@ -664,7 +659,7 @@ fn build_headless_config(
         reasoning_effort,
         reasoning_cycle,
         settings,
-        context_window,
+        context_window: None,
     }
 }
 

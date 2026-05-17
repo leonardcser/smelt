@@ -1,4 +1,4 @@
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 pub fn config_dir() -> PathBuf {
     engine::config_dir()
@@ -66,9 +66,6 @@ pub struct SettingsConfig {
     pub show_thinking: Option<bool>,
     pub restrict_to_workspace: Option<bool>,
     pub redact_secrets: Option<bool>,
-    /// Override the context window size (tokens). When unset, the engine
-    /// fetches it from the provider API at startup.
-    pub context_window: Option<u32>,
 }
 
 /// The set of boolean settings exposed to Lua. Keeping this as a single
@@ -143,80 +140,12 @@ pub struct ResolvedSettings {
     pub redact_secrets: bool,
 }
 
-#[derive(Debug, Clone)]
-pub struct AuxiliaryUseForConfig {
-    pub title: bool,
-    pub prediction: bool,
-    pub compaction: bool,
-    pub btw: bool,
-}
-
-impl Default for AuxiliaryUseForConfig {
-    fn default() -> Self {
-        Self {
-            title: true,
-            prediction: true,
-            compaction: true,
-            btw: true,
-        }
-    }
-}
-
-#[derive(Debug, Default, Clone)]
-pub struct AuxiliaryConfig {
-    pub model: Option<String>,
-    pub use_for: AuxiliaryUseForConfig,
-}
-
-#[derive(Debug, Default)]
-pub struct ThemeConfig {
-    pub accent: Option<String>,
-}
-
-#[derive(Debug, Default)]
-pub struct DefaultsConfig {
-    pub model: Option<String>,
-    /// Starting mode: normal, plan, apply, yolo.
-    pub mode: Option<String>,
-    /// Modes available for Shift+Tab cycling. Defaults to all modes.
-    pub mode_cycle: Option<Vec<String>>,
-    pub reasoning_effort: Option<String>,
-    /// Reasoning effort levels available for Ctrl+T cycling.
-    pub reasoning_cycle: Option<Vec<String>>,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ConfigSource {
-    /// Loaded and parsed from a file.
-    Loaded,
-    /// File exists but failed to parse (fell back to defaults).
-    ParseError,
-    /// File was not found (using defaults).
-    NotFound,
-}
-
-/// Configuration for the skills system.
-#[derive(Debug, Default, Clone)]
-pub struct SkillsConfig {
-    /// Extra directories to scan for skills.
-    pub paths: Vec<String>,
-}
-
 #[derive(Debug, Default)]
 pub struct Config {
     pub providers: Vec<ProviderConfig>,
-    pub defaults: DefaultsConfig,
     pub settings: SettingsConfig,
-    pub auxiliary: AuxiliaryConfig,
-    pub theme: ThemeConfig,
     /// MCP server configurations.
     pub mcp: std::collections::HashMap<String, crate::mcp::McpServerConfig>,
-    /// Skills configuration.
-    pub skills: SkillsConfig,
-    /// Path the config was loaded from.
-    pub path: PathBuf,
-    /// How the config was resolved.
-    pub source: Option<ConfigSource>,
 }
 
 /// A resolved model entry combining provider connection info with model config.
@@ -231,31 +160,6 @@ pub struct ResolvedModel {
     /// Provider type from config: "openai-compatible" (default), "openai", "codex", "anthropic-compatible", "anthropic", or "copilot".
     pub provider_type: String,
     pub config: ModelConfig,
-}
-
-pub use protocol::AuxiliaryTask;
-
-#[derive(Debug, Clone)]
-pub struct AuxiliaryRouting {
-    pub model: Option<ResolvedModel>,
-    pub use_for: AuxiliaryUseForConfig,
-}
-
-impl AuxiliaryRouting {
-    pub(crate) fn is_enabled_for(&self, task: AuxiliaryTask) -> bool {
-        match task {
-            AuxiliaryTask::Title => self.use_for.title,
-            AuxiliaryTask::Prediction => self.use_for.prediction,
-            AuxiliaryTask::Compaction => self.use_for.compaction,
-            AuxiliaryTask::Btw => self.use_for.btw,
-        }
-    }
-
-    pub fn model_for(&self, task: AuxiliaryTask) -> Option<&ResolvedModel> {
-        self.is_enabled_for(task)
-            .then_some(self.model.as_ref())
-            .flatten()
-    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -335,30 +239,6 @@ pub fn resolve_model_ref_with_provider<'a>(
     }
 }
 
-/// Resolve an `auxiliary.model` reference. Falls back to a provider-name
-/// lookup when the reference doesn't match any registered model AND the
-/// provider uses dynamic model discovery (e.g. `codex`), where statically
-/// listing every model under `providers[].models` is impractical.
-pub(crate) fn resolve_aux_model_ref<'a>(
-    models: &'a [ResolvedModel],
-    reference: &str,
-) -> Result<&'a ResolvedModel, ResolveModelRefError> {
-    match resolve_model_ref(models, reference) {
-        Ok(model) => Ok(model),
-        Err(ResolveModelRefError::NotFound { .. }) => {
-            let resolved = resolve_provider_ref(models, reference)?;
-            if resolved.provider_type == "codex" || resolved.provider_type == "copilot" {
-                Ok(resolved)
-            } else {
-                Err(ResolveModelRefError::NotFound {
-                    reference: reference.to_string(),
-                })
-            }
-        }
-        Err(other) => Err(other),
-    }
-}
-
 pub fn resolve_provider_ref<'a>(
     models: &'a [ResolvedModel],
     provider: &str,
@@ -393,18 +273,6 @@ pub fn resolve_provider_ref<'a>(
 }
 
 impl Config {
-    pub fn load() -> Self {
-        Self {
-            path: config_dir().join("init.lua"),
-            source: Some(ConfigSource::NotFound),
-            ..Self::default()
-        }
-    }
-
-    pub fn load_from(_path: &Path) -> Self {
-        Self::load()
-    }
-
     /// Flatten providers + models into a list of resolved model entries.
     pub fn resolve_models(&self) -> Vec<ResolvedModel> {
         let mut out = Vec::new();
@@ -560,27 +428,6 @@ impl Config {
                 models: vec![],
             });
         }
-    }
-
-    /// Get the default model key from defaults.model
-    pub fn get_default_model(&self) -> Option<&str> {
-        self.defaults.model.as_deref()
-    }
-
-    pub fn resolve_auxiliary_routing(
-        &self,
-        models: &[ResolvedModel],
-    ) -> Result<AuxiliaryRouting, ResolveModelRefError> {
-        let model = self
-            .auxiliary
-            .model
-            .as_deref()
-            .map(|reference| resolve_aux_model_ref(models, reference).cloned())
-            .transpose()?;
-        Ok(AuxiliaryRouting {
-            model,
-            use_for: self.auxiliary.use_for.clone(),
-        })
     }
 }
 

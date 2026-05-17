@@ -42,15 +42,6 @@ smelt.settings.redact_secrets = true
 See the [Configuration Reference](../reference/configuration.md#settings) for
 every key and default.
 
-## Auxiliary Model
-
-Keep your main conversation on one model and route smaller background requests
-(title generation, ghost-text prediction, compaction, `/btw`) to another. The
-auxiliary model must be one you've registered under a provider.
-
-Set it at runtime via `/settings` or with `--set
-auxiliary.model=provider/model`.
-
 ## Themes
 
 Built-in accent presets:

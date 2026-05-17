@@ -434,7 +434,6 @@ impl LuaRuntime {
             providers,
             mcp,
             settings,
-            ..Default::default()
         }
     }
 
@@ -1688,7 +1687,7 @@ fn lua_files_in(dir: &std::path::Path) -> Vec<PathBuf> {
     out
 }
 
-fn init_lua_path() -> Option<PathBuf> {
+pub fn init_lua_path() -> Option<PathBuf> {
     let base = std::env::var_os("XDG_CONFIG_HOME")
         .map(PathBuf::from)
         .or_else(|| dirs::home_dir().map(|h| h.join(".config")))?;

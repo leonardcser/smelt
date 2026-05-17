@@ -1,4 +1,4 @@
-use crate::{setup, Args};
+use crate::Args;
 use protocol::{AgentMode, ReasoningEffort};
 
 /// Read an API key from `key_env`. An empty `key_env` returns an empty key.
@@ -37,11 +37,10 @@ pub struct ResolvedStartup {
     pub cache: smelt_core::state::SessionCache,
 }
 
-/// Resolve the active model: CLI `--model` > config default > cached selection > first in config.
+/// Resolve the active model: CLI `--model` > cached selection > first in config.
 /// Returns `None` when the CLI model is absent from resolved models and `--api-base` is also set.
 fn resolve_model_reference(
     args: &Args,
-    cfg: &smelt_core::config::Config,
     available_models: &[smelt_core::config::ResolvedModel],
     cache: &smelt_core::state::SessionCache,
 ) -> Option<smelt_core::config::ResolvedModel> {
@@ -59,8 +58,6 @@ fn resolve_model_reference(
 
     if let Some(ref cli_model) = args.model {
         pick(cli_model, args.api_base.is_some())
-    } else if let Some(default) = cfg.get_default_model() {
-        pick(default, false)
     } else if let Some(ref cached) = cache.selected_model {
         smelt_core::config::resolve_model_ref(available_models, cached)
             .ok()
@@ -131,18 +128,10 @@ pub async fn resolve(
         });
     }
 
-    let auxiliary_routing = match cfg.resolve_auxiliary_routing(&available_models) {
-        Ok(routing) => routing,
-        Err(err) => {
-            eprintln!("error: auxiliary.model: {err}");
-            std::process::exit(1);
-        }
-    };
-
     let mut startup_auth_error: Option<String> = None;
 
     let (api_base, api_key, api_key_env, mut provider_type, model, mut model_config) = {
-        let resolved = resolve_model_reference(args, &cfg, &available_models, &cache);
+        let resolved = resolve_model_reference(args, &available_models, &cache);
 
         if let Some(r) = resolved {
             let base = args.api_base.clone().unwrap_or_else(|| r.api_base.clone());
@@ -165,47 +154,6 @@ pub async fn resolve(
                 r.model_name.clone(),
                 r.config.clone(),
             )
-        } else if cfg.source == Some(smelt_core::config::ConfigSource::NotFound)
-            && args.api_base.is_none()
-        {
-            if !setup::run_initial_setup(&cfg.path).await {
-                std::process::exit(1);
-            }
-            cfg = smelt_core::config::Config::load_from(&cfg.path);
-            cfg.inject_oauth_providers();
-            available_models = cfg.resolve_models();
-            if cfg.has_codex_provider() {
-                let ids = engine::auth::cached_models(engine::auth::AuthProvider::Codex);
-                if !ids.is_empty() {
-                    cfg.inject_codex_models(&mut available_models, &ids);
-                }
-            }
-            if cfg.has_copilot_provider() {
-                let ids = engine::auth::cached_models(engine::auth::AuthProvider::Copilot);
-                if !ids.is_empty() {
-                    cfg.inject_copilot_models(&mut available_models, &ids);
-                }
-            }
-            if let Some(r) = available_models.first() {
-                let key = match resolve_api_key(&r.api_key_env) {
-                    Ok(key) => key,
-                    Err(err) => {
-                        startup_auth_error = Some(err);
-                        String::new()
-                    }
-                };
-                (
-                    r.api_base.clone(),
-                    key,
-                    r.api_key_env.clone(),
-                    r.provider_type.clone(),
-                    r.model_name.clone(),
-                    r.config.clone(),
-                )
-            } else {
-                eprintln!("error: setup completed but no models found in config");
-                std::process::exit(1);
-            }
         } else if let Some(base) = args.api_base.clone() {
             let key_env = args.api_key_env.clone().unwrap_or_default();
             let key = match resolve_api_key(&key_env) {
@@ -230,22 +178,10 @@ pub async fn resolve(
                 smelt_core::config::ModelConfig::default(),
             )
         } else {
-            match cfg.source {
-                Some(smelt_core::config::ConfigSource::ParseError) => {
-                    eprintln!(
-                        "error: config file at {} failed to parse (see warning above)\n\
-                         Fix the config or provide --api-base and --model.",
-                        cfg.path.display()
-                    );
-                }
-                _ => {
-                    eprintln!(
-                        "error: no providers with models found in {}\n\
-                         Add a provider with models, or provide --api-base and --model.",
-                        cfg.path.display()
-                    );
-                }
-            }
+            eprintln!(
+                "error: no providers with models registered.\n\
+                 Add `smelt.provider.register{{...}}` calls to your init.lua, or use --api-base and --model."
+            );
             std::process::exit(1);
         }
     };
@@ -271,48 +207,18 @@ pub async fn resolve(
         model_config.tool_calling = Some(false);
     }
 
-    let auxiliary = {
-        let mut build = |task: smelt_core::config::AuxiliaryTask| {
-            auxiliary_routing.model_for(task).map(|resolved| {
-                let key = resolve_api_key(&resolved.api_key_env).unwrap_or_else(|err| {
-                    startup_auth_error.get_or_insert(err);
-                    String::new()
-                });
-                engine::RequestModelConfig {
-                    model: resolved.model_name.clone(),
-                    api: engine::ApiConfig {
-                        base: resolved.api_base.clone(),
-                        key,
-                        key_env: resolved.api_key_env.clone(),
-                        provider_type: resolved.provider_type.clone(),
-                        model_config: (&resolved.config).into(),
-                    },
-                }
-            })
-        };
-        engine::AuxiliaryModelConfig {
-            title: build(smelt_core::config::AuxiliaryTask::Title),
-            prediction: build(smelt_core::config::AuxiliaryTask::Prediction),
-            compaction: build(smelt_core::config::AuxiliaryTask::Compaction),
-            btw: build(smelt_core::config::AuxiliaryTask::Btw),
-        }
-    };
+    let auxiliary = engine::AuxiliaryModelConfig::default();
 
-    let mode_override = args
-        .mode
-        .as_deref()
-        .or(cfg.defaults.mode.as_deref())
-        .map(|s| {
-            AgentMode::parse(s).unwrap_or_else(|| {
-                eprintln!("warning: unknown mode '{s}', defaulting to normal");
-                AgentMode::Normal
-            })
-        });
+    let mode_override = args.mode.as_deref().map(|s| {
+        AgentMode::parse(s).unwrap_or_else(|| {
+            eprintln!("warning: unknown mode '{s}', defaulting to normal");
+            AgentMode::Normal
+        })
+    });
 
     let mode_cycle = args
         .mode_cycle
         .as_deref()
-        .or(cfg.defaults.mode_cycle.as_deref())
         .map(AgentMode::parse_list)
         .filter(|v| !v.is_empty())
         .unwrap_or_else(|| AgentMode::ALL.to_vec());
@@ -321,19 +227,12 @@ pub async fn resolve(
         .reasoning_effort
         .as_deref()
         .and_then(ReasoningEffort::parse)
-        .or_else(|| {
-            cfg.defaults
-                .reasoning_effort
-                .as_deref()
-                .and_then(ReasoningEffort::parse)
-        })
         .unwrap_or(cache.reasoning_effort);
 
     let provider_kind = engine::ProviderKind::from_config(&provider_type);
     let mut reasoning_cycle = args
         .reasoning_cycle
         .as_deref()
-        .or(cfg.defaults.reasoning_cycle.as_deref())
         .map(ReasoningEffort::parse_list)
         .filter(|v| !v.is_empty())
         .unwrap_or_else(|| provider_kind.default_reasoning_cycle().to_vec());
