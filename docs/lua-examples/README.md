@@ -9,7 +9,7 @@ your own `init.lua`) to try them out.
 - **per_project.lua** — if `$PWD/.smelt/init.lua` exists, `dofile` it after the
   user-level config has loaded and notify which file was sourced.
 - **mode_keybinds.lua** — `<C-y>` in normal mode copies the transcript or the
-  prompt depending on which pane has focus, using `smelt.win.focus()` to
+  prompt depending on which pane has focus, using `smelt.focus()` to
   branch.
 - **statusline.lua** — three additional statusline sources (cwd label, git
   branch pill, right-aligned clock) registered via

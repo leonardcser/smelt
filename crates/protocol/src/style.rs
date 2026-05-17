@@ -3,7 +3,7 @@
 //! `StyledLines` is the canonical representation for "rich text the user
 //! sees" — tool summary headers, confirm dialog body content, anywhere a
 //! tool wants to attach color/syntax/emphasis. The shape matches the
-//! `smelt.buf.set_styled_lines` Lua API: a list of lines, each a list of
+//! `buf:styled` Lua API: a list of lines, each a list of
 //! styled spans.
 
 use serde::{Deserialize, Serialize};
@@ -15,7 +15,7 @@ use serde::{Deserialize, Serialize};
 /// overrides per-character fg; `style` modifiers (dim/bold/italic) stack.
 /// `hl` names a theme group whose style is composed before the per-span
 /// modifiers. `fg`/`bg` name theme groups whose fg/bg axis is extracted
-/// (matching `smelt.buf.set_extmark` semantics).
+/// (matching `buf:mark` semantics).
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct StyledSpan {
     pub text: String,

@@ -144,10 +144,10 @@ end, { desc = "say hi" })
 
 ## Reacting to events
 
-Subscribe to engine and UI events with `smelt.cell.subscribe(name, handler)`:
+Subscribe to engine and UI events with `smelt.cell(name):subscribe(handler)`:
 
 ```lua
-smelt.cell.subscribe("turn_end", function(data)
+smelt.cell("turn_end"):subscribe(function(data)
   if not data.cancelled then smelt.ui.notify("done") end
 end)
 ```
@@ -209,7 +209,7 @@ smelt.provider.middleware({
 
 Hooks fire in registration order; each hook sees the previous one's
 replacement. To observe streaming tokens without mutating mid-stream, use
-`smelt.cell.subscribe("stream_delta", ...)`. See the
+`smelt.cell("stream_delta"):subscribe(...)`. See the
 [`smelt.provider` reference](../reference/api/provider.md) for details.
 
 ## Early-phase config

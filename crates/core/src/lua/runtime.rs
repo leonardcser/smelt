@@ -997,7 +997,7 @@ impl LuaRuntime {
     ///   * `nil` / no value — empty summary (no header text)
     ///   * a `string` — wrapped as a single plain span (each `\n`-line one row)
     ///   * a table of `{ {span, span}, {span, span} }` — multi-line styled output;
-    ///     span shape matches `smelt.buf.set_styled_lines` (`{ text, syntax?, style? }`).
+    ///     span shape matches `buf:styled` (`{ text, syntax?, style? }`).
     pub fn tool_summary(
         &self,
         tool_name: &str,
@@ -1433,7 +1433,7 @@ impl LuaRuntime {
 ///   * `string` — wrapped as one or more plain-text lines (split on `\n`)
 ///   * `table` — must be a 2D sequence: outer list is lines, each line is a
 ///     list of span tables of shape `{ text, syntax?, style? = { hl?, dim?,
-///     bold?, italic?, fg?, bg? } }`. Mirrors `smelt.buf.set_styled_lines`.
+///     bold?, italic?, fg?, bg? } }`. Mirrors `buf:styled`.
 fn decode_styled_lines(value: mlua::Value) -> Result<protocol::StyledLines, String> {
     use protocol::{StyledLines, StyledSpan};
     match value {

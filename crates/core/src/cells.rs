@@ -373,7 +373,7 @@ pub const SEEDED_CELL_NAMES: &[&str] = &[
 ];
 
 /// Project a `StyledLines` payload into the same shape Lua sees from
-/// `smelt.buf.set_styled_lines` — a sequence of lines, each a sequence
+/// `buf:styled` — a sequence of lines, each a sequence
 /// of `{ text, syntax?, style? = { hl?, dim?, bold?, italic?, fg?, bg? } }`
 /// span tables. Empty lines come through as `{}`.
 fn styled_lines_to_lua(lua: &mlua::Lua, sl: &protocol::StyledLines) -> mlua::Value {

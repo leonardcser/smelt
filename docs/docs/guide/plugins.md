@@ -104,10 +104,11 @@ that path.
 
 ## Lifecycle events
 
-`smelt.cell.subscribe(name, handler)` subscribes to runtime cells — agent
+`smelt.cell(name):subscribe(handler)` subscribes to runtime cells — agent
 turns, session load, mode changes, tool start/end, and so on. Some carry a
-payload, some are bare signals. The full list is the `smelt.cell.Name` alias
-in [`_types.lua`](https://github.com/leonardcser/smelt/blob/main/runtime/lua/smelt/_meta/_types.lua);
+payload, some are bare signals. `:subscribe` returns a `Reg` whose `:remove()`
+drops the subscription. The full list is the `smelt.cell.Name` alias in
+[`_types.lua`](https://github.com/leonardcser/smelt/blob/main/runtime/lua/smelt/_meta/_types.lua);
 common ones:
 
 | Event | Payload | When |
@@ -122,19 +123,18 @@ common ones:
 | `shutdown` | — | App is about to quit |
 
 ```lua
-smelt.cell.subscribe("turn_end", function(payload)
+smelt.cell("turn_end"):subscribe(function(payload)
   if payload.cancelled then return end
   -- ... e.g. kick off a prediction call
 end)
 
-smelt.cell.subscribe("agent_mode", function(mode)
+smelt.cell("agent_mode"):subscribe(function(mode)
   if mode == "plan" then activate() else deactivate() end
 end)
 ```
 
 You can also declare your own cells with `smelt.cell.new("my_plugin:state",
-initial)` and broadcast updates with `smelt.cell.set("my_plugin:state",
-value)`.
+initial)` and broadcast updates with `smelt.cell("my_plugin:state"):set(value)`.
 
 ## Keymaps
 
@@ -143,7 +143,7 @@ value)`.
 
 ```lua
 smelt.keymap.set("n", "<C-y>", function()
-  local where = smelt.win.focus()
+  local where = smelt.focus()
   local text  = where == "transcript" and smelt.transcript.text() or smelt.prompt.text()
   smelt.clipboard.write(text)
 end)
@@ -157,22 +157,22 @@ end)
 ```
 
 Per-window bindings (transcript-only, picker-only, etc.) go through
-`smelt.win.set_keymap(win_id, key, handler)`.
+`win:key(chord, handler)`, which returns a `Reg` whose `:remove()` undoes
+the binding.
 
-## Window events and extmarks
+## Window events and marks
 
 Plugins that paint into existing buffers subscribe to per-window events and
-draw with extmarks scoped to a namespace they own. The pattern is:
+draw with marks scoped to a namespace they own. The pattern is:
 
 ```lua
-local prompt = smelt.prompt.win_id()
-local ns     = smelt.buf.create_namespace("my_plugin")
+local prompt = smelt.prompt.win()
+local ns     = smelt.ns("my_plugin")
 
-smelt.win.on_event(prompt, "text_changed", function()
-  local buf = smelt.win.buf(prompt)
+prompt:on("text_changed", function()
+  local buf = prompt:buf()
   if not buf then return end
-  smelt.buf.clear_namespace(buf, ns)
-  smelt.buf.set_extmark(buf, ns, 1, 0, {
+  buf:clear_ns(ns):mark(ns, 1, 0, {
     end_col  = 999,
     hl_group = "DiagnosticHint",
     priority = 200,
@@ -180,9 +180,9 @@ smelt.win.on_event(prompt, "text_changed", function()
 end)
 ```
 
-Both `"text_changed"` and the `set_extmark` opts table are type-checked: an
-unknown event name or a typo'd field surfaces as a diagnostic in your editor
-before the plugin ever runs.
+Both `"text_changed"` and the `mark` opts table are type-checked: an unknown
+event name or a typo'd field surfaces as a diagnostic in your editor before
+the plugin ever runs.
 
 ## Floating windows and overlays
 
@@ -191,10 +191,10 @@ side docks — open a buffer, attach it to a window, then mount that window in
 an overlay:
 
 ```lua
-local buf = smelt.buf.create()
-local win = smelt.win.open(buf, { focusable = false })
+local buf = smelt.buf.new()
+local win = smelt.win.new(buf, { focusable = false })
 
-smelt.ui.overlay.open({
+smelt.overlay.new({
   title     = { { text = " perf ", bold = true } },
   anchor    = "screen_at",
   corner    = "ne",
@@ -202,7 +202,7 @@ smelt.ui.overlay.open({
   height    = 14,           -- cells
   modal     = false,
   draggable = true,
-  items     = { { win = win, height = "fill" } },
+  layout    = smelt.ui.layout.leaf(win),
 })
 ```
 
@@ -287,7 +287,7 @@ smelt.tools.register({
   permission_defaults = { normal = "allow", plan = "allow" },
   summary  = function(_args) return "plan ready" end,
   render   = function(args, output, width, buf)
-    smelt.markdown.render(buf, args.plan_summary or "")
+    smelt.render.markdown(buf, args.plan_summary or "")
   end,
   execute  = function(args)
     local result = smelt.ui.dialog.open({ ... }) -- yields, allowed inside execute

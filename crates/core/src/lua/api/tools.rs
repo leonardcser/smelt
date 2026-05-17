@@ -76,7 +76,7 @@ pub struct LuaToolDef {
     /// rendered in the transcript header AND confirm dialog body header.
     /// Plain string is auto-wrapped as one plain span; the styled-lines
     /// form is `{ { { text, syntax?, style? }, ... }, ... }` — same span
-    /// shape as `smelt.buf.set_styled_lines`.
+    /// shape as `buf:styled`.
     pub summary: Option<mlua::Function>,
     /// `approval_patterns(args, ctx) -> string[]` — patterns offered as one-click approvals.
     pub approval_patterns: Option<mlua::Function>,

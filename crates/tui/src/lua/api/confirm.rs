@@ -3,17 +3,17 @@
 //!
 //! The Lua side owns dialog orchestration (open the overlay, attach
 //! keymaps, route Submit / Dismiss) and composes the title / summary /
-//! preview buffers itself via `smelt.buf.set_styled_lines`,
+//! preview buffers itself via `buf:styled`,
 //! `smelt.render.syntax`, and friends. The request payload (tool name /
 //! desc / args / options / approval patterns / outside dir / cwd label)
 //! flows through the `confirm_requested` cell, so the dialog reads it
 //! once via `smelt.cell("confirm_requested"):get()` instead of polling
 //! Rust by handle. Rust exposes:
 //!
-//! - `_back_tab` — toggles app mode + auto-allows when the new mode
+//! - `__back_tab` — toggles app mode + auto-allows when the new mode
 //!   covers this request.
 //! - `__render_preview` — dispatches to the tool's `preview` callback.
-//! - `_resolve` — final pick, removes the registry entry.
+//! - `__resolve` — final pick, removes the registry entry.
 //!
 //! Per-panel control (`scroll_by`, `focus`, …) goes through the
 //! generic `smelt.ui.dialog._panel_*` primitives surfaced by the
@@ -168,7 +168,7 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
     Ok(())
 }
 
-/// Stable string label for the `confirm_resolved` cell payload and `_resolve` input.
+/// Stable string label for the `confirm_resolved` cell payload and `__resolve` input.
 fn decision_label(choice: &ConfirmChoice) -> &'static str {
     match choice {
         ConfirmChoice::Yes => "yes",

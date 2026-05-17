@@ -3,7 +3,7 @@
 -- or copies the prompt text when in the prompt window.
 
 smelt.keymap.set("n", "<C-y>", function()
-    local win = smelt.win.focus()
+    local win = smelt.focus()
     if win == "transcript" then
         local text = smelt.transcript.text()
         if #text > 0 then
