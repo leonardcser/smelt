@@ -9,6 +9,7 @@ use syntect::easy::HighlightLines;
 
 use super::{syntax_theme, GutterStyle, SYNTAX_SET};
 use crate::content::builder::{display_width, LineBuilder};
+use smelt_buffer::buffer::SpanMeta;
 use crate::content::default_width;
 use crate::style::Color;
 
@@ -561,14 +562,20 @@ pub fn print_cached_inline_diff(
                 };
                 let line_fg = sign.map(|(_, color)| color);
                 let visual_rows = split_cached_spans_into_rows(out, spans, max_content);
+                let pad_meta = SpanMeta {
+                    selectable: false,
+                    copy_as: None,
+                };
                 for (vi, vrow) in visual_rows.iter().enumerate() {
-                    // Indent: non-selectable cells outside the bg — cursor/selection
-                    // skip them via `snap_col_past_chrome`, just like a window gutter.
-                    if indent > 0 {
-                        out.print_gutter(&indent_str);
-                    }
+                    // For delete/insert rows the bg extends under the indent
+                    // (the leftmost cells of the row), so the strip reads as a
+                    // single change-band. Indent cells stay non-selectable —
+                    // setting bg before `print_gutter` keeps both properties.
                     if let Some(bgv) = bg {
                         out.set_bg(bgv);
+                    }
+                    if indent > 0 {
+                        out.print_gutter(&indent_str);
                     }
                     emit_diff_prefix(
                         out,
@@ -589,17 +596,15 @@ pub fn print_cached_inline_diff(
                             out.print("  ");
                         }
                         print_cached_spans(out, vrow, bg);
-                        // Trailing bg-styled spaces pad the row to `layout_width`.
-                        // Same mechanism the user block uses, so both stop exactly
-                        // at the content edge — no row-fill decoration, no chance
-                        // for the bg to bleed under the scrollbar gutter.
+                        // Trailing bg pad — non-selectable so the cursor can't
+                        // land on it and selection/copy skip it like a gutter.
                         let chunk_w: usize =
                             vrow.iter().map(|s| display_width(&s.text)).sum();
                         let trailing = layout_width
                             .saturating_sub(chrome_cells + chunk_w);
                         if trailing > 0 {
                             out.set_bg(bgv);
-                            out.print(&" ".repeat(trailing));
+                            out.print_with_meta(&" ".repeat(trailing), pad_meta.clone());
                         }
                         out.reset_style();
                     } else {
