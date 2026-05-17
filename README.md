@@ -14,8 +14,10 @@
   <a href="https://github.com/leonardcser/smelt/issues">Issues</a>
 </p>
 
-> [!WARNING] smelt is in early development. Expect bugs and breaking changes,
-> and update often.
+> [!WARNING] smelt is in active development. `main` is mid-refactor, so code
+> and docs are not fully in sync and some features are unfinished. Use the
+> latest pre-release tag and update often. The last stable release is
+> significantly behind and not recommended.
 
 ## Why
 
