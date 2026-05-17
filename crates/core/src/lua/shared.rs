@@ -289,4 +289,18 @@ impl LuaResumeSink {
             let _ = tx.send(());
         }
     }
+
+    /// Run `work` on tokio's blocking-thread pool and resolve `task_id`
+    /// with the produced JSON payload. The common bridge for sync work
+    /// (file I/O, blocking process calls) that needs to surface back to
+    /// a yielded Lua coroutine without blocking the main loop.
+    pub fn spawn_blocking_resolve<F>(self, task_id: u64, work: F)
+    where
+        F: FnOnce() -> serde_json::Value + Send + 'static,
+    {
+        tokio::task::spawn_blocking(move || {
+            let payload = work();
+            self.resolve_json(task_id, payload);
+        });
+    }
 }

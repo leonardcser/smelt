@@ -11,8 +11,21 @@ local task = {}
 ---@type fun(): integer
 task.alloc = nil
 
+--- Allocate an external task id, invoke `start(id)` to kick off whatever
+--- will eventually call `smelt.task.resume(id, value)` (or resolve through
+--- the Rust resume sink), and park until that resolution arrives. Returns
+--- the resolved value. Raises `cancelled` if the task is cancelled while
+--- parked. Plugin authors bridging custom Rust extensions use this to
+--- avoid hand-rolling the alloc + start + wait dance.
+---@type fun(start: fun(id: integer)): any
+task.external = nil
+
 --- Resume the yielded task `id` with `value`. The runtime delivers `value` as the return of the matching `coroutine.yield`.
 ---@type fun(id: integer, value: any): nil
 task.resume = nil
+
+--- Park the running task until `smelt.task.resume(id, value)` fires. Returns the resumed value.
+---@type fun(id: integer): any
+task.wait = nil
 
 return task

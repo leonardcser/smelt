@@ -39,6 +39,14 @@ fs.mkdir_all = nil
 ---@type fun(p: string): string?, string?
 fs.read = nil
 
+--- Read `path` off the main thread. Must be called from inside
+--- `smelt.spawn(fn)` or a `tool.execute` (anything that runs on the Lua
+--- task runtime). Returns `(content, nil)` on success or `(nil, err)` on
+--- failure — same convention as `smelt.fs.read`.
+---@see smelt.fs.read
+---@type fun(path: string): string?, string?
+fs.read_async = nil
+
 --- List the immediate entries of directory `p`. Returns `(entries, nil)` on success or `(nil, err_string)` on failure.
 ---@type fun(p: string): string[]?, string?
 fs.read_dir = nil
@@ -63,8 +71,25 @@ fs.rename = nil
 ---@type fun(p: string): integer?, string?
 fs.size = nil
 
+--- Filesystem watcher. Calls `handler(event)` for each event, where
+--- `event = { kind, detail?, paths }`. `kind` is one of `"create" | "modify" | "remove" | "rename" | "access" | "other" | "any"`;
+--- `detail` carries notify's sub-kind when one is reported (e.g. `kind = "create"` → `detail = "file" | "folder"`).
+--- `opts.recursive` defaults to true; set false to watch only the immediate
+--- entries of a directory. Returns a `Reg` whose `:remove()` stops the
+--- watcher and cancels the polling coroutine.
+---@type fun(path: string, handler: fun(event: { kind: string, detail: string?, paths: string[] }), opts: table?): smelt.Reg
+fs.watch = nil
+
 --- Write `contents` to file `p`, creating it if necessary. Returns `(true, nil)` on success or `(false, err_string)` on failure.
 ---@type fun(p: string, contents: string): boolean, string?
 fs.write = nil
+
+--- Write `contents` to `path` off the main thread. Same yielding rules as
+--- `smelt.fs.read_async`. Returns `(true, nil)` on success or
+--- `(false, err)` on failure — mirrors `smelt.fs.write`.
+---@see smelt.fs.read_async
+---@see smelt.fs.write
+---@type fun(path: string, contents: string): boolean, string?
+fs.write_async = nil
 
 return fs

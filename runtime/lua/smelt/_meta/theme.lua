@@ -31,4 +31,9 @@ theme.set = nil
 ---@type fun(): table
 theme.snapshot = nil
 
+--- Load a colorscheme by name via `require("smelt.colorschemes.<name>")`.
+--- Install custom colorschemes at `runtime/lua/smelt/colorschemes/<name>.lua`.
+---@type fun(name: string): any
+theme.use = nil
+
 return theme

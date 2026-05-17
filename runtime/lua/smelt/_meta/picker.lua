@@ -7,6 +7,16 @@
 ---@class smelt.picker
 local picker = {}
 
+--- Fuzzy-finder picker. Filters `opts.items` against the prompt input on every
+--- keystroke, ranked by `smelt.fuzzy.rank`. Accepts string items or
+--- `{ label, description?, ansi_color?, search_terms? }` records. Returns
+--- `{ index, item, action }` on accept or `nil` on dismiss.
+---   • `opts.on_select(item)` — fires on navigation
+---   • `opts.placement` — defaults to "prompt_docked"
+---@see smelt.fuzzy.rank
+---@type fun(opts: table): { index: integer, item: table, action: string }?
+picker.fuzzy = nil
+
 --- Open a picker overlay and return a `Picker` userdata. The picker is non-blocking; the yield-until-pick wrapper lives in pure Lua as `smelt.picker.choose(opts)`.
 ---@type fun(opts: table): smelt.picker.Picker
 picker.new = nil

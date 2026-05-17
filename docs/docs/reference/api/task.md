@@ -14,6 +14,19 @@ fun(): integer
 
 Allocate and return a fresh external task id used to pair a yielded coroutine with a later `task.resume` call.
 
+## `smelt.task.external`
+
+```lua
+fun(start: fun(id: integer)): any
+```
+
+Allocate an external task id, invoke `start(id)` to kick off whatever
+will eventually call `smelt.task.resume(id, value)` (or resolve through
+the Rust resume sink), and park until that resolution arrives. Returns
+the resolved value. Raises `cancelled` if the task is cancelled while
+parked. Plugin authors bridging custom Rust extensions use this to
+avoid hand-rolling the alloc + start + wait dance.
+
 ## `smelt.task.resume`
 
 ```lua
@@ -21,4 +34,12 @@ fun(id: integer, value: any): nil
 ```
 
 Resume the yielded task `id` with `value`. The runtime delivers `value` as the return of the matching `coroutine.yield`.
+
+## `smelt.task.wait`
+
+```lua
+fun(id: integer): any
+```
+
+Park the running task until `smelt.task.resume(id, value)` fires. Returns the resumed value.
 

@@ -54,3 +54,12 @@ fun(): table
 
 Snapshot every known theme role and its current color into a `{ role = color }` table. Useful for theme-aware pickers and diagnostic dumps.
 
+## `smelt.theme.use`
+
+```lua
+fun(name: string): any
+```
+
+Load a colorscheme by name via `require("smelt.colorschemes.<name>")`.
+Install custom colorschemes at `runtime/lua/smelt/colorschemes/<name>.lua`.
+

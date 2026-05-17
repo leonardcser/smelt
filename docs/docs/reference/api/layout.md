@@ -38,6 +38,23 @@ fun(buf: any): table
 
 Wrap a `Buf` handle (or raw buf id) into a leaf block layout that renders the buffer's contents in place.
 
+## `smelt.layout.sep`
+
+```lua
+fun(char: string?): any
+```
+
+Build a 1×1 leaf from a single glyph. Auto-repeats to fill the parent's
+axis: `sep("│")` in an hbox = vertical divider, `sep("─")` in a vbox = horizontal.
+
+## `smelt.layout.text`
+
+```lua
+fun(content: string, opts: table?): any
+```
+
+Build a leaf layout from a string. Common pattern for `render` callbacks.
+
 ## `smelt.layout.vbox`
 
 ```lua

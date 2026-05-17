@@ -6,3 +6,14 @@
 
 Per-plugin state. `smelt.state(name)` returns an ephemeral table that survives `/reload` only; `smelt.state.persistent(name)` returns a JSON-backed wrapper that survives restarts too.
 
+## `smelt.state.persistent`
+
+```lua
+fun(name: string, opts: { debounce_ms: integer? }?): table
+```
+
+Persistent wrapper: backed by JSON under
+`$XDG_STATE_HOME/smelt/plugins/<name>.json`. Top-level writes are
+debounced and auto-saved; nested mutations require an explicit
+`s.save()` call. Reads pass through to the loaded table.
+

@@ -70,6 +70,17 @@ fun(p: string): string?, string?
 
 Read `p` into a string. Returns `(content, nil)` on success or `(nil, err_string)` on failure.
 
+## `smelt.fs.read_async`
+
+```lua
+fun(path: string): string?, string?
+```
+
+Read `path` off the main thread. Must be called from inside
+`smelt.spawn(fn)` or a `tool.execute` (anything that runs on the Lua
+task runtime). Returns `(content, nil)` on success or `(nil, err)` on
+failure — same convention as `smelt.fs.read`.
+
 ## `smelt.fs.read_dir`
 
 ```lua
@@ -118,6 +129,21 @@ fun(p: string): integer?, string?
 
 Return the size of file `p` in bytes. Returns `(size, nil)` or `(nil, err_string)` on failure.
 
+## `smelt.fs.watch`
+
+```lua
+fun(path: string, handler: fun(event: { kind: string, detail: string?, paths: string[] }), opts: table?): smelt.Reg
+```
+
+Types: [`smelt.Reg`](types.md#smeltreg)
+
+Filesystem watcher. Calls `handler(event)` for each event, where
+`event = { kind, detail?, paths }`. `kind` is one of `"create" | "modify" | "remove" | "rename" | "access" | "other" | "any"`;
+`detail` carries notify's sub-kind when one is reported (e.g. `kind = "create"` → `detail = "file" | "folder"`).
+`opts.recursive` defaults to true; set false to watch only the immediate
+entries of a directory. Returns a `Reg` whose `:remove()` stops the
+watcher and cancels the polling coroutine.
+
 ## `smelt.fs.write`
 
 ```lua
@@ -125,4 +151,14 @@ fun(p: string, contents: string): boolean, string?
 ```
 
 Write `contents` to file `p`, creating it if necessary. Returns `(true, nil)` on success or `(false, err_string)` on failure.
+
+## `smelt.fs.write_async`
+
+```lua
+fun(path: string, contents: string): boolean, string?
+```
+
+Write `contents` to `path` off the main thread. Same yielding rules as
+`smelt.fs.read_async`. Returns `(true, nil)` on success or
+`(false, err)` on failure — mirrors `smelt.fs.write`.
 

@@ -23,6 +23,15 @@ layout.hbox = nil
 ---@type fun(buf: any): table
 layout.leaf = nil
 
+--- Build a 1×1 leaf from a single glyph. Auto-repeats to fill the parent's
+--- axis: `sep("│")` in an hbox = vertical divider, `sep("─")` in a vbox = horizontal.
+---@type fun(char: string?): any
+layout.sep = nil
+
+--- Build a leaf layout from a string. Common pattern for `render` callbacks.
+---@type fun(content: string, opts: table?): any
+layout.text = nil
+
 --- Stack `items` vertically into a single block layout. Each item must be a layout userdata produced by `layout.leaf`/`layout.vbox`/`layout.hbox`.
 ---@type fun(items: table): table
 layout.vbox = nil

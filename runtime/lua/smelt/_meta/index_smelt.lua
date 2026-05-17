@@ -19,6 +19,12 @@ smelt.ns = nil
 ---@type fun(): nil
 smelt.quit = nil
 
+--- Sleep for `ms` milliseconds. Must be called from inside `smelt.spawn(fn)`
+--- or a `tool.execute`. Raises `cancelled` if the task is cancelled while
+--- parked.
+---@type fun(ms: integer): any
+smelt.sleep = nil
+
 --- Run `handler` as a coroutine on the Lua task runtime. The handler may yield; its result is discarded. Returns a `Reg` whose `:remove()` cancels the task — any in-flight `smelt.sleep` / `smelt.task.wait` raises `cancelled` and the coroutine unwinds.
 ---@see smelt.task.wait
 ---@type fun(handler: fun()): smelt.Reg

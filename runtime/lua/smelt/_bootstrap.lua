@@ -1,10 +1,30 @@
 -- Task-yielding primitives. Autoloaded before user init.lua so all plugins
 -- see `smelt.sleep` and dialog/picker helpers can reference them.
 
-function smelt.sleep(ms)
+-- Yieldable-context guard. `level = 3` so the error points at the caller's
+-- caller (the user code), not this helper.
+local function require_yieldable(name)
   if not coroutine.isyieldable() then
-    error("smelt.sleep: call from inside smelt.spawn(fn) or tool.execute", 2)
+    error(name .. ": call from inside smelt.spawn(fn) or tool.execute", 3)
   end
+end
+
+-- Yield on an external-task id and unwrap cancellation. Internal to the
+-- task primitives below.
+local function yield_external(id)
+  local result = coroutine.yield({ __yield = "external", id = id })
+  if type(result) == "table" and result.__cancelled then
+    error("cancelled", 3)
+  end
+  return result
+end
+
+-- Sleep for `ms` milliseconds. Must be called from inside `smelt.spawn(fn)`
+-- or a `tool.execute`. Raises `cancelled` if the task is cancelled while
+-- parked.
+-- @sig fun(ms: integer): any
+function smelt.sleep(ms)
+  require_yieldable("smelt.sleep")
   local result = coroutine.yield({ __yield = "sleep", ms = ms })
   if type(result) == "table" and result.__cancelled then
     error("cancelled", 2)
@@ -13,30 +33,33 @@ function smelt.sleep(ms)
 end
 
 -- Park the running task until `smelt.task.resume(id, value)` fires. Returns the resumed value.
+-- @sig fun(id: integer): any
 function smelt.task.wait(id)
-  if not coroutine.isyieldable() then
-    error("smelt.task.wait: call from inside smelt.spawn(fn) or tool.execute", 2)
-  end
-  local result = coroutine.yield({ __yield = "external", id = id })
-  if type(result) == "table" and result.__cancelled then
-    error("cancelled", 2)
-  end
-  return result
+  require_yieldable("smelt.task.wait")
+  return yield_external(id)
+end
+
+-- Allocate an external task id, invoke `start(id)` to kick off whatever
+-- will eventually call `smelt.task.resume(id, value)` (or resolve through
+-- the Rust resume sink), and park until that resolution arrives. Returns
+-- the resolved value. Raises `cancelled` if the task is cancelled while
+-- parked. Plugin authors bridging custom Rust extensions use this to
+-- avoid hand-rolling the alloc + start + wait dance.
+-- @sig fun(start: fun(id: integer)): any
+function smelt.task.external(start)
+  require_yieldable("smelt.task.external")
+  local id = smelt.task.alloc()
+  start(id)
+  return yield_external(id)
 end
 
 -- Call another tool from within `execute`. Pass `parent_call_id` so streamed
 -- output groups under the parent invocation. Returns `{ content, is_error, metadata? }`.
+-- @sig fun(name: string, args: table?, parent_call_id: string?): { content: string, is_error: boolean?, metadata: table? }
 function smelt.tools.call(name, args, parent_call_id)
-  if not coroutine.isyieldable() then
-    error("smelt.tools.call: call from inside tool.execute", 2)
-  end
-  local id = smelt.task.alloc()
-  smelt.tools.__send_call(id, parent_call_id or "", name, args or {})
-  local result = coroutine.yield({ __yield = "external", id = id })
-  if type(result) == "table" and result.__cancelled then
-    error("cancelled", 2)
-  end
-  return result
+  return smelt.task.external(function(id)
+    smelt.tools.__send_call(id, parent_call_id or "", name, args or {})
+  end)
 end
 
 function smelt.tools.default_summary(args)
@@ -83,6 +106,7 @@ smelt.tools.register = function(def)
 end
 
 -- Build a leaf layout from a string. Common pattern for `render` callbacks.
+-- @sig fun(content: string, opts: table?): any
 function smelt.layout.text(content, opts)
   local buf = smelt.buf.new()
   smelt.render.text(buf, content or "", opts)
@@ -91,6 +115,7 @@ end
 
 -- Build a 1×1 leaf from a single glyph. Auto-repeats to fill the parent's
 -- axis: `sep("│")` in an hbox = vertical divider, `sep("─")` in a vbox = horizontal.
+-- @sig fun(char: string?): any
 function smelt.layout.sep(char)
   local buf = smelt.buf.new()
   buf:lines({ char or "─" })
@@ -103,6 +128,7 @@ end
 -- `{ index, item, action }` on accept or `nil` on dismiss.
 --   • `opts.on_select(item)` — fires on navigation
 --   • `opts.placement` — defaults to "prompt_docked"
+-- @sig fun(opts: table): { index: integer, item: table, action: string }?
 function smelt.picker.fuzzy(opts)
   if type(opts) ~= "table" then
     error("smelt.picker.fuzzy: expected table of options", 2)
@@ -124,13 +150,9 @@ end
 -- `smelt.spawn(fn)` or a `tool.execute` (anything that runs on the Lua
 -- task runtime). Returns `(content, nil)` on success or `(nil, err)` on
 -- failure — same convention as `smelt.fs.read`.
+-- @sig fun(path: string): string?, string?
 function smelt.fs.read_async(path)
-  if not coroutine.isyieldable() then
-    error("smelt.fs.read_async: call from inside smelt.spawn(fn) or tool.execute", 2)
-  end
-  local id = smelt.task.alloc()
-  smelt.fs.__read_async_start(id, path)
-  local result = smelt.task.wait(id)
+  local result = smelt.task.external(function(id) smelt.fs.__read_async_start(id, path) end)
   if result.content ~= nil then return result.content, nil end
   return nil, result.err
 end
@@ -138,22 +160,32 @@ end
 -- Write `contents` to `path` off the main thread. Same yielding rules as
 -- `smelt.fs.read_async`. Returns `(true, nil)` on success or
 -- `(false, err)` on failure — mirrors `smelt.fs.write`.
+-- @sig fun(path: string, contents: string): boolean, string?
 function smelt.fs.write_async(path, contents)
-  if not coroutine.isyieldable() then
-    error("smelt.fs.write_async: call from inside smelt.spawn(fn) or tool.execute", 2)
-  end
-  local id = smelt.task.alloc()
-  smelt.fs.__write_async_start(id, path, contents)
-  local result = smelt.task.wait(id)
+  local result = smelt.task.external(function(id) smelt.fs.__write_async_start(id, path, contents) end)
   if result.ok then return true, nil end
   return false, result.err
 end
 
+-- Run `cmd` with `args` off the main thread. Same yielding rules as the
+-- other `*_async` helpers — must be called from inside `smelt.spawn(fn)`
+-- or a `tool.execute`. `opts` accepts `cwd`, `env`, `timeout_secs`,
+-- `stdin`. Returns `({ stdout, stderr, exit_code, timed_out }, nil)` on
+-- success or `(nil, err)` on failure — mirrors `smelt.process.run`.
+-- @sig fun(cmd: string, args: string[]?, opts: table?): { stdout: string, stderr: string, exit_code: integer, timed_out: boolean }?, string?
+function smelt.process.run_async(cmd, args, opts)
+  local result = smelt.task.external(function(id) smelt.process.__run_async_start(id, cmd, args, opts) end)
+  if result.err ~= nil then return nil, result.err end
+  return result, nil
+end
+
 -- Filesystem watcher. Calls `handler(event)` for each event, where
--- `event = { kind = "create" | "modify" | "remove" | "access" | "other" | "any", paths = { ... } }`.
+-- `event = { kind, detail?, paths }`. `kind` is one of `"create" | "modify" | "remove" | "rename" | "access" | "other" | "any"`;
+-- `detail` carries notify's sub-kind when one is reported (e.g. `kind = "create"` → `detail = "file" | "folder"`).
 -- `opts.recursive` defaults to true; set false to watch only the immediate
 -- entries of a directory. Returns a `Reg` whose `:remove()` stops the
 -- watcher and cancels the polling coroutine.
+-- @sig fun(path: string, handler: fun(event: { kind: string, detail: string?, paths: string[] }), opts: table?): smelt.Reg
 function smelt.fs.watch(path, handler, opts)
   if type(path) ~= "string" then
     error("smelt.fs.watch: path must be a string", 2)
@@ -187,6 +219,7 @@ end
 
 -- Load a colorscheme by name via `require("smelt.colorschemes.<name>")`.
 -- Install custom colorschemes at `runtime/lua/smelt/colorschemes/<name>.lua`.
+-- @sig fun(name: string): any
 function smelt.theme.use(name)
   return require("smelt.colorschemes." .. name)
 end
@@ -206,6 +239,7 @@ __smelt_state_touched__ = {}
 -- `$XDG_STATE_HOME/smelt/plugins/<name>.json`. Top-level writes are
 -- debounced and auto-saved; nested mutations require an explicit
 -- `s.save()` call. Reads pass through to the loaded table.
+-- @sig fun(name: string, opts: { debounce_ms: integer? }?): table
 smelt.state.persistent = function(name, opts)
   opts = opts or {}
   local debounce_ms = opts.debounce_ms or 100

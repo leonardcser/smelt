@@ -30,6 +30,16 @@ fun(): nil
 
 Request a clean shutdown of the app. The quit fires on the next tick after the current handler returns.
 
+## `smelt.sleep`
+
+```lua
+fun(ms: integer): any
+```
+
+Sleep for `ms` milliseconds. Must be called from inside `smelt.spawn(fn)`
+or a `tool.execute`. Raises `cancelled` if the task is cancelled while
+parked.
+
 ## `smelt.spawn`
 
 ```lua

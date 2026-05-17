@@ -274,13 +274,11 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
             "Begin an off-thread read of `path` and resolve `task_id` with `{ content }` on success or `{ err }` on failure. Used internally by `smelt.fs.read_async`.",
             &["task_id", "path"],
             move |_, (task_id, path): (u64, String)| -> LuaResult<()> {
-                let sink = s.resume_sink();
-                tokio::task::spawn_blocking(move || {
-                    let payload = match std::fs::read_to_string(&path) {
+                s.resume_sink().spawn_blocking_resolve(task_id, move || {
+                    match std::fs::read_to_string(&path) {
                         Ok(content) => serde_json::json!({ "content": content }),
                         Err(err) => serde_json::json!({ "err": err.to_string() }),
-                    };
-                    sink.resolve_json(task_id, payload);
+                    }
                 });
                 Ok(())
             },
@@ -295,13 +293,11 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
             &["task_id", "path", "contents"],
             move |_, (task_id, path, contents): (u64, String, mlua::String)| -> LuaResult<()> {
                 let bytes = contents.as_bytes().to_vec();
-                let sink = s.resume_sink();
-                tokio::task::spawn_blocking(move || {
-                    let payload = match std::fs::write(&path, &bytes) {
+                s.resume_sink().spawn_blocking_resolve(task_id, move || {
+                    match std::fs::write(&path, &bytes) {
                         Ok(()) => serde_json::json!({ "ok": true }),
                         Err(err) => serde_json::json!({ "err": err.to_string() }),
-                    };
-                    sink.resolve_json(task_id, payload);
+                    }
                 });
                 Ok(())
             },

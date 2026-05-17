@@ -6,6 +6,19 @@
 
 Picker handle constructor. `smelt.picker.new(opts)` opens a picker overlay and returns a `Picker` userdata. The picker is non-blocking; the yield-until-pick wrapper lives in pure Lua as `smelt.picker.choose(opts)`.
 
+## `smelt.picker.fuzzy`
+
+```lua
+fun(opts: table): { index: integer, item: table, action: string }?
+```
+
+Fuzzy-finder picker. Filters `opts.items` against the prompt input on every
+keystroke, ranked by `smelt.fuzzy.rank`. Accepts string items or
+`{ label, description?, ansi_color?, search_terms? }` records. Returns
+`{ index, item, action }` on accept or `nil` on dismiss.
+  • `opts.on_select(item)` — fires on navigation
+  • `opts.placement` — defaults to "prompt_docked"
+
 ## `smelt.picker.new`
 
 ```lua

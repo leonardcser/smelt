@@ -124,10 +124,29 @@ fn run_inner() -> std::io::Result<()> {
     #[allow(clippy::io_other_error)]
     LuaRuntime::register_for_docs()
         .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e.to_string()))?;
-    let metas = snapshot();
+    let mut metas = snapshot();
     if metas.is_empty() {
         eprintln!("no Lua functions registered — has any module been migrated to LuaMod::fn_ yet?");
         std::process::exit(1);
+    }
+
+    // Bundled-Lua functions in `_bootstrap.lua` are part of the public
+    // API surface (smelt.sleep, smelt.fs.watch, smelt.task.external, …)
+    // but have no Rust closure to derive a signature from. Parse them
+    // out so they show up in stubs + reference docs. Skip any name
+    // already registered from Rust so Lua-side reassignments (e.g. the
+    // `smelt.tools.register` wrap) don't clobber the canonical doc.
+    let bootstrap_path = repo_root()?.join("runtime/lua/smelt/_bootstrap.lua");
+    if bootstrap_path.is_file() {
+        let content = std::fs::read_to_string(&bootstrap_path)?;
+        let registered: std::collections::HashSet<(&str, &str)> =
+            metas.iter().map(|m| (m.module, m.name)).collect();
+        for parsed in parse_bundled_lua(&content) {
+            if registered.contains(&(parsed.module, parsed.name)) {
+                continue;
+            }
+            metas.push(parsed);
+        }
     }
 
     let mut by_mod: BTreeMap<&str, Vec<&LuaFnMeta>> = BTreeMap::new();
@@ -625,6 +644,121 @@ fn clean_stale_files(
         }
     }
     Ok(())
+}
+
+/// Parse `function smelt.X.Y(args)` and `smelt.X.Y = function(args)`
+/// declarations out of a bundled Lua file. Returns owned-then-leaked
+/// `LuaFnMeta` entries so they slot into the same render pipeline as
+/// the Rust-registered functions. Skips names starting with `_` (those
+/// are internal helpers like `__smelt_state__` or `__smelt_raw_*`).
+///
+/// Doc strings come from the contiguous `--`-prefixed lines immediately
+/// above the function declaration. A trailing `-- @sig fun(...): T`
+/// line in that block overrides the inferred signature; otherwise we
+/// fall back to `fun(<args>: any...): any` so plugin authors at least
+/// see the function exists and what parameters it takes.
+fn parse_bundled_lua(content: &str) -> Vec<LuaFnMeta> {
+    let mut out: Vec<LuaFnMeta> = Vec::new();
+    let mut doc_buf: Vec<String> = Vec::new();
+    let mut sig_override: Option<String> = None;
+    for raw in content.lines() {
+        let trimmed = raw.trim_start();
+        if let Some(rest) = trimmed.strip_prefix("-- @sig ") {
+            sig_override = Some(rest.trim().to_string());
+            continue;
+        }
+        if let Some(rest) = trimmed.strip_prefix("--") {
+            let text = rest.strip_prefix(' ').unwrap_or(rest);
+            doc_buf.push(text.to_string());
+            continue;
+        }
+        if let Some((full_name, args)) = parse_lua_fn_decl(raw) {
+            let Some((module, name)) = split_module_and_name(&full_name) else {
+                doc_buf.clear();
+                sig_override = None;
+                continue;
+            };
+            if name.starts_with('_') {
+                doc_buf.clear();
+                sig_override = None;
+                continue;
+            }
+            let doc = doc_buf
+                .iter()
+                .map(|s| s.trim_end().to_string())
+                .collect::<Vec<_>>()
+                .join("\n");
+            let sig = sig_override.clone().unwrap_or_else(|| default_sig(&args));
+            out.push(LuaFnMeta {
+                module: Box::leak(module.into_boxed_str()),
+                name: Box::leak(name.into_boxed_str()),
+                doc: Box::leak(doc.into_boxed_str()),
+                sig,
+                tier: Tier::Host,
+            });
+            doc_buf.clear();
+            sig_override = None;
+            continue;
+        }
+        if !trimmed.is_empty() {
+            doc_buf.clear();
+            sig_override = None;
+        }
+    }
+    out
+}
+
+fn parse_lua_fn_decl(line: &str) -> Option<(String, String)> {
+    let line = line.trim_start();
+    // Form 1: `function smelt.X.Y(args)`
+    if let Some(rest) = line.strip_prefix("function ") {
+        let paren = rest.find('(')?;
+        let name = rest[..paren].trim().to_string();
+        if !name.starts_with("smelt.") {
+            return None;
+        }
+        let close = rest.rfind(')')?;
+        if close <= paren {
+            return None;
+        }
+        let args = rest[paren + 1..close].trim().to_string();
+        return Some((name, args));
+    }
+    // Form 2: `smelt.X.Y = function(args)`
+    if !line.starts_with("smelt.") {
+        return None;
+    }
+    let eq = line.find('=')?;
+    let lhs = line[..eq].trim();
+    let rhs = line[eq + 1..].trim_start();
+    let after_fn = rhs.strip_prefix("function")?;
+    if !after_fn.starts_with('(') {
+        return None;
+    }
+    let close = after_fn.rfind(')')?;
+    let args = after_fn[1..close].trim().to_string();
+    Some((lhs.to_string(), args))
+}
+
+fn split_module_and_name(full: &str) -> Option<(String, String)> {
+    let idx = full.rfind('.')?;
+    let module = full[..idx].to_string();
+    let name = full[idx + 1..].to_string();
+    if name.is_empty() {
+        return None;
+    }
+    Some((module, name))
+}
+
+fn default_sig(args: &str) -> String {
+    let typed = args
+        .split(',')
+        .map(|p| p.trim())
+        .filter(|p| !p.is_empty())
+        .map(|p| format!("{p}: any"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    format!("fun({typed}): any")
 }
 
 fn repo_root() -> std::io::Result<PathBuf> {

@@ -7,6 +7,14 @@
 ---@class smelt.tools
 local tools = {}
 
+--- Call another tool from within `execute`. Pass `parent_call_id` so streamed
+--- output groups under the parent invocation. Returns `{ content, is_error, metadata? }`.
+---@type fun(name: string, args: table?, parent_call_id: string?): { content: string, is_error: boolean?, metadata: table? }
+tools.call = nil
+
+---@type fun(args: any): any
+tools.default_summary = nil
+
 --- Return the names of every registered plugin tool, sorted.
 ---@type fun(): table
 tools.list = nil

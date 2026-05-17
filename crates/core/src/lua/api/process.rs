@@ -130,6 +130,30 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
         },
     )?;
     {
+        let s = Arc::clone(shared);
+        m.fn_(
+            "__run_async_start",
+            "Begin an off-thread run of `cmd` with `args` and resolve `task_id` with `{ stdout, stderr, exit_code, timed_out }` on success or `{ err }` on failure. `opts` accepts `cwd`, `env`, `timeout_secs`, and `stdin`. Used internally by `smelt.process.run_async`.",
+            &["task_id", "cmd", "args", "opts"],
+            move |_, (task_id, cmd, args, opts): (u64, String, Option<Vec<String>>, Option<mlua::Table>)| -> LuaResult<()> {
+                let parsed = parse_run_options(opts.as_ref())?;
+                let args = args.unwrap_or_default();
+                s.resume_sink().spawn_blocking_resolve(task_id, move || {
+                    match process::run(&cmd, &args, &parsed) {
+                        Ok(out) => serde_json::json!({
+                            "stdout": out.stdout,
+                            "stderr": out.stderr,
+                            "exit_code": out.exit_code,
+                            "timed_out": out.timed_out,
+                        }),
+                        Err(err) => serde_json::json!({ "err": err.to_string() }),
+                    }
+                });
+                Ok(())
+            },
+        )?;
+    }
+    {
         let shared_run_streaming = Arc::clone(shared);
         m.fn_(
             "run_streaming",

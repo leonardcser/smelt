@@ -27,6 +27,15 @@ process.read_output = nil
 ---@type fun(cmd: string, args: string[]?, opts: table?): table?, string?
 process.run = nil
 
+--- Run `cmd` with `args` off the main thread. Same yielding rules as the
+--- other `*_async` helpers — must be called from inside `smelt.spawn(fn)`
+--- or a `tool.execute`. `opts` accepts `cwd`, `env`, `timeout_secs`,
+--- `stdin`. Returns `({ stdout, stderr, exit_code, timed_out }, nil)` on
+--- success or `(nil, err)` on failure — mirrors `smelt.process.run`.
+---@see smelt.process.run
+---@type fun(cmd: string, args: string[]?, opts: table?): { stdout: string, stderr: string, exit_code: integer, timed_out: boolean }?, string?
+process.run_async = nil
+
 --- Run `command` with a `timeout_ms` deadline, streaming each output line into the live tool call `call_id` and resolving task `task_id` with `{ content, is_error, timed_out }` (or `{ __cancelled = true }` if cancelled).
 ---@type fun(task_id: integer, call_id: string, command: string, timeout_ms: integer): nil
 process.run_streaming = nil

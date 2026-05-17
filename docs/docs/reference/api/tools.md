@@ -6,6 +6,23 @@
 
 Register, unregister, and resolve plugin tools for the engine.
 
+## `smelt.tools.call`
+
+```lua
+fun(name: string, args: table?, parent_call_id: string?): { content: string, is_error: boolean?, metadata: table? }
+```
+
+Call another tool from within `execute`. Pass `parent_call_id` so streamed
+output groups under the parent invocation. Returns `{ content, is_error, metadata? }`.
+
+## `smelt.tools.default_summary`
+
+```lua
+fun(args: any): any
+```
+
+
+
 ## `smelt.tools.list`
 
 ```lua
