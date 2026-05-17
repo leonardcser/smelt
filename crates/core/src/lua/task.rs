@@ -18,7 +18,7 @@ pub enum TaskCompletion {
     ToolResult { request_id: u64, call_id: String },
 }
 
-struct LuaTask {
+pub(crate) struct LuaTask {
     id: u64,
     thread: mlua::Thread,
     wait: TaskWait,
@@ -57,6 +57,14 @@ pub struct ToolEnv<'a> {
 }
 
 /// Single-threaded task runtime; all methods must run on the Lua owner thread.
+///
+/// **Invariant**: the `LuaShared::tasks` mutex guarding this struct must never
+/// be held across a call into Lua code. Lua callbacks can re-enter the runtime
+/// (e.g. `smelt.spawn` from inside a coroutine, `Reg:remove()` cancelling a
+/// sibling task), and `std::sync::Mutex` is non-reentrant — holding the lock
+/// across a resume would deadlock. `drive_tasks` enforces this by popping a
+/// task out via `take_next_ready`, dropping the lock for the duration of
+/// `step_task_owned`, then reacquiring to `put_back` the parked task.
 pub struct LuaTaskRuntime {
     tasks: Vec<LuaTask>,
     next_task_id: AtomicU64,
@@ -156,103 +164,107 @@ impl LuaTaskRuntime {
         self.tasks.len()
     }
 
+    /// Pop a ready task out of the runtime, returning it by value. `drive_tasks`
+    /// uses this to step a task without holding the `tasks` mutex — so Lua code
+    /// that re-enters the runtime (e.g. `smelt.spawn` from inside a coroutine)
+    /// can acquire the lock synchronously instead of deadlocking.
+    pub(crate) fn take_next_ready(&mut self, now: Instant) -> Option<LuaTask> {
+        let idx = self.tasks.iter().position(|t| match &t.wait {
+            TaskWait::Ready(_) => true,
+            TaskWait::Sleep(deadline) => t.cancel.is_cancelled() || *deadline <= now,
+            TaskWait::External(_) => false,
+        })?;
+        Some(self.tasks.swap_remove(idx))
+    }
+
+    pub(crate) fn put_back(&mut self, task: LuaTask) {
+        self.tasks.push(task);
+    }
+
+    /// Drive every ready task once. Used by tests; production callers use
+    /// `take_next_ready` + `step_task_owned` + `put_back` so the lock can be
+    /// dropped during the resume.
     pub fn drive(&mut self, lua: &Lua, now: Instant) -> Vec<TaskDriveOutput> {
         let mut outputs = Vec::new();
-        let mut i = 0;
-        while i < self.tasks.len() {
-            let ready = match &self.tasks[i].wait {
-                TaskWait::Ready(_) => true,
-                TaskWait::Sleep(deadline) => {
-                    self.tasks[i].cancel.is_cancelled() || *deadline <= now
-                }
-                TaskWait::External(_) => false,
-            };
-            if !ready {
-                i += 1;
-                continue;
-            }
-            let drop_task = self.step_task(lua, i, now, &mut outputs);
-            if drop_task {
-                self.tasks.swap_remove(i);
-            } else {
-                i += 1;
+        while let Some(task) = self.take_next_ready(now) {
+            if let Some(parked) = step_task_owned(lua, task, now, &mut outputs) {
+                self.tasks.push(parked);
             }
         }
         outputs
     }
+}
 
-    fn step_task(
-        &mut self,
-        lua: &Lua,
-        idx: usize,
-        now: Instant,
-        outputs: &mut Vec<TaskDriveOutput>,
-    ) -> bool {
-        let task = &mut self.tasks[idx];
-        let resume_args =
-            match std::mem::replace(&mut task.wait, TaskWait::Ready(LuaMultiValue::new())) {
-                TaskWait::Ready(mv) => mv,
-                TaskWait::Sleep(_) => LuaMultiValue::new(),
-                TaskWait::External(_) => LuaMultiValue::new(), // unreachable per ready check
-            };
-        let cancel = task.cancel.clone();
-        let result: LuaResult<LuaValue> =
-            with_task_cancel(cancel, || task.thread.resume(resume_args));
+/// Resume one task without holding the runtime. Returns the task if it parked
+/// again (sleep/external), `None` if it finished or errored.
+pub(crate) fn step_task_owned(
+    lua: &Lua,
+    mut task: LuaTask,
+    now: Instant,
+    outputs: &mut Vec<TaskDriveOutput>,
+) -> Option<LuaTask> {
+    let resume_args = match std::mem::replace(&mut task.wait, TaskWait::Ready(LuaMultiValue::new()))
+    {
+        TaskWait::Ready(mv) => mv,
+        TaskWait::Sleep(_) => LuaMultiValue::new(),
+        TaskWait::External(_) => LuaMultiValue::new(),
+    };
+    let cancel = task.cancel.clone();
+    let result: LuaResult<LuaValue> = with_task_cancel(cancel, || task.thread.resume(resume_args));
 
-        match result {
-            Ok(v) => {
-                if task.thread.status() == mlua::ThreadStatus::Finished {
-                    match &task.completion {
-                        TaskCompletion::FireAndForget => {}
-                        TaskCompletion::ToolResult {
-                            request_id,
-                            call_id,
-                        } => {
-                            let (content, is_error) = coerce_tool_result(&v);
-                            outputs.push(TaskDriveOutput::ToolComplete {
-                                request_id: *request_id,
-                                call_id: call_id.clone(),
-                                content,
-                                is_error,
-                            });
-                        }
-                    }
-                    return true;
-                }
-                match decode_yield(lua, v) {
-                    Ok(Yield::Sleep(d)) => {
-                        if task.cancel.is_cancelled() {
-                            let mut mv = LuaMultiValue::new();
-                            mv.push_back(cancelled_marker(lua));
-                            task.wait = TaskWait::Ready(mv);
-                        } else {
-                            task.wait = TaskWait::Sleep(now + d);
-                        }
-                        false
-                    }
-                    Ok(Yield::External(id)) => {
-                        if task.cancel.is_cancelled() {
-                            let mut mv = LuaMultiValue::new();
-                            mv.push_back(cancelled_marker(lua));
-                            task.wait = TaskWait::Ready(mv);
-                        } else {
-                            task.wait = TaskWait::External(id);
-                        }
-                        false
-                    }
-                    Err(msg) => {
-                        outputs.push(TaskDriveOutput::Error(format!("task {}: {msg}", task.id)));
-                        fail_completion(&task.completion, &msg, outputs);
-                        true
+    match result {
+        Ok(v) => {
+            if task.thread.status() == mlua::ThreadStatus::Finished {
+                match &task.completion {
+                    TaskCompletion::FireAndForget => {}
+                    TaskCompletion::ToolResult {
+                        request_id,
+                        call_id,
+                    } => {
+                        let (content, is_error) = coerce_tool_result(&v);
+                        outputs.push(TaskDriveOutput::ToolComplete {
+                            request_id: *request_id,
+                            call_id: call_id.clone(),
+                            content,
+                            is_error,
+                        });
                     }
                 }
+                return None;
             }
-            Err(e) => {
-                let msg = e.to_string();
-                outputs.push(TaskDriveOutput::Error(format!("task {}: {msg}", task.id)));
-                fail_completion(&task.completion, &msg, outputs);
-                true
+            match decode_yield(lua, v) {
+                Ok(Yield::Sleep(d)) => {
+                    if task.cancel.is_cancelled() {
+                        let mut mv = LuaMultiValue::new();
+                        mv.push_back(cancelled_marker(lua));
+                        task.wait = TaskWait::Ready(mv);
+                    } else {
+                        task.wait = TaskWait::Sleep(now + d);
+                    }
+                    Some(task)
+                }
+                Ok(Yield::External(id)) => {
+                    if task.cancel.is_cancelled() {
+                        let mut mv = LuaMultiValue::new();
+                        mv.push_back(cancelled_marker(lua));
+                        task.wait = TaskWait::Ready(mv);
+                    } else {
+                        task.wait = TaskWait::External(id);
+                    }
+                    Some(task)
+                }
+                Err(msg) => {
+                    outputs.push(TaskDriveOutput::Error(format!("task {}: {msg}", task.id)));
+                    fail_completion(&task.completion, &msg, outputs);
+                    None
+                }
             }
+        }
+        Err(e) => {
+            let msg = e.to_string();
+            outputs.push(TaskDriveOutput::Error(format!("task {}: {msg}", task.id)));
+            fail_completion(&task.completion, &msg, outputs);
+            None
         }
     }
 }
@@ -623,15 +635,9 @@ mod tests {
         // Cancel before first drive.
         rt.cancel_all(&lua);
 
-        // Drive: task runs, does sync work, yields sleep.
-        // step_task sees cancelled token and replaces the sleep
-        // with a Ready(cancel_marker).
-        let out = rt.drive(&lua, Instant::now());
-        assert!(out.is_empty());
-        assert_eq!(rt.tasks.len(), 1);
-        assert!(matches!(rt.tasks[0].wait, TaskWait::Ready(_)));
-
-        // Next drive resumes with cancel marker and finishes.
+        // Drive: task runs, yields sleep (rewritten to Ready(cancel_marker)
+        // by step_task_owned), then is picked up again in the same `drive`
+        // loop, resumed with the cancel marker, and finishes.
         let out = rt.drive(&lua, Instant::now());
         assert!(out.is_empty());
         assert_eq!(rt.tasks.len(), 0);

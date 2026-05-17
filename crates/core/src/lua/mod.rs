@@ -14,11 +14,12 @@ pub mod watchers;
 pub use reg::LuaReg;
 
 pub use hooks::{composite_off, HookEntry, HookRegistry};
-pub use runtime::{autoload_modules, autoload_modules_filtered, LuaRuntime};
+pub use runtime::{autoload_modules, autoload_modules_filtered, load_bootstrap_chunks, LuaRuntime};
 pub use shared::{
     CliFlagKind, CliFlagSpec, CliFlagValue, DefaultShell, Hooks, LuaResumeSink, LuaShared, Phase,
     RegisteredCommand, StatusSource, ToolHandles, LUA_BUF_ID_BASE,
 };
+pub(crate) use task::step_task_owned;
 pub use task::{
     current_task_cancel, with_task_cancel, LuaTaskRuntime, TaskCompletion, TaskDriveOutput,
     TaskEvent, ToolEnv,

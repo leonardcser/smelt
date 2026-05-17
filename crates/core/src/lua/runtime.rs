@@ -787,10 +787,25 @@ impl LuaRuntime {
     }
 
     pub fn drive_tasks(&self, now: Instant) -> Vec<TaskDriveOutput> {
-        let Ok(mut rt) = self.shared.tasks.lock() else {
-            return Vec::new();
-        };
-        let outs = rt.drive(&self.lua, now);
+        let mut outs = Vec::new();
+        // Step one task at a time without holding the `tasks` mutex across the
+        // resume. Re-entrant `smelt.spawn` / `Reg::remove()` calls from inside
+        // the coroutine acquire the lock synchronously instead of deadlocking.
+        loop {
+            let task = {
+                let Ok(mut rt) = self.shared.tasks.lock() else {
+                    return Vec::new();
+                };
+                rt.take_next_ready(now)
+            };
+            let Some(task) = task else { break };
+            if let Some(parked) = crate::lua::step_task_owned(&self.lua, task, now, &mut outs) {
+                let Ok(mut rt) = self.shared.tasks.lock() else {
+                    return Vec::new();
+                };
+                rt.put_back(parked);
+            }
+        }
         let mut forward = Vec::with_capacity(outs.len());
         for out in outs {
             match out {
@@ -1380,7 +1395,17 @@ impl LuaRuntime {
                 is_error: true,
             };
         }
-        let outputs = rt.drive(&self.lua, now);
+        // Single-step the freshly-spawned task: if the handler yields, callers
+        // get `Pending` and the task is parked for the next `drive_tasks` tick.
+        // (The general drive loop is fixed-point, but at tool entry we want
+        // "yielded at all → Pending" so async handlers don't get coalesced.)
+        let task_opt = rt.take_next_ready(now);
+        let mut outputs = Vec::new();
+        if let Some(task) = task_opt {
+            if let Some(parked) = crate::lua::step_task_owned(&self.lua, task, now, &mut outputs) {
+                rt.put_back(parked);
+            }
+        }
         drop(rt);
 
         let mut immediate: Option<(String, bool)> = None;

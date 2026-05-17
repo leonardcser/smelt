@@ -73,9 +73,13 @@ end
 -- ```
 -- @sig fun(...: smelt.Reg?): smelt.Reg
 function smelt.reg.compose(...)
+  -- Use `select("#", ...)` rather than `#regs`; `ipairs` stops at the
+  -- first `nil`, which would silently skip Regs after a `nil` slot.
+  local n = select("#", ...)
   local regs = { ... }
   return smelt.reg.new(function()
-    for _, r in ipairs(regs) do
+    for i = 1, n do
+      local r = regs[i]
       if r and r.remove then r:remove() end
     end
   end)
@@ -181,45 +185,55 @@ smelt.tools.register = function(def)
   return __smelt_raw_tools_register__(def)
 end
 
--- Build a leaf layout from a string. Common pattern for `render` callbacks.
--- @sig fun(content: string, opts: table?): any
-function smelt.layout.text(content, opts)
-  local buf = smelt.buf.new()
-  smelt.render.text(buf, content or "", opts)
-  return smelt.layout.leaf(buf)
+-- The layout helpers depend on `smelt.layout.leaf` from the UiHost tier
+-- (registered by the TUI crate). In headless/core-only contexts the
+-- namespace is absent, so we no-op the definitions rather than crash on
+-- nil-index. This keeps `_bootstrap.lua` loadable against any tier.
+if smelt.layout and smelt.layout.leaf then
+  -- Build a leaf layout from a string. Common pattern for `render` callbacks.
+  -- @sig fun(content: string, opts: table?): any
+  function smelt.layout.text(content, opts)
+    local buf = smelt.buf.new()
+    smelt.render.text(buf, content or "", opts)
+    return smelt.layout.leaf(buf)
+  end
+
+  -- Build a 1×1 leaf from a single glyph. Auto-repeats to fill the parent's
+  -- axis: `sep("│")` in an hbox = vertical divider, `sep("─")` in a vbox = horizontal.
+  -- @sig fun(char: string?): any
+  function smelt.layout.sep(char)
+    local buf = smelt.buf.new()
+    buf:lines({ char or "─" })
+    return smelt.layout.leaf(buf)
+  end
 end
 
--- Build a 1×1 leaf from a single glyph. Auto-repeats to fill the parent's
--- axis: `sep("│")` in an hbox = vertical divider, `sep("─")` in a vbox = horizontal.
--- @sig fun(char: string?): any
-function smelt.layout.sep(char)
-  local buf = smelt.buf.new()
-  buf:lines({ char or "─" })
-  return smelt.layout.leaf(buf)
-end
-
--- Fuzzy-finder picker. Filters `opts.items` against the prompt input on every
--- keystroke, ranked by `smelt.fuzzy.rank`. Accepts string items or
--- `{ label, description?, ansi_color?, search_terms? }` records. Returns
--- `{ index, item, action }` on accept or `nil` on dismiss.
---   • `opts.on_select(item)` — fires on navigation
---   • `opts.placement` — defaults to "prompt_docked"
--- @sig fun(opts: table): { index: integer, item: table, action: string }?
-function smelt.picker.fuzzy(opts)
-  if type(opts) ~= "table" then
-    error("smelt.picker.fuzzy: expected table of options", 2)
+-- Picker depends on `smelt.prompt.open_picker` (UiHost tier). Only
+-- attach the convenience wrapper when the prompt namespace is present.
+if smelt.picker and smelt.prompt and smelt.prompt.open_picker then
+  -- Fuzzy-finder picker. Filters `opts.items` against the prompt input on every
+  -- keystroke, ranked by `smelt.fuzzy.rank`. Accepts string items or
+  -- `{ label, description?, ansi_color?, search_terms? }` records. Returns
+  -- `{ index, item, action }` on accept or `nil` on dismiss.
+  --   • `opts.on_select(item)` — fires on navigation
+  --   • `opts.placement` — defaults to "prompt_docked"
+  -- @sig fun(opts: table): { index: integer, item: table, action: string }?
+  function smelt.picker.fuzzy(opts)
+    if type(opts) ~= "table" then
+      error("smelt.picker.fuzzy: expected table of options", 2)
+    end
+    if type(opts.items) ~= "table" then
+      error("smelt.picker.fuzzy: opts.items must be a table", 2)
+    end
+    local normalized = {}
+    for i, it in ipairs(opts.items) do
+      normalized[i] = type(it) == "string" and { label = it } or it
+    end
+    local merged = {}
+    for k, v in pairs(opts) do merged[k] = v end
+    merged.items = normalized
+    return smelt.prompt.open_picker(merged)
   end
-  if type(opts.items) ~= "table" then
-    error("smelt.picker.fuzzy: opts.items must be a table", 2)
-  end
-  local normalized = {}
-  for i, it in ipairs(opts.items) do
-    normalized[i] = type(it) == "string" and { label = it } or it
-  end
-  local merged = {}
-  for k, v in pairs(opts) do merged[k] = v end
-  merged.items = normalized
-  return smelt.prompt.open_picker(merged)
 end
 
 -- Read `path` off the main thread. Must be called from inside
@@ -296,11 +310,14 @@ function smelt.fs.watch(path, handler, opts)
   end))
 end
 
--- Load a colorscheme by name via `require("smelt.colorschemes.<name>")`.
--- Install custom colorschemes at `runtime/lua/smelt/colorschemes/<name>.lua`.
--- @sig fun(name: string): any
-function smelt.theme.use(name)
-  return require("smelt.colorschemes." .. name)
+-- `smelt.theme` is UiHost. Only attach the convenience loader when it exists.
+if smelt.theme then
+  -- Load a colorscheme by name via `require("smelt.colorschemes.<name>")`.
+  -- Install custom colorschemes at `runtime/lua/smelt/colorschemes/<name>.lua`.
+  -- @sig fun(name: string): any
+  function smelt.theme.use(name)
+    return require("smelt.colorschemes." .. name)
+  end
 end
 
 -- Per-name state. Two flavours:
