@@ -101,7 +101,7 @@ impl LuaTypeTuple for () {
 
 // Single-type param lists (1-tuple arity without the wrapper).
 // Every type that has `LuaType` also has a `LuaTypeTuple` impl as a lone
-// parameter, so `register_fn` works for both `|_, x: String|` and
+// parameter, so `LuaMod::fn_` works for both `|_, x: String|` and
 // `|_, (x, y): (String, u64)|` shapes.
 macro_rules! impl_lua_type_tuple_single {
     ($($t:ty),+ $(,)?) => {

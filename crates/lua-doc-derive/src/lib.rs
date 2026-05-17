@@ -3,7 +3,7 @@
 //! definitions and the doc registry that `gen-lua-docs` reads from.
 //!
 //! Both derives emit:
-//! - `LuaType` (so the type can show up directly in a `register_fn`
+//! - `LuaType` (so the type can show up directly in a `LuaMod::fn_`
 //!   sig as e.g. `opts: smelt.buf.ExtmarkOpts?` instead of `opts:
 //!   table?`).
 //! - `LuaTypeTuple` for single-arg use (so `|_, opts: ExtmarkOpts|`
@@ -11,7 +11,7 @@
 //! - `mlua::FromLua` so the closure receives a fully decoded value.
 //!
 //! The `LuaType` impl pushes the decl into the doc registry the first
-//! time `lua_type()` runs — i.e. as soon as a `register_fn` site
+//! time `lua_type()` runs — i.e. as soon as a `LuaMod::fn_` site
 //! references the type. No central "declare" step needed; declaration
 //! follows usage.
 

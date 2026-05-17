@@ -75,7 +75,7 @@ per-namespace page calls it out in the header.
   `smelt.tools`.
 - **UiHost** — requires a live terminal UI. Calling a UiHost function from
   headless mode raises. Examples: `smelt.win`, `smelt.buf`, `smelt.theme`,
-  `smelt.ui`, `smelt.statusline`, `smelt.keymap`.
+  `smelt.notify`, `smelt.statusline`, `smelt.keymap`.
 
 Plugins that should keep working in headless contexts must avoid UiHost
 namespaces or guard them behind a tier check.

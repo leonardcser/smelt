@@ -3,16 +3,15 @@
 //! Every `LuaMod` carries its full dotted path (`smelt.http.cache`) and
 //! the tier it belongs to. Sub-modules are created with `.sub(name, doc)`
 //! and derive their path by concatenation — the path string appears once,
-//! at module creation, and the same `record_module_doc` call that the
-//! doc-gen pipeline reads is fired automatically. Function registration
-//! goes through `.fn_(name, doc, params, f)`, which calls the same
-//! `register_fn_inner` pipeline as the legacy free `register_fn` /
-//! `register_ui_fn` helpers — so the LuaCATS signatures are derived from
-//! Rust types exactly as before.
+//! at module creation, and the matching `record_module_doc` call fires
+//! automatically. Function registration goes through
+//! `.fn_(name, doc, params, f)`; the LuaCATS signature is derived from
+//! the Rust closure's argument-tuple and return types so drift becomes a
+//! compile error.
 
 use mlua::{FromLuaMulti, IntoLuaMulti, Lua, MaybeSend};
 
-use super::doc::{record_module_doc, register_fn_inner, Tier};
+use super::doc::{record_module, register_fn_inner, Tier};
 use super::lua_type::{LuaType, LuaTypeTuple};
 
 /// A live Lua module under construction. The `tbl` is already attached
@@ -37,7 +36,7 @@ impl<'a> LuaMod<'a> {
     ) -> mlua::Result<Self> {
         let path: &'static str = leak(format!("smelt.{name}"));
         let tbl = lua.create_table()?;
-        record_module_doc(path, doc);
+        record_module(path, doc, Some(tier));
         smelt.set(name, tbl.clone())?;
         Ok(Self {
             tbl,
@@ -60,12 +59,32 @@ impl<'a> LuaMod<'a> {
         }
     }
 
+    /// Take ownership of a `tbl` that the caller already attached (e.g.
+    /// the root `smelt` table, or `smelt_keymap` passed in from the
+    /// dispatcher). Records the module doc + tier as if `under` had
+    /// created the table.
+    pub fn own(
+        lua: &'a Lua,
+        tbl: mlua::Table,
+        path: &'static str,
+        doc: &'static str,
+        tier: Tier,
+    ) -> Self {
+        record_module(path, doc, Some(tier));
+        Self {
+            tbl,
+            lua,
+            path,
+            tier,
+        }
+    }
+
     /// Add a sub-module under this one. Path becomes `self.path.name`.
     /// Inherits the parent's tier.
     pub fn sub(&self, name: &'static str, doc: &'static str) -> mlua::Result<LuaMod<'a>> {
         let path: &'static str = leak(format!("{}.{name}", self.path));
         let tbl = self.lua.create_table()?;
-        record_module_doc(path, doc);
+        record_module(path, doc, Some(self.tier));
         self.tbl.set(name, tbl.clone())?;
         Ok(LuaMod {
             tbl,

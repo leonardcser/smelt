@@ -62,11 +62,14 @@ pub struct LuaFnMeta {
 
 /// Module-level documentation, attached by [`record_module_doc`].
 /// Surfaces above the function list in the per-module markdown page
-/// and as a top-of-file comment in the LuaCATS stub.
+/// and as a top-of-file comment in the LuaCATS stub. `tier` is the
+/// declared tier of the module; the page falls back to this when every
+/// function is `__`-prefixed and filtered out of the rendered surface.
 #[derive(Clone, Debug)]
 pub struct LuaModuleMeta {
     pub module: &'static str,
     pub doc: &'static str,
+    pub tier: Option<Tier>,
 }
 
 static REGISTRY: Mutex<Vec<LuaFnMeta>> = Mutex::new(Vec::new());
@@ -88,7 +91,7 @@ pub fn snapshot() -> Vec<LuaFnMeta> {
 /// Push a class declaration into the side-table. Called from the
 /// `LuaType` impl emitted by `#[derive(LuaOpts)]` the first time the
 /// type's `lua_type()` runs, so any opts struct that ends up in a
-/// `register_fn` sig is automatically discovered.
+/// `LuaMod::fn_` sig is automatically discovered.
 pub fn record_class(decl: LuaClassDecl) {
     if let Ok(mut v) = CLASSES.lock() {
         v.retain(|c| c.name != decl.name);
@@ -113,14 +116,23 @@ pub fn aliases_snapshot() -> Vec<LuaAliasDecl> {
     ALIASES.lock().map(|v| v.clone()).unwrap_or_default()
 }
 
-/// Attach a one-shot description to a Lua module. Call from the
-/// module's `register` function before the first `register_fn` so the
-/// description shows up in `gen-lua-docs` output. Repeated calls for
-/// the same module replace the previous entry.
+/// Attach a one-shot description to a Lua module. Normally fired
+/// automatically by [`super::module::LuaMod::under`] / `.sub`; call
+/// directly only when extending a table that was already attached by
+/// another tier (e.g. `LuaMod::extend`). Repeated calls for the same
+/// module replace the previous entry.
 pub fn record_module_doc(module: &'static str, doc: &'static str) {
+    record_module(module, doc, None);
+}
+
+/// Like [`record_module_doc`] but also pins the module's tier so the
+/// rendered page picks up the right label even when every fn is
+/// filtered out (private `__`-prefixed names). Called from
+/// [`super::module::LuaMod::under`] / `.sub`.
+pub fn record_module(module: &'static str, doc: &'static str, tier: Option<Tier>) {
     if let Ok(mut v) = MODULES.lock() {
         v.retain(|m| m.module != module);
-        v.push(LuaModuleMeta { module, doc });
+        v.push(LuaModuleMeta { module, doc, tier });
     }
 }
 

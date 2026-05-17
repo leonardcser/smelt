@@ -3,7 +3,7 @@
 
 use crate::lua::{LuaHandle, LuaShared};
 use mlua::prelude::*;
-use smelt_core::lua::doc::{record_module_doc, Tier};
+use smelt_core::lua::doc::Tier;
 use smelt_core::lua::lua_type::LuaCallback;
 use smelt_core::lua::module::LuaMod;
 use std::sync::Arc;
@@ -13,11 +13,13 @@ pub(super) fn register(
     smelt_keymap: &mlua::Table,
     shared: &Arc<LuaShared>,
 ) -> LuaResult<()> {
-    record_module_doc(
+    let m = LuaMod::own(
+        lua,
+        smelt_keymap.clone(),
         "smelt.keymap",
         "Register chord→callback bindings and inspect the layered help index. Chords and modes are canonicalized at registration; unknown values raise immediately. UiHost-only.",
+        Tier::UiHost,
     );
-    let m = LuaMod::extend(lua, smelt_keymap.clone(), "smelt.keymap", Tier::UiHost);
     m.fn_(
         "help_sections",
         "Return layered keybinding help as `{ title, entries = { { label, detail } } }` rows. Filters vim-only chords when vim mode is disabled.",
