@@ -1,49 +1,38 @@
-//! `smelt.notebook` — render, parse, read, and apply notebook edits.
+//! `smelt.notebook` — parse, read, apply, and compute preview data for notebook edits.
 
-use crate::content::builder::LineBuilder;
-use crate::content::highlight::{print_inline_diff, print_syntax_file};
-use crate::content::selection::wrap_line;
-use crate::smelt_term::BufId;
 use lua_doc_derive::lua_module;
 use mlua::prelude::*;
 use smelt_core::lua::doc::register_ui_fn;
 use smelt_core::notebook;
-use smelt_core::notebook::NotebookRenderData;
-use smelt_core::theme::intern;
 use std::collections::HashMap;
 
 #[lua_module(
     name = "smelt.notebook",
-    doc = "Render, parse, read, and apply notebook cell edits. UiHost-only."
+    doc = "Parse, read, and apply notebook cell edits, plus compute preview data for the edit_notebook tool. UiHost-only."
 )]
 pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
     let notebook = lua.create_table()?;
     register_ui_fn(
         &notebook,
         "smelt.notebook",
-        "render",
-        "Render a notebook edit preview into the buffer (insert mode shows the new source highlighted; edit mode shows an inline diff). `args` is the notebook tool's argument table.",
-        &["buf_id", "args"],
+        "preview_data",
+        "Compute the preview payload for an `edit_notebook` call. Returns `nil` when the notebook can't be read/parsed or the target cell is out of range. The returned table has `{ edit_mode, path, title, old_source, new_source, syntax_ext }` — `title` is the formatted header (`\"insert cell 3 [py]\"` etc.), `syntax_ext` is the extension for syntax-highlighting the body (`\"py\"` / `\"md\"`).",
+        &["args"],
         lua,
-        |_, (buf_id, args): (u64, mlua::Table)|  -> LuaResult<()>{
+        |lua, args: mlua::Table| -> LuaResult<Option<mlua::Table>> {
             let args = lua_table_to_json_map(&args)
-                .map_err(|e| LuaError::RuntimeError(format!("notebook.render: {e}")))?;
-            crate::lua::with_app(|app| {
-                let Some(data) = smelt_core::notebook::preview_render_data(&args) else {
-                    return;
-                };
-                let theme_snap = app.ui.theme().clone();
-                let width = crate::content::term_width() as u16;
-                if let Some(buf) = app.ui.buf_mut(BufId(buf_id)) {
-                    crate::content::to_buffer::render_into_buffer(
-                        buf,
-                        width,
-                        &theme_snap,
-                        |sink| render_notebook_preview(sink, &data, 0, u16::MAX),
-                    );
-                }
-            });
-            Ok(())
+                .map_err(|e| LuaError::RuntimeError(format!("notebook.preview_data: {e}")))?;
+            let Some(data) = smelt_core::notebook::preview_render_data(&args) else {
+                return Ok(None);
+            };
+            let t = lua.create_table()?;
+            t.set("edit_mode", data.edit_mode.clone())?;
+            t.set("path", data.path.clone())?;
+            t.set("title", data.title())?;
+            t.set("syntax_ext", data.syntax_ext())?;
+            t.set("old_source", data.old_source.clone())?;
+            t.set("new_source", data.new_source.clone())?;
+            Ok(Some(t))
         },
     )?;
     register_ui_fn(
@@ -190,54 +179,4 @@ fn lua_value_to_json(v: &mlua::Value) -> mlua::Result<serde_json::Value> {
         }
         _ => J::Null,
     })
-}
-
-fn render_notebook_preview(
-    out: &mut LineBuilder,
-    data: &NotebookRenderData,
-    skip: u16,
-    viewport: u16,
-) {
-    let title = data.title();
-    let title_lines = wrap_line(&title, crate::content::term_width().saturating_sub(4));
-    let mut skipped = skip;
-    let mut emitted = 0u16;
-
-    for line in &title_lines {
-        if skipped > 0 {
-            skipped -= 1;
-            continue;
-        }
-        if viewport > 0 && emitted >= viewport {
-            return;
-        }
-        out.print(" ");
-        out.push_hl(intern("Comment"));
-        out.print(line);
-        out.pop_style();
-        out.newline();
-        emitted += 1;
-    }
-
-    let remaining = if viewport == 0 {
-        0
-    } else {
-        viewport.saturating_sub(emitted)
-    };
-    if data.edit_mode == "insert" {
-        if remaining == 0 && viewport > 0 {
-            return;
-        }
-        print_syntax_file(out, &data.new_source, &data.path, skipped, remaining);
-    } else {
-        print_inline_diff(
-            out,
-            &data.old_source,
-            &data.new_source,
-            &data.path,
-            &data.old_source,
-            skipped,
-            remaining,
-        );
-    }
 }

@@ -7,8 +7,9 @@ use crate::smelt_term::{BufCreateOpts, BufId, Buffer, Theme};
 
 use crate::content::transcript_parsers as blocks;
 use crate::content::transcript_parsers::{render_thinking_summary, thinking_summary};
+use smelt_core::content::block_layout::{BlockLayout, HboxItem, RenderedLayout};
 use smelt_core::transcript_model::{
-    gap_between, Block, BlockId, ToolOutputRef, ToolState, ToolStatus, ViewState,
+    gap_between, Block, BlockId, ToolOutput, ToolOutputRef, ToolState, ToolStatus, ViewState,
 };
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -318,6 +319,10 @@ impl TuiApp {
     ) -> TranscriptData {
         let gutters = self.transcript_gutters();
         let tw = (gutters.content_width(width as u16) as usize).max(1);
+        // Run plugin `render` hooks on the main thread (Lua is single-threaded) and stash
+        // the resulting owned buffers on `ToolState.render_cache`. Worker layout below
+        // reads those buffers without touching `app.ui` or the Lua VM.
+        self.prerender_tool_blocks(tw as u16);
         let theme = self.ui.theme().clone();
 
         let ephemeral_buf = self
@@ -341,6 +346,86 @@ impl TuiApp {
 
         TranscriptData {
             clamped_scroll: out.clamped_scroll,
+        }
+    }
+
+    /// Main-thread pre-pass: walk every `Block::ToolCall` whose `ToolState.render_cache`
+    /// is missing or width-stale, call the plugin's `render` hook (Lua VM is single-
+    /// threaded), and stash the resulting owned-buffer tree on the state. Parallel layout
+    /// workers downstream just read those buffers — they never touch `app.ui` or Lua.
+    fn prerender_tool_blocks(&mut self, width: u16) {
+        struct Job {
+            call_id: String,
+            name: String,
+            args: HashMap<String, serde_json::Value>,
+            output: Option<ToolOutput>,
+            status: ToolStatus,
+            elapsed_secs: Option<u64>,
+        }
+
+        let jobs: Vec<Job> = {
+            let history = &self.transcript.history;
+            let mut jobs = Vec::new();
+            for id in &history.order {
+                let block = &history.blocks[id];
+                let Block::ToolCall {
+                    call_id,
+                    name,
+                    args,
+                    ..
+                } = block
+                else {
+                    continue;
+                };
+                let Some(state) = history.tool_states.get(call_id) else {
+                    continue;
+                };
+                if matches!(state.status, ToolStatus::Denied) {
+                    continue;
+                }
+                if matches!(&state.render_cache, Some((w, _)) if *w == width) {
+                    continue;
+                }
+                jobs.push(Job {
+                    call_id: call_id.clone(),
+                    name: name.clone(),
+                    args: args.clone(),
+                    output: state.output.as_deref().cloned(),
+                    status: state.status,
+                    elapsed_secs: state.elapsed.map(|d| d.as_secs()),
+                });
+            }
+            jobs
+        };
+        if jobs.is_empty() {
+            return;
+        }
+
+        for job in jobs {
+            let status_label = match job.status {
+                ToolStatus::Pending => "pending",
+                ToolStatus::Ok => "ok",
+                ToolStatus::Err => "err",
+                ToolStatus::Denied => "denied",
+                ToolStatus::Confirm => "confirm",
+            };
+            let ctx = smelt_core::lua::runtime::ToolRenderCtx {
+                width: width as usize,
+                summary: "",
+                status: status_label,
+                elapsed_secs: job.elapsed_secs,
+                call_id: Some(&job.call_id),
+            };
+            let Some(layout) =
+                self.lua
+                    .render_tool_layout(&job.name, &job.args, job.output.as_ref(), ctx)
+            else {
+                continue;
+            };
+            let rendered = extract_rendered_layout(&layout, &mut self.ui);
+            if let Some(state) = self.transcript.history.tool_states.get_mut(&job.call_id) {
+                state.render_cache = Some((width, rendered));
+            }
         }
     }
 
@@ -484,5 +569,43 @@ impl TuiApp {
 
         let above = queued_rows + stash + 1; // +1 = top bar
         (above, input_rows)
+    }
+}
+
+/// Move every leaf buffer out of `ui` into a `RenderedLayout`. Missing buf ids fall back
+/// to an empty placeholder so a registration race doesn't take down the frame.
+pub(crate) fn extract_rendered_layout(
+    layout: &BlockLayout,
+    ui: &mut crate::smelt_term::Ui,
+) -> RenderedLayout {
+    use smelt_core::content::block_layout::{LuaLeaf, RenderedLeaf};
+    match layout {
+        BlockLayout::Leaf(LuaLeaf::Buf(id)) => {
+            let buf = ui
+                .buf_destroy(*id)
+                .unwrap_or_else(|| Buffer::new(*id, BufCreateOpts::default()));
+            BlockLayout::Leaf(RenderedLeaf::Buf(Box::new(buf)))
+        }
+        BlockLayout::Leaf(LuaLeaf::Diff(spec)) => {
+            BlockLayout::Leaf(RenderedLeaf::Diff(spec.clone()))
+        }
+        BlockLayout::Leaf(LuaLeaf::FileView(spec)) => {
+            BlockLayout::Leaf(RenderedLeaf::FileView(spec.clone()))
+        }
+        BlockLayout::Vbox(items) => BlockLayout::Vbox(
+            items
+                .iter()
+                .map(|c| extract_rendered_layout(c, ui))
+                .collect(),
+        ),
+        BlockLayout::Hbox(items) => BlockLayout::Hbox(
+            items
+                .iter()
+                .map(|item| HboxItem {
+                    constraint: item.constraint,
+                    layout: extract_rendered_layout(&item.layout, ui),
+                })
+                .collect(),
+        ),
     }
 }

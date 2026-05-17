@@ -422,7 +422,8 @@ impl Window {
         let last_logical = buf.lines().len() - 1;
         if !self.layout_matches(buf) {
             let lrow = vrow.min(last_logical);
-            return buf.byte_at_display_pos(lrow, vcell);
+            let cell = snap_col_past_chrome(buf, lrow, vcell as u16) as usize;
+            return buf.byte_at_display_pos(lrow, cell);
         }
         let (lrow, chunk_idx) = match self.layout.logical_at_visual(vrow) {
             Some(p) => p,
@@ -434,7 +435,8 @@ impl Window {
         };
         let logical_line = buf.lines().get(lrow).map(String::as_str).unwrap_or("");
         let chunk_start_cell = smelt_buffer::text::byte_to_cell(logical_line, chunk_start_byte);
-        buf.byte_at_display_pos(lrow, chunk_start_cell + vcell)
+        let cell = snap_col_past_chrome(buf, lrow, (chunk_start_cell + vcell) as u16) as usize;
+        buf.byte_at_display_pos(lrow, cell)
     }
 
     /// Read access to the most recent layout. Always populated after the first
@@ -1565,6 +1567,16 @@ impl Window {
             let resolved = pos.or_else(|| {
                 let end = self.effective_endpoint();
                 let (row, col) = self.cursor_visual(buf, end);
+                // Snap visual cursor past chrome spans (e.g. inline gutter) so the
+                // caret never paints inside non-selectable cells. Logical row is
+                // resolved via the layout — when the layout doesn't match, fall
+                // back to identity (vrow == logical).
+                let logical_row = self
+                    .layout
+                    .logical_at_visual(row as usize)
+                    .map(|(lr, _)| lr)
+                    .unwrap_or(row as usize);
+                let col = snap_col_past_chrome(buf, logical_row, col);
                 row.checked_sub(self.scroll_top)
                     .filter(|rel| *rel < height)
                     .map(|screen_row| (col, screen_row))
@@ -1585,6 +1597,31 @@ impl Window {
                     }
                 }
             }
+        }
+    }
+}
+
+/// Advance `col` past any leading non-selectable (chrome) spans on `logical_row`.
+/// Used by cursor positioning so the caret never lands inside an inline gutter
+/// or other chrome — caller-supplied col is clamped forward to the first
+/// selectable cell, repeated until no chrome span covers it.
+fn snap_col_past_chrome(buf: &Buffer, logical_row: usize, col: u16) -> u16 {
+    let mut spans = Vec::new();
+    buf.highlights_at_into(logical_row, &mut spans);
+    if spans.iter().all(|s| s.meta.selectable) {
+        return col;
+    }
+    let mut col = col;
+    loop {
+        let mut advanced = false;
+        for s in &spans {
+            if !s.meta.selectable && s.col_start <= col && col < s.col_end {
+                col = s.col_end;
+                advanced = true;
+            }
+        }
+        if !advanced {
+            return col;
         }
     }
 }

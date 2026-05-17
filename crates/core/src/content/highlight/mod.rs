@@ -8,6 +8,27 @@ pub mod inline;
 pub mod syntax;
 pub mod util;
 
+/// How the highlight renderers paint the left margin / gutter.
+///
+/// The set is closed and exhaustive — each variant corresponds to a real consumer:
+/// - `None` — minimalist render (snippets, inline previews) with no gutter at all.
+/// - `InlineLineNumbers` — paint a single ` N ` line-number column as text inside
+///   the content area; the host window needs no gutter config. Used by transcript
+///   tool blocks (`write_file`, `edit_file`, file/diff previews).
+/// - `Stamped` — emits `SourceLine` metadata only; a host window with a
+///   `LineNumberGutter` paints the actual column. Used by file-viewer panes
+///   (`BufFormat::Code`) where the gutter belongs to the window chrome.
+///
+/// `print_syntax_file*` understands `None | Stamped` (inline-gutter callers
+/// route through `build_file_view_cache` + `print_cached_inline_diff` instead).
+/// `print_cached_inline_diff` understands `None | InlineLineNumbers | Stamped`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum GutterStyle {
+    None,
+    InlineLineNumbers,
+    Stamped,
+}
+
 pub(super) static SYNTAX_SET: LazyLock<SyntaxSet> =
     LazyLock::new(SyntaxSet::load_defaults_newlines);
 pub(super) static THEME_SET: LazyLock<two_face::theme::EmbeddedLazyThemeSet> =
@@ -38,9 +59,9 @@ pub(super) fn syntax_theme() -> &'static syntect::highlighting::Theme {
 }
 
 pub use diff::{
-    build_inline_diff_cache_ext, compute_split_diff, print_cached_inline_diff, print_inline_diff,
-    print_inline_diff_ext, print_split_diff, print_split_diff_side, CachedInlineDiff,
-    SplitDiffPlan, SplitSide,
+    build_file_view_cache, build_inline_diff_cache_ext, compute_split_diff,
+    print_cached_inline_diff, print_inline_diff, print_inline_diff_ext, print_split_diff,
+    print_split_diff_side, CachedInlineDiff, SplitDiffPlan, SplitSide,
 };
 pub use inline::{
     emit_inline_spans, inline_spans_width, parse_inline_spans, render_markdown_table,

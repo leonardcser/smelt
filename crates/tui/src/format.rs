@@ -9,7 +9,7 @@ use crate::smelt_term::{Buffer, BufferParser};
 use std::sync::Arc;
 
 use crate::content::builder::LineBuilder;
-use crate::content::highlight::{print_inline_diff_ext, print_syntax_file_ext};
+use crate::content::highlight::{print_inline_diff_ext, print_syntax_file_ext, GutterStyle};
 use crate::content::to_buffer::render_into_buffer;
 
 /// Content kind a parser-backed buffer renders.
@@ -116,7 +116,15 @@ impl BufferParser for ModeParser {
                 diff_base: None,
             } => {
                 render_into_buffer(buf, width, &theme, |sink| {
-                    print_syntax_file_ext(sink, source, "", Some(lang), 0, u16::MAX);
+                    print_syntax_file_ext(
+                        sink,
+                        source,
+                        "",
+                        Some(lang),
+                        GutterStyle::Stamped,
+                        0,
+                        u16::MAX,
+                    );
                 });
             }
             BufFormat::Code {
@@ -124,7 +132,18 @@ impl BufferParser for ModeParser {
                 diff_base: Some(old),
             } => {
                 render_into_buffer(buf, width, &theme, |sink| {
-                    print_inline_diff_ext(sink, old, source, "", old, Some(lang), 0, u16::MAX);
+                    print_inline_diff_ext(
+                        sink,
+                        old,
+                        source,
+                        "",
+                        old,
+                        Some(lang),
+                        GutterStyle::Stamped,
+                        0,
+                        0,
+                        u16::MAX,
+                    );
                 });
             }
         }

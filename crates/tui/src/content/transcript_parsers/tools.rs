@@ -1,9 +1,12 @@
 use super::MAX_TOOL_BLOCK_ROWS;
 use protocol::{StyledLines, StyledSpan};
 use smelt_core::buffer::SpanMeta;
-use smelt_core::content::block_layout::BlockLayout;
+use smelt_core::content::block_layout::{DiffSpec, FileViewSpec, RenderedLayout, RenderedLeaf};
 use smelt_core::content::builder::{replay_buffer_row_into, LineBuilder};
-use smelt_core::content::highlight::InlineSyntax;
+use smelt_core::content::highlight::{
+    build_file_view_cache, print_cached_inline_diff, print_inline_diff_ext, GutterStyle,
+    InlineSyntax,
+};
 use smelt_core::content::wrap::{wrap_line, wrap_line_ranges};
 use smelt_core::theme::{intern, HlGroup};
 use smelt_core::transcript_model::{ToolOutput, ToolStatus};
@@ -14,7 +17,6 @@ use std::time::Duration;
 #[allow(clippy::too_many_arguments)]
 pub(super) fn render_tool(
     out: &mut LineBuilder,
-    call_id: &str,
     name: &str,
     summary: &StyledLines,
     args: &HashMap<String, serde_json::Value>,
@@ -22,6 +24,7 @@ pub(super) fn render_tool(
     elapsed: Option<Duration>,
     output: Option<&ToolOutput>,
     user_message: Option<&str>,
+    rendered: Option<&RenderedLayout>,
     width: usize,
 ) -> u16 {
     let color: HlGroup = match status {
@@ -42,11 +45,9 @@ pub(super) fn render_tool(
         rows += 1;
     }
     if status != ToolStatus::Denied {
-        let layout =
-            call_render_layout(name, args, output, summary, status, elapsed, call_id, width);
-        if let Some(layout) = layout {
+        if let Some(layout) = rendered {
             let inner_width = (width as u16).saturating_sub(2);
-            rows += replay_layout(out, &layout, inner_width);
+            rows += replay_rendered(out, layout, inner_width);
         } else if let Some(out_data) = output {
             if !out_data.content.is_empty() {
                 rows += print_tool_output(out, name, out_data, args, width);
@@ -220,60 +221,21 @@ fn print_tool_line(
     rows
 }
 
-#[allow(clippy::too_many_arguments)]
-fn call_render_layout(
-    name: &str,
-    args: &HashMap<String, serde_json::Value>,
-    output: Option<&ToolOutput>,
-    summary: &StyledLines,
-    status: ToolStatus,
-    elapsed: Option<Duration>,
-    call_id: &str,
-    width: usize,
-) -> Option<BlockLayout> {
-    let status_label = match status {
-        ToolStatus::Pending => "pending",
-        ToolStatus::Ok => "ok",
-        ToolStatus::Err => "err",
-        ToolStatus::Denied => "denied",
-        ToolStatus::Confirm => "confirm",
-    };
-    let elapsed_secs = elapsed.map(|d| d.as_secs());
-    let cid = if call_id.is_empty() {
-        None
-    } else {
-        Some(call_id)
-    };
-    let summary_plain = summary.as_plain_text();
-    crate::lua::app_ref::try_with_app(|app| {
-        app.lua.render_tool_layout(
-            name,
-            args,
-            output,
-            smelt_core::lua::runtime::ToolRenderCtx {
-                width,
-                summary: &summary_plain,
-                status: status_label,
-                elapsed_secs,
-                call_id: cid,
-            },
-        )
-    })
-    .flatten()
+fn replay_rendered(out: &mut LineBuilder, layout: &RenderedLayout, inner_width: u16) -> u16 {
+    let cap = MAX_TOOL_BLOCK_ROWS as u16;
+    replay_node(out, layout, cap, inner_width, true)
 }
 
-fn replay_layout(out: &mut LineBuilder, layout: &BlockLayout, inner_width: u16) -> u16 {
-    crate::lua::app_ref::try_with_app(|app| {
-        let cap = MAX_TOOL_BLOCK_ROWS as u16;
-        replay_node(out, layout, app, cap, inner_width, true)
-    })
-    .unwrap_or(0)
+/// Render a `RenderedLayout` directly into `out` (no tool-block gutter, no row cap)
+/// — used by the confirm dialog's preview pipeline, which renders into a fresh
+/// dialog-owned buffer instead of stamping into a transcript row.
+pub fn render_layout_into(out: &mut LineBuilder, layout: &RenderedLayout, width: u16) -> u16 {
+    replay_node(out, layout, u16::MAX, width, false)
 }
 
 fn replay_node(
     out: &mut LineBuilder,
-    layout: &BlockLayout,
-    app: &mut crate::app::TuiApp,
+    layout: &RenderedLayout,
     rows_cap: u16,
     width: u16,
     with_gutter: bool,
@@ -282,32 +244,92 @@ fn replay_node(
         return 0;
     }
     match layout {
-        BlockLayout::Leaf(buf_id) => {
-            let Some(buf) = app.ui.buf_destroy(*buf_id) else {
-                return 0;
-            };
-            replay_leaf(out, &buf, rows_cap, width, with_gutter)
-        }
-        BlockLayout::Vbox(items) => {
+        RenderedLayout::Leaf(leaf) => render_leaf(out, leaf, rows_cap, width, with_gutter),
+        RenderedLayout::Vbox(items) => {
             let mut written = 0u16;
             for child in items {
                 let remaining = rows_cap.saturating_sub(written);
                 if remaining == 0 {
                     break;
                 }
-                written = written.saturating_add(replay_node(
-                    out,
-                    child,
-                    app,
-                    remaining,
-                    width,
-                    with_gutter,
-                ));
+                written =
+                    written.saturating_add(replay_node(out, child, remaining, width, with_gutter));
             }
             written
         }
-        BlockLayout::Hbox(items) => replay_hbox(out, items, app, rows_cap, width, with_gutter),
+        RenderedLayout::Hbox(items) => replay_hbox(out, items, rows_cap, width, with_gutter),
     }
+}
+
+fn render_leaf(
+    out: &mut LineBuilder,
+    leaf: &RenderedLeaf,
+    rows_cap: u16,
+    width: u16,
+    with_gutter: bool,
+) -> u16 {
+    match leaf {
+        RenderedLeaf::Buf(buf) => replay_leaf(out, buf, rows_cap, width, with_gutter),
+        RenderedLeaf::Diff(spec) => render_diff_spec(out, spec, rows_cap, with_gutter),
+        RenderedLeaf::FileView(spec) => render_file_view_spec(out, spec, rows_cap, with_gutter),
+    }
+}
+
+/// Render a `Diff` spec leaf directly into the worker's block buffer. The
+/// 2-cell indent gets baked into the diff renderer (every row gets it), so
+/// `fill_line_bg` survives the projection seam — bg, indent, line numbers,
+/// and content all share one render pass.
+fn render_diff_spec(
+    out: &mut LineBuilder,
+    spec: &DiffSpec,
+    rows_cap: u16,
+    with_gutter: bool,
+) -> u16 {
+    let ext = spec
+        .lang
+        .as_deref()
+        .map(smelt_core::content::highlight::lang_to_ext);
+    let indent = if with_gutter { 2 } else { 0 };
+    print_inline_diff_ext(
+        out,
+        &spec.old,
+        &spec.new,
+        &spec.path,
+        &spec.anchor,
+        ext,
+        GutterStyle::InlineLineNumbers,
+        indent,
+        0,
+        rows_cap,
+    )
+}
+
+/// Render a `FileView` spec leaf — single-line-number column, no diff bg.
+fn render_file_view_spec(
+    out: &mut LineBuilder,
+    spec: &FileViewSpec,
+    rows_cap: u16,
+    with_gutter: bool,
+) -> u16 {
+    let ext = spec
+        .lang
+        .as_deref()
+        .map(smelt_core::content::highlight::lang_to_ext)
+        .or_else(|| {
+            std::path::Path::new(&spec.path)
+                .extension()
+                .and_then(|e| e.to_str())
+        });
+    let cache = build_file_view_cache(&spec.content, ext);
+    let indent = if with_gutter { 2 } else { 0 };
+    print_cached_inline_diff(
+        out,
+        &cache,
+        GutterStyle::InlineLineNumbers,
+        indent,
+        0,
+        rows_cap,
+    )
 }
 
 fn replay_leaf(
@@ -343,24 +365,32 @@ fn replay_leaf(
 
 fn replay_hbox(
     out: &mut LineBuilder,
-    items: &[smelt_core::content::block_layout::HboxItem],
-    app: &mut crate::app::TuiApp,
+    items: &[smelt_core::content::block_layout::RenderedHboxItem],
     rows_cap: u16,
     total_width: u16,
     with_gutter: bool,
 ) -> u16 {
-    let widths = smelt_core::content::block_layout::solve_hbox_widths(items, total_width);
+    use smelt_core::content::block_layout::solve_hbox_widths;
+    let widths = solve_hbox_widths(items, total_width);
 
-    let mut columns: Vec<Vec<smelt_core::buffer::Buffer>> = Vec::with_capacity(items.len());
+    let mut columns: Vec<Vec<&smelt_core::buffer::Buffer>> = Vec::with_capacity(items.len());
     let mut col_height: u16 = 0;
     let mut any_unit_only = true;
     for item in items {
-        let mut bufs: Vec<smelt_core::buffer::Buffer> = Vec::new();
-        for buf_id in item.layout.leaves() {
-            if let Some(buf) = app.ui.buf_destroy(buf_id) {
-                bufs.push(buf);
-            }
-        }
+        // Hbox columns can only contain buffer leaves; spec leaves (diff/file_view)
+        // would need width-dependent height computation that hbox layout can't do
+        // ahead of time. The built-in tools that use specs (edit_file, write_file)
+        // wrap them in a top-level `Leaf`, not an `Hbox`, so this restriction is
+        // invisible to them.
+        let bufs: Vec<&smelt_core::buffer::Buffer> = item
+            .layout
+            .leaves()
+            .into_iter()
+            .filter_map(|l| match l {
+                RenderedLeaf::Buf(b) => Some(&**b),
+                _ => None,
+            })
+            .collect();
         let height: u16 = bufs
             .iter()
             .map(|b| {
@@ -408,7 +438,7 @@ fn replay_hbox(
 
 fn emit_column_row(
     out: &mut LineBuilder,
-    bufs: &[smelt_core::buffer::Buffer],
+    bufs: &[&smelt_core::buffer::Buffer],
     r: u16,
     col_w: u16,
 ) -> u16 {

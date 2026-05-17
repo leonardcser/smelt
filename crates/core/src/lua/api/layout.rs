@@ -1,7 +1,9 @@
 //! `smelt.layout` — composable block layout (vbox/hbox/leaf) returned from tool `render` callbacks.
 
 use crate::buffer::BufId;
-use crate::content::block_layout::{BlockLayout, Constraint, HboxItem};
+use crate::content::block_layout::{
+    BlockLayout, Constraint, DiffSpec, FileViewSpec, HboxItem, LuaLeaf,
+};
 use crate::lua::doc::register_fn;
 use lua_doc_derive::lua_module;
 use mlua::prelude::*;
@@ -70,7 +72,55 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
         &["buf_id"],
         lua,
         |_, buf_id: u64| -> LuaResult<LuaBlockLayout> {
-            Ok(LuaBlockLayout(BlockLayout::Leaf(BufId(buf_id))))
+            Ok(LuaBlockLayout(BlockLayout::Leaf(LuaLeaf::Buf(BufId(
+                buf_id,
+            )))))
+        },
+    )?;
+
+    register_fn(
+        &layout_tbl,
+        "smelt.layout",
+        "diff",
+        "Inline-diff render directive — the worker renders the diff directly into the block buffer (no scratch buffer, no replay seam). `opts.old`, `opts.new` are the before/after strings; `opts.path` picks syntax via extension; `opts.anchor` (optional, defaults to `opts.old`) is the diff-view anchor; `opts.lang` overrides path-based syntax.",
+        &["opts"],
+        lua,
+        |_, opts: mlua::Table| -> LuaResult<LuaBlockLayout> {
+            let old: String = opts.get::<Option<String>>("old")?.unwrap_or_default();
+            let new: String = opts.get::<Option<String>>("new")?.unwrap_or_default();
+            let path: String = opts.get::<Option<String>>("path")?.unwrap_or_default();
+            let anchor: String = opts
+                .get::<Option<String>>("anchor")?
+                .unwrap_or_else(|| old.clone());
+            let lang: Option<String> = opts.get::<Option<String>>("lang")?;
+            Ok(LuaBlockLayout(BlockLayout::Leaf(LuaLeaf::Diff(DiffSpec {
+                old,
+                new,
+                path,
+                anchor,
+                lang,
+            }))))
+        },
+    )?;
+
+    register_fn(
+        &layout_tbl,
+        "smelt.layout",
+        "file_view",
+        "Syntax-highlighted file-view render directive — single line-number column, no diff bg. `opts.content` is the source text; `opts.path` picks syntax via extension; `opts.lang` overrides path-based syntax.",
+        &["opts"],
+        lua,
+        |_, opts: mlua::Table| -> LuaResult<LuaBlockLayout> {
+            let content: String = opts.get::<Option<String>>("content")?.unwrap_or_default();
+            let path: String = opts.get::<Option<String>>("path")?.unwrap_or_default();
+            let lang: Option<String> = opts.get::<Option<String>>("lang")?;
+            Ok(LuaBlockLayout(BlockLayout::Leaf(LuaLeaf::FileView(
+                FileViewSpec {
+                    content,
+                    path,
+                    lang,
+                },
+            ))))
         },
     )?;
 

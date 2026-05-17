@@ -82,20 +82,18 @@ smelt.tools.register({
     if output.is_error then
       return smelt.layout.text(output.content, { is_error = true })
     end
-    local buf = smelt.buf.create()
-    smelt.diff.render(buf, {
+    return smelt.layout.diff({
       old = args.old_string or "",
       new = args.new_string or "",
       path = args.file_path or "",
     })
-    return smelt.layout.leaf(buf)
   end,
   paths_for_workspace = function(args)
     local p = args.file_path or ""
     return p ~= "" and { p } or {}
   end,
-  preview = function(buf, args)
-    smelt.diff.render(buf, {
+  preview = function(args)
+    return smelt.layout.diff({
       old  = args.old_string or "",
       new  = args.new_string or "",
       path = args.file_path or "",

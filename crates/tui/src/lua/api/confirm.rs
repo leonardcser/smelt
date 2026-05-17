@@ -102,12 +102,15 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
     )?;
 
     // smelt.confirm._render_preview(buf_id, handle_id) → bool.
-    // Calls the tool's `preview` callback if registered. Returns false if none registered.
+    // Calls the tool's `preview(args) -> smelt.layout` callback if registered, extracts
+    // any buffer leaves from `app.ui`, then renders the layout into the dialog's
+    // preview buffer at `term_width` cells. Returns false if the tool registered no
+    // preview or the callback returned nil / an invalid value.
     register_ui_fn(
         &confirm_tbl,
         "smelt.confirm",
         "_render_preview",
-        "smelt.confirm._render_preview(buf_id, handle_id) → bool. Calls the tool's `preview` callback if registered. Returns false if none registered.",
+        "smelt.confirm._render_preview(buf_id, handle_id) → bool. Calls the tool's `preview(args) -> smelt.layout` callback if registered, then renders the returned layout into the dialog's preview buffer. Returns false if none registered or the callback returned nil.",
         &["buf_id", "handle_id"],
         lua,
         |_, (buf_id, handle_id): (u64, u64)|  -> LuaResult<bool>{
@@ -122,7 +125,7 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
                 None => return Ok(false),
             };
             Ok(
-                crate::lua::try_with_app(|app| app.lua.render_tool_preview(&req.0, &req.1, buf_id))
+                crate::lua::try_with_app(|app| render_preview_into(app, buf_id, &req.0, &req.1))
                     .unwrap_or(false),
             )
 
@@ -207,4 +210,30 @@ fn outside_dir_string(req: &ConfirmRequest) -> String {
         .as_ref()
         .map(|p| p.to_string_lossy().into_owned())
         .unwrap_or_default()
+}
+
+/// Call the tool's `preview` hook, move any returned buffer ids out of `app.ui`,
+/// then render the resulting layout directly into the dialog's preview buffer at
+/// `term_width` cells. Mirrors the transcript path (`prerender_tool_blocks` +
+/// `extract_rendered_layout` + `replay_rendered`) but with no row cap and no
+/// 2-cell tool-block gutter, since the dialog's preview pane owns its own chrome.
+fn render_preview_into(
+    app: &mut crate::app::TuiApp,
+    buf_id: u64,
+    tool_name: &str,
+    args: &std::collections::HashMap<String, serde_json::Value>,
+) -> bool {
+    let Some(layout) = app.lua.render_tool_preview(tool_name, args) else {
+        return false;
+    };
+    let rendered = crate::app::transcript::extract_rendered_layout(&layout, &mut app.ui);
+    let theme = app.ui.theme().clone();
+    let width = crate::content::term_width() as u16;
+    let Some(buf) = app.ui.buf_mut(crate::smelt_term::BufId(buf_id)) else {
+        return false;
+    };
+    crate::content::to_buffer::render_into_buffer(buf, width, &theme, |sink| {
+        crate::content::transcript_parsers::render_layout_into(sink, &rendered, width);
+    });
+    true
 }

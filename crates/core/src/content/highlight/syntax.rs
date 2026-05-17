@@ -6,7 +6,7 @@ use syntect::easy::HighlightLines;
 use syntect::highlighting::Style;
 use syntect::parsing::SyntaxReference;
 
-use super::{syntax_theme, SYNTAX_SET};
+use super::{syntax_theme, GutterStyle, SYNTAX_SET};
 use crate::content::builder::LineBuilder;
 use crate::content::default_width;
 use crate::style::Color;
@@ -127,15 +127,21 @@ pub(super) fn render_highlighted(
     out: &mut LineBuilder,
     lines: &[&str],
     syntax: &syntect::parsing::SyntaxReference,
+    gutter: GutterStyle,
     skip: u16,
     max_rows: u16,
 ) -> u16 {
     let _perf = smelt_perf::perf::begin("render:highlighted");
     let theme = syntax_theme();
-    // Reserve gutter space so wrap math accounts for the consumer-side gutter:
-    // line-number width + 2 cells of padding (" N ").
-    let gutter_width = format!("{}", lines.len()).len() + 2;
-    let max_content = default_width().saturating_sub(gutter_width + 1).max(1);
+    let lineno_digits = lines.len().max(1).to_string().len();
+    // `Stamped` reserves gutter cells for the host window's `LineNumberGutter`.
+    // `None` reserves nothing. Inline-gutter callers go through
+    // `build_file_view_cache` + `print_cached_inline_diff` instead.
+    let gutter_cells = match gutter {
+        GutterStyle::Stamped => lineno_digits + 2,
+        GutterStyle::None | GutterStyle::InlineLineNumbers => 0,
+    };
+    let max_content = default_width().saturating_sub(gutter_cells + 1).max(1);
     let limit = lines.len();
 
     let mut total_rows = 0u16;
@@ -153,12 +159,14 @@ pub(super) fn render_highlighted(
         let visual_rows = split_regions_into_rows(out, &regions, max_content);
         for (vi, vrow) in visual_rows.iter().enumerate() {
             if total_rows >= skip && emitted < emit_limit {
-                out.stamp_chunk(
-                    vi,
-                    smelt_buffer::buffer::SourceLine::Linear {
-                        lineno: (i + 1) as u32,
-                    },
-                );
+                if matches!(gutter, GutterStyle::Stamped) {
+                    out.stamp_chunk(
+                        vi,
+                        smelt_buffer::buffer::SourceLine::Linear {
+                            lineno: (i + 1) as u32,
+                        },
+                    );
+                }
                 print_split_regions(out, vrow, None);
                 out.newline();
                 emitted += 1;
@@ -173,17 +181,20 @@ pub fn print_syntax_file(
     out: &mut LineBuilder,
     content: &str,
     path: &str,
+    gutter: GutterStyle,
     skip: u16,
     max_rows: u16,
 ) -> u16 {
-    print_syntax_file_ext(out, content, path, None, skip, max_rows)
+    print_syntax_file_ext(out, content, path, None, gutter, skip, max_rows)
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn print_syntax_file_ext(
     out: &mut LineBuilder,
     content: &str,
     path: &str,
     syntax_ext: Option<&str>,
+    gutter: GutterStyle,
     skip: u16,
     max_rows: u16,
 ) -> u16 {
@@ -198,7 +209,7 @@ pub fn print_syntax_file_ext(
         .find_syntax_by_extension(ext)
         .unwrap_or_else(|| SYNTAX_SET.find_syntax_plain_text());
     let lines: Vec<&str> = content.lines().collect();
-    render_highlighted(out, &lines, syntax, skip, max_rows)
+    render_highlighted(out, &lines, syntax, gutter, skip, max_rows)
 }
 /// Split syntax regions into visual rows that each fit within `max_width` columns.
 fn split_regions_into_rows(
@@ -472,7 +483,14 @@ mod tests {
     #[test]
     fn print_syntax_file_uses_extension_from_path() {
         let block = render_test(80, |out| {
-            print_syntax_file(out, "let x = 1;\nlet y = 2;\n", "/path/file.rs", 0, 0);
+            print_syntax_file(
+                out,
+                "let x = 1;\nlet y = 2;\n",
+                "/path/file.rs",
+                GutterStyle::InlineLineNumbers,
+                0,
+                0,
+            );
         });
         let joined = join_text(&block);
         assert!(joined.contains("let x = 1;"));
@@ -485,7 +503,7 @@ mod tests {
     #[test]
     fn print_syntax_file_falls_back_to_plain_text_for_unknown_extension() {
         let block = render_test(80, |out| {
-            print_syntax_file(out, "content\n", "/path/no_ext", 0, 0);
+            print_syntax_file(out, "content\n", "/path/no_ext", GutterStyle::None, 0, 0);
         });
         assert!(join_text(&block).contains("content"));
     }
@@ -495,8 +513,15 @@ mod tests {
         // Force rust highlighting on a .txt path.
         let mut emitted_a = 0u16;
         render_test(80, |out| {
-            emitted_a =
-                print_syntax_file_ext(out, "let x = 1;\n", "/path/file.txt", Some("rs"), 0, 0);
+            emitted_a = print_syntax_file_ext(
+                out,
+                "let x = 1;\n",
+                "/path/file.txt",
+                Some("rs"),
+                GutterStyle::None,
+                0,
+                0,
+            );
         });
         assert!(emitted_a >= 1);
     }
@@ -506,7 +531,7 @@ mod tests {
         let content = "a\nb\nc\nd\ne\n";
         let mut emitted = 0u16;
         render_test(80, |out| {
-            emitted = print_syntax_file(out, content, "/path/file.txt", 0, 2);
+            emitted = print_syntax_file(out, content, "/path/file.txt", GutterStyle::None, 0, 2);
         });
         assert_eq!(emitted, 2);
     }
@@ -515,7 +540,7 @@ mod tests {
     fn print_syntax_file_skips_leading_rows() {
         let content = "first\nsecond\nthird\n";
         let block = render_test(80, |out| {
-            print_syntax_file(out, content, "/path/file.txt", 2, 0);
+            print_syntax_file(out, content, "/path/file.txt", GutterStyle::None, 2, 0);
         });
         let joined = join_text(&block);
         assert!(joined.contains("third"));
@@ -528,7 +553,7 @@ mod tests {
         let content = "1\n2\n3\n";
         let mut emitted = 0u16;
         render_test(80, |out| {
-            emitted = print_syntax_file(out, content, "/path/file.txt", 0, 0);
+            emitted = print_syntax_file(out, content, "/path/file.txt", GutterStyle::None, 0, 0);
         });
         assert_eq!(emitted, 3);
     }

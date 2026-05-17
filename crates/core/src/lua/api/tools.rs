@@ -86,7 +86,9 @@ pub struct LuaToolDef {
     pub render: Option<mlua::Function>,
     /// `paths_for_workspace(args) -> string[]` — files this invocation will touch.
     pub paths_for_workspace: Option<mlua::Function>,
-    /// `preview(buf, args)` — pre-execute preview render.
+    /// `preview(args) -> smelt.layout` — pre-execute preview render. Returns
+    /// the same `smelt.layout` value the `render` callback returns; the confirm
+    /// dialog renders it directly into the preview pane.
     pub preview: Option<mlua::Function>,
     /// `decide(args, mode) -> smelt.tools.Decision?` — per-call decision; nil falls through to generic permissions.
     pub decide: Option<mlua::Function>,

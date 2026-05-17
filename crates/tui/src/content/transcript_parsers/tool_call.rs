@@ -10,7 +10,7 @@ use std::time::Duration;
 #[allow(clippy::too_many_arguments)]
 pub(super) fn render(
     out: &mut LineBuilder,
-    call_id: &str,
+    _call_id: &str,
     name: &str,
     summary: &protocol::StyledLines,
     args: &HashMap<String, serde_json::Value>,
@@ -19,9 +19,15 @@ pub(super) fn render(
     state: &ToolState,
     width: usize,
 ) -> u16 {
+    // Cache hit only when the cached width matches the current layout width — a resize
+    // invalidates without us having to track it explicitly.
+    let rendered = state
+        .render_cache
+        .as_ref()
+        .filter(|(w, _)| *w as usize == width)
+        .map(|(_, layout)| layout);
     render_tool(
         out,
-        call_id,
         name,
         summary,
         args,
@@ -29,6 +35,7 @@ pub(super) fn render(
         elapsed,
         state.output.as_deref(),
         state.user_message.as_deref(),
+        rendered,
         width,
     )
 }

@@ -14,11 +14,3 @@ fun(buf_id: integer, opts: table): nil
 
 Paint syntect-highlighted code from `opts.content` into the buffer as a plain block — one source line per row, no gutter, no line numbers. Indentation is the caller's responsibility. Pick the syntax via `opts.lang` (`"bash"`, `"rust"`, `"py"`, …) or `opts.path` (extension-sniffed); `lang` wins when both are set. Unknown languages fall back to plain text.
 
-## `smelt.syntax.render_file`
-
-```lua
-fun(buf_id: integer, opts: table): nil
-```
-
-Paint `opts.content` into the buffer with file-view metadata: each row gets `SourceLine::Linear` stamped so a `gutter = "line_numbers"` window draws the gutter. Pick the syntax via `opts.lang` or `opts.path`. Use this for write_file / notebook diffs; prefer `smelt.syntax.render` for plain snippets.
-

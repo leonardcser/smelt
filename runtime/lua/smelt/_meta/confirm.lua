@@ -12,7 +12,7 @@ local confirm = {}
 ---@type fun(handle_id: integer): boolean
 confirm._back_tab = nil
 
---- smelt.confirm._render_preview(buf_id, handle_id) → bool. Calls the tool's `preview` callback if registered. Returns false if none registered.
+--- smelt.confirm._render_preview(buf_id, handle_id) → bool. Calls the tool's `preview(args) -> smelt.layout` callback if registered, then renders the returned layout into the dialog's preview buffer. Returns false if none registered or the callback returned nil.
 ---@type fun(buf_id: integer, handle_id: integer): boolean
 confirm._render_preview = nil
 

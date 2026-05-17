@@ -347,6 +347,7 @@ impl TuiApp {
                                     elapsed,
                                     output: output.map(Box::new),
                                     user_message: None,
+                                    render_cache: None,
                                 },
                             );
                         }

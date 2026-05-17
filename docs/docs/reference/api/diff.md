@@ -4,15 +4,7 @@
 
 **Tier:** `UiHost` — Requires a terminal UI; calling these from headless mode raises.
 
-Paint diffs into Buffers — inline (one buffer) or split side-by-side (two buffers). UiHost-only.
-
-## `smelt.diff.render`
-
-```lua
-fun(buf_id: integer, opts: table): nil
-```
-
-Paint an inline diff between `opts.old` and `opts.new` into the buffer, syntax-highlighted by `opts.path`'s extension. Mirrors the pipeline used by the built-in confirm dialog.
+Paint side-by-side diffs into a pair of Buffers. Inline diffs are returned declaratively via `smelt.layout.diff`. UiHost-only.
 
 ## `smelt.diff.render_split`
 

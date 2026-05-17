@@ -23,6 +23,7 @@ mod user;
 use markdown::is_horizontal_rule;
 pub use markdown::render_markdown_inner;
 pub use thinking::{render_thinking_summary, thinking_summary};
+pub use tools::render_layout_into;
 pub use user::UserBlockGeometry;
 
 /// Per-tool row cap (applied to command header and output body separately).
@@ -296,6 +297,7 @@ mod tests {
             elapsed: None,
             output: None,
             user_message: None,
+            render_cache: None,
         }
     }
 
@@ -667,6 +669,7 @@ mod tests {
             elapsed: Some(std::time::Duration::from_secs(1)),
             output: None,
             user_message: None,
+            render_cache: None,
         };
         let ctx = LayoutContext {
             width: 30,
@@ -709,6 +712,7 @@ mod tests {
             elapsed: None,
             output: None,
             user_message: None,
+            render_cache: None,
         };
         let ctx = LayoutContext {
             width: 80,
@@ -720,6 +724,123 @@ mod tests {
         assert!(display.len() >= 2);
         assert!(!display[0].soft_wrapped);
         assert!(!display[1].soft_wrapped);
+    }
+
+    /// Regression guard for the silent fall-through where parallel layout workers
+    /// couldn't reach Lua, so `render_tool` dropped to `render_wrapped_output` and showed
+    /// the raw `output.content` (e.g. "wrote 562 bytes to poem.txt") instead of the
+    /// plugin-rendered body. The fix pre-bakes the render on the main thread and stashes
+    /// it on `ToolState.render_cache`; this test asserts that when a cache is present,
+    /// its content reaches the transcript and `output.content` does not.
+    #[test]
+    fn tool_render_cache_replaces_raw_output() {
+        use smelt_core::content::block_layout::BlockLayout;
+        use smelt_core::transcript_model::ToolOutput;
+
+        let mut payload = Buffer::new(BufId(99), BufCreateOpts::default());
+        payload.set_all_lines(vec!["fn main() {".into(), "    println!(\"hi\");".into()]);
+        let cache = (
+            W as u16,
+            BlockLayout::Leaf(smelt_core::content::block_layout::RenderedLeaf::Buf(
+                Box::new(payload),
+            )),
+        );
+
+        let mut args = HashMap::new();
+        args.insert(
+            "file_path".into(),
+            serde_json::Value::String("hello.rs".into()),
+        );
+        let block = Block::ToolCall {
+            call_id: "c-render-cache".into(),
+            name: "write_file".into(),
+            summary: protocol::StyledLines::from_plain("hello.rs"),
+            args,
+        };
+        let state = ToolState {
+            status: ToolStatus::Ok,
+            elapsed: None,
+            output: Some(Box::new(ToolOutput {
+                content: "RAW_FALLBACK_TEXT".into(),
+                is_error: false,
+                metadata: None,
+            })),
+            user_message: None,
+            render_cache: Some(cache),
+        };
+        let ctx = LayoutContext {
+            width: W as u16,
+            show_thinking: true,
+            view_state: ViewState::Expanded,
+        };
+        let display = layout_block_test(&block, Some(&state), &ctx);
+        let joined: String = display
+            .iter()
+            .flat_map(|l| l.spans.iter().map(|s| s.text.as_str()))
+            .collect::<Vec<_>>()
+            .join("");
+        assert!(
+            joined.contains("fn main() {"),
+            "cached layout content should reach the transcript, got: {joined:?}"
+        );
+        assert!(
+            !joined.contains("RAW_FALLBACK_TEXT"),
+            "raw output.content must not leak when render_cache is present, got: {joined:?}"
+        );
+    }
+
+    /// When the cached width doesn't match the layout width, the cache is ignored and
+    /// the rendered body falls back to `output.content`. This guards the resize path.
+    #[test]
+    fn tool_render_cache_ignored_on_width_mismatch() {
+        use smelt_core::content::block_layout::BlockLayout;
+        use smelt_core::transcript_model::ToolOutput;
+
+        let mut payload = Buffer::new(BufId(99), BufCreateOpts::default());
+        payload.set_all_lines(vec!["STALE_LAYOUT".into()]);
+        let stale_cache = (
+            (W as u16) + 10, // cached width != ctx.width
+            BlockLayout::Leaf(smelt_core::content::block_layout::RenderedLeaf::Buf(
+                Box::new(payload),
+            )),
+        );
+
+        let block = Block::ToolCall {
+            call_id: "c-stale".into(),
+            name: "write_file".into(),
+            summary: protocol::StyledLines::from_plain("x.rs"),
+            args: HashMap::new(),
+        };
+        let state = ToolState {
+            status: ToolStatus::Ok,
+            elapsed: None,
+            output: Some(Box::new(ToolOutput {
+                content: "FALLBACK".into(),
+                is_error: false,
+                metadata: None,
+            })),
+            user_message: None,
+            render_cache: Some(stale_cache),
+        };
+        let ctx = LayoutContext {
+            width: W as u16,
+            show_thinking: true,
+            view_state: ViewState::Expanded,
+        };
+        let display = layout_block_test(&block, Some(&state), &ctx);
+        let joined: String = display
+            .iter()
+            .flat_map(|l| l.spans.iter().map(|s| s.text.as_str()))
+            .collect::<Vec<_>>()
+            .join("");
+        assert!(
+            !joined.contains("STALE_LAYOUT"),
+            "stale-width cache must not be used, got: {joined:?}"
+        );
+        assert!(
+            joined.contains("FALLBACK"),
+            "expected fallback to output.content on width mismatch, got: {joined:?}"
+        );
     }
 
     #[test]
@@ -737,6 +858,7 @@ mod tests {
             elapsed: Some(std::time::Duration::from_secs(3)),
             output: None,
             user_message: None,
+            render_cache: None,
         };
         let ctx = LayoutContext {
             width: 80,

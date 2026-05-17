@@ -7,6 +7,14 @@
 ---@class smelt.layout
 local layout = {}
 
+--- Inline-diff render directive — the worker renders the diff directly into the block buffer (no scratch buffer, no replay seam). `opts.old`, `opts.new` are the before/after strings; `opts.path` picks syntax via extension; `opts.anchor` (optional, defaults to `opts.old`) is the diff-view anchor; `opts.lang` overrides path-based syntax.
+---@type fun(opts: table): table
+layout.diff = nil
+
+--- Syntax-highlighted file-view render directive — single line-number column, no diff bg. `opts.content` is the source text; `opts.path` picks syntax via extension; `opts.lang` overrides path-based syntax.
+---@type fun(opts: table): table
+layout.file_view = nil
+
 --- Lay `items` out horizontally. Each entry is either a layout userdata (defaults to fill weight 1) or `{ layout, cols=N }` / `{ layout, weight=N }` for a fixed-column or weighted slot.
 ---@type fun(items: table): table
 layout.hbox = nil

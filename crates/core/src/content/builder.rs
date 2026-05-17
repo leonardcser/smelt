@@ -102,6 +102,13 @@ impl<'a> LineBuilder<'a> {
         self.theme
     }
 
+    /// The width this builder was constructed with. Renderers use this to drive
+    /// wrap math and bg-fill so the layout sizes the buffer it actually writes
+    /// into rather than a global terminal width.
+    pub fn layout_width(&self) -> u16 {
+        self.layout_width
+    }
+
     /// Commit any pending line and return rendering metadata.
     pub fn finish(mut self) -> Outcome {
         if self.has_pending_content || self.cur_decoration_present() || self.cur_visible_cols > 0 {

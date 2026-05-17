@@ -7,7 +7,7 @@ use similar::{ChangeTag, TextDiff};
 use std::path::Path;
 use syntect::easy::HighlightLines;
 
-use super::{syntax_theme, SYNTAX_SET};
+use super::{syntax_theme, GutterStyle, SYNTAX_SET};
 use crate::content::builder::LineBuilder;
 use crate::content::default_width;
 use crate::style::Color;
@@ -42,8 +42,7 @@ pub(crate) struct CachedSpan {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub(crate) enum CachedDiffLine {
     Context {
-        old_lineno: usize,
-        new_lineno: usize,
+        lineno: usize,
         text: String,
         spans: Vec<CachedSpan>,
     },
@@ -87,6 +86,34 @@ pub(crate) fn build_inline_diff_cache(
     anchor: &str,
 ) -> CachedInlineDiff {
     build_inline_diff_cache_ext(old, new, path, anchor, None)
+}
+
+/// All-Context cache for a single-file view (write_file, notebook insert,
+/// `smelt.syntax.render_file`). Same IR as the diff renderer so a single
+/// `print_cached_inline_diff` pipeline serves both — line numbers, wrap math,
+/// and bg-spanning all live in one place.
+pub fn build_file_view_cache(content: &str, ext: Option<&str>) -> CachedInlineDiff {
+    let _perf = smelt_perf::perf::begin("render:build_file_view_cache");
+    let ext = ext.unwrap_or("txt");
+    let syntax = SYNTAX_SET
+        .find_syntax_by_extension(ext)
+        .unwrap_or_else(|| SYNTAX_SET.find_syntax_plain_text());
+    let theme = syntax_theme();
+    let mut h = HighlightLines::new(syntax, theme);
+    let lines: Vec<CachedDiffLine> = content
+        .lines()
+        .enumerate()
+        .map(|(i, line)| CachedDiffLine::Context {
+            lineno: i + 1,
+            text: line.to_string(),
+            spans: cached_spans_for_line(&mut h, line),
+        })
+        .collect();
+    let max_display_lineno = lines.len().max(1);
+    CachedInlineDiff {
+        max_display_lineno,
+        lines,
+    }
 }
 
 pub fn build_inline_diff_cache_ext(
@@ -143,8 +170,7 @@ pub fn build_inline_diff_cache_ext(
         .enumerate()
     {
         lines.push(CachedDiffLine::Context {
-            old_lineno: ctx_before_start + idx + 1,
-            new_lineno: ctx_before_start + idx + 1,
+            lineno: ctx_before_start + idx + 1,
             text: (*line).to_string(),
             spans: cached_spans_for_line(&mut h, line),
         });
@@ -170,8 +196,7 @@ pub fn build_inline_diff_cache_ext(
                     }
                     if new_lineno >= dv.view_start && new_lineno < dv.view_end {
                         lines.push(CachedDiffLine::Context {
-                            old_lineno: old_lineno + 1,
-                            new_lineno: new_lineno + 1,
+                            lineno: new_lineno + 1,
                             text: raw,
                             spans,
                         });
@@ -220,8 +245,7 @@ pub fn build_inline_diff_cache_ext(
         .enumerate()
     {
         lines.push(CachedDiffLine::Context {
-            old_lineno: after_start + idx + 1,
-            new_lineno: after_start + idx + 1,
+            lineno: after_start + idx + 1,
             text: (*line).to_string(),
             spans: cached_spans_for_line(&mut h, line),
         });
@@ -342,20 +366,24 @@ fn compute_change_visibility(changes: &[DiffChange], ctx: usize) -> Vec<bool> {
 
 /// Render a syntax-highlighted inline diff; `skip` rows are skipped, at most `max_rows` emitted.
 /// Syntax is inferred from `path`'s extension.
+#[allow(clippy::too_many_arguments)]
 pub fn print_inline_diff(
     out: &mut LineBuilder,
     old: &str,
     new: &str,
     path: &str,
     anchor: &str,
+    gutter: GutterStyle,
     skip: u16,
     max_rows: u16,
 ) -> u16 {
-    print_inline_diff_ext(out, old, new, path, anchor, None, skip, max_rows)
+    print_inline_diff_ext(out, old, new, path, anchor, None, gutter, 0, skip, max_rows)
 }
 
-/// Like [`print_inline_diff`] but with an explicit syntect language/extension token,
-/// bypassing the `path`-based extension sniff.
+/// Like [`print_inline_diff`] but with an explicit syntect language/extension token
+/// (bypasses the `path`-based extension sniff) and `indent_cells` of non-selectable
+/// leading indent per row — used by the tool-block worker to align diff content with
+/// the tool name's column without a separate replay-time wrapper.
 #[allow(clippy::too_many_arguments)]
 pub fn print_inline_diff_ext(
     out: &mut LineBuilder,
@@ -364,12 +392,14 @@ pub fn print_inline_diff_ext(
     path: &str,
     anchor: &str,
     syntax_ext: Option<&str>,
+    gutter: GutterStyle,
+    indent_cells: u16,
     skip: u16,
     max_rows: u16,
 ) -> u16 {
     let _perf = smelt_perf::perf::begin("render:inline_diff_cold");
     let cache = build_inline_diff_cache_ext(old, new, path, anchor, syntax_ext);
-    print_cached_inline_diff(out, &cache, skip, max_rows)
+    print_cached_inline_diff(out, &cache, gutter, indent_cells, skip, max_rows)
 }
 
 fn print_cached_spans(out: &mut LineBuilder, spans: &[CachedSpan], bg: Option<Color>) -> usize {
@@ -436,23 +466,37 @@ fn split_cached_spans_into_rows(
 pub fn print_cached_inline_diff(
     out: &mut LineBuilder,
     cache: &CachedInlineDiff,
+    gutter: GutterStyle,
+    indent_cells: u16,
     skip: u16,
     max_rows: u16,
 ) -> u16 {
     let _perf = smelt_perf::perf::begin("render:inline_diff_cached");
 
-    // Reserve gutter space so wrap math accounts for the consumer-side gutter:
-    // diff layout is " O  N " (old_w + 2 + new_w + 2 cells) plus the per-row
-    // "X " sign prefix.
-    let gutter_width = format!("{}", cache.max_display_lineno).len();
-    let consumer_gutter = gutter_width + 2 + gutter_width + 2;
+    // Single line-number column (` N `). The body sign ("+ "/"- "/"  ") is always
+    // written inline regardless of mode. `Stamped` hands off the line number via
+    // `SourceLine`; the host window's `LineNumberGutter` paints the column outside
+    // the content width — so the in-content prefix is just the sign.
+    let lineno_digits = format!("{}", cache.max_display_lineno).len();
+    let prefix_cells = match gutter {
+        GutterStyle::Stamped => 0,
+        GutterStyle::InlineLineNumbers => lineno_digits + 2,
+        GutterStyle::None => 0,
+    };
     let sign_prefix = 2;
     let right_margin = 2;
-    let tw = default_width();
-    let max_content = tw
-        .saturating_sub(consumer_gutter + sign_prefix + right_margin)
+    let indent = indent_cells as usize;
+    let indent_str = " ".repeat(indent);
+    let layout_width = if out.layout_width() == 0 {
+        default_width()
+    } else {
+        out.layout_width() as usize
+    };
+    let max_content = layout_width
+        .saturating_sub(indent + prefix_cells + sign_prefix + right_margin)
         .max(1);
-    // Content re-wraps per row from default_width(), so the layout is width-pinned.
+    let blank_prefix = " ".repeat(prefix_cells);
+    // Content re-wraps per row at `layout_width`, so the layout is width-pinned.
     out.mark_wrapped();
     let emit_limit = if max_rows == 0 { u16::MAX } else { max_rows };
     let bg_del = Color::Rgb {
@@ -476,7 +520,14 @@ pub fn print_cached_inline_diff(
         }
         match line {
             CachedDiffLine::Ellipsis => {
-                out.set_source_line(smelt_buffer::buffer::SourceLine::Synthetic);
+                if indent > 0 {
+                    out.print_gutter(&indent_str);
+                }
+                if matches!(gutter, GutterStyle::Stamped) {
+                    out.set_source_line(smelt_buffer::buffer::SourceLine::Synthetic);
+                } else if prefix_cells > 0 {
+                    out.print(&blank_prefix);
+                }
                 out.set_fg(Color::DarkGrey);
                 out.print("...");
                 out.reset_style();
@@ -484,33 +535,25 @@ pub fn print_cached_inline_diff(
             }
             _ => {
                 let (source_line, sign, bg, spans) = match line {
-                    CachedDiffLine::Context {
-                        old_lineno,
-                        new_lineno,
-                        spans,
-                        ..
-                    } => (
-                        smelt_buffer::buffer::SourceLine::Diff {
-                            old: Some(*old_lineno as u32),
-                            new: Some(*new_lineno as u32),
+                    CachedDiffLine::Context { lineno, spans, .. } => (
+                        smelt_buffer::buffer::SourceLine::Linear {
+                            lineno: *lineno as u32,
                         },
                         None,
                         None,
                         spans,
                     ),
                     CachedDiffLine::Delete { lineno, spans, .. } => (
-                        smelt_buffer::buffer::SourceLine::Diff {
-                            old: Some(*lineno as u32),
-                            new: None,
+                        smelt_buffer::buffer::SourceLine::Linear {
+                            lineno: *lineno as u32,
                         },
                         Some(('-', Color::Red)),
                         Some(bg_del),
                         spans,
                     ),
                     CachedDiffLine::Insert { lineno, spans, .. } => (
-                        smelt_buffer::buffer::SourceLine::Diff {
-                            old: None,
-                            new: Some(*lineno as u32),
+                        smelt_buffer::buffer::SourceLine::Linear {
+                            lineno: *lineno as u32,
                         },
                         Some(('+', Color::Green)),
                         Some(bg_add),
@@ -518,9 +561,26 @@ pub fn print_cached_inline_diff(
                     ),
                     CachedDiffLine::Ellipsis => unreachable!(),
                 };
+                let line_fg = sign.map(|(_, color)| color);
                 let visual_rows = split_cached_spans_into_rows(out, spans, max_content);
                 for (vi, vrow) in visual_rows.iter().enumerate() {
-                    out.stamp_chunk(vi, source_line);
+                    // Indent: non-selectable cells outside the bg — cursor/selection
+                    // skip them via `snap_col_past_chrome`, just like a window gutter.
+                    if indent > 0 {
+                        out.print_gutter(&indent_str);
+                    }
+                    if let Some(bgv) = bg {
+                        out.set_bg(bgv);
+                    }
+                    emit_diff_prefix(
+                        out,
+                        gutter,
+                        source_line,
+                        vi,
+                        lineno_digits,
+                        &blank_prefix,
+                        line_fg,
+                    );
                     if let Some((ch, color)) = sign {
                         let bgv = bg.unwrap();
                         out.set_bg(bgv);
@@ -530,7 +590,10 @@ pub fn print_cached_inline_diff(
                         } else {
                             out.print("  ");
                         }
-                        let _content_cols = print_cached_spans(out, vrow, bg);
+                        print_cached_spans(out, vrow, bg);
+                        // Bg trails via `fill_line_bg` — a per-row decoration on the
+                        // worker's block buffer, propagated verbatim by the projection
+                        // step into the transcript buffer (no scratch-buffer seam).
                         out.fill_line_bg(bgv, right_margin as u16);
                         out.reset_style();
                     } else {
@@ -544,6 +607,49 @@ pub fn print_cached_inline_diff(
         emitted += 1;
     }
     emitted
+}
+
+/// Emit the diff row's left-of-content prefix per the chosen gutter style. `Stamped`
+/// hands off via `SourceLine` (host window's `LineNumberGutter` paints the column);
+/// `InlineLineNumbers` writes ` N ` as text — coloured `line_fg` when set (red/green
+/// for delete/insert rows so the gutter shares the row's diff tint), otherwise the
+/// theme's `Comment` group; `None` writes nothing.
+fn emit_diff_prefix(
+    out: &mut LineBuilder,
+    gutter: GutterStyle,
+    source_line: smelt_buffer::buffer::SourceLine,
+    vi: usize,
+    lineno_digits: usize,
+    blank_prefix: &str,
+    line_fg: Option<Color>,
+) {
+    match gutter {
+        GutterStyle::Stamped => {
+            out.stamp_chunk(vi, source_line);
+        }
+        GutterStyle::InlineLineNumbers => {
+            match line_fg {
+                Some(fg) => out.push_fg(fg),
+                None => out.push_hl(crate::theme::intern("Comment")),
+            }
+            if vi == 0 {
+                let lineno = match source_line {
+                    smelt_buffer::buffer::SourceLine::Linear { lineno } => Some(lineno),
+                    smelt_buffer::buffer::SourceLine::Diff { new, .. } => new,
+                    _ => None,
+                };
+                out.print_gutter(&format!(
+                    " {:>w$} ",
+                    lineno.map(|n| n.to_string()).unwrap_or_default(),
+                    w = lineno_digits
+                ));
+            } else {
+                out.print_gutter(blank_prefix);
+            }
+            out.pop_style();
+        }
+        GutterStyle::None => {}
+    }
 }
 
 // ─── Side-by-side diff renderer ──────────────────────────────────────
@@ -1143,8 +1249,7 @@ mod tests {
         let cache = CachedInlineDiff {
             max_display_lineno: 1,
             lines: vec![CachedDiffLine::Context {
-                old_lineno: 1,
-                new_lineno: 1,
+                lineno: 1,
                 text: "x".to_string(),
                 spans: vec![CachedSpan {
                     text: "x".to_string(),
@@ -1153,7 +1258,7 @@ mod tests {
             }],
         };
         let block = render_test(80, |out| {
-            let emitted = print_cached_inline_diff(out, &cache, 0, 0);
+            let emitted = print_cached_inline_diff(out, &cache, GutterStyle::Stamped, 0, 0, 0);
             // 0 means "no limit" — should emit the single line.
             assert_eq!(emitted, 1);
         });
@@ -1166,8 +1271,7 @@ mod tests {
             max_display_lineno: 3,
             lines: (1..=3)
                 .map(|i| CachedDiffLine::Context {
-                    old_lineno: i,
-                    new_lineno: i,
+                    lineno: i,
                     text: format!("line{i}"),
                     spans: vec![CachedSpan {
                         text: format!("line{i}"),
@@ -1177,7 +1281,7 @@ mod tests {
                 .collect(),
         };
         render_test(80, |out| {
-            let emitted = print_cached_inline_diff(out, &cache, 0, 2);
+            let emitted = print_cached_inline_diff(out, &cache, GutterStyle::Stamped, 0, 0, 2);
             assert_eq!(emitted, 2);
         });
     }
@@ -1188,8 +1292,7 @@ mod tests {
             max_display_lineno: 3,
             lines: (1..=3)
                 .map(|i| CachedDiffLine::Context {
-                    old_lineno: i,
-                    new_lineno: i,
+                    lineno: i,
                     text: format!("line{i}"),
                     spans: vec![CachedSpan {
                         text: format!("line{i}"),
@@ -1199,7 +1302,7 @@ mod tests {
                 .collect(),
         };
         let block = render_test(80, |out| {
-            let emitted = print_cached_inline_diff(out, &cache, 2, 0);
+            let emitted = print_cached_inline_diff(out, &cache, GutterStyle::Stamped, 0, 2, 0);
             assert_eq!(emitted, 1);
         });
         let joined: String = block
@@ -1223,8 +1326,7 @@ mod tests {
             max_display_lineno: 10,
             lines: vec![
                 CachedDiffLine::Context {
-                    old_lineno: 1,
-                    new_lineno: 1,
+                    lineno: 1,
                     text: "ctx".to_string(),
                     spans: vec![span("ctx")],
                 },
@@ -1242,7 +1344,7 @@ mod tests {
             ],
         };
         let block = render_test(80, |out| {
-            print_cached_inline_diff(out, &cache, 0, 0);
+            print_cached_inline_diff(out, &cache, GutterStyle::InlineLineNumbers, 0, 0, 0);
         });
         let joined: String = block
             .lines
@@ -1270,6 +1372,7 @@ mod tests {
                 "    let x = 42;\n",
                 path.to_str().unwrap(),
                 "    let x = 1;\n",
+                GutterStyle::InlineLineNumbers,
                 0,
                 0,
             );

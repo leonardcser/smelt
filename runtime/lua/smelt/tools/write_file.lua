@@ -44,19 +44,17 @@ smelt.tools.register({
     if output.is_error then
       return smelt.layout.text(output.content, { is_error = true })
     end
-    local buf = smelt.buf.create()
-    smelt.syntax.render_file(buf, {
+    return smelt.layout.file_view({
       content = args.content or "",
       path    = args.file_path or "",
     })
-    return smelt.layout.leaf(buf)
   end,
   paths_for_workspace = function(args)
     local p = args.file_path or ""
     return p ~= "" and { p } or {}
   end,
-  preview = function(buf, args)
-    smelt.syntax.render_file(buf, {
+  preview = function(args)
+    return smelt.layout.file_view({
       content = args.content or "",
       path    = args.file_path or "",
     })

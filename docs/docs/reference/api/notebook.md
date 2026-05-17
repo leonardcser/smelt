@@ -4,7 +4,7 @@
 
 **Tier:** `UiHost` — Requires a terminal UI; calling these from headless mode raises.
 
-Render, parse, read, and apply notebook cell edits. UiHost-only.
+Parse, read, and apply notebook cell edits, plus compute preview data for the edit_notebook tool. UiHost-only.
 
 ## `smelt.notebook.apply_edit`
 
@@ -30,6 +30,14 @@ fun(json: string): table?, string?
 
 Parse a notebook JSON string. Returns `(notebook, nil)` with `{ nbformat, nbformat_minor, cells = { { kind, id?, source, execution_count? } } }` on success, or `(nil, error)` on failure.
 
+## `smelt.notebook.preview_data`
+
+```lua
+fun(args: table): table?
+```
+
+Compute the preview payload for an `edit_notebook` call. Returns `nil` when the notebook can't be read/parsed or the target cell is out of range. The returned table has `{ edit_mode, path, title, old_source, new_source, syntax_ext }` — `title` is the formatted header (`"insert cell 3 [py]"` etc.), `syntax_ext` is the extension for syntax-highlighting the body (`"py"` / `"md"`).
+
 ## `smelt.notebook.read`
 
 ```lua
@@ -37,12 +45,4 @@ fun(path: string, offset: integer, limit: integer): string?, string?
 ```
 
 Render a Jupyter notebook at `path` as cell-by-cell text starting at `offset` for at most `limit` cells. Returns `(text, nil)` on success or `(nil, err_msg)` on parse failure — same output the built-in `read_file` tool produces.
-
-## `smelt.notebook.render`
-
-```lua
-fun(buf_id: integer, args: table): nil
-```
-
-Render a notebook edit preview into the buffer (insert mode shows the new source highlighted; edit mode shows an inline diff). `args` is the notebook tool's argument table.
 

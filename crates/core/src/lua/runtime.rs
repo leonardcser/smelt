@@ -939,41 +939,58 @@ impl LuaRuntime {
         handlers.get(tool_name).is_some_and(|h| h.preview.is_some())
     }
 
-    /// Run a tool's `preview(buf, args)` callback; returns true on success.
+    /// Run a tool's `preview(args)` callback and return the composed `BlockLayout` tree.
+    /// `None` if the tool registered no preview, the call failed, or the return value
+    /// wasn't a `smelt.layout` userdata.
     pub fn render_tool_preview(
         &self,
         tool_name: &str,
         args: &HashMap<String, serde_json::Value>,
-        buf_id: u64,
-    ) -> bool {
-        let render_fn = {
+    ) -> Option<crate::content::block_layout::BlockLayout> {
+        let preview_fn = {
             let handlers = self.shared.tools.lock().unwrap_or_else(|e| e.into_inner());
-            let Some(h) = handlers.get(tool_name) else {
-                return false;
-            };
-            let Some(rh) = h.preview.as_ref() else {
-                return false;
-            };
-            match self.lua.registry_value::<mlua::Function>(&rh.key) {
-                Ok(f) => f,
-                Err(_) => return false,
-            }
+            let h = handlers.get(tool_name)?;
+            let rh = h.preview.as_ref()?;
+            self.lua.registry_value::<mlua::Function>(&rh.key).ok()?
         };
 
         let args_table = match self.args_to_lua_table(args) {
             Ok(t) => t,
             Err(e) => {
                 self.record_error(format!("tool preview: build args: {e}"));
-                return false;
+                return None;
             }
         };
 
         let _perf = smelt_perf::perf::begin("lua:tool");
-        if let Err(e) = render_fn.call::<()>((buf_id, args_table)) {
-            self.record_error(format!("tool preview `{tool_name}`: {e}"));
-            return false;
+        let result: mlua::Value = match preview_fn.call(args_table) {
+            Ok(v) => v,
+            Err(e) => {
+                self.record_error(format!("tool preview `{tool_name}`: {e}"));
+                return None;
+            }
+        };
+
+        match result {
+            mlua::Value::Nil => None,
+            mlua::Value::UserData(ud) => {
+                match ud.borrow::<crate::lua::api::layout::LuaBlockLayout>() {
+                    Ok(layout) => Some(layout.0.clone()),
+                    Err(e) => {
+                        self.record_error(format!(
+                            "tool preview `{tool_name}`: expected smelt.layout value: {e}"
+                        ));
+                        None
+                    }
+                }
+            }
+            _ => {
+                self.record_error(format!(
+                    "tool preview `{tool_name}`: expected smelt.layout value or nil"
+                ));
+                None
+            }
         }
-        true
     }
 
     /// Invoke the tool's `summary(args)` Lua hook. The hook may return:

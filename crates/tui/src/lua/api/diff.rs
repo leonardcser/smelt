@@ -1,13 +1,14 @@
 //! `smelt.diff` — paint diffs into buffers.
 //!
-//! - `smelt.diff.render(buf, { old, new, path })` paints an inline diff
-//!   (one buffer with delete/insert lines interleaved). Same pipeline the
-//!   confirm dialog uses.
 //! - `smelt.diff.render_split(left_buf, right_buf, { old, new, lang? | path? })`
 //!   paints aligned side-by-side views into two buffers — synthetic padding
 //!   rows on whichever side is shorter so both buffers share a row count.
+//!
+//! Inline (single-buffer) diffs are returned declaratively via
+//! `smelt.layout.diff{...}` from a tool's `render` / `preview` callback; the
+//! host renders them directly into the block buffer with no scratch-buffer seam.
 
-use crate::content::highlight::{compute_split_diff, print_inline_diff, print_split_diff_side};
+use crate::content::highlight::{compute_split_diff, print_split_diff_side};
 use crate::content::to_buffer::render_into_buffer;
 use crate::smelt_term::BufId;
 use lua_doc_derive::lua_module;
@@ -17,33 +18,10 @@ use smelt_core::lua::doc::register_ui_fn;
 
 #[lua_module(
     name = "smelt.diff",
-    doc = "Paint diffs into Buffers — inline (one buffer) or split side-by-side (two buffers). UiHost-only."
+    doc = "Paint side-by-side diffs into a pair of Buffers. Inline diffs are returned declaratively via `smelt.layout.diff`. UiHost-only."
 )]
 pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
     let diff = lua.create_table()?;
-    register_ui_fn(
-        &diff,
-        "smelt.diff",
-        "render",
-        "Paint an inline diff between `opts.old` and `opts.new` into the buffer, syntax-highlighted by `opts.path`'s extension. Mirrors the pipeline used by the built-in confirm dialog.",
-        &["buf_id", "opts"],
-        lua,
-        |_, (buf_id, opts): (u64, mlua::Table)| -> LuaResult<()> {
-            let old: String = opts.get::<Option<String>>("old")?.unwrap_or_default();
-            let new: String = opts.get::<Option<String>>("new")?.unwrap_or_default();
-            let path: String = opts.get::<Option<String>>("path")?.unwrap_or_default();
-            crate::lua::with_app(|app| {
-                let theme_snap = app.ui.theme().clone();
-                let width = crate::content::term_width() as u16;
-                if let Some(buf) = app.ui.buf_mut(BufId(buf_id)) {
-                    render_into_buffer(buf, width, &theme_snap, |sink| {
-                        print_inline_diff(sink, &old, &new, &path, &old, 0, u16::MAX);
-                    });
-                }
-            });
-            Ok(())
-        },
-    )?;
     register_ui_fn(
         &diff,
         "smelt.diff",

@@ -47,28 +47,42 @@ smelt.tools.register({
     end
     return smelt.fs.file_state.staleness_error(path, "notebook")
   end,
-  preview = function(buf, args)
-    smelt.notebook.render(buf, args)
+  preview = function(args)
+    local data = smelt.notebook.preview_data(args)
+    if not data then return nil end
+    local title = smelt.layout.text(data.title)
+    local body
+    if data.edit_mode == "insert" then
+      body = smelt.layout.file_view({
+        content = data.new_source,
+        lang    = data.syntax_ext,
+      })
+    else
+      body = smelt.layout.diff({
+        old  = data.old_source,
+        new  = data.new_source,
+        lang = data.syntax_ext,
+        path = data.path,
+      })
+    end
+    return smelt.layout.vbox({ title, body })
   end,
   render = function(args, output, ctx)
     if output.is_error then
       return smelt.layout.text(output.content, { is_error = true })
     end
     local meta = output.metadata or {}
-    local buf = smelt.buf.create()
     if meta.edit_mode == "insert" then
-      smelt.syntax.render_file(buf, {
+      return smelt.layout.file_view({
         content = meta.new_source or "",
         path    = (meta.path or "") .. ".py",
       })
-    else
-      smelt.diff.render(buf, {
-        old = meta.old_source or "",
-        new = meta.new_source or "",
-        path = meta.path or "",
-      })
     end
-    return smelt.layout.leaf(buf)
+    return smelt.layout.diff({
+      old = meta.old_source or "",
+      new = meta.new_source or "",
+      path = meta.path or "",
+    })
   end,
   execute = function(args)
     local path = args.notebook_path or ""

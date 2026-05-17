@@ -2,13 +2,14 @@
 //! with no gutter and no line numbers. Indentation is the caller's responsibility
 //! (panel `pad_left`, composed leading spaces, etc.).
 //!
-//! `smelt.syntax.render_file(buf, { content, lang?, path? })` — multi-line render
-//! with the file-view layout (numbered gutter, indent).
+//! For file-view renders with a line-number gutter, return `smelt.layout.file_view`
+//! from a tool's `render` / `preview` callback — the host renders it directly into
+//! the block buffer.
 //!
 //! Inline single-span highlighting is handled by `smelt.buf.set_styled_lines`
 //! spans with `syntax = "<lang>"`.
 
-use crate::content::highlight::{print_code_lines, print_syntax_file, print_syntax_file_ext};
+use crate::content::highlight::print_code_lines;
 use crate::content::to_buffer::render_into_buffer;
 use crate::smelt_term::BufId;
 use lua_doc_derive::lua_module;
@@ -44,47 +45,6 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
                                 .unwrap_or("")
                         });
                         print_code_lines(sink, &content, lang_token);
-                    });
-                }
-            });
-            Ok(())
-        },
-    )?;
-
-    register_ui_fn(
-        &syntax,
-        "smelt.syntax",
-        "render_file",
-        "Paint `opts.content` into the buffer with file-view metadata: each row gets `SourceLine::Linear` stamped so a `gutter = \"line_numbers\"` window draws the gutter. Pick the syntax via `opts.lang` or `opts.path`. Use this for write_file / notebook diffs; prefer `smelt.syntax.render` for plain snippets.",
-        &["buf_id", "opts"],
-        lua,
-        |_, (buf_id, opts): (u64, mlua::Table)|  -> LuaResult<()>{
-            let content: String = opts.get::<Option<String>>("content")?.unwrap_or_default();
-            let lang: Option<String> = opts.get::<Option<String>>("lang")?;
-            let path: Option<String> = opts.get::<Option<String>>("path")?;
-            crate::lua::with_app(|app| {
-                let theme_snap = app.ui.theme().clone();
-                let width = crate::content::term_width() as u16;
-                if let Some(buf) = app.ui.buf_mut(BufId(buf_id)) {
-                    render_into_buffer(buf, width, &theme_snap, |sink| {
-                        match (lang.as_deref(), path.as_deref()) {
-                            (Some(l), _) => {
-                                print_syntax_file_ext(
-                                    sink,
-                                    &content,
-                                    path.as_deref().unwrap_or(""),
-                                    Some(smelt_core::content::highlight::lang_to_ext(l)),
-                                    0,
-                                    u16::MAX,
-                                );
-                            }
-                            (None, Some(p)) => {
-                                print_syntax_file(sink, &content, p, 0, u16::MAX);
-                            }
-                            (None, None) => {
-                                print_syntax_file(sink, &content, "", 0, u16::MAX);
-                            }
-                        }
                     });
                 }
             });
