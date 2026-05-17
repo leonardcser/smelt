@@ -994,7 +994,11 @@ fn handle_visual(key: KeyEvent, ctx: &mut VimContext<'_>) -> Action {
         if let KeyCode::Char(c) = key.code {
             if let Some((start, end)) = text_object(ctx.buf.as_str(), *ctx.cpos, inner, c) {
                 ctx.vim_state.visual_anchor = start;
-                *ctx.cpos = end.saturating_sub(1);
+                *ctx.cpos = if end > 0 {
+                    prev_char_boundary(ctx.buf.as_str(), end)
+                } else {
+                    end
+                };
             }
         }
         return Action::Consumed;
