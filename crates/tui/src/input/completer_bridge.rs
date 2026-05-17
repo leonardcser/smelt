@@ -130,6 +130,7 @@ impl PromptState {
                 ctx.buf.text_mut().replace_range(start..end, &replacement);
                 ctx.win.cpos = start + replacement.len();
             }
+            ctx.win.clamp_anchors_to_source(ctx.buf.source());
         }
     }
 
