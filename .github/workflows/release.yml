@@ -109,8 +109,8 @@ jobs:
           VERSION="${GITHUB_REF_NAME#v}"
           echo "Updating version to: $VERSION"
 
-          # Update version in all Cargo.toml files
-          for file in Cargo.toml crates/protocol/Cargo.toml crates/engine/Cargo.toml crates/style/Cargo.toml crates/perf/Cargo.toml crates/buffer/Cargo.toml crates/term/Cargo.toml crates/edit/Cargo.toml crates/core/Cargo.toml crates/tui/Cargo.toml; do
+          # Update version in all workspace Cargo.toml files
+          for file in Cargo.toml crates/*/Cargo.toml; do
             sed -i.bak "s/^version = \"[^\"]*\"/version = \"$VERSION\"/" "$file"
             rm -f "${file}.bak"
           done
@@ -122,7 +122,7 @@ jobs:
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add Cargo.toml Cargo.lock crates/protocol/Cargo.toml crates/engine/Cargo.toml crates/style/Cargo.toml crates/perf/Cargo.toml crates/buffer/Cargo.toml crates/term/Cargo.toml crates/edit/Cargo.toml crates/core/Cargo.toml crates/tui/Cargo.toml
+          git add Cargo.toml Cargo.lock crates/*/Cargo.toml
           if git diff --staged --quiet; then
             echo "Version already up to date"
           else
