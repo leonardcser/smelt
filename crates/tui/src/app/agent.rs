@@ -312,12 +312,11 @@ impl TuiApp {
             let leftover = std::mem::take(&mut self.queued_messages);
             if !leftover.is_empty() {
                 let mut ctx = crate::input::prompt_ctx_mut(&mut self.ui);
-                let mut combined = leftover.join("\n");
+                let mut prefix = leftover.join("\n");
                 if !ctx.buf.source().is_empty() {
-                    combined.push('\n');
-                    combined.push_str(ctx.buf.source());
+                    prefix.push('\n');
                 }
-                self.input.replace_text(&mut ctx, combined, None);
+                self.input.prepend_text(&mut ctx, prefix);
             }
         } else {
             self.working.finish(TurnOutcome::Done);
