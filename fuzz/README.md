@@ -22,10 +22,11 @@ tar -czf seed_corpus.tar.gz seed_corpus
 # Full local cycle: unpack → fuzz → cmin → repack tarball (default 300s)
 cargo xtask fuzz [seconds]
 
-# Indefinite fuzzing — runs cycles forever, archives crashes under
-# `fuzz/crashes/<timestamp>/`, cmin's the corpus every N cycles. Stop with
-# Ctrl-C; safe to leave running overnight.
-./fuzz/fuzz-loop.sh [secs_per_cycle] [cmin_every_n_cycles]   # defaults: 600 10
+# Stop-on-first-crash, parallel workers — pair with the `fuzz-triage` skill
+# for the fix-as-you-go loop. For unattended runs that keep going past
+# crashes, swap `-ignore_crashes=0` for `=1`.
+cargo +nightly fuzz run --sanitizer=none smelt_loop -- -fork=4 -ignore_crashes=0
+cargo +nightly fuzz run --sanitizer=none text_ops   -- -fork=4 -ignore_crashes=0
 
 # Lower-level pieces:
 cargo +nightly fuzz run smelt_loop -- -max_len=4096 -max_total_time=300
