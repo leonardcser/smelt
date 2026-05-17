@@ -1,4 +1,4 @@
-//! `smelt.confirm._*` primitives consumed by
+//! `smelt.confirm.__*` primitives consumed by
 //! `runtime/lua/smelt/dialogs/confirm.lua`.
 //!
 //! The Lua side owns dialog orchestration (open the overlay, attach
@@ -12,7 +12,7 @@
 //!
 //! - `_back_tab` — toggles app mode + auto-allows when the new mode
 //!   covers this request.
-//! - `_render_preview` — dispatches to the tool's `preview` callback.
+//! - `__render_preview` — dispatches to the tool's `preview` callback.
 //! - `_resolve` — final pick, removes the registry entry.
 //!
 //! Per-panel control (`scroll_by`, `focus`, …) goes through the
@@ -34,15 +34,15 @@ use smelt_core::transcript_model::{ApprovalScope, ConfirmChoice, ConfirmRequest}
 pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
     let confirm_tbl = lua.create_table()?;
 
-    // smelt.confirm._back_tab(handle_id) → bool. Cycles app mode and returns true if the
+    // smelt.confirm.__back_tab(handle_id) → bool. Cycles app mode and returns true if the
     // new mode auto-allows the request. The with_app borrow must be released before calling
     // back into Lua (smelt.mode.cycle re-enters with_app), so the body is split: gather
     // request payload, run cycle, then re-enter with_app to inspect and resolve.
     register_ui_fn(
         &confirm_tbl,
         "smelt.confirm",
-        "_back_tab",
-        "smelt.confirm._back_tab(handle_id) → bool. Cycles app mode and returns true if the new mode auto-allows the request. The with_app borrow must be released before calling back into Lua (smelt.mode.cycle re-enters with_app), so the body is split: gather request payload, run cycle, then re-enter with_app to inspect and resolve.",
+        "__back_tab",
+        "smelt.confirm.__back_tab(handle_id) → bool. Cycles app mode and returns true if the new mode auto-allows the request. The with_app borrow must be released before calling back into Lua (smelt.mode.cycle re-enters with_app), so the body is split: gather request payload, run cycle, then re-enter with_app to inspect and resolve.",
         &["handle_id"],
         lua,
         |lua, handle_id: u64|  -> LuaResult<bool>{
@@ -101,7 +101,7 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
         },
     )?;
 
-    // smelt.confirm._render_preview(buf_id, handle_id) → bool.
+    // smelt.confirm.__render_preview(buf_id, handle_id) → bool.
     // Calls the tool's `preview(args) -> smelt.layout` callback if registered, extracts
     // any buffer leaves from `app.ui`, then renders the layout into the dialog's
     // preview buffer at `term_width` cells. Returns false if the tool registered no
@@ -109,8 +109,8 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
     register_ui_fn(
         &confirm_tbl,
         "smelt.confirm",
-        "_render_preview",
-        "smelt.confirm._render_preview(buf_id, handle_id) → bool. Calls the tool's `preview(args) -> smelt.layout` callback if registered, then renders the returned layout into the dialog's preview buffer. Returns false if none registered or the callback returned nil.",
+        "__render_preview",
+        "smelt.confirm.__render_preview(buf_id, handle_id) → bool. Calls the tool's `preview(args) -> smelt.layout` callback if registered, then renders the returned layout into the dialog's preview buffer. Returns false if none registered or the callback returned nil.",
         &["buf_id", "handle_id"],
         lua,
         |_, (buf_id, handle_id): (u64, u64)|  -> LuaResult<bool>{
@@ -132,12 +132,12 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
         },
     )?;
 
-    // smelt.confirm._resolve(handle_id, decision, message?).
+    // smelt.confirm.__resolve(handle_id, decision, message?).
     // `decision` matches the `confirm_resolved` cell lexicon. Removes the registry entry.
     register_ui_fn(
         &confirm_tbl,
         "smelt.confirm",
-        "_resolve",
+        "__resolve",
         "Final confirm pick. `decision` matches the `confirm_resolved` cell lexicon (`yes`, `no`, `always_session`, `always_workspace`, `always_pattern_*`, `always_dir_*`); `message` is an optional rejection note. Removes the registry entry and routes the choice through the engine.",
         &["handle_id", "decision", "message"],
         lua,

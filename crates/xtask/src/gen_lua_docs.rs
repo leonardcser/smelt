@@ -132,6 +132,12 @@ fn run_inner() -> std::io::Result<()> {
 
     let mut by_mod: BTreeMap<&str, Vec<&LuaFnMeta>> = BTreeMap::new();
     for m in &metas {
+        // Private API: names starting with `__` are not surfaced in
+        // generated stubs / reference docs. They stay callable from
+        // bundled lua (which can reference them by literal name).
+        if m.name.starts_with("__") {
+            continue;
+        }
         by_mod.entry(m.module).or_default().push(m);
     }
     for fns in by_mod.values_mut() {
@@ -161,16 +167,28 @@ fn run_inner() -> std::io::Result<()> {
     expected_stems.insert("index".into());
     expected_stems.insert("types".into());
 
-    for (module, fns) in &by_mod {
+    // Doc-only modules (every fn is `__`-prefixed and filtered out)
+    // still get a page so callers see the module exists and read its
+    // module doc. Iterate the union of `by_mod` and `mod_docs` keys.
+    let empty_fns: Vec<&LuaFnMeta> = Vec::new();
+    let mut all_modules: std::collections::BTreeSet<&str> = by_mod.keys().copied().collect();
+    for k in mod_docs.keys() {
+        all_modules.insert(k);
+    }
+    for module in &all_modules {
         if !module.starts_with("smelt.") && *module != "smelt" {
             continue; // skip internal helpers
         }
-        if mod_docs.get(module).copied().unwrap_or("").is_empty() {
+        let fns = by_mod.get(module).unwrap_or(&empty_fns);
+        let mod_doc = mod_docs.get(module).copied().unwrap_or("");
+        if fns.is_empty() && mod_doc.is_empty() {
+            continue; // nothing to document
+        }
+        if mod_doc.is_empty() {
             eprintln!("warning: module `{module}` has functions but no module doc; consider adding record_module_doc");
         }
         let file_stem = module_file_stem(module);
         expected_stems.insert(file_stem.clone());
-        let mod_doc = mod_docs.get(module).copied().unwrap_or("");
         std::fs::write(
             stubs_dir.join(format!("{file_stem}.lua")),
             render_stub(module, fns, mod_doc),

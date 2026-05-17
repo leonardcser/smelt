@@ -126,7 +126,7 @@ function smelt.confirm.open(handle_id)
   local header_buf  = smelt.buf.new()
   local preview_buf = smelt.buf.new()
   render_header(header_buf, req)
-  smelt.confirm._render_preview(preview_buf, handle_id)
+  smelt.confirm.__render_preview(preview_buf, handle_id)
   local first_preview = preview_buf:line(1)
   local has_preview = first_preview ~= nil and first_preview ~= ""
 
@@ -157,7 +157,7 @@ function smelt.confirm.open(handle_id)
   local function close_with(idx, message)
     if resolved then return end
     resolved = true
-    smelt.confirm._resolve(handle_id, decisions[idx] or "no", message)
+    smelt.confirm.__resolve(handle_id, decisions[idx] or "no", message)
   end
 
   local handle = smelt.ui.dialog.open_handle({
@@ -175,7 +175,7 @@ function smelt.confirm.open(handle_id)
     focus = options_leaf,
     keymaps = {
       { key = "s-tab", on_press = function(ctx)
-          if smelt.confirm._back_tab(handle_id) then
+          if smelt.confirm.__back_tab(handle_id) then
             resolved = true
             ctx.close()
           end
