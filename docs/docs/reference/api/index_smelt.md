@@ -33,8 +33,10 @@ Request a clean shutdown of the app. The quit fires on the next tick after the c
 ## `smelt.spawn`
 
 ```lua
-fun(handler: fun()): nil
+fun(handler: fun()): smelt.Reg
 ```
 
-Run `handler` as a fire-and-forget coroutine on the Lua task runtime. The handler may yield; its result is discarded.
+Types: [`smelt.Reg`](types.md#smeltreg)
+
+Run `handler` as a coroutine on the Lua task runtime. The handler may yield; its result is discarded. Returns a `Reg` whose `:remove()` cancels the task — any in-flight `smelt.sleep` / `smelt.task.wait` raises `cancelled` and the coroutine unwinds.
 

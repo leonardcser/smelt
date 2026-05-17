@@ -266,6 +266,99 @@ end)
 Calling `smelt.sleep` from outside a yielding context raises immediately —
 that's how you tell which side of the line you're on.
 
+`smelt.spawn(fn)` returns a `Reg` whose `:remove()` cancels the coroutine —
+any in-flight `smelt.sleep` / `smelt.task.wait` raises `cancelled` and the
+task unwinds. Compose your own teardown with `smelt.reg.new(undo)` when a
+plugin owns several reactive subscriptions:
+
+```lua
+local task = smelt.spawn(function() while true do ... end end)
+local key  = smelt.win.cur():key("n", "<leader>x", handler)
+return smelt.reg.new(function()
+  task:remove()
+  key:remove()
+end)
+```
+
+## Plugin state
+
+`smelt.state(name)` returns an ephemeral table scoped to `name`. Survives
+`/reload` but not a restart — perfect for caches and live counters. Plugins
+removed since the last load have their slots swept automatically.
+
+```lua
+local s = smelt.state("my_plugin")
+s.counter = (s.counter or 0) + 1
+```
+
+`smelt.state.persistent(name)` returns a JSON-backed wrapper that writes
+through to `$XDG_STATE_HOME/smelt/plugins/<name>.json`. Top-level
+assignments are debounced and auto-saved; nested mutations need an
+explicit `:save()`.
+
+```lua
+local s = smelt.state.persistent("recent_files")
+s.last_opened = "/path/to/file"   -- debounced auto-save
+table.insert(s.history or {}, "another"); s.save()   -- nested → manual save
+```
+
+## Filesystem watching
+
+`smelt.fs.watch(path, handler, opts?)` calls `handler(event)` for each
+filesystem change under `path`. `event = { kind, detail?, paths }`:
+
+- `kind` — `"create" | "modify" | "remove" | "rename" | "access" | "other" | "any"`.
+- `detail` — finer-grained sub-kind when notify reports one. Examples:
+  `kind = "create"` → `detail = "file" | "folder"`;
+  `kind = "rename"` → `detail = "from" | "to" | "both"`;
+  `kind = "modify"` → `detail = "data" | "metadata"`.
+- `paths` — list of affected paths.
+
+Set `opts.recursive = false` to watch only direct children. Returns a `Reg`:
+
+```lua
+local reg = smelt.fs.watch(vim.fn.getcwd(), function(ev)
+  for _, p in ipairs(ev.paths) do
+    smelt.log.info(ev.kind .. " " .. p)
+  end
+end)
+-- later: reg:remove()
+```
+
+## Off-thread filesystem I/O
+
+For large reads/writes that would otherwise block the main loop, use the
+async variants. They yield through the task runtime, so they must run
+inside `smelt.spawn(fn)` or a `tool.execute` body:
+
+```lua
+smelt.spawn(function()
+  local content, err = smelt.fs.read_async("/path/to/big.json")
+  if not content then return smelt.log.error(err) end
+  local ok, err2 = smelt.fs.write_async("/tmp/out", transform(content))
+end)
+```
+
+The sync `smelt.fs.read` / `smelt.fs.write` stay fine for small files and
+config-time reads.
+
+## Pickers
+
+`smelt.picker.fuzzy(opts)` is the high-level entry point for choose-one
+prompts. Items can be plain strings or `{ label, description, ansi_color,
+search_terms }` records; ranking is delegated to `smelt.fuzzy.rank`.
+Returns `{ index, item, action }` on accept or `nil` on dismiss.
+
+```lua
+smelt.spawn(function()
+  local choice = smelt.picker.fuzzy({
+    items = { "first", "second", "third" },
+    placeholder = "pick one",
+  })
+  if choice then smelt.log.info("picked " .. choice.item.label) end
+end)
+```
+
 ## Custom tools
 
 `smelt.tools.register({ name, execute, ... })` exposes a tool to the model.

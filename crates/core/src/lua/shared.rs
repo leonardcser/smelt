@@ -124,6 +124,11 @@ pub struct LuaShared {
     /// Default shell + argv for `smelt.process.run`/`run_streaming` when no
     /// explicit shell is given. `None` means hardcoded `sh -c`.
     pub default_shell: Mutex<Option<DefaultShell>>,
+    /// Active filesystem watchers registered through `smelt.fs.watch`. The
+    /// notify-backed `WatcherEntry` keeps the OS subscription alive; dropping
+    /// the entry tears it down. `next_watcher_id` mints fresh ids.
+    pub watchers: Mutex<HashMap<u64, crate::lua::watchers::WatcherEntry>>,
+    pub next_watcher_id: AtomicU64,
     /// Current boot phase. Phase-sensitive APIs use this to gate their
     /// behavior (refuse-when-late or warn-when-late). Defaults to `Early`
     /// — the runtime promotes it to `Init` before autoload and `Running`
@@ -214,6 +219,8 @@ impl Default for LuaShared {
             cli_flag_values: Mutex::new(HashMap::new()),
             hooks: Hooks::default(),
             default_shell: Mutex::new(None),
+            watchers: Mutex::new(HashMap::new()),
+            next_watcher_id: AtomicU64::new(1),
             phase: AtomicU8::new(Phase::Early as u8),
         }
     }
@@ -249,6 +256,9 @@ impl LuaShared {
         self.hooks.tool_after.clear();
         self.hooks.provider_request.clear();
         self.hooks.provider_response.clear();
+        if let Ok(mut m) = self.watchers.lock() {
+            m.clear();
+        }
     }
 }
 

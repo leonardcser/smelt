@@ -33,9 +33,11 @@ mod phase;
 mod process;
 mod provider;
 pub mod reasoning;
+mod reg;
 mod shell;
 mod skills;
 mod spawn;
+mod state;
 mod task;
 mod timer;
 mod tools;
@@ -127,7 +129,7 @@ pub fn register_host_api(
     clipboard::register(lua, smelt)?;
     cmd::register(lua, smelt, shared)?;
     frontend::register(lua, smelt)?;
-    fs::register(lua, smelt)?;
+    fs::register(lua, smelt, shared)?;
     fuzzy::register(lua, smelt)?;
     grep::register(lua, smelt)?;
     html::register(lua, smelt)?;
@@ -139,6 +141,7 @@ pub fn register_host_api(
     mode::register(lua, smelt)?;
     os::register(lua, smelt)?;
     reasoning::register(lua, smelt)?;
+    reg::register(lua, smelt)?;
     parse::register(lua, smelt)?;
     path::register(lua, smelt)?;
     perf::register(lua, smelt)?;
@@ -148,6 +151,7 @@ pub fn register_host_api(
     shell::register(lua, smelt)?;
     skills::register(lua, smelt)?;
     spawn::register(lua, smelt, shared)?;
+    state::register(lua, smelt)?;
     task::register(lua, smelt, shared)?;
     timer::register(lua, smelt)?;
     tools::register(lua, smelt, shared)?;

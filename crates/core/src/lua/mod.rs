@@ -9,6 +9,7 @@ pub mod reg;
 pub mod runtime;
 mod shared;
 mod task;
+pub mod watchers;
 
 pub use reg::LuaReg;
 

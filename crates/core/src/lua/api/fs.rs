@@ -3,11 +3,16 @@
 use crate::fs::FlockGuard;
 use crate::lua::doc::Tier;
 use crate::lua::module::LuaMod;
+use crate::lua::watchers::{WatcherEntry, WatcherState};
+use crate::lua::LuaShared;
 use mlua::prelude::*;
+use notify::{Config, EventKind, RecommendedWatcher, RecursiveMode, Watcher};
 use std::cell::RefCell;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
+use std::sync::atomic::Ordering;
+use std::sync::{Arc, Mutex};
 
-pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
+pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) -> LuaResult<()> {
     let fs = LuaMod::under(
         lua,
         smelt,
@@ -262,7 +267,243 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
         })?,
     )?;
 
+    {
+        let s = shared.clone();
+        fs.fn_(
+            "__read_async_start",
+            "Begin an off-thread read of `path` and resolve `task_id` with `{ content }` on success or `{ err }` on failure. Used internally by `smelt.fs.read_async`.",
+            &["task_id", "path"],
+            move |_, (task_id, path): (u64, String)| -> LuaResult<()> {
+                let sink = s.resume_sink();
+                tokio::task::spawn_blocking(move || {
+                    let payload = match std::fs::read_to_string(&path) {
+                        Ok(content) => serde_json::json!({ "content": content }),
+                        Err(err) => serde_json::json!({ "err": err.to_string() }),
+                    };
+                    sink.resolve_json(task_id, payload);
+                });
+                Ok(())
+            },
+        )?;
+    }
+
+    {
+        let s = shared.clone();
+        fs.fn_(
+            "__write_async_start",
+            "Begin an off-thread write of `contents` to `path` and resolve `task_id` with `{ ok = true }` on success or `{ err }` on failure. Used internally by `smelt.fs.write_async`.",
+            &["task_id", "path", "contents"],
+            move |_, (task_id, path, contents): (u64, String, mlua::String)| -> LuaResult<()> {
+                let bytes = contents.as_bytes().to_vec();
+                let sink = s.resume_sink();
+                tokio::task::spawn_blocking(move || {
+                    let payload = match std::fs::write(&path, &bytes) {
+                        Ok(()) => serde_json::json!({ "ok": true }),
+                        Err(err) => serde_json::json!({ "err": err.to_string() }),
+                    };
+                    sink.resolve_json(task_id, payload);
+                });
+                Ok(())
+            },
+        )?;
+    }
+
+    {
+        let s = shared.clone();
+        fs.fn_(
+            "__watch_register",
+            "Start a filesystem watcher on `path` and return `(watcher_id, nil)` on success or `(nil, err_string)` on failure. `opts.recursive` (default `true`) controls subdirectory traversal. Used internally by `smelt.fs.watch`; prefer that.",
+            &["path", "opts"],
+            move |_, (path, opts): (String, Option<mlua::Table>)| -> LuaResult<(Option<u64>, Option<String>)> {
+                let recursive = opts
+                    .as_ref()
+                    .and_then(|t| t.get::<Option<bool>>("recursive").ok().flatten())
+                    .unwrap_or(true);
+                let mode = if recursive {
+                    RecursiveMode::Recursive
+                } else {
+                    RecursiveMode::NonRecursive
+                };
+                let id = s.next_watcher_id.fetch_add(1, Ordering::Relaxed);
+                let state = Arc::new(Mutex::new(WatcherState::default()));
+                let state_clone = Arc::clone(&state);
+                let sink = s.resume_sink();
+                let watcher_result = RecommendedWatcher::new(
+                    move |res: notify::Result<notify::Event>| {
+                        let Ok(event) = res else { return };
+                        let payload = event_to_json(&event);
+                        // Single critical section: push the event, and if a
+                        // task is armed, drain everything in the same lock.
+                        // Decoupling the push from the drain creates a window
+                        // where __watch_arm could be re-entered and steal the
+                        // pending list out from under us — keep them atomic.
+                        let resume = {
+                            let Ok(mut st) = state_clone.lock() else { return };
+                            if st.closed {
+                                return;
+                            }
+                            st.pending.push(payload);
+                            match st.armed.take() {
+                                Some(task_id) => {
+                                    Some((task_id, std::mem::take(&mut st.pending)))
+                                }
+                                None => None,
+                            }
+                        };
+                        if let Some((task_id, drained)) = resume {
+                            sink.resolve_json(task_id, serde_json::Value::Array(drained));
+                        }
+                    },
+                    Config::default(),
+                );
+                let mut watcher = match watcher_result {
+                    Ok(w) => w,
+                    Err(err) => return Ok((None, Some(err.to_string()))),
+                };
+                if let Err(err) = watcher.watch(Path::new(&path), mode) {
+                    return Ok((None, Some(err.to_string())));
+                }
+                let entry = WatcherEntry {
+                    state,
+                    _watcher: watcher,
+                };
+                if let Ok(mut map) = s.watchers.lock() {
+                    map.insert(id, entry);
+                }
+                Ok((Some(id), None))
+            },
+        )?;
+    }
+
+    {
+        let s = shared.clone();
+        fs.fn_(
+            "__watch_arm",
+            "Register `task_id` to receive the next batch of events from watcher `watcher_id`. If events are already queued they resolve `task_id` synchronously; otherwise the next event resolves it. Resolves with `nil` if the watcher has been stopped. Used internally by `smelt.fs.watch`.",
+            &["watcher_id", "task_id"],
+            move |_, (watcher_id, task_id): (u64, u64)| -> LuaResult<()> {
+                let sink = s.resume_sink();
+                let Ok(map) = s.watchers.lock() else {
+                    sink.resolve_json(task_id, serde_json::Value::Null);
+                    return Ok(());
+                };
+                let Some(entry) = map.get(&watcher_id) else {
+                    sink.resolve_json(task_id, serde_json::Value::Null);
+                    return Ok(());
+                };
+                let drained = {
+                    let Ok(mut st) = entry.state.lock() else {
+                        sink.resolve_json(task_id, serde_json::Value::Null);
+                        return Ok(());
+                    };
+                    if st.closed {
+                        sink.resolve_json(task_id, serde_json::Value::Null);
+                        return Ok(());
+                    }
+                    if st.pending.is_empty() {
+                        st.armed = Some(task_id);
+                        None
+                    } else {
+                        Some(std::mem::take(&mut st.pending))
+                    }
+                };
+                if let Some(events) = drained {
+                    sink.resolve_json(task_id, serde_json::Value::Array(events));
+                }
+                Ok(())
+            },
+        )?;
+    }
+
+    {
+        let s = shared.clone();
+        fs.fn_(
+            "__watch_stop",
+            "Stop the watcher with id `watcher_id`. Any task waiting through `__watch_arm` is resolved with `nil`. Used internally by `smelt.fs.watch`.",
+            &["watcher_id"],
+            move |_, watcher_id: u64| -> LuaResult<()> {
+                let entry = s.watchers.lock().ok().and_then(|mut m| m.remove(&watcher_id));
+                if let Some(entry) = entry {
+                    let armed = entry
+                        .state
+                        .lock()
+                        .ok()
+                        .and_then(|mut st| {
+                            st.closed = true;
+                            st.armed.take()
+                        });
+                    if let Some(task_id) = armed {
+                        s.resume_sink().resolve_json(task_id, serde_json::Value::Null);
+                    }
+                }
+                Ok(())
+            },
+        )?;
+    }
+
     Ok(())
+}
+
+fn event_to_json(event: &notify::Event) -> serde_json::Value {
+    use notify::event::{AccessKind, AccessMode, CreateKind, ModifyKind, RemoveKind, RenameMode};
+    let (kind, detail) = match event.kind {
+        EventKind::Create(k) => (
+            "create",
+            Some(match k {
+                CreateKind::File => "file",
+                CreateKind::Folder => "folder",
+                CreateKind::Any => "any",
+                CreateKind::Other => "other",
+            }),
+        ),
+        EventKind::Modify(m) => match m {
+            ModifyKind::Name(RenameMode::From) => ("rename", Some("from")),
+            ModifyKind::Name(RenameMode::To) => ("rename", Some("to")),
+            ModifyKind::Name(RenameMode::Both) => ("rename", Some("both")),
+            ModifyKind::Name(_) => ("rename", None),
+            ModifyKind::Data(_) => ("modify", Some("data")),
+            ModifyKind::Metadata(_) => ("modify", Some("metadata")),
+            ModifyKind::Any => ("modify", Some("any")),
+            ModifyKind::Other => ("modify", Some("other")),
+        },
+        EventKind::Remove(k) => (
+            "remove",
+            Some(match k {
+                RemoveKind::File => "file",
+                RemoveKind::Folder => "folder",
+                RemoveKind::Any => "any",
+                RemoveKind::Other => "other",
+            }),
+        ),
+        EventKind::Access(a) => (
+            "access",
+            Some(match a {
+                AccessKind::Open(_) => "open",
+                AccessKind::Close(AccessMode::Write) => "close_write",
+                AccessKind::Close(_) => "close",
+                AccessKind::Read => "read",
+                AccessKind::Any => "any",
+                AccessKind::Other => "other",
+            }),
+        ),
+        EventKind::Other => ("other", None),
+        EventKind::Any => ("any", None),
+    };
+    let paths: Vec<String> = event
+        .paths
+        .iter()
+        .map(|p| p.to_string_lossy().into_owned())
+        .collect();
+    let mut obj = serde_json::Map::new();
+    obj.insert("kind".into(), serde_json::Value::String(kind.into()));
+    if let Some(d) = detail {
+        obj.insert("detail".into(), serde_json::Value::String(d.into()));
+    }
+    obj.insert(
+        "paths".into(),
+        serde_json::Value::Array(paths.into_iter().map(serde_json::Value::String).collect()),
+    );
+    serde_json::Value::Object(obj)
 }
 
 struct FlockHandle(RefCell<Option<FlockGuard>>);

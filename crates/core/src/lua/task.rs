@@ -102,6 +102,26 @@ impl LuaTaskRuntime {
         false
     }
 
+    /// Cancel a single task by id. Returns `true` if the task was found.
+    /// Sleeping/external tasks are unparked with the cancelled marker; the
+    /// next `drive()` step delivers the marker to the coroutine so user
+    /// code in `smelt.sleep` / `task.wait` raises `cancelled` and unwinds.
+    pub fn cancel_task(&mut self, lua: &Lua, id: u64) -> bool {
+        let marker = cancelled_marker(lua);
+        for task in &mut self.tasks {
+            if task.id == id {
+                task.cancel.cancel();
+                if matches!(&task.wait, TaskWait::Sleep(_) | TaskWait::External(_)) {
+                    let mut mv = LuaMultiValue::new();
+                    mv.push_back(marker);
+                    task.wait = TaskWait::Ready(mv);
+                }
+                return true;
+            }
+        }
+        false
+    }
+
     pub fn cancel_all(&mut self, lua: &Lua) {
         let marker = cancelled_marker(lua);
         for task in &mut self.tasks {

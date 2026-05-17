@@ -19,8 +19,9 @@ smelt.ns = nil
 ---@type fun(): nil
 smelt.quit = nil
 
---- Run `handler` as a fire-and-forget coroutine on the Lua task runtime. The handler may yield; its result is discarded.
----@type fun(handler: fun()): nil
+--- Run `handler` as a coroutine on the Lua task runtime. The handler may yield; its result is discarded. Returns a `Reg` whose `:remove()` cancels the task — any in-flight `smelt.sleep` / `smelt.task.wait` raises `cancelled` and the coroutine unwinds.
+---@see smelt.task.wait
+---@type fun(handler: fun()): smelt.Reg
 smelt.spawn = nil
 
 return smelt
