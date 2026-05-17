@@ -1,5 +1,6 @@
 mod buffer;
 mod completer_bridge;
+pub(crate) mod editor;
 mod vim_bridge;
 
 pub(crate) use smelt_core::history::History;

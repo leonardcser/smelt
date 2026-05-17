@@ -28,16 +28,10 @@ use smelt_core::FrontendKind;
 use std::sync::Arc;
 
 use crossterm::{
-    cursor,
-    event::{
-        self, DisableBracketedPaste, DisableFocusChange, DisableMouseCapture, EnableBracketedPaste,
-        EnableFocusChange, EnableMouseCapture, EventStream,
-    },
-    terminal::{self, DisableLineWrap, EnableLineWrap, EnterAlternateScreen, LeaveAlternateScreen},
-    ExecutableCommand,
+    event::{self, EventStream},
+    terminal,
 };
 use std::collections::{HashMap, VecDeque};
-use std::io;
 
 use std::pin::Pin;
 use std::sync::Mutex;
@@ -108,6 +102,10 @@ pub struct TuiApp {
     pub(crate) timers: Timers,
     /// Confirm/dialog requests deferred while the user is still typing.
     pub(crate) pending_dialogs: VecDeque<DeferredDialog>,
+    /// Owned for the lifetime of `run()`. `None` outside that scope — the
+    /// test harness constructs a `TuiApp` without a real terminal and skips
+    /// claiming. `Drop` here restores the terminal even on panic.
+    pub(crate) terminal: Option<crate::term_setup::TuiTerminal>,
 }
 
 pub use well_known::{
@@ -440,6 +438,7 @@ impl TuiApp {
                 pending_chord: None,
             },
             pending_dialogs: VecDeque::new(),
+            terminal: None,
         }
     }
 
@@ -754,14 +753,11 @@ impl TuiApp {
         smelt_core::commands::set_command_resolver(|name| {
             crate::lua::try_with_app(|app| app.lua.has_command(name)).unwrap_or(false)
         });
-        terminal::enable_raw_mode().ok();
-        let _ = io::stdout().execute(EnterAlternateScreen);
-        // Disable DECAWM — writing to the bottom-right cell must not trigger auto-scroll.
-        let _ = io::stdout().execute(DisableLineWrap);
-        let _ = io::stdout().execute(cursor::Hide);
-        let _ = io::stdout().execute(EnableBracketedPaste);
-        let _ = io::stdout().execute(EnableFocusChange);
-        let _ = io::stdout().execute(EnableMouseCapture);
+        // RAII guard for the terminal envelope: raw mode + alt screen + mouse +
+        // bracketed paste + focus + DECAWM-off + hidden cursor. Lives as long
+        // as `run()`; `Drop` restores cooked mode and the normal screen, even
+        // on panic. Shell-outs go through `self.terminal.as_ref().suspended()`.
+        self.terminal = crate::term_setup::TuiTerminal::claim().ok();
 
         if !self.core.session.messages.is_empty() {
             self.restore_screen();
@@ -1125,13 +1121,8 @@ impl TuiApp {
         self.drain_cells_pending();
         self.save_session();
 
-        let _ = io::stdout().execute(DisableMouseCapture);
-        let _ = io::stdout().execute(EnableLineWrap);
-        let _ = io::stdout().execute(LeaveAlternateScreen);
-        let _ = io::stdout().execute(cursor::Show);
-        let _ = io::stdout().execute(DisableBracketedPaste);
-        let _ = io::stdout().execute(DisableFocusChange);
-        terminal::disable_raw_mode().ok();
+        // Drop the terminal guard last so any rendering above stays in TUI mode.
+        self.terminal = None;
     }
 }
 

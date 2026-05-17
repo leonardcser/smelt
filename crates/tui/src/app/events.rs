@@ -3,14 +3,8 @@ use crate::app::{CommandAction, EventOutcome, InputOutcome, TuiApp};
 use crate::input::{resolve_agent_esc, Action, EscAction};
 use crate::keymap::{self, KeyAction};
 use crate::smelt_term::UiHost;
-use crossterm::event::{KeyCode, KeyModifiers};
-use crossterm::{
-    event::{DisableMouseCapture, EnableMouseCapture, Event, KeyEvent},
-    terminal::{self, DisableLineWrap, EnableLineWrap, EnterAlternateScreen, LeaveAlternateScreen},
-    ExecutableCommand,
-};
+use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
 use protocol::Content;
-use std::io;
 
 impl TuiApp {
     // ── Terminal event dispatch ───────────────────────────────────────────
@@ -578,49 +572,31 @@ impl TuiApp {
     }
 
     fn edit_in_editor(&mut self) {
-        let editor = std::env::var("VISUAL")
-            .or_else(|_| std::env::var("EDITOR"))
-            .unwrap_or_else(|_| "vi".into());
-
-        let tmp = match tempfile::Builder::new().suffix(".md").tempfile() {
-            Ok(f) => f,
+        let req = match crate::input::editor::prepare(self.prompt_buf().source()) {
+            Ok(req) => req,
             Err(e) => {
-                self.notify_error(format!("tmpfile: {e}"));
+                self.notify_error(format!("editor: {e}"));
                 return;
             }
         };
-        if let Err(e) = std::fs::write(tmp.path(), self.prompt_buf().source()) {
-            self.notify_error(format!("write tmp: {e}"));
-            return;
-        }
-
-        // Suspend TUI for the editor.
-        let _ = io::stdout().execute(DisableMouseCapture);
-        let _ = io::stdout().execute(EnableLineWrap);
-        let _ = io::stdout().execute(LeaveAlternateScreen);
-        terminal::disable_raw_mode().ok();
-
-        let status = std::process::Command::new(&editor).arg(tmp.path()).status();
-
-        terminal::enable_raw_mode().ok();
-        let _ = io::stdout().execute(EnterAlternateScreen);
-        let _ = io::stdout().execute(DisableLineWrap);
-        let _ = io::stdout().execute(EnableMouseCapture);
-
-        match status {
-            Ok(s) if s.success() => match std::fs::read_to_string(tmp.path()) {
-                Ok(new) => {
-                    let mut pctx = crate::input::prompt_ctx_mut(&mut self.ui);
-                    self.input.replace_text(&mut pctx, new);
-                }
-                Err(e) => self.notify_error(format!("read tmp: {e}")),
-            },
-            Ok(s) => {
-                self.notify_error(format!("{editor} exited with {s}"));
+        let spawn = || {
+            std::process::Command::new(&req.program)
+                .args(&req.args)
+                .status()
+        };
+        let status = match self.terminal.as_ref() {
+            Some(t) => t.suspended(spawn),
+            None => spawn(),
+        };
+        // Vim et al re-show the hardware cursor and scribble over the alt
+        // screen; force a full repaint so the diff baseline is rebuilt.
+        self.ui.force_redraw();
+        match crate::input::editor::finalize(req, status) {
+            Ok(text) => {
+                let mut pctx = crate::input::prompt_ctx_mut(&mut self.ui);
+                self.input.replace_text(&mut pctx, text);
             }
-            Err(e) => {
-                self.notify_error(format!("{editor}: {e}"));
-            }
+            Err(msg) => self.notify_error(msg),
         }
     }
 
