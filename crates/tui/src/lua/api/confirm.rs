@@ -4,7 +4,7 @@
 //! The Lua side owns dialog orchestration (open the overlay, attach
 //! keymaps, route Submit / Dismiss) and composes the title / summary /
 //! preview buffers itself via `smelt.buf.set_styled_lines`,
-//! `smelt.syntax.render`, and friends. The request payload (tool name /
+//! `smelt.render.syntax`, and friends. The request payload (tool name /
 //! desc / args / options / approval patterns / outside dir / cwd label)
 //! flows through the `confirm_requested` cell, so the dialog reads it
 //! once via `smelt.cell("confirm_requested"):get()` instead of polling

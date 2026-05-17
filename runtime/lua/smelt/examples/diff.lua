@@ -1,5 +1,5 @@
 -- `/diff <filepath>` — side-by-side diff of <filepath> vs `git show HEAD:<filepath>`.
--- Demo of `smelt.diff.render_split` + `smelt.ui.layout.hbox`.
+-- Demo of `smelt.render.diff_split` + `smelt.ui.layout.hbox`.
 -- Not autoloaded; add `require("smelt.examples.diff")` to init.lua.
 
 local M = {}
@@ -77,7 +77,7 @@ local function open(filepath)
 	local left_buf = smelt.buf.new()
 	local right_buf = smelt.buf.new()
 
-	smelt.diff.render_split(left_buf, right_buf, {
+	smelt.render.diff_split(left_buf, right_buf, {
 		old = old_text,
 		new = new_text,
 		path = rel,

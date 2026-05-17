@@ -120,10 +120,10 @@ local function register_exit_plan_mode()
     summary = function(_) return "plan ready" end,
     render = function(args, output, width, buf)
       if output.is_error then
-        smelt.text.render(buf, output.content, { is_error = true })
+        smelt.render.text(buf, output.content, { is_error = true })
         return
       end
-      smelt.markdown.render(buf, args.plan_summary or "")
+      smelt.render.markdown(buf, args.plan_summary or "")
     end,
     execute = function(args)
       local summary = args.plan_summary or ""

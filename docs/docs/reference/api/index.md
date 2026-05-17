@@ -4,7 +4,7 @@
 
 Reference for every namespace exposed under the global `smelt` table. Signatures are derived from the Rust closure's argument tuple and return type, so the LuaCATS-style annotation always matches what mlua actually marshals.
 
-**Coverage:** 60 namespace(s), 225 function(s), 27 class(es), 9 alias(es).
+**Coverage:** 58 namespace(s), 225 function(s), 27 class(es), 9 alias(es).
 
 ## IDE completion
 
@@ -52,25 +52,37 @@ Requires a terminal UI; calling these from headless mode raises.
 - [`smelt`](index_smelt.md) — 4 function(s)
 - [`smelt.buf`](buf.md) — 1 function(s)
 - [`smelt.confirm`](confirm.md) — 3 function(s)
+<<<<<<< HEAD
 - [`smelt.diff`](diff.md) — 1 function(s)
+||||||| parent of 268b411e (feat(lua): collapse render APIs into smelt.render namespace)
+- [`smelt.diff`](diff.md) — 2 function(s)
+=======
+>>>>>>> 268b411e (feat(lua): collapse render APIs into smelt.render namespace)
 - [`smelt.engine`](engine.md) — 7 function(s)
 - [`smelt.history`](history.md) — 2 function(s)
 - [`smelt.keymap`](keymap.md) — 4 function(s)
-- [`smelt.markdown`](markdown.md) — 1 function(s)
 - [`smelt.metrics`](metrics.md) — 2 function(s)
 - [`smelt.metrics.perf`](metrics_perf.md) — 3 function(s)
 - [`smelt.model`](model.md) — 3 function(s)
-- [`smelt.notebook`](notebook.md) — 5 function(s)
+- [`smelt.notebook`](notebook.md) — 4 function(s)
 - [`smelt.overlay`](overlay.md) — 1 function(s)
 - [`smelt.paint`](paint.md) — 2 function(s)
 - [`smelt.permissions`](permissions.md) — 5 function(s)
 - [`smelt.picker`](picker.md) — 1 function(s)
 - [`smelt.prompt`](prompt.md) — 5 function(s)
+- [`smelt.render`](render.md) — 7 function(s)
 - [`smelt.session`](session.md) — 16 function(s)
 - [`smelt.settings`](settings.md) — 3 function(s)
 - [`smelt.statusline`](statusline.md) — 3 function(s)
+<<<<<<< HEAD
 - [`smelt.syntax`](syntax.md) — 1 function(s)
 - [`smelt.text`](text.md) — 2 function(s)
+||||||| parent of 268b411e (feat(lua): collapse render APIs into smelt.render namespace)
+- [`smelt.syntax`](syntax.md) — 2 function(s)
+- [`smelt.text`](text.md) — 2 function(s)
+=======
+- [`smelt.text`](text.md) — 1 function(s)
+>>>>>>> 268b411e (feat(lua): collapse render APIs into smelt.render namespace)
 - [`smelt.theme`](theme.md) — 6 function(s)
 - [`smelt.transcript`](transcript.md) — 1 function(s)
 - [`smelt.ui`](ui.md) — 2 function(s)

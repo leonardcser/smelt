@@ -85,7 +85,7 @@ end
 -- Build a leaf layout from a string. Common pattern for `render` callbacks.
 function smelt.layout.text(content, opts)
   local buf = smelt.buf.new()
-  smelt.text.render(buf, content or "", opts)
+  smelt.render.text(buf, content or "", opts)
   return smelt.layout.leaf(buf)
 end
 

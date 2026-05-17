@@ -1,21 +1,13 @@
-//! `smelt.text` bindings — visual-width measurement + dim/error
-//! body rendering into a Buffer using the same wrapping that the
-//! built-in tool render path uses for tool output.
+//! `smelt.text` — visual-width measurement. UiHost-only (because the
+//! width metric matches the TUI's terminal-cell column count). Render
+//! helpers live in `smelt.render`.
 
-use crate::content::to_buffer::render_into_buffer;
 use lua_doc_derive::lua_module;
 use mlua::prelude::*;
-use smelt_core::content::wrap::wrap_line;
 use smelt_core::lua::doc::register_ui_fn;
-use smelt_core::theme::intern;
 use unicode_width::UnicodeWidthStr;
 
-use super::buf::LuaBuf;
-
-#[lua_module(
-    name = "smelt.text",
-    doc = "Visual-width measurement and dim/error body rendering into a Buffer. UiHost-only."
-)]
+#[lua_module(name = "smelt.text", doc = "Visual-width measurement. UiHost-only.")]
 pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
     let text = lua.create_table()?;
     register_ui_fn(
@@ -27,51 +19,6 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
         lua,
         |_, s: String| Ok(UnicodeWidthStr::width(s.as_str()) as u64),
     )?;
-
-    register_ui_fn(
-        &text,
-        "smelt.text",
-        "render",
-        "Paint plain text into a buffer with the dim/error body styling that the built-in tool render path uses. `opts.is_error = true` switches to the error-message highlight group.",
-        &["buf", "content", "opts"],
-        lua,
-        |_, (buf, content, opts): (LuaBuf, String, Option<mlua::Table>)|  -> LuaResult<()>{
-            let is_error = opts
-                .as_ref()
-                .and_then(|t| t.get::<Option<bool>>("is_error").ok().flatten())
-                .unwrap_or(false);
-            crate::lua::with_app(|app| {
-                let theme_snap = app.ui.theme().clone();
-                let width = crate::content::term_width() as u16;
-                if let Some(buf) = app.ui.buf_mut(buf.id) {
-                    render_into_buffer(buf, width, &theme_snap, |sink| {
-                        let max_cols = (width as usize).saturating_sub(3);
-                        for line in content.lines() {
-                            let expanded = line.replace('\t', "    ");
-                            let segs = wrap_line(&expanded, max_cols);
-                            if segs.len() > 1 {
-                                sink.mark_wrapped();
-                            }
-                            for seg in &segs {
-                                if is_error {
-                                    sink.push_hl(intern("ErrorMsg"));
-                                    sink.print(&format!("  {}", seg));
-                                    sink.pop_style();
-                                } else {
-                                    sink.push_dim();
-                                    sink.print(&format!("  {}", seg));
-                                    sink.pop_style();
-                                }
-                                sink.newline();
-                            }
-                        }
-                    });
-                }
-            });
-            Ok(())
-        },
-    )?;
-
     smelt.set("text", text)?;
     Ok(())
 }

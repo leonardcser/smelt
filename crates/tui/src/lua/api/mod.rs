@@ -3,11 +3,9 @@
 
 mod buf;
 mod confirm;
-mod diff;
 mod engine;
 mod history;
 mod keymap;
-mod markdown;
 mod metrics;
 mod model;
 mod notebook;
@@ -16,10 +14,10 @@ mod paint;
 mod permissions;
 mod picker;
 mod prompt;
+mod render;
 mod session;
 mod settings;
 mod statusline;
-mod syntax;
 mod text;
 mod theme;
 mod transcript;
@@ -64,10 +62,8 @@ impl LuaRuntime {
         confirm::register(lua, &smelt)?;
         notebook::register(lua, &smelt)?;
         paint::register(lua, &smelt, shared)?;
-        diff::register(lua, &smelt)?;
-        syntax::register(lua, &smelt)?;
+        render::register(lua, &smelt)?;
         text::register(lua, &smelt)?;
-        markdown::register(lua, &smelt)?;
         engine::register(lua, &smelt, shared)?;
         history::register(lua, &smelt)?;
         keymap::register(lua, &smelt_keymap, shared)?;
