@@ -26,6 +26,8 @@ use smelt_core::lua::doc::Tier;
 use smelt_core::lua::module::LuaMod;
 use smelt_core::transcript_model::{ApprovalScope, ConfirmChoice, ConfirmRequest};
 
+use super::buf::LuaBuf;
+
 /// Register `smelt.confirm.*` primitives.
 pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
     let m = LuaMod::under(
@@ -106,9 +108,9 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
     // preview or the callback returned nil / an invalid value.
     m.fn_(
         "__render_preview",
-        "smelt.confirm.__render_preview(buf_id, handle_id) → bool. Calls the tool's `preview(args) -> smelt.layout` callback if registered, then renders the returned layout into the dialog's preview buffer. Returns false if none registered or the callback returned nil.",
-        &["buf_id", "handle_id"],
-        |_, (buf_id, handle_id): (u64, u64)| -> LuaResult<bool> {
+        "smelt.confirm.__render_preview(buf, handle_id) → bool. Calls the tool's `preview(args) -> smelt.layout` callback if registered, then renders the returned layout into the dialog's preview buffer. Returns false if none registered or the callback returned nil.",
+        &["buf", "handle_id"],
+        |_, (buf, handle_id): (LuaBuf, u64)| -> LuaResult<bool> {
 
             let req = match crate::lua::with_app(|app| {
                 app.core
@@ -120,7 +122,7 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
                 None => return Ok(false),
             };
             Ok(
-                crate::lua::try_with_app(|app| render_preview_into(app, buf_id, &req.0, &req.1))
+                crate::lua::try_with_app(|app| render_preview_into(app, buf.id, &req.0, &req.1))
                     .unwrap_or(false),
             )
 
@@ -210,7 +212,7 @@ fn outside_dir_string(req: &ConfirmRequest) -> String {
 /// 2-cell tool-block gutter, since the dialog's preview pane owns its own chrome.
 fn render_preview_into(
     app: &mut crate::app::TuiApp,
-    buf_id: u64,
+    buf_id: crate::smelt_term::BufId,
     tool_name: &str,
     args: &std::collections::HashMap<String, serde_json::Value>,
 ) -> bool {
@@ -220,7 +222,7 @@ fn render_preview_into(
     let rendered = crate::app::transcript::extract_rendered_layout(&layout, &mut app.ui);
     let theme = app.ui.theme().clone();
     let width = crate::content::term_width() as u16;
-    let Some(buf) = app.ui.buf_mut(crate::smelt_term::BufId(buf_id)) else {
+    let Some(buf) = app.ui.buf_mut(buf_id) else {
         return false;
     };
     crate::content::to_buffer::render_into_buffer(buf, width, &theme, |sink| {
