@@ -243,11 +243,15 @@ function smelt.fs.write_async(path, contents)
   return false, result.err
 end
 
--- Run `cmd` with `args` off the main thread. Same yielding rules as the
--- other `*_async` helpers — must be called from inside `smelt.spawn(fn)`
--- or a `tool.execute`. `opts` accepts `cwd`, `env`, `timeout_secs`,
--- `stdin`. Returns `({ stdout, stderr, exit_code, timed_out }, nil)` on
--- success or `(nil, err)` on failure — mirrors `smelt.process.run`.
+-- Run `cmd` with `args` off the main thread. Must be called from inside
+-- `smelt.spawn(fn)` or a `tool.execute`. `opts` accepts `cwd`, `env`,
+-- `timeout_secs`, `stdin`. Returns
+-- `({ stdout, stderr, exit_code, timed_out }, nil)` on success or
+-- `(nil, err)` on spawn failure. If the calling coroutine is cancelled
+-- (e.g. by `smelt.task.timeout` or by `:remove()` on the parent spawn),
+-- the child process is killed (SIGTERM to its process group) and
+-- `smelt.task.external` raises `cancelled` — same shape as every other
+-- yielding API.
 -- @sig fun(cmd: string, args: string[]?, opts: table?): { stdout: string, stderr: string, exit_code: integer, timed_out: boolean }?, string?
 function smelt.process.run_async(cmd, args, opts)
   local result = smelt.task.external(function(id) smelt.process.__run_async_start(id, cmd, args, opts) end)

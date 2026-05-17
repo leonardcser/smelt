@@ -103,6 +103,111 @@ where
     }
 }
 
+/// Async variant of [`run`] that honors a `CancellationToken`. The
+/// caller can short-circuit a long-running child by cancelling the
+/// token — the child's process group receives SIGTERM (then SIGKILL on
+/// the standard escalation) and the future resolves with
+/// `RunOutcome::Cancelled` once the wait completes. Stdout/stderr are
+/// read concurrently so the child can't deadlock on a full pipe.
+pub(crate) async fn run_async(
+    cmd: &str,
+    args: &[String],
+    opts: &Options,
+    cancel: CancellationToken,
+) -> io::Result<RunOutcome> {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    let mut command = tokio::process::Command::new(cmd);
+    command.args(args);
+    if let Some(cwd) = &opts.cwd {
+        command.current_dir(cwd);
+    }
+    for (k, v) in &opts.env {
+        command.env(k, v);
+    }
+    let stdin_kind = if opts.stdin.is_some() {
+        Stdio::piped()
+    } else {
+        Stdio::null()
+    };
+    command
+        .stdin(stdin_kind)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    #[cfg(unix)]
+    command.process_group(0);
+
+    let mut child = command.spawn()?;
+
+    if let (Some(text), Some(mut stdin)) = (opts.stdin.as_ref(), child.stdin.take()) {
+        let _ = stdin.write_all(text.as_bytes()).await;
+        // `stdin` drops here, closing the pipe so the child sees EOF.
+    }
+
+    let mut stdout = child.stdout.take().expect("stdout piped");
+    let mut stderr = child.stderr.take().expect("stderr piped");
+    let stdout_task = tokio::spawn(async move {
+        let mut buf = String::new();
+        let _ = stdout.read_to_string(&mut buf).await;
+        buf
+    });
+    let stderr_task = tokio::spawn(async move {
+        let mut buf = String::new();
+        let _ = stderr.read_to_string(&mut buf).await;
+        buf
+    });
+
+    let timeout = opts.timeout.unwrap_or(Duration::from_secs(30));
+    let deadline = tokio::time::sleep(timeout);
+    tokio::pin!(deadline);
+
+    tokio::select! {
+        biased;
+        _ = cancel.cancelled() => {
+            kill_process_group(&child);
+            let _ = child.wait().await;
+            let _ = stdout_task.await;
+            let _ = stderr_task.await;
+            Ok(RunOutcome::Cancelled)
+        }
+        _ = &mut deadline => {
+            kill_process_group(&child);
+            let _ = child.wait().await;
+            let stdout_buf = stdout_task.await.unwrap_or_default();
+            let stderr_buf = stderr_task.await.unwrap_or_default();
+            let stderr_msg = if stderr_buf.is_empty() {
+                format!("process timed out after {}s", timeout.as_secs())
+            } else {
+                stderr_buf
+            };
+            Ok(RunOutcome::Done(Output {
+                stdout: stdout_buf,
+                stderr: stderr_msg,
+                exit_code: -1,
+                timed_out: true,
+            }))
+        }
+        status = child.wait() => {
+            let stdout_buf = stdout_task.await.unwrap_or_default();
+            let stderr_buf = stderr_task.await.unwrap_or_default();
+            Ok(RunOutcome::Done(Output {
+                stdout: stdout_buf,
+                stderr: stderr_buf,
+                exit_code: status?.code().unwrap_or(-1),
+                timed_out: false,
+            }))
+        }
+    }
+}
+
+/// Result of [`run_async`]: `Done` for natural completion or timeout,
+/// `Cancelled` when the cancellation token fired and the child was
+/// killed before producing a status.
+pub(crate) enum RunOutcome {
+    Done(Output),
+    Cancelled,
+}
+
 #[derive(Debug, Clone)]
 pub struct StreamOutput {
     /// stdout + stderr lines interleaved in arrival order, joined by '\n'.

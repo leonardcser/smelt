@@ -354,22 +354,39 @@ end)
 -- later: reg:remove()
 ```
 
-## Off-thread filesystem I/O
+## Off-thread filesystem and process I/O
 
-For large reads/writes that would otherwise block the main loop, use the
-async variants. They yield through the task runtime, so they must run
-inside `smelt.spawn(fn)` or a `tool.execute` body:
+For large reads/writes/subprocess invocations that would otherwise block
+the main loop, use the async variants. They yield through the task
+runtime, so they must run inside `smelt.spawn(fn)` or a `tool.execute`
+body:
 
 ```lua
 smelt.spawn(function()
   local content, err = smelt.fs.read_async("/path/to/big.json")
-  if not content then return smelt.log.error(err) end
-  local ok, err2 = smelt.fs.write_async("/tmp/out", transform(content))
+  if not content then return io.stderr:write(err) end
+  local ok = smelt.fs.write_async("/tmp/out", transform(content))
+
+  local out = smelt.process.run_async("ripgrep", { "TODO", "." })
+  if out then print(out.stdout) end
 end)
 ```
 
-The sync `smelt.fs.read` / `smelt.fs.write` stay fine for small files and
-config-time reads.
+The sync `smelt.fs.read` / `smelt.fs.write` / `smelt.process.run` stay
+fine for small files and config-time reads.
+
+**Cancellation semantics.** When the calling coroutine is cancelled
+(`smelt.task.timeout` deadline, `smelt.task.race` loser, or
+`:remove()` on the spawn Reg), every yielding API raises `cancelled`
+and unwinds. The underlying work differs by kind:
+
+- `smelt.process.run_async` — the child's process group receives
+  SIGTERM; the future resolves once the kill completes.
+- `smelt.fs.read_async` / `smelt.fs.write_async` — the std::fs call
+  can't be interrupted mid-syscall, so the worker thread runs to
+  completion and the result is discarded. Bounded waste (file-size
+  dependent); no external side effects leak.
+- `smelt.sleep` / `smelt.task.wait` — instantaneous.
 
 ## Pickers
 
