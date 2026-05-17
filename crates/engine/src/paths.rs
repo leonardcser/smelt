@@ -278,6 +278,7 @@ mod tests {
     // ---- git_root / git_branch (best-effort, depends on the test workspace being a git repo) ----
 
     #[test]
+    #[serial]
     fn git_root_returns_some_inside_repo_and_none_outside() {
         let cwd = std::env::current_dir().unwrap();
         // The crate's own repo; should return some path under the workspace.
@@ -290,6 +291,7 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn git_root_returns_none_when_root_equals_home() {
         // Spoof HOME to equal git's --show-toplevel by setting HOME to the actual git root.
         let cwd = std::env::current_dir().unwrap();
