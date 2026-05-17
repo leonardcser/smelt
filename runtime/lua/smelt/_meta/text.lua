@@ -8,7 +8,7 @@
 local text = {}
 
 --- Paint plain text into a buffer with the dim/error body styling that the built-in tool render path uses. `opts.is_error = true` switches to the error-message highlight group.
----@type fun(buf: integer, content: string, opts: table?): nil
+---@type fun(buf: smelt.buf.Buf, content: string, opts: table?): nil
 text.render = nil
 
 --- Return the visual column count of `s`. Lua's `#s` counts bytes; use this for sizing extmark ranges or computing column offsets so multi-byte and wide characters land correctly.

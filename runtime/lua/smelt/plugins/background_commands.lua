@@ -199,7 +199,7 @@ smelt.cmd.register("ps", function()
         panels = { { leaf = options_leaf } },
         keymaps = {
           { key = "bs", hint = "\u{232b}: kill selected", on_press = function(ctx)
-            local idx = (smelt.win.cursor_row(options_leaf) or 0) + 1
+            local idx = (options_leaf:cursor() or 0) + 1
             local target = snapshot[idx]
             if target then
               smelt.process.kill(target.id)

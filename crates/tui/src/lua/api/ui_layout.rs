@@ -1,7 +1,7 @@
 //! `smelt.ui.layout` — composable layout-tree primitives for overlays.
 //!
 //! Plugins build a layout tree from `leaf` / `vbox` / `hbox` and hand it to
-//! `smelt.ui.overlay.open` via `opts.layout`. Each node is opaque userdata;
+//! `smelt.overlay.new` via `opts.layout`. Each node is opaque userdata;
 //! you can nest containers arbitrarily for multi-pane overlays (side-by-side
 //! diffs, master/detail, etc).
 //!
@@ -19,7 +19,7 @@ use smelt_core::lua::lua_type::LuaType;
 use smelt_term::Line;
 
 /// A node in an overlay's layout tree. Built up in Lua via the layout
-/// constructors and consumed by `smelt.ui.overlay.open`.
+/// constructors and consumed by `smelt.overlay.new`.
 #[derive(Clone)]
 pub(crate) enum LayoutNode {
     /// A window/paint id leaf. Resolution to `WinId` vs `PaintId` happens at
@@ -72,6 +72,28 @@ impl LuaType for LuaUiLayout {
     }
 }
 
+/// Resolve a `smelt.ui.layout.leaf(target)` argument to the raw u64 id
+/// stored in the layout node. Accepts a `Win` userdata, a paint id
+/// integer, or — as a convenience — a raw win/paint integer (legacy).
+fn resolve_leaf_target(target: &mlua::Value) -> mlua::Result<u64> {
+    match target {
+        mlua::Value::UserData(ud) => {
+            if let Ok(w) = ud.borrow::<super::win::LuaWin>() {
+                return Ok(w.id.0);
+            }
+            Err(mlua::Error::external(
+                "smelt.ui.layout.leaf: expected a Win handle or paint id",
+            ))
+        }
+        mlua::Value::Integer(i) => Ok(*i as u64),
+        mlua::Value::Number(n) => Ok(*n as u64),
+        other => Err(mlua::Error::external(format!(
+            "smelt.ui.layout.leaf: expected Win handle or integer, got {}",
+            other.type_name()
+        ))),
+    }
+}
+
 /// Pull `border` / `title` off any node-builder opts table.
 fn parse_node_chrome(opts: Option<&mlua::Table>, ctx: &str) -> Result<NodeChrome, String> {
     let Some(t) = opts else {
@@ -113,7 +135,7 @@ fn parse_items(t: &mlua::Table, axis_key: &str, ctx: &str) -> mlua::Result<Vec<L
 
 #[lua_module(
     name = "smelt.ui.layout",
-    doc = "Composable layout-tree primitives (leaf/vbox/hbox) for overlays. The resulting userdata is passed to `smelt.ui.overlay.open` via `opts.layout`."
+    doc = "Composable layout-tree primitives (leaf/vbox/hbox) for overlays. The resulting userdata is passed to `smelt.overlay.new` via `opts.layout`."
 )]
 pub(super) fn register(lua: &Lua, smelt_ui: &mlua::Table) -> LuaResult<()> {
     let tbl = lua.create_table()?;
@@ -122,10 +144,11 @@ pub(super) fn register(lua: &Lua, smelt_ui: &mlua::Table) -> LuaResult<()> {
         &tbl,
         "smelt.ui.layout",
         "leaf",
-        "Wrap a window or paint id into a leaf node. `opts` accepts `border`, `title`, `collapse_when_empty` (force the slot to zero size when the wrapped window's buffer is empty).",
-        &["id", "opts"],
+        "Wrap a Win handle or paint id into a leaf node. `opts` accepts `border`, `title`, `collapse_when_empty` (force the slot to zero size when the wrapped window's buffer is empty).",
+        &["win_or_paint", "opts"],
         lua,
-        |_, (id, opts): (u64, Option<mlua::Table>)| -> LuaResult<LuaUiLayout> {
+        |_, (target, opts): (mlua::Value, Option<mlua::Table>)| -> LuaResult<LuaUiLayout> {
+            let raw_id = resolve_leaf_target(&target)?;
             let chrome = parse_node_chrome(opts.as_ref(), "smelt.ui.layout.leaf")
                 .map_err(mlua::Error::external)?;
             let collapse_when_empty = opts
@@ -133,7 +156,7 @@ pub(super) fn register(lua: &Lua, smelt_ui: &mlua::Table) -> LuaResult<()> {
                 .and_then(|t| t.get::<bool>("collapse_when_empty").ok())
                 .unwrap_or(false);
             Ok(LuaUiLayout(LayoutNode::Leaf {
-                raw_id: id,
+                raw_id,
                 chrome,
                 collapse_when_empty,
             }))

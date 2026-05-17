@@ -4,7 +4,7 @@
 
 **Tier:** `UiHost` — Requires a terminal UI; calling these from headless mode raises.
 
-Composable layout-tree primitives (leaf/vbox/hbox) for overlays. The resulting userdata is passed to `smelt.ui.overlay.open` via `opts.layout`.
+Composable layout-tree primitives (leaf/vbox/hbox) for overlays. The resulting userdata is passed to `smelt.overlay.new` via `opts.layout`.
 
 ## `smelt.ui.layout.hbox`
 
@@ -17,10 +17,10 @@ Horizontal container. `items` is an array of `{ child_layout, width = <constrain
 ## `smelt.ui.layout.leaf`
 
 ```lua
-fun(id: integer, opts: table?): smelt.ui.layout
+fun(win_or_paint: any, opts: table?): smelt.ui.layout
 ```
 
-Wrap a window or paint id into a leaf node. `opts` accepts `border`, `title`, `collapse_when_empty` (force the slot to zero size when the wrapped window's buffer is empty).
+Wrap a Win handle or paint id into a leaf node. `opts` accepts `border`, `title`, `collapse_when_empty` (force the slot to zero size when the wrapped window's buffer is empty).
 
 ## `smelt.ui.layout.vbox`
 

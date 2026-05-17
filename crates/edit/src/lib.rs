@@ -2351,7 +2351,7 @@ mod tests {
             }
         ));
         // Mark the leaf non-focusable (matches `perf_panel.lua`'s
-        // `smelt.win.open(buf, { focusable = false })`).
+        // `smelt.win.new(buf, { focusable = false })`).
         ui.win_mut(leaf).unwrap().focusable = false;
 
         let perf_layout = LayoutTree::hbox(vec![(

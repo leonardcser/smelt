@@ -4,7 +4,7 @@
 
 Reference for every namespace exposed under the global `smelt` table. Signatures are derived from the Rust closure's argument tuple and return type, so the LuaCATS-style annotation always matches what mlua actually marshals.
 
-**Coverage:** 58 namespace(s), 260 function(s), 22 class(es), 9 alias(es).
+**Coverage:** 59 namespace(s), 232 function(s), 27 class(es), 9 alias(es).
 
 ## IDE completion
 
@@ -48,8 +48,8 @@ Available in every runtime, including headless mode.
 
 Requires a terminal UI; calling these from headless mode raises.
 
-- [`smelt`](index_smelt.md) — 2 function(s)
-- [`smelt.buf`](buf.md) — 11 function(s)
+- [`smelt`](index_smelt.md) — 4 function(s)
+- [`smelt.buf`](buf.md) — 1 function(s)
 - [`smelt.confirm`](confirm.md) — 3 function(s)
 - [`smelt.diff`](diff.md) — 1 function(s)
 - [`smelt.engine`](engine.md) — 7 function(s)
@@ -60,8 +60,10 @@ Requires a terminal UI; calling these from headless mode raises.
 - [`smelt.metrics.perf`](metrics_perf.md) — 3 function(s)
 - [`smelt.model`](model.md) — 3 function(s)
 - [`smelt.notebook`](notebook.md) — 5 function(s)
+- [`smelt.overlay`](overlay.md) — 1 function(s)
 - [`smelt.paint`](paint.md) — 2 function(s)
 - [`smelt.permissions`](permissions.md) — 5 function(s)
+- [`smelt.picker`](picker.md) — 1 function(s)
 - [`smelt.prompt`](prompt.md) — 5 function(s)
 - [`smelt.session`](session.md) — 16 function(s)
 - [`smelt.settings`](settings.md) — 3 function(s)
@@ -70,13 +72,12 @@ Requires a terminal UI; calling these from headless mode raises.
 - [`smelt.text`](text.md) — 2 function(s)
 - [`smelt.theme`](theme.md) — 6 function(s)
 - [`smelt.transcript`](transcript.md) — 1 function(s)
-- [`smelt.ui`](ui.md) — 7 function(s)
+- [`smelt.ui`](ui.md) — 2 function(s)
+- [`smelt.ui.ghost`](ui_ghost.md) — 2 function(s)
 - [`smelt.ui.layout`](ui_layout.md) — 3 function(s)
-- [`smelt.ui.overlay`](ui_overlay.md) — 2 function(s)
-- [`smelt.ui.picker`](ui_picker.md) — 1 function(s)
 - [`smelt.ui.spinner`](ui_spinner.md) — 2 function(s)
 - [`smelt.vim`](vim.md) — 2 function(s)
-- [`smelt.win`](win.md) — 17 function(s)
+- [`smelt.win`](win.md) — 1 function(s)
 
 ## Types
 

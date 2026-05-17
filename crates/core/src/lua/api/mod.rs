@@ -21,7 +21,7 @@ mod grep;
 mod html;
 mod http;
 mod image;
-pub(crate) mod layout;
+pub mod layout;
 mod mcp;
 mod messages;
 pub mod mode;

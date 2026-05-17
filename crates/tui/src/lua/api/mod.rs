@@ -11,8 +11,10 @@ mod markdown;
 mod metrics;
 mod model;
 mod notebook;
+mod overlay;
 mod paint;
 mod permissions;
+mod picker;
 mod prompt;
 mod session;
 mod settings;
@@ -24,7 +26,7 @@ mod transcript;
 mod ui;
 pub(crate) mod ui_layout;
 pub(crate) mod vim;
-mod win;
+pub(crate) mod win;
 
 use super::{LuaRuntime, LuaShared};
 use mlua::prelude::*;
@@ -53,6 +55,8 @@ impl LuaRuntime {
         // UiHost-tier bindings
         buf::register(lua, &smelt, shared)?;
         win::register(lua, &smelt, shared)?;
+        overlay::register(lua, &smelt)?;
+        picker::register(lua, &smelt)?;
         self::ui::register(lua, &smelt_ui)?;
         prompt::register(lua, &smelt)?;
         theme::register(lua, &smelt)?;
@@ -76,6 +80,39 @@ impl LuaRuntime {
         vim::register(lua, &smelt)?;
 
         smelt.set("keymap", smelt_keymap)?;
+
+        // Override `smelt.layout.leaf` so it accepts a `Buf` userdata in
+        // addition to the raw `u64` the host-tier registration accepts.
+        // Tools' `render` callbacks now own Buf handles, not numeric ids.
+        let layout_tbl: mlua::Table = smelt.get("layout")?;
+        register_ui_fn(
+            &layout_tbl,
+            "smelt.layout",
+            "leaf",
+            "Wrap a `Buf` handle (or raw buf id) into a leaf block layout that renders the buffer's contents in place.",
+            &["buf"],
+            lua,
+            |_, buf: mlua::Value| -> LuaResult<smelt_core::lua::api::layout::LuaBlockLayout> {
+                let id = match buf {
+                    mlua::Value::Integer(n) => smelt_core::buffer::BufId(n as u64),
+                    mlua::Value::UserData(ud) => ud.borrow::<buf::LuaBuf>()?.id,
+                    other => {
+                        return Err(mlua::Error::FromLuaConversionError {
+                            from: other.type_name(),
+                            to: "smelt.buf.Buf or integer".into(),
+                            message: Some(
+                                "smelt.layout.leaf: expected a Buf userdata or integer".into(),
+                            ),
+                        });
+                    }
+                };
+                Ok(smelt_core::lua::api::layout::LuaBlockLayout(
+                    smelt_core::content::block_layout::BlockLayout::Leaf(
+                        smelt_core::content::block_layout::LuaLeaf::Buf(id),
+                    ),
+                ))
+            },
+        )?;
 
         // Cross-cutting UiHost-tier additions to host modules.
         let cmd_tbl: mlua::Table = smelt.get("cmd")?;
@@ -139,6 +176,32 @@ impl LuaRuntime {
             |_, msg: String| -> LuaResult<()> {
                 crate::lua::with_app(|app| app.notify_error(msg));
                 Ok(())
+            },
+        )?;
+        register_ui_fn(
+            &smelt,
+            "smelt",
+            "ns",
+            "Look up or allocate a stable namespace id for `name`. Namespaces scope `buf:mark` / `buf:clear_ns` calls so plugins can repaint their region without disturbing others.",
+            &["name"],
+            lua,
+            |_, name: String| -> LuaResult<u32> {
+                Ok(smelt_core::buffer::create_namespace(&name).0)
+            },
+        )?;
+        register_ui_fn(
+            &smelt,
+            "smelt",
+            "focus",
+            "Return which top-level pane currently has focus: `\"transcript\"` or `\"prompt\"`.",
+            &[],
+            lua,
+            |_, ()| -> LuaResult<String> {
+                Ok(crate::lua::try_with_app(|app| match app.app_focus {
+                    crate::app::AppFocus::Content => "transcript".to_string(),
+                    crate::app::AppFocus::Prompt => "prompt".to_string(),
+                })
+                .unwrap_or_default())
             },
         )?;
         register_ui_fn(

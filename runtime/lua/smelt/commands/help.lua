@@ -1,6 +1,6 @@
 -- Built-in /help command. Centered info viewer of all keybindings.
 
-local NS_DIM = smelt.buf.create_namespace("smelt.help.dim")
+local NS_DIM = smelt.ns("smelt.help.dim")
 
 local function build_layout(sections)
   local max_label = 0
@@ -34,25 +34,25 @@ smelt.cmd.register("help", function()
     local sections = smelt.keymap.help()
     local lines, detail_byte_cols = build_layout(sections)
 
-    local buf = smelt.buf.create({ readonly = true })
-    smelt.buf.set_lines(buf, lines)
+    local buf = smelt.buf.new({ readonly = true })
+    buf:lines(lines)
     for i, line in ipairs(lines) do
       local col = detail_byte_cols[i]
       if col < #line then
-        smelt.buf.set_extmark(buf, NS_DIM, i, col, { end_col = #line, dim = true })
+        buf:mark(NS_DIM, i, col, { end_col = #line, dim = true })
       end
     end
     -- `selectable = true` so mouse click-and-drag highlights text the same way
     -- it does in the transcript; vim_enabled tracks the user's global setting so
     -- non-vim users don't get dropped into normal mode here.
-    local leaf = smelt.win.open(buf, {
+    local leaf = smelt.win.new(buf, {
       region      = "dialog_overlay",
       focusable   = true,
       selectable  = true,
       vim_enabled = smelt.settings.vim and true or false,
     })
 
-    smelt.ui.overlay.open({
+    smelt.overlay.new({
       title  = { { text = " help ", bold = true } },
       anchor = "center",
       border = { all = "Comment" },
@@ -61,10 +61,10 @@ smelt.cmd.register("help", function()
     })
 
     local task_id = smelt.task.alloc()
-    local function close() smelt.win.close(leaf); smelt.task.resume(task_id, nil) end
-    smelt.win.set_keymap(leaf, "q", close)
-    smelt.win.set_keymap(leaf, "?", close)
-    smelt.win.on_event(leaf, "dismiss", close)
+    local function close() leaf:close(); smelt.task.resume(task_id, nil) end
+    leaf:key("q", close)
+    leaf:key("?", close)
+    leaf:on("dismiss", close)
     smelt.task.wait(task_id)
   end)
 end, { desc = "show keybindings" })
@@ -76,7 +76,7 @@ end, { desc = "show keybindings" })
 -- context — `?` opens help even when the prompt has content. Returning false
 -- passes the keystroke through to the buffer so it lands as a real `?`.
 smelt.keymap.set("", "?", function()
-  if smelt.win.focus() == "prompt" then
+  if smelt.focus() == "prompt" then
     local vim_mode = smelt.vim.mode()
     local typing = vim_mode == nil or vim_mode == "insert"
     if typing then

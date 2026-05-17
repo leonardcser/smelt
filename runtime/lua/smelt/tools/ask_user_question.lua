@@ -87,7 +87,7 @@ smelt.tools.register({
       local other_leaf, other_buf = smelt.ui.dialog.input("or type a custom answer...")
 
       local typed_other = false
-      smelt.win.on_event(other_leaf, "text_changed", function() typed_other = true end)
+      other_leaf:on("text_changed", function() typed_other = true end)
 
       local result = smelt.ui.dialog.open({
         title        = title,
@@ -100,13 +100,13 @@ smelt.tools.register({
         },
         on_submit = function(ctx)
           if typed_other then
-            local custom = smelt.buf.get_line(other_buf, 1) or ""
+            local custom = other_buf:line(1) or ""
             if custom ~= "" then
               ctx.resolve({ custom = custom })
               return
             end
           end
-          local idx = (smelt.win.cursor_row(options_leaf) or 0) + 1
+          local idx = (options_leaf:cursor() or 0) + 1
           ctx.resolve({ option = idx })
         end,
       })

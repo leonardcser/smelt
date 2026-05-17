@@ -5,7 +5,7 @@
 -- directly.
 --
 -- The dialog primitive does not know what's inside it. Consumers build their own
--- buffers and leaves (using the helpers below or `smelt.win.open` directly) and pass
+-- buffers and leaves (using the helpers below or `smelt.win.new` directly) and pass
 -- the leaves in `opts.panels`. Dialog handles only:
 --   1. Opening the overlay at dock_bottom with a top border.
 --   2. Setting initial focus.
@@ -18,7 +18,7 @@
 --     of which panel is focused. Use these for shortcuts that should always work in
 --     the dialog (e.g. Alt-W, Ctrl-D).
 --   - To scope a key to a specific panel, install it directly on that leaf via
---     `smelt.win.set_keymap(leaf, key, fn)` after `open_handle` returns. Example:
+--     `leaf:key(key, fn)` after `open_handle` returns. Example:
 --     the confirm dialog binds `tab` only on the options leaf (jump into the
 --     reason input) and `esc` only on the reason leaf (pop focus back to the
 --     options leaf instead of dismissing the dialog).
@@ -44,7 +44,7 @@ local REGION = "dialog_overlay"
 -- helpers and handed to `smelt.ui.dialog.open` must follow the same rule.
 --
 -- Scrollbars: buffer-viewer leaves (`markdown`, `content`) inherit the default
--- `scrollbar = true` from `smelt.win.open` so a thumb appears when content
+-- `scrollbar = true` from `smelt.win.new` so a thumb appears when content
 -- overflows. Cursor-driven leaves (`input`, `options`, `list`) opt out — the
 -- selection cursor and key nav already convey position.
 
@@ -52,19 +52,20 @@ local GUTTER = 1
 
 function smelt.ui.dialog.input(placeholder, opts)
   opts = opts or {}
-  local buf = smelt.buf.create()
-  smelt.buf.set_lines(buf, { "" })
+  local buf = smelt.buf.new()
+  buf:lines({ "" })
   -- Single-line input: wrap=false keeps long entries on one row so the caret
   -- can scroll horizontally instead of jumping to a wrapped continuation.
   -- `opts.pad_left` / `opts.pad_right` override the dialog gutter for callers
   -- that want extra indent (e.g. nested inputs visually grouped under a list).
-  local leaf = smelt.win.open(buf, {
+  local leaf = smelt.win.new(buf, {
     region = REGION, focusable = true, selectable = true,
     pad_left = opts.pad_left or GUTTER,
     pad_right = opts.pad_right or GUTTER,
     scrollbar = false, wrap = false,
+    kind = "input",
+    placeholder = placeholder or "",
   })
-  if leaf then smelt.win.configure_input(leaf, placeholder or "") end
   return leaf, buf
 end
 
@@ -73,21 +74,20 @@ function smelt.ui.dialog.options(labels, opts)
   local lines = {}
   for _, l in ipairs(labels or {}) do table.insert(lines, l) end
   if #lines == 0 then lines = { "" } end
-  local buf = smelt.buf.create()
-  smelt.buf.set_lines(buf, lines)
-  local leaf = smelt.win.open(buf, {
-    region     = REGION,
-    focusable  = true,
-    selectable = true,
-    pad_left   = GUTTER,
-    pad_right  = GUTTER,
-    scrollbar  = false,
+  local buf = smelt.buf.new()
+  buf:lines(lines)
+  local selected = tonumber(opts.selected or 1) or 1
+  if selected < 1 then selected = 1 end
+  local leaf = smelt.win.new(buf, {
+    region        = REGION,
+    focusable     = true,
+    selectable    = true,
+    pad_left      = GUTTER,
+    pad_right     = GUTTER,
+    scrollbar     = false,
+    kind          = "list",
+    initial_cursor = selected - 1,
   })
-  if leaf then
-    local selected = tonumber(opts.selected or 1) or 1
-    if selected < 1 then selected = 1 end
-    smelt.win.configure_list(leaf, selected - 1)
-  end
   return leaf, buf
 end
 
@@ -95,11 +95,12 @@ function smelt.ui.dialog.list(buf, opts)
   opts = opts or {}
   local focusable = opts.focusable
   if focusable == nil then focusable = true end
-  local leaf = smelt.win.open(buf, {
+  local leaf = smelt.win.new(buf, {
     region = REGION, focusable = focusable, selectable = true,
     pad_left = GUTTER, pad_right = GUTTER, scrollbar = false,
+    kind = "list",
+    initial_cursor = opts.selected or 0,
   })
-  if leaf then smelt.win.configure_list(leaf, opts.selected or 0) end
   return leaf
 end
 
@@ -115,9 +116,9 @@ local function split_lines(text)
 end
 
 function smelt.ui.dialog.markdown(text)
-  local buf = smelt.buf.create({ mode = "markdown" })
-  smelt.buf.set_source(buf, text or "")
-  local leaf = smelt.win.open(buf, {
+  local buf = smelt.buf.new({ mode = "markdown" })
+  buf:source(text or "")
+  local leaf = smelt.win.new(buf, {
     region = REGION, focusable = false, selectable = true,
     pad_left = GUTTER, pad_right = GUTTER,
   })
@@ -128,17 +129,17 @@ function smelt.ui.dialog.content(opts)
   opts = opts or {}
   local buf = opts.buf
   if not buf then
-    buf = smelt.buf.create({ readonly = true })
+    buf = smelt.buf.new({ readonly = true })
     if opts.text and opts.text ~= "" then
-      smelt.buf.set_lines(buf, split_lines(opts.text))
+      buf:lines(split_lines(opts.text))
     end
   end
   local focusable = opts.focusable
   if focusable == nil then focusable = opts.interactive or false end
-  -- `wrap` defaults to true (matches `smelt.win.open`); pass `wrap = false` to
-  -- show pre-styled content (e.g. via `smelt.buf.set_styled_lines`) at its
+  -- `wrap` defaults to true (matches `smelt.win.new`); pass `wrap = false` to
+  -- show pre-styled content (e.g. via `buf:styled(...)`) at its
   -- intrinsic width without soft-wrapping the row.
-  local leaf = smelt.win.open(buf, {
+  local leaf = smelt.win.new(buf, {
     region      = REGION,
     focusable   = focusable,
     selectable  = true,
@@ -237,7 +238,7 @@ local function open_overlay(opts)
     { panel_vbox, height = outer_height },
   })
 
-  smelt.ui.overlay.open({
+  smelt.overlay.new({
     title        = title,
     anchor       = "dock_bottom",
     border       = { top = "SmeltAccent" },
@@ -256,13 +257,13 @@ local function setup_lifecycle(opts, leaves, resolve_fn)
 
   -- Explicit focus override; otherwise the overlay's own modal-focus logic picks
   -- the first focusable leaf at open() time.
-  if opts.focus then smelt.win.set_focus(opts.focus) end
+  if opts.focus then opts.focus:focus() end
 
   local resolved = false
   local function resolve(value)
     if resolved then return end
     resolved = true
-    smelt.win.close(root)
+    root:close()
     resolve_fn(value)
   end
 
@@ -291,7 +292,7 @@ local function setup_lifecycle(opts, leaves, resolve_fn)
           if not ok then smelt.ui.notify_error("dialog keymap: " .. tostring(err)) end
         end
         for _, leaf in ipairs(leaves) do
-          smelt.win.set_keymap(leaf, km.key, cb)
+          leaf:key(km.key, cb)
         end
       end
     end
@@ -301,7 +302,7 @@ local function setup_lifecycle(opts, leaves, resolve_fn)
   -- handlers register on every leaf to catch events from any panel.
   local function register_on_all(event_name, handler)
     for _, leaf in ipairs(leaves) do
-      smelt.win.on_event(leaf, event_name, handler)
+      leaf:on(event_name, handler)
     end
   end
 

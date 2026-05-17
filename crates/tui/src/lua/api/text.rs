@@ -3,13 +3,14 @@
 //! built-in tool render path uses for tool output.
 
 use crate::content::to_buffer::render_into_buffer;
-use crate::smelt_term::BufId;
 use lua_doc_derive::lua_module;
 use mlua::prelude::*;
 use smelt_core::content::wrap::wrap_line;
 use smelt_core::lua::doc::register_ui_fn;
 use smelt_core::theme::intern;
 use unicode_width::UnicodeWidthStr;
+
+use super::buf::LuaBuf;
 
 #[lua_module(
     name = "smelt.text",
@@ -34,7 +35,7 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
         "Paint plain text into a buffer with the dim/error body styling that the built-in tool render path uses. `opts.is_error = true` switches to the error-message highlight group.",
         &["buf", "content", "opts"],
         lua,
-        |_, (buf_id, content, opts): (u64, String, Option<mlua::Table>)|  -> LuaResult<()>{
+        |_, (buf, content, opts): (LuaBuf, String, Option<mlua::Table>)|  -> LuaResult<()>{
             let is_error = opts
                 .as_ref()
                 .and_then(|t| t.get::<Option<bool>>("is_error").ok().flatten())
@@ -42,7 +43,7 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
             crate::lua::with_app(|app| {
                 let theme_snap = app.ui.theme().clone();
                 let width = crate::content::term_width() as u16;
-                if let Some(buf) = app.ui.buf_mut(BufId(buf_id)) {
+                if let Some(buf) = app.ui.buf_mut(buf.id) {
                     render_into_buffer(buf, width, &theme_snap, |sink| {
                         let max_cols = (width as usize).saturating_sub(3);
                         for line in content.lines() {

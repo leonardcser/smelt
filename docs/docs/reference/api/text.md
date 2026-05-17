@@ -9,8 +9,10 @@ Visual-width measurement and dim/error body rendering into a Buffer. UiHost-only
 ## `smelt.text.render`
 
 ```lua
-fun(buf: integer, content: string, opts: table?): nil
+fun(buf: smelt.buf.Buf, content: string, opts: table?): nil
 ```
+
+Types: [`smelt.buf.Buf`](types.md#smeltbufbuf)
 
 Paint plain text into a buffer with the dim/error body styling that the built-in tool render path uses. `opts.is_error = true` switches to the error-message highlight group.
 

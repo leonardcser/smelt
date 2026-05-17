@@ -105,7 +105,7 @@ smelt.tools.register({
   },
   approval_patterns = M.approval_patterns,
   -- `summary` doubles as both the transcript header and the confirm dialog body.
-  -- Returning styled-lines (same shape as `smelt.buf.set_styled_lines`) lets us
+  -- Returning styled-lines (same shape as `buf:styled(lines)`) lets us
   -- syntax-highlight the command without the renderer hard-coding bash.
   summary = function(args)
     local cmd = args.command or ""

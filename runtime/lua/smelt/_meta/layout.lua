@@ -19,8 +19,8 @@ layout.file_view = nil
 ---@type fun(items: table): table
 layout.hbox = nil
 
---- Wrap a buffer id into a leaf block layout that renders the buffer's contents in place.
----@type fun(buf_id: integer): table
+--- Wrap a `Buf` handle (or raw buf id) into a leaf block layout that renders the buffer's contents in place.
+---@type fun(buf: any): table
 layout.leaf = nil
 
 --- Stack `items` vertically into a single block layout. Each item must be a layout userdata produced by `layout.leaf`/`layout.vbox`/`layout.hbox`.

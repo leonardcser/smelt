@@ -9,8 +9,10 @@ Paint markdown into a Buffer. UiHost-only.
 ## `smelt.markdown.render`
 
 ```lua
-fun(buf_id: integer, source: string): nil
+fun(buf: smelt.buf.Buf, source: string): nil
 ```
+
+Types: [`smelt.buf.Buf`](types.md#smeltbufbuf)
 
 Render markdown `source` into the buffer using the same renderer the transcript uses for assistant text blocks (headings, lists, code fences, inline emphasis).
 

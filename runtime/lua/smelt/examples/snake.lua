@@ -240,7 +240,7 @@ local function close()
 		smelt.paint.unregister(STATE.paint_id)
 	end
 	if STATE.win then
-		smelt.win.close(STATE.win)
+		STATE.win:close()
 	end
 	STATE = nil
 end
@@ -252,27 +252,27 @@ local function open()
 	math.randomseed(os.time())
 	STATE = init_state()
 
-	STATE.buf = smelt.buf.create()
-	smelt.buf.set_lines(STATE.buf, {
+	STATE.buf = smelt.buf.new()
+	STATE.buf:lines({
 		" hjkl / arrows: move    space: reset    esc / ctrl-c: close ",
 	})
-	STATE.win = smelt.win.open(STATE.buf, { focusable = true })
+	STATE.win = smelt.win.new(STATE.buf, { focusable = true })
 
 	STATE.paint_id = smelt.paint.register(paint)
 
-	smelt.win.set_keymap(STATE.win, "h", turn("left"))
-	smelt.win.set_keymap(STATE.win, "j", turn("down"))
-	smelt.win.set_keymap(STATE.win, "k", turn("up"))
-	smelt.win.set_keymap(STATE.win, "l", turn("right"))
-	smelt.win.set_keymap(STATE.win, "<Left>", turn("left"))
-	smelt.win.set_keymap(STATE.win, "<Down>", turn("down"))
-	smelt.win.set_keymap(STATE.win, "<Up>", turn("up"))
-	smelt.win.set_keymap(STATE.win, "<Right>", turn("right"))
-	smelt.win.set_keymap(STATE.win, "<Space>", reset)
-	smelt.win.set_keymap(STATE.win, "<Esc>", close)
-	smelt.win.set_keymap(STATE.win, "<C-c>", close)
+	STATE.win:key("h", turn("left"))
+	STATE.win:key("j", turn("down"))
+	STATE.win:key("k", turn("up"))
+	STATE.win:key("l", turn("right"))
+	STATE.win:key("<Left>", turn("left"))
+	STATE.win:key("<Down>", turn("down"))
+	STATE.win:key("<Up>", turn("up"))
+	STATE.win:key("<Right>", turn("right"))
+	STATE.win:key("<Space>", reset)
+	STATE.win:key("<Esc>", close)
+	STATE.win:key("<C-c>", close)
 
-	smelt.ui.overlay.open({
+	smelt.overlay.new({
 		title = {
 			{ text = " snake ", fg = "green", bold = true },
 			{ text = "(F11 to close) ", fg = "grey", dim = true },
@@ -287,7 +287,7 @@ local function open()
 		draggable = true,
 		resizable = false,
 	})
-	smelt.win.set_focus(STATE.win)
+	STATE.win:focus()
 
 	STATE.timer = smelt.timer.every(TICK_MS, tick)
 end

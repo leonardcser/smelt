@@ -4,95 +4,15 @@
 
 **Tier:** `UiHost` — Requires a terminal UI; calling these from headless mode raises.
 
-Buffer creation, line/source mutation, extmarks, and yank. UiHost-only — buffers are terminal-screen backing stores that windows render into.
+Buffer handle constructor. `smelt.buf.new(opts?)` returns a `Buf` userdata.
 
-## `smelt.buf.clear_namespace`
-
-```lua
-fun(buf: integer, ns: integer, line_start: integer?, line_end: integer?): nil
-```
-
-Drop every extmark owned by `ns` between `[line_start, line_end)` (1-based, inclusive start, exclusive end). Defaults clear the whole buffer so plugins that repaint a namespace each tick (perf panel, ghost text) don't have to track ids.
-
-## `smelt.buf.create`
+## `smelt.buf.new`
 
 ```lua
-fun(opts: table?): integer
+fun(opts: table?): smelt.buf.Buf
 ```
 
-Create a new buffer and return its id. `opts.mode` selects a `BufFormat` parser; `opts.readonly` blocks edits via the public mutators. `opts.name` opts the buffer into hot-reload survival: re-calling `create` with the same name returns the existing buffer (its contents/extmarks/cursor are preserved) with `readonly`/`mode` re-applied. Anonymous buffers are reaped on `/reload`.
+Types: [`smelt.buf.Buf`](types.md#smeltbufbuf)
 
-## `smelt.buf.create_namespace`
-
-```lua
-fun(name: string): integer
-```
-
-Look up or allocate a stable namespace id for `name`. Repeated calls with the same name return the same id.
-
-## `smelt.buf.get_line`
-
-```lua
-fun(buf: integer, line: integer): string?
-```
-
-Read a single line by 1-based index. Returns `nil` when out of range.
-
-## `smelt.buf.named`
-
-```lua
-fun(name: string): integer?
-```
-
-Look up the buffer id registered under `name` (i.e. previously created via `buf.create({ name = name })`). Returns `nil` when no such buffer is open. Used by plugins to recover their named buffer ids without re-calling `create`.
-
-## `smelt.buf.set_extmark`
-
-```lua
-fun(buf: integer, ns: integer, row: integer, col: integer, opts: smelt.buf.ExtmarkOpts?): integer
-```
-
-Types: [`smelt.buf.ExtmarkOpts`](types.md#smeltbufextmarkopts)
-
-Place a highlight or virt-text extmark at `(row, col)` (row is 1-based). `opts` mirrors `nvim_buf_set_extmark`'s keyset; pass `opts.id` to retarget an existing mark. Returns the new extmark id.
-
-## `smelt.buf.set_lines`
-
-```lua
-fun(buf: integer, lines: string[]): nil
-```
-
-Replace every line of the buffer with the strings in `lines`.
-
-## `smelt.buf.set_readonly`
-
-```lua
-fun(buf: integer, ro: boolean): nil
-```
-
-Toggle a buffer's read-only flag. Read-only buffers reject `set_lines`/`set_source`.
-
-## `smelt.buf.set_source`
-
-```lua
-fun(buf: integer, source: string): nil
-```
-
-Replace the buffer's full source text in one call. Cheaper than `set_lines` when you already have the joined string.
-
-## `smelt.buf.set_styled_lines`
-
-```lua
-fun(buf: integer, lines: table): nil
-```
-
-Replace the buffer with a list of styled lines. Each line is a sequence of span tables: `{ text, style?, syntax? }`. `style = { hl?, dim?, bold?, italic?, fg?, bg? }` — `hl` is a theme group name; `fg`/`bg` are theme group names whose fg/bg axis is extracted (matches `set_extmark`). `syntax` runs the span text through the inline syntax highlighter (`"bash"`, `"rust"`, …) and overrides per-character fg; `style` modifiers still apply. An empty span list emits a blank line.
-
-## `smelt.buf.text`
-
-```lua
-fun(buf: integer): string?
-```
-
-Return the buffer's full source as a string. `nil` if no buffer has that id.
+Create a buffer and return a `Buf` userdata. `opts.name` opts the buffer into hot-reload survival — repeat calls with the same name return the same handle with mutable opts re-applied.
 

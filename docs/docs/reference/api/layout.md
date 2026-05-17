@@ -33,10 +33,10 @@ Lay `items` out horizontally. Each entry is either a layout userdata (defaults t
 ## `smelt.layout.leaf`
 
 ```lua
-fun(buf_id: integer): table
+fun(buf: any): table
 ```
 
-Wrap a buffer id into a leaf block layout that renders the buffer's contents in place.
+Wrap a `Buf` handle (or raw buf id) into a leaf block layout that renders the buffer's contents in place.
 
 ## `smelt.layout.vbox`
 

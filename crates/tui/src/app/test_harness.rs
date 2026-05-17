@@ -1584,9 +1584,9 @@ mod tests {
         let lua = &app.app.lua.lua;
         lua.load(
             r#"
-            local buf = smelt.buf.create({ name = "perf_panel.buf" })
-            local win = smelt.win.open(buf, { name = "perf_panel.win", focusable = false })
-            smelt.ui.overlay.open({
+            local buf = smelt.buf.new({ name = "perf_panel.buf" })
+            local win = smelt.win.new(buf, { name = "perf_panel.win", focusable = false })
+            smelt.overlay.new({
                 name = "perf_panel",
                 title = "old title",
                 anchor = "screen_at",
@@ -1617,9 +1617,9 @@ mod tests {
 
         lua.load(
             r#"
-            local buf = smelt.buf.create({ name = "perf_panel.buf" })
-            local win = smelt.win.open(buf, { name = "perf_panel.win", focusable = false })
-            smelt.ui.overlay.open({
+            local buf = smelt.buf.new({ name = "perf_panel.buf" })
+            local win = smelt.win.new(buf, { name = "perf_panel.win", focusable = false })
+            smelt.overlay.new({
                 name = "perf_panel",
                 title = "new title",
                 anchor = "screen_at",
@@ -1663,18 +1663,16 @@ mod tests {
         let _guard = crate::lua::install_app_ptr(&mut app.app);
         let lua = &app.app.lua.lua;
 
-        let win_id: u64 = lua
-            .load(
-                r#"
-                local buf = smelt.buf.create({ name = "w.buf" })
-                local win = smelt.win.open(buf, { name = "w.win", wrap = false })
-                return win
-                "#,
-            )
-            .eval()
-            .expect("first open");
+        lua.load(
+            r#"
+            local buf = smelt.buf.new({ name = "w.buf" })
+            smelt.win.new(buf, { name = "w.win", wrap = false })
+            "#,
+        )
+        .exec()
+        .expect("first open");
 
-        let wid = crate::smelt_term::WinId(win_id);
+        let wid = app.app.ui.named_win("w.win").expect("named win");
         assert!(
             !app.app.ui.win(wid).unwrap().wrap,
             "wrap should be false after explicit open"
@@ -1683,8 +1681,8 @@ mod tests {
         // Re-open with the same name but no `wrap` key → wrap should stay false.
         lua.load(
             r#"
-            local buf = smelt.buf.create({ name = "w.buf" })
-            smelt.win.open(buf, { name = "w.win" })
+            local buf = smelt.buf.new({ name = "w.buf" })
+            smelt.win.new(buf, { name = "w.win" })
             "#,
         )
         .exec()
@@ -1704,30 +1702,33 @@ mod tests {
         let _guard = crate::lua::install_app_ptr(&mut app.app);
         let lua = &app.app.lua.lua;
 
-        let first: (u64, u64) = lua
-            .load(
-                r#"
-                local buf = smelt.buf.create({ name = "x.buf" })
-                local win = smelt.win.open(buf, { name = "x.win" })
-                return buf, win
-                "#,
-            )
-            .eval()
-            .expect("first");
+        lua.load(
+            r#"
+            local buf = smelt.buf.new({ name = "x.buf" })
+            smelt.win.new(buf, { name = "x.win" })
+            "#,
+        )
+        .exec()
+        .expect("first");
+        let first_buf = app.app.ui.named_buf("x.buf").expect("buf 1");
+        let first_win = app.app.ui.named_win("x.win").expect("win 1");
 
-        let second: (u64, u64) = lua
-            .load(
-                r#"
-                local buf = smelt.buf.create({ name = "x.buf" })
-                local win = smelt.win.open(buf, { name = "x.win" })
-                return buf, win
-                "#,
-            )
-            .eval()
-            .expect("second");
+        lua.load(
+            r#"
+            local buf = smelt.buf.new({ name = "x.buf" })
+            smelt.win.new(buf, { name = "x.win" })
+            "#,
+        )
+        .exec()
+        .expect("second");
+        let second_buf = app.app.ui.named_buf("x.buf").expect("buf 2");
+        let second_win = app.app.ui.named_win("x.win").expect("win 2");
 
-        assert_eq!(first.0, second.0, "named buf id stable across re-create");
-        assert_eq!(first.1, second.1, "named win id stable across re-open");
+        assert_eq!(
+            first_buf, second_buf,
+            "named buf id stable across re-create"
+        );
+        assert_eq!(first_win, second_win, "named win id stable across re-open");
     }
 
     /// Re-opening a named overlay with a structurally different layout
@@ -1741,9 +1742,9 @@ mod tests {
 
         lua.load(
             r#"
-            local buf = smelt.buf.create({ name = "a.buf" })
-            local win = smelt.win.open(buf, { name = "a.win" })
-            smelt.ui.overlay.open({
+            local buf = smelt.buf.new({ name = "a.buf" })
+            local win = smelt.win.new(buf, { name = "a.win" })
+            smelt.overlay.new({
                 name = "ov",
                 anchor = "screen_at", corner = "nw",
                 row = 0, col = 0, width = 40, height = 10,
@@ -1765,11 +1766,11 @@ mod tests {
 
         lua.load(
             r#"
-            local b1 = smelt.buf.create({ name = "a.buf" })
-            local b2 = smelt.buf.create({ name = "b.buf" })
-            local w1 = smelt.win.open(b1, { name = "a.win" })
-            local w2 = smelt.win.open(b2, { name = "b.win" })
-            smelt.ui.overlay.open({
+            local b1 = smelt.buf.new({ name = "a.buf" })
+            local b2 = smelt.buf.new({ name = "b.buf" })
+            local w1 = smelt.win.new(b1, { name = "a.win" })
+            local w2 = smelt.win.new(b2, { name = "b.win" })
+            smelt.overlay.new({
                 name = "ov",
                 anchor = "screen_at", corner = "nw",
                 row = 0, col = 0, width = 40, height = 10,
@@ -1873,9 +1874,9 @@ mod tests {
                 r#"
                 local state = smelt.state("plug")
                 local function attach()
-                    local buf = smelt.buf.create({{ name = "plug.buf" }})
-                    local win = smelt.win.open(buf, {{ name = "plug.win" }})
-                    smelt.ui.overlay.open({{
+                    local buf = smelt.buf.new({{ name = "plug.buf" }})
+                    local win = smelt.win.new(buf, {{ name = "plug.win" }})
+                    smelt.overlay.new({{
                         name = "plug",
                         title = "{title}",
                         anchor = "screen_at", corner = "nw",
@@ -2008,9 +2009,9 @@ mod tests {
             r#"
             local state = smelt.state("mix")
             local function attach()
-                local b1 = smelt.buf.create({ name = "mix.buf" })
-                local w1 = smelt.win.open(b1, { name = "mix.win" })
-                smelt.ui.overlay.open({
+                local b1 = smelt.buf.new({ name = "mix.buf" })
+                local w1 = smelt.win.new(b1, { name = "mix.win" })
+                smelt.overlay.new({
                     name = "mix",
                     anchor = "screen_at", corner = "nw",
                     row = 0, col = 0, width = 30, height = 8,
@@ -2021,9 +2022,9 @@ mod tests {
             attach()
 
             -- Anonymous overlay (no name) — should be reaped on /reload.
-            local b2 = smelt.buf.create()
-            local w2 = smelt.win.open(b2, {})
-            smelt.ui.overlay.open({
+            local b2 = smelt.buf.new()
+            local w2 = smelt.win.new(b2, {})
+            smelt.overlay.new({
                 anchor = "screen_at", corner = "se",
                 row = 0, col = 0, width = 20, height = 5,
                 layout = smelt.ui.layout.leaf(w2),
@@ -2050,9 +2051,9 @@ mod tests {
             r#"
             local state = smelt.state("mix")
             local function attach()
-                local b1 = smelt.buf.create({ name = "mix.buf" })
-                local w1 = smelt.win.open(b1, { name = "mix.win" })
-                smelt.ui.overlay.open({
+                local b1 = smelt.buf.new({ name = "mix.buf" })
+                local w1 = smelt.win.new(b1, { name = "mix.win" })
+                smelt.overlay.new({
                     name = "mix",
                     anchor = "screen_at", corner = "nw",
                     row = 0, col = 0, width = 30, height = 8,
@@ -2164,17 +2165,17 @@ mod tests {
             end)
 
             -- Anonymous + named UI resources
-            local b1 = smelt.buf.create({ name = "seed.buf" })
-            local w1 = smelt.win.open(b1, { name = "seed.win" })
-            smelt.ui.overlay.open({
+            local b1 = smelt.buf.new({ name = "seed.buf" })
+            local w1 = smelt.win.new(b1, { name = "seed.win" })
+            smelt.overlay.new({
                 name = "seed.ov",
                 anchor = "screen_at", corner = "nw",
                 row = 0, col = 0, width = 30, height = 8,
                 layout = smelt.ui.layout.leaf(w1),
             })
-            local b2 = smelt.buf.create()
-            local w2 = smelt.win.open(b2, {})
-            smelt.ui.overlay.open({
+            local b2 = smelt.buf.new()
+            local w2 = smelt.win.new(b2, {})
+            smelt.overlay.new({
                 anchor = "screen_at", corner = "se",
                 row = 0, col = 0, width = 20, height = 5,
                 layout = smelt.ui.layout.leaf(w2),
@@ -2354,9 +2355,9 @@ mod tests {
             r#"
             local state = smelt.state("res")
             local function attach()
-                local b = smelt.buf.create({ name = "res.buf" })
-                local w = smelt.win.open(b, { name = "res.win" })
-                smelt.ui.overlay.open({
+                local b = smelt.buf.new({ name = "res.buf" })
+                local w = smelt.win.new(b, { name = "res.win" })
+                smelt.overlay.new({
                     name = "res",
                     anchor = "screen_at", corner = "nw",
                     row = 0, col = 0, width = 30, height = 10,

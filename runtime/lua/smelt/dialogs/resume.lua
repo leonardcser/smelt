@@ -2,7 +2,7 @@
 -- below. Arrows + Ctrl-J/K navigate; typing into the input filters; Enter loads;
 -- Ctrl-D deletes the highlighted session; Alt-W toggles the workspace filter.
 
-local NS_META = smelt.buf.create_namespace("smelt.resume.meta")
+local NS_META = smelt.ns("smelt.resume.meta")
 
 local function is_junk(s)
   if s == nil then return true end
@@ -77,22 +77,22 @@ local function filter_entries(entries, query, workspace_only, current_cwd)
 end
 
 local function refresh_list(list_buf, filtered, now_ms)
-  -- NS_META is a custom namespace, so `set_lines` doesn't clear it for us;
+  -- NS_META is a custom namespace, so `buf:lines` doesn't clear it for us;
   -- wipe it ourselves before each render or stale dim marks from a longer
   -- previous list leak into shorter renders (e.g. the empty-state line).
-  smelt.buf.clear_namespace(list_buf, NS_META)
+  list_buf:clear_ns(NS_META)
   if #filtered == 0 then
     local empty = "  (no matching sessions)"
-    smelt.buf.set_lines(list_buf, { empty })
-    smelt.buf.set_extmark(list_buf, NS_META, 1, 0, { end_col = #empty, dim = true })
+    list_buf:lines({ empty })
+    list_buf:mark(NS_META, 1, 0, { end_col = #empty, dim = true })
     return
   end
   local lines = {}
   for _, e in ipairs(filtered) do table.insert(lines, format_row(e, now_ms)) end
-  smelt.buf.set_lines(list_buf, lines)
+  list_buf:lines(lines)
   local meta_end = LEADING + SIZE_COL + GAP + TIME_COL
   for i = 1, #filtered do
-    smelt.buf.set_extmark(list_buf, NS_META, i, 0, { end_col = meta_end, dim = true })
+    list_buf:mark(NS_META, i, 0, { end_col = meta_end, dim = true })
   end
 end
 
@@ -111,25 +111,25 @@ smelt.cmd.register("resume", function()
     local filtered      = filter_entries(entries, query, workspace_only, current_cwd)
 
     -- List: passive display, non-focusable; selection shown via selection_highlight.
-    local list_buf = smelt.buf.create()
+    local list_buf = smelt.buf.new()
     refresh_list(list_buf, filtered, now_ms)
     local list_leaf = smelt.ui.dialog.list(list_buf, { focusable = false })
 
     -- Input: focused, receives typing. Filter loop wired below.
     local input_leaf = smelt.ui.dialog.input("filter sessions…")
 
-    smelt.win.on_event(input_leaf, "text_changed", function(ctx)
+    input_leaf:on("text_changed", function(ctx)
       query = ctx.text or ""
       filtered = filter_entries(entries, query, workspace_only, current_cwd)
       refresh_list(list_buf, filtered, now_ms)
-      smelt.win.set_cursor_row(list_leaf, 0)
+      list_leaf:cursor(0)
     end)
 
     local function nav(delta)
-      return function() smelt.win.move_cursor(list_leaf, delta) end
+      return function() list_leaf:move_cursor(delta) end
     end
 
-    -- `configure_list` already binds these on the list leaf itself, but the list
+    -- The list-kind leaf already binds these on itself, but the list
     -- is non-focusable here (focus stays on the input), so those bindings never
     -- fire. We forward at the dialog level instead so the input stays focused
     -- while these keys drive the list cursor.
@@ -156,10 +156,10 @@ smelt.cmd.register("resume", function()
             workspace_only = not workspace_only
             filtered = filter_entries(entries, query, workspace_only, current_cwd)
             refresh_list(list_buf, filtered, now_ms)
-            smelt.win.set_cursor_row(list_leaf, 0)
+            list_leaf:cursor(0)
           end },
         { key = "alt-d", hint = "⌥d: delete", on_press = function()
-            local idx = (smelt.win.cursor_row(list_leaf) or 0) + 1
+            local idx = (list_leaf:cursor() or 0) + 1
             local e = filtered[idx]
             if not e then return end
             smelt.session.delete(e.id)
@@ -168,11 +168,11 @@ smelt.cmd.register("resume", function()
             end
             filtered = filter_entries(entries, query, workspace_only, current_cwd)
             refresh_list(list_buf, filtered, now_ms)
-            smelt.win.set_cursor_row(list_leaf, 0)
+            list_leaf:cursor(0)
           end },
       },
       on_submit = function(ctx)
-        local idx = (smelt.win.cursor_row(list_leaf) or 0) + 1
+        local idx = (list_leaf:cursor() or 0) + 1
         ctx.resolve(filtered[idx])
       end,
     })

@@ -1,8 +1,8 @@
 -- Built-in tool-approval dialog. Override `smelt.confirm.open` in init.lua to
 -- swap the default UI. Tool `preview` callbacks live in each tool's Lua definition.
 
-local NS_NUM = smelt.buf.create_namespace("smelt.confirm.num")
-local NS_SEL = smelt.buf.create_namespace("smelt.confirm.sel")
+local NS_NUM = smelt.ns("smelt.confirm.num")
+local NS_SEL = smelt.ns("smelt.confirm.sel")
 
 -- `~/`-rewrite of the process cwd for workspace-scoped "always allow" labels.
 local function pretty_cwd()
@@ -93,7 +93,7 @@ local function render_header(buf, req)
     lines[#lines + 1] = { { text = desc, style = { dim = true } } }
   end
 
-  smelt.buf.set_styled_lines(buf, lines)
+  buf:styled(lines)
 end
 
 -- Paint " N. " dim numbering prefixes on each option row and stamp a cursor-row-only
@@ -106,12 +106,10 @@ local function render_options(buf, labels)
     rendered[i] = prefix .. label
     label_starts[i] = #prefix
   end
-  smelt.buf.set_lines(buf, rendered)
-  smelt.buf.clear_namespace(buf, NS_NUM)
-  smelt.buf.clear_namespace(buf, NS_SEL)
+  buf:lines(rendered):clear_ns(NS_NUM):clear_ns(NS_SEL)
   for i, start in ipairs(label_starts) do
-    smelt.buf.set_extmark(buf, NS_NUM, i, 0, { end_col = start, dim = true })
-    smelt.buf.set_extmark(buf, NS_SEL, i, start, {
+    buf:mark(NS_NUM, i, 0, { end_col = start, dim = true })
+    buf:mark(NS_SEL, i, start, {
       end_col       = #rendered[i],
       hl_group      = "SmeltAccent",
       on_cursor_row = true,
@@ -125,11 +123,11 @@ function smelt.confirm.open(handle_id)
   local req = smelt.cell("confirm_requested"):get()
   if not req or req.handle_id ~= handle_id then return end
 
-  local header_buf  = smelt.buf.create()
-  local preview_buf = smelt.buf.create()
+  local header_buf  = smelt.buf.new()
+  local preview_buf = smelt.buf.new()
   render_header(header_buf, req)
   smelt.confirm._render_preview(preview_buf, handle_id)
-  local first_preview = smelt.buf.get_line(preview_buf, 1)
+  local first_preview = preview_buf:line(1)
   local has_preview = first_preview ~= nil and first_preview ~= ""
 
   local labels, decisions = build_options(req)
@@ -142,7 +140,7 @@ function smelt.confirm.open(handle_id)
     allow_lines[#allow_lines + 1] = {}
   end
   allow_lines[#allow_lines + 1] = { { text = "Allow?", style = { dim = true } } }
-  smelt.buf.set_styled_lines(allow_buf, allow_lines)
+  allow_buf:styled(allow_lines)
   local options_leaf, options_buf = smelt.ui.dialog.options(labels)
   render_options(options_buf, labels)
   local reason_leaf, reason_buf =
@@ -153,7 +151,7 @@ function smelt.confirm.open(handle_id)
   local spacer_leaf = smelt.ui.dialog.content({ text = "", wrap = false })
 
   local typed_reason = false
-  smelt.win.on_event(reason_leaf, "text_changed", function() typed_reason = true end)
+  reason_leaf:on("text_changed", function() typed_reason = true end)
 
   local resolved = false
   local function close_with(idx, message)
@@ -184,10 +182,10 @@ function smelt.confirm.open(handle_id)
         end },
     },
     on_submit = function(ctx)
-      local idx = (smelt.win.cursor_row(options_leaf) or 0) + 1
+      local idx = (options_leaf:cursor() or 0) + 1
       local message = nil
       if typed_reason then
-        local line = smelt.buf.get_line(reason_buf, 1) or ""
+        local line = reason_buf:line(1) or ""
         if line ~= "" then message = line end
       end
       close_with(idx, message)
@@ -204,11 +202,11 @@ function smelt.confirm.open(handle_id)
   -- dismissing the dialog — that still works from the options leaf). Scoping
   -- both keymaps per-leaf means typing literal Tab/Esc characters in the
   -- input would only ever do the configured action.
-  smelt.win.set_keymap(options_leaf, "tab", function()
-    smelt.win.set_focus(reason_leaf)
+  options_leaf:key("tab", function()
+    reason_leaf:focus()
   end)
-  smelt.win.set_keymap(reason_leaf, "esc", function()
-    smelt.win.set_focus(options_leaf)
+  reason_leaf:key("esc", function()
+    options_leaf:focus()
   end)
 
   return handle

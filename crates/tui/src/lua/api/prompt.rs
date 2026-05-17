@@ -1,9 +1,8 @@
 //! `smelt.prompt` bindings — the main editable input surface.
 //!
-//! `win_id()` returns the stable `WinId` so plugins can reuse
-//! `smelt.win.on_event(prompt, "text_changed", …)` and
-//! `smelt.win.set_keymap(prompt, …)`. `text()` snapshots the
-//! current buffer; `set_text(s)` replaces it.
+//! `win()` returns a `Win` userdata for the prompt input so plugins can
+//! bind keys / events via the chainable handle API. `text()` snapshots
+//! the current buffer; `set_text(s)` replaces it.
 
 use lua_doc_derive::lua_module;
 use mlua::prelude::*;
@@ -11,18 +10,18 @@ use smelt_core::lua::doc::register_ui_fn;
 
 #[lua_module(
     name = "smelt.prompt",
-    doc = "The main editable input surface: win_id, text get/set, and cursor control. UiHost-only."
+    doc = "The main editable input surface: win handle, text get/set, and cursor control. UiHost-only."
 )]
 pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
     let prompt_tbl = lua.create_table()?;
     register_ui_fn(
         &prompt_tbl,
         "smelt.prompt",
-        "win_id",
-        "Return the stable `WinId` for the prompt input. Use with `smelt.win.on_event` and `smelt.win.set_keymap` to attach plugin behaviour.",
+        "win",
+        "Return a `Win` handle for the prompt input. Use `win:key(...)` and `win:on(...)` to attach plugin behaviour.",
         &[],
         lua,
-        |_, ()| Ok(crate::app::PROMPT_WIN.0),
+        |_, ()| Ok(super::win::LuaWin { id: crate::app::PROMPT_WIN }),
     )?;
     register_ui_fn(
         &prompt_tbl,

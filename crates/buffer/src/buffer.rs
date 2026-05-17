@@ -28,7 +28,7 @@ impl std::fmt::Display for BufId {
     }
 }
 
-/// Smallest id minted by plugin-side `smelt.buf.create`. Keeps Lua
+/// Smallest id minted by plugin-side `smelt.buf.new`. Keeps Lua
 /// buffers in a disjoint range from Rust's sequential allocator.
 pub const LUA_BUF_ID_BASE: u64 = 1 << 32;
 

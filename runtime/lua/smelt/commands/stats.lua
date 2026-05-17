@@ -2,11 +2,11 @@
 
 local function open_text_dialog(title, text)
   smelt.spawn(function()
-    local buf = smelt.buf.create({ readonly = true })
+    local buf = smelt.buf.new({ readonly = true })
     local lines = {}
     for line in (text or ""):gmatch("([^\n]*)\n?") do table.insert(lines, line) end
     if #lines == 0 then lines = { "" } end
-    smelt.buf.set_lines(buf, lines)
+    buf:lines(lines)
     local leaf = smelt.ui.dialog.content({ buf = buf, interactive = true })
 
     smelt.ui.dialog.open({

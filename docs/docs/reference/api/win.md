@@ -4,145 +4,15 @@
 
 **Tier:** `UiHost` — Requires a terminal UI; calling these from headless mode raises.
 
-Window lifecycle, focus, keymap/event registration, and buffer resolution. UiHost-only — windows are layout leaves that render a buffer onto the screen.
+Window handle constructor. `smelt.win.new(buf, opts?)` returns a `Win` userdata.
 
-## `smelt.win.buf`
-
-```lua
-fun(id: integer): integer?
-```
-
-Return the buffer id backing window `id`, or `nil` if no such window exists.
-
-## `smelt.win.clear_event`
+## `smelt.win.new`
 
 ```lua
-fun(win_id: integer, event: smelt.win.Event, callback_id: integer): nil
+fun(buf: smelt.buf.Buf, opts: table?): smelt.win.Win?
 ```
 
-Types: [`smelt.win.Event`](types.md#smeltwinevent)
+Types: [`smelt.buf.Buf`](types.md#smeltbufbuf), [`smelt.win.Win`](types.md#smeltwinwin)
 
-Remove a per-window event handler by `callback_id` (returned from `on_event`). The associated Lua handle is freed.
-
-## `smelt.win.clear_keymap`
-
-```lua
-fun(win_id: integer, key_str: string): nil
-```
-
-Remove a per-window key binding for `win_id` previously installed via `set_keymap`. The associated Lua handle is freed.
-
-## `smelt.win.close`
-
-```lua
-fun(id: integer): nil
-```
-
-Close the overlay leaf identified by `id`. No-op if the window does not exist or is not an overlay leaf.
-
-## `smelt.win.configure_input`
-
-```lua
-fun(win_id: integer, placeholder: string?): nil
-```
-
-Mark `win_id` as a single-line text input leaf with the same editing keymap as the prompt. If `placeholder` is non-empty, seed the buffer with dim placeholder text; the first printable keystroke clears it and starts a fresh line.
-
-## `smelt.win.configure_list`
-
-```lua
-fun(win_id: integer, initial_cursor: integer?): nil
-```
-
-Mark `win_id` as a list leaf with arrow-key/scroll handling and place the initial cursor at row `initial_cursor` (clamped to `u16`).
-
-## `smelt.win.cursor_row`
-
-```lua
-fun(win_id: integer): integer?
-```
-
-Return the current cursor row (0-based) of `win_id`, or `nil` if the window doesn't exist.
-
-## `smelt.win.focus`
-
-```lua
-fun(): string
-```
-
-Return which top-level pane currently has focus: `"transcript"` or `"prompt"`.
-
-## `smelt.win.link_scroll`
-
-```lua
-fun(wins: table): nil
-```
-
-Mirror `scroll_top` across `wins` — every member of the array follows whichever member the user scrolls. Re-linking a window that's already in a group merges the new ids into the existing group; closing any member auto-removes it (the group is dropped once fewer than two live members remain).
-
-## `smelt.win.move_cursor`
-
-```lua
-fun(win_id: integer, delta: integer): nil
-```
-
-Move `win_id`'s cursor by `delta` rows (clamped to the buffer's line count), keep the row on-screen by adjusting `scroll_top`, and emit `selection_changed`. Lets an external panel (e.g. a docked search input) drive a list without holding focus.
-
-## `smelt.win.named`
-
-```lua
-fun(name: string): integer?
-```
-
-Look up the window id registered under `name` (i.e. previously opened via `win.open(buf, { name = name, ... })`). Returns `nil` when no such window is open.
-
-## `smelt.win.on_event`
-
-```lua
-fun(win_id: integer, event: smelt.win.Event, func: fun(value: table)): integer
-```
-
-Types: [`smelt.win.Event`](types.md#smeltwinevent)
-
-Subscribe `func` to event `event` on window `win_id`. Returns a callback id usable with `clear_event`.
-
-## `smelt.win.open`
-
-```lua
-fun(buf_id: integer, opts: table?): integer?
-```
-
-Open a split window over the buffer `buf_id`. `opts.region` picks the layout slot (default `"lua_overlay"`); `opts.focusable` and `opts.vim_enabled` toggle keyboard behaviour. Row-highlight is two-opt: `opts.cursor_line` (paints the row at the cursor only while this window is focused — caret leaves like code/diff viewers) and `opts.selection_highlight` (paints the row at `cursor_row` regardless of focus — list leaves like pickers driven by an external input). `opts.pad_left` / `opts.pad_right` reserve padding columns on either side. `opts.scrollbar` (default `true`) reserves the rightmost column for a scrollbar that paints only when content overflows — set `false` for cursor-driven UIs (lists, single-line inputs). `opts.wrap` (default `true`) soft-wraps long logical lines onto multiple visual rows; rows the renderer marked `pre_formatted` (e.g. syntax-highlighted code) are not re-wrapped. The line-number gutter is on by default and shows numbers only for rows stamped with `SourceLine` metadata (so text/list panes pay no column cost while code/diff buffers number automatically); pass `opts.gutter = "none"` to disable. `opts.name` opts the window into hot-reload survival: re-calling with the same name returns the existing window (cursor/scroll preserved) with the mutable flags re-applied. Returns the `WinId` or `nil` if no slot was available.
-
-## `smelt.win.rect`
-
-```lua
-fun(id: integer): any
-```
-
-Return the window's current viewport rect as `{ row, col, width, height }`, or `nil` until the first render lays it out.
-
-## `smelt.win.set_cursor_row`
-
-```lua
-fun(win_id: integer, row: integer): nil
-```
-
-Place `win_id`'s cursor at absolute `row` (clamped to the buffer's line count). Adjusts `scroll_top` so the row stays on-screen and emits `selection_changed` if the position actually moved.
-
-## `smelt.win.set_focus`
-
-```lua
-fun(id: integer): nil
-```
-
-Move keyboard focus to window `id`. No-op if the window is not focusable or does not exist.
-
-## `smelt.win.set_keymap`
-
-```lua
-fun(win_id: integer, key_str: string, func: fun(value: table)): nil
-```
-
-Install `func` as the handler for `key_str` on window `win_id`. Replaces any existing binding (the displaced Lua handle is freed). Raises on unknown key strings.
+Open a split window over `buf` and return a `Win` userdata. `opts.name` opts the window into hot-reload survival. `opts.kind = "input"` (`opts.placeholder?`) marks the window as a single-line text input; `opts.kind = "list"` (`opts.initial_cursor?`) marks it as a navigable list leaf.
 

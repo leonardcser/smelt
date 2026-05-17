@@ -59,7 +59,7 @@ smelt.cmd.register("permissions", function()
       local deleted_this_round = false
       local pending_d = false
       local function delete_selected(ctx)
-        local idx = (smelt.win.cursor_row(options_leaf) or 0) + 1
+        local idx = (options_leaf:cursor() or 0) + 1
         local m = mapping[idx]
         if m then
           delete_entry(perms, m)

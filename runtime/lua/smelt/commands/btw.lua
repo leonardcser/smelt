@@ -12,12 +12,12 @@ smelt.cmd.register("btw", function(args)
   end
 
   smelt.spawn(function()
-    local buf = smelt.buf.create({ mode = "markdown", readonly = true })
+    local buf = smelt.buf.new({ mode = "markdown", readonly = true })
     local done = false
 
     local function tick()
       if done then return end
-      smelt.buf.set_source(buf, smelt.ui.spinner.glyph() .. " working")
+      buf:source(smelt.ui.spinner.glyph() .. " working")
       smelt.defer(smelt.ui.spinner.period_ms(), tick)
     end
     tick()
@@ -35,7 +35,7 @@ smelt.cmd.register("btw", function(args)
       task = "btw",
       on_response = function(content)
         done = true
-        smelt.buf.set_source(buf, content)
+        buf:source(content)
       end,
     })
 

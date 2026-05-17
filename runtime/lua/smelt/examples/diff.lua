@@ -34,9 +34,9 @@ local function close()
 	if not STATE then
 		return
 	end
-	-- `win.close(leaf)` closes the whole overlay when the leaf belongs to one.
+	-- Closing the leaf closes the whole overlay when the leaf belongs to one.
 	if STATE.left_win then
-		smelt.win.close(STATE.left_win)
+		STATE.left_win:close()
 	end
 	STATE = nil
 end
@@ -74,16 +74,16 @@ local function open(filepath)
 		return
 	end
 
-	local left_buf = smelt.buf.create()
-	local right_buf = smelt.buf.create()
+	local left_buf = smelt.buf.new()
+	local right_buf = smelt.buf.new()
 
 	smelt.diff.render_split(left_buf, right_buf, {
 		old = old_text,
 		new = new_text,
 		path = rel,
 	})
-	smelt.buf.set_readonly(left_buf, true)
-	smelt.buf.set_readonly(right_buf, true)
+	left_buf:readonly(true)
+	right_buf:readonly(true)
 
 	local vim = smelt.settings.vim and true or false
 	local win_opts = {
@@ -92,10 +92,10 @@ local function open(filepath)
 		cursor_line = true,
 		selectable = true,
 	}
-	local left_win = smelt.win.open(left_buf, win_opts)
-	local right_win = smelt.win.open(right_buf, win_opts)
+	local left_win = smelt.win.new(left_buf, win_opts)
+	local right_win = smelt.win.new(right_buf, win_opts)
 
-	local overlay = smelt.ui.overlay.open({
+	local overlay = smelt.overlay.new({
 		title = {
 			{ text = " diff ", fg = "green", bold = true },
 			{ text = rel .. " ", fg = "white" },
@@ -121,16 +121,16 @@ local function open(filepath)
 
 	STATE = { overlay = overlay, left_win = left_win, right_win = right_win }
 
-	smelt.win.link_scroll({ left_win, right_win })
+	left_win:link_scroll(right_win)
 
 	-- No Esc keymap: with `modal = true`, Tier 5 of the key cascade dismisses
 	-- the overlay on bare Esc / Ctrl-C — and only when vim is in idle Normal
 	-- (so Esc in Visual still exits Visual instead of closing the dialog).
 	-- We listen for `close` to keep STATE in sync once the overlay tears down.
-	smelt.win.on_event(left_win, "close", function()
+	left_win:on("close", function()
 		STATE = nil
 	end)
-	smelt.win.set_focus(left_win)
+	left_win:focus()
 end
 
 smelt.cmd.register("diff", function(value)

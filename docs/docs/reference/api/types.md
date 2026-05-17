@@ -6,9 +6,31 @@ Records and string-literal unions referenced from the namespace pages. Generated
 
 ## Classes
 
-### `smelt.buf.ExtmarkOpts`
+### `smelt.Reg`
 
-Options accepted by `smelt.buf.set_extmark`. Mirrors a useful subset of `nvim_buf_set_extmark`'s keyset; pick highlight or virt-text fields, not both.
+Registration handle returned by every callback-binding API. `:remove()` undoes the binding and frees the underlying Lua callback. Idempotent: subsequent calls return `false`.
+
+| Field | Type | Required | Description |
+| --- | --- | --- | --- |
+| `remove` | `fun(): boolean` | yes | Undo the registration. Returns `true` the first time; `false` on subsequent calls or when the underlying target is already gone. |
+
+### `smelt.buf.Buf`
+
+Buffer handle returned by `smelt.buf.new(opts?)`. Setter methods return the same handle for chaining.
+
+| Field | Type | Required | Description |
+| --- | --- | --- | --- |
+| `source` | `fun(s: string?): any` | yes | Read or write the buffer's full source. Without arg returns the source string (or `nil` if the buffer is gone). With arg replaces the source and returns the handle for chaining. |
+| `lines` | `fun(arr: string[]?): any` | yes | Read or write the buffer as a string array. Without arg returns the lines; with arg replaces all lines and returns the handle for chaining. |
+| `line` | `fun(idx: integer): string?` | yes | Read a single line by 1-based index. `nil` if out of range or the buffer is gone. |
+| `styled` | `fun(lines: table): smelt.buf.Buf` | yes | Replace the buffer with a list of styled lines (`{ { text, style?, syntax? }, ... }`). Returns the handle for chaining. |
+| `readonly` | `fun(val: boolean?): any` | yes | Read or write the readonly flag. With arg, returns the handle for chaining. |
+| `mark` | `fun(ns: integer, row: integer, col: integer, opts: smelt.buf.MarkOpts?): integer` | yes | Place a highlight or virt-text extmark at `(row, col)` (row is 1-based). Returns the new extmark id. Allocate `ns` via `smelt.ns(name)`. |
+| `clear_ns` | `fun(ns: integer, start: integer?, end_: integer?): smelt.buf.Buf` | yes | Drop every extmark owned by `ns` between `[start, end)` (1-based, exclusive end). Defaults clear the whole buffer. Returns the handle for chaining. |
+
+### `smelt.buf.MarkOpts`
+
+Options accepted by `buf:mark(ns, row, col, opts)`. Mirrors a useful subset of `nvim_buf_set_extmark`'s keyset; pick highlight or virt-text fields, not both.
 
 | Field | Type | Required | Description |
 | --- | --- | --- | --- |
@@ -25,7 +47,7 @@ Options accepted by `smelt.buf.set_extmark`. Mirrors a useful subset of `nvim_bu
 | `dim` | `boolean` |  | Force-dim the highlight. |
 | `italic` | `boolean` |  | Force-italic the highlight. |
 | `hl_eol` | `boolean` |  | Extend the highlight past the last column to fill the EOL. |
-| `on_cursor_row` | `boolean` |  | Paint this highlight only on the window's cursor row. Lets you decorate the selected list item (or any selection-aware sub-range) without re-rendering on every selection change. |
+| `on_cursor_row` | `boolean` |  | Paint only on the window's cursor row. Decorates the selected list item without re-rendering on every move. |
 | `virt_text` | `string` |  | Virtual-text chunk to render alongside the line. |
 | `virt_text_hl` | `string` |  | Theme group applied to the virt-text chunk. |
 | `virt_text_pos` | [smelt.buf.VirtTextPos](types.md#smeltbufvirttextpos) |  | Where the virt-text appears relative to the line. |
@@ -144,6 +166,14 @@ MCP server config accepted by `smelt.mcp.register`.
 | `timeout` | `integer` |  | Request timeout in milliseconds. Defaults to `30000`. |
 | `enabled` | `boolean` |  | Whether the server is enabled. Defaults to `true`. |
 
+### `smelt.overlay.Overlay`
+
+Overlay handle returned by `smelt.overlay.new(opts)`.
+
+| Field | Type | Required | Description |
+| --- | --- | --- | --- |
+| `close` | `fun(): nil` | yes | Close the overlay. No-op if already closed. |
+
 ### `smelt.paint.Slice`
 
 Grid slice passed to paint callbacks. Methods delegate to the live grid slice for the current frame; out-of-scope calls fail cleanly.
@@ -213,6 +243,18 @@ A workspace permission rule (one tool with N patterns, persisted to disk).
 | --- | --- | --- | --- |
 | `tool` | `string` | yes | Tool name the rule applies to. |
 | `patterns` | `string[]` | yes | Patterns granted for this tool. |
+
+### `smelt.picker.Picker`
+
+Picker handle returned by `smelt.picker.new(opts)`. Setter methods return the same handle for chaining.
+
+| Field | Type | Required | Description |
+| --- | --- | --- | --- |
+| `win` | `fun(): smelt.win.Win` | yes | Return the underlying Win handle (use `win:key(...)`, `win:on(...)` to bind input). |
+| `close` | `fun(): nil` | yes | Close the picker overlay. No-op if already closed. |
+| `items` | `fun(items: table): smelt.picker.Picker` | yes | Replace the picker's items. Each entry is a string or `{ label, description?, ansi_color?, prefix?, ... }`. Selection resets to row 0. Returns the handle for chaining. |
+| `selected` | `fun(idx: integer?): any` | yes | Read or write the current logical selection (0-based). Without arg returns the index (`nil` if the picker is empty); with arg sets the selection and returns the handle for chaining. |
+| `move` | `fun(delta: integer): smelt.picker.Picker` | yes | Move the picker's cursor by `delta` rows (clamped to the buffer's line count). Returns the handle for chaining. |
 
 ### `smelt.provider.Config`
 
@@ -286,6 +328,22 @@ Plugin tool definition passed to `smelt.tools.register`. `execute` is required; 
 | `decide` | `function` |  | `decide(args, mode) -> smelt.tools.Decision?` — per-call decision; nil falls through to generic permissions. |
 | `override` | `boolean` |  | Replace a core tool of the same name (advanced). |
 
+### `smelt.win.Win`
+
+Window handle returned by `smelt.win.new(buf, opts?)`. Setter methods return the same handle for chaining.
+
+| Field | Type | Required | Description |
+| --- | --- | --- | --- |
+| `close` | `fun(): nil` | yes | Close the overlay leaf. No-op if the window is already closed. |
+| `focus` | `fun(): nil` | yes | Move keyboard focus to this window. No-op if the window is not focusable. |
+| `buf` | `fun(): smelt.buf.Buf?` | yes | Return the backing Buf handle, or `nil` if the window is gone. |
+| `rect` | `fun(): any` | yes | Return the window's current viewport rect as `{ row, col, width, height }`, or `nil` until the first render lays it out. |
+| `cursor` | `fun(row: integer?): any` | yes | Read or write the cursor row (0-based). Without arg returns the row; with arg sets and returns the handle for chaining. |
+| `move_cursor` | `fun(delta: integer): smelt.win.Win` | yes | Move the cursor by `delta` rows (clamped to the buffer's line count). Returns the handle for chaining. |
+| `key` | `fun(chord: string, func: fun(value: table)): smelt.Reg` | yes | Bind `func` to `chord` on this window. Returns a Reg handle whose `:remove()` undoes the binding. Raises on unknown chords. |
+| `on` | `fun(event: smelt.win.Event, func: fun(value: table)): smelt.Reg` | yes | Subscribe `func` to `event` on this window. Returns a Reg handle whose `:remove()` undoes the subscription. |
+| `link_scroll` | `fun(others: smelt.win.Win): smelt.win.Win` | yes | Link `scroll_top` between this window and the variadic `others`. Closing any member auto-removes it. Returns the handle for chaining. |
+
 ## Aliases
 
 ### `smelt.buf.VirtTextPos`
@@ -338,7 +396,7 @@ Variants: `"insert"` \| `"normal"` \| `"visual"` \| `"visual_line"`
 
 ### `smelt.win.Event`
 
-Window-event names accepted by `smelt.win.on_event` and `smelt.win.clear_event`. Maps onto the internal `WinEvent` enum.
+Window-event names accepted by `win:on(event, fn)`. Maps onto the internal `WinEvent` enum.
 
 Variants: `"open"` \| `"close"` \| `"focus"` \| `"blur"` \| `"selection_changed"` \| `"submit"` \| `"text_changed"` \| `"dismiss"` \| `"tick"`
 

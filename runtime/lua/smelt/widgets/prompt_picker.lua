@@ -61,18 +61,19 @@ function smelt.prompt.open_picker(opts)
   local current = all_items
   local selected = 1
 
-  local PROMPT = smelt.prompt.win_id()
+  local prompt = smelt.prompt.win()
   local initial_query = smelt.prompt.text() or ""
   if initial_query ~= "" then
     current = filter_items(all_items, initial_query)
   end
 
-  local win_id = smelt.ui.picker._open({
+  local picker = smelt.picker.new({
     items     = to_picker_items(current),
     placement = "prompt_docked",
   })
 
   local task_id = smelt.task.alloc()
+  local regs = {}
 
   local function fire_on_select()
     if on_select and current[selected] then
@@ -85,17 +86,9 @@ function smelt.prompt.open_picker(opts)
   end
   fire_on_select()
 
-  local keys = { "up", "down", "c-k", "c-j", "c-p", "c-n", "enter", "tab", "esc" }
-  local text_changed_id
-
   local function teardown()
-    for _, k in ipairs(keys) do
-      smelt.win.clear_keymap(PROMPT, k)
-    end
-    if text_changed_id then
-      smelt.win.clear_event(PROMPT, "text_changed", text_changed_id)
-    end
-    smelt.win.close(win_id)
+    for _, reg in ipairs(regs) do reg:remove() end
+    picker:close()
   end
 
   local function close_with(result)
@@ -107,7 +100,7 @@ function smelt.prompt.open_picker(opts)
     local n = #current
     if n == 0 then return end
     selected = ((selected - 1 + delta) % n) + 1
-    smelt.ui.picker.set_selected(win_id, selected - 1)
+    picker:selected(selected - 1)
     fire_on_select()
   end
 
@@ -123,32 +116,31 @@ function smelt.prompt.open_picker(opts)
 
   -- Picker renders reversed: index 0 is at the bottom (closest to prompt).
   -- Up moves toward worse matches; Down toward better (closer to prompt).
-  smelt.win.set_keymap(PROMPT, "up",    function() move(1)  end)
-  smelt.win.set_keymap(PROMPT, "down",  function() move(-1) end)
-  smelt.win.set_keymap(PROMPT, "c-k",   function() move(1)  end)
-  smelt.win.set_keymap(PROMPT, "c-j",   function() move(-1) end)
-  smelt.win.set_keymap(PROMPT, "c-p",   function() move(1)  end)
-  smelt.win.set_keymap(PROMPT, "c-n",   function() move(-1) end)
+  regs[#regs + 1] = prompt:key("up",    function() move(1)  end)
+  regs[#regs + 1] = prompt:key("down",  function() move(-1) end)
+  regs[#regs + 1] = prompt:key("c-k",   function() move(1)  end)
+  regs[#regs + 1] = prompt:key("c-j",   function() move(-1) end)
+  regs[#regs + 1] = prompt:key("c-p",   function() move(1)  end)
+  regs[#regs + 1] = prompt:key("c-n",   function() move(-1) end)
   -- Clear prompt before dispatching so the typed query doesn't linger.
-  smelt.win.set_keymap(PROMPT, "enter", function()
+  regs[#regs + 1] = prompt:key("enter", function()
     smelt.prompt.set_text("")
     accept("enter")
   end)
-  smelt.win.set_keymap(PROMPT, "tab",   function()
+  regs[#regs + 1] = prompt:key("tab",   function()
     local picked = current[selected]
     if picked then
       smelt.prompt.set_text(picked.label)
     end
     accept("tab")
   end)
-  smelt.win.set_keymap(PROMPT, "esc",   function() close_with(nil) end)
+  regs[#regs + 1] = prompt:key("esc",   function() close_with(nil) end)
 
-  text_changed_id = smelt.win.on_event(PROMPT, "text_changed", function(ctx)
+  regs[#regs + 1] = prompt:on("text_changed", function(ctx)
     local query = ctx.text or ""
     current = filter_items(all_items, query)
     selected = 1
-    smelt.ui.picker.set_items(win_id, to_picker_items(current))
-    smelt.ui.picker.set_selected(win_id, 0)
+    picker:items(to_picker_items(current)):selected(0)
     fire_on_select()
   end)
 

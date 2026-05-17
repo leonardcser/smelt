@@ -8,7 +8,7 @@
 local markdown = {}
 
 --- Render markdown `source` into the buffer using the same renderer the transcript uses for assistant text blocks (headings, lists, code fences, inline emphasis).
----@type fun(buf_id: integer, source: string): nil
+---@type fun(buf: smelt.buf.Buf, source: string): nil
 markdown.render = nil
 
 return markdown

@@ -16,6 +16,8 @@ use mlua::prelude::*;
 use smelt_core::content::highlight::{lang_to_ext, SplitSide};
 use smelt_core::lua::doc::register_ui_fn;
 
+use super::buf::LuaBuf;
+
 #[lua_module(
     name = "smelt.diff",
     doc = "Paint side-by-side diffs into a pair of Buffers. Inline diffs are returned declaratively via `smelt.layout.diff`. UiHost-only."
@@ -26,10 +28,10 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
         &diff,
         "smelt.diff",
         "render_split",
-        "Paint a side-by-side diff between `opts.old` and `opts.new` into two buffers — `left_buf_id` gets the pre-edit view, `right_buf_id` gets the post-edit view. Both buffers end up with the same row count: synthetic padding rows fill in wherever one side has fewer changes than the other, so vertical alignment between sides is exact. Pick the syntax via `opts.lang` (`\"rust\"`, `\"py\"`, …) or `opts.path` (extension-sniffed); `lang` wins when both are set.",
-        &["left_buf_id", "right_buf_id", "opts"],
+        "Paint a side-by-side diff between `opts.old` and `opts.new` into two buffers. Both buffers end up with the same row count; synthetic padding rows align them. Pick syntax via `opts.lang` or `opts.path`; `lang` wins when both are set.",
+        &["left", "right", "opts"],
         lua,
-        |_, (left_id, right_id, opts): (u64, u64, mlua::Table)| -> LuaResult<()> {
+        |_, (left, right, opts): (LuaBuf, LuaBuf, mlua::Table)| -> LuaResult<()> {
             let old: String = opts.get::<Option<String>>("old")?.unwrap_or_default();
             let new: String = opts.get::<Option<String>>("new")?.unwrap_or_default();
             let lang: Option<String> = opts.get::<Option<String>>("lang")?;
@@ -43,14 +45,7 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
                 },
             );
             crate::lua::with_app(|app| {
-                render_split_into_pair(
-                    app,
-                    BufId(left_id),
-                    BufId(right_id),
-                    &old,
-                    &new,
-                    ext.as_deref(),
-                );
+                render_split_into_pair(app, left.id, right.id, &old, &new, ext.as_deref());
             });
             Ok(())
         },
@@ -59,9 +54,6 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
     Ok(())
 }
 
-/// Render the split diff into both buffers. The diff plan is computed
-/// once and replayed per side, so each side renders directly into its
-/// target buffer — no scratch copy, no lost highlight extmarks.
 fn render_split_into_pair(
     app: &mut crate::app::TuiApp,
     left_id: BufId,

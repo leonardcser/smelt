@@ -124,7 +124,7 @@ smelt.cmd.register("export", function()
       height = "30%",
       panels = { { leaf = options_leaf } },
       on_submit = function(ctx)
-        ctx.resolve((smelt.win.cursor_row(options_leaf) or 0) + 1)
+        ctx.resolve((options_leaf:cursor() or 0) + 1)
       end,
     })
 

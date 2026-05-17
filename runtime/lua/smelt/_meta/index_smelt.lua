@@ -7,6 +7,14 @@
 ---@class smelt
 local smelt = {}
 
+--- Return which top-level pane currently has focus: `"transcript"` or `"prompt"`.
+---@type fun(): string
+smelt.focus = nil
+
+--- Look up or allocate a stable namespace id for `name`. Namespaces scope `buf:mark` / `buf:clear_ns` calls so plugins can repaint their region without disturbing others.
+---@type fun(name: string): integer
+smelt.ns = nil
+
 --- Request a clean shutdown of the app. The quit fires on the next tick after the current handler returns.
 ---@type fun(): nil
 smelt.quit = nil

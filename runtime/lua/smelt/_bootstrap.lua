@@ -84,7 +84,7 @@ end
 
 -- Build a leaf layout from a string. Common pattern for `render` callbacks.
 function smelt.layout.text(content, opts)
-  local buf = smelt.buf.create()
+  local buf = smelt.buf.new()
   smelt.text.render(buf, content or "", opts)
   return smelt.layout.leaf(buf)
 end
@@ -92,8 +92,8 @@ end
 -- Build a 1×1 leaf from a single glyph. Auto-repeats to fill the parent's
 -- axis: `sep("│")` in an hbox = vertical divider, `sep("─")` in a vbox = horizontal.
 function smelt.layout.sep(char)
-  local buf = smelt.buf.create()
-  smelt.buf.set_lines(buf, 0, -1, { char or "─" })
+  local buf = smelt.buf.new()
+  buf:lines({ char or "─" })
   return smelt.layout.leaf(buf)
 end
 

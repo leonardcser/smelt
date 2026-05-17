@@ -151,7 +151,7 @@ local function register_exit_plan_mode()
           { leaf = options_leaf, height = "fit"  },
         },
         on_submit = function(ctx)
-          local idx = (smelt.win.cursor_row(options_leaf) or 0) + 1
+          local idx = (options_leaf:cursor() or 0) + 1
           local opt = options[idx]
           if opt and opt.on_select then opt.on_select() end
           ctx.resolve(opt and opt.action or nil)

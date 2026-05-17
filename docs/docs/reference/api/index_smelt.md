@@ -6,6 +6,22 @@
 
 Root smelt namespace. Host-tier bindings are registered first; UiHost-tier bindings are injected when a TUI is active.
 
+## `smelt.focus`
+
+```lua
+fun(): string
+```
+
+Return which top-level pane currently has focus: `"transcript"` or `"prompt"`.
+
+## `smelt.ns`
+
+```lua
+fun(name: string): integer
+```
+
+Look up or allocate a stable namespace id for `name`. Namespaces scope `buf:mark` / `buf:clear_ns` calls so plugins can repaint their region without disturbing others.
+
 ## `smelt.quit`
 
 ```lua

@@ -1,6 +1,6 @@
 -- Built-in /rewind command. Picks a past user turn and rewinds the transcript to it.
 
-local NS_META = smelt.buf.create_namespace("smelt.rewind.meta")
+local NS_META = smelt.ns("smelt.rewind.meta")
 
 local function build_rows(turns)
   -- Returns { lines, prefix_widths }: parallel arrays of the rendered label and the
@@ -36,7 +36,7 @@ smelt.cmd.register("rewind", function(args)
 
     -- Dim the "N. " turn number prefix so the label stands out.
     for i, width in ipairs(prefix_widths) do
-      smelt.buf.set_extmark(options_buf, NS_META, i, 0, {
+      options_buf:mark(NS_META, i, 0, {
         end_col = width,
         dim     = true,
       })
@@ -47,7 +47,7 @@ smelt.cmd.register("rewind", function(args)
       height = "50%",
       panels = { { leaf = options_leaf } },
       on_submit = function(ctx)
-        ctx.resolve((smelt.win.cursor_row(options_leaf) or 0) + 1)
+        ctx.resolve((options_leaf:cursor() or 0) + 1)
       end,
     })
 

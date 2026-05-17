@@ -4,7 +4,7 @@
 
 **Tier:** `UiHost` — Requires a terminal UI; calling these from headless mode raises.
 
-The main editable input surface: win_id, text get/set, and cursor control. UiHost-only.
+The main editable input surface: win handle, text get/set, and cursor control. UiHost-only.
 
 ## `smelt.prompt.remove_section`
 
@@ -38,11 +38,13 @@ fun(): string
 
 Return the prompt input buffer's current text.
 
-## `smelt.prompt.win_id`
+## `smelt.prompt.win`
 
 ```lua
-fun(): integer
+fun(): smelt.win.Win
 ```
 
-Return the stable `WinId` for the prompt input. Use with `smelt.win.on_event` and `smelt.win.set_keymap` to attach plugin behaviour.
+Types: [`smelt.win.Win`](types.md#smeltwinwin)
+
+Return a `Win` handle for the prompt input. Use `win:key(...)` and `win:on(...)` to attach plugin behaviour.
 

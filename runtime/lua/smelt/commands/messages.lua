@@ -24,8 +24,8 @@ smelt.cmd.register("messages", function()
     smelt.messages.mark_read()
     local body_lines = format_lines(entries)
 
-    local body_buf = smelt.buf.create({ readonly = true })
-    smelt.buf.set_lines(body_buf, body_lines)
+    local body_buf = smelt.buf.new({ readonly = true })
+    body_buf:lines(body_lines)
     local body_leaf = smelt.ui.dialog.content({ buf = body_buf, interactive = true })
 
     smelt.ui.dialog.open({

@@ -1,10 +1,16 @@
-//! `smelt.buf` — buffer creation, line/source mutation, extmarks. UiHost-only.
+//! `smelt.buf` — Buf handle. UiHost-only.
+//!
+//! `smelt.buf.new(opts?)` returns a `Buf` userdata with chainable
+//! methods. `opts.name` opts the buffer into hot-reload survival:
+//! a repeat call with the same name returns the existing buf with
+//! its mutable opts re-applied.
 
 use crate::lua::LuaShared;
 use lua_doc_derive::lua_module;
 use lua_doc_derive::{LuaAlias, LuaOpts};
 use mlua::prelude::*;
-use smelt_core::lua::doc::register_ui_fn;
+use smelt_core::lua::doc::{record_class, record_module_doc};
+use smelt_core::lua::lua_type::{LuaClassDecl, LuaType};
 use std::sync::Arc;
 
 /// Where a virtual-text chunk is rendered relative to the line.
@@ -33,12 +39,12 @@ impl From<LuaVirtTextPos> for smelt_core::buffer::VirtTextPos {
     }
 }
 
-/// Options accepted by `smelt.buf.set_extmark`. Mirrors a useful subset
-/// of `nvim_buf_set_extmark`'s keyset; pick highlight or virt-text
-/// fields, not both.
+/// Options accepted by `buf:mark(ns, row, col, opts)`. Mirrors a useful
+/// subset of `nvim_buf_set_extmark`'s keyset; pick highlight or
+/// virt-text fields, not both.
 #[derive(Default, Debug, LuaOpts)]
-#[lua(name = "smelt.buf.ExtmarkOpts")]
-pub struct LuaExtmarkOpts {
+#[lua(name = "smelt.buf.MarkOpts")]
+pub struct LuaMarkOpts {
     /// Retarget an existing mark by id instead of allocating a new one.
     pub id: Option<u32>,
     /// 1-based end row (inclusive). `nil` keeps the mark single-line.
@@ -67,9 +73,8 @@ pub struct LuaExtmarkOpts {
     pub italic: Option<bool>,
     /// Extend the highlight past the last column to fill the EOL.
     pub hl_eol: Option<bool>,
-    /// Paint this highlight only on the window's cursor row. Lets you decorate
-    /// the selected list item (or any selection-aware sub-range) without re-rendering
-    /// on every selection change.
+    /// Paint only on the window's cursor row. Decorates the
+    /// selected list item without re-rendering on every move.
     pub on_cursor_row: Option<bool>,
 
     /// Virtual-text chunk to render alongside the line.
@@ -85,266 +90,321 @@ pub struct LuaExtmarkOpts {
     pub yank_as: Option<String>,
 }
 
-#[lua_module(
-    name = "smelt.buf",
-    doc = "Buffer creation, line/source mutation, extmarks, and yank. UiHost-only — buffers are terminal-screen backing stores that windows render into."
-)]
-pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) -> LuaResult<()> {
-    let buf_tbl = lua.create_table()?;
-    register_ui_fn(
-        &buf_tbl,
-        "smelt.buf",
-        "text",
-        "Return the buffer's full source as a string. `nil` if no buffer has that id.",
-        &["buf"],
-        lua,
-        |_, id: u64| -> LuaResult<Option<String>> {
-            Ok(crate::lua::try_with_app(|app| {
-                app.ui
-                    .buf(crate::smelt_term::BufId(id))
-                    .map(|b| b.source().to_string())
-            })
-            .flatten())
-        },
-    )?;
+/// Lua-side handle for a `BufId`. Methods on this userdata are the
+/// only public mutators; the constructor `smelt.buf.new(opts?)` returns
+/// one of these.
+#[derive(Clone, Copy, Debug)]
+pub struct LuaBuf {
+    pub(crate) id: crate::smelt_term::BufId,
+}
 
-    {
-        let s = shared.clone();
-        register_ui_fn(
-            &buf_tbl,
-            "smelt.buf",
-            "create",
-            "Create a new buffer and return its id. `opts.mode` selects a `BufFormat` parser; `opts.readonly` blocks edits via the public mutators. `opts.name` opts the buffer into hot-reload survival: re-calling `create` with the same name returns the existing buffer (its contents/extmarks/cursor are preserved) with `readonly`/`mode` re-applied. Anonymous buffers are reaped on `/reload`.",
-            &["opts"],
-            lua,
-            move |_, (opts,): (Option<mlua::Table>,)| -> LuaResult<u64> {
-                let format = match opts.as_ref() {
-                    Some(t) => match t.get::<Option<String>>("mode")? {
-                        Some(mode) => Some(
-                            crate::format::BufFormat::from_lua_spec(&mode, t)
-                                .map_err(|e| LuaError::RuntimeError(format!("buf.create: {e}")))?,
-                        ),
-                        None => None,
-                    },
-                    None => None,
-                };
-                let readonly: bool = opts
-                    .as_ref()
-                    .and_then(|t| t.get::<bool>("readonly").ok())
-                    .unwrap_or(false);
-                let editable: bool = opts
-                    .as_ref()
-                    .and_then(|t| t.get::<bool>("editable").ok())
-                    .unwrap_or(false);
-                let undo_limit: Option<usize> = opts
-                    .as_ref()
-                    .and_then(|t| t.get::<Option<u64>>("undo").ok())
-                    .flatten()
-                    .map(|n| n as usize);
-                let name: Option<String> = opts
-                    .as_ref()
-                    .and_then(|t| t.get::<Option<String>>("name").ok())
-                    .flatten();
-                let result_id = crate::lua::with_app(|app| -> u64 {
-                    // Named buffer that already exists — return existing id, refresh mutable opts.
-                    if let Some(ref n) = name {
-                        if let Some((bid, buf)) = app.ui.lookup_named_buf_mut(n) {
-                            buf.readonly = readonly;
-                            if let Some(fmt) = format {
-                                buf.set_parser(fmt.into_parser());
-                            }
-                            return bid.0;
-                        }
-                    }
-                    let id = s
-                        .next_buf_id
-                        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                    match app.ui.buf_create_with_id(
-                        crate::smelt_term::BufId(id),
-                        crate::smelt_term::BufCreateOpts::default(),
-                    ) {
-                        Ok(bid) => {
-                            if let Some(buf) = app.ui.buf_mut(bid) {
-                                buf.readonly = readonly;
-                                if let Some(fmt) = format {
-                                    buf.set_parser(fmt.into_parser());
-                                }
-                                if editable {
-                                    let limit = undo_limit.or(Some(100));
-                                    buf.history = crate::smelt_term::UndoHistory::new(limit);
-                                }
-                            }
-                            if let Some(ref n) = name {
-                                app.ui.name_buf(n.clone(), bid);
-                            }
-                            id
-                        }
-                        Err(clash) => {
-                            app.notify_error(format!("buf.create: id {} already in use", clash.0));
-                            0
-                        }
-                    }
-                });
-                Ok(result_id)
-            },
-        )?;
+impl LuaType for LuaBuf {
+    fn lua_type() -> String {
+        "smelt.buf.Buf".into()
     }
+}
 
-    register_ui_fn(
-        &buf_tbl,
-        "smelt.buf",
-        "named",
-        "Look up the buffer id registered under `name` (i.e. previously created via `buf.create({ name = name })`). Returns `nil` when no such buffer is open. Used by plugins to recover their named buffer ids without re-calling `create`.",
-        &["name"],
-        lua,
-        |_, name: String| -> LuaResult<Option<u64>> {
-            Ok(crate::lua::try_with_app(|app| {
-                app.ui.named_buf(&name).map(|b| b.0)
-            })
-            .flatten())
-        },
-    )?;
+impl FromLua for LuaBuf {
+    fn from_lua(value: mlua::Value, _: &Lua) -> LuaResult<Self> {
+        match value {
+            mlua::Value::UserData(ud) => Ok(*ud.borrow::<LuaBuf>()?),
+            other => Err(mlua::Error::FromLuaConversionError {
+                from: other.type_name(),
+                to: "smelt.buf.Buf".into(),
+                message: Some("expected a Buf userdata (built via `smelt.buf.new(...)`)".into()),
+            }),
+        }
+    }
+}
 
-    register_ui_fn(
-        &buf_tbl,
-        "smelt.buf",
-        "set_readonly",
-        "Toggle a buffer's read-only flag. Read-only buffers reject `set_lines`/`set_source`.",
-        &["buf", "ro"],
-        lua,
-        |_, (id, ro): (u64, bool)| -> LuaResult<()> {
-            crate::lua::with_app(|app| {
-                if let Some(buf) = app.ui.buf_mut(crate::smelt_term::BufId(id)) {
-                    buf.readonly = ro;
+impl mlua::UserData for LuaBuf {
+    fn add_methods<M: mlua::UserDataMethods<Self>>(methods: &mut M) {
+        methods.add_meta_method(mlua::MetaMethod::ToString, |_, this, ()| {
+            Ok(format!("Buf#{}", this.id.0))
+        });
+
+        // ── source (full text): get / set ──────────────────────────
+        methods.add_function(
+            "source",
+            |lua, (this_ud, s): (mlua::AnyUserData, Option<String>)| -> LuaResult<mlua::Value> {
+                let this = *this_ud.borrow::<LuaBuf>()?;
+                match s {
+                    Some(text) => {
+                        crate::lua::with_app(|app| {
+                            if let Some(buf) = app.ui.buf_mut(this.id) {
+                                buf.set_source(text);
+                            }
+                        });
+                        Ok(mlua::Value::UserData(this_ud))
+                    }
+                    None => {
+                        let out = crate::lua::try_with_app(|app| {
+                            app.ui.buf(this.id).map(|b| b.source().to_string())
+                        })
+                        .flatten();
+                        Ok(match out {
+                            Some(s) => mlua::Value::String(lua.create_string(&s)?),
+                            None => mlua::Value::Nil,
+                        })
+                    }
                 }
-            });
-            Ok(())
-        },
-    )?;
+            },
+        );
 
-    register_ui_fn(
-        &buf_tbl,
-        "smelt.buf",
-        "set_lines",
-        "Replace every line of the buffer with the strings in `lines`.",
-        &["buf", "lines"],
-        lua,
-        |_, (id, lines): (u64, Vec<String>)| -> LuaResult<()> {
-            crate::lua::with_app(|app| {
-                if let Some(buf) = app.ui.buf_mut(crate::smelt_term::BufId(id)) {
-                    buf.set_all_lines(lines);
+        // ── lines (vec<string>): get / set ─────────────────────────
+        methods.add_function(
+            "lines",
+            |lua,
+             (this_ud, arr): (mlua::AnyUserData, Option<Vec<String>>)|
+             -> LuaResult<mlua::Value> {
+                let this = *this_ud.borrow::<LuaBuf>()?;
+                match arr {
+                    Some(lines) => {
+                        crate::lua::with_app(|app| {
+                            if let Some(buf) = app.ui.buf_mut(this.id) {
+                                buf.set_all_lines(lines);
+                            }
+                        });
+                        Ok(mlua::Value::UserData(this_ud))
+                    }
+                    None => {
+                        let out: Option<Vec<String>> = crate::lua::try_with_app(|app| {
+                            app.ui
+                                .buf(this.id)
+                                .map(|b| b.lines().iter().map(|l| l.to_string()).collect())
+                        })
+                        .flatten();
+                        match out {
+                            Some(v) => {
+                                let t = lua.create_table()?;
+                                for (i, s) in v.into_iter().enumerate() {
+                                    t.set(i + 1, s)?;
+                                }
+                                Ok(mlua::Value::Table(t))
+                            }
+                            None => Ok(mlua::Value::Nil),
+                        }
+                    }
                 }
-            });
-            Ok(())
-        },
-    )?;
+            },
+        );
 
-    register_ui_fn(
-        &buf_tbl,
-        "smelt.buf",
-        "get_line",
-        "Read a single line by 1-based index. Returns `nil` when out of range.",
-        &["buf", "line"],
-        lua,
-        |_, (id, line_idx): (u64, u64)| -> LuaResult<Option<String>> {
-            let line0 = match line_idx.checked_sub(1) {
+        // ── line(idx) — single line read, 1-based ──────────────────
+        methods.add_method("line", |_, this, idx: u64| -> LuaResult<Option<String>> {
+            let line0 = match idx.checked_sub(1) {
                 Some(n) => n as usize,
                 None => return Ok(None),
             };
-            let text = crate::lua::with_app(|app| {
+            Ok(crate::lua::try_with_app(|app| {
                 app.ui
-                    .buf(crate::smelt_term::BufId(id))
+                    .buf(this.id)
                     .and_then(|b| b.get_line(line0).map(|s| s.to_string()))
-            });
-            Ok(text)
-        },
-    )?;
+            })
+            .flatten())
+        });
 
-    register_ui_fn(
-        &buf_tbl,
-        "smelt.buf",
-        "set_source",
-        "Replace the buffer's full source text in one call. Cheaper than `set_lines` when you already have the joined string.",
-        &["buf", "source"],
-        lua,
-        |_, (id, source): (u64, String)|  -> LuaResult<()>{
-            crate::lua::with_app(|app| {
-                if let Some(buf) = app.ui.buf_mut(crate::smelt_term::BufId(id)) {
-                    buf.set_source(source);
+        // ── styled(spans) — set styled lines (chainable) ───────────
+        methods.add_function(
+            "styled",
+            |_,
+             (this_ud, lines): (mlua::AnyUserData, mlua::Table)|
+             -> LuaResult<mlua::AnyUserData> {
+                let this = *this_ud.borrow::<LuaBuf>()?;
+                set_styled_lines(this.id, lines)?;
+                Ok(this_ud)
+            },
+        );
+
+        // ── readonly: get / set ────────────────────────────────────
+        methods.add_function(
+            "readonly",
+            |_, (this_ud, val): (mlua::AnyUserData, Option<bool>)| -> LuaResult<mlua::Value> {
+                let this = *this_ud.borrow::<LuaBuf>()?;
+                match val {
+                    Some(ro) => {
+                        crate::lua::with_app(|app| {
+                            if let Some(buf) = app.ui.buf_mut(this.id) {
+                                buf.readonly = ro;
+                            }
+                        });
+                        Ok(mlua::Value::UserData(this_ud))
+                    }
+                    None => {
+                        let out =
+                            crate::lua::try_with_app(|app| app.ui.buf(this.id).map(|b| b.readonly))
+                                .flatten()
+                                .unwrap_or(false);
+                        Ok(mlua::Value::Boolean(out))
+                    }
                 }
-            });
-            Ok(())
+            },
+        );
+
+        // ── mark(ns, row, col, opts?) → extmark id ─────────────────
+        methods.add_method(
+            "mark",
+            |_,
+             this,
+             (ns, row, col, opts): (u32, u64, u64, Option<LuaMarkOpts>)|
+             -> LuaResult<u64> { Ok(set_extmark(this.id, ns, row, col, opts)) },
+        );
+
+        // ── clear_ns(ns, start?, end?) — chainable ─────────────────
+        methods.add_function(
+            "clear_ns",
+            |_,
+             (this_ud, ns, start, end_): (mlua::AnyUserData, u32, Option<i64>, Option<i64>)|
+             -> LuaResult<mlua::AnyUserData> {
+                let this = *this_ud.borrow::<LuaBuf>()?;
+                use smelt_core::buffer::NsId;
+                let start_line = match start {
+                    Some(n) if n > 0 => (n as usize).saturating_sub(1),
+                    _ => 0,
+                };
+                let end_line = match end_ {
+                    Some(n) if n > 0 => n as usize,
+                    _ => usize::MAX,
+                };
+                crate::lua::with_app(|app| {
+                    if let Some(buf) = app.ui.buf_mut(this.id) {
+                        buf.clear_namespace(NsId(ns), start_line, end_line);
+                    }
+                });
+                Ok(this_ud)
+            },
+        );
+    }
+}
+
+#[lua_module(
+    name = "smelt.buf",
+    doc = "Buffer handle constructor. `smelt.buf.new(opts?)` returns a `Buf` userdata. \
+`opts.name` opts the buffer into hot-reload survival — repeat calls with the same name \
+return the same handle with mutable opts re-applied. Anonymous buffers are reaped on `/reload`. \
+UiHost-only — buffers are terminal-screen backing stores that windows render into."
+)]
+pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) -> LuaResult<()> {
+    record_module_doc(
+        "smelt.buf",
+        "Buffer handle constructor. `smelt.buf.new(opts?)` returns a `Buf` userdata.",
+    );
+
+    record_class(LuaClassDecl {
+        name: "smelt.buf.Buf",
+        doc: "Buffer handle returned by `smelt.buf.new(opts?)`. Setter methods return the same handle for chaining.",
+        fields: smelt_core::class_methods! {
+            "source" => fn(s: Option<String>) -> mlua::Value, "Read or write the buffer's full source. Without arg returns the source string (or `nil` if the buffer is gone). With arg replaces the source and returns the handle for chaining.",
+            "lines" => fn(arr: Option<Vec<String>>) -> mlua::Value, "Read or write the buffer as a string array. Without arg returns the lines; with arg replaces all lines and returns the handle for chaining.",
+            "line" => fn(idx: u64) -> Option<String>, "Read a single line by 1-based index. `nil` if out of range or the buffer is gone.",
+            "styled" => fn(lines: mlua::Table) -> LuaBuf, "Replace the buffer with a list of styled lines (`{ { text, style?, syntax? }, ... }`). Returns the handle for chaining.",
+            "readonly" => fn(val: Option<bool>) -> mlua::Value, "Read or write the readonly flag. With arg, returns the handle for chaining.",
+            "mark" => fn(ns: u32, row: u64, col: u64, opts: Option<LuaMarkOpts>) -> u64, "Place a highlight or virt-text extmark at `(row, col)` (row is 1-based). Returns the new extmark id. Allocate `ns` via `smelt.ns(name)`.",
+            "clear_ns" => fn(ns: u32, start: Option<i64>, end_: Option<i64>) -> LuaBuf, "Drop every extmark owned by `ns` between `[start, end)` (1-based, exclusive end). Defaults clear the whole buffer. Returns the handle for chaining.",
         },
-    )?;
+    });
 
-    register_ui_fn(
-        &buf_tbl,
-        "smelt.buf",
-        "set_styled_lines",
-        "Replace the buffer with a list of styled lines. Each line is a sequence of span tables: `{ text, style?, syntax? }`. `style = { hl?, dim?, bold?, italic?, fg?, bg? }` — `hl` is a theme group name; `fg`/`bg` are theme group names whose fg/bg axis is extracted (matches `set_extmark`). `syntax` runs the span text through the inline syntax highlighter (`\"bash\"`, `\"rust\"`, …) and overrides per-character fg; `style` modifiers still apply. An empty span list emits a blank line.",
-        &["buf", "lines"],
-        lua,
-        set_styled_lines,
-    )?;
+    let buf_tbl = lua.create_table()?;
 
-    register_ui_fn(
-        &buf_tbl,
-        "smelt.buf",
-        "set_extmark",
-        "Place a highlight or virt-text extmark at `(row, col)` (row is 1-based). `opts` mirrors `nvim_buf_set_extmark`'s keyset; pass `opts.id` to retarget an existing mark. Returns the new extmark id.",
-        &["buf", "ns", "row", "col", "opts"],
-        lua,
-        set_extmark,
-    )?;
-
-    register_ui_fn(
-        &buf_tbl,
-        "smelt.buf",
-        "create_namespace",
-        "Look up or allocate a stable namespace id for `name`. Repeated calls with the same name return the same id.",
-        &["name"],
-        lua,
-        |_, (name,): (String,)| Ok(smelt_core::buffer::create_namespace(&name).0),
-    )?;
-
-    register_ui_fn(
-        &buf_tbl,
-        "smelt.buf",
-        "clear_namespace",
-        "Drop every extmark owned by `ns` between `[line_start, line_end)` (1-based, inclusive start, exclusive end). Defaults clear the whole buffer so plugins that repaint a namespace each tick (perf panel, ghost text) don't have to track ids.",
-        &["buf", "ns", "line_start", "line_end"],
-        lua,
-        |_, (id, ns, start, end_): (u64, u32, Option<i64>, Option<i64>)| {
-            use smelt_core::buffer::NsId;
-            let start_line = match start {
-                Some(n) if n > 0 => (n as usize).saturating_sub(1),
-                _ => 0,
-            };
-            let end_line = match end_ {
-                Some(n) if n > 0 => n as usize,
-                _ => usize::MAX,
-            };
-            crate::lua::with_app(|app| {
-                if let Some(buf) = app.ui.buf_mut(crate::smelt_term::BufId(id)) {
-                    buf.clear_namespace(NsId(ns), start_line, end_line);
-                }
-            });
-            Ok(())
-        },
-    )?;
+    // ── smelt.buf.new(opts?) ───────────────────────────────────────
+    {
+        let s = shared.clone();
+        smelt_core::lua::doc::register_ui_fn(
+            &buf_tbl,
+            "smelt.buf",
+            "new",
+            "Create a buffer and return a `Buf` userdata. `opts.name` opts the buffer into hot-reload survival — repeat calls with the same name return the same handle with mutable opts re-applied.",
+            &["opts"],
+            lua,
+            move |_, opts: Option<mlua::Table>| -> LuaResult<LuaBuf> {
+                let id = create_or_open(&s, opts.as_ref())?;
+                Ok(LuaBuf { id })
+            },
+        )?;
+    }
 
     smelt.set("buf", buf_tbl)?;
     Ok(())
 }
 
-/// `smelt.buf.set_styled_lines(buf, lines)`.
-///
-/// Each line is a sequence of span tables; each span carries `text` plus optional
-/// `style = { hl?, dim?, bold?, italic?, fg?, bg? }` and `syntax` (language token
-/// routed through `InlineSyntax`). Replaces the buffer's contents wholesale.
-fn set_styled_lines(_: &Lua, (id, lines): (u64, mlua::Table)) -> LuaResult<()> {
+/// Implementation of `smelt.buf.new(opts?)`. If `opts.name` resolves to an
+/// existing buffer, returns its id with mutable opts re-applied (the
+/// hot-reload survival path); otherwise allocates a fresh one.
+fn create_or_open(
+    shared: &Arc<LuaShared>,
+    opts: Option<&mlua::Table>,
+) -> LuaResult<crate::smelt_term::BufId> {
+    let format = match opts {
+        Some(t) => match t.get::<Option<String>>("mode")? {
+            Some(mode) => Some(
+                crate::format::BufFormat::from_lua_spec(&mode, t)
+                    .map_err(|e| LuaError::RuntimeError(format!("buf: {e}")))?,
+            ),
+            None => None,
+        },
+        None => None,
+    };
+    let readonly: bool = opts
+        .and_then(|t| t.get::<bool>("readonly").ok())
+        .unwrap_or(false);
+    let editable: bool = opts
+        .and_then(|t| t.get::<bool>("editable").ok())
+        .unwrap_or(false);
+    let undo_limit: Option<usize> = opts
+        .and_then(|t| t.get::<Option<u64>>("undo").ok())
+        .flatten()
+        .map(|n| n as usize);
+    let name: Option<String> = opts
+        .and_then(|t| t.get::<Option<String>>("name").ok())
+        .flatten();
+
+    let result_id = crate::lua::with_app(|app| -> crate::smelt_term::BufId {
+        // Named buffer that already exists — refresh mutable opts.
+        if let Some(ref n) = name {
+            if let Some((bid, buf)) = app.ui.lookup_named_buf_mut(n) {
+                buf.readonly = readonly;
+                if let Some(fmt) = format {
+                    buf.set_parser(fmt.into_parser());
+                }
+                return bid;
+            }
+        }
+        let id = shared
+            .next_buf_id
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        match app.ui.buf_create_with_id(
+            crate::smelt_term::BufId(id),
+            crate::smelt_term::BufCreateOpts::default(),
+        ) {
+            Ok(bid) => {
+                if let Some(buf) = app.ui.buf_mut(bid) {
+                    buf.readonly = readonly;
+                    if let Some(fmt) = format {
+                        buf.set_parser(fmt.into_parser());
+                    }
+                    if editable {
+                        let limit = undo_limit.or(Some(100));
+                        buf.history = crate::smelt_term::UndoHistory::new(limit);
+                    }
+                }
+                if let Some(ref n) = name {
+                    app.ui.name_buf(n.clone(), bid);
+                }
+                bid
+            }
+            Err(clash) => {
+                app.notify_error(format!("buf: id {} already in use", clash.0));
+                crate::smelt_term::BufId(0)
+            }
+        }
+    });
+
+    Ok(result_id)
+}
+
+/// `buf:styled(spans)` — set a styled line list. Same semantics as the
+/// old `set_styled_lines`; lifted out so `Buf` methods stay tidy.
+fn set_styled_lines(id: crate::smelt_term::BufId, lines: mlua::Table) -> LuaResult<()> {
     use crate::content::to_buffer::render_into_buffer;
-    use crate::smelt_term::BufId;
     use smelt_core::content::highlight::InlineSyntax;
     use smelt_core::style::Style;
     use smelt_core::theme::intern;
@@ -396,7 +456,7 @@ fn set_styled_lines(_: &Lua, (id, lines): (u64, mlua::Table)) -> LuaResult<()> {
             }
             other => {
                 return Err(mlua::Error::external(format!(
-                    "smelt.buf.set_styled_lines: expected line to be a table of spans, got {}",
+                    "buf:styled: expected line to be a table of spans, got {}",
                     other.type_name()
                 )));
             }
@@ -417,10 +477,9 @@ fn set_styled_lines(_: &Lua, (id, lines): (u64, mlua::Table)) -> LuaResult<()> {
     crate::lua::with_app(|app| {
         let theme_snap = app.ui.theme().clone();
         let width = crate::content::term_width() as u16;
-        let Some(buf) = app.ui.buf_mut(BufId(id)) else {
+        let Some(buf) = app.ui.buf_mut(id) else {
             return;
         };
-        // Wipe pre-existing content; render_into_buffer otherwise appends past the seed.
         buf.set_all_lines(Vec::new());
         render_into_buffer(buf, width, &theme_snap, |sink| {
             for spans in &decoded {
@@ -456,19 +515,18 @@ fn set_styled_lines(_: &Lua, (id, lines): (u64, mlua::Table)) -> LuaResult<()> {
     Ok(())
 }
 
-/// `smelt.buf.set_extmark(buf, ns, row, col, opts) -> extmark_id`.
-/// `row` is 1-based. `opts.id` retargets an existing mark.
-/// Highlight: `hl_group` applies a full style; `fg`/`bg` override individual axes;
-/// unknown groups silently resolve to default. VirtText: pass `virt_text`.
+/// `buf:mark(ns, row, col, opts?) → extmark id`. Row is 1-based.
 fn set_extmark(
-    _: &Lua,
-    (id, ns, row, col, opts): (u64, u32, u64, u64, Option<LuaExtmarkOpts>),
-) -> LuaResult<u64> {
-    use crate::smelt_term::BufId;
+    id: crate::smelt_term::BufId,
+    ns: u32,
+    row: u64,
+    col: u64,
+    opts: Option<LuaMarkOpts>,
+) -> u64 {
     use smelt_core::buffer::{ExtmarkId, ExtmarkOpts, NsId};
 
     let Some(row0) = row.checked_sub(1) else {
-        return Ok(0);
+        return 0;
     };
     let row0 = row0 as usize;
     let col0 = col as usize;
@@ -515,21 +573,18 @@ fn set_extmark(
     payload_opts.end_right_gravity = opts.end_right_gravity.unwrap_or(false);
     payload_opts.id = mark_id;
 
-    let new_id = crate::lua::with_app(|app| {
+    crate::lua::with_app(|app| {
         app.ui
-            .buf_mut(BufId(id))
+            .buf_mut(id)
             .map(|buf| buf.set_extmark(NsId(ns), row0, col0, payload_opts))
     })
     .map(|eid: ExtmarkId| eid.0 as u64)
-    .unwrap_or(0);
-    Ok(new_id)
+    .unwrap_or(0)
 }
 
-fn build_highlight_style(opts: &LuaExtmarkOpts) -> crate::smelt_term::SpanStyle {
+fn build_highlight_style(opts: &LuaMarkOpts) -> crate::smelt_term::SpanStyle {
     use smelt_core::style::Style;
 
-    // Unknown group names silently resolve to default (nvim parity).
-    // `hl_group` sets the full base style; `fg`/`bg` override individual color axes.
     let resolve_group =
         |name: &str| -> Style { crate::lua::with_app(|app| app.ui.theme().get(name)) };
 

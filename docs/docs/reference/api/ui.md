@@ -4,16 +4,6 @@
 
 **Tier:** `UiHost` — Requires a terminal UI; calling these from headless mode raises.
 
-Overlay primitives — ghost text, spinner, picker, and generic overlay composition. UiHost-only.
-
-## `smelt.ui.clear`
-
-```lua
-fun(): nil
-```
-
-Clear the prompt's ghost text. Idempotent.
-
 ## `smelt.ui.notify`
 
 ```lua
@@ -29,36 +19,4 @@ fun(msg: string): nil
 ```
 
 Show an error notification in the status area (highlighted with the error color).
-
-## `smelt.ui.selected`
-
-```lua
-fun(win_id: integer): integer?
-```
-
-Return the picker `win_id`'s current logical selection (0-based). Resolves the buffer cursor through the picker's reversed mapping, so wheel-pan and keyboard nav agree. `nil` for non-picker windows or empty pickers.
-
-## `smelt.ui.set`
-
-```lua
-fun(text: string): nil
-```
-
-Set the prompt's ghost text (the dim suggestion shown after the cursor). Replaces any existing ghost completion.
-
-## `smelt.ui.set_items`
-
-```lua
-fun(win_id: integer, items_tbl: table): nil
-```
-
-Replace the picker `win_id`'s items. Each entry can be a string or a `{ label, detail?, value?, ... }` table; selection resets to row 0.
-
-## `smelt.ui.set_selected`
-
-```lua
-fun(win_id: integer, idx: integer): nil
-```
-
-Move the picker `win_id`'s selection to row `idx` (0-based, clamped at 0). No-op for non-picker windows.
 
