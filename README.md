@@ -1,160 +1,79 @@
 <p align="center">
-  <img src="docs/docs/logo.png" alt="smelt logo" width="160">
+  <img src="docs/docs/logo.png" alt="smelt logo" width="150">
 </p>
 
 <h1 align="center">smelt</h1>
 
 <p align="center">
-  A Rust TUI coding agent. Connects to any OpenAI-compatible API (Ollama, OpenAI,
-  Anthropic, Google Gemini, OpenRouter, etc.), your ChatGPT subscription via
-  OpenAI Codex, or your GitHub Copilot subscription, and provides an interactive
-  terminal interface for code generation, analysis, and assistance.
+  <a href="https://leonardcser.github.io/smelt/">Documentation</a>
+  &nbsp;·&nbsp;
+  <a href="https://leonardcser.github.io/smelt/reference/api/">Lua API</a>
+  &nbsp;·&nbsp;
+  <a href="https://github.com/leonardcser/smelt/releases">Releases</a>
+  &nbsp;·&nbsp;
+  <a href="https://github.com/leonardcser/smelt/issues">Issues</a>
 </p>
+
+> [!WARNING] smelt is in early development. Expect bugs and breaking changes,
+> and update often.
+
+## Why
+
+Most coding agents are bloated and hard to customize. smelt is small, fast, and
+scriptable in Lua like Neovim. Built from scratch, with care for the details.
 
 <p align="center">
   <img src="assets/demo.gif" alt="demo" width="800">
 </p>
 
+## What's inside
+
+- **Terminal renderer.** Its own grid and layout engine, not `ratatui`.
+- **Vim editor.** Motions, text objects, registers, undo.
+- **Lua plugins.** Keymaps, commands, autocmds, custom tools.
+- **Deterministic fuzzing.** Fixed clock and stubbed I/O, so any crash can be
+  replayed.
+- **No config needed.** Run with flags, or `smelt auth` for ChatGPT and Copilot.
+
 ## Install
 
-**Prebuilt binaries:**
-
-Download from [GitHub Releases](https://github.com/leonardcser/smelt/releases).
-
-**From source:**
+Prebuilt binaries on the
+[Releases](https://github.com/leonardcser/smelt/releases) page, or from source:
 
 ```bash
 cargo install --git https://github.com/leonardcser/smelt.git
 ```
 
-Running `smelt` with no config file will launch an **interactive setup wizard**
-that walks you through selecting a provider and model.
+## Run
 
-**With Ollama (local):**
+**API key providers** (any OpenAI-compatible endpoint):
 
 ```bash
-ollama pull qwen3.5:0.8b
+# local model via Ollama
 smelt --model qwen3.5:0.8b --api-base http://localhost:11434/v1
-```
 
-**With OpenAI:**
-
-```bash
-read -s OPENAI_API_KEY && export OPENAI_API_KEY
+# OpenAI, Anthropic, OpenRouter, etc.
 smelt --model gpt-5.4 --api-base https://api.openai.com/v1 --api-key-env OPENAI_API_KEY
 ```
 
-**With OpenAI Codex (ChatGPT Pro/Plus subscription):**
+**Subscription providers** (ChatGPT Pro/Plus, GitHub Copilot):
 
 ```bash
-smelt auth          # log in with your ChatGPT account
-smelt --model gpt-5.4    # use any Codex-supported model
+smelt auth                          # one-time login
+smelt --model gpt-5.4               # Codex
+smelt --model claude-sonnet-4.5     # Copilot
 ```
 
-**With GitHub Copilot:**
+Or just run `smelt` with no arguments and follow the wizard.
 
-```bash
-smelt auth                          # pick "GitHub Copilot", follow device-code prompt
-smelt --model claude-sonnet-4.5     # use any model your Copilot plan exposes
-```
+## Docs
 
-**With Anthropic:**
-
-```bash
-read -s ANTHROPIC_API_KEY && export ANTHROPIC_API_KEY
-smelt --model claude-opus-4-5 --api-base https://api.anthropic.com/v1 --api-key-env ANTHROPIC_API_KEY
-```
-
-## Features
-
-- **Tool use** — file read/write/edit, glob, grep, bash, notebooks, web
-  fetch/search
-- **Permission system** — granular allow/ask/deny per tool, bash pattern, URL,
-  and workspace-scoped approvals
-- **4 modes** — Normal, Plan, Apply, Yolo (`Shift+Tab` to cycle)
-- **Vim mode** — full vi keybindings for the input editor
-- **Sessions** — auto-save, resume, fork, rewind conversations
-- **Compaction** — LLM-powered summarization to stay within context limits
-  (auto-trigger threshold configurable via `SMELT_COMPACT_THRESHOLD_PERCENT`,
-  default `80`)
-- **Reasoning effort** — configurable thinking depth (off/low/medium/high/max)
-- **File references** — attach files with `@path` syntax
-- **Skills** — on-demand specialized knowledge via `SKILL.md` files
-- **MCP** — connect external tool servers via the Model Context Protocol
-- **Custom commands** — user-defined commands via markdown files
-- **Lua scripting** — extend with `~/.config/smelt/init.lua` (keymaps, commands, autocmds, engine control, lifecycle events, custom tools and tool summaries) — see the [Plugin Authoring guide](https://leonardcser.github.io/smelt/guide/plugins/) and the [Lua API reference](https://leonardcser.github.io/smelt/reference/api/) for the full surface, plus IDE completion stubs in `runtime/lua/smelt/_meta/`
-- **Custom instructions** — project-level `AGENTS.md` files
-- **Input prediction** — ghost text suggesting your next message
-- **Image support** — paste from clipboard or reference image files
-- **Headless mode** — scriptable, no TUI
-- **Interactive setup** — guided first-run wizard and `smelt auth` for managing
-  providers
-
-## Configuration
-
-Config file: `~/.config/smelt/init.lua` (respects `$XDG_CONFIG_HOME`).
-
-```lua
-smelt.provider.register("ollama", {
-  type = "openai-compatible", -- or: "openai-compatible", "openai", "codex", "anthropic-compatible", "anthropic", "copilot"
-  api_base = "http://localhost:11434/v1",
-  models = { "qwen3.5:27b" },
-})
-
-smelt.provider.register("openai", {
-  type = "openai",
-  api_base = "https://api.openai.com/v1",
-  api_key_env = "OPENAI_API_KEY",
-  models = { "gpt-5.4" },
-})
-
-smelt.provider.register("codex", {
-  type = "codex", -- uses ChatGPT subscription — models fetched automatically
-  api_base = "https://chatgpt.com/backend-api/codex",
-})
-
-smelt.provider.register("copilot", {
-  type = "copilot", -- uses GitHub Copilot subscription — models fetched automatically
-  api_base = "https://api.individual.githubcopilot.com",
-})
-
-smelt.settings.vim = false
-smelt.settings.auto_compact = false
-smelt.settings.redact_secrets = true -- on by default — scrubs secrets from user input and tool results before they reach the LLM
-```
-
-See the [full documentation](https://leonardcser.github.io/smelt/) for all
-config options, CLI flags, keybindings, permissions, and more.
-
-## Documentation
-
-Full docs are available at
-[leonardcser.github.io/smelt](https://leonardcser.github.io/smelt/) and can be
-built locally with [Zensical](https://github.com/zensical/zensical):
-
-```bash
-uv tool install zensical
-cd docs && zensical serve
-```
-
-## Development
-
-```bash
-cargo build       # compile
-cargo run         # run
-cargo test        # run tests
-cargo fmt         # format
-cargo clippy      # lint
-```
-
-## Acknowledgments
-
-Inspired by [Claude Code](https://github.com/anthropics/claude-code).
-
-## Contributing
-
-Contributions welcome! Open an issue or pull request.
+Full documentation for configuration, Lua API, keybindings, permissions,
+providers, and plugin authoring lives at
+**[leonardcser.github.io/smelt](https://leonardcser.github.io/smelt/)**.
 
 ## License
 
-MIT — see [LICENSE](LICENSE).
+MIT, see [LICENSE](LICENSE). Inspired by
+[Claude Code](https://github.com/anthropics/claude-code) and
+[Neovim](https://github.com/neovim/neovim).
