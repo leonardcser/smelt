@@ -1470,21 +1470,21 @@ impl Window {
             let line_has_selection = selection_ranges.iter().any(|r| r.line == logical_row);
             let any_chrome = spans_buf.iter().any(|s| !s.meta.selectable);
             let any_selectable = spans_buf.iter().any(|s| s.meta.selectable);
-            let mask_slice: Option<&[bool]> =
-                if line_has_selection && any_chrome && any_selectable {
-                    mask_buf.clear();
-                    mask_buf.resize(content_width as usize, true);
-                    for span in spans_buf.iter().filter(|s| !s.meta.selectable) {
-                        let start = to_viewport_col(span.col_start) as usize;
-                        let end = to_viewport_col(span.col_end) as usize;
-                        for slot in mask_buf.iter_mut().take(end).skip(start) {
-                            *slot = false;
-                        }
+            let mask_slice: Option<&[bool]> = if line_has_selection && any_chrome && any_selectable
+            {
+                mask_buf.clear();
+                mask_buf.resize(content_width as usize, true);
+                for span in spans_buf.iter().filter(|s| !s.meta.selectable) {
+                    let start = to_viewport_col(span.col_start) as usize;
+                    let end = to_viewport_col(span.col_end) as usize;
+                    for slot in mask_buf.iter_mut().take(end).skip(start) {
+                        *slot = false;
                     }
-                    Some(mask_buf.as_slice())
-                } else {
-                    None
-                };
+                }
+                Some(mask_buf.as_slice())
+            } else {
+                None
+            };
             if logical.is_some() {
                 for r in selection_ranges.iter().filter(|r| r.line == logical_row) {
                     let style = merge_span_style(row_style, &visual_style);
