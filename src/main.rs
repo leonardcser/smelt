@@ -182,7 +182,16 @@ async fn main() {
         eprintln!("warning: lua init: {err}");
     }
 
-    let s = startup::resolve(&args, lua_cfg).await;
+    // One reqwest client shared across startup tasks (Codex / Copilot auth refresh,
+    // context-window fetch) so we only build one rustls config + parse webpki-roots
+    // once. The engine builds its own client because it sets a custom user-agent
+    // for provider request gating.
+    let startup_http_client = reqwest::Client::builder()
+        .user_agent(concat!("smelt/", env!("CARGO_PKG_VERSION")))
+        .build()
+        .unwrap_or_else(|_| reqwest::Client::new());
+
+    let s = startup::resolve(&args, lua_cfg, &startup_http_client).await;
     let startup::ResolvedStartup {
         cfg,
         available_models,
@@ -416,12 +425,13 @@ async fn main() {
         let ctx_provider_type = initial_provider_type.clone();
         let (tx, rx) = tokio::sync::oneshot::channel();
         let ctx_clock = Arc::clone(&clock);
+        let ctx_client = startup_http_client.clone();
         tokio::spawn(async move {
             let provider = engine::Provider::new(
                 ctx_api_base,
                 ctx_api_key,
                 &ctx_provider_type,
-                reqwest::Client::new(),
+                ctx_client,
                 ctx_clock,
             );
             let _ = tx.send(provider.fetch_context_window(&ctx_model).await);

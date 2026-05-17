@@ -72,7 +72,14 @@ fn resolve_model_reference(
 }
 
 /// Resolve all startup configuration: Lua registries, `--set` overrides, model lists, API keys, and defaults.
-pub async fn resolve(args: &Args, cfg: smelt_core::config::Config) -> ResolvedStartup {
+///
+/// `http_client` is reused for Codex / Copilot auth refresh tasks so they don't each
+/// rebuild a fresh rustls config + webpki-roots parse.
+pub async fn resolve(
+    args: &Args,
+    cfg: smelt_core::config::Config,
+    http_client: &reqwest::Client,
+) -> ResolvedStartup {
     let mut cfg = cfg;
 
     for pair in &args.set {
@@ -104,8 +111,8 @@ pub async fn resolve(args: &Args, cfg: smelt_core::config::Config) -> ResolvedSt
         if !ids.is_empty() {
             cfg.inject_codex_models(&mut available_models, &ids);
         }
-        tokio::spawn(async {
-            let client = reqwest::Client::new();
+        let client = http_client.clone();
+        tokio::spawn(async move {
             let _ = engine::auth::refresh_models_cache(engine::auth::AuthProvider::Codex, &client)
                 .await;
         });
@@ -116,8 +123,8 @@ pub async fn resolve(args: &Args, cfg: smelt_core::config::Config) -> ResolvedSt
         if !ids.is_empty() {
             cfg.inject_copilot_models(&mut available_models, &ids);
         }
-        tokio::spawn(async {
-            let client = reqwest::Client::new();
+        let client = http_client.clone();
+        tokio::spawn(async move {
             let _ =
                 engine::auth::refresh_models_cache(engine::auth::AuthProvider::Copilot, &client)
                     .await;
