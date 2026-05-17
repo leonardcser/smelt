@@ -1,6 +1,6 @@
 [package]
 name = "smelt-perf"
-version = "0.4.7"
+version = "0.5.0-alpha.1"
 edition = "2021"
 description = "Lightweight allocation + timing instrumentation. Counting global allocator and labelled scope guards."
 license = "MIT"

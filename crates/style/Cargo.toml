@@ -1,6 +1,6 @@
 [package]
 name = "smelt-style"
-version = "0.4.7"
+version = "0.5.0-alpha.1"
 edition = "2021"
 description = "Frontend-neutral style primitives — Color, Style, Theme, HlGroup. Shared leaf consumed by document models (smelt-buffer) and renderers (smelt-term)."
 license = "MIT"
