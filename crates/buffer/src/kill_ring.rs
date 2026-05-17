@@ -1,6 +1,22 @@
 //! Emacs-style kill ring with yank-pop support.
+//!
+//! The kill ring carries plain text only. Attachment markers have no
+//! representation here — an `AttachmentId` is bound to a specific buffer's
+//! attachment list, not to text — so every entry point strips
+//! `ATTACHMENT_MARKER` before storing. Yanking back can then go through
+//! `AttachedTextMut::insert_str` without risk of producing orphan markers
+//! that would desync source from the id list.
 
+use crate::attachment::ATTACHMENT_MARKER;
 use std::time::{Duration, Instant};
+
+fn strip_markers(text: String) -> String {
+    if text.contains(ATTACHMENT_MARKER) {
+        text.replace(ATTACHMENT_MARKER, "")
+    } else {
+        text
+    }
+}
 
 const KILL_RING_MAX: usize = 32;
 
@@ -53,6 +69,7 @@ impl KillRing {
 
     /// Push a new kill, rotating the previous current into history.
     pub fn kill(&mut self, text: String) {
+        let text = strip_markers(text);
         if text.is_empty() {
             return;
         }
@@ -114,14 +131,14 @@ impl KillRing {
 
     /// Set the current kill text, clearing the linewise flag.
     pub fn set(&mut self, text: String) {
-        self.current = text;
+        self.current = strip_markers(text);
         self.linewise = false;
         self.source_range = None;
     }
 
     /// Set the current kill text with an explicit linewise flag.
     pub fn set_with_linewise(&mut self, text: String, linewise: bool) {
-        self.current = text;
+        self.current = strip_markers(text);
         self.linewise = linewise;
     }
 
@@ -129,7 +146,7 @@ impl KillRing {
     /// so hosts can detect that a yank happened. Clears `last_yank_at` so
     /// deletes don't inherit a prior yank's flash; call `mark_yanked` after for yanks.
     pub fn set_with_source(&mut self, text: String, linewise: bool, start: usize, end: usize) {
-        self.current = text;
+        self.current = strip_markers(text);
         self.linewise = linewise;
         self.source_range = Some((start, end));
         self.yank_tick = self.yank_tick.wrapping_add(1);
