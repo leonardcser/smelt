@@ -24,12 +24,9 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
         },
     )?;
     // Callable: smelt.notify("msg") -> info toast.
-    let call = lua.create_function(|_, (_tbl, msg): (mlua::Table, String)| -> LuaResult<()> {
+    m.callable(|_, (_tbl, msg): (mlua::Table, String)| -> LuaResult<()> {
         crate::lua::with_app(|app| app.notify(msg));
         Ok(())
     })?;
-    let mt = lua.create_table()?;
-    mt.set("__call", call)?;
-    m.tbl.set_metatable(Some(mt))?;
     Ok(())
 }

@@ -114,6 +114,24 @@ impl<'a> LuaMod<'a> {
         )
     }
 
+    /// Wire a `__call` metamethod on the module's table. Replaces any
+    /// existing `__call` so a higher tier can override a lower tier's
+    /// stub (e.g. TUI installing the live setter over the host-tier
+    /// read-only stub on `smelt.mode`). The closure receives the table
+    /// as its first arg (the Lua self) and the call args as the rest.
+    pub fn callable<F, A, R>(&self, f: F) -> mlua::Result<()>
+    where
+        F: Fn(&Lua, A) -> mlua::Result<R> + MaybeSend + 'static,
+        A: FromLuaMulti,
+        R: IntoLuaMulti,
+    {
+        let func = self.lua.create_function(f)?;
+        let mt = self.tbl.metatable().unwrap_or(self.lua.create_table()?);
+        mt.set("__call", func)?;
+        self.tbl.set_metatable(Some(mt))?;
+        Ok(())
+    }
+
     pub fn lua(&self) -> &'a Lua {
         self.lua
     }

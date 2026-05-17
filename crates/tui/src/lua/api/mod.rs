@@ -124,29 +124,29 @@ impl LuaRuntime {
         // Replace the host-tier `__call` no-op stub on `smelt.mode` /
         // `smelt.reasoning` with the live setter, so `smelt.mode("plan")`
         // and `smelt.reasoning("high")` actually take effect.
-        install_selector_call(
-            lua,
-            &smelt,
-            "mode",
-            |_, mode: LuaAgentMode| {
-                crate::lua::with_app(|app| app.set_mode(mode.into()));
-                Ok(())
-            },
-            |lua, ()| -> LuaResult<mlua::Value> {
+        LuaMod::extend(lua, smelt.get("mode")?, "smelt.mode", Tier::UiHost).callable(
+            |lua, (_tbl, v): (mlua::Table, Option<LuaAgentMode>)| -> LuaResult<mlua::Value> {
+                if let Some(mode) = v {
+                    crate::lua::with_app(|app| app.set_mode(mode.into()));
+                    return Ok(mlua::Value::Nil);
+                }
                 let cur = crate::lua::try_with_app(|app| LuaAgentMode::from(app.core.config.mode))
                     .unwrap_or(LuaAgentMode::Normal);
                 cur.into_lua(lua)
             },
         )?;
-        install_selector_call(
+        LuaMod::extend(
             lua,
-            &smelt,
-            "reasoning",
-            |_, effort: LuaReasoningEffort| {
-                crate::lua::with_app(|app| app.set_reasoning_effort(effort.into()));
-                Ok(())
-            },
-            |lua, ()| -> LuaResult<mlua::Value> {
+            smelt.get("reasoning")?,
+            "smelt.reasoning",
+            Tier::UiHost,
+        )
+        .callable(
+            |lua, (_tbl, v): (mlua::Table, Option<LuaReasoningEffort>)| -> LuaResult<mlua::Value> {
+                if let Some(effort) = v {
+                    crate::lua::with_app(|app| app.set_reasoning_effort(effort.into()));
+                    return Ok(mlua::Value::Nil);
+                }
                 let cur = crate::lua::try_with_app(|app| {
                     LuaReasoningEffort::from(app.core.config.reasoning_effort)
                 })
@@ -191,42 +191,6 @@ impl LuaRuntime {
 
         Ok(())
     }
-}
-
-/// Wire a callable selector module: when `smelt.<name>(v)` is called
-/// with a value, `set(v)` runs; with no arg, `get()` returns the
-/// current value. Replaces the `__call` stub the host-tier registration
-/// installed.
-fn install_selector_call<T, S, G>(
-    lua: &Lua,
-    smelt: &mlua::Table,
-    name: &'static str,
-    set: S,
-    get: G,
-) -> LuaResult<()>
-where
-    T: 'static + FromLua,
-    S: Fn(&Lua, T) -> LuaResult<()> + 'static,
-    G: Fn(&Lua, ()) -> LuaResult<mlua::Value> + 'static,
-{
-    let tbl: mlua::Table = smelt.get(name)?;
-    let call = lua.create_function(
-        move |lua, (_tbl, v): (mlua::Table, Option<T>)| -> LuaResult<mlua::Value> {
-            match v {
-                Some(value) => {
-                    set(lua, value)?;
-                    Ok(mlua::Value::Nil)
-                }
-                None => get(lua, ()),
-            }
-        },
-    )?;
-    let mt = tbl
-        .metatable()
-        .unwrap_or_else(|| lua.create_table().unwrap());
-    mt.set("__call", call)?;
-    tbl.set_metatable(Some(mt))?;
-    Ok(())
 }
 
 // ── theme + color helpers ──────────────────────────────────────────────

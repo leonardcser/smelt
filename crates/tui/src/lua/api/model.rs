@@ -37,7 +37,7 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
     )?;
 
     // `__call(v?)`: read when no arg, switch when arg.
-    let f = lua.create_function(
+    m.callable(
         |lua, (_tbl, v): (mlua::Table, Option<String>)| -> LuaResult<mlua::Value> {
             match v {
                 Some(name) => {
@@ -52,8 +52,5 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
             }
         },
     )?;
-    let mt = lua.create_table()?;
-    mt.set("__call", f)?;
-    m.tbl.set_metatable(Some(mt))?;
     Ok(())
 }

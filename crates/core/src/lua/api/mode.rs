@@ -43,7 +43,7 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
     )?;
 
     // `__call`: get when no arg, no-op set stub here (TUI overrides).
-    let f = lua.create_function(
+    m.callable(
         |lua, (_tbl, v): (mlua::Table, Option<LuaAgentMode>)| -> LuaResult<mlua::Value> {
             if v.is_some() {
                 return Ok(mlua::Value::Nil);
@@ -53,9 +53,6 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
             cur.into_lua(lua)
         },
     )?;
-    let mt = lua.create_table()?;
-    mt.set("__call", f)?;
-    m.tbl.set_metatable(Some(mt))?;
 
     Ok(())
 }
