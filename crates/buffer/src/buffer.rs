@@ -175,7 +175,6 @@ pub enum SourceLine {
 
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct LineDecoration {
-    pub gutter_bg: Option<Color>,
     /// Row-level bg fill, painted across the entire slice width by `Window::render`.
     /// Set via `Buffer::set_decoration` for buffers that aren't built through
     /// `LineBuilder` (e.g. the cmdline status bar). Transcript content blocks
@@ -1143,7 +1142,6 @@ impl Buffer {
 
     pub fn decoration_at(&self, line: usize) -> &LineDecoration {
         static DEFAULT: LineDecoration = LineDecoration {
-            gutter_bg: None,
             fill_bg: None,
             soft_wrapped: false,
             source_text: None,

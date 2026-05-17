@@ -221,16 +221,6 @@ impl<'a> LineBuilder<'a> {
         self.cur_decoration.fill_bg = Some(bg);
     }
 
-    pub fn set_gutter_bg(&mut self, bg: Color) {
-        self.cur_decoration.gutter_bg = Some(bg);
-    }
-
-    /// Like `set_gutter_bg` but resolves the background from a theme group.
-    pub fn set_gutter_bg_group(&mut self, group: HlGroup) {
-        let bg = self.theme.resolve(group).bg.unwrap_or(Color::Reset);
-        self.set_gutter_bg(bg);
-    }
-
     pub fn mark_soft_wrap_continuation(&mut self) {
         self.cur_decoration.soft_wrapped = true;
     }
@@ -497,10 +487,7 @@ fn style_has_axis_mods(s: &Style) -> bool {
 }
 
 fn has_decoration(dec: &LineDecoration) -> bool {
-    dec.gutter_bg.is_some()
-        || dec.fill_bg.is_some()
-        || dec.soft_wrapped
-        || dec.source_text.is_some()
+    dec.fill_bg.is_some() || dec.soft_wrapped || dec.source_text.is_some()
 }
 
 fn style_is_default(s: &Style) -> bool {
@@ -744,7 +731,7 @@ mod tests {
         let mut buf = fresh_buf();
         let theme = Theme::default();
         let mut lb = LineBuilder::new(&mut buf, &theme, 80);
-        lb.set_gutter_bg(Color::Red);
+        lb.fill_line_bg(Color::Red);
         assert_eq!(lb.line_count(), 1);
     }
 
@@ -775,18 +762,6 @@ mod tests {
         assert_eq!(meta_copy.as_deref(), Some("real"));
     }
 
-
-    #[test]
-    fn set_gutter_bg_and_group_set_decoration() {
-        let mut buf = fresh_buf();
-        let theme = Theme::default();
-        let mut lb = LineBuilder::new(&mut buf, &theme, 80);
-        lb.set_gutter_bg(Color::Blue);
-        assert_eq!(lb.cur_decoration.gutter_bg, Some(Color::Blue));
-        lb.set_gutter_bg_group(intern("AnotherMissing_xyz"));
-        // Theme fallback -> Color::Reset; ensure the decoration was updated.
-        assert!(lb.cur_decoration.gutter_bg.is_some());
-    }
 
     #[test]
     fn mark_soft_wrap_continuation_sets_decoration_flag() {
