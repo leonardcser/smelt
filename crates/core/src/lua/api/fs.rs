@@ -176,19 +176,6 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
     register_fn(
         &fs,
         "smelt.fs",
-        "mtime",
-        "Return the modification time of `p` in seconds since the UNIX epoch. Returns `(secs, nil)` or `(nil, err_string)` on failure.",
-        &["p"],
-        lua,
-        |_, p: String| match crate::fs::mtime_secs(&p) {
-            Ok(value) => Ok((value, None)),
-            Err(err) => Ok((None, Some(err.to_string()))),
-        },
-    )?;
-
-    register_fn(
-        &fs,
-        "smelt.fs",
         "size",
         "Return the size of file `p` in bytes. Returns `(size, nil)` or `(nil, err_string)` on failure.",
         &["p"],

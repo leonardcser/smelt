@@ -78,14 +78,6 @@ fun(p: string): boolean, string?
 
 Create directory `p` along with any missing parent directories. Returns `(true, nil)` on success or `(false, err_string)` on failure.
 
-## `smelt.fs.mtime`
-
-```lua
-fun(p: string): integer?, string?
-```
-
-Return the modification time of `p` in seconds since the UNIX epoch. Returns `(secs, nil)` or `(nil, err_string)` on failure.
-
 ## `smelt.fs.mtime_ms`
 
 ```lua

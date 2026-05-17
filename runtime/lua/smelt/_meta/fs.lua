@@ -43,10 +43,6 @@ fs.mkdir = nil
 ---@type fun(p: string): boolean, string?
 fs.mkdir_all = nil
 
---- Return the modification time of `p` in seconds since the UNIX epoch. Returns `(secs, nil)` or `(nil, err_string)` on failure.
----@type fun(p: string): integer?, string?
-fs.mtime = nil
-
 --- Return the modification time of `p` in milliseconds since the UNIX epoch. Returns `(ms, nil)` or `(nil, err_string)` on failure.
 ---@type fun(p: string): integer?, string?
 fs.mtime_ms = nil

@@ -7,17 +7,13 @@
 ---@class smelt.http
 local http = {}
 
---- Look up a cached HTTP response by `key`. Returns the stored string or `nil` if no entry exists.
----@type fun(key: string): string?
+--- Perform a synchronous HTTP GET against `url`. `opts` accepts `headers`, `timeout_secs`, and `max_redirects`. Returns `({ status, final_url, body, headers }, nil)` on success or `(nil, err_string)` on failure.
+---@type fun(url: string, opts: table?): table?, string?
 http.get = nil
 
 --- Perform a synchronous HTTP POST against `url` with `body` bytes. `opts` accepts `headers`, `timeout_secs`, and `max_redirects`. Returns `({ status, final_url, body, headers }, nil)` on success or `(nil, err_string)` on failure.
 ---@type fun(url: string, body: string?, opts: table?): table?, string?
 http.post = nil
-
---- Store `value` in the HTTP response cache under `key`.
----@type fun(key: string, value: string): nil
-http.put = nil
 
 --- Return a randomly selected User-Agent string from the built-in pool.
 ---@type fun(): string

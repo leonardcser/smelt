@@ -60,16 +60,6 @@ pub(crate) fn copy(from: impl AsRef<Path>, to: impl AsRef<Path>) -> io::Result<u
     std::fs::copy(from, to)
 }
 
-/// `None` if the platform does not expose mtime or the value is before the epoch.
-pub(crate) fn mtime_secs(path: impl AsRef<Path>) -> io::Result<Option<u64>> {
-    let meta = std::fs::metadata(path)?;
-    let modified = meta.modified()?;
-    Ok(modified
-        .duration_since(std::time::UNIX_EPOCH)
-        .ok()
-        .map(|d| d.as_secs()))
-}
-
 pub(crate) fn size(path: impl AsRef<Path>) -> io::Result<u64> {
     Ok(std::fs::metadata(path)?.len())
 }
@@ -166,12 +156,11 @@ mod tests {
     }
 
     #[test]
-    fn mtime_and_size() {
+    fn size_of_file() {
         let tmp = TempDir::new().unwrap();
         let p = tmp.path().join("z.txt");
         write(&p, "hello").unwrap();
         assert_eq!(size(&p).unwrap(), 5);
-        assert!(mtime_secs(&p).unwrap().is_some());
     }
 }
 

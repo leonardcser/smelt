@@ -57,7 +57,7 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
     let cache_tbl = lua.create_table()?;
     register_fn(
         &cache_tbl,
-        "smelt.http",
+        "smelt.http.cache",
         "get",
         "Look up a cached HTTP response by `key`. Returns the stored string or `nil` if no entry exists.",
         &["key"],
@@ -66,7 +66,7 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
     )?;
     register_fn(
         &cache_tbl,
-        "smelt.http",
+        "smelt.http.cache",
         "put",
         "Store `value` in the HTTP response cache under `key`.",
         &["key", "value"],

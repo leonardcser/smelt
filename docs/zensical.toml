@@ -42,6 +42,7 @@ nav = [
     { "`smelt.history`" = "reference/api/history.md" },
     { "`smelt.html`" = "reference/api/html.md" },
     { "`smelt.http`" = "reference/api/http.md" },
+    { "`smelt.http.cache`" = "reference/api/http_cache.md" },
     { "`smelt.image`" = "reference/api/image.md" },
     { "`smelt.keymap`" = "reference/api/keymap.md" },
     { "`smelt.layout`" = "reference/api/layout.md" },

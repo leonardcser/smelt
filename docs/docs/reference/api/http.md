@@ -9,10 +9,10 @@ Synchronous HTTP get/post with redirect following and header support. Errors use
 ## `smelt.http.get`
 
 ```lua
-fun(key: string): string?
+fun(url: string, opts: table?): table?, string?
 ```
 
-Look up a cached HTTP response by `key`. Returns the stored string or `nil` if no entry exists.
+Perform a synchronous HTTP GET against `url`. `opts` accepts `headers`, `timeout_secs`, and `max_redirects`. Returns `({ status, final_url, body, headers }, nil)` on success or `(nil, err_string)` on failure.
 
 ## `smelt.http.post`
 
@@ -21,14 +21,6 @@ fun(url: string, body: string?, opts: table?): table?, string?
 ```
 
 Perform a synchronous HTTP POST against `url` with `body` bytes. `opts` accepts `headers`, `timeout_secs`, and `max_redirects`. Returns `({ status, final_url, body, headers }, nil)` on success or `(nil, err_string)` on failure.
-
-## `smelt.http.put`
-
-```lua
-fun(key: string, value: string): nil
-```
-
-Store `value` in the HTTP response cache under `key`.
 
 ## `smelt.http.random_user_agent`
 
