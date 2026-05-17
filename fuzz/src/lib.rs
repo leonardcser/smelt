@@ -322,6 +322,27 @@ pub enum FuzzOp {
     /// chord that reaches the same code path requires two keystrokes inside
     /// `PANE_CHORD_WINDOW`, which random fuzz inputs rarely hit.
     TogglePaneFocus,
+    /// Emit `ToolArgsDelta`. The TUI accumulates `delta` into a per-call
+    /// JSON-fragment buffer, then displays the reconstructed args when
+    /// the matching `ToolStarted` arrives. Exercises the streaming-arg
+    /// reassembly path against arbitrary out-of-order or orphan deltas.
+    EngineToolArgsDelta {
+        call_id: String,
+        tool_name: String,
+        delta: String,
+    },
+    /// Emit `BtwResponse`. Active-turn dispatch surfaces an ephemeral
+    /// side-question reply that doesn't enter the main history.
+    EngineBtwResponse {
+        content: String,
+    },
+    /// Emit `EngineAskResponse`. Resumes a Lua coroutine that issued a
+    /// one-shot `UiCommand::EngineAsk`; no-op when no coroutine is waiting
+    /// on the synthesized `id`.
+    EngineAskResponse {
+        id: u64,
+        content: String,
+    },
 }
 
 #[derive(Arbitrary, Debug, Clone, Copy, Serialize, Deserialize)]
@@ -767,6 +788,11 @@ fn run_check(check: PostCheck, pre: &Snapshot, post: &Snapshot, new_actions: &[A
                     "Retrying on active turn left working idle: {:?}",
                     post.working
                 );
+                assert!(
+                    !post.streaming.text && !post.streaming.thinking,
+                    "Retrying left streaming active: {:?}",
+                    post.streaming
+                );
             }
         }
         PostCheck::Steered { count } => {
@@ -1203,6 +1229,26 @@ fn plan(op: FuzzOp) -> (Option<SourceEvent>, PostCheck) {
         }
         FuzzOp::InsertAttachment { .. } | FuzzOp::TogglePaneFocus => {
             unreachable!("InsertAttachment / TogglePaneFocus side channels handled inline in apply()")
+        }
+        FuzzOp::EngineToolArgsDelta {
+            call_id,
+            tool_name,
+            delta,
+        } => {
+            let ev = SourceEvent::Engine(EngineEvent::ToolArgsDelta {
+                call_id,
+                tool_name,
+                delta,
+            });
+            (Some(ev), PostCheck::None)
+        }
+        FuzzOp::EngineBtwResponse { content } => {
+            let ev = SourceEvent::Engine(EngineEvent::BtwResponse { content });
+            (Some(ev), PostCheck::None)
+        }
+        FuzzOp::EngineAskResponse { id, content } => {
+            let ev = SourceEvent::Engine(EngineEvent::EngineAskResponse { id, content });
+            (Some(ev), PostCheck::None)
         }
     }
 }
