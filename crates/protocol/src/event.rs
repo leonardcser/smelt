@@ -360,6 +360,16 @@ pub enum UiCommand {
         provider_type: String,
     },
 
+    /// Replace cached prompt inputs after `/reload`. Updates
+    /// `EngineConfig::instructions`, `EngineConfig::skill_section`, and
+    /// `EngineConfig::system_prompt_override` so subsequent turns,
+    /// compactions, and mid-turn mode changes see the refreshed values.
+    ReloadAgentConfig {
+        instructions: Option<String>,
+        skill_section: Option<String>,
+        system_prompt_override: Option<String>,
+    },
+
     /// Compact conversation history.
     Compact {
         history: Vec<Message>,

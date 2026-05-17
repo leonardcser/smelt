@@ -44,6 +44,9 @@ glob = "0.3"
 globset = "0.4"
 ignore = "0.4"
 
+# Filesystem watch
+notify = "8.2.0"
+
 # System
 libc = "0.2"
 dirs = "6"

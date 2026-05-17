@@ -261,6 +261,9 @@ impl LuaShared {
         if let Ok(mut m) = self.watchers.lock() {
             m.clear();
         }
+        if let Ok(mut m) = self.mcp_configs.lock() {
+            m.clear();
+        }
     }
 }
 

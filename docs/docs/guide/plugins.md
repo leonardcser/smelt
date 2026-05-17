@@ -42,6 +42,28 @@ scratch; the current transcript and agent state stay put. Errors land in
 `/messages`. Changes to
 [`early.lua`](customization.md#early-phase-config) need a real restart.
 
+Reload also refreshes the on-disk inputs that feed the agent's system prompt
+and tool surface, not just Lua:
+
+- `AGENTS.md` (global `~/.config/smelt/AGENTS.md` plus the nearest project
+  copy) is re-read.
+- Every `SKILL.md` under `~/.config/smelt/skills/`, `.smelt/skills/`, and any
+  extra directories in `settings.skills.paths` is rescanned, so new skills,
+  renamed skills, and edits to descriptions or bodies all show up on the
+  next turn.
+- MCP servers declared with `smelt.mcp.register` are reconciled: new
+  registrations spawn, removed registrations stop, and servers whose
+  config changed are restarted. Pending tool calls finish on the old
+  connection.
+- `--system-prompt <file>`, when the flag pointed at a file path, is
+  re-read from disk.
+
+Set `smelt.settings.auto_reload = true` to skip the manual F5: smelt watches
+`~/.config/smelt/`, `.smelt/`, the nearest `AGENTS.md`, and the
+`--system-prompt` file (if any), debounces a 250 ms window, then runs `/reload`
+for you. Edits that land while an agent turn is running or a modal dialog is
+open are deferred to the next quiet window.
+
 ## Bundled plugins
 
 | Plugin | Autoloaded | What it does |

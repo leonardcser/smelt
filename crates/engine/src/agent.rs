@@ -67,7 +67,6 @@ pub(crate) async fn engine_task(
                             model_config_overrides.as_ref(),
                             std::sync::Arc::clone(&config.clock),
                         );
-                        let skill_section = config.skills.as_ref().and_then(|s| s.prompt_section());
                         let system_prompt = tui_system_prompt
                             .or_else(|| config.system_prompt_override.clone())
                             .unwrap_or_else(|| {
@@ -75,7 +74,7 @@ pub(crate) async fn engine_task(
                                     mode,
                                     &config.cwd,
                                     config.instructions.as_deref(),
-                                    skill_section,
+                                    config.skill_section.as_deref(),
                                 )
                             });
                         let mut turn = Turn {
@@ -184,6 +183,15 @@ pub(crate) async fn engine_task(
                         config.api.key = api_key;
                         config.api.provider_type = provider_type;
                         config.model = model;
+                    }
+                    UiCommand::ReloadAgentConfig {
+                        instructions,
+                        skill_section,
+                        system_prompt_override,
+                    } => {
+                        config.instructions = instructions;
+                        config.skill_section = skill_section;
+                        config.system_prompt_override = system_prompt_override;
                     }
                     _ => {} // Steer, Cancel, etc. only relevant during a turn
                 }
@@ -502,7 +510,6 @@ impl<'a> Turn<'a> {
 
     /// Rebuilds the system prompt after a mid-turn mode change.
     fn regenerate_system_prompt(&mut self) {
-        let skill_section = self.config.skills.as_ref().and_then(|s| s.prompt_section());
         let new = self
             .config
             .system_prompt_override
@@ -512,7 +519,7 @@ impl<'a> Turn<'a> {
                     self.mode,
                     &self.config.cwd,
                     self.config.instructions.as_deref(),
-                    skill_section,
+                    self.config.skill_section.as_deref(),
                 )
             });
         self.system_prompt = new;

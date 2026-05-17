@@ -3045,6 +3045,7 @@ dependencies = [
  "libc",
  "lua-doc-derive",
  "mlua",
+ "notify",
  "protocol",
  "serde",
  "serde_json",

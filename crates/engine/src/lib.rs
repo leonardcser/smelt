@@ -138,7 +138,11 @@ pub struct EngineConfig {
     /// When set, replaces the built-in system prompt template entirely.
     pub system_prompt_override: Option<String>,
     pub cwd: PathBuf,
-    pub skills: Option<Arc<SkillLoader>>,
+    /// Pre-rendered "# Skills" block injected into the system prompt.
+    /// Built once on startup from the [`SkillLoader`] and refreshed on
+    /// `/reload` through [`protocol::UiCommand::ReloadAgentConfig`]. The
+    /// loader itself lives on `Core::skills` for tool execution.
+    pub skill_section: Option<String>,
     pub auto_compact: bool,
     /// `None` causes the engine to fetch this from the provider API on first use.
     pub context_window: Option<u32>,
@@ -399,7 +403,7 @@ mod tests {
             instructions: None,
             system_prompt_override: None,
             cwd: PathBuf::from("/"),
-            skills: None,
+            skill_section: None,
             auto_compact: false,
             context_window: None,
             redact_secrets: false,

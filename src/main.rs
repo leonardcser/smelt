@@ -319,19 +319,25 @@ async fn main() {
     } else {
         tui::instructions::load()
     };
+    // Track the source path when `--system-prompt` points at a file so
+    // `/reload` can re-read it. Inline strings keep `system_prompt_path = None`.
+    let mut system_prompt_path: Option<std::path::PathBuf> = None;
     let system_prompt_override = if args.no_system_prompt {
         Some(String::new())
     } else {
         args.system_prompt.take().map(|s| {
             let path = std::path::Path::new(&s);
             if path.is_file() {
-                std::fs::read_to_string(path).unwrap_or_else(|e| {
+                let pb = path.to_path_buf();
+                let content = std::fs::read_to_string(&pb).unwrap_or_else(|e| {
                     eprintln!(
                         "error: failed to read system prompt file {}: {e}",
-                        path.display()
+                        pb.display()
                     );
                     std::process::exit(1);
-                })
+                });
+                system_prompt_path = Some(pb);
+                content
             } else {
                 s
             }
@@ -366,26 +372,25 @@ async fn main() {
     let initial_api_base = api_base.clone();
     let initial_provider_type = provider_type.clone();
 
-    let skill_loader = {
-        let extra_paths: Vec<std::path::PathBuf> = Vec::new();
-        Arc::new(engine::SkillLoader::load(&extra_paths))
-    };
-    let tui_skill_section = skill_loader.prompt_section().map(String::from);
-    let tui_skill_loader = skill_loader.clone();
-    let tui_instructions = instructions.clone();
+    // Extra skill search roots (today the empty default; once a Lua API
+    // for declaring them lands, plumb the resolved list through here).
+    let skill_extra_paths: Vec<std::path::PathBuf> = Vec::new();
+    let (prompt_inputs, skill_loader) = tui::prompt_inputs::PromptInputs::load(
+        skill_extra_paths,
+        system_prompt_path,
+        instructions,
+        system_prompt_override,
+    );
 
-    let mcp_manager = if cfg.mcp.is_empty() {
-        None
-    } else {
-        Some(smelt_core::mcp::McpManager::start(&cfg.mcp).await)
-    };
+    // Always create the manager (even with no servers) so `/reload` can
+    // add servers later through `smelt.mcp.register` and the dispatcher
+    // sees them live without the engine having to restart.
+    let mcp_manager = smelt_core::mcp::McpManager::start(&cfg.mcp).await;
     let dispatcher: Box<dyn engine::tools::ToolDispatcher> =
-        match mcp_manager.as_ref().and_then(|m| {
-            smelt_core::mcp::dispatcher::McpDispatcher::new(Arc::clone(m), Arc::clone(&permissions))
-        }) {
-            Some(d) => Box::new(d),
-            None => Box::new(engine::tools::EmptyDispatcher::new()),
-        };
+        Box::new(smelt_core::mcp::dispatcher::McpDispatcher::new(
+            Arc::clone(&mcp_manager),
+            Arc::clone(&permissions),
+        ));
 
     let engine_handle = engine::start(
         engine::EngineConfig {
@@ -398,10 +403,10 @@ async fn main() {
             },
             model: model.clone(),
             auxiliary,
-            instructions,
-            system_prompt_override,
+            instructions: prompt_inputs.instructions.clone(),
+            system_prompt_override: prompt_inputs.system_prompt_override.clone(),
             cwd: cwd.clone(),
-            skills: Some(skill_loader),
+            skill_section: prompt_inputs.skill_section.clone(),
             auto_compact: settings.auto_compact,
             context_window: None,
             redact_secrets: settings.redact_secrets,
@@ -476,8 +481,8 @@ async fn main() {
             Arc::clone(&clock),
             Arc::clone(&env),
         );
-        core.skills = Some(tui_skill_loader.clone());
-        core.mcp = mcp_manager.clone();
+        core.skills = Some(Arc::clone(&skill_loader));
+        core.mcp = Some(Arc::clone(&mcp_manager));
         let sink = smelt_core::HeadlessSink::new(output_format, color_mode, args.verbose);
         let mut headless = smelt_core::HeadlessApp::new(core, sink);
         headless
@@ -522,10 +527,9 @@ async fn main() {
             Arc::clone(&clock),
             Arc::clone(&env),
         );
-        app.core.skills = Some(tui_skill_loader.clone());
-        app.core.mcp = mcp_manager.clone();
-        app.extra_instructions = tui_instructions;
-        app.skill_section = tui_skill_section;
+        app.core.skills = Some(Arc::clone(&skill_loader));
+        app.core.mcp = Some(Arc::clone(&mcp_manager));
+        app.prompt_inputs = prompt_inputs;
         if let Some(mode) = mode_override {
             app.core.config.mode = mode;
         }

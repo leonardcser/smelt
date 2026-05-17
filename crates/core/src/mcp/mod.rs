@@ -13,7 +13,7 @@ use tokio::process::Command;
 use tokio::sync::RwLock;
 
 /// Configuration for a single MCP server.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 #[serde(tag = "type")]
 pub enum McpServerConfig {
     #[serde(rename = "local")]
@@ -255,10 +255,12 @@ impl McpServer {
 
 /// Owns the set of `McpServer`s. Held by both `Core` (for Lua
 /// introspection) and `McpDispatcher` (for tool dispatch) via `Arc`.
-/// The server map is populated once at `start`; lookups are lock-free
-/// after that — each `McpServer` carries its own per-field locks.
+/// The server map sits behind a `std::sync::RwLock` so Lua callers can
+/// snapshot it without entering the tokio runtime; reconcile mutates
+/// the map under the same lock and only holds it for the swap, not
+/// across `connect()` awaits.
 pub struct McpManager {
-    servers: HashMap<String, Arc<McpServer>>,
+    servers: StdRwLock<HashMap<String, Arc<McpServer>>>,
 }
 
 impl McpManager {
@@ -266,42 +268,80 @@ impl McpManager {
     /// every connector future has resolved (success or failure); status
     /// is queryable via [`McpServer::status`] afterwards.
     pub async fn start(configs: &HashMap<String, McpServerConfig>) -> Arc<Self> {
-        let mut servers = HashMap::with_capacity(configs.len());
-        for (name, config) in configs {
-            servers.insert(
-                name.clone(),
-                Arc::new(McpServer::new(name.clone(), config.clone())),
-            );
+        let manager = Arc::new(Self {
+            servers: StdRwLock::new(HashMap::new()),
+        });
+        manager.reconcile(configs.clone()).await;
+        manager
+    }
+
+    /// Snapshot of all servers in arbitrary order. Acquires the read
+    /// lock briefly; the returned `Vec` is independent of the live map
+    /// so callers can iterate without holding the lock.
+    pub fn servers_snapshot(&self) -> Vec<Arc<McpServer>> {
+        match self.servers.read() {
+            Ok(guard) => guard.values().cloned().collect(),
+            Err(poisoned) => poisoned.get_ref().values().cloned().collect(),
         }
-        let manager = Arc::new(Self { servers });
+    }
+
+    /// Look up one server by registered name. Returns `None` when no
+    /// server is registered under that name.
+    pub fn server(&self, name: &str) -> Option<Arc<McpServer>> {
+        let guard = self
+            .servers
+            .read()
+            .map_err(|e| e.into_inner())
+            .unwrap_or_else(|e| e);
+        guard.get(name).cloned()
+    }
+
+    /// Diff the live server map against a freshly computed desired set
+    /// and reconcile in place. New servers spawn connectors; removed
+    /// servers are dropped (their `RunningService` shuts down with the
+    /// `McpServer`); servers whose config changed are stopped and
+    /// replaced. Runs the connectors concurrently and awaits all of
+    /// them so callers know reconcile is complete when this returns.
+    pub async fn reconcile(self: &Arc<Self>, desired: HashMap<String, McpServerConfig>) {
+        let new_servers: Vec<Arc<McpServer>> = {
+            let mut guard = match self.servers.write() {
+                Ok(g) => g,
+                Err(poisoned) => poisoned.into_inner(),
+            };
+            guard.retain(|name, server| match desired.get(name) {
+                Some(cfg) => &server.config == cfg,
+                None => false,
+            });
+            let mut spawned = Vec::new();
+            for (name, cfg) in desired.into_iter() {
+                if guard.contains_key(&name) {
+                    continue;
+                }
+                let server = Arc::new(McpServer::new(name.clone(), cfg));
+                guard.insert(name, Arc::clone(&server));
+                spawned.push(server);
+            }
+            spawned
+        };
 
         let mut handles = Vec::new();
-        for server in manager.servers.values() {
-            let server = Arc::clone(server);
+        for server in new_servers {
             handles.push(tokio::spawn(async move { server.connect().await }));
         }
         for h in handles {
             let _ = h.await;
         }
-
-        manager
-    }
-
-    /// All servers in arbitrary order.
-    pub fn servers(&self) -> impl Iterator<Item = &Arc<McpServer>> {
-        self.servers.values()
-    }
-
-    /// Look up one server by registered name.
-    pub fn server(&self, name: &str) -> Option<&Arc<McpServer>> {
-        self.servers.get(name)
     }
 
     /// Snapshot of every discovered tool across every connected server.
     /// Sorted by `(server_name, tool_name)` so callers see a stable order
     /// despite the underlying `HashMap`.
     pub fn tool_defs(&self) -> Vec<McpToolDef> {
-        let mut defs: Vec<McpToolDef> = self.servers.values().flat_map(|s| s.tools()).collect();
+        let mut defs: Vec<McpToolDef> = self
+            .servers_snapshot()
+            .iter()
+            .flat_map(|s| s.tools())
+            .collect();
         defs.sort_by(|a, b| {
             (a.server_name.as_str(), a.tool_name.as_str())
                 .cmp(&(b.server_name.as_str(), b.tool_name.as_str()))
@@ -318,8 +358,7 @@ impl McpManager {
         timeout: Duration,
     ) -> Result<String, String> {
         let server = self
-            .servers
-            .get(server_name)
+            .server(server_name)
             .ok_or_else(|| format!("MCP server '{}' not connected", server_name))?;
         server.call_tool(tool_name, args, timeout).await
     }

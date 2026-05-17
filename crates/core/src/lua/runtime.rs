@@ -406,6 +406,19 @@ impl LuaRuntime {
             .exec()
     }
 
+    /// Snapshot the desired MCP server set as registered through
+    /// `smelt.mcp.register`. `/reload` uses this to drive
+    /// [`crate::mcp::McpManager::reconcile`].
+    pub fn mcp_configs_snapshot(
+        &self,
+    ) -> std::collections::HashMap<String, crate::mcp::McpServerConfig> {
+        self.shared
+            .mcp_configs
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
+    }
+
     pub fn to_config(&self) -> crate::config::Config {
         let providers = self
             .shared

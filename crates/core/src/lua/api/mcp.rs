@@ -161,7 +161,7 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
                     return Ok(Vec::new());
                 };
                 let mut rows = Vec::new();
-                for server in mgr.servers() {
+                for server in mgr.servers_snapshot() {
                     let row = lua.create_table()?;
                     row.set("name", server.name.as_str())?;
                     row.set("config", config_to_table(lua, &server.config)?)?;

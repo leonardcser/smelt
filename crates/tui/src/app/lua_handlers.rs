@@ -14,13 +14,17 @@ impl TuiApp {
         }
     }
 
-    /// `/reload` entry point. Two-phase:
+    /// `/reload` entry point. Three-phase:
     ///
     /// 1. [`Self::clear_tui_for_reload`] wipes TUI-side caches that hold
     ///    Lua handles or reference resources reload will invalidate.
     /// 2. [`LuaRuntime::reload`] (via its own `clear_for_reload`) wipes
     ///    every `LuaShared` registry, then re-runs bootstrap → autoload
     ///    → init.lua → plugins → state sweep.
+    /// 3. [`Self::refresh_agent_inputs`] re-reads AGENTS.md, rebuilds the
+    ///    [`engine::SkillLoader`], re-reads the `--system-prompt` file when
+    ///    present, then ships the refreshed bundle to the engine task via
+    ///    [`protocol::UiCommand::ReloadAgentConfig`].
     ///
     /// Rust-owned UI state (overlays, windows, buffers) is left in place
     /// when named — plugins re-attach via `smelt.state` and the
@@ -30,10 +34,43 @@ impl TuiApp {
         let cwd = std::env::current_dir().ok();
         let err = self.lua.reload(cwd.as_deref());
         self.input.command_arg_sources = self.lua.list_command_args();
+        self.refresh_agent_inputs();
+        self.reconcile_mcp_servers();
         match err {
             Some(e) => self.notify_error(format!("lua reload: {e}")),
             None => self.notify("lua reloaded".into()),
         }
+    }
+
+    /// Re-read filesystem-backed inputs that feed the agent's system prompt
+    /// and ship them to the engine. Runs as the last step of `/reload` so
+    /// the engine sees fresh AGENTS.md / SKILL.md / `--system-prompt` bytes
+    /// on the next turn, compaction, mid-turn mode change, or `EngineAsk`.
+    pub(crate) fn refresh_agent_inputs(&mut self) {
+        let outcome = self.prompt_inputs.refresh();
+        self.core.skills = Some(outcome.loader);
+        if let Some(err) = outcome.system_prompt_read_error {
+            self.notify_error(err);
+        }
+        self.core
+            .engine
+            .send(self.prompt_inputs.to_reload_command());
+    }
+
+    /// Reconcile MCP servers against the post-reload `smelt.mcp.register`
+    /// desired-state set. Spawns/stops/restarts servers off-thread; the
+    /// TUI continues without blocking on handshakes. The
+    /// [`smelt_core::mcp::McpDispatcher`] reads tool defs live from the
+    /// manager, so the engine's dispatch path picks up the new server
+    /// set without further coordination.
+    pub(crate) fn reconcile_mcp_servers(&mut self) {
+        let desired = self.lua.mcp_configs_snapshot();
+        let Some(manager) = self.core.mcp.clone() else {
+            return;
+        };
+        tokio::spawn(async move {
+            manager.reconcile(desired).await;
+        });
     }
 
     /// **Single ledger** of every TUI-side cache that holds Lua handles

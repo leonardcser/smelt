@@ -171,6 +171,7 @@ site.
 | `show_thinking`         | `true`  | Show full thinking/reasoning blocks (false shows a single summary)                |
 | `restrict_to_workspace` | `true`  | Downgrade Allow → Ask for paths outside the workspace                             |
 | `redact_secrets`        | `true`  | Scrub detected secrets from user input and tool results before they reach the LLM |
+| `auto_reload`           | `false` | Watch `~/.config/smelt/`, `.smelt/`, `AGENTS.md`, and `--system-prompt` and fire `/reload` on change |
 
 Override any setting from the CLI with `--set KEY=VALUE`, e.g.
 `--set vim=true`. Values must be `true` or `false`.

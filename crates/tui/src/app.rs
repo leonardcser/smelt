@@ -93,8 +93,15 @@ pub struct TuiApp {
     pub(crate) app_focus: AppFocus,
     /// Tracks the last text dispatched as `TextChanged` on `PROMPT_WIN`.
     pub(crate) last_prompt_text: String,
-    pub extra_instructions: Option<String>,
-    pub skill_section: Option<String>,
+    /// On-disk inputs that feed the agent's system prompt. Single
+    /// home for `AGENTS.md`, the [`engine::SkillLoader`] section, and
+    /// the `--system-prompt` file content; refreshed in place by
+    /// `/reload`.
+    pub prompt_inputs: crate::prompt_inputs::PromptInputs,
+    /// Drop guard for the auto-reload filesystem watcher. `None` when
+    /// the watcher is disabled (`settings.auto_reload = false`) or when
+    /// `notify` failed to subscribe to any of the configured roots.
+    pub(crate) auto_reload: Option<crate::auto_reload::AutoReloadHandle>,
     pub(crate) prompt_sections: crate::prompt_sections::PromptSections,
     pub ui: crate::smelt_term::Ui,
     pub(crate) well_known: WellKnown,
@@ -424,8 +431,8 @@ impl TuiApp {
             project_trust: Some(project_trust),
             app_focus: AppFocus::Prompt,
             last_prompt_text: String::new(),
-            extra_instructions: None,
-            skill_section: None,
+            prompt_inputs: crate::prompt_inputs::PromptInputs::default(),
+            auto_reload: None,
             prompt_sections: crate::prompt_sections::PromptSections::default(),
             ui,
             well_known,
@@ -449,8 +456,8 @@ impl TuiApp {
             cwd,
             self.core.config.mode,
             true, // TUI is always interactive
-            self.skill_section.as_deref(),
-            self.extra_instructions.as_deref(),
+            self.prompt_inputs.skill_section.as_deref(),
+            self.prompt_inputs.instructions.as_deref(),
         );
         self.prompt_sections.assemble()
     }
@@ -792,6 +799,19 @@ impl TuiApp {
         self.flush_lua_callbacks();
         self.input.command_arg_sources = self.lua.list_command_args();
 
+        let mut auto_reload_rx: Option<tokio::sync::mpsc::UnboundedReceiver<()>> = None;
+        if self.core.config.settings.auto_reload {
+            let paths = crate::auto_reload::WatchPaths::discover(
+                std::path::Path::new(&self.cwd),
+                &self.prompt_inputs.skill_extra_paths,
+                self.prompt_inputs.system_prompt_path.clone(),
+            );
+            if let Some((handle, rx)) = crate::auto_reload::spawn(paths) {
+                self.auto_reload = Some(handle);
+                auto_reload_rx = Some(rx);
+            }
+        }
+
         let mut term_events = EventStream::new();
         // Independent SIGWINCH listener: crossterm's signal source intermittently drops
         // resize events (signal-hook-mio counter / mio readiness race), so we keep our
@@ -1064,6 +1084,26 @@ impl TuiApp {
                     while self.lua_wakeup_rx.try_recv().is_ok() {}
                     self.flush_lua_callbacks();
                     self.drive_lua_tasks();
+                    self.render_normal(self.agent.is_some());
+                }
+
+                Some(_) = async {
+                    match auto_reload_rx.as_mut() {
+                        Some(rx) => rx.recv().await,
+                        None => std::future::pending().await,
+                    }
+                } => {
+                    // Drain follow-up signals so an editor that produced
+                    // a fresh burst right at the boundary doesn't queue
+                    // a second reload tick we'd execute immediately.
+                    if let Some(rx) = auto_reload_rx.as_mut() {
+                        while rx.try_recv().is_ok() {}
+                    }
+                    if self.agent.is_some() || self.ui.active_modal().is_some() {
+                        // Defer: re-arm on the next debounced batch.
+                        continue;
+                    }
+                    self.reload_lua();
                     self.render_normal(self.agent.is_some());
                 }
 

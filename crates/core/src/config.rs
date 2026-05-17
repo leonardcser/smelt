@@ -66,6 +66,10 @@ pub struct SettingsConfig {
     pub show_thinking: Option<bool>,
     pub restrict_to_workspace: Option<bool>,
     pub redact_secrets: Option<bool>,
+    /// Watch on-disk config inputs (init.lua, plugins/, commands/,
+    /// skills/, AGENTS.md, `--system-prompt` file) and dispatch
+    /// `/reload` when any of them changes. Off by default.
+    pub auto_reload: Option<bool>,
 }
 
 /// The set of boolean settings exposed to Lua. Keeping this as a single
@@ -82,6 +86,7 @@ pub const SETTINGS_KEYS: &[&str] = &[
     "show_thinking",
     "restrict_to_workspace",
     "redact_secrets",
+    "auto_reload",
 ];
 
 impl SettingsConfig {
@@ -100,6 +105,7 @@ impl SettingsConfig {
             "show_thinking" => self.show_thinking = v,
             "restrict_to_workspace" => self.restrict_to_workspace = v,
             "redact_secrets" => self.redact_secrets = v,
+            "auto_reload" => self.auto_reload = v,
             _ => return Err(format!("unknown setting '{key}'")),
         }
         Ok(())
@@ -119,6 +125,7 @@ impl SettingsConfig {
             show_thinking: self.show_thinking.unwrap_or(true),
             restrict_to_workspace: self.restrict_to_workspace.unwrap_or(true),
             redact_secrets: self.redact_secrets.unwrap_or(true),
+            auto_reload: self.auto_reload.unwrap_or(false),
         }
     }
 }
@@ -138,6 +145,7 @@ pub struct ResolvedSettings {
     pub show_thinking: bool,
     pub restrict_to_workspace: bool,
     pub redact_secrets: bool,
+    pub auto_reload: bool,
 }
 
 /// Startup defaults for new sessions, set from Lua via `smelt.defaults{...}`.

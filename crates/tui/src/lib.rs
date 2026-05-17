@@ -6,6 +6,7 @@
 static ALLOCATOR: smelt_perf::alloc::Counting = smelt_perf::alloc::Counting;
 
 pub mod app;
+pub mod auto_reload;
 pub(crate) mod commands;
 pub(crate) mod completer;
 pub(crate) mod content;
@@ -20,6 +21,7 @@ pub use smelt_core::permissions;
 pub(crate) mod metrics;
 pub(crate) mod persist;
 pub(crate) mod picker;
+pub mod prompt_inputs;
 pub(crate) mod prompt_sections;
 pub(crate) mod sleep_inhibit;
 pub use content::highlight::warm_up_syntect;
