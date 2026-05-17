@@ -126,7 +126,7 @@ Spec for `smelt.engine.ask`.
 
 ### `smelt.engine.CommandOverrides`
 
-Front-matter override block accepted by [`smelt.engine.submit_command`]. Mirrors what plugin commands set in their markdown header. Tool-name keys (e.g. `bash`, `edit`) become per-subcommand pattern buckets.
+Front-matter override block accepted by `smelt.engine.submit_command`. Mirrors what plugin commands set in their markdown header. Tool-name keys (e.g. `bash`, `edit`) become per-subcommand pattern buckets.
 
 | Field | Type | Required | Description |
 | --- | --- | --- | --- |

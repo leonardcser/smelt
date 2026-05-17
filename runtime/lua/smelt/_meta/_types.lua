@@ -85,7 +85,7 @@
 ---@field task? smelt.engine.AskTask Routing tag; defaults to `"btw"`.
 ---@field on_response? fun(value: string) Fires once with the assistant's reply string.
 
---- Front-matter override block accepted by [`smelt.engine.submit_command`]. Mirrors what plugin commands set in their markdown header. Tool-name keys (e.g. `bash`, `edit`) become per-subcommand pattern buckets.
+--- Front-matter override block accepted by `smelt.engine.submit_command`. Mirrors what plugin commands set in their markdown header. Tool-name keys (e.g. `bash`, `edit`) become per-subcommand pattern buckets.
 ---@class smelt.engine.CommandOverrides
 ---@field description? string Override the command description shown in `/help`.
 ---@field provider? string Force a specific provider for this command's turn.

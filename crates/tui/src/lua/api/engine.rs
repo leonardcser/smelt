@@ -56,7 +56,7 @@ impl From<LuaRuleOverride> for smelt_core::custom_commands::RuleOverride {
 }
 
 /// Front-matter override block accepted by
-/// [`smelt.engine.submit_command`]. Mirrors what plugin commands set in
+/// `smelt.engine.submit_command`. Mirrors what plugin commands set in
 /// their markdown header. Tool-name keys (e.g. `bash`, `edit`) become
 /// per-subcommand pattern buckets.
 #[derive(Default, Debug, LuaOpts)]
