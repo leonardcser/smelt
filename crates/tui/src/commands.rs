@@ -248,8 +248,12 @@ impl TuiApp {
         Some(ExecHandle { rx, kill })
     }
 
-    /// Switch to a model by key. No-op if the key is not found.
-    pub(crate) fn apply_model(&mut self, key: &str) {
+    /// Switch to a model by key. No-op if the key is not found. `persist`
+    /// controls whether the choice updates the cross-session "last used"
+    /// cache — pass `false` when restoring a model as part of resuming a
+    /// saved session so the resume doesn't overwrite the user's last
+    /// explicit pick.
+    pub(crate) fn apply_model(&mut self, key: &str, persist: bool) {
         let Some(resolved) = self
             .core
             .config
@@ -267,7 +271,9 @@ impl TuiApp {
         self.core.config.provider_type = resolved.provider_type.clone();
         self.core.config.model_config = (&resolved.config).into();
         let api_key = self.resolve_api_key().unwrap_or_default();
-        state::set_selected_model(resolved.key.clone());
+        if persist {
+            state::set_selected_model(resolved.key.clone());
+        }
         self.core.engine.send(UiCommand::SetModel {
             model: self.core.config.model.clone(),
             api_base: self.core.config.api_base.clone(),

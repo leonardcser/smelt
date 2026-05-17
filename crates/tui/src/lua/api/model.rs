@@ -41,7 +41,7 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
         |lua, (_tbl, v): (mlua::Table, Option<String>)| -> LuaResult<mlua::Value> {
             match v {
                 Some(name) => {
-                    crate::lua::with_app(|app| app.apply_model(&name));
+                    crate::lua::with_app(|app| app.apply_model(&name, true));
                     Ok(mlua::Value::Nil)
                 }
                 None => {

@@ -173,7 +173,7 @@ impl TuiApp {
                 .ok()
                 .map(|resolved| resolved.key.clone());
                 if let Some(key) = resolved_key {
-                    self.apply_model(&key);
+                    self.apply_model(&key, false);
                 }
             }
         }
