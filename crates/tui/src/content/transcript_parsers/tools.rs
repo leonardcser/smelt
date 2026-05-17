@@ -305,10 +305,13 @@ fn render_diff_spec(
 }
 
 /// Render a `FileView` spec leaf — single-line-number column, no diff bg.
+/// File-view is the deliverable (the contents the tool wrote), so we ignore
+/// the rows cap and emit every line: a 200-line `write_file` shows all 200.
+/// The diff path stays capped because a diff is a summary of changes.
 fn render_file_view_spec(
     out: &mut LineBuilder,
     spec: &FileViewSpec,
-    rows_cap: u16,
+    _rows_cap: u16,
     with_gutter: bool,
 ) -> u16 {
     let ext = spec
@@ -328,7 +331,7 @@ fn render_file_view_spec(
         GutterStyle::InlineLineNumbers,
         indent,
         0,
-        rows_cap,
+        u16::MAX,
     )
 }
 
