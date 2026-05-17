@@ -20,6 +20,9 @@ jobs:
       - name: Cache dependencies
         uses: Swatinem/rust-cache@v2
 
+      - name: Install cargo-nextest
+        uses: taiki-e/install-action@nextest
+
       - name: Check formatting
         run: cargo fmt -- --check
 
@@ -30,7 +33,7 @@ jobs:
         run: cargo build --workspace
 
       - name: Run tests
-        run: cargo test --workspace
+        run: cargo nextest run --workspace
 
   build:
     name: Build (${{ matrix.target }})
