@@ -1,7 +1,8 @@
 //! Pure cursor-motion primitives over `&str` byte positions.
 
 use super::text::{
-    char_class, line_end, line_start, next_char_boundary, prev_char_boundary, CharClass,
+    byte_to_cell, cell_to_byte, char_class, line_end, line_start, next_char_boundary,
+    prev_char_boundary, CharClass,
 };
 
 /// Direction + variant for `f`/`F`/`t`/`T`-style find-char motions.
@@ -134,30 +135,32 @@ pub(crate) fn goto_line(buf: &str, line_idx: usize) -> usize {
 }
 
 /// Move down one line, preserving preferred column (`curswant`). Returns `(new_cpos, actual_col)`.
+/// Columns are in terminal display cells (wide-char safe); the returned byte
+/// offset always lands on a char boundary.
 pub(crate) fn move_down_col(buf: &str, cpos: usize, want_col: Option<usize>) -> (usize, usize) {
     let sol = line_start(buf, cpos);
-    let col = want_col.unwrap_or(cpos - sol);
     let eol = line_end(buf, cpos);
+    let col = want_col.unwrap_or_else(|| byte_to_cell(&buf[sol..eol], cpos - sol));
     if eol >= buf.len() {
         return (cpos, col);
     }
     let next_sol = eol + 1;
     let next_eol = line_end(buf, next_sol);
-    let next_len = next_eol - next_sol;
-    (next_sol + col.min(next_len), col)
+    let next_line = &buf[next_sol..next_eol];
+    (next_sol + cell_to_byte(next_line, col), col)
 }
 
 pub(crate) fn move_up_col(buf: &str, cpos: usize, want_col: Option<usize>) -> (usize, usize) {
     let sol = line_start(buf, cpos);
+    let eol = line_end(buf, cpos);
+    let col = want_col.unwrap_or_else(|| byte_to_cell(&buf[sol..eol], cpos - sol));
     if sol == 0 {
-        let col = want_col.unwrap_or(cpos - sol);
         return (cpos, col);
     }
-    let col = want_col.unwrap_or(cpos - sol);
     let prev_eol = sol - 1;
     let prev_sol = line_start(buf, prev_eol);
-    let prev_len = prev_eol - prev_sol;
-    (prev_sol + col.min(prev_len), col)
+    let prev_line = &buf[prev_sol..prev_eol];
+    (prev_sol + cell_to_byte(prev_line, col), col)
 }
 
 pub(crate) fn move_down(buf: &str, cpos: usize) -> usize {
