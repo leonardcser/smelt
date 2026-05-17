@@ -785,6 +785,7 @@ impl PromptState {
                 let cpos = ctx.win.cpos;
                 if let Some(new_cpos) = clipboard.kill_ring.yank(&mut ctx.buf.text_mut(), cpos) {
                     ctx.win.cpos = new_cpos;
+                    ctx.win.clamp_anchors_to_source(ctx.buf.source());
                     self.recompute_completer(ctx.as_ref());
                 }
                 Action::Redraw
@@ -792,6 +793,7 @@ impl PromptState {
             KeyAction::YankPop => {
                 if let Some(new_cpos) = clipboard.kill_ring.yank_pop(&mut ctx.buf.text_mut()) {
                     ctx.win.cpos = new_cpos;
+                    ctx.win.clamp_anchors_to_source(ctx.buf.source());
                     self.recompute_completer(ctx.as_ref());
                 }
                 Action::Redraw
