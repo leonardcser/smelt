@@ -544,14 +544,17 @@ impl TestApp {
         } else {
             smelt_core::transcript_model::ConfirmChoice::No
         };
-        let cancel = self.app.resolve_confirm(
-            (choice, message),
-            &req.call_id,
-            req.request_id,
-            &req.tool_name,
-        );
-        if cancel {
-            self.app.discard_turn(false);
+        {
+            let _guard = crate::lua::install_app_ptr(&mut self.app);
+            let cancel = self.app.resolve_confirm(
+                (choice, message),
+                &req.call_id,
+                req.request_id,
+                &req.tool_name,
+            );
+            if cancel {
+                self.app.discard_turn(false);
+            }
         }
         self.drain_cmd();
         true
