@@ -57,11 +57,11 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
                             for seg in &segs {
                                 if is_error {
                                     sink.push_hl(intern("ErrorMsg"));
-                                    sink.print(&format!("  {}", seg));
+                                    sink.print(seg);
                                     sink.pop_style();
                                 } else {
                                     sink.push_dim();
-                                    sink.print(&format!("  {}", seg));
+                                    sink.print(seg);
                                     sink.pop_style();
                                 }
                                 sink.newline();
