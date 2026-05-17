@@ -64,10 +64,13 @@ smelt.theme.set("accent", { ansi = 208 })
 return {}
 ```
 
-Then in `init.lua`:
+Theme APIs touch live TUI state, so they can't run at the top level of
+`init.lua` (the TUI isn't up yet). Defer the call until the session is ready:
 
 ```lua
-smelt.theme.use("mytheme")
+smelt.cell("session_started"):subscribe(function()
+  smelt.theme.use("mytheme")
+end)
 ```
 
 Use `smelt.theme.set(role, { ansi = N })` or `{ rgb = { r, g, b } }` to
