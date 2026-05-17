@@ -778,7 +778,10 @@ mod tests {
     fn stash_row_has_muted_style() {
         let theme = test_theme();
         let row = stash_row(40, &theme);
-        assert_eq!(row.segments[1].style.fg, Some(theme_color(&theme, "Comment")));
+        assert_eq!(
+            row.segments[1].style.fg,
+            Some(theme_color(&theme, "Comment"))
+        );
     }
 
     #[test]
