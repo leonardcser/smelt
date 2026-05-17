@@ -378,6 +378,17 @@ impl Window {
             return;
         }
         let prev_width_wrap = self.layout_key.map(|(_, w, wrap)| (w, wrap));
+        // Snapshot the cursor's distance from `scroll_top` before rebuild.
+        // Only meaningful when the layout matches the buffer — otherwise
+        // `cursor_row` was computed against a stale layout. Buffers replaced
+        // under us mid-frame (transcript projection) reach this point with a
+        // mismatched tick and skip the snapshot here; the render loop takes
+        // it earlier via `cursor_screen_row_in_viewport`.
+        let cursor_screen_row = if self.layout_matches(buf) {
+            self.cursor_row.checked_sub(self.scroll_top)
+        } else {
+            None
+        };
         self.layout = WrappedLayout::from_buffer(buf, width, self.wrap);
         self.layout_key = Some(key);
         // Restore the logical anchor only on width/wrap changes — a content
@@ -387,8 +398,19 @@ impl Window {
         if let Some((prev_w, prev_wrap)) = prev_width_wrap {
             if prev_w != width || prev_wrap != self.wrap {
                 self.restore_scroll_from_anchor(buf);
+                if let Some(screen_row) = cursor_screen_row {
+                    self.restore_cursor_screen_row(buf, screen_row);
+                }
             }
         }
+    }
+
+    /// Cursor's row offset from `scroll_top`, returned when the cursor sits
+    /// inside the viewport. Callers that mutate the buffer mid-frame
+    /// (transcript projection) capture this before the mutation so the
+    /// cursor's screen row can be restored after the new layout lands.
+    pub fn cursor_screen_row_in_viewport(&self) -> Option<u16> {
+        self.cursor_row.checked_sub(self.scroll_top)
     }
 
     /// Single mutation entry for `scroll_top`. Stamps `scroll_anchor` at the
@@ -436,6 +458,27 @@ impl Window {
         }
         let (vrow, _) = self.layout.visual_for_logical(lrow, byte);
         self.scroll_top = vrow as u16;
+    }
+
+    /// Reposition the cursor so it sits at `scroll_top + screen_row` in the
+    /// current layout — used after a layout/scroll restore so the cursor
+    /// stays visually fixed relative to the viewport instead of drifting
+    /// off-screen as reflow shifts visual rows. Reassigns `cpos` to whatever
+    /// byte lands at that visual row using `curswant` as the column target.
+    pub fn restore_cursor_screen_row(&mut self, buf: &Buffer, screen_row: u16) {
+        let total = self.visual_row_total(buf);
+        if total == 0 {
+            return;
+        }
+        let target_vrow = self
+            .scroll_top
+            .saturating_add(screen_row)
+            .min(total.saturating_sub(1)) as usize;
+        let want = self.curswant.unwrap_or(self.cursor_col as usize);
+        self.cpos = self.cpos_at_visual(buf, target_vrow, want);
+        let (row, col) = self.cursor_visual(buf, self.cpos);
+        self.cursor_row = row;
+        self.cursor_col = col;
     }
 
     /// `true` when `self.layout` was built against `buf`'s current
@@ -3109,6 +3152,40 @@ mod tests {
         w.ensure_layout(&buf, 10);
         assert_eq!(w.layout.visual_count(), 8);
         assert_eq!(w.scroll_top, 4, "anchor restored after width change");
+    }
+
+    #[test]
+    fn cursor_screen_row_preserved_across_width_change() {
+        // Cursor sits 3 rows below scroll_top at width=5. After widening to
+        // 10, the cursor must still appear 3 rows below the (anchor-restored)
+        // scroll_top so it stays visually fixed under the user's gaze.
+        let mut w = make_win();
+        w.wrap = true;
+        let rows = vec![
+            "aaaaaaaaaaaaaaaaaaaa".into(),
+            "bbbbbbbbbbbbbbbbbbbb".into(),
+            "cccccccccccccccccccc".into(),
+            "dddddddddddddddddddd".into(),
+        ];
+        let buf = make_buf(rows);
+
+        w.ensure_layout(&buf, 5);
+        w.follow_tail = false;
+        w.set_scroll(8, &buf);
+        // Place cursor 3 visual rows below scroll_top — logical row 2,
+        // chunk 3.
+        w.cpos = buf.byte_at_display_pos(2, 15);
+        let (r, c) = w.cursor_visual(&buf, w.cpos);
+        w.cursor_row = r;
+        w.cursor_col = c;
+        assert_eq!(w.cursor_row.checked_sub(w.scroll_top), Some(3));
+
+        w.ensure_layout(&buf, 10);
+        assert_eq!(
+            w.cursor_row.checked_sub(w.scroll_top),
+            Some(3),
+            "cursor's screen-row distance preserved across width change"
+        );
     }
 
     #[test]

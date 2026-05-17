@@ -158,6 +158,11 @@ impl TuiApp {
         viewport_rows: u16,
         has_transcript_cursor: bool,
     ) {
+        // Snapshot the cursor's screen-row offset before the projection
+        // rebuilds the buffer — once the changedtick bumps, `ensure_layout`
+        // can't recover this offset from inside Window, so we capture it
+        // here while the OLD layout/scroll are still in sync.
+        let cursor_screen_row = self.transcript_win().cursor_screen_row_in_viewport();
         let tdata = {
             let _p = smelt_perf::perf::begin("compositor:project_transcript");
             self.project_transcript_buffer(
@@ -168,6 +173,16 @@ impl TuiApp {
             )
         };
         self.transcript_win_mut().scroll_top = tdata.clamped_scroll;
+        // After scroll is restored to the new block anchor, pin the cursor to
+        // the same screen-row offset so it stays visually fixed across resize
+        // instead of drifting off-viewport as reflow shifts visual rows.
+        if let Some(screen_row) = cursor_screen_row {
+            let buf_id = self.transcript_win().buf;
+            let (win, buf) = self.ui.win_and_buf_mut(crate::app::TRANSCRIPT_WIN, buf_id);
+            if let (Some(win), Some(buf)) = (win, buf) {
+                win.restore_cursor_screen_row(buf, screen_row);
+            }
+        }
 
         let transcript_selection =
             self.transcript_selection_highlights(tdata.clamped_scroll, viewport_rows);
