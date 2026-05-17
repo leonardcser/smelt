@@ -1616,13 +1616,22 @@ impl Window {
 /// Advance `col` past any leading non-selectable (chrome) spans on `logical_row`.
 /// Used by cursor positioning so the caret never lands inside an inline gutter
 /// or other chrome — caller-supplied col is clamped forward to the first
-/// selectable cell, repeated until no chrome span covers it.
+/// selectable cell, repeated until no chrome span covers it. If advancing
+/// would carry the cursor past every selectable cell on the row (e.g. click in
+/// a trailing bg pad, or an all-chrome user-block padding row), clamp back to
+/// the last selectable col_end so the cursor never escapes the row's content
+/// edge and triggers horizontal pan.
 fn snap_col_past_chrome(buf: &Buffer, logical_row: usize, col: u16) -> u16 {
     let mut spans = Vec::new();
     buf.highlights_at_into(logical_row, &mut spans);
     if spans.iter().all(|s| s.meta.selectable) {
         return col;
     }
+    let max_selectable_end = spans
+        .iter()
+        .filter(|s| s.meta.selectable)
+        .map(|s| s.col_end)
+        .max();
     let mut col = col;
     loop {
         let mut advanced = false;
@@ -1633,8 +1642,13 @@ fn snap_col_past_chrome(buf: &Buffer, logical_row: usize, col: u16) -> u16 {
             }
         }
         if !advanced {
-            return col;
+            break;
         }
+    }
+    match max_selectable_end {
+        Some(end) if col > end => end,
+        None => 0,
+        _ => col,
     }
 }
 
@@ -2832,5 +2846,53 @@ mod tests {
         assert_eq!(grid.cell(p99_col, 0).symbol, '2');
         assert_eq!(grid.cell(p99_col, 0).style.fg, Some(Color::Yellow));
         assert_eq!(grid.cell(p99_col + p99_w, 0).style.fg, None);
+    }
+
+    #[test]
+    fn snap_col_past_chrome_clamps_trailing_pad_to_selectable_edge() {
+        // Click in a user-block trailing bg pad (chrome past the content) must
+        // not push the cursor to layout_width — that would pan the viewport
+        // horizontally to the row's right edge. Clamp to the last selectable
+        // col_end instead.
+        let mut buf = make_buf(vec![" hello                          ".into()]);
+        let chrome = smelt_buffer::buffer::SpanMeta {
+            selectable: false,
+            ..Default::default()
+        };
+        // Leading 1-col pad (chrome), selectable content 1..6, trailing pad 6..32.
+        buf.add_highlight_with_meta(0, 0, 1, crate::SpanStyle::new(), chrome.clone());
+        buf.add_highlight_with_meta(
+            0,
+            1,
+            6,
+            crate::SpanStyle::new(),
+            smelt_buffer::buffer::SpanMeta::default(),
+        );
+        buf.add_highlight_with_meta(0, 6, 32, crate::SpanStyle::new(), chrome);
+
+        assert_eq!(snap_col_past_chrome(&buf, 0, 0), 1, "lead chrome → content");
+        assert_eq!(snap_col_past_chrome(&buf, 0, 3), 3, "selectable stays put");
+        assert_eq!(
+            snap_col_past_chrome(&buf, 0, 20),
+            6,
+            "trailing chrome clamps to selectable edge"
+        );
+    }
+
+    #[test]
+    fn snap_col_past_chrome_all_chrome_row_returns_zero() {
+        // Blank user-block padding rows are entirely chrome (1 span covering
+        // 0..layout_width). A click anywhere on the row must not escape past
+        // the row's content edge.
+        let mut buf = make_buf(vec![" ".repeat(40)]);
+        let chrome = smelt_buffer::buffer::SpanMeta {
+            selectable: false,
+            ..Default::default()
+        };
+        buf.add_highlight_with_meta(0, 0, 40, crate::SpanStyle::new(), chrome);
+
+        assert_eq!(snap_col_past_chrome(&buf, 0, 0), 0);
+        assert_eq!(snap_col_past_chrome(&buf, 0, 20), 0);
+        assert_eq!(snap_col_past_chrome(&buf, 0, 39), 0);
     }
 }

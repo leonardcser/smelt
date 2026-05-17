@@ -9,9 +9,9 @@ use syntect::easy::HighlightLines;
 
 use super::{syntax_theme, GutterStyle, SYNTAX_SET};
 use crate::content::builder::LineBuilder;
-use smelt_buffer::buffer::SpanMeta;
 use crate::content::default_width;
 use crate::style::Color;
+use smelt_buffer::buffer::SpanMeta;
 
 struct DiffChange {
     tag: ChangeTag,

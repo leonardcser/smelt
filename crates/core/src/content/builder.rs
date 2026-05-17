@@ -199,9 +199,7 @@ impl<'a> LineBuilder<'a> {
     /// inline highlights/selection cover them). For buffers whose text must
     /// stay clean — set the bg via `fill_line_bg` and let paint draw it.
     pub fn pad_row_to_layout_width(&mut self, meta: SpanMeta) {
-        let remaining = self
-            .layout_width
-            .saturating_sub(self.cur_visible_cols) as usize;
+        let remaining = self.layout_width.saturating_sub(self.cur_visible_cols) as usize;
         if remaining == 0 {
             return;
         }
@@ -761,7 +759,6 @@ mod tests {
             .find_map(|s| s.meta.copy_as.clone());
         assert_eq!(meta_copy.as_deref(), Some("real"));
     }
-
 
     #[test]
     fn mark_soft_wrap_continuation_sets_decoration_flag() {
