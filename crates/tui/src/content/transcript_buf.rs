@@ -112,6 +112,21 @@ impl TranscriptProjection {
             };
         }
 
+        // When width changes, capture a content-stable anchor at the current
+        // scroll_top — (BlockId, row_offset_in_block) — before the layout is
+        // discarded. After the new layout is built we remap this back to a
+        // visual row so resize keeps the same block anchored at the viewport
+        // top instead of letting the visual-row counter drift.
+        let width_changed = self
+            .project_key
+            .map(|prev| prev.width != width)
+            .unwrap_or(false);
+        let resize_anchor = if width_changed {
+            self.block_anchor_at(scroll_top as usize)
+        } else {
+            None
+        };
+
         self.gc_if_stale(gen, width);
 
         let base_key = LayoutKey {
@@ -204,9 +219,45 @@ impl TranscriptProjection {
         self.layout = layout;
         self.project_key = Some(key);
 
+        let restored_scroll = resize_anchor
+            .and_then(|(block_id, offset)| {
+                self.layout.iter().find(|e| e.id == block_id).map(|entry| {
+                    let target = entry.start.saturating_add(offset as u32);
+                    clamp_u16(target)
+                })
+            })
+            .unwrap_or(scroll_top);
+
         ProjectOutput {
-            clamped_scroll: clamp_scroll(scroll_top, total_rows, viewport_rows),
+            clamped_scroll: clamp_scroll(restored_scroll, total_rows, viewport_rows),
         }
+    }
+
+    /// Map an absolute row to its `(BlockId, row_offset_within_block)`. Gap
+    /// rows resolve to the previous block's last row so a scroll position
+    /// stranded in a gap still anchors to a stable block boundary. Rows past
+    /// the end of all blocks (e.g. `follow_tail`'s `u16::MAX` sentinel) return
+    /// `None` so the caller falls back to scroll_top and the natural clamp
+    /// pins the viewport to the new bottom.
+    fn block_anchor_at(&self, row: usize) -> Option<(BlockId, u16)> {
+        let last = self.layout.last()?;
+        let last_end = last.start.saturating_add(last.rows as u32);
+        let row_u32 = row as u32;
+        if row_u32 >= last_end {
+            return None;
+        }
+        let idx = self.layout.partition_point(|e| e.start <= row_u32);
+        if idx == 0 {
+            return None;
+        }
+        let entry = self.layout[idx - 1];
+        let end = entry.start.saturating_add(entry.rows as u32);
+        let offset_u32 = if row_u32 < end {
+            row_u32 - entry.start
+        } else {
+            entry.rows.saturating_sub(1) as u32
+        };
+        Some((entry.id, offset_u32.min(u16::MAX as u32) as u16))
     }
 
     /// Render every block into the cache. For full-text consumers that may run
