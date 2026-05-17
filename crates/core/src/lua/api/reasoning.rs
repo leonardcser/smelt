@@ -2,7 +2,8 @@
 //! `smelt.mode`. `smelt.reasoning()` reads, `smelt.reasoning(v)` sets,
 //! `smelt.reasoning.cycle_list()` returns the configured cycle.
 
-use crate::lua::doc::{record_module_doc, register_fn};
+use crate::lua::doc::Tier;
+use crate::lua::module::LuaMod;
 use lua_doc_derive::LuaAlias;
 use mlua::prelude::*;
 
@@ -18,19 +19,17 @@ pub enum LuaReasoningEffort {
 }
 
 pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
-    record_module_doc(
-        "smelt.reasoning",
+    let m = LuaMod::under(
+        lua,
+        smelt,
+        "reasoning",
         "Reasoning-effort selector. `smelt.reasoning()` reads the active effort; `smelt.reasoning(v)` sets it (overridden by the TUI to apply the change). `smelt.reasoning.cycle_list()` lists the configured cycle.",
-    );
-
-    let reasoning_tbl = lua.create_table()?;
-    register_fn(
-        &reasoning_tbl,
-        "smelt.reasoning",
+        Tier::Host,
+    )?;
+    m.fn_(
         "cycle_list",
         "Return the configured reasoning-effort cycle.",
         &[],
-        lua,
         |_, ()| -> LuaResult<Vec<LuaReasoningEffort>> {
             Ok(crate::host::try_with_core(|core| {
                 core.config
@@ -59,8 +58,7 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
     )?;
     let mt = lua.create_table()?;
     mt.set("__call", f)?;
-    reasoning_tbl.set_metatable(Some(mt))?;
+    m.tbl.set_metatable(Some(mt))?;
 
-    smelt.set("reasoning", reasoning_tbl)?;
     Ok(())
 }

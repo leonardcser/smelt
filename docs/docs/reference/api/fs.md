@@ -22,14 +22,6 @@ fun(p: string): boolean
 
 Return `true` if a filesystem entry exists at `p`.
 
-## `smelt.fs.get`
-
-```lua
-fun(p: string): any
-```
-
-Look up the cached file-state entry for `p`. Returns `{ content, mtime_ms, read_range }` or `nil` when no entry exists.
-
 ## `smelt.fs.glob`
 
 ```lua
@@ -37,14 +29,6 @@ fun(pattern: string, path: string?, opts: table?): string[]?, string?
 ```
 
 Find paths matching `pattern` under `path` (defaults to cwd). Returns the matches sorted newest-first, capped at `opts.max` (default 200). On error returns `(nil, err_string)`.
-
-## `smelt.fs.has`
-
-```lua
-fun(p: string): boolean
-```
-
-Return `true` if the file-state cache has a recorded entry for `p`.
 
 ## `smelt.fs.is_dir`
 
@@ -78,14 +62,6 @@ fun(p: string): boolean, string?
 
 Create directory `p` along with any missing parent directories. Returns `(true, nil)` on success or `(false, err_string)` on failure.
 
-## `smelt.fs.mtime_ms`
-
-```lua
-fun(p: string): integer?, string?
-```
-
-Return the modification time of `p` in milliseconds since the UNIX epoch. Returns `(ms, nil)` or `(nil, err_string)` on failure.
-
 ## `smelt.fs.read`
 
 ```lua
@@ -101,22 +77,6 @@ fun(p: string): string[]?, string?
 ```
 
 List the immediate entries of directory `p`. Returns `(entries, nil)` on success or `(nil, err_string)` on failure.
-
-## `smelt.fs.record_read`
-
-```lua
-fun(p: string, content: string, offset: integer, limit: integer): nil
-```
-
-Record that `p` was read at byte range `[offset, offset+limit)` with `content` so subsequent staleness checks know what the agent has seen.
-
-## `smelt.fs.record_write`
-
-```lua
-fun(p: string, content: string): nil
-```
-
-Record that `p` was written with `content` so subsequent staleness checks see the latest state.
 
 ## `smelt.fs.remove_dir`
 
@@ -157,14 +117,6 @@ fun(p: string): integer?, string?
 ```
 
 Return the size of file `p` in bytes. Returns `(size, nil)` or `(nil, err_string)` on failure.
-
-## `smelt.fs.staleness_error`
-
-```lua
-fun(p: string, noun: string?): string?
-```
-
-Return an error message describing why the cached state of `p` is stale relative to disk, or `nil` if it is up to date. `noun` (default `"file"`) labels the entity in the message.
 
 ## `smelt.fs.write`
 

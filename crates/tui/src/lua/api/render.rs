@@ -15,29 +15,28 @@ use crate::content::highlight::{
 };
 use crate::content::to_buffer::render_into_buffer;
 use crate::smelt_term::BufId;
-use lua_doc_derive::lua_module;
 use mlua::prelude::*;
 use smelt_core::content::highlight::SplitSide;
 use smelt_core::content::wrap::wrap_line;
-use smelt_core::lua::doc::register_ui_fn;
+use smelt_core::lua::doc::Tier;
+use smelt_core::lua::module::LuaMod;
 use smelt_core::theme::intern;
 
 use super::buf::LuaBuf;
 
-#[lua_module(
-    name = "smelt.render",
-    doc = "Paint text / markdown / syntax-highlighted code / split diffs into a `Buf`. UiHost-only."
-)]
 pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
-    let render = lua.create_table()?;
+    let m = LuaMod::under(
+        lua,
+        smelt,
+        "render",
+        "Paint text / markdown / syntax-highlighted code / split diffs into a `Buf`. UiHost-only.",
+        Tier::UiHost,
+    )?;
 
-    register_ui_fn(
-        &render,
-        "smelt.render",
+    m.fn_(
         "text",
         "Paint plain text into a buffer with dim/error body styling. `opts.is_error = true` switches to the error-message highlight group.",
         &["buf", "content", "opts"],
-        lua,
         |_, (buf, content, opts): (LuaBuf, String, Option<mlua::Table>)| -> LuaResult<()> {
             let is_error = opts
                 .as_ref()
@@ -75,13 +74,10 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
         },
     )?;
 
-    register_ui_fn(
-        &render,
-        "smelt.render",
+    m.fn_(
         "markdown",
         "Render markdown `source` into the buffer using the same renderer the transcript uses for assistant text blocks.",
         &["buf", "source"],
-        lua,
         |_, (buf, source): (LuaBuf, String)| -> LuaResult<()> {
             crate::lua::with_app(|app| {
                 let theme_snap = app.ui.theme().clone();
@@ -103,13 +99,10 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
         },
     )?;
 
-    register_ui_fn(
-        &render,
-        "smelt.render",
+    m.fn_(
         "syntax",
         "Paint syntect-highlighted code from `opts.content` into the buffer as a plain block. Pick syntax via `opts.lang` or `opts.path`. Unknown languages fall back to plain text.",
         &["buf", "opts"],
-        lua,
         |_, (buf, opts): (LuaBuf, mlua::Table)| -> LuaResult<()> {
             let content: String = opts.get::<Option<String>>("content")?.unwrap_or_default();
             let lang: Option<String> = opts.get::<Option<String>>("lang")?;
@@ -133,13 +126,10 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
         },
     )?;
 
-    register_ui_fn(
-        &render,
-        "smelt.render",
+    m.fn_(
         "diff_split",
         "Paint a side-by-side diff between `opts.old` and `opts.new` into two buffers. Both buffers end up with the same row count; synthetic padding rows align them. Pick syntax via `opts.lang` or `opts.path`.",
         &["left", "right", "opts"],
-        lua,
         |_, (left, right, opts): (LuaBuf, LuaBuf, mlua::Table)| -> LuaResult<()> {
             let old: String = opts.get::<Option<String>>("old")?.unwrap_or_default();
             let new: String = opts.get::<Option<String>>("new")?.unwrap_or_default();
@@ -160,7 +150,6 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
         },
     )?;
 
-    smelt.set("render", render)?;
     Ok(())
 }
 

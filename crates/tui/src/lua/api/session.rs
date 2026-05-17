@@ -1,9 +1,9 @@
 //! `smelt.session` bindings — current session metadata, turn list,
 //! messages snapshot, rewind, list / load / delete persisted sessions.
 
-use lua_doc_derive::lua_module;
 use mlua::prelude::*;
-use smelt_core::lua::doc::register_ui_fn;
+use smelt_core::lua::doc::Tier;
+use smelt_core::lua::module::LuaMod;
 
 fn messages_to_lua(lua: &Lua, msgs: &[protocol::Message]) -> LuaResult<mlua::Table> {
     let tbl = lua.create_table()?;
@@ -41,39 +41,32 @@ fn messages_to_lua(lua: &Lua, msgs: &[protocol::Message]) -> LuaResult<mlua::Tab
     Ok(tbl)
 }
 
-#[lua_module(
-    name = "smelt.session",
-    doc = "Current session metadata, turn list, message snapshots, rewind, and persisted session management. UiHost-only."
-)]
 pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
-    let session_tbl = lua.create_table()?;
-    register_ui_fn(
-        &session_tbl,
-        "smelt.session",
+    let m = LuaMod::under(
+        lua,
+        smelt,
+        "session",
+        "Current session metadata, turn list, message snapshots, rewind, and persisted session management. UiHost-only.",
+        Tier::UiHost,
+    )?;
+    m.fn_(
         "title",
         "Session title (a short summary derived from the first user message), or `nil` until the engine assigns one.",
         &[],
-        lua,
         |_, ()| -> LuaResult<Option<String>> {
             Ok(crate::lua::try_with_app(|app| app.core.session.title.clone()).unwrap_or_default())
         },
     )?;
-    register_ui_fn(
-        &session_tbl,
-        "smelt.session",
+    m.fn_(
         "cwd",
         "Working directory the session was launched from. Stable across the session.",
         &[],
-        lua,
         |_, ()| Ok(crate::lua::try_with_app(|app| app.cwd.clone()).unwrap_or_default()),
     )?;
-    register_ui_fn(
-        &session_tbl,
-        "smelt.session",
+    m.fn_(
         "cost",
         "Cumulative session cost in USD across every model call this session has made.",
         &[],
-        lua,
         |_, ()| -> LuaResult<f64> {
             Ok(
                 crate::lua::try_with_app(|app| app.core.session.session_cost_usd)
@@ -81,55 +74,40 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
             )
         },
     )?;
-    register_ui_fn(
-        &session_tbl,
-        "smelt.session",
+    m.fn_(
         "context_tokens",
         "Most recent prompt-token count reported by the provider, or `nil` if no turn has completed yet.",
         &[],
-        lua,
         |_, ()| -> LuaResult<Option<u32>> {
             Ok(crate::lua::try_with_app(|app| app.core.session.context_tokens).unwrap_or_default())
         },
     )?;
-    register_ui_fn(
-        &session_tbl,
-        "smelt.session",
+    m.fn_(
         "context_window",
         "Configured context-window size in tokens for the active model. `nil` when the model entry has no declared limit.",
         &[],
-        lua,
         |_, ()| -> LuaResult<Option<u32>> {
             Ok(crate::lua::try_with_app(|app| app.core.config.context_window).unwrap_or_default())
         },
     )?;
-    register_ui_fn(
-        &session_tbl,
-        "smelt.session",
+    m.fn_(
         "created_at_ms",
         "Unix-epoch timestamp (milliseconds) at which this session was started.",
         &[],
-        lua,
         |_, ()| -> LuaResult<u64> {
             Ok(crate::lua::try_with_app(|app| app.core.session.created_at_ms).unwrap_or_default())
         },
     )?;
-    register_ui_fn(
-        &session_tbl,
-        "smelt.session",
+    m.fn_(
         "id",
         "Stable session id (matches the on-disk session filename).",
         &[],
-        lua,
         |_, ()| Ok(crate::lua::try_with_app(|app| app.core.session.id.clone()).unwrap_or_default()),
     )?;
-    register_ui_fn(
-        &session_tbl,
-        "smelt.session",
+    m.fn_(
         "dir",
         "Absolute path of the on-disk session directory (transcript JSONL, attachments, ledger).",
         &[],
-        lua,
         |_, ()| -> LuaResult<String> {
             Ok(crate::lua::try_with_app(|app| {
                 smelt_core::session::dir_for(&app.core.session)
@@ -139,13 +117,10 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
             .unwrap_or_default())
         },
     )?;
-    register_ui_fn(
-        &session_tbl,
-        "smelt.session",
+    m.fn_(
         "messages",
         "Snapshot the current session messages as `{ role, content?, tool_calls?, tool_call_id?, is_error? }` rows. Roles are `system`/`user`/`assistant`/`tool`. `opts.roles` (array of role strings) filters by role; `opts.include_tool = false` drops `role = \"tool\"` rows; `opts.since_index` returns rows with 1-based index `>= since_index`; `opts.limit` caps row count from the start of the (filtered) result.",
         &["opts"],
-        lua,
         |lua, opts: Option<mlua::Table>| -> LuaResult<mlua::Table> {
             let messages = crate::lua::try_with_app(|app| app.core.session.messages.clone())
                 .unwrap_or_default();
@@ -191,14 +166,11 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
             messages_to_lua(lua, &filtered)
         },
     )?;
-    register_ui_fn(
-        &session_tbl,
-        "smelt.session",
+    m.fn_(
         "turns",
         "Return user turns as `{ block_idx, label }` rows where `label` is the first line of the user message. Used by the rewind dialog.",
         &[],
-        lua,
-        |lua, ()|  -> LuaResult<mlua::Table>{
+        |lua, ()| -> LuaResult<mlua::Table> {
             let turns = crate::lua::try_with_app(|app| app.user_turns()).unwrap_or_default();
             let out = lua.create_table()?;
             for (i, (block_idx, text)) in turns.into_iter().enumerate() {
@@ -211,14 +183,11 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
             Ok(out)
         },
     )?;
-    register_ui_fn(
-        &session_tbl,
-        "smelt.session",
+    m.fn_(
         "rewind_to",
         "Rewind the session to a prior user turn. `block_idx = nil` rewinds to before the first turn; `opts.restore_vim_insert = true` re-enters vim insert mode after the rewind.",
         &["block_idx", "opts"],
-        lua,
-        |_, (block_idx, opts): (Option<usize>, Option<mlua::Table>)|  -> LuaResult<()>{
+        |_, (block_idx, opts): (Option<usize>, Option<mlua::Table>)| -> LuaResult<()> {
             let restore_vim_insert = opts
                 .and_then(|t| t.get::<bool>("restore_vim_insert").ok())
                 .unwrap_or(false);
@@ -226,14 +195,11 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
             Ok(())
         },
     )?;
-    register_ui_fn(
-        &session_tbl,
-        "smelt.session",
+    m.fn_(
         "list",
         "List persisted sessions other than the current one. Each row carries `id`, `title`, `subtitle`, `cwd`, `parent_id`, `updated_at_ms`, `created_at_ms`, and `size_bytes` when available.",
         &[],
-        lua,
-        |lua, ()|  -> LuaResult<mlua::Table>{
+        |lua, ()| -> LuaResult<mlua::Table> {
             let current_id =
                 crate::lua::try_with_core(|core| core.session.id.clone()).unwrap_or_default();
             let sessions = smelt_core::session::list_sessions();
@@ -260,25 +226,19 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
             Ok(out)
         },
     )?;
-    register_ui_fn(
-        &session_tbl,
-        "smelt.session",
+    m.fn_(
         "load",
         "Switch the UI to the persisted session with `id`. Replays its message log and resets transient state.",
         &["id"],
-        lua,
-        |_, id: String|  -> LuaResult<()>{
+        |_, id: String| -> LuaResult<()> {
             crate::lua::with_app(|app| app.load_session_by_id(&id));
             Ok(())
         },
     )?;
-    register_ui_fn(
-        &session_tbl,
-        "smelt.session",
+    m.fn_(
         "delete",
         "Delete the persisted session with `id`. Refuses to delete the currently active session.",
         &["id"],
-        lua,
         |_, id: String| -> LuaResult<()> {
             crate::lua::with_app(|app| {
                 if id != app.core.session.id {
@@ -288,26 +248,20 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
             Ok(())
         },
     )?;
-    register_ui_fn(
-        &session_tbl,
-        "smelt.session",
+    m.fn_(
         "fork",
         "Fork the current session: clone its messages into a new session id and switch to it. Useful for branching off an experiment without losing the original timeline.",
         &[],
-        lua,
-        |_, ()|  -> LuaResult<()>{
+        |_, ()| -> LuaResult<()> {
             crate::lua::with_app(|app| app.fork_session());
             Ok(())
         },
     )?;
-    register_ui_fn(
-        &session_tbl,
-        "smelt.session",
+    m.fn_(
         "reset",
         "Cancel any in-flight agent and clear the session to a blank slate. Logs an `agent_stop` event with reason `user_cancel_and_clear`.",
         &[],
-        lua,
-        |_, ()|  -> LuaResult<()>{
+        |_, ()| -> LuaResult<()> {
             crate::lua::with_app(|app| {
                 engine::log::entry(
                     engine::log::Level::Info,
@@ -320,6 +274,5 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
             Ok(())
         },
     )?;
-    smelt.set("session", session_tbl)?;
     Ok(())
 }

@@ -4,7 +4,7 @@
 
 **Tier:** `UiHost` — Requires a terminal UI; calling these from headless mode raises.
 
-Picker handle constructor. `smelt.picker.new(opts)` returns a `Picker` userdata.
+Picker handle constructor. `smelt.picker.new(opts)` opens a picker overlay and returns a `Picker` userdata. The picker is non-blocking; the yield-until-pick wrapper lives in pure Lua as `smelt.picker.choose(opts)`.
 
 ## `smelt.picker.new`
 

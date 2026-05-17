@@ -1,10 +1,11 @@
 //! `smelt.mcp` — config-time MCP server registration. Unknown fields and types raise errors.
 
-use crate::lua::doc::register_fn;
+use crate::lua::doc::Tier;
 use crate::lua::lua_type::{LuaType, LuaTypeTuple};
+use crate::lua::module::LuaMod;
 use crate::lua::LuaShared;
 use crate::mcp::{McpServerConfig, McpStatus};
-use lua_doc_derive::{lua_module, LuaOpts};
+use lua_doc_derive::LuaOpts;
 use mlua::prelude::*;
 use std::sync::Arc;
 
@@ -113,20 +114,19 @@ pub struct LuaMcpConfig {
     pub enabled: Option<bool>,
 }
 
-#[lua_module(
-    name = "smelt.mcp",
-    doc = "Config-time MCP server registration. Unknown fields raise errors."
-)]
 pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) -> LuaResult<()> {
-    let tbl = lua.create_table()?;
+    let m = LuaMod::under(
+        lua,
+        smelt,
+        "mcp",
+        "Config-time MCP server registration. Unknown fields raise errors.",
+        Tier::Host,
+    )?;
     let shared_for_register = Arc::clone(shared);
-    register_fn(
-        &tbl,
-        "smelt.mcp",
+    m.fn_(
         "register",
         "Declare an MCP server named `name`. See [`smelt.mcp.Config`](types.md#smeltmcpconfig).",
         &["name", "cfg"],
-        lua,
         move |_, (name, cfg): (String, LuaMcpConfig)| -> LuaResult<()> {
             let kind = cfg.kind.as_deref().unwrap_or("local");
             if kind != "local" {
@@ -150,13 +150,10 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
         },
     )?;
 
-    register_fn(
-        &tbl,
-        "smelt.mcp",
+    m.fn_(
         "list",
         "Snapshot every declared MCP server. Each row is `{ name, config, status, tool_count }` where `status` is `{ kind = \"disabled\"|\"connecting\"|\"connected\"|\"error\", since_ms?, error?, at_ms? }`. Lifecycle reads are sync — safe to call from a status renderer or keymap.",
         &[],
-        lua,
         |lua, ()| -> LuaResult<mlua::Table> {
             let out = lua.create_table()?;
             let rows = crate::host::try_with_core(|core| -> LuaResult<Vec<mlua::Table>> {
@@ -187,13 +184,10 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
             Ok(out)
         },
     )?;
-    register_fn(
-        &tbl,
-        "smelt.mcp",
+    m.fn_(
         "tools",
         "Snapshot every discovered MCP tool. Each row is `{ server, name, qualified_name, description, schema }`. When `server` is provided, only that server's tools are returned; otherwise tools from every connected server.",
         &["server"],
-        lua,
         |lua, server: Option<String>| -> LuaResult<mlua::Table> {
             let out = lua.create_table()?;
             let rows = crate::host::try_with_core(|core| -> LuaResult<Vec<mlua::Table>> {
@@ -226,13 +220,10 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
             Ok(out)
         },
     )?;
-    register_fn(
-        &tbl,
-        "smelt.mcp",
+    m.fn_(
         "status",
         "Return the lifecycle status for server `name`: `\"disabled\"`, `\"connecting\"`, `\"connected\"`, or `\"error\"`. Returns `nil` when no server with that name is declared.",
         &["name"],
-        lua,
         |_, name: String| -> LuaResult<Option<String>> {
             Ok(crate::host::try_with_core(|core| {
                 core.mcp
@@ -244,6 +235,5 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
         },
     )?;
 
-    smelt.set("mcp", tbl)?;
     Ok(())
 }

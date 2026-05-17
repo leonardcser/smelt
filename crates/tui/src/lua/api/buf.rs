@@ -6,11 +6,11 @@
 //! its mutable opts re-applied.
 
 use crate::lua::LuaShared;
-use lua_doc_derive::lua_module;
 use lua_doc_derive::{LuaAlias, LuaOpts};
 use mlua::prelude::*;
-use smelt_core::lua::doc::{record_class, record_module_doc};
+use smelt_core::lua::doc::{record_class, Tier};
 use smelt_core::lua::lua_type::{LuaClassDecl, LuaType};
+use smelt_core::lua::module::LuaMod;
 use std::sync::Arc;
 
 /// Where a virtual-text chunk is rendered relative to the line.
@@ -276,18 +276,17 @@ impl mlua::UserData for LuaBuf {
     }
 }
 
-#[lua_module(
-    name = "smelt.buf",
-    doc = "Buffer handle constructor. `smelt.buf.new(opts?)` returns a `Buf` userdata. \
+pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) -> LuaResult<()> {
+    let m = LuaMod::under(
+        lua,
+        smelt,
+        "buf",
+        "Buffer handle constructor. `smelt.buf.new(opts?)` returns a `Buf` userdata. \
 `opts.name` opts the buffer into hot-reload survival — repeat calls with the same name \
 return the same handle with mutable opts re-applied. Anonymous buffers are reaped on `/reload`. \
-UiHost-only — buffers are terminal-screen backing stores that windows render into."
-)]
-pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) -> LuaResult<()> {
-    record_module_doc(
-        "smelt.buf",
-        "Buffer handle constructor. `smelt.buf.new(opts?)` returns a `Buf` userdata.",
-    );
+UiHost-only — buffers are terminal-screen backing stores that windows render into.",
+        Tier::UiHost,
+    )?;
 
     record_class(LuaClassDecl {
         name: "smelt.buf.Buf",
@@ -303,18 +302,13 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
         },
     });
 
-    let buf_tbl = lua.create_table()?;
-
     // ── smelt.buf.new(opts?) ───────────────────────────────────────
     {
         let s = shared.clone();
-        smelt_core::lua::doc::register_ui_fn(
-            &buf_tbl,
-            "smelt.buf",
+        m.fn_(
             "new",
             "Create a buffer and return a `Buf` userdata. `opts.name` opts the buffer into hot-reload survival — repeat calls with the same name return the same handle with mutable opts re-applied.",
             &["opts"],
-            lua,
             move |_, opts: Option<mlua::Table>| -> LuaResult<LuaBuf> {
                 let id = create_or_open(&s, opts.as_ref())?;
                 Ok(LuaBuf { id })
@@ -322,7 +316,6 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
         )?;
     }
 
-    smelt.set("buf", buf_tbl)?;
     Ok(())
 }
 

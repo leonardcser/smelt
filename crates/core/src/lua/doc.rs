@@ -1,14 +1,14 @@
 //! Doc-collection registry for Lua FFI bindings.
 //!
-//! [`register_fn`] / [`register_ui_fn`] are generic over the closure's
-//! argument-tuple and return types. The LuaCATS signature is *derived*
-//! from those types via [`super::lua_type::LuaType`] /
+//! [`super::module::LuaMod`] is the entry point — every Lua module
+//! constructs one and registers its functions via `.fn_(...)`. The
+//! LuaCATS signature is *derived* from the closure's argument-tuple
+//! and return types via [`super::lua_type::LuaType`] /
 //! [`super::lua_type::LuaTypeTuple`], so it can never drift from the
-//! actual mlua marshalling — drift becomes a compile error. Pick
-//! `register_fn` for host-tier APIs (work in headless mode) and
-//! `register_ui_fn` for UiHost-tier APIs (require a terminal UI).
-//! The tier surfaces in the generated nav and stub headers so plugin
-//! authors can tell at a glance which APIs are headless-safe.
+//! actual mlua marshalling — drift becomes a compile error. The
+//! module's tier (Host vs UiHost) surfaces in the generated nav and
+//! stub headers so plugin authors can tell at a glance which APIs
+//! are headless-safe.
 //!
 //! `gen-lua-docs` reads [`snapshot`] after spinning up a
 //! [`crate::lua::LuaRuntime`] (registration is the side-effect that
@@ -129,7 +129,7 @@ pub fn modules_snapshot() -> Vec<LuaModuleMeta> {
 }
 
 #[allow(clippy::too_many_arguments)]
-fn register_fn_inner<F, A, R>(
+pub(crate) fn register_fn_inner<F, A, R>(
     tbl: &mlua::Table,
     module: &'static str,
     name: &'static str,
@@ -163,50 +163,4 @@ where
         tier,
     });
     Ok(())
-}
-
-/// Register a host-tier Lua function on `tbl` (works in headless mode).
-///
-/// `param_names` is paired positionally with the argument tuple;
-/// missing entries fall back to `argN`. The trait bounds enforce that
-/// every Rust type in the tuple has a [`LuaType`] impl, so adding a
-/// new param type means one `impl_lua_type!` line in
-/// [`super::lua_type`] — not a doc-string update.
-pub fn register_fn<F, A, R>(
-    tbl: &mlua::Table,
-    module: &'static str,
-    name: &'static str,
-    doc: &'static str,
-    param_names: &[&'static str],
-    lua: &Lua,
-    f: F,
-) -> mlua::Result<()>
-where
-    F: Fn(&Lua, A) -> mlua::Result<R> + MaybeSend + 'static,
-    A: FromLuaMulti + LuaTypeTuple,
-    R: IntoLuaMulti + LuaType,
-{
-    register_fn_inner(tbl, module, name, doc, param_names, lua, f, Tier::Host)
-}
-
-/// Register a UiHost-tier Lua function on `tbl` (requires a TUI).
-///
-/// Use this for any binding that touches `crate::lua::with_app(...)`
-/// or otherwise depends on a live `TuiApp`. See [`register_fn`] for
-/// the parameter contract.
-pub fn register_ui_fn<F, A, R>(
-    tbl: &mlua::Table,
-    module: &'static str,
-    name: &'static str,
-    doc: &'static str,
-    param_names: &[&'static str],
-    lua: &Lua,
-    f: F,
-) -> mlua::Result<()>
-where
-    F: Fn(&Lua, A) -> mlua::Result<R> + MaybeSend + 'static,
-    A: FromLuaMulti + LuaTypeTuple,
-    R: IntoLuaMulti + LuaType,
-{
-    register_fn_inner(tbl, module, name, doc, param_names, lua, f, Tier::UiHost)
 }

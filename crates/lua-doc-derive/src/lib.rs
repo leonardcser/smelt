@@ -38,65 +38,6 @@ pub fn derive_lua_alias(input: TokenStream) -> TokenStream {
     }
 }
 
-// ═══════════════════════════════════════════════════════════════════════
-//  #[lua_module(name = "smelt.foo", doc = "...")]
-//
-//  Marks a Lua registration function and injects a `record_module_doc`
-//  call at the top of its body. Both args are required — forgetting one
-//  is a compile error, so every module ships with a doc string that the
-//  gen-lua-docs pass can pick up.
-// ═══════════════════════════════════════════════════════════════════════
-
-#[proc_macro_attribute]
-pub fn lua_module(args: TokenStream, input: TokenStream) -> TokenStream {
-    match expand_lua_module(args, input) {
-        Ok(ts) => ts.into(),
-        Err(e) => e.to_compile_error().into(),
-    }
-}
-
-fn expand_lua_module(args: TokenStream, input: TokenStream) -> syn::Result<TokenStream2> {
-    let meta_list = syn::parse::Parser::parse(
-        syn::punctuated::Punctuated::<Meta, syn::Token![,]>::parse_terminated,
-        args,
-    )?;
-    let mut name: Option<String> = None;
-    let mut doc: Option<String> = None;
-    for meta in meta_list {
-        if let Meta::NameValue(nv) = meta {
-            if let syn::Expr::Lit(syn::ExprLit {
-                lit: Lit::Str(s), ..
-            }) = nv.value
-            {
-                if nv.path.is_ident("name") {
-                    name = Some(s.value());
-                } else if nv.path.is_ident("doc") {
-                    doc = Some(s.value());
-                }
-            }
-        }
-    }
-    let name = name.ok_or_else(|| {
-        syn::Error::new(
-            proc_macro2::Span::call_site(),
-            "#[lua_module] requires `name = \"smelt.foo\"`",
-        )
-    })?;
-    let doc = doc.ok_or_else(|| {
-        syn::Error::new(
-            proc_macro2::Span::call_site(),
-            "#[lua_module] requires `doc = \"...\"`",
-        )
-    })?;
-
-    let mut func: syn::ItemFn = syn::parse(input)?;
-    let prelude: syn::Stmt = syn::parse_quote! {
-        ::smelt_core::lua::doc::record_module_doc(#name, #doc);
-    };
-    func.block.stmts.insert(0, prelude);
-    Ok(quote! { #func })
-}
-
 // ── shared helpers ────────────────────────────────────────────────────
 
 /// Read the `#[lua(name = "...")]` attribute. Returns `None` when

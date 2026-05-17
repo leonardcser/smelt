@@ -15,17 +15,9 @@ fs.copy = nil
 ---@type fun(p: string): boolean
 fs.exists = nil
 
---- Look up the cached file-state entry for `p`. Returns `{ content, mtime_ms, read_range }` or `nil` when no entry exists.
----@type fun(p: string): any
-fs.get = nil
-
 --- Find paths matching `pattern` under `path` (defaults to cwd). Returns the matches sorted newest-first, capped at `opts.max` (default 200). On error returns `(nil, err_string)`.
 ---@type fun(pattern: string, path: string?, opts: table?): string[]?, string?
 fs.glob = nil
-
---- Return `true` if the file-state cache has a recorded entry for `p`.
----@type fun(p: string): boolean
-fs.has = nil
 
 --- Return `true` if `p` exists and refers to a directory.
 ---@type fun(p: string): boolean
@@ -43,10 +35,6 @@ fs.mkdir = nil
 ---@type fun(p: string): boolean, string?
 fs.mkdir_all = nil
 
---- Return the modification time of `p` in milliseconds since the UNIX epoch. Returns `(ms, nil)` or `(nil, err_string)` on failure.
----@type fun(p: string): integer?, string?
-fs.mtime_ms = nil
-
 --- Read `p` into a string. Returns `(content, nil)` on success or `(nil, err_string)` on failure.
 ---@type fun(p: string): string?, string?
 fs.read = nil
@@ -54,14 +42,6 @@ fs.read = nil
 --- List the immediate entries of directory `p`. Returns `(entries, nil)` on success or `(nil, err_string)` on failure.
 ---@type fun(p: string): string[]?, string?
 fs.read_dir = nil
-
---- Record that `p` was read at byte range `[offset, offset+limit)` with `content` so subsequent staleness checks know what the agent has seen.
----@type fun(p: string, content: string, offset: integer, limit: integer): nil
-fs.record_read = nil
-
---- Record that `p` was written with `content` so subsequent staleness checks see the latest state.
----@type fun(p: string, content: string): nil
-fs.record_write = nil
 
 --- Delete the empty directory at `p`. Returns `(true, nil)` on success or `(false, err_string)` on failure.
 ---@type fun(p: string): boolean, string?
@@ -82,10 +62,6 @@ fs.rename = nil
 --- Return the size of file `p` in bytes. Returns `(size, nil)` or `(nil, err_string)` on failure.
 ---@type fun(p: string): integer?, string?
 fs.size = nil
-
---- Return an error message describing why the cached state of `p` is stale relative to disk, or `nil` if it is up to date. `noun` (default `"file"`) labels the entity in the message.
----@type fun(p: string, noun: string?): string?
-fs.staleness_error = nil
 
 --- Write `contents` to file `p`, creating it if necessary. Returns `(true, nil)` on success or `(false, err_string)` on failure.
 ---@type fun(p: string, contents: string): boolean, string?

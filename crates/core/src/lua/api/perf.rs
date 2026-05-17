@@ -1,8 +1,8 @@
 //! `smelt.perf` — timing helpers for Lua.
 
-use crate::lua::doc::register_fn;
+use crate::lua::doc::Tier;
 use crate::lua::lua_type::LuaCallback;
-use lua_doc_derive::lua_module;
+use crate::lua::module::LuaMod;
 use mlua::prelude::*;
 use std::collections::HashSet;
 use std::sync::Mutex;
@@ -42,20 +42,19 @@ fn intern_label(label: &str) -> &'static str {
     leaked
 }
 
-#[lua_module(
-    name = "smelt.perf",
-    doc = "Lightweight scope timers that feed `smelt.metrics.perf_snapshot`. Wrap a hot Lua block to see where time goes when perf collection is enabled."
-)]
 pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
-    let perf_tbl = lua.create_table()?;
+    let m = LuaMod::under(
+        lua,
+        smelt,
+        "perf",
+        "Lightweight scope timers that feed `smelt.metrics.perf_snapshot`. Wrap a hot Lua block to see where time goes when perf collection is enabled.",
+        Tier::Host,
+    )?;
 
-    register_fn(
-        &perf_tbl,
-        "smelt.perf",
+    m.fn_(
         "time",
         "Run `fn()` and record its elapsed time under `label`. Returns whatever `fn` returns (single value). Cheap when perf collection is disabled.",
         &["label", "fn"],
-        lua,
         |_, (label, cb): (String, LuaCallback<(), mlua::Value>)| -> LuaResult<mlua::Value> {
             let label = intern_label(&label);
             let _perf = smelt_perf::perf::begin(label);
@@ -63,6 +62,5 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
         },
     )?;
 
-    smelt.set("perf", perf_tbl)?;
     Ok(())
 }

@@ -5,10 +5,10 @@
 //! yield-until-pick wrapper lives in pure Lua (see
 //! `runtime/lua/smelt/picker.lua`).
 
-use lua_doc_derive::lua_module;
 use mlua::prelude::*;
-use smelt_core::lua::doc::{record_class, record_module_doc};
+use smelt_core::lua::doc::{record_class, Tier};
 use smelt_core::lua::lua_type::{LuaClassDecl, LuaType};
+use smelt_core::lua::module::LuaMod;
 
 /// Lua-side handle for a picker. Backed by a `WinId` — the picker is
 /// just a list-style win wrapped in an overlay, so methods delegate to
@@ -103,16 +103,15 @@ impl mlua::UserData for LuaPicker {
     }
 }
 
-#[lua_module(
-    name = "smelt.picker",
-    doc = "Picker handle constructor. `smelt.picker.new(opts)` opens a picker overlay and returns a `Picker` userdata. \
-The picker is non-blocking; the yield-until-pick wrapper lives in pure Lua as `smelt.picker.choose(opts)`."
-)]
 pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
-    record_module_doc(
-        "smelt.picker",
-        "Picker handle constructor. `smelt.picker.new(opts)` returns a `Picker` userdata.",
-    );
+    let m = LuaMod::under(
+        lua,
+        smelt,
+        "picker",
+        "Picker handle constructor. `smelt.picker.new(opts)` opens a picker overlay and returns a `Picker` userdata. \
+The picker is non-blocking; the yield-until-pick wrapper lives in pure Lua as `smelt.picker.choose(opts)`.",
+        Tier::UiHost,
+    )?;
 
     record_class(LuaClassDecl {
         name: "smelt.picker.Picker",
@@ -126,14 +125,10 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
         },
     });
 
-    let p_tbl = lua.create_table()?;
-    smelt_core::lua::doc::register_ui_fn(
-        &p_tbl,
-        "smelt.picker",
+    m.fn_(
         "new",
         "Open a picker overlay and return a `Picker` userdata. The picker is non-blocking; the yield-until-pick wrapper lives in pure Lua as `smelt.picker.choose(opts)`.",
         &["opts"],
-        lua,
         |_, opts: mlua::Table| -> LuaResult<LuaPicker> {
             let win = crate::lua::with_app(|app| crate::lua::ui_ops::open_picker(app, opts))
                 .map_err(|e| LuaError::RuntimeError(format!("picker: {e}")))?;
@@ -141,6 +136,5 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
         },
     )?;
 
-    smelt.set("picker", p_tbl)?;
     Ok(())
 }

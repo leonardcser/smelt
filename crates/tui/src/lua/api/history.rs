@@ -4,24 +4,23 @@
 //!                    history-specific scorer (word-match boosts,
 //!                    recency bonus). 1-based index into entries().
 
-use lua_doc_derive::lua_module;
 use mlua::prelude::*;
-use smelt_core::lua::doc::register_ui_fn;
+use smelt_core::lua::doc::Tier;
+use smelt_core::lua::module::LuaMod;
 
-#[lua_module(
-    name = "smelt.history",
-    doc = "Prompt history entries and search. UiHost-only."
-)]
 pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
-    let history_tbl = lua.create_table()?;
-    register_ui_fn(
-        &history_tbl,
-        "smelt.history",
+    let m = LuaMod::under(
+        lua,
+        smelt,
+        "history",
+        "Prompt history entries and search. UiHost-only.",
+        Tier::UiHost,
+    )?;
+    m.fn_(
         "entries",
         "Return the prompt history as an array of strings, oldest first. Mirrors what the up-arrow recall in the input bar walks through.",
         &[],
-        lua,
-        |lua, ()|  -> LuaResult<mlua::Table>{
+        |lua, ()| -> LuaResult<mlua::Table> {
             let entries = crate::lua::try_with_app(|app| {
                 app.input_history
                     .entries()
@@ -36,14 +35,11 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
             Ok(out)
         },
     )?;
-    register_ui_fn(
-        &history_tbl,
-        "smelt.history",
+    m.fn_(
         "search",
         "Rank prompt history against `query` using the history-specific scorer (word-match boost, recency bonus, dedupe). Returns `{ index, score }` rows where `index` is 1-based into `entries()`.",
         &["query"],
-        lua,
-        |lua, query: String|  -> LuaResult<mlua::Table>{
+        |lua, query: String| -> LuaResult<mlua::Table> {
             let entries = crate::lua::try_with_app(|app| {
                 app.input_history
                     .entries()
@@ -79,6 +75,5 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
             Ok(out)
         },
     )?;
-    smelt.set("history", history_tbl)?;
     Ok(())
 }

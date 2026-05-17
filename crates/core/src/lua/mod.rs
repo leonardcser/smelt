@@ -4,6 +4,7 @@ pub mod api;
 pub mod doc;
 pub mod hooks;
 pub mod lua_type;
+pub mod module;
 pub mod reg;
 pub mod runtime;
 mod shared;

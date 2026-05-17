@@ -35,6 +35,7 @@ nav = [
     { "`smelt.engine`" = "reference/api/engine.md" },
     { "`smelt.frontend`" = "reference/api/frontend.md" },
     { "`smelt.fs`" = "reference/api/fs.md" },
+    { "`smelt.fs.file_state`" = "reference/api/fs_file_state.md" },
     { "`smelt.fuzzy`" = "reference/api/fuzzy.md" },
     { "`smelt.grep`" = "reference/api/grep.md" },
     { "`smelt.history`" = "reference/api/history.md" },

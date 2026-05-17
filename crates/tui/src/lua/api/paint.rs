@@ -12,10 +12,10 @@
 //! out-of-scope method calls fail cleanly with a Lua runtime error.
 
 use crate::lua::LuaShared;
-use lua_doc_derive::lua_module;
 use mlua::prelude::*;
-use smelt_core::lua::doc::register_ui_fn;
+use smelt_core::lua::doc::Tier;
 use smelt_core::lua::lua_type::{LuaCallback, LuaType};
+use smelt_core::lua::module::LuaMod;
 use std::sync::Arc;
 
 /// Paint-slice placeholder used only to surface the `smelt.paint.Slice`
@@ -29,23 +29,22 @@ impl LuaType for LuaPaintSlice {
     }
 }
 
-#[lua_module(
-    name = "smelt.paint",
-    doc = "Register Lua callbacks against custom paint regions. UiHost-only."
-)]
 pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) -> LuaResult<()> {
-    let paint_tbl = lua.create_table()?;
+    let m = LuaMod::under(
+        lua,
+        smelt,
+        "paint",
+        "Register Lua callbacks against custom paint regions. UiHost-only.",
+        Tier::UiHost,
+    )?;
     crate::lua::paint::register_paint_slice_docs();
 
     {
         let s = shared.clone();
-        register_ui_fn(
-            &paint_tbl,
-            "smelt.paint",
+        m.fn_(
             "register",
             "Register `func` as a paint callback and return a stable paint id usable anywhere a window id is accepted (overlay item `win`, layout leaves). The callback fires per frame the leaf is visible with a slice + context table.",
             &["func"],
-            lua,
             move |lua, func: LuaCallback<(LuaPaintSlice, mlua::Table), ()>| {
                 let handle_id =
                     crate::lua::register_callback_handle(&s, lua, func.into_inner())?;
@@ -55,14 +54,11 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
         )?;
     }
 
-    register_ui_fn(
-        &paint_tbl,
-        "smelt.paint",
+    m.fn_(
         "unregister",
         "Drop a previously registered paint callback by `id`. The associated Lua handle is freed; subsequent paints of that id no-op.",
         &["id"],
-        lua,
-        |_, id: u64|  -> LuaResult<()>{
+        |_, id: u64| -> LuaResult<()> {
             crate::lua::with_app(|app| {
                 if let Some(handle_id) = app
                     .paint_registry
@@ -75,6 +71,5 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
         },
     )?;
 
-    smelt.set("paint", paint_tbl)?;
     Ok(())
 }

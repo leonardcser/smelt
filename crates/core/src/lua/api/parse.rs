@@ -1,22 +1,21 @@
 //! `smelt.parse` — pure parsers: `frontmatter(content) -> (table | nil, body)`.
 
-use crate::lua::doc::register_fn;
-use lua_doc_derive::lua_module;
+use crate::lua::doc::Tier;
+use crate::lua::module::LuaMod;
 use mlua::prelude::*;
 
-#[lua_module(
-    name = "smelt.parse",
-    doc = "Pure parsers: frontmatter extraction from markdown documents."
-)]
 pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
-    let parse_tbl = lua.create_table()?;
-    register_fn(
-        &parse_tbl,
-        "smelt.parse",
+    let m = LuaMod::under(
+        lua,
+        smelt,
+        "parse",
+        "Pure parsers: frontmatter extraction from markdown documents.",
+        Tier::Host,
+    )?;
+    m.fn_(
         "frontmatter",
         "Split `---`-delimited YAML frontmatter from a markdown document. Returns `(frontmatter_table, body)` or `(nil, content)` when no frontmatter is present.",
         &["content"],
-        lua,
         |lua, content: String| -> LuaResult<(mlua::Value, String)> {
             let Some(rest) = content.strip_prefix("---") else {
                 return Ok((mlua::Value::Nil, content));
@@ -37,7 +36,6 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
         },
     )?;
 
-    smelt.set("parse", parse_tbl)?;
     Ok(())
 }
 

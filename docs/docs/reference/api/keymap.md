@@ -4,7 +4,7 @@
 
 **Tier:** `UiHost` — Requires a terminal UI; calling these from headless mode raises.
 
-Register key bindings and query layered help sections. UiHost-only.
+Register chord→callback bindings and inspect the layered help index. Chords and modes are canonicalized at registration; unknown values raise immediately. UiHost-only.
 
 ## `smelt.keymap.help_sections`
 

@@ -1,35 +1,31 @@
 //! `smelt.fuzzy` — score / rank candidates via neo_frizbee.
 
-use crate::lua::doc::register_fn;
-use lua_doc_derive::lua_module;
+use crate::lua::doc::Tier;
+use crate::lua::module::LuaMod;
 use mlua::prelude::*;
 
-#[lua_module(
-    name = "smelt.fuzzy",
-    doc = "Fuzzy-match scoring backed by neo_frizbee (SIMD Smith-Waterman)."
-)]
 pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
-    let fuzzy_tbl = lua.create_table()?;
-    register_fn(
-        &fuzzy_tbl,
-        "smelt.fuzzy",
+    let m = LuaMod::under(
+        lua,
+        smelt,
+        "fuzzy",
+        "Fuzzy-match scoring backed by neo_frizbee (SIMD Smith-Waterman).",
+        Tier::Host,
+    )?;
+    m.fn_(
         "score",
         "Fuzzy-match score for `text` against `query`. Lower = better; `nil` = no match.",
         &["text", "query"],
-        lua,
         |_, (text, query): (String, String)| match crate::fuzzy::fuzzy_score(&text, &query) {
             Some(s) => Ok(Some(s)),
             None => Ok(None),
         },
     )?;
 
-    register_fn(
-        &fuzzy_tbl,
-        "smelt.fuzzy",
+    m.fn_(
         "rank",
         "Rank `items` by fuzzy match against `query`. Returns 1-based indices, best first. Empty query → identity order. Items may be strings or tables with `label`/`description`/`search_terms`; set `_hay` to a precomputed concatenated haystack to skip per-call concatenation.",
         &["items", "query"],
-        lua,
         |_, (items, query): (mlua::Table, String)| -> LuaResult<Vec<usize>> {
             let len = items.raw_len();
             if query.is_empty() {
@@ -71,6 +67,5 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
         },
     )?;
 
-    smelt.set("fuzzy", fuzzy_tbl)?;
     Ok(())
 }

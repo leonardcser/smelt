@@ -5,22 +5,21 @@ use std::collections::HashMap;
 use std::time::Duration;
 
 use crate::http;
-use crate::lua::doc::{record_module_doc, register_fn};
-use lua_doc_derive::lua_module;
+use crate::lua::doc::Tier;
+use crate::lua::module::LuaMod;
 
-#[lua_module(
-    name = "smelt.http",
-    doc = "Synchronous HTTP get/post with redirect following and header support. Errors use the `(value, err_string)` convention."
-)]
 pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
-    let http_tbl = lua.create_table()?;
-    register_fn(
-        &http_tbl,
-        "smelt.http",
+    let http = LuaMod::under(
+        lua,
+        smelt,
+        "http",
+        "Synchronous HTTP get/post with redirect following and header support. Errors use the `(value, err_string)` convention.",
+        Tier::Host,
+    )?;
+    http.fn_(
         "get",
         "Perform a synchronous HTTP GET against `url`. `opts` accepts `headers`, `timeout_secs`, and `max_redirects`. Returns `({ status, final_url, body, headers }, nil)` on success or `(nil, err_string)` on failure.",
         &["url", "opts"],
-        lua,
         |lua, (url, opts): (String, Option<mlua::Table>)| -> LuaResult<(Option<mlua::Table>, Option<String>)> {
             let parsed = parse_options(opts.as_ref())?;
             match http::get(&url, &parsed) {
@@ -29,13 +28,10 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
             }
         },
     )?;
-    register_fn(
-        &http_tbl,
-        "smelt.http",
+    http.fn_(
         "post",
         "Perform a synchronous HTTP POST against `url` with `body` bytes. `opts` accepts `headers`, `timeout_secs`, and `max_redirects`. Returns `({ status, final_url, body, headers }, nil)` on success or `(nil, err_string)` on failure.",
         &["url", "body", "opts"],
-        lua,
         |lua, (url, body, opts): (String, Option<mlua::String>, Option<mlua::Table>)| -> LuaResult<(Option<mlua::Table>, Option<String>)> {
             let parsed = parse_options(opts.as_ref())?;
             let body_bytes = body.map(|s| s.as_bytes().to_vec()).unwrap_or_default();
@@ -45,44 +41,33 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
             }
         },
     )?;
-    register_fn(
-        &http_tbl,
-        "smelt.http",
+    http.fn_(
         "random_user_agent",
         "Return a randomly selected User-Agent string from the built-in pool.",
         &[],
-        lua,
         |_, ()| Ok(http::random_user_agent()),
     )?;
-    let cache_tbl = lua.create_table()?;
-    record_module_doc(
-        "smelt.http.cache",
+
+    let cache = http.sub(
+        "cache",
         "Process-wide HTTP response cache. Plugins can stash bodies under arbitrary keys to dedupe repeat fetches across a session.",
-    );
-    register_fn(
-        &cache_tbl,
-        "smelt.http.cache",
+    )?;
+    cache.fn_(
         "get",
         "Look up a cached HTTP response by `key`. Returns the stored string or `nil` if no entry exists.",
         &["key"],
-        lua,
         |_, key: String| Ok(http::cache::get(&key)),
     )?;
-    register_fn(
-        &cache_tbl,
-        "smelt.http.cache",
+    cache.fn_(
         "put",
         "Store `value` in the HTTP response cache under `key`.",
         &["key", "value"],
-        lua,
         |_, (key, value): (String, String)| -> LuaResult<()> {
             http::cache::put(&key, &value);
             Ok(())
         },
     )?;
-    http_tbl.set("cache", cache_tbl)?;
 
-    smelt.set("http", http_tbl)?;
     Ok(())
 }
 

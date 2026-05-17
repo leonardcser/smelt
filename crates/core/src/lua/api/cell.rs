@@ -5,11 +5,11 @@
 //! every cell name matching `pattern`; both subscriptions return a
 //! `Reg` userdata whose `:remove()` drops the subscription.
 
-use crate::lua::doc::{record_alias, record_class, register_fn};
+use crate::lua::doc::{record_alias, record_class, Tier};
 use crate::lua::lua_type::{LuaAliasDecl, LuaCallback, LuaClassDecl, LuaType, LuaTypeTuple};
+use crate::lua::module::LuaMod;
 use crate::lua::reg::LuaReg;
 use crate::lua::LuaHandle;
-use lua_doc_derive::lua_module;
 use mlua::prelude::*;
 
 /// Lua-facing string type for cell names. Renders as
@@ -62,13 +62,6 @@ impl std::ops::Deref for LuaCellName {
     }
 }
 
-#[lua_module(
-    name = "smelt.cell",
-    doc = "Typed reactive cell registry. `smelt.cell(name)` returns a sticky \
-`Cell` handle with `:get`, `:set`, `:subscribe`, `:name`. `smelt.cell.new` declares \
-a cell with an initial value. `smelt.cell.glob` subscribes across every name \
-matching a glob pattern."
-)]
 pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
     use crate::cells::{LuaCellValue, SubscriberKind};
     use std::rc::Rc;
@@ -84,15 +77,21 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
         },
     });
 
-    let cell_tbl = lua.create_table()?;
+    let m = LuaMod::under(
+        lua,
+        smelt,
+        "cell",
+        "Typed reactive cell registry. `smelt.cell(name)` returns a sticky \
+`Cell` handle with `:get`, `:set`, `:subscribe`, `:name`. `smelt.cell.new` declares \
+a cell with an initial value. `smelt.cell.glob` subscribes across every name \
+matching a glob pattern.",
+        Tier::Host,
+    )?;
 
-    register_fn(
-        &cell_tbl,
-        "smelt.cell",
+    m.fn_(
         "new",
         "Declare a cell named `name` with `initial` as its starting value. No-op if the cell already exists.",
         &["name", "initial"],
-        lua,
         |lua, (name, initial): (LuaCellName, mlua::Value)| -> LuaResult<()> {
             let key = lua.create_registry_value(initial)?;
             crate::host::try_with_core(|core| {
@@ -102,13 +101,10 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
         },
     )?;
 
-    register_fn(
-        &cell_tbl,
-        "smelt.cell",
+    m.fn_(
         "glob",
         "Register `handler(name, value)` for every cell whose name matches `pattern` (glob syntax). Returns a `Reg` whose `:remove()` drops the glob subscription.",
         &["pattern", "handler"],
-        lua,
         |lua,
          (pattern, handler): (String, LuaCallback<(String, mlua::Value), ()>)|
          -> LuaResult<LuaReg> {
@@ -132,9 +128,8 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
         "__call",
         lua.create_function(|_, (_tbl, name): (mlua::Table, String)| Ok(LuaCell { name }))?,
     )?;
-    cell_tbl.set_metatable(Some(mt))?;
+    m.tbl.set_metatable(Some(mt))?;
 
-    smelt.set("cell", cell_tbl)?;
     Ok(())
 }
 

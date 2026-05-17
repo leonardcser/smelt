@@ -31,7 +31,8 @@ use super::{LuaRuntime, LuaShared};
 use mlua::prelude::*;
 use smelt_core::lua::api::mode::LuaAgentMode;
 use smelt_core::lua::api::reasoning::LuaReasoningEffort;
-use smelt_core::lua::doc::{record_module_doc, register_ui_fn};
+use smelt_core::lua::doc::{record_module_doc, Tier};
+use smelt_core::lua::module::LuaMod;
 use std::sync::Arc;
 
 /// Semantic version of the Lua API surface, exposed as `smelt.version`.
@@ -82,13 +83,10 @@ impl LuaRuntime {
         // addition to the raw `u64` the host-tier registration accepts.
         // Tools' `render` callbacks now own Buf handles, not numeric ids.
         let layout_tbl: mlua::Table = smelt.get("layout")?;
-        register_ui_fn(
-            &layout_tbl,
-            "smelt.layout",
+        LuaMod::extend(lua, layout_tbl, "smelt.layout", Tier::UiHost).fn_(
             "leaf",
             "Wrap a `Buf` handle (or raw buf id) into a leaf block layout that renders the buffer's contents in place.",
             &["buf"],
-            lua,
             |_, buf: mlua::Value| -> LuaResult<smelt_core::lua::api::layout::LuaBlockLayout> {
                 let id = match buf {
                     mlua::Value::Integer(n) => smelt_core::buffer::BufId(n as u64),
@@ -114,14 +112,11 @@ impl LuaRuntime {
 
         // Cross-cutting UiHost-tier additions to host modules.
         let cmd_tbl: mlua::Table = smelt.get("cmd")?;
-        register_ui_fn(
-            &cmd_tbl,
-            "smelt.cmd",
+        LuaMod::extend(lua, cmd_tbl, "smelt.cmd", Tier::UiHost).fn_(
             "run",
             "Execute the slash-command line `line` (with or without leading `/`) as if the user had typed it. Errors are surfaced as in-app notifications.",
             &["line"],
-            lua,
-            |_, line: String|  -> LuaResult<()>{
+            |_, line: String| -> LuaResult<()> {
                 crate::lua::with_app(|app| app.apply_lua_command(&line));
                 Ok(())
             },
@@ -159,24 +154,19 @@ impl LuaRuntime {
                 cur.into_lua(lua)
             },
         )?;
-        register_ui_fn(
-            &smelt,
-            "smelt",
+        let smelt_root = LuaMod::extend(lua, smelt.clone(), "smelt", Tier::UiHost);
+        smelt_root.fn_(
             "ns",
             "Look up or allocate a stable namespace id for `name`. Namespaces scope `buf:mark` / `buf:clear_ns` calls so plugins can repaint their region without disturbing others.",
             &["name"],
-            lua,
             |_, name: String| -> LuaResult<u32> {
                 Ok(smelt_core::buffer::create_namespace(&name).0)
             },
         )?;
-        register_ui_fn(
-            &smelt,
-            "smelt",
+        smelt_root.fn_(
             "focus",
             "Return which top-level pane currently has focus: `\"transcript\"` or `\"prompt\"`.",
             &[],
-            lua,
             |_, ()| -> LuaResult<String> {
                 Ok(crate::lua::try_with_app(|app| match app.app_focus {
                     crate::app::AppFocus::Content => "transcript".to_string(),
@@ -185,14 +175,11 @@ impl LuaRuntime {
                 .unwrap_or_default())
             },
         )?;
-        register_ui_fn(
-            &smelt,
-            "smelt",
+        smelt_root.fn_(
             "quit",
             "Request a clean shutdown of the app. The quit fires on the next tick after the current handler returns.",
             &[],
-            lua,
-            |_, ()|  -> LuaResult<()>{
+            |_, ()| -> LuaResult<()> {
                 crate::lua::with_app(|app| app.pending_quit = true);
                 Ok(())
             },

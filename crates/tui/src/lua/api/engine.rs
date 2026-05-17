@@ -1,10 +1,11 @@
 //! `smelt.engine` — cancel, compact, `ask`, and `submit_command` for Lua-rendered turns.
 
 use crate::lua::{LuaHandle, LuaShared};
-use lua_doc_derive::{lua_module, LuaAlias, LuaOpts};
+use lua_doc_derive::{LuaAlias, LuaOpts};
 use mlua::prelude::*;
-use smelt_core::lua::doc::register_ui_fn;
+use smelt_core::lua::doc::Tier;
 use smelt_core::lua::lua_type::LuaCallback;
+use smelt_core::lua::module::LuaMod;
 use std::sync::Arc;
 
 /// Auxiliary task tag accepted by `smelt.engine.ask`. Routes the
@@ -124,20 +125,19 @@ pub struct LuaAskSpec {
     pub on_response: Option<LuaCallback<String, ()>>,
 }
 
-#[lua_module(
-    name = "smelt.engine",
-    doc = "LLM engine control — cancel, ask, submit commands, and request tool approval. UiHost-only."
-)]
 pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) -> LuaResult<()> {
-    let engine_tbl = lua.create_table()?;
-    register_ui_fn(
-        &engine_tbl,
-        "smelt.engine",
+    let m = LuaMod::under(
+        lua,
+        smelt,
+        "engine",
+        "LLM engine control — cancel, ask, submit commands, and request tool approval. UiHost-only.",
+        Tier::UiHost,
+    )?;
+    m.fn_(
         "cancel",
         "Cancel the in-flight turn. If a compaction is running, bumps the compact epoch and marks the working state interrupted; otherwise sends `Cancel` to the engine.",
         &[],
-        lua,
-        |_, ()|  -> LuaResult<()>{
+        |_, ()| -> LuaResult<()> {
             crate::lua::with_app(|app| {
                 if app.working.is_compacting() {
                     app.compact_epoch += 1;
@@ -151,31 +151,22 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
             Ok(())
         },
     )?;
-    register_ui_fn(
-        &engine_tbl,
-        "smelt.engine",
+    m.fn_(
         "is_running",
         "Return `true` if an agent turn is currently in flight (a request is being streamed or a tool is executing).",
         &[],
-        lua,
         |_, ()| Ok(crate::lua::try_with_app(|app| app.agent.is_some()).unwrap_or(false)),
     )?;
-    register_ui_fn(
-        &engine_tbl,
-        "smelt.engine",
+    m.fn_(
         "is_compacting",
         "Return `true` while a transcript compaction is running.",
         &[],
-        lua,
         |_, ()| Ok(crate::lua::try_with_app(|app| app.working.is_compacting()).unwrap_or(false)),
     )?;
-    register_ui_fn(
-        &engine_tbl,
-        "smelt.engine",
+    m.fn_(
         "reload",
         "Re-evaluate every Lua surface: clears every command, keymap, statusline source, tool, hook, timer, and cell subscriber, wipes non-stdlib `package.loaded` entries, then re-runs the bundled autoload modules, `init.lua`, global plugins, and `.smelt/init.lua` + `.smelt/plugins/*`. `early.lua` is intentionally skipped — its CLI-flag and `smelt.builtins.disable` effects are startup-only.",
         &[],
-        lua,
         |_, ()| -> LuaResult<()> {
             crate::lua::with_app(|app| {
                 if app.agent.is_some() {
@@ -195,26 +186,20 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
         },
     )?;
 
-    register_ui_fn(
-        &engine_tbl,
-        "smelt.engine",
+    m.fn_(
         "compact",
         "Start a transcript compaction with optional extra `instructions` for the summarizer. Notifies and no-ops if compaction is unavailable in the current state.",
         &["instructions"],
-        lua,
-        |_, instructions: Option<String>|  -> LuaResult<()>{
+        |_, instructions: Option<String>| -> LuaResult<()> {
             crate::lua::with_app(|app| app.compact_or_notify(instructions));
             Ok(())
         },
     )?;
 
-    register_ui_fn(
-        &engine_tbl,
-        "smelt.engine",
+    m.fn_(
         "submit_command",
         "Start an agent turn from a Lua-defined custom command (`/name`). Notifies and no-ops if an agent is already running. See [`smelt.engine.CommandOverrides`](types.md#smeltenginecommandoverrides) for the override shape.",
         &["name", "body", "overrides"],
-        lua,
         |_,
          (name, body, overrides): (String, String, Option<LuaCommandOverrides>)|
          -> LuaResult<()> {
@@ -239,13 +224,10 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
     // smelt.engine.ask({system, messages?, question?, task?, on_response})
     {
         let s = shared.clone();
-        register_ui_fn(
-            &engine_tbl,
-            "smelt.engine",
+        m.fn_(
             "ask",
             "Run an out-of-band auxiliary LLM request (title / prediction / compaction / btw) without touching the main turn. `spec.on_response` fires once with the assistant's reply; returns the request id.",
             &["spec"],
-            lua,
             move |lua, spec: LuaAskSpec| -> LuaResult<u64> {
                 let task = spec.task.map(Into::into).unwrap_or_default();
 
@@ -291,6 +273,5 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
         )?;
     }
 
-    smelt.set("engine", engine_tbl)?;
     Ok(())
 }

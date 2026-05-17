@@ -7,10 +7,11 @@
 //! When called outside the two-pass main binary (e.g. headless test
 //! harness), `get` falls back to the spec's default value.
 
-use crate::lua::doc::register_fn;
+use crate::lua::doc::Tier;
+use crate::lua::module::LuaMod;
 use crate::lua::shared::{CliFlagKind, CliFlagSpec, CliFlagValue};
 use crate::lua::LuaShared;
-use lua_doc_derive::{lua_module, LuaAlias, LuaOpts};
+use lua_doc_derive::{LuaAlias, LuaOpts};
 use mlua::prelude::*;
 use std::sync::Arc;
 
@@ -77,25 +78,24 @@ fn value_to_lua(lua: &Lua, v: &CliFlagValue) -> LuaResult<mlua::Value> {
     })
 }
 
-#[lua_module(
-    name = "smelt.cli",
-    doc = "Declare and read CLI flags from Lua. `register_flag` is intended \
+pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) -> LuaResult<()> {
+    let m = LuaMod::under(
+        lua,
+        smelt,
+        "cli",
+        "Declare and read CLI flags from Lua. `register_flag` is intended \
 to be called from `early.lua` so the flag is folded into the main binary's \
 argument parser. `get(name)` returns the parsed value (or the declared \
-default) after the binary has parsed argv."
-)]
-pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) -> LuaResult<()> {
-    let tbl = lua.create_table()?;
+default) after the binary has parsed argv.",
+        Tier::Host,
+    )?;
 
     {
         let s = shared.clone();
-        register_fn(
-            &tbl,
-            "smelt.cli",
+        m.fn_(
             "register_flag",
             "Register a CLI flag. MUST be called from `early.lua` — the runtime errors loudly if invoked in any later phase, because clap has already parsed argv by then. `opts.kind` is `\"boolean\"`, `\"string\"`, or `\"integer\"`; `opts.default` (optional) sets the value when the flag is absent. Booleans always default to `false` when not provided. Errors if a flag with the same name was already registered.",
             &["opts"],
-            lua,
             move |_, opts: LuaRegisterFlagOpts| -> LuaResult<()> {
                 if s.phase() != crate::lua::Phase::Early {
                     return Err(LuaError::RuntimeError(format!(
@@ -144,13 +144,10 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
 
     {
         let s = shared.clone();
-        register_fn(
-            &tbl,
-            "smelt.cli",
+        m.fn_(
             "get",
             "Return the parsed value of the Lua-declared CLI flag `name`. Returns the declared default if the binary has not parsed argv yet (e.g. headless tests).",
             &["name"],
-            lua,
             move |lua, name: String| -> LuaResult<mlua::Value> {
                 let parsed = s
                     .cli_flag_values
@@ -176,13 +173,10 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
 
     {
         let s = shared.clone();
-        register_fn(
-            &tbl,
-            "smelt.cli",
+        m.fn_(
             "list",
             "Return the names of every Lua-declared CLI flag, in registration order.",
             &[],
-            lua,
             move |lua, ()| -> LuaResult<mlua::Table> {
                 let names: Vec<String> = s
                     .cli_flag_specs
@@ -198,6 +192,5 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
         )?;
     }
 
-    smelt.set("cli", tbl)?;
     Ok(())
 }

@@ -1,21 +1,20 @@
 //! `smelt.spawn` — fire-and-forget Lua coroutine on the `LuaTaskRuntime`.
 
-use crate::lua::doc::register_fn;
+use crate::lua::doc::Tier;
 use crate::lua::lua_type::LuaCallback;
+use crate::lua::module::LuaMod;
 use crate::lua::{LuaShared, TaskCompletion};
 use mlua::prelude::*;
 use std::sync::Arc;
 
 pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) -> LuaResult<()> {
+    let m = LuaMod::extend(lua, smelt.clone(), "smelt", Tier::Host);
     let s = shared.clone();
-    register_fn(
-        smelt,
-        "smelt",
+    m.fn_(
         "spawn",
         "Run `handler` as a fire-and-forget coroutine on the Lua task runtime. The handler may yield; its result is discarded.",
         &["handler"],
-        lua,
-        move |lua, handler: LuaCallback<(), ()>|  -> LuaResult<()>{
+        move |lua, handler: LuaCallback<(), ()>| -> LuaResult<()> {
             if let Ok(mut rt) = s.tasks.lock() {
                 rt.spawn(
                     lua,

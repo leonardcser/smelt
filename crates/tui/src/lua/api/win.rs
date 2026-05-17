@@ -8,11 +8,11 @@
 //! single `:remove()` method that frees the binding.
 
 use crate::lua::{parse_keybind, LuaShared};
-use lua_doc_derive::lua_module;
 use lua_doc_derive::LuaAlias;
 use mlua::prelude::*;
-use smelt_core::lua::doc::{record_class, record_module_doc};
+use smelt_core::lua::doc::{record_class, Tier};
 use smelt_core::lua::lua_type::{LuaCallback, LuaClassDecl, LuaType};
+use smelt_core::lua::module::LuaMod;
 use smelt_core::lua::reg::LuaReg;
 use std::sync::Arc;
 
@@ -286,16 +286,15 @@ pub(crate) struct SharedHandle(pub(crate) Arc<LuaShared>);
 
 impl mlua::UserData for SharedHandle {}
 
-#[lua_module(
-    name = "smelt.win",
-    doc = "Window handle constructor. `smelt.win.new(buf, opts?)` opens a split window over `buf` and returns a `Win` userdata. \
-`opts.name` opts the window into hot-reload survival. UiHost-only — windows are layout leaves that render a buffer onto the screen."
-)]
 pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) -> LuaResult<()> {
-    record_module_doc(
-        "smelt.win",
-        "Window handle constructor. `smelt.win.new(buf, opts?)` returns a `Win` userdata.",
-    );
+    let m = LuaMod::under(
+        lua,
+        smelt,
+        "win",
+        "Window handle constructor. `smelt.win.new(buf, opts?)` opens a split window over `buf` and returns a `Win` userdata. \
+`opts.name` opts the window into hot-reload survival. UiHost-only — windows are layout leaves that render a buffer onto the screen.",
+        Tier::UiHost,
+    )?;
 
     // Stash the shared state so per-method registrations (key/on) can
     // recover it without each method capturing its own clone.
@@ -320,14 +319,10 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
         },
     });
 
-    let win_tbl = lua.create_table()?;
-    smelt_core::lua::doc::register_ui_fn(
-        &win_tbl,
-        "smelt.win",
+    m.fn_(
         "new",
         "Open a split window over `buf` and return a `Win` userdata. `opts.name` opts the window into hot-reload survival. `opts.kind = \"input\"` (`opts.placeholder?`) marks the window as a single-line text input; `opts.kind = \"list\"` (`opts.initial_cursor?`) marks it as a navigable list leaf.",
         &["buf", "opts"],
-        lua,
         |_,
          (buf, opts): (super::buf::LuaBuf, Option<mlua::Table>)|
          -> LuaResult<Option<LuaWin>> {
@@ -335,7 +330,6 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
         },
     )?;
 
-    smelt.set("win", win_tbl)?;
     Ok(())
 }
 

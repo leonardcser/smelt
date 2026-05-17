@@ -2,7 +2,8 @@
 //! `smelt.mode()` reads, `smelt.mode(v)` sets (TUI override), and
 //! `smelt.mode.cycle_list()` returns the configured cycle.
 
-use crate::lua::doc::{record_module_doc, register_fn};
+use crate::lua::doc::Tier;
+use crate::lua::module::LuaMod;
 use lua_doc_derive::LuaAlias;
 use mlua::prelude::*;
 
@@ -17,19 +18,17 @@ pub enum LuaAgentMode {
 }
 
 pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
-    record_module_doc(
-        "smelt.mode",
+    let m = LuaMod::under(
+        lua,
+        smelt,
+        "mode",
         "Agent-mode selector. `smelt.mode()` reads the active mode; `smelt.mode(v)` sets it (overridden by the TUI to apply the change). `smelt.mode.cycle_list()` lists the configured cycle.",
-    );
-
-    let mode_tbl = lua.create_table()?;
-    register_fn(
-        &mode_tbl,
-        "smelt.mode",
+        Tier::Host,
+    )?;
+    m.fn_(
         "cycle_list",
         "Return the configured agent-mode cycle; falls back to all known modes when the user has not customized one.",
         &[],
-        lua,
         |_, ()| -> LuaResult<Vec<LuaAgentMode>> {
             Ok(crate::host::try_with_core(|core| {
                 let cycle: &[protocol::AgentMode] = if core.config.mode_cycle.is_empty() {
@@ -56,8 +55,7 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
     )?;
     let mt = lua.create_table()?;
     mt.set("__call", f)?;
-    mode_tbl.set_metatable(Some(mt))?;
+    m.tbl.set_metatable(Some(mt))?;
 
-    smelt.set("mode", mode_tbl)?;
     Ok(())
 }

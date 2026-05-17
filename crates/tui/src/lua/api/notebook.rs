@@ -1,24 +1,23 @@
 //! `smelt.notebook` — parse, read, apply, and compute preview data for notebook edits.
 
-use lua_doc_derive::lua_module;
 use mlua::prelude::*;
-use smelt_core::lua::doc::register_ui_fn;
+use smelt_core::lua::doc::Tier;
+use smelt_core::lua::module::LuaMod;
 use smelt_core::notebook;
 use std::collections::HashMap;
 
-#[lua_module(
-    name = "smelt.notebook",
-    doc = "Parse, read, and apply notebook cell edits, plus compute preview data for the edit_notebook tool. UiHost-only."
-)]
 pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
-    let notebook = lua.create_table()?;
-    register_ui_fn(
-        &notebook,
-        "smelt.notebook",
-        "preview_data",
-        "Compute the preview payload for an `edit_notebook` call. Returns `nil` when the notebook can't be read/parsed or the target cell is out of range. The returned table has `{ edit_mode, path, title, old_source, new_source, syntax_ext }` — `title` is the formatted header (`\"insert cell 3 [py]\"` etc.), `syntax_ext` is the extension for syntax-highlighting the body (`\"py\"` / `\"md\"`).",
-        &["args"],
+    let m = LuaMod::under(
         lua,
+        smelt,
+        "notebook",
+        "Parse, read, and apply notebook cell edits, plus compute preview data for the edit_notebook tool. UiHost-only.",
+        Tier::UiHost,
+    )?;
+    m.fn_(
+        "preview_data",
+        "Compute the preview payload for an `edit_notebook` call. Returns `nil` when the notebook can't be read/parsed or the target cell is out of range. The returned table has `{ edit_mode, path, title, old_source, new_source, syntax_ext }`.",
+        &["args"],
         |lua, args: mlua::Table| -> LuaResult<Option<mlua::Table>> {
             let args = lua_table_to_json_map(&args)
                 .map_err(|e| LuaError::RuntimeError(format!("notebook.preview_data: {e}")))?;
@@ -35,36 +34,27 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
             Ok(Some(t))
         },
     )?;
-    register_ui_fn(
-        &notebook,
-        "smelt.notebook",
+    m.fn_(
         "is_notebook_path",
         "Return `true` if `path` looks like a Jupyter notebook (`.ipynb` extension).",
         &["path"],
-        lua,
         |_, p: String| Ok(smelt_core::notebook::is_notebook_path(&p)),
     )?;
 
-    register_ui_fn(
-        &notebook,
-        "smelt.notebook",
+    m.fn_(
         "parse",
         "Parse a notebook JSON string. Returns `(notebook, nil)` with `{ nbformat, nbformat_minor, cells = { { kind, id?, source, execution_count? } } }` on success, or `(nil, error)` on failure.",
         &["json"],
-        lua,
         |lua, json: String| match notebook::parse(&json) {
             Ok(nb) => Ok((Some(notebook_to_lua(lua, &nb)?), None)),
             Err(err) => Ok((None, Some(err.to_string()))),
         },
     )?;
 
-    register_ui_fn(
-        &notebook,
-        "smelt.notebook",
+    m.fn_(
         "read",
         "Render a Jupyter notebook at `path` as cell-by-cell text starting at `offset` for at most `limit` cells. Returns `(text, nil)` on success or `(nil, err_msg)` on parse failure — same output the built-in `read_file` tool produces.",
         &["path", "offset", "limit"],
-        lua,
         |_, (path, offset, limit): (String, u64, u64)| -> LuaResult<(Option<String>, Option<String>)> {
 
             match smelt_core::notebook::render_notebook_text(&path, offset as usize, limit as usize)
@@ -76,13 +66,10 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
         },
     )?;
 
-    register_ui_fn(
-        &notebook,
-        "smelt.notebook",
+    m.fn_(
         "apply_edit",
         "Apply a notebook edit (cell insert/replace/delete) described by `args` and persist the new file. Returns `(message_table, nil)` on success or `(nil, err_msg)` on failure. Callers are expected to hold the per-path advisory flock.",
         &["args"],
-        lua,
         |lua, args: mlua::Table| -> LuaResult<(Option<mlua::Value>, Option<String>)> {
 
             let args_map = lua_table_to_json_map(&args)
@@ -107,7 +94,6 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
         },
     )?;
 
-    smelt.set("notebook", notebook)?;
     Ok(())
 }
 

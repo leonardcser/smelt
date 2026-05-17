@@ -4,10 +4,10 @@
 //! (a `smelt.overlay.layout` userdata tree) and returns an `Overlay`
 //! userdata. `opts.name` opts the overlay into hot-reload survival.
 
-use lua_doc_derive::lua_module;
 use mlua::prelude::*;
-use smelt_core::lua::doc::{record_class, record_module_doc};
+use smelt_core::lua::doc::{record_class, Tier};
 use smelt_core::lua::lua_type::{LuaClassDecl, LuaType};
+use smelt_core::lua::module::LuaMod;
 
 /// Lua-side handle for an `OverlayId`.
 #[derive(Clone, Copy, Debug)]
@@ -45,16 +45,15 @@ impl mlua::UserData for LuaOverlay {
     }
 }
 
-#[lua_module(
-    name = "smelt.overlay",
-    doc = "Overlay handle constructor. `smelt.overlay.new(opts)` opens an overlay from `opts.layout` (a `smelt.overlay.layout` userdata) and returns an `Overlay` userdata. \
-`opts.name` opts the overlay into hot-reload survival. UiHost-only."
-)]
 pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
-    record_module_doc(
-        "smelt.overlay",
-        "Overlay handle constructor. `smelt.overlay.new(opts)` returns an `Overlay` userdata.",
-    );
+    let m = LuaMod::under(
+        lua,
+        smelt,
+        "overlay",
+        "Overlay handle constructor. `smelt.overlay.new(opts)` opens an overlay from `opts.layout` (a `smelt.overlay.layout` userdata) and returns an `Overlay` userdata. \
+`opts.name` opts the overlay into hot-reload survival. UiHost-only.",
+        Tier::UiHost,
+    )?;
 
     record_class(LuaClassDecl {
         name: "smelt.overlay.Overlay",
@@ -64,14 +63,10 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
         },
     });
 
-    let ov_tbl = lua.create_table()?;
-    smelt_core::lua::doc::register_ui_fn(
-        &ov_tbl,
-        "smelt.overlay",
+    m.fn_(
         "new",
         "Open an overlay rendered from `opts.layout` (a `smelt.overlay.layout` userdata) and return an `Overlay` userdata. `opts.name` opts the overlay into hot-reload survival.",
         &["opts"],
-        lua,
         |_, opts: mlua::Table| -> LuaResult<LuaOverlay> {
             let id = crate::lua::with_app(|app| crate::lua::ui_ops::open_overlay(app, opts))
                 .map_err(|e| LuaError::RuntimeError(format!("overlay: {e}")))?;
@@ -81,7 +76,6 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
         },
     )?;
 
-    super::overlay_layout::register(lua, &ov_tbl)?;
-    smelt.set("overlay", ov_tbl)?;
+    super::overlay_layout::register(&m)?;
     Ok(())
 }

@@ -5,9 +5,10 @@
 //! already executed by then, so prefer `smelt.tools.unregister` /
 //! `smelt.cmd.unregister` for post-hoc removal.
 
-use crate::lua::doc::register_fn;
+use crate::lua::doc::Tier;
+use crate::lua::module::LuaMod;
 use crate::lua::LuaShared;
-use lua_doc_derive::{lua_module, LuaOpts};
+use lua_doc_derive::LuaOpts;
 use mlua::prelude::*;
 use std::sync::Arc;
 
@@ -62,26 +63,25 @@ fn expand(sel: &LuaBuiltinsSelector) -> Vec<String> {
     out
 }
 
-#[lua_module(
-    name = "smelt.builtins",
-    doc = "Opt out of bundled `smelt.<dotted>` modules. Call from \
+pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) -> LuaResult<()> {
+    let m = LuaMod::under(
+        lua,
+        smelt,
+        "builtins",
+        "Opt out of bundled `smelt.<dotted>` modules. Call from \
 `early.lua` to prevent the module from auto-loading; calls made later \
 mark the module as disabled but its body has already run. For runtime \
 removal of an already-loaded tool/command, use `smelt.tools.unregister` \
-or `smelt.cmd.unregister` directly."
-)]
-pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) -> LuaResult<()> {
-    let tbl = lua.create_table()?;
+or `smelt.cmd.unregister` directly.",
+        Tier::Host,
+    )?;
 
     {
         let s = shared.clone();
-        register_fn(
-            &tbl,
-            "smelt.builtins",
+        m.fn_(
             "disable",
             "Mark the bundled modules in `selector` as disabled. The auto-loader skips matching `require()` calls. Returns the count of names marked. Call from `early.lua` for full effect.",
             &["selector"],
-            lua,
             move |_, sel: LuaBuiltinsSelector| -> LuaResult<usize> {
                 let names = expand(&sel);
                 let mut count = 0usize;
@@ -99,13 +99,10 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
 
     {
         let s = shared.clone();
-        register_fn(
-            &tbl,
-            "smelt.builtins",
+        m.fn_(
             "enable",
             "Undo a prior `disable` for the bundled modules in `selector`. Returns the count of names un-marked. Has no effect if the modules were never disabled.",
             &["selector"],
-            lua,
             move |_, sel: LuaBuiltinsSelector| -> LuaResult<usize> {
                 let names = expand(&sel);
                 let mut count = 0usize;
@@ -123,13 +120,10 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
 
     {
         let s = shared.clone();
-        register_fn(
-            &tbl,
-            "smelt.builtins",
+        m.fn_(
             "is_disabled",
             "Return `true` if the dotted module name (e.g. `\"smelt.tools.web_search\"`) is currently in the disabled set.",
             &["module"],
-            lua,
             move |_, module: String| -> LuaResult<bool> {
                 Ok(s.disabled_modules
                     .lock()
@@ -141,13 +135,10 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
 
     {
         let s = shared.clone();
-        register_fn(
-            &tbl,
-            "smelt.builtins",
+        m.fn_(
             "list",
             "Return the sorted dotted module names that are currently disabled.",
             &[],
-            lua,
             move |lua, ()| -> LuaResult<mlua::Table> {
                 let mut names: Vec<String> = s
                     .disabled_modules
@@ -164,6 +155,5 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
         )?;
     }
 
-    smelt.set("builtins", tbl)?;
     Ok(())
 }

@@ -2,30 +2,27 @@
 //! Chords and modes are canonicalized at registration; unknown values raise immediately.
 
 use crate::lua::{LuaHandle, LuaShared};
-use lua_doc_derive::lua_module;
 use mlua::prelude::*;
-use smelt_core::lua::doc::register_ui_fn;
+use smelt_core::lua::doc::{record_module_doc, Tier};
 use smelt_core::lua::lua_type::LuaCallback;
+use smelt_core::lua::module::LuaMod;
 use std::sync::Arc;
 
-#[lua_module(
-    name = "smelt.keymap",
-    doc = "Register key bindings and query layered help sections. UiHost-only."
-)]
 pub(super) fn register(
     lua: &Lua,
     smelt_keymap: &mlua::Table,
     shared: &Arc<LuaShared>,
 ) -> LuaResult<()> {
-    let keymap_tbl = lua.create_table()?;
-    register_ui_fn(
-        &keymap_tbl,
+    record_module_doc(
         "smelt.keymap",
+        "Register chord→callback bindings and inspect the layered help index. Chords and modes are canonicalized at registration; unknown values raise immediately. UiHost-only.",
+    );
+    let m = LuaMod::extend(lua, smelt_keymap.clone(), "smelt.keymap", Tier::UiHost);
+    m.fn_(
         "help_sections",
         "Return layered keybinding help as `{ title, entries = { { label, detail } } }` rows. Filters vim-only chords when vim mode is disabled.",
         &[],
-        lua,
-        |lua, ()|  -> LuaResult<mlua::Table>{
+        |lua, ()| -> LuaResult<mlua::Table> {
             let vim_enabled =
                 crate::lua::try_with_app(|app| app.input.vim_enabled(app.prompt_win()))
                     .unwrap_or(false);
@@ -47,17 +44,14 @@ pub(super) fn register(
             Ok(out)
         },
     )?;
-    smelt_keymap.set("help", keymap_tbl.get::<mlua::Function>("help_sections")?)?;
+    smelt_keymap.set("help", smelt_keymap.get::<mlua::Function>("help_sections")?)?;
 
     {
         let s = shared.clone();
-        register_ui_fn(
-            smelt_keymap,
-            "smelt.keymap",
+        m.fn_(
             "set",
             "Bind `chord` in `mode` to a Lua callback. `mode` is `\"n\"|\"i\"|\"v\"|\"\"` (or the long form `normal`/`insert`/`visual`); the chord is canonicalized at registration and unknown values raise immediately. Re-binding the same `(mode, chord)` overwrites the prior handler.",
             &["mode", "chord", "handler"],
-            lua,
             move |lua,
                   (mode, chord, handler): (String, String, LuaCallback<(), ()>)|
                   -> LuaResult<()> {
@@ -84,13 +78,10 @@ pub(super) fn register(
     }
     {
         let s = shared.clone();
-        register_ui_fn(
-            smelt_keymap,
-            "smelt.keymap",
+        m.fn_(
             "unset",
             "Drop the binding for `chord` in `mode`. `mode` accepts the same forms as `set`. Returns `true` if a binding was removed.",
             &["mode", "chord"],
-            lua,
             move |_, (mode, chord): (String, String)| -> LuaResult<bool> {
                 let canonical_mode = crate::lua::normalize_mode(&mode).ok_or_else(|| {
                     LuaError::RuntimeError(format!(
@@ -110,13 +101,10 @@ pub(super) fn register(
     }
     {
         let s = shared.clone();
-        register_ui_fn(
-            smelt_keymap,
-            "smelt.keymap",
+        m.fn_(
             "list",
             "Return the set of currently-bound `{ mode, chord }` rows. `mode` is the canonical short form (`\"n\"`/`\"i\"`/`\"v\"`/`\"\"`).",
             &[],
-            lua,
             move |lua, ()| -> LuaResult<mlua::Table> {
                 let mut rows: Vec<(String, String)> = s
                     .keymaps

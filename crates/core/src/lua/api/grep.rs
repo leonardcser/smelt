@@ -1,24 +1,23 @@
 //! `smelt.grep` — ripgrep wrapper. `rg` exit 1 (no match) is not an error; check `exit_code`.
 
 use crate::grep;
-use crate::lua::doc::register_fn;
-use lua_doc_derive::lua_module;
+use crate::lua::doc::Tier;
+use crate::lua::module::LuaMod;
 use mlua::prelude::*;
 use std::time::Duration;
 
-#[lua_module(
-    name = "smelt.grep",
-    doc = "Ripgrep wrapper for searching files. Exit code 1 (no match) is not an error."
-)]
 pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
-    let grep_tbl = lua.create_table()?;
-    register_fn(
-        &grep_tbl,
-        "smelt.grep",
+    let m = LuaMod::under(
+        lua,
+        smelt,
+        "grep",
+        "Ripgrep wrapper for searching files. Exit code 1 (no match) is not an error.",
+        Tier::Host,
+    )?;
+    m.fn_(
         "run",
         "Run ripgrep with `pattern` over `path`. `opts` accepts `mode` (`content`/`files_with_matches`/`count`), `case_insensitive`, `multiline`, `line_numbers`, `before_context`/`after_context`/`context`, `glob`, `type`, `timeout_secs`. Returns `(result_table, nil)` on success or `(nil, error_string)` on spawn failure. Exit code 1 (no match) is not an error — inspect `exit_code` on the result.",
         &["pattern", "path", "opts"],
-        lua,
         |lua, (pattern, path, opts): (String, String, Option<mlua::Table>)| -> LuaResult<(Option<mlua::Table>, Option<String>)> {
             let parsed = parse_options(opts.as_ref())?;
             match grep::run(&pattern, &path, &parsed) {
@@ -28,7 +27,6 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
         },
     )?;
 
-    smelt.set("grep", grep_tbl)?;
     Ok(())
 }
 

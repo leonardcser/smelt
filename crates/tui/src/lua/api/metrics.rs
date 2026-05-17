@@ -2,38 +2,34 @@
 //! `/cost` dialogs, plus a live perf snapshot consumed by the F12
 //! debug panel.
 
-use lua_doc_derive::lua_module;
 use mlua::prelude::*;
-use smelt_core::lua::doc::{record_module_doc, register_ui_fn};
+use smelt_core::lua::doc::Tier;
+use smelt_core::lua::module::LuaMod;
 
-#[lua_module(
-    name = "smelt.metrics",
-    doc = "Preformatted stats text and live perf instrumentation. UiHost-only."
-)]
 pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
-    let metrics_tbl = lua.create_table()?;
-    register_ui_fn(
-        &metrics_tbl,
-        "smelt.metrics",
+    let m = LuaMod::under(
+        lua,
+        smelt,
+        "metrics",
+        "Preformatted stats text and live perf instrumentation. UiHost-only.",
+        Tier::UiHost,
+    )?;
+    m.fn_(
         "stats_text",
         "Return preformatted text for the `/stats` dialog (per-model token totals and request counts loaded from the on-disk metrics ledger).",
         &[],
-        lua,
-        |_, ()|  -> LuaResult<String>{
+        |_, ()| -> LuaResult<String> {
             let entries = crate::metrics::load();
             let stats = crate::metrics::render_stats(&entries);
             Ok(crate::metrics::render_stats_text(&stats))
         },
     )?;
 
-    register_ui_fn(
-        &metrics_tbl,
-        "smelt.metrics",
+    m.fn_(
         "session_cost_text",
         "Return preformatted text for the `/cost` dialog showing the current session's cost, per-turn average, and resolved pricing for the active model.",
         &[],
-        lua,
-        |_, ()|  -> LuaResult<String>{
+        |_, ()| -> LuaResult<String> {
             let text = crate::lua::try_with_app(|app| {
                 let turns = app.user_turns().len();
                 let resolved = engine::pricing::resolve(
@@ -54,46 +50,36 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
         },
     )?;
 
-    let perf_tbl = lua.create_table()?;
-    record_module_doc(
-        "smelt.metrics.perf",
+    let perf = m.sub(
+        "perf",
         "Perf instrumentation toggle, clear, and snapshot. UiHost-only.",
-    );
+    )?;
 
-    register_ui_fn(
-        &perf_tbl,
-        "smelt.metrics.perf",
+    perf.fn_(
         "set_enabled",
         "Toggle perf instrumentation collection on/off. Disabled by default; enable to populate `snapshot` for the F12 debug panel.",
         &["on"],
-        lua,
-        |_, on: bool|  -> LuaResult<()>{
+        |_, on: bool| -> LuaResult<()> {
             smelt_perf::perf::set_enabled(on);
             Ok(())
         },
     )?;
 
-    register_ui_fn(
-        &perf_tbl,
-        "smelt.metrics.perf",
+    perf.fn_(
         "clear",
         "Clear all accumulated perf samples (durations and value gauges).",
         &[],
-        lua,
         |_, ()| -> LuaResult<()> {
             smelt_perf::perf::clear();
             Ok(())
         },
     )?;
 
-    register_ui_fn(
-        &perf_tbl,
-        "smelt.metrics.perf",
+    perf.fn_(
         "snapshot",
         "Return the current perf snapshot as `{ durations, values, enabled }` with per-label `count`, `last`, `p50`, `p95`, `p99`, `max`, `total` fields. Powers the F12 debug panel.",
         &[],
-        lua,
-        |lua, ()|  -> LuaResult<mlua::Table>{
+        |lua, ()| -> LuaResult<mlua::Table> {
             let snap = smelt_perf::perf::snapshot();
             let out = lua.create_table()?;
             let durs = lua.create_table()?;
@@ -129,7 +115,5 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
         },
     )?;
 
-    metrics_tbl.set("perf", perf_tbl)?;
-    smelt.set("metrics", metrics_tbl)?;
     Ok(())
 }

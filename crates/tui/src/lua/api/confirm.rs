@@ -21,31 +21,30 @@
 
 use mlua::prelude::*;
 
-use lua_doc_derive::lua_module;
 use smelt_core::cells::ConfirmResolved;
-use smelt_core::lua::doc::register_ui_fn;
+use smelt_core::lua::doc::Tier;
+use smelt_core::lua::module::LuaMod;
 use smelt_core::transcript_model::{ApprovalScope, ConfirmChoice, ConfirmRequest};
 
 /// Register `smelt.confirm.*` primitives.
-#[lua_module(
-    name = "smelt.confirm",
-    doc = "Confirm dialog primitives — preview dispatch, back-tab cycling, and choice resolution. UiHost-only."
-)]
 pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
-    let confirm_tbl = lua.create_table()?;
+    let m = LuaMod::under(
+        lua,
+        smelt,
+        "confirm",
+        "Confirm dialog primitives — preview dispatch, back-tab cycling, and choice resolution. UiHost-only.",
+        Tier::UiHost,
+    )?;
 
     // smelt.confirm.__back_tab(handle_id) → bool. Cycles app mode and returns true if the
     // new mode auto-allows the request. The with_app borrow must be released before calling
     // back into Lua (smelt.mode.cycle re-enters with_app), so the body is split: gather
     // request payload, run cycle, then re-enter with_app to inspect and resolve.
-    register_ui_fn(
-        &confirm_tbl,
-        "smelt.confirm",
+    m.fn_(
         "__back_tab",
         "smelt.confirm.__back_tab(handle_id) → bool. Cycles app mode and returns true if the new mode auto-allows the request. The with_app borrow must be released before calling back into Lua (smelt.mode.cycle re-enters with_app), so the body is split: gather request payload, run cycle, then re-enter with_app to inspect and resolve.",
         &["handle_id"],
-        lua,
-        |lua, handle_id: u64|  -> LuaResult<bool>{
+        |lua, handle_id: u64| -> LuaResult<bool> {
 
             let request: Option<(
                 u64,
@@ -101,19 +100,15 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
         },
     )?;
 
-    // smelt.confirm.__render_preview(buf_id, handle_id) → bool.
     // Calls the tool's `preview(args) -> smelt.layout` callback if registered, extracts
     // any buffer leaves from `app.ui`, then renders the layout into the dialog's
     // preview buffer at `term_width` cells. Returns false if the tool registered no
     // preview or the callback returned nil / an invalid value.
-    register_ui_fn(
-        &confirm_tbl,
-        "smelt.confirm",
+    m.fn_(
         "__render_preview",
         "smelt.confirm.__render_preview(buf_id, handle_id) → bool. Calls the tool's `preview(args) -> smelt.layout` callback if registered, then renders the returned layout into the dialog's preview buffer. Returns false if none registered or the callback returned nil.",
         &["buf_id", "handle_id"],
-        lua,
-        |_, (buf_id, handle_id): (u64, u64)|  -> LuaResult<bool>{
+        |_, (buf_id, handle_id): (u64, u64)| -> LuaResult<bool> {
 
             let req = match crate::lua::with_app(|app| {
                 app.core
@@ -134,14 +129,11 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
 
     // smelt.confirm.__resolve(handle_id, decision, message?).
     // `decision` matches the `confirm_resolved` cell lexicon. Removes the registry entry.
-    register_ui_fn(
-        &confirm_tbl,
-        "smelt.confirm",
+    m.fn_(
         "__resolve",
         "Final confirm pick. `decision` matches the `confirm_resolved` cell lexicon (`yes`, `no`, `always_session`, `always_workspace`, `always_pattern_*`, `always_dir_*`); `message` is an optional rejection note. Removes the registry entry and routes the choice through the engine.",
         &["handle_id", "decision", "message"],
-        lua,
-        |_, (handle_id, decision, message): (u64, String, Option<String>)|  -> LuaResult<()>{
+        |_, (handle_id, decision, message): (u64, String, Option<String>)| -> LuaResult<()> {
             crate::lua::with_app(|app| {
                 let entry = match app.core.confirms.take(handle_id) {
                     Some(e) => e,
@@ -164,7 +156,6 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
         },
     )?;
 
-    smelt.set("confirm", confirm_tbl)?;
     Ok(())
 }
 

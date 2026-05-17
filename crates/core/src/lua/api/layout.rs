@@ -4,8 +4,8 @@ use crate::buffer::BufId;
 use crate::content::block_layout::{
     BlockLayout, Constraint, DiffSpec, FileViewSpec, HboxItem, LuaLeaf,
 };
-use crate::lua::doc::register_fn;
-use lua_doc_derive::lua_module;
+use crate::lua::doc::Tier;
+use crate::lua::module::LuaMod;
 use mlua::prelude::*;
 
 pub struct LuaBlockLayout(pub BlockLayout);
@@ -58,33 +58,28 @@ fn collect_hbox_items(items: mlua::Table) -> LuaResult<Vec<HboxItem>> {
     Ok(out)
 }
 
-#[lua_module(
-    name = "smelt.layout",
-    doc = "Composable block layout (vbox/hbox/leaf) for tool render callbacks."
-)]
 pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
-    let layout_tbl = lua.create_table()?;
-    register_fn(
-        &layout_tbl,
-        "smelt.layout",
-        "leaf",
-        "Wrap a buffer id into a leaf block layout that renders the buffer's contents in place.",
-        &["buf_id"],
+    let m = LuaMod::under(
         lua,
+        smelt,
+        "layout",
+        "Composable block layout (vbox/hbox/leaf/diff/file_view) for tool render callbacks.",
+        Tier::Host,
+    )?;
+    m.fn_(
+        "leaf",
+        "Wrap a buffer id into a leaf block layout that renders the buffer's contents in place. (The TUI tier extends this to also accept a `Buf` userdata.)",
+        &["buf_id"],
         |_, buf_id: u64| -> LuaResult<LuaBlockLayout> {
             Ok(LuaBlockLayout(BlockLayout::Leaf(LuaLeaf::Buf(BufId(
                 buf_id,
             )))))
         },
     )?;
-
-    register_fn(
-        &layout_tbl,
-        "smelt.layout",
+    m.fn_(
         "diff",
-        "Inline-diff render directive — the worker renders the diff directly into the block buffer (no scratch buffer, no replay seam). `opts.old`, `opts.new` are the before/after strings; `opts.path` picks syntax via extension; `opts.anchor` (optional, defaults to `opts.old`) is the diff-view anchor; `opts.lang` overrides path-based syntax.",
+        "Inline-diff render directive — the worker renders the diff directly into the block buffer. `opts.old`, `opts.new` are the before/after strings; `opts.path` picks syntax via extension; `opts.anchor` (defaults to `opts.old`) is the diff-view anchor; `opts.lang` overrides path-based syntax.",
         &["opts"],
-        lua,
         |_, opts: mlua::Table| -> LuaResult<LuaBlockLayout> {
             let old: String = opts.get::<Option<String>>("old")?.unwrap_or_default();
             let new: String = opts.get::<Option<String>>("new")?.unwrap_or_default();
@@ -102,14 +97,10 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
             }))))
         },
     )?;
-
-    register_fn(
-        &layout_tbl,
-        "smelt.layout",
+    m.fn_(
         "file_view",
         "Syntax-highlighted file-view render directive — single line-number column, no diff bg. `opts.content` is the source text; `opts.path` picks syntax via extension; `opts.lang` overrides path-based syntax.",
         &["opts"],
-        lua,
         |_, opts: mlua::Table| -> LuaResult<LuaBlockLayout> {
             let content: String = opts.get::<Option<String>>("content")?.unwrap_or_default();
             let path: String = opts.get::<Option<String>>("path")?.unwrap_or_default();
@@ -123,35 +114,25 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
             ))))
         },
     )?;
-
-    register_fn(
-        &layout_tbl,
-        "smelt.layout",
+    m.fn_(
         "vbox",
-        "Stack `items` vertically into a single block layout. Each item must be a layout userdata produced by `layout.leaf`/`layout.vbox`/`layout.hbox`.",
+        "Stack `items` vertically into a single block layout. Each item must be a layout userdata produced by `layout.leaf`/`layout.vbox`/`layout.hbox`/`layout.diff`/`layout.file_view`.",
         &["items"],
-        lua,
         |_, items: mlua::Table| -> LuaResult<LuaBlockLayout> {
             Ok(LuaBlockLayout(BlockLayout::Vbox(collect_vbox_items(
                 items,
             )?)))
         },
     )?;
-
-    register_fn(
-        &layout_tbl,
-        "smelt.layout",
+    m.fn_(
         "hbox",
         "Lay `items` out horizontally. Each entry is either a layout userdata (defaults to fill weight 1) or `{ layout, cols=N }` / `{ layout, weight=N }` for a fixed-column or weighted slot.",
         &["items"],
-        lua,
-        |_, items: mlua::Table| {
+        |_, items: mlua::Table| -> LuaResult<LuaBlockLayout> {
             Ok(LuaBlockLayout(BlockLayout::Hbox(collect_hbox_items(
                 items,
             )?)))
         },
     )?;
-
-    smelt.set("layout", layout_tbl)?;
     Ok(())
 }

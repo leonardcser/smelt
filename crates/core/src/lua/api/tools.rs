@@ -1,10 +1,11 @@
 //! `smelt.tools` — register/unregister plugin tools and resolve their results to the engine.
 
 use super::{lua_table_to_args, lua_table_to_json};
-use crate::lua::doc::register_fn;
+use crate::lua::doc::Tier;
 use crate::lua::hooks::composite_off;
+use crate::lua::module::LuaMod;
 use crate::lua::{LuaHandle, LuaShared, ToolHandles};
-use lua_doc_derive::{lua_module, LuaAlias, LuaOpts};
+use lua_doc_derive::{LuaAlias, LuaOpts};
 use mlua::prelude::*;
 use std::sync::Arc;
 
@@ -97,21 +98,20 @@ pub struct LuaToolDef {
     pub override_core: bool,
 }
 
-#[lua_module(
-    name = "smelt.tools",
-    doc = "Register, unregister, and resolve plugin tools for the engine."
-)]
 pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) -> LuaResult<()> {
-    let tools_tbl = lua.create_table()?;
+    let m = LuaMod::under(
+        lua,
+        smelt,
+        "tools",
+        "Register, unregister, and resolve plugin tools for the engine.",
+        Tier::Host,
+    )?;
     {
         let s = shared.clone();
-        register_fn(
-            &tools_tbl,
-            "smelt.tools",
+        m.fn_(
             "register",
             "Register a plugin tool. See [`smelt.tools.ToolDef`](types.md#smelttoolstooldef) for every supported field; only `name` and `execute` are required.",
             &["def"],
-            lua,
             move |lua, def: LuaToolDef| -> LuaResult<()> {
                 let name = def.name;
                 let execute_handle = LuaHandle::from_func(lua, def.execute)?;
@@ -196,13 +196,10 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
     }
     {
         let s = shared.clone();
-        register_fn(
-            &tools_tbl,
-            "smelt.tools",
+        m.fn_(
             "unregister",
             "Unregister a previously-registered tool by `name`. Returns `true` if a tool was removed, `false` otherwise.",
             &["name"],
-            lua,
             move |_, name: String| -> LuaResult<bool> {
                 Ok(s.tools
                     .lock()
@@ -213,13 +210,10 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
     }
     {
         let s = shared.clone();
-        register_fn(
-            &tools_tbl,
-            "smelt.tools",
+        m.fn_(
             "list",
             "Return the names of every registered plugin tool, sorted.",
             &[],
-            lua,
             move |lua, ()| -> LuaResult<mlua::Table> {
                 let mut names: Vec<String> = s
                     .tools
@@ -237,9 +231,7 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
     }
     {
         let s = shared.clone();
-        register_fn(
-            &tools_tbl,
-            "smelt.tools",
+        m.fn_(
             "middleware",
             "Register middleware for tool `name`. Pass `\"\"` (empty string) as `name` to match every tool. \
 `mw` is a table of `{ before = fn?, after = fn? }`:\n\n\
@@ -247,7 +239,6 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
 - `after(args, ctx, result)` runs after the tool completes and may return `{ content, is_error }` to replace the result. NOTE: `after` currently only fires for tools that complete synchronously; yielding tools (most builtins) skip it until the task-runtime path is wired.\n\n\
 Hooks fire in registration order; an earlier hook's replacement is visible to later hooks. Returns an `off()` function that removes this middleware.",
             &["name", "mw"],
-            lua,
             move |lua, (name, mw): (String, mlua::Table)| -> LuaResult<mlua::Function> {
                 let before_fn: Option<mlua::Function> = mw.get("before").ok();
                 let after_fn: Option<mlua::Function> = mw.get("after").ok();
@@ -270,13 +261,10 @@ Hooks fire in registration order; an earlier hook's replacement is visible to la
             },
         )?;
     }
-    register_fn(
-        &tools_tbl,
-        "smelt.tools",
+    m.fn_(
         "resolve",
         "Resolve the pending tool call `call_id` from request `request_id` with `{ content, is_error }`. Sends a `ToolResult` back to the engine.",
         &["request_id", "call_id", "result"],
-        lua,
         |_, (request_id, call_id, result): (u64, String, mlua::Table)| -> LuaResult<()> {
             let content: String = result.get("content").unwrap_or_default();
             let is_error: bool = result.get("is_error").unwrap_or(false);
@@ -291,13 +279,10 @@ Hooks fire in registration order; an earlier hook's replacement is visible to la
             Ok(())
         },
     )?;
-    register_fn(
-        &tools_tbl,
-        "smelt.tools",
+    m.fn_(
         "__send_call",
         "Internal: forward a tool call invocation to the engine. Used by Lua wrappers to delegate to a core tool.",
         &["request_id", "parent_call_id", "tool_name", "args"],
-        lua,
         |lua,
          (request_id, parent_call_id, tool_name, args): (
             u64,
@@ -318,6 +303,5 @@ Hooks fire in registration order; an earlier hook's replacement is visible to la
             Ok(())
         },
     )?;
-    smelt.set("tools", tools_tbl)?;
     Ok(())
 }

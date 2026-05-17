@@ -1,8 +1,9 @@
 //! `smelt.vim` bindings — read and write the focused-pane `VimMode`.
 
-use lua_doc_derive::{lua_module, LuaAlias};
+use lua_doc_derive::LuaAlias;
 use mlua::prelude::*;
-use smelt_core::lua::doc::register_ui_fn;
+use smelt_core::lua::doc::Tier;
+use smelt_core::lua::module::LuaMod;
 
 /// Vim mode string literal.
 #[derive(Clone, Copy, Debug, LuaAlias)]
@@ -28,19 +29,18 @@ impl LuaVimMode {
     }
 }
 
-#[lua_module(
-    name = "smelt.vim",
-    doc = "Read and write the vim mode of the focused vim-enabled surface. UiHost-only."
-)]
 pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
-    let vim_tbl = lua.create_table()?;
-    register_ui_fn(
-        &vim_tbl,
-        "smelt.vim",
+    let m = LuaMod::under(
+        lua,
+        smelt,
+        "vim",
+        "Read and write the vim mode of the focused vim-enabled surface. UiHost-only.",
+        Tier::UiHost,
+    )?;
+    m.fn_(
         "mode",
         "Return the vim mode of the focused surface, or `nil` if it isn't vim-enabled.",
         &[],
-        lua,
         |_, ()| -> LuaResult<Option<LuaVimMode>> {
             Ok(
                 crate::lua::try_with_app(|app| app.focused_vim_mode().map(LuaVimMode::from))
@@ -48,13 +48,10 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
             )
         },
     )?;
-    register_ui_fn(
-        &vim_tbl,
-        "smelt.vim",
+    m.fn_(
         "set_mode",
         "Switch the vim mode of the focused vim-enabled window. Raises on unknown values.",
         &["mode"],
-        lua,
         |_, mode: LuaVimMode| -> LuaResult<()> {
             let target = mode.into();
             crate::lua::with_app(|app| {
@@ -63,6 +60,5 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
             Ok(())
         },
     )?;
-    smelt.set("vim", vim_tbl)?;
     Ok(())
 }

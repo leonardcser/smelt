@@ -2,28 +2,22 @@
 //! `smelt.model()` reads the active key, `smelt.model(v)` switches,
 //! `smelt.model.list()` returns the available models.
 
-use lua_doc_derive::lua_module;
 use mlua::prelude::*;
-use smelt_core::lua::doc::{record_module_doc, register_ui_fn};
+use smelt_core::lua::doc::Tier;
+use smelt_core::lua::module::LuaMod;
 
-#[lua_module(
-    name = "smelt.model",
-    doc = "Model selector. `smelt.model()` reads, `smelt.model(v)` switches, `smelt.model.list()` lists available models."
-)]
 pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
-    record_module_doc(
-        "smelt.model",
+    let m = LuaMod::under(
+        lua,
+        smelt,
+        "model",
         "Model selector. `smelt.model()` reads the active model key, `smelt.model(v)` switches, `smelt.model.list()` returns the available models.",
-    );
-
-    let model_tbl = lua.create_table()?;
-    register_ui_fn(
-        &model_tbl,
-        "smelt.model",
+        Tier::UiHost,
+    )?;
+    m.fn_(
         "list",
         "Return an array of `{ key, name, provider }` records for every model the active config can switch to.",
         &[],
-        lua,
         |lua, ()| -> LuaResult<mlua::Table> {
             let out = lua.create_table()?;
             if let Some(res) = crate::lua::try_with_app(|app| -> LuaResult<()> {
@@ -60,8 +54,6 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
     )?;
     let mt = lua.create_table()?;
     mt.set("__call", f)?;
-    model_tbl.set_metatable(Some(mt))?;
-
-    smelt.set("model", model_tbl)?;
+    m.tbl.set_metatable(Some(mt))?;
     Ok(())
 }

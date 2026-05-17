@@ -1,7 +1,7 @@
 //! `smelt.shell` — shell command splitting and interactive/background-operator validators.
 
-use crate::lua::doc::register_fn;
-use lua_doc_derive::lua_module;
+use crate::lua::doc::Tier;
+use crate::lua::module::LuaMod;
 use mlua::prelude::*;
 
 const INTERACTIVE_BINS: &[&str] = &[
@@ -51,29 +51,25 @@ fn check_shell_background_operator(command: &str) -> Option<String> {
     }
 }
 
-#[lua_module(
-    name = "smelt.shell",
-    doc = "Shell command splitting and interactive/background-operator validators."
-)]
 pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
-    let shell_tbl = lua.create_table()?;
-    register_fn(
-        &shell_tbl,
-        "smelt.shell",
+    let m = LuaMod::under(
+        lua,
+        smelt,
+        "shell",
+        "Shell command splitting and interactive/background-operator validators.",
+        Tier::Host,
+    )?;
+    m.fn_(
         "split",
         "Split `command` into the sequence of subcommands separated by shell operators (`;`, `&&`, `||`, `|`). Operators themselves are dropped.",
         &["command"],
-        lua,
         |_, command: String| Ok(crate::permissions::split_shell_commands(&command)),
     )?;
-    register_fn(
-        &shell_tbl,
-        "smelt.shell",
+    m.fn_(
         "split_with_ops",
         "Split `command` into subcommands and pair each with the operator that followed it. Returns rows of `{ command = string, op = string? }`.",
         &["command"],
-        lua,
-        |lua, command: String|  -> LuaResult<mlua::Table>{
+        |lua, command: String| -> LuaResult<mlua::Table> {
             let parts = crate::permissions::split_shell_commands_with_ops(&command);
             let out = lua.create_table()?;
             for (i, (cmd, op)) in parts.into_iter().enumerate() {
@@ -87,37 +83,27 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
             Ok(out)
         },
     )?;
-    register_fn(
-        &shell_tbl,
-        "smelt.shell",
+    m.fn_(
         "check_interactive",
         "Return a user-facing error message if `command` would invoke an interactive program (editor, REPL, pager, `git -i`, etc.), or `nil` if it is safe to run non-interactively.",
         &["command"],
-        lua,
         |_, command: String| Ok(check_interactive(&command).map(String::from)),
     )?;
-    register_fn(
-        &shell_tbl,
-        "smelt.shell",
+    m.fn_(
         "check_background_op",
         "Return a user-facing error message if `command` uses the shell `&` background operator, or `nil` otherwise.",
         &["command"],
-        lua,
         |_, command: String| Ok(check_shell_background_operator(&command)),
     )?;
-    register_fn(
-        &shell_tbl,
-        "smelt.shell",
+    m.fn_(
         "extract_paths",
         "Extract filesystem paths referenced by `command` for workspace permission checks.",
         &["command"],
-        lua,
         |_, command: String| -> LuaResult<Vec<String>> {
             Ok(crate::permissions::workspace::extract_paths_from_command(
                 &command,
             ))
         },
     )?;
-    smelt.set("shell", shell_tbl)?;
     Ok(())
 }

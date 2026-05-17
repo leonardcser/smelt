@@ -1,22 +1,21 @@
 //! `smelt.skills` — list/load skill content from the `SkillLoader` populated at startup.
 
-use crate::lua::doc::register_fn;
-use lua_doc_derive::lua_module;
+use crate::lua::doc::Tier;
+use crate::lua::module::LuaMod;
 use mlua::prelude::*;
 
-#[lua_module(
-    name = "smelt.skills",
-    doc = "List and load skill content from the SkillLoader populated at startup."
-)]
 pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
-    let tbl = lua.create_table()?;
-    register_fn(
-        &tbl,
-        "smelt.skills",
+    let m = LuaMod::under(
+        lua,
+        smelt,
+        "skills",
+        "List and load skill content from the SkillLoader populated at startup.",
+        Tier::Host,
+    )?;
+    m.fn_(
         "content",
         "Load the skill named `name` and return `(content, nil)` on success or `(nil, err_string)` if the skill is missing or failed to load.",
         &["name"],
-        lua,
         |_, name: String| -> LuaResult<(Option<String>, Option<String>)> {
             let resolved = crate::host::try_with_core(|core| {
                 core.skills.as_ref().map(|loader| loader.content(&name))
@@ -30,14 +29,11 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
         },
     )?;
 
-    register_fn(
-        &tbl,
-        "smelt.skills",
+    m.fn_(
         "list",
         "Return the names of every skill discovered by the loader as a Lua array. Empty when no skills are loaded.",
         &[],
-        lua,
-        |lua, ()|  -> LuaResult<mlua::Table>{
+        |lua, ()| -> LuaResult<mlua::Table> {
             let names: Vec<String> = crate::host::try_with_core(|core| {
                 core.skills
                     .as_ref()
@@ -53,6 +49,5 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
         },
     )?;
 
-    smelt.set("skills", tbl)?;
     Ok(())
 }

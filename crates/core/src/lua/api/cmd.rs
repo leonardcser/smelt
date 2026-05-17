@@ -1,9 +1,10 @@
 //! `smelt.cmd` — register/list slash commands. `run` is added by the TUI after host-API init.
 
-use crate::lua::doc::register_fn;
+use crate::lua::doc::Tier;
 use crate::lua::lua_type::LuaCallback;
+use crate::lua::module::LuaMod;
 use crate::lua::{LuaHandle, LuaShared, RegisteredCommand};
-use lua_doc_derive::{lua_module, LuaOpts};
+use lua_doc_derive::LuaOpts;
 use mlua::prelude::*;
 use std::sync::Arc;
 
@@ -26,21 +27,20 @@ pub struct LuaCmdRegisterOpts {
     pub hidden: Option<bool>,
 }
 
-#[lua_module(
-    name = "smelt.cmd",
-    doc = "Register and list slash commands. `cmd.run` is injected by the TUI layer so it can access the live app state."
-)]
 pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) -> LuaResult<()> {
-    let cmd_tbl = lua.create_table()?;
+    let m = LuaMod::under(
+        lua,
+        smelt,
+        "cmd",
+        "Register and list slash commands. `cmd.run` is injected by the TUI layer so it can access the live app state.",
+        Tier::Host,
+    )?;
     {
         let s = shared.clone();
-        register_fn(
-            &cmd_tbl,
-            "smelt.cmd",
+        m.fn_(
             "register",
             "Register a slash command `name` whose `handler` is invoked when the user runs it. `opts` accepts `desc`, `args`, `while_busy` (default `true`), `queue_when_busy` (default `false`), `startup_ok` (default `false`), and `hidden` (default `false`).",
             &["name", "handler", "opts"],
-            lua,
             move |lua,
                   (name, handler, opts): (
                 String,
@@ -70,13 +70,10 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
     }
     {
         let s = shared.clone();
-        register_fn(
-            &cmd_tbl,
-            "smelt.cmd",
+        m.fn_(
             "list",
             "Return every registered slash command as a Lua array of `{ name, desc, args, while_busy, queue_when_busy, startup_ok, hidden }` rows. Sorted by name.",
             &[],
-            lua,
             move |lua, ()| -> LuaResult<mlua::Table> {
                 struct Row {
                     name: String,
@@ -143,13 +140,10 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
     }
     {
         let s = shared.clone();
-        register_fn(
-            &cmd_tbl,
-            "smelt.cmd",
+        m.fn_(
             "unregister",
             "Drop the slash command `name` from the registry. Returns `true` if a command was removed, `false` if no command with that name existed.",
             &["name"],
-            lua,
             move |_, name: String| -> LuaResult<bool> {
                 Ok(s.commands
                     .lock()
@@ -158,6 +152,5 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
             },
         )?;
     }
-    smelt.set("cmd", cmd_tbl)?;
     Ok(())
 }

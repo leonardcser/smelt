@@ -4,7 +4,7 @@
 
 **Tier:** `UiHost` — Requires a terminal UI; calling these from headless mode raises.
 
-Overlay handle constructor. `smelt.overlay.new(opts)` returns an `Overlay` userdata.
+Overlay handle constructor. `smelt.overlay.new(opts)` opens an overlay from `opts.layout` (a `smelt.overlay.layout` userdata) and returns an `Overlay` userdata. `opts.name` opts the overlay into hot-reload survival. UiHost-only.
 
 ## `smelt.overlay.new`
 

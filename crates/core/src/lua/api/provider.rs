@@ -4,11 +4,12 @@ use mlua::prelude::*;
 use std::sync::Arc;
 
 use crate::config::{ModelConfig, ProviderConfig};
-use crate::lua::doc::register_fn;
+use crate::lua::doc::Tier;
 use crate::lua::hooks::composite_off;
 use crate::lua::lua_type::{LuaType, LuaTypeTuple};
+use crate::lua::module::LuaMod;
 use crate::lua::LuaShared;
-use lua_doc_derive::{lua_module, LuaOpts};
+use lua_doc_derive::LuaOpts;
 
 /// One model entry in a provider's `models` list. Plugin authors can
 /// pass either a bare model id string or a full table — the wrapper
@@ -112,21 +113,20 @@ pub struct LuaProviderConfig {
     pub models: Vec<LuaModelEntry>,
 }
 
-#[lua_module(
-    name = "smelt.provider",
-    doc = "List built-in model providers and register custom ones. Headless-safe."
-)]
 pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) -> LuaResult<()> {
-    let tbl = lua.create_table()?;
+    let m = LuaMod::under(
+        lua,
+        smelt,
+        "provider",
+        "List built-in model providers and register custom ones. Headless-safe.",
+        Tier::Host,
+    )?;
     {
         let shared = Arc::clone(shared);
-        register_fn(
-            &tbl,
-            "smelt.provider",
+        m.fn_(
             "register",
             "Declare a provider named `name`. Re-registering replaces the previous entry of the same name.",
             &["name", "cfg"],
-            lua,
             move |_lua, (name, cfg): (String, LuaProviderConfig)| -> LuaResult<()> {
                 let provider = ProviderConfig {
                     name: Some(name),
@@ -147,13 +147,10 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
 
     {
         let shared = Arc::clone(shared);
-        register_fn(
-            &tbl,
-            "smelt.provider",
+        m.fn_(
             "list",
             "Return every registered provider as an array of tables. Each entry has `name`, `type`, `api_base`, `api_key_env`, and a `models` array.",
             &[],
-            lua,
             move |lua, ()| -> LuaResult<mlua::Table> {
                 let providers = shared.providers.lock().unwrap_or_else(|e| e.into_inner());
                 let out = lua.create_table()?;
@@ -189,9 +186,7 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
 
     {
         let s = shared.clone();
-        register_fn(
-            &tbl,
-            "smelt.provider",
+        m.fn_(
             "middleware",
             "Register provider middleware. `mw` is a table of \
 `{ on_request = fn?, on_response = fn? }`:\n\n\
@@ -200,7 +195,6 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
 Hooks fire in registration order. Each hook sees the previous hook's replacement. Returns an `off()` function that removes this middleware.\n\n\
 For streaming observation use `smelt.cell(\"stream_delta\"):subscribe( ...)` — synchronous mutation of mid-stream tokens isn't safe because the parser owns the partial state.",
             &["mw"],
-            lua,
             move |lua, mw: mlua::Table| -> LuaResult<mlua::Function> {
                 let on_request: Option<mlua::Function> = mw.get("on_request").ok();
                 let on_response: Option<mlua::Function> = mw.get("on_response").ok();
@@ -224,6 +218,5 @@ For streaming observation use `smelt.cell(\"stream_delta\"):subscribe( ...)` —
         )?;
     }
 
-    smelt.set("provider", tbl)?;
     Ok(())
 }

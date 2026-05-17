@@ -2,9 +2,10 @@
 //! rules, sync a Lua-built ruleset back through the App. Sits over
 //! `RuntimeApprovals` + [`crate::permissions::store`].
 
-use lua_doc_derive::{lua_module, LuaOpts};
+use lua_doc_derive::LuaOpts;
 use mlua::prelude::*;
-use smelt_core::lua::doc::register_ui_fn;
+use smelt_core::lua::doc::Tier;
+use smelt_core::lua::module::LuaMod;
 use std::sync::Arc;
 
 /// A single session permission entry (one approved tool/pattern pair).
@@ -108,24 +109,23 @@ pub struct LuaPermissionRulesSpec {
     pub yolo: Option<LuaModePerms>,
 }
 
-#[lua_module(
-    name = "smelt.permissions",
-    doc = "List session/workspace rules and sync a Lua-built ruleset back through the App. UiHost-only."
-)]
 pub(super) fn register(
     lua: &Lua,
     smelt: &mlua::Table,
     shared: &Arc<crate::lua::LuaShared>,
 ) -> LuaResult<()> {
-    let permissions_tbl = lua.create_table()?;
-    register_ui_fn(
-        &permissions_tbl,
-        "smelt.permissions",
+    let m = LuaMod::under(
+        lua,
+        smelt,
+        "permissions",
+        "List session/workspace rules and sync a Lua-built ruleset back through the App. UiHost-only.",
+        Tier::UiHost,
+    )?;
+    m.fn_(
         "list",
         "Return current permission rules as `{ session = { { tool, pattern } }, workspace = { { tool, patterns } } }`. Session entries come from runtime approvals; workspace entries come from the on-disk store rooted at the current cwd.",
         &[],
-        lua,
-        |lua, ()|  -> LuaResult<mlua::Table>{
+        |lua, ()| -> LuaResult<mlua::Table> {
             let (session_entries, cwd) = crate::lua::try_with_app(|app| {
                 let entries = app
                     .session_permission_entries()
@@ -162,13 +162,10 @@ pub(super) fn register(
             Ok(out)
         },
     )?;
-    register_ui_fn(
-        &permissions_tbl,
-        "smelt.permissions",
+    m.fn_(
         "sync",
         "Replace runtime + workspace permission entries with `spec.session` and `spec.workspace`. Persists workspace rules to disk; session rules apply for this run only.",
         &["spec"],
-        lua,
         |_, spec: LuaPermissionSyncSpec| -> LuaResult<()> {
             let session_entries: Vec<smelt_core::PermissionEntry> = spec
                 .session
@@ -192,13 +189,10 @@ pub(super) fn register(
     )?;
     {
         let shared = Arc::clone(shared);
-        register_ui_fn(
-            &permissions_tbl,
-            "smelt.permissions",
+        m.fn_(
             "set_rules",
             "Install the per-mode permission ruleset. See [`smelt.permissions.RulesSpec`](types.md#smeltpermissionsrulesspec).",
             &["spec"],
-            lua,
             move |_, spec: LuaPermissionRulesSpec| -> LuaResult<()> {
                 let rules = crate::permissions::rules::RawPerms {
                     default: spec.default.map(Into::into).unwrap_or_default(),
@@ -217,13 +211,10 @@ pub(super) fn register(
         )?;
     }
     // Decision primitives for tool `decide` callbacks. Returns "allow"/"ask"/"deny".
-    register_ui_fn(
-        &permissions_tbl,
-        "smelt.permissions",
+    m.fn_(
         "check_tool",
         "Decision primitives for tool `decide` callbacks. Returns \"allow\"/\"ask\"/\"deny\".",
         &["mode_str", "name"],
-        lua,
         |_, (mode_str, name): (String, String)| -> LuaResult<String> {
             Ok(crate::lua::try_with_app(|app| {
                 let mode = parse_mode(&mode_str);
@@ -232,14 +223,11 @@ pub(super) fn register(
             .unwrap_or_else(|| "ask".to_string()))
         },
     )?;
-    register_ui_fn(
-        &permissions_tbl,
-        "smelt.permissions",
+    m.fn_(
         "check",
         "Decide a subcommand bucket (e.g. `(\"normal\", \"shell\", \"git status\")`) against the current ruleset. Returns `\"allow\"`, `\"ask\"`, or `\"deny\"`; defaults to `\"ask\"` when no app context is available.",
         &["mode_str", "bucket", "value"],
-        lua,
-        |_, (mode_str, bucket, value): (String, String, String)|  -> LuaResult<String>{
+        |_, (mode_str, bucket, value): (String, String, String)| -> LuaResult<String> {
             Ok(crate::lua::try_with_app(|app| {
                 let mode = parse_mode(&mode_str);
                 decision_label(app.core.permissions.check_subcommand(mode, &bucket, &value))
@@ -249,7 +237,6 @@ pub(super) fn register(
         },
     )?;
 
-    smelt.set("permissions", permissions_tbl)?;
     Ok(())
 }
 
