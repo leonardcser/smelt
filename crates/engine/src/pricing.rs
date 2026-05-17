@@ -146,32 +146,46 @@ async fn load_or_fetch(client: &reqwest::Client) -> HashMap<(String, String), Mo
 }
 
 fn parse_catalog(json: &str) -> Option<HashMap<(String, String), ModelPricing>> {
-    let root: serde_json::Value = serde_json::from_str(json).ok()?;
-    let obj = root.as_object()?;
+    // Typed deserialization to skip building a `serde_json::Value` tree for
+    // the entire ~50 KB response. Unknown fields on providers/models are
+    // ignored automatically.
+    #[derive(serde::Deserialize)]
+    struct CatalogProvider {
+        #[serde(default)]
+        models: HashMap<String, CatalogModel>,
+    }
+    #[derive(serde::Deserialize)]
+    struct CatalogModel {
+        cost: Option<CatalogCost>,
+    }
+    // `Option<f64>` (not `#[serde(default)] f64`) so a stray null / string for any single
+    // cost field doesn't fail the whole catalog — fall back to 0.0 per field, matching
+    // the prior `Value::as_f64().unwrap_or(0.0)` semantics.
+    #[derive(serde::Deserialize)]
+    struct CatalogCost {
+        input: Option<f64>,
+        output: Option<f64>,
+        cache_read: Option<f64>,
+        cache_write: Option<f64>,
+    }
+
+    let root: HashMap<String, CatalogProvider> = serde_json::from_str(json).ok()?;
     let mut map = HashMap::new();
-    for (provider, provider_val) in obj {
-        let models = provider_val.get("models").and_then(|m| m.as_object());
-        let models = match models {
-            Some(m) => m,
-            None => continue,
-        };
-        for (model_id, model_val) in models {
-            let cost = match model_val.get("cost") {
-                Some(c) => c,
-                None => continue,
-            };
-            let input = cost["input"].as_f64().unwrap_or(0.0);
-            let output = cost["output"].as_f64().unwrap_or(0.0);
+    for (provider, provider_val) in root {
+        for (model_id, model_val) in provider_val.models {
+            let Some(cost) = model_val.cost else { continue };
+            let input = cost.input.unwrap_or(0.0);
+            let output = cost.output.unwrap_or(0.0);
             if input == 0.0 && output == 0.0 {
                 continue;
             }
             map.insert(
-                (provider.clone(), model_id.clone()),
+                (provider.clone(), model_id),
                 ModelPricing {
                     input,
                     output,
-                    cache_read: cost["cache_read"].as_f64().unwrap_or(0.0),
-                    cache_write: cost["cache_write"].as_f64().unwrap_or(0.0),
+                    cache_read: cost.cache_read.unwrap_or(0.0),
+                    cache_write: cost.cache_write.unwrap_or(0.0),
                 },
             );
         }
