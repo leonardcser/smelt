@@ -78,7 +78,7 @@ impl PromptState {
             }
             vim::Action::HistoryPrev => {
                 if let Some(entry) = history.as_deref_mut().and_then(|h| h.up(ctx.buf.source())) {
-                    let text = entry.to_string();
+                    let text = entry.replace(super::ATTACHMENT_MARKER, "");
                     self.install_source(ctx, text, 0);
                     self.sync_completer(ctx.as_ref());
                 }
@@ -86,7 +86,7 @@ impl PromptState {
             }
             vim::Action::HistoryNext => {
                 if let Some(entry) = history.as_deref_mut().and_then(|h| h.down()) {
-                    let s = entry.to_string();
+                    let s = entry.replace(super::ATTACHMENT_MARKER, "");
                     let cpos = s.len();
                     self.install_source(ctx, s, cpos);
                     self.sync_completer(ctx.as_ref());
