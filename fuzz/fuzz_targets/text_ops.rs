@@ -18,20 +18,29 @@
 use arbitrary::Arbitrary;
 use libfuzzer_sys::fuzz_target;
 use smelt_buffer::text::{
-    byte_of_char, byte_to_cell, cell_to_byte, char_pos, line_start_offsets, next_char_boundary,
-    prev_char_boundary, insert, insert_str, replace_range, slice, snap,
+    byte_of_char, byte_to_cell, cell_to_byte, char_pos, insert, insert_str, line_start_offsets,
+    next_char_boundary, prev_char_boundary, replace_range, slice, snap,
 };
 
 #[derive(Arbitrary, Debug)]
 enum TextOp {
     /// Snap an offset, then check `snap(s, snap(s, x)) == snap(s, x)`.
-    Snap { pos: u32 },
+    Snap {
+        pos: u32,
+    },
     /// `prev_char_boundary` must be ≤ pos and on a boundary.
-    Prev { pos: u32 },
+    Prev {
+        pos: u32,
+    },
     /// `next_char_boundary` must be ≥ pos and on a boundary.
-    Next { pos: u32 },
+    Next {
+        pos: u32,
+    },
     /// `slice` must not panic; returned slice must be a substring.
-    Slice { start: u32, end: u32 },
+    Slice {
+        start: u32,
+        end: u32,
+    },
     /// `replace_range` must contain the replacement at the snapped start.
     Replace {
         start: u32,
@@ -39,15 +48,29 @@ enum TextOp {
         with: String,
     },
     /// `insert` returns the insertion offset on a boundary.
-    InsertChar { pos: u32, ch: u32 },
+    InsertChar {
+        pos: u32,
+        ch: u32,
+    },
     /// `insert_str` returns the insertion offset on a boundary.
-    InsertStr { pos: u32, s: String },
+    InsertStr {
+        pos: u32,
+        s: String,
+    },
     /// `byte_to_cell` ↔ `cell_to_byte` round-trip on a single line.
-    ByteCell { byte: u32 },
-    CellByte { cell: u32 },
+    ByteCell {
+        byte: u32,
+    },
+    CellByte {
+        cell: u32,
+    },
     /// `char_pos` ↔ `byte_of_char` round-trip.
-    CharPosOfByte { byte: u32 },
-    ByteOfChar { idx: u32 },
+    CharPosOfByte {
+        byte: u32,
+    },
+    ByteOfChar {
+        idx: u32,
+    },
 }
 
 #[derive(Arbitrary, Debug)]
@@ -100,10 +123,7 @@ fn run(initial: String, ops: Vec<TextOp>) {
                 let with_clone = with.clone();
                 replace_range(&mut s, (start as usize)..(end as usize), &with);
                 if !with_clone.is_empty() {
-                    assert!(
-                        s.contains(&with_clone),
-                        "replace_range dropped replacement"
-                    );
+                    assert!(s.contains(&with_clone), "replace_range dropped replacement");
                 }
             }
             TextOp::InsertChar { pos, ch } => {

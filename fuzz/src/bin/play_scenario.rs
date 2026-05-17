@@ -11,7 +11,7 @@
 
 use crossterm::cursor::MoveTo;
 use crossterm::event::{self, Event, KeyCode, KeyModifiers};
-use crossterm::style::{Print, ResetColor, SetAttribute, Attribute};
+use crossterm::style::{Attribute, Print, ResetColor, SetAttribute};
 use crossterm::terminal::{
     self, disable_raw_mode, enable_raw_mode, Clear, ClearType, EnterAlternateScreen,
     LeaveAlternateScreen,
@@ -217,5 +217,8 @@ fn op_label(op: &smelt_fuzz::FuzzOp) -> String {
         EngineShutdown { .. } => "shutdown".into(),
         InsertAttachment { label } => format!("insert attachment {label}"),
         TogglePaneFocus => "toggle pane focus".into(),
+        EngineToolArgsDelta { tool_name, .. } => format!("tool args delta {tool_name}"),
+        EngineBtwResponse { .. } => "btw response".into(),
+        EngineAskResponse { id, .. } => format!("ask response {id}"),
     }
 }

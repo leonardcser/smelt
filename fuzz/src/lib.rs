@@ -9,10 +9,10 @@ use crossterm::event::{
     Event as TermEvent, KeyCode, KeyEvent, KeyEventKind, KeyEventState, KeyModifiers, MouseButton,
     MouseEvent, MouseEventKind,
 };
+use protocol::UiCommand;
 use protocol::{AgentMode, Content, EngineEvent, Message, TokenUsage, ToolOutcome};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use protocol::UiCommand;
 use tui::app::test_harness::{Action, AllocBudget, SourceEvent};
 
 pub use tui::app::test_harness::TestApp;
@@ -47,7 +47,9 @@ impl<'a> Arbitrary<'a> for ArgsBag {
 
 fn arb_short_string(u: &mut Unstructured<'_>, max_bytes: usize) -> arbitrary::Result<String> {
     let len = u.int_in_range(0..=max_bytes)?;
-    let bytes: Vec<u8> = (0..len).map(|_| u.arbitrary::<u8>()).collect::<Result<_, _>>()?;
+    let bytes: Vec<u8> = (0..len)
+        .map(|_| u.arbitrary::<u8>())
+        .collect::<Result<_, _>>()?;
     Ok(String::from_utf8_lossy(&bytes).into_owned())
 }
 
@@ -163,7 +165,10 @@ pub enum FuzzOp {
     /// Wake any pending Lua callbacks.
     LuaWakeup,
     /// Terminal resize, clamped to `[1, 400]` per dimension.
-    Resize { w: u16, h: u16 },
+    Resize {
+        w: u16,
+        h: u16,
+    },
 
     /// Synthesize an active agent turn so subsequent engine events flow
     /// through the active-turn dispatch path.
@@ -523,19 +528,27 @@ enum PostCheck {
     ThinkingFlushed,
     /// `ToolStarted` flushes streaming text + thinking and adds `call_id`
     /// to pending.
-    ToolStarted { call_id: String },
+    ToolStarted {
+        call_id: String,
+    },
     /// `ToolOutput` for an already-pending `call_id` is a pure append to
     /// that tool's output; the pending entry stays put.
-    ToolOutput { call_id: String },
+    ToolOutput {
+        call_id: String,
+    },
     /// `ToolFinished` clears `call_id` from pending — but only verifiable
     /// when it was actually present beforehand.
-    ToolFinished { call_id: String },
+    ToolFinished {
+        call_id: String,
+    },
     /// `ExecDone` runs `finalize_exec`, which clears `stream_exec_id`.
     ExecCleared,
     /// `CompactionComplete` with `msg_count` messages. When the pre-state
     /// had a matching compact epoch and `msg_count > 0`, the apply path
     /// must replace `session.messages` and drain all snapshot vectors.
-    CompactionApplied { msg_count: usize },
+    CompactionApplied {
+        msg_count: usize,
+    },
     /// `TurnComplete` against the active turn. Non-empty messages replace
     /// session.messages; an active turn ends.
     TurnCompleted {
@@ -546,7 +559,9 @@ enum PostCheck {
     TurnErrored,
     /// `Steered`. Active-turn dispatch flushes streams and drains up to
     /// `count` queued messages.
-    Steered { count: usize },
+    Steered {
+        count: usize,
+    },
     /// `Retrying`. Active-turn dispatch moves working into `Retrying`
     /// phase (still animating).
     Retrying,
@@ -566,7 +581,10 @@ enum PostCheck {
         targeted_active: bool,
     },
     /// `TitleGenerated` only applies when `pending_title` was set.
-    TitleApplied { title: String, slug: String },
+    TitleApplied {
+        title: String,
+        slug: String,
+    },
     /// `RequestPermission` against an active turn lands on exactly one of
     /// three branches: auto-approve (one new `PermissionDecision`,
     /// no new confirm), defer (one new `pending_dialogs` entry, no new
@@ -576,7 +594,10 @@ enum PostCheck {
     /// Approving / denying a confirm consumes one pending entry and queues
     /// a `PermissionDecision`. Approve never ends the turn; deny without a
     /// message ends it.
-    ConfirmResolved { approved: bool, had_message: bool },
+    ConfirmResolved {
+        approved: bool,
+        had_message: bool,
+    },
     /// `ToolDispatch` with an unregistered tool produces exactly one
     /// `ToolResult` UiCommand (the synthetic error path). With a real Lua
     /// tool registered it could yield `Pending` instead, but the harness
@@ -685,10 +706,7 @@ fn run_check(check: PostCheck, pre: &Snapshot, post: &Snapshot, new_actions: &[A
         }
         PostCheck::TurnErrored => {
             if pre.agent_running {
-                assert!(
-                    !post.agent_running,
-                    "TurnError did not end the active turn",
-                );
+                assert!(!post.agent_running, "TurnError did not end the active turn",);
             }
         }
         PostCheck::TokenUsageReceived {
@@ -869,7 +887,11 @@ fn run_check(check: PostCheck, pre: &Snapshot, post: &Snapshot, new_actions: &[A
                     assert!(
                         post.agent_running,
                         "{} ended the turn unexpectedly",
-                        if approved { "Approve" } else { "Deny with message" },
+                        if approved {
+                            "Approve"
+                        } else {
+                            "Deny with message"
+                        },
                     );
                 }
             }
@@ -901,10 +923,7 @@ fn run_check(check: PostCheck, pre: &Snapshot, post: &Snapshot, new_actions: &[A
         }
         PostCheck::ShutdownReceived => {
             if pre.agent_running {
-                assert!(
-                    !post.agent_running,
-                    "Shutdown did not end the active turn",
-                );
+                assert!(!post.agent_running, "Shutdown did not end the active turn",);
             }
         }
         PostCheck::CompactionApplied { msg_count } => {
@@ -998,7 +1017,10 @@ fn plan(op: FuzzOp) -> (Option<SourceEvent>, PostCheck) {
                 PostCheck::None,
             )
         }
-        FuzzOp::Paste(s) => (Some(SourceEvent::Term(TermEvent::Paste(s))), PostCheck::None),
+        FuzzOp::Paste(s) => (
+            Some(SourceEvent::Term(TermEvent::Paste(s))),
+            PostCheck::None,
+        ),
         FuzzOp::Mouse(m) => {
             let ev = MouseEvent {
                 kind: decode_mouse_kind(m.kind, m.button),
@@ -1022,7 +1044,10 @@ fn plan(op: FuzzOp) -> (Option<SourceEvent>, PostCheck) {
         ),
         // Side-channel: not a SourceEvent.
         FuzzOp::StartTurn(_) => (None, PostCheck::None),
-        FuzzOp::EngineReady => (Some(SourceEvent::Engine(EngineEvent::Ready)), PostCheck::None),
+        FuzzOp::EngineReady => (
+            Some(SourceEvent::Engine(EngineEvent::Ready)),
+            PostCheck::None,
+        ),
         FuzzOp::EngineText(s) => (
             Some(SourceEvent::Engine(EngineEvent::Text { content: s })),
             PostCheck::TextFlushed,
@@ -1228,7 +1253,9 @@ fn plan(op: FuzzOp) -> (Option<SourceEvent>, PostCheck) {
             (Some(ev), PostCheck::ShutdownReceived)
         }
         FuzzOp::InsertAttachment { .. } | FuzzOp::TogglePaneFocus => {
-            unreachable!("InsertAttachment / TogglePaneFocus side channels handled inline in apply()")
+            unreachable!(
+                "InsertAttachment / TogglePaneFocus side channels handled inline in apply()"
+            )
         }
         FuzzOp::EngineToolArgsDelta {
             call_id,
