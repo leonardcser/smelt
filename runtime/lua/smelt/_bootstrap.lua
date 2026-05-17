@@ -115,11 +115,12 @@ function smelt.task.timeout(ms, fn)
   return payload.result, nil
 end
 
--- Run `fns` concurrently; first to return wins. Returns
--- `{ index, result }` of the winner; all others are cancelled. Errors
--- from any branch propagate (losers cancelled first). Must run inside
--- a yielding context.
--- @sig fun(...: fun(): any): { index: integer, result: any }
+-- Run `fns` concurrently; first to return wins. Returns the winner's
+-- `(index, result)` as multi-value, mirroring `task.timeout`'s
+-- `(value, err)` shape. All other branches are cancelled. Errors from
+-- any branch propagate (losers cancelled first). Must run inside a
+-- yielding context.
+-- @sig fun(...: fun(): any): integer, any
 function smelt.task.race(...)
   require_yieldable("smelt.task.race")
   local fns = { ... }
@@ -140,7 +141,7 @@ function smelt.task.race(...)
     end
   end)
   if payload.error then error(payload.error, 2) end
-  return { index = payload.index, result = payload.result }
+  return payload.index, payload.result
 end
 
 -- Run `fns` concurrently; wait for all to finish. Returns an array of

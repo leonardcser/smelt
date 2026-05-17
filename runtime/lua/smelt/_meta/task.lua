@@ -27,11 +27,12 @@ task.alloc = nil
 ---@type fun(start: fun(id: integer)): any
 task.external = nil
 
---- Run `fns` concurrently; first to return wins. Returns
---- `{ index, result }` of the winner; all others are cancelled. Errors
---- from any branch propagate (losers cancelled first). Must run inside
---- a yielding context.
----@type fun(...: fun(): any): { index: integer, result: any }
+--- Run `fns` concurrently; first to return wins. Returns the winner's
+--- `(index, result)` as multi-value, mirroring `task.timeout`'s
+--- `(value, err)` shape. All other branches are cancelled. Errors from
+--- any branch propagate (losers cancelled first). Must run inside a
+--- yielding context.
+---@type fun(...: fun(): any): integer, any
 task.race = nil
 
 --- Resume the yielded task `id` with `value`. The runtime delivers `value` as the return of the matching `coroutine.yield`.

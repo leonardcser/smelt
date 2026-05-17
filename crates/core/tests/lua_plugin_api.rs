@@ -187,12 +187,12 @@ fn task_race_returns_first_to_finish() {
         .load(
             r#"
             smelt.spawn(function()
-                local winner = smelt.task.race(
+                local idx, val = smelt.task.race(
                     function() smelt.sleep(100); return "slow" end,
                     function() smelt.sleep(5);   return "fast" end
                 )
-                INDEX = winner.index
-                RESULT = winner.result
+                INDEX = idx
+                RESULT = val
                 DONE = true
             end)
             "#,
