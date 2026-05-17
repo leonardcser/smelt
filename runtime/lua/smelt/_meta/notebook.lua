@@ -19,7 +19,7 @@ notebook.is_notebook_path = nil
 ---@type fun(json: string): table?, string?
 notebook.parse = nil
 
---- Compute the preview payload for an `edit_notebook` call. Returns `nil` when the notebook can't be read/parsed or the target cell is out of range. The returned table has `{ edit_mode, path, title, old_source, new_source, syntax_ext }` — `title` is the formatted header (`"insert cell 3 [py]"` etc.), `syntax_ext` is the extension for syntax-highlighting the body (`"py"` / `"md"`).
+--- Compute the preview payload for an `edit_notebook` call. Returns `nil` when the notebook can't be read/parsed or the target cell is out of range. The returned table has `{ edit_mode, path, title, old_source, new_source, syntax_ext }`.
 ---@type fun(args: table): table?
 notebook.preview_data = nil
 

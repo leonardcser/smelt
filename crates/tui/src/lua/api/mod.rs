@@ -109,7 +109,6 @@ impl LuaRuntime {
             },
         )?;
 
-
         // Cross-cutting UiHost-tier additions to host modules.
         let cmd_tbl: mlua::Table = smelt.get("cmd")?;
         LuaMod::extend(lua, cmd_tbl, "smelt.cmd", Tier::UiHost).fn_(

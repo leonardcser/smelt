@@ -7,17 +7,4 @@
 ---@class smelt.confirm
 local confirm = {}
 
---- smelt.confirm._back_tab(handle_id) → bool. Cycles app mode and returns true if the new mode auto-allows the request. The with_app borrow must be released before calling back into Lua (smelt.mode.cycle re-enters with_app), so the body is split: gather request payload, run cycle, then re-enter with_app to inspect and resolve.
----@see smelt.mode.cycle
----@type fun(handle_id: integer): boolean
-confirm._back_tab = nil
-
---- smelt.confirm._render_preview(buf_id, handle_id) → bool. Calls the tool's `preview(args) -> smelt.layout` callback if registered, then renders the returned layout into the dialog's preview buffer. Returns false if none registered or the callback returned nil.
----@type fun(buf_id: integer, handle_id: integer): boolean
-confirm._render_preview = nil
-
---- Final confirm pick. `decision` matches the `confirm_resolved` cell lexicon (`yes`, `no`, `always_session`, `always_workspace`, `always_pattern_*`, `always_dir_*`); `message` is an optional rejection note. Removes the registry entry and routes the choice through the engine.
----@type fun(handle_id: integer, decision: string, message: string?): nil
-confirm._resolve = nil
-
 return confirm

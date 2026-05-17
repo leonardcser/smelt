@@ -4,7 +4,7 @@
 
 Reference for every namespace exposed under the global `smelt` table. Signatures are derived from the Rust closure's argument tuple and return type, so the LuaCATS-style annotation always matches what mlua actually marshals.
 
-**Coverage:** 58 namespace(s), 217 function(s), 27 class(es), 9 alias(es).
+**Coverage:** 59 namespace(s), 228 function(s), 27 class(es), 9 alias(es).
 
 ## IDE completion
 
@@ -20,14 +20,15 @@ Available in every runtime, including headless mode.
 - [`smelt.clipboard`](clipboard.md) — 2 function(s)
 - [`smelt.cmd`](cmd.md) — 4 function(s)
 - [`smelt.frontend`](frontend.md) — 2 function(s)
-- [`smelt.fs`](fs.md) — 21 function(s)
+- [`smelt.fs`](fs.md) — 18 function(s)
+- [`smelt.fs.file_state`](fs_file_state.md) — 6 function(s)
 - [`smelt.fuzzy`](fuzzy.md) — 2 function(s)
 - [`smelt.grep`](grep.md) — 1 function(s)
 - [`smelt.html`](html.md) — 5 function(s)
 - [`smelt.http`](http.md) — 3 function(s)
 - [`smelt.http.cache`](http_cache.md) — 2 function(s)
 - [`smelt.image`](image.md) — 3 function(s)
-- [`smelt.layout`](layout.md) — 5 function(s)
+- [`smelt.layout`](layout.md) — 7 function(s)
 - [`smelt.mcp`](mcp.md) — 4 function(s)
 - [`smelt.messages`](messages.md) — 6 function(s)
 - [`smelt.mode`](mode.md) — 1 function(s)
@@ -35,60 +36,46 @@ Available in every runtime, including headless mode.
 - [`smelt.parse`](parse.md) — 1 function(s)
 - [`smelt.path`](path.md) — 12 function(s)
 - [`smelt.perf`](perf.md) — 1 function(s)
-- [`smelt.process`](process.md) — 8 function(s)
+- [`smelt.process`](process.md) — 9 function(s)
 - [`smelt.provider`](provider.md) — 3 function(s)
 - [`smelt.reasoning`](reasoning.md) — 1 function(s)
+- [`smelt.reg`](reg.md) — 2 function(s)
 - [`smelt.shell`](shell.md) — 5 function(s)
 - [`smelt.skills`](skills.md) — 2 function(s)
-- [`smelt.task`](task.md) — 2 function(s)
+- [`smelt.state`](state.md) — 1 function(s)
+- [`smelt.task`](task.md) — 7 function(s)
 - [`smelt.timer`](timer.md) — 2 function(s)
-- [`smelt.tools`](tools.md) — 6 function(s)
+- [`smelt.tools`](tools.md) — 7 function(s)
 - [`smelt.trust`](trust.md) — 2 function(s)
 
 ## UiHost namespaces
 
 Requires a terminal UI; calling these from headless mode raises.
 
-- [`smelt`](index_smelt.md) — 4 function(s)
+- [`smelt`](index_smelt.md) — 5 function(s)
 - [`smelt.buf`](buf.md) — 1 function(s)
-- [`smelt.confirm`](confirm.md) — 3 function(s)
-<<<<<<< HEAD
-- [`smelt.diff`](diff.md) — 1 function(s)
-||||||| parent of 268b411e (feat(lua): collapse render APIs into smelt.render namespace)
-- [`smelt.diff`](diff.md) — 2 function(s)
-=======
->>>>>>> 268b411e (feat(lua): collapse render APIs into smelt.render namespace)
 - [`smelt.engine`](engine.md) — 7 function(s)
 - [`smelt.history`](history.md) — 2 function(s)
 - [`smelt.keymap`](keymap.md) — 4 function(s)
 - [`smelt.metrics`](metrics.md) — 2 function(s)
 - [`smelt.metrics.perf`](metrics_perf.md) — 3 function(s)
 - [`smelt.model`](model.md) — 1 function(s)
-- [`smelt.notebook`](notebook.md) — 4 function(s)
+- [`smelt.notebook`](notebook.md) — 5 function(s)
+- [`smelt.notify`](notify.md) — 1 function(s)
 - [`smelt.overlay`](overlay.md) — 1 function(s)
+- [`smelt.overlay.layout`](overlay_layout.md) — 3 function(s)
 - [`smelt.paint`](paint.md) — 2 function(s)
 - [`smelt.permissions`](permissions.md) — 5 function(s)
-- [`smelt.picker`](picker.md) — 1 function(s)
+- [`smelt.picker`](picker.md) — 2 function(s)
 - [`smelt.prompt`](prompt.md) — 5 function(s)
-- [`smelt.render`](render.md) — 7 function(s)
+- [`smelt.prompt.ghost`](prompt_ghost.md) — 2 function(s)
+- [`smelt.render`](render.md) — 4 function(s)
 - [`smelt.session`](session.md) — 16 function(s)
-- [`smelt.settings`](settings.md) — 3 function(s)
+- [`smelt.spinner`](spinner.md) — 2 function(s)
 - [`smelt.statusline`](statusline.md) — 3 function(s)
-<<<<<<< HEAD
-- [`smelt.syntax`](syntax.md) — 1 function(s)
-- [`smelt.text`](text.md) — 2 function(s)
-||||||| parent of 268b411e (feat(lua): collapse render APIs into smelt.render namespace)
-- [`smelt.syntax`](syntax.md) — 2 function(s)
-- [`smelt.text`](text.md) — 2 function(s)
-=======
 - [`smelt.text`](text.md) — 1 function(s)
->>>>>>> 268b411e (feat(lua): collapse render APIs into smelt.render namespace)
-- [`smelt.theme`](theme.md) — 6 function(s)
+- [`smelt.theme`](theme.md) — 7 function(s)
 - [`smelt.transcript`](transcript.md) — 1 function(s)
-- [`smelt.ui`](ui.md) — 2 function(s)
-- [`smelt.ui.ghost`](ui_ghost.md) — 2 function(s)
-- [`smelt.ui.layout`](ui_layout.md) — 3 function(s)
-- [`smelt.ui.spinner`](ui_spinner.md) — 2 function(s)
 - [`smelt.vim`](vim.md) — 2 function(s)
 - [`smelt.win`](win.md) — 1 function(s)
 
