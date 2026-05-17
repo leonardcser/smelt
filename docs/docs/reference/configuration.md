@@ -115,16 +115,18 @@ models default to zero cost.
 Model resolution follows this precedence:
 
 1. `--model` CLI flag
-2. Last used model (cached from previous session)
-3. First model in the providers list
+2. `smelt.defaults{ model = "..." }` in `init.lua`
+3. Last explicitly chosen model (cached from previous session)
+4. First model in the providers list
 
 Switch models at runtime with `/model`. The choice is persisted in
-`state.json` and restored on next launch.
+`state.json` and restored on next launch unless `smelt.defaults` pins one.
 
 ## Modes and Reasoning
 
-Starting mode and reasoning effort can be set via CLI flags. Both are
-toggleable at runtime: `Shift+Tab` cycles modes, `Ctrl+T` cycles reasoning.
+Starting mode and reasoning effort can be set via CLI flags or in
+`init.lua`. Both are toggleable at runtime: `Shift+Tab` cycles modes,
+`Ctrl+T` cycles reasoning.
 
 | CLI flag                     | Description                                               |
 | ---------------------------- | --------------------------------------------------------- |
@@ -145,6 +147,20 @@ effort is always included in the cycle.
 
 Toggle full thinking blocks at runtime with `/thinking` (or the
 `show_thinking` setting).
+
+### Pinning startup defaults
+
+Use `smelt.defaults{...}` in `init.lua` to pin a starting model, mode,
+and/or reasoning effort across launches. Every field is optional and CLI
+flags still win:
+
+```lua
+smelt.defaults({
+  model = "openai/gpt-5.4",
+  mode = "plan",
+  reasoning_effort = "high",
+})
+```
 
 ## Settings
 
@@ -268,7 +284,7 @@ All runtime data is stored under the XDG base directories:
 | ----------------------------------- | ------------------------------------------------------------ |
 | `$XDG_CONFIG_HOME/smelt/`           | `init.lua`, `plugins/`, global `skills/`                     |
 | `$XDG_STATE_HOME/smelt/sessions/`   | Saved sessions (`session.json`, `meta.json`, blobs)          |
-| `$XDG_STATE_HOME/smelt/state.json`  | Persisted state (last model, mode, accent color)             |
+| `$XDG_STATE_HOME/smelt/state.json`  | Persisted picks (last model, mode, reasoning effort)         |
 | `$XDG_STATE_HOME/smelt/workspaces/` | Per-workspace saved permissions                              |
 | `$XDG_STATE_HOME/smelt/history`     | Prompt history                                               |
 | `$XDG_STATE_HOME/smelt/trust.json`  | Trusted project `.smelt/` hashes                             |

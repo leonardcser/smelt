@@ -7,7 +7,7 @@
 ---@class smelt.engine
 local engine = {}
 
---- Run an out-of-band auxiliary LLM request (title / prediction / compaction / btw) without touching the main turn. `spec.on_response` fires once with the assistant's reply; returns the request id.
+--- Run an out-of-band side request (title / prediction / compaction / btw) against the primary model without touching the main turn. `spec.on_response` fires once with the assistant's reply; returns the request id.
 ---@type fun(spec: smelt.engine.AskSpec): integer
 engine.ask = nil
 

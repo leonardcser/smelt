@@ -14,7 +14,7 @@ fun(spec: smelt.engine.AskSpec): integer
 
 Types: [`smelt.engine.AskSpec`](types.md#smeltengineaskspec)
 
-Run an out-of-band auxiliary LLM request (title / prediction / compaction / btw) without touching the main turn. `spec.on_response` fires once with the assistant's reply; returns the request id.
+Run an out-of-band side request (title / prediction / compaction / btw) against the primary model without touching the main turn. `spec.on_response` fires once with the assistant's reply; returns the request id.
 
 ## `smelt.engine.cancel`
 

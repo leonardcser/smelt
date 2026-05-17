@@ -241,7 +241,7 @@
 --- Type of CLI flag declared via `smelt.cli.register_flag`. Matches the subset of clap that we expose to Lua.
 ---@alias smelt.cli.FlagKind "boolean"|"string"|"integer"
 
---- Auxiliary task tag accepted by `smelt.engine.ask`. Routes the request to a dedicated auxiliary model when one is configured.
+--- Tag for the kind of side request `smelt.engine.ask` is making. Used by the engine for bookkeeping (cost grouping, cancellation scope); the request runs against the primary model.
 ---@alias smelt.engine.AskTask "title"|"prediction"|"compaction"|"btw"
 
 --- Agent mode string literal.

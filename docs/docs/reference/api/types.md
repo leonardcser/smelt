@@ -365,7 +365,7 @@ Variants: `"boolean"` \| `"string"` \| `"integer"`
 
 ### `smelt.engine.AskTask`
 
-Auxiliary task tag accepted by `smelt.engine.ask`. Routes the request to a dedicated auxiliary model when one is configured.
+Tag for the kind of side request `smelt.engine.ask` is making. Used by the engine for bookkeeping (cost grouping, cancellation scope); the request runs against the primary model.
 
 Variants: `"title"` \| `"prediction"` \| `"compaction"` \| `"btw"`
 

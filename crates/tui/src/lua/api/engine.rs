@@ -8,8 +8,9 @@ use smelt_core::lua::lua_type::LuaCallback;
 use smelt_core::lua::module::LuaMod;
 use std::sync::Arc;
 
-/// Auxiliary task tag accepted by `smelt.engine.ask`. Routes the
-/// request to a dedicated auxiliary model when one is configured.
+/// Tag for the kind of side request `smelt.engine.ask` is making. Used
+/// by the engine for bookkeeping (cost grouping, cancellation scope);
+/// the request runs against the primary model.
 #[derive(Clone, Copy, Debug, LuaAlias)]
 #[lua(name = "smelt.engine.AskTask", mirror = "protocol::AuxiliaryTask")]
 pub enum LuaAskTask {
@@ -226,7 +227,7 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
         let s = shared.clone();
         m.fn_(
             "ask",
-            "Run an out-of-band auxiliary LLM request (title / prediction / compaction / btw) without touching the main turn. `spec.on_response` fires once with the assistant's reply; returns the request id.",
+            "Run an out-of-band side request (title / prediction / compaction / btw) against the primary model without touching the main turn. `spec.on_response` fires once with the assistant's reply; returns the request id.",
             &["spec"],
             move |lua, spec: LuaAskSpec| -> LuaResult<u64> {
                 let task = spec.task.map(Into::into).unwrap_or_default();
