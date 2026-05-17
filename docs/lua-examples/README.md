@@ -17,7 +17,7 @@ your own `init.lua`) to try them out.
   order; the optional third arg sets a default `align` for items the source
   returns without one.
 - **override.lua** — register a `/hello` command that greets via
-  `smelt.ui.notify`, and remap `<C-s>` in normal mode to run `/fork`.
+  `smelt.notify`, and remap `<C-s>` in normal mode to run `/fork`.
 
 ## API reference
 

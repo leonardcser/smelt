@@ -18,7 +18,7 @@ that's where you wire your behaviour up.
 ```lua
 -- ~/.config/smelt/plugins/hello.lua
 smelt.cmd.register("hello", function(arg)
-  smelt.ui.notify("hello, " .. (arg ~= "" and arg or "world"))
+  smelt.notify("hello, " .. (arg ~= "" and arg or "world"))
 end, { desc = "greet someone" })
 
 return {}
@@ -202,7 +202,7 @@ smelt.overlay.new({
   height    = 14,           -- cells
   modal     = false,
   draggable = true,
-  layout    = smelt.ui.layout.leaf(win),
+  layout    = smelt.overlay.layout.leaf(win),
 })
 ```
 
@@ -228,7 +228,7 @@ Anchor defaults: `dock_bottom` / `dock_top` are full-width × 60% tall;
 `screen_at` / `win` default to 60×20 cells.
 
 For modal dialogs (a markdown panel + an option list + a free-text input, etc.)
-`smelt.ui.dialog.open` is the higher-level surface — it returns the result of
+`smelt.dialog.open` is the higher-level surface — it returns the result of
 the user's choice. The bundled dialogs in
 [`runtime/lua/smelt/dialogs/`](https://github.com/leonardcser/smelt/tree/main/runtime/lua/smelt/dialogs)
 (`confirm`, `permissions`, `resume`, `rewind`) are the reference implementations.
@@ -245,8 +245,8 @@ Dialog height has two modes:
 
 ## Tasks: tool calls, dialogs, sleeps
 
-Anything that yields — `smelt.sleep`, `smelt.ui.dialog.open`,
-`smelt.ui.picker.open`, `smelt.tools.call`, `smelt.task.wait` — must run inside
+Anything that yields — `smelt.sleep`, `smelt.dialog.open`,
+`smelt.picker.open`, `smelt.tools.call`, `smelt.task.wait` — must run inside
 a task-yielding context. There are two:
 
 1. **Inside `tool.execute`** — every plugin tool already runs on a coroutine.
@@ -257,7 +257,7 @@ a task-yielding context. There are two:
 ```lua
 smelt.cmd.register("ps", function()
   smelt.spawn(function()
-    local result = smelt.ui.dialog.open({ ... })
+    local result = smelt.dialog.open({ ... })
     if result.action == "approve" then ... end
   end)
 end)
@@ -290,7 +290,7 @@ smelt.tools.register({
     smelt.render.markdown(buf, args.plan_summary or "")
   end,
   execute  = function(args)
-    local result = smelt.ui.dialog.open({ ... }) -- yields, allowed inside execute
+    local result = smelt.dialog.open({ ... }) -- yields, allowed inside execute
     if result.action ~= "approve" then
       return { content = "Plan not approved", is_error = true }
     end

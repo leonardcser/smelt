@@ -19,7 +19,7 @@ smelt.cmd.picker("color", {
         return
       end
     end
-    smelt.ui.notify_error("unknown color: " .. arg)
+    smelt.notify.error("unknown color: " .. arg)
   end,
   prepare    = function() original_ansi = (smelt.theme.get("SmeltSlug") or {}).ansi end,
   on_select  = function(item) if item.ansi_color then smelt.theme.set("SmeltSlug",{ ansi = item.ansi_color }) end end,

@@ -14,5 +14,5 @@ fun(opts: table): smelt.overlay.Overlay
 
 Types: [`smelt.overlay.Overlay`](types.md#smeltoverlayoverlay)
 
-Open an overlay rendered from `opts.layout` (a `smelt.ui.layout` userdata) and return an `Overlay` userdata. `opts.name` opts the overlay into hot-reload survival.
+Open an overlay rendered from `opts.layout` (a `smelt.overlay.layout` userdata) and return an `Overlay` userdata. `opts.name` opts the overlay into hot-reload survival.
 

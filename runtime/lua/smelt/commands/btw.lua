@@ -7,7 +7,7 @@ local SYSTEM = "You are a helpful assistant. The user is asking a quick side que
 smelt.cmd.register("btw", function(args)
   local question = args or ""
   if question == "" then
-    smelt.ui.notify_error("usage: /btw <question>")
+    smelt.notify.error("usage: /btw <question>")
     return
   end
 
@@ -17,8 +17,8 @@ smelt.cmd.register("btw", function(args)
 
     local function tick()
       if done then return end
-      buf:source(smelt.ui.spinner.glyph() .. " working")
-      smelt.timer.set(smelt.ui.spinner.period_ms(), tick)
+      buf:source(smelt.spinner.glyph() .. " working")
+      smelt.timer.set(smelt.spinner.period_ms(), tick)
     end
     tick()
 
@@ -39,9 +39,9 @@ smelt.cmd.register("btw", function(args)
       end,
     })
 
-    local leaf = smelt.ui.dialog.content({ buf = buf, interactive = true })
+    local leaf = smelt.dialog.content({ buf = buf, interactive = true })
 
-    smelt.ui.dialog.open({
+    smelt.dialog.open({
       title   = question,
       height  = 60,
       panels  = { { leaf = leaf, height = "fill" } },

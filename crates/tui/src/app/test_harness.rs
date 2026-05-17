@@ -1593,7 +1593,7 @@ mod tests {
                 corner = "ne",
                 row = 0, col = 0,
                 width = 44, height = 14,
-                layout = smelt.ui.layout.leaf(win),
+                layout = smelt.overlay.layout.leaf(win),
             })
             "#,
         )
@@ -1626,7 +1626,7 @@ mod tests {
                 corner = "ne",
                 row = 0, col = 0,
                 width = 44, height = 14,
-                layout = smelt.ui.layout.leaf(win),
+                layout = smelt.overlay.layout.leaf(win),
             })
             "#,
         )
@@ -1748,7 +1748,7 @@ mod tests {
                 name = "ov",
                 anchor = "screen_at", corner = "nw",
                 row = 0, col = 0, width = 40, height = 10,
-                layout = smelt.ui.layout.leaf(win),
+                layout = smelt.overlay.layout.leaf(win),
             })
             "#,
         )
@@ -1774,9 +1774,9 @@ mod tests {
                 name = "ov",
                 anchor = "screen_at", corner = "nw",
                 row = 0, col = 0, width = 40, height = 10,
-                layout = smelt.ui.layout.vbox({
-                    { smelt.ui.layout.leaf(w1), height = "fill" },
-                    { smelt.ui.layout.leaf(w2), height = "fill" },
+                layout = smelt.overlay.layout.vbox({
+                    { smelt.overlay.layout.leaf(w1), height = "fill" },
+                    { smelt.overlay.layout.leaf(w2), height = "fill" },
                 }),
             })
             "#,
@@ -1881,7 +1881,7 @@ mod tests {
                         title = "{title}",
                         anchor = "screen_at", corner = "nw",
                         row = 0, col = 0, width = 40, height = 10,
-                        layout = smelt.ui.layout.leaf(win),
+                        layout = smelt.overlay.layout.leaf(win),
                     }})
                 end
                 state.open = true
@@ -2015,7 +2015,7 @@ mod tests {
                     name = "mix",
                     anchor = "screen_at", corner = "nw",
                     row = 0, col = 0, width = 30, height = 8,
-                    layout = smelt.ui.layout.leaf(w1),
+                    layout = smelt.overlay.layout.leaf(w1),
                 })
             end
             state.open = true
@@ -2027,7 +2027,7 @@ mod tests {
             smelt.overlay.new({
                 anchor = "screen_at", corner = "se",
                 row = 0, col = 0, width = 20, height = 5,
-                layout = smelt.ui.layout.leaf(w2),
+                layout = smelt.overlay.layout.leaf(w2),
             })
             "#,
         )
@@ -2057,7 +2057,7 @@ mod tests {
                     name = "mix",
                     anchor = "screen_at", corner = "nw",
                     row = 0, col = 0, width = 30, height = 8,
-                    layout = smelt.ui.layout.leaf(w1),
+                    layout = smelt.overlay.layout.leaf(w1),
                 })
             end
             if state.open then attach() end
@@ -2171,14 +2171,14 @@ mod tests {
                 name = "seed.ov",
                 anchor = "screen_at", corner = "nw",
                 row = 0, col = 0, width = 30, height = 8,
-                layout = smelt.ui.layout.leaf(w1),
+                layout = smelt.overlay.layout.leaf(w1),
             })
             local b2 = smelt.buf.new()
             local w2 = smelt.win.new(b2, {})
             smelt.overlay.new({
                 anchor = "screen_at", corner = "se",
                 row = 0, col = 0, width = 20, height = 5,
-                layout = smelt.ui.layout.leaf(w2),
+                layout = smelt.overlay.layout.leaf(w2),
             })
 
             -- smelt.state slot
@@ -2362,7 +2362,7 @@ mod tests {
                     anchor = "screen_at", corner = "nw",
                     row = 0, col = 0, width = 30, height = 10,
                     resizable = true,
-                    layout = smelt.ui.layout.leaf(w),
+                    layout = smelt.overlay.layout.leaf(w),
                 })
             end
             state.open = true

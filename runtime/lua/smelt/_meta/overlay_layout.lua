@@ -4,19 +4,19 @@
 -- Do not edit by hand; update the `register_fn` call in Rust instead.
 
 --- Composable layout-tree primitives (leaf/vbox/hbox) for overlays. The resulting userdata is passed to `smelt.overlay.new` via `opts.layout`.
----@class smelt.ui.layout
-local ui_layout = {}
+---@class smelt.overlay.layout
+local overlay_layout = {}
 
 --- Horizontal container. `items` is an array of `{ child_layout, width = <constraint>, collapse_when_empty = bool? }`. `opts` accepts `border`, `title`, `gap`.
----@type fun(items: table, opts: table?): smelt.ui.layout
-ui_layout.hbox = nil
+---@type fun(items: table, opts: table?): smelt.overlay.layout
+overlay_layout.hbox = nil
 
 --- Wrap a Win handle or paint id into a leaf node. `opts` accepts `border`, `title`, `collapse_when_empty` (force the slot to zero size when the wrapped window's buffer is empty).
----@type fun(win_or_paint: any, opts: table?): smelt.ui.layout
-ui_layout.leaf = nil
+---@type fun(win_or_paint: any, opts: table?): smelt.overlay.layout
+overlay_layout.leaf = nil
 
 --- Vertical container. `items` is an array of `{ child_layout, height = <constraint>, collapse_when_empty = bool? }`. `opts` accepts `border`, `title`, `gap` (cells between children).
----@type fun(items: table, opts: table?): smelt.ui.layout
-ui_layout.vbox = nil
+---@type fun(items: table, opts: table?): smelt.overlay.layout
+overlay_layout.vbox = nil
 
-return ui_layout
+return overlay_layout

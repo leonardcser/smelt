@@ -11,7 +11,7 @@ smelt.cell("turn_end"):subscribe(function(payload)
     return
   end
 
-  smelt.ui.ghost.clear()
+  smelt.prompt.ghost.clear()
 
   local history = smelt.session.messages()
 
@@ -60,7 +60,7 @@ smelt.cell("turn_end"):subscribe(function(payload)
     on_response = function(content)
       local text = content:match("^%s*(.-)%s*$") or ""
       if text ~= "" then
-        smelt.ui.ghost.set(text)
+        smelt.prompt.ghost.set(text)
       end
     end,
   })

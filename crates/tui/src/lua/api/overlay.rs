@@ -1,7 +1,7 @@
 //! `smelt.overlay` — Overlay handle. UiHost-only.
 //!
 //! `smelt.overlay.new(opts)` opens an overlay rendered from `opts.layout`
-//! (a `smelt.ui.layout` userdata tree) and returns an `Overlay`
+//! (a `smelt.overlay.layout` userdata tree) and returns an `Overlay`
 //! userdata. `opts.name` opts the overlay into hot-reload survival.
 
 use lua_doc_derive::lua_module;
@@ -47,7 +47,7 @@ impl mlua::UserData for LuaOverlay {
 
 #[lua_module(
     name = "smelt.overlay",
-    doc = "Overlay handle constructor. `smelt.overlay.new(opts)` opens an overlay from `opts.layout` (a `smelt.ui.layout` userdata) and returns an `Overlay` userdata. \
+    doc = "Overlay handle constructor. `smelt.overlay.new(opts)` opens an overlay from `opts.layout` (a `smelt.overlay.layout` userdata) and returns an `Overlay` userdata. \
 `opts.name` opts the overlay into hot-reload survival. UiHost-only."
 )]
 pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
@@ -69,7 +69,7 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
         &ov_tbl,
         "smelt.overlay",
         "new",
-        "Open an overlay rendered from `opts.layout` (a `smelt.ui.layout` userdata) and return an `Overlay` userdata. `opts.name` opts the overlay into hot-reload survival.",
+        "Open an overlay rendered from `opts.layout` (a `smelt.overlay.layout` userdata) and return an `Overlay` userdata. `opts.name` opts the overlay into hot-reload survival.",
         &["opts"],
         lua,
         |_, opts: mlua::Table| -> LuaResult<LuaOverlay> {
@@ -81,6 +81,7 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
         },
     )?;
 
+    super::overlay_layout::register(lua, &ov_tbl)?;
     smelt.set("overlay", ov_tbl)?;
     Ok(())
 }

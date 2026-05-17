@@ -26,9 +26,9 @@ smelt.cmd.register("messages", function()
 
     local body_buf = smelt.buf.new({ readonly = true })
     body_buf:lines(body_lines)
-    local body_leaf = smelt.ui.dialog.content({ buf = body_buf, interactive = true })
+    local body_leaf = smelt.dialog.content({ buf = body_buf, interactive = true })
 
-    smelt.ui.dialog.open({
+    smelt.dialog.open({
       title      = string.format("messages (%d)", #entries),
       max_height = "50%",
       panels     = { { leaf = body_leaf } },

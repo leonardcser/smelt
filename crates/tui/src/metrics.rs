@@ -349,7 +349,7 @@ fn stats_line_visual_width(line: &StatsLine, label_col: usize) -> usize {
 }
 
 /// Flatten one `StatsLine` to a plain string. Used by the `/stats` and
-/// `/cost` Lua plugins which render through `smelt.ui.dialog.open` and
+/// `/cost` Lua plugins which render through `smelt.dialog.open` and
 /// need a textual representation rather than the structured variants.
 fn stats_line_to_text(line: &StatsLine, label_col: usize) -> String {
     match line {

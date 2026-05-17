@@ -331,7 +331,7 @@ impl TuiApp {
                 tool_name,
                 args,
             } => {
-                // Plugins open their own confirm dialogs via `smelt.ui.dialog.open` inside `execute`.
+                // Plugins open their own confirm dialogs via `smelt.dialog.open` inside `execute`.
                 self.handle_tool_call(request_id, call_id, tool_name, args);
                 SessionControl::Continue
             }

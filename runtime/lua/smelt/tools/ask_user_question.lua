@@ -82,14 +82,14 @@ smelt.tools.register({
         title = "question"
       end
 
-      local md_leaf      = smelt.ui.dialog.markdown(q.question or "")
-      local options_leaf = smelt.ui.dialog.options(labels)
-      local other_leaf, other_buf = smelt.ui.dialog.input("or type a custom answer...")
+      local md_leaf      = smelt.dialog.markdown(q.question or "")
+      local options_leaf = smelt.dialog.options(labels)
+      local other_leaf, other_buf = smelt.dialog.input("or type a custom answer...")
 
       local typed_other = false
       other_leaf:on("text_changed", function() typed_other = true end)
 
-      local result = smelt.ui.dialog.open({
+      local result = smelt.dialog.open({
         title        = title,
         blocks_agent = true,
         height       = "70%",

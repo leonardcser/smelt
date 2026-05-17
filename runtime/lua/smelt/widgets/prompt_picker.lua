@@ -80,7 +80,7 @@ function smelt.prompt.open_picker(opts)
       local orig = original[current[selected]._idx]
       local ok, err = pcall(on_select, orig)
       if not ok then
-        smelt.ui.notify_error("prompt picker on_select: " .. tostring(err))
+        smelt.notify.error("prompt picker on_select: " .. tostring(err))
       end
     end
   end

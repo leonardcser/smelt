@@ -91,7 +91,7 @@ every mode.
 ```lua
 smelt.keymap.set("n", "<C-s>", function()
   smelt.cmd.run("fork")
-  smelt.ui.notify("session forked")
+  smelt.notify("session forked")
 end)
 ```
 
@@ -138,7 +138,7 @@ Register from `init.lua` with `smelt.cmd.register`:
 
 ```lua
 smelt.cmd.register("hello", function(arg)
-  smelt.ui.notify("hello, " .. (arg or "world") .. "!")
+  smelt.notify("hello, " .. (arg or "world") .. "!")
 end, { desc = "say hi" })
 ```
 
@@ -148,7 +148,7 @@ Subscribe to engine and UI events with `smelt.cell(name):subscribe(handler)`:
 
 ```lua
 smelt.cell("turn_end"):subscribe(function(data)
-  if not data.cancelled then smelt.ui.notify("done") end
+  if not data.cancelled then smelt.notify("done") end
 end)
 ```
 

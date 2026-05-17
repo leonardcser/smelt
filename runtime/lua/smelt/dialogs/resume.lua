@@ -100,7 +100,7 @@ smelt.cmd.register("resume", function()
   smelt.spawn(function()
     local entries = smelt.session.list()
     if #entries == 0 then
-      smelt.ui.notify_error("no saved sessions")
+      smelt.notify.error("no saved sessions")
       return
     end
 
@@ -113,10 +113,10 @@ smelt.cmd.register("resume", function()
     -- List: passive display, non-focusable; selection shown via selection_highlight.
     local list_buf = smelt.buf.new()
     refresh_list(list_buf, filtered, now_ms)
-    local list_leaf = smelt.ui.dialog.list(list_buf, { focusable = false })
+    local list_leaf = smelt.dialog.list(list_buf, { focusable = false })
 
     -- Input: focused, receives typing. Filter loop wired below.
-    local input_leaf = smelt.ui.dialog.input("filter sessions…")
+    local input_leaf = smelt.dialog.input("filter sessions…")
 
     input_leaf:on("text_changed", function(ctx)
       query = ctx.text or ""
@@ -133,7 +133,7 @@ smelt.cmd.register("resume", function()
     -- is non-focusable here (focus stays on the input), so those bindings never
     -- fire. We forward at the dialog level instead so the input stays focused
     -- while these keys drive the list cursor.
-    local picked = smelt.ui.dialog.open({
+    local picked = smelt.dialog.open({
       title  = "resume",
       height = "70%",
       panels = {

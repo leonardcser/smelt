@@ -172,7 +172,7 @@ end
 smelt.cmd.register("ps", function()
   local procs = smelt.process.list()
   if #procs == 0 then
-    smelt.ui.notify_error("no background processes")
+    smelt.notify.error("no background processes")
     return
   end
 
@@ -187,10 +187,10 @@ smelt.cmd.register("ps", function()
       for _, p in ipairs(procs) do table.insert(labels, format_proc(p)) end
 
       local snapshot = procs
-      local options_leaf = smelt.ui.dialog.options(labels)
+      local options_leaf = smelt.dialog.options(labels)
       local should_reopen = false
 
-      smelt.ui.dialog.open({
+      smelt.dialog.open({
         title = {
           { text = "processes ", bold = true },
           { text = "(bs: kill)", fg = "grey", dim = true },

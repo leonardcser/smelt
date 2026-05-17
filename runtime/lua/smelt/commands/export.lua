@@ -112,14 +112,14 @@ end
 
 smelt.cmd.register("export", function()
   if #smelt.session.messages() == 0 then
-    smelt.ui.notify_error("nothing to export")
+    smelt.notify.error("nothing to export")
     return
   end
 
   smelt.spawn(function()
-    local options_leaf = smelt.ui.dialog.options({ "Copy to clipboard", "Write to file" })
+    local options_leaf = smelt.dialog.options({ "Copy to clipboard", "Write to file" })
 
-    local picked = smelt.ui.dialog.open({
+    local picked = smelt.dialog.open({
       title  = "export",
       height = "30%",
       panels = { { leaf = options_leaf } },
@@ -133,18 +133,18 @@ smelt.cmd.register("export", function()
     local markdown = format_markdown()
     if picked == 1 then
       smelt.clipboard.write(markdown)
-      smelt.ui.notify("conversation copied to clipboard")
+      smelt.notify("conversation copied to clipboard")
     elseif picked == 2 then
       local path = default_export_path()
       local f, err = io.open(path, "w")
       if not f then
-        smelt.ui.notify_error("export failed: " .. (err or "unknown"))
+        smelt.notify.error("export failed: " .. (err or "unknown"))
         return
       end
       f:write(markdown)
       f:close()
       local name = path:match("([^/]+)$") or path
-      smelt.ui.notify("exported to " .. name)
+      smelt.notify("exported to " .. name)
     end
   end)
 end, { desc = "copy conversation to clipboard" })

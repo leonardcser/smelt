@@ -7,9 +7,9 @@ local function open_text_dialog(title, text)
     for line in (text or ""):gmatch("([^\n]*)\n?") do table.insert(lines, line) end
     if #lines == 0 then lines = { "" } end
     buf:lines(lines)
-    local leaf = smelt.ui.dialog.content({ buf = buf, interactive = true })
+    local leaf = smelt.dialog.content({ buf = buf, interactive = true })
 
-    smelt.ui.dialog.open({
+    smelt.dialog.open({
       title      = title,
       max_height = "50%",
       panels     = { { leaf = leaf } },

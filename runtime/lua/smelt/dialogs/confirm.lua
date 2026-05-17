@@ -132,23 +132,23 @@ function smelt.confirm.open(handle_id)
 
   local labels, decisions = build_options(req)
 
-  local header_leaf  = smelt.ui.dialog.content({ buf = header_buf, wrap = false })
-  local preview_leaf = smelt.ui.dialog.content({ buf = preview_buf, interactive = true })
-  local allow_leaf, allow_buf = smelt.ui.dialog.content({ wrap = false })
+  local header_leaf  = smelt.dialog.content({ buf = header_buf, wrap = false })
+  local preview_leaf = smelt.dialog.content({ buf = preview_buf, interactive = true })
+  local allow_leaf, allow_buf = smelt.dialog.content({ wrap = false })
   local allow_lines = {}
   if not has_preview then
     allow_lines[#allow_lines + 1] = {}
   end
   allow_lines[#allow_lines + 1] = { { text = "Allow?", style = { dim = true } } }
   allow_buf:styled(allow_lines)
-  local options_leaf, options_buf = smelt.ui.dialog.options(labels)
+  local options_leaf, options_buf = smelt.dialog.options(labels)
   render_options(options_buf, labels)
   local reason_leaf, reason_buf =
-      smelt.ui.dialog.input("press tab to add a reason…", { pad_left = 2 })
+      smelt.dialog.input("press tab to add a reason…", { pad_left = 2 })
 
   -- Empty 1-row spacer panel that visually separates the options list from
   -- the reason input.
-  local spacer_leaf = smelt.ui.dialog.content({ text = "", wrap = false })
+  local spacer_leaf = smelt.dialog.content({ text = "", wrap = false })
 
   local typed_reason = false
   reason_leaf:on("text_changed", function() typed_reason = true end)
@@ -160,7 +160,7 @@ function smelt.confirm.open(handle_id)
     smelt.confirm.__resolve(handle_id, decisions[idx] or "no", message)
   end
 
-  local handle = smelt.ui.dialog.open_handle({
+  local handle = smelt.dialog.open_handle({
     blocks_agent = true,
     max_height   = "fill",
     panels = {

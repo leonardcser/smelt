@@ -9,7 +9,9 @@ mod keymap;
 mod metrics;
 mod model;
 mod notebook;
+mod notify;
 mod overlay;
+pub(crate) mod overlay_layout;
 mod paint;
 mod permissions;
 mod picker;
@@ -17,12 +19,11 @@ mod prompt;
 mod render;
 mod session;
 mod settings;
+mod spinner;
 mod statusline;
 mod text;
 mod theme;
 mod transcript;
-mod ui;
-pub(crate) mod ui_layout;
 pub(crate) mod vim;
 pub(crate) mod win;
 
@@ -42,7 +43,6 @@ pub(crate) use smelt_core::lua::json_to_lua as json_to_lua_value;
 impl LuaRuntime {
     pub(super) fn register_api(lua: &Lua, shared: &Arc<LuaShared>) -> LuaResult<()> {
         let smelt = lua.create_table()?;
-        let smelt_ui = lua.create_table()?;
         let smelt_keymap = lua.create_table()?;
 
         smelt.set("version", VERSION)?;
@@ -55,7 +55,8 @@ impl LuaRuntime {
         win::register(lua, &smelt, shared)?;
         overlay::register(lua, &smelt)?;
         picker::register(lua, &smelt)?;
-        self::ui::register(lua, &smelt_ui)?;
+        notify::register(lua, &smelt)?;
+        spinner::register(lua, &smelt)?;
         prompt::register(lua, &smelt)?;
         theme::register(lua, &smelt)?;
         statusline::register(lua, &smelt, shared)?;
@@ -110,6 +111,7 @@ impl LuaRuntime {
             },
         )?;
 
+
         // Cross-cutting UiHost-tier additions to host modules.
         let cmd_tbl: mlua::Table = smelt.get("cmd")?;
         register_ui_fn(
@@ -158,30 +160,6 @@ impl LuaRuntime {
             },
         )?;
         register_ui_fn(
-            &smelt_ui,
-            "smelt.ui",
-            "notify",
-            "Show an informational notification in the status area.",
-            &["msg"],
-            lua,
-            |_, msg: String| -> LuaResult<()> {
-                crate::lua::with_app(|app| app.notify(msg));
-                Ok(())
-            },
-        )?;
-        register_ui_fn(
-            &smelt_ui,
-            "smelt.ui",
-            "notify_error",
-            "Show an error notification in the status area (highlighted with the error color).",
-            &["msg"],
-            lua,
-            |_, msg: String| -> LuaResult<()> {
-                crate::lua::with_app(|app| app.notify_error(msg));
-                Ok(())
-            },
-        )?;
-        register_ui_fn(
             &smelt,
             "smelt",
             "ns",
@@ -219,8 +197,6 @@ impl LuaRuntime {
                 Ok(())
             },
         )?;
-
-        smelt.set("ui", smelt_ui)?;
 
         lua.globals().set("smelt", smelt)?;
 

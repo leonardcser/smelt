@@ -1,7 +1,7 @@
--- `smelt.ui.dialog`: opinionated framing on top of `smelt.ui.overlay`.
+-- `smelt.dialog`: opinionated framing on top of `smelt.overlay`.
 --
 -- A dialog is always docked at the bottom of the screen with a top border and is modal.
--- For anything else (centered info viewers, transient overlays), use `smelt.ui.overlay`
+-- For anything else (centered info viewers, transient overlays), use `smelt.overlay`
 -- directly.
 --
 -- The dialog primitive does not know what's inside it. Consumers build their own
@@ -24,15 +24,15 @@
 --     options leaf instead of dismissing the dialog).
 --
 -- Buffer helpers:
---   smelt.ui.dialog.input(placeholder)         -> leaf, buf  (single-line input)
---   smelt.ui.dialog.options(labels, opts)      -> leaf, buf  (list of selectable labels)
---   smelt.ui.dialog.list(buf, opts)            -> leaf       (existing buffer as a list)
---   smelt.ui.dialog.markdown(text)             -> leaf, buf  (markdown-rendered content)
---   smelt.ui.dialog.content(opts)              -> leaf, buf  (plain content; opts.text or opts.buf)
+--   smelt.dialog.input(placeholder)         -> leaf, buf  (single-line input)
+--   smelt.dialog.options(labels, opts)      -> leaf, buf  (list of selectable labels)
+--   smelt.dialog.list(buf, opts)            -> leaf       (existing buffer as a list)
+--   smelt.dialog.markdown(text)             -> leaf, buf  (markdown-rendered content)
+--   smelt.dialog.content(opts)              -> leaf, buf  (plain content; opts.text or opts.buf)
 
 local M = {}
 
-smelt.ui.dialog = smelt.ui.dialog or {}
+smelt.dialog = smelt.dialog or {}
 
 local REGION = "dialog_overlay"
 
@@ -41,7 +41,7 @@ local REGION = "dialog_overlay"
 -- Every helper here adds a one-cell gutter on the left AND the right so dialog
 -- content never sits flush against the frame. The gutter is invariant: callers
 -- must not pass `pad_left` / `pad_right`. Custom leaves built outside these
--- helpers and handed to `smelt.ui.dialog.open` must follow the same rule.
+-- helpers and handed to `smelt.dialog.open` must follow the same rule.
 --
 -- Scrollbars: buffer-viewer leaves (`markdown`, `content`) inherit the default
 -- `scrollbar = true` from `smelt.win.new` so a thumb appears when content
@@ -50,7 +50,7 @@ local REGION = "dialog_overlay"
 
 local GUTTER = 1
 
-function smelt.ui.dialog.input(placeholder, opts)
+function smelt.dialog.input(placeholder, opts)
   opts = opts or {}
   local buf = smelt.buf.new()
   buf:lines({ "" })
@@ -69,7 +69,7 @@ function smelt.ui.dialog.input(placeholder, opts)
   return leaf, buf
 end
 
-function smelt.ui.dialog.options(labels, opts)
+function smelt.dialog.options(labels, opts)
   opts = opts or {}
   local lines = {}
   for _, l in ipairs(labels or {}) do table.insert(lines, l) end
@@ -91,7 +91,7 @@ function smelt.ui.dialog.options(labels, opts)
   return leaf, buf
 end
 
-function smelt.ui.dialog.list(buf, opts)
+function smelt.dialog.list(buf, opts)
   opts = opts or {}
   local focusable = opts.focusable
   if focusable == nil then focusable = true end
@@ -115,7 +115,7 @@ local function split_lines(text)
   return out
 end
 
-function smelt.ui.dialog.markdown(text)
+function smelt.dialog.markdown(text)
   local buf = smelt.buf.new({ mode = "markdown" })
   buf:source(text or "")
   local leaf = smelt.win.new(buf, {
@@ -125,7 +125,7 @@ function smelt.ui.dialog.markdown(text)
   return leaf, buf
 end
 
-function smelt.ui.dialog.content(opts)
+function smelt.dialog.content(opts)
   opts = opts or {}
   local buf = opts.buf
   if not buf then
@@ -165,33 +165,33 @@ end
 --     dialog actually shrinks; longer content triggers the panel's scrollbar
 --     at the cap.
 --
--- Translation: both modes desugar to a `smelt.ui.layout` wrapper around the
+-- Translation: both modes desugar to a `smelt.overlay.layout` wrapper around the
 -- panel vbox before opening the overlay. The overlay itself has no `width` /
 -- `height` knobs — its size is whatever the layout-tree's natural size
 -- resolves to against the current terminal, re-evaluated every frame. The
 -- height literal (integer cells / `"N%"` / `"fill"` / `"fit"`) is passed
--- straight through to `smelt.ui.layout.vbox`, which understands all of these.
+-- straight through to `smelt.overlay.layout.vbox`, which understands all of these.
 
 local function open_overlay(opts)
   if opts.height ~= nil and opts.max_height ~= nil then
-    error("smelt.ui.dialog: use `height` (fixed) or `max_height` (fit to content), not both", 3)
+    error("smelt.dialog: use `height` (fixed) or `max_height` (fit to content), not both", 3)
   end
   local fit_mode = opts.max_height ~= nil
   local default_panel_height = fit_mode and "fit" or nil
 
   local panels = opts.panels or {}
   if #panels == 0 then
-    error("smelt.ui.dialog: panels must be non-empty", 3)
+    error("smelt.dialog: panels must be non-empty", 3)
   end
 
   local leaves = {}
   local layout_items = {}
   for i, p in ipairs(panels) do
     if type(p) ~= "table" or p.leaf == nil then
-      error("smelt.ui.dialog: panel " .. i .. " requires a `leaf`", 3)
+      error("smelt.dialog: panel " .. i .. " requires a `leaf`", 3)
     end
     leaves[i] = p.leaf
-    local leaf_node = smelt.ui.layout.leaf(p.leaf, {
+    local leaf_node = smelt.overlay.layout.leaf(p.leaf, {
       border              = p.border,
       title               = p.title,
       collapse_when_empty = p.collapse_when_empty or false,
@@ -225,7 +225,7 @@ local function open_overlay(opts)
   --   * `height = H`     -> outer constraint H — dialog is exactly that tall
   --   * `max_height` set -> outer `fit`        — dialog shrinks to content, capped at the anchor extent
   --   * neither          -> outer `"60%"`      — dock_bottom anchor default
-  local panel_vbox = smelt.ui.layout.vbox(layout_items)
+  local panel_vbox = smelt.overlay.layout.vbox(layout_items)
   local outer_height
   if opts.max_height ~= nil then
     outer_height = "fit"
@@ -234,7 +234,7 @@ local function open_overlay(opts)
   else
     outer_height = "60%"
   end
-  local outer = smelt.ui.layout.vbox({
+  local outer = smelt.overlay.layout.vbox({
     { panel_vbox, height = outer_height },
   })
 
@@ -289,7 +289,7 @@ local function setup_lifecycle(opts, leaves, resolve_fn)
         local on_press = km.on_press
         local cb = function(raw_ctx)
           local ok, err = pcall(on_press, make_ctx(raw_ctx))
-          if not ok then smelt.ui.notify_error("dialog keymap: " .. tostring(err)) end
+          if not ok then smelt.notify.error("dialog keymap: " .. tostring(err)) end
         end
         for _, leaf in ipairs(leaves) do
           leaf:key(km.key, cb)
@@ -312,7 +312,7 @@ local function setup_lifecycle(opts, leaves, resolve_fn)
   if type(opts.on_submit) == "function" then
     register_on_all("submit", function(raw_ctx)
       local ok, err = pcall(opts.on_submit, make_ctx(raw_ctx))
-      if not ok then smelt.ui.notify_error("dialog on_submit: " .. tostring(err)) end
+      if not ok then smelt.notify.error("dialog on_submit: " .. tostring(err)) end
     end)
   end
 
@@ -320,7 +320,7 @@ local function setup_lifecycle(opts, leaves, resolve_fn)
   register_on_all("dismiss", function(raw_ctx)
     if type(opts.on_dismiss) == "function" then
       local ok, err = pcall(opts.on_dismiss, make_ctx(raw_ctx))
-      if not ok then smelt.ui.notify_error("dialog on_dismiss: " .. tostring(err)) end
+      if not ok then smelt.notify.error("dialog on_dismiss: " .. tostring(err)) end
     else
       resolve(nil)
     end
@@ -329,7 +329,7 @@ local function setup_lifecycle(opts, leaves, resolve_fn)
   if type(opts.on_tick) == "function" then
     register_on_all("tick", function(raw_ctx)
       local ok, err = pcall(opts.on_tick, make_ctx(raw_ctx))
-      if not ok then smelt.ui.notify_error("dialog on_tick: " .. tostring(err)) end
+      if not ok then smelt.notify.error("dialog on_tick: " .. tostring(err)) end
     end)
   end
 
@@ -338,7 +338,7 @@ local function setup_lifecycle(opts, leaves, resolve_fn)
       if type(fn) == "function" then
         register_on_all(event_name, function(raw_ctx)
           local ok, err = pcall(fn, make_ctx(raw_ctx))
-          if not ok then smelt.ui.notify_error("dialog on_event[" .. event_name .. "]: " .. tostring(err)) end
+          if not ok then smelt.notify.error("dialog on_event[" .. event_name .. "]: " .. tostring(err)) end
         end)
       end
     end
@@ -348,12 +348,12 @@ local function setup_lifecycle(opts, leaves, resolve_fn)
 end
 
 -- Coroutine-blocking open. Returns the value passed to `ctx.resolve(value)`.
-function smelt.ui.dialog.open(opts)
+function smelt.dialog.open(opts)
   if not coroutine.isyieldable() then
-    error("smelt.ui.dialog.open: call from inside smelt.spawn(fn) or tool.execute", 2)
+    error("smelt.dialog.open: call from inside smelt.spawn(fn) or tool.execute", 2)
   end
   if type(opts) ~= "table" then
-    error("smelt.ui.dialog.open: expected table of options", 2)
+    error("smelt.dialog.open: expected table of options", 2)
   end
 
   local _, leaves = open_overlay(opts)
@@ -367,9 +367,9 @@ end
 -- Non-coroutine open. Returns `{ win, panels, close() }` synchronously. The consumer
 -- drives the lifecycle via `on_submit` / `on_dismiss` callbacks and tears down with
 -- `handle:close()`. No value flows back (use `open` if you want one).
-function smelt.ui.dialog.open_handle(opts)
+function smelt.dialog.open_handle(opts)
   if type(opts) ~= "table" then
-    error("smelt.ui.dialog.open_handle: expected table of options", 2)
+    error("smelt.dialog.open_handle: expected table of options", 2)
   end
   local _, leaves = open_overlay(opts)
   local resolve, root = setup_lifecycle(opts, leaves, function(_) end)

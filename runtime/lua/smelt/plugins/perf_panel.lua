@@ -120,7 +120,7 @@ local function attach()
 		blocks_agent = false,
 		draggable = true,
 		resizable = true,
-		layout = smelt.ui.layout.leaf(state.win),
+		layout = smelt.overlay.layout.leaf(state.win),
 	})
 	-- Cancel any prior timer (hot-reload survival) before re-arming.
 	if state.timer then state.timer:remove() end

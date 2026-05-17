@@ -488,15 +488,17 @@ mod tests {
     use super::*;
     use smelt_core::lua::api::lua_table_to_json;
 
-    /// Stub `smelt.ui.notify` / `smelt.ui.notify_error` to push into `_G.test_log` / `_G.test_err`.
+    /// Stub `smelt.notify` / `smelt.notify.error` to push into `_G.test_log` / `_G.test_err`.
     fn install_test_notify(rt: &LuaRuntime) {
         rt.lua
             .load(
                 r#"
                     _G.test_log = {}
                     _G.test_err = {}
-                    smelt.ui.notify = function(msg) table.insert(_G.test_log, msg) end
-                    smelt.ui.notify_error = function(msg) table.insert(_G.test_err, msg) end
+                    local mt = getmetatable(smelt.notify) or {}
+                    mt.__call = function(_, msg) table.insert(_G.test_log, msg) end
+                    setmetatable(smelt.notify, mt)
+                    smelt.notify.error = function(msg) table.insert(_G.test_err, msg) end
                 "#,
             )
             .exec()
@@ -748,7 +750,7 @@ mod tests {
 
     #[test]
     fn dialog_open_outside_task_errors() {
-        // Calling `smelt.ui.dialog.open` outside a yieldable coroutine
+        // Calling `smelt.dialog.open` outside a yieldable coroutine
         // (the runtime file's first guard) must raise. With plugins
         // loaded the Lua wrapper is in place; `isyieldable()` is false
         // at the top level, so the call errors before reaching the
@@ -756,7 +758,7 @@ mod tests {
         let mut rt = LuaRuntime::new();
         rt.load_autoload();
         assert!(rt.load_error.is_none(), "load_error: {:?}", rt.load_error);
-        let res: LuaResult<()> = rt.lua.load("smelt.ui.dialog.open({panels = {}})").exec();
+        let res: LuaResult<()> = rt.lua.load("smelt.dialog.open({panels = {}})").exec();
         assert!(res.is_err());
     }
 
@@ -852,7 +854,7 @@ mod tests {
         let rt = LuaRuntime::new();
         install_test_notify(&rt);
         rt.lua
-            .load("smelt.ui.notify('hello from lua')")
+            .load("smelt.notify('hello from lua')")
             .exec()
             .expect("exec");
         let msgs = drain_notifications(&rt);
@@ -877,7 +879,7 @@ mod tests {
             .load(
                 r#"
                     smelt.cmd.register("hello", function()
-                        smelt.ui.notify("hello world")
+                        smelt.notify("hello world")
                     end)
                 "#,
             )
@@ -897,7 +899,7 @@ mod tests {
             .load(
                 r#"
                     smelt.keymap.set("n", "<C-g>", function()
-                        smelt.ui.notify("ctrl-g")
+                        smelt.notify("ctrl-g")
                     end)
                 "#,
             )
@@ -984,7 +986,7 @@ mod tests {
             .load(
                 r#"
                     smelt.keymap.set("", "<C-h>", function()
-                        smelt.ui.notify("any-mode")
+                        smelt.notify("any-mode")
                     end)
                 "#,
             )
@@ -1139,7 +1141,7 @@ mod tests {
                 r#"
                     for _, mode in ipairs({ "normal", "insert", "visual" }) do
                         smelt.keymap.set(mode, "c-r", function()
-                            smelt.ui.notify("history: " .. mode)
+                            smelt.notify("history: " .. mode)
                         end)
                     end
                 "#,
@@ -1171,8 +1173,8 @@ mod tests {
         rt.lua
             .load(
                 r#"
-                    smelt.keymap.set("", "<Esc><Esc>", function() smelt.ui.notify("esc-esc") end)
-                    smelt.keymap.set("n", "gd", function() smelt.ui.notify("go-def") end)
+                    smelt.keymap.set("", "<Esc><Esc>", function() smelt.notify("esc-esc") end)
+                    smelt.keymap.set("n", "gd", function() smelt.notify("go-def") end)
                 "#,
             )
             .exec()
@@ -1228,7 +1230,7 @@ mod tests {
             .load(
                 r#"
                     smelt.keymap.set("", "<Esc><Esc>", function(ctx)
-                        smelt.ui.notify("mode=" .. tostring(ctx.vim_mode_at_chord_start))
+                        smelt.notify("mode=" .. tostring(ctx.vim_mode_at_chord_start))
                     end)
                 "#,
             )

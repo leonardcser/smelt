@@ -136,10 +136,10 @@ local function register_exit_plan_mode()
       local labels = {}
       for _, o in ipairs(options) do table.insert(labels, o.label) end
 
-      local md_leaf      = smelt.ui.dialog.markdown(summary)
-      local options_leaf = smelt.ui.dialog.options(labels)
+      local md_leaf      = smelt.dialog.markdown(summary)
+      local options_leaf = smelt.dialog.options(labels)
 
-      local action = smelt.ui.dialog.open({
+      local action = smelt.dialog.open({
         title = {
           { text = "plan ", fg = "yellow", bold = true },
           { text = "(review and approve)", fg = "grey", dim = true },

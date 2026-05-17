@@ -16,7 +16,7 @@
 //! - `__resolve` — final pick, removes the registry entry.
 //!
 //! Per-panel control (`scroll_by`, `focus`, …) goes through the
-//! generic `smelt.ui.dialog._panel_*` primitives surfaced by the
+//! generic `smelt.dialog._panel_*` primitives surfaced by the
 //! typed panel handles in `runtime/lua/smelt/dialog.lua`.
 
 use mlua::prelude::*;

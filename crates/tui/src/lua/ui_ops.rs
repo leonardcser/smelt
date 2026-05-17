@@ -2,7 +2,7 @@
 //! recipes.
 //!
 //! Overlay sizing is driven entirely by `opts.layout` — a `LayoutTree` built
-//! from `smelt.ui.layout.leaf` / `.vbox` / `.hbox`. The overlay's outer size
+//! from `smelt.overlay.layout.leaf` / `.vbox` / `.hbox`. The overlay's outer size
 //! comes from `LayoutTree::natural_size_with` evaluated against the current
 //! terminal extent every frame; resize tracks automatically. To pin a width or
 //! height, wrap the inner tree in a one-slot vbox/hbox with a `Length(N)` /
@@ -22,13 +22,15 @@ pub(crate) fn open_overlay(app: &mut TuiApp, opts: mlua::Table) -> Result<u64, S
     let name: Option<String> = opts.get::<Option<String>>("name").ok().flatten();
     let title = crate::lua::parse::title(opts.get::<mlua::Value>("title").ok())
         .map_err(|e| format!("overlay title: {e}"))?;
-    let layout_ud: mlua::AnyUserData = opts
-        .get("layout")
-        .map_err(|_| "overlay.open: missing `layout = <smelt.ui.layout.* userdata>`".to_string())?;
+    let layout_ud: mlua::AnyUserData = opts.get("layout").map_err(|_| {
+        "overlay.open: missing `layout = <smelt.overlay.layout.* userdata>`".to_string()
+    })?;
     let layout_node = {
         let borrowed = layout_ud
-            .borrow::<crate::lua::api::ui_layout::LuaUiLayout>()
-            .map_err(|e| format!("overlay.open: `layout` must be a smelt.ui.layout node: {e}"))?;
+            .borrow::<crate::lua::api::overlay_layout::LuaUiLayout>()
+            .map_err(|e| {
+                format!("overlay.open: `layout` must be a smelt.overlay.layout node: {e}")
+            })?;
         borrowed.0.clone()
     };
     let (term_w, term_h) = app.ui.terminal_size();
@@ -42,7 +44,7 @@ pub(crate) fn open_overlay(app: &mut TuiApp, opts: mlua::Table) -> Result<u64, S
 
     let mut window_leaves: Vec<WinId> = Vec::new();
     let (_root_constraint, inner) =
-        crate::lua::api::ui_layout::build_layout_tree(app, &layout_node, &mut window_leaves)?;
+        crate::lua::api::overlay_layout::build_layout_tree(app, &layout_node, &mut window_leaves)?;
     let mut layout = inner;
     if let Some(b) = border {
         layout = layout.with_border(b);

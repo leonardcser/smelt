@@ -160,7 +160,7 @@ end
 local function run_custom(name, path, arg)
   local content = read_file(path)
   if not content then
-    smelt.ui.notify_error("/" .. name .. ": cannot read " .. path)
+    smelt.notify.error("/" .. name .. ": cannot read " .. path)
     return
   end
   local fm, body = smelt.parse.frontmatter(content)

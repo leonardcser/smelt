@@ -21,7 +21,7 @@ end
 smelt.cmd.register("rewind", function(args)
   local turns = smelt.session.turns()
   if #turns == 0 then
-    smelt.ui.notify_error("nothing to rewind")
+    smelt.notify.error("nothing to rewind")
     return
   end
 
@@ -30,7 +30,7 @@ smelt.cmd.register("rewind", function(args)
 
   smelt.spawn(function()
     local lines, prefix_widths = build_rows(turns)
-    local options_leaf, options_buf = smelt.ui.dialog.options(lines, {
+    local options_leaf, options_buf = smelt.dialog.options(lines, {
       selected = #lines,
     })
 
@@ -42,7 +42,7 @@ smelt.cmd.register("rewind", function(args)
       })
     end
 
-    local picked = smelt.ui.dialog.open({
+    local picked = smelt.dialog.open({
       title  = "rewind",
       height = "50%",
       panels = { { leaf = options_leaf } },

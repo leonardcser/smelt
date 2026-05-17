@@ -36,7 +36,7 @@ local function run_picker_loop(opts)
       if r.action == "enter" and opts.on_enter then
         local ok, err = pcall(opts.on_enter, r.item, r.index)
         if not ok then
-          smelt.ui.notify_error("cmd.picker on_enter: " .. tostring(err))
+          smelt.notify.error("cmd.picker on_enter: " .. tostring(err))
           return
         end
       end

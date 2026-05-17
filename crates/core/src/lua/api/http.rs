@@ -5,7 +5,7 @@ use std::collections::HashMap;
 use std::time::Duration;
 
 use crate::http;
-use crate::lua::doc::register_fn;
+use crate::lua::doc::{record_module_doc, register_fn};
 use lua_doc_derive::lua_module;
 
 #[lua_module(
@@ -55,6 +55,10 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
         |_, ()| Ok(http::random_user_agent()),
     )?;
     let cache_tbl = lua.create_table()?;
+    record_module_doc(
+        "smelt.http.cache",
+        "Process-wide HTTP response cache. Plugins can stash bodies under arbitrary keys to dedupe repeat fetches across a session.",
+    );
     register_fn(
         &cache_tbl,
         "smelt.http.cache",

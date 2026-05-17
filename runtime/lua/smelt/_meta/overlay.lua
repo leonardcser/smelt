@@ -7,8 +7,8 @@
 ---@class smelt.overlay
 local overlay = {}
 
---- Open an overlay rendered from `opts.layout` (a `smelt.ui.layout` userdata) and return an `Overlay` userdata. `opts.name` opts the overlay into hot-reload survival.
----@see smelt.ui.layout
+--- Open an overlay rendered from `opts.layout` (a `smelt.overlay.layout` userdata) and return an `Overlay` userdata. `opts.name` opts the overlay into hot-reload survival.
+---@see smelt.overlay.layout
 ---@type fun(opts: table): smelt.overlay.Overlay
 overlay.new = nil
 

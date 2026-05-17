@@ -4,6 +4,8 @@
 
 **Tier:** `Host` — Available in every runtime, including headless mode.
 
+Process-wide HTTP response cache. Plugins can stash bodies under arbitrary keys to dedupe repeat fetches across a session.
+
 ## `smelt.http.cache.get`
 
 ```lua

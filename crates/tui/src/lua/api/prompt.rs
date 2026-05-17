@@ -76,6 +76,41 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
             Ok(())
         },
     )?;
+    register_ghost(lua, &prompt_tbl)?;
     smelt.set("prompt", prompt_tbl)?;
+    Ok(())
+}
+
+#[lua_module(
+    name = "smelt.prompt.ghost",
+    doc = "Ghost text on the prompt — dim suggestion shown after the cursor. UiHost-only."
+)]
+fn register_ghost(lua: &Lua, prompt_tbl: &mlua::Table) -> LuaResult<()> {
+    let ghost_tbl = lua.create_table()?;
+    register_ui_fn(
+        &ghost_tbl,
+        "smelt.prompt.ghost",
+        "set",
+        "Set the prompt's ghost text (the dim suggestion shown after the cursor). Replaces any existing ghost completion.",
+        &["text"],
+        lua,
+        |_, text: String| -> LuaResult<()> {
+            crate::lua::with_app(|app| app.set_prompt_completer(text));
+            Ok(())
+        },
+    )?;
+    register_ui_fn(
+        &ghost_tbl,
+        "smelt.prompt.ghost",
+        "clear",
+        "Clear the prompt's ghost text. Idempotent.",
+        &[],
+        lua,
+        |_, ()| -> LuaResult<()> {
+            crate::lua::with_app(|app| app.clear_prompt_completer());
+            Ok(())
+        },
+    )?;
+    prompt_tbl.set("ghost", ghost_tbl)?;
     Ok(())
 }

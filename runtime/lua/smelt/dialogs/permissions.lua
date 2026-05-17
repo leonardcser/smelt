@@ -42,7 +42,7 @@ smelt.cmd.register("permissions", function()
   smelt.spawn(function()
     local perms = smelt.permissions.list()
     if #(perms.session or {}) == 0 and #(perms.workspace or {}) == 0 then
-      smelt.ui.notify_error("no permissions")
+      smelt.notify.error("no permissions")
       return
     end
 
@@ -55,7 +55,7 @@ smelt.cmd.register("permissions", function()
       local labels = {}
       for _, it in ipairs(items) do table.insert(labels, it.label) end
 
-      local options_leaf = smelt.ui.dialog.options(labels)
+      local options_leaf = smelt.dialog.options(labels)
       local deleted_this_round = false
       local pending_d = false
       local function delete_selected(ctx)
@@ -68,7 +68,7 @@ smelt.cmd.register("permissions", function()
         ctx.close()
       end
 
-      smelt.ui.dialog.open({
+      smelt.dialog.open({
         title = {
           { text = "permissions ", bold = true },
           { text = "(d/bs: delete)", fg = "grey", dim = true },

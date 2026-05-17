@@ -1,4 +1,4 @@
-//! `smelt.ui.layout` — composable layout-tree primitives for overlays.
+//! `smelt.overlay.layout` — composable layout-tree primitives for overlays.
 //!
 //! Plugins build a layout tree from `leaf` / `vbox` / `hbox` and hand it to
 //! `smelt.overlay.new` via `opts.layout`. Each node is opaque userdata;
@@ -68,11 +68,11 @@ impl mlua::UserData for LuaUiLayout {}
 
 impl LuaType for LuaUiLayout {
     fn lua_type() -> String {
-        "smelt.ui.layout".into()
+        "smelt.overlay.layout".into()
     }
 }
 
-/// Resolve a `smelt.ui.layout.leaf(target)` argument to the raw u64 id
+/// Resolve a `smelt.overlay.layout.leaf(target)` argument to the raw u64 id
 /// stored in the layout node. Accepts a `Win` userdata, a paint id
 /// integer, or — as a convenience — a raw win/paint integer (legacy).
 fn resolve_leaf_target(target: &mlua::Value) -> mlua::Result<u64> {
@@ -82,13 +82,13 @@ fn resolve_leaf_target(target: &mlua::Value) -> mlua::Result<u64> {
                 return Ok(w.id.0);
             }
             Err(mlua::Error::external(
-                "smelt.ui.layout.leaf: expected a Win handle or paint id",
+                "smelt.overlay.layout.leaf: expected a Win handle or paint id",
             ))
         }
         mlua::Value::Integer(i) => Ok(*i as u64),
         mlua::Value::Number(n) => Ok(*n as u64),
         other => Err(mlua::Error::external(format!(
-            "smelt.ui.layout.leaf: expected Win handle or integer, got {}",
+            "smelt.overlay.layout.leaf: expected Win handle or integer, got {}",
             other.type_name()
         ))),
     }
@@ -134,22 +134,22 @@ fn parse_items(t: &mlua::Table, axis_key: &str, ctx: &str) -> mlua::Result<Vec<L
 }
 
 #[lua_module(
-    name = "smelt.ui.layout",
+    name = "smelt.overlay.layout",
     doc = "Composable layout-tree primitives (leaf/vbox/hbox) for overlays. The resulting userdata is passed to `smelt.overlay.new` via `opts.layout`."
 )]
-pub(super) fn register(lua: &Lua, smelt_ui: &mlua::Table) -> LuaResult<()> {
+pub(super) fn register(lua: &Lua, overlay_tbl: &mlua::Table) -> LuaResult<()> {
     let tbl = lua.create_table()?;
 
     register_ui_fn(
         &tbl,
-        "smelt.ui.layout",
+        "smelt.overlay.layout",
         "leaf",
         "Wrap a Win handle or paint id into a leaf node. `opts` accepts `border`, `title`, `collapse_when_empty` (force the slot to zero size when the wrapped window's buffer is empty).",
         &["win_or_paint", "opts"],
         lua,
         |_, (target, opts): (mlua::Value, Option<mlua::Table>)| -> LuaResult<LuaUiLayout> {
             let raw_id = resolve_leaf_target(&target)?;
-            let chrome = parse_node_chrome(opts.as_ref(), "smelt.ui.layout.leaf")
+            let chrome = parse_node_chrome(opts.as_ref(), "smelt.overlay.layout.leaf")
                 .map_err(mlua::Error::external)?;
             let collapse_when_empty = opts
                 .as_ref()
@@ -165,14 +165,14 @@ pub(super) fn register(lua: &Lua, smelt_ui: &mlua::Table) -> LuaResult<()> {
 
     register_ui_fn(
         &tbl,
-        "smelt.ui.layout",
+        "smelt.overlay.layout",
         "vbox",
         "Vertical container. `items` is an array of `{ child_layout, height = <constraint>, collapse_when_empty = bool? }`. `opts` accepts `border`, `title`, `gap` (cells between children).",
         &["items", "opts"],
         lua,
         |_, (items_tbl, opts): (mlua::Table, Option<mlua::Table>)| -> LuaResult<LuaUiLayout> {
-            let items = parse_items(&items_tbl, "height", "smelt.ui.layout.vbox")?;
-            let chrome = parse_node_chrome(opts.as_ref(), "smelt.ui.layout.vbox")
+            let items = parse_items(&items_tbl, "height", "smelt.overlay.layout.vbox")?;
+            let chrome = parse_node_chrome(opts.as_ref(), "smelt.overlay.layout.vbox")
                 .map_err(mlua::Error::external)?;
             let gap = opts
                 .as_ref()
@@ -189,14 +189,14 @@ pub(super) fn register(lua: &Lua, smelt_ui: &mlua::Table) -> LuaResult<()> {
 
     register_ui_fn(
         &tbl,
-        "smelt.ui.layout",
+        "smelt.overlay.layout",
         "hbox",
         "Horizontal container. `items` is an array of `{ child_layout, width = <constraint>, collapse_when_empty = bool? }`. `opts` accepts `border`, `title`, `gap`.",
         &["items", "opts"],
         lua,
         |_, (items_tbl, opts): (mlua::Table, Option<mlua::Table>)| -> LuaResult<LuaUiLayout> {
-            let items = parse_items(&items_tbl, "width", "smelt.ui.layout.hbox")?;
-            let chrome = parse_node_chrome(opts.as_ref(), "smelt.ui.layout.hbox")
+            let items = parse_items(&items_tbl, "width", "smelt.overlay.layout.hbox")?;
+            let chrome = parse_node_chrome(opts.as_ref(), "smelt.overlay.layout.hbox")
                 .map_err(mlua::Error::external)?;
             let gap = opts
                 .as_ref()
@@ -211,7 +211,7 @@ pub(super) fn register(lua: &Lua, smelt_ui: &mlua::Table) -> LuaResult<()> {
         },
     )?;
 
-    smelt_ui.set("layout", tbl)?;
+    overlay_tbl.set("layout", tbl)?;
     Ok(())
 }
 

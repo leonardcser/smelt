@@ -4,15 +4,15 @@
 -- Do not edit by hand; update the `register_fn` call in Rust instead.
 
 --- Ghost text on the prompt — dim suggestion shown after the cursor. UiHost-only.
----@class smelt.ui.ghost
-local ui_ghost = {}
+---@class smelt.prompt.ghost
+local prompt_ghost = {}
 
 --- Clear the prompt's ghost text. Idempotent.
 ---@type fun(): nil
-ui_ghost.clear = nil
+prompt_ghost.clear = nil
 
 --- Set the prompt's ghost text (the dim suggestion shown after the cursor). Replaces any existing ghost completion.
 ---@type fun(text: string): nil
-ui_ghost.set = nil
+prompt_ghost.set = nil
 
-return ui_ghost
+return prompt_ghost
