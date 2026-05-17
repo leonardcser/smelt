@@ -140,12 +140,25 @@ pub struct ResolvedSettings {
     pub redact_secrets: bool,
 }
 
+/// Startup defaults for new sessions, set from Lua via `smelt.defaults{...}`.
+/// Every field is a fallback — CLI flags and resumed-session state win.
+#[derive(Debug, Default, Clone)]
+pub struct DefaultsConfig {
+    /// Starting model reference (`"provider/model"` or bare model name).
+    pub model: Option<String>,
+    /// Starting agent mode: `"normal"`, `"plan"`, `"apply"`, `"yolo"`.
+    pub mode: Option<String>,
+    /// Starting reasoning effort: `"off"`, `"low"`, `"medium"`, `"high"`, `"max"`.
+    pub reasoning_effort: Option<String>,
+}
+
 #[derive(Debug, Default)]
 pub struct Config {
     pub providers: Vec<ProviderConfig>,
     pub settings: SettingsConfig,
     /// MCP server configurations.
     pub mcp: std::collections::HashMap<String, crate::mcp::McpServerConfig>,
+    pub defaults: DefaultsConfig,
 }
 
 /// A resolved model entry combining provider connection info with model config.

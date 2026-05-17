@@ -99,6 +99,7 @@ pub struct LuaShared {
     pub permission_rules: Mutex<Option<crate::permissions::rules::RawPerms>>,
     pub mcp_configs: Mutex<HashMap<String, crate::mcp::McpServerConfig>>,
     pub settings_overrides: Mutex<HashMap<String, bool>>,
+    pub defaults: Mutex<crate::config::DefaultsConfig>,
     pub tool_defaults: Mutex<crate::permissions::rules::ToolDefaults>,
     pub messages: Mutex<crate::messages::Messages>,
     /// Bundled `smelt.<dotted>` module names the user has opted out of via
@@ -211,6 +212,7 @@ impl Default for LuaShared {
             permission_rules: Mutex::new(None),
             mcp_configs: Mutex::new(HashMap::new()),
             settings_overrides: Mutex::new(HashMap::new()),
+            defaults: Mutex::new(crate::config::DefaultsConfig::default()),
             tool_defaults: Mutex::new(crate::permissions::rules::ToolDefaults::default()),
             messages: Mutex::new(crate::messages::Messages::new()),
             disabled_modules: Mutex::new(HashSet::new()),

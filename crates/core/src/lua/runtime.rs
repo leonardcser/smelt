@@ -430,10 +430,17 @@ impl LuaRuntime {
                 eprintln!("settings override: {e}");
             }
         }
+        let defaults = self
+            .shared
+            .defaults
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone();
         crate::config::Config {
             providers,
             mcp,
             settings,
+            defaults,
         }
     }
 

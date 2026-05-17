@@ -14,6 +14,7 @@ pub(crate) mod cell;
 mod cli;
 mod clipboard;
 mod cmd;
+mod defaults;
 mod frontend;
 mod fs;
 mod fuzzy;
@@ -128,6 +129,7 @@ pub fn register_host_api(
     cli::register(lua, smelt, shared)?;
     clipboard::register(lua, smelt)?;
     cmd::register(lua, smelt, shared)?;
+    defaults::register(lua, smelt, shared)?;
     frontend::register(lua, smelt)?;
     fs::register(lua, smelt, shared)?;
     fuzzy::register(lua, smelt)?;

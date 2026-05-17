@@ -37,10 +37,13 @@ pub struct ResolvedStartup {
     pub cache: smelt_core::state::SessionCache,
 }
 
-/// Resolve the active model: CLI `--model` > cached selection > first in config.
-/// Returns `None` when the CLI model is absent from resolved models and `--api-base` is also set.
+/// Resolve the active model. Priority: CLI `--model` > `smelt.defaults{model=...}`
+/// in init.lua > cached `selected_model` from the previous session > first in
+/// config. Returns `None` when the CLI model is absent from resolved models
+/// and `--api-base` is also set.
 fn resolve_model_reference(
     args: &Args,
+    cfg: &smelt_core::config::Config,
     available_models: &[smelt_core::config::ResolvedModel],
     cache: &smelt_core::state::SessionCache,
 ) -> Option<smelt_core::config::ResolvedModel> {
@@ -58,6 +61,8 @@ fn resolve_model_reference(
 
     if let Some(ref cli_model) = args.model {
         pick(cli_model, args.api_base.is_some())
+    } else if let Some(default) = cfg.defaults.model.as_deref() {
+        pick(default, false)
     } else if let Some(ref cached) = cache.selected_model {
         smelt_core::config::resolve_model_ref(available_models, cached)
             .ok()
@@ -131,7 +136,7 @@ pub async fn resolve(
     let mut startup_auth_error: Option<String> = None;
 
     let (api_base, api_key, api_key_env, mut provider_type, model, mut model_config) = {
-        let resolved = resolve_model_reference(args, &available_models, &cache);
+        let resolved = resolve_model_reference(args, &cfg, &available_models, &cache);
 
         if let Some(r) = resolved {
             let base = args.api_base.clone().unwrap_or_else(|| r.api_base.clone());
@@ -209,12 +214,16 @@ pub async fn resolve(
 
     let auxiliary = engine::AuxiliaryModelConfig::default();
 
-    let mode_override = args.mode.as_deref().map(|s| {
-        AgentMode::parse(s).unwrap_or_else(|| {
-            eprintln!("warning: unknown mode '{s}', defaulting to normal");
-            AgentMode::Normal
-        })
-    });
+    let mode_override = args
+        .mode
+        .as_deref()
+        .or(cfg.defaults.mode.as_deref())
+        .map(|s| {
+            AgentMode::parse(s).unwrap_or_else(|| {
+                eprintln!("warning: unknown mode '{s}', defaulting to normal");
+                AgentMode::Normal
+            })
+        });
 
     let mode_cycle = args
         .mode_cycle
@@ -227,6 +236,12 @@ pub async fn resolve(
         .reasoning_effort
         .as_deref()
         .and_then(ReasoningEffort::parse)
+        .or_else(|| {
+            cfg.defaults
+                .reasoning_effort
+                .as_deref()
+                .and_then(ReasoningEffort::parse)
+        })
         .unwrap_or(cache.reasoning_effort);
 
     let provider_kind = engine::ProviderKind::from_config(&provider_type);
