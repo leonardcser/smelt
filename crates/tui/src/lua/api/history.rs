@@ -22,8 +22,13 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
         &[],
         lua,
         |lua, ()|  -> LuaResult<mlua::Table>{
-            let entries = crate::lua::try_with_app(|app| app.input_history.entries().to_vec())
-                .unwrap_or_default();
+            let entries = crate::lua::try_with_app(|app| {
+                app.input_history
+                    .entries()
+                    .map(String::from)
+                    .collect::<Vec<String>>()
+            })
+            .unwrap_or_default();
             let out = lua.create_table()?;
             for (i, entry) in entries.into_iter().enumerate() {
                 out.set(i + 1, entry)?;
@@ -39,8 +44,13 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
         &["query"],
         lua,
         |lua, query: String|  -> LuaResult<mlua::Table>{
-            let entries = crate::lua::try_with_app(|app| app.input_history.entries().to_vec())
-                .unwrap_or_default();
+            let entries = crate::lua::try_with_app(|app| {
+                app.input_history
+                    .entries()
+                    .map(String::from)
+                    .collect::<Vec<String>>()
+            })
+            .unwrap_or_default();
             // Entries are oldest-first; iterate reversed and dedupe so recent ranks highest.
             let mut seen = std::collections::HashSet::new();
             let mut scored: Vec<(u32, usize, usize)> = Vec::new();
