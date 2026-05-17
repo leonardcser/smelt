@@ -316,15 +316,19 @@ pub(crate) fn clamp_normal(buf: &str, cpos: &mut usize) {
         } else {
             prev_char_boundary(buf, buf.len())
         };
-        return;
-    }
-    // Cursor must not sit on an interior '\n'.
-    if buf.as_bytes()[*cpos] == b'\n' && *cpos > 0 {
+    } else if buf.as_bytes()[*cpos] == b'\n' && *cpos > 0 {
+        // Cursor must not sit on an interior '\n'.
         let sol = line_start(buf, *cpos);
         if *cpos > sol {
             *cpos = prev_char_boundary(buf, *cpos);
         }
     }
+    debug_assert!(
+        *cpos <= buf.len() && buf.is_char_boundary(*cpos),
+        "clamp_normal postcondition: cpos {} not on char boundary in buf len {}",
+        *cpos,
+        buf.len()
+    );
 }
 
 #[cfg(test)]

@@ -554,6 +554,18 @@ impl Window {
             };
         }
         self.vim_state.clamp_visual_anchor(source);
+        debug_assert!(
+            self.cpos <= len && source.is_char_boundary(self.cpos),
+            "clamp_anchors_to_source postcondition: cpos {} not on char boundary in source len {}",
+            self.cpos,
+            len
+        );
+        debug_assert!(
+            self.selection_anchor
+                .is_none_or(|a| a <= len && source.is_char_boundary(a)),
+            "clamp_anchors_to_source postcondition: selection_anchor {:?} not on char boundary",
+            self.selection_anchor
+        );
     }
 
     /// Resolve the shift-selection range against `src`. Both endpoints are clamped to
