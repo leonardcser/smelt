@@ -262,8 +262,7 @@ impl PromptState {
             &ctx.buf.attachment_ids,
         );
         if let Some(entry) = ctx.buf.history.undo(current) {
-            self.install_source(ctx, entry.buf, entry.cpos);
-            ctx.buf.text_mut().set_ids(entry.attachments);
+            self.install_source(ctx, entry.buf, entry.cpos, entry.attachments);
         }
         self.recompute_completer(ctx.as_ref());
     }

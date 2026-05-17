@@ -48,7 +48,7 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
         |_, text: String|  -> LuaResult<()>{
             crate::lua::with_app(|app| {
                 let mut pctx = crate::input::prompt_ctx_mut(&mut app.ui);
-                app.input.replace_text(&mut pctx, text, None);
+                app.input.replace_text(&mut pctx, text);
             });
             Ok(())
         },

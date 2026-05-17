@@ -254,46 +254,71 @@ impl PromptState {
         clipboard.kill_ring.record_clipboard_write(text);
     }
 
-    /// Single seam for replacing `source` wholesale. Clamps `cpos` to a char
-    /// boundary, clears `selection_anchor`, and closes the completer — its
-    /// anchor was indexed into the old source and would otherwise outlive
-    /// it. Callers that still want a completer call `recompute_completer` /
-    /// Wholesale source swap. Resets every piece of state whose validity
-    /// depended on the old bytes: cpos snap, selection anchor, attachment
-    /// ids, vim visual anchor, completer. Callers that need a fresh
-    /// attachment set (e.g. rewind, stash restore) must repopulate
-    /// `attachment_ids` after this returns. Paste-state and undo differ
-    /// per site so callers still manage those themselves.
-    pub(crate) fn install_source(&mut self, ctx: &mut PromptCtx<'_>, text: String, cpos: usize) {
-        ctx.buf.set_source(text);
+    /// Wholesale buffer swap. Installs `text` + `ids` atomically (via
+    /// `AttachedTextMut::install`, which debug-asserts that marker count in
+    /// `text` matches `ids.len()`). Clamps `cpos` to a char boundary, clears
+    /// selection + vim visual anchors, closes the completer.
+    ///
+    /// Passing `ids = vec![]` with marker-containing text trips the debug
+    /// assert — exactly what you want, since the caller would otherwise be
+    /// silently dropping attachment ids while leaving their markers in
+    /// source. Callers that need to preserve attachments hand the
+    /// corresponding `Vec<AttachmentId>` in; those that genuinely want a
+    /// clean buffer pass `vec![]` and a marker-free `text`.
+    pub(crate) fn install_source(
+        &mut self,
+        ctx: &mut PromptCtx<'_>,
+        text: String,
+        cpos: usize,
+        ids: Vec<AttachmentId>,
+    ) {
+        ctx.buf.text_mut().install(text, ids);
         let source = ctx.buf.source();
         ctx.win.cpos = crate::smelt_term::text::snap(source, cpos);
         ctx.win.selection_anchor = None;
         ctx.win.vim_state.clear_visual_anchor();
-        ctx.buf.attachment_ids.clear();
         self.close_completer();
     }
 
     pub(crate) fn clear(&mut self, ctx: &mut PromptCtx<'_>) {
-        self.install_source(ctx, String::new(), 0);
+        self.install_source(ctx, String::new(), 0, Vec::new());
         self.from_paste = false;
         // Stash and store are intentionally preserved.
     }
 
-    /// Replace the buffer wholesale: snapshot undo, install new source
-    /// (which resets attachments/selection/vim anchor), reset paste-state,
-    /// re-derive completer. Direct `source` writes bypass these invariants.
-    pub(crate) fn replace_text(
-        &mut self,
-        ctx: &mut PromptCtx<'_>,
-        text: String,
-        cursor: Option<usize>,
-    ) {
+    /// Wholesale buffer swap from user-supplied plain text (no attachments).
+    /// Snapshots undo, installs new source with empty `attachment_ids`,
+    /// cursor at end, refreshes completer.
+    ///
+    /// Intended for callers feeding text from outside the prompt: Lua
+    /// `smelt.prompt.set_text`, AcceptGhostText, `$EDITOR` re-import.
+    /// If `text` contains an `ATTACHMENT_MARKER`, the underlying
+    /// `AttachedTextMut::install` debug-asserts (the caller can't both
+    /// claim "no attachments" and carry markers in the bytes).
+    pub(crate) fn replace_text(&mut self, ctx: &mut PromptCtx<'_>, text: String) {
         self.save_undo(ctx);
-        let cpos = cursor.unwrap_or(text.len());
-        self.install_source(ctx, text, cpos);
-        self.from_paste = false;
+        let cpos = text.len();
+        self.install_source(ctx, text, cpos, Vec::new());
         self.recompute_completer(ctx.as_ref());
+    }
+
+    /// Marker-stripped view of the prompt source for handoff to `History`.
+    /// History stores its draft slot verbatim from whatever the caller hands
+    /// in; persisting raw `ATTACHMENT_MARKER` bytes would let `History::down`
+    /// return a marker that no longer has a matching id, breaking INV-15.
+    /// Every history hand-off (current source or recalled entry) flows
+    /// through `Self::clean_for_history`.
+    fn clean_for_history(s: &str) -> String {
+        s.replace(ATTACHMENT_MARKER, "")
+    }
+
+    /// Install a marker-stripped history entry into the prompt buffer.
+    /// `end_cursor = true` places the cursor at end (used by history-down
+    /// where shells conventionally land you after the recalled text).
+    fn install_history_entry(&mut self, ctx: &mut PromptCtx<'_>, entry: &str, end_cursor: bool) {
+        let text = Self::clean_for_history(entry);
+        let cpos = if end_cursor { text.len() } else { 0 };
+        self.install_source(ctx, text, cpos, Vec::new());
     }
 
     /// Prepend `prefix` to the buffer, snapshot undo, shift cpos forward.
@@ -317,14 +342,13 @@ impl PromptState {
     /// Toggle stash. Attachments are cloned out of the store so the stash survives store clears.
     fn toggle_stash(&mut self, ctx: &mut PromptCtx<'_>) {
         if let Some(snap) = self.stash.take() {
-            self.install_source(ctx, snap.buf, snap.cpos);
-            ctx.buf.attachment_ids = snap
+            let ids: Vec<_> = snap
                 .attachments
                 .into_iter()
                 .map(|a| self.store.lock().unwrap().insert(a))
                 .collect();
+            self.install_source(ctx, snap.buf, snap.cpos, ids);
             self.from_paste = snap.from_paste;
-            self.close_completer();
         } else {
             let source_empty = ctx.buf.source().is_empty();
             let no_attachments = ctx.buf.attachment_ids.is_empty();
@@ -353,12 +377,12 @@ impl PromptState {
 
     pub(crate) fn restore_stash(&mut self, ctx: &mut PromptCtx<'_>) {
         if let Some(snap) = self.stash.take() {
-            self.install_source(ctx, snap.buf, snap.cpos);
-            ctx.buf.attachment_ids = snap
+            let ids: Vec<_> = snap
                 .attachments
                 .into_iter()
                 .map(|a| self.store.lock().unwrap().insert(a))
                 .collect();
+            self.install_source(ctx, snap.buf, snap.cpos, ids);
             self.from_paste = snap.from_paste;
         }
     }
@@ -380,8 +404,7 @@ impl PromptState {
             }
         }
         let cpos = text.len();
-        self.install_source(ctx, text, cpos);
-        ctx.buf.attachment_ids = ids;
+        self.install_source(ctx, text, cpos, ids);
     }
 
     /// Expand attachment markers to text. Image markers are stripped (data flows via `Content::Parts`).
@@ -636,9 +659,11 @@ impl PromptState {
                     ctx.win.cpos = new_pos;
                     self.recompute_completer(ctx.as_ref());
                     Action::Redraw
-                } else if let Some(entry) = history.and_then(|h| h.up(ctx.buf.source())) {
-                    let text = entry.replace(ATTACHMENT_MARKER, "");
-                    self.install_source(ctx, text, 0);
+                } else if let Some(entry) =
+                    history.and_then(|h| h.up(&Self::clean_for_history(ctx.buf.source())))
+                {
+                    let entry = entry.to_string();
+                    self.install_history_entry(ctx, &entry, false);
                     ctx.win.curswant = None;
                     self.sync_completer(ctx.as_ref());
                     Action::Redraw
@@ -657,9 +682,8 @@ impl PromptState {
                     self.recompute_completer(ctx.as_ref());
                     Action::Redraw
                 } else if let Some(entry) = history.and_then(|h| h.down()) {
-                    let s = entry.replace(ATTACHMENT_MARKER, "");
-                    let cpos = s.len();
-                    self.install_source(ctx, s, cpos);
+                    let entry = entry.to_string();
+                    self.install_history_entry(ctx, &entry, true);
                     ctx.win.curswant = None;
                     self.sync_completer(ctx.as_ref());
                     Action::Redraw
@@ -690,9 +714,11 @@ impl PromptState {
                 Action::Redraw
             }
             KeyAction::HistoryPrev => {
-                if let Some(entry) = history.and_then(|h| h.up(ctx.buf.source())) {
-                    let text = entry.replace(ATTACHMENT_MARKER, "");
-                    self.install_source(ctx, text, 0);
+                if let Some(entry) =
+                    history.and_then(|h| h.up(&Self::clean_for_history(ctx.buf.source())))
+                {
+                    let entry = entry.to_string();
+                    self.install_history_entry(ctx, &entry, false);
                     self.sync_completer(ctx.as_ref());
                     Action::Redraw
                 } else {
@@ -701,9 +727,8 @@ impl PromptState {
             }
             KeyAction::HistoryNext => {
                 if let Some(entry) = history.and_then(|h| h.down()) {
-                    let s = entry.replace(ATTACHMENT_MARKER, "");
-                    let cpos = s.len();
-                    self.install_source(ctx, s, cpos);
+                    let entry = entry.to_string();
+                    self.install_history_entry(ctx, &entry, true);
                     self.sync_completer(ctx.as_ref());
                     Action::Redraw
                 } else {
@@ -2566,7 +2591,6 @@ mod tests {
                 win: &mut input.win,
             },
             String::new(),
-            None,
         );
         assert_eq!(input.win.selection_anchor, None);
     }
@@ -2667,6 +2691,7 @@ mod tests {
             },
             "héllo".to_string(),
             2,
+            Vec::new(),
         ); // mid 'é'
         assert_eq!(input.win.cpos, 1, "cpos must snap to a char boundary");
     }

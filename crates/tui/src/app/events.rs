@@ -356,7 +356,7 @@ impl TuiApp {
                         let full = self.take_prompt_completer().unwrap();
                         let line = full.lines().next().unwrap_or(&full).to_string();
                         let mut pctx = crate::input::prompt_ctx_mut(&mut self.ui);
-                        self.input.replace_text(&mut pctx, line, None);
+                        self.input.replace_text(&mut pctx, line);
                         return EventOutcome::Redraw;
                     }
                     Some(
@@ -611,7 +611,7 @@ impl TuiApp {
             Ok(s) if s.success() => match std::fs::read_to_string(tmp.path()) {
                 Ok(new) => {
                     let mut pctx = crate::input::prompt_ctx_mut(&mut self.ui);
-                    self.input.replace_text(&mut pctx, new, None);
+                    self.input.replace_text(&mut pctx, new);
                 }
                 Err(e) => self.notify_error(format!("read tmp: {e}")),
             },

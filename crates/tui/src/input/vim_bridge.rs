@@ -77,18 +77,20 @@ impl PromptState {
                 }
             }
             vim::Action::HistoryPrev => {
-                if let Some(entry) = history.as_deref_mut().and_then(|h| h.up(ctx.buf.source())) {
-                    let text = entry.replace(super::ATTACHMENT_MARKER, "");
-                    self.install_source(ctx, text, 0);
+                if let Some(entry) = history
+                    .as_deref_mut()
+                    .and_then(|h| h.up(&Self::clean_for_history(ctx.buf.source())))
+                {
+                    let entry = entry.to_string();
+                    self.install_history_entry(ctx, &entry, false);
                     self.sync_completer(ctx.as_ref());
                 }
                 VimBridgeResult::Handled(Action::Redraw)
             }
             vim::Action::HistoryNext => {
                 if let Some(entry) = history.as_deref_mut().and_then(|h| h.down()) {
-                    let s = entry.replace(super::ATTACHMENT_MARKER, "");
-                    let cpos = s.len();
-                    self.install_source(ctx, s, cpos);
+                    let entry = entry.to_string();
+                    self.install_history_entry(ctx, &entry, true);
                     self.sync_completer(ctx.as_ref());
                 }
                 VimBridgeResult::Handled(Action::Redraw)
