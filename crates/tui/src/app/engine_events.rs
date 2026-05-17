@@ -236,6 +236,12 @@ impl TuiApp {
                 request_id,
             })),
             EngineEvent::Retrying { delay_ms, attempt } => {
+                // The retry restarts the turn from the last committed
+                // message — any partial streaming text/thinking captured
+                // before the failure is obsolete and must not bleed into
+                // the next attempt's stream.
+                self.flush_streaming_thinking();
+                self.flush_streaming_text();
                 self.working.begin(TurnPhase::Retrying {
                     delay: Duration::from_millis(delay_ms),
                     attempt,
