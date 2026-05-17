@@ -277,8 +277,8 @@ fn render_leaf(
 
 /// Render a `Diff` spec leaf directly into the worker's block buffer. The
 /// 2-cell indent gets baked into the diff renderer (every row gets it), so
-/// `fill_line_bg` survives the projection seam — bg, indent, line numbers,
-/// and content all share one render pass.
+/// bg, indent, line numbers, content, and trailing pad all share one render
+/// pass and survive the projection seam intact.
 fn render_diff_spec(
     out: &mut LineBuilder,
     spec: &DiffSpec,

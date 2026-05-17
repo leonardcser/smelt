@@ -176,8 +176,12 @@ pub enum SourceLine {
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct LineDecoration {
     pub gutter_bg: Option<Color>,
+    /// Row-level bg fill, painted across the entire slice width by `Window::render`.
+    /// Set via `Buffer::set_decoration` for buffers that aren't built through
+    /// `LineBuilder` (e.g. the cmdline status bar). Transcript content blocks
+    /// pad with inline styled spaces via `LineBuilder::pad_row_to_layout_width`
+    /// instead, so the bg, content, and chrome cells share one mechanism.
     pub fill_bg: Option<Color>,
-    pub fill_right_margin: u16,
     pub soft_wrapped: bool,
     pub source_text: Option<String>,
     /// Logical line mapping for this row. `None` = fall back to `row + 1`.
@@ -1141,7 +1145,6 @@ impl Buffer {
         static DEFAULT: LineDecoration = LineDecoration {
             gutter_bg: None,
             fill_bg: None,
-            fill_right_margin: 0,
             soft_wrapped: false,
             source_text: None,
             source_line: None,

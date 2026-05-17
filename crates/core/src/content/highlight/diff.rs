@@ -8,7 +8,7 @@ use std::path::Path;
 use syntect::easy::HighlightLines;
 
 use super::{syntax_theme, GutterStyle, SYNTAX_SET};
-use crate::content::builder::{display_width, LineBuilder};
+use crate::content::builder::LineBuilder;
 use smelt_buffer::buffer::SpanMeta;
 use crate::content::default_width;
 use crate::style::Color;
@@ -492,8 +492,9 @@ pub fn print_cached_inline_diff(
     } else {
         out.layout_width() as usize
     };
-    let chrome_cells = indent + prefix_cells + sign_prefix;
-    let max_content = layout_width.saturating_sub(chrome_cells).max(1);
+    let max_content = layout_width
+        .saturating_sub(indent + prefix_cells + sign_prefix)
+        .max(1);
     let blank_prefix = " ".repeat(prefix_cells);
     // Content re-wraps per row at `layout_width`, so the layout is width-pinned.
     out.mark_wrapped();
@@ -568,9 +569,10 @@ pub fn print_cached_inline_diff(
                 };
                 for (vi, vrow) in visual_rows.iter().enumerate() {
                     // For delete/insert rows the bg extends under the indent
-                    // (the leftmost cells of the row), so the strip reads as a
-                    // single change-band. Indent cells stay non-selectable —
-                    // setting bg before `print_gutter` keeps both properties.
+                    // (the leftmost cells of the row) and across the trailing
+                    // pad, so the strip reads as a single change-band. Indent
+                    // and pad cells stay non-selectable; `pad_row_to_layout_width`
+                    // emits the trailing spaces with the active bg.
                     if let Some(bgv) = bg {
                         out.set_bg(bgv);
                     }
@@ -596,16 +598,8 @@ pub fn print_cached_inline_diff(
                             out.print("  ");
                         }
                         print_cached_spans(out, vrow, bg);
-                        // Trailing bg pad — non-selectable so the cursor can't
-                        // land on it and selection/copy skip it like a gutter.
-                        let chunk_w: usize =
-                            vrow.iter().map(|s| display_width(&s.text)).sum();
-                        let trailing = layout_width
-                            .saturating_sub(chrome_cells + chunk_w);
-                        if trailing > 0 {
-                            out.set_bg(bgv);
-                            out.print_with_meta(&" ".repeat(trailing), pad_meta.clone());
-                        }
+                        out.set_bg(bgv);
+                        out.pad_row_to_layout_width(pad_meta.clone());
                         out.reset_style();
                     } else {
                         out.print("  ");
@@ -783,7 +777,7 @@ fn paint_diff_line(
     source_line: smelt_buffer::buffer::SourceLine,
 ) {
     if let Some(bg) = bg {
-        out.fill_line_bg(bg, 0);
+        out.fill_line_bg(bg);
     }
     out.set_source_line(source_line);
     let line_with_nl = format!("{}\n", text);

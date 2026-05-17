@@ -188,21 +188,37 @@ impl<'a> LineBuilder<'a> {
         self.was_wrapped = true;
     }
 
-    /// Fill the row remainder with `bg` up to the right edge, leaving `right_margin` columns blank.
-    pub fn fill_line_bg(&mut self, bg: Color, right_margin: u16) {
-        // A row has at most one fill; catch double-calls in debug builds.
+    /// Emit trailing spaces with `meta` and the currently active style until
+    /// the row reaches `layout_width()`. The primitive for "fill row to the
+    /// right edge with the active bg" — callers don't recompute trailing
+    /// widths per row, and the cells inherit whatever style is set (bg, dim,
+    /// …). Pass `SpanMeta { selectable: false, copy_as: None }` for chrome
+    /// pad so cursor/selection/copy skip it.
+    ///
+    /// Use this when the row text needs the pad cells *in the buffer* (so
+    /// inline highlights/selection cover them). For buffers whose text must
+    /// stay clean — set the bg via `fill_line_bg` and let paint draw it.
+    pub fn pad_row_to_layout_width(&mut self, meta: SpanMeta) {
+        let remaining = self
+            .layout_width
+            .saturating_sub(self.cur_visible_cols) as usize;
+        if remaining == 0 {
+            return;
+        }
+        self.print_with_meta(&" ".repeat(remaining), meta);
+    }
+
+    /// Record a row-level bg fill: paint draws `bg` across the full slice
+    /// width without writing trailing cells into the buffer text. Sister
+    /// primitive to `pad_row_to_layout_width`; pick this when the buffer
+    /// text needs to stay free of trailing pad (e.g. split-diff rows that
+    /// are read back as logical content).
+    pub fn fill_line_bg(&mut self, bg: Color) {
         debug_assert!(
             self.cur_decoration.fill_bg.is_none(),
             "fill_line_bg called twice on the same row"
         );
         self.cur_decoration.fill_bg = Some(bg);
-        self.cur_decoration.fill_right_margin = right_margin;
-    }
-
-    /// Like `fill_line_bg` but resolves the background from a theme group.
-    pub fn fill_line_bg_group(&mut self, group: HlGroup, right_margin: u16) {
-        let bg = self.theme.resolve(group).bg.unwrap_or(Color::Reset);
-        self.fill_line_bg(bg, right_margin);
     }
 
     pub fn set_gutter_bg(&mut self, bg: Color) {
@@ -483,7 +499,6 @@ fn style_has_axis_mods(s: &Style) -> bool {
 fn has_decoration(dec: &LineDecoration) -> bool {
     dec.gutter_bg.is_some()
         || dec.fill_bg.is_some()
-        || dec.fill_right_margin != 0
         || dec.soft_wrapped
         || dec.source_text.is_some()
 }
@@ -760,16 +775,6 @@ mod tests {
         assert_eq!(meta_copy.as_deref(), Some("real"));
     }
 
-    #[test]
-    fn fill_line_bg_group_resolves_from_theme_or_falls_back_to_reset() {
-        let block = test_util::render_test(80, |out| {
-            out.print("x");
-            // Unknown group -> theme.resolve returns Style::default(), bg=None -> Color::Reset.
-            out.fill_line_bg_group(intern("DefinitelyMissingGroup_xyz"), 0);
-            out.newline();
-        });
-        assert_eq!(block.lines.len(), 1);
-    }
 
     #[test]
     fn set_gutter_bg_and_group_set_decoration() {

@@ -53,12 +53,10 @@ pub(super) fn render(
         selectable: false,
         copy_as: None,
     };
-    let row_w = width.max(1);
     let blank_row = |out: &mut LineBuilder| {
         out.set_hl(user_bg);
-        out.print_with_meta(&" ".repeat(row_w), pad_meta.clone());
+        out.pad_row_to_layout_width(pad_meta.clone());
         out.reset_style();
-        out.set_gutter_bg_group(user_bg);
         out.newline();
     };
     blank_row(out);
@@ -74,15 +72,13 @@ pub(super) fn render(
             out.mark_wrapped();
         }
         for chunk in &chunks {
-            let chunk_w = display_width(chunk);
-            let trailing = row_w.saturating_sub(1 + chunk_w);
             out.set_hl(user_bg);
             out.print_with_meta(" ", pad_meta.clone());
             out.set_bold();
             print_highlights(out, chunk, image_labels, is_command);
-            out.print_with_meta(&" ".repeat(trailing), pad_meta.clone());
+            out.set_hl(user_bg);
+            out.pad_row_to_layout_width(pad_meta.clone());
             out.reset_style();
-            out.set_gutter_bg_group(user_bg);
             out.newline();
             rows += 1;
         }
