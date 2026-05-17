@@ -6,6 +6,17 @@
 
 Yield-then-resume coroutine bridge: alloc and resume external tasks.
 
+## `smelt.task.all`
+
+```lua
+fun(...: fun(): any): any[]
+```
+
+Run `fns` concurrently; wait for all to finish. Returns an array of
+results in the same order as the input. Errors from any branch
+propagate; the remaining branches still complete and their results
+are discarded. Must run inside a yielding context.
+
 ## `smelt.task.alloc`
 
 ```lua
@@ -27,6 +38,17 @@ the resolved value. Raises `cancelled` if the task is cancelled while
 parked. Plugin authors bridging custom Rust extensions use this to
 avoid hand-rolling the alloc + start + wait dance.
 
+## `smelt.task.race`
+
+```lua
+fun(...: fun(): any): { index: integer, result: any }
+```
+
+Run `fns` concurrently; first to return wins. Returns
+`{ index, result }` of the winner; all others are cancelled. Errors
+from any branch propagate (losers cancelled first). Must run inside
+a yielding context.
+
 ## `smelt.task.resume`
 
 ```lua
@@ -34,6 +56,18 @@ fun(id: integer, value: any): nil
 ```
 
 Resume the yielded task `id` with `value`. The runtime delivers `value` as the return of the matching `coroutine.yield`.
+
+## `smelt.task.timeout`
+
+```lua
+fun(ms: integer, fn: fun(): any): any, string?
+```
+
+Run `fn` with an `ms`-millisecond deadline. Returns `(result, nil)` if
+`fn` finishes in time, or `(nil, "timeout")` if the deadline fires
+first — in which case `fn`'s coroutine is cancelled (any in-flight
+`smelt.sleep` / `task.wait` raises `cancelled` and the coroutine
+unwinds). Must run inside a yielding context.
 
 ## `smelt.task.wait`
 

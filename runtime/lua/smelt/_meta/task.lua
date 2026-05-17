@@ -7,6 +7,13 @@
 ---@class smelt.task
 local task = {}
 
+--- Run `fns` concurrently; wait for all to finish. Returns an array of
+--- results in the same order as the input. Errors from any branch
+--- propagate; the remaining branches still complete and their results
+--- are discarded. Must run inside a yielding context.
+---@type fun(...: fun(): any): any[]
+task.all = nil
+
 --- Allocate and return a fresh external task id used to pair a yielded coroutine with a later `task.resume` call.
 ---@type fun(): integer
 task.alloc = nil
@@ -20,9 +27,24 @@ task.alloc = nil
 ---@type fun(start: fun(id: integer)): any
 task.external = nil
 
+--- Run `fns` concurrently; first to return wins. Returns
+--- `{ index, result }` of the winner; all others are cancelled. Errors
+--- from any branch propagate (losers cancelled first). Must run inside
+--- a yielding context.
+---@type fun(...: fun(): any): { index: integer, result: any }
+task.race = nil
+
 --- Resume the yielded task `id` with `value`. The runtime delivers `value` as the return of the matching `coroutine.yield`.
 ---@type fun(id: integer, value: any): nil
 task.resume = nil
+
+--- Run `fn` with an `ms`-millisecond deadline. Returns `(result, nil)` if
+--- `fn` finishes in time, or `(nil, "timeout")` if the deadline fires
+--- first — in which case `fn`'s coroutine is cancelled (any in-flight
+--- `smelt.sleep` / `task.wait` raises `cancelled` and the coroutine
+--- unwinds). Must run inside a yielding context.
+---@type fun(ms: integer, fn: fun(): any): any, string?
+task.timeout = nil
 
 --- Park the running task until `smelt.task.resume(id, value)` fires. Returns the resumed value.
 ---@type fun(id: integer): any

@@ -12,7 +12,9 @@ local tools = {}
 ---@type fun(name: string, args: table?, parent_call_id: string?): { content: string, is_error: boolean?, metadata: table? }
 tools.call = nil
 
----@type fun(args: any): any
+--- Best-effort one-liner summary of a tool call's arguments. Picks a sensible field from `args` in priority order: `questions` (returns `"N question(s)"`), `pattern` (optionally suffixed with ` in <display path>`), then the first non-empty `command | file_path | notebook_path | path | url | query | name | id`. Returns `""` if nothing matches. Used as the default `summary` field on tools registered via `smelt.tools.register`.
+---@see smelt.tools.register
+---@type fun(args: table?): string
 tools.default_summary = nil
 
 --- Return the names of every registered plugin tool, sorted.

@@ -268,16 +268,45 @@ that's how you tell which side of the line you're on.
 
 `smelt.spawn(fn)` returns a `Reg` whose `:remove()` cancels the coroutine —
 any in-flight `smelt.sleep` / `smelt.task.wait` raises `cancelled` and the
-task unwinds. Compose your own teardown with `smelt.reg.new(undo)` when a
-plugin owns several reactive subscriptions:
+task unwinds. When a plugin owns several reactive subscriptions, combine
+them with `smelt.reg.compose(...)` and return one handle:
 
 ```lua
-local task = smelt.spawn(function() while true do ... end end)
-local key  = smelt.win.cur():key("n", "<leader>x", handler)
-return smelt.reg.new(function()
-  task:remove()
-  key:remove()
+return smelt.reg.compose(
+  smelt.win.cur():key("n", "<leader>x", handler),
+  smelt.fs.watch(path, on_change),
+  smelt.timer.every(1000, tick)
+)
+```
+
+`smelt.reg.new(fn)` wraps an arbitrary teardown function as a `Reg` for
+cases that need custom cleanup logic.
+
+## Concurrency combinators
+
+`smelt.task.timeout`, `smelt.task.race`, and `smelt.task.all` compose
+multiple coroutines through `smelt.spawn` + `smelt.task.external`. All
+require a yielding context.
+
+```lua
+-- Bound a yielding op with a deadline.
+local out, err = smelt.task.timeout(2000, function()
+  return smelt.process.run_async("slow-command", {})
 end)
+if err == "timeout" then ... end
+
+-- First to finish wins; losers are cancelled.
+local winner = smelt.task.race(
+  function() return smelt.fs.read_async("/etc/hostname") end,
+  function() smelt.sleep(500); return "fallback" end
+)
+print(winner.index, winner.result)
+
+-- Wait for everything; results stay in input order.
+local results = smelt.task.all(
+  function() return smelt.fs.read_async("a.txt") end,
+  function() return smelt.fs.read_async("b.txt") end
+)
 ```
 
 ## Plugin state

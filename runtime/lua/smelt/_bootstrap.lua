@@ -9,10 +9,10 @@ local function require_yieldable(name)
   end
 end
 
--- Yield on an external-task id and unwrap cancellation. Internal to the
--- task primitives below.
-local function yield_external(id)
-  local result = coroutine.yield({ __yield = "external", id = id })
+-- Yield with a payload and unwrap cancellation uniformly. Internal to the
+-- task primitives below — single source for the `__cancelled` check.
+local function yield_with_cancel(payload)
+  local result = coroutine.yield(payload)
   if type(result) == "table" and result.__cancelled then
     error("cancelled", 3)
   end
@@ -25,18 +25,14 @@ end
 -- @sig fun(ms: integer): any
 function smelt.sleep(ms)
   require_yieldable("smelt.sleep")
-  local result = coroutine.yield({ __yield = "sleep", ms = ms })
-  if type(result) == "table" and result.__cancelled then
-    error("cancelled", 2)
-  end
-  return result
+  return yield_with_cancel({ __yield = "sleep", ms = ms })
 end
 
 -- Park the running task until `smelt.task.resume(id, value)` fires. Returns the resumed value.
 -- @sig fun(id: integer): any
 function smelt.task.wait(id)
   require_yieldable("smelt.task.wait")
-  return yield_external(id)
+  return yield_with_cancel({ __yield = "external", id = id })
 end
 
 -- Allocate an external task id, invoke `start(id)` to kick off whatever
@@ -50,7 +46,7 @@ function smelt.task.external(start)
   require_yieldable("smelt.task.external")
   local id = smelt.task.alloc()
   start(id)
-  return yield_external(id)
+  return yield_with_cancel({ __yield = "external", id = id })
 end
 
 -- Call another tool from within `execute`. Pass `parent_call_id` so streamed
@@ -62,37 +58,117 @@ function smelt.tools.call(name, args, parent_call_id)
   end)
 end
 
-function smelt.tools.default_summary(args)
-  args = args or {}
-
-  local questions = args.questions
-  if type(questions) == "table" then
-    local n = #questions
-    if n > 0 then
-      return string.format("%d question%s", n, n == 1 and "" or "s")
+-- Combine variadic `Reg`s into one. `:remove()` on the result fires every
+-- inner `:remove()` in order, idempotent across repeat calls. Inputs may
+-- include `nil` (skipped) so call sites don't need to filter. Returns a
+-- `Reg`. Typical use: a plugin that owns several reactive subscriptions
+-- returns one composed Reg to its caller.
+--
+-- ```lua
+-- return smelt.reg.compose(
+--   smelt.win.cur():key("n", "<leader>x", handler),
+--   smelt.fs.watch(path, on_change),
+--   smelt.timer.every(1000, tick)
+-- )
+-- ```
+-- @sig fun(...: smelt.Reg?): smelt.Reg
+function smelt.reg.compose(...)
+  local regs = { ... }
+  return smelt.reg.new(function()
+    for _, r in ipairs(regs) do
+      if r and r.remove then r:remove() end
     end
-  end
+  end)
+end
 
-  local pattern = args.pattern
-  if type(pattern) == "string" and pattern ~= "" then
-    local path = args.path
-    if type(path) == "string" and path ~= "" and path ~= "." then
-      return pattern .. " in " .. smelt.path.display(path)
+-- Run `fn` with an `ms`-millisecond deadline. Returns `(result, nil)` if
+-- `fn` finishes in time, or `(nil, "timeout")` if the deadline fires
+-- first — in which case `fn`'s coroutine is cancelled (any in-flight
+-- `smelt.sleep` / `task.wait` raises `cancelled` and the coroutine
+-- unwinds). Must run inside a yielding context.
+-- @sig fun(ms: integer, fn: fun(): any): any, string?
+function smelt.task.timeout(ms, fn)
+  require_yieldable("smelt.task.timeout")
+  local payload = smelt.task.external(function(id)
+    local timer_reg, task_reg
+    local settled = false
+    task_reg = smelt.spawn(function()
+      local ok, value = pcall(fn)
+      if settled then return end
+      settled = true
+      if timer_reg then timer_reg:remove() end
+      smelt.task.resume(id, ok and { result = value } or { error = tostring(value) })
+    end)
+    timer_reg = smelt.timer.set(ms, function()
+      if settled then return end
+      settled = true
+      task_reg:remove()
+      smelt.task.resume(id, { timeout = true })
+    end)
+  end)
+  if payload.timeout then return nil, "timeout" end
+  if payload.error then return nil, payload.error end
+  return payload.result, nil
+end
+
+-- Run `fns` concurrently; first to return wins. Returns
+-- `{ index, result }` of the winner; all others are cancelled. Errors
+-- from any branch propagate (losers cancelled first). Must run inside
+-- a yielding context.
+-- @sig fun(...: fun(): any): { index: integer, result: any }
+function smelt.task.race(...)
+  require_yieldable("smelt.task.race")
+  local fns = { ... }
+  if #fns == 0 then error("smelt.task.race: requires at least one function", 2) end
+  local payload = smelt.task.external(function(id)
+    local regs = {}
+    local settled = false
+    for i, fn in ipairs(fns) do
+      regs[i] = smelt.spawn(function()
+        local ok, value = pcall(fn)
+        if settled then return end
+        settled = true
+        for j, r in ipairs(regs) do
+          if j ~= i and r then r:remove() end
+        end
+        smelt.task.resume(id, ok and { index = i, result = value } or { error = tostring(value) })
+      end)
     end
-    return pattern
-  end
+  end)
+  if payload.error then error(payload.error, 2) end
+  return { index = payload.index, result = payload.result }
+end
 
-  for _, key in ipairs({ "command", "file_path", "notebook_path", "path", "url", "query", "name", "id" }) do
-    local value = args[key]
-    if type(value) == "string" and value ~= "" then
-      if key == "file_path" or key == "notebook_path" or key == "path" then
-        return smelt.path.display(value)
-      end
-      return value
+-- Run `fns` concurrently; wait for all to finish. Returns an array of
+-- results in the same order as the input. Errors from any branch
+-- propagate; the remaining branches still complete and their results
+-- are discarded. Must run inside a yielding context.
+-- @sig fun(...: fun(): any): any[]
+function smelt.task.all(...)
+  require_yieldable("smelt.task.all")
+  local fns = { ... }
+  if #fns == 0 then return {} end
+  local results = {}
+  local first_err
+  local payload = smelt.task.external(function(id)
+    local remaining = #fns
+    for i, fn in ipairs(fns) do
+      smelt.spawn(function()
+        local ok, value = pcall(fn)
+        if ok then
+          results[i] = value
+        else
+          first_err = first_err or tostring(value)
+        end
+        remaining = remaining - 1
+        if remaining == 0 then
+          smelt.task.resume(id, { error = first_err })
+        end
+      end)
     end
-  end
-
-  return ""
+  end)
+  if payload.error then error(payload.error, 2) end
+  return results
 end
 
 -- Idempotent across `/reload`: cache the raw register in a global so each
@@ -211,10 +287,9 @@ function smelt.fs.watch(path, handler, opts)
       end
     end
   end)
-  return smelt.reg.new(function()
-    task:remove()
+  return smelt.reg.compose(task, smelt.reg.new(function()
     smelt.fs.__watch_stop(watcher_id)
-  end)
+  end))
 end
 
 -- Load a colorscheme by name via `require("smelt.colorschemes.<name>")`.

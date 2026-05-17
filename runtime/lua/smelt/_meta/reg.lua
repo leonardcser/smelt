@@ -7,6 +7,23 @@
 ---@class smelt.reg
 local reg = {}
 
+--- Combine variadic `Reg`s into one. `:remove()` on the result fires every
+--- inner `:remove()` in order, idempotent across repeat calls. Inputs may
+--- include `nil` (skipped) so call sites don't need to filter. Returns a
+--- `Reg`. Typical use: a plugin that owns several reactive subscriptions
+--- returns one composed Reg to its caller.
+--- 
+--- ```lua
+--- return smelt.reg.compose(
+---   smelt.win.cur():key("n", "<leader>x", handler),
+---   smelt.fs.watch(path, on_change),
+---   smelt.timer.every(1000, tick)
+--- )
+--- ```
+---@see smelt.reg.compose
+---@type fun(...: smelt.Reg?): smelt.Reg
+reg.compose = nil
+
 --- Wrap `undo` as a `Reg`. The first call to `:remove()` invokes `undo()` and returns `true`; subsequent calls are no-ops returning `false`. Errors raised inside `undo` are swallowed.
 ---@type fun(undo: function): smelt.Reg
 reg.new = nil

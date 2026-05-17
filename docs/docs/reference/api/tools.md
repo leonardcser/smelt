@@ -18,10 +18,10 @@ output groups under the parent invocation. Returns `{ content, is_error, metadat
 ## `smelt.tools.default_summary`
 
 ```lua
-fun(args: any): any
+fun(args: table?): string
 ```
 
-
+Best-effort one-liner summary of a tool call's arguments. Picks a sensible field from `args` in priority order: `questions` (returns `"N question(s)"`), `pattern` (optionally suffixed with ` in <display path>`), then the first non-empty `command | file_path | notebook_path | path | url | query | name | id`. Returns `""` if nothing matches. Used as the default `summary` field on tools registered via `smelt.tools.register`.
 
 ## `smelt.tools.list`
 

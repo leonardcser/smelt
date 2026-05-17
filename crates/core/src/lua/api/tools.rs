@@ -280,6 +280,43 @@ Hooks fire in registration order; an earlier hook's replacement is visible to la
         },
     )?;
     m.fn_(
+        "default_summary",
+        "Best-effort one-liner summary of a tool call's arguments. Picks a sensible field from `args` in priority order: `questions` (returns `\"N question(s)\"`), `pattern` (optionally suffixed with ` in <display path>`), then the first non-empty `command | file_path | notebook_path | path | url | query | name | id`. Returns `\"\"` if nothing matches. Used as the default `summary` field on tools registered via `smelt.tools.register`.",
+        &["args"],
+        |_, args: Option<mlua::Table>| -> LuaResult<String> {
+            let Some(args) = args else { return Ok(String::new()) };
+            if let Ok(Some(questions)) = args.get::<Option<mlua::Table>>("questions") {
+                let n = questions.raw_len();
+                if n > 0 {
+                    let suffix = if n == 1 { "" } else { "s" };
+                    return Ok(format!("{n} question{suffix}"));
+                }
+            }
+            if let Ok(Some(pattern)) = args.get::<Option<String>>("pattern") {
+                if !pattern.is_empty() {
+                    if let Ok(Some(path)) = args.get::<Option<String>>("path") {
+                        if !path.is_empty() && path != "." {
+                            return Ok(format!("{pattern} in {}", crate::tools::display_path(&path)));
+                        }
+                    }
+                    return Ok(pattern);
+                }
+            }
+            for key in ["command", "file_path", "notebook_path", "path", "url", "query", "name", "id"] {
+                if let Ok(Some(value)) = args.get::<Option<String>>(key) {
+                    if value.is_empty() {
+                        continue;
+                    }
+                    if matches!(key, "file_path" | "notebook_path" | "path") {
+                        return Ok(crate::tools::display_path(&value));
+                    }
+                    return Ok(value);
+                }
+            }
+            Ok(String::new())
+        },
+    )?;
+    m.fn_(
         "__send_call",
         "Internal: forward a tool call invocation to the engine. Used by Lua wrappers to delegate to a core tool.",
         &["request_id", "parent_call_id", "tool_name", "args"],
