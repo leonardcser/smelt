@@ -269,6 +269,15 @@ pub struct Window {
     /// Preferred display column for vertical motion; measured in terminal cells.
     pub curswant: Option<usize>,
     pub scroll_top: u16,
+    /// Logical anchor for `scroll_top` — `(changedtick, logical_row, byte_offset)`
+    /// of the chunk that was at the top of the viewport when scroll was last
+    /// set. Restored after a width/wrap-driven layout rebuild so resize keeps
+    /// the same logical row anchored at the top instead of letting the
+    /// visual-row counter drift across reflow. The changedtick guard skips
+    /// restoration when the buffer content was replaced under us (e.g. the
+    /// transcript projection rebuilds its buffer on every frame), since the
+    /// `(lrow, byte)` would no longer reference the same content.
+    pub(crate) scroll_anchor: Option<(u64, usize, usize)>,
     /// Visual-row index of the cursor (0-based, in the same space as `scroll_top`).
     /// Derived from `cpos` via `sync_from_cpos`, projected through `self.layout`
     /// so it tracks visual rows when wrap splits a logical row into multiple
@@ -334,6 +343,7 @@ impl Window {
             selection_anchor: None,
             curswant: None,
             scroll_top: 0,
+            scroll_anchor: None,
             scroll_left: 0,
             cursor_row: 0,
             cursor_col: 0,
@@ -367,8 +377,65 @@ impl Window {
         if self.layout_key == Some(key) {
             return;
         }
+        let prev_width_wrap = self.layout_key.map(|(_, w, wrap)| (w, wrap));
         self.layout = WrappedLayout::from_buffer(buf, width, self.wrap);
         self.layout_key = Some(key);
+        // Restore the logical anchor only on width/wrap changes — a content
+        // change (changedtick bump) shouldn't move the viewport behind the
+        // user's back, and the anchor's `(lrow, byte)` may no longer reference
+        // the same content.
+        if let Some((prev_w, prev_wrap)) = prev_width_wrap {
+            if prev_w != width || prev_wrap != self.wrap {
+                self.restore_scroll_from_anchor(buf);
+            }
+        }
+    }
+
+    /// Single mutation entry for `scroll_top`. Stamps `scroll_anchor` at the
+    /// `(changedtick, logical_row, chunk_start_byte)` currently at the top so
+    /// a later width/wrap-driven layout rebuild can restore the same logical
+    /// position. Skips the anchor stamp when the layout doesn't match the
+    /// buffer (callers before the first `ensure_layout`); the next
+    /// `set_scroll` post-layout will pick up the anchor correctly.
+    pub fn set_scroll(&mut self, visual_row: u16, buf: &Buffer) {
+        self.scroll_top = visual_row;
+        if !self.layout_matches(buf) {
+            return;
+        }
+        let Some((lrow, chunk_idx)) = self.layout.logical_at_visual(visual_row as usize) else {
+            return;
+        };
+        let byte = self
+            .layout
+            .chunks_of(lrow)
+            .get(chunk_idx)
+            .map(|&(s, _)| s)
+            .unwrap_or(0);
+        self.scroll_anchor = Some((buf.changedtick(), lrow, byte));
+    }
+
+    /// Re-derive `scroll_top` from `scroll_anchor` against the freshly-built
+    /// layout. Called after a width/wrap rebuild in `ensure_layout`. Skips
+    /// when no anchor is set, when `follow_tail` is active (sentinel wins),
+    /// when the buffer's content was replaced since the anchor was stamped
+    /// (changedtick mismatch — the (lrow, byte) is no longer meaningful), or
+    /// when the anchor row no longer exists in the buffer.
+    fn restore_scroll_from_anchor(&mut self, buf: &Buffer) {
+        if self.follow_tail {
+            return;
+        }
+        let Some((tick, lrow, byte)) = self.scroll_anchor else {
+            return;
+        };
+        if tick != buf.changedtick() {
+            self.scroll_anchor = None;
+            return;
+        }
+        if lrow >= self.layout.logical_count() {
+            return;
+        }
+        let (vrow, _) = self.layout.visual_for_logical(lrow, byte);
+        self.scroll_top = vrow as u16;
     }
 
     /// `true` when `self.layout` was built against `buf`'s current
@@ -733,19 +800,27 @@ impl Window {
     /// cached layout's widest visual row; vertical bounds use the caller-
     /// supplied `total_rows` so wrap-aware paths pass `visual_row_total` and
     /// plain row counters pass `lines().len()`.
-    pub fn keep_cursor_visible(&mut self, total_rows: u16, viewport_rows: u16, viewport_cols: u16) {
+    pub fn keep_cursor_visible(
+        &mut self,
+        buf: &Buffer,
+        total_rows: u16,
+        viewport_rows: u16,
+        viewport_cols: u16,
+    ) {
         if viewport_rows > 0 {
             let max_scroll = total_rows.saturating_sub(viewport_rows);
             let viewport_bottom = self
                 .scroll_top
                 .saturating_add(viewport_rows.saturating_sub(1));
             if self.cursor_row > viewport_bottom {
-                self.scroll_top = self
+                let target = self
                     .cursor_row
                     .saturating_sub(viewport_rows.saturating_sub(1))
                     .min(max_scroll);
+                self.set_scroll(target, buf);
             } else if self.cursor_row < self.scroll_top {
-                self.scroll_top = self.cursor_row;
+                let target = self.cursor_row;
+                self.set_scroll(target, buf);
             }
         }
         if viewport_cols > 0 {
@@ -768,7 +843,7 @@ impl Window {
         self.cursor_col = col;
         let total_rows = self.visual_row_total(buf);
         let viewport_cols = self.viewport.map(|v| v.content_width).unwrap_or(0);
-        self.keep_cursor_visible(total_rows, viewport_rows, viewport_cols);
+        self.keep_cursor_visible(buf, total_rows, viewport_rows, viewport_cols);
     }
 
     // ── Event dispatch ────────────────────────────────────────────────
@@ -1125,30 +1200,30 @@ impl Window {
         match action {
             // `zz` recenters the cursor row; horizontal still tracks the cursor.
             Action::CenterScroll => {
-                self.recenter_on_cursor(total_rows, viewport_rows);
-                self.keep_cursor_visible(total_rows, 0, viewport_cols);
+                self.recenter_on_cursor(buf, total_rows, viewport_rows);
+                self.keep_cursor_visible(buf, total_rows, 0, viewport_cols);
             }
             // `zh`/`zl` pan the horizontal viewport without moving the cursor —
             // the cursor is allowed to scroll off-screen, matching nvim.
             Action::PanColumns(delta) => {
                 self.pan_by_columns(delta, viewport_cols);
-                self.keep_cursor_visible(total_rows, viewport_rows, 0);
+                self.keep_cursor_visible(buf, total_rows, viewport_rows, 0);
             }
-            _ => self.keep_cursor_visible(total_rows, viewport_rows, viewport_cols),
+            _ => self.keep_cursor_visible(buf, total_rows, viewport_rows, viewport_cols),
         }
         Status::Consumed
     }
 
     /// Vim `zz`: scroll so the cursor row sits at the vertical middle of the
     /// viewport, clamped to the available scroll range.
-    fn recenter_on_cursor(&mut self, total_rows: u16, viewport_rows: u16) {
+    fn recenter_on_cursor(&mut self, buf: &Buffer, total_rows: u16, viewport_rows: u16) {
         if viewport_rows == 0 {
             return;
         }
         let half = viewport_rows / 2;
         let want = self.cursor_row.saturating_sub(half);
         let max_scroll = total_rows.saturating_sub(viewport_rows);
-        self.scroll_top = want.min(max_scroll);
+        self.set_scroll(want.min(max_scroll), buf);
         self.follow_tail = self.scroll_top >= max_scroll;
     }
 
@@ -1230,7 +1305,7 @@ impl Window {
             });
         let new_scroll = scroll_top.min(max_scroll);
         if new_scroll == cur_scroll {
-            self.scroll_top = new_scroll;
+            self.set_scroll(new_scroll, buf);
             self.follow_tail = new_scroll >= max_scroll;
             return;
         }
@@ -1241,7 +1316,7 @@ impl Window {
         self.cursor_row = row;
         self.cursor_col = col;
         self.curswant = Some(want);
-        self.scroll_top = new_scroll;
+        self.set_scroll(new_scroll, buf);
         self.follow_tail = new_scroll >= max_scroll;
     }
 
@@ -1981,18 +2056,20 @@ mod tests {
     #[test]
     fn keep_cursor_visible_pans_horizontally_when_off_right() {
         let mut w = make_win();
+        let buf = make_buf(vec![]);
         w.scroll_left = 0;
         w.cursor_col = 95;
-        w.keep_cursor_visible(0, 0, 20);
+        w.keep_cursor_visible(&buf, 0, 0, 20);
         assert_eq!(w.scroll_left, 76);
     }
 
     #[test]
     fn keep_cursor_visible_snaps_back_horizontally_when_off_left() {
         let mut w = make_win();
+        let buf = make_buf(vec![]);
         w.scroll_left = 50;
         w.cursor_col = 10;
-        w.keep_cursor_visible(0, 0, 20);
+        w.keep_cursor_visible(&buf, 0, 0, 20);
         assert_eq!(w.scroll_left, 10);
     }
 
@@ -2998,5 +3075,59 @@ mod tests {
             "row 1 virtual cell selected despite being all-chrome"
         );
         assert_eq!(grid.cell(0, 2).style.bg, visual_bg.bg, "row 2 selected");
+    }
+
+    #[test]
+    fn scroll_anchor_restored_after_width_change() {
+        // Build a wrapped buffer where each row wraps into 4 visual rows at
+        // width=5, and 2 visual rows at width=10. With cursor at the top,
+        // scroll to visual row 8 — that's logical row 2 at width=5. After
+        // narrowing width to nothing (rebuild only), then widening to 10, the
+        // anchor must restore scroll_top to the visual row that contains
+        // logical row 2 at the new width — visual row 4.
+        let mut w = make_win();
+        w.wrap = true;
+        let rows = vec![
+            "aaaaaaaaaaaaaaaaaaaa".into(), // 20 cells
+            "bbbbbbbbbbbbbbbbbbbb".into(),
+            "cccccccccccccccccccc".into(),
+            "dddddddddddddddddddd".into(),
+        ];
+        let buf = make_buf(rows);
+
+        w.ensure_layout(&buf, 5);
+        // At width=5, each 20-char row wraps to 4 chunks → 16 visual rows.
+        assert_eq!(w.layout.visual_count(), 16);
+        // Disable follow_tail so the anchor isn't bypassed.
+        w.follow_tail = false;
+        w.set_scroll(8, &buf);
+        // Logical row 2, chunk 0 sits at visual row 8.
+        assert_eq!(w.scroll_anchor.map(|(_, l, b)| (l, b)), Some((2, 0)));
+
+        // Widen to 10. Layout rebuilds; restore_scroll_from_anchor should
+        // remap (lrow=2, byte=0) to visual row 4 (each logical = 2 chunks).
+        w.ensure_layout(&buf, 10);
+        assert_eq!(w.layout.visual_count(), 8);
+        assert_eq!(w.scroll_top, 4, "anchor restored after width change");
+    }
+
+    #[test]
+    fn scroll_anchor_skipped_on_changedtick_bump() {
+        // Content change (changedtick bump) must invalidate the anchor — the
+        // (lrow, byte) no longer references the same content, so silently
+        // restoring would teleport the viewport.
+        let mut w = make_win();
+        w.wrap = true;
+        let mut buf = make_buf(vec!["aaaaaaaaaa".into(), "bbbbbbbbbb".into()]);
+        w.ensure_layout(&buf, 5);
+        w.follow_tail = false;
+        w.set_scroll(2, &buf);
+        assert!(w.scroll_anchor.is_some());
+
+        // Replace buffer content in place — bumps changedtick.
+        buf.set_all_lines(vec!["x".into(); 5]);
+        w.ensure_layout(&buf, 10);
+        // Anchor cleared because changedtick mismatched.
+        assert!(w.scroll_anchor.is_none());
     }
 }

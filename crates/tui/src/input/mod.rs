@@ -519,7 +519,7 @@ impl PromptState {
         } else {
             let viewport_cols = ctx.win.viewport.map(|v| v.content_width).unwrap_or(0);
             ctx.win
-                .keep_cursor_visible(total_rows, viewport_rows, viewport_cols);
+                .keep_cursor_visible(ctx.buf, total_rows, viewport_rows, viewport_cols);
         }
     }
 

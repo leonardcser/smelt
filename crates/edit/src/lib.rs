@@ -1158,7 +1158,14 @@ impl Ui {
                     .unwrap_or(0);
                 if let Some(win) = self.wins.get_mut(&win_id) {
                     if win.pending_scroll_to_cursor && leaf_rect.height > 0 {
-                        win.keep_cursor_visible(total_rows, leaf_rect.height, content_width);
+                        if let Some(buf) = self.bufs.get(&buf_id) {
+                            win.keep_cursor_visible(
+                                buf,
+                                total_rows,
+                                leaf_rect.height,
+                                content_width,
+                            );
+                        }
                         win.pending_scroll_to_cursor = false;
                     }
                     let scrollbar = if win.config.gutters.scrollbar && leaf_rect.width > 0 {
