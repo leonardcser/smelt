@@ -26,7 +26,7 @@ pub use smelt_buffer::undo::{UndoEntry, UndoHistory};
 
 pub use smelt_term::{
     flush_diff, paint_layout_tree, Align, Border, Cell, CellUpdate, Color, Compositor, Constraint,
-    Corner, Grid, GridSlice, Gutters, HitRegistry, LayoutTree, Line, Natural, NaturalRef,
+    Corner, Grid, GridSlice, Gutters, HitRegistry, LayoutTree, Line, Natural, NaturalRef, Overflow,
     PaintDispatch, PaintId, Rect, SnapshotFrame, Span, StaticNatural, Style, Theme, DEFAULT_ACCENT,
 };
 pub use smelt_term::{grid, layout};
@@ -798,22 +798,29 @@ impl Ui {
         true
     }
 
+    /// Close an overlay and every leaf callback registered inside it.
+    /// Window leaves are removed; paint leaves only lose their leaf-scoped callbacks.
+    #[must_use]
+    pub fn overlay_close_tree(&mut self, id: OverlayId) -> Vec<u64> {
+        let mut all_ids = Vec::new();
+        if let Some(removed) = self.overlay_close(id) {
+            for leaf in removed.layout.leaves_in_order() {
+                let win = WinId(leaf.0);
+                all_ids.extend(self.callbacks.clear_all(win));
+                self.named_wins.unbind_by_id(win);
+                self.wins.remove(&win);
+            }
+        }
+        all_ids.extend(self.callbacks.clear_overlay_all(id));
+        all_ids
+    }
+
     /// Close a window. Returns Lua callback ids for the caller to drop from the Lua registry.
     /// When `id` is an overlay leaf, closes the whole overlay and clears all leaf callbacks.
     #[must_use]
     pub fn win_close(&mut self, id: WinId) -> Vec<u64> {
         if let Some(overlay_id) = self.overlay_for_leaf(id) {
-            let mut all_ids = Vec::new();
-            if let Some(removed) = self.overlay_close(overlay_id) {
-                for leaf in removed.layout.leaves_in_order() {
-                    let win = WinId(leaf.0);
-                    all_ids.extend(self.callbacks.clear_all(win));
-                    self.named_wins.unbind_by_id(win);
-                    self.wins.remove(&win);
-                }
-            }
-            all_ids.extend(self.callbacks.clear_overlay_all(overlay_id));
-            return all_ids;
+            return self.overlay_close_tree(overlay_id);
         }
         self.named_wins.unbind_by_id(id);
         self.wins.remove(&id);
@@ -872,6 +879,29 @@ impl Ui {
     #[must_use]
     pub fn win_clear_event_by_id(&mut self, win: WinId, ev: WinEvent, id: u64) -> Option<Callback> {
         self.callbacks.clear_event_by_id(win, ev, id)
+    }
+
+    /// Register an event callback on a generic layout leaf. Window leaves use
+    /// their normal `WinId`; paint leaves share the same raw layout id space.
+    pub fn leaf_on_event(&mut self, leaf: PaintId, ev: WinEvent, cb: Callback) {
+        self.callbacks.on_event(WinId(leaf.0), ev, cb);
+    }
+
+    /// Remove a specific generic-leaf event callback by Lua handle id.
+    #[must_use]
+    pub fn leaf_clear_event_by_id(
+        &mut self,
+        leaf: PaintId,
+        ev: WinEvent,
+        id: u64,
+    ) -> Option<Callback> {
+        self.callbacks.clear_event_by_id(WinId(leaf.0), ev, id)
+    }
+
+    /// Remove every callback associated with a generic layout leaf.
+    #[must_use]
+    pub fn leaf_clear_callbacks(&mut self, leaf: PaintId) -> Vec<u64> {
+        self.callbacks.clear_all(WinId(leaf.0))
     }
 
     /// Fire a `WinEvent` on `win`. Callbacks registered on `win` for `ev` fire in

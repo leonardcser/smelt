@@ -60,7 +60,7 @@ impl LuaRuntime {
             self.record_error(format!("callback payload: {e}"));
             return None;
         }
-        if let Err(e) = payload_table.set("win", win.0) {
+        if let Err(e) = payload_table.set("leaf", win.0) {
             self.record_error(format!("callback payload: {e}"));
             return None;
         }
@@ -113,7 +113,7 @@ fn populate_payload_table(
         }
         crate::smelt_term::Payload::Selection { index } => table.set("index", *index + 1),
         crate::smelt_term::Payload::Text { content } => table.set("text", content.clone()),
-        crate::smelt_term::Payload::Click { row, col, button } => {
+        crate::smelt_term::Payload::Mouse { row, col, button } => {
             table.set("row", *row)?;
             table.set("col", *col)?;
             table.set(

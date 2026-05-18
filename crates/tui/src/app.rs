@@ -1077,6 +1077,11 @@ impl TuiApp {
                 || self.has_active_exec()
                 || self.working.is_animating()
                 || yank_flash_active;
+            let next_timer_delay = self
+                .core
+                .timers
+                .next_deadline()
+                .map(|deadline| deadline.saturating_duration_since(now));
 
             tokio::select! {
                 biased;
@@ -1218,6 +1223,12 @@ impl TuiApp {
                     want.saturating_sub(since)
                 }), if has_animation || self.ui.drag_autoscroll_started().is_some() => {
                     self.tick_drag_autoscroll();
+                    self.render_normal(self.agent.is_some());
+                }
+
+                _ = tokio::time::sleep(next_timer_delay.unwrap_or(Duration::MAX)), if next_timer_delay.is_some() => {
+                    self.tick_timers();
+                    self.drive_lua_tasks();
                     self.render_normal(self.agent.is_some());
                 }
 

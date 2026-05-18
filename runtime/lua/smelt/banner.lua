@@ -61,6 +61,10 @@ end
 
 M.LOGO_MARK_PIXELS = M.fire_wordmark()
 
+function M.logo_mark_pixels(fire)
+	return M.fire_wordmark(fire or M.FIRE_PIXELS, M.WORDMARK_PIXELS)
+end
+
 function M.logo_mark_size()
 	return #M.LOGO_MARK_PIXELS[1], math.ceil(#M.LOGO_MARK_PIXELS / 2)
 end

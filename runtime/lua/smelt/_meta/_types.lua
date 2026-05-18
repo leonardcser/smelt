@@ -135,6 +135,8 @@
 --- Opaque handle returned by `smelt.paint.register`. Usable directly in `smelt.overlay.layout.leaf(handle, opts)` (it stands in for a Win in layout leaves).
 ---@class smelt.paint.Paint
 ---@field remove fun(): boolean Drop the paint callback. Returns `true` if it was still registered. Subsequent paints of this id no-op.
+---@field rect fun(): any Return the paint leaf's current screen rect as `{ row, col, width, height }`, or `nil` until the first render lays it out.
+---@field on fun(event: smelt.paint.Event, func: fun(value: table)): smelt.Reg Subscribe `func` to `event` on this paint leaf. Returns a Reg handle whose `:remove()` undoes the subscription.
 
 --- Grid slice passed to paint callbacks. Methods delegate to the live grid slice for the current frame; out-of-scope calls fail cleanly.
 ---@class smelt.paint.Slice
@@ -263,6 +265,9 @@
 --- Agent mode string literal.
 ---@alias smelt.mode.Mode "normal"|"plan"|"apply"|"yolo"
 
+--- Paint-leaf events accepted by `paint:on(event, fn)`.
+---@alias smelt.paint.Event "press"|"release"|"drag"
+
 --- Reasoning effort level string literal.
 ---@alias smelt.reasoning.Effort "off"|"low"|"medium"|"high"|"max"
 
@@ -273,5 +278,5 @@
 ---@alias smelt.vim.Mode "insert"|"normal"|"visual"|"visual_line"
 
 --- Window-event names accepted by `win:on(event, fn)`. Maps onto the internal `WinEvent` enum.
----@alias smelt.win.Event "open"|"close"|"focus"|"blur"|"selection_changed"|"submit"|"text_changed"|"dismiss"|"tick"|"click"|"scrolled"
+---@alias smelt.win.Event "open"|"close"|"focus"|"blur"|"selection_changed"|"submit"|"text_changed"|"dismiss"|"tick"|"press"|"release"|"drag"|"scrolled"
 

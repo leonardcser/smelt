@@ -54,14 +54,20 @@ pub enum WinEvent {
     Dismiss,
     /// Fired once per event-loop iteration for live-refresh overlays.
     Tick,
-    /// Mouse-down landed inside this window. Payload carries leaf-relative `row`/`col`
+    /// Mouse-down landed inside this leaf. Payload carries leaf-relative `row`/`col`
     /// and the button. Fires before focus promotion; non-focusable leaves still receive it.
-    Click,
+    Press,
+    /// Mouse-up after a `Press` on this leaf. Fires on the leaf that owned the
+    /// press, even if the pointer drifted out (capture). Same payload as `Press`.
+    Release,
+    /// Mouse motion while a button is held after a `Press` on this leaf. Same
+    /// payload as `Press`; `row`/`col` are leaf-relative for the new position.
+    Drag,
     /// Window's scroll state changed. Payload carries the new `top` and `follow` flag.
     Scrolled,
 }
 
-/// Mouse button identity carried in `Payload::Click`.
+/// Mouse button identity carried in `Payload::Mouse`.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum MouseButton {
     Left,
@@ -83,8 +89,9 @@ pub enum Payload {
     Text {
         content: String,
     },
-    /// Mouse-click hit a window. `row`/`col` are leaf-relative cell coordinates.
-    Click {
+    /// Mouse event hit a leaf. `row`/`col` are leaf-relative cell coordinates.
+    /// Used for `Press`, `Release`, and `Drag`.
+    Mouse {
         row: u16,
         col: u16,
         button: MouseButton,

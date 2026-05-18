@@ -129,13 +129,21 @@ impl TuiApp {
         if let Some((win, count)) = self.ui.resolve_split_mouse(me, now) {
             let is_down = is_left_down(me.kind);
             let is_up = matches!(me.kind, MouseEventKind::Up(MouseButton::Left));
-            // Fire WinEvent::Click on Down with leaf-relative cell coords so
-            // plugin overlays (non-focusable + non-selectable buttons) can react.
-            // Fires before any per-leaf handling below; the built-in transcript /
-            // input / list flows still run unconditionally — Click is purely
-            // additive for Lua subscribers.
-            if is_down {
-                self.fire_click_event(win, me, crate::smelt_term::MouseButton::Left);
+            let is_drag = matches!(me.kind, MouseEventKind::Drag(MouseButton::Left));
+            // Fire Press/Release/Drag on the captured leaf with leaf-relative coords.
+            // Built-in transcript / input / list handling below still runs — pointer
+            // events are purely additive for Lua subscribers.
+            let pointer_event = if is_down {
+                Some(crate::smelt_term::WinEvent::Press)
+            } else if is_up {
+                Some(crate::smelt_term::WinEvent::Release)
+            } else if is_drag {
+                Some(crate::smelt_term::WinEvent::Drag)
+            } else {
+                None
+            };
+            if let Some(ev) = pointer_event {
+                self.fire_pointer_event(win, ev, me, crate::smelt_term::MouseButton::Left);
             }
             if win == crate::app::PROMPT_WIN {
                 self.handle_prompt_mouse(me, count);
@@ -175,16 +183,23 @@ impl TuiApp {
         EventOutcome::Noop
     }
 
-    /// Fire `WinEvent::Click` on `win` with leaf-relative cell coords. Coords
-    /// are clamped to `(0, 0)` when the win has no live viewport (the click
-    /// landed during a hit-test stale frame).
-    fn fire_click_event(
+    /// Fire a pointer `WinEvent` (`Press`/`Release`/`Drag`) on `win` with
+    /// leaf-relative cell coords. Coords are clamped to `(0, 0)` when the leaf
+    /// has no live viewport (the event landed during a hit-test stale frame).
+    fn fire_pointer_event(
         &mut self,
         win: WinId,
+        event: crate::smelt_term::WinEvent,
         me: MouseEvent,
         button: crate::smelt_term::MouseButton,
     ) {
-        let (rel_row, rel_col) = match self.ui.win(win).and_then(|w| w.viewport).map(|v| v.rect) {
+        let rect = self
+            .ui
+            .win(win)
+            .and_then(|w| w.viewport)
+            .map(|v| v.rect)
+            .or_else(|| self.ui.paint_rect(crate::smelt_term::PaintId::from(win)));
+        let (rel_row, rel_col) = match rect {
             Some(rect) => (
                 me.row.saturating_sub(rect.top),
                 me.column.saturating_sub(rect.left),
@@ -199,8 +214,8 @@ impl TuiApp {
         };
         self.ui.fire_win_event(
             win,
-            crate::smelt_term::WinEvent::Click,
-            crate::smelt_term::Payload::Click {
+            event,
+            crate::smelt_term::Payload::Mouse {
                 row: rel_row,
                 col: rel_col,
                 button,

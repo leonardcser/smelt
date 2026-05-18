@@ -93,6 +93,10 @@ impl Timers {
         self.entries.is_empty()
     }
 
+    pub fn next_deadline(&self) -> Option<Instant> {
+        self.entries.iter().map(|e| e.deadline).min()
+    }
+
     /// Cancel every scheduled timer. Used by `/reload`.
     pub fn clear(&mut self) {
         self.entries.clear();
@@ -102,7 +106,7 @@ impl Timers {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use engine::clock::VirtualClock;
+    use engine::clock::{MonoClock, VirtualClock};
     use mlua::Lua;
     use std::time::SystemTime;
 
@@ -161,6 +165,16 @@ mod tests {
         assert!(t.drain_due(&lua).is_empty());
         assert!(t.cancel(id));
         assert_eq!(t.len(), 0);
+    }
+
+    #[test]
+    fn next_deadline_reports_earliest_timer() {
+        let lua = Lua::new();
+        let (clock, mut t) = fixture();
+        let start = clock.instant_now();
+        t.set(Duration::from_millis(250), handle(&lua, "function() end"));
+        t.set(Duration::from_millis(40), handle(&lua, "function() end"));
+        assert_eq!(t.next_deadline(), Some(start + Duration::from_millis(40)));
     }
 
     #[test]

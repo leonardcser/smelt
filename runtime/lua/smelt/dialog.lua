@@ -268,14 +268,15 @@ local function setup_lifecycle(opts, leaves, overlay, resolve_fn)
     resolve_fn(value)
   end
 
-  -- Build a ctx for user callbacks. Raw event fields (`text`, `index`, `code`, `mods`,
-  -- `win`) flow through unchanged; we add `resolve`, `close`, and `panels` on top.
+  -- Build a ctx for user callbacks. Raw event fields (`text`, `index`, `code`,
+  -- `mods`, `leaf`) flow through unchanged; we add `win` (the dialog root),
+  -- `resolve`, `close`, and `panels` on top.
   local function make_ctx(raw_ctx)
     local ctx = {}
     if type(raw_ctx) == "table" then
       for k, v in pairs(raw_ctx) do ctx[k] = v end
     end
-    if not ctx.win then ctx.win = root end
+    ctx.win     = root
     ctx.resolve = resolve
     ctx.close   = function() resolve(nil) end
     ctx.panels  = leaves

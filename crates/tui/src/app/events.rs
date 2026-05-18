@@ -678,6 +678,13 @@ impl TuiApp {
         }
     }
 
+    /// Close an overlay by id without assuming its first layout leaf is a window.
+    pub(crate) fn close_overlay(&mut self, overlay_id: crate::smelt_term::OverlayId) {
+        for id in self.ui.overlay_close_tree(overlay_id) {
+            self.lua.remove_callback(id);
+        }
+    }
+
     /// Close the focused overlay if it doesn't block the agent.
     /// Fires `WinEvent::Dismiss` so callbacks can flush pending state before close.
     pub(crate) fn close_focused_non_blocking_overlay(&mut self) {

@@ -35,16 +35,7 @@ impl mlua::UserData for LuaOverlay {
 
         methods.add_method("close", |_, this, ()| -> LuaResult<()> {
             crate::lua::with_app(|app| {
-                // Closing an overlay = closing its first leaf; the
-                // overlay registry tears down automatically when its
-                // leaves are gone.
-                if let Some(leaf) = app
-                    .ui
-                    .overlay(this.id)
-                    .and_then(|ov| ov.layout.leaves_in_order().into_iter().next())
-                {
-                    app.close_overlay_leaf(crate::smelt_term::WinId(leaf.0));
-                }
+                app.close_overlay(this.id);
             });
             Ok(())
         });

@@ -14,11 +14,15 @@
 //! out-of-scope method calls fail cleanly with a Lua runtime error.
 
 use crate::lua::LuaShared;
+use lua_doc_derive::LuaAlias;
 use mlua::prelude::*;
 use smelt_core::lua::doc::{record_class, Tier};
 use smelt_core::lua::lua_type::{LuaCallback, LuaClassDecl, LuaType};
 use smelt_core::lua::module::LuaMod;
+use smelt_core::lua::reg::LuaReg;
 use std::sync::Arc;
+
+use super::win::current_shared;
 
 /// Paint-slice placeholder used only to surface the `smelt.paint.Slice`
 /// type name in the paint-callback signature. The actual userdata is
@@ -28,6 +32,31 @@ pub struct LuaPaintSlice;
 impl LuaType for LuaPaintSlice {
     fn lua_type() -> String {
         "smelt.paint.Slice".into()
+    }
+}
+
+/// Paint-leaf events accepted by `paint:on(event, fn)`.
+#[derive(Clone, Copy, Debug, LuaAlias)]
+#[lua(name = "smelt.paint.Event")]
+pub enum LuaPaintEvent {
+    /// Mouse-down landed inside this paint leaf. Payload: `{ row, col, button }`
+    /// with leaf-relative cell coordinates and `button` ∈ `"left"|"right"|"middle"`.
+    Press,
+    /// Mouse-up after a `Press` on this leaf. Fires on the leaf that owned the
+    /// press, even if the pointer drifted out (capture). Same payload as `Press`.
+    Release,
+    /// Mouse drag (motion with button held) while this leaf owns the press.
+    /// Same payload as `Press`; coords are leaf-relative for the new position.
+    Drag,
+}
+
+impl From<LuaPaintEvent> for crate::smelt_term::WinEvent {
+    fn from(e: LuaPaintEvent) -> Self {
+        match e {
+            LuaPaintEvent::Press => crate::smelt_term::WinEvent::Press,
+            LuaPaintEvent::Release => crate::smelt_term::WinEvent::Release,
+            LuaPaintEvent::Drag => crate::smelt_term::WinEvent::Drag,
+        }
     }
 }
 
@@ -54,6 +83,9 @@ impl mlua::UserData for LuaPaintReg {
 
         methods.add_method("remove", |_, this, ()| -> LuaResult<bool> {
             let removed = crate::lua::with_app(|app| {
+                for id in app.ui.leaf_clear_callbacks(this.id) {
+                    app.lua.remove_callback(id);
+                }
                 if let Some(handle_id) = app.paint_registry.unregister(this.id) {
                     app.lua.remove_callback(handle_id);
                     true
@@ -63,6 +95,54 @@ impl mlua::UserData for LuaPaintReg {
             });
             Ok(removed)
         });
+
+        methods.add_method("rect", |lua, this, ()| -> LuaResult<mlua::Value> {
+            let rect = crate::lua::try_with_app(|app| app.ui.paint_rect(this.id)).flatten();
+            match rect {
+                Some(r) => {
+                    let t = lua.create_table()?;
+                    t.set("row", r.top)?;
+                    t.set("col", r.left)?;
+                    t.set("width", r.width)?;
+                    t.set("height", r.height)?;
+                    Ok(mlua::Value::Table(t))
+                }
+                None => Ok(mlua::Value::Nil),
+            }
+        });
+
+        methods.add_function(
+            "on",
+            |lua,
+             (this_ud, event, func): (
+                mlua::AnyUserData,
+                LuaPaintEvent,
+                LuaCallback<mlua::Table, ()>,
+            )|
+             -> LuaResult<LuaReg> {
+                let this = *this_ud.borrow::<LuaPaintReg>()?;
+                let shared = current_shared(lua)?;
+                let id = crate::lua::register_callback_handle(&shared, lua, func.into_inner())?;
+                let event: crate::smelt_term::WinEvent = event.into();
+                crate::lua::with_app(|app| {
+                    app.ui.leaf_on_event(
+                        this.id,
+                        event,
+                        crate::smelt_term::Callback::Lua(crate::smelt_term::LuaHandle(id)),
+                    );
+                });
+                let leaf = this.id;
+                Ok(LuaReg::new(move || {
+                    let mut removed = false;
+                    crate::lua::with_app(|app| {
+                        let prev = app.ui.leaf_clear_event_by_id(leaf, event, id);
+                        removed = prev.is_some();
+                        crate::lua::drop_displaced_lua_handle(app, prev);
+                    });
+                    removed
+                }))
+            },
+        );
     }
 }
 
@@ -81,6 +161,8 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
         doc: "Opaque handle returned by `smelt.paint.register`. Usable directly in `smelt.overlay.layout.leaf(handle, opts)` (it stands in for a Win in layout leaves).",
         fields: smelt_core::class_methods! {
             "remove" => fn() -> bool, "Drop the paint callback. Returns `true` if it was still registered. Subsequent paints of this id no-op.",
+            "rect" => fn() -> mlua::Value, "Return the paint leaf's current screen rect as `{ row, col, width, height }`, or `nil` until the first render lays it out.",
+            "on" => fn(event: LuaPaintEvent, func: LuaCallback<mlua::Table, ()>) -> LuaReg, "Subscribe `func` to `event` on this paint leaf. Returns a Reg handle whose `:remove()` undoes the subscription.",
         },
     });
 
@@ -99,6 +181,9 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
                     crate::lua::register_callback_handle(&s, lua, func.into_inner())?;
                 let paint_id = crate::lua::with_app(|app| {
                     let (id, prev) = app.paint_registry.register(handle_id, name);
+                    for stale in app.ui.leaf_clear_callbacks(id) {
+                        app.lua.remove_callback(stale);
+                    }
                     if let Some(p) = prev {
                         app.lua.remove_callback(p);
                     }

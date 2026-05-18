@@ -99,6 +99,22 @@ end
 if persist().is_open then open() end
 ```
 
+Paint leaves can also receive pointer events directly (`press`, `release`,
+`drag`), which is useful for canvas-like overlays that should not be forced
+through a buffer-backed window. The leaf that owned the `press` keeps
+receiving `drag` and `release` even if the pointer drifts outside its rect:
+
+```lua
+local paint = smelt.paint.register(draw_fn, { name = "myplugin.paint" })
+paint:on("press",   function(ev) smelt.notify("down @ "..ev.row..","..ev.col) end)
+paint:on("drag",    function(ev) ... end)
+paint:on("release", function(ev) ... end)
+```
+
+When a paint leaf needs visual breathing room without moving the overlay,
+pass `overflow` to `smelt.overlay.layout.leaf`. The extra cells are paint-only:
+layout, centering, and hit-testing still use the leaf's measured rect.
+
 Use `smelt.lifecycle.on_ready(fn)` only when you need code that fires
 *after* every bring-up's plugin pass completes (cell subscriptions,
 deferred wiring). The hook fires with `ctx = { kind = "launch" |
@@ -545,4 +561,3 @@ require canonical names only: `smelt.vim.set_mode("normal")` works,
 and PascalCase variants like `"Insert"` are not accepted). Open aliases (e.g.
 [`smelt.cell.Name`](../reference/api/types.md#smeltcellname)) keep accepting
 any string and just expose well-known names as completion hints.
-

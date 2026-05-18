@@ -11,7 +11,7 @@
 //! `{ kind = "...", n = N }`.
 
 use crate::smelt_term::layout::Border;
-use crate::smelt_term::{Constraint, LayoutTree, Natural, NaturalRef, StaticNatural};
+use crate::smelt_term::{Constraint, LayoutTree, Natural, NaturalRef, Overflow, StaticNatural};
 use mlua::prelude::*;
 use smelt_core::lua::lua_type::LuaType;
 use smelt_core::lua::module::LuaMod;
@@ -74,6 +74,7 @@ pub(crate) enum LayoutNode {
     Leaf {
         raw_id: u64,
         chrome: NodeChrome,
+        overflow: Overflow,
         collapse_when_empty: bool,
         natural: Option<NaturalRef>,
     },
@@ -185,6 +186,49 @@ fn parse_measure(opts: Option<&mlua::Table>, ctx: &str) -> mlua::Result<Option<N
     }
 }
 
+/// Parse `opts.overflow`. Accepts:
+///   * `nil` — no paint overflow
+///   * integer — same number of cells on all sides
+///   * `{ top = n, right = n, bottom = n, left = n }` — per-side cells
+fn parse_overflow(opts: Option<&mlua::Table>, ctx: &str) -> mlua::Result<Overflow> {
+    let Some(t) = opts else {
+        return Ok(Overflow::default());
+    };
+    let v: mlua::Value = match t.get("overflow") {
+        Ok(v) => v,
+        Err(_) => return Ok(Overflow::default()),
+    };
+    match v {
+        mlua::Value::Nil => Ok(Overflow::default()),
+        mlua::Value::Integer(n) => {
+            if n < 0 {
+                return Err(mlua::Error::external(format!(
+                    "{ctx}: expected a non-negative integer or side table"
+                )));
+            }
+            Ok(Overflow::all(n as u16))
+        }
+        mlua::Value::Number(n) => {
+            if !n.is_finite() || n < 0.0 {
+                return Err(mlua::Error::external(format!(
+                    "{ctx}: expected a non-negative integer or side table"
+                )));
+            }
+            Ok(Overflow::all(n as u16))
+        }
+        mlua::Value::Table(tbl) => Ok(Overflow {
+            top: tbl.get::<u16>("top").unwrap_or(0),
+            right: tbl.get::<u16>("right").unwrap_or(0),
+            bottom: tbl.get::<u16>("bottom").unwrap_or(0),
+            left: tbl.get::<u16>("left").unwrap_or(0),
+        }),
+        other => Err(mlua::Error::external(format!(
+            "{ctx}: expected nil, integer, or side table; got {}",
+            other.type_name()
+        ))),
+    }
+}
+
 /// Pull `border` / `title` / `padding` off any node-builder opts table.
 fn parse_node_chrome(opts: Option<&mlua::Table>, ctx: &str) -> Result<NodeChrome, String> {
     let Some(t) = opts else {
@@ -237,12 +281,13 @@ pub(super) fn register(overlay: &LuaMod) -> LuaResult<()> {
 
     m.fn_(
         "leaf",
-        "Wrap a Win handle or paint id into a leaf node. `opts` accepts `border`, `title`, `collapse_when_empty` (force the slot to zero size when the wrapped window's buffer is empty), `measure` (a `{w, h}` table for a static natural size or a `smelt.overlay.layout.measure(...)` handle for one the plugin can live-update).",
+        "Wrap a Win handle or paint id into a leaf node. `opts` accepts `border`, `title`, `collapse_when_empty` (force the slot to zero size when the wrapped window's buffer is empty), `measure` (a `{w, h}` table for a static natural size or a `smelt.overlay.layout.measure(...)` handle for one the plugin can live-update), and `overflow` (extra paint-only cells around the leaf, as an integer or `{ top, right, bottom, left }`).",
         &["win_or_paint", "opts"],
         |_, (target, opts): (mlua::Value, Option<mlua::Table>)| -> LuaResult<LuaUiLayout> {
             let raw_id = resolve_leaf_target(&target)?;
             let chrome = parse_node_chrome(opts.as_ref(), "smelt.overlay.layout.leaf")
                 .map_err(mlua::Error::external)?;
+            let overflow = parse_overflow(opts.as_ref(), "smelt.overlay.layout.leaf.overflow")?;
             let collapse_when_empty = opts
                 .as_ref()
                 .and_then(|t| t.get::<bool>("collapse_when_empty").ok())
@@ -251,6 +296,7 @@ pub(super) fn register(overlay: &LuaMod) -> LuaResult<()> {
             Ok(LuaUiLayout(LayoutNode::Leaf {
                 raw_id,
                 chrome,
+                overflow,
                 collapse_when_empty,
                 natural,
             }))
@@ -322,6 +368,7 @@ pub(crate) fn build_layout_tree(
         LayoutNode::Leaf {
             raw_id,
             chrome,
+            overflow,
             collapse_when_empty,
             natural,
         } => {
@@ -337,6 +384,9 @@ pub(crate) fn build_layout_tree(
             };
             if let Some(n) = natural.clone() {
                 tree = tree.with_natural(n);
+            }
+            if !overflow.is_empty() {
+                tree = tree.with_overflow(*overflow);
             }
             if let Some(b) = chrome.border {
                 tree = tree.with_border(b);

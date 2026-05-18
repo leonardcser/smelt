@@ -202,6 +202,8 @@ Opaque handle returned by `smelt.paint.register`. Usable directly in `smelt.over
 | Field | Type | Required | Description |
 | --- | --- | --- | --- |
 | `remove` | `fun(): boolean` | yes | Drop the paint callback. Returns `true` if it was still registered. Subsequent paints of this id no-op. |
+| `rect` | `fun(): any` | yes | Return the paint leaf's current screen rect as `{ row, col, width, height }`, or `nil` until the first render lays it out. |
+| `on` | `fun(event: smelt.paint.Event, func: fun(value: table)): smelt.Reg` | yes | Subscribe `func` to `event` on this paint leaf. Returns a Reg handle whose `:remove()` undoes the subscription. |
 
 ### `smelt.paint.Slice`
 
@@ -400,6 +402,12 @@ Agent mode string literal.
 
 Variants: `"normal"` \| `"plan"` \| `"apply"` \| `"yolo"`
 
+### `smelt.paint.Event`
+
+Paint-leaf events accepted by `paint:on(event, fn)`.
+
+Variants: `"press"` \| `"release"` \| `"drag"`
+
 ### `smelt.reasoning.Effort`
 
 Reasoning effort level string literal.
@@ -422,5 +430,5 @@ Variants: `"insert"` \| `"normal"` \| `"visual"` \| `"visual_line"`
 
 Window-event names accepted by `win:on(event, fn)`. Maps onto the internal `WinEvent` enum.
 
-Variants: `"open"` \| `"close"` \| `"focus"` \| `"blur"` \| `"selection_changed"` \| `"submit"` \| `"text_changed"` \| `"dismiss"` \| `"tick"` \| `"click"` \| `"scrolled"`
+Variants: `"open"` \| `"close"` \| `"focus"` \| `"blur"` \| `"selection_changed"` \| `"submit"` \| `"text_changed"` \| `"dismiss"` \| `"tick"` \| `"press"` \| `"release"` \| `"drag"` \| `"scrolled"`
 

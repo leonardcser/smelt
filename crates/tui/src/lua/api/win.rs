@@ -44,7 +44,14 @@ pub enum LuaWinEvent {
     /// Mouse-down landed on the window. Payload: `{ row, col, button }`
     /// (leaf-relative cell coords, `button` ∈ `"left"|"right"|"middle"`).
     /// Non-focusable, non-selectable windows still receive it.
-    Click,
+    Press,
+    /// Mouse-up after a `Press` on this window. Fires on the leaf that owned
+    /// the press, even if the pointer drifted out (capture). Same payload as
+    /// `Press`.
+    Release,
+    /// Mouse drag (motion with button held) while this window owns the press.
+    /// Same payload as `Press`; coords are leaf-relative for the new position.
+    Drag,
     /// Window's scroll state changed. Payload: `{ top, follow }` where
     /// `top` is the new `scroll_top` and `follow` is the pin-to-tail flag.
     Scrolled,
@@ -63,7 +70,9 @@ impl From<LuaWinEvent> for crate::smelt_term::WinEvent {
             LuaWinEvent::TextChanged => WinEvent::TextChanged,
             LuaWinEvent::Dismiss => WinEvent::Dismiss,
             LuaWinEvent::Tick => WinEvent::Tick,
-            LuaWinEvent::Click => WinEvent::Click,
+            LuaWinEvent::Press => WinEvent::Press,
+            LuaWinEvent::Release => WinEvent::Release,
+            LuaWinEvent::Drag => WinEvent::Drag,
             LuaWinEvent::Scrolled => WinEvent::Scrolled,
         }
     }
@@ -363,7 +372,7 @@ impl mlua::UserData for LuaWin {
 
 /// Recover the `LuaShared` from the Lua state's app registry. Used by
 /// methods that need to register Lua callback handles.
-fn current_shared(lua: &Lua) -> LuaResult<Arc<LuaShared>> {
+pub(super) fn current_shared(lua: &Lua) -> LuaResult<Arc<LuaShared>> {
     // Stored under the named registry value `__smelt_shared` by
     // `register_api` below. mlua's named-registry API is the cheapest
     // pin: same key, same Arc clone, no per-call lookup overhead worth
