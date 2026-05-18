@@ -306,7 +306,7 @@ impl PromptState {
     /// Marker-stripped view of the prompt source for handoff to `History`.
     /// History stores its draft slot verbatim from whatever the caller hands
     /// in; persisting raw `ATTACHMENT_MARKER` bytes would let `History::down`
-    /// return a marker that no longer has a matching id, breaking INV-15.
+    /// return a marker that no longer has a matching attachment id.
     /// Every history hand-off (current source or recalled entry) flows
     /// through `Self::clean_for_history`.
     fn clean_for_history(s: &str) -> String {

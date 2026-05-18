@@ -147,7 +147,7 @@ fn paint_status(
     let next_label = scenario
         .ops
         .get(step)
-        .map(|op| format!("next: {}", op_label(op)))
+        .map(|op| format!("next: {}", op.label()))
         .unwrap_or_else(|| "(end)".to_string());
     let line = format!(
         " step {step}/{total}  {next_label}  [space]next [b]back [r]reset [s]state [q]quit",
@@ -162,59 +162,3 @@ fn paint_status(
     stdout.flush()
 }
 
-/// Short label for a `FuzzOp` shown in the status line. Doesn't need to
-/// be lossless — just enough to know what the next step does.
-fn op_label(op: &smelt_fuzz::FuzzOp) -> String {
-    use smelt_fuzz::FuzzOp::*;
-    match op {
-        KeyUnicode(c) => format!("key {:?}", char::from_u32(*c).unwrap_or('?')),
-        KeyCtrl(b) => format!("ctrl-{}", (b'a' + (b % 26)) as char),
-        KeyShift(b) => format!("shift-{}", (b'a' + (b % 26)) as char),
-        KeySpecial(_) => "special".into(),
-        KeySpecialShift(_) => "shift+special".into(),
-        Paste(s) => format!("paste {} chars", s.chars().count()),
-        Mouse(m) => format!("mouse k={} b={} {},{}", m.kind, m.button, m.col, m.row),
-        Tick(ms) => format!("tick {ms}ms"),
-        LuaWakeup => "lua wakeup".into(),
-        Resize { w, h } => format!("resize {w}x{h}"),
-        StartTurn(id) => format!("start turn {id}"),
-        EngineReady => "engine ready".into(),
-        EngineText(_) => "engine text".into(),
-        EngineTextDelta(_) => "engine text delta".into(),
-        EngineThinking(_) => "engine thinking".into(),
-        EngineThinkingDelta(_) => "engine thinking delta".into(),
-        EngineToolStart { tool_name, .. } => format!("tool start {tool_name}"),
-        EngineToolOutput { .. } => "tool output".into(),
-        EngineToolFinish { is_error, .. } => {
-            if *is_error {
-                "tool error".into()
-            } else {
-                "tool done".into()
-            }
-        }
-        ExecOutput(_) => "exec output".into(),
-        ExecDone(code) => format!("exec done {code:?}"),
-        EngineTurnComplete { msg_count } => format!("turn complete ({msg_count} msgs)"),
-        EngineTurnError(_) => "turn error".into(),
-        EngineSteered { count, .. } => format!("steered (drain {count})"),
-        EngineRetrying { attempt, .. } => format!("retrying (attempt {attempt})"),
-        EngineTokenUsage { prompt, .. } => format!("token usage (prompt {prompt})"),
-        PushQueuedMessage(_) => "push queued message".into(),
-        EngineProcessCompleted { id, .. } => format!("process completed {id}"),
-        EngineMessages { msg_count } => format!("messages ({msg_count})"),
-        EngineRequestPermission { tool_name, .. } => format!("request permission {tool_name}"),
-        ApproveFirstConfirm => "approve confirm".into(),
-        DenyFirstConfirm { .. } => "deny confirm".into(),
-        EngineToolDispatch { tool_name, .. } => format!("tool dispatch {tool_name}"),
-        EngineToolHooksRequest { tool_name, .. } => format!("tool hooks {tool_name}"),
-        EngineCoreToolResult { .. } => "core tool result".into(),
-        EngineShutdown { .. } => "shutdown".into(),
-        InsertAttachment { label } => format!("insert attachment {label}"),
-        TogglePaneFocus => "toggle pane focus".into(),
-        EngineToolArgsDelta { tool_name, .. } => format!("tool args delta {tool_name}"),
-        EngineAskResponse { id, .. } => format!("ask response {id}"),
-        EngineAskError { id, kind_idx, .. } => format!("ask error {id} k={kind_idx}"),
-        ReloadLua => "reload lua".into(),
-        OpenOverlay { variant } => format!("open overlay v={variant}"),
-    }
-}

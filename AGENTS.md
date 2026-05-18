@@ -52,7 +52,7 @@ or `source_mut().replace_range(...)` directly.
 Its `replace_range`, `insert_str`, `insert`, `insert_marker`, `install`,
 `set_ids`, `strip_attachments`, `clear` methods are the **only** safe
 mutation entry points. They keep marker count and id count in lockstep
-(INV-15) and a debug-assert verifies the invariant after every call.
+and a debug-assert verifies the invariant after every call.
 
 **Boundary math** — `snap`, `prev_char_boundary`, `next_char_boundary`,
 `byte_to_cell`, `cell_to_byte`, `char_pos`, `byte_of_char` all live in

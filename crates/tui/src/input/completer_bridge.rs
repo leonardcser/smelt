@@ -224,7 +224,7 @@ impl PromptState {
     /// create a new one via `make`. Either way, update the query. The anchor
     /// check matters when the buffer shrinks (history scroll, vim ops): an
     /// existing completer's anchor would otherwise outlive the source it points
-    /// into and INV-11 would fire on the next assert.
+    /// into and the next invariant check would fire on a stale anchor.
     fn set_or_update_completer(
         &mut self,
         kind: CompleterKind,

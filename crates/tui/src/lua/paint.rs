@@ -96,6 +96,15 @@ impl PaintRegistry {
         self.handles.contains_key(&id)
     }
 
+    /// Count of named paint slots. Anonymous slots have no entry in
+    /// `names`, so this excludes them — exactly what reload-survival
+    /// post-checks want. Harness-only: production code reads names
+    /// directly via `id_by_name`.
+    #[cfg(any(test, feature = "harness"))]
+    pub(crate) fn named_count(&self) -> usize {
+        self.names.names().count()
+    }
+
     #[cfg(test)]
     pub(crate) fn id_by_name(&self, name: &str) -> Option<PaintId> {
         self.names.lookup(name)

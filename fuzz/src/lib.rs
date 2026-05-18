@@ -368,6 +368,69 @@ pub enum FuzzOp {
     },
 }
 
+impl FuzzOp {
+    /// Short human label used by `play_scenario` for its status line.
+    /// Lives next to the enum so adding a variant is one edit, not two —
+    /// the per-variant match previously lived in `play_scenario.rs` and
+    /// drifted every time a new op landed.
+    pub fn label(&self) -> String {
+        use FuzzOp::*;
+        match self {
+            KeyUnicode(c) => format!("key {:?}", char::from_u32(*c).unwrap_or('?')),
+            KeyCtrl(b) => format!("ctrl-{}", (b'a' + (b % 26)) as char),
+            KeyShift(b) => format!("shift-{}", (b'a' + (b % 26)) as char),
+            KeySpecial(_) => "special".into(),
+            KeySpecialShift(_) => "shift+special".into(),
+            Paste(s) => format!("paste {} chars", s.chars().count()),
+            Mouse(m) => format!("mouse k={} b={} {},{}", m.kind, m.button, m.col, m.row),
+            Tick(ms) => format!("tick {ms}ms"),
+            LuaWakeup => "lua wakeup".into(),
+            Resize { w, h } => format!("resize {w}x{h}"),
+            StartTurn(id) => format!("start turn {id}"),
+            EngineReady => "engine ready".into(),
+            EngineText(_) => "engine text".into(),
+            EngineTextDelta(_) => "engine text delta".into(),
+            EngineThinking(_) => "engine thinking".into(),
+            EngineThinkingDelta(_) => "engine thinking delta".into(),
+            EngineToolStart { tool_name, .. } => format!("tool start {tool_name}"),
+            EngineToolOutput { .. } => "tool output".into(),
+            EngineToolFinish { is_error, .. } => {
+                if *is_error {
+                    "tool error".into()
+                } else {
+                    "tool done".into()
+                }
+            }
+            ExecOutput(_) => "exec output".into(),
+            ExecDone(code) => format!("exec done {code:?}"),
+            EngineTurnComplete { msg_count } => format!("turn complete ({msg_count} msgs)"),
+            EngineTurnError(_) => "turn error".into(),
+            EngineSteered { count, .. } => format!("steered (drain {count})"),
+            EngineRetrying { attempt, .. } => format!("retrying (attempt {attempt})"),
+            EngineTokenUsage { prompt, .. } => format!("token usage (prompt {prompt})"),
+            PushQueuedMessage(_) => "push queued message".into(),
+            EngineProcessCompleted { id, .. } => format!("process completed {id}"),
+            EngineMessages { msg_count } => format!("messages ({msg_count})"),
+            EngineRequestPermission { tool_name, .. } => {
+                format!("request permission {tool_name}")
+            }
+            ApproveFirstConfirm => "approve confirm".into(),
+            DenyFirstConfirm { .. } => "deny confirm".into(),
+            EngineToolDispatch { tool_name, .. } => format!("tool dispatch {tool_name}"),
+            EngineToolHooksRequest { tool_name, .. } => format!("tool hooks {tool_name}"),
+            EngineCoreToolResult { .. } => "core tool result".into(),
+            EngineShutdown { .. } => "shutdown".into(),
+            InsertAttachment { label } => format!("insert attachment {label}"),
+            TogglePaneFocus => "toggle pane focus".into(),
+            EngineToolArgsDelta { tool_name, .. } => format!("tool args delta {tool_name}"),
+            EngineAskResponse { id, .. } => format!("ask response {id}"),
+            EngineAskError { id, kind_idx, .. } => format!("ask error {id} k={kind_idx}"),
+            ReloadLua => "reload lua".into(),
+            OpenOverlay { variant } => format!("open overlay v={variant}"),
+        }
+    }
+}
+
 #[derive(Arbitrary, Debug, Clone, Copy, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum FuzzMode {
@@ -1409,7 +1472,27 @@ pub fn apply(app: &mut TestApp, op: FuzzOp) {
             return;
         }
         FuzzOp::ReloadLua => {
+            // Targeted reload-survival check: every named slot in the
+            // four reload-survival registries (bufs, wins, overlays,
+            // paints) that existed before reload must still exist
+            // after. New names may be added (the first reload runs
+            // `on_ready` which lets bundled plugins register named
+            // resources for the first time); anonymous slots get
+            // reaped (they don't contribute to these counters).
+            // Strictly: post >= pre component-wise. This is the
+            // `ce76000e`-class regression detector — cheap and specific.
+            let pre = app.named_resource_counts();
             app.reload_lua();
+            let post = app.named_resource_counts();
+            assert!(
+                post.0 >= pre.0
+                    && post.1 >= pre.1
+                    && post.2 >= pre.2
+                    && post.3 >= pre.3,
+                "reload dropped a named resource: pre=(bufs,wins,overlays,paints)={:?} post={:?}",
+                pre,
+                post,
+            );
             app.assert_invariants();
             return;
         }

@@ -411,6 +411,18 @@ impl Ui {
         self.named_overlays.bind(name.into(), id);
     }
 
+    /// Counts of bound names per registry: `(bufs, wins, overlays)`.
+    /// Used by fuzz post-checks to assert named resources survive
+    /// `/reload` — anonymous slots get reaped but named ones must
+    /// keep their bindings.
+    pub fn named_counts(&self) -> (usize, usize, usize) {
+        (
+            self.named_bufs.names().count(),
+            self.named_wins.names().count(),
+            self.named_overlays.names().count(),
+        )
+    }
+
     // ── Named-refresh shortcuts ──────────────────────────────────────
     //
     // Each `lookup_named_X_mut` fuses the two-step `named_X` →

@@ -432,8 +432,7 @@ impl TestApp {
     /// Side-channel: insert a synthetic image attachment at the prompt
     /// cursor. Mirrors clipboard-image paste / `:image` paths without
     /// needing a real terminal clipboard. Exercises the
-    /// attachment_ids ↔ marker invariant (INV-15) under interleaved
-    /// mutations.
+    /// attachment_ids ↔ marker invariant under interleaved mutations.
     pub fn insert_attachment(&mut self, label: String) {
         let data_url = format!(
             "data:image/png;base64,FUZZ-{}",
@@ -472,6 +471,16 @@ impl TestApp {
     pub fn run_lua(&mut self, snippet: &str) -> bool {
         let _guard = crate::lua::install_app_ptr(&mut self.app);
         self.app.lua.lua.load(snippet).exec().is_ok()
+    }
+
+    /// Counts of bound names across the four reload-survival registries:
+    /// `(bufs, wins, overlays, paints)`. Reload-survival post-checks
+    /// snapshot these before and after `reload_lua()` and assert
+    /// equality — anonymous slots get reaped but every name in the
+    /// registry must survive with a stable id.
+    pub fn named_resource_counts(&self) -> (usize, usize, usize, usize) {
+        let (bufs, wins, overlays) = self.app.ui.named_counts();
+        (bufs, wins, overlays, self.app.paint_registry.named_count())
     }
 
     /// Side-channel: open a synthetic overlay via `smelt.overlay.new`.
@@ -639,9 +648,6 @@ impl TestApp {
     ///   coherence plus pending-tool bookkeeping.
     /// - [`Self::assert_resource_invariants`] — bounded queues and other
     ///   leak floors.
-    ///
-    /// Panic messages are prefixed with `INV-NN:` so a corpus replay can
-    /// be classified at a glance.
     pub fn assert_invariants(&self) {
         self.assert_text_invariants();
         self.assert_ui_invariants();
@@ -682,7 +688,7 @@ impl TestApp {
             }
             assert!(
                 win.cpos <= src.len(),
-                "INV-01: window {:?} cpos {} > source len {}",
+                "window {:?} cpos {} > source len {}",
                 wid,
                 win.cpos,
                 src.len()
@@ -690,13 +696,13 @@ impl TestApp {
             let snapped = smelt_buffer::text::snap(src, win.cpos);
             assert_eq!(
                 snapped, win.cpos,
-                "INV-02: window {:?} cpos {} not on UTF-8 char boundary (snapped {})",
+                "window {:?} cpos {} not on UTF-8 char boundary (snapped {})",
                 wid, win.cpos, snapped
             );
             if let Some(anchor) = win.selection_anchor {
                 assert!(
                     anchor <= src.len(),
-                    "INV-03: window {:?} selection_anchor {} > source len {}",
+                    "window {:?} selection_anchor {} > source len {}",
                     wid,
                     anchor,
                     src.len()
@@ -704,7 +710,7 @@ impl TestApp {
                 let snapped = smelt_buffer::text::snap(src, anchor);
                 assert_eq!(
                     snapped, anchor,
-                    "INV-04: window {:?} selection_anchor {} not on UTF-8 char boundary (snapped {})",
+                    "window {:?} selection_anchor {} not on UTF-8 char boundary (snapped {})",
                     wid, anchor, snapped
                 );
             }
@@ -718,7 +724,7 @@ impl TestApp {
             for (i, entry) in buf.history.iter_undo().enumerate() {
                 assert!(
                     entry.cpos <= entry.buf.len(),
-                    "INV-05: buf {:?} undo[{}] cpos {} > snapshot len {}",
+                    "buf {:?} undo[{}] cpos {} > snapshot len {}",
                     bid,
                     i,
                     entry.cpos,
@@ -727,14 +733,14 @@ impl TestApp {
                 let snapped = smelt_buffer::text::snap(&entry.buf, entry.cpos);
                 assert_eq!(
                     snapped, entry.cpos,
-                    "INV-06: buf {:?} undo[{}] cpos {} not on UTF-8 char boundary",
+                    "buf {:?} undo[{}] cpos {} not on UTF-8 char boundary",
                     bid, i, entry.cpos
                 );
             }
             for (i, entry) in buf.history.iter_redo().enumerate() {
                 assert!(
                     entry.cpos <= entry.buf.len(),
-                    "INV-07: buf {:?} redo[{}] cpos {} > snapshot len {}",
+                    "buf {:?} redo[{}] cpos {} > snapshot len {}",
                     bid,
                     i,
                     entry.cpos,
@@ -743,14 +749,14 @@ impl TestApp {
                 let snapped = smelt_buffer::text::snap(&entry.buf, entry.cpos);
                 assert_eq!(
                     snapped, entry.cpos,
-                    "INV-08: buf {:?} redo[{}] cpos {} not on UTF-8 char boundary",
+                    "buf {:?} redo[{}] cpos {} not on UTF-8 char boundary",
                     bid, i, entry.cpos
                 );
             }
             if let Some(cap) = buf.history.cap() {
                 assert!(
                     buf.history.undo_len() <= cap,
-                    "INV-09: buf {:?} undo stack {} > cap {}",
+                    "buf {:?} undo stack {} > cap {}",
                     bid,
                     buf.history.undo_len(),
                     cap
@@ -764,7 +770,7 @@ impl TestApp {
         if let Some((start, end)) = self.app.core.clipboard.kill_ring.source_range() {
             assert!(
                 start <= end,
-                "INV-10: kill-ring source_range {} > {} (inverted)",
+                "kill-ring source_range {} > {} (inverted)",
                 start,
                 end
             );
@@ -780,14 +786,14 @@ impl TestApp {
                 let anchor = session.completer.anchor;
                 assert!(
                     anchor <= src.len(),
-                    "INV-11: completer anchor {} > prompt source len {}",
+                    "completer anchor {} > prompt source len {}",
                     anchor,
                     src.len()
                 );
                 let snapped = smelt_buffer::text::snap(src, anchor);
                 assert_eq!(
                     snapped, anchor,
-                    "INV-12: completer anchor {} not on UTF-8 char boundary (snapped {})",
+                    "completer anchor {} not on UTF-8 char boundary (snapped {})",
                     anchor, snapped
                 );
             }
@@ -813,7 +819,7 @@ impl TestApp {
             let anchor = win.vim_state.visual_anchor_raw();
             assert!(
                 anchor <= text.len(),
-                "INV-13: window {:?} vim visual_anchor {} > text len {}",
+                "window {:?} vim visual_anchor {} > text len {}",
                 wid,
                 anchor,
                 text.len()
@@ -821,7 +827,7 @@ impl TestApp {
             let snapped = smelt_buffer::text::snap(&text, anchor);
             assert_eq!(
                 snapped, anchor,
-                "INV-14: window {:?} vim visual_anchor {} not on UTF-8 char boundary (snapped {})",
+                "window {:?} vim visual_anchor {} not on UTF-8 char boundary (snapped {})",
                 wid, anchor, snapped
             );
         }
@@ -836,7 +842,7 @@ impl TestApp {
             assert_eq!(
                 marker_count,
                 prompt.attachment_ids.len(),
-                "INV-15: prompt has {} attachment markers but {} attachment_ids",
+                "prompt has {} attachment markers but {} attachment_ids",
                 marker_count,
                 prompt.attachment_ids.len()
             );
@@ -848,14 +854,14 @@ impl TestApp {
     /// notification overlay (when set) points at a live window.
     pub fn assert_ui_invariants(&self) {
         let (w, h) = self.app.ui.terminal_size();
-        assert!(w > 0 && h > 0, "INV-20: terminal size collapsed to {w}x{h}");
+        assert!(w > 0 && h > 0, "terminal size collapsed to {w}x{h}");
 
         // Focused window, when set, must still be alive. A stale `focus`
         // pointing at a closed leaf is a use-after-free in waiting.
         if let Some(focused) = self.app.ui.focus() {
             assert!(
                 self.app.ui.win(focused).is_some(),
-                "INV-21: focus points at dead window {focused:?}"
+                "focus points at dead window {focused:?}"
             );
         }
 
@@ -866,7 +872,7 @@ impl TestApp {
         for (wid, win) in self.app.ui.iter_wins() {
             assert!(
                 self.app.ui.buf(win.buf).is_some(),
-                "INV-22: window {wid:?} buf {:?} points at non-existent buffer",
+                "window {wid:?} buf {:?} points at non-existent buffer",
                 win.buf,
             );
         }
@@ -878,7 +884,7 @@ impl TestApp {
         if let Some(win) = self.app.notification {
             assert!(
                 self.app.ui.win(win).is_some(),
-                "INV-23: notification points at dead window {win:?}",
+                "notification points at dead window {win:?}",
             );
         }
     }
@@ -894,7 +900,7 @@ impl TestApp {
             for pt in &ag.pending {
                 assert!(
                     seen.insert(pt.call_id.as_str()),
-                    "INV-30: duplicate pending tool call_id {:?} in turn {}",
+                    "duplicate pending tool call_id {:?} in turn {}",
                     pt.call_id,
                     ag.turn_id
                 );
@@ -907,20 +913,20 @@ impl TestApp {
                 let state = self.app.transcript.history.tool_states.get(&pt.call_id);
                 assert!(
                     state.is_some(),
-                    "INV-31: pending tool {:?} has no ToolState entry in transcript history",
+                    "pending tool {:?} has no ToolState entry in transcript history",
                     pt.call_id,
                 );
                 if let Some(state) = state {
                     assert!(
                         !state.is_terminal(),
-                        "INV-32: pending tool {:?} has terminal ToolState",
+                        "pending tool {:?} has terminal ToolState",
                         pt.call_id,
                     );
                 }
             }
         }
 
-        // Reverse direction of INV-31: every `ToolState` key must
+        // Reverse direction of every `ToolState` key must
         // correspond to a `Block::ToolCall` in transcript history. A
         // missing block means `gc_tool_states` failed to drop a state
         // that no longer has a live block, or `set_history` left state
@@ -935,7 +941,7 @@ impl TestApp {
             });
             assert!(
                 exists,
-                "INV-36: tool_state {:?} has no matching Block::ToolCall in history",
+                "tool_state {:?} has no matching Block::ToolCall in history",
                 call_id,
             );
         }
@@ -951,7 +957,7 @@ impl TestApp {
         if self.app.working.is_animating() {
             assert!(
                 self.app.agent.is_some(),
-                "INV-33: working is animating without an active agent turn",
+                "working is animating without an active agent turn",
             );
         }
 
@@ -962,11 +968,11 @@ impl TestApp {
         if self.app.agent.is_none() {
             assert!(
                 !self.app.parser.has_active_text(),
-                "INV-34: streaming text buffer non-empty with no agent turn",
+                "streaming text buffer non-empty with no agent turn",
             );
             assert!(
                 !self.app.parser.has_active_thinking(),
-                "INV-35: streaming thinking buffer non-empty with no agent turn",
+                "streaming thinking buffer non-empty with no agent turn",
             );
         }
     }
@@ -981,13 +987,13 @@ impl TestApp {
 
         assert!(
             self.app.queued_messages.len() <= QUEUED_MESSAGES_CAP,
-            "INV-40: queued_messages {} > cap {}",
+            "queued_messages {} > cap {}",
             self.app.queued_messages.len(),
             QUEUED_MESSAGES_CAP,
         );
         assert!(
             self.app.pending_dialogs.len() <= PENDING_DIALOGS_CAP,
-            "INV-41: pending_dialogs {} > cap {}",
+            "pending_dialogs {} > cap {}",
             self.app.pending_dialogs.len(),
             PENDING_DIALOGS_CAP,
         );

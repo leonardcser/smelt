@@ -171,6 +171,54 @@ pub enum LuaOp {
     },
 }
 
+impl LuaOp {
+    /// Short human label for status-line / log display. Mirrors
+    /// [`crate::FuzzOp::label`] — keeps the per-variant text next to
+    /// the variant definition so adding a `LuaOp` is one edit.
+    pub fn label(&self) -> String {
+        use LuaOp::*;
+        match self {
+            BufNew { name_slot } => match name_slot {
+                Some(n) => format!("buf.new (name slot {n})"),
+                None => "buf.new (anon)".into(),
+            },
+            WinNew { buf_idx, name_slot } => match name_slot {
+                Some(n) => format!("win.new (buf {buf_idx} -> name slot {n})"),
+                None => format!("win.new (buf {buf_idx}, anon)"),
+            },
+            OverlayNew {
+                name_slot,
+                keymap_count,
+                ..
+            } => match name_slot {
+                Some(n) => format!("overlay.new (name slot {n}, {keymap_count} kms)"),
+                None => format!("overlay.new (anon, {keymap_count} kms)"),
+            },
+            Remove { kind, idx } => format!("remove kind={kind} idx={idx}"),
+            Reload => "reload".into(),
+            PaintRegister {
+                name_slot,
+                body_kind,
+            } => match name_slot {
+                Some(n) => format!("paint.register (name slot {n}, body {body_kind})"),
+                None => format!("paint.register (anon, body {body_kind})"),
+            },
+            StateSet { slot, key, .. } => format!("state.set slot={slot} key={key:?}"),
+            StateGet { slot, key } => format!("state.get slot={slot} key={key:?}"),
+            CmdRegister {
+                name_slot,
+                handler_kind,
+            } => format!("cmd.register slot={name_slot} body={handler_kind}"),
+            CmdInvoke { name_slot } => format!("cmd.run slot={name_slot}"),
+            KeymapSet {
+                scope_kind,
+                chord_slot,
+                ..
+            } => format!("keymap.set scope={scope_kind} chord_slot={chord_slot}"),
+        }
+    }
+}
+
 impl<'a> Arbitrary<'a> for LuaOp {
     /// Bias toward state-creating / deep-state ops. Weights chosen so
     /// short scenarios still reach Reload + Remove + multi-resource
