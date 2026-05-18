@@ -63,6 +63,48 @@ Set `smelt.settings.auto_reload = true` to skip the manual F5: smelt watches
 for you. Edits that land while an agent turn is running or a modal dialog is
 open are deferred to the next quiet window.
 
+### Surviving reload smoothly
+
+Module bodies run with the host pointer live on every Lua-context bring-up —
+both cold start and `/reload`. Three pieces compose into "my UI keeps the
+same position / focus / content when the user reloads my plugin":
+
+1. **`smelt.state(name)`** — JSON-shaped table that survives `/reload` (not
+   restart). Persist your `is_open` / cursor / variant index here.
+2. **`opts.name = "..."`** on `smelt.overlay.new`, `smelt.win.new`,
+   `smelt.buf.new`, and `smelt.paint.register` — opts the resource into
+   hot-reload survival. The Rust-side structure stays in place; re-passing
+   the same name on re-open swaps the layout / closure / contents
+   atomically. Anonymous (no-name) resources get reaped each reload.
+3. **Module-body re-open** — at the bottom of your file, check the state
+   flag and re-call your `open()`. On cold start `is_open` is false, so
+   it's a no-op; after `/reload` it's true, so `open()` re-runs and finds
+   the named overlay / paint slot already there, just updating closures.
+
+The canonical example is
+[`runtime/lua/smelt/examples/banner_picker.lua`](https://github.com/leonardcser/smelt/blob/main/runtime/lua/smelt/examples/banner_picker.lua):
+
+```lua
+local function open()
+  if STATE then return end
+  STATE = {}
+  STATE.buf     = smelt.buf.new   ({ name = "myplugin.buf" })
+  STATE.win     = smelt.win.new   (STATE.buf, { name = "myplugin.win" })
+  STATE.paint   = smelt.paint.register(paint_fn, { name = "myplugin.paint" })
+  STATE.overlay = smelt.overlay.new({ name = "myplugin", layout = ... })
+  persist().is_open = true
+end
+
+-- module body — runs on every Lua-context bring-up.
+if persist().is_open then open() end
+```
+
+Use `smelt.lifecycle.on_ready(fn)` only when you need code that fires
+*after* every bring-up's plugin pass completes (cell subscriptions,
+deferred wiring). The hook fires with `ctx = { kind = "launch" |
+"reload" }` so launch-only handlers can early-return on
+`ctx.kind ~= "launch"`.
+
 ## Bundled plugins
 
 | Plugin | Autoloaded | What it does |
