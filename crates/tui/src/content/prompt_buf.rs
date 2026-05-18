@@ -769,9 +769,7 @@ mod tests {
     use super::*;
 
     fn test_theme() -> crate::smelt_term::Theme {
-        let mut t = crate::smelt_term::Theme::new();
-        crate::theme::populate_ui_theme(&mut t);
-        t
+        crate::theme::default_baked().as_ref().clone()
     }
 
     #[test]
@@ -899,11 +897,7 @@ mod tests {
             Window,
         };
 
-        let theme = std::sync::Arc::new({
-            let mut t = Theme::new();
-            crate::theme::populate_ui_theme(&mut t);
-            t
-        });
+        let theme: std::sync::Arc<Theme> = crate::theme::default_baked().clone();
 
         let mut buf = Buffer::new(crate::app::PROMPT_EDIT_BUF, BufCreateOpts::default());
         buf.set_all_lines(vec!["hello".into()]);

@@ -295,6 +295,13 @@ impl TuiApp {
         let (ui, well_known) = {
             let mut ui = crate::smelt_term::Ui::new();
             ui.set_terminal_size(term_w, term_h);
+            // Install the baked default theme up-front. `run()` may
+            // overwrite it after detecting light/dark, and Lua's
+            // `theme.use(...)` will later swap to the user's
+            // colorscheme — but until then every render path sees a
+            // working theme. Tests that construct TuiApp without
+            // calling run() rely on this.
+            *ui.theme_mut() = crate::theme::default_baked().as_ref().clone();
             let input_display_buf = ui
                 .buf_create_with_id(
                     crate::app::PROMPT_EDIT_BUF,
@@ -815,7 +822,16 @@ impl TuiApp {
         self.context_window_tx = Some(ctx_tx);
         self.refresh_context_window();
         crate::theme::detect_background(self.ui.theme_mut());
-        crate::theme::populate_ui_theme(self.ui.theme_mut());
+        // Install the baked default theme so the first frame renders with
+        // real colors before Lua's `theme.use(...)` runs during bootstrap.
+        // Lua-side colorschemes overwrite this via `smelt.theme.apply`.
+        let mut baked = crate::theme::default_baked().as_ref().clone();
+        baked.set_light(self.ui.theme().is_light());
+        *self.ui.theme_mut() = baked;
+        // Publish to the process-wide active theme slot so the diff
+        // renderer (which can't reach the app context from a worker
+        // thread) reads the right colors.
+        smelt_core::theme::set_active(self.ui.theme().clone());
         // Capture the thread-safe Lua command-name set directly. Going through
         // `try_with_app` would only work on the main thread (APP is a thread-
         // local), and `layout_block_into` runs in worker threads via

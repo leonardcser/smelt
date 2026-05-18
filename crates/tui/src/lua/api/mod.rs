@@ -198,43 +198,13 @@ impl LuaRuntime {
     }
 }
 
-// ── theme + color helpers ──────────────────────────────────────────────
+// ── color projection helpers ──────────────────────────────────────────
 
-/// Encode a `Color` as a Lua table: `{ansi=u8}`, `{rgb={r,g,b}}`, or `{named="red"}`.
-pub(super) fn color_to_lua(lua: &Lua, color: smelt_core::style::Color) -> LuaResult<mlua::Table> {
-    use smelt_core::style::Color;
-    let t = lua.create_table()?;
-    match color {
-        Color::AnsiValue(v) => t.set("ansi", v)?,
-        Color::Rgb { r, g, b } => {
-            let rgb = lua.create_table()?;
-            rgb.set("r", r)?;
-            rgb.set("g", g)?;
-            rgb.set("b", b)?;
-            t.set("rgb", rgb)?;
-        }
-        Color::Reset => t.set("named", "reset")?,
-        Color::Black => t.set("named", "black")?,
-        Color::DarkGrey => t.set("named", "dark_grey")?,
-        Color::Red => t.set("named", "red")?,
-        Color::DarkRed => t.set("named", "dark_red")?,
-        Color::Green => t.set("named", "green")?,
-        Color::DarkGreen => t.set("named", "dark_green")?,
-        Color::Yellow => t.set("named", "yellow")?,
-        Color::DarkYellow => t.set("named", "dark_yellow")?,
-        Color::Blue => t.set("named", "blue")?,
-        Color::DarkBlue => t.set("named", "dark_blue")?,
-        Color::Magenta => t.set("named", "magenta")?,
-        Color::DarkMagenta => t.set("named", "dark_magenta")?,
-        Color::Cyan => t.set("named", "cyan")?,
-        Color::DarkCyan => t.set("named", "dark_cyan")?,
-        Color::White => t.set("named", "white")?,
-        Color::Grey => t.set("named", "grey")?,
-    }
-    Ok(t)
-}
-
-/// Project a `Color` to an ANSI palette index. `Color::Reset` → `None`.
+/// Project a `Color` to an ANSI 256 palette index. `Color::Reset` → `None`.
+/// The 16 named colors map to their canonical ANSI slots; RGB triples are
+/// snapped to the nearest 6×6×6 cube entry. Used by call sites that ship
+/// colors out to Lua (e.g. `statusline.snapshot`) where mlua tables are
+/// keyed by ANSI index.
 pub(super) fn color_to_ansi(color: smelt_core::style::Color) -> Option<u8> {
     use smelt_core::style::Color;
     match color {
@@ -260,8 +230,10 @@ pub(super) fn color_to_ansi(color: smelt_core::style::Color) -> Option<u8> {
     }
 }
 
-/// Approximate an RGB triple to the nearest ANSI 256 palette entry.
-fn rgb_to_ansi256(r: u8, g: u8, b: u8) -> u8 {
+/// Nearest ANSI 256-color index for an sRGB triple. Uses the canonical
+/// xterm 6×6×6 cube (0/95/135/175/215/255) plus the 24-step greyscale
+/// ramp.
+pub(super) fn rgb_to_ansi256(r: u8, g: u8, b: u8) -> u8 {
     if r == g && g == b {
         if r < 8 {
             return 16;
@@ -271,40 +243,6 @@ fn rgb_to_ansi256(r: u8, g: u8, b: u8) -> u8 {
         }
         return 232 + ((r - 8) / 10);
     }
-    let to_cube = |c: u8| -> u8 {
-        if c < 48 {
-            0
-        } else if c < 115 {
-            1
-        } else {
-            ((c - 35) / 40).min(5)
-        }
-    };
-    16 + 36 * to_cube(r) + 6 * to_cube(g) + to_cube(b)
-}
-
-/// Decode a Lua color table (`{ansi=u8}`, `{preset="name"}`, or `{rgb={r,g,b}}`) to ANSI index.
-pub(super) fn color_ansi_from_lua(table: &mlua::Table) -> LuaResult<u8> {
-    if let Ok(v) = table.get::<u8>("ansi") {
-        return Ok(v);
-    }
-    if let Ok(name) = table.get::<String>("preset") {
-        return crate::theme::preset_by_name(&name)
-            .ok_or_else(|| LuaError::RuntimeError(format!("unknown preset: {name}")));
-    }
-    if let Ok(rgb) = table.get::<mlua::Table>("rgb") {
-        let r: u8 = rgb.get("r")?;
-        let g: u8 = rgb.get("g")?;
-        let b: u8 = rgb.get("b")?;
-        return Ok(rgb_to_ansi_256(r, g, b));
-    }
-    Err(LuaError::RuntimeError(
-        "color table must have one of: ansi, preset, rgb".into(),
-    ))
-}
-
-/// Nearest ANSI 256-color index for an sRGB triple.
-fn rgb_to_ansi_256(r: u8, g: u8, b: u8) -> u8 {
     fn band(c: u8) -> u8 {
         let levels = [0u8, 95, 135, 175, 215, 255];
         levels
@@ -317,137 +255,29 @@ fn rgb_to_ansi_256(r: u8, g: u8, b: u8) -> u8 {
     16 + 36 * band(r) + 6 * band(g) + band(b)
 }
 
-/// Resolved color for a highlight group: fg preferred, then bg, then `Color::Reset`.
-pub(super) fn group_color(
-    theme: &crate::smelt_term::Theme,
-    group: &str,
-) -> smelt_core::style::Color {
-    let style = theme.get(group);
-    style
-        .fg
-        .or(style.bg)
-        .unwrap_or(smelt_core::style::Color::Reset)
-}
-
-/// Set highlight group `group` to fg = `Color::AnsiValue(ansi)`. For the two
-/// "palette" groups (`SmeltAccent`, `SmeltSlug`), bumps the corresponding ANSI
-/// index on the `Theme` and re-runs `populate_ui_theme` so derived groups
-/// follow. Any other group is set in place — only the fg moves.
-pub(super) fn theme_set(theme: &mut crate::smelt_term::Theme, group: &str, ansi: u8) {
-    match group {
-        "SmeltAccent" => {
-            theme.set_accent(ansi);
-            crate::theme::populate_ui_theme(theme);
-        }
-        "SmeltSlug" => {
-            theme.set_slug(ansi);
-            crate::theme::populate_ui_theme(theme);
-        }
-        other => {
-            theme.set(
-                other,
-                smelt_core::style::Style::new().fg(smelt_core::style::Color::AnsiValue(ansi)),
-            );
-        }
-    }
-}
-
-/// Well-known smelt highlight groups, in the order `theme.snapshot()` reports them.
-pub(super) const SMELT_GROUPS: &[&str] = &[
-    "SmeltAccent",
-    "SmeltSlug",
-    "SmeltUserBg",
-    "SmeltScrollPillBg",
-    "SmeltCodeBlockBg",
-    "SmeltBar",
-    "SmeltToolPending",
-    "SmeltReasonOff",
-    "Comment",
-];
-
-/// List of (group_name, current_color) pairs for `theme.snapshot()`.
-pub(super) fn theme_snapshot_pairs(
-    theme: &crate::smelt_term::Theme,
-) -> Vec<(&'static str, smelt_core::style::Color)> {
-    SMELT_GROUPS
-        .iter()
-        .map(|g| (*g, group_color(theme, g)))
-        .collect()
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use smelt_core::style::Color;
 
-    fn theme() -> crate::smelt_term::Theme {
-        let mut t = crate::smelt_term::Theme::new();
-        crate::theme::populate_ui_theme(&mut t);
-        t
+    #[test]
+    fn color_to_ansi_named_round_trips() {
+        assert_eq!(color_to_ansi(Color::Red), Some(9));
+        assert_eq!(color_to_ansi(Color::White), Some(15));
+        assert_eq!(color_to_ansi(Color::Reset), None);
+        assert_eq!(color_to_ansi(Color::AnsiValue(208)), Some(208));
     }
 
     #[test]
-    fn group_color_known_groups_return_color() {
-        let t = theme();
-        for g in SMELT_GROUPS {
-            // All built-in smelt groups are populated by `populate_ui_theme`;
-            // none should fall through to `Color::Reset`.
-            assert_ne!(
-                group_color(&t, g),
-                smelt_core::style::Color::Reset,
-                "expected populated color for {g}"
-            );
-        }
+    fn rgb_to_ansi256_greyscale_ramp() {
+        // Mid-grey snaps into the 232-255 ramp.
+        let v = rgb_to_ansi256(128, 128, 128);
+        assert!((232..=255).contains(&v), "got {v}");
     }
 
     #[test]
-    fn group_color_unknown_returns_reset() {
-        let t = theme();
-        assert_eq!(group_color(&t, "Bogus"), smelt_core::style::Color::Reset);
-    }
-
-    #[test]
-    fn theme_set_smelt_accent_rebuilds_palette() {
-        let mut t = theme();
-        theme_set(&mut t, "SmeltAccent", 42);
-        assert_eq!(t.accent(), 42);
-        assert_eq!(
-            t.get("SmeltAccent").fg,
-            Some(smelt_core::style::Color::AnsiValue(42))
-        );
-    }
-
-    #[test]
-    fn theme_set_smelt_accent_via_preset_decode() {
-        // sage maps to ANSI 108.
-        let v = crate::theme::preset_by_name("sage").unwrap();
-        let mut t = theme();
-        theme_set(&mut t, "SmeltAccent", v);
-        assert_eq!(t.accent(), 108);
-    }
-
-    #[test]
-    fn theme_set_arbitrary_group_only_moves_fg() {
-        let mut t = theme();
-        let accent_before = t.accent();
-        theme_set(&mut t, "Comment", 99);
-        assert_eq!(
-            t.get("Comment").fg,
-            Some(smelt_core::style::Color::AnsiValue(99))
-        );
-        // Accent palette index is untouched when setting a non-palette group.
-        assert_eq!(t.accent(), accent_before);
-    }
-
-    #[test]
-    fn theme_snapshot_pairs_lists_all_groups() {
-        let t = theme();
-        let pairs = theme_snapshot_pairs(&t);
-        let names: Vec<&str> = pairs.iter().map(|(n, _)| *n).collect();
-        for expected in SMELT_GROUPS {
-            assert!(
-                names.contains(expected),
-                "snapshot missing {expected}: {names:?}"
-            );
-        }
+    fn rgb_to_ansi256_pure_red_hits_cube_corner() {
+        // 255,0,0 sits at the (5,0,0) corner of the 6×6×6 cube: 16+36*5 = 196.
+        assert_eq!(rgb_to_ansi256(255, 0, 0), 196);
     }
 }

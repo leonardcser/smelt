@@ -4,7 +4,17 @@
 
 **Tier:** `UiHost` — Requires a terminal UI; calling these from headless mode raises.
 
-Read and write theme highlight groups, snapshot the current palette, and enumerate built-in color presets. UiHost-only. Highlight groups follow nvim's PascalCase convention (`Comment`, `SmeltAccent`, …). Writing `SmeltAccent` or `SmeltSlug` is special: it bumps the corresponding palette index and rebuilds dependent groups.
+Apply, read, and override the active colorscheme. Highlight groups follow nvim's PascalCase convention (`Comment`, `SmeltAccent`, …). The full colorscheme is described by a `ThemeSpec` table whose `groups` map keys are highlight-group names and whose values are either a `StyleDecl` table or a string referencing another group in the spec. UiHost-only.
+
+## `smelt.theme.apply`
+
+```lua
+fun(spec: smelt.theme.ThemeSpec): nil
+```
+
+Types: [`smelt.theme.ThemeSpec`](types.md#smeltthemethemespec)
+
+Compile `spec` against the current light/dark setting and install it as the active theme. String-valued group entries are resolved at compile time; cycles and dangling references raise a runtime error.
 
 ## `smelt.theme.get`
 
@@ -12,7 +22,7 @@ Read and write theme highlight groups, snapshot the current palette, and enumera
 fun(group: string): table
 ```
 
-Return the resolved foreground (or background) color for highlight group `group` (PascalCase: `Comment`, `ErrorMsg`, `SmeltAccent`, …) as a `{ ansi, rgb? }` table. Unknown groups resolve to the terminal's default fg.
+Read the resolved `StyleDecl` for `group`. Unknown groups resolve to an empty table.
 
 ## `smelt.theme.is_light`
 
@@ -22,29 +32,15 @@ fun(): boolean
 
 Return `true` if the active theme is a light theme. Lets plugins flip glyphs or contrast levels based on the current palette.
 
-## `smelt.theme.link`
-
-```lua
-fun(from: string, to: string): nil
-```
-
-Alias theme role `from` to `to` so reads of `from` resolve to `to`'s current color. Lets plugins reuse semantic groups (`MyPluginAccent` → `SmeltAccent`).
-
-## `smelt.theme.presets`
-
-```lua
-fun(): table
-```
-
-Built-in color presets for Lua-side pickers.
-
 ## `smelt.theme.set`
 
 ```lua
-fun(group: string, value: table): nil
+fun(group: string, style: smelt.theme.StyleDecl): nil
 ```
 
-Set highlight group `group`'s color. Pass a `{ ansi = N }` or `{ rgb = { r, g, b } }` table; RGB snaps to the closest 256-color slot. Setting `SmeltAccent` or `SmeltSlug` also bumps the corresponding palette index and rebuilds dependent groups; other groups only have their fg replaced.
+Types: [`smelt.theme.StyleDecl`](types.md#smeltthemestyledecl)
+
+Override a single highlight group's style. `style` is a `StyleDecl` table (`{ fg = { ansi = 244 }, bold = true }`). The override sticks until the next `apply()` or `use()` call.
 
 ## `smelt.theme.snapshot`
 
@@ -52,14 +48,17 @@ Set highlight group `group`'s color. Pass a `{ ansi = N }` or `{ rgb = { r, g, b
 fun(): table
 ```
 
-Snapshot every known theme role and its current color into a `{ role = color }` table. Useful for theme-aware pickers and diagnostic dumps.
+Snapshot every group currently set on the active theme into a `{ group = StyleDecl }` table.
 
 ## `smelt.theme.use`
 
 ```lua
-fun(name: string): any
+fun(name: string): nil
 ```
 
-Load a colorscheme by name via `require("smelt.colorschemes.<name>")`.
-Install custom colorschemes at `runtime/lua/smelt/colorschemes/<name>.lua`.
+Load colorscheme `name` from `runtime/lua/smelt/colorschemes/<name>.lua`
+and apply it. The file must `return` a `ThemeSpec` table: a `groups`
+map keyed by highlight-group name with either a `StyleDecl` table or
+a string reference as its value (see `smelt.theme.apply`). Drop
+custom colorschemes alongside `default.lua`.
 

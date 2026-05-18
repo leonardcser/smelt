@@ -92,8 +92,7 @@ struct ModeParser {
 
 impl BufferParser for ModeParser {
     fn parse(&self, buf: &mut Buffer, source: &str, width: u16) {
-        let mut theme = crate::smelt_term::Theme::new();
-        crate::theme::populate_ui_theme(&mut theme);
+        let theme = crate::theme::default_baked().as_ref().clone();
         let width = width.max(1);
         match &self.mode {
             BufFormat::Plain => {

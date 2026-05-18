@@ -499,16 +499,12 @@ pub fn print_cached_inline_diff(
     // Content re-wraps per row at `layout_width`, so the layout is width-pinned.
     out.mark_wrapped();
     let emit_limit = if max_rows == 0 { u16::MAX } else { max_rows };
-    let bg_del = Color::Rgb {
-        r: 60,
-        g: 20,
-        b: 20,
-    };
-    let bg_add = Color::Rgb {
-        r: 20,
-        g: 50,
-        b: 20,
-    };
+    // Diff row fills come from the active theme. Themes that omit
+    // `SmeltDiffAddBg` / `SmeltDiffDelBg` produce diffs without a row
+    // background (text still highlights via syntax colors).
+    let theme = crate::theme::active();
+    let bg_del = theme.get("SmeltDiffDelBg").bg;
+    let bg_add = theme.get("SmeltDiffAddBg").bg;
 
     let mut emitted = 0u16;
     for (row_idx, line) in cache.lines.iter().enumerate() {
@@ -548,7 +544,7 @@ pub fn print_cached_inline_diff(
                             lineno: *lineno as u32,
                         },
                         Some(('-', Color::Red)),
-                        Some(bg_del),
+                        bg_del,
                         spans,
                     ),
                     CachedDiffLine::Insert { lineno, spans, .. } => (
@@ -556,7 +552,7 @@ pub fn print_cached_inline_diff(
                             lineno: *lineno as u32,
                         },
                         Some(('+', Color::Green)),
-                        Some(bg_add),
+                        bg_add,
                         spans,
                     ),
                     CachedDiffLine::Ellipsis => unreachable!(),
@@ -589,8 +585,12 @@ pub fn print_cached_inline_diff(
                         line_fg,
                     );
                     if let Some((ch, color)) = sign {
-                        let bgv = bg.unwrap();
-                        out.set_bg(bgv);
+                        // bg is None when the theme doesn't define
+                        // `SmeltDiffAddBg` / `SmeltDiffDelBg`; in that
+                        // case skip the row-fill but still emit the sign.
+                        if let Some(bgv) = bg {
+                            out.set_bg(bgv);
+                        }
                         if vi == 0 {
                             out.set_fg(color);
                             out.print(&format!("{} ", ch));
@@ -598,8 +598,10 @@ pub fn print_cached_inline_diff(
                             out.print("  ");
                         }
                         print_cached_spans(out, vrow, bg);
-                        out.set_bg(bgv);
-                        out.pad_row_to_layout_width(pad_meta.clone());
+                        if let Some(bgv) = bg {
+                            out.set_bg(bgv);
+                            out.pad_row_to_layout_width(pad_meta.clone());
+                        }
                         out.reset_style();
                     } else {
                         out.print("  ");
@@ -821,17 +823,10 @@ pub fn print_split_diff_side(
         .unwrap_or_else(|| SYNTAX_SET.find_syntax_plain_text());
     let theme = syntax_theme();
     let mut h = HighlightLines::new(syntax, theme);
+    let theme = crate::theme::active();
     let bg_changed = match side {
-        SplitSide::Left => Color::Rgb {
-            r: 60,
-            g: 20,
-            b: 20,
-        },
-        SplitSide::Right => Color::Rgb {
-            r: 20,
-            g: 50,
-            b: 20,
-        },
+        SplitSide::Left => theme.get("SmeltDiffDelBg").bg,
+        SplitSide::Right => theme.get("SmeltDiffAddBg").bg,
     };
     for row in &plan.rows {
         let cell = match side {
@@ -843,7 +838,7 @@ pub fn print_split_diff_side(
                 out,
                 &c.text,
                 &mut h,
-                if c.changed { Some(bg_changed) } else { None },
+                if c.changed { bg_changed } else { None },
                 smelt_buffer::buffer::SourceLine::Linear { lineno: c.lineno },
             ),
             None => paint_synthetic_row(out),

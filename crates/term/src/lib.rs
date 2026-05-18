@@ -29,7 +29,7 @@ pub use layout::{
 };
 pub use line::{Line, Span};
 pub use smelt_style::style::Color;
-pub use smelt_style::theme::{Theme, DEFAULT_ACCENT};
+pub use smelt_style::theme::Theme;
 pub use snapshot::SnapshotFrame;
 pub use surface::Surface;
 

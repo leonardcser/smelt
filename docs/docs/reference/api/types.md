@@ -324,6 +324,48 @@ Options accepted by `smelt.statusline.register`.
 | --- | --- | --- | --- |
 | `align` | `string` |  | `"right"` makes the source's segments default to the right strip. Defaults to left. |
 
+### `smelt.theme.ColorDecl`
+
+Color value used inside a `StyleDecl`. May be a direct color (`{ ansi = N }` / `{ rgb = ... }`) or a `{ dark, light }` branch resolved at compile time against the terminal background. If both a direct color and a branch are set, the branch wins when its side matches the active mode; otherwise the direct color is used.
+
+| Field | Type | Required | Description |
+| --- | --- | --- | --- |
+| `ansi` | `integer` |  | ANSI 256-color palette index for the default (non-branched) case. |
+| `rgb` | `integer[]` |  | `[r, g, b]` sRGB triple for the default (non-branched) case. |
+| `light` | [smelt.theme.ColorLeaf](types.md#smeltthemecolorleaf) |  | Color this branch resolves to when `is_light == true`. |
+| `dark` | [smelt.theme.ColorLeaf](types.md#smeltthemecolorleaf) |  | Color this branch resolves to when `is_light == false`. |
+
+### `smelt.theme.ColorLeaf`
+
+Concrete color value: an ANSI 256 palette index or an sRGB triple. Used as the leaf of a `ColorDecl` (and as the leaf of its dark/light branches). Exactly one of `ansi` / `rgb` should be set; empty resolves to `None`.
+
+| Field | Type | Required | Description |
+| --- | --- | --- | --- |
+| `ansi` | `integer` |  | ANSI 256-color palette index. |
+| `rgb` | `integer[]` |  | `[r, g, b]` sRGB triple. |
+
+### `smelt.theme.StyleDecl`
+
+Style table for a single highlight group. Every field is optional — unset fields stay at `Style::default()`. Pass a string in place of this struct (at the group-map level) to alias another group.
+
+| Field | Type | Required | Description |
+| --- | --- | --- | --- |
+| `fg` | [smelt.theme.ColorDecl](types.md#smeltthemecolordecl) |  | Foreground color. |
+| `bg` | [smelt.theme.ColorDecl](types.md#smeltthemecolordecl) |  | Background color. |
+| `bold` | `boolean` |  | Bold text. |
+| `italic` | `boolean` |  | Italic text. |
+| `dim` | `boolean` |  | Dim / faint text. |
+| `underline` | `boolean` |  | Underline. |
+| `crossedout` | `boolean` |  | Strikethrough. |
+
+### `smelt.theme.ThemeSpec`
+
+Flat map keyed by highlight-group name (`Comment`, `Visual`, `SmeltAccent`, …). Each value is either a `StyleDecl` table or a string referencing another group in the same spec. Every themable color (foreground, background, diff row fills, scrollbar colors, mode indicators) is just a group.
+
+| Field | Type | Required | Description |
+| --- | --- | --- | --- |
+| `[string]` | `string | smelt.theme.StyleDecl` |  | Style table or alias string for the group named by the key. |
+
 ### `smelt.tools.PermissionDefaults`
 
 Per-mode default decisions installed by `smelt.tools.register`. Each missing field falls through to the host's generic rules.

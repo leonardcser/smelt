@@ -1,5 +1,0 @@
----
-source: crates/tui/tests/storybook/mod.rs
-expression: frame.styles_text()
----
-  0   6   5 fg=Magenta attrs=bold

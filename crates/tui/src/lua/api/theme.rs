@@ -1,82 +1,180 @@
-//! `smelt.theme` bindings — read / write theme roles, snapshot the
-//! current palette, enumerate built-in presets.
+//! `smelt.theme` bindings — apply a colorscheme spec, read/write
+//! individual groups, snapshot the resolved theme.
+//!
+//! A colorscheme is a `ThemeSpec` table: a map from highlight-group
+//! names to either a `StyleDecl` table (`{ fg = ..., bold = true }`) or
+//! a string referencing another group (`"SmeltMuted"`). Pass the table
+//! to `apply()` or have `runtime/lua/smelt/colorschemes/<name>.lua`
+//! return one and call `theme.use("<name>")`.
 
-use super::{color_ansi_from_lua, color_to_lua, group_color, theme_set, theme_snapshot_pairs};
+use crate::theme::{compile, StyleDecl, ThemeSpec};
 use mlua::prelude::*;
 use smelt_core::lua::doc::Tier;
 use smelt_core::lua::module::LuaMod;
+use smelt_core::style::{Color, Style};
 
 pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
     let m = LuaMod::under(
         lua,
         smelt,
         "theme",
-        "Read and write theme highlight groups, snapshot the current palette, and enumerate built-in color presets. UiHost-only. Highlight groups follow nvim's PascalCase convention (`Comment`, `SmeltAccent`, …). Writing `SmeltAccent` or `SmeltSlug` is special: it bumps the corresponding palette index and rebuilds dependent groups.",
+        "Apply, read, and override the active colorscheme. Highlight \
+groups follow nvim's PascalCase convention (`Comment`, `SmeltAccent`, …). \
+The full colorscheme is described by a `ThemeSpec` table whose `groups` \
+map keys are highlight-group names and whose values are either a \
+`StyleDecl` table or a string referencing another group in the spec. \
+UiHost-only.",
         Tier::UiHost,
     )?;
+
     m.fn_(
-        "get",
-        "Return the resolved foreground (or background) color for highlight group `group` (PascalCase: `Comment`, `ErrorMsg`, `SmeltAccent`, …) as a `{ ansi, rgb? }` table. Unknown groups resolve to the terminal's default fg.",
-        &["group"],
-        |lua, group: String| -> LuaResult<mlua::Table> {
-            let color = crate::lua::with_app(|app| group_color(app.ui.theme(), &group));
-            color_to_lua(lua, color)
+        "apply",
+        "Compile `spec` against the current light/dark setting and \
+install it as the active theme. String-valued group entries are resolved \
+at compile time; cycles and dangling references raise a runtime error.",
+        &["spec"],
+        |_, spec: ThemeSpec| -> LuaResult<()> {
+            crate::lua::with_app(|app| {
+                let is_light = app.ui.theme().is_light();
+                match compile(&spec, is_light) {
+                    Ok(theme) => {
+                        *app.ui.theme_mut() = theme;
+                        publish_active(app);
+                        Ok(())
+                    }
+                    Err(e) => Err(LuaError::RuntimeError(format!("theme.apply: {e}"))),
+                }
+            })
         },
     )?;
+
     m.fn_(
         "set",
-        "Set highlight group `group`'s color. Pass a `{ ansi = N }` or `{ rgb = { r, g, b } }` table; RGB snaps to the closest 256-color slot. Setting `SmeltAccent` or `SmeltSlug` also bumps the corresponding palette index and rebuilds dependent groups; other groups only have their fg replaced.",
-        &["group", "value"],
-        |_, (group, value): (String, mlua::Table)| -> LuaResult<()> {
-            let ansi = color_ansi_from_lua(&value)?;
-            crate::lua::with_app(|app| theme_set(app.ui.theme_mut(), &group, ansi));
+        "Override a single highlight group's style. `style` is a \
+`StyleDecl` table (`{ fg = { ansi = 244 }, bold = true }`). The override \
+sticks until the next `apply()` or `use()` call.",
+        &["group", "style"],
+        |_, (group, style): (String, StyleDecl)| -> LuaResult<()> {
+            crate::lua::with_app(|app| {
+                let is_light = app.ui.theme().is_light();
+                let s = style_decl_to_style(&style, is_light);
+                app.ui.theme_mut().set(group, s);
+                publish_active(app);
+            });
             Ok(())
         },
     )?;
+
     m.fn_(
-        "link",
-        "Alias theme role `from` to `to` so reads of `from` resolve to `to`'s current color. Lets plugins reuse semantic groups (`MyPluginAccent` → `SmeltAccent`).",
-        &["from", "to"],
-        |_, (from, to): (String, String)| -> LuaResult<()> {
-            crate::lua::with_app(|app| app.ui.theme_mut().link(from, to));
-            Ok(())
+        "get",
+        "Read the resolved `StyleDecl` for `group`. Unknown groups \
+resolve to an empty table.",
+        &["group"],
+        |lua, group: String| -> LuaResult<mlua::Table> {
+            let style = crate::lua::with_app(|app| app.ui.theme().get(&group));
+            style_to_lua(lua, style)
         },
     )?;
+
     m.fn_(
         "snapshot",
-        "Snapshot every known theme role and its current color into a `{ role = color }` table. Useful for theme-aware pickers and diagnostic dumps.",
+        "Snapshot every group currently set on the active theme into a \
+`{ group = StyleDecl }` table.",
         &[],
         |lua, ()| -> LuaResult<mlua::Table> {
-            let t = lua.create_table()?;
-            let pairs = crate::lua::with_app(|app| theme_snapshot_pairs(app.ui.theme()));
-            for (name, color) in pairs {
-                t.set(name, color_to_lua(lua, color)?)?;
+            let pairs = crate::lua::with_app(|app| {
+                let theme = app.ui.theme();
+                let mut out: Vec<(String, Style)> = Vec::with_capacity(theme.len());
+                for (id, style) in theme.iter() {
+                    if let Some(name) = smelt_core::theme::name_of(id) {
+                        if name.starts_with("__anon__/") {
+                            continue;
+                        }
+                        out.push((name, *style));
+                    }
+                }
+                out.sort_by(|(a, _), (b, _)| a.cmp(b));
+                out
+            });
+            let out = lua.create_table()?;
+            for (name, style) in pairs {
+                out.set(name, style_to_lua(lua, style)?)?;
             }
-            Ok(t)
+            Ok(out)
         },
     )?;
+
     m.fn_(
         "is_light",
-        "Return `true` if the active theme is a light theme. Lets plugins flip glyphs or contrast levels based on the current palette.",
+        "Return `true` if the active theme is a light theme. Lets \
+plugins flip glyphs or contrast levels based on the current palette.",
         &[],
         |_, ()| Ok(crate::lua::with_app(|app| app.ui.theme().is_light())),
     )?;
-    // Built-in color presets for Lua-side pickers.
-    m.fn_(
-        "presets",
-        "Built-in color presets for Lua-side pickers.",
-        &[],
-        |lua, ()| -> LuaResult<mlua::Table> {
-            let list = lua.create_table()?;
-            for (i, (name, detail, ansi)) in crate::theme::PRESETS.iter().enumerate() {
-                let entry = lua.create_table()?;
-                entry.set("name", *name)?;
-                entry.set("detail", *detail)?;
-                entry.set("ansi", *ansi)?;
-                list.set(i + 1, entry)?;
-            }
-            Ok(list)
-        },
-    )?;
+
     Ok(())
+}
+
+/// Project a `Style` to a Lua `StyleDecl` table. Unset fields are
+/// omitted so `snapshot()` round-trips cleanly back through `apply()`.
+fn style_to_lua(lua: &Lua, style: Style) -> LuaResult<mlua::Table> {
+    let t = lua.create_table()?;
+    if let Some(fg) = style.fg {
+        t.set("fg", color_to_lua(lua, fg)?)?;
+    }
+    if let Some(bg) = style.bg {
+        t.set("bg", color_to_lua(lua, bg)?)?;
+    }
+    if style.bold {
+        t.set("bold", true)?;
+    }
+    if style.italic {
+        t.set("italic", true)?;
+    }
+    if style.dim {
+        t.set("dim", true)?;
+    }
+    if style.underline {
+        t.set("underline", true)?;
+    }
+    if style.crossedout {
+        t.set("crossedout", true)?;
+    }
+    Ok(t)
+}
+
+fn color_to_lua(lua: &Lua, color: Color) -> LuaResult<mlua::Table> {
+    let t = lua.create_table()?;
+    match color {
+        Color::AnsiValue(v) => t.set("ansi", v)?,
+        Color::Rgb { r, g, b } => t.set("rgb", [r, g, b])?,
+        other => {
+            // Project the named colors back to their canonical ANSI slot.
+            if let Some(idx) = super::color_to_ansi(other) {
+                t.set("ansi", idx)?;
+            }
+        }
+    }
+    Ok(t)
+}
+
+fn style_decl_to_style(decl: &StyleDecl, is_light: bool) -> Style {
+    Style {
+        fg: decl.fg.as_ref().and_then(|c| c.to_color(is_light)),
+        bg: decl.bg.as_ref().and_then(|c| c.to_color(is_light)),
+        bold: decl.bold.unwrap_or(false),
+        italic: decl.italic.unwrap_or(false),
+        dim: decl.dim.unwrap_or(false),
+        underline: decl.underline.unwrap_or(false),
+        crossedout: decl.crossedout.unwrap_or(false),
+    }
+}
+
+/// Publish the app's current theme to the process-wide active theme
+/// slot. Deep renderers (the diff renderer in `smelt_core`) read from
+/// that slot, so any Lua-driven mutation needs to refresh it.
+fn publish_active(app: &mut crate::app::TuiApp) {
+    // `app.ui.theme()` returns `&Arc<Theme>`. Clone the Arc into the
+    // active slot — no extra Theme allocation.
+    smelt_core::theme::set_active(app.ui.theme().clone());
 }

@@ -27,7 +27,7 @@ pub use smelt_buffer::undo::{UndoEntry, UndoHistory};
 pub use smelt_term::{
     flush_diff, paint_layout_tree, Align, Border, Cell, CellUpdate, Color, Compositor, Constraint,
     Corner, Grid, GridSlice, Gutters, HitRegistry, LayoutTree, Line, Natural, NaturalRef,
-    PaintDispatch, PaintId, Rect, SnapshotFrame, Span, StaticNatural, Style, Theme, DEFAULT_ACCENT,
+    PaintDispatch, PaintId, Rect, SnapshotFrame, Span, StaticNatural, Style, Theme,
 };
 pub use smelt_term::{grid, layout};
 

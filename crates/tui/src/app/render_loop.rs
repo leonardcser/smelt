@@ -8,7 +8,6 @@ impl TuiApp {
     pub(crate) fn render_normal(&mut self, agent_running: bool) {
         let _perf = smelt_perf::perf::begin("app:tick_compositor");
         self.update_spinner();
-        crate::theme::populate_ui_theme(self.ui.theme_mut());
         // Publish vim mode so overlay leaves read it via `DrawContext::vim_mode`.
 
         let (term_w, term_h) = self.ui.terminal_size();

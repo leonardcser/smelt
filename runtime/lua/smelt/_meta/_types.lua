@@ -213,6 +213,32 @@
 ---@class smelt.statusline.RegisterOpts
 ---@field align? string `"right"` makes the source's segments default to the right strip. Defaults to left.
 
+--- Color value used inside a `StyleDecl`. May be a direct color (`{ ansi = N }` / `{ rgb = ... }`) or a `{ dark, light }` branch resolved at compile time against the terminal background. If both a direct color and a branch are set, the branch wins when its side matches the active mode; otherwise the direct color is used.
+---@class smelt.theme.ColorDecl
+---@field ansi? integer ANSI 256-color palette index for the default (non-branched) case.
+---@field rgb? integer[] `[r, g, b]` sRGB triple for the default (non-branched) case.
+---@field light? smelt.theme.ColorLeaf Color this branch resolves to when `is_light == true`.
+---@field dark? smelt.theme.ColorLeaf Color this branch resolves to when `is_light == false`.
+
+--- Concrete color value: an ANSI 256 palette index or an sRGB triple. Used as the leaf of a `ColorDecl` (and as the leaf of its dark/light branches). Exactly one of `ansi` / `rgb` should be set; empty resolves to `None`.
+---@class smelt.theme.ColorLeaf
+---@field ansi? integer ANSI 256-color palette index.
+---@field rgb? integer[] `[r, g, b]` sRGB triple.
+
+--- Style table for a single highlight group. Every field is optional — unset fields stay at `Style::default()`. Pass a string in place of this struct (at the group-map level) to alias another group.
+---@class smelt.theme.StyleDecl
+---@field fg? smelt.theme.ColorDecl Foreground color.
+---@field bg? smelt.theme.ColorDecl Background color.
+---@field bold? boolean Bold text.
+---@field italic? boolean Italic text.
+---@field dim? boolean Dim / faint text.
+---@field underline? boolean Underline.
+---@field crossedout? boolean Strikethrough.
+
+--- Flat map keyed by highlight-group name (`Comment`, `Visual`, `SmeltAccent`, …). Each value is either a `StyleDecl` table or a string referencing another group in the same spec. Every themable color (foreground, background, diff row fills, scrollbar colors, mode indicators) is just a group.
+---@class smelt.theme.ThemeSpec
+---@field [string] string | smelt.theme.StyleDecl Style table or alias string for the group named by the key.
+
 --- Per-mode default decisions installed by `smelt.tools.register`. Each missing field falls through to the host's generic rules.
 ---@class smelt.tools.PermissionDefaults
 ---@field normal? smelt.tools.Decision Decision applied in normal mode.

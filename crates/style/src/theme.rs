@@ -1,9 +1,15 @@
 //! Theme registry: nvim-style highlight groups interned to stable [`HlGroup`] ids.
 //! Unknown names resolve to `Style::default()` without panicking.
+//!
+//! A `Theme` is a flat `HlGroup → Style` map plus an `is_light` hint. There
+//! is no aliasing layer — a colorscheme that wants two names to share a
+//! color either sets both directly, or expresses the relationship in its
+//! source spec (e.g. `Comment = "SmeltMuted"` resolved at compile time in
+//! `smelt_tui::theme::compile`). The runtime sees only resolved styles.
 
-use crate::style::{Color, Style};
+use crate::style::Style;
 use std::collections::HashMap;
-use std::sync::{OnceLock, RwLock};
+use std::sync::{Arc, OnceLock, RwLock};
 
 /// Interned highlight-group id. Stable for the process lifetime.
 #[derive(Copy, Clone, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -119,32 +125,13 @@ pub fn registry_len() -> usize {
     named + anon
 }
 
-/// Default accent palette index (`Color::AnsiValue(208)`, the "ember" preset).
-pub const DEFAULT_ACCENT: u8 = 208;
-
-#[derive(Debug, Clone)]
+/// Resolved highlight-group → style map. `Theme` is materialized state:
+/// every group has its final `Style` baked in. Construct via
+/// `smelt_tui::theme::compile` or hand-build with [`Theme::set`].
+#[derive(Debug, Clone, Default)]
 pub struct Theme {
     styles: HashMap<HlGroup, Style>,
-    /// Source → target links, resolved at `resolve()` time. Max chain depth 16 (cycle guard).
-    links: HashMap<HlGroup, HlGroup>,
     is_light: bool,
-    /// ANSI 256-color accent index. Tracked separately from `SmeltAccent` so palette rebuilds
-    /// are a single setter call.
-    accent: u8,
-    /// Slug pill background index. `0` means use accent.
-    slug: u8,
-}
-
-impl Default for Theme {
-    fn default() -> Self {
-        Self {
-            styles: HashMap::new(),
-            links: HashMap::new(),
-            is_light: false,
-            accent: DEFAULT_ACCENT,
-            slug: 0,
-        }
-    }
 }
 
 impl Theme {
@@ -152,39 +139,25 @@ impl Theme {
         Self::default()
     }
 
+    /// Set `name` to `style`. Overwrites any prior value.
     pub fn set(&mut self, name: impl Into<String>, style: Style) {
         let id = intern(&name.into());
-        self.links.remove(&id);
         self.styles.insert(id, style);
     }
 
-    pub fn link(&mut self, from: impl Into<String>, to: impl Into<String>) {
-        let from_id = intern(&from.into());
-        let to_id = intern(&to.into());
-        self.styles.remove(&from_id);
-        self.links.insert(from_id, to_id);
-    }
-
-    /// Resolve a name to its current Style, following links. Unknown names return `Style::default()`.
+    /// Resolve a name to its current Style. Unknown names return `Style::default()`.
     pub fn get(&self, name: &str) -> Style {
         self.resolve(intern(name))
     }
 
-    /// Resolve a [`HlGroup`] to its current Style. Follows up to 16 link hops; cycles fall back to default.
+    /// Resolve a [`HlGroup`] to its current Style. Anonymous style ids fall
+    /// through to the global anon registry; everything else returns
+    /// `Style::default()`.
     pub fn resolve(&self, hl: HlGroup) -> Style {
-        let mut cur = hl;
-        let mut visited: usize = 0;
-        while let Some(target) = self.links.get(&cur) {
-            visited += 1;
-            if visited > 16 {
-                return Style::default();
-            }
-            cur = *target;
-        }
-        if let Some(style) = self.styles.get(&cur).copied() {
+        if let Some(style) = self.styles.get(&hl).copied() {
             return style;
         }
-        anon_resolve(cur).unwrap_or_default()
+        anon_resolve(hl).unwrap_or_default()
     }
 
     /// Get-or-mint the HlGroup id for `name`.
@@ -192,10 +165,10 @@ impl Theme {
         intern(name)
     }
 
-    /// Returns true if this Theme has a Style or link registered for `hl`.
-    /// False means `resolve` will fall back to `Style::default()`.
+    /// True iff this Theme has a Style registered for `hl`. False means
+    /// `resolve` will fall back to the anon registry or `Style::default()`.
     pub fn contains(&self, hl: HlGroup) -> bool {
-        self.styles.contains_key(&hl) || self.links.contains_key(&hl)
+        self.styles.contains_key(&hl)
     }
 
     pub fn is_light(&self) -> bool {
@@ -206,34 +179,49 @@ impl Theme {
         self.is_light = light;
     }
 
-    pub fn accent(&self) -> u8 {
-        self.accent
+    /// Iterator over `(HlGroup, &Style)` for every group set on this theme.
+    /// Order is unspecified.
+    pub fn iter(&self) -> impl Iterator<Item = (HlGroup, &Style)> {
+        self.styles.iter().map(|(k, v)| (*k, v))
     }
 
-    pub fn set_accent(&mut self, ansi: u8) {
-        self.accent = ansi;
+    /// Number of groups set on this theme.
+    pub fn len(&self) -> usize {
+        self.styles.len()
     }
 
-    pub fn accent_color(&self) -> Color {
-        Color::AnsiValue(self.accent)
+    pub fn is_empty(&self) -> bool {
+        self.styles.is_empty()
     }
+}
 
-    pub fn slug(&self) -> u8 {
-        self.slug
-    }
+// ── Process-wide active theme ───────────────────────────────────────────
+//
+// Deep renderers (the diff renderer in `smelt_core`, future syntax
+// theming) can't reasonably thread `&Theme` through every signature —
+// they're called from worker threads that have no live app context. So
+// the runtime publishes the current `Theme` to one process-wide slot
+// that anyone can read with a single locked Arc clone.
+//
+// `smelt_tui::theme::compile` (and `smelt.theme.set` overrides) push
+// new themes here. Callers that hold their own `Arc<Theme>` (e.g. the
+// TUI `Surface`) should mirror it into the slot via `set_active` so
+// downstream readers see the same state.
 
-    pub fn set_slug(&mut self, ansi: u8) {
-        self.slug = ansi;
-    }
+fn active_slot() -> &'static RwLock<Arc<Theme>> {
+    static SLOT: OnceLock<RwLock<Arc<Theme>>> = OnceLock::new();
+    SLOT.get_or_init(|| RwLock::new(Arc::new(Theme::new())))
+}
 
-    /// Resolved slug pill background. `slug == 0` falls back to accent.
-    pub fn slug_color(&self) -> Color {
-        if self.slug == 0 {
-            self.accent_color()
-        } else {
-            Color::AnsiValue(self.slug)
-        }
-    }
+/// Snapshot the active process-wide theme. Reads are uncontended in the
+/// steady state — the lock is only held during a theme swap.
+pub fn active() -> Arc<Theme> {
+    active_slot().read().unwrap().clone()
+}
+
+/// Install `theme` as the process-wide active theme.
+pub fn set_active(theme: Arc<Theme>) {
+    *active_slot().write().unwrap() = theme;
 }
 
 #[cfg(test)]
@@ -260,79 +248,20 @@ mod tests {
     }
 
     #[test]
-    fn link_chases_to_target() {
-        let mut t = Theme::new();
-        t.set("Visual", Style::new().bg(Color::AnsiValue(237)));
-        t.link("SearchHighlight", "Visual");
-        assert_eq!(t.get("SearchHighlight"), t.get("Visual"));
-    }
-
-    #[test]
-    fn link_chain_resolves() {
-        let mut t = Theme::new();
-        t.set("Base", Style::new().bg(Color::AnsiValue(42)));
-        t.link("Mid", "Base");
-        t.link("Top", "Mid");
-        assert_eq!(t.get("Top"), t.get("Base"));
-    }
-
-    #[test]
-    fn cyclic_link_returns_default_without_panic() {
-        let mut t = Theme::new();
-        t.link("A", "B");
-        t.link("B", "A");
-        assert_eq!(t.get("A"), Style::default());
-    }
-
-    #[test]
-    fn link_chain_exceeding_depth_cap_returns_default() {
-        let mut t = Theme::new();
-        // 17-hop chain L0 -> L1 -> ... -> L17, where L17 has a real style.
-        // Without the cap, get("L0") would chase to L17 and return target_style.
-        for i in 0..17 {
-            t.link(format!("L{i}"), format!("L{}", i + 1));
-        }
-        t.set("L17", Style::new().bg(Color::AnsiValue(99)));
-        assert_eq!(t.get("L0"), Style::default());
-    }
-
-    #[test]
-    fn set_overwrites_existing_link() {
-        let mut t = Theme::new();
-        t.set("Visual", Style::new().bg(Color::AnsiValue(237)));
-        t.link("Search", "Visual");
-        let direct = Style::new().bg(Color::AnsiValue(220));
-        t.set("Search", direct);
-        assert_eq!(t.get("Search"), direct);
-    }
-
-    #[test]
-    fn link_overwrites_existing_set() {
+    fn set_overwrites_existing_set() {
         let mut t = Theme::new();
         t.set("X", Style::new().bg(Color::AnsiValue(1)));
-        t.set("Y", Style::new().bg(Color::AnsiValue(2)));
-        t.link("X", "Y");
-        assert_eq!(t.get("X"), t.get("Y"));
+        let direct = Style::new().bg(Color::AnsiValue(2));
+        t.set("X", direct);
+        assert_eq!(t.get("X"), direct);
     }
 
     #[test]
-    fn accent_defaults_to_ember_and_round_trips() {
+    fn light_flag_round_trips() {
         let mut t = Theme::new();
-        assert_eq!(t.accent(), DEFAULT_ACCENT);
-        assert_eq!(t.accent_color(), Color::AnsiValue(DEFAULT_ACCENT));
-        t.set_accent(75);
-        assert_eq!(t.accent(), 75);
-        assert_eq!(t.accent_color(), Color::AnsiValue(75));
-    }
-
-    #[test]
-    fn slug_zero_falls_back_to_accent() {
-        let mut t = Theme::new();
-        t.set_accent(75);
-        assert_eq!(t.slug(), 0);
-        assert_eq!(t.slug_color(), Color::AnsiValue(75));
-        t.set_slug(108);
-        assert_eq!(t.slug_color(), Color::AnsiValue(108));
+        assert!(!t.is_light());
+        t.set_light(true);
+        assert!(t.is_light());
     }
 
     // ── Interner ──────────────────────────────────────────────────────────
@@ -391,12 +320,10 @@ mod tests {
     }
 
     #[test]
-    fn contains_reports_set_and_linked_names_only() {
+    fn contains_reports_set_names_only() {
         let mut t = Theme::new();
         t.set("style_audit_contains_a", Style::new().bold());
-        t.link("style_audit_contains_b", "style_audit_contains_a");
         assert!(t.contains(t.id_for("style_audit_contains_a")));
-        assert!(t.contains(t.id_for("style_audit_contains_b")));
         assert!(!t.contains(t.id_for("style_audit_contains_unknown")));
     }
 }

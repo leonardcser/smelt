@@ -344,12 +344,37 @@ end
 
 -- `smelt.theme` is UiHost. Only attach the convenience loader when it exists.
 if smelt.theme then
-  -- Load a colorscheme by name via `require("smelt.colorschemes.<name>")`.
-  -- Install custom colorschemes at `runtime/lua/smelt/colorschemes/<name>.lua`.
-  -- @sig fun(name: string): any
+  -- Load colorscheme `name` from `runtime/lua/smelt/colorschemes/<name>.lua`
+  -- and apply it. The file must `return` a `ThemeSpec` table: a `groups`
+  -- map keyed by highlight-group name with either a `StyleDecl` table or
+  -- a string reference as its value (see `smelt.theme.apply`). Drop
+  -- custom colorschemes alongside `default.lua`.
+  -- @sig fun(name: string): nil
   function smelt.theme.use(name)
-    return require("smelt.colorschemes." .. name)
+    local spec = require("smelt.colorschemes." .. name)
+    if type(spec) ~= "table" then
+      error("smelt.theme.use: colorscheme `" .. name .. "` must return a ThemeSpec table", 2)
+    end
+    smelt.theme.apply(spec)
   end
+
+  -- Built-in accent presets. Used by `/theme` and `/color`; user
+  -- colorschemes can extend this list. Each entry is
+  -- `{ name = string, detail = string, ansi = integer }`.
+  smelt.theme.presets = smelt.theme.presets or {
+    { name = "ember",    detail = "default",         ansi = 208 },
+    { name = "coral",    detail = "salmon pink",     ansi = 210 },
+    { name = "rose",     detail = "soft pink",       ansi = 211 },
+    { name = "gold",     detail = "warm yellow",     ansi = 220 },
+    { name = "ice",      detail = "cool white-blue", ansi = 159 },
+    { name = "sky",      detail = "light blue",      ansi = 117 },
+    { name = "blue",     detail = "classic blue",    ansi = 69  },
+    { name = "lavender", detail = "cool purple",     ansi = 147 },
+    { name = "lilac",    detail = "warm purple",     ansi = 183 },
+    { name = "mint",     detail = "soft green",      ansi = 115 },
+    { name = "sage",     detail = "muted green",     ansi = 108 },
+    { name = "silver",   detail = "grey",            ansi = 244 },
+  }
 end
 
 -- Per-name state. Two flavours:
