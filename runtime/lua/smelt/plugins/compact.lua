@@ -30,7 +30,14 @@ local TRUNCATION_SUFFIX = "\n…[truncated for compaction]"
 local COMPACT_USER_MESSAGE_MAX_TOKENS = 20000
 
 -- Fire auto-compact when the prompt usage crosses this fraction of the window.
-local AUTO_COMPACT_THRESHOLD = 0.80
+-- Override per user: `smelt.state.persistent("compact").threshold = 0.7` in init.lua.
+local DEFAULT_AUTO_COMPACT_THRESHOLD = 0.80
+
+local function auto_compact_threshold()
+  local v = smelt.state.persistent("compact").threshold
+  if type(v) == "number" and v > 0 and v <= 1 then return v end
+  return DEFAULT_AUTO_COMPACT_THRESHOLD
+end
 
 -- How many times to re-issue the summarizer call when the model returns an
 -- empty response before giving up.
@@ -232,7 +239,7 @@ smelt.cell("turn_complete"):subscribe(function()
   local window = smelt.session.context_window()
   local tokens = smelt.session.context_tokens()
   if not window or not tokens then return end
-  if tokens < window * AUTO_COMPACT_THRESHOLD then return end
+  if tokens < window * auto_compact_threshold() then return end
   run_compact({ inject_recent_user_messages = true })
 end)
 
