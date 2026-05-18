@@ -4,21 +4,21 @@
 
 **Tier:** `Host` — Available in every runtime, including headless mode.
 
-Once-per-launch hooks keyed by event name. `on(event, fn)` is the general form; `on_ready` is a shorthand for the most common case (react to a CLI flag at startup).
+Once-per-launch hooks keyed by event name. `on(event, fn)` is the general form; `on_ready` is a shorthand for the most common case (react to a CLI flag at startup). Each hook fires at most once per launch and is dropped from the registry on fire.
 
 ## `smelt.lifecycle.on`
 
 ```lua
-fun(event: string, fn: function): nil
+fun(event: string, fn: function): fun(): boolean
 ```
 
-Queue `fn` for the lifecycle event named `event`. Multiple hooks per event fire in registration order. Today only `"ready"` is emitted (after bootstrap + argv parse, before the main loop); more events may be added without breaking this API.
+Queue `fn` for the lifecycle event named `event`. Multiple hooks per event fire in registration order. Today only `"ready"` is emitted (after bootstrap + argv parse, before the main loop); more events may be added without breaking this API. Returns an `off()` that unregisters the hook before it fires; calling `off()` after the hook has already fired is a no-op returning `false`.
 
 ## `smelt.lifecycle.on_ready`
 
 ```lua
-fun(fn: function): nil
+fun(fn: function): fun(): boolean
 ```
 
-Shorthand for `lifecycle.on("ready", fn)`. The host calls `fn` once, after Lua bootstrap and CLI parsing finish and before the main loop starts. Use this to wire a CLI flag declared via `smelt.cli.register_flag` to a startup action — e.g. open a picker, load a session, dispatch a command.
+Shorthand for `lifecycle.on("ready", fn)`. The host calls `fn` once, after Lua bootstrap and CLI parsing finish and before the main loop starts. Use this to wire a CLI flag declared via `smelt.cli.register_flag` to a startup action — e.g. open a picker, load a session, dispatch a command. Returns an `off()` that unregisters the hook before `ready` fires.
 

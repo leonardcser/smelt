@@ -90,7 +90,7 @@ impl HookRegistry {
     /// `name`, in registration order. Returns an owned vector so the
     /// mutex is released before the caller invokes the functions —
     /// preventing re-entrancy deadlocks when a hook reads back from the
-    /// same registry.
+    /// same registry. Entries stay registered for the next dispatch.
     pub fn snapshot_for(&self, lua: &Lua, name: &str) -> Vec<mlua::Function> {
         let Ok(entries) = self.entries.lock() else {
             return Vec::new();
@@ -100,6 +100,30 @@ impl HookRegistry {
             .filter(|e| e.name.is_empty() || e.name == name)
             .filter_map(|e| lua.registry_value::<mlua::Function>(&e.handle.key).ok())
             .collect()
+    }
+
+    /// One-shot variant of [`snapshot_for`]: take every entry whose name
+    /// matches (including the `""` wildcard), drop them from the registry,
+    /// and return the cloned Lua functions in registration order. Use this
+    /// for events that fire once per launch (lifecycle hooks) so the same
+    /// callback can't re-fire after a `/reload` re-registration.
+    pub fn drain_for(&self, lua: &Lua, name: &str) -> Vec<mlua::Function> {
+        let Ok(mut entries) = self.entries.lock() else {
+            return Vec::new();
+        };
+        let mut drained = Vec::new();
+        entries.retain(|e| {
+            let matches = e.name.is_empty() || e.name == name;
+            if matches {
+                if let Ok(f) = lua.registry_value::<mlua::Function>(&e.handle.key) {
+                    drained.push(f);
+                }
+                false
+            } else {
+                true
+            }
+        });
+        drained
     }
 
     /// `true` when no entries are registered. Cheap check used by hot

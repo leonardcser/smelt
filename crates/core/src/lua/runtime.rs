@@ -695,16 +695,9 @@ impl LuaRuntime {
     /// loop). Per-hook errors are returned so the caller can surface them as
     /// in-app notifications without aborting the remaining hooks.
     pub fn drain_lifecycle_hooks(&mut self, event: &str) -> Vec<String> {
-        let hooks = self.shared.drain_lifecycle_hooks(event);
+        let hooks = self.shared.hooks.lifecycle.drain_for(&self.lua, event);
         let mut errors = Vec::with_capacity(hooks.len());
-        for handle in hooks {
-            let f = match self.lua.registry_value::<mlua::Function>(&handle.key) {
-                Ok(f) => f,
-                Err(e) => {
-                    errors.push(format!("lifecycle.{event}: stale handle: {e}"));
-                    continue;
-                }
-            };
+        for f in hooks {
             if let Err(e) = f.call::<()>(()) {
                 errors.push(format!("lifecycle.{event}: {e}"));
             }
@@ -1935,20 +1928,12 @@ mod tests {
             .expect("register");
         assert!(rt.shared.commands.lock().unwrap().contains_key("plug_cmd"));
         assert!(!rt.shared.hooks.tool_before.is_empty());
-        assert_eq!(
-            rt.shared
-                .lifecycle_hooks
-                .lock()
-                .unwrap()
-                .get("ready")
-                .map(|v| v.len()),
-            Some(1)
-        );
+        assert!(!rt.shared.hooks.lifecycle.is_empty());
 
         rt.shared.clear_lua_handles();
         assert!(rt.shared.commands.lock().unwrap().is_empty());
         assert!(rt.shared.hooks.tool_before.is_empty());
-        assert!(rt.shared.lifecycle_hooks.lock().unwrap().is_empty());
+        assert!(rt.shared.hooks.lifecycle.is_empty());
     }
 
     #[test]
@@ -1977,13 +1962,7 @@ mod tests {
         // Second drain returns nothing — hooks are one-shot.
         let again = rt.drain_lifecycle_hooks("ready");
         assert!(again.is_empty());
-        assert!(rt
-            .shared
-            .lifecycle_hooks
-            .lock()
-            .unwrap()
-            .get("ready")
-            .is_none());
+        assert!(rt.shared.hooks.lifecycle.is_empty());
     }
 
     #[test]
