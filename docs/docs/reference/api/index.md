@@ -4,7 +4,7 @@
 
 Reference for every namespace exposed under the global `smelt` table. Signatures are derived from the Rust closure's argument tuple and return type, so the LuaCATS-style annotation always matches what mlua actually marshals.
 
-**Coverage:** 60 namespace(s), 232 function(s), 27 class(es), 9 alias(es).
+**Coverage:** 60 namespace(s), 237 function(s), 29 class(es), 8 alias(es).
 
 ## IDE completion
 
@@ -34,7 +34,7 @@ Available in every runtime, including headless mode.
 - [`smelt.messages`](messages.md) — 6 function(s)
 - [`smelt.mode`](mode.md) — 1 function(s)
 - [`smelt.os`](os.md) — 10 function(s)
-- [`smelt.parse`](parse.md) — 1 function(s)
+- [`smelt.parse`](parse.md) — 2 function(s)
 - [`smelt.path`](path.md) — 12 function(s)
 - [`smelt.perf`](perf.md) — 1 function(s)
 - [`smelt.process`](process.md) — 9 function(s)
@@ -60,7 +60,7 @@ Requires a terminal UI; calling these from headless mode raises.
 - [`smelt.keymap`](keymap.md) — 4 function(s)
 - [`smelt.metrics`](metrics.md) — 2 function(s)
 - [`smelt.metrics.perf`](metrics_perf.md) — 3 function(s)
-- [`smelt.model`](model.md) — 1 function(s)
+- [`smelt.model`](model.md) — 2 function(s)
 - [`smelt.notebook`](notebook.md) — 5 function(s)
 - [`smelt.notify`](notify.md) — 1 function(s)
 - [`smelt.overlay`](overlay.md) — 1 function(s)
@@ -71,10 +71,10 @@ Requires a terminal UI; calling these from headless mode raises.
 - [`smelt.prompt`](prompt.md) — 5 function(s)
 - [`smelt.prompt.ghost`](prompt_ghost.md) — 2 function(s)
 - [`smelt.render`](render.md) — 4 function(s)
-- [`smelt.session`](session.md) — 16 function(s)
-- [`smelt.spinner`](spinner.md) — 2 function(s)
+- [`smelt.session`](session.md) — 14 function(s)
+- [`smelt.spinner`](spinner.md) — 5 function(s)
 - [`smelt.statusline`](statusline.md) — 3 function(s)
-- [`smelt.text`](text.md) — 1 function(s)
+- [`smelt.text`](text.md) — 3 function(s)
 - [`smelt.theme`](theme.md) — 7 function(s)
 - [`smelt.transcript`](transcript.md) — 1 function(s)
 - [`smelt.vim`](vim.md) — 2 function(s)

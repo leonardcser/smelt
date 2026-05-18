@@ -4,29 +4,29 @@
 
 **Tier:** `Host` — Available in every runtime, including headless mode.
 
-Once-per-launch hooks keyed by event name. `on(event, fn)` is the general form; `on_ready` / `on_shutdown` are shorthands for the two emitted events. Each callback receives an event-specific `ctx` table.
+Once-per-launch hooks keyed by event name. `on(event, fn)` is the general form; `on_ready` / `on_shutdown` are shorthands for the two emitted events. Each callback receives an event-specific `ctx` table. Each hook fires at most once per launch and is dropped from the registry on fire.
 
 ## `smelt.lifecycle.on`
 
 ```lua
-fun(event: string, fn: function): nil
+fun(event: string, fn: function): fun(): boolean
 ```
 
-Queue `fn(ctx)` for the lifecycle event named `event`. Multiple hooks per event fire in registration order. Emitted events: `"ready"` (after bootstrap + argv parse, before the main loop; `ctx` is an empty table) and `"shutdown"` (after the TUI tears down, before process exit; `ctx = { session_id, has_messages }`).
+Queue `fn(ctx)` for the lifecycle event named `event`. Multiple hooks per event fire in registration order. Emitted events: `"ready"` (after bootstrap + argv parse, before the main loop; `ctx` is an empty table) and `"shutdown"` (after the TUI tears down, before process exit; `ctx = { session_id, has_messages }`). Returns an `off()` that unregisters the hook before it fires; calling `off()` after the hook has already fired is a no-op returning `false`.
 
 ## `smelt.lifecycle.on_ready`
 
 ```lua
-fun(fn: function): nil
+fun(fn: function): fun(): boolean
 ```
 
-Shorthand for `lifecycle.on("ready", fn)`. The host calls `fn(ctx)` once, after Lua bootstrap and CLI parsing finish and before the main loop starts. `ctx` is currently an empty table — reserved for forward compatibility. Use this to wire a CLI flag declared via `smelt.cli.register_flag` to a startup action.
+Shorthand for `lifecycle.on("ready", fn)`. The host calls `fn(ctx)` once, after Lua bootstrap and CLI parsing finish and before the main loop starts. `ctx` is currently an empty table — reserved for forward compatibility. Use this to wire a CLI flag declared via `smelt.cli.register_flag` to a startup action. Returns an `off()` that unregisters the hook before `ready` fires.
 
 ## `smelt.lifecycle.on_shutdown`
 
 ```lua
-fun(fn: function): nil
+fun(fn: function): fun(): boolean
 ```
 
-Shorthand for `lifecycle.on("shutdown", fn)`. The host calls `fn(ctx)` once after the TUI tears down, before the process exits. Stdout is cooked at that point so `print` writes land in the user's terminal scrollback. `ctx = { session_id: string, has_messages: boolean }`. Hooks only fire on the normal exit path (quit / Ctrl-D / `smelt.quit`); SIGINT/SIGTERM bypass them.
+Shorthand for `lifecycle.on("shutdown", fn)`. The host calls `fn(ctx)` once after the TUI tears down, before the process exits. Stdout is cooked at that point so `print` writes land in the user's terminal scrollback. `ctx = { session_id: string, has_messages: boolean }`. Hooks only fire on the normal exit path (quit / Ctrl-D / `smelt.quit`); SIGINT/SIGTERM bypass them. Returns an `off()` that unregisters the hook before `shutdown` fires.
 
