@@ -50,7 +50,7 @@ local function open_bottom()
     selectable = false,
     scrollbar = false,
   })
-  win:on("click", function()
+  win:on("press", function()
     state.transcript_win:scroll("tail")
   end)
   state.bottom_buf = buf
@@ -103,7 +103,7 @@ local function open_top(width)
     selectable = false,
     scrollbar = false,
   })
-  win:on("click", function()
+  win:on("press", function()
     if state.top_target_idx then
       local blocks = smelt.transcript.blocks()
       for _, b in ipairs(blocks) do
