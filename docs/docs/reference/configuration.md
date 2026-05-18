@@ -181,33 +181,36 @@ Names used by the bundled plugins: `title`, `compact`, `predict`, `btw`,
 
 ## Settings
 
-Set boolean preferences in `init.lua` by writing to `smelt.settings`:
+Set preferences in `init.lua` by writing to `smelt.settings`:
 
 ```lua
 smelt.settings.vim = true
 smelt.settings.auto_compact = false
+smelt.settings.compact_threshold = 0.65
 smelt.settings.show_tps = true
 ```
 
-All toggleable at runtime via `/settings`. Unknown keys raise at the access
-site.
+Boolean settings are toggleable at runtime via `/settings`. Numeric settings
+are set from `init.lua`, the `--set` CLI flag, or any Lua context. Unknown
+keys raise at the access site; type mismatches raise on assignment.
 
-| Key                     | Default | Description                                                                       |
-| ----------------------- | ------- | --------------------------------------------------------------------------------- |
-| `vim`                   | `false` | Vi keybindings in the prompt                                                      |
-| `auto_compact`          | `false` | Auto-summarize when context usage crosses the threshold (forced on in headless)   |
-| `show_tps`              | `true`  | Tokens/sec in status bar                                                          |
-| `show_tokens`           | `true`  | Context token count in status bar                                                 |
-| `show_cost`             | `true`  | Session cost in status bar                                                        |
-| `show_prediction`       | `true`  | Ghost-text input predictions                                                      |
-| `show_slug`             | `true`  | Task-slug label in status bar                                                     |
-| `show_thinking`         | `true`  | Show full thinking/reasoning blocks (false shows a single summary)                |
-| `restrict_to_workspace` | `true`  | Downgrade Allow → Ask for paths outside the workspace                             |
-| `redact_secrets`        | `true`  | Scrub detected secrets from user input and tool results before they reach the LLM |
-| `auto_reload`           | `false` | Watch `~/.config/smelt/`, `.smelt/`, `AGENTS.md`, and `--system-prompt` and fire `/reload` on change |
+| Key                     | Type      | Default | Description                                                                       |
+| ----------------------- | --------- | ------- | --------------------------------------------------------------------------------- |
+| `vim`                   | `boolean` | `false` | Vi keybindings in the prompt                                                      |
+| `auto_compact`          | `boolean` | `false` | Auto-summarize when context usage crosses `compact_threshold` (forced on in headless) |
+| `compact_threshold`     | `number`  | `0.80`  | Fraction of the context window at which auto-compact fires (0 < x ≤ 1)            |
+| `show_tps`              | `boolean` | `true`  | Tokens/sec in status bar                                                          |
+| `show_tokens`           | `boolean` | `true`  | Context token count in status bar                                                 |
+| `show_cost`             | `boolean` | `true`  | Session cost in status bar                                                        |
+| `show_prediction`       | `boolean` | `true`  | Ghost-text input predictions                                                      |
+| `show_slug`             | `boolean` | `true`  | Task-slug label in status bar                                                     |
+| `show_thinking`         | `boolean` | `true`  | Show full thinking/reasoning blocks (false shows a single summary)                |
+| `restrict_to_workspace` | `boolean` | `true`  | Downgrade Allow to Ask for paths outside the workspace                            |
+| `redact_secrets`        | `boolean` | `true`  | Scrub detected secrets from user input and tool results before they reach the LLM |
+| `auto_reload`           | `boolean` | `false` | Watch `~/.config/smelt/`, `.smelt/`, `AGENTS.md`, and `--system-prompt` and fire `/reload` on change |
 
-Override any setting from the CLI with `--set KEY=VALUE`, e.g.
-`--set vim=true`. Values must be `true` or `false`.
+Override any setting from the CLI with `--set KEY=VALUE`. Boolean values
+must be `true`/`false`; numeric values are parsed as floats.
 
 ## Theme
 

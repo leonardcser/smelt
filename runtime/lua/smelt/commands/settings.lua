@@ -1,4 +1,8 @@
 -- `/settings` — toggle boolean settings. Enter toggles and reopens; Esc closes.
+-- Non-boolean settings (numbers) are tunable through init.lua, the `--set`
+-- CLI flag, or assignment to `smelt.settings.<key>` from any Lua context;
+-- they don't appear in this picker because there's no canonical inline
+-- editor for typed values.
 
 local SETTINGS_META = {
   { key = "vim",                   label = "vim mode",             terms = "vim editor" },

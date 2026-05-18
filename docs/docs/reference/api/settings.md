@@ -4,5 +4,5 @@
 
 **Tier:** `UiHost` — Requires a terminal UI; calling these from headless mode raises.
 
-Metatable-backed proxy table for boolean preferences. Read and write keys directly (`settings.foo = true`) or iterate with `pairs`. UiHost-only.
+Metatable-backed proxy table for preferences. Read and write keys directly (`settings.foo = true`, `settings.compact_threshold = 0.65`) or iterate with `pairs`. Values are typed per the schema; type mismatches raise. UiHost-only.
 

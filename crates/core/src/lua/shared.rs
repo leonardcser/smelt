@@ -109,7 +109,7 @@ pub struct LuaShared {
     pub providers: Mutex<Vec<crate::config::ProviderConfig>>,
     pub permission_rules: Mutex<Option<crate::permissions::rules::RawPerms>>,
     pub mcp_configs: Mutex<HashMap<String, crate::mcp::McpServerConfig>>,
-    pub settings_overrides: Mutex<HashMap<String, bool>>,
+    pub settings_overrides: Mutex<HashMap<String, crate::config::SettingValue>>,
     pub defaults: Mutex<crate::config::DefaultsConfig>,
     pub tool_defaults: Mutex<crate::permissions::rules::ToolDefaults>,
     pub messages: Mutex<crate::messages::Messages>,

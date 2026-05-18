@@ -70,49 +70,95 @@ pub struct SettingsConfig {
     /// skills/, AGENTS.md, `--system-prompt` file) and dispatch
     /// `/reload` when any of them changes. Off by default.
     pub auto_reload: Option<bool>,
+    /// Fraction of the configured context window (0, 1] at which the
+    /// bundled compact plugin auto-triggers between turns. Default `0.80`.
+    pub compact_threshold: Option<f64>,
 }
 
-/// The set of boolean settings exposed to Lua. Keeping this as a single
-/// table is what lets `smelt.settings` use a metatable that rejects
-/// unknown keys at the access site.
-pub const SETTINGS_KEYS: &[&str] = &[
-    "vim",
-    "auto_compact",
-    "show_tps",
-    "show_tokens",
-    "show_cost",
-    "show_prediction",
-    "show_slug",
-    "show_thinking",
-    "restrict_to_workspace",
-    "redact_secrets",
-    "auto_reload",
+/// Value type of a settings slot. Drives parsing of `--set` overrides
+/// and the Lua `__index`/`__newindex` dispatch.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SettingKind {
+    Bool,
+    Number,
+}
+
+/// Owned setting value. `set` accepts any of these; the schema decides
+/// whether the assignment is type-compatible.
+#[derive(Debug, Clone, PartialEq)]
+pub enum SettingValue {
+    Bool(bool),
+    Number(f64),
+}
+
+impl SettingValue {
+    pub fn kind(&self) -> SettingKind {
+        match self {
+            SettingValue::Bool(_) => SettingKind::Bool,
+            SettingValue::Number(_) => SettingKind::Number,
+        }
+    }
+}
+
+/// The set of settings exposed to Lua, with their value types. Lookup
+/// is linear (small N); the table doubles as the public schema for
+/// `smelt.settings.__pairs`, the `/settings` command, and `--set`.
+pub const SETTINGS_KEYS: &[(&str, SettingKind)] = &[
+    ("vim", SettingKind::Bool),
+    ("auto_compact", SettingKind::Bool),
+    ("show_tps", SettingKind::Bool),
+    ("show_tokens", SettingKind::Bool),
+    ("show_cost", SettingKind::Bool),
+    ("show_prediction", SettingKind::Bool),
+    ("show_slug", SettingKind::Bool),
+    ("show_thinking", SettingKind::Bool),
+    ("restrict_to_workspace", SettingKind::Bool),
+    ("redact_secrets", SettingKind::Bool),
+    ("auto_reload", SettingKind::Bool),
+    ("compact_threshold", SettingKind::Number),
 ];
 
+pub fn setting_kind(key: &str) -> Option<SettingKind> {
+    SETTINGS_KEYS
+        .iter()
+        .find(|(k, _)| *k == key)
+        .map(|(_, k)| *k)
+}
+
 impl SettingsConfig {
-    /// Apply a boolean override by key. Returns an error message for unknown
-    /// keys.
-    pub fn set_bool(&mut self, key: &str, value: bool) -> Result<(), String> {
-        let v = Some(value);
-        match key {
-            "vim" => self.vim = v,
-            "auto_compact" => self.auto_compact = v,
-            "show_tps" => self.show_tps = v,
-            "show_tokens" => self.show_tokens = v,
-            "show_cost" => self.show_cost = v,
-            "show_prediction" => self.show_prediction = v,
-            "show_slug" => self.show_slug = v,
-            "show_thinking" => self.show_thinking = v,
-            "restrict_to_workspace" => self.restrict_to_workspace = v,
-            "redact_secrets" => self.redact_secrets = v,
-            "auto_reload" => self.auto_reload = v,
-            _ => return Err(format!("unknown setting '{key}'")),
+    /// Apply an override by key. Returns an error message on unknown keys
+    /// or type mismatches.
+    pub fn set(&mut self, key: &str, value: SettingValue) -> Result<(), String> {
+        let expected = setting_kind(key).ok_or_else(|| format!("unknown setting '{key}'"))?;
+        if value.kind() != expected {
+            return Err(format!(
+                "setting '{key}' expects {:?}, got {:?}",
+                expected,
+                value.kind()
+            ));
+        }
+        match (key, value) {
+            ("vim", SettingValue::Bool(v)) => self.vim = Some(v),
+            ("auto_compact", SettingValue::Bool(v)) => self.auto_compact = Some(v),
+            ("show_tps", SettingValue::Bool(v)) => self.show_tps = Some(v),
+            ("show_tokens", SettingValue::Bool(v)) => self.show_tokens = Some(v),
+            ("show_cost", SettingValue::Bool(v)) => self.show_cost = Some(v),
+            ("show_prediction", SettingValue::Bool(v)) => self.show_prediction = Some(v),
+            ("show_slug", SettingValue::Bool(v)) => self.show_slug = Some(v),
+            ("show_thinking", SettingValue::Bool(v)) => self.show_thinking = Some(v),
+            ("restrict_to_workspace", SettingValue::Bool(v)) => {
+                self.restrict_to_workspace = Some(v)
+            }
+            ("redact_secrets", SettingValue::Bool(v)) => self.redact_secrets = Some(v),
+            ("auto_reload", SettingValue::Bool(v)) => self.auto_reload = Some(v),
+            ("compact_threshold", SettingValue::Number(v)) => self.compact_threshold = Some(v),
+            _ => unreachable!("schema mismatch for {key}"),
         }
         Ok(())
     }
 
-    /// Resolve to a fully-realized boolean settings struct using built-in
-    /// defaults for any field the Lua config didn't set.
+    /// Resolve to a fully-realized settings struct using built-in defaults
+    /// for any field the Lua config didn't set.
     pub fn resolve(&self) -> ResolvedSettings {
         ResolvedSettings {
             vim: self.vim.unwrap_or(false),
@@ -126,13 +172,14 @@ impl SettingsConfig {
             restrict_to_workspace: self.restrict_to_workspace.unwrap_or(true),
             redact_secrets: self.redact_secrets.unwrap_or(true),
             auto_reload: self.auto_reload.unwrap_or(false),
+            compact_threshold: self.compact_threshold.unwrap_or(0.80),
         }
     }
 }
 
-/// Fully resolved boolean settings (no Options). Lives on `AppConfig`
-/// so runtime reads/writes hit the live struct; persistence is not a
-/// concern of this type — config is `init.lua`, not a JSON registry.
+/// Fully resolved settings (no Options). Lives on `AppConfig` so runtime
+/// reads/writes hit the live struct; persistence is not a concern of
+/// this type — config is `init.lua`, not a JSON registry.
 #[derive(Debug, Clone)]
 pub struct ResolvedSettings {
     pub vim: bool,
@@ -146,6 +193,7 @@ pub struct ResolvedSettings {
     pub restrict_to_workspace: bool,
     pub redact_secrets: bool,
     pub auto_reload: bool,
+    pub compact_threshold: f64,
 }
 
 /// Startup defaults for new sessions, set from Lua via `smelt.defaults{...}`.

@@ -88,15 +88,28 @@ pub async fn resolve(
             eprintln!("error: --set requires KEY=VALUE format, got '{pair}'");
             std::process::exit(1);
         };
-        let parsed = match value {
-            "true" => true,
-            "false" => false,
-            _ => {
-                eprintln!("error: --set {pair}: invalid bool value '{value}' for {key}");
+        let parsed = match smelt_core::config::setting_kind(key) {
+            Some(smelt_core::config::SettingKind::Bool) => match value {
+                "true" => smelt_core::config::SettingValue::Bool(true),
+                "false" => smelt_core::config::SettingValue::Bool(false),
+                _ => {
+                    eprintln!("error: --set {pair}: invalid bool value '{value}' for {key}");
+                    std::process::exit(1);
+                }
+            },
+            Some(smelt_core::config::SettingKind::Number) => match value.parse::<f64>() {
+                Ok(n) => smelt_core::config::SettingValue::Number(n),
+                Err(_) => {
+                    eprintln!("error: --set {pair}: invalid number '{value}' for {key}");
+                    std::process::exit(1);
+                }
+            },
+            None => {
+                eprintln!("error: --set {pair}: unknown setting '{key}'");
                 std::process::exit(1);
             }
         };
-        if let Err(e) = cfg.settings.set_bool(key, parsed) {
+        if let Err(e) = cfg.settings.set(key, parsed) {
             eprintln!("error: --set {pair}: {e}");
             std::process::exit(1);
         }

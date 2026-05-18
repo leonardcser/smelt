@@ -56,17 +56,6 @@ smelt.model.preferred("compact", "anthropic/claude-haiku")
 The model must be registered under a provider. Custom plugins can pick any
 name they like to expose the same override pattern to users.
 
-## Per-plugin Tunables
-
-Plugins that need user-tunable values (thresholds, retry caps, etc.) read
-them from `smelt.state.persistent("<plugin>")` — same JSON-backed store
-that `smelt.model.preferred` uses. Survives `/reload` and restart.
-
-```lua
--- Trigger auto-compact earlier than the 0.80 default
-smelt.state.persistent("compact").threshold = 0.65
-```
-
 
 ## Themes
 

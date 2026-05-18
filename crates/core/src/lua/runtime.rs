@@ -492,7 +492,7 @@ impl LuaRuntime {
             .lock()
             .unwrap_or_else(|e| e.into_inner());
         for (key, value) in overrides.iter() {
-            if let Err(e) = settings.set_bool(key, *value) {
+            if let Err(e) = settings.set(key, value.clone()) {
                 eprintln!("settings override: {e}");
             }
         }
