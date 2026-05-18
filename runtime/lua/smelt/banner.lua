@@ -43,6 +43,33 @@ M.WORDMARK_PIXELS = {
   "WWW.W.W.W.WWW.WW..WW",
 }
 
+-- 8x5 mini-flame keyframes for animated wordmark+fire compositions. All
+-- frames share dimensions; cycle through them at ~6fps to flicker the
+-- flame. Same palette as `LOGO_PIXELS`.
+M.MINI_FIRE_FRAMES = {
+  {
+    "....R...",
+    ".R..OR..",
+    "..RRoR..",
+    ".ROYoOR.",
+    "ROYYYoOR",
+  },
+  {
+    "....R...",
+    "....OR..",
+    ".RRRoR..",
+    ".RoYoOR.",
+    "ROYYYoOR",
+  },
+  {
+    "....R...",
+    "...OOR..",
+    "..RRoR..",
+    ".ROYoOR.",
+    "RoYYYoOR",
+  },
+}
+
 local function pixel_grid_size(pixels)
   local w = #pixels[1]
   local h = math.ceil(#pixels / 2)
