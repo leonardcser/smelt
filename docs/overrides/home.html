@@ -107,48 +107,25 @@
     pointer-events: auto;
   }
 
-  .hero-ascii-title {
-    --char-w: clamp(5px, 0.85vw, 11px);
-    --char-h: clamp(9px, 1.5vw, 19px);
+  .hero-logo {
+    position: relative;
+    width: min(22rem, 58vw);
     margin: 0 0 1.5rem 0;
-    user-select: none;
-    background: none !important;
-    border: none !important;
-    font-size: 0;
-    line-height: 0;
   }
-  [data-md-color-scheme="default"] .hero-ascii-title {
-    text-shadow:
-      0 0 0.2em rgba(255, 133, 46, 0.1),
-      0 0 0.6em rgba(255, 117, 24, 0.06);
-  }
-  [data-md-color-scheme="slate"] .hero-ascii-title {
-    text-shadow:
-      0 0 0.2em rgba(255, 120, 40, 0.2),
-      0 0 0.8em rgba(255, 92, 0, 0.12);
-  }
-  .hero-ascii-title .line {
-    display: flex;
-    height: var(--char-h);
-  }
-  .hero-ascii-title span {
+
+  .hero-logo img {
     display: block;
-    width: var(--char-w);
-    height: var(--char-h);
-    overflow: hidden;
-    font-family: var(--md-code-font-family), monospace;
-    font-size: var(--char-h);
-    line-height: 1;
-    text-align: center;
-    flex-shrink: 0;
-    transform: scaleY(1.1);
-    transform-origin: top;
+    width: 100%;
+    height: auto;
+    image-rendering: pixelated;
   }
-  [data-md-color-scheme="default"] .hero-ascii-title {
-    color: #16110f;
+
+  [data-md-color-scheme="default"] .hero-logo img {
+    content: url("logo-light.svg");
   }
-  [data-md-color-scheme="slate"] .hero-ascii-title {
-    color: #fff3e8;
+
+  [data-md-color-scheme="slate"] .hero-logo img {
+    content: url("logo-dark.svg");
   }
 
   .hero-subtitle {
@@ -241,15 +218,9 @@
 <section class="hero">
   <div id="hero-lava"></div>
   <div class="hero-overlay">
-    <pre class="hero-ascii-title">
-                                      ░██    ░██    
-                                      ░██    ░██    
- ░███████  ░█████████████   ░███████  ░██ ░████████ 
-░██        ░██   ░██   ░██ ░██    ░██ ░██    ░██    
- ░███████  ░██   ░██   ░██ ░█████████ ░██    ░██    
-       ░██ ░██   ░██   ░██ ░██        ░██    ░██    
- ░███████  ░██   ░██   ░██  ░███████  ░██     ░████</pre
-    >
+    <div class="hero-logo" aria-label="smelt">
+      <img src="logo-dark.svg" alt="smelt logo" />
+    </div>
     <p class="hero-subtitle">Just another coding agent</p>
     <div class="hero-actions">
       <a href="guide/getting-started/"
@@ -277,29 +248,5 @@
     </div>
   </div>
 </section>
-<script>
-  var titleEl = document.querySelector(".hero-ascii-title");
-  if (titleEl) {
-    var lines = titleEl.textContent.split("\n");
-    var html = "";
-    for (var l = 0; l < lines.length; l++) {
-      html += '<div class="line">';
-      for (var i = 0; i < lines[l].length; i++) {
-        var ch = lines[l][i];
-        if (ch === " ") {
-          html += "<span>&nbsp;</span>";
-        } else if (ch === "&") {
-          html += "<span>&amp;</span>";
-        } else if (ch === "<") {
-          html += "<span>&lt;</span>";
-        } else {
-          html += "<span>" + ch + "</span>";
-        }
-      }
-      html += "</div>";
-    }
-    titleEl.innerHTML = html;
-  }
-</script>
 <script src="javascripts/hero-lava.js"></script>
 {% endblock %} {% block footer %}{% endblock %}

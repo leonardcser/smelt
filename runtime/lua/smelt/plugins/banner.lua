@@ -1,15 +1,13 @@
--- Empty-state wordmark overlay + shutdown logo/resume-hint banner.
+-- Empty-state logo overlay + shutdown logo/resume-hint banner.
 --
--- Anchors a non-focusable overlay centered over the transcript window
--- whenever the session has zero messages, and tears it down the moment a
--- turn begins. On clean shutdown the full logo + wordmark + dimmed
--- version + resume hint print to the cooked terminal scrollback.
+-- The splash is a non-focusable overlay centered over the transcript on
+-- zero-message sessions; it tears down on the first turn. On clean shutdown
+-- the same logo + dimmed version + resume hint print to the scrollback.
 --
--- The wordmark is a paint-rendered half-block image; the version label is
--- a real buffer so the user can select / copy it. Art lives in
--- `smelt.banner` — replace `M.LOGO_PIXELS` / `M.WORDMARK_PIXELS` /
--- `M.PALETTE` from a user plugin to retheme. Disable this whole module
--- via `smelt.builtins.disable({ plugins = { "banner" } })` in `early.lua`.
+-- The version label is a real buffer so users can select / copy it. Art
+-- lives in `smelt.banner` — override `FIRE_PIXELS` / `WORDMARK_PIXELS` /
+-- `PALETTE` to retheme, or disable this module via
+-- `smelt.builtins.disable({ plugins = { "banner" } })` in `early.lua`.
 
 local banner = require("smelt.banner")
 
@@ -24,10 +22,10 @@ local function teardown()
   state.version_win = nil
 end
 
-local function paint_wordmark(slice, _ctx)
-  local w = banner.wordmark_size()
+local function paint_logo(slice, _ctx)
+  local w = banner.logo_mark_size()
   local col0 = math.max(0, math.floor((slice:width() - w) / 2))
-  banner.paint_pixels(slice, 0, col0, banner.WORDMARK_PIXELS)
+  banner.paint_pixels(slice, 0, col0, banner.LOGO_MARK_PIXELS)
 end
 
 local function ensure_version_window(text)
@@ -36,7 +34,11 @@ local function ensure_version_window(text)
   local ns = smelt.ns("smelt.banner.version")
   buf:clear_ns(ns)
   buf:mark(ns, 1, 0, { end_col = #text, dim = true })
-  local win = smelt.win.new(buf, { name = "smelt.banner.version.win", focusable = false })
+  local win = smelt.win.new(buf, {
+    name = "smelt.banner.version.win",
+    focusable = false,
+    selectable = true,
+  })
   state.version_buf = buf
   state.version_win = win
   return win
@@ -44,19 +46,17 @@ end
 
 local function open_splash()
   if state.overlay then return end
-  state.paint = smelt.paint.register(paint_wordmark, { name = "smelt.banner.splash.paint" })
-  local word_w, word_h = banner.wordmark_size()
+  state.paint = smelt.paint.register(paint_logo, { name = "smelt.banner.splash.paint" })
+  local logo_w, logo_h = banner.logo_mark_size()
   local version_text = "v" .. (smelt.version or "")
-  local w = math.max(word_w, #version_text)
+  local w = math.max(logo_w, #version_text)
   local version_win = ensure_version_window(version_text)
-  -- vbox: paint slot (word_h rows) on top, real-buffer slot (1 row) below.
-  -- Per-leaf `measure` hints pin each slot's natural width to `w` so the
-  -- overlay's natural rect resolves to exactly `w` cells wide and the
-  -- `center` anchor centers that.
+  -- Paint slot on top, version buffer below. `measure` pins each slot's
+  -- natural width to `w` so the overlay centers exactly.
   local sized = smelt.overlay.layout.vbox({
     {
-      smelt.overlay.layout.leaf(state.paint, { measure = { w, word_h } }),
-      height = word_h,
+      smelt.overlay.layout.leaf(state.paint, { measure = { w, logo_h } }),
+      height = logo_h,
     },
     {
       smelt.overlay.layout.leaf(version_win, { measure = { w, 1 } }),
@@ -68,26 +68,17 @@ local function open_splash()
     anchor = "win",
     target = smelt.win.transcript(),
     attach = "center",
-    -- Transcript reserves a row at its bottom for the gap separating it
-    -- from the prompt window. That row counts toward the window's height
-    -- so geometric-center math lands a half-row low — nudge down by 1 to
-    -- restore visual symmetry. (Yes, "down by 1" looks counter-intuitive
-    -- with a bottom gap; what's actually happening is the rounded-down
-    -- integer center sits one row above true center on an odd-height
-    -- viewport.)
+    -- The transcript's bottom gap row pulls integer-center math half a
+    -- row above true center on odd heights; nudge down by 1.
     row_offset = 1,
-    -- Sits behind dialogs and any other plugin overlay (default z = 50) so
-    -- a /resume picker, confirm dialog, or perf panel never has to fight
-    -- the splash for the user's attention.
+    -- Sits behind dialogs and plugin overlays (default z = 50).
     z = 0,
     modal = false,
     blocks_agent = false,
     border = "none",
     layout = sized,
   })
-  -- Re-center the version line inside the bottom slot via a per-row dim
-  -- highlight + leading padding. (`buf:lines` writes the raw text; we want
-  -- it horizontally centered within `w` cells.)
+  -- Center the version text inside the bottom slot via leading padding.
   local pad = math.floor((w - #version_text) / 2)
   if pad > 0 then
     state.version_buf:lines({ string.rep(" ", pad) .. version_text })
@@ -102,15 +93,9 @@ local function refresh()
   if #msgs == 0 then open_splash() else teardown() end
 end
 
--- `smelt.cell:subscribe` no-ops when the host pointer isn't live (the
--- pre-TUI plugin pass that extracts engine config); the module body
--- re-runs inside `bring_up_lua` where the bind takes effect. Subscription
--- handles are wiped between bring-ups so re-subscribing in module body
--- doesn't stack. `session_started` covers /reset, /fork, /resume;
--- `turn_start` covers the first agent dispatch; `history` covers direct
--- message-list mutations (rewind, compaction, load). `refresh()` runs
--- through `on_ready` so the host pointer is guaranteed live for the
--- first paint.
+-- session_started covers /reset, /fork, /resume; turn_start covers the
+-- first dispatch; history covers rewind / compaction / load. on_ready
+-- ensures the host pointer is live before the first paint.
 smelt.cell("session_started"):subscribe(refresh)
 smelt.cell("turn_start"):subscribe(teardown)
 smelt.cell("history"):subscribe(refresh)
@@ -118,10 +103,11 @@ smelt.lifecycle.on_ready(refresh)
 
 smelt.lifecycle.on_shutdown(function(ctx)
   if not ctx.has_messages then return end
-  local rows, version_col, version_row = banner.compose()
+  local rows = banner.LOGO_MARK_PIXELS
   local version_text = "v" .. (smelt.version or "")
-  local overlays = { { row = version_row, col = version_col, text = version_text, dim = true } }
-  print(banner.ansi_render(rows, banner.PALETTE, overlays))
+  local pad = math.max(0, math.floor((#rows[1] - #version_text) / 2))
+  print(banner.ansi_render(rows, banner.PALETTE))
+  print(string.rep(" ", pad) .. "\27[2m" .. version_text .. "\27[0m")
   print("")
   io.write(string.format("\27[2mresume with:\nsmelt --resume %s\27[0m\n\n", ctx.session_id))
 end)

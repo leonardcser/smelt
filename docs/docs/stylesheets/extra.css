@@ -13,3 +13,16 @@
   --md-accent-fg-color: #ff9c3b;
   --md-accent-fg-color--transparent: #ff9c3b1a;
 }
+
+.md-logo img {
+  height: 1.6rem;
+  width: auto;
+}
+
+[data-md-color-scheme="default"] .md-logo img {
+  content: url("../logo-light.svg");
+}
+
+[data-md-color-scheme="slate"] .md-logo img {
+  content: url("../logo-dark.svg");
+}
