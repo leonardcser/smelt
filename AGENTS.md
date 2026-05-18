@@ -21,7 +21,10 @@ Whenever you add a new user-facing feature or change user-facing behavior,
 update the README.md and the docs/ folder. Don't document internal
 implementation details — only things end users need to know. When you
 change the Lua API surface, run `cargo xtask gen-lua-docs` and commit the
-regenerated files — CI fails if they're out of sync.
+regenerated files — CI fails if they're out of sync. Never hand-edit files
+under `runtime/lua/smelt/_meta/` or `docs/docs/reference/api/`; during a
+rebase, resolve any conflict in them with `git checkout --ours/--theirs`
+and rerun the generator at the end.
 
 ## Conventions
 
