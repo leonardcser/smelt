@@ -761,6 +761,7 @@ impl<'a> Turn<'a> {
             let content = resp.content.map(Content::text);
             let tool_calls = resp.tool_calls;
             let reasoning = resp.reasoning_content;
+            let reasoning_details = resp.reasoning_details;
 
             // Injected message arrived during the LLM call; loop so the model can respond.
             if had_injected && tool_calls.is_empty() {
@@ -808,7 +809,12 @@ impl<'a> Turn<'a> {
                 }
 
                 let msg = self
-                    .apply_response_hooks(Message::assistant(content, reasoning, None))
+                    .apply_response_hooks(Message::assistant_with_reasoning(
+                        content,
+                        reasoning,
+                        reasoning_details,
+                        None,
+                    ))
                     .await;
                 self.messages.push(msg);
                 self.emit_messages_snapshot();
@@ -818,9 +824,10 @@ impl<'a> Turn<'a> {
 
             empty_retries = 0;
             let msg = self
-                .apply_response_hooks(Message::assistant(
+                .apply_response_hooks(Message::assistant_with_reasoning(
                     content,
                     reasoning,
+                    reasoning_details,
                     Some(tool_calls.clone()),
                 ))
                 .await;

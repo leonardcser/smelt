@@ -7,6 +7,8 @@ pub(crate) fn user(text: &str) -> Message {
         role: Role::User,
         content: Some(Content::Text(text.into())),
         reasoning_content: None,
+
+        reasoning_details: None,
         tool_calls: None,
         tool_call_id: None,
         is_error: false,
@@ -18,6 +20,8 @@ pub(crate) fn system(text: &str) -> Message {
         role: Role::System,
         content: Some(Content::Text(text.into())),
         reasoning_content: None,
+
+        reasoning_details: None,
         tool_calls: None,
         tool_call_id: None,
         is_error: false,
@@ -29,6 +33,8 @@ pub(crate) fn assistant_text(text: &str) -> Message {
         role: Role::Assistant,
         content: Some(Content::Text(text.into())),
         reasoning_content: None,
+
+        reasoning_details: None,
         tool_calls: None,
         tool_call_id: None,
         is_error: false,
@@ -40,6 +46,8 @@ pub(crate) fn assistant_calls(content: Option<&str>, calls: Vec<ToolCall>) -> Me
         role: Role::Assistant,
         content: content.map(|t| Content::Text(t.into())),
         reasoning_content: None,
+
+        reasoning_details: None,
         tool_calls: Some(calls),
         tool_call_id: None,
         is_error: false,
@@ -55,6 +63,8 @@ pub(crate) fn tool_msg_with_error(call_id: Option<&str>, output: &str, is_error:
         role: Role::Tool,
         content: Some(Content::Text(output.into())),
         reasoning_content: None,
+
+        reasoning_details: None,
         tool_calls: None,
         tool_call_id: call_id.map(String::from),
         is_error,

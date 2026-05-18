@@ -10,6 +10,13 @@ pub struct Message {
     pub content: Option<Content>,
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub reasoning_content: Option<String>,
+    /// Provider-shaped reasoning blocks captured verbatim and echoed back on
+    /// the next request. Anthropic needs the original `thinking` /
+    /// `redacted_thinking` blocks (with their `signature`) prepended to the
+    /// assistant content; OpenAI Responses needs the original `reasoning`
+    /// items (with `id` + `encrypted_content`) re-sent.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub reasoning_details: Option<Vec<ReasoningBlock>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tool_calls: Option<Vec<ToolCall>>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -19,12 +26,27 @@ pub struct Message {
     pub is_error: bool,
 }
 
+/// Opaque reasoning block captured from a provider response. `provider`
+/// tags which provider it came from so build_body for a different provider
+/// can skip it; `data` is the verbatim block JSON.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ReasoningBlock {
+    pub provider: String,
+    pub data: serde_json::Value,
+}
+
+impl ReasoningBlock {
+    pub const ANTHROPIC: &'static str = "anthropic";
+    pub const OPENAI_RESPONSES: &'static str = "openai_responses";
+}
+
 impl Message {
     pub fn system(text: impl Into<String>) -> Self {
         Self {
             role: Role::System,
             content: Some(Content::text(text)),
             reasoning_content: None,
+            reasoning_details: None,
             tool_calls: None,
             tool_call_id: None,
             is_error: false,
@@ -36,6 +58,7 @@ impl Message {
             role: Role::User,
             content: Some(content),
             reasoning_content: None,
+            reasoning_details: None,
             tool_calls: None,
             tool_call_id: None,
             is_error: false,
@@ -47,10 +70,20 @@ impl Message {
         reasoning: Option<String>,
         tool_calls: Option<Vec<ToolCall>>,
     ) -> Self {
+        Self::assistant_with_reasoning(content, reasoning, None, tool_calls)
+    }
+
+    pub fn assistant_with_reasoning(
+        content: Option<Content>,
+        reasoning: Option<String>,
+        reasoning_details: Option<Vec<ReasoningBlock>>,
+        tool_calls: Option<Vec<ToolCall>>,
+    ) -> Self {
         Self {
             role: Role::Assistant,
             content,
             reasoning_content: reasoning,
+            reasoning_details,
             tool_calls,
             tool_call_id: None,
             is_error: false,
@@ -62,6 +95,7 @@ impl Message {
             role: Role::Tool,
             content: Some(Content::text(content)),
             reasoning_content: None,
+            reasoning_details: None,
             tool_calls: None,
             tool_call_id: Some(call_id),
             is_error,

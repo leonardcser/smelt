@@ -468,6 +468,8 @@ mod tests {
             role,
             content: Some(Content::Text(text.into())),
             reasoning_content: None,
+
+            reasoning_details: None,
             tool_calls: None,
             tool_call_id: None,
             is_error: false,
@@ -638,6 +640,8 @@ mod tests {
                 label: None,
             }])),
             reasoning_content: None,
+
+            reasoning_details: None,
             tool_calls: None,
             tool_call_id: None,
             is_error: false,

@@ -1,10 +1,12 @@
-use super::{collect_indexed_tool_calls, non_empty, sse};
+use super::{collect_indexed_tool_calls, non_empty, non_empty_blocks, sse};
 use super::{ParsedResponse, ProviderError, StreamDelta, ToolDefinition};
 use crate::cancel::CancellationToken;
 use crate::config::ModelConfig;
 use crate::trim::{trim_tool_output, MAX_TOOL_OUTPUT_LINES};
-use protocol::{FunctionCall, Message, ReasoningEffort, Role, TokenUsage, ToolCall};
-use std::collections::HashMap;
+use protocol::{
+    FunctionCall, Message, ReasoningBlock, ReasoningEffort, Role, TokenUsage, ToolCall,
+};
+use std::collections::{BTreeMap, HashMap};
 
 fn supports_adaptive_thinking(model: &str) -> bool {
     model.contains("opus-4-6") || model.contains("sonnet-4-6")
@@ -53,6 +55,17 @@ pub(super) fn build_body(
             }
             Role::Assistant => {
                 let mut message_content = Vec::new();
+                // Thinking blocks (with signatures) must precede text and
+                // tool_use blocks; the API rejects assistant turns that end
+                // with a thinking block, but it requires the original
+                // signed blocks be replayed when the turn ended with tool_use.
+                if let Some(blocks) = &m.reasoning_details {
+                    for block in blocks {
+                        if block.provider == ReasoningBlock::ANTHROPIC {
+                            message_content.push(block.data.clone());
+                        }
+                    }
+                }
                 if let Some(c) = &m.content {
                     message_content.push(serde_json::json!({
                         "type": "text",
@@ -136,6 +149,7 @@ pub(super) fn build_body(
 pub(super) fn parse_response(data: &serde_json::Value) -> Result<ParsedResponse, ProviderError> {
     let mut content: Option<String> = None;
     let mut reasoning: Option<String> = None;
+    let mut reasoning_blocks: Vec<ReasoningBlock> = Vec::new();
     let mut tool_calls: Vec<ToolCall> = Vec::new();
 
     if let Some(content_blocks) = data["content"].as_array() {
@@ -155,6 +169,16 @@ pub(super) fn parse_response(data: &serde_json::Value) -> Result<ParsedResponse,
                             None => reasoning = Some(text.to_string()),
                         }
                     }
+                    reasoning_blocks.push(ReasoningBlock {
+                        provider: ReasoningBlock::ANTHROPIC.to_string(),
+                        data: block.clone(),
+                    });
+                }
+                Some("redacted_thinking") => {
+                    reasoning_blocks.push(ReasoningBlock {
+                        provider: ReasoningBlock::ANTHROPIC.to_string(),
+                        data: block.clone(),
+                    });
                 }
                 Some("tool_use") => {
                     let id = block["id"].as_str().unwrap_or_default().to_string();
@@ -193,9 +217,23 @@ pub(super) fn parse_response(data: &serde_json::Value) -> Result<ParsedResponse,
     Ok(ParsedResponse {
         content,
         reasoning,
+        reasoning_blocks: non_empty_blocks(reasoning_blocks),
         tool_calls,
         usage,
     })
+}
+
+/// Streaming accumulator for one thinking content block. Holds the verbatim
+/// shape we will replay on the next request — text + signature for normal
+/// thinking, opaque `data` for redacted_thinking.
+#[derive(Default)]
+pub(super) struct ThinkingAccum {
+    pub(super) text: String,
+    pub(super) signature: Option<String>,
+    /// Verbatim payload of a `redacted_thinking` block. When set, this block
+    /// is replayed as `{"type":"redacted_thinking", "data": <payload>}`; text
+    /// and signature are unused.
+    pub(super) redacted_data: Option<String>,
 }
 
 /// Accumulator for one streaming response. Mutated by `apply_sse_event`.
@@ -203,6 +241,8 @@ pub(super) fn parse_response(data: &serde_json::Value) -> Result<ParsedResponse,
 pub(super) struct StreamState {
     pub(super) content: String,
     pub(super) reasoning: String,
+    /// content block index -> verbatim thinking block, replayed on next turn.
+    pub(super) thinking_blocks: BTreeMap<usize, ThinkingAccum>,
     /// content block index -> (id, name, args-json)
     pub(super) tool_calls: HashMap<usize, (String, String, String)>,
     pub(super) usage: TokenUsage,
@@ -210,9 +250,30 @@ pub(super) struct StreamState {
 
 impl StreamState {
     pub(super) fn finalize(self) -> ParsedResponse {
+        let reasoning_blocks: Vec<ReasoningBlock> = self
+            .thinking_blocks
+            .into_values()
+            .map(|t| ReasoningBlock {
+                provider: ReasoningBlock::ANTHROPIC.to_string(),
+                data: match t.redacted_data {
+                    Some(d) => serde_json::json!({"type": "redacted_thinking", "data": d}),
+                    None => {
+                        let mut obj = serde_json::json!({
+                            "type": "thinking",
+                            "thinking": t.text,
+                        });
+                        if let Some(sig) = t.signature {
+                            obj["signature"] = serde_json::Value::String(sig);
+                        }
+                        obj
+                    }
+                },
+            })
+            .collect();
         ParsedResponse {
             content: non_empty(self.content),
             reasoning: non_empty(self.reasoning),
+            reasoning_blocks: non_empty_blocks(reasoning_blocks),
             tool_calls: collect_indexed_tool_calls(self.tool_calls),
             usage: self.usage,
         }
@@ -239,12 +300,37 @@ pub(super) fn apply_sse_event(
         "content_block_start" => {
             if let Some(idx) = ev["index"].as_u64() {
                 if let Some(cb) = ev.get("content_block") {
-                    if cb["type"].as_str() == Some("tool_use") {
-                        let id = cb["id"].as_str().unwrap_or_default().to_string();
-                        let name = cb["name"].as_str().unwrap_or_default().to_string();
-                        state
-                            .tool_calls
-                            .insert(idx as usize, (id, name, String::new()));
+                    match cb["type"].as_str() {
+                        Some("tool_use") => {
+                            let id = cb["id"].as_str().unwrap_or_default().to_string();
+                            let name = cb["name"].as_str().unwrap_or_default().to_string();
+                            state
+                                .tool_calls
+                                .insert(idx as usize, (id, name, String::new()));
+                        }
+                        Some("thinking") => {
+                            // Initial `thinking` field may already carry partial
+                            // text; signature arrives via signature_delta.
+                            let initial = cb["thinking"].as_str().unwrap_or("").to_string();
+                            state.thinking_blocks.insert(
+                                idx as usize,
+                                ThinkingAccum {
+                                    text: initial,
+                                    ..Default::default()
+                                },
+                            );
+                        }
+                        Some("redacted_thinking") => {
+                            let data = cb["data"].as_str().unwrap_or("").to_string();
+                            state.thinking_blocks.insert(
+                                idx as usize,
+                                ThinkingAccum {
+                                    redacted_data: Some(data),
+                                    ..Default::default()
+                                },
+                            );
+                        }
+                        _ => {}
                     }
                 }
             }
@@ -264,7 +350,26 @@ pub(super) fn apply_sse_event(
                         if let Some(text) = delta["thinking"].as_str() {
                             if !text.is_empty() {
                                 state.reasoning.push_str(text);
+                                if let Some(idx) = ev["index"].as_u64() {
+                                    let entry =
+                                        state.thinking_blocks.entry(idx as usize).or_default();
+                                    entry.text.push_str(text);
+                                }
                                 on_delta(StreamDelta::Thinking(text));
+                            }
+                        }
+                    }
+                    Some("signature_delta") => {
+                        if let Some(sig) = delta["signature"].as_str() {
+                            if !sig.is_empty() {
+                                if let Some(idx) = ev["index"].as_u64() {
+                                    let entry =
+                                        state.thinking_blocks.entry(idx as usize).or_default();
+                                    match &mut entry.signature {
+                                        Some(s) => s.push_str(sig),
+                                        None => entry.signature = Some(sig.to_string()),
+                                    }
+                                }
                             }
                         }
                     }
@@ -861,5 +966,148 @@ mod tests {
         assert!(r.content.is_none());
         assert!(r.reasoning.is_none());
         assert!(r.tool_calls.is_empty());
+        assert!(r.reasoning_blocks.is_none());
+    }
+
+    // ---- reasoning round-trip ----
+
+    #[test]
+    fn parse_response_captures_thinking_blocks_with_signature() {
+        let v = json!({"content": [
+            {"type": "thinking", "thinking": "ponder", "signature": "sig-1"},
+            {"type": "text", "text": "answer"},
+        ]});
+        let r = parse_response(&v).unwrap();
+        let blocks = r.reasoning_blocks.expect("blocks");
+        assert_eq!(blocks.len(), 1);
+        assert_eq!(blocks[0].provider, "anthropic");
+        assert_eq!(blocks[0].data["type"], "thinking");
+        assert_eq!(blocks[0].data["thinking"], "ponder");
+        assert_eq!(blocks[0].data["signature"], "sig-1");
+    }
+
+    #[test]
+    fn parse_response_captures_redacted_thinking_verbatim() {
+        let v = json!({"content": [
+            {"type": "redacted_thinking", "data": "opaque-payload"},
+            {"type": "text", "text": "answer"},
+        ]});
+        let r = parse_response(&v).unwrap();
+        let blocks = r.reasoning_blocks.expect("blocks");
+        assert_eq!(blocks.len(), 1);
+        assert_eq!(blocks[0].data["type"], "redacted_thinking");
+        assert_eq!(blocks[0].data["data"], "opaque-payload");
+    }
+
+    #[test]
+    fn sse_thinking_block_captures_signature_via_signature_delta() {
+        let mut state = StreamState::default();
+        step(
+            &mut state,
+            json!({
+                "type": "content_block_start", "index": 0,
+                "content_block": {"type": "thinking", "thinking": ""}
+            }),
+        );
+        step(
+            &mut state,
+            json!({
+                "type": "content_block_delta", "index": 0,
+                "delta": {"type": "thinking_delta", "thinking": "step "}
+            }),
+        );
+        step(
+            &mut state,
+            json!({
+                "type": "content_block_delta", "index": 0,
+                "delta": {"type": "thinking_delta", "thinking": "one"}
+            }),
+        );
+        step(
+            &mut state,
+            json!({
+                "type": "content_block_delta", "index": 0,
+                "delta": {"type": "signature_delta", "signature": "sig-"}
+            }),
+        );
+        step(
+            &mut state,
+            json!({
+                "type": "content_block_delta", "index": 0,
+                "delta": {"type": "signature_delta", "signature": "xyz"}
+            }),
+        );
+        let r = state.finalize();
+        let blocks = r.reasoning_blocks.expect("blocks");
+        assert_eq!(blocks.len(), 1);
+        assert_eq!(blocks[0].data["type"], "thinking");
+        assert_eq!(blocks[0].data["thinking"], "step one");
+        assert_eq!(blocks[0].data["signature"], "sig-xyz");
+    }
+
+    #[test]
+    fn sse_redacted_thinking_block_finalizes_to_verbatim_data() {
+        let mut state = StreamState::default();
+        step(
+            &mut state,
+            json!({
+                "type": "content_block_start", "index": 0,
+                "content_block": {"type": "redacted_thinking", "data": "ciphertext"}
+            }),
+        );
+        let r = state.finalize();
+        let blocks = r.reasoning_blocks.expect("blocks");
+        assert_eq!(blocks[0].data["type"], "redacted_thinking");
+        assert_eq!(blocks[0].data["data"], "ciphertext");
+    }
+
+    #[test]
+    fn build_body_prepends_anthropic_reasoning_blocks_before_text_and_tool_use() {
+        use protocol::{Content, Message, ReasoningBlock, Role};
+        let m = Message {
+            role: Role::Assistant,
+            content: Some(Content::Text("answer".into())),
+            reasoning_content: None,
+            reasoning_details: Some(vec![ReasoningBlock {
+                provider: ReasoningBlock::ANTHROPIC.to_string(),
+                data: json!({"type": "thinking", "thinking": "why", "signature": "s"}),
+            }]),
+            tool_calls: Some(vec![ToolCall::new(
+                "tid".into(),
+                FunctionCall {
+                    name: "f".into(),
+                    arguments: "{}".into(),
+                },
+            )]),
+            tool_call_id: None,
+            is_error: false,
+        };
+        let body = build_body(&[m], &[], "m", ReasoningEffort::Off, &cfg());
+        let content = &body["messages"][0]["content"];
+        assert_eq!(content[0]["type"], "thinking");
+        assert_eq!(content[0]["signature"], "s");
+        assert_eq!(content[1]["type"], "text");
+        assert_eq!(content[2]["type"], "tool_use");
+    }
+
+    #[test]
+    fn build_body_skips_reasoning_blocks_from_other_providers() {
+        use protocol::{Content, Message, ReasoningBlock, Role};
+        let m = Message {
+            role: Role::Assistant,
+            content: Some(Content::Text("answer".into())),
+            reasoning_content: None,
+            reasoning_details: Some(vec![ReasoningBlock {
+                provider: ReasoningBlock::OPENAI_RESPONSES.to_string(),
+                data: json!({"type": "reasoning", "id": "x"}),
+            }]),
+            tool_calls: None,
+            tool_call_id: None,
+            is_error: false,
+        };
+        let body = build_body(&[m], &[], "m", ReasoningEffort::Off, &cfg());
+        let content = &body["messages"][0]["content"];
+        assert_eq!(content.as_array().unwrap().len(), 1);
+        assert_eq!(content[0]["type"], "text");
     }
 }

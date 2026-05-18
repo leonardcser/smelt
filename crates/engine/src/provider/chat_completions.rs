@@ -20,6 +20,10 @@ pub(super) fn build_body(
             let mut v = serde_json::to_value(m).unwrap();
             if let Some(obj) = v.as_object_mut() {
                 obj.remove("is_error");
+                // Provider-shaped reasoning is only meaningful to the
+                // Anthropic / OpenAI Responses round-trip; chat-completions
+                // backends would reject the extra field.
+                obj.remove("reasoning_details");
                 if m.role == Role::Tool {
                     if let Some(s) = obj.get("content").and_then(|c| c.as_str()) {
                         let trimmed = trim_tool_output(s, MAX_TOOL_OUTPUT_LINES);
@@ -114,6 +118,7 @@ pub(super) fn parse_response(data: &serde_json::Value) -> Result<ParsedResponse,
     Ok(ParsedResponse {
         content,
         reasoning,
+        reasoning_blocks: None,
         tool_calls,
         usage,
     })
@@ -146,6 +151,7 @@ impl StreamState {
                 return ParsedResponse {
                     content: cleaned_content,
                     reasoning: cleaned_reasoning,
+                    reasoning_blocks: None,
                     tool_calls,
                     usage,
                 };
@@ -155,6 +161,7 @@ impl StreamState {
         ParsedResponse {
             content,
             reasoning,
+            reasoning_blocks: None,
             tool_calls,
             usage,
         }
@@ -287,6 +294,18 @@ mod tests {
     }
 
     #[test]
+    fn build_body_strips_reasoning_details_from_messages() {
+        use protocol::ReasoningBlock;
+        let mut m = user("hi");
+        m.reasoning_details = Some(vec![ReasoningBlock {
+            provider: ReasoningBlock::ANTHROPIC.to_string(),
+            data: serde_json::json!({"type": "thinking", "thinking": "x"}),
+        }]);
+        let body = build_body(&[m], &[], "m", ReasoningEffort::Off, &cfg());
+        assert!(body["messages"][0].get("reasoning_details").is_none());
+    }
+
+    #[test]
     fn build_body_tool_message_content_is_trimmed() {
         // trim_tool_output applies to the content string; many short lines pass through unchanged.
         let body = build_body(
@@ -305,6 +324,8 @@ mod tests {
             role: Role::Assistant,
             content: None,
             reasoning_content: None,
+
+            reasoning_details: None,
             tool_calls: Some(vec![ToolCall::new(
                 "id".into(),
                 FunctionCall {
@@ -326,6 +347,8 @@ mod tests {
             role: Role::Assistant,
             content: None,
             reasoning_content: None,
+
+            reasoning_details: None,
             tool_calls: Some(vec![ToolCall::new(
                 "id".into(),
                 FunctionCall {

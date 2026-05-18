@@ -1,11 +1,13 @@
-use super::non_empty;
 use super::sse;
+use super::{non_empty, non_empty_blocks};
 use super::{ParsedResponse, ProviderError, StreamDelta, ToolDefinition};
 use crate::cancel::CancellationToken;
 use crate::config::ModelConfig;
 use crate::log;
 use crate::trim::{trim_tool_output, MAX_TOOL_OUTPUT_LINES};
-use protocol::{FunctionCall, Message, ReasoningEffort, Role, TokenUsage, ToolCall};
+use protocol::{
+    FunctionCall, Message, ReasoningBlock, ReasoningEffort, Role, TokenUsage, ToolCall,
+};
 use std::collections::HashMap;
 
 /// OpenAI reports total input tokens (including cached); subtract cached to match Anthropic semantics.
@@ -79,6 +81,16 @@ pub(super) fn build_body(
                 }));
             }
             Role::Assistant => {
+                // Reasoning items must appear *before* the message and
+                // function_call items they preceded in the original
+                // response, so the server can link them up by id.
+                if let Some(blocks) = &m.reasoning_details {
+                    for block in blocks {
+                        if block.provider == ReasoningBlock::OPENAI_RESPONSES {
+                            input.push(block.data.clone());
+                        }
+                    }
+                }
                 if let Some(content) = &m.content {
                     input.push(serde_json::json!({
                         "type": "message",
@@ -160,6 +172,10 @@ pub(super) fn build_body(
             "effort": effort_label(effort),
             "summary": "auto",
         });
+        // Ask the server to return encrypted reasoning so we can replay it
+        // on subsequent turns without keeping a `previous_response_id` —
+        // stateless rounds with full history match smelt's design.
+        body["include"] = serde_json::json!(["reasoning.encrypted_content"]);
     }
 
     body
@@ -172,6 +188,7 @@ pub(super) fn parse_response(data: &serde_json::Value) -> Result<ParsedResponse,
 
     let mut content: Option<String> = None;
     let mut reasoning: Option<String> = None;
+    let mut reasoning_blocks: Vec<ReasoningBlock> = Vec::new();
     let mut tool_calls: Vec<ToolCall> = Vec::new();
 
     for item in output {
@@ -208,6 +225,10 @@ pub(super) fn parse_response(data: &serde_json::Value) -> Result<ParsedResponse,
                 if !texts.is_empty() {
                     reasoning = Some(texts.join("\n"));
                 }
+                reasoning_blocks.push(ReasoningBlock {
+                    provider: ReasoningBlock::OPENAI_RESPONSES.to_string(),
+                    data: item.clone(),
+                });
             }
             _ => {}
         }
@@ -218,6 +239,7 @@ pub(super) fn parse_response(data: &serde_json::Value) -> Result<ParsedResponse,
     Ok(ParsedResponse {
         content,
         reasoning,
+        reasoning_blocks: non_empty_blocks(reasoning_blocks),
         tool_calls,
         usage,
     })
@@ -228,6 +250,10 @@ pub(super) fn parse_response(data: &serde_json::Value) -> Result<ParsedResponse,
 pub(super) struct StreamState {
     pub(super) content: String,
     pub(super) reasoning: String,
+    /// Verbatim reasoning items captured via `response.output_item.done`.
+    /// Echoed back on the next turn so the model retains its chain of
+    /// thought (encrypted_content + id).
+    pub(super) reasoning_items: Vec<serde_json::Value>,
     /// item_id -> (call_id, name, args)
     pub(super) tool_calls: HashMap<String, (String, String, String)>,
     pub(super) usage: TokenUsage,
@@ -253,9 +279,18 @@ impl StreamState {
                 )
             })
             .collect();
+        let reasoning_blocks: Vec<ReasoningBlock> = self
+            .reasoning_items
+            .into_iter()
+            .map(|data| ReasoningBlock {
+                provider: ReasoningBlock::OPENAI_RESPONSES.to_string(),
+                data,
+            })
+            .collect();
         Ok(ParsedResponse {
             content: non_empty(self.content),
             reasoning: non_empty(self.reasoning),
+            reasoning_blocks: non_empty_blocks(reasoning_blocks),
             tool_calls,
             usage: self.usage,
         })
@@ -279,6 +314,11 @@ pub(super) fn apply_sse_event(
             if !id.is_empty() && !name.is_empty() {
                 state.tool_calls.insert(id, (call_id, name, String::new()));
             }
+        }
+        "response.output_item.done" if ev["item"]["type"].as_str() == Some("reasoning") => {
+            // Capture the full reasoning item — `id` + `encrypted_content`
+            // + `summary` — so it can be echoed back on the next request.
+            state.reasoning_items.push(ev["item"].clone());
         }
         "response.output_text.delta" => {
             if let Some(text) = ev["delta"].as_str() {
@@ -475,6 +515,8 @@ mod tests {
                 },
             ])),
             reasoning_content: None,
+
+            reasoning_details: None,
             tool_calls: None,
             tool_call_id: None,
             is_error: false,
@@ -493,6 +535,8 @@ mod tests {
             role: Role::User,
             content: None,
             reasoning_content: None,
+
+            reasoning_details: None,
             tool_calls: None,
             tool_call_id: None,
             is_error: false,
@@ -523,6 +567,8 @@ mod tests {
             role: Role::Assistant,
             content: None,
             reasoning_content: None,
+
+            reasoning_details: None,
             tool_calls: None,
             tool_call_id: None,
             is_error: false,
@@ -1132,5 +1178,89 @@ mod tests {
         assert!(r.content.is_none());
         assert!(r.reasoning.is_none());
         assert!(r.tool_calls.is_empty());
+        assert!(r.reasoning_blocks.is_none());
+    }
+
+    // ---- reasoning round-trip ----
+
+    #[test]
+    fn build_body_requests_encrypted_reasoning_when_effort_on() {
+        let body = build_body(&[user("hi")], &[], "gpt-5", ReasoningEffort::High, &cfg());
+        assert_eq!(body["include"][0], "reasoning.encrypted_content");
+    }
+
+    #[test]
+    fn build_body_omits_include_when_effort_off() {
+        let body = build_body(&[user("hi")], &[], "gpt-5", ReasoningEffort::Off, &cfg());
+        assert!(body.get("include").is_none());
+    }
+
+    #[test]
+    fn parse_response_captures_reasoning_items_verbatim() {
+        let v = json!({
+            "output": [
+                {"type": "reasoning", "id": "rs_1", "summary": [{"text": "sum"}], "encrypted_content": "enc"},
+                {"type": "message", "content": [{"type": "output_text", "text": "answer"}]},
+            ],
+            "usage": {}
+        });
+        let r = parse_response(&v).unwrap();
+        let blocks = r.reasoning_blocks.expect("blocks");
+        assert_eq!(blocks.len(), 1);
+        assert_eq!(blocks[0].provider, "openai_responses");
+        assert_eq!(blocks[0].data["id"], "rs_1");
+        assert_eq!(blocks[0].data["encrypted_content"], "enc");
+    }
+
+    #[test]
+    fn sse_output_item_done_reasoning_captured_verbatim() {
+        let mut state = StreamState::default();
+        step(
+            &mut state,
+            json!({
+                "type": "response.output_item.done",
+                "item": {"type": "reasoning", "id": "rs_1", "encrypted_content": "enc", "summary": []}
+            }),
+        );
+        let r = state.finalize().unwrap();
+        let blocks = r.reasoning_blocks.expect("blocks");
+        assert_eq!(blocks[0].data["id"], "rs_1");
+        assert_eq!(blocks[0].data["encrypted_content"], "enc");
+    }
+
+    #[test]
+    fn build_body_prepends_reasoning_items_before_message_and_function_call() {
+        let calls = vec![ToolCall::new(
+            "c1".into(),
+            FunctionCall {
+                name: "f".into(),
+                arguments: "{}".into(),
+            },
+        )];
+        let mut m = assistant_calls(calls);
+        m.content = Some(protocol::Content::Text("answer".into()));
+        m.reasoning_details = Some(vec![ReasoningBlock {
+            provider: ReasoningBlock::OPENAI_RESPONSES.to_string(),
+            data: json!({"type": "reasoning", "id": "rs_1", "encrypted_content": "enc"}),
+        }]);
+        let body = build_body(&[m], &[], "gpt-5", ReasoningEffort::Off, &cfg());
+        let input = body["input"].as_array().unwrap();
+        assert_eq!(input[0]["type"], "reasoning");
+        assert_eq!(input[0]["id"], "rs_1");
+        assert_eq!(input[1]["type"], "message");
+        assert_eq!(input[2]["type"], "function_call");
+    }
+
+    #[test]
+    fn build_body_skips_reasoning_blocks_from_other_providers() {
+        let mut m = assistant_text("answer");
+        m.reasoning_details = Some(vec![ReasoningBlock {
+            provider: ReasoningBlock::ANTHROPIC.to_string(),
+            data: json!({"type": "thinking", "thinking": "x"}),
+        }]);
+        let body = build_body(&[m], &[], "gpt-5", ReasoningEffort::Off, &cfg());
+        let input = body["input"].as_array().unwrap();
+        assert_eq!(input.len(), 1);
+        assert_eq!(input[0]["type"], "message");
     }
 }

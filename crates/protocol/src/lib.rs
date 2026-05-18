@@ -19,7 +19,7 @@ pub use event::{
     AskModel, AskResponseFormat, Decision, EngineAskError, EngineAskErrorKind, EngineEvent,
     StartTurnPayload, ToolDef, ToolExecutionMode, ToolHookFlags, ToolHooks, UiCommand,
 };
-pub use message::{FunctionCall, Message, Role, ToolCall, ToolOutcome};
+pub use message::{FunctionCall, Message, ReasoningBlock, Role, ToolCall, ToolOutcome};
 pub use mode::{AgentMode, ReasoningEffort};
 pub use style::{StyledLines, StyledSpan};
 pub use usage::{ModelConfigOverrides, PermissionOverrides, RuleSetOverride, TokenUsage, TurnMeta};

@@ -10,7 +10,7 @@ mod sse;
 use crate::cancel::CancellationToken;
 use crate::log;
 pub use protocol::TokenUsage;
-use protocol::{Message, ReasoningEffort, ToolCall};
+use protocol::{Message, ReasoningBlock, ReasoningEffort, ToolCall};
 use reqwest::Client;
 use serde::Serialize;
 use std::time::Duration;
@@ -51,6 +51,8 @@ impl ToolDefinition {
 pub(crate) struct ParsedResponse {
     pub(crate) content: Option<String>,
     pub(crate) reasoning: Option<String>,
+    /// Provider-shaped reasoning blocks to round-trip on the next request.
+    pub(crate) reasoning_blocks: Option<Vec<ReasoningBlock>>,
     pub(crate) tool_calls: Vec<ToolCall>,
     pub(crate) usage: TokenUsage,
 }
@@ -60,6 +62,7 @@ impl ParsedResponse {
         LLMResponse {
             content: self.content,
             reasoning_content: self.reasoning,
+            reasoning_details: self.reasoning_blocks,
             tool_calls: self.tool_calls,
             usage: self.usage,
             tokens_per_sec,
@@ -72,6 +75,14 @@ pub(crate) fn non_empty(s: String) -> Option<String> {
         None
     } else {
         Some(s)
+    }
+}
+
+pub(crate) fn non_empty_blocks(v: Vec<ReasoningBlock>) -> Option<Vec<ReasoningBlock>> {
+    if v.is_empty() {
+        None
+    } else {
+        Some(v)
     }
 }
 
@@ -111,6 +122,7 @@ pub(crate) enum StreamDelta<'a> {
 pub(crate) struct LLMResponse {
     pub(crate) content: Option<String>,
     pub(crate) reasoning_content: Option<String>,
+    pub(crate) reasoning_details: Option<Vec<ReasoningBlock>>,
     pub(crate) tool_calls: Vec<ToolCall>,
     pub(crate) usage: TokenUsage,
     pub(crate) tokens_per_sec: Option<f64>,
@@ -923,6 +935,8 @@ mod tests {
             role: Role::User,
             content: Some(Content::Text(text.into())),
             reasoning_content: None,
+
+            reasoning_details: None,
             tool_calls: None,
             tool_call_id: None,
             is_error: false,
@@ -1421,6 +1435,8 @@ mod tests {
                 label: None,
             }])),
             reasoning_content: None,
+
+            reasoning_details: None,
             tool_calls: None,
             tool_call_id: None,
             is_error: false,
@@ -1437,6 +1453,8 @@ mod tests {
                 label: None,
             }])),
             reasoning_content: None,
+
+            reasoning_details: None,
             tool_calls: None,
             tool_call_id: None,
             is_error: false,
@@ -1571,6 +1589,7 @@ mod tests {
         let p = ParsedResponse {
             content: Some("c".into()),
             reasoning: Some("r".into()),
+            reasoning_blocks: None,
             tool_calls: vec![ToolCall::new(
                 "id".into(),
                 FunctionCall {

@@ -1,6 +1,6 @@
 ---
 source: tests/scenarios.rs
-assertion_line: 134
+assertion_line: 325
 expression: out.events
 ---
 [
@@ -47,6 +47,15 @@ expression: out.events
         {
           "content": "answer",
           "reasoning_content": "let me think",
+          "reasoning_details": [
+            {
+              "data": {
+                "thinking": "let me think",
+                "type": "thinking"
+              },
+              "provider": "anthropic"
+            }
+          ],
           "role": "assistant"
         }
       ],
@@ -63,6 +72,15 @@ expression: out.events
         {
           "content": "answer",
           "reasoning_content": "let me think",
+          "reasoning_details": [
+            {
+              "data": {
+                "thinking": "let me think",
+                "type": "thinking"
+              },
+              "provider": "anthropic"
+            }
+          ],
           "role": "assistant"
         }
       ],
