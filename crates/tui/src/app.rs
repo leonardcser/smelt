@@ -1089,10 +1089,12 @@ impl TuiApp {
                 .kill_ring
                 .yank_flash_until()
                 .is_some_and(|t| t > now);
+            let drag_active = self.ui.drag_capture_window().is_some();
             let has_animation = self.ui.focused_overlay().is_some()
                 || self.has_active_exec()
                 || self.working.is_animating()
-                || yank_flash_active;
+                || yank_flash_active
+                || drag_active;
             let next_timer_delay = self
                 .core
                 .timers
@@ -1228,17 +1230,13 @@ impl TuiApp {
 
                 _ = tokio::time::sleep({
                     let since = last_frame.elapsed();
-                    let want = if let Some(started) = self.ui.drag_autoscroll_started() {
-                        let held = started.elapsed().as_millis() as u64;
-                        // Start at ~33 lines/sec (30 ms), ramp to ~200 lines/sec (5 ms).
-                        let ms = 30u64.saturating_sub(held / 120).max(5);
-                        Duration::from_millis(ms)
-                    } else {
-                        MIN_FRAME_INTERVAL
-                    };
+                    let want = self
+                        .ui
+                        .drag_autoscroll_interval()
+                        .unwrap_or(MIN_FRAME_INTERVAL);
                     want.saturating_sub(since)
-                }), if has_animation || self.ui.drag_autoscroll_started().is_some() => {
-                    self.tick_drag_autoscroll();
+                }), if has_animation => {
+                    self.ui.tick_drag_autoscroll();
                     self.render_normal(self.agent.is_some());
                 }
 

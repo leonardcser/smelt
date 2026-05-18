@@ -1091,6 +1091,16 @@ impl Ui {
         self.capture
     }
 
+    /// Window id when a left-button drag is currently captured to that window
+    /// (i.e. a content drag is in progress on it). `None` for scrollbar /
+    /// overlay-chrome drags and when no drag is active.
+    pub fn drag_capture_window(&self) -> Option<WinId> {
+        match self.capture {
+            Some(HitTarget::Window(w)) => Some(w),
+            _ => None,
+        }
+    }
+
     fn set_capture(&mut self, target: HitTarget) {
         self.capture = Some(target);
     }
@@ -1108,51 +1118,74 @@ impl Ui {
         self.cursor_shape = shape;
     }
 
-    /// Timestamp when edge-drag autoscroll started; hosts use this to ramp the tick interval.
-    pub fn drag_autoscroll_started(&self) -> Option<std::time::Instant> {
-        self.drag_autoscroll_since
+    /// Sleep duration until the next edge-drag autoscroll tick, ramping from
+    /// `AUTOSCROLL_START_MS` down to `AUTOSCROLL_MIN_MS` over
+    /// `AUTOSCROLL_RAMP_DIVISOR_MS` of edge dwell. `None` when the drag is not
+    /// parked at a viewport edge (host should fall back to its normal frame
+    /// interval). Does not mutate; safe to call while computing the next
+    /// `tokio::select` sleep.
+    pub fn drag_autoscroll_interval(&self) -> Option<std::time::Duration> {
+        self.edge_drag_delta().is_some().then(|| {
+            let held = self
+                .drag_autoscroll_since
+                .map(|t| t.elapsed().as_millis() as u64)
+                .unwrap_or(0);
+            let ms = AUTOSCROLL_START_MS
+                .saturating_sub(held / AUTOSCROLL_RAMP_DIVISOR_MS)
+                .max(AUTOSCROLL_MIN_MS);
+            std::time::Duration::from_millis(ms)
+        })
     }
 
-    /// While the captured window's cursor is parked at a viewport edge, returns
-    /// `Some((win, delta))` with `delta = -1` (top) or `+1` (bottom). Manages the
-    /// autoscroll timestamp internally.
-    pub fn poll_drag_autoscroll(&mut self) -> Option<(WinId, isize)> {
-        let win_id = match self.capture {
-            Some(HitTarget::Window(w)) => w,
-            _ => {
-                self.drag_autoscroll_since = None;
-                return None;
-            }
-        };
-        let win = self.wins.get(&win_id)?;
-        let viewport_h = match win.viewport {
-            Some(v) => v.rect.height as usize,
-            None => {
-                self.drag_autoscroll_since = None;
-                return None;
-            }
-        };
-        if viewport_h == 0 {
+    /// Per-frame autoscroll step: when a left-button drag's endpoint is parked
+    /// at the top or bottom of the captured window's viewport, pan one row in
+    /// that direction and re-park the endpoint at the new leading edge so the
+    /// selection grows by one row per tick. The endpoint, not `cpos`, is the
+    /// trigger — `cpos` is the pre-drag cursor and is unchanged mid-gesture,
+    /// so a cursor-based check would fire on whatever line happened to be
+    /// selected before the drag. Returns `true` if anything panned.
+    pub fn tick_drag_autoscroll(&mut self) -> bool {
+        let Some((win_id, delta)) = self.edge_drag_delta() else {
             self.drag_autoscroll_since = None;
-            return None;
-        }
-        // Drag-autoscroll fires when the cursor sits at the top/bottom edge of the
-        // viewport. `cursor_row` is buffer-absolute; convert via `cursor_screen_row`
-        // (cursor off-screen → no autoscroll).
-        let Some(screen_row) = win.cursor_screen_row(viewport_h as u16) else {
-            self.drag_autoscroll_since = None;
-            return None;
-        };
-        let delta: isize = if screen_row == 0 {
-            -1
-        } else if (screen_row as usize) >= viewport_h.saturating_sub(1) {
-            1
-        } else {
-            self.drag_autoscroll_since = None;
-            return None;
+            return false;
         };
         self.drag_autoscroll_since
             .get_or_insert_with(std::time::Instant::now);
+        let win = self.wins.get(&win_id).expect("edge_drag_delta validated");
+        let viewport_h = win.viewport.expect("edge_drag_delta validated").rect.height;
+        let buf_id = win.buf;
+        let (win, buf) = self.win_and_buf_mut(win_id, buf_id);
+        win.expect("captured window")
+            .drag_autoscroll_step(buf.expect("captured buffer"), viewport_h, delta)
+    }
+
+    /// `(win, delta)` when an in-flight drag's endpoint sits exactly at the
+    /// top or bottom of the captured window's viewport. Shared trigger check
+    /// for [`drag_autoscroll_interval`] and [`tick_drag_autoscroll`].
+    fn edge_drag_delta(&self) -> Option<(WinId, isize)> {
+        let win_id = match self.capture? {
+            HitTarget::Window(w) => w,
+            _ => return None,
+        };
+        let win = self.wins.get(&win_id)?;
+        let viewport_h = win.viewport?.rect.height;
+        if viewport_h == 0 {
+            return None;
+        }
+        // Mouse must still be held (drag in flight). `Window::mouse_up` clears
+        // `drag_endpoint`, so this also blocks autoscroll after release.
+        let buf = self.bufs.get(&win.buf)?;
+        let screen_row = win
+            .effective_cursor_row(buf)
+            .checked_sub(win.scroll_top)
+            .filter(|r| *r < viewport_h)?;
+        let delta = if screen_row == 0 {
+            -1
+        } else if screen_row >= viewport_h.saturating_sub(1) {
+            1
+        } else {
+            return None;
+        };
         Some((win_id, delta))
     }
 
@@ -1991,6 +2024,14 @@ impl UiHost for Ui {
 
 /// Minimum `(width, height)` a resize gesture can shrink an overlay to.
 const MIN_OVERLAY_SIZE: (u16, u16) = (8, 3);
+
+/// Drag-autoscroll ramp: first tick after the endpoint parks at the edge fires
+/// after `AUTOSCROLL_START_MS`; the interval shortens by 1 ms per
+/// `AUTOSCROLL_RAMP_DIVISOR_MS` of dwell, floored at `AUTOSCROLL_MIN_MS`
+/// (≈30 → 200 lines/sec over ~3 s).
+const AUTOSCROLL_START_MS: u64 = 30;
+const AUTOSCROLL_MIN_MS: u64 = 5;
+const AUTOSCROLL_RAMP_DIVISOR_MS: u64 = 120;
 
 /// Classify a chrome hit inside an overlay rect: top row → Title, bottom-right cell → Resize, else Body.
 fn chrome_zone(rect: Rect, ov: &Overlay, row: u16, col: u16) -> overlay::ChromeZone {
@@ -4067,83 +4108,80 @@ mod tests {
         assert_eq!(ui.capture(), None);
     }
 
-    #[test]
-    fn poll_drag_autoscroll_returns_none_without_window_capture() {
-        let mut ui = make_ui();
-        let _win = make_scrollbar_split(&mut ui);
-        assert_eq!(ui.poll_drag_autoscroll(), None);
-        assert_eq!(ui.drag_autoscroll_started(), None);
+    /// Place the captured window's drag endpoint at the start of visual row
+    /// `vrow` so `edge_drag_delta` sees it parked at that row.
+    fn park_drag_endpoint_at(ui: &mut Ui, win: WinId, vrow: usize) {
+        let buf_id = ui.win(win).unwrap().buf;
+        let buf = ui.buf(buf_id).unwrap();
+        let byte = buf.byte_at_display_pos(vrow, 0);
+        ui.win_mut(win).unwrap().drag_endpoint = Some(byte);
     }
 
     #[test]
-    fn poll_drag_autoscroll_fires_at_top_edge_and_latches_started_at() {
-        let mut ui = make_ui();
-        let win = make_scrollbar_split(&mut ui);
-        ui.set_capture(HitTarget::Window(win));
-        {
-            let w = ui.win_mut(win).unwrap();
-            w.cursor_row = 0;
-        }
-        let result = ui.poll_drag_autoscroll();
-        assert_eq!(result, Some((win, -1)));
-        assert!(ui.drag_autoscroll_started().is_some());
+    fn drag_autoscroll_returns_none_without_window_capture() {
+        let ui = make_ui();
+        assert!(ui.drag_autoscroll_interval().is_none());
     }
 
     #[test]
-    fn poll_drag_autoscroll_fires_at_bottom_edge() {
+    fn drag_autoscroll_fires_at_top_edge() {
         let mut ui = make_ui();
         let win = make_scrollbar_split(&mut ui);
         ui.set_capture(HitTarget::Window(win));
-        // make_scrollbar_split paints a viewport with rect height = 10,
-        // so cursor_row=9 is the bottom row.
-        {
-            let w = ui.win_mut(win).unwrap();
-            w.cursor_row = 9;
-        }
-        assert_eq!(ui.poll_drag_autoscroll(), Some((win, 1)));
+        park_drag_endpoint_at(&mut ui, win, 0);
+        assert!(ui.drag_autoscroll_interval().is_some());
+        // Already at top of buffer — can't scroll further up, but the
+        // trigger still fires; the tick just no-ops the pan.
+        assert!(!ui.tick_drag_autoscroll());
+
+        // Scroll into the buffer and re-park at viewport top: now it pans.
+        ui.win_mut(win).unwrap().scroll_top = 5;
+        park_drag_endpoint_at(&mut ui, win, 5);
+        assert!(ui.tick_drag_autoscroll());
+        assert_eq!(ui.win(win).unwrap().scroll_top, 4);
     }
 
     #[test]
-    fn poll_drag_autoscroll_clears_started_at_when_cursor_leaves_edge() {
+    fn drag_autoscroll_fires_at_bottom_edge() {
         let mut ui = make_ui();
         let win = make_scrollbar_split(&mut ui);
         ui.set_capture(HitTarget::Window(win));
-        {
-            let w = ui.win_mut(win).unwrap();
-            w.cursor_row = 0;
-        }
-        let _ = ui.poll_drag_autoscroll();
-        assert!(ui.drag_autoscroll_started().is_some());
-        {
-            let w = ui.win_mut(win).unwrap();
-            w.cursor_row = 5;
-        }
-        assert_eq!(ui.poll_drag_autoscroll(), None);
-        assert_eq!(ui.drag_autoscroll_started(), None);
+        // Viewport height is 10; row 9 is the last visible row.
+        park_drag_endpoint_at(&mut ui, win, 9);
+        assert!(ui.drag_autoscroll_interval().is_some());
+        assert!(ui.tick_drag_autoscroll());
+        assert_eq!(ui.win(win).unwrap().scroll_top, 1);
     }
 
     #[test]
-    fn poll_drag_autoscroll_clears_started_at_when_capture_releases() {
+    fn drag_autoscroll_idle_when_endpoint_leaves_edge() {
         let mut ui = make_ui();
         let win = make_scrollbar_split(&mut ui);
         ui.set_capture(HitTarget::Window(win));
-        {
-            let w = ui.win_mut(win).unwrap();
-            w.cursor_row = 0;
-        }
-        let _ = ui.poll_drag_autoscroll();
-        assert!(ui.drag_autoscroll_started().is_some());
+        park_drag_endpoint_at(&mut ui, win, 5);
+        assert!(ui.drag_autoscroll_interval().is_none());
+        assert!(!ui.tick_drag_autoscroll());
+    }
+
+    #[test]
+    fn drag_autoscroll_clears_latch_when_capture_releases() {
+        let mut ui = make_ui();
+        let win = make_scrollbar_split(&mut ui);
+        ui.set_capture(HitTarget::Window(win));
+        park_drag_endpoint_at(&mut ui, win, 9);
+        assert!(ui.tick_drag_autoscroll());
         ui.clear_capture();
-        assert_eq!(ui.drag_autoscroll_started(), None);
-        assert_eq!(ui.poll_drag_autoscroll(), None);
+        assert!(ui.drag_autoscroll_interval().is_none());
+        assert!(!ui.tick_drag_autoscroll());
     }
 
     #[test]
-    fn poll_drag_autoscroll_returns_none_for_scrollbar_capture() {
+    fn drag_autoscroll_ignores_scrollbar_capture() {
         let mut ui = make_ui();
         let win = make_scrollbar_split(&mut ui);
         ui.set_capture(HitTarget::Scrollbar { owner: win });
-        ui.win_mut(win).unwrap().cursor_row = 0;
-        assert_eq!(ui.poll_drag_autoscroll(), None);
+        park_drag_endpoint_at(&mut ui, win, 0);
+        assert!(ui.drag_autoscroll_interval().is_none());
+        assert!(!ui.tick_drag_autoscroll());
     }
 }

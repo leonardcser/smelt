@@ -1324,6 +1324,44 @@ impl Window {
         self.scroll_left = (cur as isize + delta).clamp(0, max_scroll as isize) as u16;
     }
 
+    /// One step of edge-drag autoscroll. Pans `scroll_top` by `delta` rows and
+    /// moves `drag_endpoint` to sit on the new leading edge of the viewport at
+    /// the drag's current visual column, so the selection grows by one row per
+    /// tick and the endpoint stays parked at the trigger edge for the next
+    /// poll. `cpos` is untouched — mouse-up commits the final endpoint.
+    /// Returns `true` when the viewport actually moved.
+    pub fn drag_autoscroll_step(
+        &mut self,
+        buf: &Buffer,
+        viewport_rows: u16,
+        delta: isize,
+    ) -> bool {
+        if delta == 0 || viewport_rows == 0 {
+            return false;
+        }
+        let total = self.visual_row_total(buf);
+        if total == 0 {
+            return false;
+        }
+        let max_scroll = total.saturating_sub(viewport_rows);
+        let cur_scroll = self.scroll_top.min(max_scroll);
+        let new_scroll = (cur_scroll as isize + delta).clamp(0, max_scroll as isize) as u16;
+        if new_scroll == self.scroll_top {
+            return false;
+        }
+        let col = self.cursor_visual(buf, self.effective_endpoint()).1 as usize;
+        self.set_scroll(new_scroll, buf);
+        let edge_vrow = if delta < 0 {
+            new_scroll as usize
+        } else {
+            (new_scroll + viewport_rows.saturating_sub(1)).min(total.saturating_sub(1)) as usize
+        };
+        // `cpos_at_visual` snaps past non-selectable chrome (transcript fold
+        // markers, gutter cells), so no transcript-specific snap is needed here.
+        self.drag_endpoint = Some(self.cpos_at_visual(buf, edge_vrow, col));
+        true
+    }
+
     /// Viewport-led pan (mouse wheel / tmux copy-mode semantics): bump `scroll_top`
     /// by `delta` rows and keep the cursor on the same screen row. The cursor's
     /// buffer row changes to whatever row is now under that screen cell.

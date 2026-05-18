@@ -237,26 +237,6 @@ impl TuiApp {
             .set_with_linewise(out.kill_ring, false);
     }
 
-    /// Scroll one line when a drag cursor sits at the viewport edge (autoscroll).
-    /// One line per tick; the main loop ramps sleep interval for acceleration.
-    pub(crate) fn tick_drag_autoscroll(&mut self) {
-        let Some((win, delta)) = self.ui.poll_drag_autoscroll() else {
-            return;
-        };
-        if win == crate::app::TRANSCRIPT_WIN && self.app_focus == crate::app::AppFocus::Content {
-            let viewport = self.viewport_rows_estimate();
-            let win_id = self.well_known.transcript;
-            let buf_id = self.transcript_win().buf;
-            let (win, buf) = self.ui.win_and_buf_mut(win_id, buf_id);
-            win.expect("transcript window").move_cursor_by_lines(
-                buf.expect("transcript buffer"),
-                delta,
-                viewport,
-            );
-            self.snap_transcript_cursor();
-        }
-    }
-
     /// Drive a prompt mouse event through `Window::handle_mouse`. On `Up` with
     /// a non-empty selection, route the yanked range through `buf.copy_range`
     /// (the prompt's `BufferCopy` expands `\u{FFFC}` markers to `[label]` for
