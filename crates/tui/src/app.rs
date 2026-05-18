@@ -1257,14 +1257,16 @@ impl TuiApp {
             }
         }
 
-        if self.agent.is_some() {
-            self.finish_turn(true);
-        }
-        self.core
-            .cells
-            .set_dyn("shutdown", std::rc::Rc::new(smelt_core::cells::EventStub));
-        self.drain_cells_pending();
-        self.save_session();
+        crate::lua::with_app_ptr(self, |app| {
+            if app.agent.is_some() {
+                app.finish_turn(true);
+            }
+            app.core
+                .cells
+                .set_dyn("shutdown", std::rc::Rc::new(smelt_core::cells::EventStub));
+            app.drain_cells_pending();
+            app.save_session();
+        });
 
         // Drop the terminal guard last so any rendering above stays in TUI mode.
         self.terminal = None;
