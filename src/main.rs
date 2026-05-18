@@ -579,10 +579,24 @@ fn parse_with_lua_flags(
         }
         arg = match spec.kind {
             tui::CliFlagKind::Boolean => arg.action(ArgAction::SetTrue),
-            tui::CliFlagKind::String => arg.action(ArgAction::Set),
-            tui::CliFlagKind::Integer => arg
-                .action(ArgAction::Set)
-                .value_parser(clap::value_parser!(i64)),
+            tui::CliFlagKind::String => {
+                let a = arg.action(ArgAction::Set);
+                if spec.value_optional {
+                    a.num_args(0..=1).default_missing_value("")
+                } else {
+                    a
+                }
+            }
+            tui::CliFlagKind::Integer => {
+                let a = arg
+                    .action(ArgAction::Set)
+                    .value_parser(clap::value_parser!(i64));
+                if spec.value_optional {
+                    a.num_args(0..=1).default_missing_value("0")
+                } else {
+                    a
+                }
+            }
         };
         cmd = cmd.arg(arg);
     }

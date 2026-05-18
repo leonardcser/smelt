@@ -51,6 +51,11 @@ pub struct LuaRegisterFlagOpts {
     pub long: Option<String>,
     /// Human-readable description for `--help`.
     pub description: Option<String>,
+    /// String/Integer flags only. When true, the flag may be passed without
+    /// a value (`smelt -r` valid alongside `smelt -r abc`); the value-less
+    /// form yields `""` for String and `0` for Integer. Defaults to `false`.
+    /// Ignored for Boolean flags.
+    pub value_optional: Option<bool>,
 }
 
 fn value_from_lua(kind: CliFlagKind, v: &mlua::Value) -> LuaResult<CliFlagValue> {
@@ -127,6 +132,7 @@ default) after the binary has parsed argv.",
                     description: opts.description,
                     short,
                     long: opts.long,
+                    value_optional: opts.value_optional.unwrap_or(false),
                 };
                 if let Ok(mut specs) = s.cli_flag_specs.lock() {
                     if specs.iter().any(|sp| sp.name == opts.name) {

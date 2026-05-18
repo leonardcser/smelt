@@ -177,6 +177,11 @@ pub struct CliFlagSpec {
     pub description: Option<String>,
     pub short: Option<char>,
     pub long: Option<String>,
+    /// String/Integer flags only. When true, the flag may appear without a
+    /// value (`smelt -r` valid alongside `smelt -r abc`); the absent-value
+    /// form yields `""` for String and `0` for Integer. Maps to clap's
+    /// `num_args(0..=1).default_missing_value(...)`. Ignored for Boolean.
+    pub value_optional: bool,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

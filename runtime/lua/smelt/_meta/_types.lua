@@ -62,6 +62,7 @@
 ---@field short? string Short flag character (e.g. `"u"` for `-u`). Optional.
 ---@field long? string Long flag name override. Defaults to `name` when absent.
 ---@field description? string Human-readable description for `--help`.
+---@field value_optional? boolean String/Integer flags only. When true, the flag may be passed without a value (`smelt -r` valid alongside `smelt -r abc`); the value-less form yields `""` for String and `0` for Integer. Defaults to `false`. Ignored for Boolean flags.
 
 --- Options accepted by `smelt.cmd.register`.
 ---@class smelt.cmd.RegisterOpts

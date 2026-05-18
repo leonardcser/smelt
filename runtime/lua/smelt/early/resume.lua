@@ -6,5 +6,6 @@ smelt.cli.register_flag({
   name = "resume",
   short = "r",
   kind = "string",
+  value_optional = true,
   description = "Resume a saved session by id, or open the picker when no id is given",
 })
