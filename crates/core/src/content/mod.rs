@@ -72,3 +72,58 @@ pub fn is_table_separator(line: &str) -> bool {
         && t.chars()
             .all(|c| c == '-' || c == '|' || c == ':' || c == ' ')
 }
+
+/// Per-column alignment, parsed from a markdown table separator line.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum ColumnAlignment {
+    #[default]
+    Left,
+    Center,
+    Right,
+}
+
+/// Parse column alignments from a markdown table separator like `|:---|:---:|---:|`.
+/// Returns one entry per column: `:---` left, `:---:` center, `---:` right,
+/// otherwise [`ColumnAlignment::Left`]. Returns empty when `line` isn't a separator.
+pub fn parse_table_alignments(line: &str) -> Vec<ColumnAlignment> {
+    if !is_table_separator(line) {
+        return Vec::new();
+    }
+    line.trim()
+        .trim_start_matches('|')
+        .trim_end_matches('|')
+        .split('|')
+        .map(|cell| {
+            let c = cell.trim();
+            match (c.starts_with(':'), c.ends_with(':')) {
+                (true, true) => ColumnAlignment::Center,
+                (false, true) => ColumnAlignment::Right,
+                _ => ColumnAlignment::Left,
+            }
+        })
+        .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parse_table_alignments_recognizes_all_three_markers() {
+        let got = parse_table_alignments("|:---|:---:|---:|---|");
+        assert_eq!(
+            got,
+            vec![
+                ColumnAlignment::Left,
+                ColumnAlignment::Center,
+                ColumnAlignment::Right,
+                ColumnAlignment::Left,
+            ]
+        );
+    }
+
+    #[test]
+    fn parse_table_alignments_returns_empty_for_non_separator() {
+        assert!(parse_table_alignments("| a | b |").is_empty());
+    }
+}

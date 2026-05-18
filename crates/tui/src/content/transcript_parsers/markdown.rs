@@ -45,8 +45,14 @@ pub fn render_markdown_inner(
             while i < lines.len() && lines[i].trim_start().starts_with('|') {
                 i += 1;
             }
-            rows +=
-                render_markdown_table_from_lines(out, &lines[table_start..i], dim, bctx, indent);
+            rows += render_markdown_table_from_lines(
+                out,
+                &lines[table_start..i],
+                width,
+                dim,
+                bctx,
+                indent,
+            );
             last_content_line = None;
         } else if is_horizontal_rule(lines[i]) {
             let prev_blank = i > 0 && lines[i - 1].trim().is_empty();
@@ -262,13 +268,18 @@ fn render_horizontal_rule(
 fn render_markdown_table_from_lines(
     out: &mut LineBuilder,
     lines: &[&str],
+    width: usize,
     dim: bool,
     bctx: Option<&smelt_core::content::BoxContext>,
     indent: &str,
 ) -> u16 {
+    let mut alignments = Vec::new();
     let mut table_rows: Vec<Vec<String>> = Vec::new();
     for line in lines {
         if smelt_core::content::is_table_separator(line) {
+            if alignments.is_empty() {
+                alignments = smelt_core::content::parse_table_alignments(line);
+            }
             continue;
         }
         let trimmed = line.trim().trim_start_matches('|').trim_end_matches('|');
@@ -278,7 +289,7 @@ fn render_markdown_table_from_lines(
     // Source text on row 0 lets copy_range reconstruct the raw markdown; subsequent
     // rows are soft-wrap continuations so they're skipped once row 0's source is emitted.
     out.arm_source_text(lines.join("\n"));
-    let n = render_markdown_table(out, &table_rows, dim, bctx, indent);
+    let n = render_markdown_table(out, &table_rows, &alignments, width, dim, bctx, indent);
     out.disarm_source_text();
     n
 }
@@ -303,5 +314,23 @@ mod tests {
             assert!(line.soft_wrapped);
             assert!(line.source_text.is_none());
         }
+    }
+
+    #[test]
+    fn rendered_table_honors_separator_alignment_markers() {
+        // Generous header widths so per-column padding is visible.
+        let md = "| LLLL | CCCC | RRRR |\n|:-----|:----:|-----:|\n| x | y | z |\n";
+        let block = render_test(80, |sink| {
+            render_markdown_inner(sink, md, 80, "", false, None);
+        });
+        let data_row = block
+            .lines
+            .iter()
+            .map(|l| l.text.as_str())
+            .find(|s| s.contains('x') && s.contains('y') && s.contains('z'))
+            .expect("data row");
+        assert!(data_row.contains("┃ x    ┃"), "left: {data_row:?}");
+        assert!(data_row.contains("┃  y   ┃"), "center: {data_row:?}");
+        assert!(data_row.contains("┃    z ┃"), "right: {data_row:?}");
     }
 }

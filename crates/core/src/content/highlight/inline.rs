@@ -3,7 +3,7 @@
 //! renderer that uses both.
 
 use crate::content::builder::LineBuilder;
-use crate::content::default_width;
+use crate::content::{default_width, ColumnAlignment};
 use crate::style::Color;
 use crate::theme::{intern, HlGroup};
 use unicode_width::UnicodeWidthStr;
@@ -13,9 +13,15 @@ use super::util::{
     run_length, strip_markdown_markers,
 };
 
+/// Render a markdown table. `alignments` may be empty (defaults to left for all
+/// columns) or shorter than the column count (missing entries default to left).
+/// `width` is the column budget available when no [`BoxContext`] surrounds the
+/// table; ignored otherwise.
 pub fn render_markdown_table(
     out: &mut LineBuilder,
     rows: &[Vec<String>],
+    alignments: &[ColumnAlignment],
+    width: usize,
     dim: bool,
     bctx: Option<&super::super::BoxContext>,
     indent: &str,
@@ -23,176 +29,187 @@ pub fn render_markdown_table(
     if rows.is_empty() {
         return 0;
     }
-
     let num_cols = rows.iter().map(|r| r.len()).max().unwrap_or(0);
     if num_cols == 0 {
         return 0;
     }
 
-    let max_table = if let Some(b) = bctx {
-        b.inner_w.saturating_sub(1)
-    } else {
-        default_width().saturating_sub(2)
+    let max_table = match bctx {
+        Some(b) => b.inner_w.saturating_sub(indent.len()),
+        None => width.saturating_sub(indent.len()),
     };
-    let mut col_widths = vec![0usize; num_cols];
-    for row in rows {
-        for (c, cell) in row.iter().enumerate() {
-            let visual = strip_markdown_markers(cell).width();
-            col_widths[c] = col_widths[c].max(visual);
-        }
-    }
+    let align_for = |c: usize| alignments.get(c).copied().unwrap_or_default();
 
-    let overhead = 3 * num_cols + 1;
-    let mut min_widths = vec![0usize; num_cols];
-    for row in rows {
-        for (c, cell) in row.iter().enumerate() {
-            min_widths[c] = min_widths[c].max(min_visual_width(cell));
-        }
-    }
-
-    let total: usize = col_widths.iter().sum::<usize>() + overhead;
-    if total > max_table {
-        let avail = max_table.saturating_sub(overhead);
-        let min_total: usize = min_widths.iter().sum();
-
-        if min_total > avail {
-            // Can't fit even at minimum widths — switch to stacked layout.
-            return render_table_stacked(out, rows, dim);
-        }
-
-        // Shrink proportionally but clamp to min_widths.
-        let content_total: usize = col_widths.iter().sum();
-        if content_total > 0 {
-            let mut new_widths: Vec<usize> = col_widths
-                .iter()
-                .zip(min_widths.iter())
-                .map(|(&w, &min)| ((w * avail) / content_total).max(min))
-                .collect();
-
-            loop {
-                let used: usize = new_widths.iter().sum();
-                if used <= avail {
-                    break;
-                }
-                let excess = used - avail;
-                let shrinkable: Vec<usize> = (0..num_cols)
-                    .filter(|&c| new_widths[c] > min_widths[c])
-                    .collect();
-                if shrinkable.is_empty() {
-                    break;
-                }
-                let per_col = (excess / shrinkable.len()).max(1);
-                for &c in &shrinkable {
-                    let reduce = per_col.min(new_widths[c] - min_widths[c]);
-                    new_widths[c] -= reduce;
-                }
-            }
-            col_widths = new_widths;
-        }
-    }
+    let Some(col_widths) = fit_column_widths(rows, num_cols, max_table) else {
+        return render_table_stacked(out, rows, dim);
+    };
 
     let mut total_rows = 0u16;
-
-    let bar = |out: &mut LineBuilder, dim: bool| {
-        out.set_hl(intern("SmeltBar"));
-        if dim {
-            out.set_dim();
-        }
-    };
-    let reset = |out: &mut LineBuilder, _dim: bool| {
-        out.reset_style();
-    };
-
-    let render_table_row =
-        |out: &mut LineBuilder, row: &[String], widths: &[usize], dim: bool| -> u16 {
-            let wrapped: Vec<Vec<String>> = row
-                .iter()
-                .enumerate()
-                .map(|(c, cell)| {
-                    let w = widths.get(c).copied().unwrap_or(0);
-                    wrap_cell_words(out, cell, w)
-                })
-                .collect();
-            let height = wrapped.iter().map(|w| w.len()).max().unwrap_or(1);
-
-            for vline in 0..height {
-                if let Some(b) = bctx {
-                    b.print_left(out);
-                } else if !indent.is_empty() {
-                    out.print_gutter(indent);
-                }
-                bar(out, dim);
-                out.print_gutter("┃");
-                reset(out, dim);
-                let mut line_cols = 1;
-                for (c, width) in widths.iter().enumerate() {
-                    let text = wrapped
-                        .get(c)
-                        .and_then(|w| w.get(vline))
-                        .map(|s| s.as_str())
-                        .unwrap_or("");
-                    let visual_len = strip_markdown_markers(text).width();
-                    out.print_gutter(" ");
-                    print_inline_styled(out, text, dim);
-                    let pad = width.saturating_sub(visual_len);
-                    if pad > 0 {
-                        out.print_gutter(&" ".repeat(pad));
-                    }
-                    out.print_gutter(" ");
-                    bar(out, dim);
-                    out.print_gutter("┃");
-                    reset(out, dim);
-                    line_cols += width + 3; // " content pad ┃"
-                }
-                if let Some(b) = bctx {
-                    b.print_right(out, line_cols);
-                }
-                out.newline();
-            }
-            height as u16
-        };
-
-    let render_border =
-        |out: &mut LineBuilder, widths: &[usize], dim: bool, l: &str, j: &str, r: &str| -> u16 {
-            if let Some(b) = bctx {
-                b.print_left(out);
-            } else if !indent.is_empty() {
-                out.print_gutter(indent);
-            }
-            bar(out, dim);
-            out.print_gutter(l);
-            let mut line_cols = 1;
-            for (c, width) in widths.iter().enumerate() {
-                let seg = width + 2;
-                out.print_gutter(&"━".repeat(seg));
-                line_cols += seg;
-                if c + 1 < widths.len() {
-                    out.print_gutter(j);
-                    line_cols += 1;
-                }
-            }
-            out.print_gutter(r);
-            line_cols += 1;
-            reset(out, dim);
-            if let Some(b) = bctx {
-                b.print_right(out, line_cols);
-            }
-            out.newline();
-            1
-        };
-
-    total_rows += render_border(out, &col_widths, dim, "┏", "┳", "┓");
+    total_rows += render_border(out, &col_widths, bctx, indent, "┏", "┳", "┓");
     if let Some(header) = rows.first() {
-        total_rows += render_table_row(out, header, &col_widths, dim);
-        total_rows += render_border(out, &col_widths, dim, "┣", "╋", "┫");
+        total_rows += render_table_row(out, header, &col_widths, align_for, dim, bctx, indent);
+        total_rows += render_border(out, &col_widths, bctx, indent, "┣", "╋", "┫");
     }
     for row in rows.iter().skip(1) {
-        total_rows += render_table_row(out, row, &col_widths, dim);
+        total_rows += render_table_row(out, row, &col_widths, align_for, dim, bctx, indent);
     }
-
-    total_rows += render_border(out, &col_widths, dim, "┗", "┻", "┛");
-
+    total_rows += render_border(out, &col_widths, bctx, indent, "┗", "┻", "┛");
     total_rows
+}
+
+/// Pick a final width per column that fits within `max_table` (including the
+/// `" cell ┃"` overhead). `None` means the table can't fit even at min widths
+/// and the caller should fall back to a stacked layout.
+fn fit_column_widths(
+    rows: &[Vec<String>],
+    num_cols: usize,
+    max_table: usize,
+) -> Option<Vec<usize>> {
+    let mut natural = vec![0usize; num_cols];
+    let mut min = vec![0usize; num_cols];
+    for row in rows {
+        for (c, cell) in row.iter().enumerate() {
+            natural[c] = natural[c].max(strip_markdown_markers(cell).width());
+            min[c] = min[c].max(min_visual_width(cell));
+        }
+    }
+    let overhead = 3 * num_cols + 1;
+    let avail = max_table.saturating_sub(overhead);
+    if natural.iter().sum::<usize>() <= avail {
+        return Some(natural);
+    }
+    if min.iter().sum::<usize>() > avail {
+        return None;
+    }
+    let natural_total: usize = natural.iter().sum();
+    if natural_total == 0 {
+        return Some(natural);
+    }
+    let mut widths: Vec<usize> = natural
+        .iter()
+        .zip(min.iter())
+        .map(|(&w, &m)| ((w * avail) / natural_total).max(m))
+        .collect();
+    while widths.iter().sum::<usize>() > avail {
+        let excess = widths.iter().sum::<usize>() - avail;
+        let shrinkable: Vec<usize> = (0..num_cols).filter(|&c| widths[c] > min[c]).collect();
+        if shrinkable.is_empty() {
+            break;
+        }
+        let per_col = (excess / shrinkable.len()).max(1);
+        for c in shrinkable {
+            let reduce = per_col.min(widths[c] - min[c]);
+            widths[c] -= reduce;
+        }
+    }
+    Some(widths)
+}
+
+/// Apply the dim "table border" style. No bg — borders ride on whatever bg the
+/// surrounding block uses (transcript / box / code-block).
+fn enter_border_style(out: &mut LineBuilder) {
+    out.set_dim();
+}
+
+fn render_row_prefix(out: &mut LineBuilder, bctx: Option<&super::super::BoxContext>, indent: &str) {
+    if let Some(b) = bctx {
+        b.print_left(out);
+    } else if !indent.is_empty() {
+        out.print_gutter(indent);
+    }
+}
+
+fn render_row_suffix(
+    out: &mut LineBuilder,
+    bctx: Option<&super::super::BoxContext>,
+    line_cols: usize,
+) {
+    if let Some(b) = bctx {
+        b.print_right(out, line_cols);
+    }
+    out.newline();
+}
+
+fn render_border(
+    out: &mut LineBuilder,
+    widths: &[usize],
+    bctx: Option<&super::super::BoxContext>,
+    indent: &str,
+    l: &str,
+    j: &str,
+    r: &str,
+) -> u16 {
+    render_row_prefix(out, bctx, indent);
+    enter_border_style(out);
+    out.print_gutter(l);
+    let mut line_cols = indent.len() + 1;
+    for (c, width) in widths.iter().enumerate() {
+        let seg = width + 2;
+        out.print_gutter(&"━".repeat(seg));
+        line_cols += seg;
+        if c + 1 < widths.len() {
+            out.print_gutter(j);
+            line_cols += 1;
+        }
+    }
+    out.print_gutter(r);
+    line_cols += 1;
+    out.reset_style();
+    render_row_suffix(out, bctx, line_cols);
+    1
+}
+
+fn render_table_row(
+    out: &mut LineBuilder,
+    row: &[String],
+    widths: &[usize],
+    align_for: impl Fn(usize) -> ColumnAlignment,
+    dim: bool,
+    bctx: Option<&super::super::BoxContext>,
+    indent: &str,
+) -> u16 {
+    let wrapped: Vec<Vec<String>> = row
+        .iter()
+        .enumerate()
+        .map(|(c, cell)| wrap_cell_words(out, cell, widths.get(c).copied().unwrap_or(0)))
+        .collect();
+    let height = wrapped.iter().map(|w| w.len()).max().unwrap_or(1);
+
+    for vline in 0..height {
+        render_row_prefix(out, bctx, indent);
+        enter_border_style(out);
+        out.print_gutter("┃");
+        out.reset_style();
+        let mut line_cols = indent.len() + 1;
+        for (c, width) in widths.iter().enumerate() {
+            let text = wrapped
+                .get(c)
+                .and_then(|w| w.get(vline))
+                .map(String::as_str)
+                .unwrap_or("");
+            let pad = width.saturating_sub(strip_markdown_markers(text).width());
+            let (left_pad, right_pad) = match align_for(c) {
+                ColumnAlignment::Left => (0, pad),
+                ColumnAlignment::Right => (pad, 0),
+                ColumnAlignment::Center => (pad / 2, pad - pad / 2),
+            };
+            out.print_gutter(" ");
+            if left_pad > 0 {
+                out.print_gutter(&" ".repeat(left_pad));
+            }
+            print_inline_styled(out, text, dim);
+            if right_pad > 0 {
+                out.print_gutter(&" ".repeat(right_pad));
+            }
+            out.print_gutter(" ");
+            enter_border_style(out);
+            out.print_gutter("┃");
+            out.reset_style();
+            line_cols += width + 3; // " content pad ┃"
+        }
+        render_row_suffix(out, bctx, line_cols);
+    }
+    height as u16
 }
 
 /// Stacked fallback: each data row becomes "Header: value" lines, used when the table is too wide.
@@ -1226,7 +1243,7 @@ mod tests {
     fn render_markdown_table_empty_rows_returns_zero() {
         let mut total = 0u16;
         render_test(80, |out| {
-            total = render_markdown_table(out, &[], false, None, "");
+            total = render_markdown_table(out, &[], &[], 80, false, None, "");
         });
         assert_eq!(total, 0);
     }
@@ -1236,7 +1253,7 @@ mod tests {
         let mut total = 0u16;
         let rows: Vec<Vec<String>> = vec![vec![], vec![]];
         render_test(80, |out| {
-            total = render_markdown_table(out, &rows, false, None, "");
+            total = render_markdown_table(out, &rows, &[], 80, false, None, "");
         });
         assert_eq!(total, 0);
     }
@@ -1248,7 +1265,7 @@ mod tests {
             vec!["a".to_string(), "b".to_string()],
         ];
         let block = render_test(80, |out| {
-            render_markdown_table(out, &rows, false, None, "");
+            render_markdown_table(out, &rows, &[], 80, false, None, "");
         });
         let joined: String = block
             .lines
@@ -1274,7 +1291,7 @@ mod tests {
     fn render_markdown_table_with_indent_prefixes_each_row() {
         let rows = vec![vec!["H".to_string()], vec!["v".to_string()]];
         let block = render_test(80, |out| {
-            render_markdown_table(out, &rows, false, None, "  ");
+            render_markdown_table(out, &rows, &[], 80, false, None, "  ");
         });
         // Indent prefixes the borders/rows.
         for line in &block.lines {
@@ -1292,7 +1309,7 @@ mod tests {
     fn render_markdown_table_dim_passes_through() {
         let rows = vec![vec!["H".to_string()], vec!["v".to_string()]];
         let block = render_test(80, |out| {
-            render_markdown_table(out, &rows, true, None, "");
+            render_markdown_table(out, &rows, &[], 80, true, None, "");
         });
         // Dim shouldn't crash and should still produce table output.
         assert!(block.lines.len() >= 4);
@@ -1316,7 +1333,7 @@ mod tests {
         let rows = vec![vec!["Col".to_string()], vec![long.clone()]];
         let bctx = narrow_bctx(30);
         let block = render_test(80, |out| {
-            render_markdown_table(out, &rows, false, Some(&bctx), "");
+            render_markdown_table(out, &rows, &[], 80, false, Some(&bctx), "");
         });
         let joined: String = block
             .lines
@@ -1342,7 +1359,7 @@ mod tests {
         ];
         let bctx = narrow_bctx(10);
         let block = render_test(80, |out| {
-            render_markdown_table(out, &rows, false, Some(&bctx), "");
+            render_markdown_table(out, &rows, &[], 80, false, Some(&bctx), "");
         });
         let joined: String = block
             .lines
@@ -1365,7 +1382,7 @@ mod tests {
         let bctx = narrow_bctx(8);
         let mut total = 0u16;
         render_test(80, |out| {
-            total = render_markdown_table(out, &rows, false, Some(&bctx), "");
+            total = render_markdown_table(out, &rows, &[], 80, false, Some(&bctx), "");
         });
         assert!(total > 0);
     }
@@ -1377,7 +1394,7 @@ mod tests {
             vec!["**bold**".to_string(), "*italic*".to_string()],
         ];
         let block = render_test(80, |out| {
-            render_markdown_table(out, &rows, false, None, "");
+            render_markdown_table(out, &rows, &[], 80, false, None, "");
         });
         // The stripped form (without markers) appears in the output, and
         // some span carries the inline style.
@@ -1402,5 +1419,59 @@ mod tests {
             .any(|s| s.style.italic);
         assert!(any_bold);
         assert!(any_italic);
+    }
+
+    #[test]
+    fn render_markdown_table_honors_per_column_alignment() {
+        // Generous header widths so per-column padding is visible.
+        let rows = vec![
+            vec!["LLLL".to_string(), "CCCC".to_string(), "RRRR".to_string()],
+            vec!["x".to_string(), "y".to_string(), "z".to_string()],
+        ];
+        let aligns = [
+            ColumnAlignment::Left,
+            ColumnAlignment::Center,
+            ColumnAlignment::Right,
+        ];
+        let block = render_test(80, |out| {
+            render_markdown_table(out, &rows, &aligns, 80, false, None, "");
+        });
+        let data_row = block
+            .lines
+            .iter()
+            .map(|l| l.text.as_str())
+            .find(|s| s.contains('x') && s.contains('y') && s.contains('z'))
+            .expect("data row");
+        assert!(data_row.contains("┃ x    ┃"), "left: {data_row:?}");
+        assert!(data_row.contains("┃  y   ┃"), "center: {data_row:?}");
+        assert!(data_row.contains("┃    z ┃"), "right: {data_row:?}");
+    }
+
+    #[test]
+    fn render_markdown_table_borders_carry_no_background() {
+        let rows = vec![
+            vec!["H".to_string(), "K".to_string()],
+            vec!["a".to_string(), "b".to_string()],
+        ];
+        let block = render_test(80, |out| {
+            render_markdown_table(out, &rows, &[], 80, false, None, "");
+        });
+        // Every span that prints a border glyph must have no bg set.
+        for line in &block.lines {
+            for span in &line.spans {
+                if span.text.chars().any(|c| {
+                    matches!(
+                        c,
+                        '┏' | '┓' | '┗' | '┛' | '┣' | '┫' | '┳' | '┻' | '╋' | '┃' | '━'
+                    )
+                }) {
+                    assert!(
+                        span.style.bg.is_none(),
+                        "table border span carries bg ({:?})",
+                        span.style.bg
+                    );
+                }
+            }
+        }
     }
 }
