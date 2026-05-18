@@ -22,8 +22,8 @@ local state = {
 	held = false,
 }
 
-local FIRE_OVERFLOW_TOP = 4
-local SIM_TOP_PAD = FIRE_OVERFLOW_TOP * 2
+local FIRE_HEADROOM = 4
+local SIM_TOP_PAD = FIRE_HEADROOM * 2
 local SIM_RAMP_TICKS = 10
 local SIM_COOLDOWN_TICKS = 8
 local SIM_DELAY_MS = 52
@@ -239,7 +239,7 @@ end
 local function paint_logo(slice, _ctx)
 	local w = banner.logo_mark_size()
 	local col0 = math.max(0, math.floor((slice:width() - w) / 2))
-	local row0 = state.fire_pixels and 0 or FIRE_OVERFLOW_TOP
+	local row0 = state.fire_pixels and 0 or FIRE_HEADROOM
 	banner.paint_pixels(slice, row0, col0, paint_rows_for_frame())
 end
 
@@ -307,16 +307,19 @@ local function open_splash()
 	local logo_w, logo_h = banner.logo_mark_size()
 	local version_text = "v" .. (smelt.version or "")
 	local w = math.max(logo_w, #version_text)
+	-- Reserve FIRE_HEADROOM cells above the wordmark inside the paint
+	-- leaf so the fire animation grows upward without painting outside the
+	-- overlay rect (which would bleed under higher-z modals like /help).
+	local paint_h = logo_h + FIRE_HEADROOM
 	local version_win = ensure_version_window(version_text)
 	-- Paint slot on top, version buffer below. `measure` pins each slot's
 	-- natural width to `w` so the overlay centers exactly.
 	local sized = smelt.overlay.layout.vbox({
 		{
 			smelt.overlay.layout.leaf(state.paint, {
-				measure = { w, logo_h },
-				overflow = { top = FIRE_OVERFLOW_TOP },
+				measure = { w, paint_h },
 			}),
-			height = logo_h,
+			height = paint_h,
 		},
 		{
 			smelt.overlay.layout.leaf(version_win, { measure = { w, 1 } }),

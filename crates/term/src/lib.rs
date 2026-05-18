@@ -25,7 +25,7 @@ pub use grid::{Cell, CellUpdate, Grid, GridSlice, Style};
 pub use hit::HitRegistry;
 pub use layout::{
     Align, Border, Constraint, Corner, Gutters, LayoutTree, LeafSizer, Natural, NaturalRef,
-    NoopSizer, Overflow, PaintId, Rect, StaticNatural,
+    NoopSizer, PaintId, Rect, StaticNatural,
 };
 pub use line::{Line, Span};
 pub use smelt_style::style::Color;
@@ -75,16 +75,10 @@ pub fn paint_layout_tree_with(
     paint: &mut PaintDispatch,
 ) {
     match node {
-        LayoutTree::Leaf {
-            id,
-            chrome,
-            overflow,
-            ..
-        } => {
+        LayoutTree::Leaf { id, chrome, .. } => {
             layout::paint_chrome(grid, area, chrome, theme);
             let inner = layout::inset_for_chrome(area, chrome);
-            let paint_area = layout::expand_rect_for_overflow(inner, *overflow, term_size);
-            paint(*id, paint_area, grid, theme, term_size);
+            paint(*id, inner, grid, theme, term_size);
         }
         LayoutTree::Vbox { items, chrome } | LayoutTree::Hbox { items, chrome } => {
             layout::paint_chrome(grid, area, chrome, theme);

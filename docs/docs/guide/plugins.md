@@ -111,10 +111,6 @@ paint:on("drag",    function(ev) ... end)
 paint:on("release", function(ev) ... end)
 ```
 
-When a paint leaf needs visual breathing room without moving the overlay,
-pass `overflow` to `smelt.overlay.layout.leaf`. The extra cells are paint-only:
-layout, centering, and hit-testing still use the leaf's measured rect.
-
 Use `smelt.lifecycle.on_ready(fn)` only when you need code that fires
 *after* every bring-up's plugin pass completes (cell subscriptions,
 deferred wiring). The hook fires with `ctx = { kind = "launch" |

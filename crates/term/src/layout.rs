@@ -67,32 +67,6 @@ pub struct Chrome {
     pub padding: u16,
 }
 
-/// Visual paint overflow for a leaf. Overflow expands the rectangle passed to
-/// the leaf's paint callback without changing the leaf's natural size,
-/// resolved layout rect, or hit-test rect.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub struct Overflow {
-    pub top: u16,
-    pub right: u16,
-    pub bottom: u16,
-    pub left: u16,
-}
-
-impl Overflow {
-    pub fn all(n: u16) -> Self {
-        Self {
-            top: n,
-            right: n,
-            bottom: n,
-            left: n,
-        }
-    }
-
-    pub fn is_empty(self) -> bool {
-        self.top == 0 && self.right == 0 && self.bottom == 0 && self.left == 0
-    }
-}
-
 /// Per-leaf natural-size hook. Plugins attach one to a leaf to drive
 /// content-aware sizing without going through `LeafSizer`. When present,
 /// it takes precedence over the sizer's reported size for `Fit`
@@ -129,7 +103,6 @@ pub enum LayoutTree {
     Leaf {
         id: PaintId,
         chrome: Chrome,
-        overflow: Overflow,
         natural: Option<NaturalRef>,
     },
     /// Vertical container; children stack top-to-bottom.
@@ -144,13 +117,11 @@ impl std::fmt::Debug for LayoutTree {
             LayoutTree::Leaf {
                 id,
                 chrome,
-                overflow,
                 natural,
             } => f
                 .debug_struct("Leaf")
                 .field("id", id)
                 .field("chrome", chrome)
-                .field("overflow", overflow)
                 .field("natural", &natural.as_ref().map(|_| "<NaturalRef>"))
                 .finish(),
             LayoutTree::Vbox { items, chrome } => f
@@ -189,7 +160,6 @@ impl LayoutTree {
         Self::Leaf {
             id: id.into(),
             chrome: Chrome::default(),
-            overflow: Overflow::default(),
             natural: None,
         }
     }
@@ -199,15 +169,6 @@ impl LayoutTree {
     pub fn with_natural(mut self, n: NaturalRef) -> Self {
         if let Self::Leaf { natural, .. } = &mut self {
             *natural = Some(n);
-        }
-        self
-    }
-
-    /// Expand the rect passed to a leaf's paint callback without changing
-    /// layout or hit-testing. No-op for containers.
-    pub fn with_overflow(mut self, o: Overflow) -> Self {
-        if let Self::Leaf { overflow, .. } = &mut self {
-            *overflow = o;
         }
         self
     }
@@ -308,7 +269,6 @@ impl LayoutTree {
             LayoutTree::Leaf {
                 id,
                 chrome,
-                overflow: _,
                 natural,
             } => {
                 let (cw, ch) = chrome_overhead(chrome);
@@ -323,24 +283,6 @@ impl LayoutTree {
             LayoutTree::Hbox { items, chrome } => natural_box(items, chrome, cap, false, sizer),
         }
     }
-}
-
-/// Expand a paint rect by `overflow`, clamped to the terminal bounds.
-pub fn expand_rect_for_overflow(area: Rect, overflow: Overflow, term_size: (u16, u16)) -> Rect {
-    if overflow.is_empty() {
-        return area;
-    }
-    let (term_w, term_h) = term_size;
-    let top = area.top.saturating_sub(overflow.top);
-    let left = area.left.saturating_sub(overflow.left);
-    let bottom = area.bottom().saturating_add(overflow.bottom).min(term_h);
-    let right = area.right().saturating_add(overflow.right).min(term_w);
-    Rect::new(
-        top,
-        left,
-        right.saturating_sub(left),
-        bottom.saturating_sub(top),
-    )
 }
 
 /// Resolves a leaf's natural size for `Fit` constraints and the natural-size
@@ -1669,35 +1611,6 @@ mod tests {
         let rects = resolve_layout(&tree, area);
         let inner = rects.get(&A).copied().expect("leaf rect resolved");
         assert_eq!(inner, Rect::new(1, 1, 8, 4));
-    }
-
-    #[test]
-    fn leaf_overflow_does_not_change_resolved_rect() {
-        let tree = LayoutTree::leaf(A).with_overflow(Overflow {
-            top: 2,
-            right: 3,
-            bottom: 4,
-            left: 5,
-        });
-        let area = Rect::new(10, 10, 20, 5);
-        let rects = resolve_layout(&tree, area);
-        assert_eq!(rects.get(&A).copied(), Some(area));
-    }
-
-    #[test]
-    fn expand_rect_for_overflow_clamps_to_terminal_bounds() {
-        let area = Rect::new(1, 2, 4, 3);
-        let expanded = expand_rect_for_overflow(
-            area,
-            Overflow {
-                top: 3,
-                right: 5,
-                bottom: 8,
-                left: 4,
-            },
-            (9, 7),
-        );
-        assert_eq!(expanded, Rect::new(0, 0, 9, 7));
     }
 
     #[test]

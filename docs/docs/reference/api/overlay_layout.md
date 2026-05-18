@@ -20,7 +20,7 @@ Horizontal container. `items` is an array of `{ child_layout, width = <constrain
 fun(win_or_paint: any, opts: table?): smelt.overlay.layout
 ```
 
-Wrap a Win handle or paint id into a leaf node. `opts` accepts `border`, `title`, `collapse_when_empty` (force the slot to zero size when the wrapped window's buffer is empty), `measure` (a `{w, h}` table for a static natural size or a `smelt.overlay.layout.measure(...)` handle for one the plugin can live-update), and `overflow` (extra paint-only cells around the leaf, as an integer or `{ top, right, bottom, left }`).
+Wrap a Win handle or paint id into a leaf node. `opts` accepts `border`, `title`, `collapse_when_empty` (force the slot to zero size when the wrapped window's buffer is empty), `measure` (a `{w, h}` table for a static natural size or a `smelt.overlay.layout.measure(...)` handle for one the plugin can live-update).
 
 ## `smelt.overlay.layout.measure`
 
