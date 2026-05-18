@@ -83,6 +83,7 @@ impl VimContext<'_> {
             let mut cpos = *self.cpos;
             clamp_normal(self.buf.as_str(), &mut cpos);
             *self.cpos = cpos;
+            self.vim_state.clamp_visual_anchor(self.buf.as_str());
         }
     }
 
@@ -95,6 +96,7 @@ impl VimContext<'_> {
             let mut cpos = *self.cpos;
             clamp_normal(self.buf.as_str(), &mut cpos);
             *self.cpos = cpos;
+            self.vim_state.clamp_visual_anchor(self.buf.as_str());
         }
     }
 
@@ -2966,6 +2968,26 @@ mod tests {
         assert_eq!(h.buf, "abc");
         h.handle(key('u'));
         assert_eq!(h.buf, "");
+    }
+
+    #[test]
+    fn test_undo_clamps_visual_anchor_when_source_shrinks() {
+        let mut h = TestHarness::new("");
+        // Snapshot empty buffer, then grow source out of band and set the
+        // anchor past byte 0.
+        h.history.save(UndoEntry::snapshot("", 0, &[]));
+        h.buf.push_str("ab");
+        h.cpos = 2;
+        h.vim_state.visual_anchor = 2;
+        // `u` restores empty source — the stale anchor must follow.
+        h.handle(key('u'));
+        assert_eq!(h.buf, "");
+        assert!(
+            h.vim_state.visual_anchor <= h.buf.len(),
+            "undo left stale visual_anchor {} past source len {}",
+            h.vim_state.visual_anchor,
+            h.buf.len(),
+        );
     }
 
     #[test]
