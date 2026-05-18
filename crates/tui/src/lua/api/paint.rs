@@ -43,12 +43,24 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
         let s = shared.clone();
         m.fn_(
             "register",
-            "Register `func` as a paint callback and return a stable paint id usable anywhere a window id is accepted (overlay item `win`, layout leaves). The callback fires per frame the leaf is visible with a slice + context table.",
-            &["func"],
-            move |lua, func: LuaCallback<(LuaPaintSlice, mlua::Table), ()>| {
+            "Register `func` as a paint callback and return a stable paint id usable anywhere a window id is accepted (overlay item `win`, layout leaves). The callback fires per frame the leaf is visible with a slice + context table. `opts.name` opts the slot into hot-reload survival: re-registering with the same name keeps the paint id stable and atomically swaps the callback, so surviving overlays/layouts referencing the id keep painting with the new code.",
+            &["func", "opts"],
+            move |lua, (func, opts): (LuaCallback<(LuaPaintSlice, mlua::Table), ()>, Option<mlua::Table>)| {
+                let name: Option<String> = opts
+                    .as_ref()
+                    .and_then(|t| t.get::<Option<String>>("name").ok().flatten());
                 let handle_id =
                     crate::lua::register_callback_handle(&s, lua, func.into_inner())?;
-                let paint_id = crate::lua::with_app(|app| app.paint_registry.register(handle_id));
+                let paint_id = crate::lua::with_app(|app| match name {
+                    Some(n) => {
+                        let (id, old) = app.paint_registry.register_named(n, handle_id);
+                        if let Some(prev) = old {
+                            app.lua.remove_callback(prev);
+                        }
+                        id
+                    }
+                    None => app.paint_registry.register(handle_id),
+                });
                 Ok(paint_id.0)
             },
         )?;

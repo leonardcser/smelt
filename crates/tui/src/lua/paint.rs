@@ -30,8 +30,14 @@ pub(crate) enum LeafKind {
 }
 
 /// Maps `PaintId` → callback handle id (a `u64` into `LuaShared::callbacks`).
+///
+/// Named slots opt the `PaintId` into hot-reload survival: re-registering
+/// with the same name reuses the existing id and atomically swaps in a
+/// new handle. Anonymous slots are reaped on `/reload`.
 pub(crate) struct PaintRegistry {
     handles: HashMap<PaintId, u64>,
+    named: HashMap<String, PaintId>,
+    name_of: HashMap<PaintId, String>,
     next_id: AtomicU64,
 }
 
@@ -39,13 +45,15 @@ impl Default for PaintRegistry {
     fn default() -> Self {
         Self {
             handles: HashMap::new(),
+            named: HashMap::new(),
+            name_of: HashMap::new(),
             next_id: AtomicU64::new(PAINT_ID_BASE),
         }
     }
 }
 
 impl PaintRegistry {
-    /// Reserve a fresh paint id and bind it to `handle_id`.
+    /// Reserve a fresh anonymous paint id and bind it to `handle_id`.
     /// Asserts the id stays in the paint half (`>= PAINT_ID_BASE`).
     pub(crate) fn register(&mut self, handle_id: u64) -> PaintId {
         let id = PaintId(self.next_id.fetch_add(1, Ordering::Relaxed));
@@ -57,8 +65,33 @@ impl PaintRegistry {
         id
     }
 
+    /// Bind `name` to a paint slot. On first registration, allocates a
+    /// fresh `PaintId`. On subsequent registrations with the same name,
+    /// reuses the existing `PaintId` and atomically swaps the handle so
+    /// surviving overlays / layouts that reference the id keep working
+    /// across hot reload. Returns the stable id and the previous handle
+    /// (when present) so the caller can release the old callback.
+    pub(crate) fn register_named(&mut self, name: String, handle_id: u64) -> (PaintId, Option<u64>) {
+        if let Some(&existing) = self.named.get(&name) {
+            let old = self.handles.insert(existing, handle_id);
+            return (existing, old);
+        }
+        let id = PaintId(self.next_id.fetch_add(1, Ordering::Relaxed));
+        debug_assert!(
+            id.0 >= PAINT_ID_BASE,
+            "PaintRegistry exhausted paint half of u64 namespace"
+        );
+        self.handles.insert(id, handle_id);
+        self.named.insert(name.clone(), id);
+        self.name_of.insert(id, name);
+        (id, None)
+    }
+
     /// Remove the binding and return the handle id so the caller can release the Lua callback.
     pub(crate) fn unregister(&mut self, id: PaintId) -> Option<u64> {
+        if let Some(name) = self.name_of.remove(&id) {
+            self.named.remove(&name);
+        }
         self.handles.remove(&id)
     }
 
@@ -70,11 +103,24 @@ impl PaintRegistry {
         self.handles.contains_key(&id)
     }
 
-    /// Drop every paint→handle mapping. Used by `/reload` so extmarks
-    /// don't dispatch to handle ids whose Lua function was wiped from
-    /// `LuaShared::callbacks`. Plugins re-register painters on re-load.
-    pub(crate) fn clear(&mut self) {
-        self.handles.clear();
+    /// Drop every anonymous paint→handle mapping; preserve named slots
+    /// so their `PaintId`s stay stable across `/reload`. Used by
+    /// `TuiApp::clear_tui_for_reload`. Plugins re-register named slots
+    /// in module body; until they do, the slot's handle is stale and
+    /// `invoke_paint` skips it (the `LuaShared::callbacks` map is also
+    /// wiped on reload). Returns the released anonymous handle ids.
+    pub(crate) fn clear_anonymous(&mut self) -> Vec<u64> {
+        let mut released = Vec::new();
+        let name_of = &self.name_of;
+        self.handles.retain(|id, handle| {
+            if name_of.contains_key(id) {
+                true
+            } else {
+                released.push(*handle);
+                false
+            }
+        });
+        released
     }
 }
 
@@ -278,5 +324,39 @@ mod tests {
     fn with_slice_errors_outside_paint() {
         let r: LuaResult<()> = with_slice(|_| ());
         assert!(r.is_err());
+    }
+
+    #[test]
+    fn register_named_reuses_id_and_returns_old_handle() {
+        let mut reg = PaintRegistry::default();
+        let (id1, old1) = reg.register_named("plugin.banner".into(), 11);
+        assert!(old1.is_none());
+        assert_eq!(reg.lookup(id1), Some(11));
+        let (id2, old2) = reg.register_named("plugin.banner".into(), 22);
+        assert_eq!(id1, id2, "named slot must keep stable id across re-register");
+        assert_eq!(old2, Some(11), "previous handle must be returned for release");
+        assert_eq!(reg.lookup(id2), Some(22));
+    }
+
+    #[test]
+    fn clear_anonymous_keeps_named_drops_anonymous() {
+        let mut reg = PaintRegistry::default();
+        let anon = reg.register(100);
+        let (named, _) = reg.register_named("plugin.x".into(), 200);
+        let released = reg.clear_anonymous();
+        assert_eq!(released, vec![100], "anonymous handle ids must be released");
+        assert!(!reg.contains(anon), "anonymous slot must be dropped");
+        assert!(reg.contains(named), "named slot must survive");
+        assert_eq!(reg.lookup(named), Some(200));
+    }
+
+    #[test]
+    fn unregister_named_removes_name_binding() {
+        let mut reg = PaintRegistry::default();
+        let (id, _) = reg.register_named("plugin.x".into(), 7);
+        assert_eq!(reg.unregister(id), Some(7));
+        let (id2, old) = reg.register_named("plugin.x".into(), 8);
+        assert!(old.is_none(), "name binding must be cleared on unregister");
+        assert_ne!(id, id2, "re-registering after unregister allocates fresh id");
     }
 }

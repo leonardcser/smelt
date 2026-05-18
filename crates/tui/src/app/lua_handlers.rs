@@ -80,7 +80,12 @@ impl TuiApp {
     fn clear_tui_for_reload(&mut self) {
         self.core.cells.clear_lua_subscribers();
         self.core.timers.clear();
-        self.paint_registry.clear();
+        // Anonymous paint slots get reaped; named slots survive with
+        // stable `PaintId`s so overlays/layouts referencing them keep
+        // working when the plugin re-registers in module body.
+        for handle in self.paint_registry.clear_anonymous() {
+            self.lua.remove_callback(handle);
+        }
         // `smelt.spinner.busy` tokens are Reg-managed but reload wipes
         // the closures holding the Reg userdata before `:remove()` runs.
         // Clear here to match the timers/cells idiom and avoid leaking
