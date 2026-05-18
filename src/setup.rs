@@ -1,8 +1,38 @@
 //! Interactive setup: first-run wizard and `smelt auth` subcommand.
 
+use crossterm::{cursor, ExecutableCommand};
 use dialoguer::{Input, Select};
 use engine::auth::{AuthProvider, LoginMethod, LoginProgress};
 use std::path::Path;
+
+/// Restore the terminal cursor on drop. Dialoguer hides it for each
+/// `Select`/`Input` prompt and only re-shows it on a clean Enter; a
+/// `read_key` error (Ctrl+C, broken stdin) propagates without the
+/// `show_cursor` write, so without this guard the cursor stays hidden
+/// for the rest of the shell session.
+struct CursorGuard;
+
+impl Drop for CursorGuard {
+    fn drop(&mut self) {
+        let _ = std::io::stdout().execute(cursor::Show);
+        let _ = std::io::stderr().execute(cursor::Show);
+    }
+}
+
+/// Drop guards don't run on signal exit, so install a one-shot SIGINT
+/// handler that restores the cursor before terminating.
+fn install_cursor_restoring_signal_handler() {
+    use std::sync::Once;
+    static ONCE: Once = Once::new();
+    ONCE.call_once(|| {
+        tokio::spawn(async {
+            let _ = tokio::signal::ctrl_c().await;
+            let _ = std::io::stdout().execute(cursor::Show);
+            let _ = std::io::stderr().execute(cursor::Show);
+            std::process::exit(130);
+        });
+    });
+}
 
 struct ProviderTemplate {
     name: &'static str,
@@ -222,6 +252,8 @@ fn run_logout(kind: AuthProvider, label: &str) {
 
 /// First-time setup wizard. Returns true if config was written.
 pub async fn run_initial_setup(config_path: &Path) -> bool {
+    let _cursor_guard = CursorGuard;
+    install_cursor_restoring_signal_handler();
     println!("\n  Welcome to smelt! No configuration found.\n");
 
     let Some(idx) = pick_provider() else {
@@ -253,6 +285,8 @@ pub async fn run_initial_setup(config_path: &Path) -> bool {
 
 /// `smelt auth` — provider picker, then provider-specific flow.
 pub async fn run_auth_command() {
+    let _cursor_guard = CursorGuard;
+    install_cursor_restoring_signal_handler();
     let Some(idx) = pick_provider() else {
         return;
     };
