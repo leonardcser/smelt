@@ -723,6 +723,30 @@ mod tests {
         assert_eq!(fired, 0);
     }
 
+    /// `fire_ask_callback` must only look at `ask_callbacks`. A non-ask
+    /// handler registered with the same id in the win/overlay/paint map
+    /// must NOT fire when an `EngineAskResponse` arrives with that id.
+    #[test]
+    fn fire_ask_callback_ignores_non_ask_handles() {
+        let rt = LuaRuntime::new();
+        rt.lua
+            .load("_G.fired = 0; _G.cb = function() _G.fired = _G.fired + 1 end")
+            .exec()
+            .unwrap();
+        let func: mlua::Function = rt.lua.load("cb").eval().unwrap();
+        // Register in the main callbacks map (win/overlay/paint registry).
+        let id = rt.register_callback(func).unwrap();
+
+        // Synthesize an EngineAskResponse for the same id. The shared id
+        // counter means a real ask call would never collide with this id,
+        // but a buggy engine emitting a stale id used to fire the wrong
+        // handler — verify the ask path stays in its own lane.
+        rt.fire_ask_callback(id, "synthetic", None);
+
+        let fired: u64 = rt.lua.load("return _G.fired").eval().unwrap();
+        assert_eq!(fired, 0, "non-ask handle must not fire on ask response");
+    }
+
     // Theme role-mapping and error logic are tested in `lua::api::tests`.
 
     #[test]

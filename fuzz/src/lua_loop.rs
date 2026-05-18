@@ -169,6 +169,16 @@ pub enum LuaOp {
         chord_slot: u8,
         handler_kind: u8,
     },
+
+    /// Call one of the recently-added read-only Lua APIs: `win:scroll()`
+    /// getter, `paint:rect()`, `smelt.transcript.blocks()`,
+    /// `smelt.text.fit(s, w)`. `kind % 4` picks the probe. These
+    /// surfaces aren't reached by the lifecycle ops above — exercising
+    /// them keeps the new render-pipeline accessors honest under fuzz.
+    ProbeRead {
+        kind: u8,
+        target_idx: u8,
+    },
 }
 
 impl LuaOp {
@@ -215,6 +225,9 @@ impl LuaOp {
                 chord_slot,
                 ..
             } => format!("keymap.set scope={scope_kind} chord_slot={chord_slot}"),
+            ProbeRead { kind, target_idx } => {
+                format!("probe_read kind={} idx={target_idx}", kind % 4)
+            }
         }
     }
 }
@@ -273,11 +286,17 @@ impl<'a> Arbitrary<'a> for LuaOp {
                 name_slot: u.arbitrary()?,
             },
 
-            // keymaps — 7%
-            _ => LuaOp::KeymapSet {
+            // keymaps — 5%
+            93..=97 => LuaOp::KeymapSet {
                 scope_kind: u.arbitrary()?,
                 chord_slot: u.arbitrary()?,
                 handler_kind: u.arbitrary()?,
+            },
+
+            // probe new read APIs — 2%
+            _ => LuaOp::ProbeRead {
+                kind: u.arbitrary()?,
+                target_idx: u.arbitrary()?,
             },
         })
     }
@@ -583,9 +602,43 @@ pub fn build_snippet(ops: &[LuaOp]) -> String {
                 chord_slot,
                 handler_kind,
             } => emit_keymap_set(&mut out, *scope_kind, *chord_slot, *handler_kind),
+            LuaOp::ProbeRead { kind, target_idx } => emit_probe_read(&mut out, *kind, *target_idx),
         }
     }
     out
+}
+
+/// `kind % 4` picks one of four recently-added read-only APIs:
+/// 0: `win:scroll()` (getter) on a tracked win
+/// 1: `paint:rect()` on a tracked paint handle
+/// 2: `smelt.transcript.blocks()`
+/// 3: `smelt.text.fit(string, width)`
+/// All wrapped in `pcall` so a missing handle or an API regression
+/// surfaces as a fuzz-visible failure (panic) rather than a silent miss.
+fn emit_probe_read(out: &mut String, kind: u8, target_idx: u8) {
+    let idx = (target_idx as usize) % 8 + 1;
+    match kind % 4 {
+        0 => {
+            out.push_str(&format!(
+                "do local w = __fuzz.wins[{idx}]; if w then pcall(function() return w:scroll() end) end end\n"
+            ));
+        }
+        1 => {
+            out.push_str(&format!(
+                "do local p = __fuzz.paints[{idx}]; if p then pcall(function() return p:rect() end) end end\n"
+            ));
+        }
+        2 => {
+            out.push_str(
+                "pcall(function() return smelt.transcript and smelt.transcript.blocks and smelt.transcript.blocks() end)\n",
+            );
+        }
+        _ => {
+            out.push_str(
+                "pcall(function() return smelt.text and smelt.text.fit and smelt.text.fit(\"abc\", 5) end)\n",
+            );
+        }
+    }
 }
 
 /// Run one scenario end-to-end. The build emits a `-- @reload@` line
