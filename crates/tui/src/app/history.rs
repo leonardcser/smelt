@@ -151,10 +151,10 @@ impl TuiApp {
         self.flush_persist();
 
         if let Some(mode) = loaded.mode.as_deref().and_then(AgentMode::parse) {
-            self.set_mode(mode);
+            self.set_mode(mode, false);
         }
         if let Some(effort) = loaded.reasoning_effort {
-            self.set_reasoning_effort(effort);
+            self.set_reasoning_effort(effort, false);
         }
         // Only restore model/API settings if not overridden by CLI.
         if !self.core.config.cli_model_override

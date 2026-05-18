@@ -248,11 +248,9 @@ impl TuiApp {
         Some(ExecHandle { rx, kill })
     }
 
-    /// Switch to a model by key. No-op if the key is not found. `persist`
-    /// controls whether the choice updates the cross-session "last used"
-    /// cache — pass `false` when restoring a model as part of resuming a
-    /// saved session so the resume doesn't overwrite the user's last
-    /// explicit pick.
+    /// Switch to a model by key. No-op if the key is not found.
+    /// `persist=false` skips the cross-session cache write so session
+    /// resume doesn't overwrite the user's last explicit pick.
     pub(crate) fn apply_model(&mut self, key: &str, persist: bool) {
         let Some(resolved) = self
             .core
@@ -308,11 +306,14 @@ impl TuiApp {
         self.update_settings(|slot| *slot = new);
     }
 
-    /// Set the agent mode, persist it, and notify the engine.
-    pub(crate) fn set_mode(&mut self, mode: AgentMode) {
+    /// `persist=false` skips the cross-session cache write so session
+    /// resume doesn't overwrite the user's last explicit pick.
+    pub(crate) fn set_mode(&mut self, mode: AgentMode, persist: bool) {
         let old = self.core.config.mode;
         self.core.config.mode = mode;
-        state::set_mode(self.core.config.mode);
+        if persist {
+            state::set_mode(self.core.config.mode);
+        }
         // Publish new mode before snapshotting tools/prompt for the engine.
         if old != mode {
             self.core
@@ -329,9 +330,13 @@ impl TuiApp {
         });
     }
 
-    pub(crate) fn set_reasoning_effort(&mut self, effort: ReasoningEffort) {
+    /// `persist=false` skips the cross-session cache write so session
+    /// resume doesn't overwrite the user's last explicit pick.
+    pub(crate) fn set_reasoning_effort(&mut self, effort: ReasoningEffort, persist: bool) {
         self.core.config.reasoning_effort = effort;
-        state::set_reasoning_effort(effort);
+        if persist {
+            state::set_reasoning_effort(effort);
+        }
         self.core
             .cells
             .set_dyn("reasoning", std::rc::Rc::new(effort.label().to_string()));

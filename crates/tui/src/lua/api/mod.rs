@@ -132,7 +132,7 @@ impl LuaRuntime {
         LuaMod::extend(lua, smelt.get("mode")?, "smelt.mode", Tier::UiHost).callable(
             |lua, (_tbl, v): (mlua::Table, Option<LuaAgentMode>)| -> LuaResult<mlua::Value> {
                 if let Some(mode) = v {
-                    crate::lua::with_app(|app| app.set_mode(mode.into()));
+                    crate::lua::with_app(|app| app.set_mode(mode.into(), true));
                     return Ok(mlua::Value::Nil);
                 }
                 let cur = crate::lua::try_with_app(|app| LuaAgentMode::from(app.core.config.mode))
@@ -149,7 +149,7 @@ impl LuaRuntime {
         .callable(
             |lua, (_tbl, v): (mlua::Table, Option<LuaReasoningEffort>)| -> LuaResult<mlua::Value> {
                 if let Some(effort) = v {
-                    crate::lua::with_app(|app| app.set_reasoning_effort(effort.into()));
+                    crate::lua::with_app(|app| app.set_reasoning_effort(effort.into(), true));
                     return Ok(mlua::Value::Nil);
                 }
                 let cur = crate::lua::try_with_app(|app| {
