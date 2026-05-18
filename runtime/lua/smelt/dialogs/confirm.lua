@@ -135,12 +135,7 @@ function smelt.confirm.open(handle_id)
   local header_leaf  = smelt.dialog.content({ buf = header_buf, wrap = false })
   local preview_leaf = smelt.dialog.content({ buf = preview_buf, interactive = true })
   local allow_leaf, allow_buf = smelt.dialog.content({ wrap = false })
-  local allow_lines = {}
-  if not has_preview then
-    allow_lines[#allow_lines + 1] = {}
-  end
-  allow_lines[#allow_lines + 1] = { { text = "Allow?", style = { dim = true } } }
-  allow_buf:styled(allow_lines)
+  allow_buf:styled({ { { text = "Allow?", style = { dim = true } } } })
   local options_leaf, options_buf = smelt.dialog.options(labels)
   render_options(options_buf, labels)
   local reason_leaf, reason_buf =
@@ -166,7 +161,7 @@ function smelt.confirm.open(handle_id)
     panels = {
       { leaf = header_leaf,  height = "fit"                              },
       { leaf = preview_leaf, height = "fit", collapse_when_empty = true,
-        border = { style = "dashed", top = "Comment", bottom = "Comment" } },
+        border = has_preview and { style = "dashed", top = "Comment", bottom = "Comment" } or nil },
       { leaf = allow_leaf,   height = "fit"                              },
       { leaf = options_leaf, height = "fit"                              },
       { leaf = spacer_leaf,  height = "fit"                              },
