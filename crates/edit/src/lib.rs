@@ -381,6 +381,7 @@ impl Ui {
     }
 
     pub fn buf_destroy(&mut self, id: BufId) -> Option<Buffer> {
+        self.named_bufs.unbind_by_id(id);
         self.bufs.remove(&id)
     }
 
@@ -508,6 +509,7 @@ impl Ui {
     pub fn overlay_close(&mut self, id: OverlayId) -> Option<Overlay> {
         let pos = self.overlays.iter().position(|(oid, _)| *oid == id)?;
         let (_, removed) = self.overlays.remove(pos);
+        self.named_overlays.unbind_by_id(id);
         if let Some(cap) = self.capture {
             let owned = match cap {
                 HitTarget::Chrome { owner, .. } => owner == id,
@@ -792,12 +794,14 @@ impl Ui {
                 for leaf in removed.layout.leaves_in_order() {
                     let win = WinId(leaf.0);
                     all_ids.extend(self.callbacks.clear_all(win));
+                    self.named_wins.unbind_by_id(win);
                     self.wins.remove(&win);
                 }
             }
             all_ids.extend(self.callbacks.clear_overlay_all(overlay_id));
             return all_ids;
         }
+        self.named_wins.unbind_by_id(id);
         self.wins.remove(&id);
         self.callbacks.clear_all(id)
     }
@@ -3281,6 +3285,40 @@ mod tests {
         assert!(ui.win(win_b).is_none());
         // Closing again is a no-op — overlay is already gone.
         assert_eq!(ui.win_close(win_a), Vec::<u64>::new());
+    }
+
+    #[test]
+    fn close_drops_named_bindings_for_win_buf_and_overlay() {
+        // Regression: when a Lua plugin closes a named overlay (or its
+        // win, or buf), the name slot must be dropped so the next
+        // `smelt.win.new({name=...})` allocates a fresh id instead of
+        // returning a stale one that no longer maps to anything.
+        let mut ui = make_ui();
+        let buf = ui.buf_create(BufCreateOpts::default());
+        ui.name_buf("plug.buf", buf);
+        let win = ui
+            .win_open_split(
+                buf,
+                SplitConfig {
+                    region: "r".into(),
+                    gutters: Gutters::default(),
+                },
+            )
+            .unwrap();
+        ui.name_win("plug.win", win);
+        let layout = LayoutTree::leaf(win);
+        let oid = ui.overlay_open(Overlay::new(layout, layout::Anchor::ScreenCenter));
+        ui.name_overlay("plug.overlay", oid);
+
+        let _ = ui.win_close(win);
+
+        assert_eq!(ui.named_win("plug.win"), None);
+        assert_eq!(ui.named_overlay("plug.overlay"), None);
+        // Named buf survives close (buf lifetime is independent of its windows).
+        assert_eq!(ui.named_buf("plug.buf"), Some(buf));
+
+        ui.buf_destroy(buf);
+        assert_eq!(ui.named_buf("plug.buf"), None);
     }
 
     #[test]
