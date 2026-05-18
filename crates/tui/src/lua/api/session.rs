@@ -5,35 +5,18 @@ use mlua::prelude::*;
 use smelt_core::lua::doc::Tier;
 use smelt_core::lua::module::LuaMod;
 
-fn lua_messages_to_protocol(table: &mlua::Table) -> LuaResult<Vec<protocol::Message>> {
+/// Convert a Lua sequence of `{ role, content?, reasoning_content?, tool_calls?, tool_call_id?, is_error? }`
+/// rows into `Vec<protocol::Message>` via serde. Rows that fail to
+/// deserialize (unknown role, malformed shape) are silently dropped so a
+/// single bad entry doesn't poison the whole replacement list.
+fn lua_messages_to_protocol(lua: &Lua, table: &mlua::Table) -> Vec<protocol::Message> {
     let mut out = Vec::new();
-    for pair in table.clone().sequence_values::<mlua::Table>() {
-        let entry = pair?;
-        let role: String = entry.get("role").unwrap_or_default();
-        let content: Option<String> = entry.get("content").ok();
-        let text = content.unwrap_or_default();
-        let msg = match role.as_str() {
-            "system" => protocol::Message::system(&text),
-            "user" => protocol::Message::user(protocol::Content::text(&text)),
-            "assistant" => protocol::Message::assistant(
-                if text.is_empty() {
-                    None
-                } else {
-                    Some(protocol::Content::text(&text))
-                },
-                None,
-                None,
-            ),
-            "tool" => {
-                let id: String = entry.get("tool_call_id").unwrap_or_default();
-                let is_error: bool = entry.get("is_error").unwrap_or(false);
-                protocol::Message::tool(id, text, is_error)
-            }
-            _ => continue,
-        };
-        out.push(msg);
+    for value in table.clone().sequence_values::<mlua::Value>().flatten() {
+        if let Some(msg) = smelt_core::lua::lua_to_serde::<protocol::Message>(lua, &value) {
+            out.push(msg);
+        }
     }
-    Ok(out)
+    out
 }
 
 fn messages_to_lua(lua: &Lua, msgs: &[protocol::Message]) -> LuaResult<mlua::Table> {
@@ -207,7 +190,7 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
                     .map(|v| matches!(v, mlua::Value::Table(_)))
                     .unwrap_or(false);
             if looks_like_list {
-                let new_msgs = lua_messages_to_protocol(&arg)?;
+                let new_msgs = lua_messages_to_protocol(lua, &arg);
                 crate::lua::with_app(|app| app.replace_messages(new_msgs));
                 return Ok(mlua::Value::Nil);
             }
