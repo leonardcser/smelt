@@ -213,5 +213,6 @@ fn op_label(op: &smelt_fuzz::FuzzOp) -> String {
         TogglePaneFocus => "toggle pane focus".into(),
         EngineToolArgsDelta { tool_name, .. } => format!("tool args delta {tool_name}"),
         EngineAskResponse { id, .. } => format!("ask response {id}"),
+        EngineAskError { id, kind_idx, .. } => format!("ask error {id} k={kind_idx}"),
     }
 }

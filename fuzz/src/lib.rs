@@ -10,7 +10,10 @@ use crossterm::event::{
     MouseEvent, MouseEventKind,
 };
 use protocol::UiCommand;
-use protocol::{AgentMode, Content, EngineEvent, Message, TokenUsage, ToolOutcome};
+use protocol::{
+    AgentMode, Content, EngineAskError, EngineAskErrorKind, EngineEvent, Message, TokenUsage,
+    ToolOutcome,
+};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use tui::app::test_harness::{Action, AllocBudget, SourceEvent};
@@ -107,6 +110,16 @@ pub struct MouseFuzz {
 }
 
 const MOUSE_BUTTONS: &[MouseButton] = &[MouseButton::Left, MouseButton::Right, MouseButton::Middle];
+
+const ENGINE_ASK_ERROR_KINDS: &[EngineAskErrorKind] = &[
+    EngineAskErrorKind::Network,
+    EngineAskErrorKind::RateLimited,
+    EngineAskErrorKind::Quota,
+    EngineAskErrorKind::InvalidResponse,
+    EngineAskErrorKind::ContextWindow,
+    EngineAskErrorKind::Cancelled,
+    EngineAskErrorKind::Other,
+];
 
 fn decode_mouse_kind(kind: u8, button: u8) -> MouseEventKind {
     let btn = MOUSE_BUTTONS[(button as usize) % MOUSE_BUTTONS.len()];
@@ -325,6 +338,15 @@ pub enum FuzzOp {
     EngineAskResponse {
         id: u64,
         content: String,
+    },
+    /// Emit `EngineAskResponse` with a typed error payload (empty content).
+    /// Resumes a waiting Lua coroutine with the failure branch so plugins
+    /// like compact.lua exercise their `err.kind` dispatch. `kind_idx` is
+    /// modded against `ENGINE_ASK_ERROR_KINDS`.
+    EngineAskError {
+        id: u64,
+        kind_idx: u8,
+        message: String,
     },
 }
 
@@ -1133,6 +1155,20 @@ fn plan(op: FuzzOp) -> (Option<SourceEvent>, PostCheck) {
                 id,
                 content,
                 error: None,
+            });
+            (Some(ev), PostCheck::None)
+        }
+        FuzzOp::EngineAskError {
+            id,
+            kind_idx,
+            message,
+        } => {
+            let kind =
+                ENGINE_ASK_ERROR_KINDS[(kind_idx as usize) % ENGINE_ASK_ERROR_KINDS.len()];
+            let ev = SourceEvent::Engine(EngineEvent::EngineAskResponse {
+                id,
+                content: String::new(),
+                error: Some(EngineAskError { kind, message }),
             });
             (Some(ev), PostCheck::None)
         }
