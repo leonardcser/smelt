@@ -628,6 +628,14 @@ impl LuaRuntime {
             .unwrap_or(false)
     }
 
+    /// Send+Sync handle to the registered `/command` name set. Worker threads
+    /// (parallel block layout, etc.) can clone this to answer "is `foo` a
+    /// known command?" without touching the main-thread `APP` pointer or the
+    /// `!Send` `LuaHandle`s in `commands`.
+    pub fn command_names_handle(&self) -> Arc<std::sync::Mutex<std::collections::HashSet<String>>> {
+        Arc::clone(&self.shared.command_names)
+    }
+
     pub fn command_blocks_while_busy(&self, name: &str) -> Option<bool> {
         self.shared
             .commands

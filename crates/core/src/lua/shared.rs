@@ -77,6 +77,11 @@ pub struct ToolHandles {
 /// All shared state between Lua closures and the app loop.
 pub struct LuaShared {
     pub commands: Mutex<HashMap<String, RegisteredCommand>>,
+    /// Send+Sync mirror of `commands`' key set. `commands` itself can't be
+    /// shared off the main thread because `RegisteredCommand` carries a
+    /// `LuaHandle`, but worker threads (e.g. parallel block layout) need
+    /// to ask "is `/foo` a known command?" — this is the answer.
+    pub command_names: Arc<Mutex<HashSet<String>>>,
     pub keymaps: Mutex<HashMap<(String, String), LuaHandle>>,
     /// Vec preserves registration order; re-registering an existing name updates in place.
     pub statusline_sources: Mutex<Vec<(String, StatusSource)>>,
@@ -197,6 +202,7 @@ impl Default for LuaShared {
     fn default() -> Self {
         Self {
             commands: Mutex::new(HashMap::new()),
+            command_names: Arc::new(Mutex::new(HashSet::new())),
             keymaps: Mutex::new(HashMap::new()),
             statusline_sources: Mutex::new(Vec::new()),
             tools: Mutex::new(HashMap::new()),
@@ -241,6 +247,9 @@ impl LuaShared {
     pub fn clear_lua_handles(&self) {
         if let Ok(mut m) = self.commands.lock() {
             m.clear();
+        }
+        if let Ok(mut s) = self.command_names.lock() {
+            s.clear();
         }
         if let Ok(mut m) = self.keymaps.lock() {
             m.clear();

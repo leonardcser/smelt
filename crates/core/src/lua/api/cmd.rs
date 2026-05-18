@@ -52,7 +52,7 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
                 let handle = LuaHandle::from_func(lua, handler.into_inner())?;
                 if let Ok(mut map) = s.commands.lock() {
                     map.insert(
-                        name,
+                        name.clone(),
                         RegisteredCommand {
                             handle,
                             description: opts.desc,
@@ -63,6 +63,9 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
                             hidden: opts.hidden.unwrap_or(false),
                         },
                     );
+                }
+                if let Ok(mut set) = s.command_names.lock() {
+                    set.insert(name);
                 }
                 Ok(())
             },
@@ -145,10 +148,17 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
             "Drop the slash command `name` from the registry. Returns `true` if a command was removed, `false` if no command with that name existed.",
             &["name"],
             move |_, name: String| -> LuaResult<bool> {
-                Ok(s.commands
+                let removed = s
+                    .commands
                     .lock()
                     .map(|mut m| m.remove(&name).is_some())
-                    .unwrap_or(false))
+                    .unwrap_or(false);
+                if removed {
+                    if let Ok(mut set) = s.command_names.lock() {
+                        set.remove(&name);
+                    }
+                }
+                Ok(removed)
             },
         )?;
     }

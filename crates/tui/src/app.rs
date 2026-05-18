@@ -757,8 +757,18 @@ impl TuiApp {
     ) {
         crate::theme::detect_background(self.ui.theme_mut());
         crate::theme::populate_ui_theme(self.ui.theme_mut());
-        smelt_core::commands::set_command_resolver(|name| {
-            crate::lua::try_with_app(|app| app.lua.has_command(name)).unwrap_or(false)
+        // Capture the thread-safe Lua command-name set directly. Going through
+        // `try_with_app` would only work on the main thread (APP is a thread-
+        // local), and `layout_block_into` runs in worker threads via
+        // `std::thread::scope`, so the resolver must reach the registry
+        // without consulting APP. `commands` itself can't cross threads (the
+        // handler holds a `LuaHandle`), so this uses the name-only mirror.
+        let command_names = self.lua.command_names_handle();
+        smelt_core::commands::set_command_resolver(move |name| {
+            command_names
+                .lock()
+                .map(|s| s.contains(name))
+                .unwrap_or(false)
         });
         // RAII guard for the terminal envelope: raw mode + alt screen + mouse +
         // bracketed paste + focus + DECAWM-off + hidden cursor. Lives as long
