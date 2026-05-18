@@ -163,3 +163,72 @@ fn print_highlights(out: &mut LineBuilder, text: &str, image_labels: &[String], 
     }
     flush(out, &mut plain);
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use smelt_core::buffer::{BufCreateOpts, BufId, Buffer};
+    use smelt_core::content::builder::test_util::read_buffer;
+    use smelt_core::style::{Color, Style};
+    use smelt_core::theme::Theme;
+    use std::sync::Mutex;
+
+    static RESOLVER_GUARD: Mutex<()> = Mutex::new(());
+    const ACCENT: Color = Color::AnsiValue(99);
+    const USER_BG: Color = Color::AnsiValue(234);
+
+    fn themed() -> Theme {
+        let mut t = Theme::default();
+        t.set(
+            "SmeltAccent",
+            Style {
+                fg: Some(ACCENT),
+                ..Style::default()
+            },
+        );
+        t.set(
+            "SmeltUserBg",
+            Style {
+                bg: Some(USER_BG),
+                ..Style::default()
+            },
+        );
+        t
+    }
+
+    fn render_content_row_styles(text: &str) -> Vec<Style> {
+        let theme = themed();
+        let mut buf = Buffer::new(BufId(0), BufCreateOpts::default());
+        let rows = {
+            let mut out = LineBuilder::new(&mut buf, &theme, 40);
+            let r = render(&mut out, text, &[], 40);
+            out.finish();
+            r as usize
+        };
+        let lines = read_buffer(&buf, &theme, rows);
+        // Content rows sit between the leading and trailing blank padding rows.
+        lines[1].spans.iter().map(|s| s.style).collect()
+    }
+
+    #[test]
+    fn registered_slash_command_paints_accent_fg() {
+        let _g = RESOLVER_GUARD.lock().unwrap();
+        smelt_core::commands::set_command_resolver(|name| name == "commit");
+        let styles = render_content_row_styles("/commit");
+        assert!(
+            styles.iter().any(|s| s.fg == Some(ACCENT)),
+            "expected an accent-fg span for /commit, got {styles:?}"
+        );
+    }
+
+    #[test]
+    fn unregistered_slash_text_stays_un_accented() {
+        let _g = RESOLVER_GUARD.lock().unwrap();
+        smelt_core::commands::set_command_resolver(|_| false);
+        let styles = render_content_row_styles("/notreal");
+        assert!(
+            styles.iter().all(|s| s.fg != Some(ACCENT)),
+            "non-command should not paint accent fg, got {styles:?}"
+        );
+    }
+}
