@@ -119,8 +119,14 @@ fn build_snapshot(app: &mut crate::app::TuiApp, lua: &Lua) -> LuaResult<mlua::Ta
 
     // Working state + throbber spans (cheaper to project than re-export the state machine).
     let working = lua.create_table()?;
-    working.set("animating", app.working.is_animating())?;
-    working.set("compacting", app.working.is_compacting())?;
+    let busy_label = app.busy_stack.top_label();
+    let busy_since = app.busy_stack.since();
+    let is_busy = app.busy_stack.is_busy();
+    working.set("animating", app.working.is_animating() || is_busy)?;
+    working.set("busy", is_busy)?;
+    if let Some(ref l) = busy_label {
+        working.set("busy_label", l.as_str())?;
+    }
     if let Some(c) = app.working.spinner_char() {
         working.set("spinner_char", c)?;
     }
@@ -128,7 +134,12 @@ fn build_snapshot(app: &mut crate::app::TuiApp, lua: &Lua) -> LuaResult<mlua::Ta
     let muted_ansi = super::color_to_ansi(muted);
     let throbber_arr = lua.create_table()?;
     let show_tps = app.core.config.settings.show_tps;
-    for (i, item) in app.working.throbber_data(show_tps).iter().enumerate() {
+    for (i, item) in app
+        .working
+        .throbber_data(show_tps, busy_label.as_deref(), busy_since)
+        .iter()
+        .enumerate()
+    {
         let st = lua.create_table()?;
         st.set("text", item.text.as_str())?;
         if item.is_muted {

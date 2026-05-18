@@ -25,7 +25,7 @@ pub use crate::event_source::SourceEvent;
 #[derive(Debug, Clone)]
 pub enum Action {
     /// A `UiCommand` was sent on the engine channel.
-    EngineSend(UiCommand),
+    EngineSend(Box<UiCommand>),
     /// The event dispatch asked the app to quit.
     Quit,
 }
@@ -57,13 +57,13 @@ pub struct StreamingState {
     pub exec: bool,
 }
 
-/// Snapshot of `WorkingState`. `animating` means a live turn exists;
-/// `compacting` is true iff the live phase is `Compacting`. The two are
-/// always either both `false` or `animating == true` with one phase flag.
+/// Snapshot of `WorkingState`. `animating` is true while a live turn
+/// exists; `busy` is true while any `smelt.spinner.busy` token is held
+/// by a plugin.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct WorkingSnapshot {
     pub animating: bool,
-    pub compacting: bool,
+    pub busy: bool,
 }
 
 /// Per-event allocation delta captured by `TestApp::feed_one`. Snapshots
@@ -381,16 +381,8 @@ impl TestApp {
         self.app.core.session.messages.len()
     }
 
-    /// Whether `pending_compact_epoch == compact_epoch`. When true, an
-    /// incoming `CompactionComplete` hits the apply path; when false, it
-    /// hits the stale fast-finish path.
-    pub fn compact_epoch_match(&self) -> bool {
-        self.app.pending_compact_epoch == self.app.compact_epoch
-    }
-
-    /// Counts of token / cost / turn-meta snapshots. Used by compaction
-    /// invariants — `apply_compaction` clears all three when the messages
-    /// payload is non-empty.
+    /// Counts of token / cost / turn-meta snapshots. Used by replace-
+    /// messages invariants — `replace_messages` clears all three.
     pub fn snapshot_counts(&self) -> (usize, usize, usize) {
         let s = &self.app.core.session;
         (
@@ -398,13 +390,6 @@ impl TestApp {
             s.cost_snapshots.len(),
             s.turn_metas.len(),
         )
-    }
-
-    /// Side-channel: prime the compact epoch so a subsequent
-    /// `CompactionComplete` lands on the apply path. Mirrors what
-    /// `compact_history` does without emitting `UiCommand::Compact`.
-    pub fn begin_compaction(&mut self) {
-        self.app.pending_compact_epoch = self.app.compact_epoch;
     }
 
     /// `turn_id` of the active agent turn, if any. Used by fuzz ops that
@@ -433,7 +418,7 @@ impl TestApp {
     pub fn working_state(&self) -> WorkingSnapshot {
         WorkingSnapshot {
             animating: self.app.working.is_animating(),
-            compacting: self.app.working.is_compacting(),
+            busy: self.app.busy_stack.is_busy(),
         }
     }
 
@@ -455,23 +440,12 @@ impl TestApp {
         self.app.transcript.history.len()
     }
 
-    /// Session title / slug. Used by `TitleGenerated` invariants.
+    /// Session title / slug.
     pub fn session_title(&self) -> Option<String> {
         self.app.core.session.title.clone()
     }
     pub fn session_slug(&self) -> Option<String> {
         self.app.core.session.slug.clone()
-    }
-    pub fn pending_title(&self) -> bool {
-        self.app.pending_title
-    }
-
-    /// Side-channel: prime the `pending_title` flag so a subsequent
-    /// `TitleGenerated` event applies. In production `pending_title` is
-    /// set when the UI sends `UiCommand::GenerateTitle`; the harness
-    /// short-circuits that flow.
-    pub fn prime_pending_title(&mut self) {
-        self.app.pending_title = true;
     }
 
     /// Side-channel: insert a synthetic image attachment at the prompt
@@ -903,16 +877,6 @@ impl TestApp {
             );
         }
 
-        // Compacting is one of the live phases — it can't be true unless
-        // working is animating. A divergence means a phase setter ran
-        // without going through `working.begin(Compacting)`.
-        if self.app.working.is_compacting() {
-            assert!(
-                self.app.working.is_animating(),
-                "INV-37: working.is_compacting without is_animating",
-            );
-        }
-
         // Idle streaming coherence. With no agent, `finish_turn` has
         // already flushed `text` and `thinking` buffers; the idle event
         // handler never appends to them. `exec` is independent of turns
@@ -993,7 +957,7 @@ impl TestApp {
     /// Drain `UiCommand`s buffered on the engine channel into the action log.
     fn drain_cmd(&mut self) {
         while let Ok(cmd) = self.cmd_rx.try_recv() {
-            self.actions.push(Action::EngineSend(cmd));
+            self.actions.push(Action::EngineSend(Box::new(cmd)));
         }
     }
 

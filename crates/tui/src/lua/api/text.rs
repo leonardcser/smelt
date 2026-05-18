@@ -21,5 +21,28 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
         &["s"],
         |_, s: String| Ok(UnicodeWidthStr::width(s.as_str()) as u64),
     )?;
+    m.fn_(
+        "slugify",
+        "Lowercase `s`, replace non-alphanumeric runs with `-`, drop empty segments. Same algorithm the title plugin uses for fallback slugs.",
+        &["s"],
+        |_, s: String| Ok(engine::provider::slugify(&s)),
+    )?;
+    m.fn_(
+        "truncate",
+        "Truncate `s` to at most `max_bytes`, snapping to the previous UTF-8 char boundary. Returns `s` unchanged when it already fits; appends `suffix` when provided and truncation actually occurred.",
+        &["s", "max_bytes", "suffix"],
+        |_, (s, max_bytes, suffix): (String, usize, Option<String>)| -> LuaResult<String> {
+            if s.len() <= max_bytes {
+                return Ok(s);
+            }
+            let cut = smelt_buffer::text::snap(&s, max_bytes);
+            let mut out = String::with_capacity(cut + suffix.as_ref().map_or(0, |s| s.len()));
+            out.push_str(&s[..cut]);
+            if let Some(suf) = suffix {
+                out.push_str(&suf);
+            }
+            Ok(out)
+        },
+    )?;
     Ok(())
 }

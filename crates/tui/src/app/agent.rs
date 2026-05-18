@@ -41,7 +41,6 @@ impl TuiApp {
             self.sync_session_snapshot();
             self.core.session.messages.pop();
         }
-        self.maybe_generate_title(Some(&text));
         self.dispatch_turn(content)
     }
 
@@ -237,7 +236,6 @@ impl TuiApp {
         if self.core.session.first_user_message.is_none() {
             self.core.session.first_user_message = Some(display.clone());
         }
-        self.maybe_generate_title(Some(&evaluated));
         {
             self.working.begin(TurnPhase::Working);
         };
@@ -306,9 +304,6 @@ impl TuiApp {
             {
                 self.working.finish(TurnOutcome::Interrupted);
             };
-            if self.pending_title {
-                self.pending_title = false;
-            }
             let leftover = std::mem::take(&mut self.queued_messages);
             if !leftover.is_empty() {
                 let mut ctx = crate::input::prompt_ctx_mut(&mut self.ui);
@@ -334,7 +329,6 @@ impl TuiApp {
         }
         self.snapshot_tokens();
         self.save_session();
-        self.maybe_auto_compact();
     }
 
     /// Invokes the Lua handler for a plugin-defined tool; synchronous handlers resolve immediately, async ones park until `drive_tasks` completes them.
@@ -370,17 +364,6 @@ impl TuiApp {
             }
             crate::lua::ToolExecResult::Pending => {}
         }
-    }
-
-    pub(crate) fn handle_title_generated(&mut self, title: String, slug: String) {
-        if !self.pending_title {
-            return;
-        }
-        self.core.session.title = Some(title);
-        self.core.session.slug = Some(slug.clone());
-        self.set_task_label(slug.clone());
-        self.pending_title = false;
-        self.save_session();
     }
 
     pub(crate) fn resolve_api_key(&mut self) -> Option<String> {

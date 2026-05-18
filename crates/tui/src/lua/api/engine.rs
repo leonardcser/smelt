@@ -1,24 +1,13 @@
-//! `smelt.engine` — cancel, compact, `ask`, and `submit_command` for Lua-rendered turns.
+//! `smelt.engine` — cancel, `ask`, and `submit_command` for Lua-rendered turns.
 
 use crate::lua::{LuaHandle, LuaShared};
-use lua_doc_derive::{LuaAlias, LuaOpts};
+use lua_doc_derive::LuaOpts;
 use mlua::prelude::*;
+use smelt_core::lua::api::reasoning::LuaReasoningEffort;
 use smelt_core::lua::doc::Tier;
 use smelt_core::lua::lua_type::LuaCallback;
 use smelt_core::lua::module::LuaMod;
 use std::sync::Arc;
-
-/// Tag for the kind of side request `smelt.engine.ask` is making. Used
-/// by the engine for bookkeeping (cost grouping, cancellation scope);
-/// the request runs against the primary model.
-#[derive(Clone, Copy, Debug, LuaAlias)]
-#[lua(name = "smelt.engine.AskTask", mirror = "protocol::AuxiliaryTask")]
-pub enum LuaAskTask {
-    Title,
-    Prediction,
-    Compaction,
-    Btw,
-}
 
 /// One message in a `smelt.engine.ask` conversation.
 #[derive(Debug, LuaOpts)]
@@ -109,6 +98,33 @@ impl From<LuaCommandOverrides> for smelt_core::custom_commands::CommandOverrides
     }
 }
 
+/// Structured JSON-output specification for `smelt.engine.ask`.
+#[derive(Debug, LuaOpts)]
+#[lua(name = "smelt.engine.AskResponseFormat")]
+pub struct LuaAskResponseFormat {
+    /// Schema name (used by some providers as the response_format label).
+    pub name: String,
+    /// JSON schema describing the expected response shape. Accepts a Lua
+    /// table that round-trips through `lua_table_to_json` into a JSON value.
+    pub schema: mlua::Table,
+}
+
+/// Typed error table delivered to `on_response` when the underlying
+/// provider call fails. `kind` is a stable string the caller can branch
+/// on; `message` is a human-readable single-line description. The
+/// struct exists purely as a doc / LuaCATS schema target — the actual
+/// table is built in `LuaRuntime::fire_ask_callback` because it lands
+/// on a callback path that bypasses `FromLua` decoding.
+#[allow(dead_code)]
+#[derive(Debug, LuaOpts)]
+#[lua(name = "smelt.engine.AskError")]
+pub struct LuaAskErrorTable {
+    /// One of `"network" | "rate_limited" | "quota" | "invalid_response" | "context_window" | "cancelled" | "other"`.
+    pub kind: String,
+    /// Human-readable single-line description (newlines collapsed to spaces).
+    pub message: String,
+}
+
 /// Spec for `smelt.engine.ask`.
 #[derive(Debug, LuaOpts)]
 #[lua(name = "smelt.engine.AskSpec")]
@@ -120,10 +136,26 @@ pub struct LuaAskSpec {
     pub messages: Vec<LuaAskMessage>,
     /// Single-shot question appended as a final user message after `messages`.
     pub question: Option<String>,
-    /// Routing tag; defaults to `"btw"`.
-    pub task: Option<LuaAskTask>,
-    /// Fires once with the assistant's reply string.
-    pub on_response: Option<LuaCallback<String, ()>>,
+    /// Model reference (`"provider/model"` or a bare name resolved against
+    /// the configured providers). When `nil`, falls back to the primary model.
+    pub model: Option<String>,
+    /// JSON-schema response constraint.
+    pub response_format: Option<LuaAskResponseFormat>,
+    /// Reasoning effort for the request; defaults to `"off"`.
+    pub reasoning_effort: Option<LuaReasoningEffort>,
+    /// When `true`, the engine wraps the call in a trim-on-overflow loop:
+    /// on context-window errors it drops the oldest message (preserving
+    /// the system prompt at index 0) and retries, up to `max_trims` times.
+    /// Defaults to `false`.
+    #[lua(default)]
+    pub trim_on_overflow: bool,
+    /// Maximum number of trim-and-retry passes; only consulted when
+    /// `trim_on_overflow` is true. Defaults to 20.
+    pub max_trims: Option<u32>,
+    /// Fires once with `(content, err)`. On success `err` is `nil` and
+    /// `content` carries the assistant text. On failure `err` is a
+    /// `smelt.engine.AskError` table and `content` is `""`.
+    pub on_response: Option<LuaCallback<(String, Option<LuaAskErrorTable>), ()>>,
 }
 
 pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) -> LuaResult<()> {
@@ -136,18 +168,11 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
     )?;
     m.fn_(
         "cancel",
-        "Cancel the in-flight turn. If a compaction is running, bumps the compact epoch and marks the working state interrupted; otherwise sends `Cancel` to the engine.",
+        "Cancel the in-flight turn. In-flight background `smelt.engine.ask` requests are unaffected and will still fire their callbacks; plugins owning `smelt.spinner.busy` tokens are responsible for releasing them.",
         &[],
         |_, ()| -> LuaResult<()> {
             crate::lua::with_app(|app| {
-                if app.working.is_compacting() {
-                    app.compact_epoch += 1;
-                    app.working
-                        .finish(smelt_core::working::TurnOutcome::Interrupted);
-                    app.notify("compaction cancelled".into());
-                } else {
-                    app.core.engine.send(protocol::UiCommand::Cancel);
-                }
+                app.core.engine.send(protocol::UiCommand::Cancel);
             });
             Ok(())
         },
@@ -157,12 +182,6 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
         "Return `true` if an agent turn is currently in flight (a request is being streamed or a tool is executing).",
         &[],
         |_, ()| Ok(crate::lua::try_with_app(|app| app.agent.is_some()).unwrap_or(false)),
-    )?;
-    m.fn_(
-        "is_compacting",
-        "Return `true` while a transcript compaction is running.",
-        &[],
-        |_, ()| Ok(crate::lua::try_with_app(|app| app.working.is_compacting()).unwrap_or(false)),
     )?;
     m.fn_(
         "reload",
@@ -183,16 +202,6 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
                 }
                 app.reload_lua();
             });
-            Ok(())
-        },
-    )?;
-
-    m.fn_(
-        "compact",
-        "Start a transcript compaction with optional extra `instructions` for the summarizer. Notifies and no-ops if compaction is unavailable in the current state.",
-        &["instructions"],
-        |_, instructions: Option<String>| -> LuaResult<()> {
-            crate::lua::with_app(|app| app.compact_or_notify(instructions));
             Ok(())
         },
     )?;
@@ -222,16 +231,14 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
         },
     )?;
 
-    // smelt.engine.ask({system, messages?, question?, task?, on_response})
+    // smelt.engine.ask({system, messages?, question?, model?, response_format?, reasoning_effort?, trim_on_overflow?, max_trims?, on_response})
     {
         let s = shared.clone();
         m.fn_(
             "ask",
-            "Run an out-of-band side request (title / prediction / compaction / btw) against the primary model without touching the main turn. `spec.on_response` fires once with the assistant's reply; returns the request id.",
+            "Run an out-of-band LLM request without touching the main turn. `spec.model` selects an alternate model (defaults to the primary), `spec.response_format` enforces a JSON schema, `spec.reasoning_effort` controls effort (defaults to `\"off\"`), `spec.trim_on_overflow` wraps the call in a trim-and-retry loop for context-window errors (`spec.max_trims` caps the number of drops, default 20). `spec.on_response` fires once with `(content, err)`; returns the request id.",
             &["spec"],
             move |lua, spec: LuaAskSpec| -> LuaResult<u64> {
-                let task = spec.task.map(Into::into).unwrap_or_default();
-
                 let mut messages: Vec<protocol::Message> = spec
                     .messages
                     .into_iter()
@@ -261,12 +268,28 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
                 }
 
                 let system = spec.system;
+                let response_format = spec.response_format.map(|f| protocol::AskResponseFormat {
+                    name: f.name,
+                    schema: smelt_core::lua::api::lua_table_to_json(lua, &f.schema),
+                });
+                let reasoning_effort = spec
+                    .reasoning_effort
+                    .map(Into::into)
+                    .unwrap_or(protocol::ReasoningEffort::Off);
+                let trim_on_overflow = spec.trim_on_overflow;
+                let max_trims = spec.max_trims.unwrap_or(20);
+                let model_ref = spec.model;
                 crate::lua::with_app(|app| {
+                    let model = model_ref.and_then(|r| resolve_model_for_ask(app, &r));
                     app.core.engine.send(protocol::UiCommand::EngineAsk {
                         id,
                         system,
                         messages,
-                        task,
+                        model,
+                        response_format,
+                        reasoning_effort,
+                        trim_on_overflow,
+                        max_trims,
                     })
                 });
                 Ok(id)
@@ -275,4 +298,29 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
     }
 
     Ok(())
+}
+
+/// Resolve a Lua-provided model reference into an `AskModel` carrying api
+/// base / key / provider type. Notifies on error and returns `None`.
+fn resolve_model_for_ask(
+    app: &mut crate::app::TuiApp,
+    reference: &str,
+) -> Option<protocol::AskModel> {
+    let resolved =
+        match smelt_core::config::resolve_model_ref(&app.core.config.available_models, reference) {
+            Ok(m) => m.clone(),
+            Err(err) => {
+                app.notify_error(format!("smelt.engine: {err}"));
+                return None;
+            }
+        };
+    let api_key = app
+        .resolve_api_key_for_env(&resolved.api_key_env)
+        .unwrap_or_default();
+    Some(protocol::AskModel {
+        model: resolved.model_name,
+        api_base: resolved.api_base,
+        api_key,
+        provider_type: resolved.provider_type,
+    })
 }

@@ -15,7 +15,6 @@ use std::time::{Duration, Instant};
 #[derive(Clone, Copy, PartialEq)]
 pub enum TurnPhase {
     Working,
-    Compacting,
     Retrying { delay: Duration, attempt: u32 },
 }
 
@@ -132,13 +131,6 @@ impl WorkingState {
         self.live.is_some()
     }
 
-    pub fn is_compacting(&self) -> bool {
-        matches!(
-            self.live.as_ref().map(|l| l.phase),
-            Some(TurnPhase::Compacting)
-        )
-    }
-
     pub fn record_tokens_per_sec(&mut self, tps: f64) {
         if let Some(live) = self.live.as_mut() {
             live.tps_samples.push(tps);
@@ -228,35 +220,32 @@ impl WorkingState {
         Some(SPINNER_FRAMES[crate::content::spinner_frame_index(elapsed)])
     }
 
-    /// Headless-safe throbber data.  The caller (statusline composer in
+    /// Headless-safe throbber data. The caller (statusline composer in
     /// tui) applies theme colours and builds the Lua table.
-    pub fn throbber_data(&self, show_tps: bool) -> Vec<ThrobberItem> {
+    ///
+    /// `busy_label` overrides the rendered label when set: when a turn
+    /// is live it replaces the `"working"` text; when no turn is live
+    /// but a busy token is set, the throbber still renders with the
+    /// spinner and label so plugins can drive long-running background
+    /// work into the status bar. `busy_since` anchors the spinner
+    /// frame index for the standalone-busy case.
+    pub fn throbber_data(
+        &self,
+        show_tps: bool,
+        busy_label: Option<&str>,
+        busy_since: Option<Instant>,
+    ) -> Vec<ThrobberItem> {
         let now = self.clock.instant_now();
         let mut out = Vec::new();
         if let Some(live) = self.live.as_ref() {
             let elapsed = live.effective_elapsed(now);
             let idx = crate::content::spinner_frame_index(elapsed);
             match live.phase {
-                TurnPhase::Compacting => {
-                    out.push(ThrobberItem {
-                        text: format!(" {} compacting ", SPINNER_FRAMES[idx]),
-                        bold: true,
-                        dim: false,
-                        priority: 0,
-                        is_muted: false,
-                    });
-                    out.push(ThrobberItem {
-                        text: format!(" {} ", format_duration(elapsed.as_secs())),
-                        bold: false,
-                        dim: true,
-                        priority: 0,
-                        is_muted: true,
-                    });
-                }
                 TurnPhase::Working | TurnPhase::Retrying { .. } => {
                     let is_retry = matches!(live.phase, TurnPhase::Retrying { .. });
+                    let label = busy_label.unwrap_or("working");
                     out.push(ThrobberItem {
-                        text: format!(" {} working ", SPINNER_FRAMES[idx]),
+                        text: format!(" {} {} ", SPINNER_FRAMES[idx], label),
                         bold: true,
                         dim: false,
                         priority: 0,
@@ -303,6 +292,23 @@ impl WorkingState {
                     }
                 }
             }
+        } else if let (Some(label), Some(since)) = (busy_label, busy_since) {
+            let elapsed = now.duration_since(since);
+            let idx = crate::content::spinner_frame_index(elapsed);
+            out.push(ThrobberItem {
+                text: format!(" {} {} ", SPINNER_FRAMES[idx], label),
+                bold: true,
+                dim: false,
+                priority: 0,
+                is_muted: false,
+            });
+            out.push(ThrobberItem {
+                text: format!(" {} ", format_duration(elapsed.as_secs())),
+                bold: false,
+                dim: true,
+                priority: 0,
+                is_muted: true,
+            });
         } else if let Some(last) = self.last.as_ref() {
             match last.outcome {
                 TurnOutcome::Done => {
@@ -397,11 +403,10 @@ mod tests {
     fn new_starts_idle_and_not_animating() {
         let (_clock, s) = fixture();
         assert!(!s.is_animating());
-        assert!(!s.is_compacting());
         assert_eq!(s.elapsed(), None);
         assert!(s.turn_meta().is_none());
         assert!(s.spinner_char().is_none());
-        assert!(s.throbber_data(false).is_empty());
+        assert!(s.throbber_data(false, None, None).is_empty());
     }
 
     #[test]
@@ -409,29 +414,8 @@ mod tests {
         let (_clock, mut s) = fixture();
         s.begin(TurnPhase::Working);
         assert!(s.is_animating());
-        assert!(!s.is_compacting());
         assert!(s.elapsed().is_some());
         assert!(s.spinner_char().is_some());
-    }
-
-    #[test]
-    fn begin_compacting_reports_compacting_flag() {
-        let (_clock, mut s) = fixture();
-        s.begin(TurnPhase::Compacting);
-        assert!(s.is_animating());
-        assert!(s.is_compacting());
-    }
-
-    #[test]
-    fn begin_when_already_live_swaps_phase_without_resetting_since() {
-        let (clock, mut s) = fixture();
-        s.begin(TurnPhase::Working);
-        s.record_tokens_per_sec(50.0);
-        clock.advance(Duration::from_millis(10));
-        s.begin(TurnPhase::Compacting);
-        assert!(s.is_compacting());
-        let meta = s.turn_meta().unwrap();
-        assert_eq!(meta.avg_tps, Some(50.0));
     }
 
     #[test]
@@ -627,7 +611,7 @@ mod tests {
     fn throbber_data_working_emits_label_and_clock() {
         let (_clock, mut s) = fixture();
         s.begin(TurnPhase::Working);
-        let items = s.throbber_data(false);
+        let items = s.throbber_data(false, None, None);
         assert!(items.len() >= 2);
         assert!(items[0].text.contains("working"));
         assert!(items[0].bold);
@@ -636,11 +620,26 @@ mod tests {
     }
 
     #[test]
-    fn throbber_data_compacting_emits_compacting_label() {
+    fn throbber_data_uses_busy_label_when_live_turn_is_running() {
         let (_clock, mut s) = fixture();
-        s.begin(TurnPhase::Compacting);
-        let items = s.throbber_data(false);
-        assert!(items.iter().any(|i| i.text.contains("compacting")));
+        s.begin(TurnPhase::Working);
+        let items = s.throbber_data(false, Some("compacting"), None);
+        assert!(items[0].text.contains("compacting"));
+        assert!(!items[0].text.contains("working"));
+    }
+
+    #[test]
+    fn throbber_data_renders_busy_only_when_no_live_turn() {
+        let (_clock, s) = fixture();
+        let items = s.throbber_data(false, Some("syncing"), Some(Instant::now()));
+        assert!(items.iter().any(|i| i.text.contains("syncing")));
+    }
+
+    #[test]
+    fn throbber_data_ignores_busy_args_when_idle_and_no_anchor() {
+        let (_clock, s) = fixture();
+        let items = s.throbber_data(false, Some("syncing"), None);
+        assert!(items.is_empty());
     }
 
     #[test]
@@ -648,10 +647,10 @@ mod tests {
         let (_clock, mut s) = fixture();
         s.begin(TurnPhase::Working);
         s.record_tokens_per_sec(12.5);
-        let with_tps = s.throbber_data(true);
+        let with_tps = s.throbber_data(true, None, None);
         let with_tps_text: String = with_tps.iter().map(|i| i.text.as_str()).collect();
         assert!(with_tps_text.contains("12.5 tok/s"));
-        let without_tps = s.throbber_data(false);
+        let without_tps = s.throbber_data(false, None, None);
         let without_tps_text: String = without_tps.iter().map(|i| i.text.as_str()).collect();
         assert!(!without_tps_text.contains("tok/s"));
     }
@@ -660,7 +659,7 @@ mod tests {
     fn throbber_data_omits_tps_when_no_samples_recorded() {
         let (_clock, mut s) = fixture();
         s.begin(TurnPhase::Working);
-        let items = s.throbber_data(true);
+        let items = s.throbber_data(true, None, None);
         let text: String = items.iter().map(|i| i.text.as_str()).collect();
         assert!(!text.contains("tok/s"));
     }
@@ -672,7 +671,7 @@ mod tests {
             delay: Duration::from_secs(5),
             attempt: 2,
         });
-        let items = s.throbber_data(false);
+        let items = s.throbber_data(false, None, None);
         let text: String = items.iter().map(|i| i.text.as_str()).collect();
         assert!(text.contains("retrying"));
         assert!(text.contains("#2"));
@@ -691,14 +690,14 @@ mod tests {
             attempt: 1,
         });
         let early: String = s
-            .throbber_data(false)
+            .throbber_data(false, None, None)
             .iter()
             .map(|i| i.text.as_str())
             .collect();
         assert!(early.contains("retrying in 5s"));
         clock.advance(Duration::from_secs(3));
         let later: String = s
-            .throbber_data(false)
+            .throbber_data(false, None, None)
             .iter()
             .map(|i| i.text.as_str())
             .collect();
@@ -711,7 +710,7 @@ mod tests {
         s.begin(TurnPhase::Working);
         s.record_tokens_per_sec(10.0);
         s.finish(TurnOutcome::Done);
-        let items = s.throbber_data(true);
+        let items = s.throbber_data(true, None, None);
         let text: String = items.iter().map(|i| i.text.as_str()).collect();
         assert!(text.contains("done"));
         assert!(text.contains("10.0 tok/s"));
@@ -722,7 +721,7 @@ mod tests {
         let (_clock, mut s) = fixture();
         s.begin(TurnPhase::Working);
         s.finish(TurnOutcome::Done);
-        let items = s.throbber_data(true);
+        let items = s.throbber_data(true, None, None);
         let text: String = items.iter().map(|i| i.text.as_str()).collect();
         assert!(text.contains("done"));
         assert!(!text.contains("tok/s"));
@@ -733,7 +732,7 @@ mod tests {
         let (_clock, mut s) = fixture();
         s.begin(TurnPhase::Working);
         s.finish(TurnOutcome::Interrupted);
-        let items = s.throbber_data(true);
+        let items = s.throbber_data(true, None, None);
         let text: String = items.iter().map(|i| i.text.as_str()).collect();
         assert!(text.contains("interrupted"));
         assert!(!text.contains("tok/s"));

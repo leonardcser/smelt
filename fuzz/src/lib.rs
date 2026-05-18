@@ -196,16 +196,6 @@ pub enum FuzzOp {
     ExecOutput(String),
     ExecDone(Option<i32>),
 
-    /// Side channel: prime the compact epoch so the next
-    /// `CompactionComplete` is treated as fresh (apply path) rather than
-    /// stale (fast-finish path). Mirrors what a real `compact_history`
-    /// call does, without engaging the engine.
-    BeginCompaction,
-    /// Synthesize a `CompactionComplete` carrying `msg_count` user/
-    /// assistant messages. Empty payload exercises the early-return arm.
-    EngineCompactionComplete {
-        msg_count: u8,
-    },
     /// Emit `TurnComplete` against the currently-active turn (when any),
     /// carrying `msg_count` synthetic messages and a zero `TurnMeta`. Idle
     /// dispatch also accepts this and replaces history when non-empty.
@@ -239,9 +229,6 @@ pub enum FuzzOp {
     /// Side channel: push a synthetic entry onto `queued_messages` so
     /// `Steered` has something to drain.
     PushQueuedMessage(String),
-    /// Side channel: flip `pending_title` so a subsequent `TitleGenerated`
-    /// applies instead of being dropped.
-    PrimePendingTitle,
     /// Emit `ProcessCompleted { id, exit_code }`. Pushes a transcript
     /// block describing the exit.
     EngineProcessCompleted {
@@ -252,11 +239,6 @@ pub enum FuzzOp {
     /// carrying `msg_count` synthetic messages. Doesn't end the turn.
     EngineMessages {
         msg_count: u8,
-    },
-    /// Emit `TitleGenerated`. Applies only when `pending_title` is set.
-    EngineTitleGenerated {
-        title: String,
-        slug: String,
     },
     /// Emit `RequestPermission`. Active-turn dispatch either auto-approves
     /// (queuing a `PermissionDecision`), defers the dialog onto the
@@ -335,11 +317,6 @@ pub enum FuzzOp {
         call_id: String,
         tool_name: String,
         delta: String,
-    },
-    /// Emit `BtwResponse`. Active-turn dispatch surfaces an ephemeral
-    /// side-question reply that doesn't enter the main history.
-    EngineBtwResponse {
-        content: String,
     },
     /// Emit `EngineAskResponse`. Resumes a Lua coroutine that issued a
     /// one-shot `UiCommand::EngineAsk`; no-op when no coroutine is waiting
@@ -462,14 +439,12 @@ struct Snapshot {
     pending: Vec<String>,
     streaming: tui::app::test_harness::StreamingState,
     session_messages: usize,
-    compact_epoch_match: bool,
     snapshot_counts: (usize, usize, usize),
     queued_messages: usize,
     working: tui::app::test_harness::WorkingSnapshot,
     session_cost_usd: f64,
     context_tokens: Option<u32>,
     transcript_blocks: usize,
-    pending_title: bool,
     session_title: Option<String>,
     session_slug: Option<String>,
     pending_confirms: usize,
@@ -488,14 +463,12 @@ impl Snapshot {
             pending: app.pending_tool_call_ids(),
             streaming: app.streaming_state(),
             session_messages: app.session_message_count(),
-            compact_epoch_match: app.compact_epoch_match(),
             snapshot_counts: app.snapshot_counts(),
             queued_messages: app.queued_message_count(),
             working: app.working_state(),
             session_cost_usd: app.session_cost_usd(),
             context_tokens: app.context_tokens(),
             transcript_blocks: app.transcript_block_count(),
-            pending_title: app.pending_title(),
             session_title: app.session_title(),
             session_slug: app.session_slug(),
             pending_confirms: app.pending_confirm_count(),
@@ -511,7 +484,7 @@ where
 {
     actions
         .iter()
-        .filter(|a| matches!(a, Action::EngineSend(cmd) if pred(cmd)))
+        .filter(|a| matches!(a, Action::EngineSend(cmd) if pred(cmd.as_ref())))
         .count()
 }
 
@@ -543,12 +516,6 @@ enum PostCheck {
     },
     /// `ExecDone` runs `finalize_exec`, which clears `stream_exec_id`.
     ExecCleared,
-    /// `CompactionComplete` with `msg_count` messages. When the pre-state
-    /// had a matching compact epoch and `msg_count > 0`, the apply path
-    /// must replace `session.messages` and drain all snapshot vectors.
-    CompactionApplied {
-        msg_count: usize,
-    },
     /// `TurnComplete` against the active turn. Non-empty messages replace
     /// session.messages; an active turn ends.
     TurnCompleted {
@@ -579,11 +546,6 @@ enum PostCheck {
     MessagesReplaced {
         msg_count: usize,
         targeted_active: bool,
-    },
-    /// `TitleGenerated` only applies when `pending_title` was set.
-    TitleApplied {
-        title: String,
-        slug: String,
     },
     /// `RequestPermission` against an active turn lands on exactly one of
     /// three branches: auto-approve (one new `PermissionDecision`,
@@ -772,33 +734,6 @@ fn run_check(check: PostCheck, pre: &Snapshot, post: &Snapshot, new_actions: &[A
                 );
             }
         }
-        PostCheck::TitleApplied { title, slug } => {
-            if pre.pending_title {
-                assert_eq!(
-                    post.session_title.as_deref(),
-                    Some(title.as_str()),
-                    "TitleGenerated did not set session.title",
-                );
-                assert_eq!(
-                    post.session_slug.as_deref(),
-                    Some(slug.as_str()),
-                    "TitleGenerated did not set session.slug",
-                );
-                assert!(
-                    !post.pending_title,
-                    "TitleGenerated did not clear pending_title flag",
-                );
-            } else {
-                assert_eq!(
-                    post.session_title, pre.session_title,
-                    "TitleGenerated without pending_title should not change title",
-                );
-                assert_eq!(
-                    post.session_slug, pre.session_slug,
-                    "TitleGenerated without pending_title should not change slug",
-                );
-            }
-        }
         PostCheck::Retrying => {
             if pre.agent_running {
                 assert!(
@@ -926,60 +861,6 @@ fn run_check(check: PostCheck, pre: &Snapshot, post: &Snapshot, new_actions: &[A
                 assert!(!post.agent_running, "Shutdown did not end the active turn",);
             }
         }
-        PostCheck::CompactionApplied { msg_count } => {
-            // Arms (active-turn dispatch in engine_events.rs:211, idle
-            // dispatch at :355):
-            //   A) epoch match + no pending tools           → apply
-            //   B) epoch match + pending tools (active turn) → refuse
-            //   C) epoch stale                              → refuse
-            //   D) idle + epoch match (any pending state)   → apply
-            // The apply path inside `apply_compaction` itself has an
-            // early-return for `messages.is_empty()` — so msg_count==0
-            // even on the apply arm is a structural no-op.
-            let pending_tools = !pre.pending.is_empty();
-            let apply_arm = pre.compact_epoch_match && (!pre.agent_running || !pending_tools);
-            let refuse_arm = !pre.compact_epoch_match || (pre.agent_running && pending_tools);
-            if apply_arm && msg_count > 0 {
-                assert_eq!(
-                    post.session_messages, msg_count,
-                    "CompactionComplete did not replace session.messages: pre {} → post {} (expected {msg_count})",
-                    pre.session_messages, post.session_messages,
-                );
-                assert_eq!(
-                    post.snapshot_counts,
-                    (0, 0, 0),
-                    "CompactionComplete did not clear snapshot vectors: {:?}",
-                    post.snapshot_counts,
-                );
-                // apply_compaction calls working.finish(Done): live → None.
-                assert!(
-                    !post.working.compacting,
-                    "CompactionComplete left working in compacting phase: {:?}",
-                    post.working,
-                );
-            }
-            if (apply_arm && msg_count == 0) || refuse_arm {
-                // No-op branches: apply_compaction's empty-messages
-                // early-return, and both refuse arms must leave
-                // session.messages and snapshot vectors untouched.
-                assert_eq!(
-                    post.session_messages, pre.session_messages,
-                    "CompactionComplete no-op arm mutated session.messages: pre {} → post {}",
-                    pre.session_messages, post.session_messages,
-                );
-                assert_eq!(
-                    post.snapshot_counts, pre.snapshot_counts,
-                    "CompactionComplete no-op arm mutated snapshot vectors: pre {:?} → post {:?}",
-                    pre.snapshot_counts, post.snapshot_counts,
-                );
-                // All no-op arms call working.finish(Done) explicitly.
-                assert!(
-                    !post.working.compacting,
-                    "CompactionComplete no-op arm left working compacting: {:?}",
-                    post.working,
-                );
-            }
-        }
     }
 }
 
@@ -1104,15 +985,6 @@ fn plan(op: FuzzOp) -> (Option<SourceEvent>, PostCheck) {
         }
         FuzzOp::ExecOutput(s) => (Some(SourceEvent::ExecOutput(s)), PostCheck::None),
         FuzzOp::ExecDone(code) => (Some(SourceEvent::ExecDone(code)), PostCheck::ExecCleared),
-        // Side-channel: not a SourceEvent.
-        FuzzOp::BeginCompaction => (None, PostCheck::None),
-        FuzzOp::EngineCompactionComplete { msg_count } => {
-            let count = usize::from(msg_count);
-            let ev = SourceEvent::Engine(EngineEvent::CompactionComplete {
-                messages: synth_messages(count),
-            });
-            (Some(ev), PostCheck::CompactionApplied { msg_count: count })
-        }
         FuzzOp::EngineTurnComplete { .. } => {
             // Needs the live turn_id (not accessible here); handled
             // inline in `apply` before reaching `plan`.
@@ -1169,7 +1041,6 @@ fn plan(op: FuzzOp) -> (Option<SourceEvent>, PostCheck) {
         FuzzOp::PushQueuedMessage(_) => {
             unreachable!("PushQueuedMessage handled inline in apply()")
         }
-        FuzzOp::PrimePendingTitle => unreachable!("PrimePendingTitle handled inline in apply()"),
         FuzzOp::EngineProcessCompleted { id, exit_code } => {
             let ev = SourceEvent::Engine(EngineEvent::ProcessCompleted { id, exit_code });
             (Some(ev), PostCheck::ProcessCompleted)
@@ -1178,13 +1049,6 @@ fn plan(op: FuzzOp) -> (Option<SourceEvent>, PostCheck) {
             // Needs the live turn_id; handled inline in `apply` before
             // reaching `plan`.
             unreachable!("EngineMessages handled inline in apply()")
-        }
-        FuzzOp::EngineTitleGenerated { title, slug } => {
-            let ev = SourceEvent::Engine(EngineEvent::TitleGenerated {
-                title: title.clone(),
-                slug: slug.clone(),
-            });
-            (Some(ev), PostCheck::TitleApplied { title, slug })
         }
         FuzzOp::EngineRequestPermission {
             req_id,
@@ -1269,12 +1133,12 @@ fn plan(op: FuzzOp) -> (Option<SourceEvent>, PostCheck) {
             });
             (Some(ev), PostCheck::None)
         }
-        FuzzOp::EngineBtwResponse { content } => {
-            let ev = SourceEvent::Engine(EngineEvent::BtwResponse { content });
-            (Some(ev), PostCheck::None)
-        }
         FuzzOp::EngineAskResponse { id, content } => {
-            let ev = SourceEvent::Engine(EngineEvent::EngineAskResponse { id, content });
+            let ev = SourceEvent::Engine(EngineEvent::EngineAskResponse {
+                id,
+                content,
+                error: None,
+            });
             (Some(ev), PostCheck::None)
         }
     }
@@ -1319,16 +1183,6 @@ pub fn apply(app: &mut TestApp, op: FuzzOp) {
     match &op {
         FuzzOp::StartTurn(id) => {
             app.start_turn(u64::from(*id));
-            app.assert_invariants();
-            return;
-        }
-        FuzzOp::BeginCompaction => {
-            app.begin_compaction();
-            app.assert_invariants();
-            return;
-        }
-        FuzzOp::PrimePendingTitle => {
-            app.prime_pending_title();
             app.assert_invariants();
             return;
         }

@@ -79,14 +79,13 @@ pub struct TuiApp {
     pub(crate) agent: Option<TurnState>,
     pub(crate) sleep_inhibit: crate::sleep_inhibit::SleepInhibitor,
     pub(crate) persister: crate::persist::Persister,
-    pub(crate) pending_title: bool,
     pub(crate) last_width: u16,
     pub(crate) last_height: u16,
     pub(crate) next_turn_id: u64,
-    /// Incremented on rewind/clear/load; invalidates in-flight compactions.
-    pub(crate) compact_epoch: u64,
-    pub(crate) pending_compact_epoch: u64,
     pub(crate) pending_turn_meta: Option<protocol::TurnMeta>,
+    /// `smelt.spinner.busy` token stack. Non-empty → status bar animates
+    /// the spinner with the top token's label.
+    pub(crate) busy_stack: BusyStack,
     startup_auth_error: Option<String>,
     /// Trust state for `<cwd>/.smelt/`; surfaced as a startup toast then dropped.
     pub(crate) project_trust: Option<smelt_core::trust::TrustState>,
@@ -118,6 +117,55 @@ pub struct TuiApp {
 pub use well_known::{
     PROMPT_ABOVE_WIN, PROMPT_BELOW_WIN, PROMPT_EDIT_BUF, PROMPT_WIN, TRANSCRIPT_WIN,
 };
+
+/// Stack of live `smelt.spinner.busy` tokens. Each `push` returns a
+/// monotonic id consumed by `release`; the status bar shows the spinner
+/// with the most recently pushed token's label. The `since` anchor
+/// marks when the stack first became non-empty so the spinner glyph
+/// can advance even when no agent turn is live.
+#[derive(Default)]
+pub(crate) struct BusyStack {
+    entries: Vec<(u64, String)>,
+    next_id: u64,
+    since: Option<Instant>,
+}
+
+impl BusyStack {
+    pub(crate) fn push(&mut self, label: String) -> u64 {
+        self.next_id += 1;
+        let id = self.next_id;
+        if self.entries.is_empty() {
+            self.since = Some(Instant::now());
+        }
+        self.entries.push((id, label));
+        id
+    }
+
+    /// Drop the entry with `id`. Returns `true` if an entry was removed.
+    pub(crate) fn release(&mut self, id: u64) -> bool {
+        if let Some(pos) = self.entries.iter().position(|(i, _)| *i == id) {
+            self.entries.remove(pos);
+            if self.entries.is_empty() {
+                self.since = None;
+            }
+            true
+        } else {
+            false
+        }
+    }
+
+    pub(crate) fn is_busy(&self) -> bool {
+        !self.entries.is_empty()
+    }
+
+    pub(crate) fn top_label(&self) -> Option<String> {
+        self.entries.last().map(|(_, l)| l.clone())
+    }
+
+    pub(crate) fn since(&self) -> Option<Instant> {
+        self.since
+    }
+}
 
 /// Well-known stable `WinId`s for the always-present split-tree windows.
 pub(crate) struct WellKnown {
@@ -420,13 +468,11 @@ impl TuiApp {
             agent: None,
             sleep_inhibit: crate::sleep_inhibit::SleepInhibitor::new(),
             persister: crate::persist::Persister::spawn(),
-            pending_title: false,
             last_width: term_w,
             last_height: term_h,
             next_turn_id: 1,
-            compact_epoch: 0,
-            pending_compact_epoch: 0,
             pending_turn_meta: None,
+            busy_stack: BusyStack::default(),
             startup_auth_error,
             project_trust: Some(project_trust),
             app_focus: AppFocus::Prompt,
@@ -940,7 +986,10 @@ impl TuiApp {
                 }
             }
 
-            if self.agent.is_none() && !self.queued_messages.is_empty() && !self.is_compacting() {
+            if self.agent.is_none()
+                && !self.queued_messages.is_empty()
+                && !self.busy_stack.is_busy()
+            {
                 let text = self.queued_messages.remove(0);
                 if !text.is_empty() {
                     let outcome = self.process_input(&text);

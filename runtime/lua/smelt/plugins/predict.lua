@@ -56,8 +56,9 @@ smelt.cell("turn_end"):subscribe(function(payload)
   smelt.engine.ask({
     system = SYSTEM,
     question = question,
-    task = "prediction",
-    on_response = function(content)
+    model = smelt.model.preferred("predict"),
+    on_response = function(content, err)
+      if err then return end
       local text = content:match("^%s*(.-)%s*$") or ""
       if text ~= "" then
         smelt.prompt.ghost.set(text)

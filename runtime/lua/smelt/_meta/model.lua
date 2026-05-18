@@ -11,4 +11,7 @@ local model = {}
 ---@type fun(): table
 model.list = nil
 
+---@type fun(name: any, value: any): any
+model.preferred = nil
+
 return model

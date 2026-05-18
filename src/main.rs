@@ -211,7 +211,6 @@ async fn main() {
     let startup::ResolvedStartup {
         cfg,
         available_models,
-        auxiliary,
         api_base,
         api_key,
         api_key_env,
@@ -401,7 +400,6 @@ async fn main() {
                 model_config: (&model_config).into(),
             },
             model: model.clone(),
-            auxiliary,
             instructions: prompt_inputs.instructions.clone(),
             system_prompt_override: prompt_inputs.system_prompt_override.clone(),
             cwd: cwd.clone(),

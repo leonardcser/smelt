@@ -424,6 +424,45 @@ impl LuaRuntime {
         (items, tick_errors)
     }
 
+    /// Fire the `smelt.engine.ask` callback registered under `id` with
+    /// `(content, err_or_nil)`. The error table mirrors the
+    /// `smelt.engine.AskError` shape — `{ kind, message }` strings —
+    /// so plugins can branch on the failure mode without parsing text.
+    pub(crate) fn fire_ask_callback(
+        &self,
+        id: u64,
+        content: &str,
+        error: Option<protocol::EngineAskError>,
+    ) {
+        let handle = {
+            let Ok(mut cbs) = self.shared.callbacks.lock() else {
+                return;
+            };
+            match cbs.remove(&id) {
+                Some(h) => h,
+                None => return,
+            }
+        };
+        let Ok(func) = self.core.lua.registry_value::<mlua::Function>(&handle.key) else {
+            return;
+        };
+        let err_value: mlua::Value = match error {
+            None => mlua::Value::Nil,
+            Some(e) => match self.core.lua.create_table() {
+                Ok(t) => {
+                    let _ = t.set("kind", e.kind.as_str());
+                    let _ = t.set("message", e.message);
+                    mlua::Value::Table(t)
+                }
+                Err(_) => mlua::Value::Nil,
+            },
+        };
+        let _perf = smelt_perf::perf::begin("lua:ask_cb");
+        if let Err(e) = func.call::<()>((content.to_string(), err_value)) {
+            self.record_error(format!("ask callback: {e}"));
+        }
+    }
+
     /// Fire `smelt.confirm.open(handle_id)` to hand a pending confirm request to the Lua dialog.
     pub(crate) fn fire_confirm_open(&self, handle_id: u64) {
         let result: mlua::Result<()> = (|| {

@@ -1,8 +1,7 @@
 mod agent;
 pub mod auth;
-pub(crate) mod cancel;
+pub mod cancel;
 pub mod clock;
-pub(crate) mod compact;
 pub(crate) mod config;
 pub mod env;
 pub mod host;
@@ -44,7 +43,13 @@ pub fn compact_threshold_percent() -> u64 {
         .unwrap_or(DEFAULT_COMPACT_THRESHOLD_PERCENT)
 }
 
-pub use compact::SUMMARY_PREFIX;
+/// Prefix on the user-message slot the compaction plugin uses to carry
+/// the handoff summary. The TUI's transcript renderer matches against
+/// this prefix to render the message as a `Compacted` block instead of
+/// a plain user turn. Source-of-truth for both the bundled Lua plugin
+/// and the renderer; they MUST stay byte-equal.
+pub const SUMMARY_PREFIX: &str = include_str!("prompts/compact_summary_prefix.md");
+
 pub use config::ModelConfig;
 pub use paths::{config_dir, data_dir, home_dir, state_dir};
 
@@ -121,19 +126,9 @@ pub struct RequestModelConfig {
     pub api: ApiConfig,
 }
 
-#[derive(Clone, Default)]
-pub struct AuxiliaryModelConfig {
-    pub title: Option<RequestModelConfig>,
-    pub prediction: Option<RequestModelConfig>,
-    pub compaction: Option<RequestModelConfig>,
-    pub btw: Option<RequestModelConfig>,
-}
-
 pub struct EngineConfig {
     pub api: ApiConfig,
     pub model: String,
-    /// Per-task model overrides; `None` falls back to the live primary.
-    pub auxiliary: AuxiliaryModelConfig,
     pub instructions: Option<String>,
     /// When set, replaces the built-in system prompt template entirely.
     pub system_prompt_override: Option<String>,
@@ -151,24 +146,6 @@ pub struct EngineConfig {
     /// [`clock::RealClock`]; deterministic-simulation harnesses inject a
     /// [`clock::VirtualClock`] so scenarios can replay against advanced time.
     pub clock: Arc<dyn clock::Clock>,
-}
-
-pub use protocol::AuxiliaryTask;
-
-impl EngineConfig {
-    /// Returns the model+api for an auxiliary task, falling back to the primary.
-    pub(crate) fn aux_or_primary(&self, task: AuxiliaryTask) -> RequestModelConfig {
-        let slot = match task {
-            AuxiliaryTask::Title => &self.auxiliary.title,
-            AuxiliaryTask::Prediction => &self.auxiliary.prediction,
-            AuxiliaryTask::Compaction => &self.auxiliary.compaction,
-            AuxiliaryTask::Btw => &self.auxiliary.btw,
-        };
-        slot.clone().unwrap_or_else(|| RequestModelConfig {
-            model: self.model.clone(),
-            api: self.api.clone(),
-        })
-    }
 }
 
 pub struct EngineHandle {
@@ -371,83 +348,6 @@ mod tests {
         let apply = build_system_prompt_full(protocol::AgentMode::Apply, cwd, None, None);
         assert!(!plan.is_empty());
         assert!(!apply.is_empty());
-    }
-
-    // ---- aux_or_primary ----
-
-    fn primary_cfg() -> RequestModelConfig {
-        RequestModelConfig {
-            model: "primary".into(),
-            api: ApiConfig {
-                base: "base".into(),
-                key: "k".into(),
-                key_env: "K".into(),
-                provider_type: "openai".into(),
-                model_config: ModelConfig::default(),
-            },
-        }
-    }
-
-    fn aux_cfg(name: &str) -> RequestModelConfig {
-        let mut p = primary_cfg();
-        p.model = name.into();
-        p
-    }
-
-    fn engine_with(aux: AuxiliaryModelConfig) -> EngineConfig {
-        let primary = primary_cfg();
-        EngineConfig {
-            api: primary.api,
-            model: primary.model,
-            auxiliary: aux,
-            instructions: None,
-            system_prompt_override: None,
-            cwd: PathBuf::from("/"),
-            skill_section: None,
-            auto_compact: false,
-            context_window: None,
-            redact_secrets: false,
-            clock: Arc::new(clock::RealClock),
-        }
-    }
-
-    #[test]
-    fn aux_or_primary_returns_override_when_set() {
-        let eng = engine_with(AuxiliaryModelConfig {
-            title: Some(aux_cfg("title-model")),
-            ..Default::default()
-        });
-        assert_eq!(
-            eng.aux_or_primary(AuxiliaryTask::Title).model,
-            "title-model"
-        );
-    }
-
-    #[test]
-    fn aux_or_primary_falls_back_to_primary_when_slot_empty() {
-        let eng = engine_with(AuxiliaryModelConfig::default());
-        for task in [
-            AuxiliaryTask::Title,
-            AuxiliaryTask::Prediction,
-            AuxiliaryTask::Compaction,
-            AuxiliaryTask::Btw,
-        ] {
-            assert_eq!(eng.aux_or_primary(task).model, "primary");
-        }
-    }
-
-    #[test]
-    fn aux_or_primary_threads_each_slot_independently() {
-        let eng = engine_with(AuxiliaryModelConfig {
-            title: Some(aux_cfg("t")),
-            prediction: Some(aux_cfg("p")),
-            compaction: Some(aux_cfg("c")),
-            btw: Some(aux_cfg("b")),
-        });
-        assert_eq!(eng.aux_or_primary(AuxiliaryTask::Title).model, "t");
-        assert_eq!(eng.aux_or_primary(AuxiliaryTask::Prediction).model, "p");
-        assert_eq!(eng.aux_or_primary(AuxiliaryTask::Compaction).model, "c");
-        assert_eq!(eng.aux_or_primary(AuxiliaryTask::Btw).model, "b");
     }
 
     // ---- EngineHandle / EventInjector ----

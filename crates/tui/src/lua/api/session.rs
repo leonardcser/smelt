@@ -5,6 +5,37 @@ use mlua::prelude::*;
 use smelt_core::lua::doc::Tier;
 use smelt_core::lua::module::LuaMod;
 
+fn lua_messages_to_protocol(table: &mlua::Table) -> LuaResult<Vec<protocol::Message>> {
+    let mut out = Vec::new();
+    for pair in table.clone().sequence_values::<mlua::Table>() {
+        let entry = pair?;
+        let role: String = entry.get("role").unwrap_or_default();
+        let content: Option<String> = entry.get("content").ok();
+        let text = content.unwrap_or_default();
+        let msg = match role.as_str() {
+            "system" => protocol::Message::system(&text),
+            "user" => protocol::Message::user(protocol::Content::text(&text)),
+            "assistant" => protocol::Message::assistant(
+                if text.is_empty() {
+                    None
+                } else {
+                    Some(protocol::Content::text(&text))
+                },
+                None,
+                None,
+            ),
+            "tool" => {
+                let id: String = entry.get("tool_call_id").unwrap_or_default();
+                let is_error: bool = entry.get("is_error").unwrap_or(false);
+                protocol::Message::tool(id, text, is_error)
+            }
+            _ => continue,
+        };
+        out.push(msg);
+    }
+    Ok(out)
+}
+
 fn messages_to_lua(lua: &Lua, msgs: &[protocol::Message]) -> LuaResult<mlua::Table> {
     let tbl = lua.create_table()?;
     for (i, msg) in msgs.iter().enumerate() {
@@ -49,14 +80,49 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
         "Current session metadata, turn list, message snapshots, rewind, and persisted session management. UiHost-only.",
         Tier::UiHost,
     )?;
-    m.fn_(
+    // smelt.session.title() reads; title(t) writes title + derived slug;
+    // title(t, s) writes both. Returns the current title on read.
+    let title = m.sub(
         "title",
-        "Session title (a short summary derived from the first user message), or `nil` until the engine assigns one.",
-        &[],
-        |_, ()| -> LuaResult<Option<String>> {
-            Ok(crate::lua::try_with_app(|app| app.core.session.title.clone()).unwrap_or_default())
+        "Session title. Callable: `title()` reads the current title, `title(t)` writes the title and derives a slug via `smelt.text.slugify`, `title(t, s)` writes both. Writes also update the task label and save the session.",
+    )?;
+    title.callable(
+        |lua,
+         (_tbl, t, s): (mlua::Table, Option<String>, Option<String>)|
+         -> LuaResult<mlua::Value> {
+            match (t, s) {
+                (Some(title), maybe_slug) => {
+                    crate::lua::with_app(|app| {
+                        let slug = maybe_slug.unwrap_or_else(|| engine::provider::slugify(&title));
+                        app.core.session.title = Some(title);
+                        app.core.session.slug = Some(slug.clone());
+                        app.set_task_label(slug);
+                        app.save_session();
+                    });
+                    Ok(mlua::Value::Nil)
+                }
+                (None, _) => {
+                    let cur = crate::lua::try_with_app(|app| app.core.session.title.clone())
+                        .unwrap_or_default();
+                    match cur {
+                        Some(t) => Ok(mlua::Value::String(lua.create_string(&t)?)),
+                        None => Ok(mlua::Value::Nil),
+                    }
+                }
+            }
         },
     )?;
+    let slug = m.sub(
+        "slug",
+        "Session slug (read-only). Writing flows through `smelt.session.title(t, s)`.",
+    )?;
+    slug.callable(|lua, (_tbl,): (mlua::Table,)| -> LuaResult<mlua::Value> {
+        let cur = crate::lua::try_with_app(|app| app.core.session.slug.clone()).unwrap_or_default();
+        match cur {
+            Some(s) => Ok(mlua::Value::String(lua.create_string(&s)?)),
+            None => Ok(mlua::Value::Nil),
+        }
+    })?;
     m.fn_(
         "cwd",
         "Working directory the session was launched from. Stable across the session.",
@@ -117,22 +183,41 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
             .unwrap_or_default())
         },
     )?;
-    m.fn_(
+    // smelt.session.messages() reads (optional opts table filters);
+    // smelt.session.messages(list) atomically replaces the message list,
+    // clears snapshots, restores the screen, and saves the session.
+    let msgs = m.sub(
         "messages",
-        "Snapshot the current session messages as `{ role, content?, tool_calls?, tool_call_id?, is_error? }` rows. Roles are `system`/`user`/`assistant`/`tool`. `opts.roles` (array of role strings) filters by role; `opts.include_tool = false` drops `role = \"tool\"` rows; `opts.since_index` returns rows with 1-based index `>= since_index`; `opts.limit` caps row count from the start of the (filtered) result.",
-        &["opts"],
-        |lua, opts: Option<mlua::Table>| -> LuaResult<mlua::Table> {
+        "Session messages. Callable: `messages()` (or `messages(opts)`) returns `{ role, content?, tool_calls?, tool_call_id?, is_error? }` rows; pass `opts.roles`, `opts.include_tool`, `opts.since_index`, `opts.limit` to filter. `messages(list)` (a sequence of `{ role, content? }` rows) atomically replaces `session.messages`, drops token/cost/turn-meta snapshots, repaints the transcript, and saves the session.",
+    )?;
+    msgs.callable(
+        |lua, (_tbl, arg): (mlua::Table, Option<mlua::Table>)| -> LuaResult<mlua::Value> {
+            let Some(arg) = arg else {
+                let messages = crate::lua::try_with_app(|app| app.core.session.messages.clone())
+                    .unwrap_or_default();
+                let out = messages_to_lua(lua, &messages)?;
+                return Ok(mlua::Value::Table(out));
+            };
+            // Distinguish "filter opts table" (has named keys) from
+            // "messages list" (sequence of {role,...} entries).
+            let len = arg.raw_len();
+            let looks_like_list = len > 0
+                && arg
+                    .raw_get::<mlua::Value>(1)
+                    .map(|v| matches!(v, mlua::Value::Table(_)))
+                    .unwrap_or(false);
+            if looks_like_list {
+                let new_msgs = lua_messages_to_protocol(&arg)?;
+                crate::lua::with_app(|app| app.replace_messages(new_msgs));
+                return Ok(mlua::Value::Nil);
+            }
+            // Filter-opts path.
+            let roles = arg.get::<Option<Vec<String>>>("roles")?;
+            let include_tool = arg.get::<Option<bool>>("include_tool")?.unwrap_or(true);
+            let since_index = arg.get::<Option<usize>>("since_index")?;
+            let limit = arg.get::<Option<usize>>("limit")?;
             let messages = crate::lua::try_with_app(|app| app.core.session.messages.clone())
                 .unwrap_or_default();
-            let (roles, include_tool, since_index, limit) = match opts {
-                Some(t) => (
-                    t.get::<Option<Vec<String>>>("roles")?,
-                    t.get::<Option<bool>>("include_tool")?.unwrap_or(true),
-                    t.get::<Option<usize>>("since_index")?,
-                    t.get::<Option<usize>>("limit")?,
-                ),
-                None => (None, true, None, None),
-            };
             let role_filter: Option<std::collections::HashSet<String>> =
                 roles.map(|v| v.into_iter().collect());
             let filtered: Vec<protocol::Message> = messages
@@ -163,7 +248,8 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
                 .map(|(_, m)| m)
                 .take(limit.unwrap_or(usize::MAX))
                 .collect();
-            messages_to_lua(lua, &filtered)
+            let out = messages_to_lua(lua, &filtered)?;
+            Ok(mlua::Value::Table(out))
         },
     )?;
     m.fn_(

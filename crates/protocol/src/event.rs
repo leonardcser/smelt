@@ -8,18 +8,62 @@ use crate::usage::{ModelConfigOverrides, PermissionOverrides, TokenUsage, TurnMe
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
-/// Auxiliary LLM task — routed to a dedicated auxiliary model when the
-/// engine config has one, otherwise falls back to the primary model.
-/// `Btw` is the generic escape hatch (plain `/btw` prompts, plugin
-/// `engine.ask` calls without a specific task tag).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+/// Structured JSON output specification mirroring `engine::ResponseFormat`.
+/// Lives on the wire so the TUI can forward Lua-provided schemas to the
+/// engine without engine depending on the Lua surface.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AskResponseFormat {
+    pub name: String,
+    pub schema: serde_json::Value,
+}
+
+/// Provider connection + model identifier needed for a one-shot
+/// `EngineAsk` call. Lives on the wire so the TUI can resolve a
+/// Lua-provided model reference before dispatching.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AskModel {
+    pub model: String,
+    pub api_base: String,
+    pub api_key: String,
+    pub provider_type: String,
+}
+
+/// Classification of a `smelt.engine.ask` failure. Surfaced to Lua as
+/// the `kind` field on the error table so plugins can branch on the
+/// failure mode without parsing message text.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub enum AuxiliaryTask {
-    Title,
-    Prediction,
-    Compaction,
-    #[default]
-    Btw,
+pub enum EngineAskErrorKind {
+    Network,
+    RateLimited,
+    Quota,
+    InvalidResponse,
+    ContextWindow,
+    Cancelled,
+    Other,
+}
+
+impl EngineAskErrorKind {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            EngineAskErrorKind::Network => "network",
+            EngineAskErrorKind::RateLimited => "rate_limited",
+            EngineAskErrorKind::Quota => "quota",
+            EngineAskErrorKind::InvalidResponse => "invalid_response",
+            EngineAskErrorKind::ContextWindow => "context_window",
+            EngineAskErrorKind::Cancelled => "cancelled",
+            EngineAskErrorKind::Other => "other",
+        }
+    }
+}
+
+/// Typed error payload returned alongside `EngineAskResponse` when the
+/// underlying provider call failed.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EngineAskError {
+    pub kind: EngineAskErrorKind,
+    /// Human-readable single-line description (newlines collapsed to spaces).
+    pub message: String,
 }
 
 /// How a registered tool interacts with concurrent tool execution.
@@ -217,17 +261,16 @@ pub enum EngineEvent {
     /// A background process has finished.
     ProcessCompleted { id: String, exit_code: Option<i32> },
 
-    /// Response to `UiCommand::Compact`.
-    CompactionComplete { messages: Vec<Message> },
-
-    /// Response to `UiCommand::GenerateTitle`.
-    TitleGenerated { title: String, slug: String },
-
-    /// Response to `UiCommand::Btw`.
-    BtwResponse { content: String },
-
-    /// Response to a `UiCommand::EngineAsk` request.
-    EngineAskResponse { id: u64, content: String },
+    /// Response to a `UiCommand::EngineAsk` request. On success
+    /// `error` is `None` and `content` is the assistant reply. On
+    /// failure `error` carries a typed classification and `content` is
+    /// empty.
+    EngineAskResponse {
+        id: u64,
+        content: String,
+        #[serde(skip_serializing_if = "Option::is_none", default)]
+        error: Option<EngineAskError>,
+    },
 
     /// Snapshot of the engine's message list, sent after each significant step.
     Messages {
@@ -370,36 +413,28 @@ pub enum UiCommand {
         system_prompt_override: Option<String>,
     },
 
-    /// Compact conversation history.
-    Compact {
-        history: Vec<Message>,
-        instructions: Option<String>,
-    },
-
-    /// Generate a title for the session based on the latest user message and
-    /// the tail of the assistant's response.
-    GenerateTitle {
-        last_user_message: String,
-        assistant_tail: String,
-    },
-
-    /// Ask an ephemeral side question (no tools, not added to history).
-    Btw {
-        question: String,
-        history: Vec<Message>,
-        reasoning_effort: ReasoningEffort,
-    },
-
-    /// One-shot LLM call initiated by Lua. The engine spawns
-    /// a fire-and-forget request routed through `task`'s auxiliary
-    /// model (or the primary model when the routing slot is empty) and
-    /// returns the response as `EngineAskResponse`.
+    /// One-shot LLM call initiated by Lua. The engine spawns a
+    /// fire-and-forget request and returns the response as
+    /// `EngineAskResponse`. `model` overrides the primary model when
+    /// `Some`; `response_format` enforces a JSON schema when present;
+    /// `reasoning_effort` controls effort (defaults to `Off`). When
+    /// `trim_on_overflow` is true, the engine wraps the call in a
+    /// retry loop that drops the oldest non-system message on
+    /// context-window errors, up to `max_trims` passes.
     EngineAsk {
         id: u64,
         system: String,
         messages: Vec<Message>,
+        #[serde(skip_serializing_if = "Option::is_none", default)]
+        model: Option<AskModel>,
+        #[serde(skip_serializing_if = "Option::is_none", default)]
+        response_format: Option<AskResponseFormat>,
         #[serde(default)]
-        task: AuxiliaryTask,
+        reasoning_effort: ReasoningEffort,
+        #[serde(default)]
+        trim_on_overflow: bool,
+        #[serde(default)]
+        max_trims: u32,
     },
 
     /// Result of a tool execution (response to `ToolDispatch`).
@@ -435,24 +470,7 @@ mod tests {
     use super::*;
     use serde_json::json;
 
-    // ---- AuxiliaryTask / ToolExecutionMode defaults + rename ----
-
-    #[test]
-    fn auxiliary_task_default_is_btw() {
-        assert_eq!(AuxiliaryTask::default(), AuxiliaryTask::Btw);
-    }
-
-    #[test]
-    fn auxiliary_task_serializes_as_snake_case() {
-        assert_eq!(
-            serde_json::to_value(AuxiliaryTask::Title).unwrap(),
-            json!("title")
-        );
-        assert_eq!(
-            serde_json::to_value(AuxiliaryTask::Compaction).unwrap(),
-            json!("compaction")
-        );
-    }
+    // ---- ToolExecutionMode defaults + rename ----
 
     #[test]
     fn tool_execution_mode_default_is_concurrent() {

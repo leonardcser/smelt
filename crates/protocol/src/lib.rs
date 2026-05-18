@@ -16,8 +16,8 @@ pub mod usage;
 
 pub use content::{Content, ContentPart};
 pub use event::{
-    AuxiliaryTask, Decision, EngineEvent, StartTurnPayload, ToolDef, ToolExecutionMode,
-    ToolHookFlags, ToolHooks, UiCommand,
+    AskModel, AskResponseFormat, Decision, EngineAskError, EngineAskErrorKind, EngineEvent,
+    StartTurnPayload, ToolDef, ToolExecutionMode, ToolHookFlags, ToolHooks, UiCommand,
 };
 pub use message::{FunctionCall, Message, Role, ToolCall, ToolOutcome};
 pub use mode::{AgentMode, ReasoningEffort};

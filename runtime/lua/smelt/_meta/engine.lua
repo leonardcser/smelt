@@ -7,21 +7,15 @@
 ---@class smelt.engine
 local engine = {}
 
---- Run an out-of-band side request (title / prediction / compaction / btw) against the primary model without touching the main turn. `spec.on_response` fires once with the assistant's reply; returns the request id.
+--- Run an out-of-band LLM request without touching the main turn. `spec.model` selects an alternate model (defaults to the primary), `spec.response_format` enforces a JSON schema, `spec.reasoning_effort` controls effort (defaults to `"off"`), `spec.trim_on_overflow` wraps the call in a trim-and-retry loop for context-window errors (`spec.max_trims` caps the number of drops, default 20). `spec.on_response` fires once with `(content, err)`; returns the request id.
 ---@type fun(spec: smelt.engine.AskSpec): integer
 engine.ask = nil
 
---- Cancel the in-flight turn. If a compaction is running, bumps the compact epoch and marks the working state interrupted; otherwise sends `Cancel` to the engine.
+--- Cancel the in-flight turn. In-flight background `smelt.engine.ask` requests are unaffected and will still fire their callbacks; plugins owning `smelt.spinner.busy` tokens are responsible for releasing them.
+---@see smelt.engine.ask
+---@see smelt.spinner.busy
 ---@type fun(): nil
 engine.cancel = nil
-
---- Start a transcript compaction with optional extra `instructions` for the summarizer. Notifies and no-ops if compaction is unavailable in the current state.
----@type fun(instructions: string?): nil
-engine.compact = nil
-
---- Return `true` while a transcript compaction is running.
----@type fun(): boolean
-engine.is_compacting = nil
 
 --- Return `true` if an agent turn is currently in flight (a request is being streamed or a tool is executing).
 ---@type fun(): boolean

@@ -21,7 +21,6 @@ pub fn resolve_api_key(key_env: &str) -> Result<String, String> {
 pub struct ResolvedStartup {
     pub cfg: smelt_core::config::Config,
     pub available_models: Vec<smelt_core::config::ResolvedModel>,
-    pub auxiliary: engine::AuxiliaryModelConfig,
     pub api_base: String,
     pub api_key: String,
     pub api_key_env: String,
@@ -212,8 +211,6 @@ pub async fn resolve(
         model_config.tool_calling = Some(false);
     }
 
-    let auxiliary = engine::AuxiliaryModelConfig::default();
-
     let mode_override = args
         .mode
         .as_deref()
@@ -263,7 +260,6 @@ pub async fn resolve(
     ResolvedStartup {
         cfg,
         available_models,
-        auxiliary,
         api_base,
         api_key,
         api_key_env,

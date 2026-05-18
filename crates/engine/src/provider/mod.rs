@@ -9,8 +9,8 @@ mod sse;
 
 use crate::cancel::CancellationToken;
 use crate::log;
-pub(crate) use protocol::TokenUsage;
-use protocol::{Content, Message, ReasoningEffort, ToolCall};
+pub use protocol::TokenUsage;
+use protocol::{Message, ReasoningEffort, ToolCall};
 use reqwest::Client;
 use serde::Serialize;
 use std::time::Duration;
@@ -117,7 +117,7 @@ pub(crate) struct LLMResponse {
 }
 
 #[derive(Debug, thiserror::Error)]
-pub(crate) enum ProviderError {
+pub enum ProviderError {
     #[error("cancelled")]
     Cancelled,
     #[error("{}", format_rate_limit(resets_at))]
@@ -334,20 +334,20 @@ impl ProviderKind {
 
 /// Structured JSON output schema. Each provider adapter maps this to its native field.
 #[derive(Clone)]
-pub(crate) struct ResponseFormat {
-    pub(crate) name: String,
-    pub(crate) schema: serde_json::Value,
+pub struct ResponseFormat {
+    pub name: String,
+    pub schema: serde_json::Value,
 }
 
-pub(crate) struct ChatOptions<'a> {
+pub struct ChatOptions<'a> {
     pub(crate) cancel: &'a CancellationToken,
     pub(crate) on_retry: Option<&'a (dyn Fn(Duration, u32) + Send + Sync)>,
     pub(crate) on_delta: Option<&'a (dyn Fn(StreamDelta<'_>) + Send + Sync)>,
-    pub(crate) response_format: Option<ResponseFormat>,
+    pub response_format: Option<ResponseFormat>,
 }
 
 impl<'a> ChatOptions<'a> {
-    pub(crate) fn new(cancel: &'a CancellationToken) -> Self {
+    pub fn new(cancel: &'a CancellationToken) -> Self {
         Self {
             cancel,
             on_retry: None,
@@ -841,128 +841,6 @@ impl Provider {
 
         None
     }
-
-    async fn complete_simple(
-        &self,
-        messages: &[Message],
-        model: &str,
-        response_format: Option<ResponseFormat>,
-    ) -> Result<(String, TokenUsage), ProviderError> {
-        let cancel = CancellationToken::new();
-        let mut opts = ChatOptions::new(&cancel);
-        opts.response_format = response_format;
-        let resp = self
-            .chat(messages, &[], model, ReasoningEffort::Off, &opts)
-            .await?;
-        let usage = resp.usage;
-        let text = resp.content.unwrap_or_default().trim().to_string();
-        if text.is_empty() {
-            Err(ProviderError::InvalidResponse("empty response".into()))
-        } else {
-            Ok((text, usage))
-        }
-    }
-
-    async fn complete_short(
-        &self,
-        prompt: &str,
-        model: &str,
-        response_format: Option<ResponseFormat>,
-    ) -> Result<(String, TokenUsage), ProviderError> {
-        let messages = vec![
-            Message::system("Reasoning: low".to_string()),
-            Message::user(Content::text(prompt)),
-        ];
-        self.complete_simple(&messages, model, response_format)
-            .await
-    }
-
-    pub(crate) async fn complete_title(
-        &self,
-        last_user_message: &str,
-        assistant_tail: &str,
-        model: &str,
-    ) -> Result<((String, String), TokenUsage), ProviderError> {
-        let assistant_block = if assistant_tail.trim().is_empty() {
-            String::new()
-        } else {
-            format!("\n\nAssistant response (tail):\n{}", assistant_tail)
-        };
-        let prompt = format!(
-            "Generate a concise session title and git-branch-style slug for a coding session.\n\
-             \n\
-             Title: 3-6 words, sentence case (capitalize only the first word and proper nouns, not Title Case), \
-             clear enough that the user can recognize the session in a list.\n\
-             Slug: 1-5 lowercase words separated by dashes, like a git branch name.\n\
-             \n\
-             Respond with a single JSON object, no markdown fences, no prose: \
-             {{\"title\": \"...\", \"slug\": \"...\"}}\n\
-             \n\
-             Good examples:\n\
-             {{\"title\": \"Fix login button on mobile\", \"slug\": \"fix-mobile-login\"}}\n\
-             {{\"title\": \"Add OAuth authentication\", \"slug\": \"add-oauth\"}}\n\
-             {{\"title\": \"Debug failing CI tests\", \"slug\": \"debug-ci-tests\"}}\n\
-             {{\"title\": \"Refactor API client error handling\", \"slug\": \"refactor-api-errors\"}}\n\
-             \n\
-             Bad (too vague): {{\"title\": \"Code changes\", \"slug\": \"changes\"}}\n\
-             Bad (too long): {{\"title\": \"Investigate and fix the issue where the login button does not respond on mobile\", \"slug\": \"fix\"}}\n\
-             Bad (wrong case): {{\"title\": \"Fix Login Button On Mobile\", \"slug\": \"fix-login\"}}\n\
-             \n\
-             User message:\n{}{}",
-            last_user_message, assistant_block
-        );
-
-        let schema = serde_json::json!({
-            "type": "object",
-            "properties": {
-                "title": {"type": "string"},
-                "slug": {"type": "string"},
-            },
-            "required": ["title", "slug"],
-            "additionalProperties": false,
-        });
-        let fmt = ResponseFormat {
-            name: "session_title".to_string(),
-            schema,
-        };
-        let (raw, usage) = self.complete_short(&prompt, model, Some(fmt)).await?;
-        let (title, slug) = parse_title_and_slug(&raw);
-
-        Ok(((title, slug), usage))
-    }
-}
-
-#[derive(serde::Deserialize)]
-struct TitleSlug {
-    #[serde(default)]
-    title: String,
-    #[serde(default)]
-    slug: String,
-}
-
-fn parse_title_and_slug(raw: &str) -> (String, String) {
-    let (mut title, mut slug) = extract_json_title_slug(raw).unwrap_or_default();
-
-    if title.is_empty() {
-        title = normalize_short(raw);
-    }
-    if slug.is_empty() {
-        slug = slugify(&title);
-    }
-
-    slug = slug
-        .split('-')
-        .filter(|w| !w.is_empty())
-        .take(5)
-        .collect::<Vec<_>>()
-        .join("-");
-
-    if title.len() > 64 {
-        title.truncate(title.floor_char_boundary(64));
-        title = title.trim().to_string();
-    }
-
-    (title, slug)
 }
 
 fn apply_response_format(body: &mut serde_json::Value, kind: ProviderKind, fmt: &ResponseFormat) {
@@ -1013,19 +891,6 @@ fn anthropic_supports_structured_output(model: &str) -> bool {
     model.contains("-4-5") || model.contains("-4-6") || model.contains("mythos")
 }
 
-fn extract_json_title_slug(raw: &str) -> Option<(String, String)> {
-    let start = raw.find('{')?;
-    let end = raw.rfind('}')?;
-    if end <= start {
-        return None;
-    }
-    let parsed: TitleSlug = serde_json::from_str(&raw[start..=end]).ok()?;
-    Some((
-        parsed.title.trim().to_string(),
-        parsed.slug.trim().to_string(),
-    ))
-}
-
 fn messages_have_images(messages: &[Message]) -> bool {
     messages.iter().any(|m| match m.role {
         protocol::Role::User | protocol::Role::Tool => {
@@ -1035,7 +900,7 @@ fn messages_have_images(messages: &[Message]) -> bool {
     })
 }
 
-pub(crate) fn slugify(title: &str) -> String {
+pub fn slugify(title: &str) -> String {
     title
         .to_lowercase()
         .chars()
@@ -1045,16 +910,6 @@ pub(crate) fn slugify(title: &str) -> String {
         .filter(|s| !s.is_empty())
         .collect::<Vec<_>>()
         .join("-")
-}
-
-fn normalize_short(raw: &str) -> String {
-    let mut t = raw.trim().trim_matches('"').trim_matches('\'').to_string();
-    t = t.split_whitespace().collect::<Vec<_>>().join(" ");
-    if t.len() > 64 {
-        t.truncate(t.floor_char_boundary(64));
-        t = t.trim().to_string();
-    }
-    t
 }
 
 #[cfg(test)]
@@ -1533,63 +1388,6 @@ mod tests {
         assert!(!anthropic_supports_structured_output("claude-3-7-sonnet"));
     }
 
-    // ---- extract_json_title_slug ----
-
-    #[test]
-    fn extract_json_title_slug_pulls_json_from_surrounding_prose() {
-        let raw = r#"sure! here it is: {"title":"Add OAuth","slug":"add-oauth"} thanks"#;
-        let (t, s) = extract_json_title_slug(raw).unwrap();
-        assert_eq!(t, "Add OAuth");
-        assert_eq!(s, "add-oauth");
-    }
-
-    #[test]
-    fn extract_json_title_slug_returns_none_without_braces() {
-        assert!(extract_json_title_slug("no json").is_none());
-    }
-
-    #[test]
-    fn extract_json_title_slug_returns_none_when_braces_misordered() {
-        assert!(extract_json_title_slug("} {").is_none());
-    }
-
-    // ---- parse_title_and_slug ----
-
-    #[test]
-    fn parse_title_and_slug_returns_from_json_object() {
-        let (t, s) = parse_title_and_slug(r#"{"title":"Fix login","slug":"fix-login"}"#);
-        assert_eq!(t, "Fix login");
-        assert_eq!(s, "fix-login");
-    }
-
-    #[test]
-    fn parse_title_and_slug_caps_slug_at_five_words() {
-        let raw = r#"{"title":"T","slug":"a-b-c-d-e-f-g"}"#;
-        let (_, s) = parse_title_and_slug(raw);
-        assert_eq!(s, "a-b-c-d-e");
-    }
-
-    #[test]
-    fn parse_title_and_slug_derives_slug_from_title_when_missing() {
-        let raw = r#"{"title":"Fix Login Button"}"#;
-        let (_, s) = parse_title_and_slug(raw);
-        assert_eq!(s, "fix-login-button");
-    }
-
-    #[test]
-    fn parse_title_and_slug_falls_back_to_raw_text_when_no_json() {
-        let (t, s) = parse_title_and_slug("just some text");
-        assert_eq!(t, "just some text");
-        assert_eq!(s, "just-some-text");
-    }
-
-    #[test]
-    fn parse_title_and_slug_truncates_long_titles() {
-        let long = "a".repeat(100);
-        let (t, _) = parse_title_and_slug(&long);
-        assert!(t.len() <= 64);
-    }
-
     // ---- slugify ----
 
     #[test]
@@ -1605,20 +1403,6 @@ mod tests {
     #[test]
     fn slugify_empty_string_returns_empty() {
         assert_eq!(slugify(""), "");
-    }
-
-    // ---- normalize_short ----
-
-    #[test]
-    fn normalize_short_trims_quotes_and_collapses_whitespace() {
-        assert_eq!(normalize_short("  \"hello  world\"  "), "hello world");
-        assert_eq!(normalize_short("'single quoted'"), "single quoted");
-    }
-
-    #[test]
-    fn normalize_short_truncates_to_64_bytes() {
-        let s = normalize_short(&"x".repeat(200));
-        assert!(s.len() <= 64);
     }
 
     // ---- messages_have_images ----

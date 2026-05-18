@@ -140,8 +140,10 @@ impl TuiApp {
                 mut display,
             } => {
                 self.redact_user_submission(&mut content, &mut display);
-                // Queue during compaction so messages run against the compacted history.
-                if self.is_compacting() {
+                // Queue while a background plugin (compaction, etc.) has
+                // taken a `smelt.spinner.busy` token so messages run
+                // against the post-busy state.
+                if self.busy_stack.is_busy() {
                     let text = content.text_content();
                     if !text.is_empty() {
                         self.queued_messages.push(text.into_owned());

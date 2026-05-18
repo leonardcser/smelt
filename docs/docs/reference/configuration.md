@@ -162,6 +162,23 @@ smelt.defaults({
 })
 ```
 
+## Per-plugin Model Preferences
+
+Background features (title generation, compaction, prediction, `/btw`,
+`web_fetch` extraction) live in bundled Lua plugins. Each plugin reads its
+preferred model from `smelt.model.preferred("<name>")`, falling back to the
+primary model when unset. Override one from `init.lua`:
+
+```lua
+smelt.model.preferred("title", "openai/gpt-5-mini")
+smelt.model.preferred("compact", "anthropic/claude-haiku")
+smelt.model.preferred("predict", "openai/gpt-5-mini")
+```
+
+Names used by the bundled plugins: `title`, `compact`, `predict`, `btw`,
+`web_fetch`. Custom plugins can pick any name. References use the same
+`provider/model` or bare-model resolution as the primary model.
+
 ## Settings
 
 Set boolean preferences in `init.lua` by writing to `smelt.settings`:

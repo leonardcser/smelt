@@ -388,3 +388,19 @@ function smelt.__sweep_state()
   end
 end
 
+-- smelt.model.preferred(name): read; (name, value): write/clear (nil clears).
+-- Stored under smelt.state.persistent("model_preferred"). Plugins use this to
+-- remember per-plugin model overrides across reloads.
+if smelt and smelt.model then
+  local function prefs() return smelt.state.persistent("model_preferred") end
+  smelt.model.preferred = function(name, value)
+    if select("#", value) == 0 then
+      local p = prefs()
+      return p[name]
+    end
+    local p = prefs()
+    p[name] = value
+    return value
+  end
+end
+

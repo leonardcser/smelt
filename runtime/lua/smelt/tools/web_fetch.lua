@@ -180,16 +180,20 @@ local function fetch_raw(args)
 end
 
 -- Spawn an auxiliary LLM request and park the coroutine until it responds.
+-- Returns the assistant reply on success, or `nil` on failure (the caller
+-- falls back to the raw fetched content).
 local function ask_extract(content, prompt)
   local id = smelt.task.alloc()
   smelt.engine.ask({
     system = "Answer the user's question based solely on the provided "
       .. "web page content. Be concise and direct.",
     question = "<content>\n" .. content .. "</content>\n\n" .. prompt,
-    task = "btw",
-    on_response = function(resp) smelt.task.resume(id, resp) end,
+    model = smelt.model.preferred("web_fetch"),
+    on_response = function(resp, err) smelt.task.resume(id, { content = resp, err = err }) end,
   })
-  return smelt.task.wait(id)
+  local result = smelt.task.wait(id)
+  if not result or result.err then return nil end
+  return result.content
 end
 
 smelt.tools.register({
@@ -251,7 +255,7 @@ smelt.tools.register({
     local content = type(raw) == "table" and raw.content or raw
     local prompt = args.prompt or ""
     local extracted = ask_extract(content, prompt)
-    if extracted and extracted ~= "" and not extracted:lower():match("^error:") then
+    if extracted and extracted ~= "" then
       return extracted
     end
     return raw

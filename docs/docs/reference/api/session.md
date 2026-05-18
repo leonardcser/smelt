@@ -94,14 +94,6 @@ fun(id: string): nil
 
 Switch the UI to the persisted session with `id`. Replays its message log and resets transient state.
 
-## `smelt.session.messages`
-
-```lua
-fun(opts: table?): table
-```
-
-Snapshot the current session messages as `{ role, content?, tool_calls?, tool_call_id?, is_error? }` rows. Roles are `system`/`user`/`assistant`/`tool`. `opts.roles` (array of role strings) filters by role; `opts.include_tool = false` drops `role = "tool"` rows; `opts.since_index` returns rows with 1-based index `>= since_index`; `opts.limit` caps row count from the start of the (filtered) result.
-
 ## `smelt.session.reset`
 
 ```lua
@@ -117,14 +109,6 @@ fun(block_idx: integer?, opts: table?): nil
 ```
 
 Rewind the session to a prior user turn. `block_idx = nil` rewinds to before the first turn; `opts.restore_vim_insert = true` re-enters vim insert mode after the rewind.
-
-## `smelt.session.title`
-
-```lua
-fun(): string?
-```
-
-Session title (a short summary derived from the first user message), or `nil` until the engine assigns one.
 
 ## `smelt.session.turns`
 

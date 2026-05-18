@@ -42,6 +42,21 @@ smelt.settings.redact_secrets = true
 See the [Configuration Reference](../reference/configuration.md#settings) for
 every key and default.
 
+## Per-plugin Model Preferences
+
+Bundled plugins (title generation, compaction, prediction, `/btw`,
+`web_fetch`) read their preferred model from
+`smelt.model.preferred("<name>")` and fall back to the primary when unset:
+
+```lua
+smelt.model.preferred("title", "openai/gpt-5-mini")
+smelt.model.preferred("compact", "anthropic/claude-haiku")
+```
+
+The model must be registered under a provider. Custom plugins can pick any
+name they like to expose the same override pattern to users.
+
+
 ## Themes
 
 Built-in accent presets:

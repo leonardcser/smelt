@@ -81,6 +81,11 @@ impl TuiApp {
         self.core.cells.clear_lua_subscribers();
         self.core.timers.clear();
         self.paint_registry.clear();
+        // `smelt.spinner.busy` tokens are Reg-managed but reload wipes
+        // the closures holding the Reg userdata before `:remove()` runs.
+        // Clear here to match the timers/cells idiom and avoid leaking
+        // entries until process exit.
+        self.busy_stack = crate::app::BusyStack::default();
         // Anonymous overlays/wins/bufs from the previous cycle. Named
         // resources (`opts.name = "..."`) survive — plugins recover
         // them by re-passing the same name on re-open.
@@ -89,14 +94,6 @@ impl TuiApp {
             self.lua.remove_callback(id);
         }
         self.picker_state.clear();
-    }
-
-    pub(crate) fn compact_or_notify(&mut self, instructions: Option<String>) {
-        if self.core.session.messages.is_empty() {
-            self.notify_error("nothing to compact".into());
-        } else {
-            self.compact_history(instructions);
-        }
     }
 
     /// Rewind to a transcript block, or restore Vim Insert mode when `block_idx` is `None`.

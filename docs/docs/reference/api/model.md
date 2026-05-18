@@ -14,3 +14,11 @@ fun(): table
 
 Return an array of `{ key, name, provider }` records for every model the active config can switch to.
 
+## `smelt.model.preferred`
+
+```lua
+fun(name: any, value: any): any
+```
+
+
+

@@ -1,6 +1,5 @@
 use crate::app::TuiApp;
 use smelt_core::session;
-use smelt_core::working::{TurnOutcome, TurnPhase};
 use smelt_core::{Block, ToolOutput, ToolState, ToolStatus};
 
 use protocol::{AgentMode, Content, Message, Role, UiCommand};
@@ -126,8 +125,6 @@ impl TuiApp {
         self.input.store.lock().unwrap().clear();
         self.core.processes.clear();
         self.core.session = session::Session::new(self.core.env.pid(), self.core.env.cwd());
-        self.pending_title = false;
-        self.compact_epoch += 1;
         if let Ok(mut guard) = self.shared_session.lock() {
             *guard = None;
         }
@@ -204,9 +201,7 @@ impl TuiApp {
         let mut pctx = crate::input::prompt_ctx_mut(&mut self.ui);
         self.input.clear(&mut pctx);
         self.input.store.lock().unwrap().clear();
-        self.pending_title = false;
         self.core.processes.clear();
-        self.compact_epoch += 1;
         self.sync_session_snapshot();
         self.core
             .cells
@@ -389,94 +384,14 @@ impl TuiApp {
         self.persister.flush();
     }
 
-    pub(crate) fn maybe_generate_title(&mut self, current_message: Option<&str>) {
-        if self.pending_title {
-            engine::log::entry(
-                engine::log::Level::Debug,
-                "title_skip",
-                &serde_json::json!({"reason": "pending"}),
-            );
-            return;
-        }
-        let last_user_idx = self
-            .core
-            .session
-            .messages
-            .iter()
-            .rposition(|m| matches!(m.role, protocol::Role::User));
-        let last_user_message = match (last_user_idx, current_message) {
-            (_, Some(msg)) if !msg.is_empty() => msg.to_string(),
-            (Some(i), _) => self
-                .core
-                .session
-                .messages
-                .get(i)
-                .and_then(|m| m.content.as_ref())
-                .map(|c| c.text_content().into_owned())
-                .unwrap_or_default(),
-            _ => String::new(),
-        };
-        if last_user_message.is_empty() {
-            engine::log::entry(
-                engine::log::Level::Debug,
-                "title_skip",
-                &serde_json::json!({"reason": "no_user_messages"}),
-            );
-            return;
-        }
-        let tail_start = last_user_idx.map(|i| i + 1).unwrap_or(0);
-        let mut assistant_tail: String = self.core.session.messages[tail_start..]
-            .iter()
-            .filter(|m| matches!(m.role, protocol::Role::Assistant))
-            .filter_map(|m| m.content.as_ref().map(|c| c.text_content()))
-            .filter(|t| !t.is_empty())
-            .collect::<Vec<_>>()
-            .join("\n");
-        if assistant_tail.len() > 1000 {
-            let cut = assistant_tail.len() - 1000;
-            let boundary = assistant_tail.ceil_char_boundary(cut);
-            assistant_tail = assistant_tail[boundary..].to_string();
-        }
-        engine::log::entry(
-            engine::log::Level::Info,
-            "title_generate",
-            &serde_json::json!({
-                "user_chars": last_user_message.len(),
-                "assistant_chars": assistant_tail.len(),
-                "current_title": self.core.session.title,
-            }),
-        );
-        self.pending_title = true;
-        self.core.engine.send(UiCommand::GenerateTitle {
-            last_user_message,
-            assistant_tail,
-        });
-    }
-
-    pub(crate) fn is_compacting(&self) -> bool {
-        self.working.is_compacting()
-    }
-
-    pub(crate) fn compact_history(&mut self, instructions: Option<String>) {
-        self.pending_compact_epoch = self.compact_epoch;
-        {
-            self.working.begin(TurnPhase::Compacting);
-        };
-        self.core.engine.send(UiCommand::Compact {
-            history: self.core.session.messages.clone(),
-            instructions,
-        });
-    }
-
-    pub(crate) fn apply_compaction(&mut self, messages: Vec<protocol::Message>) {
+    /// Atomically replace `session.messages` with `messages`. Clears token /
+    /// cost / turn-meta snapshots (they key into pre-replacement positions),
+    /// resets `context_tokens`, repaints the screen, and saves the session.
+    /// No-op when `messages` is empty.
+    pub(crate) fn replace_messages(&mut self, messages: Vec<protocol::Message>) {
         if messages.is_empty() {
-            {
-                self.working.finish(TurnOutcome::Done);
-            };
             return;
         }
-
-        // Old snapshots key into pre-compaction positions; running cost carries forward.
         self.core.session.messages = messages;
         self.core.session.token_snapshots.clear();
         self.core.session.cost_snapshots.clear();
@@ -485,25 +400,7 @@ impl TuiApp {
 
         self.restore_screen();
         self.save_session();
-        {
-            self.working.finish(TurnOutcome::Done);
-        };
         self.transcript_win_mut().scroll_to_bottom();
-    }
-
-    pub(crate) fn maybe_auto_compact(&mut self) {
-        if !self.core.config.settings.auto_compact {
-            return;
-        }
-        let Some(ctx) = self.core.config.context_window else {
-            return;
-        };
-        let Some(tokens) = self.core.session.context_tokens else {
-            return;
-        };
-        if tokens as u64 * 100 >= ctx as u64 * engine::compact_threshold_percent() {
-            self.compact_history(None);
-        }
     }
 
     pub(crate) fn rewind_to(
@@ -565,7 +462,6 @@ impl TuiApp {
             self.core.session.token_snapshots.last().map(|&(_, t)| t);
         self.truncate_to(block_idx);
         self.reset_session_permissions();
-        self.compact_epoch += 1;
 
         turn_text.map(|t| (t, images))
     }

@@ -73,18 +73,32 @@
 ---@field startup_ok? boolean If true, the command may run before the runtime has finished bootstrapping. Defaults to `false`.
 ---@field hidden? boolean If true, the command is hidden from `/help` and the picker (still callable). Defaults to `false`.
 
+--- Typed error table delivered to `on_response` when the underlying provider call fails. `kind` is a stable string the caller can branch on; `message` is a human-readable single-line description. The struct exists purely as a doc / LuaCATS schema target — the actual table is built in `LuaRuntime::fire_ask_callback` because it lands on a callback path that bypasses `FromLua` decoding.
+---@class smelt.engine.AskError
+---@field kind string One of `"network" | "rate_limited" | "quota" | "invalid_response" | "context_window" | "cancelled" | "other"`.
+---@field message string Human-readable single-line description (newlines collapsed to spaces).
+
 --- One message in a `smelt.engine.ask` conversation.
 ---@class smelt.engine.AskMessage
 ---@field role string Either `"user"` or `"assistant"`. Other roles are silently dropped.
 ---@field content string Message body as plain text.
+
+--- Structured JSON-output specification for `smelt.engine.ask`.
+---@class smelt.engine.AskResponseFormat
+---@field name string Schema name (used by some providers as the response_format label).
+---@field schema table JSON schema describing the expected response shape. Accepts a Lua table that round-trips through `lua_table_to_json` into a JSON value.
 
 --- Spec for `smelt.engine.ask`.
 ---@class smelt.engine.AskSpec
 ---@field system string System prompt sent before the conversation.
 ---@field messages? smelt.engine.AskMessage[] Prior turns. Each message is `{ role = "user"|"assistant", content = "..." }`.
 ---@field question? string Single-shot question appended as a final user message after `messages`.
----@field task? smelt.engine.AskTask Routing tag; defaults to `"btw"`.
----@field on_response? fun(value: string) Fires once with the assistant's reply string.
+---@field model? string Model reference (`"provider/model"` or a bare name resolved against the configured providers). When `nil`, falls back to the primary model.
+---@field response_format? smelt.engine.AskResponseFormat JSON-schema response constraint.
+---@field reasoning_effort? smelt.reasoning.Effort Reasoning effort for the request; defaults to `"off"`.
+---@field trim_on_overflow? boolean When `true`, the engine wraps the call in a trim-on-overflow loop: on context-window errors it drops the oldest message (preserving the system prompt at index 0) and retries, up to `max_trims` times. Defaults to `false`.
+---@field max_trims? integer Maximum number of trim-and-retry passes; only consulted when `trim_on_overflow` is true. Defaults to 20.
+---@field on_response? fun(arg1: string, arg2: smelt.engine.AskError?) Fires once with `(content, err)`. On success `err` is `nil` and `content` carries the assistant text. On failure `err` is a `smelt.engine.AskError` table and `content` is `""`.
 
 --- Front-matter override block accepted by `smelt.engine.submit_command`. Mirrors what plugin commands set in their markdown header. Tool-name keys (e.g. `bash`, `edit`) become per-subcommand pattern buckets.
 ---@class smelt.engine.CommandOverrides
@@ -241,9 +255,6 @@
 
 --- Type of CLI flag declared via `smelt.cli.register_flag`. Matches the subset of clap that we expose to Lua.
 ---@alias smelt.cli.FlagKind "boolean"|"string"|"integer"
-
---- Tag for the kind of side request `smelt.engine.ask` is making. Used by the engine for bookkeeping (cost grouping, cancellation scope); the request runs against the primary model.
----@alias smelt.engine.AskTask "title"|"prediction"|"compaction"|"btw"
 
 --- Agent mode string literal.
 ---@alias smelt.mode.Mode "normal"|"plan"|"apply"|"yolo"

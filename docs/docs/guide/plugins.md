@@ -67,9 +67,11 @@ open are deferred to the next quiet window.
 
 | Plugin | Autoloaded | What it does |
 | --- | --- | --- |
+| `compact` | yes | Owns `/compact` and post-turn auto-compaction (uses `smelt.engine.ask` with `trim_on_overflow`, drives the status spinner via `smelt.spinner.busy`) |
 | `esc_chord` | yes | `<Esc><Esc>` to cancel `/compact` or rewind a turn |
 | `perf_panel` | yes | F12 overlay with live duration percentiles |
 | `predict` | yes | After each turn, predicts your next message and shows it as ghost text |
+| `title` | yes | After each turn, generates a session title + slug if one isn't set |
 | `background_commands` | **opt-in** (experimental) | Adds `run_in_background` to `bash`, plus `read_process_output`, `stop_process`, and `/ps` |
 | `plan_mode` | **opt-in** | Wires up plan mode — registers `exit_plan_mode` and injects the plan-mode system prompt |
 

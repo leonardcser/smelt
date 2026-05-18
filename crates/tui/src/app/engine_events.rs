@@ -252,33 +252,8 @@ impl TuiApp {
                 self.handle_process_completed(id, exit_code);
                 SessionControl::Continue
             }
-            EngineEvent::CompactionComplete { messages } => {
-                // Refuse to apply compaction while tools are still in flight:
-                // `apply_compaction` rebuilds the transcript from scratch,
-                // which clears `tool_states` for every pending tool and
-                // leaves their widgets orphaned in `agent.pending` forever.
-                // The conversation stays uncompacted this round; the engine
-                // can resend after the turn settles.
-                let pending_tools = !pending.is_empty();
-                if self.pending_compact_epoch != self.compact_epoch || pending_tools {
-                    {
-                        self.working.finish(TurnOutcome::Done);
-                    };
-                    return SessionControl::Continue;
-                }
-                self.apply_compaction(messages);
-                SessionControl::Continue
-            }
-            EngineEvent::TitleGenerated { title, slug } => {
-                self.handle_title_generated(title, slug);
-                SessionControl::Continue
-            }
-            EngineEvent::BtwResponse { content } => {
-                let _ = content;
-                SessionControl::Continue
-            }
-            EngineEvent::EngineAskResponse { id, content } => {
-                self.lua.fire_callback(id, &content);
+            EngineEvent::EngineAskResponse { id, content, error } => {
+                self.lua.fire_ask_callback(id, &content, error);
                 SessionControl::Continue
             }
             EngineEvent::Messages {
@@ -398,22 +373,8 @@ impl TuiApp {
             self.set_history(messages);
             self.save_session();
         }
-        EngineEvent::CompactionComplete { messages } => {
-            if self.pending_compact_epoch != self.compact_epoch {
-                self.working
-                        .finish(TurnOutcome::Done);
-                return;
-            }
-            self.apply_compaction(messages);
-        }
-        EngineEvent::TitleGenerated { title, slug } => {
-            self.handle_title_generated(title, slug);
-        }
-        EngineEvent::BtwResponse { content } => {
-            let _ = content;
-        }
-        EngineEvent::EngineAskResponse { id, content } => {
-            self.lua.fire_callback(id, &content);
+        EngineEvent::EngineAskResponse { id, content, error } => {
+            self.lua.fire_ask_callback(id, &content, error);
         }
         EngineEvent::ProcessCompleted { id, exit_code } => {
             self.handle_process_completed(id, exit_code);

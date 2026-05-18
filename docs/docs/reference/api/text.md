@@ -6,6 +6,22 @@
 
 Visual-width measurement. UiHost-only.
 
+## `smelt.text.slugify`
+
+```lua
+fun(s: string): string
+```
+
+Lowercase `s`, replace non-alphanumeric runs with `-`, drop empty segments. Same algorithm the title plugin uses for fallback slugs.
+
+## `smelt.text.truncate`
+
+```lua
+fun(s: string, max_bytes: integer, suffix: string?): string
+```
+
+Truncate `s` to at most `max_bytes`, snapping to the previous UTF-8 char boundary. Returns `s` unchanged when it already fits; appends `suffix` when provided and truncation actually occurred.
+
 ## `smelt.text.width`
 
 ```lua

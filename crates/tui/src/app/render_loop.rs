@@ -13,7 +13,7 @@ impl TuiApp {
 
         let (term_w, term_h) = self.ui.terminal_size();
         let width = term_w as usize;
-        let show_queued = agent_running || self.is_compacting();
+        let show_queued = agent_running || self.busy_stack.is_busy();
 
         self.adjust_tail_scroll();
         self.ui.sync_scroll_links();

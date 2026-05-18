@@ -7,6 +7,14 @@
 ---@class smelt.text
 local text = {}
 
+--- Lowercase `s`, replace non-alphanumeric runs with `-`, drop empty segments. Same algorithm the title plugin uses for fallback slugs.
+---@type fun(s: string): string
+text.slugify = nil
+
+--- Truncate `s` to at most `max_bytes`, snapping to the previous UTF-8 char boundary. Returns `s` unchanged when it already fits; appends `suffix` when provided and truncation actually occurred.
+---@type fun(s: string, max_bytes: integer, suffix: string?): string
+text.truncate = nil
+
 --- Return the visual column count of `s`. Lua's `#s` counts bytes; use this for sizing extmark ranges or computing column offsets so multi-byte and wide characters land correctly.
 ---@type fun(s: string): integer
 text.width = nil

@@ -1,14 +1,13 @@
-use crate::compact::{self, CompactOptions, CompactPhase, CompactReason, InitialContextInjection};
 use crate::log;
 use crate::provider::{self, ChatOptions, FunctionSchema, Provider, ProviderError, ToolDefinition};
 use crate::tools::{ToolContext, ToolDispatcher, ToolResult};
 #[cfg(test)]
 use crate::ModelConfig;
-use crate::{ApiConfig, AuxiliaryTask, EngineConfig};
+use crate::{ApiConfig, EngineConfig};
 use protocol::Decision;
 use protocol::{
-    AgentMode, Content, EngineEvent, Message, ReasoningEffort, Role, ToolOutcome, TurnMeta,
-    UiCommand,
+    AgentMode, AskModel, Content, EngineAskError, EngineAskErrorKind, EngineEvent, Message,
+    ReasoningEffort, Role, ToolOutcome, TurnMeta, UiCommand,
 };
 use serde_json::Value;
 use std::collections::HashMap;
@@ -16,8 +15,6 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use std::time::Instant;
 use tokio::sync::mpsc;
-
-use crate::compact_threshold_percent;
 
 static NEXT_REQUEST_ID: AtomicU64 = AtomicU64::new(1);
 
@@ -97,85 +94,32 @@ pub(crate) async fn engine_task(
                             tps_samples: Vec::new(),
                             tool_elapsed: HashMap::new(),
                             context_window,
-                            compacted_this_turn: false,
                         };
                         turn.run(input_content, history).await;
                         context_window = turn.context_window;
-                    }
-                    UiCommand::Compact { history, instructions } => {
-                        let request = config.aux_or_primary(AuxiliaryTask::Compaction);
-                        let provider = build_provider(
-                            &request.api,
-                            &client,
-                            None,
-                            None,
-                            None,
-                            std::sync::Arc::clone(&config.clock),
-                        );
-                        let cancel = crate::cancel::CancellationToken::new();
-                        match compact::run_compact(
-                            &provider,
-                            &history,
-                            &request.model,
-                            instructions.as_deref(),
-                            &cancel,
-                            CompactOptions {
-                                injection: InitialContextInjection::DoNotInject,
-                                phase: CompactPhase::Manual,
-                                reason: CompactReason::UserRequested,
-                            },
-                        )
-                        .await
-                        {
-                            Ok((messages, usage)) => {
-                                emit_usage_background(&event_tx, &request.api, &request.model, usage);
-                                let _ = event_tx.send(EngineEvent::CompactionComplete { messages });
-                            }
-                            Err(e) => {
-                                let msg = match e {
-                                    ProviderError::QuotaExceeded(_) => {
-                                        "API quota exceeded — check your plan and billing details".to_string()
-                                    }
-                                    _ => format!("compaction failed: {}", e.to_string().replace('\n', " ")),
-                                };
-                                let _ = event_tx.send(EngineEvent::TurnError { message: msg });
-                            }
-                        }
-                    }
-                    UiCommand::GenerateTitle {
-                        last_user_message,
-                        assistant_tail,
-                    } => {
-                        spawn_title_generation(
-                            &config,
-                            &client,
-                            last_user_message,
-                            assistant_tail,
-                            &event_tx,
-                        );
-                    }
-                    UiCommand::Btw {
-                        question,
-                        history,
-                        reasoning_effort,
-                    } => {
-                        spawn_btw_request(
-                            &config,
-                            &client,
-                            reasoning_effort,
-                            question,
-                            history,
-                            &event_tx,
-                        );
                     }
                     UiCommand::EngineAsk {
                         id,
                         system,
                         messages,
-                        task,
+                        model,
+                        response_format,
+                        reasoning_effort,
+                        trim_on_overflow,
+                        max_trims,
                     } => {
                         spawn_engine_ask(
-                            &config, &client, id, system, messages, task, &event_tx,
+                            &config,
+                            &client,
+                            id,
+                            system,
+                            messages,
+                            model,
+                            response_format,
+                            reasoning_effort,
+                            trim_on_overflow,
+                            max_trims,
+                            &event_tx,
                         );
                     }
                     UiCommand::SetModel { model, api_base, api_key, provider_type } => {
@@ -203,183 +147,156 @@ pub(crate) async fn engine_task(
     let _ = event_tx.send(EngineEvent::Shutdown { reason: None });
 }
 
-fn spawn_title_generation(
-    config: &EngineConfig,
-    client: &reqwest::Client,
-    last_user_message: String,
-    assistant_tail: String,
-    event_tx: &mpsc::UnboundedSender<EngineEvent>,
-) {
-    let request = config.aux_or_primary(AuxiliaryTask::Title);
-    let provider = build_provider(
-        &request.api,
-        client,
-        None,
-        None,
-        None,
-        std::sync::Arc::clone(&config.clock),
-    );
-    let pricing = PricingContext::from_api(&request.api);
-    let model = request.model;
-    let tx = event_tx.clone();
-    tokio::spawn(async move {
-        log::entry(
-            log::Level::Info,
-            "title_request",
-            &serde_json::json!({
-                "user_chars": last_user_message.len(),
-                "assistant_chars": assistant_tail.len(),
-                "model": &model,
-            }),
-        );
-        match provider
-            .complete_title(&last_user_message, &assistant_tail, &model)
-            .await
-        {
-            Ok(((ref title, ref slug), usage)) => {
-                pricing.emit(&tx, &model, usage);
-                log::entry(
-                    log::Level::Info,
-                    "title_result",
-                    &serde_json::json!({"title": title, "slug": slug}),
-                );
-                let _ = tx.send(EngineEvent::TitleGenerated {
-                    title: title.clone(),
-                    slug: slug.clone(),
-                });
-            }
-            Err(ref e) => {
-                log::entry(
-                    log::Level::Warn,
-                    "title_error",
-                    &serde_json::json!({"error": e.to_string()}),
-                );
-                if matches!(e, ProviderError::QuotaExceeded(_)) {
-                    let _ = tx.send(EngineEvent::TurnError {
-                        message: "API quota exceeded — check your plan and billing details"
-                            .to_string(),
-                    });
-                    return;
-                }
-                let fallback = last_user_message
-                    .lines()
-                    .next()
-                    .filter(|l| !l.is_empty())
-                    .unwrap_or("Untitled");
-                let mut title = fallback.to_string();
-                if title.len() > 48 {
-                    title.truncate(title.floor_char_boundary(48));
-                }
-                let title = title.trim().to_string();
-                let slug = provider::slugify(&title);
-                let _ = tx.send(EngineEvent::TitleGenerated { title, slug });
-            }
-        }
-    });
+/// Resolve an `AskModel` override (or the primary) into `(ApiConfig, model_name)`.
+fn resolve_ask_target(config: &EngineConfig, model: Option<AskModel>) -> (ApiConfig, String) {
+    match model {
+        Some(m) => (
+            ApiConfig {
+                base: m.api_base,
+                key: m.api_key,
+                key_env: String::new(),
+                provider_type: m.provider_type,
+                model_config: config.api.model_config.clone(),
+            },
+            m.model,
+        ),
+        None => (config.api.clone(), config.model.clone()),
+    }
 }
 
-fn spawn_btw_request(
-    config: &EngineConfig,
-    client: &reqwest::Client,
-    reasoning_effort: protocol::ReasoningEffort,
-    question: String,
-    history: Vec<protocol::Message>,
-    event_tx: &mpsc::UnboundedSender<EngineEvent>,
-) {
-    let request = config.aux_or_primary(AuxiliaryTask::Btw);
-    let provider = build_provider(
-        &request.api,
-        client,
-        None,
-        None,
-        None,
-        std::sync::Arc::clone(&config.clock),
-    );
-    let pricing = PricingContext::from_api(&request.api);
-    let model = request.model;
-    let tx = event_tx.clone();
-    let redact = config.redact_secrets;
-    tokio::spawn(async move {
-        let cancel = crate::cancel::CancellationToken::new();
-
-        let question = if redact {
-            crate::redact::redact(&question)
-        } else {
-            question
-        };
-
-        let mut messages = Vec::with_capacity(history.len() + 2);
-        messages.push(protocol::Message::system(
-            "You are a helpful assistant. The user is asking a quick side question \
-             while working on something else. Answer concisely and directly. \
-             You have the conversation history for context.",
-        ));
-        messages.extend(history);
-        messages.push(protocol::Message::user(protocol::Content::text(&question)));
-
-        let content = match provider
-            .chat(
-                &messages,
-                &[],
-                &model,
-                reasoning_effort,
-                &ChatOptions::new(&cancel),
-            )
-            .await
-        {
-            Ok(resp) => {
-                pricing.emit(&tx, &model, resp.usage);
-                resp.content.unwrap_or_default()
-            }
-            Err(e) => format!("error: {e}"),
-        };
-        let _ = tx.send(EngineEvent::BtwResponse { content });
-    });
-}
-
+#[allow(clippy::too_many_arguments)]
 fn spawn_engine_ask(
     config: &EngineConfig,
     client: &reqwest::Client,
     id: u64,
     system: String,
     mut messages: Vec<protocol::Message>,
-    task: AuxiliaryTask,
+    model: Option<AskModel>,
+    response_format: Option<protocol::AskResponseFormat>,
+    reasoning_effort: ReasoningEffort,
+    trim_on_overflow: bool,
+    max_trims: u32,
     event_tx: &mpsc::UnboundedSender<EngineEvent>,
 ) {
-    let request = config.aux_or_primary(task);
+    let (api, model_name) = resolve_ask_target(config, model);
     let provider = build_provider(
-        &request.api,
+        &api,
         client,
         None,
         None,
         None,
         std::sync::Arc::clone(&config.clock),
     );
-    let pricing = PricingContext::from_api(&request.api);
-    let model = request.model;
+    let pricing = PricingContext::from_api(&api);
     let tx = event_tx.clone();
     tokio::spawn(async move {
         let cancel = crate::cancel::CancellationToken::new();
         messages.insert(0, protocol::Message::system(&system));
 
-        let content = match provider
-            .chat(
-                &messages,
-                &[],
-                &model,
-                protocol::ReasoningEffort::default(),
-                &ChatOptions::new(&cancel),
-            )
-            .await
-        {
-            Ok(resp) => {
-                pricing.emit(&tx, &model, resp.usage);
-                resp.content.unwrap_or_default()
+        let mut opts = ChatOptions::new(&cancel);
+        if let Some(fmt) = response_format {
+            opts.response_format = Some(crate::provider::ResponseFormat {
+                name: fmt.name,
+                schema: fmt.schema,
+            });
+        }
+
+        let mut trims_done: u32 = 0;
+        let result = loop {
+            match provider
+                .chat(&messages, &[], &model_name, reasoning_effort, &opts)
+                .await
+            {
+                Ok(resp) => break Ok(resp),
+                Err(e)
+                    if trim_on_overflow
+                        && is_context_window_error(&e)
+                        && trims_done < max_trims
+                        && messages.len() > 2 =>
+                {
+                    // Drop the oldest non-system message and retry.
+                    messages.remove(1);
+                    trims_done += 1;
+                    log::entry(
+                        log::Level::Warn,
+                        "engine_ask_trim_oldest",
+                        &serde_json::json!({
+                            "request_id": id,
+                            "trims_done": trims_done,
+                            "remaining_messages": messages.len(),
+                        }),
+                    );
+                    continue;
+                }
+                Err(e) => break Err(e),
             }
-            Err(e) => format!("error: {e}"),
         };
-        let _ = tx.send(EngineEvent::EngineAskResponse { id, content });
+
+        match result {
+            Ok(resp) => {
+                pricing.emit(&tx, &model_name, resp.usage);
+                let _ = tx.send(EngineEvent::EngineAskResponse {
+                    id,
+                    content: resp.content.unwrap_or_default(),
+                    error: None,
+                });
+            }
+            Err(e) => {
+                let kind = classify_provider_error(&e);
+                let message = e.to_string().replace('\n', " ");
+                let _ = tx.send(EngineEvent::EngineAskResponse {
+                    id,
+                    content: String::new(),
+                    error: Some(EngineAskError { kind, message }),
+                });
+            }
+        }
     });
+}
+
+/// Map a provider error to a stable `EngineAskErrorKind` for Lua callers.
+fn classify_provider_error(e: &ProviderError) -> EngineAskErrorKind {
+    match e {
+        ProviderError::Cancelled => EngineAskErrorKind::Cancelled,
+        ProviderError::QuotaExceeded(_) => EngineAskErrorKind::Quota,
+        ProviderError::Network(_) => EngineAskErrorKind::Network,
+        ProviderError::RateLimited { .. } => EngineAskErrorKind::RateLimited,
+        ProviderError::Server { .. } => {
+            if is_context_window_error(e) {
+                EngineAskErrorKind::ContextWindow
+            } else {
+                EngineAskErrorKind::Network
+            }
+        }
+        ProviderError::InvalidResponse(_) => {
+            if is_context_window_error(e) {
+                EngineAskErrorKind::ContextWindow
+            } else {
+                EngineAskErrorKind::InvalidResponse
+            }
+        }
+        ProviderError::Auth(_) | ProviderError::NotFound(_) | ProviderError::MaxRetries => {
+            EngineAskErrorKind::Other
+        }
+    }
+}
+
+/// True when the error indicates the model's context window was exceeded.
+/// Mirrors the body-substring check previously living in `compact.rs`.
+fn is_context_window_error(e: &ProviderError) -> bool {
+    let body = match e {
+        ProviderError::InvalidResponse(b) => b.as_str(),
+        ProviderError::Server { body, .. } => body.as_str(),
+        _ => return false,
+    };
+    let lower = body.to_ascii_lowercase();
+    lower.contains("context_length_exceeded")
+        || lower.contains("context length")
+        || lower.contains("context window")
+        || lower.contains("maximum context")
+        || lower.contains("prompt is too long")
+        || lower.contains("prompt too long")
+        || lower.contains("too many tokens")
 }
 
 fn build_provider(
@@ -453,7 +370,6 @@ struct Turn<'a> {
     tps_samples: Vec<f64>,
     tool_elapsed: HashMap<String, u64>,
     context_window: Option<u32>,
-    compacted_this_turn: bool,
 }
 
 impl<'a> Turn<'a> {
@@ -544,76 +460,18 @@ impl<'a> Turn<'a> {
         });
     }
 
-    /// Compact history when context crosses the threshold. Returns true if compaction ran.
-    /// Only fires once per turn.
-    async fn maybe_compact(&mut self, prompt_tokens: u32) -> bool {
-        if !self.config.auto_compact || self.compacted_this_turn {
-            return false;
-        }
+    /// Check whether prompt usage has crossed the context-window threshold.
+    /// Returns `true` when the caller should abort the turn with a
+    /// "context limit reached" `TurnError` so the user can run `/compact`.
+    async fn over_context_limit(&mut self, prompt_tokens: u32) -> bool {
         if self.context_window.is_none() {
             self.context_window = self.provider.fetch_context_window(&self.model).await;
         }
         let Some(ctx) = self.context_window else {
             return false;
         };
-        let threshold = compact_threshold_percent();
-        if (prompt_tokens as u64) * 100 < (ctx as u64) * threshold {
-            return false;
-        }
-        self.compacted_this_turn = true;
-        debug_assert!(
-            matches!(self.messages[0].role, Role::System),
-            "first message should be the system prompt"
-        );
-        let request = self.config.aux_or_primary(AuxiliaryTask::Compaction);
-        let provider = build_provider(
-            &request.api,
-            self.http_client,
-            None,
-            None,
-            None,
-            std::sync::Arc::clone(&self.config.clock),
-        );
-        let result = compact::run_compact(
-            &provider,
-            &self.messages[1..],
-            &request.model,
-            self.config.instructions.as_deref(),
-            &self.cancel,
-            CompactOptions {
-                injection: InitialContextInjection::BeforeLastUserMessage,
-                phase: CompactPhase::MidTurn,
-                reason: CompactReason::ContextLimit,
-            },
-        )
-        .await;
-        match result {
-            Ok((compacted, usage)) => {
-                emit_usage_background(self.event_tx, &request.api, &request.model, usage);
-                self.messages.truncate(1);
-                self.messages.extend(compacted);
-                self.emit_messages_snapshot();
-                log::entry(
-                    log::Level::Info,
-                    "mid_turn_compact",
-                    &serde_json::json!({
-                        "prompt_tokens": prompt_tokens,
-                        "context_window": ctx,
-                        "threshold_percent": threshold,
-                        "new_message_count": self.messages.len(),
-                    }),
-                );
-                true
-            }
-            Err(e) => {
-                log::entry(
-                    log::Level::Warn,
-                    "mid_turn_compact_error",
-                    &serde_json::json!({"error": e.to_string()}),
-                );
-                false
-            }
-        }
+        let threshold = crate::compact_threshold_percent();
+        (prompt_tokens as u64) * 100 >= (ctx as u64) * threshold
     }
 
     fn commit_partial_assistant(&mut self, text: String, reasoning: String) {
@@ -685,39 +543,15 @@ impl<'a> Turn<'a> {
     /// Handle a command that can be processed regardless of turn state.
     fn handle_background_cmd(&self, cmd: UiCommand) -> bool {
         match cmd {
-            UiCommand::GenerateTitle {
-                last_user_message,
-                assistant_tail,
-            } => {
-                spawn_title_generation(
-                    self.config,
-                    self.http_client,
-                    last_user_message,
-                    assistant_tail,
-                    self.event_tx,
-                );
-                true
-            }
-            UiCommand::Btw {
-                question,
-                history,
-                reasoning_effort,
-            } => {
-                spawn_btw_request(
-                    self.config,
-                    self.http_client,
-                    reasoning_effort,
-                    question,
-                    history,
-                    self.event_tx,
-                );
-                true
-            }
             UiCommand::EngineAsk {
                 id,
                 system,
                 messages,
-                task,
+                model,
+                response_format,
+                reasoning_effort,
+                trim_on_overflow,
+                max_trims,
             } => {
                 spawn_engine_ask(
                     self.config,
@@ -725,7 +559,11 @@ impl<'a> Turn<'a> {
                     id,
                     system,
                     messages,
-                    task,
+                    model,
+                    response_format,
+                    reasoning_effort,
+                    trim_on_overflow,
+                    max_trims,
                     self.event_tx,
                 );
                 true
@@ -926,8 +764,20 @@ impl<'a> Turn<'a> {
             }
 
             if let Some(tokens) = prompt_tokens {
-                if self.maybe_compact(tokens).await {
-                    continue;
+                if self.over_context_limit(tokens).await {
+                    log::entry(
+                        log::Level::Warn,
+                        "context_limit_reached",
+                        &serde_json::json!({
+                            "prompt_tokens": tokens,
+                            "context_window": self.context_window,
+                        }),
+                    );
+                    self.emit_turn_complete(false);
+                    self.emit(EngineEvent::TurnError {
+                        message: "Context limit reached. Run /compact and retry.".to_string(),
+                    });
+                    return;
                 }
             }
 
@@ -1833,24 +1683,6 @@ fn send_usage(
     });
 }
 
-/// Emit a background TokenUsage event; cost is tracked but doesn't update context display.
-fn emit_usage_background(
-    tx: &mpsc::UnboundedSender<EngineEvent>,
-    api: &crate::ApiConfig,
-    model: &str,
-    usage: protocol::TokenUsage,
-) {
-    send_usage(
-        tx,
-        &api.provider_type,
-        &api.model_config,
-        model,
-        usage,
-        None,
-        true,
-    );
-}
-
 #[derive(Clone)]
 struct PricingContext {
     provider_type: String,
@@ -1995,7 +1827,7 @@ mod tests {
         assert_eq!(cfg.top_k, Some(7));
     }
 
-    // ---- send_usage / emit_usage_background ----
+    // ---- send_usage ----
 
     #[test]
     fn send_usage_emits_token_usage_event_with_cost_when_pricing_resolves() {
@@ -2036,16 +1868,6 @@ mod tests {
         send_usage(&tx, "openai-compatible", &cfg, "model", usage, None, false);
         match rx.try_recv().unwrap() {
             EngineEvent::TokenUsage { cost_usd, .. } => assert!(cost_usd.is_none()),
-            _ => panic!("expected TokenUsage"),
-        }
-    }
-
-    #[test]
-    fn emit_usage_background_marks_event_as_background() {
-        let (tx, mut rx) = mpsc::unbounded_channel::<EngineEvent>();
-        emit_usage_background(&tx, &api_cfg(), "m", protocol::TokenUsage::default());
-        match rx.try_recv().unwrap() {
-            EngineEvent::TokenUsage { background, .. } => assert!(background),
             _ => panic!("expected TokenUsage"),
         }
     }

@@ -11,4 +11,8 @@ local parse = {}
 ---@type fun(content: string): any, string
 parse.frontmatter = nil
 
+--- Parse a JSON document into a Lua value. Returns the decoded value on success, `nil` on parse error. Objects become tables, arrays become 1-indexed tables, numbers become integers when they fit losslessly.
+---@type fun(content: string): any
+parse.json = nil
+
 return parse

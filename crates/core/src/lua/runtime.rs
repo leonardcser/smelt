@@ -783,25 +783,6 @@ impl LuaRuntime {
         items
     }
 
-    pub fn fire_callback(&self, id: u64, content: &str) {
-        let handle = {
-            let Ok(mut cbs) = self.shared.callbacks.lock() else {
-                return;
-            };
-            match cbs.remove(&id) {
-                Some(h) => h,
-                None => return,
-            }
-        };
-        let Ok(func) = self.lua.registry_value::<mlua::Function>(&handle.key) else {
-            return;
-        };
-        let _perf = smelt_perf::perf::begin("lua:ask_cb");
-        if let Err(e) = func.call::<()>(content.to_string()) {
-            self.record_error(format!("ask callback: {e}"));
-        }
-    }
-
     pub fn remove_callback(&self, id: u64) {
         if let Ok(mut cbs) = self.shared.callbacks.lock() {
             cbs.remove(&id);

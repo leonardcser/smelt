@@ -13,6 +13,17 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
         Tier::Host,
     )?;
     m.fn_(
+        "json",
+        "Parse a JSON document into a Lua value. Returns the decoded value on success, `nil` on parse error. Objects become tables, arrays become 1-indexed tables, numbers become integers when they fit losslessly.",
+        &["content"],
+        |lua, content: String| -> LuaResult<mlua::Value> {
+            match serde_json::from_str::<serde_json::Value>(&content) {
+                Ok(v) => json_to_lua(lua, v),
+                Err(_) => Ok(mlua::Value::Nil),
+            }
+        },
+    )?;
+    m.fn_(
         "frontmatter",
         "Split `---`-delimited YAML frontmatter from a markdown document. Returns `(frontmatter_table, body)` or `(nil, content)` when no frontmatter is present.",
         &["content"],
