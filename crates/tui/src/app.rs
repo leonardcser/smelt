@@ -769,7 +769,7 @@ impl TuiApp {
                 layout,
                 crate::smelt_term::layout::Anchor::Win {
                     target: crate::app::PROMPT_ABOVE_WIN.into(),
-                    attach: crate::smelt_term::Corner::NW,
+                    attach: crate::smelt_term::Align::NW,
                     row_offset: -1,
                     col_offset: 0,
                 },
@@ -881,7 +881,11 @@ impl TuiApp {
         // to react to their own CLI flags (declared via
         // `smelt.cli.register_flag` in `early/*.lua`) — e.g. `/resume` opens
         // its picker here rather than arriving through `initial_message`.
-        let errors = crate::lua::with_app_ptr(self, |app| app.lua.drain_lifecycle_hooks("ready"));
+        let errors = crate::lua::with_app_ptr(self, |app| {
+            app.lua.drain_lifecycle_hooks("ready", |lua| {
+                Ok::<mlua::Value, mlua::Error>(mlua::Value::Table(lua.create_table()?))
+            })
+        });
         for err in errors {
             self.notify_error(err);
         }

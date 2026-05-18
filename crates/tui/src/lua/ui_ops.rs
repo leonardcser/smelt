@@ -10,7 +10,7 @@
 //! writer of `Overlay::size_override`.
 
 use crate::app::TuiApp;
-use crate::smelt_term::layout::{Anchor, Corner, PaintId};
+use crate::smelt_term::layout::{Align, Anchor, Corner, PaintId};
 use crate::smelt_term::{Callback, CallbackResult, KeyBind, Overlay, Payload, WinEvent, WinId};
 use crossterm::event::{KeyCode, KeyModifiers};
 
@@ -95,6 +95,27 @@ pub(crate) fn open_overlay(app: &mut TuiApp, opts: mlua::Table) -> Result<u64, S
     Ok(id.0 as u64)
 }
 
+/// Accept `target = <integer>` or `target = <Win userdata>`. Used by the
+/// `anchor = "win"` / `"win_center"` paths so callers can hand the window
+/// handle straight through without an explicit `.id` accessor.
+fn parse_win_target(opts: &mlua::Table) -> Result<u64, String> {
+    let raw: mlua::Value = opts
+        .get("target")
+        .map_err(|e| format!("anchor = 'win' requires target = <win or win_id>: {e}"))?;
+    match raw {
+        mlua::Value::Integer(n) if n >= 0 => Ok(n as u64),
+        mlua::Value::Number(n) if n >= 0.0 => Ok(n as u64),
+        mlua::Value::UserData(ud) => ud
+            .borrow::<crate::lua::api::win::LuaWin>()
+            .map(|w| w.id.0)
+            .map_err(|e| format!("anchor = 'win': target userdata is not a Win: {e}")),
+        other => Err(format!(
+            "anchor = 'win': target must be a Win handle or integer id, got {}",
+            other.type_name()
+        )),
+    }
+}
+
 /// Parse `opts.anchor` (plus anchor-specific extras) directly into a
 /// `term::Anchor`. The four dock variants reserve the bottom statusline row
 /// via `ScreenBottom { above_rows: 1 }` (bottom) or by anchoring at row 0 +
@@ -142,15 +163,17 @@ fn parse_overlay_anchor(opts: &mlua::Table, term_w: u16, term_h: u16) -> Result<
             })
         }
         Some("win") => {
-            let target_id: u64 = opts
-                .get("target")
-                .map_err(|e| format!("anchor = 'win' requires target = <win_id>: {e}"))?;
+            let target_id: u64 = parse_win_target(opts)?;
+            let target = PaintId::from(WinId(target_id));
+            // `attach` selects one of nine alignment points inside the
+            // target rect (`nw|n|ne|w|center|e|sw|s|se`); the same point on
+            // the overlay rect is mapped to it. Defaults to `nw`.
             let attach =
-                crate::lua::parse::corner(opts.get::<String>("attach").ok().as_deref(), Corner::NW);
+                crate::lua::parse::align(opts.get::<String>("attach").ok().as_deref(), Align::NW)?;
             let row_offset: i32 = opts.get("row_offset").unwrap_or(0);
             let col_offset: i32 = opts.get("col_offset").unwrap_or(0);
             Ok(Anchor::Win {
-                target: PaintId::from(WinId(target_id)),
+                target,
                 attach,
                 row_offset,
                 col_offset,

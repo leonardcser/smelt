@@ -85,6 +85,19 @@ impl FromLua for LuaWin {
     }
 }
 
+/// Built-in window ids are owned by the app shell; closing them through Lua
+/// would tear down the chrome the host depends on, so `Win:close()` no-ops
+/// for these. Plugin-owned overlay leaves close normally.
+fn is_builtin_win(id: crate::smelt_term::WinId) -> bool {
+    matches!(
+        id,
+        crate::app::TRANSCRIPT_WIN
+            | crate::app::PROMPT_WIN
+            | crate::app::PROMPT_ABOVE_WIN
+            | crate::app::PROMPT_BELOW_WIN
+    )
+}
+
 impl mlua::UserData for LuaWin {
     fn add_methods<M: mlua::UserDataMethods<Self>>(methods: &mut M) {
         methods.add_meta_method(mlua::MetaMethod::ToString, |_, this, ()| {
@@ -93,6 +106,9 @@ impl mlua::UserData for LuaWin {
 
         // ── close / focus ──────────────────────────────────────────
         methods.add_method("close", |_, this, ()| -> LuaResult<()> {
+            if is_builtin_win(this.id) {
+                return Ok(());
+            }
             crate::lua::with_app(|app| {
                 app.close_overlay_leaf(this.id);
             });
@@ -328,6 +344,13 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
          -> LuaResult<Option<LuaWin>> {
             Ok(open_or_refresh(buf.id, opts.as_ref())?.map(|id| LuaWin { id }))
         },
+    )?;
+
+    m.fn_(
+        "transcript",
+        "Return a `Win` handle for the built-in transcript window. Useful as an `anchor = \"win\"` / `\"win_center\"` target so plugins can float overlays over the transcript without hard-coding its id.",
+        &[],
+        |_, ()| -> LuaResult<LuaWin> { Ok(LuaWin { id: crate::app::TRANSCRIPT_WIN }) },
     )?;
 
     Ok(())

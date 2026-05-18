@@ -304,8 +304,11 @@ async fn main() {
             let _ = crossterm::terminal::disable_raw_mode();
             let _ = std::io::stdout().execute(crossterm::event::DisableBracketedPaste);
             let _ = std::io::stdout().execute(crossterm::event::DisableFocusChange);
+            // SIGINT / SIGTERM bypass the normal exit path, so the Lua
+            // `"shutdown"` hooks never fire here. Print a no-frills resume
+            // hint as a fallback so the user can still recover the session.
             if let Some(id) = session_id {
-                tui::print_resume_hint(&id);
+                eprintln!("\nresume with:\nsmelt --resume {id}\n");
             }
             std::process::exit(0);
         });
@@ -536,8 +539,15 @@ async fn main() {
 
         println!();
         app.run(ctx_rx, args.message).await;
-        if !app.core.session.messages.is_empty() {
-            tui::print_resume_hint(&app.core.session.id);
+        // Fire `smelt.lifecycle.on("shutdown", fn)` hooks. The TUI is torn
+        // down at this point so stdout is in cooked mode — plugins (e.g.
+        // the bundled resume-hint banner) can `print(...)` straight to the
+        // user's terminal scrollback.
+        let session_id = app.core.session.id.clone();
+        let has_messages = !app.core.session.messages.is_empty();
+        let errs = app.lua.drain_shutdown_hooks(&session_id, has_messages);
+        for err in errs {
+            eprintln!("smelt: lifecycle.shutdown: {err}");
         }
     }
     smelt_perf::perf::print_summary();

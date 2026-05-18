@@ -1,6 +1,6 @@
 //! Overlay stories.
 
-use tui::smelt_term::layout::{Anchor, Border, Constraint, Corner, Gutters};
+use tui::smelt_term::layout::{Align, Anchor, Border, Constraint, Corner, Gutters};
 use tui::smelt_term::{LayoutTree, Overlay, SplitConfig};
 
 fn pane(region: &str) -> SplitConfig {
@@ -229,7 +229,7 @@ story!(anchor_win_attaches_above_target, |ctx| {
         layout,
         Anchor::Win {
             target: wb.into(),
-            attach: Corner::NW,
+            attach: Align::NW,
             row_offset: -1,
             col_offset: 0,
         },

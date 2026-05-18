@@ -22,8 +22,8 @@ pub use smelt_buffer::clipboard::Clipboard;
 pub use smelt_buffer::undo::{UndoEntry, UndoHistory};
 
 pub use smelt_term::{
-    flush_diff, paint_layout_tree, Border, Cell, CellUpdate, Color, Compositor, Constraint, Corner,
-    Grid, GridSlice, Gutters, HitRegistry, LayoutTree, Line, PaintDispatch, PaintId, Rect,
+    flush_diff, paint_layout_tree, Align, Border, Cell, CellUpdate, Color, Compositor, Constraint,
+    Corner, Grid, GridSlice, Gutters, HitRegistry, LayoutTree, Line, PaintDispatch, PaintId, Rect,
     SnapshotFrame, Span, Style, Theme, DEFAULT_ACCENT,
 };
 pub use smelt_term::{grid, layout};
@@ -2033,7 +2033,7 @@ mod tests {
             5,
             layout::Anchor::Win {
                 target: WinId(999).into(),
-                attach: Corner::NW,
+                attach: layout::Align::NW,
                 row_offset: 0,
                 col_offset: 0,
             },

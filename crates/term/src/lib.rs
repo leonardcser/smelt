@@ -24,7 +24,7 @@ pub use flush::flush_diff;
 pub use grid::{Cell, CellUpdate, Grid, GridSlice, Style};
 pub use hit::HitRegistry;
 pub use layout::{
-    Border, Constraint, Corner, Gutters, LayoutTree, LeafSizer, NoopSizer, PaintId, Rect,
+    Align, Border, Constraint, Corner, Gutters, LayoutTree, LeafSizer, NoopSizer, PaintId, Rect,
 };
 pub use line::{Line, Span};
 pub use smelt_style::style::Color;

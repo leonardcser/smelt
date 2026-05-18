@@ -308,13 +308,44 @@ fn natural_box(
     (w.min(cap_w), h.min(cap_h))
 }
 
-/// Which corner of a rectangle serves as its anchor point.
+/// Which corner of a rectangle serves as its anchor point. Used by
+/// `ScreenAt` and `Cursor` (whose flip-on-overflow logic specifically
+/// pivots on real corners). For window-relative anchoring see [`Align`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Corner {
     NW,
     NE,
     SW,
     SE,
+}
+
+/// 9-point alignment inside a rectangle. Used by `Anchor::Win`: the
+/// chosen alignment picks the same point on both the target and the
+/// overlay, so `Center` places the overlay's center on the target's
+/// center, `NW` flush-mounts top-left to top-left, `N` puts the
+/// overlay's top edge midpoint on the target's top edge midpoint, etc.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Align {
+    NW,
+    N,
+    NE,
+    W,
+    Center,
+    E,
+    SW,
+    S,
+    SE,
+}
+
+impl From<Corner> for Align {
+    fn from(c: Corner) -> Self {
+        match c {
+            Corner::NW => Align::NW,
+            Corner::NE => Align::NE,
+            Corner::SW => Align::SW,
+            Corner::SE => Align::SE,
+        }
+    }
 }
 
 /// Screen position for an anchored overlay. Carries position only;
@@ -331,10 +362,16 @@ pub enum Anchor {
         row_offset: i32,
         col_offset: i32,
     },
-    /// Anchored to another window; `attach` corner aligns to the target's edge.
+    /// Anchored to another window. `attach` picks the alignment point on
+    /// both the target rect and the overlay rect — see [`Align`]. `NW`
+    /// flush-mounts top-left; `Center` centers the overlay inside the
+    /// target; `N`/`S`/`E`/`W` align the overlay's matching edge midpoint
+    /// to the target's. `row_offset`/`col_offset` nudge the resolved rect
+    /// away from the alignment point — useful for compensating chrome
+    /// rows (gutter, status line) the host adds inside the target.
     Win {
         target: PaintId,
-        attach: Corner,
+        attach: Align,
         row_offset: i32,
         col_offset: i32,
     },

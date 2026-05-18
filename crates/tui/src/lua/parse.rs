@@ -423,6 +423,33 @@ pub(crate) fn corner(name: Option<&str>, default: Corner) -> Corner {
     }
 }
 
+/// Parse a 9-point alignment string into an [`Align`]. Accepts
+/// `"nw"|"n"|"ne"|"w"|"center"|"e"|"sw"|"s"|"se"` (case-insensitive).
+/// Falls back to `default` when `name` is `None`; an unknown name errors.
+pub(crate) fn align(
+    name: Option<&str>,
+    default: crate::smelt_term::Align,
+) -> Result<crate::smelt_term::Align, String> {
+    use crate::smelt_term::Align;
+    let Some(raw) = name else {
+        return Ok(default);
+    };
+    match raw.to_ascii_lowercase().as_str() {
+        "nw" => Ok(Align::NW),
+        "n" => Ok(Align::N),
+        "ne" => Ok(Align::NE),
+        "w" => Ok(Align::W),
+        "center" | "c" => Ok(Align::Center),
+        "e" => Ok(Align::E),
+        "sw" => Ok(Align::SW),
+        "s" => Ok(Align::S),
+        "se" => Ok(Align::SE),
+        other => Err(format!(
+            "unknown alignment '{other}' (expected nw|n|ne|w|center|e|sw|s|se)"
+        )),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="docs/docs/logo.png" alt="smelt logo" width="150">
+  <img src="docs/docs/logo-full.svg" alt="smelt logo" width="360">
 </p>
 
 <h1 align="center">smelt</h1>

@@ -691,18 +691,46 @@ impl LuaRuntime {
 
     /// Invoke every `smelt.lifecycle.on(event, fn)` callback in registration
     /// order, then drop them. The host calls this at the corresponding phase
-    /// (today: `"ready"` after Lua bootstrap and argv parse, before the main
-    /// loop). Per-hook errors are returned so the caller can surface them as
-    /// in-app notifications without aborting the remaining hooks.
-    pub fn drain_lifecycle_hooks(&mut self, event: &str) -> Vec<String> {
+    /// — `"ready"` after Lua bootstrap and argv parse, `"shutdown"` after the
+    /// TUI tears down but before the process exits. Per-hook errors are
+    /// returned so the caller can surface them as in-app notifications without
+    /// aborting the remaining hooks.
+    ///
+    /// `build_ctx` constructs the per-event ctx table fresh inside the Lua
+    /// runtime borrow. Pass `|_| Ok(mlua::Value::Nil)` for events that don't
+    /// need a ctx.
+    pub fn drain_lifecycle_hooks<F>(&mut self, event: &str, build_ctx: F) -> Vec<String>
+    where
+        F: Fn(&mlua::Lua) -> mlua::Result<mlua::Value>,
+    {
         let hooks = self.shared.hooks.lifecycle.drain_for(&self.lua, event);
         let mut errors = Vec::with_capacity(hooks.len());
         for f in hooks {
-            if let Err(e) = f.call::<()>(()) {
+            let ctx = match build_ctx(&self.lua) {
+                Ok(v) => v,
+                Err(e) => {
+                    errors.push(format!("lifecycle.{event}: ctx build: {e}"));
+                    continue;
+                }
+            };
+            if let Err(e) = f.call::<()>(ctx) {
                 errors.push(format!("lifecycle.{event}: {e}"));
             }
         }
         errors
+    }
+
+    /// Convenience over [`drain_lifecycle_hooks`] for the `"shutdown"` event:
+    /// builds the standard `{ session_id, has_messages }` ctx so the binary
+    /// crate doesn't need a direct `mlua` dependency.
+    pub fn drain_shutdown_hooks(&mut self, session_id: &str, has_messages: bool) -> Vec<String> {
+        let sid = session_id.to_string();
+        self.drain_lifecycle_hooks("shutdown", |lua| {
+            let t = lua.create_table()?;
+            t.set("session_id", sid.as_str())?;
+            t.set("has_messages", has_messages)?;
+            Ok(mlua::Value::Table(t))
+        })
     }
 
     pub fn command_blocks_while_busy(&self, name: &str) -> Option<bool> {
@@ -1950,7 +1978,7 @@ mod tests {
             .exec()
             .expect("register hooks");
 
-        let errs = rt.drain_lifecycle_hooks("ready");
+        let errs = rt.drain_lifecycle_hooks("ready", |_| Ok(mlua::Value::Nil));
         assert!(errs.is_empty(), "no per-hook errors expected, got {errs:?}");
         let log: Vec<String> = rt
             .lua
@@ -1960,7 +1988,7 @@ mod tests {
         assert_eq!(log, vec!["a".to_string(), "b".to_string()]);
 
         // Second drain returns nothing — hooks are one-shot.
-        let again = rt.drain_lifecycle_hooks("ready");
+        let again = rt.drain_lifecycle_hooks("ready", |_| Ok(mlua::Value::Nil));
         assert!(again.is_empty());
         assert!(rt.shared.hooks.lifecycle.is_empty());
     }
@@ -1968,8 +1996,42 @@ mod tests {
     #[test]
     fn lifecycle_unknown_event_drains_to_empty() {
         let mut rt = LuaRuntime::new();
-        let errs = rt.drain_lifecycle_hooks("never_emitted");
+        let errs = rt.drain_lifecycle_hooks("never_emitted", |_| Ok(mlua::Value::Nil));
         assert!(errs.is_empty());
+    }
+
+    #[test]
+    fn lifecycle_passes_ctx_table_to_hook() {
+        let mut rt = LuaRuntime::new();
+        rt.lua
+            .load(
+                r#"
+                LIFECYCLE_CTX = nil
+                smelt.lifecycle.on("shutdown", function(ctx) LIFECYCLE_CTX = ctx end)
+                "#,
+            )
+            .exec()
+            .expect("register");
+
+        let errs = rt.drain_lifecycle_hooks("shutdown", |lua| {
+            let t = lua.create_table()?;
+            t.set("session_id", "sess-42")?;
+            t.set("has_messages", true)?;
+            Ok(mlua::Value::Table(t))
+        });
+        assert!(errs.is_empty(), "no errors expected, got {errs:?}");
+        let id: String = rt
+            .lua
+            .load("return LIFECYCLE_CTX.session_id")
+            .eval()
+            .expect("ctx.session_id readable");
+        let has: bool = rt
+            .lua
+            .load("return LIFECYCLE_CTX.has_messages")
+            .eval()
+            .expect("ctx.has_messages readable");
+        assert_eq!(id, "sess-42");
+        assert!(has);
     }
 
     #[test]
@@ -1986,7 +2048,7 @@ mod tests {
             .exec()
             .expect("register");
 
-        let errs = rt.drain_lifecycle_hooks("ready");
+        let errs = rt.drain_lifecycle_hooks("ready", |_| Ok(mlua::Value::Nil));
         assert_eq!(errs.len(), 1, "expected one error, got {errs:?}");
         assert!(
             errs[0].contains("boom"),

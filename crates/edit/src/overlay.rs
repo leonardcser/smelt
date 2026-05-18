@@ -1,7 +1,7 @@
 //! Z-stacked overlay window groups positioned via an `Anchor` over a `LayoutTree`.
 
 use super::WinId;
-use crate::layout::{Anchor, Corner, LayoutTree, Rect};
+use crate::layout::{Align, Anchor, Corner, LayoutTree, Rect};
 use std::collections::HashMap;
 
 /// Stable handle for an overlay. Distinct from `WinId` to avoid chrome/content hit collision.
@@ -164,23 +164,13 @@ pub fn resolve_anchor(anchor: &Anchor, size: (u16, u16), ctx: &AnchorContext<'_>
             col_offset,
         } => {
             let target_rect = ctx.win_rects.get(&WinId(target.0))?;
-            let (r, c) = match attach {
-                Corner::NW => (target_rect.top as i32, target_rect.left as i32),
-                Corner::NE => (
-                    target_rect.top as i32,
-                    target_rect.right() as i32 - w as i32,
-                ),
-                Corner::SW => (
-                    target_rect.bottom() as i32 - h as i32,
-                    target_rect.left as i32,
-                ),
-                Corner::SE => (
-                    target_rect.bottom() as i32 - h as i32,
-                    target_rect.right() as i32 - w as i32,
-                ),
-            };
-            let r = r + row_offset;
-            let c = c + col_offset;
+            // The alignment picks the same anchor point on the target and
+            // the overlay; subtracting `align_offset(attach, overlay)` from
+            // the target's anchor point yields the overlay's top-left.
+            let target_x = target_rect.left as i32 + align_x(*attach, target_rect.width);
+            let target_y = target_rect.top as i32 + align_y(*attach, target_rect.height);
+            let r = target_y - align_y(*attach, h) + row_offset;
+            let c = target_x - align_x(*attach, w) + col_offset;
             (clamp_axis(r, term_h, h), clamp_axis(c, term_w, w))
         }
         Anchor::ScreenBottom { above_rows } => {
@@ -192,6 +182,27 @@ pub fn resolve_anchor(anchor: &Anchor, size: (u16, u16), ctx: &AnchorContext<'_>
         }
     };
     Some(Rect::new(top, left, w, h))
+}
+
+/// X-axis offset from a rect's left edge to the alignment point. `Center`
+/// rounds down on odd widths so two centered rects of the same parity land
+/// on the same column.
+fn align_x(a: Align, width: u16) -> i32 {
+    match a {
+        Align::NW | Align::W | Align::SW => 0,
+        Align::N | Align::Center | Align::S => width as i32 / 2,
+        Align::NE | Align::E | Align::SE => width as i32,
+    }
+}
+
+/// Y-axis offset from a rect's top edge to the alignment point. Mirror of
+/// [`align_x`] for the vertical axis.
+fn align_y(a: Align, height: u16) -> i32 {
+    match a {
+        Align::NW | Align::N | Align::NE => 0,
+        Align::W | Align::Center | Align::E => height as i32 / 2,
+        Align::SW | Align::S | Align::SE => height as i32,
+    }
 }
 
 /// Corner-anchored point `(row, col)` → rectangle top-left for size `(w, h)`.
@@ -231,7 +242,7 @@ fn clamp_axis(pos: i32, term: u16, span: u16) -> u16 {
 mod tests {
     use super::WinId;
     use super::*;
-    use crate::layout::{Anchor, Constraint, Corner};
+    use crate::layout::{Align, Anchor, Constraint, Corner};
 
     #[test]
     fn overlay_defaults_are_sensible() {
@@ -249,7 +260,7 @@ mod tests {
             layout,
             Anchor::Win {
                 target: WinId(7).into(),
-                attach: Corner::NW,
+                attach: Align::NW,
                 row_offset: 0,
                 col_offset: 0,
             },
@@ -364,7 +375,7 @@ mod tests {
         let r = resolve_anchor(
             &Anchor::Win {
                 target: WinId(7).into(),
-                attach: Corner::NW,
+                attach: Align::NW,
                 row_offset: 0,
                 col_offset: 0,
             },
@@ -382,7 +393,7 @@ mod tests {
         let r = resolve_anchor(
             &Anchor::Win {
                 target: WinId(7).into(),
-                attach: Corner::SE,
+                attach: Align::SE,
                 row_offset: 0,
                 col_offset: 0,
             },
@@ -399,7 +410,7 @@ mod tests {
         let r = resolve_anchor(
             &Anchor::Win {
                 target: WinId(999).into(),
-                attach: Corner::NW,
+                attach: Align::NW,
                 row_offset: 0,
                 col_offset: 0,
             },
@@ -410,13 +421,72 @@ mod tests {
     }
 
     #[test]
+    fn win_anchor_center_centers_inside_target_rect() {
+        let mut rects = HashMap::new();
+        // Target at (top=4, left=10, w=40, h=12); centering a 20x4 overlay
+        // gives top = 4 + (12-4)/2 = 8, left = 10 + (40-20)/2 = 20.
+        rects.insert(WinId(3), Rect::new(4, 10, 40, 12));
+        let r = resolve_anchor(
+            &Anchor::Win {
+                target: WinId(3).into(),
+                attach: Align::Center,
+                row_offset: 0,
+                col_offset: 0,
+            },
+            (20, 4),
+            &ctx(80, 24, &rects),
+        )
+        .unwrap();
+        assert_eq!(r, Rect::new(8, 20, 20, 4));
+    }
+
+    #[test]
+    fn win_anchor_n_centers_horizontally_at_top_edge() {
+        let mut rects = HashMap::new();
+        // Target (top=4, left=10, w=40, h=12); attaching N puts overlay's
+        // top-edge-midpoint on target's top-edge-midpoint: top = 4,
+        // left = 10 + 40/2 - 20/2 = 20.
+        rects.insert(WinId(3), Rect::new(4, 10, 40, 12));
+        let r = resolve_anchor(
+            &Anchor::Win {
+                target: WinId(3).into(),
+                attach: Align::N,
+                row_offset: 0,
+                col_offset: 0,
+            },
+            (20, 4),
+            &ctx(80, 24, &rects),
+        )
+        .unwrap();
+        assert_eq!(r, Rect::new(4, 20, 20, 4));
+    }
+
+    #[test]
+    fn win_anchor_center_with_offset_nudges_resolved_rect() {
+        let mut rects = HashMap::new();
+        rects.insert(WinId(3), Rect::new(4, 10, 40, 12));
+        let r = resolve_anchor(
+            &Anchor::Win {
+                target: WinId(3).into(),
+                attach: Align::Center,
+                row_offset: 1,
+                col_offset: -2,
+            },
+            (20, 4),
+            &ctx(80, 24, &rects),
+        )
+        .unwrap();
+        assert_eq!(r, Rect::new(9, 18, 20, 4));
+    }
+
+    #[test]
     fn win_anchor_offsets_shift_position() {
         let mut rects = HashMap::new();
         rects.insert(WinId(7), Rect::new(10, 20, 40, 8));
         let r = resolve_anchor(
             &Anchor::Win {
                 target: WinId(7).into(),
-                attach: Corner::NW,
+                attach: Align::NW,
                 row_offset: -1,
                 col_offset: 3,
             },

@@ -35,9 +35,14 @@ use smelt_core::lua::doc::{record_module_doc, Tier};
 use smelt_core::lua::module::LuaMod;
 use std::sync::Arc;
 
-/// Semantic version of the Lua API surface, exposed as `smelt.version`.
+/// Schema version of the Lua API surface, exposed as `smelt.api_version`.
 /// Increments on breaking changes; additive changes do not bump it.
-pub(crate) const VERSION: &str = "1";
+pub(crate) const API_VERSION: &str = "1";
+
+/// Smelt binary version, exposed as `smelt.version`. Sourced from
+/// `CARGO_PKG_VERSION` at compile time so the workspace's `0.x.y` version
+/// stays in lockstep with what plugins see.
+pub(crate) const APP_VERSION: &str = env!("CARGO_PKG_VERSION");
 
 pub(crate) use smelt_core::lua::json_to_lua as json_to_lua_value;
 
@@ -46,7 +51,8 @@ impl LuaRuntime {
         let smelt = lua.create_table()?;
         let smelt_keymap = lua.create_table()?;
 
-        smelt.set("version", VERSION)?;
+        smelt.set("version", APP_VERSION)?;
+        smelt.set("api_version", API_VERSION)?;
         record_module_doc("smelt", "Root smelt namespace. Host-tier bindings are registered first; UiHost-tier bindings are injected when a TUI is active.");
 
         smelt_core::lua::api::register_host_api(lua, &smelt, &smelt_keymap, &shared.core)?;

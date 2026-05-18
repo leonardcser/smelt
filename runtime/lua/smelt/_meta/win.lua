@@ -11,4 +11,8 @@ local win = {}
 ---@type fun(buf: smelt.buf.Buf, opts: table?): smelt.win.Win?
 win.new = nil
 
+--- Return a `Win` handle for the built-in transcript window. Useful as an `anchor = "win"` / `"win_center"` target so plugins can float overlays over the transcript without hard-coding its id.
+---@type fun(): smelt.win.Win
+win.transcript = nil
+
 return win

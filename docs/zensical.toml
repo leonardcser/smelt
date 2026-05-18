@@ -97,7 +97,7 @@ nav = [
 [project.theme]
 custom_dir = "overrides"
 language = "en"
-logo = "logo.png"
+logo = "logo.svg"
 features = [
     "navigation.tabs",
     "content.action.edit",

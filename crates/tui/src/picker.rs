@@ -14,7 +14,7 @@ use crate::app::PROMPT_ABOVE_WIN;
 use crate::smelt_term::layout::Anchor;
 use crate::smelt_term::BufCreateOpts;
 use crate::smelt_term::{
-    BufId, Constraint, Corner, Gutters, LayoutTree, Overlay, OverlayId, SplitConfig, WinId,
+    Align, BufId, Constraint, Corner, Gutters, LayoutTree, Overlay, OverlayId, SplitConfig, WinId,
 };
 use smelt_core::content::builder::render_into;
 use smelt_core::style::Style;
@@ -271,7 +271,7 @@ fn anchor_for(placement: PickerPlacement, height: u16) -> Anchor {
     match placement {
         PickerPlacement::PromptDocked { .. } => Anchor::Win {
             target: PROMPT_ABOVE_WIN.into(),
-            attach: Corner::NW,
+            attach: Align::NW,
             row_offset: -(height as i32),
             col_offset: 0,
         },
@@ -487,7 +487,7 @@ mod tests {
             } => {
                 // Offset is negative `height` so the overlay sits above the prompt.
                 assert_eq!(row_offset, -5);
-                assert!(matches!(attach, Corner::NW));
+                assert!(matches!(attach, Align::NW));
             }
             other => panic!("expected Anchor::Win, got {other:?}"),
         }

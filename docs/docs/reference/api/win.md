@@ -16,3 +16,13 @@ Types: [`smelt.buf.Buf`](types.md#smeltbufbuf), [`smelt.win.Win`](types.md#smelt
 
 Open a split window over `buf` and return a `Win` userdata. `opts.name` opts the window into hot-reload survival. `opts.kind = "input"` (`opts.placeholder?`) marks the window as a single-line text input; `opts.kind = "list"` (`opts.initial_cursor?`) marks it as a navigable list leaf.
 
+## `smelt.win.transcript`
+
+```lua
+fun(): smelt.win.Win
+```
+
+Types: [`smelt.win.Win`](types.md#smeltwinwin)
+
+Return a `Win` handle for the built-in transcript window. Useful as an `anchor = "win"` / `"win_center"` target so plugins can float overlays over the transcript without hard-coding its id.
+

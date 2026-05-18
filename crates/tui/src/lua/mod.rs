@@ -363,8 +363,18 @@ impl LuaRuntime {
     /// Drain `smelt.lifecycle.on(event, fn)` callbacks for `event`. Returns
     /// per-hook errors so the caller can surface them as notifications;
     /// invocation failures are isolated so one hook can't suppress the rest.
-    pub fn drain_lifecycle_hooks(&mut self, event: &str) -> Vec<String> {
-        self.core.drain_lifecycle_hooks(event)
+    /// `build_ctx` constructs the per-event ctx table fresh inside the Lua
+    /// runtime borrow.
+    pub fn drain_lifecycle_hooks<F>(&mut self, event: &str, build_ctx: F) -> Vec<String>
+    where
+        F: Fn(&mlua::Lua) -> mlua::Result<mlua::Value>,
+    {
+        self.core.drain_lifecycle_hooks(event, build_ctx)
+    }
+
+    /// Forward to [`smelt_core::lua::LuaRuntime::drain_shutdown_hooks`].
+    pub fn drain_shutdown_hooks(&mut self, session_id: &str, has_messages: bool) -> Vec<String> {
+        self.core.drain_shutdown_hooks(session_id, has_messages)
     }
 
     /// Evaluate `~/.config/smelt/early.lua` (if present). Call BEFORE
@@ -692,11 +702,21 @@ mod tests {
     // Theme role-mapping and error logic are tested in `lua::api::tests`.
 
     #[test]
-    fn runtime_exposes_api_version() {
+    fn runtime_exposes_api_version_and_app_version() {
         let rt = LuaRuntime::new();
         assert!(rt.load_error.is_none(), "load_error: {:?}", rt.load_error);
-        let version: String = rt.lua.load("return smelt.version").eval().expect("eval");
-        assert_eq!(version, crate::lua::api::VERSION);
+        let api: String = rt
+            .lua
+            .load("return smelt.api_version")
+            .eval()
+            .expect("eval");
+        assert_eq!(api, crate::lua::api::API_VERSION);
+        let app: String = rt.lua.load("return smelt.version").eval().expect("eval");
+        assert_eq!(app, crate::lua::api::APP_VERSION);
+        assert!(
+            !app.is_empty() && app.chars().next().is_some_and(|c| c.is_ascii_digit()),
+            "smelt.version should be the program version, got {app:?}"
+        );
     }
 
     #[test]
