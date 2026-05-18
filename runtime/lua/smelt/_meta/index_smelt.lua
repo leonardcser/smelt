@@ -16,30 +16,25 @@ smelt.focus = nil
 smelt.ns = nil
 
 --- Promote the current loader frame to plugin scope `name` and return a
---- scope handle that bundles common per-plugin entry points so a plugin's
---- module body reads as a single object:
+--- small handle exposing the plugin's per-cycle state slot:
 --- 
 ---   local M = smelt.plugin("banner")
----   M.state.fires = 0                       -- = smelt.state("banner")
----   M:cell("banner.open"):subscribe(fn)     -- = smelt.cell(name):subscribe
----   M:on("ready", fn)                       -- = smelt.lifecycle.on
----   M:on_ready(fn)                          -- = smelt.lifecycle.on_ready
----   M:on_shutdown(fn)                       -- = smelt.lifecycle.on_shutdown
----   M:cmd("banner.toggle", fn)              -- = smelt.cmd.register
----   M:keymap("n", "<C-g>", fn)              -- = smelt.keymap.set
+---   M.state.fires = 0          -- M.state is smelt.state("banner")
+---   M.name == "banner"
 --- 
---- After this call, `smelt.state()` resolves to the named slot and
---- unnamed resource constructors auto-name keyed by `name`. Idempotent
---- within a single module body run: counters reset on every promotion
---- so declaration order is what matters.
+--- After this call, bare `smelt.state()` also resolves to the named
+--- slot and unnamed resource constructors auto-name keyed by `name`.
+--- Idempotent within a single module body run: counters reset on every
+--- promotion so declaration order is what matters.
+--- 
+--- The handle deliberately doesn't wrap `smelt.cell` / `smelt.cmd` /
+--- `smelt.keymap` / `smelt.lifecycle.*` — those calls would not be
+--- scope-aware (cell/cmd names are global), so a method facade would
+--- imply encapsulation it can't deliver. Call them directly through
+--- `smelt.*` and namespace your cell/cmd names explicitly.
 --- 
 --- Must be called from a module body (or init.lua). Outside a loader
 --- frame (e.g. from an event callback) it raises immediately.
----@see smelt.lifecycle.on
----@see smelt.lifecycle.on_ready
----@see smelt.lifecycle.on_shutdown
----@see smelt.cmd.register
----@see smelt.keymap.set
 ---@type fun(name: any): any
 smelt.plugin = nil
 

@@ -3,7 +3,8 @@
 //! `require()` for a disabled module is skipped entirely. Calls made
 //! later still mark the module as disabled, but the module body has
 //! already executed by then, so prefer `smelt.tools.unregister` /
-//! `smelt.cmd.unregister` for post-hoc removal.
+//! holding the `Reg` returned by `smelt.cmd.register` and calling
+//! `:remove()` for post-hoc removal.
 
 use crate::lua::doc::Tier;
 use crate::lua::module::LuaMod;
@@ -71,8 +72,9 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
         "Opt out of bundled `smelt.<dotted>` modules. Call from \
 `early.lua` to prevent the module from auto-loading; calls made later \
 mark the module as disabled but its body has already run. For runtime \
-removal of an already-loaded tool/command, use `smelt.tools.unregister` \
-or `smelt.cmd.unregister` directly.",
+removal of an already-loaded tool, call `smelt.tools.unregister` \
+directly; for commands, hold the `Reg` returned by `smelt.cmd.register` \
+and call `:remove()`.",
         Tier::Host,
     )?;
 
