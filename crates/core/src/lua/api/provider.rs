@@ -6,7 +6,7 @@ use std::sync::Arc;
 use crate::config::{ModelConfig, ProviderConfig};
 use crate::lua::doc::Tier;
 use crate::lua::hooks::composite_off;
-use crate::lua::lua_type::{LuaType, LuaTypeTuple};
+use crate::lua::lua_type::{LuaCallback, LuaType, LuaTypeTuple};
 use crate::lua::module::LuaMod;
 use crate::lua::LuaShared;
 use lua_doc_derive::LuaOpts;
@@ -195,7 +195,7 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
 Hooks fire in registration order. Each hook sees the previous hook's replacement. Returns an `off()` function that removes this middleware.\n\n\
 For streaming observation use `smelt.cell(\"stream_delta\"):subscribe( ...)` — synchronous mutation of mid-stream tokens isn't safe because the parser owns the partial state.",
             &["mw"],
-            move |lua, mw: mlua::Table| -> LuaResult<mlua::Function> {
+            move |lua, mw: mlua::Table| -> LuaResult<LuaCallback<(), bool>> {
                 let on_request: Option<mlua::Function> = mw.get("on_request").ok();
                 let on_response: Option<mlua::Function> = mw.get("on_response").ok();
                 if on_request.is_none() && on_response.is_none() {
@@ -213,7 +213,8 @@ For streaming observation use `smelt.cell(\"stream_delta\"):subscribe( ...)` —
                     let id = s.hooks.provider_response.register(lua, f, "")?;
                     parts.push((Arc::clone(&s.hooks.provider_response), id));
                 }
-                composite_off(lua, parts)
+                let off = composite_off(lua, parts)?;
+                LuaCallback::<(), bool>::from_lua(mlua::Value::Function(off), lua)
             },
         )?;
     }

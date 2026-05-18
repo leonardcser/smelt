@@ -3,6 +3,7 @@
 use super::{lua_table_to_args, lua_table_to_json};
 use crate::lua::doc::Tier;
 use crate::lua::hooks::composite_off;
+use crate::lua::lua_type::LuaCallback;
 use crate::lua::module::LuaMod;
 use crate::lua::{LuaHandle, LuaShared, ToolHandles};
 use lua_doc_derive::{LuaAlias, LuaOpts};
@@ -239,7 +240,7 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
 - `after(args, ctx, result)` runs after the tool completes and may return `{ content, is_error }` to replace the result. NOTE: `after` currently only fires for tools that complete synchronously; yielding tools (most builtins) skip it until the task-runtime path is wired.\n\n\
 Hooks fire in registration order; an earlier hook's replacement is visible to later hooks. Returns an `off()` function that removes this middleware.",
             &["name", "mw"],
-            move |lua, (name, mw): (String, mlua::Table)| -> LuaResult<mlua::Function> {
+            move |lua, (name, mw): (String, mlua::Table)| -> LuaResult<LuaCallback<(), bool>> {
                 let before_fn: Option<mlua::Function> = mw.get("before").ok();
                 let after_fn: Option<mlua::Function> = mw.get("after").ok();
                 if before_fn.is_none() && after_fn.is_none() {
@@ -257,7 +258,8 @@ Hooks fire in registration order; an earlier hook's replacement is visible to la
                     let id = s.hooks.tool_after.register(lua, f, name.clone())?;
                     parts.push((Arc::clone(&s.hooks.tool_after), id));
                 }
-                composite_off(lua, parts)
+                let off = composite_off(lua, parts)?;
+                LuaCallback::<(), bool>::from_lua(mlua::Value::Function(off), lua)
             },
         )?;
     }

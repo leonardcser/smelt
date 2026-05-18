@@ -27,7 +27,7 @@ tools.list = nil
 --- - `after(args, ctx, result)` runs after the tool completes and may return `{ content, is_error }` to replace the result. NOTE: `after` currently only fires for tools that complete synchronously; yielding tools (most builtins) skip it until the task-runtime path is wired.
 --- 
 --- Hooks fire in registration order; an earlier hook's replacement is visible to later hooks. Returns an `off()` function that removes this middleware.
----@type fun(name: string, mw: table): function
+---@type fun(name: string, mw: table): fun(): boolean
 tools.middleware = nil
 
 --- Register a plugin tool. See `smelt.tools.ToolDef` for every supported field; only `name` and `execute` are required.

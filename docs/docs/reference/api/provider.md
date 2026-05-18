@@ -17,7 +17,7 @@ Return every registered provider as an array of tables. Each entry has `name`, `
 ## `smelt.provider.middleware`
 
 ```lua
-fun(mw: table): function
+fun(mw: table): fun(): boolean
 ```
 
 Register provider middleware. `mw` is a table of `{ on_request = fn?, on_response = fn? }`:

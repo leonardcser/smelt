@@ -25,7 +25,7 @@ local reg = {}
 reg.compose = nil
 
 --- Wrap `undo` as a `Reg`. The first call to `:remove()` invokes `undo()` and returns `true`; subsequent calls are no-ops returning `false`. Errors raised inside `undo` are swallowed.
----@type fun(undo: function): smelt.Reg
+---@type fun(undo: fun()): smelt.Reg
 reg.new = nil
 
 return reg

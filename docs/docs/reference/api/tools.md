@@ -34,7 +34,7 @@ Return the names of every registered plugin tool, sorted.
 ## `smelt.tools.middleware`
 
 ```lua
-fun(name: string, mw: table): function
+fun(name: string, mw: table): fun(): boolean
 ```
 
 Register middleware for tool `name`. Pass `""` (empty string) as `name` to match every tool. `mw` is a table of `{ before = fn?, after = fn? }`:

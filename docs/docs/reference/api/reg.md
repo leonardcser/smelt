@@ -31,7 +31,7 @@ return smelt.reg.compose(
 ## `smelt.reg.new`
 
 ```lua
-fun(undo: function): smelt.Reg
+fun(undo: fun()): smelt.Reg
 ```
 
 Types: [`smelt.Reg`](types.md#smeltreg)
