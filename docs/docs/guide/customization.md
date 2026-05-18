@@ -71,16 +71,29 @@ slug color is separate — change it per-session with `/color`.
 
 `smelt.theme.use("name")` loads
 `runtime/lua/smelt/colorschemes/<name>.lua` (or your own file on the Lua
-`package.path`). A minimal scheme just sets the accent:
+`package.path`) and applies it. A colorscheme `return`s a `ThemeSpec`
+table: a flat map keyed by highlight-group name. Each value is either a
+`StyleDecl` table (`{ fg = ..., bg = ..., bold = true }`) or a string
+referencing another group in the same spec.
 
 ```lua
 -- ~/.config/smelt/lua/smelt/colorschemes/mytheme.lua
-smelt.theme.set("accent", { ansi = 208 })
-return {}
+return {
+  SmeltAccent = { fg = { ansi = 208 } },           -- ember
+  SmeltMuted  = { fg = { ansi = 244 } },
+  SmeltUserBg = { bg = { dark = { ansi = 236 },    -- light/dark branches
+                         light = { ansi = 254 } } },
+  Comment     = "SmeltMuted",                       -- alias another group
+}
 ```
 
+Color values support `{ ansi = N }` (256-color slot), `{ rgb = { R, G, B } }`
+(sRGB triple), or a `{ dark = ..., light = ... }` pair that resolves
+against the detected terminal background.
+
 Theme APIs touch live TUI state, so they can't run at the top level of
-`init.lua` (the TUI isn't up yet). Defer the call until the session is ready:
+`init.lua` (the TUI isn't up yet). Defer the call until the session is
+ready:
 
 ```lua
 smelt.cell("session_started"):subscribe(function()
@@ -88,8 +101,10 @@ smelt.cell("session_started"):subscribe(function()
 end)
 ```
 
-Use `smelt.theme.set(role, { ansi = N })` or `{ rgb = { r, g, b } }` to
-override any role. `smelt.theme.snapshot()` dumps the active palette.
+`smelt.theme.set(group, style)` tweaks a single group on top of the
+active scheme (same `StyleDecl` shape as a value in the map).
+`smelt.theme.snapshot()` dumps every group's resolved style.
+`smelt.theme.is_light()` reports the detected background.
 
 ## Keymaps
 

@@ -220,10 +220,16 @@ Change accent color at runtime with `/theme`. Presets: `ember`, `coral`,
 
 The task slug color is separate — change it per-session with `/color`.
 
-Colorschemes are Lua modules under `runtime/lua/smelt/colorschemes/<name>.lua`.
-Install custom colorschemes at
-`~/.config/smelt/lua/smelt/colorschemes/<name>.lua` and load via
-`smelt.theme.use("<name>")`.
+A full colorscheme is a `ThemeSpec`: a flat Lua table keyed by
+highlight-group name (`SmeltAccent`, `Comment`, `SmeltDiffAddBg`, …)
+whose values are either a `StyleDecl` table (`{ fg = ..., bold = true }`)
+or a string referencing another group in the same spec. Built-in
+colorschemes live at `runtime/lua/smelt/colorschemes/<name>.lua`;
+custom ones drop in at `~/.config/smelt/lua/smelt/colorschemes/<name>.lua`
+and load via `smelt.theme.use("<name>")`. See the
+[customization guide](../guide/customization.md#custom-colorschemes) for
+the full shape; `runtime/lua/smelt/colorschemes/default.lua` is the
+worked example.
 
 ## MCP (Model Context Protocol)
 

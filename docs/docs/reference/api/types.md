@@ -326,23 +326,14 @@ Options accepted by `smelt.statusline.register`.
 
 ### `smelt.theme.ColorDecl`
 
-Color value used inside a `StyleDecl`. May be a direct color (`{ ansi = N }` / `{ rgb = ... }`) or a `{ dark, light }` branch resolved at compile time against the terminal background. If both a direct color and a branch are set, the branch wins when its side matches the active mode; otherwise the direct color is used.
+Color value. Set `ansi` (256-color palette index) or `rgb` (`{R, G, B}` triple) for a direct color, or `dark` / `light` (themselves `ColorDecl`s) for a branch that resolves against the terminal background. A matching-side branch wins over the direct fields.
 
 | Field | Type | Required | Description |
 | --- | --- | --- | --- |
 | `ansi` | `integer` |  | ANSI 256-color palette index for the default (non-branched) case. |
 | `rgb` | `integer[]` |  | `[r, g, b]` sRGB triple for the default (non-branched) case. |
-| `light` | [smelt.theme.ColorLeaf](types.md#smeltthemecolorleaf) |  | Color this branch resolves to when `is_light == true`. |
-| `dark` | [smelt.theme.ColorLeaf](types.md#smeltthemecolorleaf) |  | Color this branch resolves to when `is_light == false`. |
-
-### `smelt.theme.ColorLeaf`
-
-Concrete color value: an ANSI 256 palette index or an sRGB triple. Used as the leaf of a `ColorDecl` (and as the leaf of its dark/light branches). Exactly one of `ansi` / `rgb` should be set; empty resolves to `None`.
-
-| Field | Type | Required | Description |
-| --- | --- | --- | --- |
-| `ansi` | `integer` |  | ANSI 256-color palette index. |
-| `rgb` | `integer[]` |  | `[r, g, b]` sRGB triple. |
+| `light` | [smelt.theme.ColorDecl](types.md#smeltthemecolordecl) |  | Color this branch resolves to when `is_light == true`. |
+| `dark` | [smelt.theme.ColorDecl](types.md#smeltthemecolordecl) |  | Color this branch resolves to when `is_light == false`. |
 
 ### `smelt.theme.StyleDecl`
 

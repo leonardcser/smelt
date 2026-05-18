@@ -4,11 +4,13 @@
 //!
 //! Architecture
 //! ------------
-//! - A colorscheme lives in Lua as a `ThemeSpec` table: a single `groups`
-//!   map keyed by highlight-group name. Diff backgrounds, scrollbar
-//!   colors, mode indicators — they're all just groups.
-//! - `ThemeSpec` and its leaf types (`StyleDecl`, `ColorDecl`) derive
-//!   `LuaOpts` so they round-trip through mlua with full IDE completion.
+//! - A colorscheme lives in Lua as a `ThemeSpec` table: a flat map
+//!   keyed by highlight-group name. Diff backgrounds, scrollbar colors,
+//!   mode indicators — they're all just groups.
+//! - `ThemeSpec`, `StyleDecl`, and `ColorDecl` round-trip through mlua
+//!   with full IDE completion. `ColorDecl` is recursive (its `dark` /
+//!   `light` branches are themselves `ColorDecl`s) so the `FromLua` and
+//!   `LuaType` impls are hand-written; the leaf types use the derive.
 //! - `compile(spec, is_light) -> Theme` resolves string-valued group
 //!   entries (e.g. `Comment = "SmeltMuted"`) at compile time, applies
 //!   the `is_light` branch to any `{ dark, light }` `ColorDecl`, and
@@ -17,6 +19,10 @@
 //! - `default_baked()` returns a process-wide fallback theme built from
 //!   an embedded spec, used by offline render paths (`format.rs`,
 //!   `prompt_buf.rs`) that don't have access to the live app theme.
+//!   A `default_lua_matches_baked_spec` test loads
+//!   `runtime/lua/smelt/colorschemes/default.lua` in a bare Lua VM and
+//!   compares it group-by-group against `baked_default_spec`, so the
+//!   two sources of truth can't drift silently.
 
 use lua_doc_derive::LuaOpts;
 use mlua::prelude::*;
@@ -114,21 +120,40 @@ impl StyleDecl {
     }
 }
 
-/// Concrete color value: an ANSI 256 palette index or an sRGB triple.
-/// Used as the leaf of a `ColorDecl` (and as the leaf of its dark/light
-/// branches). Exactly one of `ansi` / `rgb` should be set; empty
-/// resolves to `None`.
-#[derive(Debug, Default, Clone, LuaOpts)]
-#[lua(name = "smelt.theme.ColorLeaf")]
-pub struct ColorLeaf {
-    /// ANSI 256-color palette index.
+/// Color value. A direct color (`{ ansi = N }` / `{ rgb = { R, G, B } }`)
+/// or a `{ dark, light }` branch resolved at compile time against the
+/// terminal background. The branch entries are themselves `ColorDecl`s,
+/// so a light/dark side can carry any other shape; nested branches are
+/// allowed but pointless (the resolver re-reads `is_light` at each
+/// level, so an inner branch resolves the same way as an outer one).
+/// If both a direct color and a matching-side branch are set, the
+/// branch wins.
+#[derive(Debug, Default, Clone)]
+pub struct ColorDecl {
+    /// ANSI 256-color palette index for the default (non-branched) case.
     pub ansi: Option<u8>,
-    /// `[r, g, b]` sRGB triple.
+    /// `[r, g, b]` sRGB triple for the default (non-branched) case.
     pub rgb: Option<[u8; 3]>,
+    /// Color this branch resolves to when `is_light == true`.
+    pub light: Option<Box<ColorDecl>>,
+    /// Color this branch resolves to when `is_light == false`.
+    pub dark: Option<Box<ColorDecl>>,
 }
 
-impl ColorLeaf {
-    fn to_color(&self) -> Option<Color> {
+impl ColorDecl {
+    const DOC: &'static str = "Color value. Set `ansi` (256-color palette \
+index) or `rgb` (`{R, G, B}` triple) for a direct color, or `dark` / `light` \
+(themselves `ColorDecl`s) for a branch that resolves against the terminal \
+background. A matching-side branch wins over the direct fields.";
+
+    pub fn to_color(&self, is_light: bool) -> Option<Color> {
+        if is_light {
+            if let Some(c) = self.light.as_ref().and_then(|c| c.to_color(is_light)) {
+                return Some(c);
+            }
+        } else if let Some(c) = self.dark.as_ref().and_then(|c| c.to_color(is_light)) {
+            return Some(c);
+        }
         if let Some(v) = self.ansi {
             return Some(Color::AnsiValue(v));
         }
@@ -139,40 +164,103 @@ impl ColorLeaf {
     }
 }
 
-/// Color value used inside a `StyleDecl`. May be a direct color
-/// (`{ ansi = N }` / `{ rgb = ... }`) or a `{ dark, light }` branch
-/// resolved at compile time against the terminal background. If both a
-/// direct color and a branch are set, the branch wins when its side
-/// matches the active mode; otherwise the direct color is used.
-#[derive(Debug, Default, Clone, LuaOpts)]
-#[lua(name = "smelt.theme.ColorDecl")]
-pub struct ColorDecl {
-    /// ANSI 256-color palette index for the default (non-branched) case.
-    pub ansi: Option<u8>,
-    /// `[r, g, b]` sRGB triple for the default (non-branched) case.
-    pub rgb: Option<[u8; 3]>,
-    /// Color this branch resolves to when `is_light == true`.
-    pub light: Option<ColorLeaf>,
-    /// Color this branch resolves to when `is_light == false`.
-    pub dark: Option<ColorLeaf>,
+// Hand-written LuaOpts/FromLua impls because `Box<ColorDecl>` doesn't
+// satisfy the `LuaType` / `FromLua` trait bounds the derive emits.
+// (mlua's `FromLua` isn't implemented for `Box<T>`, and adding a
+// blanket impl would touch the shared `lua_type` module just for this
+// recursive case.) Behavior matches what `#[derive(LuaOpts)]` would
+// produce for the equivalent non-recursive struct.
+
+impl LuaType for ColorDecl {
+    fn lua_type() -> String {
+        record_class(LuaClassDecl {
+            name: "smelt.theme.ColorDecl",
+            doc: Self::DOC,
+            fields: vec![
+                LuaClassField {
+                    name: "ansi",
+                    ty: "integer".into(),
+                    optional: true,
+                    doc: "ANSI 256-color palette index for the default (non-branched) case.",
+                },
+                LuaClassField {
+                    name: "rgb",
+                    ty: "integer[]".into(),
+                    optional: true,
+                    doc: "`[r, g, b]` sRGB triple for the default (non-branched) case.",
+                },
+                LuaClassField {
+                    name: "light",
+                    ty: "smelt.theme.ColorDecl".into(),
+                    optional: true,
+                    doc: "Color this branch resolves to when `is_light == true`.",
+                },
+                LuaClassField {
+                    name: "dark",
+                    ty: "smelt.theme.ColorDecl".into(),
+                    optional: true,
+                    doc: "Color this branch resolves to when `is_light == false`.",
+                },
+            ],
+        });
+        "smelt.theme.ColorDecl".to_string()
+    }
 }
 
-impl ColorDecl {
-    pub fn to_color(&self, is_light: bool) -> Option<Color> {
-        if is_light {
-            if let Some(c) = self.light.as_ref().and_then(ColorLeaf::to_color) {
-                return Some(c);
+impl LuaTypeTuple for ColorDecl {
+    const ARITY: usize = 1;
+    fn lua_param_list(param_names: &[&'static str]) -> String {
+        let name = param_names.first().copied().unwrap_or("arg1");
+        format!("{}: {}", name, Self::lua_type())
+    }
+}
+
+impl LuaOpts for ColorDecl {
+    fn lua_class_decl() -> LuaClassDecl {
+        // Returned for the `LuaOpts` trait contract; the field list is
+        // emitted by the `LuaType` impl above when the registry first
+        // sees the class.
+        LuaClassDecl {
+            name: "smelt.theme.ColorDecl",
+            doc: Self::DOC,
+            fields: vec![],
+        }
+    }
+}
+
+impl FromLua for ColorDecl {
+    // `lua` is threaded through recursive calls for the trait signature;
+    // clippy can't see past the recursion to know it's actually used.
+    #[allow(clippy::only_used_in_recursion)]
+    fn from_lua(value: LuaValue, lua: &Lua) -> LuaResult<Self> {
+        let t = match value {
+            LuaValue::Table(t) => t,
+            other => {
+                return Err(LuaError::FromLuaConversionError {
+                    from: other.type_name(),
+                    to: "smelt.theme.ColorDecl".into(),
+                    message: Some("expected a table".into()),
+                });
             }
-        } else if let Some(c) = self.dark.as_ref().and_then(ColorLeaf::to_color) {
-            return Some(c);
-        }
-        if let Some(v) = self.ansi {
-            return Some(Color::AnsiValue(v));
-        }
-        if let Some([r, g, b]) = self.rgb {
-            return Some(Color::Rgb { r, g, b });
-        }
-        None
+        };
+        let ansi = t.get::<Option<u8>>("ansi")?;
+        let rgb = t.get::<Option<[u8; 3]>>("rgb")?;
+        // Recurse via `LuaValue` round-trip so `Box<ColorDecl>` doesn't
+        // need a `FromLua` impl of its own.
+        let light = match t.get::<Option<LuaValue>>("light")? {
+            Some(v) => Some(Box::new(ColorDecl::from_lua(v, lua)?)),
+            None => None,
+        };
+        let dark = match t.get::<Option<LuaValue>>("dark")? {
+            Some(v) => Some(Box::new(ColorDecl::from_lua(v, lua)?)),
+            None => None,
+        };
+        Ok(Self {
+            ansi,
+            rgb,
+            light,
+            dark,
+        })
     }
 }
 
@@ -490,14 +578,8 @@ fn baked_default_spec() -> ThemeSpec {
     }
     fn dl(dark: u8, light: u8) -> ColorDecl {
         ColorDecl {
-            dark: Some(ColorLeaf {
-                ansi: Some(dark),
-                ..Default::default()
-            }),
-            light: Some(ColorLeaf {
-                ansi: Some(light),
-                ..Default::default()
-            }),
+            dark: Some(Box::new(ansi(dark))),
+            light: Some(Box::new(ansi(light))),
             ..Default::default()
         }
     }
@@ -712,5 +794,59 @@ mod tests {
                 b: 20
             })
         );
+    }
+
+    /// Drift guard: load `runtime/lua/smelt/colorschemes/default.lua` in
+    /// a bare Lua VM, decode the returned table as a `ThemeSpec`, and
+    /// compare its compiled output group-by-group against the in-Rust
+    /// `baked_default_spec`. The Lua spec is the source of truth at
+    /// runtime; the baked spec is the paint-before-bootstrap fallback.
+    /// They must stay in lockstep — this test catches the moment they
+    /// don't.
+    #[test]
+    fn default_lua_matches_baked_spec() {
+        const DEFAULT_LUA: &str =
+            include_str!("../../../runtime/lua/smelt/colorschemes/default.lua");
+        let lua = mlua::Lua::new();
+        let lua_spec_value: LuaValue = lua
+            .load(DEFAULT_LUA)
+            .set_name("colorschemes/default.lua")
+            .eval()
+            .expect("default.lua must load");
+        let lua_spec: ThemeSpec = ThemeSpec::from_lua(lua_spec_value, &lua)
+            .expect("default.lua must decode as ThemeSpec");
+        let baked_spec = baked_default_spec();
+
+        for is_light in [false, true] {
+            let lua_theme = compile(&lua_spec, is_light).expect("lua spec compiles");
+            let baked_theme = compile(&baked_spec, is_light).expect("baked spec compiles");
+
+            // Collect every group name appearing on either side. Both
+            // resolved styles must match exactly — same fg/bg/flags.
+            let mut names: std::collections::HashSet<String> = std::collections::HashSet::new();
+            for (id, _) in lua_theme.iter() {
+                if let Some(n) = smelt_core::theme::name_of(id) {
+                    if !n.starts_with("__anon__/") {
+                        names.insert(n);
+                    }
+                }
+            }
+            for (id, _) in baked_theme.iter() {
+                if let Some(n) = smelt_core::theme::name_of(id) {
+                    if !n.starts_with("__anon__/") {
+                        names.insert(n);
+                    }
+                }
+            }
+            for name in &names {
+                let lua_style = lua_theme.get(name);
+                let baked_style = baked_theme.get(name);
+                assert_eq!(
+                    lua_style, baked_style,
+                    "group `{name}` drifted between default.lua and baked_default_spec \
+                     (is_light={is_light}): lua={lua_style:?} baked={baked_style:?}"
+                );
+            }
+        }
     }
 }

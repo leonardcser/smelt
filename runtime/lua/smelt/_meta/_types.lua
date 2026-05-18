@@ -213,17 +213,12 @@
 ---@class smelt.statusline.RegisterOpts
 ---@field align? string `"right"` makes the source's segments default to the right strip. Defaults to left.
 
---- Color value used inside a `StyleDecl`. May be a direct color (`{ ansi = N }` / `{ rgb = ... }`) or a `{ dark, light }` branch resolved at compile time against the terminal background. If both a direct color and a branch are set, the branch wins when its side matches the active mode; otherwise the direct color is used.
+--- Color value. Set `ansi` (256-color palette index) or `rgb` (`{R, G, B}` triple) for a direct color, or `dark` / `light` (themselves `ColorDecl`s) for a branch that resolves against the terminal background. A matching-side branch wins over the direct fields.
 ---@class smelt.theme.ColorDecl
 ---@field ansi? integer ANSI 256-color palette index for the default (non-branched) case.
 ---@field rgb? integer[] `[r, g, b]` sRGB triple for the default (non-branched) case.
----@field light? smelt.theme.ColorLeaf Color this branch resolves to when `is_light == true`.
----@field dark? smelt.theme.ColorLeaf Color this branch resolves to when `is_light == false`.
-
---- Concrete color value: an ANSI 256 palette index or an sRGB triple. Used as the leaf of a `ColorDecl` (and as the leaf of its dark/light branches). Exactly one of `ansi` / `rgb` should be set; empty resolves to `None`.
----@class smelt.theme.ColorLeaf
----@field ansi? integer ANSI 256-color palette index.
----@field rgb? integer[] `[r, g, b]` sRGB triple.
+---@field light? smelt.theme.ColorDecl Color this branch resolves to when `is_light == true`.
+---@field dark? smelt.theme.ColorDecl Color this branch resolves to when `is_light == false`.
 
 --- Style table for a single highlight group. Every field is optional — unset fields stay at `Style::default()`. Pass a string in place of this struct (at the group-map level) to alias another group.
 ---@class smelt.theme.StyleDecl
