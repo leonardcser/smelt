@@ -372,6 +372,7 @@ Window handle returned by `smelt.win.new(buf, opts?)`. Setter methods return the
 | `key` | `fun(chord: string, func: fun(value: table)): smelt.Reg` | yes | Bind `func` to `chord` on this window. Returns a Reg handle whose `:remove()` undoes the binding. Raises on unknown chords. |
 | `on` | `fun(event: smelt.win.Event, func: fun(value: table)): smelt.Reg` | yes | Subscribe `func` to `event` on this window. Returns a Reg handle whose `:remove()` undoes the subscription. |
 | `link_scroll` | `fun(others: smelt.win.Win): smelt.win.Win` | yes | Link `scroll_top` between this window and the variadic `others`. Closing any member auto-removes it. Returns the handle for chaining. |
+| `scroll` | `fun(arg: any): any` | yes | Read or write the window's scroll state. No arg returns `{ top, follow, total, viewport }` (`total` is the buffer's line count; `viewport` is the leaf's height). An integer sets `scroll_top` and clears the pin-to-tail flag. The literal string `"tail"` re-pins the viewport to the buffer's tail. |
 
 ## Aliases
 
@@ -421,5 +422,5 @@ Variants: `"insert"` \| `"normal"` \| `"visual"` \| `"visual_line"`
 
 Window-event names accepted by `win:on(event, fn)`. Maps onto the internal `WinEvent` enum.
 
-Variants: `"open"` \| `"close"` \| `"focus"` \| `"blur"` \| `"selection_changed"` \| `"submit"` \| `"text_changed"` \| `"dismiss"` \| `"tick"`
+Variants: `"open"` \| `"close"` \| `"focus"` \| `"blur"` \| `"selection_changed"` \| `"submit"` \| `"text_changed"` \| `"dismiss"` \| `"tick"` \| `"click"` \| `"scrolled"`
 

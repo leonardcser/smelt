@@ -175,6 +175,14 @@ pub(crate) fn populate_ui_theme(theme: &mut crate::smelt_term::Theme) {
     } else {
         Color::AnsiValue(236)
     };
+    // One notch darker than `user_bg`. Used by the scroll-jump pills so they
+    // sit visually behind queued messages and tool blocks without competing
+    // for attention.
+    let pill_bg = if is_light {
+        Color::AnsiValue(250)
+    } else {
+        Color::AnsiValue(234)
+    };
     let code_block_bg = if is_light {
         Color::AnsiValue(255)
     } else {
@@ -232,6 +240,7 @@ pub(crate) fn populate_ui_theme(theme: &mut crate::smelt_term::Theme) {
     theme.set("SmeltSlug", Style::new().bg(theme.slug_color()));
     theme.set("SmeltStatusBg", Style::new().bg(Color::AnsiValue(233)));
     theme.set("SmeltUserBg", Style::new().bg(user_bg));
+    theme.set("SmeltScrollPillBg", Style::new().bg(pill_bg));
     theme.set("SmeltCodeBlockBg", Style::new().bg(code_block_bg));
     theme.set("SmeltBar", Style::new().bg(bar));
     theme.set("SmeltScrollbarTrack", Style::new().bg(scrollbar_track));

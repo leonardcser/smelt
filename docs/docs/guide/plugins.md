@@ -113,6 +113,7 @@ deferred wiring). The hook fires with `ctx = { kind = "launch" |
 | `esc_chord` | yes | `<Esc><Esc>` to cancel `/compact` or rewind a turn |
 | `perf_panel` | yes | F12 overlay with live duration percentiles |
 | `predict` | yes | After each turn, predicts your next message and shows it as ghost text |
+| `scroll_pills` | yes | While the transcript is scrolled away from the tail, shows two click-only overlays — a "↓ jump to bottom" pill above the prompt and a one-row "jump to next message" pill at the top of the terminal |
 | `title` | yes | After each turn, generates a session title + slug if one isn't set |
 | `background_commands` | **opt-in** (experimental) | Adds `run_in_background` to `bash`, plus `read_process_output`, `stop_process`, and `/ps` |
 | `plan_mode` | **opt-in** | Wires up plan mode — registers `exit_plan_mode` and injects the plan-mode system prompt |

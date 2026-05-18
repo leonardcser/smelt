@@ -309,6 +309,8 @@ pub struct Window {
     /// Cpos of a single-click press awaiting drag; promoted to a selection on the
     /// first `Drag` event. A bare press-release with no motion leaves no selection.
     pub pending_press: Option<usize>,
+    /// `(scroll_top, follow_tail)` last emitted via `WinEvent::Scrolled`.
+    pub(crate) last_emitted_scroll: Option<(u16, bool)>,
     /// Moving end of an active mouse drag-select, in editable-byte space. `None`
     /// outside a drag. The renderer paints the cursor/CursorLine at this byte's
     /// projected row when set, and the selection range is `(selection_anchor,
@@ -347,7 +349,8 @@ impl Window {
             scroll_left: 0,
             cursor_row: 0,
             cursor_col: 0,
-            follow_tail: true,
+            // Opt-in; callers that want sticky-bottom set this true.
+            follow_tail: false,
             pending_recenter: false,
             pending_scroll_to_cursor: false,
             last_render_cpos: None,
@@ -356,6 +359,7 @@ impl Window {
             drag_anchor_line: None,
             pending_press: None,
             drag_endpoint: None,
+            last_emitted_scroll: None,
         }
     }
 
@@ -809,6 +813,19 @@ impl Window {
     pub fn scroll_to_bottom(&mut self) {
         self.scroll_top = u16::MAX;
         self.follow_tail = true;
+    }
+
+    /// `true` while an in-flight selection or vim Visual mode should hold the
+    /// viewport still instead of snapping to tail. Mouse-drag capture is
+    /// checked separately at the `Ui` level.
+    pub fn tail_follow_frozen(&self) -> bool {
+        if self.selection_anchor.is_some() {
+            return true;
+        }
+        if self.vim_enabled && matches!(self.vim_mode, VimMode::Visual | VimMode::VisualLine) {
+            return true;
+        }
+        false
     }
 
     // ── Navigation ─────────────────────────────────────────────────────
@@ -2240,9 +2257,9 @@ mod tests {
     }
 
     #[test]
-    fn follow_tail_default_true() {
+    fn follow_tail_default_false() {
         let w = make_win();
-        assert!(w.follow_tail);
+        assert!(!w.follow_tail);
     }
 
     #[test]

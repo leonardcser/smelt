@@ -15,7 +15,14 @@ impl TuiApp {
         let width = term_w as usize;
         let show_queued = agent_running || self.busy_stack.is_busy();
 
-        self.adjust_tail_scroll();
+        self.ui.apply_tail_follow();
+        // Transcript's buffer is rebuilt mid-frame by `project_transcript_buffer`,
+        // so the `apply_tail_follow` clamp is one row stale during streaming.
+        // Pin the sentinel instead — the projection's own clamp_scroll resolves
+        // it against the post-rebuild row count.
+        if self.ui.should_follow_tail(crate::app::TRANSCRIPT_WIN) {
+            self.transcript_win_mut().scroll_top = u16::MAX;
+        }
         self.ui.sync_scroll_links();
 
         let queued_owned: Vec<String> = if show_queued {
@@ -112,26 +119,6 @@ impl TuiApp {
                 crate::lua::paint::invoke_paint(lua, handle_id, slice, ctx);
             }
         });
-    }
-
-    /// Freeze tail-follow during selection/vim-visual/drag; otherwise snap to bottom.
-    fn adjust_tail_scroll(&mut self) {
-        let win = self.transcript_win();
-        let has_selection = win.selection_anchor.is_some();
-        let in_vim_visual = win.vim_enabled
-            && matches!(
-                win.vim_mode,
-                crate::smelt_term::VimMode::Visual | crate::smelt_term::VimMode::VisualLine
-            );
-        let mouse_drag_active = matches!(
-            self.ui.capture(),
-            Some(crate::smelt_term::HitTarget::Window(_))
-        );
-        let freeze = has_selection || in_vim_visual || mouse_drag_active;
-        let follow_tail = self.transcript_win().follow_tail;
-        if !freeze && follow_tail {
-            self.transcript_win_mut().scroll_top = u16::MAX;
-        }
     }
 
     /// Compute which pane owns the cursor this frame.

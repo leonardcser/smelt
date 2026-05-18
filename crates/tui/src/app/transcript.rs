@@ -260,6 +260,43 @@ impl TuiApp {
         cpos
     }
 
+    /// Snapshot of the laid-out transcript blocks as `(idx, role, first_row,
+    /// rows, first_line)`. `idx` is 0-based into `transcript.history.order` to
+    /// match `session.rewind_to(block_idx)`. `first_line` is the first
+    /// non-empty line of the block's raw source text (truncated upstream by
+    /// the caller as needed). Returns empty when no projection has run yet
+    /// (i.e. before the first frame).
+    pub(crate) fn transcript_block_snapshots(
+        &self,
+    ) -> Vec<(usize, &'static str, u16, u16, String)> {
+        use smelt_core::transcript_model::Block;
+        let mut out = Vec::new();
+        let history = &self.transcript.history;
+        for (block_id, first_row, rows) in self.transcript_projection.block_layout() {
+            let Some(idx) = history.order.iter().position(|id| *id == block_id) else {
+                continue;
+            };
+            let Some(block) = history.blocks.get(&block_id) else {
+                continue;
+            };
+            let role = match block {
+                Block::User { .. } => "user",
+                Block::Text { .. } => "assistant",
+                Block::Thinking { .. } => "thinking",
+                Block::ToolCall { .. } => "tool",
+                Block::CodeLine { .. } => "code",
+                Block::Exec { .. } => "exec",
+                Block::Compacted { .. } => "compacted",
+            };
+            let first_line = block
+                .raw_text()
+                .and_then(|t| t.lines().find(|l| !l.trim().is_empty()).map(str::to_string))
+                .unwrap_or_default();
+            out.push((idx, role, first_row, rows, first_line));
+        }
+        out
+    }
+
     pub(crate) fn finish_transcript_turn(&mut self) {
         let _perf = smelt_perf::perf::begin("render:finish_turn");
         self.parser

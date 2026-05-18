@@ -41,6 +41,13 @@ pub enum LuaWinEvent {
     Dismiss,
     /// Periodic tick for animation/refresh.
     Tick,
+    /// Mouse-down landed on the window. Payload: `{ row, col, button }`
+    /// (leaf-relative cell coords, `button` ∈ `"left"|"right"|"middle"`).
+    /// Non-focusable, non-selectable windows still receive it.
+    Click,
+    /// Window's scroll state changed. Payload: `{ top, follow }` where
+    /// `top` is the new `scroll_top` and `follow` is the pin-to-tail flag.
+    Scrolled,
 }
 
 impl From<LuaWinEvent> for crate::smelt_term::WinEvent {
@@ -56,6 +63,8 @@ impl From<LuaWinEvent> for crate::smelt_term::WinEvent {
             LuaWinEvent::TextChanged => WinEvent::TextChanged,
             LuaWinEvent::Dismiss => WinEvent::Dismiss,
             LuaWinEvent::Tick => WinEvent::Tick,
+            LuaWinEvent::Click => WinEvent::Click,
+            LuaWinEvent::Scrolled => WinEvent::Scrolled,
         }
     }
 }
@@ -265,6 +274,73 @@ impl mlua::UserData for LuaWin {
             },
         );
 
+        // ── scroll: get / set / pin-to-tail ────────────────────────
+        // `win:scroll()` returns `{ top, follow, total, viewport }`.
+        // `win:scroll(integer)` sets `scroll_top` and clears `follow_tail`.
+        // `win:scroll("tail")` re-pins (`follow_tail = true`).
+        methods.add_function(
+            "scroll",
+            |lua, (this_ud, arg): (mlua::AnyUserData, mlua::Value)| -> LuaResult<mlua::Value> {
+                let this = *this_ud.borrow::<LuaWin>()?;
+                match arg {
+                    mlua::Value::Nil => {
+                        let info = crate::lua::try_with_app(|app| {
+                            let win = app.ui.win(this.id)?;
+                            let total = app.ui.buf(win.buf).map(|b| b.lines().len()).unwrap_or(0);
+                            let viewport = win.viewport.map(|v| v.rect.height).unwrap_or(0);
+                            Some((win.scroll_top, win.follow_tail, total as u64, viewport))
+                        })
+                        .flatten();
+                        match info {
+                            Some((top, follow, total, viewport)) => {
+                                let t = lua.create_table()?;
+                                t.set("top", top)?;
+                                t.set("follow", follow)?;
+                                t.set("total", total)?;
+                                t.set("viewport", viewport)?;
+                                Ok(mlua::Value::Table(t))
+                            }
+                            None => Ok(mlua::Value::Nil),
+                        }
+                    }
+                    mlua::Value::Integer(n) => {
+                        crate::lua::with_app(|app| {
+                            let Some(win) = app.ui.win(this.id) else {
+                                return;
+                            };
+                            let buf_id = win.buf;
+                            let viewport_rows = win.viewport.map(|v| v.rect.height).unwrap_or(0);
+                            let target = n.max(0).min(u16::MAX as i64) as u16;
+                            let (w, buf) = app.ui.win_and_buf_mut(this.id, buf_id);
+                            if let (Some(w), Some(buf)) = (w, buf) {
+                                // Match mouse-wheel semantics: keep the cursor on
+                                // the same screen row across the pan.
+                                w.scroll_to_preserving_cursor_screen_row(
+                                    target,
+                                    buf,
+                                    viewport_rows,
+                                );
+                                w.follow_tail = false;
+                            }
+                        });
+                        Ok(mlua::Value::UserData(this_ud))
+                    }
+                    mlua::Value::String(s) if s.to_str()?.as_ref() == "tail" => {
+                        crate::lua::with_app(|app| {
+                            if let Some(w) = app.ui.win_mut(this.id) {
+                                w.follow_tail = true;
+                            }
+                        });
+                        Ok(mlua::Value::UserData(this_ud))
+                    }
+                    other => Err(mlua::Error::RuntimeError(format!(
+                        "win:scroll: expected nil, integer, or \"tail\"; got {}",
+                        other.type_name()
+                    ))),
+                }
+            },
+        );
+
         // ── link_scroll(...) — chainable; variadic over Win ────────
         methods.add_function(
             "link_scroll",
@@ -332,12 +408,20 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
             "key" => fn(chord: String, func: LuaCallback<mlua::Table, ()>) -> LuaReg, "Bind `func` to `chord` on this window. Returns a Reg handle whose `:remove()` undoes the binding. Raises on unknown chords.",
             "on" => fn(event: LuaWinEvent, func: LuaCallback<mlua::Table, ()>) -> LuaReg, "Subscribe `func` to `event` on this window. Returns a Reg handle whose `:remove()` undoes the subscription.",
             "link_scroll" => fn(others: mlua::Variadic<LuaWin>) -> LuaWin, "Link `scroll_top` between this window and the variadic `others`. Closing any member auto-removes it. Returns the handle for chaining.",
+            "scroll" => fn(arg: mlua::Value) -> mlua::Value, "Read or write the window's scroll state. No arg returns `{ top, follow, total, viewport }` (`total` is the buffer's line count; `viewport` is the leaf's height). An integer sets `scroll_top` and clears the pin-to-tail flag. The literal string `\"tail\"` re-pins the viewport to the buffer's tail.",
         },
     });
 
+    // Doc text is built at registration time so per-opt defaults stay in
+    // lockstep with the Rust source (`Gutters::default()`) — no hand-kept
+    // duplication that could drift on a default change.
+    let new_doc: &'static str = Box::leak(format!(
+        "Open a split window over `buf` and return a `Win` userdata. `opts.name` opts the window into hot-reload survival; omitted from a module body, a stable per-(plugin, declaration-index) name is auto-assigned. `opts.kind = \"input\"` (`opts.placeholder?`) marks the window as a single-line text input; `opts.kind = \"list\"` (`opts.initial_cursor?`) marks it as a navigable list leaf. `opts.scrollbar` reserves the rightmost column for an overflow scrollbar (default `{}`); pass `false` on 1-row pills / dialog chrome to reclaim that cell.",
+        crate::smelt_term::layout::Gutters::default().scrollbar
+    ).into_boxed_str());
     m.fn_(
         "new",
-        "Open a split window over `buf` and return a `Win` userdata. `opts.name` opts the window into hot-reload survival; omitted from a module body, a stable per-(plugin, declaration-index) name is auto-assigned. `opts.kind = \"input\"` (`opts.placeholder?`) marks the window as a single-line text input; `opts.kind = \"list\"` (`opts.initial_cursor?`) marks it as a navigable list leaf.",
+        new_doc,
         &["buf", "opts"],
         |lua,
          (buf, opts): (super::buf::LuaBuf, Option<mlua::Table>)|

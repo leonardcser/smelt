@@ -129,6 +129,14 @@ impl TuiApp {
         if let Some((win, count)) = self.ui.resolve_split_mouse(me, now) {
             let is_down = is_left_down(me.kind);
             let is_up = matches!(me.kind, MouseEventKind::Up(MouseButton::Left));
+            // Fire WinEvent::Click on Down with leaf-relative cell coords so
+            // plugin overlays (non-focusable + non-selectable buttons) can react.
+            // Fires before any per-leaf handling below; the built-in transcript /
+            // input / list flows still run unconditionally — Click is purely
+            // additive for Lua subscribers.
+            if is_down {
+                self.fire_click_event(win, me, crate::smelt_term::MouseButton::Left);
+            }
             if win == crate::app::PROMPT_WIN {
                 self.handle_prompt_mouse(me, count);
             } else if win == crate::app::TRANSCRIPT_WIN {
@@ -165,6 +173,40 @@ impl TuiApp {
         }
 
         EventOutcome::Noop
+    }
+
+    /// Fire `WinEvent::Click` on `win` with leaf-relative cell coords. Coords
+    /// are clamped to `(0, 0)` when the win has no live viewport (the click
+    /// landed during a hit-test stale frame).
+    fn fire_click_event(
+        &mut self,
+        win: WinId,
+        me: MouseEvent,
+        button: crate::smelt_term::MouseButton,
+    ) {
+        let (rel_row, rel_col) = match self.ui.win(win).and_then(|w| w.viewport).map(|v| v.rect) {
+            Some(rect) => (
+                me.row.saturating_sub(rect.top),
+                me.column.saturating_sub(rect.left),
+            ),
+            None => (0, 0),
+        };
+        let lua = &self.lua;
+        let mut lua_invoke = |handle: crate::smelt_term::LuaHandle,
+                              w: WinId,
+                              payload: &crate::smelt_term::Payload| {
+            lua.queue_invocation(handle, w, payload);
+        };
+        self.ui.fire_win_event(
+            win,
+            crate::smelt_term::WinEvent::Click,
+            crate::smelt_term::Payload::Click {
+                row: rel_row,
+                col: rel_col,
+                button,
+            },
+            &mut lua_invoke,
+        );
     }
 
     fn yank_to_clipboard(&mut self, out: crate::smelt_term::CopyOutput) {

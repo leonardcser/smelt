@@ -1,0 +1,176 @@
+-- Scroll-pill overlays shown while the transcript is scrolled off-tail:
+--   * Bottom pill — " ↓ jump to bottom " above the prompt; click re-pins to tail.
+--   * Top pill    — first line of the nearest user message above the viewport;
+--     click scrolls to it with one row of gap so repeated clicks walk back.
+-- Disable via `smelt.builtins.disable({ plugins = { "scroll_pills" } })`.
+
+local ns_bottom = smelt.ns("smelt.scroll_pills.bottom")
+local ns_top = smelt.ns("smelt.scroll_pills.top")
+
+local PILL_BG = "SmeltScrollPillBg"
+local PILL_FG = "Comment"
+
+local state = {
+  transcript_win = nil,
+  bottom_overlay = nil,
+  bottom_buf = nil,
+  bottom_win = nil,
+  top_overlay = nil,
+  top_buf = nil,
+  top_win = nil,
+  top_target_idx = nil,
+}
+
+-- ── Bottom pill: "jump to bottom" ─────────────────────────────────────
+
+local BOTTOM_LABEL = " ↓ jump to bottom "
+local BOTTOM_WIDTH = smelt.text.width(BOTTOM_LABEL)
+
+local function close_bottom()
+  if state.bottom_overlay then state.bottom_overlay:close() end
+  state.bottom_overlay = nil
+  state.bottom_buf = nil
+  state.bottom_win = nil
+end
+
+local function open_bottom()
+  if state.bottom_overlay then return end
+  local buf = smelt.buf.new({ name = "smelt.scroll_pills.bottom.buf" })
+  buf:lines({ BOTTOM_LABEL })
+  buf:clear_ns(ns_bottom)
+  buf:mark(ns_bottom, 1, 0, {
+    end_col = BOTTOM_WIDTH,
+    fg = PILL_FG,
+    bg = PILL_BG,
+    bold = true,
+  })
+  local win = smelt.win.new(buf, {
+    name = "smelt.scroll_pills.bottom.win",
+    focusable = false,
+    selectable = false,
+    scrollbar = false,
+  })
+  win:on("click", function()
+    state.transcript_win:scroll("tail")
+  end)
+  state.bottom_buf = buf
+  state.bottom_win = win
+  state.bottom_overlay = smelt.overlay.new({
+    name = "smelt.scroll_pills.bottom",
+    anchor = "win",
+    target = state.transcript_win,
+    attach = "s",
+    z = 5,
+    modal = false,
+    blocks_agent = false,
+    border = "none",
+    layout = smelt.overlay.layout.leaf(win, { measure = { BOTTOM_WIDTH, 1 } }),
+  })
+end
+
+-- ── Top pill: "jump to last user message" ─────────────────────────────
+
+-- Most-recent user block at-or-above the viewport top. Hidden when that
+-- block sits exactly at the viewport top (already visible, click would no-op).
+local function user_block_for_top_pill()
+  local scroll = state.transcript_win:scroll()
+  if not scroll or scroll.follow then return nil end
+  local blocks = smelt.transcript.blocks()
+  for i = #blocks, 1, -1 do
+    local b = blocks[i]
+    if b.role == "user" and b.first_line ~= "" and b.first_row <= scroll.top then
+      if b.first_row == scroll.top then return nil end
+      return b
+    end
+  end
+  return nil
+end
+
+local function close_top()
+  if state.top_overlay then state.top_overlay:close() end
+  state.top_overlay = nil
+  state.top_buf = nil
+  state.top_win = nil
+  state.top_target_idx = nil
+end
+
+local function open_top(width)
+  local buf = smelt.buf.new({ name = "smelt.scroll_pills.top.buf" })
+  buf:lines({ "" })
+  local win = smelt.win.new(buf, {
+    name = "smelt.scroll_pills.top.win",
+    focusable = false,
+    selectable = false,
+    scrollbar = false,
+  })
+  win:on("click", function()
+    if state.top_target_idx then
+      local blocks = smelt.transcript.blocks()
+      for _, b in ipairs(blocks) do
+        if b.idx == state.top_target_idx then
+          -- One row of gap above the target so the previous user turn peeks in.
+          state.transcript_win:scroll(math.max(0, b.first_row - 1))
+          return
+        end
+      end
+    end
+  end)
+  state.top_buf = buf
+  state.top_win = win
+  state.top_overlay = smelt.overlay.new({
+    name = "smelt.scroll_pills.top",
+    anchor = "screen_at",
+    corner = "nw",
+    row = 0,
+    col = 0,
+    z = 5,
+    modal = false,
+    blocks_agent = false,
+    border = "none",
+    layout = smelt.overlay.layout.leaf(win, { measure = { width, 1 } }),
+  })
+end
+
+local function paint_top_row(width, label)
+  local inner = smelt.text.fit(label, width - 2, { suffix = "…" })
+  local row = " " .. inner .. " "
+  state.top_buf:lines({ row })
+  state.top_buf:clear_ns(ns_top)
+  state.top_buf:mark(ns_top, 1, 0, {
+    end_col = width,
+    fg = PILL_FG,
+    bg = PILL_BG,
+    bold = true,
+    hl_eol = true,
+  })
+end
+
+local function refresh_top()
+  local rect = state.transcript_win:rect()
+  -- Leave the transcript's scrollbar column uncovered.
+  local width = rect and math.max(0, rect.width - 1) or 0
+  if width <= 0 then close_top(); return end
+
+  local target = user_block_for_top_pill()
+  if not target then close_top(); return end
+
+  if not state.top_overlay then open_top(width) end
+  state.top_target_idx = target.idx
+  paint_top_row(width, target.first_line)
+end
+
+-- ── React to scroll changes ────────────────────────────────────────────
+-- UiHost-bound; re-wires on every `/reload`.
+
+smelt.lifecycle.on_ready(function()
+  state.transcript_win = smelt.win.transcript()
+  state.transcript_win:on("scrolled", function(payload)
+    if payload.follow then
+      close_bottom()
+      close_top()
+      return
+    end
+    open_bottom()
+    refresh_top()
+  end)
+end)

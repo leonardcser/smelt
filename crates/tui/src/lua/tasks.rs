@@ -113,5 +113,23 @@ fn populate_payload_table(
         }
         crate::smelt_term::Payload::Selection { index } => table.set("index", *index + 1),
         crate::smelt_term::Payload::Text { content } => table.set("text", content.clone()),
+        crate::smelt_term::Payload::Click { row, col, button } => {
+            table.set("row", *row)?;
+            table.set("col", *col)?;
+            table.set(
+                "button",
+                match button {
+                    crate::smelt_term::MouseButton::Left => "left",
+                    crate::smelt_term::MouseButton::Right => "right",
+                    crate::smelt_term::MouseButton::Middle => "middle",
+                },
+            )?;
+            Ok(())
+        }
+        crate::smelt_term::Payload::Scroll { top, follow } => {
+            table.set("top", *top)?;
+            table.set("follow", *follow)?;
+            Ok(())
+        }
     }
 }

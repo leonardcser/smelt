@@ -357,6 +357,7 @@ pub(super) const SMELT_GROUPS: &[&str] = &[
     "SmeltAccent",
     "SmeltSlug",
     "SmeltUserBg",
+    "SmeltScrollPillBg",
     "SmeltCodeBlockBg",
     "SmeltBar",
     "SmeltToolPending",

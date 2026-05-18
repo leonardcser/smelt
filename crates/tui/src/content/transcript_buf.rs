@@ -56,6 +56,16 @@ impl TranscriptProjection {
         }
     }
 
+    /// Snapshot of the laid-out blocks: `(BlockId, first_row, rows)` for each
+    /// entry from the most recent `project()`. Used by Lua's
+    /// `smelt.transcript.blocks()` to map block indices back to display rows
+    /// without duplicating the layout walk.
+    pub(crate) fn block_layout(&self) -> impl Iterator<Item = (BlockId, u16, u16)> + '_ {
+        self.layout
+            .iter()
+            .map(|e| (e.id, e.start.min(u16::MAX as u32) as u16, e.rows))
+    }
+
     /// Block at absolute row `row`. `None` for gap rows or rows past the projected total.
     pub(crate) fn block_of_row(&self, row: usize) -> Option<BlockId> {
         let row = row as u32;

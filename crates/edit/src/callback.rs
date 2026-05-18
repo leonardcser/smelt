@@ -54,15 +54,46 @@ pub enum WinEvent {
     Dismiss,
     /// Fired once per event-loop iteration for live-refresh overlays.
     Tick,
+    /// Mouse-down landed inside this window. Payload carries leaf-relative `row`/`col`
+    /// and the button. Fires before focus promotion; non-focusable leaves still receive it.
+    Click,
+    /// Window's scroll state changed. Payload carries the new `top` and `follow` flag.
+    Scrolled,
+}
+
+/// Mouse button identity carried in `Payload::Click`.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum MouseButton {
+    Left,
+    Right,
+    Middle,
 }
 
 /// Payload attached to a callback invocation.
 #[derive(Clone, Debug)]
 pub enum Payload {
     None,
-    Key { code: KeyCode, mods: KeyModifiers },
-    Selection { index: usize },
-    Text { content: String },
+    Key {
+        code: KeyCode,
+        mods: KeyModifiers,
+    },
+    Selection {
+        index: usize,
+    },
+    Text {
+        content: String,
+    },
+    /// Mouse-click hit a window. `row`/`col` are leaf-relative cell coordinates.
+    Click {
+        row: u16,
+        col: u16,
+        button: MouseButton,
+    },
+    /// Scroll state changed. `top` is the new `scroll_top`; `follow` is `follow_tail`.
+    Scroll {
+        top: u16,
+        follow: bool,
+    },
 }
 
 /// Result returned by a callback.

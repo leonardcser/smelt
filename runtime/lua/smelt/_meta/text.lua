@@ -7,11 +7,16 @@
 ---@class smelt.text
 local text = {}
 
+--- Force `s` to occupy exactly `width` display cells: truncate when too long (appending `opts.suffix`, default `"…"`), pad when too short (with `opts.fill`, default `" "`). `opts.align` is `"left"` (default), `"right"`, or `"center"`. Use this for fixed-width UI slots — handles multi-byte and wide chars correctly so the result is always exactly `width` cells wide regardless of content.
+---@type fun(s: string, width: integer, opts: table?): string
+text.fit = nil
+
 --- Lowercase `s`, replace non-alphanumeric runs with `-`, drop empty segments. Same algorithm the title plugin uses for fallback slugs.
 ---@type fun(s: string): string
 text.slugify = nil
 
---- Truncate `s` to at most `max_bytes`, snapping to the previous UTF-8 char boundary. Returns `s` unchanged when it already fits; appends `suffix` when provided and truncation actually occurred.
+--- Truncate `s` to at most `max_bytes`, snapping to the previous UTF-8 char boundary. Returns `s` unchanged when it already fits; appends `suffix` when provided and truncation actually occurred. **Byte-based** — use `smelt.text.fit` instead when you need to fit into a terminal-cell budget.
+---@see smelt.text.fit
 ---@type fun(s: string, max_bytes: integer, suffix: string?): string
 text.truncate = nil
 

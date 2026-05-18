@@ -25,5 +25,25 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
             .unwrap_or_default())
         },
     )?;
+    m.fn_(
+        "blocks",
+        "Return the laid-out transcript blocks for the current frame as a list of `{ idx, role, first_row, rows, first_line }`. `idx` is 0-based into `session.messages` order (the same value `session.rewind_to(idx)` accepts). `role` is `\"user\"|\"assistant\"|\"thinking\"|\"tool\"|\"code\"|\"exec\"|\"compacted\"`. `first_row` is the absolute display row of the block's first visible line (compare against `win:scroll().top`). `rows` is the block's row count. `first_line` is the first non-empty line of the block's raw source text. Returns an empty list before the first frame projects.",
+        &[],
+        |lua, ()| -> LuaResult<mlua::Table> {
+            let snaps = crate::lua::try_with_app(|app| app.transcript_block_snapshots())
+                .unwrap_or_default();
+            let out = lua.create_table_with_capacity(snaps.len(), 0)?;
+            for (i, (idx, role, first_row, rows, first_line)) in snaps.into_iter().enumerate() {
+                let t = lua.create_table()?;
+                t.set("idx", idx)?;
+                t.set("role", role)?;
+                t.set("first_row", first_row)?;
+                t.set("rows", rows)?;
+                t.set("first_line", first_line)?;
+                out.set(i + 1, t)?;
+            }
+            Ok(out)
+        },
+    )?;
     Ok(())
 }

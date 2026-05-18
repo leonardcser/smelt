@@ -339,6 +339,10 @@ impl TuiApp {
                 w.gutter = Some(std::sync::Arc::new(
                     crate::smelt_term::gutter::LineNumberGutter::new(),
                 ));
+                // Opt the transcript into per-frame tail-follow. Plugin leaves
+                // keep the default `false`; `Ui::apply_tail_follow` ignores
+                // them and they stay where the caller put them.
+                w.follow_tail = true;
             }
             let prompt_above_buf = ui.buf_create(crate::smelt_term::BufCreateOpts::default());
             assert!(ui.win_open_split_at(
@@ -951,6 +955,7 @@ impl TuiApp {
                         lua.queue_invocation(handle, win, payload);
                     };
                 self.ui.dispatch_tick(&mut lua_invoke);
+                self.ui.dispatch_scroll_events(&mut lua_invoke);
             }
             self.flush_lua_callbacks();
 

@@ -57,7 +57,9 @@ impl From<WinId> for PaintId {
 pub type LuaInvoke<'a> = dyn FnMut(callback::LuaHandle, WinId, &callback::Payload) + 'a;
 
 use callback::Callbacks;
-pub use callback::{Callback, CallbackCtx, CallbackResult, KeyBind, LuaHandle, Payload, WinEvent};
+pub use callback::{
+    Callback, CallbackCtx, CallbackResult, KeyBind, LuaHandle, MouseButton, Payload, WinEvent,
+};
 pub use event::{Event, Status};
 use overlay::OverlayHitTarget;
 pub use overlay::{HitTarget, Overlay, OverlayId};
@@ -1803,10 +1805,69 @@ impl Ui {
         Status::Consumed
     }
 
+    /// Whether `win`'s tail-follow should fire this frame: opted in, not frozen
+    /// by a selection / Visual mode, and not the target of an in-flight mouse
+    /// drag on this same window.
+    pub fn should_follow_tail(&self, win: WinId) -> bool {
+        let Some(w) = self.wins.get(&win) else {
+            return false;
+        };
+        if !w.follow_tail || w.tail_follow_frozen() {
+            return false;
+        }
+        !matches!(self.capture, Some(HitTarget::Window(d)) if d == win)
+    }
+
+    /// Pin `scroll_top` to the tail for every window where
+    /// [`Self::should_follow_tail`] holds. Buffers rebuilt mid-frame (e.g.
+    /// transcript streaming) should set `scroll_top = u16::MAX` themselves
+    /// after this pass.
+    pub fn apply_tail_follow(&mut self) {
+        let ids: Vec<WinId> = self.wins.keys().copied().collect();
+        for id in ids {
+            if !self.should_follow_tail(id) {
+                continue;
+            }
+            let win = &self.wins[&id];
+            let buf_id = win.buf;
+            let viewport_rows = win.viewport.map(|v| v.rect.height).unwrap_or(0);
+            let total_rows = self
+                .bufs
+                .get(&buf_id)
+                .map(|b| b.lines().len().min(u16::MAX as usize) as u16)
+                .unwrap_or(0);
+            let max_scroll = total_rows.saturating_sub(viewport_rows);
+            if let Some(w) = self.wins.get_mut(&id) {
+                w.scroll_top = max_scroll;
+            }
+        }
+    }
+
     pub fn dispatch_tick(&mut self, lua_invoke: &mut LuaInvoke) {
         let wins: Vec<WinId> = self.callbacks.wins_with_event(WinEvent::Tick);
         for win in wins {
             self.fire_win_event(win, WinEvent::Tick, Payload::None, lua_invoke);
+        }
+    }
+
+    /// Fire `WinEvent::Scrolled` on every subscribed window whose
+    /// `(scroll_top, follow_tail)` changed since the last emission.
+    pub fn dispatch_scroll_events(&mut self, lua_invoke: &mut LuaInvoke) {
+        let wins: Vec<WinId> = self.callbacks.wins_with_event(WinEvent::Scrolled);
+        for win in wins {
+            let Some(w) = self.wins.get_mut(&win) else {
+                continue;
+            };
+            let cur = (w.scroll_top, w.follow_tail);
+            if w.last_emitted_scroll == Some(cur) {
+                continue;
+            }
+            w.last_emitted_scroll = Some(cur);
+            let payload = Payload::Scroll {
+                top: cur.0,
+                follow: cur.1,
+            };
+            self.fire_win_event(win, WinEvent::Scrolled, payload, lua_invoke);
         }
     }
 
