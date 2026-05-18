@@ -44,7 +44,7 @@ end
 
 local function open_splash()
   if state.overlay then return end
-  state.paint_id = smelt.paint.register(paint_wordmark)
+  state.paint_id = smelt.paint.register(paint_wordmark, { name = "smelt.banner.splash.paint" })
   local word_w, word_h = banner.wordmark_size()
   local version_text = "v" .. (smelt.version or "")
   local w = math.max(word_w, #version_text)

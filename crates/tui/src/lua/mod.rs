@@ -350,10 +350,6 @@ impl LuaRuntime {
         &self.core.lua
     }
 
-    pub(crate) fn take_load_error(&mut self) -> Option<String> {
-        self.core.load_error.take()
-    }
-
     /// Run every bundled `runtime/lua/smelt/early/*.lua` file. Call BEFORE
     /// [`Self::load_early_init`] so user code can override flag declarations.
     pub fn load_bundled_early(&mut self) {

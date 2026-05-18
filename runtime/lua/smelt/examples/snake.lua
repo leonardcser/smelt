@@ -259,7 +259,7 @@ local function open()
 	})
 	STATE.win = smelt.win.new(STATE.buf, { focusable = true })
 
-	STATE.paint_id = smelt.paint.register(paint)
+	STATE.paint_id = smelt.paint.register(paint, { name = "smelt.snake.paint" })
 
 	STATE.win:key("h", turn("left"))
 	STATE.win:key("j", turn("down"))

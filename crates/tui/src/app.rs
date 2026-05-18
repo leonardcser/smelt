@@ -842,9 +842,6 @@ impl TuiApp {
             );
             self.drain_cells_pending();
         }
-        if let Some(err) = self.lua.take_load_error() {
-            self.notify_error(format!("lua init: {err}"));
-        }
         if let Some(state) = self.project_trust.take() {
             if matches!(state, smelt_core::trust::TrustState::Untrusted { .. }) {
                 self.notify(
@@ -852,8 +849,6 @@ impl TuiApp {
                 );
             }
         }
-        self.flush_lua_callbacks();
-        self.input.command_arg_sources = self.lua.list_command_args();
 
         let mut auto_reload_rx: Option<tokio::sync::mpsc::UnboundedReceiver<()>> = None;
         if self.core.config.settings.auto_reload {
@@ -878,16 +873,15 @@ impl TuiApp {
                 .expect("install SIGWINCH listener");
 
         // Cold-start the Lua context through the same pipeline `/reload`
-        // uses. The pre-TUI plugin load that already happened in `main`
-        // extracted engine config and registered slash commands, but its
-        // module bodies ran without the host pointer — any code that
-        // touches `smelt.win`, `smelt.overlay`, `smelt.paint`,
-        // `smelt.cell:subscribe`, etc. needed an `on_ready` hook to
-        // defer. By re-running plugins here inside `install_app_ptr`,
-        // module bodies see the host live on every Lua-context init
-        // (cold start AND `/reload`), so plain `if persist().is_open
-        // then open() end` works in both places. `lifecycle.on("ready")`
-        // hooks drain at the end with `ctx.kind = "launch"`.
+        // uses. `main` already ran a pre-TUI plugin pass to extract
+        // engine config — that pass couldn't touch `smelt.win`,
+        // `smelt.overlay`, `smelt.paint`, `smelt.cell:subscribe`, etc.
+        // because the host pointer wasn't installed yet. Re-running
+        // here inside `install_app_ptr` makes the host live for module
+        // bodies on every Lua-context init (cold start AND `/reload`),
+        // so plain `if persist().is_open then open() end` at module
+        // top works in both. `lifecycle.on("ready")` hooks drain at
+        // the end with `ctx.kind = "launch"`.
         let load_err = crate::lua::with_app_ptr(self, |app| app.bring_up_lua("launch"));
         if let Some(err) = load_err {
             self.notify_error(format!("lua init: {err}"));
