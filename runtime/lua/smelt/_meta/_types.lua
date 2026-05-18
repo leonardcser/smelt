@@ -96,8 +96,6 @@
 ---@field model? string Model reference (`"provider/model"` or a bare name resolved against the configured providers). When `nil`, falls back to the primary model.
 ---@field response_format? smelt.engine.AskResponseFormat JSON-schema response constraint.
 ---@field reasoning_effort? smelt.reasoning.Effort Reasoning effort for the request; defaults to `"off"`.
----@field trim_on_overflow? boolean When `true`, the engine wraps the call in a trim-on-overflow loop: on context-window errors it drops the oldest message (preserving the system prompt at index 0) and retries, up to `max_trims` times. Defaults to `false`.
----@field max_trims? integer Maximum number of trim-and-retry passes; only consulted when `trim_on_overflow` is true. Defaults to 20.
 ---@field on_response? fun(arg1: string, arg2: smelt.engine.AskError?) Fires once with `(content, err)`. On success `err` is `nil` and `content` carries the assistant text. On failure `err` is a `smelt.engine.AskError` table and `content` is `""`.
 
 --- Front-matter override block accepted by `smelt.engine.submit_command`. Mirrors what plugin commands set in their markdown header. Tool-name keys (e.g. `bash`, `edit`) become per-subcommand pattern buckets.

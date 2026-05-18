@@ -417,10 +417,10 @@ pub enum UiCommand {
     /// fire-and-forget request and returns the response as
     /// `EngineAskResponse`. `model` overrides the primary model when
     /// `Some`; `response_format` enforces a JSON schema when present;
-    /// `reasoning_effort` controls effort (defaults to `Off`). When
-    /// `trim_on_overflow` is true, the engine wraps the call in a
-    /// retry loop that drops the oldest non-system message on
-    /// context-window errors, up to `max_trims` passes.
+    /// `reasoning_effort` controls effort (defaults to `Off`). Overflow
+    /// handling is the caller's responsibility — context-window failures
+    /// surface through `EngineAskError { kind = "context_window" }` and
+    /// plugins compose retry strategy in Lua.
     EngineAsk {
         id: u64,
         system: String,
@@ -431,10 +431,6 @@ pub enum UiCommand {
         response_format: Option<AskResponseFormat>,
         #[serde(default)]
         reasoning_effort: ReasoningEffort,
-        #[serde(default)]
-        trim_on_overflow: bool,
-        #[serde(default)]
-        max_trims: u32,
     },
 
     /// Result of a tool execution (response to `ToolDispatch`).

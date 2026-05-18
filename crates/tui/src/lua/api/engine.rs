@@ -143,15 +143,6 @@ pub struct LuaAskSpec {
     pub response_format: Option<LuaAskResponseFormat>,
     /// Reasoning effort for the request; defaults to `"off"`.
     pub reasoning_effort: Option<LuaReasoningEffort>,
-    /// When `true`, the engine wraps the call in a trim-on-overflow loop:
-    /// on context-window errors it drops the oldest message (preserving
-    /// the system prompt at index 0) and retries, up to `max_trims` times.
-    /// Defaults to `false`.
-    #[lua(default)]
-    pub trim_on_overflow: bool,
-    /// Maximum number of trim-and-retry passes; only consulted when
-    /// `trim_on_overflow` is true. Defaults to 20.
-    pub max_trims: Option<u32>,
     /// Fires once with `(content, err)`. On success `err` is `nil` and
     /// `content` carries the assistant text. On failure `err` is a
     /// `smelt.engine.AskError` table and `content` is `""`.
@@ -246,12 +237,12 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
         },
     )?;
 
-    // smelt.engine.ask({system, messages?, question?, model?, response_format?, reasoning_effort?, trim_on_overflow?, max_trims?, on_response})
+    // smelt.engine.ask({system, messages?, question?, model?, response_format?, reasoning_effort?, on_response})
     {
         let s = shared.clone();
         m.fn_(
             "ask",
-            "Run an out-of-band LLM request without touching the main turn. `spec.model` selects an alternate model (defaults to the primary), `spec.response_format` enforces a JSON schema, `spec.reasoning_effort` controls effort (defaults to `\"off\"`), `spec.trim_on_overflow` wraps the call in a trim-and-retry loop for context-window errors (`spec.max_trims` caps the number of drops, default 20). `spec.on_response` fires once with `(content, err)`; returns the request id.",
+            "Run an out-of-band LLM request without touching the main turn. `spec.model` selects an alternate model (defaults to the primary), `spec.response_format` enforces a JSON schema, `spec.reasoning_effort` controls effort (defaults to `\"off\"`). `spec.on_response` fires once with `(content, err)`; on context-window errors `err.kind = \"context_window\"` so callers can compose retries in Lua (see `smelt.engine.ask_with_trim`). Returns the request id.",
             &["spec"],
             move |lua, spec: LuaAskSpec| -> LuaResult<u64> {
                 let mut messages: Vec<protocol::Message> = spec
@@ -291,8 +282,6 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
                     .reasoning_effort
                     .map(Into::into)
                     .unwrap_or(protocol::ReasoningEffort::Off);
-                let trim_on_overflow = spec.trim_on_overflow;
-                let max_trims = spec.max_trims.unwrap_or(20);
                 let model_ref = spec.model;
                 crate::lua::with_app(|app| {
                     let model = model_ref.and_then(|r| resolve_model_for_ask(app, &r));
@@ -303,8 +292,6 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
                         model,
                         response_format,
                         reasoning_effort,
-                        trim_on_overflow,
-                        max_trims,
                     })
                 });
                 Ok(id)

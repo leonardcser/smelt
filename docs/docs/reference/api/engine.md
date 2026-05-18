@@ -14,7 +14,19 @@ fun(spec: smelt.engine.AskSpec): integer
 
 Types: [`smelt.engine.AskSpec`](types.md#smeltengineaskspec)
 
-Run an out-of-band LLM request without touching the main turn. `spec.model` selects an alternate model (defaults to the primary), `spec.response_format` enforces a JSON schema, `spec.reasoning_effort` controls effort (defaults to `"off"`), `spec.trim_on_overflow` wraps the call in a trim-and-retry loop for context-window errors (`spec.max_trims` caps the number of drops, default 20). `spec.on_response` fires once with `(content, err)`; returns the request id.
+Run an out-of-band LLM request without touching the main turn. `spec.model` selects an alternate model (defaults to the primary), `spec.response_format` enforces a JSON schema, `spec.reasoning_effort` controls effort (defaults to `"off"`). `spec.on_response` fires once with `(content, err)`; on context-window errors `err.kind = "context_window"` so callers can compose retries in Lua (see `smelt.engine.ask_with_trim`). Returns the request id.
+
+## `smelt.engine.ask_with_trim`
+
+```lua
+fun(spec: table): integer
+```
+
+Wrap `smelt.engine.ask` with a trim-and-retry loop for context-window
+errors: drops the oldest message from `spec.messages` and re-issues
+the request up to `spec.max_trims` times (default 20). `spec` accepts
+every field `smelt.engine.ask` accepts, plus `max_trims`. The engine
+itself is one-shot; composition lives here so the policy stays visible.
 
 ## `smelt.engine.cancel`
 

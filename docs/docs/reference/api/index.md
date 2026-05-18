@@ -55,7 +55,7 @@ Requires a terminal UI; calling these from headless mode raises.
 
 - [`smelt`](index_smelt.md) — 5 function(s)
 - [`smelt.buf`](buf.md) — 1 function(s)
-- [`smelt.engine`](engine.md) — 6 function(s)
+- [`smelt.engine`](engine.md) — 7 function(s)
 - [`smelt.history`](history.md) — 2 function(s)
 - [`smelt.keymap`](keymap.md) — 4 function(s)
 - [`smelt.metrics`](metrics.md) — 2 function(s)

@@ -311,6 +311,37 @@ function smelt.fs.watch(path, handler, opts)
   end))
 end
 
+-- `smelt.engine` is UiHost. Only attach the convenience wrapper when it exists.
+if smelt.engine and smelt.engine.ask then
+  -- Wrap `smelt.engine.ask` with a trim-and-retry loop for context-window
+  -- errors: drops the oldest message from `spec.messages` and re-issues
+  -- the request up to `spec.max_trims` times (default 20). `spec` accepts
+  -- every field `smelt.engine.ask` accepts, plus `max_trims`. The engine
+  -- itself is one-shot; composition lives here so the policy stays visible.
+  -- @sig fun(spec: table): integer
+  function smelt.engine.ask_with_trim(spec)
+    local max_trims = spec.max_trims or 20
+    spec.max_trims = nil
+    local user_cb = spec.on_response
+    local trims = 0
+    local messages = spec.messages or {}
+    spec.messages = messages
+    local function attempt()
+      spec.on_response = function(content, err)
+        if err and err.kind == "context_window" and #messages > 0 and trims < max_trims then
+          trims = trims + 1
+          table.remove(messages, 1)
+          attempt()
+          return
+        end
+        if user_cb then user_cb(content, err) end
+      end
+      smelt.engine.ask(spec)
+    end
+    attempt()
+  end
+end
+
 -- `smelt.theme` is UiHost. Only attach the convenience loader when it exists.
 if smelt.theme then
   -- Load a colorscheme by name via `require("smelt.colorschemes.<name>")`.

@@ -3,9 +3,8 @@
 -- handoff summary so future turns fit within the context window.
 --
 -- Drives the status-bar spinner via `smelt.spinner.busy("compacting")`
--- and uses `smelt.engine.ask({ trim_on_overflow = true })` so the engine
--- transparently drops the oldest history entry when the summarizer
--- request itself overflows the context window.
+-- and uses `smelt.engine.ask_with_trim` so the summarizer request itself
+-- can drop the oldest history entry and retry when it overflows.
 
 local SYSTEM = [[
 You are performing a CONTEXT CHECKPOINT COMPACTION. Create a handoff summary for another instance of yourself that will resume the task.
@@ -166,13 +165,12 @@ local function summarize(history, instructions, done)
   local empty_retries = 0
 
   local function send()
-    smelt.engine.ask({
-      system           = system_text,
-      messages         = messages,
-      model            = smelt.model.preferred("compact"),
-      trim_on_overflow = true,
-      max_trims        = 20,
-      on_response      = function(summary, err)
+    smelt.engine.ask_with_trim({
+      system      = system_text,
+      messages    = messages,
+      model       = smelt.model.preferred("compact"),
+      max_trims   = 20,
+      on_response = function(summary, err)
         if err then
           handle:remove()
           smelt.notify.error("compaction failed: " .. err.message)

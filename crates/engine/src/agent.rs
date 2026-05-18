@@ -101,8 +101,6 @@ pub(crate) async fn engine_task(
                         model,
                         response_format,
                         reasoning_effort,
-                        trim_on_overflow,
-                        max_trims,
                     } => {
                         spawn_engine_ask(
                             &config,
@@ -113,8 +111,6 @@ pub(crate) async fn engine_task(
                             model,
                             response_format,
                             reasoning_effort,
-                            trim_on_overflow,
-                            max_trims,
                             &event_tx,
                         );
                     }
@@ -170,8 +166,6 @@ fn spawn_engine_ask(
     model: Option<AskModel>,
     response_format: Option<protocol::AskResponseFormat>,
     reasoning_effort: ReasoningEffort,
-    trim_on_overflow: bool,
-    max_trims: u32,
     event_tx: &mpsc::UnboundedSender<EngineEvent>,
 ) {
     let (api, model_name) = resolve_ask_target(config, model);
@@ -197,36 +191,9 @@ fn spawn_engine_ask(
             });
         }
 
-        let mut trims_done: u32 = 0;
-        let result = loop {
-            match provider
-                .chat(&messages, &[], &model_name, reasoning_effort, &opts)
-                .await
-            {
-                Ok(resp) => break Ok(resp),
-                Err(e)
-                    if trim_on_overflow
-                        && is_context_window_error(&e)
-                        && trims_done < max_trims
-                        && messages.len() > 2 =>
-                {
-                    // Drop the oldest non-system message and retry.
-                    messages.remove(1);
-                    trims_done += 1;
-                    log::entry(
-                        log::Level::Warn,
-                        "engine_ask_trim_oldest",
-                        &serde_json::json!({
-                            "request_id": id,
-                            "trims_done": trims_done,
-                            "remaining_messages": messages.len(),
-                        }),
-                    );
-                    continue;
-                }
-                Err(e) => break Err(e),
-            }
-        };
+        let result = provider
+            .chat(&messages, &[], &model_name, reasoning_effort, &opts)
+            .await;
 
         match result {
             Ok(resp) => {
@@ -531,8 +498,6 @@ impl<'a> Turn<'a> {
                 model,
                 response_format,
                 reasoning_effort,
-                trim_on_overflow,
-                max_trims,
             } => {
                 spawn_engine_ask(
                     self.config,
@@ -543,8 +508,6 @@ impl<'a> Turn<'a> {
                     model,
                     response_format,
                     reasoning_effort,
-                    trim_on_overflow,
-                    max_trims,
                     self.event_tx,
                 );
                 true
