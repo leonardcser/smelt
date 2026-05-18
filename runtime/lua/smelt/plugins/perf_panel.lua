@@ -128,8 +128,13 @@ end
 
 local function open()
 	state.open = true
-	smelt.metrics.perf.clear()
-	smelt.metrics.perf.set_enabled(true)
+	-- If perf is already on (e.g. `--bench`), leave its samples and enabled
+	-- flag alone so the end-of-run summary still has data to print.
+	state.owns_perf = not smelt.metrics.perf.snapshot().enabled
+	if state.owns_perf then
+		smelt.metrics.perf.clear()
+		smelt.metrics.perf.set_enabled(true)
+	end
 	attach()
 end
 
@@ -139,8 +144,11 @@ local function close()
 	if state.overlay then state.overlay:close(); state.overlay = nil end
 	state.win = nil
 	-- Named buf survives for next open by design.
-	smelt.metrics.perf.set_enabled(false)
-	smelt.metrics.perf.clear()
+	if state.owns_perf then
+		smelt.metrics.perf.set_enabled(false)
+		smelt.metrics.perf.clear()
+		state.owns_perf = nil
+	end
 end
 
 local function toggle()
