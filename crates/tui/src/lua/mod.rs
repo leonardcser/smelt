@@ -461,7 +461,7 @@ impl LuaRuntime {
         error: Option<protocol::EngineAskError>,
     ) {
         let handle = {
-            let Ok(mut cbs) = self.shared.callbacks.lock() else {
+            let Ok(mut cbs) = self.shared.ask_callbacks.lock() else {
                 return;
             };
             match cbs.remove(&id) {

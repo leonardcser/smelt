@@ -267,7 +267,7 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
 
                 if let Some(cb) = spec.on_response {
                     let handle = LuaHandle::from_func(lua, cb.into_inner())?;
-                    if let Ok(mut cbs) = s.callbacks.lock() {
+                    if let Ok(mut cbs) = s.ask_callbacks.lock() {
                         cbs.insert(id, handle);
                     }
                 }

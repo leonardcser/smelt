@@ -87,6 +87,12 @@ pub struct LuaShared {
     pub statusline_sources: Mutex<Vec<(String, StatusSource)>>,
     pub tools: Mutex<HashMap<String, ToolHandles>>,
     pub callbacks: Mutex<HashMap<u64, LuaHandle>>,
+    /// Callbacks registered for `smelt.engine.ask`. Separate from
+    /// `callbacks` so `fire_ask_callback` can't accidentally fire a
+    /// paint/win/overlay handler that happens to share an id namespace
+    /// — the two maps allocate ids from the same `next_id` counter but
+    /// each call_id only ever lands in one of them.
+    pub ask_callbacks: Mutex<HashMap<u64, LuaHandle>>,
     pub next_id: AtomicU64,
     /// Starts at `LUA_BUF_ID_BASE` so Lua-allocated `BufId`s never collide with Rust-side buffers.
     pub next_buf_id: AtomicU64,
@@ -223,6 +229,7 @@ impl Default for LuaShared {
             statusline_sources: Mutex::new(Vec::new()),
             tools: Mutex::new(HashMap::new()),
             callbacks: Mutex::new(HashMap::new()),
+            ask_callbacks: Mutex::new(HashMap::new()),
             next_id: AtomicU64::new(1),
             next_buf_id: AtomicU64::new(LUA_BUF_ID_BASE),
             next_external_id: AtomicU64::new(1),
@@ -277,6 +284,9 @@ impl LuaShared {
             m.clear();
         }
         if let Ok(mut m) = self.callbacks.lock() {
+            m.clear();
+        }
+        if let Ok(mut m) = self.ask_callbacks.lock() {
             m.clear();
         }
         self.hooks.tool_before.clear();
