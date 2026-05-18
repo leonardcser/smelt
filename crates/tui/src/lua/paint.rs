@@ -53,32 +53,23 @@ impl Default for PaintRegistry {
 }
 
 impl PaintRegistry {
-    /// Reserve a fresh anonymous paint id and bind it to `handle_id`.
-    /// Asserts the id stays in the paint half (`>= PAINT_ID_BASE`).
-    pub(crate) fn register(&mut self, handle_id: u64) -> PaintId {
-        let id = PaintId(self.next_id.fetch_add(1, Ordering::Relaxed));
-        debug_assert!(
-            id.0 >= PAINT_ID_BASE,
-            "PaintRegistry exhausted paint half of u64 namespace"
-        );
-        self.handles.insert(id, handle_id);
-        id
-    }
-
-    /// Bind `name` to a paint slot. On first registration, allocates a
-    /// fresh `PaintId`. On subsequent registrations with the same name,
-    /// reuses the existing `PaintId` and atomically swaps the handle so
-    /// surviving overlays / layouts that reference the id keep working
-    /// across hot reload. Returns the stable id and the previous handle
-    /// (when present) so the caller can release the old callback.
-    pub(crate) fn register_named(
+    /// Register `handle_id` as a paint callback and return its stable
+    /// `PaintId`. When `name` is `Some`, the slot survives `/reload`:
+    /// a subsequent `register(.., Some(same_name))` reuses the existing
+    /// `PaintId` and atomically swaps in the new handle, returning the
+    /// previous handle so the caller can release the old callback.
+    /// Anonymous (`None`) slots always allocate a fresh id and never
+    /// return a previous handle.
+    pub(crate) fn register(
         &mut self,
-        name: String,
         handle_id: u64,
+        name: Option<String>,
     ) -> (PaintId, Option<u64>) {
-        if let Some(&existing) = self.named.get(&name) {
-            let old = self.handles.insert(existing, handle_id);
-            return (existing, old);
+        if let Some(ref n) = name {
+            if let Some(&existing) = self.named.get(n) {
+                let prev = self.handles.insert(existing, handle_id);
+                return (existing, prev);
+            }
         }
         let id = PaintId(self.next_id.fetch_add(1, Ordering::Relaxed));
         debug_assert!(
@@ -86,8 +77,10 @@ impl PaintRegistry {
             "PaintRegistry exhausted paint half of u64 namespace"
         );
         self.handles.insert(id, handle_id);
-        self.named.insert(name.clone(), id);
-        self.name_of.insert(id, name);
+        if let Some(n) = name {
+            self.named.insert(n.clone(), id);
+            self.name_of.insert(id, n);
+        }
         (id, None)
     }
 
@@ -294,17 +287,21 @@ pub(crate) fn invoke_paint(
 mod tests {
     use super::*;
 
+    fn anon(reg: &mut PaintRegistry, handle: u64) -> PaintId {
+        reg.register(handle, None).0
+    }
+
     #[test]
     fn allocator_starts_above_winid_range() {
         let mut reg = PaintRegistry::default();
-        let id = reg.register(7);
+        let id = anon(&mut reg, 7);
         assert!(id.0 >= PAINT_ID_BASE);
     }
 
     #[test]
     fn register_unregister_roundtrips_handle_id() {
         let mut reg = PaintRegistry::default();
-        let id = reg.register(42);
+        let id = anon(&mut reg, 42);
         assert_eq!(reg.lookup(id), Some(42));
         assert!(reg.contains(id));
         let removed = reg.unregister(id);
@@ -316,9 +313,9 @@ mod tests {
     #[test]
     fn fresh_ids_are_distinct() {
         let mut reg = PaintRegistry::default();
-        let a = reg.register(1);
-        let b = reg.register(2);
-        let c = reg.register(3);
+        let a = anon(&mut reg, 1);
+        let b = anon(&mut reg, 2);
+        let c = anon(&mut reg, 3);
         assert_ne!(a, b);
         assert_ne!(b, c);
         assert_ne!(a, c);
@@ -333,10 +330,10 @@ mod tests {
     #[test]
     fn register_named_reuses_id_and_returns_old_handle() {
         let mut reg = PaintRegistry::default();
-        let (id1, old1) = reg.register_named("plugin.banner".into(), 11);
+        let (id1, old1) = reg.register(11, Some("plugin.banner".into()));
         assert!(old1.is_none());
         assert_eq!(reg.lookup(id1), Some(11));
-        let (id2, old2) = reg.register_named("plugin.banner".into(), 22);
+        let (id2, old2) = reg.register(22, Some("plugin.banner".into()));
         assert_eq!(
             id1, id2,
             "named slot must keep stable id across re-register"
@@ -352,11 +349,11 @@ mod tests {
     #[test]
     fn clear_anonymous_keeps_named_drops_anonymous() {
         let mut reg = PaintRegistry::default();
-        let anon = reg.register(100);
-        let (named, _) = reg.register_named("plugin.x".into(), 200);
+        let anon_id = anon(&mut reg, 100);
+        let (named, _) = reg.register(200, Some("plugin.x".into()));
         let released = reg.clear_anonymous();
         assert_eq!(released, vec![100], "anonymous handle ids must be released");
-        assert!(!reg.contains(anon), "anonymous slot must be dropped");
+        assert!(!reg.contains(anon_id), "anonymous slot must be dropped");
         assert!(reg.contains(named), "named slot must survive");
         assert_eq!(reg.lookup(named), Some(200));
     }
@@ -364,9 +361,9 @@ mod tests {
     #[test]
     fn unregister_named_removes_name_binding() {
         let mut reg = PaintRegistry::default();
-        let (id, _) = reg.register_named("plugin.x".into(), 7);
+        let (id, _) = reg.register(7, Some("plugin.x".into()));
         assert_eq!(reg.unregister(id), Some(7));
-        let (id2, old) = reg.register_named("plugin.x".into(), 8);
+        let (id2, old) = reg.register(8, Some("plugin.x".into()));
         assert!(old.is_none(), "name binding must be cleared on unregister");
         assert_ne!(
             id, id2,

@@ -51,15 +51,12 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
                     .and_then(|t| t.get::<Option<String>>("name").ok().flatten());
                 let handle_id =
                     crate::lua::register_callback_handle(&s, lua, func.into_inner())?;
-                let paint_id = crate::lua::with_app(|app| match name {
-                    Some(n) => {
-                        let (id, old) = app.paint_registry.register_named(n, handle_id);
-                        if let Some(prev) = old {
-                            app.lua.remove_callback(prev);
-                        }
-                        id
+                let paint_id = crate::lua::with_app(|app| {
+                    let (id, prev) = app.paint_registry.register(handle_id, name);
+                    if let Some(p) = prev {
+                        app.lua.remove_callback(p);
                     }
-                    None => app.paint_registry.register(handle_id),
+                    id
                 });
                 Ok(paint_id.0)
             },

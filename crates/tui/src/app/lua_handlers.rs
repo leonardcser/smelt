@@ -14,27 +14,8 @@ impl TuiApp {
         }
     }
 
-    /// `/reload` entry point. Delegates to [`Self::bring_up_lua`] —
-    /// the same pipeline that runs once on cold start from
-    /// `TuiApp::run` — then surfaces the outcome as a notification.
-    ///
-    /// Phases (shared with cold start):
-    /// 1. [`Self::clear_tui_for_reload`] wipes TUI-side caches that hold
-    ///    Lua handles or reference resources the reload will invalidate.
-    /// 2. [`LuaRuntime::reload`] wipes every `LuaShared` registry then
-    ///    re-runs bootstrap → autoload → init.lua → plugins → state sweep.
-    ///    Module bodies run with the host pointer live.
-    /// 3. [`Self::refresh_agent_inputs`] re-reads AGENTS.md, rebuilds the
-    ///    [`engine::SkillLoader`], re-reads `--system-prompt` when present,
-    ///    ships the refreshed bundle via
-    ///    [`protocol::UiCommand::ReloadAgentConfig`].
-    /// 4. `smelt.lifecycle.on("ready", fn)` hooks drain with
-    ///    `ctx = { kind = "reload" }` so hooks that gate on launch-only
-    ///    behavior early-return.
-    ///
-    /// Rust-owned UI state (named overlays, wins, bufs, paint slots)
-    /// survives — plugins re-attach via `smelt.state` and the
-    /// `opts.name` survival path.
+    /// `/reload` entry point. Wraps [`Self::bring_up_lua`] (the
+    /// shared cold-start + reload pipeline) with a user-facing toast.
     pub(crate) fn reload_lua(&mut self) {
         let err = self.bring_up_lua("reload");
         match err {
@@ -48,6 +29,26 @@ impl TuiApp {
     /// Plugin module bodies always run with the host pointer live and
     /// `lifecycle.on("ready")` hooks fire on every bring-up so plugins
     /// can rehydrate from `smelt.state` once per Lua-context init.
+    /// Rust-owned UI state (named overlays, wins, bufs, paint slots)
+    /// survives — plugins re-attach via `opts.name` and `smelt.state`.
+    ///
+    /// Phases:
+    /// 1. [`Self::clear_tui_for_reload`] wipes TUI-side caches that hold
+    ///    Lua handles (timers, anonymous paint, anonymous overlays/
+    ///    wins/bufs, picker state, busy stack).
+    /// 2. [`LuaRuntime::reload`] wipes every `LuaShared` registry then
+    ///    re-runs bootstrap → autoload → init.lua → plugins → state sweep.
+    /// 3. `input.command_arg_sources` is refreshed from the new
+    ///    `smelt.cmd.register` set.
+    /// 4. [`Self::refresh_agent_inputs`] re-reads AGENTS.md, rebuilds the
+    ///    [`engine::SkillLoader`], re-reads `--system-prompt` when present,
+    ///    ships the refreshed bundle via
+    ///    [`protocol::UiCommand::ReloadAgentConfig`].
+    /// 5. [`Self::reconcile_mcp_servers`] reconciles MCP server state
+    ///    off-thread against the new `smelt.mcp.register` desired set.
+    /// 6. `smelt.lifecycle.on("ready", fn)` hooks drain with
+    ///    `ctx = { kind }` so hooks that need to distinguish cold start
+    ///    from reload can branch on it.
     ///
     /// Must be called inside an `install_app_ptr` scope. Returns the
     /// Lua load error (if any) so the caller can render it however
