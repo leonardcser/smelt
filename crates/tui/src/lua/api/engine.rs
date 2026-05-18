@@ -183,6 +183,18 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
         &[],
         |_, ()| Ok(crate::lua::try_with_app(|app| app.agent.is_some()).unwrap_or(false)),
     )?;
+    {
+        let s = shared.clone();
+        m.fn_(
+            "on_context_limit",
+            "Register a recovery hook the engine calls when a provider returns a context-window error mid-turn. `fn` is called as `fn(messages, reply)` — `messages` is the conversation up to that point (excluding the system prompt at index 1) and `reply` is a Lua function the hook MUST call exactly once with either a shorter messages array (engine swaps it in and retries the turn) or `nil` (engine aborts with the existing TurnError). The first registered hook to call `reply` wins; later hooks are ignored. Returns an `off()` that removes this hook. Bundled `compact.lua` registers a hook that runs the standard summarization flow.",
+            &["fn"],
+            move |lua, func: mlua::Function| -> LuaResult<mlua::Function> {
+                let id = s.hooks.context_limit.register(lua, func, "")?;
+                s.hooks.context_limit.off_for(lua, id)
+            },
+        )?;
+    }
     m.fn_(
         "reload",
         "Re-evaluate every Lua surface: clears every command, keymap, statusline source, tool, hook, timer, and cell subscriber, wipes non-stdlib `package.loaded` entries, then re-runs the bundled autoload modules, `init.lua`, global plugins, and `.smelt/init.lua` + `.smelt/plugins/*`. `early.lua` is intentionally skipped — its CLI-flag and `smelt.builtins.disable` effects are startup-only.",

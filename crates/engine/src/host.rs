@@ -66,6 +66,18 @@ pub enum HostCall {
         message: Message,
         reply: oneshot::Sender<Option<Message>>,
     },
+
+    /// Engine hit a context-window error mid-turn. The host's registered
+    /// recovery hook (`smelt.engine.on_context_limit`) is invoked with
+    /// the conversation up to that point and returns a shorter
+    /// conversation to retry with. `Some(msgs)` swaps the engine's
+    /// `messages` (excluding the system prompt at index 0) and re-runs
+    /// the loop; `None` (no hook registered, hook returned nil, or hook
+    /// failed) aborts the turn with the existing `TurnError`.
+    RecoverFromContextLimit {
+        messages: Vec<Message>,
+        reply: oneshot::Sender<Option<Vec<Message>>>,
+    },
 }
 
 /// Outcome of an `AskPermission` round-trip.

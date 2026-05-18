@@ -152,14 +152,16 @@ local function compact_request_messages(history, instructions)
   }
 end
 
-local function run_compact(opts)
-  local history = smelt.session.messages()
+-- Async summarizer primitive shared by /compact, post-turn auto-compact,
+-- and the on_context_limit recovery hook. Owns the spinner, the
+-- trim-on-overflow + empty-retry loops, and notification on failure.
+-- Calls `done(summary_string)` on success or `done(nil)` on failure.
+local function summarize(history, instructions, done)
   if not history or #history == 0 then
-    smelt.notify.error("nothing to compact")
+    done(nil)
     return
   end
-
-  local system_text, messages = compact_request_messages(history, opts and opts.instructions)
+  local system_text, messages = compact_request_messages(history, instructions)
   local handle = smelt.spinner.busy("compacting")
   local empty_retries = 0
 
@@ -174,6 +176,7 @@ local function run_compact(opts)
         if err then
           handle:remove()
           smelt.notify.error("compaction failed: " .. err.message)
+          done(nil)
           return
         end
         if not summary or summary == "" then
@@ -184,20 +187,33 @@ local function run_compact(opts)
           end
           handle:remove()
           smelt.notify.error("compaction failed: empty summary after retries")
+          done(nil)
           return
         end
         handle:remove()
-        local replacement = build_replacement(
-          history,
-          summary,
-          opts and opts.inject_recent_user_messages or false
-        )
-        smelt.session.messages(replacement)
+        done(summary)
       end,
     })
   end
 
   send()
+end
+
+local function run_compact(opts)
+  local history = smelt.session.messages()
+  if not history or #history == 0 then
+    smelt.notify.error("nothing to compact")
+    return
+  end
+  summarize(history, opts and opts.instructions, function(summary)
+    if not summary then return end
+    local replacement = build_replacement(
+      history,
+      summary,
+      opts and opts.inject_recent_user_messages or false
+    )
+    smelt.session.messages(replacement)
+  end)
 end
 
 -- ── /compact command ──────────────────────────────────────────────────
@@ -220,4 +236,27 @@ smelt.cell("turn_complete"):subscribe(function()
   if not window or not tokens then return end
   if tokens < window * AUTO_COMPACT_THRESHOLD then return end
   run_compact({ inject_recent_user_messages = true })
+end)
+
+-- ── mid-turn recovery hook ────────────────────────────────────────────
+--
+-- Engine invokes this when a provider returns a context-window error
+-- mid-turn. Honours `settings.auto_compact`: when disabled, the hook
+-- calls `reply(nil)` immediately so the engine aborts the turn with the
+-- standard error. When enabled, summarises the conversation and hands
+-- the engine a one-message replacement carrying the summary, letting
+-- the turn continue seamlessly without a user-visible failure.
+
+smelt.engine.on_context_limit(function(messages, reply)
+  if not smelt.settings.auto_compact then
+    reply(nil)
+    return
+  end
+  summarize(messages, nil, function(summary)
+    if not summary then
+      reply(nil)
+      return
+    end
+    reply({ { role = "user", content = SUMMARY_PREFIX .. "\n" .. summary } })
+  end)
 end)

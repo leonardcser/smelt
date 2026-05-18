@@ -166,6 +166,11 @@ pub struct Hooks {
     pub provider_request: Arc<HookRegistry>,
     /// `provider.middleware{on_response=...}` registry.
     pub provider_response: Arc<HookRegistry>,
+    /// `smelt.engine.on_context_limit(fn)` registry. Engine consults
+    /// these in registration order when a provider returns a
+    /// context-window error mid-turn; the first hook to return a
+    /// non-nil messages array wins. Always uses `name = ""`.
+    pub context_limit: Arc<HookRegistry>,
 }
 
 /// Spec for a Lua-declared CLI flag. Mirrors the subset of clap we need.
@@ -282,6 +287,7 @@ impl LuaShared {
         self.hooks.tool_after.clear();
         self.hooks.provider_request.clear();
         self.hooks.provider_response.clear();
+        self.hooks.context_limit.clear();
         if let Ok(mut m) = self.watchers.lock() {
             m.clear();
         }

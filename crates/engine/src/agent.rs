@@ -726,6 +726,31 @@ impl<'a> Turn<'a> {
                         },
                         &serde_json::json!({"reason": "llm_error", "error": error_msg.clone()}),
                     );
+                    if is_ctx {
+                        // Ask the host's recovery hook for a shorter
+                        // conversation. On success we swap messages
+                        // (preserving the system prompt at index 0)
+                        // and re-enter the loop transparently.
+                        let history: Vec<Message> = self.messages.iter().skip(1).cloned().collect();
+                        let recovered = self
+                            .host_call(|reply| crate::host::HostCall::RecoverFromContextLimit {
+                                messages: history,
+                                reply,
+                            })
+                            .await
+                            .flatten();
+                        if let Some(shorter) = recovered {
+                            log::entry(
+                                log::Level::Info,
+                                "context_limit_recovered",
+                                &serde_json::json!({"new_message_count": shorter.len() + 1}),
+                            );
+                            self.messages.truncate(1);
+                            self.messages.extend(shorter);
+                            self.emit_messages_snapshot();
+                            continue;
+                        }
+                    }
                     self.emit_turn_complete(false);
                     let message = if is_ctx {
                         "Context limit reached. Run /compact and retry.".to_string()
