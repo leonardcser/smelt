@@ -947,11 +947,11 @@ impl TuiApp {
         const MIN_FRAME_INTERVAL: Duration = Duration::from_millis(16);
 
         'main: loop {
+            let _app_guard = crate::lua::install_app_ptr(self);
             if self.pending_quit {
                 self.discard_turn(true);
                 break 'main;
             }
-            let _app_guard = crate::lua::install_app_ptr(self);
             self.tick_timers();
             self.publish_diff_cells();
             self.drain_cells_pending();
