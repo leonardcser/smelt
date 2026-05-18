@@ -7,11 +7,14 @@ pub mod callback;
 pub(crate) mod event;
 pub mod gutter;
 pub(crate) mod motions;
+pub mod named;
 pub(crate) mod overlay;
 pub mod text;
 pub(crate) mod text_objects;
 pub mod vim;
 pub(crate) mod window;
+
+pub use named::NamedSlots;
 
 pub use smelt_buffer::attachment::AttachmentId;
 pub use smelt_buffer::buffer::{
@@ -76,15 +79,15 @@ pub struct Ui {
     /// Insertion order is the secondary z-order sort key; see [`Self::overlays_in_z_order`].
     overlays: Vec<(OverlayId, Overlay)>,
     next_overlay_id: u32,
-    /// Stable-name → resource-id maps for the hot-reload path. Plugins
+    /// Stable-name ↔ resource-id maps for the hot-reload path. Plugins
     /// that pass `opts.name = "foo"` to `buf_create` / `win_open_*` /
     /// `overlay_open` get the same id back on every (re-)load, so
     /// `/reload` can mutate the resource in place instead of tearing
     /// it down and losing scroll/cursor/size. Anonymous resources
     /// (`opts.name == nil`) skip these maps and are reaped on reload.
-    named_bufs: HashMap<String, BufId>,
-    named_wins: HashMap<String, WinId>,
-    named_overlays: HashMap<String, OverlayId>,
+    named_bufs: NamedSlots<BufId>,
+    named_wins: NamedSlots<WinId>,
+    named_overlays: NamedSlots<OverlayId>,
     /// `set_focus` pushes the outgoing focus here; overlay-close walks it back.
     focus_history: Vec<WinId>,
     focus: Option<WinId>,
@@ -136,9 +139,9 @@ impl Ui {
             callbacks: Callbacks::new(),
             overlays: Vec::new(),
             next_overlay_id: 1,
-            named_bufs: HashMap::new(),
-            named_wins: HashMap::new(),
-            named_overlays: HashMap::new(),
+            named_bufs: NamedSlots::new(),
+            named_wins: NamedSlots::new(),
+            named_overlays: NamedSlots::new(),
             focus_history: Vec::new(),
             focus: None,
             capture: None,
@@ -384,27 +387,27 @@ impl Ui {
     // ── Named resources (hot-reload-survivable handles) ──────────────
 
     pub fn named_buf(&self, name: &str) -> Option<BufId> {
-        self.named_bufs.get(name).copied()
+        self.named_bufs.lookup(name)
     }
 
     pub fn name_buf(&mut self, name: impl Into<String>, id: BufId) {
-        self.named_bufs.insert(name.into(), id);
+        self.named_bufs.bind(name.into(), id);
     }
 
     pub fn named_win(&self, name: &str) -> Option<WinId> {
-        self.named_wins.get(name).copied()
+        self.named_wins.lookup(name)
     }
 
     pub fn name_win(&mut self, name: impl Into<String>, id: WinId) {
-        self.named_wins.insert(name.into(), id);
+        self.named_wins.bind(name.into(), id);
     }
 
     pub fn named_overlay(&self, name: &str) -> Option<OverlayId> {
-        self.named_overlays.get(name).copied()
+        self.named_overlays.lookup(name)
     }
 
     pub fn name_overlay(&mut self, name: impl Into<String>, id: OverlayId) {
-        self.named_overlays.insert(name.into(), id);
+        self.named_overlays.bind(name.into(), id);
     }
 
     // ── Named-refresh shortcuts ──────────────────────────────────────
@@ -415,13 +418,13 @@ impl Ui {
     // (to apply opts) in one go.
 
     pub fn lookup_named_buf_mut(&mut self, name: &str) -> Option<(BufId, &mut Buffer)> {
-        let bid = self.named_bufs.get(name).copied()?;
+        let bid = self.named_bufs.lookup(name)?;
         let buf = self.bufs.get_mut(&bid)?;
         Some((bid, buf))
     }
 
     pub fn lookup_named_overlay_mut(&mut self, name: &str) -> Option<(OverlayId, &mut Overlay)> {
-        let id = self.named_overlays.get(name).copied()?;
+        let id = self.named_overlays.lookup(name)?;
         let ov = self
             .overlays
             .iter_mut()
@@ -437,8 +440,7 @@ impl Ui {
     /// them by passing the same `opts.name` on re-open. Returns the
     /// union of Lua callback ids the caller must release.
     pub fn reap_anonymous(&mut self, lua_buf_threshold: u64) -> Vec<u64> {
-        let keep_overlays: std::collections::HashSet<OverlayId> =
-            self.named_overlays.values().copied().collect();
+        let keep_overlays = self.named_overlays.ids_set();
         let doomed: Vec<WinId> = self
             .overlays
             .iter()
@@ -452,8 +454,7 @@ impl Ui {
         }
         let referenced: std::collections::HashSet<BufId> =
             self.wins.values().map(|w| w.buf).collect();
-        let named_bufs: std::collections::HashSet<BufId> =
-            self.named_bufs.values().copied().collect();
+        let named_bufs = self.named_bufs.ids_set();
         let drop_bufs: Vec<BufId> = self
             .bufs
             .keys()

@@ -25,10 +25,12 @@ Return the set of currently-bound `{ mode, chord }` rows. `mode` is the canonica
 ## `smelt.keymap.set`
 
 ```lua
-fun(mode: string, chord: string, handler: fun()): nil
+fun(mode: string, chord: string, handler: fun()): smelt.Reg
 ```
 
-Bind `chord` in `mode` to a Lua callback. `mode` is `"n"|"i"|"v"|""` (or the long form `normal`/`insert`/`visual`); the chord is canonicalized at registration and unknown values raise immediately. Re-binding the same `(mode, chord)` overwrites the prior handler.
+Types: [`smelt.Reg`](types.md#smeltreg)
+
+Bind `chord` in `mode` to a Lua callback. `mode` is `"n"|"i"|"v"|""` (or the long form `normal`/`insert`/`visual`); the chord is canonicalized at registration and unknown values raise immediately. Re-binding the same `(mode, chord)` overwrites the prior handler. Returns a `Reg` whose `:remove()` drops the binding.
 
 ## `smelt.keymap.unset`
 

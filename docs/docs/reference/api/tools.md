@@ -34,25 +34,27 @@ Return the names of every registered plugin tool, sorted.
 ## `smelt.tools.middleware`
 
 ```lua
-fun(name: string, mw: table): fun(): boolean
+fun(name: string, mw: table): smelt.Reg
 ```
+
+Types: [`smelt.Reg`](types.md#smeltreg)
 
 Register middleware for tool `name`. Pass `""` (empty string) as `name` to match every tool. `mw` is a table of `{ before = fn?, after = fn? }`:
 
 - `before(args, ctx)` runs synchronously before the tool executes. Return a table to replace `args`; return `{ deny = true, reason = "..." }` to short-circuit with an error result. Any other return is no-op.
 - `after(args, ctx, result)` runs after the tool completes and may return `{ content, is_error }` to replace the result. NOTE: `after` currently only fires for tools that complete synchronously; yielding tools (most builtins) skip it until the task-runtime path is wired.
 
-Hooks fire in registration order; an earlier hook's replacement is visible to later hooks. Returns an `off()` function that removes this middleware.
+Hooks fire in registration order; an earlier hook's replacement is visible to later hooks. Returns a `Reg` whose `:remove()` drops this middleware.
 
 ## `smelt.tools.register`
 
 ```lua
-fun(def: smelt.tools.ToolDef): nil
+fun(def: smelt.tools.ToolDef): smelt.Reg
 ```
 
-Types: [`smelt.tools.ToolDef`](types.md#smelttoolstooldef)
+Types: [`smelt.tools.ToolDef`](types.md#smelttoolstooldef), [`smelt.Reg`](types.md#smeltreg)
 
-Register a plugin tool. See [`smelt.tools.ToolDef`](types.md#smelttoolstooldef) for every supported field; only `name` and `execute` are required.
+Register a plugin tool. See [`smelt.tools.ToolDef`](types.md#smelttoolstooldef) for every supported field; only `name` and `execute` are required. Returns a `Reg` whose `:remove()` unregisters the tool.
 
 ## `smelt.tools.resolve`
 

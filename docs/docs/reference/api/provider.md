@@ -17,25 +17,27 @@ Return every registered provider as an array of tables. Each entry has `name`, `
 ## `smelt.provider.middleware`
 
 ```lua
-fun(mw: table): fun(): boolean
+fun(mw: table): smelt.Reg
 ```
+
+Types: [`smelt.Reg`](types.md#smeltreg)
 
 Register provider middleware. `mw` is a table of `{ on_request = fn?, on_response = fn? }`:
 
 - `on_request(messages)` — runs just before the engine calls the provider. `messages` is the full conversation history (an array of `{ role, content, tool_calls? }` rows including the system prompt at index 1). Return a replacement array to mutate it; any other return value leaves the history untouched.
 - `on_response(message)` — runs after the assistant message is fully assembled but before it's appended to history. `message` is the same `{ role = "assistant", content?, tool_calls? }` shape used everywhere else. Return a replacement table to mutate it; any other return leaves it as-is.
 
-Hooks fire in registration order. Each hook sees the previous hook's replacement. Returns an `off()` function that removes this middleware.
+Hooks fire in registration order. Each hook sees the previous hook's replacement. Returns a `Reg` whose `:remove()` drops this middleware.
 
 For streaming observation use `smelt.cell("stream_delta"):subscribe( ...)` — synchronous mutation of mid-stream tokens isn't safe because the parser owns the partial state.
 
 ## `smelt.provider.register`
 
 ```lua
-fun(name: string, cfg: smelt.provider.Config): nil
+fun(name: string, cfg: smelt.provider.Config): smelt.Reg
 ```
 
-Types: [`smelt.provider.Config`](types.md#smeltproviderconfig)
+Types: [`smelt.provider.Config`](types.md#smeltproviderconfig), [`smelt.Reg`](types.md#smeltreg)
 
-Declare a provider named `name`. Re-registering replaces the previous entry of the same name.
+Declare a provider named `name`. Re-registering replaces the previous entry of the same name. Returns a `Reg` whose `:remove()` drops the provider.
 

@@ -26,13 +26,13 @@ tools.list = nil
 --- - `before(args, ctx)` runs synchronously before the tool executes. Return a table to replace `args`; return `{ deny = true, reason = "..." }` to short-circuit with an error result. Any other return is no-op.
 --- - `after(args, ctx, result)` runs after the tool completes and may return `{ content, is_error }` to replace the result. NOTE: `after` currently only fires for tools that complete synchronously; yielding tools (most builtins) skip it until the task-runtime path is wired.
 --- 
---- Hooks fire in registration order; an earlier hook's replacement is visible to later hooks. Returns an `off()` function that removes this middleware.
----@type fun(name: string, mw: table): fun(): boolean
+--- Hooks fire in registration order; an earlier hook's replacement is visible to later hooks. Returns a `Reg` whose `:remove()` drops this middleware.
+---@type fun(name: string, mw: table): smelt.Reg
 tools.middleware = nil
 
---- Register a plugin tool. See `smelt.tools.ToolDef` for every supported field; only `name` and `execute` are required.
+--- Register a plugin tool. See `smelt.tools.ToolDef` for every supported field; only `name` and `execute` are required. Returns a `Reg` whose `:remove()` unregisters the tool.
 ---@see smelt.tools.ToolDef
----@type fun(def: smelt.tools.ToolDef): nil
+---@type fun(def: smelt.tools.ToolDef): smelt.Reg
 tools.register = nil
 
 --- Resolve the pending tool call `call_id` from request `request_id` with `{ content, is_error }`. Sends a `ToolResult` back to the engine.

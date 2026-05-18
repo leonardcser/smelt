@@ -4,29 +4,35 @@
 
 **Tier:** `Host` — Available in every runtime, including headless mode.
 
-Host-phase hooks keyed by event name. `on(event, fn)` is the general form; `on_ready` / `on_shutdown` are shorthands. `on_ready` fires on every Lua-context bring-up (cold start AND `/reload`) with `ctx = { kind = "launch" | "reload" }`. `on_shutdown` fires once on clean process exit. The registry is wiped between bring-ups — re-register the hook in module body if you want it to fire every time. Each `on*` returns an `off()` that unregisters the hook before it fires.
+Host-phase hooks keyed by event name. `on(event, fn)` is the general form; `on_ready` / `on_shutdown` are shorthands. `on_ready` fires on every Lua-context bring-up (cold start AND `/reload`) with `ctx = { kind = "launch" | "reload" }` — use this when you need UiHost-tier APIs that aren't reachable from the pre-TUI plugin load. `on_shutdown` fires once on clean process exit. The registry is wiped between bring-ups — re-register the hook in module body if you want it to fire every time. Each `on*` returns a `Reg` whose `:remove()` unregisters the hook before it fires.
 
 ## `smelt.lifecycle.on`
 
 ```lua
-fun(event: string, fn: function): fun(): boolean
+fun(event: string, fn: function): smelt.Reg
 ```
 
-Queue `fn(ctx)` for the lifecycle event named `event`. Multiple hooks per event fire in registration order. Emitted events: `"ready"` (every Lua-context bring-up — cold start and after each `/reload`; `ctx = { kind = "launch" | "reload" }`) and `"shutdown"` (after the TUI tears down, before process exit; `ctx = { session_id, has_messages }`). Returns an `off()` that unregisters the hook before it fires; calling `off()` after the hook has already fired is a no-op returning `false`.
+Types: [`smelt.Reg`](types.md#smeltreg)
+
+Queue `fn(ctx)` for the lifecycle event named `event`. Multiple hooks per event fire in registration order. Emitted events: `"ready"` (every Lua-context bring-up — cold start and after each `/reload`; `ctx = { kind = "launch" | "reload" }`) and `"shutdown"` (after the TUI tears down, before process exit; `ctx = { session_id, has_messages }`). Returns a `Reg` whose `:remove()` unregisters the hook before it fires; calling `:remove()` after the hook has already fired is a no-op returning `false`.
 
 ## `smelt.lifecycle.on_ready`
 
 ```lua
-fun(fn: function): fun(): boolean
+fun(fn: function): smelt.Reg
 ```
 
-Shorthand for `lifecycle.on("ready", fn)`. The host calls `fn(ctx)` on every Lua-context bring-up: once on cold start (`ctx.kind = "launch"`) and once after every `/reload` (`ctx.kind = "reload"`). The full UiHost-tier surface is live in both cases. The registry is wiped between bring-ups so re-registering this hook at module top is the correct way to make it fire every cycle. For CLI-flag-driven startup actions that should NOT re-fire on `/reload`, early-return when `ctx.kind ~= "launch"`. For "rehydrate from `smelt.state` if I was open" patterns, prefer plain module-body code over this hook — module body also re-runs on every bring-up. Returns an `off()` that unregisters the hook before it fires.
+Types: [`smelt.Reg`](types.md#smeltreg)
+
+Shorthand for `lifecycle.on("ready", fn)`. The host calls `fn(ctx)` on every Lua-context bring-up: once on cold start (`ctx.kind = "launch"`) and once after every `/reload` (`ctx.kind = "reload"`). The full UiHost-tier surface is live in both cases — use this when you need APIs (`smelt.paint.register`, `smelt.overlay.new`, etc.) that aren't reachable from the pre-TUI plugin load. The registry is wiped between bring-ups so re-registering this hook at module top is the correct way to make it fire every cycle. For Host-tier work (cells, cmds, keymaps, state), prefer plain module body — it also re-runs on every bring-up. Returns a `Reg` whose `:remove()` unregisters the hook before it fires.
 
 ## `smelt.lifecycle.on_shutdown`
 
 ```lua
-fun(fn: function): fun(): boolean
+fun(fn: function): smelt.Reg
 ```
 
-Shorthand for `lifecycle.on("shutdown", fn)`. The host calls `fn(ctx)` once after the TUI tears down, before the process exits. Stdout is cooked at that point so `print` writes land in the user's terminal scrollback. `ctx = { session_id: string, has_messages: boolean }`. Hooks only fire on the normal exit path (quit / Ctrl-D / `smelt.quit`); SIGINT/SIGTERM bypass them. Returns an `off()` that unregisters the hook before `shutdown` fires.
+Types: [`smelt.Reg`](types.md#smeltreg)
+
+Shorthand for `lifecycle.on("shutdown", fn)`. The host calls `fn(ctx)` once after the TUI tears down, before the process exits. Stdout is cooked at that point so `print` writes land in the user's terminal scrollback. `ctx = { session_id: string, has_messages: boolean }`. Hooks only fire on the normal exit path (quit / Ctrl-D / `smelt.quit`); SIGINT/SIGTERM bypass them. Returns a `Reg` whose `:remove()` unregisters the hook before `shutdown` fires.
 

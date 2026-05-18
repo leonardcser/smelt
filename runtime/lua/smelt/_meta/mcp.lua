@@ -11,9 +11,9 @@ local mcp = {}
 ---@type fun(): table
 mcp.list = nil
 
---- Declare an MCP server named `name`. See `smelt.mcp.Config`.
+--- Declare an MCP server named `name`. See `smelt.mcp.Config`. Returns a `Reg` whose `:remove()` drops the desired-state entry; the next `/reload` reconciles it away.
 ---@see smelt.mcp.Config
----@type fun(name: string, cfg: smelt.mcp.Config): nil
+---@type fun(name: string, cfg: smelt.mcp.Config): smelt.Reg
 mcp.register = nil
 
 --- Return the lifecycle status for server `name`: `"disabled"`, `"connecting"`, `"connected"`, or `"error"`. Returns `nil` when no server with that name is declared.

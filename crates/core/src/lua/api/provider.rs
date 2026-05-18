@@ -5,9 +5,10 @@ use std::sync::Arc;
 
 use crate::config::{ModelConfig, ProviderConfig};
 use crate::lua::doc::Tier;
-use crate::lua::hooks::composite_off;
-use crate::lua::lua_type::{LuaCallback, LuaType, LuaTypeTuple};
+use crate::lua::hooks::composite_reg;
+use crate::lua::lua_type::{LuaType, LuaTypeTuple};
 use crate::lua::module::LuaMod;
+use crate::lua::reg::LuaReg;
 use crate::lua::LuaShared;
 use lua_doc_derive::LuaOpts;
 
@@ -125,22 +126,30 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
         let shared = Arc::clone(shared);
         m.fn_(
             "register",
-            "Declare a provider named `name`. Re-registering replaces the previous entry of the same name.",
+            "Declare a provider named `name`. Re-registering replaces the previous entry of the same name. Returns a `Reg` whose `:remove()` drops the provider.",
             &["name", "cfg"],
-            move |_lua, (name, cfg): (String, LuaProviderConfig)| -> LuaResult<()> {
+            move |_lua, (name, cfg): (String, LuaProviderConfig)| -> LuaResult<LuaReg> {
                 let provider = ProviderConfig {
-                    name: Some(name),
+                    name: Some(name.clone()),
                     provider_type: Some(cfg.provider_type),
                     api_base: Some(cfg.api_base),
                     api_key_env: cfg.api_key_env,
                     models: cfg.models.into_iter().map(|m| m.0).collect(),
                 };
                 let mut providers = shared.providers.lock().unwrap_or_else(|e| e.into_inner());
-                providers.retain(|p| {
-                    p.name.as_deref() != Some(&provider.name.clone().unwrap_or_default())
-                });
+                providers.retain(|p| p.name.as_deref() != Some(&name));
                 providers.push(provider);
-                Ok(())
+                drop(providers);
+                let shared_for_reg = Arc::clone(&shared);
+                Ok(LuaReg::new(move || {
+                    let mut providers = shared_for_reg
+                        .providers
+                        .lock()
+                        .unwrap_or_else(|e| e.into_inner());
+                    let before = providers.len();
+                    providers.retain(|p| p.name.as_deref() != Some(&name));
+                    providers.len() != before
+                }))
             },
         )?;
     }
@@ -192,10 +201,10 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
 `{ on_request = fn?, on_response = fn? }`:\n\n\
 - `on_request(messages)` — runs just before the engine calls the provider. `messages` is the full conversation history (an array of `{ role, content, tool_calls? }` rows including the system prompt at index 1). Return a replacement array to mutate it; any other return value leaves the history untouched.\n\
 - `on_response(message)` — runs after the assistant message is fully assembled but before it's appended to history. `message` is the same `{ role = \"assistant\", content?, tool_calls? }` shape used everywhere else. Return a replacement table to mutate it; any other return leaves it as-is.\n\n\
-Hooks fire in registration order. Each hook sees the previous hook's replacement. Returns an `off()` function that removes this middleware.\n\n\
+Hooks fire in registration order. Each hook sees the previous hook's replacement. Returns a `Reg` whose `:remove()` drops this middleware.\n\n\
 For streaming observation use `smelt.cell(\"stream_delta\"):subscribe( ...)` — synchronous mutation of mid-stream tokens isn't safe because the parser owns the partial state.",
             &["mw"],
-            move |lua, mw: mlua::Table| -> LuaResult<LuaCallback<(), bool>> {
+            move |lua, mw: mlua::Table| -> LuaResult<LuaReg> {
                 let on_request: Option<mlua::Function> = mw.get("on_request").ok();
                 let on_response: Option<mlua::Function> = mw.get("on_response").ok();
                 if on_request.is_none() && on_response.is_none() {
@@ -213,8 +222,7 @@ For streaming observation use `smelt.cell(\"stream_delta\"):subscribe( ...)` —
                     let id = s.hooks.provider_response.register(lua, f, "")?;
                     parts.push((Arc::clone(&s.hooks.provider_response), id));
                 }
-                let off = composite_off(lua, parts)?;
-                LuaCallback::<(), bool>::from_lua(mlua::Value::Function(off), lua)
+                Ok(composite_reg(parts))
             },
         )?;
     }

@@ -16,14 +16,14 @@ provider.list = nil
 --- - `on_request(messages)` — runs just before the engine calls the provider. `messages` is the full conversation history (an array of `{ role, content, tool_calls? }` rows including the system prompt at index 1). Return a replacement array to mutate it; any other return value leaves the history untouched.
 --- - `on_response(message)` — runs after the assistant message is fully assembled but before it's appended to history. `message` is the same `{ role = "assistant", content?, tool_calls? }` shape used everywhere else. Return a replacement table to mutate it; any other return leaves it as-is.
 --- 
---- Hooks fire in registration order. Each hook sees the previous hook's replacement. Returns an `off()` function that removes this middleware.
+--- Hooks fire in registration order. Each hook sees the previous hook's replacement. Returns a `Reg` whose `:remove()` drops this middleware.
 --- 
 --- For streaming observation use `smelt.cell("stream_delta"):subscribe( ...)` — synchronous mutation of mid-stream tokens isn't safe because the parser owns the partial state.
----@type fun(mw: table): fun(): boolean
+---@type fun(mw: table): smelt.Reg
 provider.middleware = nil
 
---- Declare a provider named `name`. Re-registering replaces the previous entry of the same name.
----@type fun(name: string, cfg: smelt.provider.Config): nil
+--- Declare a provider named `name`. Re-registering replaces the previous entry of the same name. Returns a `Reg` whose `:remove()` drops the provider.
+---@type fun(name: string, cfg: smelt.provider.Config): smelt.Reg
 provider.register = nil
 
 return provider

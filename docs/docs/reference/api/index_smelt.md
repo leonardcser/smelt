@@ -28,12 +28,26 @@ Look up or allocate a stable namespace id for `name`. Namespaces scope `buf:mark
 fun(name: any): any
 ```
 
-Promote the current loader frame to plugin scope `name`. Must be
-called from a module body (or init.lua). After this call,
-`smelt.state()` resolves to the named slot and unnamed resource
-constructors auto-name keyed by `name`. Idempotent within a single
-module body run: counters reset on every promotion so declaration
-order is what matters.
+Promote the current loader frame to plugin scope `name` and return a
+scope handle that bundles common per-plugin entry points so a plugin's
+module body reads as a single object:
+
+  local M = smelt.plugin("banner")
+  M.state.fires = 0                       -- = smelt.state("banner")
+  M:cell("banner.open"):subscribe(fn)     -- = smelt.cell(name):subscribe
+  M:on("ready", fn)                       -- = smelt.lifecycle.on
+  M:on_ready(fn)                          -- = smelt.lifecycle.on_ready
+  M:on_shutdown(fn)                       -- = smelt.lifecycle.on_shutdown
+  M:cmd("banner.toggle", fn)              -- = smelt.cmd.register
+  M:keymap("n", "<C-g>", fn)              -- = smelt.keymap.set
+
+After this call, `smelt.state()` resolves to the named slot and
+unnamed resource constructors auto-name keyed by `name`. Idempotent
+within a single module body run: counters reset on every promotion
+so declaration order is what matters.
+
+Must be called from a module body (or init.lua). Outside a loader
+frame (e.g. from an event callback) it raises immediately.
 
 ## `smelt.quit`
 

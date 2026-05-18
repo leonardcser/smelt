@@ -2,9 +2,9 @@
 
 use super::{lua_table_to_args, lua_table_to_json};
 use crate::lua::doc::Tier;
-use crate::lua::hooks::composite_off;
-use crate::lua::lua_type::LuaCallback;
+use crate::lua::hooks::composite_reg;
 use crate::lua::module::LuaMod;
+use crate::lua::reg::LuaReg;
 use crate::lua::{LuaHandle, LuaShared, ToolHandles};
 use lua_doc_derive::{LuaAlias, LuaOpts};
 use mlua::prelude::*;
@@ -111,9 +111,9 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
         let s = shared.clone();
         m.fn_(
             "register",
-            "Register a plugin tool. See [`smelt.tools.ToolDef`](types.md#smelttoolstooldef) for every supported field; only `name` and `execute` are required.",
+            "Register a plugin tool. See [`smelt.tools.ToolDef`](types.md#smelttoolstooldef) for every supported field; only `name` and `execute` are required. Returns a `Reg` whose `:remove()` unregisters the tool.",
             &["def"],
-            move |lua, def: LuaToolDef| -> LuaResult<()> {
+            move |lua, def: LuaToolDef| -> LuaResult<LuaReg> {
                 let name = def.name;
                 let execute_handle = LuaHandle::from_func(lua, def.execute)?;
 
@@ -179,7 +179,7 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
 
                 if let Ok(mut map) = s.tools.lock() {
                     map.insert(
-                        name,
+                        name.clone(),
                         ToolHandles {
                             execute: execute_handle,
                             approval_patterns: approval_patterns_handle,
@@ -191,7 +191,14 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
                         },
                     );
                 }
-                Ok(())
+                let s_for_reg = s.clone();
+                Ok(LuaReg::new(move || {
+                    s_for_reg
+                        .tools
+                        .lock()
+                        .map(|mut m| m.remove(&name).is_some())
+                        .unwrap_or(false)
+                }))
             },
         )?;
     }
@@ -238,9 +245,9 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
 `mw` is a table of `{ before = fn?, after = fn? }`:\n\n\
 - `before(args, ctx)` runs synchronously before the tool executes. Return a table to replace `args`; return `{ deny = true, reason = \"...\" }` to short-circuit with an error result. Any other return is no-op.\n\
 - `after(args, ctx, result)` runs after the tool completes and may return `{ content, is_error }` to replace the result. NOTE: `after` currently only fires for tools that complete synchronously; yielding tools (most builtins) skip it until the task-runtime path is wired.\n\n\
-Hooks fire in registration order; an earlier hook's replacement is visible to later hooks. Returns an `off()` function that removes this middleware.",
+Hooks fire in registration order; an earlier hook's replacement is visible to later hooks. Returns a `Reg` whose `:remove()` drops this middleware.",
             &["name", "mw"],
-            move |lua, (name, mw): (String, mlua::Table)| -> LuaResult<LuaCallback<(), bool>> {
+            move |lua, (name, mw): (String, mlua::Table)| -> LuaResult<LuaReg> {
                 let before_fn: Option<mlua::Function> = mw.get("before").ok();
                 let after_fn: Option<mlua::Function> = mw.get("after").ok();
                 if before_fn.is_none() && after_fn.is_none() {
@@ -258,8 +265,7 @@ Hooks fire in registration order; an earlier hook's replacement is visible to la
                     let id = s.hooks.tool_after.register(lua, f, name.clone())?;
                     parts.push((Arc::clone(&s.hooks.tool_after), id));
                 }
-                let off = composite_off(lua, parts)?;
-                LuaCallback::<(), bool>::from_lua(mlua::Value::Function(off), lua)
+                Ok(composite_reg(parts))
             },
         )?;
     }

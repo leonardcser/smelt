@@ -47,12 +47,12 @@ Return `true` if an agent turn is currently in flight (a request is being stream
 ## `smelt.engine.on_context_limit`
 
 ```lua
-fun(hook: fun(arg1: smelt.engine.AskMessage[], arg2: fun(value: smelt.engine.AskMessage[]?))): fun(): boolean
+fun(hook: fun(arg1: smelt.engine.AskMessage[], arg2: fun(value: smelt.engine.AskMessage[]?))): smelt.Reg
 ```
 
-Types: [`smelt.engine.AskMessage`](types.md#smeltengineaskmessage)
+Types: [`smelt.engine.AskMessage`](types.md#smeltengineaskmessage), [`smelt.Reg`](types.md#smeltreg)
 
-Register a recovery hook the engine calls when a provider returns a context-window error mid-turn. `hook` receives the conversation so far (excluding the system prompt) and a `reply` callback the hook MUST call exactly once — either with a shorter messages array (engine swaps it in and retries the turn) or `nil` (engine aborts with the existing TurnError). The first registered hook to call `reply` wins; later hooks are ignored. Returns an `off()` that removes this hook. Bundled `compact.lua` registers a hook that runs the standard summarization flow.
+Register a recovery hook the engine calls when a provider returns a context-window error mid-turn. `hook` receives the conversation so far (excluding the system prompt) and a `reply` callback the hook MUST call exactly once — either with a shorter messages array (engine swaps it in and retries the turn) or `nil` (engine aborts with the existing TurnError). The first registered hook to call `reply` wins; later hooks are ignored. Returns a `Reg` whose `:remove()` drops the hook. Bundled `compact.lua` registers a hook that runs the standard summarization flow.
 
 ## `smelt.engine.reload`
 

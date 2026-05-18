@@ -125,9 +125,9 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
     let shared_for_register = Arc::clone(shared);
     m.fn_(
         "register",
-        "Declare an MCP server named `name`. See [`smelt.mcp.Config`](types.md#smeltmcpconfig).",
+        "Declare an MCP server named `name`. See [`smelt.mcp.Config`](types.md#smeltmcpconfig). Returns a `Reg` whose `:remove()` drops the desired-state entry; the next `/reload` reconciles it away.",
         &["name", "cfg"],
-        move |_, (name, cfg): (String, LuaMcpConfig)| -> LuaResult<()> {
+        move |_, (name, cfg): (String, LuaMcpConfig)| -> LuaResult<crate::lua::reg::LuaReg> {
             let kind = cfg.kind.as_deref().unwrap_or("local");
             if kind != "local" {
                 return Err(mlua::Error::external(format!(
@@ -144,9 +144,16 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
                 enabled: cfg.enabled.unwrap_or(true),
             };
             if let Ok(mut map) = shared_for_register.mcp_configs.lock() {
-                map.insert(name, config);
+                map.insert(name.clone(), config);
             }
-            Ok(())
+            let shared_for_reg = Arc::clone(&shared_for_register);
+            Ok(crate::lua::reg::LuaReg::new(move || {
+                shared_for_reg
+                    .mcp_configs
+                    .lock()
+                    .map(|mut m| m.remove(&name).is_some())
+                    .unwrap_or(false)
+            }))
         },
     )?;
 

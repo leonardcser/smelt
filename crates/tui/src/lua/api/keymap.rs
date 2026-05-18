@@ -6,6 +6,7 @@ use mlua::prelude::*;
 use smelt_core::lua::doc::Tier;
 use smelt_core::lua::lua_type::LuaCallback;
 use smelt_core::lua::module::LuaMod;
+use smelt_core::lua::reg::LuaReg;
 use std::sync::Arc;
 
 pub(super) fn register(
@@ -52,11 +53,11 @@ pub(super) fn register(
         let s = shared.clone();
         m.fn_(
             "set",
-            "Bind `chord` in `mode` to a Lua callback. `mode` is `\"n\"|\"i\"|\"v\"|\"\"` (or the long form `normal`/`insert`/`visual`); the chord is canonicalized at registration and unknown values raise immediately. Re-binding the same `(mode, chord)` overwrites the prior handler.",
+            "Bind `chord` in `mode` to a Lua callback. `mode` is `\"n\"|\"i\"|\"v\"|\"\"` (or the long form `normal`/`insert`/`visual`); the chord is canonicalized at registration and unknown values raise immediately. Re-binding the same `(mode, chord)` overwrites the prior handler. Returns a `Reg` whose `:remove()` drops the binding.",
             &["mode", "chord", "handler"],
             move |lua,
                   (mode, chord, handler): (String, String, LuaCallback<(), ()>)|
-                  -> LuaResult<()> {
+                  -> LuaResult<LuaReg> {
                 let canonical_mode = crate::lua::normalize_mode(&mode).ok_or_else(
                     || {
                         LuaError::RuntimeError(format!(
@@ -72,9 +73,16 @@ pub(super) fn register(
                     })?;
                 let handle = LuaHandle::from_func(lua, handler.into_inner())?;
                 if let Ok(mut map) = s.keymaps.lock() {
-                    map.insert((canonical_mode, canonical_chord), handle);
+                    map.insert((canonical_mode.clone(), canonical_chord.clone()), handle);
                 }
-                Ok(())
+                let s_for_reg = s.clone();
+                Ok(LuaReg::new(move || {
+                    s_for_reg
+                        .keymaps
+                        .lock()
+                        .map(|mut m| m.remove(&(canonical_mode.clone(), canonical_chord.clone())).is_some())
+                        .unwrap_or(false)
+                }))
             },
         )?;
     }

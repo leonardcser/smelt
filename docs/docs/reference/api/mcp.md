@@ -17,12 +17,12 @@ Snapshot every declared MCP server. Each row is `{ name, config, status, tool_co
 ## `smelt.mcp.register`
 
 ```lua
-fun(name: string, cfg: smelt.mcp.Config): nil
+fun(name: string, cfg: smelt.mcp.Config): smelt.Reg
 ```
 
-Types: [`smelt.mcp.Config`](types.md#smeltmcpconfig)
+Types: [`smelt.mcp.Config`](types.md#smeltmcpconfig), [`smelt.Reg`](types.md#smeltreg)
 
-Declare an MCP server named `name`. See [`smelt.mcp.Config`](types.md#smeltmcpconfig).
+Declare an MCP server named `name`. See [`smelt.mcp.Config`](types.md#smeltmcpconfig). Returns a `Reg` whose `:remove()` drops the desired-state entry; the next `/reload` reconciles it away.
 
 ## `smelt.mcp.status`
 

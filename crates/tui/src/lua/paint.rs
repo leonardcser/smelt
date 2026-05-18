@@ -10,6 +10,7 @@ use crate::smelt_term::{DrawContext, GridSlice};
 use mlua::prelude::*;
 use smelt_core::lua::doc::record_class;
 use smelt_core::lua::lua_type::LuaClassDecl;
+use smelt_edit::NamedSlots;
 use std::cell::Cell;
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -36,8 +37,7 @@ pub(crate) enum LeafKind {
 /// new handle. Anonymous slots are reaped on `/reload`.
 pub(crate) struct PaintRegistry {
     handles: HashMap<PaintId, u64>,
-    named: HashMap<String, PaintId>,
-    name_of: HashMap<PaintId, String>,
+    names: NamedSlots<PaintId>,
     next_id: AtomicU64,
 }
 
@@ -45,8 +45,7 @@ impl Default for PaintRegistry {
     fn default() -> Self {
         Self {
             handles: HashMap::new(),
-            named: HashMap::new(),
-            name_of: HashMap::new(),
+            names: NamedSlots::new(),
             next_id: AtomicU64::new(PAINT_ID_BASE),
         }
     }
@@ -66,7 +65,7 @@ impl PaintRegistry {
         name: Option<String>,
     ) -> (PaintId, Option<u64>) {
         if let Some(ref n) = name {
-            if let Some(&existing) = self.named.get(n) {
+            if let Some(existing) = self.names.lookup(n) {
                 let prev = self.handles.insert(existing, handle_id);
                 return (existing, prev);
             }
@@ -78,17 +77,14 @@ impl PaintRegistry {
         );
         self.handles.insert(id, handle_id);
         if let Some(n) = name {
-            self.named.insert(n.clone(), id);
-            self.name_of.insert(id, n);
+            self.names.bind(n, id);
         }
         (id, None)
     }
 
     /// Remove the binding and return the handle id so the caller can release the Lua callback.
     pub(crate) fn unregister(&mut self, id: PaintId) -> Option<u64> {
-        if let Some(name) = self.name_of.remove(&id) {
-            self.named.remove(&name);
-        }
+        self.names.unbind_by_id(id);
         self.handles.remove(&id)
     }
 
@@ -102,7 +98,7 @@ impl PaintRegistry {
 
     #[cfg(test)]
     pub(crate) fn id_by_name(&self, name: &str) -> Option<PaintId> {
-        self.named.get(name).copied()
+        self.names.lookup(name)
     }
 
     #[cfg(test)]
@@ -118,9 +114,9 @@ impl PaintRegistry {
     /// wiped on reload). Returns the released anonymous handle ids.
     pub(crate) fn clear_anonymous(&mut self) -> Vec<u64> {
         let mut released = Vec::new();
-        let name_of = &self.name_of;
+        let names = &self.names;
         self.handles.retain(|id, handle| {
-            if name_of.contains_key(id) {
+            if names.contains_id(*id) {
                 true
             } else {
                 released.push(*handle);

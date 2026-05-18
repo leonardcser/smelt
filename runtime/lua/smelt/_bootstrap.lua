@@ -454,12 +454,26 @@ function __smelt_auto_name(kind)
   return string.format("%s:%s:%d", scope, kind, idx)
 end
 
--- Promote the current loader frame to plugin scope `name`. Must be
--- called from a module body (or init.lua). After this call,
--- `smelt.state()` resolves to the named slot and unnamed resource
--- constructors auto-name keyed by `name`. Idempotent within a single
--- module body run: counters reset on every promotion so declaration
--- order is what matters.
+-- Promote the current loader frame to plugin scope `name` and return a
+-- scope handle that bundles common per-plugin entry points so a plugin's
+-- module body reads as a single object:
+--
+--   local M = smelt.plugin("banner")
+--   M.state.fires = 0                       -- = smelt.state("banner")
+--   M:cell("banner.open"):subscribe(fn)     -- = smelt.cell(name):subscribe
+--   M:on("ready", fn)                       -- = smelt.lifecycle.on
+--   M:on_ready(fn)                          -- = smelt.lifecycle.on_ready
+--   M:on_shutdown(fn)                       -- = smelt.lifecycle.on_shutdown
+--   M:cmd("banner.toggle", fn)              -- = smelt.cmd.register
+--   M:keymap("n", "<C-g>", fn)              -- = smelt.keymap.set
+--
+-- After this call, `smelt.state()` resolves to the named slot and
+-- unnamed resource constructors auto-name keyed by `name`. Idempotent
+-- within a single module body run: counters reset on every promotion
+-- so declaration order is what matters.
+--
+-- Must be called from a module body (or init.lua). Outside a loader
+-- frame (e.g. from an event callback) it raises immediately.
 function smelt.plugin(name)
   if type(name) ~= "string" or name == "" then
     error("smelt.plugin: name must be a non-empty string", 2)
@@ -470,6 +484,21 @@ function smelt.plugin(name)
   end
   __smelt_scope_stack[i] = name
   __smelt_scope_counters[name] = { paint = 0, buf = 0, win = 0, overlay = 0 }
+
+  local handle = setmetatable({
+    name = name,
+  }, {
+    __index = function(_, key)
+      if key == "state" then return smelt.state(name) end
+    end,
+  })
+  function handle:cell(cell_name) return smelt.cell(cell_name) end
+  function handle:on(event, fn) return smelt.lifecycle.on(event, fn) end
+  function handle:on_ready(fn) return smelt.lifecycle.on_ready(fn) end
+  function handle:on_shutdown(fn) return smelt.lifecycle.on_shutdown(fn) end
+  function handle:cmd(cmd_name, fn) return smelt.cmd.register(cmd_name, fn) end
+  function handle:keymap(mode, chord, fn) return smelt.keymap.set(mode, chord, fn) end
+  return handle
 end
 
 -- Make `smelt.state` callable. With an explicit name: returns the

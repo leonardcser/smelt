@@ -7,6 +7,7 @@ use mlua::prelude::*;
 use smelt_core::lua::doc::Tier;
 use smelt_core::lua::lua_type::LuaCallback;
 use smelt_core::lua::module::LuaMod;
+use smelt_core::lua::reg::LuaReg;
 use std::sync::Arc;
 
 /// Options accepted by `smelt.statusline.register`.
@@ -29,7 +30,7 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
         let s = shared.clone();
         m.fn_(
             "register",
-            "Register a Lua statusline source named `name`. The handler is called once per refresh with the snapshot table and returns segments. `opts.align = \"right\"` makes its segments default to the right strip; later registrations replace earlier ones with the same name.",
+            "Register a Lua statusline source named `name`. The handler is called once per refresh with the snapshot table and returns segments. `opts.align = \"right\"` makes its segments default to the right strip; later registrations replace earlier ones with the same name. Returns a `Reg` whose `:remove()` drops the source.",
             &["name", "handler", "opts"],
             move |lua,
                   (name, handler, opts): (
@@ -37,7 +38,7 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
                 LuaCallback<mlua::Table, mlua::Table>,
                 Option<LuaStatuslineRegisterOpts>,
             )|
-                  -> LuaResult<()> {
+                  -> LuaResult<LuaReg> {
                 let default_align_right = opts
                     .and_then(|o| o.align)
                     .map(|s| s == "right")
@@ -51,10 +52,21 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
                     if let Some(existing) = sources.iter_mut().find(|(n, _)| n == &name) {
                         existing.1 = source;
                     } else {
-                        sources.push((name, source));
+                        sources.push((name.clone(), source));
                     }
                 }
-                Ok(())
+                let s_for_reg = s.clone();
+                Ok(LuaReg::new(move || {
+                    s_for_reg
+                        .statusline_sources
+                        .lock()
+                        .map(|mut v| {
+                            let before = v.len();
+                            v.retain(|(n, _)| n != &name);
+                            v.len() != before
+                        })
+                        .unwrap_or(false)
+                }))
             },
         )?;
     }

@@ -15,8 +15,8 @@ keymap.help_sections = nil
 ---@type fun(): table
 keymap.list = nil
 
---- Bind `chord` in `mode` to a Lua callback. `mode` is `"n"|"i"|"v"|""` (or the long form `normal`/`insert`/`visual`); the chord is canonicalized at registration and unknown values raise immediately. Re-binding the same `(mode, chord)` overwrites the prior handler.
----@type fun(mode: string, chord: string, handler: fun()): nil
+--- Bind `chord` in `mode` to a Lua callback. `mode` is `"n"|"i"|"v"|""` (or the long form `normal`/`insert`/`visual`); the chord is canonicalized at registration and unknown values raise immediately. Re-binding the same `(mode, chord)` overwrites the prior handler. Returns a `Reg` whose `:remove()` drops the binding.
+---@type fun(mode: string, chord: string, handler: fun()): smelt.Reg
 keymap.set = nil
 
 --- Drop the binding for `chord` in `mode`. `mode` accepts the same forms as `set`. Returns `true` if a binding was removed.

@@ -180,12 +180,11 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
         type HookCb = LuaCallback<(Vec<LuaAskMessage>, ReplyCb), ()>;
         m.fn_(
             "on_context_limit",
-            "Register a recovery hook the engine calls when a provider returns a context-window error mid-turn. `hook` receives the conversation so far (excluding the system prompt) and a `reply` callback the hook MUST call exactly once — either with a shorter messages array (engine swaps it in and retries the turn) or `nil` (engine aborts with the existing TurnError). The first registered hook to call `reply` wins; later hooks are ignored. Returns an `off()` that removes this hook. Bundled `compact.lua` registers a hook that runs the standard summarization flow.",
+            "Register a recovery hook the engine calls when a provider returns a context-window error mid-turn. `hook` receives the conversation so far (excluding the system prompt) and a `reply` callback the hook MUST call exactly once — either with a shorter messages array (engine swaps it in and retries the turn) or `nil` (engine aborts with the existing TurnError). The first registered hook to call `reply` wins; later hooks are ignored. Returns a `Reg` whose `:remove()` drops the hook. Bundled `compact.lua` registers a hook that runs the standard summarization flow.",
             &["hook"],
-            move |lua, hook: HookCb| -> LuaResult<LuaCallback<(), bool>> {
+            move |lua, hook: HookCb| -> LuaResult<smelt_core::lua::reg::LuaReg> {
                 let id = s.hooks.context_limit.register(lua, hook.into_inner(), "")?;
-                let off = s.hooks.context_limit.off_for(lua, id)?;
-                LuaCallback::<(), bool>::from_lua(mlua::Value::Function(off), lua)
+                Ok(s.hooks.context_limit.reg_for(id))
             },
         )?;
     }

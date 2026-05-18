@@ -9,12 +9,12 @@ Register/unregister statusline sources and snapshot composer state. UiHost-only.
 ## `smelt.statusline.register`
 
 ```lua
-fun(name: string, handler: fun(value: table): table, opts: smelt.statusline.RegisterOpts?): nil
+fun(name: string, handler: fun(value: table): table, opts: smelt.statusline.RegisterOpts?): smelt.Reg
 ```
 
-Types: [`smelt.statusline.RegisterOpts`](types.md#smeltstatuslineregisteropts)
+Types: [`smelt.statusline.RegisterOpts`](types.md#smeltstatuslineregisteropts), [`smelt.Reg`](types.md#smeltreg)
 
-Register a Lua statusline source named `name`. The handler is called once per refresh with the snapshot table and returns segments. `opts.align = "right"` makes its segments default to the right strip; later registrations replace earlier ones with the same name.
+Register a Lua statusline source named `name`. The handler is called once per refresh with the snapshot table and returns segments. `opts.align = "right"` makes its segments default to the right strip; later registrations replace earlier ones with the same name. Returns a `Reg` whose `:remove()` drops the source.
 
 ## `smelt.statusline.snapshot`
 

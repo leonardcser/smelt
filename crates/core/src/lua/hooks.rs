@@ -44,9 +44,9 @@ impl HookRegistry {
     }
 
     /// Push a Lua function under `name`. Returns the freshly-minted id
-    /// for use with [`off_for`] or [`remove`]. The caller is responsible
-    /// for stashing the returned id when constructing composite `off()`
-    /// closures (e.g. `tools.middleware` registers in two registries
+    /// for use with [`reg_for`] or [`remove`]. The caller is responsible
+    /// for stashing the returned id when constructing composite `Reg`
+    /// handles (e.g. `tools.middleware` registers in two registries
     /// under one user-visible handle).
     pub fn register(
         &self,
@@ -66,13 +66,13 @@ impl HookRegistry {
         Ok(id)
     }
 
-    /// Build a Lua `off()` function that removes entry `id` from this
-    /// registry exactly. The returned function captures an
-    /// `Arc<HookRegistry>` so it's safe to call from any phase, even
-    /// after the original registration site is long gone.
-    pub fn off_for(self: &Arc<Self>, lua: &Lua, id: u64) -> LuaResult<mlua::Function> {
+    /// Build a [`LuaReg`] whose `:remove()` drops entry `id` from this
+    /// registry. The returned `Reg` captures an `Arc<HookRegistry>` so
+    /// it's safe to call from any phase, even after the original
+    /// registration site is long gone.
+    pub fn reg_for(self: &Arc<Self>, id: u64) -> super::reg::LuaReg {
         let me = Arc::clone(self);
-        lua.create_function(move |_, ()| -> LuaResult<bool> { Ok(me.remove(id)) })
+        super::reg::LuaReg::new(move || me.remove(id))
     }
 
     /// Remove the entry whose id matches. Returns `true` when an entry
@@ -141,15 +141,15 @@ impl HookRegistry {
     }
 }
 
-/// Build a composite `off()` that removes one id from each of several
+/// Build a composite [`LuaReg`] that removes one id from each of several
 /// registries. Used by surfaces (like `smelt.tools.middleware`) whose
 /// user-visible handle straddles multiple registries.
-pub fn composite_off(lua: &Lua, parts: Vec<(Arc<HookRegistry>, u64)>) -> LuaResult<mlua::Function> {
-    lua.create_function(move |_, ()| -> LuaResult<bool> {
+pub fn composite_reg(parts: Vec<(Arc<HookRegistry>, u64)>) -> super::reg::LuaReg {
+    super::reg::LuaReg::new(move || {
         let mut any = false;
         for (reg, id) in &parts {
             any |= reg.remove(*id);
         }
-        Ok(any)
+        any
     })
 }

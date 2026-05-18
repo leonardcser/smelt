@@ -7,8 +7,8 @@
 ---@class smelt.statusline
 local statusline = {}
 
---- Register a Lua statusline source named `name`. The handler is called once per refresh with the snapshot table and returns segments. `opts.align = "right"` makes its segments default to the right strip; later registrations replace earlier ones with the same name.
----@type fun(name: string, handler: fun(value: table): table, opts: smelt.statusline.RegisterOpts?): nil
+--- Register a Lua statusline source named `name`. The handler is called once per refresh with the snapshot table and returns segments. `opts.align = "right"` makes its segments default to the right strip; later registrations replace earlier ones with the same name. Returns a `Reg` whose `:remove()` drops the source.
+---@type fun(name: string, handler: fun(value: table): table, opts: smelt.statusline.RegisterOpts?): smelt.Reg
 statusline.register = nil
 
 --- Return the full statusline state in one table per refresh: theme colors, working/throbber state, vim mode, agent mode, indicators, and cursor position. Returns an empty table when the app pointer is unavailable.
