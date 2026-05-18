@@ -95,7 +95,8 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
             move |lua, (func, opts): (LuaCallback<(LuaPaintSlice, mlua::Table), ()>, Option<mlua::Table>)| -> LuaResult<LuaPaintReg> {
                 let name: Option<String> = opts
                     .as_ref()
-                    .and_then(|t| t.get::<Option<String>>("name").ok().flatten());
+                    .and_then(|t| t.get::<Option<String>>("name").ok().flatten())
+                    .or_else(|| crate::lua::auto_name_for_scope(lua, "paint"));
                 let handle_id =
                     crate::lua::register_callback_handle(&s, lua, func.into_inner())?;
                 let paint_id = crate::lua::with_app(|app| {

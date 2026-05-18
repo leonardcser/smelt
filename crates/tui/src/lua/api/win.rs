@@ -337,11 +337,32 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
 
     m.fn_(
         "new",
-        "Open a split window over `buf` and return a `Win` userdata. `opts.name` opts the window into hot-reload survival. `opts.kind = \"input\"` (`opts.placeholder?`) marks the window as a single-line text input; `opts.kind = \"list\"` (`opts.initial_cursor?`) marks it as a navigable list leaf.",
+        "Open a split window over `buf` and return a `Win` userdata. `opts.name` opts the window into hot-reload survival; omitted from a module body, a stable per-(plugin, declaration-index) name is auto-assigned. `opts.kind = \"input\"` (`opts.placeholder?`) marks the window as a single-line text input; `opts.kind = \"list\"` (`opts.initial_cursor?`) marks it as a navigable list leaf.",
         &["buf", "opts"],
-        |_,
+        |lua,
          (buf, opts): (super::buf::LuaBuf, Option<mlua::Table>)|
          -> LuaResult<Option<LuaWin>> {
+            // Auto-name from active plugin scope when caller didn't.
+            let opts = match opts {
+                Some(t) => {
+                    let has_name = t.get::<Option<String>>("name").ok().flatten().is_some();
+                    if !has_name {
+                        if let Some(auto) = crate::lua::auto_name_for_scope(lua, "win") {
+                            t.set("name", auto)?;
+                        }
+                    }
+                    Some(t)
+                }
+                None => {
+                    if let Some(auto) = crate::lua::auto_name_for_scope(lua, "win") {
+                        let t = lua.create_table()?;
+                        t.set("name", auto)?;
+                        Some(t)
+                    } else {
+                        None
+                    }
+                }
+            };
             Ok(open_or_refresh(buf.id, opts.as_ref())?.map(|id| LuaWin { id }))
         },
     )?;

@@ -218,6 +218,16 @@ fn tokenize_chord_spec(input: &str) -> Option<Vec<String>> {
     }
 }
 
+/// Mint the next auto-name for a kind ("paint" | "buf" | "win" |
+/// "overlay") in the currently active plugin scope. Returns `None`
+/// when no module body is on the Lua call stack (e.g. the caller is
+/// inside an event-loop callback). Plugin authors get auto-named
+/// hot-reload-survivable resources without typing `opts.name = "..."`.
+pub(crate) fn auto_name_for_scope(lua: &Lua, kind: &str) -> Option<String> {
+    let f: mlua::Function = lua.globals().get("__smelt_auto_name").ok()?;
+    f.call::<Option<String>>(kind).ok().flatten()
+}
+
 /// Stash a Lua callable in `shared.callbacks` under a fresh u64 id.
 /// Used by every `smelt.win.*` binding that takes a callback.
 pub(crate) fn register_callback_handle(

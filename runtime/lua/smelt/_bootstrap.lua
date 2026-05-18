@@ -398,9 +398,82 @@ smelt.state.persistent = function(name, opts)
   })
 end
 
--- Make `smelt.state` callable: `smelt.state("foo")` returns the ephemeral table.
+-- Plugin scope stack. Pushed by the Rust loader wrapper around every
+-- module body (autoload, init.lua, plugin files). The top entry is the
+-- "current scope" — a stable identity (typically the require path or
+-- file path) that `smelt.state()` and unnamed resource constructors
+-- (`smelt.paint.register`, `smelt.overlay.new`, `smelt.win.new`,
+-- `smelt.buf.new`) consult for auto-scoping.
+__smelt_scope_stack = __smelt_scope_stack or {}
+-- Per-scope per-type counter — minted in declaration order during a
+-- module body run, reset on every push so auto-names stay stable
+-- across reload when the module body executes the same constructors
+-- in the same order.
+__smelt_scope_counters = __smelt_scope_counters or {}
+
+-- Push `name` as the active scope and run `fn(...)` inside it. Counters
+-- reset on every push so the N-th unnamed paint slot in a given module
+-- always lands the same auto-name across `/reload`. Errors propagate
+-- after restoring the stack so a failing module body doesn't leak its
+-- frame.
+function __smelt_with_scope(name, fn, ...)
+  table.insert(__smelt_scope_stack, name)
+  __smelt_scope_counters[name] = { paint = 0, buf = 0, win = 0, overlay = 0 }
+  local ok, ret = pcall(fn, ...)
+  table.remove(__smelt_scope_stack)
+  if not ok then error(ret, 0) end
+  return ret
+end
+
+-- Resolve the current scope name, if any. Returns nil when no module
+-- body is on the call stack (e.g. inside a callback fired from the event
+-- loop). Used by `smelt.state()` and unnamed-resource auto-naming.
+function __smelt_current_scope()
+  return __smelt_scope_stack[#__smelt_scope_stack]
+end
+
+-- Run `fn(...)` with the scope stack temporarily cleared. Resources
+-- created inside `fn` get no auto-name and are therefore reaped on
+-- `/reload`. The escape hatch for genuinely throwaway resources declared
+-- from inside a module body.
+function __smelt_unscoped(fn, ...)
+  local saved = __smelt_scope_stack
+  __smelt_scope_stack = {}
+  local ok, ret = pcall(fn, ...)
+  __smelt_scope_stack = saved
+  if not ok then error(ret, 0) end
+  return ret
+end
+
+-- Mint the next auto-name for `kind` ("paint" | "buf" | "win" | "overlay")
+-- in the current scope. Returns nil if no scope is active. The naming
+-- is `"<scope>:<kind>:<idx>"`, deterministic per (scope, kind, declaration
+-- order); idx counts from 0.
+function __smelt_auto_name(kind)
+  local scope = __smelt_scope_stack[#__smelt_scope_stack]
+  if not scope then return nil end
+  local counters = __smelt_scope_counters[scope]
+  if not counters then
+    counters = { paint = 0, buf = 0, win = 0, overlay = 0 }
+    __smelt_scope_counters[scope] = counters
+  end
+  local idx = counters[kind] or 0
+  counters[kind] = idx + 1
+  return string.format("%s:%s:%d", scope, kind, idx)
+end
+
+-- Make `smelt.state` callable. With an explicit name: returns the
+-- ephemeral table for that name. With no arg: returns the current
+-- plugin's scoped table, keyed by the current scope name. Raises if
+-- called with no arg outside a module body (no scope active).
 setmetatable(smelt.state, {
   __call = function(_, name)
+    if name == nil then
+      name = __smelt_current_scope()
+      if not name then
+        error("smelt.state(): no plugin scope active — call with an explicit name from outside module body", 2)
+      end
+    end
     __smelt_state_touched__[name] = true
     local s = __smelt_state__[name]
     if not s then

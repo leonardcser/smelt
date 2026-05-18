@@ -14,5 +14,5 @@ fun(opts: table?): smelt.buf.Buf
 
 Types: [`smelt.buf.Buf`](types.md#smeltbufbuf)
 
-Create a buffer and return a `Buf` userdata. `opts.name` opts the buffer into hot-reload survival — repeat calls with the same name return the same handle with mutable opts re-applied.
+Create a buffer and return a `Buf` userdata. `opts.name` opts the buffer into hot-reload survival — repeat calls with the same name return the same handle with mutable opts re-applied. When omitted from a module body, a stable per-(plugin, declaration-index) name is auto-assigned so the buffer survives `/reload` without explicit naming.
 

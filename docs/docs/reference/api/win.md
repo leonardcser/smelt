@@ -14,7 +14,7 @@ fun(buf: smelt.buf.Buf, opts: table?): smelt.win.Win?
 
 Types: [`smelt.buf.Buf`](types.md#smeltbufbuf), [`smelt.win.Win`](types.md#smeltwinwin)
 
-Open a split window over `buf` and return a `Win` userdata. `opts.name` opts the window into hot-reload survival. `opts.kind = "input"` (`opts.placeholder?`) marks the window as a single-line text input; `opts.kind = "list"` (`opts.initial_cursor?`) marks it as a navigable list leaf.
+Open a split window over `buf` and return a `Win` userdata. `opts.name` opts the window into hot-reload survival; omitted from a module body, a stable per-(plugin, declaration-index) name is auto-assigned. `opts.kind = "input"` (`opts.placeholder?`) marks the window as a single-line text input; `opts.kind = "list"` (`opts.initial_cursor?`) marks it as a navigable list leaf.
 
 ## `smelt.win.transcript`
 

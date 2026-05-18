@@ -1949,7 +1949,10 @@ mod tests {
     fn reload_lua_reaps_anonymous_overlay_keeps_named() {
         let tmp = tempfile::tempdir().unwrap();
         let init = tmp.path().join("init.lua");
-        // First version opens both a named and an anonymous overlay.
+        // First version opens both a named overlay and an unscoped
+        // anonymous overlay. The unscoped one is created via
+        // `__smelt_unscoped(...)` (an explicit escape hatch) so
+        // auto-naming doesn't kick in — that's the path that gets reaped.
         std::fs::write(
             &init,
             r#"
@@ -1967,14 +1970,17 @@ mod tests {
             state.open = true
             attach()
 
-            -- Anonymous overlay (no name) — should be reaped on /reload.
-            local b2 = smelt.buf.new()
-            local w2 = smelt.win.new(b2, {})
-            smelt.overlay.new({
-                anchor = "screen_at", corner = "se",
-                row = 0, col = 0, width = 20, height = 5,
-                layout = smelt.overlay.layout.leaf(w2),
-            })
+            -- Unscoped anonymous overlay: bypasses auto-naming and
+            -- should be reaped on /reload.
+            __smelt_unscoped(function()
+                local b2 = smelt.buf.new()
+                local w2 = smelt.win.new(b2, {})
+                smelt.overlay.new({
+                    anchor = "screen_at", corner = "se",
+                    row = 0, col = 0, width = 20, height = 5,
+                    layout = smelt.overlay.layout.leaf(w2),
+                })
+            end)
             "#,
         )
         .unwrap();
@@ -2041,9 +2047,13 @@ mod tests {
             local state = smelt.state("paint_id_probe")
             local function painter(_slice, _ctx) end
             -- `paint.register` returns a Paint handle; stash its numeric
-            -- id so the Rust side can compare across reload.
-            state.named  = smelt.paint.register(painter, { name = "probe.named" }):id()
-            state.anon   = smelt.paint.register(painter):id()
+            -- id so the Rust side can compare across reload. The `anon`
+            -- slot uses `__smelt_unscoped` so auto-naming doesn't kick in
+            -- and the id can be observed reaped.
+            state.named = smelt.paint.register(painter, { name = "probe.named" }):id()
+            state.anon = __smelt_unscoped(function()
+                return smelt.paint.register(painter):id()
+            end)
             "#,
         )
         .unwrap();
@@ -2247,13 +2257,16 @@ mod tests {
                 row = 0, col = 0, width = 30, height = 8,
                 layout = smelt.overlay.layout.leaf(w1),
             })
-            local b2 = smelt.buf.new()
-            local w2 = smelt.win.new(b2, {})
-            smelt.overlay.new({
-                anchor = "screen_at", corner = "se",
-                row = 0, col = 0, width = 20, height = 5,
-                layout = smelt.overlay.layout.leaf(w2),
-            })
+            -- Unscoped anonymous overlay (no auto-name): must be reaped.
+            __smelt_unscoped(function()
+                local b2 = smelt.buf.new()
+                local w2 = smelt.win.new(b2, {})
+                smelt.overlay.new({
+                    anchor = "screen_at", corner = "se",
+                    row = 0, col = 0, width = 20, height = 5,
+                    layout = smelt.overlay.layout.leaf(w2),
+                })
+            end)
 
             -- smelt.state slot
             local s = smelt.state("seed_plugin")

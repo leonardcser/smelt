@@ -127,6 +127,20 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
         &["opts"],
         |lua, opts: mlua::Table| -> LuaResult<LuaOverlay> {
             let keymaps: Option<mlua::Table> = opts.get("keymaps").ok().flatten();
+            // Auto-name overlays declared without `opts.name` inside a
+            // module body so they survive `/reload` keyed by their
+            // declaration site. Skipped when the caller already passed
+            // a name or when no plugin scope is active.
+            let has_name = opts
+                .get::<Option<String>>("name")
+                .ok()
+                .flatten()
+                .is_some();
+            if !has_name {
+                if let Some(auto) = crate::lua::auto_name_for_scope(lua, "overlay") {
+                    opts.set("name", auto)?;
+                }
+            }
             let id = crate::lua::with_app(|app| crate::lua::ui_ops::open_overlay(app, opts))
                 .map_err(|e| LuaError::RuntimeError(format!("overlay: {e}")))?;
             let overlay_id = crate::smelt_term::OverlayId(id as u32);

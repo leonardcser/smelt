@@ -307,9 +307,35 @@ UiHost-only — buffers are terminal-screen backing stores that windows render i
         let s = shared.clone();
         m.fn_(
             "new",
-            "Create a buffer and return a `Buf` userdata. `opts.name` opts the buffer into hot-reload survival — repeat calls with the same name return the same handle with mutable opts re-applied.",
+            "Create a buffer and return a `Buf` userdata. `opts.name` opts the buffer into hot-reload survival — repeat calls with the same name return the same handle with mutable opts re-applied. When omitted from a module body, a stable per-(plugin, declaration-index) name is auto-assigned so the buffer survives `/reload` without explicit naming.",
             &["opts"],
-            move |_, opts: Option<mlua::Table>| -> LuaResult<LuaBuf> {
+            move |lua, opts: Option<mlua::Table>| -> LuaResult<LuaBuf> {
+                // Auto-name from active plugin scope when caller didn't.
+                if let Some(ref tbl) = opts {
+                    let has_name = tbl
+                        .get::<Option<String>>("name")
+                        .ok()
+                        .flatten()
+                        .is_some();
+                    if !has_name {
+                        if let Some(auto) = crate::lua::auto_name_for_scope(lua, "buf") {
+                            tbl.set("name", auto)?;
+                        }
+                    }
+                }
+                let opts = match opts {
+                    Some(t) => Some(t),
+                    None => {
+                        // No table at all: still want to auto-name if scoped.
+                        if let Some(auto) = crate::lua::auto_name_for_scope(lua, "buf") {
+                            let t = lua.create_table()?;
+                            t.set("name", auto)?;
+                            Some(t)
+                        } else {
+                            None
+                        }
+                    }
+                };
                 let id = create_or_open(&s, opts.as_ref())?;
                 Ok(LuaBuf { id })
             },
