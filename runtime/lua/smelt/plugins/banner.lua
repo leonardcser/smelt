@@ -48,18 +48,18 @@ local function open_splash()
   local word_w, word_h = banner.wordmark_size()
   local version_text = "v" .. (smelt.version or "")
   local w = math.max(word_w, #version_text)
-  local h = word_h + 1
   local version_win = ensure_version_window(version_text)
   -- vbox: paint slot (word_h rows) on top, real-buffer slot (1 row) below.
-  -- The hbox in each slot fixes the width, so the overlay's natural rect
-  -- comes out exactly `w x h` and the `center` anchor centers that.
+  -- Per-leaf `measure` hints pin each slot's natural width to `w` so the
+  -- overlay's natural rect resolves to exactly `w` cells wide and the
+  -- `center` anchor centers that.
   local sized = smelt.overlay.layout.vbox({
     {
-      smelt.overlay.layout.hbox({ { smelt.overlay.layout.leaf(state.paint_id), width = w } }),
+      smelt.overlay.layout.leaf(state.paint_id, { measure = { w, word_h } }),
       height = word_h,
     },
     {
-      smelt.overlay.layout.hbox({ { smelt.overlay.layout.leaf(version_win), width = w } }),
+      smelt.overlay.layout.leaf(version_win, { measure = { w, 1 } }),
       height = 1,
     },
   })

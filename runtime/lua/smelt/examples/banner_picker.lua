@@ -8,20 +8,17 @@
 -- Not autoloaded. Add `require("smelt.examples.banner_picker")` to
 -- `init.lua` to wire the `/banner` command.
 --
--- The overlay is closed + reopened on each Tab so its layout's natural
--- size shrinks to the new variant. The pattern below (PERSIST table, live
--- STATE table, rebuild()) generalizes to any "playground"-style picker
--- where each option has different dimensions.
+-- The overlay is sized to its content via `smelt.overlay.layout.measure(...)`
+-- handles: one for the paint surface (updated on Tab to the current variant's
+-- pixel size), one static for the hint row. The layout's natural size feeds
+-- the overlay's rect every frame, so cycling resizes smoothly with no
+-- close+reopen churn.
 
 local banner = require("smelt.banner")
 
 local M = {}
 
--- Survives close+reopen cycles (variant cycling and Space toggle). Lost on
--- /reload. Use `smelt.state(...)` instead if you want reload-survival.
 local PERSIST = { variant_idx = 1, looping = false, frame = 0 }
-
--- Live resources while the overlay is open. `nil` when closed.
 local STATE = nil
 
 local LABELS = {
@@ -32,8 +29,8 @@ local LABELS = {
   "wordmark+fire",
 }
 
-local HINT = " Tab: cycle   Space: loop   Esc: close "
-local TICK_MS = 166 -- ~6fps
+local HINT = " Tab / Space / Esc "
+local TICK_MS = 166
 
 local function compose_fire_wordmark(fire, wordmark)
   local fire_w, wm_w = #fire[1], #wordmark[1]
@@ -45,14 +42,13 @@ local function compose_fire_wordmark(fire, wordmark)
   local rows = {}
   for _, r in ipairs(fire) do rows[#rows + 1] = centered(r, fire_w) end
   for _, r in ipairs(wordmark) do rows[#rows + 1] = centered(r, wm_w) end
-  -- Pad at the top so the wordmark sits flush against the version line.
+  -- Pad at top so the wordmark sits flush against the version line below.
   if #rows % 2 == 1 then table.insert(rows, 1, string.rep(".", width)) end
   return rows
 end
 
 -- Returns (cell_width, cell_height, paint_fn(slice, row0, col0)) for the
--- variant at `idx` and animation frame `frame_idx` (only consumed by
--- wordmark+fire).
+-- given variant at the given animation frame.
 local function variant_info(idx, frame_idx)
   local label = LABELS[idx]
   local version = "v" .. (smelt.version or "")
@@ -96,15 +92,20 @@ end
 local function paint(slice, _ctx)
   if not STATE then return end
   local w, h, paint_fn = variant_info(PERSIST.variant_idx, PERSIST.frame)
-  local sw, sh = slice:width(), slice:height()
+  local sw = slice:width()
+  local sh = slice:height()
   local r0 = math.max(0, math.floor((sh - h) / 2))
   local c0 = math.max(0, math.floor((sw - w) / 2))
   paint_fn(slice, r0, c0)
 end
 
-local close, open
+local function update_measure()
+  if not STATE then return end
+  local w, h = variant_info(PERSIST.variant_idx, PERSIST.frame)
+  STATE.measure:set(w, h)
+end
 
-function close()
+local function close()
   if not STATE then return end
   if STATE.timer then STATE.timer:remove() end
   if STATE.paint_id then smelt.paint.unregister(STATE.paint_id) end
@@ -113,23 +114,18 @@ function close()
   STATE = nil
 end
 
-local function rebuild()
-  close()
-  open()
-end
-
 local function cycle(delta)
   PERSIST.variant_idx = ((PERSIST.variant_idx - 1 + delta) % #LABELS) + 1
   PERSIST.frame = 0
-  rebuild()
+  update_measure()
 end
 
-function open()
+local function open()
   if STATE then return end
   STATE = {}
 
   local w, h = variant_info(PERSIST.variant_idx, PERSIST.frame)
-  local inner_w = math.max(w, #HINT)
+  STATE.measure = smelt.overlay.layout.measure(w, h)
 
   STATE.buf = smelt.buf.new()
   STATE.buf:lines({ HINT })
@@ -139,31 +135,28 @@ function open()
 
   STATE.win:key("<Tab>", function() cycle(1) end)
   STATE.win:key("<S-Tab>", function() cycle(-1) end)
-  STATE.win:key("<Space>", function()
-    PERSIST.looping = not PERSIST.looping
-    rebuild() -- refresh title chip showing LOOP state
-  end)
+  STATE.win:key("<Space>", function() PERSIST.looping = not PERSIST.looping end)
   STATE.win:key("<Esc>", close)
   STATE.win:key("<C-c>", close)
 
-  local title = {
-    { text = " /banner ", fg = "yellow", bold = true },
-    { text = "(" .. LABELS[PERSIST.variant_idx] .. ")", fg = "grey", dim = true },
-  }
-  if PERSIST.looping then
-    title[#title + 1] = { text = " ● LOOP", fg = "red", dim = true }
-  end
-  title[#title + 1] = { text = " " }
-
   STATE.overlay = smelt.overlay.new({
-    title = title,
-    width = inner_w + 2,
-    height = h + 1 + 2, -- art + hint + border
+    name = "smelt.banner_picker",
+    title = {
+      { text = " /banner ", fg = "yellow", bold = true },
+    },
+    anchor = "center",
+    border = { all = "Comment" },
     layout = smelt.overlay.layout.vbox({
-      { smelt.overlay.layout.leaf(STATE.paint_id), height = "fill" },
-      { smelt.overlay.layout.leaf(STATE.win),      height = 1      },
-    }),
-    modal = true,
+      {
+        smelt.overlay.layout.leaf(STATE.paint_id, { measure = STATE.measure }),
+        height = "fit",
+      },
+      {
+        smelt.overlay.layout.leaf(STATE.win, { measure = { #HINT, 1 } }),
+        height = 1,
+      },
+    }, { padding = 2 }),
+    modal = false,
     draggable = true,
     resizable = false,
   })

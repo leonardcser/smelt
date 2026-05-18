@@ -113,14 +113,12 @@ local function attach()
 		corner = "ne",
 		row = 0,
 		col = 0,
-		width = PANEL_W,
-		height = PANEL_H,
 		border = { all = "Comment" },
 		modal = false,
 		blocks_agent = false,
 		draggable = true,
 		resizable = true,
-		layout = smelt.overlay.layout.leaf(state.win),
+		layout = smelt.overlay.layout.leaf(state.win, { measure = { PANEL_W, PANEL_H } }),
 	})
 	-- Cancel any prior timer (hot-reload survival) before re-arming.
 	if state.timer then state.timer:remove() end

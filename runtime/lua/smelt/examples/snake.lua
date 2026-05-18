@@ -11,9 +11,10 @@ local GRID_W = 32
 local GRID_H = 32 -- 16 terminal rows after half-block packing
 local TICK_MS = 100
 
--- Overlay: status row + game (GRID_H/2 term rows) + hint strip + 1-cell border each side.
-local OVERLAY_W = GRID_W + 2
-local OVERLAY_H = (GRID_H / 2) + 1 + 1 + 2
+-- Paint area: 1 status row above (GRID_H/2) game rows. Hint strip is a
+-- separate 1-row win below. Overlay sizes itself from these via per-leaf
+-- `measure` hints + a vbox.
+local PAINT_H = (GRID_H / 2) + 1
 
 local BG = { r = 18, g = 22, b = 30 } -- dark playfield so snake's green pops
 
@@ -277,11 +278,16 @@ local function open()
 			{ text = " snake ", fg = "green", bold = true },
 			{ text = "(F11 to close) ", fg = "grey", dim = true },
 		},
-		width = OVERLAY_W,
-		height = OVERLAY_H,
+		border = { all = "Comment" },
 		layout = smelt.overlay.layout.vbox({
-			{ smelt.overlay.layout.leaf(STATE.paint_id), height = "fill" },
-			{ smelt.overlay.layout.leaf(STATE.win),      height = 1      },
+			{
+				smelt.overlay.layout.leaf(STATE.paint_id, { measure = { GRID_W, PAINT_H } }),
+				height = "fit",
+			},
+			{
+				smelt.overlay.layout.leaf(STATE.win, { measure = { GRID_W, 1 } }),
+				height = 1,
+			},
 		}),
 		modal = false,
 		draggable = true,
