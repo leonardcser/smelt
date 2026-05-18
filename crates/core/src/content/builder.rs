@@ -206,11 +206,13 @@ impl<'a> LineBuilder<'a> {
         self.print_with_meta(&" ".repeat(remaining), meta);
     }
 
-    /// Record a row-level bg fill: paint draws `bg` across the full slice
-    /// width without writing trailing cells into the buffer text. Sister
-    /// primitive to `pad_row_to_layout_width`; pick this when the buffer
-    /// text needs to stay free of trailing pad (e.g. split-diff rows that
-    /// are read back as logical content).
+    /// Record a row-level bg fill: paint draws `bg` across the layout
+    /// content region (same span as `pad_row_to_layout_width`) without
+    /// writing trailing cells into the buffer text. Gutter and right-margin
+    /// columns keep the row's cursor/normal style so chrome stays uniform
+    /// across rows. Pick this when the buffer text needs to stay free of
+    /// trailing pad (e.g. split-diff rows that are read back as logical
+    /// content, or blank padding rows whose clipboard yank should be empty).
     pub fn fill_line_bg(&mut self, bg: Color) {
         debug_assert!(
             self.cur_decoration.fill_bg.is_none(),

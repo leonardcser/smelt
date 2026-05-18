@@ -1457,21 +1457,31 @@ impl Window {
                 0
             };
             let decoration = logical.map(|_| buf.decoration_at(logical_row));
-            let mut row_style = if fill_cursor_row && cursor_screen_row == Some(row) {
+            let base_row_style = if fill_cursor_row && cursor_screen_row == Some(row) {
                 cursor_style
             } else {
                 normal_style
             };
-            if let Some(dec) = decoration {
-                if let Some(bg) = dec.fill_bg {
-                    row_style = Style {
-                        bg: Some(bg),
-                        ..row_style
-                    };
+            let row_style = match decoration.and_then(|d| d.fill_bg) {
+                Some(bg) => Style {
+                    bg: Some(bg),
+                    ..base_row_style
+                },
+                None => base_row_style,
+            };
+            // `base_row_style` covers the whole slice (gutter and right margin)
+            // so cursor/normal highlights span every column. `fill_bg` is a
+            // layout-scoped decoration: it only overrides the content region
+            // so the bg lines up with `pad_row_to_layout_width`-padded rows
+            // and doesn't leak into chrome columns.
+            if base_row_style != Style::default() {
+                for col in 0..width {
+                    slice.set(col, row, ' ', base_row_style);
                 }
             }
-            if row_style != Style::default() {
-                for col in 0..width {
+            if row_style != base_row_style {
+                let end = content_offset.saturating_add(content_width).min(width);
+                for col in content_offset..end {
                     slice.set(col, row, ' ', row_style);
                 }
             }
@@ -1485,7 +1495,7 @@ impl Window {
                         None
                     };
                     if let Some(g) = cell {
-                        let style = merge_styles(row_style, g.style);
+                        let style = merge_styles(base_row_style, g.style);
                         let mut c: u16 = 0;
                         for ch in g.text.chars() {
                             let cw = UnicodeWidthChar::width(ch).unwrap_or(0).max(1) as u16;
@@ -1495,9 +1505,10 @@ impl Window {
                             slice.set(c, row, ch, style);
                             c += cw;
                         }
-                        // Pad to gutter_width so partial cells inherit row_style cleanly.
+                        // Pad to gutter_width with the gutter's base style so
+                        // partial cells inherit chrome bg, never `fill_bg`.
                         for fill in c..gutter_width {
-                            slice.set(fill, row, ' ', row_style);
+                            slice.set(fill, row, ' ', base_row_style);
                         }
                     }
                 }
