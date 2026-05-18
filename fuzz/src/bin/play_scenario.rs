@@ -214,5 +214,7 @@ fn op_label(op: &smelt_fuzz::FuzzOp) -> String {
         EngineToolArgsDelta { tool_name, .. } => format!("tool args delta {tool_name}"),
         EngineAskResponse { id, .. } => format!("ask response {id}"),
         EngineAskError { id, kind_idx, .. } => format!("ask error {id} k={kind_idx}"),
+        ReloadLua => "reload lua".into(),
+        OpenOverlay { variant } => format!("open overlay v={variant}"),
     }
 }

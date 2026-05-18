@@ -451,6 +451,91 @@ impl TestApp {
         self.app.toggle_pane_focus();
     }
 
+    /// Side-channel: invoke the `/reload` pipeline. Wipes every Lua
+    /// registry (commands, keymaps, statusline, tools, hooks, timers,
+    /// cell subscribers), re-runs `init.lua` and bundled plugins, then
+    /// re-fires `on_ready` hooks with `ctx.kind = "reload"`. Named
+    /// resources (paint slots, NamedSlots bindings on bufs/wins/overlays)
+    /// must keep stable ids; anonymous ones get reaped. Exercises the
+    /// hot-reload surface that was untested by fuzz.
+    pub fn reload_lua(&mut self) {
+        let _guard = crate::lua::install_app_ptr(&mut self.app);
+        self.app.reload_lua();
+    }
+
+    /// Side-channel: open a synthetic overlay via `smelt.overlay.new`.
+    /// `variant % N` picks from a small fixed set spanning the new
+    /// surface area (leaf, vbox, with static measure, with keymap,
+    /// named vs anonymous). Same-variant repeats land on the same
+    /// NamedSlot name so the dedup path runs; different variants
+    /// allocate fresh slots. Best-effort: a Lua failure is swallowed
+    /// (the next op still runs against a consistent app).
+    pub fn open_synthetic_overlay(&mut self, variant: u8) {
+        const VARIANTS: &[&str] = &[
+            // 0: named leaf
+            r#"
+            local b = smelt.buf.new({ name = "fuzz.ov.0.buf" })
+            local w = smelt.win.new(b, { name = "fuzz.ov.0.win" })
+            smelt.overlay.new({
+                name = "fuzz.ov.0", anchor = "screen_at", corner = "nw",
+                row = 0, col = 0, width = 20, height = 5,
+                layout = smelt.overlay.layout.leaf(w),
+            })
+            "#,
+            // 1: anonymous leaf — reaped on reload
+            r#"
+            local b = smelt.buf.new()
+            local w = smelt.win.new(b, {})
+            smelt.overlay.new({
+                anchor = "screen_at", corner = "ne",
+                row = 0, col = 0, width = 15, height = 4,
+                layout = smelt.overlay.layout.leaf(w),
+            })
+            "#,
+            // 2: leaf with static measure (drives the per-leaf measure hook)
+            r#"
+            local b = smelt.buf.new({ name = "fuzz.ov.2.buf" })
+            local w = smelt.win.new(b, { name = "fuzz.ov.2.win" })
+            smelt.overlay.new({
+                name = "fuzz.ov.2", anchor = "screen_at", corner = "sw",
+                row = 0, col = 0, width = 25, height = 6,
+                layout = smelt.overlay.layout.leaf(w, { measure = { w = 18, h = 4 } }),
+            })
+            "#,
+            // 3: vbox of two leaves
+            r#"
+            local b1 = smelt.buf.new({ name = "fuzz.ov.3.buf1" })
+            local w1 = smelt.win.new(b1, { name = "fuzz.ov.3.win1" })
+            local b2 = smelt.buf.new({ name = "fuzz.ov.3.buf2" })
+            local w2 = smelt.win.new(b2, { name = "fuzz.ov.3.win2" })
+            smelt.overlay.new({
+                name = "fuzz.ov.3", anchor = "screen_at", corner = "se",
+                row = 0, col = 0, width = 22, height = 8,
+                layout = smelt.overlay.layout.vbox({
+                    { node = smelt.overlay.layout.leaf(w1), height = 3 },
+                    { node = smelt.overlay.layout.leaf(w2), height = 3 },
+                }),
+            })
+            "#,
+            // 4: leaf with overlay-level keymap (deferred-safe path)
+            r#"
+            local b = smelt.buf.new({ name = "fuzz.ov.4.buf" })
+            local w = smelt.win.new(b, { name = "fuzz.ov.4.win" })
+            smelt.overlay.new({
+                name = "fuzz.ov.4", anchor = "screen_at", corner = "nw",
+                row = 1, col = 1, width = 18, height = 5,
+                layout = smelt.overlay.layout.leaf(w),
+                keymaps = {
+                    { key = "<C-x>", on_press = function() end },
+                },
+            })
+            "#,
+        ];
+        let snippet = VARIANTS[(variant as usize) % VARIANTS.len()];
+        let _guard = crate::lua::install_app_ptr(&mut self.app);
+        let _ = self.app.lua.lua.load(snippet).exec();
+    }
+
     /// Number of confirm dialogs currently registered with the core. Used
     /// by `RequestPermission` invariants to assert the dispatch either
     /// auto-approved (no confirm registered) or registered exactly one.

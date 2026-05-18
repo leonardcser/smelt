@@ -348,6 +348,21 @@ pub enum FuzzOp {
         kind_idx: u8,
         message: String,
     },
+    /// Side channel: invoke the `/reload` pipeline. Stresses named-slot
+    /// survival (paint ids, buf/win/overlay NamedSlots) and `on_ready`
+    /// re-entry (`ctx.kind = "reload"`) against arbitrary pre-state —
+    /// the surface where the `fix(edit): drop named bindings on close`
+    /// bug class lives.
+    ReloadLua,
+    /// Side channel: open a synthetic overlay via `smelt.overlay.new`.
+    /// `variant % N` picks the shape (named/anonymous leaf, vbox, leaf
+    /// with static measure, leaf with overlay-level keymap). Same
+    /// `variant` reuses the same NamedSlot name so the dedup path is
+    /// exercised, different variants populate different slots. Targets
+    /// the new measure / overlay-keymap / NamedSlots surfaces.
+    OpenOverlay {
+        variant: u8,
+    },
 }
 
 #[derive(Arbitrary, Debug, Clone, Copy, Serialize, Deserialize)]
@@ -1133,9 +1148,12 @@ fn plan(op: FuzzOp) -> (Option<SourceEvent>, PostCheck) {
             let ev = SourceEvent::Engine(EngineEvent::Shutdown { reason });
             (Some(ev), PostCheck::ShutdownReceived)
         }
-        FuzzOp::InsertAttachment { .. } | FuzzOp::TogglePaneFocus => {
+        FuzzOp::InsertAttachment { .. }
+        | FuzzOp::TogglePaneFocus
+        | FuzzOp::ReloadLua
+        | FuzzOp::OpenOverlay { .. } => {
             unreachable!(
-                "InsertAttachment / TogglePaneFocus side channels handled inline in apply()"
+                "InsertAttachment / TogglePaneFocus / ReloadLua / OpenOverlay side channels handled inline in apply()"
             )
         }
         FuzzOp::EngineToolArgsDelta {
@@ -1219,6 +1237,16 @@ pub fn apply(app: &mut TestApp, op: FuzzOp) {
         }
         FuzzOp::TogglePaneFocus => {
             app.toggle_pane_focus();
+            app.assert_invariants();
+            return;
+        }
+        FuzzOp::ReloadLua => {
+            app.reload_lua();
+            app.assert_invariants();
+            return;
+        }
+        FuzzOp::OpenOverlay { variant } => {
+            app.open_synthetic_overlay(*variant);
             app.assert_invariants();
             return;
         }
