@@ -11,11 +11,59 @@
 //! `{ kind = "...", n = N }`.
 
 use crate::smelt_term::layout::Border;
-use crate::smelt_term::{Constraint, LayoutTree};
+use crate::smelt_term::{Constraint, LayoutTree, Natural, NaturalRef, StaticNatural};
 use mlua::prelude::*;
 use smelt_core::lua::lua_type::LuaType;
 use smelt_core::lua::module::LuaMod;
 use smelt_term::Line;
+use std::sync::{Arc, Mutex};
+
+/// Mutable cell shared between Lua (`measure_handle:set(w, h)`) and the
+/// term layout resolver (`Natural::size`). Lock contention is negligible —
+/// the cell is only read during layout passes and written from Lua key
+/// handlers / state changes.
+#[derive(Clone)]
+pub struct LuaMeasure {
+    pub(crate) inner: Arc<Mutex<(u16, u16)>>,
+}
+
+impl LuaMeasure {
+    fn new(w: u16, h: u16) -> Self {
+        Self {
+            inner: Arc::new(Mutex::new((w, h))),
+        }
+    }
+}
+
+impl mlua::UserData for LuaMeasure {
+    fn add_methods<M: mlua::UserDataMethods<Self>>(methods: &mut M) {
+        methods.add_method("set", |_, this, (w, h): (u16, u16)| {
+            if let Ok(mut cell) = this.inner.lock() {
+                *cell = (w, h);
+            }
+            Ok(())
+        });
+        methods.add_method("get", |_, this, ()| {
+            let (w, h) = this.inner.lock().map(|c| *c).unwrap_or((0, 0));
+            Ok((w, h))
+        });
+    }
+}
+
+impl LuaType for LuaMeasure {
+    fn lua_type() -> String {
+        "smelt.overlay.layout.Measure".into()
+    }
+}
+
+/// `Natural` impl that reads from the shared `LuaMeasure` cell each frame.
+struct LuaMeasureNatural(Arc<Mutex<(u16, u16)>>);
+
+impl Natural for LuaMeasureNatural {
+    fn size(&self, _cap: (u16, u16)) -> (u16, u16) {
+        self.0.lock().map(|c| *c).unwrap_or((0, 0))
+    }
+}
 
 /// A node in an overlay's layout tree. Built up in Lua via the layout
 /// constructors and consumed by `smelt.overlay.new`.
@@ -27,6 +75,7 @@ pub(crate) enum LayoutNode {
         raw_id: u64,
         chrome: NodeChrome,
         collapse_when_empty: bool,
+        natural: Option<NaturalRef>,
     },
     /// Vertical or horizontal container. Children are laid out along the
     /// primary axis with their `constraint`; the cross axis fills the
@@ -49,6 +98,7 @@ pub(crate) enum ContainerKind {
 pub(crate) struct NodeChrome {
     pub border: Option<Border>,
     pub title: Option<Line<'static>>,
+    pub padding: u16,
 }
 
 /// One slot inside a `Container`. `constraint` sizes the slot along the
@@ -93,7 +143,45 @@ fn resolve_leaf_target(target: &mlua::Value) -> mlua::Result<u64> {
     }
 }
 
-/// Pull `border` / `title` off any node-builder opts table.
+/// Parse `opts.measure`. Accepts:
+///   * `nil` — no override; the host's `LeafSizer` decides
+///   * `{ w, h }` array — fixed natural size
+///   * `smelt.overlay.layout.measure(...)` userdata — shared mutable cell
+fn parse_measure(opts: Option<&mlua::Table>, ctx: &str) -> mlua::Result<Option<NaturalRef>> {
+    let Some(t) = opts else { return Ok(None) };
+    let v: mlua::Value = match t.get("measure") {
+        Ok(v) => v,
+        Err(_) => return Ok(None),
+    };
+    match v {
+        mlua::Value::Nil => Ok(None),
+        mlua::Value::Table(tbl) => {
+            let w: u16 = tbl
+                .get(1)
+                .map_err(|e| mlua::Error::external(format!("{ctx}: missing width: {e}")))?;
+            let h: u16 = tbl
+                .get(2)
+                .map_err(|e| mlua::Error::external(format!("{ctx}: missing height: {e}")))?;
+            Ok(Some(Arc::new(StaticNatural(w, h)) as NaturalRef))
+        }
+        mlua::Value::UserData(ud) => {
+            let m = ud.borrow::<LuaMeasure>().map_err(|e| {
+                mlua::Error::external(format!(
+                    "{ctx}: expected a measure handle or {{w, h}} table: {e}"
+                ))
+            })?;
+            Ok(Some(
+                Arc::new(LuaMeasureNatural(m.inner.clone())) as NaturalRef
+            ))
+        }
+        other => Err(mlua::Error::external(format!(
+            "{ctx}: expected nil, {{w, h}}, or measure handle; got {}",
+            other.type_name()
+        ))),
+    }
+}
+
+/// Pull `border` / `title` / `padding` off any node-builder opts table.
 fn parse_node_chrome(opts: Option<&mlua::Table>, ctx: &str) -> Result<NodeChrome, String> {
     let Some(t) = opts else {
         return Ok(NodeChrome::default());
@@ -104,7 +192,12 @@ fn parse_node_chrome(opts: Option<&mlua::Table>, ctx: &str) -> Result<NodeChrome
     };
     let title = crate::lua::parse::title(t.get::<mlua::Value>("title").ok())
         .map_err(|e| format!("{ctx}.title: {e}"))?;
-    Ok(NodeChrome { border, title })
+    let padding = t.get::<u16>("padding").unwrap_or(0);
+    Ok(NodeChrome {
+        border,
+        title,
+        padding,
+    })
 }
 
 /// Read `items = { { node, width|height = ..., collapse_when_empty = ... }, ... }`
@@ -140,7 +233,7 @@ pub(super) fn register(overlay: &LuaMod) -> LuaResult<()> {
 
     m.fn_(
         "leaf",
-        "Wrap a Win handle or paint id into a leaf node. `opts` accepts `border`, `title`, `collapse_when_empty` (force the slot to zero size when the wrapped window's buffer is empty).",
+        "Wrap a Win handle or paint id into a leaf node. `opts` accepts `border`, `title`, `collapse_when_empty` (force the slot to zero size when the wrapped window's buffer is empty), `measure` (a `{w, h}` table for a static natural size or a `smelt.overlay.layout.measure(...)` handle for one the plugin can live-update).",
         &["win_or_paint", "opts"],
         |_, (target, opts): (mlua::Value, Option<mlua::Table>)| -> LuaResult<LuaUiLayout> {
             let raw_id = resolve_leaf_target(&target)?;
@@ -150,17 +243,28 @@ pub(super) fn register(overlay: &LuaMod) -> LuaResult<()> {
                 .as_ref()
                 .and_then(|t| t.get::<bool>("collapse_when_empty").ok())
                 .unwrap_or(false);
+            let natural = parse_measure(opts.as_ref(), "smelt.overlay.layout.leaf.measure")?;
             Ok(LuaUiLayout(LayoutNode::Leaf {
                 raw_id,
                 chrome,
                 collapse_when_empty,
+                natural,
             }))
         },
     )?;
 
     m.fn_(
+        "measure",
+        "Construct a shareable natural-size handle for use with `layout.leaf(opts.measure = ...)`. Initial size is `(w, h)` (default `(0, 0)`); update at any time via `handle:set(w, h)` to drive a live overlay resize on the next frame. Read current size via `handle:get()`.",
+        &["w", "h"],
+        |_, (w, h): (Option<u16>, Option<u16>)| -> LuaResult<LuaMeasure> {
+            Ok(LuaMeasure::new(w.unwrap_or(0), h.unwrap_or(0)))
+        },
+    )?;
+
+    m.fn_(
         "vbox",
-        "Vertical container. `items` is an array of `{ child_layout, height = <constraint>, collapse_when_empty = bool? }`. `opts` accepts `border`, `title`, `gap` (cells between children).",
+        "Vertical container. `items` is an array of `{ child_layout, height = <constraint>, collapse_when_empty = bool? }`. `opts` accepts `border`, `title`, `gap` (cells between children), `padding` (uniform inner inset on all sides, inside any border).",
         &["items", "opts"],
         |_, (items_tbl, opts): (mlua::Table, Option<mlua::Table>)| -> LuaResult<LuaUiLayout> {
             let items = parse_items(&items_tbl, "height", "smelt.overlay.layout.vbox")?;
@@ -181,7 +285,7 @@ pub(super) fn register(overlay: &LuaMod) -> LuaResult<()> {
 
     m.fn_(
         "hbox",
-        "Horizontal container. `items` is an array of `{ child_layout, width = <constraint>, collapse_when_empty = bool? }`. `opts` accepts `border`, `title`, `gap`.",
+        "Horizontal container. `items` is an array of `{ child_layout, width = <constraint>, collapse_when_empty = bool? }`. `opts` accepts `border`, `title`, `gap`, `padding` (uniform inner inset on all sides, inside any border).",
         &["items", "opts"],
         |_, (items_tbl, opts): (mlua::Table, Option<mlua::Table>)| -> LuaResult<LuaUiLayout> {
             let items = parse_items(&items_tbl, "width", "smelt.overlay.layout.hbox")?;
@@ -215,6 +319,7 @@ pub(crate) fn build_layout_tree(
             raw_id,
             chrome,
             collapse_when_empty,
+            natural,
         } => {
             let leaf = app.resolve_leaf_id(*raw_id).ok_or_else(|| {
                 format!("layout leaf references missing window/paint id {raw_id}")
@@ -226,11 +331,17 @@ pub(crate) fn build_layout_tree(
                 }
                 crate::lua::paint::LeafKind::Paint(p) => LayoutTree::leaf(p),
             };
+            if let Some(n) = natural.clone() {
+                tree = tree.with_natural(n);
+            }
             if let Some(b) = chrome.border {
                 tree = tree.with_border(b);
             }
             if let Some(t) = chrome.title.clone() {
                 tree = tree.with_title(t);
+            }
+            if chrome.padding > 0 {
+                tree = tree.with_padding(chrome.padding);
             }
             // Default leaf constraint is `Fill` when used at the root; container
             // items override this via their own slot constraint. `collapse_when_empty`
@@ -269,6 +380,9 @@ pub(crate) fn build_layout_tree(
             }
             if *gap > 0 {
                 tree = tree.with_gap(*gap);
+            }
+            if chrome.padding > 0 {
+                tree = tree.with_padding(chrome.padding);
             }
             Ok((Constraint::Fill, tree))
         }

@@ -24,7 +24,8 @@ pub use flush::flush_diff;
 pub use grid::{Cell, CellUpdate, Grid, GridSlice, Style};
 pub use hit::HitRegistry;
 pub use layout::{
-    Align, Border, Constraint, Corner, Gutters, LayoutTree, LeafSizer, NoopSizer, PaintId, Rect,
+    Align, Border, Constraint, Corner, Gutters, LayoutTree, LeafSizer, Natural, NaturalRef,
+    NoopSizer, PaintId, Rect, StaticNatural,
 };
 pub use line::{Line, Span};
 pub use smelt_style::style::Color;
@@ -74,9 +75,9 @@ pub fn paint_layout_tree_with(
     paint: &mut PaintDispatch,
 ) {
     match node {
-        LayoutTree::Leaf { id, chrome } => {
+        LayoutTree::Leaf { id, chrome, .. } => {
             layout::paint_chrome(grid, area, chrome, theme);
-            let inner = layout::inset_for_border(area, chrome.border);
+            let inner = layout::inset_for_chrome(area, chrome);
             paint(*id, inner, grid, theme, term_size);
         }
         LayoutTree::Vbox { items, chrome } | LayoutTree::Hbox { items, chrome } => {

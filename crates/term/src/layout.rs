@@ -51,7 +51,8 @@ pub enum Constraint {
 /// A sizing `Constraint` paired with its subtree; used as `Vbox`/`Hbox` items.
 pub type Item = (Constraint, LayoutTree);
 
-/// Container chrome (gap, border, title) shared by `Vbox` and `Hbox`.
+/// Container chrome (gap, border, title, padding) shared by `Vbox`, `Hbox`,
+/// and `Leaf`.
 #[derive(Clone, Debug, Default)]
 pub struct Chrome {
     /// Cells between adjacent children; `0` packs flush.
@@ -60,18 +61,81 @@ pub struct Chrome {
     pub border: Option<Border>,
     /// Title in the top border row. Requires `border = Some(_)`; renders as a styled [`Line`].
     pub title: Option<crate::line::Line<'static>>,
+    /// Uniform inner padding (cells) on all four sides, *inside* any
+    /// border. Increases the container's natural size by `2 * padding` on
+    /// each axis; children are laid out in the padded-inset rect.
+    pub padding: u16,
 }
 
-#[derive(Clone, Debug)]
+/// Per-leaf natural-size hook. Plugins attach one to a leaf to drive
+/// content-aware sizing without going through `LeafSizer`. When present,
+/// it takes precedence over the sizer's reported size for `Fit`
+/// resolution. Implementations are typically a static `(w, h)` pair or a
+/// shared mutable cell that the plugin updates on user actions (variant
+/// cycling, content change, etc.).
+pub trait Natural: Send + Sync {
+    /// Natural `(width, height)` for the leaf at the given available cap.
+    /// `cap` is the inner-cap (border/gap already subtracted); impls may
+    /// ignore it.
+    fn size(&self, cap: (u16, u16)) -> (u16, u16);
+}
+
+/// Shared reference to a `Natural` hook; cheap to clone.
+pub type NaturalRef = std::sync::Arc<dyn Natural>;
+
+/// Fixed natural size. Use for leaves whose extent is known at layout
+/// construction time and doesn't change between frames.
+#[derive(Clone, Copy, Debug)]
+pub struct StaticNatural(pub u16, pub u16);
+
+impl Natural for StaticNatural {
+    fn size(&self, _cap: (u16, u16)) -> (u16, u16) {
+        (self.0, self.1)
+    }
+}
+
+#[derive(Clone)]
 pub enum LayoutTree {
     /// Terminal node; the host matches on `PaintId` in its paint dispatcher.
     /// Carries its own `Chrome` so leaves can have a border/title without a
-    /// synthetic wrapper container.
-    Leaf { id: PaintId, chrome: Chrome },
+    /// synthetic wrapper container. `natural`, when set, overrides the
+    /// active `LeafSizer` for this leaf's natural-size reporting.
+    Leaf {
+        id: PaintId,
+        chrome: Chrome,
+        natural: Option<NaturalRef>,
+    },
     /// Vertical container; children stack top-to-bottom.
     Vbox { items: Vec<Item>, chrome: Chrome },
     /// Horizontal container; children pack left-to-right.
     Hbox { items: Vec<Item>, chrome: Chrome },
+}
+
+impl std::fmt::Debug for LayoutTree {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            LayoutTree::Leaf {
+                id,
+                chrome,
+                natural,
+            } => f
+                .debug_struct("Leaf")
+                .field("id", id)
+                .field("chrome", chrome)
+                .field("natural", &natural.as_ref().map(|_| "<NaturalRef>"))
+                .finish(),
+            LayoutTree::Vbox { items, chrome } => f
+                .debug_struct("Vbox")
+                .field("items", items)
+                .field("chrome", chrome)
+                .finish(),
+            LayoutTree::Hbox { items, chrome } => f
+                .debug_struct("Hbox")
+                .field("items", items)
+                .field("chrome", chrome)
+                .finish(),
+        }
+    }
 }
 
 impl LayoutTree {
@@ -96,7 +160,17 @@ impl LayoutTree {
         Self::Leaf {
             id: id.into(),
             chrome: Chrome::default(),
+            natural: None,
         }
+    }
+
+    /// Attach a `Natural` hook to a leaf node so it can drive its own
+    /// `Fit` size. No-op for containers.
+    pub fn with_natural(mut self, n: NaturalRef) -> Self {
+        if let Self::Leaf { natural, .. } = &mut self {
+            *natural = Some(n);
+        }
+        self
     }
 
     pub fn chrome_mut(&mut self) -> &mut Chrome {
@@ -117,6 +191,11 @@ impl LayoutTree {
 
     pub fn with_gap(mut self, g: u16) -> Self {
         self.chrome_mut().gap = g;
+        self
+    }
+
+    pub fn with_padding(mut self, p: u16) -> Self {
+        self.chrome_mut().padding = p;
         self
     }
 
@@ -187,11 +266,18 @@ impl LayoutTree {
     /// is added on top. Result is always `<= cap`.
     pub fn natural_size_with(&self, cap: (u16, u16), sizer: &dyn LeafSizer) -> (u16, u16) {
         match self {
-            LayoutTree::Leaf { id, chrome } => {
-                let (bw, bh) = chrome_border_dims(chrome);
-                let inner_cap = (cap.0.saturating_sub(bw), cap.1.saturating_sub(bh));
-                let (w, h) = sizer.leaf_natural_size(*id, inner_cap);
-                ((w + bw).min(cap.0), (h + bh).min(cap.1))
+            LayoutTree::Leaf {
+                id,
+                chrome,
+                natural,
+            } => {
+                let (cw, ch) = chrome_overhead(chrome);
+                let inner_cap = (cap.0.saturating_sub(cw), cap.1.saturating_sub(ch));
+                let (w, h) = natural
+                    .as_deref()
+                    .map(|n| n.size(inner_cap))
+                    .unwrap_or_else(|| sizer.leaf_natural_size(*id, inner_cap));
+                ((w + cw).min(cap.0), (h + ch).min(cap.1))
             }
             LayoutTree::Vbox { items, chrome } => natural_box(items, chrome, cap, true, sizer),
             LayoutTree::Hbox { items, chrome } => natural_box(items, chrome, cap, false, sizer),
@@ -228,6 +314,14 @@ fn chrome_border_dims(chrome: &Chrome) -> (u16, u16) {
     (bw, bh)
 }
 
+/// Total `(width, height)` overhead from chrome: border + uniform padding on
+/// all four sides. Padding contributes `2 * chrome.padding` on each axis.
+fn chrome_overhead(chrome: &Chrome) -> (u16, u16) {
+    let (bw, bh) = chrome_border_dims(chrome);
+    let pad2 = chrome.padding.saturating_mul(2);
+    (bw.saturating_add(pad2), bh.saturating_add(pad2))
+}
+
 fn natural_box(
     items: &[Item],
     chrome: &Chrome,
@@ -236,21 +330,21 @@ fn natural_box(
     sizer: &dyn LeafSizer,
 ) -> (u16, u16) {
     let (cap_w, cap_h) = cap;
-    let (border_w, border_h) = chrome_border_dims(chrome);
+    let (chrome_w, chrome_h) = chrome_overhead(chrome);
     let gaps = chrome
         .gap
         .saturating_mul(items.len().saturating_sub(1) as u16);
 
-    // Inner cap subtracts border and gap from the primary axis.
+    // Inner cap subtracts chrome (border + padding) and gap from the primary axis.
     let (primary_cap, secondary_cap) = if vertical {
         (
-            cap_h.saturating_sub(border_h).saturating_sub(gaps),
-            cap_w.saturating_sub(border_w),
+            cap_h.saturating_sub(chrome_h).saturating_sub(gaps),
+            cap_w.saturating_sub(chrome_w),
         )
     } else {
         (
-            cap_w.saturating_sub(border_w).saturating_sub(gaps),
-            cap_h.saturating_sub(border_h),
+            cap_w.saturating_sub(chrome_w).saturating_sub(gaps),
+            cap_h.saturating_sub(chrome_h),
         )
     };
 
@@ -292,13 +386,13 @@ fn natural_box(
         primary = primary.saturating_add(primary_size);
         secondary = secondary.max(cross_size);
     }
-    let (primary_border, secondary_border) = if vertical {
-        (border_h, border_w)
+    let (primary_chrome, secondary_chrome) = if vertical {
+        (chrome_h, chrome_w)
     } else {
-        (border_w, border_h)
+        (chrome_w, chrome_h)
     };
-    primary = primary.saturating_add(gaps).saturating_add(primary_border);
-    secondary = secondary.saturating_add(secondary_border);
+    primary = primary.saturating_add(gaps).saturating_add(primary_chrome);
+    secondary = secondary.saturating_add(secondary_chrome);
 
     let (w, h) = if vertical {
         (secondary, primary)
@@ -585,7 +679,9 @@ pub fn resolve_layout_with(
 }
 
 /// Inner area after subtracting the border's per-side reservations.
-/// Returns `area` unchanged when `border` is `None`.
+/// Returns `area` unchanged when `border` is `None`. Does not account for
+/// `Chrome.padding`; prefer [`inset_for_chrome`] when you have the full
+/// `Chrome`.
 pub fn inset_for_border(area: Rect, border: Option<Border>) -> Rect {
     let Some(b) = border else {
         return area;
@@ -600,6 +696,22 @@ pub fn inset_for_border(area: Rect, border: Option<Border>) -> Rect {
         .saturating_sub(left_pad)
         .saturating_sub(right_pad);
     Rect::new(area.top + top_pad, area.left + left_pad, w, h)
+}
+
+/// Inner area after subtracting both `chrome.border` reservations and
+/// `chrome.padding` (uniform on all four sides). Returns `area` unchanged
+/// when both are zero.
+pub fn inset_for_chrome(area: Rect, chrome: &Chrome) -> Rect {
+    let bordered = inset_for_border(area, chrome.border);
+    let p = chrome.padding;
+    if p == 0 {
+        return bordered;
+    }
+    let top = bordered.top + p;
+    let left = bordered.left + p;
+    let w = bordered.width.saturating_sub(p).saturating_sub(p);
+    let h = bordered.height.saturating_sub(p).saturating_sub(p);
+    Rect::new(top, left, w, h)
 }
 
 /// Paint a container's border and title into `grid` at `area`.
@@ -732,8 +844,8 @@ fn resolve_node(
     out: &mut HashMap<PaintId, Rect>,
 ) {
     match node {
-        LayoutTree::Leaf { id, chrome } => {
-            out.insert(*id, inset_for_border(area, chrome.border));
+        LayoutTree::Leaf { id, chrome, .. } => {
+            out.insert(*id, inset_for_chrome(area, chrome));
         }
         LayoutTree::Vbox { items, chrome } => {
             resolve_box(items, chrome, area, true, sizer, out);
@@ -754,7 +866,7 @@ pub fn layout_box_children(
     vertical: bool,
     sizer: &dyn LeafSizer,
 ) -> (Rect, Vec<Rect>) {
-    let inner = inset_for_border(area, chrome.border);
+    let inner = inset_for_chrome(area, chrome);
     let total_gap = chrome
         .gap
         .saturating_mul(items.len().saturating_sub(1) as u16);

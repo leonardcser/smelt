@@ -7,15 +7,20 @@
 ---@class smelt.overlay.layout
 local overlay_layout = {}
 
---- Horizontal container. `items` is an array of `{ child_layout, width = <constraint>, collapse_when_empty = bool? }`. `opts` accepts `border`, `title`, `gap`.
+--- Horizontal container. `items` is an array of `{ child_layout, width = <constraint>, collapse_when_empty = bool? }`. `opts` accepts `border`, `title`, `gap`, `padding` (uniform inner inset on all sides, inside any border).
 ---@type fun(items: table, opts: table?): smelt.overlay.layout
 overlay_layout.hbox = nil
 
---- Wrap a Win handle or paint id into a leaf node. `opts` accepts `border`, `title`, `collapse_when_empty` (force the slot to zero size when the wrapped window's buffer is empty).
+--- Wrap a Win handle or paint id into a leaf node. `opts` accepts `border`, `title`, `collapse_when_empty` (force the slot to zero size when the wrapped window's buffer is empty), `measure` (a `{w, h}` table for a static natural size or a `smelt.overlay.layout.measure(...)` handle for one the plugin can live-update).
+---@see smelt.overlay.layout.measure
 ---@type fun(win_or_paint: any, opts: table?): smelt.overlay.layout
 overlay_layout.leaf = nil
 
---- Vertical container. `items` is an array of `{ child_layout, height = <constraint>, collapse_when_empty = bool? }`. `opts` accepts `border`, `title`, `gap` (cells between children).
+--- Construct a shareable natural-size handle for use with `layout.leaf(opts.measure = ...)`. Initial size is `(w, h)` (default `(0, 0)`); update at any time via `handle:set(w, h)` to drive a live overlay resize on the next frame. Read current size via `handle:get()`.
+---@type fun(w: integer?, h: integer?): smelt.overlay.layout.Measure
+overlay_layout.measure = nil
+
+--- Vertical container. `items` is an array of `{ child_layout, height = <constraint>, collapse_when_empty = bool? }`. `opts` accepts `border`, `title`, `gap` (cells between children), `padding` (uniform inner inset on all sides, inside any border).
 ---@type fun(items: table, opts: table?): smelt.overlay.layout
 overlay_layout.vbox = nil
 
