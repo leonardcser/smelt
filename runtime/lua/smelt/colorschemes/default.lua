@@ -37,7 +37,7 @@ return {
   -- Background fills, light/dark aware.
   SmeltStatusBg       = bg({ ansi = 233 }),   -- always dark; cmdline / status
   SmeltUserBg         = bg(dl(236, 254)),
-  SmeltScrollPillBg   = bg(dl(236, 254)),
+  SmeltScrollPillBg   = bg(dl(234, 250)),
   SmeltCodeBlockBg    = bg(dl(233, 255)),
   SmeltBar            = bg(dl(237, 252)),
   SmeltSelection      = bg(dl(238, 189)),

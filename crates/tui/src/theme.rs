@@ -623,7 +623,7 @@ fn baked_default_spec() -> ThemeSpec {
     // Background fills. `dl(dark, light)` carries the per-mode branch.
     groups.insert("SmeltStatusBg".into(), bg(ansi(233)));
     groups.insert("SmeltUserBg".into(), bg(dl(236, 254)));
-    groups.insert("SmeltScrollPillBg".into(), bg(dl(236, 254)));
+    groups.insert("SmeltScrollPillBg".into(), bg(dl(234, 250)));
     groups.insert("SmeltCodeBlockBg".into(), bg(dl(233, 255)));
     groups.insert("SmeltBar".into(), bg(dl(237, 252)));
     groups.insert("SmeltSelection".into(), bg(dl(238, 189)));

@@ -26,7 +26,7 @@ local function compose()
   local working = snap.working or {}
   local items = {}
 
-  local pill_bg = working.compacting and COMPACTING_BG or theme.slug_bg
+  local pill_bg = working.compacting and COMPACTING_BG or theme.slug_bg or theme.accent_fg
   local live = working.animating
   local label
   if live then
