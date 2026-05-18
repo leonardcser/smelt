@@ -7,8 +7,8 @@
 ---@class smelt.paint
 local paint = {}
 
---- Register `func` as a paint callback and return a stable paint id usable anywhere a window id is accepted (overlay item `win`, layout leaves). The callback fires per frame the leaf is visible with a slice + context table.
----@type fun(func: fun(arg1: smelt.paint.Slice, arg2: table)): integer
+--- Register `func` as a paint callback and return a stable paint id usable anywhere a window id is accepted (overlay item `win`, layout leaves). The callback fires per frame the leaf is visible with a slice + context table. `opts.name` opts the slot into hot-reload survival: re-registering with the same name keeps the paint id stable and atomically swaps the callback, so surviving overlays/layouts referencing the id keep painting with the new code.
+---@type fun(func: fun(arg1: smelt.paint.Slice, arg2: table), opts: table?): integer
 paint.register = nil
 
 --- Drop a previously registered paint callback by `id`. The associated Lua handle is freed; subsequent paints of that id no-op.

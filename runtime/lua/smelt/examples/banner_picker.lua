@@ -13,12 +13,30 @@
 -- pixel size), one static for the hint row. The layout's natural size feeds
 -- the overlay's rect every frame, so cycling resizes smoothly with no
 -- close+reopen churn.
+--
+-- Hot-reload survival: variant / loop / frame / is_open live in
+-- `smelt.state("smelt.banner_picker")`, which outlives `/reload`. The
+-- overlay, window, buffer, and paint slot all carry `name = "..."` so
+-- their backing structures survive reload — the closures get atomically
+-- swapped to the freshly-loaded versions. On every Lua-context bring-up
+-- the bottom of this file checks `persist().is_open` and re-opens the
+-- picker if it was open at /reload time, so editing this file refreshes
+-- the sprites without closing the picker.
 
 local banner = require("smelt.banner")
 
 local M = {}
 
-local PERSIST = { variant_idx = 1, looping = false, frame = 0 }
+-- Lazy-defaulted accessor for reload-surviving state.
+local function persist()
+  local s = smelt.state("smelt.banner_picker")
+  if s.variant_idx == nil then s.variant_idx = 1 end
+  if s.looping     == nil then s.looping     = false end
+  if s.frame       == nil then s.frame       = 0 end
+  if s.is_open     == nil then s.is_open     = false end
+  return s
+end
+
 local STATE = nil
 
 local LABELS = {
@@ -91,7 +109,7 @@ end
 
 local function paint(slice, _ctx)
   if not STATE then return end
-  local w, h, paint_fn = variant_info(PERSIST.variant_idx, PERSIST.frame)
+  local w, h, paint_fn = variant_info(persist().variant_idx, persist().frame)
   local sw = slice:width()
   local sh = slice:height()
   local r0 = math.max(0, math.floor((sh - h) / 2))
@@ -101,7 +119,7 @@ end
 
 local function update_measure()
   if not STATE then return end
-  local w, h = variant_info(PERSIST.variant_idx, PERSIST.frame)
+  local w, h = variant_info(persist().variant_idx, persist().frame)
   STATE.measure:set(w, h)
 end
 
@@ -112,11 +130,12 @@ local function close()
   if STATE.win then STATE.win:close() end
   if STATE.overlay then STATE.overlay:close() end
   STATE = nil
+  persist().is_open = false
 end
 
 local function cycle(delta)
-  PERSIST.variant_idx = ((PERSIST.variant_idx - 1 + delta) % #LABELS) + 1
-  PERSIST.frame = 0
+  persist().variant_idx = ((persist().variant_idx - 1 + delta) % #LABELS) + 1
+  persist().frame = 0
   update_measure()
 end
 
@@ -124,25 +143,28 @@ local function open()
   if STATE then return end
   STATE = {}
 
-  local w, h = variant_info(PERSIST.variant_idx, PERSIST.frame)
+  local w, h = variant_info(persist().variant_idx, persist().frame)
   STATE.measure = smelt.overlay.layout.measure(w, h)
 
-  STATE.buf = smelt.buf.new()
+  STATE.buf = smelt.buf.new({ name = "smelt.banner_picker.hint.buf" })
   STATE.buf:lines({ HINT })
-  STATE.win = smelt.win.new(STATE.buf, { focusable = true })
+  STATE.win = smelt.win.new(STATE.buf, {
+    name = "smelt.banner_picker.hint.win",
+    focusable = true,
+  })
 
-  STATE.paint_id = smelt.paint.register(paint)
+  STATE.paint_id = smelt.paint.register(paint, { name = "smelt.banner_picker.paint" })
 
   STATE.win:key("<Tab>", function() cycle(1) end)
   STATE.win:key("<S-Tab>", function() cycle(-1) end)
-  STATE.win:key("<Space>", function() PERSIST.looping = not PERSIST.looping end)
+  STATE.win:key("<Space>", function() persist().looping = not persist().looping end)
   STATE.win:key("<Esc>", close)
   STATE.win:key("<C-c>", close)
 
   STATE.overlay = smelt.overlay.new({
     name = "smelt.banner_picker",
     title = {
-      { text = " /banner ", fg = "yellow", bold = true },
+      { text = " /banner ", dim = true, bold = true },
     },
     anchor = "center",
     border = { all = "Comment" },
@@ -163,8 +185,10 @@ local function open()
   STATE.win:focus()
 
   STATE.timer = smelt.timer.every(TICK_MS, function()
-    if PERSIST.looping then PERSIST.frame = PERSIST.frame + 1 end
+    if persist().looping then persist().frame = persist().frame + 1 end
   end)
+
+  persist().is_open = true
 end
 
 local function toggle()
@@ -172,5 +196,12 @@ local function toggle()
 end
 
 smelt.cmd.register("banner", toggle, { desc = "logo variant picker (demo)" })
+
+-- Module body re-runs with the host pointer live on every Lua-context
+-- bring-up (cold start and `/reload`). On the first cold-start
+-- `persist().is_open` is false so this is a no-op; after `/reload` it
+-- re-opens the picker on top of the surviving named overlay / paint
+-- slot so the sprite edit shows up in place.
+if persist().is_open then open() end
 
 return M

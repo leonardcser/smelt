@@ -9,12 +9,12 @@ Register Lua callbacks against custom paint regions. UiHost-only.
 ## `smelt.paint.register`
 
 ```lua
-fun(func: fun(arg1: smelt.paint.Slice, arg2: table)): integer
+fun(func: fun(arg1: smelt.paint.Slice, arg2: table), opts: table?): integer
 ```
 
 Types: [`smelt.paint.Slice`](types.md#smeltpaintslice)
 
-Register `func` as a paint callback and return a stable paint id usable anywhere a window id is accepted (overlay item `win`, layout leaves). The callback fires per frame the leaf is visible with a slice + context table.
+Register `func` as a paint callback and return a stable paint id usable anywhere a window id is accepted (overlay item `win`, layout leaves). The callback fires per frame the leaf is visible with a slice + context table. `opts.name` opts the slot into hot-reload survival: re-registering with the same name keeps the paint id stable and atomically swaps the callback, so surviving overlays/layouts referencing the id keep painting with the new code.
 
 ## `smelt.paint.unregister`
 

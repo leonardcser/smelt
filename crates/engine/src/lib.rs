@@ -128,6 +128,33 @@ pub struct EngineConfig {
     pub clock: Arc<dyn clock::Clock>,
 }
 
+impl EngineConfig {
+    /// Construct an empty config the engine task can spawn against
+    /// before the TUI has run plugin loading. The command loop spins
+    /// safely on this — turns can't start (the user hasn't reached the
+    /// main loop yet), so the placeholder is overwritten by a
+    /// [`UiCommand::Configure`] sent immediately after `init.lua` has
+    /// resolved.
+    pub fn placeholder(cwd: PathBuf, clock: Arc<dyn clock::Clock>) -> Self {
+        Self {
+            api: ApiConfig {
+                base: String::new(),
+                key: String::new(),
+                key_env: String::new(),
+                provider_type: String::new(),
+                model_config: ModelConfig::default(),
+            },
+            model: String::new(),
+            instructions: None,
+            system_prompt_override: None,
+            cwd,
+            skill_section: None,
+            redact_secrets: false,
+            clock,
+        }
+    }
+}
+
 pub struct EngineHandle {
     cmd_tx: mpsc::UnboundedSender<UiCommand>,
     event_tx: mpsc::UnboundedSender<EngineEvent>,

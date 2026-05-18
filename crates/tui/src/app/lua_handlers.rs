@@ -14,32 +14,60 @@ impl TuiApp {
         }
     }
 
-    /// `/reload` entry point. Three-phase:
+    /// `/reload` entry point. Delegates to [`Self::bring_up_lua`] —
+    /// the same pipeline that runs once on cold start from
+    /// `TuiApp::run` — then surfaces the outcome as a notification.
     ///
+    /// Phases (shared with cold start):
     /// 1. [`Self::clear_tui_for_reload`] wipes TUI-side caches that hold
-    ///    Lua handles or reference resources reload will invalidate.
-    /// 2. [`LuaRuntime::reload`] (via its own `clear_for_reload`) wipes
-    ///    every `LuaShared` registry, then re-runs bootstrap → autoload
-    ///    → init.lua → plugins → state sweep.
+    ///    Lua handles or reference resources the reload will invalidate.
+    /// 2. [`LuaRuntime::reload`] wipes every `LuaShared` registry then
+    ///    re-runs bootstrap → autoload → init.lua → plugins → state sweep.
+    ///    Module bodies run with the host pointer live.
     /// 3. [`Self::refresh_agent_inputs`] re-reads AGENTS.md, rebuilds the
-    ///    [`engine::SkillLoader`], re-reads the `--system-prompt` file when
-    ///    present, then ships the refreshed bundle to the engine task via
+    ///    [`engine::SkillLoader`], re-reads `--system-prompt` when present,
+    ///    ships the refreshed bundle via
     ///    [`protocol::UiCommand::ReloadAgentConfig`].
+    /// 4. `smelt.lifecycle.on("ready", fn)` hooks drain with
+    ///    `ctx = { kind = "reload" }` so hooks that gate on launch-only
+    ///    behavior early-return.
     ///
-    /// Rust-owned UI state (overlays, windows, buffers) is left in place
-    /// when named — plugins re-attach via `smelt.state` and the
+    /// Rust-owned UI state (named overlays, wins, bufs, paint slots)
+    /// survives — plugins re-attach via `smelt.state` and the
     /// `opts.name` survival path.
     pub(crate) fn reload_lua(&mut self) {
+        let err = self.bring_up_lua("reload");
+        match err {
+            Some(e) => self.notify_error(format!("lua reload: {e}")),
+            None => self.notify("lua reloaded".into()),
+        }
+    }
+
+    /// Bring up (or rebuild) the Lua context. Single pipeline shared by
+    /// cold start (`kind = "launch"`) and `/reload` (`kind = "reload"`).
+    /// Plugin module bodies always run with the host pointer live and
+    /// `lifecycle.on("ready")` hooks fire on every bring-up so plugins
+    /// can rehydrate from `smelt.state` once per Lua-context init.
+    ///
+    /// Must be called inside an `install_app_ptr` scope. Returns the
+    /// Lua load error (if any) so the caller can render it however
+    /// makes sense for the phase.
+    pub(crate) fn bring_up_lua(&mut self, kind: &'static str) -> Option<String> {
         self.clear_tui_for_reload();
         let cwd = std::env::current_dir().ok();
         let err = self.lua.reload(cwd.as_deref());
         self.input.command_arg_sources = self.lua.list_command_args();
         self.refresh_agent_inputs();
         self.reconcile_mcp_servers();
-        match err {
-            Some(e) => self.notify_error(format!("lua reload: {e}")),
-            None => self.notify("lua reloaded".into()),
+        let hook_errors = self.lua.drain_lifecycle_hooks("ready", move |lua| {
+            let t = lua.create_table()?;
+            t.set("kind", kind)?;
+            Ok::<mlua::Value, mlua::Error>(mlua::Value::Table(t))
+        });
+        for he in hook_errors {
+            self.notify_error(he);
         }
+        err
     }
 
     /// Re-read filesystem-backed inputs that feed the agent's system prompt

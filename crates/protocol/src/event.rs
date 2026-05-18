@@ -413,6 +413,22 @@ pub enum UiCommand {
         system_prompt_override: Option<String>,
     },
 
+    /// Bulk reconfigure every mutable `EngineConfig` field in one shot.
+    /// Used by the cold-start path so the engine task can spawn with a
+    /// placeholder config and adopt the real one once plugin loading has
+    /// resolved the user's `init.lua`. Applied between turns; in-flight
+    /// turns continue against the snapshot they captured at start.
+    Configure {
+        api_base: String,
+        api_key: String,
+        provider_type: String,
+        model: String,
+        instructions: Option<String>,
+        skill_section: Option<String>,
+        system_prompt_override: Option<String>,
+        redact_secrets: bool,
+    },
+
     /// One-shot LLM call initiated by Lua. The engine spawns a
     /// fire-and-forget request and returns the response as
     /// `EngineAskResponse`. `model` overrides the primary model when

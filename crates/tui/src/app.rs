@@ -877,17 +877,20 @@ impl TuiApp {
             tokio::signal::unix::signal(tokio::signal::unix::SignalKind::window_change())
                 .expect("install SIGWINCH listener");
 
-        // Drain `smelt.lifecycle.on("ready", fn)` hooks. Plugins use these
-        // to react to their own CLI flags (declared via
-        // `smelt.cli.register_flag` in `early/*.lua`) — e.g. `/resume` opens
-        // its picker here rather than arriving through `initial_message`.
-        let errors = crate::lua::with_app_ptr(self, |app| {
-            app.lua.drain_lifecycle_hooks("ready", |lua| {
-                Ok::<mlua::Value, mlua::Error>(mlua::Value::Table(lua.create_table()?))
-            })
-        });
-        for err in errors {
-            self.notify_error(err);
+        // Cold-start the Lua context through the same pipeline `/reload`
+        // uses. The pre-TUI plugin load that already happened in `main`
+        // extracted engine config and registered slash commands, but its
+        // module bodies ran without the host pointer — any code that
+        // touches `smelt.win`, `smelt.overlay`, `smelt.paint`,
+        // `smelt.cell:subscribe`, etc. needed an `on_ready` hook to
+        // defer. By re-running plugins here inside `install_app_ptr`,
+        // module bodies see the host live on every Lua-context init
+        // (cold start AND `/reload`), so plain `if persist().is_open
+        // then open() end` works in both places. `lifecycle.on("ready")`
+        // hooks drain at the end with `ctx.kind = "launch"`.
+        let load_err = crate::lua::with_app_ptr(self, |app| app.bring_up_lua("launch"));
+        if let Some(err) = load_err {
+            self.notify_error(format!("lua init: {err}"));
         }
 
         // Auto-submit initial message if provided (e.g. `agent "fix the bug"`).

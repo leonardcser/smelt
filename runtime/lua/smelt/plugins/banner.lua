@@ -102,11 +102,13 @@ local function refresh()
   if #msgs == 0 then open_splash() else teardown() end
 end
 
--- Subscriptions must register inside `on_ready`: `smelt.cell:subscribe`
--- needs the host pointer installed, which only happens after the TUI is
--- live. From this hook onward `session_started` covers /reset, /fork,
--- /resume; `turn_start` covers the first agent dispatch; `history` covers
--- direct message-list mutations (rewind, compaction, load).
+-- Subscriptions register inside `on_ready`: it fires once per Lua-context
+-- bring-up (cold start AND `/reload`) with the host pointer live, which
+-- `smelt.cell:subscribe` needs. The `lifecycle` registry is wiped between
+-- bring-ups so re-subscribing here doesn't stack. From this hook onward
+-- `session_started` covers /reset, /fork, /resume; `turn_start` covers
+-- the first agent dispatch; `history` covers direct message-list
+-- mutations (rewind, compaction, load).
 smelt.lifecycle.on_ready(function()
   smelt.cell("session_started"):subscribe(refresh)
   smelt.cell("turn_start"):subscribe(teardown)

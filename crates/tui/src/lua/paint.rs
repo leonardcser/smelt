@@ -71,7 +71,11 @@ impl PaintRegistry {
     /// surviving overlays / layouts that reference the id keep working
     /// across hot reload. Returns the stable id and the previous handle
     /// (when present) so the caller can release the old callback.
-    pub(crate) fn register_named(&mut self, name: String, handle_id: u64) -> (PaintId, Option<u64>) {
+    pub(crate) fn register_named(
+        &mut self,
+        name: String,
+        handle_id: u64,
+    ) -> (PaintId, Option<u64>) {
         if let Some(&existing) = self.named.get(&name) {
             let old = self.handles.insert(existing, handle_id);
             return (existing, old);
@@ -333,8 +337,15 @@ mod tests {
         assert!(old1.is_none());
         assert_eq!(reg.lookup(id1), Some(11));
         let (id2, old2) = reg.register_named("plugin.banner".into(), 22);
-        assert_eq!(id1, id2, "named slot must keep stable id across re-register");
-        assert_eq!(old2, Some(11), "previous handle must be returned for release");
+        assert_eq!(
+            id1, id2,
+            "named slot must keep stable id across re-register"
+        );
+        assert_eq!(
+            old2,
+            Some(11),
+            "previous handle must be returned for release"
+        );
         assert_eq!(reg.lookup(id2), Some(22));
     }
 
@@ -357,6 +368,9 @@ mod tests {
         assert_eq!(reg.unregister(id), Some(7));
         let (id2, old) = reg.register_named("plugin.x".into(), 8);
         assert!(old.is_none(), "name binding must be cleared on unregister");
-        assert_ne!(id, id2, "re-registering after unregister allocates fresh id");
+        assert_ne!(
+            id, id2,
+            "re-registering after unregister allocates fresh id"
+        );
     }
 }

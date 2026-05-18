@@ -4,7 +4,7 @@
 
 **Tier:** `Host` — Available in every runtime, including headless mode.
 
-Once-per-launch hooks keyed by event name. `on(event, fn)` is the general form; `on_ready` / `on_shutdown` are shorthands for the two emitted events. Each callback receives an event-specific `ctx` table. Each hook fires at most once per launch and is dropped from the registry on fire.
+Host-phase hooks keyed by event name. `on(event, fn)` is the general form; `on_ready` / `on_shutdown` are shorthands. `on_ready` fires on every Lua-context bring-up (cold start AND `/reload`) with `ctx = { kind = "launch" | "reload" }`. `on_shutdown` fires once on clean process exit. The registry is wiped between bring-ups — re-register the hook in module body if you want it to fire every time. Each `on*` returns an `off()` that unregisters the hook before it fires.
 
 ## `smelt.lifecycle.on`
 
@@ -12,7 +12,7 @@ Once-per-launch hooks keyed by event name. `on(event, fn)` is the general form; 
 fun(event: string, fn: function): fun(): boolean
 ```
 
-Queue `fn(ctx)` for the lifecycle event named `event`. Multiple hooks per event fire in registration order. Emitted events: `"ready"` (after bootstrap + argv parse, before the main loop; `ctx` is an empty table) and `"shutdown"` (after the TUI tears down, before process exit; `ctx = { session_id, has_messages }`). Returns an `off()` that unregisters the hook before it fires; calling `off()` after the hook has already fired is a no-op returning `false`.
+Queue `fn(ctx)` for the lifecycle event named `event`. Multiple hooks per event fire in registration order. Emitted events: `"ready"` (every Lua-context bring-up — cold start and after each `/reload`; `ctx = { kind = "launch" | "reload" }`) and `"shutdown"` (after the TUI tears down, before process exit; `ctx = { session_id, has_messages }`). Returns an `off()` that unregisters the hook before it fires; calling `off()` after the hook has already fired is a no-op returning `false`.
 
 ## `smelt.lifecycle.on_ready`
 
@@ -20,7 +20,7 @@ Queue `fn(ctx)` for the lifecycle event named `event`. Multiple hooks per event 
 fun(fn: function): fun(): boolean
 ```
 
-Shorthand for `lifecycle.on("ready", fn)`. The host calls `fn(ctx)` once, after Lua bootstrap and CLI parsing finish and before the main loop starts. `ctx` is currently an empty table — reserved for forward compatibility. Use this to wire a CLI flag declared via `smelt.cli.register_flag` to a startup action. Returns an `off()` that unregisters the hook before `ready` fires.
+Shorthand for `lifecycle.on("ready", fn)`. The host calls `fn(ctx)` on every Lua-context bring-up: once on cold start (`ctx.kind = "launch"`) and once after every `/reload` (`ctx.kind = "reload"`). The full UiHost-tier surface is live in both cases. The registry is wiped between bring-ups so re-registering this hook at module top is the correct way to make it fire every cycle. For CLI-flag-driven startup actions that should NOT re-fire on `/reload`, early-return when `ctx.kind ~= "launch"`. For "rehydrate from `smelt.state` if I was open" patterns, prefer plain module-body code over this hook — module body also re-runs on every bring-up. Returns an `off()` that unregisters the hook before it fires.
 
 ## `smelt.lifecycle.on_shutdown`
 

@@ -98,7 +98,11 @@ end
 
 -- Wire the `--resume` CLI flag (declared in `smelt/early/resume.lua`) to a
 -- startup action: nil = no flag, "" = open picker, else = load that session.
-smelt.lifecycle.on_ready(function()
+-- Gated on `ctx.kind == "launch"` because the module body re-runs (and
+-- "ready" hooks re-drain) on every `/reload`; without the gate, a reload
+-- would re-open the picker every time.
+smelt.lifecycle.on_ready(function(ctx)
+  if ctx.kind ~= "launch" then return end
   local v = smelt.cli.get("resume")
   if v == nil then return end
   if v == "" then

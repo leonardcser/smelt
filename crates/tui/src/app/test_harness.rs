@@ -2025,6 +2025,132 @@ mod tests {
         );
     }
 
+    /// Named paint slots (`smelt.paint.register(fn, { name = "..." })`)
+    /// must keep the same `PaintId` across `/reload` so surviving
+    /// overlays / layouts that reference the id keep painting with the
+    /// fresh closure. Anonymous slots get reaped.
+    #[test]
+    fn reload_lua_preserves_named_paint_slot() {
+        let tmp = tempfile::tempdir().unwrap();
+        let init = tmp.path().join("init.lua");
+        // Module-body code: capture the paint id in a state slot so we
+        // can read it back from Rust after the reload cycle.
+        std::fs::write(
+            &init,
+            r#"
+            local state = smelt.state("paint_id_probe")
+            local function painter(_slice, _ctx) end
+            state.named  = smelt.paint.register(painter, { name = "probe.named" })
+            state.anon   = smelt.paint.register(painter)
+            "#,
+        )
+        .unwrap();
+
+        let mut app = TestApp::builder().with_init_lua(&init).build();
+
+        let read_state_int = |rt: &crate::lua::LuaRuntime, key: &str| -> Option<u64> {
+            rt.lua
+                .load(format!(
+                    "local s = __smelt_state__['paint_id_probe']; return s and s.{key} or nil"
+                ))
+                .eval::<Option<i64>>()
+                .ok()
+                .flatten()
+                .map(|v| v as u64)
+        };
+
+        let pre_named = read_state_int(&app.app.lua, "named").expect("named pre id");
+        let pre_anon = read_state_int(&app.app.lua, "anon").expect("anon pre id");
+        assert!(app
+            .app
+            .paint_registry
+            .contains(crate::smelt_term::layout::PaintId(pre_named)));
+        assert!(app
+            .app
+            .paint_registry
+            .contains(crate::smelt_term::layout::PaintId(pre_anon)));
+
+        {
+            let _g = crate::lua::install_app_ptr(&mut app.app);
+            app.app.reload_lua();
+        }
+
+        let post_named = read_state_int(&app.app.lua, "named").expect("named post id");
+        let post_anon = read_state_int(&app.app.lua, "anon").expect("anon post id");
+        assert_eq!(
+            pre_named, post_named,
+            "named paint slot must keep stable PaintId across reload"
+        );
+        assert_ne!(
+            pre_anon, post_anon,
+            "anonymous paint slot must allocate a fresh id on reload"
+        );
+        assert!(
+            !app.app
+                .paint_registry
+                .contains(crate::smelt_term::layout::PaintId(pre_anon)),
+            "old anonymous PaintId must be reaped"
+        );
+        assert!(app
+            .app
+            .paint_registry
+            .contains(crate::smelt_term::layout::PaintId(post_named)));
+        assert!(app
+            .app
+            .paint_registry
+            .contains(crate::smelt_term::layout::PaintId(post_anon)));
+    }
+
+    /// `lifecycle.on("ready", fn)` hooks must re-drain on `/reload` so
+    /// plugins that subscribe to cells / open splash overlays / etc.
+    /// re-wire themselves on every Lua-context bring-up. The fire
+    /// passes `ctx = { kind = "launch" | "reload" }`.
+    #[test]
+    fn reload_lua_drains_ready_hooks_with_kind_reload() {
+        let tmp = tempfile::tempdir().unwrap();
+        let init = tmp.path().join("init.lua");
+        std::fs::write(
+            &init,
+            r#"
+            local state = smelt.state("ready_kind_probe")
+            state.fires = (state.fires or 0)
+            state.last_kind = nil
+            smelt.lifecycle.on_ready(function(ctx)
+                state.fires = state.fires + 1
+                state.last_kind = ctx and ctx.kind or "<nil>"
+            end)
+            "#,
+        )
+        .unwrap();
+
+        let mut app = TestApp::builder().with_init_lua(&init).build();
+        // Cold-start TestApp doesn't run `TuiApp::run`, so the initial
+        // "ready" drain hasn't fired yet — fire it manually to match
+        // the cold-start path.
+        {
+            let _g = crate::lua::install_app_ptr(&mut app.app);
+            let _ = app.app.bring_up_lua("launch");
+        }
+
+        let read = |rt: &crate::lua::LuaRuntime, k: &str| -> String {
+            rt.lua
+                .load(format!(
+                    "return tostring(__smelt_state__['ready_kind_probe'].{k})"
+                ))
+                .eval::<String>()
+                .unwrap()
+        };
+        assert_eq!(read(&app.app.lua, "fires"), "1");
+        assert_eq!(read(&app.app.lua, "last_kind"), "launch");
+
+        {
+            let _g = crate::lua::install_app_ptr(&mut app.app);
+            app.app.reload_lua();
+        }
+        assert_eq!(read(&app.app.lua, "fires"), "2");
+        assert_eq!(read(&app.app.lua, "last_kind"), "reload");
+    }
+
     /// A `smelt.state(...)` slot that the new init.lua no longer
     /// references must be pruned by `smelt.__sweep_state` (called by
     /// `reload()` at the end of the cycle).

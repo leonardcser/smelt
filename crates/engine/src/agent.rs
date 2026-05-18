@@ -131,6 +131,25 @@ pub(crate) async fn engine_task(
                         config.skill_section = skill_section;
                         config.system_prompt_override = system_prompt_override;
                     }
+                    UiCommand::Configure {
+                        api_base,
+                        api_key,
+                        provider_type,
+                        model,
+                        instructions,
+                        skill_section,
+                        system_prompt_override,
+                        redact_secrets,
+                    } => {
+                        config.api.base = api_base;
+                        config.api.key = api_key;
+                        config.api.provider_type = provider_type;
+                        config.model = model;
+                        config.instructions = instructions;
+                        config.skill_section = skill_section;
+                        config.system_prompt_override = system_prompt_override;
+                        config.redact_secrets = redact_secrets;
+                    }
                     _ => {} // Steer, Cancel, etc. only relevant during a turn
                 }
             }
