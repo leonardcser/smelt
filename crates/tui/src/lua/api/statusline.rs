@@ -30,7 +30,17 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
         let s = shared.clone();
         m.fn_(
             "register",
-            "Register a Lua statusline source named `name`. The handler is called once per refresh with the snapshot table and returns segments. `opts.align = \"right\"` makes its segments default to the right strip; later registrations replace earlier ones with the same name. Returns a `Reg` whose `:remove()` drops the source.",
+            "Register a Lua statusline source named `name`. The handler is \
+called once per refresh and returns a single segment table or a list. Each \
+segment is `{ text, style_group?, style?, priority?, align_right?, \
+truncatable?, separated? }`: `style_group` names a theme group whose \
+resolved style applies (e.g. `\"SmeltModePlan\"`); `style` is a \
+`StyleDecl` overlay applied on top. Higher `priority` drops first; \
+`truncatable` shrinks with `…` before being fully dropped; `separated` \
+inserts ` · ` before this segment. `opts.align = \"right\"` makes the \
+source's segments default to the right strip; later registrations \
+replace earlier ones with the same name. Returns a `Reg` whose \
+`:remove()` drops the source.",
             &["name", "handler", "opts"],
             move |lua,
                   (name, handler, opts): (
@@ -86,7 +96,12 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
     }
     m.fn_(
         "snapshot",
-        "Return the full statusline state in one table per refresh: theme colors, working/throbber state, vim mode, agent mode, indicators, and cursor position. Returns an empty table when the app pointer is unavailable.",
+        "Return the statusline state in one table per refresh: \
+`working`/`throbber`, `vim`, `mode`, `permission_pending`, \
+`running_procs`, `running_agents`, `task_label`, `settings`, and \
+`position`. Styles are not projected — name a `style_group` on each \
+segment instead. Returns an empty table when the app pointer is \
+unavailable.",
         &[],
         |lua, ()| -> LuaResult<mlua::Table> {
             match crate::lua::try_with_app(|app| build_snapshot(app, lua)) {
@@ -98,38 +113,14 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
     Ok(())
 }
 
-/// Build the full snapshot the Lua composer consumes once per refresh.
+/// Build the snapshot the Lua composer consumes once per refresh. Carries
+/// raw app state only — style decisions live in `status.lua` via theme
+/// groups (`style_group`), so plugins look colors up by name instead of
+/// receiving a hand-projected palette.
 fn build_snapshot(app: &mut crate::app::TuiApp, lua: &Lua) -> LuaResult<mlua::Table> {
-    use smelt_core::style::Color;
-
     let t = lua.create_table()?;
 
-    // Theme colors as ANSI u8s; nil means fall back to the terminal default.
-    let theme = lua.create_table()?;
-    let theme_ref = app.ui.theme();
-    let fg_of = |group: &str| theme_ref.get(group).fg.and_then(super::color_to_ansi);
-    let bg_of = |group: &str| theme_ref.get(group).bg.and_then(super::color_to_ansi);
-    if let Some(c) = fg_of("SmeltAccent") {
-        theme.set("accent_fg", c)?;
-    }
-    if let Some(c) = fg_of("Comment") {
-        theme.set("muted_fg", c)?;
-    }
-    if let Some(c) = fg_of("SmeltModePlan") {
-        theme.set("plan_fg", c)?;
-    }
-    if let Some(c) = fg_of("SmeltModeApply") {
-        theme.set("apply_fg", c)?;
-    }
-    if let Some(c) = fg_of("SmeltModeYolo") {
-        theme.set("yolo_fg", c)?;
-    }
-    if let Some(c) = bg_of("SmeltSlug") {
-        theme.set("slug_bg", c)?;
-    }
-    t.set("theme", theme)?;
-
-    // Working state + throbber spans (cheaper to project than re-export the state machine).
+    // Working state + throbber spans.
     let working = lua.create_table()?;
     let busy_label = app.busy_stack.top_label();
     let busy_since = app.busy_stack.since();
@@ -142,8 +133,6 @@ fn build_snapshot(app: &mut crate::app::TuiApp, lua: &Lua) -> LuaResult<mlua::Ta
     if let Some(c) = app.working.spinner_char() {
         working.set("spinner_char", c)?;
     }
-    let muted = app.ui.theme().get("Comment").fg.unwrap_or(Color::Reset);
-    let muted_ansi = super::color_to_ansi(muted);
     let throbber_arr = lua.create_table()?;
     let show_tps = app.core.config.settings.show_tps;
     for (i, item) in app
@@ -154,11 +143,7 @@ fn build_snapshot(app: &mut crate::app::TuiApp, lua: &Lua) -> LuaResult<mlua::Ta
     {
         let st = lua.create_table()?;
         st.set("text", item.text.as_str())?;
-        if item.is_muted {
-            if let Some(c) = muted_ansi {
-                st.set("fg", c)?;
-            }
-        }
+        st.set("muted", item.is_muted)?;
         st.set("bold", item.bold)?;
         st.set("dim", item.dim)?;
         st.set("priority", item.priority)?;

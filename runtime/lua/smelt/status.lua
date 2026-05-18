@@ -1,36 +1,23 @@
--- Statusline composer. Registers a `core` source returning segments for the
--- Rust layout engine (priority, truncation, alignment).
+-- Statusline composer. Builds the `core` source's segments each refresh.
+-- Style decisions live in the theme: every segment references a group
+-- via `style_group` so `/theme`, `/color`, and user overrides cascade
+-- without status.lua having to read or project palette colors.
 
 local M = {}
 
-local STATUS_BG = 233
-local PILL_FG = 0
-local COMPACTING_BG = 15
-local VIM_BG = 236
-local VIM_INSERT_FG = 78
-local VIM_VISUAL_FG = 176
-local VIM_NORMAL_FG = 74
-local MODE_BG = 234
-
-local function vim_fg(kind)
-  if kind == "insert" then return VIM_INSERT_FG end
-  if kind == "visual" then return VIM_VISUAL_FG end
-  return VIM_NORMAL_FG
-end
-
 local function compose()
   local snap = smelt.statusline.snapshot()
-  if not snap or not snap.theme then return {} end
+  if not snap then return {} end
 
-  local theme = snap.theme or {}
   local working = snap.working or {}
   local items = {}
 
-  local pill_bg = working.compacting and COMPACTING_BG or theme.slug_bg or theme.accent_fg
+  -- ── Slug / compacting pill ─────────────────────────────────────────
+  local compacting = working.busy_label == "compacting"
   local live = working.animating
   local label
   if live then
-    if working.compacting then
+    if compacting then
       label = "compacting"
     elseif snap.settings and snap.settings.show_slug then
       label = snap.task_label or "working"
@@ -41,80 +28,91 @@ local function compose()
     label = snap.task_label
   end
 
+  -- SmeltSlug carries the pill fg only; the bg defaults to SmeltAccent
+  -- unless `/color` has set an explicit slug bg. Resolved here, not in
+  -- the engine, so the cascade rule stays out of Rust.
+  local slug_extra
+  if not compacting then
+    local slug = smelt.theme.get("SmeltSlug") or {}
+    if not slug.bg then
+      local accent = smelt.theme.get("SmeltAccent") or {}
+      if accent.fg then slug_extra = { bg = accent.fg } end
+    end
+  end
+
+  local pill_group = compacting and "SmeltCompacting" or "SmeltSlug"
   if working.spinner_char then
     table.insert(items, {
       text = " " .. working.spinner_char,
-      fg = PILL_FG,
-      bg = pill_bg,
+      style_group = pill_group,
+      style = slug_extra,
       priority = 0,
     })
   end
   if label then
     table.insert(items, {
       text = " " .. label .. " ",
-      fg = PILL_FG,
-      bg = pill_bg,
+      style_group = pill_group,
+      style = slug_extra,
       priority = 5,
       truncatable = true,
     })
   end
 
+  -- ── Vim mode pill ──────────────────────────────────────────────────
   if snap.vim and snap.vim.enabled then
+    local vim_group
+    if snap.vim.kind == "insert" then vim_group = "SmeltVimInsert"
+    elseif snap.vim.kind == "visual" then vim_group = "SmeltVimVisual"
+    else vim_group = "SmeltVimNormal" end
     table.insert(items, {
       text = " " .. (snap.vim.label or "NORMAL") .. " ",
-      fg = vim_fg(snap.vim.kind),
-      bg = VIM_BG,
+      style_group = vim_group,
       priority = 3,
     })
   end
 
+  -- ── Agent mode pill ────────────────────────────────────────────────
   local mode = snap.mode
   if mode then
-    local mode_fg
-    if mode.name == "plan" then
-      mode_fg = theme.plan_fg
-    elseif mode.name == "apply" then
-      mode_fg = theme.apply_fg
-    elseif mode.name == "yolo" then
-      mode_fg = theme.yolo_fg
-    else
-      mode_fg = theme.muted_fg
-    end
+    local mode_group
+    if mode.name == "plan" then mode_group = "SmeltModePlan"
+    elseif mode.name == "apply" then mode_group = "SmeltModeApply"
+    elseif mode.name == "yolo" then mode_group = "SmeltModeYolo"
+    elseif mode.name == "exec" then mode_group = "SmeltModeExec"
+    else mode_group = "SmeltModeDefault" end
     local icon = smelt.mode.icon and smelt.mode.icon(mode.name) or ""
     table.insert(items, {
       text = " " .. icon .. (mode.name or "") .. " ",
-      fg = mode_fg,
-      bg = MODE_BG,
+      style_group = mode_group,
       priority = 1,
     })
   end
 
-  -- Throbber: skip the first span when animating (slug pill already shows the spinner).
+  -- ── Throbber: skip the first span when animating (slug pill already shows the spinner). ──
   local throb = working.throbber or {}
   local skip = (working.animating and #throb > 0) and 1 or 0
   for i = skip + 1, #throb do
     local span = throb[i]
     local prio = span.priority or 0
     if prio == 0 then prio = 4
-    elseif prio == 3 then prio = 6
-    end
+    elseif prio == 3 then prio = 6 end
     table.insert(items, {
       text = span.text,
-      fg = span.fg,
-      bg = STATUS_BG,
-      bold = span.bold,
+      style_group = span.muted and "Comment" or nil,
+      style = { bold = span.bold, dim = span.dim },
       priority = prio,
     })
   end
 
+  -- ── Right-strip indicators ────────────────────────────────────────
   if snap.permission_pending then
     table.insert(items, {
       text = "permission pending",
-      fg = theme.accent_fg,
-      bg = STATUS_BG,
-      bold = true,
+      style_group = "SmeltAccent",
+      style = { bold = true },
       priority = 2,
-      group = true,
+      separated = true,
     })
   end
 
@@ -122,28 +120,25 @@ local function compose()
   if procs > 0 then
     table.insert(items, {
       text = procs == 1 and "1 proc" or (procs .. " procs"),
-      fg = theme.accent_fg,
-      bg = STATUS_BG,
+      style_group = "SmeltAccent",
       priority = 2,
-      group = true,
+      separated = true,
     })
   end
   local agents = snap.running_agents or 0
   if agents > 0 then
     table.insert(items, {
       text = agents == 1 and "1 agent" or (agents .. " agents"),
-      fg = theme.agent_fg,
-      bg = STATUS_BG,
+      style_group = "SmeltAccent",
       priority = 2,
-      group = true,
+      separated = true,
     })
   end
 
   if snap.position and snap.position.text then
     table.insert(items, {
       text = snap.position.text,
-      fg = theme.muted_fg,
-      bg = STATUS_BG,
+      style_group = "Comment",
       priority = 3,
       align_right = true,
     })

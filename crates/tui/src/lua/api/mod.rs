@@ -22,7 +22,7 @@ mod settings;
 mod spinner;
 mod statusline;
 mod text;
-mod theme;
+pub(crate) mod theme;
 mod transcript;
 pub(crate) mod vim;
 pub(crate) mod win;

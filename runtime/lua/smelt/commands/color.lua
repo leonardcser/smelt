@@ -8,7 +8,16 @@ for i, p in ipairs(presets) do
 end
 
 local function set_slug(ansi)
-  smelt.theme.set("SmeltSlug", { bg = { ansi = ansi } })
+  local current = smelt.theme.get("SmeltSlug") or {}
+  smelt.theme.set("SmeltSlug", {
+    fg = current.fg,
+    bg = ansi and { ansi = ansi } or nil,
+    bold = current.bold,
+    italic = current.italic,
+    dim = current.dim,
+    underline = current.underline,
+    crossedout = current.crossedout,
+  })
 end
 
 local original_ansi
@@ -28,5 +37,5 @@ smelt.cmd.picker("color", {
   prepare    = function() original_ansi = ((smelt.theme.get("SmeltSlug") or {}).bg or {}).ansi end,
   on_select  = function(item) if item.ansi_color then set_slug(item.ansi_color) end end,
   on_enter   = function(item) smelt.cmd.run("/color " .. item.label) end,
-  on_dismiss = function() if original_ansi then set_slug(original_ansi) end end,
+  on_dismiss = function() set_slug(original_ansi) end,
 })

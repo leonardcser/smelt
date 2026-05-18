@@ -398,8 +398,11 @@ impl LuaRuntime {
     /// Call every registered statusline source, returning combined items and per-source errors.
     /// Each source returns a single item or a list; empty-text items are skipped.
     /// The second tuple element is `(source_name, error_or_none)` per source.
+    /// Item styles are resolved against `theme` at parse time so `style_group`
+    /// references track the live theme without per-frame Lua lookups.
     pub(crate) fn tick_statusline(
         &self,
+        theme: &smelt_core::theme::Theme,
     ) -> (
         Vec<crate::content::status::StatusItem>,
         Vec<(String, Option<String>)>,
@@ -409,6 +412,7 @@ impl LuaRuntime {
         };
         let mut items = Vec::new();
         let mut tick_errors: Vec<(String, Option<String>)> = Vec::new();
+        let is_light = theme.is_light();
         for (name, source) in sources.iter() {
             let Ok(func) = self
                 .core
@@ -423,7 +427,13 @@ impl LuaRuntime {
                     tick_errors.push((name.clone(), None));
                 }
                 Ok(mlua::Value::Table(t)) => {
-                    collect_statusline_items(&t, source.default_align_right, &mut items);
+                    collect_statusline_items(
+                        &t,
+                        source.default_align_right,
+                        theme,
+                        is_light,
+                        &mut items,
+                    );
                     tick_errors.push((name.clone(), None));
                 }
                 Ok(_) => {
@@ -493,27 +503,26 @@ impl LuaRuntime {
     }
 }
 
-fn ansi_color_from_lua(table: &mlua::Table, key: &str) -> Option<smelt_core::style::Color> {
-    let val: u8 = table.get(key).ok()?;
-    Some(smelt_core::style::Color::AnsiValue(val))
-}
-
 /// Parse a single-item or list-of-items Lua table into `StatusItem`s, appending to `out`.
+/// Each item resolves `style_group` (theme group lookup) and overlays `style`
+/// (`StyleDecl`) before being pushed.
 fn collect_statusline_items(
     table: &mlua::Table,
     default_align_right: bool,
+    theme: &smelt_core::theme::Theme,
+    is_light: bool,
     out: &mut Vec<crate::content::status::StatusItem>,
 ) {
     let looks_like_item = table.contains_key("text").unwrap_or(false);
     if looks_like_item {
-        if let Some(item) = statusline_item_from(table, default_align_right) {
+        if let Some(item) = statusline_item_from(table, default_align_right, theme, is_light) {
             out.push(item);
         }
         return;
     }
     for pair in table.sequence_values::<mlua::Table>() {
         let Ok(entry) = pair else { continue };
-        if let Some(item) = statusline_item_from(&entry, default_align_right) {
+        if let Some(item) = statusline_item_from(&entry, default_align_right, theme, is_light) {
             out.push(item);
         }
     }
@@ -522,10 +531,21 @@ fn collect_statusline_items(
 fn statusline_item_from(
     entry: &mlua::Table,
     default_align_right: bool,
+    theme: &smelt_core::theme::Theme,
+    is_light: bool,
 ) -> Option<crate::content::status::StatusItem> {
     let text: String = entry.get("text").ok()?;
     if text.is_empty() {
         return None;
+    }
+    let mut style = smelt_core::style::Style::default();
+    if let Ok(group) = entry.get::<String>("style_group") {
+        if !group.is_empty() {
+            style = theme.get(&group);
+        }
+    }
+    if let Ok(decl) = entry.get::<crate::theme::StyleDecl>("style") {
+        api::theme::overlay_style_decl(&mut style, &decl, is_light);
     }
     // Per-item `align_right` wins over source-level default.
     let align_right = if entry.contains_key("align_right").unwrap_or(false) {
@@ -535,13 +555,11 @@ fn statusline_item_from(
     };
     Some(crate::content::status::StatusItem {
         text,
-        fg: ansi_color_from_lua(entry, "fg"),
-        bg: ansi_color_from_lua(entry, "bg"),
-        bold: entry.get("bold").unwrap_or(false),
+        style,
         priority: entry.get("priority").unwrap_or(0),
         align_right,
         truncatable: entry.get("truncatable").unwrap_or(false),
-        group: entry.get("group").unwrap_or(false),
+        separated: entry.get("separated").unwrap_or(false),
     })
 }
 

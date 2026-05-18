@@ -610,12 +610,19 @@ fn baked_default_spec() -> ThemeSpec {
     fn aliased(target: &str) -> GroupDecl {
         GroupDecl::Ref(target.to_string())
     }
+    fn pill(fg_c: ColorDecl, bg_c: ColorDecl) -> GroupDecl {
+        GroupDecl::Style(StyleDecl {
+            fg: Some(fg_c),
+            bg: Some(bg_c),
+            ..Default::default()
+        })
+    }
 
     let mut groups: HashMap<String, GroupDecl> = HashMap::new();
 
     // ── Base colors: the only groups that hold literal values. ──────────
     groups.insert("SmeltAccent".into(), fg(ansi(208))); // ember
-    groups.insert("SmeltSlug".into(), aliased("SmeltAccent"));
+    groups.insert("SmeltSlug".into(), fg(ansi(0))); // pill fg; bg falls back to SmeltAccent in status.lua
     groups.insert("SmeltMuted".into(), fg(ansi(244)));
     groups.insert("SmeltSuccess".into(), fg(ansi(77)));
     groups.insert("SmeltHeading".into(), fg(ansi(117)));
@@ -639,18 +646,25 @@ fn baked_default_spec() -> ThemeSpec {
     groups.insert("SmeltReasonHigh".into(), fg(ansi(203)));
     groups.insert("SmeltReasonMax".into(), fg(ansi(196)));
 
-    // Mode indicator colors.
-    groups.insert("SmeltModePlan".into(), fg(ansi(79)));
-    groups.insert("SmeltModeApply".into(), fg(ansi(141)));
-    groups.insert("SmeltModeYolo".into(), fg(ansi(204)));
+    // Statusline pills: each carries a full {fg, bg} pair so plugins
+    // reference them by `style_group` alone.
+    groups.insert("SmeltCompacting".into(), pill(ansi(0), ansi(15)));
+    groups.insert("SmeltVimNormal".into(), pill(ansi(74), ansi(236)));
+    groups.insert("SmeltVimInsert".into(), pill(ansi(78), ansi(236)));
+    groups.insert("SmeltVimVisual".into(), pill(ansi(176), ansi(236)));
+    groups.insert("SmeltModePlan".into(), pill(ansi(79), ansi(234)));
+    groups.insert("SmeltModeApply".into(), pill(ansi(141), ansi(234)));
+    groups.insert("SmeltModeYolo".into(), pill(ansi(204), ansi(234)));
     groups.insert(
         "SmeltModeExec".into(),
         GroupDecl::Style(StyleDecl {
             fg: Some(ansi(197)),
+            bg: Some(ansi(234)),
             bold: Some(true),
             ..Default::default()
         }),
     );
+    groups.insert("SmeltModeDefault".into(), pill(ansi(244), ansi(234)));
 
     // ── Semantic / nvim-standard names: links into the base set. ────────
     groups.insert("Comment".into(), aliased("SmeltMuted"));
@@ -720,8 +734,9 @@ mod tests {
         // Comment is aliased to SmeltMuted → fg = AnsiValue(244).
         assert_eq!(theme.get("Comment").fg, Some(Color::AnsiValue(244)));
         assert_eq!(theme.get("SmeltMuted").fg, Some(Color::AnsiValue(244)));
-        // SmeltSlug is aliased to SmeltAccent → fg = AnsiValue(208).
-        assert_eq!(theme.get("SmeltSlug").fg, Some(Color::AnsiValue(208)));
+        // SmeltSlug carries the pill fg only; bg falls back to SmeltAccent in status.lua.
+        assert_eq!(theme.get("SmeltSlug").fg, Some(Color::AnsiValue(0)));
+        assert_eq!(theme.get("SmeltSlug").bg, None);
         assert_eq!(theme.get("SmeltAccent").fg, Some(Color::AnsiValue(208)));
     }
 

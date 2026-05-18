@@ -1063,7 +1063,7 @@ impl TuiApp {
             // Recompute statusline after engine events drain so a turn ending mid-iteration
             // (TurnComplete) flips the spinner pill to "done" in the same frame, instead of
             // showing stale items until the next input event.
-            let (items, tick_errors) = self.lua.tick_statusline();
+            let (items, tick_errors) = self.lua.tick_statusline(self.ui.theme());
             self.custom_status_items = items;
             for (name, msg) in tick_errors {
                 match msg {

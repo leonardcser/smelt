@@ -1,7 +1,7 @@
 //! Status line and bar span types with priority-based responsive collapsing.
 
 use super::{builder::display_width, selection::truncate_str};
-use smelt_core::style::Color;
+use smelt_core::style::{Color, Style};
 
 #[derive(Clone, Default, PartialEq)]
 pub(crate) struct StyleState {
@@ -17,13 +17,11 @@ pub(crate) struct StyleState {
 #[derive(Clone, Debug)]
 pub(crate) struct StatusItem {
     pub(crate) text: String,
-    pub(crate) fg: Option<Color>,
-    pub(crate) bg: Option<Color>,
-    pub(crate) bold: bool,
+    pub(crate) style: Style,
     pub(crate) priority: u8,
     pub(crate) align_right: bool,
     pub(crate) truncatable: bool,
-    pub(crate) group: bool,
+    pub(crate) separated: bool,
 }
 
 impl StatusItem {
@@ -31,15 +29,18 @@ impl StatusItem {
         StatusSpan {
             text: self.text.clone(),
             style: StyleState {
-                fg: self.fg,
-                bg: Some(self.bg.unwrap_or(fill_bg)),
-                bold: self.bold,
-                ..StyleState::default()
+                fg: self.style.fg,
+                bg: Some(self.style.bg.unwrap_or(fill_bg)),
+                bold: self.style.bold,
+                dim: self.style.dim,
+                italic: self.style.italic,
+                underline: self.style.underline,
+                crossedout: self.style.crossedout,
             },
             priority: self.priority,
             align_right: self.align_right,
             truncatable: self.truncatable,
-            group: self.group,
+            separated: self.separated,
         }
     }
 }
@@ -70,10 +71,10 @@ pub(crate) struct StatusSpan {
     /// 0 = always show, higher = drop first.
     pub(crate) priority: u8,
     /// Insert " · " separator before this span.
-    pub(crate) group: bool,
+    pub(crate) separated: bool,
     /// Can truncate with "…" before being fully dropped.
     pub(crate) truncatable: bool,
-    /// Pull to right edge with a one-cell gap; no group separator.
+    /// Pull to right edge with a one-cell gap; no separator.
     pub(crate) align_right: bool,
 }
 
@@ -105,7 +106,7 @@ pub(crate) fn spans_to_buffer_line(
         let mut w = 0;
         let mut first = true;
         for s in spans.iter().filter(|s| s.align_right == right) {
-            if s.group && !first {
+            if s.separated && !first {
                 w += STATUS_SEP_LEN;
             }
             w += display_width(&s.text);
@@ -166,7 +167,7 @@ pub(crate) fn spans_to_buffer_line(
 
     let mut first_left = true;
     for s in spans.iter().filter(|s| !s.align_right) {
-        if s.group && !first_left {
+        if s.separated && !first_left {
             left_runs.push((STATUS_SEP.to_string(), sep_style));
         }
         left_runs.push((s.text.clone(), style_to_grid(&s.style)));
@@ -174,7 +175,7 @@ pub(crate) fn spans_to_buffer_line(
     }
     let mut first_right = true;
     for s in spans.iter().filter(|s| s.align_right) {
-        if s.group && !first_right {
+        if s.separated && !first_right {
             right_runs.push((STATUS_SEP.to_string(), sep_style));
         }
         right_runs.push((s.text.clone(), style_to_grid(&s.style)));

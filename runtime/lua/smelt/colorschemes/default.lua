@@ -29,7 +29,7 @@ end
 return {
   -- ── Base palette: groups that hold literal color values. ──────────
   SmeltAccent         = fg({ ansi = 208 }),   -- ember
-  SmeltSlug           = "SmeltAccent",         -- slug pill falls back to accent
+  SmeltSlug           = fg({ ansi = 0 }),     -- pill fg; bg falls back to SmeltAccent in status.lua
   SmeltMuted          = fg({ ansi = 244 }),   -- "comment grey"
   SmeltSuccess        = fg({ ansi = 77 }),    -- check-mark green
   SmeltHeading        = fg({ ansi = 117 }),   -- sky blue headings
@@ -53,11 +53,17 @@ return {
   SmeltReasonHigh     = fg({ ansi = 203 }),
   SmeltReasonMax      = fg({ ansi = 196 }),
 
-  -- Mode indicators.
-  SmeltModePlan       = fg({ ansi = 79  }),
-  SmeltModeApply      = fg({ ansi = 141 }),
-  SmeltModeYolo       = fg({ ansi = 204 }),
-  SmeltModeExec       = fg({ ansi = 197 }, { bold = true }),
+  -- Statusline pills: each carries a full {fg, bg} pair so plugins
+  -- reference them by `style_group` alone.
+  SmeltCompacting     = { fg = { ansi = 0  }, bg = { ansi = 15  } },
+  SmeltVimNormal      = { fg = { ansi = 74 }, bg = { ansi = 236 } },
+  SmeltVimInsert      = { fg = { ansi = 78 }, bg = { ansi = 236 } },
+  SmeltVimVisual      = { fg = { ansi = 176}, bg = { ansi = 236 } },
+  SmeltModePlan       = { fg = { ansi = 79 }, bg = { ansi = 234 } },
+  SmeltModeApply      = { fg = { ansi = 141}, bg = { ansi = 234 } },
+  SmeltModeYolo       = { fg = { ansi = 204}, bg = { ansi = 234 } },
+  SmeltModeExec       = { fg = { ansi = 197}, bg = { ansi = 234 }, bold = true },
+  SmeltModeDefault    = { fg = { ansi = 244}, bg = { ansi = 234 } },
 
   -- Diff renderer row fills. Override these like any other group.
   SmeltDiffAddBg      = bg({ rgb = { 20, 50, 20 } }),

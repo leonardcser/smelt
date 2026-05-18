@@ -7,11 +7,11 @@
 ---@class smelt.statusline
 local statusline = {}
 
---- Register a Lua statusline source named `name`. The handler is called once per refresh with the snapshot table and returns segments. `opts.align = "right"` makes its segments default to the right strip; later registrations replace earlier ones with the same name. Returns a `Reg` whose `:remove()` drops the source.
+--- Register a Lua statusline source named `name`. The handler is called once per refresh and returns a single segment table or a list. Each segment is `{ text, style_group?, style?, priority?, align_right?, truncatable?, separated? }`: `style_group` names a theme group whose resolved style applies (e.g. `"SmeltModePlan"`); `style` is a `StyleDecl` overlay applied on top. Higher `priority` drops first; `truncatable` shrinks with `…` before being fully dropped; `separated` inserts ` · ` before this segment. `opts.align = "right"` makes the source's segments default to the right strip; later registrations replace earlier ones with the same name. Returns a `Reg` whose `:remove()` drops the source.
 ---@type fun(name: string, handler: fun(value: table): table, opts: smelt.statusline.RegisterOpts?): smelt.Reg
 statusline.register = nil
 
---- Return the full statusline state in one table per refresh: theme colors, working/throbber state, vim mode, agent mode, indicators, and cursor position. Returns an empty table when the app pointer is unavailable.
+--- Return the statusline state in one table per refresh: `working`/`throbber`, `vim`, `mode`, `permission_pending`, `running_procs`, `running_agents`, `task_label`, `settings`, and `position`. Styles are not projected — name a `style_group` on each segment instead. Returns an empty table when the app pointer is unavailable.
 ---@type fun(): table
 statusline.snapshot = nil
 
