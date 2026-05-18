@@ -1,6 +1,7 @@
 mod agent;
 pub mod auth;
 pub mod cancel;
+pub mod catalog;
 pub mod clock;
 pub(crate) mod config;
 pub mod env;
@@ -35,6 +36,10 @@ pub const SUMMARY_PREFIX: &str = include_str!("prompts/compact_summary_prefix.md
 
 pub use config::ModelConfig;
 pub use paths::{config_dir, data_dir, home_dir, state_dir};
+
+/// Re-export so non-engine crates (the TUI) can store an HTTP client
+/// without depending on `reqwest` directly.
+pub use reqwest::Client as HttpClient;
 
 pub use provider::{Provider, ProviderKind};
 pub use skills::SkillLoader;

@@ -112,6 +112,13 @@ pub struct TuiApp {
     /// test harness constructs a `TuiApp` without a real terminal and skips
     /// claiming. `Drop` here restores the terminal even on panic.
     pub(crate) terminal: Option<crate::term_setup::TuiTerminal>,
+    /// Shared HTTP client used for background side-fetches (context window).
+    /// `None` in the test harness.
+    pub(crate) http_client: Option<engine::HttpClient>,
+    /// Sender into the channel `run()` drains for context-window updates.
+    /// `apply_model` spawns a fetch task that pushes the result here so the
+    /// UI footer reflects the new model immediately.
+    pub(crate) context_window_tx: Option<tokio::sync::mpsc::UnboundedSender<Option<u32>>>,
 }
 
 pub use well_known::{
@@ -492,6 +499,8 @@ impl TuiApp {
             },
             pending_dialogs: VecDeque::new(),
             terminal: None,
+            http_client: None,
+            context_window_tx: None,
         }
     }
 
@@ -796,11 +805,11 @@ impl TuiApp {
         };
     }
 
-    pub async fn run(
-        &mut self,
-        mut ctx_rx: Option<tokio::sync::oneshot::Receiver<Option<u32>>>,
-        initial_message: Option<String>,
-    ) {
+    pub async fn run(&mut self, http_client: engine::HttpClient, initial_message: Option<String>) {
+        let (ctx_tx, mut ctx_rx) = tokio::sync::mpsc::unbounded_channel::<Option<u32>>();
+        self.http_client = Some(http_client);
+        self.context_window_tx = Some(ctx_tx);
+        self.refresh_context_window();
         crate::theme::detect_background(self.ui.theme_mut());
         crate::theme::populate_ui_theme(self.ui.theme_mut());
         // Capture the thread-safe Lua command-name set directly. Going through
@@ -945,11 +954,8 @@ impl TuiApp {
             }
             self.flush_lua_callbacks();
 
-            if let Some(ref mut rx) = ctx_rx {
-                if let Ok(result) = rx.try_recv() {
-                    self.core.config.context_window = result;
-                    ctx_rx = None;
-                }
+            while let Ok(result) = ctx_rx.try_recv() {
+                self.core.config.context_window = result;
             }
 
             self.drain_host_calls();

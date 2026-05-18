@@ -3,7 +3,6 @@ mod startup;
 
 use clap::{Parser, Subcommand, ValueEnum};
 use crossterm::ExecutableCommand;
-use startup::resolve_api_key;
 use std::sync::{Arc, Mutex};
 
 #[global_allocator]
@@ -412,38 +411,6 @@ async fn main() {
         },
         dispatcher,
     );
-    let ctx_rx = if !args.headless {
-        let ctx_api_base = args
-            .api_base
-            .clone()
-            .or_else(|| available_models.first().map(|m| m.api_base.clone()))
-            .unwrap_or_default();
-        let ctx_api_key = args
-            .api_key_env
-            .as_deref()
-            .or_else(|| available_models.first().map(|m| m.api_key_env.as_str()))
-            .and_then(|env| resolve_api_key(env).ok())
-            .unwrap_or_default();
-        let ctx_model = model.clone();
-        let ctx_provider_type = initial_provider_type.clone();
-        let (tx, rx) = tokio::sync::oneshot::channel();
-        let ctx_clock = Arc::clone(&clock);
-        let ctx_client = startup_http_client.clone();
-        tokio::spawn(async move {
-            let provider = engine::Provider::new(
-                ctx_api_base,
-                ctx_api_key,
-                &ctx_provider_type,
-                ctx_client,
-                ctx_clock,
-            );
-            let _ = tx.send(provider.fetch_context_window(&ctx_model).await);
-        });
-        Some(rx)
-    } else {
-        None
-    };
-
     let color_mode = match args.color {
         ColorMode::Auto => smelt_core::ColorMode::Auto,
         ColorMode::Always => smelt_core::ColorMode::Always,
@@ -538,7 +505,7 @@ async fn main() {
         redirect_stderr();
 
         println!();
-        app.run(ctx_rx, args.message).await;
+        app.run(startup_http_client.clone(), args.message).await;
         // Fire `smelt.lifecycle.on("shutdown", fn)` hooks. The TUI is torn
         // down at this point so stdout is in cooked mode — plugins (e.g.
         // the bundled resume-hint banner) can `print(...)` straight to the

@@ -283,6 +283,28 @@ impl TuiApp {
                 .cells
                 .set_dyn("model", std::rc::Rc::new(self.core.config.model.clone()));
         }
+        self.refresh_context_window();
+    }
+
+    /// Kick off a background fetch for the current model's context window
+    /// and push the result through `context_window_tx`. No-op when the
+    /// channel/client aren't wired (test harness, headless runs).
+    pub(crate) fn refresh_context_window(&mut self) {
+        let Some(tx) = self.context_window_tx.clone() else {
+            return;
+        };
+        let Some(client) = self.http_client.clone() else {
+            return;
+        };
+        let api_base = self.core.config.api_base.clone();
+        let api_key = self.resolve_api_key().unwrap_or_default();
+        let provider_type = self.core.config.provider_type.clone();
+        let model = self.core.config.model.clone();
+        let clock = std::sync::Arc::clone(&self.core.clock);
+        tokio::spawn(async move {
+            let provider = engine::Provider::new(api_base, api_key, &provider_type, client, clock);
+            let _ = tx.send(provider.fetch_context_window(&model).await);
+        });
     }
 
     /// Mutate resolved settings and propagate to input/screen. Live state

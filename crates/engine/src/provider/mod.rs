@@ -316,6 +316,19 @@ impl ProviderKind {
         }
     }
 
+    /// Canonical config string for this provider — the inverse of
+    /// [`ProviderKind::from_config`]. Used for catalog lookups and logging.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::OpenAi => "openai",
+            Self::Codex => "codex",
+            Self::AnthropicCompatible => "anthropic-compatible",
+            Self::Anthropic => "anthropic",
+            Self::Copilot => "copilot",
+            Self::OpenAiCompatible => "openai-compatible",
+        }
+    }
+
     pub fn detect_from_url(api_base: &str) -> Self {
         if api_base.contains("api.kimi.com/coding") {
             Self::AnthropicCompatible
@@ -785,7 +798,11 @@ impl Provider {
     }
 
     pub async fn fetch_context_window(&self, model: &str) -> Option<u32> {
-        let result = match self.kind {
+        let provider_label = self.kind.as_str();
+        // Hit the provider's own `/v1/models` first — that's the
+        // authoritative source. Fall through to the models.dev catalog
+        // if it doesn't expose a window field.
+        let from_provider = match self.kind {
             ProviderKind::OpenAiCompatible => {
                 self.fetch_context_window_openai_compatible(model).await
             }
@@ -796,12 +813,15 @@ impl Provider {
             }
             ProviderKind::Copilot => copilot::cached_context_window(model),
         };
+        let result =
+            from_provider.or_else(|| crate::catalog::context_window(provider_label, model));
         crate::log::entry(
             crate::log::Level::Info,
             "fetch_context_window",
             &serde_json::json!({
                 "model": model,
-                "provider": format!("{:?}", self.kind),
+                "provider": provider_label,
+                "from_provider": from_provider,
                 "result": result,
             }),
         );
@@ -838,21 +858,34 @@ impl Provider {
         let data: serde_json::Value = resp.json().await.ok()?;
         let models = data["data"].as_array()?;
         let entry = models.iter().find(|m| m["id"].as_str() == Some(model))?;
+        context_window_from_models_entry(entry)
+    }
+}
 
-        if let Some(v) = entry["max_model_len"].as_u64() {
-            return Some(v as u32);
-        }
-
-        if let Some(args) = entry["status"]["args"].as_array() {
-            for i in 0..args.len().saturating_sub(1) {
-                if args[i].as_str() == Some("--ctx-size") {
-                    return args[i + 1].as_str()?.parse::<u32>().ok();
-                }
+/// Pick the context window out of one `/v1/models` entry. Each backend
+/// uses a different field; we walk the common ones in priority order.
+fn context_window_from_models_entry(entry: &serde_json::Value) -> Option<u32> {
+    // vLLM / SGLang advertise the raw `max_model_len`.
+    if let Some(v) = entry["max_model_len"].as_u64() {
+        return Some(v as u32);
+    }
+    // Moonshot / Kimi / OpenRouter / DeepSeek / Together AI.
+    if let Some(v) = entry["context_length"].as_u64() {
+        return Some(v as u32);
+    }
+    // Groq + a handful of others.
+    if let Some(v) = entry["context_window"].as_u64() {
+        return Some(v as u32);
+    }
+    // llama.cpp server: published as a launcher arg pair on `status.args`.
+    if let Some(args) = entry["status"]["args"].as_array() {
+        for i in 0..args.len().saturating_sub(1) {
+            if args[i].as_str() == Some("--ctx-size") {
+                return args[i + 1].as_str()?.parse::<u32>().ok();
             }
         }
-
-        None
     }
+    None
 }
 
 fn apply_response_format(body: &mut serde_json::Value, kind: ProviderKind, fmt: &ResponseFormat) {
@@ -1552,6 +1585,39 @@ mod tests {
         assert_eq!(cfg.temperature, Some(0.5));
         assert_eq!(cfg.top_p, Some(0.8));
         assert_eq!(cfg.top_k, Some(42));
+    }
+
+    // ---- context_window_from_models_entry ----
+
+    #[test]
+    fn context_window_prefers_max_model_len() {
+        let entry = serde_json::json!({"max_model_len": 32768, "context_length": 8192});
+        assert_eq!(context_window_from_models_entry(&entry), Some(32768));
+    }
+
+    #[test]
+    fn context_window_falls_back_to_context_length() {
+        let entry = serde_json::json!({"context_length": 256000});
+        assert_eq!(context_window_from_models_entry(&entry), Some(256_000));
+    }
+
+    #[test]
+    fn context_window_falls_back_to_context_window_field() {
+        let entry = serde_json::json!({"context_window": 131072});
+        assert_eq!(context_window_from_models_entry(&entry), Some(131_072));
+    }
+
+    #[test]
+    fn context_window_parses_llama_cpp_ctx_size_arg() {
+        let entry =
+            serde_json::json!({"status": {"args": ["--port", "8080", "--ctx-size", "4096"]}});
+        assert_eq!(context_window_from_models_entry(&entry), Some(4096));
+    }
+
+    #[test]
+    fn context_window_returns_none_when_no_known_fields_present() {
+        let entry = serde_json::json!({"id": "m"});
+        assert_eq!(context_window_from_models_entry(&entry), None);
     }
 
     #[test]

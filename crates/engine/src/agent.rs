@@ -40,7 +40,7 @@ pub(crate) async fn engine_task(
         .user_agent(concat!("smelt/", env!("CARGO_PKG_VERSION")))
         .build()
         .unwrap_or_else(|_| reqwest::Client::new());
-    crate::pricing::spawn_catalog_fetch(client.clone());
+    crate::catalog::spawn_fetch(client.clone());
 
     let _ = event_tx.send(EngineEvent::Ready);
 
