@@ -398,51 +398,43 @@ smelt.state.persistent = function(name, opts)
   })
 end
 
--- Plugin scope stack. Pushed by the Rust loader wrapper around every
--- module body (autoload, init.lua, plugin files). The top entry is the
--- "current scope" — a stable identity (typically the require path or
--- file path) that `smelt.state()` and unnamed resource constructors
--- (`smelt.paint.register`, `smelt.overlay.new`, `smelt.win.new`,
--- `smelt.buf.new`) consult for auto-scoping.
+-- Plugin scope stack. Each Rust loader (autoload, init.lua, plugin
+-- files) pushes a placeholder frame around the module body via
+-- `__smelt_with_scope`. The frame stays unnamed (`false`) by default —
+-- the module body opts in to hot-reload survival by calling
+-- `smelt.plugin("name")`, which promotes its frame to that name.
+-- While the frame is named, `smelt.state()` and the unnamed-resource
+-- constructors (`smelt.paint.register`, `smelt.overlay.new`,
+-- `smelt.win.new`, `smelt.buf.new`) auto-name on the plugin's behalf
+-- so survival is implicit for the rest of the body.
 __smelt_scope_stack = __smelt_scope_stack or {}
 -- Per-scope per-type counter — minted in declaration order during a
--- module body run, reset on every push so auto-names stay stable
--- across reload when the module body executes the same constructors
--- in the same order.
+-- module body run, reset every time `smelt.plugin(name)` promotes a
+-- fresh frame so auto-names stay stable across `/reload` when the
+-- module body runs the same constructors in the same order.
 __smelt_scope_counters = __smelt_scope_counters or {}
 
--- Push `name` as the active scope and run `fn(...)` inside it. Counters
--- reset on every push so the N-th unnamed paint slot in a given module
--- always lands the same auto-name across `/reload`. Errors propagate
--- after restoring the stack so a failing module body doesn't leak its
--- frame.
-function __smelt_with_scope(name, fn, ...)
-  table.insert(__smelt_scope_stack, name)
-  __smelt_scope_counters[name] = { paint = 0, buf = 0, win = 0, overlay = 0 }
+-- Push an unnamed frame, run `fn(...)`, pop it. The frame starts as
+-- `false` (no auto-naming, no scoped state); the module body can
+-- promote it to a named plugin scope via `smelt.plugin(name)`. Errors
+-- propagate after restoring the stack so a failing module body doesn't
+-- leak its frame.
+function __smelt_with_scope(fn, ...)
+  __smelt_scope_stack[#__smelt_scope_stack + 1] = false
   local ok, ret = pcall(fn, ...)
-  table.remove(__smelt_scope_stack)
+  __smelt_scope_stack[#__smelt_scope_stack] = nil
   if not ok then error(ret, 0) end
   return ret
 end
 
--- Resolve the current scope name, if any. Returns nil when no module
--- body is on the call stack (e.g. inside a callback fired from the event
--- loop). Used by `smelt.state()` and unnamed-resource auto-naming.
+-- Resolve the current scope name, if any. Returns nil when no plugin
+-- scope is active (no `smelt.plugin(...)` call, or running inside a
+-- callback fired from the event loop). Used by `smelt.state()` and
+-- unnamed-resource auto-naming.
 function __smelt_current_scope()
-  return __smelt_scope_stack[#__smelt_scope_stack]
-end
-
--- Run `fn(...)` with the scope stack temporarily cleared. Resources
--- created inside `fn` get no auto-name and are therefore reaped on
--- `/reload`. The escape hatch for genuinely throwaway resources declared
--- from inside a module body.
-function __smelt_unscoped(fn, ...)
-  local saved = __smelt_scope_stack
-  __smelt_scope_stack = {}
-  local ok, ret = pcall(fn, ...)
-  __smelt_scope_stack = saved
-  if not ok then error(ret, 0) end
-  return ret
+  local top = __smelt_scope_stack[#__smelt_scope_stack]
+  if top == false then return nil end
+  return top
 end
 
 -- Mint the next auto-name for `kind` ("paint" | "buf" | "win" | "overlay")
@@ -450,7 +442,7 @@ end
 -- is `"<scope>:<kind>:<idx>"`, deterministic per (scope, kind, declaration
 -- order); idx counts from 0.
 function __smelt_auto_name(kind)
-  local scope = __smelt_scope_stack[#__smelt_scope_stack]
+  local scope = __smelt_current_scope()
   if not scope then return nil end
   local counters = __smelt_scope_counters[scope]
   if not counters then
@@ -460,6 +452,24 @@ function __smelt_auto_name(kind)
   local idx = counters[kind] or 0
   counters[kind] = idx + 1
   return string.format("%s:%s:%d", scope, kind, idx)
+end
+
+-- Promote the current loader frame to plugin scope `name`. Must be
+-- called from a module body (or init.lua). After this call,
+-- `smelt.state()` resolves to the named slot and unnamed resource
+-- constructors auto-name keyed by `name`. Idempotent within a single
+-- module body run: counters reset on every promotion so declaration
+-- order is what matters.
+function smelt.plugin(name)
+  if type(name) ~= "string" or name == "" then
+    error("smelt.plugin: name must be a non-empty string", 2)
+  end
+  local i = #__smelt_scope_stack
+  if i == 0 then
+    error("smelt.plugin: must be called from a module body (or init.lua)", 2)
+  end
+  __smelt_scope_stack[i] = name
+  __smelt_scope_counters[name] = { paint = 0, buf = 0, win = 0, overlay = 0 }
 end
 
 -- Make `smelt.state` callable. With an explicit name: returns the

@@ -74,7 +74,7 @@ Sticky handle returned by `smelt.cell(name)`. Setters return the handle for chai
 | --- | --- | --- | --- |
 | `get` | `fun(): any` | yes | Return the current cell value, or `nil` when the cell isn't declared. |
 | `set` | `fun(value: any): smelt.cell.Cell` | yes | Publish a new value. Returns the handle for chaining. |
-| `subscribe` | `fun(handler: fun(value: any)): smelt.Reg` | yes | Register `handler(value)` to fire on every `set`. Returns a `Reg` whose `:remove()` drops the subscription. When called before the host pointer is live the subscription is queued and bound on the next host bring-up. |
+| `subscribe` | `fun(handler: fun(value: any)): smelt.Reg` | yes | Register `handler(value)` to fire on every `set`. Returns a `Reg` whose `:remove()` drops the subscription. No-op when called before the host pointer is live (e.g. the pre-TUI plugin pass) — the module body re-runs inside `bring_up_lua` where the bind takes effect. |
 | `name` | `fun(): string` | yes | Return the cell name. |
 
 ### `smelt.cli.RegisterFlagOpts`
@@ -197,11 +197,10 @@ Overlay handle returned by `smelt.overlay.new(opts)`.
 
 ### `smelt.paint.Paint`
 
-Handle returned by `smelt.paint.register`. Usable directly in `smelt.overlay.layout.leaf(handle, opts)` (it stands in for a Win or raw paint id).
+Opaque handle returned by `smelt.paint.register`. Usable directly in `smelt.overlay.layout.leaf(handle, opts)` (it stands in for a Win in layout leaves).
 
 | Field | Type | Required | Description |
 | --- | --- | --- | --- |
-| `id` | `fun(): integer` | yes | Return the underlying paint id (a u64 usable anywhere a Win id / paint id is accepted). |
 | `remove` | `fun(): boolean` | yes | Drop the paint callback. Returns `true` if it was still registered. Subsequent paints of this id no-op. |
 
 ### `smelt.paint.Slice`

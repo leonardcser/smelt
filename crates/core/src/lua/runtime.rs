@@ -409,14 +409,12 @@ impl LuaRuntime {
     pub fn load_init(&mut self, path: &std::path::Path) -> LuaResult<()> {
         let src = std::fs::read_to_string(path)
             .map_err(|e| LuaError::RuntimeError(format!("read init.lua: {e}")))?;
-        // Top-level user init pushes "init.lua" as its scope; resources
-        // created at module top get auto-named under that scope.
+        // Push an unnamed loader frame; `smelt.plugin("name")` inside
+        // the body opts in to hot-reload survival. Falls back to plain
+        // exec when bootstrap hasn't installed `__smelt_with_scope` yet.
         let loader = self.lua.load(&src).set_name("init.lua").into_function()?;
-        match wrap_in_scope(&self.lua, "init.lua", loader.clone()) {
+        match wrap_in_scope(&self.lua, loader.clone()) {
             Ok(wrapped) => wrapped.call::<()>(()),
-            // Bootstrap hasn't run yet (e.g. test harness running init
-            // before bootstrap installs `__smelt_with_scope`). Fall back
-            // to plain exec — no auto-scoping but loading still works.
             Err(_) => loader.call::<()>(()),
         }
     }
@@ -468,12 +466,10 @@ impl LuaRuntime {
             .load(&src)
             .set_name(name.as_str())
             .into_function()?;
-        // Each top-level plugin file pushes its own scope (the file
-        // path, which is stable per-host). Within that scope, unnamed
-        // resources auto-name deterministically and `smelt.state()`
-        // resolves to a path-keyed slot. Falls back to plain exec when
-        // bootstrap hasn't installed `__smelt_with_scope` yet.
-        match wrap_in_scope(&self.lua, &name, loader.clone()) {
+        // Push an unnamed loader frame; the plugin opts in via
+        // `smelt.plugin("name")`. Falls back to plain exec when bootstrap
+        // hasn't installed `__smelt_with_scope` yet.
+        match wrap_in_scope(&self.lua, loader.clone()) {
             Ok(wrapped) => wrapped.call::<()>(()),
             Err(_) => loader.call::<()>(()),
         }
@@ -1764,12 +1760,12 @@ fn register_module_searcher_with_roots(lua: &Lua, roots: Vec<PathBuf>) -> LuaRes
             if let Ok(source) = std::fs::read_to_string(&path) {
                 let name = path.display().to_string();
                 let loader = lua.load(source).set_name(name).into_function()?;
-                // Push `module` (the dotted require path, stable across
-                // disk locations) as the scope so `smelt.state()` and
-                // unnamed-resource auto-naming stay reload-stable. Fall
-                // back to the unwrapped loader if bootstrap hasn't
-                // installed `__smelt_with_scope` yet.
-                let wrapped = wrap_in_scope(lua, &module, loader.clone()).unwrap_or(loader);
+                // Push an unnamed loader frame so the required module
+                // can opt in to hot-reload survival via
+                // `smelt.plugin(name)`. Falls back to the unwrapped
+                // loader if bootstrap hasn't installed
+                // `__smelt_with_scope` yet.
+                let wrapped = wrap_in_scope(lua, loader.clone()).unwrap_or(loader);
                 return Ok(mlua::Value::Function(wrapped));
             }
         }
@@ -1778,7 +1774,7 @@ fn register_module_searcher_with_roots(lua: &Lua, roots: Vec<PathBuf>) -> LuaRes
                 .load(*source)
                 .set_name(module.as_str())
                 .into_function()?;
-            let wrapped = wrap_in_scope(lua, &module, loader.clone()).unwrap_or(loader);
+            let wrapped = wrap_in_scope(lua, loader.clone()).unwrap_or(loader);
             return Ok(mlua::Value::Function(wrapped));
         }
         Ok(mlua::Value::String(lua.create_string(format!(
@@ -1793,16 +1789,15 @@ fn register_module_searcher_with_roots(lua: &Lua, roots: Vec<PathBuf>) -> LuaRes
     Ok(())
 }
 
-/// Wrap a Lua loader function so its body runs with `scope` pushed onto
-/// `__smelt_scope_stack`. Implemented by forwarding through the bundled
-/// `__smelt_with_scope` helper which handles push/pop + error
-/// propagation. Returns the wrapped function.
-fn wrap_in_scope(lua: &Lua, scope: &str, loader: mlua::Function) -> LuaResult<mlua::Function> {
+/// Wrap a Lua loader function so its body runs inside a fresh frame
+/// pushed onto `__smelt_scope_stack`. The frame starts unnamed; the
+/// module body opts in to hot-reload survival via `smelt.plugin(name)`.
+/// Implemented by forwarding through the bundled `__smelt_with_scope`
+/// helper which handles push/pop + error propagation.
+fn wrap_in_scope(lua: &Lua, loader: mlua::Function) -> LuaResult<mlua::Function> {
     let with_scope: mlua::Function = lua.globals().get("__smelt_with_scope")?;
-    let scope_s = scope.to_string();
-    lua.create_function(move |lua, args: mlua::MultiValue| {
+    lua.create_function(move |_, args: mlua::MultiValue| {
         let mut call_args = mlua::MultiValue::new();
-        call_args.push_back(mlua::Value::String(lua.create_string(&scope_s)?));
         call_args.push_back(mlua::Value::Function(loader.clone()));
         for a in args {
             call_args.push_back(a);

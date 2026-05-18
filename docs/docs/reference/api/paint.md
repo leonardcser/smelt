@@ -14,5 +14,5 @@ fun(func: fun(arg1: smelt.paint.Slice, arg2: table), opts: table?): smelt.paint.
 
 Types: [`smelt.paint.Slice`](types.md#smeltpaintslice), [`smelt.paint.Paint`](types.md#smeltpaintpaint)
 
-Register `func` as a paint callback and return a `Paint` handle (userdata with `:id()` / `:remove()`). The handle is accepted anywhere a window id is in the layout / overlay APIs. The callback fires per frame the leaf is visible with a slice + context table. `opts.name` opts the slot into hot-reload survival: re-registering with the same name keeps the paint id stable and atomically swaps the callback, so surviving overlays/layouts referencing the handle keep painting with the new code.
+Register `func` as a paint callback and return an opaque `Paint` handle (userdata with `:remove()`). The handle is accepted anywhere a window id is in the layout / overlay APIs. The callback fires per frame the leaf is visible with a slice + context table. `opts.name` opts the slot into hot-reload survival: re-registering with the same name keeps the paint id stable and atomically swaps the callback, so surviving overlays/layouts referencing the handle keep painting with the new code.
 

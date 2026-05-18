@@ -22,6 +22,19 @@ fun(name: string): integer
 
 Look up or allocate a stable namespace id for `name`. Namespaces scope `buf:mark` / `buf:clear_ns` calls so plugins can repaint their region without disturbing others.
 
+## `smelt.plugin`
+
+```lua
+fun(name: any): any
+```
+
+Promote the current loader frame to plugin scope `name`. Must be
+called from a module body (or init.lua). After this call,
+`smelt.state()` resolves to the named slot and unnamed resource
+constructors auto-name keyed by `name`. Idempotent within a single
+module body run: counters reset on every promotion so declaration
+order is what matters.
+
 ## `smelt.quit`
 
 ```lua

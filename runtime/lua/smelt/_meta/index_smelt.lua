@@ -15,6 +15,15 @@ smelt.focus = nil
 ---@type fun(name: string): integer
 smelt.ns = nil
 
+--- Promote the current loader frame to plugin scope `name`. Must be
+--- called from a module body (or init.lua). After this call,
+--- `smelt.state()` resolves to the named slot and unnamed resource
+--- constructors auto-name keyed by `name`. Idempotent within a single
+--- module body run: counters reset on every promotion so declaration
+--- order is what matters.
+---@type fun(name: any): any
+smelt.plugin = nil
+
 --- Request a clean shutdown of the app. The quit fires on the next tick after the current handler returns.
 ---@type fun(): nil
 smelt.quit = nil

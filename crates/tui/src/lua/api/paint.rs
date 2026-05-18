@@ -1,8 +1,8 @@
 //! `smelt.paint` bindings — register Lua callbacks against custom
 //! paint regions.
 //!
-//! `smelt.paint.register(func, opts?)` returns a `Paint` userdata with
-//! `:id()` and `:remove()`. The handle is usable directly anywhere a
+//! `smelt.paint.register(func, opts?)` returns an opaque `Paint`
+//! userdata with `:remove()`. The handle is usable directly anywhere a
 //! window id is accepted in the layout / overlay APIs (`overlay item.win`,
 //! `smelt.overlay.layout.leaf`). Per frame the leaf is visible, the
 //! renderer fires the registered callback with a slice userdata +
@@ -33,7 +33,8 @@ impl LuaType for LuaPaintSlice {
 
 /// Handle returned by `smelt.paint.register`. Carries the `PaintId`
 /// directly so it can stand in for a Win userdata in layout leaves,
-/// and exposes `:id()` / `:remove()`.
+/// and exposes `:remove()`. The `PaintId` is intentionally not exposed
+/// to Lua — names are the stable identity surface.
 #[derive(Clone, Copy, Debug)]
 pub struct LuaPaintReg {
     pub(crate) id: crate::smelt_term::layout::PaintId,
@@ -50,8 +51,6 @@ impl mlua::UserData for LuaPaintReg {
         methods.add_meta_method(mlua::MetaMethod::ToString, |_, this, ()| {
             Ok(format!("Paint#{}", this.id.0))
         });
-
-        methods.add_method("id", |_, this, ()| -> LuaResult<u64> { Ok(this.id.0) });
 
         methods.add_method("remove", |_, this, ()| -> LuaResult<bool> {
             let removed = crate::lua::with_app(|app| {
@@ -79,9 +78,8 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
 
     record_class(LuaClassDecl {
         name: "smelt.paint.Paint",
-        doc: "Handle returned by `smelt.paint.register`. Usable directly in `smelt.overlay.layout.leaf(handle, opts)` (it stands in for a Win or raw paint id).",
+        doc: "Opaque handle returned by `smelt.paint.register`. Usable directly in `smelt.overlay.layout.leaf(handle, opts)` (it stands in for a Win in layout leaves).",
         fields: smelt_core::class_methods! {
-            "id" => fn() -> u64, "Return the underlying paint id (a u64 usable anywhere a Win id / paint id is accepted).",
             "remove" => fn() -> bool, "Drop the paint callback. Returns `true` if it was still registered. Subsequent paints of this id no-op.",
         },
     });
@@ -90,7 +88,7 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
         let s = shared.clone();
         m.fn_(
             "register",
-            "Register `func` as a paint callback and return a `Paint` handle (userdata with `:id()` / `:remove()`). The handle is accepted anywhere a window id is in the layout / overlay APIs. The callback fires per frame the leaf is visible with a slice + context table. `opts.name` opts the slot into hot-reload survival: re-registering with the same name keeps the paint id stable and atomically swaps the callback, so surviving overlays/layouts referencing the handle keep painting with the new code.",
+            "Register `func` as a paint callback and return an opaque `Paint` handle (userdata with `:remove()`). The handle is accepted anywhere a window id is in the layout / overlay APIs. The callback fires per frame the leaf is visible with a slice + context table. `opts.name` opts the slot into hot-reload survival: re-registering with the same name keeps the paint id stable and atomically swaps the callback, so surviving overlays/layouts referencing the handle keep painting with the new code.",
             &["func", "opts"],
             move |lua, (func, opts): (LuaCallback<(LuaPaintSlice, mlua::Table), ()>, Option<mlua::Table>)| -> LuaResult<LuaPaintReg> {
                 let name: Option<String> = opts

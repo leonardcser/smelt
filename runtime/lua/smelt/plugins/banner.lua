@@ -102,14 +102,15 @@ local function refresh()
   if #msgs == 0 then open_splash() else teardown() end
 end
 
--- `smelt.cell:subscribe` is deferred-safe: calls made before the host
--- pointer is live (the pre-TUI plugin pass that extracts engine config)
--- queue and bind on the next host bring-up. Cell-subscription handles
--- are wiped between bring-ups so re-subscribing in module body doesn't
--- stack. `session_started` covers /reset, /fork, /resume; `turn_start`
--- covers the first agent dispatch; `history` covers direct message-list
--- mutations (rewind, compaction, load). `refresh()` runs through
--- `on_ready` so the host pointer is guaranteed live for the first paint.
+-- `smelt.cell:subscribe` no-ops when the host pointer isn't live (the
+-- pre-TUI plugin pass that extracts engine config); the module body
+-- re-runs inside `bring_up_lua` where the bind takes effect. Subscription
+-- handles are wiped between bring-ups so re-subscribing in module body
+-- doesn't stack. `session_started` covers /reset, /fork, /resume;
+-- `turn_start` covers the first agent dispatch; `history` covers direct
+-- message-list mutations (rewind, compaction, load). `refresh()` runs
+-- through `on_ready` so the host pointer is guaranteed live for the
+-- first paint.
 smelt.cell("session_started"):subscribe(refresh)
 smelt.cell("turn_start"):subscribe(teardown)
 smelt.cell("history"):subscribe(refresh)

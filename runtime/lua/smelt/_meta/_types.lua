@@ -51,7 +51,7 @@
 ---@class smelt.cell.Cell
 ---@field get fun(): any Return the current cell value, or `nil` when the cell isn't declared.
 ---@field set fun(value: any): smelt.cell.Cell Publish a new value. Returns the handle for chaining.
----@field subscribe fun(handler: fun(value: any)): smelt.Reg Register `handler(value)` to fire on every `set`. Returns a `Reg` whose `:remove()` drops the subscription. When called before the host pointer is live the subscription is queued and bound on the next host bring-up.
+---@field subscribe fun(handler: fun(value: any)): smelt.Reg Register `handler(value)` to fire on every `set`. Returns a `Reg` whose `:remove()` drops the subscription. No-op when called before the host pointer is live (e.g. the pre-TUI plugin pass) — the module body re-runs inside `bring_up_lua` where the bind takes effect.
 ---@field name fun(): string Return the cell name.
 
 --- Flag specification accepted by `smelt.cli.register_flag`.
@@ -132,9 +132,8 @@
 ---@field close fun(): nil Close the overlay. No-op if already closed.
 ---@field key fun(chord: string, func: fun(value: table)): smelt.Reg Bind `func` to `chord` on this overlay. Fires when any leaf of the overlay holds focus, after a per-window keymap miss but before global Lua keymaps. Returns a Reg whose `:remove()` undoes the binding.
 
---- Handle returned by `smelt.paint.register`. Usable directly in `smelt.overlay.layout.leaf(handle, opts)` (it stands in for a Win or raw paint id).
+--- Opaque handle returned by `smelt.paint.register`. Usable directly in `smelt.overlay.layout.leaf(handle, opts)` (it stands in for a Win in layout leaves).
 ---@class smelt.paint.Paint
----@field id fun(): integer Return the underlying paint id (a u64 usable anywhere a Win id / paint id is accepted).
 ---@field remove fun(): boolean Drop the paint callback. Returns `true` if it was still registered. Subsequent paints of this id no-op.
 
 --- Grid slice passed to paint callbacks. Methods delegate to the live grid slice for the current frame; out-of-scope calls fail cleanly.

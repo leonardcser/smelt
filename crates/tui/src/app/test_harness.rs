@@ -1949,10 +1949,10 @@ mod tests {
     fn reload_lua_reaps_anonymous_overlay_keeps_named() {
         let tmp = tempfile::tempdir().unwrap();
         let init = tmp.path().join("init.lua");
-        // First version opens both a named overlay and an unscoped
-        // anonymous overlay. The unscoped one is created via
-        // `__smelt_unscoped(...)` (an explicit escape hatch) so
-        // auto-naming doesn't kick in — that's the path that gets reaped.
+        // First version opens both a named overlay and a plain
+        // anonymous overlay. init.lua doesn't call `smelt.plugin(...)`,
+        // so its loader frame is unnamed and anonymous resources stay
+        // anonymous — they get reaped on /reload.
         std::fs::write(
             &init,
             r#"
@@ -1970,17 +1970,15 @@ mod tests {
             state.open = true
             attach()
 
-            -- Unscoped anonymous overlay: bypasses auto-naming and
-            -- should be reaped on /reload.
-            __smelt_unscoped(function()
-                local b2 = smelt.buf.new()
-                local w2 = smelt.win.new(b2, {})
-                smelt.overlay.new({
-                    anchor = "screen_at", corner = "se",
-                    row = 0, col = 0, width = 20, height = 5,
-                    layout = smelt.overlay.layout.leaf(w2),
-                })
-            end)
+            -- Anonymous overlay: init.lua's frame is unnamed (no
+            -- `smelt.plugin(...)` call), so this gets reaped on /reload.
+            local b2 = smelt.buf.new()
+            local w2 = smelt.win.new(b2, {})
+            smelt.overlay.new({
+                anchor = "screen_at", corner = "se",
+                row = 0, col = 0, width = 20, height = 5,
+                layout = smelt.overlay.layout.leaf(w2),
+            })
             "#,
         )
         .unwrap();
@@ -2046,49 +2044,39 @@ mod tests {
             r#"
             local state = smelt.state("paint_id_probe")
             local function painter(_slice, _ctx) end
-            -- `paint.register` returns a Paint handle; stash its numeric
-            -- id so the Rust side can compare across reload. The `anon`
-            -- slot uses `__smelt_unscoped` so auto-naming doesn't kick in
-            -- and the id can be observed reaped.
-            state.named = smelt.paint.register(painter, { name = "probe.named" }):id()
-            state.anon = __smelt_unscoped(function()
-                return smelt.paint.register(painter):id()
-            end)
+            -- No `smelt.plugin(...)` call → init.lua's loader frame
+            -- stays unnamed, so the unnamed register call below is
+            -- anonymous and gets reaped on /reload. The explicit
+            -- name = "probe.named" slot survives.
+            smelt.paint.register(painter, { name = "probe.named" })
+            smelt.paint.register(painter)
+            state.dummy = true
             "#,
         )
         .unwrap();
 
         let mut app = TestApp::builder().with_init_lua(&init).build();
 
-        let read_state_int = |rt: &crate::lua::LuaRuntime, key: &str| -> Option<u64> {
-            rt.lua
-                .load(format!(
-                    "local s = __smelt_state__['paint_id_probe']; return s and s.{key} or nil"
-                ))
-                .eval::<Option<i64>>()
-                .ok()
-                .flatten()
-                .map(|v| v as u64)
-        };
-
-        let pre_named = read_state_int(&app.app.lua, "named").expect("named pre id");
-        let pre_anon = read_state_int(&app.app.lua, "anon").expect("anon pre id");
-        assert!(app
+        let pre_named = app
             .app
             .paint_registry
-            .contains(crate::smelt_term::layout::PaintId(pre_named)));
-        assert!(app
-            .app
-            .paint_registry
-            .contains(crate::smelt_term::layout::PaintId(pre_anon)));
+            .id_by_name("probe.named")
+            .expect("named pre id");
+        // The anonymous slot has no name binding; locate it as the only
+        // un-named PaintId currently registered.
+        let pre_anon = find_anon_paint(&app.app);
 
         {
             let _g = crate::lua::install_app_ptr(&mut app.app);
             app.app.reload_lua();
         }
 
-        let post_named = read_state_int(&app.app.lua, "named").expect("named post id");
-        let post_anon = read_state_int(&app.app.lua, "anon").expect("anon post id");
+        let post_named = app
+            .app
+            .paint_registry
+            .id_by_name("probe.named")
+            .expect("named post id");
+        let post_anon = find_anon_paint(&app.app);
         assert_eq!(
             pre_named, post_named,
             "named paint slot must keep stable PaintId across reload"
@@ -2098,19 +2086,26 @@ mod tests {
             "anonymous paint slot must allocate a fresh id on reload"
         );
         assert!(
-            !app.app
-                .paint_registry
-                .contains(crate::smelt_term::layout::PaintId(pre_anon)),
+            !app.app.paint_registry.contains(pre_anon),
             "old anonymous PaintId must be reaped"
         );
-        assert!(app
-            .app
-            .paint_registry
-            .contains(crate::smelt_term::layout::PaintId(post_named)));
-        assert!(app
-            .app
-            .paint_registry
-            .contains(crate::smelt_term::layout::PaintId(post_anon)));
+        assert!(app.app.paint_registry.contains(post_named));
+        assert!(app.app.paint_registry.contains(post_anon));
+    }
+
+    /// Find the single anonymous paint id (no name binding) currently
+    /// registered. Used by paint-reload tests to track the throwaway
+    /// slot across `/reload` without needing Lua-side reflection.
+    fn find_anon_paint(app: &crate::app::TuiApp) -> crate::smelt_term::layout::PaintId {
+        let reg = &app.paint_registry;
+        let named: std::collections::HashSet<crate::smelt_term::layout::PaintId> = ["probe.named"]
+            .iter()
+            .filter_map(|n| reg.id_by_name(n))
+            .collect();
+        reg.all_ids()
+            .into_iter()
+            .find(|id| !named.contains(id))
+            .expect("anonymous paint id present")
     }
 
     /// `lifecycle.on("ready", fn)` hooks must re-drain on `/reload` so
@@ -2257,16 +2252,14 @@ mod tests {
                 row = 0, col = 0, width = 30, height = 8,
                 layout = smelt.overlay.layout.leaf(w1),
             })
-            -- Unscoped anonymous overlay (no auto-name): must be reaped.
-            __smelt_unscoped(function()
-                local b2 = smelt.buf.new()
-                local w2 = smelt.win.new(b2, {})
-                smelt.overlay.new({
-                    anchor = "screen_at", corner = "se",
-                    row = 0, col = 0, width = 20, height = 5,
-                    layout = smelt.overlay.layout.leaf(w2),
-                })
-            end)
+            -- Anonymous overlay (init.lua frame unnamed): must be reaped.
+            local b2 = smelt.buf.new()
+            local w2 = smelt.win.new(b2, {})
+            smelt.overlay.new({
+                anchor = "screen_at", corner = "se",
+                row = 0, col = 0, width = 20, height = 5,
+                layout = smelt.overlay.layout.leaf(w2),
+            })
 
             -- smelt.state slot
             local s = smelt.state("seed_plugin")

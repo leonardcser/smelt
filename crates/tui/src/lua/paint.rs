@@ -100,6 +100,16 @@ impl PaintRegistry {
         self.handles.contains_key(&id)
     }
 
+    #[cfg(test)]
+    pub(crate) fn id_by_name(&self, name: &str) -> Option<PaintId> {
+        self.named.get(name).copied()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn all_ids(&self) -> Vec<PaintId> {
+        self.handles.keys().copied().collect()
+    }
+
     /// Drop every anonymous paint→handle mapping; preserve named slots
     /// so their `PaintId`s stay stable across `/reload`. Used by
     /// `TuiApp::clear_tui_for_reload`. Plugins re-register named slots

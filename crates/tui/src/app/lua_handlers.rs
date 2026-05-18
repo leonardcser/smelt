@@ -60,10 +60,6 @@ impl TuiApp {
         self.input.command_arg_sources = self.lua.list_command_args();
         self.refresh_agent_inputs();
         self.reconcile_mcp_servers();
-        // Bind any `cell:subscribe` calls queued before the host pointer
-        // was live (e.g. from the pre-TUI plugin pass that extracts engine
-        // config). The host pointer is live for the rest of this scope.
-        self.drain_pending_cell_subs();
         let hook_errors = self.lua.drain_lifecycle_hooks("ready", move |lua| {
             let t = lua.create_table()?;
             t.set("kind", kind)?;
@@ -73,24 +69,6 @@ impl TuiApp {
             self.notify_error(he);
         }
         err
-    }
-
-    /// Drain the deferred-subscribe queue from `LuaShared` into the live
-    /// `Cells` registry. Each entry's shared state flips so the matching
-    /// `LuaReg:remove()` knows whether to drop a queue entry or
-    /// unsubscribe a bound id.
-    fn drain_pending_cell_subs(&mut self) {
-        let pending: Vec<_> = self
-            .lua
-            .core_shared()
-            .pending_cell_subs
-            .lock()
-            .map(|mut q| std::mem::take(&mut *q))
-            .unwrap_or_default();
-        if pending.is_empty() {
-            return;
-        }
-        self.core.cells.drain_pending_lua_subs(pending);
     }
 
     /// Re-read filesystem-backed inputs that feed the agent's system prompt
