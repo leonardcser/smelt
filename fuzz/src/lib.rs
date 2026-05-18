@@ -263,11 +263,12 @@ pub enum FuzzOp {
     DenyFirstConfirm {
         message: Option<String>,
     },
-    /// Emit `ToolDispatch`. With no Lua tool registered for `tool_name`,
-    /// `execute_tool` returns `Immediate { is_error: true }` and the TUI
-    /// sends a `ToolResult` UiCommand back. Exercises the "unknown tool"
-    /// error path and proves `handle_tool_call` is panic-free against
-    /// arbitrary names and arg payloads.
+    /// Emit `ToolDispatch`. Unknown `tool_name`s take the `Immediate
+    /// { is_error: true }` path and queue a `ToolResult` UiCommand back
+    /// in-step; known tools (autoloaded Lua) may yield Pending and resolve
+    /// asynchronously, queueing 0 results this step. Exercises the dispatch
+    /// surface and proves `handle_tool_call` is panic-free against arbitrary
+    /// names and arg payloads.
     EngineToolDispatch {
         req_id: u8,
         call_id: u8,
@@ -835,9 +836,9 @@ fn run_check(check: PostCheck, pre: &Snapshot, post: &Snapshot, new_actions: &[A
             if pre.agent_running {
                 let new_results =
                     count_action(new_actions, |c| matches!(c, UiCommand::ToolResult { .. }));
-                assert_eq!(
-                    new_results, 1,
-                    "ToolDispatch with no tool registered should queue exactly one ToolResult (got {new_results})",
+                assert!(
+                    new_results <= 1,
+                    "ToolDispatch should queue at most one ToolResult in-step (got {new_results})",
                 );
             }
         }
