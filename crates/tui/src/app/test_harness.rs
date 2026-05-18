@@ -868,8 +868,9 @@ impl TestApp {
         // `agent = Some(...)`, and `discard_turn` always calls
         // `working.finish` before nulling `agent`. The reverse direction
         // (agent.is_some() => working.is_animating) does NOT hold —
-        // stale-epoch `CompactionComplete` legitimately finishes working
-        // while the turn keeps running — so we only assert one way.
+        // host-driven recovery hooks (e.g. on_context_limit) can pause
+        // the animation while the turn keeps running — so we only assert
+        // one way.
         if self.app.working.is_animating() {
             assert!(
                 self.app.agent.is_some(),
