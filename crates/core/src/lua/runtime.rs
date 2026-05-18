@@ -30,6 +30,12 @@ const BOOTSTRAP_FILES: &[&str] = &[
 /// Subdirectories whose files are `require`'d at startup as side-effect registrations.
 const AUTOLOAD_DIRS: &[&str] = &["tools", "commands", "plugins", "dialogs"];
 
+/// Subdirectory whose files run during the Early phase under the restricted
+/// `smelt` view, BEFORE user `early.lua`. Plugins drop a file here to declare
+/// CLI flags (`smelt.cli.register_flag{}`) or opt out of bundled modules
+/// (`smelt.builtins.disable{}`).
+const EARLY_DIRS: &[&str] = &["early"];
+
 /// Bundled plugins that ship with smelt but are NOT autoloaded. Users opt in by
 /// calling `require("smelt.plugins.<name>")` from their `init.lua`.
 const OPTIONAL_PLUGINS: &[&str] = &[
@@ -152,6 +158,36 @@ impl LuaRuntime {
         }
     }
 
+    /// Run every bundled `runtime/lua/smelt/early/*.lua` file during the
+    /// Early phase under the restricted `smelt` view. Intended for plugins
+    /// shipped with smelt that want to declare a CLI flag via
+    /// `smelt.cli.register_flag{}` (so argv parsing picks it up) without
+    /// forcing every user to edit their `early.lua`. Runs BEFORE
+    /// [`Self::load_early_init`] so user code can override.
+    pub fn load_bundled_early(&mut self) {
+        if self.load_error.is_some() {
+            return;
+        }
+        let modules = early_modules();
+        if modules.is_empty() {
+            return;
+        }
+        let result = self.with_early_smelt(|this| {
+            for name in &modules {
+                let code = format!("require('{name}')");
+                this.lua
+                    .load(&code)
+                    .set_name(name.as_str())
+                    .exec()
+                    .map_err(|e| LuaError::RuntimeError(format!("bundled early {name}: {e}")))?;
+            }
+            Ok(())
+        });
+        if let Err(e) = result {
+            self.load_error = Some(format!("bundled early init: {e}"));
+        }
+    }
+
     /// Evaluate `~/.config/smelt/early.lua` if present. Intended to run
     /// BEFORE [`autoload_modules`] so a user can call
     /// `smelt.builtins.disable{}` / `smelt.cli.register_flag{}` and
@@ -200,14 +236,31 @@ impl LuaRuntime {
     fn run_early_phase(&mut self, path: &std::path::Path, name: &str) -> LuaResult<()> {
         let src = std::fs::read_to_string(path)
             .map_err(|e| LuaError::RuntimeError(format!("read {name}: {e}")))?;
-        // Save full smelt, install restricted view, eval, restore.
+        self.with_early_smelt(|this| this.lua.load(&src).set_name(name).exec())
+    }
+
+    /// Swap the global `smelt` for the restricted Early-phase view, set the
+    /// phase, run `body`, then restore the full `smelt` regardless of
+    /// outcome. The single place that owns the Early-phase smelt-view
+    /// contract — every early-phase loader (`run_early_phase`,
+    /// `load_bundled_early`) routes through here. Body errors win over
+    /// restore errors so a real user mistake isn't masked by table-restore
+    /// noise.
+    fn with_early_smelt<F, R>(&mut self, body: F) -> LuaResult<R>
+    where
+        F: FnOnce(&mut Self) -> LuaResult<R>,
+    {
         let full_smelt: mlua::Table = self.lua.globals().get("smelt")?;
         let restricted = self.build_early_smelt_view(&full_smelt)?;
         self.lua.globals().set("smelt", restricted)?;
         self.shared.set_phase(crate::lua::Phase::Early);
-        let result = self.lua.load(&src).set_name(name).exec();
-        self.lua.globals().set("smelt", full_smelt)?;
-        result
+        let body_result = body(self);
+        let restore_result = self.lua.globals().set("smelt", full_smelt);
+        match (body_result, restore_result) {
+            (Err(e), _) => Err(e),
+            (Ok(_), Err(e)) => Err(e),
+            (Ok(v), Ok(())) => Ok(v),
+        }
     }
 
     /// Build the restricted `smelt` table seen by `early.lua`. Exposes
@@ -634,6 +687,29 @@ impl LuaRuntime {
     /// `!Send` `LuaHandle`s in `commands`.
     pub fn command_names_handle(&self) -> Arc<std::sync::Mutex<std::collections::HashSet<String>>> {
         Arc::clone(&self.shared.command_names)
+    }
+
+    /// Invoke every `smelt.lifecycle.on(event, fn)` callback in registration
+    /// order, then drop them. The host calls this at the corresponding phase
+    /// (today: `"ready"` after Lua bootstrap and argv parse, before the main
+    /// loop). Per-hook errors are returned so the caller can surface them as
+    /// in-app notifications without aborting the remaining hooks.
+    pub fn drain_lifecycle_hooks(&mut self, event: &str) -> Vec<String> {
+        let hooks = self.shared.drain_lifecycle_hooks(event);
+        let mut errors = Vec::with_capacity(hooks.len());
+        for handle in hooks {
+            let f = match self.lua.registry_value::<mlua::Function>(&handle.key) {
+                Ok(f) => f,
+                Err(e) => {
+                    errors.push(format!("lifecycle.{event}: stale handle: {e}"));
+                    continue;
+                }
+            };
+            if let Err(e) = f.call::<()>(()) {
+                errors.push(format!("lifecycle.{event}: {e}"));
+            }
+        }
+        errors
     }
 
     pub fn command_blocks_while_busy(&self, name: &str) -> Option<bool> {
@@ -1634,6 +1710,25 @@ pub fn autoload_modules() -> Vec<String> {
     autoload_modules_filtered(&std::collections::HashSet::new())
 }
 
+/// Bundled `runtime/lua/smelt/early/*.lua` modules to `require` during the
+/// Early phase. Sorted lex order for deterministic registration.
+pub fn early_modules() -> Vec<String> {
+    let mut out = Vec::new();
+    for dir_name in EARLY_DIRS {
+        let Some(dir) = EMBEDDED_LUA.get_dir(*dir_name) else {
+            continue;
+        };
+        let mut names: Vec<String> = dir
+            .files()
+            .filter(|f| f.path().extension().and_then(|s| s.to_str()) == Some("lua"))
+            .filter_map(|f| f.path().to_str().map(path_to_module))
+            .collect();
+        names.sort();
+        out.extend(names);
+    }
+    out
+}
+
 fn register_embedded_searcher(lua: &Lua) -> LuaResult<()> {
     register_module_searcher_with_roots(lua, module_overlay_roots())
 }
@@ -1852,16 +1947,106 @@ mod tests {
                 r#"
                 smelt.cmd.register("plug_cmd", function() end)
                 smelt.tools.middleware("bash", { before = function(ctx) return ctx end })
+                smelt.lifecycle.on_ready(function() end)
                 "#,
             )
             .exec()
             .expect("register");
         assert!(rt.shared.commands.lock().unwrap().contains_key("plug_cmd"));
         assert!(!rt.shared.hooks.tool_before.is_empty());
+        assert_eq!(
+            rt.shared
+                .lifecycle_hooks
+                .lock()
+                .unwrap()
+                .get("ready")
+                .map(|v| v.len()),
+            Some(1)
+        );
 
         rt.shared.clear_lua_handles();
         assert!(rt.shared.commands.lock().unwrap().is_empty());
         assert!(rt.shared.hooks.tool_before.is_empty());
+        assert!(rt.shared.lifecycle_hooks.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn lifecycle_on_ready_fires_in_registration_order_and_drains() {
+        let mut rt = LuaRuntime::new();
+        rt.lua
+            .load(
+                r#"
+                LIFECYCLE_LOG = {}
+                smelt.lifecycle.on_ready(function() table.insert(LIFECYCLE_LOG, "a") end)
+                smelt.lifecycle.on("ready", function() table.insert(LIFECYCLE_LOG, "b") end)
+                "#,
+            )
+            .exec()
+            .expect("register hooks");
+
+        let errs = rt.drain_lifecycle_hooks("ready");
+        assert!(errs.is_empty(), "no per-hook errors expected, got {errs:?}");
+        let log: Vec<String> = rt
+            .lua
+            .load("return LIFECYCLE_LOG")
+            .eval()
+            .expect("read log");
+        assert_eq!(log, vec!["a".to_string(), "b".to_string()]);
+
+        // Second drain returns nothing — hooks are one-shot.
+        let again = rt.drain_lifecycle_hooks("ready");
+        assert!(again.is_empty());
+        assert!(rt
+            .shared
+            .lifecycle_hooks
+            .lock()
+            .unwrap()
+            .get("ready")
+            .is_none());
+    }
+
+    #[test]
+    fn lifecycle_unknown_event_drains_to_empty() {
+        let mut rt = LuaRuntime::new();
+        let errs = rt.drain_lifecycle_hooks("never_emitted");
+        assert!(errs.is_empty());
+    }
+
+    #[test]
+    fn lifecycle_hook_error_isolates_per_callback() {
+        let mut rt = LuaRuntime::new();
+        rt.lua
+            .load(
+                r#"
+                LIFECYCLE_RAN = 0
+                smelt.lifecycle.on_ready(function() error("boom") end)
+                smelt.lifecycle.on_ready(function() LIFECYCLE_RAN = LIFECYCLE_RAN + 1 end)
+                "#,
+            )
+            .exec()
+            .expect("register");
+
+        let errs = rt.drain_lifecycle_hooks("ready");
+        assert_eq!(errs.len(), 1, "expected one error, got {errs:?}");
+        assert!(
+            errs[0].contains("boom"),
+            "error message preserved: {}",
+            errs[0]
+        );
+        let ran: i64 = rt.lua.load("return LIFECYCLE_RAN").eval().unwrap();
+        assert_eq!(ran, 1, "second hook still ran after first one errored");
+    }
+
+    #[test]
+    fn bundled_early_modules_run_in_lex_order_with_restricted_smelt() {
+        let modules = early_modules();
+        assert!(
+            modules.contains(&"smelt.early.resume".to_string()),
+            "bundled early should include smelt.early.resume, got {modules:?}"
+        );
+        let mut sorted = modules.clone();
+        sorted.sort();
+        assert_eq!(modules, sorted, "early modules must be lex-sorted");
     }
 
     #[test]

@@ -33,6 +33,15 @@ pub(crate) fn install_app_ptr(app: &mut TuiApp) -> AppPtrGuard {
     }
 }
 
+/// Run `body` with the APP pointer installed for its duration. The
+/// equivalent of `let _g = install_app_ptr(app); body(app)`, but reads
+/// straight-line at the call site — preferred for one-shot Lua entries
+/// like draining lifecycle hooks.
+pub(crate) fn with_app_ptr<R>(app: &mut TuiApp, body: impl FnOnce(&mut TuiApp) -> R) -> R {
+    let _guard = install_app_ptr(app);
+    body(app)
+}
+
 /// Drop guard returned by [`install_app_ptr`]. Restores the previous slot on drop.
 pub(crate) struct AppPtrGuard {
     old_app: Option<NonNull<TuiApp>>,

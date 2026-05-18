@@ -23,6 +23,7 @@ mod html;
 mod http;
 mod image;
 pub mod layout;
+mod lifecycle;
 mod mcp;
 mod messages;
 pub mod mode;
@@ -138,6 +139,7 @@ pub fn register_host_api(
     http::register(lua, smelt)?;
     image::register(lua, smelt)?;
     layout::register(lua, smelt)?;
+    lifecycle::register(lua, smelt, shared)?;
     mcp::register(lua, smelt, shared)?;
     messages::register(lua, smelt, shared)?;
     mode::register(lua, smelt)?;

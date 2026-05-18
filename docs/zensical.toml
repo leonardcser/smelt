@@ -45,6 +45,7 @@ nav = [
     { "`smelt.image`" = "reference/api/image.md" },
     { "`smelt.keymap`" = "reference/api/keymap.md" },
     { "`smelt.layout`" = "reference/api/layout.md" },
+    { "`smelt.lifecycle`" = "reference/api/lifecycle.md" },
     { "`smelt.mcp`" = "reference/api/mcp.md" },
     { "`smelt.messages`" = "reference/api/messages.md" },
     { "`smelt.metrics`" = "reference/api/metrics.md" },

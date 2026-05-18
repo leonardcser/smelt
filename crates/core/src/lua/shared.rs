@@ -82,6 +82,12 @@ pub struct LuaShared {
     /// `LuaHandle`, but worker threads (e.g. parallel block layout) need
     /// to ask "is `/foo` a known command?" — this is the answer.
     pub command_names: Arc<Mutex<HashSet<String>>>,
+    /// Lua callbacks queued via `smelt.lifecycle.on(event, fn)` (or the
+    /// `on_ready` shorthand). The host drains one event's queue at the
+    /// matching phase — e.g. `ready` after bootstrap + argv parse, before
+    /// the main loop. Keyed by event name (string) so adding a new
+    /// lifecycle event needs no Rust-side schema changes.
+    pub lifecycle_hooks: Mutex<HashMap<String, Vec<LuaHandle>>>,
     pub keymaps: Mutex<HashMap<(String, String), LuaHandle>>,
     /// Vec preserves registration order; re-registering an existing name updates in place.
     pub statusline_sources: Mutex<Vec<(String, StatusSource)>>,
@@ -203,6 +209,7 @@ impl Default for LuaShared {
         Self {
             commands: Mutex::new(HashMap::new()),
             command_names: Arc::new(Mutex::new(HashSet::new())),
+            lifecycle_hooks: Mutex::new(HashMap::new()),
             keymaps: Mutex::new(HashMap::new()),
             statusline_sources: Mutex::new(Vec::new()),
             tools: Mutex::new(HashMap::new()),
@@ -251,6 +258,9 @@ impl LuaShared {
         if let Ok(mut s) = self.command_names.lock() {
             s.clear();
         }
+        if let Ok(mut m) = self.lifecycle_hooks.lock() {
+            m.clear();
+        }
         if let Ok(mut m) = self.keymaps.lock() {
             m.clear();
         }
@@ -284,6 +294,25 @@ impl LuaShared {
             inbox: Arc::clone(&self.json_inbox),
             wakeup: self.wakeup_tx.get().cloned(),
         }
+    }
+
+    /// Queue `handle` under the lifecycle event named `event`. Order of
+    /// registration is preserved per event.
+    pub fn register_lifecycle_hook(&self, event: &str, handle: LuaHandle) {
+        if let Ok(mut m) = self.lifecycle_hooks.lock() {
+            m.entry(event.to_string()).or_default().push(handle);
+        }
+    }
+
+    /// Take every queued hook for `event`, leaving the slot empty so the
+    /// next round starts fresh. Order matches registration. Returns empty
+    /// on poison or unknown event.
+    pub fn drain_lifecycle_hooks(&self, event: &str) -> Vec<LuaHandle> {
+        self.lifecycle_hooks
+            .lock()
+            .ok()
+            .and_then(|mut m| m.remove(event))
+            .unwrap_or_default()
     }
 }
 

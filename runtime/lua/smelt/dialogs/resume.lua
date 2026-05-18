@@ -96,6 +96,18 @@ local function refresh_list(list_buf, filtered, now_ms)
   end
 end
 
+-- Wire the `--resume` CLI flag (declared in `smelt/early/resume.lua`) to a
+-- startup action: nil = no flag, "" = open picker, else = load that session.
+smelt.lifecycle.on_ready(function()
+  local v = smelt.cli.get("resume")
+  if v == nil then return end
+  if v == "" then
+    smelt.cmd.run("resume")
+  else
+    smelt.session.load(v)
+  end
+end)
+
 smelt.cmd.register("resume", function()
   smelt.spawn(function()
     local entries = smelt.session.list()

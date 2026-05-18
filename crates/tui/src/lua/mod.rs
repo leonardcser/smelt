@@ -12,7 +12,7 @@ mod tasks;
 pub(crate) mod ui_ops;
 
 pub use app_ref::try_with_app;
-pub(crate) use app_ref::{install_app_ptr, try_with_core, with_app};
+pub(crate) use app_ref::{install_app_ptr, try_with_core, with_app, with_app_ptr};
 
 pub(crate) use smelt_core::lua::{LuaHandle, TaskDriveOutput, ToolEnv, ToolExecResult};
 
@@ -352,6 +352,19 @@ impl LuaRuntime {
 
     pub(crate) fn take_load_error(&mut self) -> Option<String> {
         self.core.load_error.take()
+    }
+
+    /// Run every bundled `runtime/lua/smelt/early/*.lua` file. Call BEFORE
+    /// [`Self::load_early_init`] so user code can override flag declarations.
+    pub fn load_bundled_early(&mut self) {
+        self.core.load_bundled_early();
+    }
+
+    /// Drain `smelt.lifecycle.on(event, fn)` callbacks for `event`. Returns
+    /// per-hook errors so the caller can surface them as notifications;
+    /// invocation failures are isolated so one hook can't suppress the rest.
+    pub fn drain_lifecycle_hooks(&mut self, event: &str) -> Vec<String> {
+        self.core.drain_lifecycle_hooks(event)
     }
 
     /// Evaluate `~/.config/smelt/early.lua` (if present). Call BEFORE

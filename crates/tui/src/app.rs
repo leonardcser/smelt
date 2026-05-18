@@ -831,6 +831,15 @@ impl TuiApp {
             tokio::signal::unix::signal(tokio::signal::unix::SignalKind::window_change())
                 .expect("install SIGWINCH listener");
 
+        // Drain `smelt.lifecycle.on("ready", fn)` hooks. Plugins use these
+        // to react to their own CLI flags (declared via
+        // `smelt.cli.register_flag` in `early/*.lua`) — e.g. `/resume` opens
+        // its picker here rather than arriving through `initial_message`.
+        let errors = crate::lua::with_app_ptr(self, |app| app.lua.drain_lifecycle_hooks("ready"));
+        for err in errors {
+            self.notify_error(err);
+        }
+
         // Auto-submit initial message if provided (e.g. `agent "fix the bug"`).
         if let Some(msg) = initial_message {
             let trimmed = msg.trim();

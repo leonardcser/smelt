@@ -89,8 +89,6 @@ pub struct Args {
     color: ColorMode,
     #[arg(short, long, help = "Show tool output in headless mode")]
     verbose: bool,
-    #[arg(short, long, num_args = 0..=1, default_missing_value = "", value_name = "SESSION_ID")]
-    resume: Option<String>,
     #[arg(
         long,
         value_name = "KEY=VALUE",
@@ -145,6 +143,7 @@ async fn main() {
     // We do the early run BEFORE detecting the `auth` subcommand
     // because clap can't know about Lua flags until early has fired.
     let mut lua_runtime = tui::lua::LuaRuntime::new();
+    lua_runtime.load_bundled_early();
     lua_runtime.load_early_init();
     let cwd = std::env::current_dir().unwrap_or_default();
     lua_runtime.load_project_early_init(&cwd);
@@ -535,17 +534,6 @@ async fn main() {
         }
         if !app.core.config.mode_cycle.contains(&app.core.config.mode) {
             app.core.config.mode_cycle.push(app.core.config.mode);
-        }
-
-        if let Some(ref resume_val) = args.resume {
-            if resume_val.is_empty() {
-                args.message = Some("/resume".to_string());
-            } else if let Some(loaded) = smelt_core::session::load(resume_val) {
-                app.load_session(loaded);
-            } else {
-                eprintln!("error: session '{}' not found", resume_val);
-                std::process::exit(1);
-            }
         }
 
         redirect_stderr();
