@@ -105,12 +105,14 @@ pub(crate) async fn engine_task(
                         spawn_engine_ask(
                             &config,
                             &client,
-                            id,
-                            system,
-                            messages,
-                            model,
-                            response_format,
-                            reasoning_effort,
+                            AskTask {
+                                id,
+                                system,
+                                messages,
+                                model,
+                                response_format,
+                                reasoning_effort,
+                            },
                             &event_tx,
                         );
                     }
@@ -156,18 +158,32 @@ fn resolve_ask_target(config: &EngineConfig, model: Option<AskModel>) -> (ApiCon
     }
 }
 
-#[allow(clippy::too_many_arguments)]
+/// One pending out-of-band LLM call. Mirrors the fields plumbed through
+/// `UiCommand::EngineAsk`; bundles them so the spawn surface stays a
+/// two-arg function (config + task) instead of an ever-growing arg list.
+pub(crate) struct AskTask {
+    pub id: u64,
+    pub system: String,
+    pub messages: Vec<protocol::Message>,
+    pub model: Option<AskModel>,
+    pub response_format: Option<protocol::AskResponseFormat>,
+    pub reasoning_effort: ReasoningEffort,
+}
+
 fn spawn_engine_ask(
     config: &EngineConfig,
     client: &reqwest::Client,
-    id: u64,
-    system: String,
-    mut messages: Vec<protocol::Message>,
-    model: Option<AskModel>,
-    response_format: Option<protocol::AskResponseFormat>,
-    reasoning_effort: ReasoningEffort,
+    task: AskTask,
     event_tx: &mpsc::UnboundedSender<EngineEvent>,
 ) {
+    let AskTask {
+        id,
+        system,
+        mut messages,
+        model,
+        response_format,
+        reasoning_effort,
+    } = task;
     let (api, model_name) = resolve_ask_target(config, model);
     let provider = build_provider(
         &api,
@@ -502,12 +518,14 @@ impl<'a> Turn<'a> {
                 spawn_engine_ask(
                     self.config,
                     self.http_client,
-                    id,
-                    system,
-                    messages,
-                    model,
-                    response_format,
-                    reasoning_effort,
+                    AskTask {
+                        id,
+                        system,
+                        messages,
+                        model,
+                        response_format,
+                        reasoning_effort,
+                    },
                     self.event_tx,
                 );
                 true
