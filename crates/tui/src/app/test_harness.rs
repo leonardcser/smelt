@@ -381,17 +381,6 @@ impl TestApp {
         self.app.core.session.messages.len()
     }
 
-    /// Counts of token / cost / turn-meta snapshots. Used by replace-
-    /// messages invariants — `replace_messages` clears all three.
-    pub fn snapshot_counts(&self) -> (usize, usize, usize) {
-        let s = &self.app.core.session;
-        (
-            s.token_snapshots.len(),
-            s.cost_snapshots.len(),
-            s.turn_metas.len(),
-        )
-    }
-
     /// `turn_id` of the active agent turn, if any. Used by fuzz ops that
     /// synthesize engine events whose dispatch is gated on a matching id
     /// (e.g. `TurnComplete`, `Messages`).
@@ -438,14 +427,6 @@ impl TestApp {
     /// a block was pushed (e.g. `ProcessCompleted`).
     pub fn transcript_block_count(&self) -> usize {
         self.app.transcript.history.len()
-    }
-
-    /// Session title / slug.
-    pub fn session_title(&self) -> Option<String> {
-        self.app.core.session.title.clone()
-    }
-    pub fn session_slug(&self) -> Option<String> {
-        self.app.core.session.slug.clone()
     }
 
     /// Side-channel: insert a synthetic image attachment at the prompt
