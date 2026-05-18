@@ -126,7 +126,7 @@ pub fn register_host_api(
 ) -> LuaResult<()> {
     crate::lua::reg::register_class_doc();
     builtins::register(lua, smelt, shared)?;
-    cell::register(lua, smelt)?;
+    cell::register(lua, smelt, shared)?;
     cli::register(lua, smelt, shared)?;
     clipboard::register(lua, smelt)?;
     cmd::register(lua, smelt, shared)?;

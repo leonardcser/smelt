@@ -228,6 +228,36 @@ impl Cells {
         self.pending.clear();
     }
 
+    /// Bind every deferred subscription queued in `pending` (from
+    /// `cell:subscribe` calls made before the host pointer was live) to
+    /// the live cell registry. Each entry's shared state transitions
+    /// `Pending → Bound { sub_id }` so the matching `LuaReg:remove()`
+    /// unsubscribes correctly. Entries already flipped to `Removed`
+    /// (user dropped the `Reg` before drain) are skipped. Entries whose
+    /// cell isn't declared get marked `Removed` — the subscription
+    /// silently never bound, matching pre-deferred-safe behavior.
+    pub fn drain_pending_lua_subs(&mut self, pending: Vec<crate::lua::shared::PendingCellSub>) {
+        use crate::lua::shared::PendingSubState;
+        use std::rc::Rc;
+        for mut entry in pending {
+            let mut state = match entry.state.lock() {
+                Ok(s) => s,
+                Err(_) => continue,
+            };
+            if !matches!(*state, PendingSubState::Pending) {
+                continue;
+            }
+            let Some(handle) = entry.handle.take() else {
+                *state = PendingSubState::Removed;
+                continue;
+            };
+            match self.subscribe_kind(&entry.name, SubscriberKind::Lua(Rc::new(handle))) {
+                Some(sub_id) => *state = PendingSubState::Bound { sub_id },
+                None => *state = PendingSubState::Removed,
+            }
+        }
+    }
+
     /// Publish `value` only when it differs from the current slot. Skips subscribers on no-op writes.
     pub fn publish_if_changed<T>(&mut self, name: &str, value: T) -> bool
     where
@@ -869,6 +899,78 @@ mod tests {
         assert!(!c.has_pending());
         // Unsubscribing again is a no-op.
         assert!(!c.unsubscribe_glob(id));
+    }
+
+    #[test]
+    fn drain_pending_lua_subs_binds_to_live_cells() {
+        use crate::lua::shared::{PendingCellSub, PendingSubState};
+        use std::sync::{Arc as StdArc, Mutex};
+        let lua = Lua::new();
+        let mut c = Cells::new();
+        c.declare("flag", false);
+
+        let state = StdArc::new(Mutex::new(PendingSubState::Pending));
+        let func: mlua::Function = lua.load("function(v) end").eval().expect("load");
+        let h = LuaHandle::from_func(&lua, func).expect("registry");
+        let pending = vec![PendingCellSub {
+            pending_id: 1,
+            name: "flag".into(),
+            handle: Some(h),
+            state: state.clone(),
+        }];
+        c.drain_pending_lua_subs(pending);
+        match &*state.lock().unwrap() {
+            PendingSubState::Bound { sub_id: _ } => {}
+            other => panic!("expected Bound, got {other:?}"),
+        }
+
+        // Publishing to the now-bound subscription must queue a fire.
+        c.set_dyn("flag", Rc::new(true));
+        assert!(c.has_pending());
+    }
+
+    #[test]
+    fn drain_pending_lua_subs_skips_removed_entries() {
+        use crate::lua::shared::{PendingCellSub, PendingSubState};
+        use std::sync::{Arc as StdArc, Mutex};
+        let lua = Lua::new();
+        let mut c = Cells::new();
+        c.declare("flag", false);
+
+        // Plugin called subscribe and then `:remove()` before drain ran.
+        let state = StdArc::new(Mutex::new(PendingSubState::Removed));
+        let func: mlua::Function = lua.load("function(v) end").eval().expect("load");
+        let h = LuaHandle::from_func(&lua, func).expect("registry");
+        let pending = vec![PendingCellSub {
+            pending_id: 2,
+            name: "flag".into(),
+            handle: Some(h),
+            state: state.clone(),
+        }];
+        c.drain_pending_lua_subs(pending);
+
+        c.set_dyn("flag", Rc::new(true));
+        // No subscriber ever bound, so set queues nothing.
+        assert!(!c.has_pending());
+    }
+
+    #[test]
+    fn drain_pending_lua_subs_marks_removed_when_cell_undeclared() {
+        use crate::lua::shared::{PendingCellSub, PendingSubState};
+        use std::sync::{Arc as StdArc, Mutex};
+        let lua = Lua::new();
+        let mut c = Cells::new();
+        let state = StdArc::new(Mutex::new(PendingSubState::Pending));
+        let func: mlua::Function = lua.load("function(v) end").eval().expect("load");
+        let h = LuaHandle::from_func(&lua, func).expect("registry");
+        let pending = vec![PendingCellSub {
+            pending_id: 3,
+            name: "no_such_cell".into(),
+            handle: Some(h),
+            state: state.clone(),
+        }];
+        c.drain_pending_lua_subs(pending);
+        assert!(matches!(*state.lock().unwrap(), PendingSubState::Removed));
     }
 
     #[test]

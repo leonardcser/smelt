@@ -13,13 +13,13 @@
 
 local banner = require("smelt.banner")
 
-local state = { overlay = nil, paint_id = nil, version_buf = nil, version_win = nil }
+local state = { overlay = nil, paint = nil, version_buf = nil, version_win = nil }
 
 local function teardown()
   if state.overlay then state.overlay:close() end
-  if state.paint_id then smelt.paint.unregister(state.paint_id) end
+  if state.paint then state.paint:remove() end
   state.overlay = nil
-  state.paint_id = nil
+  state.paint = nil
   state.version_buf = nil
   state.version_win = nil
 end
@@ -44,7 +44,7 @@ end
 
 local function open_splash()
   if state.overlay then return end
-  state.paint_id = smelt.paint.register(paint_wordmark, { name = "smelt.banner.splash.paint" })
+  state.paint = smelt.paint.register(paint_wordmark, { name = "smelt.banner.splash.paint" })
   local word_w, word_h = banner.wordmark_size()
   local version_text = "v" .. (smelt.version or "")
   local w = math.max(word_w, #version_text)
@@ -55,7 +55,7 @@ local function open_splash()
   -- `center` anchor centers that.
   local sized = smelt.overlay.layout.vbox({
     {
-      smelt.overlay.layout.leaf(state.paint_id, { measure = { w, word_h } }),
+      smelt.overlay.layout.leaf(state.paint, { measure = { w, word_h } }),
       height = word_h,
     },
     {
@@ -102,19 +102,18 @@ local function refresh()
   if #msgs == 0 then open_splash() else teardown() end
 end
 
--- Subscriptions register inside `on_ready`: it fires once per Lua-context
--- bring-up (cold start AND `/reload`) with the host pointer live, which
--- `smelt.cell:subscribe` needs. The `lifecycle` registry is wiped between
--- bring-ups so re-subscribing here doesn't stack. From this hook onward
--- `session_started` covers /reset, /fork, /resume; `turn_start` covers
--- the first agent dispatch; `history` covers direct message-list
--- mutations (rewind, compaction, load).
-smelt.lifecycle.on_ready(function()
-  smelt.cell("session_started"):subscribe(refresh)
-  smelt.cell("turn_start"):subscribe(teardown)
-  smelt.cell("history"):subscribe(refresh)
-  refresh()
-end)
+-- `smelt.cell:subscribe` is deferred-safe: calls made before the host
+-- pointer is live (the pre-TUI plugin pass that extracts engine config)
+-- queue and bind on the next host bring-up. Cell-subscription handles
+-- are wiped between bring-ups so re-subscribing in module body doesn't
+-- stack. `session_started` covers /reset, /fork, /resume; `turn_start`
+-- covers the first agent dispatch; `history` covers direct message-list
+-- mutations (rewind, compaction, load). `refresh()` runs through
+-- `on_ready` so the host pointer is guaranteed live for the first paint.
+smelt.cell("session_started"):subscribe(refresh)
+smelt.cell("turn_start"):subscribe(teardown)
+smelt.cell("history"):subscribe(refresh)
+smelt.lifecycle.on_ready(refresh)
 
 smelt.lifecycle.on_shutdown(function(ctx)
   if not ctx.has_messages then return end

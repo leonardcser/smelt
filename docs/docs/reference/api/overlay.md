@@ -4,7 +4,7 @@
 
 **Tier:** `UiHost` — Requires a terminal UI; calling these from headless mode raises.
 
-Overlay handle constructor. `smelt.overlay.new(opts)` opens an overlay from `opts.layout` (a `smelt.overlay.layout` userdata) and returns an `Overlay` userdata. `opts.name` opts the overlay into hot-reload survival. UiHost-only.
+Overlay handle constructor. `smelt.overlay.new(opts)` opens an overlay from `opts.layout` (a `smelt.overlay.layout` userdata) and returns an `Overlay` userdata. `opts.name` opts the overlay into hot-reload survival. `opts.keymaps` (list of `{key, on_press, hint?}`) installs overlay-scoped bindings. UiHost-only.
 
 ## `smelt.overlay.new`
 
@@ -14,5 +14,5 @@ fun(opts: table): smelt.overlay.Overlay
 
 Types: [`smelt.overlay.Overlay`](types.md#smeltoverlayoverlay)
 
-Open an overlay rendered from `opts.layout` (a `smelt.overlay.layout` userdata) and return an `Overlay` userdata. `opts.name` opts the overlay into hot-reload survival.
+Open an overlay rendered from `opts.layout` (a `smelt.overlay.layout` userdata) and return an `Overlay` userdata. `opts.name` opts the overlay into hot-reload survival. `opts.keymaps` (list of `{key, on_press, hint?}`) installs overlay-scoped bindings.
 

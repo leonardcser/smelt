@@ -17,12 +17,12 @@ Return every registered slash command as a Lua array of `{ name, desc, args, whi
 ## `smelt.cmd.register`
 
 ```lua
-fun(name: string, handler: fun(value: string?), opts: smelt.cmd.RegisterOpts?): nil
+fun(name: string, handler: fun(value: string?), opts: smelt.cmd.RegisterOpts?): smelt.Reg
 ```
 
-Types: [`smelt.cmd.RegisterOpts`](types.md#smeltcmdregisteropts)
+Types: [`smelt.cmd.RegisterOpts`](types.md#smeltcmdregisteropts), [`smelt.Reg`](types.md#smeltreg)
 
-Register a slash command `name` whose `handler` is invoked when the user runs it. `opts` accepts `desc`, `args`, `while_busy` (default `true`), `queue_when_busy` (default `false`), `startup_ok` (default `false`), and `hidden` (default `false`).
+Register a slash command `name` whose `handler` is invoked when the user runs it. `opts` accepts `desc`, `args`, `while_busy` (default `true`), `queue_when_busy` (default `false`), `startup_ok` (default `false`), and `hidden` (default `false`). Returns a `Reg` whose `:remove()` unregisters the command.
 
 ## `smelt.cmd.run`
 
@@ -31,12 +31,4 @@ fun(line: string): nil
 ```
 
 Execute the slash-command line `line` (with or without leading `/`) as if the user had typed it. Errors are surfaced as in-app notifications.
-
-## `smelt.cmd.unregister`
-
-```lua
-fun(name: string): boolean
-```
-
-Drop the slash command `name` from the registry. Returns `true` if a command was removed, `false` if no command with that name existed.
 

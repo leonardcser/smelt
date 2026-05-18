@@ -9,14 +9,15 @@
 -- the leaves in `opts.panels`. Dialog handles only:
 --   1. Opening the overlay at dock_bottom with a top border.
 --   2. Setting initial focus.
---   3. Installing dialog-level keymaps on every leaf.
+--   3. Installing dialog-level keymaps at overlay scope.
 --   4. Bridging Submit/Dismiss/Tick events to user callbacks.
 --   5. Coroutine lifecycle: `open(opts)` blocks until `ctx.resolve(v)` is called.
 --
 -- Keymap scoping (important):
---   - `opts.keymaps` are DIALOG-WIDE — installed on every leaf so they fire regardless
---     of which panel is focused. Use these for shortcuts that should always work in
---     the dialog (e.g. Alt-W, Ctrl-D).
+--   - `opts.keymaps` are DIALOG-WIDE — installed at overlay scope (tier 1b of
+--     the key cascade) so they fire regardless of which panel is focused.
+--     Use these for shortcuts that should always work in the dialog (e.g.
+--     Alt-W, Ctrl-D).
 --   - To scope a key to a specific panel, install it directly on that leaf via
 --     `leaf:key(key, fn)` after `open_handle` returns. Example:
 --     the confirm dialog binds `tab` only on the options leaf (jump into the
@@ -238,7 +239,7 @@ local function open_overlay(opts)
     { panel_vbox, height = outer_height },
   })
 
-  smelt.overlay.new({
+  local overlay = smelt.overlay.new({
     title        = title,
     anchor       = "dock_bottom",
     border       = { top = "SmeltAccent" },
@@ -247,12 +248,12 @@ local function open_overlay(opts)
     layout       = outer,
   })
 
-  return leaves[1], leaves
+  return leaves[1], leaves, overlay
 end
 
 -- Wire dialog-level keymaps, focus, events, and the resolve handle. Shared between
 -- `open` (coroutine) and `open_handle` (sync).
-local function setup_lifecycle(opts, leaves, resolve_fn)
+local function setup_lifecycle(opts, leaves, overlay, resolve_fn)
   local root = leaves[1]
 
   -- Explicit focus override; otherwise the overlay's own modal-focus logic picks
@@ -281,19 +282,18 @@ local function setup_lifecycle(opts, leaves, resolve_fn)
     return ctx
   end
 
-  -- Dialog-level keymaps: install on EVERY leaf so they fire no matter which panel
-  -- has focus. Inert leaves never receive keys, so installing widely is harmless.
+  -- Dialog-level keymaps install at the overlay scope so they fire regardless
+  -- of which leaf holds focus, without per-leaf re-registration. Tier 1b of
+  -- the key cascade routes the chord to whichever overlay contains the focused
+  -- leaf, which is always this overlay while the dialog is open + modal.
   if type(opts.keymaps) == "table" then
     for _, km in ipairs(opts.keymaps) do
       if type(km) == "table" and km.key and type(km.on_press) == "function" then
         local on_press = km.on_press
-        local cb = function(raw_ctx)
+        overlay:key(km.key, function(raw_ctx)
           local ok, err = pcall(on_press, make_ctx(raw_ctx))
           if not ok then smelt.notify.error("dialog keymap: " .. tostring(err)) end
-        end
-        for _, leaf in ipairs(leaves) do
-          leaf:key(km.key, cb)
-        end
+        end)
       end
     end
   end
@@ -356,9 +356,9 @@ function smelt.dialog.open(opts)
     error("smelt.dialog.open: expected table of options", 2)
   end
 
-  local _, leaves = open_overlay(opts)
+  local _, leaves, overlay = open_overlay(opts)
   local task_id = smelt.task.alloc()
-  setup_lifecycle(opts, leaves, function(value)
+  setup_lifecycle(opts, leaves, overlay, function(value)
     smelt.task.resume(task_id, value)
   end)
   return smelt.task.wait(task_id)
@@ -371,8 +371,8 @@ function smelt.dialog.open_handle(opts)
   if type(opts) ~= "table" then
     error("smelt.dialog.open_handle: expected table of options", 2)
   end
-  local _, leaves = open_overlay(opts)
-  local resolve, root = setup_lifecycle(opts, leaves, function(_) end)
+  local _, leaves, overlay = open_overlay(opts)
+  local resolve, root = setup_lifecycle(opts, leaves, overlay, function(_) end)
   return {
     win    = root,
     panels = leaves,

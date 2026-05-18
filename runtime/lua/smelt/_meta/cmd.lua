@@ -11,16 +11,12 @@ local cmd = {}
 ---@type fun(): table
 cmd.list = nil
 
---- Register a slash command `name` whose `handler` is invoked when the user runs it. `opts` accepts `desc`, `args`, `while_busy` (default `true`), `queue_when_busy` (default `false`), `startup_ok` (default `false`), and `hidden` (default `false`).
----@type fun(name: string, handler: fun(value: string?), opts: smelt.cmd.RegisterOpts?): nil
+--- Register a slash command `name` whose `handler` is invoked when the user runs it. `opts` accepts `desc`, `args`, `while_busy` (default `true`), `queue_when_busy` (default `false`), `startup_ok` (default `false`), and `hidden` (default `false`). Returns a `Reg` whose `:remove()` unregisters the command.
+---@type fun(name: string, handler: fun(value: string?), opts: smelt.cmd.RegisterOpts?): smelt.Reg
 cmd.register = nil
 
 --- Execute the slash-command line `line` (with or without leading `/`) as if the user had typed it. Errors are surfaced as in-app notifications.
 ---@type fun(line: string): nil
 cmd.run = nil
-
---- Drop the slash command `name` from the registry. Returns `true` if a command was removed, `false` if no command with that name existed.
----@type fun(name: string): boolean
-cmd.unregister = nil
 
 return cmd

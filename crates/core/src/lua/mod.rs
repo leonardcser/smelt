@@ -7,7 +7,7 @@ pub mod lua_type;
 pub mod module;
 pub mod reg;
 pub mod runtime;
-mod shared;
+pub(crate) mod shared;
 mod task;
 pub mod watchers;
 
@@ -18,8 +18,9 @@ pub use runtime::{
     autoload_modules, autoload_modules_filtered, init_lua_path, load_bootstrap_chunks, LuaRuntime,
 };
 pub use shared::{
-    CliFlagKind, CliFlagSpec, CliFlagValue, DefaultShell, Hooks, LuaResumeSink, LuaShared, Phase,
-    RegisteredCommand, StatusSource, ToolHandles, LUA_BUF_ID_BASE,
+    CliFlagKind, CliFlagSpec, CliFlagValue, DefaultShell, Hooks, LuaResumeSink, LuaShared,
+    PendingCellSub, PendingSubState, Phase, RegisteredCommand, StatusSource, ToolHandles,
+    LUA_BUF_ID_BASE,
 };
 pub(crate) use task::step_task_owned;
 pub use task::{

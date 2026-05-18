@@ -745,15 +745,20 @@ impl TuiApp {
 
     /// Orchestrates the per-key dispatch cascade when an overlay or modal is
     /// focused. Tiers fire in order; the first to return `Consumed` wins:
-    ///   1. Specific keymap on the focused leaf (`win_set_keymap`)
-    ///   2. Global Lua keymap (`smelt.keymap.set("", chord, fn)`)
-    ///   3. Per-window catch-all fallback (`win_set_key_fallback`)
-    ///   4. Vim viewer keys on the focused leaf
-    ///   5. Modal dismiss for bare Esc / Ctrl-C
     ///
-    /// Putting global keymaps between tiers 1 and 3 lets a site-wide chord
-    /// like `?` → /help win over a dialog input's blanket printable-char
-    /// fallback, without each leaf needing a bespoke carve-out.
+    /// - Tier 1: specific keymap on the focused leaf (`win_set_keymap`).
+    /// - Tier 1b: overlay-scoped keymap (`overlay_set_keymap`) on the overlay
+    ///   containing the focused leaf.
+    /// - Tier 2: global Lua keymap (`smelt.keymap.set("", chord, fn)`).
+    /// - Tier 3: per-window catch-all fallback (`win_set_key_fallback`).
+    /// - Tier 4: vim viewer keys on the focused leaf.
+    /// - Tier 5: modal dismiss for bare Esc / Ctrl-C.
+    ///
+    /// Putting global keymaps between tiers 1b and 3 lets a site-wide chord
+    /// like `?` -> /help win over a dialog input's blanket printable-char
+    /// fallback, without each leaf needing a bespoke carve-out. Overlay-scoped
+    /// keymaps sit above global so an open dialog/picker's local intent
+    /// (e.g. `Tab` cycles items) beats a site-wide rebinding of the same chord.
     pub(crate) fn run_key_cascade(&mut self, k: KeyEvent) -> crate::smelt_term::Status {
         use crate::smelt_term::Status;
 
@@ -768,6 +773,26 @@ impl TuiApp {
                 };
             if matches!(
                 self.ui.dispatch_key(k.code, k.modifiers, &mut lua_invoke),
+                Status::Consumed
+            ) {
+                return Status::Consumed;
+            }
+        }
+
+        // Tier 1b: overlay-scoped keymap on the overlay containing the
+        // focused leaf. Owned by the overlay, so any leaf inside it sees
+        // the same bindings without per-leaf re-registration.
+        {
+            let lua = &self.lua;
+            let mut lua_invoke =
+                |handle: crate::smelt_term::LuaHandle,
+                 win: crate::smelt_term::WinId,
+                 payload: &crate::smelt_term::Payload| {
+                    lua.queue_invocation(handle, win, payload);
+                };
+            if matches!(
+                self.ui
+                    .dispatch_overlay_key(k.code, k.modifiers, &mut lua_invoke),
                 Status::Consumed
             ) {
                 return Status::Consumed;

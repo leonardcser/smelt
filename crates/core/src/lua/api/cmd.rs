@@ -3,6 +3,7 @@
 use crate::lua::doc::Tier;
 use crate::lua::lua_type::LuaCallback;
 use crate::lua::module::LuaMod;
+use crate::lua::reg::LuaReg;
 use crate::lua::{LuaHandle, LuaShared, RegisteredCommand};
 use lua_doc_derive::LuaOpts;
 use mlua::prelude::*;
@@ -39,7 +40,7 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
         let s = shared.clone();
         m.fn_(
             "register",
-            "Register a slash command `name` whose `handler` is invoked when the user runs it. `opts` accepts `desc`, `args`, `while_busy` (default `true`), `queue_when_busy` (default `false`), `startup_ok` (default `false`), and `hidden` (default `false`).",
+            "Register a slash command `name` whose `handler` is invoked when the user runs it. `opts` accepts `desc`, `args`, `while_busy` (default `true`), `queue_when_busy` (default `false`), `startup_ok` (default `false`), and `hidden` (default `false`). Returns a `Reg` whose `:remove()` unregisters the command.",
             &["name", "handler", "opts"],
             move |lua,
                   (name, handler, opts): (
@@ -47,7 +48,7 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
                 LuaCallback<Option<String>, ()>,
                 Option<LuaCmdRegisterOpts>,
             )|
-                  -> LuaResult<()> {
+                  -> LuaResult<LuaReg> {
                 let opts = opts.unwrap_or_default();
                 let handle = LuaHandle::from_func(lua, handler.into_inner())?;
                 if let Ok(mut map) = s.commands.lock() {
@@ -65,9 +66,22 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
                     );
                 }
                 if let Ok(mut set) = s.command_names.lock() {
-                    set.insert(name);
+                    set.insert(name.clone());
                 }
-                Ok(())
+                let s_for_reg = s.clone();
+                Ok(LuaReg::new(move || {
+                    let removed = s_for_reg
+                        .commands
+                        .lock()
+                        .map(|mut m| m.remove(&name).is_some())
+                        .unwrap_or(false);
+                    if removed {
+                        if let Ok(mut set) = s_for_reg.command_names.lock() {
+                            set.remove(&name);
+                        }
+                    }
+                    removed
+                }))
             },
         )?;
     }
@@ -138,27 +152,6 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
                     table.set(i + 1, row)?;
                 }
                 Ok(table)
-            },
-        )?;
-    }
-    {
-        let s = shared.clone();
-        m.fn_(
-            "unregister",
-            "Drop the slash command `name` from the registry. Returns `true` if a command was removed, `false` if no command with that name existed.",
-            &["name"],
-            move |_, name: String| -> LuaResult<bool> {
-                let removed = s
-                    .commands
-                    .lock()
-                    .map(|mut m| m.remove(&name).is_some())
-                    .unwrap_or(false);
-                if removed {
-                    if let Ok(mut set) = s.command_names.lock() {
-                        set.remove(&name);
-                    }
-                }
-                Ok(removed)
             },
         )?;
     }

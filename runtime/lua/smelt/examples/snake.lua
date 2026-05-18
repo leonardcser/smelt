@@ -67,7 +67,7 @@ local function init_state()
 		food = new_food(snake),
 		dead = false,
 		score = 0,
-		paint_id = nil,
+		paint = nil,
 		timer = nil,
 		win = nil,
 		buf = nil,
@@ -237,8 +237,8 @@ local function close()
 	if STATE.timer then
 		STATE.timer:remove()
 	end
-	if STATE.paint_id then
-		smelt.paint.unregister(STATE.paint_id)
+	if STATE.paint then
+		STATE.paint:remove()
 	end
 	if STATE.win then
 		STATE.win:close()
@@ -259,19 +259,7 @@ local function open()
 	})
 	STATE.win = smelt.win.new(STATE.buf, { focusable = true })
 
-	STATE.paint_id = smelt.paint.register(paint, { name = "smelt.snake.paint" })
-
-	STATE.win:key("h", turn("left"))
-	STATE.win:key("j", turn("down"))
-	STATE.win:key("k", turn("up"))
-	STATE.win:key("l", turn("right"))
-	STATE.win:key("<Left>", turn("left"))
-	STATE.win:key("<Down>", turn("down"))
-	STATE.win:key("<Up>", turn("up"))
-	STATE.win:key("<Right>", turn("right"))
-	STATE.win:key("<Space>", reset)
-	STATE.win:key("<Esc>", close)
-	STATE.win:key("<C-c>", close)
+	STATE.paint = smelt.paint.register(paint, { name = "smelt.snake.paint" })
 
 	smelt.overlay.new({
 		title = {
@@ -281,7 +269,7 @@ local function open()
 		border = { all = "Comment" },
 		layout = smelt.overlay.layout.vbox({
 			{
-				smelt.overlay.layout.leaf(STATE.paint_id, { measure = { GRID_W, PAINT_H } }),
+				smelt.overlay.layout.leaf(STATE.paint, { measure = { GRID_W, PAINT_H } }),
 				height = "fit",
 			},
 			{
@@ -292,6 +280,19 @@ local function open()
 		modal = false,
 		draggable = true,
 		resizable = false,
+		keymaps = {
+			{ key = "h", on_press = turn("left") },
+			{ key = "j", on_press = turn("down") },
+			{ key = "k", on_press = turn("up") },
+			{ key = "l", on_press = turn("right") },
+			{ key = "<Left>", on_press = turn("left") },
+			{ key = "<Down>", on_press = turn("down") },
+			{ key = "<Up>", on_press = turn("up") },
+			{ key = "<Right>", on_press = turn("right") },
+			{ key = "<Space>", on_press = reset },
+			{ key = "<Esc>", on_press = close },
+			{ key = "<C-c>", on_press = close },
+		},
 	})
 	STATE.win:focus()
 

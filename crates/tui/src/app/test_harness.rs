@@ -2040,8 +2040,10 @@ mod tests {
             r#"
             local state = smelt.state("paint_id_probe")
             local function painter(_slice, _ctx) end
-            state.named  = smelt.paint.register(painter, { name = "probe.named" })
-            state.anon   = smelt.paint.register(painter)
+            -- `paint.register` returns a Paint handle; stash its numeric
+            -- id so the Rust side can compare across reload.
+            state.named  = smelt.paint.register(painter, { name = "probe.named" }):id()
+            state.anon   = smelt.paint.register(painter):id()
             "#,
         )
         .unwrap();

@@ -9,8 +9,12 @@ use crate::lua::doc::{record_alias, record_class, Tier};
 use crate::lua::lua_type::{LuaAliasDecl, LuaCallback, LuaClassDecl, LuaType, LuaTypeTuple};
 use crate::lua::module::LuaMod;
 use crate::lua::reg::LuaReg;
+use crate::lua::shared::{PendingCellSub, PendingSubState};
 use crate::lua::LuaHandle;
+use crate::lua::LuaShared;
 use mlua::prelude::*;
+use std::sync::atomic::Ordering;
+use std::sync::{Arc, Mutex};
 
 /// Lua-facing string type for cell names. Renders as
 /// `string | "vim_mode" | "agent_mode" | ...` in the generated
@@ -62,7 +66,7 @@ impl std::ops::Deref for LuaCellName {
     }
 }
 
-pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
+pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) -> LuaResult<()> {
     use crate::cells::{LuaCellValue, SubscriberKind};
     use std::rc::Rc;
 
@@ -72,10 +76,14 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
         fields: crate::class_methods! {
             "get" => fn() -> mlua::Value, "Return the current cell value, or `nil` when the cell isn't declared.",
             "set" => fn(value: mlua::Value) -> LuaCell, "Publish a new value. Returns the handle for chaining.",
-            "subscribe" => fn(handler: LuaCallback<mlua::Value, ()>) -> Option<LuaReg>, "Register `handler(value)` to fire on every `set`. Returns a `Reg` whose `:remove()` drops the subscription, or `nil` if the runtime has no host.",
+            "subscribe" => fn(handler: LuaCallback<mlua::Value, ()>) -> LuaReg, "Register `handler(value)` to fire on every `set`. Returns a `Reg` whose `:remove()` drops the subscription. When called before the host pointer is live the subscription is queued and bound on the next host bring-up.",
             "name" => fn() -> String, "Return the cell name.",
         },
     });
+
+    // Stash the shared arc in the Lua named registry so `LuaCell::add_methods`
+    // (which only sees `lua`) can recover it without rewiring every method.
+    lua.set_named_registry_value("__smelt_cell_shared", SharedCellRef(shared.clone()))?;
 
     let m = LuaMod::under(
         lua,
@@ -133,6 +141,12 @@ matching a glob pattern.",
     Ok(())
 }
 
+/// Userdata wrapper so `Arc<LuaShared>` can sit in the Lua named registry
+/// and be recovered by `LuaCell::add_methods` (which only sees `lua`).
+pub(crate) struct SharedCellRef(pub Arc<LuaShared>);
+
+impl mlua::UserData for SharedCellRef {}
+
 /// Sticky handle for a single cell. Returned by `smelt.cell(name)`.
 pub struct LuaCell {
     name: String,
@@ -176,19 +190,73 @@ impl mlua::UserData for LuaCell {
 
         methods.add_method(
             "subscribe",
-            |lua, this, handler: mlua::Function| -> LuaResult<Option<LuaReg>> {
-                let handle = LuaHandle::from_func(lua, handler)?;
-                let id = crate::host::try_with_core(|core| {
-                    core.cells
-                        .subscribe_kind(&this.name, SubscriberKind::Lua(Rc::new(handle)))
-                })
-                .flatten();
-                let Some(id) = id else { return Ok(None) };
+            |lua, this, handler: mlua::Function| -> LuaResult<LuaReg> {
                 let name = this.name.clone();
-                Ok(Some(LuaReg::new(move || {
-                    crate::host::try_with_core(|core| core.cells.unsubscribe(&name, id))
+
+                // Fast path: host is live → subscribe immediately. The
+                // handler is parked in the Lua registry inside `LuaHandle`
+                // so the runtime can fire it without further marshaling.
+                let handle = LuaHandle::from_func(lua, handler.clone())?;
+                if let Some(sub_id) = crate::host::try_with_core(|core| {
+                    core.cells
+                        .subscribe_kind(&name, SubscriberKind::Lua(Rc::new(handle)))
+                })
+                .flatten()
+                {
+                    let name_for_reg = name.clone();
+                    return Ok(LuaReg::new(move || {
+                        crate::host::try_with_core(|core| {
+                            core.cells.unsubscribe(&name_for_reg, sub_id)
+                        })
                         .unwrap_or(false)
-                })))
+                    }));
+                }
+
+                // Deferred path: no host yet (pre-TUI / `early.lua`). Queue
+                // the subscription on `LuaShared`; the next bring-up drains
+                // it. The `Reg` tracks the pending → bound transition via
+                // a shared state so `:remove()` is correct in either window.
+                let shared = lua
+                    .named_registry_value::<mlua::AnyUserData>("__smelt_cell_shared")?
+                    .borrow::<SharedCellRef>()?
+                    .0
+                    .clone();
+                let handle = LuaHandle::from_func(lua, handler)?;
+                let pending_id = shared
+                    .next_pending_cell_sub_id
+                    .fetch_add(1, Ordering::Relaxed);
+                let state = Arc::new(Mutex::new(PendingSubState::Pending));
+                if let Ok(mut q) = shared.pending_cell_subs.lock() {
+                    q.push(PendingCellSub {
+                        pending_id,
+                        name: name.clone(),
+                        handle: Some(handle),
+                        state: state.clone(),
+                    });
+                }
+                let shared_for_reg = shared.clone();
+                let name_for_reg = name.clone();
+                Ok(LuaReg::new(move || {
+                    let mut st = state.lock().expect("state mutex");
+                    let prior = std::mem::replace(&mut *st, PendingSubState::Removed);
+                    drop(st);
+                    match prior {
+                        PendingSubState::Pending => {
+                            // Drop the queued entry. Drain handles removed
+                            // entries gracefully by checking state, so a
+                            // race between drain and remove is benign.
+                            if let Ok(mut q) = shared_for_reg.pending_cell_subs.lock() {
+                                q.retain(|p| p.pending_id != pending_id);
+                            }
+                            true
+                        }
+                        PendingSubState::Bound { sub_id } => crate::host::try_with_core(|core| {
+                            core.cells.unsubscribe(&name_for_reg, sub_id)
+                        })
+                        .unwrap_or(false),
+                        PendingSubState::Removed => false,
+                    }
+                }))
             },
         );
 

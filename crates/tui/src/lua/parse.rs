@@ -158,7 +158,9 @@ pub(crate) fn title(v: Option<mlua::Value>) -> Result<Option<Line<'static>>, Str
 /// Parse a layout `Constraint`. Surface:
 ///
 /// - omitted / `nil` → `Fill`
-/// - integer `n > 0` → `Length(n)`
+/// - integer `n >= 0` → `Length(n)` (zero is valid: a slot with no rows /
+///   columns, useful as a hidden focus anchor that still participates in
+///   `overlay_for_leaf`)
 /// - string `"fill"` / `"fit"` → `Fill` / `Fit`
 /// - string `"N%"` → `Percentage(N)` (shorthand for the common case)
 /// - string `"min:N"` / `"max:N"` / `"pct:N"` / `"ratio:N/M"` →
@@ -168,8 +170,14 @@ pub(crate) fn title(v: Option<mlua::Value>) -> Result<Option<Line<'static>>, Str
 pub(crate) fn constraint(v: Option<mlua::Value>, ctx: &str) -> Result<Constraint, String> {
     match v {
         None | Some(mlua::Value::Nil) => Ok(Constraint::Fill),
-        Some(mlua::Value::Integer(n)) if n > 0 => Ok(Constraint::Length(n as u16)),
-        Some(mlua::Value::Number(n)) if n > 0.0 => Ok(Constraint::Length(n as u16)),
+        Some(mlua::Value::Integer(n)) if n >= 0 => Ok(Constraint::Length(n as u16)),
+        Some(mlua::Value::Number(n)) if n >= 0.0 => Ok(Constraint::Length(n as u16)),
+        Some(mlua::Value::Integer(n)) => Err(format!(
+            "{ctx}: length constraint must be non-negative, got {n}"
+        )),
+        Some(mlua::Value::Number(n)) => Err(format!(
+            "{ctx}: length constraint must be non-negative, got {n}"
+        )),
         Some(mlua::Value::String(s)) => {
             let raw = s.to_str().map_err(|e| e.to_string())?.to_string();
             constraint_str(&raw, ctx)

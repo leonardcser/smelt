@@ -74,6 +74,31 @@ pub struct ToolHandles {
     pub decide: Option<LuaHandle>,
 }
 
+/// Subscription state for a deferred-safe `cell:subscribe`. The same `Arc`
+/// is held by both the pending entry in `LuaShared::pending_cell_subs` and
+/// the `LuaReg` returned to the plugin. The drain pass + `:remove()` race
+/// through this state and the last one to win records the terminal value.
+#[derive(Debug)]
+pub enum PendingSubState {
+    /// Queued but not yet bound to the live cell registry.
+    Pending,
+    /// Bound to a real subscription id at drain time.
+    Bound { sub_id: u64 },
+    /// `:remove()` ran. Either dropped from the queue (if `Pending`) or
+    /// unsubscribed from the registry (if `Bound`).
+    Removed,
+}
+
+/// One queued `cell:subscribe` call awaiting host install. The drain pass
+/// pulls the `handle` out by `take`-ing the `Option`, leaving the entry
+/// in `Removed` state so a subsequent `:remove()` is a no-op.
+pub struct PendingCellSub {
+    pub pending_id: u64,
+    pub name: String,
+    pub handle: Option<LuaHandle>,
+    pub state: Arc<Mutex<PendingSubState>>,
+}
+
 /// All shared state between Lua closures and the app loop.
 pub struct LuaShared {
     pub commands: Mutex<HashMap<String, RegisteredCommand>>,
@@ -140,6 +165,13 @@ pub struct LuaShared {
     /// — the runtime promotes it to `Init` before autoload and `Running`
     /// once the agent loop is live.
     phase: AtomicU8,
+    /// Deferred `smelt.cell:subscribe` calls made before the host pointer
+    /// is live (e.g. from a pre-TUI plugin pass or `early.lua`). Drained
+    /// by `LuaShared::drain_pending_cell_subs` on the next host bring-up
+    /// so plugin authors can subscribe in module body without an
+    /// `on_ready` wrapper.
+    pub pending_cell_subs: Mutex<Vec<PendingCellSub>>,
+    pub next_pending_cell_sub_id: AtomicU64,
 }
 
 /// Every hook-registry surface bundled into one struct. New middleware
@@ -246,6 +278,8 @@ impl Default for LuaShared {
             watchers: Mutex::new(HashMap::new()),
             next_watcher_id: AtomicU64::new(1),
             phase: AtomicU8::new(Phase::Early as u8),
+            pending_cell_subs: Mutex::new(Vec::new()),
+            next_pending_cell_sub_id: AtomicU64::new(1),
         }
     }
 }
@@ -290,6 +324,19 @@ impl LuaShared {
         }
         if let Ok(mut m) = self.mcp_configs.lock() {
             m.clear();
+        }
+        if let Ok(mut q) = self.pending_cell_subs.lock() {
+            // Mark any still-pending entries removed so any straggling
+            // `LuaReg:remove()` from the previous bring-up is a no-op
+            // instead of poking the next cycle's queue by index.
+            for p in q.iter() {
+                if let Ok(mut s) = p.state.lock() {
+                    if matches!(*s, PendingSubState::Pending) {
+                        *s = PendingSubState::Removed;
+                    }
+                }
+            }
+            q.clear();
         }
     }
 }

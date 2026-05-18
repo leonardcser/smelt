@@ -1,5 +1,7 @@
-//! Per-window keymap and event callback registry.
-use super::WinId;
+//! Per-window keymap and event callback registry. Also hosts overlay-scoped
+//! keymaps: bindings that fire when any leaf of the overlay holds focus,
+//! letting an overlay own its key handling without each leaf re-registering.
+use super::{OverlayId, WinId};
 use crossterm::event::{KeyCode, KeyModifiers};
 use std::collections::HashMap;
 
@@ -108,6 +110,9 @@ pub(crate) struct Callbacks {
     events: HashMap<WinId, HashMap<WinEvent, Vec<Callback>>>,
     /// Per-window fallback key handler tried after specific keymaps miss.
     key_fallback: HashMap<WinId, Callback>,
+    /// Per-overlay keymaps. Fire when any leaf of the overlay holds focus,
+    /// after a per-window keymap miss but before global Lua keymaps.
+    overlay_keymaps: HashMap<OverlayId, HashMap<KeyBind, Callback>>,
 }
 
 impl Callbacks {
@@ -211,6 +216,65 @@ impl Callbacks {
         self.keymaps.entry(win).or_default().insert(key, cb);
     }
 
+    // ── Overlay-scoped keymaps ───────────────────────────────────────
+
+    #[must_use]
+    pub(crate) fn set_overlay_keymap(
+        &mut self,
+        overlay: OverlayId,
+        key: KeyBind,
+        cb: Callback,
+    ) -> Option<Callback> {
+        self.overlay_keymaps
+            .entry(overlay)
+            .or_default()
+            .insert(key, cb)
+    }
+
+    pub(crate) fn clear_overlay_keymap(
+        &mut self,
+        overlay: OverlayId,
+        key: KeyBind,
+    ) -> Option<Callback> {
+        self.overlay_keymaps
+            .get_mut(&overlay)
+            .and_then(|t| t.remove(&key))
+    }
+
+    pub(crate) fn take_overlay_keymap(
+        &mut self,
+        overlay: OverlayId,
+        key: KeyBind,
+    ) -> Option<Callback> {
+        self.overlay_keymaps.get_mut(&overlay)?.remove(&key)
+    }
+
+    pub(crate) fn restore_overlay_keymap(
+        &mut self,
+        overlay: OverlayId,
+        key: KeyBind,
+        cb: Callback,
+    ) {
+        self.overlay_keymaps
+            .entry(overlay)
+            .or_default()
+            .insert(key, cb);
+    }
+
+    /// Remove every overlay-scoped binding. Returns Lua handle ids for caller cleanup.
+    #[must_use]
+    pub(crate) fn clear_overlay_all(&mut self, overlay: OverlayId) -> Vec<u64> {
+        let mut lua_ids = Vec::new();
+        if let Some(table) = self.overlay_keymaps.remove(&overlay) {
+            for cb in table.into_values() {
+                if let Callback::Lua(LuaHandle(id)) = cb {
+                    lua_ids.push(id);
+                }
+            }
+        }
+        lua_ids
+    }
+
     /// Same take/restore pattern for event callbacks (takes the whole Vec).
     pub(crate) fn take_event(&mut self, win: WinId, ev: WinEvent) -> Option<Vec<Callback>> {
         self.events.get_mut(&win)?.remove(&ev)
@@ -247,6 +311,33 @@ mod tests {
         let _ = cbs.clear_all(wid(1));
         assert!(cbs.take_keymap(wid(1), KeyBind::char('q')).is_none());
         assert!(cbs.take_event(wid(1), WinEvent::Submit).is_none());
+    }
+
+    fn oid(n: u32) -> OverlayId {
+        OverlayId(n)
+    }
+
+    #[test]
+    fn set_and_take_overlay_keymap() {
+        let mut cbs = Callbacks::new();
+        let key = KeyBind::plain(KeyCode::Tab);
+        let _ = cbs.set_overlay_keymap(oid(1), key, Callback::Lua(LuaHandle(7)));
+        let taken = cbs.take_overlay_keymap(oid(1), key);
+        assert!(matches!(taken, Some(Callback::Lua(LuaHandle(7)))));
+        assert!(cbs.take_overlay_keymap(oid(1), key).is_none());
+    }
+
+    #[test]
+    fn clear_overlay_all_returns_lua_ids() {
+        let mut cbs = Callbacks::new();
+        let _ = cbs.set_overlay_keymap(oid(2), KeyBind::char('q'), Callback::Lua(LuaHandle(11)));
+        let _ = cbs.set_overlay_keymap(oid(2), KeyBind::char('w'), Callback::Lua(LuaHandle(12)));
+        let mut ids = cbs.clear_overlay_all(oid(2));
+        ids.sort();
+        assert_eq!(ids, vec![11, 12]);
+        assert!(cbs
+            .take_overlay_keymap(oid(2), KeyBind::char('q'))
+            .is_none());
     }
 
     #[test]

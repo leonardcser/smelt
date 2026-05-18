@@ -122,22 +122,26 @@ impl LuaType for LuaUiLayout {
 }
 
 /// Resolve a `smelt.overlay.layout.leaf(target)` argument to the raw u64 id
-/// stored in the layout node. Accepts a `Win` userdata, a paint id
-/// integer, or — as a convenience — a raw win/paint integer (legacy).
+/// stored in the layout node. Accepts a `Win` userdata, a `Paint`
+/// handle from `smelt.paint.register`, a raw paint id integer, or a
+/// raw win id integer.
 fn resolve_leaf_target(target: &mlua::Value) -> mlua::Result<u64> {
     match target {
         mlua::Value::UserData(ud) => {
             if let Ok(w) = ud.borrow::<super::win::LuaWin>() {
                 return Ok(w.id.0);
             }
+            if let Ok(p) = ud.borrow::<super::paint::LuaPaintReg>() {
+                return Ok(p.id.0);
+            }
             Err(mlua::Error::external(
-                "smelt.overlay.layout.leaf: expected a Win handle or paint id",
+                "smelt.overlay.layout.leaf: expected a Win or Paint handle (or raw id)",
             ))
         }
         mlua::Value::Integer(i) => Ok(*i as u64),
         mlua::Value::Number(n) => Ok(*n as u64),
         other => Err(mlua::Error::external(format!(
-            "smelt.overlay.layout.leaf: expected Win handle or integer, got {}",
+            "smelt.overlay.layout.leaf: expected Win/Paint handle or integer, got {}",
             other.type_name()
         ))),
     }
