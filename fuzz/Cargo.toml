@@ -39,6 +39,13 @@ doc = false
 bench = false
 
 [[bin]]
+name = "lua_loop"
+path = "fuzz_targets/lua_loop.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
 name = "crash_to_scenario"
 path = "src/bin/crash_to_scenario.rs"
 test = false

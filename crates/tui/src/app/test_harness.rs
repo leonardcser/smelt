@@ -463,6 +463,17 @@ impl TestApp {
         self.app.reload_lua();
     }
 
+    /// Run an arbitrary Lua snippet against the embedded runtime with
+    /// the host pointer installed. Returns whether execution succeeded
+    /// (a Lua-level error is *not* a fuzz failure — many generated
+    /// snippets intentionally hit type errors that the bindings layer
+    /// raises as mlua errors). Used by `lua_loop` to feed batched ops
+    /// that reference each other via shared locals.
+    pub fn run_lua(&mut self, snippet: &str) -> bool {
+        let _guard = crate::lua::install_app_ptr(&mut self.app);
+        self.app.lua.lua.load(snippet).exec().is_ok()
+    }
+
     /// Side-channel: open a synthetic overlay via `smelt.overlay.new`.
     /// `variant % N` picks from a small fixed set spanning the new
     /// surface area (leaf, vbox, with static measure, with keymap,
