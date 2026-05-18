@@ -44,8 +44,6 @@ pub(crate) async fn engine_task(
 
     let _ = event_tx.send(EngineEvent::Ready);
 
-    let mut context_window: Option<u32> = config.context_window;
-
     loop {
         tokio::select! {
             Some(cmd) = cmd_rx.recv() => {
@@ -93,10 +91,8 @@ pub(crate) async fn engine_task(
                             started_at: config.clock.instant_now(),
                             tps_samples: Vec::new(),
                             tool_elapsed: HashMap::new(),
-                            context_window,
                         };
                         turn.run(input_content, history).await;
-                        context_window = turn.context_window;
                     }
                     UiCommand::EngineAsk {
                         id,
@@ -369,7 +365,6 @@ struct Turn<'a> {
     started_at: Instant,
     tps_samples: Vec<f64>,
     tool_elapsed: HashMap<String, u64>,
-    context_window: Option<u32>,
 }
 
 impl<'a> Turn<'a> {
@@ -458,20 +453,6 @@ impl<'a> Turn<'a> {
             turn_id: self.turn_id,
             messages,
         });
-    }
-
-    /// Check whether prompt usage has crossed the context-window threshold.
-    /// Returns `true` when the caller should abort the turn with a
-    /// "context limit reached" `TurnError` so the user can run `/compact`.
-    async fn over_context_limit(&mut self, prompt_tokens: u32) -> bool {
-        if self.context_window.is_none() {
-            self.context_window = self.provider.fetch_context_window(&self.model).await;
-        }
-        let Some(ctx) = self.context_window else {
-            return false;
-        };
-        let threshold = crate::compact_threshold_percent();
-        (prompt_tokens as u64) * 100 >= (ctx as u64) * threshold
     }
 
     fn commit_partial_assistant(&mut self, text: String, reasoning: String) {
@@ -735,50 +716,40 @@ impl<'a> Turn<'a> {
                 }
                 Err(e) => {
                     let error_msg = e.to_string().replace('\n', " ");
+                    let is_ctx = is_context_window_error(&e);
                     log::entry(
                         log::Level::Warn,
-                        "agent_stop",
+                        if is_ctx {
+                            "context_limit_reached"
+                        } else {
+                            "agent_stop"
+                        },
                         &serde_json::json!({"reason": "llm_error", "error": error_msg.clone()}),
                     );
                     self.emit_turn_complete(false);
-                    self.emit(EngineEvent::TurnError { message: error_msg });
+                    let message = if is_ctx {
+                        "Context limit reached. Run /compact and retry.".to_string()
+                    } else {
+                        error_msg
+                    };
+                    self.emit(EngineEvent::TurnError { message });
                     return;
                 }
             };
 
-            let prompt_tokens = resp.usage.prompt_tokens;
-            if prompt_tokens.is_some() {
-                let tokens_per_sec = resp.tokens_per_sec;
-                if let Some(tps) = tokens_per_sec {
-                    self.tps_samples.push(tps);
-                }
+            if let Some(tps) = resp.tokens_per_sec {
+                self.tps_samples.push(tps);
+            }
+            if resp.usage.prompt_tokens.is_some() {
                 send_usage(
                     self.event_tx,
                     &self.config.api.provider_type,
                     &self.config.api.model_config,
                     &self.model,
                     resp.usage,
-                    tokens_per_sec,
+                    resp.tokens_per_sec,
                     false,
                 );
-            }
-
-            if let Some(tokens) = prompt_tokens {
-                if self.over_context_limit(tokens).await {
-                    log::entry(
-                        log::Level::Warn,
-                        "context_limit_reached",
-                        &serde_json::json!({
-                            "prompt_tokens": tokens,
-                            "context_window": self.context_window,
-                        }),
-                    );
-                    self.emit_turn_complete(false);
-                    self.emit(EngineEvent::TurnError {
-                        message: "Context limit reached. Run /compact and retry.".to_string(),
-                    });
-                    return;
-                }
             }
 
             let content = resp.content.map(Content::text);

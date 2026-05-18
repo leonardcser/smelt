@@ -332,7 +332,6 @@ GitHub Copilot OAuth tokens are stored in the system keyring (service:
 | `NO_COLOR`                        | Disable ANSI colors                                                                              |
 | `FORCE_COLOR`                     | Force ANSI colors regardless of TTY detection                                                    |
 | `EDITOR`                          | Editor for `Ctrl+X Ctrl+E` and vim `v`                                                           |
-| `SMELT_COMPACT_THRESHOLD_PERCENT` | Auto-compact trigger as a percentage of the context window. Integer in `[10, 95]`; default `80`. |
 | `SMELT_CODEX_TOKENS`              | Inline JSON Codex auth payload (overrides keyring and disk)                                      |
 | `SMELT_COPILOT_TOKENS`            | Inline JSON Copilot auth payload (overrides keyring and disk)                                    |
 

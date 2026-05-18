@@ -404,8 +404,6 @@ async fn main() {
             system_prompt_override: prompt_inputs.system_prompt_override.clone(),
             cwd: cwd.clone(),
             skill_section: prompt_inputs.skill_section.clone(),
-            auto_compact: settings.auto_compact,
-            context_window: None,
             redact_secrets: settings.redact_secrets,
             clock: Arc::clone(&clock),
         },

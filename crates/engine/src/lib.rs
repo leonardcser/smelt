@@ -26,23 +26,6 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::sync::mpsc;
 
-/// Default auto-compaction threshold, as a percentage of the context window.
-const DEFAULT_COMPACT_THRESHOLD_PERCENT: u64 = 80;
-
-/// Environment variable that overrides the auto-compaction threshold.
-/// Accepts an integer percentage in `[10, 95]`.
-const COMPACT_THRESHOLD_ENV: &str = "SMELT_COMPACT_THRESHOLD_PERCENT";
-
-/// Auto-compaction threshold as a percentage of the context window.
-/// Reads `SMELT_COMPACT_THRESHOLD_PERCENT` at call time; falls back to 80.
-pub fn compact_threshold_percent() -> u64 {
-    std::env::var(COMPACT_THRESHOLD_ENV)
-        .ok()
-        .and_then(|v| v.trim().parse::<u64>().ok())
-        .filter(|p| (10..=95).contains(p))
-        .unwrap_or(DEFAULT_COMPACT_THRESHOLD_PERCENT)
-}
-
 /// Prefix on the user-message slot the compaction plugin uses to carry
 /// the handoff summary. The TUI's transcript renderer matches against
 /// this prefix to render the message as a `Compacted` block instead of
@@ -138,9 +121,6 @@ pub struct EngineConfig {
     /// `/reload` through [`protocol::UiCommand::ReloadAgentConfig`]. The
     /// loader itself lives on `Core::skills` for tool execution.
     pub skill_section: Option<String>,
-    pub auto_compact: bool,
-    /// `None` causes the engine to fetch this from the provider API on first use.
-    pub context_window: Option<u32>,
     pub redact_secrets: bool,
     /// Source of monotonic + wall-clock time. Production uses
     /// [`clock::RealClock`]; deterministic-simulation harnesses inject a
@@ -240,73 +220,6 @@ pub fn start(config: EngineConfig, dispatcher: Box<dyn tools::ToolDispatcher>) -
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    // ---- compact_threshold_percent ----
-
-    fn with_env<F: FnOnce()>(key: &str, value: Option<&str>, f: F) {
-        let prev = std::env::var(key).ok();
-        unsafe {
-            match value {
-                Some(v) => std::env::set_var(key, v),
-                None => std::env::remove_var(key),
-            }
-        }
-        f();
-        unsafe {
-            match prev {
-                Some(v) => std::env::set_var(key, v),
-                None => std::env::remove_var(key),
-            }
-        }
-    }
-
-    #[test]
-    fn compact_threshold_defaults_to_80_when_env_unset() {
-        with_env(COMPACT_THRESHOLD_ENV, None, || {
-            assert_eq!(compact_threshold_percent(), 80);
-        });
-    }
-
-    #[test]
-    fn compact_threshold_reads_valid_env_value() {
-        with_env(COMPACT_THRESHOLD_ENV, Some("50"), || {
-            assert_eq!(compact_threshold_percent(), 50);
-        });
-    }
-
-    #[test]
-    fn compact_threshold_rejects_below_10_and_above_95() {
-        with_env(COMPACT_THRESHOLD_ENV, Some("9"), || {
-            assert_eq!(compact_threshold_percent(), 80);
-        });
-        with_env(COMPACT_THRESHOLD_ENV, Some("96"), || {
-            assert_eq!(compact_threshold_percent(), 80);
-        });
-    }
-
-    #[test]
-    fn compact_threshold_accepts_inclusive_bounds() {
-        with_env(COMPACT_THRESHOLD_ENV, Some("10"), || {
-            assert_eq!(compact_threshold_percent(), 10);
-        });
-        with_env(COMPACT_THRESHOLD_ENV, Some("95"), || {
-            assert_eq!(compact_threshold_percent(), 95);
-        });
-    }
-
-    #[test]
-    fn compact_threshold_rejects_non_numeric_values() {
-        with_env(COMPACT_THRESHOLD_ENV, Some("nope"), || {
-            assert_eq!(compact_threshold_percent(), 80);
-        });
-    }
-
-    #[test]
-    fn compact_threshold_trims_whitespace_around_value() {
-        with_env(COMPACT_THRESHOLD_ENV, Some("  42 "), || {
-            assert_eq!(compact_threshold_percent(), 42);
-        });
-    }
 
     // ---- render_system_prompt ----
 
