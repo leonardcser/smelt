@@ -14,11 +14,7 @@ impl TuiApp {
     /// `std::io::stdout()`; the fuzz harness passes `std::io::sink()` so
     /// every code path under `content/*` and `compositor:*` runs without
     /// dumping megabytes of ANSI per scenario into libFuzzer's log file.
-    pub(crate) fn render_normal_to<W: std::io::Write>(
-        &mut self,
-        agent_running: bool,
-        out: &mut W,
-    ) {
+    pub(crate) fn render_normal_to<W: std::io::Write>(&mut self, agent_running: bool, out: &mut W) {
         let _perf = smelt_perf::perf::begin("app:tick_compositor");
         self.update_spinner();
         // Publish vim mode so overlay leaves read it via `DrawContext::vim_mode`.

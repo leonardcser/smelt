@@ -479,7 +479,7 @@ dependencies = [
 
 [[package]]
 name = "engine"
-version = "0.5.0-alpha.1"
+version = "0.5.0-alpha.2"
 dependencies = [
  "base64",
  "futures-util",
@@ -1287,7 +1287,7 @@ checksum = "112b39cec0b298b6c1999fee3e31427f74f676e4cb9879ed1a121b43661a4154"
 
 [[package]]
 name = "lua-doc-derive"
-version = "0.5.0-alpha.1"
+version = "0.5.0-alpha.2"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -1686,7 +1686,7 @@ dependencies = [
 
 [[package]]
 name = "protocol"
-version = "0.5.0-alpha.1"
+version = "0.5.0-alpha.2"
 dependencies = [
  "serde",
  "serde_json",
@@ -2313,7 +2313,7 @@ checksum = "67b1b7a3b5fe4f1376887184045fcf45c69e92af734b7aaddc05fb777b6fbd03"
 
 [[package]]
 name = "smelt-buffer"
-version = "0.5.0-alpha.1"
+version = "0.5.0-alpha.2"
 dependencies = [
  "base64",
  "sha2",
@@ -2323,7 +2323,7 @@ dependencies = [
 
 [[package]]
 name = "smelt-core"
-version = "0.5.0-alpha.1"
+version = "0.5.0-alpha.2"
 dependencies = [
  "dirs",
  "ego-tree",
@@ -2358,7 +2358,7 @@ dependencies = [
 
 [[package]]
 name = "smelt-edit"
-version = "0.5.0-alpha.1"
+version = "0.5.0-alpha.2"
 dependencies = [
  "crossterm",
  "smelt-buffer",
@@ -2372,6 +2372,7 @@ version = "0.0.0"
 dependencies = [
  "arbitrary",
  "crossterm",
+ "engine",
  "libfuzzer-sys",
  "protocol",
  "serde",
@@ -2384,15 +2385,15 @@ dependencies = [
 
 [[package]]
 name = "smelt-perf"
-version = "0.5.0-alpha.1"
+version = "0.5.0-alpha.2"
 
 [[package]]
 name = "smelt-style"
-version = "0.5.0-alpha.1"
+version = "0.5.0-alpha.2"
 
 [[package]]
 name = "smelt-term"
-version = "0.5.0-alpha.1"
+version = "0.5.0-alpha.2"
 dependencies = [
  "crossterm",
  "smelt-style",
@@ -2742,7 +2743,7 @@ checksum = "e421abadd41a4225275504ea4d6566923418b7f05506fbc9c0fe86ba7396114b"
 
 [[package]]
 name = "tui"
-version = "0.5.0-alpha.1"
+version = "0.5.0-alpha.2"
 dependencies = [
  "base64",
  "crossterm",
