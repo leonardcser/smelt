@@ -50,7 +50,7 @@ Bundled plugins (title generation, compaction, prediction, `/btw`,
 
 ```lua
 smelt.model.preferred("title", "openai/gpt-5-mini")
-smelt.model.preferred("compact", "anthropic/claude-haiku")
+smelt.model.preferred("compact", "anthropic/claude-haiku-4-5")
 ```
 
 The model must be registered under a provider. Custom plugins can pick any

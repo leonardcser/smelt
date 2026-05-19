@@ -56,7 +56,7 @@ cargo install --git https://github.com/leonardcser/smelt.git
 smelt --model qwen3.5:0.8b --api-base http://localhost:11434/v1
 
 # OpenAI, Anthropic, OpenRouter, etc.
-smelt --model gpt-5.4 --api-base https://api.openai.com/v1 --api-key-env OPENAI_API_KEY
+smelt --model gpt-5.5 --api-base https://api.openai.com/v1 --api-key-env OPENAI_API_KEY
 ```
 
 **Subscription providers** (ChatGPT Pro/Plus, GitHub Copilot):
@@ -64,7 +64,7 @@ smelt --model gpt-5.4 --api-base https://api.openai.com/v1 --api-key-env OPENAI_
 ```bash
 smelt auth                          # one-time login
 smelt --model gpt-5.4               # Codex
-smelt --model claude-sonnet-4.5     # Copilot
+smelt --model claude-sonnet-4-6     # Copilot
 ```
 
 Or just run `smelt` with no arguments and follow the wizard.

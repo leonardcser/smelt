@@ -51,7 +51,7 @@ SGLang, llama.cpp.
 
     ```bash
     read -s OPENAI_API_KEY && export OPENAI_API_KEY
-    smelt --model gpt-5.4 \
+    smelt --model gpt-5.5 \
           --api-base https://api.openai.com/v1 \
           --api-key-env OPENAI_API_KEY
     ```
@@ -75,7 +75,7 @@ SGLang, llama.cpp.
 
     ```bash
     smelt auth   # pick "GitHub Copilot", follow the device-code prompt
-    smelt --model claude-sonnet-4.5
+    smelt --model claude-sonnet-4-6
     ```
 
     On login, smelt enables the policy for every model your account exposes
@@ -87,7 +87,7 @@ SGLang, llama.cpp.
 
     ```bash
     read -s ANTHROPIC_API_KEY && export ANTHROPIC_API_KEY
-    smelt --model claude-opus-4-6 \
+    smelt --model claude-opus-4-7 \
           --api-base https://api.anthropic.com/v1 \
           --api-key-env ANTHROPIC_API_KEY
     ```
@@ -119,7 +119,7 @@ smelt.provider.register("openai", {
   type = "openai",
   api_base = "https://api.openai.com/v1",
   api_key_env = "OPENAI_API_KEY",
-  models = { "gpt-5.4" },
+  models = { "gpt-5.5" },
 })
 
 smelt.settings.vim = true

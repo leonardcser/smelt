@@ -42,7 +42,7 @@ smelt.provider.register("openai", {
   type = "openai",
   api_base = "https://api.openai.com/v1",
   api_key_env = "OPENAI_API_KEY",
-  models = { "gpt-5.4" },
+  models = { "gpt-5.5" },
 })
 ```
 
@@ -156,7 +156,7 @@ flags still win:
 
 ```lua
 smelt.defaults({
-  model = "openai/gpt-5.4",
+  model = "openai/gpt-5.5",
   mode = "plan",
   reasoning_effort = "high",
 })
@@ -171,7 +171,7 @@ primary model when unset. Override one from `init.lua`:
 
 ```lua
 smelt.model.preferred("title", "openai/gpt-5-mini")
-smelt.model.preferred("compact", "anthropic/claude-haiku")
+smelt.model.preferred("compact", "anthropic/claude-haiku-4-5")
 smelt.model.preferred("predict", "openai/gpt-5-mini")
 ```
 
