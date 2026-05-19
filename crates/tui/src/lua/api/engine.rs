@@ -325,8 +325,9 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
                     let mut tools: Vec<protocol::ToolDef> = Vec::new();
                     if inherit_session {
                         // Snapshot live session state so the request prefix
-                        // matches the main turn byte-for-byte.
-                        system = app.rebuild_system_prompt();
+                        // matches the main turn byte-for-byte. Pure read —
+                        // must not mutate `app.prompt_sections`.
+                        system = app.assemble_system_prompt();
                         let session_msgs = app.core.session.messages.clone();
                         messages = session_msgs.into_iter().chain(messages).collect();
                         tools = app.lua.tool_defs(app.core.config.mode);

@@ -516,6 +516,9 @@ impl TuiApp {
     }
 
     /// Rebuilds prompt sections from current app state and returns the assembled system prompt.
+    /// Mutates `self.prompt_sections`; call sites that just want to read
+    /// the current system prompt (Lua getters, EngineAsk inheritance)
+    /// should use [`Self::assemble_system_prompt`] instead.
     pub(crate) fn rebuild_system_prompt(&mut self) -> String {
         let cwd = std::path::Path::new(&self.cwd);
         self.prompt_sections = crate::prompt_sections::build_defaults(
@@ -526,6 +529,21 @@ impl TuiApp {
             self.prompt_inputs.instructions.as_deref(),
         );
         self.prompt_sections.assemble()
+    }
+
+    /// Pure variant of [`Self::rebuild_system_prompt`]: returns the
+    /// assembled bytes without committing them to `self.prompt_sections`.
+    /// "What is the system prompt right now" reads must not mutate state.
+    pub(crate) fn assemble_system_prompt(&self) -> String {
+        let cwd = std::path::Path::new(&self.cwd);
+        crate::prompt_sections::build_defaults(
+            cwd,
+            self.core.config.mode,
+            true,
+            self.prompt_inputs.skill_section.as_deref(),
+            self.prompt_inputs.instructions.as_deref(),
+        )
+        .assemble()
     }
 
     /// Fire due timer callbacks; re-arms recurring entries and drops one-shots.
