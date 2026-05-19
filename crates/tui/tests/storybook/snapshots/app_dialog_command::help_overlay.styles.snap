@@ -1,0 +1,73 @@
+---
+source: crates/tui/tests/storybook/app_ctx.rs
+expression: frame.styles_text()
+---
+dim: 60 18
+  0   0   1 fg=AnsiValue(244)
+  0   1   6 fg=AnsiValue(244) attrs=bold
+  0   7  53 fg=AnsiValue(244)
+  1   0   1 fg=AnsiValue(244)
+  1   1   1 fg=Black bg=White
+  1  26  32 attrs=dim
+  1  58   1 bg=AnsiValue(243)
+  1  59   1 fg=AnsiValue(244)
+  2   0   1 fg=AnsiValue(244)
+  2  26  20 attrs=dim
+  2  58   1 bg=AnsiValue(243)
+  2  59   1 fg=AnsiValue(244)
+  3   0   1 fg=AnsiValue(244)
+  3  26  19 attrs=dim
+  3  58   1 bg=AnsiValue(243)
+  3  59   1 fg=AnsiValue(244)
+  4   0   1 fg=AnsiValue(244)
+  4  58   1 bg=AnsiValue(243)
+  4  59   1 fg=AnsiValue(244)
+  5   0   1 fg=AnsiValue(244)
+  5  26  12 attrs=dim
+  5  58   1 bg=AnsiValue(243)
+  5  59   1 fg=AnsiValue(244)
+  6   0   1 fg=AnsiValue(244)
+  6  26  14 attrs=dim
+  6  58   1 bg=AnsiValue(243)
+  6  59   1 fg=AnsiValue(244)
+  7   0   1 fg=AnsiValue(244)
+  7  26  25 attrs=dim
+  7  58   1 bg=AnsiValue(243)
+  7  59   1 fg=AnsiValue(244)
+  8   0   1 fg=AnsiValue(244)
+  8  26  20 attrs=dim
+  8  58   1 bg=AnsiValue(243)
+  8  59   1 fg=AnsiValue(244)
+  9   0   1 fg=AnsiValue(244)
+  9  26  22 attrs=dim
+  9  58   1 bg=AnsiValue(243)
+  9  59   1 fg=AnsiValue(244)
+ 10   0   1 fg=AnsiValue(244)
+ 10  26  21 attrs=dim
+ 10  58   1 bg=AnsiValue(243)
+ 10  59   1 fg=AnsiValue(244)
+ 11   0   1 fg=AnsiValue(244)
+ 11  26  32 attrs=dim
+ 11  58   1 bg=AnsiValue(243)
+ 11  59   1 fg=AnsiValue(244)
+ 12   0   1 fg=AnsiValue(244)
+ 12  26  24 attrs=dim
+ 12  58   1 bg=AnsiValue(235)
+ 12  59   1 fg=AnsiValue(244)
+ 13   0   1 fg=AnsiValue(244)
+ 13  26  29 attrs=dim
+ 13  58   1 bg=AnsiValue(235)
+ 13  59   1 fg=AnsiValue(244)
+ 14   0   1 fg=AnsiValue(244)
+ 14  26  16 attrs=dim
+ 14  58   1 bg=AnsiValue(235)
+ 14  59   1 fg=AnsiValue(244)
+ 15   0   1 fg=AnsiValue(244)
+ 15  26  25 attrs=dim
+ 15  58   1 bg=AnsiValue(235)
+ 15  59   1 fg=AnsiValue(244)
+ 16   0   1 fg=AnsiValue(244)
+ 16  26  32 attrs=dim
+ 16  58   1 bg=AnsiValue(235)
+ 16  59   1 fg=AnsiValue(244)
+ 17   0  60 fg=AnsiValue(244)

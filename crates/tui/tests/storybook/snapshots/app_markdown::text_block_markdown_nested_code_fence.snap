@@ -1,0 +1,21 @@
+---
+source: crates/tui/tests/storybook/app_ctx.rs
+expression: frame.text()
+---
+First in rust:
+
+let x = 1;
+
+Then in python:
+
+x = 1
+print(x)
+
+Done.
+
+
+
+
+─────────────────────────────────────────────────────────  ─
+
+────────────────────────────────────────────────────────────

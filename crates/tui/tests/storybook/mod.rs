@@ -207,4 +207,21 @@ macro_rules! story {
     };
 }
 
+pub mod app_ctx;
 pub mod stories;
+
+/// Build a tool-args `HashMap` from a small list of `(&'static str, V)`
+/// pairs. Convenience for dialog stories whose tool dispatch needs a
+/// HashMap-typed `args` field; bridges the gap from the natural array
+/// literal callers want to write.
+#[allow(dead_code)]
+pub fn args<I, V>(entries: I) -> std::collections::HashMap<String, serde_json::Value>
+where
+    I: IntoIterator<Item = (&'static str, V)>,
+    V: Into<serde_json::Value>,
+{
+    entries
+        .into_iter()
+        .map(|(k, v)| (k.to_string(), v.into()))
+        .collect()
+}

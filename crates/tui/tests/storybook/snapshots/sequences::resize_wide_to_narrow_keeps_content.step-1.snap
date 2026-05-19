@@ -1,0 +1,7 @@
+---
+source: crates/tui/tests/storybook/mod.rs
+expression: frame.text()
+---
+alpha bravo c
+delta echo fo
+golf hotel in

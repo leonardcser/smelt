@@ -1,0 +1,33 @@
+---
+source: crates/tui/tests/storybook/app_ctx.rs
+expression: frame.text()
+---
+# Release notes
+The 0.6 release ships streaming markdown with inline code and
+legacy paths removed.
+
+## Highlights
+- table renderer matches the dialog one
+- syntax highlighting in fenced code
+- bug fix: trailing newline in headings
+
+> Heads up: the API changed in one place — see below.
+
+───
+
+
+fn run() -> Result<()> {
+    println!("hello");
+    Ok(())
+}
+
+┏━━━━━━━━┳━━━━━━┓
+┃ change ┃ who  ┃
+┣━━━━━━━━╋━━━━━━┫
+┃ parser ┃ core ┃
+┃ diff   ┃ tui  ┃
+┗━━━━━━━━┻━━━━━━┛
+
+───────────────────────────────────────────────────────────────────  ─
+
+──────────────────────────────────────────────────────────────────────

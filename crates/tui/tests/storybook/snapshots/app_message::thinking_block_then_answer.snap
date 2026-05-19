@@ -1,0 +1,15 @@
+---
+source: crates/tui/tests/storybook/app_ctx.rs
+expression: frame.text()
+---
+│ let me think about this carefully.
+
+the answer is 42.
+
+
+
+
+
+─────────────────────────────────────  ─
+
+────────────────────────────────────────

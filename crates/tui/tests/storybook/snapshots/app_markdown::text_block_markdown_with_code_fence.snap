@@ -1,0 +1,19 @@
+---
+source: crates/tui/tests/storybook/app_ctx.rs
+expression: frame.text()
+---
+Here's the fix:
+
+fn add(a: i64, b: i64) -> i64 {
+    a.checked_add(b).expect("overflow")
+}
+
+Done.
+
+
+
+
+
+─────────────────────────────────────────────────────────  ─
+
+────────────────────────────────────────────────────────────

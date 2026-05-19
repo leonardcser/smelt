@@ -1,0 +1,25 @@
+---
+source: crates/tui/tests/storybook/app_ctx.rs
+expression: frame.text()
+---
+
+ rename `add` to `checked_add`
+
+
+│ scan the file, then issue an edit_file with the renamed signature.
+
+I'll rename the function and harden it against overflow.
+
+⏺ edit_file src/lib.rs
+   1 - fn add(a: i32, b: i32)
+   1 + fn checked_add(a: i64, b: i64)
+
+Done. Want me to update the call sites too?
+
+
+
+
+
+───────────────────────────────────────────────────────────────────  ─
+
+──────────────────────────────────────────────────────────────────────

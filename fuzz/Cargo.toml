@@ -15,7 +15,7 @@ path = "src/lib.rs"
 [dependencies]
 libfuzzer-sys = "0.4"
 arbitrary = { version = "1", features = ["derive"] }
-tui = { path = "../crates/tui", features = ["harness"] }
+tui = { path = "../crates/tui" }
 smelt-buffer = { path = "../crates/buffer" }
 smelt-style = { path = "../crates/style" }
 protocol = { path = "../crates/protocol" }

@@ -123,7 +123,9 @@ smelt.tools.register({
       local secs = math.floor(ms / 1000)
       table.insert(items, smelt.layout.text("(timeout: " .. format_duration(secs) .. ")"))
     end
-    table.insert(items, smelt.layout.text(output.content, { is_error = output.is_error }))
+    table.insert(items, smelt.layout.text(output.content, {
+      hl_group = output.is_error and "ErrorMsg" or nil,
+    }))
     return smelt.layout.vbox(items)
   end,
   paths_for_workspace = function(args)

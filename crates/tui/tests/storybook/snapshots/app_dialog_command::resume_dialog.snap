@@ -1,0 +1,15 @@
+---
+source: crates/tui/tests/storybook/app_ctx.rs
+expression: frame.text()
+---
+
+
+
+
+
+─ resume ───────────────────────────────────────────────────────────────
+ filter sessions…                                            workspace
+      12.1K  5m       investigate parser regression
+       4.0K  2h       wire up the diff renderer
+      85.6K  1d       first pass at the resume picker
+       1.4M  5d       spike: notebook preview

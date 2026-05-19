@@ -1,0 +1,11 @@
+---
+source: crates/tui/tests/storybook/app_ctx.rs
+expression: frame.text()
+---
+⏺ bash sleep 5
+  (timeout: 2m 0s)
+
+
+─────────────────────────────────────────────────────────  ─
+
+────────────────────────────────────────────────────────────

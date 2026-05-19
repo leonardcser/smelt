@@ -69,7 +69,7 @@ smelt.tools.register({
   end,
   render = function(args, output, ctx)
     if output.is_error then
-      return smelt.layout.text(output.content, { is_error = true })
+      return smelt.layout.text(output.content, { hl_group = "ErrorMsg" })
     end
     local meta = output.metadata or {}
     if meta.edit_mode == "insert" then

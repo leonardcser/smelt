@@ -1,0 +1,11 @@
+---
+source: crates/tui/tests/storybook/app_ctx.rs
+expression: frame.text()
+---
+⏺ read_file missing.rs
+  could not read file: missing.rs
+
+
+─────────────────────────────────────────────────────────  ─
+
+────────────────────────────────────────────────────────────

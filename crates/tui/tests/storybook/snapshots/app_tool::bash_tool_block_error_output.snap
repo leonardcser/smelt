@@ -1,0 +1,13 @@
+---
+source: crates/tui/tests/storybook/app_ctx.rs
+expression: frame.text()
+---
+⏺ bash cat missing.txt
+  cat: missing.txt: No such file or directory
+
+
+
+
+─────────────────────────────────────────────────────────  ─
+
+────────────────────────────────────────────────────────────

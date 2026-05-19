@@ -1,0 +1,10 @@
+---
+source: crates/tui/tests/storybook/app_ctx.rs
+expression: frame.text()
+---
+─ what is the difference between source and lines? ───────────────────
+ buf:source(text) replaces the whole buffer with a single string
+ and reparses; buf:lines(...) overwrites the row array directly
+ without reparsing. Use source for markdown/code where formatting
+ depends on the whole text, lines for list/picker buffers that are
+ already shaped row-by-row.

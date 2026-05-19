@@ -1,0 +1,15 @@
+---
+source: crates/tui/tests/storybook/app_ctx.rs
+expression: frame.text()
+---
+# Title
+## Section
+### Subsection
+Body text follows.
+
+
+
+
+───────────────────────────────────────────────  ─
+
+──────────────────────────────────────────────────

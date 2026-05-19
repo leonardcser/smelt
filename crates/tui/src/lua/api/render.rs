@@ -35,19 +35,19 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
 
     m.fn_(
         "text",
-        "Paint plain text into a buffer with dim/error body styling. `opts.is_error = true` switches to the error-message highlight group.",
+        "Paint plain text into a buffer. With no `opts.hl_group`, text renders as dim body. Pass `opts.hl_group = \"ErrorMsg\"` for errors, `\"SmeltAccent\"` for accent, or any registered theme group — the mapping is the caller's choice, not the renderer's.",
         &["buf", "content", "opts"],
         |_, (buf, content, opts): (LuaBuf, String, Option<mlua::Table>)| -> LuaResult<()> {
-            let is_error = opts
+            let hl_group = opts
                 .as_ref()
-                .and_then(|t| t.get::<Option<bool>>("is_error").ok().flatten())
-                .unwrap_or(false);
+                .and_then(|t| t.get::<Option<String>>("hl_group").ok().flatten());
             crate::lua::with_app(|app| {
                 let theme_snap = app.ui.theme().clone();
                 let width = crate::content::term_width() as u16;
                 if let Some(buf) = app.ui.buf_mut(buf.id) {
                     render_into_buffer(buf, width, &theme_snap, |sink| {
                         let max_cols = (width as usize).saturating_sub(3);
+                        let hl = hl_group.as_deref().map(intern);
                         for line in content.lines() {
                             let expanded = line.replace('\t', "    ");
                             let segs = wrap_line(&expanded, max_cols);
@@ -55,15 +55,12 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
                                 sink.mark_wrapped();
                             }
                             for seg in &segs {
-                                if is_error {
-                                    sink.push_hl(intern("ErrorMsg"));
-                                    sink.print(seg);
-                                    sink.pop_style();
-                                } else {
-                                    sink.push_dim();
-                                    sink.print(seg);
-                                    sink.pop_style();
+                                match hl {
+                                    Some(g) => sink.push_hl(g),
+                                    None => sink.push_dim(),
                                 }
+                                sink.print(seg);
+                                sink.pop_style();
                                 sink.newline();
                             }
                         }

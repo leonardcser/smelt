@@ -1,0 +1,13 @@
+---
+source: crates/tui/tests/storybook/app_ctx.rs
+expression: frame.text()
+---
+
+> Always validate at the boundary.
+> Never trust caller input.
+
+Got it.
+
+─────────────────────────────────────────────────────────  ─
+
+────────────────────────────────────────────────────────────

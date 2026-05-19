@@ -1,0 +1,11 @@
+---
+source: crates/tui/tests/storybook/app_ctx.rs
+expression: frame.text()
+---
+
+ refactor the parser into its own module
+
+
+───────────────────────────────────────────────  ─
+
+──────────────────────────────────────────────────

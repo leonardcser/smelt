@@ -1,0 +1,17 @@
+---
+source: crates/tui/tests/storybook/app_ctx.rs
+expression: frame.text()
+---
+- first item
+- second item
+  - nested item
+1. ordered one
+2. ordered two
+
+
+
+
+
+───────────────────────────────────────────────  ─
+
+──────────────────────────────────────────────────

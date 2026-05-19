@@ -29,6 +29,11 @@ notify = { workspace = true }
 insta = { workspace = true }
 
 [features]
-# Expose the in-process `TestApp` harness to external binaries that need to
-# drive a `TuiApp` through scripted `SourceEvent` streams.
+# Expose the in-process `TestApp` harness (and the few `pub(crate)`
+# accessors stories use to reach into app/lua state). On by default so
+# the integration test crate under `tests/storybook` and the
+# `examples/stories.rs` viewer compile without extra flags; release
+# binaries opt out via `default-features = false`.
+default = ["harness"]
 harness = []
+

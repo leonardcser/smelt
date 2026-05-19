@@ -2,8 +2,15 @@
 //!
 //! Reads the blessed `.snap` files under `crates/tui/tests/storybook/snapshots/`
 //! and renders each story's frame with its styles sidecar applied. No story
-//! re-execution — the snapshot files already contain everything the user
-//! would see.
+//! re-execution — the snapshot files contain everything the user would see.
+//!
+//! All of the format knowledge lives in `smelt_term::SnapshotFrame`:
+//! `parse` reconstructs the captured frame losslessly (the `dim:` header
+//! on the styles sidecar carries cell dimensions, so wide-char rows
+//! whose trailing continuation slot was `trim_end`-stripped still come
+//! back intact), and `blit_into` replays the captured cells through the
+//! same `Grid` primitives the live app uses. Crossterm is used only for
+//! the terminal envelope (alt screen, raw mode, input polling).
 //!
 //! Keys: `j`/`k` or `↓`/`↑` navigate, `g`/`G` jump to top/bottom,
 //! `q` or `Esc` quits.
@@ -12,63 +19,32 @@
 //!     cargo run -p tui --example stories
 
 use std::collections::HashMap;
-use std::io::{stdout, Write};
+use std::io::stdout;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use crossterm::cursor;
 use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyModifiers};
-use crossterm::style::{
-    Attribute, Color as CtColor, Print, ResetColor, SetAttribute, SetBackgroundColor,
-    SetForegroundColor,
-};
-use crossterm::terminal::{self, Clear, ClearType, EnterAlternateScreen, LeaveAlternateScreen};
-use crossterm::{ExecutableCommand, QueueableCommand};
+use crossterm::terminal::{self, EnterAlternateScreen, LeaveAlternateScreen};
+use crossterm::{cursor, ExecutableCommand};
 
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
-struct StyleRun {
-    fg: Option<CtColor>,
-    bg: Option<CtColor>,
-    bold: bool,
-    dim: bool,
-    italic: bool,
-    underline: bool,
-    crossedout: bool,
-}
-
-impl StyleRun {
-    fn is_default(&self) -> bool {
-        self == &StyleRun::default()
-    }
-}
-
-/// (row, col, len, style)
-type StyleSpan = (u16, u16, u16, StyleRun);
+use smelt_term::{Color, Compositor, Grid, SnapshotFrame, Style, Theme};
+use unicode_width::UnicodeWidthChar;
 
 #[derive(Clone, Debug)]
 struct Story {
-    /// Group name (e.g. `"layout"`).
     group: String,
-    /// Stem after the `::` (e.g. `"vbox_three_panes"` or
-    /// `"theme_swap_repaints_without_buffer_edit.step-1"`).
     name: String,
-    /// Full snapshot id minus `.snap` suffix; used as filename root.
     full_id: String,
-    /// Path to the `.snap` text file.
     snap_path: PathBuf,
-    /// Path to the corresponding `.styles.snap` file (may not exist
-    /// if no spans were emitted).
     styles_path: PathBuf,
 }
 
 fn snapshot_dir() -> PathBuf {
-    // `cargo run --example` runs from the package directory.
     let cwd = std::env::current_dir().expect("cwd");
     let candidate = cwd.join("tests").join("storybook").join("snapshots");
     if candidate.is_dir() {
         return candidate;
     }
-    // Fallback: workspace-root invocation.
     cwd.join("crates")
         .join("tui")
         .join("tests")
@@ -91,11 +67,7 @@ fn enumerate_stories() -> Vec<Story> {
         let Some(file_name) = path.file_name().and_then(|s| s.to_str()) else {
             continue;
         };
-        // Skip styles sidecars and any `.snap.new` drift files.
-        if !file_name.ends_with(".snap") {
-            continue;
-        }
-        if file_name.ends_with(".styles.snap") {
+        if !file_name.ends_with(".snap") || file_name.ends_with(".styles.snap") {
             continue;
         }
         let id = file_name.trim_end_matches(".snap").to_string();
@@ -118,158 +90,35 @@ fn enumerate_stories() -> Vec<Story> {
     entries
 }
 
-/// Strip the insta YAML header from a `.snap` body and return the
-/// content lines. The format is:
-///
-///     ---
-///     source: …
-///     expression: …
-///     ---
-///     <body>
-fn read_snap_body(path: &Path) -> std::io::Result<Vec<String>> {
+/// Strip the insta YAML header from a `.snap` body — `insta`'s
+/// concern, not the library's.
+fn read_snap_body(path: &Path) -> std::io::Result<String> {
     let raw = std::fs::read_to_string(path)?;
     let mut iter = raw.lines();
-    // First line should be `---`.
     if iter.next() != Some("---") {
-        // No header: return the whole file.
-        return Ok(raw.lines().map(|l| l.to_string()).collect());
+        return Ok(raw);
     }
-    // Skip header until the second `---`.
     for line in iter.by_ref() {
         if line == "---" {
             break;
         }
     }
-    Ok(iter.map(|l| l.to_string()).collect())
+    Ok(iter.collect::<Vec<_>>().join("\n"))
 }
 
-/// Parse one styles-sidecar body. Each line has the shape:
-///     row col len fg=… bg=… attrs=bold|italic
-/// `row col len` are right-aligned ints. Empty lines collapse out.
-fn parse_styles(body: &[String]) -> Vec<StyleSpan> {
-    let mut out = Vec::new();
-    for line in body {
-        let trimmed = line.trim();
-        if trimmed.is_empty() {
-            continue;
-        }
-        let mut parts = trimmed.split_whitespace();
-        let Some(row) = parts.next().and_then(|s| s.parse::<u16>().ok()) else {
-            continue;
-        };
-        let Some(col) = parts.next().and_then(|s| s.parse::<u16>().ok()) else {
-            continue;
-        };
-        let Some(len) = parts.next().and_then(|s| s.parse::<u16>().ok()) else {
-            continue;
-        };
-        let mut style = StyleRun::default();
-        for kv in parts {
-            if let Some(rest) = kv.strip_prefix("fg=") {
-                style.fg = parse_color(rest);
-            } else if let Some(rest) = kv.strip_prefix("bg=") {
-                style.bg = parse_color(rest);
-            } else if let Some(rest) = kv.strip_prefix("attrs=") {
-                for attr in rest.split('|') {
-                    match attr {
-                        "bold" => style.bold = true,
-                        "dim" => style.dim = true,
-                        "italic" => style.italic = true,
-                        "underline" => style.underline = true,
-                        "crossedout" => style.crossedout = true,
-                        _ => {}
-                    }
-                }
-            }
-        }
-        out.push((row, col, len, style));
-    }
-    out
+/// Load and parse a story's `.snap` + `.styles.snap` files into a
+/// faithful `SnapshotFrame`.
+fn load_frame(story: &Story) -> SnapshotFrame {
+    let text = read_snap_body(&story.snap_path).unwrap_or_default();
+    let styles = if story.styles_path.exists() {
+        read_snap_body(&story.styles_path).unwrap_or_default()
+    } else {
+        String::new()
+    };
+    SnapshotFrame::parse(&text, &styles)
 }
 
-/// Parse the `Debug` output of `smelt_core::style::Color` back into
-/// crossterm's `Color`. Names match 1-to-1 except `Rgb { r, g, b }`
-/// and `AnsiValue(n)`.
-fn parse_color(s: &str) -> Option<CtColor> {
-    if let Some(rest) = s.strip_prefix("Rgb { ") {
-        // Form: `Rgb { r: 12, g: 34, b: 56 }` — split on commas.
-        let inner = rest.trim_end_matches(" }");
-        let mut r = None;
-        let mut g = None;
-        let mut b = None;
-        for kv in inner.split(',') {
-            let kv = kv.trim();
-            if let Some(v) = kv.strip_prefix("r:") {
-                r = v.trim().parse().ok();
-            } else if let Some(v) = kv.strip_prefix("g:") {
-                g = v.trim().parse().ok();
-            } else if let Some(v) = kv.strip_prefix("b:") {
-                b = v.trim().parse().ok();
-            }
-        }
-        return match (r, g, b) {
-            (Some(r), Some(g), Some(b)) => Some(CtColor::Rgb { r, g, b }),
-            _ => None,
-        };
-    }
-    if let Some(rest) = s.strip_prefix("AnsiValue(") {
-        let n: u8 = rest.trim_end_matches(')').parse().ok()?;
-        return Some(CtColor::AnsiValue(n));
-    }
-    Some(match s {
-        "Reset" => CtColor::Reset,
-        "Black" => CtColor::Black,
-        "DarkGrey" | "DarkGray" => CtColor::DarkGrey,
-        "Red" => CtColor::Red,
-        "DarkRed" => CtColor::DarkRed,
-        "Green" => CtColor::Green,
-        "DarkGreen" => CtColor::DarkGreen,
-        "Yellow" => CtColor::Yellow,
-        "DarkYellow" => CtColor::DarkYellow,
-        "Blue" => CtColor::Blue,
-        "DarkBlue" => CtColor::DarkBlue,
-        "Magenta" => CtColor::Magenta,
-        "DarkMagenta" => CtColor::DarkMagenta,
-        "Cyan" => CtColor::Cyan,
-        "DarkCyan" => CtColor::DarkCyan,
-        "White" => CtColor::White,
-        "Grey" | "Gray" => CtColor::Grey,
-        _ => return None,
-    })
-}
-
-/// Build a per-cell style table for a frame. `rows.len()` rows, each
-/// padded to `width` cells. Anything not covered by a span stays
-/// default.
-fn cell_styles(rows: &[String], spans: &[StyleSpan], width: usize) -> Vec<Vec<StyleRun>> {
-    let mut out: Vec<Vec<StyleRun>> = (0..rows.len())
-        .map(|_| vec![StyleRun::default(); width])
-        .collect();
-    for (r, c, len, style) in spans {
-        let r = *r as usize;
-        if r >= out.len() {
-            continue;
-        }
-        let start = *c as usize;
-        let end = (*c as usize + *len as usize).min(width);
-        for cell in &mut out[r][start..end] {
-            *cell = style.clone();
-        }
-    }
-    out
-}
-
-fn frame_width(rows: &[String], spans: &[StyleSpan]) -> usize {
-    let from_text = rows.iter().map(|r| r.chars().count()).max().unwrap_or(0);
-    let from_styles = spans
-        .iter()
-        .map(|(_, c, l, _)| *c as usize + *l as usize)
-        .max()
-        .unwrap_or(0);
-    from_text.max(from_styles)
-}
-
-// ── List-pane rendering ───────────────────────────────────────────
+// ── List-pane state ───────────────────────────────────────────────
 
 fn group_counts(stories: &[Story]) -> Vec<(String, usize)> {
     let mut counts: HashMap<String, usize> = HashMap::new();
@@ -280,8 +129,6 @@ fn group_counts(stories: &[Story]) -> Vec<(String, usize)> {
     pairs.sort_by(|a, b| a.0.cmp(&b.0));
     pairs
 }
-
-// ── App state + main loop ─────────────────────────────────────────
 
 struct App {
     stories: Vec<Story>,
@@ -310,7 +157,6 @@ impl App {
             idx = len - 1;
         }
         self.selected = idx as usize;
-        // Keep the selection in view.
         if self.selected < self.list_scroll {
             self.list_scroll = self.selected;
         }
@@ -333,11 +179,55 @@ impl App {
     }
 }
 
-fn render(app: &App, term_w: u16, term_h: u16) -> std::io::Result<()> {
-    let mut out = stdout();
-    out.queue(Clear(ClearType::All))?;
+// ── Paint helpers ─────────────────────────────────────────────────
 
-    // Layout: left list, gap=1, right preview. List width = 32 cells.
+const STYLE_BOLD: Style = Style {
+    fg: None,
+    bg: None,
+    bold: true,
+    dim: false,
+    italic: false,
+    underline: false,
+    crossedout: false,
+};
+
+const STYLE_DIM: Style = Style {
+    fg: None,
+    bg: None,
+    bold: false,
+    dim: true,
+    italic: false,
+    underline: false,
+    crossedout: false,
+};
+
+/// Truncate `text` to at most `max_w` visual columns.
+fn fit_width(text: &str, max_w: u16) -> (String, u16) {
+    let mut out = String::new();
+    let mut emitted: u16 = 0;
+    for ch in text.chars() {
+        let cw = UnicodeWidthChar::width(ch).unwrap_or(0).max(1) as u16;
+        if emitted + cw > max_w {
+            break;
+        }
+        out.push(ch);
+        emitted += cw;
+    }
+    (out, emitted)
+}
+
+/// Paint `text` left-aligned at `(x, y)`, truncating to `max_w` and
+/// padding with spaces so a styled background extends to the edge.
+fn write_line(grid: &mut Grid, x: u16, y: u16, max_w: u16, text: &str, style: Style) {
+    let (slice, emitted) = fit_width(text, max_w);
+    grid.put_str(x, y, &slice, style);
+    if emitted < max_w {
+        let pad = " ".repeat((max_w - emitted) as usize);
+        grid.put_str(x + emitted, y, &pad, style);
+    }
+}
+
+fn paint_frame(grid: &mut Grid, app: &App, term_w: u16, term_h: u16) {
     let list_w: u16 = 32;
     let gap: u16 = 1;
     let preview_left = list_w + gap;
@@ -347,17 +237,15 @@ fn render(app: &App, term_w: u16, term_h: u16) -> std::io::Result<()> {
     let content_top: u16 = header_h;
     let content_h = term_h.saturating_sub(header_h + footer_h);
 
-    // ── Header ────────────────────────────────────────────────────
-    out.queue(cursor::MoveTo(0, 0))?;
-    out.queue(SetAttribute(Attribute::Bold))?;
-    out.queue(Print(format!(
+    // Header.
+    let header = format!(
         "smelt storybook — {} stories across {} groups",
         app.stories.len(),
         group_counts(&app.stories).len()
-    )))?;
-    out.queue(SetAttribute(Attribute::Reset))?;
+    );
+    write_line(grid, 0, 0, term_w, &header, STYLE_BOLD);
 
-    // ── List pane ─────────────────────────────────────────────────
+    // List pane.
     let mut last_group: Option<&str> = None;
     for (offset, (i, story)) in app
         .stories
@@ -371,170 +259,91 @@ fn render(app: &App, term_w: u16, term_h: u16) -> std::io::Result<()> {
         if row >= content_top + content_h {
             break;
         }
-        out.queue(cursor::MoveTo(0, row))?;
-        // Group break.
         let g_changed = last_group != Some(story.group.as_str());
         last_group = Some(story.group.as_str());
         let selected = i == app.selected;
-        if selected {
-            out.queue(SetAttribute(Attribute::Reverse))?;
-        } else if g_changed {
-            out.queue(SetAttribute(Attribute::Dim))?;
-        }
-        let mut label = if g_changed {
+        let label = if g_changed {
             format!("▸ {} :: {}", story.group, story.name)
         } else {
             format!("    {}", story.name)
         };
-        // Truncate to list width.
-        if label.chars().count() > list_w as usize {
-            let truncated: String = label.chars().take(list_w as usize - 1).collect();
-            label = format!("{truncated}…");
-        }
-        // Pad to fill the row so background reverse covers the whole bar.
-        let pad = (list_w as usize).saturating_sub(label.chars().count());
-        out.queue(Print(label))?;
-        if pad > 0 {
-            out.queue(Print(" ".repeat(pad)))?;
-        }
-        out.queue(SetAttribute(Attribute::Reset))?;
-    }
-
-    // ── Vertical separator ────────────────────────────────────────
-    for r in content_top..(content_top + content_h) {
-        out.queue(cursor::MoveTo(list_w, r))?;
-        out.queue(SetAttribute(Attribute::Dim))?;
-        out.queue(Print("│"))?;
-        out.queue(SetAttribute(Attribute::Reset))?;
-    }
-
-    // ── Preview pane ──────────────────────────────────────────────
-    if let Some(story) = app.stories.get(app.selected) {
-        let rows = read_snap_body(&story.snap_path).unwrap_or_default();
-        let style_rows = if story.styles_path.exists() {
-            parse_styles(&read_snap_body(&story.styles_path).unwrap_or_default())
+        let style = if selected {
+            Style {
+                fg: Some(Color::Black),
+                bg: Some(Color::White),
+                ..Style::default()
+            }
+        } else if g_changed {
+            STYLE_DIM
         } else {
-            Vec::new()
+            Style::default()
         };
-        let width = frame_width(&rows, &style_rows);
-        let cells = cell_styles(&rows, &style_rows, width);
+        write_line(grid, 0, row, list_w, &label, style);
+    }
 
-        // Title.
-        out.queue(cursor::MoveTo(preview_left, content_top))?;
-        out.queue(SetAttribute(Attribute::Bold))?;
-        out.queue(Print(&story.full_id))?;
-        out.queue(SetAttribute(Attribute::Reset))?;
-        out.queue(cursor::MoveTo(preview_left, content_top + 1))?;
-        out.queue(SetAttribute(Attribute::Dim))?;
-        out.queue(Print(format!("frame: {} × {}", width, rows.len())))?;
-        out.queue(SetAttribute(Attribute::Reset))?;
+    // Vertical separator.
+    for r in content_top..(content_top + content_h) {
+        grid.put_str(list_w, r, "│", STYLE_DIM);
+    }
+
+    // Preview pane.
+    if let Some(story) = app.stories.get(app.selected) {
+        let frame = load_frame(story);
+
+        write_line(
+            grid,
+            preview_left,
+            content_top,
+            preview_w,
+            &story.full_id,
+            STYLE_BOLD,
+        );
+        let info = format!("frame: {} × {}", frame.width, frame.height);
+        write_line(
+            grid,
+            preview_left,
+            content_top + 1,
+            preview_w,
+            &info,
+            STYLE_DIM,
+        );
 
         // Frame body, framed by a thin rule above + below.
         let body_top = content_top + 3;
-        let frame_max_w = preview_w.saturating_sub(2) as usize;
-        let render_w = width.min(frame_max_w);
-        // Top rule.
-        out.queue(cursor::MoveTo(preview_left, body_top.saturating_sub(1)))?;
-        out.queue(SetAttribute(Attribute::Dim))?;
-        out.queue(Print(format!("┌{}┐", "─".repeat(render_w))))?;
-        out.queue(SetAttribute(Attribute::Reset))?;
+        let frame_max_w = preview_w.saturating_sub(2);
+        let render_w = frame.width.min(frame_max_w);
+        let inner_x = preview_left + 1;
+        let max_inner_h = (content_h as usize).saturating_sub(5) as u16;
+        let inner_h = frame.height.min(max_inner_h);
 
-        let max_rows = (content_h as usize).saturating_sub(5);
-        for (r, line) in rows.iter().enumerate().take(max_rows) {
-            let frame_row = body_top + r as u16;
-            if frame_row >= content_top + content_h - 1 {
-                break;
-            }
-            out.queue(cursor::MoveTo(preview_left, frame_row))?;
-            out.queue(SetAttribute(Attribute::Dim))?;
-            out.queue(Print("│"))?;
-            out.queue(SetAttribute(Attribute::Reset))?;
-            // The snap stores 1 char per visual column — a width-2
-            // glyph occupies its column plus a trailing placeholder
-            // space. The terminal, however, advances by the glyph's
-            // own width when we print it, so emitting both columns
-            // double-counts the wide cell and pushes the trailing
-            // border right. Skip the placeholder when the preceding
-            // glyph is wide.
-            use unicode_width::UnicodeWidthChar;
-            let chars: Vec<char> = line.chars().collect();
-            let row_styles = cells.get(r);
-            let mut col = 0usize;
-            let mut emitted: u16 = 0;
-            while col < render_w {
-                let ch = chars.get(col).copied().unwrap_or(' ');
-                let cw = UnicodeWidthChar::width(ch).unwrap_or(0).max(1);
-                if emitted as usize + cw > render_w {
-                    break;
-                }
-                let style = row_styles
-                    .and_then(|s| s.get(col).cloned())
-                    .unwrap_or_default();
-                apply_style(&mut out, &style)?;
-                let mut buf = [0u8; 4];
-                out.queue(Print(ch.encode_utf8(&mut buf).to_string()))?;
-                out.queue(ResetColor)?;
-                out.queue(SetAttribute(Attribute::Reset))?;
-                col += cw;
-                emitted += cw as u16;
-            }
-            // Pad with spaces if the row had fewer visual cells than
-            // `render_w` — keeps the trailing `│` aligned.
-            while emitted < render_w as u16 {
-                out.queue(Print(" "))?;
-                emitted += 1;
-            }
-            out.queue(SetAttribute(Attribute::Dim))?;
-            out.queue(Print("│"))?;
-            out.queue(SetAttribute(Attribute::Reset))?;
+        let top_rule = format!("┌{}┐", "─".repeat(render_w as usize));
+        grid.put_str(
+            preview_left,
+            body_top.saturating_sub(1),
+            &top_rule,
+            STYLE_DIM,
+        );
+
+        for r in 0..inner_h {
+            grid.put_str(preview_left, body_top + r, "│", STYLE_DIM);
+            grid.put_str(inner_x + render_w, body_top + r, "│", STYLE_DIM);
         }
-        // Bottom rule.
-        let bottom_row = body_top + (rows.len().min(max_rows) as u16);
+
+        frame.blit_into(grid, inner_x, body_top);
+
+        let bottom_row = body_top + inner_h;
         if bottom_row < content_top + content_h {
-            out.queue(cursor::MoveTo(preview_left, bottom_row))?;
-            out.queue(SetAttribute(Attribute::Dim))?;
-            out.queue(Print(format!("└{}┘", "─".repeat(render_w))))?;
-            out.queue(SetAttribute(Attribute::Reset))?;
+            let rule = format!("└{}┘", "─".repeat(render_w as usize));
+            grid.put_str(preview_left, bottom_row, &rule, STYLE_DIM);
         }
     }
 
-    // ── Footer ────────────────────────────────────────────────────
-    out.queue(cursor::MoveTo(0, term_h.saturating_sub(1)))?;
-    out.queue(SetAttribute(Attribute::Dim))?;
-    out.queue(Print("j/k or ↓/↑ navigate · g/G top/bottom · q/Esc quit"))?;
-    out.queue(SetAttribute(Attribute::Reset))?;
-
-    out.flush()?;
-    Ok(())
+    // Footer.
+    let footer = "j/k or ↓/↑ navigate · g/G top/bottom · q/Esc quit";
+    write_line(grid, 0, term_h.saturating_sub(1), term_w, footer, STYLE_DIM);
 }
 
-fn apply_style<W: Write>(w: &mut W, s: &StyleRun) -> std::io::Result<()> {
-    if s.is_default() {
-        return Ok(());
-    }
-    if let Some(fg) = s.fg {
-        w.queue(SetForegroundColor(fg))?;
-    }
-    if let Some(bg) = s.bg {
-        w.queue(SetBackgroundColor(bg))?;
-    }
-    if s.bold {
-        w.queue(SetAttribute(Attribute::Bold))?;
-    }
-    if s.dim {
-        w.queue(SetAttribute(Attribute::Dim))?;
-    }
-    if s.italic {
-        w.queue(SetAttribute(Attribute::Italic))?;
-    }
-    if s.underline {
-        w.queue(SetAttribute(Attribute::Underlined))?;
-    }
-    if s.crossedout {
-        w.queue(SetAttribute(Attribute::CrossedOut))?;
-    }
-    Ok(())
-}
+// ── Main loop ─────────────────────────────────────────────────────
 
 fn run() -> std::io::Result<()> {
     let stories = enumerate_stories();
@@ -553,32 +362,57 @@ fn run() -> std::io::Result<()> {
 
     let mut app = App::new(stories);
     let mut size = terminal::size()?;
+    let theme = Theme::default();
+    let mut compositor = Compositor::new(size.0, size.1);
+
     let result = (|| -> std::io::Result<()> {
+        let mut dirty = true;
         loop {
             let list_height = (size.1 as usize).saturating_sub(4);
-            render(&app, size.0, size.1)?;
-            if event::poll(Duration::from_millis(200))? {
+            if dirty {
+                compositor.render_with(&theme, &mut out, |grid, _theme| {
+                    paint_frame(grid, &app, size.0, size.1);
+                })?;
+                dirty = false;
+            }
+            if event::poll(Duration::from_secs(1))? {
                 match event::read()? {
                     Event::Key(KeyEvent {
                         code, modifiers, ..
                     }) => match code {
                         KeyCode::Char('q') | KeyCode::Esc => break,
                         KeyCode::Char('c') if modifiers.contains(KeyModifiers::CONTROL) => break,
-                        KeyCode::Char('j') | KeyCode::Down => app.move_selection(1, list_height),
-                        KeyCode::Char('k') | KeyCode::Up => app.move_selection(-1, list_height),
+                        KeyCode::Char('j') | KeyCode::Down => {
+                            app.move_selection(1, list_height);
+                            dirty = true;
+                        }
+                        KeyCode::Char('k') | KeyCode::Up => {
+                            app.move_selection(-1, list_height);
+                            dirty = true;
+                        }
                         KeyCode::PageDown => {
-                            app.move_selection((list_height as i32) - 2, list_height)
+                            app.move_selection((list_height as i32) - 2, list_height);
+                            dirty = true;
                         }
                         KeyCode::PageUp => {
-                            app.move_selection(-((list_height as i32) - 2), list_height)
+                            app.move_selection(-((list_height as i32) - 2), list_height);
+                            dirty = true;
                         }
-                        KeyCode::Char('g') => app.jump(true, list_height),
-                        KeyCode::Char('G') => app.jump(false, list_height),
-                        KeyCode::Home => app.jump(true, list_height),
-                        KeyCode::End => app.jump(false, list_height),
+                        KeyCode::Char('g') | KeyCode::Home => {
+                            app.jump(true, list_height);
+                            dirty = true;
+                        }
+                        KeyCode::Char('G') | KeyCode::End => {
+                            app.jump(false, list_height);
+                            dirty = true;
+                        }
                         _ => {}
                     },
-                    Event::Resize(w, h) => size = (w, h),
+                    Event::Resize(w, h) => {
+                        size = (w, h);
+                        compositor.resize(w, h);
+                        dirty = true;
+                    }
                     _ => {}
                 }
             }

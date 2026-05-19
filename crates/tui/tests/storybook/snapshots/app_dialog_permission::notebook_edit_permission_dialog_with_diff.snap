@@ -1,0 +1,31 @@
+---
+source: crates/tui/tests/storybook/app_ctx.rs
+expression: frame.text()
+---
+
+
+
+
+
+
+
+
+────────────────────────────────────────────────────────────────────────────────
+ edit_notebook: analysis.ipynb
+╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌
+ replace cell 1 [code] id=load
+  1   import pandas as pd
+  2   df = pd.read_csv('data.csv')
+  3 + print(df.head())
+  3         "nbformat_minor": 5,
+  4         "metadata": {},
+  5         "cells": [
+  6           { "cell_type": "markdown", "id": "intro",
+╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌
+ Allow?
+  1. yes
+  2. no
+  3. always allow
+  4. always allow in ~/cwd
+
+  press tab to add a reason…

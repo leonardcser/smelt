@@ -1,0 +1,15 @@
+---
+source: crates/tui/tests/storybook/app_ctx.rs
+expression: frame.text()
+---
+⏺ web_fetch https://example.com/release
+  Summarise the release notes
+  0.6 ships streaming markdown and removes the legacy renderer.
+
+
+
+
+
+───────────────────────────────────────────────────────────────────  ─
+
+──────────────────────────────────────────────────────────────────────

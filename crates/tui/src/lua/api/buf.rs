@@ -49,7 +49,8 @@ pub struct LuaMarkOpts {
     pub id: Option<u32>,
     /// 1-based end row (inclusive). `nil` keeps the mark single-line.
     pub end_row: Option<u64>,
-    /// End column for highlight ranges.
+    /// End byte offset for highlight ranges (exclusive). Same unit as
+    /// `col` — bytes into the line, matching `#s` and `string.find`.
     pub end_col: Option<u64>,
     /// Higher-priority marks paint over lower-priority ones.
     #[lua(default)]
@@ -297,7 +298,7 @@ UiHost-only — buffers are terminal-screen backing stores that windows render i
             "line" => fn(idx: u64) -> Option<String>, "Read a single line by 1-based index. `nil` if out of range or the buffer is gone.",
             "styled" => fn(lines: mlua::Table) -> LuaBuf, "Replace the buffer with a list of styled lines (`{ { text, style?, syntax? }, ... }`). Returns the handle for chaining.",
             "readonly" => fn(val: Option<bool>) -> mlua::Value, "Read or write the readonly flag. With arg, returns the handle for chaining.",
-            "mark" => fn(ns: u32, row: u64, col: u64, opts: Option<LuaMarkOpts>) -> u64, "Place a highlight or virt-text extmark at `(row, col)` (row is 1-based). Returns the new extmark id. Allocate `ns` via `smelt.ns(name)`.",
+            "mark" => fn(ns: u32, row: u64, col: u64, opts: Option<LuaMarkOpts>) -> u64, "Place a highlight or virt-text extmark at `(row, col)`. Row is 1-based; `col` and `opts.end_col` are byte offsets into the line — the same unit as `#s`, `string.find`, and `string.sub`. Off-boundary bytes snap to the nearest UTF-8 char boundary; out-of-range bytes clamp to the line end. Returns the new extmark id. Allocate `ns` via `smelt.ns(name)`.",
             "clear_ns" => fn(ns: u32, start: Option<i64>, end_: Option<i64>) -> LuaBuf, "Drop every extmark owned by `ns` between `[start, end)` (1-based, exclusive end). Defaults clear the whole buffer. Returns the handle for chaining.",
         },
     });
@@ -534,7 +535,8 @@ fn set_styled_lines(id: crate::smelt_term::BufId, lines: mlua::Table) -> LuaResu
     Ok(())
 }
 
-/// `buf:mark(ns, row, col, opts?) → extmark id`. Row is 1-based.
+/// `buf:mark(ns, row, col, opts?) → extmark id`. Row is 1-based;
+/// `col`/`end_col` are byte offsets into the line.
 fn set_extmark(
     id: crate::smelt_term::BufId,
     ns: u32,
@@ -548,15 +550,29 @@ fn set_extmark(
         return 0;
     };
     let row0 = row0 as usize;
-    let col0 = col as usize;
+    let byte_col = col as usize;
 
     let opts = opts.unwrap_or_default();
 
     let end_row: Option<usize> = opts
         .end_row
         .and_then(|n| n.checked_sub(1).map(|x| x as usize));
-    let end_col: Option<usize> = opts.end_col.map(|n| n as usize);
+    let end_byte_col: Option<usize> = opts.end_col.map(|n| n as usize);
     let mark_id: Option<ExtmarkId> = opts.id.map(ExtmarkId);
+
+    // Underlying extmarks store display-cell columns. Convert byte
+    // offsets → cells using the current line content. Snaps off-boundary
+    // bytes and clamps overshoot to the end of the line.
+    let (col0, end_col) = crate::lua::with_app(|app| {
+        let line = app
+            .ui
+            .buf(id)
+            .and_then(|b| b.get_line(row0).map(String::from))
+            .unwrap_or_default();
+        let s = smelt_buffer::text::byte_to_cell(&line, byte_col);
+        let e = end_byte_col.map(|b| smelt_buffer::text::byte_to_cell(&line, b));
+        (s, e)
+    });
 
     let mut payload_opts = if let Some(text) = opts.virt_text.clone() {
         let mut o = ExtmarkOpts::virt_text(text, opts.virt_text_hl.clone());

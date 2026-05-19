@@ -509,9 +509,7 @@ impl Provider {
         CacheConfig {
             anthropic_markers: self.supports_anthropic_cache(),
             ttl_long,
-            prompt_cache_key: session_id
-                .filter(|s| !s.is_empty())
-                .map(|s| s.to_string()),
+            prompt_cache_key: session_id.filter(|s| !s.is_empty()).map(|s| s.to_string()),
         }
     }
 

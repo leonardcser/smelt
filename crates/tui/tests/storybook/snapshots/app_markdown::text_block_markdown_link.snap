@@ -1,0 +1,11 @@
+---
+source: crates/tui/tests/storybook/app_ctx.rs
+expression: frame.text()
+---
+See the [docs](https://example.com/docs) or visit
+<https://example.com> directly.
+
+
+─────────────────────────────────────────────────────────  ─
+
+────────────────────────────────────────────────────────────
