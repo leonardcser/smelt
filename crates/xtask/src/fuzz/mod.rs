@@ -97,6 +97,7 @@ pub(super) const TARGETS: &[(&str, TargetKind)] = &[
     ("attached_ops", TargetKind::Bytes),
     ("cache_invariance", TargetKind::Bytes),
     ("openai_cache_invariance", TargetKind::Bytes),
+    ("snapshot_roundtrip", TargetKind::Bytes),
 ];
 
 #[derive(Copy, Clone, PartialEq, Eq)]

@@ -18,7 +18,7 @@ before relaunching.
 
 ## Targets
 
-Six targets, two flavors:
+Seven targets, two flavors:
 
 | target | flavor | weight |
 |---|---|---|
@@ -27,11 +27,12 @@ Six targets, two flavors:
 | `attached_ops` | bytes — fast | medium |
 | `cache_invariance` | bytes — fast | light |
 | `openai_cache_invariance` | bytes — fast | light |
+| `snapshot_roundtrip` | bytes — fast | light |
 | `text_ops` | bytes — fastest | light |
 
 ## Launch (all targets, background, parallel)
 
-The user specifies a total fork budget. Distribute across the six targets
+The user specifies a total fork budget. Distribute across the seven targets
 weighting the heavy ones higher. Default split for **20 forks**:
 
 | target | forks |
@@ -39,8 +40,9 @@ weighting the heavy ones higher. Default split for **20 forks**:
 | `smelt_loop` | 6 |
 | `lua_loop` | 6 |
 | `attached_ops` | 3 |
-| `cache_invariance` | 2 |
+| `cache_invariance` | 1 |
 | `openai_cache_invariance` | 2 |
+| `snapshot_roundtrip` | 1 |
 | `text_ops` | 1 |
 
 For a different budget, scale proportionally. Heavy targets get the
@@ -56,8 +58,9 @@ mkdir -p /tmp/fuzz-loop
 cargo xtask fuzz run smelt_loop --fork 6              > /tmp/fuzz-loop/fuzz-smelt_loop.log 2>&1
 cargo xtask fuzz run lua_loop --fork 6                > /tmp/fuzz-loop/fuzz-lua_loop.log 2>&1
 cargo xtask fuzz run attached_ops --fork 3            > /tmp/fuzz-loop/fuzz-attached_ops.log 2>&1
-cargo xtask fuzz run cache_invariance --fork 2        > /tmp/fuzz-loop/fuzz-cache_invariance.log 2>&1
+cargo xtask fuzz run cache_invariance --fork 1        > /tmp/fuzz-loop/fuzz-cache_invariance.log 2>&1
 cargo xtask fuzz run openai_cache_invariance --fork 2 > /tmp/fuzz-loop/fuzz-openai_cache_invariance.log 2>&1
+cargo xtask fuzz run snapshot_roundtrip --fork 1      > /tmp/fuzz-loop/fuzz-snapshot_roundtrip.log 2>&1
 cargo xtask fuzz run text_ops --fork 1                > /tmp/fuzz-loop/fuzz-text_ops.log 2>&1
 ```
 

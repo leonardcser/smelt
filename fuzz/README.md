@@ -10,6 +10,7 @@ Six targets covering distinct surfaces:
 | `attached_ops` | `smelt_buffer::attached::AttachedTextMut` | segment-based reference model + invariant check |
 | `cache_invariance` | Anthropic prompt-cache prefix stability | random history + `cache_control`-aware byte diff |
 | `openai_cache_invariance` | OpenAI / aux-model prompt-cache stability | random history + `prompt_cache_key`-aware byte diff |
+| `snapshot_roundtrip` | `SnapshotFrame::parse` round-trip | random grid + style palette + assert `from_grid → text+styles → parse` is identity |
 
 ## Setup once
 

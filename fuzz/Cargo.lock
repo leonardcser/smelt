@@ -2379,6 +2379,7 @@ dependencies = [
  "serde_json",
  "smelt-buffer",
  "smelt-style",
+ "smelt-term",
  "tokio",
  "tui",
 ]
