@@ -338,104 +338,25 @@ pub struct LuaScenario {
 }
 
 impl<'a> Arbitrary<'a> for LuaScenario {
-    /// Per-scenario swarm + state-aware bundle generator. Each seed
-    /// disables most `LuaOp` variants and skews the rest wildly (swarm);
-    /// within those variants, the generator tracks live resource pool
-    /// sizes ([`LuaGenState`]) and rejects ops that would no-op against
-    /// the current state (e.g. `WinNew` when no buf exists,
-    /// `OverlayNew` when no win exists, `Remove` against an empty
-    /// pool). The model is approximate — Lua-side `pcall` failures or
-    /// host-side rejections may diverge from the model — but biasing
-    /// generation toward *valid* sequences turns roughly half of
-    /// previously-no-op ops into productive ones. Without it, a
-    /// scenario heavy on `Remove` against an empty buf pool wastes
-    /// budget bouncing off the `#__fuzz.bufs == 0` guard. The swarm
+    /// Per-scenario swarm-weighted op stream. Each seed disables most
+    /// `LuaOp` variants and skews the rest wildly so scenarios commit
+    /// to one shape of workload (buf-heavy, hook-heavy, paint-heavy…)
+    /// rather than uniformly bouncing across all variants. No state
+    /// model — the emitted Lua has defensive `#pool == 0` guards so
+    /// "act on an empty pool" ops cleanly no-op at runtime; the
+    /// generator doesn't need to know what's live. (A prior state-aware
+    /// generator added a retry loop and terminated scenarios early on
+    /// state-starvation, costing more ops than it saved.) The swarm
     /// table itself isn't persisted in the JSON scenario — `ops` is
     /// what replays.
     fn arbitrary(u: &mut Unstructured<'a>) -> arbitrary::Result<Self> {
         let swarm = SwarmWeights::arbitrary(u, N_LUAOP_VARIANTS)?;
-        let mut state = LuaGenState::default();
         let mut ops = Vec::new();
         while !u.is_empty() && ops.len() < LUA_MAX_OPS {
-            // Bounded retry so a state-starved seed still produces
-            // *some* op rather than spinning. 4 attempts is enough in
-            // practice — most variants are stateless and pass on the
-            // first try.
-            let mut op = None;
-            for _ in 0..4 {
-                let idx = swarm.pick(u)?;
-                let candidate = build_lua_op(idx, u)?;
-                if state.allows(&candidate) {
-                    op = Some(candidate);
-                    break;
-                }
-            }
-            let Some(op) = op else { break };
-            state.apply(&op);
-            ops.push(op);
+            let idx = swarm.pick(u)?;
+            ops.push(build_lua_op(idx, u)?);
         }
         Ok(LuaScenario { ops })
-    }
-}
-
-/// Generator-side estimate of Lua resource pool sizes. Updated after
-/// every emitted op; used to skip ops that would no-op against current
-/// state. The actual runtime state may diverge (mlua `pcall` failures,
-/// host-side errors), so this is a hint, not a guarantee — the emitted
-/// Lua still has defensive `#pool == 0` guards.
-#[derive(Default)]
-struct LuaGenState {
-    bufs: u32,
-    wins: u32,
-    overlays: u32,
-    paints: u32,
-}
-
-impl LuaGenState {
-    fn allows(&self, op: &LuaOp) -> bool {
-        match op {
-            LuaOp::WinNew { .. } => self.bufs > 0,
-            LuaOp::OverlayNew { .. } => self.wins > 0,
-            LuaOp::Remove { kind, .. } => self.pool(*kind) > 0,
-            _ => true,
-        }
-    }
-
-    fn apply(&mut self, op: &LuaOp) {
-        match op {
-            LuaOp::BufNew { .. } => self.bufs = self.bufs.saturating_add(1),
-            LuaOp::WinNew { .. } => self.wins = self.wins.saturating_add(1),
-            LuaOp::OverlayNew { .. } => self.overlays = self.overlays.saturating_add(1),
-            LuaOp::PaintRegister { .. } => self.paints = self.paints.saturating_add(1),
-            LuaOp::Remove { kind, .. } => {
-                let slot = match kind % 4 {
-                    0 => &mut self.bufs,
-                    1 => &mut self.wins,
-                    2 => &mut self.overlays,
-                    _ => &mut self.paints,
-                };
-                *slot = slot.saturating_sub(1);
-            }
-            LuaOp::Reload => {
-                // `/reload` wipes plugin-owned resources. Anonymous
-                // resources die; named ones survive but the conservative
-                // model treats this as full reset.
-                self.bufs = 0;
-                self.wins = 0;
-                self.overlays = 0;
-                self.paints = 0;
-            }
-            _ => {}
-        }
-    }
-
-    fn pool(&self, kind: u8) -> u32 {
-        match kind % 4 {
-            0 => self.bufs,
-            1 => self.wins,
-            2 => self.overlays,
-            _ => self.paints,
-        }
     }
 }
 
@@ -584,10 +505,9 @@ fn emit_remove(out: &mut String, kind: u8, idx: u8) {
         _ => "paints",
     };
     // `table.remove` (not `pool[i] = nil`) so live indices stay dense.
-    // The generator's [`LuaGenState`] tracks pool counts and only emits
-    // `Remove` when the pool is non-empty, so the `n == 0` guard here is
-    // belt-and-braces — a previously-failed pcall on the create path
-    // could still leave the model out of sync with the runtime.
+    // The `n == 0` guard handles the (common) case where the swarm
+    // emits Remove against an empty pool — the generator no longer
+    // pre-filters such ops.
     out.push_str("(function()\n");
     out.push_str(&format!("  local n = #__fuzz.{pool}\n"));
     out.push_str("  if n == 0 then return end\n");
