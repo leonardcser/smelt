@@ -48,26 +48,35 @@ mod refer {
     }
 
     pub fn prev_char_boundary(s: &str, pos: usize) -> usize {
-        let snapped = snap(s, pos);
-        if snapped == 0 {
+        // Production semantics (locked down by the
+        // `prev_char_boundary_snaps_back_to_previous_boundary_from_mid_char`
+        // unit test): "largest boundary STRICTLY less than `pos`",
+        // clamped to `s.len()`. From mid-char that's the boundary at the
+        // start of the containing char — NOT one boundary further back.
+        // An earlier version of this reference snapped pos first, which
+        // pushed mid-char inputs one extra boundary backward and showed
+        // up as a real differential failure during fuzzing.
+        let clamped = pos.min(s.len());
+        if clamped == 0 {
             return 0;
         }
-        // Largest boundary strictly less than snapped — except when pos
-        // already sits between chars, in which case it's snapped itself.
-        let mut last = 0;
+        let mut prev = 0;
         for (i, _) in s.char_indices() {
-            if i >= snapped {
-                return last;
+            if i >= clamped {
+                return prev;
             }
-            last = i;
+            prev = i;
         }
-        last
+        prev
     }
 
     pub fn next_char_boundary(s: &str, pos: usize) -> usize {
-        let snapped = snap(s, pos);
+        // Production semantics: smallest boundary strictly greater than
+        // `pos`, clamped to `s.len()`. From mid-char that's the boundary
+        // at the end of the containing char.
+        let clamped = pos.min(s.len());
         for (i, _) in s.char_indices() {
-            if i > snapped {
+            if i > clamped {
                 return i;
             }
         }
