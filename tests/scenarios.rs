@@ -328,3 +328,128 @@ async fn thinking_then_text() {
         "[].TokenUsage.tokens_per_sec" => "[tps]",
     });
 }
+
+/// Anthropic cache_control: a plain turn stamps `cache_control` on the
+/// last block of the system prompt and on the last user message. Tools
+/// would also get a marker but headless mode disables tools entirely.
+#[tokio::test]
+async fn anthropic_emits_cache_control_markers() {
+    let h = Harness::new().await;
+    h.write_config("anthropic", "claude-test");
+    h.write_init_lua("");
+    h.mount_anthropic_sse(&[
+        serde_json::json!({
+            "type": "message_start",
+            "message": {
+                "id": "msg_test",
+                "type": "message",
+                "role": "assistant",
+                "model": "claude-test",
+                "content": [],
+                "stop_reason": null,
+                "stop_sequence": null,
+                "usage": { "input_tokens": 10, "output_tokens": 0 }
+            }
+        }),
+        serde_json::json!({
+            "type": "content_block_start",
+            "index": 0,
+            "content_block": { "type": "text", "text": "" }
+        }),
+        serde_json::json!({
+            "type": "content_block_delta",
+            "index": 0,
+            "delta": { "type": "text_delta", "text": "ok" }
+        }),
+        serde_json::json!({ "type": "content_block_stop", "index": 0 }),
+        serde_json::json!({
+            "type": "message_delta",
+            "delta": { "stop_reason": "end_turn", "stop_sequence": null },
+            "usage": { "output_tokens": 1 }
+        }),
+        serde_json::json!({ "type": "message_stop" }),
+    ])
+    .await;
+
+    let _ = h.run("hello", "test/claude-test");
+    let bodies = h.captured_request_bodies().await;
+    let body = bodies.first().expect("captured at least one request body");
+
+    let expected = serde_json::json!({"type": "ephemeral"});
+    let system_blocks = body["system"]
+        .as_array()
+        .expect("system encoded as block array");
+    let last_sys = system_blocks.last().expect("system has at least one block");
+    assert_eq!(
+        last_sys["cache_control"], expected,
+        "system prompt's last block must carry cache_control"
+    );
+
+    let messages = body["messages"]
+        .as_array()
+        .expect("messages encoded as array");
+    let last_user = messages
+        .iter()
+        .rev()
+        .find(|m| m["role"] == "user")
+        .expect("found at least one user message");
+    let user_blocks = last_user["content"]
+        .as_array()
+        .expect("user content encoded as block array");
+    let last_block = user_blocks.last().expect("user has at least one block");
+    assert_eq!(
+        last_block["cache_control"], expected,
+        "last user message's last content block must carry cache_control"
+    );
+}
+
+/// OpenAI-family providers must NOT receive a `prompt_cache_key`: the
+/// server-side prefix cache is automatic, and sending a per-session
+/// identifier is telemetry without a benefit on a single-user CLI.
+#[tokio::test]
+async fn openai_omits_prompt_cache_key() {
+    let h = Harness::new().await;
+    h.write_config("openai-compatible", "gpt-test");
+    h.write_init_lua("");
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, ResponseTemplate};
+    let mut body = String::new();
+    for ev in [
+        serde_json::json!({
+            "id": "chatcmpl-1",
+            "object": "chat.completion.chunk",
+            "choices": [{
+                "index": 0,
+                "delta": { "role": "assistant", "content": "ok" }
+            }]
+        }),
+        serde_json::json!({
+            "id": "chatcmpl-1",
+            "object": "chat.completion.chunk",
+            "choices": [{ "index": 0, "delta": {}, "finish_reason": "stop" }],
+            "usage": { "prompt_tokens": 10, "completion_tokens": 1, "total_tokens": 11 }
+        }),
+    ] {
+        body.push_str("data: ");
+        body.push_str(&serde_json::to_string(&ev).unwrap());
+        body.push_str("\n\n");
+    }
+    body.push_str("data: [DONE]\n\n");
+    Mock::given(method("POST"))
+        .and(path("/chat/completions"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .insert_header("content-type", "text/event-stream")
+                .set_body_string(body),
+        )
+        .mount(&h.mock)
+        .await;
+
+    let _ = h.run("hi", "test/gpt-test");
+    let bodies = h.captured_request_bodies().await;
+    let body = bodies.first().expect("captured at least one request body");
+    assert!(
+        body.get("prompt_cache_key").is_none(),
+        "smelt must not send prompt_cache_key to the provider"
+    );
+}

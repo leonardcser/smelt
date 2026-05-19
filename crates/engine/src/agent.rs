@@ -158,25 +158,6 @@ fn resolve_ask_target(config: &EngineConfig, model: Option<AskModel>) -> (ApiCon
     }
 }
 
-/// Build per-request cache options from the provider's capability flags
-/// and the engine's settings. Anthropic-family providers always get
-/// `cache_control` markers; OpenAI-family providers always get a stable
-/// `prompt_cache_key`. The provider's `cache_key()` is generated once at
-/// construction and never mutates over the provider's lifetime, so the
-/// server-side prefix hash stays stable across every request from this
-/// session.
-fn cache_config_for(provider: &Provider, config: &EngineConfig) -> crate::provider::CacheConfig {
-    crate::provider::CacheConfig {
-        anthropic_markers: provider.supports_anthropic_cache(),
-        ttl_long: config.cache_ttl_long,
-        prompt_cache_key: if provider.supports_openai_cache_key() {
-            Some(provider.cache_key().to_string())
-        } else {
-            None
-        },
-    }
-}
-
 /// One pending out-of-band LLM call. Mirrors the fields plumbed through
 /// `UiCommand::EngineAsk`; bundles them so the spawn surface stays a
 /// two-arg function (config + task) instead of an ever-growing arg list.
@@ -220,15 +201,7 @@ fn spawn_engine_ask(
         messages.insert(0, protocol::Message::system(&system));
 
         let mut opts = ChatOptions::new(&cancel);
-        opts.cache = crate::provider::CacheConfig {
-            anthropic_markers: provider.supports_anthropic_cache(),
-            ttl_long: cache_ttl_long,
-            prompt_cache_key: if provider.supports_openai_cache_key() {
-                Some(provider.cache_key().to_string())
-            } else {
-                None
-            },
-        };
+        opts.cache = provider.default_cache_config(cache_ttl_long);
         if let Some(fmt) = response_format {
             opts.response_format = Some(crate::provider::ResponseFormat {
                 name: fmt.name,
@@ -648,7 +621,8 @@ impl<'a> Turn<'a> {
 
             self.regenerate_system_prompt();
 
-            // Recompute tool definitions each iteration — mode may have changed.
+            // Sorted by name so the request prefix stays byte-identical
+            // across turns. Anything that reorders tools busts the cache.
             let tool_defs: Vec<ToolDefinition> = if self.provider.tool_calling() {
                 let mut defs: Vec<ToolDefinition> = self
                     .dispatcher
@@ -681,6 +655,7 @@ impl<'a> Turn<'a> {
                         parameters: pt.parameters.clone(),
                     }));
                 }
+                defs.sort_by(|a, b| a.function.name.cmp(&b.function.name));
                 defs
             } else {
                 Vec::new()
@@ -1546,7 +1521,9 @@ impl<'a> Turn<'a> {
                 on_retry: Some(&on_retry),
                 on_delta: Some(&on_delta),
                 response_format: None,
-                cache: cache_config_for(&self.provider, self.config),
+                cache: self
+                    .provider
+                    .default_cache_config(self.config.cache_ttl_long),
             };
             let chat_future = self.provider.chat(
                 &self.messages,

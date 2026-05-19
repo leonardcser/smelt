@@ -384,28 +384,15 @@ impl<'a> ChatOptions<'a> {
     }
 }
 
-/// Per-request prompt-cache strategy. Anthropic and Anthropic-compatible
-/// providers stamp `cache_control` markers on the system, tools, and the
-/// last user message when `anthropic_markers` is set. OpenAI-family
-/// providers stamp `prompt_cache_key` for deterministic prefix caching.
+/// Per-request prompt-cache strategy. OpenAI-family providers are not
+/// represented here: their cache is server-side automatic on byte-identical
+/// prefixes, and `prompt_cache_key` is deliberately omitted to avoid
+/// leaking a per-session identifier.
 #[derive(Clone, Debug, Default)]
 pub struct CacheConfig {
-    /// Emit Anthropic-style `cache_control: {"type":"ephemeral"}` markers.
     pub anthropic_markers: bool,
-    /// Use `"ttl":"1h"` instead of the default 5-minute TTL.
+    /// Use the 1-hour TTL instead of 5 minutes.
     pub ttl_long: bool,
-    /// Stable cache key for OpenAI-family providers. Typically the session id.
-    pub prompt_cache_key: Option<String>,
-}
-
-fn generate_cache_key(clock: &std::sync::Arc<dyn crate::clock::Clock>) -> String {
-    let wall = clock
-        .system_now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_nanos())
-        .unwrap_or(0);
-    let pid = std::process::id();
-    format!("smelt-{:x}-{:x}", pid, wall)
 }
 
 #[derive(Clone)]
@@ -418,10 +405,6 @@ pub struct Provider {
     /// Sticky routing token for Codex: set from the first response, echoed on subsequent requests within the same turn.
     turn_state: std::sync::Arc<std::sync::Mutex<Option<String>>>,
     clock: std::sync::Arc<dyn crate::clock::Clock>,
-    /// Stable per-Provider identifier used as the OpenAI `prompt_cache_key`.
-    /// Lives for the lifetime of the Provider instance so the prefix hash on
-    /// the server side stays stable across every request from this session.
-    cache_key: String,
 }
 
 /// Ensure `tool_calls[].function.arguments` is valid JSON; some models emit malformed strings.
@@ -449,7 +432,6 @@ impl Provider {
     ) -> Self {
         let api_base = api_base.trim_end_matches('/').to_string();
         let kind = ProviderKind::from_config(provider_type);
-        let cache_key = generate_cache_key(&clock);
         Self {
             api_base,
             api_key,
@@ -458,16 +440,7 @@ impl Provider {
             model_config: Default::default(),
             turn_state: std::sync::Arc::new(std::sync::Mutex::new(None)),
             clock,
-            cache_key,
         }
-    }
-
-    /// Stable identifier passed to OpenAI-family providers as
-    /// `prompt_cache_key`. Always returns the same value for a given
-    /// `Provider` instance; switching providers (e.g. via `/model`) is
-    /// expected to invalidate the cache.
-    pub fn cache_key(&self) -> &str {
-        &self.cache_key
     }
 
     pub(crate) fn reset_turn_state(&self) {
@@ -507,16 +480,11 @@ impl Provider {
         )
     }
 
-    /// Whether this provider accepts an OpenAI-style `prompt_cache_key`
-    /// for deterministic prefix caching.
-    pub fn supports_openai_cache_key(&self) -> bool {
-        matches!(
-            self.kind,
-            ProviderKind::OpenAi
-                | ProviderKind::OpenAiCompatible
-                | ProviderKind::Codex
-                | ProviderKind::Copilot
-        )
+    pub fn default_cache_config(&self, ttl_long: bool) -> CacheConfig {
+        CacheConfig {
+            anthropic_markers: self.supports_anthropic_cache(),
+            ttl_long,
+        }
     }
 
     pub(crate) async fn chat(
@@ -624,15 +592,6 @@ impl Provider {
 
         if let Some(fmt) = opts.response_format.as_ref() {
             apply_response_format(&mut body, self.kind, fmt);
-        }
-
-        // Stable `prompt_cache_key` for OpenAI-family providers. Tied to the
-        // Provider's lifetime so the server keeps the prefix hash the same
-        // across every request from this session.
-        if let Some(key) = opts.cache.prompt_cache_key.as_ref() {
-            if self.supports_openai_cache_key() {
-                body["prompt_cache_key"] = serde_json::json!(key);
-            }
         }
 
         let use_stream = opts.on_delta.is_some() || is_codex;

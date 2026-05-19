@@ -8,7 +8,6 @@ use protocol::{
 };
 use std::collections::{BTreeMap, HashMap};
 
-/// Build the `cache_control` JSON object for the configured TTL.
 fn cache_control_value(cache: &CacheConfig) -> serde_json::Value {
     if cache.ttl_long {
         serde_json::json!({"type": "ephemeral", "ttl": "1h"})
@@ -17,16 +16,13 @@ fn cache_control_value(cache: &CacheConfig) -> serde_json::Value {
     }
 }
 
-/// Attach `cache_control` to a JSON value that is either a content block
-/// or a tool/system entry. No-op if the value is not an object.
 fn stamp_cache_control(v: &mut serde_json::Value, cache: &CacheConfig) {
     if let Some(obj) = v.as_object_mut() {
         obj.insert("cache_control".into(), cache_control_value(cache));
     }
 }
 
-/// Count `cache_control` markers in a request body. Anthropic rejects
-/// requests with more than 4 (across system, tools, and message content).
+/// Anthropic rejects requests with more than 4 `cache_control` markers.
 fn count_cache_breakpoints(body: &serde_json::Value) -> usize {
     fn walk(v: &serde_json::Value, count: &mut usize) {
         match v {
@@ -82,9 +78,8 @@ pub(super) fn build_body(
     let mut system_content: Option<String> = None;
     let mut content: Vec<serde_json::Value> = Vec::new();
 
-    // Index of the last `Role::User` message in `content`. Used as the
-    // moving cache breakpoint: everything up through this user turn is
-    // reused across the in-turn assistant/tool round-trips.
+    // Moving cache breakpoint: everything up through this user turn is
+    // reused across in-turn assistant/tool round-trips.
     let mut last_user_idx: Option<usize> = None;
 
     for m in messages {
@@ -169,8 +164,7 @@ pub(super) fn build_body(
         })
         .collect();
 
-    // Stamp the moving user-message breakpoint *before* the body
-    // construction takes ownership of `content`.
+    // Stamp before body construction takes ownership of `content`.
     if cache.anthropic_markers {
         if let Some(idx) = last_user_idx {
             if let Some(blocks) = content
@@ -208,8 +202,6 @@ pub(super) fn build_body(
         body["tools"] = serde_json::json!(tools_arr);
     }
 
-    // Anthropic caps cache_control breakpoints at 4 per request. We use at
-    // most 3 (system, last tool, last user) so this is a safety belt.
     debug_assert!(
         count_cache_breakpoints(&body) <= 4,
         "anthropic request exceeds 4 cache_control breakpoints"
@@ -601,7 +593,6 @@ mod tests {
         CacheConfig {
             anthropic_markers: true,
             ttl_long: false,
-            prompt_cache_key: None,
         }
     }
 
@@ -609,7 +600,6 @@ mod tests {
         CacheConfig {
             anthropic_markers: true,
             ttl_long: true,
-            prompt_cache_key: None,
         }
     }
 
@@ -696,6 +686,46 @@ mod tests {
         assert_eq!(
             body["messages"][0]["content"][0]["cache_control"],
             json!({"type": "ephemeral", "ttl": "1h"})
+        );
+    }
+
+    #[test]
+    fn build_body_is_deterministic() {
+        // Cache hits depend on byte-stable prefixes. Re-running build_body
+        // with identical inputs must produce identical JSON.
+        let tools = vec![
+            ToolDefinition::new(FunctionSchema {
+                name: "alpha".into(),
+                description: "first".into(),
+                parameters: json!({"type": "object", "properties": {"x": {"type": "string"}}}),
+            }),
+            ToolDefinition::new(FunctionSchema {
+                name: "beta".into(),
+                description: "second".into(),
+                parameters: json!({"type": "object"}),
+            }),
+        ];
+        let msgs = vec![system("sys"), user("u1"), assistant_text("a1"), user("u2")];
+        let a = build_body(
+            &msgs,
+            &tools,
+            "m",
+            ReasoningEffort::Off,
+            &cfg(),
+            &cache_on(),
+        );
+        let b = build_body(
+            &msgs,
+            &tools,
+            "m",
+            ReasoningEffort::Off,
+            &cfg(),
+            &cache_on(),
+        );
+        assert_eq!(
+            serde_json::to_string(&a).unwrap(),
+            serde_json::to_string(&b).unwrap(),
+            "build_body must be byte-deterministic for identical inputs"
         );
     }
 

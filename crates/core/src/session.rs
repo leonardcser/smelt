@@ -46,10 +46,8 @@ pub struct Session {
     /// Running session cost in USD; updated incrementally as token usage events arrive.
     #[serde(default)]
     pub session_cost_usd: f64,
-    /// Cumulative token usage across every turn in the session. Distinct
-    /// from `context_tokens` (which reflects the current prefix size) and
-    /// `token_snapshots` (per-turn series). Powers `smelt.session.tokens()`
-    /// and the cache-hit-ratio status segment.
+    /// Cumulative token usage across every turn this session has made;
+    /// distinct from the per-turn `context_tokens` snapshot.
     #[serde(default)]
     pub session_usage: TokenUsage,
 }

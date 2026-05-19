@@ -139,6 +139,21 @@ impl Harness {
     fn smelt_dir(&self) -> PathBuf {
         self.config_dir.path().join("smelt")
     }
+
+    /// Drain captured `POST /messages` request bodies the wiremock saw
+    /// during this run. Bodies are parsed as JSON; entries that fail to
+    /// parse (binary, malformed) are dropped silently. Useful for
+    /// asserting on what we *sent* — `cache_control` markers,
+    /// `prompt_cache_key`, tool ordering — not just what we received.
+    pub async fn captured_request_bodies(&self) -> Vec<Value> {
+        self.mock
+            .received_requests()
+            .await
+            .unwrap_or_default()
+            .into_iter()
+            .filter_map(|r| serde_json::from_slice::<Value>(&r.body).ok())
+            .collect()
+    }
 }
 
 #[allow(dead_code)]
