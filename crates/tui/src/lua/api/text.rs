@@ -66,6 +66,19 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
         |_, s: String| Ok(UnicodeWidthStr::width(s.as_str()) as u64),
     )?;
     m.fn_(
+        "line_count",
+        "Return the number of lines in `s`. Counts `\\n` separators and adds one if the last line is unterminated; an empty string returns `0`. Matches the line count users see in a renderer that splits on `\\n` without dropping the trailing partial line.",
+        &["s"],
+        |_, s: String| {
+            if s.is_empty() {
+                return Ok(0u64);
+            }
+            let newlines = s.bytes().filter(|b| *b == b'\n').count() as u64;
+            let trailing = u64::from(!s.ends_with('\n'));
+            Ok(newlines + trailing)
+        },
+    )?;
+    m.fn_(
         "slugify",
         "Lowercase `s`, replace non-alphanumeric runs with `-`, drop empty segments. Same algorithm the title plugin uses for fallback slugs.",
         &["s"],

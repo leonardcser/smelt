@@ -1,0 +1,19 @@
+---
+source: crates/tui/tests/storybook/app_ctx.rs
+expression: frame.text()
+---
+
+
+
+
+
+ task slug              on
+ input prediction       on
+ show cost              on
+ show tokens            on
+ show tok/s             on
+ auto compact           on
+ vim mode               off
+───────────────────────────────────────────────────────────────────  ─
+
+──────────────────────────────────────────────────────────────────────

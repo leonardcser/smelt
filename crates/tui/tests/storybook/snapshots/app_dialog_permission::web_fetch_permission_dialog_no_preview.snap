@@ -1,0 +1,21 @@
+---
+source: crates/tui/tests/storybook/app_ctx.rs
+expression: frame.text()
+---
+
+
+
+
+
+
+
+──────────────────────────────────────────────────────────────────────
+ web_fetch: https://example.com/page
+
+ Allow?
+  1. yes
+  2. no
+  3. allow web_fetch:https://example.com
+  4. allow web_fetch:https://example.com in ~/cwd
+
+  press tab to add a reason…

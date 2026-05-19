@@ -1,0 +1,16 @@
+---
+source: crates/tui/tests/storybook/app_ctx.rs
+expression: frame.text()
+---
+
+
+
+
+
+
+─ permissions ────────────────────────────────────────────────────────
+ bash: ls/*
+ web_fetch: https://example.com/*
+ bash: cat/*
+ bash: cat/* /etc/*
+ write_file: src/**/*.rs

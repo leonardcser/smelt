@@ -1,0 +1,13 @@
+---
+source: crates/tui/tests/storybook/app_ctx.rs
+expression: frame.text()
+---
+⏺ read_file src/main.rs
+  3 lines
+
+
+
+
+─────────────────────────────────────────────────────────  ─
+
+────────────────────────────────────────────────────────────

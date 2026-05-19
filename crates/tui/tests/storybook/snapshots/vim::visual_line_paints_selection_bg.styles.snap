@@ -2,5 +2,6 @@
 source: crates/tui/tests/storybook/mod.rs
 expression: frame.styles_text()
 ---
+dim: 20 4
   0   0   5 bg=DarkGrey
   1   0   4 bg=DarkGrey

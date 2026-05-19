@@ -1,0 +1,7 @@
+---
+source: crates/tui/tests/storybook/mod.rs
+expression: frame.text()
+---
+alpha
+beta
+gamma

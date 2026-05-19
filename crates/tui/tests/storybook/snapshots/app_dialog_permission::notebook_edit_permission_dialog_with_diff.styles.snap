@@ -1,0 +1,60 @@
+---
+source: crates/tui/tests/storybook/app_ctx.rs
+expression: frame.styles_text()
+---
+dim: 80 28
+  8   0  80 fg=AnsiValue(208)
+  9   1  13 fg=AnsiValue(208)
+ 10   0  80 fg=AnsiValue(244)
+ 11   1  29 attrs=dim
+ 12   1   3 fg=AnsiValue(244)
+ 12   6   6 fg=Rgb { r: 249, g: 38, b: 114 }
+ 12  12   8 fg=Rgb { r: 248, g: 248, b: 242 }
+ 12  20   2 fg=Rgb { r: 249, g: 38, b: 114 }
+ 12  22   3 fg=Rgb { r: 248, g: 248, b: 242 }
+ 13   1   3 fg=AnsiValue(244)
+ 13   6   3 fg=Rgb { r: 248, g: 248, b: 242 }
+ 13   9   1 fg=Rgb { r: 249, g: 38, b: 114 }
+ 13  10  13 fg=Rgb { r: 248, g: 248, b: 242 }
+ 13  23  10 fg=Rgb { r: 230, g: 219, b: 116 }
+ 13  33   1 fg=Rgb { r: 248, g: 248, b: 242 }
+ 14   1   5 fg=Green bg=Rgb { r: 20, g: 50, b: 20 }
+ 14   6   5 fg=Rgb { r: 102, g: 217, b: 239 } bg=Rgb { r: 20, g: 50, b: 20 }
+ 14  11  11 fg=Rgb { r: 248, g: 248, b: 242 } bg=Rgb { r: 20, g: 50, b: 20 }
+ 14  22  56 bg=Rgb { r: 20, g: 50, b: 20 }
+ 15   1   3 fg=AnsiValue(244)
+ 15   6   6 fg=Rgb { r: 248, g: 248, b: 242 }
+ 15  12  16 fg=Rgb { r: 230, g: 219, b: 116 }
+ 15  28   2 fg=Rgb { r: 248, g: 248, b: 242 }
+ 15  30   1 fg=Rgb { r: 190, g: 132, b: 255 }
+ 15  31   1 fg=Rgb { r: 248, g: 248, b: 242 }
+ 16   1   3 fg=AnsiValue(244)
+ 16   6   6 fg=Rgb { r: 248, g: 248, b: 242 }
+ 16  12  10 fg=Rgb { r: 230, g: 219, b: 116 }
+ 16  22   5 fg=Rgb { r: 248, g: 248, b: 242 }
+ 17   1   3 fg=AnsiValue(244)
+ 17   6   6 fg=Rgb { r: 248, g: 248, b: 242 }
+ 17  12   7 fg=Rgb { r: 230, g: 219, b: 116 }
+ 17  19   3 fg=Rgb { r: 248, g: 248, b: 242 }
+ 18   1   3 fg=AnsiValue(244)
+ 18   6  10 fg=Rgb { r: 248, g: 248, b: 242 }
+ 18  16  11 fg=Rgb { r: 230, g: 219, b: 116 }
+ 18  27   2 fg=Rgb { r: 248, g: 248, b: 242 }
+ 18  29  10 fg=Rgb { r: 230, g: 219, b: 116 }
+ 18  39   2 fg=Rgb { r: 248, g: 248, b: 242 }
+ 18  41   4 fg=Rgb { r: 230, g: 219, b: 116 }
+ 18  45   2 fg=Rgb { r: 248, g: 248, b: 242 }
+ 18  47   7 fg=Rgb { r: 230, g: 219, b: 116 }
+ 18  54   1 fg=Rgb { r: 248, g: 248, b: 242 }
+ 19   0  80 fg=AnsiValue(244)
+ 20   1   6 attrs=dim
+ 21   0   1 bg=AnsiValue(237)
+ 21   1   1 fg=Black bg=White
+ 21   2   3 bg=AnsiValue(237) attrs=dim
+ 21   5   3 fg=AnsiValue(208) bg=AnsiValue(237)
+ 21   8  72 bg=AnsiValue(237)
+ 22   1   4 attrs=dim
+ 23   1   4 attrs=dim
+ 24   1   4 attrs=dim
+ 26   2  26 attrs=dim
+ 27   0  80 bg=AnsiValue(233)

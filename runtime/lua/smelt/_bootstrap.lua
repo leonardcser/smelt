@@ -199,6 +199,16 @@ if smelt.layout and smelt.layout.leaf then
     return smelt.layout.leaf(buf)
   end
 
+  -- Build a leaf layout from a markdown string. Common pattern for `render`
+  -- callbacks that want full block-level markdown (headings, fenced code,
+  -- lists, tables) instead of plain dim body text.
+  -- @sig fun(content: string): any
+  function smelt.layout.markdown(content)
+    local buf = smelt.buf.new()
+    smelt.render.markdown(buf, content or "")
+    return smelt.layout.leaf(buf)
+  end
+
   -- Build a 1×1 leaf from a single glyph. Auto-repeats to fill the parent's
   -- axis: `sep("│")` in an hbox = vertical divider, `sep("─")` in a vbox = horizontal.
   -- @sig fun(char: string?): any
@@ -208,6 +218,7 @@ if smelt.layout and smelt.layout.leaf then
     return smelt.layout.leaf(buf)
   end
 end
+
 
 -- Picker depends on `smelt.prompt.open_picker` (UiHost tier). Only
 -- attach the convenience wrapper when the prompt namespace is present.

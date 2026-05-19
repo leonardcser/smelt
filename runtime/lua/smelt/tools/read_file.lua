@@ -86,16 +86,10 @@ smelt.tools.register({
     return smelt.path.display(args.file_path or "")
   end,
   render = function(args, output, ctx)
-    local content = output.content or ""
-    local n = 0
-    if content ~= "" then
-      local _, newlines = content:gsub("\n", "\n")
-      n = newlines
-      if content:sub(-1) ~= "\n" then
-        n = n + 1
-      end
+    if output.is_error then
+      return smelt.layout.text(output.content, { hl_group = "ErrorMsg" })
     end
-    return smelt.layout.text(n .. " lines")
+    return smelt.layout.text(smelt.text.line_count(output.content or "") .. " lines")
   end,
   paths_for_workspace = function(args)
     local p = args.file_path or ""

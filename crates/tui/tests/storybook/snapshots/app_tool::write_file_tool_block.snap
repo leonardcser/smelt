@@ -1,0 +1,17 @@
+---
+source: crates/tui/tests/storybook/app_ctx.rs
+expression: frame.text()
+---
+⏺ write_file src/greet.rs
+   1   pub fn greet(name: &str) -> String {
+   2       format!("hello, {name}")
+   3   }
+
+
+
+
+
+
+───────────────────────────────────────────────────────────────────  ─
+
+──────────────────────────────────────────────────────────────────────

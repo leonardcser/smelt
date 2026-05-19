@@ -26,7 +26,9 @@ smelt.tools.register({
     return args.query or ""
   end,
   render = function(args, output, ctx)
-    return smelt.layout.text(output.content, { is_error = output.is_error })
+    return smelt.layout.text(output.content, {
+      hl_group = output.is_error and "ErrorMsg" or nil,
+    })
   end,
   execute = function(args)
     local query = args.query or ""

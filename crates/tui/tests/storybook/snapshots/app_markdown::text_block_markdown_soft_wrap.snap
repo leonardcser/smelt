@@ -1,0 +1,13 @@
+---
+source: crates/tui/tests/storybook/app_ctx.rs
+expression: frame.text()
+---
+This is one long paragraph that has to wrap
+across several visible rows because the
+viewport is narrower than the sentence and we
+want to exercise the soft-wrap path through
+render_paragraph.
+
+───────────────────────────────────────────────  ─
+
+──────────────────────────────────────────────────

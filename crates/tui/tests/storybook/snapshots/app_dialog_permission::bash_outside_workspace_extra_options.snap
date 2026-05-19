@@ -1,0 +1,25 @@
+---
+source: crates/tui/tests/storybook/app_ctx.rs
+expression: frame.text()
+---
+
+
+
+
+
+
+
+
+
+
+
+────────────────────────────────────────────────────────────────────────────────
+ bash: cat /etc/hosts
+
+ Allow?
+  1. yes
+  2. no
+  3. allow bash:cat, bash:cat/* /etc
+  4. allow bash:cat, bash:cat/* /etc in ~/cwd
+
+  press tab to add a reason…

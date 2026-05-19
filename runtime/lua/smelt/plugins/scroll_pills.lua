@@ -39,7 +39,7 @@ local function open_bottom()
   buf:lines({ BOTTOM_LABEL })
   buf:clear_ns(ns_bottom)
   buf:mark(ns_bottom, 1, 0, {
-    end_col = BOTTOM_WIDTH,
+    end_col = #BOTTOM_LABEL,
     fg = PILL_FG,
     bg = PILL_BG,
     bold = true,
@@ -137,7 +137,7 @@ local function paint_top_row(width, label)
   state.top_buf:lines({ row })
   state.top_buf:clear_ns(ns_top)
   state.top_buf:mark(ns_top, 1, 0, {
-    end_col = width,
+    end_col = #row,
     fg = PILL_FG,
     bg = PILL_BG,
     bold = true,

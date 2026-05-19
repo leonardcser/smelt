@@ -23,6 +23,12 @@ layout.hbox = nil
 ---@type fun(buf: any): table
 layout.leaf = nil
 
+--- Build a leaf layout from a markdown string. Common pattern for `render`
+--- callbacks that want full block-level markdown (headings, fenced code,
+--- lists, tables) instead of plain dim body text.
+---@type fun(content: string): any
+layout.markdown = nil
+
 --- Build a 1×1 leaf from a single glyph. Auto-repeats to fill the parent's
 --- axis: `sep("│")` in an hbox = vertical divider, `sep("─")` in a vbox = horizontal.
 ---@type fun(char: string?): any

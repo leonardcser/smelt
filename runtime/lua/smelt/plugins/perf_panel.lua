@@ -68,20 +68,21 @@ local function compose_lines(snap, label_w)
 	local rows = snap.durations or {}
 	local max_rows = PANEL_H - 3
 	local n = math.min(#rows, max_rows)
-	local width = smelt.text.width
 	for i = 1, n do
 		local r = rows[i]
 		local last_s = fmt_us(r.last_us)
 		local p99_s = fmt_us(r.p99_us)
 		local cnt_s = string.format("%3d", math.min(r.count, 999))
-		local line = pad_label(r.label, label_w) .. " " .. last_s .. "  " .. p99_s .. " " .. cnt_s
+		local label_s = pad_label(r.label, label_w)
+		local line = label_s .. " " .. last_s .. "  " .. p99_s .. " " .. cnt_s
 		lines[#lines + 1] = line
-		local last_w = width(last_s)
-		local p99_w = width(p99_s)
-		local last_col = label_w + 1
-		table.insert(color_spans, { row = i + 1, col = last_col, end_col = last_col + last_w, role = severity_role(r.last_us) })
-		local p99_col = last_col + last_w + 2
-		table.insert(color_spans, { row = i + 1, col = p99_col, end_col = p99_col + p99_w, role = severity_role(r.p99_us) })
+		-- Byte offsets into `line`. `pad_label` pads with ASCII spaces, so
+		-- #label_s == cells of the label column; `last_s`/`p99_s` may contain
+		-- the µ glyph (2 bytes / 1 cell), so we measure via `#` not width.
+		local last_col = #label_s + 1
+		local p99_col = last_col + #last_s + 2
+		table.insert(color_spans, { row = i + 1, col = last_col, end_col = last_col + #last_s, role = severity_role(r.last_us) })
+		table.insert(color_spans, { row = i + 1, col = p99_col, end_col = p99_col + #p99_s, role = severity_role(r.p99_us) })
 	end
 	if n == 0 then
 		lines[#lines + 1] = "  (no samples yet)"

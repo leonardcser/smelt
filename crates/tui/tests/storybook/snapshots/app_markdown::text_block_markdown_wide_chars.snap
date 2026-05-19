@@ -1,0 +1,13 @@
+---
+source: crates/tui/tests/storybook/app_ctx.rs
+expression: frame.text()
+---
+日 本 語 の テ ス ト  🚀
+
+绝 对 要 测 试 一 下 中 文 换 行  with mixed
+ascii.
+
+
+─────────────────────────────────────  ─
+
+────────────────────────────────────────

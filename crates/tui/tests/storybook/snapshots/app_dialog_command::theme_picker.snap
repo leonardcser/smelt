@@ -1,0 +1,19 @@
+---
+source: crates/tui/tests/storybook/app_ctx.rs
+expression: frame.text()
+---
+
+
+
+
+
+ ● blue      classic blue
+ ● sky       light blue
+ ● ice       cool white-blue
+ ● gold      warm yellow
+ ● rose      soft pink
+ ● coral     salmon pink
+ ● ember     default
+───────────────────────────────────────────────────────────────────  ─
+
+──────────────────────────────────────────────────────────────────────

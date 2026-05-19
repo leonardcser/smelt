@@ -1,0 +1,25 @@
+---
+source: crates/tui/tests/storybook/app_ctx.rs
+expression: frame.text()
+---
+
+
+
+
+
+
+
+
+
+────────────────────────────────────────────────────────────────────────────────
+ bash: for f in *.rs; do
+         rustfmt "$f"
+       done
+
+ Allow?
+  1. yes
+  2. no
+  3. allow bash:for
+  4. allow bash:for in ~/cwd
+
+  press tab to add a reason…

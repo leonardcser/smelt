@@ -1,0 +1,17 @@
+---
+source: crates/tui/tests/storybook/app_ctx.rs
+expression: frame.text()
+---
+
+
+
+
+
+
+
+─ messages (2) ───────────────────────────────────────────────────────
+ [error] parser
+   first error message
+
+ [warn] renderer
+   second warning

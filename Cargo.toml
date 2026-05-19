@@ -12,7 +12,7 @@ smelt-buffer = { path = "crates/buffer" }
 smelt-term = { path = "crates/term" }
 smelt-edit = { path = "crates/edit" }
 smelt-core = { path = "crates/core" }
-tui = { path = "crates/tui" }
+tui = { path = "crates/tui", default-features = false }
 lua-doc-derive = { path = "crates/lua-doc-derive" }
 
 # Async / runtime

@@ -236,7 +236,9 @@ smelt.tools.register({
     if args.prompt and args.prompt ~= "" then
       table.insert(items, smelt.layout.text(args.prompt))
     end
-    table.insert(items, smelt.layout.text(output.content, { is_error = output.is_error }))
+    table.insert(items, smelt.layout.text(output.content, {
+      hl_group = output.is_error and "ErrorMsg" or nil,
+    }))
     return smelt.layout.vbox(items)
   end,
   decide = function(args, mode)

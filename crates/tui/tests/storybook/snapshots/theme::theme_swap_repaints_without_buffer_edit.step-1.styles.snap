@@ -2,6 +2,7 @@
 source: crates/tui/tests/storybook/mod.rs
 expression: frame.styles_text()
 ---
+dim: 20 3
   0   0  20 fg=Red
   1   0  20 fg=Red
   2   0  20 fg=Red

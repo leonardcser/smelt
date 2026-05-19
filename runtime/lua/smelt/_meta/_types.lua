@@ -14,14 +14,14 @@
 ---@field line fun(idx: integer): string? Read a single line by 1-based index. `nil` if out of range or the buffer is gone.
 ---@field styled fun(lines: table): smelt.buf.Buf Replace the buffer with a list of styled lines (`{ { text, style?, syntax? }, ... }`). Returns the handle for chaining.
 ---@field readonly fun(val: boolean?): any Read or write the readonly flag. With arg, returns the handle for chaining.
----@field mark fun(ns: integer, row: integer, col: integer, opts: smelt.buf.MarkOpts?): integer Place a highlight or virt-text extmark at `(row, col)` (row is 1-based). Returns the new extmark id. Allocate `ns` via `smelt.ns(name)`.
+---@field mark fun(ns: integer, row: integer, col: integer, opts: smelt.buf.MarkOpts?): integer Place a highlight or virt-text extmark at `(row, col)`. Row is 1-based; `col` and `opts.end_col` are byte offsets into the line — the same unit as `#s`, `string.find`, and `string.sub`. Off-boundary bytes snap to the nearest UTF-8 char boundary; out-of-range bytes clamp to the line end. Returns the new extmark id. Allocate `ns` via `smelt.ns(name)`.
 ---@field clear_ns fun(ns: integer, start: integer?, end_: integer?): smelt.buf.Buf Drop every extmark owned by `ns` between `[start, end)` (1-based, exclusive end). Defaults clear the whole buffer. Returns the handle for chaining.
 
 --- Options accepted by `buf:mark(ns, row, col, opts)`. Mirrors a useful subset of `nvim_buf_set_extmark`'s keyset; pick highlight or virt-text fields, not both.
 ---@class smelt.buf.MarkOpts
 ---@field id? integer Retarget an existing mark by id instead of allocating a new one.
 ---@field end_row? integer 1-based end row (inclusive). `nil` keeps the mark single-line.
----@field end_col? integer End column for highlight ranges.
+---@field end_col? integer End byte offset for highlight ranges (exclusive). Same unit as `col` — bytes into the line, matching `#s` and `string.find`.
 ---@field priority? integer Higher-priority marks paint over lower-priority ones.
 ---@field right_gravity? boolean If true, the mark sticks with text inserted to its right.
 ---@field end_right_gravity? boolean Right-gravity flag for the end-of-range cursor.

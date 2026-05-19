@@ -101,16 +101,18 @@ end
 local function render_options(buf, labels)
   local rendered = {}
   local label_starts = {}
+  local line_ends = {}
   for i, label in ipairs(labels) do
     local prefix = string.format(" %d. ", i)
     rendered[i] = prefix .. label
     label_starts[i] = #prefix
+    line_ends[i] = #rendered[i]
   end
   buf:lines(rendered):clear_ns(NS_NUM):clear_ns(NS_SEL)
   for i, start in ipairs(label_starts) do
     buf:mark(NS_NUM, i, 0, { end_col = start, dim = true })
     buf:mark(NS_SEL, i, start, {
-      end_col       = #rendered[i],
+      end_col       = line_ends[i],
       hl_group      = "SmeltAccent",
       on_cursor_row = true,
     })

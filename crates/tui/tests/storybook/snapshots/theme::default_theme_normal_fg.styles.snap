@@ -2,4 +2,4 @@
 source: crates/tui/tests/storybook/mod.rs
 expression: frame.styles_text()
 ---
-
+dim: 20 3

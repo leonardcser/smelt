@@ -1,0 +1,11 @@
+---
+source: crates/tui/tests/storybook/app_ctx.rs
+expression: frame.text()
+---
+⏺ write_file /root/forbidden.rs
+  permission denied: /root/forbidden.rs
+
+
+─────────────────────────────────────────────────────────  ─
+
+────────────────────────────────────────────────────────────

@@ -1,0 +1,13 @@
+---
+source: crates/tui/tests/storybook/app_ctx.rs
+expression: frame.text()
+---
+⏺ glob **/*.rs in crates/term
+  3 files
+
+
+
+
+─────────────────────────────────────────────────────────  ─
+
+────────────────────────────────────────────────────────────

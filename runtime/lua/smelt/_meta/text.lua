@@ -11,6 +11,10 @@ local text = {}
 ---@type fun(s: string, width: integer, opts: table?): string
 text.fit = nil
 
+--- Return the number of lines in `s`. Counts `\n` separators and adds one if the last line is unterminated; an empty string returns `0`. Matches the line count users see in a renderer that splits on `\n` without dropping the trailing partial line.
+---@type fun(s: string): integer
+text.line_count = nil
+
 --- Lowercase `s`, replace non-alphanumeric runs with `-`, drop empty segments. Same algorithm the title plugin uses for fallback slugs.
 ---@type fun(s: string): string
 text.slugify = nil

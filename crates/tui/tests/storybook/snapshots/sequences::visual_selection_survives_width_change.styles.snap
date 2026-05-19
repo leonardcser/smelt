@@ -1,0 +1,6 @@
+---
+source: crates/tui/tests/storybook/mod.rs
+expression: frame.styles_text()
+---
+dim: 30 3
+  0   0  10 bg=DarkGrey

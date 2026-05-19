@@ -38,6 +38,16 @@ fun(buf: any): table
 
 Wrap a `Buf` handle (or raw buf id) into a leaf block layout that renders the buffer's contents in place.
 
+## `smelt.layout.markdown`
+
+```lua
+fun(content: string): any
+```
+
+Build a leaf layout from a markdown string. Common pattern for `render`
+callbacks that want full block-level markdown (headings, fenced code,
+lists, tables) instead of plain dim body text.
+
 ## `smelt.layout.sep`
 
 ```lua

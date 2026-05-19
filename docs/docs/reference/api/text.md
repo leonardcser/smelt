@@ -14,6 +14,14 @@ fun(s: string, width: integer, opts: table?): string
 
 Force `s` to occupy exactly `width` display cells: truncate when too long (appending `opts.suffix`, default `"…"`), pad when too short (with `opts.fill`, default `" "`). `opts.align` is `"left"` (default), `"right"`, or `"center"`. Use this for fixed-width UI slots — handles multi-byte and wide chars correctly so the result is always exactly `width` cells wide regardless of content.
 
+## `smelt.text.line_count`
+
+```lua
+fun(s: string): integer
+```
+
+Return the number of lines in `s`. Counts `\n` separators and adds one if the last line is unterminated; an empty string returns `0`. Matches the line count users see in a renderer that splits on `\n` without dropping the trailing partial line.
+
 ## `smelt.text.slugify`
 
 ```lua

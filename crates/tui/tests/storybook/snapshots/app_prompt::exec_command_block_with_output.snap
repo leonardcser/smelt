@@ -1,0 +1,15 @@
+---
+source: crates/tui/tests/storybook/app_ctx.rs
+expression: frame.text()
+---
+
+ !ls -1 src
+
+  lib.rs
+  main.rs
+  parser.rs
+
+
+───────────────────────────────────────────────  ─
+
+──────────────────────────────────────────────────

@@ -221,6 +221,18 @@ impl TestAppBuilder {
         // target, and has no semantic value. Swap to `NullSink` immediately.
         app.core.clipboard.swap_sink(Box::new(smelt_core::NullSink));
 
+        // Install the command resolver `user::render` consults to paint
+        // registered `/cmd` text with `SmeltAccent`. Production does this
+        // in `TuiApp::run`, which the harness skips — without the hook
+        // every slash command in stories looks unstyled.
+        let command_names = app.lua.command_names_handle();
+        smelt_core::commands::set_command_resolver(move |name| {
+            command_names
+                .lock()
+                .map(|s| s.contains(name))
+                .unwrap_or(false)
+        });
+
         // Turn on per-thread allocation counters so `feed_one` snapshots see
         // real numbers. Idempotent; cheap when re-called.
         smelt_perf::alloc::enable();
@@ -642,6 +654,78 @@ impl TestApp {
         crate::lua::with_app_ptr(&mut self.app, |app| {
             app.render_normal_to(agent_running, &mut sink);
         });
+    }
+
+    /// Render one frame and return the resulting `SnapshotFrame`. Used
+    /// by the app-level storybook harness; `render_normal` updates the
+    /// `Ui` snapshot buffer as a side effect of composing layers, so
+    /// the post-render `ui.snapshot()` reflects the rendered frame. The
+    /// ANSI bytes `render_normal` flushes to stdout are captured (and
+    /// discarded) by the test harness.
+    pub fn render_to_frame(&mut self) -> crate::smelt_term::SnapshotFrame {
+        let agent_running = self.app.agent.is_some();
+        let _guard = crate::lua::install_app_ptr(&mut self.app);
+        self.app.render_normal(agent_running);
+        self.app.ui.snapshot()
+    }
+
+    /// Append a `Block::User` to the transcript history so flows that
+    /// read the user-turn list (rewind dialog, transcript projection)
+    /// see a non-empty conversation without a real engine roundtrip.
+    pub fn push_user_block(&mut self, text: &str) {
+        self.app.show_user_message(text, Vec::new());
+    }
+
+    /// Smallest pending `smelt.engine.ask` callback id, if any.
+    /// Stories that drive `/btw` or other ask flows use this to
+    /// pair their synthesised `EngineAskResponse` to the right id.
+    pub fn pending_ask_id(&self) -> Option<u64> {
+        let shared = self.app.lua.shared().core_arc();
+        let cbs = shared.ask_callbacks.lock().ok()?;
+        cbs.keys().min().copied()
+    }
+
+    /// Working directory string the live app uses (captured at
+    /// construction). Stories that seed persisted-session fixtures
+    /// match this value into `meta.json` so the resume dialog's
+    /// workspace filter keeps the seeded entries.
+    pub fn cwd_str(&self) -> &str {
+        &self.app.cwd
+    }
+
+    /// Push a `Block::Compacted` summary block into the transcript —
+    /// the same block the live compact plugin produces between turns.
+    /// Stories use this to snapshot the compaction chrome without
+    /// running a real `engine.ask` round-trip.
+    pub fn push_compacted(&mut self, summary: &str) {
+        self.app
+            .push_block(smelt_core::transcript_model::Block::Compacted {
+                summary: summary.to_string(),
+            });
+    }
+
+    /// Open a `Block::Exec` shell-escape block in the transcript with
+    /// `command` as the header. Pair with
+    /// `SourceEvent::ExecOutput`/`ExecDone` to stream output and close
+    /// the block. The production path is `start_shell_escape`, which
+    /// also spawns a real `sh -c`; stories don't want a subprocess, so
+    /// the harness invokes the transcript hook directly.
+    pub fn start_exec(&mut self, command: &str) {
+        self.app.start_exec(command.to_string());
+    }
+
+    /// Push an `assistant` text block onto the transcript history so
+    /// flows that read message history see a multi-turn conversation.
+    pub fn push_assistant_text(&mut self, text: &str) {
+        self.app
+            .core
+            .session
+            .messages
+            .push(protocol::Message::assistant(
+                Some(protocol::Content::Text(text.to_string())),
+                None,
+                None,
+            ));
     }
 
     /// Resize the app's surface to `(width, height)`. Used by replay

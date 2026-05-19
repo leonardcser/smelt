@@ -1,0 +1,13 @@
+---
+source: crates/tui/tests/storybook/app_ctx.rs
+expression: frame.text()
+---
+Working on it…
+
+
+
+
+ error  provider returned 503: service unavailable
+─────────────────────────────────────────────────────────  ─
+
+────────────────────────────────────────────────────────────

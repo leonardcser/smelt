@@ -1,0 +1,17 @@
+---
+source: crates/tui/tests/storybook/app_ctx.rs
+expression: frame.text()
+---
+- top bullet
+  1. nested ordered one
+  2. nested ordered two
+- another top bullet
+1. ordered top
+   - nested bullet
+   - nested bullet two
+2. ordered tail
+
+
+───────────────────────────────────────────────  ─
+
+──────────────────────────────────────────────────

@@ -13,31 +13,31 @@ local function build_layout(sections)
   local label_col = max_label + 4
 
   local lines = {}
-  local detail_byte_cols = {}
+  local detail_bytes = {}
   for si, section in ipairs(sections) do
     for _, entry in ipairs(section.entries) do
       local pad = label_col - smelt.text.width(entry.label)
       local line = entry.label .. string.rep(" ", pad) .. entry.detail
       table.insert(lines, line)
-      table.insert(detail_byte_cols, #entry.label + pad)
+      table.insert(detail_bytes, #entry.label + pad)
     end
     if si < #sections then
       table.insert(lines, "")
-      table.insert(detail_byte_cols, 0)
+      table.insert(detail_bytes, 0)
     end
   end
-  return lines, detail_byte_cols
+  return lines, detail_bytes
 end
 
 smelt.cmd.register("help", function()
   smelt.spawn(function()
     local sections = smelt.keymap.help()
-    local lines, detail_byte_cols = build_layout(sections)
+    local lines, detail_bytes = build_layout(sections)
 
     local buf = smelt.buf.new({ readonly = true })
     buf:lines(lines)
     for i, line in ipairs(lines) do
-      local col = detail_byte_cols[i]
+      local col = detail_bytes[i]
       if col < #line then
         buf:mark(NS_DIM, i, col, { end_col = #line, dim = true })
       end

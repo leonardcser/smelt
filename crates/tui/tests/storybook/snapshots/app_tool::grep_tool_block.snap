@@ -1,0 +1,13 @@
+---
+source: crates/tui/tests/storybook/app_ctx.rs
+expression: frame.text()
+---
+⏺ grep fn render in crates/tui/src
+  2 matches
+
+
+
+
+───────────────────────────────────────────────────────────────────  ─
+
+──────────────────────────────────────────────────────────────────────
