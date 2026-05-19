@@ -1,0 +1,268 @@
+{
+  "_about": "queued_messages grew unboundedly when the busy-stack stayed busy (hung plugin) and the user kept submitting. The TUI now caps queued submissions at MAX_QUEUED_MESSAGES and silently drops the overflow. Reverting the cap re-trips the resource-invariant assertion.",
+  "_fix": "feat(tui): cap queued_messages at MAX_QUEUED_MESSAGES",
+  "vim": true,
+  "mode": "plan",
+  "ops": [
+    {
+      "kind": "push_queued_message",
+      "data": ""
+    },
+    {
+      "kind": "push_queued_message",
+      "data": ""
+    },
+    {
+      "kind": "push_queued_message",
+      "data": ""
+    },
+    {
+      "kind": "push_queued_message",
+      "data": ""
+    },
+    {
+      "kind": "push_queued_message",
+      "data": ""
+    },
+    {
+      "kind": "push_queued_message",
+      "data": ""
+    },
+    {
+      "kind": "push_queued_message",
+      "data": ""
+    },
+    {
+      "kind": "push_queued_message",
+      "data": ""
+    },
+    {
+      "kind": "push_queued_message",
+      "data": ""
+    },
+    {
+      "kind": "push_queued_message",
+      "data": ""
+    },
+    {
+      "kind": "push_queued_message",
+      "data": ""
+    },
+    {
+      "kind": "push_queued_message",
+      "data": ""
+    },
+    {
+      "kind": "push_queued_message",
+      "data": ""
+    },
+    {
+      "kind": "push_queued_message",
+      "data": ""
+    },
+    {
+      "kind": "push_queued_message",
+      "data": ""
+    },
+    {
+      "kind": "push_queued_message",
+      "data": ""
+    },
+    {
+      "kind": "push_queued_message",
+      "data": ""
+    },
+    {
+      "kind": "push_queued_message",
+      "data": ""
+    },
+    {
+      "kind": "push_queued_message",
+      "data": ""
+    },
+    {
+      "kind": "push_queued_message",
+      "data": ""
+    },
+    {
+      "kind": "push_queued_message",
+      "data": ""
+    },
+    {
+      "kind": "push_queued_message",
+      "data": ""
+    },
+    {
+      "kind": "push_queued_message",
+      "data": ""
+    },
+    {
+      "kind": "push_queued_message",
+      "data": ""
+    },
+    {
+      "kind": "push_queued_message",
+      "data": ""
+    },
+    {
+      "kind": "push_queued_message",
+      "data": ""
+    },
+    {
+      "kind": "push_queued_message",
+      "data": ""
+    },
+    {
+      "kind": "push_queued_message",
+      "data": ""
+    },
+    {
+      "kind": "push_queued_message",
+      "data": ""
+    },
+    {
+      "kind": "push_queued_message",
+      "data": ""
+    },
+    {
+      "kind": "push_queued_message",
+      "data": ""
+    },
+    {
+      "kind": "push_queued_message",
+      "data": ""
+    },
+    {
+      "kind": "push_queued_message",
+      "data": ""
+    },
+    {
+      "kind": "push_queued_message",
+      "data": ""
+    },
+    {
+      "kind": "push_queued_message",
+      "data": ""
+    },
+    {
+      "kind": "push_queued_message",
+      "data": ""
+    },
+    {
+      "kind": "push_queued_message",
+      "data": ""
+    },
+    {
+      "kind": "push_queued_message",
+      "data": ""
+    },
+    {
+      "kind": "push_queued_message",
+      "data": ""
+    },
+    {
+      "kind": "push_queued_message",
+      "data": ""
+    },
+    {
+      "kind": "push_queued_message",
+      "data": ""
+    },
+    {
+      "kind": "push_queued_message",
+      "data": ""
+    },
+    {
+      "kind": "push_queued_message",
+      "data": ""
+    },
+    {
+      "kind": "push_queued_message",
+      "data": ""
+    },
+    {
+      "kind": "push_queued_message",
+      "data": ""
+    },
+    {
+      "kind": "push_queued_message",
+      "data": ""
+    },
+    {
+      "kind": "push_queued_message",
+      "data": ""
+    },
+    {
+      "kind": "push_queued_message",
+      "data": ""
+    },
+    {
+      "kind": "push_queued_message",
+      "data": ""
+    },
+    {
+      "kind": "push_queued_message",
+      "data": ""
+    },
+    {
+      "kind": "push_queued_message",
+      "data": ""
+    },
+    {
+      "kind": "push_queued_message",
+      "data": ""
+    },
+    {
+      "kind": "push_queued_message",
+      "data": ""
+    },
+    {
+      "kind": "push_queued_message",
+      "data": ""
+    },
+    {
+      "kind": "push_queued_message",
+      "data": ""
+    },
+    {
+      "kind": "push_queued_message",
+      "data": ""
+    },
+    {
+      "kind": "push_queued_message",
+      "data": ""
+    },
+    {
+      "kind": "push_queued_message",
+      "data": ""
+    },
+    {
+      "kind": "push_queued_message",
+      "data": ""
+    },
+    {
+      "kind": "push_queued_message",
+      "data": ""
+    },
+    {
+      "kind": "push_queued_message",
+      "data": ""
+    },
+    {
+      "kind": "push_queued_message",
+      "data": ""
+    },
+    {
+      "kind": "push_queued_message",
+      "data": ""
+    },
+    {
+      "kind": "push_queued_message",
+      "data": ""
+    },
+    {
+      "kind": "push_queued_message",
+      "data": ""
+    }
+  ]
+}
