@@ -129,13 +129,23 @@ pub struct LuaAskErrorTable {
 #[derive(Debug, LuaOpts)]
 #[lua(name = "smelt.engine.AskSpec")]
 pub struct LuaAskSpec {
-    /// System prompt sent before the conversation.
-    pub system: String,
+    /// System prompt sent before the conversation. Optional when
+    /// `inherit_session = true` (the current session's system prompt is
+    /// substituted in that case).
+    #[lua(default)]
+    pub system: Option<String>,
     /// Prior turns. Each message is `{ role = "user"|"assistant", content = "..." }`.
     #[lua(default)]
     pub messages: Vec<LuaAskMessage>,
     /// Single-shot question appended as a final user message after `messages`.
     pub question: Option<String>,
+    /// When true, override `system` with the current session's assembled
+    /// system prompt and prepend the live `session.messages` (full message
+    /// shape including tool turns) plus the active tool list. The request
+    /// then shares the Anthropic prefix cache with the main turn. Used by
+    /// the compaction summariser to keep its prompt off the cache miss path.
+    #[lua(default)]
+    pub inherit_session: bool,
     /// Model reference (`"provider/model"` or a bare name resolved against
     /// the configured providers). When `nil`, falls back to the primary model.
     pub model: Option<String>,
@@ -259,9 +269,6 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
                         _ => None,
                     })
                     .collect();
-                if let Some(q) = spec.question {
-                    messages.push(protocol::Message::user(protocol::Content::text(&q)));
-                }
 
                 let id = s.next_id.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
 
@@ -272,7 +279,7 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
                     }
                 }
 
-                let system = spec.system;
+                let mut system = spec.system.unwrap_or_default();
                 let response_format = spec.response_format.map(|f| protocol::AskResponseFormat {
                     name: f.name,
                     schema: smelt_core::lua::api::lua_table_to_json(lua, &f.schema),
@@ -282,7 +289,21 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
                     .map(Into::into)
                     .unwrap_or(protocol::ReasoningEffort::Off);
                 let model_ref = spec.model;
+                let inherit_session = spec.inherit_session;
+                let question = spec.question;
                 crate::lua::with_app(|app| {
+                    let mut tools: Vec<protocol::ToolDef> = Vec::new();
+                    if inherit_session {
+                        // Snapshot live session state so the request prefix
+                        // matches the main turn byte-for-byte.
+                        system = app.rebuild_system_prompt();
+                        let session_msgs = app.core.session.messages.clone();
+                        messages = session_msgs.into_iter().chain(messages).collect();
+                        tools = app.lua.tool_defs(app.core.config.mode);
+                    }
+                    if let Some(q) = question {
+                        messages.push(protocol::Message::user(protocol::Content::text(&q)));
+                    }
                     let model = model_ref.and_then(|r| resolve_model_for_ask(app, &r));
                     app.core.engine.send(protocol::UiCommand::EngineAsk {
                         id,
@@ -291,6 +312,7 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
                         model,
                         response_format,
                         reasoning_effort,
+                        tools,
                     })
                 });
                 Ok(id)

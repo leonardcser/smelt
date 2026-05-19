@@ -90,9 +90,10 @@
 
 --- Spec for `smelt.engine.ask`.
 ---@class smelt.engine.AskSpec
----@field system string System prompt sent before the conversation.
+---@field system? string System prompt sent before the conversation. Optional when `inherit_session = true` (the current session's system prompt is substituted in that case).
 ---@field messages? smelt.engine.AskMessage[] Prior turns. Each message is `{ role = "user"|"assistant", content = "..." }`.
 ---@field question? string Single-shot question appended as a final user message after `messages`.
+---@field inherit_session? boolean When true, override `system` with the current session's assembled system prompt and prepend the live `session.messages` (full message shape including tool turns) plus the active tool list. The request then shares the Anthropic prefix cache with the main turn. Used by the compaction summariser to keep its prompt off the cache miss path.
 ---@field model? string Model reference (`"provider/model"` or a bare name resolved against the configured providers). When `nil`, falls back to the primary model.
 ---@field response_format? smelt.engine.AskResponseFormat JSON-schema response constraint.
 ---@field reasoning_effort? smelt.reasoning.Effort Reasoning effort for the request; defaults to `"off"`.

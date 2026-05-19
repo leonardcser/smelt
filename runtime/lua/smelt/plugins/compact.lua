@@ -12,38 +12,35 @@
 -- Both phases are visible to the user via `smelt.spinner.busy("compacting")`
 -- and emit structured `compaction` log events with before/after token counts.
 
-local SYSTEM = [[
-You are performing a CONTEXT CHECKPOINT COMPACTION. Produce a structured
-handoff summary that another instance of yourself will read to resume the
-task without losing critical context.
+-- Task instruction appended as the FINAL user message of the summariser
+-- request. Everything before it (system, tools, prior messages) mirrors
+-- the main session, so the request hits the same Anthropic prefix cache
+-- slot. Only this trailing instruction is fresh on each compaction.
+local SUMMARY_TASK = [[
+The conversation above is becoming long. Stop the current task and instead produce a CONTEXT CHECKPOINT COMPACTION: a structured handoff summary that another instance of yourself will read to resume the task without losing critical context.
 
-Reply in this exact Markdown structure. Omit a section only if the
-conversation truly contains nothing for it; never invent details.
+Reply in this exact Markdown structure. Omit a section only if the conversation truly contains nothing for it; never invent details. Respond with ONLY the Markdown document — no preamble, no apology, no tool calls.
 
 # Goal
 What the user is trying to accomplish (one or two sentences).
 
 # Constraints
-Hard limits, style rules, environment facts, anything the next instance
-must respect.
+Hard limits, style rules, environment facts, anything the next instance must respect.
 
 # Progress
 What has already been done. Concrete, specific, in completion order.
 
 # Decisions
-Choices that were made and the rationale, when the rationale matters
-for what comes next.
+Choices that were made and the rationale, when the rationale matters for what comes next.
 
 # Next steps
 Ordered, concrete actions the next instance should take.
 
 # Critical context
-File contents, error messages, command output, exact identifiers, etc.
-that the next instance will need verbatim. Quote precisely.
+File contents, error messages, command output, exact identifiers, etc. that the next instance will need verbatim. Quote precisely.
 
 # Relevant files
-Bullet list of file paths that were touched or are about to be touched,
-with a one-line note on why each matters.
+Bullet list of file paths that were touched or are about to be touched, with a one-line note on why each matters.
 ]]
 
 local SUMMARY_PREFIX = "Another language model started to solve this problem and produced a summary of its thinking process. You also have access to the state of the tools that were used by that language model. Use this to build on the work that has already been done and avoid duplicating work. Here is the summary produced by the other language model, use the information in this summary to assist with your own analysis:"
@@ -252,43 +249,94 @@ local function stringify_conversation(history)
   return table.concat(parts, "\n\n")
 end
 
--- `{ system, user }` message pair the summarizer model receives.
-local function compact_request_messages(history, instructions)
-  local system_text = SYSTEM:gsub("^%s+", ""):gsub("%s+$", "")
+-- Compose the trailing user message. Folds optional per-call instructions
+-- into the structured-summary spec.
+local function build_summary_task(instructions)
+  local task = SUMMARY_TASK:gsub("^%s+", ""):gsub("%s+$", "")
   if instructions then
     local extra = instructions:gsub("^%s+", ""):gsub("%s+$", "")
     if extra ~= "" then
-      system_text = system_text .. "\n\n" .. INSTRUCTIONS_PREAMBLE .. "\n" .. extra
+      task = task .. "\n\n" .. INSTRUCTIONS_PREAMBLE .. "\n" .. extra
     end
   end
-  local user_text = "Conversation to summarize:\n\n" .. stringify_conversation(history)
-  return system_text, {
-    { role = "user", content = user_text },
-  }
+  return task
 end
 
--- Async summarizer primitive shared by /compact, post-turn auto-compact,
--- and the on_context_limit recovery hook. Owns the spinner, the
--- trim-on-overflow + empty-retry loops, and notification on failure.
--- Calls `done(summary_string)` on success or `done(nil)` on failure.
-local function summarize(history, instructions, done)
+-- Legacy fallback summariser: flattens the supplied history into a single
+-- user message and sends it with `ask_with_trim`. Used by the mid-turn
+-- recovery hook (where the live session may not be settled) and as the
+-- overflow fallback for the inheriting path.
+local function summarize_flat(history, instructions, done)
   if not history or #history == 0 then
     done(nil)
     return
   end
   local cleaned = strip_images(history)
-  local system_text, messages = compact_request_messages(cleaned, instructions)
+  local task = build_summary_task(instructions)
+  local user_text = task .. "\n\nConversation to summarize:\n\n" .. stringify_conversation(cleaned)
   local handle = smelt.spinner.busy("compacting")
   local empty_retries = 0
 
   local function send()
     smelt.engine.ask_with_trim({
-      system      = system_text,
-      messages    = messages,
+      system      = "You are performing a context-checkpoint compaction. Produce ONLY the requested Markdown summary.",
+      messages    = { { role = "user", content = user_text } },
       model       = smelt.model.preferred("compact"),
       max_trims   = 20,
       on_response = function(summary, err)
         if err then
+          handle:remove()
+          smelt.notify.error("compaction failed: " .. err.message)
+          done(nil)
+          return
+        end
+        if not summary or summary == "" then
+          if empty_retries < MAX_EMPTY_RETRIES then
+            empty_retries = empty_retries + 1
+            send()
+            return
+          end
+          handle:remove()
+          smelt.notify.error("compaction failed: empty summary after retries")
+          done(nil)
+          return
+        end
+        handle:remove()
+        done(summary)
+      end,
+    })
+  end
+
+  send()
+end
+
+-- Async summarizer primitive shared by /compact and post-turn auto-compact.
+-- Uses `inherit_session = true` so the request prefix matches the main
+-- turn byte-for-byte and reuses its Anthropic prompt-cache slot. Falls
+-- back to the flat stringify path on context-window overflow.
+local function summarize(history, instructions, done)
+  if not history or #history == 0 then
+    done(nil)
+    return
+  end
+  local task = build_summary_task(instructions)
+  local handle = smelt.spinner.busy("compacting")
+  local empty_retries = 0
+
+  local function send()
+    smelt.engine.ask({
+      inherit_session = true,
+      question        = task,
+      model           = smelt.model.preferred("compact"),
+      on_response     = function(summary, err)
+        if err then
+          if err.kind == "context_window" then
+            -- Inherited session overflowed the summariser window. Fall back
+            -- to the flat stringify path, which trims aggressively.
+            handle:remove()
+            summarize_flat(history, instructions, done)
+            return
+          end
           handle:remove()
           smelt.notify.error("compaction failed: " .. err.message)
           done(nil)
@@ -421,7 +469,11 @@ smelt.engine.on_context_limit(function(messages, reply)
     return
   end
 
-  summarize(messages, nil, function(summary)
+  -- Mid-turn recovery uses the flat path: the engine hands us a `messages`
+  -- snapshot that doesn't match `smelt.session.messages()`, so we can't
+  -- inherit_session cleanly. Cache reuse is worth less here anyway — the
+  -- turn is already failing.
+  summarize_flat(messages, nil, function(summary)
     if not summary then
       consecutive_failures = consecutive_failures + 1
       reply(nil)

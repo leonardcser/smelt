@@ -100,6 +100,7 @@ pub(crate) async fn engine_task(
                         model,
                         response_format,
                         reasoning_effort,
+                        tools,
                     } => {
                         spawn_engine_ask(
                             &config,
@@ -111,6 +112,7 @@ pub(crate) async fn engine_task(
                                 model,
                                 response_format,
                                 reasoning_effort,
+                                tools,
                             },
                             &event_tx,
                         );
@@ -167,6 +169,10 @@ pub(crate) struct AskTask {
     pub model: Option<AskModel>,
     pub response_format: Option<protocol::AskResponseFormat>,
     pub reasoning_effort: ReasoningEffort,
+    /// Optional tool list. When non-empty AND matching the main session's
+    /// tools byte-for-byte, the request reuses the main session's
+    /// Anthropic prefix cache.
+    pub tools: Vec<protocol::ToolDef>,
 }
 
 fn spawn_engine_ask(
@@ -182,6 +188,7 @@ fn spawn_engine_ask(
         model,
         response_format,
         reasoning_effort,
+        tools,
     } = task;
     let (api, model_name) = resolve_ask_target(config, model);
     let provider = build_provider(
@@ -208,8 +215,23 @@ fn spawn_engine_ask(
             });
         }
 
+        // Reuse the main-turn tool format (sorted by name) so an EngineAsk
+        // that inherits the session's tool list produces a byte-identical
+        // tools section and hits the same Anthropic prefix cache slot.
+        let mut tool_defs: Vec<ToolDefinition> = tools
+            .into_iter()
+            .map(|t| {
+                ToolDefinition::new(FunctionSchema {
+                    name: t.name,
+                    description: t.description,
+                    parameters: t.parameters,
+                })
+            })
+            .collect();
+        tool_defs.sort_by(|a, b| a.function.name.cmp(&b.function.name));
+
         let result = provider
-            .chat(&messages, &[], &model_name, reasoning_effort, &opts)
+            .chat(&messages, &tool_defs, &model_name, reasoning_effort, &opts)
             .await;
 
         match result {
@@ -516,6 +538,7 @@ impl<'a> Turn<'a> {
                 model,
                 response_format,
                 reasoning_effort,
+                tools,
             } => {
                 spawn_engine_ask(
                     self.config,
@@ -527,6 +550,7 @@ impl<'a> Turn<'a> {
                         model,
                         response_format,
                         reasoning_effort,
+                        tools,
                     },
                     self.event_tx,
                 );

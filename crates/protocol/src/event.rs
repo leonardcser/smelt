@@ -431,6 +431,11 @@ pub enum UiCommand {
         response_format: Option<AskResponseFormat>,
         #[serde(default)]
         reasoning_effort: ReasoningEffort,
+        /// Tools to send alongside the request. When this matches the
+        /// main session's tool list byte-for-byte, the request shares
+        /// the Anthropic prefix cache with the main turn.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        tools: Vec<ToolDef>,
     },
 
     /// Result of a tool execution (response to `ToolDispatch`).
