@@ -1,6 +1,6 @@
 # smelt fuzz
 
-Four targets covering distinct surfaces:
+Six targets covering distinct surfaces:
 
 | target | what it fuzzes | how |
 |---|---|---|
@@ -8,6 +8,8 @@ Four targets covering distinct surfaces:
 | `lua_loop` | Lua FFI bindings (`smelt.*` API) | structured `LuaScenario` ops + FFI ledger oracle |
 | `text_ops` | `smelt_buffer::text` UTF-8 helpers | direct calls + reference-model differential |
 | `attached_ops` | `smelt_buffer::attached::AttachedTextMut` | segment-based reference model + invariant check |
+| `cache_invariance` | Anthropic prompt-cache prefix stability | random history + `cache_control`-aware byte diff |
+| `openai_cache_invariance` | OpenAI / aux-model prompt-cache stability | random history + `prompt_cache_key`-aware byte diff |
 
 ## Setup once
 
@@ -18,19 +20,48 @@ cargo install cargo-fuzz
 
 ## Day-to-day
 
-```sh
-# Run a target until you Ctrl-C, parallel workers, stop on first crash:
-cargo +nightly fuzz run --sanitizer=none smelt_loop -- -fork=4 -ignore_crashes=0
+Fuzz a single target until first crash or Ctrl-C:
 
-# Unattended (keep going past crashes; artifacts pile up under fuzz/artifacts/):
-cargo +nightly fuzz run --sanitizer=none lua_loop -- -fork=4 -ignore_crashes=1 -max_total_time=3600
+```sh
+cargo xtask fuzz run smelt_loop --fork 8
 ```
+
+Anything after the target name is forwarded to libFuzzer. The two flags
+above the `--` shim live on the xtask itself:
+
+| flag | what |
+|---|---|
+| `--fork N` | parallel workers (default 1) |
+| `--cmin` | sweep + shrink the corpus first |
+| trailing args | passed verbatim to libFuzzer (e.g. `-max_total_time=3600`) |
+
+## Background fuzzing (agents)
+
+The intended shape for long-running fuzz sessions in an agent loop:
+
+1. Spawn each target with `run_in_background: true`, redirecting output to
+   `/tmp/fuzz-loop/fuzz-<target>.log`.
+2. Don't poll — the harness fires a notification the moment any background
+   process exits, and `cargo xtask fuzz run` only exits on crash (or
+   Ctrl-C). An exit code 77 means libFuzzer caught a panic; the artifact
+   is under `fuzz/artifacts/<target>/`.
+3. On notification: read the log, locate the crash artifact, triage:
+
+   ```sh
+   cargo xtask fuzz triage <target> fuzz/artifacts/<target>/crash-<hex>
+   ```
+
+4. Fix the bug, commit a regression seed under
+   `fuzz/seeds/<target>/regression/`, then re-launch the target.
+
+The agent doesn't sleep, schedule wake-ups, or check progress — the
+notification on exit is the loop signal.
 
 ## When the fuzzer finds a crash
 
 ```sh
 # One-shot triage: shrink + format + print the minimal scenario.
-fuzz/scripts/triage.sh lua_loop fuzz/artifacts/lua_loop/crash-<hex>
+cargo xtask fuzz triage lua_loop fuzz/artifacts/lua_loop/crash-<hex>
 ```
 
 Then either fix the bug and commit a regression seed, or — if you want
@@ -49,22 +80,10 @@ Every fuzz-found bug gets a committed JSON seed under
 them locally is one command:
 
 ```sh
-fuzz/scripts/replay-regression.sh
+cargo xtask fuzz replay-regression
 ```
 
 See `fuzz/seeds/README.md` for the convention and how to add one.
-
-## Overnight
-
-```sh
-# Cmin first (sweeps the historical corpus for regressions; minimizes
-# corpus for faster fuzz next session), then fuzz from the minimized
-# corpus for the remaining time. Default budget 8 hours.
-fuzz/scripts/overnight.sh [hours]
-```
-
-Logs land in `/tmp/fuzz-overnight-<stamp>/`. New crashes copy through to
-`fuzz/artifacts/<target>/`.
 
 ## Coverage scoreboard
 
@@ -72,8 +91,8 @@ Logs land in `/tmp/fuzz-overnight-<stamp>/`. New crashes copy through to
 # Snapshot per-target source-code coverage to fuzz/coverage-history/.
 # Use to A/B your own generator changes: snapshot before, change, snapshot
 # after, diff the .txt files.
-fuzz/scripts/coverage-snapshot.sh
-fuzz/scripts/coverage-snapshot.sh smelt_loop      # one target only
+cargo xtask fuzz coverage-snapshot
+cargo xtask fuzz coverage-snapshot smelt_loop      # one target only
 ```
 
 ## Lower-level
@@ -82,7 +101,7 @@ fuzz/scripts/coverage-snapshot.sh smelt_loop      # one target only
 # Raw shrinker — predicate is `panic::catch_unwind(run_scenario)`.
 cargo run --release --bin shrink_scenario -- --target lua_loop in.json out.min.json
 
-# Headless replay (exits non-zero on panic; what triage.sh and CI use):
+# Headless replay (exits non-zero on panic; what triage and CI use):
 cargo run --bin replay_scenario -- --target lua_loop in.json
 
 # Cmin a single target manually:

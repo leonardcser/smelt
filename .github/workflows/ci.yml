@@ -81,4 +81,4 @@ jobs:
             fuzz
 
       - name: Replay regression seeds
-        run: fuzz/scripts/replay-regression.sh
+        run: cargo xtask fuzz replay-regression

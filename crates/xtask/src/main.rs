@@ -24,10 +24,17 @@ fn main() {
 }
 
 fn print_usage() {
-    eprintln!("usage: cargo xtask <command>");
+    eprintln!("usage: cargo xtask <command> [args]");
     eprintln!();
     eprintln!("commands:");
-    eprintln!("  gen-lua-docs   regenerate Lua API stubs + reference docs");
-    eprintln!("  synth          generate a synthetic session for perf testing");
-    eprintln!("  fuzz [secs]    unpack corpus → fuzz → cmin → repack (default 300s)");
+    eprintln!("  gen-lua-docs                          regenerate Lua API stubs + reference docs");
+    eprintln!(
+        "  synth                                 generate a synthetic session for perf testing"
+    );
+    eprintln!("  fuzz run <target> [--fork N] [--cmin] fuzz a target until crash or Ctrl-C");
+    eprintln!(
+        "  fuzz triage <target> <artifact>       shrink a crash and print the minimal scenario"
+    );
+    eprintln!("  fuzz replay-regression                replay every committed regression seed");
+    eprintln!("  fuzz coverage-snapshot [target...]    per-target source coverage snapshot");
 }
