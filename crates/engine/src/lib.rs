@@ -34,7 +34,6 @@ use tokio::sync::mpsc;
 /// and the renderer; they MUST stay byte-equal.
 pub const SUMMARY_PREFIX: &str = include_str!("prompts/compact_summary_prefix.md");
 
-pub use protocol::{mode_change_note, MODE_NOTE_PREFIX};
 
 pub use config::ModelConfig;
 pub use paths::{config_dir, data_dir, home_dir, state_dir};

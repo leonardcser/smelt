@@ -231,10 +231,7 @@ fn spawn_engine_ask(
         messages.insert(0, protocol::Message::system(&system));
 
         let mut opts = ChatOptions::new(&cancel);
-        opts.cache = provider.default_cache_config(cache_ttl_long);
-        if !session_id.is_empty() {
-            opts.cache.prompt_cache_key = Some(session_id);
-        }
+        opts.cache = provider.default_cache_config(cache_ttl_long, Some(&session_id));
         if let Some(fmt) = response_format {
             opts.response_format = Some(crate::provider::ResponseFormat {
                 name: fmt.name,
@@ -1574,16 +1571,14 @@ impl<'a> Turn<'a> {
                     });
                 }
             };
-            let mut cache = self
-                .provider
-                .default_cache_config(self.config.cache_ttl_long);
-            cache.prompt_cache_key = Some(self.session_id.clone());
             let opts = ChatOptions {
                 cancel: &self.cancel,
                 on_retry: Some(&on_retry),
                 on_delta: Some(&on_delta),
                 response_format: None,
-                cache,
+                cache: self
+                    .provider
+                    .default_cache_config(self.config.cache_ttl_long, Some(&self.session_id)),
             };
             let chat_future = self.provider.chat(
                 &self.messages,

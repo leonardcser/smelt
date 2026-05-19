@@ -505,11 +505,13 @@ impl Provider {
         )
     }
 
-    pub fn default_cache_config(&self, ttl_long: bool) -> CacheConfig {
+    pub fn default_cache_config(&self, ttl_long: bool, session_id: Option<&str>) -> CacheConfig {
         CacheConfig {
             anthropic_markers: self.supports_anthropic_cache(),
             ttl_long,
-            prompt_cache_key: None,
+            prompt_cache_key: session_id
+                .filter(|s| !s.is_empty())
+                .map(|s| s.to_string()),
         }
     }
 

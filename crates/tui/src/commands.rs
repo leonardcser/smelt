@@ -351,7 +351,7 @@ impl TuiApp {
             // If the previous message is also a mode note (back-to-back
             // toggles between turns), replace it in place rather than
             // stack — the model only needs the *current* mode.
-            let note = engine::mode_change_note(self.core.config.mode);
+            let note = protocol::mode_change_note(self.core.config.mode);
             let new_msg = protocol::Message::user(protocol::Content::text(note));
             let last_is_mode_note = self
                 .core
