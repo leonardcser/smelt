@@ -20,6 +20,12 @@ keyring = "3"
 minijinja = "2"
 regex = "1"
 
+[features]
+# Exposes `fuzz_build_anthropic_body` / `fuzz_build_openai_body` for the
+# `cache_invariance` fuzz target. Not for production use — these bypass
+# the network layer and let fuzzers byte-compare cached prefixes.
+fuzz = []
+
 [dev-dependencies]
 serial_test = "3.4.0"
 tempfile.workspace = true

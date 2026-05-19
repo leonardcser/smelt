@@ -36,7 +36,7 @@ use engine::provider::{
 };
 use engine::ModelConfig;
 use libfuzzer_sys::fuzz_target;
-use protocol::{Content, Message, ReasoningEffort};
+use protocol::{mode_change_note, AgentMode, Content, Message, ReasoningEffort};
 use serde_json::Value;
 
 /// One tool definition, hand-rolled rather than `derive(Arbitrary)` so
@@ -74,15 +74,17 @@ enum StableAction {
     AppendTurn { assistant_text: String, user_text: String },
     /// Append a `[smelt:mode]` synthetic note + a regular user turn.
     /// Mirrors `/mode` switching: the synthetic note sits in the message
-    /// stream, NOT in the system prompt.
+    /// stream, NOT in the system prompt. Uses the canonical
+    /// `protocol::mode_change_note` builder so the bytes match what the
+    /// real `/mode` command writes.
     AppendModeNote { mode: u8, user_text: String },
     /// Reorder tools (shuffle) — the canonical sort must produce the
     /// same output regardless of input order.
     ReorderTools,
-    /// Vary sampling params (temperature) — these don't enter the
-    /// cached prefix, so `system` / `tools` / `messages` must stay
-    /// byte-identical.
-    NudgeTemperature,
+    /// Toggle reasoning effort — this sits in the sampling section of
+    /// the body, not the cached prefix, so `system` / `tools` /
+    /// `messages` must stay byte-identical.
+    NudgeReasoningEffort,
 }
 
 #[derive(Debug, Arbitrary)]
@@ -95,7 +97,12 @@ struct Input {
     action: StableAction,
 }
 
-const MODES: &[&str] = &["plan", "yolo", "ask"];
+const MODES: &[AgentMode] = &[
+    AgentMode::Normal,
+    AgentMode::Plan,
+    AgentMode::Apply,
+    AgentMode::Yolo,
+];
 
 fn strip_markers(v: &Value) -> Value {
     match v {
@@ -228,7 +235,7 @@ fn run(input: Input) {
         StableAction::AppendModeNote { mode, user_text } => {
             let m = MODES[(*mode as usize) % MODES.len()];
             messages.push(Message::assistant(Some(Content::text(String::from("ok"))), None, None));
-            messages.push(Message::user(Content::text(format!("[smelt:mode] now in {m} mode."))));
+            messages.push(Message::user(Content::text(mode_change_note(m))));
             messages.push(Message::user(Content::text(user_text.clone())));
             let after = body(&messages, &tools, &cfg);
             assert_prefix_stable(&before, &after, prefix_msg_count, "AppendModeNote");
@@ -248,12 +255,10 @@ fn run(input: Input) {
             // Whole body should match — no message changes, just tools.
             assert_prefix_stable(&before, &after, prefix_msg_count, "ReorderTools");
         }
-        StableAction::NudgeTemperature => {
-            // ModelConfig has no public mutator for temperature in the
-            // current API; the property we want to assert is "non-prefix
-            // params don't enter the cached prefix bytes". The cheap proxy:
-            // rebuild with a *different* effort level (which sits in the
-            // sampling params, not the cached prefix) and check stability.
+        StableAction::NudgeReasoningEffort => {
+            // Reasoning effort lives in the sampling section of the body,
+            // not in the cached prefix. Rebuild with a different effort
+            // and assert system / tools / messages bytes are unchanged.
             let after = fuzz_build_anthropic_body(
                 &messages,
                 &tools,
@@ -262,7 +267,7 @@ fn run(input: Input) {
                 &cfg,
                 &cache_on(),
             );
-            assert_prefix_stable(&before, &after, prefix_msg_count, "NudgeTemperature");
+            assert_prefix_stable(&before, &after, prefix_msg_count, "NudgeReasoningEffort");
         }
     }
 }
