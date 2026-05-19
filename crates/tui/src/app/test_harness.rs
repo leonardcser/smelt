@@ -628,6 +628,20 @@ impl TestApp {
         self.app.render_normal(agent_running);
     }
 
+    /// Render variant that exercises the full projection pipeline (layout,
+    /// transcript/prompt/status sync, completer overlay) but throws the
+    /// final compositor diff into a sink instead of stdout. Intended for
+    /// the fuzz loop: every per-frame code path under `content/*` and the
+    /// `compositor:*` perf scopes runs, so renderer bugs (cursor /
+    /// scroll_top / tail-follow / parser projection) become reachable
+    /// under fuzz without per-iteration megabytes of ANSI bytes hitting
+    /// libFuzzer's log file.
+    pub fn render_silent(&mut self) {
+        let agent_running = self.app.agent.is_some();
+        let mut sink = std::io::sink();
+        self.app.render_normal_to(agent_running, &mut sink);
+    }
+
     /// Resize the app's surface to `(width, height)`. Used by replay
     /// drivers that own a real terminal and need to match the app's
     /// internal grid to the OS-reported size.

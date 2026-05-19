@@ -6,6 +6,19 @@ use crate::content::{layout, prompt_buf};
 
 impl TuiApp {
     pub(crate) fn render_normal(&mut self, agent_running: bool) {
+        let mut stdout = std::io::stdout();
+        self.render_normal_to(agent_running, &mut stdout);
+    }
+
+    /// Render variant parameterised by the output sink. Production passes
+    /// `std::io::stdout()`; the fuzz harness passes `std::io::sink()` so
+    /// every code path under `content/*` and `compositor:*` runs without
+    /// dumping megabytes of ANSI per scenario into libFuzzer's log file.
+    pub(crate) fn render_normal_to<W: std::io::Write>(
+        &mut self,
+        agent_running: bool,
+        out: &mut W,
+    ) {
         let _perf = smelt_perf::perf::begin("app:tick_compositor");
         self.update_spinner();
         // Publish vim mode so overlay leaves read it via `DrawContext::vim_mode`.
@@ -109,11 +122,10 @@ impl TuiApp {
         }
 
         let _p = smelt_perf::perf::begin("compositor:render_flush");
-        let mut stdout = std::io::stdout();
         // Split-borrow paint registry and lua out of `self` to avoid aliasing with `&mut self.ui`.
         let paint_registry = &self.paint_registry;
         let lua = &self.lua;
-        let _ = self.ui.render_with_paints(&mut stdout, |id, slice, ctx| {
+        let _ = self.ui.render_with_paints(out, |id, slice, ctx| {
             if let Some(handle_id) = paint_registry.lookup(id) {
                 crate::lua::paint::invoke_paint(lua, handle_id, slice, ctx);
             }

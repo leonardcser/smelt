@@ -631,6 +631,22 @@ fn weighted_fuzz_op(u: &mut Unstructured<'_>) -> arbitrary::Result<FuzzOp> {
 /// the in-memory fuzz input is a `FuzzInput`. Same bytes either way.
 pub type Scenario = FuzzInput;
 
+/// Should `run_scenario` render a frame after applying this op? `true`
+/// covers anything that changes what would be on screen: input edits,
+/// engine stream updates, resize, mouse drag, overlay/dialog motion,
+/// reload (re-fires `on_ready`, may open splashes). `false` for ops
+/// that only nudge clock or queue-meta state (`Tick`, `EngineReady`,
+/// `EngineTokenUsage`) — rendering after those is pure cost. Lifting
+/// every `content/*` parser out of 0% coverage is exactly what this
+/// classification unlocks; the trade-off is one frame projection per
+/// non-trivial op (≈50% of ops, on average).
+fn render_trigger(op: &FuzzOp) -> bool {
+    !matches!(
+        op,
+        FuzzOp::Tick(_) | FuzzOp::EngineReady | FuzzOp::EngineTokenUsage { .. }
+    )
+}
+
 pub const SPECIALS: &[KeyCode] = &[
     KeyCode::Enter,
     KeyCode::Esc,
@@ -1632,11 +1648,19 @@ pub fn run_scenario(scenario: Scenario) {
 
     let take = scenario.ops.len().min(MAX_OPS);
     for op in scenario.ops.into_iter().take(take) {
+        let render_after = render_trigger(&op);
         apply(&mut app, op);
         if app.quit_requested() {
             break;
         }
+        if render_after {
+            app.render_silent();
+        }
     }
+    // Always render once at the end so the final state passes through the
+    // projection — covers scenarios that end on a `Tick` and would
+    // otherwise skip the renderer entirely.
+    app.render_silent();
 
     let theme_end = smelt_style::theme::registry_len();
     let ns_end = smelt_buffer::buffer::namespace_count();
