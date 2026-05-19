@@ -44,19 +44,23 @@ Triage one cycle per crash. The other target keeps running throughout.
    debug-decoded `FuzzInput`, and the panic message). Newest artifact is in
    `fuzz/artifacts/<target>/`.
 
-2. **Minimize**:
+2. **Minimize** (byte-level, then structural):
    ```bash
    cargo +nightly fuzz tmin --sanitizer=none <target> <artifact>
    ```
 
-3. **Decode + trace** (the replay binaries live in `fuzz/`):
+3. **Decode + structural shrink + trace** (the bins live in `fuzz/`):
    ```bash
-   cd fuzz && cargo build --release --bin replay_scenario --bin crash_to_scenario
-   ./target/release/crash_to_scenario <minimized-artifact> /tmp/min.json
+   cd fuzz && cargo build --release --bin replay_scenario --bin crash_to_scenario --bin shrink_scenario
+   # Replace `--target smelt_loop` with `--target lua_loop` for lua artifacts.
+   ./target/release/crash_to_scenario <minimized-artifact> /tmp/raw.json
+   ./target/release/shrink_scenario /tmp/raw.json /tmp/min.json
    ./target/release/replay_scenario --trace /tmp/min.json
    ```
-   `--trace` prints per-op `(cpos, src.len, vim_mode, sel_anchor)` for every
-   window — usually enough to identify which op flipped the invariant.
+   The structural shrinker drops whole ops + halves string payloads, so a
+   200-op tmin output typically lands at <10 ops. `--trace` prints per-op
+   `(cpos, src.len, vim_mode, sel_anchor)` for every window — usually
+   enough to identify which op flipped the invariant.
 
 4. **Root cause first, fix once**: panic prefixes (`INV-NN`, `AttachedTextMut`,
    etc.) map to specific invariants. Form a single hypothesis before

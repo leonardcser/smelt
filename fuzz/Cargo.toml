@@ -66,6 +66,13 @@ test = false
 doc = false
 bench = false
 
+[[bin]]
+name = "shrink_scenario"
+path = "src/bin/shrink_scenario.rs"
+test = false
+doc = false
+bench = false
+
 [profile.release]
 debug = 1
 lto = true

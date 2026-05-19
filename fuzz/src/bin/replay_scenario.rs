@@ -1,30 +1,79 @@
-//! Replay a `Scenario` JSON file against a fresh `TestApp`.
+//! Replay a scenario JSON file against a fresh `TestApp`.
 //!
 //! Usage:
 //!
 //! ```text
-//! cargo run --bin replay_scenario -- [--trace] <scenario.json>
+//! cargo run --bin replay_scenario -- \
+//!     [--target smelt_loop|lua_loop] [--trace] <scenario.json>
 //! ```
 //!
-//! With `--trace`, prints prompt + transcript window state after each op so
-//! invariant violations can be located precisely. Without it, just runs the
+//! Default target is `smelt_loop`. With `--trace` (smelt_loop only),
+//! prints prompt + transcript window state after each op so invariant
+//! violations can be located precisely. Without it, just runs the
 //! scenario and exits non-zero on any panic or assertion.
 
-use smelt_fuzz::Scenario;
+use smelt_fuzz::{LuaScenario, Scenario};
 use std::path::Path;
 use std::{env, fs, process};
 
+enum Target {
+    SmeltLoop,
+    LuaLoop,
+}
+
+impl Target {
+    fn parse(s: &str) -> Option<Self> {
+        match s {
+            "smelt_loop" => Some(Target::SmeltLoop),
+            "lua_loop" => Some(Target::LuaLoop),
+            _ => None,
+        }
+    }
+}
+
 fn main() {
-    let args: Vec<String> = env::args().collect();
-    let trace = args.iter().any(|a| a == "--trace");
-    let path_arg = args.iter().skip(1).find(|a| !a.starts_with("--"));
-    let Some(path_arg) = path_arg else {
-        eprintln!("usage: replay_scenario [--trace] <scenario.json>");
-        process::exit(2);
-    };
-    let path = Path::new(path_arg);
+    let argv: Vec<String> = env::args().collect();
+    let mut target = Target::SmeltLoop;
+    let mut trace = false;
+    let mut positional: Vec<String> = Vec::new();
+    let mut i = 1;
+    while i < argv.len() {
+        match argv[i].as_str() {
+            "--target" => {
+                i += 1;
+                let Some(arg) = argv.get(i) else {
+                    usage_and_exit(2);
+                };
+                let Some(t) = Target::parse(arg) else {
+                    eprintln!("error: unknown --target {arg:?}");
+                    process::exit(2);
+                };
+                target = t;
+            }
+            "--trace" => trace = true,
+            "-h" | "--help" => usage_and_exit(0),
+            other if other.starts_with("--") => {
+                eprintln!("error: unknown flag {other:?}");
+                process::exit(2);
+            }
+            _ => positional.push(argv[i].clone()),
+        }
+        i += 1;
+    }
+    if positional.len() != 1 {
+        usage_and_exit(2);
+    }
+    let path = Path::new(&positional[0]);
     let text = fs::read_to_string(path).expect("read scenario");
-    let scenario: Scenario = serde_json::from_str(&text).expect("parse scenario");
+
+    match target {
+        Target::SmeltLoop => replay_smelt(&text, path, trace),
+        Target::LuaLoop => replay_lua(&text, path, trace),
+    }
+}
+
+fn replay_smelt(text: &str, path: &Path, trace: bool) {
+    let scenario: Scenario = serde_json::from_str(text).expect("parse scenario");
 
     if trace {
         let runtime = tokio::runtime::Builder::new_current_thread()
@@ -67,4 +116,22 @@ fn main() {
 
     smelt_fuzz::run_scenario(scenario);
     eprintln!("ok: {}", path.display());
+}
+
+fn replay_lua(text: &str, path: &Path, trace: bool) {
+    if trace {
+        eprintln!(
+            "warning: --trace is not supported for lua_loop scenarios (no per-op decomposition); ignoring"
+        );
+    }
+    let scenario: LuaScenario = serde_json::from_str(text).expect("parse scenario");
+    smelt_fuzz::run_lua_scenario(scenario);
+    eprintln!("ok: {}", path.display());
+}
+
+fn usage_and_exit(code: i32) -> ! {
+    eprintln!(
+        "usage: replay_scenario [--target smelt_loop|lua_loop] [--trace] <scenario.json>"
+    );
+    process::exit(code);
 }

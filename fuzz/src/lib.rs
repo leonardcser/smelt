@@ -454,10 +454,11 @@ impl From<FuzzMode> for AgentMode {
 /// A full reproducible scenario: initial app config plus the event stream.
 /// `FuzzInput` is also what `arbitrary` decodes from libFuzzer bytes, so a
 /// crash artifact converts to a `Scenario` JSON via a single
-/// `serde_json::to_string_pretty`. `Arbitrary` is **hand-written** to bias
-/// `ops` generation toward deep-state variants (see
-/// [`weighted_fuzz_op`]); JSON serialisation still round-trips losslessly
-/// via serde derive.
+/// `serde_json::to_string_pretty`. `Arbitrary` is **hand-written** to draw
+/// per-scenario [`SwarmWeights`] up front, then sample ops from that
+/// distribution (see [`build_fuzz_op`]). JSON serialisation still
+/// round-trips losslessly via serde derive — the swarm table itself is
+/// generator state and is not persisted.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FuzzInput {
     pub vim: bool,
@@ -469,161 +470,202 @@ impl<'a> Arbitrary<'a> for FuzzInput {
     fn arbitrary(u: &mut Unstructured<'a>) -> arbitrary::Result<Self> {
         let vim = u.arbitrary()?;
         let mode = u.arbitrary()?;
-        // libFuzzer grows inputs incrementally; pull as many ops as
-        // bytes allow up to `MAX_OPS`. Each loop iteration consumes
-        // a few bytes via `weighted_fuzz_op`, so this naturally
-        // bounds itself when bytes run out.
+        // Swarm testing: each scenario commits to a corner of the op
+        // space. Some variants are disabled outright; the rest get
+        // wildly skewed weights. Drawing the table here (not per-op)
+        // means a single seed goes deep into its chosen corner rather
+        // than uniformly bouncing across 43 variants.
+        let swarm = SwarmWeights::arbitrary(u, N_FUZZOP_VARIANTS)?;
         let mut ops = Vec::new();
         while !u.is_empty() && ops.len() < MAX_OPS {
-            ops.push(weighted_fuzz_op(u)?);
+            let idx = swarm.pick(u)?;
+            ops.push(build_fuzz_op(idx, u)?);
         }
         Ok(FuzzInput { vim, mode, ops })
     }
 }
 
-/// Pick a `FuzzOp` with non-uniform variant weights. The motivation:
-/// uniform sampling over 44 variants gives each one ~2.3% probability,
-/// so a 64-op scenario hits any specific deep-state op (`ReloadLua`,
-/// `OpenOverlay`, `EngineToolDispatch`) only ~1.5 times on average,
-/// which leaves the new Lua surface area under-explored. Three tiers:
+/// Per-scenario swarm weights. Each entry is either `0` (variant
+/// disabled for this seed) or a weight in `1..=100` (relative selection
+/// weight). At least one entry is guaranteed non-zero. Inspired by
+/// TigerBeetle's `random_enum_weights`: per seed, *zero out* most
+/// variants and skew the rest wildly so each scenario commits to one
+/// shape of workload rather than uniformly spreading thin.
 ///
-/// - **Input tier (~25%)**: cheap terminal events. Many fuzz seeds
-///   already saturate this; over-sampling burns iterations without
-///   adding coverage.
-/// - **Engine tier (~50%)**: turn lifecycle, streaming, tool calls,
-///   permissions. This is the main state-creating workload.
-/// - **Deep tier (~25%)**: `/reload`, overlay open, tool dispatch,
-///   shutdown — operations that exercise newer / less-covered
-///   subsystems. 4-5× the per-variant weight of input ops.
-///
-/// Weights are bucketed against a 1000-slot lottery so we can keep
-/// fine-grained per-variant adjustments without rewriting the
-/// dispatcher. **No dictionaries** — all string / numeric payloads
-/// are still drawn from `u.arbitrary()` so the value space is
-/// unrestricted; only the variant selector is biased.
-fn weighted_fuzz_op(u: &mut Unstructured<'_>) -> arbitrary::Result<FuzzOp> {
-    let r = u.int_in_range(0u16..=999)?;
-    Ok(match r {
-        // --- Input tier (~25% / 250 slots) ---
-        0..=49 => FuzzOp::KeyUnicode(u.arbitrary()?),
-        50..=79 => FuzzOp::KeyCtrl(u.arbitrary()?),
-        80..=99 => FuzzOp::KeyShift(u.arbitrary()?),
-        100..=129 => FuzzOp::KeySpecial(u.arbitrary()?),
-        130..=144 => FuzzOp::KeySpecialShift(u.arbitrary()?),
-        145..=164 => FuzzOp::Paste(u.arbitrary()?),
-        165..=174 => FuzzOp::Mouse(u.arbitrary()?),
-        175..=204 => FuzzOp::Tick(u.arbitrary()?),
-        205..=219 => FuzzOp::LuaWakeup,
-        220..=249 => FuzzOp::Resize {
+/// Weights aren't persisted in the on-disk `Scenario` JSON — they're a
+/// per-Arbitrary-draw artifact. Crashed scenarios round-trip through
+/// the `ops` vector alone, which is what actually replays.
+pub struct SwarmWeights {
+    weights: Vec<u32>,
+    total: u32,
+}
+
+impl SwarmWeights {
+    /// Draw a fresh swarm table over `n` variants. ~50% of variants are
+    /// disabled per seed; surviving variants get weights in `1..=100`.
+    /// Falls back to a uniform-1 table when bytes are too short to draw
+    /// the full shape.
+    pub fn arbitrary(u: &mut Unstructured<'_>, n: usize) -> arbitrary::Result<Self> {
+        let mut weights = vec![0u32; n];
+        let mut total = 0u32;
+        for slot in &mut weights {
+            // 50/50 enabled bit then 1..=100 weight. Two bytes per
+            // variant — fine for n ≤ 64 on any non-trivial libFuzzer
+            // input.
+            if u.arbitrary::<bool>().unwrap_or(false) {
+                let w = u.int_in_range(1u32..=100).unwrap_or(1);
+                *slot = w;
+                total += w;
+            }
+        }
+        if total == 0 {
+            // Force a usable distribution when the random draw zeroed
+            // everything (rare, but possible).
+            weights[0] = 1;
+            total = 1;
+        }
+        Ok(Self { weights, total })
+    }
+
+    /// Sample a variant index, weighted by the table. Consumes a few
+    /// bytes per call.
+    pub fn pick(&self, u: &mut Unstructured<'_>) -> arbitrary::Result<usize> {
+        let pick = u.int_in_range(0u32..=self.total.saturating_sub(1))?;
+        let mut acc = 0u32;
+        for (i, &w) in self.weights.iter().enumerate() {
+            acc = acc.saturating_add(w);
+            if pick < acc {
+                return Ok(i);
+            }
+        }
+        Ok(self.weights.len() - 1)
+    }
+}
+
+/// Total `FuzzOp` variant count. Keep in lockstep with `build_fuzz_op`.
+pub const N_FUZZOP_VARIANTS: usize = 43;
+
+/// Build one `FuzzOp` by variant index. The index space is the swarm
+/// dispatch surface; payloads still come from `u.arbitrary()` so the
+/// value space stays unrestricted.
+fn build_fuzz_op(idx: usize, u: &mut Unstructured<'_>) -> arbitrary::Result<FuzzOp> {
+    Ok(match idx {
+        0 => FuzzOp::KeyUnicode(u.arbitrary()?),
+        1 => FuzzOp::KeyCtrl(u.arbitrary()?),
+        2 => FuzzOp::KeyShift(u.arbitrary()?),
+        3 => FuzzOp::KeySpecial(u.arbitrary()?),
+        4 => FuzzOp::KeySpecialShift(u.arbitrary()?),
+        5 => FuzzOp::Paste(u.arbitrary()?),
+        6 => FuzzOp::Mouse(u.arbitrary()?),
+        7 => FuzzOp::Tick(u.arbitrary()?),
+        8 => FuzzOp::LuaWakeup,
+        9 => FuzzOp::Resize {
             w: u.arbitrary()?,
             h: u.arbitrary()?,
         },
-
-        // --- Engine tier (~50% / 500 slots) ---
-        250..=274 => FuzzOp::StartTurn(u.arbitrary()?),
-        275..=289 => FuzzOp::EngineReady,
-        290..=314 => FuzzOp::EngineText(u.arbitrary()?),
-        315..=339 => FuzzOp::EngineTextDelta(u.arbitrary()?),
-        340..=354 => FuzzOp::EngineThinking(u.arbitrary()?),
-        355..=369 => FuzzOp::EngineThinkingDelta(u.arbitrary()?),
-        370..=389 => FuzzOp::EngineToolStart {
+        10 => FuzzOp::StartTurn(u.arbitrary()?),
+        11 => FuzzOp::EngineReady,
+        12 => FuzzOp::EngineText(u.arbitrary()?),
+        13 => FuzzOp::EngineTextDelta(u.arbitrary()?),
+        14 => FuzzOp::EngineThinking(u.arbitrary()?),
+        15 => FuzzOp::EngineThinkingDelta(u.arbitrary()?),
+        16 => FuzzOp::EngineToolStart {
             call_id: u.arbitrary()?,
             tool_name: u.arbitrary()?,
             args: u.arbitrary()?,
         },
-        390..=409 => FuzzOp::EngineToolOutput {
+        17 => FuzzOp::EngineToolOutput {
             call_id: u.arbitrary()?,
             chunk: u.arbitrary()?,
         },
-        410..=429 => FuzzOp::EngineToolFinish {
+        18 => FuzzOp::EngineToolFinish {
             call_id: u.arbitrary()?,
             is_error: u.arbitrary()?,
             content: u.arbitrary()?,
         },
-        430..=444 => FuzzOp::ExecOutput(u.arbitrary()?),
-        445..=459 => FuzzOp::ExecDone(u.arbitrary()?),
-        460..=474 => FuzzOp::EngineTurnError(u.arbitrary()?),
-        475..=494 => FuzzOp::EngineSteered {
+        19 => FuzzOp::ExecOutput(u.arbitrary()?),
+        20 => FuzzOp::ExecDone(u.arbitrary()?),
+        21 => FuzzOp::EngineTurnError(u.arbitrary()?),
+        22 => FuzzOp::EngineSteered {
             text: u.arbitrary()?,
             count: u.arbitrary()?,
         },
-        495..=509 => FuzzOp::EngineRetrying {
+        23 => FuzzOp::EngineRetrying {
             delay_ms: u.arbitrary()?,
             attempt: u.arbitrary()?,
         },
-        510..=524 => FuzzOp::EngineTokenUsage {
+        24 => FuzzOp::EngineTokenUsage {
             prompt: u.arbitrary()?,
             completion: u.arbitrary()?,
             tps: u.arbitrary()?,
             cost_cents: u.arbitrary()?,
             background: u.arbitrary()?,
         },
-        525..=534 => FuzzOp::PushQueuedMessage(u.arbitrary()?),
-        535..=549 => FuzzOp::EngineProcessCompleted {
+        25 => FuzzOp::PushQueuedMessage(u.arbitrary()?),
+        26 => FuzzOp::EngineProcessCompleted {
             id: u.arbitrary()?,
             exit_code: u.arbitrary()?,
         },
-        550..=569 => FuzzOp::EngineMessages {
+        27 => FuzzOp::EngineMessages {
             msg_count: u.arbitrary()?,
         },
-        570..=579 => FuzzOp::ApproveFirstConfirm,
-        580..=589 => FuzzOp::DenyFirstConfirm {
+        28 => FuzzOp::ApproveFirstConfirm,
+        29 => FuzzOp::DenyFirstConfirm {
             message: u.arbitrary()?,
         },
-        590..=614 => FuzzOp::EngineCoreToolResult {
+        30 => FuzzOp::EngineCoreToolResult {
             req_id: u.arbitrary()?,
             content: u.arbitrary()?,
             is_error: u.arbitrary()?,
         },
-        615..=634 => FuzzOp::EngineToolHooksRequest {
+        31 => FuzzOp::EngineToolHooksRequest {
             req_id: u.arbitrary()?,
             call_id: u.arbitrary()?,
             tool_name: u.arbitrary()?,
             args: u.arbitrary()?,
         },
-        635..=649 => FuzzOp::InsertAttachment {
+        32 => FuzzOp::InsertAttachment {
             label: u.arbitrary()?,
         },
-        650..=664 => FuzzOp::TogglePaneFocus,
-        665..=684 => FuzzOp::EngineToolArgsDelta {
+        33 => FuzzOp::TogglePaneFocus,
+        34 => FuzzOp::EngineToolArgsDelta {
             call_id: u.arbitrary()?,
             tool_name: u.arbitrary()?,
             delta: u.arbitrary()?,
         },
-        685..=709 => FuzzOp::EngineAskResponse {
+        35 => FuzzOp::EngineAskResponse {
             id: u.arbitrary()?,
             content: u.arbitrary()?,
         },
-        710..=729 => FuzzOp::EngineAskError {
+        36 => FuzzOp::EngineAskError {
             id: u.arbitrary()?,
             kind_idx: u.arbitrary()?,
             message: u.arbitrary()?,
         },
-        730..=749 => FuzzOp::EngineTurnComplete {
+        37 => FuzzOp::EngineTurnComplete {
             msg_count: u.arbitrary()?,
         },
-
-        // --- Deep tier (~25% / 250 slots) ---
-        750..=799 => FuzzOp::EngineToolDispatch {
+        38 => FuzzOp::EngineToolDispatch {
             req_id: u.arbitrary()?,
             call_id: u.arbitrary()?,
             tool_name: u.arbitrary()?,
             args: u.arbitrary()?,
         },
-        800..=849 => FuzzOp::EngineRequestPermission {
+        39 => FuzzOp::EngineRequestPermission {
             req_id: u.arbitrary()?,
             call_id: u.arbitrary()?,
             tool_name: u.arbitrary()?,
             summary: u.arbitrary()?,
             args: u.arbitrary()?,
         },
-        850..=889 => FuzzOp::EngineShutdown {
+        40 => FuzzOp::EngineShutdown {
             reason: u.arbitrary()?,
         },
-        890..=939 => FuzzOp::ReloadLua,
-        _ => FuzzOp::OpenOverlay {
+        41 => FuzzOp::ReloadLua,
+        42 => FuzzOp::OpenOverlay {
             variant: u.arbitrary()?,
         },
+        n => unreachable!("fuzz_op idx {n} out of range; bump N_FUZZOP_VARIANTS or extend dispatch"),
     })
 }
 

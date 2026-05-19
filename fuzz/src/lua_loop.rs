@@ -18,6 +18,7 @@
 //! (`__fuzz.bufs[i]`, `__fuzz.wins[i]`, `__fuzz.overlays[i]`,
 //! `__fuzz.paints[i]`) so later ops can reference earlier outputs.
 
+use crate::SwarmWeights;
 use arbitrary::{Arbitrary, Unstructured};
 use serde::{Deserialize, Serialize};
 use tui::app::test_harness::TestApp;
@@ -228,73 +229,71 @@ impl LuaOp {
     }
 }
 
+/// Total `LuaOp` variant count. Keep in lockstep with `build_lua_op`.
+pub const N_LUAOP_VARIANTS: usize = 12;
+
+/// Build one `LuaOp` by variant index. Payloads still come from
+/// `u.arbitrary()` so the value space stays unrestricted.
+fn build_lua_op(idx: usize, u: &mut Unstructured<'_>) -> arbitrary::Result<LuaOp> {
+    Ok(match idx {
+        0 => LuaOp::BufNew {
+            name_slot: opt_slot(u)?,
+        },
+        1 => LuaOp::WinNew {
+            buf_idx: u.arbitrary()?,
+            name_slot: opt_slot(u)?,
+        },
+        2 => LuaOp::OverlayNew {
+            layout: u.arbitrary()?,
+            name_slot: opt_slot(u)?,
+            keymap_count: u.arbitrary()?,
+        },
+        3 => LuaOp::Remove {
+            kind: u.arbitrary()?,
+            idx: u.arbitrary()?,
+        },
+        4 => LuaOp::Reload,
+        5 => LuaOp::PaintRegister {
+            name_slot: opt_slot(u)?,
+            body_kind: u.arbitrary()?,
+        },
+        6 => LuaOp::StateSet {
+            slot: u.arbitrary()?,
+            key: arb_short_string(u, 16)?,
+            value: u.arbitrary()?,
+        },
+        7 => LuaOp::StateGet {
+            slot: u.arbitrary()?,
+            key: arb_short_string(u, 16)?,
+        },
+        8 => LuaOp::CmdRegister {
+            name_slot: u.arbitrary()?,
+            handler_kind: u.arbitrary()?,
+        },
+        9 => LuaOp::CmdInvoke {
+            name_slot: u.arbitrary()?,
+        },
+        10 => LuaOp::KeymapSet {
+            scope_kind: u.arbitrary()?,
+            chord_slot: u.arbitrary()?,
+            handler_kind: u.arbitrary()?,
+        },
+        11 => LuaOp::ProbeRead {
+            kind: u.arbitrary()?,
+            target_idx: u.arbitrary()?,
+        },
+        n => unreachable!("lua_op idx {n} out of range; bump N_LUAOP_VARIANTS or extend dispatch"),
+    })
+}
+
 impl<'a> Arbitrary<'a> for LuaOp {
-    /// Bias toward state-creating / deep-state ops. Weights chosen so
-    /// short scenarios still reach Reload + Remove + multi-resource
-    /// states. Buckets sum to 100.
+    /// Default-uniform sample. Production scenarios use [`LuaScenario`]
+    /// which draws a per-scenario [`SwarmWeights`] up front and samples
+    /// `LuaOp`s from that table; this impl exists for ad-hoc callers
+    /// (tests, single-op `Arbitrary`).
     fn arbitrary(u: &mut Unstructured<'a>) -> arbitrary::Result<Self> {
-        let r = u.int_in_range(0u8..=99)?;
-        Ok(match r {
-            // resource lifecycle — 50% (the core of the target)
-            0..=14 => LuaOp::BufNew {
-                name_slot: opt_slot(u)?,
-            },
-            15..=29 => LuaOp::WinNew {
-                buf_idx: u.arbitrary()?,
-                name_slot: opt_slot(u)?,
-            },
-            30..=44 => LuaOp::OverlayNew {
-                layout: u.arbitrary()?,
-                name_slot: opt_slot(u)?,
-                keymap_count: u.arbitrary()?,
-            },
-            45..=54 => LuaOp::Remove {
-                kind: u.arbitrary()?,
-                idx: u.arbitrary()?,
-            },
-
-            // reload — 8% (heavy but high-signal)
-            55..=62 => LuaOp::Reload,
-
-            // paint — 10%
-            63..=72 => LuaOp::PaintRegister {
-                name_slot: opt_slot(u)?,
-                body_kind: u.arbitrary()?,
-            },
-
-            // state — 12%
-            73..=80 => LuaOp::StateSet {
-                slot: u.arbitrary()?,
-                key: arb_short_string(u, 16)?,
-                value: u.arbitrary()?,
-            },
-            81..=84 => LuaOp::StateGet {
-                slot: u.arbitrary()?,
-                key: arb_short_string(u, 16)?,
-            },
-
-            // commands — 8%
-            85..=89 => LuaOp::CmdRegister {
-                name_slot: u.arbitrary()?,
-                handler_kind: u.arbitrary()?,
-            },
-            90..=92 => LuaOp::CmdInvoke {
-                name_slot: u.arbitrary()?,
-            },
-
-            // keymaps — 5%
-            93..=97 => LuaOp::KeymapSet {
-                scope_kind: u.arbitrary()?,
-                chord_slot: u.arbitrary()?,
-                handler_kind: u.arbitrary()?,
-            },
-
-            // probe new read APIs — 2%
-            _ => LuaOp::ProbeRead {
-                kind: u.arbitrary()?,
-                target_idx: u.arbitrary()?,
-            },
-        })
+        let idx = u.int_in_range(0..=(N_LUAOP_VARIANTS - 1))?;
+        build_lua_op(idx, u)
     }
 }
 
@@ -314,9 +313,111 @@ fn arb_short_string(u: &mut Unstructured<'_>, max_bytes: usize) -> arbitrary::Re
     Ok(String::from_utf8_lossy(&bytes).into_owned())
 }
 
-#[derive(Arbitrary, Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LuaScenario {
     pub ops: Vec<LuaOp>,
+}
+
+impl<'a> Arbitrary<'a> for LuaScenario {
+    /// Per-scenario swarm + state-aware bundle generator. Each seed
+    /// disables most `LuaOp` variants and skews the rest wildly (swarm);
+    /// within those variants, the generator tracks live resource pool
+    /// sizes ([`LuaGenState`]) and rejects ops that would no-op against
+    /// the current state (e.g. `WinNew` when no buf exists,
+    /// `OverlayNew` when no win exists, `Remove` against an empty
+    /// pool). The model is approximate — Lua-side `pcall` failures or
+    /// host-side rejections may diverge from the model — but biasing
+    /// generation toward *valid* sequences turns roughly half of
+    /// previously-no-op ops into productive ones. Without it, a
+    /// scenario heavy on `Remove` against an empty buf pool wastes
+    /// budget bouncing off the `#__fuzz.bufs == 0` guard. The swarm
+    /// table itself isn't persisted in the JSON scenario — `ops` is
+    /// what replays.
+    fn arbitrary(u: &mut Unstructured<'a>) -> arbitrary::Result<Self> {
+        let swarm = SwarmWeights::arbitrary(u, N_LUAOP_VARIANTS)?;
+        let mut state = LuaGenState::default();
+        let mut ops = Vec::new();
+        while !u.is_empty() && ops.len() < LUA_MAX_OPS {
+            // Bounded retry so a state-starved seed still produces
+            // *some* op rather than spinning. 4 attempts is enough in
+            // practice — most variants are stateless and pass on the
+            // first try.
+            let mut op = None;
+            for _ in 0..4 {
+                let idx = swarm.pick(u)?;
+                let candidate = build_lua_op(idx, u)?;
+                if state.allows(&candidate) {
+                    op = Some(candidate);
+                    break;
+                }
+            }
+            let Some(op) = op else { break };
+            state.apply(&op);
+            ops.push(op);
+        }
+        Ok(LuaScenario { ops })
+    }
+}
+
+/// Generator-side estimate of Lua resource pool sizes. Updated after
+/// every emitted op; used to skip ops that would no-op against current
+/// state. The actual runtime state may diverge (mlua `pcall` failures,
+/// host-side errors), so this is a hint, not a guarantee — the emitted
+/// Lua still has defensive `#pool == 0` guards.
+#[derive(Default)]
+struct LuaGenState {
+    bufs: u32,
+    wins: u32,
+    overlays: u32,
+    paints: u32,
+}
+
+impl LuaGenState {
+    fn allows(&self, op: &LuaOp) -> bool {
+        match op {
+            LuaOp::WinNew { .. } => self.bufs > 0,
+            LuaOp::OverlayNew { .. } => self.wins > 0,
+            LuaOp::Remove { kind, .. } => self.pool(*kind) > 0,
+            _ => true,
+        }
+    }
+
+    fn apply(&mut self, op: &LuaOp) {
+        match op {
+            LuaOp::BufNew { .. } => self.bufs = self.bufs.saturating_add(1),
+            LuaOp::WinNew { .. } => self.wins = self.wins.saturating_add(1),
+            LuaOp::OverlayNew { .. } => self.overlays = self.overlays.saturating_add(1),
+            LuaOp::PaintRegister { .. } => self.paints = self.paints.saturating_add(1),
+            LuaOp::Remove { kind, .. } => {
+                let slot = match kind % 4 {
+                    0 => &mut self.bufs,
+                    1 => &mut self.wins,
+                    2 => &mut self.overlays,
+                    _ => &mut self.paints,
+                };
+                *slot = slot.saturating_sub(1);
+            }
+            LuaOp::Reload => {
+                // `/reload` wipes plugin-owned resources. Anonymous
+                // resources die; named ones survive but the conservative
+                // model treats this as full reset.
+                self.bufs = 0;
+                self.wins = 0;
+                self.overlays = 0;
+                self.paints = 0;
+            }
+            _ => {}
+        }
+    }
+
+    fn pool(&self, kind: u8) -> u32 {
+        match kind % 4 {
+            0 => self.bufs,
+            1 => self.wins,
+            2 => self.overlays,
+            _ => self.paints,
+        }
+    }
 }
 
 pub const LUA_MAX_OPS: usize = 96;
@@ -457,21 +558,24 @@ fn emit_overlay_new(out: &mut String, layout: &ArbLayout, name_slot: Option<u8>,
 }
 
 fn emit_remove(out: &mut String, kind: u8, idx: u8) {
-    let (pool, label) = match kind % 4 {
-        0 => ("bufs", "buf"),
-        1 => ("wins", "win"),
-        2 => ("overlays", "overlay"),
-        _ => ("paints", "paint"),
+    let pool = match kind % 4 {
+        0 => "bufs",
+        1 => "wins",
+        2 => "overlays",
+        _ => "paints",
     };
-    let _ = label;
+    // `table.remove` (not `pool[i] = nil`) so live indices stay dense.
+    // The generator's [`LuaGenState`] tracks pool counts and only emits
+    // `Remove` when the pool is non-empty, so the `n == 0` guard here is
+    // belt-and-braces — a previously-failed pcall on the create path
+    // could still leave the model out of sync with the runtime.
     out.push_str("(function()\n");
-    out.push_str(&format!(
-        "  local i = ({} % math.max(1, #__fuzz.{pool})) + 1\n",
-        idx
-    ));
+    out.push_str(&format!("  local n = #__fuzz.{pool}\n"));
+    out.push_str("  if n == 0 then return end\n");
+    out.push_str(&format!("  local i = ({idx} % n) + 1\n"));
     out.push_str(&format!("  local h = __fuzz.{pool}[i]\n"));
     out.push_str("  if h and h.remove then pcall(h.remove, h) end\n");
-    out.push_str(&format!("  __fuzz.{pool}[i] = nil\n"));
+    out.push_str(&format!("  table.remove(__fuzz.{pool}, i)\n"));
     out.push_str("end)()\n");
 }
 
