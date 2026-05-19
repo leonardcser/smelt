@@ -93,7 +93,7 @@ const PROVIDERS: &[ProviderTemplate] = &[
         provider_type: "anthropic",
         api_base: "https://api.anthropic.com/v1",
         api_key_env: "ANTHROPIC_API_KEY",
-        default_model: "claude-sonnet-4-20250514",
+        default_model: "claude-sonnet-4-6",
         needs_api_base: false,
         oauth: None,
     },
