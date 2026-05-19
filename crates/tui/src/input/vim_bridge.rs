@@ -79,7 +79,7 @@ impl PromptState {
             vim::Action::HistoryPrev => {
                 if let Some(entry) = history
                     .as_deref_mut()
-                    .and_then(|h| h.up(&Self::clean_for_history(ctx.buf.source())))
+                    .and_then(|h| h.up(&Self::strip_attachment_markers(ctx.buf.source())))
                 {
                     let entry = entry.to_string();
                     self.install_history_entry(ctx, &entry, false);

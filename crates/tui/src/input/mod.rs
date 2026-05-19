@@ -293,29 +293,25 @@ impl PromptState {
     ///
     /// Intended for callers feeding text from outside the prompt: Lua
     /// `smelt.prompt.set_text`, AcceptGhostText, `$EDITOR` re-import.
-    /// Any `ATTACHMENT_MARKER` bytes in `text` are stripped before
-    /// install — these callers can't carry attachment ids, so the
-    /// markers would be orphaned (and trip the marker/id invariant in
+    /// Any `ATTACHMENT_MARKER` bytes in `text` are stripped — these
+    /// callers can't carry attachment ids, so the markers would be
+    /// orphaned (and trip the marker/id invariant in
     /// `AttachedTextMut::install`).
     pub(crate) fn replace_text(&mut self, ctx: &mut PromptCtx<'_>, text: String) {
         self.save_undo(ctx);
-        let text = if text.contains(ATTACHMENT_MARKER) {
-            text.replace(ATTACHMENT_MARKER, "")
-        } else {
-            text
-        };
+        let text = Self::strip_attachment_markers(&text);
         let cpos = text.len();
         self.install_source(ctx, text, cpos, Vec::new());
         self.recompute_completer(ctx.as_ref());
     }
 
-    /// Marker-stripped view of the prompt source for handoff to `History`.
-    /// History stores its draft slot verbatim from whatever the caller hands
-    /// in; persisting raw `ATTACHMENT_MARKER` bytes would let `History::down`
-    /// return a marker that no longer has a matching attachment id.
-    /// Every history hand-off (current source or recalled entry) flows
-    /// through `Self::clean_for_history`.
-    fn clean_for_history(s: &str) -> String {
+    /// Strip `ATTACHMENT_MARKER` bytes from `s`. Used at every seam where
+    /// source bytes leave the buffer for storage that can't carry the
+    /// matching attachment ids: `History` draft slot, `replace_text`
+    /// install path, `$EDITOR` round-trip. Persisting raw markers
+    /// upstream would let them return without backing ids, violating
+    /// the marker/id invariant on install.
+    fn strip_attachment_markers(s: &str) -> String {
         s.replace(ATTACHMENT_MARKER, "")
     }
 
@@ -323,7 +319,7 @@ impl PromptState {
     /// `end_cursor = true` places the cursor at end (used by history-down
     /// where shells conventionally land you after the recalled text).
     fn install_history_entry(&mut self, ctx: &mut PromptCtx<'_>, entry: &str, end_cursor: bool) {
-        let text = Self::clean_for_history(entry);
+        let text = Self::strip_attachment_markers(entry);
         let cpos = if end_cursor { text.len() } else { 0 };
         self.install_source(ctx, text, cpos, Vec::new());
     }
@@ -667,7 +663,7 @@ impl PromptState {
                     self.recompute_completer(ctx.as_ref());
                     Action::Redraw
                 } else if let Some(entry) =
-                    history.and_then(|h| h.up(&Self::clean_for_history(ctx.buf.source())))
+                    history.and_then(|h| h.up(&Self::strip_attachment_markers(ctx.buf.source())))
                 {
                     let entry = entry.to_string();
                     self.install_history_entry(ctx, &entry, false);
@@ -722,7 +718,7 @@ impl PromptState {
             }
             KeyAction::HistoryPrev => {
                 if let Some(entry) =
-                    history.and_then(|h| h.up(&Self::clean_for_history(ctx.buf.source())))
+                    history.and_then(|h| h.up(&Self::strip_attachment_markers(ctx.buf.source())))
                 {
                     let entry = entry.to_string();
                     self.install_history_entry(ctx, &entry, false);

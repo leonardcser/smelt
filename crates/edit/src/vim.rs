@@ -74,16 +74,22 @@ impl VimContext<'_> {
         ));
     }
 
+    /// Install an undo/redo entry: swap source + attachments, restore cpos,
+    /// and clamp every offset that survived the source swap (cpos and the
+    /// vim visual anchor — either can land past end-of-source if the entry
+    /// shrunk the buffer).
+    fn restore(&mut self, entry: UndoEntry) {
+        self.buf.install(entry.buf, entry.attachments);
+        *self.cpos = entry.cpos;
+        clamp_normal(self.buf.as_str(), self.cpos);
+        self.vim_state.clamp_visual_anchor(self.buf.as_str());
+    }
+
     /// Undo: pop the most recent snapshot, stash current state for redo.
     fn undo(&mut self) {
         let current = UndoEntry::snapshot(self.buf.as_str(), *self.cpos, self.buf.ids());
         if let Some(entry) = self.history.undo(current) {
-            self.buf.install(entry.buf, entry.attachments);
-            *self.cpos = entry.cpos;
-            let mut cpos = *self.cpos;
-            clamp_normal(self.buf.as_str(), &mut cpos);
-            *self.cpos = cpos;
-            self.vim_state.clamp_visual_anchor(self.buf.as_str());
+            self.restore(entry);
         }
     }
 
@@ -91,12 +97,7 @@ impl VimContext<'_> {
     fn redo(&mut self) {
         let current = UndoEntry::snapshot(self.buf.as_str(), *self.cpos, self.buf.ids());
         if let Some(entry) = self.history.redo(current) {
-            self.buf.install(entry.buf, entry.attachments);
-            *self.cpos = entry.cpos;
-            let mut cpos = *self.cpos;
-            clamp_normal(self.buf.as_str(), &mut cpos);
-            *self.cpos = cpos;
-            self.vim_state.clamp_visual_anchor(self.buf.as_str());
+            self.restore(entry);
         }
     }
 
