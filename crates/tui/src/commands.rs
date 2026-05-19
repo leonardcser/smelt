@@ -347,12 +347,27 @@ impl TuiApp {
             // The history's prefix is unchanged; the note lives at the
             // moving cache breakpoint and becomes part of the cacheable
             // prefix on the next user turn.
-            self.core
+            //
+            // If the previous message is also a mode note (back-to-back
+            // toggles between turns), replace it in place rather than
+            // stack — the model only needs the *current* mode.
+            let note = engine::mode_change_note(self.core.config.mode);
+            let new_msg = protocol::Message::user(protocol::Content::text(note));
+            let last_is_mode_note = self
+                .core
                 .session
                 .messages
-                .push(protocol::Message::user(protocol::Content::text(
-                    engine::mode_change_note(self.core.config.mode),
-                )));
+                .last()
+                .and_then(|m| m.content.as_ref())
+                .map(|c| c.as_text().starts_with(protocol::MODE_NOTE_PREFIX))
+                .unwrap_or(false);
+            if last_is_mode_note {
+                if let Some(last) = self.core.session.messages.last_mut() {
+                    *last = new_msg;
+                }
+            } else {
+                self.core.session.messages.push(new_msg);
+            }
         }
         let system_prompt = self.rebuild_system_prompt();
         let tools = self.lua.tool_defs(self.core.config.mode);
