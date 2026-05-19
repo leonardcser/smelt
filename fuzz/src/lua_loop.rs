@@ -869,9 +869,17 @@ pub fn run_lua_scenario(scenario: LuaScenario) {
             app.reload_lua();
             app.assert_invariants();
             // `/reload` is the heaviest GC-and-rebuild surface in the
-            // Lua API — re-check liveness afterward so a reload that
-            // forgot to re-register a handle surfaces here.
+            // Lua API — re-check per-field liveness afterward so a
+            // reload that forgot to re-register a named handle surfaces
+            // here.
             app.assert_lua_handles_alive();
         }
     }
+    // Post-scenario steady-state leak check: do two more reloads from
+    // current state and assert the live-handle count is stable between
+    // them. Catches reload-path leaks (handles created during reload
+    // but never dropped) that the per-field walk above can't see — it
+    // only checks tracked fields, not the global counter.
+    drop(segments);
+    app.assert_no_handle_leak_across_reload();
 }

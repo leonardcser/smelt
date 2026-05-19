@@ -1131,6 +1131,47 @@ impl TestApp {
         check_reg("hooks.lifecycle", &hooks.lifecycle);
     }
 
+    /// Net live `LuaHandle` count, taken from the global drop-counter
+    /// ledger (`created - dropped`). Complements [`assert_lua_handles_alive`]:
+    /// that function walks named registries and asserts each handle
+    /// resolves; this one counts *every* handle that's ever crossed
+    /// `LuaHandle::from_func` regardless of where it ended up stored,
+    /// so it catches leaks the named walk can't see (anonymous closures
+    /// stashed only in Lua tables, etc.).
+    pub fn lua_handles_live(&self) -> u64 {
+        smelt_core::lua::lua_handles_live()
+    }
+
+    /// Reload the Lua context once, snapshot the live handle count,
+    /// reload again, and assert the count didn't grow. Compares **two
+    /// consecutive** reloads (not pre/post a single reload) because
+    /// cold-start vs first-reload isn't apples-to-apples — lifecycle
+    /// hooks fire with `ctx.kind = "reload"` only on the second-and-
+    /// later bring-ups, so plugins legitimately do extra registration
+    /// on the first reload. By reload N the system is in steady state;
+    /// any drift between reload N and N+1 means a registry isn't
+    /// being cleared.
+    ///
+    /// Intended for one-shot use at the END of a scenario, after the
+    /// scenario's own reload ops have run — calling it inside the
+    /// segment loop would inflate the reload count and obscure the
+    /// scenario semantics.
+    pub fn assert_no_handle_leak_across_reload(&mut self) {
+        self.reload_lua();
+        self.app.lua.lua.gc_collect().ok();
+        self.app.lua.lua.gc_collect().ok();
+        let baseline = smelt_core::lua::lua_handles_live();
+        self.reload_lua();
+        self.app.lua.lua.gc_collect().ok();
+        self.app.lua.lua.gc_collect().ok();
+        let after = smelt_core::lua::lua_handles_live();
+        if after > baseline {
+            panic!(
+                "FFI-LEDGER: handle leak across reload — count went {baseline} -> {after} on second consecutive reload (steady state should be stable)"
+            );
+        }
+    }
+
     pub fn feed<I>(&mut self, events: I)
     where
         I: IntoIterator<Item = SourceEvent>,

@@ -36,6 +36,34 @@ pub enum ToolExecResult {
 }
 
 use mlua::prelude::*;
+use std::sync::atomic::{AtomicU64, Ordering};
+
+/// Global counters of `LuaHandle` lifecycle events. The pair is a
+/// **drop-counter ledger**: every `from_func` increments `created`,
+/// every `Drop` increments `dropped`. The difference is the net live
+/// count of registry-backed callables.
+///
+/// Used by the fuzz harness as a leak oracle that survives refactors —
+/// a per-field walk has to be updated by anyone adding a new
+/// `LuaHandle` field. The drop counter has no such surface and catches
+/// handles that don't live in any tracked field at all (e.g. a closure
+/// that was stashed only in a Lua table).
+static LUA_HANDLES_CREATED: AtomicU64 = AtomicU64::new(0);
+static LUA_HANDLES_DROPPED: AtomicU64 = AtomicU64::new(0);
+
+/// Snapshot the `(created, dropped)` counters. Live = created - dropped.
+pub fn lua_handle_inventory() -> (u64, u64) {
+    (
+        LUA_HANDLES_CREATED.load(Ordering::Relaxed),
+        LUA_HANDLES_DROPPED.load(Ordering::Relaxed),
+    )
+}
+
+/// Convenience: net live handle count, derived from [`lua_handle_inventory`].
+pub fn lua_handles_live() -> u64 {
+    let (c, d) = lua_handle_inventory();
+    c.saturating_sub(d)
+}
 
 /// A Lua callable parked in the registry so it survives GC.
 pub struct LuaHandle {
@@ -44,9 +72,15 @@ pub struct LuaHandle {
 
 impl LuaHandle {
     pub fn from_func(lua: &Lua, func: mlua::Function) -> LuaResult<Self> {
-        Ok(Self {
-            key: lua.create_registry_value(func)?,
-        })
+        let key = lua.create_registry_value(func)?;
+        LUA_HANDLES_CREATED.fetch_add(1, Ordering::Relaxed);
+        Ok(Self { key })
+    }
+}
+
+impl Drop for LuaHandle {
+    fn drop(&mut self) {
+        LUA_HANDLES_DROPPED.fetch_add(1, Ordering::Relaxed);
     }
 }
 
