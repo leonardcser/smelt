@@ -126,6 +126,14 @@ fun(ids: string[]): table
 
 Parallel batch read of `session.text(id)` for many ids. Returns a table keyed by id; missing sessions are omitted. Use this when a picker needs to search across all sessions — the heavy IO happens on a worker pool rather than serializing on the Lua thread.
 
+## `smelt.session.tokens`
+
+```lua
+fun(): table
+```
+
+Cumulative token usage across every turn this session has made. Returns a table with `input`, `output`, `cache_read`, `cache_write`, `reasoning`, `total` (input + output), and `cache_hit_ratio` (cache_read / (input + cache_read), `nil` if no input observed yet).
+
 ## `smelt.session.turns`
 
 ```lua

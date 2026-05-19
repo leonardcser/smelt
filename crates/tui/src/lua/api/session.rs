@@ -124,6 +124,37 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
         },
     )?;
     m.fn_(
+        "tokens",
+        "Cumulative token usage across every turn this session has made. Returns a table with `input`, `output`, `cache_read`, `cache_write`, `reasoning`, `total` (input + output), and `cache_hit_ratio` (cache_read / (input + cache_read), `nil` if no input observed yet).",
+        &[],
+        |lua, ()| -> LuaResult<mlua::Table> {
+            let usage = crate::lua::try_with_app(|app| app.core.session.session_usage.clone())
+                .unwrap_or_default();
+            let t = lua.create_table()?;
+            let input = usage.prompt_tokens.unwrap_or(0);
+            let output = usage.completion_tokens.unwrap_or(0);
+            let cache_read = usage.cache_read_tokens.unwrap_or(0);
+            let cache_write = usage.cache_write_tokens.unwrap_or(0);
+            let reasoning = usage.reasoning_tokens.unwrap_or(0);
+            t.set("input", input)?;
+            t.set("output", output)?;
+            t.set("cache_read", cache_read)?;
+            t.set("cache_write", cache_write)?;
+            t.set("reasoning", reasoning)?;
+            t.set("total", input + output)?;
+            // The denominator is input + cache_read: input is the count of
+            // tokens the provider had to read fresh, cache_read is the count
+            // served from cache. Together they cover the prefix this turn
+            // consumed. A ratio of 1.0 means a perfect hit; 0.0 means a
+            // full re-process.
+            let denom = input as u64 + cache_read as u64;
+            if denom > 0 {
+                t.set("cache_hit_ratio", cache_read as f64 / denom as f64)?;
+            }
+            Ok(t)
+        },
+    )?;
+    m.fn_(
         "context_tokens",
         "Most recent prompt-token count reported by the provider, or `nil` if no turn has completed yet.",
         &[],

@@ -1,5 +1,5 @@
 use crate::config;
-use protocol::{Message, ReasoningEffort, TurnMeta};
+use protocol::{Message, ReasoningEffort, TokenUsage, TurnMeta};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::fs;
@@ -46,6 +46,12 @@ pub struct Session {
     /// Running session cost in USD; updated incrementally as token usage events arrive.
     #[serde(default)]
     pub session_cost_usd: f64,
+    /// Cumulative token usage across every turn in the session. Distinct
+    /// from `context_tokens` (which reflects the current prefix size) and
+    /// `token_snapshots` (per-turn series). Powers `smelt.session.tokens()`
+    /// and the cache-hit-ratio status segment.
+    #[serde(default)]
+    pub session_usage: TokenUsage,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -104,6 +110,7 @@ impl Session {
             cost_snapshots: Vec::new(),
             turn_metas: Vec::new(),
             session_cost_usd: 0.0,
+            session_usage: TokenUsage::default(),
         }
     }
 
@@ -145,6 +152,7 @@ impl Session {
             cost_snapshots: self.cost_snapshots.clone(),
             turn_metas: self.turn_metas.clone(),
             session_cost_usd: self.session_cost_usd,
+            session_usage: self.session_usage.clone(),
         }
     }
 }

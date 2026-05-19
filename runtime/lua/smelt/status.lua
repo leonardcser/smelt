@@ -105,6 +105,23 @@ local function compose()
     })
   end
 
+  -- ── Cache hit ratio (right strip) ────────────────────────────────
+  -- Only emit once any data exists; `cache_hit_ratio` is nil until the
+  -- first prompt is observed. Grouped with the token indicators so it
+  -- hides when `show_tokens` is off.
+  if snap.settings and snap.settings.show_tokens then
+    local tokens = smelt.session.tokens()
+    if tokens and tokens.cache_hit_ratio then
+      local pct = math.floor(tokens.cache_hit_ratio * 100 + 0.5)
+      table.insert(items, {
+        text = "cache " .. pct .. "%",
+        style_group = "Comment",
+        priority = 4,
+        separated = true,
+      })
+    end
+  end
+
   -- ── Right-strip indicators ────────────────────────────────────────
   if snap.permission_pending then
     table.insert(items, {

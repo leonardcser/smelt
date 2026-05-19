@@ -54,6 +54,7 @@ impl TuiApp {
                 }
                 let cost = cost_usd.unwrap_or(0.0);
                 self.core.session.session_cost_usd += cost;
+                self.core.session.session_usage.accumulate(&usage);
                 crate::metrics::append(&crate::metrics::MetricsEntry {
                     timestamp_ms: std::time::SystemTime::now()
                         .duration_since(std::time::UNIX_EPOCH)

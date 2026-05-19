@@ -67,6 +67,10 @@ session.text = nil
 ---@type fun(ids: string[]): table
 session.texts = nil
 
+--- Cumulative token usage across every turn this session has made. Returns a table with `input`, `output`, `cache_read`, `cache_write`, `reasoning`, `total` (input + output), and `cache_hit_ratio` (cache_read / (input + cache_read), `nil` if no input observed yet).
+---@type fun(): table
+session.tokens = nil
+
 --- Return user turns as `{ block_idx, label }` rows where `label` is the first line of the user message. Used by the rewind dialog.
 ---@type fun(): table
 session.turns = nil
