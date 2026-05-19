@@ -293,11 +293,17 @@ impl PromptState {
     ///
     /// Intended for callers feeding text from outside the prompt: Lua
     /// `smelt.prompt.set_text`, AcceptGhostText, `$EDITOR` re-import.
-    /// If `text` contains an `ATTACHMENT_MARKER`, the underlying
-    /// `AttachedTextMut::install` debug-asserts (the caller can't both
-    /// claim "no attachments" and carry markers in the bytes).
+    /// Any `ATTACHMENT_MARKER` bytes in `text` are stripped before
+    /// install — these callers can't carry attachment ids, so the
+    /// markers would be orphaned (and trip the marker/id invariant in
+    /// `AttachedTextMut::install`).
     pub(crate) fn replace_text(&mut self, ctx: &mut PromptCtx<'_>, text: String) {
         self.save_undo(ctx);
+        let text = if text.contains(ATTACHMENT_MARKER) {
+            text.replace(ATTACHMENT_MARKER, "")
+        } else {
+            text
+        };
         let cpos = text.len();
         self.install_source(ctx, text, cpos, Vec::new());
         self.recompute_completer(ctx.as_ref());
@@ -2578,6 +2584,22 @@ mod tests {
             })
             .unwrap();
         let _ = input.buf.source()[s..e]; // would panic without the snap
+    }
+
+    #[test]
+    fn replace_text_strips_attachment_markers() {
+        let mut input = Harness::new();
+        input.buf.set_source(String::new());
+        let text = format!("hi{m}there", m = ATTACHMENT_MARKER);
+        input.state.replace_text(
+            &mut PromptCtx {
+                buf: &mut input.buf,
+                win: &mut input.win,
+            },
+            text,
+        );
+        assert_eq!(input.buf.source(), "hithere");
+        assert!(input.buf.attachment_ids.is_empty());
     }
 
     #[test]
