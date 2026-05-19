@@ -1,54 +1,93 @@
 # smelt fuzz
 
-## Setup
+Four targets covering distinct surfaces:
 
-```bash
+| target | what it fuzzes | how |
+|---|---|---|
+| `smelt_loop` | TUI event loop (terminal + engine events) | structured `Scenario` ops |
+| `lua_loop` | Lua FFI bindings (`smelt.*` API) | structured `LuaScenario` ops + FFI ledger oracle |
+| `text_ops` | `smelt_buffer::text` UTF-8 helpers | direct calls + reference-model differential |
+| `attached_ops` | `smelt_buffer::attached::AttachedTextMut` | segment-based reference model + invariant check |
+
+## Setup once
+
+```sh
 rustup toolchain install nightly
 cargo install cargo-fuzz
-tar -xzf seed_corpus.tar.gz   # warm cache for the fuzzer
 ```
 
-The corpus is tracked as a single tarball; the unpacked `seed_corpus/` dir is
-gitignored. After a long fuzz session, repack with:
+## Day-to-day
 
-```bash
-cargo +nightly fuzz cmin smelt_loop seed_corpus/smelt_loop
-tar -czf seed_corpus.tar.gz seed_corpus
-```
-
-## Commands
-
-```bash
-# Full local cycle: unpack → fuzz → cmin → repack tarball (default 300s)
-cargo xtask fuzz [seconds]
-
-# Stop-on-first-crash, parallel workers — pair with the `fuzz-triage` skill
-# for the fix-as-you-go loop. For unattended runs that keep going past
-# crashes, swap `-ignore_crashes=0` for `=1`.
+```sh
+# Run a target until you Ctrl-C, parallel workers, stop on first crash:
 cargo +nightly fuzz run --sanitizer=none smelt_loop -- -fork=4 -ignore_crashes=0
-cargo +nightly fuzz run --sanitizer=none text_ops   -- -fork=4 -ignore_crashes=0
 
-# Lower-level pieces:
-cargo +nightly fuzz run smelt_loop -- -max_len=4096 -max_total_time=300
-cargo +nightly fuzz cmin smelt_loop seed_corpus/smelt_loop
-
-# Crash → JSON (both targets supported via --target)
-cargo run --bin crash_to_scenario -- artifacts/smelt_loop/<file> out.json
-cargo run --bin crash_to_scenario -- --target lua_loop artifacts/lua_loop/<file> out.json
-
-# Structural shrinker — drops whole ops + halves string payloads until
-# the minimal subset that still panics remains. Run AFTER `cargo fuzz tmin`
-# for the byte-level pass; this one operates on the decoded JSON, so a
-# 200-op crash typically minimizes to <10 ops in a few seconds.
-cargo run --release --bin shrink_scenario -- out.json out.min.json
-cargo run --release --bin shrink_scenario -- --target lua_loop out.json out.min.json
-
-# Headless replay (CI / regression checks; exits non-zero on failure)
-cargo run --bin replay_scenario -- out.json
-cargo run --bin replay_scenario -- --target lua_loop out.json
-
-# Visual replay (step-by-step in real terminal — smelt_loop only)
-cargo run --bin play_scenario -- examples/hello_agent.json
+# Unattended (keep going past crashes; artifacts pile up under fuzz/artifacts/):
+cargo +nightly fuzz run --sanitizer=none lua_loop -- -fork=4 -ignore_crashes=1 -max_total_time=3600
 ```
 
-`play_scenario` controls: `space`/`→` next, `b`/`←` back, `r` reset, `s` state dump, `q`/`Esc` quit.
+## When the fuzzer finds a crash
+
+```sh
+# One-shot triage: shrink + format + print the minimal scenario.
+fuzz/scripts/triage.sh lua_loop fuzz/artifacts/lua_loop/crash-<hex>
+```
+
+Then either fix the bug and commit a regression seed, or — if you want
+to keep poking — replay the shrunk scenario directly:
+
+```sh
+cargo run --bin replay_scenario -- --target lua_loop /path/to/shrunk.json
+# Or step through it visually (smelt_loop only):
+cargo run --bin play_scenario -- /path/to/shrunk.json
+```
+
+## Regression seeds
+
+Every fuzz-found bug gets a committed JSON seed under
+`fuzz/seeds/<target>/regression/`. CI replays them on every PR; running
+them locally is one command:
+
+```sh
+fuzz/scripts/replay-regression.sh
+```
+
+See `fuzz/seeds/README.md` for the convention and how to add one.
+
+## Overnight
+
+```sh
+# Cmin first (sweeps the historical corpus for regressions; minimizes
+# corpus for faster fuzz next session), then fuzz from the minimized
+# corpus for the remaining time. Default budget 8 hours.
+fuzz/scripts/overnight.sh [hours]
+```
+
+Logs land in `/tmp/fuzz-overnight-<stamp>/`. New crashes copy through to
+`fuzz/artifacts/<target>/`.
+
+## Coverage scoreboard
+
+```sh
+# Snapshot per-target source-code coverage to fuzz/coverage-history/.
+# Use to A/B your own generator changes: snapshot before, change, snapshot
+# after, diff the .txt files.
+fuzz/scripts/coverage-snapshot.sh
+fuzz/scripts/coverage-snapshot.sh smelt_loop      # one target only
+```
+
+## Lower-level
+
+```sh
+# Raw shrinker — predicate is `panic::catch_unwind(run_scenario)`.
+cargo run --release --bin shrink_scenario -- --target lua_loop in.json out.min.json
+
+# Headless replay (exits non-zero on panic; what triage.sh and CI use):
+cargo run --bin replay_scenario -- --target lua_loop in.json
+
+# Cmin a single target manually:
+cargo +nightly fuzz cmin --sanitizer=none smelt_loop
+
+# Source-code coverage report for one target:
+cargo +nightly fuzz coverage --sanitizer=none smelt_loop fuzz/corpus/smelt_loop
+```
