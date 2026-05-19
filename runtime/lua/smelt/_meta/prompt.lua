@@ -19,7 +19,7 @@ prompt.set_section = nil
 ---@type fun(text: string): nil
 prompt.set_text = nil
 
---- Return the prompt input buffer's current text.
+--- Return the prompt input buffer's current text. Internal attachment markers are stripped — plugins see only the user-visible characters.
 ---@type fun(): string
 prompt.text = nil
 

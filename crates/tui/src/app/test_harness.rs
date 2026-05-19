@@ -1166,6 +1166,34 @@ mod tests {
     use super::*;
 
     #[test]
+    fn lua_prompt_text_strips_attachment_markers() {
+        // Inserting an attachment seeds the prompt with U+FFFC + a backing id.
+        // `smelt.prompt.text()` is the Lua-side accessor that history search,
+        // pickers, and similar plugins use to snapshot the input — those
+        // callers can't carry attachment ids, so leaking the marker byte
+        // lets a marker round-trip back through `set_text` orphan an id.
+        let mut app = TestApp::builder().build();
+        app.insert_attachment("screenshot.png".into());
+        assert!(app
+            .app
+            .prompt_buf()
+            .source()
+            .contains(smelt_buffer::ATTACHMENT_MARKER));
+        let _guard = crate::lua::install_app_ptr(&mut app.app);
+        let s: String = app
+            .app
+            .lua
+            .lua
+            .load("return smelt.prompt.text()")
+            .eval()
+            .expect("smelt.prompt.text");
+        assert!(
+            !s.contains(smelt_buffer::ATTACHMENT_MARKER),
+            "prompt.text leaked marker byte: {s:?}"
+        );
+    }
+
+    #[test]
     fn builds_a_fresh_test_app() {
         let app = TestApp::builder().build();
         let s = app.state();

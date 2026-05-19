@@ -5,6 +5,7 @@
 //! the current buffer; `set_text(s)` replaces it.
 
 use mlua::prelude::*;
+use smelt_buffer::attachment::ATTACHMENT_MARKER;
 use smelt_core::lua::doc::Tier;
 use smelt_core::lua::module::LuaMod;
 
@@ -24,13 +25,13 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
     )?;
     m.fn_(
         "text",
-        "Return the prompt input buffer's current text.",
+        "Return the prompt input buffer's current text. Internal attachment markers are stripped — plugins see only the user-visible characters.",
         &[],
         |_, ()| {
-            Ok(
-                crate::lua::try_with_app(|app| app.prompt_buf().source().to_string())
-                    .unwrap_or_default(),
-            )
+            Ok(crate::lua::try_with_app(|app| {
+                app.prompt_buf().source().replace(ATTACHMENT_MARKER, "")
+            })
+            .unwrap_or_default())
         },
     )?;
     m.fn_(

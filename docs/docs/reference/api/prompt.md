@@ -36,7 +36,7 @@ Replace the prompt buffer with `text`. The cursor lands at the end and undo stat
 fun(): string
 ```
 
-Return the prompt input buffer's current text.
+Return the prompt input buffer's current text. Internal attachment markers are stripped — plugins see only the user-visible characters.
 
 ## `smelt.prompt.win`
 
