@@ -16,13 +16,13 @@
 //!   the `is_light` branch to any `{ dark, light }` `ColorDecl`, and
 //!   produces a flat `HlGroup → Style` map. There is no runtime alias
 //!   table — references are resolved once.
-//! - `default_baked()` returns a process-wide fallback theme built from
-//!   an embedded spec, used by offline render paths (`format.rs`,
-//!   `prompt_buf.rs`) that don't have access to the live app theme.
-//!   A `default_lua_matches_baked_spec` test loads
-//!   `runtime/lua/smelt/colorschemes/default.lua` in a bare Lua VM and
-//!   compares it group-by-group against `baked_default_spec`, so the
-//!   two sources of truth can't drift silently.
+//! - `default_baked()` returns a process-wide fallback theme. It evals
+//!   `runtime/lua/smelt/colorschemes/default.lua` (embedded via
+//!   `include_str!`) in a throwaway `mlua::Lua` and decodes the result
+//!   as a `ThemeSpec`. The Lua file is the single source of truth — no
+//!   parallel Rust HashMap. Offline render paths (`format.rs`,
+//!   `prompt_buf.rs`) that don't have access to the live app theme
+//!   reach the default via this entry point.
 
 use lua_doc_derive::LuaOpts;
 use mlua::prelude::*;
@@ -564,127 +564,20 @@ pub fn default_baked() -> &'static Arc<Theme> {
     })
 }
 
-/// The same spec that `runtime/lua/smelt/colorschemes/default.lua`
-/// describes, hard-coded here so the binary has a working theme before
-/// the Lua runtime initializes. Keep the two in sync — the Lua spec is
-/// the source of truth at runtime; this is the paint-before-bootstrap
-/// fallback.
+/// Decode `runtime/lua/smelt/colorschemes/default.lua` (embedded at
+/// compile time) into a `ThemeSpec`. The Lua file is the single source
+/// of truth for the default colorscheme — `default_baked()` calls this
+/// once and caches the compiled `Theme`. Panics on decode failure so a
+/// malformed default.lua surfaces immediately at first paint.
 fn baked_default_spec() -> ThemeSpec {
-    fn ansi(v: u8) -> ColorDecl {
-        ColorDecl {
-            ansi: Some(v),
-            ..Default::default()
-        }
-    }
-    fn dl(dark: u8, light: u8) -> ColorDecl {
-        ColorDecl {
-            dark: Some(Box::new(ansi(dark))),
-            light: Some(Box::new(ansi(light))),
-            ..Default::default()
-        }
-    }
-    fn rgb(r: u8, g: u8, b: u8) -> ColorDecl {
-        ColorDecl {
-            rgb: Some([r, g, b]),
-            ..Default::default()
-        }
-    }
-    fn fg(c: ColorDecl) -> GroupDecl {
-        GroupDecl::Style(StyleDecl {
-            fg: Some(c),
-            ..Default::default()
-        })
-    }
-    fn bg(c: ColorDecl) -> GroupDecl {
-        GroupDecl::Style(StyleDecl {
-            bg: Some(c),
-            ..Default::default()
-        })
-    }
-    fn dim() -> GroupDecl {
-        GroupDecl::Style(StyleDecl {
-            dim: Some(true),
-            ..Default::default()
-        })
-    }
-    fn aliased(target: &str) -> GroupDecl {
-        GroupDecl::Ref(target.to_string())
-    }
-    fn pill(fg_c: ColorDecl, bg_c: ColorDecl) -> GroupDecl {
-        GroupDecl::Style(StyleDecl {
-            fg: Some(fg_c),
-            bg: Some(bg_c),
-            ..Default::default()
-        })
-    }
-
-    let mut groups: HashMap<String, GroupDecl> = HashMap::new();
-
-    // ── Base colors: the only groups that hold literal values. ──────────
-    groups.insert("SmeltAccent".into(), fg(ansi(208))); // ember
-    groups.insert("SmeltSlug".into(), fg(ansi(0))); // pill fg; bg falls back to SmeltAccent in status.lua
-    groups.insert("SmeltMuted".into(), fg(ansi(244)));
-    groups.insert("SmeltSuccess".into(), fg(ansi(77)));
-    groups.insert("SmeltHeading".into(), fg(ansi(117)));
-
-    // Background fills. `dl(dark, light)` carries the per-mode branch.
-    groups.insert("SmeltStatusBg".into(), bg(ansi(233)));
-    groups.insert("SmeltUserBg".into(), bg(dl(236, 254)));
-    groups.insert("SmeltScrollPillBg".into(), bg(dl(234, 250)));
-    groups.insert("SmeltCodeBlockBg".into(), bg(dl(233, 255)));
-    groups.insert("SmeltBar".into(), bg(dl(237, 252)));
-    groups.insert("SmeltSelection".into(), bg(dl(238, 189)));
-    groups.insert("SmeltCursorLineBg".into(), bg(dl(237, 253)));
-    groups.insert("SmeltScrollbarTrack".into(), bg(dl(235, 254)));
-    groups.insert("SmeltScrollbarThumb".into(), bg(dl(243, 247)));
-
-    // Tool / reasoning state colors. `8` = `DarkGrey` in 256-color.
-    groups.insert("SmeltToolPending".into(), fg(dl(8, 250)));
-    groups.insert("SmeltReasonOff".into(), fg(dl(8, 250)));
-    groups.insert("SmeltReasonLow".into(), fg(ansi(75)));
-    groups.insert("SmeltReasonMed".into(), fg(ansi(214)));
-    groups.insert("SmeltReasonHigh".into(), fg(ansi(203)));
-    groups.insert("SmeltReasonMax".into(), fg(ansi(196)));
-
-    // Statusline pills: each carries a full {fg, bg} pair so plugins
-    // reference them by `style_group` alone.
-    groups.insert("SmeltCompacting".into(), pill(ansi(0), ansi(15)));
-    groups.insert("SmeltVimNormal".into(), pill(ansi(74), ansi(236)));
-    groups.insert("SmeltVimInsert".into(), pill(ansi(78), ansi(236)));
-    groups.insert("SmeltVimVisual".into(), pill(ansi(176), ansi(236)));
-    groups.insert("SmeltModePlan".into(), pill(ansi(79), ansi(234)));
-    groups.insert("SmeltModeApply".into(), pill(ansi(141), ansi(234)));
-    groups.insert("SmeltModeYolo".into(), pill(ansi(204), ansi(234)));
-    groups.insert(
-        "SmeltModeExec".into(),
-        GroupDecl::Style(StyleDecl {
-            fg: Some(ansi(197)),
-            bg: Some(ansi(234)),
-            bold: Some(true),
-            ..Default::default()
-        }),
-    );
-    groups.insert("SmeltModeDefault".into(), pill(ansi(244), ansi(234)));
-
-    // ── Semantic / nvim-standard names: links into the base set. ────────
-    groups.insert("Comment".into(), aliased("SmeltMuted"));
-    groups.insert("Visual".into(), aliased("SmeltSelection"));
-    groups.insert("CursorLine".into(), aliased("SmeltCursorLineBg"));
-    groups.insert(
-        "ErrorMsg".into(),
-        GroupDecl::Style(StyleDecl {
-            fg: Some(ansi(9)), // bright red
-            ..Default::default()
-        }),
-    );
-    groups.insert("GhostText".into(), dim());
-
-    // Diff renderer row fills. Themes can override these like any
-    // other group.
-    groups.insert("SmeltDiffAddBg".into(), bg(rgb(20, 50, 20)));
-    groups.insert("SmeltDiffDelBg".into(), bg(rgb(60, 20, 20)));
-
-    ThemeSpec { groups }
+    const DEFAULT_LUA: &str = include_str!("../../../runtime/lua/smelt/colorschemes/default.lua");
+    let lua = mlua::Lua::new();
+    let value: mlua::Value = lua
+        .load(DEFAULT_LUA)
+        .set_name("colorschemes/default.lua")
+        .eval()
+        .expect("embedded default.lua must load");
+    ThemeSpec::from_lua(value, &lua).expect("embedded default.lua must decode as ThemeSpec")
 }
 
 #[cfg(test)]
@@ -809,59 +702,5 @@ mod tests {
                 b: 20
             })
         );
-    }
-
-    /// Drift guard: load `runtime/lua/smelt/colorschemes/default.lua` in
-    /// a bare Lua VM, decode the returned table as a `ThemeSpec`, and
-    /// compare its compiled output group-by-group against the in-Rust
-    /// `baked_default_spec`. The Lua spec is the source of truth at
-    /// runtime; the baked spec is the paint-before-bootstrap fallback.
-    /// They must stay in lockstep — this test catches the moment they
-    /// don't.
-    #[test]
-    fn default_lua_matches_baked_spec() {
-        const DEFAULT_LUA: &str =
-            include_str!("../../../runtime/lua/smelt/colorschemes/default.lua");
-        let lua = mlua::Lua::new();
-        let lua_spec_value: LuaValue = lua
-            .load(DEFAULT_LUA)
-            .set_name("colorschemes/default.lua")
-            .eval()
-            .expect("default.lua must load");
-        let lua_spec: ThemeSpec = ThemeSpec::from_lua(lua_spec_value, &lua)
-            .expect("default.lua must decode as ThemeSpec");
-        let baked_spec = baked_default_spec();
-
-        for is_light in [false, true] {
-            let lua_theme = compile(&lua_spec, is_light).expect("lua spec compiles");
-            let baked_theme = compile(&baked_spec, is_light).expect("baked spec compiles");
-
-            // Collect every group name appearing on either side. Both
-            // resolved styles must match exactly — same fg/bg/flags.
-            let mut names: std::collections::HashSet<String> = std::collections::HashSet::new();
-            for (id, _) in lua_theme.iter() {
-                if let Some(n) = smelt_core::theme::name_of(id) {
-                    if !n.starts_with("__anon__/") {
-                        names.insert(n);
-                    }
-                }
-            }
-            for (id, _) in baked_theme.iter() {
-                if let Some(n) = smelt_core::theme::name_of(id) {
-                    if !n.starts_with("__anon__/") {
-                        names.insert(n);
-                    }
-                }
-            }
-            for name in &names {
-                let lua_style = lua_theme.get(name);
-                let baked_style = baked_theme.get(name);
-                assert_eq!(
-                    lua_style, baked_style,
-                    "group `{name}` drifted between default.lua and baked_default_spec \
-                     (is_light={is_light}): lua={lua_style:?} baked={baked_style:?}"
-                );
-            }
-        }
     }
 }
