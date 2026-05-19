@@ -40,6 +40,26 @@ impl AgentMode {
     pub const ALL: &[Self] = &[Self::Normal, Self::Plan, Self::Apply, Self::Yolo];
 }
 
+/// Marker prefix on synthetic user messages that announce a mode change.
+/// The TUI's set_mode handler emits these; the transcript renderer keys
+/// on the prefix to display the note as a small inline pill instead of
+/// a chat block. Source-of-truth for both writers and readers; bytes
+/// must stay stable so the prefix doesn't bust the prompt cache.
+pub const MODE_NOTE_PREFIX: &str = "[smelt:mode] ";
+
+/// Build the synthetic user-note text appended to history when the
+/// agent's mode switches. Bytes are stable per mode so the cached
+/// prefix that includes earlier mode notes still hits the cache.
+pub fn mode_change_note(mode: AgentMode) -> String {
+    let body = match mode {
+        AgentMode::Plan => "now in plan mode. Investigate and reason only; do not modify files or run mutating commands. Use read_file, glob, grep, and read-only bash. edit_file and write_file are unavailable.",
+        AgentMode::Apply => "now in apply mode. You may read, edit, and create files. Continue to confirm destructive bash commands before running them.",
+        AgentMode::Yolo => "now in yolo mode. Full autonomy; act without pausing for confirmation. Continue to avoid genuinely irreversible operations.",
+        AgentMode::Normal => "now in normal mode.",
+    };
+    format!("{MODE_NOTE_PREFIX}{body}")
+}
+
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum ReasoningEffort {

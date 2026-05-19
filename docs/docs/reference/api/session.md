@@ -110,6 +110,14 @@ fun(block_idx: integer?, opts: table?): nil
 
 Rewind the session to a prior user turn. `block_idx = nil` rewinds to before the first turn; `opts.restore_vim_insert = true` re-enters vim insert mode after the rewind.
 
+## `smelt.session.system`
+
+```lua
+fun(): string
+```
+
+Currently-assembled system prompt sent on the next turn. Reflects every prompt section (base, skills, instructions). Useful for auxiliary LLM calls that want to share the main turn's prompt-cache slot.
+
 ## `smelt.session.text`
 
 ```lua

@@ -412,6 +412,14 @@ pub(crate) fn clamp_prompt_cache_key(key: &str) -> String {
     }
 }
 
+/// Sort tool definitions by name in place. The cached prompt prefix
+/// includes the tools section; any registration-order drift would
+/// silently invalidate the cache. Every caller that hands tools to
+/// `Provider::chat` MUST sort first; this is the canonical helper.
+pub fn sort_tools_for_cache_stability(tools: &mut [ToolDefinition]) {
+    tools.sort_by(|a, b| a.function.name.cmp(&b.function.name));
+}
+
 #[derive(Clone)]
 pub struct Provider {
     api_base: String,

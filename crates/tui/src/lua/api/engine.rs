@@ -254,6 +254,36 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
             "Run an out-of-band LLM request without touching the main turn. `spec.model` selects an alternate model (defaults to the primary), `spec.response_format` enforces a JSON schema, `spec.reasoning_effort` controls effort (defaults to `\"off\"`). `spec.on_response` fires once with `(content, err)`; on context-window errors `err.kind = \"context_window\"` so callers can compose retries in Lua (see `smelt.engine.ask_with_trim`). Returns the request id.",
             &["spec"],
             move |lua, spec: LuaAskSpec| -> LuaResult<u64> {
+                // Validate the (system, inherit_session, messages) combination
+                // before touching any state. inherit_session=true substitutes
+                // the live session — supplying a separate system or messages
+                // alongside is almost always a caller bug (silently dropped
+                // in the old code path). inherit_session=false requires
+                // an explicit system prompt.
+                if spec.inherit_session {
+                    if spec.system.is_some() {
+                        return Err(LuaError::external(
+                            "smelt.engine.ask: `system` is ignored when `inherit_session = true`; pass either one, not both",
+                        ));
+                    }
+                    if !spec.messages.is_empty() {
+                        return Err(LuaError::external(
+                            "smelt.engine.ask: `messages` is ignored when `inherit_session = true`; the live session is substituted",
+                        ));
+                    }
+                } else {
+                    let sys_ok = spec
+                        .system
+                        .as_deref()
+                        .map(|s| !s.is_empty())
+                        .unwrap_or(false);
+                    if !sys_ok {
+                        return Err(LuaError::external(
+                            "smelt.engine.ask: `system` must be a non-empty string when `inherit_session = false`",
+                        ));
+                    }
+                }
+
                 let mut messages: Vec<protocol::Message> = spec
                     .messages
                     .into_iter()

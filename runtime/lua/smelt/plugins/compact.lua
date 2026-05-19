@@ -277,9 +277,18 @@ local function summarize_flat(history, instructions, done)
   local handle = smelt.spinner.busy("compacting")
   local empty_retries = 0
 
+  -- Reuse the main session's system prompt so the system block hits the
+  -- same Anthropic cache slot. Tools are still empty here (the flat path
+  -- can't send tools without breaking the trim wrapper), so the longer
+  -- prefix won't hit — but the system slot alone is the bulk of the win.
+  local system = smelt.session.system()
+  if not system or system == "" then
+    system = "You are performing a context-checkpoint compaction. Produce ONLY the requested Markdown summary."
+  end
+
   local function send()
     smelt.engine.ask_with_trim({
-      system      = "You are performing a context-checkpoint compaction. Produce ONLY the requested Markdown summary.",
+      system      = system,
       messages    = { { role = "user", content = user_text } },
       model       = smelt.model.preferred("compact"),
       max_trims   = 20,

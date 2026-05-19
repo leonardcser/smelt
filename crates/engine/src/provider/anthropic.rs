@@ -1731,4 +1731,60 @@ mod tests {
             );
         }
     }
+
+    /// Stable: tools registered in any order must reach the provider
+    /// sorted by name. `agent.rs` and `spawn_engine_ask` both call
+    /// `sort_tools_for_cache_stability` before `provider.chat`; this
+    /// test pins that helper. A regression that drops the sort would
+    /// have the provider see different prefix bytes every time plugin
+    /// registration order shifts.
+    #[test]
+    fn cache_tools_arrive_sorted_by_name_regardless_of_input_order() {
+        fn tool(name: &str) -> ToolDefinition {
+            ToolDefinition::new(FunctionSchema {
+                name: name.into(),
+                description: format!("{name} tool"),
+                parameters: json!({"type": "object"}),
+            })
+        }
+        let mut shuffled_a = vec![tool("zed"), tool("alpha"), tool("midway")];
+        let mut shuffled_b = vec![tool("midway"), tool("zed"), tool("alpha")];
+        crate::provider::sort_tools_for_cache_stability(&mut shuffled_a);
+        crate::provider::sort_tools_for_cache_stability(&mut shuffled_b);
+
+        // Both orderings collapse to the same body.
+        let body_a = build_body(
+            &[user("u")],
+            &shuffled_a,
+            "m",
+            ReasoningEffort::Off,
+            &cfg(),
+            &cache_on(),
+        );
+        let body_b = build_body(
+            &[user("u")],
+            &shuffled_b,
+            "m",
+            ReasoningEffort::Off,
+            &cfg(),
+            &cache_on(),
+        );
+        assert_eq!(
+            without_markers(&body_a["tools"]),
+            without_markers(&body_b["tools"]),
+            "sort_tools_for_cache_stability must produce identical output regardless of input order",
+        );
+
+        let tool_names: Vec<&str> = body_a["tools"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|t| t["name"].as_str().unwrap())
+            .collect();
+        assert_eq!(
+            tool_names,
+            vec!["alpha", "midway", "zed"],
+            "tools field must reach the provider in alphabetical order",
+        );
+    }
 }

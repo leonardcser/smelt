@@ -59,6 +59,10 @@ session.reset = nil
 ---@type fun(block_idx: integer?, opts: table?): nil
 session.rewind_to = nil
 
+--- Currently-assembled system prompt sent on the next turn. Reflects every prompt section (base, skills, instructions). Useful for auxiliary LLM calls that want to share the main turn's prompt-cache slot.
+---@type fun(): string
+session.system = nil
+
 --- Return the searchable plain-text blob for session `id` (user + assistant text only; reasoning, tool output, and system messages excluded). Returns `nil` when the session is missing. Reads the `content.txt` sidecar; falls back to rebuilding from `session.json` and caching the sidecar for legacy sessions.
 ---@type fun(id: string): string?
 session.text = nil

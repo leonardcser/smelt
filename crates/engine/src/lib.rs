@@ -34,23 +34,7 @@ use tokio::sync::mpsc;
 /// and the renderer; they MUST stay byte-equal.
 pub const SUMMARY_PREFIX: &str = include_str!("prompts/compact_summary_prefix.md");
 
-/// Marker prefix on synthetic user messages that announce a mode change.
-/// The transcript renderer keys on this to display the note as a small
-/// inline pill instead of a chat block.
-pub const MODE_NOTE_PREFIX: &str = "[smelt:mode] ";
-
-/// Synthetic user-note text appended to the history when the agent's
-/// mode switches. Bytes are stable per mode so the prefix that includes
-/// these notes still hits the cache on subsequent turns.
-pub fn mode_change_note(mode: protocol::AgentMode) -> String {
-    let body = match mode {
-        protocol::AgentMode::Plan => "now in plan mode. Investigate and reason only; do not modify files or run mutating commands. Use read_file, glob, grep, and read-only bash. edit_file and write_file are unavailable.",
-        protocol::AgentMode::Apply => "now in apply mode. You may read, edit, and create files. Continue to confirm destructive bash commands before running them.",
-        protocol::AgentMode::Yolo => "now in yolo mode. Full autonomy; act without pausing for confirmation. Continue to avoid genuinely irreversible operations.",
-        protocol::AgentMode::Normal => "now in normal mode.",
-    };
-    format!("{}{}", MODE_NOTE_PREFIX, body)
-}
+pub use protocol::{mode_change_note, MODE_NOTE_PREFIX};
 
 pub use config::ModelConfig;
 pub use paths::{config_dir, data_dir, home_dir, state_dir};
@@ -279,6 +263,48 @@ mod tests {
         let a = build_system_prompt_full(cwd, Some("hi"), Some("# Skills\nfoo"));
         let b = build_system_prompt_full(cwd, Some("hi"), Some("# Skills\nfoo"));
         assert_eq!(a, b);
+    }
+
+    #[test]
+    fn system_prompt_contains_no_time_or_date_substitutions() {
+        // Time-varying values (current date, current time, wall-clock
+        // timestamps) would silently rotate the cache key. pi-mono embeds
+        // `Current date:`; we explicitly don't. Scan the rendered prompt
+        // for tokens that would suggest a future regression sneaks one in.
+        let prompt = build_system_prompt_full(
+            std::path::Path::new("/some/cwd"),
+            Some("instructions"),
+            Some("# Skills\nfoo"),
+        );
+        let lower = prompt.to_ascii_lowercase();
+        for needle in [
+            "current date",
+            "current time",
+            "today is",
+            "current datetime",
+            "now is",
+        ] {
+            assert!(
+                !lower.contains(needle),
+                "system prompt must not embed a time-varying substring (found `{needle}` in rendered output)",
+            );
+        }
+        // Also pin: rendering twice produces identical bytes — the template
+        // itself must not call into any time-of-day source.
+        let a = build_system_prompt_full(
+            std::path::Path::new("/some/cwd"),
+            Some("instructions"),
+            Some("# Skills\nfoo"),
+        );
+        let b = build_system_prompt_full(
+            std::path::Path::new("/some/cwd"),
+            Some("instructions"),
+            Some("# Skills\nfoo"),
+        );
+        assert_eq!(
+            a, b,
+            "system prompt drifted between calls with identical inputs",
+        );
     }
 
     // ---- EngineHandle / EventInjector ----

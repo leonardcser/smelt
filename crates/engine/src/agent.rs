@@ -107,6 +107,7 @@ pub(crate) async fn engine_task(
                         spawn_engine_ask(
                             &config,
                             &client,
+                            &*dispatcher,
                             AskTask {
                                 id,
                                 system,
@@ -184,19 +185,30 @@ pub(crate) struct AskTask {
 fn spawn_engine_ask(
     config: &EngineConfig,
     client: &reqwest::Client,
+    dispatcher: &dyn ToolDispatcher,
     task: AskTask,
     event_tx: &mpsc::UnboundedSender<EngineEvent>,
 ) {
     let AskTask {
         id,
         system,
-        mut messages,
+        messages: supplied_messages,
         model,
         response_format,
         reasoning_effort,
-        tools,
+        tools: supplied_tools,
         session_id,
     } = task;
+
+    // Merge MCP defs from the engine's dispatcher with the supplied (Lua)
+    // tools, mirroring the main-turn merge in `Turn::run`. The caller
+    // (inherit_session=true on the Lua side) only ever supplies the Lua
+    // tool list — MCP defs live on the engine side and would otherwise
+    // be missing from the EngineAsk's `tools` field, splitting its
+    // cache slot from the main turn's.
+    let mcp_defs = dispatcher.definitions();
+    let mut messages = supplied_messages;
+    let tools = supplied_tools;
     let (api, model_name) = resolve_ask_target(config, model);
     let provider = build_provider(
         &api,
@@ -237,8 +249,9 @@ fn spawn_engine_ask(
                     parameters: t.parameters,
                 })
             })
+            .chain(mcp_defs)
             .collect();
-        tool_defs.sort_by(|a, b| a.function.name.cmp(&b.function.name));
+        crate::provider::sort_tools_for_cache_stability(&mut tool_defs);
 
         let result = provider
             .chat(&messages, &tool_defs, &model_name, reasoning_effort, &opts)
@@ -557,6 +570,7 @@ impl<'a> Turn<'a> {
                 spawn_engine_ask(
                     self.config,
                     self.http_client,
+                    self.dispatcher,
                     AskTask {
                         id,
                         system,
@@ -694,7 +708,7 @@ impl<'a> Turn<'a> {
                         parameters: pt.parameters.clone(),
                     }));
                 }
-                defs.sort_by(|a, b| a.function.name.cmp(&b.function.name));
+                crate::provider::sort_tools_for_cache_stability(&mut defs);
                 defs
             } else {
                 Vec::new()
