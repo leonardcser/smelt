@@ -5,6 +5,7 @@
 //! lossy translation.
 
 pub mod lua_loop;
+pub mod shrink;
 pub use lua_loop::{run_lua_scenario, LuaScenario};
 
 use arbitrary::{Arbitrary, Unstructured};

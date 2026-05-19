@@ -14,6 +14,12 @@
 //!  - inverted ranges produce empty / clamped results, never panics
 //!  - replace_range round-trips: result.contains(replacement)
 //!  - boundary helpers are monotonic relative to input
+//!  - **production helpers agree with naive `char_indices`-based
+//!    reference implementations** — the production code uses byte
+//!    tricks for speed; divergence from the canonical iteration-based
+//!    reference catches optimization bugs (mis-snapped offsets,
+//!    off-by-one in char counts, etc.) that the intrinsic invariants
+//!    above cannot detect.
 
 use arbitrary::Arbitrary;
 use libfuzzer_sys::fuzz_target;
@@ -21,6 +27,72 @@ use smelt_buffer::text::{
     byte_of_char, byte_to_cell, cell_to_byte, char_pos, insert, insert_str, line_start_offsets,
     next_char_boundary, prev_char_boundary, replace_range, slice, snap,
 };
+
+/// Reference implementations: O(n) walks over `char_indices`. Slower
+/// than the production code but obviously correct — every divergence
+/// is a real bug.
+mod refer {
+    pub fn snap(s: &str, pos: usize) -> usize {
+        if pos >= s.len() {
+            return s.len();
+        }
+        // Largest char boundary ≤ pos.
+        let mut last = 0;
+        for (i, _) in s.char_indices() {
+            if i > pos {
+                return last;
+            }
+            last = i;
+        }
+        last
+    }
+
+    pub fn prev_char_boundary(s: &str, pos: usize) -> usize {
+        let snapped = snap(s, pos);
+        if snapped == 0 {
+            return 0;
+        }
+        // Largest boundary strictly less than snapped — except when pos
+        // already sits between chars, in which case it's snapped itself.
+        let mut last = 0;
+        for (i, _) in s.char_indices() {
+            if i >= snapped {
+                return last;
+            }
+            last = i;
+        }
+        last
+    }
+
+    pub fn next_char_boundary(s: &str, pos: usize) -> usize {
+        let snapped = snap(s, pos);
+        for (i, _) in s.char_indices() {
+            if i > snapped {
+                return i;
+            }
+        }
+        s.len()
+    }
+
+    pub fn char_pos(s: &str, byte: usize) -> usize {
+        let snapped = snap(s, byte);
+        s[..snapped].chars().count()
+    }
+
+    pub fn byte_of_char(s: &str, idx: usize) -> usize {
+        let total = s.chars().count();
+        if idx >= total {
+            return s.len();
+        }
+        s.char_indices().nth(idx).map(|(b, _)| b).unwrap_or(s.len())
+    }
+
+    pub fn slice(s: &str, range: core::ops::Range<usize>) -> &str {
+        let start = snap(s, range.start);
+        let end = snap(s, range.end).max(start);
+        &s[start..end]
+    }
+}
 
 #[derive(Arbitrary, Debug)]
 enum TextOp {
@@ -98,26 +170,43 @@ fn run(initial: String, ops: Vec<TextOp>) {
                 let p = snap(&s, pos as usize);
                 assert_boundary(&s, p, "snap");
                 assert_eq!(snap(&s, p), p, "snap not idempotent");
+                let r = refer::snap(&s, pos as usize);
+                assert_eq!(p, r, "snap diverges from reference (pos={pos}, s={s:?})");
             }
             TextOp::Prev { pos } => {
                 let p = prev_char_boundary(&s, pos as usize);
                 assert_boundary(&s, p, "prev_char_boundary");
                 assert!(p <= pos as usize || pos as usize > s.len(), "prev > pos");
+                let r = refer::prev_char_boundary(&s, pos as usize);
+                assert_eq!(
+                    p, r,
+                    "prev_char_boundary diverges from reference (pos={pos}, s={s:?})"
+                );
             }
             TextOp::Next { pos } => {
                 let p = next_char_boundary(&s, pos as usize);
                 assert_boundary(&s, p, "next_char_boundary");
                 assert!(p >= snap(&s, pos as usize), "next < snap(pos)");
+                let r = refer::next_char_boundary(&s, pos as usize);
+                assert_eq!(
+                    p, r,
+                    "next_char_boundary diverges from reference (pos={pos}, s={s:?})"
+                );
             }
             TextOp::Slice { start, end } => {
-                let slice = slice(&s, (start as usize)..(end as usize));
+                let sl = slice(&s, (start as usize)..(end as usize));
                 // Slice must be a contiguous substring (or empty).
-                if !slice.is_empty() {
+                if !sl.is_empty() {
                     assert!(
-                        s.contains(slice),
-                        "slice produced non-substring {slice:?} of {s:?}"
+                        s.contains(sl),
+                        "slice produced non-substring {sl:?} of {s:?}"
                     );
                 }
+                let r = refer::slice(&s, (start as usize)..(end as usize));
+                assert_eq!(
+                    sl, r,
+                    "slice diverges from reference (start={start}, end={end}, s={s:?})"
+                );
             }
             TextOp::Replace { start, end, with } => {
                 let with_clone = with.clone();
@@ -147,11 +236,15 @@ fn run(initial: String, ops: Vec<TextOp>) {
                 assert_boundary(&s, p, "cell_to_byte");
             }
             TextOp::CharPosOfByte { byte } => {
-                let _ = char_pos(&s, byte as usize);
+                let p = char_pos(&s, byte as usize);
+                let r = refer::char_pos(&s, byte as usize);
+                assert_eq!(p, r, "char_pos diverges from reference (byte={byte}, s={s:?})");
             }
             TextOp::ByteOfChar { idx } => {
                 let p = byte_of_char(&s, idx as usize);
                 assert_boundary(&s, p, "byte_of_char");
+                let r = refer::byte_of_char(&s, idx as usize);
+                assert_eq!(p, r, "byte_of_char diverges from reference (idx={idx}, s={s:?})");
             }
         }
         // After every op the buffer is still valid UTF-8 (this is implicit
