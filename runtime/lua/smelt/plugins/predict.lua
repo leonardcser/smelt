@@ -1,10 +1,7 @@
 -- Input prediction plugin. Predicts the user's next message via a background
 -- LLM call and displays it as ghost text.
 
-local SYSTEM = "You predict what a user will type next in a coding assistant conversation. "
-  .. "Reply with ONLY the predicted message — no quotes, no explanation, "
-  .. "no preamble. Keep it short (one sentence max). If you cannot predict, "
-  .. "reply with an empty string."
+local aux = require("smelt.aux")
 
 smelt.cell("turn_end"):subscribe(function(payload)
   if payload.cancelled then
@@ -51,10 +48,10 @@ smelt.cell("turn_end"):subscribe(function(payload)
 
   local question = "Recent conversation:\n\n"
     .. table.concat(parts, "\n\n")
-    .. "\n\nPredict the user's next message."
+    .. "\n\nTask: predict what the user will type next in the conversation above. Keep it short — one sentence max. If you cannot predict, reply with an empty string."
 
   smelt.engine.ask({
-    system = SYSTEM,
+    system = aux.SYSTEM,
     question = question,
     model = smelt.model.preferred("predict"),
     on_response = function(content, err)

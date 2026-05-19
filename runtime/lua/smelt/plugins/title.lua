@@ -2,10 +2,10 @@
 -- recent user turn after `turn_complete`. Skips when a title is already set.
 -- Per-plugin model override: smelt.model.preferred("title", "provider/model").
 
-local SYSTEM = "You generate concise session titles."
+local aux = require("smelt.aux")
 
 local PROMPT_TEMPLATE = [[
-Generate a concise session title and git-branch-style slug for a coding session.
+Task: generate a concise session title and git-branch-style slug for a coding session.
 
 Title: 3-6 words, sentence case (capitalize only the first word and proper nouns, not Title Case), clear enough that the user can recognize the session in a list.
 Slug: 1-5 lowercase words separated by dashes, like a git branch name.
@@ -95,7 +95,7 @@ smelt.cell("turn_complete"):subscribe(function()
   local question = string.format(PROMPT_TEMPLATE, last_user_text, assistant_block)
 
   smelt.engine.ask({
-    system = SYSTEM,
+    system = aux.SYSTEM,
     question = question,
     model = smelt.model.preferred("title"),
     reasoning_effort = "off",
