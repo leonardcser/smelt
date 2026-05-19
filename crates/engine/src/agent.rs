@@ -200,15 +200,20 @@ fn spawn_engine_ask(
         session_id,
     } = task;
 
-    // Merge MCP defs from the engine's dispatcher with the supplied (Lua)
-    // tools, mirroring the main-turn merge in `Turn::run`. The caller
-    // (inherit_session=true on the Lua side) only ever supplies the Lua
-    // tool list — MCP defs live on the engine side and would otherwise
-    // be missing from the EngineAsk's `tools` field, splitting its
-    // cache slot from the main turn's.
-    let mcp_defs = dispatcher.definitions();
+    // Inherit-session is signalled by a non-empty supplied tool list
+    // (the Lua side fills it with `app.lua.tool_defs(...)` only on that
+    // path). When present, merge the engine's MCP defs in too so the
+    // tools section matches the main turn byte-for-byte. Plain callers
+    // (predict, title) pass an empty list and get an empty `tools`
+    // field — sending MCP defs to them would waste tokens and break
+    // their own cache prefix.
     let mut messages = supplied_messages;
     let tools = supplied_tools;
+    let mcp_defs = if tools.is_empty() {
+        Vec::new()
+    } else {
+        dispatcher.definitions()
+    };
     let (api, model_name) = resolve_ask_target(config, model);
     let provider = build_provider(
         &api,
