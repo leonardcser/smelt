@@ -73,6 +73,10 @@ pub struct SettingsConfig {
     /// Fraction of the configured context window (0, 1] at which the
     /// bundled compact plugin auto-triggers between turns. Default `0.80`.
     pub compact_threshold: Option<f64>,
+    /// Anthropic prompt cache TTL. `false` (default) uses the 5-minute
+    /// ephemeral TTL; `true` opts into the 1-hour TTL. Has no effect on
+    /// non-Anthropic providers.
+    pub cache_ttl_long: Option<bool>,
 }
 
 /// Value type of a settings slot. Drives parsing of `--set` overrides
@@ -116,6 +120,7 @@ pub const SETTINGS_KEYS: &[(&str, SettingKind)] = &[
     ("redact_secrets", SettingKind::Bool),
     ("auto_reload", SettingKind::Bool),
     ("compact_threshold", SettingKind::Number),
+    ("cache_ttl_long", SettingKind::Bool),
 ];
 
 pub fn setting_kind(key: &str) -> Option<SettingKind> {
@@ -152,6 +157,7 @@ impl SettingsConfig {
             ("redact_secrets", SettingValue::Bool(v)) => self.redact_secrets = Some(v),
             ("auto_reload", SettingValue::Bool(v)) => self.auto_reload = Some(v),
             ("compact_threshold", SettingValue::Number(v)) => self.compact_threshold = Some(v),
+            ("cache_ttl_long", SettingValue::Bool(v)) => self.cache_ttl_long = Some(v),
             _ => unreachable!("schema mismatch for {key}"),
         }
         Ok(())
@@ -173,6 +179,7 @@ impl SettingsConfig {
             redact_secrets: self.redact_secrets.unwrap_or(true),
             auto_reload: self.auto_reload.unwrap_or(false),
             compact_threshold: self.compact_threshold.unwrap_or(0.80),
+            cache_ttl_long: self.cache_ttl_long.unwrap_or(false),
         }
     }
 }
@@ -194,6 +201,7 @@ pub struct ResolvedSettings {
     pub redact_secrets: bool,
     pub auto_reload: bool,
     pub compact_threshold: f64,
+    pub cache_ttl_long: bool,
 }
 
 /// Startup defaults for new sessions, set from Lua via `smelt.defaults{...}`.

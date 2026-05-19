@@ -127,6 +127,9 @@ pub struct EngineConfig {
     /// loader itself lives on `Core::skills` for tool execution.
     pub skill_section: Option<String>,
     pub redact_secrets: bool,
+    /// Use the Anthropic 1-hour cache TTL instead of the default 5-minute
+    /// one when emitting `cache_control` markers.
+    pub cache_ttl_long: bool,
     /// Source of monotonic + wall-clock time. Production uses
     /// [`clock::RealClock`]; deterministic-simulation harnesses inject a
     /// [`clock::VirtualClock`] so scenarios can replay against advanced time.

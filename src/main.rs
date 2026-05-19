@@ -407,6 +407,7 @@ async fn main() {
             cwd: cwd.clone(),
             skill_section: prompt_inputs.skill_section.clone(),
             redact_secrets: settings.redact_secrets,
+            cache_ttl_long: settings.cache_ttl_long,
             clock: Arc::clone(&clock),
         },
         dispatcher,

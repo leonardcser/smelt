@@ -158,6 +158,25 @@ fn resolve_ask_target(config: &EngineConfig, model: Option<AskModel>) -> (ApiCon
     }
 }
 
+/// Build per-request cache options from the provider's capability flags
+/// and the engine's settings. Anthropic-family providers always get
+/// `cache_control` markers; OpenAI-family providers always get a stable
+/// `prompt_cache_key`. The provider's `cache_key()` is generated once at
+/// construction and never mutates over the provider's lifetime, so the
+/// server-side prefix hash stays stable across every request from this
+/// session.
+fn cache_config_for(provider: &Provider, config: &EngineConfig) -> crate::provider::CacheConfig {
+    crate::provider::CacheConfig {
+        anthropic_markers: provider.supports_anthropic_cache(),
+        ttl_long: config.cache_ttl_long,
+        prompt_cache_key: if provider.supports_openai_cache_key() {
+            Some(provider.cache_key().to_string())
+        } else {
+            None
+        },
+    }
+}
+
 /// One pending out-of-band LLM call. Mirrors the fields plumbed through
 /// `UiCommand::EngineAsk`; bundles them so the spawn surface stays a
 /// two-arg function (config + task) instead of an ever-growing arg list.
@@ -195,11 +214,21 @@ fn spawn_engine_ask(
     );
     let pricing = PricingContext::from_api(&api);
     let tx = event_tx.clone();
+    let cache_ttl_long = config.cache_ttl_long;
     tokio::spawn(async move {
         let cancel = crate::cancel::CancellationToken::new();
         messages.insert(0, protocol::Message::system(&system));
 
         let mut opts = ChatOptions::new(&cancel);
+        opts.cache = crate::provider::CacheConfig {
+            anthropic_markers: provider.supports_anthropic_cache(),
+            ttl_long: cache_ttl_long,
+            prompt_cache_key: if provider.supports_openai_cache_key() {
+                Some(provider.cache_key().to_string())
+            } else {
+                None
+            },
+        };
         if let Some(fmt) = response_format {
             opts.response_format = Some(crate::provider::ResponseFormat {
                 name: fmt.name,
@@ -1517,6 +1546,7 @@ impl<'a> Turn<'a> {
                 on_retry: Some(&on_retry),
                 on_delta: Some(&on_delta),
                 response_format: None,
+                cache: cache_config_for(&self.provider, self.config),
             };
             let chat_future = self.provider.chat(
                 &self.messages,

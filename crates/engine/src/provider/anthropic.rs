@@ -1,5 +1,5 @@
 use super::{collect_indexed_tool_calls, non_empty, non_empty_blocks, sse};
-use super::{ParsedResponse, ProviderError, StreamDelta, ToolDefinition};
+use super::{CacheConfig, ParsedResponse, ProviderError, StreamDelta, ToolDefinition};
 use crate::cancel::CancellationToken;
 use crate::config::ModelConfig;
 use crate::trim::{trim_tool_output, MAX_TOOL_OUTPUT_LINES};
@@ -7,6 +7,49 @@ use protocol::{
     FunctionCall, Message, ReasoningBlock, ReasoningEffort, Role, TokenUsage, ToolCall,
 };
 use std::collections::{BTreeMap, HashMap};
+
+/// Build the `cache_control` JSON object for the configured TTL.
+fn cache_control_value(cache: &CacheConfig) -> serde_json::Value {
+    if cache.ttl_long {
+        serde_json::json!({"type": "ephemeral", "ttl": "1h"})
+    } else {
+        serde_json::json!({"type": "ephemeral"})
+    }
+}
+
+/// Attach `cache_control` to a JSON value that is either a content block
+/// or a tool/system entry. No-op if the value is not an object.
+fn stamp_cache_control(v: &mut serde_json::Value, cache: &CacheConfig) {
+    if let Some(obj) = v.as_object_mut() {
+        obj.insert("cache_control".into(), cache_control_value(cache));
+    }
+}
+
+/// Count `cache_control` markers in a request body. Anthropic rejects
+/// requests with more than 4 (across system, tools, and message content).
+fn count_cache_breakpoints(body: &serde_json::Value) -> usize {
+    fn walk(v: &serde_json::Value, count: &mut usize) {
+        match v {
+            serde_json::Value::Object(m) => {
+                if m.contains_key("cache_control") {
+                    *count += 1;
+                }
+                for (_, child) in m {
+                    walk(child, count);
+                }
+            }
+            serde_json::Value::Array(a) => {
+                for child in a {
+                    walk(child, count);
+                }
+            }
+            _ => {}
+        }
+    }
+    let mut count = 0;
+    walk(body, &mut count);
+    count
+}
 
 fn supports_adaptive_thinking(model: &str) -> bool {
     model.contains("opus-4-6") || model.contains("sonnet-4-6")
@@ -34,9 +77,15 @@ pub(super) fn build_body(
     model: &str,
     effort: ReasoningEffort,
     config: &ModelConfig,
+    cache: &CacheConfig,
 ) -> serde_json::Value {
     let mut system_content: Option<String> = None;
     let mut content: Vec<serde_json::Value> = Vec::new();
+
+    // Index of the last `Role::User` message in `content`. Used as the
+    // moving cache breakpoint: everything up through this user turn is
+    // reused across the in-turn assistant/tool round-trips.
+    let mut last_user_idx: Option<usize> = None;
 
     for m in messages {
         match m.role {
@@ -48,10 +97,16 @@ pub(super) fn build_body(
                 }
             }
             Role::User => {
+                let text = m
+                    .content
+                    .as_ref()
+                    .map(|c| c.as_text().to_string())
+                    .unwrap_or_default();
                 content.push(serde_json::json!({
                     "role": "user",
-                    "content": m.content.as_ref().map(|c| c.as_text()).unwrap_or_default(),
+                    "content": [{"type": "text", "text": text}],
                 }));
+                last_user_idx = Some(content.len() - 1);
             }
             Role::Assistant => {
                 let mut message_content = Vec::new();
@@ -114,6 +169,22 @@ pub(super) fn build_body(
         })
         .collect();
 
+    // Stamp the moving user-message breakpoint *before* the body
+    // construction takes ownership of `content`.
+    if cache.anthropic_markers {
+        if let Some(idx) = last_user_idx {
+            if let Some(blocks) = content
+                .get_mut(idx)
+                .and_then(|m| m.get_mut("content"))
+                .and_then(|c| c.as_array_mut())
+            {
+                if let Some(last_block) = blocks.last_mut() {
+                    stamp_cache_control(last_block, cache);
+                }
+            }
+        }
+    }
+
     let mut body = serde_json::json!({
         "model": model,
         "messages": content,
@@ -121,11 +192,28 @@ pub(super) fn build_body(
     });
 
     if let Some(sys) = system_content {
-        body["system"] = serde_json::json!([{"type": "text", "text": sys}]);
+        let mut sys_block = serde_json::json!({"type": "text", "text": sys});
+        if cache.anthropic_markers {
+            stamp_cache_control(&mut sys_block, cache);
+        }
+        body["system"] = serde_json::json!([sys_block]);
     }
     if !api_tools.is_empty() {
-        body["tools"] = serde_json::json!(api_tools);
+        let mut tools_arr = api_tools;
+        if cache.anthropic_markers {
+            if let Some(last) = tools_arr.last_mut() {
+                stamp_cache_control(last, cache);
+            }
+        }
+        body["tools"] = serde_json::json!(tools_arr);
     }
+
+    // Anthropic caps cache_control breakpoints at 4 per request. We use at
+    // most 3 (system, last tool, last user) so this is a safety belt.
+    debug_assert!(
+        count_cache_breakpoints(&body) <= 4,
+        "anthropic request exceeds 4 cache_control breakpoints"
+    );
     if let Some(v) = config.temperature {
         body["temperature"] = serde_json::json!(v);
     }
@@ -488,6 +576,7 @@ mod tests {
             "m",
             ReasoningEffort::Off,
             &cfg(),
+            &CacheConfig::default(),
         );
         assert_eq!(body["system"][0]["type"], "text");
         assert_eq!(body["system"][0]["text"], "first\n\nsecond");
@@ -495,16 +584,166 @@ mod tests {
 
     #[test]
     fn build_body_omits_system_field_when_no_system_messages() {
-        let body = build_body(&[user("hi")], &[], "m", ReasoningEffort::Off, &cfg());
+        let body = build_body(
+            &[user("hi")],
+            &[],
+            "m",
+            ReasoningEffort::Off,
+            &cfg(),
+            &CacheConfig::default(),
+        );
         assert!(body.get("system").is_none());
+    }
+
+    // ---- cache_control ----
+
+    fn cache_on() -> CacheConfig {
+        CacheConfig {
+            anthropic_markers: true,
+            ttl_long: false,
+            prompt_cache_key: None,
+        }
+    }
+
+    fn cache_on_long() -> CacheConfig {
+        CacheConfig {
+            anthropic_markers: true,
+            ttl_long: true,
+            prompt_cache_key: None,
+        }
+    }
+
+    #[test]
+    fn cache_stamps_system_tools_and_last_user() {
+        let tools = vec![
+            ToolDefinition::new(FunctionSchema {
+                name: "a".into(),
+                description: "first tool".into(),
+                parameters: json!({"type": "object"}),
+            }),
+            ToolDefinition::new(FunctionSchema {
+                name: "b".into(),
+                description: "second tool".into(),
+                parameters: json!({"type": "object"}),
+            }),
+        ];
+        let body = build_body(
+            &[system("sys"), user("u1"), assistant_text("a1"), user("u2")],
+            &tools,
+            "m",
+            ReasoningEffort::Off,
+            &cfg(),
+            &cache_on(),
+        );
+        // System: last (only) block has the marker.
+        assert_eq!(
+            body["system"][0]["cache_control"],
+            json!({"type": "ephemeral"})
+        );
+        // Tools: only the LAST tool is marked.
+        assert!(body["tools"][0].get("cache_control").is_none());
+        assert_eq!(
+            body["tools"][1]["cache_control"],
+            json!({"type": "ephemeral"})
+        );
+        // Messages: only the last user message's last block is marked.
+        assert!(body["messages"][0]["content"][0]
+            .get("cache_control")
+            .is_none());
+        assert!(body["messages"][1]["content"][0]
+            .get("cache_control")
+            .is_none());
+        assert_eq!(
+            body["messages"][2]["content"][0]["cache_control"],
+            json!({"type": "ephemeral"})
+        );
+        // Exactly three markers; well under the 4-cap.
+        assert_eq!(count_cache_breakpoints(&body), 3);
+    }
+
+    #[test]
+    fn cache_disabled_emits_no_markers() {
+        let tools = vec![ToolDefinition::new(FunctionSchema {
+            name: "a".into(),
+            description: "tool".into(),
+            parameters: json!({"type": "object"}),
+        })];
+        let body = build_body(
+            &[system("sys"), user("hi")],
+            &tools,
+            "m",
+            ReasoningEffort::Off,
+            &cfg(),
+            &CacheConfig::default(),
+        );
+        assert_eq!(count_cache_breakpoints(&body), 0);
+    }
+
+    #[test]
+    fn cache_ttl_long_emits_1h() {
+        let body = build_body(
+            &[system("sys"), user("hi")],
+            &[],
+            "m",
+            ReasoningEffort::Off,
+            &cfg(),
+            &cache_on_long(),
+        );
+        assert_eq!(
+            body["system"][0]["cache_control"],
+            json!({"type": "ephemeral", "ttl": "1h"})
+        );
+        assert_eq!(
+            body["messages"][0]["content"][0]["cache_control"],
+            json!({"type": "ephemeral", "ttl": "1h"})
+        );
+    }
+
+    #[test]
+    fn cache_marks_only_last_user_when_multiple_users() {
+        let body = build_body(
+            &[
+                user("first"),
+                assistant_text("ack"),
+                user("second"),
+                assistant_text("ack2"),
+                user("third"),
+            ],
+            &[],
+            "m",
+            ReasoningEffort::Off,
+            &cfg(),
+            &cache_on(),
+        );
+        // No system, no tools — only the last user counts.
+        assert!(body["messages"][0]["content"][0]
+            .get("cache_control")
+            .is_none());
+        assert!(body["messages"][2]["content"][0]
+            .get("cache_control")
+            .is_none());
+        assert_eq!(
+            body["messages"][4]["content"][0]["cache_control"],
+            json!({"type": "ephemeral"})
+        );
+        assert_eq!(count_cache_breakpoints(&body), 1);
     }
 
     #[test]
     fn build_body_emits_user_message_with_text_content() {
-        let body = build_body(&[user("hello")], &[], "m", ReasoningEffort::Off, &cfg());
+        let body = build_body(
+            &[user("hello")],
+            &[],
+            "m",
+            ReasoningEffort::Off,
+            &cfg(),
+            &CacheConfig::default(),
+        );
         let msg = &body["messages"][0];
         assert_eq!(msg["role"], "user");
-        assert_eq!(msg["content"], "hello");
+        assert_eq!(msg["content"][0]["type"], "text");
+        assert_eq!(msg["content"][0]["text"], "hello");
+        assert!(msg["content"][0].get("cache_control").is_none());
     }
 
     #[test]
@@ -515,6 +754,7 @@ mod tests {
             "m",
             ReasoningEffort::Off,
             &cfg(),
+            &CacheConfig::default(),
         );
         let msg = &body["messages"][0];
         assert_eq!(msg["role"], "assistant");
@@ -537,6 +777,7 @@ mod tests {
             "m",
             ReasoningEffort::Off,
             &cfg(),
+            &CacheConfig::default(),
         );
         let block = &body["messages"][0]["content"][0];
         assert_eq!(block["type"], "tool_use");
@@ -560,6 +801,7 @@ mod tests {
             "m",
             ReasoningEffort::Off,
             &cfg(),
+            &CacheConfig::default(),
         );
         let block = &body["messages"][0]["content"][0];
         assert!(block["input"].is_object());
@@ -574,6 +816,7 @@ mod tests {
             "m",
             ReasoningEffort::Off,
             &cfg(),
+            &CacheConfig::default(),
         );
         let msg = &body["messages"][0];
         assert_eq!(msg["role"], "user");
@@ -591,6 +834,7 @@ mod tests {
             "m",
             ReasoningEffort::Off,
             &cfg(),
+            &CacheConfig::default(),
         );
         assert_eq!(body["messages"][0]["content"][0]["tool_use_id"], "");
     }
@@ -602,7 +846,14 @@ mod tests {
             description: "d".into(),
             parameters: json!({"type":"object"}),
         })];
-        let body = build_body(&[user("hi")], &tools, "m", ReasoningEffort::Off, &cfg());
+        let body = build_body(
+            &[user("hi")],
+            &tools,
+            "m",
+            ReasoningEffort::Off,
+            &cfg(),
+            &CacheConfig::default(),
+        );
         let t = &body["tools"][0];
         assert_eq!(t["name"], "f");
         assert_eq!(t["description"], "d");
@@ -614,7 +865,14 @@ mod tests {
         let mut c = cfg();
         c.temperature = Some(0.4);
         c.top_p = Some(0.8);
-        let body = build_body(&[user("hi")], &[], "m", ReasoningEffort::Off, &c);
+        let body = build_body(
+            &[user("hi")],
+            &[],
+            "m",
+            ReasoningEffort::Off,
+            &c,
+            &CacheConfig::default(),
+        );
         assert_eq!(body["temperature"], 0.4);
         assert_eq!(body["top_p"], 0.8);
     }
@@ -627,6 +885,7 @@ mod tests {
             "claude-sonnet-4-6",
             ReasoningEffort::High,
             &cfg(),
+            &CacheConfig::default(),
         );
         assert_eq!(body["thinking"]["type"], "adaptive");
         assert_eq!(body["thinking"]["display"], "summarized");
@@ -644,6 +903,7 @@ mod tests {
             "claude-haiku-4-5",
             ReasoningEffort::High,
             &cfg(),
+            &CacheConfig::default(),
         );
         assert!(body.get("thinking").is_none());
         assert!(body.get("output_config").is_none());
@@ -657,13 +917,21 @@ mod tests {
             "claude-sonnet-4-6",
             ReasoningEffort::Off,
             &cfg(),
+            &CacheConfig::default(),
         );
         assert!(body.get("thinking").is_none());
     }
 
     #[test]
     fn build_body_sets_default_max_tokens() {
-        let body = build_body(&[user("hi")], &[], "m", ReasoningEffort::Off, &cfg());
+        let body = build_body(
+            &[user("hi")],
+            &[],
+            "m",
+            ReasoningEffort::Off,
+            &cfg(),
+            &CacheConfig::default(),
+        );
         assert_eq!(body["max_tokens"], 4096);
     }
 
@@ -1082,7 +1350,14 @@ mod tests {
             tool_call_id: None,
             is_error: false,
         };
-        let body = build_body(&[m], &[], "m", ReasoningEffort::Off, &cfg());
+        let body = build_body(
+            &[m],
+            &[],
+            "m",
+            ReasoningEffort::Off,
+            &cfg(),
+            &CacheConfig::default(),
+        );
         let content = &body["messages"][0]["content"];
         assert_eq!(content[0]["type"], "thinking");
         assert_eq!(content[0]["signature"], "s");
@@ -1105,7 +1380,14 @@ mod tests {
             tool_call_id: None,
             is_error: false,
         };
-        let body = build_body(&[m], &[], "m", ReasoningEffort::Off, &cfg());
+        let body = build_body(
+            &[m],
+            &[],
+            "m",
+            ReasoningEffort::Off,
+            &cfg(),
+            &CacheConfig::default(),
+        );
         let content = &body["messages"][0]["content"];
         assert_eq!(content.as_array().unwrap().len(), 1);
         assert_eq!(content[0]["type"], "text");
