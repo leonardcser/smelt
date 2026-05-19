@@ -19,6 +19,7 @@ pub(crate) fn backspace(payload: &str, cur: usize) -> Option<(String, usize)> {
         return Some((payload.to_string(), 0));
     }
     let chars: Vec<char> = payload.chars().collect();
+    let cur = cur.min(chars.len());
     let new: String = chars[..cur - 1]
         .iter()
         .copied()
@@ -44,6 +45,7 @@ pub(crate) fn insert_char(payload: &str, cur: usize, c: char) -> (String, usize)
 /// Forward-delete one char at `cur`. No-op when the cursor is at end-of-line.
 pub(crate) fn delete_forward(payload: &str, cur: usize) -> (String, usize) {
     let chars: Vec<char> = payload.chars().collect();
+    let cur = cur.min(chars.len());
     if cur >= chars.len() {
         return (payload.to_string(), cur);
     }
@@ -254,6 +256,16 @@ mod tests {
         assert_eq!(cur, 1);
     }
 
+    #[test]
+    fn backspace_clamps_overflow_cursor_to_end() {
+        // The dispatcher reads the cursor in *cells*; wide chars (CJK) make
+        // cells > chars, so the cursor can outrun the payload. Backspace
+        // must clamp like insert_char does.
+        let (out, cur) = backspace("ab", 99).unwrap();
+        assert_eq!(out, "a");
+        assert_eq!(cur, 1);
+    }
+
     // ── delete_forward ───────────────────────────────────────────────────
 
     #[test]
@@ -268,6 +280,13 @@ mod tests {
         let (out, cur) = delete_forward("abcd", 1);
         assert_eq!(out, "acd");
         assert_eq!(cur, 1);
+    }
+
+    #[test]
+    fn delete_forward_clamps_overflow_cursor_to_end() {
+        let (out, cur) = delete_forward("ab", 99);
+        assert_eq!(out, "ab");
+        assert_eq!(cur, 2);
     }
 
     // ── delete_word_back ─────────────────────────────────────────────────
