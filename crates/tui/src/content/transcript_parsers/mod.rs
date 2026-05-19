@@ -11,6 +11,7 @@ use smelt_core::transcript_model::{Block, ToolState, ViewState};
 pub mod markdown;
 mod tools;
 
+mod chrome;
 mod code_line;
 mod compacted;
 mod exec;

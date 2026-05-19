@@ -65,6 +65,12 @@ return {
   SmeltModeExec       = { fg = { ansi = 197}, bg = { ansi = 234 }, bold = true },
   SmeltModeDefault    = { fg = { ansi = 244}, bg = { ansi = 234 } },
 
+  -- Foreground-only accent for the `!` exec prefix in the prompt and in
+  -- the transcript exec block. Bg is intentionally omitted so the prompt
+  -- stays unfilled and the transcript block can show `SmeltUserBg`
+  -- underneath.
+  SmeltExecPrefix     = fg({ ansi = 197 }, { bold = true }),
+
   -- Diff renderer row fills. Override these like any other group.
   SmeltDiffAddBg      = bg({ rgb = { 20, 50, 20 } }),
   SmeltDiffDelBg      = bg({ rgb = { 60, 20, 20 } }),

@@ -1,9 +1,6 @@
 //! `Block::User` renderer.
 
-use smelt_core::buffer::SpanMeta;
 use smelt_core::content::builder::{display_width, LineBuilder};
-use smelt_core::content::wrap::wrap_line;
-use smelt_core::style::Color;
 use smelt_core::theme::intern;
 
 /// Preprocessed user message layout: tab-expanded, blank-trimmed lines with a computed `block_w`.
@@ -48,59 +45,9 @@ pub(super) fn render(
     let is_command = smelt_core::commands::is_command(text.trim());
     let text_w = width.saturating_sub(2).max(1);
     let geom = UserBlockGeometry::new(text, text_w);
-    let user_bg = intern("SmeltUserBg");
-    let user_bg_color = out.theme().resolve(user_bg).bg.unwrap_or(Color::Reset);
-    let mut rows = 0u16;
-    let pad_meta = SpanMeta {
-        selectable: false,
-        copy_as: None,
-    };
-    // Blank padding rows mirror the content-row column layout — 1-col chrome
-    // pad + 1-col selectable cell — so a multi-line selection lands its
-    // 1-cell virtual span at col 1, lined up with where content starts on
-    // neighbor rows. `copy_as = Some("")` keeps the placeholder cell out of
-    // the yank output so a blank row stays blank in the clipboard. The bg
-    // for the remaining cells comes from `fill_line_bg` (no inline pad text)
-    // so the row's text content stays minimal.
-    let blank_anchor_meta = SpanMeta {
-        selectable: true,
-        copy_as: Some(String::new()),
-    };
-    let blank_row = |out: &mut LineBuilder| {
-        out.set_hl(user_bg);
-        out.print_with_meta(" ", pad_meta.clone());
-        out.print_with_meta(" ", blank_anchor_meta.clone());
-        out.reset_style();
-        out.fill_line_bg(user_bg_color);
-        out.newline();
-    };
-    blank_row(out);
-    rows += 1;
-    for logical_line in &geom.lines {
-        if logical_line.is_empty() {
-            blank_row(out);
-            rows += 1;
-            continue;
-        }
-        let chunks = wrap_line(logical_line, text_w);
-        if chunks.len() > 1 {
-            out.mark_wrapped();
-        }
-        for chunk in &chunks {
-            out.set_hl(user_bg);
-            out.print_with_meta(" ", pad_meta.clone());
-            out.set_bold();
-            print_highlights(out, chunk, image_labels, is_command);
-            out.set_hl(user_bg);
-            out.pad_row_to_layout_width(pad_meta.clone());
-            out.reset_style();
-            out.newline();
-            rows += 1;
-        }
-    }
-    blank_row(out);
-    rows += 1;
-    rows
+    super::chrome::render(out, &geom.lines, text_w, |out, chunk, _idx| {
+        print_highlights(out, chunk, image_labels, is_command);
+    })
 }
 
 fn print_highlights(out: &mut LineBuilder, text: &str, image_labels: &[String], is_command: bool) {

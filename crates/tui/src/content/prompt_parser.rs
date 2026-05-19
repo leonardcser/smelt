@@ -149,7 +149,7 @@ impl BufferParser for PromptBufferParser {
         // Theme-group extmarks: the renderer resolves group → style at paint
         // time, so live theme updates flow through without re-parsing.
         let accent_group = intern("SmeltAccent");
-        let exec_group = intern("SmeltModeExec");
+        let exec_group = intern("SmeltExecPrefix");
 
         // Char index of the first whitespace on the first visual line, which
         // marks the end of the leading `/command` token. Highlighting only
