@@ -112,13 +112,6 @@ fn autonomous_behavior() -> &'static str {
      - Do not narrate or explain your changes. Just make them."
 }
 
-fn write_access() -> &'static str {
-    "# Write access\n\
-     You have write access. Use edit_file to modify existing files and write_file only to create \
-     new files.\n\
-     Always read a file with read_file before editing it — edit_file will reject stale edits."
-}
-
 /// Build the default prompt sections for a given mode and app state.
 pub(crate) fn build_defaults(
     cwd: &std::path::Path,
@@ -140,10 +133,7 @@ pub(crate) fn build_defaults(
         },
     );
 
-    if matches!(mode, AgentMode::Apply | AgentMode::Yolo) {
-        ps.set("write_access", write_access().to_string());
-    }
-
+    let _ = mode; // mode no longer feeds the cacheable system prompt
     if let Some(skills) = skill_section {
         if !skills.is_empty() {
             ps.set("skills", skills.to_string());
@@ -258,13 +248,17 @@ mod tests {
     }
 
     #[test]
-    fn build_defaults_adds_write_access_for_apply_and_yolo_modes() {
-        let apply = build_defaults(Path::new("/w"), AgentMode::Apply, true, None, None);
-        let yolo = build_defaults(Path::new("/w"), AgentMode::Yolo, true, None, None);
-        let read = build_defaults(Path::new("/w"), AgentMode::Normal, true, None, None);
-        assert!(names(&apply).contains(&"write_access"));
-        assert!(names(&yolo).contains(&"write_access"));
-        assert!(!names(&read).contains(&"write_access"));
+    fn build_defaults_is_byte_stable_across_modes() {
+        // The base prompt must not change with mode; mode-specific
+        // behavior is communicated via a runtime message instead.
+        let cwd = Path::new("/w");
+        let plan = build_defaults(cwd, AgentMode::Plan, true, None, None).assemble();
+        let apply = build_defaults(cwd, AgentMode::Apply, true, None, None).assemble();
+        let yolo = build_defaults(cwd, AgentMode::Yolo, true, None, None).assemble();
+        let normal = build_defaults(cwd, AgentMode::Normal, true, None, None).assemble();
+        assert_eq!(plan, apply);
+        assert_eq!(apply, yolo);
+        assert_eq!(yolo, normal);
     }
 
     #[test]

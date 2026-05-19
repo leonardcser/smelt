@@ -66,7 +66,6 @@ pub(crate) async fn engine_task(
                             .or_else(|| config.system_prompt_override.clone())
                             .unwrap_or_else(|| {
                                 crate::build_system_prompt_full(
-                                    mode,
                                     &config.cwd,
                                     config.instructions.as_deref(),
                                     config.skill_section.as_deref(),
@@ -404,7 +403,9 @@ impl<'a> Turn<'a> {
         self.messages.push(msg);
     }
 
-    /// Rebuilds the system prompt after a mid-turn mode change.
+    /// Rebuilds the system prompt after `/reload`. Mode changes alone
+    /// don't reach here: the base prompt is mode-agnostic so its bytes
+    /// stay stable across `/mode` switches, preserving the cache.
     fn regenerate_system_prompt(&mut self) {
         let new = self
             .config
@@ -412,7 +413,6 @@ impl<'a> Turn<'a> {
             .clone()
             .unwrap_or_else(|| {
                 crate::build_system_prompt_full(
-                    self.mode,
                     &self.config.cwd,
                     self.config.instructions.as_deref(),
                     self.config.skill_section.as_deref(),

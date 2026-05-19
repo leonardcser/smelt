@@ -342,6 +342,17 @@ impl TuiApp {
                 .cells
                 .set_dyn("agent_mode", std::rc::Rc::new(mode.as_str().to_string()));
             self.drain_cells_pending();
+            // Append a synthetic user note so the model learns about the
+            // new mode without us regenerating the (cached) system prompt.
+            // The history's prefix is unchanged; the note lives at the
+            // moving cache breakpoint and becomes part of the cacheable
+            // prefix on the next user turn.
+            self.core
+                .session
+                .messages
+                .push(protocol::Message::user(protocol::Content::text(
+                    engine::mode_change_note(self.core.config.mode),
+                )));
         }
         let system_prompt = self.rebuild_system_prompt();
         let tools = self.lua.tool_defs(self.core.config.mode);

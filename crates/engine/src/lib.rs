@@ -34,6 +34,24 @@ use tokio::sync::mpsc;
 /// and the renderer; they MUST stay byte-equal.
 pub const SUMMARY_PREFIX: &str = include_str!("prompts/compact_summary_prefix.md");
 
+/// Marker prefix on synthetic user messages that announce a mode change.
+/// The transcript renderer keys on this to display the note as a small
+/// inline pill instead of a chat block.
+pub const MODE_NOTE_PREFIX: &str = "[smelt:mode] ";
+
+/// Synthetic user-note text appended to the history when the agent's
+/// mode switches. Bytes are stable per mode so the prefix that includes
+/// these notes still hits the cache on subsequent turns.
+pub fn mode_change_note(mode: protocol::AgentMode) -> String {
+    let body = match mode {
+        protocol::AgentMode::Plan => "now in plan mode. Investigate and reason only; do not modify files or run mutating commands. Use read_file, glob, grep, and read-only bash. edit_file and write_file are unavailable.",
+        protocol::AgentMode::Apply => "now in apply mode. You may read, edit, and create files. Continue to confirm destructive bash commands before running them.",
+        protocol::AgentMode::Yolo => "now in yolo mode. Full autonomy; act without pausing for confirmation. Continue to avoid genuinely irreversible operations.",
+        protocol::AgentMode::Normal => "now in normal mode.",
+    };
+    format!("{}{}", MODE_NOTE_PREFIX, body)
+}
+
 pub use config::ModelConfig;
 pub use paths::{config_dir, data_dir, home_dir, state_dir};
 
@@ -46,20 +64,17 @@ pub use skills::SkillLoader;
 
 struct PromptContext<'a> {
     cwd: &'a std::path::Path,
-    write_access: bool,
     skills_section: Option<&'a str>,
     extra_instructions: Option<&'a str>,
 }
 
 pub(crate) fn build_system_prompt_full(
-    mode: protocol::AgentMode,
     cwd: &std::path::Path,
     extra_instructions: Option<&str>,
     skill_section: Option<&str>,
 ) -> String {
     let ctx = PromptContext {
         cwd,
-        write_access: matches!(mode, protocol::AgentMode::Apply | protocol::AgentMode::Yolo),
         skills_section: skill_section,
         extra_instructions,
     };
@@ -76,7 +91,6 @@ fn render_system_prompt(ctx: &PromptContext<'_>) -> String {
     let rendered = template
         .render(minijinja::context! {
             cwd => ctx.cwd.display().to_string(),
-            write_access => ctx.write_access,
             skills_section => ctx.skills_section.unwrap_or(""),
             extra_instructions => ctx.extra_instructions.unwrap_or(""),
         })
@@ -236,7 +250,6 @@ mod tests {
         let cwd = std::path::Path::new("/tmp/x");
         let ctx = PromptContext {
             cwd,
-            write_access: true,
             skills_section: None,
             extra_instructions: Some("MARK-EXTRA-7384"),
         };
@@ -250,7 +263,6 @@ mod tests {
         let cwd = std::path::Path::new("/x");
         let ctx = PromptContext {
             cwd,
-            write_access: false,
             skills_section: None,
             extra_instructions: None,
         };
@@ -259,16 +271,14 @@ mod tests {
         assert!(!out.contains("\n\n\n"));
     }
 
-    // ---- build_system_prompt_full mode flag ----
-
     #[test]
-    fn build_system_prompt_full_chooses_write_access_by_agent_mode() {
-        // Just verify the helper runs and produces non-empty output for both modes.
+    fn system_prompt_is_byte_stable_for_session_inputs() {
+        // The same (cwd, skills, instructions) must produce identical bytes
+        // every time so /mode switches don't bust the cache.
         let cwd = std::path::Path::new("/x");
-        let plan = build_system_prompt_full(protocol::AgentMode::Plan, cwd, None, None);
-        let apply = build_system_prompt_full(protocol::AgentMode::Apply, cwd, None, None);
-        assert!(!plan.is_empty());
-        assert!(!apply.is_empty());
+        let a = build_system_prompt_full(cwd, Some("hi"), Some("# Skills\nfoo"));
+        let b = build_system_prompt_full(cwd, Some("hi"), Some("# Skills\nfoo"));
+        assert_eq!(a, b);
     }
 
     // ---- EngineHandle / EventInjector ----
