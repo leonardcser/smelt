@@ -106,10 +106,7 @@ pub enum LuaOp {
 
     /// `smelt.win.new(buf, { name = ... })`. `buf_idx % pool.len()`
     /// picks a live buf; if the pool is empty, the op no-ops.
-    WinNew {
-        buf_idx: u8,
-        name_slot: Option<u8>,
-    },
+    WinNew { buf_idx: u8, name_slot: Option<u8> },
 
     /// `smelt.overlay.new({ layout = ..., name = ..., keymap_count = N })`.
     /// Picks a layout shape; `keymap_count % 3` overlay-scoped bindings
@@ -172,13 +169,12 @@ pub enum LuaOp {
 
     /// Call one of the recently-added read-only Lua APIs: `win:scroll()`
     /// getter, `paint:rect()`, `smelt.transcript.blocks()`,
-    /// `smelt.text.fit(s, w)`. `kind % 4` picks the probe. These
-    /// surfaces aren't reached by the lifecycle ops above — exercising
-    /// them keeps the new render-pipeline accessors honest under fuzz.
-    ProbeRead {
-        kind: u8,
-        target_idx: u8,
-    },
+    /// `smelt.text.fit(s, w)`, `win:content_width()`,
+    /// `smelt.session.text(id)`, `smelt.session.texts({ids})`.
+    /// `kind % 7` picks the probe. These surfaces aren't reached by the
+    /// lifecycle ops above — exercising them keeps the new
+    /// render-pipeline and session-search accessors honest under fuzz.
+    ProbeRead { kind: u8, target_idx: u8 },
 }
 
 impl LuaOp {
@@ -363,7 +359,9 @@ fn name_or_anon(slot: Option<u8>, prefix: &str) -> Option<String> {
 /// pool so subsequent ops can reference it via `__fuzz.<pool>[i]`.
 fn emit_buf_new(out: &mut String, name_slot: Option<u8>) {
     let name = name_or_anon(name_slot, "fuzz.buf");
-    out.push_str("__fuzz.bufs[#__fuzz.bufs+1] = (function()\n  local ok, v = pcall(smelt.buf.new, ");
+    out.push_str(
+        "__fuzz.bufs[#__fuzz.bufs+1] = (function()\n  local ok, v = pcall(smelt.buf.new, ",
+    );
     match name {
         Some(n) => {
             out.push_str("{ name = ");
@@ -397,7 +395,10 @@ fn emit_win_new(out: &mut String, buf_idx: u8, name_slot: Option<u8>) {
 
 fn emit_layout(out: &mut String, layout: &ArbLayout) {
     match layout {
-        ArbLayout::Leaf { win_idx, with_measure } => {
+        ArbLayout::Leaf {
+            win_idx,
+            with_measure,
+        } => {
             out.push_str(&format!(
                 "smelt.overlay.layout.leaf(__fuzz.wins[({} % math.max(1, #__fuzz.wins)) + 1]",
                 win_idx
@@ -428,12 +429,7 @@ fn emit_layout(out: &mut String, layout: &ArbLayout) {
     }
 }
 
-fn emit_overlay_new(
-    out: &mut String,
-    layout: &ArbLayout,
-    name_slot: Option<u8>,
-    keymap_count: u8,
-) {
+fn emit_overlay_new(out: &mut String, layout: &ArbLayout, name_slot: Option<u8>, keymap_count: u8) {
     let name = name_or_anon(name_slot, "fuzz.ov");
     out.push_str("(function()\n");
     out.push_str("  if #__fuzz.wins == 0 then return end\n");
@@ -563,16 +559,11 @@ pub fn build_snippet(ops: &[LuaOp]) -> String {
     // index into them. Initialised fresh each scenario; on /reload
     // these locals survive (they're in the eval frame, not the
     // bundled-plugin frame that gets wiped).
-    out.push_str(
-        "local __fuzz = { bufs = {}, wins = {}, overlays = {}, paints = {} }\n",
-    );
+    out.push_str("local __fuzz = { bufs = {}, wins = {}, overlays = {}, paints = {} }\n");
     for op in ops {
         match op {
             LuaOp::BufNew { name_slot } => emit_buf_new(&mut out, *name_slot),
-            LuaOp::WinNew {
-                buf_idx,
-                name_slot,
-            } => emit_win_new(&mut out, *buf_idx, *name_slot),
+            LuaOp::WinNew { buf_idx, name_slot } => emit_win_new(&mut out, *buf_idx, *name_slot),
             LuaOp::OverlayNew {
                 layout,
                 name_slot,
@@ -608,16 +599,19 @@ pub fn build_snippet(ops: &[LuaOp]) -> String {
     out
 }
 
-/// `kind % 4` picks one of four recently-added read-only APIs:
+/// `kind % 7` picks one of the recently-added read-only APIs:
 /// 0: `win:scroll()` (getter) on a tracked win
 /// 1: `paint:rect()` on a tracked paint handle
 /// 2: `smelt.transcript.blocks()`
 /// 3: `smelt.text.fit(string, width)`
+/// 4: `win:content_width()` on a tracked win
+/// 5: `smelt.session.text(id)` against a missing id (sidecar fallback path)
+/// 6: `smelt.session.texts({ids})` parallel batch read
 /// All wrapped in `pcall` so a missing handle or an API regression
 /// surfaces as a fuzz-visible failure (panic) rather than a silent miss.
 fn emit_probe_read(out: &mut String, kind: u8, target_idx: u8) {
     let idx = (target_idx as usize) % 8 + 1;
-    match kind % 4 {
+    match kind % 7 {
         0 => {
             out.push_str(&format!(
                 "do local w = __fuzz.wins[{idx}]; if w then pcall(function() return w:scroll() end) end end\n"
@@ -633,9 +627,24 @@ fn emit_probe_read(out: &mut String, kind: u8, target_idx: u8) {
                 "pcall(function() return smelt.transcript and smelt.transcript.blocks and smelt.transcript.blocks() end)\n",
             );
         }
-        _ => {
+        3 => {
             out.push_str(
                 "pcall(function() return smelt.text and smelt.text.fit and smelt.text.fit(\"abc\", 5) end)\n",
+            );
+        }
+        4 => {
+            out.push_str(&format!(
+                "do local w = __fuzz.wins[{idx}]; if w then pcall(function() return w:content_width() end) end end\n"
+            ));
+        }
+        5 => {
+            out.push_str(
+                "pcall(function() return smelt.session and smelt.session.text and smelt.session.text(\"__fuzz_missing\") end)\n",
+            );
+        }
+        _ => {
+            out.push_str(
+                "pcall(function() return smelt.session and smelt.session.texts and smelt.session.texts({ \"__fuzz_missing_a\", \"__fuzz_missing_b\" }) end)\n",
             );
         }
     }
