@@ -341,9 +341,8 @@ mod tests {
         let crashes = |v: &Value| {
             let ops = v.get("ops").and_then(|x| x.as_array());
             let Some(ops) = ops else { return false };
-            ops.iter().any(|op| {
-                op.get("payload").and_then(|x| x.as_str()) == Some("KEY")
-            })
+            ops.iter()
+                .any(|op| op.get("payload").and_then(|x| x.as_str()) == Some("KEY"))
         };
         let scenario = json!({
             "vim": false,
@@ -361,9 +360,6 @@ mod tests {
         // Only one op remains.
         assert_eq!(ops.len(), 1, "expected exactly one op after full shrink");
         // And its payload is the load-bearing literal.
-        assert_eq!(
-            ops[0].get("payload").and_then(|v| v.as_str()),
-            Some("KEY")
-        );
+        assert_eq!(ops[0].get("payload").and_then(|v| v.as_str()), Some("KEY"));
     }
 }

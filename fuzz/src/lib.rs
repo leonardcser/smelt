@@ -668,7 +668,9 @@ fn build_fuzz_op(idx: usize, u: &mut Unstructured<'_>) -> arbitrary::Result<Fuzz
         42 => FuzzOp::OpenOverlay {
             variant: u.arbitrary()?,
         },
-        n => unreachable!("fuzz_op idx {n} out of range; bump N_FUZZOP_VARIANTS or extend dispatch"),
+        n => {
+            unreachable!("fuzz_op idx {n} out of range; bump N_FUZZOP_VARIANTS or extend dispatch")
+        }
     })
 }
 
@@ -1473,8 +1475,7 @@ fn plan(op: FuzzOp) -> (Option<SourceEvent>, PostCheck) {
             kind_idx,
             message,
         } => {
-            let kind =
-                ENGINE_ASK_ERROR_KINDS[(kind_idx as usize) % ENGINE_ASK_ERROR_KINDS.len()];
+            let kind = ENGINE_ASK_ERROR_KINDS[(kind_idx as usize) % ENGINE_ASK_ERROR_KINDS.len()];
             let ev = SourceEvent::Engine(EngineEvent::EngineAskResponse {
                 id,
                 content: String::new(),
@@ -1546,10 +1547,7 @@ pub fn apply(app: &mut TestApp, op: FuzzOp) {
             app.reload_lua();
             let post = app.named_resource_counts();
             assert!(
-                post.0 >= pre.0
-                    && post.1 >= pre.1
-                    && post.2 >= pre.2
-                    && post.3 >= pre.3,
+                post.0 >= pre.0 && post.1 >= pre.1 && post.2 >= pre.2 && post.3 >= pre.3,
                 "reload dropped a named resource: pre=(bufs,wins,overlays,paints)={:?} post={:?}",
                 pre,
                 post,

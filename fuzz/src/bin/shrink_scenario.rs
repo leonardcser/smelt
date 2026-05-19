@@ -134,9 +134,7 @@ fn main() {
 }
 
 fn usage_and_exit(code: i32) -> ! {
-    eprintln!(
-        "usage: shrink_scenario [--target smelt_loop|lua_loop] <scenario.json> [out.json]"
-    );
+    eprintln!("usage: shrink_scenario [--target smelt_loop|lua_loop] <scenario.json> [out.json]");
     process::exit(code);
 }
 

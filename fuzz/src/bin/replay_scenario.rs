@@ -130,8 +130,6 @@ fn replay_lua(text: &str, path: &Path, trace: bool) {
 }
 
 fn usage_and_exit(code: i32) -> ! {
-    eprintln!(
-        "usage: replay_scenario [--target smelt_loop|lua_loop] [--trace] <scenario.json>"
-    );
+    eprintln!("usage: replay_scenario [--target smelt_loop|lua_loop] [--trace] <scenario.json>");
     process::exit(code);
 }

@@ -201,7 +201,10 @@ enum AttachedOp {
     /// `clear` — empties both halves.
     Clear,
     /// `install` — wholesale swap; we only accept self-consistent pairs.
-    Install { src_ids: Vec<u64>, text_between: Vec<String> },
+    Install {
+        src_ids: Vec<u64>,
+        text_between: Vec<String>,
+    },
 }
 
 #[derive(Arbitrary, Debug)]
@@ -290,17 +293,17 @@ fn run(input: Input) {
                 }
                 reference.clear();
             }
-            AttachedOp::Install { src_ids, text_between } => {
+            AttachedOp::Install {
+                src_ids,
+                text_between,
+            } => {
                 // Build a self-consistent (source, ids) pair from the
                 // arbitrary inputs: one marker per id, optional text
                 // between them, no embedded markers.
                 let n = src_ids.len();
                 let mut built = String::new();
                 for (i, id) in src_ids.iter().enumerate() {
-                    let between = text_between
-                        .get(i)
-                        .map(|s| s.as_str())
-                        .unwrap_or("");
+                    let between = text_between.get(i).map(|s| s.as_str()).unwrap_or("");
                     let safe: String = between.replace(ATTACHMENT_MARKER, "");
                     built.push_str(&safe);
                     built.push(ATTACHMENT_MARKER);

@@ -161,4 +161,3 @@ fn paint_status(
     stdout.execute(ResetColor)?;
     stdout.flush()
 }
-

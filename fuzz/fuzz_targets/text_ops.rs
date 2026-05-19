@@ -238,13 +238,19 @@ fn run(initial: String, ops: Vec<TextOp>) {
             TextOp::CharPosOfByte { byte } => {
                 let p = char_pos(&s, byte as usize);
                 let r = refer::char_pos(&s, byte as usize);
-                assert_eq!(p, r, "char_pos diverges from reference (byte={byte}, s={s:?})");
+                assert_eq!(
+                    p, r,
+                    "char_pos diverges from reference (byte={byte}, s={s:?})"
+                );
             }
             TextOp::ByteOfChar { idx } => {
                 let p = byte_of_char(&s, idx as usize);
                 assert_boundary(&s, p, "byte_of_char");
                 let r = refer::byte_of_char(&s, idx as usize);
-                assert_eq!(p, r, "byte_of_char diverges from reference (idx={idx}, s={s:?})");
+                assert_eq!(
+                    p, r,
+                    "byte_of_char diverges from reference (idx={idx}, s={s:?})"
+                );
             }
         }
         // After every op the buffer is still valid UTF-8 (this is implicit

@@ -107,8 +107,6 @@ fn main() {
 }
 
 fn usage_and_exit(code: i32) -> ! {
-    eprintln!(
-        "usage: crash_to_scenario [--target smelt_loop|lua_loop] <artifact-path> [out.json]"
-    );
+    eprintln!("usage: crash_to_scenario [--target smelt_loop|lua_loop] <artifact-path> [out.json]");
     process::exit(code);
 }
