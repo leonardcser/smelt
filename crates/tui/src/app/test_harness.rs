@@ -639,7 +639,9 @@ impl TestApp {
     pub fn render_silent(&mut self) {
         let agent_running = self.app.agent.is_some();
         let mut sink = std::io::sink();
-        self.app.render_normal_to(agent_running, &mut sink);
+        crate::lua::with_app_ptr(&mut self.app, |app| {
+            app.render_normal_to(agent_running, &mut sink);
+        });
     }
 
     /// Resize the app's surface to `(width, height)`. Used by replay
