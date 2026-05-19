@@ -24,6 +24,18 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
         "Set the process environment variable `name` to `value`. Mutates the live process env; visible to subsequent `getenv` calls and child processes.",
         &["name", "value"],
         |_, (name, value): (String, String)| -> LuaResult<()> {
+            // `std::env::set_var` panics on empty / `=`-containing / NUL-
+            // containing names; reject them as a Lua error instead.
+            if name.is_empty() || name.contains('=') || name.contains('\0') {
+                return Err(mlua::Error::RuntimeError(format!(
+                    "setenv: invalid name {name:?}"
+                )));
+            }
+            if value.contains('\0') {
+                return Err(mlua::Error::RuntimeError(
+                    "setenv: value contains NUL".into(),
+                ));
+            }
             // SAFETY: Lua runs on a single thread; setenv on POSIX is
             // safe so long as nothing else is reading concurrently.
             unsafe { std::env::set_var(name, value) };
@@ -36,6 +48,13 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
         "Remove the environment variable `name` from the process environment.",
         &["name"],
         |_, name: String| -> LuaResult<()> {
+            // Mirror `setenv`'s validation; the libc call panics on the
+            // same illegal inputs.
+            if name.is_empty() || name.contains('=') || name.contains('\0') {
+                return Err(mlua::Error::RuntimeError(format!(
+                    "unsetenv: invalid name {name:?}"
+                )));
+            }
             unsafe { std::env::remove_var(name) };
             Ok(())
         },
