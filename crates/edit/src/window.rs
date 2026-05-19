@@ -1330,12 +1330,7 @@ impl Window {
     /// tick and the endpoint stays parked at the trigger edge for the next
     /// poll. `cpos` is untouched — mouse-up commits the final endpoint.
     /// Returns `true` when the viewport actually moved.
-    pub fn drag_autoscroll_step(
-        &mut self,
-        buf: &Buffer,
-        viewport_rows: u16,
-        delta: isize,
-    ) -> bool {
+    pub fn drag_autoscroll_step(&mut self, buf: &Buffer, viewport_rows: u16, delta: isize) -> bool {
         if delta == 0 || viewport_rows == 0 {
             return false;
         }
@@ -1418,6 +1413,10 @@ impl Window {
         self.follow_tail = new_scroll >= max_scroll;
     }
 
+    /// One-shot positioning. Leaves `follow_tail` alone — callers that want
+    /// tail-follow re-engagement (transcript `<C-End>`) call `scroll_to_bottom`
+    /// instead; non-streaming surfaces (pickers, dialog lists) get to stay at
+    /// their default `false` even when the cursor lands on the last row.
     fn jump_to_line_col(&mut self, buf: &Buffer, line_idx: usize, col: usize, viewport_rows: u16) {
         let rows = buf.lines();
         if rows.is_empty() {
@@ -1428,8 +1427,6 @@ impl Window {
         let landed_col = buf.display_cursor_pos(self.cpos).1;
         self.curswant = Some(landed_col);
         self.sync_from_cpos(buf, viewport_rows);
-        let max_scroll = (self.visual_row_total(buf)).saturating_sub(viewport_rows);
-        self.follow_tail = self.scroll_top >= max_scroll;
     }
 
     pub fn render(&self, buf: &Buffer, slice: &mut GridSlice<'_>, ctx: &DrawContext) {
@@ -3207,8 +3204,6 @@ mod tests {
         w.ensure_layout(&buf, 5);
         // At width=5, each 20-char row wraps to 4 chunks → 16 visual rows.
         assert_eq!(w.layout.visual_count(), 16);
-        // Disable follow_tail so the anchor isn't bypassed.
-        w.follow_tail = false;
         w.set_scroll(8, &buf);
         // Logical row 2, chunk 0 sits at visual row 8.
         assert_eq!(w.scroll_anchor.map(|(_, l, b)| (l, b)), Some((2, 0)));
@@ -3236,7 +3231,6 @@ mod tests {
         let buf = make_buf(rows);
 
         w.ensure_layout(&buf, 5);
-        w.follow_tail = false;
         w.set_scroll(8, &buf);
         // Place cursor 3 visual rows below scroll_top — logical row 2,
         // chunk 3.
@@ -3263,7 +3257,6 @@ mod tests {
         w.wrap = true;
         let mut buf = make_buf(vec!["aaaaaaaaaa".into(), "bbbbbbbbbb".into()]);
         w.ensure_layout(&buf, 5);
-        w.follow_tail = false;
         w.set_scroll(2, &buf);
         assert!(w.scroll_anchor.is_some());
 

@@ -1155,8 +1155,11 @@ impl Ui {
         let viewport_h = win.viewport.expect("edge_drag_delta validated").rect.height;
         let buf_id = win.buf;
         let (win, buf) = self.win_and_buf_mut(win_id, buf_id);
-        win.expect("captured window")
-            .drag_autoscroll_step(buf.expect("captured buffer"), viewport_h, delta)
+        win.expect("captured window").drag_autoscroll_step(
+            buf.expect("captured buffer"),
+            viewport_h,
+            delta,
+        )
     }
 
     /// `(win, delta)` when an in-flight drag's endpoint sits exactly at the

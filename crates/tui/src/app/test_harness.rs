@@ -1476,6 +1476,68 @@ mod tests {
         assert!(!app.app.picker_state.contains_key(&leaf));
     }
 
+    /// Regression: a prompt-docked picker whose `scroll_top` lands at
+    /// `max_scroll` (cursor at the bottom in reversed mode) was getting
+    /// clobbered by `Ui::apply_tail_follow` on the first frame — the new
+    /// leaf has no viewport rect yet, so `max_scroll = total_rows - 0`
+    /// snapped `scroll_top` past the end and the picker rendered blank
+    /// until the user typed a character to force a re-layout.
+    #[test]
+    fn prompt_docked_picker_does_not_get_tail_clobbered_on_first_render() {
+        let tmp = tempfile::tempdir().unwrap();
+        let init = tmp.path().join("init.lua");
+        std::fs::write(
+            &init,
+            r#"
+            smelt.cmd.picker("pick", {
+              items = (function()
+                local out = {}
+                for i = 1, 12 do out[i] = { label = "item" .. i } end
+                return out
+              end)(),
+              apply = function() end,
+            })
+            "#,
+        )
+        .unwrap();
+
+        let mut app = TestApp::builder().with_init_lua(&init).build();
+        app.type_text("/pick");
+        app.app.render_normal(false);
+
+        app.press(KeyCode::Enter);
+        app.feed_one(SourceEvent::LuaWakeup);
+        app.app.render_normal(false);
+
+        // Locate the prompt-docked picker overlay (the slash completer's
+        // own picker is closed on Enter).
+        let leaf = (1u32..50)
+            .map(crate::smelt_term::OverlayId)
+            .filter_map(|id| app.app.ui.overlay(id))
+            .filter_map(|ov| ov.layout.leaves_in_order().into_iter().next())
+            .map(|p| WinId(p.0))
+            .find(|&w| app.app.picker_state.contains_key(&w))
+            .expect("a prompt-docked picker overlay should be open after /pick");
+
+        let win = app.app.ui.win(leaf).expect("picker leaf alive");
+        let buf = app.app.ui.buf(win.buf).expect("picker buf alive");
+        let viewport_rows = win
+            .viewport
+            .map(|v| v.rect.height)
+            .expect("picker leaf must have a viewport after render_normal");
+        let total_rows = buf.line_count() as u16;
+        let max_scroll = total_rows.saturating_sub(viewport_rows);
+        assert!(
+            win.scroll_top <= max_scroll,
+            "picker scroll_top must stay within bounds on first render \
+             (scroll_top={}, max_scroll={}, total_rows={}, viewport_rows={})",
+            win.scroll_top,
+            max_scroll,
+            total_rows,
+            viewport_rows,
+        );
+    }
+
     // ── Vim mode transitions ────────────────────────────────────────
 
     #[test]
