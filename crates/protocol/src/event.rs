@@ -436,6 +436,11 @@ pub enum UiCommand {
         /// the Anthropic prefix cache with the main turn.
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         tools: Vec<ToolDef>,
+        /// Stable per-session identifier. Used as OpenAI's
+        /// `prompt_cache_key` so EngineAsk requests route to the same
+        /// cache shard as the main turn.
+        #[serde(default, skip_serializing_if = "String::is_empty")]
+        session_id: String,
     },
 
     /// Result of a tool execution (response to `ToolDispatch`).

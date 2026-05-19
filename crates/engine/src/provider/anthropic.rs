@@ -593,6 +593,7 @@ mod tests {
         CacheConfig {
             anthropic_markers: true,
             ttl_long: false,
+            prompt_cache_key: None,
         }
     }
 
@@ -600,6 +601,7 @@ mod tests {
         CacheConfig {
             anthropic_markers: true,
             ttl_long: true,
+            prompt_cache_key: None,
         }
     }
 

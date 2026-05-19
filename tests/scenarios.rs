@@ -403,11 +403,12 @@ async fn anthropic_emits_cache_control_markers() {
     );
 }
 
-/// OpenAI-family providers must NOT receive a `prompt_cache_key`: the
-/// server-side prefix cache is automatic, and sending a per-session
-/// identifier is telemetry without a benefit on a single-user CLI.
+/// `prompt_cache_key` is gated to `openai` and `codex` provider kinds.
+/// Generic `openai-compatible` endpoints (vllm, llama.cpp, etc.) often
+/// don't recognize the field — sending it would be telemetry without
+/// any caching benefit.
 #[tokio::test]
-async fn openai_omits_prompt_cache_key() {
+async fn openai_compatible_omits_prompt_cache_key() {
     let h = Harness::new().await;
     h.write_config("openai-compatible", "gpt-test");
     h.write_init_lua("");

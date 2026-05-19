@@ -384,15 +384,32 @@ impl<'a> ChatOptions<'a> {
     }
 }
 
-/// Per-request prompt-cache strategy. OpenAI-family providers are not
-/// represented here: their cache is server-side automatic on byte-identical
-/// prefixes, and `prompt_cache_key` is deliberately omitted to avoid
-/// leaking a per-session identifier.
+/// Per-request prompt-cache strategy. Anthropic uses `cache_control`
+/// markers; OpenAI-family providers use a `prompt_cache_key` routing hint
+/// (session-scoped) that improves hit rate under load. The key is a
+/// performance optimization, not telemetry — without it OpenAI's prefix
+/// cache works opportunistically; with it the request routes to a shard
+/// that already saw the prefix.
 #[derive(Clone, Debug, Default)]
 pub struct CacheConfig {
     pub anthropic_markers: bool,
-    /// Use the 1-hour TTL instead of 5 minutes.
+    /// Use the 1-hour TTL instead of 5 minutes (Anthropic only).
     pub ttl_long: bool,
+    /// Session-stable identifier sent to OpenAI / Codex as
+    /// `prompt_cache_key`. Should be the same for every request in a
+    /// session and differ across sessions. Clamped to 64 chars.
+    pub prompt_cache_key: Option<String>,
+}
+
+/// OpenAI accepts up to 256 chars but recommends shorter; pi-mono uses
+/// 64. Session ids in smelt are SHA256 hex (64 chars) so most keys pass
+/// through unchanged.
+pub(crate) fn clamp_prompt_cache_key(key: &str) -> String {
+    if key.len() <= 64 {
+        key.to_string()
+    } else {
+        key[..64].to_string()
+    }
 }
 
 #[derive(Clone)]
@@ -484,6 +501,7 @@ impl Provider {
         CacheConfig {
             anthropic_markers: self.supports_anthropic_cache(),
             ttl_long,
+            prompt_cache_key: None,
         }
     }
 
@@ -592,6 +610,16 @@ impl Provider {
 
         if let Some(fmt) = opts.response_format.as_ref() {
             apply_response_format(&mut body, self.kind, fmt);
+        }
+
+        // OpenAI / Codex routing hint: keeps follow-up requests landing on
+        // the shard that already cached the prefix. Anthropic uses
+        // cache_control markers instead; Copilot and local OpenAI-compat
+        // servers don't recognize the field.
+        if matches!(self.kind, ProviderKind::OpenAi | ProviderKind::Codex) {
+            if let Some(ref key) = opts.cache.prompt_cache_key {
+                body["prompt_cache_key"] = serde_json::json!(clamp_prompt_cache_key(key));
+            }
         }
 
         let use_stream = opts.on_delta.is_some() || is_codex;

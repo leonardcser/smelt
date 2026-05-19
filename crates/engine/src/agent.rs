@@ -51,7 +51,7 @@ pub(crate) async fn engine_task(
                     UiCommand::StartTurn(payload) => {
                         let protocol::StartTurnPayload {
                             turn_id, content: input_content, mode, model, reasoning_effort,
-                            history, api_base, api_key, session_id: _, session_dir: _,
+                            history, api_base, api_key, session_id, session_dir: _,
                             model_config_overrides, permission_overrides: _,
                             system_prompt: tui_system_prompt, tools,
                         } = *payload;
@@ -87,6 +87,7 @@ pub(crate) async fn engine_task(
                             model,
                             system_prompt,
                             tools,
+                            session_id,
                             started_at: config.clock.instant_now(),
                             tps_samples: Vec::new(),
                             tool_elapsed: HashMap::new(),
@@ -101,6 +102,7 @@ pub(crate) async fn engine_task(
                         response_format,
                         reasoning_effort,
                         tools,
+                        session_id,
                     } => {
                         spawn_engine_ask(
                             &config,
@@ -113,6 +115,7 @@ pub(crate) async fn engine_task(
                                 response_format,
                                 reasoning_effort,
                                 tools,
+                                session_id,
                             },
                             &event_tx,
                         );
@@ -173,6 +176,9 @@ pub(crate) struct AskTask {
     /// tools byte-for-byte, the request reuses the main session's
     /// Anthropic prefix cache.
     pub tools: Vec<protocol::ToolDef>,
+    /// Session id forwarded as `prompt_cache_key` to OpenAI / Codex so
+    /// the EngineAsk hits the same cache shard as the main turn.
+    pub session_id: String,
 }
 
 fn spawn_engine_ask(
@@ -189,6 +195,7 @@ fn spawn_engine_ask(
         response_format,
         reasoning_effort,
         tools,
+        session_id,
     } = task;
     let (api, model_name) = resolve_ask_target(config, model);
     let provider = build_provider(
@@ -208,6 +215,9 @@ fn spawn_engine_ask(
 
         let mut opts = ChatOptions::new(&cancel);
         opts.cache = provider.default_cache_config(cache_ttl_long);
+        if !session_id.is_empty() {
+            opts.cache.prompt_cache_key = Some(session_id);
+        }
         if let Some(fmt) = response_format {
             opts.response_format = Some(crate::provider::ResponseFormat {
                 name: fmt.name,
@@ -368,6 +378,9 @@ struct Turn<'a> {
     model: String,
     system_prompt: String,
     tools: Vec<protocol::ToolDef>,
+    /// Stable per-session identifier sent as OpenAI's `prompt_cache_key`
+    /// to anchor cache routing across all turns in this session.
+    session_id: String,
     started_at: Instant,
     tps_samples: Vec<f64>,
     tool_elapsed: HashMap<String, u64>,
@@ -539,6 +552,7 @@ impl<'a> Turn<'a> {
                 response_format,
                 reasoning_effort,
                 tools,
+                session_id,
             } => {
                 spawn_engine_ask(
                     self.config,
@@ -551,6 +565,7 @@ impl<'a> Turn<'a> {
                         response_format,
                         reasoning_effort,
                         tools,
+                        session_id,
                     },
                     self.event_tx,
                 );
@@ -1540,14 +1555,16 @@ impl<'a> Turn<'a> {
                     });
                 }
             };
+            let mut cache = self
+                .provider
+                .default_cache_config(self.config.cache_ttl_long);
+            cache.prompt_cache_key = Some(self.session_id.clone());
             let opts = ChatOptions {
                 cancel: &self.cancel,
                 on_retry: Some(&on_retry),
                 on_delta: Some(&on_delta),
                 response_format: None,
-                cache: self
-                    .provider
-                    .default_cache_config(self.config.cache_ttl_long),
+                cache,
             };
             let chat_future = self.provider.chat(
                 &self.messages,

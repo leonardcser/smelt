@@ -305,6 +305,7 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
                         messages.push(protocol::Message::user(protocol::Content::text(&q)));
                     }
                     let model = model_ref.and_then(|r| resolve_model_for_ask(app, &r));
+                    let session_id = app.core.session.id.clone();
                     app.core.engine.send(protocol::UiCommand::EngineAsk {
                         id,
                         system,
@@ -313,6 +314,7 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
                         response_format,
                         reasoning_effort,
                         tools,
+                        session_id,
                     })
                 });
                 Ok(id)

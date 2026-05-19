@@ -375,6 +375,12 @@ local function emit_event(phase, before_tokens, after_tokens, extra)
   smelt.log.info("compaction", data)
 end
 
+-- Threshold (fraction of context window) below which Phase A's prune is
+-- considered "enough" — we commit the prune and skip the summarisation
+-- LLM call. Above this we discard the prune so Phase B can inherit the
+-- un-mutated session and reuse the main turn's prompt-cache slot.
+local PHASE_A_SUFFICIENT_THRESHOLD = 0.60
+
 local function run_compact(opts)
   local history = smelt.session.messages()
   if not history or #history == 0 then
@@ -383,18 +389,24 @@ local function run_compact(opts)
   end
   local before_tokens = approx_history_tokens(history)
 
-  -- Phase A: cheap prune of older tool results.
+  -- Phase A: speculatively prune older tool-result bodies. Commit only
+  -- when prune alone brings tokens comfortably under threshold; otherwise
+  -- discard so the Phase B summariser inherits the original session and
+  -- hits the main-turn cache. Applying the prune before summarising
+  -- would rewrite early-prefix messages and bust that cache.
   local pruned, elided_bytes = prune_old_tool_results(history)
-  if elided_bytes > 0 then
-    smelt.session.messages(pruned)
-    local mid_tokens = approx_history_tokens(pruned)
-    emit_event("prune", before_tokens, mid_tokens, { elided_bytes = elided_bytes })
-    history = pruned
-    before_tokens = mid_tokens
+  local window = smelt.session.context_window()
+  if elided_bytes > 0 and window then
+    local pruned_tokens = approx_history_tokens(pruned)
+    if pruned_tokens < window * PHASE_A_SUFFICIENT_THRESHOLD then
+      smelt.session.messages(pruned)
+      emit_event("prune", before_tokens, pruned_tokens, { elided_bytes = elided_bytes })
+      return
+    end
   end
 
-  -- Phase B: summarize the older history when the prune wasn't enough
-  -- (or when called explicitly via /compact).
+  -- Phase B: summarise the original history. `inherit_session` keeps the
+  -- request prefix byte-identical to the main turn for cache reuse.
   summarize(history, opts and opts.instructions, function(summary)
     if not summary then
       consecutive_failures = consecutive_failures + 1
