@@ -311,6 +311,10 @@ pub struct Window {
     pub pending_press: Option<usize>,
     /// `(scroll_top, follow_tail)` last emitted via `WinEvent::Scrolled`.
     pub(crate) last_emitted_scroll: Option<(u16, bool)>,
+    /// `(rect, content_width)` last emitted via `WinEvent::Resized`. Tracked
+    /// here so the dispatcher can fire only when the leaf's geometry
+    /// actually changed since the last frame.
+    pub(crate) last_emitted_resize: Option<(Rect, u16)>,
     /// Moving end of an active mouse drag-select, in editable-byte space. `None`
     /// outside a drag. The renderer paints the cursor/CursorLine at this byte's
     /// projected row when set, and the selection range is `(selection_anchor,
@@ -360,6 +364,7 @@ impl Window {
             pending_press: None,
             drag_endpoint: None,
             last_emitted_scroll: None,
+            last_emitted_resize: None,
         }
     }
 

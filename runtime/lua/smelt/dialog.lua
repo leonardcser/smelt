@@ -154,24 +154,18 @@ end
 
 -- ── Dialog overlay wrapper ────────────────────────────────────────────
 
--- Build the overlay items table from panels and open the overlay. Returns the root
--- leaf and the array of leaves.
+-- Build the overlay items table from panels and open the overlay. Returns
+-- the root leaf and the array of leaves.
 --
--- Height modes (pick one; setting both is an error):
---   * `opts.height` — dialog is exactly that size. Integer = cells; `"N%"` =
---     percent of the screen; `"fill"` = full screen. Default `"60%"`. Panels
---     with no `height` default to `"fill"` (split the dock's remainder).
---   * `opts.max_height` — dialog shrinks to fit its content, capped at this
---     size. Panels with no `height` default to `"fit"` so a single-panel
---     dialog actually shrinks; longer content triggers the panel's scrollbar
---     at the cap.
+-- Dialog height (pick one; setting both is an error):
+--   * `opts.height`     — fixed: integer cells, `"N%"`, `"fill"`. Default `"60%"`.
+--   * `opts.max_height` — shrink to content, capped at this size. Panels with
+--     no explicit `height` default to `"fit"` so the panel vbox actually
+--     reports its natural size to the overlay.
 --
--- Translation: both modes desugar to a `smelt.overlay.layout` wrapper around the
--- panel vbox before opening the overlay. The overlay itself has no `width` /
--- `height` knobs — its size is whatever the layout-tree's natural size
--- resolves to against the current terminal, re-evaluated every frame. The
--- height literal (integer cells / `"N%"` / `"fill"` / `"fit"`) is passed
--- straight through to `smelt.overlay.layout.vbox`, which understands all of these.
+-- Both desugar to a single value passed to `smelt.overlay.new`'s `height`
+-- knob (`"max:N%"` for max_height). The panel vbox is the overlay layout
+-- directly — no outer wrapper.
 
 local function open_overlay(opts)
   if opts.height ~= nil and opts.max_height ~= nil then
@@ -221,23 +215,16 @@ local function open_overlay(opts)
     end
   end
 
-  -- The panel vbox is the inner layout. Wrap it in an outer vbox slot whose
-  -- height constraint encodes the dialog-level sizing rule:
-  --   * `height = H`     -> outer constraint H — dialog is exactly that tall
-  --   * `max_height` set -> outer `fit`        — dialog shrinks to content, capped at the anchor extent
-  --   * neither          -> outer `"60%"`      — dock_bottom anchor default
   local panel_vbox = smelt.overlay.layout.vbox(layout_items)
-  local outer_height
+
+  -- fixed: width = "100%", height = opts.height (or "60%" default)
+  -- fit:   width = "100%", height = "fit", max_height = opts.max_height
+  local height_spec, max_height_spec
   if opts.max_height ~= nil then
-    outer_height = "fit"
-  elseif opts.height ~= nil then
-    outer_height = opts.height
+    height_spec, max_height_spec = "fit", opts.max_height
   else
-    outer_height = "60%"
+    height_spec, max_height_spec = (opts.height or "60%"), nil
   end
-  local outer = smelt.overlay.layout.vbox({
-    { panel_vbox, height = outer_height },
-  })
 
   local overlay = smelt.overlay.new({
     title        = title,
@@ -245,7 +232,10 @@ local function open_overlay(opts)
     border       = { top = "SmeltAccent" },
     modal        = true,
     blocks_agent = opts.blocks_agent or false,
-    layout       = outer,
+    layout       = panel_vbox,
+    width        = "100%",
+    height       = height_spec,
+    max_height   = max_height_spec,
   })
 
   return leaves[1], leaves, overlay
@@ -363,6 +353,145 @@ function smelt.dialog.open(opts)
     smelt.task.resume(task_id, value)
   end)
   return smelt.task.wait(task_id)
+end
+
+-- ── Picker preset ─────────────────────────────────────────────────────
+--
+-- `smelt.dialog.picker(opts)` is a thin wrapper that bundles the recurring
+-- Telescope-style shape: a single-line input on top, a non-focusable list
+-- below, navigation forwarded from the input to the list, Enter submits.
+-- Coroutine-blocking like `smelt.dialog.open`; returns the value resolved
+-- from `on_submit` (or `nil` on dismiss).
+--
+-- Opts:
+--   * `items`       — array of arbitrary item tables (passed to `render`).
+--   * `render`      — `function(item) -> { text = ..., marks = ... }` (see
+--                     `smelt.list`).
+--   * `filter`      — optional predicate `function(item) -> bool` applied
+--                     to every refilter; the picker re-runs it whenever
+--                     the query changes (so it can close over the live
+--                     query state).
+--   * `placeholder` — input prompt text. Defaults to `""`.
+--   * `empty_text`  — shown in the list when nothing matches.
+--   * `on_open`     — `function(ctx)` fires once before the dialog blocks,
+--                     after the input/list have been built. Use it to seed
+--                     marks on the input buffer or to set an initial cursor
+--                     row on the list.
+--   * `on_query`    — `function(query, ctx)` fires on every keystroke.
+--                     The default is `list:set_filter(opts.filter)`. Pass
+--                     this when you want to swap the filter (e.g. rebuild
+--                     it from a fresh query).
+--   * `on_submit`   — `function(item, ctx)` fires on Enter. Default:
+--                     `ctx.resolve(item)`. Override when you need to
+--                     post-process before resolving (or to no-op when
+--                     nothing is selected).
+--   * `keymaps`     — extra dialog-level keymaps merged on top of the
+--                     built-in navigation bindings. Each entry's
+--                     `on_press(ctx)` receives the picker ctx with
+--                     `ctx.list`, `ctx.input`, `ctx.input_buf` added.
+--   * `title`, `height`, `max_height`, `blocks_agent` — forwarded to
+--                     `smelt.dialog.open`.
+
+local NAV_KEYS = {
+  { "up",     -1  },
+  { "down",   1   },
+  { "ctrl-k", -1  },
+  { "ctrl-j", 1   },
+  { "ctrl-p", -1  },
+  { "ctrl-n", 1   },
+  { "pgup",   -10 },
+  { "pgdn",   10  },
+  { "ctrl-u", -5  },
+  { "ctrl-d", 5   },
+}
+
+function smelt.dialog.picker(opts)
+  if not coroutine.isyieldable() then
+    error("smelt.dialog.picker: call from inside smelt.spawn(fn) or tool.execute", 2)
+  end
+  if type(opts) ~= "table" then
+    error("smelt.dialog.picker: expected table of options", 2)
+  end
+  if type(opts.render) ~= "function" then
+    error("smelt.dialog.picker: opts.render must be a function", 2)
+  end
+
+  local input_leaf, input_buf = smelt.dialog.input(opts.placeholder or "")
+  local list_buf  = smelt.buf.new()
+  local list_leaf = smelt.dialog.list(list_buf, { focusable = false })
+
+  local list = smelt.list.new({
+    leaf       = list_leaf,
+    buf        = list_buf,
+    items      = opts.items or {},
+    render     = opts.render,
+    filter     = opts.filter,
+    empty_text = opts.empty_text or "  (no matches)",
+  })
+
+  local function augment(ctx)
+    ctx.list      = list
+    ctx.input     = input_leaf
+    ctx.input_buf = input_buf
+    return ctx
+  end
+
+  if type(opts.on_open) == "function" then
+    opts.on_open(augment({}))
+  end
+
+  input_leaf:on("text_changed", function(raw)
+    local query = (raw and raw.text) or ""
+    if type(opts.on_query) == "function" then
+      opts.on_query(query, augment({ text = query }))
+    elseif opts.filter ~= nil then
+      list:set_filter(opts.filter)
+    end
+  end)
+
+  local function nav(delta)
+    return function() list:move_cursor(delta) end
+  end
+
+  local keymaps = {}
+  for _, n in ipairs(NAV_KEYS) do
+    table.insert(keymaps, { key = n[1], on_press = nav(n[2]) })
+  end
+  if type(opts.keymaps) == "table" then
+    for _, km in ipairs(opts.keymaps) do
+      local fn = km.on_press
+      table.insert(keymaps, {
+        key      = km.key,
+        hint     = km.hint,
+        on_press = function(ctx) return fn(augment(ctx)) end,
+      })
+    end
+  end
+
+  local on_submit
+  if type(opts.on_submit) == "function" then
+    on_submit = function(ctx) return opts.on_submit(list:selected(), augment(ctx)) end
+  else
+    on_submit = function(ctx)
+      local item = list:selected()
+      if item ~= nil then ctx.resolve(item) end
+    end
+  end
+
+  return smelt.dialog.open({
+    title        = opts.title,
+    height       = opts.height,
+    max_height   = opts.max_height,
+    blocks_agent = opts.blocks_agent,
+    panels = {
+      { leaf = input_leaf, height = 1      },
+      { leaf = list_leaf,  height = "fill" },
+    },
+    focus     = input_leaf,
+    keymaps   = keymaps,
+    on_submit = on_submit,
+    on_dismiss = opts.on_dismiss,
+  })
 end
 
 -- Non-coroutine open. Returns `{ win, panels, close() }` synchronously. The consumer

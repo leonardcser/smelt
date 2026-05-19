@@ -1,8 +1,18 @@
 -- Built-in /resume command. Telescope-style picker: search input on top, results
 -- below. Arrows + Ctrl-J/K navigate; typing into the input filters; Enter loads;
--- Ctrl-D deletes the highlighted session; Alt-W toggles the workspace filter.
+-- Alt-D deletes the highlighted session; Ctrl-W toggles the workspace filter
+-- between "this workspace" (default) and "all sessions".
+--
+-- Matching is two-tier:
+--   * Title + first-user-message: fuzzy match (`smelt.fuzzy`), instant — runs
+--     against cheap meta loaded up front.
+--   * Full message text: substring match against the per-session `content.txt`
+--     sidecar, loaded in parallel on the first non-empty query and cached for
+--     the dialog lifetime. Opening the dialog stays instant; the first
+--     keystroke pays the IO cost once.
 
-local NS_META = smelt.ns("smelt.resume.meta")
+local NS_META  = smelt.ns("smelt.resume.meta")
+local NS_STATE = smelt.ns("smelt.resume.state")
 
 local function is_junk(s)
   if s == nil then return true end
@@ -45,55 +55,34 @@ end
 
 local LEADING, SIZE_COL, TIME_COL, GAP = 2, 8, 7, 2
 
-local function format_row(entry, now_ms)
-  local size_str = format_size(entry.size_bytes)
-  local time_str = time_ago(
-    (entry.updated_at_ms > 0) and entry.updated_at_ms or entry.created_at_ms,
-    now_ms
-  )
-  return string.format(
-    "%s%" .. SIZE_COL .. "s%s%-" .. TIME_COL .. "s%s%s",
-    string.rep(" ", LEADING),
-    size_str,
-    string.rep(" ", GAP),
-    time_str,
-    string.rep(" ", GAP),
-    display_title(entry)
-  )
+local function make_render(now_ms)
+  return function(entry)
+    local size_str = format_size(entry.size_bytes)
+    local ts = (entry.updated_at_ms > 0) and entry.updated_at_ms or entry.created_at_ms
+    local meta = string.format(
+      "%s%" .. SIZE_COL .. "s%s%-" .. TIME_COL .. "s%s",
+      string.rep(" ", LEADING),
+      size_str,
+      string.rep(" ", GAP),
+      time_ago(ts, now_ms),
+      string.rep(" ", GAP)
+    )
+    local indent = string.rep("  ", entry.depth or 0)
+    return {
+      text  = meta .. indent .. display_title(entry),
+      marks = { { col = 0, opts = { end_col = #meta, dim = true } } },
+    }
+  end
 end
 
-local function filter_entries(entries, query, workspace_only, current_cwd)
-  local out = {}
-  for _, e in ipairs(entries) do
-    local keep = true
-    if workspace_only then keep = (e.cwd == current_cwd) end
-    if keep and query ~= "" then
-      local hay = display_title(e) .. " " .. (e.subtitle or "")
-      keep = smelt.fuzzy.score(hay, query) ~= nil
-    end
-    if keep then table.insert(out, e) end
-  end
-  return out
-end
-
-local function refresh_list(list_buf, filtered, now_ms)
-  -- NS_META is a custom namespace, so `buf:lines` doesn't clear it for us;
-  -- wipe it ourselves before each render or stale dim marks from a longer
-  -- previous list leak into shorter renders (e.g. the empty-state line).
-  list_buf:clear_ns(NS_META)
-  if #filtered == 0 then
-    local empty = "  (no matching sessions)"
-    list_buf:lines({ empty })
-    list_buf:mark(NS_META, 1, 0, { end_col = #empty, dim = true })
-    return
-  end
-  local lines = {}
-  for _, e in ipairs(filtered) do table.insert(lines, format_row(e, now_ms)) end
-  list_buf:lines(lines)
-  local meta_end = LEADING + SIZE_COL + GAP + TIME_COL
-  for i = 1, #filtered do
-    list_buf:mark(NS_META, i, 0, { end_col = meta_end, dim = true })
-  end
+local function update_state_label(buf, workspace_only)
+  buf:clear_ns(NS_STATE)
+  local label = workspace_only and " workspace " or " all "
+  buf:mark(NS_STATE, 1, 0, {
+    virt_text     = label,
+    virt_text_pos = "right_align",
+    dim           = true,
+  })
 end
 
 -- Wire the `--resume` CLI flag (declared in `smelt/early/resume.lua`) to a
@@ -120,76 +109,88 @@ smelt.cmd.register("resume", function()
       return
     end
 
-    local current_cwd   = smelt.session.cwd()
-    local now_ms        = os.time() * 1000
+    local current_cwd    = smelt.session.cwd()
+    local now_ms         = os.time() * 1000
     local workspace_only = true
-    local query         = ""
-    local filtered      = filter_entries(entries, query, workspace_only, current_cwd)
+    local query          = ""
 
-    -- List: passive display, non-focusable; selection shown via selection_highlight.
-    local list_buf = smelt.buf.new()
-    refresh_list(list_buf, filtered, now_ms)
-    local list_leaf = smelt.dialog.list(list_buf, { focusable = false })
+    -- Expand flat list into DFS-ordered tree (depth field for fork indent).
+    local tree_entries = smelt.session.tree(entries)
 
-    -- Input: focused, receives typing. Filter loop wired below.
-    local input_leaf = smelt.dialog.input("filter sessions…")
-
-    input_leaf:on("text_changed", function(ctx)
-      query = ctx.text or ""
-      filtered = filter_entries(entries, query, workspace_only, current_cwd)
-      refresh_list(list_buf, filtered, now_ms)
-      list_leaf:cursor(0)
-    end)
-
-    local function nav(delta)
-      return function() list_leaf:move_cursor(delta) end
+    -- Pre-build title haystacks once. Hot path runs `smelt.fuzzy.score` against
+    -- these per refilter; rebuilding per call would re-concatenate strings.
+    local title_hays = {}
+    for _, e in ipairs(tree_entries) do
+      title_hays[e.id] = display_title(e) .. " " .. (e.subtitle or "")
     end
 
-    -- The list-kind leaf already binds these on itself, but the list
-    -- is non-focusable here (focus stays on the input), so those bindings never
-    -- fire. We forward at the dialog level instead so the input stays focused
-    -- while these keys drive the list cursor.
-    local picked = smelt.dialog.open({
-      title  = "resume",
-      height = "70%",
-      panels = {
-        { leaf = input_leaf, height = 1      },
-        { leaf = list_leaf,  height = "fill" },
-      },
-      focus  = input_leaf,
+    -- Lowercased content blobs, lazy-loaded in parallel on the first non-empty
+    -- query. Stays `nil` while the user is just toggling the workspace filter.
+    local texts = nil
+
+    local function ensure_texts()
+      if texts ~= nil then return end
+      local ids = {}
+      for _, e in ipairs(tree_entries) do table.insert(ids, e.id) end
+      local raw = smelt.session.texts(ids)
+      local lowered = {}
+      for k, v in pairs(raw) do lowered[k] = v:lower() end
+      texts = lowered
+    end
+
+    local function make_filter()
+      local q_lower = query:lower()
+      return function(entry)
+        if workspace_only and entry.cwd ~= current_cwd then return false end
+        if query == "" then return true end
+        if smelt.fuzzy.score(title_hays[entry.id] or "", query) ~= nil then
+          return true
+        end
+        local blob = texts and texts[entry.id]
+        return blob ~= nil and blob:find(q_lower, 1, true) ~= nil
+      end
+    end
+
+    local picked = smelt.dialog.picker({
+      title       = "resume",
+      height      = "70%",
+      placeholder = "filter sessions…",
+      items       = tree_entries,
+      render      = make_render(now_ms),
+      filter      = make_filter(),
+      empty_text  = "  (no matching sessions)",
+
+      on_open = function(ctx)
+        update_state_label(ctx.input_buf, workspace_only)
+      end,
+
+      on_query = function(q, ctx)
+        query = q
+        if query ~= "" then ensure_texts() end
+        ctx.list:set_filter(make_filter())
+      end,
+
       keymaps = {
-        { key = "up",     on_press = nav(-1)  },
-        { key = "down",   on_press = nav(1)   },
-        { key = "ctrl-k", on_press = nav(-1)  },
-        { key = "ctrl-j", on_press = nav(1)   },
-        { key = "ctrl-p", on_press = nav(-1)  },
-        { key = "ctrl-n", on_press = nav(1)   },
-        { key = "pgup",   on_press = nav(-10) },
-        { key = "pgdn",   on_press = nav(10)  },
-        { key = "ctrl-u", on_press = nav(-5)  },
-        { key = "ctrl-d", on_press = nav(5)   },
-        { key = "alt-w", hint = "⌥w: toggle workspace filter", on_press = function()
+        { key = "ctrl-w", hint = "^w: workspace ⇄ all", on_press = function(ctx)
             workspace_only = not workspace_only
-            filtered = filter_entries(entries, query, workspace_only, current_cwd)
-            refresh_list(list_buf, filtered, now_ms)
-            list_leaf:cursor(0)
+            update_state_label(ctx.input_buf, workspace_only)
+            ctx.list:set_filter(make_filter())
           end },
-        { key = "alt-d", hint = "⌥d: delete", on_press = function()
-            local idx = (list_leaf:cursor() or 0) + 1
-            local e = filtered[idx]
+        { key = "alt-d", hint = "⌥d: delete", on_press = function(ctx)
+            local e = ctx.list:selected()
             if not e then return end
             smelt.session.delete(e.id)
-            for i, x in ipairs(entries) do
-              if x.id == e.id then table.remove(entries, i); break end
+            for i, x in ipairs(tree_entries) do
+              if x.id == e.id then table.remove(tree_entries, i); break end
             end
-            filtered = filter_entries(entries, query, workspace_only, current_cwd)
-            refresh_list(list_buf, filtered, now_ms)
-            list_leaf:cursor(0)
+            title_hays[e.id] = nil
+            if texts then texts[e.id] = nil end
+            ctx.list:set_items(tree_entries)
           end },
       },
-      on_submit = function(ctx)
-        local idx = (list_leaf:cursor() or 0) + 1
-        ctx.resolve(filtered[idx])
+
+      on_submit = function(item, ctx)
+        if item ~= nil then ctx.resolve(item) end
       end,
     })
 

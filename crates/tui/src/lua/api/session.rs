@@ -305,6 +305,27 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
         },
     )?;
     m.fn_(
+        "text",
+        "Return the searchable plain-text blob for session `id` (user + assistant text only; reasoning, tool output, and system messages excluded). Returns `nil` when the session is missing. Reads the `content.txt` sidecar; falls back to rebuilding from `session.json` and caching the sidecar for legacy sessions.",
+        &["id"],
+        |_, id: String| -> LuaResult<Option<String>> {
+            Ok(smelt_core::session::load_search_blob(&id))
+        },
+    )?;
+    m.fn_(
+        "texts",
+        "Parallel batch read of `session.text(id)` for many ids. Returns a table keyed by id; missing sessions are omitted. Use this when a picker needs to search across all sessions — the heavy IO happens on a worker pool rather than serializing on the Lua thread.",
+        &["ids"],
+        |lua, ids: Vec<String>| -> LuaResult<mlua::Table> {
+            let pairs = smelt_core::session::load_search_blobs(ids);
+            let out = lua.create_table()?;
+            for (id, blob) in pairs {
+                out.set(id, blob)?;
+            }
+            Ok(out)
+        },
+    )?;
+    m.fn_(
         "delete",
         "Delete the persisted session with `id`. Refuses to delete the currently active session.",
         &["id"],

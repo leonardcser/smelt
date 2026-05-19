@@ -65,6 +65,10 @@ pub enum WinEvent {
     Drag,
     /// Window's scroll state changed. Payload carries the new `top` and `follow` flag.
     Scrolled,
+    /// Leaf's viewport rect changed (first paint, terminal resize, layout
+    /// reflow). Payload carries the new `{ row, col, width, height }` rect
+    /// and the inner `content_width` in `Payload::Rect`.
+    Resized,
 }
 
 /// Mouse button identity carried in `Payload::Mouse`.
@@ -100,6 +104,16 @@ pub enum Payload {
     Scroll {
         top: u16,
         follow: bool,
+    },
+    /// Resize payload. `row`/`col`/`width`/`height` describe the new outer
+    /// rect (matches `win:rect()`); `content_width` is the inner cell
+    /// budget after gutter and pad subtraction (matches `win:content_width()`).
+    Rect {
+        row: u16,
+        col: u16,
+        width: u16,
+        height: u16,
+        content_width: u16,
     },
 }
 

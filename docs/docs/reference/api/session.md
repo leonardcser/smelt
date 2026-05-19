@@ -110,6 +110,22 @@ fun(block_idx: integer?, opts: table?): nil
 
 Rewind the session to a prior user turn. `block_idx = nil` rewinds to before the first turn; `opts.restore_vim_insert = true` re-enters vim insert mode after the rewind.
 
+## `smelt.session.text`
+
+```lua
+fun(id: string): string?
+```
+
+Return the searchable plain-text blob for session `id` (user + assistant text only; reasoning, tool output, and system messages excluded). Returns `nil` when the session is missing. Reads the `content.txt` sidecar; falls back to rebuilding from `session.json` and caching the sidecar for legacy sessions.
+
+## `smelt.session.texts`
+
+```lua
+fun(ids: string[]): table
+```
+
+Parallel batch read of `session.text(id)` for many ids. Returns a table keyed by id; missing sessions are omitted. Use this when a picker needs to search across all sessions — the heavy IO happens on a worker pool rather than serializing on the Lua thread.
+
 ## `smelt.session.turns`
 
 ```lua

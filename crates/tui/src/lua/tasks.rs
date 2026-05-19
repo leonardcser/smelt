@@ -131,5 +131,19 @@ fn populate_payload_table(
             table.set("follow", *follow)?;
             Ok(())
         }
+        crate::smelt_term::Payload::Rect {
+            row,
+            col,
+            width,
+            height,
+            content_width,
+        } => {
+            table.set("row", *row)?;
+            table.set("col", *col)?;
+            table.set("width", *width)?;
+            table.set("height", *height)?;
+            table.set("content_width", *content_width)?;
+            Ok(())
+        }
     }
 }

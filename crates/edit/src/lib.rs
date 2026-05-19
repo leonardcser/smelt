@@ -765,7 +765,7 @@ impl Ui {
         for (id, ov) in self.overlays_in_z_order() {
             let size = ov
                 .size_override
-                .unwrap_or_else(|| ov.layout.natural_size_with((term_w, term_h), self));
+                .unwrap_or_else(|| resolve_overlay_size(ov, (term_w, term_h), self));
             if let Some(rect) = overlay::resolve_anchor(&ov.anchor, size, &ctx) {
                 out.push((id, rect, ov));
             }
@@ -1937,6 +1937,35 @@ impl Ui {
         }
     }
 
+    /// Fire `WinEvent::Resized` on every subscribed window whose viewport
+    /// `(rect, content_width)` changed since the last emission. Fires the
+    /// first time the leaf gets a viewport, then again on terminal resize
+    /// or layout reflow.
+    pub fn dispatch_resize_events(&mut self, lua_invoke: &mut LuaInvoke) {
+        let wins: Vec<WinId> = self.callbacks.wins_with_event(WinEvent::Resized);
+        for win in wins {
+            let Some(w) = self.wins.get_mut(&win) else {
+                continue;
+            };
+            let Some(vp) = w.viewport else {
+                continue;
+            };
+            let cur = (vp.rect, vp.content_width);
+            if w.last_emitted_resize == Some(cur) {
+                continue;
+            }
+            w.last_emitted_resize = Some(cur);
+            let payload = Payload::Rect {
+                row: vp.rect.top,
+                col: vp.rect.left,
+                width: vp.rect.width,
+                height: vp.rect.height,
+                content_width: vp.content_width,
+            };
+            self.fire_win_event(win, WinEvent::Resized, payload, lua_invoke);
+        }
+    }
+
     pub fn force_redraw(&mut self) {
         self.surface.force_redraw();
     }
@@ -2050,6 +2079,50 @@ fn chrome_zone(rect: Rect, ov: &Overlay, row: u16, col: u16) -> overlay::ChromeZ
         return overlay::ChromeZone::Title;
     }
     overlay::ChromeZone::Body
+}
+
+/// Resolve an overlay's rect size from its `width`/`height` `Constraint`
+/// against the terminal extent. `Fit` reads the layout's natural size on
+/// that axis; explicit sizing modes evaluate independently per axis.
+/// Then [`Overlay::max_width`] / [`Overlay::max_height`] cap the result if
+/// set — they're resolved with the same rules and act as upper bounds.
+fn resolve_overlay_size(
+    overlay: &Overlay,
+    term: (u16, u16),
+    sizer: &dyn layout::LeafSizer,
+) -> (u16, u16) {
+    use layout::Constraint::*;
+    let needs_natural = matches!(
+        (overlay.width, overlay.height),
+        (Fit, _) | (_, Fit) | (Max(_), _) | (_, Max(_)) | (Min(_), _) | (_, Min(_)),
+    );
+    let natural = if needs_natural {
+        overlay.layout.natural_size_with(term, sizer)
+    } else {
+        (0, 0)
+    };
+    let resolve = |c: layout::Constraint, term_axis: u16, natural_axis: u16| -> u16 {
+        match c {
+            Length(n) => n.min(term_axis),
+            Percentage(p) => ((term_axis as u32 * p as u32) / 100) as u16,
+            Ratio(num, denom) if denom != 0 => {
+                ((term_axis as u32 * num as u32) / denom as u32).min(term_axis as u32) as u16
+            }
+            Max(n) => natural_axis.min(n).min(term_axis),
+            Min(n) => natural_axis.max(n).min(term_axis),
+            Fill => term_axis,
+            Fit | Ratio(_, _) => natural_axis.min(term_axis),
+        }
+    };
+    let mut w = resolve(overlay.width, term.0, natural.0);
+    let mut h = resolve(overlay.height, term.1, natural.1);
+    if let Some(cap) = overlay.max_width {
+        w = w.min(resolve(cap, term.0, natural.0));
+    }
+    if let Some(cap) = overlay.max_height {
+        h = h.min(resolve(cap, term.1, natural.1));
+    }
+    (w, h)
 }
 
 /// Paint one resolved overlay: clear the rect (overlays are opaque) then walk its layout tree.

@@ -402,6 +402,7 @@ Window handle returned by `smelt.win.new(buf, opts?)`. Setter methods return the
 | `focus` | `fun(): nil` | yes | Move keyboard focus to this window. No-op if the window is not focusable. |
 | `buf` | `fun(): smelt.buf.Buf?` | yes | Return the backing Buf handle, or `nil` if the window is gone. |
 | `rect` | `fun(): any` | yes | Return the window's current viewport rect as `{ row, col, width, height }`, or `nil` until the first render lays it out. |
+| `content_width` | `fun(): any` | yes | Return the inner-content width in cells (gutter and pad_left/pad_right already subtracted), or `nil` until the first render lays the window out. Use this instead of `rect().width` when fitting text into the window's actual content budget. |
 | `cursor` | `fun(row: integer?): any` | yes | Read or write the cursor row (0-based). Without arg returns the row; with arg sets and returns the handle for chaining. |
 | `move_cursor` | `fun(delta: integer): smelt.win.Win` | yes | Move the cursor by `delta` rows (clamped to the buffer's line count). Returns the handle for chaining. |
 | `key` | `fun(chord: string, func: fun(value: table)): smelt.Reg` | yes | Bind `func` to `chord` on this window. Returns a Reg handle whose `:remove()` undoes the binding. Raises on unknown chords. |
@@ -463,5 +464,5 @@ Variants: `"insert"` \| `"normal"` \| `"visual"` \| `"visual_line"`
 
 Window-event names accepted by `win:on(event, fn)`. Maps onto the internal `WinEvent` enum.
 
-Variants: `"open"` \| `"close"` \| `"focus"` \| `"blur"` \| `"selection_changed"` \| `"submit"` \| `"text_changed"` \| `"dismiss"` \| `"tick"` \| `"press"` \| `"release"` \| `"drag"` \| `"scrolled"`
+Variants: `"open"` \| `"close"` \| `"focus"` \| `"blur"` \| `"selection_changed"` \| `"submit"` \| `"text_changed"` \| `"dismiss"` \| `"tick"` \| `"press"` \| `"release"` \| `"drag"` \| `"scrolled"` \| `"resized"`
 

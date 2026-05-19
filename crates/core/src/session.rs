@@ -362,6 +362,29 @@ fn build_search_blob(messages: &[Message]) -> String {
     out
 }
 
+/// Read the searchable text blob for `id`. Falls back to regenerating from
+/// `session.json` (and caching to disk) when the `content.txt` sidecar is
+/// missing — older sessions written before the sidecar existed.
+pub fn load_search_blob(id: &str) -> Option<String> {
+    let _perf = smelt_perf::perf::begin("session:load_search_blob");
+    let session_dir = sessions_dir().join(id);
+    if let Ok(contents) = fs::read_to_string(session_dir.join("content.txt")) {
+        return Some(contents);
+    }
+    let full = fs::read_to_string(session_dir.join("session.json")).ok()?;
+    let session: Session = serde_json::from_str(&full).ok()?;
+    let blob = build_search_blob(&session.messages);
+    atomic_write(&session_dir.join("content.txt"), blob.as_bytes(), now_ms());
+    Some(blob)
+}
+
+/// Parallel batch read of search blobs. Returns `(id, blob)` pairs; missing
+/// sessions are silently dropped. Output order is not stable.
+pub fn load_search_blobs(ids: Vec<String>) -> Vec<(String, String)> {
+    let _perf = smelt_perf::perf::begin("session:load_search_blobs");
+    crate::utils::parallel_filter_map(ids, |id| load_search_blob(&id).map(|b| (id, b)))
+}
+
 fn write_meta(session_dir: &std::path::Path, meta: &SessionMeta) {
     if let Ok(json) = serde_json::to_string(meta) {
         atomic_write(&session_dir.join("meta.json"), json.as_bytes(), now_ms());

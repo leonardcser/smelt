@@ -55,6 +55,10 @@ pub enum LuaWinEvent {
     /// Window's scroll state changed. Payload: `{ top, follow }` where
     /// `top` is the new `scroll_top` and `follow` is the pin-to-tail flag.
     Scrolled,
+    /// Leaf's viewport rect changed. Payload: `{ row, col, width, height,
+    /// content_width }` for the new outer rect and inner cell budget.
+    /// Fires once after the first paint and on every later resize/reflow.
+    Resized,
 }
 
 impl From<LuaWinEvent> for crate::smelt_term::WinEvent {
@@ -74,6 +78,7 @@ impl From<LuaWinEvent> for crate::smelt_term::WinEvent {
             LuaWinEvent::Release => WinEvent::Release,
             LuaWinEvent::Drag => WinEvent::Drag,
             LuaWinEvent::Scrolled => WinEvent::Scrolled,
+            LuaWinEvent::Resized => WinEvent::Resized,
         }
     }
 }
@@ -170,6 +175,24 @@ impl mlua::UserData for LuaWin {
                 }
                 None => Ok(mlua::Value::Nil),
             }
+        });
+
+        // Inner-content width in cells, with gutter and pad_left/pad_right
+        // already subtracted. Returns `nil` until the first paint lays the
+        // window out. Use this instead of `rect().width` when you need the
+        // cell budget for fitting text — `rect.width` includes chrome.
+        methods.add_method("content_width", |_, this, ()| -> LuaResult<mlua::Value> {
+            let w = crate::lua::try_with_app(|app| {
+                app.ui
+                    .win(this.id)
+                    .and_then(|w| w.viewport)
+                    .map(|vp| vp.content_width)
+            })
+            .flatten();
+            Ok(match w {
+                Some(n) => mlua::Value::Integer(n as i64),
+                None => mlua::Value::Nil,
+            })
         });
 
         // ── cursor: get / set ──────────────────────────────────────
@@ -412,6 +435,7 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
             "focus" => fn() -> (), "Move keyboard focus to this window. No-op if the window is not focusable.",
             "buf" => fn() -> Option<super::buf::LuaBuf>, "Return the backing Buf handle, or `nil` if the window is gone.",
             "rect" => fn() -> mlua::Value, "Return the window's current viewport rect as `{ row, col, width, height }`, or `nil` until the first render lays it out.",
+            "content_width" => fn() -> mlua::Value, "Return the inner-content width in cells (gutter and pad_left/pad_right already subtracted), or `nil` until the first render lays the window out. Use this instead of `rect().width` when fitting text into the window's actual content budget.",
             "cursor" => fn(row: Option<u64>) -> mlua::Value, "Read or write the cursor row (0-based). Without arg returns the row; with arg sets and returns the handle for chaining.",
             "move_cursor" => fn(delta: i64) -> LuaWin, "Move the cursor by `delta` rows (clamped to the buffer's line count). Returns the handle for chaining.",
             "key" => fn(chord: String, func: LuaCallback<mlua::Table, ()>) -> LuaReg, "Bind `func` to `chord` on this window. Returns a Reg handle whose `:remove()` undoes the binding. Raises on unknown chords.",

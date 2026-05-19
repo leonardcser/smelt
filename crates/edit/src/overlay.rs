@@ -1,7 +1,7 @@
 //! Z-stacked overlay window groups positioned via an `Anchor` over a `LayoutTree`.
 
 use super::WinId;
-use crate::layout::{Align, Anchor, Corner, LayoutTree, Rect};
+use crate::layout::{Align, Anchor, Constraint, Corner, LayoutTree, Rect};
 use std::collections::HashMap;
 
 /// Stable handle for an overlay. Distinct from `WinId` to avoid chrome/content hit collision.
@@ -38,6 +38,20 @@ pub enum HitTarget {
 pub struct Overlay {
     pub layout: LayoutTree,
     pub anchor: Anchor,
+    /// How wide the overlay rect is along the horizontal axis. Resolved
+    /// against the terminal width every frame. Default `Fit` reads the
+    /// layout's natural width — back-compat with the original
+    /// `natural_size_with` path.
+    pub width: Constraint,
+    /// Vertical-axis twin of [`Self::width`].
+    pub height: Constraint,
+    /// Optional cap applied after [`Self::width`] resolves. Lets a caller
+    /// say "fit to content, but never exceed 50% of the terminal" by
+    /// pairing `width = Fit` with `max_width = Percentage(50)`. Resolved
+    /// the same way as `width` but used only as an upper bound.
+    pub max_width: Option<Constraint>,
+    /// Vertical-axis twin of [`Self::max_width`].
+    pub max_height: Option<Constraint>,
     /// Stacking order. Higher draws on top; same `z` breaks by insertion order.
     pub z: u16,
     /// When true, focus + Tab cycling stay inside this overlay; Esc/Ctrl-C fires Dismiss.
@@ -49,6 +63,7 @@ pub struct Overlay {
     /// When true, the bottom-right border cell is a resize handle.
     pub resizable: bool,
     /// Explicit size override; set by resize gesture, preserved across frames.
+    /// Wins over [`Self::width`]/[`Self::height`] when set.
     pub size_override: Option<(u16, u16)>,
 }
 
@@ -57,6 +72,10 @@ impl Overlay {
         Self {
             layout,
             anchor,
+            width: Constraint::Fit,
+            height: Constraint::Fit,
+            max_width: None,
+            max_height: None,
             z: 50,
             modal: false,
             blocks_agent: false,
@@ -93,6 +112,26 @@ impl Overlay {
 
     pub fn with_size(mut self, size: (u16, u16)) -> Self {
         self.size_override = Some(size);
+        self
+    }
+
+    pub fn with_width(mut self, w: Constraint) -> Self {
+        self.width = w;
+        self
+    }
+
+    pub fn with_height(mut self, h: Constraint) -> Self {
+        self.height = h;
+        self
+    }
+
+    pub fn with_max_width(mut self, w: Option<Constraint>) -> Self {
+        self.max_width = w;
+        self
+    }
+
+    pub fn with_max_height(mut self, h: Option<Constraint>) -> Self {
+        self.max_height = h;
         self
     }
 }

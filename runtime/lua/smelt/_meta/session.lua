@@ -59,6 +59,14 @@ session.reset = nil
 ---@type fun(block_idx: integer?, opts: table?): nil
 session.rewind_to = nil
 
+--- Return the searchable plain-text blob for session `id` (user + assistant text only; reasoning, tool output, and system messages excluded). Returns `nil` when the session is missing. Reads the `content.txt` sidecar; falls back to rebuilding from `session.json` and caching the sidecar for legacy sessions.
+---@type fun(id: string): string?
+session.text = nil
+
+--- Parallel batch read of `session.text(id)` for many ids. Returns a table keyed by id; missing sessions are omitted. Use this when a picker needs to search across all sessions — the heavy IO happens on a worker pool rather than serializing on the Lua thread.
+---@type fun(ids: string[]): table
+session.texts = nil
+
 --- Return user turns as `{ block_idx, label }` rows where `label` is the first line of the user message. Used by the rewind dialog.
 ---@type fun(): table
 session.turns = nil

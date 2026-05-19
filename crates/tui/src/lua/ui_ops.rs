@@ -41,6 +41,17 @@ pub(crate) fn open_overlay(app: &mut TuiApp, opts: mlua::Table) -> Result<u64, S
     let z: u16 = opts.get("z").unwrap_or(50);
     let draggable: bool = opts.get("draggable").unwrap_or(false);
     let resizable: bool = opts.get("resizable").unwrap_or(false);
+    // `width`/`height` resolve the overlay rect per-frame against the
+    // terminal extent. Reuse the same constraint parser as `layout.vbox`
+    // items so `"70%"`, `"max:60"`, `"fit"`, integer cells, etc. all work.
+    // Default `Fit` matches the legacy "size from layout.natural" path.
+    let width = parse_overlay_constraint(&opts, "width", "overlay.width")?;
+    let height = parse_overlay_constraint(&opts, "height", "overlay.height")?;
+    // `max_width`/`max_height` are optional upper bounds applied after the
+    // primary axis resolves. Lets `width = "fit"` + `max_width = "50%"`
+    // express "shrink to content, cap at 50% of terminal".
+    let max_width = parse_overlay_constraint_opt(&opts, "max_width", "overlay.max_width")?;
+    let max_height = parse_overlay_constraint_opt(&opts, "max_height", "overlay.max_height")?;
 
     let mut window_leaves: Vec<WinId> = Vec::new();
     let (_root_constraint, inner) =
@@ -57,6 +68,10 @@ pub(crate) fn open_overlay(app: &mut TuiApp, opts: mlua::Table) -> Result<u64, S
         if let Some((id, ov)) = app.ui.lookup_named_overlay_mut(n) {
             ov.layout = layout;
             ov.anchor = anchor;
+            ov.width = width;
+            ov.height = height;
+            ov.max_width = max_width;
+            ov.max_height = max_height;
             ov.z = z;
             ov.modal = modal;
             ov.blocks_agent = blocks_agent;
@@ -87,12 +102,47 @@ pub(crate) fn open_overlay(app: &mut TuiApp, opts: mlua::Table) -> Result<u64, S
         .modal(modal)
         .blocks_agent(blocks_agent)
         .draggable(draggable)
-        .resizable(resizable);
+        .resizable(resizable)
+        .with_width(width)
+        .with_height(height)
+        .with_max_width(max_width)
+        .with_max_height(max_height);
     let id = app.ui.overlay_open(overlay);
     if let Some(n) = name {
         app.ui.name_overlay(n, id);
     }
     Ok(id.0 as u64)
+}
+
+/// Read `opts[key]` as a `Constraint` for the overlay's width or height.
+/// Missing/`nil` defaults to `Fit` (read the layout's natural size on that
+/// axis — back-compat with the original `natural_size_with` path). Any
+/// shape accepted by `crate::lua::parse::constraint` is supported here.
+fn parse_overlay_constraint(
+    opts: &mlua::Table,
+    key: &str,
+    ctx: &str,
+) -> Result<crate::smelt_term::layout::Constraint, String> {
+    let v: Option<mlua::Value> = opts.get(key).ok();
+    if matches!(v, None | Some(mlua::Value::Nil)) {
+        return Ok(crate::smelt_term::layout::Constraint::Fit);
+    }
+    crate::lua::parse::constraint(v, ctx)
+}
+
+/// Twin of [`parse_overlay_constraint`] that returns `None` for absent /
+/// `nil` values instead of defaulting to `Fit`. Used by `max_width` and
+/// `max_height` where "unset" means "no cap" rather than "fit".
+fn parse_overlay_constraint_opt(
+    opts: &mlua::Table,
+    key: &str,
+    ctx: &str,
+) -> Result<Option<crate::smelt_term::layout::Constraint>, String> {
+    let v: Option<mlua::Value> = opts.get(key).ok();
+    if matches!(v, None | Some(mlua::Value::Nil)) {
+        return Ok(None);
+    }
+    crate::lua::parse::constraint(v, ctx).map(Some)
 }
 
 /// Accept `target = <integer>` or `target = <Win userdata>`. Used by the

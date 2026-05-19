@@ -972,6 +972,7 @@ impl TuiApp {
                     };
                 self.ui.dispatch_tick(&mut lua_invoke);
                 self.ui.dispatch_scroll_events(&mut lua_invoke);
+                self.ui.dispatch_resize_events(&mut lua_invoke);
             }
             self.flush_lua_callbacks();
 

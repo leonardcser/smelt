@@ -19,6 +19,8 @@ static EMBEDDED_LUA: Dir<'_> = include_dir!("$CARGO_MANIFEST_DIR/../../runtime/l
 const BOOTSTRAP_FILES: &[&str] = &[
     "_bootstrap.lua",
     "dialog.lua",
+    "list.lua",
+    "session.lua",
     "widgets/picker.lua",
     "widgets/prompt_picker.lua",
     "cmd.lua",
