@@ -1422,4 +1422,311 @@ mod tests {
         assert_eq!(content.as_array().unwrap().len(), 1);
         assert_eq!(content[0]["type"], "text");
     }
+
+    // ── Cache stability regression tests ─────────────────────────────────
+    //
+    // These pin the invariants the rest of the codebase relies on for
+    // Anthropic prompt-cache reuse. Each test names the scenario, what
+    // SHOULD reuse the cache (Stable), and what is expected to invalidate
+    // (Invalidated). Drifts here mean cache misses in production.
+
+    fn two_tools() -> Vec<ToolDefinition> {
+        vec![
+            ToolDefinition::new(FunctionSchema {
+                name: "alpha".into(),
+                description: "first tool".into(),
+                parameters: json!({"type": "object"}),
+            }),
+            ToolDefinition::new(FunctionSchema {
+                name: "beta".into(),
+                description: "second tool".into(),
+                parameters: json!({"type": "object"}),
+            }),
+        ]
+    }
+
+    /// Strip the moving `cache_control` marker from every block. Anthropic
+    /// keys the cache on (model, tools, system, messages-up-to-marker);
+    /// the marker itself is the breakpoint, not part of the prefix. Two
+    /// requests with identical fields modulo marker placement should hit
+    /// the same cache slot.
+    fn without_markers(v: &serde_json::Value) -> serde_json::Value {
+        match v {
+            serde_json::Value::Object(map) => {
+                let mut out = serde_json::Map::new();
+                for (k, val) in map {
+                    if k == "cache_control" {
+                        continue;
+                    }
+                    out.insert(k.clone(), without_markers(val));
+                }
+                serde_json::Value::Object(out)
+            }
+            serde_json::Value::Array(arr) => {
+                serde_json::Value::Array(arr.iter().map(without_markers).collect())
+            }
+            other => other.clone(),
+        }
+    }
+
+    /// Stable: a plain follow-up turn. Turn N+1's request appends an
+    /// assistant message and a new user message; everything else stays
+    /// byte-identical so the moving cache breakpoint on turn N's last
+    /// user message still anchors a hit.
+    #[test]
+    fn cache_prefix_stable_across_consecutive_turns() {
+        let tools = two_tools();
+        let turn_n = build_body(
+            &[system("sys"), user("u1")],
+            &tools,
+            "m",
+            ReasoningEffort::Off,
+            &cfg(),
+            &cache_on(),
+        );
+        let turn_n_plus_1 = build_body(
+            &[system("sys"), user("u1"), assistant_text("a1"), user("u2")],
+            &tools,
+            "m",
+            ReasoningEffort::Off,
+            &cfg(),
+            &cache_on(),
+        );
+
+        // System and tools must be byte-identical: the cached prefix at
+        // the system breakpoint depends on both.
+        assert_eq!(
+            without_markers(&turn_n["system"]),
+            without_markers(&turn_n_plus_1["system"]),
+            "system bytes drifted between consecutive turns",
+        );
+        assert_eq!(
+            without_markers(&turn_n["tools"]),
+            without_markers(&turn_n_plus_1["tools"]),
+            "tools bytes drifted between consecutive turns",
+        );
+
+        // The first user message must be byte-identical (after stripping
+        // the marker on turn N): turn N+1 must reuse the prefix that
+        // turn N cached.
+        assert_eq!(
+            without_markers(&turn_n["messages"][0]),
+            without_markers(&turn_n_plus_1["messages"][0]),
+            "first user message drifted; cache prefix breaks",
+        );
+    }
+
+    /// Stable: mode-change synthetic user note appends without disturbing
+    /// the system block. The base prompt is mode-agnostic, so flipping
+    /// modes only adds a trailing user note — system bytes match.
+    #[test]
+    fn cache_stable_when_mode_change_appends_user_note() {
+        let tools = two_tools();
+        let before = build_body(
+            &[system("sys"), user("u1")],
+            &tools,
+            "m",
+            ReasoningEffort::Off,
+            &cfg(),
+            &cache_on(),
+        );
+        let after = build_body(
+            &[
+                system("sys"),
+                user("u1"),
+                assistant_text("a1"),
+                user("[smelt:mode] now in plan mode."),
+                user("u2"),
+            ],
+            &tools,
+            "m",
+            ReasoningEffort::Off,
+            &cfg(),
+            &cache_on(),
+        );
+        assert_eq!(
+            without_markers(&before["system"]),
+            without_markers(&after["system"]),
+        );
+        assert_eq!(
+            without_markers(&before["tools"]),
+            without_markers(&after["tools"]),
+        );
+    }
+
+    /// Invalidated (expected): editing AGENTS.md / `/reload` produces a
+    /// different system prompt. The bytes diverge — by design.
+    #[test]
+    fn cache_invalidates_when_system_prompt_changes() {
+        let before = build_body(
+            &[system("sys v1"), user("u")],
+            &[],
+            "m",
+            ReasoningEffort::Off,
+            &cfg(),
+            &cache_on(),
+        );
+        let after = build_body(
+            &[system("sys v2"), user("u")],
+            &[],
+            "m",
+            ReasoningEffort::Off,
+            &cfg(),
+            &cache_on(),
+        );
+        assert_ne!(
+            without_markers(&before["system"]),
+            without_markers(&after["system"]),
+        );
+    }
+
+    /// Invalidated (expected): a new plugin tool joins the registry. The
+    /// tools array gains an entry; the cached prefix at the system or
+    /// tool breakpoint is gone.
+    #[test]
+    fn cache_invalidates_when_tools_list_grows() {
+        let before = build_body(
+            &[system("sys"), user("u")],
+            &two_tools(),
+            "m",
+            ReasoningEffort::Off,
+            &cfg(),
+            &cache_on(),
+        );
+        let mut more = two_tools();
+        more.push(ToolDefinition::new(FunctionSchema {
+            name: "gamma".into(),
+            description: "third".into(),
+            parameters: json!({"type": "object"}),
+        }));
+        let after = build_body(
+            &[system("sys"), user("u")],
+            &more,
+            "m",
+            ReasoningEffort::Off,
+            &cfg(),
+            &cache_on(),
+        );
+        assert_ne!(
+            without_markers(&before["tools"]),
+            without_markers(&after["tools"]),
+        );
+    }
+
+    /// Invalidated (expected): re-ordering tools rewrites the prefix.
+    /// `agent.rs` sorts tools by name precisely so this doesn't happen
+    /// in practice; this test pins the dependency on that sort.
+    #[test]
+    fn cache_invalidates_when_tools_reorder() {
+        let mut a = two_tools();
+        let mut b = two_tools();
+        b.reverse();
+        let before = build_body(
+            &[user("u")],
+            &a,
+            "m",
+            ReasoningEffort::Off,
+            &cfg(),
+            &cache_on(),
+        );
+        let after = build_body(
+            &[user("u")],
+            &b,
+            "m",
+            ReasoningEffort::Off,
+            &cfg(),
+            &cache_on(),
+        );
+        // Sanity: helpers above produce two distinct tools.
+        a.sort_by(|x, y| x.function.name.cmp(&y.function.name));
+        b.sort_by(|x, y| x.function.name.cmp(&y.function.name));
+        assert_eq!(a.len(), b.len());
+        assert_ne!(
+            without_markers(&before["tools"]),
+            without_markers(&after["tools"]),
+            "reordering tools must perturb the prefix (agent.rs sorts to prevent this)",
+        );
+    }
+
+    /// Stable: sampling params (temperature, top_p) sit outside the cached
+    /// prefix. Tweaking them must not perturb `system`, `tools`, or
+    /// `messages` bytes.
+    #[test]
+    fn cache_stable_when_temperature_changes() {
+        let mut cfg_a = cfg();
+        cfg_a.temperature = Some(0.2);
+        let mut cfg_b = cfg();
+        cfg_b.temperature = Some(0.9);
+        let a = build_body(
+            &[system("sys"), user("u")],
+            &two_tools(),
+            "m",
+            ReasoningEffort::Off,
+            &cfg_a,
+            &cache_on(),
+        );
+        let b = build_body(
+            &[system("sys"), user("u")],
+            &two_tools(),
+            "m",
+            ReasoningEffort::Off,
+            &cfg_b,
+            &cache_on(),
+        );
+        assert_eq!(without_markers(&a["system"]), without_markers(&b["system"]));
+        assert_eq!(without_markers(&a["tools"]), without_markers(&b["tools"]));
+        assert_eq!(
+            without_markers(&a["messages"]),
+            without_markers(&b["messages"]),
+        );
+    }
+
+    /// Stable: an EngineAsk inheriting the session sends the SAME system,
+    /// tools, and message prefix as the main turn — only the trailing
+    /// instruction differs. The cached prefix up to the last main-turn
+    /// user message survives.
+    #[test]
+    fn cache_inherit_session_reuses_main_turn_prefix() {
+        let tools = two_tools();
+        let main_turn = build_body(
+            &[system("sys"), user("u1"), assistant_text("a1"), user("u2")],
+            &tools,
+            "m",
+            ReasoningEffort::Off,
+            &cfg(),
+            &cache_on(),
+        );
+        let inherited = build_body(
+            &[
+                system("sys"),
+                user("u1"),
+                assistant_text("a1"),
+                user("u2"),
+                assistant_text("a2"),
+                user("Summarize the conversation above as a Markdown document."),
+            ],
+            &tools,
+            "m",
+            ReasoningEffort::Off,
+            &cfg(),
+            &cache_on(),
+        );
+        // Identical prefix from system through the original last user
+        // message. Only the trailing summary instruction is fresh.
+        assert_eq!(
+            without_markers(&main_turn["system"]),
+            without_markers(&inherited["system"]),
+        );
+        assert_eq!(
+            without_markers(&main_turn["tools"]),
+            without_markers(&inherited["tools"]),
+        );
+        for i in 0..main_turn["messages"].as_array().unwrap().len() {
+            assert_eq!(
+                without_markers(&main_turn["messages"][i]),
+                without_markers(&inherited["messages"][i]),
+                "inherited request must preserve main-turn message {i}",
+            );
+        }
+    }
 }
