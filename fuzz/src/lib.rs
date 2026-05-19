@@ -502,28 +502,30 @@ pub struct SwarmWeights {
 }
 
 impl SwarmWeights {
-    /// Draw a fresh swarm table over `n` variants. ~50% of variants are
-    /// disabled per seed; surviving variants get weights in `1..=100`.
-    /// Falls back to a uniform-1 table when bytes are too short to draw
-    /// the full shape.
+    /// Draw a fresh swarm table over `n` variants. One byte per slot:
+    /// `byte < 64` disables the variant (25% disable rate); otherwise
+    /// the weight is `byte - 63` (range `1..=192`). Single-byte cost
+    /// matters — measured coverage A/B showed the prior 2-byte/variant
+    /// encoding ate the entire entropy budget of the median 47-byte
+    /// libFuzzer seed, leaving nothing for op bytes.
     pub fn arbitrary(u: &mut Unstructured<'_>, n: usize) -> arbitrary::Result<Self> {
         let mut weights = vec![0u32; n];
         let mut total = 0u32;
         for slot in &mut weights {
-            // 50/50 enabled bit then 1..=100 weight. Two bytes per
-            // variant — fine for n ≤ 64 on any non-trivial libFuzzer
-            // input.
-            if u.arbitrary::<bool>().unwrap_or(false) {
-                let w = u.int_in_range(1u32..=100).unwrap_or(1);
+            let b = u.arbitrary::<u8>().unwrap_or(0);
+            if b >= 64 {
+                let w = (b - 63) as u32;
                 *slot = w;
                 total += w;
             }
         }
         if total == 0 {
-            // Force a usable distribution when the random draw zeroed
-            // everything (rare, but possible).
-            weights[0] = 1;
-            total = 1;
+            // Empty random draw (or exhausted input): fall back to a
+            // uniform distribution rather than collapsing to a single
+            // variant. Short seeds — common in libFuzzer's early corpus
+            // growth — would otherwise only ever fire variant 0.
+            weights.fill(1);
+            total = n as u32;
         }
         Ok(Self { weights, total })
     }
