@@ -1,0 +1,11 @@
+{
+  "_about": "Regression for the unsetenv(\"\") panic found by lua_loop. std::env::remove_var panics on an empty name; smelt.os.unsetenv now validates first. If someone reverts that validation, this scenario crashes again.",
+  "_fix": "98d397a4 fix(lua): validate setenv/unsetenv name; reject empty/=/\\0",
+  "ops": [
+    {
+      "LuaSnippet": {
+        "code": "smelt.os.unsetenv('')\nsmelt.os.unsetenv('FOO=BAR')\nsmelt.os.unsetenv('FOO\\0BAR')\nsmelt.os.setenv('', 'x')\nsmelt.os.setenv('FOO=BAR', 'x')\nsmelt.os.setenv('FOO', 'x\\0y')\n"
+      }
+    }
+  ]
+}

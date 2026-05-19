@@ -188,6 +188,16 @@ pub enum LuaOp {
     /// but the host-side type-checking + arg-conversion paths still
     /// execute.
     ApiProbe { fn_idx: u16, arg_kind: u8 },
+
+    /// Execute an arbitrary Lua snippet verbatim. **Not produced by the
+    /// fuzz generator** — `build_lua_op` doesn't emit this variant. It
+    /// exists so hand-authored regression seeds (under
+    /// `fuzz/seeds/<target>/regression/`) can reproduce a specific bug
+    /// deterministically: instead of guessing which `ApiProbe { fn_idx, arg_kind }`
+    /// reduced to "the call that crashed", the seed just says
+    /// `LuaSnippet { code = "smelt.os.unsetenv('')" }`. Stable across
+    /// `Arbitrary` impl changes (raw libFuzzer-byte seeds aren't).
+    LuaSnippet { code: String },
 }
 
 impl LuaOp {
@@ -239,6 +249,10 @@ impl LuaOp {
             }
             ApiProbe { fn_idx, arg_kind } => {
                 format!("api_probe fn={fn_idx} arg={arg_kind}")
+            }
+            LuaSnippet { code } => {
+                let preview: String = code.chars().take(40).collect();
+                format!("lua_snippet {preview:?}")
             }
         }
     }
@@ -661,6 +675,15 @@ pub fn build_snippet(ops: &[LuaOp], api_metas: &[(&str, &str)]) -> String {
             LuaOp::ApiProbe { fn_idx, arg_kind } => {
                 emit_api_probe(&mut out, *fn_idx, *arg_kind, api_metas);
             }
+            LuaOp::LuaSnippet { code } => {
+                // Wrap in pcall so a regression scenario that hits a
+                // Lua-level error still gets to the post-scenario
+                // invariants — those are what catch the real bug
+                // (panic in a binding, leaked handle, …).
+                out.push_str("pcall(function()\n");
+                out.push_str(code);
+                out.push_str("\nend)\n");
+            }
         }
     }
     out
@@ -687,7 +710,9 @@ fn emit_api_probe(out: &mut String, fn_idx: u16, arg_kind: u8, api_metas: &[(&st
         3 => "true",
         _ => "{}",
     };
-    out.push_str(&format!("pcall(function() return {module}.{name}({arg}) end)\n"));
+    out.push_str(&format!(
+        "pcall(function() return {module}.{name}({arg}) end)\n"
+    ));
 }
 
 /// `kind % 7` picks one of the recently-added read-only APIs:
