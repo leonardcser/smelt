@@ -250,6 +250,12 @@ pub(crate) const CHORD_TIMEOUT_MS: u64 = 500;
 /// Idle time after the last keypress before showing a deferred permission dialog.
 pub(crate) const CONFIRM_DEFER_MS: u64 = 1500;
 
+/// Hard cap on how many user submissions stack up while a background
+/// plugin holds the spinner busy. Sensible bursts are under 10; anything
+/// past this is almost certainly a hung plugin, and silently dropping
+/// the overflow is preferable to unbounded memory growth.
+pub(crate) const MAX_QUEUED_MESSAGES: usize = 64;
+
 pub(crate) enum DeferredDialog {
     Confirm(Box<ConfirmRequest>),
 }

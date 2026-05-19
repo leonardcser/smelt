@@ -145,7 +145,9 @@ impl TuiApp {
                 // against the post-busy state.
                 if self.busy_stack.is_busy() {
                     let text = content.text_content();
-                    if !text.is_empty() {
+                    if !text.is_empty()
+                        && self.queued_messages.len() < crate::app::MAX_QUEUED_MESSAGES
+                    {
                         self.queued_messages.push(text.into_owned());
                     }
                 } else {
@@ -511,7 +513,8 @@ impl TuiApp {
                 if let Some(outcome) = self.try_command_while_running(text.trim()) {
                     return outcome;
                 }
-                if !text.is_empty() {
+                if !text.is_empty() && self.queued_messages.len() < crate::app::MAX_QUEUED_MESSAGES
+                {
                     self.queued_messages.push(text.into_owned());
                 }
             }

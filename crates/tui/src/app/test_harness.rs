@@ -408,9 +408,13 @@ impl TestApp {
 
     /// Side-channel: push a synthetic queued message. In production
     /// `queued_messages` is filled by pressing Enter on the prompt while a
-    /// turn is active; the harness short-circuits that flow.
+    /// turn is active; the harness short-circuits that flow but honors
+    /// the same `MAX_QUEUED_MESSAGES` cap so the fuzz observes the real
+    /// drop-on-overflow behavior instead of unbounded growth.
     pub fn push_queued_message(&mut self, text: String) {
-        self.app.queued_messages.push(text);
+        if self.app.queued_messages.len() < crate::app::MAX_QUEUED_MESSAGES {
+            self.app.queued_messages.push(text);
+        }
     }
 
     /// Snapshot of the working-status bar's live state. Used by fuzz
@@ -1082,14 +1086,13 @@ impl TestApp {
     /// a handful of in-flight confirms) so a true unbounded leak trips
     /// well before the 256-op fuzz budget runs out.
     pub fn assert_resource_invariants(&self) {
-        const QUEUED_MESSAGES_CAP: usize = 64;
         const PENDING_DIALOGS_CAP: usize = 64;
 
         assert!(
-            self.app.queued_messages.len() <= QUEUED_MESSAGES_CAP,
+            self.app.queued_messages.len() <= crate::app::MAX_QUEUED_MESSAGES,
             "queued_messages {} > cap {}",
             self.app.queued_messages.len(),
-            QUEUED_MESSAGES_CAP,
+            crate::app::MAX_QUEUED_MESSAGES,
         );
         assert!(
             self.app.pending_dialogs.len() <= PENDING_DIALOGS_CAP,
