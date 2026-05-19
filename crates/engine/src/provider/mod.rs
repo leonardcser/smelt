@@ -403,13 +403,10 @@ pub struct CacheConfig {
 
 /// OpenAI accepts up to 256 chars but recommends shorter; pi-mono uses
 /// 64. Session ids in smelt are SHA256 hex (64 chars) so most keys pass
-/// through unchanged.
+/// through unchanged. Clamping is by char count (not bytes) so non-ASCII
+/// keys never split mid-codepoint.
 pub(crate) fn clamp_prompt_cache_key(key: &str) -> String {
-    if key.len() <= 64 {
-        key.to_string()
-    } else {
-        key[..64].to_string()
-    }
+    key.chars().take(64).collect()
 }
 
 /// Sort tool definitions by name in place. The cached prompt prefix
@@ -1028,12 +1025,13 @@ pub fn slugify(title: &str) -> String {
         .join("-")
 }
 
-/// Fuzz-only entry point: builds the Anthropic-shaped request body the
-/// same way the production code does. Exposed so `cache_invariance` can
-/// assert byte-stability of the cached prefix across randomly-generated
-/// message histories without going through the network layer. Not part
-/// of the supported API surface — use `Provider::chat` instead.
-#[doc(hidden)]
+/// Fuzz-only entry points: build the provider-shaped request bodies the
+/// same way the production code does, so `cache_invariance` can
+/// byte-compare cached prefixes across randomly-generated histories
+/// without going through the network layer. Gated behind the `fuzz`
+/// feature; not part of the supported API surface — use `Provider::chat`
+/// instead.
+#[cfg(any(test, feature = "fuzz"))]
 pub fn fuzz_build_anthropic_body(
     messages: &[Message],
     tools: &[ToolDefinition],
@@ -1043,6 +1041,22 @@ pub fn fuzz_build_anthropic_body(
     cache: &CacheConfig,
 ) -> serde_json::Value {
     anthropic::build_body(messages, tools, model, effort, config, cache)
+}
+
+#[cfg(any(test, feature = "fuzz"))]
+pub fn fuzz_build_openai_body(
+    messages: &[Message],
+    tools: &[ToolDefinition],
+    model: &str,
+    effort: ReasoningEffort,
+    config: &crate::config::ModelConfig,
+    cache: &CacheConfig,
+) -> serde_json::Value {
+    let mut body = openai::build_body(messages, tools, model, effort, config);
+    if let Some(ref key) = cache.prompt_cache_key {
+        body["prompt_cache_key"] = serde_json::json!(clamp_prompt_cache_key(key));
+    }
+    body
 }
 
 #[cfg(test)]
