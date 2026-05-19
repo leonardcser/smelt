@@ -181,6 +181,19 @@ impl TuiApp {
                 win.restore_cursor_screen_row(buf, screen_row);
             }
         }
+        // The projection rebuilt `lines` via `set_all_lines`, which can shrink
+        // the readonly buffer (e.g. blocks removed by `/clear`, a reload that
+        // reset transcript state). Any cursor anchor a vim motion or click
+        // parked past the new text length now points beyond it. Reclamp here
+        // so the rest of the frame sees coherent offsets.
+        {
+            let buf_id = self.transcript_win().buf;
+            let (win, buf) = self.ui.win_and_buf_mut(crate::app::TRANSCRIPT_WIN, buf_id);
+            if let (Some(win), Some(buf)) = (win, buf) {
+                let text = buf.text();
+                win.clamp_anchors_to_source(&text);
+            }
+        }
 
         let transcript_selection =
             self.transcript_selection_highlights(tdata.clamped_scroll, viewport_rows);
