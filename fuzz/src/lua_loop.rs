@@ -176,6 +176,18 @@ pub enum LuaOp {
     /// lifecycle ops above — exercising them keeps the new
     /// render-pipeline and session-search accessors honest under fuzz.
     ProbeRead { kind: u8, target_idx: u8 },
+
+    /// Call a `smelt.<module>.<name>` function selected by index into
+    /// the [`smelt_core::lua::doc::snapshot`] registry — the same
+    /// enumeration that powers `cargo xtask gen-lua-docs`. Any function
+    /// added via `LuaMod::fn_` flows into this op automatically with
+    /// no hand-written entry, so coverage of the Lua API surface keeps
+    /// up with the surface itself instead of silently rotting.
+    /// `arg_kind % 5` picks an arg shape (`nil`, `""`, `0`, `true`, `{}`)
+    /// — most calls will fail with type errors (wrapped in `pcall`)
+    /// but the host-side type-checking + arg-conversion paths still
+    /// execute.
+    ApiProbe { fn_idx: u16, arg_kind: u8 },
 }
 
 impl LuaOp {
@@ -225,12 +237,15 @@ impl LuaOp {
             ProbeRead { kind, target_idx } => {
                 format!("probe_read kind={} idx={target_idx}", kind % 4)
             }
+            ApiProbe { fn_idx, arg_kind } => {
+                format!("api_probe fn={fn_idx} arg={arg_kind}")
+            }
         }
     }
 }
 
 /// Total `LuaOp` variant count. Keep in lockstep with `build_lua_op`.
-pub const N_LUAOP_VARIANTS: usize = 12;
+pub const N_LUAOP_VARIANTS: usize = 13;
 
 /// Build one `LuaOp` by variant index. Payloads still come from
 /// `u.arbitrary()` so the value space stays unrestricted.
@@ -281,6 +296,10 @@ fn build_lua_op(idx: usize, u: &mut Unstructured<'_>) -> arbitrary::Result<LuaOp
         11 => LuaOp::ProbeRead {
             kind: u.arbitrary()?,
             target_idx: u.arbitrary()?,
+        },
+        12 => LuaOp::ApiProbe {
+            fn_idx: u.arbitrary()?,
+            arg_kind: u.arbitrary()?,
         },
         n => unreachable!("lua_op idx {n} out of range; bump N_LUAOP_VARIANTS or extend dispatch"),
     })
@@ -624,10 +643,27 @@ fn emit_state_get(out: &mut String, slot: u8, key: &str) {
 
 fn emit_cmd_register(out: &mut String, name_slot: u8, handler_kind: u8) {
     let n = (name_slot as usize) % CMD_POOL;
-    let body = match handler_kind % 3 {
+    // Body variants 3..=5 are **re-entrant**: the registered handler
+    // calls back into the Rust API mid-execution. This drives the
+    // Rust→Lua-callback→Rust path that flat top-level call sequences
+    // can't reach — bug class is "second Rust call mutates state the
+    // outer Rust call still holds a reference to". Variant 5 emits
+    // mutual recursion across two `fuzz.cmd.*` slots (bounded by Lua
+    // stack depth + the host's command-dispatch reentry guard).
+    let body = match handler_kind % 6 {
         0 => "function() end",
         1 => "function() smelt.state(\"fuzz.cmd_count\").n = (smelt.state(\"fuzz.cmd_count\").n or 0) + 1 end",
-        _ => "function() error(\"fuzz cmd error\") end",
+        2 => "function() error(\"fuzz cmd error\") end",
+        // Re-entrant: create a buf from inside the handler. Stresses
+        // the lifetime of any buf-registry lock the outer dispatch
+        // holds.
+        3 => "function() pcall(smelt.buf.new, {}) end",
+        // Re-entrant: invoke another command from this handler. Pairs
+        // with the existing `fuzz.cmd.<n>` namespace so a sibling
+        // command may recursively invoke us back.
+        4 => "function() pcall(smelt.cmd.run, \"fuzz.cmd.0\") end",
+        // Re-entrant: read+write state, then invoke another command.
+        _ => "function() local s = smelt.state(\"fuzz.cmd_reentry\"); s.depth = (s.depth or 0) + 1; if (s.depth or 0) < 4 then pcall(smelt.cmd.run, \"fuzz.cmd.\" .. ((s.depth or 0) % 6)) end; s.depth = (s.depth or 1) - 1 end",
     };
     out.push_str(&format!(
         "pcall(smelt.cmd.register, \"fuzz.cmd.{n}\", {body})\n"
@@ -656,8 +692,12 @@ fn emit_keymap_set(out: &mut String, scope_kind: u8, chord_slot: u8, handler_kin
     ));
 }
 
-/// Build the full Lua chunk for `ops`. Returns the snippet string.
-pub fn build_snippet(ops: &[LuaOp]) -> String {
+/// Build the full Lua chunk for `ops`. `api_metas` is the live
+/// `(module, name)` enumeration from `TestApp::lua_doc_snapshot()` —
+/// `LuaOp::ApiProbe` indices mod into it at emit time so the fuzz
+/// surface tracks the API surface automatically. Returns the snippet
+/// string.
+pub fn build_snippet(ops: &[LuaOp], api_metas: &[(&str, &str)]) -> String {
     let mut out = String::with_capacity(2048);
     // Handle pool — declared as Lua-side tables so emitted ops can
     // index into them. Initialised fresh each scenario; on /reload
@@ -698,9 +738,36 @@ pub fn build_snippet(ops: &[LuaOp]) -> String {
                 handler_kind,
             } => emit_keymap_set(&mut out, *scope_kind, *chord_slot, *handler_kind),
             LuaOp::ProbeRead { kind, target_idx } => emit_probe_read(&mut out, *kind, *target_idx),
+            LuaOp::ApiProbe { fn_idx, arg_kind } => {
+                emit_api_probe(&mut out, *fn_idx, *arg_kind, api_metas);
+            }
         }
     }
     out
+}
+
+/// Emit a `pcall(<module>.<name>, <arg>)` for one of the api_metas
+/// entries. Indices mod into the slice so a u16 maps onto any-sized
+/// API surface. `arg_kind % 5` picks the arg shape; most calls will
+/// fail with type errors but the host-side conversion path still runs.
+fn emit_api_probe(out: &mut String, fn_idx: u16, arg_kind: u8, api_metas: &[(&str, &str)]) {
+    if api_metas.is_empty() {
+        return;
+    }
+    let (module, name) = api_metas[(fn_idx as usize) % api_metas.len()];
+    // Skip private (`__`-prefixed) entries — they're internals not
+    // intended for plugin callers, and probing them just creates noise.
+    if name.starts_with("__") {
+        return;
+    }
+    let arg = match arg_kind % 5 {
+        0 => "nil",
+        1 => "\"\"",
+        2 => "0",
+        3 => "true",
+        _ => "{}",
+    };
+    out.push_str(&format!("pcall(function() return {module}.{name}({arg}) end)\n"));
 }
 
 /// `kind % 7` picks one of the recently-added read-only APIs:
@@ -767,19 +834,33 @@ pub fn run_lua_scenario(scenario: LuaScenario) {
     let _guard = runtime.enter();
 
     let mut app = TestApp::builder().build();
+    // Capture the live Lua doc-registry enumeration *after* the TUI
+    // LuaRuntime has finished registering every `LuaMod::fn_`. The
+    // snapshot drives `LuaOp::ApiProbe` emit so the fuzz surface
+    // tracks the API surface automatically.
+    let api_metas = app.lua_doc_snapshot();
     let take = scenario.ops.len().min(LUA_MAX_OPS);
     let ops = &scenario.ops[..take];
-    let snippet = build_snippet(ops);
+    let snippet = build_snippet(ops, &api_metas);
 
     let segments: Vec<&str> = snippet.split("-- @reload@\n").collect();
     for (i, segment) in segments.iter().enumerate() {
         if !segment.trim().is_empty() {
             // Lua-level errors aren't fuzz failures — the snippet
             // intentionally tolerates type errors via `pcall`. Real
-            // bugs surface through `assert_invariants` or Rust panics
-            // inside binding code.
+            // bugs surface through `assert_invariants`, Rust panics
+            // inside binding code, or the FFI ledger detecting a
+            // dangling `RegistryKey`.
             let _ = app.run_lua(segment);
             app.assert_invariants();
+            // FFI ledger: force a full Lua GC and verify every Rust-
+            // side `LuaHandle` still resolves in the mlua registry.
+            // Without this, a path that drops a `RegistryKey` without
+            // calling `remove` survives latently — only manifesting
+            // when something else tries to invoke the dead handle,
+            // potentially much later or never. Running it between
+            // segments pins the failure to the op batch responsible.
+            app.assert_lua_handles_alive();
         }
         // Reload BETWEEN segments (matches the sentinel position).
         // Skipped after the last segment so the final invariant check
@@ -787,6 +868,10 @@ pub fn run_lua_scenario(scenario: LuaScenario) {
         if i + 1 < segments.len() {
             app.reload_lua();
             app.assert_invariants();
+            // `/reload` is the heaviest GC-and-rebuild surface in the
+            // Lua API — re-check liveness afterward so a reload that
+            // forgot to re-register a handle surfaces here.
+            app.assert_lua_handles_alive();
         }
     }
 }

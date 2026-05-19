@@ -139,6 +139,18 @@ impl HookRegistry {
             v.clear();
         }
     }
+
+    /// Walk every entry as `(id, name, &handle)`. Test harnesses use
+    /// this to verify each registered handle still resolves in the
+    /// mlua registry after a forced GC — a `Nil` value means the
+    /// handle was dropped without going through `remove`.
+    pub fn for_each_entry(&self, mut f: impl FnMut(u64, &str, &LuaHandle)) {
+        if let Ok(entries) = self.entries.lock() {
+            for entry in entries.iter() {
+                f(entry.id, entry.name.as_str(), &entry.handle);
+            }
+        }
+    }
 }
 
 /// Build a composite [`LuaReg`] that removes one id from each of several

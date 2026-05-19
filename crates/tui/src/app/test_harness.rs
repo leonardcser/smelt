@@ -1031,6 +1031,106 @@ impl TestApp {
         }
     }
 
+    /// Enumerate every Lua function recorded by `LuaMod::fn_` at
+    /// registration time. Returned tuples are `(module, name)`, e.g.
+    /// `("smelt.buf", "new")`. The same registry powers
+    /// `cargo xtask gen-lua-docs`, so any function visible in the
+    /// reference docs is also fuzzable — and a freshly-added
+    /// `smelt.foo.bar` flows into the fuzz target automatically, with
+    /// no manual update to a hand-written `LuaOp` table.
+    pub fn lua_doc_snapshot(&self) -> Vec<(&'static str, &'static str)> {
+        smelt_core::lua::doc::snapshot()
+            .into_iter()
+            .map(|m| (m.module, m.name))
+            .collect()
+    }
+
+    /// Force a full Lua GC, then walk every registered `LuaHandle`
+    /// across the shared registries and assert it still resolves in the
+    /// mlua registry. A `Value::Nil` after `gc_collect` means a Rust
+    /// path dropped the handle's `RegistryKey` (or the key was wrong
+    /// from the start) — the Rust→Lua reference is dangling. Used by
+    /// `lua_loop` between batches so leaks surface attached to the op
+    /// that caused them rather than at scenario teardown.
+    pub fn assert_lua_handles_alive(&self) {
+        let lua = &self.app.lua.lua;
+        lua.gc_collect().expect("lua gc_collect failed");
+
+        let check = |label: &str, handle: &smelt_core::lua::LuaHandle| {
+            let val: mlua::Value = lua
+                .registry_value(&handle.key)
+                .unwrap_or_else(|e| panic!("FFI-LEDGER: registry_value({label}) failed: {e}"));
+            if matches!(val, mlua::Value::Nil) {
+                panic!("FFI-LEDGER: dangling handle in {label} (registry value is Nil after gc_collect)");
+            }
+        };
+
+        let shared = self.app.lua.shared();
+        if let Ok(srcs) = shared.statusline_sources.lock() {
+            for (name, src) in srcs.iter() {
+                check(&format!("statusline_sources[{name}]"), &src.handle);
+            }
+        }
+
+        let core = &shared.core;
+        if let Ok(cbs) = core.callbacks.lock() {
+            for (id, h) in cbs.iter() {
+                check(&format!("callbacks[{id}]"), h);
+            }
+        }
+        if let Ok(asks) = core.ask_callbacks.lock() {
+            for (id, h) in asks.iter() {
+                check(&format!("ask_callbacks[{id}]"), h);
+            }
+        }
+        if let Ok(cmds) = core.commands.lock() {
+            for (name, cmd) in cmds.iter() {
+                check(&format!("commands[{name}]"), &cmd.handle);
+            }
+        }
+        if let Ok(kms) = core.keymaps.lock() {
+            for (k, h) in kms.iter() {
+                check(&format!("keymaps[{k:?}]"), h);
+            }
+        }
+        if let Ok(tools) = core.tools.lock() {
+            for (name, t) in tools.iter() {
+                check(&format!("tools[{name}].execute"), &t.execute);
+                if let Some(h) = &t.approval_patterns {
+                    check(&format!("tools[{name}].approval_patterns"), h);
+                }
+                if let Some(h) = &t.preflight {
+                    check(&format!("tools[{name}].preflight"), h);
+                }
+                if let Some(h) = &t.render {
+                    check(&format!("tools[{name}].render"), h);
+                }
+                if let Some(h) = &t.paths_for_workspace {
+                    check(&format!("tools[{name}].paths_for_workspace"), h);
+                }
+                if let Some(h) = &t.preview {
+                    check(&format!("tools[{name}].preview"), h);
+                }
+                if let Some(h) = &t.decide {
+                    check(&format!("tools[{name}].decide"), h);
+                }
+            }
+        }
+
+        let hooks = &core.hooks;
+        let check_reg = |reg_label: &str, reg: &smelt_core::lua::HookRegistry| {
+            reg.for_each_entry(|id, name, h| {
+                check(&format!("{reg_label}[{id} name={name:?}]"), h);
+            });
+        };
+        check_reg("hooks.tool_before", &hooks.tool_before);
+        check_reg("hooks.tool_after", &hooks.tool_after);
+        check_reg("hooks.provider_request", &hooks.provider_request);
+        check_reg("hooks.provider_response", &hooks.provider_response);
+        check_reg("hooks.context_limit", &hooks.context_limit);
+        check_reg("hooks.lifecycle", &hooks.lifecycle);
+    }
+
     pub fn feed<I>(&mut self, events: I)
     where
         I: IntoIterator<Item = SourceEvent>,
