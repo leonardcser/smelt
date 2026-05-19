@@ -31,7 +31,7 @@ smelt.mcp.register("filesystem", {
 
 -- Settings
 smelt.settings.vim = true
-smelt.settings.auto_compact = false
+smelt.settings.auto_compact = true
 smelt.settings.show_cost = true
 
 -- Permission rules

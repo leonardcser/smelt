@@ -35,7 +35,7 @@ assigning to `smelt.settings`, or override from the CLI with `--set key=value`:
 
 ```lua
 smelt.settings.vim = true
-smelt.settings.auto_compact = false
+smelt.settings.auto_compact = true
 smelt.settings.redact_secrets = true
 ```
 

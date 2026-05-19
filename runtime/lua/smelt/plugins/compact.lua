@@ -1,42 +1,97 @@
 -- Compaction plugin. Owns the /compact command and the post-turn
--- auto-compact subscription. Replaces the conversation with a model-generated
--- handoff summary so future turns fit within the context window.
+-- auto-compact subscription. Runs a two-phase pass when the context window
+-- is filling up:
 --
--- Drives the status-bar spinner via `smelt.spinner.busy("compacting")`
--- and uses `smelt.engine.ask_with_trim` so the summarizer request itself
--- can drop the oldest history entry and retry when it overflows.
+--   Phase A (prune): cheap, no LLM call. Replaces the bodies of old tool
+--                    results with elision markers so a flood of large
+--                    tool outputs doesn't force a summarisation round-trip.
+--   Phase B (summarise): if phase A doesn't reclaim enough, runs an LLM
+--                    summarisation over the older history with a fixed
+--                    structured prompt. Recent turns are preserved verbatim.
+--
+-- Both phases are visible to the user via `smelt.spinner.busy("compacting")`
+-- and emit structured `compaction` log events with before/after token counts.
 
 local SYSTEM = [[
-You are performing a CONTEXT CHECKPOINT COMPACTION. Create a handoff summary for another instance of yourself that will resume the task.
+You are performing a CONTEXT CHECKPOINT COMPACTION. Produce a structured
+handoff summary that another instance of yourself will read to resume the
+task without losing critical context.
 
-Include:
-- Current progress and key decisions made
-- Important context, constraints, or user preferences
-- What remains to be done (clear next steps)
-- Any critical data, examples, or references needed to continue
+Reply in this exact Markdown structure. Omit a section only if the
+conversation truly contains nothing for it; never invent details.
 
-Be concise, structured, and focused on helping the next LLM seamlessly continue the work.
+# Goal
+What the user is trying to accomplish (one or two sentences).
+
+# Constraints
+Hard limits, style rules, environment facts, anything the next instance
+must respect.
+
+# Progress
+What has already been done. Concrete, specific, in completion order.
+
+# Decisions
+Choices that were made and the rationale, when the rationale matters
+for what comes next.
+
+# Next steps
+Ordered, concrete actions the next instance should take.
+
+# Critical context
+File contents, error messages, command output, exact identifiers, etc.
+that the next instance will need verbatim. Quote precisely.
+
+# Relevant files
+Bullet list of file paths that were touched or are about to be touched,
+with a one-line note on why each matters.
 ]]
 
 local SUMMARY_PREFIX = "Another language model started to solve this problem and produced a summary of its thinking process. You also have access to the state of the tools that were used by that language model. Use this to build on the work that has already been done and avoid duplicating work. Here is the summary produced by the other language model, use the information in this summary to assist with your own analysis:"
 
 local INSTRUCTIONS_PREAMBLE = "The user has asked you to pay special attention to the following when summarizing:"
 
--- Per-message byte cap when flattening history for the summarizer.
+-- Per-message byte cap when flattening history for the summarizer. Caps
+-- runaway tool outputs from blowing up the summariser's own context.
 local MAX_STRINGIFIED_MESSAGE_BYTES = 8000
 local TRUNCATION_SUFFIX = "\n…[truncated for compaction]"
 
--- Soft token cap on user messages carried forward in BeforeLastUserMessage mode.
+-- Soft token cap on user messages carried forward when injecting recent
+-- user turns alongside the summary.
 local COMPACT_USER_MESSAGE_MAX_TOKENS = 20000
 
+-- Phase A: replace tool-result bodies older than this byte budget with
+-- an elision marker. Keeps the most recent `PHASE_A_KEEP_RECENT_BYTES`
+-- of tool content verbatim; everything before it gets `<elided …>`.
+local PHASE_A_KEEP_RECENT_BYTES = 40000
 
--- How many times to re-issue the summarizer call when the model returns an
--- empty response before giving up.
+-- How many times to re-issue the summarizer call when the model returns
+-- an empty response before giving up.
 local MAX_EMPTY_RETRIES = 2
+
+-- Circuit breaker. After this many consecutive failed compactions, the
+-- plugin stops auto-firing for the rest of the session to avoid burning
+-- tokens in a loop. /compact still works (manual override).
+local MAX_CONSECUTIVE_FAILURES = 3
+local consecutive_failures = 0
 
 -- ── helpers ────────────────────────────────────────────────────────────
 
 local function approx_tokens(s) return math.ceil(#s / 4) end
+
+local function approx_history_tokens(history)
+  local total = 0
+  for _, m in ipairs(history) do
+    if type(m.content) == "string" then total = total + approx_tokens(m.content) end
+    if m.reasoning_content then total = total + approx_tokens(m.reasoning_content) end
+    if m.tool_calls then
+      for _, c in ipairs(m.tool_calls) do
+        local fn = c["function"] or c.function_call or {}
+        if fn.arguments then total = total + approx_tokens(fn.arguments) end
+      end
+    end
+  end
+  return total
+end
 
 local function is_summary_user(msg)
   if msg.role ~= "user" or not msg.content then return false end
@@ -73,6 +128,68 @@ local function select_recent(user_msgs, max_tokens)
   return picked
 end
 
+-- Strip image attachments from a flat copy of the history. The summariser
+-- model only needs the textual conversation; pulling images into the
+-- summariser turn can itself overflow the context window on image-heavy
+-- sessions. Pure function, returns a new list.
+local function strip_images(history)
+  local out = {}
+  for _, m in ipairs(history) do
+    local copy = {}
+    for k, v in pairs(m) do copy[k] = v end
+    if type(copy.content) == "table" then
+      local cleaned = {}
+      for _, part in ipairs(copy.content) do
+        if not (part.type == "image" or part.type == "image_url") then
+          table.insert(cleaned, part)
+        end
+      end
+      copy.content = cleaned
+    end
+    table.insert(out, copy)
+  end
+  return out
+end
+
+-- Phase A: prune old tool-result bodies. Walks the history from the tail
+-- backwards counting tool-result bytes; everything past
+-- `PHASE_A_KEEP_RECENT_BYTES` of *recent* tool content is replaced with an
+-- elision marker. Returns the new history plus the number of bytes
+-- elided (for telemetry).
+local function prune_old_tool_results(history)
+  local kept_bytes = 0
+  local elided_bytes = 0
+  local new_history = {}
+  -- First pass: pick the cut index. Walk backwards counting bytes of
+  -- tool-result content until we exceed the keep-recent budget.
+  local cut_index = 0
+  for i = #history, 1, -1 do
+    local m = history[i]
+    if m.role == "tool" and type(m.content) == "string" then
+      kept_bytes = kept_bytes + #m.content
+      if kept_bytes > PHASE_A_KEEP_RECENT_BYTES then
+        cut_index = i
+        break
+      end
+    end
+  end
+  -- Second pass: rewrite earlier tool-result bodies.
+  for i, m in ipairs(history) do
+    if i <= cut_index and m.role == "tool" and type(m.content) == "string"
+        and not m.content:match("^<elided ") then
+      local copy = {}
+      for k, v in pairs(m) do copy[k] = v end
+      elided_bytes = elided_bytes + #m.content
+      copy.content = string.format(
+        "<elided %d bytes of tool output during compaction>", #m.content)
+      table.insert(new_history, copy)
+    else
+      table.insert(new_history, m)
+    end
+  end
+  return new_history, elided_bytes
+end
+
 local function build_replacement(history, summary, inject_recent_user_messages)
   local out = {}
   if inject_recent_user_messages then
@@ -90,8 +207,9 @@ local function build_replacement(history, summary, inject_recent_user_messages)
 end
 
 -- Build a single flattened transcript string the summarizer model sees
--- as `user` content. Mirrors the previous Rust `stringify_conversation`:
--- labels by role, trims, drops blanks, caps each entry's bytes.
+-- as `user` content. Labels by role, trims, drops blanks, caps each
+-- entry's bytes so a single oversized tool result can't blow the
+-- summariser's own context budget.
 local function stringify_conversation(history)
   local parts = {}
   for _, m in ipairs(history) do
@@ -158,7 +276,8 @@ local function summarize(history, instructions, done)
     done(nil)
     return
   end
-  local system_text, messages = compact_request_messages(history, instructions)
+  local cleaned = strip_images(history)
+  local system_text, messages = compact_request_messages(cleaned, instructions)
   local handle = smelt.spinner.busy("compacting")
   local empty_retries = 0
 
@@ -195,38 +314,75 @@ local function summarize(history, instructions, done)
   send()
 end
 
+local function emit_event(phase, before_tokens, after_tokens, extra)
+  local data = {
+    phase = phase,
+    before_tokens = before_tokens,
+    after_tokens = after_tokens,
+    saved_tokens = math.max(0, before_tokens - after_tokens),
+  }
+  if extra then
+    for k, v in pairs(extra) do data[k] = v end
+  end
+  smelt.log.info("compaction", data)
+end
+
 local function run_compact(opts)
   local history = smelt.session.messages()
   if not history or #history == 0 then
     smelt.notify.error("nothing to compact")
     return
   end
+  local before_tokens = approx_history_tokens(history)
+
+  -- Phase A: cheap prune of older tool results.
+  local pruned, elided_bytes = prune_old_tool_results(history)
+  if elided_bytes > 0 then
+    smelt.session.messages(pruned)
+    local mid_tokens = approx_history_tokens(pruned)
+    emit_event("prune", before_tokens, mid_tokens, { elided_bytes = elided_bytes })
+    history = pruned
+    before_tokens = mid_tokens
+  end
+
+  -- Phase B: summarize the older history when the prune wasn't enough
+  -- (or when called explicitly via /compact).
   summarize(history, opts and opts.instructions, function(summary)
-    if not summary then return end
+    if not summary then
+      consecutive_failures = consecutive_failures + 1
+      return
+    end
+    consecutive_failures = 0
     local replacement = build_replacement(
       history,
       summary,
       opts and opts.inject_recent_user_messages or false
     )
     smelt.session.messages(replacement)
+    local after_tokens = approx_history_tokens(replacement)
+    emit_event("summarize", before_tokens, after_tokens)
   end)
 end
 
 -- ── /compact command ──────────────────────────────────────────────────
 
 smelt.cmd.register("compact", function(arg)
+  consecutive_failures = 0
   run_compact({ instructions = arg, inject_recent_user_messages = false })
 end, { desc = "compact conversation history", while_busy = false })
 
 -- ── post-turn auto-compaction ─────────────────────────────────────────
 --
 -- Subscribes to `turn_complete`. Fires when settings.auto_compact is on AND
--- the live prompt token count crosses AUTO_COMPACT_THRESHOLD of the configured
+-- the live prompt token count crosses `compact_threshold` of the configured
 -- context window. Uses BeforeLastUserMessage so the user's most recent asks
--- carry forward into the compacted history.
+-- carry forward into the compacted history. A circuit breaker disables
+-- auto-firing after `MAX_CONSECUTIVE_FAILURES` consecutive failed attempts
+-- so a broken summariser model can't drain the user's tokens in a loop.
 
 smelt.cell("turn_complete"):subscribe(function()
   if not smelt.settings.auto_compact then return end
+  if consecutive_failures >= MAX_CONSECUTIVE_FAILURES then return end
   local window = smelt.session.context_window()
   local tokens = smelt.session.context_tokens()
   if not window or not tokens then return end
@@ -250,11 +406,30 @@ smelt.engine.on_context_limit(function(messages, reply)
     reply(nil)
     return
   end
+  local before_tokens = approx_history_tokens(messages)
+
+  -- Cascading fallback: try phase A first (cheap, no LLM). If pruning
+  -- alone reclaims enough space the recovery returns the pruned list
+  -- without a summarisation round-trip.
+  local pruned, elided_bytes = prune_old_tool_results(messages)
+  if elided_bytes > 0 then
+    emit_event("prune-recovery", before_tokens, approx_history_tokens(pruned),
+      { elided_bytes = elided_bytes })
+    -- Try with just the prune. If the engine still 413s, this hook will
+    -- fire again and we'll fall through to summarisation.
+    reply(pruned)
+    return
+  end
+
   summarize(messages, nil, function(summary)
     if not summary then
+      consecutive_failures = consecutive_failures + 1
       reply(nil)
       return
     end
-    reply({ { role = "user", content = SUMMARY_PREFIX .. "\n" .. summary } })
+    consecutive_failures = 0
+    local replacement = { { role = "user", content = SUMMARY_PREFIX .. "\n" .. summary } }
+    emit_event("summarize-recovery", before_tokens, approx_history_tokens(replacement))
+    reply(replacement)
   end)
 end)

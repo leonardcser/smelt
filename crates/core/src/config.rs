@@ -168,7 +168,7 @@ impl SettingsConfig {
     pub fn resolve(&self) -> ResolvedSettings {
         ResolvedSettings {
             vim: self.vim.unwrap_or(false),
-            auto_compact: self.auto_compact.unwrap_or(false),
+            auto_compact: self.auto_compact.unwrap_or(true),
             show_tps: self.show_tps.unwrap_or(true),
             show_tokens: self.show_tokens.unwrap_or(true),
             show_cost: self.show_cost.unwrap_or(true),

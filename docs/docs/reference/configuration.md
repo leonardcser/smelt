@@ -185,7 +185,7 @@ Set preferences in `init.lua` by writing to `smelt.settings`:
 
 ```lua
 smelt.settings.vim = true
-smelt.settings.auto_compact = false
+smelt.settings.auto_compact = true
 smelt.settings.compact_threshold = 0.65
 smelt.settings.show_tps = true
 ```
@@ -197,7 +197,7 @@ keys raise at the access site; type mismatches raise on assignment.
 | Key                     | Type      | Default | Description                                                                       |
 | ----------------------- | --------- | ------- | --------------------------------------------------------------------------------- |
 | `vim`                   | `boolean` | `false` | Vi keybindings in the prompt                                                      |
-| `auto_compact`          | `boolean` | `false` | Auto-summarize when context usage crosses `compact_threshold` (forced on in headless) |
+| `auto_compact`          | `boolean` | `true`  | Auto-summarize when context usage crosses `compact_threshold` (forced on in headless) |
 | `compact_threshold`     | `number`  | `0.80`  | Fraction of the context window at which auto-compact fires (0 < x ≤ 1)            |
 | `show_tps`              | `boolean` | `true`  | Tokens/sec in status bar                                                          |
 | `show_tokens`           | `boolean` | `true`  | Context token count in status bar                                                 |
