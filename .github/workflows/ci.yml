@@ -61,3 +61,24 @@ jobs:
           cargo xtask gen-lua-docs
           git diff --exit-code -- docs/docs/reference/api runtime/lua/smelt/_meta docs/zensical.toml \
             || (echo "::error::Generated Lua API docs are out of date. Run 'cargo xtask gen-lua-docs' and commit." && exit 1)
+
+  fuzz-regression:
+    name: Fuzz regression replay
+    if: github.event_name != 'pull_request_target'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v6
+
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache dependencies
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            .
+            fuzz
+
+      - name: Replay regression seeds
+        run: fuzz/scripts/replay-regression.sh
