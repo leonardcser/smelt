@@ -509,9 +509,7 @@ impl Provider {
         CacheConfig {
             anthropic_markers: self.supports_anthropic_cache(),
             ttl_long,
-            prompt_cache_key: session_id
-                .filter(|s| !s.is_empty())
-                .map(|s| s.to_string()),
+            prompt_cache_key: session_id.filter(|s| !s.is_empty()).map(|s| s.to_string()),
         }
     }
 
@@ -1028,6 +1026,23 @@ pub fn slugify(title: &str) -> String {
         .filter(|s| !s.is_empty())
         .collect::<Vec<_>>()
         .join("-")
+}
+
+/// Fuzz-only entry point: builds the Anthropic-shaped request body the
+/// same way the production code does. Exposed so `cache_invariance` can
+/// assert byte-stability of the cached prefix across randomly-generated
+/// message histories without going through the network layer. Not part
+/// of the supported API surface — use `Provider::chat` instead.
+#[doc(hidden)]
+pub fn fuzz_build_anthropic_body(
+    messages: &[Message],
+    tools: &[ToolDefinition],
+    model: &str,
+    effort: ReasoningEffort,
+    config: &crate::config::ModelConfig,
+    cache: &CacheConfig,
+) -> serde_json::Value {
+    anthropic::build_body(messages, tools, model, effort, config, cache)
 }
 
 #[cfg(test)]
