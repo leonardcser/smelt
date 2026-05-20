@@ -79,7 +79,7 @@ pub fn run(_args: Vec<String>) {
             continue;
         }
         println!(">>> {target}: {} byte-form seed(s)", files.len());
-        let status = Command::new("cargo")
+        let output = Command::new("cargo")
             .args([
                 "+nightly",
                 "fuzz",
@@ -91,14 +91,22 @@ pub fn run(_args: Vec<String>) {
                 "-runs=0",
             ])
             .current_dir(&root)
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .status()
+            .output()
             .unwrap_or_else(|e| die(&format!("spawn cargo fuzz run: {e}")));
-        if status.success() {
+        if output.status.success() {
             println!("  ok");
         } else {
             println!("  FAIL");
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            if !stdout.is_empty() {
+                println!("--- stdout ---");
+                print!("{stdout}");
+            }
+            if !stderr.is_empty() {
+                println!("--- stderr ---");
+                print!("{stderr}");
+            }
             fail = true;
         }
     }
