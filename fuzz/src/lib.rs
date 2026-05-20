@@ -561,138 +561,189 @@ impl SwarmWeights {
     }
 }
 
-/// Total `FuzzOp` variant count. Keep in lockstep with `build_fuzz_op`.
-pub const N_FUZZOP_VARIANTS: usize = 45;
+/// Per-variant builder. The Arbitrary impl picks an index into
+/// `FUZZOP_BUILDERS` and calls the corresponding closure to mint the
+/// variant with random payload. Centralising this as a slice means
+/// adding a new variant is exactly one edit: append a closure here.
+/// `N_FUZZOP_VARIANTS` derives from `.len()`, so the index space and the
+/// dispatch table cannot drift.
+type FuzzOpBuilder = fn(&mut Unstructured<'_>) -> arbitrary::Result<FuzzOp>;
 
-/// Build one `FuzzOp` by variant index. The index space is the swarm
-/// dispatch surface; payloads still come from `u.arbitrary()` so the
-/// value space stays unrestricted.
-fn build_fuzz_op(idx: usize, u: &mut Unstructured<'_>) -> arbitrary::Result<FuzzOp> {
-    Ok(match idx {
-        0 => FuzzOp::KeyUnicode(u.arbitrary()?),
-        1 => FuzzOp::KeyCtrl(u.arbitrary()?),
-        2 => FuzzOp::KeyShift(u.arbitrary()?),
-        3 => FuzzOp::KeySpecial(u.arbitrary()?),
-        4 => FuzzOp::KeySpecialShift(u.arbitrary()?),
-        5 => FuzzOp::Paste(u.arbitrary()?),
-        6 => FuzzOp::Mouse(u.arbitrary()?),
-        7 => FuzzOp::Tick(u.arbitrary()?),
-        8 => FuzzOp::LuaWakeup,
-        9 => FuzzOp::Resize {
+const FUZZOP_BUILDERS: &[FuzzOpBuilder] = &[
+    |u| Ok(FuzzOp::KeyUnicode(u.arbitrary()?)),
+    |u| Ok(FuzzOp::KeyCtrl(u.arbitrary()?)),
+    |u| Ok(FuzzOp::KeyShift(u.arbitrary()?)),
+    |u| Ok(FuzzOp::KeySpecial(u.arbitrary()?)),
+    |u| Ok(FuzzOp::KeySpecialShift(u.arbitrary()?)),
+    |u| Ok(FuzzOp::Paste(u.arbitrary()?)),
+    |u| Ok(FuzzOp::Mouse(u.arbitrary()?)),
+    |u| Ok(FuzzOp::Tick(u.arbitrary()?)),
+    |_| Ok(FuzzOp::LuaWakeup),
+    |u| {
+        Ok(FuzzOp::Resize {
             w: u.arbitrary()?,
             h: u.arbitrary()?,
-        },
-        10 => FuzzOp::StartTurn(u.arbitrary()?),
-        11 => FuzzOp::EngineReady,
-        12 => FuzzOp::EngineText(u.arbitrary()?),
-        13 => FuzzOp::EngineTextDelta(u.arbitrary()?),
-        14 => FuzzOp::EngineThinking(u.arbitrary()?),
-        15 => FuzzOp::EngineThinkingDelta(u.arbitrary()?),
-        16 => FuzzOp::EngineToolStart {
+        })
+    },
+    |u| Ok(FuzzOp::StartTurn(u.arbitrary()?)),
+    |_| Ok(FuzzOp::EngineReady),
+    |u| Ok(FuzzOp::EngineText(u.arbitrary()?)),
+    |u| Ok(FuzzOp::EngineTextDelta(u.arbitrary()?)),
+    |u| Ok(FuzzOp::EngineThinking(u.arbitrary()?)),
+    |u| Ok(FuzzOp::EngineThinkingDelta(u.arbitrary()?)),
+    |u| {
+        Ok(FuzzOp::EngineToolStart {
             call_id: u.arbitrary()?,
             tool_name: u.arbitrary()?,
             args: u.arbitrary()?,
-        },
-        17 => FuzzOp::EngineToolOutput {
+        })
+    },
+    |u| {
+        Ok(FuzzOp::EngineToolOutput {
             call_id: u.arbitrary()?,
             chunk: u.arbitrary()?,
-        },
-        18 => FuzzOp::EngineToolFinish {
+        })
+    },
+    |u| {
+        Ok(FuzzOp::EngineToolFinish {
             call_id: u.arbitrary()?,
             is_error: u.arbitrary()?,
             content: u.arbitrary()?,
-        },
-        19 => FuzzOp::ExecOutput(u.arbitrary()?),
-        20 => FuzzOp::ExecDone(u.arbitrary()?),
-        21 => FuzzOp::EngineTurnError(u.arbitrary()?),
-        22 => FuzzOp::EngineSteered {
+        })
+    },
+    |u| Ok(FuzzOp::ExecOutput(u.arbitrary()?)),
+    |u| Ok(FuzzOp::ExecDone(u.arbitrary()?)),
+    |u| Ok(FuzzOp::EngineTurnError(u.arbitrary()?)),
+    |u| {
+        Ok(FuzzOp::EngineSteered {
             text: u.arbitrary()?,
             count: u.arbitrary()?,
-        },
-        23 => FuzzOp::EngineRetrying {
+        })
+    },
+    |u| {
+        Ok(FuzzOp::EngineRetrying {
             delay_ms: u.arbitrary()?,
             attempt: u.arbitrary()?,
-        },
-        24 => FuzzOp::EngineTokenUsage {
+        })
+    },
+    |u| {
+        Ok(FuzzOp::EngineTokenUsage {
             prompt: u.arbitrary()?,
             completion: u.arbitrary()?,
             tps: u.arbitrary()?,
             cost_cents: u.arbitrary()?,
             background: u.arbitrary()?,
-        },
-        25 => FuzzOp::PushQueuedMessage(u.arbitrary()?),
-        26 => FuzzOp::EngineProcessCompleted {
+        })
+    },
+    |u| Ok(FuzzOp::PushQueuedMessage(u.arbitrary()?)),
+    |u| {
+        Ok(FuzzOp::EngineProcessCompleted {
             id: u.arbitrary()?,
             exit_code: u.arbitrary()?,
-        },
-        27 => FuzzOp::EngineMessages {
+        })
+    },
+    |u| {
+        Ok(FuzzOp::EngineMessages {
             msg_count: u.arbitrary()?,
-        },
-        28 => FuzzOp::ApproveFirstConfirm,
-        29 => FuzzOp::DenyFirstConfirm {
+        })
+    },
+    |_| Ok(FuzzOp::ApproveFirstConfirm),
+    |u| {
+        Ok(FuzzOp::DenyFirstConfirm {
             message: u.arbitrary()?,
-        },
-        30 => FuzzOp::EngineCoreToolResult {
+        })
+    },
+    |u| {
+        Ok(FuzzOp::EngineCoreToolResult {
             req_id: u.arbitrary()?,
             content: u.arbitrary()?,
             is_error: u.arbitrary()?,
-        },
-        31 => FuzzOp::EngineToolHooksRequest {
+        })
+    },
+    |u| {
+        Ok(FuzzOp::EngineToolHooksRequest {
             req_id: u.arbitrary()?,
             call_id: u.arbitrary()?,
             tool_name: u.arbitrary()?,
             args: u.arbitrary()?,
-        },
-        32 => FuzzOp::InsertAttachment {
+        })
+    },
+    |u| {
+        Ok(FuzzOp::InsertAttachment {
             label: u.arbitrary()?,
-        },
-        33 => FuzzOp::TogglePaneFocus,
-        34 => FuzzOp::EngineToolArgsDelta {
+        })
+    },
+    |_| Ok(FuzzOp::TogglePaneFocus),
+    |u| {
+        Ok(FuzzOp::EngineToolArgsDelta {
             call_id: u.arbitrary()?,
             tool_name: u.arbitrary()?,
             delta: u.arbitrary()?,
-        },
-        35 => FuzzOp::EngineAskResponse {
+        })
+    },
+    |u| {
+        Ok(FuzzOp::EngineAskResponse {
             id: u.arbitrary()?,
             content: u.arbitrary()?,
-        },
-        36 => FuzzOp::EngineAskError {
+        })
+    },
+    |u| {
+        Ok(FuzzOp::EngineAskError {
             id: u.arbitrary()?,
             kind_idx: u.arbitrary()?,
             message: u.arbitrary()?,
-        },
-        37 => FuzzOp::EngineTurnComplete {
+        })
+    },
+    |u| {
+        Ok(FuzzOp::EngineTurnComplete {
             msg_count: u.arbitrary()?,
-        },
-        38 => FuzzOp::EngineToolDispatch {
+        })
+    },
+    |u| {
+        Ok(FuzzOp::EngineToolDispatch {
             req_id: u.arbitrary()?,
             call_id: u.arbitrary()?,
             tool_name: u.arbitrary()?,
             args: u.arbitrary()?,
-        },
-        39 => FuzzOp::EngineRequestPermission {
+        })
+    },
+    |u| {
+        Ok(FuzzOp::EngineRequestPermission {
             req_id: u.arbitrary()?,
             call_id: u.arbitrary()?,
             tool_name: u.arbitrary()?,
             summary: u.arbitrary()?,
             args: u.arbitrary()?,
-        },
-        40 => FuzzOp::EngineShutdown {
+        })
+    },
+    |u| {
+        Ok(FuzzOp::EngineShutdown {
             reason: u.arbitrary()?,
-        },
-        41 => FuzzOp::ReloadLua,
-        42 => FuzzOp::OpenOverlay {
+        })
+    },
+    |_| Ok(FuzzOp::ReloadLua),
+    |u| {
+        Ok(FuzzOp::OpenOverlay {
             variant: u.arbitrary()?,
-        },
-        43 => FuzzOp::InstallPlaceholder {
+        })
+    },
+    |u| {
+        Ok(FuzzOp::InstallPlaceholder {
             text: u.arbitrary()?,
             variant: u.arbitrary()?,
-        },
-        44 => FuzzOp::ClearPlaceholder,
-        n => {
-            unreachable!("fuzz_op idx {n} out of range; bump N_FUZZOP_VARIANTS or extend dispatch")
-        }
-    })
+        })
+    },
+    |_| Ok(FuzzOp::ClearPlaceholder),
+];
+
+/// Total `FuzzOp` variant count, derived from the dispatch table so it
+/// cannot drift.
+pub const N_FUZZOP_VARIANTS: usize = FUZZOP_BUILDERS.len();
+
+/// Build one `FuzzOp` by variant index. Indices outside the table never
+/// happen because `Arbitrary` for `FuzzOp` always picks within range.
+fn build_fuzz_op(idx: usize, u: &mut Unstructured<'_>) -> arbitrary::Result<FuzzOp> {
+    FUZZOP_BUILDERS[idx](u)
 }
 
 /// Alias clarifying intent at use sites: on-disk JSON is a `Scenario`,
