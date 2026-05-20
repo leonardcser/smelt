@@ -84,7 +84,7 @@ jobs:
             fuzz
 
       - name: Install cargo-fuzz
-        run: cargo install cargo-fuzz --locked
+        run: cargo install cargo-fuzz
 
       - name: Replay regression seeds
         run: cargo xtask fuzz replay-regression
