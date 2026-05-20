@@ -4,6 +4,7 @@
 //! produces, so a crash artifact round-trips into a readable file with no
 //! lossy translation.
 
+pub mod cache_common;
 pub mod lua_loop;
 pub mod shrink;
 pub use lua_loop::{run_lua_scenario, LuaScenario};

@@ -13,16 +13,9 @@
 //! the prefix bytes byte-identical (ignoring the moving `cache_control`
 //! marker, whose position legitimately drifts with the conversation).
 //!
-//! Stable actions covered here:
-//!  - Append-only turn growth (`assistant` + new `user` after the
-//!    current last user message).
-//!  - Mode-change synthetic user note (`[smelt:mode] ...`) — appended
-//!    only, system bytes must stay put.
-//!  - Temperature / sampling-param drift in `ModelConfig` — params sit
-//!    outside the cached prefix; `system`, `tools`, prior `messages`
-//!    must stay byte-identical.
-//!  - Tool list reorder — `sort_tools_for_cache_stability` makes the
-//!    output position-independent.
+//! Stable actions covered here are defined in `smelt_fuzz::cache_common`
+//! and shared with the OpenAI target so a new action lands in both
+//! targets at once.
 //!
 //! Each iteration: build a baseline body, apply one stable action,
 //! build the post-action body, strip `cache_control` markers from both,
@@ -30,79 +23,20 @@
 //! divergence means a real bug: tokens are being re-billed.
 
 use arbitrary::Arbitrary;
-use engine::provider::{
-    fuzz_build_anthropic_body, sort_tools_for_cache_stability, CacheConfig, FunctionSchema,
-    ToolDefinition,
-};
+use engine::provider::{fuzz_build_anthropic_body, CacheConfig, ToolDefinition};
 use engine::ModelConfig;
 use libfuzzer_sys::fuzz_target;
-use protocol::{mode_change_note, AgentMode, Content, Message, ReasoningEffort};
+use protocol::{mode_change_note, Content, Message, ReasoningEffort};
 use serde_json::Value;
-
-/// One tool definition, hand-rolled rather than `derive(Arbitrary)` so
-/// we can keep the parameters schema valid JSON (random `Value`s would
-/// produce mostly garbage that doesn't exercise the cache machinery).
-#[derive(Debug, Clone, Arbitrary)]
-struct ArbTool {
-    /// Index into `TOOL_NAMES` mod its length — bounded so two histories
-    /// can collide on the same tool name and the dedup-on-name behavior
-    /// is exercised.
-    name_idx: u8,
-    description: String,
-}
-
-const TOOL_NAMES: &[&str] = &[
-    "read", "write", "edit", "grep", "glob", "ls", "bash", "fetch", "spawn",
-];
-
-impl ArbTool {
-    fn build(&self) -> ToolDefinition {
-        let name = TOOL_NAMES[(self.name_idx as usize) % TOOL_NAMES.len()].to_string();
-        ToolDefinition::new(FunctionSchema {
-            name,
-            description: self.description.clone(),
-            parameters: serde_json::json!({"type": "object"}),
-        })
-    }
-}
-
-/// One stable action that must NOT invalidate the cache prefix.
-#[derive(Debug, Clone, Arbitrary)]
-enum StableAction {
-    /// Append `assistant_text("a"), user("u")` — the canonical follow-up
-    /// turn. `text` is the new user content.
-    AppendTurn { assistant_text: String, user_text: String },
-    /// Append a `[smelt:mode]` synthetic note + a regular user turn.
-    /// Mirrors `/mode` switching: the synthetic note sits in the message
-    /// stream, NOT in the system prompt. Uses the canonical
-    /// `protocol::mode_change_note` builder so the bytes match what the
-    /// real `/mode` command writes.
-    AppendModeNote { mode: u8, user_text: String },
-    /// Reorder tools (shuffle) — the canonical sort must produce the
-    /// same output regardless of input order.
-    ReorderTools,
-    /// Toggle reasoning effort — this sits in the sampling section of
-    /// the body, not the cached prefix, so `system` / `tools` /
-    /// `messages` must stay byte-identical.
-    NudgeReasoningEffort,
-}
+use smelt_fuzz::cache_common::{ArbTool, StableAction, MODES};
 
 #[derive(Debug, Arbitrary)]
 struct Input {
     initial_system: String,
-    /// Sequence of (role, text) user/assistant pairs to form the
-    /// baseline history.
     initial_user_texts: Vec<String>,
     tools: Vec<ArbTool>,
     action: StableAction,
 }
-
-const MODES: &[AgentMode] = &[
-    AgentMode::Normal,
-    AgentMode::Plan,
-    AgentMode::Apply,
-    AgentMode::Yolo,
-];
 
 fn strip_markers(v: &Value) -> Value {
     match v {
@@ -148,26 +82,13 @@ fn cache_on() -> CacheConfig {
     }
 }
 
-fn dedup_arb_tools_by_name(arb: &[ArbTool]) -> Vec<ArbTool> {
-    let mut seen = std::collections::HashSet::new();
-    arb.iter()
-        .take(6)
-        .filter(|t| seen.insert(t.name_idx as usize % TOOL_NAMES.len()))
-        .cloned()
-        .collect()
-}
-
-fn build_tools(arb: &[ArbTool]) -> Vec<ToolDefinition> {
-    let mut tools: Vec<ToolDefinition> = dedup_arb_tools_by_name(arb)
-        .iter()
-        .map(|t| t.build())
-        .collect();
-    sort_tools_for_cache_stability(&mut tools);
-    tools
-}
-
-fn body(messages: &[Message], tools: &[ToolDefinition], cfg: &ModelConfig) -> Value {
-    fuzz_build_anthropic_body(messages, tools, "m", ReasoningEffort::Off, cfg, &cache_on())
+fn body(
+    messages: &[Message],
+    tools: &[ToolDefinition],
+    cfg: &ModelConfig,
+    effort: ReasoningEffort,
+) -> Value {
+    fuzz_build_anthropic_body(messages, tools, "m", effort, cfg, &cache_on())
 }
 
 fn assert_prefix_stable(before: &Value, after: &Value, prefix_msg_count: usize, label: &str) {
@@ -187,10 +108,15 @@ fn assert_prefix_stable(before: &Value, after: &Value, prefix_msg_count: usize, 
             serde_json::to_string(a.get("tools").unwrap_or(&Value::Null)).unwrap_or_default()
         );
     }
-    // Check that the first `prefix_msg_count` messages are byte-identical.
     let empty = Vec::new();
-    let bm = b.get("messages").and_then(|v| v.as_array()).unwrap_or(&empty);
-    let am = a.get("messages").and_then(|v| v.as_array()).unwrap_or(&empty);
+    let bm = b
+        .get("messages")
+        .and_then(|v| v.as_array())
+        .unwrap_or(&empty);
+    let am = a
+        .get("messages")
+        .and_then(|v| v.as_array())
+        .unwrap_or(&empty);
     let n = prefix_msg_count.min(bm.len()).min(am.len());
     for i in 0..n {
         if bm[i] != am[i] {
@@ -206,16 +132,12 @@ fn assert_prefix_stable(before: &Value, after: &Value, prefix_msg_count: usize, 
 fn run(input: Input) {
     let mut messages = build_history(&input);
     if messages.len() < 2 {
-        return; // Nothing to cache.
+        return;
     }
-    let tools = build_tools(&input.tools);
+    let tools = smelt_fuzz::cache_common::build_tools(&input.tools);
     let cfg = ModelConfig::default();
 
-    let before = body(&messages, &tools, &cfg);
-    // `prefix_msg_count` = every existing message survives in the prefix.
-    // Even when we append, the prior ones must stay byte-identical so the
-    // moving breakpoint at the previous-last-user still lands on the
-    // same cached prefix.
+    let before = body(&messages, &tools, &cfg, ReasoningEffort::Off);
     let prefix_msg_count = messages.len();
 
     match &input.action {
@@ -229,44 +151,28 @@ fn run(input: Input) {
                 None,
             ));
             messages.push(Message::user(Content::text(user_text.clone())));
-            let after = body(&messages, &tools, &cfg);
+            let after = body(&messages, &tools, &cfg, ReasoningEffort::Off);
             assert_prefix_stable(&before, &after, prefix_msg_count, "AppendTurn");
         }
         StableAction::AppendModeNote { mode, user_text } => {
             let m = MODES[(*mode as usize) % MODES.len()];
-            messages.push(Message::assistant(Some(Content::text(String::from("ok"))), None, None));
+            messages.push(Message::assistant(
+                Some(Content::text(String::from("ok"))),
+                None,
+                None,
+            ));
             messages.push(Message::user(Content::text(mode_change_note(m))));
             messages.push(Message::user(Content::text(user_text.clone())));
-            let after = body(&messages, &tools, &cfg);
+            let after = body(&messages, &tools, &cfg, ReasoningEffort::Off);
             assert_prefix_stable(&before, &after, prefix_msg_count, "AppendModeNote");
         }
         StableAction::ReorderTools => {
-            // Reverse the input order before sorting — sort must produce
-            // the same output bytes.
-            let mut reordered_arb: Vec<ArbTool> =
-                dedup_arb_tools_by_name(&input.tools).into_iter().rev().collect();
-            // Dedup again post-reverse in case order affected which entry
-            // was the "first" with a given name.
-            reordered_arb = dedup_arb_tools_by_name(&reordered_arb);
-            let mut reordered: Vec<ToolDefinition> =
-                reordered_arb.iter().map(|t| t.build()).collect();
-            sort_tools_for_cache_stability(&mut reordered);
-            let after = body(&messages, &reordered, &cfg);
-            // Whole body should match — no message changes, just tools.
+            let reordered = smelt_fuzz::cache_common::reorder_tools(&input.tools);
+            let after = body(&messages, &reordered, &cfg, ReasoningEffort::Off);
             assert_prefix_stable(&before, &after, prefix_msg_count, "ReorderTools");
         }
         StableAction::NudgeReasoningEffort => {
-            // Reasoning effort lives in the sampling section of the body,
-            // not in the cached prefix. Rebuild with a different effort
-            // and assert system / tools / messages bytes are unchanged.
-            let after = fuzz_build_anthropic_body(
-                &messages,
-                &tools,
-                "m",
-                ReasoningEffort::Low,
-                &cfg,
-                &cache_on(),
-            );
+            let after = body(&messages, &tools, &cfg, ReasoningEffort::Low);
             assert_prefix_stable(&before, &after, prefix_msg_count, "NudgeReasoningEffort");
         }
     }

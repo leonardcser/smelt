@@ -17,54 +17,20 @@
 //!  - `tools` must be sorted by `sort_tools_for_cache_stability` so
 //!    registration-order drift can't bust the prefix.
 //!
+//! Stable actions live in `smelt_fuzz::cache_common` so they stay in
+//! lockstep with the Anthropic target.
+//!
 //! Each iteration: build a baseline OpenAI body with a fixed
 //! `prompt_cache_key`, apply one stable action, build the post-action
 //! body, assert the cache-relevant fields are byte-identical.
 
 use arbitrary::Arbitrary;
-use engine::provider::{
-    fuzz_build_openai_body, sort_tools_for_cache_stability, CacheConfig, FunctionSchema,
-    ToolDefinition,
-};
+use engine::provider::{fuzz_build_openai_body, CacheConfig, ToolDefinition};
 use engine::ModelConfig;
 use libfuzzer_sys::fuzz_target;
-use protocol::{mode_change_note, AgentMode, Content, Message, ReasoningEffort};
+use protocol::{mode_change_note, Content, Message, ReasoningEffort};
 use serde_json::Value;
-
-#[derive(Debug, Clone, Arbitrary)]
-struct ArbTool {
-    name_idx: u8,
-    description: String,
-}
-
-const TOOL_NAMES: &[&str] = &[
-    "read", "write", "edit", "grep", "glob", "ls", "bash", "fetch", "spawn",
-];
-
-impl ArbTool {
-    fn build(&self) -> ToolDefinition {
-        let name = TOOL_NAMES[(self.name_idx as usize) % TOOL_NAMES.len()].to_string();
-        ToolDefinition::new(FunctionSchema {
-            name,
-            description: self.description.clone(),
-            parameters: serde_json::json!({"type": "object"}),
-        })
-    }
-}
-
-#[derive(Debug, Clone, Arbitrary)]
-enum StableAction {
-    AppendTurn {
-        assistant_text: String,
-        user_text: String,
-    },
-    AppendModeNote {
-        mode: u8,
-        user_text: String,
-    },
-    ReorderTools,
-    NudgeReasoningEffort,
-}
+use smelt_fuzz::cache_common::{ArbTool, StableAction, MODES};
 
 #[derive(Debug, Arbitrary)]
 struct Input {
@@ -79,13 +45,6 @@ struct Input {
     /// inside the body builder.
     session_key: String,
 }
-
-const MODES: &[AgentMode] = &[
-    AgentMode::Normal,
-    AgentMode::Plan,
-    AgentMode::Apply,
-    AgentMode::Yolo,
-];
 
 fn build_history(input: &Input) -> Vec<Message> {
     let mut msgs = Vec::with_capacity(input.initial_user_texts.len() * 2 + 4);
@@ -112,24 +71,6 @@ fn cache_with_key(key: &str) -> CacheConfig {
         ttl_long: false,
         prompt_cache_key: Some(key.to_string()),
     }
-}
-
-fn dedup_arb_tools_by_name(arb: &[ArbTool]) -> Vec<ArbTool> {
-    let mut seen = std::collections::HashSet::new();
-    arb.iter()
-        .take(6)
-        .filter(|t| seen.insert(t.name_idx as usize % TOOL_NAMES.len()))
-        .cloned()
-        .collect()
-}
-
-fn build_tools(arb: &[ArbTool]) -> Vec<ToolDefinition> {
-    let mut tools: Vec<ToolDefinition> = dedup_arb_tools_by_name(arb)
-        .iter()
-        .map(|t| t.build())
-        .collect();
-    sort_tools_for_cache_stability(&mut tools);
-    tools
 }
 
 fn body(
@@ -197,11 +138,9 @@ fn run(input: Input) {
     if messages.len() < 2 {
         return;
     }
-    let tools = build_tools(&input.tools);
+    let tools = smelt_fuzz::cache_common::build_tools(&input.tools);
     let cfg = ModelConfig::default();
 
-    // Session key is sticky across the whole session — fix it once and
-    // expect every subsequent body to carry the same clamped value.
     let key = if input.session_key.is_empty() {
         "session".to_string()
     } else {
@@ -246,21 +185,11 @@ fn run(input: Input) {
             assert_prefix_stable(&before, &after, nonsystem_prefix, "AppendModeNote", false);
         }
         StableAction::ReorderTools => {
-            let mut reordered_arb: Vec<ArbTool> = dedup_arb_tools_by_name(&input.tools)
-                .into_iter()
-                .rev()
-                .collect();
-            reordered_arb = dedup_arb_tools_by_name(&reordered_arb);
-            let mut reordered: Vec<ToolDefinition> =
-                reordered_arb.iter().map(|t| t.build()).collect();
-            sort_tools_for_cache_stability(&mut reordered);
+            let reordered = smelt_fuzz::cache_common::reorder_tools(&input.tools);
             let after = body(&messages, &reordered, &cfg, &cache, ReasoningEffort::Off);
             assert_prefix_stable(&before, &after, nonsystem_prefix, "ReorderTools", true);
         }
         StableAction::NudgeReasoningEffort => {
-            // Reasoning effort sits in `reasoning`/`include`, not in the
-            // cached prefix. `instructions` / `input` / `tools` /
-            // `prompt_cache_key` must stay byte-identical.
             let after = body(&messages, &tools, &cfg, &cache, ReasoningEffort::Low);
             assert_prefix_stable(
                 &before,
