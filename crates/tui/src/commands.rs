@@ -16,18 +16,21 @@ pub(crate) struct ExecHandle {
 
 /// Parsed shape of a raw command line typed into the prompt or cmdline.
 ///
-/// The dispatcher's call site treats `Shell` specially (spawn a child); every
-/// other shape goes through the slash-command pipeline, with leading `:` or
-/// `/` stripped. Bare text like `foo bar` parses as `Slash { name: "foo",
-/// arg: Some("bar") }` and is filtered out downstream by `has_command`.
+/// The dispatcher's call site treats `Shell` specially (spawn a child) and
+/// `Slash` as a registered command invocation. `Bare` is plain text that the
+/// user typed without a sigil — it is NOT dispatched as a command, even if
+/// its first word matches a registered name; the caller hands it to the
+/// agent as a normal user message.
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) enum ParsedCommand<'a> {
     /// Empty (or whitespace-only) line.
     Empty,
     /// `! <script>` shell escape. `script` has its leading whitespace trimmed.
     Shell { script: &'a str },
-    /// Slash command (`/name [arg…]`, `:name [arg…]`, or bare `name [arg…]`).
+    /// Slash command (`/name [arg…]` or `:name [arg…]`). Requires a sigil.
     Slash { name: &'a str, arg: Option<&'a str> },
+    /// Plain text with no sigil. Never dispatched as a command.
+    Bare { text: &'a str },
 }
 
 /// Classify a raw command line without dispatching it. See [`ParsedCommand`].
@@ -41,15 +44,11 @@ pub(crate) fn parse_command_line(line: &str) -> ParsedCommand<'_> {
             script: rest.trim_start(),
         };
     }
-    // `:` and `/` are both slash-command sigils; everything else falls
-    // through as a "slash command" with the literal first word as `name`.
-    let body = line
-        .strip_prefix(':')
-        .or_else(|| line.strip_prefix('/'))
-        .unwrap_or(line);
-    // `idx` is the byte offset of a whitespace char; the char itself may be
-    // multi-byte (e.g. U+2000 EN QUAD is 3 bytes), so split via `splitn` to
-    // step past one whole char instead of `idx + 1` slicing mid-codepoint.
+    let Some(body) = line.strip_prefix(':').or_else(|| line.strip_prefix('/')) else {
+        return ParsedCommand::Bare { text: line };
+    };
+    // `splitn` steps past one whole whitespace char (may be multi-byte, e.g.
+    // U+2000 EN QUAD) instead of slicing at `idx + 1` mid-codepoint.
     match body.splitn(2, char::is_whitespace).collect::<Vec<_>>()[..] {
         [name, arg] => {
             let arg = arg.trim();
@@ -65,36 +64,23 @@ pub(crate) fn parse_command_line(line: &str) -> ParsedCommand<'_> {
     }
 }
 
-/// Dispatch a raw command line. Leading `:` normalises to `/`. `!` lines
-/// spawn a shell escape; everything else dispatches to a Lua-registered handler.
+/// Dispatch a raw command line. `!` lines spawn a shell escape; `/` and `:`
+/// dispatch to a Lua-registered handler. Bare text (no sigil) is never
+/// dispatched — it is left for the caller to forward to the agent.
 pub(crate) fn run_command(app: &mut TuiApp, line: &str) -> CommandAction {
     let _perf = smelt_perf::perf::begin("cmd:dispatch");
-    let parsed = parse_command_line(line);
-    if let ParsedCommand::Shell { script } = parsed {
-        if !app.input.skip_shell_escape() {
+    let (name, arg) = match parse_command_line(line) {
+        ParsedCommand::Shell { script } => {
+            if app.input.skip_shell_escape() {
+                return CommandAction::Continue;
+            }
             return match app.start_shell_escape(script) {
                 Some(handle) => CommandAction::Exec(handle),
                 None => CommandAction::Continue,
             };
         }
-    }
-    // For non-shell input (or `!` lines being treated as plain text mid-paste),
-    // dispatch through the slash-command pipeline. Mirrors the legacy behaviour
-    // of `trim_start_matches('/')` on the trimmed line.
-    let trimmed = line.trim();
-    if trimmed.is_empty() {
-        return CommandAction::Continue;
-    }
-    let body = trimmed
-        .strip_prefix(':')
-        .or_else(|| trimmed.strip_prefix('/'))
-        .unwrap_or(trimmed);
-    let (name, arg) = match body.splitn(2, char::is_whitespace).collect::<Vec<_>>()[..] {
-        [n, a] => {
-            let a = a.trim().to_string();
-            (n.to_string(), if a.is_empty() { None } else { Some(a) })
-        }
-        _ => (body.to_string(), None),
+        ParsedCommand::Slash { name, arg } => (name.to_string(), arg.map(str::to_string)),
+        ParsedCommand::Empty | ParsedCommand::Bare { .. } => return CommandAction::Continue,
     };
     app.core
         .cells
@@ -465,12 +451,23 @@ mod tests {
     }
 
     #[test]
-    fn bare_name_without_a_sigil_still_parses_as_slash() {
-        // Preserves the legacy fall-through: any non-shell input goes
-        // through the slash pipeline so `has_command` decides whether to
-        // dispatch it.
-        assert_eq!(parse_command_line("foo bar"), slash("foo", Some("bar")));
-        assert_eq!(parse_command_line("foo"), slash("foo", None));
+    fn bare_name_without_a_sigil_parses_as_bare_text() {
+        // Without a leading `/` or `:`, the line is plain text headed for
+        // the agent — even if its first word matches a registered command.
+        assert_eq!(
+            parse_command_line("foo bar"),
+            ParsedCommand::Bare { text: "foo bar" }
+        );
+        assert_eq!(
+            parse_command_line("foo"),
+            ParsedCommand::Bare { text: "foo" }
+        );
+        assert_eq!(
+            parse_command_line("  btw what's up  "),
+            ParsedCommand::Bare {
+                text: "btw what's up"
+            }
+        );
     }
 
     #[test]

@@ -5,8 +5,17 @@ use smelt_core::transcript_model::ConfirmChoice;
 
 impl TuiApp {
     /// Run a slash command as if typed into the cmdline. Forwards `Exec` for shell escapes.
+    /// Accepts bare names (`"btw foo"`) — the leading `/` is added automatically so the
+    /// dispatcher's sigil requirement applies only to user-typed prompt input.
     pub(crate) fn apply_lua_command(&mut self, line: &str) {
-        match crate::commands::run_command(self, line) {
+        let trimmed = line.trim_start();
+        let normalized: std::borrow::Cow<str> =
+            if trimmed.starts_with('/') || trimmed.starts_with(':') || trimmed.starts_with('!') {
+                std::borrow::Cow::Borrowed(line)
+            } else {
+                std::borrow::Cow::Owned(format!("/{trimmed}"))
+            };
+        match crate::commands::run_command(self, &normalized) {
             crate::app::CommandAction::Exec(handle) => {
                 self.exec = Some(handle);
             }
