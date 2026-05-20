@@ -8,7 +8,7 @@ const CLIENT_ID: &str = "app_EMoamEEZ73f0CkXaXp7hrann";
 const ISSUER: &str = "https://auth.openai.com";
 pub const CODEX_API_ENDPOINT: &str = "https://chatgpt.com/backend-api/codex/responses";
 const OAUTH_PORT: u16 = 1455;
-const REFRESH_INTERVAL_SECS: u64 = 8 * 3600; // 8 hours
+const REFRESH_INTERVAL_SECS: u64 = 8 * 24 * 3600; // 8 days, matching codex
 
 pub(crate) const CODEX_TOKENS_ENV: &str = "SMELT_CODEX_TOKENS";
 
@@ -85,6 +85,10 @@ struct AuthExt {
 }
 
 fn parse_jwt_claims(token: &str) -> Option<JwtClaims> {
+    decode_jwt_payload(token)
+}
+
+fn decode_jwt_payload<T: serde::de::DeserializeOwned>(token: &str) -> Option<T> {
     use base64::Engine;
     let parts: Vec<&str> = token.split('.').collect();
     if parts.len() != 3 {
@@ -94,6 +98,15 @@ fn parse_jwt_claims(token: &str) -> Option<JwtClaims> {
         .decode(parts[1])
         .ok()?;
     serde_json::from_slice(&payload).ok()
+}
+
+#[derive(Deserialize)]
+struct ExpClaim {
+    exp: Option<u64>,
+}
+
+fn parse_jwt_expiration(token: &str) -> Option<u64> {
+    decode_jwt_payload::<ExpClaim>(token).and_then(|c| c.exp)
 }
 
 struct PkceCodes {
@@ -129,8 +142,8 @@ fn generate_state() -> String {
 
 #[derive(Deserialize)]
 struct TokenResponse {
-    access_token: String,
-    refresh_token: String,
+    access_token: Option<String>,
+    refresh_token: Option<String>,
     id_token: Option<String>,
     expires_in: Option<u64>,
 }
@@ -323,23 +336,25 @@ async fn exchange_code(
         .await
         .map_err(|e| format!("bad token response: {e}"))?;
 
-    save_token_response(tokens)
+    save_token_response(tokens, None)
 }
 
 pub(crate) async fn refresh_tokens(
     client: &reqwest::Client,
     refresh_token: &str,
 ) -> Result<CodexTokens, String> {
-    let form_body = url::form_urlencoded::Serializer::new(String::new())
-        .append_pair("grant_type", "refresh_token")
-        .append_pair("refresh_token", refresh_token)
-        .append_pair("client_id", CLIENT_ID)
-        .finish();
+    let previous = CodexTokens::load();
+
+    let body = serde_json::json!({
+        "client_id": CLIENT_ID,
+        "grant_type": "refresh_token",
+        "refresh_token": refresh_token,
+    });
 
     let resp = client
         .post(format!("{ISSUER}/oauth/token"))
-        .header("Content-Type", "application/x-www-form-urlencoded")
-        .body(form_body)
+        .header("Content-Type", "application/json")
+        .json(&body)
         .send()
         .await
         .map_err(|e| format!("token refresh failed: {e}"))?;
@@ -354,7 +369,7 @@ pub(crate) async fn refresh_tokens(
         .await
         .map_err(|e| format!("bad refresh response: {e}"))?;
 
-    let result = save_token_response(tokens)?;
+    let result = save_token_response(tokens, previous.as_ref())?;
 
     log::entry(
         log::Level::Debug,
@@ -377,15 +392,41 @@ fn classify_refresh_error(body: &str) -> String {
     }
 }
 
-fn save_token_response(tokens: TokenResponse) -> Result<CodexTokens, String> {
-    let now = unix_now();
-    let result = CodexTokens {
-        account_id: extract_account_id(&tokens.access_token, tokens.id_token.as_deref()),
-        access_token: tokens.access_token,
-        refresh_token: tokens.refresh_token,
-        expires_at: now + tokens.expires_in.unwrap_or(3600),
+fn merge_token_response(
+    tokens: TokenResponse,
+    previous: Option<&CodexTokens>,
+    now: u64,
+) -> Result<CodexTokens, String> {
+    let access_token = tokens
+        .access_token
+        .or_else(|| previous.map(|t| t.access_token.clone()))
+        .ok_or("missing access_token in OAuth response")?;
+    let refresh_token = tokens
+        .refresh_token
+        .or_else(|| previous.map(|t| t.refresh_token.clone()))
+        .ok_or("missing refresh_token in OAuth response")?;
+
+    let expires_at = parse_jwt_expiration(&access_token)
+        .or_else(|| tokens.expires_in.map(|s| now + s))
+        .unwrap_or(now + 3600);
+
+    let account_id = extract_account_id(&access_token, tokens.id_token.as_deref())
+        .or_else(|| previous.and_then(|t| t.account_id.clone()));
+
+    Ok(CodexTokens {
+        account_id,
+        access_token,
+        refresh_token,
+        expires_at,
         last_refresh: now,
-    };
+    })
+}
+
+fn save_token_response(
+    tokens: TokenResponse,
+    previous: Option<&CodexTokens>,
+) -> Result<CodexTokens, String> {
+    let result = merge_token_response(tokens, previous, unix_now())?;
     result
         .save()
         .map_err(|e| format!("failed to save tokens: {e}"))?;
@@ -881,6 +922,106 @@ mod tests {
             serde_json::from_value(serde_json::json!({"device_auth_id":"d","usercode":"alt"}))
                 .unwrap();
         assert_eq!(r.user_code, "alt");
+    }
+
+    // ---- parse_jwt_expiration ----
+
+    #[test]
+    fn parse_jwt_expiration_reads_exp_claim() {
+        let jwt = jwt_with(&serde_json::json!({"exp": 1_700_000_000_u64}));
+        assert_eq!(parse_jwt_expiration(&jwt), Some(1_700_000_000));
+    }
+
+    #[test]
+    fn parse_jwt_expiration_returns_none_without_exp() {
+        let jwt = jwt_with(&serde_json::json!({}));
+        assert_eq!(parse_jwt_expiration(&jwt), None);
+    }
+
+    #[test]
+    fn parse_jwt_expiration_returns_none_for_garbage() {
+        assert_eq!(parse_jwt_expiration("not-a-jwt"), None);
+    }
+
+    // ---- merge_token_response ----
+
+    fn previous_tokens() -> CodexTokens {
+        CodexTokens {
+            access_token: "prev-access".into(),
+            refresh_token: "prev-refresh".into(),
+            expires_at: 0,
+            account_id: Some("prev-acct".into()),
+            last_refresh: 0,
+        }
+    }
+
+    #[test]
+    fn merge_token_response_reuses_previous_refresh_token_when_missing() {
+        let access = jwt_with(&serde_json::json!({"exp": 1_700_000_000_u64}));
+        let resp = TokenResponse {
+            access_token: Some(access.clone()),
+            refresh_token: None,
+            id_token: None,
+            expires_in: None,
+        };
+        let out = merge_token_response(resp, Some(&previous_tokens()), 1_000).unwrap();
+        assert_eq!(out.access_token, access);
+        assert_eq!(out.refresh_token, "prev-refresh");
+        assert_eq!(out.account_id.as_deref(), Some("prev-acct"));
+        assert_eq!(out.last_refresh, 1_000);
+    }
+
+    #[test]
+    fn merge_token_response_prefers_jwt_exp_over_expires_in() {
+        let jwt_exp = 1_800_000_000_u64;
+        let access = jwt_with(&serde_json::json!({"exp": jwt_exp}));
+        let resp = TokenResponse {
+            access_token: Some(access),
+            refresh_token: Some("new-refresh".into()),
+            id_token: None,
+            expires_in: Some(60),
+        };
+        let out = merge_token_response(resp, Some(&previous_tokens()), 1_000).unwrap();
+        assert_eq!(out.expires_at, jwt_exp);
+        assert_eq!(out.refresh_token, "new-refresh");
+    }
+
+    #[test]
+    fn merge_token_response_falls_back_to_expires_in_when_jwt_has_no_exp() {
+        let access = jwt_with(&serde_json::json!({}));
+        let resp = TokenResponse {
+            access_token: Some(access),
+            refresh_token: Some("r".into()),
+            id_token: None,
+            expires_in: Some(120),
+        };
+        let out = merge_token_response(resp, None, 1_000).unwrap();
+        assert_eq!(out.expires_at, 1_120);
+    }
+
+    #[test]
+    fn merge_token_response_errors_when_no_access_token_anywhere() {
+        let resp = TokenResponse {
+            access_token: None,
+            refresh_token: Some("r".into()),
+            id_token: None,
+            expires_in: Some(60),
+        };
+        let err = merge_token_response(resp, None, 0).unwrap_err();
+        assert!(err.contains("access_token"));
+    }
+
+    #[test]
+    fn merge_token_response_errors_when_no_refresh_token_anywhere() {
+        let access = jwt_with(&serde_json::json!({"exp": 1_700_000_000_u64}));
+        let resp = TokenResponse {
+            access_token: Some(access),
+            refresh_token: None,
+            id_token: None,
+            expires_in: Some(60),
+        };
+        let err = merge_token_response(resp, None, 0).unwrap_err();
+        assert!(err.contains("refresh_token"));
     }
 
     // ---- pkce / state helpers (smoke) ----
