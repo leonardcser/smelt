@@ -7,6 +7,11 @@
 ---@class smelt
 local smelt = {}
 
+--- Push a busy token onto the per-app stack and return a `Reg` whose `:remove()` pops it. While any token is live the reactive `work_*` cells flip to the busy state (`work_state == "busy"`, `work_label` = top label). Mirrors `smelt.spinner.busy`; the cells are the canonical surface plugins should subscribe to.
+---@see smelt.spinner.busy
+---@type fun(label: string|{ label: string, kind?: string }): smelt.Reg
+smelt.busy = nil
+
 --- Return which top-level pane currently has focus: `"transcript"` or `"prompt"`.
 ---@type fun(): string
 smelt.focus = nil

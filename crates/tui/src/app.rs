@@ -150,6 +150,8 @@ pub(crate) struct BusyStack {
     since: Option<Instant>,
 }
 
+pub use smelt_core::cells::WorkBusyEntry;
+
 impl BusyStack {
     pub(crate) fn push(&mut self, label: String) -> u64 {
         self.next_id += 1;
@@ -184,6 +186,19 @@ impl BusyStack {
 
     pub(crate) fn since(&self) -> Option<Instant> {
         self.since
+    }
+
+    /// Full stack newest-last, projected onto `WorkBusyEntry`. Cheap
+    /// clone of the per-entry `(id, label)` pair; called once per tick
+    /// by the cell publisher.
+    pub(crate) fn entries_snapshot(&self) -> Vec<WorkBusyEntry> {
+        self.entries
+            .iter()
+            .map(|(id, label)| WorkBusyEntry {
+                id: *id,
+                label: label.clone(),
+            })
+            .collect()
     }
 }
 
@@ -576,7 +591,8 @@ impl TuiApp {
         }
     }
 
-    /// Publish `vim_mode`, `confirms_pending`, `now`, and `spinner_frame` cells whenever their values change.
+    /// Publish `vim_mode`, `confirms_pending`, `now`, `spinner_frame`,
+    /// and the `work_*` family of cells whenever their values change.
     pub(crate) fn publish_diff_cells(&mut self) {
         self.core.cells.publish_if_changed(
             "vim_mode",
@@ -600,6 +616,78 @@ impl TuiApp {
             .map(|e| smelt_core::content::spinner_frame_index(e) as u8)
             .unwrap_or(0);
         self.core.cells.publish_if_changed("spinner_frame", frame);
+
+        self.publish_work_cells();
+    }
+
+    /// Derive and publish the `work_*` cells from `WorkingState` and the
+    /// per-app busy stack. Layered so engine-side `Working`/`Retrying`/
+    /// `Paused` win over busy tokens; an empty engine state with a live
+    /// busy token reads as `Busy`; otherwise `Done`/`Interrupted` if a
+    /// turn just archived, else `Idle`.
+    fn publish_work_cells(&mut self) {
+        use smelt_core::working::{TurnOutcome, WorkState};
+
+        let engine = self.working.engine_state();
+        let busy_label = self.busy_stack.top_label();
+        let outcome = self.working.last_outcome();
+
+        let state = if let Some(s) = engine {
+            s
+        } else if self.busy_stack.is_busy() {
+            WorkState::Busy
+        } else {
+            match outcome {
+                Some(TurnOutcome::Done) => WorkState::Done,
+                Some(TurnOutcome::Interrupted) => WorkState::Interrupted,
+                None => WorkState::Idle,
+            }
+        };
+
+        let label = if let Some(l) = busy_label {
+            l
+        } else if matches!(
+            engine,
+            Some(WorkState::Working) | Some(WorkState::Retrying) | Some(WorkState::Paused)
+        ) {
+            "working".to_string()
+        } else {
+            String::new()
+        };
+
+        let outcome_str = match outcome {
+            Some(TurnOutcome::Done) if engine.is_none() => "done",
+            Some(TurnOutcome::Interrupted) if engine.is_none() => "interrupted",
+            _ => "",
+        };
+
+        let elapsed_ms = self
+            .working
+            .elapsed()
+            .map(|d| d.as_millis() as u64)
+            .unwrap_or(0);
+
+        let (retry_attempt, retry_remaining_ms) = self.working.retry_info().unwrap_or((0, 0));
+
+        self.core
+            .cells
+            .publish_if_changed("work_state", state.as_str().to_string());
+        self.core.cells.publish_if_changed("work_label", label);
+        self.core
+            .cells
+            .publish_if_changed("work_elapsed_ms", elapsed_ms);
+        self.core
+            .cells
+            .publish_if_changed("work_outcome", outcome_str.to_string());
+        self.core
+            .cells
+            .publish_if_changed("work_retry_attempt", retry_attempt);
+        self.core
+            .cells
+            .publish_if_changed("work_retry_remaining_ms", retry_remaining_ms);
+        self.core
+            .cells
+            .publish_if_changed("work_busy", self.busy_stack.entries_snapshot());
     }
 
     /// Drain pending cell-fire notifications and invoke subscribers.

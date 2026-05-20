@@ -489,6 +489,17 @@ impl TestApp {
         self.app.lua.lua.load(snippet).exec().is_ok()
     }
 
+    /// Re-publish the cell diff + fire queued subscribers. Production
+    /// runs this every main-loop tick (`app.rs:1068`); the harness
+    /// skips that loop and exposes it here so tests can assert against
+    /// the reactive `work_*` / `vim_mode` / `now` cells without driving
+    /// a synthetic event.
+    pub fn tick_cells(&mut self) {
+        let _guard = crate::lua::install_app_ptr(&mut self.app);
+        self.app.publish_diff_cells();
+        self.app.drain_cells_pending();
+    }
+
     /// Counts of bound names across the four reload-survival registries:
     /// `(bufs, wins, overlays, paints)`. Reload-survival post-checks
     /// snapshot these before and after `reload_lua()` and assert
@@ -1472,6 +1483,63 @@ mod tests {
             "steady-state keystroke delta: {} allocs / {} bytes",
             delta.allocs, delta.bytes_grown
         );
+    }
+
+    #[test]
+    fn smelt_busy_pushes_token_and_flips_work_cells() {
+        let mut app = TestApp::builder().build();
+        let lua_ok = app.run_lua(
+            r#"
+                _G._busy_handle = smelt.busy("syncing")
+            "#,
+        );
+        assert!(lua_ok, "smelt.busy snippet failed");
+        app.tick_cells();
+        let _guard = crate::lua::install_app_ptr(&mut app.app);
+        let state: String = app
+            .app
+            .lua
+            .lua
+            .load(r#"return smelt.cell("work_state"):get()"#)
+            .eval()
+            .expect("work_state");
+        assert_eq!(state, "busy");
+        let label: String = app
+            .app
+            .lua
+            .lua
+            .load(r#"return smelt.cell("work_label"):get()"#)
+            .eval()
+            .expect("work_label");
+        assert_eq!(label, "syncing");
+        let (count, first_label): (i64, String) = app
+            .app
+            .lua
+            .lua
+            .load(
+                r#"
+                local s = smelt.cell("work_busy"):get()
+                return #s, s[1].label
+                "#,
+            )
+            .eval()
+            .expect("work_busy");
+        assert_eq!(count, 1);
+        assert_eq!(first_label, "syncing");
+        drop(_guard);
+
+        let ok = app.run_lua("_G._busy_handle:remove(); _G._busy_handle = nil");
+        assert!(ok);
+        app.tick_cells();
+        let _guard = crate::lua::install_app_ptr(&mut app.app);
+        let state_after: String = app
+            .app
+            .lua
+            .lua
+            .load(r#"return smelt.cell("work_state"):get()"#)
+            .eval()
+            .expect("work_state post-release");
+        assert_eq!(state_after, "idle");
     }
 
     #[test]

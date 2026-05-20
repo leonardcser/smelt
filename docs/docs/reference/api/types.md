@@ -426,7 +426,7 @@ Variants: `"inline"` \| `"overlay"` \| `"right_align"` \| `"eol"`
 
 Name of a reactive cell. Open alias — plugin-defined cells declared via `smelt.cell.new` are accepted alongside the well-known runtime cells listed here.
 
-Open alias — accepts any `string`. Well-known names: `"agent_mode"` \| `"block_done"` \| `"branch"` \| `"cmd_post"` \| `"cmd_pre"` \| `"confirm_requested"` \| `"confirm_resolved"` \| `"confirms_pending"` \| `"cwd"` \| `"errors"` \| `"history"` \| `"input_submit"` \| `"model"` \| `"now"` \| `"reasoning"` \| `"session_ended"` \| `"session_started"` \| `"session_title"` \| `"shutdown"` \| `"spinner_frame"` \| `"stream_delta"` \| `"tokens_used"` \| `"tool_end"` \| `"tool_start"` \| `"turn_complete"` \| `"turn_end"` \| `"turn_error"` \| `"turn_start"` \| `"vim_mode"`.
+Open alias — accepts any `string`. Well-known names: `"agent_mode"` \| `"block_done"` \| `"branch"` \| `"cmd_post"` \| `"cmd_pre"` \| `"confirm_requested"` \| `"confirm_resolved"` \| `"confirms_pending"` \| `"cwd"` \| `"errors"` \| `"history"` \| `"input_submit"` \| `"model"` \| `"now"` \| `"reasoning"` \| `"session_ended"` \| `"session_started"` \| `"session_title"` \| `"shutdown"` \| `"spinner_frame"` \| `"stream_delta"` \| `"tokens_used"` \| `"tool_end"` \| `"tool_start"` \| `"turn_complete"` \| `"turn_end"` \| `"turn_error"` \| `"turn_start"` \| `"vim_mode"` \| `"work_busy"` \| `"work_elapsed_ms"` \| `"work_label"` \| `"work_outcome"` \| `"work_retry_attempt"` \| `"work_retry_remaining_ms"` \| `"work_state"`.
 
 ### `smelt.cli.FlagKind`
 

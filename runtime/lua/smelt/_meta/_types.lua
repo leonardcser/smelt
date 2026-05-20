@@ -283,7 +283,7 @@
 ---@alias smelt.buf.VirtTextPos "inline"|"overlay"|"right_align"|"eol"
 
 --- Name of a reactive cell. Open alias — plugin-defined cells declared via `smelt.cell.new` are accepted alongside the well-known runtime cells listed here.
----@alias smelt.cell.Name string|"agent_mode"|"block_done"|"branch"|"cmd_post"|"cmd_pre"|"confirm_requested"|"confirm_resolved"|"confirms_pending"|"cwd"|"errors"|"history"|"input_submit"|"model"|"now"|"reasoning"|"session_ended"|"session_started"|"session_title"|"shutdown"|"spinner_frame"|"stream_delta"|"tokens_used"|"tool_end"|"tool_start"|"turn_complete"|"turn_end"|"turn_error"|"turn_start"|"vim_mode"
+---@alias smelt.cell.Name string|"agent_mode"|"block_done"|"branch"|"cmd_post"|"cmd_pre"|"confirm_requested"|"confirm_resolved"|"confirms_pending"|"cwd"|"errors"|"history"|"input_submit"|"model"|"now"|"reasoning"|"session_ended"|"session_started"|"session_title"|"shutdown"|"spinner_frame"|"stream_delta"|"tokens_used"|"tool_end"|"tool_start"|"turn_complete"|"turn_end"|"turn_error"|"turn_start"|"vim_mode"|"work_busy"|"work_elapsed_ms"|"work_label"|"work_outcome"|"work_retry_attempt"|"work_retry_remaining_ms"|"work_state"
 
 --- Type of CLI flag declared via `smelt.cli.register_flag`. Matches the subset of clap that we expose to Lua.
 ---@alias smelt.cli.FlagKind "boolean"|"string"|"integer"
