@@ -83,8 +83,8 @@ pub struct TuiApp {
     pub(crate) last_height: u16,
     pub(crate) next_turn_id: u64,
     pub(crate) pending_turn_meta: Option<protocol::TurnMeta>,
-    /// `smelt.spinner.busy` token stack. Non-empty → status bar animates
-    /// the spinner with the top token's label.
+    /// `smelt.work.busy` token stack. Non-empty → prompt top-bar
+    /// indicator animates with the top token's label.
     pub(crate) busy_stack: BusyStack,
     startup_auth_error: Option<String>,
     /// Trust state for `<cwd>/.smelt/`; surfaced as a startup toast then dropped.
@@ -138,11 +138,11 @@ pub use well_known::{
     PROMPT_ABOVE_WIN, PROMPT_BELOW_WIN, PROMPT_EDIT_BUF, PROMPT_WIN, TRANSCRIPT_WIN,
 };
 
-/// Stack of live `smelt.spinner.busy` tokens. Each `push` returns a
-/// monotonic id consumed by `release`; the status bar shows the spinner
-/// with the most recently pushed token's label. The `since` anchor
-/// marks when the stack first became non-empty so the spinner glyph
-/// can advance even when no agent turn is live.
+/// Stack of live `smelt.work.busy` tokens. Each `push` returns a
+/// monotonic id consumed by `release`; the prompt top-bar indicator
+/// animates with the most recently pushed token's label. The `since`
+/// anchor marks when the stack first became non-empty so the spinner
+/// glyph can advance even when no agent turn is live.
 #[derive(Default)]
 pub(crate) struct BusyStack {
     entries: Vec<(u64, String)>,

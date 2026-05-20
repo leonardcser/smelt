@@ -11,7 +11,7 @@ local statusline = {}
 ---@type fun(name: string, handler: fun(value: table): table, opts: smelt.statusline.RegisterOpts?): smelt.Reg
 statusline.register = nil
 
---- Return the statusline state in one table per refresh: `working` (stripped down to `{ animating }`; the working pill itself lives in the prompt top bar — read `work_*` cells for the full state), `vim`, `mode`, `permission_pending`, `running_procs`, `running_agents`, `task_label`, `settings`, and `position`. Styles are not projected — name a `style_group` on each segment instead. Returns an empty table when the app pointer is unavailable.
+--- Return the statusline state in one table per refresh: `tps` (tokens-per-second from the live or just-archived turn, when available), `vim`, `mode`, `permission_pending`, `running_procs`, `running_agents`, `task_label`, `settings`, and `position`. The working pill lives in the prompt top bar now; plugins that need work state read the `work_*` cells instead. Styles are not projected — name a `style_group` on each segment. Returns an empty table when the app pointer is unavailable.
 ---@type fun(): table
 statusline.snapshot = nil
 

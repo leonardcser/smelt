@@ -9,7 +9,7 @@
 --                    summarisation over the older history with a fixed
 --                    structured prompt. Recent turns are preserved verbatim.
 --
--- Both phases are visible to the user via `smelt.spinner.busy("compacting")`
+-- Both phases are visible to the user via `smelt.work.busy("compacting")`
 -- and emit structured `compaction` log events with before/after token counts.
 
 -- Task instruction appended as the FINAL user message of the summariser
@@ -274,7 +274,7 @@ local function summarize_flat(history, instructions, done)
   local cleaned = strip_images(history)
   local task = build_summary_task(instructions)
   local user_text = task .. "\n\nConversation to summarize:\n\n" .. stringify_conversation(cleaned)
-  local handle = smelt.spinner.busy("compacting")
+  local handle = smelt.work.busy("compacting")
   local empty_retries = 0
 
   -- Reuse the main session's system prompt so the system block hits the
@@ -329,7 +329,7 @@ local function summarize(history, instructions, done)
     return
   end
   local task = build_summary_task(instructions)
-  local handle = smelt.spinner.busy("compacting")
+  local handle = smelt.work.busy("compacting")
   local empty_retries = 0
 
   local function send()

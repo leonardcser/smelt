@@ -6,16 +6,6 @@
 
 Root smelt namespace. Host-tier bindings are registered first; UiHost-tier bindings are injected when a TUI is active.
 
-## `smelt.busy`
-
-```lua
-fun(label: string|{ label: string, kind?: string }): smelt.Reg
-```
-
-Types: [`smelt.Reg`](types.md#smeltreg)
-
-Push a busy token onto the per-app stack and return a `Reg` whose `:remove()` pops it. While any token is live the reactive `work_*` cells flip to the busy state (`work_state == "busy"`, `work_label` = top label). Mirrors `smelt.spinner.busy`; the cells are the canonical surface plugins should subscribe to.
-
 ## `smelt.focus`
 
 ```lua

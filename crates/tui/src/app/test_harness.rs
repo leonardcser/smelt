@@ -58,7 +58,7 @@ pub struct StreamingState {
 }
 
 /// Snapshot of `WorkingState`. `animating` is true while a live turn
-/// exists; `busy` is true while any `smelt.spinner.busy` token is held
+/// exists; `busy` is true while any `smelt.work.busy` token is held
 /// by a plugin.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct WorkingSnapshot {
@@ -1486,14 +1486,14 @@ mod tests {
     }
 
     #[test]
-    fn smelt_busy_pushes_token_and_flips_work_cells() {
+    fn smelt_work_busy_pushes_token_and_flips_work_cells() {
         let mut app = TestApp::builder().build();
         let lua_ok = app.run_lua(
             r#"
-                _G._busy_handle = smelt.busy("syncing")
+                _G._busy_handle = smelt.work.busy("syncing")
             "#,
         );
-        assert!(lua_ok, "smelt.busy snippet failed");
+        assert!(lua_ok, "smelt.work.busy snippet failed");
         app.tick_cells();
         let _guard = crate::lua::install_app_ptr(&mut app.app);
         let state: String = app

@@ -22,9 +22,9 @@ engine.ask = nil
 ---@type fun(spec: table): integer
 engine.ask_with_trim = nil
 
---- Cancel the in-flight turn. In-flight background `smelt.engine.ask` requests are unaffected and will still fire their callbacks; plugins owning `smelt.spinner.busy` tokens are responsible for releasing them.
+--- Cancel the in-flight turn. In-flight background `smelt.engine.ask` requests are unaffected and will still fire their callbacks; plugins owning `smelt.work.busy` tokens are responsible for releasing them.
 ---@see smelt.engine.ask
----@see smelt.spinner.busy
+---@see smelt.work.busy
 ---@type fun(): nil
 engine.cancel = nil
 

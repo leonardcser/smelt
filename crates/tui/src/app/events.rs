@@ -141,7 +141,7 @@ impl TuiApp {
             } => {
                 self.redact_user_submission(&mut content, &mut display);
                 // Queue while a background plugin (compaction, etc.) has
-                // taken a `smelt.spinner.busy` token so messages run
+                // taken a `smelt.work.busy` token so messages run
                 // against the post-busy state.
                 if self.busy_stack.is_busy() {
                     let text = content.text_content();

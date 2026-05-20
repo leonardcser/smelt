@@ -121,7 +121,7 @@ impl TuiApp {
         for handle in self.paint_registry.clear_anonymous() {
             self.lua.remove_callback(handle);
         }
-        // `smelt.spinner.busy` tokens are Reg-managed but reload wipes
+        // `smelt.work.busy` tokens are Reg-managed but reload wipes
         // the closures holding the Reg userdata before `:remove()` runs.
         // Clear here to match the timers/cells idiom and avoid leaking
         // entries until process exit.

@@ -315,7 +315,7 @@ pub struct ConfirmRequested {
 }
 
 /// Single entry in the `work_busy` cell payload. One per live
-/// `smelt.busy` / `smelt.spinner.busy` token, projected newest-last as
+/// `smelt.work.busy` token, projected newest-last as
 /// `{ id, label }` Lua tables. `id` is the monotonic token id returned
 /// by `push`; plugins compare it across ticks to spot specific tokens.
 #[derive(Clone, Debug, PartialEq)]

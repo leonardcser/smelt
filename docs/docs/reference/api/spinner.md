@@ -4,25 +4,7 @@
 
 **Tier:** `UiHost` — Requires a terminal UI; calling these from headless mode raises.
 
-Shared spinner glyph and cadence for plugin animations, plus a busy-token stack so long-running background work surfaces in the prompt top-bar indicator. UiHost-only.
-
-## `smelt.spinner.busy`
-
-```lua
-fun(label: string): smelt.Reg
-```
-
-Types: [`smelt.Reg`](types.md#smeltreg)
-
-Push a busy token onto the per-app stack and return a `Reg` whose `:remove()` pops it. While any token is live, the prompt top-bar indicator shows the spinner with the top token's `label`. Multiple plugins can hold tokens concurrently; the most recently pushed label wins.
-
-## `smelt.spinner.busy_label`
-
-```lua
-fun(): string?
-```
-
-Return the top busy-stack label, or `nil` when nothing is busy.
+Shared spinner glyph and cadence for plugin animations. Pure rendering primitive — work-state tokens belong in `smelt.work`. UiHost-only.
 
 ## `smelt.spinner.glyph`
 
@@ -31,14 +13,6 @@ fun(): string
 ```
 
 Return the current spinner glyph (single grapheme). Stays in sync with the prompt top-bar working indicator so plugin spinners animate together.
-
-## `smelt.spinner.is_busy`
-
-```lua
-fun(): boolean
-```
-
-Return `true` while at least one `smelt.spinner.busy` token is live.
 
 ## `smelt.spinner.period_ms`
 

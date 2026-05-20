@@ -169,7 +169,7 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
     )?;
     m.fn_(
         "cancel",
-        "Cancel the in-flight turn. In-flight background `smelt.engine.ask` requests are unaffected and will still fire their callbacks; plugins owning `smelt.spinner.busy` tokens are responsible for releasing them.",
+        "Cancel the in-flight turn. In-flight background `smelt.engine.ask` requests are unaffected and will still fire their callbacks; plugins owning `smelt.work.busy` tokens are responsible for releasing them.",
         &[],
         |_, ()| -> LuaResult<()> {
             crate::lua::with_app(|app| {

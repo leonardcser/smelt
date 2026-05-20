@@ -1,4 +1,4 @@
--- Idle-mode Esc-Esc: cancel any in-flight background work (`smelt.spinner.busy`
+-- Idle-mode Esc-Esc: cancel any in-flight background work (`smelt.work.busy`
 -- tokens, e.g. /compact), or rewind to the previous turn. Defers to Rust when
 -- the agent is running — the cancel-agent path lives there.
 
@@ -9,7 +9,7 @@ smelt.keymap.set("", "<Esc><Esc>", function(ctx)
 
   local restore_insert = ctx.vim_mode_at_chord_start == "insert"
 
-  if smelt.spinner.is_busy() then
+  if smelt.work.is_busy() then
     smelt.engine.cancel()
     if restore_insert then
       smelt.vim.set_mode("insert")

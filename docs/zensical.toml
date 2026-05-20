@@ -86,6 +86,7 @@ nav = [
     { "`smelt.trust`" = "reference/api/trust.md" },
     { "`smelt.vim`" = "reference/api/vim.md" },
     { "`smelt.win`" = "reference/api/win.md" },
+    { "`smelt.work`" = "reference/api/work.md" },
     { "Types" = "reference/api/types.md" },
     # <<< LUA API NAV
     ]},

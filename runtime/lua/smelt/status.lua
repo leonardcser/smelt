@@ -59,15 +59,12 @@ local function compose()
   end
 
   -- ── Tokens-per-second (right strip) ───────────────────────────────
-  if snap.settings and snap.settings.show_tps then
-    local tps = (snap.working or {}).tps
-    if tps then
-      table.insert(items, {
-        text = string.format(" %.1f tok/s", tps),
-        style_group = "Comment",
-        priority = 4,
-      })
-    end
+  if snap.settings and snap.settings.show_tps and snap.tps then
+    table.insert(items, {
+      text = string.format(" %.1f tok/s", snap.tps),
+      style_group = "Comment",
+      priority = 4,
+    })
   end
 
   -- ── Cache hit ratio (right strip) ────────────────────────────────

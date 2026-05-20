@@ -96,12 +96,13 @@ replace earlier ones with the same name. Returns a `Reg` whose \
     }
     m.fn_(
         "snapshot",
-        "Return the statusline state in one table per refresh: `working` \
-(stripped down to `{ animating }`; the working pill itself lives in the \
-prompt top bar — read `work_*` cells for the full state), `vim`, `mode`, \
-`permission_pending`, `running_procs`, `running_agents`, `task_label`, \
-`settings`, and `position`. Styles are not projected — name a \
-`style_group` on each segment instead. Returns an empty table when the \
+        "Return the statusline state in one table per refresh: `tps` \
+(tokens-per-second from the live or just-archived turn, when \
+available), `vim`, `mode`, `permission_pending`, `running_procs`, \
+`running_agents`, `task_label`, `settings`, and `position`. The \
+working pill lives in the prompt top bar now; plugins that need work \
+state read the `work_*` cells instead. Styles are not projected — \
+name a `style_group` on each segment. Returns an empty table when the \
 app pointer is unavailable.",
         &[],
         |lua, ()| -> LuaResult<mlua::Table> {
@@ -121,22 +122,14 @@ app pointer is unavailable.",
 fn build_snapshot(app: &mut crate::app::TuiApp, lua: &Lua) -> LuaResult<mlua::Table> {
     let t = lua.create_table()?;
 
-    // The animating/working pill rendered by the previous status.lua
-    // composer now lives in the prompt-block top bar; the snapshot
-    // keeps a stripped-down `working` table so plugins that just want
-    // "is anything happening" can still gate on `animating`. Plugins
-    // that need richer state read the `work_*` cells directly. `tps`
-    // is exposed here (rather than only in `work_*` cells) because the
-    // status bar renders it next to the cache-hit ratio.
-    let working = lua.create_table()?;
-    working.set(
-        "animating",
-        app.working.is_animating() || app.busy_stack.is_busy(),
-    )?;
+    // Tokens-per-second from the live or just-archived turn. Top-level
+    // because it's a turn metric the status bar paints next to the
+    // cache-hit ratio; the working pill itself lives in the prompt
+    // top bar, and plugins that need full work state read the `work_*`
+    // cells directly.
     if let Some(tps) = app.working.turn_meta().and_then(|m| m.avg_tps) {
-        working.set("tps", tps)?;
+        t.set("tps", tps)?;
     }
-    t.set("working", working)?;
 
     // Vim mode: focused overlay-leaf with vim wins; non-vim overlay leaf yields no label.
     let vim_tbl = lua.create_table()?;

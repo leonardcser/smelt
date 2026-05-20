@@ -34,7 +34,7 @@ itself is one-shot; composition lives here so the policy stays visible.
 fun(): nil
 ```
 
-Cancel the in-flight turn. In-flight background `smelt.engine.ask` requests are unaffected and will still fire their callbacks; plugins owning `smelt.spinner.busy` tokens are responsible for releasing them.
+Cancel the in-flight turn. In-flight background `smelt.engine.ask` requests are unaffected and will still fire their callbacks; plugins owning `smelt.work.busy` tokens are responsible for releasing them.
 
 ## `smelt.engine.is_running`
 
