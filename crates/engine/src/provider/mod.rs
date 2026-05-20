@@ -876,8 +876,14 @@ impl Provider {
             }
             ProviderKind::OpenAi => None,
             ProviderKind::Codex => codex::cached_context_window(model),
-            ProviderKind::AnthropicCompatible | ProviderKind::Anthropic => {
-                self.fetch_context_window_anthropic(model).await
+            ProviderKind::Anthropic => self.fetch_context_window_anthropic(model).await,
+            // Kimi's `/coding` endpoint is Anthropic-shaped for chat but
+            // OpenAI-shaped for `/models`; fall back to the listing.
+            ProviderKind::AnthropicCompatible => {
+                match self.fetch_context_window_anthropic(model).await {
+                    Some(v) => Some(v),
+                    None => self.fetch_context_window_openai_compatible(model).await,
+                }
             }
             ProviderKind::Copilot => copilot::cached_context_window(model),
         };
@@ -925,9 +931,20 @@ impl Provider {
         }
         let data: serde_json::Value = resp.json().await.ok()?;
         let models = data["data"].as_array()?;
-        let entry = models.iter().find(|m| m["id"].as_str() == Some(model))?;
+        let entry = models.iter().find(|m| models_entry_matches(m, model))?;
         context_window_from_models_entry(entry)
     }
+}
+
+/// Kimi puts the human-facing name in `display_name` and a stable
+/// backend slug in `id`, so accept either.
+fn models_entry_matches(entry: &serde_json::Value, model: &str) -> bool {
+    let eq = |field: &str| {
+        entry[field]
+            .as_str()
+            .is_some_and(|s| s.eq_ignore_ascii_case(model))
+    };
+    eq("id") || eq("display_name")
 }
 
 /// Pick the context window out of one `/v1/models` entry. Each backend
@@ -1720,6 +1737,34 @@ mod tests {
     fn context_window_returns_none_when_no_known_fields_present() {
         let entry = serde_json::json!({"id": "m"});
         assert_eq!(context_window_from_models_entry(&entry), None);
+    }
+
+    // ---- models_entry_matches ----
+
+    #[test]
+    fn models_entry_matches_by_id_case_insensitive() {
+        let entry = serde_json::json!({"id": "Kimi-for-Coding"});
+        assert!(models_entry_matches(&entry, "kimi-for-coding"));
+    }
+
+    #[test]
+    fn models_entry_matches_by_display_name_when_id_differs() {
+        let entry = serde_json::json!({"id": "kimi-for-coding", "display_name": "Kimi-k2.6", "context_length": 262144});
+        assert!(models_entry_matches(&entry, "kimi-k2.6"));
+        assert_eq!(context_window_from_models_entry(&entry), Some(262_144));
+    }
+
+    #[test]
+    fn models_entry_matches_returns_false_when_neither_field_matches() {
+        let entry = serde_json::json!({"id": "a", "display_name": "B"});
+        assert!(!models_entry_matches(&entry, "c"));
+    }
+
+    #[test]
+    fn models_entry_matches_handles_missing_display_name() {
+        let entry = serde_json::json!({"id": "gpt-5.5"});
+        assert!(models_entry_matches(&entry, "gpt-5.5"));
+        assert!(!models_entry_matches(&entry, "gpt-5"));
     }
 
     #[test]
