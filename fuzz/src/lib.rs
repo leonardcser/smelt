@@ -1538,59 +1538,23 @@ fn plan(op: FuzzOp) -> (Option<SourceEvent>, PostCheck) {
     }
 }
 
-/// Apply one `FuzzOp` to a `TestApp`. Every op rolls through the same path:
-/// pre-snapshot → feed event (or side-channel) → post-snapshot → check →
-/// global invariants.
-pub fn apply(app: &mut TestApp, op: FuzzOp) {
-    // Side channels — pokes that bypass `feed_one_within_budget`. Variants
-    // carrying owned data (e.g. PushQueuedMessage(String)) are handled
-    // with `if let` so they take ownership; the rest match by reference.
-    if let FuzzOp::PushQueuedMessage(text) = op {
-        app.push_queued_message(text);
-        app.assert_invariants();
-        return;
-    }
-    if let FuzzOp::InsertAttachment { label } = op {
-        app.insert_attachment(label);
-        app.assert_invariants();
-        return;
-    }
-    if let FuzzOp::InstallPlaceholder { text, variant } = op {
-        let (accept, dismiss) = placeholder_chord_pair(variant);
-        app.install_prompt_placeholder(text, accept, dismiss);
-        app.assert_invariants();
-        return;
-    }
-    if let FuzzOp::DenyFirstConfirm { message } = op {
-        let pre = Snapshot::capture(app);
-        let had_message = message.is_some();
-        app.resolve_first_confirm(false, message);
-        let post = Snapshot::capture(app);
-        let new_actions = app.actions_since(pre.action_count);
-        run_check(
-            PostCheck::ConfirmResolved {
-                approved: false,
-                had_message,
-            },
-            &pre,
-            &post,
-            new_actions,
-        );
-        check_turn_end_invariants(&pre, &post);
-        app.assert_invariants();
-        return;
-    }
-    match &op {
-        FuzzOp::StartTurn(id) => {
-            app.start_turn(u64::from(*id));
-            app.assert_invariants();
-            return;
+/// Side channels are `FuzzOp` variants that bypass `feed_one_within_budget`
+/// and poke the app directly (host-level pokes the engine never sees). The
+/// dispatcher returns `Ok(())` if the op was a side channel and was handled,
+/// or `Err(op)` if the op should fall through to the event-feeding path.
+/// Owned-data variants take ownership cleanly via this single match.
+fn try_dispatch_side_channel(app: &mut TestApp, op: FuzzOp) -> Result<(), FuzzOp> {
+    match op {
+        FuzzOp::PushQueuedMessage(text) => app.push_queued_message(text),
+        FuzzOp::InsertAttachment { label } => app.insert_attachment(label),
+        FuzzOp::InstallPlaceholder { text, variant } => {
+            let (accept, dismiss) = placeholder_chord_pair(variant);
+            app.install_prompt_placeholder(text, accept, dismiss);
         }
-        FuzzOp::TogglePaneFocus => {
-            app.toggle_pane_focus();
-            app.assert_invariants();
-            return;
-        }
+        FuzzOp::ClearPlaceholder => app.clear_prompt_placeholder(),
+        FuzzOp::StartTurn(id) => app.start_turn(u64::from(id)),
+        FuzzOp::TogglePaneFocus => app.toggle_pane_focus(),
+        FuzzOp::OpenOverlay { variant } => app.open_synthetic_overlay(variant),
         FuzzOp::ReloadLua => {
             // Targeted reload-survival check: every named slot in the
             // four reload-survival registries (bufs, wins, overlays,
@@ -1610,18 +1574,6 @@ pub fn apply(app: &mut TestApp, op: FuzzOp) {
                 pre,
                 post,
             );
-            app.assert_invariants();
-            return;
-        }
-        FuzzOp::OpenOverlay { variant } => {
-            app.open_synthetic_overlay(*variant);
-            app.assert_invariants();
-            return;
-        }
-        FuzzOp::ClearPlaceholder => {
-            app.clear_prompt_placeholder();
-            app.assert_invariants();
-            return;
         }
         FuzzOp::ApproveFirstConfirm => {
             let pre = Snapshot::capture(app);
@@ -1638,11 +1590,40 @@ pub fn apply(app: &mut TestApp, op: FuzzOp) {
                 new_actions,
             );
             check_turn_end_invariants(&pre, &post);
+        }
+        FuzzOp::DenyFirstConfirm { message } => {
+            let pre = Snapshot::capture(app);
+            let had_message = message.is_some();
+            app.resolve_first_confirm(false, message);
+            let post = Snapshot::capture(app);
+            let new_actions = app.actions_since(pre.action_count);
+            run_check(
+                PostCheck::ConfirmResolved {
+                    approved: false,
+                    had_message,
+                },
+                &pre,
+                &post,
+                new_actions,
+            );
+            check_turn_end_invariants(&pre, &post);
+        }
+        other => return Err(other),
+    }
+    Ok(())
+}
+
+/// Apply one `FuzzOp` to a `TestApp`. Every op rolls through the same path:
+/// pre-snapshot → feed event (or side-channel) → post-snapshot → check →
+/// global invariants.
+pub fn apply(app: &mut TestApp, op: FuzzOp) {
+    let op = match try_dispatch_side_channel(app, op) {
+        Ok(()) => {
             app.assert_invariants();
             return;
         }
-        _ => {}
-    }
+        Err(op) => op,
+    };
 
     let pre = Snapshot::capture(app);
     // `TurnComplete` is gated on `turn_id` matching the live agent — read
