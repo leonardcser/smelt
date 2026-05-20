@@ -274,6 +274,13 @@ impl TuiApp {
         self.sleep_inhibit.release();
         self.core.engine.send(UiCommand::Cancel);
         self.lua.cancel_tasks();
+        // A turn is ending without going through `finish_turn`. Commit any
+        // in-flight streaming buffers so the post-cancel state honors the
+        // "no agent ⇒ no active stream" invariant (an empty thinking delta
+        // arrived right before this can leave an empty `active_thinking`
+        // sentinel that lingers past `agent = None`).
+        self.flush_streaming_thinking();
+        self.flush_streaming_text();
         {
             self.working.finish(TurnOutcome::Interrupted);
         };
