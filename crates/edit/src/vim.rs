@@ -237,6 +237,13 @@ impl VimWindowState {
         self.visual_anchor = 0;
     }
 
+    /// Shift the visual anchor right by `delta` bytes. Call after
+    /// prepending text to the buffer so the anchor keeps pointing at the
+    /// same character (cpos is shifted by the caller too).
+    pub fn shift_visual_anchor(&mut self, delta: usize) {
+        self.visual_anchor = self.visual_anchor.saturating_add(delta);
+    }
+
     /// Clamp the visual anchor into `source` and snap it to a char
     /// boundary. Call after any in-place source shrink so the anchor
     /// preserved for `gv` can never outlive its bytes or land mid-UTF-8.

@@ -308,6 +308,12 @@ impl PromptState {
         ctx.buf.text_mut().insert_str(0, &prefix);
         ctx.win.cpos += inserted;
         ctx.win.selection_anchor = None;
+        // Every offset into the buffer shifts right by `inserted`. Cpos is
+        // shifted above; vim's visual_anchor needs the same treatment or
+        // it lands mid-codepoint when the prepended prefix straddles a
+        // boundary that the anchor used to sit on.
+        ctx.win.vim_state.shift_visual_anchor(inserted);
+        ctx.win.clamp_anchors_to_source(ctx.buf.source());
         self.from_paste = false;
     }
 
