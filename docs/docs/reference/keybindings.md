@@ -16,7 +16,7 @@
 | `Shift+Tab`                     | Cycle mode (normal → plan → apply → yolo) |
 | `Esc`                           | Dismiss dialog / unqueue messages       |
 | `Esc Esc`                       | Cancel agent / compaction / rewind      |
-| `↑` / `↓` / `Ctrl+P` / `Ctrl+N` | Navigate input history                  |
+| `↑` / `↓` / `Ctrl+P` / `Ctrl+N` | Previous / next line (history at edges) |
 | `Tab`                           | Accept ghost text completion            |
 | `?`                             | Open help (empty input only)            |
 | `Cmd+V`                         | Paste image from clipboard              |
@@ -34,8 +34,10 @@ into the prompt; a second `Esc` cancels the running turn.
 | `Ctrl+B` / `Left`              | Backward one character |
 | `Alt+F` / `Alt+Right`          | Forward one word       |
 | `Alt+B` / `Alt+Left`           | Backward one word      |
-| `Cmd+Up`                       | Start of buffer        |
-| `Cmd+Down`                     | End of buffer          |
+| `Alt+<` / `Cmd+Up`             | Start of buffer        |
+| `Alt+>` / `Cmd+Down`           | End of buffer          |
+| `PgUp` / `Alt+V`               | Page up                |
+| `PgDn` / `Ctrl+V`              | Page down              |
 
 ### Editing
 
@@ -99,14 +101,16 @@ their vim meanings:
 | -------- | ----------------- | --------------------- |
 | `Ctrl+U` | Half-page up      | Kill to start of line |
 | `Ctrl+D` | Half-page down    | Delete forward        |
+| `Ctrl+B` | Page up           | Back one character    |
+| `Ctrl+F` | Page down         | Forward one character |
+| `Ctrl+Y` | Scroll up one line| Yank                  |
+| `Ctrl+E` | Scroll down one line | End of line        |
 | `Ctrl+J` | History next      | Insert newline        |
 | `Ctrl+K` | History prev      | Kill to end of line   |
 | `Ctrl+R` | Redo              | History search        |
 | `v`      | Edit in `$EDITOR` | —                     |
 | `Ctrl+A` | No-op             | Start of line         |
-| `Ctrl+E` | No-op             | End of line           |
 | `Ctrl+W` | No-op             | Delete word backward  |
-| `Ctrl+Y` | No-op             | Yank                  |
 
 Full vim support: motions, operators (`d`, `c`, `y`), text objects (`iw`,
 `a(`…), find (`f`, `t`, `F`, `T`, `;`, `,`), and commands (`x`, `s`, `r`, `p`,
@@ -116,6 +120,18 @@ Yank / paste are mirrored with the system clipboard: `y` / `yy` / `d` / `x`
 push to the clipboard, and `p` / `P` read from it. If the clipboard was
 updated externally since your last yank, `p` pastes the external text
 (charwise); otherwise vim's linewise flag from `yy` is preserved.
+
+## Transcript
+
+Focus the transcript with `Ctrl+W` then `h` / `j` / `k` / `l` / `p` / `w` (any
+direction toggles). The transcript shares the same keymap as the prompt —
+arrows, `Ctrl+P` / `Ctrl+N`, `PgUp` / `PgDn`, `Ctrl+V` / `Alt+V`, `Alt+<` /
+`Alt+>`, `Home` / `End`, `Cmd+C`, and shift-extended selection variants all
+work. Editing chords are silently dropped on the read-only transcript buffer.
+`Ctrl+C` returns focus to the prompt. With vim enabled the full vim engine
+runs on the transcript (motions, `y` to yank, `v` / `V` visual selection,
+`Ctrl+B` / `Ctrl+F` / `Ctrl+U` / `Ctrl+D` / `Ctrl+Y` / `Ctrl+E` viewport
+scrolling).
 
 ## Cmdline (`:`)
 

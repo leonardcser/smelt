@@ -321,6 +321,19 @@ impl PromptState {
         ctx.win.clamp_anchors_to_source(ctx.buf.source());
     }
 
+    /// Move the cursor by `delta` source lines, clamped to the buffer bounds.
+    pub(super) fn scroll_lines(&mut self, ctx: &mut PromptCtx<'_>, delta: isize) {
+        let source = ctx.buf.source();
+        let line = super::current_line(source, ctx.win.cpos);
+        let total_lines = source.chars().filter(|&c| c == '\n').count() + 1;
+        let target = if delta < 0 {
+            line.saturating_sub((-delta) as usize)
+        } else {
+            (line + delta as usize).min(total_lines.saturating_sub(1))
+        };
+        self.move_to_line(ctx, target);
+    }
+
     pub(super) fn move_to_line(&mut self, ctx: &mut PromptCtx<'_>, target_line: usize) {
         let mut line = 0;
         let mut pos = 0;

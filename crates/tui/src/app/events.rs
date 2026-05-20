@@ -865,27 +865,30 @@ impl TuiApp {
         )
     }
 
-    /// Unified viewer-key dispatcher. Applies a key to `win_id`, handling in
-    /// order:
-    ///   1. Page motion (PageUp/Down, Ctrl-u/d/b/f/y/e) — vim Normal only for
-    ///      the Ctrl- variants so an Insert handler can still see them.
-    ///   2. Vim engine (when `vim_enabled`).
-    ///   3. Non-vim OS-style navigation: arrows, Home/End, Ctrl/Alt-arrows for
-    ///      word, shift+nav for selection-extend, Ctrl-C / Cmd-C for copy.
+    /// Unified viewer-key dispatcher shared between transcript, overlay leaves,
+    /// and any future scrollable window. Resolution order:
+    ///   1. Vim engine (when `vim_enabled`) — handles motions, operators,
+    ///      and yanks; falls through with `Passthrough` for chords vim
+    ///      doesn't claim (e.g. Shift+Arrow selection-extend).
+    ///   2. Shared keymap dispatch via [`Self::dispatch_buffer_action`].
+    ///      The keymap uses the window's actual `vim_enabled`/`vim_mode`
+    ///      context so vim-Normal-only chords (Ctrl-U/D, Ctrl-B/F page
+    ///      motion, Ctrl-Y/E line scroll) and emacs chords (Ctrl-V/Alt-V,
+    ///      Alt-</>, Ctrl-P/N) route correctly.
     ///
-    /// One code path serves overlay leaves, the transcript pane, and any
-    /// future scrollable window. The caller stays responsible for any
-    /// site-specific post-processing (e.g. transcript cursor snapping).
+    /// Editing actions (kill, delete, yank, etc.) are silently dropped on
+    /// `buf.readonly` buffers — the same dispatcher serves the read-only
+    /// transcript and a future read-write Lua-created buffer without
+    /// branching the call site.
     pub(crate) fn dispatch_window_viewer_key(
         &mut self,
         win_id: crate::smelt_term::WinId,
         k: KeyEvent,
     ) -> crate::smelt_term::Status {
         use crate::smelt_term::Status;
-        let (vim_enabled, vim_mode, buf_id, viewport_rows) = match self.ui.win(win_id) {
+        let (vim_enabled, buf_id, viewport_rows) = match self.ui.win(win_id) {
             Some(w) => (
                 w.vim_enabled,
-                w.vim_mode,
                 w.buf,
                 w.viewport.map(|v| v.rect.height).unwrap_or(0),
             ),
@@ -903,24 +906,6 @@ impl TuiApp {
             return Status::Ignored;
         }
 
-        // (1) Page motion — Ctrl- variants gated on vim Normal so future
-        // Insert handlers can claim them; plain PageUp/Down always fires.
-        let is_ctrl_motion = k.modifiers.contains(KeyModifiers::CONTROL);
-        let allow_ctrl =
-            !is_ctrl_motion || !vim_enabled || vim_mode == crate::smelt_term::VimMode::Normal;
-        if allow_ctrl {
-            if let Some(d) = crate::smelt_term::vim::page_motion_delta(k, viewport_rows) {
-                let (win, buf) = self.ui.win_and_buf_mut(win_id, buf_id);
-                let win = win.expect("window");
-                let buf = buf.expect("buffer");
-                win.move_cursor_by_lines(buf, d, viewport_rows);
-                let max_scroll = (buf.lines().len() as u16).saturating_sub(viewport_rows);
-                win.follow_tail = win.scroll_top >= max_scroll;
-                return Status::Consumed;
-            }
-        }
-
-        // (2) Vim engine.
         if vim_enabled {
             let (win, buf) = self.ui.win_and_buf_mut(win_id, buf_id);
             let win = win.expect("window");
@@ -932,20 +917,22 @@ impl TuiApp {
             if matches!(status, Status::Consumed) {
                 return Status::Consumed;
             }
-            // Vim Passthrough (e.g. shift+arrows) falls through to the
-            // OS-style nav layer so selection-extend keeps working in vim
-            // mode too — matches the prompt's behaviour.
+            // Vim Passthrough (Shift+Arrows, etc.) falls through so the
+            // shared keymap layer can claim selection-extend chords —
+            // matches the prompt's behaviour.
         }
 
-        // (3) OS-style navigation.
-        self.apply_nonvim_nav_key(win_id, buf_id, k, viewport_rows)
+        self.dispatch_buffer_action(win_id, buf_id, k, viewport_rows)
     }
 
-    /// KeyAction-driven non-vim navigation: arrows, Home/End, Ctrl/Alt-arrows
-    /// for word motion, shift+nav for selection extension, Ctrl-C / Cmd-C for
-    /// copy. Operates on any window — the transcript wraps this with
-    /// `snap_transcript_cursor` for its non-selectable cell skipping.
-    fn apply_nonvim_nav_key(
+    /// Keymap-driven dispatcher: looks up the binding under the window's
+    /// real vim context, executes the resolved [`KeyAction`] against the
+    /// (win, buf) pair, and honours `buf.readonly` for editing actions.
+    /// Mirrors the prompt's `PromptState::execute_key_action` for the
+    /// motion + selection + copy + page-motion subset; non-motion actions
+    /// (editing, history) are handled elsewhere (the prompt) or dropped
+    /// (read-only buffers).
+    fn dispatch_buffer_action(
         &mut self,
         win_id: crate::smelt_term::WinId,
         buf_id: crate::smelt_term::BufId,
@@ -953,17 +940,21 @@ impl TuiApp {
         viewport_rows: u16,
     ) -> crate::smelt_term::Status {
         use crate::keymap::{lookup, KeyAction, KeyContext};
-        use crate::smelt_term::Status;
+        use crate::smelt_term::{Status, VimMode};
 
-        let buf_empty = self
-            .ui
-            .buf(buf_id)
-            .map(|b| b.text().is_empty())
-            .unwrap_or(true);
+        let (vim_enabled, vim_mode, readonly, buf_empty) =
+            match (self.ui.win(win_id), self.ui.buf(buf_id)) {
+                (Some(w), Some(b)) => (w.vim_enabled, w.vim_mode, b.readonly, b.text().is_empty()),
+                _ => return Status::Ignored,
+            };
         let ctx = KeyContext {
             buf_empty,
-            vim_non_insert: false,
-            vim_enabled: false,
+            vim_non_insert: vim_enabled
+                && matches!(
+                    vim_mode,
+                    VimMode::Normal | VimMode::Visual | VimMode::VisualLine
+                ),
+            vim_enabled,
             agent_running: false,
         };
         let Some(action) = lookup(k.code, k.modifiers, &ctx) else {
@@ -981,38 +972,54 @@ impl TuiApp {
                 | KeyAction::SelectStartOfLine
                 | KeyAction::SelectEndOfLine
         );
-
-        let cpos_before = match self.ui.win(win_id) {
-            Some(w) => w.cpos,
-            None => return Status::Ignored,
-        };
-        let win = self.ui.win_mut(win_id).expect("window");
-        match action {
+        let is_motion = matches!(
+            action,
             KeyAction::MoveLeft
-            | KeyAction::MoveRight
-            | KeyAction::MoveUp
-            | KeyAction::MoveDown
-            | KeyAction::MoveStartOfLine
-            | KeyAction::MoveEndOfLine
-            | KeyAction::MoveWordForward
-            | KeyAction::MoveWordBackward => {
-                win.selection_anchor = None;
-            }
-            _ if extending => {
-                win.extend_selection(cpos_before);
-            }
-            _ => {}
+                | KeyAction::MoveRight
+                | KeyAction::MoveUp
+                | KeyAction::MoveDown
+                | KeyAction::MoveStartOfLine
+                | KeyAction::MoveEndOfLine
+                | KeyAction::MoveWordForward
+                | KeyAction::MoveWordBackward
+                | KeyAction::MoveStartOfBuffer
+                | KeyAction::MoveEndOfBuffer
+                | KeyAction::PageUp
+                | KeyAction::PageDown
+                | KeyAction::HalfPageUp
+                | KeyAction::HalfPageDown
+                | KeyAction::ScrollLineUp
+                | KeyAction::ScrollLineDown
+        );
+
+        let cpos_before = self.ui.win(win_id).expect("window").cpos;
+        let win = self.ui.win_mut(win_id).expect("window");
+        if is_motion {
+            win.selection_anchor = None;
+        } else if extending {
+            win.extend_selection(cpos_before);
         }
 
-        let delta: Option<isize> = match action {
+        // Line-delta motions resolve through the window's display-line API,
+        // which respects soft-wrap and gutter math.
+        let line_delta: Option<isize> = match action {
             KeyAction::MoveUp | KeyAction::SelectUp => Some(-1),
             KeyAction::MoveDown | KeyAction::SelectDown => Some(1),
+            KeyAction::PageUp => Some(-(viewport_rows as isize)),
+            KeyAction::PageDown => Some(viewport_rows as isize),
+            KeyAction::HalfPageUp => Some(-((viewport_rows as isize) / 2).max(1)),
+            KeyAction::HalfPageDown => Some(((viewport_rows as isize) / 2).max(1)),
+            KeyAction::ScrollLineUp => Some(-1),
+            KeyAction::ScrollLineDown => Some(1),
             _ => None,
         };
-        if let Some(d) = delta {
+        if let Some(d) = line_delta {
             let (win, buf) = self.ui.win_and_buf_mut(win_id, buf_id);
-            win.expect("window")
-                .move_cursor_by_lines(buf.expect("buffer"), d, viewport_rows);
+            let win = win.expect("window");
+            let buf = buf.expect("buffer");
+            win.move_cursor_by_lines(buf, d, viewport_rows);
+            let max_scroll = (buf.lines().len() as u16).saturating_sub(viewport_rows);
+            win.follow_tail = win.scroll_top >= max_scroll;
             return Status::Consumed;
         }
 
@@ -1049,6 +1056,8 @@ impl TuiApp {
                     crate::smelt_term::text::CharClass::Word,
                 ))
             }
+            KeyAction::MoveStartOfBuffer => Some(0),
+            KeyAction::MoveEndOfBuffer => Some(text.len()),
             KeyAction::CopySelection => {
                 let win = self.ui.win(win_id).expect("window");
                 if let Some((s, e)) = win.selection_range(buf) {
@@ -1063,6 +1072,9 @@ impl TuiApp {
                 }
                 return Status::Consumed;
             }
+            // Read-only buffers silently drop editing actions; the prompt
+            // path is the only consumer for these.
+            _ if readonly => return Status::Ignored,
             _ => None,
         };
         drop(text);

@@ -790,21 +790,32 @@ impl PromptState {
                 Action::Redraw
             }
 
-            // ── Vim half-page scroll ────────────────────────────────────
-            KeyAction::VimHalfPageUp => {
-                let half = content::term_height() / 2;
-                let line = current_line(ctx.buf.source(), ctx.win.cpos);
-                let target = line.saturating_sub(half);
-                self.move_to_line(ctx, target);
+            // ── Page motion ─────────────────────────────────────────────
+            // The prompt is a single edit buffer; page motion clamps to its
+            // bounds. Used in vim Normal (Ctrl-B/F/U/D/Y/E) and emacs
+            // (Ctrl-V/Alt-V) — both surface through the shared keymap.
+            KeyAction::PageUp => {
+                self.scroll_lines(ctx, -(content::term_height() as isize));
                 Action::Redraw
             }
-            KeyAction::VimHalfPageDown => {
-                let half = content::term_height() / 2;
-                let source = ctx.buf.source();
-                let line = current_line(source, ctx.win.cpos);
-                let total = source.chars().filter(|&c| c == '\n').count() + 1;
-                let target = (line + half).min(total - 1);
-                self.move_to_line(ctx, target);
+            KeyAction::PageDown => {
+                self.scroll_lines(ctx, content::term_height() as isize);
+                Action::Redraw
+            }
+            KeyAction::HalfPageUp => {
+                self.scroll_lines(ctx, -((content::term_height() / 2) as isize));
+                Action::Redraw
+            }
+            KeyAction::HalfPageDown => {
+                self.scroll_lines(ctx, (content::term_height() / 2) as isize);
+                Action::Redraw
+            }
+            KeyAction::ScrollLineUp => {
+                self.scroll_lines(ctx, -1);
+                Action::Redraw
+            }
+            KeyAction::ScrollLineDown => {
+                self.scroll_lines(ctx, 1);
                 Action::Redraw
             }
 
@@ -1024,7 +1035,7 @@ impl PromptState {
 
 pub(crate) use smelt_buffer::text::{byte_of_char, char_pos};
 
-fn current_line(buf: &str, cpos: usize) -> usize {
+pub(super) fn current_line(buf: &str, cpos: usize) -> usize {
     let end = smelt_buffer::text::snap(buf, cpos);
     buf[..end].chars().filter(|&c| c == '\n').count()
 }

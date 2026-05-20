@@ -3,20 +3,20 @@ source: crates/tui/tests/storybook/app_ctx.rs
 expression: frame.text()
 ---
 ┌ help ────────────────────────────────────────────────────┐
-│/command                 commands  (try /resume, /compact │
-│@<path>                  attach a file or URL             │
-│!<cmd>                   run a shell command              │
+│/command                       commands  (try /resume, /c │
+│@<path>                        attach a file or URL       │
+│!<cmd>                         run a shell command        │
 │                                                          │
-│enter                    send message                     │
-│ctrl+j  shift+enter      insert newline                   │
-│ctrl+c                   cancel / interrupt / quit        │
-│ctrl+r                   search input history             │
-│ctrl+t                   cycle reasoning effort           │
-│ctrl+s                   stash / unstash input            │
-│shift+tab                cycle mode  (normal → plan → app │
-│↑/↓  ctrl+n/p            navigate history / items         │
-│ctrl+u / ctrl+d          scroll up / down  (half page)    │
-│ctrl+a / ctrl+e          line start / end                 │
-│ctrl+k / ctrl+w          kill to end / delete word        │
-│ctrl+y / alt+y           yank / yank-pop (cycle kill ring │
+│enter                          send message               │
+│ctrl+j  shift+enter            insert newline             │
+│ctrl+c                         cancel / interrupt / quit  │
+│ctrl+r                         search input history       │
+│ctrl+t                         cycle reasoning effort     │
+│ctrl+s                         stash / unstash input      │
+│shift+tab                      cycle mode  (normal → plan │
+│↑/↓  ctrl+p/n                  previous / next line  (his │
+│pgup / pgdn  ctrl+v / alt+v    page up / down             │
+│ctrl+a / ctrl+e                line start / end           │
+│alt+< / alt+>                  buffer start / end         │
+│ctrl+k / ctrl+w                kill to end / delete word  │
 └──────────────────────────────────────────────────────────┘

@@ -10,7 +10,7 @@ pub(crate) struct TranscriptProjection {
     cache_generation: u64,
     cache_width: u16,
     project_key: Option<ProjectKey>,
-    /// Block layout from the last `project()`. Backs `block_of_row`.
+    /// Block layout from the last `project()`. Surfaced to Lua via `block_layout`.
     layout: Vec<LayoutEntry>,
     /// Cached `build_rows` result for full-text consumers (Lua API, vim navigation).
     cached_rows: Option<CachedRows>,
@@ -64,22 +64,6 @@ impl TranscriptProjection {
         self.layout
             .iter()
             .map(|e| (e.id, e.start.min(u16::MAX as u32) as u16, e.rows))
-    }
-
-    /// Block at absolute row `row`. `None` for gap rows or rows past the projected total.
-    pub(crate) fn block_of_row(&self, row: usize) -> Option<BlockId> {
-        let row = row as u32;
-        let idx = self.layout.partition_point(|e| e.start <= row);
-        if idx == 0 {
-            return None;
-        }
-        let entry = self.layout[idx - 1];
-        let end = entry.start + entry.rows as u32;
-        if row < end {
-            Some(entry.id)
-        } else {
-            None
-        }
     }
 
     fn gc_if_stale(&mut self, gen: u64, width: u16) {

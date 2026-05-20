@@ -9,7 +9,7 @@ use crate::content::transcript_parsers as blocks;
 use crate::content::transcript_parsers::{render_thinking_summary, thinking_summary};
 use smelt_core::content::block_layout::{BlockLayout, HboxItem, RenderedLayout};
 use smelt_core::transcript_model::{
-    gap_between, Block, BlockId, ToolOutput, ToolOutputRef, ToolState, ToolStatus, ViewState,
+    gap_between, Block, BlockId, ToolOutput, ToolOutputRef, ToolState, ToolStatus,
 };
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -301,14 +301,6 @@ impl TuiApp {
         let _perf = smelt_perf::perf::begin("render:finish_turn");
         self.parser
             .finalize_active_tools(&mut self.transcript.history);
-    }
-
-    pub(crate) fn block_view_state(&self, id: BlockId) -> ViewState {
-        self.transcript.block_view_state(id)
-    }
-
-    pub(crate) fn set_block_view_state(&mut self, id: BlockId, state: ViewState) {
-        self.transcript.set_block_view_state(id, state);
     }
 
     pub(crate) fn drain_finished_blocks(&mut self) -> Vec<BlockId> {

@@ -1,6 +1,6 @@
 //! Content-pane key dispatch: thin wrapper around the shared viewer-key
-//! dispatcher with transcript-specific extras (block expand, Ctrl-C to leave
-//! the pane, `q` to quit, cursor snapping past non-selectable cells).
+//! dispatcher with transcript-specific extras (Ctrl-C to leave the pane,
+//! cursor snapping past non-selectable cells).
 
 use crate::app::{EventOutcome, TuiApp};
 use crossterm::event::{Event, KeyCode};
@@ -21,12 +21,6 @@ impl TuiApp {
             return EventOutcome::Redraw;
         }
 
-        // Block-level chord (e.g. `e` to expand a tool block). Runs before the
-        // shared dispatcher so it wins over vim's `e` (end-of-word).
-        if let Some(outcome) = self.dispatch_block_key(k) {
-            return outcome;
-        }
-
         let win_id = self.well_known.transcript;
         let yank_tick_before = self.core.clipboard.kill_ring.yank_tick();
         let status = self.dispatch_window_viewer_key(win_id, k);
@@ -43,10 +37,6 @@ impl TuiApp {
             self.snap_transcript_cursor();
             return EventOutcome::Redraw;
         }
-
-        match (k.code, k.modifiers) {
-            (KeyCode::Char('q'), M::NONE) => EventOutcome::Quit,
-            _ => EventOutcome::Noop,
-        }
+        EventOutcome::Noop
     }
 }

@@ -1,8 +1,7 @@
-//! Pane focus and block-scoped key dispatch.
+//! Pane focus chord (`Ctrl-W` + nav) toggling focus between prompt and transcript.
 
 use crate::app::{EventOutcome, TuiApp};
-use crossterm::event::{Event, KeyCode, KeyEvent};
-use smelt_core::{Block, BlockId, ViewState};
+use crossterm::event::{Event, KeyCode};
 use std::time::Duration;
 
 /// Max inter-key gap between `Ctrl-W` and its follow-up key.
@@ -63,38 +62,5 @@ impl TuiApp {
         win.expect("transcript window")
             .refocus(buf.expect("transcript buffer"), viewport);
         self.snap_transcript_cursor();
-    }
-
-    fn focused_block_id(&mut self) -> Option<BlockId> {
-        let row = self.transcript_win().cursor_abs_row();
-        self.transcript_projection.block_of_row(row)
-    }
-
-    /// Handle a key as a block-scoped binding. Returns `Some` if consumed, `None` to fall through.
-    pub(crate) fn dispatch_block_key(&mut self, k: KeyEvent) -> Option<EventOutcome> {
-        use crossterm::event::KeyModifiers as M;
-        if k.modifiers != M::NONE {
-            return None;
-        }
-        let block_id = self.focused_block_id()?;
-        let is_tool = matches!(
-            self.transcript.block(block_id),
-            Some(Block::ToolCall { .. })
-        );
-        if !is_tool {
-            return None;
-        }
-        match k.code {
-            KeyCode::Char('e') => {
-                let vs = self.block_view_state(block_id);
-                let next = match vs {
-                    ViewState::Expanded => ViewState::Collapsed,
-                    _ => ViewState::Expanded,
-                };
-                self.set_block_view_state(block_id, next);
-                Some(EventOutcome::Redraw)
-            }
-            _ => None,
-        }
     }
 }

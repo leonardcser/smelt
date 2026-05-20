@@ -50,9 +50,13 @@ pub(crate) enum KeyAction {
     CapitalizeWord,
     Undo,
 
-    // Vim-specific (only active in vim normal mode)
-    VimHalfPageUp,
-    VimHalfPageDown,
+    // Page motion (shared between vim normal and emacs/arrow-key contexts).
+    PageUp,
+    PageDown,
+    HalfPageUp,
+    HalfPageDown,
+    ScrollLineUp,
+    ScrollLineDown,
 
     // Clipboard
     ClipboardImage,
@@ -260,18 +264,42 @@ static BINDINGS: &[Binding] = &[
         when().not_vim_non_insert(),
         KeyAction::InsertNewline,
     ),
-    // ── Vim half-page scroll (before emacs Ctrl+U/D) ────────────────────
+    // ── Vim Normal-mode page motion (must precede emacs Ctrl+A/E/B/F) ───
     bind(
         KeyCode::Char('u'),
         CTRL,
         when().vim_non_insert(),
-        KeyAction::VimHalfPageUp,
+        KeyAction::HalfPageUp,
     ),
     bind(
         KeyCode::Char('d'),
         CTRL,
         when().vim_non_insert(),
-        KeyAction::VimHalfPageDown,
+        KeyAction::HalfPageDown,
+    ),
+    bind(
+        KeyCode::Char('b'),
+        CTRL,
+        when().vim_non_insert(),
+        KeyAction::PageUp,
+    ),
+    bind(
+        KeyCode::Char('f'),
+        CTRL,
+        when().vim_non_insert(),
+        KeyAction::PageDown,
+    ),
+    bind(
+        KeyCode::Char('y'),
+        CTRL,
+        when().vim_non_insert(),
+        KeyAction::ScrollLineUp,
+    ),
+    bind(
+        KeyCode::Char('e'),
+        CTRL,
+        when().vim_non_insert(),
+        KeyAction::ScrollLineDown,
     ),
     // ── Emacs navigation ────────────────────────────────────────────────
     bind(
@@ -286,10 +314,50 @@ static BINDINGS: &[Binding] = &[
         when().not_vim_non_insert(),
         KeyAction::MoveEndOfLine,
     ),
-    bind(KeyCode::Char('f'), CTRL, when(), KeyAction::MoveRight),
-    bind(KeyCode::Char('b'), CTRL, when(), KeyAction::MoveLeft),
+    bind(
+        KeyCode::Char('f'),
+        CTRL,
+        when().not_vim_non_insert(),
+        KeyAction::MoveRight,
+    ),
+    bind(
+        KeyCode::Char('b'),
+        CTRL,
+        when().not_vim_non_insert(),
+        KeyAction::MoveLeft,
+    ),
     bind(KeyCode::Char('f'), ALT, when(), KeyAction::MoveWordForward),
     bind(KeyCode::Char('b'), ALT, when(), KeyAction::MoveWordBackward),
+    // Emacs page motion. Vim Normal claims Ctrl-V for visual-block but
+    // since vim_non_insert variants above match first, this only fires
+    // outside vim Normal.
+    bind(
+        KeyCode::Char('v'),
+        CTRL,
+        when().not_vim_non_insert(),
+        KeyAction::PageDown,
+    ),
+    bind(
+        KeyCode::Char('v'),
+        ALT,
+        when().not_vim_non_insert(),
+        KeyAction::PageUp,
+    ),
+    // Emacs buffer bounds (M-< / M->). Both `<`/`>` and Shift-versions of
+    // `,`/`.` are accepted — terminals differ in whether they fold the
+    // shift into the keycode.
+    bind(
+        KeyCode::Char('<'),
+        ALT,
+        when().not_vim_non_insert(),
+        KeyAction::MoveStartOfBuffer,
+    ),
+    bind(
+        KeyCode::Char('>'),
+        ALT,
+        when().not_vim_non_insert(),
+        KeyAction::MoveEndOfBuffer,
+    ),
     // ── Emacs editing ───────────────────────────────────────────────────
     bind(
         KeyCode::Char('d'),
@@ -399,12 +467,14 @@ static BINDINGS: &[Binding] = &[
     bind(KeyCode::Right, NONE, when(), KeyAction::MoveRight),
     bind(KeyCode::Up, SUPER, when(), KeyAction::MoveStartOfBuffer),
     bind(KeyCode::Up, NONE, when(), KeyAction::MoveUp),
-    bind(KeyCode::Char('p'), CTRL, when(), KeyAction::HistoryPrev),
+    bind(KeyCode::Char('p'), CTRL, when(), KeyAction::MoveUp),
     bind(KeyCode::Down, SUPER, when(), KeyAction::MoveEndOfBuffer),
     bind(KeyCode::Down, NONE, when(), KeyAction::MoveDown),
-    bind(KeyCode::Char('n'), CTRL, when(), KeyAction::HistoryNext),
+    bind(KeyCode::Char('n'), CTRL, when(), KeyAction::MoveDown),
     bind(KeyCode::Home, NONE, when(), KeyAction::MoveStartOfLine),
     bind(KeyCode::End, NONE, when(), KeyAction::MoveEndOfLine),
+    bind(KeyCode::PageUp, NONE, when(), KeyAction::PageUp),
+    bind(KeyCode::PageDown, NONE, when(), KeyAction::PageDown),
     // ── Delete / Backspace ──────────────────────────────────────────────
     bind(KeyCode::Delete, ALT, when(), KeyAction::DeleteWordForward),
     bind(KeyCode::Delete, NONE, when(), KeyAction::DeleteCharForward),
@@ -491,9 +561,13 @@ pub(crate) mod hints {
             "shift+tab",
             "cycle mode  (normal \u{2192} plan \u{2192} apply \u{2192} yolo)",
         ),
-        ("\u{2191}/\u{2193}  ctrl+n/p", "navigate history / items"),
-        ("ctrl+u / ctrl+d", "scroll up / down  (half page)"),
+        (
+            "\u{2191}/\u{2193}  ctrl+p/n",
+            "previous / next line  (history at edges)",
+        ),
+        ("pgup / pgdn  ctrl+v / alt+v", "page up / down"),
         ("ctrl+a / ctrl+e", "line start / end"),
+        ("alt+< / alt+>", "buffer start / end"),
         ("ctrl+k / ctrl+w", "kill to end / delete word"),
         ("ctrl+y / alt+y", "yank / yank-pop (cycle kill ring)"),
         (
@@ -514,6 +588,11 @@ pub(crate) mod hints {
     const HELP_VIM_OVERRIDES: &[(&str, &str)] = &[
         ("ctrl+j / ctrl+k", "history next / prev  (normal mode)"),
         ("ctrl+u / ctrl+d", "half-page up / down  (normal mode)"),
+        ("ctrl+b / ctrl+f", "page up / down  (normal mode)"),
+        (
+            "ctrl+y / ctrl+e",
+            "scroll one line up / down  (normal mode)",
+        ),
         ("ctrl+r", "redo  (normal mode)"),
         ("v / V", "visual / visual-line selection  (normal mode)"),
     ];
@@ -587,7 +666,97 @@ mod tests {
         };
         assert_eq!(
             lookup(KeyCode::Char('u'), CTRL, &c),
-            Some(KeyAction::VimHalfPageUp)
+            Some(KeyAction::HalfPageUp)
+        );
+    }
+
+    #[test]
+    fn alt_v_emacs_page_up() {
+        let c = ctx();
+        assert_eq!(lookup(KeyCode::Char('v'), ALT, &c), Some(KeyAction::PageUp));
+    }
+
+    #[test]
+    fn ctrl_v_emacs_page_down() {
+        let c = ctx();
+        assert_eq!(
+            lookup(KeyCode::Char('v'), CTRL, &c),
+            Some(KeyAction::PageDown)
+        );
+    }
+
+    #[test]
+    fn ctrl_f_emacs_is_move_right_outside_vim() {
+        let c = ctx();
+        assert_eq!(
+            lookup(KeyCode::Char('f'), CTRL, &c),
+            Some(KeyAction::MoveRight)
+        );
+    }
+
+    #[test]
+    fn ctrl_f_vim_normal_is_page_down() {
+        let c = KeyContext {
+            vim_non_insert: true,
+            vim_enabled: true,
+            ..ctx()
+        };
+        assert_eq!(
+            lookup(KeyCode::Char('f'), CTRL, &c),
+            Some(KeyAction::PageDown)
+        );
+    }
+
+    #[test]
+    fn ctrl_p_is_move_up() {
+        let c = ctx();
+        assert_eq!(
+            lookup(KeyCode::Char('p'), CTRL, &c),
+            Some(KeyAction::MoveUp)
+        );
+    }
+
+    #[test]
+    fn ctrl_y_vim_normal_is_scroll_line_up() {
+        let c = KeyContext {
+            vim_non_insert: true,
+            vim_enabled: true,
+            ..ctx()
+        };
+        assert_eq!(
+            lookup(KeyCode::Char('y'), CTRL, &c),
+            Some(KeyAction::ScrollLineUp)
+        );
+    }
+
+    #[test]
+    fn ctrl_e_vim_normal_is_scroll_line_down() {
+        let c = KeyContext {
+            vim_non_insert: true,
+            vim_enabled: true,
+            ..ctx()
+        };
+        assert_eq!(
+            lookup(KeyCode::Char('e'), CTRL, &c),
+            Some(KeyAction::ScrollLineDown)
+        );
+    }
+
+    #[test]
+    fn alt_lt_start_of_buffer() {
+        let c = ctx();
+        assert_eq!(
+            lookup(KeyCode::Char('<'), ALT, &c),
+            Some(KeyAction::MoveStartOfBuffer)
+        );
+    }
+
+    #[test]
+    fn alt_gt_end_of_buffer() {
+        let c = ctx();
+        assert_eq!(
+            lookup(KeyCode::Char('>'), ALT, &c),
+            Some(KeyAction::MoveEndOfBuffer)
         );
     }
 

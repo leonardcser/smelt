@@ -296,35 +296,6 @@ impl VimWindowState {
     }
 }
 
-/// Viewport-scroll line delta for a page-motion chord, or `None` when
-/// the chord isn't one. Shared between transcript and overlay viewers so
-/// every focused buffer with vim enabled scrolls consistently.
-///
-///   PageUp     → −1 page,  PageDown → +1 page  (no modifiers)
-///   Ctrl-U     → −½ page,  Ctrl-D   → +½ page
-///   Ctrl-B     → −1 page,  Ctrl-F   → +1 page
-///   Ctrl-Y     → −1 line,  Ctrl-E   → +1 line
-pub fn page_motion_delta(k: KeyEvent, viewport_rows: u16) -> Option<isize> {
-    let half = (viewport_rows / 2).max(1) as isize;
-    let full = (viewport_rows as isize).max(1);
-    if !k.modifiers.contains(KeyModifiers::CONTROL) {
-        return match k.code {
-            KeyCode::PageUp => Some(-full),
-            KeyCode::PageDown => Some(full),
-            _ => None,
-        };
-    }
-    match k.code {
-        KeyCode::Char('u') => Some(-half),
-        KeyCode::Char('d') => Some(half),
-        KeyCode::Char('b') => Some(-full),
-        KeyCode::Char('f') => Some(full),
-        KeyCode::Char('y') => Some(-1),
-        KeyCode::Char('e') => Some(1),
-        _ => None,
-    }
-}
-
 /// Visual selection as ordered byte offsets, or `None` outside Visual modes.
 pub fn visual_range(
     state: &VimWindowState,
@@ -411,7 +382,7 @@ fn handle_normal(key: KeyEvent, ctx: &mut VimContext<'_>) -> Action {
             }
             // Pass through keys that the main handler needs.
             KeyCode::Char(
-                'c' | 'd' | 'u' | 't' | 'k' | 'l' | 'f' | 'b' | 'j' | 'n' | 'p' | 's',
+                'c' | 'd' | 'u' | 't' | 'k' | 'l' | 'f' | 'b' | 'j' | 'n' | 'p' | 's' | 'y' | 'e',
             ) => return Action::Passthrough,
             _ => return Action::Consumed,
         }
