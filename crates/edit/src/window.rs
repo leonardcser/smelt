@@ -1111,7 +1111,15 @@ impl Window {
         // owned by another widget.
         if let Some(end) = self.drag_endpoint.take() {
             if self.is_caret_leaf() {
-                self.cpos = end;
+                // The drag endpoint was computed at mouse-down against the
+                // buffer state then; by mouse-up the source or projected lines
+                // may have shifted (streaming delta into the transcript,
+                // resize-driven re-layout). Snap into the joined-display space
+                // (`text()`, which equals `source()` for editable buffers and
+                // is the only meaningful coordinate for readonly leaves) so
+                // the committed cpos never lands past EOF or mid-codepoint.
+                let text = buf.text();
+                self.cpos = text::snap(&text, end.min(text.len()));
                 self.sync_from_cpos(buf, viewport_rows);
                 // Mirror vim: a click or drag-release stamps curswant at the
                 // landing column so a subsequent j/k keeps that column.
