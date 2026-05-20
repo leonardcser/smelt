@@ -1,4 +1,5 @@
 #![no_main]
+#![allow(clippy::doc_lazy_continuation)]
 
 //! `SnapshotFrame` text+styles round-trip invariance fuzz.
 //!

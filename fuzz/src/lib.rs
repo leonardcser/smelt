@@ -367,6 +367,20 @@ pub enum FuzzOp {
     OpenOverlay {
         variant: u8,
     },
+    /// Side channel: install a placeholder on the prompt window with the
+    /// given text and accept / dismiss chord set. `variant % N` picks the
+    /// chord pair (Tab/Esc, Enter/Esc, Ctrl-N/Ctrl-G, ...) so the routing
+    /// branches in `dispatch_placeholder_key` are exercised against random
+    /// follow-up keystrokes. The placeholder dispatcher fires on the next
+    /// matching key while the buffer is empty.
+    InstallPlaceholder {
+        text: String,
+        variant: u8,
+    },
+    /// Side channel: clear the prompt placeholder (extmark + opts). Mirrors
+    /// `clear_placeholder` so scenarios can drop a placeholder without
+    /// going through accept / dismiss.
+    ClearPlaceholder,
 }
 
 impl FuzzOp {
@@ -428,6 +442,8 @@ impl FuzzOp {
             EngineAskError { id, kind_idx, .. } => format!("ask error {id} k={kind_idx}"),
             ReloadLua => "reload lua".into(),
             OpenOverlay { variant } => format!("open overlay v={variant}"),
+            InstallPlaceholder { variant, .. } => format!("install placeholder v={variant}"),
+            ClearPlaceholder => "clear placeholder".into(),
         }
     }
 }
@@ -546,7 +562,7 @@ impl SwarmWeights {
 }
 
 /// Total `FuzzOp` variant count. Keep in lockstep with `build_fuzz_op`.
-pub const N_FUZZOP_VARIANTS: usize = 43;
+pub const N_FUZZOP_VARIANTS: usize = 45;
 
 /// Build one `FuzzOp` by variant index. The index space is the swarm
 /// dispatch surface; payloads still come from `u.arbitrary()` so the
@@ -668,6 +684,11 @@ fn build_fuzz_op(idx: usize, u: &mut Unstructured<'_>) -> arbitrary::Result<Fuzz
         42 => FuzzOp::OpenOverlay {
             variant: u.arbitrary()?,
         },
+        43 => FuzzOp::InstallPlaceholder {
+            text: u.arbitrary()?,
+            variant: u.arbitrary()?,
+        },
+        44 => FuzzOp::ClearPlaceholder,
         n => {
             unreachable!("fuzz_op idx {n} out of range; bump N_FUZZOP_VARIANTS or extend dispatch")
         }
@@ -733,6 +754,35 @@ fn decode_codepoint(raw: u32) -> char {
 
 fn clamp_dim(d: u16) -> u16 {
     d.clamp(RESIZE_MIN, RESIZE_MAX)
+}
+
+/// Curated `(accept, dismiss)` chord pairs for `InstallPlaceholder`.
+/// Each variant exercises a different placeholder dispatch path: bare
+/// keys, modifier chords, multi-chord accept sets, and the empty-set
+/// case where the placeholder is purely cosmetic.
+fn placeholder_chord_pair(
+    variant: u8,
+) -> (
+    Vec<tui::smelt_term::KeyBind>,
+    Vec<tui::smelt_term::KeyBind>,
+) {
+    use tui::smelt_term::KeyBind;
+    let kb = |code, mods| KeyBind { code, mods };
+    let tab = kb(KeyCode::Tab, KeyModifiers::NONE);
+    let enter = kb(KeyCode::Enter, KeyModifiers::NONE);
+    let esc = kb(KeyCode::Esc, KeyModifiers::NONE);
+    let right = kb(KeyCode::Right, KeyModifiers::NONE);
+    let ctrl_n = kb(KeyCode::Char('n'), KeyModifiers::CONTROL);
+    let ctrl_g = kb(KeyCode::Char('g'), KeyModifiers::CONTROL);
+    let ctrl_y = kb(KeyCode::Char('y'), KeyModifiers::CONTROL);
+    match variant % 6 {
+        0 => (vec![tab], vec![esc]),
+        1 => (vec![enter], vec![esc]),
+        2 => (vec![ctrl_n], vec![ctrl_g]),
+        3 => (vec![tab, right, ctrl_y], vec![esc, ctrl_g]),
+        4 => (vec![], vec![esc]),
+        _ => (vec![], vec![]),
+    }
 }
 
 /// Compress the random `u8` call-id space down to `CALL_ID_BUCKETS` so
@@ -1445,9 +1495,11 @@ fn plan(op: FuzzOp) -> (Option<SourceEvent>, PostCheck) {
         FuzzOp::InsertAttachment { .. }
         | FuzzOp::TogglePaneFocus
         | FuzzOp::ReloadLua
-        | FuzzOp::OpenOverlay { .. } => {
+        | FuzzOp::OpenOverlay { .. }
+        | FuzzOp::InstallPlaceholder { .. }
+        | FuzzOp::ClearPlaceholder => {
             unreachable!(
-                "InsertAttachment / TogglePaneFocus / ReloadLua / OpenOverlay side channels handled inline in apply()"
+                "InsertAttachment / TogglePaneFocus / ReloadLua / OpenOverlay / InstallPlaceholder / ClearPlaceholder side channels handled inline in apply()"
             )
         }
         FuzzOp::EngineToolArgsDelta {
@@ -1500,6 +1552,12 @@ pub fn apply(app: &mut TestApp, op: FuzzOp) {
     }
     if let FuzzOp::InsertAttachment { label } = op {
         app.insert_attachment(label);
+        app.assert_invariants();
+        return;
+    }
+    if let FuzzOp::InstallPlaceholder { text, variant } = op {
+        let (accept, dismiss) = placeholder_chord_pair(variant);
+        app.install_prompt_placeholder(text, accept, dismiss);
         app.assert_invariants();
         return;
     }
@@ -1557,6 +1615,11 @@ pub fn apply(app: &mut TestApp, op: FuzzOp) {
         }
         FuzzOp::OpenOverlay { variant } => {
             app.open_synthetic_overlay(*variant);
+            app.assert_invariants();
+            return;
+        }
+        FuzzOp::ClearPlaceholder => {
+            app.clear_prompt_placeholder();
             app.assert_invariants();
             return;
         }

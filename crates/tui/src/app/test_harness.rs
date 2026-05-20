@@ -466,6 +466,34 @@ impl TestApp {
         self.app.toggle_pane_focus();
     }
 
+    /// Side-channel: install a placeholder on the prompt window with given
+    /// accept / dismiss chords. Mirrors what Lua's `Win:placeholder(text, opts)`
+    /// does; the dispatch path then runs on the next matching key. Without a
+    /// side channel the placeholder is reachable only through Lua, which
+    /// limits coverage of the accept/dismiss key-routing branches.
+    pub fn install_prompt_placeholder(
+        &mut self,
+        text: String,
+        accept: Vec<crate::smelt_term::KeyBind>,
+        dismiss: Vec<crate::smelt_term::KeyBind>,
+    ) {
+        let win = self.app.well_known.prompt;
+        self.app.set_placeholder(win, text);
+        self.app.placeholder_opts.insert(
+            win,
+            crate::app::PlaceholderOpts {
+                accept_keys: accept,
+                dismiss_keys: dismiss,
+            },
+        );
+    }
+
+    /// Side-channel: clear the prompt placeholder (both extmark and opts).
+    pub fn clear_prompt_placeholder(&mut self) {
+        let win = self.app.well_known.prompt;
+        self.app.clear_placeholder(win);
+    }
+
     /// Side-channel: invoke the `/reload` pipeline. Wipes every Lua
     /// registry (commands, keymaps, statusline, tools, hooks, timers,
     /// cell subscribers), re-runs `init.lua` and bundled plugins, then
@@ -977,6 +1005,18 @@ impl TestApp {
             assert!(
                 self.app.ui.win(win).is_some(),
                 "notification points at dead window {win:?}",
+            );
+        }
+
+        // Placeholder dispatch opts shadow the extmark-stored placeholder
+        // text; both `set_placeholder` and `clear_placeholder` are the only
+        // ways to install/remove them, but a window close that bypasses
+        // `clear_placeholder` would orphan the entry. The dispatcher then
+        // matches keys against a policy for a window that no longer exists.
+        for win in self.app.placeholder_opts.keys() {
+            assert!(
+                self.app.ui.win(*win).is_some(),
+                "placeholder_opts points at dead window {win:?}",
             );
         }
     }

@@ -123,13 +123,13 @@ pub struct TuiApp {
     /// buffer (extmark) for the prompt; this side-table holds the
     /// accept/dismiss chord policy plugins configure when calling
     /// `Win:placeholder(text, opts)`.
-    pub(crate) placeholder_opts: HashMap<crate::smelt_term::WinId, PlaceholderOpts>,
+    pub placeholder_opts: HashMap<crate::smelt_term::WinId, PlaceholderOpts>,
 }
 
 /// Per-window dispatch policy for a placeholder. Set via Lua's
 /// `Win:placeholder(text, opts)`; the dispatcher consults it on key events.
 #[derive(Default, Clone)]
-pub(crate) struct PlaceholderOpts {
+pub struct PlaceholderOpts {
     pub accept_keys: Vec<crate::smelt_term::KeyBind>,
     pub dismiss_keys: Vec<crate::smelt_term::KeyBind>,
 }
@@ -815,7 +815,7 @@ impl TuiApp {
     }
 
     /// Set the placeholder text on `win`. Replaces any prior placeholder.
-    pub(crate) fn set_placeholder(&mut self, win: crate::smelt_term::WinId, text: String) {
+    pub fn set_placeholder(&mut self, win: crate::smelt_term::WinId, text: String) {
         let Some(buf) = self.ui.win_buf_mut(win) else {
             return;
         };
@@ -830,7 +830,7 @@ impl TuiApp {
     }
 
     /// Clear the placeholder on `win` (text + opts). Idempotent.
-    pub(crate) fn clear_placeholder(&mut self, win: crate::smelt_term::WinId) {
+    pub fn clear_placeholder(&mut self, win: crate::smelt_term::WinId) {
         if let Some(buf) = self.ui.win_buf_mut(win) {
             let ns = buf.create_namespace(crate::content::prompt_buf::PLACEHOLDER_NS);
             buf.clear_namespace(ns, 0, usize::MAX);
