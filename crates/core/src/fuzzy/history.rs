@@ -2,7 +2,7 @@
 
 use crate::fuzzy::score::{recency_bonus, split_words};
 
-pub(crate) fn history_score(text: &str, query: &str, recency_rank: usize) -> Option<u32> {
+pub fn history_score(text: &str, query: &str, recency_rank: usize) -> Option<u32> {
     // Normalize the frizbee score into a small range so the
     // word/exact/prefix bonuses below dominate the relative ordering.
     let base = (crate::fuzzy::fuzzy_score(text, query)? / 100) as i64;

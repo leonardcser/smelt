@@ -22,12 +22,6 @@ use mlua::prelude::*;
 
 use std::sync::{Arc, Mutex};
 
-/// List all Lua-registered `/commands` as `(name, description)`.
-/// Sorted by name. Returns empty when no app pointer is installed.
-pub(crate) fn list_commands() -> Vec<(String, Option<String>)> {
-    try_with_app(|app| app.lua.list_commands_with_desc()).unwrap_or_default()
-}
-
 /// Format a `crossterm::KeyEvent` into an nvim-style chord string
 /// (`<C-g>`, `<S-Tab>`, `<M-x>`, printable `j`, etc).
 /// The result is the lookup key for `smelt.keymap.set`. Returns `None` for unrecognized chords.

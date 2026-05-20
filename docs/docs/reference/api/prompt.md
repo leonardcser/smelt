@@ -6,6 +6,14 @@
 
 The main editable input surface: win handle, text get/set, and cursor control. UiHost-only.
 
+## `smelt.prompt.cursor`
+
+```lua
+fun(pos: integer?): integer
+```
+
+Read or write the prompt cursor as a byte offset into `text()`. Without an argument returns the current offset; with one snaps it to a char boundary and clamps to source length. Returns the resulting offset.
+
 ## `smelt.prompt.remove_section`
 
 ```lua
@@ -13,6 +21,14 @@ fun(name: string): nil
 ```
 
 Remove the named prompt section. No-op if the section does not exist.
+
+## `smelt.prompt.replace_range`
+
+```lua
+fun(start: integer, end: integer, text: string): integer
+```
+
+UTF-8-safe replace of the byte range `[start, end)` in the prompt with `text`. Endpoints are snapped to char boundaries and clamped to source length. The cursor lands at `start + #text`. Returns the new cursor offset.
 
 ## `smelt.prompt.set_section`
 

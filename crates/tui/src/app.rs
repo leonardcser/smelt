@@ -298,9 +298,8 @@ impl TuiApp {
         env: Arc<engine::env::RuntimeEnv>,
     ) -> Self {
         let host_rx = engine.take_host_rx();
-        let mut input = PromptState::new();
+        let input = PromptState::new();
         let vim_enabled = config.settings.vim;
-        input.command_arg_sources = Vec::new();
 
         let cwd = std::env::current_dir()
             .ok()

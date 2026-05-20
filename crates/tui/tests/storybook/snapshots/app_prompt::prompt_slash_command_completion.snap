@@ -1,12 +1,13 @@
 ---
 source: crates/tui/tests/storybook/app_ctx.rs
+assertion_line: 344
 expression: frame.text()
 ---
 
 
 
-
-
+ /exit         exit the app
+ /cost         show session cost
  /compact      compact conversation history
  /color        set task slug color
  /clear        start new conversation

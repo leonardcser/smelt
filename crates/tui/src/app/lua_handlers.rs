@@ -47,15 +47,13 @@ impl TuiApp {
     ///    wins/bufs, picker state, busy stack).
     /// 2. [`LuaRuntime::reload`] wipes every `LuaShared` registry then
     ///    re-runs bootstrap → autoload → init.lua → plugins → state sweep.
-    /// 3. `input.command_arg_sources` is refreshed from the new
-    ///    `smelt.cmd.register` set.
-    /// 4. [`Self::refresh_agent_inputs`] re-reads AGENTS.md, rebuilds the
+    /// 3. [`Self::refresh_agent_inputs`] re-reads AGENTS.md, rebuilds the
     ///    [`engine::SkillLoader`], re-reads `--system-prompt` when present,
     ///    ships the refreshed bundle via
     ///    [`protocol::UiCommand::ReloadAgentConfig`].
-    /// 5. [`Self::reconcile_mcp_servers`] reconciles MCP server state
+    /// 4. [`Self::reconcile_mcp_servers`] reconciles MCP server state
     ///    off-thread against the new `smelt.mcp.register` desired set.
-    /// 6. `smelt.lifecycle.on("ready", fn)` hooks drain with
+    /// 5. `smelt.lifecycle.on("ready", fn)` hooks drain with
     ///    `ctx = { kind }` so hooks that need to distinguish cold start
     ///    from reload can branch on it.
     ///
@@ -66,7 +64,6 @@ impl TuiApp {
         self.clear_tui_for_reload();
         let cwd = std::env::current_dir().ok();
         let err = self.lua.reload(cwd.as_deref());
-        self.input.command_arg_sources = self.lua.list_command_args();
         self.refresh_agent_inputs();
         self.reconcile_mcp_servers();
         let hook_errors = self.lua.drain_lifecycle_hooks("ready", move |lua| {

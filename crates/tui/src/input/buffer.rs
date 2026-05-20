@@ -45,14 +45,12 @@ impl PromptState {
         let p = ctx.buf.text_mut().insert(ctx.win.cpos, c);
         ctx.win.cpos = p + c.len_utf8();
         ctx.win.clamp_anchors_to_source(ctx.buf.source());
-        self.recompute_completer(ctx.as_ref());
     }
 
     pub(super) fn backspace(&mut self, ctx: &mut PromptCtx<'_>) {
         if self.selection_range(ctx.as_ref()).is_some() {
             self.save_undo(ctx);
             self.delete_selection(ctx);
-            self.recompute_completer(ctx.as_ref());
             return;
         }
         // A degenerate `selection_anchor` (set by a shift-key whose motion
@@ -70,7 +68,6 @@ impl PromptState {
             let cpos = ctx.win.cpos;
             self.safe_shrink(ctx, start..cpos);
             ctx.win.cpos = start;
-            self.recompute_completer(ctx.as_ref());
             return;
         }
         let prev = prev_char_boundary(ctx.buf.source(), ctx.win.cpos);
@@ -80,7 +77,6 @@ impl PromptState {
         let cpos = ctx.win.cpos;
         self.safe_shrink(ctx, prev..cpos);
         ctx.win.cpos = prev;
-        self.recompute_completer(ctx.as_ref());
     }
 
     /// Byte offset of the opening `"` when the cursor is just after the closing `"` of a `"@path"` token.
@@ -116,7 +112,6 @@ impl PromptState {
         let cpos = ctx.win.cpos;
         self.safe_shrink(ctx, target..cpos);
         ctx.win.cpos = target;
-        self.recompute_completer(ctx.as_ref());
     }
 
     pub(super) fn delete_char_forward(&mut self, ctx: &mut PromptCtx<'_>) {
@@ -126,7 +121,6 @@ impl PromptState {
         let cpos = ctx.win.cpos;
         let next = next_char_boundary(ctx.buf.source(), cpos);
         self.safe_shrink(ctx, cpos..next);
-        self.recompute_completer(ctx.as_ref());
     }
 
     pub(super) fn delete_word_forward(&mut self, ctx: &mut PromptCtx<'_>) {
@@ -140,7 +134,6 @@ impl PromptState {
         );
         let cpos = ctx.win.cpos;
         self.safe_shrink(ctx, cpos..target);
-        self.recompute_completer(ctx.as_ref());
     }
 
     pub(super) fn kill_to_end_of_line(
@@ -156,7 +149,6 @@ impl PromptState {
         let killed = ctx.buf.copy_range(cpos..end);
         self.safe_shrink(ctx, cpos..end);
         self.kill_and_copy(killed, clipboard);
-        self.recompute_completer(ctx.as_ref());
     }
 
     pub(super) fn kill_to_start_of_line(
@@ -173,7 +165,6 @@ impl PromptState {
         self.safe_shrink(ctx, start..cpos);
         ctx.win.cpos = start;
         self.kill_and_copy(killed, clipboard);
-        self.recompute_completer(ctx.as_ref());
     }
 
     pub(super) fn delete_to_start_of_line(&mut self, ctx: &mut PromptCtx<'_>) {
@@ -184,7 +175,6 @@ impl PromptState {
         let cpos = ctx.win.cpos;
         self.safe_shrink(ctx, start..cpos);
         ctx.win.cpos = start;
-        self.recompute_completer(ctx.as_ref());
     }
 
     pub(super) fn uppercase_word(&mut self, ctx: &mut PromptCtx<'_>) {
@@ -206,7 +196,6 @@ impl PromptState {
         ctx.buf.text_mut().replace_range(cpos..end, &upper);
         ctx.win.cpos = cpos + new_len;
         ctx.win.clamp_anchors_to_source(ctx.buf.source());
-        self.recompute_completer(ctx.as_ref());
     }
 
     pub(super) fn lowercase_word(&mut self, ctx: &mut PromptCtx<'_>) {
@@ -224,7 +213,6 @@ impl PromptState {
         ctx.buf.text_mut().replace_range(cpos..end, &lower);
         ctx.win.cpos = cpos + new_len;
         ctx.win.clamp_anchors_to_source(ctx.buf.source());
-        self.recompute_completer(ctx.as_ref());
     }
 
     pub(super) fn capitalize_word(&mut self, ctx: &mut PromptCtx<'_>) {
@@ -252,7 +240,6 @@ impl PromptState {
         ctx.buf.text_mut().replace_range(cpos..end, &cap);
         ctx.win.cpos = cpos + cap_len;
         ctx.win.clamp_anchors_to_source(ctx.buf.source());
-        self.recompute_completer(ctx.as_ref());
     }
 
     pub(super) fn undo(&mut self, ctx: &mut PromptCtx<'_>) {
@@ -264,7 +251,6 @@ impl PromptState {
         if let Some(entry) = ctx.buf.history.undo(current) {
             self.install_source(ctx, entry.buf, entry.cpos, entry.attachments);
         }
-        self.recompute_completer(ctx.as_ref());
     }
 
     pub(super) fn move_word_forward(&mut self, ctx: &mut PromptCtx<'_>) -> bool {
@@ -278,7 +264,6 @@ impl PromptState {
         );
         if target != ctx.win.cpos {
             ctx.win.cpos = target;
-            self.recompute_completer(ctx.as_ref());
             true
         } else {
             false
@@ -296,7 +281,6 @@ impl PromptState {
         );
         if target != ctx.win.cpos {
             ctx.win.cpos = target;
-            self.recompute_completer(ctx.as_ref());
             true
         } else {
             false
@@ -358,7 +342,6 @@ impl PromptState {
             pos = ctx.buf.source().rfind('\n').map(|i| i + 1).unwrap_or(0);
         }
         ctx.win.cpos = pos;
-        self.recompute_completer(ctx.as_ref());
     }
 
     /// Kill text into the kill ring and copy to clipboard. `out.kill_ring`

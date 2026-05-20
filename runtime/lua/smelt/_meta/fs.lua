@@ -80,6 +80,10 @@ fs.size = nil
 ---@type fun(path: string, handler: fun(event: { kind: string, detail: string?, paths: string[] }), opts: table?): smelt.Reg
 fs.watch = nil
 
+--- Return tracked + untracked non-ignored files under the cwd, plus every intermediate parent directory, sorted lexicographically. Uses `git ls-files` when a git repo is present and falls back to a depth-capped filesystem walk otherwise. Suitable as the source for an `@file` completer.
+---@type fun(): string[]
+fs.workspace_files = nil
+
 --- Write `contents` to file `p`, creating it if necessary. Returns `(true, nil)` on success or `(false, err_string)` on failure.
 ---@type fun(p: string, contents: string): boolean, string?
 fs.write = nil

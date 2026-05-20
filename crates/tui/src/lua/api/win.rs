@@ -326,6 +326,13 @@ impl mlua::UserData for LuaWin {
         );
 
         // ── on(event, fn) → Reg ────────────────────────────────────
+        //
+        // Headless-safe: when no app pointer is installed (e.g. autoload
+        // running before `bring_up_lua`, or a unit test driving the Lua
+        // runtime directly), there is no `Ui` to register against and no
+        // event source to ever fire. The call silently no-ops and the
+        // returned Reg is inert. Callers that need a guaranteed live
+        // subscription should re-call after `lifecycle.on_ready`.
         methods.add_function(
             "on",
             |lua,
@@ -339,13 +346,21 @@ impl mlua::UserData for LuaWin {
                 let shared = current_shared(lua)?;
                 let id = crate::lua::register_callback_handle(&shared, lua, func.into_inner())?;
                 let event: crate::smelt_term::WinEvent = event.into();
-                crate::lua::with_app(|app| {
+                let installed = crate::lua::try_with_app(|app| {
                     app.ui.win_on_event(
                         this.id,
                         event,
                         crate::smelt_term::Callback::Lua(crate::smelt_term::LuaHandle(id)),
                     );
-                });
+                })
+                .is_some();
+                if !installed {
+                    // Drop the orphan callback so the handle table doesn't leak.
+                    if let Ok(mut cbs) = shared.callbacks.lock() {
+                        cbs.remove(&id);
+                    }
+                    return Ok(LuaReg::new(|| false));
+                }
                 let win = this.id;
                 Ok(LuaReg::new(move || {
                     let mut removed = false;

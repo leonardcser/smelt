@@ -18,47 +18,70 @@ local STATS_W = 19
 local MIN_LABEL_W = 6
 
 local function severity_role(us)
-	if us < 100 then return "Comment" end
-	if us < 1000 then return "SmeltReasonLow" end
-	if us < 5000 then return "SmeltReasonMed" end
-	if us < 16000 then return "SmeltReasonHigh" end
+	if us < 100 then
+		return "Comment"
+	end
+	if us < 1000 then
+		return "SmeltReasonLow"
+	end
+	if us < 5000 then
+		return "SmeltReasonMed"
+	end
+	if us < 16000 then
+		return "SmeltReasonHigh"
+	end
 	return "SmeltReasonMax"
 end
 
 local function fmt_us(us)
-	if us < 1000 then return string.format("%4dµs", us) end
+	if us < 1000 then
+		return string.format("%4dµs", us)
+	end
 	local ms = us / 1000.0
-	if ms < 10 then return string.format("%4.2fms", ms) end
-	if ms < 100 then return string.format("%4.1fms", ms) end
+	if ms < 10 then
+		return string.format("%4.2fms", ms)
+	end
+	if ms < 100 then
+		return string.format("%4.1fms", ms)
+	end
 	return string.format("%4dms", math.floor(ms + 0.5))
 end
 
 local function pad_label(label, label_w)
 	local len = #label
-	if len > label_w then return label:sub(1, label_w - 1) .. "…" end
+	if len > label_w then
+		return label:sub(1, label_w - 1) .. "…"
+	end
 	return label .. string.rep(" ", label_w - len)
 end
 
 local function header_for(label_w)
 	return pad_label("label", label_w)
-		.. " " .. string.format("%6s", "last")
-		.. "  " .. string.format("%6s", "p99")
-		.. " " .. string.format("%3s", "n")
+		.. " "
+		.. string.format("%6s", "last")
+		.. "  "
+		.. string.format("%6s", "p99")
+		.. " "
+		.. string.format("%3s", "n")
 end
 
 local function panel_title()
 	return {
-		{ text = " perf ", bold = true },
+		{ text = " performance ", bold = true },
 		{ text = "(F12 to close) ", fg = "grey", dim = true },
 	}
 end
 
 local function current_label_width(win)
 	local rect = win:rect()
-	if not rect then return MIN_LABEL_W end
+	if not rect then
+		return MIN_LABEL_W
+	end
 	local inner_w = math.max(rect.width - 2, 0)
 	local lw = inner_w - STATS_W
-	if lw < MIN_LABEL_W then return MIN_LABEL_W end
+	if lw < MIN_LABEL_W then
+		return MIN_LABEL_W
+	end
 	return lw
 end
 
@@ -81,8 +104,14 @@ local function compose_lines(snap, label_w)
 		-- the µ glyph (2 bytes / 1 cell), so we measure via `#` not width.
 		local last_col = #label_s + 1
 		local p99_col = last_col + #last_s + 2
-		table.insert(color_spans, { row = i + 1, col = last_col, end_col = last_col + #last_s, role = severity_role(r.last_us) })
-		table.insert(color_spans, { row = i + 1, col = p99_col, end_col = p99_col + #p99_s, role = severity_role(r.p99_us) })
+		table.insert(
+			color_spans,
+			{ row = i + 1, col = last_col, end_col = last_col + #last_s, role = severity_role(r.last_us) }
+		)
+		table.insert(
+			color_spans,
+			{ row = i + 1, col = p99_col, end_col = p99_col + #p99_s, role = severity_role(r.p99_us) }
+		)
 	end
 	if n == 0 then
 		lines[#lines + 1] = "  (no samples yet)"
@@ -91,11 +120,17 @@ local function compose_lines(snap, label_w)
 end
 
 local function paint()
-	if not state.open then return end
+	if not state.open then
+		return
+	end
 	local buf, win = state.buf, state.win
-	if not buf or not win then return end
+	if not buf or not win then
+		return
+	end
 	local ok, snap = pcall(smelt.metrics.perf.snapshot)
-	if not ok then return end
+	if not ok then
+		return
+	end
 	local label_w = current_label_width(win)
 	local lines, spans = compose_lines(snap, label_w)
 	buf:lines(lines):clear_ns(NS_HL)
@@ -122,7 +157,9 @@ local function attach()
 		layout = smelt.overlay.layout.leaf(state.win, { measure = { PANEL_W, PANEL_H } }),
 	})
 	-- Cancel any prior timer (hot-reload survival) before re-arming.
-	if state.timer then state.timer:remove() end
+	if state.timer then
+		state.timer:remove()
+	end
 	state.timer = smelt.timer.every(250, paint)
 	paint()
 end
@@ -141,8 +178,14 @@ end
 
 local function close()
 	state.open = false
-	if state.timer then state.timer:remove(); state.timer = nil end
-	if state.overlay then state.overlay:close(); state.overlay = nil end
+	if state.timer then
+		state.timer:remove()
+		state.timer = nil
+	end
+	if state.overlay then
+		state.overlay:close()
+		state.overlay = nil
+	end
 	state.win = nil
 	-- Named buf survives for next open by design.
 	if state.owns_perf then
@@ -153,12 +196,18 @@ local function close()
 end
 
 local function toggle()
-	if state.open then close() else open() end
+	if state.open then
+		close()
+	else
+		open()
+	end
 end
 
 smelt.keymap.set("", "<F12>", toggle)
 
 -- Re-attach after /reload: named resources survive, paint timer is anonymous.
-if state.open then attach() end
+if state.open then
+	attach()
+end
 
 return M

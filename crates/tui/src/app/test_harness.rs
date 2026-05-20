@@ -153,9 +153,6 @@ impl TestAppBuilder {
         settings.vim = self.vim;
         let shared_session = Arc::new(Mutex::new(None));
         let mut lua = crate::lua::LuaRuntime::new();
-        // Match production startup: autoload registers built-in
-        // commands (`:quit`, `:help`, ...) and the default keymap.
-        lua.load_autoload();
         if let Some(ref path) = self.init_lua {
             lua.set_init_lua_path(path.clone());
         }
@@ -207,12 +204,16 @@ impl TestAppBuilder {
             env,
         );
 
-        // init.lua may touch TUI surfaces (overlays / wins / bufs), so it
-        // needs the app TLS pointer installed — which can only happen
-        // after TuiApp construction.
-        if self.init_lua.is_some() {
+        // Match production startup: re-run bootstrap + autoload + init.lua
+        // inside an `install_app_ptr` scope so module bodies that touch
+        // TUI surfaces (e.g. `smelt.prompt.win():on(...)`) see a live
+        // app pointer. Production does this via `bring_up_lua` →
+        // `lua.reload`. Stories skip the `on_ready` drain on purpose:
+        // it's reserved for interactive decoration (splash banner, etc.)
+        // that storybook snapshots should not include.
+        {
             let _guard = crate::lua::install_app_ptr(&mut app);
-            app.lua.load_user_config();
+            let _ = app.lua.reload(None);
         }
 
         // Production wires the Tui frontend to `Osc52Sink`, which writes
@@ -450,10 +451,7 @@ impl TestApp {
     /// needing a real terminal clipboard. Exercises the
     /// attachment_ids ↔ marker invariant under interleaved mutations.
     pub fn insert_attachment(&mut self, label: String) {
-        let data_url = format!(
-            "data:image/png;base64,FUZZ-{}",
-            self.app.input.completer.is_some() as u8
-        );
+        let data_url = "data:image/png;base64,FUZZ-0".to_string();
         let mut ctx = crate::input::prompt_ctx_mut(&mut self.app.ui);
         self.app.input.insert_image(&mut ctx, label, data_url);
     }
@@ -878,29 +876,6 @@ impl TestApp {
                 start,
                 end
             );
-        }
-
-        // Completer anchor lives in the prompt-edit buffer. When active,
-        // it must still resolve to a valid byte boundary after every
-        // mutation — that's the exact stale-offset trap fuzzing should
-        // catch.
-        if let Some(session) = self.app.input.completer.as_ref() {
-            if let Some(prompt) = self.app.ui.buf(crate::app::PROMPT_EDIT_BUF) {
-                let src = prompt.source();
-                let anchor = session.completer.anchor;
-                assert!(
-                    anchor <= src.len(),
-                    "completer anchor {} > prompt source len {}",
-                    anchor,
-                    src.len()
-                );
-                let snapped = smelt_buffer::text::snap(src, anchor);
-                assert_eq!(
-                    snapped, anchor,
-                    "completer anchor {} not on UTF-8 char boundary (snapped {})",
-                    anchor, snapped
-                );
-            }
         }
 
         // Vim visual_anchor must stay on a UTF-8 char boundary in the
@@ -2583,9 +2558,10 @@ mod tests {
         .unwrap();
 
         let mut app = TestApp::builder().with_init_lua(&init).build();
-        // Cold-start TestApp doesn't run `TuiApp::run`, so the initial
-        // "ready" drain hasn't fired yet — fire it manually to match
-        // the cold-start path.
+        // Cold-start `TestApp` skips the `on_ready` drain (storybook
+        // tests don't want interactive decoration like the splash
+        // banner). Fire it manually here since this test specifically
+        // covers the `kind = "launch"` drain.
         {
             let _g = crate::lua::install_app_ptr(&mut app.app);
             let _ = app.app.bring_up_lua("launch");

@@ -47,6 +47,44 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
         },
     )?;
     m.fn_(
+        "cursor",
+        "Read or write the prompt cursor as a byte offset into `text()`. Without an argument returns the current offset; with one snaps it to a char boundary and clamps to source length. Returns the resulting offset.",
+        &["pos"],
+        |_, pos: Option<i64>| -> LuaResult<i64> {
+            Ok(crate::lua::with_app(|app| match pos {
+                Some(p) => {
+                    let pctx = crate::input::prompt_ctx_mut(&mut app.ui);
+                    let p = p.max(0) as usize;
+                    let snapped = smelt_buffer::text::snap(pctx.buf.source(), p);
+                    pctx.win.cpos = snapped;
+                    pctx.win.selection_anchor = None;
+                    pctx.win.clamp_anchors_to_source(pctx.buf.source());
+                    snapped as i64
+                }
+                None => app.prompt_win().cpos as i64,
+            }))
+        },
+    )?;
+    m.fn_(
+        "replace_range",
+        "UTF-8-safe replace of the byte range `[start, end)` in the prompt with `text`. Endpoints are snapped to char boundaries and clamped to source length. The cursor lands at `start + #text`. Returns the new cursor offset.",
+        &["start", "end", "text"],
+        |_, (start, end, text): (i64, i64, String)| -> LuaResult<i64> {
+            Ok(crate::lua::with_app(|app| {
+                let pctx = crate::input::prompt_ctx_mut(&mut app.ui);
+                let src = pctx.buf.source();
+                let start = smelt_buffer::text::snap(src, start.max(0) as usize);
+                let end = smelt_buffer::text::snap(src, end.max(0) as usize).max(start);
+                pctx.buf.text_mut().replace_range(start..end, &text);
+                let new_cpos = start + text.len();
+                pctx.win.cpos = new_cpos;
+                pctx.win.selection_anchor = None;
+                pctx.win.clamp_anchors_to_source(pctx.buf.source());
+                new_cpos as i64
+            }))
+        },
+    )?;
+    m.fn_(
         "set_section",
         "Set the named prompt section (e.g. selection context, attached files) to `content`. Sections render above the editable text and are submitted with the next turn.",
         &["name", "content"],

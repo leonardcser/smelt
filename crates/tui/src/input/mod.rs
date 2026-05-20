@@ -1,11 +1,9 @@
 mod buffer;
-mod completer_bridge;
 pub(crate) mod editor;
 mod vim_bridge;
 
 pub(crate) use smelt_core::history::History;
 
-use crate::completer::CompleterSession;
 use crate::content;
 use crate::keymap::{self, KeyAction, KeyContext};
 use crate::smelt_term::VimMode;
@@ -75,7 +73,7 @@ pub(crate) struct InputSnapshot {
 
 // ── Shared input state ───────────────────────────────────────────────────────
 
-/// Prompt-specific side-cars (completer, stash, attachments).
+/// Prompt-specific side-cars (stash, attachments).
 /// The canonical edit buffer lives in `ui.bufs[PROMPT_EDIT_BUF]` and the
 /// window in `ui.wins[PROMPT_WIN]`; methods that touch either take
 /// `&mut Buffer`/`&mut Window` (or shared refs) as parameters. Display
@@ -83,17 +81,11 @@ pub(crate) struct InputSnapshot {
 /// `buf.source` via `sync_display_coords` before each render.
 pub(crate) struct PromptState {
     pub(crate) store: Arc<Mutex<AttachmentStore>>,
-    pub(crate) completer: Option<CompleterSession>,
-    /// WinIds of closed completer sessions, drained and closed on the next frame.
-    pub(crate) pending_picker_close: Vec<crate::smelt_term::WinId>,
     pub(crate) stash: Option<InputSnapshot>,
     /// True when content came from a paste; cleared on manual character input.
     pub(super) from_paste: bool,
     /// Chord state: true after Ctrl+X, waiting for second key.
     pending_ctrl_x: bool,
-    /// Completable arguments for commands like `/model`, `/theme`, `/color`.
-    /// Each entry is `("/cmd", vec!["arg1", "arg2", ...])`.
-    pub(crate) command_arg_sources: Vec<(String, Vec<String>)>,
 }
 
 /// What the caller should do after `handle_event`.
@@ -119,12 +111,9 @@ impl PromptState {
         let store = Arc::new(Mutex::new(AttachmentStore::new()));
         Self {
             store,
-            completer: None,
-            pending_picker_close: Vec::new(),
             stash: None,
             from_paste: false,
             pending_ctrl_x: false,
-            command_arg_sources: Vec::new(),
         }
     }
 
@@ -177,21 +166,6 @@ impl PromptState {
         win.selection_anchor = None;
     }
 
-    /// End the active completer session, queuing its picker leaf for close. Use instead of `= None`.
-    pub(crate) fn close_completer(&mut self) {
-        if let Some(session) = self.completer.take() {
-            if let Some(win) = session.picker_win {
-                self.pending_picker_close.push(win);
-            }
-        }
-    }
-
-    /// Install a new completer, retiring the previous session. Bare `= Some(...)` orphans the WinId.
-    pub(crate) fn set_completer(&mut self, comp: crate::completer::Completer) {
-        self.close_completer();
-        self.completer = Some(CompleterSession::new(comp));
-    }
-
     fn extend_selection(&mut self, win: &mut crate::smelt_term::Window) {
         win.extend_selection(win.cpos);
     }
@@ -206,7 +180,6 @@ impl PromptState {
         ctx.win.cpos = start;
         ctx.win.selection_anchor = None;
         ctx.win.clamp_anchors_to_source(ctx.buf.source());
-        self.recompute_completer(ctx.as_ref());
         Some(deleted)
     }
 
@@ -258,7 +231,7 @@ impl PromptState {
     /// Wholesale buffer swap. Installs `text` + `ids` atomically (via
     /// `AttachedTextMut::install`, which debug-asserts that marker count in
     /// `text` matches `ids.len()`). Clamps `cpos` to a char boundary, clears
-    /// selection + vim visual anchors, closes the completer.
+    /// selection + vim visual anchors.
     ///
     /// Passing `ids = vec![]` with marker-containing text trips the debug
     /// assert — exactly what you want, since the caller would otherwise be
@@ -278,7 +251,6 @@ impl PromptState {
         ctx.win.cpos = crate::smelt_term::text::snap(source, cpos);
         ctx.win.selection_anchor = None;
         ctx.win.vim_state.clear_visual_anchor();
-        self.close_completer();
     }
 
     pub(crate) fn clear(&mut self, ctx: &mut PromptCtx<'_>) {
@@ -289,7 +261,7 @@ impl PromptState {
 
     /// Wholesale buffer swap from user-supplied plain text (no attachments).
     /// Snapshots undo, installs new source with empty `attachment_ids`,
-    /// cursor at end, refreshes completer.
+    /// cursor at end.
     ///
     /// Intended for callers feeding text from outside the prompt: Lua
     /// `smelt.prompt.set_text`, placeholder accept, `$EDITOR` re-import.
@@ -302,7 +274,6 @@ impl PromptState {
         let text = Self::strip_attachment_markers(&text);
         let cpos = text.len();
         self.install_source(ctx, text, cpos, Vec::new());
-        self.recompute_completer(ctx.as_ref());
     }
 
     /// Strip `ATTACHMENT_MARKER` bytes from `s`. Used at every seam where
@@ -338,8 +309,6 @@ impl PromptState {
         ctx.win.cpos += inserted;
         ctx.win.selection_anchor = None;
         self.from_paste = false;
-        self.close_completer();
-        self.recompute_completer(ctx.as_ref());
     }
 
     /// Toggle stash. Attachments are cloned out of the store so the stash survives store clears.
@@ -373,7 +342,6 @@ impl PromptState {
                 });
                 ctx.win.selection_anchor = None;
                 ctx.win.vim_state.clear_visual_anchor();
-                self.close_completer();
             }
         }
     }
@@ -462,10 +430,6 @@ impl PromptState {
         if self.selection_range(ctx.as_ref()).is_some() {
             self.save_undo(ctx);
             self.delete_selection(ctx);
-            // delete_selection can shrink source past the completer's
-            // anchor; the completer is meaningless after a non-textual
-            // image insert anyway, so just dismiss it.
-            self.close_completer();
         }
         let id = self.store.lock().unwrap().insert_image(label, data_url);
         self.insert_attachment_id(ctx, id);
@@ -604,7 +568,6 @@ impl PromptState {
                 let p = ctx.buf.text_mut().insert(ctx.win.cpos, '\n');
                 ctx.win.cpos = p + 1;
                 ctx.win.clamp_anchors_to_source(ctx.buf.source());
-                self.close_completer();
                 Action::Redraw
             }
 
@@ -615,7 +578,6 @@ impl PromptState {
                     let source = ctx.buf.source();
                     let cp = char_pos(source, cpos);
                     ctx.win.cpos = byte_of_char(source, cp - 1);
-                    self.recompute_completer(ctx.as_ref());
                     Action::Redraw
                 } else {
                     Action::Noop
@@ -627,7 +589,6 @@ impl PromptState {
                     let source = ctx.buf.source();
                     let cp = char_pos(source, cpos);
                     ctx.win.cpos = byte_of_char(source, cp + 1);
-                    self.recompute_completer(ctx.as_ref());
                     Action::Redraw
                 } else {
                     Action::Noop
@@ -655,7 +616,6 @@ impl PromptState {
                 ctx.win.curswant = Some(new_want);
                 if new_pos != ctx.win.cpos {
                     ctx.win.cpos = new_pos;
-                    self.recompute_completer(ctx.as_ref());
                     Action::Redraw
                 } else if let Some(entry) =
                     history.and_then(|h| h.up(&Self::strip_attachment_markers(ctx.buf.source())))
@@ -663,7 +623,6 @@ impl PromptState {
                     let entry = entry.to_string();
                     self.install_history_entry(ctx, &entry, false);
                     ctx.win.curswant = None;
-                    self.sync_completer(ctx.as_ref());
                     Action::Redraw
                 } else {
                     Action::Noop
@@ -677,13 +636,11 @@ impl PromptState {
                 ctx.win.curswant = Some(new_want);
                 if new_pos != ctx.win.cpos {
                     ctx.win.cpos = new_pos;
-                    self.recompute_completer(ctx.as_ref());
                     Action::Redraw
                 } else if let Some(entry) = history.and_then(|h| h.down()) {
                     let entry = entry.to_string();
                     self.install_history_entry(ctx, &entry, true);
                     ctx.win.curswant = None;
-                    self.sync_completer(ctx.as_ref());
                     Action::Redraw
                 } else {
                     Action::Noop
@@ -692,23 +649,19 @@ impl PromptState {
             KeyAction::MoveStartOfLine => {
                 let cpos = ctx.win.cpos;
                 ctx.win.cpos = crate::smelt_term::text::line_start(ctx.buf.source(), cpos);
-                self.recompute_completer(ctx.as_ref());
                 Action::Redraw
             }
             KeyAction::MoveEndOfLine => {
                 let cpos = ctx.win.cpos;
                 ctx.win.cpos = crate::smelt_term::text::line_end(ctx.buf.source(), cpos);
-                self.recompute_completer(ctx.as_ref());
                 Action::Redraw
             }
             KeyAction::MoveStartOfBuffer => {
                 ctx.win.cpos = 0;
-                self.recompute_completer(ctx.as_ref());
                 Action::Redraw
             }
             KeyAction::MoveEndOfBuffer => {
                 ctx.win.cpos = ctx.buf.source().len();
-                self.recompute_completer(ctx.as_ref());
                 Action::Redraw
             }
             KeyAction::HistoryPrev => {
@@ -717,7 +670,6 @@ impl PromptState {
                 {
                     let entry = entry.to_string();
                     self.install_history_entry(ctx, &entry, false);
-                    self.sync_completer(ctx.as_ref());
                     Action::Redraw
                 } else {
                     Action::Noop
@@ -727,7 +679,6 @@ impl PromptState {
                 if let Some(entry) = history.and_then(|h| h.down()) {
                     let entry = entry.to_string();
                     self.install_history_entry(ctx, &entry, true);
-                    self.sync_completer(ctx.as_ref());
                     Action::Redraw
                 } else {
                     Action::Noop
@@ -809,7 +760,6 @@ impl PromptState {
                 if let Some(new_cpos) = clipboard.kill_ring.yank(&mut ctx.buf.text_mut(), cpos) {
                     ctx.win.cpos = new_cpos;
                     ctx.win.clamp_anchors_to_source(ctx.buf.source());
-                    self.recompute_completer(ctx.as_ref());
                 }
                 Action::Redraw
             }
@@ -817,7 +767,6 @@ impl PromptState {
                 if let Some(new_cpos) = clipboard.kill_ring.yank_pop(&mut ctx.buf.text_mut()) {
                     ctx.win.cpos = new_cpos;
                     ctx.win.clamp_anchors_to_source(ctx.buf.source());
-                    self.recompute_completer(ctx.as_ref());
                 }
                 Action::Redraw
             }
@@ -883,7 +832,6 @@ impl PromptState {
                         }
                         clipboard.kill_ring.set(out.kill_ring);
                     }
-                    self.recompute_completer(ctx.as_ref());
                     Action::Redraw
                 } else {
                     Action::Noop
@@ -986,7 +934,7 @@ impl PromptState {
         }
     }
 
-    /// Process a terminal event. Priority: completer → vim → paste → keymap → insert.
+    /// Process a terminal event. Priority: vim → paste → keymap → insert.
     pub(crate) fn handle_event(
         &mut self,
         ctx: &mut PromptCtx<'_>,
@@ -995,12 +943,6 @@ impl PromptState {
         clipboard: &mut crate::smelt_term::Clipboard,
         now: std::time::Instant,
     ) -> Action {
-        if self.completer.is_some() {
-            if let Some(action) = self.handle_completer_event(ctx, &ev) {
-                return action;
-            }
-        }
-
         match self.dispatch_vim(ctx, &ev, &mut history, clipboard, now) {
             VimBridgeResult::Handled(action) => return action,
             VimBridgeResult::Passthrough | VimBridgeResult::NotAKey => {}
@@ -1017,7 +959,6 @@ impl PromptState {
                         Ok(url) => {
                             let label = engine::image::image_label_from_path(&path);
                             self.insert_image(ctx, label, url);
-                            self.recompute_completer(ctx.as_ref());
                             return Action::Redraw;
                         }
                         Err(e) => {
@@ -1029,12 +970,10 @@ impl PromptState {
             if data.trim().is_empty() {
                 if let Some(url) = clipboard_image_to_data_url() {
                     self.insert_image(ctx, "clipboard.png".into(), url);
-                    self.recompute_completer(ctx.as_ref());
                     return Action::Redraw;
                 }
             }
             self.insert_paste(ctx, data);
-            self.recompute_completer(ctx.as_ref());
             return Action::Redraw;
         }
 
@@ -1090,25 +1029,6 @@ fn current_line(buf: &str, cpos: usize) -> usize {
     buf[..end].chars().filter(|&c| c == '\n').count()
 }
 
-/// Returns the byte offset of the `@` anchor when the cursor is inside an `@…` zone.
-pub(super) fn cursor_in_at_zone(buf: &str, cpos: usize) -> Option<usize> {
-    let cpos = smelt_buffer::text::snap(buf, cpos);
-    // Include the char at cpos so cursor-on-@ is matched.
-    let search_end = buf[cpos..]
-        .char_indices()
-        .nth(1)
-        .map(|(i, _)| cpos + i)
-        .unwrap_or(buf.len());
-    let at_pos = buf[..search_end].rfind('@')?;
-    if at_pos > 0 && !buf[..at_pos].ends_with(char::is_whitespace) {
-        return None;
-    }
-    if at_pos < cpos && buf[at_pos + 1..cpos].contains(char::is_whitespace) {
-        return None;
-    }
-    Some(at_pos)
-}
-
 /// Read an image from the system clipboard and return a data URL.
 /// macOS: uses `osascript`; Linux: tries `xclip` then `wl-paste`.
 fn clipboard_image_to_data_url() -> Option<String> {
@@ -1160,17 +1080,6 @@ fn clipboard_image_to_data_url() -> Option<String> {
     }
     let b64 = base64::engine::general_purpose::STANDARD.encode(&bytes);
     Some(format!("data:image/png;base64,{b64}"))
-}
-
-pub(super) fn find_slash_anchor(buf: &str, cpos: usize) -> Option<usize> {
-    if !buf.starts_with('/') {
-        return None;
-    }
-    let cpos = smelt_buffer::text::snap(buf, cpos);
-    if cpos < 1 || buf[1..cpos].contains(char::is_whitespace) {
-        return None;
-    }
-    Some(0)
 }
 
 // ── Agent-mode Esc resolution ────────────────────────────────────────────────

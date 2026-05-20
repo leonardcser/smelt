@@ -1,3 +1,4 @@
+pub mod history;
 pub mod score;
 
 /// neo_frizbee's SIMD load path over-reads up to 16 bytes past the

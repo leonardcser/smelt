@@ -22,6 +22,7 @@ local function to_picker_items(list)
       label       = it.label,
       description = it.description,
       ansi_color  = it.ansi_color,
+      label_color = it.label_color,
       prefix      = it.prefix,
     }
   end
@@ -72,6 +73,10 @@ function smelt.prompt.open_picker(opts)
     placement = "prompt_docked",
   })
 
+  -- Claim modal ownership of the prompt so auto-completers (slash / @file /
+  -- arg) stay quiet while this picker uses the prompt as its filter input.
+  local lock_reg = smelt.prompt.acquire and smelt.prompt.acquire() or nil
+
   local task_id = smelt.task.alloc()
   local regs = {}
 
@@ -89,6 +94,7 @@ function smelt.prompt.open_picker(opts)
   local function teardown()
     for _, reg in ipairs(regs) do reg:remove() end
     picker:close()
+    if lock_reg then lock_reg:remove() end
   end
 
   local function close_with(result)

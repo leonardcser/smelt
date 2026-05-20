@@ -22,6 +22,7 @@ const BOOTSTRAP_FILES: &[&str] = &[
     "list.lua",
     "session.lua",
     "widgets/picker.lua",
+    "widgets/completer.lua",
     "widgets/prompt_picker.lua",
     "cmd.lua",
     "dialogs/confirm.lua",
@@ -30,7 +31,7 @@ const BOOTSTRAP_FILES: &[&str] = &[
 ];
 
 /// Subdirectories whose files are `require`'d at startup as side-effect registrations.
-const AUTOLOAD_DIRS: &[&str] = &["tools", "commands", "plugins", "dialogs"];
+const AUTOLOAD_DIRS: &[&str] = &["tools", "commands", "completers", "plugins", "dialogs"];
 
 /// Subdirectory whose files run during the Early phase under the restricted
 /// `smelt` view, BEFORE user `early.lua`. Plugins drop a file here to declare
@@ -788,38 +789,6 @@ impl LuaRuntime {
                 v
             })
             .unwrap_or_default()
-    }
-
-    pub fn list_commands_with_desc(&self) -> Vec<(String, Option<String>)> {
-        let mut items: Vec<(String, Option<String>)> = self
-            .shared
-            .commands
-            .lock()
-            .map(|m| {
-                m.iter()
-                    .filter(|(_, v)| !v.hidden)
-                    .map(|(k, v)| (k.clone(), v.description.clone()))
-                    .collect()
-            })
-            .unwrap_or_default();
-        items.sort_by(|a, b| a.0.cmp(&b.0));
-        items
-    }
-
-    pub fn list_command_args(&self) -> Vec<(String, Vec<String>)> {
-        let mut items: Vec<(String, Vec<String>)> = self
-            .shared
-            .commands
-            .lock()
-            .map(|m| {
-                m.iter()
-                    .filter(|(_, v)| !v.args.is_empty())
-                    .map(|(k, v)| (format!("/{k}"), v.args.clone()))
-                    .collect()
-            })
-            .unwrap_or_default();
-        items.sort_by(|a, b| a.0.cmp(&b.0));
-        items
     }
 
     pub fn remove_callback(&self, id: u64) {

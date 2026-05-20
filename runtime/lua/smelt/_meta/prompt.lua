@@ -7,9 +7,17 @@
 ---@class smelt.prompt
 local prompt = {}
 
+--- Read or write the prompt cursor as a byte offset into `text()`. Without an argument returns the current offset; with one snaps it to a char boundary and clamps to source length. Returns the resulting offset.
+---@type fun(pos: integer?): integer
+prompt.cursor = nil
+
 --- Remove the named prompt section. No-op if the section does not exist.
 ---@type fun(name: string): nil
 prompt.remove_section = nil
+
+--- UTF-8-safe replace of the byte range `[start, end)` in the prompt with `text`. Endpoints are snapped to char boundaries and clamped to source length. The cursor lands at `start + #text`. Returns the new cursor offset.
+---@type fun(start: integer, end: integer, text: string): integer
+prompt.replace_range = nil
 
 --- Set the named prompt section (e.g. selection context, attached files) to `content`. Sections render above the editable text and are submitted with the next turn.
 ---@type fun(name: string, content: string): nil

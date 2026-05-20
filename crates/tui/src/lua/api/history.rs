@@ -60,7 +60,7 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
                     .map(str::trim)
                     .find(|l| !l.is_empty())
                     .unwrap_or("");
-                if let Some(s) = crate::completer::history::history_score(label, &query, rank) {
+                if let Some(s) = smelt_core::fuzzy::history::history_score(label, &query, rank) {
                     scored.push((s, rank, orig_idx));
                 }
             }

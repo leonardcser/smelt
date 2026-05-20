@@ -729,6 +729,12 @@ pub(crate) fn parse_picker_item(v: &mlua::Value) -> Result<crate::picker::Picker
                         .fg(smelt_core::style::Color::AnsiValue(ansi as u8)),
                 );
             }
+            if let Ok(Some(ansi)) = t.get::<Option<u64>>("label_color") {
+                item = item.with_label_style(
+                    smelt_core::style::Style::new()
+                        .fg(smelt_core::style::Color::AnsiValue(ansi as u8)),
+                );
+            }
             Ok(item)
         }
         other => Err(format!(

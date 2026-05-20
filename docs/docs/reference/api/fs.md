@@ -144,6 +144,14 @@ Filesystem watcher. Calls `handler(event)` for each event, where
 entries of a directory. Returns a `Reg` whose `:remove()` stops the
 watcher and cancels the polling coroutine.
 
+## `smelt.fs.workspace_files`
+
+```lua
+fun(): string[]
+```
+
+Return tracked + untracked non-ignored files under the cwd, plus every intermediate parent directory, sorted lexicographically. Uses `git ls-files` when a git repo is present and falls back to a depth-capped filesystem walk otherwise. Suitable as the source for an `@file` completer.
+
 ## `smelt.fs.write`
 
 ```lua

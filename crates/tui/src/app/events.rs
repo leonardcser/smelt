@@ -360,10 +360,6 @@ impl TuiApp {
                         return EventOutcome::Quit;
                     }
                     KeyAction::ClearBuffer => {
-                        if self.input.completer.is_some() {
-                            self.input.close_completer();
-                            return EventOutcome::Redraw;
-                        }
                         self.timers.last_ctrlc = Some(self.core.clock.instant_now());
                         let mut pctx = crate::input::prompt_ctx_mut(&mut self.ui);
                         self.input.clear(&mut pctx);
@@ -407,18 +403,10 @@ impl TuiApp {
             if let Some(action) = keymap::lookup(code, modifiers, &ctx) {
                 match action {
                     KeyAction::CancelAgent => {
-                        if self.input.completer.is_some() {
-                            self.input.close_completer();
-                            return EventOutcome::Noop;
-                        }
                         self.queued_messages.clear();
                         return EventOutcome::CancelAgent;
                     }
                     KeyAction::ClearBuffer => {
-                        if self.input.completer.is_some() {
-                            self.input.close_completer();
-                            return EventOutcome::Noop;
-                        }
                         self.timers.last_ctrlc = Some(self.core.clock.instant_now());
                         let mut pctx = crate::input::prompt_ctx_mut(&mut self.ui);
                         self.input.clear(&mut pctx);

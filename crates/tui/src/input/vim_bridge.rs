@@ -63,7 +63,6 @@ impl PromptState {
                 // Clear shift+key selection on any vim-consumed key
                 // (e.g. Esc in insert mode, Esc in visual mode).
                 self.clear_selection(ctx.win);
-                self.recompute_completer(ctx.as_ref());
                 VimBridgeResult::Handled(Action::Redraw)
             }
             vim::Action::Submit => {
@@ -83,7 +82,6 @@ impl PromptState {
                 {
                     let entry = entry.to_string();
                     self.install_history_entry(ctx, &entry, false);
-                    self.sync_completer(ctx.as_ref());
                 }
                 VimBridgeResult::Handled(Action::Redraw)
             }
@@ -91,7 +89,6 @@ impl PromptState {
                 if let Some(entry) = history.as_deref_mut().and_then(|h| h.down()) {
                     let entry = entry.to_string();
                     self.install_history_entry(ctx, &entry, true);
-                    self.sync_completer(ctx.as_ref());
                 }
                 VimBridgeResult::Handled(Action::Redraw)
             }

@@ -88,11 +88,6 @@ impl TuiApp {
 
         self.finalize_layer_rects();
 
-        {
-            let _p = smelt_perf::perf::begin("compositor:completer");
-            self.sync_completer_overlay();
-        }
-
         // Late cursor-shape fill-ins. Each sync layer above sets `cursor_shape` for
         // the focus context it owns (transcript / prompt). Two cross-cutting cases
         // are decided here, after the layers have spoken, by forcing `Block` only
@@ -310,87 +305,6 @@ impl TuiApp {
                     self.ui.set_focus(crate::app::TRANSCRIPT_WIN);
                 }
             }
-        }
-    }
-
-    // ── Completer overlay ──────────────────────────────────────────
-
-    fn sync_completer_overlay(&mut self) {
-        // Drain picker leaves orphaned when their session ended.
-        for win in std::mem::take(&mut self.input.pending_picker_close) {
-            self.close_overlay_leaf(win);
-        }
-
-        let (max_rows, selected, items, existing_win) = match self.input.completer.as_ref() {
-            Some(session) => {
-                let prefix = match session.kind {
-                    crate::completer::CompleterKind::Command => "/",
-                    crate::completer::CompleterKind::File => "./",
-                    crate::completer::CompleterKind::CommandArg => "",
-                };
-                let command_style =
-                    matches!(session.kind, crate::completer::CompleterKind::Command).then(|| {
-                        let accent = self
-                            .ui
-                            .theme()
-                            .get("SmeltAccent")
-                            .fg
-                            .unwrap_or(smelt_core::style::Color::Reset);
-                        smelt_core::style::Style::new().fg(accent)
-                    });
-                let items: Vec<crate::picker::PickerItem> = session
-                    .results_iter()
-                    .map(|r| {
-                        let item_prefix = if r.ansi_color.is_some() {
-                            "● "
-                        } else {
-                            prefix
-                        };
-                        let mut it = crate::picker::PickerItem::new(r.label.clone())
-                            .with_prefix(item_prefix);
-                        if let Some(desc) = r.description.as_deref() {
-                            it = it.with_description(desc);
-                        }
-                        if let Some(c) = r.ansi_color {
-                            it = it.with_prefix_style(
-                                smelt_core::style::Style::new()
-                                    .fg(smelt_core::style::Color::AnsiValue(c)),
-                            );
-                        } else if let Some(style) = command_style {
-                            it = it.with_prefix_style(style).with_label_style(style);
-                        }
-                        it
-                    })
-                    .collect();
-                (
-                    session.max_visible_rows() as u16,
-                    session.selected,
-                    items,
-                    session.picker_win,
-                )
-            }
-            None => return,
-        };
-
-        // Reuse the existing overlay — closing/reopening on every filter change causes cursor jumps.
-        let open_win = match existing_win {
-            Some(win) => {
-                crate::picker::set_items(self, win, items, selected);
-                Some(win)
-            }
-            None => crate::picker::open(
-                self,
-                items,
-                selected,
-                crate::picker::PickerPlacement::PromptDocked { max_rows },
-                false,
-                false,
-                30, // below default overlay z (50) so dialogs overlay the completer
-            ),
-        };
-
-        if let Some(session) = self.input.completer.as_mut() {
-            session.picker_win = open_win;
         }
     }
 }

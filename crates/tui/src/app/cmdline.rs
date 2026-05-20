@@ -20,8 +20,17 @@ pub(crate) struct CmdlineState {
     pub(crate) history_browse: Option<usize>,
     /// Live input snapshot saved when history browsing begins; restored on Down past the newest entry.
     pub(crate) history_stash: String,
-    /// Completer lazily constructed on first Tab; dropped on close or text mutation.
-    pub(crate) completer: Option<crate::completer::Completer>,
+    /// Tab-cycle state: command-name candidates ordered by fuzzy match against the
+    /// query at first Tab, plus the current cursor into that list. Dropped on close
+    /// or text mutation so the next Tab re-ranks against the new query.
+    pub(crate) completer: Option<CmdlineCompleter>,
+}
+
+/// Linear tab-cycling completer for the `:` cmdline. Holds the candidate
+/// command names ranked best-first and the current selection index.
+pub(crate) struct CmdlineCompleter {
+    pub(crate) labels: Vec<String>,
+    pub(crate) selected: usize,
 }
 
 impl TuiApp {
@@ -356,35 +365,44 @@ impl TuiApp {
     }
 
     fn cmdline_cycle_completer(&mut self, next: bool) {
-        use crate::completer::{Completer, CompletionItem};
         if self.cmdline.completer.is_none() {
             let typed = self.cmdline_text();
-            let mut comp = Completer::commands(0);
-            let lua_cmds = self.lua.command_names();
-            if !lua_cmds.is_empty() {
-                let mut items: Vec<CompletionItem> = comp.all_items().to_vec();
-                for name in lua_cmds {
-                    if !items.iter().any(|i| i.label == name) {
-                        items.push(CompletionItem::new(name, Some("(lua)".into()), None));
-                    }
-                }
-                comp.refresh_items(items);
-            }
-            comp.update_query(typed);
-            self.cmdline.completer = Some(comp);
-        } else if let Some(ref mut comp) = self.cmdline.completer {
-            if next {
-                comp.move_up();
+            let labels = self.lua.command_names();
+            let ranked: Vec<String> = if typed.is_empty() {
+                labels
             } else {
-                comp.move_down();
+                let refs: Vec<&str> = labels.iter().map(String::as_str).collect();
+                smelt_core::fuzzy::fuzzy_rank(&typed, &refs)
+                    .into_iter()
+                    .map(|i| labels[i].clone())
+                    .collect()
+            };
+            if ranked.is_empty() {
+                return;
             }
+            self.cmdline.completer = Some(CmdlineCompleter {
+                labels: ranked,
+                selected: 0,
+            });
+        } else if let Some(comp) = self.cmdline.completer.as_mut() {
+            let n = comp.labels.len();
+            if n == 0 {
+                return;
+            }
+            comp.selected = if next {
+                (comp.selected + n - 1) % n
+            } else {
+                (comp.selected + 1) % n
+            };
         }
-        if let Some(ref comp) = self.cmdline.completer {
-            if let Some(item) = comp.selected_item() {
-                let label = item.label.clone();
-                let cursor = label.chars().count();
-                self.cmdline_set_payload(&label, cursor);
-            }
+        let payload = self
+            .cmdline
+            .completer
+            .as_ref()
+            .and_then(|c| c.labels.get(c.selected).cloned());
+        if let Some(label) = payload {
+            let cursor = label.chars().count();
+            self.cmdline_set_payload(&label, cursor);
         }
     }
 }

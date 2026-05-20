@@ -174,6 +174,13 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
         },
     )?;
 
+    fs.fn_(
+        "workspace_files",
+        "Return tracked + untracked non-ignored files under the cwd, plus every intermediate parent directory, sorted lexicographically. Uses `git ls-files` when a git repo is present and falls back to a depth-capped filesystem walk otherwise. Suitable as the source for an `@file` completer.",
+        &[],
+        |_, ()| -> LuaResult<Vec<String>> { Ok(workspace_files()) },
+    )?;
+
     let file_state = fs.sub(
         "file_state",
         "Cached file-state tracker used by tools to detect external modifications between reads and writes.",
@@ -524,4 +531,178 @@ fn paths_to_strings(paths: Vec<PathBuf>) -> Vec<String> {
         .into_iter()
         .map(|p| p.to_string_lossy().into_owned())
         .collect()
+}
+
+// ── Workspace file enumeration ──────────────────────────────────────────────
+
+/// Tracked + untracked non-ignored files via git, plus every intermediate
+/// parent directory. Falls back to a depth-capped filesystem walk when git
+/// is unavailable or the cwd is not a git repo. Used by the `@file` completer.
+fn workspace_files() -> Vec<String> {
+    let output = std::process::Command::new("git")
+        .args(["ls-files", "--cached", "--others", "--exclude-standard"])
+        .output();
+    let lines: Vec<String> = match output {
+        Ok(o) if o.status.success() => {
+            let s = String::from_utf8_lossy(&o.stdout);
+            s.lines()
+                .filter(|l| !l.is_empty())
+                .map(|l| l.to_string())
+                .collect()
+        }
+        _ => return walk_cwd_files(),
+    };
+    expand_with_parent_dirs(&lines)
+}
+
+fn expand_with_parent_dirs(files: &[String]) -> Vec<String> {
+    use std::collections::HashSet;
+    let mut dirs = HashSet::new();
+    let mut entries: Vec<String> = files
+        .iter()
+        .flat_map(|l| {
+            let mut parts = Vec::new();
+            let mut prefix = String::new();
+            for component in std::path::Path::new(l)
+                .parent()
+                .into_iter()
+                .flat_map(|p| p.components())
+            {
+                if !prefix.is_empty() {
+                    prefix.push('/');
+                }
+                prefix.push_str(&component.as_os_str().to_string_lossy());
+                if dirs.insert(prefix.clone()) {
+                    parts.push(prefix.clone());
+                }
+            }
+            parts.push(l.to_string());
+            parts
+        })
+        .collect();
+    entries.sort();
+    entries
+}
+
+fn walk_cwd_files() -> Vec<String> {
+    use std::collections::HashSet;
+    const IGNORED: &[&str] = &[
+        ".git",
+        "node_modules",
+        "target",
+        "__pycache__",
+        ".venv",
+        "venv",
+        ".tox",
+        "dist",
+        "build",
+        ".next",
+    ];
+    const MAX_DEPTH: usize = 6;
+    const MAX_ENTRIES: usize = 5000;
+
+    let mut entries = Vec::new();
+    let mut dirs = HashSet::new();
+    let mut stack: Vec<(String, usize)> = vec![(String::new(), 0)];
+
+    while let Some((prefix, depth)) = stack.pop() {
+        if entries.len() >= MAX_ENTRIES {
+            break;
+        }
+        let dir_path = if prefix.is_empty() {
+            ".".to_string()
+        } else {
+            prefix.clone()
+        };
+        let read = match std::fs::read_dir(&dir_path) {
+            Ok(r) => r,
+            Err(_) => continue,
+        };
+        for entry in read.flatten() {
+            if entries.len() >= MAX_ENTRIES {
+                break;
+            }
+            let name = entry.file_name().to_string_lossy().to_string();
+            if name.starts_with('.') || IGNORED.contains(&name.as_str()) {
+                continue;
+            }
+            let rel = if prefix.is_empty() {
+                name.clone()
+            } else {
+                format!("{}/{}", prefix, name)
+            };
+            let is_dir = entry.file_type().map(|t| t.is_dir()).unwrap_or(false);
+            if is_dir {
+                if dirs.insert(rel.clone()) {
+                    entries.push(rel.clone());
+                }
+                if depth < MAX_DEPTH {
+                    stack.push((rel, depth + 1));
+                }
+            } else {
+                let mut dir_prefix = String::new();
+                for component in std::path::Path::new(&rel)
+                    .parent()
+                    .into_iter()
+                    .flat_map(|p| p.components())
+                {
+                    if !dir_prefix.is_empty() {
+                        dir_prefix.push('/');
+                    }
+                    dir_prefix.push_str(&component.as_os_str().to_string_lossy());
+                    if dirs.insert(dir_prefix.clone()) {
+                        entries.push(dir_prefix.clone());
+                    }
+                }
+                entries.push(rel);
+            }
+        }
+    }
+    entries.sort();
+    entries
+}
+
+#[cfg(test)]
+mod workspace_tests {
+    use super::*;
+
+    fn paths<const N: usize>(arr: [&str; N]) -> Vec<String> {
+        arr.iter().map(|s| (*s).to_string()).collect()
+    }
+
+    #[test]
+    fn expand_with_parent_dirs_returns_empty_for_no_files() {
+        assert!(expand_with_parent_dirs(&[]).is_empty());
+    }
+
+    #[test]
+    fn expand_with_parent_dirs_keeps_top_level_files_as_is() {
+        let out = expand_with_parent_dirs(&paths(["README.md", "Cargo.toml"]));
+        assert_eq!(out, paths(["Cargo.toml", "README.md"]));
+    }
+
+    #[test]
+    fn expand_with_parent_dirs_inserts_each_intermediate_directory() {
+        let out = expand_with_parent_dirs(&paths(["src/app/events.rs"]));
+        assert_eq!(out, paths(["src", "src/app", "src/app/events.rs"]));
+    }
+
+    #[test]
+    fn expand_with_parent_dirs_deduplicates_shared_parents_across_files() {
+        let out = expand_with_parent_dirs(&paths([
+            "src/app/events.rs",
+            "src/app/mouse.rs",
+            "src/picker.rs",
+        ]));
+        assert_eq!(
+            out,
+            paths([
+                "src",
+                "src/app",
+                "src/app/events.rs",
+                "src/app/mouse.rs",
+                "src/picker.rs",
+            ])
+        );
+    }
 }
