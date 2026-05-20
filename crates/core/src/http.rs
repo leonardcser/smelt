@@ -1,7 +1,11 @@
-//! HTTP capability — synchronous fetch over `reqwest::blocking`. Pure transport,
-//! no policy. Retry logic belongs to the caller. The `cache` submodule provides
-//! a disk-backed TTL cache; `random_user_agent` rotates UA strings to soften
-//! rate-limit detection.
+//! HTTP capability. Pure async transport over `reqwest::Client`, no policy:
+//! retry, caching, and rate-limit handling belong to the caller. The `cache`
+//! submodule provides a disk-backed TTL store; `random_user_agent` rotates UA
+//! strings to soften rate-limit detection.
+//!
+//! Callers spawn these futures via [`crate::lua::shared::LuaResumeSink`] so a
+//! parked Lua coroutine wakes up when the response lands. The Lua runtime is
+//! never blocked on the request.
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -25,34 +29,38 @@ pub(crate) struct Options {
     pub(crate) headers: HashMap<String, String>,
 }
 
-pub(crate) fn get(url: &str, opts: &Options) -> Result<Response, reqwest::Error> {
+pub(crate) async fn get(url: &str, opts: &Options) -> Result<Response, reqwest::Error> {
     let mut request = build_client(opts)?.get(url);
     for (k, v) in &opts.headers {
         request = request.header(k, v);
     }
-    finish(request)
+    finish(request).await
 }
 
-/// Body is sent verbatim — set `Content-Type` via `opts.headers` when needed.
-pub(crate) fn post(url: &str, body: Vec<u8>, opts: &Options) -> Result<Response, reqwest::Error> {
+/// Body is sent verbatim. Set `Content-Type` via `opts.headers` when needed.
+pub(crate) async fn post(
+    url: &str,
+    body: Vec<u8>,
+    opts: &Options,
+) -> Result<Response, reqwest::Error> {
     let mut request = build_client(opts)?.post(url).body(body);
     for (k, v) in &opts.headers {
         request = request.header(k, v);
     }
-    finish(request)
+    finish(request).await
 }
 
-fn build_client(opts: &Options) -> Result<reqwest::blocking::Client, reqwest::Error> {
+fn build_client(opts: &Options) -> Result<reqwest::Client, reqwest::Error> {
     let timeout = opts.timeout.unwrap_or(Duration::from_secs(30));
     let max_redirects = opts.max_redirects.unwrap_or(10);
-    reqwest::blocking::Client::builder()
+    reqwest::Client::builder()
         .timeout(timeout)
         .redirect(reqwest::redirect::Policy::limited(max_redirects))
         .build()
 }
 
-fn finish(request: reqwest::blocking::RequestBuilder) -> Result<Response, reqwest::Error> {
-    let resp = request.send()?;
+async fn finish(request: reqwest::RequestBuilder) -> Result<Response, reqwest::Error> {
+    let resp = request.send().await?;
     let status = resp.status().as_u16();
     let final_url = resp.url().to_string();
     let headers = resp
@@ -60,7 +68,7 @@ fn finish(request: reqwest::blocking::RequestBuilder) -> Result<Response, reqwes
         .iter()
         .filter_map(|(k, v)| v.to_str().ok().map(|s| (k.to_string(), s.to_string())))
         .collect();
-    let body = resp.bytes()?.to_vec();
+    let body = resp.bytes().await?.to_vec();
     Ok(Response {
         status,
         final_url,
@@ -109,13 +117,13 @@ const USER_AGENTS: &[&str] = &[
 mod tests {
     use super::*;
 
-    #[test]
-    fn get_unreachable_returns_error() {
+    #[tokio::test]
+    async fn get_unreachable_returns_error() {
         let opts = Options {
             timeout: Some(Duration::from_millis(50)),
             ..Default::default()
         };
-        let err = get("http://127.0.0.1:1/", &opts);
+        let err = get("http://127.0.0.1:1/", &opts).await;
         assert!(err.is_err());
     }
 }

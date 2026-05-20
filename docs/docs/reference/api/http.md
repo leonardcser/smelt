@@ -4,23 +4,29 @@
 
 **Tier:** `Host` — Available in every runtime, including headless mode.
 
-Synchronous HTTP get/post with redirect following and header support. Errors use the `(value, err_string)` convention.
+Asynchronous HTTP get/post. Yields the calling coroutine until the response lands; runtime stays responsive. Errors use the `(value, err_string)` convention.
 
 ## `smelt.http.get`
 
 ```lua
-fun(url: string, opts: table?): table?, string?
+fun(url: string, opts: table?): { status: integer, final_url: string, body: string, headers: table }?, string?
 ```
 
-Perform a synchronous HTTP GET against `url`. `opts` accepts `headers`, `timeout_secs`, and `max_redirects`. Returns `({ status, final_url, body, headers }, nil)` on success or `(nil, err_string)` on failure.
+Perform an HTTP GET against `url`. Yields the calling coroutine until the
+response lands; the runtime stays responsive throughout. `opts` accepts
+`headers`, `timeout_secs`, and `max_redirects`. Returns
+`({ status, final_url, body, headers }, nil)` on success or `(nil, err)`
+on transport failure. Cancellation of the parent task drops the in-flight
+request and raises `cancelled` from this call.
 
 ## `smelt.http.post`
 
 ```lua
-fun(url: string, body: string?, opts: table?): table?, string?
+fun(url: string, body: string?, opts: table?): { status: integer, final_url: string, body: string, headers: table }?, string?
 ```
 
-Perform a synchronous HTTP POST against `url` with `body` bytes. `opts` accepts `headers`, `timeout_secs`, and `max_redirects`. Returns `({ status, final_url, body, headers }, nil)` on success or `(nil, err_string)` on failure.
+Perform an HTTP POST against `url` with `body` bytes. Yields the calling
+coroutine until the response lands. Same return shape as `smelt.http.get`.
 
 ## `smelt.http.random_user_agent`
 

@@ -15,7 +15,24 @@ enum TaskWait {
 
 pub enum TaskCompletion {
     FireAndForget,
-    ToolResult { request_id: u64, call_id: String },
+    /// Slash-command dispatch. `name` carries the cmd name so an error
+    /// surfaces as `cmd `<name>`: …` instead of the opaque `task <id>: …`.
+    Command {
+        name: String,
+    },
+    ToolResult {
+        request_id: u64,
+        call_id: String,
+    },
+}
+
+impl TaskCompletion {
+    fn error_label(&self, task_id: u64) -> String {
+        match self {
+            TaskCompletion::Command { name } => format!("cmd `{name}`"),
+            _ => format!("task {task_id}"),
+        }
+    }
 }
 
 pub(crate) struct LuaTask {
@@ -216,7 +233,7 @@ pub(crate) fn step_task_owned(
         Ok(v) => {
             if task.thread.status() == mlua::ThreadStatus::Finished {
                 match &task.completion {
-                    TaskCompletion::FireAndForget => {}
+                    TaskCompletion::FireAndForget | TaskCompletion::Command { .. } => {}
                     TaskCompletion::ToolResult {
                         request_id,
                         call_id,
@@ -254,7 +271,10 @@ pub(crate) fn step_task_owned(
                     Some(task)
                 }
                 Err(msg) => {
-                    outputs.push(TaskDriveOutput::Error(format!("task {}: {msg}", task.id)));
+                    outputs.push(TaskDriveOutput::Error(format!(
+                        "{}: {msg}",
+                        task.completion.error_label(task.id)
+                    )));
                     fail_completion(&task.completion, &msg, outputs);
                     None
                 }
@@ -262,7 +282,10 @@ pub(crate) fn step_task_owned(
         }
         Err(e) => {
             let msg = e.to_string();
-            outputs.push(TaskDriveOutput::Error(format!("task {}: {msg}", task.id)));
+            outputs.push(TaskDriveOutput::Error(format!(
+                "{}: {msg}",
+                task.completion.error_label(task.id)
+            )));
             fail_completion(&task.completion, &msg, outputs);
             None
         }

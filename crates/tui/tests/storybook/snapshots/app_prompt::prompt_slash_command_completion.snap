@@ -4,7 +4,7 @@ expression: frame.text()
 ---
 
 
-
+ /exit         exit the app
  /docs         open the smelt documentation in you
  /cost         show session cost
  /compact      compact conversation history

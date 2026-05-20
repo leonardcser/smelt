@@ -152,6 +152,36 @@ pub(super) fn register(
         },
     )?;
 
+    settings_tbl.fn_(
+        "schema",
+        "Return the settings schema as an array of `{ key, kind, choices? }` rows. `kind` is `\"bool\"`, `\"number\"`, or `\"string\"`. `choices` is present for `\"string\"` keys with a closed value set. UIs use this to render every known setting without hand-maintaining a list.",
+        &[],
+        |lua, ()| -> LuaResult<mlua::Table> {
+            let out = lua.create_table()?;
+            for decl in SETTINGS {
+                let row = lua.create_table()?;
+                row.set("key", decl.key)?;
+                row.set(
+                    "kind",
+                    match decl.kind {
+                        SettingKind::Bool => "bool",
+                        SettingKind::Number => "number",
+                        SettingKind::String => "string",
+                    },
+                )?;
+                if let Some(choices) = decl.choices {
+                    let arr = lua.create_table()?;
+                    for (i, c) in choices.iter().enumerate() {
+                        arr.set(i + 1, *c)?;
+                    }
+                    row.set("choices", arr)?;
+                }
+                out.push(row)?;
+            }
+            Ok(out)
+        },
+    )?;
+
     settings_tbl.tbl.set_metatable(Some(mt_tbl))?;
     Ok(())
 }

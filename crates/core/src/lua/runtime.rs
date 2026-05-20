@@ -559,13 +559,43 @@ impl LuaRuntime {
             f
         };
         let _perf = smelt_perf::perf::begin("lua:cmd");
-        let result: LuaResult<()> = match arg {
-            Some(a) => func.call::<()>(a),
-            None => func.call::<()>(()),
-        };
-        if let Err(e) = result {
-            self.record_error(format!("cmd `{name}`: {e}"));
+
+        let mut initial_args = mlua::MultiValue::new();
+        if let Some(a) = arg {
+            match self.lua.create_string(&a) {
+                Ok(s) => initial_args.push_back(mlua::Value::String(s)),
+                Err(e) => {
+                    self.record_error(format!("cmd `{name}`: {e}"));
+                    return true;
+                }
+            }
         }
+
+        // Run the handler on the Lua task runtime so it executes inside a
+        // coroutine. Yieldable APIs (`smelt.dialog.open`, `smelt.sleep`,
+        // `smelt.task.wait`, ...) then work without each command wrapping its
+        // body in `smelt.spawn`. Non-yielding handlers finish in the
+        // synchronous drive below; yielding handlers park on the runtime and
+        // resume on the next main-loop `drive_tasks` tick.
+        let spawn_result = {
+            let Ok(mut rt) = self.shared.tasks.lock() else {
+                self.record_error(format!("cmd `{name}`: task runtime unavailable"));
+                return true;
+            };
+            rt.spawn(
+                &self.lua,
+                func,
+                initial_args,
+                TaskCompletion::Command {
+                    name: name.to_string(),
+                },
+            )
+        };
+        if let Err(e) = spawn_result {
+            self.record_error(format!("cmd `{name}`: {e}"));
+            return true;
+        }
+        let _ = self.drive_tasks(Instant::now());
         true
     }
 

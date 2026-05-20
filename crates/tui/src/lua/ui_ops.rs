@@ -692,7 +692,7 @@ pub(crate) fn open_picker(app: &mut TuiApp, opts: mlua::Table) -> Result<WinId, 
     let placement = match placement_str.as_str() {
         "bottom" => crate::picker::PickerPlacement::ScreenBottom,
         "cursor" => crate::picker::PickerPlacement::Cursor,
-        "prompt_docked" => crate::picker::PickerPlacement::PromptDocked { max_rows: 7 },
+        "prompt_docked" => crate::picker::PickerPlacement::PromptDocked { max_rows: 8 },
         _ => crate::picker::PickerPlacement::ScreenCenter,
     };
     // prompt_docked is non-focusable (keys flow to the prompt); other placements own dispatch.

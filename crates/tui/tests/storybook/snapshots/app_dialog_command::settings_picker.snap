@@ -6,14 +6,14 @@ expression: frame.text()
 
 
 
-
- task slug              on
- input prediction       on
+ show thinking          on
+ show slug              on
+ show prediction        on
  show cost              on
  show tokens            on
- show tok/s             on
+ show tps               on
  auto compact           on
- vim mode               off
+ vim                    off
 ───────────────────────────────────────────────────────────────────  ─
 
 ──────────────────────────────────────────────────────────────────────

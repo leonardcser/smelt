@@ -18,7 +18,6 @@
 local OWNER = "leonardcser"
 local REPO = "smelt"
 local REPO_URL = "https://github.com/" .. OWNER .. "/" .. REPO .. ".git"
-local API = "https://api.github.com/repos/" .. OWNER .. "/" .. REPO
 local CHECK_INTERVAL_SECS = 3600
 
 local state = smelt.state.persistent("upgrade")
@@ -122,35 +121,82 @@ local function compare_semver(a, b)
   return compare_pre(pa.pre, pb.pre)
 end
 
-local function http_get(url, etag)
-  local headers = {
+-- ── transport ──────────────────────────────────────────────────────────
+--
+-- Anonymous `api.github.com` enforces 60 requests/hour/IP, shared across
+-- every gh client, browser, IDE extension, etc. behind the same NAT or
+-- VPN exit. We try the user's local `gh` CLI first: its `gh auth login`
+-- token raises the cap to 5000/hr per user and sidesteps the IP bucket
+-- entirely. Only when gh is missing or fails do we fall back to anonymous
+-- HTTP, and we 304-condition each request via ETag so we burn one bucket
+-- slot per actual change.
+--
+-- api_fetch(path, etag) returns one of:
+--   { json = table, new_etag = string|nil }   success
+--   { not_modified = true }                    server matched ETag (HTTP path only)
+--   { backoff_until = epoch }                  rate-limited, caller defers silently
+--   { err = string }                           transport / non-rate-limit HTTP failure
+
+local function github_error(resp)
+  local snippet = (resp.body or ""):gsub("^%s+", ""):gsub("%s+$", ""):sub(1, 200)
+  return "github HTTP " .. tostring(resp.status) .. ": " .. snippet
+end
+
+local function api_fetch(path, etag)
+  local gh_args = { "api", path, "-H", "Accept:application/vnd.github+json" }
+  if etag and etag ~= "" then
+    table.insert(gh_args, "-H")
+    table.insert(gh_args, "If-None-Match:" .. etag)
+  end
+  local gh = smelt.process.run_async("gh", gh_args, { timeout_secs = 15 })
+  if gh and gh.exit_code == 0 and gh.stdout and #gh.stdout > 0 then
+    local v = smelt.parse.json(gh.stdout)
+    if type(v) ~= "table" then return { err = "gh: bad response" } end
+    -- `gh api` doesn't surface response headers, so we can't refresh the
+    -- ETag from the gh path. Preserve the prior value; if gh later
+    -- disappears the HTTP fallback will repopulate it.
+    return { json = v, new_etag = etag }
+  end
+
+  local req_headers = {
     ["Accept"]     = "application/vnd.github+json",
     ["User-Agent"] = "smelt-upgrade/" .. (smelt.build.version or "0"),
   }
-  if etag and etag ~= "" then headers["If-None-Match"] = etag end
-  local resp, err = smelt.http.get(url, { headers = headers, timeout_secs = 15 })
-  if not resp then return nil, err end
-  return resp
+  if etag and etag ~= "" then req_headers["If-None-Match"] = etag end
+  local resp, err = smelt.http.get("https://api.github.com/" .. path, {
+    headers = req_headers, timeout_secs = 15,
+  })
+  if not resp then return { err = err } end
+  if resp.status == 304 then return { not_modified = true } end
+  if resp.status == 403 then
+    local h = resp.headers or {}
+    local remaining = h["x-ratelimit-remaining"] or h["X-RateLimit-Remaining"]
+    if remaining == "0" then
+      local reset = tonumber(h["x-ratelimit-reset"] or h["X-RateLimit-Reset"])
+      return { backoff_until = reset or (now() + 600) }
+    end
+  end
+  if resp.status ~= 200 then return { err = github_error(resp) } end
+  local v = smelt.parse.json(resp.body)
+  if type(v) ~= "table" then return { err = "github: bad response" } end
+  local new_etag = resp.headers and (resp.headers.etag or resp.headers.ETag)
+  return { json = v, new_etag = new_etag }
 end
 
 -- ── channel fetchers ───────────────────────────────────────────────────
 
 local function fetch_stable()
   local ch = channel_state("stable")
-  local resp, err = http_get(API .. "/releases?per_page=30", ch.etag)
-  if not resp then return nil, err end
-  if resp.status == 304 then return ch.latest end
-  if resp.status ~= 200 then
-    return nil, "github: HTTP " .. resp.status
-  end
-  ch.etag = resp.headers and (resp.headers.etag or resp.headers.ETag)
-  local releases = smelt.parse.json(resp.body)
-  if type(releases) ~= "table" then return nil, "github: bad response" end
+  local r = api_fetch("repos/" .. OWNER .. "/" .. REPO .. "/releases?per_page=30", ch.etag)
+  if r.err then return nil, r.err end
+  if r.backoff_until then return nil, nil, r.backoff_until end
+  if r.not_modified then return ch.latest end
+  ch.etag = r.new_etag
   local best = nil
-  for _, r in ipairs(releases) do
-    if not r.draft and type(r.tag_name) == "string" then
-      if not best or compare_semver(r.tag_name, best.tag_name) > 0 then
-        best = r
+  for _, rel in ipairs(r.json) do
+    if not rel.draft and type(rel.tag_name) == "string" then
+      if not best or compare_semver(rel.tag_name, best.tag_name) > 0 then
+        best = rel
       end
     end
   end
@@ -169,17 +215,13 @@ end
 
 local function fetch_unstable()
   local ch = channel_state("unstable")
-  local resp, err = http_get(API .. "/commits/main", ch.etag)
-  if not resp then return nil, err end
-  if resp.status == 304 then return ch.latest end
-  if resp.status ~= 200 then
-    return nil, "github: HTTP " .. resp.status
-  end
-  ch.etag = resp.headers and (resp.headers.etag or resp.headers.ETag)
-  local commit = smelt.parse.json(resp.body)
-  if type(commit) ~= "table" or type(commit.sha) ~= "string" then
-    return nil, "github: bad response"
-  end
+  local r = api_fetch("repos/" .. OWNER .. "/" .. REPO .. "/commits/main", ch.etag)
+  if r.err then return nil, r.err end
+  if r.backoff_until then return nil, nil, r.backoff_until end
+  if r.not_modified then return ch.latest end
+  ch.etag = r.new_etag
+  local commit = r.json
+  if type(commit.sha) ~= "string" then return nil, "github: bad response" end
   local rec = {
     sha      = commit.sha,
     short    = commit.sha:sub(1, 7),
@@ -256,14 +298,23 @@ local function run_check(force)
       smelt.notify.error("autoupgrade: unstable channel requires a build SHA (this binary was built without git)")
       return
     end
+    local backoff
     if channel == "stable" then
-      rec, err = fetch_stable()
+      rec, err, backoff = fetch_stable()
     else
-      rec, err = fetch_unstable()
+      rec, err, backoff = fetch_unstable()
     end
-    channel_state(channel).last_checked_at = now()
+    -- On a rate-limit response, defer the next check until github's
+    -- reset window (capped to a 10 min fallback) by parking
+    -- last_checked_at so `should_check_now` only fires again then.
+    if backoff then
+      channel_state(channel).last_checked_at = backoff - CHECK_INTERVAL_SECS
+    else
+      channel_state(channel).last_checked_at = now()
+    end
     state.save()
     checking = false
+    if backoff then return end
     if not rec then
       smelt.notify.error("autoupgrade: " .. tostring(err))
       return
@@ -476,7 +527,8 @@ local function open_upgrade_dialog()
 
   smelt.dialog.open({
     title      = "smelt upgrade",
-    max_height = "60%",
+    min_height = "30%",
+    max_height = "70%",
     panels     = { { leaf = leaf, height = "fill" } },
     keymaps    = {
       { key = "q",     on_press = function(ctx) ctx.close() end },

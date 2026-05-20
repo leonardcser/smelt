@@ -65,7 +65,7 @@ Two channels controlled by `smelt.settings.autoupgrade_channel`:
   `cargo install --branch main` (a few minutes; requires `cargo`).
 
 The polling behaviour is `smelt.settings.autoupgrade`: `"off"`, `"notify"`
-(default — show pill, don't install), or `"auto"` (install in
+(default, show pill but don't install), or `"auto"` (install in the
 background as soon as an update is detected).
 
 ## Run

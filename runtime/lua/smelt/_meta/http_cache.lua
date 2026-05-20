@@ -9,10 +9,10 @@ local http_cache = {}
 
 --- Look up a cached HTTP response by `key`. Returns the stored string or `nil` if no entry exists.
 ---@type fun(key: string): string?
-http_cache.get = nil
+http_cache.read = nil
 
 --- Store `value` in the HTTP response cache under `key`.
 ---@type fun(key: string, value: string): nil
-http_cache.put = nil
+http_cache.write = nil
 
 return http_cache

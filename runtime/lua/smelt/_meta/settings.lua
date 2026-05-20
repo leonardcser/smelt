@@ -7,4 +7,8 @@
 ---@class smelt.settings
 local settings = {}
 
+--- Return the settings schema as an array of `{ key, kind, choices? }` rows. `kind` is `"bool"`, `"number"`, or `"string"`. `choices` is present for `"string"` keys with a closed value set. UIs use this to render every known setting without hand-maintaining a list.
+---@type fun(): table
+settings.schema = nil
+
 return settings

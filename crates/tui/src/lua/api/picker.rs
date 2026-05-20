@@ -41,11 +41,11 @@ impl mlua::UserData for LuaPicker {
             Ok(())
         });
 
-        // ── items(items) — replace the picker's items (set-only) ───
+        // ── items(items, selected?) — replace items + land cursor atomically
         methods.add_function(
             "items",
             |_,
-             (this_ud, items_tbl): (mlua::AnyUserData, mlua::Table)|
+             (this_ud, items_tbl, selected): (mlua::AnyUserData, mlua::Table, Option<i64>)|
              -> LuaResult<mlua::AnyUserData> {
                 let this = *this_ud.borrow::<LuaPicker>()?;
                 let mut items = Vec::new();
@@ -55,8 +55,9 @@ impl mlua::UserData for LuaPicker {
                         .map_err(LuaError::RuntimeError)?;
                     items.push(it);
                 }
+                let sel = selected.map(|i| i.max(0) as usize).unwrap_or(0);
                 crate::lua::with_app(|app| {
-                    crate::picker::set_items(app, this.win, items, 0);
+                    crate::picker::set_items(app, this.win, items, sel);
                 });
                 Ok(this_ud)
             },
@@ -119,7 +120,7 @@ The picker is non-blocking; the yield-until-pick wrapper lives in pure Lua as `s
         fields: smelt_core::class_methods! {
             "win" => fn() -> super::win::LuaWin, "Return the underlying Win handle (use `win:key(...)`, `win:on(...)` to bind input).",
             "close" => fn() -> (), "Close the picker overlay. No-op if already closed.",
-            "items" => fn(items: mlua::Table) -> LuaPicker, "Replace the picker's items. Each entry is a string or `{ label, description?, ansi_color?, prefix?, ... }`. Selection resets to row 0. Returns the handle for chaining.",
+            "items" => fn(items: mlua::Table, selected: Option<i64>) -> LuaPicker, "Replace the picker's items. Each entry is a string or `{ label, description?, ansi_color?, prefix?, ... }`. `selected` is the 0-based logical index to land the cursor on (default 0 — top of the new list); pass the current selection here to avoid a flash to row 0 followed by a separate `:selected()` call. Returns the handle for chaining.",
             "selected" => fn(idx: Option<i64>) -> mlua::Value, "Read or write the current logical selection (0-based). Without arg returns the index (`nil` if the picker is empty); with arg sets the selection and returns the handle for chaining.",
             "move" => fn(delta: i64) -> LuaPicker, "Move the picker's cursor by `delta` rows (clamped to the buffer's line count). Returns the handle for chaining.",
         },

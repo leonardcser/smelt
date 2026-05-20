@@ -285,6 +285,28 @@ function smelt.process.run_async(cmd, args, opts)
   return result, nil
 end
 
+-- Perform an HTTP GET against `url`. Yields the calling coroutine until the
+-- response lands; the runtime stays responsive throughout. `opts` accepts
+-- `headers`, `timeout_secs`, and `max_redirects`. Returns
+-- `({ status, final_url, body, headers }, nil)` on success or `(nil, err)`
+-- on transport failure. Cancellation of the parent task drops the in-flight
+-- request and raises `cancelled` from this call.
+-- @sig fun(url: string, opts: table?): { status: integer, final_url: string, body: string, headers: table }?, string?
+function smelt.http.get(url, opts)
+  local result = smelt.task.external(function(id) smelt.http.__get_async_start(id, url, opts) end)
+  if result.err ~= nil then return nil, result.err end
+  return result, nil
+end
+
+-- Perform an HTTP POST against `url` with `body` bytes. Yields the calling
+-- coroutine until the response lands. Same return shape as `smelt.http.get`.
+-- @sig fun(url: string, body: string?, opts: table?): { status: integer, final_url: string, body: string, headers: table }?, string?
+function smelt.http.post(url, body, opts)
+  local result = smelt.task.external(function(id) smelt.http.__post_async_start(id, url, body, opts) end)
+  if result.err ~= nil then return nil, result.err end
+  return result, nil
+end
+
 smelt.tick = smelt.tick or {}
 
 -- Reload-safe periodic work. Subscribes to the `now` cell (a one-second

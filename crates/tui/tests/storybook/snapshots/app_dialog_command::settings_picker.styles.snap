@@ -3,6 +3,7 @@ source: crates/tui/tests/storybook/app_ctx.rs
 expression: frame.styles_text()
 ---
 dim: 70 16
+  4  24   2 attrs=dim
   5  24   2 attrs=dim
   6  24   2 attrs=dim
   7  24   2 attrs=dim

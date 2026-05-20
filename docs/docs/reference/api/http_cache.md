@@ -6,7 +6,7 @@
 
 Process-wide HTTP response cache. Plugins can stash bodies under arbitrary keys to dedupe repeat fetches across a session.
 
-## `smelt.http.cache.get`
+## `smelt.http.cache.read`
 
 ```lua
 fun(key: string): string?
@@ -14,7 +14,7 @@ fun(key: string): string?
 
 Look up a cached HTTP response by `key`. Returns the stored string or `nil` if no entry exists.
 
-## `smelt.http.cache.put`
+## `smelt.http.cache.write`
 
 ```lua
 fun(key: string, value: string): nil

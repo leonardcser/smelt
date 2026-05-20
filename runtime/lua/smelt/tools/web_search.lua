@@ -37,7 +37,7 @@ smelt.tools.register({
     end
 
     local cache_key = "search:" .. query
-    local cached = smelt.http.cache.get(cache_key)
+    local cached = smelt.http.cache.read(cache_key)
     if cached then
       return cached
     end
@@ -81,7 +81,7 @@ smelt.tools.register({
     end
 
     local output = table.concat(lines, "\n")
-    smelt.http.cache.put(cache_key, output)
+    smelt.http.cache.write(cache_key, output)
     return output
   end,
 })

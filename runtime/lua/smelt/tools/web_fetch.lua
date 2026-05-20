@@ -76,7 +76,7 @@ local function fetch_raw(args)
   end
 
   local cache_key = "fetch:" .. url .. ":" .. format
-  local cached = smelt.http.cache.get(cache_key)
+  local cached = smelt.http.cache.read(cache_key)
   if cached then return cached end
 
   local function do_fetch(ua)
@@ -175,7 +175,7 @@ local function fetch_raw(args)
   if was_truncated then
     output = output .. "\n\n[Response truncated — original response exceeded 5 MB]"
   end
-  smelt.http.cache.put(cache_key, output)
+  smelt.http.cache.write(cache_key, output)
   return output
 end
 

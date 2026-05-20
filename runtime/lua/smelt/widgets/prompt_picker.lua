@@ -1,10 +1,23 @@
 -- `smelt.prompt.open_picker(opts)` — prompt-docked picker.
--- Up/Down navigate, Enter accepts, Tab inserts the label, Esc dismisses.
+-- Up/Down navigate, Tab inserts the label, Esc dismisses.
 --
--- opts.items    = { { label, description?, ansi_color?, search_terms? }, ... }
--- opts.on_select = function(item)  -- fires on navigation
+-- Two modes, distinguished by whether `on_enter` is supplied:
 --
--- Returns `{ index, item, action }` on accept, nil on dismiss.
+--   Single-shot (no on_enter):
+--     Enter accepts and closes. Returns `{ index, item, action }` on accept
+--     (action: "enter" | "tab"), or `nil` on dismiss.
+--
+--   Persistent (on_enter is a function):
+--     Enter fires `on_enter(item, index)` and the picker stays open.
+--     `opts.items` may be a function — it's re-evaluated after each
+--     on_enter so callbacks that mutate state (toggle settings, etc.)
+--     see the refreshed list without rebuilding the picker. The cursor
+--     stays on the same row. Returns nil when the user dismisses.
+--
+-- opts.items     = { entry, ... } | function() -> { entry, ... }
+--   entry = { label, description?, ansi_color?, search_terms? }
+-- opts.on_select = function(item)   -- fires on navigation
+-- opts.on_enter  = function(item, idx)  -- persistent mode; see above
 
 local function filter_items(all_items, query)
   return smelt.perf.time("picker:filter", function()
@@ -29,25 +42,10 @@ local function to_picker_items(list)
   return out
 end
 
-function smelt.prompt.open_picker(opts)
-  if not coroutine.isyieldable() then
-    error("smelt.prompt.open_picker: call from inside smelt.spawn(fn) or tool.execute", 2)
-  end
-  if type(opts) ~= "table" then
-    error("smelt.prompt.open_picker: expected table of options", 2)
-  end
-  if type(opts.items) ~= "table" or #opts.items == 0 then
-    error("smelt.prompt.open_picker: opts.items must be a non-empty table", 2)
-  end
-
-  local original = opts.items
-  local on_select = opts.on_select
-
-  -- Stamp each entry with its original index so filtering can resolve back to it.
-  -- Precompute `_hay` so per-keystroke ranking skips concatenation.
-  local all_items = {}
+local function stamp(original)
+  local all = {}
   for i, it in ipairs(original) do
-    all_items[i] = {
+    all[i] = {
       label        = it.label,
       description  = it.description,
       ansi_color   = it.ansi_color,
@@ -58,15 +56,35 @@ function smelt.prompt.open_picker(opts)
         or ((it.label or "") .. " " .. (it.description or "") .. " " .. (it.search_terms or "")),
     }
   end
+  return all
+end
 
-  local current = all_items
-  local selected = 1
+local function resolve_items(items)
+  return type(items) == "function" and items() or items
+end
 
-  local prompt = smelt.prompt.win()
-  local initial_query = smelt.prompt.text() or ""
-  if initial_query ~= "" then
-    current = filter_items(all_items, initial_query)
+function smelt.prompt.open_picker(opts)
+  if not coroutine.isyieldable() then
+    error("smelt.prompt.open_picker: call from inside smelt.spawn(fn) or tool.execute", 2)
   end
+  if type(opts) ~= "table" then
+    error("smelt.prompt.open_picker: expected table of options", 2)
+  end
+
+  local original = resolve_items(opts.items)
+  if type(original) ~= "table" or #original == 0 then
+    error("smelt.prompt.open_picker: opts.items must resolve to a non-empty table", 2)
+  end
+
+  local on_select = opts.on_select
+  local on_enter = opts.on_enter
+  local persistent = type(on_enter) == "function"
+
+  local all_items = stamp(original)
+  local prompt = smelt.prompt.win()
+  local query = smelt.prompt.text() or ""
+  local current = query == "" and all_items or filter_items(all_items, query)
+  local selected = 1
 
   local picker = smelt.picker.new({
     items     = to_picker_items(current),
@@ -110,6 +128,36 @@ function smelt.prompt.open_picker(opts)
     fire_on_select()
   end
 
+  -- Find the position of the logical item with `idx` (1-based original
+  -- index) in `current`, or `nil` if it dropped out of the filtered view.
+  local function pos_of(idx)
+    if not idx then return nil end
+    for i, it in ipairs(current) do
+      if it._idx == idx then return i end
+    end
+    return nil
+  end
+
+  -- Persistent mode only: refresh items in place after an on_enter callback.
+  -- Anchors the cursor to the original item the user was on so reorders
+  -- (filter ranking, list shuffles) don't strand the cursor on a different
+  -- row. If the item dropped out of the filtered view, falls back to the
+  -- nearest still-present position.
+  local function refresh()
+    local anchor_idx = current[selected] and current[selected]._idx
+    original = resolve_items(opts.items)
+    all_items = stamp(original or {})
+    query = smelt.prompt.text() or ""
+    current = query == "" and all_items or filter_items(all_items, query)
+    if #current == 0 then
+      selected = 1
+    else
+      selected = pos_of(anchor_idx) or math.min(selected, #current)
+    end
+    picker:items(to_picker_items(current), selected - 1)
+    fire_on_select()
+  end
+
   local function accept(action)
     local picked = current[selected]
     if not picked then
@@ -128,10 +176,23 @@ function smelt.prompt.open_picker(opts)
   regs[#regs + 1] = prompt:key("c-j",   function() move(-1) end)
   regs[#regs + 1] = prompt:key("c-p",   function() move(1)  end)
   regs[#regs + 1] = prompt:key("c-n",   function() move(-1) end)
-  -- Clear prompt before dispatching so the typed query doesn't linger.
   regs[#regs + 1] = prompt:key("enter", function()
-    smelt.prompt.set_text("")
-    accept("enter")
+    if persistent then
+      local picked = current[selected]
+      if not picked then return end
+      local orig = original[picked._idx]
+      local ok, err = pcall(on_enter, orig, picked._idx)
+      if not ok then
+        smelt.notify.error("prompt picker on_enter: " .. tostring(err))
+        close_with(nil)
+        return
+      end
+      refresh()
+    else
+      -- Clear prompt before dispatching so the typed query doesn't linger.
+      smelt.prompt.set_text("")
+      accept("enter")
+    end
   end)
   regs[#regs + 1] = prompt:key("tab",   function()
     local picked = current[selected]
@@ -143,10 +204,12 @@ function smelt.prompt.open_picker(opts)
   regs[#regs + 1] = prompt:key("esc",   function() close_with(nil) end)
 
   regs[#regs + 1] = prompt:on("text_changed", function(ctx)
-    local query = ctx.text or ""
-    current = filter_items(all_items, query)
+    query = ctx.text or ""
+    current = query == "" and all_items or filter_items(all_items, query)
+    -- Reset selection to the top match on each keystroke; the user is
+    -- searching, so "best match" beats "stay where you were".
     selected = 1
-    picker:items(to_picker_items(current)):selected(0)
+    picker:items(to_picker_items(current), 0)
     fire_on_select()
   end)
 
