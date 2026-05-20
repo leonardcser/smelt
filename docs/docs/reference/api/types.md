@@ -284,7 +284,7 @@ Picker handle returned by `smelt.picker.new(opts)`. Setter methods return the sa
 | --- | --- | --- | --- |
 | `win` | `fun(): smelt.win.Win` | yes | Return the underlying Win handle (use `win:key(...)`, `win:on(...)` to bind input). |
 | `close` | `fun(): nil` | yes | Close the picker overlay. No-op if already closed. |
-| `items` | `fun(items: table): smelt.picker.Picker` | yes | Replace the picker's items. Each entry is a string or `{ label, description?, ansi_color?, prefix?, ... }`. Selection resets to row 0. Returns the handle for chaining. |
+| `items` | `fun(items: table, selected: integer?): smelt.picker.Picker` | yes | Replace the picker's items. Each entry is a string or `{ label, description?, ansi_color?, prefix?, ... }`. `selected` is the 0-based logical index to land the cursor on (default 0 — top of the new list); pass the current selection here to avoid a flash to row 0 followed by a separate `:selected()` call. Returns the handle for chaining. |
 | `selected` | `fun(idx: integer?): any` | yes | Read or write the current logical selection (0-based). Without arg returns the index (`nil` if the picker is empty); with arg sets the selection and returns the handle for chaining. |
 | `move` | `fun(delta: integer): smelt.picker.Picker` | yes | Move the picker's cursor by `delta` rows (clamped to the buffer's line count). Returns the handle for chaining. |
 
