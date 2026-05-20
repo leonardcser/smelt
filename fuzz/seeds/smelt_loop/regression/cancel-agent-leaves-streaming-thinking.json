@@ -1,0 +1,58 @@
+{
+  "_about": "cancel_agent (called from rewind_to_block before clearing self.agent) did not flush the streaming thinking or text buffers. An empty EngineEvent::ThinkingDelta arriving just before cancel left an empty active_thinking sentinel that survived past the agent transition, tripping the harness's no-streaming-without-agent turn-end invariant.",
+  "_fix": "fix(app): flush streaming buffers in cancel_agent",
+  "mode": "plan",
+  "ops": [
+    {
+      "data": "7",
+      "kind": "paste"
+    },
+    {
+      "data": 0,
+      "kind": "key_special"
+    },
+    {
+      "data": 27,
+      "kind": "key_special"
+    },
+    {
+      "data": 27,
+      "kind": "key_special"
+    },
+    {
+      "data": 27,
+      "kind": "key_special"
+    },
+    {
+      "data": 27,
+      "kind": "key_special"
+    },
+    {
+      "data": "\u001b",
+      "kind": "paste"
+    },
+    {
+      "data": 0,
+      "kind": "key_special"
+    },
+    {
+      "kind": "lua_wakeup"
+    },
+    {
+      "data": 255,
+      "kind": "key_special"
+    },
+    {
+      "data": 0,
+      "kind": "key_special"
+    },
+    {
+      "data": "",
+      "kind": "engine_thinking_delta"
+    },
+    {
+      "kind": "lua_wakeup"
+    }
+  ],
+  "vim": true
+}
