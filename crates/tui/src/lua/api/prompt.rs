@@ -64,32 +64,5 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
             Ok(())
         },
     )?;
-    register_ghost(&m)?;
-    Ok(())
-}
-
-fn register_ghost(prompt: &LuaMod) -> LuaResult<()> {
-    let m = prompt.sub(
-        "ghost",
-        "Ghost text on the prompt — dim suggestion shown after the cursor. UiHost-only.",
-    )?;
-    m.fn_(
-        "set",
-        "Set the prompt's ghost text (the dim suggestion shown after the cursor). Replaces any existing ghost completion.",
-        &["text"],
-        |_, text: String| -> LuaResult<()> {
-            crate::lua::with_app(|app| app.set_prompt_completer(text));
-            Ok(())
-        },
-    )?;
-    m.fn_(
-        "clear",
-        "Clear the prompt's ghost text. Idempotent.",
-        &[],
-        |_, ()| -> LuaResult<()> {
-            crate::lua::with_app(|app| app.clear_prompt_completer());
-            Ok(())
-        },
-    )?;
     Ok(())
 }

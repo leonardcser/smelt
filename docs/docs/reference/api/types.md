@@ -408,6 +408,9 @@ Window handle returned by `smelt.win.new(buf, opts?)`. Setter methods return the
 | `move_cursor` | `fun(delta: integer): smelt.win.Win` | yes | Move the cursor by `delta` rows (clamped to the buffer's line count). Returns the handle for chaining. |
 | `key` | `fun(chord: string, func: fun(value: table)): smelt.Reg` | yes | Bind `func` to `chord` on this window. Returns a Reg handle whose `:remove()` undoes the binding. Raises on unknown chords. |
 | `on` | `fun(event: smelt.win.Event, func: fun(value: table)): smelt.Reg` | yes | Subscribe `func` to `event` on this window. Returns a Reg handle whose `:remove()` undoes the subscription. |
+| `placeholder` | `fun(text: string, opts: table?): smelt.win.Win` | yes | Set the window's placeholder — a dim suggestion rendered when the buffer is empty. Replaces any prior placeholder. `text` must be a single line (no `\n`); split before calling. `opts.accept_keys` (array of chord strings, default `{}`) accept the placeholder into the buffer and fire `placeholder_accepted`. `opts.dismiss_keys` (default `{ "esc", "c-c" }`) clear the placeholder and fire `placeholder_dismissed`. Typing does not destroy the placeholder; the extmark survives so an undo back to an empty buffer makes it visible again. Today only the prompt window renders the dim text and runs the accept/dismiss dispatch — calls on other windows store state but won't render. Returns the handle for chaining. |
+| `clear_placeholder` | `fun(): nil` | yes | Clear the window's placeholder text and opts. Idempotent. |
+| `placeholder_text` | `fun(): string?` | yes | Return the current placeholder text, or `nil` if none is set. |
 | `link_scroll` | `fun(others: smelt.win.Win): smelt.win.Win` | yes | Link `scroll_top` between this window and the variadic `others`. Closing any member auto-removes it. Returns the handle for chaining. |
 | `scroll` | `fun(arg: any): any` | yes | Read or write the window's scroll state. No arg returns `{ top, follow, total, viewport }` (`total` is the buffer's line count; `viewport` is the leaf's height). An integer sets `scroll_top` and clears the pin-to-tail flag. The literal string `"tail"` re-pins the viewport to the buffer's tail. |
 
@@ -465,5 +468,5 @@ Variants: `"insert"` \| `"normal"` \| `"visual"` \| `"visual_line"`
 
 Window-event names accepted by `win:on(event, fn)`. Maps onto the internal `WinEvent` enum.
 
-Variants: `"open"` \| `"close"` \| `"focus"` \| `"blur"` \| `"selection_changed"` \| `"submit"` \| `"text_changed"` \| `"dismiss"` \| `"tick"` \| `"press"` \| `"release"` \| `"drag"` \| `"scrolled"` \| `"resized"`
+Variants: `"open"` \| `"close"` \| `"focus"` \| `"blur"` \| `"selection_changed"` \| `"submit"` \| `"text_changed"` \| `"dismiss"` \| `"tick"` \| `"press"` \| `"release"` \| `"drag"` \| `"scrolled"` \| `"resized"` \| `"placeholder_accepted"` \| `"placeholder_dismissed"`
 

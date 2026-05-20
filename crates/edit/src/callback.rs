@@ -69,6 +69,12 @@ pub enum WinEvent {
     /// reflow). Payload carries the new `{ row, col, width, height }` rect
     /// and the inner `content_width` in `Payload::Rect`.
     Resized,
+    /// User accepted a placeholder suggestion via an `accept_keys` chord.
+    /// Payload carries the accepted text in `Payload::Text`.
+    PlaceholderAccepted,
+    /// User dismissed the placeholder via a `dismiss_keys` chord.
+    /// Payload carries the dismissed text in `Payload::Text`.
+    PlaceholderDismissed,
 }
 
 /// Mouse button identity carried in `Payload::Mouse`.

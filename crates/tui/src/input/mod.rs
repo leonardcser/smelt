@@ -292,7 +292,7 @@ impl PromptState {
     /// cursor at end, refreshes completer.
     ///
     /// Intended for callers feeding text from outside the prompt: Lua
-    /// `smelt.prompt.set_text`, AcceptGhostText, `$EDITOR` re-import.
+    /// `smelt.prompt.set_text`, placeholder accept, `$EDITOR` re-import.
     /// Any `ATTACHMENT_MARKER` bytes in `text` are stripped — these
     /// callers can't carry attachment ids, so the markers would be
     /// orphaned (and trip the marker/id invariant in
@@ -489,12 +489,7 @@ impl PromptState {
         Content::with_images(text, images)
     }
 
-    pub(crate) fn key_context(
-        &self,
-        ctx: PromptCtxRef<'_>,
-        agent_running: bool,
-        ghost_text_visible: bool,
-    ) -> KeyContext {
+    pub(crate) fn key_context(&self, ctx: PromptCtxRef<'_>, agent_running: bool) -> KeyContext {
         KeyContext {
             buf_empty: ctx.buf.source().is_empty() && ctx.buf.attachment_ids.is_empty(),
             vim_non_insert: ctx.win.vim_enabled
@@ -504,7 +499,6 @@ impl PromptState {
                 ),
             vim_enabled: ctx.win.vim_enabled,
             agent_running,
-            ghost_text_visible,
         }
     }
 
@@ -574,7 +568,7 @@ impl PromptState {
         }
         match action {
             // Caller handles these.
-            KeyAction::Quit | KeyAction::CancelAgent | KeyAction::AcceptGhostText => Action::Noop,
+            KeyAction::Quit | KeyAction::CancelAgent => Action::Noop,
 
             // ── TuiApp control ─────────────────────────────────────────────
             KeyAction::ClearBuffer => {
@@ -1069,7 +1063,6 @@ impl PromptState {
                     ),
                 vim_enabled: ctx.win.vim_enabled,
                 agent_running: false,
-                ghost_text_visible: false,
             };
 
             if let Some(action) = keymap::lookup(code, modifiers, &key_ctx) {

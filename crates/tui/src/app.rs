@@ -119,6 +119,19 @@ pub struct TuiApp {
     /// `apply_model` spawns a fetch task that pushes the result here so the
     /// UI footer reflects the new model immediately.
     pub(crate) context_window_tx: Option<tokio::sync::mpsc::UnboundedSender<Option<u32>>>,
+    /// Per-window placeholder dispatch options. `text` lives on the
+    /// buffer (extmark) for the prompt; this side-table holds the
+    /// accept/dismiss chord policy plugins configure when calling
+    /// `Win:placeholder(text, opts)`.
+    pub(crate) placeholder_opts: HashMap<crate::smelt_term::WinId, PlaceholderOpts>,
+}
+
+/// Per-window dispatch policy for a placeholder. Set via Lua's
+/// `Win:placeholder(text, opts)`; the dispatcher consults it on key events.
+#[derive(Default, Clone)]
+pub(crate) struct PlaceholderOpts {
+    pub accept_keys: Vec<crate::smelt_term::KeyBind>,
+    pub dismiss_keys: Vec<crate::smelt_term::KeyBind>,
 }
 
 pub use well_known::{
@@ -518,6 +531,7 @@ impl TuiApp {
             terminal: None,
             http_client: None,
             context_window_tx: None,
+            placeholder_opts: HashMap::new(),
         }
     }
 
@@ -618,13 +632,11 @@ impl TuiApp {
         }
     }
 
-    /// Returns the current ghost-text prediction from the prompt buffer's completer extmark.
-    pub(crate) fn prompt_completer_text(&mut self) -> Option<String> {
-        let buf = self
-            .ui
-            .win_buf_mut(self.well_known.prompt)
-            .expect("prompt window registered at startup");
-        let ns = buf.create_namespace(crate::content::prompt_buf::COMPLETER_NS);
+    /// Returns the current placeholder text on `win`, if any. Stored as an
+    /// extmark on the window's buffer in the well-known placeholder namespace.
+    pub(crate) fn placeholder_text(&mut self, win: crate::smelt_term::WinId) -> Option<String> {
+        let buf = self.ui.win_buf_mut(win)?;
+        let ns = buf.create_namespace(crate::content::prompt_buf::PLACEHOLDER_NS);
         buf.extmarks(ns).into_iter().find_map(|(_, mark)| {
             if let crate::smelt_term::ExtmarkPayload::VirtText { text, .. } = &mark.payload {
                 Some(text.clone())
@@ -634,13 +646,12 @@ impl TuiApp {
         })
     }
 
-    /// Replaces the prompt buffer's ghost-text prediction extmark.
-    pub(crate) fn set_prompt_completer(&mut self, text: String) {
-        let buf = self
-            .ui
-            .win_buf_mut(self.well_known.prompt)
-            .expect("prompt window registered at startup");
-        let ns = buf.create_namespace(crate::content::prompt_buf::COMPLETER_NS);
+    /// Set the placeholder text on `win`. Replaces any prior placeholder.
+    pub(crate) fn set_placeholder(&mut self, win: crate::smelt_term::WinId, text: String) {
+        let Some(buf) = self.ui.win_buf_mut(win) else {
+            return;
+        };
+        let ns = buf.create_namespace(crate::content::prompt_buf::PLACEHOLDER_NS);
         buf.clear_namespace(ns, 0, usize::MAX);
         buf.set_extmark(
             ns,
@@ -650,21 +661,85 @@ impl TuiApp {
         );
     }
 
-    pub(crate) fn clear_prompt_completer(&mut self) {
-        let buf = self
-            .ui
-            .win_buf_mut(self.well_known.prompt)
-            .expect("prompt window registered at startup");
-        let ns = buf.create_namespace(crate::content::prompt_buf::COMPLETER_NS);
-        buf.clear_namespace(ns, 0, usize::MAX);
+    /// Clear the placeholder on `win` (text + opts). Idempotent.
+    pub(crate) fn clear_placeholder(&mut self, win: crate::smelt_term::WinId) {
+        if let Some(buf) = self.ui.win_buf_mut(win) {
+            let ns = buf.create_namespace(crate::content::prompt_buf::PLACEHOLDER_NS);
+            buf.clear_namespace(ns, 0, usize::MAX);
+        }
+        self.placeholder_opts.remove(&win);
     }
 
-    pub(crate) fn take_prompt_completer(&mut self) -> Option<String> {
-        let text = self.prompt_completer_text();
-        if text.is_some() {
-            self.clear_prompt_completer();
+    /// Match a key against the placeholder dispatch policy for `win`.
+    /// Returns `Some(Redraw)` if the key was consumed by accept/dismiss,
+    /// `None` otherwise.
+    ///
+    /// Accept replaces the buffer with the first line of the placeholder text
+    /// (multi-line predictions collapse to a single line for safety) and fires
+    /// `WinEvent::PlaceholderAccepted`. Dismiss clears the placeholder and fires
+    /// `WinEvent::PlaceholderDismissed`. Both run only when the buffer is empty
+    /// — the same visibility rule that gates rendering.
+    pub(crate) fn dispatch_placeholder_key(
+        &mut self,
+        win: crate::smelt_term::WinId,
+        code: crossterm::event::KeyCode,
+        mods: crossterm::event::KeyModifiers,
+    ) -> Option<EventOutcome> {
+        let text = self.placeholder_text(win)?;
+        let opts = self.placeholder_opts.get(&win)?.clone();
+        let buf_empty = self
+            .ui
+            .win_buf_mut(win)
+            .map(|b| b.source().is_empty())
+            .unwrap_or(true);
+        if !buf_empty {
+            return None;
         }
-        text
+        let kb = crate::smelt_term::KeyBind::new(code, mods);
+        if opts.accept_keys.contains(&kb) {
+            self.clear_placeholder(win);
+            if win == self.well_known.prompt {
+                let mut pctx = crate::input::prompt_ctx_mut(&mut self.ui);
+                self.input.replace_text(&mut pctx, text.clone());
+            }
+            self.fire_placeholder_event(
+                win,
+                crate::smelt_term::WinEvent::PlaceholderAccepted,
+                text,
+            );
+            return Some(EventOutcome::Redraw);
+        }
+        if opts.dismiss_keys.contains(&kb) {
+            self.clear_placeholder(win);
+            self.fire_placeholder_event(
+                win,
+                crate::smelt_term::WinEvent::PlaceholderDismissed,
+                text,
+            );
+            return Some(EventOutcome::Redraw);
+        }
+        None
+    }
+
+    fn fire_placeholder_event(
+        &mut self,
+        win: crate::smelt_term::WinId,
+        event: crate::smelt_term::WinEvent,
+        text: String,
+    ) {
+        let lua = &self.lua;
+        let mut lua_invoke = |handle: crate::smelt_term::LuaHandle,
+                              w: crate::smelt_term::WinId,
+                              payload: &crate::smelt_term::Payload| {
+            lua.queue_invocation(handle, w, payload);
+        };
+        self.ui.fire_win_event(
+            win,
+            event,
+            crate::smelt_term::Payload::Text { content: text },
+            &mut lua_invoke,
+        );
+        self.flush_lua_callbacks();
     }
 
     /// Gutters configured on the transcript window (single source of truth: `Window.config.gutters`).

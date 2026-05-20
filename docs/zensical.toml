@@ -66,7 +66,6 @@ nav = [
     { "`smelt.picker`" = "reference/api/picker.md" },
     { "`smelt.process`" = "reference/api/process.md" },
     { "`smelt.prompt`" = "reference/api/prompt.md" },
-    { "`smelt.prompt.ghost`" = "reference/api/prompt_ghost.md" },
     { "`smelt.provider`" = "reference/api/provider.md" },
     { "`smelt.reasoning`" = "reference/api/reasoning.md" },
     { "`smelt.reg`" = "reference/api/reg.md" },

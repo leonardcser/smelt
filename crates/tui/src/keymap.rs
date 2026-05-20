@@ -16,7 +16,6 @@ pub(crate) enum KeyAction {
     CycleReasoning,
     ToggleStash,
     Redraw,
-    AcceptGhostText,
 
     // Submit
     Submit,
@@ -80,7 +79,6 @@ pub(crate) struct KeyContext {
     pub(crate) vim_non_insert: bool,
     pub(crate) vim_enabled: bool,
     pub(crate) agent_running: bool,
-    pub(crate) ghost_text_visible: bool,
 }
 
 // ── Conditions ───────────────────────────────────────────────────────────────
@@ -110,7 +108,6 @@ pub(crate) struct When {
     vim_non_insert: Cond,
     vim_enabled: Cond,
     agent_running: Cond,
-    ghost_text: Cond,
 }
 
 impl When {
@@ -120,7 +117,6 @@ impl When {
             vim_non_insert: Cond::Any,
             vim_enabled: Cond::Any,
             agent_running: Cond::Any,
-            ghost_text: Cond::Any,
         }
     }
 
@@ -154,17 +150,11 @@ impl When {
         self
     }
 
-    const fn ghost_text(mut self) -> Self {
-        self.ghost_text = Cond::Yes;
-        self
-    }
-
     fn matches(&self, ctx: &KeyContext) -> bool {
         self.buf_empty.matches(ctx.buf_empty)
             && self.vim_non_insert.matches(ctx.vim_non_insert)
             && self.vim_enabled.matches(ctx.vim_enabled)
             && self.agent_running.matches(ctx.agent_running)
-            && self.ghost_text.matches(ctx.ghost_text_visible)
     }
 }
 
@@ -224,13 +214,6 @@ const NONE: KeyModifiers = KeyModifiers::NONE;
 /// Does not include vim motions, menu/completer navigation, dialog handling,
 /// Esc logic, paste events, or char insertion (all handled elsewhere).
 static BINDINGS: &[Binding] = &[
-    // ── Ghost text ──────────────────────────────────────────────────────
-    bind(
-        KeyCode::Tab,
-        NONE,
-        when().ghost_text().buf_empty(),
-        KeyAction::AcceptGhostText,
-    ),
     // ── TuiApp control ─────────────────────────────────────────────────────
     // Ctrl+C: menu/completer dismissal happens before keymap lookup.
     bind(
@@ -562,7 +545,6 @@ mod tests {
             vim_non_insert: false,
             vim_enabled: false,
             agent_running: false,
-            ghost_text_visible: false,
         }
     }
 
@@ -629,19 +611,7 @@ mod tests {
     }
 
     #[test]
-    fn ghost_text_tab_accepts() {
-        let c = KeyContext {
-            ghost_text_visible: true,
-            ..ctx()
-        };
-        assert_eq!(
-            lookup(KeyCode::Tab, NONE, &c),
-            Some(KeyAction::AcceptGhostText)
-        );
-    }
-
-    #[test]
-    fn tab_without_ghost_text_no_match() {
+    fn tab_unbound_by_default() {
         let c = ctx();
         assert_eq!(lookup(KeyCode::Tab, NONE, &c), None);
     }

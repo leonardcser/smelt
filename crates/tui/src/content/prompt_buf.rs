@@ -9,8 +9,9 @@ use crate::smelt_term::{Buffer, ExtmarkOpts, ExtmarkPayload};
 
 use smelt_core::style::Color;
 
-/// Extmark namespace for ghost-text (completer prediction).
-pub(crate) const COMPLETER_NS: &str = "completer";
+/// Extmark namespace for `Win:placeholder` text rendered as a dim
+/// suggestion when the buffer is empty.
+pub(crate) const PLACEHOLDER_NS: &str = "placeholder";
 
 struct StyledSegment {
     text: String,
@@ -122,8 +123,8 @@ pub(crate) fn compute_input(
 ) {
     let usable = inp.content_width as usize;
 
-    let completer_ns = buf.create_namespace(COMPLETER_NS);
-    let prediction: Option<String> = buf.extmarks(completer_ns).into_iter().find_map(|(_, m)| {
+    let placeholder_ns = buf.create_namespace(PLACEHOLDER_NS);
+    let prediction: Option<String> = buf.extmarks(placeholder_ns).into_iter().find_map(|(_, m)| {
         if let ExtmarkPayload::VirtText { text, .. } = &m.payload {
             Some(text.clone())
         } else {
@@ -148,7 +149,7 @@ pub(crate) fn compute_input(
             buf.set_selection(Vec::new());
         }
 
-        buf.clear_namespace(completer_ns, 0, usize::MAX);
+        buf.clear_namespace(placeholder_ns, 0, usize::MAX);
         if let Some(text) = prediction {
             let row = if buf.source().is_empty() {
                 0
@@ -156,7 +157,7 @@ pub(crate) fn compute_input(
                 total_lines
             };
             buf.set_extmark(
-                completer_ns,
+                placeholder_ns,
                 row,
                 0,
                 ExtmarkOpts::virt_text(text, Some("GhostText".into())),
@@ -185,7 +186,7 @@ pub(crate) fn compute_input(
         .collect();
     buf.set_selection(selection);
 
-    buf.clear_namespace(completer_ns, 0, usize::MAX);
+    buf.clear_namespace(placeholder_ns, 0, usize::MAX);
     if let Some(text) = prediction {
         // Row 0 when input is empty (dim suggestion visible); past last row otherwise
         // (keeps storage alive without rendering; Window::render only walks 0..line_count).
@@ -195,7 +196,7 @@ pub(crate) fn compute_input(
             total_lines
         };
         buf.set_extmark(
-            completer_ns,
+            placeholder_ns,
             row,
             0,
             ExtmarkOpts::virt_text(text, Some("GhostText".into())),

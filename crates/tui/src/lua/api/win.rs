@@ -59,6 +59,14 @@ pub enum LuaWinEvent {
     /// content_width }` for the new outer rect and inner cell budget.
     /// Fires once after the first paint and on every later resize/reflow.
     Resized,
+    /// User accepted a placeholder via one of its `accept_keys`. Payload:
+    /// `{ text = <accepted text> }`.
+    #[lua(rename = "placeholder_accepted")]
+    PlaceholderAccepted,
+    /// User dismissed a placeholder via one of its `dismiss_keys`. Payload:
+    /// `{ text = <dismissed text> }`.
+    #[lua(rename = "placeholder_dismissed")]
+    PlaceholderDismissed,
 }
 
 impl From<LuaWinEvent> for crate::smelt_term::WinEvent {
@@ -79,6 +87,8 @@ impl From<LuaWinEvent> for crate::smelt_term::WinEvent {
             LuaWinEvent::Drag => WinEvent::Drag,
             LuaWinEvent::Scrolled => WinEvent::Scrolled,
             LuaWinEvent::Resized => WinEvent::Resized,
+            LuaWinEvent::PlaceholderAccepted => WinEvent::PlaceholderAccepted,
+            LuaWinEvent::PlaceholderDismissed => WinEvent::PlaceholderDismissed,
         }
     }
 }
@@ -272,6 +282,49 @@ impl mlua::UserData for LuaWin {
             },
         );
 
+        // ── placeholder(text, opts?) → LuaWin ──────────────────────
+        methods.add_function(
+            "placeholder",
+            |_,
+             (this_ud, text, opts): (mlua::AnyUserData, String, Option<mlua::Table>)|
+             -> LuaResult<mlua::AnyUserData> {
+                let this = *this_ud.borrow::<LuaWin>()?;
+                if text.contains('\n') {
+                    return Err(mlua::Error::RuntimeError(
+                        "Win:placeholder: text must be a single line; split before calling \
+                         (e.g. `text:match(\"[^\\n]+\")`)"
+                            .into(),
+                    ));
+                }
+                let accept_keys = parse_chord_list(opts.as_ref(), "accept_keys")?;
+                let dismiss_keys =
+                    parse_chord_list_with_default(opts.as_ref(), "dismiss_keys", &["esc", "c-c"])?;
+                crate::lua::with_app(|app| {
+                    app.set_placeholder(this.id, text);
+                    app.placeholder_opts.insert(
+                        this.id,
+                        crate::app::PlaceholderOpts {
+                            accept_keys,
+                            dismiss_keys,
+                        },
+                    );
+                });
+                Ok(this_ud)
+            },
+        );
+
+        methods.add_method("clear_placeholder", |_, this, ()| -> LuaResult<()> {
+            crate::lua::with_app(|app| app.clear_placeholder(this.id));
+            Ok(())
+        });
+
+        methods.add_method(
+            "placeholder_text",
+            |_, this, ()| -> LuaResult<Option<String>> {
+                Ok(crate::lua::try_with_app(|app| app.placeholder_text(this.id)).flatten())
+            },
+        );
+
         // ── on(event, fn) → Reg ────────────────────────────────────
         methods.add_function(
             "on",
@@ -393,6 +446,73 @@ impl mlua::UserData for LuaWin {
     }
 }
 
+/// Parse `opts.<field>` as a list of chord strings (e.g. `{"tab", "right"}`).
+/// Returns the empty list when the field is missing or `nil`.
+fn parse_chord_list(
+    opts: Option<&mlua::Table>,
+    field: &str,
+) -> LuaResult<Vec<crate::smelt_term::KeyBind>> {
+    let Some(t) = opts else {
+        return Ok(Vec::new());
+    };
+    match t.get::<Option<mlua::Value>>(field)? {
+        None | Some(mlua::Value::Nil) => Ok(Vec::new()),
+        Some(mlua::Value::Table(arr)) => collect_chords(&arr, field),
+        Some(other) => Err(mlua::Error::RuntimeError(format!(
+            "Win:placeholder: opts.{field} must be an array of chord strings; got {}",
+            other.type_name()
+        ))),
+    }
+}
+
+/// Same as [`parse_chord_list`] but substitutes `defaults` when the field
+/// is omitted (vs. explicitly `nil` or empty, which still mean "none").
+fn parse_chord_list_with_default(
+    opts: Option<&mlua::Table>,
+    field: &str,
+    defaults: &[&str],
+) -> LuaResult<Vec<crate::smelt_term::KeyBind>> {
+    let Some(t) = opts else {
+        return parse_default(defaults, field);
+    };
+    match t.get::<Option<mlua::Value>>(field)? {
+        None => parse_default(defaults, field),
+        Some(mlua::Value::Nil) => Ok(Vec::new()),
+        Some(mlua::Value::Table(arr)) => collect_chords(&arr, field),
+        Some(other) => Err(mlua::Error::RuntimeError(format!(
+            "Win:placeholder: opts.{field} must be an array of chord strings; got {}",
+            other.type_name()
+        ))),
+    }
+}
+
+fn parse_default(defaults: &[&str], field: &str) -> LuaResult<Vec<crate::smelt_term::KeyBind>> {
+    defaults
+        .iter()
+        .map(|c| {
+            parse_keybind(c).ok_or_else(|| {
+                mlua::Error::RuntimeError(format!(
+                    "Win:placeholder: default opts.{field} contains unknown chord `{c}`"
+                ))
+            })
+        })
+        .collect()
+}
+
+fn collect_chords(arr: &mlua::Table, field: &str) -> LuaResult<Vec<crate::smelt_term::KeyBind>> {
+    let mut out = Vec::new();
+    for pair in arr.clone().pairs::<mlua::Value, String>() {
+        let (_, chord) = pair?;
+        let kb = parse_keybind(&chord).ok_or_else(|| {
+            mlua::Error::RuntimeError(format!(
+                "Win:placeholder: opts.{field} contains unknown chord `{chord}`"
+            ))
+        })?;
+        out.push(kb);
+    }
+    Ok(out)
+}
+
 /// Recover the `LuaShared` from the Lua state's app registry. Used by
 /// methods that need to register Lua callback handles.
 pub(super) fn current_shared(lua: &Lua) -> LuaResult<Arc<LuaShared>> {
@@ -440,6 +560,9 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
             "move_cursor" => fn(delta: i64) -> LuaWin, "Move the cursor by `delta` rows (clamped to the buffer's line count). Returns the handle for chaining.",
             "key" => fn(chord: String, func: LuaCallback<mlua::Table, ()>) -> LuaReg, "Bind `func` to `chord` on this window. Returns a Reg handle whose `:remove()` undoes the binding. Raises on unknown chords.",
             "on" => fn(event: LuaWinEvent, func: LuaCallback<mlua::Table, ()>) -> LuaReg, "Subscribe `func` to `event` on this window. Returns a Reg handle whose `:remove()` undoes the subscription.",
+            "placeholder" => fn(text: String, opts: Option<mlua::Table>) -> LuaWin, "Set the window's placeholder — a dim suggestion rendered when the buffer is empty. Replaces any prior placeholder. `text` must be a single line (no `\\n`); split before calling. `opts.accept_keys` (array of chord strings, default `{}`) accept the placeholder into the buffer and fire `placeholder_accepted`. `opts.dismiss_keys` (default `{ \"esc\", \"c-c\" }`) clear the placeholder and fire `placeholder_dismissed`. Typing does not destroy the placeholder; the extmark survives so an undo back to an empty buffer makes it visible again. Today only the prompt window renders the dim text and runs the accept/dismiss dispatch — calls on other windows store state but won't render. Returns the handle for chaining.",
+            "clear_placeholder" => fn() -> (), "Clear the window's placeholder text and opts. Idempotent.",
+            "placeholder_text" => fn() -> Option<String>, "Return the current placeholder text, or `nil` if none is set.",
             "link_scroll" => fn(others: mlua::Variadic<LuaWin>) -> LuaWin, "Link `scroll_top` between this window and the variadic `others`. Closing any member auto-removes it. Returns the handle for chaining.",
             "scroll" => fn(arg: mlua::Value) -> mlua::Value, "Read or write the window's scroll state. No arg returns `{ top, follow, total, viewport }` (`total` is the buffer's line count; `viewport` is the leaf's height). An integer sets `scroll_top` and clears the pin-to-tail flag. The literal string `\"tail\"` re-pins the viewport to the buffer's tail.",
         },

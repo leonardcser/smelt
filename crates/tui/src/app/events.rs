@@ -27,7 +27,7 @@ impl TuiApp {
             // Skip when an overlay or cmdline is focused — they get first dibs.
             if self.ui.focused_overlay().is_none() && self.well_known.cmdline.is_none() {
                 let pctx = crate::input::prompt_ctx_ref(&self.ui);
-                let ctx = self.input.key_context(pctx, self.agent.is_some(), false);
+                let ctx = self.input.key_context(pctx, self.agent.is_some());
                 match keymap::lookup(*code, *modifiers, &ctx) {
                     Some(KeyAction::ToggleMode) => {
                         self.lua.cycle_mode();
@@ -186,9 +186,6 @@ impl TuiApp {
     ///
     /// Dispatch priority: resize/mouse → Lua keymaps → pane chords → cmdline `:` → content focus → overlay keys.
     fn dispatch_common(&mut self, ev: &Event) -> Option<EventOutcome> {
-        if matches!(ev, Event::Paste(_)) {
-            self.clear_prompt_completer();
-        }
         if let Event::Resize(w, h) = *ev {
             self.handle_resize(w, h);
             return Some(EventOutcome::Noop);
@@ -342,32 +339,20 @@ impl TuiApp {
             code, modifiers, ..
         }) = ev
         {
-            let ghost_text = self.prompt_completer_text();
-            let ghost = ghost_text.is_some() && self.prompt_buf().source().is_empty();
-            let pctx_ref = crate::input::prompt_ctx_ref(&self.ui);
-            let ctx = self.input.key_context(pctx_ref, false, ghost);
-
-            // Editing keys dismiss ghost text; transparent actions (mode toggles, redraw) preserve it.
-            if ghost {
-                match keymap::lookup(code, modifiers, &ctx) {
-                    Some(KeyAction::AcceptGhostText) => {
-                        let full = self.take_prompt_completer().unwrap();
-                        let line = full.lines().next().unwrap_or(&full).to_string();
-                        let mut pctx = crate::input::prompt_ctx_mut(&mut self.ui);
-                        self.input.replace_text(&mut pctx, line);
-                        return EventOutcome::Redraw;
-                    }
-                    Some(
-                        KeyAction::ToggleMode
-                        | KeyAction::CycleReasoning
-                        | KeyAction::Redraw
-                        | KeyAction::ToggleStash,
-                    ) => {}
-                    _ => {
-                        self.clear_prompt_completer();
-                    }
-                }
+            // Placeholder routing: when the prompt is empty and a placeholder is set,
+            // matching `accept_keys` accept the text into the buffer; matching
+            // `dismiss_keys` clear it. Both fire the corresponding win event.
+            // Typing past those chords leaves the placeholder intact (the buffer
+            // becoming non-empty just hides it visually — undoing back to empty
+            // restores it).
+            if let Some(outcome) =
+                self.dispatch_placeholder_key(self.well_known.prompt, code, modifiers)
+            {
+                return outcome;
             }
+
+            let pctx_ref = crate::input::prompt_ctx_ref(&self.ui);
+            let ctx = self.input.key_context(pctx_ref, false);
 
             if let Some(action) = keymap::lookup(code, modifiers, &ctx) {
                 match action {
@@ -418,7 +403,7 @@ impl TuiApp {
         }) = ev
         {
             let pctx_ref = crate::input::prompt_ctx_ref(&self.ui);
-            let ctx = self.input.key_context(pctx_ref, true, false);
+            let ctx = self.input.key_context(pctx_ref, true);
             if let Some(action) = keymap::lookup(code, modifiers, &ctx) {
                 match action {
                     KeyAction::CancelAgent => {
@@ -676,6 +661,7 @@ impl TuiApp {
     /// `Ui::win_close` cascades to overlay close when the leaf belongs to one.
     pub(crate) fn close_overlay_leaf(&mut self, win_id: crate::smelt_term::WinId) {
         crate::picker::forget(self, win_id);
+        self.placeholder_opts.remove(&win_id);
         for id in self.win_close(win_id) {
             self.lua.remove_callback(id);
         }
@@ -991,7 +977,6 @@ impl TuiApp {
             vim_non_insert: false,
             vim_enabled: false,
             agent_running: false,
-            ghost_text_visible: false,
         };
         let Some(action) = lookup(k.code, k.modifiers, &ctx) else {
             return Status::Ignored;

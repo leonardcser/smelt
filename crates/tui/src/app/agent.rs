@@ -26,7 +26,7 @@ impl TuiApp {
     pub(crate) fn begin_agent_turn(&mut self, display: &str, content: Content) -> TurnState {
         let _perf = smelt_perf::perf::begin("agent:begin_turn");
         self.sleep_inhibit.acquire();
-        self.clear_prompt_completer();
+        self.clear_placeholder(self.well_known.prompt);
         self.begin_turn();
         self.show_user_message(display, content.image_labels());
         let text = content.text_content();
@@ -315,7 +315,7 @@ impl TuiApp {
             }
         } else {
             self.working.finish(TurnOutcome::Done);
-            self.clear_prompt_completer();
+            self.clear_placeholder(self.well_known.prompt);
         }
         let meta = self
             .pending_turn_meta

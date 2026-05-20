@@ -1,14 +1,17 @@
 -- Input prediction plugin. Predicts the user's next message via a background
--- LLM call and displays it as ghost text.
+-- LLM call and renders it as the prompt's placeholder. Tab accepts; Esc and
+-- Ctrl-C dismiss; typing hides it without destroying it, so an undo back to
+-- an empty buffer brings it back.
 
 local aux = require("smelt.aux")
+local prompt = smelt.prompt.win()
 
 smelt.cell("turn_end"):subscribe(function(payload)
   if payload.cancelled then
     return
   end
 
-  smelt.prompt.ghost.clear()
+  prompt:clear_placeholder()
 
   local history = smelt.session.messages()
 
@@ -56,9 +59,11 @@ smelt.cell("turn_end"):subscribe(function(payload)
     model = smelt.model.preferred("predict"),
     on_response = function(content, err)
       if err then return end
-      local text = content:match("^%s*(.-)%s*$") or ""
+      -- Keep only the first line; `Win:placeholder` rejects newlines and
+      -- the prompt only renders a single line of ghost text anyway.
+      local text = (content:match("[^\n]+") or ""):match("^%s*(.-)%s*$")
       if text ~= "" then
-        smelt.prompt.ghost.set(text)
+        prompt:placeholder(text, { accept_keys = { "tab" } })
       end
     end,
   })
