@@ -9,8 +9,17 @@ Ripgrep wrapper for searching files. Exit code 1 (no match) is not an error.
 ## `smelt.grep.run`
 
 ```lua
-fun(pattern: string, path: string, opts: table?): table?, string?
+fun(pattern: string, path: string, opts: table?): { stdout: string, stderr: string, exit_code: integer, timed_out: boolean }?, string?
 ```
 
-Run ripgrep with `pattern` over `path`. `opts` accepts `mode` (`content`/`files_with_matches`/`count`), `case_insensitive`, `multiline`, `line_numbers`, `before_context`/`after_context`/`context`, `glob`, `type`, `timeout_secs`. Returns `(result_table, nil)` on success or `(nil, error_string)` on spawn failure. Exit code 1 (no match) is not an error — inspect `exit_code` on the result.
+Run ripgrep with `pattern` over `path` off the main thread. Yields the
+calling coroutine until the child exits; must be called from inside
+`smelt.spawn(fn)` or a `tool.execute`. `opts` accepts the same fields
+as the underlying `smelt.grep` namespace (`mode`,
+`case_insensitive`, `multiline`, `line_numbers`, `before_context`,
+`after_context`, `context`, `glob`, `type`, `timeout_secs`). Returns
+`({ stdout, stderr, exit_code, timed_out }, nil)` on success or
+`(nil, err)` on spawn failure. Cancellation kills the child (SIGKILL)
+and `smelt.task.external` raises `cancelled`. Exit code 1 (no match)
+is not an error — inspect `exit_code` on the result.
 

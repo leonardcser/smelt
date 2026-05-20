@@ -369,7 +369,7 @@ require a yielding context.
 ```lua
 -- Bound a yielding op with a deadline.
 local out, err = smelt.task.timeout(2000, function()
-  return smelt.process.run_async("slow-command", {})
+  return smelt.process.run("slow-command", {})
 end)
 if err == "timeout" then ... end
 
@@ -432,12 +432,15 @@ end)
 -- later: reg:remove()
 ```
 
-## Off-thread filesystem and process I/O
+## Off-thread filesystem, process, and grep I/O
 
-For large reads/writes/subprocess invocations that would otherwise block
-the main loop, use the async variants. They yield through the task
-runtime, so they must run inside `smelt.spawn(fn)` or a `tool.execute`
-body:
+`smelt.process.run` and `smelt.grep.run` yield the calling coroutine
+through the task runtime instead of blocking the main loop; they must
+run inside `smelt.spawn(fn)` or a `tool.execute` body. The same is
+true for the explicit `smelt.fs.read_async` / `smelt.fs.write_async`
+variants when reading or writing large files. `smelt.fs.read` /
+`smelt.fs.write` stay synchronous and are fine for small config-time
+reads:
 
 ```lua
 smelt.spawn(function()
@@ -445,21 +448,23 @@ smelt.spawn(function()
   if not content then return io.stderr:write(err) end
   local ok = smelt.fs.write_async("/tmp/out", transform(content))
 
-  local out = smelt.process.run_async("ripgrep", { "TODO", "." })
+  local out = smelt.process.run("ripgrep", { "TODO", "." })
   if out then print(out.stdout) end
+
+  local matches = smelt.grep.run("TODO", ".", { line_numbers = true })
+  if matches then print(matches.stdout) end
 end)
 ```
-
-The sync `smelt.fs.read` / `smelt.fs.write` / `smelt.process.run` stay
-fine for small files and config-time reads.
 
 **Cancellation semantics.** When the calling coroutine is cancelled
 (`smelt.task.timeout` deadline, `smelt.task.race` loser, or
 `:remove()` on the spawn Reg), every yielding API raises `cancelled`
 and unwinds. The underlying work differs by kind:
 
-- `smelt.process.run_async` — the child's process group receives
-  SIGTERM; the future resolves once the kill completes.
+- `smelt.process.run` — the child's process group receives SIGTERM;
+  the future resolves once the kill completes.
+- `smelt.grep.run` — the `rg` child receives SIGKILL and the future
+  resolves once `wait()` returns.
 - `smelt.fs.read_async` / `smelt.fs.write_async` — the std::fs call
   can't be interrupted mid-syscall, so the worker thread runs to
   completion and the result is discarded. Bounded waste (file-size

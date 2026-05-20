@@ -1,11 +1,10 @@
-//! Process capability — sync spawn-and-wait (`run`) and async streaming
-//! (`run_streaming`) primitives. `ProcessRegistry` manages long-lived
-//! background children (`spawn_bg`, `read_output`, `stop`).
+//! Process capability — async spawn-and-wait (`run_async`) and async
+//! streaming (`run_streaming`) primitives. `ProcessRegistry` manages
+//! long-lived background children (`spawn_bg`, `read_output`, `stop`).
 
 use std::collections::HashMap;
-use std::ffi::OsStr;
 use std::io;
-use std::process::{Command, Stdio};
+use std::process::Stdio;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -30,85 +29,13 @@ pub(crate) struct Output {
     pub(crate) timed_out: bool,
 }
 
-pub(crate) fn run<I, S>(cmd: &str, args: I, opts: &Options) -> io::Result<Output>
-where
-    I: IntoIterator<Item = S>,
-    S: AsRef<OsStr>,
-{
-    let mut command = Command::new(cmd);
-    command.args(args);
-
-    if let Some(cwd) = &opts.cwd {
-        command.current_dir(cwd);
-    }
-    for (k, v) in &opts.env {
-        command.env(k, v);
-    }
-
-    let stdin_kind = if opts.stdin.is_some() {
-        Stdio::piped()
-    } else {
-        Stdio::null()
-    };
-    command
-        .stdin(stdin_kind)
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
-
-    let mut child = command.spawn()?;
-
-    if let (Some(text), Some(stdin)) = (&opts.stdin, child.stdin.as_mut()) {
-        use std::io::Write;
-        stdin.write_all(text.as_bytes())?;
-    }
-    child.stdin.take(); // close
-
-    let timeout = opts.timeout.unwrap_or(Duration::from_secs(30));
-    let deadline = Instant::now() + timeout;
-
-    loop {
-        match child.try_wait()? {
-            Some(status) => {
-                let mut stdout = String::new();
-                let mut stderr = String::new();
-                if let Some(mut out) = child.stdout.take() {
-                    use std::io::Read;
-                    let _ = out.read_to_string(&mut stdout);
-                }
-                if let Some(mut err) = child.stderr.take() {
-                    use std::io::Read;
-                    let _ = err.read_to_string(&mut stderr);
-                }
-                return Ok(Output {
-                    stdout,
-                    stderr,
-                    exit_code: status.code().unwrap_or(-1),
-                    timed_out: false,
-                });
-            }
-            None => {
-                if Instant::now() >= deadline {
-                    let _ = child.kill();
-                    let _ = child.wait();
-                    return Ok(Output {
-                        stdout: String::new(),
-                        stderr: format!("process timed out after {}s", timeout.as_secs()),
-                        exit_code: -1,
-                        timed_out: true,
-                    });
-                }
-                std::thread::sleep(Duration::from_millis(20));
-            }
-        }
-    }
-}
-
-/// Async variant of [`run`] that honors a `CancellationToken`. The
-/// caller can short-circuit a long-running child by cancelling the
-/// token — the child's process group receives SIGTERM (then SIGKILL on
-/// the standard escalation) and the future resolves with
-/// `RunOutcome::Cancelled` once the wait completes. Stdout/stderr are
-/// read concurrently so the child can't deadlock on a full pipe.
+/// Spawn `cmd` with `args` and wait for completion, honoring a
+/// `CancellationToken`. The caller can short-circuit a long-running
+/// child by cancelling the token — the child's process group receives
+/// SIGTERM (then SIGKILL on the standard escalation) and the future
+/// resolves with `RunOutcome::Cancelled` once the wait completes.
+/// Stdout/stderr are read concurrently so the child can't deadlock on
+/// a full pipe.
 pub(crate) async fn run_async(
     cmd: &str,
     args: &[String],
@@ -581,79 +508,93 @@ impl ProcessRegistry {
 mod tests {
     use super::*;
 
-    #[test]
-    fn run_echo_captures_stdout() {
-        let out = run("sh", ["-c", "echo hello"], &Options::default()).unwrap();
+    async fn run(cmd: &str, args: &[&str], opts: &Options) -> Output {
+        let args: Vec<String> = args.iter().map(|s| s.to_string()).collect();
+        match run_async(cmd, &args, opts, CancellationToken::new())
+            .await
+            .unwrap()
+        {
+            RunOutcome::Done(out) => out,
+            RunOutcome::Cancelled => panic!("unexpected cancellation"),
+        }
+    }
+
+    #[tokio::test]
+    async fn run_echo_captures_stdout() {
+        let out = run("sh", &["-c", "echo hello"], &Options::default()).await;
         assert!(out.stdout.contains("hello"));
         assert_eq!(out.exit_code, 0);
         assert!(!out.timed_out);
     }
 
-    #[test]
-    fn run_propagates_exit_code() {
-        let out = run("sh", ["-c", "exit 42"], &Options::default()).unwrap();
+    #[tokio::test]
+    async fn run_propagates_exit_code() {
+        let out = run("sh", &["-c", "exit 42"], &Options::default()).await;
         assert_eq!(out.exit_code, 42);
     }
 
-    #[test]
-    fn run_pipes_stdin_to_child() {
+    #[tokio::test]
+    async fn run_pipes_stdin_to_child() {
         let opts = Options {
             stdin: Some("hello world".into()),
             ..Default::default()
         };
-        let out = run("cat", Vec::<&str>::new(), &opts).unwrap();
+        let out = run("cat", &[], &opts).await;
         assert_eq!(out.stdout, "hello world");
     }
 
-    #[test]
-    fn run_honors_cwd() {
+    #[tokio::test]
+    async fn run_honors_cwd() {
         let tmp = tempfile::TempDir::new().unwrap();
         let opts = Options {
             cwd: Some(tmp.path().to_string_lossy().into_owned()),
             ..Default::default()
         };
-        let out = run("pwd", Vec::<&str>::new(), &opts).unwrap();
+        let out = run("pwd", &[], &opts).await;
         assert!(out.stdout.contains(tmp.path().to_string_lossy().as_ref()));
     }
 
-    #[test]
-    fn run_times_out_long_command() {
+    #[tokio::test]
+    async fn run_times_out_long_command() {
         let opts = Options {
             timeout: Some(Duration::from_millis(100)),
             ..Default::default()
         };
-        let out = run("sh", ["-c", "sleep 5"], &opts).unwrap();
+        let out = run("sh", &["-c", "sleep 5"], &opts).await;
         assert!(out.timed_out);
         assert_eq!(out.exit_code, -1);
     }
 
-    #[test]
-    fn run_passes_custom_env_to_child() {
+    #[tokio::test]
+    async fn run_passes_custom_env_to_child() {
         let mut env = HashMap::new();
         env.insert("SMELT_TEST_VAR".into(), "from_test".into());
         let opts = Options {
             env,
             ..Default::default()
         };
-        let out = run("sh", ["-c", "echo $SMELT_TEST_VAR"], &opts).unwrap();
+        let out = run("sh", &["-c", "echo $SMELT_TEST_VAR"], &opts).await;
         assert!(out.stdout.contains("from_test"));
     }
 
-    #[test]
-    fn run_captures_stderr_separately() {
-        let out = run("sh", ["-c", "echo err 1>&2"], &Options::default()).unwrap();
+    #[tokio::test]
+    async fn run_captures_stderr_separately() {
+        let out = run("sh", &["-c", "echo err 1>&2"], &Options::default()).await;
         assert_eq!(out.exit_code, 0);
         assert!(out.stderr.contains("err"));
         assert!(!out.stdout.contains("err"));
     }
 
-    #[test]
-    fn run_returns_io_error_for_nonexistent_binary() {
-        let result = run(
+    #[tokio::test]
+    async fn run_returns_io_error_for_nonexistent_binary() {
+        let args: Vec<String> = Vec::new();
+        let result = run_async(
             "__definitely_no_such_command__",
-            Vec::<&str>::new(),
+            &args,
             &Options::default(),
-        );
+            CancellationToken::new(),
+        )
+        .await;
         assert!(result.is_err());
     }
 

@@ -41,18 +41,11 @@ Drain buffered output from the registered process `id`. Returns `{ text, running
 ## `smelt.process.run`
 
 ```lua
-fun(cmd: string, args: string[]?, opts: table?): table?, string?
-```
-
-Run `cmd` with `args` synchronously. `opts` accepts `cwd`, `env`, `timeout_secs`, and `stdin`. Returns `({ stdout, stderr, exit_code, timed_out }, nil)` or `(nil, err_string)` on failure.
-
-## `smelt.process.run_async`
-
-```lua
 fun(cmd: string, args: string[]?, opts: table?): { stdout: string, stderr: string, exit_code: integer, timed_out: boolean }?, string?
 ```
 
-Run `cmd` with `args` off the main thread. Must be called from inside
+Run `cmd` with `args` off the main thread. Yields the calling
+coroutine until the child exits; must be called from inside
 `smelt.spawn(fn)` or a `tool.execute`. `opts` accepts `cwd`, `env`,
 `timeout_secs`, `stdin`. Returns
 `({ stdout, stderr, exit_code, timed_out }, nil)` on success or

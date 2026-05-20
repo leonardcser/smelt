@@ -23,11 +23,8 @@ process.list = nil
 ---@type fun(id: string): table
 process.read_output = nil
 
---- Run `cmd` with `args` synchronously. `opts` accepts `cwd`, `env`, `timeout_secs`, and `stdin`. Returns `({ stdout, stderr, exit_code, timed_out }, nil)` or `(nil, err_string)` on failure.
----@type fun(cmd: string, args: string[]?, opts: table?): table?, string?
-process.run = nil
-
---- Run `cmd` with `args` off the main thread. Must be called from inside
+--- Run `cmd` with `args` off the main thread. Yields the calling
+--- coroutine until the child exits; must be called from inside
 --- `smelt.spawn(fn)` or a `tool.execute`. `opts` accepts `cwd`, `env`,
 --- `timeout_secs`, `stdin`. Returns
 --- `({ stdout, stderr, exit_code, timed_out }, nil)` on success or
@@ -39,7 +36,7 @@ process.run = nil
 ---@see smelt.task.timeout
 ---@see smelt.task.external
 ---@type fun(cmd: string, args: string[]?, opts: table?): { stdout: string, stderr: string, exit_code: integer, timed_out: boolean }?, string?
-process.run_async = nil
+process.run = nil
 
 --- Run `command` with a `timeout_ms` deadline, streaming each output line into the live tool call `call_id` and resolving task `task_id` with `{ content, is_error, timed_out }` (or `{ __cancelled = true }` if cancelled).
 ---@type fun(task_id: integer, call_id: string, command: string, timeout_ms: integer): nil

@@ -193,7 +193,7 @@ local function register_all()
   for _, f in ipairs(files) do
     local stem, path = f.stem, f.path
     smelt.cmd.register(stem, function(arg)
-      run_custom(stem, path, arg)
+      smelt.spawn(function() run_custom(stem, path, arg) end)
     end, {
       desc            = file_desc(path),
       while_busy      = false,

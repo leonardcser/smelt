@@ -148,7 +148,7 @@ local function api_fetch(path, etag)
     table.insert(gh_args, "-H")
     table.insert(gh_args, "If-None-Match:" .. etag)
   end
-  local gh = smelt.process.run_async("gh", gh_args, { timeout_secs = 15 })
+  local gh = smelt.process.run("gh", gh_args, { timeout_secs = 15 })
   if gh and gh.exit_code == 0 and gh.stdout and #gh.stdout > 0 then
     local v = smelt.parse.json(gh.stdout)
     if type(v) ~= "table" then return { err = "gh: bad response" } end
@@ -357,11 +357,11 @@ end)
 -- Stable channel installs the prebuilt tarball from GitHub Releases
 -- (seconds, no toolchain required). Unstable channel falls back to
 -- `cargo install --branch main` because there's no prebuilt for an
--- arbitrary main HEAD. Both paths run in the background via
--- `smelt.process.run_async`, so the user keeps using smelt while the
--- install proceeds. Replacing a running binary on Unix is safe:
--- `tar -xzf -C $dir` overwrites the inode, the running process keeps
--- executing from memory, the next launch picks up the new build.
+-- arbitrary main HEAD. Both paths run on a background coroutine so
+-- the user keeps using smelt while the install proceeds. Replacing a
+-- running binary on Unix is safe: `tar -xzf -C $dir` overwrites the
+-- inode, the running process keeps executing from memory, the next
+-- launch picks up the new build.
 
 -- Single in-flight guard so a periodic check that fires during an
 -- install doesn't spawn a second one. `attempted[key]` remembers a
@@ -400,10 +400,7 @@ local function install_stable_async(tag, on_done)
     local tmp_tar = exe .. ".upgrade.tar.gz"
 
     smelt.notify("downloading " .. tag .. "…")
-    -- Use curl (truly async via run_async) rather than smelt.http.get,
-    -- which is reqwest::blocking and would freeze the UI thread for the
-    -- multi-MB tarball download.
-    local r = smelt.process.run_async(
+    local r = smelt.process.run(
       "curl", { "-fLso", tmp_tar, url },
       { timeout_secs = 300 }
     )
@@ -416,7 +413,7 @@ local function install_stable_async(tag, on_done)
 
     -- Extract `smelt` next to the running binary. Overwriting an
     -- in-use binary on Unix is safe (unlink + create new inode).
-    local x = smelt.process.run_async(
+    local x = smelt.process.run(
       "tar", { "-xzf", tmp_tar, "-C", dir, "smelt" },
       { timeout_secs = 60 }
     )
@@ -456,7 +453,7 @@ local function install_unstable_async(sha, on_done)
     end
     smelt.notify("building main@" .. sha:sub(1, 7) ..
                  " via cargo (this may take a few minutes)…")
-    local r = smelt.process.run_async("cargo", {
+    local r = smelt.process.run("cargo", {
       "install", "--git", REPO_URL, "--branch", "main",
       "--force", "--locked",
     }, { timeout_secs = 1800 })

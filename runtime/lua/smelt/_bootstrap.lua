@@ -269,7 +269,8 @@ function smelt.fs.write_async(path, contents)
   return false, result.err
 end
 
--- Run `cmd` with `args` off the main thread. Must be called from inside
+-- Run `cmd` with `args` off the main thread. Yields the calling
+-- coroutine until the child exits; must be called from inside
 -- `smelt.spawn(fn)` or a `tool.execute`. `opts` accepts `cwd`, `env`,
 -- `timeout_secs`, `stdin`. Returns
 -- `({ stdout, stderr, exit_code, timed_out }, nil)` on success or
@@ -279,7 +280,7 @@ end
 -- `smelt.task.external` raises `cancelled` — same shape as every other
 -- yielding API.
 -- @sig fun(cmd: string, args: string[]?, opts: table?): { stdout: string, stderr: string, exit_code: integer, timed_out: boolean }?, string?
-function smelt.process.run_async(cmd, args, opts)
+function smelt.process.run(cmd, args, opts)
   local result = smelt.task.external(function(id) smelt.process.__run_async_start(id, cmd, args, opts) end)
   if result.err ~= nil then return nil, result.err end
   return result, nil
@@ -303,6 +304,23 @@ end
 -- @sig fun(url: string, body: string?, opts: table?): { status: integer, final_url: string, body: string, headers: table }?, string?
 function smelt.http.post(url, body, opts)
   local result = smelt.task.external(function(id) smelt.http.__post_async_start(id, url, body, opts) end)
+  if result.err ~= nil then return nil, result.err end
+  return result, nil
+end
+
+-- Run ripgrep with `pattern` over `path` off the main thread. Yields the
+-- calling coroutine until the child exits; must be called from inside
+-- `smelt.spawn(fn)` or a `tool.execute`. `opts` accepts the same fields
+-- as the underlying `smelt.grep` namespace (`mode`,
+-- `case_insensitive`, `multiline`, `line_numbers`, `before_context`,
+-- `after_context`, `context`, `glob`, `type`, `timeout_secs`). Returns
+-- `({ stdout, stderr, exit_code, timed_out }, nil)` on success or
+-- `(nil, err)` on spawn failure. Cancellation kills the child (SIGKILL)
+-- and `smelt.task.external` raises `cancelled`. Exit code 1 (no match)
+-- is not an error — inspect `exit_code` on the result.
+-- @sig fun(pattern: string, path: string, opts: table?): { stdout: string, stderr: string, exit_code: integer, timed_out: boolean }?, string?
+function smelt.grep.run(pattern, path, opts)
+  local result = smelt.task.external(function(id) smelt.grep.__run_async_start(id, pattern, path, opts) end)
   if result.err ~= nil then return nil, result.err end
   return result, nil
 end

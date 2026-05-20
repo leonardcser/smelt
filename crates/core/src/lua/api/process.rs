@@ -116,24 +116,11 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
             },
         )?;
     }
-    m.fn_(
-        "run",
-        "Run `cmd` with `args` synchronously. `opts` accepts `cwd`, `env`, `timeout_secs`, and `stdin`. Returns `({ stdout, stderr, exit_code, timed_out }, nil)` or `(nil, err_string)` on failure.",
-        &["cmd", "args", "opts"],
-        |lua, (cmd, args, opts): (String, Option<Vec<String>>, Option<mlua::Table>)| -> LuaResult<(Option<mlua::Table>, Option<String>)> {
-            let parsed = parse_run_options(opts.as_ref())?;
-            let args = args.unwrap_or_default();
-            match process::run(&cmd, &args, &parsed) {
-                Ok(out) => Ok((Some(output_to_lua(lua, &out)?), None)),
-                Err(err) => Ok((None, Some(err.to_string()))),
-            }
-        },
-    )?;
     {
         let s = Arc::clone(shared);
         m.fn_(
             "__run_async_start",
-            "Begin an async run of `cmd` with `args`. Resolves `task_id` with `{ stdout, stderr, exit_code, timed_out }` on completion, `{ __cancelled = true }` if the calling coroutine is cancelled (child is killed), or `{ err }` on spawn failure. `opts` accepts `cwd`, `env`, `timeout_secs`, and `stdin`. Used internally by `smelt.process.run_async`.",
+            "Begin an async run of `cmd` with `args`. Resolves `task_id` with `{ stdout, stderr, exit_code, timed_out }` on completion, `{ __cancelled = true }` if the calling coroutine is cancelled (child is killed), or `{ err }` on spawn failure. `opts` accepts `cwd`, `env`, `timeout_secs`, and `stdin`. Used internally by `smelt.process.run`.",
             &["task_id", "cmd", "args", "opts"],
             move |_, (task_id, cmd, args, opts): (u64, String, Option<Vec<String>>, Option<mlua::Table>)| -> LuaResult<()> {
                 let parsed = parse_run_options(opts.as_ref())?;
@@ -272,13 +259,4 @@ fn parse_run_options(opts: Option<&mlua::Table>) -> LuaResult<process::Options> 
             .map(Duration::from_secs),
         stdin: t.get::<Option<String>>("stdin")?,
     })
-}
-
-fn output_to_lua(lua: &Lua, out: &process::Output) -> LuaResult<mlua::Table> {
-    let t = lua.create_table()?;
-    t.set("stdout", out.stdout.clone())?;
-    t.set("stderr", out.stderr.clone())?;
-    t.set("exit_code", out.exit_code)?;
-    t.set("timed_out", out.timed_out)?;
-    Ok(t)
 }

@@ -134,7 +134,7 @@ pub fn register_host_api(
     frontend::register(lua, smelt)?;
     fs::register(lua, smelt, shared)?;
     fuzzy::register(lua, smelt)?;
-    grep::register(lua, smelt)?;
+    grep::register(lua, smelt, shared)?;
     html::register(lua, smelt)?;
     http::register(lua, smelt, shared)?;
     image::register(lua, smelt)?;

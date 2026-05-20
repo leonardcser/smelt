@@ -3,11 +3,11 @@
 //! Boots a [`LuaRuntime`] with the host-tier API registered and the
 //! bundled `_bootstrap.lua` evaluated, then exercises the public
 //! primitives (`smelt.task.timeout/race/all`, `smelt.reg.compose`,
-//! `smelt.fs.watch`, `smelt.fs.read_async`, `smelt.process.run_async`,
+//! `smelt.fs.watch`, `smelt.fs.read_async`, `smelt.process.run`,
 //! cancellation behavior, …) end-to-end.
 //!
 //! Tests that need tokio (anything that goes through `tokio::spawn` —
-//! `process.run_async`) use `#[tokio::test]`; everything else uses the
+//! `process.run`) use `#[tokio::test]`; everything else uses the
 //! plain `#[test]` form.
 
 use smelt_core::lua::LuaRuntime;
@@ -48,7 +48,7 @@ fn pump_until_sync(rt: &LuaRuntime, ms: u64, done: impl Fn(&LuaRuntime) -> bool)
 }
 
 /// Same shape as `pump_until_sync` but yields to tokio between ticks so
-/// `tokio::spawn` tasks (e.g. `process.run_async`) can run.
+/// `tokio::spawn` tasks (e.g. `process.run`) can run.
 async fn pump_until_async(rt: &LuaRuntime, ms: u64, done: impl Fn(&LuaRuntime) -> bool) -> bool {
     let deadline = Instant::now() + Duration::from_millis(ms);
     while Instant::now() < deadline {
@@ -278,16 +278,16 @@ async fn fs_async_round_trip() {
     assert_eq!(content, "hello from async");
 }
 
-// -- process.run_async --------------------------------------------------
+// -- process.run --------------------------------------------------
 
 #[tokio::test(flavor = "current_thread")]
-async fn process_run_async_happy_path() {
+async fn process_run_happy_path() {
     let rt = fresh();
     rt.lua
         .load(
             r#"
             smelt.spawn(function()
-                local out, err = smelt.process.run_async("echo", { "hello async" })
+                local out, err = smelt.process.run("echo", { "hello async" })
                 STDOUT = out and out.stdout or ""
                 EXIT = out and out.exit_code or -99
                 ERR = err
@@ -296,7 +296,7 @@ async fn process_run_async_happy_path() {
             "#,
         )
         .exec()
-        .expect("spawn run_async");
+        .expect("spawn run");
     assert!(
         pump_until_async(&rt, 2000, |rt| rt
             .lua
@@ -314,7 +314,7 @@ async fn process_run_async_happy_path() {
 }
 
 #[tokio::test(flavor = "current_thread")]
-async fn process_run_async_kills_child_on_cancel() {
+async fn process_run_kills_child_on_cancel() {
     let rt = fresh();
     // Spawn a coroutine that runs `sleep 5`, then cancel it after a short
     // delay. The coroutine must unwind with `cancelled` (raised by the
@@ -325,15 +325,15 @@ async fn process_run_async_kills_child_on_cancel() {
             CANCELLED = false
             REG = smelt.spawn(function()
                 local ok, err = pcall(function()
-                    smelt.process.run_async("sleep", { "5" })
+                    smelt.process.run("sleep", { "5" })
                 end)
                 CANCELLED = (not ok) and tostring(err):find("cancelled") ~= nil
             end)
             "#,
         )
         .exec()
-        .expect("spawn run_async");
-    // Let the run_async actually launch its tokio task + spawn the child.
+        .expect("spawn run");
+    // Let smelt.process.run actually launch its tokio task + spawn the child.
     let _ = pump_until_async(&rt, 200, |_| false).await;
 
     let started = Instant::now();
