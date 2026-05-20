@@ -160,6 +160,16 @@ impl VimContext<'_> {
         self.buf.replace_range(start..end, text);
         self.vim_state.clamp_visual_anchor(self.buf.as_str());
     }
+
+    /// Insert `text` at `at`, returning the inserted position. Mirrors
+    /// `buf.insert_str` but also clamps the visual anchor: a paste shifts
+    /// every offset past `at` right by `text.len()`, so a pre-paste anchor
+    /// can land mid-codepoint in the post-paste source.
+    fn insert_str(&mut self, at: usize, text: &str) -> usize {
+        let p = self.buf.insert_str(at, text);
+        self.vim_state.clamp_visual_anchor(self.buf.as_str());
+        p
+    }
 }
 
 // ── Internal types ──────────────────────────────────────────────────────────
@@ -629,7 +639,7 @@ fn handle_normal_char(c: char, ctx: &mut VimContext<'_>) -> Action {
                     let eol = line_end(ctx.buf.as_str(), *ctx.cpos);
                     let text = ctx.register().to_string();
                     let insert = format!("\n{}", text);
-                    let p = ctx.buf.insert_str(eol, &insert);
+                    let p = ctx.insert_str(eol, &insert);
                     *ctx.cpos = p + 1;
                     // Move to first non-blank.
                     *ctx.cpos += ctx.buf.as_str()[*ctx.cpos..]
@@ -639,7 +649,7 @@ fn handle_normal_char(c: char, ctx: &mut VimContext<'_>) -> Action {
                 } else {
                     let after = advance_chars(ctx.buf.as_str(), *ctx.cpos, 1).min(ctx.buf.len());
                     let text = ctx.register().to_string();
-                    let p = ctx.buf.insert_str(after, &text);
+                    let p = ctx.insert_str(after, &text);
                     let paste_end = p + text.len();
                     *ctx.cpos = prev_char_boundary(ctx.buf.as_str(), paste_end).max(p);
                     clamp_normal(ctx.buf.as_str(), ctx.cpos);
@@ -655,7 +665,7 @@ fn handle_normal_char(c: char, ctx: &mut VimContext<'_>) -> Action {
                     let sol = line_start(ctx.buf.as_str(), *ctx.cpos);
                     let text = ctx.register().to_string();
                     let insert = format!("{}\n", text);
-                    let p = ctx.buf.insert_str(sol, &insert);
+                    let p = ctx.insert_str(sol, &insert);
                     *ctx.cpos = p;
                     *ctx.cpos += ctx.buf.as_str()[*ctx.cpos..]
                         .bytes()
@@ -663,7 +673,7 @@ fn handle_normal_char(c: char, ctx: &mut VimContext<'_>) -> Action {
                         .count();
                 } else {
                     let text = ctx.register().to_string();
-                    let p = ctx.buf.insert_str(*ctx.cpos, &text);
+                    let p = ctx.insert_str(*ctx.cpos, &text);
                     let plen = text.len();
                     if plen > 0 {
                         let paste_end = p + plen;
