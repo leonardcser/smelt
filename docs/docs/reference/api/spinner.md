@@ -4,7 +4,7 @@
 
 **Tier:** `UiHost` — Requires a terminal UI; calling these from headless mode raises.
 
-Shared spinner glyph and cadence for plugin animations, plus a busy-token stack so long-running background work shows the status-bar spinner. UiHost-only.
+Shared spinner glyph and cadence for plugin animations, plus a busy-token stack so long-running background work surfaces in the prompt top-bar indicator. UiHost-only.
 
 ## `smelt.spinner.busy`
 
@@ -14,7 +14,7 @@ fun(label: string): smelt.Reg
 
 Types: [`smelt.Reg`](types.md#smeltreg)
 
-Push a busy token onto the per-app stack and return a `Reg` whose `:remove()` pops it. While any token is live, the status bar shows the spinner with the top token's `label`. Multiple plugins can hold tokens concurrently; the most recently pushed label wins.
+Push a busy token onto the per-app stack and return a `Reg` whose `:remove()` pops it. While any token is live, the prompt top-bar indicator shows the spinner with the top token's `label`. Multiple plugins can hold tokens concurrently; the most recently pushed label wins.
 
 ## `smelt.spinner.busy_label`
 
@@ -30,7 +30,7 @@ Return the top busy-stack label, or `nil` when nothing is busy.
 fun(): string
 ```
 
-Return the current spinner glyph (single grapheme). Stays in sync with the status bar's working pill so plugin spinners animate together.
+Return the current spinner glyph (single grapheme). Stays in sync with the prompt top-bar working indicator so plugin spinners animate together.
 
 ## `smelt.spinner.is_busy`
 

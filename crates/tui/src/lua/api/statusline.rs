@@ -96,12 +96,13 @@ replace earlier ones with the same name. Returns a `Reg` whose \
     }
     m.fn_(
         "snapshot",
-        "Return the statusline state in one table per refresh: \
-`working`/`throbber`, `vim`, `mode`, `permission_pending`, \
-`running_procs`, `running_agents`, `task_label`, `settings`, and \
-`position`. Styles are not projected — name a `style_group` on each \
-segment instead. Returns an empty table when the app pointer is \
-unavailable.",
+        "Return the statusline state in one table per refresh: `working` \
+(stripped down to `{ animating }`; the working pill itself lives in the \
+prompt top bar — read `work_*` cells for the full state), `vim`, `mode`, \
+`permission_pending`, `running_procs`, `running_agents`, `task_label`, \
+`settings`, and `position`. Styles are not projected — name a \
+`style_group` on each segment instead. Returns an empty table when the \
+app pointer is unavailable.",
         &[],
         |lua, ()| -> LuaResult<mlua::Table> {
             match crate::lua::try_with_app(|app| build_snapshot(app, lua)) {
@@ -120,36 +121,21 @@ unavailable.",
 fn build_snapshot(app: &mut crate::app::TuiApp, lua: &Lua) -> LuaResult<mlua::Table> {
     let t = lua.create_table()?;
 
-    // Working state + throbber spans.
+    // The animating/working pill rendered by the previous status.lua
+    // composer now lives in the prompt-block top bar; the snapshot
+    // keeps a stripped-down `working` table so plugins that just want
+    // "is anything happening" can still gate on `animating`. Plugins
+    // that need richer state read the `work_*` cells directly. `tps`
+    // is exposed here (rather than only in `work_*` cells) because the
+    // status bar renders it next to the cache-hit ratio.
     let working = lua.create_table()?;
-    let busy_label = app.busy_stack.top_label();
-    let busy_since = app.busy_stack.since();
-    let is_busy = app.busy_stack.is_busy();
-    working.set("animating", app.working.is_animating() || is_busy)?;
-    working.set("busy", is_busy)?;
-    if let Some(ref l) = busy_label {
-        working.set("busy_label", l.as_str())?;
+    working.set(
+        "animating",
+        app.working.is_animating() || app.busy_stack.is_busy(),
+    )?;
+    if let Some(tps) = app.working.turn_meta().and_then(|m| m.avg_tps) {
+        working.set("tps", tps)?;
     }
-    if let Some(c) = app.working.spinner_char() {
-        working.set("spinner_char", c)?;
-    }
-    let throbber_arr = lua.create_table()?;
-    let show_tps = app.core.config.settings.show_tps;
-    for (i, item) in app
-        .working
-        .throbber_data(show_tps, busy_label.as_deref(), busy_since)
-        .iter()
-        .enumerate()
-    {
-        let st = lua.create_table()?;
-        st.set("text", item.text.as_str())?;
-        st.set("muted", item.is_muted)?;
-        st.set("bold", item.bold)?;
-        st.set("dim", item.dim)?;
-        st.set("priority", item.priority)?;
-        throbber_arr.set(i + 1, st)?;
-    }
-    working.set("throbber", throbber_arr)?;
     t.set("working", working)?;
 
     // Vim mode: focused overlay-leaf with vim wins; non-vim overlay leaf yields no label.
@@ -213,7 +199,7 @@ fn build_snapshot(app: &mut crate::app::TuiApp, lua: &Lua) -> LuaResult<mlua::Ta
 
     let settings = lua.create_table()?;
     settings.set("show_slug", app.core.config.settings.show_slug)?;
-    settings.set("show_tps", show_tps)?;
+    settings.set("show_tps", app.core.config.settings.show_tps)?;
     t.set("settings", settings)?;
 
     // Cursor position: tracks the focused leaf's window (prompt, transcript, or

@@ -8,6 +8,7 @@ use crate::smelt_term::grid::Style;
 use crate::smelt_term::{Buffer, ExtmarkOpts, ExtmarkPayload};
 
 use smelt_core::style::Color;
+use smelt_core::working::WorkState;
 
 /// Extmark namespace for `Win:placeholder` text rendered as a dim
 /// suggestion when the buffer is empty.
@@ -32,7 +33,29 @@ pub(crate) struct PromptAboveInput<'a> {
     pub(crate) queued: &'a [String],
     pub(crate) stash: &'a Option<crate::input::InputSnapshot>,
     pub(crate) bar_info: BarInfo,
+    pub(crate) indicator: Option<IndicatorInfo>,
     pub(crate) width: u16,
+}
+
+/// Working/done/interrupted indicator slotted into the prompt top bar's
+/// left side. Composer-ready: glyph + label + optional trailing
+/// duration; the bar layer just maps fields onto styled spans. (TPS
+/// lives in the status bar; see `statusline.rs`.)
+#[derive(Clone, Debug)]
+pub(crate) struct IndicatorInfo {
+    pub(crate) state: WorkState,
+    pub(crate) label: String,
+    /// Glyph for the current frame. Empty when the indicator is static
+    /// and intentionally omits a spinner (idle/no-op).
+    pub(crate) glyph: &'static str,
+    /// Pre-formatted duration text (e.g. `"1m 23s"`). `None` to omit.
+    pub(crate) duration_text: Option<String>,
+    /// Optional retry suffix (e.g. `"retrying in 3s #2"`).
+    pub(crate) retry_text: Option<String>,
+    /// Elapsed (paused-aware) duration that drives the traveling-wave
+    /// color animation across the glyph + label characters. `None`
+    /// means the indicator renders with a static fg.
+    pub(crate) pulse_elapsed: Option<std::time::Duration>,
 }
 
 pub(crate) struct InputLeafInput<'a> {
@@ -73,10 +96,19 @@ pub(crate) fn compute_prompt_above(
     if pa.stash.is_some() {
         rows.push(stash_row(usable, theme));
     }
+    let top_bar_left = pa
+        .indicator
+        .as_ref()
+        .map(|i| build_top_bar_left(i, theme))
+        .unwrap_or_default();
     let top_bar_right = build_top_bar_right(&pa.bar_info, theme);
     rows.push(bar_row(
         usable,
-        None,
+        if top_bar_left.is_empty() {
+            None
+        } else {
+            Some(&top_bar_left)
+        },
         if top_bar_right.is_empty() {
             None
         } else {
@@ -467,6 +499,128 @@ fn bar_row(
     WindowRow::styled(segs)
 }
 
+/// Color at character column `x` for the traveling brightness wave.
+/// Phase moves left→right: as `elapsed` grows, the crest shifts to
+/// higher `x`. Output is a grayscale RGB between `LOW` and `HIGH`.
+fn wave_color_at(elapsed: std::time::Duration, x: f32) -> Color {
+    // Time period for the wave to complete a full cycle at a fixed
+    // column (also the inverse of how often a given char flashes).
+    const PERIOD_MS: f32 = 1_200.0;
+    // Spatial period — how many character cells fit one full wave.
+    // Shorter → more crests visible at once.
+    const WAVELENGTH: f32 = 16.0;
+    const HIGH: f32 = 255.0;
+    const LOW: f32 = 140.0;
+
+    let t = (elapsed.as_millis() as f32) / PERIOD_MS;
+    let phase = (t - x / WAVELENGTH) * std::f32::consts::TAU;
+    let intensity = (phase.sin() + 1.0) * 0.5;
+    let level = (LOW + (HIGH - LOW) * intensity).round() as u8;
+    Color::Rgb {
+        r: level,
+        g: level,
+        b: level,
+    }
+}
+
+/// Compose the indicator into top-bar spans. Glyph + label render bold;
+/// active states (Working / Retrying / Busy) emit one span per
+/// character with colors sampled from a left-to-right traveling
+/// sinusoid (a wave of "brightness" sliding across the label). Static
+/// states (Paused / Done / Interrupted) use a single muted span. A
+/// leading bar-coloured `─` indents the row so the indicator visually
+/// grows out of the horizontal rule.
+fn build_top_bar_left(info: &IndicatorInfo, theme: &crate::smelt_term::Theme) -> Vec<BarSpan> {
+    let muted = theme_color(theme, "Comment");
+    let bar = theme_color(theme, "SmeltBar");
+    let default_fg = theme_color(theme, "Normal");
+
+    let mut spans = Vec::new();
+    // Leading `─` so the indicator sits one cell in from the edge and
+    // visually merges with the bar's horizontal rule.
+    spans.push(BarSpan {
+        text: "\u{2500}".into(),
+        color: bar,
+        bg: None,
+        bold: false,
+        dim: false,
+        priority: 0,
+    });
+
+    let active = matches!(
+        info.state,
+        WorkState::Working | WorkState::Retrying | WorkState::Busy
+    );
+
+    if active {
+        // Compose " glyph label" and emit each char as its own span so
+        // the wave can paint a left→right gradient of brightness over
+        // the accent color.
+        let text = if info.label.is_empty() {
+            format!(" {}", info.glyph)
+        } else {
+            format!(" {} {}", info.glyph, info.label)
+        };
+        let elapsed = info.pulse_elapsed.unwrap_or_default();
+        for (x, ch) in text.chars().enumerate() {
+            spans.push(BarSpan {
+                text: ch.to_string(),
+                color: wave_color_at(elapsed, x as f32),
+                bg: None,
+                bold: true,
+                dim: false,
+                priority: 0,
+            });
+        }
+    } else {
+        let (color, bold, dim) = match info.state {
+            WorkState::Paused | WorkState::Done | WorkState::Interrupted => (muted, false, true),
+            _ => (default_fg, true, false),
+        };
+        if !info.glyph.is_empty() {
+            spans.push(BarSpan {
+                text: format!(" {}", info.glyph),
+                color,
+                bg: None,
+                bold,
+                dim,
+                priority: 0,
+            });
+        }
+        if !info.label.is_empty() {
+            spans.push(BarSpan {
+                text: format!(" {}", info.label),
+                color,
+                bg: None,
+                bold,
+                dim,
+                priority: 0,
+            });
+        }
+    }
+    if let Some(ref dur) = info.duration_text {
+        spans.push(BarSpan {
+            text: format!(" {}", dur),
+            color: muted,
+            bg: None,
+            bold: false,
+            dim: true,
+            priority: 1,
+        });
+    }
+    if let Some(ref retry) = info.retry_text {
+        spans.push(BarSpan {
+            text: format!(" ({})", retry),
+            color: muted,
+            bg: None,
+            bold: false,
+            dim: true,
+            priority: 2,
+        });
+    }
+    spans
+}
+
 fn build_top_bar_right(info: &BarInfo, theme: &crate::smelt_term::Theme) -> Vec<BarSpan> {
     let muted = theme_color(theme, "Comment");
     let bar = theme_color(theme, "SmeltBar");
@@ -855,6 +1009,7 @@ mod tests {
         let pa = PromptAboveInput {
             queued: &[],
             stash: &None,
+            indicator: None,
             width: 80,
             bar_info: BarInfo {
                 model_label: None,

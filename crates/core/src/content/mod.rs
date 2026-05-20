@@ -60,6 +60,14 @@ pub fn spinner_glyph() -> &'static str {
     SPINNER_FRAMES[spinner_frame_index(epoch.elapsed())]
 }
 
+/// Glyph for a caller-provided elapsed duration. Use this when the
+/// frame must derive from a virtual or paused-aware clock so snapshot
+/// tests stay deterministic. Callers that want process-wide animation
+/// use `spinner_glyph` instead.
+pub fn glyph_for(elapsed: std::time::Duration) -> &'static str {
+    SPINNER_FRAMES[spinner_frame_index(elapsed)]
+}
+
 /// Fallback column budget when no explicit width is provided.
 pub(crate) fn default_width() -> usize {
     80

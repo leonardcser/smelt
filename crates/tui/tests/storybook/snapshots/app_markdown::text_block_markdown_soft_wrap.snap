@@ -8,6 +8,6 @@ viewport is narrower than the sentence and we
 want to exercise the soft-wrap path through
 render_paragraph.
 
-───────────────────────────────────────────────  ─
+─ ✿ working… ──────────────────────────────────  ─
 
 ──────────────────────────────────────────────────

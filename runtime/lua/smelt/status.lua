@@ -9,50 +9,19 @@ local function compose()
   local snap = smelt.statusline.snapshot()
   if not snap then return {} end
 
-  local working = snap.working or {}
   local items = {}
 
-  -- ── Slug / compacting pill ─────────────────────────────────────────
-  local compacting = working.busy_label == "compacting"
-  local live = working.animating
-  local label
-  if live then
-    if compacting then
-      label = "compacting"
-    elseif snap.settings and snap.settings.show_slug then
-      label = snap.task_label or "working"
-    else
-      label = "working"
-    end
-  elseif snap.settings and snap.settings.show_slug then
-    label = snap.task_label
-  end
-
-  -- SmeltSlug carries the pill fg only; the bg defaults to SmeltAccent
-  -- unless `/color` has set an explicit slug bg. Resolved here, not in
-  -- the engine, so the cascade rule stays out of Rust.
-  local slug_extra
-  if not compacting then
+  -- ── Slug pill (always shows when show_slug is on; working state lives in the prompt top bar) ──
+  if snap.settings and snap.settings.show_slug and snap.task_label then
     local slug = smelt.theme.get("SmeltSlug") or {}
+    local slug_extra
     if not slug.bg then
       local accent = smelt.theme.get("SmeltAccent") or {}
       if accent.fg then slug_extra = { bg = accent.fg } end
     end
-  end
-
-  local pill_group = compacting and "SmeltCompacting" or "SmeltSlug"
-  if working.spinner_char then
     table.insert(items, {
-      text = " " .. working.spinner_char,
-      style_group = pill_group,
-      style = slug_extra,
-      priority = 0,
-    })
-  end
-  if label then
-    table.insert(items, {
-      text = " " .. label .. " ",
-      style_group = pill_group,
+      text = " " .. snap.task_label .. " ",
+      style_group = "SmeltSlug",
       style = slug_extra,
       priority = 5,
       truncatable = true,
@@ -89,20 +58,16 @@ local function compose()
     })
   end
 
-  -- ── Throbber: skip the first span when animating (slug pill already shows the spinner). ──
-  local throb = working.throbber or {}
-  local skip = (working.animating and #throb > 0) and 1 or 0
-  for i = skip + 1, #throb do
-    local span = throb[i]
-    local prio = span.priority or 0
-    if prio == 0 then prio = 4
-    elseif prio == 3 then prio = 6 end
-    table.insert(items, {
-      text = span.text,
-      style_group = span.muted and "Comment" or nil,
-      style = { bold = span.bold, dim = span.dim },
-      priority = prio,
-    })
+  -- ── Tokens-per-second (right strip) ───────────────────────────────
+  if snap.settings and snap.settings.show_tps then
+    local tps = (snap.working or {}).tps
+    if tps then
+      table.insert(items, {
+        text = string.format(" %.1f tok/s", tps),
+        style_group = "Comment",
+        priority = 4,
+      })
+    end
   end
 
   -- ── Cache hit ratio (right strip) ────────────────────────────────

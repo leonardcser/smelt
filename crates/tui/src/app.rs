@@ -620,14 +620,15 @@ impl TuiApp {
         self.publish_work_cells();
     }
 
-    /// Derive and publish the `work_*` cells from `WorkingState` and the
-    /// per-app busy stack. Layered so engine-side `Working`/`Retrying`/
-    /// `Paused` win over busy tokens; an empty engine state with a live
-    /// busy token reads as `Busy`; otherwise `Done`/`Interrupted` if a
-    /// turn just archived, else `Idle`.
-    fn publish_work_cells(&mut self) {
+    /// Resolve the public `WorkState` and label from `WorkingState` +
+    /// the per-app busy stack. Engine-side `Working`/`Retrying`/`Paused`
+    /// win over busy tokens; an empty engine state with a live busy
+    /// token reads as `Busy`; otherwise `Done`/`Interrupted` if a turn
+    /// just archived, else `Idle`. The label is the top busy entry's
+    /// when set, otherwise `"working"` for live engine phases, otherwise
+    /// empty.
+    pub(crate) fn resolve_work_state(&self) -> (smelt_core::working::WorkState, String) {
         use smelt_core::working::{TurnOutcome, WorkState};
-
         let engine = self.working.engine_state();
         let busy_label = self.busy_stack.top_label();
         let outcome = self.working.last_outcome();
@@ -654,6 +655,86 @@ impl TuiApp {
         } else {
             String::new()
         };
+
+        (state, label)
+    }
+
+    /// Pre-composed top-bar indicator state, or `None` when the
+    /// indicator should not render (`Idle` with no last outcome).
+    pub(crate) fn indicator_info(&self) -> Option<crate::content::prompt_buf::IndicatorInfo> {
+        use crate::content::prompt_buf::IndicatorInfo;
+        use smelt_core::working::WorkState;
+        let (state, resolved_label) = self.resolve_work_state();
+        if matches!(state, WorkState::Idle) {
+            return None;
+        }
+        let label = if resolved_label.is_empty() {
+            match state {
+                WorkState::Done => "done".to_string(),
+                WorkState::Interrupted => "interrupted".to_string(),
+                WorkState::Paused => "paused".to_string(),
+                _ => resolved_label,
+            }
+        } else {
+            resolved_label
+        };
+        // Active labels get a trailing ellipsis ("working…", "compacting…")
+        // so they read as in-progress even at a glance.
+        let label = if matches!(
+            state,
+            WorkState::Working | WorkState::Retrying | WorkState::Busy
+        ) && !label.is_empty()
+        {
+            format!("{label}\u{2026}")
+        } else {
+            label
+        };
+        let animating = matches!(
+            state,
+            WorkState::Working | WorkState::Retrying | WorkState::Busy
+        );
+        let elapsed = match state {
+            WorkState::Busy => self.busy_stack.since().map(|s| s.elapsed()),
+            _ => self.working.elapsed(),
+        };
+        let glyph = if animating {
+            smelt_core::content::glyph_for(elapsed.unwrap_or_default())
+        } else if matches!(state, WorkState::Paused) {
+            smelt_core::content::glyph_for(std::time::Duration::ZERO)
+        } else {
+            ""
+        };
+        // Duration suppressed for `Interrupted` — the label alone reads
+        // cleaner without trailing zero-or-stale seconds.
+        let duration_text = if matches!(state, WorkState::Interrupted) {
+            None
+        } else {
+            elapsed
+                .filter(|d| d.as_secs() > 0)
+                .map(|d| smelt_core::utils::format_duration(d.as_secs()))
+        };
+        let retry_text = self.working.retry_info().map(|(attempt, remaining_ms)| {
+            format!("retrying in {}s #{}", remaining_ms / 1000, attempt)
+        });
+        let pulse_elapsed = if animating { elapsed } else { None };
+        Some(IndicatorInfo {
+            state,
+            label,
+            glyph,
+            duration_text,
+            retry_text,
+            pulse_elapsed,
+        })
+    }
+
+    /// Derive and publish the `work_*` cells from `WorkingState` and the
+    /// per-app busy stack.
+    fn publish_work_cells(&mut self) {
+        use smelt_core::working::TurnOutcome;
+
+        let (state, label) = self.resolve_work_state();
+        let engine = self.working.engine_state();
+        let outcome = self.working.last_outcome();
 
         let outcome_str = match outcome {
             Some(TurnOutcome::Done) if engine.is_none() => "done",
@@ -1280,6 +1361,7 @@ impl TuiApp {
             let has_animation = self.ui.focused_overlay().is_some()
                 || self.has_active_exec()
                 || self.working.is_animating()
+                || self.busy_stack.is_busy()
                 || yank_flash_active
                 || drag_active;
             let next_timer_delay = self

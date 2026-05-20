@@ -1,7 +1,7 @@
 //! `smelt.spinner` — shared spinner glyph and cadence so plugin
-//! animations stay in sync with the built-in status pill, plus a
-//! per-app busy-token stack that drives the status-bar spinner when
-//! long-running background work is in flight. UiHost-only.
+//! animations stay in sync with the built-in working indicator, plus a
+//! per-app busy-token stack that drives the prompt top-bar indicator
+//! when long-running background work is in flight. UiHost-only.
 
 use mlua::prelude::*;
 use smelt_core::lua::doc::Tier;
@@ -13,12 +13,12 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
         lua,
         smelt,
         "spinner",
-        "Shared spinner glyph and cadence for plugin animations, plus a busy-token stack so long-running background work shows the status-bar spinner. UiHost-only.",
+        "Shared spinner glyph and cadence for plugin animations, plus a busy-token stack so long-running background work surfaces in the prompt top-bar indicator. UiHost-only.",
         Tier::UiHost,
     )?;
     m.fn_(
         "glyph",
-        "Return the current spinner glyph (single grapheme). Stays in sync with the status bar's working pill so plugin spinners animate together.",
+        "Return the current spinner glyph (single grapheme). Stays in sync with the prompt top-bar working indicator so plugin spinners animate together.",
         &[],
         |_, ()| Ok(smelt_core::content::spinner_glyph()),
     )?;
@@ -30,7 +30,7 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
     )?;
     m.fn_(
         "busy",
-        "Push a busy token onto the per-app stack and return a `Reg` whose `:remove()` pops it. While any token is live, the status bar shows the spinner with the top token's `label`. Multiple plugins can hold tokens concurrently; the most recently pushed label wins.",
+        "Push a busy token onto the per-app stack and return a `Reg` whose `:remove()` pops it. While any token is live, the prompt top-bar indicator shows the spinner with the top token's `label`. Multiple plugins can hold tokens concurrently; the most recently pushed label wins.",
         &["label"],
         |_, label: String| -> LuaResult<LuaReg> {
             let id = crate::lua::with_app(|app| app.busy_stack.push(label));

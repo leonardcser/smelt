@@ -221,10 +221,12 @@ impl TuiApp {
             show_cost: self.core.config.settings.show_cost,
             session_cost_usd: self.core.session.session_cost_usd,
         };
+        let indicator = self.indicator_info();
         let pa = prompt_buf::PromptAboveInput {
             queued,
             stash: &self.input.stash,
             bar_info,
+            indicator,
             width: term_w,
         };
         let theme = self.ui.theme().clone();

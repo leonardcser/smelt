@@ -22,7 +22,7 @@ Register a Lua statusline source named `name`. The handler is called once per re
 fun(): table
 ```
 
-Return the statusline state in one table per refresh: `working`/`throbber`, `vim`, `mode`, `permission_pending`, `running_procs`, `running_agents`, `task_label`, `settings`, and `position`. Styles are not projected — name a `style_group` on each segment instead. Returns an empty table when the app pointer is unavailable.
+Return the statusline state in one table per refresh: `working` (stripped down to `{ animating }`; the working pill itself lives in the prompt top bar — read `work_*` cells for the full state), `vim`, `mode`, `permission_pending`, `running_procs`, `running_agents`, `task_label`, `settings`, and `position`. Styles are not projected — name a `style_group` on each segment instead. Returns an empty table when the app pointer is unavailable.
 
 ## `smelt.statusline.unregister`
 
