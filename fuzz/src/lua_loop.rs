@@ -198,6 +198,20 @@ pub enum LuaOp {
     /// `LuaSnippet { code = "smelt.os.unsetenv('')" }`. Stable across
     /// `Arbitrary` impl changes (raw libFuzzer-byte seeds aren't).
     LuaSnippet { code: String },
+
+    /// `smelt.work.busy("label")` — push a busy token, store the
+    /// returned `Reg` under `slot % POOL`. Exercises the per-app
+    /// `BusyStack`: push ordering, label drift, reactive `work_*` cell
+    /// publishing, and crucially the cleanup path (reload must wipe
+    /// every token; `Reg:remove()` from `WorkBusyRelease` must pop the
+    /// exact pushed id).
+    WorkBusyAcquire { slot: u8, label_slot: u8 },
+
+    /// `__fuzz.regs[slot]:remove()` — release a token captured by an
+    /// earlier `WorkBusyAcquire`. No-op if the slot is nil; same chord
+    /// the production code uses (`Reg:remove`) so the BusyStack release
+    /// path with mismatched ids surfaces here too.
+    WorkBusyRelease { slot: u8 },
 }
 
 impl LuaOp {
@@ -254,12 +268,16 @@ impl LuaOp {
                 let preview: String = code.chars().take(40).collect();
                 format!("lua_snippet {preview:?}")
             }
+            WorkBusyAcquire { slot, label_slot } => {
+                format!("work.busy slot={slot} label={label_slot}")
+            }
+            WorkBusyRelease { slot } => format!("work.release slot={slot}"),
         }
     }
 }
 
 /// Total `LuaOp` variant count. Keep in lockstep with `build_lua_op`.
-pub const N_LUAOP_VARIANTS: usize = 13;
+pub const N_LUAOP_VARIANTS: usize = 15;
 
 /// Build one `LuaOp` by variant index. Payloads still come from
 /// `u.arbitrary()` so the value space stays unrestricted.
@@ -314,6 +332,13 @@ fn build_lua_op(idx: usize, u: &mut Unstructured<'_>) -> arbitrary::Result<LuaOp
         12 => LuaOp::ApiProbe {
             fn_idx: u.arbitrary()?,
             arg_kind: u.arbitrary()?,
+        },
+        13 => LuaOp::WorkBusyAcquire {
+            slot: u.arbitrary()?,
+            label_slot: u.arbitrary()?,
+        },
+        14 => LuaOp::WorkBusyRelease {
+            slot: u.arbitrary()?,
         },
         n => unreachable!("lua_op idx {n} out of range; bump N_LUAOP_VARIANTS or extend dispatch"),
     })
@@ -637,7 +662,9 @@ pub fn build_snippet(ops: &[LuaOp], api_metas: &[(&str, &str)]) -> String {
     // index into them. Initialised fresh each scenario; on /reload
     // these locals survive (they're in the eval frame, not the
     // bundled-plugin frame that gets wiped).
-    out.push_str("local __fuzz = { bufs = {}, wins = {}, overlays = {}, paints = {} }\n");
+    out.push_str(
+        "local __fuzz = { bufs = {}, wins = {}, overlays = {}, paints = {}, regs = {} }\n",
+    );
     for op in ops {
         match op {
             LuaOp::BufNew { name_slot } => emit_buf_new(&mut out, *name_slot),
@@ -684,9 +711,37 @@ pub fn build_snippet(ops: &[LuaOp], api_metas: &[(&str, &str)]) -> String {
                 out.push_str(code);
                 out.push_str("\nend)\n");
             }
+            LuaOp::WorkBusyAcquire { slot, label_slot } => {
+                emit_work_busy_acquire(&mut out, *slot, *label_slot);
+            }
+            LuaOp::WorkBusyRelease { slot } => emit_work_busy_release(&mut out, *slot),
         }
     }
     out
+}
+
+/// `__fuzz.regs[slot] = smelt.work.busy("fuzz.label.<n>")`. The slot
+/// pool is 6-wide so collisions on the same slot exercise the
+/// "overwrite then leak the prior `Reg`" case — the prior token must
+/// then survive only on the BusyStack (with no client handle), making
+/// reload-time cleanup the only release path.
+fn emit_work_busy_acquire(out: &mut String, slot: u8, label_slot: u8) {
+    let slot = (slot as usize) % 6 + 1;
+    let label = label_slot as usize % 4;
+    out.push_str(&format!(
+        "pcall(function() __fuzz.regs[{slot}] = smelt.work.busy(\"fuzz.label.{label}\") end)\n"
+    ));
+}
+
+/// `__fuzz.regs[slot]:remove()` — pop the matching busy token from
+/// the BusyStack. Drops the slot afterwards so a follow-up release
+/// no-ops cleanly (matches plugin code that nils out the Reg after
+/// release).
+fn emit_work_busy_release(out: &mut String, slot: u8) {
+    let slot = (slot as usize) % 6 + 1;
+    out.push_str(&format!(
+        "pcall(function() if __fuzz.regs[{slot}] then __fuzz.regs[{slot}]:remove(); __fuzz.regs[{slot}] = nil end end)\n"
+    ));
 }
 
 /// Emit a `pcall(<module>.<name>, <arg>)` for one of the api_metas

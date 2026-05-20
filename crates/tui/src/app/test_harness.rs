@@ -1175,6 +1175,19 @@ impl TestApp {
                 );
             }
         }
+
+        // BusyStack `since` field tracks the timestamp of the *first*
+        // pushed token; it MUST be Some iff entries is non-empty. The
+        // reactive `work_*` cells and `WorkState::elapsed` consult it,
+        // and a stale `Some` after the last release would leave the
+        // prompt indicator animating past 0 entries.
+        assert_eq!(
+            self.app.busy_stack.is_busy(),
+            self.app.busy_stack.since().is_some(),
+            "busy_stack is_busy={} but since.is_some()={}",
+            self.app.busy_stack.is_busy(),
+            self.app.busy_stack.since().is_some(),
+        );
     }
 
     /// Enumerate every Lua function recorded by `LuaMod::fn_` at
