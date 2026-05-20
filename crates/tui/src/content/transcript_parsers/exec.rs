@@ -6,10 +6,11 @@ use smelt_core::content::builder::LineBuilder;
 use smelt_core::style::Color;
 use smelt_core::theme::intern;
 
+use super::metrics::chrome_text_width;
 use super::tools::render_wrapped_output;
 
 pub(super) fn render(out: &mut LineBuilder, command: &str, output: &str, width: usize) -> u16 {
-    let text_w = width.saturating_sub(2).max(1);
+    let text_w = chrome_text_width(width);
     let exec_fg = out
         .theme()
         .resolve(intern("SmeltExecPrefix"))

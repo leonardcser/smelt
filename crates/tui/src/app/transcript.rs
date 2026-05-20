@@ -563,7 +563,7 @@ impl TuiApp {
         if !combined.is_empty() {
             let (label, line_count) = thinking_summary(&combined);
             crate::content::emit_newlines(out, self.thinking_summary_gap());
-            render_thinking_summary(out, width, &label, line_count, true);
+            render_thinking_summary(out, width, &label, line_count);
         }
     }
 

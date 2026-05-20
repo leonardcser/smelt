@@ -11,6 +11,8 @@ use smelt_core::content::wrap::wrap_line;
 use smelt_core::style::Color;
 use smelt_core::theme::intern;
 
+use super::metrics::CHROME_INNER_PAD;
+
 pub(super) fn render(
     out: &mut LineBuilder,
     lines: &[String],
@@ -27,10 +29,11 @@ pub(super) fn render(
         selectable: true,
         copy_as: Some(String::new()),
     };
+    let pad: String = " ".repeat(CHROME_INNER_PAD);
 
     let blank_row = |out: &mut LineBuilder| {
         out.set_hl(user_bg);
-        out.print_with_meta(" ", pad_meta.clone());
+        out.print_with_meta(&pad, pad_meta.clone());
         out.print_with_meta(" ", blank_anchor_meta.clone());
         out.reset_style();
         out.fill_line_bg(user_bg_color);
@@ -54,7 +57,7 @@ pub(super) fn render(
         }
         for chunk in &chunks {
             out.set_hl(user_bg);
-            out.print_with_meta(" ", pad_meta.clone());
+            out.print_with_meta(&pad, pad_meta.clone());
             out.set_bold();
             paint(out, chunk, chunk_idx);
             out.set_hl(user_bg);

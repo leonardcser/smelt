@@ -3,6 +3,8 @@
 use smelt_core::content::builder::{display_width, LineBuilder};
 use smelt_core::theme::intern;
 
+use super::metrics::chrome_text_width;
+
 /// Preprocessed user message layout: tab-expanded, blank-trimmed lines with a computed `block_w`.
 pub struct UserBlockGeometry {
     pub lines: Vec<String>,
@@ -43,7 +45,7 @@ pub(super) fn render(
     width: usize,
 ) -> u16 {
     let is_command = smelt_core::commands::is_command(text.trim());
-    let text_w = width.saturating_sub(2).max(1);
+    let text_w = chrome_text_width(width);
     let geom = UserBlockGeometry::new(text, text_w);
     super::chrome::render(out, &geom.lines, text_w, |out, chunk, _idx| {
         print_highlights(out, chunk, image_labels, is_command);

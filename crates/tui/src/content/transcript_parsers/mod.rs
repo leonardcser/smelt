@@ -15,6 +15,7 @@ mod chrome;
 mod code_line;
 mod compacted;
 mod exec;
+mod metrics;
 mod text;
 mod thinking;
 mod tool_call;
@@ -873,5 +874,141 @@ mod tests {
             .iter()
             .any(|span| !span.meta.selectable && span.text.contains("3s"));
         assert!(has_non_selectable_time);
+    }
+
+    /// Snapshot the leftmost cells of every block variant against the values
+    /// declared in `metrics.rs`. This is the regression guard against block
+    /// renderers drifting back to ad-hoc `"  "` / `"│ "` literals.
+    #[test]
+    fn leftmost_padding_matches_metrics() {
+        use super::metrics::{BLOCK_GUTTER_SPACE, CHROME_INNER_PAD, THINKING_GUTTER};
+        use smelt_core::transcript_model::ToolState;
+
+        let chrome_pad: String = " ".repeat(CHROME_INNER_PAD);
+        let ctx = LayoutContext {
+            width: W as u16,
+            show_thinking: false,
+            view_state: ViewState::Expanded,
+        };
+        let render = |b: &Block, st: Option<&ToolState>| layout_block_test(b, st, &ctx);
+
+        // User: every row in the chrome panel starts with the chrome pad.
+        let lines = render(&user("hello"), None);
+        for line in &lines {
+            assert!(
+                line.text.starts_with(&chrome_pad),
+                "user row missing chrome pad: {:?}",
+                line.text
+            );
+        }
+
+        // Exec command (no output): chrome panel rows start with chrome pad.
+        let exec_no_output = Block::Exec {
+            command: "ls".into(),
+            output: String::new(),
+        };
+        let lines = render(&exec_no_output, None);
+        for line in &lines {
+            assert!(
+                line.text.starts_with(&chrome_pad),
+                "exec chrome row missing pad: {:?}",
+                line.text
+            );
+        }
+
+        // Exec output: bottom rows sit under the block gutter.
+        let exec_with_output = Block::Exec {
+            command: "echo hi".into(),
+            output: "hello\nworld".into(),
+        };
+        let lines = render(&exec_with_output, None);
+        let output_tail = &lines[lines.len() - 2..];
+        for line in output_tail {
+            assert!(
+                line.text.starts_with(BLOCK_GUTTER_SPACE),
+                "exec output row missing block gutter: {:?}",
+                line.text
+            );
+        }
+
+        // Thinking expanded: every row prefixed with the thinking gutter.
+        let expanded_ctx = LayoutContext {
+            show_thinking: true,
+            ..ctx
+        };
+        let lines = layout_block_test(&thinking("**title**\nbody line"), None, &expanded_ctx);
+        for line in &lines {
+            assert!(
+                line.text.starts_with(THINKING_GUTTER),
+                "thinking expanded row missing gutter: {:?}",
+                line.text
+            );
+        }
+
+        // Thinking collapsed (one summary row).
+        let lines = render(&thinking("**title**\nbody"), None);
+        assert_eq!(lines.len(), 1);
+        assert!(lines[0].text.starts_with(THINKING_GUTTER));
+
+        // Text/markdown: renderer emits no left indent.
+        let lines = render(&text("hello world"), None);
+        for line in &lines {
+            assert!(
+                !line.text.starts_with(' '),
+                "text row should be flush-left: {:?}",
+                line.text
+            );
+        }
+
+        // CodeLine: renderer emits no left indent (window-level line-number
+        // gutter is applied at paint time, outside the block buffer).
+        let code = Block::CodeLine {
+            content: "fn main() {}".into(),
+            lang: "rust".into(),
+        };
+        let lines = render(&code, None);
+        for line in &lines {
+            assert!(
+                !line.text.starts_with(' '),
+                "code line row should be flush-left: {:?}",
+                line.text
+            );
+        }
+
+        // ToolCall header begins with the `⏺` glyph (no indent).
+        let tc = tool_call();
+        let state = pending_tool_state();
+        let lines = render(&tc, Some(&state));
+        assert!(
+            lines[0].text.starts_with('\u{23fa}'),
+            "tool header should start with ⏺: {:?}",
+            lines[0].text
+        );
+
+        // ToolCall with a user_message: that row sits under the block gutter.
+        let denied = ToolState {
+            status: ToolStatus::Denied,
+            user_message: Some("nope".into()),
+            ..pending_tool_state()
+        };
+        let lines = render(&tc, Some(&denied));
+        assert!(
+            lines[1].text.starts_with(BLOCK_GUTTER_SPACE),
+            "tool user_message row missing block gutter: {:?}",
+            lines[1].text
+        );
+
+        // Compacted: starts with a horizontal rule glyph (no indent).
+        let lines = render(
+            &Block::Compacted {
+                summary: "ok".into(),
+            },
+            None,
+        );
+        assert!(
+            lines[0].text.starts_with('\u{2500}'),
+            "compacted row should start with ─: {:?}",
+            lines[0].text
+        );
     }
 }

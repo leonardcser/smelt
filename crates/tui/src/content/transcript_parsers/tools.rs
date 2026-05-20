@@ -1,3 +1,4 @@
+use super::metrics::{BLOCK_GUTTER_SPACE, BLOCK_GUTTER_W};
 use super::MAX_TOOL_BLOCK_ROWS;
 use protocol::{StyledLines, StyledSpan};
 use smelt_core::buffer::SpanMeta;
@@ -40,13 +41,13 @@ pub(super) fn render_tool(
     };
     let mut rows = print_tool_line(out, name, summary, color, time, width);
     if let Some(msg) = user_message {
-        print_dim(out, &format!("  {msg}"));
+        print_dim(out, &format!("{BLOCK_GUTTER_SPACE}{msg}"));
         out.newline();
         rows += 1;
     }
     if status != ToolStatus::Denied {
         if let Some(layout) = rendered {
-            let inner_width = (width as u16).saturating_sub(2);
+            let inner_width = (width as u16).saturating_sub(BLOCK_GUTTER_W as u16);
             rows += replay_rendered(out, layout, inner_width);
         } else if let Some(out_data) = output {
             if !out_data.content.is_empty() {
@@ -289,7 +290,11 @@ fn render_diff_spec(
         .lang
         .as_deref()
         .map(smelt_core::content::highlight::lang_to_ext);
-    let indent = if with_gutter { 2 } else { 0 };
+    let indent = if with_gutter {
+        BLOCK_GUTTER_W as u16
+    } else {
+        0
+    };
     print_inline_diff_ext(
         out,
         &spec.old,
@@ -324,7 +329,11 @@ fn render_file_view_spec(
                 .and_then(|e| e.to_str())
         });
     let cache = build_file_view_cache(&spec.content, ext);
-    let indent = if with_gutter { 2 } else { 0 };
+    let indent = if with_gutter {
+        BLOCK_GUTTER_W as u16
+    } else {
+        0
+    };
     print_cached_inline_diff(
         out,
         &cache,
@@ -349,7 +358,7 @@ fn replay_leaf(
     if is_unit_leaf(buf) && width > 0 {
         let glyph = buf.get_line(0).unwrap_or("");
         if with_gutter {
-            out.print_gutter("  ");
+            out.print_gutter(BLOCK_GUTTER_SPACE);
         }
         out.print(&glyph.repeat(width as usize));
         out.newline();
@@ -358,7 +367,7 @@ fn replay_leaf(
     let limit = (n as u16).min(rows_cap);
     for i in 0..limit {
         if with_gutter {
-            out.print_gutter("  ");
+            out.print_gutter(BLOCK_GUTTER_SPACE);
         }
         replay_buffer_row_into(buf, i, out);
         out.newline();
@@ -422,7 +431,7 @@ fn replay_hbox(
 
     for r in 0..row_total {
         if with_gutter {
-            out.print_gutter("  ");
+            out.print_gutter(BLOCK_GUTTER_SPACE);
         }
         for (col_idx, bufs) in columns.iter().enumerate() {
             let col_w = widths.get(col_idx).copied().unwrap_or(0);
@@ -619,7 +628,7 @@ pub fn render_wrapped_output(
     width: usize,
 ) -> u16 {
     let _perf = smelt_perf::perf::begin("render:wrapped_output");
-    let max_cols = width.saturating_sub(3); // "  " gutter
+    let max_cols = super::metrics::block_inner_width(width);
 
     let wrapped: Vec<String> = content
         .lines()
@@ -639,7 +648,10 @@ pub fn render_wrapped_output(
         let skipped = total - MAX_TOOL_BLOCK_ROWS;
         print_dim(
             out,
-            &format!("  ... {} above", pluralize(skipped, "line", "lines")),
+            &format!(
+                "{BLOCK_GUTTER_SPACE}... {} above",
+                pluralize(skipped, "line", "lines")
+            ),
         );
         out.newline();
         rows += 1;
@@ -648,10 +660,10 @@ pub fn render_wrapped_output(
     for seg in &wrapped[start..] {
         if is_error {
             out.push_hl(intern("ErrorMsg"));
-            out.print_string(format!("  {}", seg));
+            out.print_string(format!("{BLOCK_GUTTER_SPACE}{seg}"));
             out.pop_style();
         } else {
-            print_dim(out, &format!("  {}", seg));
+            print_dim(out, &format!("{BLOCK_GUTTER_SPACE}{seg}"));
         }
         out.newline();
         rows += 1;

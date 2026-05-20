@@ -4,6 +4,7 @@
 use smelt_core::content::builder::LineBuilder;
 use smelt_core::content::wrap::wrap_line;
 
+use super::metrics::{block_inner_width, THINKING_GUTTER};
 use super::tools::pluralize;
 
 pub(super) fn render(
@@ -14,9 +15,9 @@ pub(super) fn render(
 ) -> u16 {
     if !show_thinking {
         let (label, line_count) = thinking_summary(content);
-        return render_thinking_summary(out, width, &label, line_count, false);
+        return render_thinking_summary(out, width, &label, line_count);
     }
-    let max_cols = width.saturating_sub(3).max(1); // "│ " gutter
+    let max_cols = block_inner_width(width);
     let mut rows = 0u16;
     for line in content.lines() {
         let segments = wrap_line(line, max_cols);
@@ -25,7 +26,7 @@ pub(super) fn render(
         }
         for seg in &segments {
             out.set_dim_italic();
-            out.print_gutter("│ ");
+            out.print_gutter(THINKING_GUTTER);
             out.print(seg);
             out.reset_style();
             out.newline();
@@ -33,17 +34,6 @@ pub(super) fn render(
         }
     }
     rows
-}
-
-pub(super) fn animated_dots() -> &'static str {
-    let n = (std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .subsec_millis()
-        / 333) as usize
-        % 3
-        + 1;
-    &"..."[..n]
 }
 
 /// Returns `(label, non_empty_line_count)`. Uses the first `**bold**` line as label if present.
@@ -72,11 +62,9 @@ pub fn render_thinking_summary(
     width: usize,
     label: &str,
     line_count: usize,
-    animated: bool,
 ) -> u16 {
-    let dots = if animated { animated_dots() } else { "" };
-    let summary = format!("{label} ({}){dots}", pluralize(line_count, "line", "lines"));
-    let max_cols = width.saturating_sub(3).max(1);
+    let summary = format!("{label} ({})", pluralize(line_count, "line", "lines"));
+    let max_cols = block_inner_width(width);
     let segs = wrap_line(&summary, max_cols);
     if segs.len() > 1 {
         out.mark_wrapped();
@@ -84,7 +72,7 @@ pub fn render_thinking_summary(
     let mut rows = 0u16;
     for seg in &segs {
         out.set_dim_italic();
-        out.print_gutter("\u{2502} ");
+        out.print_gutter(THINKING_GUTTER);
         out.print(seg);
         out.reset_style();
         out.newline();
