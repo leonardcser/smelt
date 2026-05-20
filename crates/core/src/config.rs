@@ -54,39 +54,6 @@ pub struct ProviderConfig {
     pub models: Vec<ModelConfig>,
 }
 
-#[derive(Debug, Default)]
-pub struct SettingsConfig {
-    pub vim: Option<bool>,
-    pub auto_compact: Option<bool>,
-    pub show_tps: Option<bool>,
-    pub show_tokens: Option<bool>,
-    pub show_cost: Option<bool>,
-    pub show_prediction: Option<bool>,
-    pub show_slug: Option<bool>,
-    pub show_thinking: Option<bool>,
-    pub restrict_to_workspace: Option<bool>,
-    pub redact_secrets: Option<bool>,
-    /// Watch on-disk config inputs (init.lua, plugins/, commands/,
-    /// skills/, AGENTS.md, `--system-prompt` file) and dispatch
-    /// `/reload` when any of them changes. Off by default.
-    pub auto_reload: Option<bool>,
-    /// Fraction of the configured context window (0, 1] at which the
-    /// bundled compact plugin auto-triggers between turns. Default `0.80`.
-    pub compact_threshold: Option<f64>,
-    /// Anthropic prompt cache TTL. `false` (default) uses the 5-minute
-    /// ephemeral TTL; `true` opts into the 1-hour TTL. Has no effect on
-    /// non-Anthropic providers.
-    pub cache_ttl_long: Option<bool>,
-    /// Autoupgrade behavior: `"off"`, `"notify"` (show pill + banner
-    /// subtitle when a new build is available; default), or `"auto"`
-    /// (install in background once detected).
-    pub autoupgrade: Option<String>,
-    /// Which release channel autoupgrade tracks. `"stable"` follows
-    /// tagged releases (any tag, including prereleases); `"unstable"`
-    /// follows `main` HEAD.
-    pub autoupgrade_channel: Option<String>,
-}
-
 /// Value type of a settings slot. Drives parsing of `--set` overrides
 /// and the Lua `__index`/`__newindex` dispatch.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -115,117 +82,253 @@ impl SettingValue {
     }
 }
 
-/// The set of settings exposed to Lua, with their value types. Lookup
-/// is linear (small N); the table doubles as the public schema for
-/// `smelt.settings.__pairs`, the `/settings` command, and `--set`.
-pub const SETTINGS_KEYS: &[(&str, SettingKind)] = &[
-    ("vim", SettingKind::Bool),
-    ("auto_compact", SettingKind::Bool),
-    ("show_tps", SettingKind::Bool),
-    ("show_tokens", SettingKind::Bool),
-    ("show_cost", SettingKind::Bool),
-    ("show_prediction", SettingKind::Bool),
-    ("show_slug", SettingKind::Bool),
-    ("show_thinking", SettingKind::Bool),
-    ("restrict_to_workspace", SettingKind::Bool),
-    ("redact_secrets", SettingKind::Bool),
-    ("auto_reload", SettingKind::Bool),
-    ("compact_threshold", SettingKind::Number),
-    ("cache_ttl_long", SettingKind::Bool),
-    ("autoupgrade", SettingKind::String),
-    ("autoupgrade_channel", SettingKind::String),
+/// Schema entry for one settings key. The `SETTINGS` table is the
+/// single source of truth: adding a setting means one entry here plus
+/// one field on `ResolvedSettings` (with its default in
+/// `impl Default`). Every other surface — `--set` parsing, Lua
+/// `__index`/`__newindex`, `__pairs`, runtime overrides — derives from
+/// this table.
+pub struct SettingDecl {
+    pub key: &'static str,
+    pub kind: SettingKind,
+    /// Closed set of accepted values for `String` settings; `None`
+    /// means free-form. Ignored for non-`String` kinds.
+    pub choices: Option<&'static [&'static str]>,
+    /// Project the typed field to a polymorphic `SettingValue`.
+    pub read: fn(&ResolvedSettings) -> SettingValue,
+    /// Assign from a polymorphic `SettingValue`. Returns `false` on
+    /// kind mismatch (the caller has already gated on kind, so this
+    /// only fires for schema bugs).
+    pub write: fn(&mut ResolvedSettings, &SettingValue) -> bool,
+}
+
+pub const SETTINGS: &[SettingDecl] = &[
+    SettingDecl {
+        key: "vim",
+        kind: SettingKind::Bool,
+        choices: None,
+        read: |s| SettingValue::Bool(s.vim),
+        write: |s, v| {
+            if let SettingValue::Bool(b) = v {
+                s.vim = *b;
+                true
+            } else {
+                false
+            }
+        },
+    },
+    SettingDecl {
+        key: "auto_compact",
+        kind: SettingKind::Bool,
+        choices: None,
+        read: |s| SettingValue::Bool(s.auto_compact),
+        write: |s, v| {
+            if let SettingValue::Bool(b) = v {
+                s.auto_compact = *b;
+                true
+            } else {
+                false
+            }
+        },
+    },
+    SettingDecl {
+        key: "show_tps",
+        kind: SettingKind::Bool,
+        choices: None,
+        read: |s| SettingValue::Bool(s.show_tps),
+        write: |s, v| {
+            if let SettingValue::Bool(b) = v {
+                s.show_tps = *b;
+                true
+            } else {
+                false
+            }
+        },
+    },
+    SettingDecl {
+        key: "show_tokens",
+        kind: SettingKind::Bool,
+        choices: None,
+        read: |s| SettingValue::Bool(s.show_tokens),
+        write: |s, v| {
+            if let SettingValue::Bool(b) = v {
+                s.show_tokens = *b;
+                true
+            } else {
+                false
+            }
+        },
+    },
+    SettingDecl {
+        key: "show_cost",
+        kind: SettingKind::Bool,
+        choices: None,
+        read: |s| SettingValue::Bool(s.show_cost),
+        write: |s, v| {
+            if let SettingValue::Bool(b) = v {
+                s.show_cost = *b;
+                true
+            } else {
+                false
+            }
+        },
+    },
+    SettingDecl {
+        key: "show_prediction",
+        kind: SettingKind::Bool,
+        choices: None,
+        read: |s| SettingValue::Bool(s.show_prediction),
+        write: |s, v| {
+            if let SettingValue::Bool(b) = v {
+                s.show_prediction = *b;
+                true
+            } else {
+                false
+            }
+        },
+    },
+    SettingDecl {
+        key: "show_slug",
+        kind: SettingKind::Bool,
+        choices: None,
+        read: |s| SettingValue::Bool(s.show_slug),
+        write: |s, v| {
+            if let SettingValue::Bool(b) = v {
+                s.show_slug = *b;
+                true
+            } else {
+                false
+            }
+        },
+    },
+    SettingDecl {
+        key: "show_thinking",
+        kind: SettingKind::Bool,
+        choices: None,
+        read: |s| SettingValue::Bool(s.show_thinking),
+        write: |s, v| {
+            if let SettingValue::Bool(b) = v {
+                s.show_thinking = *b;
+                true
+            } else {
+                false
+            }
+        },
+    },
+    SettingDecl {
+        key: "restrict_to_workspace",
+        kind: SettingKind::Bool,
+        choices: None,
+        read: |s| SettingValue::Bool(s.restrict_to_workspace),
+        write: |s, v| {
+            if let SettingValue::Bool(b) = v {
+                s.restrict_to_workspace = *b;
+                true
+            } else {
+                false
+            }
+        },
+    },
+    SettingDecl {
+        key: "redact_secrets",
+        kind: SettingKind::Bool,
+        choices: None,
+        read: |s| SettingValue::Bool(s.redact_secrets),
+        write: |s, v| {
+            if let SettingValue::Bool(b) = v {
+                s.redact_secrets = *b;
+                true
+            } else {
+                false
+            }
+        },
+    },
+    SettingDecl {
+        key: "auto_reload",
+        kind: SettingKind::Bool,
+        choices: None,
+        read: |s| SettingValue::Bool(s.auto_reload),
+        write: |s, v| {
+            if let SettingValue::Bool(b) = v {
+                s.auto_reload = *b;
+                true
+            } else {
+                false
+            }
+        },
+    },
+    SettingDecl {
+        key: "compact_threshold",
+        kind: SettingKind::Number,
+        choices: None,
+        read: |s| SettingValue::Number(s.compact_threshold),
+        write: |s, v| {
+            if let SettingValue::Number(n) = v {
+                s.compact_threshold = *n;
+                true
+            } else {
+                false
+            }
+        },
+    },
+    SettingDecl {
+        key: "cache_ttl_long",
+        kind: SettingKind::Bool,
+        choices: None,
+        read: |s| SettingValue::Bool(s.cache_ttl_long),
+        write: |s, v| {
+            if let SettingValue::Bool(b) = v {
+                s.cache_ttl_long = *b;
+                true
+            } else {
+                false
+            }
+        },
+    },
+    SettingDecl {
+        key: "autoupgrade",
+        kind: SettingKind::String,
+        choices: Some(&["off", "notify", "auto"]),
+        read: |s| SettingValue::String(s.autoupgrade.clone()),
+        write: |s, v| {
+            if let SettingValue::String(t) = v {
+                s.autoupgrade = t.clone();
+                true
+            } else {
+                false
+            }
+        },
+    },
+    SettingDecl {
+        key: "autoupgrade_channel",
+        kind: SettingKind::String,
+        choices: Some(&["stable", "unstable"]),
+        read: |s| SettingValue::String(s.autoupgrade_channel.clone()),
+        write: |s, v| {
+            if let SettingValue::String(t) = v {
+                s.autoupgrade_channel = t.clone();
+                true
+            } else {
+                false
+            }
+        },
+    },
 ];
 
-/// Allowed values for string-typed settings. Returns `None` for keys
-/// that are free-form (any string accepted). Used by `set` and `--set`
-/// parsing to reject typos at the source rather than at the consumer.
-pub fn setting_string_choices(key: &str) -> Option<&'static [&'static str]> {
-    match key {
-        "autoupgrade" => Some(&["off", "notify", "auto"]),
-        "autoupgrade_channel" => Some(&["stable", "unstable"]),
-        _ => None,
-    }
+pub fn setting_decl(key: &str) -> Option<&'static SettingDecl> {
+    SETTINGS.iter().find(|d| d.key == key)
 }
 
 pub fn setting_kind(key: &str) -> Option<SettingKind> {
-    SETTINGS_KEYS
-        .iter()
-        .find(|(k, _)| *k == key)
-        .map(|(_, k)| *k)
+    setting_decl(key).map(|d| d.kind)
 }
 
-impl SettingsConfig {
-    /// Apply an override by key. Returns an error message on unknown keys
-    /// or type mismatches.
-    pub fn set(&mut self, key: &str, value: SettingValue) -> Result<(), String> {
-        let expected = setting_kind(key).ok_or_else(|| format!("unknown setting '{key}'"))?;
-        if value.kind() != expected {
-            return Err(format!(
-                "setting '{key}' expects {:?}, got {:?}",
-                expected,
-                value.kind()
-            ));
-        }
-        if let (SettingValue::String(s), Some(choices)) = (&value, setting_string_choices(key)) {
-            if !choices.contains(&s.as_str()) {
-                return Err(format!("setting '{key}': '{s}' is not one of {choices:?}"));
-            }
-        }
-        match (key, value) {
-            ("vim", SettingValue::Bool(v)) => self.vim = Some(v),
-            ("auto_compact", SettingValue::Bool(v)) => self.auto_compact = Some(v),
-            ("show_tps", SettingValue::Bool(v)) => self.show_tps = Some(v),
-            ("show_tokens", SettingValue::Bool(v)) => self.show_tokens = Some(v),
-            ("show_cost", SettingValue::Bool(v)) => self.show_cost = Some(v),
-            ("show_prediction", SettingValue::Bool(v)) => self.show_prediction = Some(v),
-            ("show_slug", SettingValue::Bool(v)) => self.show_slug = Some(v),
-            ("show_thinking", SettingValue::Bool(v)) => self.show_thinking = Some(v),
-            ("restrict_to_workspace", SettingValue::Bool(v)) => {
-                self.restrict_to_workspace = Some(v)
-            }
-            ("redact_secrets", SettingValue::Bool(v)) => self.redact_secrets = Some(v),
-            ("auto_reload", SettingValue::Bool(v)) => self.auto_reload = Some(v),
-            ("compact_threshold", SettingValue::Number(v)) => self.compact_threshold = Some(v),
-            ("cache_ttl_long", SettingValue::Bool(v)) => self.cache_ttl_long = Some(v),
-            ("autoupgrade", SettingValue::String(v)) => self.autoupgrade = Some(v),
-            ("autoupgrade_channel", SettingValue::String(v)) => self.autoupgrade_channel = Some(v),
-            _ => unreachable!("schema mismatch for {key}"),
-        }
-        Ok(())
-    }
-
-    /// Resolve to a fully-realized settings struct using built-in defaults
-    /// for any field the Lua config didn't set.
-    pub fn resolve(&self) -> ResolvedSettings {
-        ResolvedSettings {
-            vim: self.vim.unwrap_or(false),
-            auto_compact: self.auto_compact.unwrap_or(true),
-            show_tps: self.show_tps.unwrap_or(true),
-            show_tokens: self.show_tokens.unwrap_or(true),
-            show_cost: self.show_cost.unwrap_or(true),
-            show_prediction: self.show_prediction.unwrap_or(true),
-            show_slug: self.show_slug.unwrap_or(true),
-            show_thinking: self.show_thinking.unwrap_or(true),
-            restrict_to_workspace: self.restrict_to_workspace.unwrap_or(true),
-            redact_secrets: self.redact_secrets.unwrap_or(true),
-            auto_reload: self.auto_reload.unwrap_or(false),
-            compact_threshold: self.compact_threshold.unwrap_or(0.80),
-            cache_ttl_long: self.cache_ttl_long.unwrap_or(false),
-            autoupgrade: self
-                .autoupgrade
-                .clone()
-                .unwrap_or_else(|| "notify".to_string()),
-            autoupgrade_channel: self
-                .autoupgrade_channel
-                .clone()
-                .unwrap_or_else(|| "stable".to_string()),
-        }
-    }
-}
-
-/// Fully resolved settings (no Options). Lives on `AppConfig` so runtime
-/// reads/writes hit the live struct; persistence is not a concern of
-/// this type — config is `init.lua`, not a JSON registry.
+/// Fully resolved settings. Lives on `AppConfig` so runtime reads/writes
+/// hit the live struct; persistence is not a concern of this type —
+/// config is `init.lua`, not a JSON registry.
+///
+/// Adding a setting: append a field here (with its default in
+/// `impl Default`) and one row to `SETTINGS` above. That's it.
 #[derive(Debug, Clone)]
 pub struct ResolvedSettings {
     pub vim: bool,
@@ -238,11 +341,75 @@ pub struct ResolvedSettings {
     pub show_thinking: bool,
     pub restrict_to_workspace: bool,
     pub redact_secrets: bool,
+    /// Watch on-disk config inputs (init.lua, plugins/, commands/,
+    /// skills/, AGENTS.md, `--system-prompt` file) and dispatch
+    /// `/reload` when any of them changes. Off by default.
     pub auto_reload: bool,
+    /// Fraction of the configured context window (0, 1] at which the
+    /// bundled compact plugin auto-triggers between turns.
     pub compact_threshold: f64,
+    /// Anthropic prompt cache TTL. `false` uses the 5-minute ephemeral
+    /// TTL; `true` opts into the 1-hour TTL. Has no effect on
+    /// non-Anthropic providers.
     pub cache_ttl_long: bool,
+    /// Autoupgrade behavior: `"off"`, `"notify"`, or `"auto"`.
     pub autoupgrade: String,
+    /// Release channel autoupgrade tracks: `"stable"` (tagged releases,
+    /// including prereleases) or `"unstable"` (`main` HEAD).
     pub autoupgrade_channel: String,
+}
+
+impl Default for ResolvedSettings {
+    fn default() -> Self {
+        Self {
+            vim: false,
+            auto_compact: true,
+            show_tps: true,
+            show_tokens: true,
+            show_cost: true,
+            show_prediction: true,
+            show_slug: true,
+            show_thinking: true,
+            restrict_to_workspace: true,
+            redact_secrets: true,
+            auto_reload: false,
+            compact_threshold: 0.80,
+            cache_ttl_long: false,
+            autoupgrade: "notify".to_string(),
+            autoupgrade_channel: "stable".to_string(),
+        }
+    }
+}
+
+impl ResolvedSettings {
+    /// Apply an override by key. Returns an error message on unknown
+    /// keys, kind mismatches, or string values outside the schema's
+    /// allowed-choice list.
+    pub fn set(&mut self, key: &str, value: &SettingValue) -> Result<(), String> {
+        let decl = setting_decl(key).ok_or_else(|| format!("unknown setting '{key}'"))?;
+        if value.kind() != decl.kind {
+            return Err(format!(
+                "setting '{key}' expects {:?}, got {:?}",
+                decl.kind,
+                value.kind()
+            ));
+        }
+        if let (SettingValue::String(s), Some(choices)) = (value, decl.choices) {
+            if !choices.contains(&s.as_str()) {
+                return Err(format!("setting '{key}': '{s}' is not one of {choices:?}"));
+            }
+        }
+        if !(decl.write)(self, value) {
+            return Err(format!("setting '{key}': internal kind mismatch"));
+        }
+        Ok(())
+    }
+
+    /// Projection helper for Lua / status / introspection. Returns
+    /// `None` for unknown keys.
+    pub fn get(&self, key: &str) -> Option<SettingValue> {
+        setting_decl(key).map(|d| (d.read)(self))
+    }
 }
 
 /// Startup defaults for new sessions, set from Lua via `smelt.defaults{...}`.
@@ -260,7 +427,7 @@ pub struct DefaultsConfig {
 #[derive(Debug, Default)]
 pub struct Config {
     pub providers: Vec<ProviderConfig>,
-    pub settings: SettingsConfig,
+    pub settings: ResolvedSettings,
     /// MCP server configurations.
     pub mcp: std::collections::HashMap<String, crate::mcp::McpServerConfig>,
     pub defaults: DefaultsConfig,

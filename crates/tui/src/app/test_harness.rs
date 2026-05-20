@@ -149,8 +149,10 @@ impl TestAppBuilder {
         let (engine, cmd_rx, event_tx) = EngineHandle::for_test();
 
         let permissions = Arc::new(smelt_core::permissions::Permissions::load());
-        let mut settings = smelt_core::config::SettingsConfig::default().resolve();
-        settings.vim = self.vim;
+        let settings = smelt_core::config::ResolvedSettings {
+            vim: self.vim,
+            ..Default::default()
+        };
         let shared_session = Arc::new(Mutex::new(None));
         let mut lua = crate::lua::LuaRuntime::new();
         if let Some(ref path) = self.init_lua {

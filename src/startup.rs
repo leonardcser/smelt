@@ -112,7 +112,7 @@ pub async fn resolve(
                 std::process::exit(1);
             }
         };
-        if let Err(e) = cfg.settings.set(key, parsed) {
+        if let Err(e) = cfg.settings.set(key, &parsed) {
             eprintln!("error: --set {pair}: {e}");
             std::process::exit(1);
         }
@@ -268,7 +268,7 @@ pub async fn resolve(
         reasoning_cycle.push(reasoning_effort);
     }
 
-    let mut settings = cfg.settings.resolve();
+    let mut settings = cfg.settings.clone();
     if args.headless {
         settings.auto_compact = true;
     }

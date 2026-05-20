@@ -504,14 +504,14 @@ impl LuaRuntime {
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .clone();
-        let mut settings = crate::config::SettingsConfig::default();
+        let mut settings = crate::config::ResolvedSettings::default();
         let overrides = self
             .shared
             .settings_overrides
             .lock()
             .unwrap_or_else(|e| e.into_inner());
         for (key, value) in overrides.iter() {
-            if let Err(e) = settings.set(key, value.clone()) {
+            if let Err(e) = settings.set(key, value) {
                 eprintln!("settings override: {e}");
             }
         }

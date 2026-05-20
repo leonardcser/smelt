@@ -1,65 +1,24 @@
-//! `smelt.settings` — typed preferences (bool or number) as direct field
-//! access via `__index`/`__newindex`. Writes before app init are stored
-//! in `LuaShared.settings_overrides` for later pickup. Unknown keys raise
-//! at the access site; type mismatches raise on assignment.
+//! `smelt.settings` — typed preferences (bool, number, or string) as
+//! direct field access via `__index`/`__newindex`. Writes before app
+//! init are stored in `LuaShared.settings_overrides` for later pickup.
+//! Unknown keys raise at the access site; type mismatches raise on
+//! assignment.
+//!
+//! The schema lives entirely in `smelt_core::config::SETTINGS` — this
+//! module reads / writes through that table and adds no per-key code
+//! of its own.
 
 use mlua::prelude::*;
-use smelt_core::config::{
-    setting_kind, setting_string_choices, ResolvedSettings, SettingKind, SettingValue,
-    SETTINGS_KEYS,
-};
+use smelt_core::config::{setting_decl, SettingKind, SettingValue, SETTINGS};
 use smelt_core::lua::doc::Tier;
 use smelt_core::lua::module::LuaMod;
 use std::sync::Arc;
 
 fn unknown_key_err(key: &str) -> LuaError {
-    let names: Vec<&str> = SETTINGS_KEYS.iter().map(|(k, _)| *k).collect();
+    let names: Vec<&str> = SETTINGS.iter().map(|d| d.key).collect();
     LuaError::external(format!(
         "smelt.settings: unknown key `{key}`; known keys are {names:?}"
     ))
-}
-
-fn read_resolved(s: &ResolvedSettings, key: &str) -> Option<SettingValue> {
-    Some(match key {
-        "vim" => SettingValue::Bool(s.vim),
-        "auto_compact" => SettingValue::Bool(s.auto_compact),
-        "show_tps" => SettingValue::Bool(s.show_tps),
-        "show_tokens" => SettingValue::Bool(s.show_tokens),
-        "show_cost" => SettingValue::Bool(s.show_cost),
-        "show_prediction" => SettingValue::Bool(s.show_prediction),
-        "show_slug" => SettingValue::Bool(s.show_slug),
-        "show_thinking" => SettingValue::Bool(s.show_thinking),
-        "restrict_to_workspace" => SettingValue::Bool(s.restrict_to_workspace),
-        "redact_secrets" => SettingValue::Bool(s.redact_secrets),
-        "auto_reload" => SettingValue::Bool(s.auto_reload),
-        "compact_threshold" => SettingValue::Number(s.compact_threshold),
-        "cache_ttl_long" => SettingValue::Bool(s.cache_ttl_long),
-        "autoupgrade" => SettingValue::String(s.autoupgrade.clone()),
-        "autoupgrade_channel" => SettingValue::String(s.autoupgrade_channel.clone()),
-        _ => return None,
-    })
-}
-
-fn write_resolved(s: &mut ResolvedSettings, key: &str, value: &SettingValue) -> bool {
-    match (key, value) {
-        ("vim", SettingValue::Bool(v)) => s.vim = *v,
-        ("auto_compact", SettingValue::Bool(v)) => s.auto_compact = *v,
-        ("show_tps", SettingValue::Bool(v)) => s.show_tps = *v,
-        ("show_tokens", SettingValue::Bool(v)) => s.show_tokens = *v,
-        ("show_cost", SettingValue::Bool(v)) => s.show_cost = *v,
-        ("show_prediction", SettingValue::Bool(v)) => s.show_prediction = *v,
-        ("show_slug", SettingValue::Bool(v)) => s.show_slug = *v,
-        ("show_thinking", SettingValue::Bool(v)) => s.show_thinking = *v,
-        ("restrict_to_workspace", SettingValue::Bool(v)) => s.restrict_to_workspace = *v,
-        ("redact_secrets", SettingValue::Bool(v)) => s.redact_secrets = *v,
-        ("auto_reload", SettingValue::Bool(v)) => s.auto_reload = *v,
-        ("compact_threshold", SettingValue::Number(v)) => s.compact_threshold = *v,
-        ("cache_ttl_long", SettingValue::Bool(v)) => s.cache_ttl_long = *v,
-        ("autoupgrade", SettingValue::String(v)) => s.autoupgrade = v.clone(),
-        ("autoupgrade_channel", SettingValue::String(v)) => s.autoupgrade_channel = v.clone(),
-        _ => return false,
-    }
-    true
 }
 
 fn setting_to_lua(lua: &Lua, value: &SettingValue) -> LuaResult<mlua::Value> {
@@ -71,8 +30,8 @@ fn setting_to_lua(lua: &Lua, value: &SettingValue) -> LuaResult<mlua::Value> {
 }
 
 fn lua_to_setting(key: &str, value: mlua::Value) -> LuaResult<SettingValue> {
-    let kind = setting_kind(key).ok_or_else(|| unknown_key_err(key))?;
-    let parsed = match (kind, value) {
+    let decl = setting_decl(key).ok_or_else(|| unknown_key_err(key))?;
+    let parsed = match (decl.kind, value) {
         (SettingKind::Bool, mlua::Value::Boolean(b)) => SettingValue::Bool(b),
         (SettingKind::Number, mlua::Value::Number(n)) => SettingValue::Number(n),
         (SettingKind::Number, mlua::Value::Integer(i)) => SettingValue::Number(i as f64),
@@ -86,7 +45,9 @@ fn lua_to_setting(key: &str, value: mlua::Value) -> LuaResult<SettingValue> {
             )))
         }
     };
-    if let (SettingValue::String(ref s), Some(choices)) = (&parsed, setting_string_choices(key)) {
+    // Validate string choices up front so the error references the Lua
+    // call site, not an internal write.
+    if let (SettingValue::String(ref s), Some(choices)) = (&parsed, decl.choices) {
         if !choices.contains(&s.as_str()) {
             return Err(LuaError::external(format!(
                 "smelt.settings.{key}: '{s}' is not one of {choices:?}"
@@ -113,14 +74,13 @@ pub(super) fn register(
 
     mt.fn_(
         "__index",
-        "Read a preference by `key` from the resolved settings. Raises if the app is not yet initialized or if `key` is not in `SETTINGS_KEYS`.",
+        "Read a preference by `key` from the resolved settings. Raises if the app is not yet initialized or if `key` is not in the schema.",
         &["_", "key"],
         |lua, (_, key): (mlua::Value, String)| -> LuaResult<mlua::Value> {
-            if setting_kind(&key).is_none() {
+            let Some(decl) = setting_decl(&key) else {
                 return Err(unknown_key_err(&key));
-            }
-            let v = crate::lua::try_with_app(|app| read_resolved(&app.core.config.settings, &key))
-                .flatten();
+            };
+            let v = crate::lua::try_with_app(|app| (decl.read)(&app.core.config.settings));
             match v {
                 Some(val) => setting_to_lua(lua, &val),
                 None => Err(LuaError::external(format!(
@@ -140,7 +100,7 @@ pub(super) fn register(
                 let parsed = lua_to_setting(&key, value)?;
                 let applied = crate::lua::try_with_app(|app| {
                     let mut s = app.core.config.settings.clone();
-                    if !write_resolved(&mut s, &key, &parsed) {
+                    if s.set(&key, &parsed).is_err() {
                         return false;
                     }
                     app.set_settings(s);
@@ -161,7 +121,7 @@ pub(super) fn register(
 
     mt.fn_(
         "__pairs",
-        "Iterate every known settings key and its current resolved value as `(key, value)` pairs. Value type matches the key's declared kind (bool or number).",
+        "Iterate every known settings key and its current resolved value as `(key, value)` pairs. Value type matches the key's declared kind.",
         &["_"],
         |lua, _: mlua::Value| -> LuaResult<(mlua::Function, mlua::Value, mlua::Value)> {
             let next = lua.create_function(|lua, (_, prev): (mlua::Value, mlua::Value)| {
@@ -171,23 +131,22 @@ pub(super) fn register(
                 };
                 let idx = match prev_key {
                     None => 0,
-                    Some(k) => match SETTINGS_KEYS.iter().position(|(s, _)| *s == k.as_str()) {
+                    Some(k) => match SETTINGS.iter().position(|d| d.key == k.as_str()) {
                         Some(i) => i + 1,
-                        None => SETTINGS_KEYS.len(),
+                        None => SETTINGS.len(),
                     },
                 };
-                if idx >= SETTINGS_KEYS.len() {
+                if idx >= SETTINGS.len() {
                     return Ok((mlua::Value::Nil, mlua::Value::Nil));
                 }
-                let (key, _) = SETTINGS_KEYS[idx];
+                let decl = &SETTINGS[idx];
                 let value =
-                    crate::lua::try_with_app(|app| read_resolved(&app.core.config.settings, key))
-                        .flatten();
+                    crate::lua::try_with_app(|app| (decl.read)(&app.core.config.settings));
                 let v = match value {
                     Some(ref val) => setting_to_lua(lua, val)?,
                     None => mlua::Value::Nil,
                 };
-                Ok((mlua::Value::String(lua.create_string(key)?), v))
+                Ok((mlua::Value::String(lua.create_string(decl.key)?), v))
             })?;
             Ok((next, mlua::Value::Nil, mlua::Value::Nil))
         },
