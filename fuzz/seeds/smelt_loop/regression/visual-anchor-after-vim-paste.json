@@ -1,0 +1,56 @@
+{
+  "_about": "vim 'p' / 'P' paste called ctx.buf.insert_str directly, bypassing the clamp_visual_anchor pass that delete_range / replace_range do. After 'V' set visual_anchor at a valid boundary, a later paste inserted bytes that shifted the source layout so the old anchor offset landed mid-codepoint.",
+  "_fix": "fix(edit): clamp visual_anchor in vim paste paths",
+  "mode": "normal",
+  "ops": [
+    {
+      "data": 1048607,
+      "kind": "key_unicode"
+    },
+    {
+      "data": 11,
+      "kind": "key_unicode"
+    },
+    {
+      "data": 1060045177,
+      "kind": "key_unicode"
+    },
+    {
+      "data": 1,
+      "kind": "key_special_shift"
+    },
+    {
+      "data": 47,
+      "kind": "key_shift"
+    },
+    {
+      "data": 27,
+      "kind": "key_shift"
+    },
+    {
+      "data": 31,
+      "kind": "key_shift"
+    },
+    {
+      "data": 31,
+      "kind": "key_shift"
+    },
+    {
+      "data": 50,
+      "kind": "key_shift"
+    },
+    {
+      "data": 253,
+      "kind": "key_shift"
+    },
+    {
+      "data": 255,
+      "kind": "key_shift"
+    },
+    {
+      "data": 15,
+      "kind": "key_shift"
+    }
+  ],
+  "vim": true
+}
