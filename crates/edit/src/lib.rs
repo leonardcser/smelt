@@ -2167,7 +2167,31 @@ impl<'a> layout::LeafSizer for UiLeafSizer<'a> {
             return (0, 0);
         };
         let h = (buf.lines().len() as u32).min(u16::MAX as u32) as u16;
-        (cap.0, h.min(cap.1))
+        // Wrapped content has no intrinsic width — its layout depends on the
+        // wrap column, which is whatever the parent slot resolves to. Defer
+        // to the cap. For non-wrapping content we can compute the actual
+        // longest-line width + chrome, so `width = "fit"` overlays shrink
+        // around their content instead of defaulting to the terminal.
+        let w = if win.wrap {
+            cap.0
+        } else {
+            use unicode_width::UnicodeWidthStr;
+            let longest = buf
+                .lines()
+                .iter()
+                .map(|l| UnicodeWidthStr::width(l.as_str()).min(u16::MAX as usize) as u16)
+                .max()
+                .unwrap_or(0);
+            let chrome = win
+                .config
+                .gutters
+                .pad_left
+                .saturating_add(win.config.gutters.pad_right)
+                .saturating_add(win.config.gutters.scrollbar_width())
+                .saturating_add(win.gutter_width(buf));
+            longest.saturating_add(chrome).min(cap.0)
+        };
+        (w, h.min(cap.1))
     }
 }
 
