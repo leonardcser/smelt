@@ -200,7 +200,7 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
     }
     m.fn_(
         "reload",
-        "Re-evaluate every Lua surface: clears every command, keymap, statusline source, tool, hook, timer, and cell subscriber, wipes non-stdlib `package.loaded` entries, then re-runs the bundled autoload modules, `init.lua`, global plugins, and `.smelt/init.lua` + `.smelt/plugins/*`. `early.lua` is intentionally skipped — its CLI-flag and `smelt.builtins.disable` effects are startup-only.",
+        "Re-evaluate every Lua surface: clears every command, keymap, statusline source, tool, hook, timer, and cell subscriber, wipes non-stdlib `package.loaded` entries, then re-runs the bootstrap chunks (from disk overlay if present, embedded otherwise, using the same `module_overlay_roots()` lookup as `require`), bundled autoload modules, `init.lua`, global plugins, and `.smelt/init.lua` + `.smelt/plugins/*`. Cancels any in-flight `smelt.spawn` tasks and dismisses an open modal dialog before reloading (the parked coroutine is dropped with the rest). `early.lua` is intentionally skipped — its CLI-flag and `smelt.builtins.disable` effects are startup-only.",
         &[],
         |_, ()| -> LuaResult<()> {
             crate::lua::with_app(|app| {
@@ -208,12 +208,16 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
                     app.notify_error("cannot reload while agent is working".into());
                     return;
                 }
-                if app.ui.active_modal().is_some() {
-                    // Modal overlays (dialogs, confirm pickers) hold Lua
-                    // callbacks; clearing them mid-flight would invalidate
-                    // the user's pending action.
-                    app.notify_error("cannot reload while a modal dialog is open".into());
-                    return;
+                // Modal overlays (dialogs, confirm pickers) hold Lua
+                // callbacks and park coroutines waiting on user input.
+                // Reload would wipe `package.loaded` and the callback
+                // registry, leaving the painted dialog pointing at
+                // orphaned closures. Dismiss the modal first; the
+                // suspended coroutine joins the other tasks that
+                // `clear_for_reload` cancels. Symmetric with how
+                // reload already drops every in-flight `smelt.spawn`.
+                if let Some(modal_id) = app.ui.active_modal() {
+                    app.close_overlay(modal_id);
                 }
                 app.reload_lua();
             });

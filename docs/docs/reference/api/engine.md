@@ -60,7 +60,7 @@ Register a recovery hook the engine calls when a provider returns a context-wind
 fun(): nil
 ```
 
-Re-evaluate every Lua surface: clears every command, keymap, statusline source, tool, hook, timer, and cell subscriber, wipes non-stdlib `package.loaded` entries, then re-runs the bundled autoload modules, `init.lua`, global plugins, and `.smelt/init.lua` + `.smelt/plugins/*`. `early.lua` is intentionally skipped — its CLI-flag and `smelt.builtins.disable` effects are startup-only.
+Re-evaluate every Lua surface: clears every command, keymap, statusline source, tool, hook, timer, and cell subscriber, wipes non-stdlib `package.loaded` entries, then re-runs the bootstrap chunks (from disk overlay if present, embedded otherwise, using the same `module_overlay_roots()` lookup as `require`), bundled autoload modules, `init.lua`, global plugins, and `.smelt/init.lua` + `.smelt/plugins/*`. Cancels any in-flight `smelt.spawn` tasks and dismisses an open modal dialog before reloading (the parked coroutine is dropped with the rest). `early.lua` is intentionally skipped — its CLI-flag and `smelt.builtins.disable` effects are startup-only.
 
 ## `smelt.engine.submit_command`
 

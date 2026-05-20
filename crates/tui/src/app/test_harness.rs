@@ -2876,6 +2876,71 @@ mod tests {
         assert!(!completed, "cancelled task must not have run to completion");
     }
 
+    /// `/reload` (`smelt.engine.reload()`) used to refuse with
+    /// "cannot reload while a modal dialog is open". We now dismiss
+    /// the modal first so the parked dialog coroutine joins the rest
+    /// of the in-flight tasks `clear_for_reload` cancels — symmetric
+    /// with how reload already drops any other `smelt.spawn`. After
+    /// reload, no modal is open and a fresh dialog opens cleanly.
+    #[test]
+    fn reload_lua_via_engine_dismisses_open_modal() {
+        let tmp = tempfile::tempdir().unwrap();
+        let init = tmp.path().join("init.lua");
+        std::fs::write(
+            &init,
+            r#"
+            smelt.cmd.register("open_modal", function()
+                smelt.spawn(function()
+                    local leaf = smelt.dialog.content({ text = "hello" })
+                    smelt.dialog.open({
+                        title = "test",
+                        max_height = "50%",
+                        panels = { { leaf = leaf } },
+                    })
+                end)
+            end)
+            "#,
+        )
+        .unwrap();
+
+        let mut app = TestApp::builder().with_init_lua(&init).build();
+        {
+            let _g = crate::lua::install_app_ptr(&mut app.app);
+            app.app.apply_lua_command("open_modal");
+        }
+        assert!(
+            app.app.ui.active_modal().is_some(),
+            "modal should be open after /open_modal"
+        );
+
+        // Drive the reload through the Lua binding (the gate lives there,
+        // not in `TuiApp::reload_lua`). The binding should dismiss the
+        // modal and call through to `reload_lua` instead of bailing out.
+        {
+            let _g = crate::lua::install_app_ptr(&mut app.app);
+            app.app
+                .lua
+                .lua
+                .load("smelt.engine.reload()")
+                .exec()
+                .expect("reload succeeds even with modal open");
+        }
+        assert!(
+            app.app.ui.active_modal().is_none(),
+            "modal must be dismissed after reload"
+        );
+
+        // Reload should have re-registered the command — reopen works.
+        {
+            let _g = crate::lua::install_app_ptr(&mut app.app);
+            app.app.apply_lua_command("open_modal");
+        }
+        assert!(
+            app.app.ui.active_modal().is_some(),
+            "command survived reload and reopens modal"
+        );
+    }
+
     /// User-resized overlay (`size_override`) must survive reload —
     /// the named-refresh path preserves user gesture state.
     #[test]

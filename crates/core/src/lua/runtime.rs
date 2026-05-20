@@ -1654,16 +1654,36 @@ fn decode_styled_lines(value: mlua::Value) -> Result<protocol::StyledLines, Stri
 
 pub fn load_bootstrap_chunks(lua: &Lua) -> mlua::Result<()> {
     for rel in BOOTSTRAP_FILES {
-        let file = EMBEDDED_LUA.get_file(rel).ok_or_else(|| {
-            LuaError::RuntimeError(format!("missing embedded bootstrap chunk: {rel}"))
-        })?;
-        let src = file
-            .contents_utf8()
-            .ok_or_else(|| LuaError::RuntimeError(format!("bootstrap chunk not utf-8: {rel}")))?;
-        let name = format!("smelt/{rel}");
-        lua.load(src).set_name(name).exec()?;
+        let (src, name) = read_bootstrap_source(rel)?;
+        lua.load(&src).set_name(name).exec()?;
     }
     Ok(())
+}
+
+/// Resolve a bootstrap-file relative path to its source, walking the
+/// same disk-overlay roots as `require()` before falling back to the
+/// baked-in [`EMBEDDED_LUA`] snapshot. Lets `dialog.lua`, `cmd.lua`,
+/// etc. hot-reload from disk on `/reload` — same dev-loop parity as
+/// autoloaded plugins. Returns `(source, chunk_name)`; the chunk name
+/// reflects where the source actually came from so Lua tracebacks
+/// point at the file you're editing.
+fn read_bootstrap_source(rel: &str) -> mlua::Result<(String, String)> {
+    for root in module_overlay_roots() {
+        let candidate = root.join("smelt").join(rel);
+        if let Ok(src) = std::fs::read_to_string(&candidate) {
+            let name = candidate.display().to_string();
+            return Ok((src, name));
+        }
+    }
+    let file = EMBEDDED_LUA.get_file(rel).ok_or_else(|| {
+        LuaError::RuntimeError(format!("missing embedded bootstrap chunk: {rel}"))
+    })?;
+    let src = file
+        .contents_utf8()
+        .ok_or_else(|| LuaError::RuntimeError(format!("bootstrap chunk not utf-8: {rel}")))?
+        .to_string();
+    let name = format!("smelt/{rel}");
+    Ok((src, name))
 }
 
 fn embedded_lua_modules() -> impl Iterator<Item = (String, &'static str)> {
