@@ -3,7 +3,7 @@
 
 #![allow(clippy::arc_with_non_send_sync)]
 
-mod api;
+pub(crate) mod api;
 pub(crate) use api::vim::LuaVimMode;
 pub use api::VERSION_STRING;
 pub mod app_ref;

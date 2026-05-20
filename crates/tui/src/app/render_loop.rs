@@ -51,18 +51,27 @@ impl TuiApp {
             let _p = smelt_perf::perf::begin("compositor:layout");
             let (above_rows, input_rows) =
                 self.measure_prompt_rows(&self.input, self.prompt_buf(), width, queued);
-            self.ui.set_layout(layout::build_layout_tree(
-                &layout::LayoutInput {
-                    term_height: term_h,
-                    prompt_above_rows: above_rows,
-                    prompt_input_rows: input_rows,
-                },
-                self.well_known.statusline,
-            ));
+            let lua_tree =
+                self.invoke_lua_layout_composer(term_w, term_h, above_rows, input_rows);
+            let tree = lua_tree.unwrap_or_else(|| {
+                layout::build_layout_tree(
+                    &layout::LayoutInput {
+                        term_height: term_h,
+                        prompt_above_rows: above_rows,
+                        prompt_input_rows: input_rows,
+                    },
+                    self.well_known.statusline,
+                )
+            });
+            self.ui.set_layout(tree);
             self.layout = layout::LayoutState::from_ui(&self.ui, self.well_known.statusline);
             (self.layout.prompt, self.layout.viewport_rows())
         };
 
+        {
+            let _p = smelt_perf::perf::begin("compositor:lua_renderers");
+            self.dispatch_lua_renderers();
+        }
         {
             let _p = smelt_perf::perf::begin("compositor:transcript");
             self.sync_transcript_layer(width, viewport_rows, has_transcript_cursor);
@@ -292,6 +301,100 @@ impl TuiApp {
                 // doesn't draw a stray glyph.
                 self.ui
                     .set_cursor_shape(crate::smelt_term::CursorShape::Hidden);
+            }
+        }
+    }
+
+    /// Invoke the Lua main-layout composer if one is registered via
+    /// `smelt.ui.layout.set(fn)`. Returns `None` when no composer is
+    /// registered, the resolved function is missing/invalid, the
+    /// callback errors, or the returned userdata isn't a `LuaUiLayout`.
+    /// The hardcoded fallback in `build_layout_tree` runs in any
+    /// `None` case so the screen stays usable when a plugin is buggy.
+    fn invoke_lua_layout_composer(
+        &mut self,
+        term_w: u16,
+        term_h: u16,
+        prompt_above_rows: u16,
+        prompt_input_rows: u16,
+    ) -> Option<crate::smelt_term::LayoutTree> {
+        let lua = self.lua.lua();
+        let shared = self.lua.shared();
+        let composer_func: Option<mlua::Function> = {
+            let guard = shared.main_layout_composer.lock().ok()?;
+            let handle = guard.as_ref()?;
+            lua.registry_value::<mlua::Function>(&handle.key).ok()
+        };
+        let func = composer_func?;
+        let state = lua.create_table().ok()?;
+        let _ = state.set("term_w", term_w);
+        let _ = state.set("term_h", term_h);
+        let _ = state.set("prompt_input_rows", prompt_input_rows);
+        let _ = state.set("prompt_above_rows", prompt_above_rows);
+        let result: mlua::Result<mlua::AnyUserData> = func.call((state,));
+        let ud = match result {
+            Ok(ud) => ud,
+            Err(e) => {
+                self.lua
+                    .record_error(format!("smelt.ui.layout composer: {e}"));
+                return None;
+            }
+        };
+        let node = ud
+            .borrow::<crate::lua::api::overlay_layout::LuaUiLayout>()
+            .ok()?
+            .0
+            .clone();
+        let mut window_leaves: Vec<crate::smelt_term::WinId> = Vec::new();
+        match crate::lua::api::overlay_layout::build_layout_tree(self, &node, &mut window_leaves) {
+            Ok((_constraint, tree)) => Some(tree),
+            Err(e) => {
+                self.lua
+                    .record_error(format!("smelt.ui.layout composer tree: {e}"));
+                None
+            }
+        }
+    }
+
+    /// Invoke every Lua renderer registered via `Win:set_renderer(fn)`.
+    /// Each callback receives its `Win` userdata; the renderer is
+    /// expected to write the window's contents into the backing buffer
+    /// for the current frame. Renderers whose target window has been
+    /// closed are silently skipped (and not collected — `Win:close()`
+    /// is the right way to drop a renderer, and the registry entry
+    /// stays so a re-opened window keeps its renderer). Errors are
+    /// recorded so plugin bugs surface in `/log` without breaking the
+    /// frame.
+    fn dispatch_lua_renderers(&mut self) {
+        let lua = self.lua.lua();
+        let shared = self.lua.shared();
+        // Snapshot (win_id, function) pairs so the registry mutex
+        // isn't held across Lua calls (renderers may legitimately
+        // re-register or remove themselves mid-frame).
+        let entries: Vec<(crate::smelt_term::WinId, mlua::Function)> = {
+            let guard = match shared.win_renderers.lock() {
+                Ok(g) => g,
+                Err(_) => return,
+            };
+            guard
+                .iter()
+                .filter_map(|(raw_id, handle)| {
+                    lua.registry_value::<mlua::Function>(&handle.key)
+                        .ok()
+                        .map(|f| (crate::smelt_term::WinId(*raw_id), f))
+                })
+                .collect()
+        };
+        for (win_id, func) in entries {
+            // Skip windows that no longer exist (e.g. closed overlay leaves
+            // whose renderer hasn't been cleared yet).
+            if self.ui.win(win_id).is_none() {
+                continue;
+            }
+            let win_ud = crate::lua::api::win::LuaWin { id: win_id };
+            if let Err(e) = func.call::<()>((win_ud,)) {
+                self.lua
+                    .record_error(format!("win renderer for {win_id:?}: {e}"));
             }
         }
     }
