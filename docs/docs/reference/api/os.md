@@ -38,6 +38,14 @@ fun(): string?
 
 Return the user's home directory, or `nil` if it cannot be determined.
 
+## `smelt.os.open_url`
+
+```lua
+fun(url: string): boolean, string?
+```
+
+Open `url` in the system's default browser. macOS uses `open`, Windows uses `cmd /c start`, everything else tries `xdg-open` then falls back to `open`. Only `http(s)://`, `mailto:`, and `file://` URLs are accepted. Returns `(true, nil)` on a successful spawn, or `(false, err_string)` if the scheme is rejected or every launcher errored.
+
 ## `smelt.os.pid`
 
 ```lua

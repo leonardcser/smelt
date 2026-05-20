@@ -23,6 +23,10 @@ os.getenv = nil
 ---@type fun(): string?
 os.home = nil
 
+--- Open `url` in the system's default browser. macOS uses `open`, Windows uses `cmd /c start`, everything else tries `xdg-open` then falls back to `open`. Only `http(s)://`, `mailto:`, and `file://` URLs are accepted. Returns `(true, nil)` on a successful spawn, or `(false, err_string)` if the scheme is rejected or every launcher errored.
+---@type fun(url: string): boolean, string?
+os.open_url = nil
+
 --- Return the OS process id of the running smelt instance.
 ---@type fun(): integer
 os.pid = nil

@@ -25,6 +25,7 @@ Type `/` to open the command picker with fuzzy search.
 | `/history`                | Fuzzy-search prompt history (also `Ctrl+R`)                |
 | `/messages`               | Show recorded errors, warnings, and notices               |
 | `/help`                   | Show keybindings (also `?` on an empty prompt)             |
+| `/docs`                   | Open the smelt documentation in your browser               |
 | `/btw <question>`         | Ask a side question; answer streams into a dialog          |
 | `/reflect [focus]`        | Step back and rethink recent changes before moving on      |
 | `/simplify [focus]`       | Review changed code for reuse, quality, and efficiency     |
