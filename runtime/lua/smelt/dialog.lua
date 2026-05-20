@@ -158,14 +158,33 @@ end
 -- the root leaf and the array of leaves.
 --
 -- Dialog height (pick one; setting both is an error):
---   * `opts.height`     — fixed: integer cells, `"N%"`, `"fill"`. Default `"60%"`.
---   * `opts.max_height` — shrink to content, capped at this size. Panels with
---     no explicit `height` default to `"fit"` so the panel vbox actually
---     reports its natural size to the overlay.
+--   * `opts.height`     — fixed total: integer cells, `"N%"`, `"fill"`. Default `"60%"`.
+--                         Includes the title/border row (this knob predates the
+--                         body-relative semantics below; matches `smelt.overlay.new`).
+--   * `opts.max_height` — shrink to content, capped at this size.
+--   * `opts.min_height` — floor that pairs with either mode. Fit-mode dialogs
+--                         default to `min_height = "30%"` so a placeholder
+--                         body stays visible when content collapses; pass
+--                         `min_height = 0` to opt out.
 --
--- Both desugar to a single value passed to `smelt.overlay.new`'s `height`
--- knob (`"max:N%"` for max_height). The panel vbox is the overlay layout
--- directly — no outer wrapper.
+-- `min_height` and `max_height` are **body-relative** when given as integer
+-- cells: the wrapper adds the dialog's chrome (top border + title row, 1 cell)
+-- before forwarding to the overlay. `"N%"` / `"fill"` / `"fit"` are forwarded
+-- verbatim — percentages of the terminal don't compose with absolute chrome
+-- offsets, and the extra row is negligible at typical percentages anyway.
+
+-- The dialog draws a single chrome row at the top (border + title share it).
+-- min_height / max_height are body-relative at the dialog layer; we add this
+-- offset before forwarding to the overlay (which uses total-rect semantics).
+local CHROME_H = 1
+
+-- Convert a body-relative size spec to a total-overlay spec. Integer cells
+-- get the chrome offset added; non-numeric specs (`"N%"`, `"fill"`, `"fit"`)
+-- pass through unchanged.
+local function with_chrome(spec)
+  if type(spec) == "number" then return spec + CHROME_H end
+  return spec
+end
 
 local function open_overlay(opts)
   if opts.height ~= nil and opts.max_height ~= nil then
@@ -173,6 +192,12 @@ local function open_overlay(opts)
   end
   local fit_mode = opts.max_height ~= nil
   local default_panel_height = fit_mode and "fit" or nil
+  -- Fit-mode dialogs read their natural size — for trivial content (one
+  -- placeholder line) that collapses to just the chrome row. Default to a
+  -- 30% terminal-height floor so the placeholder + a comfortable margin stay
+  -- visible. Callers can override via `opts.min_height` (including `0` to opt
+  -- out entirely).
+  local default_min_height = fit_mode and "30%" or nil
 
   local panels = opts.panels or {}
   if #panels == 0 then
@@ -235,7 +260,8 @@ local function open_overlay(opts)
     layout       = panel_vbox,
     width        = "100%",
     height       = height_spec,
-    max_height   = max_height_spec,
+    max_height   = with_chrome(max_height_spec),
+    min_height   = with_chrome(opts.min_height or default_min_height),
   })
 
   return leaves[1], leaves, overlay
@@ -389,7 +415,7 @@ end
 --                     built-in navigation bindings. Each entry's
 --                     `on_press(ctx)` receives the picker ctx with
 --                     `ctx.list`, `ctx.input`, `ctx.input_buf` added.
---   * `title`, `height`, `max_height`, `blocks_agent` — forwarded to
+--   * `title`, `height`, `max_height`, `min_height`, `blocks_agent` — forwarded to
 --                     `smelt.dialog.open`.
 
 local NAV_KEYS = {
@@ -482,6 +508,7 @@ function smelt.dialog.picker(opts)
     title        = opts.title,
     height       = opts.height,
     max_height   = opts.max_height,
+    min_height   = opts.min_height,
     blocks_agent = opts.blocks_agent,
     panels = {
       { leaf = input_leaf, height = 1      },

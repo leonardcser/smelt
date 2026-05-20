@@ -2122,6 +2122,15 @@ fn resolve_overlay_size(
     if let Some(cap) = overlay.max_height {
         h = h.min(resolve(cap, term.1, natural.1));
     }
+    if let Some(floor) = overlay.min_width {
+        w = w.max(resolve(floor, term.0, natural.0));
+    }
+    if let Some(floor) = overlay.min_height {
+        h = h.max(resolve(floor, term.1, natural.1));
+    }
+    // Floors can't push past the terminal extent.
+    w = w.min(term.0);
+    h = h.min(term.1);
     (w, h)
 }
 

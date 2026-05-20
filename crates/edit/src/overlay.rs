@@ -52,6 +52,13 @@ pub struct Overlay {
     pub max_width: Option<Constraint>,
     /// Vertical-axis twin of [`Self::max_width`].
     pub max_height: Option<Constraint>,
+    /// Optional floor applied after [`Self::width`] resolves. Pairs with
+    /// `width = Fit` to express "shrink to content, but never smaller
+    /// than 20 cells". Resolved the same way as `width` but used only as
+    /// a lower bound.
+    pub min_width: Option<Constraint>,
+    /// Vertical-axis twin of [`Self::min_width`].
+    pub min_height: Option<Constraint>,
     /// Stacking order. Higher draws on top; same `z` breaks by insertion order.
     pub z: u16,
     /// When true, focus + Tab cycling stay inside this overlay; Esc/Ctrl-C fires Dismiss.
@@ -76,6 +83,8 @@ impl Overlay {
             height: Constraint::Fit,
             max_width: None,
             max_height: None,
+            min_width: None,
+            min_height: None,
             z: 50,
             modal: false,
             blocks_agent: false,
@@ -132,6 +141,16 @@ impl Overlay {
 
     pub fn with_max_height(mut self, h: Option<Constraint>) -> Self {
         self.max_height = h;
+        self
+    }
+
+    pub fn with_min_width(mut self, w: Option<Constraint>) -> Self {
+        self.min_width = w;
+        self
+    }
+
+    pub fn with_min_height(mut self, h: Option<Constraint>) -> Self {
+        self.min_height = h;
         self
     }
 }

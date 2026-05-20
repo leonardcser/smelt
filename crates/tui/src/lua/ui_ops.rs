@@ -52,6 +52,11 @@ pub(crate) fn open_overlay(app: &mut TuiApp, opts: mlua::Table) -> Result<u64, S
     // express "shrink to content, cap at 50% of terminal".
     let max_width = parse_overlay_constraint_opt(&opts, "max_width", "overlay.max_width")?;
     let max_height = parse_overlay_constraint_opt(&opts, "max_height", "overlay.max_height")?;
+    // `min_width`/`min_height` are the symmetric floors. Pairs with
+    // `height = "fit"` + `min_height = 2` to express "shrink to content,
+    // but never smaller than 2 cells".
+    let min_width = parse_overlay_constraint_opt(&opts, "min_width", "overlay.min_width")?;
+    let min_height = parse_overlay_constraint_opt(&opts, "min_height", "overlay.min_height")?;
 
     let mut window_leaves: Vec<WinId> = Vec::new();
     let (_root_constraint, inner) =
@@ -72,6 +77,8 @@ pub(crate) fn open_overlay(app: &mut TuiApp, opts: mlua::Table) -> Result<u64, S
             ov.height = height;
             ov.max_width = max_width;
             ov.max_height = max_height;
+            ov.min_width = min_width;
+            ov.min_height = min_height;
             ov.z = z;
             ov.modal = modal;
             ov.blocks_agent = blocks_agent;
@@ -106,7 +113,9 @@ pub(crate) fn open_overlay(app: &mut TuiApp, opts: mlua::Table) -> Result<u64, S
         .with_width(width)
         .with_height(height)
         .with_max_width(max_width)
-        .with_max_height(max_height);
+        .with_max_height(max_height)
+        .with_min_width(min_width)
+        .with_min_height(min_height);
     let id = app.ui.overlay_open(overlay);
     if let Some(n) = name {
         app.ui.name_overlay(n, id);
