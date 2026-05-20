@@ -73,12 +73,18 @@ jobs:
       - name: Set up Rust
         uses: dtolnay/rust-toolchain@stable
 
+      - name: Set up Rust (nightly for cargo-fuzz)
+        uses: dtolnay/rust-toolchain@nightly
+
       - name: Cache dependencies
         uses: Swatinem/rust-cache@v2
         with:
           workspaces: |
             .
             fuzz
+
+      - name: Install cargo-fuzz
+        uses: taiki-e/install-action@cargo-fuzz
 
       - name: Replay regression seeds
         run: cargo xtask fuzz replay-regression
