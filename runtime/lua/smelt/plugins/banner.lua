@@ -352,18 +352,20 @@ local function open_splash()
 end
 
 local function refresh()
-	local msgs = smelt.session.messages({}) or {}
-	if #msgs == 0 then
+	if smelt.transcript.is_empty() then
 		open_splash()
 	else
 		teardown()
 	end
 end
 
--- session_started covers /reset, /fork, /resume; turn_start covers the
--- first dispatch; history covers rewind / compaction / load. on_ready
--- ensures the host pointer is live before the first paint.
+-- session_started covers /reset, /fork, /resume; input_submit covers
+-- shell escapes (`!cmd`) and any input the user submits; turn_start
+-- covers programmatic agent dispatches (CLI startup message, replay);
+-- history covers rewind / compaction / load. on_ready ensures the host
+-- pointer is live before the first paint.
 smelt.cell("session_started"):subscribe(refresh)
+smelt.cell("input_submit"):subscribe(teardown)
 smelt.cell("turn_start"):subscribe(teardown)
 smelt.cell("history"):subscribe(refresh)
 smelt.lifecycle.on_ready(refresh)

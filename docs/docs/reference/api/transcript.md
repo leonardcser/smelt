@@ -14,6 +14,14 @@ fun(): table
 
 Return the laid-out transcript blocks for the current frame as a list of `{ idx, role, first_row, rows, first_line }`. `idx` is 0-based into `session.messages` order (the same value `session.rewind_to(idx)` accepts). `role` is `"user"|"assistant"|"thinking"|"tool"|"code"|"exec"|"compacted"`. `first_row` is the absolute display row of the block's first visible line (compare against `win:scroll().top`). `rows` is the block's row count. `first_line` is the first non-empty line of the block's raw source text. Returns an empty list before the first frame projects.
 
+## `smelt.transcript.is_empty`
+
+```lua
+fun(): boolean
+```
+
+Return `true` when the transcript history holds no blocks (user, assistant, thinking, tool, exec, code, compacted). Reads `transcript.history` directly, so unlike `blocks()` it works before the first frame projects and is the right signal for empty-state plugins (logo splash, onboarding hints).
+
 ## `smelt.transcript.text`
 
 ```lua

@@ -186,6 +186,10 @@ impl TuiApp {
             return None;
         }
         self.start_exec(cmd.to_string());
+        self.core
+            .cells
+            .set_dyn("input_submit", std::rc::Rc::new(format!("!{cmd}")));
+        self.pump_lua();
 
         let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
         let kill = std::sync::Arc::new(tokio::sync::Notify::new());

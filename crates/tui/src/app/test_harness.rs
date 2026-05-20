@@ -2907,6 +2907,7 @@ mod tests {
         {
             let _g = crate::lua::install_app_ptr(&mut app.app);
             app.app.apply_lua_command("open_modal");
+            app.app.drive_lua_tasks();
         }
         assert!(
             app.app.ui.active_modal().is_some(),
@@ -2934,6 +2935,7 @@ mod tests {
         {
             let _g = crate::lua::install_app_ptr(&mut app.app);
             app.app.apply_lua_command("open_modal");
+            app.app.drive_lua_tasks();
         }
         assert!(
             app.app.ui.active_modal().is_some(),

@@ -11,6 +11,10 @@ local transcript = {}
 ---@type fun(): table
 transcript.blocks = nil
 
+--- Return `true` when the transcript history holds no blocks (user, assistant, thinking, tool, exec, code, compacted). Reads `transcript.history` directly, so unlike `blocks()` it works before the first frame projects and is the right signal for empty-state plugins (logo splash, onboarding hints).
+---@type fun(): boolean
+transcript.is_empty = nil
+
 --- Return the full transcript as a single newline-joined string (post-render display text, with thinking blocks visible according to the `show_thinking` setting).
 ---@type fun(): string
 transcript.text = nil
