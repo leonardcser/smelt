@@ -37,7 +37,7 @@ pub(super) fn render(
 }
 
 /// Returns `(label, non_empty_line_count)`. Uses the first `**bold**` line as label if present.
-pub fn thinking_summary(content: &str) -> (String, usize) {
+pub(super) fn thinking_summary(content: &str) -> (String, usize) {
     let mut label = None;
     let mut lines = 0usize;
     for line in content.lines() {
@@ -57,7 +57,7 @@ pub fn thinking_summary(content: &str) -> (String, usize) {
     (label.unwrap_or_else(|| "thinking".to_string()), lines)
 }
 
-pub fn render_thinking_summary(
+fn render_thinking_summary(
     out: &mut LineBuilder,
     width: usize,
     label: &str,

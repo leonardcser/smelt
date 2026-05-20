@@ -14,13 +14,6 @@ pub mod transcript_parsers;
 use crossterm::terminal;
 use smelt_core::style::Color;
 
-/// Emit `n` blank rows.
-pub(crate) fn emit_newlines(out: &mut builder::LineBuilder, n: u16) {
-    for _ in 0..n {
-        out.newline();
-    }
-}
-
 pub(super) fn reasoning_color(
     effort: protocol::ReasoningEffort,
     theme: &crate::smelt_term::Theme,

@@ -36,8 +36,6 @@ struct ProjectKey {
     generation: u64,
     width: u16,
     show_thinking: bool,
-    /// Forces re-stitch when ephemeral content (active thinking) changes.
-    ephemeral_fingerprint: Option<u64>,
 }
 
 pub(crate) struct ProjectOutput {
@@ -86,17 +84,14 @@ impl TranscriptProjection {
         width: u16,
         show_thinking: bool,
         theme: &Theme,
-        ephemeral: Option<&Buffer>,
         scroll_top: u16,
         viewport_rows: u16,
     ) -> ProjectOutput {
         let gen = history.generation();
-        let ephemeral_fingerprint = ephemeral.map(Buffer::changedtick);
         let key = ProjectKey {
             generation: gen,
             width,
             show_thinking,
-            ephemeral_fingerprint,
         };
 
         if self.project_key == Some(key) {
@@ -183,22 +178,6 @@ impl TranscriptProjection {
                 start,
                 rows: block_rows as u16,
             });
-        }
-
-        if let Some(eph) = ephemeral {
-            for r in 0..eph.line_count() {
-                let row_idx = texts.len();
-                texts.push(eph.get_line(r).unwrap_or("").to_string());
-                let h = eph.highlights_at(r);
-                let dec = eph.decoration_at(r).clone();
-                if !h.is_empty() || dec != LineDecoration::default() {
-                    pending.push(PendingRow {
-                        row: row_idx,
-                        highlights: h,
-                        decoration: dec,
-                    });
-                }
-            }
         }
 
         let total_rows = clamp_u16(texts.len() as u32);
@@ -627,16 +606,7 @@ mod tests {
         let mut projection = TranscriptProjection::new();
         let mut buf = Buffer::new(crate::smelt_term::BufId(1), Default::default());
 
-        projection.project(
-            &mut buf,
-            &mut transcript.history,
-            80,
-            false,
-            &theme,
-            None,
-            0,
-            80,
-        );
+        projection.project(&mut buf, &mut transcript.history, 80, false, &theme, 0, 80);
 
         assert!(buf.line_count() > 0);
         assert_eq!(buf.get_line(buf.line_count() - 1), Some("hello"));

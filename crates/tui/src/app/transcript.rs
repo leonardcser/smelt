@@ -1,15 +1,13 @@
 //! Transcript block history, streaming state, projection, and cursor glyph cache.
 
 use crate::app::TuiApp;
-use crate::content::builder::LineBuilder;
 use crate::content::selection::wrap_with_offsets;
-use crate::smelt_term::{BufCreateOpts, BufId, Buffer, Theme};
+use crate::smelt_term::{BufCreateOpts, Buffer};
 
 use crate::content::transcript_parsers as blocks;
-use crate::content::transcript_parsers::{render_thinking_summary, thinking_summary};
 use smelt_core::content::block_layout::{BlockLayout, HboxItem, RenderedLayout};
 use smelt_core::transcript_model::{
-    gap_between, Block, BlockId, ToolOutput, ToolOutputRef, ToolState, ToolStatus,
+    Block, BlockId, ToolOutput, ToolOutputRef, ToolState, ToolStatus,
 };
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -40,29 +38,6 @@ impl TuiApp {
     pub(crate) fn flush_streaming_thinking(&mut self) {
         self.parser
             .flush_streaming_thinking(&mut self.transcript.history);
-    }
-
-    fn thinking_summary_gap(&self) -> u16 {
-        if let Some(last) = self
-            .transcript
-            .history
-            .order
-            .iter()
-            .rev()
-            .filter_map(|id| self.transcript.history.blocks.get(id))
-            .find(|b| !matches!(b, Block::Thinking { .. }))
-        {
-            gap_between(
-                last,
-                &Block::Thinking {
-                    content: String::new(),
-                },
-            )
-        } else if self.transcript.history.is_empty() {
-            0
-        } else {
-            1
-        }
     }
 
     pub(crate) fn append_streaming_text(&mut self, delta: &str) {
@@ -147,8 +122,8 @@ impl TuiApp {
         );
     }
 
-    pub(crate) fn has_transcript_content(&mut self, show_thinking: bool) -> bool {
-        !self.transcript.history.is_empty() || self.has_ephemeral(show_thinking)
+    pub(crate) fn has_transcript_content(&mut self, _show_thinking: bool) -> bool {
+        !self.transcript.history.is_empty()
     }
 
     /// Full transcript as one string per display row. Result is cached as an
@@ -156,22 +131,12 @@ impl TuiApp {
     pub(crate) fn full_transcript_display_text(&mut self, show_thinking: bool) -> Arc<Vec<String>> {
         let tw = self.transcript_width() as u16;
         let theme = self.ui.theme().clone();
-        let cached = self.transcript_projection.build_rows(
+        self.transcript_projection.build_rows(
             &mut self.transcript.history,
             tw,
             show_thinking,
             &theme,
-        );
-        if !self.has_ephemeral(show_thinking) {
-            return cached;
-        }
-        // Ephemeral content varies per frame; clone-and-append rather than invalidate.
-        let ephemeral_buf = self.render_ephemeral_to_buffer(tw, show_thinking, &theme);
-        let mut rows: Vec<String> = (*cached).clone();
-        for r in 0..ephemeral_buf.line_count() {
-            rows.push(ephemeral_buf.get_line(r).unwrap_or("").to_string());
-        }
-        Arc::new(rows)
+        )
     }
 
     /// `\n` byte positions in `full_transcript_display_text(..).join("\n")`,
@@ -189,30 +154,6 @@ impl TuiApp {
             show_thinking,
             &theme,
         );
-
-        if self.has_ephemeral(show_thinking) {
-            let rows = self.transcript_projection.build_rows(
-                &mut self.transcript.history,
-                tw,
-                show_thinking,
-                &theme,
-            );
-            let snap_row_count = rows.len();
-            let mut pos: usize = rows.iter().map(|r| r.len()).sum();
-            if snap_row_count > 1 {
-                pos += snap_row_count - 1; // join '\n' bytes
-            }
-            let ephemeral_buf = self.render_ephemeral_to_buffer(tw, show_thinking, &theme);
-            let mut first_ephemeral = true;
-            for r in 0..ephemeral_buf.line_count() {
-                if !first_ephemeral || snap_row_count > 0 {
-                    hard.push(pos);
-                    pos += 1;
-                }
-                first_ephemeral = false;
-                pos += ephemeral_buf.get_line(r).unwrap_or("").len();
-            }
-        }
         soft.sort_unstable();
         hard.sort_unstable();
         (soft, hard)
@@ -354,10 +295,6 @@ impl TuiApp {
         self.prerender_tool_blocks(tw as u16);
         let theme = self.ui.theme().clone();
 
-        let ephemeral_buf = self
-            .has_ephemeral(show_thinking)
-            .then(|| self.render_ephemeral_to_buffer(tw as u16, show_thinking, &theme));
-
         let buf = self
             .ui
             .win_buf_mut(self.well_known.transcript)
@@ -368,7 +305,6 @@ impl TuiApp {
             tw as u16,
             show_thinking,
             &theme,
-            ephemeral_buf.as_ref(),
             scroll_top,
             viewport_rows,
         );
@@ -532,43 +468,6 @@ impl TuiApp {
             .filter(|r| r.line >= first && r.line < last)
             .map(|r| (r.line, r.col_start, r.col_end))
             .collect()
-    }
-
-    fn has_ephemeral(&self, show_thinking: bool) -> bool {
-        self.parser.has_active_thinking() && !show_thinking
-    }
-
-    fn render_ephemeral_into(&self, out: &mut LineBuilder, width: usize, show_thinking: bool) {
-        let Some(at) = self.parser.active_thinking() else {
-            return;
-        };
-        if show_thinking {
-            return;
-        }
-        let mut combined = at.paragraph.clone();
-        if !at.current_line.is_empty() {
-            if !combined.is_empty() {
-                combined.push('\n');
-            }
-            combined.push_str(&at.current_line);
-        }
-        if !combined.is_empty() {
-            let (label, line_count) = thinking_summary(&combined);
-            crate::content::emit_newlines(out, self.thinking_summary_gap());
-            render_thinking_summary(out, width, &label, line_count);
-        }
-    }
-
-    /// Render the active-thinking summary into a scratch Buffer at the given width.
-    fn render_ephemeral_to_buffer(&self, tw: u16, show_thinking: bool, theme: &Theme) -> Buffer {
-        let mut buf = Buffer::new(BufId(0), BufCreateOpts::default());
-        if !self.has_ephemeral(show_thinking) {
-            return buf;
-        }
-        let mut col = LineBuilder::new(&mut buf, theme, tw);
-        self.render_ephemeral_into(&mut col, tw as usize, show_thinking);
-        let _ = col.finish();
-        buf
     }
 
     /// Row counts `(above, input)` for the prompt block. `above` = queued + stash + top bar.

@@ -24,7 +24,6 @@ mod user;
 #[cfg(test)]
 use markdown::is_horizontal_rule;
 pub use markdown::render_markdown_inner;
-pub use thinking::{render_thinking_summary, thinking_summary};
 pub use tools::render_layout_into;
 pub use user::UserBlockGeometry;
 
@@ -226,6 +225,7 @@ pub(super) fn render_block(
 
 #[cfg(test)]
 mod tests {
+    use super::thinking::thinking_summary;
     use super::*;
     use smelt_core::buffer::{BufCreateOpts, BufId, Buffer};
     use smelt_core::content::builder::test_util::{read_buffer, TestLine};
