@@ -314,6 +314,16 @@ pub struct ConfirmRequested {
     pub approval_patterns: Vec<String>,
 }
 
+/// Single entry in the `work_busy` cell payload. One per live
+/// `smelt.busy` / `smelt.spinner.busy` token, projected newest-last as
+/// `{ id, label }` Lua tables. `id` is the monotonic token id returned
+/// by `push`; plugins compare it across ticks to spot specific tokens.
+#[derive(Clone, Debug, PartialEq)]
+pub struct WorkBusyEntry {
+    pub id: u64,
+    pub label: String,
+}
+
 /// Payload for the `stream_delta` cell. Emitted for every streaming
 /// chunk arriving from the provider — text, thinking, and tool-call
 /// argument JSON fragments. Use `bytes` for cheap counters (live TPS);
@@ -370,6 +380,13 @@ pub const SEEDED_CELL_NAMES: &[&str] = &[
     "turn_error",
     "turn_start",
     "vim_mode",
+    "work_busy",
+    "work_elapsed_ms",
+    "work_label",
+    "work_outcome",
+    "work_retry_attempt",
+    "work_retry_remaining_ms",
+    "work_state",
 ];
 
 /// Project a `StyledLines` payload into the same shape Lua sees from
@@ -595,6 +612,26 @@ pub(crate) fn build_with_builtins(seeds: BuiltinSeeds) -> Cells {
     cells.declare("branch", seeds.branch);
     cells.declare("now", 0u64);
     cells.declare("spinner_frame", 0u8);
+
+    cells.register_lua_projector::<Vec<WorkBusyEntry>, _>(|v, lua| {
+        let Ok(out) = lua.create_table() else {
+            return mlua::Value::Nil;
+        };
+        for (i, e) in v.iter().enumerate() {
+            let Ok(t) = lua.create_table() else { continue };
+            let _ = t.set("id", e.id);
+            let _ = t.set("label", e.label.as_str());
+            let _ = out.set(i + 1, t);
+        }
+        mlua::Value::Table(out)
+    });
+    cells.declare("work_state", String::from("idle"));
+    cells.declare("work_label", String::new());
+    cells.declare("work_elapsed_ms", 0u64);
+    cells.declare("work_busy", Vec::<WorkBusyEntry>::new());
+    cells.declare("work_outcome", String::new());
+    cells.declare("work_retry_attempt", 0u32);
+    cells.declare("work_retry_remaining_ms", 0u64);
 
     // Event-shaped cells: declared with an `EventStub` placeholder so `smelt.cell(name):subscribe` works.
     cells.declare("history", EventStub);

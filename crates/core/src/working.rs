@@ -18,8 +18,37 @@ pub enum TurnPhase {
     Retrying { delay: Duration, attempt: u32 },
 }
 
+/// Public, plugin-facing snapshot of the overall work state. Resolved by
+/// the tui layer from the engine-side `WorkingState` and the per-app
+/// busy-token stack: `Idle` / `Busy` / `Done` / `Interrupted` are layered
+/// on top of `engine_state` in the cell publisher.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum WorkState {
+    Idle,
+    Working,
+    Retrying,
+    Paused,
+    Busy,
+    Done,
+    Interrupted,
+}
+
+impl WorkState {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Idle => "idle",
+            Self::Working => "working",
+            Self::Retrying => "retrying",
+            Self::Paused => "paused",
+            Self::Busy => "busy",
+            Self::Done => "done",
+            Self::Interrupted => "interrupted",
+        }
+    }
+}
+
 /// Outcome of a completed turn.
-#[derive(Clone, Copy, PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum TurnOutcome {
     Done,
     Interrupted,
@@ -129,6 +158,47 @@ impl WorkingState {
     /// static text.
     pub fn is_animating(&self) -> bool {
         self.live.is_some()
+    }
+
+    /// Engine-only view of the live turn. Returns `None` when no live
+    /// turn is running — the caller layers the busy stack on top to
+    /// decide `Idle` / `Busy` / `Done` / `Interrupted`.
+    pub fn engine_state(&self) -> Option<WorkState> {
+        let live = self.live.as_ref()?;
+        if live.pause_started.is_some() {
+            return Some(WorkState::Paused);
+        }
+        Some(match live.phase {
+            TurnPhase::Retrying { .. } => WorkState::Retrying,
+            TurnPhase::Working => WorkState::Working,
+        })
+    }
+
+    /// Retry countdown for the cell publisher. Returns `(attempt, remaining_ms)`
+    /// while the live turn is in `Retrying` phase, `None` otherwise.
+    pub fn retry_info(&self) -> Option<(u32, u64)> {
+        let live = self.live.as_ref()?;
+        match live.phase {
+            TurnPhase::Retrying { delay, attempt } => {
+                let now = self.clock.instant_now();
+                let remaining = live
+                    .retry_deadline
+                    .map(|t| t.saturating_duration_since(now))
+                    .unwrap_or(delay)
+                    .as_millis() as u64;
+                Some((attempt, remaining))
+            }
+            _ => None,
+        }
+    }
+
+    /// Outcome of the archived last turn, when no live turn is running.
+    /// Used by the cell publisher to derive `work_state` and `work_outcome`.
+    pub fn last_outcome(&self) -> Option<TurnOutcome> {
+        if self.live.is_some() {
+            return None;
+        }
+        self.last.as_ref().map(|l| l.outcome)
     }
 
     pub fn record_tokens_per_sec(&mut self, tps: f64) {
@@ -725,6 +795,72 @@ mod tests {
         let text: String = items.iter().map(|i| i.text.as_str()).collect();
         assert!(text.contains("done"));
         assert!(!text.contains("tok/s"));
+    }
+
+    #[test]
+    fn engine_state_idle_returns_none() {
+        let (_clock, s) = fixture();
+        assert!(s.engine_state().is_none());
+    }
+
+    #[test]
+    fn engine_state_working_after_begin() {
+        let (_clock, mut s) = fixture();
+        s.begin(TurnPhase::Working);
+        assert_eq!(s.engine_state(), Some(WorkState::Working));
+    }
+
+    #[test]
+    fn engine_state_retrying_after_begin_retrying() {
+        let (_clock, mut s) = fixture();
+        s.begin(TurnPhase::Retrying {
+            delay: Duration::from_secs(2),
+            attempt: 1,
+        });
+        assert_eq!(s.engine_state(), Some(WorkState::Retrying));
+    }
+
+    #[test]
+    fn engine_state_paused_when_pause_started() {
+        let (_clock, mut s) = fixture();
+        s.begin(TurnPhase::Working);
+        s.set_paused(true);
+        assert_eq!(s.engine_state(), Some(WorkState::Paused));
+        s.set_paused(false);
+        assert_eq!(s.engine_state(), Some(WorkState::Working));
+    }
+
+    #[test]
+    fn engine_state_idle_after_finish() {
+        let (_clock, mut s) = fixture();
+        s.begin(TurnPhase::Working);
+        s.finish(TurnOutcome::Done);
+        // `Done` is layered by the tui resolver on top of the busy stack;
+        // `engine_state` itself only describes the live turn.
+        assert!(s.engine_state().is_none());
+        assert_eq!(s.last_outcome(), Some(TurnOutcome::Done));
+    }
+
+    #[test]
+    fn retry_info_reports_attempt_and_remaining() {
+        let (clock, mut s) = fixture();
+        s.begin(TurnPhase::Retrying {
+            delay: Duration::from_secs(5),
+            attempt: 3,
+        });
+        let (attempt, remaining_ms) = s.retry_info().expect("retry info");
+        assert_eq!(attempt, 3);
+        assert_eq!(remaining_ms, 5000);
+        clock.advance(Duration::from_secs(2));
+        let (_, remaining_ms) = s.retry_info().expect("retry info");
+        assert_eq!(remaining_ms, 3000);
+    }
+
+    #[test]
+    fn retry_info_none_when_working() {
+        let (_clock, mut s) = fixture();
+        s.begin(TurnPhase::Working);
+        assert!(s.retry_info().is_none());
     }
 
     #[test]
