@@ -609,6 +609,7 @@ impl PromptState {
                 }
                 let p = ctx.buf.text_mut().insert(ctx.win.cpos, '\n');
                 ctx.win.cpos = p + 1;
+                ctx.win.clamp_anchors_to_source(ctx.buf.source());
                 self.close_completer();
                 Action::Redraw
             }
