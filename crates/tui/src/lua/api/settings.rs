@@ -5,7 +5,8 @@
 
 use mlua::prelude::*;
 use smelt_core::config::{
-    setting_kind, ResolvedSettings, SettingKind, SettingValue, SETTINGS_KEYS,
+    setting_kind, setting_string_choices, ResolvedSettings, SettingKind, SettingValue,
+    SETTINGS_KEYS,
 };
 use smelt_core::lua::doc::Tier;
 use smelt_core::lua::module::LuaMod;
@@ -32,6 +33,9 @@ fn read_resolved(s: &ResolvedSettings, key: &str) -> Option<SettingValue> {
         "redact_secrets" => SettingValue::Bool(s.redact_secrets),
         "auto_reload" => SettingValue::Bool(s.auto_reload),
         "compact_threshold" => SettingValue::Number(s.compact_threshold),
+        "cache_ttl_long" => SettingValue::Bool(s.cache_ttl_long),
+        "autoupgrade" => SettingValue::String(s.autoupgrade.clone()),
+        "autoupgrade_channel" => SettingValue::String(s.autoupgrade_channel.clone()),
         _ => return None,
     })
 }
@@ -50,29 +54,46 @@ fn write_resolved(s: &mut ResolvedSettings, key: &str, value: &SettingValue) -> 
         ("redact_secrets", SettingValue::Bool(v)) => s.redact_secrets = *v,
         ("auto_reload", SettingValue::Bool(v)) => s.auto_reload = *v,
         ("compact_threshold", SettingValue::Number(v)) => s.compact_threshold = *v,
+        ("cache_ttl_long", SettingValue::Bool(v)) => s.cache_ttl_long = *v,
+        ("autoupgrade", SettingValue::String(v)) => s.autoupgrade = v.clone(),
+        ("autoupgrade_channel", SettingValue::String(v)) => s.autoupgrade_channel = v.clone(),
         _ => return false,
     }
     true
 }
 
-fn setting_to_lua(_lua: &Lua, value: &SettingValue) -> LuaResult<mlua::Value> {
+fn setting_to_lua(lua: &Lua, value: &SettingValue) -> LuaResult<mlua::Value> {
     Ok(match value {
         SettingValue::Bool(b) => mlua::Value::Boolean(*b),
         SettingValue::Number(n) => mlua::Value::Number(*n),
+        SettingValue::String(s) => mlua::Value::String(lua.create_string(s)?),
     })
 }
 
 fn lua_to_setting(key: &str, value: mlua::Value) -> LuaResult<SettingValue> {
     let kind = setting_kind(key).ok_or_else(|| unknown_key_err(key))?;
-    match (kind, value) {
-        (SettingKind::Bool, mlua::Value::Boolean(b)) => Ok(SettingValue::Bool(b)),
-        (SettingKind::Number, mlua::Value::Number(n)) => Ok(SettingValue::Number(n)),
-        (SettingKind::Number, mlua::Value::Integer(i)) => Ok(SettingValue::Number(i as f64)),
-        (expected, got) => Err(LuaError::external(format!(
-            "smelt.settings.{key}: expected {expected:?}, got {}",
-            got.type_name()
-        ))),
+    let parsed = match (kind, value) {
+        (SettingKind::Bool, mlua::Value::Boolean(b)) => SettingValue::Bool(b),
+        (SettingKind::Number, mlua::Value::Number(n)) => SettingValue::Number(n),
+        (SettingKind::Number, mlua::Value::Integer(i)) => SettingValue::Number(i as f64),
+        (SettingKind::String, mlua::Value::String(s)) => {
+            SettingValue::String(s.to_string_lossy().to_string())
+        }
+        (expected, got) => {
+            return Err(LuaError::external(format!(
+                "smelt.settings.{key}: expected {expected:?}, got {}",
+                got.type_name()
+            )))
+        }
+    };
+    if let (SettingValue::String(ref s), Some(choices)) = (&parsed, setting_string_choices(key)) {
+        if !choices.contains(&s.as_str()) {
+            return Err(LuaError::external(format!(
+                "smelt.settings.{key}: '{s}' is not one of {choices:?}"
+            )));
+        }
     }
+    Ok(parsed)
 }
 
 pub(super) fn register(

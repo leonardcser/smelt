@@ -40,21 +40,42 @@ use std::sync::Arc;
 /// Increments on breaking changes; additive changes do not bump it.
 pub(crate) const API_VERSION: &str = "1";
 
-/// Smelt binary version, exposed as `smelt.version`. Sourced from
-/// `CARGO_PKG_VERSION` at compile time so the workspace's `0.x.y` version
-/// stays in lockstep with what plugins see.
+/// Build identity, exposed as `smelt.build`. Versions are sourced from
+/// `CARGO_PKG_VERSION` so the workspace's `0.x.y` version stays in
+/// lockstep with what plugins see; sha/date/target come from the build
+/// script (`build.rs`).
 pub(crate) const APP_VERSION: &str = env!("CARGO_PKG_VERSION");
+pub(crate) const BUILD_SHA: &str = env!("SMELT_BUILD_SHA");
+pub(crate) const BUILD_DATE: &str = env!("SMELT_BUILD_DATE");
+pub(crate) const BUILD_TARGET: &str = env!("SMELT_TARGET");
 
 pub(crate) use smelt_core::lua::json_to_lua as json_to_lua_value;
+
+/// `"unknown"` collapses to Lua nil so plugins can branch on `smelt.build.sha == nil`
+/// rather than string-matching a sentinel.
+fn optional_str(s: &str) -> Option<&str> {
+    if s.is_empty() || s == "unknown" {
+        None
+    } else {
+        Some(s)
+    }
+}
 
 impl LuaRuntime {
     pub(super) fn register_api(lua: &Lua, shared: &Arc<LuaShared>) -> LuaResult<()> {
         let smelt = lua.create_table()?;
         let smelt_keymap = lua.create_table()?;
 
-        smelt.set("version", APP_VERSION)?;
+        let build = lua.create_table()?;
+        build.set("version", APP_VERSION)?;
+        build.set("sha", optional_str(BUILD_SHA))?;
+        build.set("date", optional_str(BUILD_DATE))?;
+        build.set("target", BUILD_TARGET)?;
+        smelt.set("build", build)?;
         smelt.set("api_version", API_VERSION)?;
         record_module_doc("smelt", "Root smelt namespace. Host-tier bindings are registered first; UiHost-tier bindings are injected when a TUI is active.");
+        record_module_doc("smelt.build", "Compile-time build identity: `version` (CARGO_PKG_VERSION), `sha` (short git commit or nil), `date` (committer ISO timestamp or nil), `target` (Rust target triple).");
+        record_module_doc("smelt.tick", "Reload-safe periodic work. Subscribes to the host's one-second `now` cell and throttles your callback to a fixed interval — safe to call from plugin module bodies. Use this for recurring polling; reserve `smelt.timer.every` for transient timers armed by user actions.");
 
         smelt_core::lua::api::register_host_api(lua, &smelt, &smelt_keymap, &shared.core)?;
 

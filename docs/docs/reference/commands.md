@@ -31,6 +31,7 @@ Type `/` to open the command picker with fuzzy search.
 | `/simplify [focus]`       | Review changed code for reuse, quality, and efficiency     |
 | `/trust`                  | Trust the current project's `.smelt/` content              |
 | `/reload`                 | Re-evaluate user Lua (init + plugins) without restarting (also `F5`) |
+| `/upgrade [check\|--yes]` | Open the upgrade dialog (or run check / install non-interactively) |
 | `/exit`, `/quit`          | Exit (also `:q`, `:qa`, `:wq`, `:wqa`)                     |
 
 ## Shell Escape

@@ -47,6 +47,27 @@ Prebuilt binaries on the
 cargo install --git https://github.com/leonardcser/smelt.git
 ```
 
+## Upgrade
+
+smelt checks for a new build hourly and shows a pill in the status bar
+when one's available. Run `/upgrade` to install — the install runs in
+the background, so you keep working while it happens; you get a
+notification when it's done and a reminder to restart to use the new
+build. Overwriting an in-use binary is safe on Unix (the running
+process keeps its inode, future launches pick up the new one).
+
+Two channels controlled by `smelt.settings.autoupgrade_channel`:
+
+- `"stable"` (default) — latest tagged release, including `alpha`/`beta`
+  prereleases. Installs by downloading the prebuilt tarball from
+  GitHub Releases (seconds; no toolchain required).
+- `"unstable"` — latest commit on the `main` branch. Installs via
+  `cargo install --branch main` (a few minutes; requires `cargo`).
+
+The polling behaviour is `smelt.settings.autoupgrade`: `"off"`, `"notify"`
+(default — show pill, don't install), or `"auto"` (install in
+background as soon as an update is detected).
+
 ## Run
 
 **API key providers** (any OpenAI-compatible endpoint):

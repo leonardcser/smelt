@@ -104,6 +104,9 @@ pub async fn resolve(
                     std::process::exit(1);
                 }
             },
+            Some(smelt_core::config::SettingKind::String) => {
+                smelt_core::config::SettingValue::String(value.to_string())
+            }
             None => {
                 eprintln!("error: --set {pair}: unknown setting '{key}'");
                 std::process::exit(1);

@@ -15,6 +15,10 @@ os.arch = nil
 ---@type fun(): string?, string?
 os.cwd = nil
 
+--- Return the filesystem path to the running smelt binary as `(path, nil)` on success, or `(nil, err_string)` on failure. Useful for plugins that re-exec the binary or report install location.
+---@type fun(): string?, string?
+os.exe_path = nil
+
 --- Return the value of the environment variable `name`, or `nil` if it is not set.
 ---@type fun(name: string): string?
 os.getenv = nil

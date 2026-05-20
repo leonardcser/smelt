@@ -285,6 +285,37 @@ function smelt.process.run_async(cmd, args, opts)
   return result, nil
 end
 
+smelt.tick = smelt.tick or {}
+
+-- Reload-safe periodic work. Subscribes to the `now` cell (a one-second
+-- wall-clock tick the host publishes while the app is alive) and fires
+-- `fn` at most once every `secs` seconds. `fn` runs inside a fresh
+-- `smelt.spawn`, so it may yield (HTTP, processes, sleeps) without
+-- blocking the cell pump.
+--
+-- Unlike `smelt.timer.every`, this idiom is safe to call from a
+-- plugin's module body: cell subscriptions are wiped on `/reload` and
+-- re-armed when the body re-runs, so no Reg juggling is required for
+-- hot-reload survival.
+--
+-- Returns a `Reg` whose `:remove()` unsubscribes.
+-- @sig fun(secs: integer, fn: fun()): smelt.Reg
+function smelt.tick.every(secs, fn)
+  if type(secs) ~= "number" or secs <= 0 then
+    error("smelt.tick.every: secs must be a positive number", 2)
+  end
+  if type(fn) ~= "function" then
+    error("smelt.tick.every: fn must be a function", 2)
+  end
+  local last = 0
+  return smelt.cell("now"):subscribe(function(now)
+    if (now or 0) - last >= secs then
+      last = now or 0
+      smelt.spawn(function() fn() end)
+    end
+  end)
+end
+
 -- Filesystem watcher. Calls `handler(event)` for each event, where
 -- `event = { kind, detail?, paths }`. `kind` is one of `"create" | "modify" | "remove" | "rename" | "access" | "other" | "any"`;
 -- `detail` carries notify's sub-kind when one is reported (e.g. `kind = "create"` → `detail = "file" | "folder"`).

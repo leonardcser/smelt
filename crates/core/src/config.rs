@@ -77,6 +77,14 @@ pub struct SettingsConfig {
     /// ephemeral TTL; `true` opts into the 1-hour TTL. Has no effect on
     /// non-Anthropic providers.
     pub cache_ttl_long: Option<bool>,
+    /// Autoupgrade behavior: `"off"`, `"notify"` (show pill + banner
+    /// subtitle when a new build is available; default), or `"auto"`
+    /// (install in background once detected).
+    pub autoupgrade: Option<String>,
+    /// Which release channel autoupgrade tracks. `"stable"` follows
+    /// tagged releases (any tag, including prereleases); `"unstable"`
+    /// follows `main` HEAD.
+    pub autoupgrade_channel: Option<String>,
 }
 
 /// Value type of a settings slot. Drives parsing of `--set` overrides
@@ -85,6 +93,7 @@ pub struct SettingsConfig {
 pub enum SettingKind {
     Bool,
     Number,
+    String,
 }
 
 /// Owned setting value. `set` accepts any of these; the schema decides
@@ -93,6 +102,7 @@ pub enum SettingKind {
 pub enum SettingValue {
     Bool(bool),
     Number(f64),
+    String(String),
 }
 
 impl SettingValue {
@@ -100,6 +110,7 @@ impl SettingValue {
         match self {
             SettingValue::Bool(_) => SettingKind::Bool,
             SettingValue::Number(_) => SettingKind::Number,
+            SettingValue::String(_) => SettingKind::String,
         }
     }
 }
@@ -121,7 +132,20 @@ pub const SETTINGS_KEYS: &[(&str, SettingKind)] = &[
     ("auto_reload", SettingKind::Bool),
     ("compact_threshold", SettingKind::Number),
     ("cache_ttl_long", SettingKind::Bool),
+    ("autoupgrade", SettingKind::String),
+    ("autoupgrade_channel", SettingKind::String),
 ];
+
+/// Allowed values for string-typed settings. Returns `None` for keys
+/// that are free-form (any string accepted). Used by `set` and `--set`
+/// parsing to reject typos at the source rather than at the consumer.
+pub fn setting_string_choices(key: &str) -> Option<&'static [&'static str]> {
+    match key {
+        "autoupgrade" => Some(&["off", "notify", "auto"]),
+        "autoupgrade_channel" => Some(&["stable", "unstable"]),
+        _ => None,
+    }
+}
 
 pub fn setting_kind(key: &str) -> Option<SettingKind> {
     SETTINGS_KEYS
@@ -142,6 +166,11 @@ impl SettingsConfig {
                 value.kind()
             ));
         }
+        if let (SettingValue::String(s), Some(choices)) = (&value, setting_string_choices(key)) {
+            if !choices.contains(&s.as_str()) {
+                return Err(format!("setting '{key}': '{s}' is not one of {choices:?}"));
+            }
+        }
         match (key, value) {
             ("vim", SettingValue::Bool(v)) => self.vim = Some(v),
             ("auto_compact", SettingValue::Bool(v)) => self.auto_compact = Some(v),
@@ -158,6 +187,8 @@ impl SettingsConfig {
             ("auto_reload", SettingValue::Bool(v)) => self.auto_reload = Some(v),
             ("compact_threshold", SettingValue::Number(v)) => self.compact_threshold = Some(v),
             ("cache_ttl_long", SettingValue::Bool(v)) => self.cache_ttl_long = Some(v),
+            ("autoupgrade", SettingValue::String(v)) => self.autoupgrade = Some(v),
+            ("autoupgrade_channel", SettingValue::String(v)) => self.autoupgrade_channel = Some(v),
             _ => unreachable!("schema mismatch for {key}"),
         }
         Ok(())
@@ -180,6 +211,14 @@ impl SettingsConfig {
             auto_reload: self.auto_reload.unwrap_or(false),
             compact_threshold: self.compact_threshold.unwrap_or(0.80),
             cache_ttl_long: self.cache_ttl_long.unwrap_or(false),
+            autoupgrade: self
+                .autoupgrade
+                .clone()
+                .unwrap_or_else(|| "notify".to_string()),
+            autoupgrade_channel: self
+                .autoupgrade_channel
+                .clone()
+                .unwrap_or_else(|| "stable".to_string()),
         }
     }
 }
@@ -202,6 +241,8 @@ pub struct ResolvedSettings {
     pub auto_reload: bool,
     pub compact_threshold: f64,
     pub cache_ttl_long: bool,
+    pub autoupgrade: String,
+    pub autoupgrade_channel: String,
 }
 
 /// Startup defaults for new sessions, set from Lua via `smelt.defaults{...}`.

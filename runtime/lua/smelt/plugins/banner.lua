@@ -280,14 +280,26 @@ local function on_release()
 	state.held = false
 end
 
-local function ensure_version_window(text)
-	local buf = smelt.buf.new({ name = "smelt.banner.version.buf" })
-	buf:lines({ text })
-	local ns = smelt.ns("smelt.banner.version")
+-- Build the buffer that sits under the logo. Holds the version line plus
+-- any lines contributed via `smelt.banner.subtitle(fn)`.
+local function ensure_label_window(lines, width)
+	local buf = smelt.buf.new({ name = "smelt.banner.label.buf" })
+	local rendered = {}
+	for _, entry in ipairs(lines) do
+		local pad = math.max(0, math.floor((width - #entry.text) / 2))
+		rendered[#rendered + 1] = string.rep(" ", pad) .. entry.text
+	end
+	buf:lines(rendered)
+	local ns = smelt.ns("smelt.banner.label")
 	buf:clear_ns(ns)
-	buf:mark(ns, 1, 0, { end_col = #text, dim = true })
+	for i, entry in ipairs(lines) do
+		if entry.dim ~= false then
+			local pad = math.max(0, math.floor((width - #entry.text) / 2))
+			buf:mark(ns, i, pad, { end_col = pad + #entry.text, dim = true })
+		end
+	end
 	local win = smelt.win.new(buf, {
-		name = "smelt.banner.version.win",
+		name = "smelt.banner.label.win",
 		focusable = false,
 		selectable = true,
 	})
@@ -305,14 +317,22 @@ local function open_splash()
 	state.paint:on("press", on_press)
 	state.paint:on("release", on_release)
 	local logo_w, logo_h = banner.logo_mark_size()
-	local version_text = "v" .. (smelt.version or "")
-	local w = math.max(logo_w, #version_text)
+	local label_lines = { { text = "v" .. (smelt.build.version or ""), dim = true } }
+	for _, sub in ipairs(banner.collect_subtitles()) do
+		label_lines[#label_lines + 1] = sub
+	end
+	local max_label_w = 0
+	for _, entry in ipairs(label_lines) do
+		if #entry.text > max_label_w then max_label_w = #entry.text end
+	end
+	local w = math.max(logo_w, max_label_w)
 	-- Reserve FIRE_HEADROOM cells above the wordmark inside the paint
 	-- leaf so the fire animation grows upward without painting outside the
 	-- overlay rect (which would bleed under higher-z modals like /help).
 	local paint_h = logo_h + FIRE_HEADROOM
-	local version_win = ensure_version_window(version_text)
-	-- Paint slot on top, version buffer below. `measure` pins each slot's
+	local label_h = #label_lines
+	local label_win = ensure_label_window(label_lines, w)
+	-- Paint slot on top, label buffer below. `measure` pins each slot's
 	-- natural width to `w` so the overlay centers exactly.
 	local sized = smelt.overlay.layout.vbox({
 		{
@@ -322,8 +342,8 @@ local function open_splash()
 			height = paint_h,
 		},
 		{
-			smelt.overlay.layout.leaf(version_win, { measure = { w, 1 } }),
-			height = 1,
+			smelt.overlay.layout.leaf(label_win, { measure = { w, label_h } }),
+			height = label_h,
 		},
 	})
 	state.overlay = smelt.overlay.new({
@@ -341,14 +361,6 @@ local function open_splash()
 		border = "none",
 		layout = sized,
 	})
-	-- Center the version text inside the bottom slot via leading padding.
-	local pad = math.floor((w - #version_text) / 2)
-	if pad > 0 then
-		state.version_buf:lines({ string.rep(" ", pad) .. version_text })
-		local ns = smelt.ns("smelt.banner.version")
-		state.version_buf:clear_ns(ns)
-		state.version_buf:mark(ns, 1, pad, { end_col = pad + #version_text, dim = true })
-	end
 end
 
 local function refresh()
@@ -375,7 +387,7 @@ smelt.lifecycle.on_shutdown(function(ctx)
 		return
 	end
 	local rows = banner.LOGO_MARK_PIXELS
-	local version_text = "v" .. (smelt.version or "")
+	local version_text = "v" .. (smelt.build.version or "")
 	local pad = math.max(0, math.floor((#rows[1] - #version_text) / 2))
 	print(banner.ansi_render(rows, banner.PALETTE))
 	print(string.rep(" ", pad) .. "\27[2m" .. version_text .. "\27[0m")

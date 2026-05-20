@@ -744,7 +744,7 @@ mod tests {
     // Theme role-mapping and error logic are tested in `lua::api::tests`.
 
     #[test]
-    fn runtime_exposes_api_version_and_app_version() {
+    fn runtime_exposes_api_version_and_build_identity() {
         let rt = LuaRuntime::new();
         assert!(rt.load_error.is_none(), "load_error: {:?}", rt.load_error);
         let api: String = rt
@@ -753,12 +753,22 @@ mod tests {
             .eval()
             .expect("eval");
         assert_eq!(api, crate::lua::api::API_VERSION);
-        let app: String = rt.lua.load("return smelt.version").eval().expect("eval");
+        let app: String = rt
+            .lua
+            .load("return smelt.build.version")
+            .eval()
+            .expect("eval");
         assert_eq!(app, crate::lua::api::APP_VERSION);
         assert!(
             !app.is_empty() && app.chars().next().is_some_and(|c| c.is_ascii_digit()),
-            "smelt.version should be the program version, got {app:?}"
+            "smelt.build.version should be the program version, got {app:?}"
         );
+        let target: String = rt
+            .lua
+            .load("return smelt.build.target")
+            .eval()
+            .expect("eval");
+        assert!(!target.is_empty(), "smelt.build.target should be non-empty");
     }
 
     #[test]

@@ -117,4 +117,69 @@ function M.ansi_render(pixels, palette)
 	return table.concat(out, "\n")
 end
 
+-- Named-source registry for the splash banner. Mirrors
+-- `smelt.statusline.register`: each call by `name` replaces any prior
+-- registration with the same name; the bundled banner plugin queries
+-- every source each time it opens the splash. Each source returns one
+-- of:
+--   * nil                                — contribute nothing
+--   * string                             — one dim line
+--   * { text, dim?, style_group? }       — one styled entry
+--   * { entry, entry, ... }              — multiple styled entries
+-- Returns a `Reg` whose `:remove()` drops the source.
+
+local banner_sources = {}
+
+function M.collect_subtitles()
+	local lines = {}
+	for _, fn in pairs(banner_sources) do
+		local ok, result = pcall(fn)
+		if not ok then
+			smelt.notify.error("banner.source: " .. tostring(result))
+		elseif result == nil then
+			-- skip
+		elseif type(result) == "string" then
+			if result ~= "" then
+				lines[#lines + 1] = { text = result, dim = true }
+			end
+		elseif type(result) == "table" then
+			if result.text then
+				lines[#lines + 1] = {
+					text = tostring(result.text),
+					dim = result.dim ~= false,
+					style_group = result.style_group,
+				}
+			else
+				for _, entry in ipairs(result) do
+					if entry and entry.text then
+						lines[#lines + 1] = {
+							text = tostring(entry.text),
+							dim = entry.dim ~= false,
+							style_group = entry.style_group,
+						}
+					end
+				end
+			end
+		end
+	end
+	return lines
+end
+
+smelt.banner = smelt.banner or {}
+
+function smelt.banner.source(name, fn)
+	if type(name) ~= "string" or name == "" then
+		error("smelt.banner.source: name must be a non-empty string", 2)
+	end
+	if type(fn) ~= "function" then
+		error("smelt.banner.source: fn must be a function", 2)
+	end
+	banner_sources[name] = fn
+	return smelt.reg.new(function()
+		if banner_sources[name] == fn then
+			banner_sources[name] = nil
+		end
+	end)
+end
+
 return M

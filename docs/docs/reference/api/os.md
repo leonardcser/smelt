@@ -22,6 +22,14 @@ fun(): string?, string?
 
 Return the current working directory as `(path, nil)`, or `(nil, err_string)` on failure.
 
+## `smelt.os.exe_path`
+
+```lua
+fun(): string?, string?
+```
+
+Return the filesystem path to the running smelt binary as `(path, nil)` on success, or `(nil, err_string)` on failure. Useful for plugins that re-exec the binary or report install location.
+
 ## `smelt.os.getenv`
 
 ```lua

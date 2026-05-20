@@ -208,9 +208,14 @@ keys raise at the access site; type mismatches raise on assignment.
 | `restrict_to_workspace` | `boolean` | `true`  | Downgrade Allow to Ask for paths outside the workspace                            |
 | `redact_secrets`        | `boolean` | `true`  | Scrub detected secrets from user input and tool results before they reach the LLM |
 | `auto_reload`           | `boolean` | `false` | Watch `~/.config/smelt/`, `.smelt/`, `AGENTS.md`, and `--system-prompt` and fire `/reload` on change |
+| `cache_ttl_long`        | `boolean` | `false` | Opt the Anthropic prompt cache into the 1-hour TTL (default is the 5-minute ephemeral TTL). No effect on non-Anthropic providers |
+| `autoupgrade`           | `string`  | `"notify"` | `"off"` no checks; `"notify"` show pill + banner subtitle when a new build is available; `"auto"` install in background as soon as an update is detected |
+| `autoupgrade_channel`   | `string`  | `"stable"` | `"stable"` downloads tagged prebuilt tarballs (any tag, including `alpha`/`beta` prereleases); `"unstable"` follows `main` HEAD via `cargo install` |
 
 Override any setting from the CLI with `--set KEY=VALUE`. Boolean values
-must be `true`/`false`; numeric values are parsed as floats.
+must be `true`/`false`; numeric values are parsed as floats; string
+values are passed through as-is and validated against the schema's
+allowed-choice list (if any).
 
 ## Theme
 

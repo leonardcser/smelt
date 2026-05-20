@@ -109,6 +109,16 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
     )?;
 
     m.fn_(
+        "exe_path",
+        "Return the filesystem path to the running smelt binary as `(path, nil)` on success, or `(nil, err_string)` on failure. Useful for plugins that re-exec the binary or report install location.",
+        &[],
+        |_, ()| match std::env::current_exe() {
+            Ok(p) => Ok((Some(p.to_string_lossy().into_owned()), None)),
+            Err(err) => Ok((None, Some(err.to_string()))),
+        },
+    )?;
+
+    m.fn_(
         "pid",
         "Return the OS process id of the running smelt instance.",
         &[],
