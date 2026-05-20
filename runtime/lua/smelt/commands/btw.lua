@@ -46,9 +46,10 @@ smelt.cmd.register("btw", function(args)
     local leaf = smelt.dialog.content({ buf = buf, interactive = true })
 
     smelt.dialog.open({
-      title   = question,
-      height  = 60,
-      panels  = { { leaf = leaf, height = "fill" } },
+      title      = question,
+      min_height = "30%",
+      max_height = "70%",
+      panels     = { { leaf = leaf, height = "fill" } },
       keymaps = {
         { key = "q", on_press = function(ctx) ctx.close() end },
       },

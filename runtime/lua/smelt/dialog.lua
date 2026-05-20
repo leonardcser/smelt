@@ -158,24 +158,21 @@ end
 -- the root leaf and the array of leaves.
 --
 -- Dialog height (pick one; setting both is an error):
---   * `opts.height`     — fixed total: integer cells, `"N%"`, `"fill"`. Default `"60%"`.
---                         Includes the title/border row (this knob predates the
---                         body-relative semantics below; matches `smelt.overlay.new`).
+--   * `opts.height`     — fixed size: integer cells, `"N%"`, `"fill"`. Default `"60%"`.
 --   * `opts.max_height` — shrink to content, capped at this size.
 --   * `opts.min_height` — floor that pairs with either mode. Fit-mode dialogs
 --                         default to `min_height = "30%"` so a placeholder
 --                         body stays visible when content collapses; pass
 --                         `min_height = 0` to opt out.
 --
--- `min_height` and `max_height` are **body-relative** when given as integer
--- cells: the wrapper adds the dialog's chrome (top border + title row, 1 cell)
--- before forwarding to the overlay. `"N%"` / `"fill"` / `"fit"` are forwarded
--- verbatim — percentages of the terminal don't compose with absolute chrome
--- offsets, and the extra row is negligible at typical percentages anyway.
+-- All three knobs are **body-relative** when given as integer cells: the
+-- wrapper adds the dialog's chrome (top border + title row, 1 cell) before
+-- forwarding to the overlay (which uses total-rect semantics). `"N%"` /
+-- `"fill"` / `"fit"` are forwarded verbatim — percentages of the terminal
+-- don't compose with absolute chrome offsets, and the extra row is negligible
+-- at typical percentages anyway.
 
 -- The dialog draws a single chrome row at the top (border + title share it).
--- min_height / max_height are body-relative at the dialog layer; we add this
--- offset before forwarding to the overlay (which uses total-rect semantics).
 local CHROME_H = 1
 
 -- Convert a body-relative size spec to a total-overlay spec. Integer cells
@@ -259,7 +256,7 @@ local function open_overlay(opts)
     blocks_agent = opts.blocks_agent or false,
     layout       = panel_vbox,
     width        = "100%",
-    height       = height_spec,
+    height       = with_chrome(height_spec),
     max_height   = with_chrome(max_height_spec),
     min_height   = with_chrome(opts.min_height or default_min_height),
   })

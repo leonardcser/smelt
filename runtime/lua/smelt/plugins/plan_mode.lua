@@ -144,8 +144,11 @@ local function register_exit_plan_mode()
           { text = "(review and approve)", fg = "grey", dim = true },
         },
         blocks_agent = true,
-        height       = "80%",
+        min_height   = "30%",
+        max_height   = "fill",
         panels = {
+          -- md `"fill"` so it absorbs the slack once `min_height` / overflow
+          -- forces the dialog past the natural fit size of (md + options).
           { leaf = md_leaf,      height = "fill" },
           { leaf = options_leaf, height = "fit"  },
         },
