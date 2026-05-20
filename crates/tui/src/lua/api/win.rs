@@ -14,6 +14,7 @@ use smelt_core::lua::doc::{record_class, Tier};
 use smelt_core::lua::lua_type::{LuaCallback, LuaClassDecl, LuaType};
 use smelt_core::lua::module::LuaMod;
 use smelt_core::lua::reg::LuaReg;
+use smelt_core::lua::LuaHandle;
 use std::sync::Arc;
 
 /// Window-event names accepted by `win:on(event, fn)`. Maps onto the
@@ -458,6 +459,32 @@ impl mlua::UserData for LuaWin {
                 Ok(this_ud)
             },
         );
+
+        // ── set_renderer(fn) — register/clear per-window renderer ──
+        methods.add_function(
+            "set_renderer",
+            |lua,
+             (this_ud, func): (mlua::AnyUserData, Option<mlua::Function>)|
+             -> LuaResult<mlua::AnyUserData> {
+                let this = *this_ud.borrow::<LuaWin>()?;
+                let shared = current_shared(lua)?;
+                let handle = match func {
+                    Some(f) => Some(LuaHandle::from_func(lua, f)?),
+                    None => None,
+                };
+                if let Ok(mut map) = shared.win_renderers.lock() {
+                    match handle {
+                        Some(h) => {
+                            map.insert(this.id.0, h);
+                        }
+                        None => {
+                            map.remove(&this.id.0);
+                        }
+                    }
+                }
+                Ok(this_ud)
+            },
+        );
     }
 }
 
@@ -628,6 +655,15 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
         &[],
         |_, ()| -> LuaResult<LuaWin> { Ok(LuaWin { id: crate::app::TRANSCRIPT_WIN }) },
     )?;
+
+    // Well-known window constants. The transcript and prompt input
+    // windows are the only two with engine-side state machinery
+    // (projection, editor); everything else is plugin-allocated.
+    // `smelt.win.TRANSCRIPT` / `smelt.win.PROMPT` are stable `Win`
+    // userdata handles plugins can reference from `smelt.ui.layout`
+    // composers without having to call a constructor.
+    m.tbl.set("TRANSCRIPT", LuaWin { id: crate::app::TRANSCRIPT_WIN })?;
+    m.tbl.set("PROMPT", LuaWin { id: crate::app::PROMPT_WIN })?;
 
     Ok(())
 }

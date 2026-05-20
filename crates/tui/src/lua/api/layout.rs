@@ -1,0 +1,71 @@
+//! `smelt.ui.layout` — composable layout-tree primitives for the main TUI.
+//!
+//! Plugins register a composer with `smelt.ui.layout.set(fn)`. The host
+//! invokes it once per frame with a state table describing the current
+//! prompt height, terminal size, and other inputs; the composer returns
+//! a layout tree built from `vbox` / `hbox` / `leaf` that the host
+//! resolves to per-window rectangles for that frame.
+//!
+//! The same constructors are exposed under `smelt.overlay.layout` for
+//! overlay composition — they share their implementations.
+
+use crate::lua::LuaShared;
+use mlua::prelude::*;
+use smelt_core::lua::doc::Tier;
+use smelt_core::lua::module::LuaMod;
+use smelt_core::lua::LuaHandle;
+use std::sync::Arc;
+
+pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) -> LuaResult<()> {
+    // `smelt.ui` is a thin grouping namespace for screen-composition primitives.
+    // It's distinct from `smelt.layout` (which composes block content inside
+    // transcript messages for tool render callbacks).
+    let ui = LuaMod::under(
+        lua,
+        smelt,
+        "ui",
+        "Screen-composition primitives: main layout composer and per-window renderer registration.",
+        Tier::UiHost,
+    )?;
+    let m = ui.sub(
+        "layout",
+        "Composable layout-tree primitives (set/vbox/hbox/leaf) for the main TUI layout. \
+`smelt.ui.layout.set(fn)` registers a composer invoked once per frame; the \
+composer returns a tree built from these constructors describing how the \
+transcript, prompt, statusline, and any plugin-added windows split the \
+screen.",
+    )?;
+
+    super::overlay_layout::register_layout_constructors(
+        &m,
+        "smelt.ui.layout",
+        "Wrap a Win handle or paint id into a leaf node. `opts` accepts `border`, `title`, `collapse_when_empty` (force the slot to zero size when the wrapped window's buffer is empty), `measure` (a `{w, h}` table for a static natural size or a `smelt.ui.layout.measure(...)` handle for one the plugin can live-update).",
+        "Construct a shareable natural-size handle for use with `layout.leaf(opts.measure = ...)`. Initial size is `(w, h)` (default `(0, 0)`); update at any time via `handle:set(w, h)` to drive a live resize on the next frame. Read current size via `handle:get()`.",
+    )?;
+
+    {
+        let s = shared.clone();
+        m.fn_(
+            "set",
+            "Register the main layout composer. The callback receives a state \
+table (`term_w`, `term_h`, `prompt_input_rows`) and returns a layout \
+userdata built via `smelt.ui.layout.{vbox,hbox,leaf}`. Passing `nil` \
+clears the composer and reverts to the engine's hardcoded layout. Only \
+the most recent registration is active; later calls replace earlier \
+ones.",
+            &["composer"],
+            move |lua, composer: Option<mlua::Function>| -> LuaResult<()> {
+                let handle = match composer {
+                    Some(f) => Some(LuaHandle::from_func(lua, f)?),
+                    None => None,
+                };
+                if let Ok(mut slot) = s.main_layout_composer.lock() {
+                    *slot = handle;
+                }
+                Ok(())
+            },
+        )?;
+    }
+
+    Ok(())
+}

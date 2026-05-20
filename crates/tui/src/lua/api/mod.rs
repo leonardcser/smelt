@@ -6,6 +6,7 @@ mod confirm;
 mod engine;
 mod history;
 mod keymap;
+mod layout;
 mod log;
 mod metrics;
 mod model;
@@ -105,6 +106,7 @@ impl LuaRuntime {
         theme::register(lua, &smelt)?;
         statusline::register(lua, &smelt, shared)?;
         confirm::register(lua, &smelt)?;
+        layout::register(lua, &smelt, shared)?;
         notebook::register(lua, &smelt)?;
         paint::register(lua, &smelt, shared)?;
         render::register(lua, &smelt)?;

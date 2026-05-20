@@ -234,20 +234,40 @@ pub(super) fn register(overlay: &LuaMod) -> LuaResult<()> {
         "layout",
         "Composable layout-tree primitives (leaf/vbox/hbox) for overlays. The resulting userdata is passed to `smelt.overlay.new` via `opts.layout`.",
     )?;
+    register_layout_constructors(
+        &m,
+        "smelt.overlay.layout",
+        "Wrap a Win handle or paint id into a leaf node. `opts` accepts `border`, `title`, `collapse_when_empty` (force the slot to zero size when the wrapped window's buffer is empty), `measure` (a `{w, h}` table for a static natural size or a `smelt.overlay.layout.measure(...)` handle for one the plugin can live-update).",
+        "Construct a shareable natural-size handle for use with `layout.leaf(opts.measure = ...)`. Initial size is `(w, h)` (default `(0, 0)`); update at any time via `handle:set(w, h)` to drive a live overlay resize on the next frame. Read current size via `handle:get()`.",
+    )?;
+    Ok(())
+}
 
+/// Shared `leaf` / `measure` / `vbox` / `hbox` registration used by both
+/// `smelt.overlay.layout` and `smelt.ui.layout`. The `ctx` prefix is
+/// threaded into error messages so plugin authors can tell which API they
+/// were calling when a constructor rejects their input; the
+/// `leaf_doc`/`measure_doc` strings let each namespace ship its own
+/// caller-facing doc text (so cross-refs in the generated docs resolve
+/// to the right page).
+pub(crate) fn register_layout_constructors(
+    m: &LuaMod,
+    ctx: &'static str,
+    leaf_doc: &'static str,
+    measure_doc: &'static str,
+) -> LuaResult<()> {
     m.fn_(
         "leaf",
-        "Wrap a Win handle or paint id into a leaf node. `opts` accepts `border`, `title`, `collapse_when_empty` (force the slot to zero size when the wrapped window's buffer is empty), `measure` (a `{w, h}` table for a static natural size or a `smelt.overlay.layout.measure(...)` handle for one the plugin can live-update).",
+        leaf_doc,
         &["win_or_paint", "opts"],
-        |_, (target, opts): (mlua::Value, Option<mlua::Table>)| -> LuaResult<LuaUiLayout> {
+        move |_, (target, opts): (mlua::Value, Option<mlua::Table>)| -> LuaResult<LuaUiLayout> {
             let raw_id = resolve_leaf_target(&target)?;
-            let chrome = parse_node_chrome(opts.as_ref(), "smelt.overlay.layout.leaf")
-                .map_err(mlua::Error::external)?;
+            let chrome = parse_node_chrome(opts.as_ref(), ctx).map_err(mlua::Error::external)?;
             let collapse_when_empty = opts
                 .as_ref()
                 .and_then(|t| t.get::<bool>("collapse_when_empty").ok())
                 .unwrap_or(false);
-            let natural = parse_measure(opts.as_ref(), "smelt.overlay.layout.leaf.measure")?;
+            let natural = parse_measure(opts.as_ref(), ctx)?;
             Ok(LuaUiLayout(LayoutNode::Leaf {
                 raw_id,
                 chrome,
@@ -259,7 +279,7 @@ pub(super) fn register(overlay: &LuaMod) -> LuaResult<()> {
 
     m.fn_(
         "measure",
-        "Construct a shareable natural-size handle for use with `layout.leaf(opts.measure = ...)`. Initial size is `(w, h)` (default `(0, 0)`); update at any time via `handle:set(w, h)` to drive a live overlay resize on the next frame. Read current size via `handle:get()`.",
+        measure_doc,
         &["w", "h"],
         |_, (w, h): (Option<u16>, Option<u16>)| -> LuaResult<LuaMeasure> {
             Ok(LuaMeasure::new(w.unwrap_or(0), h.unwrap_or(0)))
@@ -270,10 +290,9 @@ pub(super) fn register(overlay: &LuaMod) -> LuaResult<()> {
         "vbox",
         "Vertical container. `items` is an array of `{ child_layout, height = <constraint>, collapse_when_empty = bool? }`. `opts` accepts `border`, `title`, `gap` (cells between children), `padding` (uniform inner inset on all sides, inside any border).",
         &["items", "opts"],
-        |_, (items_tbl, opts): (mlua::Table, Option<mlua::Table>)| -> LuaResult<LuaUiLayout> {
-            let items = parse_items(&items_tbl, "height", "smelt.overlay.layout.vbox")?;
-            let chrome = parse_node_chrome(opts.as_ref(), "smelt.overlay.layout.vbox")
-                .map_err(mlua::Error::external)?;
+        move |_, (items_tbl, opts): (mlua::Table, Option<mlua::Table>)| -> LuaResult<LuaUiLayout> {
+            let items = parse_items(&items_tbl, "height", ctx)?;
+            let chrome = parse_node_chrome(opts.as_ref(), ctx).map_err(mlua::Error::external)?;
             let gap = opts
                 .as_ref()
                 .and_then(|t| t.get::<u16>("gap").ok())
@@ -291,10 +310,9 @@ pub(super) fn register(overlay: &LuaMod) -> LuaResult<()> {
         "hbox",
         "Horizontal container. `items` is an array of `{ child_layout, width = <constraint>, collapse_when_empty = bool? }`. `opts` accepts `border`, `title`, `gap`, `padding` (uniform inner inset on all sides, inside any border).",
         &["items", "opts"],
-        |_, (items_tbl, opts): (mlua::Table, Option<mlua::Table>)| -> LuaResult<LuaUiLayout> {
-            let items = parse_items(&items_tbl, "width", "smelt.overlay.layout.hbox")?;
-            let chrome = parse_node_chrome(opts.as_ref(), "smelt.overlay.layout.hbox")
-                .map_err(mlua::Error::external)?;
+        move |_, (items_tbl, opts): (mlua::Table, Option<mlua::Table>)| -> LuaResult<LuaUiLayout> {
+            let items = parse_items(&items_tbl, "width", ctx)?;
+            let chrome = parse_node_chrome(opts.as_ref(), ctx).map_err(mlua::Error::external)?;
             let gap = opts
                 .as_ref()
                 .and_then(|t| t.get::<u16>("gap").ok())

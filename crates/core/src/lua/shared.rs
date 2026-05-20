@@ -85,6 +85,18 @@ pub struct LuaShared {
     pub keymaps: Mutex<HashMap<(String, String), LuaHandle>>,
     /// Vec preserves registration order; re-registering an existing name updates in place.
     pub statusline_sources: Mutex<Vec<(String, StatusSource)>>,
+    /// Lua-registered composer for the main TUI layout. When `Some`, the
+    /// host invokes it once per frame to produce a `LuaUiLayout` tree
+    /// describing the split between transcript, prompt, and any
+    /// plugin-added windows. Falls back to the hardcoded tree on error
+    /// or `None`. The callback signature is `fun(state) -> Layout`.
+    pub main_layout_composer: Mutex<Option<LuaHandle>>,
+    /// Per-window render callbacks keyed by raw `WinId.0`. When a window
+    /// has a renderer registered, the host invokes it once per frame with
+    /// the backing `Buf` so Lua can repaint the window's contents. Used
+    /// by plugin-owned bars, statuslines, and any Lua-side window whose
+    /// content is computed rather than streamed.
+    pub win_renderers: Mutex<HashMap<u64, LuaHandle>>,
     pub tools: Mutex<HashMap<String, ToolHandles>>,
     pub callbacks: Mutex<HashMap<u64, LuaHandle>>,
     /// Callbacks registered for `smelt.engine.ask`. Separate from
@@ -227,6 +239,8 @@ impl Default for LuaShared {
             command_names: Arc::new(Mutex::new(HashSet::new())),
             keymaps: Mutex::new(HashMap::new()),
             statusline_sources: Mutex::new(Vec::new()),
+            main_layout_composer: Mutex::new(None),
+            win_renderers: Mutex::new(HashMap::new()),
             tools: Mutex::new(HashMap::new()),
             callbacks: Mutex::new(HashMap::new()),
             ask_callbacks: Mutex::new(HashMap::new()),
@@ -279,6 +293,12 @@ impl LuaShared {
         }
         if let Ok(mut v) = self.statusline_sources.lock() {
             v.clear();
+        }
+        if let Ok(mut c) = self.main_layout_composer.lock() {
+            *c = None;
+        }
+        if let Ok(mut m) = self.win_renderers.lock() {
+            m.clear();
         }
         if let Ok(mut m) = self.tools.lock() {
             m.clear();

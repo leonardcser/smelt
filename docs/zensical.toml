@@ -88,6 +88,7 @@ nav = [
     { "`smelt.tools`" = "reference/api/tools.md" },
     { "`smelt.transcript`" = "reference/api/transcript.md" },
     { "`smelt.trust`" = "reference/api/trust.md" },
+    { "`smelt.ui.layout`" = "reference/api/ui_layout.md" },
     { "`smelt.vim`" = "reference/api/vim.md" },
     { "`smelt.win`" = "reference/api/win.md" },
     { "`smelt.work`" = "reference/api/work.md" },
