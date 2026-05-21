@@ -89,12 +89,7 @@ fn replay_smelt(text: &str, path: &Path, trace: bool) {
         for (i, op) in scenario.ops.into_iter().take(take).enumerate() {
             eprintln!("--- op{i} {op:?} ---");
             smelt_fuzz::apply(&mut app, op);
-            for wid in [
-                tui::app::PROMPT_WIN,
-                tui::app::TRANSCRIPT_WIN,
-                tui::app::PROMPT_ABOVE_WIN,
-                tui::app::PROMPT_BELOW_WIN,
-            ] {
+            for wid in [tui::app::PROMPT_WIN, tui::app::TRANSCRIPT_WIN] {
                 let win = match app.app.ui.win(wid) {
                     Some(w) => w,
                     None => continue,

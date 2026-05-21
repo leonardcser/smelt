@@ -848,22 +848,42 @@ fn call_id_string(id: u8) -> String {
     format!("call-{:02x}", id % CALL_ID_BUCKETS)
 }
 
-/// Synthesize a deterministic, lightweight message vector for compaction
-/// payloads. Alternating user/assistant content keeps the rebuild-screen
-/// path through `restore_screen` honest without coupling to engine
-/// internals.
+/// Synthesize a deterministic, lightweight history vector for compaction
+/// payloads. Rotates through user, terminal assistant, and tool-call
+/// assistant turns so `EngineMessages` / `EngineTurnComplete` exercise
+/// every `HistoryItem` discriminant — the sum-typed history (commit
+/// `b0c54474`) added a third arm and the rebuild-screen path through
+/// `restore_screen` must survive each variant.
 fn synth_history(count: usize) -> Vec<protocol::HistoryItem> {
     (0..count)
         .map(|i| {
             let body = format!("compacted-{i}");
-            if i % 2 == 0 {
-                protocol::HistoryItem::user(Content::text(body))
-            } else {
-                protocol::HistoryItem::Assistant(protocol::AssistantTurn::terminal(
+            match i % 3 {
+                0 => protocol::HistoryItem::user(Content::text(body)),
+                1 => protocol::HistoryItem::Assistant(protocol::AssistantTurn::terminal(
                     Some(Content::text(body)),
                     None,
                     Vec::new(),
-                ))
+                )),
+                _ => {
+                    let invocation = protocol::ToolInvocation {
+                        call_id: format!("synth-call-{i:02}"),
+                        name: "synth".to_string(),
+                        arguments: "{}".to_string(),
+                        result: ToolOutcome {
+                            content: format!("synth-result-{i}"),
+                            is_error: false,
+                            metadata: None,
+                        },
+                        elapsed_ms: None,
+                    };
+                    protocol::HistoryItem::Assistant(protocol::AssistantTurn::with_invocations(
+                        Some(Content::text(body)),
+                        None,
+                        Vec::new(),
+                        vec![invocation],
+                    ))
+                }
             }
         })
         .collect()
