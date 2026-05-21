@@ -286,11 +286,7 @@ impl TuiApp {
         });
     }
 
-    fn push_assistant_blocks(
-        &mut self,
-        turn: &AssistantTurn,
-        tool_elapsed: &HashMap<String, u64>,
-    ) {
+    fn push_assistant_blocks(&mut self, turn: &AssistantTurn, tool_elapsed: &HashMap<String, u64>) {
         if let Some(ref reasoning) = turn.reasoning {
             if !reasoning.is_empty() {
                 self.push_block(Block::Thinking {

@@ -77,11 +77,9 @@ fn generate(turns: usize, words: usize, title: Option<String>) {
             .push(protocol::HistoryItem::user(Content::text(user_text)));
 
         let body = assistant_body(i, words);
-        session
-            .history
-            .push(protocol::HistoryItem::Assistant(
-                protocol::AssistantTurn::terminal(Some(Content::text(body)), None, Vec::new()),
-            ));
+        session.history.push(protocol::HistoryItem::Assistant(
+            protocol::AssistantTurn::terminal(Some(Content::text(body)), None, Vec::new()),
+        ));
     }
 
     session.updated_at_ms = session::now_ms();

@@ -517,9 +517,7 @@ fn build_search_blob(history: &[HistoryItem]) -> String {
     for item in history {
         let text_opt = match item {
             HistoryItem::User { content } => Some(content.text_content()),
-            HistoryItem::Assistant(turn) => {
-                turn.content.as_ref().map(|c| c.text_content())
-            }
+            HistoryItem::Assistant(turn) => turn.content.as_ref().map(|c| c.text_content()),
             HistoryItem::System { .. } => None,
         };
         if let Some(text) = text_opt {
@@ -668,9 +666,7 @@ mod tests {
         assert_eq!(prefix, "abcd");
     }
 
-    use protocol::{
-        AssistantTurn, Content, ContentPart, HistoryItem, ToolInvocation, ToolOutcome,
-    };
+    use protocol::{AssistantTurn, Content, ContentPart, HistoryItem, ToolInvocation, ToolOutcome};
 
     fn user_item(text: &str) -> HistoryItem {
         HistoryItem::User {
@@ -848,8 +844,7 @@ mod tests {
 
     fn first_image_url(item: &HistoryItem) -> &str {
         match item {
-            HistoryItem::User { content }
-            | HistoryItem::System { content } => match content {
+            HistoryItem::User { content } | HistoryItem::System { content } => match content {
                 Content::Parts(parts) => match &parts[0] {
                     ContentPart::ImageUrl { url, .. } => url,
                     _ => panic!("expected image part"),
@@ -999,14 +994,14 @@ mod tests {
         let mut original = Session::new(123, std::path::PathBuf::from("/w"));
         original.history.push(user_item("hi"));
         original.history.push(assistant_text_item("hello"));
-        original.history.push(HistoryItem::Assistant(
-            AssistantTurn::with_invocations(
+        original
+            .history
+            .push(HistoryItem::Assistant(AssistantTurn::with_invocations(
                 Some(Content::Text("doing work".into())),
                 None,
                 Vec::new(),
                 vec![inv_ok, inv_err],
-            ),
-        ));
+            )));
         original.token_snapshots = vec![(1, 50), (3, 200)];
         original.cost_snapshots = vec![(3, 1.25)];
         original.context_tokens = Some(200);
@@ -1031,8 +1026,9 @@ mod tests {
         // times across save/load is `turn_metas.tool_elapsed`. Verify
         // both halves of that contract.
         let mut original = Session::new(7, std::path::PathBuf::from("/w"));
-        original.history.push(HistoryItem::Assistant(
-            AssistantTurn::with_invocations(
+        original
+            .history
+            .push(HistoryItem::Assistant(AssistantTurn::with_invocations(
                 None,
                 None,
                 Vec::new(),
@@ -1047,8 +1043,7 @@ mod tests {
                     },
                     elapsed_ms: Some(42),
                 }],
-            ),
-        ));
+            )));
         let meta = protocol::TurnMeta {
             elapsed_ms: 100,
             avg_tps: None,

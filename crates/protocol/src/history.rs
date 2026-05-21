@@ -24,12 +24,8 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum HistoryItem {
-    System {
-        content: Content,
-    },
-    User {
-        content: Content,
-    },
+    System { content: Content },
+    User { content: Content },
     Assistant(AssistantTurn),
 }
 
@@ -189,9 +185,10 @@ pub fn history_from_messages(messages: Vec<Message>) -> Vec<HistoryItem> {
                     std::collections::HashMap::new();
                 let mut j = i + 1;
                 while j < messages.len() && matches!(messages[j].role, Role::Tool) {
-                    if let (Some(id), Some(content)) =
-                        (messages[j].tool_call_id.clone(), messages[j].content.clone())
-                    {
+                    if let (Some(id), Some(content)) = (
+                        messages[j].tool_call_id.clone(),
+                        messages[j].content.clone(),
+                    ) {
                         results_by_id
                             .insert(id, (content.as_text().to_string(), messages[j].is_error));
                     }
@@ -200,12 +197,13 @@ pub fn history_from_messages(messages: Vec<Message>) -> Vec<HistoryItem> {
                 let invocations = calls
                     .into_iter()
                     .map(|tc| {
-                        let (content, is_error) = results_by_id.remove(&tc.id).unwrap_or_else(|| {
-                            (
-                                "interrupted (resumed): no recorded tool result".into(),
-                                true,
-                            )
-                        });
+                        let (content, is_error) =
+                            results_by_id.remove(&tc.id).unwrap_or_else(|| {
+                                (
+                                    "interrupted (resumed): no recorded tool result".into(),
+                                    true,
+                                )
+                            });
                         ToolInvocation {
                             call_id: tc.id,
                             name: tc.function.name,
@@ -255,7 +253,12 @@ pub fn history_to_messages(items: &[HistoryItem]) -> Vec<Message> {
                 let tool_calls = if turn.invocations.is_empty() {
                     None
                 } else {
-                    Some(turn.invocations.iter().map(|inv| inv.as_tool_call()).collect())
+                    Some(
+                        turn.invocations
+                            .iter()
+                            .map(|inv| inv.as_tool_call())
+                            .collect(),
+                    )
                 };
                 let reasoning_details = if turn.reasoning_blocks.is_empty() {
                     None
