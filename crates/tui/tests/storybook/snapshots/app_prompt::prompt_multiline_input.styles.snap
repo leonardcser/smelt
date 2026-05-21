@@ -4,6 +4,9 @@ assertion_line: 345
 expression: frame.styles_text()
 ---
 dim: 50 10
+  4   0  50 fg=AnsiValue(237)
   7  11   1 fg=Black bg=White
-  9   0  10 fg=AnsiValue(244) bg=AnsiValue(233)
-  9  10  40 bg=AnsiValue(233)
+  8   0  50 fg=AnsiValue(237)
+  9   0  10 fg=AnsiValue(244) bg=AnsiValue(234)
+  9  10  32 bg=AnsiValue(233)
+  9  42   8 fg=AnsiValue(244) bg=AnsiValue(233)

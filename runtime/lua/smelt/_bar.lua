@@ -249,10 +249,13 @@ function M.compose_status(items, opts)
   end
 
   -- Fill in default bg from `bg_group` for spans that don't set one.
+  -- `hl_group` carries its own bg, so a span that picked an `hl_group`
+  -- (e.g. a vim/mode pill) keeps that group's bg instead of getting
+  -- the statusline fill colour pasted on top.
   local function with_default_bg(style)
     local s = {}
     for k, v in pairs(style) do s[k] = v end
-    if bg_group and not s.bg then s.bg = bg_group end
+    if bg_group and not s.bg and not s.hl_group then s.bg = bg_group end
     return s
   end
   local fill_style = with_default_bg({})

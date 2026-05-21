@@ -49,7 +49,11 @@ impl TuiApp {
         // ── Layout ──
         let (prompt_rect, viewport_rows) = {
             let _p = smelt_perf::perf::begin("compositor:layout");
-            let input_rows = self.measure_prompt_input_rows(self.prompt_buf(), width);
+            let wrapped_rows = self.measure_prompt_input_rows(self.prompt_buf(), width);
+            // Cap the prompt block at half the screen so a very long
+            // composing message keeps the transcript usable.
+            let max_input_rows = (term_h / 2).max(1);
+            let input_rows = wrapped_rows.min(max_input_rows);
             let tree = self
                 .invoke_lua_layout_composer(term_w, term_h, input_rows)
                 .unwrap_or_else(|| layout::seed_layout_tree(input_rows));

@@ -1,5 +1,6 @@
 ---
 source: crates/tui/tests/storybook/app_ctx.rs
+assertion_line: 344
 expression: frame.text()
 ---
 
@@ -17,4 +18,4 @@ expression: frame.text()
 ──────────────────────────────────────────────────────────────────────
 
 ──────────────────────────────────────────────────────────────────────
- ○ normal
+ ○ normal                                                     1:1 100%

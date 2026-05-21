@@ -20,4 +20,4 @@ expression: frame.text()
   4. allow web_fetch:https://example.com in ~/cwd
 
   press tab to add a reason…
- ○ normal
+ ○ normal                                                       1:1 0%

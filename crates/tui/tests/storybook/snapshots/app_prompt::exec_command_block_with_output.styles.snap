@@ -12,6 +12,9 @@ dim: 50 12
   3   0   8 attrs=dim
   4   0   9 attrs=dim
   5   0  11 attrs=dim
+  8   0  50 fg=AnsiValue(237)
   9   1   1 fg=Black bg=White
- 11   0  10 fg=AnsiValue(244) bg=AnsiValue(233)
- 11  10  40 bg=AnsiValue(233)
+ 10   0  50 fg=AnsiValue(237)
+ 11   0  10 fg=AnsiValue(244) bg=AnsiValue(234)
+ 11  10  32 bg=AnsiValue(233)
+ 11  42   8 fg=AnsiValue(244) bg=AnsiValue(233)

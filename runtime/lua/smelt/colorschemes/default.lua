@@ -39,7 +39,7 @@ return {
   SmeltUserBg         = bg(dl(236, 254)),
   SmeltScrollPillBg   = bg(dl(234, 250)),
   SmeltCodeBlockBg    = bg(dl(233, 255)),
-  SmeltBar            = bg(dl(237, 252)),
+  SmeltBar            = fg(dl(237, 252)),
   SmeltSelection      = bg(dl(238, 189)),
   SmeltCursorLineBg   = bg(dl(237, 253)),
   SmeltScrollbarTrack = bg(dl(235, 254)),

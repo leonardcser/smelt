@@ -7,6 +7,7 @@ dim: 70 10
   0   0   1 fg=AnsiValue(77)
   0   1   6 attrs=dim
   1   2   9 attrs=dim
+  6   0   1 fg=AnsiValue(237)
   6   1   1 fg=Rgb { r: 198, g: 198, b: 198 } attrs=bold
   6   2   1 fg=Rgb { r: 175, g: 175, b: 175 } attrs=bold
   6   3   1 fg=Rgb { r: 157, g: 157, b: 157 } attrs=bold
@@ -18,6 +19,9 @@ dim: 70 10
   6   9   1 fg=Rgb { r: 198, g: 198, b: 198 } attrs=bold
   6  10   1 fg=Rgb { r: 220, g: 220, b: 220 } attrs=bold
   6  11   1 fg=Rgb { r: 238, g: 238, b: 238 } attrs=bold
+  6  13  57 fg=AnsiValue(237)
   7   1   1 fg=Black bg=White
-  9   0  10 fg=AnsiValue(244) bg=AnsiValue(233)
-  9  10  60 bg=AnsiValue(233)
+  8   0  70 fg=AnsiValue(237)
+  9   0  10 fg=AnsiValue(244) bg=AnsiValue(234)
+  9  10  52 bg=AnsiValue(233)
+  9  62   8 fg=AnsiValue(244) bg=AnsiValue(233)

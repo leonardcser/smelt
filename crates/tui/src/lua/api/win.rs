@@ -160,13 +160,17 @@ impl mlua::UserData for LuaWin {
             },
         );
 
-        // ── rect — viewport bounds ─────────────────────────────────
+        // ── rect — current layout-resolved bounds ──────────────────
+        // Reads `split_rect` when the leaf has been placed in the
+        // current layout tree, so renderers running BEFORE the first
+        // paint already see the correct width (no startup width flash).
         methods.add_method("rect", |lua, this, ()| -> LuaResult<mlua::Value> {
             let rect = crate::lua::try_with_app(|app| {
-                app.ui
-                    .win(this.id)
-                    .and_then(|w| w.viewport)
-                    .map(|vp| vp.rect)
+                app.ui.win(this.id).and_then(|w| {
+                    w.viewport
+                        .map(|vp| vp.rect)
+                        .or_else(|| app.ui.split_rect(this.id))
+                })
             })
             .flatten();
             match rect {
@@ -183,15 +187,18 @@ impl mlua::UserData for LuaWin {
         });
 
         // Inner-content width in cells, with gutter and pad_left/pad_right
-        // already subtracted. Returns `nil` until the first paint lays the
-        // window out. Use this instead of `rect().width` when you need the
-        // cell budget for fitting text — `rect.width` includes chrome.
+        // already subtracted. Falls back to the layout-resolved rect minus
+        // gutters when the viewport hasn't been laid out yet — keeps bar
+        // renderers from picking the `or 80` cold-start width on the
+        // first frame after bootstrap.
         methods.add_method("content_width", |_, this, ()| -> LuaResult<mlua::Value> {
             let w = crate::lua::try_with_app(|app| {
-                app.ui
-                    .win(this.id)
-                    .and_then(|w| w.viewport)
-                    .map(|vp| vp.content_width)
+                let win = app.ui.win(this.id)?;
+                if let Some(vp) = win.viewport {
+                    return Some(vp.content_width);
+                }
+                let rect = app.ui.split_rect(this.id)?;
+                Some(win.config.gutters.content_width(rect.width))
             })
             .flatten();
             Ok(match w {
