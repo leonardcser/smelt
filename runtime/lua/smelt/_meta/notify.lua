@@ -22,7 +22,7 @@ notify.error = nil
 --- where `smelt.notify` isn't bound.
 ---@see smelt.notify.error
 ---@see smelt.notify.warn
----@type fun(source: string): table
+---@type fun(source: string): smelt.notify.Scoped
 notify.scoped = nil
 
 --- Show a warning toast and append the body to the message log. Pass `source` to tag the `/messages` entry; defaults to `"lua"`.

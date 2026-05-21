@@ -148,6 +148,17 @@ function List:move_cursor(delta)
   self.leaf:move_cursor(delta)
 end
 
+--- Options accepted by `smelt.list.new`. `leaf` and `buf` are mandatory —
+--- they own the rendered selection cursor and the backing line buffer;
+--- the rest configure how data is sourced, filtered, and rendered.
+---@class smelt.list.Opts
+---@field leaf any Selectable list leaf (typically from `smelt.dialog.list`).
+---@field buf smelt.buf.Buf Backing buffer that mirrors the rendered rows.
+---@field items? any[] Initial item set. Mutate via `:set_items(...)` later if needed.
+---@field render fun(item: any): table Returns `{ text, marks }` per visible row.
+---@field filter? fun(item: any): boolean Predicate re-run on `:set_filter` / `:refresh`.
+---@field empty_text? string Placeholder line shown when no row passes the filter.
+
 -- Build a structured list bound to the dialog-list `opts.leaf` and its
 -- backing `opts.buf`. `opts.items` is the data source; `opts.render(item)`
 -- returns `{ text, marks }`; `opts.filter(item)` is optional and re-runs
@@ -155,7 +166,7 @@ end
 -- when no row passes the filter. Returns a handle with `:selected`,
 -- `:set_filter`, `:refresh`, `:set_cursor`, `:move_cursor`. See the
 -- header docstring for the full usage shape.
--- @sig fun(opts: table): table
+-- @sig fun(opts: smelt.list.Opts): table
 function smelt.list.new(opts)
   if type(opts) ~= "table" then
     error("smelt.list.new: expected options table", 2)

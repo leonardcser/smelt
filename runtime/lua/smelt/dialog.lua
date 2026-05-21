@@ -51,6 +51,57 @@ local REGION = "dialog_overlay"
 
 local GUTTER = 1
 
+--- One body panel inside a dialog. `leaf` is the win/leaf built by one of
+--- the `smelt.dialog.*` helpers; `height` follows the same grammar as
+--- `smelt.dialog.open` (integer cells, `"N%"`, `"fill"`, `"fit"`).
+---@class smelt.dialog.Panel
+---@field leaf any A leaf returned by `smelt.dialog.input/options/list/markdown/content`.
+---@field height? any Integer cells, `"N%"`, `"fill"`, or `"fit"`.
+
+--- One dialog-level keymap entry. `on_press(ctx)` receives the dialog
+--- context exposing `ctx.close()` and `ctx.resolve(value)` so the
+--- handler can dismiss the dialog or resolve the blocking `open` call.
+---@class smelt.dialog.Keymap
+---@field key string Chord string (e.g. `"q"`, `"<Esc>"`, `"ctrl-j"`).
+---@field hint? string Optional one-line hint surfaced in the dialog footer.
+---@field on_press fun(ctx: any): any Handler invoked when the key fires.
+
+--- Options accepted by `smelt.dialog.open` / `smelt.dialog.open_handle`.
+--- Body sizing is body-relative: integer `height` values are forwarded
+--- through with the chrome row added automatically; `"N%"`, `"fill"`,
+--- and `"fit"` pass through verbatim. Pick one of `height` or
+--- `max_height`; setting both raises.
+---@class smelt.dialog.Opts
+---@field title? string Title rendered in the chrome row.
+---@field panels smelt.dialog.Panel[] Ordered list of body panels.
+---@field focus? any Leaf that should receive initial focus.
+---@field height? any Fixed total body size: integer cells, `"N%"`, `"fill"`, or `"fit"`.
+---@field max_height? any Shrink-to-content cap that pairs with `min_height`.
+---@field min_height? any Floor for the body size (defaults to `"30%"` in fit mode).
+---@field blocks_agent? boolean Block the agent loop while the dialog is open. Defaults to `false`.
+---@field keymaps? smelt.dialog.Keymap[] Dialog-level key bindings (merged with built-ins).
+---@field on_submit? fun(ctx: any): any Handler invoked on Enter; default resolves with the focused leaf.
+---@field on_dismiss? fun(): nil Handler invoked when the dialog is dismissed.
+
+--- Options accepted by `smelt.dialog.picker`. Layered on top of
+--- `smelt.dialog.Opts`; only the picker-specific fields are listed.
+---@class smelt.dialog.PickerOpts
+---@field items? any[] | fun(): any[] Eager item table or a lazy producer; re-evaluated by `on_query`.
+---@field render fun(item: any): table Per-item `{ text, marks }` table — see `smelt.list.new`.
+---@field filter? fun(item: any): boolean Predicate applied during `set_filter` / `refresh`.
+---@field placeholder? string Input placeholder; defaults to `""`.
+---@field empty_text? string Shown in the list when nothing matches.
+---@field on_open? fun(ctx: any): nil Fires once after the input/list have been built.
+---@field on_query? fun(query: string, ctx: any): nil Fires on every keystroke; default re-applies `filter`.
+---@field on_submit? fun(item: any, ctx: any): any Fires on Enter; default resolves with the selected item.
+---@field on_dismiss? fun(): nil Fires when the dialog is dismissed.
+---@field keymaps? smelt.dialog.Keymap[] Extra dialog-level keymaps merged on top of navigation bindings.
+---@field title? string Forwarded to `smelt.dialog.open`.
+---@field height? any Forwarded to `smelt.dialog.open`.
+---@field max_height? any Forwarded to `smelt.dialog.open`.
+---@field min_height? any Forwarded to `smelt.dialog.open`.
+---@field blocks_agent? boolean Forwarded to `smelt.dialog.open`.
+
 -- Build a single-line text-input leaf with a fresh buffer. `placeholder`
 -- shows when the buffer is empty; `opts.pad_left` / `opts.pad_right`
 -- override the dialog gutter. Returns `(leaf, buf)` so the caller can
@@ -390,7 +441,7 @@ end
 -- caller until a handler calls `ctx.resolve(value)`. Must run inside a
 -- `smelt.spawn` (or tool execute) frame; returns the resolved value or
 -- `nil` on dismiss.
--- @sig fun(opts: table): any
+-- @sig fun(opts: smelt.dialog.Opts): any
 function smelt.dialog.open(opts)
   if not coroutine.isyieldable() then
     error("smelt.dialog.open: call from inside smelt.spawn(fn) or tool.execute", 2)
@@ -463,7 +514,7 @@ local NAV_KEYS = {
 -- block above `NAV_KEYS` for every accepted `opts` field. Returns the
 -- value resolved from `on_submit` (defaults to the highlighted item) or
 -- `nil` on dismiss.
--- @sig fun(opts: table): any
+-- @sig fun(opts: smelt.dialog.PickerOpts): any
 function smelt.dialog.picker(opts)
   if not coroutine.isyieldable() then
     error("smelt.dialog.picker: call from inside smelt.spawn(fn) or tool.execute", 2)
@@ -558,7 +609,7 @@ end
 -- The consumer drives the lifecycle via `on_submit` / `on_dismiss`
 -- callbacks and tears down with `handle:close()`. No value flows back
 -- — use `smelt.dialog.open` when you need to read the result.
--- @sig fun(opts: table): table
+-- @sig fun(opts: smelt.dialog.Opts): table
 function smelt.dialog.open_handle(opts)
   if type(opts) ~= "table" then
     error("smelt.dialog.open_handle: expected table of options", 2)

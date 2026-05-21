@@ -63,13 +63,34 @@ local function resolve_items(items)
   return type(items) == "function" and items() or items
 end
 
+--- Picker entry shown in the prompt-docked dropdown. `label` and the
+--- optional flavour fields mirror what the fuzzy ranker renders; the
+--- caller is free to attach extra fields and read them back from
+--- `on_select` / `on_enter`.
+---@class smelt.prompt.PickerItem
+---@field label string Primary text rendered for the row.
+---@field description? string Secondary text shown dimmed after the label.
+---@field ansi_color? any ANSI color spec used for the prefix glyph.
+---@field label_color? any Override the label's color.
+---@field prefix? string Glyph rendered before the label.
+---@field search_terms? string Extra haystack tokens for the fuzzy match.
+
+--- Options accepted by `smelt.prompt.open_picker`. Passing `on_enter`
+--- switches the picker to persistent mode (stays open across selects);
+--- omit it for single-shot behaviour.
+---@class smelt.prompt.PickerOpts
+---@field items smelt.prompt.PickerItem[] | fun(): smelt.prompt.PickerItem[] Eager list or lazy producer.
+---@field on_select? fun(item: smelt.prompt.PickerItem): nil Fires on every cursor move.
+---@field on_enter? fun(item: smelt.prompt.PickerItem, idx: integer): nil Persistent-mode accept handler.
+---@field on_dismiss? fun(): nil Fires on Esc.
+
 -- Prompt-docked picker. Filters `opts.items` (or `opts.items()`) against
 -- the current prompt buffer on every keystroke, ranked by `smelt.fuzzy.rank`.
 -- Pass `opts.on_select` for the per-navigation hook; pass `opts.on_enter`
 -- to switch to persistent mode (the picker stays open across selections
 -- until Esc). Returns `{ action, item, index }` on accept or `nil` on
 -- dismiss (single-shot mode). Must run inside a `smelt.spawn` frame.
--- @sig fun(opts: table): table?
+-- @sig fun(opts: smelt.prompt.PickerOpts): table?
 function smelt.prompt.open_picker(opts)
   if not coroutine.isyieldable() then
     error("smelt.prompt.open_picker: call from inside smelt.spawn(fn) or tool.execute", 2)

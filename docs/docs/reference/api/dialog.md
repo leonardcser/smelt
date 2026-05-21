@@ -60,8 +60,10 @@ summaries, intros). Returns `(leaf, buf)`.
 ## `smelt.dialog.open`
 
 ```lua
-fun(opts: table): any
+fun(opts: smelt.dialog.Opts): any
 ```
+
+Types: [`smelt.dialog.Opts`](types.md#smeltdialogopts)
 
 Coroutine-blocking dialog opener. Builds the overlay from `opts.panels`
 (each `{ leaf, height }`), wires `opts.keymaps`, then yields the
@@ -72,8 +74,10 @@ caller until a handler calls `ctx.resolve(value)`. Must run inside a
 ## `smelt.dialog.open_handle`
 
 ```lua
-fun(opts: table): table
+fun(opts: smelt.dialog.Opts): table
 ```
+
+Types: [`smelt.dialog.Opts`](types.md#smeltdialogopts)
 
 Non-coroutine open. Returns `{ win, panels, close() }` synchronously.
 The consumer drives the lifecycle via `on_submit` / `on_dismiss`
@@ -96,8 +100,10 @@ Returns `(leaf, buf)`; the caller reads the active row via
 ## `smelt.dialog.picker`
 
 ```lua
-fun(opts: table): any
+fun(opts: smelt.dialog.PickerOpts): any
 ```
+
+Types: [`smelt.dialog.PickerOpts`](types.md#smeltdialogpickeropts)
 
 Coroutine-blocking Telescope-style picker. Stacks a single-line input
 on top of a list driven by `smelt.list.new`; navigation forwards from

@@ -9,8 +9,10 @@ Picker-style virtual list widget. `smelt.list.new(opts)` returns a handle that o
 ## `smelt.list.new`
 
 ```lua
-fun(opts: table): table
+fun(opts: smelt.list.Opts): table
 ```
+
+Types: [`smelt.list.Opts`](types.md#smeltlistopts)
 
 Build a structured list bound to the dialog-list `opts.leaf` and its
 backing `opts.buf`. `opts.items` is the data source; `opts.render(item)`

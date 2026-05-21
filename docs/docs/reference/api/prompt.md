@@ -23,17 +23,14 @@ recompute pass. Idempotent — multiple acquirers stack.
 ## `smelt.prompt.completer`
 
 ```lua
-fun(spec: table): smelt.Reg
+fun(spec: smelt.prompt.CompleterSpec): smelt.Reg
 ```
 
-Types: [`smelt.Reg`](types.md#smeltreg)
+Types: [`smelt.prompt.CompleterSpec`](types.md#smeltpromptcompleterspec), [`smelt.Reg`](types.md#smeltreg)
 
-Register a completer spec. Required fields: `detect(text, cpos)` ->
-`(spec_data, anchor)?` recognises a trigger token; `items()` -> the
-candidate list; `query(token)` -> ranked subset; `accept(item)`
-splices the completion back into the prompt. Returns a `Reg` whose
-`:remove()` unregisters the completer and closes the picker if it
-was active.
+Register a completer spec. See `smelt.prompt.CompleterSpec` for the
+required fields. Returns a `Reg` whose `:remove()` unregisters the
+completer and closes the picker if it was active.
 
 ## `smelt.prompt.cursor`
 
@@ -56,8 +53,10 @@ modal owner.
 ## `smelt.prompt.open_picker`
 
 ```lua
-fun(opts: table): table?
+fun(opts: smelt.prompt.PickerOpts): table?
 ```
+
+Types: [`smelt.prompt.PickerOpts`](types.md#smeltpromptpickeropts)
 
 Prompt-docked picker. Filters `opts.items` (or `opts.items()`) against
 the current prompt buffer on every keystroke, ranked by `smelt.fuzzy.rank`.

@@ -207,13 +207,21 @@ end
 -- re-executed inside the `install_app_ptr` scope.
 smelt.prompt.win():on("text_changed", function() M._recompute() end)
 
--- Register a completer spec. Required fields: `detect(text, cpos)` ->
--- `(spec_data, anchor)?` recognises a trigger token; `items()` -> the
--- candidate list; `query(token)` -> ranked subset; `accept(item)`
--- splices the completion back into the prompt. Returns a `Reg` whose
--- `:remove()` unregisters the completer and closes the picker if it
--- was active.
--- @sig fun(spec: table): smelt.Reg
+--- Completer specification handed to `smelt.prompt.completer`. Every
+--- field is required: `detect` recognises a trigger token in the live
+--- prompt text, `items` enumerates the candidate set, `query` ranks
+--- the candidates against the user's input, and `accept` splices the
+--- chosen value back into the prompt.
+---@class smelt.prompt.CompleterSpec
+---@field detect fun(text: string, cpos: integer): any?, integer? Detect the trigger; returns `(spec_data, anchor_byte_offset)` or `nil`.
+---@field items fun(spec_data: any): table[] Build the candidate list (one entry per row).
+---@field query fun(spec_data: any, token: string, items: table[]): table[] Filter / rank the candidates.
+---@field accept fun(spec_data: any, item: table): nil Splice the accepted candidate into the prompt.
+
+-- Register a completer spec. See `smelt.prompt.CompleterSpec` for the
+-- required fields. Returns a `Reg` whose `:remove()` unregisters the
+-- completer and closes the picker if it was active.
+-- @sig fun(spec: smelt.prompt.CompleterSpec): smelt.Reg
 function smelt.prompt.completer(spec)
   assert(type(spec) == "table", "smelt.prompt.completer: expected table")
   assert(type(spec.detect) == "function", "spec.detect required")

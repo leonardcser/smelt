@@ -629,6 +629,16 @@ function smelt.__sweep_state()
 end
 
 if smelt and smelt.notify then
+  --- Source-bound notify handle returned by `smelt.notify.scoped`. Callable
+  --- as `handle(msg)` for an info toast; `handle.error(msg)` and
+  --- `handle.warn(msg)` raise error/warning toasts. Every call forwards to
+  --- the underlying `smelt.notify*` with the source string pinned at
+  --- factory time.
+  ---@class smelt.notify.Scoped
+  ---@field error fun(msg: string) Raise an error toast tagged with the bound source.
+  ---@field warn fun(msg: string) Raise a warning toast tagged with the bound source.
+  ---@field [string] any Callable: `handle(msg)` -> info toast tagged with the bound source.
+
   -- Bind `source` once and return a callable bag that forwards to
   -- `smelt.notify` / `smelt.notify.error` / `smelt.notify.warn` with the
   -- source pinned. A plugin opts in with one line at the top of the file:
@@ -638,7 +648,7 @@ if smelt and smelt.notify then
   -- so the per-call-site `, "upgrade"` repetition goes away. Same toast +
   -- `/messages` semantics as the underlying calls. Skipped on headless
   -- where `smelt.notify` isn't bound.
-  -- @sig fun(source: string): table
+  -- @sig fun(source: string): smelt.notify.Scoped
   function smelt.notify.scoped(source)
     if type(source) ~= "string" or source == "" then
       error("smelt.notify.scoped: source must be a non-empty string", 2)

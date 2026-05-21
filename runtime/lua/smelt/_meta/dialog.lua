@@ -42,7 +42,7 @@ dialog.markdown = nil
 --- caller until a handler calls `ctx.resolve(value)`. Must run inside a
 --- `smelt.spawn` (or tool execute) frame; returns the resolved value or
 --- `nil` on dismiss.
----@type fun(opts: table): any
+---@type fun(opts: smelt.dialog.Opts): any
 dialog.open = nil
 
 --- Non-coroutine open. Returns `{ win, panels, close() }` synchronously.
@@ -50,7 +50,7 @@ dialog.open = nil
 --- callbacks and tears down with `handle:close()`. No value flows back
 --- — use `smelt.dialog.open` when you need to read the result.
 ---@see smelt.dialog.open
----@type fun(opts: table): table
+---@type fun(opts: smelt.dialog.Opts): table
 dialog.open_handle = nil
 
 --- Build a static selectable list leaf populated with `labels`. The
@@ -67,7 +67,7 @@ dialog.options = nil
 --- value resolved from `on_submit` (defaults to the highlighted item) or
 --- `nil` on dismiss.
 ---@see smelt.list.new
----@type fun(opts: table): any
+---@type fun(opts: smelt.dialog.PickerOpts): any
 dialog.picker = nil
 
 return dialog

@@ -15,13 +15,11 @@ local prompt = {}
 ---@type fun(): smelt.Reg
 prompt.acquire = nil
 
---- Register a completer spec. Required fields: `detect(text, cpos)` ->
---- `(spec_data, anchor)?` recognises a trigger token; `items()` -> the
---- candidate list; `query(token)` -> ranked subset; `accept(item)`
---- splices the completion back into the prompt. Returns a `Reg` whose
---- `:remove()` unregisters the completer and closes the picker if it
---- was active.
----@type fun(spec: table): smelt.Reg
+--- Register a completer spec. See `smelt.prompt.CompleterSpec` for the
+--- required fields. Returns a `Reg` whose `:remove()` unregisters the
+--- completer and closes the picker if it was active.
+---@see smelt.prompt.CompleterSpec
+---@type fun(spec: smelt.prompt.CompleterSpec): smelt.Reg
 prompt.completer = nil
 
 --- Read or write the prompt cursor as a byte offset into `text()`. Without an argument returns the current offset; with one snaps it to a char boundary and clamps to source length. Returns the resulting offset.
@@ -42,7 +40,7 @@ prompt.is_modal = nil
 --- until Esc). Returns `{ action, item, index }` on accept or `nil` on
 --- dismiss (single-shot mode). Must run inside a `smelt.spawn` frame.
 ---@see smelt.fuzzy.rank
----@type fun(opts: table): table?
+---@type fun(opts: smelt.prompt.PickerOpts): table?
 prompt.open_picker = nil
 
 --- Remove the named prompt section. No-op if the section does not exist.

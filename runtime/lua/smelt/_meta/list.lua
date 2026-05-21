@@ -14,7 +14,7 @@ local list = {}
 --- when no row passes the filter. Returns a handle with `:selected`,
 --- `:set_filter`, `:refresh`, `:set_cursor`, `:move_cursor`. See the
 --- header docstring for the full usage shape.
----@type fun(opts: table): table
+---@type fun(opts: smelt.list.Opts): table
 list.new = nil
 
 return list

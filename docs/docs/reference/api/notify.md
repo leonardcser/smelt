@@ -17,8 +17,10 @@ Show an error toast (highlighted with the error color) and append the body to th
 ## `smelt.notify.scoped`
 
 ```lua
-fun(source: string): table
+fun(source: string): smelt.notify.Scoped
 ```
+
+Types: [`smelt.notify.Scoped`](types.md#smeltnotifyscoped)
 
 Bind `source` once and return a callable bag that forwards to
 `smelt.notify` / `smelt.notify.error` / `smelt.notify.warn` with the
