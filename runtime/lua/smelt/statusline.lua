@@ -1,8 +1,7 @@
--- Statusline window. Replaces the old `status.lua` + Rust-side
--- `smelt.statusline.register/unregister/snapshot` plumbing.
+-- Statusline window — Lua-allocated, Lua-rendered.
 --
 -- This module owns:
---   * the statusline window (`M.win`) — Lua-allocated
+--   * the statusline window (`M.win`)
 --   * a registry of named source callbacks (`M.add` / `M.remove`)
 --   * a per-frame renderer that calls each source, flattens the
 --     returned segments, composes via `_bar.compose_status`, and
@@ -10,9 +9,8 @@
 --
 -- The built-in `core` source reads engine state directly from cells
 -- (`vim_mode`, `agent_mode`, `tps`, `task_label`, `running_procs`,
--- `permission_pending`, `cursor_pos`) and `smelt.session.tokens()` for
--- cache info. Plugins extend the line by registering additional
--- sources via `M.add(name, fn)`.
+-- `permission_pending`, `cursor_pos`). Plugins extend the line by
+-- registering additional sources via `M.add(name, fn)`.
 
 local bar = require("smelt._bar")
 
@@ -32,8 +30,6 @@ function M.add(name, handler)
   end
   sources[#sources + 1] = { name = name, handler = handler }
 end
-
-M.register = M.add
 
 function M.remove(name)
   for i = #sources, 1, -1 do

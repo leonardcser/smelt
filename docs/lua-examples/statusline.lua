@@ -1,11 +1,16 @@
--- Three statusline sources: a cwd label, a git branch pill, and a
--- clock. Each registered independently; items are appended to the
--- Rust-side built-in spans (slug, vim mode, model, cost, position, …).
+-- Three extra statusline sources: a cwd label, a git branch pill, and
+-- a clock. Each source returns a list of items appended to the
+-- statusline's left strip (or right strip when `align_right = true`).
 --
--- Sources render left-to-right in registration order. The optional
--- third arg sets a default `align` for items the source returns
--- without an explicit `align_right`; per-item `align_right` still
--- wins when set.
+-- Items use the same shape as `core_compose` in `smelt/statusline.lua`:
+--   text        (required) — the rendered string
+--   style       (optional) — { fg, bg, hl_group, bold, italic, dim, ... }
+--   priority    (optional) — higher = more droppable when line is tight
+--   truncatable (optional) — if true, the item shrinks before being dropped
+--   separated   (optional) — prefix " · " when not first in its strip
+--   align_right (optional) — push to the right strip
+
+local statusline = require("smelt.statusline")
 
 local function git_branch()
   local f = io.popen("git rev-parse --abbrev-ref HEAD 2>/dev/null")
@@ -15,21 +20,36 @@ local function git_branch()
   return branch
 end
 
-smelt.statusline.register("cwd", function()
+statusline.add("cwd", function()
   local cwd = os.getenv("PWD") or ""
   local home = os.getenv("HOME") or ""
   if home ~= "" and cwd:sub(1, #home) == home then
     cwd = "~" .. cwd:sub(#home + 1)
   end
-  return { text = " " .. cwd .. " ", bold = true, fg = 75, priority = 0, truncatable = true }
+  return { {
+    text = " " .. cwd .. " ",
+    style = { fg = { ansi = 75 }, bold = true },
+    priority = 0,
+    truncatable = true,
+  } }
 end)
 
-smelt.statusline.register("git_branch", function()
+statusline.add("git_branch", function()
   local branch = git_branch()
-  if not branch then return nil end
-  return { text = " " .. branch .. " ", fg = 114, priority = 1, group = true }
+  if not branch then return {} end
+  return { {
+    text = " " .. branch .. " ",
+    style = { fg = { ansi = 114 } },
+    priority = 1,
+    separated = true,
+  } }
 end)
 
-smelt.statusline.register("clock", function()
-  return { text = os.date("%H:%M"), fg = 245, priority = 2 }
-end, { align = "right" })
+statusline.add("clock", function()
+  return { {
+    text = os.date("%H:%M"),
+    style = { fg = { ansi = 245 } },
+    priority = 2,
+    align_right = true,
+  } }
+end)
