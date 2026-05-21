@@ -257,24 +257,24 @@ impl TuiApp {
                 self.lua.fire_ask_callback(id, &content, error);
                 SessionControl::Continue
             }
-            EngineEvent::Messages {
+            EngineEvent::HistoryUpdated {
                 turn_id: id,
-                messages,
+                history,
             } => {
                 if id == turn_id {
-                    self.set_history(messages);
+                    self.set_history(history);
                 }
                 SessionControl::Continue
             }
             EngineEvent::TurnComplete {
                 turn_id: id,
-                messages,
+                history,
                 meta,
             } => {
                 if id != turn_id {
                     return SessionControl::Continue;
                 }
-                self.set_history(messages);
+                self.set_history(history);
                 let payload = meta.clone().unwrap_or(protocol::TurnMeta {
                     elapsed_ms: 0,
                     avg_tps: None,
@@ -365,13 +365,13 @@ impl TuiApp {
     /// Handle engine events that arrive when no turn is active.
     pub(crate) fn handle_idle_engine_event(&mut self, ev: EngineEvent) {
         match ev {
-        // Stale Messages snapshots from cancelled/completed turns would overwrite a freshly cleared history.
-        EngineEvent::Messages { .. } => {}
-        EngineEvent::TurnComplete { messages, .. }
+        // Stale history snapshots from cancelled/completed turns would overwrite a freshly cleared history.
+        EngineEvent::HistoryUpdated { .. } => {}
+        EngineEvent::TurnComplete { history, .. }
             // Persist final messages from a cancelled turn without rebuilding the screen.
-            if !messages.is_empty() =>
+            if !history.is_empty() =>
         {
-            self.set_history(messages);
+            self.set_history(history);
             self.save_session();
         }
         EngineEvent::EngineAskResponse { id, content, error } => {

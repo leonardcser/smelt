@@ -215,8 +215,10 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
     msgs.callable(
         |lua, (_tbl, arg): (mlua::Table, Option<mlua::Table>)| -> LuaResult<mlua::Value> {
             let Some(arg) = arg else {
-                let messages = crate::lua::try_with_app(|app| app.core.session.messages.clone())
-                    .unwrap_or_default();
+                let messages = crate::lua::try_with_app(|app| {
+                    protocol::history_to_messages(&app.core.session.history)
+                })
+                .unwrap_or_default();
                 let out = messages_to_lua(lua, &messages)?;
                 return Ok(mlua::Value::Table(out));
             };
@@ -230,7 +232,8 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
                     .unwrap_or(false);
             if looks_like_list {
                 let new_msgs = lua_messages_to_protocol(lua, &arg);
-                crate::lua::with_app(|app| app.replace_messages(new_msgs));
+                let new_history = protocol::history_from_messages(new_msgs);
+                crate::lua::with_app(|app| app.replace_history(new_history));
                 return Ok(mlua::Value::Nil);
             }
             // Filter-opts path.
@@ -238,8 +241,10 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
             let include_tool = arg.get::<Option<bool>>("include_tool")?.unwrap_or(true);
             let since_index = arg.get::<Option<usize>>("since_index")?;
             let limit = arg.get::<Option<usize>>("limit")?;
-            let messages = crate::lua::try_with_app(|app| app.core.session.messages.clone())
-                .unwrap_or_default();
+            let messages = crate::lua::try_with_app(|app| {
+                protocol::history_to_messages(&app.core.session.history)
+            })
+            .unwrap_or_default();
             let role_filter: Option<std::collections::HashSet<String>> =
                 roles.map(|v| v.into_iter().collect());
             let filtered: Vec<protocol::Message> = messages

@@ -5,7 +5,7 @@ use std::borrow::Cow;
 use serde::{Deserialize, Serialize};
 
 /// A single part of a multipart message content block.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum ContentPart {
     Text { text: String },
     ImageUrl { url: String, label: Option<String> },
@@ -56,7 +56,7 @@ impl<'de> Deserialize<'de> for ContentPart {
 /// Message content: either a plain string or an array of typed parts.
 ///
 /// Serializes as a JSON string when `Text`, or a JSON array when `Parts`.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum Content {
     Text(String),
     Parts(Vec<ContentPart>),

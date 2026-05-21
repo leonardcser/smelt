@@ -342,21 +342,24 @@ impl TuiApp {
             // toggles between turns), replace it in place rather than
             // stack — the model only needs the *current* mode.
             let note = protocol::mode_change_note(self.core.config.mode);
-            let new_msg = protocol::Message::user(protocol::Content::text(note));
+            let new_item = protocol::HistoryItem::user(protocol::Content::text(note));
             let last_is_mode_note = self
                 .core
                 .session
-                .messages
+                .history
                 .last()
-                .and_then(|m| m.content.as_ref())
+                .and_then(|item| match item {
+                    protocol::HistoryItem::User { content } => Some(content),
+                    _ => None,
+                })
                 .map(|c| c.as_text().starts_with(protocol::MODE_NOTE_PREFIX))
                 .unwrap_or(false);
             if last_is_mode_note {
-                if let Some(last) = self.core.session.messages.last_mut() {
-                    *last = new_msg;
+                if let Some(last) = self.core.session.history.last_mut() {
+                    *last = new_item;
                 }
             } else {
-                self.core.session.messages.push(new_msg);
+                self.core.session.history.push(new_item);
             }
         }
         let system_prompt = self.rebuild_system_prompt();

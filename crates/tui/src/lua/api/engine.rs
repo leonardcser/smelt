@@ -333,7 +333,7 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
                         // must not mutate `app.prompt_sections`. Validation
                         // above guarantees `messages` is empty here.
                         system = app.assemble_system_prompt();
-                        messages = app.core.session.messages.clone();
+                        messages = protocol::history_to_messages(&app.core.session.history);
                         tools = app.lua.tool_defs(app.core.config.mode);
                     }
                     if let Some(q) = question {

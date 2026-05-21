@@ -16,7 +16,7 @@ use crossterm::event::{
 };
 use protocol::UiCommand;
 use protocol::{
-    AgentMode, Content, EngineAskError, EngineAskErrorKind, EngineEvent, Message, TokenUsage,
+    AgentMode, Content, EngineAskError, EngineAskErrorKind, EngineEvent, TokenUsage,
     ToolOutcome,
 };
 use serde::{Deserialize, Serialize};
@@ -852,14 +852,18 @@ fn call_id_string(id: u8) -> String {
 /// payloads. Alternating user/assistant content keeps the rebuild-screen
 /// path through `restore_screen` honest without coupling to engine
 /// internals.
-fn synth_messages(count: usize) -> Vec<Message> {
+fn synth_history(count: usize) -> Vec<protocol::HistoryItem> {
     (0..count)
         .map(|i| {
             let body = format!("compacted-{i}");
             if i % 2 == 0 {
-                Message::user(Content::text(body))
+                protocol::HistoryItem::user(Content::text(body))
             } else {
-                Message::assistant(Some(Content::text(body)), None, None)
+                protocol::HistoryItem::Assistant(protocol::AssistantTurn::terminal(
+                    Some(Content::text(body)),
+                    None,
+                    Vec::new(),
+                ))
             }
         })
         .collect()
@@ -1688,7 +1692,7 @@ pub fn apply(app: &mut TestApp, op: FuzzOp) {
             let id = app.current_turn_id().unwrap_or(0);
             let ev = SourceEvent::Engine(EngineEvent::TurnComplete {
                 turn_id: id,
-                messages: synth_messages(count),
+                history: synth_history(count),
                 meta: None,
             });
             (
@@ -1702,9 +1706,9 @@ pub fn apply(app: &mut TestApp, op: FuzzOp) {
         FuzzOp::EngineMessages { msg_count } => {
             let count = usize::from(msg_count);
             let id = app.current_turn_id().unwrap_or(0);
-            let ev = SourceEvent::Engine(EngineEvent::Messages {
+            let ev = SourceEvent::Engine(EngineEvent::HistoryUpdated {
                 turn_id: id,
-                messages: synth_messages(count),
+                history: synth_history(count),
             });
             (
                 Some(ev),

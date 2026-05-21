@@ -1,7 +1,7 @@
 use crate::app::{
     DeferredDialog, PendingTool, SessionControl, TuiApp, TurnState, CONFIRM_DEFER_MS,
 };
-use protocol::{Content, Decision, Message, UiCommand};
+use protocol::{Content, Decision, HistoryItem, UiCommand};
 use smelt_core::working::{TurnOutcome, TurnPhase};
 use smelt_core::*;
 use std::collections::HashMap;
@@ -36,10 +36,10 @@ impl TuiApp {
         if !content.is_empty() {
             self.core
                 .session
-                .messages
-                .push(Message::user(content.clone()));
+                .history
+                .push(HistoryItem::user(content.clone()));
             self.sync_session_snapshot();
-            self.core.session.messages.pop();
+            self.core.session.history.pop();
         }
         self.dispatch_turn(content)
     }
@@ -85,7 +85,7 @@ impl TuiApp {
                 mode: self.core.config.mode,
                 model: self.core.config.model.clone(),
                 reasoning_effort: self.core.config.reasoning_effort,
-                history: self.core.session.messages.clone(),
+                history: self.core.session.history.clone(),
                 api_base: Some(self.core.config.api_base.clone()),
                 api_key: Some(api_key),
                 session_id: self.core.session.id.clone(),
@@ -117,10 +117,10 @@ impl TuiApp {
         if !evaluated.is_empty() {
             self.core
                 .session
-                .messages
-                .push(Message::user(Content::text(evaluated.clone())));
+                .history
+                .push(HistoryItem::user(Content::text(evaluated.clone())));
             self.sync_session_snapshot();
-            self.core.session.messages.pop();
+            self.core.session.history.pop();
         }
 
         let (model, api_base, api_key) = {
@@ -251,7 +251,7 @@ impl TuiApp {
                 mode: self.core.config.mode,
                 model,
                 reasoning_effort: reasoning,
-                history: self.core.session.messages.clone(),
+                history: self.core.session.history.clone(),
                 api_base: Some(api_base),
                 api_key: Some(api_key),
                 session_id: self.core.session.id.clone(),
@@ -332,7 +332,7 @@ impl TuiApp {
             self.core
                 .session
                 .turn_metas
-                .push((self.core.session.messages.len(), meta));
+                .push((self.core.session.history.len(), meta));
         }
         self.snapshot_tokens();
         self.save_session();

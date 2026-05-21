@@ -1,16 +1,15 @@
 ---
 source: tests/scenarios.rs
-assertion_line: 110
 expression: out.events
 ---
 [
   "Ready",
   {
-    "Messages": {
-      "messages": [
+    "HistoryUpdated": {
+      "history": [
         {
           "content": "hi",
-          "role": "user"
+          "kind": "user"
         }
       ],
       "turn_id": 1
@@ -32,15 +31,15 @@ expression: out.events
     }
   },
   {
-    "Messages": {
-      "messages": [
+    "HistoryUpdated": {
+      "history": [
         {
           "content": "hi",
-          "role": "user"
+          "kind": "user"
         },
         {
           "content": "partial",
-          "role": "assistant"
+          "kind": "assistant"
         }
       ],
       "turn_id": 1
@@ -48,14 +47,14 @@ expression: out.events
   },
   {
     "TurnComplete": {
-      "messages": [
+      "history": [
         {
           "content": "hi",
-          "role": "user"
+          "kind": "user"
         },
         {
           "content": "partial",
-          "role": "assistant"
+          "kind": "assistant"
         }
       ],
       "meta": {

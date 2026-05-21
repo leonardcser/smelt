@@ -2,7 +2,7 @@ use crate::app::TuiApp;
 use smelt_core::session;
 use smelt_core::{Block, ToolOutput, ToolState, ToolStatus};
 
-use protocol::{AgentMode, Content, Message, Role, UiCommand};
+use protocol::{AgentMode, AssistantTurn, Content, HistoryItem, UiCommand};
 use std::collections::HashMap;
 use std::time::Duration;
 
@@ -19,10 +19,10 @@ impl TuiApp {
         }
     }
 
-    pub(crate) fn set_history(&mut self, messages: Vec<Message>) {
-        self.core.session.messages = messages;
+    pub(crate) fn set_history(&mut self, history: Vec<HistoryItem>) {
+        self.core.session.history = history;
         self.sync_session_snapshot();
-        let count = self.core.session.messages.len();
+        let count = self.core.session.history.len();
         self.core.cells.set_dyn(
             "history",
             std::rc::Rc::new(smelt_core::cells::HistoryDelta {
@@ -63,17 +63,17 @@ impl TuiApp {
             self.core
                 .session
                 .token_snapshots
-                .push((self.core.session.messages.len(), tokens));
+                .push((self.core.session.history.len(), tokens));
         }
         let cost = self.core.session.session_cost_usd;
         self.core
             .session
             .cost_snapshots
-            .push((self.core.session.messages.len(), cost));
+            .push((self.core.session.history.len(), cost));
     }
 
     pub(crate) fn fork_session(&mut self) {
-        if self.core.session.messages.is_empty() {
+        if self.core.session.history.is_empty() {
             self.notify_error("nothing to fork".into());
             return;
         }
@@ -95,7 +95,7 @@ impl TuiApp {
             "history",
             std::rc::Rc::new(smelt_core::cells::HistoryDelta {
                 kind: "forked".into(),
-                count: self.core.session.messages.len(),
+                count: self.core.session.history.len(),
             }),
         );
         self.notify(format!("forked from {original_id}"));
@@ -106,7 +106,7 @@ impl TuiApp {
         // Cancel in-flight engine work before clearing state so stale events don't restore old data.
         self.core.engine.send(UiCommand::Cancel);
         let old_id = self.core.session.id.clone();
-        self.core.session.messages.clear();
+        self.core.session.history.clear();
         self.reset_session_permissions();
         self.queued_messages.clear();
         self.task_label = None;
@@ -180,7 +180,7 @@ impl TuiApp {
             self.set_task_label(slug.clone());
         }
         // Drop snapshots beyond the restored history length.
-        let hist_len = self.core.session.messages.len();
+        let hist_len = self.core.session.history.len();
         self.core
             .session
             .token_snapshots
@@ -214,7 +214,7 @@ impl TuiApp {
             "history",
             std::rc::Rc::new(smelt_core::cells::HistoryDelta {
                 kind: "loaded".into(),
-                count: self.core.session.messages.len(),
+                count: self.core.session.history.len(),
             }),
         );
         // Drain stale engine events so old snapshots don't overwrite
@@ -233,123 +233,24 @@ impl TuiApp {
         if let Some(ref slug) = self.core.session.slug {
             self.set_task_label(slug.clone());
         }
-        if self.core.session.messages.is_empty() {
+        if self.core.session.history.is_empty() {
             return;
         }
 
-        let mut tool_outputs: HashMap<String, ToolOutput> = HashMap::new();
+        // Per-call elapsed times survive across reloads via turn_metas.
+        // ToolInvocation also carries its own elapsed; we prefer the
+        // in-line value and fall back to turn_metas for older sessions.
         let mut tool_elapsed: HashMap<String, u64> = HashMap::new();
-        for msg in &self.core.session.messages {
-            if matches!(msg.role, Role::Tool) {
-                if let Some(ref id) = msg.tool_call_id {
-                    let text = msg
-                        .content
-                        .as_ref()
-                        .map(|c| c.text_content().into_owned())
-                        .unwrap_or_default();
-                    tool_outputs.insert(
-                        id.clone(),
-                        ToolOutput {
-                            content: text,
-                            is_error: msg.is_error,
-                            metadata: None,
-                        },
-                    );
-                }
-            }
-        }
-
         for (_, meta) in &self.core.session.turn_metas {
             tool_elapsed.extend(meta.tool_elapsed.iter().map(|(k, v)| (k.clone(), *v)));
         }
 
-        let messages = self.core.session.messages.clone();
-        for msg in &messages {
-            match msg.role {
-                Role::User => {
-                    if let Some(ref content) = msg.content {
-                        let text = content.text_content();
-                        let prefix_marker = engine::SUMMARY_PREFIX.trim_end();
-                        if let Some(rest) = text.strip_prefix(prefix_marker) {
-                            let summary = rest.trim_start_matches('\n');
-                            self.push_block(Block::Compacted {
-                                summary: summary.to_string(),
-                            });
-                        } else {
-                            let image_labels = content.image_labels();
-                            let display_text = if image_labels.is_empty() {
-                                text.into_owned()
-                            } else {
-                                let suffix = image_labels.join(" ");
-                                if text.is_empty() {
-                                    suffix
-                                } else {
-                                    format!("{text} {suffix}")
-                                }
-                            };
-                            self.push_block(Block::User {
-                                text: display_text,
-                                image_labels,
-                            });
-                        }
-                    }
-                }
-                Role::Assistant => {
-                    if let Some(ref reasoning) = msg.reasoning_content {
-                        if !reasoning.is_empty() {
-                            self.push_block(Block::Thinking {
-                                content: reasoning.clone(),
-                            });
-                        }
-                    }
-                    if let Some(ref content) = msg.content {
-                        self.push_block(Block::Text {
-                            content: content.text_content().into_owned(),
-                        });
-                    }
-                    if let Some(ref calls) = msg.tool_calls {
-                        for tc in calls {
-                            let args: HashMap<String, serde_json::Value> =
-                                serde_json::from_str(&tc.function.arguments).unwrap_or_default();
-                            let output = tool_outputs.get(&tc.id).cloned();
-
-                            let status = if let Some(ref out) = output {
-                                if out.content.contains("denied this tool call")
-                                    || out.content.contains("blocked this tool call")
-                                {
-                                    ToolStatus::Denied
-                                } else if out.is_error {
-                                    ToolStatus::Err
-                                } else {
-                                    ToolStatus::Ok
-                                }
-                            } else {
-                                ToolStatus::Pending
-                            };
-                            let elapsed = tool_elapsed
-                                .get(&tc.id)
-                                .map(|ms| Duration::from_millis(*ms));
-                            let summary = self.lua.tool_summary(&tc.function.name, &args);
-                            self.push_tool_call(
-                                Block::ToolCall {
-                                    call_id: tc.id.clone(),
-                                    name: tc.function.name.clone(),
-                                    summary,
-                                    args,
-                                },
-                                ToolState {
-                                    status,
-                                    elapsed,
-                                    output: output.map(Box::new),
-                                    user_message: None,
-                                    render_cache: None,
-                                },
-                            );
-                        }
-                    }
-                }
-                Role::Tool => {}
-                Role::System => {}
+        let history = self.core.session.history.clone();
+        for item in &history {
+            match item {
+                HistoryItem::User { content } => self.push_user_block(content),
+                HistoryItem::Assistant(turn) => self.push_assistant_blocks(turn, &tool_elapsed),
+                HistoryItem::System { .. } => {}
             }
         }
 
@@ -358,9 +259,92 @@ impl TuiApp {
         }
     }
 
+    fn push_user_block(&mut self, content: &Content) {
+        let text = content.text_content();
+        let prefix_marker = engine::SUMMARY_PREFIX.trim_end();
+        if let Some(rest) = text.strip_prefix(prefix_marker) {
+            let summary = rest.trim_start_matches('\n');
+            self.push_block(Block::Compacted {
+                summary: summary.to_string(),
+            });
+            return;
+        }
+        let image_labels = content.image_labels();
+        let display_text = if image_labels.is_empty() {
+            text.into_owned()
+        } else {
+            let suffix = image_labels.join(" ");
+            if text.is_empty() {
+                suffix
+            } else {
+                format!("{text} {suffix}")
+            }
+        };
+        self.push_block(Block::User {
+            text: display_text,
+            image_labels,
+        });
+    }
+
+    fn push_assistant_blocks(
+        &mut self,
+        turn: &AssistantTurn,
+        tool_elapsed: &HashMap<String, u64>,
+    ) {
+        if let Some(ref reasoning) = turn.reasoning {
+            if !reasoning.is_empty() {
+                self.push_block(Block::Thinking {
+                    content: reasoning.clone(),
+                });
+            }
+        }
+        if let Some(ref content) = turn.content {
+            self.push_block(Block::Text {
+                content: content.text_content().into_owned(),
+            });
+        }
+        for inv in &turn.invocations {
+            let args: HashMap<String, serde_json::Value> =
+                serde_json::from_str(&inv.arguments).unwrap_or_default();
+            let status = if inv.result.content.contains("denied this tool call")
+                || inv.result.content.contains("blocked this tool call")
+            {
+                ToolStatus::Denied
+            } else if inv.result.is_error {
+                ToolStatus::Err
+            } else {
+                ToolStatus::Ok
+            };
+            let output = ToolOutput {
+                content: inv.result.content.clone(),
+                is_error: inv.result.is_error,
+                metadata: inv.result.metadata.clone(),
+            };
+            let elapsed_ms = inv
+                .elapsed_ms
+                .or_else(|| tool_elapsed.get(&inv.call_id).copied());
+            let summary = self.lua.tool_summary(&inv.name, &args);
+            self.push_tool_call(
+                Block::ToolCall {
+                    call_id: inv.call_id.clone(),
+                    name: inv.name.clone(),
+                    summary,
+                    args,
+                },
+                ToolState {
+                    status,
+                    elapsed: elapsed_ms.map(Duration::from_millis),
+                    output: Some(Box::new(output)),
+                    user_message: None,
+                    render_cache: None,
+                },
+            );
+        }
+    }
+
     pub(crate) fn save_session(&mut self) {
         let _perf = smelt_perf::perf::begin("session:save");
-        if self.core.session.messages.is_empty() {
+        if self.core.session.history.is_empty() {
             return;
         }
         self.sync_session_snapshot();
@@ -388,11 +372,11 @@ impl TuiApp {
     /// cost / turn-meta snapshots (they key into pre-replacement positions),
     /// resets `context_tokens`, repaints the screen, and saves the session.
     /// No-op when `messages` is empty.
-    pub(crate) fn replace_messages(&mut self, messages: Vec<protocol::Message>) {
-        if messages.is_empty() {
+    pub(crate) fn replace_history(&mut self, history: Vec<HistoryItem>) {
+        if history.is_empty() {
             return;
         }
-        self.core.session.messages = messages;
+        self.core.session.history = history;
         self.core.session.token_snapshots.clear();
         self.core.session.cost_snapshots.clear();
         self.core.session.turn_metas.clear();
@@ -416,8 +400,8 @@ impl TuiApp {
 
         let mut user_count = 0;
         let mut hist_idx = 0;
-        for (i, msg) in self.core.session.messages.iter().enumerate() {
-            if matches!(msg.role, Role::User) {
+        for (i, item) in self.core.session.history.iter().enumerate() {
+            if matches!(item, HistoryItem::User { .. }) {
                 user_count += 1;
                 if user_count > user_turns_to_keep {
                     hist_idx = i;
@@ -427,27 +411,22 @@ impl TuiApp {
             hist_idx = i + 1;
         }
 
-        let images: Vec<(String, String)> = self
-            .core
-            .session
-            .messages
-            .get(hist_idx)
-            .and_then(|msg| msg.content.as_ref())
-            .map(|content| match content {
-                Content::Parts(parts) => parts
-                    .iter()
-                    .filter_map(|p| match p {
-                        protocol::ContentPart::ImageUrl { url, label } => {
-                            Some((label.clone().unwrap_or_else(|| "image".into()), url.clone()))
-                        }
-                        _ => None,
-                    })
-                    .collect(),
-                _ => Vec::new(),
-            })
-            .unwrap_or_default();
+        let images: Vec<(String, String)> = match self.core.session.history.get(hist_idx) {
+            Some(HistoryItem::User {
+                content: Content::Parts(parts),
+            }) => parts
+                .iter()
+                .filter_map(|p| match p {
+                    protocol::ContentPart::ImageUrl { url, label } => {
+                        Some((label.clone().unwrap_or_else(|| "image".into()), url.clone()))
+                    }
+                    _ => None,
+                })
+                .collect(),
+            _ => Vec::new(),
+        };
 
-        self.core.session.messages.truncate(hist_idx);
+        self.core.session.history.truncate(hist_idx);
         truncate_keyed(&mut self.core.session.token_snapshots, hist_idx);
         truncate_keyed(&mut self.core.session.cost_snapshots, hist_idx);
         truncate_keyed(&mut self.core.session.turn_metas, hist_idx);

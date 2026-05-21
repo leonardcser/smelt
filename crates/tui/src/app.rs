@@ -1166,7 +1166,7 @@ impl TuiApp {
         // on panic. Shell-outs go through `self.terminal.as_ref().suspended()`.
         self.terminal = crate::term_setup::TuiTerminal::claim().ok();
 
-        if !self.core.session.messages.is_empty() {
+        if !self.core.session.history.is_empty() {
             self.restore_screen();
             if let Some(ref slug) = self.core.session.slug {
                 self.set_task_label(slug.clone());

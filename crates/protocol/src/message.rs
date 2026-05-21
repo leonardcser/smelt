@@ -3,7 +3,7 @@
 use crate::content::Content;
 use serde::{Deserialize, Serialize};
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Message {
     pub role: Role,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -29,7 +29,7 @@ pub struct Message {
 /// Opaque reasoning block captured from a provider response. `provider`
 /// tags which provider it came from so build_body for a different provider
 /// can skip it; `data` is the verbatim block JSON.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ReasoningBlock {
     pub provider: String,
     pub data: serde_json::Value,
@@ -42,9 +42,13 @@ impl ReasoningBlock {
 
 impl Message {
     pub fn system(text: impl Into<String>) -> Self {
+        Self::system_content(Content::text(text))
+    }
+
+    pub fn system_content(content: Content) -> Self {
         Self {
             role: Role::System,
-            content: Some(Content::text(text)),
+            content: Some(content),
             reasoning_content: None,
             reasoning_details: None,
             tool_calls: None,
@@ -116,7 +120,7 @@ pub enum Role {
     Tool,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ToolCall {
     pub id: String,
     #[serde(rename = "type")]
@@ -134,7 +138,7 @@ impl ToolCall {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct FunctionCall {
     pub name: String,
     #[serde(deserialize_with = "deserialize_arguments")]
@@ -153,7 +157,7 @@ fn deserialize_arguments<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Strin
 }
 
 /// Serde helper: always serializes as "function".
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct AlwaysFunction;
 
 impl Serialize for AlwaysFunction {
@@ -380,7 +384,7 @@ mod tests {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ToolOutcome {
     pub content: String,
     pub is_error: bool,

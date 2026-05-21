@@ -394,8 +394,8 @@ fn entropy_tokens(input: &str) -> Vec<(usize, usize, f64)> {
     results
 }
 
-/// Redact secrets in message content. Leaves reasoning and tool_call args untouched.
-pub(crate) fn redact_message(msg: &mut protocol::Message) {
+#[cfg(test)]
+fn redact_message(msg: &mut protocol::Message) {
     if let Some(ref mut content) = msg.content {
         redact_content(content);
     }

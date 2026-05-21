@@ -287,7 +287,7 @@ async fn main() {
             let session_id = if let Ok(guard) = shared.lock() {
                 if let Some(ref s) = *guard {
                     smelt_core::session::save(s, &smelt_core::attachment::AttachmentStore::new());
-                    if !s.messages.is_empty() {
+                    if !s.history.is_empty() {
                         Some(s.id.clone())
                     } else {
                         None
@@ -512,7 +512,7 @@ async fn main() {
         // the bundled resume-hint banner) can `print(...)` straight to the
         // user's terminal scrollback.
         let session_id = app.core.session.id.clone();
-        let has_messages = !app.core.session.messages.is_empty();
+        let has_messages = !app.core.session.history.is_empty();
         let errs = app.lua.drain_shutdown_hooks(&session_id, has_messages);
         for err in errs {
             eprintln!("smelt: lifecycle.shutdown: {err}");

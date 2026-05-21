@@ -1,16 +1,15 @@
 ---
 source: tests/scenarios.rs
-assertion_line: 325
 expression: out.events
 ---
 [
   "Ready",
   {
-    "Messages": {
-      "messages": [
+    "HistoryUpdated": {
+      "history": [
         {
           "content": "solve it",
-          "role": "user"
+          "kind": "user"
         }
       ],
       "turn_id": 1
@@ -38,16 +37,17 @@ expression: out.events
     }
   },
   {
-    "Messages": {
-      "messages": [
+    "HistoryUpdated": {
+      "history": [
         {
           "content": "solve it",
-          "role": "user"
+          "kind": "user"
         },
         {
           "content": "answer",
-          "reasoning_content": "let me think",
-          "reasoning_details": [
+          "kind": "assistant",
+          "reasoning": "let me think",
+          "reasoning_blocks": [
             {
               "data": {
                 "thinking": "let me think",
@@ -55,8 +55,7 @@ expression: out.events
               },
               "provider": "anthropic"
             }
-          ],
-          "role": "assistant"
+          ]
         }
       ],
       "turn_id": 1
@@ -64,15 +63,16 @@ expression: out.events
   },
   {
     "TurnComplete": {
-      "messages": [
+      "history": [
         {
           "content": "solve it",
-          "role": "user"
+          "kind": "user"
         },
         {
           "content": "answer",
-          "reasoning_content": "let me think",
-          "reasoning_details": [
+          "kind": "assistant",
+          "reasoning": "let me think",
+          "reasoning_blocks": [
             {
               "data": {
                 "thinking": "let me think",
@@ -80,8 +80,7 @@ expression: out.events
               },
               "provider": "anthropic"
             }
-          ],
-          "role": "assistant"
+          ]
         }
       ],
       "meta": {

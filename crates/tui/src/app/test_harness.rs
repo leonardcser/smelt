@@ -390,10 +390,10 @@ impl TestApp {
         }
     }
 
-    /// Length of `session.messages`. Used by post-event invariants that
+    /// Length of `session.history`. Used by post-event invariants that
     /// assert compaction or `set_history` replaced the conversation.
     pub fn session_message_count(&self) -> usize {
-        self.app.core.session.messages.len()
+        self.app.core.session.history.len()
     }
 
     /// `turn_id` of the active agent turn, if any. Used by fuzz ops that
@@ -763,11 +763,13 @@ impl TestApp {
         self.app
             .core
             .session
-            .messages
-            .push(protocol::Message::assistant(
-                Some(protocol::Content::Text(text.to_string())),
-                None,
-                None,
+            .history
+            .push(protocol::HistoryItem::Assistant(
+                protocol::AssistantTurn::terminal(
+                    Some(protocol::Content::Text(text.to_string())),
+                    None,
+                    Vec::new(),
+                ),
             ));
     }
 

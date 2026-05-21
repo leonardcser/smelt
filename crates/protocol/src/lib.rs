@@ -9,6 +9,7 @@
 
 pub mod content;
 pub mod event;
+pub mod history;
 pub mod message;
 pub mod mode;
 pub mod style;
@@ -18,6 +19,10 @@ pub use content::{Content, ContentPart};
 pub use event::{
     AskModel, AskResponseFormat, Decision, EngineAskError, EngineAskErrorKind, EngineEvent,
     StartTurnPayload, ToolDef, ToolExecutionMode, ToolHookFlags, ToolHooks, UiCommand,
+};
+pub use history::{
+    history_from_messages, history_to_message_positions, history_to_messages,
+    message_to_history_positions, AssistantTurn, HistoryItem, ToolInvocation,
 };
 pub use message::{FunctionCall, Message, ReasoningBlock, Role, ToolCall, ToolOutcome};
 pub use mode::{mode_change_note, AgentMode, ReasoningEffort, MODE_NOTE_PREFIX};

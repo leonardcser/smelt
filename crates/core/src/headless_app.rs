@@ -71,7 +71,7 @@ impl HeadlessApp {
                 mode: self.core.config.mode,
                 model: self.core.config.model.clone(),
                 reasoning_effort: self.core.config.reasoning_effort,
-                history: self.core.session.messages.clone(),
+                history: self.core.session.history.clone(),
                 api_base: Some(self.core.config.api_base.clone()),
                 api_key: Some(self.api_key()),
                 session_id: self.core.session.id.clone(),
@@ -189,7 +189,7 @@ impl HeadlessApp {
                             message: None,
                         });
                     }
-                    EngineEvent::Messages { .. } => {}
+                    EngineEvent::HistoryUpdated { .. } => {}
                     EngineEvent::TurnError { message } => {
                         self.sink.log_error(&message);
                         break;

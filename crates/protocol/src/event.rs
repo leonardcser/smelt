@@ -272,16 +272,19 @@ pub enum EngineEvent {
         error: Option<EngineAskError>,
     },
 
-    /// Snapshot of the engine's message list, sent after each significant step.
-    Messages {
+    /// Atomic snapshot of the engine's committed history. Fires after each
+    /// step that mutates `Vec<HistoryItem>`. By construction every
+    /// `HistoryItem::Assistant` carries paired `ToolInvocation`s for the
+    /// tool_calls it emitted — there is no in-flight state to worry about.
+    HistoryUpdated {
         turn_id: u64,
-        messages: Vec<Message>,
+        history: Vec<crate::history::HistoryItem>,
     },
 
-    /// The agent turn completed successfully.
+    /// The agent turn completed (successfully or after cancellation).
     TurnComplete {
         turn_id: u64,
-        messages: Vec<Message>,
+        history: Vec<crate::history::HistoryItem>,
         meta: Option<TurnMeta>,
     },
 
@@ -335,7 +338,7 @@ pub struct StartTurnPayload {
     pub mode: AgentMode,
     pub model: String,
     pub reasoning_effort: ReasoningEffort,
-    pub history: Vec<Message>,
+    pub history: Vec<crate::history::HistoryItem>,
     /// Override API base URL for this turn (uses engine default if None).
     pub api_base: Option<String>,
     /// Override API key for this turn (uses engine default if None).

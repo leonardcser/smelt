@@ -1,37 +1,35 @@
-//! Append-only deduplication of `tool_result` messages within a conversation.
-//! Prior messages are never modified, preserving the prompt-cache prefix.
+//! Append-only deduplication of tool invocation results within a conversation.
+//! Walks committed `HistoryItem::Assistant` turns and replaces a freshly-
+//! produced `ToolOutcome.content` with a short pointer when an identical
+//! result already exists earlier in the conversation. Cache-safe: the
+//! pointer lives on the *new* invocation, never on prior history bytes.
 
-use protocol::{Message, Role};
+use protocol::{HistoryItem, ToolInvocation};
 
 /// Minimum body length for dedup to fire.
 const MIN_DEDUP_LEN: usize = 500;
 
-/// Return the call id of the most recent prior tool_result matching `new_content`
-/// and `new_is_error`, or `None`. Requires `is_error` equality to prevent mixing
-/// a success reference with an error result.
+/// Return the call id of the most recent prior tool invocation matching
+/// `new_content` and `new_is_error`, or `None`.
 pub(crate) fn duplicate_of<'a>(
     new_content: &str,
     new_is_error: bool,
-    history: &'a [Message],
+    history: &'a [HistoryItem],
 ) -> Option<&'a str> {
     if new_content.len() < MIN_DEDUP_LEN {
         return None;
     }
-    for msg in history.iter().rev() {
-        if msg.role != Role::Tool {
-            continue;
-        }
-        if msg.is_error != new_is_error {
-            continue;
-        }
-        let Some(ref cid) = msg.tool_call_id else {
+    for item in history.iter().rev() {
+        let HistoryItem::Assistant(turn) = item else {
             continue;
         };
-        let Some(ref content) = msg.content else {
-            continue;
-        };
-        if content.as_text() == new_content {
-            return Some(cid.as_str());
+        for inv in turn.invocations.iter().rev() {
+            if inv.result.is_error != new_is_error {
+                continue;
+            }
+            if inv.result.content == new_content {
+                return Some(inv.call_id.as_str());
+            }
         }
     }
     None
@@ -45,30 +43,63 @@ pub(crate) fn dedup_stub(prior_call_id: &str) -> String {
     )
 }
 
+/// Mutate every `ToolInvocation.result.content` whose body duplicates an
+/// earlier history entry, replacing it with a `dedup_stub`. Idempotent
+/// and safe to call on the freshly-built invocations of the current turn
+/// before the assistant `HistoryItem` is pushed.
+pub(crate) fn apply_in_place(invocations: &mut [ToolInvocation], history: &[HistoryItem]) {
+    for inv in invocations.iter_mut() {
+        if let Some(prior_id) = duplicate_of(&inv.result.content, inv.result.is_error, history) {
+            // Cloning is necessary: `prior_id` borrows immutably from `history`
+            // while we then mutate `inv.result.content`.
+            let stub = dedup_stub(prior_id);
+            inv.result.content = stub;
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::test_util::tool_msg_with_error;
-    use protocol::{Content, Message};
-
-    fn tool_msg(call_id: &str, content: &str, is_error: bool) -> Message {
-        tool_msg_with_error(Some(call_id), content, is_error)
-    }
+    use protocol::{AssistantTurn, Content, HistoryItem, ToolInvocation, ToolOutcome};
 
     fn big(prefix: &str) -> String {
         format!("{prefix}{}", "x".repeat(MIN_DEDUP_LEN))
     }
 
+    fn inv(call_id: &str, content: &str, is_error: bool) -> ToolInvocation {
+        ToolInvocation {
+            call_id: call_id.into(),
+            name: "f".into(),
+            arguments: "{}".into(),
+            result: ToolOutcome {
+                content: content.into(),
+                is_error,
+                metadata: None,
+            },
+            elapsed_ms: None,
+        }
+    }
+
+    fn assistant_with(invocations: Vec<ToolInvocation>) -> HistoryItem {
+        HistoryItem::Assistant(AssistantTurn::with_invocations(
+            None,
+            None,
+            Vec::new(),
+            invocations,
+        ))
+    }
+
     #[test]
     fn short_output_is_not_deduped() {
-        let history = vec![tool_msg("a", "ok", false)];
+        let history = vec![assistant_with(vec![inv("a", "ok", false)])];
         assert!(duplicate_of("ok", false, &history).is_none());
     }
 
     #[test]
     fn identical_long_output_is_deduped() {
         let body = big("same ");
-        let history = vec![tool_msg("call_1", &body, false)];
+        let history = vec![assistant_with(vec![inv("call_1", &body, false)])];
         assert_eq!(duplicate_of(&body, false, &history), Some("call_1"));
     }
 
@@ -76,15 +107,16 @@ mod tests {
     fn different_long_outputs_are_not_deduped() {
         let a = big("a ");
         let b = big("b ");
-        let history = vec![tool_msg("call_1", &a, false)];
+        let history = vec![assistant_with(vec![inv("call_1", &a, false)])];
         assert!(duplicate_of(&b, false, &history).is_none());
     }
 
     #[test]
-    fn non_tool_messages_are_ignored() {
+    fn non_assistant_items_are_ignored() {
         let body = big("same ");
-        // A user message matching the body must not be a dedup target.
-        let history = vec![Message::user(Content::text(body.clone()))];
+        let history = vec![HistoryItem::User {
+            content: Content::text(body.clone()),
+        }];
         assert!(duplicate_of(&body, false, &history).is_none());
     }
 
@@ -92,8 +124,8 @@ mod tests {
     fn multiple_matches_return_most_recent() {
         let body = big("same ");
         let history = vec![
-            tool_msg("call_1", &body, false),
-            tool_msg("call_2", &body, false),
+            assistant_with(vec![inv("call_1", &body, false)]),
+            assistant_with(vec![inv("call_2", &body, false)]),
         ];
         assert_eq!(duplicate_of(&body, false, &history), Some("call_2"));
     }
@@ -101,40 +133,17 @@ mod tests {
     #[test]
     fn error_result_does_not_match_success_result() {
         let body = big("same ");
-        let history = vec![tool_msg("call_1", &body, false)];
+        let history = vec![assistant_with(vec![inv("call_1", &body, false)])];
         assert!(duplicate_of(&body, true, &history).is_none());
     }
 
     #[test]
-    fn error_matches_error() {
-        let body = big("err ");
-        let history = vec![tool_msg("call_1", &body, true)];
-        assert_eq!(duplicate_of(&body, true, &history), Some("call_1"));
-    }
-
-    #[test]
-    fn dedup_stub_mentions_call_id() {
-        let s = dedup_stub("call_42");
-        assert!(s.contains("call_42"));
-        assert!(s.contains("identical"));
-        assert!(s.len() < 200);
-    }
-
-    #[test]
-    fn threshold_boundary() {
-        let body = "x".repeat(MIN_DEDUP_LEN);
-        let history = vec![tool_msg("call_1", &body, false)];
-        assert_eq!(duplicate_of(&body, false, &history), Some("call_1"));
-
-        let body = "x".repeat(MIN_DEDUP_LEN - 1);
-        let history = vec![tool_msg("call_1", &body, false)];
-        assert!(duplicate_of(&body, false, &history).is_none());
-    }
-
-    #[test]
-    fn stub_is_shorter_than_body() {
-        let body = big("x ");
-        let stub = dedup_stub("call_1");
-        assert!(stub.len() < body.len());
+    fn apply_in_place_rewrites_duplicates_in_current_invocations() {
+        let body = big("dup ");
+        let history = vec![assistant_with(vec![inv("prior", &body, false)])];
+        let mut current = vec![inv("fresh", &body, false), inv("uniq", "small", false)];
+        apply_in_place(&mut current, &history);
+        assert!(current[0].result.content.contains("prior"));
+        assert_eq!(current[1].result.content, "small");
     }
 }

@@ -6,8 +6,8 @@ use crate::ModelConfig;
 use crate::{ApiConfig, EngineConfig};
 use protocol::Decision;
 use protocol::{
-    AgentMode, AskModel, Content, EngineAskError, EngineAskErrorKind, EngineEvent, Message,
-    ReasoningEffort, Role, ToolOutcome, TurnMeta, UiCommand,
+    AgentMode, AskModel, AssistantTurn, Content, EngineAskError, EngineAskErrorKind, EngineEvent,
+    HistoryItem, Message, ReasoningEffort, ToolInvocation, ToolOutcome, TurnMeta, UiCommand,
 };
 use serde_json::Value;
 use std::collections::HashMap;
@@ -80,7 +80,7 @@ pub(crate) async fn engine_task(
                             config: &config,
                             http_client: &client,
                             cancel: crate::cancel::CancellationToken::new(),
-                            messages: Vec::new(),
+                            history: Vec::new(),
                             mode,
                             reasoning_effort,
                             turn_id,
@@ -365,6 +365,115 @@ struct ToolExecutionPlan<'a> {
     sequential_tools: Vec<(&'a protocol::ToolCall, HashMap<String, Value>, Instant)>,
     pending_tool_hooks: Vec<(u64, PendingToolCall<'a>)>,
     pending_tool_perms: Vec<(u64, PendingToolCall<'a>)>,
+    /// Synthetic outcomes produced inside `classify_tools` itself — unknown
+    /// tools, denied dispatch decisions. Folded into the assistant turn's
+    /// `invocations` at commit time so the invariant ("every dispatched
+    /// tool_call has a paired outcome") holds even when no execution
+    /// happens for that slot.
+    inline_outcomes: Vec<(String, ToolOutcome)>,
+}
+
+/// Fold every produced outcome into a `Vec<ToolInvocation>` in the order
+/// the LLM emitted the calls. Any call without a recorded outcome gets a
+/// synthetic `interrupted` outcome — that case should be unreachable in
+/// production (all execution paths produce an outcome), but the safety net
+/// makes the on-disk + on-wire invariant true *by construction*, not by
+/// careful code review.
+fn pair_invocations_in_order(
+    calls: &[protocol::ToolCall],
+    slot_outcomes: Vec<(String, ToolOutcome, Option<u64>)>,
+    plugin_outcomes: Vec<(String, ToolOutcome, Option<u64>)>,
+    inline_outcomes: Vec<(String, ToolOutcome)>,
+) -> Vec<ToolInvocation> {
+    let mut by_id: HashMap<String, (ToolOutcome, Option<u64>)> = HashMap::new();
+    for (id, o, e) in slot_outcomes {
+        by_id.insert(id, (o, e));
+    }
+    for (id, o, e) in plugin_outcomes {
+        by_id.entry(id).or_insert((o, e));
+    }
+    for (id, o) in inline_outcomes {
+        by_id.entry(id).or_insert((o, None));
+    }
+    calls
+        .iter()
+        .map(|tc| {
+            let (result, elapsed_ms) = by_id.remove(&tc.id).unwrap_or_else(|| {
+                // Safety net: should be unreachable because every execution
+                // path (slot, plugin, sequential, inline-classify) writes
+                // an outcome before pair_invocations_in_order runs. If it
+                // fires, our reasoning was wrong — log so we can find out.
+                crate::log::entry(
+                    crate::log::Level::Warn,
+                    "agent_invocation_missing",
+                    &serde_json::json!({
+                        "call_id": tc.id,
+                        "tool": tc.function.name,
+                    }),
+                );
+                (
+                    ToolOutcome {
+                        content: "interrupted: tool result missing at commit time".into(),
+                        is_error: true,
+                        metadata: None,
+                    },
+                    None,
+                )
+            });
+            ToolInvocation {
+                call_id: tc.id.clone(),
+                name: tc.function.name.clone(),
+                arguments: tc.function.arguments.clone(),
+                result,
+                elapsed_ms,
+            }
+        })
+        .collect()
+}
+
+/// Log a warning when a host hook returns a `Vec<Message>` with assistant
+/// `tool_calls` whose ids aren't satisfied by following `Role::Tool`
+/// messages. The orphans are auto-repaired by `history_from_messages` —
+/// this surface makes the repair visible so a misbehaving plugin can be
+/// found instead of silently fixed.
+fn warn_if_replacement_has_orphans(replacement: &[Message], site: &str) {
+    use protocol::Role;
+    let mut orphans: Vec<String> = Vec::new();
+    let mut i = 0;
+    while i < replacement.len() {
+        if matches!(replacement[i].role, Role::Assistant) {
+            if let Some(ref calls) = replacement[i].tool_calls {
+                let mut satisfied: std::collections::HashSet<&str> =
+                    std::collections::HashSet::new();
+                let mut j = i + 1;
+                while j < replacement.len() && matches!(replacement[j].role, Role::Tool) {
+                    if let Some(ref id) = replacement[j].tool_call_id {
+                        satisfied.insert(id.as_str());
+                    }
+                    j += 1;
+                }
+                for call in calls {
+                    if !satisfied.contains(call.id.as_str()) {
+                        orphans.push(call.id.clone());
+                    }
+                }
+                i = j;
+                continue;
+            }
+        }
+        i += 1;
+    }
+    if !orphans.is_empty() {
+        crate::log::entry(
+            crate::log::Level::Warn,
+            "host_hook_orphan_tool_calls",
+            &serde_json::json!({
+                "site": site,
+                "orphan_call_ids": orphans,
+                "note": "auto-repaired with synthetic 'interrupted' results",
+            }),
+        );
+    }
 }
 
 struct PendingToolCall<'a> {
@@ -386,7 +495,13 @@ struct Turn<'a> {
     config: &'a EngineConfig,
     http_client: &'a reqwest::Client,
     cancel: crate::cancel::CancellationToken,
-    messages: Vec<Message>,
+    /// Committed conversation history. Invariant: every `Assistant` turn
+    /// either has no `invocations` (terminal) or has a `ToolOutcome` paired
+    /// with every `ToolCall` the LLM emitted. There is no in-flight tool
+    /// state here — that lives on stack-locals during the run loop's
+    /// dispatch phase and is folded into a single `HistoryItem::Assistant`
+    /// at commit time.
+    history: Vec<HistoryItem>,
     mode: AgentMode,
     reasoning_effort: ReasoningEffort,
     turn_id: u64,
@@ -445,12 +560,28 @@ impl<'a> Turn<'a> {
             .as_millis() as u64
     }
 
-    /// Scrubs user/tool content when redact_secrets is enabled; passes assistant/system through.
-    fn push_message(&mut self, mut msg: Message) {
-        if self.config.redact_secrets && matches!(msg.role, Role::User | Role::Tool) {
-            crate::redact::redact_message(&mut msg);
+    /// Append a user turn, redacting content first when `redact_secrets` is on.
+    fn push_user(&mut self, mut content: Content) {
+        if self.config.redact_secrets {
+            crate::redact::redact_content(&mut content);
         }
-        self.messages.push(msg);
+        self.history.push(HistoryItem::User { content });
+    }
+
+    /// Append an assistant turn atomically. When `invocations` is non-empty,
+    /// every entry already carries its `ToolOutcome` — the only way to
+    /// satisfy `AssistantTurn`'s shape — so the on-disk and on-wire
+    /// representations can never carry an orphan tool_use.
+    fn push_assistant_turn(&mut self, mut turn: AssistantTurn) {
+        if self.config.redact_secrets {
+            for inv in &mut turn.invocations {
+                let redacted = crate::redact::redact(&inv.result.content);
+                if redacted != inv.result.content {
+                    inv.result.content = redacted;
+                }
+            }
+        }
+        self.history.push(HistoryItem::Assistant(turn));
     }
 
     /// Rebuilds the system prompt after `/reload`. Mode changes alone
@@ -469,27 +600,33 @@ impl<'a> Turn<'a> {
                 )
             });
         self.system_prompt = new;
-        if let Some(first) = self.messages.first_mut() {
-            if matches!(first.role, Role::System) {
-                *first = Message::system(&self.system_prompt);
+        if let Some(first) = self.history.first_mut() {
+            if matches!(first, HistoryItem::System { .. }) {
+                *first = HistoryItem::system(&self.system_prompt);
             }
         }
     }
 
+    /// Emit the public-visible slice of history (everything except the
+    /// leading system item). Callers can rely on the invariant: every
+    /// `HistoryItem::Assistant` in the emitted vec carries its full set of
+    /// paired `ToolInvocation`s.
     fn emit_messages_snapshot(&self) {
-        let mut messages = self.messages.clone();
-        if messages
-            .first()
-            .is_some_and(|m| matches!(m.role, Role::System))
-        {
-            messages.remove(0);
-        }
-        self.emit(EngineEvent::Messages {
+        let items: Vec<HistoryItem> = self
+            .history
+            .iter()
+            .filter(|i| !matches!(i, HistoryItem::System { .. }))
+            .cloned()
+            .collect();
+        self.emit(EngineEvent::HistoryUpdated {
             turn_id: self.turn_id,
-            messages,
+            history: items,
         });
     }
 
+    /// Commit a streamed-but-cancelled assistant message. The model never
+    /// asked for any tools, so this is a terminal turn — `invocations` is
+    /// empty by construction.
     fn commit_partial_assistant(&mut self, text: String, reasoning: String) {
         let content = if text.trim().is_empty() {
             None
@@ -502,18 +639,19 @@ impl<'a> Turn<'a> {
             Some(reasoning)
         };
         if content.is_some() || reasoning.is_some() {
-            self.messages
-                .push(Message::assistant(content, reasoning, None));
+            self.push_assistant_turn(AssistantTurn::terminal(content, reasoning, Vec::new()));
         }
     }
 
     fn emit_turn_complete(&mut self, interrupted: bool) {
         let meta = self.build_meta(interrupted);
-        self.messages.remove(0);
-        let msgs = std::mem::take(&mut self.messages);
+        let items: Vec<HistoryItem> = std::mem::take(&mut self.history)
+            .into_iter()
+            .filter(|i| !matches!(i, HistoryItem::System { .. }))
+            .collect();
         self.emit(EngineEvent::TurnComplete {
             turn_id: self.turn_id,
-            messages: msgs,
+            history: items,
             meta: Some(meta),
         });
     }
@@ -598,14 +736,18 @@ impl<'a> Turn<'a> {
                     text: text.clone(),
                     count: 1,
                 });
-                self.push_message(Message::user(Content::text(text)));
+                self.push_user(Content::text(text));
                 self.emit_messages_snapshot();
                 true
             }
             UiCommand::Unsteer { count } => {
                 for _ in 0..count {
-                    if let Some(pos) = self.messages.iter().rposition(|m| m.role == Role::User) {
-                        self.messages.remove(pos);
+                    if let Some(pos) = self
+                        .history
+                        .iter()
+                        .rposition(|i| matches!(i, HistoryItem::User { .. }))
+                    {
+                        self.history.remove(pos);
                     }
                 }
                 self.emit_messages_snapshot();
@@ -619,9 +761,9 @@ impl<'a> Turn<'a> {
                 self.mode = mode;
                 if let Some(prompt) = system_prompt {
                     self.system_prompt = prompt;
-                    if let Some(first) = self.messages.first_mut() {
-                        if matches!(first.role, Role::System) {
-                            *first = Message::system(&self.system_prompt);
+                    if let Some(first) = self.history.first_mut() {
+                        if matches!(first, HistoryItem::System { .. }) {
+                            *first = HistoryItem::system(&self.system_prompt);
                         }
                     }
                 } else {
@@ -653,14 +795,14 @@ impl<'a> Turn<'a> {
         }
     }
 
-    async fn run(&mut self, content: Content, history: Vec<Message>) {
+    async fn run(&mut self, content: Content, history: Vec<HistoryItem>) {
         self.provider.reset_turn_state();
-        self.messages = Vec::with_capacity(history.len() + 2);
-        self.messages.push(Message::system(&self.system_prompt));
-        self.messages.extend(history);
+        self.history = Vec::with_capacity(history.len() + 2);
+        self.history.push(HistoryItem::system(&self.system_prompt));
+        self.history.extend(history);
 
         if !content.is_empty() {
-            self.push_message(Message::user(content));
+            self.push_user(content);
         }
         self.emit_messages_snapshot();
 
@@ -722,15 +864,21 @@ impl<'a> Turn<'a> {
             }
 
             // Fire `smelt.provider.middleware{on_request=...}` hooks
-            // and accept any mutation they apply to the message slice.
+            // against the wire-format view. The host trait still speaks
+            // `Vec<Message>` for plugin-compatibility; any replacement is
+            // folded back into the `HistoryItem` shape (which repairs any
+            // orphan tool_use a misbehaving plugin might introduce).
+            let request_view = protocol::history_to_messages(&self.history);
             if let Some(Some(replacement)) = self
                 .host_call(|reply| crate::host::HostCall::ProviderRequest {
-                    messages: self.messages.clone(),
+                    messages: request_view,
                     reply,
                 })
                 .await
             {
-                self.messages = replacement;
+                warn_if_replacement_has_orphans(&replacement, "provider_request");
+                self.history = protocol::history_from_messages(replacement);
+                self.ensure_system_prefix();
             }
 
             let (result, partial_text, partial_reasoning) = self.call_llm(&tool_defs).await;
@@ -768,25 +916,38 @@ impl<'a> Turn<'a> {
                     );
                     if is_ctx {
                         // Ask the host's recovery hook for a shorter
-                        // conversation. On success we swap messages
+                        // conversation. On success we swap history
                         // (preserving the system prompt at index 0)
-                        // and re-enter the loop transparently.
-                        let history: Vec<Message> = self.messages.iter().skip(1).cloned().collect();
+                        // and re-enter the loop transparently. The view
+                        // sent to the host is the wire-shape; the
+                        // returned `Vec<Message>` is folded back into
+                        // `HistoryItem`s, which repairs any orphan
+                        // tool_use the compaction plugin might emit.
+                        let recovery_view: Vec<Message> = protocol::history_to_messages(
+                            &self
+                                .history
+                                .iter()
+                                .skip(1)
+                                .cloned()
+                                .collect::<Vec<_>>(),
+                        );
                         let recovered = self
                             .host_call(|reply| crate::host::HostCall::RecoverFromContextLimit {
-                                messages: history,
+                                messages: recovery_view,
                                 reply,
                             })
                             .await
                             .flatten();
                         if let Some(shorter) = recovered {
+                            warn_if_replacement_has_orphans(&shorter, "context_limit_recovery");
+                            let new = protocol::history_from_messages(shorter);
                             log::entry(
                                 log::Level::Info,
                                 "context_limit_recovered",
-                                &serde_json::json!({"new_message_count": shorter.len() + 1}),
+                                &serde_json::json!({"new_message_count": new.len() + 1}),
                             );
-                            self.messages.truncate(1);
-                            self.messages.extend(shorter);
+                            self.history.truncate(1);
+                            self.history.extend(new);
                             self.emit_messages_snapshot();
                             continue;
                         }
@@ -851,11 +1012,10 @@ impl<'a> Turn<'a> {
             if tool_calls.is_empty() {
                 let is_empty = content.is_none()
                     && reasoning.is_none()
-                    && self
-                        .messages
-                        .last()
-                        .map(|m| m.role == Role::Tool)
-                        .unwrap_or(false);
+                    && matches!(
+                        self.history.last(),
+                        Some(HistoryItem::Assistant(t)) if !t.invocations.is_empty()
+                    );
 
                 if is_empty && empty_retries < MAX_EMPTY_RETRIES {
                     empty_retries += 1;
@@ -867,7 +1027,7 @@ impl<'a> Turn<'a> {
                     continue;
                 }
 
-                let msg = self
+                let hooked = self
                     .apply_response_hooks(Message::assistant_with_reasoning(
                         content,
                         reasoning,
@@ -875,14 +1035,19 @@ impl<'a> Turn<'a> {
                         None,
                     ))
                     .await;
-                self.messages.push(msg);
+                let turn = AssistantTurn::terminal(
+                    hooked.content,
+                    hooked.reasoning_content,
+                    hooked.reasoning_details.unwrap_or_default(),
+                );
+                self.push_assistant_turn(turn);
                 self.emit_messages_snapshot();
                 self.emit_turn_complete(false);
                 return;
             }
 
             empty_retries = 0;
-            let msg = self
+            let hooked = self
                 .apply_response_hooks(Message::assistant_with_reasoning(
                     content,
                     reasoning,
@@ -890,26 +1055,60 @@ impl<'a> Turn<'a> {
                     Some(tool_calls.clone()),
                 ))
                 .await;
-            self.messages.push(msg);
-            self.emit_messages_snapshot();
+            // Capture the (possibly hook-mutated) in-flight assistant shape
+            // for atomic commit. The `tool_calls` that classify_tools will
+            // dispatch are read from the hook output too — plugins that
+            // synthesize calls must do so via the hook return value.
+            let post_hook_content = hooked.content;
+            let post_hook_reasoning = hooked.reasoning_content;
+            let post_hook_reasoning_blocks = hooked.reasoning_details.unwrap_or_default();
+            let dispatched_calls = hooked.tool_calls.unwrap_or_default();
 
-            let mut plan = self.classify_tools(&tool_calls);
+            let mut plan = self.classify_tools(&dispatched_calls);
             let mut completed: Vec<Option<ToolResult>> =
                 (0..plan.slots.len()).map(|_| None).collect();
-            let (cancelled, deferred, mut tool_results) =
+            let (cancelled, deferred, mut plugin_outcomes) =
                 self.execute_concurrent(&mut plan, &mut completed).await;
-            let seq_tool_results = self.run_sequential(&plan, &mut completed).await;
-            tool_results.extend(seq_tool_results);
+            let seq_outcomes = self.run_sequential(&plan).await;
+            plugin_outcomes.extend(seq_outcomes);
             if cancelled {
-                self.mark_unfinished_cancelled(&plan, &completed);
+                self.mark_unfinished_cancelled(&plan, &mut completed);
             }
-            self.collect_results(&plan, completed);
-            for (call_id, content, is_error) in tool_results {
-                self.push_message(Message::tool(call_id, content, is_error));
-            }
+            let slot_outcomes = self.gather_slot_results(&plan, completed);
+            let inline_outcomes = std::mem::take(&mut plan.inline_outcomes);
+            // All execution paths have written their outcome into one of
+            // these three vecs. Pair-and-order folds them onto the
+            // dispatched_calls list so the resulting `Vec<ToolInvocation>`
+            // has the same length and order as the LLM's emitted tool_uses.
+            // The history can never observe an unpaired tool_use.
+            let mut invocations = pair_invocations_in_order(
+                &dispatched_calls,
+                slot_outcomes,
+                plugin_outcomes,
+                inline_outcomes,
+            );
+            crate::result_dedup::apply_in_place(&mut invocations, &self.history);
+            self.push_assistant_turn(AssistantTurn::with_invocations(
+                post_hook_content,
+                post_hook_reasoning,
+                post_hook_reasoning_blocks,
+                invocations,
+            ));
+            self.emit_messages_snapshot();
             for cmd in deferred {
                 self.handle_turn_cmd(cmd);
             }
+        }
+    }
+
+    /// Make sure `self.history[0]` is the system prompt, inserting it if a
+    /// host hook replaced the history without preserving it. Called only
+    /// from the hook-replacement path.
+    fn ensure_system_prefix(&mut self) {
+        let needs_insert = !matches!(self.history.first(), Some(HistoryItem::System { .. }));
+        if needs_insert {
+            self.history
+                .insert(0, HistoryItem::system(&self.system_prompt));
         }
     }
 
@@ -925,13 +1124,18 @@ impl<'a> Turn<'a> {
             sequential_tools: Vec::new(),
             pending_tool_hooks: Vec::new(),
             pending_tool_perms: Vec::new(),
+            inline_outcomes: Vec::new(),
         };
 
+        // Cancellation isn't checked inside the per-tool loop: if it
+        // were, the unprocessed tool_calls would never produce
+        // outcomes, leaving the committed assistant turn with orphan
+        // calls. Letting classification finish is cheap, and
+        // `execute_concurrent` short-circuits the actual work on
+        // cancellation by draining its pending vecs with a synthetic
+        // `cancelled` outcome (which the invariant requires).
         for tc in tool_calls {
             self.drain_commands();
-            if self.cancel.is_cancelled() {
-                break;
-            }
 
             let args: HashMap<String, Value> =
                 serde_json::from_str(&tc.function.arguments).unwrap_or_default();
@@ -990,12 +1194,17 @@ impl<'a> Turn<'a> {
             {
                 Some(h) => h,
                 None => {
-                    self.push_tool_result(
-                        &tc.id,
-                        &format!("unknown tool: {}", tc.function.name),
-                        true,
-                        Some(tool_start),
-                    );
+                    let outcome = ToolOutcome {
+                        content: format!("unknown tool: {}", tc.function.name),
+                        is_error: true,
+                        metadata: None,
+                    };
+                    self.emit(EngineEvent::ToolFinished {
+                        call_id: tc.id.clone(),
+                        result: outcome.clone(),
+                        elapsed_ms: Some(self.elapsed_ms_since(tool_start)),
+                    });
+                    plan.inline_outcomes.push((tc.id.clone(), outcome));
                     continue;
                 }
             };
@@ -1012,16 +1221,32 @@ impl<'a> Turn<'a> {
                     plan.ready.push(idx);
                 }
                 Decision::Deny => {
-                    self.push_tool_result(
-                        &tc.id,
-                        "The user's permission settings blocked this tool call. \
-                         Try a different approach or ask the user for guidance.",
-                        false,
-                        None,
-                    );
+                    let outcome = ToolOutcome {
+                        content: "The user's permission settings blocked this tool call. \
+                                  Try a different approach or ask the user for guidance."
+                            .to_string(),
+                        is_error: false,
+                        metadata: None,
+                    };
+                    self.emit(EngineEvent::ToolFinished {
+                        call_id: tc.id.clone(),
+                        result: outcome.clone(),
+                        elapsed_ms: None,
+                    });
+                    plan.inline_outcomes.push((tc.id.clone(), outcome));
                 }
                 Decision::Error(ref err) => {
-                    self.push_tool_result(&tc.id, err, true, None);
+                    let outcome = ToolOutcome {
+                        content: err.clone(),
+                        is_error: true,
+                        metadata: None,
+                    };
+                    self.emit(EngineEvent::ToolFinished {
+                        call_id: tc.id.clone(),
+                        result: outcome.clone(),
+                        elapsed_ms: None,
+                    });
+                    plan.inline_outcomes.push((tc.id.clone(), outcome));
                 }
                 Decision::Ask => {
                     let summary = if hooks.summary.is_empty() {
@@ -1058,7 +1283,7 @@ impl<'a> Turn<'a> {
         &mut self,
         plan: &mut ToolExecutionPlan<'b>,
         completed: &mut [Option<ToolResult>],
-    ) -> (bool, Vec<UiCommand>, Vec<(String, String, bool)>) {
+    ) -> (bool, Vec<UiCommand>, Vec<(String, ToolOutcome, Option<u64>)>) {
         use futures_util::stream::StreamExt;
 
         type TaggedFut<'x> =
@@ -1100,7 +1325,7 @@ impl<'a> Turn<'a> {
         let cancel = &self.cancel;
         let cmd_rx = &mut self.cmd_rx;
         let mut deferred: Vec<UiCommand> = Vec::new();
-        let mut tool_results: Vec<(String, String, bool)> = Vec::new();
+        let mut tool_results: Vec<(String, ToolOutcome, Option<u64>)> = Vec::new();
 
         let cancelled = loop {
             if outstanding == 0 {
@@ -1182,16 +1407,17 @@ impl<'a> Turn<'a> {
                                 };
                                 let tool_start = pending.tool_start;
                                 let elapsed_ms = Some(elapsed_ms_since(tool_start));
+                                let outcome = ToolOutcome {
+                                    content: denial,
+                                    is_error: false,
+                                    metadata: None,
+                                };
                                 let _ = self.event_tx.send(EngineEvent::ToolFinished {
                                     call_id: pending.tc.id.clone(),
-                                    result: ToolOutcome {
-                                        content: denial.clone(),
-                                        is_error: false,
-                                        metadata: None,
-                                    },
+                                    result: outcome.clone(),
                                     elapsed_ms,
                                 });
-                                tool_results.push((pending.tc.id.clone(), denial, false));
+                                tool_results.push((pending.tc.id.clone(), outcome, elapsed_ms));
                                 outstanding -= 1;
                             }
                         }
@@ -1235,31 +1461,33 @@ impl<'a> Turn<'a> {
                                         .to_string();
                                     let tool_start = pending.tool_start;
                                     let elapsed_ms = Some(elapsed_ms_since(tool_start));
+                                    let outcome = ToolOutcome {
+                                        content: denial,
+                                        is_error: false,
+                                        metadata: None,
+                                    };
                                     let _ = self.event_tx.send(EngineEvent::ToolFinished {
                                         call_id: pending.tc.id.clone(),
-                                        result: ToolOutcome {
-                                            content: denial.clone(),
-                                            is_error: false,
-                                            metadata: None,
-                                        },
+                                        result: outcome.clone(),
                                         elapsed_ms,
                                     });
-                                    tool_results.push((pending.tc.id.clone(), denial, false));
+                                    tool_results.push((pending.tc.id.clone(), outcome, elapsed_ms));
                                     outstanding -= 1;
                                 }
                                 Decision::Error(ref err) => {
                                     let tool_start = pending.tool_start;
                                     let elapsed_ms = Some(elapsed_ms_since(tool_start));
+                                    let outcome = ToolOutcome {
+                                        content: err.clone(),
+                                        is_error: true,
+                                        metadata: None,
+                                    };
                                     let _ = self.event_tx.send(EngineEvent::ToolFinished {
                                         call_id: pending.tc.id.clone(),
-                                        result: ToolOutcome {
-                                            content: err.clone(),
-                                            is_error: true,
-                                            metadata: None,
-                                        },
+                                        result: outcome.clone(),
                                         elapsed_ms,
                                     });
-                                    tool_results.push((pending.tc.id.clone(), err.clone(), true));
+                                    tool_results.push((pending.tc.id.clone(), outcome, elapsed_ms));
                                     outstanding -= 1;
                                 }
                                 Decision::Ask => {
@@ -1294,16 +1522,17 @@ impl<'a> Turn<'a> {
                         {
                             let (_, _, start) = plan.pending_tools.swap_remove(pos);
                             let elapsed_ms = Some(elapsed_ms_since(start));
+                            let outcome = ToolOutcome {
+                                content,
+                                is_error,
+                                metadata: None,
+                            };
                             let _ = self.event_tx.send(EngineEvent::ToolFinished {
                                 call_id: call_id.clone(),
-                                result: ToolOutcome {
-                                    content: content.clone(),
-                                    is_error,
-                                    metadata: None,
-                                },
+                                result: outcome.clone(),
                                 elapsed_ms,
                             });
-                            tool_results.push((call_id, content, is_error));
+                            tool_results.push((call_id, outcome, elapsed_ms));
                             outstanding -= 1;
                         }
                     }
@@ -1350,65 +1579,73 @@ impl<'a> Turn<'a> {
         };
 
         if cancelled {
+            let cancelled_outcome = || ToolOutcome {
+                content: "cancelled".to_string(),
+                is_error: true,
+                metadata: None,
+            };
             for (_, call_id, start) in plan.pending_tools.drain(..) {
                 let elapsed_ms = Some(elapsed_ms_since(start));
+                let outcome = cancelled_outcome();
                 let _ = self.event_tx.send(EngineEvent::ToolFinished {
                     call_id: call_id.clone(),
-                    result: ToolOutcome {
-                        content: "cancelled".to_string(),
-                        is_error: true,
-                        metadata: None,
-                    },
+                    result: outcome.clone(),
                     elapsed_ms,
                 });
-                tool_results.push((call_id, "cancelled".to_string(), true));
+                tool_results.push((call_id, outcome, elapsed_ms));
             }
             for (_, pending) in plan.pending_tool_hooks.drain(..) {
                 let elapsed_ms = Some(elapsed_ms_since(pending.tool_start));
+                let outcome = cancelled_outcome();
                 let _ = self.event_tx.send(EngineEvent::ToolFinished {
                     call_id: pending.tc.id.clone(),
-                    result: ToolOutcome {
-                        content: "cancelled".to_string(),
-                        is_error: true,
-                        metadata: None,
-                    },
+                    result: outcome.clone(),
                     elapsed_ms,
                 });
-                tool_results.push((pending.tc.id.clone(), "cancelled".to_string(), true));
+                tool_results.push((pending.tc.id.clone(), outcome, elapsed_ms));
             }
             for (_, pending) in plan.pending_tool_perms.drain(..) {
                 let elapsed_ms = Some(elapsed_ms_since(pending.tool_start));
                 let _ = self.event_tx.send(EngineEvent::ToolFinished {
                     call_id: pending.tc.id.clone(),
-                    result: ToolOutcome {
-                        content: "cancelled".to_string(),
-                        is_error: true,
-                        metadata: None,
-                    },
+                    result: cancelled_outcome(),
                     elapsed_ms,
                 });
-                tool_results.push((pending.tc.id.clone(), "cancelled".to_string(), true));
+                tool_results.push((pending.tc.id.clone(), cancelled_outcome(), elapsed_ms));
             }
         }
 
         (cancelled, deferred, tool_results)
     }
 
-    /// Emits cancelled results for slots that never completed.
+    /// Populate `completed[i]` with a synthetic `cancelled` outcome for any
+    /// slot that never finished. Emits a `ToolFinished` event per slot. The
+    /// resulting `Vec<Option<ToolResult>>` invariant — Some for every slot —
+    /// is what `gather_slot_results` then folds into the assistant turn.
     fn mark_unfinished_cancelled(
         &mut self,
         plan: &ToolExecutionPlan<'_>,
-        completed: &[Option<ToolResult>],
+        completed: &mut [Option<ToolResult>],
     ) {
-        let starts: Vec<_> = plan
-            .slots
-            .iter()
-            .enumerate()
-            .filter(|(i, _)| completed[*i].is_none())
-            .map(|(_, slot)| (slot.tc.id.clone(), slot.start))
-            .collect();
-        for (call_id, start) in starts {
-            self.push_tool_result(&call_id, "cancelled", true, Some(start));
+        for (i, slot) in plan.slots.iter().enumerate() {
+            if completed[i].is_some() {
+                continue;
+            }
+            let outcome = ToolResult {
+                content: "cancelled".to_string(),
+                is_error: true,
+                metadata: None,
+            };
+            self.emit(EngineEvent::ToolFinished {
+                call_id: slot.tc.id.clone(),
+                result: ToolOutcome {
+                    content: outcome.content.clone(),
+                    is_error: outcome.is_error,
+                    metadata: outcome.metadata.clone(),
+                },
+                elapsed_ms: Some(self.elapsed_ms_since(slot.start)),
+            });
+            completed[i] = Some(outcome);
         }
     }
 
@@ -1416,8 +1653,7 @@ impl<'a> Turn<'a> {
     async fn run_sequential(
         &mut self,
         plan: &ToolExecutionPlan<'_>,
-        _completed: &mut [Option<ToolResult>],
-    ) -> Vec<(String, String, bool)> {
+    ) -> Vec<(String, ToolOutcome, Option<u64>)> {
         let mut tool_results = Vec::new();
         let mut cancelled = false;
         for (tc, args, start) in &plan.sequential_tools {
@@ -1441,26 +1677,33 @@ impl<'a> Turn<'a> {
                 }
             };
             let elapsed_ms = Some(self.elapsed_ms_since(*start));
+            let outcome = ToolOutcome {
+                content,
+                is_error,
+                metadata: None,
+            };
             let _ = self.event_tx.send(EngineEvent::ToolFinished {
                 call_id: tc.id.clone(),
-                result: ToolOutcome {
-                    content: content.clone(),
-                    is_error,
-                    metadata: None,
-                },
+                result: outcome.clone(),
                 elapsed_ms,
             });
-            tool_results.push((tc.id.clone(), content, is_error));
+            tool_results.push((tc.id.clone(), outcome, elapsed_ms));
         }
         tool_results
     }
 
-    /// Commit tool results to history, emit ToolFinished, and record elapsed times.
-    fn collect_results(
+    /// Fold built-in (dispatched-by-slot) tool results into `(call_id,
+    /// outcome, elapsed)` triples ready to be paired into the assistant
+    /// turn. Emits `ToolFinished` and records `tool_elapsed` along the way.
+    ///
+    /// Pure accumulator: never touches `self.history`. The atomic commit
+    /// in `run()` is the only place that writes to history.
+    fn gather_slot_results(
         &mut self,
         plan: &ToolExecutionPlan<'_>,
         mut completed: Vec<Option<ToolResult>>,
-    ) {
+    ) -> Vec<(String, ToolOutcome, Option<u64>)> {
+        let mut out = Vec::with_capacity(plan.slots.len());
         for (i, slot) in plan.slots.iter().enumerate() {
             let Some(result) = completed[i].take() else {
                 continue;
@@ -1491,27 +1734,30 @@ impl<'a> Turn<'a> {
 
             let elapsed_ms = self.elapsed_ms_since(slot.start);
             self.tool_elapsed.insert(slot.tc.id.clone(), elapsed_ms);
-            let mut tool_content = content.clone();
+            let mut full_content = content.clone();
             if let Some(ref msg) = slot.confirm_msg {
-                tool_content.push_str(&format!("\n\nUser message: {msg}"));
+                full_content.push_str(&format!("\n\nUser message: {msg}"));
             }
-            let history_content =
-                match crate::result_dedup::duplicate_of(&tool_content, is_error, &self.messages) {
-                    Some(prior_id) => crate::result_dedup::dedup_stub(prior_id),
-                    None => tool_content,
-                };
-            self.push_message(Message::tool(slot.tc.id.clone(), history_content, is_error));
-            self.emit_messages_snapshot();
             self.emit(EngineEvent::ToolFinished {
                 call_id: slot.tc.id.clone(),
                 result: ToolOutcome {
-                    content,
+                    content: content.clone(),
                     is_error,
-                    metadata,
+                    metadata: metadata.clone(),
                 },
                 elapsed_ms: Some(elapsed_ms),
             });
+            out.push((
+                slot.tc.id.clone(),
+                ToolOutcome {
+                    content: full_content,
+                    is_error,
+                    metadata,
+                },
+                Some(elapsed_ms),
+            ));
         }
+        out
     }
 
     fn drain_commands(&mut self) {
@@ -1580,8 +1826,14 @@ impl<'a> Turn<'a> {
                     .provider
                     .default_cache_config(self.config.cache_ttl_long, Some(&self.session_id)),
             };
+            // Convert the engine's `Vec<HistoryItem>` to the wire-format
+            // `Vec<Message>` the provider speaks. Pairing is invariant-safe
+            // by construction (every `AssistantTurn` carries its
+            // `ToolInvocation`s inline), so the resulting Message slice
+            // satisfies "assistant tool_calls followed by tool_results".
+            let wire_messages = protocol::history_to_messages(&self.history);
             let chat_future = self.provider.chat(
-                &self.messages,
+                &wire_messages,
                 tool_defs,
                 &self.model,
                 self.reasoning_effort,
@@ -1679,33 +1931,6 @@ impl<'a> Turn<'a> {
         }
     }
 
-    fn push_tool_result(
-        &mut self,
-        tool_call_id: &str,
-        content: &str,
-        is_error: bool,
-        started_at: Option<Instant>,
-    ) {
-        let history_content =
-            match crate::result_dedup::duplicate_of(content, is_error, &self.messages) {
-                Some(prior_id) => crate::result_dedup::dedup_stub(prior_id),
-                None => content.to_string(),
-            };
-        self.push_message(Message::tool(
-            tool_call_id.to_string(),
-            history_content,
-            is_error,
-        ));
-        self.emit(EngineEvent::ToolFinished {
-            call_id: tool_call_id.to_string(),
-            result: ToolOutcome {
-                content: content.to_string(),
-                is_error,
-                metadata: None,
-            },
-            elapsed_ms: started_at.map(|t| self.elapsed_ms_since(t)),
-        });
-    }
 }
 
 // ── Helpers ─────────────────────────────────────────────────────────────────

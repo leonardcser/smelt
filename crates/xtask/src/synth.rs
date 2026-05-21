@@ -73,15 +73,15 @@ fn generate(turns: usize, words: usize, title: Option<String>) {
     for i in 1..=turns {
         let user_text = format!("synth turn {i} — describe topic {i}");
         session
-            .messages
-            .push(protocol::Message::user(Content::text(user_text)));
+            .history
+            .push(protocol::HistoryItem::user(Content::text(user_text)));
 
         let body = assistant_body(i, words);
-        session.messages.push(protocol::Message::assistant(
-            Some(Content::text(body)),
-            None,
-            None,
-        ));
+        session
+            .history
+            .push(protocol::HistoryItem::Assistant(
+                protocol::AssistantTurn::terminal(Some(Content::text(body)), None, Vec::new()),
+            ));
     }
 
     session.updated_at_ms = session::now_ms();
@@ -89,8 +89,8 @@ fn generate(turns: usize, words: usize, title: Option<String>) {
     session::save(&session, &AttachmentStore::new());
     println!("{}", stamp);
     eprintln!(
-        "synth: wrote {turns} turns ({} messages) → {}",
-        session.messages.len(),
+        "synth: wrote {turns} turns ({} history items) → {}",
+        session.history.len(),
         session::dir_for(&session).display()
     );
     eprintln!("resume with: smelt -r {stamp}");
