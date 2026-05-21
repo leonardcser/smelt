@@ -112,15 +112,17 @@ models default to zero cost.
 
 ## Model Selection
 
-Model resolution follows this precedence:
+Model resolution follows this precedence on a fresh launch:
 
 1. `--model` CLI flag
-2. `smelt.defaults{ model = "..." }` in `init.lua`
-3. Last explicitly chosen model (cached from previous session)
+2. Last explicitly chosen model (recalled from `recent.json`)
+3. `smelt.defaults{ model = "..." }` in `init.lua`
 4. First model in the providers list
 
-Switch models at runtime with `/model`. The choice is persisted in
-`state.json` and restored on next launch unless `smelt.defaults` pins one.
+Switch models at runtime with `/model`. The choice is recorded in
+`recent.json` (in `$XDG_STATE_HOME/smelt/`) and restored on the next
+launch. To always start from `smelt.defaults` and ignore the last pick,
+set `smelt.remember({ model = false })` in `init.lua`.
 
 ## Modes and Reasoning
 
@@ -148,11 +150,21 @@ effort is always included in the cycle.
 Toggle full thinking blocks at runtime with `/thinking` (or the
 `show_thinking` setting).
 
-### Pinning startup defaults
+### Defaults vs. last-used
 
-Use `smelt.defaults{...}` in `init.lua` to pin a starting model, mode,
-and/or reasoning effort across launches. Every field is optional and CLI
-flags still win:
+Smelt distinguishes two layers for model / mode / reasoning effort:
+
+- **Defaults** in `init.lua` are the cold-start values, used when there
+  is no recorded last-used pick.
+- **Recent** (`recent.json` under `$XDG_STATE_HOME/smelt/`) is what you
+  picked last session. Each launch restores it, so you don't have to
+  re-pick.
+
+Precedence on a fresh launch is `CLI flag → recent → defaults →
+hardcoded fallback`. Resuming a session (`--resume`) takes the session's
+own saved model / mode / effort, ignoring `recent.json`.
+
+Pin a cold-start value with `smelt.defaults{...}`:
 
 ```lua
 smelt.defaults({
@@ -161,6 +173,29 @@ smelt.defaults({
   reasoning_effort = "high",
 })
 ```
+
+To make a key always start from `smelt.defaults` and ignore the last
+pick, opt out per-key with `smelt.remember{...}`:
+
+```lua
+smelt.remember({
+  mode = false,             -- always start in the default mode
+  reasoning_effort = false, -- always start at the default effort
+  -- model = true (default) — still recalls the last model
+})
+```
+
+### Settings and theme are session-only
+
+`smelt.settings.*`, `smelt.theme.use(...)`, and `smelt.theme.apply(...)`
+apply only to the current session. They never write to disk. Edit
+`init.lua` to persist them.
+
+`/settings` toggles in the UI affect the running session and print the
+`smelt.settings.<key> = ...` snippet to paste into `init.lua`.
+`/settings-export` copies a snippet of every current setting (plus
+current model / mode / effort under `smelt.defaults{...}`) to the
+clipboard.
 
 ## Per-plugin Model Preferences
 
@@ -316,7 +351,7 @@ All runtime data is stored under the XDG base directories:
 | ----------------------------------- | ------------------------------------------------------------ |
 | `$XDG_CONFIG_HOME/smelt/`           | `init.lua`, `plugins/`, global `skills/`                     |
 | `$XDG_STATE_HOME/smelt/sessions/`   | Saved sessions (`session.json`, `meta.json`, blobs)          |
-| `$XDG_STATE_HOME/smelt/state.json`  | Persisted picks (last model, mode, reasoning effort)         |
+| `$XDG_STATE_HOME/smelt/recent.json` | Last-used picks (model, mode, reasoning effort)              |
 | `$XDG_STATE_HOME/smelt/workspaces/` | Per-workspace saved permissions                              |
 | `$XDG_STATE_HOME/smelt/history`     | Prompt history                                               |
 | `$XDG_STATE_HOME/smelt/trust.json`  | Trusted project `.smelt/` hashes                             |

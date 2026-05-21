@@ -239,9 +239,9 @@ impl TuiApp {
     }
 
     /// Switch to a model by key. No-op if the key is not found.
-    /// `persist=false` skips the cross-session cache write so session
+    /// `record=false` skips the `recent.json` write so session
     /// resume doesn't overwrite the user's last explicit pick.
-    pub(crate) fn apply_model(&mut self, key: &str, persist: bool) {
+    pub(crate) fn apply_model(&mut self, key: &str, record: bool) {
         let Some(resolved) = self
             .core
             .config
@@ -259,7 +259,7 @@ impl TuiApp {
         self.core.config.provider_type = resolved.provider_type.clone();
         self.core.config.model_config = (&resolved.config).into();
         let api_key = self.resolve_api_key().unwrap_or_default();
-        if persist {
+        if record && self.core.config.remember.model {
             state::set_selected_model(resolved.key.clone());
         }
         self.core.engine.send(UiCommand::SetModel {
@@ -318,12 +318,12 @@ impl TuiApp {
         self.update_settings(|slot| *slot = new);
     }
 
-    /// `persist=false` skips the cross-session cache write so session
+    /// `record=false` skips the `recent.json` write so session
     /// resume doesn't overwrite the user's last explicit pick.
-    pub(crate) fn set_mode(&mut self, mode: AgentMode, persist: bool) {
+    pub(crate) fn set_mode(&mut self, mode: AgentMode, record: bool) {
         let old = self.core.config.mode;
         self.core.config.mode = mode;
-        if persist {
+        if record && self.core.config.remember.mode {
             state::set_mode(self.core.config.mode);
         }
         // Publish new mode before snapshotting tools/prompt for the engine.
@@ -371,11 +371,11 @@ impl TuiApp {
         });
     }
 
-    /// `persist=false` skips the cross-session cache write so session
+    /// `record=false` skips the `recent.json` write so session
     /// resume doesn't overwrite the user's last explicit pick.
-    pub(crate) fn set_reasoning_effort(&mut self, effort: ReasoningEffort, persist: bool) {
+    pub(crate) fn set_reasoning_effort(&mut self, effort: ReasoningEffort, record: bool) {
         self.core.config.reasoning_effort = effort;
-        if persist {
+        if record && self.core.config.remember.reasoning_effort {
             state::set_reasoning_effort(effort);
         }
         self.core

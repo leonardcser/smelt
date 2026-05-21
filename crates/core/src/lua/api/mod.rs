@@ -36,6 +36,7 @@ mod process;
 mod provider;
 pub mod reasoning;
 mod reg;
+mod remember;
 mod shell;
 mod skills;
 mod spawn;
@@ -146,6 +147,7 @@ pub fn register_host_api(
     os::register(lua, smelt)?;
     reasoning::register(lua, smelt)?;
     reg::register(lua, smelt)?;
+    remember::register(lua, smelt, shared)?;
     parse::register(lua, smelt)?;
     path::register(lua, smelt)?;
     perf::register(lua, smelt)?;

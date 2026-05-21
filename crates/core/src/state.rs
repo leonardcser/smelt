@@ -1,6 +1,9 @@
-//! Cross-session cache for last-used picks (model, mode, reasoning effort).
-//! Not config — config lives in `init.lua`. Persists so a fresh launch
-//! lands where the user left off.
+//! Recent-pick memory for model / mode / reasoning effort.
+//!
+//! Not config — config lives in `init.lua`. This is the "what was I
+//! using last" memory, analogous to Vim's shada / Neovim's session
+//! info: a fresh launch lands where you left off, while `init.lua`
+//! still owns the actual configuration.
 
 use crate::config;
 use protocol::{AgentMode, ReasoningEffort};
@@ -8,7 +11,7 @@ use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 
 #[derive(Debug, Default, Serialize, Deserialize)]
-pub struct SessionCache {
+pub struct Recent {
     #[serde(default)]
     pub mode: String,
     #[serde(default)]
@@ -17,17 +20,17 @@ pub struct SessionCache {
     pub reasoning_effort: ReasoningEffort,
 }
 
-fn cache_path() -> PathBuf {
-    config::state_dir().join("state.json")
+fn recent_path() -> PathBuf {
+    config::state_dir().join("recent.json")
 }
 
-fn cache_lock_path() -> PathBuf {
-    config::state_dir().join("state.lock")
+fn recent_lock_path() -> PathBuf {
+    config::state_dir().join("recent.lock")
 }
 
-impl SessionCache {
+impl Recent {
     pub fn load() -> Self {
-        let path = cache_path();
+        let path = recent_path();
         let Ok(contents) = std::fs::read_to_string(&path) else {
             return Self::default();
         };
@@ -35,7 +38,7 @@ impl SessionCache {
     }
 
     fn save_unlocked(&self) {
-        let path = cache_path();
+        let path = recent_path();
         if let Some(parent) = path.parent() {
             let _ = std::fs::create_dir_all(parent);
         }
@@ -44,16 +47,16 @@ impl SessionCache {
         }
     }
 
-    pub fn mode(&self) -> AgentMode {
-        AgentMode::parse(&self.mode).unwrap_or(AgentMode::Normal)
+    pub fn mode(&self) -> Option<AgentMode> {
+        AgentMode::parse(&self.mode)
     }
 }
 
-struct CacheLock(Option<std::fs::File>);
+struct RecentLock(Option<std::fs::File>);
 
-impl CacheLock {
+impl RecentLock {
     fn acquire() -> Self {
-        let path = cache_lock_path();
+        let path = recent_lock_path();
         if let Some(parent) = path.parent() {
             let _ = std::fs::create_dir_all(parent);
         }
@@ -77,7 +80,7 @@ impl CacheLock {
     }
 }
 
-impl Drop for CacheLock {
+impl Drop for RecentLock {
     fn drop(&mut self) {
         #[cfg(unix)]
         if let Some(ref f) = self.0 {
@@ -95,7 +98,9 @@ fn write_atomic(path: &Path, contents: &str) -> std::io::Result<()> {
     };
     let tmp = parent.join(format!(
         ".{}.{}.tmp",
-        path.file_name().and_then(|s| s.to_str()).unwrap_or("state"),
+        path.file_name()
+            .and_then(|s| s.to_str())
+            .unwrap_or("recent"),
         std::process::id()
     ));
     std::fs::write(&tmp, contents)?;
@@ -103,27 +108,27 @@ fn write_atomic(path: &Path, contents: &str) -> std::io::Result<()> {
     Ok(())
 }
 
-fn update_cache(f: impl FnOnce(&mut SessionCache)) {
-    let _lock = CacheLock::acquire();
-    let mut s = SessionCache::load();
+fn update_recent(f: impl FnOnce(&mut Recent)) {
+    let _lock = RecentLock::acquire();
+    let mut s = Recent::load();
     f(&mut s);
     s.save_unlocked();
 }
 
 pub fn set_mode(mode: AgentMode) {
-    update_cache(|s| {
+    update_recent(|s| {
         s.mode = mode.as_str().to_string();
     });
 }
 
 pub fn set_selected_model(key: String) {
-    update_cache(|s| {
+    update_recent(|s| {
         s.selected_model = Some(key);
     });
 }
 
 pub fn set_reasoning_effort(effort: ReasoningEffort) {
-    update_cache(|s| {
+    update_recent(|s| {
         s.reasoning_effort = effort;
     });
 }
@@ -161,7 +166,7 @@ mod tests {
             let b1 = barrier.clone();
             let mode_thread = std::thread::spawn(move || {
                 b1.wait();
-                update_cache(|s| {
+                update_recent(|s| {
                     s.mode = AgentMode::Apply.as_str().to_string();
                     std::thread::sleep(Duration::from_millis(50));
                 });
@@ -176,9 +181,9 @@ mod tests {
             mode_thread.join().unwrap();
             model_thread.join().unwrap();
 
-            let cache = SessionCache::load();
-            assert_eq!(cache.mode(), AgentMode::Apply);
-            assert_eq!(cache.selected_model.as_deref(), Some("anthropic/claude"));
+            let recent = Recent::load();
+            assert_eq!(recent.mode(), Some(AgentMode::Apply));
+            assert_eq!(recent.selected_model.as_deref(), Some("anthropic/claude"));
         });
     }
 }

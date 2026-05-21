@@ -179,6 +179,7 @@ impl TestAppBuilder {
             reasoning_effort: ReasoningEffort::Off,
             reasoning_cycle: Vec::new(),
             settings,
+            remember: smelt_core::config::RememberConfig::default(),
             context_window: None,
         };
 

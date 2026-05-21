@@ -524,11 +524,18 @@ impl LuaRuntime {
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .clone();
+        let remember = self
+            .shared
+            .remember
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone();
         crate::config::Config {
             providers,
             mcp,
             settings,
             defaults,
+            remember,
         }
     }
 

@@ -21,5 +21,6 @@ pub struct AppConfig {
     pub reasoning_cycle: Vec<ReasoningEffort>,
 
     pub settings: config::ResolvedSettings,
+    pub remember: config::RememberConfig,
     pub context_window: Option<u32>,
 }

@@ -33,18 +33,18 @@ pub struct ResolvedStartup {
     pub reasoning_effort: ReasoningEffort,
     pub reasoning_cycle: Vec<ReasoningEffort>,
     pub startup_auth_error: Option<String>,
-    pub cache: smelt_core::state::SessionCache,
 }
 
-/// Resolve the active model. Priority: CLI `--model` > `smelt.defaults{model=...}`
-/// in init.lua > cached `selected_model` from the previous session > first in
-/// config. Returns `None` when the CLI model is absent from resolved models
-/// and `--api-base` is also set.
+/// Resolve the active model. Priority: CLI `--model` > recent
+/// `selected_model` (when `smelt.remember.model` is on) >
+/// `smelt.defaults{model=...}` in init.lua > first in config. Returns
+/// `None` when the CLI model is absent from resolved models and
+/// `--api-base` is also set.
 fn resolve_model_reference(
     args: &Args,
     cfg: &smelt_core::config::Config,
     available_models: &[smelt_core::config::ResolvedModel],
-    cache: &smelt_core::state::SessionCache,
+    recent: &smelt_core::state::Recent,
 ) -> Option<smelt_core::config::ResolvedModel> {
     let pick = |reference: &str, allow_not_found: bool| match smelt_core::config::resolve_model_ref(
         available_models,
@@ -60,13 +60,17 @@ fn resolve_model_reference(
 
     if let Some(ref cli_model) = args.model {
         pick(cli_model, args.api_base.is_some())
+    } else if let Some(picked) = cfg
+        .remember
+        .model
+        .then_some(recent.selected_model.as_deref())
+        .flatten()
+        .and_then(|key| smelt_core::config::resolve_model_ref(available_models, key).ok())
+        .cloned()
+    {
+        Some(picked)
     } else if let Some(default) = cfg.defaults.model.as_deref() {
         pick(default, false)
-    } else if let Some(ref cached) = cache.selected_model {
-        smelt_core::config::resolve_model_ref(available_models, cached)
-            .ok()
-            .cloned()
-            .or_else(|| available_models.first().cloned())
     } else {
         available_models.first().cloned()
     }
@@ -120,7 +124,7 @@ pub async fn resolve(
 
     cfg.inject_oauth_providers();
 
-    let cache = smelt_core::state::SessionCache::load();
+    let recent = smelt_core::state::Recent::load();
     let mut available_models = cfg.resolve_models();
 
     if cfg.has_codex_provider() {
@@ -151,7 +155,7 @@ pub async fn resolve(
     let mut startup_auth_error: Option<String> = None;
 
     let (api_base, api_key, api_key_env, mut provider_type, model, mut model_config) = {
-        let resolved = resolve_model_reference(args, &cfg, &available_models, &cache);
+        let resolved = resolve_model_reference(args, &cfg, &available_models, &recent);
 
         if let Some(r) = resolved {
             let base = args.api_base.clone().unwrap_or_else(|| r.api_base.clone());
@@ -227,16 +231,21 @@ pub async fn resolve(
         model_config.tool_calling = Some(false);
     }
 
-    let mode_override = args
-        .mode
-        .as_deref()
-        .or(cfg.defaults.mode.as_deref())
-        .map(|s| {
-            AgentMode::parse(s).unwrap_or_else(|| {
-                eprintln!("warning: unknown mode '{s}', defaulting to normal");
-                AgentMode::Normal
-            })
-        });
+    let parse_mode = |s: &str| {
+        AgentMode::parse(s).unwrap_or_else(|| {
+            eprintln!("warning: unknown mode '{s}', defaulting to normal");
+            AgentMode::Normal
+        })
+    };
+    let mode_override = if let Some(s) = args.mode.as_deref() {
+        Some(parse_mode(s))
+    } else if cfg.remember.mode {
+        recent
+            .mode()
+            .or_else(|| cfg.defaults.mode.as_deref().map(parse_mode))
+    } else {
+        cfg.defaults.mode.as_deref().map(parse_mode)
+    };
 
     let mode_cycle = args
         .mode_cycle
@@ -245,17 +254,22 @@ pub async fn resolve(
         .filter(|v| !v.is_empty())
         .unwrap_or_else(|| AgentMode::ALL.to_vec());
 
-    let reasoning_effort = args
+    let default_effort = cfg
+        .defaults
+        .reasoning_effort
+        .as_deref()
+        .and_then(ReasoningEffort::parse);
+    let reasoning_effort = if let Some(cli) = args
         .reasoning_effort
         .as_deref()
         .and_then(ReasoningEffort::parse)
-        .or_else(|| {
-            cfg.defaults
-                .reasoning_effort
-                .as_deref()
-                .and_then(ReasoningEffort::parse)
-        })
-        .unwrap_or(cache.reasoning_effort);
+    {
+        cli
+    } else if cfg.remember.reasoning_effort && recent.reasoning_effort != ReasoningEffort::Off {
+        recent.reasoning_effort
+    } else {
+        default_effort.unwrap_or(ReasoningEffort::Off)
+    };
 
     let provider_kind = engine::ProviderKind::from_config(&provider_type);
     let mut reasoning_cycle = args
@@ -288,6 +302,5 @@ pub async fn resolve(
         reasoning_effort,
         reasoning_cycle,
         startup_auth_error,
-        cache,
     }
 }

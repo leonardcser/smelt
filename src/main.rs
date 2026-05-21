@@ -225,7 +225,6 @@ async fn main() {
         reasoning_effort,
         reasoning_cycle,
         mut startup_auth_error,
-        cache,
     } = s;
 
     if let Some(level) = engine::log::parse_level(&args.log_level) {
@@ -441,6 +440,7 @@ async fn main() {
             reasoning_effort,
             reasoning_cycle,
             settings,
+            cfg.remember.clone(),
         );
         let mut core = smelt_core::Core::new(
             app_config,
@@ -458,16 +458,7 @@ async fn main() {
             .run_oneshot(args.message.unwrap(), headless_cancel)
             .await;
     } else {
-        // Merge CLI/startup defaults with the persisted SessionCache: the
-        // cache always provides the initial agent mode; it overrides the
-        // reasoning effort only when the CLI/startup side passed `Off`.
-        let reasoning_effort = if reasoning_effort == protocol::ReasoningEffort::Off
-            && cache.reasoning_effort != protocol::ReasoningEffort::Off
-        {
-            cache.reasoning_effort
-        } else {
-            reasoning_effort
-        };
+        let initial_mode = mode_override.unwrap_or(protocol::AgentMode::Normal);
         let app_config = smelt_core::AppConfig {
             model,
             api_base: initial_api_base,
@@ -478,11 +469,12 @@ async fn main() {
             cli_model_override: args.model.is_some(),
             cli_api_base_override: args.api_base.is_some(),
             cli_api_key_env_override: args.api_key_env.is_some(),
-            mode: cache.mode(),
+            mode: initial_mode,
             mode_cycle,
             reasoning_effort,
             reasoning_cycle,
             settings,
+            remember: cfg.remember.clone(),
             context_window: None,
         };
         let mut app = tui::app::TuiApp::new(
@@ -499,9 +491,6 @@ async fn main() {
         app.core.skills = Some(Arc::clone(&skill_loader));
         app.core.mcp = Some(Arc::clone(&mcp_manager));
         app.prompt_inputs = prompt_inputs;
-        if let Some(mode) = mode_override {
-            app.core.config.mode = mode;
-        }
         if !app.core.config.mode_cycle.contains(&app.core.config.mode) {
             app.core.config.mode_cycle.push(app.core.config.mode);
         }
@@ -621,6 +610,7 @@ fn build_headless_config(
     reasoning_effort: protocol::ReasoningEffort,
     reasoning_cycle: Vec<protocol::ReasoningEffort>,
     settings: smelt_core::config::ResolvedSettings,
+    remember: smelt_core::config::RememberConfig,
 ) -> smelt_core::AppConfig {
     let mode = mode_override.unwrap_or(protocol::AgentMode::Normal);
     let mut mode_cycle = mode_cycle;
@@ -642,6 +632,7 @@ fn build_headless_config(
         reasoning_effort,
         reasoning_cycle,
         settings,
+        remember,
         context_window: None,
     }
 }

@@ -244,7 +244,8 @@ impl ResolvedSettings {
 }
 
 /// Startup defaults for new sessions, set from Lua via `smelt.defaults{...}`.
-/// Every field is a fallback — CLI flags and resumed-session state win.
+/// Each field is the "no recent memory" fallback: the last-used pick
+/// (when `smelt.remember[k]` is on) and CLI flags both win.
 #[derive(Debug, Default, Clone)]
 pub struct DefaultsConfig {
     /// Starting model reference (`"provider/model"` or bare model name).
@@ -255,6 +256,27 @@ pub struct DefaultsConfig {
     pub reasoning_effort: Option<String>,
 }
 
+/// Per-key opt-in to last-used recall on startup. All true by default;
+/// flip any to `false` from init.lua via `smelt.remember({...})`
+/// to make that key always start from `smelt.defaults` regardless of
+/// what the user picked in the previous session.
+#[derive(Debug, Clone)]
+pub struct RememberConfig {
+    pub model: bool,
+    pub mode: bool,
+    pub reasoning_effort: bool,
+}
+
+impl Default for RememberConfig {
+    fn default() -> Self {
+        Self {
+            model: true,
+            mode: true,
+            reasoning_effort: true,
+        }
+    }
+}
+
 #[derive(Debug, Default)]
 pub struct Config {
     pub providers: Vec<ProviderConfig>,
@@ -262,6 +284,7 @@ pub struct Config {
     /// MCP server configurations.
     pub mcp: std::collections::HashMap<String, crate::mcp::McpServerConfig>,
     pub defaults: DefaultsConfig,
+    pub remember: RememberConfig,
 }
 
 /// A resolved model entry combining provider connection info with model config.
