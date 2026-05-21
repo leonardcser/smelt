@@ -146,6 +146,13 @@ impl mlua::UserData for LuaWin {
         methods.add_method("focus", |_, this, ()| -> LuaResult<()> {
             crate::lua::with_app(|app| {
                 app.ui.set_focus(this.id);
+                // Keep app-level pane focus in sync when a well-known pane
+                // window is focused (prompt bars call this from press handlers).
+                match this.id {
+                    crate::app::PROMPT_WIN => app.app_focus = crate::app::AppFocus::Prompt,
+                    crate::app::TRANSCRIPT_WIN => app.app_focus = crate::app::AppFocus::Content,
+                    _ => {}
+                }
             });
             Ok(())
         });

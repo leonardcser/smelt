@@ -270,8 +270,14 @@ M.bottom_win = smelt.win.new(smelt.buf.new({ name = "smelt.prompt_bar.bottom" })
   region = "prompt_below",
 })
 
-if M.top_win then M.top_win:set_renderer(render_top) end
-if M.bottom_win then M.bottom_win:set_renderer(render_bottom) end
+if M.top_win then
+  M.top_win:set_renderer(render_top)
+  M.top_win:on("press", function() smelt.win.PROMPT:focus() end)
+end
+if M.bottom_win then
+  M.bottom_win:set_renderer(render_bottom)
+  M.bottom_win:on("press", function() smelt.win.PROMPT:focus() end)
+end
 
 -- Expose helper for the layout composer so it can compute the top bar's
 -- row count from current state (queued messages, stash row, bar row).
