@@ -267,13 +267,13 @@ local function open()
 			{ text = "(F11 to close) ", fg = "grey", dim = true },
 		},
 		border = { all = "Comment" },
-		layout = smelt.overlay.layout.vbox({
+		layout = smelt.ui.layout.vbox({
 			{
-				smelt.overlay.layout.leaf(STATE.paint, { measure = { GRID_W, PAINT_H } }),
+				smelt.ui.layout.leaf(STATE.paint, { measure = { GRID_W, PAINT_H } }),
 				height = "fit",
 			},
 			{
-				smelt.overlay.layout.leaf(STATE.win, { measure = { GRID_W, 1 } }),
+				smelt.ui.layout.leaf(STATE.win, { measure = { GRID_W, 1 } }),
 				height = 1,
 			},
 		}),

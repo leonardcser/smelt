@@ -6,8 +6,9 @@
 //! a layout tree built from `vbox` / `hbox` / `leaf` that the host
 //! resolves to per-window rectangles for that frame.
 //!
-//! The same constructors are exposed under `smelt.overlay.layout` for
-//! overlay composition — they share their implementations.
+//! The same constructors also produce the layout userdata accepted by
+//! `smelt.overlay.new` via `opts.layout` — there's one namespace for both
+//! screen-composition and overlay-composition cases.
 
 use crate::lua::LuaShared;
 use mlua::prelude::*;
@@ -37,12 +38,7 @@ transcript, prompt, statusline, and any plugin-added windows split the \
 screen.",
     )?;
 
-    super::overlay_layout::register_layout_constructors(
-        &m,
-        "smelt.ui.layout",
-        "Wrap a Win handle or paint id into a leaf node. `opts` accepts `border`, `title`, `collapse_when_empty` (force the slot to zero size when the wrapped window's buffer is empty), `measure` (a `{w, h}` table for a static natural size or a `smelt.ui.layout.measure(...)` handle for one the plugin can live-update).",
-        "Construct a shareable natural-size handle for use with `layout.leaf(opts.measure = ...)`. Initial size is `(w, h)` (default `(0, 0)`); update at any time via `handle:set(w, h)` to drive a live resize on the next frame. Read current size via `handle:get()`.",
-    )?;
+    super::overlay_layout::register_layout_constructors(&m)?;
 
     {
         let s = shared.clone();

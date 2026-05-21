@@ -1,5 +1,5 @@
 -- `/diff <filepath>` — side-by-side diff of <filepath> vs `git show HEAD:<filepath>`.
--- Demo of `smelt.render.diff_split` + `smelt.overlay.layout.hbox`.
+-- Demo of `smelt.render.diff_split` + `smelt.ui.layout.hbox`.
 -- Not autoloaded; add `require("smelt.examples.diff")` to init.lua.
 
 local M = {}
@@ -104,13 +104,13 @@ local function open(filepath)
 		anchor = "center",
 		width = "90%",
 		height = "85%",
-		layout = smelt.overlay.layout.hbox({
+		layout = smelt.ui.layout.hbox({
 			{
-				smelt.overlay.layout.leaf(left_win, { title = { { text = " HEAD ", fg = "red", dim = true } } }),
+				smelt.ui.layout.leaf(left_win, { title = { { text = " HEAD ", fg = "red", dim = true } } }),
 				width = "fill",
 			},
 			{
-				smelt.overlay.layout.leaf(right_win, { title = { { text = " working ", fg = "green", dim = true } } }),
+				smelt.ui.layout.leaf(right_win, { title = { { text = " working ", fg = "green", dim = true } } }),
 				width = "fill",
 			},
 		}, { gap = 1 }),

@@ -74,13 +74,13 @@ local function open()
 		name = "smelt.banner_picker",
 		anchor = "center",
 		border = "none",
-		layout = smelt.overlay.layout.vbox({
+		layout = smelt.ui.layout.vbox({
 			{
-				smelt.overlay.layout.leaf(STATE.paint, { measure = { w, h } }),
+				smelt.ui.layout.leaf(STATE.paint, { measure = { w, h } }),
 				height = "fit",
 			},
 			{
-				smelt.overlay.layout.leaf(STATE.win, { measure = { 0, 0 } }),
+				smelt.ui.layout.leaf(STATE.win, { measure = { 0, 0 } }),
 				height = 0,
 			},
 		}, { padding = 2 }),

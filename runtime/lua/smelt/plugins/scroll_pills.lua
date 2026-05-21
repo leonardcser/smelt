@@ -64,7 +64,7 @@ local function open_bottom()
     modal = false,
     blocks_agent = false,
     border = "none",
-    layout = smelt.overlay.layout.leaf(win, { measure = { BOTTOM_WIDTH, 1 } }),
+    layout = smelt.ui.layout.leaf(win, { measure = { BOTTOM_WIDTH, 1 } }),
   })
 end
 
@@ -127,7 +127,7 @@ local function open_top(width)
     modal = false,
     blocks_agent = false,
     border = "none",
-    layout = smelt.overlay.layout.leaf(win, { measure = { width, 1 } }),
+    layout = smelt.ui.layout.leaf(win, { measure = { width, 1 } }),
   })
 end
 

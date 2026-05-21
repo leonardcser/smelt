@@ -135,7 +135,7 @@ local function indicator_spans()
   local secs = math.floor(elapsed_ms / 1000)
   if state ~= "interrupted" and secs > 0 then
     spans[#spans + 1] = {
-      text = " " .. bar.format_duration(secs),
+      text = " " .. smelt.text.format_duration(secs),
       style = { fg = "Comment", dim = true },
       priority = 1,
     }
@@ -197,9 +197,9 @@ local function right_spans()
       local tok_text
       if window and window > 0 then
         local pct = math.floor(ctx / window * 100)
-        tok_text = string.format(" %s (%d%%)", bar.format_tokens(ctx), pct)
+        tok_text = string.format(" %s (%d%%)", smelt.text.format_tokens(ctx), pct)
       else
-        tok_text = " " .. bar.format_tokens(ctx)
+        tok_text = " " .. smelt.text.format_tokens(ctx)
       end
       spans[#spans + 1] = {
         text = tok_text,
@@ -220,7 +220,7 @@ local function right_spans()
         }
       end
       spans[#spans + 1] = {
-        text = " " .. bar.format_cost(cost),
+        text = " " .. smelt.text.format_cost(cost),
         style = { fg = "Comment" },
         priority = 1,
       }

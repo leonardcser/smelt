@@ -205,7 +205,7 @@
 ---@field close fun(): nil Close the overlay. No-op if already closed.
 ---@field key fun(chord: string, func: fun(value: table)): smelt.Reg Bind `func` to `chord` on this overlay. Fires when any leaf of the overlay holds focus, after a per-window keymap miss but before global Lua keymaps. Returns a Reg whose `:remove()` undoes the binding.
 
---- Opaque handle returned by `smelt.paint.register`. Usable directly in `smelt.overlay.layout.leaf(handle, opts)` (it stands in for a Win in layout leaves).
+--- Opaque handle returned by `smelt.paint.register`. Usable directly in `smelt.ui.layout.leaf(handle, opts)` (it stands in for a Win in layout leaves).
 ---@class smelt.paint.Paint
 ---@field remove fun(): boolean Drop the paint callback. Returns `true` if it was still registered. Subsequent paints of this id no-op.
 ---@field rect fun(): any Return the paint leaf's current screen rect as `{ row, col, width, height }`, or `nil` until the first render lays it out.

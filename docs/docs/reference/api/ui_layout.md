@@ -9,7 +9,7 @@ Composable layout-tree primitives (set/vbox/hbox/leaf) for the main TUI layout. 
 ## `smelt.ui.layout.hbox`
 
 ```lua
-fun(items: table, opts: table?): smelt.overlay.layout
+fun(items: table, opts: table?): smelt.ui.layout
 ```
 
 Horizontal container. `items` is an array of `{ child_layout, width = <constraint>, collapse_when_empty = bool? }`. `opts` accepts `border`, `title`, `gap`, `padding` (uniform inner inset on all sides, inside any border).
@@ -17,7 +17,7 @@ Horizontal container. `items` is an array of `{ child_layout, width = <constrain
 ## `smelt.ui.layout.leaf`
 
 ```lua
-fun(win_or_paint: any, opts: table?): smelt.overlay.layout
+fun(win_or_paint: any, opts: table?): smelt.ui.layout
 ```
 
 Wrap a Win handle or paint id into a leaf node. `opts` accepts `border`, `title`, `collapse_when_empty` (force the slot to zero size when the wrapped window's buffer is empty), `measure` (a `{w, h}` table for a static natural size or a `smelt.ui.layout.measure(...)` handle for one the plugin can live-update).
@@ -25,7 +25,7 @@ Wrap a Win handle or paint id into a leaf node. `opts` accepts `border`, `title`
 ## `smelt.ui.layout.measure`
 
 ```lua
-fun(w: integer?, h: integer?): smelt.overlay.layout.Measure
+fun(w: integer?, h: integer?): smelt.ui.layout.Measure
 ```
 
 Construct a shareable natural-size handle for use with `layout.leaf(opts.measure = ...)`. Initial size is `(w, h)` (default `(0, 0)`); update at any time via `handle:set(w, h)` to drive a live resize on the next frame. Read current size via `handle:get()`.
@@ -41,7 +41,7 @@ Register the main layout composer. The callback receives a state table (`term_w`
 ## `smelt.ui.layout.vbox`
 
 ```lua
-fun(items: table, opts: table?): smelt.overlay.layout
+fun(items: table, opts: table?): smelt.ui.layout
 ```
 
 Vertical container. `items` is an array of `{ child_layout, height = <constraint>, collapse_when_empty = bool? }`. `opts` accepts `border`, `title`, `gap` (cells between children), `padding` (uniform inner inset on all sides, inside any border).

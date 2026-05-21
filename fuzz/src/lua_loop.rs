@@ -480,7 +480,7 @@ fn emit_layout(out: &mut String, layout: &ArbLayout) {
             with_measure,
         } => {
             out.push_str(&format!(
-                "smelt.overlay.layout.leaf(__fuzz.wins[({} % math.max(1, #__fuzz.wins)) + 1]",
+                "smelt.ui.layout.leaf(__fuzz.wins[({} % math.max(1, #__fuzz.wins)) + 1]",
                 win_idx
             ));
             if *with_measure {
@@ -490,18 +490,18 @@ fn emit_layout(out: &mut String, layout: &ArbLayout) {
         }
         ArbLayout::Vbox { a, b } => {
             out.push_str(&format!(
-                "smelt.overlay.layout.vbox({{ \
-                    {{ node = smelt.overlay.layout.leaf(__fuzz.wins[({} % math.max(1, #__fuzz.wins)) + 1]), height = 3 }}, \
-                    {{ node = smelt.overlay.layout.leaf(__fuzz.wins[({} % math.max(1, #__fuzz.wins)) + 1]), height = 3 }} \
+                "smelt.ui.layout.vbox({{ \
+                    {{ node = smelt.ui.layout.leaf(__fuzz.wins[({} % math.max(1, #__fuzz.wins)) + 1]), height = 3 }}, \
+                    {{ node = smelt.ui.layout.leaf(__fuzz.wins[({} % math.max(1, #__fuzz.wins)) + 1]), height = 3 }} \
                 }})",
                 a, b
             ));
         }
         ArbLayout::Hbox { a, b } => {
             out.push_str(&format!(
-                "smelt.overlay.layout.hbox({{ \
-                    {{ node = smelt.overlay.layout.leaf(__fuzz.wins[({} % math.max(1, #__fuzz.wins)) + 1]), width = 8 }}, \
-                    {{ node = smelt.overlay.layout.leaf(__fuzz.wins[({} % math.max(1, #__fuzz.wins)) + 1]), width = 8 }} \
+                "smelt.ui.layout.hbox({{ \
+                    {{ node = smelt.ui.layout.leaf(__fuzz.wins[({} % math.max(1, #__fuzz.wins)) + 1]), width = 8 }}, \
+                    {{ node = smelt.ui.layout.leaf(__fuzz.wins[({} % math.max(1, #__fuzz.wins)) + 1]), width = 8 }} \
                 }})",
                 a, b
             ));

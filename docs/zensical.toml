@@ -60,7 +60,6 @@ nav = [
     { "`smelt.notify`" = "reference/api/notify.md" },
     { "`smelt.os`" = "reference/api/os.md" },
     { "`smelt.overlay`" = "reference/api/overlay.md" },
-    { "`smelt.overlay.layout`" = "reference/api/overlay_layout.md" },
     { "`smelt.paint`" = "reference/api/paint.md" },
     { "`smelt.parse`" = "reference/api/parse.md" },
     { "`smelt.path`" = "reference/api/path.md" },

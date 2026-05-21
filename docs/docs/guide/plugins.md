@@ -280,7 +280,7 @@ smelt.overlay.new({
   height    = 14,           -- cells
   modal     = false,
   draggable = true,
-  layout    = smelt.overlay.layout.leaf(win),
+  layout    = smelt.ui.layout.leaf(win),
 })
 ```
 

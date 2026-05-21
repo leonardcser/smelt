@@ -11,6 +11,18 @@ local text = {}
 ---@type fun(s: string, width: integer, opts: table?): string
 text.fit = nil
 
+--- Format a USD cost with precision that scales to the magnitude: `$0.0042` under one cent, `$0.123` under one dollar, `$1.23` otherwise. Mirrors the format the prompt bar uses for session cost.
+---@type fun(usd: number): string
+text.format_cost = nil
+
+--- Format `seconds` as a short human-readable duration: `42s`, `3m 12s`, `1h 5m 0s`. Used by the prompt-bar working indicator; useful for any plugin surfacing elapsed time.
+---@type fun(seconds: integer): string
+text.format_duration = nil
+
+--- Format a raw token count as `1.2k`, `3.4m`, or the bare integer for values under 1000. Useful for compact statusline / banner displays.
+---@type fun(n: integer): string
+text.format_tokens = nil
+
 --- Return the number of lines in `s`. Counts `\n` separators and adds one if the last line is unterminated; an empty string returns `0`. Matches the line count users see in a renderer that splits on `\n` without dropping the trailing partial line.
 ---@type fun(s: string): integer
 text.line_count = nil

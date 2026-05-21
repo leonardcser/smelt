@@ -334,15 +334,15 @@ local function open_splash()
 	local label_win = ensure_label_window(label_lines, w)
 	-- Paint slot on top, label buffer below. `measure` pins each slot's
 	-- natural width to `w` so the overlay centers exactly.
-	local sized = smelt.overlay.layout.vbox({
+	local sized = smelt.ui.layout.vbox({
 		{
-			smelt.overlay.layout.leaf(state.paint, {
+			smelt.ui.layout.leaf(state.paint, {
 				measure = { w, paint_h },
 			}),
 			height = paint_h,
 		},
 		{
-			smelt.overlay.layout.leaf(label_win, { measure = { w, label_h } }),
+			smelt.ui.layout.leaf(label_win, { measure = { w, label_h } }),
 			height = label_h,
 		},
 	})

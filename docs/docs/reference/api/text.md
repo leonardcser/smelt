@@ -14,6 +14,30 @@ fun(s: string, width: integer, opts: table?): string
 
 Force `s` to occupy exactly `width` display cells: truncate when too long (appending `opts.suffix`, default `"…"`), pad when too short (with `opts.fill`, default `" "`). `opts.align` is `"left"` (default), `"right"`, or `"center"`. Use this for fixed-width UI slots — handles multi-byte and wide chars correctly so the result is always exactly `width` cells wide regardless of content.
 
+## `smelt.text.format_cost`
+
+```lua
+fun(usd: number): string
+```
+
+Format a USD cost with precision that scales to the magnitude: `$0.0042` under one cent, `$0.123` under one dollar, `$1.23` otherwise. Mirrors the format the prompt bar uses for session cost.
+
+## `smelt.text.format_duration`
+
+```lua
+fun(seconds: integer): string
+```
+
+Format `seconds` as a short human-readable duration: `42s`, `3m 12s`, `1h 5m 0s`. Used by the prompt-bar working indicator; useful for any plugin surfacing elapsed time.
+
+## `smelt.text.format_tokens`
+
+```lua
+fun(n: integer): string
+```
+
+Format a raw token count as `1.2k`, `3.4m`, or the bare integer for values under 1000. Useful for compact statusline / banner displays.
+
 ## `smelt.text.line_count`
 
 ```lua

@@ -283,7 +283,7 @@ local function open_overlay(opts)
       error("smelt.dialog: panel " .. i .. " requires a `leaf`", 3)
     end
     leaves[i] = p.leaf
-    local leaf_node = smelt.overlay.layout.leaf(p.leaf, {
+    local leaf_node = smelt.ui.layout.leaf(p.leaf, {
       border              = p.border,
       title               = p.title,
       collapse_when_empty = p.collapse_when_empty or false,
@@ -312,7 +312,7 @@ local function open_overlay(opts)
     end
   end
 
-  local panel_vbox = smelt.overlay.layout.vbox(layout_items)
+  local panel_vbox = smelt.ui.layout.vbox(layout_items)
 
   -- fixed: width = "100%", height = opts.height (or "60%" default)
   -- fit:   width = "100%", height = "fit", max_height = opts.max_height

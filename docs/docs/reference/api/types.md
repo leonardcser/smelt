@@ -294,7 +294,7 @@ Overlay handle returned by `smelt.overlay.new(opts)`.
 
 ### `smelt.paint.Paint`
 
-Opaque handle returned by `smelt.paint.register`. Usable directly in `smelt.overlay.layout.leaf(handle, opts)` (it stands in for a Win in layout leaves).
+Opaque handle returned by `smelt.paint.register`. Usable directly in `smelt.ui.layout.leaf(handle, opts)` (it stands in for a Win in layout leaves).
 
 | Field | Type | Required | Description |
 | --- | --- | --- | --- |

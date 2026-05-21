@@ -4,7 +4,7 @@
 //! `smelt.paint.register(func, opts?)` returns an opaque `Paint`
 //! userdata with `:remove()`. The handle is usable directly anywhere a
 //! window id is accepted in the layout / overlay APIs (`overlay item.win`,
-//! `smelt.overlay.layout.leaf`). Per frame the leaf is visible, the
+//! `smelt.ui.layout.leaf`). Per frame the leaf is visible, the
 //! renderer fires the registered callback with a slice userdata +
 //! context table; the callback writes cells via slice methods (`set` /
 //! `put_str` / `fill_rect`).
@@ -158,7 +158,7 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
 
     record_class(LuaClassDecl {
         name: "smelt.paint.Paint",
-        doc: "Opaque handle returned by `smelt.paint.register`. Usable directly in `smelt.overlay.layout.leaf(handle, opts)` (it stands in for a Win in layout leaves).",
+        doc: "Opaque handle returned by `smelt.paint.register`. Usable directly in `smelt.ui.layout.leaf(handle, opts)` (it stands in for a Win in layout leaves).",
         fields: smelt_core::class_methods! {
             "remove" => fn() -> bool, "Drop the paint callback. Returns `true` if it was still registered. Subsequent paints of this id no-op.",
             "rect" => fn() -> mlua::Value, "Return the paint leaf's current screen rect as `{ row, col, width, height }`, or `nil` until the first render lays it out.",

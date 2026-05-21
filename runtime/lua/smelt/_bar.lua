@@ -1,10 +1,12 @@
 -- Bar composition primitives: priority-drop fill (prompt top bar +
--- bottom bar), statusline priority-drop layout, traveling-wave color
--- (working indicator), and small text formatters.
+-- bottom bar), statusline priority-drop layout, and the
+-- traveling-wave color used by the working indicator.
 --
 -- Internal — not part of the public API. `prompt_bar.lua` and
 -- `statusline.lua` call into this; plugins that want a custom bar
 -- can replace these functions in their own renderer or copy them out.
+-- Human-readable formatters that used to live here (`format_duration`,
+-- `format_tokens`, `format_cost`) are now in `smelt.text`.
 --
 -- A `Span` is the unit input these functions accept:
 --   { text, style?, priority?, separated?, truncatable?, align_right? }
@@ -24,40 +26,6 @@ local M = {}
 local DASH = "\u{2500}"
 local STATUS_SEP = " \u{00b7} "
 local STATUS_SEP_LEN = 3
-
--- ── format helpers ──────────────────────────────────────────────────
-
-function M.format_duration(secs)
-  if secs < 60 then
-    return string.format("%ds", secs)
-  elseif secs < 3600 then
-    return string.format("%dm %ds", math.floor(secs / 60), secs % 60)
-  else
-    local hours = math.floor(secs / 3600)
-    local minutes = math.floor((secs % 3600) / 60)
-    return string.format("%dh %dm %ds", hours, minutes, secs % 60)
-  end
-end
-
-function M.format_tokens(n)
-  if n >= 1000000 then
-    return string.format("%.1fm", n / 1000000)
-  elseif n >= 1000 then
-    return string.format("%.1fk", n / 1000)
-  else
-    return tostring(n)
-  end
-end
-
-function M.format_cost(usd)
-  if usd < 0.01 then
-    return string.format("$%.4f", usd)
-  elseif usd < 1.0 then
-    return string.format("$%.3f", usd)
-  else
-    return string.format("$%.2f", usd)
-  end
-end
 
 -- ── traveling-wave color ────────────────────────────────────────────
 --

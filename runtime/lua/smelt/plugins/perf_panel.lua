@@ -154,7 +154,7 @@ local function attach()
 		blocks_agent = false,
 		draggable = true,
 		resizable = true,
-		layout = smelt.overlay.layout.leaf(state.win, { measure = { PANEL_W, PANEL_H } }),
+		layout = smelt.ui.layout.leaf(state.win, { measure = { PANEL_W, PANEL_H } }),
 	})
 	-- Cancel any prior timer (hot-reload survival) before re-arming.
 	if state.timer then

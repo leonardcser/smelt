@@ -554,7 +554,7 @@ impl TestApp {
             smelt.overlay.new({
                 name = "fuzz.ov.0", anchor = "screen_at", corner = "nw",
                 row = 0, col = 0, width = 20, height = 5,
-                layout = smelt.overlay.layout.leaf(w),
+                layout = smelt.ui.layout.leaf(w),
             })
             "#,
             // 1: anonymous leaf — reaped on reload
@@ -564,7 +564,7 @@ impl TestApp {
             smelt.overlay.new({
                 anchor = "screen_at", corner = "ne",
                 row = 0, col = 0, width = 15, height = 4,
-                layout = smelt.overlay.layout.leaf(w),
+                layout = smelt.ui.layout.leaf(w),
             })
             "#,
             // 2: leaf with static measure (drives the per-leaf measure hook)
@@ -574,7 +574,7 @@ impl TestApp {
             smelt.overlay.new({
                 name = "fuzz.ov.2", anchor = "screen_at", corner = "sw",
                 row = 0, col = 0, width = 25, height = 6,
-                layout = smelt.overlay.layout.leaf(w, { measure = { w = 18, h = 4 } }),
+                layout = smelt.ui.layout.leaf(w, { measure = { w = 18, h = 4 } }),
             })
             "#,
             // 3: vbox of two leaves
@@ -586,9 +586,9 @@ impl TestApp {
             smelt.overlay.new({
                 name = "fuzz.ov.3", anchor = "screen_at", corner = "se",
                 row = 0, col = 0, width = 22, height = 8,
-                layout = smelt.overlay.layout.vbox({
-                    { node = smelt.overlay.layout.leaf(w1), height = 3 },
-                    { node = smelt.overlay.layout.leaf(w2), height = 3 },
+                layout = smelt.ui.layout.vbox({
+                    { node = smelt.ui.layout.leaf(w1), height = 3 },
+                    { node = smelt.ui.layout.leaf(w2), height = 3 },
                 }),
             })
             "#,
@@ -599,7 +599,7 @@ impl TestApp {
             smelt.overlay.new({
                 name = "fuzz.ov.4", anchor = "screen_at", corner = "nw",
                 row = 1, col = 1, width = 18, height = 5,
-                layout = smelt.overlay.layout.leaf(w),
+                layout = smelt.ui.layout.leaf(w),
                 keymaps = {
                     { key = "<C-x>", on_press = function() end },
                 },
@@ -2121,7 +2121,7 @@ mod tests {
                 corner = "ne",
                 row = 0, col = 0,
                 width = 44, height = 14,
-                layout = smelt.overlay.layout.leaf(win),
+                layout = smelt.ui.layout.leaf(win),
             })
             "#,
         )
@@ -2154,7 +2154,7 @@ mod tests {
                 corner = "ne",
                 row = 0, col = 0,
                 width = 44, height = 14,
-                layout = smelt.overlay.layout.leaf(win),
+                layout = smelt.ui.layout.leaf(win),
             })
             "#,
         )
@@ -2276,7 +2276,7 @@ mod tests {
                 name = "ov",
                 anchor = "screen_at", corner = "nw",
                 row = 0, col = 0, width = 40, height = 10,
-                layout = smelt.overlay.layout.leaf(win),
+                layout = smelt.ui.layout.leaf(win),
             })
             "#,
         )
@@ -2302,9 +2302,9 @@ mod tests {
                 name = "ov",
                 anchor = "screen_at", corner = "nw",
                 row = 0, col = 0, width = 40, height = 10,
-                layout = smelt.overlay.layout.vbox({
-                    { smelt.overlay.layout.leaf(w1), height = "fill" },
-                    { smelt.overlay.layout.leaf(w2), height = "fill" },
+                layout = smelt.ui.layout.vbox({
+                    { smelt.ui.layout.leaf(w1), height = "fill" },
+                    { smelt.ui.layout.leaf(w2), height = "fill" },
                 }),
             })
             "#,
@@ -2409,7 +2409,7 @@ mod tests {
                         title = "{title}",
                         anchor = "screen_at", corner = "nw",
                         row = 0, col = 0, width = 40, height = 10,
-                        layout = smelt.overlay.layout.leaf(win),
+                        layout = smelt.ui.layout.leaf(win),
                     }})
                 end
                 state.open = true
@@ -2546,7 +2546,7 @@ mod tests {
                     name = "mix",
                     anchor = "screen_at", corner = "nw",
                     row = 0, col = 0, width = 30, height = 8,
-                    layout = smelt.overlay.layout.leaf(w1),
+                    layout = smelt.ui.layout.leaf(w1),
                 })
             end
             state.open = true
@@ -2559,7 +2559,7 @@ mod tests {
             smelt.overlay.new({
                 anchor = "screen_at", corner = "se",
                 row = 0, col = 0, width = 20, height = 5,
-                layout = smelt.overlay.layout.leaf(w2),
+                layout = smelt.ui.layout.leaf(w2),
             })
             "#,
         )
@@ -2589,7 +2589,7 @@ mod tests {
                     name = "mix",
                     anchor = "screen_at", corner = "nw",
                     row = 0, col = 0, width = 30, height = 8,
-                    layout = smelt.overlay.layout.leaf(w1),
+                    layout = smelt.ui.layout.leaf(w1),
                 })
             end
             if state.open then attach() end
@@ -2832,7 +2832,7 @@ mod tests {
                 name = "seed.ov",
                 anchor = "screen_at", corner = "nw",
                 row = 0, col = 0, width = 30, height = 8,
-                layout = smelt.overlay.layout.leaf(w1),
+                layout = smelt.ui.layout.leaf(w1),
             })
             -- Anonymous overlay (init.lua frame unnamed): must be reaped.
             local b2 = smelt.buf.new()
@@ -2840,7 +2840,7 @@ mod tests {
             smelt.overlay.new({
                 anchor = "screen_at", corner = "se",
                 row = 0, col = 0, width = 20, height = 5,
-                layout = smelt.overlay.layout.leaf(w2),
+                layout = smelt.ui.layout.leaf(w2),
             })
 
             -- smelt.state slot
@@ -3076,7 +3076,7 @@ mod tests {
                     anchor = "screen_at", corner = "nw",
                     row = 0, col = 0, width = 30, height = 10,
                     resizable = true,
-                    layout = smelt.overlay.layout.leaf(w),
+                    layout = smelt.ui.layout.leaf(w),
                 })
             end
             state.open = true

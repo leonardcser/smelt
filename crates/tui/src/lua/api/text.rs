@@ -1,6 +1,6 @@
-//! `smelt.text` — visual-width measurement. UiHost-only (because the
-//! width metric matches the TUI's terminal-cell column count). Render
-//! helpers live in `smelt.render`.
+//! `smelt.text` — visual-width measurement and human-readable formatting.
+//! UiHost-only (the width metric matches the TUI's terminal-cell column
+//! count). Render helpers live in `smelt.render`.
 
 use mlua::prelude::*;
 use smelt_core::content::width::{pad_to_cells, truncate_to_cells};
@@ -94,6 +94,48 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
                 _ => format!("{trimmed}{}", pad_to_cells(&fill, fill_w, gap)),
             };
             Ok(out)
+        },
+    )?;
+    m.fn_(
+        "format_duration",
+        "Format `seconds` as a short human-readable duration: `42s`, `3m 12s`, `1h 5m 0s`. Used by the prompt-bar working indicator; useful for any plugin surfacing elapsed time.",
+        &["seconds"],
+        |_, secs: u64| -> LuaResult<String> {
+            Ok(if secs < 60 {
+                format!("{secs}s")
+            } else if secs < 3600 {
+                format!("{}m {}s", secs / 60, secs % 60)
+            } else {
+                format!("{}h {}m {}s", secs / 3600, (secs % 3600) / 60, secs % 60)
+            })
+        },
+    )?;
+    m.fn_(
+        "format_tokens",
+        "Format a raw token count as `1.2k`, `3.4m`, or the bare integer for values under 1000. Useful for compact statusline / banner displays.",
+        &["n"],
+        |_, n: u64| -> LuaResult<String> {
+            Ok(if n >= 1_000_000 {
+                format!("{:.1}m", n as f64 / 1_000_000.0)
+            } else if n >= 1_000 {
+                format!("{:.1}k", n as f64 / 1_000.0)
+            } else {
+                n.to_string()
+            })
+        },
+    )?;
+    m.fn_(
+        "format_cost",
+        "Format a USD cost with precision that scales to the magnitude: `$0.0042` under one cent, `$0.123` under one dollar, `$1.23` otherwise. Mirrors the format the prompt bar uses for session cost.",
+        &["usd"],
+        |_, usd: f64| -> LuaResult<String> {
+            Ok(if usd < 0.01 {
+                format!("${:.4}", usd)
+            } else if usd < 1.0 {
+                format!("${:.3}", usd)
+            } else {
+                format!("${:.2}", usd)
+            })
         },
     )?;
     Ok(())
