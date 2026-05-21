@@ -1,5 +1,8 @@
--- Session title plugin. Generates a short session title + slug from the most
--- recent user turn after `turn_complete`. Skips when a title is already set.
+-- Session title plugin. Generates a short session title + slug from the
+-- first user submission. Fires on `input_submit` so the title appears
+-- immediately and survives mid-turn interrupts. Skips when a title is
+-- already set, the submission is empty, or the submission is a shell
+-- escape (`!cmd`).
 -- Per-plugin model override: smelt.model.preferred("title", "provider/model").
 
 local aux = require("smelt.aux")
@@ -24,7 +27,7 @@ Bad (too long): {"title": "Investigate and fix the issue where the login button 
 Bad (wrong case): {"title": "Fix Login Button On Mobile", "slug": "fix-login"}
 
 User message:
-%s%s
+%s
 ]]
 
 local SCHEMA = {
@@ -56,43 +59,17 @@ local function parse_response(raw)
   return nil
 end
 
-smelt.cell("turn_complete"):subscribe(function()
-  -- Skip when already titled.
+local inflight = false
+
+smelt.cell("input_submit"):subscribe(function(text)
   if smelt.session.title() then return end
+  if inflight then return end
+  if type(text) ~= "string" then return end
+  local trimmed = text:gsub("^%s+", ""):gsub("%s+$", "")
+  if trimmed == "" or trimmed:sub(1, 1) == "!" then return end
 
-  local messages = smelt.session.messages()
-  if not messages or #messages == 0 then return end
-
-  -- Find last user message and any assistant text after it.
-  local last_user_idx, last_user_text
-  for i = #messages, 1, -1 do
-    local m = messages[i]
-    if m.role == "user" then
-      last_user_idx = i
-      last_user_text = m.content or ""
-      break
-    end
-  end
-  if not last_user_idx or last_user_text == "" then return end
-
-  local tail = {}
-  for i = last_user_idx + 1, #messages do
-    local m = messages[i]
-    if m.role == "assistant" and m.content and m.content ~= "" then
-      table.insert(tail, m.content)
-    end
-  end
-  local assistant_tail = table.concat(tail, "\n")
-  if #assistant_tail > 1000 then
-    assistant_tail = assistant_tail:sub(#assistant_tail - 999)
-  end
-
-  local assistant_block = ""
-  if assistant_tail ~= "" then
-    assistant_block = "\n\nAssistant response (tail):\n" .. assistant_tail
-  end
-
-  local question = string.format(PROMPT_TEMPLATE, last_user_text, assistant_block)
+  inflight = true
+  local question = string.format(PROMPT_TEMPLATE, trimmed)
 
   smelt.engine.ask({
     system = aux.SYSTEM,
@@ -101,8 +78,10 @@ smelt.cell("turn_complete"):subscribe(function()
     reasoning_effort = "off",
     response_format = { name = "session_title", schema = SCHEMA },
     on_response = function(content, err)
+      inflight = false
+      if smelt.session.title() then return end
       if err then
-        local title, slug = fallback_title(last_user_text)
+        local title, slug = fallback_title(trimmed)
         smelt.session.title(title, slug)
         return
       end
@@ -112,7 +91,6 @@ smelt.cell("turn_complete"):subscribe(function()
         local slug = (type(parsed.slug) == "string" and parsed.slug ~= "")
           and parsed.slug
           or smelt.text.slugify(title)
-        -- Cap slug at 5 dash-separated parts.
         local parts = {}
         for part in slug:gmatch("[^-]+") do
           table.insert(parts, part)
@@ -122,7 +100,7 @@ smelt.cell("turn_complete"):subscribe(function()
         smelt.session.title(title, slug)
         return
       end
-      local title, slug = fallback_title(last_user_text)
+      local title, slug = fallback_title(trimmed)
       smelt.session.title(title, slug)
     end,
   })
