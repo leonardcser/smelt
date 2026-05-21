@@ -1,18 +1,17 @@
 //! `Block::User` renderer.
 
-use smelt_core::content::builder::{display_width, LineBuilder};
+use smelt_core::content::builder::LineBuilder;
 use smelt_core::theme::intern;
 
 use super::metrics::chrome_text_width;
 
-/// Preprocessed user message layout: tab-expanded, blank-trimmed lines with a computed `block_w`.
-pub struct UserBlockGeometry {
+/// Preprocessed user message layout: tab-expanded, blank-trimmed lines.
+pub(super) struct UserBlockGeometry {
     pub lines: Vec<String>,
-    pub block_w: usize,
 }
 
 impl UserBlockGeometry {
-    pub fn new(text: &str, text_w: usize) -> Self {
+    pub(super) fn new(text: &str) -> Self {
         let all_lines: Vec<String> = text.lines().map(|l| l.replace('\t', "    ")).collect();
         let start = all_lines.iter().position(|l| !l.is_empty()).unwrap_or(0);
         let end = all_lines
@@ -23,18 +22,7 @@ impl UserBlockGeometry {
             .iter()
             .map(|l| l.trim_end().to_string())
             .collect();
-        let wraps = lines.iter().any(|l| display_width(l) > text_w);
-        let multiline = lines.len() > 1 || wraps;
-        let block_w = if multiline {
-            if wraps {
-                text_w + 1
-            } else {
-                lines.iter().map(|l| display_width(l)).max().unwrap_or(0) + 1
-            }
-        } else {
-            0
-        };
-        Self { lines, block_w }
+        Self { lines }
     }
 }
 
@@ -46,7 +34,7 @@ pub(super) fn render(
 ) -> u16 {
     let is_command = smelt_core::commands::is_command(text.trim());
     let text_w = chrome_text_width(width);
-    let geom = UserBlockGeometry::new(text, text_w);
+    let geom = UserBlockGeometry::new(text);
     super::chrome::render(out, &geom.lines, text_w, |out, chunk, _idx| {
         print_highlights(out, chunk, image_labels, is_command);
     })

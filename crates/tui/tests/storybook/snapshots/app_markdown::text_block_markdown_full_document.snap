@@ -1,5 +1,6 @@
 ---
 source: crates/tui/tests/storybook/app_ctx.rs
+assertion_line: 344
 expression: frame.text()
 ---
 # Release notes
@@ -28,6 +29,7 @@ fn run() -> Result<()> {
 ┃ diff   ┃ tui  ┃
 ┗━━━━━━━━┻━━━━━━┛
 
-─ ✿ working… ──────────────────────────────────────────────────────  ─
+─ ✿ working… ─────────────────────────────────────────────────────────
 
 ──────────────────────────────────────────────────────────────────────
+ ○ normal

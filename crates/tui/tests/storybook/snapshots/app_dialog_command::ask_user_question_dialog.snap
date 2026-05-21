@@ -1,5 +1,6 @@
 ---
 source: crates/tui/tests/storybook/app_ctx.rs
+assertion_line: 344
 expression: frame.text()
 ---
 
@@ -19,3 +20,8 @@ expression: frame.text()
  API key — paste a secret token
  Anonymous — skip auth entirely
  or type a custom answer...
+
+
+
+
+ ○ normal                                                               1:1 100%

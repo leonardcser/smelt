@@ -1,5 +1,6 @@
 ---
 source: crates/tui/tests/storybook/app_ctx.rs
+assertion_line: 345
 expression: frame.styles_text()
 ---
 dim: 70 16
@@ -9,4 +10,5 @@ dim: 70 16
   7   0   1 bg=AnsiValue(237)
   7   1   1 fg=Black bg=White
   7   2  68 bg=AnsiValue(237)
- 15   0  70 bg=AnsiValue(233)
+ 15   0  10 fg=AnsiValue(244) bg=AnsiValue(233)
+ 15  10  60 bg=AnsiValue(233)

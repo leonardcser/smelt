@@ -66,6 +66,14 @@ pub struct LuaMarkOpts {
     pub fg: Option<String>,
     /// Theme group whose background overrides `hl_group`.
     pub bg: Option<String>,
+    /// Direct foreground RGB triple `{ r, g, b }`. Takes precedence over
+    /// `fg`/`hl_group`. Used for renderer-driven colors that can't be
+    /// pre-baked as theme groups (e.g. the prompt top bar's traveling
+    /// wave samples a sinusoid per cell).
+    pub fg_rgb: Option<[u8; 3]>,
+    /// Direct background RGB triple `{ r, g, b }`. Takes precedence over
+    /// `bg`/`hl_group`.
+    pub bg_rgb: Option<[u8; 3]>,
     /// Force-bold the highlight.
     pub bold: Option<bool>,
     /// Force-dim the highlight.
@@ -377,7 +385,11 @@ fn create_or_open(
         .and_then(|t| t.get::<Option<String>>("name").ok())
         .flatten();
 
-    let result_id = crate::lua::with_app(|app| -> crate::smelt_term::BufId {
+    // `try_with_app` (rather than `with_app`) lets bootstrap chunks call
+    // `smelt.buf.new` before an app pointer is installed (the initial
+    // autoload pass). The buffer is created for real on the second pass,
+    // when `bring_up_lua("launch")` reloads with the app available.
+    let result_id = crate::lua::try_with_app(|app| -> crate::smelt_term::BufId {
         // Named buffer that already exists — refresh mutable opts.
         if let Some(ref n) = name {
             if let Some((bid, buf)) = app.ui.lookup_named_buf_mut(n) {
@@ -416,7 +428,8 @@ fn create_or_open(
                 crate::smelt_term::BufId(0)
             }
         }
-    });
+    })
+    .unwrap_or(crate::smelt_term::BufId(0));
 
     Ok(result_id)
 }
@@ -632,6 +645,12 @@ fn build_highlight_style(opts: &LuaMarkOpts) -> crate::smelt_term::SpanStyle {
     }
     if let Some(name) = opts.bg.as_deref() {
         style.bg = resolve_group(name).bg;
+    }
+    if let Some([r, g, b]) = opts.fg_rgb {
+        style.fg = Some(smelt_core::style::Color::Rgb { r, g, b });
+    }
+    if let Some([r, g, b]) = opts.bg_rgb {
+        style.bg = Some(smelt_core::style::Color::Rgb { r, g, b });
     }
     if let Some(b) = opts.bold {
         style.bold = b;

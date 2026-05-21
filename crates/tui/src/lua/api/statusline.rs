@@ -1,99 +1,26 @@
-//! `smelt.statusline` — register/unregister sources and expose a `snapshot()` of all
-//! state the Lua composer needs in one table per refresh.
+//! `smelt.statusline.snapshot()` — feed the Lua statusline composer the
+//! per-refresh slice of host state it can't read from cells (vim mode,
+//! mode pill, permission/proc counts, settings, cursor position).
+//!
+//! Registration of sources moved to pure Lua in
+//! `runtime/lua/smelt/statusline.lua`; this module no longer exposes
+//! `register`/`unregister`.
 
-use crate::lua::{LuaHandle, LuaShared, StatusSource};
-use lua_doc_derive::LuaOpts;
 use mlua::prelude::*;
 use smelt_core::lua::doc::Tier;
-use smelt_core::lua::lua_type::LuaCallback;
 use smelt_core::lua::module::LuaMod;
-use smelt_core::lua::reg::LuaReg;
 use std::sync::Arc;
 
-/// Options accepted by `smelt.statusline.register`.
-#[derive(Default, Debug, LuaOpts)]
-#[lua(name = "smelt.statusline.RegisterOpts")]
-pub struct LuaStatuslineRegisterOpts {
-    /// `"right"` makes the source's segments default to the right strip. Defaults to left.
-    pub align: Option<String>,
-}
+use crate::lua::LuaShared;
 
-pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) -> LuaResult<()> {
+pub(super) fn register(lua: &Lua, smelt: &mlua::Table, _shared: &Arc<LuaShared>) -> LuaResult<()> {
     let m = LuaMod::under(
         lua,
         smelt,
         "statusline",
-        "Register/unregister statusline sources and snapshot composer state. UiHost-only.",
+        "Snapshot host state for the Lua statusline composer. UiHost-only.",
         Tier::UiHost,
     )?;
-    {
-        let s = shared.clone();
-        m.fn_(
-            "register",
-            "Register a Lua statusline source named `name`. The handler is \
-called once per refresh and returns a single segment table or a list. Each \
-segment is `{ text, style_group?, style?, priority?, align_right?, \
-truncatable?, separated? }`: `style_group` names a theme group whose \
-resolved style applies (e.g. `\"SmeltModePlan\"`); `style` is a \
-`StyleDecl` overlay applied on top. Higher `priority` drops first; \
-`truncatable` shrinks with `…` before being fully dropped; `separated` \
-inserts ` · ` before this segment. `opts.align = \"right\"` makes the \
-source's segments default to the right strip; later registrations \
-replace earlier ones with the same name. Returns a `Reg` whose \
-`:remove()` drops the source.",
-            &["name", "handler", "opts"],
-            move |lua,
-                  (name, handler, opts): (
-                String,
-                LuaCallback<mlua::Table, mlua::Table>,
-                Option<LuaStatuslineRegisterOpts>,
-            )|
-                  -> LuaResult<LuaReg> {
-                let default_align_right = opts
-                    .and_then(|o| o.align)
-                    .map(|s| s == "right")
-                    .unwrap_or(false);
-                let handle = LuaHandle::from_func(lua, handler.into_inner())?;
-                let source = StatusSource {
-                    handle,
-                    default_align_right,
-                };
-                if let Ok(mut sources) = s.statusline_sources.lock() {
-                    if let Some(existing) = sources.iter_mut().find(|(n, _)| n == &name) {
-                        existing.1 = source;
-                    } else {
-                        sources.push((name.clone(), source));
-                    }
-                }
-                let s_for_reg = s.clone();
-                Ok(LuaReg::new(move || {
-                    s_for_reg
-                        .statusline_sources
-                        .lock()
-                        .map(|mut v| {
-                            let before = v.len();
-                            v.retain(|(n, _)| n != &name);
-                            v.len() != before
-                        })
-                        .unwrap_or(false)
-                }))
-            },
-        )?;
-    }
-    {
-        let s = shared.clone();
-        m.fn_(
-            "unregister",
-            "Drop the statusline source registered under `name`. No-op if no such source exists.",
-            &["name"],
-            move |_, name: String| -> LuaResult<()> {
-                if let Ok(mut sources) = s.statusline_sources.lock() {
-                    sources.retain(|(n, _)| n != &name);
-                }
-                Ok(())
-            },
-        )?;
-    }
     m.fn_(
         "snapshot",
         "Return the statusline state in one table per refresh: `tps` \
@@ -102,12 +29,12 @@ available), `vim`, `mode`, `permission_pending`, `running_procs`, \
 `running_agents`, `task_label`, `settings`, and `position`. The \
 working pill lives in the prompt top bar now; plugins that need work \
 state read the `work_*` cells instead. Styles are not projected — \
-name a `style_group` on each segment. Returns an empty table when the \
-app pointer is unavailable.",
+look colors up by theme group in the composer. Returns an empty \
+table when the app pointer is unavailable.",
         &[],
         |lua, ()| -> LuaResult<mlua::Table> {
             match crate::lua::try_with_app(|app| build_snapshot(app, lua)) {
-                None => lua.create_table(), // no app pointer — status.lua short-circuits
+                None => lua.create_table(),
                 Some(result) => result,
             }
         },
@@ -115,23 +42,22 @@ app pointer is unavailable.",
     Ok(())
 }
 
-/// Build the snapshot the Lua composer consumes once per refresh. Carries
-/// raw app state only — style decisions live in `status.lua` via theme
-/// groups (`style_group`), so plugins look colors up by name instead of
-/// receiving a hand-projected palette.
+fn vim_mode_label(mode: Option<crate::smelt_term::VimMode>) -> Option<&'static str> {
+    match mode {
+        Some(crate::smelt_term::VimMode::Insert) => Some("INSERT"),
+        Some(crate::smelt_term::VimMode::Visual) => Some("VISUAL"),
+        Some(crate::smelt_term::VimMode::VisualLine) => Some("VISUAL LINE"),
+        _ => None,
+    }
+}
+
 fn build_snapshot(app: &mut crate::app::TuiApp, lua: &Lua) -> LuaResult<mlua::Table> {
     let t = lua.create_table()?;
 
-    // Tokens-per-second from the live or just-archived turn. Top-level
-    // because it's a turn metric the status bar paints next to the
-    // cache-hit ratio; the working pill itself lives in the prompt
-    // top bar, and plugins that need full work state read the `work_*`
-    // cells directly.
     if let Some(tps) = app.working.turn_meta().and_then(|m| m.avg_tps) {
         t.set("tps", tps)?;
     }
 
-    // Vim mode: focused overlay-leaf with vim wins; non-vim overlay leaf yields no label.
     let vim_tbl = lua.create_table()?;
     let focused_window = app.ui.focused_window();
     let focused_window_has_vim = focused_window.map(|w| w.vim_enabled).unwrap_or(false);
@@ -164,7 +90,7 @@ fn build_snapshot(app: &mut crate::app::TuiApp, lua: &Lua) -> LuaResult<mlua::Ta
     };
     vim_tbl.set("enabled", vim_enabled)?;
     if vim_enabled {
-        let label = crate::content::status::vim_mode_label(vim_mode).unwrap_or("NORMAL");
+        let label = vim_mode_label(vim_mode).unwrap_or("NORMAL");
         vim_tbl.set("label", label)?;
         let kind = match vim_mode {
             Some(crate::smelt_term::VimMode::Insert) => "insert",
@@ -176,12 +102,10 @@ fn build_snapshot(app: &mut crate::app::TuiApp, lua: &Lua) -> LuaResult<mlua::Ta
     }
     t.set("vim", vim_tbl)?;
 
-    // AgentMode: name only; icon resolves in Lua so plugin-defined modes pick up their glyph.
     let mode_tbl = lua.create_table()?;
     mode_tbl.set("name", app.core.config.mode.as_str())?;
     t.set("mode", mode_tbl)?;
 
-    // Right-strip indicators.
     let blocked = app.focused_overlay_blocks_agent();
     t.set("permission_pending", app.pending_dialog && !blocked)?;
     t.set("running_procs", app.core.processes.running_count() as i64)?;
@@ -195,10 +119,6 @@ fn build_snapshot(app: &mut crate::app::TuiApp, lua: &Lua) -> LuaResult<mlua::Ta
     settings.set("show_tps", app.core.config.settings.show_tps)?;
     t.set("settings", settings)?;
 
-    // Cursor position: tracks the focused leaf's window (prompt, transcript, or
-    // a vim-enabled overlay like /help). All windows expose display-space
-    // cursor_abs_row / cursor_col via projection maps, and their buffer's
-    // line_count is the display-row total — same formula works for every leaf.
     let position = app.ui.focused_window().and_then(|w| {
         let total = app.ui.buf(w.buf).map(|b| b.line_count()).unwrap_or(0);
         if total == 0 {

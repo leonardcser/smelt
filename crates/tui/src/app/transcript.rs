@@ -4,7 +4,6 @@ use crate::app::TuiApp;
 use crate::content::selection::wrap_with_offsets;
 use crate::smelt_term::{BufCreateOpts, Buffer};
 
-use crate::content::transcript_parsers as blocks;
 use smelt_core::content::block_layout::{BlockLayout, HboxItem, RenderedLayout};
 use smelt_core::transcript_model::{
     Block, BlockId, ToolOutput, ToolOutputRef, ToolState, ToolStatus,
@@ -470,33 +469,17 @@ impl TuiApp {
             .collect()
     }
 
-    /// Row counts `(above, input)` for the prompt block. `above` = queued + stash + top bar.
-    pub(crate) fn measure_prompt_rows(
+    /// Wrap the prompt input against `width` and return the resulting row count.
+    /// The Lua layout composer reads this as `state.prompt_input_rows` and
+    /// gives the prompt window that many rows in the splits tree.
+    pub(crate) fn measure_prompt_input_rows(
         &self,
-        state: &crate::input::PromptState,
         edit_buf: &crate::smelt_term::Buffer,
         width: usize,
-        queued: &[String],
-    ) -> (u16, u16) {
+    ) -> u16 {
         let usable = width.saturating_sub(2);
-        let text_w = usable.saturating_sub(2).max(1);
-
-        let stash: u16 = if state.stash.is_some() { 1 } else { 0 };
-
-        let mut queued_rows = 0u16;
-        for msg in queued {
-            let geom = blocks::UserBlockGeometry::new(msg, text_w);
-            for line in &geom.lines {
-                let w = crate::content::builder::display_width(line);
-                queued_rows += if w == 0 { 1 } else { w.div_ceil(text_w) as u16 };
-            }
-        }
-
         let wrap = wrap_with_offsets(edit_buf.source(), &[], usable);
-        let input_rows = wrap.visual_lines.len().max(1) as u16;
-
-        let above = queued_rows + stash + 1; // +1 = top bar
-        (above, input_rows)
+        wrap.visual_lines.len().max(1) as u16
     }
 }
 

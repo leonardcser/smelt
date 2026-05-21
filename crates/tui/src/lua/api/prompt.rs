@@ -102,5 +102,30 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
             Ok(())
         },
     )?;
+    m.fn_(
+        "queued",
+        "Return the array of messages currently queued behind the active turn. Empty when the agent is idle and no busy work is in flight. The top-bar renderer reads this each frame to surface waiting messages above the input.",
+        &[],
+        |_, ()| -> LuaResult<Vec<String>> {
+            Ok(crate::lua::try_with_app(|app| {
+                let agent_running = app.agent.is_some();
+                let show_queued = agent_running || app.busy_stack.is_busy();
+                if show_queued {
+                    app.queued_messages.clone()
+                } else {
+                    Vec::new()
+                }
+            })
+            .unwrap_or_default())
+        },
+    )?;
+    m.fn_(
+        "has_stash",
+        "Return whether the prompt currently holds a stashed input snapshot (Ctrl+S). The top-bar renderer uses this to surface a `» Stashed (ctrl+s to unstash)` row.",
+        &[],
+        |_, ()| -> LuaResult<bool> {
+            Ok(crate::lua::try_with_app(|app| app.input.stash.is_some()).unwrap_or(false))
+        },
+    )?;
     Ok(())
 }

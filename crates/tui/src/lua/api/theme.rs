@@ -170,33 +170,6 @@ fn style_decl_to_style(decl: &StyleDecl, is_light: bool) -> Style {
     }
 }
 
-/// Apply `decl` on top of `out` in-place. Fields the decl sets win; unset
-/// fields keep their existing value. Used by callers that compose a
-/// theme-group style with a per-call override (e.g. status items).
-pub(crate) fn overlay_style_decl(out: &mut Style, decl: &StyleDecl, is_light: bool) {
-    if let Some(c) = decl.fg.as_ref().and_then(|c| c.to_color(is_light)) {
-        out.fg = Some(c);
-    }
-    if let Some(c) = decl.bg.as_ref().and_then(|c| c.to_color(is_light)) {
-        out.bg = Some(c);
-    }
-    if let Some(v) = decl.bold {
-        out.bold = v;
-    }
-    if let Some(v) = decl.italic {
-        out.italic = v;
-    }
-    if let Some(v) = decl.dim {
-        out.dim = v;
-    }
-    if let Some(v) = decl.underline {
-        out.underline = v;
-    }
-    if let Some(v) = decl.crossedout {
-        out.crossedout = v;
-    }
-}
-
 /// Publish the app's current theme to the process-wide active theme
 /// slot. Deep renderers (the diff renderer in `smelt_core`) read from
 /// that slot, so any Lua-driven mutation needs to refresh it.

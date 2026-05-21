@@ -59,11 +59,6 @@ pub struct RegisteredCommand {
     pub hidden: bool,
 }
 
-pub struct StatusSource {
-    pub handle: LuaHandle,
-    pub default_align_right: bool,
-}
-
 pub struct ToolHandles {
     pub execute: LuaHandle,
     pub approval_patterns: Option<LuaHandle>,
@@ -83,8 +78,6 @@ pub struct LuaShared {
     /// to ask "is `/foo` a known command?" — this is the answer.
     pub command_names: Arc<Mutex<HashSet<String>>>,
     pub keymaps: Mutex<HashMap<(String, String), LuaHandle>>,
-    /// Vec preserves registration order; re-registering an existing name updates in place.
-    pub statusline_sources: Mutex<Vec<(String, StatusSource)>>,
     /// Lua-registered composer for the main TUI layout. When `Some`, the
     /// host invokes it once per frame to produce a `LuaUiLayout` tree
     /// describing the split between transcript, prompt, and any
@@ -238,7 +231,6 @@ impl Default for LuaShared {
             commands: Mutex::new(HashMap::new()),
             command_names: Arc::new(Mutex::new(HashSet::new())),
             keymaps: Mutex::new(HashMap::new()),
-            statusline_sources: Mutex::new(Vec::new()),
             main_layout_composer: Mutex::new(None),
             win_renderers: Mutex::new(HashMap::new()),
             tools: Mutex::new(HashMap::new()),
@@ -280,7 +272,7 @@ impl LuaShared {
     }
 
     /// Drop every Lua handle from the registries `/reload` repopulates:
-    /// commands, keymaps, statusline sources, tools, callbacks, hooks.
+    /// commands, keymaps, layout composer + window renderers, tools, callbacks, hooks.
     pub fn clear_lua_handles(&self) {
         if let Ok(mut m) = self.commands.lock() {
             m.clear();
@@ -290,9 +282,6 @@ impl LuaShared {
         }
         if let Ok(mut m) = self.keymaps.lock() {
             m.clear();
-        }
-        if let Ok(mut v) = self.statusline_sources.lock() {
-            v.clear();
         }
         if let Ok(mut c) = self.main_layout_composer.lock() {
             *c = None;

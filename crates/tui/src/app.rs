@@ -11,7 +11,6 @@ pub(crate) mod lua_handlers;
 pub(crate) mod mouse;
 pub(crate) mod pane_focus;
 pub(crate) mod render_loop;
-pub(crate) mod status_bar;
 #[cfg(any(test, feature = "harness"))]
 pub mod test_harness;
 pub(crate) mod transcript;
@@ -59,10 +58,6 @@ pub struct TuiApp {
     pub(crate) task_label: Option<String>,
     pub(crate) pending_dialog: bool,
     pub(crate) pending_quit: bool,
-    /// Items from Lua-registered statusline sources, appended each frame.
-    pub(crate) custom_status_items: Vec<crate::content::status::StatusItem>,
-    /// Last error per statusline source; rate-limits toast spam.
-    statusline_last_errors: HashMap<String, String>,
     pub(crate) notification: Option<crate::smelt_term::WinId>,
     pub(crate) cmdline: crate::app::cmdline::CmdlineState,
     pub(crate) picker_state: HashMap<crate::smelt_term::WinId, crate::picker::PickerState>,
@@ -134,9 +129,7 @@ pub struct PlaceholderOpts {
     pub dismiss_keys: Vec<crate::smelt_term::KeyBind>,
 }
 
-pub use well_known::{
-    PROMPT_ABOVE_WIN, PROMPT_BELOW_WIN, PROMPT_EDIT_BUF, PROMPT_WIN, TRANSCRIPT_WIN,
-};
+pub use well_known::{PROMPT_EDIT_BUF, PROMPT_WIN, TRANSCRIPT_WIN};
 
 /// Stack of live `smelt.work.busy` tokens. Each `push` returns a
 /// monotonic id consumed by `release`; the prompt top-bar indicator
@@ -203,12 +196,12 @@ impl BusyStack {
 }
 
 /// Well-known stable `WinId`s for the always-present split-tree windows.
+/// Prompt input and the transcript stay engine-owned; the prompt bars and
+/// statusline are Lua-allocated by `runtime/lua/smelt/prompt_bar.lua` and
+/// `runtime/lua/smelt/statusline.lua`.
 pub(crate) struct WellKnown {
     pub(crate) prompt: crate::smelt_term::WinId,
-    pub(crate) prompt_above: crate::smelt_term::WinId,
-    pub(crate) prompt_below: crate::smelt_term::WinId,
     pub(crate) transcript: crate::smelt_term::WinId,
-    pub(crate) statusline: crate::smelt_term::WinId,
     pub(crate) cmdline: Option<crate::smelt_term::WinId>,
 }
 
@@ -384,21 +377,6 @@ impl TuiApp {
                 // them and they stay where the caller put them.
                 w.follow_tail = true;
             }
-            let prompt_above_buf = ui.buf_create(crate::smelt_term::BufCreateOpts::default());
-            assert!(ui.win_open_split_at(
-                crate::app::PROMPT_ABOVE_WIN,
-                prompt_above_buf,
-                crate::smelt_term::SplitConfig {
-                    region: "prompt_above".into(),
-                    gutters: crate::smelt_term::Gutters {
-                        scrollbar: false,
-                        ..Default::default()
-                    },
-                },
-            ));
-            if let Some(w) = ui.win_mut(crate::app::PROMPT_ABOVE_WIN) {
-                w.focusable = false;
-            }
             assert!(ui.win_open_split_at(
                 crate::app::PROMPT_WIN,
                 input_display_buf,
@@ -425,55 +403,21 @@ impl TuiApp {
                     w.set_vim_mode(crate::smelt_term::VimMode::Insert);
                 }
             }
-            let prompt_below_buf = ui.buf_create(crate::smelt_term::BufCreateOpts::default());
-            assert!(ui.win_open_split_at(
-                crate::app::PROMPT_BELOW_WIN,
-                prompt_below_buf,
-                crate::smelt_term::SplitConfig {
-                    region: "prompt_below".into(),
-                    gutters: crate::smelt_term::Gutters {
-                        scrollbar: false,
-                        ..Default::default()
-                    },
-                },
-            ));
-            if let Some(w) = ui.win_mut(crate::app::PROMPT_BELOW_WIN) {
-                w.focusable = false;
-            }
-            let status_buf = ui.buf_create(crate::smelt_term::BufCreateOpts::default());
-            let status_win = ui
-                .win_open_split(
-                    status_buf,
-                    crate::smelt_term::SplitConfig {
-                        region: "status".into(),
-                        gutters: crate::smelt_term::Gutters {
-                            scrollbar: false,
-                            ..Default::default()
-                        },
-                    },
-                )
-                .expect("status buffer was just created");
-            if let Some(win) = ui.win_mut(status_win) {
-                win.focusable = false;
-            }
-            // Seed a minimal splits tree so overlay anchors can resolve before the first render frame.
-            ui.set_layout(crate::content::layout::build_layout_tree(
-                &crate::content::layout::LayoutInput {
-                    term_height: term_h,
-                    prompt_above_rows: 1,
-                    prompt_input_rows: 1,
-                },
-                status_win,
+            // Seed a minimal splits tree (transcript + prompt) so overlay
+            // anchors resolve before the first render frame. The Lua
+            // composer (registered by `runtime/lua/smelt/layout.lua`)
+            // replaces this on the next render once `bring_up_lua` runs
+            // and `prompt_bar.lua` / `statusline.lua` have allocated
+            // their windows.
+            ui.set_layout(crate::content::layout::seed_layout_tree(
+                /* prompt_input_rows */ 1,
             ));
             ui.set_focus(crate::app::PROMPT_WIN);
             (
                 ui,
                 WellKnown {
                     prompt: crate::app::PROMPT_WIN,
-                    prompt_above: crate::app::PROMPT_ABOVE_WIN,
-                    prompt_below: crate::app::PROMPT_BELOW_WIN,
                     transcript: crate::app::TRANSCRIPT_WIN,
-                    statusline: status_win,
                     cmdline: None,
                 },
             )
@@ -507,8 +451,6 @@ impl TuiApp {
             task_label: None,
             pending_dialog: false,
             pending_quit: false,
-            custom_status_items: Vec::new(),
-            statusline_last_errors: HashMap::new(),
             notification: None,
             cmdline: crate::app::cmdline::CmdlineState::default(),
             picker_state: HashMap::new(),
@@ -657,74 +599,6 @@ impl TuiApp {
         };
 
         (state, label)
-    }
-
-    /// Pre-composed top-bar indicator state, or `None` when the
-    /// indicator should not render (`Idle` with no last outcome).
-    pub(crate) fn indicator_info(&self) -> Option<crate::content::prompt_buf::IndicatorInfo> {
-        use crate::content::prompt_buf::IndicatorInfo;
-        use smelt_core::working::WorkState;
-        let (state, resolved_label) = self.resolve_work_state();
-        if matches!(state, WorkState::Idle) {
-            return None;
-        }
-        let label = if resolved_label.is_empty() {
-            match state {
-                WorkState::Done => "done".to_string(),
-                WorkState::Interrupted => "interrupted".to_string(),
-                WorkState::Paused => "paused".to_string(),
-                _ => resolved_label,
-            }
-        } else {
-            resolved_label
-        };
-        // Active labels get a trailing ellipsis ("working…", "compacting…")
-        // so they read as in-progress even at a glance.
-        let label = if matches!(
-            state,
-            WorkState::Working | WorkState::Retrying | WorkState::Busy
-        ) && !label.is_empty()
-        {
-            format!("{label}\u{2026}")
-        } else {
-            label
-        };
-        let animating = matches!(
-            state,
-            WorkState::Working | WorkState::Retrying | WorkState::Busy
-        );
-        let elapsed = match state {
-            WorkState::Busy => self.busy_stack.since().map(|s| s.elapsed()),
-            _ => self.working.elapsed(),
-        };
-        let glyph = if animating {
-            smelt_core::content::glyph_for(elapsed.unwrap_or_default())
-        } else if matches!(state, WorkState::Paused) {
-            smelt_core::content::glyph_for(std::time::Duration::ZERO)
-        } else {
-            ""
-        };
-        // Duration suppressed for `Interrupted` — the label alone reads
-        // cleaner without trailing zero-or-stale seconds.
-        let duration_text = if matches!(state, WorkState::Interrupted) {
-            None
-        } else {
-            elapsed
-                .filter(|d| d.as_secs() > 0)
-                .map(|d| smelt_core::utils::format_duration(d.as_secs()))
-        };
-        let retry_text = self.working.retry_info().map(|(attempt, remaining_ms)| {
-            format!("retrying in {}s #{}", remaining_ms / 1000, attempt)
-        });
-        let pulse_elapsed = if animating { elapsed } else { None };
-        Some(IndicatorInfo {
-            state,
-            label,
-            glyph,
-            duration_text,
-            retry_text,
-            pulse_elapsed,
-        })
     }
 
     /// Derive and publish the `work_*` cells from `WorkingState` and the
@@ -1100,19 +974,16 @@ impl TuiApp {
                 crate::smelt_term::LayoutTree::leaf(win),
             )]),
         )]);
+        // Float `1` row above the prompt's Lua-allocated top bar (or the
+        // prompt input on cold start, before Lua has registered the bar).
+        // Anchoring against the named window keeps the toast correctly
+        // placed even when queued/stash rows grow the top bar.
+        let anchor = crate::content::layout::anchor_above_prompt_chrome(&self.ui, 1);
         let _overlay_id = self.ui.overlay_open(
-            crate::smelt_term::Overlay::new(
-                layout,
-                crate::smelt_term::layout::Anchor::Win {
-                    target: crate::app::PROMPT_ABOVE_WIN.into(),
-                    attach: crate::smelt_term::Align::NW,
-                    row_offset: -1,
-                    col_offset: 0,
-                },
-            )
-            // Sits below dialogs (default overlay z 50) so a toast never
-            // obscures a modal asking for input.
-            .with_z(40),
+            crate::smelt_term::Overlay::new(layout, anchor)
+                // Sits below dialogs (default overlay z 50) so a toast
+                // never obscures a modal asking for input.
+                .with_z(40),
         );
         self.notification = Some(win);
     }
@@ -1374,25 +1245,6 @@ impl TuiApp {
                     }
                 }
                 self.pending_dialog = !self.pending_dialogs.is_empty();
-            }
-
-            // Recompute statusline after engine events drain so a turn ending mid-iteration
-            // (TurnComplete) flips the spinner pill to "done" in the same frame, instead of
-            // showing stale items until the next input event.
-            let (items, tick_errors) = self.lua.tick_statusline(self.ui.theme());
-            self.custom_status_items = items;
-            for (name, msg) in tick_errors {
-                match msg {
-                    Some(new_msg) => {
-                        if self.statusline_last_errors.get(&name) != Some(&new_msg) {
-                            self.notify_error(new_msg.clone());
-                            self.statusline_last_errors.insert(name, new_msg);
-                        }
-                    }
-                    None => {
-                        self.statusline_last_errors.remove(&name);
-                    }
-                }
             }
 
             self.render_normal(self.agent.is_some());

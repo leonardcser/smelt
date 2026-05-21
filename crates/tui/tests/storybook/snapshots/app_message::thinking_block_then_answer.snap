@@ -1,5 +1,6 @@
 ---
 source: crates/tui/tests/storybook/app_ctx.rs
+assertion_line: 344
 expression: frame.text()
 ---
 │ let me think about this carefully.
@@ -10,6 +11,7 @@ the answer is 42.
 
 
 
-─ ✿ working… ────────────────────────  ─
+─ ✿ working… ───────────────────────────
 
 ────────────────────────────────────────
+ ○ normal

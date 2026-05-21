@@ -1,11 +1,13 @@
 ---
 source: crates/tui/tests/storybook/app_ctx.rs
+assertion_line: 344
 expression: frame.text()
 ---
 ⏺ grep (?P<bad in crates/tui/src
   regex parse error: unterminated group
 
 
-─ ✿ working… ──────────────────────────────────────────────────────  ─
+─ ✿ working… ─────────────────────────────────────────────────────────
 
 ──────────────────────────────────────────────────────────────────────
+ ○ normal

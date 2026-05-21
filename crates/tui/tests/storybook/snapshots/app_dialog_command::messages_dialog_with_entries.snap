@@ -1,5 +1,6 @@
 ---
 source: crates/tui/tests/storybook/app_ctx.rs
+assertion_line: 344
 expression: frame.text()
 ---
 
@@ -15,3 +16,4 @@ expression: frame.text()
 
  [warn] renderer
    second warning
+ ○ normal

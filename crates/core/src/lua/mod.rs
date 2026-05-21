@@ -19,7 +19,7 @@ pub use runtime::{
 };
 pub use shared::{
     CliFlagKind, CliFlagSpec, CliFlagValue, DefaultShell, Hooks, LuaResumeSink, LuaShared, Phase,
-    RegisteredCommand, StatusSource, ToolHandles, LUA_BUF_ID_BASE,
+    RegisteredCommand, ToolHandles, LUA_BUF_ID_BASE,
 };
 pub(crate) use task::step_task_owned;
 pub use task::{

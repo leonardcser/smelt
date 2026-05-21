@@ -18,4 +18,5 @@ dim: 70 16
  13  69   1 bg=AnsiValue(235)
  14  24   6 fg=AnsiValue(208)
  14  69   1 bg=AnsiValue(235)
- 15   0  70 bg=AnsiValue(233)
+ 15   0  10 fg=AnsiValue(244) bg=AnsiValue(233)
+ 15  10  60 bg=AnsiValue(233)

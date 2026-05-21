@@ -18,3 +18,4 @@ expression: frame.text()
  buf:source(text) replaces the whole buffer with a single string
  and reparses; buf:lines(...) overwrites the row array directly
  without reparsing. Use source for markdown/code where formatting
+ ○ normal

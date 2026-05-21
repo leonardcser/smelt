@@ -17,8 +17,6 @@ pub(crate) use app_ref::{install_app_ptr, try_with_core, with_app, with_app_ptr}
 
 pub(crate) use smelt_core::lua::{LuaHandle, TaskDriveOutput, ToolEnv, ToolExecResult};
 
-pub(crate) use smelt_core::lua::StatusSource;
-
 use mlua::prelude::*;
 
 use std::sync::{Arc, Mutex};
@@ -390,61 +388,6 @@ impl LuaRuntime {
         self.core.load_project_early_init(cwd);
     }
 
-    /// Call every registered statusline source, returning combined items and per-source errors.
-    /// Each source returns a single item or a list; empty-text items are skipped.
-    /// The second tuple element is `(source_name, error_or_none)` per source.
-    /// Item styles are resolved against `theme` at parse time so `style_group`
-    /// references track the live theme without per-frame Lua lookups.
-    pub(crate) fn tick_statusline(
-        &self,
-        theme: &smelt_core::theme::Theme,
-    ) -> (
-        Vec<crate::content::status::StatusItem>,
-        Vec<(String, Option<String>)>,
-    ) {
-        let Ok(sources) = self.shared.statusline_sources.lock() else {
-            return (Vec::new(), Vec::new());
-        };
-        let mut items = Vec::new();
-        let mut tick_errors: Vec<(String, Option<String>)> = Vec::new();
-        let is_light = theme.is_light();
-        for (name, source) in sources.iter() {
-            let Ok(func) = self
-                .core
-                .lua
-                .registry_value::<mlua::Function>(&source.handle.key)
-            else {
-                continue;
-            };
-            let _perf = smelt_perf::perf::begin("lua:statusline");
-            match func.call::<mlua::Value>(()) {
-                Ok(mlua::Value::Nil) => {
-                    tick_errors.push((name.clone(), None));
-                }
-                Ok(mlua::Value::Table(t)) => {
-                    collect_statusline_items(
-                        &t,
-                        source.default_align_right,
-                        theme,
-                        is_light,
-                        &mut items,
-                    );
-                    tick_errors.push((name.clone(), None));
-                }
-                Ok(_) => {
-                    tick_errors.push((
-                        name.clone(),
-                        Some(format!("statusline[{name}]: expected table")),
-                    ));
-                }
-                Err(e) => {
-                    tick_errors.push((name.clone(), Some(format!("statusline[{name}]: {e}"))));
-                }
-            }
-        }
-        (items, tick_errors)
-    }
-
     /// Fire the `smelt.engine.ask` callback registered under `id` with
     /// `(content, err_or_nil)`. The error table mirrors the
     /// `smelt.engine.AskError` shape — `{ kind, message }` strings —
@@ -496,66 +439,6 @@ impl LuaRuntime {
             self.record_error(format!("smelt.confirm.open: {e}"));
         }
     }
-}
-
-/// Parse a single-item or list-of-items Lua table into `StatusItem`s, appending to `out`.
-/// Each item resolves `style_group` (theme group lookup) and overlays `style`
-/// (`StyleDecl`) before being pushed.
-fn collect_statusline_items(
-    table: &mlua::Table,
-    default_align_right: bool,
-    theme: &smelt_core::theme::Theme,
-    is_light: bool,
-    out: &mut Vec<crate::content::status::StatusItem>,
-) {
-    let looks_like_item = table.contains_key("text").unwrap_or(false);
-    if looks_like_item {
-        if let Some(item) = statusline_item_from(table, default_align_right, theme, is_light) {
-            out.push(item);
-        }
-        return;
-    }
-    for pair in table.sequence_values::<mlua::Table>() {
-        let Ok(entry) = pair else { continue };
-        if let Some(item) = statusline_item_from(&entry, default_align_right, theme, is_light) {
-            out.push(item);
-        }
-    }
-}
-
-fn statusline_item_from(
-    entry: &mlua::Table,
-    default_align_right: bool,
-    theme: &smelt_core::theme::Theme,
-    is_light: bool,
-) -> Option<crate::content::status::StatusItem> {
-    let text: String = entry.get("text").ok()?;
-    if text.is_empty() {
-        return None;
-    }
-    let mut style = smelt_core::style::Style::default();
-    if let Ok(group) = entry.get::<String>("style_group") {
-        if !group.is_empty() {
-            style = theme.get(&group);
-        }
-    }
-    if let Ok(decl) = entry.get::<crate::theme::StyleDecl>("style") {
-        api::theme::overlay_style_decl(&mut style, &decl, is_light);
-    }
-    // Per-item `align_right` wins over source-level default.
-    let align_right = if entry.contains_key("align_right").unwrap_or(false) {
-        entry.get("align_right").unwrap_or(default_align_right)
-    } else {
-        default_align_right
-    };
-    Some(crate::content::status::StatusItem {
-        text,
-        style,
-        priority: entry.get("priority").unwrap_or(0),
-        align_right,
-        truncatable: entry.get("truncatable").unwrap_or(false),
-        separated: entry.get("separated").unwrap_or(false),
-    })
 }
 
 impl Default for LuaRuntime {
@@ -1048,9 +931,9 @@ mod tests {
 
     #[test]
     fn reload_clears_tui_surfaces() {
-        // End-to-end reload across core (cmd) + TUI (keymap, statusline)
-        // registries. Catches the case where a new surface is added to
-        // `LuaShared` and someone forgets to extend `clear_lua_handles`.
+        // End-to-end reload across core (cmd) + TUI (keymap) registries.
+        // Catches the case where a new surface is added to `LuaShared` and
+        // someone forgets to extend `clear_lua_handles`.
         let tmp = tempfile::tempdir().unwrap();
         let init = tmp.path().join("init.lua");
         std::fs::write(
@@ -1058,7 +941,6 @@ mod tests {
             r#"
                 smelt.cmd.register("plug_cmd", function() end)
                 smelt.keymap.set("n", "<C-g>", function() end)
-                smelt.statusline.register("plug_src", function() return {} end)
             "#,
         )
         .unwrap();
@@ -1078,29 +960,16 @@ mod tests {
             k.keys().any(|(_, c)| c == "<C-g>")
         };
         assert!(has_user_chord(&shared.keymaps.lock().unwrap()));
-        assert!(shared
-            .statusline_sources
-            .lock()
-            .unwrap()
-            .iter()
-            .any(|(n, _)| n == "plug_src"));
 
-        // Reload to an empty body: the user-registered command, keymap, and
-        // statusline source must disappear. Autoload-registered keymaps
-        // (e.g. F5/reload, F12/perf_panel) come back, so we only assert the
-        // user chord is gone.
+        // Reload to an empty body: every user-registered surface disappears.
+        // Autoload-registered keymaps (e.g. F5/reload, F12/perf_panel) come
+        // back, so we only assert the user chord is gone.
         std::fs::write(&init, "").unwrap();
         let err = rt.reload(None);
         assert!(err.is_none(), "reload: {err:?}");
 
         assert!(!shared.commands.lock().unwrap().contains_key("plug_cmd"));
         assert!(!has_user_chord(&shared.keymaps.lock().unwrap()));
-        assert!(!shared
-            .statusline_sources
-            .lock()
-            .unwrap()
-            .iter()
-            .any(|(n, _)| n == "plug_src"));
     }
 
     #[test]

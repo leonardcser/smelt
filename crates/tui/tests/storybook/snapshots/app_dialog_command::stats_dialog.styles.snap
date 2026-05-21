@@ -8,4 +8,5 @@ dim: 70 12
   8   2   5 fg=AnsiValue(208) attrs=dim
   8   7  63 fg=AnsiValue(208)
   9   1   1 fg=Black bg=White
- 11   0  70 bg=AnsiValue(233)
+ 11   0  10 fg=AnsiValue(244) bg=AnsiValue(233)
+ 11  10  60 bg=AnsiValue(233)

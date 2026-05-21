@@ -708,6 +708,11 @@ impl TestApp {
     pub fn render_to_frame(&mut self) -> crate::smelt_term::SnapshotFrame {
         let agent_running = self.app.agent.is_some();
         let _guard = crate::lua::install_app_ptr(&mut self.app);
+        // The main loop refreshes diff cells once per tick before
+        // rendering; storybook drives `render_normal` directly without
+        // that loop, so we have to publish here or Lua renderers see
+        // stale `work_*` / `vim_mode` / `now` values.
+        self.app.publish_diff_cells();
         self.app.render_normal(agent_running);
         self.app.ui.snapshot()
     }
@@ -1227,12 +1232,6 @@ impl TestApp {
         };
 
         let shared = self.app.lua.shared();
-        if let Ok(srcs) = shared.statusline_sources.lock() {
-            for (name, src) in srcs.iter() {
-                check(&format!("statusline_sources[{name}]"), &src.handle);
-            }
-        }
-
         let core = &shared.core;
         if let Ok(cbs) = core.callbacks.lock() {
             for (id, h) in cbs.iter() {
@@ -2809,7 +2808,6 @@ mod tests {
             -- LuaShared registries
             smelt.cmd.register("seed_cmd", function() end)
             smelt.keymap.set("n", "<C-g>", function() end)
-            smelt.statusline.register("seed_src", function() return {} end)
             smelt.tools.register({
                 name = "seed_tool",
                 description = "",
@@ -2863,12 +2861,6 @@ mod tests {
             .unwrap()
             .keys()
             .any(|(_, c)| c == "<C-g>"));
-        assert!(shared
-            .statusline_sources
-            .lock()
-            .unwrap()
-            .iter()
-            .any(|(n, _)| n == "seed_src"));
         assert!(shared.tools.lock().unwrap().contains_key("seed_tool"));
         assert!(!shared.hooks.tool_before.is_empty());
         assert!(!shared.hooks.provider_request.is_empty());
@@ -2904,15 +2896,6 @@ mod tests {
                 .keys()
                 .any(|(_, c)| c == "<C-g>"),
             "user keymap cleared"
-        );
-        assert!(
-            !shared
-                .statusline_sources
-                .lock()
-                .unwrap()
-                .iter()
-                .any(|(n, _)| n == "seed_src"),
-            "user statusline source cleared"
         );
         assert!(
             !shared.tools.lock().unwrap().contains_key("seed_tool"),

@@ -6,28 +6,11 @@ pub(crate) mod block_buffers;
 pub(crate) mod layout;
 pub(crate) mod prompt_buf;
 pub(crate) mod prompt_parser;
-pub(crate) mod status;
 pub(crate) mod to_buffer;
 pub(crate) mod transcript_buf;
 pub mod transcript_parsers;
 
 use crossterm::terminal;
-use smelt_core::style::Color;
-
-pub(super) fn reasoning_color(
-    effort: protocol::ReasoningEffort,
-    theme: &crate::smelt_term::Theme,
-) -> Color {
-    let group = match effort {
-        protocol::ReasoningEffort::Off => "SmeltReasonOff",
-        protocol::ReasoningEffort::Low => "SmeltReasonLow",
-        protocol::ReasoningEffort::Medium => "SmeltReasonMed",
-        protocol::ReasoningEffort::High => "SmeltReasonHigh",
-        protocol::ReasoningEffort::Max => "SmeltReasonMax",
-    };
-    let style = theme.get(group);
-    style.fg.or(style.bg).unwrap_or(Color::Reset)
-}
 
 pub(crate) fn term_width() -> usize {
     terminal::size().map(|(w, _)| w as usize).unwrap_or(80)
@@ -35,14 +18,4 @@ pub(crate) fn term_width() -> usize {
 
 pub(crate) fn term_height() -> usize {
     terminal::size().map(|(_, h)| h as usize).unwrap_or(24)
-}
-
-pub(super) fn format_tokens(n: u32) -> String {
-    if n >= 1_000_000 {
-        format!("{:.1}m", n as f64 / 1_000_000.0)
-    } else if n >= 1_000 {
-        format!("{:.1}k", n as f64 / 1_000.0)
-    } else {
-        format!("{}", n)
-    }
 }

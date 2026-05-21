@@ -25,7 +25,6 @@ mod user;
 use markdown::is_horizontal_rule;
 pub use markdown::render_markdown_inner;
 pub use tools::render_layout_into;
-pub use user::UserBlockGeometry;
 
 /// Per-tool row cap (applied to command header and output body separately).
 const MAX_TOOL_BLOCK_ROWS: usize = 20;

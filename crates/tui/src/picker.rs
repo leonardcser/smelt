@@ -10,11 +10,10 @@
 //! Closing the leaf cascades through `overlay_close` to remove the overlay.
 
 use crate::app::TuiApp;
-use crate::app::PROMPT_ABOVE_WIN;
 use crate::smelt_term::layout::Anchor;
 use crate::smelt_term::BufCreateOpts;
 use crate::smelt_term::{
-    Align, BufId, Constraint, Corner, Gutters, LayoutTree, Overlay, OverlayId, SplitConfig, WinId,
+    BufId, Constraint, Corner, Gutters, LayoutTree, Overlay, OverlayId, SplitConfig, WinId,
 };
 use smelt_core::content::builder::render_into;
 use smelt_core::style::Style;
@@ -130,7 +129,7 @@ pub(crate) fn open(
     }
 
     let layout = layout_for(leaf, height);
-    let anchor = anchor_for(placement, height);
+    let anchor = anchor_for(&app.ui, placement, height);
     let overlay = Overlay::new(layout, anchor)
         .with_z(z)
         .blocks_agent(blocks_agent);
@@ -171,9 +170,13 @@ pub(crate) fn set_items(app: &mut TuiApp, leaf: WinId, items: Vec<PickerItem>, s
             w.jump_to_row(buf_ref, cursor_row, height);
         }
     }
+    // Compute the anchor before grabbing the &mut on `Ui::overlay_mut` so
+    // the immutable read of `app.ui.named_win(...)` doesn't overlap the
+    // mutable borrow on the overlay record.
+    let new_anchor = anchor_for(&app.ui, state.placement, height);
     if let Some(ov) = app.ui.overlay_mut(state.overlay) {
         ov.layout = layout_for(leaf, height);
-        ov.anchor = anchor_for(state.placement, height);
+        ov.anchor = new_anchor;
     }
 }
 
@@ -267,23 +270,27 @@ fn layout_for(leaf: WinId, height: u16) -> LayoutTree {
     )])
 }
 
-fn anchor_for(placement: PickerPlacement, height: u16) -> Anchor {
+fn anchor_for(ui: &crate::smelt_term::Ui, placement: PickerPlacement, height: u16) -> Anchor {
     match placement {
-        PickerPlacement::PromptDocked { .. } => Anchor::Win {
-            target: PROMPT_ABOVE_WIN.into(),
-            attach: Align::NW,
-            row_offset: -(height as i32),
-            col_offset: 0,
-        },
+        // Float above the prompt's chrome stack. Anchoring at the top
+        // bar's window (rather than offset-from-prompt-input) keeps the
+        // picker correctly placed when queued messages or a stash row
+        // grow the top bar past one row.
+        PickerPlacement::PromptDocked { .. } => {
+            crate::content::layout::anchor_above_prompt_chrome(ui, height)
+        }
         PickerPlacement::ScreenCenter => Anchor::ScreenCenter,
         PickerPlacement::Cursor => Anchor::Cursor {
             corner: Corner::NW,
             row_offset: 1,
             col_offset: 0,
         },
-        PickerPlacement::ScreenBottom => Anchor::ScreenBottom {
-            above_rows: crate::content::layout::STATUSLINE_ROWS,
-        },
+        // Anchor at the very bottom of the screen. The host has no
+        // opinion about the Lua-allocated statusline; callers that want
+        // the picker to clear it pass an explicit `Anchor::Win` against
+        // `require("smelt.statusline").win` from the Lua side instead
+        // of relying on a Rust-side reservation.
+        PickerPlacement::ScreenBottom => Anchor::ScreenBottom { above_rows: 0 },
     }
 }
 
@@ -478,32 +485,37 @@ mod tests {
 
     // ── anchor_for ───────────────────────────────────────────────────────
 
+    fn fresh_ui() -> crate::smelt_term::Ui {
+        crate::smelt_term::Ui::new()
+    }
+
     #[test]
-    fn anchor_for_prompt_docked_attaches_above_prompt_with_negative_row_offset() {
-        let a = anchor_for(PickerPlacement::PromptDocked { max_rows: 8 }, 5);
+    fn anchor_for_prompt_docked_falls_back_to_prompt_win_when_top_bar_missing() {
+        // Without the Lua-allocated top bar (no `smelt.prompt_bar.top`
+        // named window), the anchor falls back to anchoring against the
+        // prompt input itself with `-height` offset. That matches the
+        // cold-start case where the Lua composer hasn't run yet.
+        let ui = fresh_ui();
+        let a = anchor_for(&ui, PickerPlacement::PromptDocked { max_rows: 8 }, 5);
         match a {
-            Anchor::Win {
-                row_offset, attach, ..
-            } => {
-                // Offset is negative `height` so the overlay sits above the prompt.
-                assert_eq!(row_offset, -5);
-                assert!(matches!(attach, Align::NW));
-            }
+            Anchor::Win { row_offset, .. } => assert_eq!(row_offset, -5),
             other => panic!("expected Anchor::Win, got {other:?}"),
         }
     }
 
     #[test]
     fn anchor_for_screen_center_returns_centered_anchor() {
+        let ui = fresh_ui();
         assert!(matches!(
-            anchor_for(PickerPlacement::ScreenCenter, 4),
+            anchor_for(&ui, PickerPlacement::ScreenCenter, 4),
             Anchor::ScreenCenter
         ));
     }
 
     #[test]
     fn anchor_for_cursor_places_overlay_one_row_below_cursor() {
-        match anchor_for(PickerPlacement::Cursor, 3) {
+        let ui = fresh_ui();
+        match anchor_for(&ui, PickerPlacement::Cursor, 3) {
             Anchor::Cursor {
                 row_offset,
                 col_offset,
@@ -518,9 +530,15 @@ mod tests {
     }
 
     #[test]
-    fn anchor_for_screen_bottom_leaves_one_row_for_the_status_bar() {
-        match anchor_for(PickerPlacement::ScreenBottom, 4) {
-            Anchor::ScreenBottom { above_rows } => assert_eq!(above_rows, 1),
+    fn anchor_for_screen_bottom_does_not_reserve_statusline_rows() {
+        // The host has no `statusline` concept anymore — the Lua layer
+        // owns the statusline window and any reservation lives on the
+        // caller. `ScreenBottom` resolves to the literal screen bottom;
+        // overlays that need to clear chrome anchor explicitly against
+        // the Lua-allocated statusline window.
+        let ui = fresh_ui();
+        match anchor_for(&ui, PickerPlacement::ScreenBottom, 4) {
+            Anchor::ScreenBottom { above_rows } => assert_eq!(above_rows, 0),
             other => panic!("expected Anchor::ScreenBottom, got {other:?}"),
         }
     }

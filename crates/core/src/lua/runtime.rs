@@ -26,7 +26,10 @@ pub const BOOTSTRAP_FILES: &[&str] = &[
     "widgets/prompt_picker.lua",
     "cmd.lua",
     "dialogs/confirm.lua",
-    "status.lua",
+    "_bar.lua",
+    "prompt_bar.lua",
+    "statusline.lua",
+    "layout.lua",
     "modes.lua",
 ];
 

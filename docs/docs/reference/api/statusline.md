@@ -4,17 +4,7 @@
 
 **Tier:** `UiHost` — Requires a terminal UI; calling these from headless mode raises.
 
-Register/unregister statusline sources and snapshot composer state. UiHost-only.
-
-## `smelt.statusline.register`
-
-```lua
-fun(name: string, handler: fun(value: table): table, opts: smelt.statusline.RegisterOpts?): smelt.Reg
-```
-
-Types: [`smelt.statusline.RegisterOpts`](types.md#smeltstatuslineregisteropts), [`smelt.Reg`](types.md#smeltreg)
-
-Register a Lua statusline source named `name`. The handler is called once per refresh and returns a single segment table or a list. Each segment is `{ text, style_group?, style?, priority?, align_right?, truncatable?, separated? }`: `style_group` names a theme group whose resolved style applies (e.g. `"SmeltModePlan"`); `style` is a `StyleDecl` overlay applied on top. Higher `priority` drops first; `truncatable` shrinks with `…` before being fully dropped; `separated` inserts ` · ` before this segment. `opts.align = "right"` makes the source's segments default to the right strip; later registrations replace earlier ones with the same name. Returns a `Reg` whose `:remove()` drops the source.
+Snapshot host state for the Lua statusline composer. UiHost-only.
 
 ## `smelt.statusline.snapshot`
 
@@ -22,13 +12,5 @@ Register a Lua statusline source named `name`. The handler is called once per re
 fun(): table
 ```
 
-Return the statusline state in one table per refresh: `tps` (tokens-per-second from the live or just-archived turn, when available), `vim`, `mode`, `permission_pending`, `running_procs`, `running_agents`, `task_label`, `settings`, and `position`. The working pill lives in the prompt top bar now; plugins that need work state read the `work_*` cells instead. Styles are not projected — name a `style_group` on each segment. Returns an empty table when the app pointer is unavailable.
-
-## `smelt.statusline.unregister`
-
-```lua
-fun(name: string): nil
-```
-
-Drop the statusline source registered under `name`. No-op if no such source exists.
+Return the statusline state in one table per refresh: `tps` (tokens-per-second from the live or just-archived turn, when available), `vim`, `mode`, `permission_pending`, `running_procs`, `running_agents`, `task_label`, `settings`, and `position`. The working pill lives in the prompt top bar now; plugins that need work state read the `work_*` cells instead. Styles are not projected — look colors up by theme group in the composer. Returns an empty table when the app pointer is unavailable.
 

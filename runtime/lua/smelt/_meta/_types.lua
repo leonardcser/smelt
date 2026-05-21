@@ -28,6 +28,8 @@
 ---@field hl_group? string Theme group whose style is applied as the highlight base.
 ---@field fg? string Theme group whose foreground overrides `hl_group`.
 ---@field bg? string Theme group whose background overrides `hl_group`.
+---@field fg_rgb? integer[] Direct foreground RGB triple `{ r, g, b }`. Takes precedence over `fg`/`hl_group`. Used for renderer-driven colors that can't be pre-baked as theme groups (e.g. the prompt top bar's traveling wave samples a sinusoid per cell).
+---@field bg_rgb? integer[] Direct background RGB triple `{ r, g, b }`. Takes precedence over `bg`/`hl_group`.
 ---@field bold? boolean Force-bold the highlight.
 ---@field dim? boolean Force-dim the highlight.
 ---@field italic? boolean Force-italic the highlight.
@@ -313,10 +315,6 @@
 ---@field output_cost? number Cost per output token in USD.
 ---@field cache_read_cost? number Cost per cache-read token in USD.
 ---@field cache_write_cost? number Cost per cache-write token in USD.
-
---- Options accepted by `smelt.statusline.register`.
----@class smelt.statusline.RegisterOpts
----@field align? string `"right"` makes the source's segments default to the right strip. Defaults to left.
 
 --- Color value. Set `ansi` (256-color palette index) or `rgb` (`{R, G, B}` triple) for a direct color, or `dark` / `light` (themselves `ColorDecl`s) for a branch that resolves against the terminal background. A matching-side branch wins over the direct fields.
 ---@class smelt.theme.ColorDecl

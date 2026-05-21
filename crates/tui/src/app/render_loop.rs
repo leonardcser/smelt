@@ -1,5 +1,6 @@
-//! Per-frame render loop: projects transcript/prompt/status into the
-//! compositor layers and syncs the prompt-docked completer overlay.
+//! Per-frame render loop: drives the Lua-registered main-layout composer,
+//! dispatches per-window Lua renderers, then projects the transcript and
+//! prompt input into their backing buffers.
 
 use crate::app::TuiApp;
 use crate::content::{layout, prompt_buf};
@@ -17,7 +18,6 @@ impl TuiApp {
     pub(crate) fn render_normal_to<W: std::io::Write>(&mut self, agent_running: bool, out: &mut W) {
         let _perf = smelt_perf::perf::begin("app:tick_compositor");
         self.update_spinner();
-        // Publish vim mode so overlay leaves read it via `DrawContext::vim_mode`.
 
         let (term_w, term_h) = self.ui.terminal_size();
         let width = term_w as usize;
@@ -49,50 +49,33 @@ impl TuiApp {
         // ── Layout ──
         let (prompt_rect, viewport_rows) = {
             let _p = smelt_perf::perf::begin("compositor:layout");
-            let (above_rows, input_rows) =
-                self.measure_prompt_rows(&self.input, self.prompt_buf(), width, queued);
-            let lua_tree =
-                self.invoke_lua_layout_composer(term_w, term_h, above_rows, input_rows);
-            let tree = lua_tree.unwrap_or_else(|| {
-                layout::build_layout_tree(
-                    &layout::LayoutInput {
-                        term_height: term_h,
-                        prompt_above_rows: above_rows,
-                        prompt_input_rows: input_rows,
-                    },
-                    self.well_known.statusline,
-                )
-            });
+            let input_rows = self.measure_prompt_input_rows(self.prompt_buf(), width);
+            let tree = self
+                .invoke_lua_layout_composer(term_w, term_h, input_rows)
+                .unwrap_or_else(|| layout::seed_layout_tree(input_rows));
             self.ui.set_layout(tree);
-            self.layout = layout::LayoutState::from_ui(&self.ui, self.well_known.statusline);
+            self.layout = layout::LayoutState::from_ui(&self.ui);
             (self.layout.prompt, self.layout.viewport_rows())
         };
+
+        // Freeze timer/spinner while a blocking dialog is up. Done before
+        // Lua renderers run so the prompt top-bar indicator they paint
+        // this frame already reflects the pause.
+        self.working.set_paused(self.focused_overlay_blocks_agent());
 
         {
             let _p = smelt_perf::perf::begin("compositor:lua_renderers");
             self.dispatch_lua_renderers();
         }
+        // Suppress unused-variable warning when queued is only forwarded into Lua state.
+        let _ = queued;
         {
             let _p = smelt_perf::perf::begin("compositor:transcript");
             self.sync_transcript_layer(width, viewport_rows, has_transcript_cursor);
         }
         {
-            let _p = smelt_perf::perf::begin("compositor:prompt_above");
-            self.sync_prompt_above_layer(term_w, queued);
-        }
-        {
             let _p = smelt_perf::perf::begin("compositor:input");
             self.sync_input_layer(prompt_rect, has_prompt_cursor);
-        }
-        {
-            let _p = smelt_perf::perf::begin("compositor:prompt_below");
-            self.sync_prompt_below_layer(term_w);
-        }
-        // Freeze timer/spinner while a blocking dialog is up.
-        self.working.set_paused(self.focused_overlay_blocks_agent());
-        {
-            let _p = smelt_perf::perf::begin("compositor:status_bar");
-            self.refresh_status_bar();
         }
 
         self.finalize_layer_rects();
@@ -220,37 +203,6 @@ impl TuiApp {
         }
     }
 
-    fn sync_prompt_above_layer(&mut self, term_w: u16, queued: &[String]) {
-        let bar_info = prompt_buf::BarInfo {
-            model_label: Some(self.core.config.model.clone()),
-            reasoning_effort: self.core.config.reasoning_effort,
-            show_tokens: self.core.config.settings.show_tokens,
-            context_tokens: self.core.session.context_tokens,
-            context_window: self.core.config.context_window,
-            show_cost: self.core.config.settings.show_cost,
-            session_cost_usd: self.core.session.session_cost_usd,
-        };
-        let indicator = self.indicator_info();
-        let pa = prompt_buf::PromptAboveInput {
-            queued,
-            stash: &self.input.stash,
-            bar_info,
-            indicator,
-            width: term_w,
-        };
-        let theme = self.ui.theme().clone();
-        if let Some(buf) = self.ui.win_buf_mut(self.well_known.prompt_above) {
-            prompt_buf::compute_prompt_above(&pa, buf, &theme);
-        }
-    }
-
-    fn sync_prompt_below_layer(&mut self, term_w: u16) {
-        let theme = self.ui.theme().clone();
-        if let Some(buf) = self.ui.win_buf_mut(self.well_known.prompt_below) {
-            prompt_buf::compute_prompt_below(term_w, buf, &theme);
-        }
-    }
-
     /// Populate the input-leaf buffer, cursor, and viewport. Cursor positions are content-local;
     /// the leaf's gutter shift is applied by `Window::render`.
     fn sync_input_layer(&mut self, prompt_rect: crate::smelt_term::Rect, has_prompt_cursor: bool) {
@@ -315,7 +267,6 @@ impl TuiApp {
         &mut self,
         term_w: u16,
         term_h: u16,
-        prompt_above_rows: u16,
         prompt_input_rows: u16,
     ) -> Option<crate::smelt_term::LayoutTree> {
         let lua = self.lua.lua();
@@ -330,7 +281,6 @@ impl TuiApp {
         let _ = state.set("term_w", term_w);
         let _ = state.set("term_h", term_h);
         let _ = state.set("prompt_input_rows", prompt_input_rows);
-        let _ = state.set("prompt_above_rows", prompt_above_rows);
         let result: mlua::Result<mlua::AnyUserData> = func.call((state,));
         let ud = match result {
             Ok(ud) => ud,

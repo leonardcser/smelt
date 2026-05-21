@@ -1,5 +1,6 @@
 ---
 source: crates/tui/tests/storybook/app_ctx.rs
+assertion_line: 344
 expression: frame.text()
 ---
 
@@ -19,3 +20,4 @@ expression: frame.text()
   4. allow web_fetch:https://example.com in ~/cwd
 
   press tab to add a reason…
+ ○ normal

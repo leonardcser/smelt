@@ -363,8 +363,30 @@ local function open_splash()
 	})
 end
 
+-- The splash is sized to the logo + version + plugin subtitles. When the
+-- terminal is too short for that block, the overlay rect spills past the
+-- transcript's bottom edge and bleeds over the prompt chrome (which sits
+-- at the same z-layer in the main layout). Suppress the splash entirely
+-- in that case — `refresh()` re-evaluates on resize via the
+-- transcript window's `resized` event so it pops back as soon as the
+-- terminal grows large enough.
+local function transcript_fits_banner()
+	local rect = smelt.win.transcript() and smelt.win.transcript():rect()
+	if not rect or not rect.height then
+		return true
+	end
+	local _, logo_h = banner.logo_mark_size()
+	local label_h = 1 -- version line, always present
+	for _ in pairs(banner.collect_subtitles()) do
+		label_h = label_h + 1
+	end
+	-- `FIRE_HEADROOM` reserves rows above the wordmark for the fire
+	-- animation; without it the centered overlay clips on its first paint.
+	return rect.height >= logo_h + FIRE_HEADROOM + label_h
+end
+
 local function refresh()
-	if smelt.transcript.is_empty() then
+	if smelt.transcript.is_empty() and transcript_fits_banner() then
 		open_splash()
 	else
 		teardown()
@@ -380,7 +402,16 @@ smelt.cell("session_started"):subscribe(refresh)
 smelt.cell("input_submit"):subscribe(teardown)
 smelt.cell("turn_start"):subscribe(teardown)
 smelt.cell("history"):subscribe(refresh)
-smelt.lifecycle.on_ready(refresh)
+smelt.lifecycle.on_ready(function()
+	refresh()
+	-- React to terminal resize: when the transcript window shrinks below
+	-- the banner's footprint, suppress the splash to keep the prompt
+	-- chrome and statusline unobscured; when it grows back, re-open.
+	local t = smelt.win.transcript()
+	if t and t.on then
+		t:on("resized", refresh)
+	end
+end)
 
 smelt.lifecycle.on_shutdown(function(ctx)
 	if not ctx.has_messages then

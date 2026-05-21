@@ -323,9 +323,16 @@ local function open_overlay(opts)
     height_spec, max_height_spec = (opts.height or "60%"), nil
   end
 
+  -- Reserve rows for the Lua-allocated statusline so the dialog docks
+  -- above it instead of overlapping. The host has no statusline concept
+  -- of its own; `statusline.rows` is the composer's self-reported row
+  -- count (the window's `:rect()` isn't usable on cold start because
+  -- the layout hasn't placed it yet).
+  local statusline = require("smelt.statusline")
   local overlay = smelt.overlay.new({
     title        = title,
     anchor       = "dock_bottom",
+    above_rows   = statusline.rows or 0,
     border       = { top = "SmeltAccent" },
     modal        = true,
     blocks_agent = opts.blocks_agent or false,

@@ -98,10 +98,6 @@ impl TuiApp {
             };
         }
 
-        if self.layout.hit_test(me.row, me.column) == HitRegion::Status {
-            return EventOutcome::Noop;
-        }
-
         // Wheel scroll is handled generically by `Ui::dispatch_event` — when it
         // falls through here, the wheel didn't land on a scrollable leaf and is
         // safe to drop.
@@ -175,8 +171,6 @@ impl TuiApp {
                     }
                 }
             }
-            // PROMPT_ABOVE_WIN and PROMPT_BELOW_WIN need no per-window handling
-            // — the region check above already promoted focus.
             return EventOutcome::Redraw;
         }
 
@@ -533,8 +527,7 @@ mod tests {
     }
 
     #[test]
-    fn region_click_on_status_or_outside_does_not_change_focus() {
-        assert_eq!(focus_for_region_click(HitRegion::Status, true), None);
+    fn region_click_outside_does_not_change_focus() {
         assert_eq!(focus_for_region_click(HitRegion::Outside, true), None);
     }
 }

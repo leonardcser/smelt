@@ -43,6 +43,8 @@ Options accepted by `buf:mark(ns, row, col, opts)`. Mirrors a useful subset of `
 | `hl_group` | `string` |  | Theme group whose style is applied as the highlight base. |
 | `fg` | `string` |  | Theme group whose foreground overrides `hl_group`. |
 | `bg` | `string` |  | Theme group whose background overrides `hl_group`. |
+| `fg_rgb` | `integer[]` |  | Direct foreground RGB triple `{ r, g, b }`. Takes precedence over `fg`/`hl_group`. Used for renderer-driven colors that can't be pre-baked as theme groups (e.g. the prompt top bar's traveling wave samples a sinusoid per cell). |
+| `bg_rgb` | `integer[]` |  | Direct background RGB triple `{ r, g, b }`. Takes precedence over `bg`/`hl_group`. |
 | `bold` | `boolean` |  | Force-bold the highlight. |
 | `dim` | `boolean` |  | Force-dim the highlight. |
 | `italic` | `boolean` |  | Force-italic the highlight. |
@@ -456,14 +458,6 @@ One model entry in a provider's `models` list. Plugin authors can pass either a 
 | `output_cost` | `number` |  | Cost per output token in USD. |
 | `cache_read_cost` | `number` |  | Cost per cache-read token in USD. |
 | `cache_write_cost` | `number` |  | Cost per cache-write token in USD. |
-
-### `smelt.statusline.RegisterOpts`
-
-Options accepted by `smelt.statusline.register`.
-
-| Field | Type | Required | Description |
-| --- | --- | --- | --- |
-| `align` | `string` |  | `"right"` makes the source's segments default to the right strip. Defaults to left. |
 
 ### `smelt.theme.ColorDecl`
 

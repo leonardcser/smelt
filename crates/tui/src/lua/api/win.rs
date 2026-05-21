@@ -123,13 +123,7 @@ impl FromLua for LuaWin {
 /// would tear down the chrome the host depends on, so `Win:close()` no-ops
 /// for these. Plugin-owned overlay leaves close normally.
 fn is_builtin_win(id: crate::smelt_term::WinId) -> bool {
-    matches!(
-        id,
-        crate::app::TRANSCRIPT_WIN
-            | crate::app::PROMPT_WIN
-            | crate::app::PROMPT_ABOVE_WIN
-            | crate::app::PROMPT_BELOW_WIN
-    )
+    matches!(id, crate::app::TRANSCRIPT_WIN | crate::app::PROMPT_WIN)
 }
 
 impl mlua::UserData for LuaWin {
@@ -656,15 +650,22 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
         |_, ()| -> LuaResult<LuaWin> { Ok(LuaWin { id: crate::app::TRANSCRIPT_WIN }) },
     )?;
 
-    // Well-known window constants. The transcript and prompt input
-    // windows are the only two with engine-side state machinery
-    // (projection, editor); everything else is plugin-allocated.
-    // `smelt.win.TRANSCRIPT` / `smelt.win.PROMPT` are stable `Win`
-    // userdata handles plugins can reference from `smelt.ui.layout`
-    // composers without having to call a constructor.
-    m.tbl.set("TRANSCRIPT", LuaWin { id: crate::app::TRANSCRIPT_WIN })?;
-    m.tbl.set("PROMPT", LuaWin { id: crate::app::PROMPT_WIN })?;
-
+    // Well-known window constants. After the layout/bars/statusline
+    // migration these are the only two engine-owned windows —
+    // everything else (top bar, bottom bar, statusline, plugin
+    // sidebars, …) is Lua-allocated via `smelt.win.new`.
+    m.tbl.set(
+        "TRANSCRIPT",
+        LuaWin {
+            id: crate::app::TRANSCRIPT_WIN,
+        },
+    )?;
+    m.tbl.set(
+        "PROMPT",
+        LuaWin {
+            id: crate::app::PROMPT_WIN,
+        },
+    )?;
     Ok(())
 }
 
@@ -675,7 +676,11 @@ fn open_or_refresh(
     buf_id: crate::smelt_term::BufId,
     opts: Option<&mlua::Table>,
 ) -> LuaResult<Option<crate::smelt_term::WinId>> {
-    let win = crate::lua::with_app(|app| -> Option<crate::smelt_term::WinId> {
+    // `try_with_app` (rather than `with_app`) lets bootstrap chunks call
+    // `smelt.win.new` before an app pointer is installed (the initial
+    // autoload pass). The window is opened for real on the second pass,
+    // when `bring_up_lua("launch")` reloads with the app available.
+    let Some(win) = crate::lua::try_with_app(|app| -> Option<crate::smelt_term::WinId> {
         let name: Option<String> = opts
             .and_then(|t| t.get::<Option<String>>("name").ok())
             .flatten();
@@ -750,7 +755,9 @@ fn open_or_refresh(
             }
         }
         win
-    });
+    }) else {
+        return Ok(None);
+    };
     Ok(win)
 }
 

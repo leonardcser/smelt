@@ -176,16 +176,26 @@ fn parse_win_target(opts: &mlua::Table) -> Result<u64, String> {
 }
 
 /// Parse `opts.anchor` (plus anchor-specific extras) directly into a
-/// `term::Anchor`. The four dock variants reserve the bottom statusline row
-/// via `ScreenBottom { above_rows: 1 }` (bottom) or by anchoring at row 0 +
-/// trusting the layout's natural size to stay within `term_h - 1` (top/left/
-/// right is uncommon — callers expressing a docked top/side dialog generally
-/// also pin a height via a `Length` slot in the layout).
+/// `term::Anchor`. The four dock variants resolve to literal screen
+/// edges; the host has no `statusline` concept anymore, so plugins that
+/// want their overlay to clear the Lua-allocated statusline pass the
+/// statusline's row count via `opts.above_rows` (typically computed
+/// from `require("smelt.statusline").win:rect().height`):
+///
+/// ```lua
+/// local sl = require("smelt.statusline").win
+/// smelt.overlay.new({
+///   anchor = "dock_bottom",
+///   above_rows = (sl and sl:rect() or {}).height or 0,
+///   ...
+/// })
+/// ```
 fn parse_overlay_anchor(opts: &mlua::Table, term_w: u16, term_h: u16) -> Result<Anchor, String> {
     match opts.get::<String>("anchor").ok().as_deref() {
-        Some("dock_bottom") | None => Ok(Anchor::ScreenBottom {
-            above_rows: crate::content::layout::STATUSLINE_ROWS,
-        }),
+        Some("dock_bottom") | None => {
+            let above_rows: u16 = opts.get("above_rows").unwrap_or(0);
+            Ok(Anchor::ScreenBottom { above_rows })
+        }
         Some("dock_top") => Ok(Anchor::ScreenAt {
             row: 0,
             col: 0,

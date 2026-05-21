@@ -27,6 +27,7 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
         "Screen-composition primitives: main layout composer and per-window renderer registration.",
         Tier::UiHost,
     )?;
+
     let m = ui.sub(
         "layout",
         "Composable layout-tree primitives (set/vbox/hbox/leaf) for the main TUI layout. \
