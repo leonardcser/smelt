@@ -59,6 +59,13 @@ local function run_picker(opts)
   end)
 end
 
+-- Register a slash command `name` that opens a prompt-docked picker when
+-- called without arguments, or invokes `opts.apply(arg)` directly when
+-- given one. See the file header for every accepted `opts` field
+-- (`items`, `apply`, `on_enter`, `on_dismiss`, `stay_open`, …). Returns
+-- nothing; the command lives until `/reload` or an explicit
+-- `smelt.cmd.register{...}:remove()` matching `name`.
+-- @sig fun(name: string, opts: table?): nil
 function smelt.cmd.picker(name, opts)
   opts = opts or {}
 

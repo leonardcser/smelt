@@ -29,3 +29,15 @@ Types: [`smelt.picker.Picker`](types.md#smeltpickerpicker)
 
 Open a picker overlay and return a `Picker` userdata. The picker is non-blocking; the yield-until-pick wrapper lives in pure Lua as `smelt.picker.choose(opts)`.
 
+## `smelt.picker.open`
+
+```lua
+fun(opts: table): { index: integer, item: any }?
+```
+
+Open a floating picker over `opts.items` and yield until the user
+accepts or dismisses. `opts` is forwarded to `smelt.picker.new` for
+placement / styling; up/down/ctrl-j/k/p/n navigate, Enter resolves,
+Esc dismisses. Returns `{ index, item }` on accept or `nil` on
+dismiss. Must run inside a `smelt.spawn` (or tool execute) frame.
+

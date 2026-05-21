@@ -7,8 +7,23 @@
 ---@class smelt.mode
 local mode = {}
 
+--- Advance the active agent mode to the next entry in `smelt.mode.cycle_list()`,
+--- wrapping at the end. No-op when the cycle is empty.
+---@see smelt.mode.cycle_list
+---@type fun(): nil
+mode.cycle = nil
+
 --- Return the configured agent-mode cycle; falls back to all known modes when the user has not customized one.
 ---@type fun(): smelt.mode.Mode[]
 mode.cycle_list = nil
+
+--- Lookup the icon registered for `name`, or `""` when none is set.
+---@type fun(name: string): string
+mode.icon = nil
+
+--- Override the icon shown alongside `name` in the statusline; subsequent
+--- `smelt.mode.icon(name)` calls return `icon`.
+---@type fun(name: string, icon: string): nil
+mode.set_icon = nil
 
 return mode

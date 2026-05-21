@@ -7,9 +7,43 @@
 ---@class smelt.prompt
 local prompt = {}
 
+--- ── Modality lock ───────────────────────────────────────────────────────
+--- Take a modality lock on the prompt area so completers/pickers don't
+--- pop while the caller owns the screen. Returns a `Reg` whose
+--- `:remove()` releases the lock; the last release re-runs the
+--- recompute pass. Idempotent — multiple acquirers stack.
+---@type fun(): smelt.Reg
+prompt.acquire = nil
+
+--- Register a completer spec. Required fields: `detect(text, cpos)` ->
+--- `(spec_data, anchor)?` recognises a trigger token; `items()` -> the
+--- candidate list; `query(token)` -> ranked subset; `accept(item)`
+--- splices the completion back into the prompt. Returns a `Reg` whose
+--- `:remove()` unregisters the completer and closes the picker if it
+--- was active.
+---@type fun(spec: table): smelt.Reg
+prompt.completer = nil
+
 --- Read or write the prompt cursor as a byte offset into `text()`. Without an argument returns the current offset; with one snaps it to a char boundary and clamps to source length. Returns the resulting offset.
 ---@type fun(pos: integer?): integer
 prompt.cursor = nil
+
+--- True while at least one `smelt.prompt.acquire()` lock is outstanding.
+--- Plugins read this to skip non-blocking work that would race the
+--- modal owner.
+---@see smelt.prompt.acquire
+---@type fun(): boolean
+prompt.is_modal = nil
+
+--- Prompt-docked picker. Filters `opts.items` (or `opts.items()`) against
+--- the current prompt buffer on every keystroke, ranked by `smelt.fuzzy.rank`.
+--- Pass `opts.on_select` for the per-navigation hook; pass `opts.on_enter`
+--- to switch to persistent mode (the picker stays open across selections
+--- until Esc). Returns `{ action, item, index }` on accept or `nil` on
+--- dismiss (single-shot mode). Must run inside a `smelt.spawn` frame.
+---@see smelt.fuzzy.rank
+---@type fun(opts: table): table?
+prompt.open_picker = nil
 
 --- Remove the named prompt section. No-op if the section does not exist.
 ---@type fun(name: string): nil

@@ -51,6 +51,11 @@ local REGION = "dialog_overlay"
 
 local GUTTER = 1
 
+-- Build a single-line text-input leaf with a fresh buffer. `placeholder`
+-- shows when the buffer is empty; `opts.pad_left` / `opts.pad_right`
+-- override the dialog gutter. Returns `(leaf, buf)` so the caller can
+-- read the entered text via `buf:source()` from the dialog keymaps.
+-- @sig fun(placeholder: string?, opts: table?): any, smelt.buf.Buf
 function smelt.dialog.input(placeholder, opts)
   opts = opts or {}
   local buf = smelt.buf.new()
@@ -70,6 +75,11 @@ function smelt.dialog.input(placeholder, opts)
   return leaf, buf
 end
 
+-- Build a static selectable list leaf populated with `labels`. The
+-- selection cursor starts on `opts.selected` (1-based, defaults to 1).
+-- Returns `(leaf, buf)`; the caller reads the active row via
+-- `leaf:cursor_row()` from the dialog keymaps.
+-- @sig fun(labels: string[], opts: table?): any, smelt.buf.Buf
 function smelt.dialog.options(labels, opts)
   opts = opts or {}
   local lines = {}
@@ -92,6 +102,11 @@ function smelt.dialog.options(labels, opts)
   return leaf, buf
 end
 
+-- Wrap an existing `buf` as a selectable list leaf. Use when the buffer
+-- contents need to be mutated live (vs. the snapshot supplied to
+-- `smelt.dialog.options`). `opts.focusable` defaults true; `opts.selected`
+-- (0-based) sets the initial cursor row.
+-- @sig fun(buf: smelt.buf.Buf, opts: table?): any
 function smelt.dialog.list(buf, opts)
   opts = opts or {}
   local focusable = opts.focusable
@@ -116,6 +131,10 @@ local function split_lines(text)
   return out
 end
 
+-- Render `text` as a non-focusable markdown leaf. Convenience wrapper
+-- around `smelt.dialog.content` for static narrative panels (notes,
+-- summaries, intros). Returns `(leaf, buf)`.
+-- @sig fun(text: string): any, smelt.buf.Buf
 function smelt.dialog.markdown(text)
   local buf = smelt.buf.new({ mode = "markdown" })
   buf:source(text or "")
@@ -126,6 +145,11 @@ function smelt.dialog.markdown(text)
   return leaf, buf
 end
 
+-- General-purpose body leaf. Pass `opts.buf` to wrap an existing buffer
+-- or `opts.text` to spin up a fresh read-only one. `opts.interactive`
+-- enables focus + vim keymaps (when the user has vim mode on);
+-- `opts.wrap` mirrors `smelt.win.new`. Returns `(leaf, buf)`.
+-- @sig fun(opts: table?): any, smelt.buf.Buf
 function smelt.dialog.content(opts)
   opts = opts or {}
   local buf = opts.buf
@@ -361,7 +385,12 @@ local function setup_lifecycle(opts, leaves, overlay, resolve_fn)
   return resolve, root
 end
 
--- Coroutine-blocking open. Returns the value passed to `ctx.resolve(value)`.
+-- Coroutine-blocking dialog opener. Builds the overlay from `opts.panels`
+-- (each `{ leaf, height }`), wires `opts.keymaps`, then yields the
+-- caller until a handler calls `ctx.resolve(value)`. Must run inside a
+-- `smelt.spawn` (or tool execute) frame; returns the resolved value or
+-- `nil` on dismiss.
+-- @sig fun(opts: table): any
 function smelt.dialog.open(opts)
   if not coroutine.isyieldable() then
     error("smelt.dialog.open: call from inside smelt.spawn(fn) or tool.execute", 2)
@@ -428,6 +457,13 @@ local NAV_KEYS = {
   { "ctrl-d", 5   },
 }
 
+-- Coroutine-blocking Telescope-style picker. Stacks a single-line input
+-- on top of a list driven by `smelt.list.new`; navigation forwards from
+-- input to list, Enter resolves with the selected item. See the doc
+-- block above `NAV_KEYS` for every accepted `opts` field. Returns the
+-- value resolved from `on_submit` (defaults to the highlighted item) or
+-- `nil` on dismiss.
+-- @sig fun(opts: table): any
 function smelt.dialog.picker(opts)
   if not coroutine.isyieldable() then
     error("smelt.dialog.picker: call from inside smelt.spawn(fn) or tool.execute", 2)
@@ -518,9 +554,11 @@ function smelt.dialog.picker(opts)
   })
 end
 
--- Non-coroutine open. Returns `{ win, panels, close() }` synchronously. The consumer
--- drives the lifecycle via `on_submit` / `on_dismiss` callbacks and tears down with
--- `handle:close()`. No value flows back (use `open` if you want one).
+-- Non-coroutine open. Returns `{ win, panels, close() }` synchronously.
+-- The consumer drives the lifecycle via `on_submit` / `on_dismiss`
+-- callbacks and tears down with `handle:close()`. No value flows back
+-- — use `smelt.dialog.open` when you need to read the result.
+-- @sig fun(opts: table): table
 function smelt.dialog.open_handle(opts)
   if type(opts) ~= "table" then
     error("smelt.dialog.open_handle: expected table of options", 2)

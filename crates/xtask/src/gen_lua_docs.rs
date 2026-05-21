@@ -130,21 +130,28 @@ fn run_inner() -> std::io::Result<()> {
         std::process::exit(1);
     }
 
-    // Bundled-Lua functions in `_bootstrap.lua` are part of the public
-    // API surface (smelt.sleep, smelt.fs.watch, smelt.task.external, …)
-    // but have no Rust closure to derive a signature from. Parse them
-    // out so they show up in stubs + reference docs. Skip any name
-    // already registered from Rust so Lua-side reassignments (e.g. the
-    // `smelt.tools.register` wrap) don't clobber the canonical doc.
-    let bootstrap_path = repo_root()?.join("runtime/lua/smelt/_bootstrap.lua");
-    if bootstrap_path.is_file() {
-        let content = std::fs::read_to_string(&bootstrap_path)?;
-        let registered: std::collections::HashSet<(&str, &str)> =
-            metas.iter().map(|m| (m.module, m.name)).collect();
+    // Bundled-Lua functions across every bootstrap chunk are part of
+    // the public API surface (smelt.sleep, smelt.dialog.open,
+    // smelt.cmd.picker, …) but have no Rust closure to derive a
+    // signature from. Parse them out of every chunk listed in
+    // `BOOTSTRAP_FILES` so they show up in stubs + reference docs. Skip
+    // any name already registered from Rust so Lua-side reassignments
+    // (e.g. the `smelt.tools.register` wrap) don't clobber the
+    // canonical doc.
+    let runtime_root = repo_root()?.join("runtime/lua/smelt");
+    let mut registered: std::collections::HashSet<(&str, &str)> =
+        metas.iter().map(|m| (m.module, m.name)).collect();
+    for rel in smelt_core::lua::runtime::BOOTSTRAP_FILES {
+        let path = runtime_root.join(rel);
+        if !path.is_file() {
+            continue;
+        }
+        let content = std::fs::read_to_string(&path)?;
         for parsed in parse_bundled_lua(&content) {
             if registered.contains(&(parsed.module, parsed.name)) {
                 continue;
             }
+            registered.insert((parsed.module, parsed.name));
             metas.push(parsed);
         }
     }

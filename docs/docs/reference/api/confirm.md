@@ -6,3 +6,16 @@
 
 Confirm dialog primitives — preview dispatch, back-tab cycling, and choice resolution. UiHost-only.
 
+## `smelt.confirm.open`
+
+```lua
+fun(handle_id: string): nil
+```
+
+Drive the bundled tool-permission confirm dialog for `handle_id`.
+Reads the matching request out of the `confirm_requested` cell, builds
+the header + preview + option leaves, dispatches the user's choice
+through `smelt.confirm.__resolve`. Bails when no matching request is
+active (e.g. a newer prompt has superseded it). Called by the host;
+plugins should not invoke directly.
+

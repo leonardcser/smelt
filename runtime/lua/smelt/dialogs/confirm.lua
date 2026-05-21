@@ -119,6 +119,13 @@ local function render_options(buf, labels)
   end
 end
 
+-- Drive the bundled tool-permission confirm dialog for `handle_id`.
+-- Reads the matching request out of the `confirm_requested` cell, builds
+-- the header + preview + option leaves, dispatches the user's choice
+-- through `smelt.confirm.__resolve`. Bails when no matching request is
+-- active (e.g. a newer prompt has superseded it). Called by the host;
+-- plugins should not invoke directly.
+-- @sig fun(handle_id: string): nil
 function smelt.confirm.open(handle_id)
   -- Bail if the cell doesn't match this handle; a newer request may have
   -- replaced it before this dialog opened.

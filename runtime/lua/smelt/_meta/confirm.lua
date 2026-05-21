@@ -7,4 +7,14 @@
 ---@class smelt.confirm
 local confirm = {}
 
+--- Drive the bundled tool-permission confirm dialog for `handle_id`.
+--- Reads the matching request out of the `confirm_requested` cell, builds
+--- the header + preview + option leaves, dispatches the user's choice
+--- through `smelt.confirm.__resolve`. Bails when no matching request is
+--- active (e.g. a newer prompt has superseded it). Called by the host;
+--- plugins should not invoke directly.
+---@see smelt.confirm.__resolve
+---@type fun(handle_id: string): nil
+confirm.open = nil
+
 return confirm

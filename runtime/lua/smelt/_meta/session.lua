@@ -75,6 +75,19 @@ session.texts = nil
 ---@type fun(): table
 session.tokens = nil
 
+--- Arrange a flat list of session entries (as returned by `smelt.session.list`)
+--- into a DFS-ordered tree by `parent_id`. Each returned entry gets a `depth`
+--- field (0 = root, 1 = first-level fork, ...). Roots come first, sorted by
+--- `opts.sort_by` descending (default `"updated_at_ms"`); each root is
+--- immediately followed by its children, sorted by the same key.
+--- 
+--- Entries whose `parent_id` references an id not present in `entries` are
+--- treated as roots — this is what makes the function safe under workspace
+--- filtering, where a fork's parent may have been filtered out.
+---@see smelt.session.list
+---@type fun(entries: table[], opts: table?): table[]
+session.tree = nil
+
 --- Return user turns as `{ block_idx, label }` rows where `label` is the first line of the user message. Used by the rewind dialog.
 ---@type fun(): table
 session.turns = nil

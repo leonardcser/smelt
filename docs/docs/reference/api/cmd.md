@@ -14,6 +14,19 @@ fun(): table
 
 Return every registered slash command as a Lua array of `{ name, desc, args, while_busy, queue_when_busy, startup_ok, hidden }` rows. Sorted by name.
 
+## `smelt.cmd.picker`
+
+```lua
+fun(name: string, opts: table?): nil
+```
+
+Register a slash command `name` that opens a prompt-docked picker when
+called without arguments, or invokes `opts.apply(arg)` directly when
+given one. See the file header for every accepted `opts` field
+(`items`, `apply`, `on_enter`, `on_dismiss`, `stay_open`, …). Returns
+nothing; the command lives until `/reload` or an explicit
+`smelt.cmd.register{...}:remove()` matching `name`.
+
 ## `smelt.cmd.register`
 
 ```lua

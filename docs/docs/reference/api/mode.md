@@ -6,6 +6,15 @@
 
 Agent-mode selector. `smelt.mode()` reads the active mode; `smelt.mode(v)` sets it (overridden by the TUI to apply the change). `smelt.mode.cycle_list()` lists the configured cycle.
 
+## `smelt.mode.cycle`
+
+```lua
+fun(): nil
+```
+
+Advance the active agent mode to the next entry in `smelt.mode.cycle_list()`,
+wrapping at the end. No-op when the cycle is empty.
+
 ## `smelt.mode.cycle_list`
 
 ```lua
@@ -15,4 +24,21 @@ fun(): smelt.mode.Mode[]
 Types: [`smelt.mode.Mode`](types.md#smeltmodemode)
 
 Return the configured agent-mode cycle; falls back to all known modes when the user has not customized one.
+
+## `smelt.mode.icon`
+
+```lua
+fun(name: string): string
+```
+
+Lookup the icon registered for `name`, or `""` when none is set.
+
+## `smelt.mode.set_icon`
+
+```lua
+fun(name: string, icon: string): nil
+```
+
+Override the icon shown alongside `name` in the statusline; subsequent
+`smelt.mode.icon(name)` calls return `icon`.
 

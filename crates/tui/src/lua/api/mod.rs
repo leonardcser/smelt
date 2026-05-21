@@ -88,6 +88,8 @@ impl LuaRuntime {
         record_module_doc("smelt", "Root smelt namespace. Host-tier bindings are registered first; UiHost-tier bindings are injected when a TUI is active.");
         record_module_doc("smelt.build", "Compile-time build identity: `version` (CARGO_PKG_VERSION), `sha` (short git commit or nil), `date` (committer ISO timestamp or nil), `target` (Rust target triple), `tag` (most recent reachable git tag or nil), `commits` (number of commits since that tag), `dirty` (true when the working tree had uncommitted changes at build time), `version_string` (composed display string used by `smelt --version`, e.g. `0.5.1-60-g3349b5f` or `…-dirty`).");
         record_module_doc("smelt.tick", "Reload-safe periodic work. Subscribes to the host's one-second `now` cell and throttles your callback to a fixed interval — safe to call from plugin module bodies. Use this for recurring polling; reserve `smelt.timer.every` for transient timers armed by user actions.");
+        record_module_doc("smelt.dialog", "Modal overlay builders. Compose a dialog from one or more `panels` of `smelt.dialog.content(...)` leaves, then call `smelt.dialog.open(...)` to push it; convenience entry points (`smelt.dialog.input`, `.options`, `.list`, `.picker`, `.markdown`) wrap the common shapes. UiHost-only.");
+        record_module_doc("smelt.list", "Picker-style virtual list widget. `smelt.list.new(opts)` returns a handle that owns the buffer, current selection, and keymaps so a plugin can render a scrollable selectable list inside any window or dialog leaf. UiHost-only.");
 
         smelt_core::lua::api::register_host_api(lua, &smelt, &smelt_keymap, &shared.core)?;
 

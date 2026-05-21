@@ -16,7 +16,7 @@ use crate::lua::{
 static EMBEDDED_LUA: Dir<'_> = include_dir!("$CARGO_MANIFEST_DIR/../../runtime/lua/smelt");
 
 /// Lua chunks executed at `register_api` time, in order: primitives before consumers.
-const BOOTSTRAP_FILES: &[&str] = &[
+pub const BOOTSTRAP_FILES: &[&str] = &[
     "_bootstrap.lua",
     "dialog.lua",
     "list.lua",

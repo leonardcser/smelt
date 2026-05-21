@@ -7,6 +7,13 @@
 ---@class smelt.reasoning
 local reasoning = {}
 
+--- Advance the active reasoning effort to the next entry in
+--- `smelt.reasoning.cycle_list()`, wrapping at the end. No-op when the
+--- cycle is empty.
+---@see smelt.reasoning.cycle_list
+---@type fun(): nil
+reasoning.cycle = nil
+
 --- Return the configured reasoning-effort cycle.
 ---@type fun(): smelt.reasoning.Effort[]
 reasoning.cycle_list = nil

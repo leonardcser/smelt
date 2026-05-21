@@ -4,7 +4,7 @@
 
 Reference for every namespace exposed under the global `smelt` table. Signatures are derived from the Rust closure's argument tuple and return type, so the LuaCATS-style annotation always matches what mlua actually marshals.
 
-**Coverage:** 63 namespace(s), 253 function(s), 33 class(es), 9 alias(es).
+**Coverage:** 66 namespace(s), 274 function(s), 33 class(es), 9 alias(es).
 
 ## IDE completion
 
@@ -18,7 +18,8 @@ Available in every runtime, including headless mode.
 - [`smelt.cell`](cell.md) — 2 function(s)
 - [`smelt.cli`](cli.md) — 3 function(s)
 - [`smelt.clipboard`](clipboard.md) — 2 function(s)
-- [`smelt.cmd`](cmd.md) — 3 function(s)
+- [`smelt.cmd`](cmd.md) — 4 function(s)
+- [`smelt.dialog`](dialog.md) — 8 function(s)
 - [`smelt.frontend`](frontend.md) — 2 function(s)
 - [`smelt.fs`](fs.md) — 19 function(s)
 - [`smelt.fs.file_state`](fs_file_state.md) — 6 function(s)
@@ -30,16 +31,17 @@ Available in every runtime, including headless mode.
 - [`smelt.image`](image.md) — 3 function(s)
 - [`smelt.layout`](layout.md) — 8 function(s)
 - [`smelt.lifecycle`](lifecycle.md) — 3 function(s)
+- [`smelt.list`](list.md) — 1 function(s)
 - [`smelt.mcp`](mcp.md) — 4 function(s)
 - [`smelt.messages`](messages.md) — 6 function(s)
-- [`smelt.mode`](mode.md) — 1 function(s)
+- [`smelt.mode`](mode.md) — 4 function(s)
 - [`smelt.os`](os.md) — 12 function(s)
 - [`smelt.parse`](parse.md) — 2 function(s)
 - [`smelt.path`](path.md) — 12 function(s)
 - [`smelt.perf`](perf.md) — 1 function(s)
 - [`smelt.process`](process.md) — 8 function(s)
 - [`smelt.provider`](provider.md) — 3 function(s)
-- [`smelt.reasoning`](reasoning.md) — 1 function(s)
+- [`smelt.reasoning`](reasoning.md) — 2 function(s)
 - [`smelt.reg`](reg.md) — 2 function(s)
 - [`smelt.shell`](shell.md) — 5 function(s)
 - [`smelt.skills`](skills.md) — 2 function(s)
@@ -56,6 +58,7 @@ Requires a terminal UI; calling these from headless mode raises.
 
 - [`smelt`](index_smelt.md) — 6 function(s)
 - [`smelt.buf`](buf.md) — 1 function(s)
+- [`smelt.confirm`](confirm.md) — 1 function(s)
 - [`smelt.engine`](engine.md) — 7 function(s)
 - [`smelt.history`](history.md) — 2 function(s)
 - [`smelt.keymap`](keymap.md) — 4 function(s)
@@ -69,10 +72,10 @@ Requires a terminal UI; calling these from headless mode raises.
 - [`smelt.overlay.layout`](overlay_layout.md) — 4 function(s)
 - [`smelt.paint`](paint.md) — 1 function(s)
 - [`smelt.permissions`](permissions.md) — 5 function(s)
-- [`smelt.picker`](picker.md) — 2 function(s)
-- [`smelt.prompt`](prompt.md) — 7 function(s)
+- [`smelt.picker`](picker.md) — 3 function(s)
+- [`smelt.prompt`](prompt.md) — 11 function(s)
 - [`smelt.render`](render.md) — 4 function(s)
-- [`smelt.session`](session.md) — 18 function(s)
+- [`smelt.session`](session.md) — 19 function(s)
 - [`smelt.settings`](settings.md) — 1 function(s)
 - [`smelt.spinner`](spinner.md) — 2 function(s)
 - [`smelt.statusline`](statusline.md) — 3 function(s)

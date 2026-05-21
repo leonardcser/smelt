@@ -11,6 +11,15 @@ local cmd = {}
 ---@type fun(): table
 cmd.list = nil
 
+--- Register a slash command `name` that opens a prompt-docked picker when
+--- called without arguments, or invokes `opts.apply(arg)` directly when
+--- given one. See the file header for every accepted `opts` field
+--- (`items`, `apply`, `on_enter`, `on_dismiss`, `stay_open`, …). Returns
+--- nothing; the command lives until `/reload` or an explicit
+--- `smelt.cmd.register{...}:remove()` matching `name`.
+---@type fun(name: string, opts: table?): nil
+cmd.picker = nil
+
 --- Register a slash command `name` whose `handler` is invoked when the user runs it. `opts` accepts `desc`, `args`, `while_busy` (default `true`), `queue_when_busy` (default `false`), `startup_ok` (default `false`), and `hidden` (default `false`). Returns a `Reg` whose `:remove()` unregisters the command.
 ---@type fun(name: string, handler: fun(value: string?), opts: smelt.cmd.RegisterOpts?): smelt.Reg
 cmd.register = nil

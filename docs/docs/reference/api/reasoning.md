@@ -6,6 +6,16 @@
 
 Reasoning-effort selector. `smelt.reasoning()` reads the active effort; `smelt.reasoning(v)` sets it (overridden by the TUI to apply the change). `smelt.reasoning.cycle_list()` lists the configured cycle.
 
+## `smelt.reasoning.cycle`
+
+```lua
+fun(): nil
+```
+
+Advance the active reasoning effort to the next entry in
+`smelt.reasoning.cycle_list()`, wrapping at the end. No-op when the
+cycle is empty.
+
 ## `smelt.reasoning.cycle_list`
 
 ```lua
