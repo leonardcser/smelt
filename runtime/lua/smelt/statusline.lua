@@ -117,20 +117,6 @@ local function core_compose()
     }
   end
 
-  -- Cache hit ratio (grouped with token indicators; hides when show_tokens is off).
-  if smelt.settings.show_tokens then
-    local tokens = smelt.session.tokens()
-    if tokens and tokens.cache_hit_ratio then
-      local pct = math.floor(tokens.cache_hit_ratio * 100 + 0.5)
-      items[#items + 1] = {
-        text = "cache " .. pct .. "%",
-        style = { fg = "Comment" },
-        priority = 4,
-        separated = true,
-      }
-    end
-  end
-
   -- Right-strip indicators.
   if cell("permission_pending") then
     items[#items + 1] = {
