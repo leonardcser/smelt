@@ -21,8 +21,9 @@ pub fn flush_diff<'a, W: Write>(
             emit_style_diff(w, &current, &update.cell.style)?;
             current = update.cell.style;
         }
+        let symbol = printable_symbol(update.cell.symbol);
         let mut buf = [0u8; 4];
-        let s = update.cell.symbol.encode_utf8(&mut buf);
+        let s = symbol.encode_utf8(&mut buf);
         w.write_all(s.as_bytes())?;
         cursor_x = update.x + 1;
         cursor_y = update.y;
@@ -34,6 +35,14 @@ pub fn flush_diff<'a, W: Write>(
     }
 
     Ok(())
+}
+
+fn printable_symbol(symbol: char) -> char {
+    if symbol.is_control() {
+        ' '
+    } else {
+        symbol
+    }
 }
 
 fn emit_style_diff<W: Write>(w: &mut W, from: &Style, to: &Style) -> std::io::Result<()> {
@@ -209,6 +218,26 @@ mod tests {
         flush_diff(&mut out, curr.diff(&prev)).unwrap();
         let s = String::from_utf8(out).unwrap();
         assert!(s.ends_with("\x1b[0m"));
+    }
+
+    #[test]
+    fn flush_never_emits_cell_control_characters() {
+        let prev = Grid::new(4, 1);
+        let mut curr = Grid::new(4, 1);
+        curr.set(0, 0, 'A', Style::default());
+        curr.set(1, 0, '\r', Style::default());
+        curr.set(2, 0, '\x1b', Style::default());
+        curr.set(3, 0, 'B', Style::default());
+
+        let s = flush_to_string(&curr, &prev);
+        assert!(
+            !s.contains('\r'),
+            "carriage return leaked into flush bytes: {s:?}"
+        );
+        assert!(
+            s.contains("A  B"),
+            "control cells should render as spaces: {s:?}"
+        );
     }
 
     // ── Color encodings ───────────────────────────────────────────────────

@@ -633,7 +633,7 @@ pub fn render_wrapped_output(
     let wrapped: Vec<String> = content
         .lines()
         .flat_map(|line| {
-            let expanded = line.replace('\t', "    ");
+            let expanded = normalize_terminal_line(line).replace('\t', "    ");
             let segs = wrap_line(&expanded, max_cols);
             if segs.len() > 1 {
                 out.mark_wrapped();
@@ -669,6 +669,44 @@ pub fn render_wrapped_output(
         rows += 1;
     }
     rows
+}
+
+fn normalize_terminal_line(line: &str) -> String {
+    let latest = line.rsplit('\r').next().unwrap_or("");
+    strip_ansi_and_controls(latest)
+}
+
+fn strip_ansi_and_controls(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut chars = text.chars().peekable();
+    while let Some(ch) = chars.next() {
+        if ch == '\x1b' {
+            match chars.next() {
+                Some('[') => {
+                    for c in chars.by_ref() {
+                        if ('@'..='~').contains(&c) {
+                            break;
+                        }
+                    }
+                }
+                Some(']') => {
+                    while let Some(c) = chars.next() {
+                        if c == '\u{7}' {
+                            break;
+                        }
+                        if c == '\x1b' && chars.peek() == Some(&'\\') {
+                            chars.next();
+                            break;
+                        }
+                    }
+                }
+                Some(_) | None => {}
+            }
+        } else if !ch.is_control() {
+            out.push(ch);
+        }
+    }
+    out
 }
 
 pub(super) fn pluralize(count: usize, singular: &str, plural: &str) -> String {

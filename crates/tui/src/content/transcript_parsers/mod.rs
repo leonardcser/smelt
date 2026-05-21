@@ -596,6 +596,29 @@ mod tests {
     }
 
     #[test]
+    fn exec_output_carriage_return_renders_latest_status_line() {
+        let rows = layout_block_test(
+            &Block::Exec {
+                command: "git rebase main".into(),
+                output: "Rebasing (1/1)\r\x1b[KSuccessfully rebased and updated refs/heads/topic."
+                    .into(),
+            },
+            None,
+            &LayoutContext::new(W as u16, true, ViewState::default()),
+        );
+        let text = rows
+            .iter()
+            .map(|row| row.text.as_str())
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        assert!(text.contains("Successfully rebased and updated refs/heads/topic."));
+        assert!(!text.contains("Rebasing (1/1)"));
+        assert!(!text.contains("[K"));
+        assert!(!text.contains('\r'));
+    }
+
+    #[test]
     fn horizontal_rule_detection() {
         assert!(is_horizontal_rule("---"));
         assert!(is_horizontal_rule("___"));
