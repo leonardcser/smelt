@@ -199,6 +199,9 @@ settings! {
     /// Release channel autoupgrade tracks: `"stable"` (tagged releases,
     /// including prereleases) or `"unstable"` (`main` HEAD).
     autoupgrade_channel:   String = "stable", choices: ["stable", "unstable"];
+    /// Seconds between background autoupgrade checks. The upgrade
+    /// plugin clamps to a 60-second minimum to avoid hammering GitHub.
+    autoupgrade_interval:  Number = 3600.0;
 }
 
 pub fn setting_decl(key: &str) -> Option<&'static SettingDecl> {

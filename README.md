@@ -73,7 +73,9 @@ Two channels controlled by `smelt.settings.autoupgrade_channel`:
 
 The polling behaviour is `smelt.settings.autoupgrade`: `"off"`, `"notify"`
 (default, show pill but don't install), or `"auto"` (install in the
-background as soon as an update is detected).
+background as soon as an update is detected). The poll cadence is
+`smelt.settings.autoupgrade_interval` (seconds, default `3600`, floored
+at 60).
 
 ## Run
 

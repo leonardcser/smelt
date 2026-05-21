@@ -3,10 +3,12 @@
 --   * unstable — main branch HEAD (needs smelt.build.sha)
 --
 -- Settings:
---   smelt.settings.autoupgrade         "off" | "notify" (default) | "auto"
---   smelt.settings.autoupgrade_channel "stable" (default) | "unstable"
+--   smelt.settings.autoupgrade          "off" | "notify" (default) | "auto"
+--   smelt.settings.autoupgrade_channel  "stable" (default) | "unstable"
+--   smelt.settings.autoupgrade_interval seconds between checks (default 3600)
 --
--- The plugin polls GitHub every CHECK_INTERVAL_SECS, caches the result in
+-- The plugin polls GitHub every `autoupgrade_interval` seconds (clamped
+-- to MIN_INTERVAL_SECS), caches the result in
 -- smelt.state.persistent("upgrade"), and surfaces "update available" via:
 --   * a right-strip statusline pill, and
 --   * a dim subtitle under the splash version.
@@ -23,7 +25,15 @@
 local OWNER = "leonardcser"
 local REPO = "smelt"
 local REPO_URL = "https://github.com/" .. OWNER .. "/" .. REPO .. ".git"
-local CHECK_INTERVAL_SECS = 3600
+-- Floor for the configured `autoupgrade_interval` setting. GitHub's
+-- anonymous limit is 60 req/hr/IP; 60 s gives the user headroom while
+-- keeping a hard guard against accidentally setting `0`.
+local MIN_INTERVAL_SECS = 60
+-- Polling tick rate. We re-evaluate the configured interval and the
+-- per-channel `last_checked_at` on every fire, so live setting changes
+-- take effect within one tick instead of waiting for the next full
+-- interval window.
+local POLL_TICK_SECS = 60
 
 local state = smelt.state.persistent("upgrade")
 
@@ -69,6 +79,12 @@ local function settings_mode()
   local m = smelt.settings.autoupgrade
   if m ~= "off" and m ~= "notify" and m ~= "auto" then m = "notify" end
   return m
+end
+
+local function settings_interval()
+  local n = tonumber(smelt.settings.autoupgrade_interval) or 3600
+  if n < MIN_INTERVAL_SECS then n = MIN_INTERVAL_SECS end
+  return n
 end
 
 -- Parse "0.6.0-alpha.2" → { 0, 6, 0, pre = "alpha.2" }. Tag may carry a
@@ -305,7 +321,7 @@ end
 local function should_check_now()
   if settings_mode() == "off" then return false end
   local last = tonumber(channel_state(settings_channel()).last_checked_at) or 0
-  return (now() - last) >= CHECK_INTERVAL_SECS
+  return (now() - last) >= settings_interval()
 end
 
 local checking = false
@@ -345,7 +361,7 @@ local function run_check(force, on_done)
     -- reset window (capped to a 10 min fallback) by parking
     -- last_checked_at so `should_check_now` only fires again then.
     if backoff then
-      channel_state(channel).last_checked_at = backoff - CHECK_INTERVAL_SECS
+      channel_state(channel).last_checked_at = backoff - settings_interval()
     else
       channel_state(channel).last_checked_at = now()
     end
@@ -658,8 +674,9 @@ end, { desc = "show release notes for the latest smelt build" })
 -- ── boot ───────────────────────────────────────────────────────────────
 
 -- `smelt.tick.every` is the reload-safe periodic primitive: subscribes
--- to the host's one-second `now` cell, throttles to CHECK_INTERVAL_SECS,
--- and dispatches into a fresh coroutine so the HTTP fetch can yield.
--- Fires the first check shortly after bring-up (no separate on_ready
--- nudge required).
-smelt.tick.every(CHECK_INTERVAL_SECS, function() run_check(false) end)
+-- to the host's one-second `now` cell, throttles to POLL_TICK_SECS, and
+-- dispatches into a fresh coroutine so the HTTP fetch can yield. The
+-- tick rate is intentionally tighter than the configured interval so
+-- live changes to `autoupgrade_interval` take effect on the next poll;
+-- the actual network fetch is gated by `should_check_now`.
+smelt.tick.every(POLL_TICK_SECS, function() run_check(false) end)
