@@ -50,11 +50,18 @@ cargo install --git https://github.com/leonardcser/smelt.git
 ## Upgrade
 
 smelt checks for a new build hourly and shows a pill in the status bar
-when one's available. Run `/upgrade` to install — the install runs in
-the background, so you keep working while it happens; you get a
-notification when it's done and a reminder to restart to use the new
-build. Overwriting an in-use binary is safe on Unix (the running
-process keeps its inode, future launches pick up the new one).
+when one's available. Run `/upgrade` to install — no confirmation
+dialog, just a notification: the install runs in the background, so
+you keep working while it happens; another notification fires when
+it's done and reminds you to restart. Overwriting an in-use binary is
+safe on Unix (the running process keeps its inode, future launches
+pick up the new one). `/upgrade --check` forces a fresh poll without
+installing; `/changelog` opens the release notes for the cached
+latest build; `/version` shows the running build identity.
+
+`smelt --version` prints the same string surfaced by `/version`,
+shaped `{tag}-{commits}-g{sha}[-dirty]` (e.g. `0.5.0-alpha.2-80-g827e6646`)
+so bug reports always pin down the exact source commit.
 
 Two channels controlled by `smelt.settings.autoupgrade_channel`:
 

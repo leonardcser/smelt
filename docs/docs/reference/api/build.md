@@ -4,5 +4,5 @@
 
 **Tier:** `Host` — Available in every runtime, including headless mode.
 
-Compile-time build identity: `version` (CARGO_PKG_VERSION), `sha` (short git commit or nil), `date` (committer ISO timestamp or nil), `target` (Rust target triple).
+Compile-time build identity: `version` (CARGO_PKG_VERSION), `sha` (short git commit or nil), `date` (committer ISO timestamp or nil), `target` (Rust target triple), `tag` (most recent reachable git tag or nil), `commits` (number of commits since that tag), `dirty` (true when the working tree had uncommitted changes at build time), `version_string` (composed display string used by `smelt --version`, e.g. `0.5.1-60-g3349b5f` or `…-dirty`).
 

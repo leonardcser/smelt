@@ -15,6 +15,7 @@ pub use smelt_core::fuzzy;
 pub mod instructions;
 pub(crate) mod keymap;
 pub mod lua;
+pub use lua::VERSION_STRING;
 pub use smelt_core::mcp;
 pub use smelt_core::permissions;
 pub(crate) mod metrics;

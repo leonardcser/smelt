@@ -9,7 +9,7 @@ use std::sync::{Arc, Mutex};
 static ALLOCATOR: smelt_perf::alloc::Counting = smelt_perf::alloc::Counting;
 
 #[derive(Parser)]
-#[command(name = "smelt", about = "Coding agent TUI", version)]
+#[command(name = "smelt", about = "Coding agent TUI", version = tui::VERSION_STRING)]
 #[command(args_conflicts_with_subcommands = true)]
 pub struct Args {
     #[command(subcommand)]

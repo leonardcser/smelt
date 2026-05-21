@@ -43,12 +43,19 @@ pub(crate) const API_VERSION: &str = "1";
 
 /// Build identity, exposed as `smelt.build`. Versions are sourced from
 /// `CARGO_PKG_VERSION` so the workspace's `0.x.y` version stays in
-/// lockstep with what plugins see; sha/date/target come from the build
-/// script (`build.rs`).
+/// lockstep with what plugins see; sha/date/target/tag/commits/dirty/
+/// version_string come from the build script (`build.rs`).
 pub(crate) const APP_VERSION: &str = env!("CARGO_PKG_VERSION");
 pub(crate) const BUILD_SHA: &str = env!("SMELT_BUILD_SHA");
 pub(crate) const BUILD_DATE: &str = env!("SMELT_BUILD_DATE");
 pub(crate) const BUILD_TARGET: &str = env!("SMELT_TARGET");
+pub(crate) const BUILD_TAG: &str = env!("SMELT_BUILD_TAG");
+pub(crate) const BUILD_COMMITS: &str = env!("SMELT_BUILD_COMMITS");
+pub(crate) const BUILD_DIRTY: &str = env!("SMELT_BUILD_DIRTY");
+/// Composed display string used by `--version` and `smelt.build.version_string`.
+/// Shape: `{tag}-{commits}-g{sha}[-dirty]` when git is available, else
+/// just `CARGO_PKG_VERSION`.
+pub const VERSION_STRING: &str = env!("SMELT_VERSION_STRING");
 
 pub(crate) use smelt_core::lua::json_to_lua as json_to_lua_value;
 
@@ -72,10 +79,14 @@ impl LuaRuntime {
         build.set("sha", optional_str(BUILD_SHA))?;
         build.set("date", optional_str(BUILD_DATE))?;
         build.set("target", BUILD_TARGET)?;
+        build.set("tag", optional_str(BUILD_TAG))?;
+        build.set("commits", BUILD_COMMITS.parse::<u32>().unwrap_or(0))?;
+        build.set("dirty", BUILD_DIRTY == "1")?;
+        build.set("version_string", VERSION_STRING)?;
         smelt.set("build", build)?;
         smelt.set("api_version", API_VERSION)?;
         record_module_doc("smelt", "Root smelt namespace. Host-tier bindings are registered first; UiHost-tier bindings are injected when a TUI is active.");
-        record_module_doc("smelt.build", "Compile-time build identity: `version` (CARGO_PKG_VERSION), `sha` (short git commit or nil), `date` (committer ISO timestamp or nil), `target` (Rust target triple).");
+        record_module_doc("smelt.build", "Compile-time build identity: `version` (CARGO_PKG_VERSION), `sha` (short git commit or nil), `date` (committer ISO timestamp or nil), `target` (Rust target triple), `tag` (most recent reachable git tag or nil), `commits` (number of commits since that tag), `dirty` (true when the working tree had uncommitted changes at build time), `version_string` (composed display string used by `smelt --version`, e.g. `0.5.1-60-g3349b5f` or `…-dirty`).");
         record_module_doc("smelt.tick", "Reload-safe periodic work. Subscribes to the host's one-second `now` cell and throttles your callback to a fixed interval — safe to call from plugin module bodies. Use this for recurring polling; reserve `smelt.timer.every` for transient timers armed by user actions.");
 
         smelt_core::lua::api::register_host_api(lua, &smelt, &smelt_keymap, &shared.core)?;
