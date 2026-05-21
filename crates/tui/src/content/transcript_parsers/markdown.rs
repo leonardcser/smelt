@@ -20,7 +20,25 @@ pub fn render_markdown_inner(
     let mut i = 0;
     let mut rows = 0u16;
     let mut last_content_line: Option<&str> = None;
+    let mut pending_blank = false;
     while i < lines.len() {
+        if lines[i].trim().is_empty() {
+            let after_heading = last_content_line.is_some_and(|l| l.trim_start().starts_with('#'));
+            let mut next_i = i + 1;
+            while next_i < lines.len() && lines[next_i].trim().is_empty() {
+                next_i += 1;
+            }
+            if rows > 0 && !after_heading && next_i < lines.len() && !is_list_item(lines[next_i]) {
+                pending_blank = true;
+            }
+            i = next_i;
+            continue;
+        }
+        if pending_blank {
+            out.newline();
+            rows += 1;
+            pending_blank = false;
+        }
         if lines[i].trim_start().starts_with("```") {
             let prev_blank = i > 0 && lines[i - 1].trim().is_empty();
             let after_heading = last_content_line.is_some_and(|l| l.trim_start().starts_with('#'));
@@ -75,25 +93,6 @@ pub fn render_markdown_inner(
             last_content_line = None;
             i += 1;
         } else {
-            if lines[i].trim().is_empty() {
-                // Skip blank lines after headings (no trailing gap) and before list items.
-                let after_heading =
-                    last_content_line.is_some_and(|l| l.trim_start().starts_with('#'));
-                if after_heading {
-                    i += 1;
-                    continue;
-                }
-                let mut next_i = i + 1;
-                while next_i < lines.len() && lines[next_i].trim().is_empty() {
-                    next_i += 1;
-                }
-                if next_i < lines.len() && is_list_item(lines[next_i]) {
-                    i += 1;
-                    continue;
-                }
-            } else {
-                last_content_line = Some(lines[i]);
-            }
             let trimmed = lines[i].trim_start();
             {
                 use smelt_core::content::highlight::{
@@ -167,6 +166,7 @@ pub fn render_markdown_inner(
                 }
                 rows += wrapped.len() as u16;
             }
+            last_content_line = Some(lines[i]);
             i += 1;
         }
     }
@@ -298,6 +298,20 @@ fn render_markdown_table_from_lines(
 mod tests {
     use super::*;
     use smelt_core::content::builder::test_util::render_test;
+
+    #[test]
+    fn markdown_collapses_leading_blank_run_before_code_block() {
+        let md = "\n\nValidation run in the new worktree:\n\n```bash\ncargo test\n```\n";
+        let block = render_test(80, |sink| {
+            render_markdown_inner(sink, md, 80, "", false, None);
+        });
+        let rows: Vec<&str> = block.lines.iter().map(|l| l.text.as_str()).collect();
+
+        assert_eq!(rows[0], "Validation run in the new worktree:");
+        assert_eq!(rows.iter().filter(|row| row.is_empty()).count(), 1);
+        assert!(rows.iter().any(|row| row.contains("cargo test")));
+        assert!(!rows.iter().any(|row| row.contains("``")), "rows: {rows:?}");
+    }
 
     #[test]
     fn rendered_table_attaches_raw_source_to_first_row() {

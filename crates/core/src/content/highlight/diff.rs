@@ -404,6 +404,8 @@ pub fn print_inline_diff_ext(
 }
 
 fn print_cached_spans(out: &mut LineBuilder, spans: &[CachedSpan], bg: Option<Color>) -> usize {
+    use unicode_width::UnicodeWidthStr;
+
     let mut col = 0;
     for span in spans {
         if span.text.is_empty() {
@@ -418,7 +420,7 @@ fn print_cached_spans(out: &mut LineBuilder, spans: &[CachedSpan], bg: Option<Co
             b: span.fg.2,
         });
         out.print(&span.text);
-        col += span.text.chars().count();
+        col += UnicodeWidthStr::width(span.text.as_str());
     }
     out.reset_style();
     col
@@ -447,8 +449,26 @@ fn split_cached_spans_into_rows(
                 col = 0;
                 continue;
             }
-            let chunk: String = chars.by_ref().take(remaining).collect();
-            col += chunk.chars().count();
+            let mut chunk = String::new();
+            let mut chunk_w = 0;
+            while let Some(ch) = chars.peek().copied() {
+                let cw = unicode_width::UnicodeWidthChar::width(ch).unwrap_or(0);
+                if chunk_w + cw > remaining && chunk_w > 0 {
+                    break;
+                }
+                if chunk_w + cw > remaining {
+                    break;
+                }
+                chars.next();
+                chunk.push(ch);
+                chunk_w += cw;
+            }
+            if chunk.is_empty() {
+                rows.push(std::mem::take(&mut current_row));
+                col = 0;
+                continue;
+            }
+            col += chunk_w;
             current_row.push(CachedSpan {
                 text: chunk,
                 fg: span.fg,
@@ -1032,6 +1052,19 @@ mod tests {
             }
         });
         assert_eq!(block.outcome.line_count, 0);
+    }
+
+    #[test]
+    fn split_cached_spans_into_rows_counts_display_width() {
+        render_test(80, |out| {
+            let spans = vec![CachedSpan {
+                text: "😀abc".to_string(),
+                fg: (1, 2, 3),
+            }];
+            let rows = split_cached_spans_into_rows(out, &spans, 2);
+            assert_eq!(rows[0][0].text, "😀");
+            assert_eq!(rows[1][0].text, "ab");
+        });
     }
 
     #[test]

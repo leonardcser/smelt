@@ -148,6 +148,24 @@ mod tests {
     }
 
     #[test]
+    fn blank_padding_rows_do_not_include_extra_anchor_cell() {
+        let theme = themed();
+        let mut buf = Buffer::new(BufId(0), BufCreateOpts::default());
+        let rows = {
+            let mut out = LineBuilder::new(&mut buf, &theme, 40);
+            let r = render(&mut out, "hello", &[], 40);
+            out.finish();
+            r as usize
+        };
+        let lines = read_buffer(&buf, &theme, rows);
+        assert_eq!(lines[0].text.len(), super::super::metrics::CHROME_INNER_PAD);
+        assert_eq!(
+            lines[rows - 1].text.len(),
+            super::super::metrics::CHROME_INNER_PAD
+        );
+    }
+
+    #[test]
     fn registered_slash_command_paints_accent_fg() {
         let _g = RESOLVER_GUARD.lock().unwrap();
         smelt_core::commands::set_command_resolver(|name| name == "commit");

@@ -25,16 +25,10 @@ pub(super) fn render(
         selectable: false,
         copy_as: None,
     };
-    let blank_anchor_meta = SpanMeta {
-        selectable: true,
-        copy_as: Some(String::new()),
-    };
     let pad: String = " ".repeat(CHROME_INNER_PAD);
-
     let blank_row = |out: &mut LineBuilder| {
         out.set_hl(user_bg);
         out.print_with_meta(&pad, pad_meta.clone());
-        out.print_with_meta(" ", blank_anchor_meta.clone());
         out.reset_style();
         out.fill_line_bg(user_bg_color);
         out.newline();
