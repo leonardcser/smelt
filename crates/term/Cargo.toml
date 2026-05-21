@@ -8,6 +8,7 @@ repository = "https://github.com/leonardcser/smelt"
 readme = "README.md"
 keywords = ["terminal", "tui", "rendering", "compositor", "layout"]
 categories = ["command-line-interface", "graphics"]
+exclude = ["tests/**"]
 
 [lib]
 name = "smelt_term"
