@@ -1,40 +1,63 @@
 ---
 name: customize
-description: Customize smelt. Change theme/colors, rebind keys, add slash commands, register tools/plugins, toggle settings, write skills. Includes the full Lua API surface (signatures, descriptions) and pointers to the on-disk built-in source.
+description:
+  Customize smelt. Change theme/colors, rebind keys, add slash commands,
+  register tools/plugins, toggle settings, write skills. Includes the full Lua
+  API surface (signatures, descriptions) and pointers to the on-disk built-in
+  source.
 ---
 
 # Customizing smelt
 
 Smelt is configured in Lua. Anything the user asks you to tweak (colors,
-keybinds, slash commands, settings, tools, plugins, skills) happens by
-editing Lua files under the user's config directory and letting the
-runtime hot-reload them.
+keybinds, slash commands, settings, tools, plugins, skills) happens by editing
+Lua files under the user's config directory and reloading the runtime.
 
 This skill gives you:
 
-1. Where customization files live and how reload works
-2. Where to read the built-in source as worked examples
+1. The core principle for how to respond
+2. Where customization files live
 3. Concrete recipes for the common asks
 4. The full Lua API surface (every namespace, signature, and one-line
-   description) so you can look up the exact function before you write
-   the edit
+   description) so you can look up the exact function before you write the edit
+
+## Core principle: persist the change, don't punt to slash commands
+
+When the user asks to change something, **edit the config file so the change
+survives a restart**. Do not answer with "run `/theme ember`" or "use
+`/settings` to toggle vim mode". Slash commands are runtime toggles a user runs
+themselves; they don't update `init.lua`, so the change is lost on the next
+launch.
+
+Your default workflow is:
+
+1. **Read** the user's `~/.config/smelt/init.lua` (create it if missing).
+2. **Edit** in the specific Lua call that effects the change (e.g.
+   `smelt.theme.set("SmeltAccent", { fg = { ansi = 208 } })`). Preserve every
+   existing line.
+3. **Call `smelt_reload`** so the edit takes effect now without waiting for the
+   user to restart smelt.
+4. Briefly tell the user what changed and where.
+
+Mention a runtime slash command only as a side note ("you can preview other
+presets with `/theme` before committing"), never as the answer.
 
 ## When to use this skill
 
-Load it whenever the user asks to modify how smelt itself behaves:
+Load it whenever the user asks to persistently modify how smelt itself behaves:
 
-- "change the prompt color to X" / "switch theme" / "make accents <color>"
+- "change the prompt color to X" / "switch theme to <color>" / "make accents
+  <color>"
 - "rebind <chord> to <action>" / "add a shortcut for X"
 - "add a /command that does X"
-- "set <setting> to X" / "turn on vim mode"
+- "set <setting> to X" / "turn on vim mode" / "disable thinking blocks"
 - "add an MCP server" / "register a provider" / "use OpenRouter"
 - "register a tool that <does X>"
 - "write a plugin that <does X>"
 - "write a skill that <does X>"
 
-Do **not** load this skill for ordinary coding work in the user's
-project. Only load it when the target of the change is *smelt's own
-config*.
+Do **not** load this skill for ordinary coding work in the user's project. Only
+load it when the target of the change is _smelt's own config_.
 
 ## Where things live
 
@@ -42,11 +65,11 @@ config*.
 
 Smelt reads Lua from these locations, later sources overriding earlier:
 
-| Path                                                | Purpose                                       |
-| --------------------------------------------------- | --------------------------------------------- |
-| Embedded in the binary                              | Built-in plugins, commands, colorschemes      |
-| `$XDG_CONFIG_HOME/smelt/` (default `~/.config/smelt/`) | Global user config                         |
-| `<cwd>/.smelt/`                                     | Project-local config (gated by `/trust`)      |
+| Path                                                   | Purpose                                  |
+| ------------------------------------------------------ | ---------------------------------------- |
+| Embedded in the binary                                 | Built-in plugins, commands, colorschemes |
+| `$XDG_CONFIG_HOME/smelt/` (default `~/.config/smelt/`) | Global user config                       |
+| `<cwd>/.smelt/`                                        | Project-local config (gated by `/trust`) |
 
 Inside each user dir, the layout is:
 
@@ -63,9 +86,9 @@ Inside each user dir, the layout is:
   AGENTS.md                      -- extra system-prompt content
 ```
 
-Use `~/.config/smelt/` for changes that should apply everywhere. Use
-`./.smelt/` for changes that should only apply in the current project
-(run `/trust` once after creating it).
+Use `~/.config/smelt/` for changes that should apply everywhere. Use `./.smelt/`
+for changes that should only apply in the current project (run `/trust` once
+after creating it).
 
 ### Read-only built-in source (for reference)
 
@@ -77,38 +100,38 @@ $XDG_DATA_HOME/smelt/builtins/lua/smelt/
 
 Default: `~/.local/share/smelt/builtins/lua/smelt/`. The mirror is
 version-stamped, so an upgrade refreshes it. **Treat this directory as
-read-only**: edits there are wiped on the next launch after a smelt
-upgrade. Use it for reading examples. Write changes to
-`~/.config/smelt/` (or `./.smelt/`).
+read-only**: edits there are wiped on the next launch after a smelt upgrade. Use
+it for reading examples. Write changes to `~/.config/smelt/` (or `./.smelt/`).
 
 What's inside that's useful when authoring custom Lua:
 
-| Path under `builtins/lua/smelt/`           | What it gives you                                                          |
-| ------------------------------------------ | -------------------------------------------------------------------------- |
-| `_meta/<module>.lua`                       | LuaCATS type stubs. Best place to look up exact signatures + field shapes. |
-| `_meta/_types.lua`                         | Every class / alias used in `_meta/*.lua` (e.g. `smelt.theme.ThemeSpec`).  |
-| `commands/<name>.lua`                      | Worked `smelt.cmd.register` examples (e.g. `docs.lua`).                    |
-| `colorschemes/<name>.lua`                  | Worked `ThemeSpec` tables. `default.lua` is the canonical reference.       |
-| `plugins/<name>.lua`                       | Bundled plugin patterns (e.g. background commands, plan mode).             |
-| `completers/<name>.lua`                    | Built-in completer patterns.                                               |
-| `dialogs/<name>.lua`                       | Built-in dialog patterns.                                                  |
+| Path under `builtins/lua/smelt/` | What it gives you                                                          |
+| -------------------------------- | -------------------------------------------------------------------------- |
+| `_meta/<module>.lua`             | LuaCATS type stubs. Best place to look up exact signatures + field shapes. |
+| `_meta/_types.lua`               | Every class / alias used in `_meta/*.lua` (e.g. `smelt.theme.ThemeSpec`).  |
+| `commands/<name>.lua`            | Worked `smelt.cmd.register` examples (e.g. `docs.lua`).                    |
+| `colorschemes/<name>.lua`        | Worked `ThemeSpec` tables. `default.lua` is the canonical reference.       |
+| `plugins/<name>.lua`             | Bundled plugin patterns (e.g. background commands, plan mode).             |
+| `completers/<name>.lua`          | Built-in completer patterns.                                               |
+| `dialogs/<name>.lua`             | Built-in dialog patterns.                                                  |
 
-Reach for these before writing new Lua: copy the closest worked example,
-then adapt.
+Reach for these before writing new Lua: copy the closest worked example, then
+adapt.
 
 ### Reference docs
 
-Per-module Markdown reference is published online:
+For deep details on a specific function (parameter shapes, return tables, opts
+records), read the LuaCATS type stubs under the builtins mirror:
 
-- Index: <https://leonardcser.github.io/smelt/reference/api/>
-- Per module: `https://leonardcser.github.io/smelt/reference/api/<module_stem>/`
-  where `<module_stem>` is the dotted name with `.` replaced by `_`
-  (e.g. `smelt.fs.file_state` becomes `fs_file_state`, and the root
-  `smelt` namespace lives at `index_smelt`).
-- Configuration reference: <https://leonardcser.github.io/smelt/reference/configuration/>
+```
+$XDG_DATA_HOME/smelt/builtins/lua/smelt/_meta/
+```
 
-When the user clones the repo, the same pages live at
-`docs/docs/reference/api/*.md`.
+One file per namespace (`cmd.lua`, `keymap.lua`, `theme.lua`, etc.) plus
+`_types.lua` for shared classes/aliases referenced by signatures. The stubs use
+LuaCATS syntax (`---@class`, `---@field`, `---@type fun(...)`), which is dense
+but precise. The API index further down in this skill is a flattened summary of
+the same data.
 
 ### Finding the config + builtins dirs from a shell
 
@@ -120,44 +143,42 @@ echo "${XDG_CONFIG_HOME:-$HOME/.config}/smelt"
 echo "${XDG_DATA_HOME:-$HOME/.local/share}/smelt/builtins/lua/smelt"
 ```
 
-If `init.lua` doesn't exist, create the directory and the file. The
-first-launch wizard does this normally, but you may be invoked when
-neither has happened yet.
+If `init.lua` doesn't exist, create the directory and the file. The first-launch
+wizard does this normally, but you may be invoked when neither has happened yet.
 
 ## Hot reload
 
-Config edits don't take effect until the Lua context is reloaded. The
-reload re-runs `init.lua`, all autoloaded plugins/commands/tools, and
-the user's `plugins/`. Persistent state (`smelt.state`, `smelt.cell`)
-survives across the cycle; module-local state in plugins is reset.
+Config edits don't take effect until the Lua context is reloaded. The reload
+re-runs `init.lua`, all autoloaded plugins/commands/tools, and the user's
+`plugins/`. Persistent state (`smelt.state`, `smelt.cell`) survives across the
+cycle; module-local state in plugins is reset.
 
-**You (the agent) trigger the reload by calling the `smelt_reload`
-tool.** Do this once, at the end of your turn after every set of edits
-to files under `~/.config/smelt/` or `./.smelt/`. The tool schedules
-the reload to fire when the current turn completes, so it never
-cancels its own in-flight call. Multiple calls in the same turn
-collapse into one reload.
+**You (the agent) trigger the reload by calling the `smelt_reload` tool.** Do
+this once, at the end of your turn after every set of edits to files under
+`~/.config/smelt/` or `./.smelt/`. The tool schedules the reload to fire when
+the current turn completes, so it never cancels its own in-flight call. Multiple
+calls in the same turn collapse into one reload.
 
-Do **not** silently flip `smelt.settings.auto_reload` in the user's
-config to avoid having to call the tool. That setting is the user's
-choice; respect whatever it's currently set to.
+Do **not** silently flip `smelt.settings.auto_reload` in the user's config to
+avoid having to call the tool. That setting is the user's choice; respect
+whatever it's currently set to.
 
 For reference (don't recommend these unless the user asks):
 
-| How                          | Triggered by  | When it fires                                                   |
-| ---------------------------- | ------------- | --------------------------------------------------------------- |
-| `smelt_reload` tool          | You, the agent| At end of the current turn (the path you should use)            |
-| `/reload`                    | User typing   | Immediately (blocks if agent is busy)                           |
-| `F5`                         | User keypress | Immediately (blocks if agent is busy)                           |
-| `auto_reload` setting        | User opts in  | Debounced filesystem watcher, deferred until the agent is idle  |
+| How                   | Triggered by   | When it fires                                                  |
+| --------------------- | -------------- | -------------------------------------------------------------- |
+| `smelt_reload` tool   | You, the agent | At end of the current turn (the path you should use)           |
+| `/reload`             | User typing    | Immediately (blocks if agent is busy)                          |
+| `F5`                  | User keypress  | Immediately (blocks if agent is busy)                          |
+| `auto_reload` setting | User opts in   | Debounced filesystem watcher, deferred until the agent is idle |
 
 ## Recipes
 
 ### Rebind a key
 
-`smelt.keymap.set(mode, chord, handler) -> Reg`. Modes are `"n"`
-(normal), `"i"` (insert), `"v"` (visual), or `""` (all). Chord syntax
-follows nvim conventions: `<C-y>`, `<S-Tab>`, `<leader>x`, etc.
+`smelt.keymap.set(mode, chord, handler) -> Reg`. Modes are `"n"` (normal), `"i"`
+(insert), `"v"` (visual), or `""` (all). Chord syntax follows nvim conventions:
+`<C-y>`, `<S-Tab>`, `<leader>x`, etc.
 
 ```lua
 -- In ~/.config/smelt/init.lua
@@ -168,37 +189,46 @@ smelt.keymap.set("n", "<C-y>", function()
 end)
 ```
 
-To remove a binding programmatically use
-`smelt.keymap.unset(mode, chord)`. For permanent removal, just delete
-the registration line.
+To remove a binding programmatically use `smelt.keymap.unset(mode, chord)`. For
+permanent removal, just delete the registration line.
 
-`smelt.keymap.list()` returns every currently-bound chord. Useful when
-the user asks "what's bound to X?".
+`smelt.keymap.list()` returns every currently-bound chord. Useful when the user
+asks "what's bound to X?".
 
 ### Change the accent color
 
-The quickest path for the user is `/theme <preset>` at runtime
-(presets: `ember`, `coral`, `rose`, `gold`, `ice`, `sky`, `blue`,
-`lavender`, `lilac`, `mint`, `sage`, `silver`) or a raw ANSI value
-(`/theme 208`). The task-slug color is separate: `/color`.
-
-For a persistent change, write to `init.lua`:
+Edit `~/.config/smelt/init.lua` and add (or update) a `smelt.theme.set` call for
+the relevant highlight group:
 
 ```lua
+-- In ~/.config/smelt/init.lua
 smelt.theme.set("SmeltAccent", { fg = { ansi = 208 }, bold = true })
 ```
 
-`smelt.theme.set(group, style)` overrides one highlight group. The
-override sticks until the next `smelt.theme.apply()` or
-`smelt.theme.use()` call. Common group names: `SmeltAccent`, `Comment`,
-`SmeltDiffAddBg`, `SmeltDiffRemoveBg`, etc. Use `smelt.theme.snapshot()`
-to dump every currently-set group if you need to discover names.
+`smelt.theme.set(group, style)` overrides one highlight group; the override
+persists across reloads because it lives in `init.lua`. Common group names:
+`SmeltAccent` (primary accent), `Comment`, `SmeltDiffAddBg`,
+`SmeltDiffRemoveBg`, `SmeltSlug` (task-slug pill), `SmeltBar` (prompt bars +
+statusline separator). Use `smelt.theme.snapshot()` to dump every currently-set
+group when the user needs to discover names.
+
+If the user names a preset (`"ember"`, `"coral"`, `"rose"`, `"gold"`, `"ice"`,
+`"sky"`, `"blue"`, `"lavender"`, `"lilac"`, `"mint"`, `"sage"`, `"silver"`),
+call `smelt.theme.use("<preset>")` in `init.lua` to apply the matching
+colorscheme:
+
+```lua
+smelt.theme.use("ember")
+```
+
+The runtime commands `/theme <preset>` and `/color <preset>` exist but are
+session-only previews; the user can mention them, but your edit goes in
+`init.lua` so it survives a restart.
 
 ### Write a full colorscheme
 
-Drop a Lua file at
-`~/.config/smelt/lua/smelt/colorschemes/<name>.lua` that returns a
-`ThemeSpec` table:
+Drop a Lua file at `~/.config/smelt/lua/smelt/colorschemes/<name>.lua` that
+returns a `ThemeSpec` table:
 
 ```lua
 return {
@@ -213,14 +243,13 @@ return {
 ```
 
 Then load it: `smelt.theme.use("<name>")`. Read
-`$XDG_DATA_HOME/smelt/builtins/lua/smelt/colorschemes/default.lua` for
-the canonical worked example. Light/dark variants share the same file:
-gate by `smelt.theme.is_light()` if needed.
+`$XDG_DATA_HOME/smelt/builtins/lua/smelt/colorschemes/default.lua` for the
+canonical worked example. Light/dark variants share the same file: gate by
+`smelt.theme.is_light()` if needed.
 
 ### Add a /command
 
-Drop a file at `~/.config/smelt/commands/<name>.lua` (or inline in
-`init.lua`):
+Drop a file at `~/.config/smelt/commands/<name>.lua` (or inline in `init.lua`):
 
 ```lua
 smelt.cmd.register("greet", function(arg)
@@ -235,40 +264,50 @@ end, {
 })
 ```
 
-The handler receives the trailing argument string (or `nil`). Errors
-are surfaced as in-app notifications.
+The handler receives the trailing argument string (or `nil`). Errors are
+surfaced as in-app notifications.
 
-Worked example: read
-`$XDG_DATA_HOME/smelt/builtins/lua/smelt/commands/docs.lua` to see how
-`/docs` uses `smelt.os.open_url`, `smelt.clipboard.write`, and
+Worked example: read `$XDG_DATA_HOME/smelt/builtins/lua/smelt/commands/docs.lua`
+to see how `/docs` uses `smelt.os.open_url`, `smelt.clipboard.write`, and
 `smelt.notify` for a graceful clipboard fallback.
 
 ### Toggle/set a setting
 
-Settings live on `smelt.settings`. Assigning an unknown key or wrong
-type raises at the call site.
+Write the assignment into `~/.config/smelt/init.lua`. Assigning an unknown key
+or wrong type raises at the call site.
 
 ```lua
+-- In ~/.config/smelt/init.lua
 smelt.settings.vim = true
 smelt.settings.auto_compact = true
 smelt.settings.compact_threshold = 0.65
 smelt.settings.show_thinking = true
 ```
 
-Booleans are also toggleable at runtime via `/settings`. Numbers can be
-set from `init.lua` or `--set KEY=VALUE` on the CLI. The full table of
-settings (with types, defaults, and descriptions) is in the
-**Settings** section further down.
+The full table of settings (key, type, default, description) is in the
+**Settings** section further down; use it to confirm a key exists and is spelled
+correctly before writing.
+
+`/settings` and `--set KEY=VALUE` exist as runtime/CLI overrides but do not
+persist; always make the change in `init.lua` so it survives a restart.
 
 ### Customize the status line
 
-The bottom-of-screen status line is composed from registered providers.
-Use `smelt.statusline.register(name, provider_fn)` to add a segment and
-`smelt.statusline.list()` to see what's currently registered. Each
-`provider_fn` returns a string (or a styled list). Look up the full
-shape in the API index (`smelt.statusline`) and read
-`$XDG_DATA_HOME/smelt/builtins/lua/smelt/status.lua` for the canonical
-worked example.
+The status line is a pure-Lua module that ships as `smelt.statusline`. Register
+a named source via `M.add(name, handler)` and the renderer calls it each frame:
+
+```lua
+local sl = require("smelt.statusline")
+sl.add("greeting", function()
+  return { { text = "hi ", hl_group = "SmeltAccent" } }
+end)
+```
+
+The handler returns a segment table or a list of them. Each segment is
+`{ text, hl_group?, style?, priority?, align_right?, truncatable?, separated? }`.
+Remove a source with `sl.remove(name)`. The canonical worked example lives at
+`$XDG_DATA_HOME/smelt/builtins/lua/smelt/statusline.lua`; its `core` source is
+what draws the built-in segments (vim mode, agent mode, tps, task label, etc.).
 
 ### Pin startup defaults (model / mode / reasoning)
 
@@ -293,9 +332,9 @@ smelt.provider.register("openai", {
 })
 ```
 
-`type` is one of `openai-compatible`, `openai`, `codex`,
-`anthropic-compatible`, `anthropic`, `copilot`. Re-registering the same
-name replaces the previous entry.
+`type` is one of `openai-compatible`, `openai`, `codex`, `anthropic-compatible`,
+`anthropic`, `copilot`. Re-registering the same name replaces the previous
+entry.
 
 ### Register an MCP server
 
@@ -308,8 +347,8 @@ smelt.mcp.register("filesystem", {
 })
 ```
 
-MCP tool names get prefixed with the server name
-(`filesystem_read_file`) and default to ask-permission.
+MCP tool names get prefixed with the server name (`filesystem_read_file`) and
+default to ask-permission.
 
 ### Register an agent tool
 
@@ -345,15 +384,14 @@ smelt.permissions.set_rules({
 })
 ```
 
-Modes: `default`, `plan`, `apply`, `yolo`. Tool kinds include `bash`
-and `mcp`. See the permissions reference at
-<https://leonardcser.github.io/smelt/reference/permissions/> for the
-full match-rule grammar.
+Modes: `default`, `plan`, `apply`, `yolo`. Tool kinds include `bash` and `mcp`.
+For the full match-rule grammar, read
+`$XDG_DATA_HOME/smelt/builtins/lua/smelt/_meta/permissions.lua` or look up
+`smelt.permissions` in the API index further down.
 
 ### Write a project-local skill
 
-When the user wants the agent to know something only inside this
-project:
+When the user wants the agent to know something only inside this project:
 
 ```
 <project>/.smelt/skills/<name>/SKILL.md
@@ -372,40 +410,43 @@ description: One-line summary the agent reads to decide whether to load.
 Any reference content the agent should consult on demand.
 ```
 
-Then run `/trust` once after creating `.smelt/`. The agent will see the
-skill in its `# Skills` listing and can load it via `load_skill`.
+Then run `/trust` once after creating `.smelt/`. The agent will see the skill in
+its `# Skills` listing and can load it via `load_skill`.
 
 ## Bundled plugins
 
 <!-- PLUGINS_BEGIN -->
 <!-- This region is auto-generated by `cargo xtask gen-lua-docs`. Do not edit by hand. -->
 
-Bundled with smelt. Drop a file under `~/.config/smelt/plugins/` to add your own.
+Bundled with smelt. Drop a file under `~/.config/smelt/plugins/` to add your
+own.
 
 ### Autoloaded
 
-Loaded on every launch unless opted out via `smelt.builtins.disable({ plugins = { "<name>" } })` in `early.lua`.
+Loaded on every launch unless opted out via
+`smelt.builtins.disable({ plugins = { "<name>" } })` in `early.lua`.
 
-| Plugin | Summary |
-| --- | --- |
-| `smelt.plugins.banner` | Empty-state logo overlay + shutdown logo/resume-hint banner. |
-| `smelt.plugins.compact` | Compaction plugin. |
-| `smelt.plugins.esc_chord` | Idle-mode Esc-Esc: cancel any in-flight background work (`smelt.work.busy` tokens, e.g. /compact), or rewind to the previous turn. |
-| `smelt.plugins.perf_panel` | F12 perf panel. |
-| `smelt.plugins.predict` | Input prediction plugin. |
-| `smelt.plugins.scroll_pills` | Scroll-pill overlays shown while the transcript is scrolled off-tail: * Bottom pill — " ↓ jump to bottom " above the prompt; click re-pins to tail. * Top pill — first line of the nearest user message above the viewport; click scrolls to it with one row of gap so repeated clicks walk back. |
-| `smelt.plugins.title` | Session title plugin. |
-| `smelt.plugins.upgrade` | Autoupgrade plugin. |
-| `smelt.plugins.version` | /version — surface the running smelt build identity as a notification. |
+| Plugin                       | Summary                                                                                                                                                                                                                                                                                           |
+| ---------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `smelt.plugins.banner`       | Empty-state logo overlay + shutdown logo/resume-hint banner.                                                                                                                                                                                                                                      |
+| `smelt.plugins.compact`      | Compaction plugin.                                                                                                                                                                                                                                                                                |
+| `smelt.plugins.esc_chord`    | Idle-mode Esc-Esc: cancel any in-flight background work (`smelt.work.busy` tokens, e.g. /compact), or rewind to the previous turn.                                                                                                                                                                |
+| `smelt.plugins.perf_panel`   | F12 perf panel.                                                                                                                                                                                                                                                                                   |
+| `smelt.plugins.predict`      | Input prediction plugin.                                                                                                                                                                                                                                                                          |
+| `smelt.plugins.scroll_pills` | Scroll-pill overlays shown while the transcript is scrolled off-tail: _ Bottom pill — " ↓ jump to bottom " above the prompt; click re-pins to tail. _ Top pill — first line of the nearest user message above the viewport; click scrolls to it with one row of gap so repeated clicks walk back. |
+| `smelt.plugins.title`        | Session title plugin.                                                                                                                                                                                                                                                                             |
+| `smelt.plugins.upgrade`      | Autoupgrade plugin.                                                                                                                                                                                                                                                                               |
+| `smelt.plugins.version`      | /version — surface the running smelt build identity as a notification.                                                                                                                                                                                                                            |
 
 ### Opt-in
 
-Shipped but not autoloaded. Add `require("smelt.plugins.<name>")` to `~/.config/smelt/init.lua` to enable.
+Shipped but not autoloaded. Add `require("smelt.plugins.<name>")` to
+`~/.config/smelt/init.lua` to enable.
 
-| Plugin | Summary |
-| --- | --- |
+| Plugin                              | Summary                                                                                                                       |
+| ----------------------------------- | ----------------------------------------------------------------------------------------------------------------------------- |
 | `smelt.plugins.background_commands` | Overrides `bash` to add `run_in_background`, registers `read_process_output` and `stop_process` tools, and the `/ps` command. |
-| `smelt.plugins.plan_mode` | Plan-mode plugin: manages the `exit_plan_mode` tool and system prompt section. |
+| `smelt.plugins.plan_mode`           | Plan-mode plugin: manages the `exit_plan_mode` tool and system prompt section.                                                |
 
 <!-- PLUGINS_END -->
 
@@ -414,25 +455,27 @@ Shipped but not autoloaded. Add `require("smelt.plugins.<name>")` to `~/.config/
 <!-- SETTINGS_BEGIN -->
 <!-- This region is auto-generated by `cargo xtask gen-lua-docs`. Do not edit by hand. -->
 
-Read or write via `smelt.settings.<key>` from `init.lua`. Booleans also toggle at runtime via `/settings`. Override from the CLI with `--set KEY=VALUE`. Assigning an unknown key or wrong type raises at the call site.
+Read or write via `smelt.settings.<key>` from `init.lua`. Booleans also toggle
+at runtime via `/settings`. Override from the CLI with `--set KEY=VALUE`.
+Assigning an unknown key or wrong type raises at the call site.
 
-| Key | Type | Default | Description |
-| --- | --- | --- | --- |
-| `vim` | `bool` | `false` | Vi keybindings in the prompt. |
-| `auto_compact` | `bool` | `true` | Auto-summarize when context usage crosses `compact_threshold` (forced on in headless). |
-| `show_tps` | `bool` | `true` | Tokens/sec in status bar. |
-| `show_tokens` | `bool` | `true` | Context token count in status bar. |
-| `show_cost` | `bool` | `true` | Session cost in status bar. |
-| `show_prediction` | `bool` | `true` | Ghost-text input predictions in the prompt. |
-| `show_slug` | `bool` | `true` | Task-slug label in status bar. |
-| `show_thinking` | `bool` | `true` | Show full thinking/reasoning blocks (false shows a single summary). |
-| `restrict_to_workspace` | `bool` | `true` | Downgrade `Allow` to `Ask` for paths outside the workspace. |
-| `redact_secrets` | `bool` | `true` | Scrub detected secrets from user input and tool results before they reach the LLM. |
-| `auto_reload` | `bool` | `false` | Watch on-disk config inputs (init.lua, plugins/, commands/,  skills/, AGENTS.md, `--system-prompt` file) and dispatch  `/reload` when any of them changes. |
-| `compact_threshold` | `number` | `0.8` | Fraction of the configured context window (0, 1] at which the  bundled compact plugin auto-triggers between turns. |
-| `cache_ttl_long` | `bool` | `false` | Anthropic prompt cache TTL. `false` uses the 5-minute ephemeral  TTL; `true` opts into the 1-hour TTL. Has no effect on  non-Anthropic providers. |
-| `autoupgrade` | `"off"` \| `"notify"` \| `"auto"` | `"notify"` | Autoupgrade behavior. `"off"` skips checks; `"notify"` shows a  pill when an update is available; `"auto"` installs in  background on detection. |
-| `autoupgrade_channel` | `"stable"` \| `"unstable"` | `"stable"` | Release channel autoupgrade tracks: `"stable"` (tagged releases,  including prereleases) or `"unstable"` (`main` HEAD). |
+| Key                     | Type                              | Default    | Description                                                                                                                                              |
+| ----------------------- | --------------------------------- | ---------- | -------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `vim`                   | `bool`                            | `false`    | Vi keybindings in the prompt.                                                                                                                            |
+| `auto_compact`          | `bool`                            | `true`     | Auto-summarize when context usage crosses `compact_threshold` (forced on in headless).                                                                   |
+| `show_tps`              | `bool`                            | `true`     | Tokens/sec in status bar.                                                                                                                                |
+| `show_tokens`           | `bool`                            | `true`     | Context token count in status bar.                                                                                                                       |
+| `show_cost`             | `bool`                            | `true`     | Session cost in status bar.                                                                                                                              |
+| `show_prediction`       | `bool`                            | `true`     | Ghost-text input predictions in the prompt.                                                                                                              |
+| `show_slug`             | `bool`                            | `true`     | Task-slug label in status bar.                                                                                                                           |
+| `show_thinking`         | `bool`                            | `true`     | Show full thinking/reasoning blocks (false shows a single summary).                                                                                      |
+| `restrict_to_workspace` | `bool`                            | `true`     | Downgrade `Allow` to `Ask` for paths outside the workspace.                                                                                              |
+| `redact_secrets`        | `bool`                            | `true`     | Scrub detected secrets from user input and tool results before they reach the LLM.                                                                       |
+| `auto_reload`           | `bool`                            | `false`    | Watch on-disk config inputs (init.lua, plugins/, commands/, skills/, AGENTS.md, `--system-prompt` file) and dispatch `/reload` when any of them changes. |
+| `compact_threshold`     | `number`                          | `0.8`      | Fraction of the configured context window (0, 1] at which the bundled compact plugin auto-triggers between turns.                                        |
+| `cache_ttl_long`        | `bool`                            | `false`    | Anthropic prompt cache TTL. `false` uses the 5-minute ephemeral TTL; `true` opts into the 1-hour TTL. Has no effect on non-Anthropic providers.          |
+| `autoupgrade`           | `"off"` \| `"notify"` \| `"auto"` | `"notify"` | Autoupgrade behavior. `"off"` skips checks; `"notify"` shows a pill when an update is available; `"auto"` installs in background on detection.           |
+| `autoupgrade_channel`   | `"stable"` \| `"unstable"`        | `"stable"` | Release channel autoupgrade tracks: `"stable"` (tagged releases, including prereleases) or `"unstable"` (`main` HEAD).                                   |
 
 <!-- SETTINGS_END -->
 
@@ -443,46 +486,42 @@ Two tiers exist:
 - **Host**: works everywhere, including headless (`smelt -p '...'`).
 - **UiHost**: needs the TUI; calling these from a headless run raises.
 
-If you're writing a plugin that might run headless (CI scripts, batch
-prompts), avoid UiHost calls or gate them on
-`smelt.frontend.is_interactive()`. The API index below labels every
-namespace with its tier.
+If you're writing a plugin that might run headless (CI scripts, batch prompts),
+avoid UiHost calls or gate them on `smelt.frontend.is_interactive()`. The API
+index below labels every namespace with its tier.
 
 ## Gotchas
 
-- **`Reg`-returning registrations.** `smelt.keymap.set`,
-  `smelt.cmd.register`, `smelt.tools.register`, etc. return a `Reg`
-  table with `:remove()`. Hold onto it if you want to unregister later;
-  otherwise reload simply re-runs `init.lua` and re-registers.
-- **Unknown setting/chord/mode keys raise.** Better to fail loud than
-  silently no-op. Check the recipes above for valid values.
-- **Hot reload wipes the Lua context.** Don't rely on module-local
-  state surviving a `/reload`. Use `smelt.state` / `smelt.cell` for
-  state that needs to persist.
-- **`.smelt/` requires trust.** After creating or editing project
-  config, the user must run `/trust`. The next reload after an edit
-  fails until they do.
-- **Don't hand-edit `_meta/` stubs or `docs/docs/reference/api/`**.
-  Those are auto-generated by `cargo xtask gen-lua-docs` from the Rust
-  side. The same is true for the API index region of this skill.
-- **The builtins dir is read-only.** Edits to
-  `$XDG_DATA_HOME/smelt/builtins/` are wiped on the next smelt upgrade.
-  Make changes under `~/.config/smelt/` or `./.smelt/`.
-- **Preserve existing config when editing `init.lua`.** Always `Read`
-  the file first, then `Edit` the specific lines you're changing. Never
-  overwrite the whole file from a template, you'll wipe the user's
-  providers, MCP servers, permissions, and custom plugins. If `init.lua`
-  doesn't exist, create a minimal one with only the lines the request
-  needs.
+- **`Reg`-returning registrations.** `smelt.keymap.set`, `smelt.cmd.register`,
+  `smelt.tools.register`, etc. return a `Reg` table with `:remove()`. Hold onto
+  it if you want to unregister later; otherwise reload simply re-runs `init.lua`
+  and re-registers.
+- **Unknown setting/chord/mode keys raise.** Better to fail loud than silently
+  no-op. Check the recipes above for valid values.
+- **Hot reload wipes the Lua context.** Don't rely on module-local state
+  surviving a `/reload`. Use `smelt.state` / `smelt.cell` for state that needs
+  to persist.
+- **`.smelt/` requires trust.** After creating or editing project config, the
+  user must run `/trust`. The next reload after an edit fails until they do.
+- **Don't hand-edit `_meta/` stubs or `docs/docs/reference/api/`**. Those are
+  auto-generated by `cargo xtask gen-lua-docs` from the Rust side. The same is
+  true for the API index region of this skill.
+- **The builtins dir is read-only.** Edits to `$XDG_DATA_HOME/smelt/builtins/`
+  are wiped on the next smelt upgrade. Make changes under `~/.config/smelt/` or
+  `./.smelt/`.
+- **Preserve existing config when editing `init.lua`.** Always `Read` the file
+  first, then `Edit` the specific lines you're changing. Never overwrite the
+  whole file from a template, you'll wipe the user's providers, MCP servers,
+  permissions, and custom plugins. If `init.lua` doesn't exist, create a minimal
+  one with only the lines the request needs.
 
 ## Lua API surface
 
-What follows is the auto-generated index of every public `smelt.*`
-function: namespace, tier, one-line summary, and signature for each
-function. For deep details (parameter shapes, return tables, type
-records), open the matching `_meta/<stem>.lua` stub under the builtins
-dir, or the matching reference page online (paths and URL conventions
-above).
+What follows is the auto-generated index of every public `smelt.*` function:
+namespace, tier, one-line summary, and signature for each function. For deep
+details (parameter shapes, return tables, type records), open the matching
+`_meta/<stem>.lua` stub under the builtins dir
+(`$XDG_DATA_HOME/smelt/builtins/lua/smelt/_meta/`).
 
 <!-- API_INDEX_BEGIN -->
 <!-- This region is auto-generated by `cargo xtask gen-lua-docs`. Do not edit by hand. -->
@@ -499,28 +538,30 @@ Opt out of bundled `smelt.<dotted>` modules.
   Mark the bundled modules in `selector` as disabled.
 - `smelt.builtins.enable` :: `fun(selector: smelt.builtins.Selector): integer`
   Undo a prior `disable` for the bundled modules in `selector`.
-- `smelt.builtins.is_disabled` :: `fun(module: string): boolean`
-  Return `true` if the dotted module name (e.g.
-- `smelt.builtins.list` :: `fun(): table`
-  Return the sorted dotted module names that are currently disabled.
+- `smelt.builtins.is_disabled` :: `fun(module: string): boolean` Return `true`
+  if the dotted module name (e.g.
+- `smelt.builtins.list` :: `fun(): table` Return the sorted dotted module names
+  that are currently disabled.
 
 #### `smelt.cell`
 
 Typed reactive cell registry.
 
-- `smelt.cell.glob` :: `fun(pattern: string, handler: fun(arg1: string, arg2: any)): smelt.Reg`
-  Register `handler(name, value)` for every cell whose name matches `pattern` (glob syntax).
-- `smelt.cell.new` :: `fun(name: smelt.cell.Name, initial: any): nil`
-  Declare a cell named `name` with `initial` as its starting value.
+- `smelt.cell.glob` ::
+  `fun(pattern: string, handler: fun(arg1: string, arg2: any)): smelt.Reg`
+  Register `handler(name, value)` for every cell whose name matches `pattern`
+  (glob syntax).
+- `smelt.cell.new` :: `fun(name: smelt.cell.Name, initial: any): nil` Declare a
+  cell named `name` with `initial` as its starting value.
 
 #### `smelt.cli`
 
 Declare and read CLI flags from Lua.
 
-- `smelt.cli.get` :: `fun(name: string): any`
-  Return the parsed value of the Lua-declared CLI flag `name`.
-- `smelt.cli.list` :: `fun(): table`
-  Return the names of every Lua-declared CLI flag, in registration order.
+- `smelt.cli.get` :: `fun(name: string): any` Return the parsed value of the
+  Lua-declared CLI flag `name`.
+- `smelt.cli.list` :: `fun(): table` Return the names of every Lua-declared CLI
+  flag, in registration order.
 - `smelt.cli.register_flag` :: `fun(opts: smelt.cli.RegisterFlagOpts): nil`
   Register a CLI flag.
 
@@ -528,23 +569,27 @@ Declare and read CLI flags from Lua.
 
 Read and write the system clipboard.
 
-- `smelt.clipboard.read` :: `fun(): string?`
-  Read the current clipboard contents as a string, or `nil` if empty/unavailable.
-- `smelt.clipboard.write` :: `fun(text: string): nil`
-  Write `text` to the system clipboard.
+- `smelt.clipboard.read` :: `fun(): string?` Read the current clipboard contents
+  as a string, or `nil` if empty/unavailable.
+- `smelt.clipboard.write` :: `fun(text: string): nil` Write `text` to the system
+  clipboard.
 
 #### `smelt.cmd`
 
 Register and list slash commands.
 
-- `smelt.cmd.list` :: `fun(): table`
-  Return every registered slash command as a Lua array of `{ name, desc, args, while_busy, queue_when_busy, startup_ok, hidden }` rows.
-- `smelt.cmd.picker` :: `fun(name: string, opts: table?): nil`
-  Register a slash command `name` that opens a prompt-docked picker when called without arguments, or invokes `opts.apply(arg)` directly when given one.
-- `smelt.cmd.register` :: `fun(name: string, handler: fun(value: string?), opts: smelt.cmd.RegisterOpts?): smelt.Reg`
-  Register a slash command `name` whose `handler` is invoked when the user runs it.
-- `smelt.cmd.run` :: `fun(line: string): nil`
-  Execute the slash-command line `line` (with or without leading `/`) as if the user had typed it.
+- `smelt.cmd.list` :: `fun(): table` Return every registered slash command as a
+  Lua array of
+  `{ name, desc, args, while_busy, queue_when_busy, startup_ok, hidden }` rows.
+- `smelt.cmd.picker` :: `fun(name: string, opts: table?): nil` Register a slash
+  command `name` that opens a prompt-docked picker when called without
+  arguments, or invokes `opts.apply(arg)` directly when given one.
+- `smelt.cmd.register` ::
+  `fun(name: string, handler: fun(value: string?), opts: smelt.cmd.RegisterOpts?): smelt.Reg`
+  Register a slash command `name` whose `handler` is invoked when the user runs
+  it.
+- `smelt.cmd.run` :: `fun(line: string): nil` Execute the slash-command line
+  `line` (with or without leading `/`) as if the user had typed it.
 
 #### `smelt.dialog`
 
@@ -552,18 +597,20 @@ Modal overlay builders.
 
 - `smelt.dialog.content` :: `fun(opts: table?): smelt.win.Win, smelt.buf.Buf`
   General-purpose body leaf.
-- `smelt.dialog.input` :: `fun(placeholder: string?, opts: table?): smelt.win.Win, smelt.buf.Buf`
-  Build a single-line text-input leaf with a fresh buffer.
+- `smelt.dialog.input` ::
+  `fun(placeholder: string?, opts: table?): smelt.win.Win, smelt.buf.Buf` Build
+  a single-line text-input leaf with a fresh buffer.
 - `smelt.dialog.list` :: `fun(buf: smelt.buf.Buf, opts: table?): smelt.win.Win`
   Wrap an existing `buf` as a selectable list leaf.
 - `smelt.dialog.markdown` :: `fun(text: string): smelt.win.Win, smelt.buf.Buf`
   Render `text` as a non-focusable markdown leaf.
-- `smelt.dialog.open` :: `fun(opts: smelt.dialog.Opts): any`
-  Coroutine-blocking dialog opener.
+- `smelt.dialog.open` :: `fun(opts: smelt.dialog.Opts): any` Coroutine-blocking
+  dialog opener.
 - `smelt.dialog.open_handle` :: `fun(opts: smelt.dialog.Opts): table`
   Non-coroutine open.
-- `smelt.dialog.options` :: `fun(labels: string[], opts: table?): smelt.win.Win, smelt.buf.Buf`
-  Build a static selectable list leaf populated with `labels`.
+- `smelt.dialog.options` ::
+  `fun(labels: string[], opts: table?): smelt.win.Win, smelt.buf.Buf` Build a
+  static selectable list leaf populated with `labels`.
 - `smelt.dialog.picker` :: `fun(opts: smelt.dialog.PickerOpts): any`
   Coroutine-blocking Telescope-style picker.
 
@@ -571,77 +618,85 @@ Modal overlay builders.
 
 Query which frontend is active (TUI vs headless).
 
-- `smelt.frontend.is_interactive` :: `fun(): boolean`
-  Return `true` when the frontend supports interactive prompts (a TTY user is present).
-- `smelt.frontend.kind` :: `fun(): string`
-  Return the active frontend kind (e.g.
+- `smelt.frontend.is_interactive` :: `fun(): boolean` Return `true` when the
+  frontend supports interactive prompts (a TTY user is present).
+- `smelt.frontend.kind` :: `fun(): string` Return the active frontend kind (e.g.
 
 #### `smelt.fs`
 
 Sync filesystem primitives.
 
-- `smelt.fs.copy` :: `fun(from: string, to: string): integer?, string?`
-  Copy file `from` to `to`.
-- `smelt.fs.exists` :: `fun(p: string): boolean`
-  Return `true` if a filesystem entry exists at `p`.
-- `smelt.fs.glob` :: `fun(pattern: string, path: string?, opts: table?): string[]?, string?`
-  Find paths matching `pattern` under `path` (defaults to cwd).
-- `smelt.fs.is_dir` :: `fun(p: string): boolean`
-  Return `true` if `p` exists and refers to a directory.
-- `smelt.fs.is_file` :: `fun(p: string): boolean`
-  Return `true` if `p` exists and refers to a regular file.
-- `smelt.fs.mkdir` :: `fun(p: string): boolean, string?`
-  Create directory `p` (parents must exist).
-- `smelt.fs.mkdir_all` :: `fun(p: string): boolean, string?`
-  Create directory `p` along with any missing parent directories.
-- `smelt.fs.read` :: `fun(p: string): string?, string?`
-  Read `p` into a string.
-- `smelt.fs.read_async` :: `fun(path: string): string?, string?`
-  Read `path` off the main thread.
-- `smelt.fs.read_dir` :: `fun(p: string): string[]?, string?`
-  List the immediate entries of directory `p`.
-- `smelt.fs.remove_dir` :: `fun(p: string): boolean, string?`
-  Delete the empty directory at `p`.
-- `smelt.fs.remove_dir_all` :: `fun(p: string): boolean, string?`
-  Recursively delete the directory tree rooted at `p`.
-- `smelt.fs.remove_file` :: `fun(p: string): boolean, string?`
-  Delete the file at `p`.
-- `smelt.fs.rename` :: `fun(from: string, to: string): boolean, string?`
-  Rename or move `from` to `to`.
-- `smelt.fs.size` :: `fun(p: string): integer?, string?`
-  Return the size of file `p` in bytes.
-- `smelt.fs.watch` :: `fun(path: string, handler: fun(event: { kind: string, detail: string?, paths: string[] }), opts: table?): smelt.Reg`
+- `smelt.fs.copy` :: `fun(from: string, to: string): integer?, string?` Copy
+  file `from` to `to`.
+- `smelt.fs.exists` :: `fun(p: string): boolean` Return `true` if a filesystem
+  entry exists at `p`.
+- `smelt.fs.glob` ::
+  `fun(pattern: string, path: string?, opts: table?): string[]?, string?` Find
+  paths matching `pattern` under `path` (defaults to cwd).
+- `smelt.fs.is_dir` :: `fun(p: string): boolean` Return `true` if `p` exists and
+  refers to a directory.
+- `smelt.fs.is_file` :: `fun(p: string): boolean` Return `true` if `p` exists
+  and refers to a regular file.
+- `smelt.fs.mkdir` :: `fun(p: string): boolean, string?` Create directory `p`
+  (parents must exist).
+- `smelt.fs.mkdir_all` :: `fun(p: string): boolean, string?` Create directory
+  `p` along with any missing parent directories.
+- `smelt.fs.read` :: `fun(p: string): string?, string?` Read `p` into a string.
+- `smelt.fs.read_async` :: `fun(path: string): string?, string?` Read `path` off
+  the main thread.
+- `smelt.fs.read_dir` :: `fun(p: string): string[]?, string?` List the immediate
+  entries of directory `p`.
+- `smelt.fs.remove_dir` :: `fun(p: string): boolean, string?` Delete the empty
+  directory at `p`.
+- `smelt.fs.remove_dir_all` :: `fun(p: string): boolean, string?` Recursively
+  delete the directory tree rooted at `p`.
+- `smelt.fs.remove_file` :: `fun(p: string): boolean, string?` Delete the file
+  at `p`.
+- `smelt.fs.rename` :: `fun(from: string, to: string): boolean, string?` Rename
+  or move `from` to `to`.
+- `smelt.fs.size` :: `fun(p: string): integer?, string?` Return the size of file
+  `p` in bytes.
+- `smelt.fs.watch` ::
+  `fun(path: string, handler: fun(event: { kind: string, detail: string?, paths: string[] }), opts: table?): smelt.Reg`
   Filesystem watcher.
-- `smelt.fs.workspace_files` :: `fun(): string[]`
-  Return tracked + untracked non-ignored files under the cwd, plus every intermediate parent directory, sorted lexicographically.
-- `smelt.fs.write` :: `fun(p: string, contents: string): boolean, string?`
-  Write `contents` to file `p`, creating it if necessary.
-- `smelt.fs.write_async` :: `fun(path: string, contents: string): boolean, string?`
-  Write `contents` to `path` off the main thread.
+- `smelt.fs.workspace_files` :: `fun(): string[]` Return tracked + untracked
+  non-ignored files under the cwd, plus every intermediate parent directory,
+  sorted lexicographically.
+- `smelt.fs.write` :: `fun(p: string, contents: string): boolean, string?` Write
+  `contents` to file `p`, creating it if necessary.
+- `smelt.fs.write_async` ::
+  `fun(path: string, contents: string): boolean, string?` Write `contents` to
+  `path` off the main thread.
 
 #### `smelt.fs.file_state`
 
-Cached file-state tracker used by tools to detect external modifications between reads and writes.
+Cached file-state tracker used by tools to detect external modifications between
+reads and writes.
 
-- `smelt.fs.file_state.get` :: `fun(p: string): any`
-  Look up the cached file-state entry for `p`.
-- `smelt.fs.file_state.has` :: `fun(p: string): boolean`
-  Return `true` if the file-state cache has a recorded entry for `p`.
-- `smelt.fs.file_state.mtime_ms` :: `fun(p: string): integer?, string?`
-  Return the modification time of `p` in milliseconds since the UNIX epoch.
-- `smelt.fs.file_state.record_read` :: `fun(p: string, content: string, offset: integer, limit: integer): nil`
-  Record that `p` was read at byte range `[offset, offset+limit)` with `content` so subsequent staleness checks know what the agent has seen.
+- `smelt.fs.file_state.get` :: `fun(p: string): any` Look up the cached
+  file-state entry for `p`.
+- `smelt.fs.file_state.has` :: `fun(p: string): boolean` Return `true` if the
+  file-state cache has a recorded entry for `p`.
+- `smelt.fs.file_state.mtime_ms` :: `fun(p: string): integer?, string?` Return
+  the modification time of `p` in milliseconds since the UNIX epoch.
+- `smelt.fs.file_state.record_read` ::
+  `fun(p: string, content: string, offset: integer, limit: integer): nil` Record
+  that `p` was read at byte range `[offset, offset+limit)` with `content` so
+  subsequent staleness checks know what the agent has seen.
 - `smelt.fs.file_state.record_write` :: `fun(p: string, content: string): nil`
-  Record that `p` was written with `content` so subsequent staleness checks see the latest state.
-- `smelt.fs.file_state.staleness_error` :: `fun(p: string, noun: string?): string?`
-  Return an error message describing why the cached state of `p` is stale relative to disk, or `nil` if it is up to date.
+  Record that `p` was written with `content` so subsequent staleness checks see
+  the latest state.
+- `smelt.fs.file_state.staleness_error` ::
+  `fun(p: string, noun: string?): string?` Return an error message describing
+  why the cached state of `p` is stale relative to disk, or `nil` if it is up to
+  date.
 
 #### `smelt.fuzzy`
 
 Fuzzy-match scoring backed by neo_frizbee (SIMD Smith-Waterman).
 
-- `smelt.fuzzy.rank` :: `fun(items: table, query: string): integer[]`
-  Rank `items` by fuzzy match against `query`.
+- `smelt.fuzzy.rank` :: `fun(items: table, query: string): integer[]` Rank
+  `items` by fuzzy match against `query`.
 - `smelt.fuzzy.score` :: `fun(text: string, query: string): integer?`
   Fuzzy-match score for `text` against `query`.
 
@@ -649,354 +704,383 @@ Fuzzy-match scoring backed by neo_frizbee (SIMD Smith-Waterman).
 
 Ripgrep wrapper for searching files.
 
-- `smelt.grep.run` :: `fun(pattern: string, path: string, opts: table?): { stdout: string, stderr: string, exit_code: integer, timed_out: boolean }?, string?`
+- `smelt.grep.run` ::
+  `fun(pattern: string, path: string, opts: table?): { stdout: string, stderr: string, exit_code: integer, timed_out: boolean }?, string?`
   Run ripgrep with `pattern` over `path` off the main thread.
 
 #### `smelt.html`
 
-HTML parsing: title extraction, link scraping, to_text, to_markdown, DDG results.
+HTML parsing: title extraction, link scraping, to_text, to_markdown, DDG
+results.
 
-- `smelt.html.links` :: `fun(source: string, base: string?): string[]`
-  Extract all anchor `href` links from `source`.
-- `smelt.html.parse_ddg_results` :: `fun(source: string): table`
-  Parse a DuckDuckGo HTML results page into rows of `{ title, link, description }`.
-- `smelt.html.title` :: `fun(source: string): string?`
-  Return the `<title>` text of `source`, or `nil` if no title element is present.
+- `smelt.html.links` :: `fun(source: string, base: string?): string[]` Extract
+  all anchor `href` links from `source`.
+- `smelt.html.parse_ddg_results` :: `fun(source: string): table` Parse a
+  DuckDuckGo HTML results page into rows of `{ title, link, description }`.
+- `smelt.html.title` :: `fun(source: string): string?` Return the `<title>` text
+  of `source`, or `nil` if no title element is present.
 - `smelt.html.to_markdown` :: `fun(source: string, base: string?): table`
-  Convert `source` HTML to a `{ title, content, links }` table where `content` is markdown.
-- `smelt.html.to_text` :: `fun(source: string): string`
-  Strip HTML tags from `source` and return the visible text content.
+  Convert `source` HTML to a `{ title, content, links }` table where `content`
+  is markdown.
+- `smelt.html.to_text` :: `fun(source: string): string` Strip HTML tags from
+  `source` and return the visible text content.
 
 #### `smelt.http`
 
 Asynchronous HTTP get/post.
 
-- `smelt.http.get` :: `fun(url: string, opts: table?): { status: integer, final_url: string, body: string, headers: table }?, string?`
+- `smelt.http.get` ::
+  `fun(url: string, opts: table?): { status: integer, final_url: string, body: string, headers: table }?, string?`
   Perform an HTTP GET against `url`.
-- `smelt.http.post` :: `fun(url: string, body: string?, opts: table?): { status: integer, final_url: string, body: string, headers: table }?, string?`
+- `smelt.http.post` ::
+  `fun(url: string, body: string?, opts: table?): { status: integer, final_url: string, body: string, headers: table }?, string?`
   Perform an HTTP POST against `url` with `body` bytes.
-- `smelt.http.random_user_agent` :: `fun(): string`
-  Return a randomly selected User-Agent string from the built-in pool.
+- `smelt.http.random_user_agent` :: `fun(): string` Return a randomly selected
+  User-Agent string from the built-in pool.
 
 #### `smelt.http.cache`
 
 Process-wide HTTP response cache.
 
-- `smelt.http.cache.read` :: `fun(key: string): string?`
-  Look up a cached HTTP response by `key`.
-- `smelt.http.cache.write` :: `fun(key: string, value: string): nil`
-  Store `value` in the HTTP response cache under `key`.
+- `smelt.http.cache.read` :: `fun(key: string): string?` Look up a cached HTTP
+  response by `key`.
+- `smelt.http.cache.write` :: `fun(key: string, value: string): nil` Store
+  `value` in the HTTP response cache under `key`.
 
 #### `smelt.image`
 
 Image file detection and base64 data-URL loading.
 
-- `smelt.image.data_url_from_bytes` :: `fun(bytes: string, mime: string): string`
-  Encode raw `bytes` as a base64 `data:` URL with the given `mime` type.
-- `smelt.image.is_image_file` :: `fun(p: string): boolean`
-  Return `true` if `p` looks like an image file (matched by extension/sniffing).
-- `smelt.image.read_as_data_url` :: `fun(p: string): string?, string?`
-  Read the image at `p` and encode it as a `data:` URL.
+- `smelt.image.data_url_from_bytes` ::
+  `fun(bytes: string, mime: string): string` Encode raw `bytes` as a base64
+  `data:` URL with the given `mime` type.
+- `smelt.image.is_image_file` :: `fun(p: string): boolean` Return `true` if `p`
+  looks like an image file (matched by extension/sniffing).
+- `smelt.image.read_as_data_url` :: `fun(p: string): string?, string?` Read the
+  image at `p` and encode it as a `data:` URL.
 
 #### `smelt.layout`
 
-Composable block layout (vbox/hbox/leaf/diff/file_view) for tool render callbacks.
+Composable block layout (vbox/hbox/leaf/diff/file_view) for tool render
+callbacks.
 
-- `smelt.layout.diff` :: `fun(opts: table): table`
-  Inline-diff render directive — the worker renders the diff directly into the block buffer.
-- `smelt.layout.file_view` :: `fun(opts: table): table`
-  Syntax-highlighted file-view render directive — single line-number column, no diff bg.
-- `smelt.layout.hbox` :: `fun(items: table): table`
-  Lay `items` out horizontally.
-- `smelt.layout.leaf` :: `fun(buf: any): table`
-  Wrap a `Buf` handle (or raw buf id) into a leaf block layout that renders the buffer's contents in place.
-- `smelt.layout.markdown` :: `fun(content: string): any`
-  Build a leaf layout from a markdown string.
-- `smelt.layout.sep` :: `fun(char: string?): any`
-  Build a 1×1 leaf from a single glyph.
-- `smelt.layout.text` :: `fun(content: string, opts: table?): any`
-  Build a leaf layout from a string.
-- `smelt.layout.vbox` :: `fun(items: table): table`
-  Stack `items` vertically into a single block layout.
+- `smelt.layout.diff` :: `fun(opts: table): table` Inline-diff render directive
+  — the worker renders the diff directly into the block buffer.
+- `smelt.layout.file_view` :: `fun(opts: table): table` Syntax-highlighted
+  file-view render directive — single line-number column, no diff bg.
+- `smelt.layout.hbox` :: `fun(items: table): table` Lay `items` out
+  horizontally.
+- `smelt.layout.leaf` :: `fun(buf: any): table` Wrap a `Buf` handle (or raw buf
+  id) into a leaf block layout that renders the buffer's contents in place.
+- `smelt.layout.markdown` :: `fun(content: string): any` Build a leaf layout
+  from a markdown string.
+- `smelt.layout.sep` :: `fun(char: string?): any` Build a 1×1 leaf from a single
+  glyph.
+- `smelt.layout.text` :: `fun(content: string, opts: table?): any` Build a leaf
+  layout from a string.
+- `smelt.layout.vbox` :: `fun(items: table): table` Stack `items` vertically
+  into a single block layout.
 
 #### `smelt.lifecycle`
 
 Host-phase hooks keyed by event name.
 
-- `smelt.lifecycle.on` :: `fun(event: string, fn: function): smelt.Reg`
-  Queue `fn(ctx)` for the lifecycle event named `event`.
-- `smelt.lifecycle.on_ready` :: `fun(fn: function): smelt.Reg`
-  Shorthand for `lifecycle.on("ready", fn)`.
-- `smelt.lifecycle.on_shutdown` :: `fun(fn: function): smelt.Reg`
-  Shorthand for `lifecycle.on("shutdown", fn)`.
+- `smelt.lifecycle.on` :: `fun(event: string, fn: function): smelt.Reg` Queue
+  `fn(ctx)` for the lifecycle event named `event`.
+- `smelt.lifecycle.on_ready` :: `fun(fn: function): smelt.Reg` Shorthand for
+  `lifecycle.on("ready", fn)`.
+- `smelt.lifecycle.on_shutdown` :: `fun(fn: function): smelt.Reg` Shorthand for
+  `lifecycle.on("shutdown", fn)`.
 
 #### `smelt.list`
 
 Picker-style virtual list widget.
 
-- `smelt.list.new` :: `fun(opts: smelt.list.Opts): table`
-  Build a structured list bound to the dialog-list `opts.leaf` and its backing `opts.buf`.
+- `smelt.list.new` :: `fun(opts: smelt.list.Opts): table` Build a structured
+  list bound to the dialog-list `opts.leaf` and its backing `opts.buf`.
 
 #### `smelt.mcp`
 
 Config-time MCP server registration.
 
-- `smelt.mcp.list` :: `fun(): table`
-  Snapshot every declared MCP server.
+- `smelt.mcp.list` :: `fun(): table` Snapshot every declared MCP server.
 - `smelt.mcp.register` :: `fun(name: string, cfg: smelt.mcp.Config): smelt.Reg`
   Declare an MCP server named `name`.
-- `smelt.mcp.status` :: `fun(name: string): string?`
-  Return the lifecycle status for server `name`: `"disabled"`, `"connecting"`, `"connected"`, or `"error"`.
-- `smelt.mcp.tools` :: `fun(server: string?): table`
-  Snapshot every discovered MCP tool.
+- `smelt.mcp.status` :: `fun(name: string): string?` Return the lifecycle status
+  for server `name`: `"disabled"`, `"connecting"`, `"connected"`, or `"error"`.
+- `smelt.mcp.tools` :: `fun(server: string?): table` Snapshot every discovered
+  MCP tool.
 
 #### `smelt.messages`
 
 Persistent message log with full bodies and tracebacks.
 
-- `smelt.messages.append` :: `fun(kind: string, source: string, msg: string): nil`
-  Append a new message of `kind` (`"error"`, `"warn"`/`"warning"`, anything else falls back to `"info"`) attributed to `source` with body `msg`.
-- `smelt.messages.clear` :: `fun(): nil`
-  Drop every message from the log.
-- `smelt.messages.count` :: `fun(): integer`
-  Return the total number of messages currently in the log.
-- `smelt.messages.list` :: `fun(): table`
-  Return every persisted message as rows of `{ kind, source, summary, full, ts_ms }`, ordered oldest-first.
-- `smelt.messages.mark_read` :: `fun(): nil`
-  Mark every message in the log as read so `unread_count` returns `0` until new errors arrive.
-- `smelt.messages.unread_count` :: `fun(): integer`
-  Return the number of unread error messages in the log.
+- `smelt.messages.append` ::
+  `fun(kind: string, source: string, msg: string): nil` Append a new message of
+  `kind` (`"error"`, `"warn"`/`"warning"`, anything else falls back to `"info"`)
+  attributed to `source` with body `msg`.
+- `smelt.messages.clear` :: `fun(): nil` Drop every message from the log.
+- `smelt.messages.count` :: `fun(): integer` Return the total number of messages
+  currently in the log.
+- `smelt.messages.list` :: `fun(): table` Return every persisted message as rows
+  of `{ kind, source, summary, full, ts_ms }`, ordered oldest-first.
+- `smelt.messages.mark_read` :: `fun(): nil` Mark every message in the log as
+  read so `unread_count` returns `0` until new errors arrive.
+- `smelt.messages.unread_count` :: `fun(): integer` Return the number of unread
+  error messages in the log.
 
 #### `smelt.mode`
 
 Agent-mode selector.
 
-- `smelt.mode.cycle` :: `fun(): nil`
-  Advance the active agent mode to the next entry in `smelt.mode.cycle_list()`, wrapping at the end.
-- `smelt.mode.cycle_list` :: `fun(): smelt.mode.Mode[]`
-  Return the configured agent-mode cycle; falls back to all known modes when the user has not customized one.
-- `smelt.mode.icon` :: `fun(name: string): string`
-  Lookup the icon registered for `name`, or `""` when none is set.
-- `smelt.mode.set_icon` :: `fun(name: string, icon: string): nil`
-  Override the icon shown alongside `name` in the statusline; subsequent `smelt.mode.icon(name)` calls return `icon`.
+- `smelt.mode.cycle` :: `fun(): nil` Advance the active agent mode to the next
+  entry in `smelt.mode.cycle_list()`, wrapping at the end.
+- `smelt.mode.cycle_list` :: `fun(): smelt.mode.Mode[]` Return the configured
+  agent-mode cycle; falls back to all known modes when the user has not
+  customized one.
+- `smelt.mode.icon` :: `fun(name: string): string` Lookup the icon registered
+  for `name`, or `""` when none is set.
+- `smelt.mode.set_icon` :: `fun(name: string, icon: string): nil` Override the
+  icon shown alongside `name` in the statusline; subsequent
+  `smelt.mode.icon(name)` calls return `icon`.
 
 #### `smelt.os`
 
 Environment and system primitives: getenv, setenv, platform, cwd, pid, etc.
 
-- `smelt.os.arch` :: `fun(): string`
-  Return the target CPU architecture as reported by `std::env::consts::ARCH` (e.g.
-- `smelt.os.cwd` :: `fun(): string?, string?`
-  Return the current working directory as `(path, nil)`, or `(nil, err_string)` on failure.
-- `smelt.os.exe_path` :: `fun(): string?, string?`
-  Return the filesystem path to the running smelt binary as `(path, nil)` on success, or `(nil, err_string)` on failure.
-- `smelt.os.getenv` :: `fun(name: string): string?`
-  Return the value of the environment variable `name`, or `nil` if it is not set.
-- `smelt.os.home` :: `fun(): string?`
-  Return the user's home directory, or `nil` if it cannot be determined.
-- `smelt.os.open_url` :: `fun(url: string): boolean, string?`
-  Open `url` in the system's default browser. macOS uses `open`, Windows uses `cmd /c start`, everything else tries `xdg-open` then falls back to `open`.
-- `smelt.os.pid` :: `fun(): integer`
-  Return the OS process id of the running smelt instance.
-- `smelt.os.platform` :: `fun(): string`
-  Return the target operating system as reported by `std::env::consts::OS` (e.g.
-- `smelt.os.set_cwd` :: `fun(p: string): boolean, string?`
-  Change the process working directory to `p`.
-- `smelt.os.setenv` :: `fun(name: string, value: string): nil`
-  Set the process environment variable `name` to `value`.
-- `smelt.os.tempdir` :: `fun(): string`
-  Return the platform temporary directory path.
-- `smelt.os.unsetenv` :: `fun(name: string): nil`
-  Remove the environment variable `name` from the process environment.
+- `smelt.os.arch` :: `fun(): string` Return the target CPU architecture as
+  reported by `std::env::consts::ARCH` (e.g.
+- `smelt.os.cwd` :: `fun(): string?, string?` Return the current working
+  directory as `(path, nil)`, or `(nil, err_string)` on failure.
+- `smelt.os.exe_path` :: `fun(): string?, string?` Return the filesystem path to
+  the running smelt binary as `(path, nil)` on success, or `(nil, err_string)`
+  on failure.
+- `smelt.os.getenv` :: `fun(name: string): string?` Return the value of the
+  environment variable `name`, or `nil` if it is not set.
+- `smelt.os.home` :: `fun(): string?` Return the user's home directory, or `nil`
+  if it cannot be determined.
+- `smelt.os.open_url` :: `fun(url: string): boolean, string?` Open `url` in the
+  system's default browser. macOS uses `open`, Windows uses `cmd /c start`,
+  everything else tries `xdg-open` then falls back to `open`.
+- `smelt.os.pid` :: `fun(): integer` Return the OS process id of the running
+  smelt instance.
+- `smelt.os.platform` :: `fun(): string` Return the target operating system as
+  reported by `std::env::consts::OS` (e.g.
+- `smelt.os.set_cwd` :: `fun(p: string): boolean, string?` Change the process
+  working directory to `p`.
+- `smelt.os.setenv` :: `fun(name: string, value: string): nil` Set the process
+  environment variable `name` to `value`.
+- `smelt.os.tempdir` :: `fun(): string` Return the platform temporary directory
+  path.
+- `smelt.os.unsetenv` :: `fun(name: string): nil` Remove the environment
+  variable `name` from the process environment.
 
 #### `smelt.parse`
 
 Pure parsers: frontmatter extraction from markdown documents.
 
-- `smelt.parse.frontmatter` :: `fun(content: string): any, string`
-  Split `---`-delimited YAML frontmatter from a markdown document.
-- `smelt.parse.json` :: `fun(content: string): any`
-  Parse a JSON document into a Lua value.
+- `smelt.parse.frontmatter` :: `fun(content: string): any, string` Split
+  `---`-delimited YAML frontmatter from a markdown document.
+- `smelt.parse.json` :: `fun(content: string): any` Parse a JSON document into a
+  Lua value.
 
 #### `smelt.path`
 
 Pure path arithmetic: normalize, join, relative, expand, display, etc.
 
-- `smelt.path.basename` :: `fun(p: string): string?`
-  Return the final component (file name) of `p`, or `nil` if `p` ends in `..`.
-- `smelt.path.canonical` :: `fun(p: string): string?, string?`
-  Resolve `p` to its canonical absolute form (following symlinks).
-- `smelt.path.commands_dir` :: `fun(): string`
-  Return the absolute path to the slash-commands directory under the user config root.
-- `smelt.path.config_dir` :: `fun(): string`
-  Return the absolute path to smelt's user config directory.
-- `smelt.path.display` :: `fun(p: string): string`
-  Return a user-friendly rendering of `p` for UI display (e.g. with the home dir abbreviated to `~`).
-- `smelt.path.expand` :: `fun(p: string): string`
-  Expand a leading `~` in `p` to the user's home directory.
-- `smelt.path.extension` :: `fun(p: string): string?`
-  Return the file extension of `p` (without the leading dot), or `nil` if there is none.
-- `smelt.path.is_absolute` :: `fun(p: string): boolean`
-  Return `true` if `p` is an absolute path on the current platform.
-- `smelt.path.join` :: `fun(...: string): string`
-  Join the variadic `parts` into a single path using the platform separator.
-- `smelt.path.normalize` :: `fun(p: string): string`
-  Normalize `p` by collapsing redundant `.`, `..`, and separator components without touching the filesystem.
-- `smelt.path.parent` :: `fun(p: string): string?`
-  Return the parent directory of `p`, or `nil` if `p` has no parent component.
-- `smelt.path.relative` :: `fun(base: string, target: string): string`
-  Return the path of `target` expressed relative to `base`.
+- `smelt.path.basename` :: `fun(p: string): string?` Return the final component
+  (file name) of `p`, or `nil` if `p` ends in `..`.
+- `smelt.path.canonical` :: `fun(p: string): string?, string?` Resolve `p` to
+  its canonical absolute form (following symlinks).
+- `smelt.path.commands_dir` :: `fun(): string` Return the absolute path to the
+  slash-commands directory under the user config root.
+- `smelt.path.config_dir` :: `fun(): string` Return the absolute path to smelt's
+  user config directory.
+- `smelt.path.display` :: `fun(p: string): string` Return a user-friendly
+  rendering of `p` for UI display (e.g. with the home dir abbreviated to `~`).
+- `smelt.path.expand` :: `fun(p: string): string` Expand a leading `~` in `p` to
+  the user's home directory.
+- `smelt.path.extension` :: `fun(p: string): string?` Return the file extension
+  of `p` (without the leading dot), or `nil` if there is none.
+- `smelt.path.is_absolute` :: `fun(p: string): boolean` Return `true` if `p` is
+  an absolute path on the current platform.
+- `smelt.path.join` :: `fun(...: string): string` Join the variadic `parts` into
+  a single path using the platform separator.
+- `smelt.path.normalize` :: `fun(p: string): string` Normalize `p` by collapsing
+  redundant `.`, `..`, and separator components without touching the filesystem.
+- `smelt.path.parent` :: `fun(p: string): string?` Return the parent directory
+  of `p`, or `nil` if `p` has no parent component.
+- `smelt.path.relative` :: `fun(base: string, target: string): string` Return
+  the path of `target` expressed relative to `base`.
 
 #### `smelt.perf`
 
 Lightweight scope timers that feed `smelt.metrics.perf_snapshot`.
 
-- `smelt.perf.time` :: `fun(label: string, fn: fun(): any): any`
-  Run `fn()` and record its elapsed time under `label`.
+- `smelt.perf.time` :: `fun(label: string, fn: fun(): any): any` Run `fn()` and
+  record its elapsed time under `label`.
 
 #### `smelt.process`
 
-Run, spawn, list, and kill processes against the `ProcessRegistry`. spawned processes are non-blocking; run processes wait for completion.
+Run, spawn, list, and kill processes against the `ProcessRegistry`. spawned
+processes are non-blocking; run processes wait for completion.
 
-- `smelt.process.get_default_shell` :: `fun(): any`
-  Return the current default shell as `{ program, args }`, or `nil` when the built-in `sh -c` default is in effect.
-- `smelt.process.kill` :: `fun(id: string): nil`
-  Stop the registered process with `id`.
-- `smelt.process.list` :: `fun(): table`
-  Return the registry of running processes as rows of `{ id, command, elapsed_secs }`.
-- `smelt.process.read_output` :: `fun(id: string): table`
-  Drain buffered output from the registered process `id`.
-- `smelt.process.run` :: `fun(cmd: string, args: string[]?, opts: table?): { stdout: string, stderr: string, exit_code: integer, timed_out: boolean }?, string?`
+- `smelt.process.get_default_shell` :: `fun(): any` Return the current default
+  shell as `{ program, args }`, or `nil` when the built-in `sh -c` default is in
+  effect.
+- `smelt.process.kill` :: `fun(id: string): nil` Stop the registered process
+  with `id`.
+- `smelt.process.list` :: `fun(): table` Return the registry of running
+  processes as rows of `{ id, command, elapsed_secs }`.
+- `smelt.process.read_output` :: `fun(id: string): table` Drain buffered output
+  from the registered process `id`.
+- `smelt.process.run` ::
+  `fun(cmd: string, args: string[]?, opts: table?): { stdout: string, stderr: string, exit_code: integer, timed_out: boolean }?, string?`
   Run `cmd` with `args` off the main thread.
-- `smelt.process.run_streaming` :: `fun(task_id: integer, call_id: string, command: string, timeout_ms: integer): nil`
-  Run `command` with a `timeout_ms` deadline, streaming each output line into the live tool call `call_id` and resolving task `task_id` with `{ content, is_error, timed_out }` (or `{ __cancelled = true }` if cancelled).
-- `smelt.process.set_default_shell` :: `fun(opts: table?): nil`
-  Override the wrapping shell used by `spawn_bg` and `run_streaming` for string-form commands.
-- `smelt.process.spawn_bg` :: `fun(command: string): string`
-  Spawn `command` as a background child registered with the process registry.
+- `smelt.process.run_streaming` ::
+  `fun(task_id: integer, call_id: string, command: string, timeout_ms: integer): nil`
+  Run `command` with a `timeout_ms` deadline, streaming each output line into
+  the live tool call `call_id` and resolving task `task_id` with
+  `{ content, is_error, timed_out }` (or `{ __cancelled = true }` if cancelled).
+- `smelt.process.set_default_shell` :: `fun(opts: table?): nil` Override the
+  wrapping shell used by `spawn_bg` and `run_streaming` for string-form
+  commands.
+- `smelt.process.spawn_bg` :: `fun(command: string): string` Spawn `command` as
+  a background child registered with the process registry.
 
 #### `smelt.provider`
 
 List built-in model providers and register custom ones.
 
-- `smelt.provider.list` :: `fun(): table`
-  Return every registered provider as an array of tables.
-- `smelt.provider.middleware` :: `fun(mw: table): smelt.Reg`
-  Register provider middleware.
-- `smelt.provider.register` :: `fun(name: string, cfg: smelt.provider.Config): smelt.Reg`
-  Declare a provider named `name`.
+- `smelt.provider.list` :: `fun(): table` Return every registered provider as an
+  array of tables.
+- `smelt.provider.middleware` :: `fun(mw: table): smelt.Reg` Register provider
+  middleware.
+- `smelt.provider.register` ::
+  `fun(name: string, cfg: smelt.provider.Config): smelt.Reg` Declare a provider
+  named `name`.
 
 #### `smelt.reasoning`
 
 Reasoning-effort selector.
 
-- `smelt.reasoning.cycle` :: `fun(): nil`
-  Advance the active reasoning effort to the next entry in `smelt.reasoning.cycle_list()`, wrapping at the end.
-- `smelt.reasoning.cycle_list` :: `fun(): smelt.reasoning.Effort[]`
-  Return the configured reasoning-effort cycle.
+- `smelt.reasoning.cycle` :: `fun(): nil` Advance the active reasoning effort to
+  the next entry in `smelt.reasoning.cycle_list()`, wrapping at the end.
+- `smelt.reasoning.cycle_list` :: `fun(): smelt.reasoning.Effort[]` Return the
+  configured reasoning-effort cycle.
 
 #### `smelt.reg`
 
 Helpers for constructing `Reg` handles.
 
-- `smelt.reg.compose` :: `fun(...: smelt.Reg?): smelt.Reg`
-  Combine variadic `Reg`s into one.
-- `smelt.reg.new` :: `fun(undo: fun()): smelt.Reg`
-  Wrap `undo` as a `Reg`.
+- `smelt.reg.compose` :: `fun(...: smelt.Reg?): smelt.Reg` Combine variadic
+  `Reg`s into one.
+- `smelt.reg.new` :: `fun(undo: fun()): smelt.Reg` Wrap `undo` as a `Reg`.
 
 #### `smelt.shell`
 
 Shell command splitting and interactive/background-operator validators.
 
-- `smelt.shell.check_background_op` :: `fun(command: string): string?`
-  Return a user-facing error message if `command` uses the shell `&` background operator, or `nil` otherwise.
-- `smelt.shell.check_interactive` :: `fun(command: string): string?`
-  Return a user-facing error message if `command` would invoke an interactive program (editor, REPL, pager, `git -i`, etc.), or `nil` if it is safe to run non-interactively.
-- `smelt.shell.extract_paths` :: `fun(command: string): string[]`
-  Extract filesystem paths referenced by `command` for workspace permission checks.
-- `smelt.shell.split` :: `fun(command: string): string[]`
-  Split `command` into the sequence of subcommands separated by shell operators (`;`, `&&`, `||`, `|`).
-- `smelt.shell.split_with_ops` :: `fun(command: string): table`
-  Split `command` into subcommands and pair each with the operator that followed it.
+- `smelt.shell.check_background_op` :: `fun(command: string): string?` Return a
+  user-facing error message if `command` uses the shell `&` background operator,
+  or `nil` otherwise.
+- `smelt.shell.check_interactive` :: `fun(command: string): string?` Return a
+  user-facing error message if `command` would invoke an interactive program
+  (editor, REPL, pager, `git -i`, etc.), or `nil` if it is safe to run
+  non-interactively.
+- `smelt.shell.extract_paths` :: `fun(command: string): string[]` Extract
+  filesystem paths referenced by `command` for workspace permission checks.
+- `smelt.shell.split` :: `fun(command: string): string[]` Split `command` into
+  the sequence of subcommands separated by shell operators (`;`, `&&`, `||`,
+  `|`).
+- `smelt.shell.split_with_ops` :: `fun(command: string): table` Split `command`
+  into subcommands and pair each with the operator that followed it.
 
 #### `smelt.skills`
 
 List and load skill content from the SkillLoader populated at startup.
 
-- `smelt.skills.content` :: `fun(name: string): string?, string?`
-  Load the skill named `name` and return `(content, nil)` on success or `(nil, err_string)` if the skill is missing or failed to load.
-- `smelt.skills.list` :: `fun(): table`
-  Return the names of every skill discovered by the loader as a Lua array.
+- `smelt.skills.content` :: `fun(name: string): string?, string?` Load the skill
+  named `name` and return `(content, nil)` on success or `(nil, err_string)` if
+  the skill is missing or failed to load.
+- `smelt.skills.list` :: `fun(): table` Return the names of every skill
+  discovered by the loader as a Lua array.
 
 #### `smelt.state`
 
 Per-plugin state.
 
-- `smelt.state.persistent` :: `fun(name: string, opts: { debounce_ms: integer? }?): table`
-  Persistent wrapper: backed by JSON under `$XDG_STATE_HOME/smelt/plugins/<name>.json`.
+- `smelt.state.persistent` ::
+  `fun(name: string, opts: { debounce_ms: integer? }?): table` Persistent
+  wrapper: backed by JSON under `$XDG_STATE_HOME/smelt/plugins/<name>.json`.
 
 #### `smelt.task`
 
 Yield-then-resume coroutine bridge: alloc and resume external tasks.
 
-- `smelt.task.all` :: `fun(...: fun(): any): any[]`
-  Run `fns` concurrently; wait for all to finish.
-- `smelt.task.alloc` :: `fun(): integer`
-  Allocate and return a fresh external task id used to pair a yielded coroutine with a later `task.resume` call.
-- `smelt.task.external` :: `fun(start: fun(id: integer)): any`
-  Allocate an external task id, invoke `start(id)` to kick off whatever will eventually call `smelt.task.resume(id, value)` (or resolve through the Rust resume sink), and park until that resolution arrives.
-- `smelt.task.race` :: `fun(...: fun(): any): integer, any`
-  Run `fns` concurrently; first to return wins.
-- `smelt.task.resume` :: `fun(id: integer, value: any): nil`
-  Resume the yielded task `id` with `value`.
-- `smelt.task.timeout` :: `fun(ms: integer, fn: fun(): any): any, string?`
-  Run `fn` with an `ms`-millisecond deadline.
-- `smelt.task.wait` :: `fun(id: integer): any`
-  Park the running task until `smelt.task.resume(id, value)` fires.
+- `smelt.task.all` :: `fun(...: fun(): any): any[]` Run `fns` concurrently; wait
+  for all to finish.
+- `smelt.task.alloc` :: `fun(): integer` Allocate and return a fresh external
+  task id used to pair a yielded coroutine with a later `task.resume` call.
+- `smelt.task.external` :: `fun(start: fun(id: integer)): any` Allocate an
+  external task id, invoke `start(id)` to kick off whatever will eventually call
+  `smelt.task.resume(id, value)` (or resolve through the Rust resume sink), and
+  park until that resolution arrives.
+- `smelt.task.race` :: `fun(...: fun(): any): integer, any` Run `fns`
+  concurrently; first to return wins.
+- `smelt.task.resume` :: `fun(id: integer, value: any): nil` Resume the yielded
+  task `id` with `value`.
+- `smelt.task.timeout` :: `fun(ms: integer, fn: fun(): any): any, string?` Run
+  `fn` with an `ms`-millisecond deadline.
+- `smelt.task.wait` :: `fun(id: integer): any` Park the running task until
+  `smelt.task.resume(id, value)` fires.
 
 #### `smelt.tick`
 
 Reload-safe periodic work.
 
-- `smelt.tick.every` :: `fun(secs: integer, fn: fun()): smelt.Reg`
-  Reload-safe periodic work.
+- `smelt.tick.every` :: `fun(secs: integer, fn: fun()): smelt.Reg` Reload-safe
+  periodic work.
 
 #### `smelt.timer`
 
 One-shot and recurring timer callbacks.
 
-- `smelt.timer.every` :: `fun(ms: integer, handler: fun()): smelt.Reg`
-  Schedule `handler` to fire repeatedly every `ms` milliseconds.
-- `smelt.timer.set` :: `fun(ms: integer, handler: fun()): smelt.Reg`
-  Schedule `handler` to run once after `ms` milliseconds.
+- `smelt.timer.every` :: `fun(ms: integer, handler: fun()): smelt.Reg` Schedule
+  `handler` to fire repeatedly every `ms` milliseconds.
+- `smelt.timer.set` :: `fun(ms: integer, handler: fun()): smelt.Reg` Schedule
+  `handler` to run once after `ms` milliseconds.
 
 #### `smelt.tools`
 
 Register, unregister, and resolve plugin tools for the engine.
 
-- `smelt.tools.call` :: `fun(name: string, args: table?, parent_call_id: string?): { content: string, is_error: boolean?, metadata: table? }`
+- `smelt.tools.call` ::
+  `fun(name: string, args: table?, parent_call_id: string?): { content: string, is_error: boolean?, metadata: table? }`
   Call another tool from within `execute`.
-- `smelt.tools.default_summary` :: `fun(args: table?): string`
-  Best-effort one-liner summary of a tool call's arguments.
-- `smelt.tools.list` :: `fun(): table`
-  Return the names of every registered plugin tool, sorted.
-- `smelt.tools.middleware` :: `fun(name: string, mw: table): smelt.Reg`
-  Register middleware for tool `name`.
-- `smelt.tools.register` :: `fun(def: smelt.tools.ToolDef): smelt.Reg`
-  Register a plugin tool.
-- `smelt.tools.resolve` :: `fun(request_id: integer, call_id: string, result: table): nil`
-  Resolve the pending tool call `call_id` from request `request_id` with `{ content, is_error }`.
-- `smelt.tools.unregister` :: `fun(name: string): boolean`
-  Unregister a previously-registered tool by `name`.
+- `smelt.tools.default_summary` :: `fun(args: table?): string` Best-effort
+  one-liner summary of a tool call's arguments.
+- `smelt.tools.list` :: `fun(): table` Return the names of every registered
+  plugin tool, sorted.
+- `smelt.tools.middleware` :: `fun(name: string, mw: table): smelt.Reg` Register
+  middleware for tool `name`.
+- `smelt.tools.register` :: `fun(def: smelt.tools.ToolDef): smelt.Reg` Register
+  a plugin tool.
+- `smelt.tools.resolve` ::
+  `fun(request_id: integer, call_id: string, result: table): nil` Resolve the
+  pending tool call `call_id` from request `request_id` with
+  `{ content, is_error }`.
+- `smelt.tools.unregister` :: `fun(name: string): boolean` Unregister a
+  previously-registered tool by `name`.
 
 #### `smelt.trust`
 
 Query and mutate the per-project content trust store.
 
-- `smelt.trust.mark` :: `fun(): string`
-  Mark the current working directory as trusted, persisting it in the user's trust store.
-- `smelt.trust.status` :: `fun(): string`
-  Return the trust state of the current working directory: `"trusted"`, `"untrusted"`, or `"no_content"`.
+- `smelt.trust.mark` :: `fun(): string` Mark the current working directory as
+  trusted, persisting it in the user's trust store.
+- `smelt.trust.status` :: `fun(): string` Return the trust state of the current
+  working directory: `"trusted"`, `"untrusted"`, or `"no_content"`.
 
 ### UiHost tier
 
@@ -1006,331 +1090,376 @@ Requires a terminal UI; calling these from headless mode raises.
 
 Root smelt namespace.
 
-- `smelt.focus` :: `fun(): string`
-  Return which top-level pane currently has focus: `"transcript"` or `"prompt"`.
-- `smelt.ns` :: `fun(name: string): integer`
-  Look up or allocate a stable namespace id for `name`.
-- `smelt.plugin` :: `fun(name: any): any`
-  Promote the current loader frame to plugin scope `name` and return a small handle exposing the plugin's per-cycle state slot:
-- `smelt.quit` :: `fun(): nil`
-  Request a clean shutdown of the app.
-- `smelt.sleep` :: `fun(ms: integer): any`
-  Sleep for `ms` milliseconds.
-- `smelt.spawn` :: `fun(handler: fun()): smelt.Reg`
-  Run `handler` as a coroutine on the Lua task runtime.
+- `smelt.focus` :: `fun(): string` Return which top-level pane currently has
+  focus: `"transcript"` or `"prompt"`.
+- `smelt.ns` :: `fun(name: string): integer` Look up or allocate a stable
+  namespace id for `name`.
+- `smelt.plugin` :: `fun(name: any): any` Promote the current loader frame to
+  plugin scope `name` and return a small handle exposing the plugin's per-cycle
+  state slot:
+- `smelt.quit` :: `fun(): nil` Request a clean shutdown of the app.
+- `smelt.sleep` :: `fun(ms: integer): any` Sleep for `ms` milliseconds.
+- `smelt.spawn` :: `fun(handler: fun()): smelt.Reg` Run `handler` as a coroutine
+  on the Lua task runtime.
 
 #### `smelt.buf`
 
 Buffer handle constructor.
 
-- `smelt.buf.new` :: `fun(opts: table?): smelt.buf.Buf`
-  Create a buffer and return a `Buf` userdata.
+- `smelt.buf.new` :: `fun(opts: table?): smelt.buf.Buf` Create a buffer and
+  return a `Buf` userdata.
 
 #### `smelt.confirm`
 
-Confirm dialog primitives — preview dispatch, back-tab cycling, and choice resolution.
+Confirm dialog primitives — preview dispatch, back-tab cycling, and choice
+resolution.
 
-- `smelt.confirm.open` :: `fun(handle_id: string): nil`
-  Drive the bundled tool-permission confirm dialog for `handle_id`.
+- `smelt.confirm.open` :: `fun(handle_id: string): nil` Drive the bundled
+  tool-permission confirm dialog for `handle_id`.
 
 #### `smelt.engine`
 
 LLM engine control — cancel, ask, submit commands, and request tool approval.
 
-- `smelt.engine.ask` :: `fun(spec: smelt.engine.AskSpec): integer`
-  Run an out-of-band LLM request without touching the main turn.
-- `smelt.engine.ask_with_trim` :: `fun(spec: table): integer`
-  Wrap `smelt.engine.ask` with a trim-and-retry loop for context-window errors: drops the oldest message from `spec.messages` and re-issues the request up to `spec.max_trims` times (default 20).
-- `smelt.engine.cancel` :: `fun(): nil`
-  Cancel the in-flight turn.
-- `smelt.engine.is_running` :: `fun(): boolean`
-  Return `true` if an agent turn is currently in flight (a request is being streamed or a tool is executing).
-- `smelt.engine.on_context_limit` :: `fun(hook: fun(arg1: smelt.engine.AskMessage[], arg2: fun(value: smelt.engine.AskMessage[]?))): smelt.Reg`
-  Register a recovery hook the engine calls when a provider returns a context-window error mid-turn.
-- `smelt.engine.reload` :: `fun(): nil`
-  Re-evaluate every Lua surface: clears every command, keymap, statusline source, tool, hook, timer, and cell subscriber, wipes non-stdlib `package.loaded` entries, then re-runs the bootstrap chunks (from disk overlay if present, embedded otherwise, using the same `module_overlay_roots()` lookup as `require`), bundled autoload modules, `init.lua`, global plugins, and `.smelt/init.lua` + `.smelt/plugins/*`.
-- `smelt.engine.submit_command` :: `fun(name: string, body: string, overrides: smelt.engine.CommandOverrides?): nil`
+- `smelt.engine.ask` :: `fun(spec: smelt.engine.AskSpec): integer` Run an
+  out-of-band LLM request without touching the main turn.
+- `smelt.engine.ask_with_trim` :: `fun(spec: table): integer` Wrap
+  `smelt.engine.ask` with a trim-and-retry loop for context-window errors: drops
+  the oldest message from `spec.messages` and re-issues the request up to
+  `spec.max_trims` times (default 20).
+- `smelt.engine.cancel` :: `fun(): nil` Cancel the in-flight turn.
+- `smelt.engine.is_running` :: `fun(): boolean` Return `true` if an agent turn
+  is currently in flight (a request is being streamed or a tool is executing).
+- `smelt.engine.on_context_limit` ::
+  `fun(hook: fun(arg1: smelt.engine.AskMessage[], arg2: fun(value: smelt.engine.AskMessage[]?))): smelt.Reg`
+  Register a recovery hook the engine calls when a provider returns a
+  context-window error mid-turn.
+- `smelt.engine.reload` :: `fun(): nil` Re-evaluate every Lua surface: clears
+  every command, keymap, statusline source, tool, hook, timer, and cell
+  subscriber, wipes non-stdlib `package.loaded` entries, then re-runs the
+  bootstrap chunks (from disk overlay if present, embedded otherwise, using the
+  same `module_overlay_roots()` lookup as `require`), bundled autoload modules,
+  `init.lua`, global plugins, and `.smelt/init.lua` + `.smelt/plugins/*`.
+- `smelt.engine.submit_command` ::
+  `fun(name: string, body: string, overrides: smelt.engine.CommandOverrides?): nil`
   Start an agent turn from a Lua-defined custom command (`/name`).
 
 #### `smelt.history`
 
 Prompt history entries and search.
 
-- `smelt.history.entries` :: `fun(): table`
-  Return the prompt history as an array of strings, oldest first.
-- `smelt.history.search` :: `fun(query: string): table`
-  Rank prompt history against `query` using the history-specific scorer (word-match boost, recency bonus, dedupe).
+- `smelt.history.entries` :: `fun(): table` Return the prompt history as an
+  array of strings, oldest first.
+- `smelt.history.search` :: `fun(query: string): table` Rank prompt history
+  against `query` using the history-specific scorer (word-match boost, recency
+  bonus, dedupe).
 
 #### `smelt.keymap`
 
 Register chord→callback bindings and inspect the layered help index.
 
-- `smelt.keymap.help_sections` :: `fun(): table`
-  Return layered keybinding help as `{ title, entries = { { label, detail } } }` rows.
-- `smelt.keymap.list` :: `fun(): table`
-  Return the set of currently-bound `{ mode, chord }` rows.
-- `smelt.keymap.set` :: `fun(mode: string, chord: string, handler: fun()): smelt.Reg`
-  Bind `chord` in `mode` to a Lua callback.
-- `smelt.keymap.unset` :: `fun(mode: string, chord: string): boolean`
-  Drop the binding for `chord` in `mode`.
+- `smelt.keymap.help_sections` :: `fun(): table` Return layered keybinding help
+  as `{ title, entries = { { label, detail } } }` rows.
+- `smelt.keymap.list` :: `fun(): table` Return the set of currently-bound
+  `{ mode, chord }` rows.
+- `smelt.keymap.set` ::
+  `fun(mode: string, chord: string, handler: fun()): smelt.Reg` Bind `chord` in
+  `mode` to a Lua callback.
+- `smelt.keymap.unset` :: `fun(mode: string, chord: string): boolean` Drop the
+  binding for `chord` in `mode`.
 
 #### `smelt.log`
 
 Structured JSONL log entries written to the engine log file.
 
-- `smelt.log.error` :: `fun(event: string, data: any?): nil`
-  Write a JSONL log entry at Error level.
-- `smelt.log.info` :: `fun(event: string, data: any?): nil`
-  Write a JSONL log entry at Info level.
-- `smelt.log.warn` :: `fun(event: string, data: any?): nil`
-  Write a JSONL log entry at Warn level.
+- `smelt.log.error` :: `fun(event: string, data: any?): nil` Write a JSONL log
+  entry at Error level.
+- `smelt.log.info` :: `fun(event: string, data: any?): nil` Write a JSONL log
+  entry at Info level.
+- `smelt.log.warn` :: `fun(event: string, data: any?): nil` Write a JSONL log
+  entry at Warn level.
 
 #### `smelt.metrics`
 
 Preformatted stats text and live perf instrumentation.
 
-- `smelt.metrics.session_cost_text` :: `fun(): string`
-  Return preformatted text for the `/cost` dialog showing the current session's cost, per-turn average, and resolved pricing for the active model.
-- `smelt.metrics.stats_text` :: `fun(): string`
-  Return preformatted text for the `/stats` dialog (per-model token totals and request counts loaded from the on-disk metrics ledger).
+- `smelt.metrics.session_cost_text` :: `fun(): string` Return preformatted text
+  for the `/cost` dialog showing the current session's cost, per-turn average,
+  and resolved pricing for the active model.
+- `smelt.metrics.stats_text` :: `fun(): string` Return preformatted text for the
+  `/stats` dialog (per-model token totals and request counts loaded from the
+  on-disk metrics ledger).
 
 #### `smelt.metrics.perf`
 
 Perf instrumentation toggle, clear, and snapshot.
 
-- `smelt.metrics.perf.clear` :: `fun(): nil`
-  Clear all accumulated perf samples (durations and value gauges).
-- `smelt.metrics.perf.set_enabled` :: `fun(on: boolean): nil`
-  Toggle perf instrumentation collection on/off.
-- `smelt.metrics.perf.snapshot` :: `fun(): table`
-  Return the current perf snapshot as `{ durations, values, enabled }` with per-label `count`, `last`, `p50`, `p95`, `p99`, `max`, `total` fields.
+- `smelt.metrics.perf.clear` :: `fun(): nil` Clear all accumulated perf samples
+  (durations and value gauges).
+- `smelt.metrics.perf.set_enabled` :: `fun(on: boolean): nil` Toggle perf
+  instrumentation collection on/off.
+- `smelt.metrics.perf.snapshot` :: `fun(): table` Return the current perf
+  snapshot as `{ durations, values, enabled }` with per-label `count`, `last`,
+  `p50`, `p95`, `p99`, `max`, `total` fields.
 
 #### `smelt.model`
 
 Model selector.
 
-- `smelt.model.list` :: `fun(): table`
-  Return an array of `{ key, name, provider }` records for every model the active config can switch to.
+- `smelt.model.list` :: `fun(): table` Return an array of
+  `{ key, name, provider }` records for every model the active config can switch
+  to.
 - `smelt.model.preferred` :: `fun(name: any, value: any): any`
-  
 
 #### `smelt.notebook`
 
-Parse, read, and apply notebook cell edits, plus compute preview data for the edit_notebook tool.
+Parse, read, and apply notebook cell edits, plus compute preview data for the
+edit_notebook tool.
 
-- `smelt.notebook.apply_edit` :: `fun(args: table): any?, string?`
-  Apply a notebook edit (cell insert/replace/delete) described by `args` and persist the new file.
-- `smelt.notebook.is_notebook_path` :: `fun(path: string): boolean`
-  Return `true` if `path` looks like a Jupyter notebook (`.ipynb` extension).
-- `smelt.notebook.parse` :: `fun(json: string): table?, string?`
-  Parse a notebook JSON string.
-- `smelt.notebook.preview_data` :: `fun(args: table): table?`
-  Compute the preview payload for an `edit_notebook` call.
-- `smelt.notebook.read` :: `fun(path: string, offset: integer, limit: integer): string?, string?`
-  Render a Jupyter notebook at `path` as cell-by-cell text starting at `offset` for at most `limit` cells.
+- `smelt.notebook.apply_edit` :: `fun(args: table): any?, string?` Apply a
+  notebook edit (cell insert/replace/delete) described by `args` and persist the
+  new file.
+- `smelt.notebook.is_notebook_path` :: `fun(path: string): boolean` Return
+  `true` if `path` looks like a Jupyter notebook (`.ipynb` extension).
+- `smelt.notebook.parse` :: `fun(json: string): table?, string?` Parse a
+  notebook JSON string.
+- `smelt.notebook.preview_data` :: `fun(args: table): table?` Compute the
+  preview payload for an `edit_notebook` call.
+- `smelt.notebook.read` ::
+  `fun(path: string, offset: integer, limit: integer): string?, string?` Render
+  a Jupyter notebook at `path` as cell-by-cell text starting at `offset` for at
+  most `limit` cells.
 
 #### `smelt.notify`
 
 Status-area toasts.
 
-- `smelt.notify.error` :: `fun(msg: string, source: string?): nil`
-  Show an error toast (highlighted with the error color) and append the body to the message log.
-- `smelt.notify.scoped` :: `fun(source: string): smelt.notify.Scoped`
-  Bind `source` once and return a callable bag that forwards to `smelt.notify` / `smelt.notify.error` / `smelt.notify.warn` with the source pinned.
-- `smelt.notify.warn` :: `fun(msg: string, source: string?): nil`
-  Show a warning toast and append the body to the message log.
+- `smelt.notify.error` :: `fun(msg: string, source: string?): nil` Show an error
+  toast (highlighted with the error color) and append the body to the message
+  log.
+- `smelt.notify.scoped` :: `fun(source: string): smelt.notify.Scoped` Bind
+  `source` once and return a callable bag that forwards to `smelt.notify` /
+  `smelt.notify.error` / `smelt.notify.warn` with the source pinned.
+- `smelt.notify.warn` :: `fun(msg: string, source: string?): nil` Show a warning
+  toast and append the body to the message log.
 
 #### `smelt.overlay`
 
 Overlay handle constructor.
 
-- `smelt.overlay.new` :: `fun(opts: table): smelt.overlay.Overlay`
-  Open an overlay rendered from `opts.layout` (a `smelt.ui.layout` userdata) and return an `Overlay` userdata.
+- `smelt.overlay.new` :: `fun(opts: table): smelt.overlay.Overlay` Open an
+  overlay rendered from `opts.layout` (a `smelt.ui.layout` userdata) and return
+  an `Overlay` userdata.
 
 #### `smelt.paint`
 
 Register Lua callbacks against custom paint regions.
 
-- `smelt.paint.register` :: `fun(func: fun(arg1: smelt.paint.Slice, arg2: table), opts: table?): smelt.paint.Paint`
-  Register `func` as a paint callback and return an opaque `Paint` handle (userdata with `:remove()`).
+- `smelt.paint.register` ::
+  `fun(func: fun(arg1: smelt.paint.Slice, arg2: table), opts: table?): smelt.paint.Paint`
+  Register `func` as a paint callback and return an opaque `Paint` handle
+  (userdata with `:remove()`).
 
 #### `smelt.permissions`
 
 List session/workspace rules and sync a Lua-built ruleset back through the App.
 
-- `smelt.permissions.check` :: `fun(mode_str: string, bucket: string, value: string): string`
-  Decide a subcommand bucket (e.g.
-- `smelt.permissions.check_tool` :: `fun(mode_str: string, name: string): string`
-  Decision primitives for tool `decide` callbacks.
-- `smelt.permissions.list` :: `fun(): table`
-  Return current permission rules as `{ session = { { tool, pattern } }, workspace = { { tool, patterns } } }`.
+- `smelt.permissions.check` ::
+  `fun(mode_str: string, bucket: string, value: string): string` Decide a
+  subcommand bucket (e.g.
+- `smelt.permissions.check_tool` ::
+  `fun(mode_str: string, name: string): string` Decision primitives for tool
+  `decide` callbacks.
+- `smelt.permissions.list` :: `fun(): table` Return current permission rules as
+  `{ session = { { tool, pattern } }, workspace = { { tool, patterns } } }`.
 - `smelt.permissions.set_rules` :: `fun(spec: smelt.permissions.RulesSpec): nil`
   Install the per-mode permission ruleset.
 - `smelt.permissions.sync` :: `fun(spec: smelt.permissions.SyncSpec): nil`
-  Replace runtime + workspace permission entries with `spec.session` and `spec.workspace`.
+  Replace runtime + workspace permission entries with `spec.session` and
+  `spec.workspace`.
 
 #### `smelt.picker`
 
 Picker handle constructor.
 
-- `smelt.picker.fuzzy` :: `fun(opts: table): { index: integer, item: table, action: string }?`
+- `smelt.picker.fuzzy` ::
+  `fun(opts: table): { index: integer, item: table, action: string }?`
   Fuzzy-finder picker.
-- `smelt.picker.new` :: `fun(opts: table): smelt.picker.Picker`
-  Open a picker overlay and return a `Picker` userdata.
-- `smelt.picker.open` :: `fun(opts: table): { index: integer, item: any }?`
-  Open a floating picker over `opts.items` and yield until the user accepts or dismisses.
+- `smelt.picker.new` :: `fun(opts: table): smelt.picker.Picker` Open a picker
+  overlay and return a `Picker` userdata.
+- `smelt.picker.open` :: `fun(opts: table): { index: integer, item: any }?` Open
+  a floating picker over `opts.items` and yield until the user accepts or
+  dismisses.
 
 #### `smelt.prompt`
 
 The main editable input surface: win handle, text get/set, and cursor control.
 
-- `smelt.prompt.acquire` :: `fun(): smelt.Reg`
-  ── Modality lock ─────────────────────────────────────────────────────── Take a modality lock on the prompt area so completers/pickers don't pop while the caller owns the screen.
+- `smelt.prompt.acquire` :: `fun(): smelt.Reg` ── Modality lock
+  ─────────────────────────────────────────────────────── Take a modality lock
+  on the prompt area so completers/pickers don't pop while the caller owns the
+  screen.
 - `smelt.prompt.completer` :: `fun(spec: smelt.prompt.CompleterSpec): smelt.Reg`
   Register a completer spec.
-- `smelt.prompt.cursor` :: `fun(pos: integer?): integer`
-  Read or write the prompt cursor as a byte offset into `text()`.
-- `smelt.prompt.has_stash` :: `fun(): boolean`
-  Return whether the prompt currently holds a stashed input snapshot (Ctrl+S).
-- `smelt.prompt.is_modal` :: `fun(): boolean`
-  True while at least one `smelt.prompt.acquire()` lock is outstanding.
+- `smelt.prompt.cursor` :: `fun(pos: integer?): integer` Read or write the
+  prompt cursor as a byte offset into `text()`.
+- `smelt.prompt.has_stash` :: `fun(): boolean` Return whether the prompt
+  currently holds a stashed input snapshot (Ctrl+S).
+- `smelt.prompt.is_modal` :: `fun(): boolean` True while at least one
+  `smelt.prompt.acquire()` lock is outstanding.
 - `smelt.prompt.open_picker` :: `fun(opts: smelt.prompt.PickerOpts): table?`
   Prompt-docked picker.
-- `smelt.prompt.queued` :: `fun(): string[]`
-  Return the array of messages currently queued behind the active turn.
-- `smelt.prompt.remove_section` :: `fun(name: string): nil`
-  Remove the named prompt section.
-- `smelt.prompt.replace_range` :: `fun(start: integer, end: integer, text: string): integer`
-  UTF-8-safe replace of the byte range `[start, end)` in the prompt with `text`.
-- `smelt.prompt.set_section` :: `fun(name: string, content: string): nil`
-  Set the named prompt section (e.g. selection context, attached files) to `content`.
-- `smelt.prompt.set_text` :: `fun(text: string): nil`
-  Replace the prompt buffer with `text`.
-- `smelt.prompt.text` :: `fun(): string`
-  Return the prompt input buffer's current text.
-- `smelt.prompt.win` :: `fun(): smelt.win.Win`
-  Return a `Win` handle for the prompt input.
+- `smelt.prompt.queued` :: `fun(): string[]` Return the array of messages
+  currently queued behind the active turn.
+- `smelt.prompt.remove_section` :: `fun(name: string): nil` Remove the named
+  prompt section.
+- `smelt.prompt.replace_range` ::
+  `fun(start: integer, end: integer, text: string): integer` UTF-8-safe replace
+  of the byte range `[start, end)` in the prompt with `text`.
+- `smelt.prompt.set_section` :: `fun(name: string, content: string): nil` Set
+  the named prompt section (e.g. selection context, attached files) to
+  `content`.
+- `smelt.prompt.set_text` :: `fun(text: string): nil` Replace the prompt buffer
+  with `text`.
+- `smelt.prompt.text` :: `fun(): string` Return the prompt input buffer's
+  current text.
+- `smelt.prompt.win` :: `fun(): smelt.win.Win` Return a `Win` handle for the
+  prompt input.
 
 #### `smelt.render`
 
 Paint text / markdown / syntax-highlighted code / split diffs into a `Buf`.
 
-- `smelt.render.diff_split` :: `fun(left: smelt.buf.Buf, right: smelt.buf.Buf, opts: table): nil`
-  Paint a side-by-side diff between `opts.old` and `opts.new` into two buffers.
+- `smelt.render.diff_split` ::
+  `fun(left: smelt.buf.Buf, right: smelt.buf.Buf, opts: table): nil` Paint a
+  side-by-side diff between `opts.old` and `opts.new` into two buffers.
 - `smelt.render.markdown` :: `fun(buf: smelt.buf.Buf, source: string): nil`
-  Render markdown `source` into the buffer using the same renderer the transcript uses for assistant text blocks.
-- `smelt.render.syntax` :: `fun(buf: smelt.buf.Buf, opts: table): nil`
-  Paint syntect-highlighted code from `opts.content` into the buffer as a plain block.
-- `smelt.render.text` :: `fun(buf: smelt.buf.Buf, content: string, opts: table?): nil`
-  Paint plain text into a buffer.
+  Render markdown `source` into the buffer using the same renderer the
+  transcript uses for assistant text blocks.
+- `smelt.render.syntax` :: `fun(buf: smelt.buf.Buf, opts: table): nil` Paint
+  syntect-highlighted code from `opts.content` into the buffer as a plain block.
+- `smelt.render.text` ::
+  `fun(buf: smelt.buf.Buf, content: string, opts: table?): nil` Paint plain text
+  into a buffer.
 
 #### `smelt.session`
 
-Current session metadata, turn list, message snapshots, rewind, and persisted session management.
+Current session metadata, turn list, message snapshots, rewind, and persisted
+session management.
 
-- `smelt.session.context_tokens` :: `fun(): integer?`
-  Most recent prompt-token count reported by the provider, or `nil` if no turn has completed yet.
-- `smelt.session.context_window` :: `fun(): integer?`
-  Configured context-window size in tokens for the active model.
-- `smelt.session.cost` :: `fun(): number`
-  Cumulative session cost in USD across every model call this session has made.
-- `smelt.session.created_at_ms` :: `fun(): integer`
-  Unix-epoch timestamp (milliseconds) at which this session was started.
-- `smelt.session.cwd` :: `fun(): string`
-  Working directory the session was launched from.
-- `smelt.session.delete` :: `fun(id: string): nil`
-  Delete the persisted session with `id`.
-- `smelt.session.dir` :: `fun(): string`
-  Absolute path of the on-disk session directory (transcript JSONL, attachments, ledger).
-- `smelt.session.fork` :: `fun(): nil`
-  Fork the current session: clone its messages into a new session id and switch to it.
-- `smelt.session.id` :: `fun(): string`
-  Stable session id (matches the on-disk session filename).
-- `smelt.session.list` :: `fun(): table`
-  List persisted sessions other than the current one.
-- `smelt.session.load` :: `fun(id: string): nil`
-  Switch the UI to the persisted session with `id`.
-- `smelt.session.reset` :: `fun(): nil`
-  Cancel any in-flight agent and clear the session to a blank slate.
+- `smelt.session.context_tokens` :: `fun(): integer?` Most recent prompt-token
+  count reported by the provider, or `nil` if no turn has completed yet.
+- `smelt.session.context_window` :: `fun(): integer?` Configured context-window
+  size in tokens for the active model.
+- `smelt.session.cost` :: `fun(): number` Cumulative session cost in USD across
+  every model call this session has made.
+- `smelt.session.created_at_ms` :: `fun(): integer` Unix-epoch timestamp
+  (milliseconds) at which this session was started.
+- `smelt.session.cwd` :: `fun(): string` Working directory the session was
+  launched from.
+- `smelt.session.delete` :: `fun(id: string): nil` Delete the persisted session
+  with `id`.
+- `smelt.session.dir` :: `fun(): string` Absolute path of the on-disk session
+  directory (transcript JSONL, attachments, ledger).
+- `smelt.session.fork` :: `fun(): nil` Fork the current session: clone its
+  messages into a new session id and switch to it.
+- `smelt.session.id` :: `fun(): string` Stable session id (matches the on-disk
+  session filename).
+- `smelt.session.list` :: `fun(): table` List persisted sessions other than the
+  current one.
+- `smelt.session.load` :: `fun(id: string): nil` Switch the UI to the persisted
+  session with `id`.
+- `smelt.session.reset` :: `fun(): nil` Cancel any in-flight agent and clear the
+  session to a blank slate.
 - `smelt.session.rewind_to` :: `fun(block_idx: integer?, opts: table?): nil`
   Rewind the session to a prior user turn.
-- `smelt.session.system` :: `fun(): string`
-  Currently-assembled system prompt sent on the next turn.
-- `smelt.session.text` :: `fun(id: string): string?`
-  Return the searchable plain-text blob for session `id` (user + assistant text only; reasoning, tool output, and system messages excluded).
-- `smelt.session.texts` :: `fun(ids: string[]): table`
-  Parallel batch read of `session.text(id)` for many ids.
-- `smelt.session.tokens` :: `fun(): table`
-  Cumulative token usage across every turn this session has made.
-- `smelt.session.tree` :: `fun(entries: table[], opts: table?): table[]`
-  Arrange a flat list of session entries (as returned by `smelt.session.list`) into a DFS-ordered tree by `parent_id`.
-- `smelt.session.turns` :: `fun(): table`
-  Return user turns as `{ block_idx, label }` rows where `label` is the first line of the user message.
+- `smelt.session.system` :: `fun(): string` Currently-assembled system prompt
+  sent on the next turn.
+- `smelt.session.text` :: `fun(id: string): string?` Return the searchable
+  plain-text blob for session `id` (user + assistant text only; reasoning, tool
+  output, and system messages excluded).
+- `smelt.session.texts` :: `fun(ids: string[]): table` Parallel batch read of
+  `session.text(id)` for many ids.
+- `smelt.session.tokens` :: `fun(): table` Cumulative token usage across every
+  turn this session has made.
+- `smelt.session.tree` :: `fun(entries: table[], opts: table?): table[]` Arrange
+  a flat list of session entries (as returned by `smelt.session.list`) into a
+  DFS-ordered tree by `parent_id`.
+- `smelt.session.turns` :: `fun(): table` Return user turns as
+  `{ block_idx, label }` rows where `label` is the first line of the user
+  message.
 
 #### `smelt.settings`
 
 Metatable-backed proxy table for preferences.
 
-- `smelt.settings.schema` :: `fun(): table`
-  Return the settings schema as an array of `{ key, kind, choices? }` rows.
+- `smelt.settings.schema` :: `fun(): table` Return the settings schema as an
+  array of `{ key, kind, choices? }` rows.
 
 #### `smelt.spinner`
 
 Shared spinner glyph and cadence for plugin animations.
 
-- `smelt.spinner.glyph` :: `fun(): string`
-  Return the current spinner glyph (single grapheme).
-- `smelt.spinner.period_ms` :: `fun(): integer`
-  Return the spinner frame period in milliseconds.
+- `smelt.spinner.glyph` :: `fun(): string` Return the current spinner glyph
+  (single grapheme).
+- `smelt.spinner.period_ms` :: `fun(): integer` Return the spinner frame period
+  in milliseconds.
 
 #### `smelt.text`
 
 Visual-width measurement.
 
 - `smelt.text.fit` :: `fun(s: string, width: integer, opts: table?): string`
-  Force `s` to occupy exactly `width` display cells: truncate when too long (appending `opts.suffix`, default `"…"`), pad when too short (with `opts.fill`, default `" "`).
-- `smelt.text.format_cost` :: `fun(usd: number): string`
-  Format a USD cost with precision that scales to the magnitude: `$0.0042` under one cent, `$0.123` under one dollar, `$1.23` otherwise.
-- `smelt.text.format_duration` :: `fun(seconds: integer): string`
-  Format `seconds` as a short human-readable duration: `42s`, `3m 12s`, `1h 5m 0s`.
-- `smelt.text.format_tokens` :: `fun(n: integer): string`
-  Format a raw token count as `1.2k`, `3.4m`, or the bare integer for values under 1000.
-- `smelt.text.line_count` :: `fun(s: string): integer`
-  Return the number of lines in `s`.
-- `smelt.text.slugify` :: `fun(s: string): string`
-  Lowercase `s`, replace non-alphanumeric runs with `-`, drop empty segments.
-- `smelt.text.truncate` :: `fun(s: string, max_bytes: integer, suffix: string?): string`
-  Truncate `s` to at most `max_bytes`, snapping to the previous UTF-8 char boundary.
-- `smelt.text.width` :: `fun(s: string): integer`
-  Return the visual column count of `s`.
+  Force `s` to occupy exactly `width` display cells: truncate when too long
+  (appending `opts.suffix`, default `"…"`), pad when too short (with
+  `opts.fill`, default `" "`).
+- `smelt.text.format_cost` :: `fun(usd: number): string` Format a USD cost with
+  precision that scales to the magnitude: `$0.0042` under one cent, `$0.123`
+  under one dollar, `$1.23` otherwise.
+- `smelt.text.format_duration` :: `fun(seconds: integer): string` Format
+  `seconds` as a short human-readable duration: `42s`, `3m 12s`, `1h 5m 0s`.
+- `smelt.text.format_tokens` :: `fun(n: integer): string` Format a raw token
+  count as `1.2k`, `3.4m`, or the bare integer for values under 1000.
+- `smelt.text.line_count` :: `fun(s: string): integer` Return the number of
+  lines in `s`.
+- `smelt.text.slugify` :: `fun(s: string): string` Lowercase `s`, replace
+  non-alphanumeric runs with `-`, drop empty segments.
+- `smelt.text.truncate` ::
+  `fun(s: string, max_bytes: integer, suffix: string?): string` Truncate `s` to
+  at most `max_bytes`, snapping to the previous UTF-8 char boundary.
+- `smelt.text.width` :: `fun(s: string): integer` Return the visual column count
+  of `s`.
 
 #### `smelt.theme`
 
 Apply, read, and override the active colorscheme.
 
-- `smelt.theme.apply` :: `fun(spec: smelt.theme.ThemeSpec): nil`
-  Compile `spec` against the current light/dark setting and install it as the active theme.
-- `smelt.theme.get` :: `fun(group: string): table`
-  Read the resolved `StyleDecl` for `group`.
-- `smelt.theme.is_light` :: `fun(): boolean`
-  Return `true` if the active theme is a light theme.
+- `smelt.theme.apply` :: `fun(spec: smelt.theme.ThemeSpec): nil` Compile `spec`
+  against the current light/dark setting and install it as the active theme.
+- `smelt.theme.get` :: `fun(group: string): table` Read the resolved `StyleDecl`
+  for `group`.
+- `smelt.theme.is_light` :: `fun(): boolean` Return `true` if the active theme
+  is a light theme.
 - `smelt.theme.set` :: `fun(group: string, style: smelt.theme.StyleDecl): nil`
   Override a single highlight group's style.
-- `smelt.theme.snapshot` :: `fun(): table`
-  Snapshot every group currently set on the active theme into a `{ group = StyleDecl }` table.
-- `smelt.theme.use` :: `fun(name: string): nil`
-  Load colorscheme `name` from `runtime/lua/smelt/colorschemes/<name>.lua` and apply it.
+- `smelt.theme.snapshot` :: `fun(): table` Snapshot every group currently set on
+  the active theme into a `{ group = StyleDecl }` table.
+- `smelt.theme.use` :: `fun(name: string): nil` Load colorscheme `name` from
+  `runtime/lua/smelt/colorschemes/<name>.lua` and apply it.
 
 #### `smelt.transcript`
 
 Read rendered transcript display text.
 
-- `smelt.transcript.blocks` :: `fun(): table`
-  Return the laid-out transcript blocks for the current frame as a list of `{ idx, role, first_row, rows, first_line }`.
-- `smelt.transcript.is_empty` :: `fun(): boolean`
-  Return `true` when the transcript history holds no blocks (user, assistant, thinking, tool, exec, code, compacted).
-- `smelt.transcript.text` :: `fun(): string`
-  Return the full transcript as a single newline-joined string (post-render display text, with thinking blocks visible according to the `show_thinking` setting).
+- `smelt.transcript.blocks` :: `fun(): table` Return the laid-out transcript
+  blocks for the current frame as a list of
+  `{ idx, role, first_row, rows, first_line }`.
+- `smelt.transcript.is_empty` :: `fun(): boolean` Return `true` when the
+  transcript history holds no blocks (user, assistant, thinking, tool, exec,
+  code, compacted).
+- `smelt.transcript.text` :: `fun(): string` Return the full transcript as a
+  single newline-joined string (post-render display text, with thinking blocks
+  visible according to the `show_thinking` setting).
 
 #### `smelt.ui.layout`
 
@@ -1338,12 +1467,14 @@ Composable layout-tree primitives (set/vbox/hbox/leaf) for the main TUI layout.
 
 - `smelt.ui.layout.hbox` :: `fun(items: table, opts: table?): smelt.ui.layout`
   Horizontal container.
-- `smelt.ui.layout.leaf` :: `fun(win_or_paint: any, opts: table?): smelt.ui.layout`
-  Wrap a Win handle or paint id into a leaf node.
-- `smelt.ui.layout.measure` :: `fun(w: integer?, h: integer?): smelt.ui.layout.Measure`
-  Construct a shareable natural-size handle for use with `layout.leaf(opts.measure = ...)`.
-- `smelt.ui.layout.set` :: `fun(composer: function?): nil`
-  Register the main layout composer.
+- `smelt.ui.layout.leaf` ::
+  `fun(win_or_paint: any, opts: table?): smelt.ui.layout` Wrap a Win handle or
+  paint id into a leaf node.
+- `smelt.ui.layout.measure` ::
+  `fun(w: integer?, h: integer?): smelt.ui.layout.Measure` Construct a shareable
+  natural-size handle for use with `layout.leaf(opts.measure = ...)`.
+- `smelt.ui.layout.set` :: `fun(composer: function?): nil` Register the main
+  layout composer.
 - `smelt.ui.layout.vbox` :: `fun(items: table, opts: table?): smelt.ui.layout`
   Vertical container.
 
@@ -1351,10 +1482,10 @@ Composable layout-tree primitives (set/vbox/hbox/leaf) for the main TUI layout.
 
 Read and write the vim mode of the focused vim-enabled surface.
 
-- `smelt.vim.mode` :: `fun(): smelt.vim.Mode?`
-  Return the vim mode of the focused surface, or `nil` if it isn't vim-enabled.
-- `smelt.vim.set_mode` :: `fun(mode: smelt.vim.Mode): nil`
-  Switch the vim mode of the focused vim-enabled window.
+- `smelt.vim.mode` :: `fun(): smelt.vim.Mode?` Return the vim mode of the
+  focused surface, or `nil` if it isn't vim-enabled.
+- `smelt.vim.set_mode` :: `fun(mode: smelt.vim.Mode): nil` Switch the vim mode
+  of the focused vim-enabled window.
 
 #### `smelt.win`
 
@@ -1362,16 +1493,16 @@ Window handle constructor.
 
 - `smelt.win.new` :: `fun(buf: smelt.buf.Buf, opts: table?): smelt.win.Win?`
   Open a split window over `buf` and return a `Win` userdata.
-- `smelt.win.transcript` :: `fun(): smelt.win.Win`
-  Return a `Win` handle for the built-in transcript window.
+- `smelt.win.transcript` :: `fun(): smelt.win.Win` Return a `Win` handle for the
+  built-in transcript window.
 
 #### `smelt.work`
 
 Push background work-state tokens.
 
-- `smelt.work.busy` :: `fun(label: string): smelt.Reg`
-  Push a busy token onto the per-app stack and return a `Reg` whose `:remove()` pops it.
-- `smelt.work.is_busy` :: `fun(): boolean`
-  Return `true` while at least one `smelt.work.busy` token is live.
+- `smelt.work.busy` :: `fun(label: string): smelt.Reg` Push a busy token onto
+  the per-app stack and return a `Reg` whose `:remove()` pops it.
+- `smelt.work.is_busy` :: `fun(): boolean` Return `true` while at least one
+  `smelt.work.busy` token is live.
 
 <!-- API_INDEX_END -->
