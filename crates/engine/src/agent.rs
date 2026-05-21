@@ -94,33 +94,6 @@ pub(crate) async fn engine_task(
                         };
                         turn.run(input_content, history).await;
                     }
-                    UiCommand::EngineAsk {
-                        id,
-                        system,
-                        messages,
-                        model,
-                        response_format,
-                        reasoning_effort,
-                        tools,
-                        session_id,
-                    } => {
-                        spawn_engine_ask(
-                            &config,
-                            &client,
-                            &*dispatcher,
-                            AskTask {
-                                id,
-                                system,
-                                messages,
-                                model,
-                                response_format,
-                                reasoning_effort,
-                                tools,
-                                session_id,
-                            },
-                            &event_tx,
-                        );
-                    }
                     UiCommand::SetModel { model, api_base, api_key, provider_type } => {
                         config.api.base = api_base;
                         config.api.key = api_key;
@@ -136,7 +109,18 @@ pub(crate) async fn engine_task(
                         config.skill_section = skill_section;
                         config.system_prompt_override = system_prompt_override;
                     }
-                    _ => {} // Steer, Cancel, etc. only relevant during a turn
+                    other => {
+                        // EngineAsk routes here; Steer/Cancel/etc. silently
+                        // fall through — they're turn-scoped and a no-op
+                        // outside a turn.
+                        let ctx = BackgroundCtx {
+                            config: &config,
+                            http_client: &client,
+                            dispatcher: &*dispatcher,
+                            event_tx: &event_tx,
+                        };
+                        let _ = dispatch_background_cmd(other, &ctx);
+                    }
                 }
             }
             else => break,
@@ -180,6 +164,61 @@ pub(crate) struct AskTask {
     /// Session id forwarded as `prompt_cache_key` to OpenAI / Codex so
     /// the EngineAsk hits the same cache shard as the main turn.
     pub session_id: String,
+}
+
+/// Immutable refs out-of-band command dispatch needs. Bundling them lets
+/// every site that drains `cmd_rx` (the outer engine loop, the
+/// turn-control loop, `call_llm`, `execute_concurrent`,
+/// `wait_for_tool_result`) route background commands through a single
+/// function — and lets `execute_concurrent` in particular do so without
+/// colliding with its long-held `&mut self.cmd_rx` borrow in the select.
+pub(crate) struct BackgroundCtx<'a> {
+    pub config: &'a EngineConfig,
+    pub http_client: &'a reqwest::Client,
+    pub dispatcher: &'a dyn ToolDispatcher,
+    pub event_tx: &'a mpsc::UnboundedSender<EngineEvent>,
+}
+
+/// Dispatch a command that doesn't depend on turn state. Returns `None`
+/// when the command was consumed; `Some(cmd)` when the caller should
+/// handle it (turn-control, per-tool protocol, lifecycle, etc.). Today
+/// only `EngineAsk` is handled here; new "anywhere" commands extend the
+/// match and instantly become available at every call site.
+pub(crate) fn dispatch_background_cmd(
+    cmd: UiCommand,
+    ctx: &BackgroundCtx<'_>,
+) -> Option<UiCommand> {
+    match cmd {
+        UiCommand::EngineAsk {
+            id,
+            system,
+            messages,
+            model,
+            response_format,
+            reasoning_effort,
+            tools,
+            session_id,
+        } => {
+            spawn_engine_ask(
+                ctx.config,
+                ctx.http_client,
+                ctx.dispatcher,
+                AskTask {
+                    id,
+                    system,
+                    messages,
+                    model,
+                    response_format,
+                    reasoning_effort,
+                    tools,
+                    session_id,
+                },
+                ctx.event_tx,
+            );
+            None
+        }
+        other => Some(other),
+    }
 }
 
 fn spawn_engine_ask(
@@ -694,38 +733,16 @@ impl<'a> Turn<'a> {
         .with_model_config(self.config.api.model_config.clone());
     }
 
-    /// Handle a command that can be processed regardless of turn state.
-    fn handle_background_cmd(&self, cmd: UiCommand) -> bool {
-        match cmd {
-            UiCommand::EngineAsk {
-                id,
-                system,
-                messages,
-                model,
-                response_format,
-                reasoning_effort,
-                tools,
-                session_id,
-            } => {
-                spawn_engine_ask(
-                    self.config,
-                    self.http_client,
-                    self.dispatcher,
-                    AskTask {
-                        id,
-                        system,
-                        messages,
-                        model,
-                        response_format,
-                        reasoning_effort,
-                        tools,
-                        session_id,
-                    },
-                    self.event_tx,
-                );
-                true
-            }
-            _ => false,
+    /// Bundle of refs that out-of-band command dispatch needs. Built on
+    /// demand so callsites that already hold a `&mut` borrow on
+    /// `self.cmd_rx` (notably `execute_concurrent`) can bypass the
+    /// borrow checker by pre-binding the ctx outside the select loop.
+    fn bg_ctx(&self) -> BackgroundCtx<'_> {
+        BackgroundCtx {
+            config: self.config,
+            http_client: self.http_client,
+            dispatcher: self.dispatcher,
+            event_tx: self.event_tx,
         }
     }
 
@@ -791,7 +808,7 @@ impl<'a> Turn<'a> {
                 self.cancel.cancel();
                 true
             }
-            other => self.handle_background_cmd(other),
+            other => dispatch_background_cmd(other, &self.bg_ctx()).is_none(),
         }
     }
 
@@ -924,12 +941,7 @@ impl<'a> Turn<'a> {
                         // `HistoryItem`s, which repairs any orphan
                         // tool_use the compaction plugin might emit.
                         let recovery_view: Vec<Message> = protocol::history_to_messages(
-                            &self
-                                .history
-                                .iter()
-                                .skip(1)
-                                .cloned()
-                                .collect::<Vec<_>>(),
+                            &self.history.iter().skip(1).cloned().collect::<Vec<_>>(),
                         );
                         let recovered = self
                             .host_call(|reply| crate::host::HostCall::RecoverFromContextLimit {
@@ -1283,7 +1295,11 @@ impl<'a> Turn<'a> {
         &mut self,
         plan: &mut ToolExecutionPlan<'b>,
         completed: &mut [Option<ToolResult>],
-    ) -> (bool, Vec<UiCommand>, Vec<(String, ToolOutcome, Option<u64>)>) {
+    ) -> (
+        bool,
+        Vec<UiCommand>,
+        Vec<(String, ToolOutcome, Option<u64>)>,
+    ) {
         use futures_util::stream::StreamExt;
 
         type TaggedFut<'x> =
@@ -1324,6 +1340,19 @@ impl<'a> Turn<'a> {
             + plan.pending_tool_perms.len();
         let cancel = &self.cancel;
         let cmd_rx = &mut self.cmd_rx;
+        // Pre-bind disjoint immutable refs so the catch-all arm can route
+        // background commands (today: EngineAsk) through
+        // `dispatch_background_cmd` without colliding with `cmd_rx`'s
+        // long-held `&mut self.cmd_rx` borrow. Without this, any tool
+        // that parks on `smelt.engine.ask` (notably `web_fetch`) would
+        // deadlock the turn: the command would land in cmd_rx, fall into
+        // a silent `_ => {}`, and never produce an `EngineAskResponse`.
+        let bg_ctx = BackgroundCtx {
+            config: self.config,
+            http_client: self.http_client,
+            dispatcher,
+            event_tx: self.event_tx,
+        };
         let mut deferred: Vec<UiCommand> = Vec::new();
         let mut tool_results: Vec<(String, ToolOutcome, Option<u64>)> = Vec::new();
 
@@ -1561,7 +1590,7 @@ impl<'a> Turn<'a> {
                     | UiCommand::SetAgentMode { .. }
                     | UiCommand::SetReasoningEffort { .. }
                     | UiCommand::SetModel { .. } => deferred.push(cmd),
-                    _ => {}
+                    other => { let _ = dispatch_background_cmd(other, &bg_ctx); }
                 },
                 Some((idx, result)) = futs.next(), if !futs.is_empty() => {
                     completed[idx] = Some(result);
@@ -1866,7 +1895,7 @@ impl<'a> Turn<'a> {
                         UiCommand::Steer { .. }
                         | UiCommand::Unsteer { .. } => deferred_turn_cmds.push(cmd),
                         other => {
-                            self.handle_background_cmd(other);
+                            let _ = dispatch_background_cmd(other, &self.bg_ctx());
                         }
                     },
                 }
@@ -1925,12 +1954,11 @@ impl<'a> Turn<'a> {
                 }
                 None => return None,
                 Some(other) => {
-                    self.handle_background_cmd(other);
+                    let _ = dispatch_background_cmd(other, &self.bg_ctx());
                 }
             }
         }
     }
-
 }
 
 // ── Helpers ─────────────────────────────────────────────────────────────────
