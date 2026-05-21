@@ -14,7 +14,7 @@ smelt.session = smelt.session or {}
 -- Entries whose `parent_id` references an id not present in `entries` are
 -- treated as roots — this is what makes the function safe under workspace
 -- filtering, where a fork's parent may have been filtered out.
--- @sig fun(entries: table[], opts: table?): table[]
+---@type fun(entries: table[], opts: table?): table[]
 function smelt.session.tree(entries, opts)
   opts = opts or {}
   local sort_by = opts.sort_by or "updated_at_ms"

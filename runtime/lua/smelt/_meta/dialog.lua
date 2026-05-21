@@ -12,14 +12,14 @@ local dialog = {}
 --- enables focus + vim keymaps (when the user has vim mode on);
 --- `opts.wrap` mirrors `smelt.win.new`. Returns `(leaf, buf)`.
 ---@see smelt.win.new
----@type fun(opts: table?): any, smelt.buf.Buf
+---@type fun(opts: table?): smelt.win.Win, smelt.buf.Buf
 dialog.content = nil
 
 --- Build a single-line text-input leaf with a fresh buffer. `placeholder`
 --- shows when the buffer is empty; `opts.pad_left` / `opts.pad_right`
 --- override the dialog gutter. Returns `(leaf, buf)` so the caller can
 --- read the entered text via `buf:source()` from the dialog keymaps.
----@type fun(placeholder: string?, opts: table?): any, smelt.buf.Buf
+---@type fun(placeholder: string?, opts: table?): smelt.win.Win, smelt.buf.Buf
 dialog.input = nil
 
 --- Wrap an existing `buf` as a selectable list leaf. Use when the buffer
@@ -27,14 +27,14 @@ dialog.input = nil
 --- `smelt.dialog.options`). `opts.focusable` defaults true; `opts.selected`
 --- (0-based) sets the initial cursor row.
 ---@see smelt.dialog.options
----@type fun(buf: smelt.buf.Buf, opts: table?): any
+---@type fun(buf: smelt.buf.Buf, opts: table?): smelt.win.Win
 dialog.list = nil
 
 --- Render `text` as a non-focusable markdown leaf. Convenience wrapper
 --- around `smelt.dialog.content` for static narrative panels (notes,
 --- summaries, intros). Returns `(leaf, buf)`.
 ---@see smelt.dialog.content
----@type fun(text: string): any, smelt.buf.Buf
+---@type fun(text: string): smelt.win.Win, smelt.buf.Buf
 dialog.markdown = nil
 
 --- Coroutine-blocking dialog opener. Builds the overlay from `opts.panels`
@@ -57,7 +57,7 @@ dialog.open_handle = nil
 --- selection cursor starts on `opts.selected` (1-based, defaults to 1).
 --- Returns `(leaf, buf)`; the caller reads the active row via
 --- `leaf:cursor_row()` from the dialog keymaps.
----@type fun(labels: string[], opts: table?): any, smelt.buf.Buf
+---@type fun(labels: string[], opts: table?): smelt.win.Win, smelt.buf.Buf
 dialog.options = nil
 
 --- Coroutine-blocking Telescope-style picker. Stacks a single-line input

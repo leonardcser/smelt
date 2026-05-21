@@ -31,7 +31,7 @@ local lock_count = 0
 -- pop while the caller owns the screen. Returns a `Reg` whose
 -- `:remove()` releases the lock; the last release re-runs the
 -- recompute pass. Idempotent — multiple acquirers stack.
--- @sig fun(): smelt.Reg
+---@type fun(): smelt.Reg
 function smelt.prompt.acquire()
   lock_count = lock_count + 1
   local released = false
@@ -48,7 +48,7 @@ end
 -- True while at least one `smelt.prompt.acquire()` lock is outstanding.
 -- Plugins read this to skip non-blocking work that would race the
 -- modal owner.
--- @sig fun(): boolean
+---@type fun(): boolean
 function smelt.prompt.is_modal()
   return lock_count > 0
 end
@@ -221,7 +221,7 @@ smelt.prompt.win():on("text_changed", function() M._recompute() end)
 -- Register a completer spec. See `smelt.prompt.CompleterSpec` for the
 -- required fields. Returns a `Reg` whose `:remove()` unregisters the
 -- completer and closes the picker if it was active.
--- @sig fun(spec: smelt.prompt.CompleterSpec): smelt.Reg
+---@type fun(spec: smelt.prompt.CompleterSpec): smelt.Reg
 function smelt.prompt.completer(spec)
   assert(type(spec) == "table", "smelt.prompt.completer: expected table")
   assert(type(spec.detect) == "function", "spec.detect required")

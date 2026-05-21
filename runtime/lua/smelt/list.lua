@@ -152,7 +152,7 @@ end
 --- they own the rendered selection cursor and the backing line buffer;
 --- the rest configure how data is sourced, filtered, and rendered.
 ---@class smelt.list.Opts
----@field leaf any Selectable list leaf (typically from `smelt.dialog.list`).
+---@field leaf smelt.win.Win Selectable list leaf (typically from `smelt.dialog.list`).
 ---@field buf smelt.buf.Buf Backing buffer that mirrors the rendered rows.
 ---@field items? any[] Initial item set. Mutate via `:set_items(...)` later if needed.
 ---@field render fun(item: any): table Returns `{ text, marks }` per visible row.
@@ -166,7 +166,7 @@ end
 -- when no row passes the filter. Returns a handle with `:selected`,
 -- `:set_filter`, `:refresh`, `:set_cursor`, `:move_cursor`. See the
 -- header docstring for the full usage shape.
--- @sig fun(opts: smelt.list.Opts): table
+---@type fun(opts: smelt.list.Opts): table
 function smelt.list.new(opts)
   if type(opts) ~= "table" then
     error("smelt.list.new: expected options table", 2)

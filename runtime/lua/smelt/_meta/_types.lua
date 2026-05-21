@@ -89,7 +89,7 @@
 ---@class smelt.dialog.Opts
 ---@field title? string Title rendered in the chrome row.
 ---@field panels smelt.dialog.Panel[] Ordered list of body panels.
----@field focus? any Leaf that should receive initial focus.
+---@field focus? smelt.win.Win Leaf that should receive initial focus.
 ---@field height? any Fixed total body size: integer cells, `"N%"`, `"fill"`, or `"fit"`.
 ---@field max_height? any Shrink-to-content cap that pairs with `min_height`.
 ---@field min_height? any Floor for the body size (defaults to `"30%"` in fit mode).
@@ -102,7 +102,7 @@
 --- the `smelt.dialog.*` helpers; `height` follows the same grammar as
 --- `smelt.dialog.open` (integer cells, `"N%"`, `"fill"`, `"fit"`).
 ---@class smelt.dialog.Panel
----@field leaf any A leaf returned by `smelt.dialog.input/options/list/markdown/content`.
+---@field leaf smelt.win.Win A leaf returned by `smelt.dialog.input/options/list/markdown/content`.
 ---@field height? any Integer cells, `"N%"`, `"fill"`, or `"fit"`.
 
 --- Options accepted by `smelt.dialog.picker`. Layered on top of
@@ -174,7 +174,7 @@
 --- they own the rendered selection cursor and the backing line buffer;
 --- the rest configure how data is sourced, filtered, and rendered.
 ---@class smelt.list.Opts
----@field leaf any Selectable list leaf (typically from `smelt.dialog.list`).
+---@field leaf smelt.win.Win Selectable list leaf (typically from `smelt.dialog.list`).
 ---@field buf smelt.buf.Buf Backing buffer that mirrors the rendered rows.
 ---@field items? any[] Initial item set. Mutate via `:set_items(...)` later if needed.
 ---@field render fun(item: any): table Returns `{ text, marks }` per visible row.

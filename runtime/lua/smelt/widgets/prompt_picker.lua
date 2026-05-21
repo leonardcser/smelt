@@ -90,7 +90,7 @@ end
 -- to switch to persistent mode (the picker stays open across selections
 -- until Esc). Returns `{ action, item, index }` on accept or `nil` on
 -- dismiss (single-shot mode). Must run inside a `smelt.spawn` frame.
--- @sig fun(opts: smelt.prompt.PickerOpts): table?
+---@type fun(opts: smelt.prompt.PickerOpts): table?
 function smelt.prompt.open_picker(opts)
   if not coroutine.isyieldable() then
     error("smelt.prompt.open_picker: call from inside smelt.spawn(fn) or tool.execute", 2)

@@ -55,7 +55,7 @@ local GUTTER = 1
 --- the `smelt.dialog.*` helpers; `height` follows the same grammar as
 --- `smelt.dialog.open` (integer cells, `"N%"`, `"fill"`, `"fit"`).
 ---@class smelt.dialog.Panel
----@field leaf any A leaf returned by `smelt.dialog.input/options/list/markdown/content`.
+---@field leaf smelt.win.Win A leaf returned by `smelt.dialog.input/options/list/markdown/content`.
 ---@field height? any Integer cells, `"N%"`, `"fill"`, or `"fit"`.
 
 --- One dialog-level keymap entry. `on_press(ctx)` receives the dialog
@@ -74,7 +74,7 @@ local GUTTER = 1
 ---@class smelt.dialog.Opts
 ---@field title? string Title rendered in the chrome row.
 ---@field panels smelt.dialog.Panel[] Ordered list of body panels.
----@field focus? any Leaf that should receive initial focus.
+---@field focus? smelt.win.Win Leaf that should receive initial focus.
 ---@field height? any Fixed total body size: integer cells, `"N%"`, `"fill"`, or `"fit"`.
 ---@field max_height? any Shrink-to-content cap that pairs with `min_height`.
 ---@field min_height? any Floor for the body size (defaults to `"30%"` in fit mode).
@@ -106,7 +106,7 @@ local GUTTER = 1
 -- shows when the buffer is empty; `opts.pad_left` / `opts.pad_right`
 -- override the dialog gutter. Returns `(leaf, buf)` so the caller can
 -- read the entered text via `buf:source()` from the dialog keymaps.
--- @sig fun(placeholder: string?, opts: table?): any, smelt.buf.Buf
+---@type fun(placeholder: string?, opts: table?): smelt.win.Win, smelt.buf.Buf
 function smelt.dialog.input(placeholder, opts)
   opts = opts or {}
   local buf = smelt.buf.new()
@@ -130,7 +130,7 @@ end
 -- selection cursor starts on `opts.selected` (1-based, defaults to 1).
 -- Returns `(leaf, buf)`; the caller reads the active row via
 -- `leaf:cursor_row()` from the dialog keymaps.
--- @sig fun(labels: string[], opts: table?): any, smelt.buf.Buf
+---@type fun(labels: string[], opts: table?): smelt.win.Win, smelt.buf.Buf
 function smelt.dialog.options(labels, opts)
   opts = opts or {}
   local lines = {}
@@ -157,7 +157,7 @@ end
 -- contents need to be mutated live (vs. the snapshot supplied to
 -- `smelt.dialog.options`). `opts.focusable` defaults true; `opts.selected`
 -- (0-based) sets the initial cursor row.
--- @sig fun(buf: smelt.buf.Buf, opts: table?): any
+---@type fun(buf: smelt.buf.Buf, opts: table?): smelt.win.Win
 function smelt.dialog.list(buf, opts)
   opts = opts or {}
   local focusable = opts.focusable
@@ -185,7 +185,7 @@ end
 -- Render `text` as a non-focusable markdown leaf. Convenience wrapper
 -- around `smelt.dialog.content` for static narrative panels (notes,
 -- summaries, intros). Returns `(leaf, buf)`.
--- @sig fun(text: string): any, smelt.buf.Buf
+---@type fun(text: string): smelt.win.Win, smelt.buf.Buf
 function smelt.dialog.markdown(text)
   local buf = smelt.buf.new({ mode = "markdown" })
   buf:source(text or "")
@@ -200,7 +200,7 @@ end
 -- or `opts.text` to spin up a fresh read-only one. `opts.interactive`
 -- enables focus + vim keymaps (when the user has vim mode on);
 -- `opts.wrap` mirrors `smelt.win.new`. Returns `(leaf, buf)`.
--- @sig fun(opts: table?): any, smelt.buf.Buf
+---@type fun(opts: table?): smelt.win.Win, smelt.buf.Buf
 function smelt.dialog.content(opts)
   opts = opts or {}
   local buf = opts.buf
@@ -441,7 +441,7 @@ end
 -- caller until a handler calls `ctx.resolve(value)`. Must run inside a
 -- `smelt.spawn` (or tool execute) frame; returns the resolved value or
 -- `nil` on dismiss.
--- @sig fun(opts: smelt.dialog.Opts): any
+---@type fun(opts: smelt.dialog.Opts): any
 function smelt.dialog.open(opts)
   if not coroutine.isyieldable() then
     error("smelt.dialog.open: call from inside smelt.spawn(fn) or tool.execute", 2)
@@ -514,7 +514,7 @@ local NAV_KEYS = {
 -- block above `NAV_KEYS` for every accepted `opts` field. Returns the
 -- value resolved from `on_submit` (defaults to the highlighted item) or
 -- `nil` on dismiss.
--- @sig fun(opts: smelt.dialog.PickerOpts): any
+---@type fun(opts: smelt.dialog.PickerOpts): any
 function smelt.dialog.picker(opts)
   if not coroutine.isyieldable() then
     error("smelt.dialog.picker: call from inside smelt.spawn(fn) or tool.execute", 2)
@@ -609,7 +609,7 @@ end
 -- The consumer drives the lifecycle via `on_submit` / `on_dismiss`
 -- callbacks and tears down with `handle:close()`. No value flows back
 -- — use `smelt.dialog.open` when you need to read the result.
--- @sig fun(opts: smelt.dialog.Opts): table
+---@type fun(opts: smelt.dialog.Opts): table
 function smelt.dialog.open_handle(opts)
   if type(opts) ~= "table" then
     error("smelt.dialog.open_handle: expected table of options", 2)

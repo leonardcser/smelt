@@ -125,7 +125,7 @@ end
 -- through `smelt.confirm.__resolve`. Bails when no matching request is
 -- active (e.g. a newer prompt has superseded it). Called by the host;
 -- plugins should not invoke directly.
--- @sig fun(handle_id: string): nil
+---@type fun(handle_id: string): nil
 function smelt.confirm.open(handle_id)
   -- Bail if the cell doesn't match this handle; a newer request may have
   -- replaced it before this dialog opened.

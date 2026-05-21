@@ -22,14 +22,14 @@ end
 -- Sleep for `ms` milliseconds. Must be called from inside `smelt.spawn(fn)`
 -- or a `tool.execute`. Raises `cancelled` if the task is cancelled while
 -- parked.
--- @sig fun(ms: integer): any
+---@type fun(ms: integer): any
 function smelt.sleep(ms)
   require_yieldable("smelt.sleep")
   return yield_with_cancel({ __yield = "sleep", ms = ms })
 end
 
 -- Park the running task until `smelt.task.resume(id, value)` fires. Returns the resumed value.
--- @sig fun(id: integer): any
+---@type fun(id: integer): any
 function smelt.task.wait(id)
   require_yieldable("smelt.task.wait")
   return yield_with_cancel({ __yield = "external", id = id })
@@ -41,7 +41,7 @@ end
 -- the resolved value. Raises `cancelled` if the task is cancelled while
 -- parked. Plugin authors bridging custom Rust extensions use this to
 -- avoid hand-rolling the alloc + start + wait dance.
--- @sig fun(start: fun(id: integer)): any
+---@type fun(start: fun(id: integer)): any
 function smelt.task.external(start)
   require_yieldable("smelt.task.external")
   local id = smelt.task.alloc()
@@ -51,7 +51,7 @@ end
 
 -- Call another tool from within `execute`. Pass `parent_call_id` so streamed
 -- output groups under the parent invocation. Returns `{ content, is_error, metadata? }`.
--- @sig fun(name: string, args: table?, parent_call_id: string?): { content: string, is_error: boolean?, metadata: table? }
+---@type fun(name: string, args: table?, parent_call_id: string?): { content: string, is_error: boolean?, metadata: table? }
 function smelt.tools.call(name, args, parent_call_id)
   return smelt.task.external(function(id)
     smelt.tools.__send_call(id, parent_call_id or "", name, args or {})
@@ -71,7 +71,7 @@ end
 --   smelt.timer.every(1000, tick)
 -- )
 -- ```
--- @sig fun(...: smelt.Reg?): smelt.Reg
+---@type fun(...: smelt.Reg?): smelt.Reg
 function smelt.reg.compose(...)
   -- Use `select("#", ...)` rather than `#regs`; `ipairs` stops at the
   -- first `nil`, which would silently skip Regs after a `nil` slot.
@@ -90,7 +90,7 @@ end
 -- first — in which case `fn`'s coroutine is cancelled (any in-flight
 -- `smelt.sleep` / `task.wait` raises `cancelled` and the coroutine
 -- unwinds). Must run inside a yielding context.
--- @sig fun(ms: integer, fn: fun(): any): any, string?
+---@type fun(ms: integer, fn: fun(): any): any, string?
 function smelt.task.timeout(ms, fn)
   require_yieldable("smelt.task.timeout")
   local payload = smelt.task.external(function(id)
@@ -120,7 +120,7 @@ end
 -- `(value, err)` shape. All other branches are cancelled. Errors from
 -- any branch propagate (losers cancelled first). Must run inside a
 -- yielding context.
--- @sig fun(...: fun(): any): integer, any
+---@type fun(...: fun(): any): integer, any
 function smelt.task.race(...)
   require_yieldable("smelt.task.race")
   local fns = { ... }
@@ -148,7 +148,7 @@ end
 -- results in the same order as the input. Errors from any branch
 -- propagate; the remaining branches still complete and their results
 -- are discarded. Must run inside a yielding context.
--- @sig fun(...: fun(): any): any[]
+---@type fun(...: fun(): any): any[]
 function smelt.task.all(...)
   require_yieldable("smelt.task.all")
   local fns = { ... }
@@ -192,7 +192,7 @@ end
 -- nil-index. This keeps `_bootstrap.lua` loadable against any tier.
 if smelt.layout and smelt.layout.leaf then
   -- Build a leaf layout from a string. Common pattern for `render` callbacks.
-  -- @sig fun(content: string, opts: table?): any
+  ---@type fun(content: string, opts: table?): any
   function smelt.layout.text(content, opts)
     local buf = smelt.buf.new()
     smelt.render.text(buf, content or "", opts)
@@ -202,7 +202,7 @@ if smelt.layout and smelt.layout.leaf then
   -- Build a leaf layout from a markdown string. Common pattern for `render`
   -- callbacks that want full block-level markdown (headings, fenced code,
   -- lists, tables) instead of plain dim body text.
-  -- @sig fun(content: string): any
+  ---@type fun(content: string): any
   function smelt.layout.markdown(content)
     local buf = smelt.buf.new()
     smelt.render.markdown(buf, content or "")
@@ -211,7 +211,7 @@ if smelt.layout and smelt.layout.leaf then
 
   -- Build a 1×1 leaf from a single glyph. Auto-repeats to fill the parent's
   -- axis: `sep("│")` in an hbox = vertical divider, `sep("─")` in a vbox = horizontal.
-  -- @sig fun(char: string?): any
+  ---@type fun(char: string?): any
   function smelt.layout.sep(char)
     local buf = smelt.buf.new()
     buf:lines({ char or "─" })
@@ -229,7 +229,7 @@ if smelt.picker and smelt.prompt and smelt.prompt.open_picker then
   -- `{ index, item, action }` on accept or `nil` on dismiss.
   --   • `opts.on_select(item)` — fires on navigation
   --   • `opts.placement` — defaults to "prompt_docked"
-  -- @sig fun(opts: table): { index: integer, item: table, action: string }?
+  ---@type fun(opts: table): { index: integer, item: table, action: string }?
   function smelt.picker.fuzzy(opts)
     if type(opts) ~= "table" then
       error("smelt.picker.fuzzy: expected table of options", 2)
@@ -252,7 +252,7 @@ end
 -- `smelt.spawn(fn)` or a `tool.execute` (anything that runs on the Lua
 -- task runtime). Returns `(content, nil)` on success or `(nil, err)` on
 -- failure — same convention as `smelt.fs.read`.
--- @sig fun(path: string): string?, string?
+---@type fun(path: string): string?, string?
 function smelt.fs.read_async(path)
   local result = smelt.task.external(function(id) smelt.fs.__read_async_start(id, path) end)
   if result.content ~= nil then return result.content, nil end
@@ -262,7 +262,7 @@ end
 -- Write `contents` to `path` off the main thread. Same yielding rules as
 -- `smelt.fs.read_async`. Returns `(true, nil)` on success or
 -- `(false, err)` on failure — mirrors `smelt.fs.write`.
--- @sig fun(path: string, contents: string): boolean, string?
+---@type fun(path: string, contents: string): boolean, string?
 function smelt.fs.write_async(path, contents)
   local result = smelt.task.external(function(id) smelt.fs.__write_async_start(id, path, contents) end)
   if result.ok then return true, nil end
@@ -279,7 +279,7 @@ end
 -- the child process is killed (SIGTERM to its process group) and
 -- `smelt.task.external` raises `cancelled` — same shape as every other
 -- yielding API.
--- @sig fun(cmd: string, args: string[]?, opts: table?): { stdout: string, stderr: string, exit_code: integer, timed_out: boolean }?, string?
+---@type fun(cmd: string, args: string[]?, opts: table?): { stdout: string, stderr: string, exit_code: integer, timed_out: boolean }?, string?
 function smelt.process.run(cmd, args, opts)
   local result = smelt.task.external(function(id) smelt.process.__run_async_start(id, cmd, args, opts) end)
   if result.err ~= nil then return nil, result.err end
@@ -292,7 +292,7 @@ end
 -- `({ status, final_url, body, headers }, nil)` on success or `(nil, err)`
 -- on transport failure. Cancellation of the parent task drops the in-flight
 -- request and raises `cancelled` from this call.
--- @sig fun(url: string, opts: table?): { status: integer, final_url: string, body: string, headers: table }?, string?
+---@type fun(url: string, opts: table?): { status: integer, final_url: string, body: string, headers: table }?, string?
 function smelt.http.get(url, opts)
   local result = smelt.task.external(function(id) smelt.http.__get_async_start(id, url, opts) end)
   if result.err ~= nil then return nil, result.err end
@@ -301,7 +301,7 @@ end
 
 -- Perform an HTTP POST against `url` with `body` bytes. Yields the calling
 -- coroutine until the response lands. Same return shape as `smelt.http.get`.
--- @sig fun(url: string, body: string?, opts: table?): { status: integer, final_url: string, body: string, headers: table }?, string?
+---@type fun(url: string, body: string?, opts: table?): { status: integer, final_url: string, body: string, headers: table }?, string?
 function smelt.http.post(url, body, opts)
   local result = smelt.task.external(function(id) smelt.http.__post_async_start(id, url, body, opts) end)
   if result.err ~= nil then return nil, result.err end
@@ -318,7 +318,7 @@ end
 -- `(nil, err)` on spawn failure. Cancellation kills the child (SIGKILL)
 -- and `smelt.task.external` raises `cancelled`. Exit code 1 (no match)
 -- is not an error — inspect `exit_code` on the result.
--- @sig fun(pattern: string, path: string, opts: table?): { stdout: string, stderr: string, exit_code: integer, timed_out: boolean }?, string?
+---@type fun(pattern: string, path: string, opts: table?): { stdout: string, stderr: string, exit_code: integer, timed_out: boolean }?, string?
 function smelt.grep.run(pattern, path, opts)
   local result = smelt.task.external(function(id) smelt.grep.__run_async_start(id, pattern, path, opts) end)
   if result.err ~= nil then return nil, result.err end
@@ -339,7 +339,7 @@ smelt.tick = smelt.tick or {}
 -- hot-reload survival.
 --
 -- Returns a `Reg` whose `:remove()` unsubscribes.
--- @sig fun(secs: integer, fn: fun()): smelt.Reg
+---@type fun(secs: integer, fn: fun()): smelt.Reg
 function smelt.tick.every(secs, fn)
   if type(secs) ~= "number" or secs <= 0 then
     error("smelt.tick.every: secs must be a positive number", 2)
@@ -362,7 +362,7 @@ end
 -- `opts.recursive` defaults to true; set false to watch only the immediate
 -- entries of a directory. Returns a `Reg` whose `:remove()` stops the
 -- watcher and cancels the polling coroutine.
--- @sig fun(path: string, handler: fun(event: { kind: string, detail: string?, paths: string[] }), opts: table?): smelt.Reg
+---@type fun(path: string, handler: fun(event: { kind: string, detail: string?, paths: string[] }), opts: table?): smelt.Reg
 function smelt.fs.watch(path, handler, opts)
   if type(path) ~= "string" then
     error("smelt.fs.watch: path must be a string", 2)
@@ -400,7 +400,7 @@ if smelt.engine and smelt.engine.ask then
   -- the request up to `spec.max_trims` times (default 20). `spec` accepts
   -- every field `smelt.engine.ask` accepts, plus `max_trims`. The engine
   -- itself is one-shot; composition lives here so the policy stays visible.
-  -- @sig fun(spec: table): integer
+  ---@type fun(spec: table): integer
   function smelt.engine.ask_with_trim(spec)
     local max_trims = spec.max_trims or 20
     spec.max_trims = nil
@@ -431,7 +431,7 @@ if smelt.theme then
   -- map keyed by highlight-group name with either a `StyleDecl` table or
   -- a string reference as its value (see `smelt.theme.apply`). Drop
   -- custom colorschemes alongside `default.lua`.
-  -- @sig fun(name: string): nil
+  ---@type fun(name: string): nil
   function smelt.theme.use(name)
     local spec = require("smelt.colorschemes." .. name)
     if type(spec) ~= "table" then
@@ -474,7 +474,7 @@ __smelt_state_touched__ = {}
 -- `$XDG_STATE_HOME/smelt/plugins/<name>.json`. Top-level writes are
 -- debounced and auto-saved; nested mutations require an explicit
 -- `s.save()` call. Reads pass through to the loaded table.
--- @sig fun(name: string, opts: { debounce_ms: integer? }?): table
+---@type fun(name: string, opts: { debounce_ms: integer? }?): table
 smelt.state.persistent = function(name, opts)
   opts = opts or {}
   local debounce_ms = opts.debounce_ms or 100
@@ -648,7 +648,7 @@ if smelt and smelt.notify then
   -- so the per-call-site `, "upgrade"` repetition goes away. Same toast +
   -- `/messages` semantics as the underlying calls. Skipped on headless
   -- where `smelt.notify` isn't bound.
-  -- @sig fun(source: string): smelt.notify.Scoped
+  ---@type fun(source: string): smelt.notify.Scoped
   function smelt.notify.scoped(source)
     if type(source) ~= "string" or source == "" then
       error("smelt.notify.scoped: source must be a non-empty string", 2)

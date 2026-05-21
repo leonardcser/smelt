@@ -128,7 +128,7 @@ and `"fit"` pass through verbatim. Pick one of `height` or
 | --- | --- | --- | --- |
 | `title` | `string` |  | Title rendered in the chrome row. |
 | `panels` | [smelt.dialog.Panel[]](types.md#smeltdialogpanel) | yes | Ordered list of body panels. |
-| `focus` | `any` |  | Leaf that should receive initial focus. |
+| `focus` | [smelt.win.Win](types.md#smeltwinwin) |  | Leaf that should receive initial focus. |
 | `height` | `any` |  | Fixed total body size: integer cells, `"N%"`, `"fill"`, or `"fit"`. |
 | `max_height` | `any` |  | Shrink-to-content cap that pairs with `min_height`. |
 | `min_height` | `any` |  | Floor for the body size (defaults to `"30%"` in fit mode). |
@@ -145,7 +145,7 @@ the `smelt.dialog.*` helpers; `height` follows the same grammar as
 
 | Field | Type | Required | Description |
 | --- | --- | --- | --- |
-| `leaf` | `any` | yes | A leaf returned by `smelt.dialog.input/options/list/markdown/content`. |
+| `leaf` | [smelt.win.Win](types.md#smeltwinwin) | yes | A leaf returned by `smelt.dialog.input/options/list/markdown/content`. |
 | `height` | `any` |  | Integer cells, `"N%"`, `"fill"`, or `"fit"`. |
 
 ### `smelt.dialog.PickerOpts`
@@ -249,7 +249,7 @@ the rest configure how data is sourced, filtered, and rendered.
 
 | Field | Type | Required | Description |
 | --- | --- | --- | --- |
-| `leaf` | `any` | yes | Selectable list leaf (typically from `smelt.dialog.list`). |
+| `leaf` | [smelt.win.Win](types.md#smeltwinwin) | yes | Selectable list leaf (typically from `smelt.dialog.list`). |
 | `buf` | [smelt.buf.Buf](types.md#smeltbufbuf) | yes | Backing buffer that mirrors the rendered rows. |
 | `items` | `any[]` |  | Initial item set. Mutate via `:set_items(...)` later if needed. |
 | `render` | `fun(item: any):` | yes | table Returns `{ text, marks }` per visible row. |

@@ -12,7 +12,7 @@ local M = {}
 -- placement / styling; up/down/ctrl-j/k/p/n navigate, Enter resolves,
 -- Esc dismisses. Returns `{ index, item }` on accept or `nil` on
 -- dismiss. Must run inside a `smelt.spawn` (or tool execute) frame.
--- @sig fun(opts: table): { index: integer, item: any }?
+---@type fun(opts: table): { index: integer, item: any }?
 function smelt.picker.open(opts)
   if not coroutine.isyieldable() then
     error("smelt.picker.open: call from inside smelt.spawn(fn) or tool.execute", 2)

@@ -65,7 +65,7 @@ end
 -- (`items`, `apply`, `on_enter`, `on_dismiss`, `stay_open`, …). Returns
 -- nothing; the command lives until `/reload` or an explicit
 -- `smelt.cmd.register{...}:remove()` matching `name`.
--- @sig fun(name: string, opts: table?): nil
+---@type fun(name: string, opts: table?): nil
 function smelt.cmd.picker(name, opts)
   opts = opts or {}
 

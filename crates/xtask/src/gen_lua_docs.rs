@@ -151,6 +151,9 @@ fn run_inner() -> std::io::Result<()> {
         }
         let content = std::fs::read_to_string(&path)?;
         let items = parse_bundled_lua(&content);
+        for w in items.warnings {
+            eprintln!("warning: {rel}:{w}");
+        }
         for parsed in items.fns {
             if registered_fns.contains(&(parsed.module, parsed.name)) {
                 continue;
@@ -681,11 +684,16 @@ fn clean_stale_files(
 /// the renderer knows about — functions, opts classes, string-literal
 /// aliases — is parsed in a single pass so adding a new bundled module
 /// is "drop the file into a bootstrap chunk" with no Rust ceremony.
+/// `warnings` carries human-readable diagnostics for malformed LuaCATS
+/// blocks (bad fields, dangling `@field` outside a class, …) so the
+/// caller can surface them at gen time instead of silently dropping
+/// the bad annotation.
 #[derive(Default)]
 struct BundledItems {
     fns: Vec<LuaFnMeta>,
     classes: Vec<LuaClassDecl>,
     aliases: Vec<LuaAliasDecl>,
+    warnings: Vec<String>,
 }
 
 /// Walk a bundled Lua file once and emit every doc-bearing surface in
@@ -693,9 +701,9 @@ struct BundledItems {
 ///
 ///   * `function smelt.X.Y(args)` / `smelt.X.Y = function(args)` →
 ///     [`LuaFnMeta`]. Doc lines are the contiguous `--` or `---` block
-///     immediately above. A trailing `-- @sig fun(...): T` or
-///     `---@type fun(...): T` directive overrides the inferred signature;
-///     otherwise we fall back to `fun(<args>: any...): any`.
+///     immediately above. A trailing `---@type fun(...): T` directive
+///     overrides the inferred signature; otherwise we fall back to
+///     `fun(<args>: any...): any`.
 ///   * `---@class smelt.X.Y` followed by zero or more `---@field …`
 ///     lines → [`LuaClassDecl`]. The preceding `---` doc lines become
 ///     the class doc.
@@ -719,7 +727,8 @@ fn parse_bundled_lua(content: &str) -> BundledItems {
             .join("\n")
     };
 
-    for raw in content.lines() {
+    for (lineno0, raw) in content.lines().enumerate() {
+        let lineno = lineno0 + 1;
         let trimmed = raw.trim_start();
 
         // LuaCATS directives (`---@…`). Must be checked before the
@@ -727,67 +736,62 @@ fn parse_bundled_lua(content: &str) -> BundledItems {
         // get accumulated as a literal doc line.
         if let Some(rest) = trimmed.strip_prefix("---@") {
             match parse_cats_directive(rest) {
-                Some(CatsDirective::Class { name }) => {
-                    if let Some((cname, cdoc, fields)) = active_class.take() {
-                        out.classes.push(LuaClassDecl {
-                            name: cname,
-                            doc: cdoc,
-                            fields,
-                        });
+                CatsDirective::Class { name } => {
+                    if !name.starts_with("smelt.") {
+                        out.warnings.push(format!(
+                            "line {lineno}: `---@class {name}` ignored (must start with `smelt.`)"
+                        ));
+                    } else {
+                        flush_active_class(&mut active_class, &mut out.classes);
+                        let doc = leak(flush_doc(&doc_buf));
+                        active_class = Some((leak(name), doc, Vec::new()));
+                        doc_buf.clear();
+                        sig_override = None;
                     }
-                    let doc = Box::leak(flush_doc(&doc_buf).into_boxed_str());
-                    active_class = Some((Box::leak(name.into_boxed_str()), doc, Vec::new()));
-                    doc_buf.clear();
-                    sig_override = None;
                 }
-                Some(CatsDirective::Field(field)) => {
+                CatsDirective::Field(Some(field)) => {
                     if let Some((_, _, ref mut fields)) = active_class {
                         fields.push(field);
+                    } else {
+                        out.warnings.push(format!(
+                            "line {lineno}: `---@field` outside any `---@class` block — dropped"
+                        ));
                     }
                     // Stay in class-accumulation mode; don't clobber doc_buf.
                 }
-                Some(CatsDirective::Alias { decl }) => {
-                    if let Some((cname, cdoc, fields)) = active_class.take() {
-                        out.classes.push(LuaClassDecl {
-                            name: cname,
-                            doc: cdoc,
-                            fields,
-                        });
-                    }
+                CatsDirective::Field(None) => {
+                    out.warnings.push(format!(
+                        "line {lineno}: malformed `---@field` (expected `name[?] type [description]`)"
+                    ));
+                }
+                CatsDirective::Alias(Some(decl)) => {
+                    flush_active_class(&mut active_class, &mut out.classes);
                     out.aliases.push(LuaAliasDecl {
-                        doc: Box::leak(flush_doc(&doc_buf).into_boxed_str()),
+                        doc: leak(flush_doc(&doc_buf)),
                         ..decl
                     });
                     doc_buf.clear();
                     sig_override = None;
                 }
-                Some(CatsDirective::Type { sig }) => {
+                CatsDirective::Alias(None) => {
+                    out.warnings.push(format!(
+                        "line {lineno}: malformed `---@alias` (expected `smelt.X.Y T1|T2|\"lit\"|…`)"
+                    ));
+                }
+                CatsDirective::Type { sig } => {
                     sig_override = Some(sig);
                 }
-                Some(CatsDirective::Ignored) => {
+                CatsDirective::Ignored => {
                     // `---@meta`, `---@see`, etc. — pass through silently.
-                }
-                None => {
-                    // Unknown `---@directive` — drop into the doc buffer
-                    // so the user sees their intent rendered.
-                    doc_buf.push(format!("@{rest}"));
                 }
             }
             continue;
         }
         // Leaving any `---@field` streak closes the active class.
         if active_class.is_some() && !trimmed.is_empty() && !trimmed.starts_with("---@field") {
-            if let Some((name, doc, fields)) = active_class.take() {
-                out.classes.push(LuaClassDecl { name, doc, fields });
-            }
+            flush_active_class(&mut active_class, &mut out.classes);
         }
 
-        // Legacy `-- @sig fun(...): T` (kept for back-compat with the
-        // existing bundled chunks). New code should prefer `---@type`.
-        if let Some(rest) = trimmed.strip_prefix("-- @sig ") {
-            sig_override = Some(rest.trim().to_string());
-            continue;
-        }
         // Both `---` (LuaCATS) and `--` (plain Lua) feed the same doc
         // accumulator. `---` wins by being checked first via the
         // directive arm above, so any non-directive `---` falls through.
@@ -815,9 +819,9 @@ fn parse_bundled_lua(content: &str) -> BundledItems {
             let doc = flush_doc(&doc_buf);
             let sig = sig_override.clone().unwrap_or_else(|| default_sig(&args));
             out.fns.push(LuaFnMeta {
-                module: Box::leak(module.into_boxed_str()),
-                name: Box::leak(name.into_boxed_str()),
-                doc: Box::leak(doc.into_boxed_str()),
+                module: leak(module),
+                name: leak(name),
+                doc: leak(doc),
                 sig,
                 tier: Tier::Host,
             });
@@ -832,67 +836,84 @@ fn parse_bundled_lua(content: &str) -> BundledItems {
     }
 
     // Flush a trailing class block (file ended with `---@field` lines).
-    if let Some((name, doc, fields)) = active_class.take() {
-        out.classes.push(LuaClassDecl { name, doc, fields });
-    }
+    flush_active_class(&mut active_class, &mut out.classes);
 
     out
 }
 
-/// LuaCATS directive recognised by [`parse_bundled_lua`]. The variants
-/// match the actual line-level annotations the parser cares about;
-/// any other `---@foo` lines fall through to `Ignored` so the parser
-/// never accidentally treats them as part of the next function's doc
-/// block.
+/// Move a built-up class block (name + accumulated fields + leading
+/// doc) into the bundled-classes vec. Used at every `---@class` /
+/// `---@alias` boundary and once at end-of-file so the renderer always
+/// sees fully-formed classes.
+fn flush_active_class(
+    active: &mut Option<(&'static str, &'static str, Vec<LuaClassField>)>,
+    out: &mut Vec<LuaClassDecl>,
+) {
+    if let Some((name, doc, fields)) = active.take() {
+        out.push(LuaClassDecl { name, doc, fields });
+    }
+}
+
+/// Promote an owned `String` to `&'static str` for the doc registry's
+/// borrow contract. The whole gen-lua-docs run is short-lived (≪1s),
+/// so leaking the handful of bundled-Lua-derived names + docs is
+/// cheaper than threading lifetimes through every render call.
+fn leak(s: impl Into<String>) -> &'static str {
+    Box::leak(s.into().into_boxed_str())
+}
+
+/// LuaCATS directive recognised by [`parse_bundled_lua`]. `Field` and
+/// `Alias` wrap an `Option` so the caller can warn on malformed bodies
+/// without dropping back into the "is this even a directive?" check —
+/// every recognised keyword produces exactly one variant, and the
+/// fallback `Ignored` covers `---@meta`, `---@see`, `---@return`, …
+/// which we deliberately don't act on (LuaCATS keeps their meaning
+/// for the LSP without our help).
 enum CatsDirective {
     Class { name: String },
-    Field(LuaClassField),
-    Alias { decl: LuaAliasDecl },
+    Field(Option<LuaClassField>),
+    Alias(Option<LuaAliasDecl>),
     Type { sig: String },
     Ignored,
 }
 
-fn parse_cats_directive(rest: &str) -> Option<CatsDirective> {
+fn parse_cats_directive(rest: &str) -> CatsDirective {
     let rest = rest.trim_start();
-    if let Some(tail) = rest
-        .strip_prefix("class ")
-        .or_else(|| rest.strip_prefix("class\t"))
-    {
+    if let Some(tail) = strip_keyword(rest, "class") {
         let name = tail
             .split([':', ' ', '\t'])
             .next()
             .unwrap_or("")
             .trim()
             .to_string();
-        if name.is_empty() || !name.starts_with("smelt.") {
-            return Some(CatsDirective::Ignored);
-        }
-        return Some(CatsDirective::Class { name });
+        return CatsDirective::Class { name };
     }
-    if let Some(tail) = rest
-        .strip_prefix("field ")
-        .or_else(|| rest.strip_prefix("field\t"))
-    {
-        return parse_cats_field(tail).map(CatsDirective::Field);
+    if let Some(tail) = strip_keyword(rest, "field") {
+        return CatsDirective::Field(parse_cats_field(tail));
     }
-    if let Some(tail) = rest
-        .strip_prefix("alias ")
-        .or_else(|| rest.strip_prefix("alias\t"))
-    {
-        return parse_cats_alias(tail).map(|decl| CatsDirective::Alias { decl });
+    if let Some(tail) = strip_keyword(rest, "alias") {
+        return CatsDirective::Alias(parse_cats_alias(tail));
     }
-    if let Some(tail) = rest
-        .strip_prefix("type ")
-        .or_else(|| rest.strip_prefix("type\t"))
-    {
-        return Some(CatsDirective::Type {
+    if let Some(tail) = strip_keyword(rest, "type") {
+        return CatsDirective::Type {
             sig: tail.trim().to_string(),
-        });
+        };
     }
-    // Every other `---@…` (meta, see, return, generic, …) is harmless
-    // for our renderer — the LSP-side meaning is preserved by the
-    // generator already (e.g. `---@see` is emitted from the doc text).
-    Some(CatsDirective::Ignored)
+    CatsDirective::Ignored
+}
+
+/// Strip a `keyword` followed by ASCII whitespace from the front of
+/// `rest`. Matches the `---@<kw> body` shape without conflating
+/// `---@class` with `---@classified` (which is silly but cheap to
+/// guard against).
+fn strip_keyword<'a>(rest: &'a str, keyword: &str) -> Option<&'a str> {
+    let tail = rest.strip_prefix(keyword)?;
+    let next = tail.chars().next()?;
+    if next.is_ascii_whitespace() {
+        Some(&tail[next.len_utf8()..])
+    } else {
+        None
+    }
 }
 
 /// Parse the body of `---@field NAME[?] TYPE [doc...]`. The type can
@@ -920,10 +941,10 @@ fn parse_cats_field(body: &str) -> Option<LuaClassField> {
     }
     let (ty, doc) = split_type_and_doc(after_name);
     Some(LuaClassField {
-        name: Box::leak(name.into_boxed_str()),
+        name: leak(name),
         ty,
         optional,
-        doc: Box::leak(doc.into_boxed_str()),
+        doc: leak(doc),
     })
 }
 
@@ -977,11 +998,11 @@ fn parse_cats_alias(body: &str) -> Option<LuaAliasDecl> {
             continue;
         }
         if let Some(lit) = p.strip_prefix('"').and_then(|s| s.strip_suffix('"')) {
-            variants.push(Box::leak(lit.to_string().into_boxed_str()));
+            variants.push(leak(lit));
         }
     }
     Some(LuaAliasDecl {
-        name: Box::leak(raw_name.to_string().into_boxed_str()),
+        name: leak(raw_name),
         doc: "",
         variants,
         open,

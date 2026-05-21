@@ -9,10 +9,10 @@ Modal overlay builders. Compose a dialog from one or more `panels` of `smelt.dia
 ## `smelt.dialog.content`
 
 ```lua
-fun(opts: table?): any, smelt.buf.Buf
+fun(opts: table?): smelt.win.Win, smelt.buf.Buf
 ```
 
-Types: [`smelt.buf.Buf`](types.md#smeltbufbuf)
+Types: [`smelt.win.Win`](types.md#smeltwinwin), [`smelt.buf.Buf`](types.md#smeltbufbuf)
 
 General-purpose body leaf. Pass `opts.buf` to wrap an existing buffer
 or `opts.text` to spin up a fresh read-only one. `opts.interactive`
@@ -22,10 +22,10 @@ enables focus + vim keymaps (when the user has vim mode on);
 ## `smelt.dialog.input`
 
 ```lua
-fun(placeholder: string?, opts: table?): any, smelt.buf.Buf
+fun(placeholder: string?, opts: table?): smelt.win.Win, smelt.buf.Buf
 ```
 
-Types: [`smelt.buf.Buf`](types.md#smeltbufbuf)
+Types: [`smelt.win.Win`](types.md#smeltwinwin), [`smelt.buf.Buf`](types.md#smeltbufbuf)
 
 Build a single-line text-input leaf with a fresh buffer. `placeholder`
 shows when the buffer is empty; `opts.pad_left` / `opts.pad_right`
@@ -35,10 +35,10 @@ read the entered text via `buf:source()` from the dialog keymaps.
 ## `smelt.dialog.list`
 
 ```lua
-fun(buf: smelt.buf.Buf, opts: table?): any
+fun(buf: smelt.buf.Buf, opts: table?): smelt.win.Win
 ```
 
-Types: [`smelt.buf.Buf`](types.md#smeltbufbuf)
+Types: [`smelt.buf.Buf`](types.md#smeltbufbuf), [`smelt.win.Win`](types.md#smeltwinwin)
 
 Wrap an existing `buf` as a selectable list leaf. Use when the buffer
 contents need to be mutated live (vs. the snapshot supplied to
@@ -48,10 +48,10 @@ contents need to be mutated live (vs. the snapshot supplied to
 ## `smelt.dialog.markdown`
 
 ```lua
-fun(text: string): any, smelt.buf.Buf
+fun(text: string): smelt.win.Win, smelt.buf.Buf
 ```
 
-Types: [`smelt.buf.Buf`](types.md#smeltbufbuf)
+Types: [`smelt.win.Win`](types.md#smeltwinwin), [`smelt.buf.Buf`](types.md#smeltbufbuf)
 
 Render `text` as a non-focusable markdown leaf. Convenience wrapper
 around `smelt.dialog.content` for static narrative panels (notes,
@@ -87,10 +87,10 @@ callbacks and tears down with `handle:close()`. No value flows back
 ## `smelt.dialog.options`
 
 ```lua
-fun(labels: string[], opts: table?): any, smelt.buf.Buf
+fun(labels: string[], opts: table?): smelt.win.Win, smelt.buf.Buf
 ```
 
-Types: [`smelt.buf.Buf`](types.md#smeltbufbuf)
+Types: [`smelt.win.Win`](types.md#smeltwinwin), [`smelt.buf.Buf`](types.md#smeltbufbuf)
 
 Build a static selectable list leaf populated with `labels`. The
 selection cursor starts on `opts.selected` (1-based, defaults to 1).
