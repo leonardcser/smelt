@@ -628,6 +628,28 @@ function smelt.__sweep_state()
   end
 end
 
+if smelt and smelt.notify then
+  -- Bind `source` once and return a callable bag that forwards to
+  -- `smelt.notify` / `smelt.notify.error` / `smelt.notify.warn` with the
+  -- source pinned. A plugin opts in with one line at the top of the file:
+  --   local notify = smelt.notify.scoped("upgrade")
+  --   notify("downloading …")
+  --   notify.error("/upgrade: spawn failed")
+  -- so the per-call-site `, "upgrade"` repetition goes away. Same toast +
+  -- `/messages` semantics as the underlying calls. Skipped on headless
+  -- where `smelt.notify` isn't bound.
+  -- @sig fun(source: string): table
+  function smelt.notify.scoped(source)
+    if type(source) ~= "string" or source == "" then
+      error("smelt.notify.scoped: source must be a non-empty string", 2)
+    end
+    return setmetatable({
+      error = function(msg) smelt.notify.error(msg, source) end,
+      warn  = function(msg) smelt.notify.warn(msg, source) end,
+    }, { __call = function(_, msg) smelt.notify(msg, source) end })
+  end
+end
+
 -- smelt.model.preferred(name): read; (name, value): write/clear (nil clears).
 -- Stored under smelt.state.persistent("model_preferred"). Plugins use this to
 -- remember per-plugin model overrides across reloads.

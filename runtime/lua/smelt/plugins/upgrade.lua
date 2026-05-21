@@ -23,12 +23,12 @@ local OWNER = "leonardcser"
 local REPO = "smelt"
 local REPO_URL = "https://github.com/" .. OWNER .. "/" .. REPO .. ".git"
 local CHECK_INTERVAL_SECS = 3600
-local SOURCE = "upgrade"
 
 local state = smelt.state.persistent("upgrade")
 
--- Every toast this plugin raises is tagged with `SOURCE` so `/messages`
--- attributes the entry to "upgrade" instead of the generic "lua".
+-- Every toast this plugin raises is tagged "upgrade" so `/messages`
+-- attributes the entry to this plugin instead of the generic "lua".
+local notify = smelt.notify.scoped("upgrade")
 
 -- Per-channel sub-namespacing. Each channel owns its own `{ etag,
 -- latest, last_checked_at }` record so switching channels is free: no
@@ -303,7 +303,7 @@ local function run_check(force)
     local rec, err
     if channel == "unstable" and not smelt.build.sha then
       checking = false
-      smelt.notify.error("autoupgrade: unstable channel requires a build SHA (this binary was built without git)", SOURCE)
+      notify.error("autoupgrade: unstable channel requires a build SHA (this binary was built without git)")
       return
     end
     local backoff
@@ -324,16 +324,16 @@ local function run_check(force)
     checking = false
     if backoff then return end
     if not rec then
-      smelt.notify.error("autoupgrade: " .. tostring(err), SOURCE)
+      notify.error("autoupgrade: " .. tostring(err))
       return
     end
     local before = latest.has_update
     recompute()
     if latest.has_update and not before then
-      smelt.notify("update available: " .. latest.next ..
+      notify("update available: " .. latest.next ..
                    (settings_mode() == "auto"
                     and " — installing in background"
-                    or  " — run /upgrade"), SOURCE)
+                    or  " — run /upgrade"))
       if settings_mode() == "auto" then dispatch_install() end
     end
   end)
@@ -391,12 +391,12 @@ local function install_stable_async(tag, on_done)
 
     local target = smelt.build.target
     if not target or target == "" then
-      smelt.notify.error("/upgrade: unknown target triple; can't pick a release asset", SOURCE)
+      notify.error("/upgrade: unknown target triple; can't pick a release asset")
       return done(false, "unknown target")
     end
     local exe, err = smelt.os.exe_path()
     if not exe then
-      smelt.notify.error("/upgrade: " .. tostring(err), SOURCE)
+      notify.error("/upgrade: " .. tostring(err))
       return done(false, err)
     end
     local dir = exe:match("(.*)/[^/]+$") or "."
@@ -407,15 +407,15 @@ local function install_stable_async(tag, on_done)
     )
     local tmp_tar = exe .. ".upgrade.tar.gz"
 
-    smelt.notify("downloading " .. tag .. "…", SOURCE)
+    notify("downloading " .. tag .. "…")
     local r = smelt.process.run(
       "curl", { "-fLso", tmp_tar, url },
       { timeout_secs = 300 }
     )
     if not r or r.exit_code ~= 0 then
       smelt.fs.remove_file(tmp_tar)
-      smelt.notify.error("/upgrade: download failed (" ..
-        (r and tostring(r.exit_code) or "spawn") .. ")", SOURCE)
+      notify.error("/upgrade: download failed (" ..
+        (r and tostring(r.exit_code) or "spawn") .. ")")
       return done(false, "download")
     end
 
@@ -427,8 +427,8 @@ local function install_stable_async(tag, on_done)
     )
     smelt.fs.remove_file(tmp_tar)
     if not x or x.exit_code ~= 0 then
-      smelt.notify.error("/upgrade: tar extract failed: " ..
-        (x and x.stderr or "spawn"), SOURCE)
+      notify.error("/upgrade: tar extract failed: " ..
+        (x and x.stderr or "spawn"))
       return done(false, "extract")
     end
 
@@ -438,13 +438,13 @@ local function install_stable_async(tag, on_done)
     if extracted ~= exe then
       local ok2, mverr = smelt.fs.rename(extracted, exe)
       if not ok2 then
-        smelt.notify.error("/upgrade: rename to " .. exe .. " failed: " ..
-          tostring(mverr), SOURCE)
+        notify.error("/upgrade: rename to " .. exe .. " failed: " ..
+          tostring(mverr))
         return done(false, "rename")
       end
     end
 
-    smelt.notify("✓ upgraded to " .. tag .. " — restart smelt to use it", SOURCE)
+    notify("✓ upgraded to " .. tag .. " — restart smelt to use it")
     done(true)
   end)
 end
@@ -459,8 +459,8 @@ local function install_unstable_async(sha, on_done)
       installing = false
       if on_done then on_done(ok, msg) end
     end
-    smelt.notify("building main@" .. sha:sub(1, 7) ..
-                 " via cargo (this may take a few minutes)…", SOURCE)
+    notify("building main@" .. sha:sub(1, 7) ..
+                 " via cargo (this may take a few minutes)…")
     -- The workspace has multiple bin crates (`smelt-agent`, `xtask`), so
     -- cargo refuses an ambiguous `cargo install --git`. Pin the package so
     -- it picks the user-facing `smelt` binary every time.
@@ -469,18 +469,18 @@ local function install_unstable_async(sha, on_done)
       "--package", "smelt-agent", "--force", "--locked",
     }, { timeout_secs = 1800 })
     if not r then
-      smelt.notify.error("/upgrade: failed to spawn cargo", SOURCE)
+      notify.error("/upgrade: failed to spawn cargo")
       return done(false, "spawn")
     end
     if r.exit_code ~= 0 then
       local tail = r.stderr or ""
       if #tail > 600 then tail = tail:sub(-600) end
-      smelt.notify.error("/upgrade: cargo install exited " ..
-        r.exit_code .. "\n" .. tail, SOURCE)
+      notify.error("/upgrade: cargo install exited " ..
+        r.exit_code .. "\n" .. tail)
       return done(false, "cargo")
     end
-    smelt.notify("✓ upgraded to main@" .. sha:sub(1, 7) ..
-                 " — restart smelt to use it", SOURCE)
+    notify("✓ upgraded to main@" .. sha:sub(1, 7) ..
+                 " — restart smelt to use it")
     done(true)
   end)
 end
@@ -507,15 +507,15 @@ end
 -- keystroke decision.
 
 local function notify_already_current()
-  smelt.notify("already up to date (" .. (latest.current or "?") .. ")", SOURCE)
+  notify("already up to date (" .. (latest.current or "?") .. ")")
 end
 
 local function notify_install_kickoff()
   local target = latest.next or "?"
   if settings_channel() == "stable" then
-    smelt.notify("upgrading to " .. target .. " in the background…", SOURCE)
+    notify("upgrading to " .. target .. " in the background…")
   else
-    smelt.notify("building " .. target .. " in the background (cargo install)…", SOURCE)
+    notify("building " .. target .. " in the background (cargo install)…")
   end
 end
 
@@ -523,12 +523,12 @@ smelt.cmd.register("upgrade", function(args)
   args = args or ""
   if args:match("%-%-check") or args == "check" then
     run_check(true)
-    smelt.notify("checking for upgrades…", SOURCE)
+    notify("checking for upgrades…")
     return
   end
   if should_check_now() then
     run_check(true)
-    smelt.notify("checking for upgrades — install will start automatically if one is found", SOURCE)
+    notify("checking for upgrades — install will start automatically if one is found")
     return
   end
   if not latest.has_update then
@@ -587,7 +587,7 @@ local function open_changelog_dialog()
       { key = "r",     on_press = function(ctx)
           ctx.close()
           run_check(true)
-          smelt.notify("refreshing changelog…", SOURCE)
+          notify("refreshing changelog…")
       end },
     },
   })
@@ -597,7 +597,7 @@ smelt.cmd.register("changelog", function()
   if not latest.details then
     if should_check_now() or not channel_state(settings_channel()).latest then
       run_check(true)
-      smelt.notify("fetching changelog…", SOURCE)
+      notify("fetching changelog…")
       return
     end
   end

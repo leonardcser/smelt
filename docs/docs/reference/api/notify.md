@@ -14,6 +14,22 @@ fun(msg: string, source: string?): nil
 
 Show an error toast (highlighted with the error color) and append the body to the message log. Pass `source` to tag the `/messages` entry (e.g. `"upgrade"`); defaults to `"lua"`.
 
+## `smelt.notify.scoped`
+
+```lua
+fun(source: string): table
+```
+
+Bind `source` once and return a callable bag that forwards to
+`smelt.notify` / `smelt.notify.error` / `smelt.notify.warn` with the
+source pinned. A plugin opts in with one line at the top of the file:
+  local notify = smelt.notify.scoped("upgrade")
+  notify("downloading …")
+  notify.error("/upgrade: spawn failed")
+so the per-call-site `, "upgrade"` repetition goes away. Same toast +
+`/messages` semantics as the underlying calls. Skipped on headless
+where `smelt.notify` isn't bound.
+
 ## `smelt.notify.warn`
 
 ```lua

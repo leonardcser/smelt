@@ -5,6 +5,8 @@
 -- adds the build target + commit date so the user gets the same
 -- information they'd see in a bug report.
 
+local notify = smelt.notify.scoped("version")
+
 smelt.cmd.register("version", function()
   local b = smelt.build or {}
   local label = b.version_string or b.version or "?"
@@ -18,5 +20,5 @@ smelt.cmd.register("version", function()
   if #extras > 0 then
     label = label .. " (" .. table.concat(extras, ", ") .. ")"
   end
-  smelt.notify("smelt " .. label, "version")
+  notify("smelt " .. label)
 end, { desc = "show the running smelt build identity" })
