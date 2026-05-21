@@ -9,19 +9,19 @@ expression: frame.text()
 
 
 
+
+
+
 ─ Auth method ──────────────────────────────────────────────────────────────────
  Which authentication method should I use?
 
+  1. OAuth
+     redirect to provider login
+  2. API key
+     paste a secret token
+  3. Anonymous
+     skip auth entirely
+  4. Other
+     or type a custom answer...
 
-
-
-
- OAuth — redirect to provider login
- API key — paste a secret token
- Anonymous — skip auth entirely
- or type a custom answer...
-
-
-
-
- ○ normal                                                               1:1 100%
+ ○ normal                                                                 1:1 0%

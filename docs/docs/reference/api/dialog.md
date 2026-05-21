@@ -19,6 +19,18 @@ or `opts.text` to spin up a fresh read-only one. `opts.interactive`
 enables focus + vim keymaps (when the user has vim mode on);
 `opts.wrap` mirrors `smelt.win.new`. Returns `(leaf, buf)`.
 
+## `smelt.dialog.current`
+
+```lua
+fun(): table | nil
+```
+
+Return the topmost active dialog ctx (the same shape passed to
+`on_submit`/`keymap` handlers: `{ resolve, close, win, panels,
+focused_leaf }`), or `nil` if no dialog is open. Use it inside
+`leaf:key(...)` callbacks — those normally lack a path to the
+dialog's resolve handle.
+
 ## `smelt.dialog.input`
 
 ```lua
@@ -42,7 +54,7 @@ Types: [`smelt.buf.Buf`](types.md#smeltbufbuf), [`smelt.win.Win`](types.md#smelt
 
 Wrap an existing `buf` as a selectable list leaf. Use when the buffer
 contents need to be mutated live (vs. the snapshot supplied to
-`smelt.dialog.options`). `opts.focusable` defaults true; `opts.selected`
+`smelt.dialog.menu`). `opts.focusable` defaults true; `opts.selected`
 (0-based) sets the initial cursor row.
 
 ## `smelt.dialog.markdown`
@@ -56,6 +68,16 @@ Types: [`smelt.win.Win`](types.md#smeltwinwin), [`smelt.buf.Buf`](types.md#smelt
 Render `text` as a non-focusable markdown leaf. Convenience wrapper
 around `smelt.dialog.content` for static narrative panels (notes,
 summaries, intros). Returns `(leaf, buf)`.
+
+## `smelt.dialog.menu`
+
+```lua
+fun(items: (string|smelt.dialog.MenuItem)[], opts: smelt.dialog.MenuOpts?): smelt.win.Win, table
+```
+
+Types: [`smelt.dialog.MenuItem`](types.md#smeltdialogmenuitem), [`smelt.dialog.MenuOpts`](types.md#smeltdialogmenuopts), [`smelt.win.Win`](types.md#smeltwinwin)
+
+
 
 ## `smelt.dialog.open`
 
@@ -83,19 +105,6 @@ Non-coroutine open. Returns `{ win, panels, close() }` synchronously.
 The consumer drives the lifecycle via `on_submit` / `on_dismiss`
 callbacks and tears down with `handle:close()`. No value flows back
 — use `smelt.dialog.open` when you need to read the result.
-
-## `smelt.dialog.options`
-
-```lua
-fun(labels: string[], opts: table?): smelt.win.Win, smelt.buf.Buf
-```
-
-Types: [`smelt.win.Win`](types.md#smeltwinwin), [`smelt.buf.Buf`](types.md#smeltbufbuf)
-
-Build a static selectable list leaf populated with `labels`. The
-selection cursor starts on `opts.selected` (1-based, defaults to 1).
-Returns `(leaf, buf)`; the caller reads the active row via
-`leaf:cursor_row()` from the dialog keymaps.
 
 ## `smelt.dialog.picker`
 

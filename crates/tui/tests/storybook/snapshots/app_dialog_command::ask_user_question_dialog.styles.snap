@@ -4,12 +4,21 @@ assertion_line: 345
 expression: frame.styles_text()
 ---
 dim: 80 22
-  6   0   2 fg=AnsiValue(208)
-  6   2  11 fg=AnsiValue(208) attrs=dim
-  6  13  67 fg=AnsiValue(208)
-  7   1   1 fg=Black bg=White
- 13   0  80 bg=AnsiValue(237)
- 16   1  26 attrs=dim
+  9   0   2 fg=AnsiValue(208)
+  9   2  11 fg=AnsiValue(208) attrs=dim
+  9  13  67 fg=AnsiValue(208)
+ 12   0   1 bg=AnsiValue(237)
+ 12   1   1 fg=Black bg=White
+ 12   2   3 bg=AnsiValue(237) attrs=dim
+ 12   5   5 fg=AnsiValue(208) bg=AnsiValue(237)
+ 12  10  70 bg=AnsiValue(237)
+ 13   1  30 attrs=dim
+ 14   1   4 attrs=dim
+ 15   1  24 attrs=dim
+ 16   1   4 attrs=dim
+ 17   1  22 attrs=dim
+ 18   1   4 attrs=dim
+ 19   1  30 attrs=dim
  21   0  10 fg=AnsiValue(244) bg=AnsiValue(234)
- 21  10  62 bg=AnsiValue(233)
- 21  72   8 fg=AnsiValue(244) bg=AnsiValue(233)
+ 21  10  64 bg=AnsiValue(233)
+ 21  74   6 fg=AnsiValue(244) bg=AnsiValue(233)

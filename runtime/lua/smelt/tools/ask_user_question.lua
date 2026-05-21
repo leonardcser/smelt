@@ -1,6 +1,11 @@
--- Built-in ask_user_question tool. Sequential; blocks the LLM turn until the user replies.
--- One dialog per question with a markdown body, option list, and free-text "Other" input.
--- multiSelect is accepted in the schema but treated as single-select.
+-- Built-in ask_user_question tool. Sequential; blocks the LLM turn until the
+-- user replies. One dialog per question with a markdown body, a numbered
+-- option menu, and a synthetic "Other" item that focuses an inline input.
+-- `multiSelect` is accepted in the schema but treated as single-select.
+
+local OTHER_KIND        = "other"
+local OTHER_LABEL       = "Other"
+local OTHER_PLACEHOLDER = "or type a custom answer..."
 
 smelt.tools.register({
   name = "ask_user_question",
@@ -30,18 +35,12 @@ smelt.tools.register({
               type = "array",
               minItems = 2,
               maxItems = 4,
-              description = "The available choices. An 'Other' free-text input is automatically offered alongside the options — do NOT include one yourself.",
+              description = "The available choices. An 'Other' free-text entry is automatically offered alongside the options — do NOT include one yourself.",
               items = {
                 type = "object",
                 properties = {
-                  label = {
-                    type = "string",
-                    description = "Display text (1-5 words).",
-                  },
-                  description = {
-                    type = "string",
-                    description = "Explanation of this option.",
-                  },
+                  label       = { type = "string", description = "Display text (1-5 words)." },
+                  description = { type = "string", description = "Explanation of this option." },
                 },
                 required = { "label", "description" },
               },
@@ -66,56 +65,75 @@ smelt.tools.register({
     local parts = {}
     for _, q in ipairs(questions) do
       local options = q.options or {}
-      local labels = {}
+
+      -- Build the visible item list: each provided option plus a synthetic
+      -- "Other" row whose description doubles as the input's placeholder.
+      -- The menu primitive renders ` N. label` / `    description` with
+      -- the prefix and description dim and the focused label in
+      -- SmeltAccent, plus digit shortcuts and multi-row stride.
+      local items = {}
       for _, opt in ipairs(options) do
-        local label = opt.label or ""
-        local desc = opt.description or ""
-        if desc ~= "" and label ~= "" then
-          table.insert(labels, label .. " — " .. desc)
-        else
-          table.insert(labels, label)
-        end
+        table.insert(items, {
+          label       = opt.label or "",
+          description = opt.description or "",
+        })
       end
+      table.insert(items, {
+        label       = OTHER_LABEL,
+        description = OTHER_PLACEHOLDER,
+        kind        = OTHER_KIND,
+      })
 
       local title = q.header
-      if title == nil or title == "" then
-        title = "question"
-      end
+      if title == nil or title == "" then title = "question" end
 
-      local md_leaf      = smelt.dialog.markdown(q.question or "")
-      local options_leaf = smelt.dialog.options(labels)
-      local other_leaf, other_buf = smelt.dialog.input("or type a custom answer...")
+      local md_leaf     = smelt.dialog.markdown(q.question or "")
+      local spacer_leaf = smelt.dialog.content({ text = "", wrap = false })
+      -- The menu's "Other" row already shows the placeholder text, so the
+      -- raw input below it is silent until the user starts typing.
+      local other_leaf, other_buf = smelt.dialog.input("")
 
-      local typed_other = false
-      other_leaf:on("text_changed", function() typed_other = true end)
+      local menu_leaf, _menu = smelt.dialog.menu(items, {
+        on_submit = function(ctx)
+          if ctx.item.kind == OTHER_KIND then
+            -- "Other" selected via Enter or its digit: pivot to the input.
+            other_leaf:focus()
+            return
+          end
+          ctx.resolve({ index = ctx.index })
+        end,
+      })
+
+      -- Enter inside the input commits the custom answer (when non-empty);
+      -- empty Enter is a no-op so the user doesn't accidentally submit a
+      -- blank "Other". Esc pops focus back to the menu so the dialog only
+      -- dismisses from the menu leaf.
+      other_leaf:key("enter", function()
+        local custom = other_buf:line(1) or ""
+        if custom == "" then return end
+        smelt.dialog.current().resolve({ custom = custom })
+      end)
+      other_leaf:key("esc", function() menu_leaf:focus() end)
 
       local result = smelt.dialog.open({
         title        = title,
         blocks_agent = true,
-        height       = "70%",
+        max_height   = "fill",
+        min_height   = 0,
+        focus        = menu_leaf,
         panels = {
-          { leaf = md_leaf,      height = "fill" },
-          { leaf = options_leaf, height = "fit"  },
-          { leaf = other_leaf                     },
+          { leaf = md_leaf,     height = "fit" },
+          { leaf = spacer_leaf, height = 1     },
+          { leaf = menu_leaf,   height = "fit" },
+          { leaf = other_leaf,  height = 1     },
         },
-        on_submit = function(ctx)
-          if typed_other then
-            local custom = other_buf:line(1) or ""
-            if custom ~= "" then
-              ctx.resolve({ custom = custom })
-              return
-            end
-          end
-          local idx = (options_leaf:cursor() or 0) + 1
-          ctx.resolve({ option = idx })
-        end,
       })
 
       local answer
       if result and result.custom then
         answer = "Other: " .. result.custom
-      elseif result and result.option then
-        local picked = options[result.option]
+      elseif result and result.index and result.index <= #options then
+        local picked = options[result.index]
         answer = (picked and picked.label) or "(unknown)"
       else
         smelt.engine.cancel()

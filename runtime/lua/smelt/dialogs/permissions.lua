@@ -55,11 +55,19 @@ smelt.cmd.register("permissions", function()
       local labels = {}
       for _, it in ipairs(items) do table.insert(labels, it.label) end
 
-      local options_leaf = smelt.dialog.options(labels)
+      -- Browse-then-delete: digits move the cursor and Enter is a no-op so
+      -- a stray press doesn't drop a rule. Deletion goes through bs/dd
+      -- below.
+      local options_leaf, options_ctrl = smelt.dialog.menu(labels, {
+        shortcuts = "select",
+        -- Enter is a no-op so a stray press doesn't drop a rule;
+        -- delete-on-confirm goes through bs/dd below.
+        on_submit = function() end,
+      })
       local deleted_this_round = false
       local pending_d = false
       local function delete_selected(ctx)
-        local idx = (options_leaf:cursor() or 0) + 1
+        local idx = options_ctrl:cursor() or 1
         local m = mapping[idx]
         if m then
           delete_entry(perms, m)

@@ -15,6 +15,14 @@ local dialog = {}
 ---@type fun(opts: table?): smelt.win.Win, smelt.buf.Buf
 dialog.content = nil
 
+--- Return the topmost active dialog ctx (the same shape passed to
+--- `on_submit`/`keymap` handlers: `{ resolve, close, win, panels,
+--- focused_leaf }`), or `nil` if no dialog is open. Use it inside
+--- `leaf:key(...)` callbacks — those normally lack a path to the
+--- dialog's resolve handle.
+---@type fun(): table | nil
+dialog.current = nil
+
 --- Build a single-line text-input leaf with a fresh buffer. `placeholder`
 --- shows when the buffer is empty; `opts.pad_left` / `opts.pad_right`
 --- override the dialog gutter. Returns `(leaf, buf)` so the caller can
@@ -24,9 +32,9 @@ dialog.input = nil
 
 --- Wrap an existing `buf` as a selectable list leaf. Use when the buffer
 --- contents need to be mutated live (vs. the snapshot supplied to
---- `smelt.dialog.options`). `opts.focusable` defaults true; `opts.selected`
+--- `smelt.dialog.menu`). `opts.focusable` defaults true; `opts.selected`
 --- (0-based) sets the initial cursor row.
----@see smelt.dialog.options
+---@see smelt.dialog.menu
 ---@type fun(buf: smelt.buf.Buf, opts: table?): smelt.win.Win
 dialog.list = nil
 
@@ -36,6 +44,9 @@ dialog.list = nil
 ---@see smelt.dialog.content
 ---@type fun(text: string): smelt.win.Win, smelt.buf.Buf
 dialog.markdown = nil
+
+---@type fun(items: (string|smelt.dialog.MenuItem)[], opts: smelt.dialog.MenuOpts?): smelt.win.Win, table
+dialog.menu = nil
 
 --- Coroutine-blocking dialog opener. Builds the overlay from `opts.panels`
 --- (each `{ leaf, height }`), wires `opts.keymaps`, then yields the
@@ -52,13 +63,6 @@ dialog.open = nil
 ---@see smelt.dialog.open
 ---@type fun(opts: smelt.dialog.Opts): table
 dialog.open_handle = nil
-
---- Build a static selectable list leaf populated with `labels`. The
---- selection cursor starts on `opts.selected` (1-based, defaults to 1).
---- Returns `(leaf, buf)`; the caller reads the active row via
---- `leaf:cursor_row()` from the dialog keymaps.
----@type fun(labels: string[], opts: table?): smelt.win.Win, smelt.buf.Buf
-dialog.options = nil
 
 --- Coroutine-blocking Telescope-style picker. Stacks a single-line input
 --- on top of a list driven by `smelt.list.new`; navigation forwards from

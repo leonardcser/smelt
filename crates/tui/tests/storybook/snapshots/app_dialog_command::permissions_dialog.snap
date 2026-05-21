@@ -10,11 +10,11 @@ expression: frame.text()
 
 
 ─ permissions ────────────────────────────────────────────────────────
- bash: ls/*
- web_fetch: https://example.com/*
- bash: cat/*
- bash: cat/* /etc/*
- write_file: src/**/*.rs
+  1. bash: ls/*
+  2. web_fetch: https://example.com/*
+  3. bash: cat/*
+  4. bash: cat/* /etc/*
+  5. write_file: src/**/*.rs
 
 
 

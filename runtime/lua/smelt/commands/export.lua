@@ -117,24 +117,21 @@ smelt.cmd.register("export", function()
   end
 
   smelt.spawn(function()
-    local options_leaf = smelt.dialog.options({ "Copy to clipboard", "Write to file" })
+    local options_leaf = smelt.dialog.menu({ "Copy to clipboard", "Write to file" })
 
     local picked = smelt.dialog.open({
       title  = "export",
       height = "30%",
       panels = { { leaf = options_leaf } },
-      on_submit = function(ctx)
-        ctx.resolve((options_leaf:cursor() or 0) + 1)
-      end,
     })
 
-    if picked == nil then return end
+    if not picked or not picked.index then return end
 
     local markdown = format_markdown()
-    if picked == 1 then
+    if picked.index == 1 then
       smelt.clipboard.write(markdown)
       smelt.notify("conversation copied to clipboard")
-    elseif picked == 2 then
+    elseif picked.index == 2 then
       local path = default_export_path()
       local f, err = io.open(path, "w")
       if not f then

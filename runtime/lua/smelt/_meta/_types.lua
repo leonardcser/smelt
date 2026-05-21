@@ -81,6 +81,20 @@
 ---@field hint? string Optional one-line hint surfaced in the dialog footer.
 ---@field on_press fun(ctx: any): any Handler invoked when the key fires.
 
+--- Each item displayed in `smelt.dialog.menu`. Strings are also accepted
+--- and lifted into this shape automatically.
+---@class smelt.dialog.MenuItem
+---@field label string Row text after the dim ` N. ` numbering.
+---@field description? string Optional second row, rendered dim.
+---@field key? string Optional chord that triggers this item (defaults to its 1-based index for items 1..9).
+
+--- Options accepted by `smelt.dialog.menu`.
+---@class smelt.dialog.MenuOpts
+---@field selected? integer 1-based starting cursor (default 1).
+---@field shortcuts? "submit"|"select"|false Digit-key behavior. Default `"submit"`.
+---@field numbered? boolean Show the dim ` N. ` prefix (default true).
+---@field on_submit? fun(ctx: any): any Override the submit path. `ctx` carries the dialog handles plus `ctx.index` (1-based) and `ctx.item`. Default resolves the active dialog with `{ index, item }`.
+
 --- Options accepted by `smelt.dialog.open` / `smelt.dialog.open_handle`.
 --- Body sizing is body-relative: integer `height` values are forwarded
 --- through with the chrome row added automatically; `"N%"`, `"fill"`,
@@ -115,7 +129,7 @@
 ---@field empty_text? string Shown in the list when nothing matches.
 ---@field on_open? fun(ctx: any): nil Fires once after the input/list have been built.
 ---@field on_query? fun(query: string, ctx: any): nil Fires on every keystroke; default re-applies `filter`.
----@field on_submit? fun(item: any, ctx: any): any Fires on Enter; default resolves with the selected item.
+---@field on_submit? fun(ctx: any): any Fires on Enter. `ctx.item` is the highlighted row; defaults to resolving with `ctx.item` when non-nil.
 ---@field on_dismiss? fun(): nil Fires when the dialog is dismissed.
 ---@field keymaps? smelt.dialog.Keymap[] Extra dialog-level keymaps merged on top of navigation bindings.
 ---@field title? string Forwarded to `smelt.dialog.open`.

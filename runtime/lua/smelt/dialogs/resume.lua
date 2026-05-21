@@ -189,8 +189,8 @@ smelt.cmd.register("resume", function()
           end },
       },
 
-      on_submit = function(item, ctx)
-        if item ~= nil then ctx.resolve(item) end
+      on_submit = function(ctx)
+        if ctx.item ~= nil then ctx.resolve(ctx.item) end
       end,
     })
 

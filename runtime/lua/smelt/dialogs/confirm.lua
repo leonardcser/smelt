@@ -1,9 +1,6 @@
 -- Built-in tool-approval dialog. Override `smelt.confirm.open` in init.lua to
 -- swap the default UI. Tool `preview` callbacks live in each tool's Lua definition.
 
-local NS_NUM = smelt.ns("smelt.confirm.num")
-local NS_SEL = smelt.ns("smelt.confirm.sel")
-
 -- `~/`-rewrite of the process cwd for workspace-scoped "always allow" labels.
 local function pretty_cwd()
   local cwd = smelt.os.cwd() or ""
@@ -96,29 +93,6 @@ local function render_header(buf, req)
   buf:styled(lines)
 end
 
--- Paint " N. " dim numbering prefixes on each option row and stamp a cursor-row-only
--- accent extmark over the label so the selected option's label flips to SmeltAccent.
-local function render_options(buf, labels)
-  local rendered = {}
-  local label_starts = {}
-  local line_ends = {}
-  for i, label in ipairs(labels) do
-    local prefix = string.format(" %d. ", i)
-    rendered[i] = prefix .. label
-    label_starts[i] = #prefix
-    line_ends[i] = #rendered[i]
-  end
-  buf:lines(rendered):clear_ns(NS_NUM):clear_ns(NS_SEL)
-  for i, start in ipairs(label_starts) do
-    buf:mark(NS_NUM, i, 0, { end_col = start, dim = true })
-    buf:mark(NS_SEL, i, start, {
-      end_col       = line_ends[i],
-      hl_group      = "SmeltAccent",
-      on_cursor_row = true,
-    })
-  end
-end
-
 -- Drive the bundled tool-permission confirm dialog for `handle_id`.
 -- Reads the matching request out of the `confirm_requested` cell, builds
 -- the header + preview + option leaves, dispatches the user's choice
@@ -145,15 +119,11 @@ function smelt.confirm.open(handle_id)
   local preview_leaf = smelt.dialog.content({ buf = preview_buf, interactive = true })
   local allow_leaf, allow_buf = smelt.dialog.content({ wrap = false })
   allow_buf:styled({ { { text = "Allow?", style = { dim = true } } } })
-  local options_leaf, options_buf = smelt.dialog.options(labels)
-  render_options(options_buf, labels)
+
+  -- Reason input is built first so the options menu's on_submit can read
+  -- its buffer when the user dismisses with text already typed.
   local reason_leaf, reason_buf =
       smelt.dialog.input("press tab to add a reason…", { pad_left = 2 })
-
-  -- Empty 1-row spacer panel that visually separates the options list from
-  -- the reason input.
-  local spacer_leaf = smelt.dialog.content({ text = "", wrap = false })
-
   local typed_reason = false
   reason_leaf:on("text_changed", function() typed_reason = true end)
 
@@ -163,6 +133,24 @@ function smelt.confirm.open(handle_id)
     resolved = true
     smelt.confirm.__resolve(handle_id, decisions[idx] or "no", message)
   end
+
+  local function current_reason()
+    if not typed_reason then return nil end
+    local line = reason_buf:line(1) or ""
+    if line == "" then return nil end
+    return line
+  end
+
+  local options_leaf, options_ctrl = smelt.dialog.menu(labels, {
+    on_submit = function(ctx)
+      close_with(ctx.index, current_reason())
+      ctx.close()
+    end,
+  })
+
+  -- Empty 1-row spacer panel that visually separates the options list from
+  -- the reason input.
+  local spacer_leaf = smelt.dialog.content({ text = "", wrap = false })
 
   local handle = smelt.dialog.open_handle({
     blocks_agent = true,
@@ -185,16 +173,6 @@ function smelt.confirm.open(handle_id)
           end
         end },
     },
-    on_submit = function(ctx)
-      local idx = (options_leaf:cursor() or 0) + 1
-      local message = nil
-      if typed_reason then
-        local line = reason_buf:line(1) or ""
-        if line ~= "" then message = line end
-      end
-      close_with(idx, message)
-      ctx.close()
-    end,
     on_dismiss = function(ctx)
       close_with(2, nil) -- "no" is always option 2
       ctx.close()
@@ -203,15 +181,14 @@ function smelt.confirm.open(handle_id)
 
   -- Tab from the options leaf jumps focus into the reason input; Esc inside
   -- the reason input pops focus back to the options leaf (instead of
-  -- dismissing the dialog — that still works from the options leaf). Scoping
-  -- both keymaps per-leaf means typing literal Tab/Esc characters in the
+  -- dismissing the dialog — that still works from the options leaf). Enter
+  -- in the reason input routes through the menu's submit path so the
+  -- highlighted option still drives the decision. Scoping all three
+  -- keymaps per-leaf means typing literal Tab/Esc/Enter characters in the
   -- input would only ever do the configured action.
-  options_leaf:key("tab", function()
-    reason_leaf:focus()
-  end)
-  reason_leaf:key("esc", function()
-    options_leaf:focus()
-  end)
+  options_leaf:key("tab", function() reason_leaf:focus() end)
+  reason_leaf:key("esc", function() options_leaf:focus() end)
+  reason_leaf:key("enter", function() options_ctrl:submit() end)
 
   return handle
 end

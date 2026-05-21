@@ -116,6 +116,28 @@ handler can dismiss the dialog or resolve the blocking `open` call.
 | `hint` | `string` |  | Optional one-line hint surfaced in the dialog footer. |
 | `on_press` | `fun(ctx: any):` | yes | any Handler invoked when the key fires. |
 
+### `smelt.dialog.MenuItem`
+
+Each item displayed in `smelt.dialog.menu`. Strings are also accepted
+and lifted into this shape automatically.
+
+| Field | Type | Required | Description |
+| --- | --- | --- | --- |
+| `label` | `string` | yes | Row text after the dim ` N. ` numbering. |
+| `description` | `string` |  | Optional second row, rendered dim. |
+| `key` | `string` |  | Optional chord that triggers this item (defaults to its 1-based index for items 1..9). |
+
+### `smelt.dialog.MenuOpts`
+
+Options accepted by `smelt.dialog.menu`.
+
+| Field | Type | Required | Description |
+| --- | --- | --- | --- |
+| `selected` | `integer` |  | 1-based starting cursor (default 1). |
+| `shortcuts` | `"submit"|"select"|false` |  | Digit-key behavior. Default `"submit"`. |
+| `numbered` | `boolean` |  | Show the dim ` N. ` prefix (default true). |
+| `on_submit` | `fun(ctx: any):` |  | any Override the submit path. `ctx` carries the dialog handles plus `ctx.index` (1-based) and `ctx.item`. Default resolves the active dialog with `{ index, item }`. |
+
 ### `smelt.dialog.Opts`
 
 Options accepted by `smelt.dialog.open` / `smelt.dialog.open_handle`.
@@ -162,7 +184,7 @@ Options accepted by `smelt.dialog.picker`. Layered on top of
 | `empty_text` | `string` |  | Shown in the list when nothing matches. |
 | `on_open` | `fun(ctx: any):` |  | nil Fires once after the input/list have been built. |
 | `on_query` | `fun(query: string, ctx: any):` |  | nil Fires on every keystroke; default re-applies `filter`. |
-| `on_submit` | `fun(item: any, ctx: any):` |  | any Fires on Enter; default resolves with the selected item. |
+| `on_submit` | `fun(ctx: any):` |  | any Fires on Enter. `ctx.item` is the highlighted row; defaults to resolving with `ctx.item` when non-nil. |
 | `on_dismiss` | `fun():` |  | nil Fires when the dialog is dismissed. |
 | `keymaps` | [smelt.dialog.Keymap[]](types.md#smeltdialogkeymap) |  | Extra dialog-level keymaps merged on top of navigation bindings. |
 | `title` | `string` |  | Forwarded to `smelt.dialog.open`. |

@@ -11,10 +11,10 @@ expression: frame.text()
  add the renderer
 
 ─ rewind ───────────────────────────────────────────────────
- 1. write the parser
- 2. add the renderer
- 3. wire up the CLI flag
- 4. (current)
+  1. write the parser
+  2. add the renderer
+  3. wire up the CLI flag
+  4. (current)
 
 
 

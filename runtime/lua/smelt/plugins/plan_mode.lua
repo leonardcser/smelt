@@ -132,11 +132,15 @@ local function register_exit_plan_mode()
         { label = "yes",                 action = "approve" },
         { label = "no",                  action = "deny"    },
       }
-      local labels = {}
-      for _, o in ipairs(options) do table.insert(labels, o.label) end
 
       local md_leaf      = smelt.dialog.markdown(summary)
-      local options_leaf = smelt.dialog.options(labels)
+      local options_leaf = smelt.dialog.menu(options, {
+        on_submit = function(ctx)
+          local item = ctx.item
+          if item and item.on_select then item.on_select() end
+          ctx.resolve(item and item.action or nil)
+        end,
+      })
 
       local action = smelt.dialog.open({
         title = {
@@ -152,12 +156,6 @@ local function register_exit_plan_mode()
           { leaf = md_leaf,      height = "fill" },
           { leaf = options_leaf, height = "fit"  },
         },
-        on_submit = function(ctx)
-          local idx = (options_leaf:cursor() or 0) + 1
-          local opt = options[idx]
-          if opt and opt.on_select then opt.on_select() end
-          ctx.resolve(opt and opt.action or nil)
-        end,
       })
 
       if action ~= "approve" then

@@ -9,7 +9,13 @@ dim: 70 16
   6  13  57 fg=AnsiValue(208)
   7   0   1 bg=AnsiValue(237)
   7   1   1 fg=Black bg=White
-  7   2  68 bg=AnsiValue(237)
+  7   2   3 bg=AnsiValue(237) attrs=dim
+  7   5  10 fg=AnsiValue(208) bg=AnsiValue(237)
+  7  15  55 bg=AnsiValue(237)
+  8   1   4 attrs=dim
+  9   1   4 attrs=dim
+ 10   1   4 attrs=dim
+ 11   1   4 attrs=dim
  15   0  10 fg=AnsiValue(244) bg=AnsiValue(234)
  15  10  54 bg=AnsiValue(233)
  15  64   6 fg=AnsiValue(244) bg=AnsiValue(233)

@@ -187,7 +187,12 @@ smelt.cmd.register("ps", function()
       for _, p in ipairs(procs) do table.insert(labels, format_proc(p)) end
 
       local snapshot = procs
-      local options_leaf = smelt.dialog.options(labels)
+      -- Browse-then-kill: digits move the cursor; Enter is a no-op so an
+      -- accidental press doesn't kill a process. Kill goes through bs.
+      local options_leaf, options_ctrl = smelt.dialog.menu(labels, {
+        shortcuts = "select",
+        on_submit = function() end,
+      })
       local should_reopen = false
 
       smelt.dialog.open({
@@ -199,7 +204,7 @@ smelt.cmd.register("ps", function()
         panels = { { leaf = options_leaf } },
         keymaps = {
           { key = "bs", hint = "\u{232b}: kill selected", on_press = function(ctx)
-            local idx = (options_leaf:cursor() or 0) + 1
+            local idx = options_ctrl:cursor() or 1
             local target = snapshot[idx]
             if target then
               smelt.process.kill(target.id)

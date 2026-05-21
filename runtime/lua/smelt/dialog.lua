@@ -26,16 +26,40 @@
 --
 -- Buffer helpers:
 --   smelt.dialog.input(placeholder)         -> leaf, buf  (single-line input)
---   smelt.dialog.options(labels, opts)      -> leaf, buf  (list of selectable labels)
+--   smelt.dialog.menu(items, opts)          -> leaf, ctrl (numbered selectable list)
 --   smelt.dialog.list(buf, opts)            -> leaf       (existing buffer as a list)
 --   smelt.dialog.markdown(text)             -> leaf, buf  (markdown-rendered content)
 --   smelt.dialog.content(opts)              -> leaf, buf  (plain content; opts.text or opts.buf)
+--
+-- Dialog context (active dialog introspection):
+--   smelt.dialog.current()                  -> ctx | nil  (resolve/close/panels/focused_leaf)
+--
+-- Callable from any handler running while the dialog is open — including
+-- leaf-level `leaf:key(...)` callbacks, which normally don't see the
+-- dialog's resolve handle. Nested dialogs stack; `current()` always
+-- returns the topmost.
 
 local M = {}
 
 smelt.dialog = smelt.dialog or {}
 
 local REGION = "dialog_overlay"
+
+-- Stack of active dialog contexts. Pushed by `setup_lifecycle` at open
+-- time, popped on resolve. `smelt.dialog.current()` returns the topmost
+-- ctx so nested dialogs (e.g. confirm-on-top-of-picker) don't shadow each
+-- other.
+local dialog_stack = {}
+
+--- Return the topmost active dialog ctx (the same shape passed to
+--- `on_submit`/`keymap` handlers: `{ resolve, close, win, panels,
+--- focused_leaf }`), or `nil` if no dialog is open. Use it inside
+--- `leaf:key(...)` callbacks — those normally lack a path to the
+--- dialog's resolve handle.
+---@type fun(): table | nil
+function smelt.dialog.current()
+  return dialog_stack[#dialog_stack]
+end
 
 -- ── Buffer/leaf builders ──────────────────────────────────────────────
 --
@@ -93,7 +117,7 @@ local GUTTER = 1
 ---@field empty_text? string Shown in the list when nothing matches.
 ---@field on_open? fun(ctx: any): nil Fires once after the input/list have been built.
 ---@field on_query? fun(query: string, ctx: any): nil Fires on every keystroke; default re-applies `filter`.
----@field on_submit? fun(item: any, ctx: any): any Fires on Enter; default resolves with the selected item.
+---@field on_submit? fun(ctx: any): any Fires on Enter. `ctx.item` is the highlighted row; defaults to resolving with `ctx.item` when non-nil.
 ---@field on_dismiss? fun(): nil Fires when the dialog is dismissed.
 ---@field keymaps? smelt.dialog.Keymap[] Extra dialog-level keymaps merged on top of navigation bindings.
 ---@field title? string Forwarded to `smelt.dialog.open`.
@@ -126,36 +150,270 @@ function smelt.dialog.input(placeholder, opts)
   return leaf, buf
 end
 
--- Build a static selectable list leaf populated with `labels`. The
--- selection cursor starts on `opts.selected` (1-based, defaults to 1).
--- Returns `(leaf, buf)`; the caller reads the active row via
--- `leaf:cursor_row()` from the dialog keymaps.
----@type fun(labels: string[], opts: table?): smelt.win.Win, smelt.buf.Buf
-function smelt.dialog.options(labels, opts)
+-- ── Menu primitive ─────────────────────────────────────────────────────
+--
+-- `smelt.dialog.menu(items, opts)` builds a selectable list leaf shaped
+-- for a small, fixed set of choices: dim ` N. ` numbering, optional
+-- description row per item (rendered dim under the label), digit-key
+-- shortcuts (`1`..`9`), and a controller that talks in **1-based item
+-- indices** so callers never have to compute a row stride.
+--
+-- Items may be strings (label-only) or `{ label, description?, key? }`
+-- tables. If any item has a non-empty description the menu renders two
+-- rows per item and cursor navigation steps by two so the cursor only
+-- rests on label rows.
+--
+-- Shortcuts (`opts.shortcuts`, default `"submit"`):
+--   * `"submit"` — pressing the item's digit moves the cursor to it AND
+--                  fires the submit path (same as Enter on that row).
+--   * `"select"` — digit moves the cursor; Enter still submits.
+--   * `false`   — no digit handling; consumers can install their own.
+--
+-- Submit path: by default the menu resolves the active dialog with
+-- `{ index = i, item = items[i] }`. Override via `opts.on_submit(ctx)`
+-- — `ctx` exposes the standard dialog handles (`resolve`, `close`,
+-- `win`, `panels`, `focused_leaf`) plus `ctx.index` (1-based) and
+-- `ctx.item` for the selection — to map to a caller-specific payload
+-- (e.g. confirm's `decisions[idx]`) or to defer (focus a sibling leaf
+-- instead of resolving).
+--
+-- Returned `ctrl` exposes 1-based selection helpers:
+--   ctrl:cursor()         -- currently selected index (1-based)
+--   ctrl:cursor(i)        -- set selection (1-based; clamped)
+--   ctrl:item()           -- currently selected item table
+--   ctrl:items()          -- normalized item list
+--   ctrl:size()           -- number of items
+--   ctrl:submit()         -- trigger the submit path programmatically
+
+local NS_MENU_NUM   = smelt.ns("smelt.dialog.menu.num")
+local NS_MENU_LABEL = smelt.ns("smelt.dialog.menu.label")
+local NS_MENU_DESC  = smelt.ns("smelt.dialog.menu.desc")
+
+-- Render `items` into `buf`, applying dim numbering and the cursor-row
+-- accent. `has_descriptions` toggles the two-row layout.
+local function render_menu(buf, items, has_descriptions, numbered)
+  local rendered = {}
+  local meta = {}
+  local desc_indent = "    "
+
+  for i, it in ipairs(items) do
+    local prefix = numbered and string.format(" %d. ", i) or " "
+    local label_line = prefix .. (it.label or "")
+    rendered[#rendered + 1] = label_line
+    local label_row = #rendered
+
+    local desc_row, desc_end
+    if has_descriptions then
+      local desc = it.description or ""
+      local desc_line = desc_indent .. desc
+      rendered[#rendered + 1] = desc_line
+      desc_row = #rendered
+      desc_end = #desc_line
+    end
+
+    meta[i] = {
+      label_row   = label_row,
+      label_start = #prefix,
+      label_end   = #label_line,
+      desc_row    = desc_row,
+      desc_end    = desc_end,
+    }
+  end
+
+  buf:lines(rendered):clear_ns(NS_MENU_NUM):clear_ns(NS_MENU_LABEL):clear_ns(NS_MENU_DESC)
+  for _, m in ipairs(meta) do
+    if numbered and m.label_start > 0 then
+      buf:mark(NS_MENU_NUM, m.label_row, 0, { end_col = m.label_start, dim = true })
+    end
+    if m.label_end > m.label_start then
+      buf:mark(NS_MENU_LABEL, m.label_row, m.label_start, {
+        end_col       = m.label_end,
+        hl_group      = "SmeltAccent",
+        on_cursor_row = true,
+      })
+    end
+    if m.desc_row and m.desc_end and m.desc_end > 0 then
+      buf:mark(NS_MENU_DESC, m.desc_row, 0, { end_col = m.desc_end, dim = true })
+    end
+  end
+end
+
+-- Normalize `items` into `{ label, description?, key? }` tables.
+local function normalize_items(items)
+  local out = {}
+  local has_descriptions = false
+  for i, it in ipairs(items or {}) do
+    local entry
+    if type(it) == "string" then
+      entry = { label = it }
+    elseif type(it) == "table" then
+      entry = {
+        label       = it.label or "",
+        description = it.description,
+        key         = it.key,
+      }
+      if entry.description and entry.description ~= "" then
+        has_descriptions = true
+      end
+    else
+      entry = { label = tostring(it) }
+    end
+    out[i] = entry
+  end
+  return out, has_descriptions
+end
+
+--- Each item displayed in `smelt.dialog.menu`. Strings are also accepted
+--- and lifted into this shape automatically.
+---@class smelt.dialog.MenuItem
+---@field label string Row text after the dim ` N. ` numbering.
+---@field description? string Optional second row, rendered dim.
+---@field key? string Optional chord that triggers this item (defaults to its 1-based index for items 1..9).
+
+--- Options accepted by `smelt.dialog.menu`.
+---@class smelt.dialog.MenuOpts
+---@field selected? integer 1-based starting cursor (default 1).
+---@field shortcuts? "submit"|"select"|false Digit-key behavior. Default `"submit"`.
+---@field numbered? boolean Show the dim ` N. ` prefix (default true).
+---@field on_submit? fun(ctx: any): any Override the submit path. `ctx` carries the dialog handles plus `ctx.index` (1-based) and `ctx.item`. Default resolves the active dialog with `{ index, item }`.
+
+---@type fun(items: (string|smelt.dialog.MenuItem)[], opts: smelt.dialog.MenuOpts?): smelt.win.Win, table
+function smelt.dialog.menu(items, opts)
   opts = opts or {}
-  local lines = {}
-  for _, l in ipairs(labels or {}) do table.insert(lines, l) end
-  if #lines == 0 then lines = { "" } end
-  local buf = smelt.buf.new()
-  buf:lines(lines)
+  local normalized, has_descriptions = normalize_items(items)
+  if #normalized == 0 then
+    normalized = { { label = "" } }
+  end
+  local numbered  = opts.numbered ~= false
+  local shortcuts = opts.shortcuts
+  if shortcuts == nil then shortcuts = "submit" end
+
+  local row_stride = has_descriptions and 2 or 1
+  local item_count = #normalized
+  local max_row    = (item_count - 1) * row_stride
+
   local selected = tonumber(opts.selected or 1) or 1
   if selected < 1 then selected = 1 end
+  if selected > item_count then selected = item_count end
+
+  local buf = smelt.buf.new()
+  render_menu(buf, normalized, has_descriptions, numbered)
+
   local leaf = smelt.win.new(buf, {
-    region        = REGION,
-    focusable     = true,
-    selectable    = true,
-    pad_left      = GUTTER,
-    pad_right     = GUTTER,
-    scrollbar     = false,
-    kind          = "list",
-    initial_cursor = selected - 1,
+    region         = REGION,
+    focusable      = true,
+    selectable     = true,
+    pad_left       = GUTTER,
+    pad_right      = GUTTER,
+    scrollbar      = false,
+    kind           = "list",
+    initial_cursor = (selected - 1) * row_stride,
   })
-  return leaf, buf
+
+  local function row_of(i) return (i - 1) * row_stride end
+  local function index_of_row(r) return math.floor(r / row_stride) + 1 end
+
+  local ctrl = {}
+  function ctrl:cursor(i)
+    if i == nil then
+      return index_of_row(leaf:cursor() or 0)
+    end
+    if i < 1 then i = 1 end
+    if i > item_count then i = item_count end
+    leaf:cursor(row_of(i))
+    return self
+  end
+  function ctrl:item() return normalized[self:cursor()] end
+  function ctrl:items() return normalized end
+  function ctrl:size() return item_count end
+
+  local function default_on_submit(ctx)
+    if ctx.resolve then
+      ctx.resolve({ index = ctx.index, item = ctx.item })
+    end
+  end
+
+  -- Builds the submit ctx by layering `index`/`item` over the active
+  -- dialog's ctx so handlers get one consistent shape (matches
+  -- `dialog.open`'s `on_submit(ctx)` argument).
+  local function submit_at(i)
+    if i < 1 or i > item_count then return end
+    leaf:cursor(row_of(i))
+    local dlg = smelt.dialog.current() or {}
+    local ctx = {
+      win          = dlg.win,
+      panels       = dlg.panels,
+      focused_leaf = dlg.focused_leaf,
+      resolve      = dlg.resolve,
+      close        = dlg.close,
+      index        = i,
+      item         = normalized[i],
+    }
+    local handler = opts.on_submit or default_on_submit
+    local ok, err = pcall(handler, ctx)
+    if not ok then smelt.notify.error("dialog menu submit: " .. tostring(err)) end
+  end
+
+  function ctrl:submit() submit_at(self:cursor()) end
+
+  -- Multi-row stride: step the cursor by `row_stride` so it never lands
+  -- on a description row. Single-row menus keep the built-in list
+  -- navigation untouched.
+  if row_stride > 1 then
+    local function step(units)
+      return function()
+        local cur = leaf:cursor() or 0
+        local target = cur + units * row_stride
+        if target < 0 then target = 0 end
+        if target > max_row then target = max_row end
+        leaf:cursor(target)
+      end
+    end
+    leaf:key("up",   step(-1))
+    leaf:key("down", step(1))
+    leaf:key("k",    step(-1))
+    leaf:key("j",    step(1))
+    leaf:key("c-k",  step(-1))
+    leaf:key("c-j",  step(1))
+    leaf:key("c-p",  step(-1))
+    leaf:key("c-n",  step(1))
+    leaf:key("pgup", step(-10))
+    leaf:key("pgdn", step(10))
+    leaf:key("c-u",  step(-5))
+    leaf:key("c-d",  step(5))
+  end
+
+  -- Enter funnels through the same submit path as digit shortcuts.
+  leaf:key("enter", function() submit_at(ctrl:cursor()) end)
+
+  -- Digit shortcuts. `key = "X"` on an item overrides its digit binding;
+  -- without an override items 1..9 use their 1-based index. Bindings live
+  -- on the leaf (tier 1a) so typing digits into a sibling input leaf
+  -- still inserts the character.
+  if shortcuts then
+    local function chord_for(i, item)
+      if item.key and item.key ~= "" then return item.key end
+      if i <= 9 then return tostring(i) end
+      return nil
+    end
+    for i, item in ipairs(normalized) do
+      local chord = chord_for(i, item)
+      if chord then
+        if shortcuts == "submit" then
+          leaf:key(chord, function() submit_at(i) end)
+        else
+          leaf:key(chord, function() leaf:cursor(row_of(i)) end)
+        end
+      end
+    end
+  end
+
+  return leaf, ctrl
 end
 
 -- Wrap an existing `buf` as a selectable list leaf. Use when the buffer
 -- contents need to be mutated live (vs. the snapshot supplied to
--- `smelt.dialog.options`). `opts.focusable` defaults true; `opts.selected`
+-- `smelt.dialog.menu`). `opts.focusable` defaults true; `opts.selected`
 -- (0-based) sets the initial cursor row.
 ---@type fun(buf: smelt.buf.Buf, opts: table?): smelt.win.Win
 function smelt.dialog.list(buf, opts)
@@ -355,27 +613,58 @@ local function setup_lifecycle(opts, leaves, overlay, resolve_fn)
   -- the first focusable leaf at open() time.
   if opts.focus then opts.focus:focus() end
 
+  -- Shared dialog ctx. `focused_leaf` is mutated live by the focus event
+  -- handlers below so callbacks always read the current value. Exposed via
+  -- `smelt.dialog.current()` and as the `ctx` arg to `opts.keymaps` /
+  -- `on_submit` handlers.
+  local ctx = {
+    win          = root,
+    panels       = leaves,
+    focused_leaf = opts.focus,
+  }
+
   local resolved = false
   local function resolve(value)
     if resolved then return end
     resolved = true
+    -- Pop our entry off the dialog stack. We scan the stack from the top
+    -- in case nested dialogs resolve out of order (a child dialog closes
+    -- last) — only remove our own entry.
+    for i = #dialog_stack, 1, -1 do
+      if dialog_stack[i] == ctx then
+        table.remove(dialog_stack, i)
+        break
+      end
+    end
     root:close()
     resolve_fn(value)
   end
+  ctx.resolve = resolve
+  ctx.close   = function() resolve(nil) end
+
+  table.insert(dialog_stack, ctx)
+
+  for _, leaf in ipairs(leaves) do
+    leaf:on("focus", function()
+      ctx.focused_leaf = leaf
+    end)
+  end
 
   -- Build a ctx for user callbacks. Raw event fields (`text`, `index`, `code`,
-  -- `mods`, `leaf`) flow through unchanged; we add `win` (the dialog root),
-  -- `resolve`, `close`, and `panels` on top.
+  -- `mods`, `leaf`) flow through unchanged; the shared dialog ctx is layered
+  -- underneath so callbacks see `resolve`, `close`, `panels`, `focused_leaf`.
   local function make_ctx(raw_ctx)
-    local ctx = {}
+    local out = {
+      win          = ctx.win,
+      panels       = ctx.panels,
+      focused_leaf = ctx.focused_leaf,
+      resolve      = ctx.resolve,
+      close        = ctx.close,
+    }
     if type(raw_ctx) == "table" then
-      for k, v in pairs(raw_ctx) do ctx[k] = v end
+      for k, v in pairs(raw_ctx) do out[k] = v end
     end
-    ctx.win     = root
-    ctx.resolve = resolve
-    ctx.close   = function() resolve(nil) end
-    ctx.panels  = leaves
-    return ctx
+    return out
   end
 
   -- Dialog-level keymaps install at the overlay scope so they fire regardless
@@ -491,10 +780,11 @@ end
 --                     The default is `list:set_filter(opts.filter)`. Pass
 --                     this when you want to swap the filter (e.g. rebuild
 --                     it from a fresh query).
---   * `on_submit`   — `function(item, ctx)` fires on Enter. Default:
---                     `ctx.resolve(item)`. Override when you need to
---                     post-process before resolving (or to no-op when
---                     nothing is selected).
+--   * `on_submit`   — `function(ctx)` fires on Enter. `ctx.item` is the
+--                     highlighted row (nil when the list is empty);
+--                     `ctx.list`/`ctx.input`/`ctx.input_buf` are added
+--                     by the picker. Default resolves with `ctx.item`
+--                     when non-nil.
 --   * `keymaps`     — extra dialog-level keymaps merged on top of the
 --                     built-in navigation bindings. Each entry's
 --                     `on_press(ctx)` receives the picker ctx with
@@ -587,7 +877,10 @@ function smelt.dialog.picker(opts)
 
   local on_submit
   if type(opts.on_submit) == "function" then
-    on_submit = function(ctx) return opts.on_submit(list:selected(), augment(ctx)) end
+    on_submit = function(ctx)
+      ctx.item = list:selected()
+      return opts.on_submit(augment(ctx))
+    end
   else
     on_submit = function(ctx)
       local item = list:selected()
