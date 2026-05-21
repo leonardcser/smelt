@@ -339,20 +339,6 @@ local function run_check(force)
   end)
 end
 
--- ── statusline pill ────────────────────────────────────────────────────
-
-require("smelt.statusline").add("upgrade", function()
-  if not latest.has_update or settings_mode() == "off" then return {} end
-  return {
-    {
-      text        = "update " .. (latest.next or "?"),
-      style_group = "SmeltAccent",
-      priority    = 2,
-      separated   = true,
-    },
-  }
-end)
-
 -- ── banner subtitle ────────────────────────────────────────────────────
 
 smelt.banner.source("upgrade", function()
