@@ -1,7 +1,7 @@
 mod setup;
 mod startup;
 
-use clap::{Parser, Subcommand, ValueEnum};
+use clap::{ArgAction, Parser, Subcommand, ValueEnum};
 use crossterm::ExecutableCommand;
 use std::sync::{Arc, Mutex};
 
@@ -9,9 +9,12 @@ use std::sync::{Arc, Mutex};
 static ALLOCATOR: smelt_perf::alloc::Counting = smelt_perf::alloc::Counting;
 
 #[derive(Parser)]
-#[command(name = "smelt", about = "Coding agent TUI", version = tui::VERSION_STRING)]
-#[command(args_conflicts_with_subcommands = true)]
+#[command(name = "smelt", about = "Coding agent TUI", version = tui::DISPLAY)]
+#[command(args_conflicts_with_subcommands = true, disable_version_flag = true)]
 pub struct Args {
+    /// Print the smelt build identity (same as `/version`).
+    #[arg(short = 'v', long = "version", action = ArgAction::Version)]
+    version_flag: Option<bool>,
     #[command(subcommand)]
     command: Option<Commands>,
     /// Initial message to send (auto-submits on startup)
@@ -86,7 +89,7 @@ pub struct Args {
     format: OutputFormat,
     #[arg(long, value_enum, default_value_t = ColorMode::Auto, help = "Color output")]
     color: ColorMode,
-    #[arg(short, long, help = "Show tool output in headless mode")]
+    #[arg(long, help = "Show tool output in headless mode")]
     verbose: bool,
     #[arg(
         long,

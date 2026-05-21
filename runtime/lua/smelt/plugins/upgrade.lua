@@ -12,12 +12,13 @@
 --   * a dim subtitle under the splash version.
 --
 -- Slash commands:
---   /upgrade            install the newest build (no confirm dialog, just a
---                       notification). On stable: downloads the prebuilt
---                       tarball; on unstable: shells `cargo install --branch main`.
---   /upgrade --check    force a refresh of the GitHub cache and notify.
---   /changelog          open a read-only dialog with the release notes for
---                       the currently cached `latest` entry.
+--   /upgrade          install the newest build (no confirm dialog, just a
+--                     notification). On stable: downloads the prebuilt
+--                     tarball; on unstable: shells `cargo install --branch main`.
+--   /upgrade check    force a refresh of the GitHub cache and notify the
+--                     outcome (update available / already up to date / error).
+--   /changelog        open a read-only dialog with the release notes for
+--                     the currently cached `latest` entry.
 
 local OWNER = "leonardcser"
 local REPO = "smelt"
@@ -211,7 +212,6 @@ local function fetch_stable()
   if not best then return nil, "github: no releases" end
   local rec = {
     tag_name     = best.tag_name,
-    version      = best.tag_name:gsub("^v", ""),
     html_url     = best.html_url,
     name         = best.name,
     published_at = best.published_at,
@@ -221,22 +221,46 @@ local function fetch_stable()
   return rec
 end
 
+-- Unstable check uses `/compare/{local}...main` so we can distinguish
+-- "remote is ahead" (real update) from "local is ahead" or "diverged"
+-- (don't clobber the user's unpushed work). When the local sha is
+-- unknown to github (e.g. a build from a never-pushed commit) the
+-- endpoint 404s; we treat that as "no update" rather than failing.
 local function fetch_unstable()
   local ch = channel_state("unstable")
-  local r = api_fetch("repos/" .. OWNER .. "/" .. REPO .. "/commits/main", ch.etag)
-  if r.err then return nil, r.err end
+  local local_sha = smelt.build.sha
+  if not local_sha then
+    return nil, "this binary was built without git; can't compare against main"
+  end
+  local r = api_fetch(
+    "repos/" .. OWNER .. "/" .. REPO .. "/compare/" .. local_sha .. "...main",
+    ch.etag
+  )
+  if r.err then
+    if r.err:find("HTTP 404", 1, true) then
+      ch.latest = { status = "unknown" }
+      return ch.latest
+    end
+    return nil, r.err
+  end
   if r.backoff_until then return nil, nil, r.backoff_until end
   if r.not_modified then return ch.latest end
   ch.etag = r.new_etag
-  local commit = r.json
-  if type(commit.sha) ~= "string" then return nil, "github: bad response" end
-  local rec = {
-    sha      = commit.sha,
-    short    = commit.sha:sub(1, 7),
-    html_url = commit.html_url,
-    date     = commit.commit and commit.commit.committer and commit.commit.committer.date,
-    message  = commit.commit and commit.commit.message,
-  }
+  local body = r.json
+  if type(body.status) ~= "string" then return nil, "github: bad compare response" end
+  local rec = { status = body.status }
+  -- For status == "behind" the head commit is the last entry in `commits`
+  -- (the list of commits in head that aren't in base, oldest-first).
+  if body.status == "behind" and type(body.commits) == "table" and #body.commits > 0 then
+    local head = body.commits[#body.commits]
+    if type(head.sha) == "string" then
+      rec.sha      = head.sha
+      rec.short    = head.sha:sub(1, 7)
+      rec.html_url = head.html_url
+      rec.date     = head.commit and head.commit.committer and head.commit.committer.date
+      rec.message  = head.commit and head.commit.message
+    end
+  end
   ch.latest = rec
   return rec
 end
@@ -246,13 +270,12 @@ end
 local function compute_stable()
   local rec = channel_state("stable").latest
   if not rec then return nil end
-  local current = smelt.build.version or "0.0.0"
-  local cmp = compare_semver(rec.version, current)
+  local cmp = compare_semver(rec.tag_name, smelt.build.version or "0.0.0")
   return {
     has_update = cmp > 0,
     channel    = "stable",
-    current    = "v" .. current,
-    next       = "v" .. rec.version,
+    current    = smelt.build.display or "?",
+    next       = rec.tag_name,
     details    = rec,
   }
 end
@@ -260,16 +283,11 @@ end
 local function compute_unstable()
   local rec = channel_state("unstable").latest
   if not rec then return nil end
-  local sha = smelt.build.sha
-  if not sha then
-    return { has_update = false, channel = "unstable", current = "main", next = nil, details = rec }
-  end
-  local has = rec.short ~= nil and rec.sha:sub(1, #sha) ~= sha
   return {
-    has_update = has,
+    has_update = rec.status == "behind" and rec.short ~= nil,
     channel    = "unstable",
-    current    = "main@" .. sha,
-    next       = "main@" .. rec.short,
+    current    = smelt.build.display or "?",
+    next       = rec.short and ("main@" .. rec.short) or nil,
     details    = rec,
   }
 end
@@ -291,22 +309,33 @@ local function should_check_now()
 end
 
 local checking = false
-local function run_check(force)
-  if checking then return end
+
+-- Drive a check and call `on_done(status)` exactly once when the work
+-- finishes. `status` is one of `"busy" | "cached" | "no_update" |
+-- "has_update" | "rate_limited" | "error"`. The tick loop passes no
+-- callback and relies on the transition-based auto-notify below; user
+-- commands pass a callback so they can always surface a terminal result.
+local function run_check(force, on_done)
+  on_done = on_done or function() end
+  if checking then
+    on_done("busy")
+    return
+  end
   if not force and not should_check_now() then
     recompute()
+    on_done("cached")
     return
   end
   checking = true
   smelt.spawn(function()
     local channel = settings_channel()
-    local rec, err
     if channel == "unstable" and not smelt.build.sha then
       checking = false
       notify.error("autoupgrade: unstable channel requires a build SHA (this binary was built without git)")
+      on_done("error")
       return
     end
-    local backoff
+    local rec, err, backoff
     if channel == "stable" then
       rec, err, backoff = fetch_stable()
     else
@@ -322,9 +351,13 @@ local function run_check(force)
     end
     state.save()
     checking = false
-    if backoff then return end
+    if backoff then
+      on_done("rate_limited")
+      return
+    end
     if not rec then
       notify.error("autoupgrade: " .. tostring(err))
+      on_done("error")
       return
     end
     local before = latest.has_update
@@ -332,10 +365,11 @@ local function run_check(force)
     if latest.has_update and not before then
       notify("update available: " .. latest.next ..
                    (settings_mode() == "auto"
-                    and " — installing in background"
-                    or  " — run /upgrade"))
+                    and ", installing in background"
+                    or  ", run /upgrade"))
       if settings_mode() == "auto" then dispatch_install() end
     end
+    on_done(latest.has_update and "has_update" or "no_update")
   end)
 end
 
@@ -364,27 +398,65 @@ end)
 local installing = false
 local attempted = {}
 
-local function install_stable_async(tag, on_done)
-  if installing then return end
-  if attempted["stable:" .. tag] then return end
-  attempted["stable:" .. tag] = true
+-- Surface a failure: write the full stderr/stdout (no truncation) to the
+-- JSONL engine log so the user can grep it after the toast disappears,
+-- then notify with a short tail. Notifications truncate, the log doesn't.
+local function report_failure(key, stage, info)
+  info = info or {}
+  smelt.log.error("upgrade.install_failed", {
+    key       = key,
+    stage     = stage,
+    exit_code = info.exit_code,
+    stderr    = info.stderr,
+    stdout    = info.stdout,
+    hint      = info.hint,
+  })
+  local detail = stage
+  if info.exit_code then detail = detail .. " (exit " .. tostring(info.exit_code) .. ")" end
+  if info.hint then detail = detail .. ": " .. tostring(info.hint) end
+  local tail = info.stderr
+  if (not tail or tail == "") then tail = info.stdout end
+  if tail and #tail > 0 then
+    if #tail > 400 then tail = "…" .. tail:sub(-400) end
+    detail = detail .. "\n" .. tail
+  end
+  notify.error("/upgrade: " .. detail .. "\n(full output in smelt log)")
+end
+
+-- Run `body` exclusively under the in-flight + attempted guards. `body`
+-- receives `fail(stage, info)` / `ok(msg?)` callbacks and must terminate
+-- via one of them; the guard is cleared once either fires.
+local function run_install(key, on_done, body)
+  if installing or attempted[key] then return end
+  attempted[key] = true
   installing = true
   smelt.spawn(function()
-    local function done(ok, msg)
+    local finished = false
+    local function finish(success, msg)
+      if finished then return end
+      finished = true
       installing = false
-      if on_done then on_done(ok, msg) end
+      if on_done then on_done(success, msg) end
     end
+    body(
+      function(stage, info)
+        report_failure(key, stage, info)
+        finish(false, stage)
+      end,
+      function(msg) finish(true, msg) end
+    )
+  end)
+end
 
+local function install_stable_async(tag, on_done)
+  run_install("stable:" .. tag, on_done, function(fail, ok)
     local target = smelt.build.target
     if not target or target == "" then
-      notify.error("/upgrade: unknown target triple; can't pick a release asset")
-      return done(false, "unknown target")
+      return fail("unknown target",
+        { hint = "smelt.build.target is empty; can't pick a release asset" })
     end
     local exe, err = smelt.os.exe_path()
-    if not exe then
-      notify.error("/upgrade: " .. tostring(err))
-      return done(false, err)
-    end
+    if not exe then return fail("exe path", { hint = err }) end
     local dir = exe:match("(.*)/[^/]+$") or "."
     local asset = "smelt-" .. target .. ".tar.gz"
     local url = string.format(
@@ -394,28 +466,26 @@ local function install_stable_async(tag, on_done)
     local tmp_tar = exe .. ".upgrade.tar.gz"
 
     notify("downloading " .. tag .. "…")
-    local r = smelt.process.run(
-      "curl", { "-fLso", tmp_tar, url },
-      { timeout_secs = 300 }
-    )
-    if not r or r.exit_code ~= 0 then
-      smelt.fs.remove_file(tmp_tar)
-      notify.error("/upgrade: download failed (" ..
-        (r and tostring(r.exit_code) or "spawn") .. ")")
-      return done(false, "download")
+    local r = smelt.process.run("curl", { "-fLso", tmp_tar, url },
+      { timeout_secs = 300 })
+    smelt.fs.remove_file(tmp_tar)
+    if not r then return fail("download", { hint = "failed to spawn curl" }) end
+    if r.exit_code ~= 0 then
+      return fail("download", {
+        exit_code = r.exit_code, stderr = r.stderr, stdout = r.stdout, hint = url,
+      })
     end
 
     -- Extract `smelt` next to the running binary. Overwriting an
     -- in-use binary on Unix is safe (unlink + create new inode).
-    local x = smelt.process.run(
-      "tar", { "-xzf", tmp_tar, "-C", dir, "smelt" },
-      { timeout_secs = 60 }
-    )
+    local x = smelt.process.run("tar", { "-xzf", tmp_tar, "-C", dir, "smelt" },
+      { timeout_secs = 60 })
     smelt.fs.remove_file(tmp_tar)
-    if not x or x.exit_code ~= 0 then
-      notify.error("/upgrade: tar extract failed: " ..
-        (x and x.stderr or "spawn"))
-      return done(false, "extract")
+    if not x then return fail("tar extract", { hint = "failed to spawn tar" }) end
+    if x.exit_code ~= 0 then
+      return fail("tar extract", {
+        exit_code = x.exit_code, stderr = x.stderr, stdout = x.stdout,
+      })
     end
 
     -- If the user renamed their binary, move the extracted `smelt`
@@ -423,30 +493,18 @@ local function install_stable_async(tag, on_done)
     local extracted = dir .. "/smelt"
     if extracted ~= exe then
       local ok2, mverr = smelt.fs.rename(extracted, exe)
-      if not ok2 then
-        notify.error("/upgrade: rename to " .. exe .. " failed: " ..
-          tostring(mverr))
-        return done(false, "rename")
-      end
+      if not ok2 then return fail("rename", { hint = mverr }) end
     end
 
-    notify("✓ upgraded to " .. tag .. " — restart smelt to use it")
-    done(true)
+    notify("✓ upgraded to " .. tag .. ", restart smelt to use it")
+    ok()
   end)
 end
 
 local function install_unstable_async(sha, on_done)
-  if installing then return end
-  if attempted["unstable:" .. sha] then return end
-  attempted["unstable:" .. sha] = true
-  installing = true
-  smelt.spawn(function()
-    local function done(ok, msg)
-      installing = false
-      if on_done then on_done(ok, msg) end
-    end
+  run_install("unstable:" .. sha, on_done, function(fail, ok)
     notify("building main@" .. sha:sub(1, 7) ..
-                 " via cargo (this may take a few minutes)…")
+      " via cargo (this may take a few minutes)…")
     -- The workspace has multiple bin crates (`smelt-agent`, `xtask`), so
     -- cargo refuses an ambiguous `cargo install --git`. Pin the package so
     -- it picks the user-facing `smelt` binary every time.
@@ -454,20 +512,15 @@ local function install_unstable_async(sha, on_done)
       "install", "--git", REPO_URL, "--branch", "main",
       "--package", "smelt-agent", "--force", "--locked",
     }, { timeout_secs = 1800 })
-    if not r then
-      notify.error("/upgrade: failed to spawn cargo")
-      return done(false, "spawn")
-    end
+    if not r then return fail("cargo install", { hint = "failed to spawn cargo" }) end
     if r.exit_code ~= 0 then
-      local tail = r.stderr or ""
-      if #tail > 600 then tail = tail:sub(-600) end
-      notify.error("/upgrade: cargo install exited " ..
-        r.exit_code .. "\n" .. tail)
-      return done(false, "cargo")
+      return fail("cargo install", {
+        exit_code = r.exit_code, stderr = r.stderr, stdout = r.stdout,
+      })
     end
     notify("✓ upgraded to main@" .. sha:sub(1, 7) ..
-                 " — restart smelt to use it")
-    done(true)
+      ", restart smelt to use it")
+    ok()
   end)
 end
 
@@ -505,16 +558,39 @@ local function notify_install_kickoff()
   end
 end
 
+-- Map a `run_check` terminal status to a user-facing notification for
+-- the `check` subcommand. `has_update` already surfaced its own message
+-- inside `run_check`; the rest need an explicit terminal toast so the
+-- user isn't left staring at "checking for upgrades…".
+local function notify_check_result(status)
+  if status == "no_update" then
+    notify_already_current()
+  elseif status == "rate_limited" then
+    notify("rate limited by github, try again later")
+  elseif status == "busy" then
+    notify("a check is already running")
+  end
+end
+
 smelt.cmd.register("upgrade", function(args)
   args = args or ""
-  if args:match("%-%-check") or args == "check" then
-    run_check(true)
+  if args == "check" then
     notify("checking for upgrades…")
+    run_check(true, notify_check_result)
     return
   end
   if should_check_now() then
-    run_check(true)
-    notify("checking for upgrades — install will start automatically if one is found")
+    notify("checking for upgrades, install will start automatically if one is found")
+    run_check(true, function(status)
+      if status == "no_update" then
+        notify_already_current()
+      elseif status == "has_update" then
+        notify_install_kickoff()
+        dispatch_install()
+      else
+        notify_check_result(status)
+      end
+    end)
     return
   end
   if not latest.has_update then

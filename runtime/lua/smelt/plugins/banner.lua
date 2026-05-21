@@ -317,7 +317,7 @@ local function open_splash()
 	state.paint:on("press", on_press)
 	state.paint:on("release", on_release)
 	local logo_w, logo_h = banner.logo_mark_size()
-	local label_lines = { { text = "v" .. (smelt.build.version or ""), dim = true } }
+	local label_lines = { { text = smelt.build.display or "", dim = true } }
 	for _, sub in ipairs(banner.collect_subtitles()) do
 		label_lines[#label_lines + 1] = sub
 	end
@@ -418,7 +418,7 @@ smelt.lifecycle.on_shutdown(function(ctx)
 		return
 	end
 	local rows = banner.LOGO_MARK_PIXELS
-	local version_text = "v" .. (smelt.build.version or "")
+	local version_text = smelt.build.display or ""
 	local pad = math.max(0, math.floor((#rows[1] - #version_text) / 2))
 	print(banner.ansi_render(rows, banner.PALETTE))
 	print(string.rep(" ", pad) .. "\27[2m" .. version_text .. "\27[0m")

@@ -7,8 +7,10 @@
 //!   - SMELT_BUILD_TAG       most recent reachable tag, or "unknown"
 //!   - SMELT_BUILD_COMMITS   commits since that tag, or "0"
 //!   - SMELT_BUILD_DIRTY     "1" when the working tree has uncommitted changes, else "0"
-//!   - SMELT_VERSION_STRING  composed display string consumed by `--version`
-//!     and `smelt.build.version_string` (e.g. `0.5.1-60-g3349b5f-dirty`)
+//!   - SMELT_DISPLAY         canonical user-facing identity string. Single
+//!     source of truth for the banner, `/version`, `/upgrade`, and `--version`.
+//!     Shape: `v{tag}` for a clean tagged build, `v{tag}-{commits}-g{sha}[-dirty]`
+//!     for a dev build, `v{CARGO_PKG_VERSION}` when git is unavailable.
 //!
 //! The git lookups go through `git rev-parse` / `git show` / `git describe`,
 //! so they work for ordinary checkouts and worktrees alike. When the source
@@ -26,9 +28,14 @@ fn main() {
 
     let pkg_version = env!("CARGO_PKG_VERSION");
     let described = git(&["describe", "--tags", "--long", "--dirty"]);
-    let (tag, commits, dirty, version_string) = match described.as_deref() {
+    let (tag, commits, dirty, display) = match described.as_deref() {
         Some(d) => parse_describe(d, pkg_version),
-        None => ("unknown".into(), "0".into(), "0".into(), pkg_version.into()),
+        None => (
+            "unknown".into(),
+            "0".into(),
+            "0".into(),
+            format!("v{pkg_version}"),
+        ),
     };
 
     println!("cargo:rustc-env=SMELT_BUILD_SHA={sha}");
@@ -37,7 +44,7 @@ fn main() {
     println!("cargo:rustc-env=SMELT_BUILD_TAG={tag}");
     println!("cargo:rustc-env=SMELT_BUILD_COMMITS={commits}");
     println!("cargo:rustc-env=SMELT_BUILD_DIRTY={dirty}");
-    println!("cargo:rustc-env=SMELT_VERSION_STRING={version_string}");
+    println!("cargo:rustc-env=SMELT_DISPLAY={display}");
 
     // Rebuild when HEAD moves. `git rev-parse --git-path HEAD` resolves
     // to the right file for both regular checkouts and worktrees.
@@ -55,9 +62,10 @@ fn main() {
 
 /// Split a `git describe --tags --long --dirty` result like
 /// `v0.5.0-alpha.2-80-g827e6646-dirty` into `(tag, commits, dirty, display)`.
-/// `display` strips the leading `v` so it matches the format requested in
-/// issue #9 (e.g. `0.5.1-60-g3349b5f-dirty`). A missing or unparseable
-/// result falls back to `pkg_version`.
+/// `display` is the canonical user-facing identity: `v{tag}` on a clean
+/// tagged build (commits == 0, not dirty), otherwise the full
+/// `v{tag}-{commits}-g{sha}[-dirty]`. A missing or unparseable result
+/// falls back to `v{pkg_version}`.
 fn parse_describe(described: &str, pkg_version: &str) -> (String, String, String, String) {
     let (core, dirty_flag) = match described.strip_suffix("-dirty") {
         Some(rest) => (rest, "1"),
@@ -73,14 +81,27 @@ fn parse_describe(described: &str, pkg_version: &str) -> (String, String, String
             "unknown".into(),
             "0".into(),
             dirty_flag.into(),
-            pkg_version.into(),
+            format!("v{pkg_version}"),
         );
     };
-    let display_core = core.strip_prefix('v').unwrap_or(core);
-    let display = if dirty_flag == "1" {
-        format!("{display_core}-dirty")
+    let tag_with_v = if tag.starts_with('v') {
+        tag.clone()
     } else {
-        display_core.into()
+        format!("v{tag}")
+    };
+    let display = if commits == "0" && dirty_flag == "0" {
+        tag_with_v
+    } else if dirty_flag == "1" {
+        let core_with_v = if core.starts_with('v') {
+            core.to_string()
+        } else {
+            format!("v{core}")
+        };
+        format!("{core_with_v}-dirty")
+    } else if core.starts_with('v') {
+        core.to_string()
+    } else {
+        format!("v{core}")
     };
     (tag, commits, dirty_flag.into(), display)
 }
