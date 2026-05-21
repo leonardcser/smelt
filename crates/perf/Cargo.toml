@@ -1,10 +1,13 @@
 [package]
 name = "smelt-perf"
-version = "0.5.0-alpha.2"
+version = "0.1.0"
 edition = "2021"
-description = "Lightweight allocation + timing instrumentation. Counting global allocator and labelled scope guards."
+description = "Lightweight allocation and timing instrumentation. Counting global allocator and labelled scope guards."
 license = "MIT"
 repository = "https://github.com/leonardcser/smelt"
+readme = "README.md"
+keywords = ["performance", "profiling", "instrumentation", "allocator", "timing"]
+categories = ["development-tools::profiling"]
 
 [lib]
 path = "src/lib.rs"

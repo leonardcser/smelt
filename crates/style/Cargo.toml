@@ -1,10 +1,13 @@
 [package]
 name = "smelt-style"
-version = "0.5.0-alpha.2"
+version = "0.1.0"
 edition = "2021"
-description = "Frontend-neutral style primitives — Color, Style, Theme, HlGroup. Shared leaf consumed by document models (smelt-buffer) and renderers (smelt-term)."
+description = "Frontend-neutral style primitives: Color, Style, Theme, HlGroup. Shared leaf consumed by document models and renderers."
 license = "MIT"
 repository = "https://github.com/leonardcser/smelt"
+readme = "README.md"
+keywords = ["terminal", "tui", "color", "style", "theme"]
+categories = ["command-line-interface"]
 
 [lib]
 name = "smelt_style"

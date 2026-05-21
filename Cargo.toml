@@ -6,10 +6,10 @@ exclude = ["fuzz"]
 # Internal crates
 protocol = { path = "crates/protocol" }
 engine = { path = "crates/engine" }
-smelt-style = { path = "crates/style" }
-smelt-perf = { path = "crates/perf" }
+smelt-style = { path = "crates/style", version = "0.1.0" }
+smelt-perf = { path = "crates/perf", version = "0.1.0" }
 smelt-buffer = { path = "crates/buffer" }
-smelt-term = { path = "crates/term" }
+smelt-term = { path = "crates/term", version = "0.1.0" }
 smelt-edit = { path = "crates/edit" }
 smelt-core = { path = "crates/core" }
 tui = { path = "crates/tui", default-features = false }

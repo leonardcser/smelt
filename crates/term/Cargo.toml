@@ -1,10 +1,13 @@
 [package]
 name = "smelt-term"
-version = "0.5.0-alpha.2"
+version = "0.1.0"
 edition = "2021"
-description = "Terminal rendering library: Grid + Compositor + LayoutTree + Window + Overlay + diff-flush renderer."
+description = "Terminal rendering library: Grid, Compositor, LayoutTree, diff-flush renderer."
 license = "MIT"
 repository = "https://github.com/leonardcser/smelt"
+readme = "README.md"
+keywords = ["terminal", "tui", "rendering", "compositor", "layout"]
+categories = ["command-line-interface", "graphics"]
 
 [lib]
 name = "smelt_term"
