@@ -116,13 +116,31 @@ pub fn reset_for_test() {
     anon_hash_to_group().write().unwrap().clear();
 }
 
-/// Total entries in the interner — interned named groups plus anonymous
-/// style entries. Used by leak invariants to confirm registries don't
-/// grow across scenario repeats.
+/// Total distinct interned entries. Anonymous styles share the named
+/// registry under `__anon__/<hash>` keys (see `intern_anonymous_style`),
+/// so the named map's length already includes them — no separate count
+/// is added. Used by leak invariants to confirm registries don't grow
+/// across scenario repeats.
 pub fn registry_len() -> usize {
+    registry().read().unwrap().id_to_name.len()
+}
+
+/// `(named, anon)` interner sizes for diagnostics. `named` is the full
+/// `id_to_name` length (which already contains every anon entry);
+/// `anon` is the subset that has a resolved style in the `anon_styles`
+/// map. Their difference equals the count of "real" named groups
+/// registered by themes or callsites.
+pub fn registry_counts() -> (usize, usize) {
     let named = registry().read().unwrap().id_to_name.len();
     let anon = anon_styles().read().unwrap().len();
-    named + anon
+    (named, anon)
+}
+
+/// Named groups registered at or after `from_idx`. Lets leak invariants
+/// list the *newly-added* names rather than print a count alone.
+pub fn names_since(from_idx: usize) -> Vec<String> {
+    let r = registry().read().unwrap();
+    r.id_to_name.get(from_idx..).unwrap_or(&[]).to_vec()
 }
 
 /// Resolved highlight-group → style map. `Theme` is materialized state:
