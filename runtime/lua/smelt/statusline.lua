@@ -64,12 +64,23 @@ local function cell(name) return smelt.cell(name):get() end
 local function core_compose()
   local items = {}
 
-  -- Slug pill.
+  -- Slug pill. SmeltSlug carries fg only; fall back to SmeltAccent's
+  -- fg as the pill bg when no explicit bg has been set (default), so
+  -- `/color` (which writes SmeltSlug.bg) and theme swaps both
+  -- propagate naturally.
   local task_label = cell("task_label")
   if smelt.settings.show_slug and task_label and task_label ~= "" then
+    local slug = smelt.theme.get("SmeltSlug") or {}
+    local style = { hl_group = "SmeltSlug" }
+    if not slug.bg then
+      local accent = smelt.theme.get("SmeltAccent")
+      if accent and accent.fg then
+        style.bg = accent.fg
+      end
+    end
     items[#items + 1] = {
       text = " " .. task_label .. " ",
-      style = { hl_group = "SmeltSlug" },
+      style = style,
       priority = 5,
       truncatable = true,
     }

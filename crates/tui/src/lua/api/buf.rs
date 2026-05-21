@@ -39,18 +39,22 @@ impl From<LuaVirtTextPos> for smelt_core::buffer::VirtTextPos {
     }
 }
 
-/// Color value for the `fg`/`bg` highlight fields. Accepts either a
-/// `string` (theme group name resolved through the active theme) or an
-/// integer triple `{ r, g, b }` (direct RGB sample).
+/// Color value for the `fg`/`bg` highlight fields. Accepts:
+/// - `string` — theme-group name resolved through the active theme.
+/// - `{ r, g, b }` — direct RGB triple (integer array).
+/// - `{ rgb = { r, g, b } }` — same RGB triple in the `StyleDecl` shape
+///   that `smelt.theme.get(group)` returns, so a caller can pipe a
+///   theme-derived color straight back into another highlight.
+/// - `{ ansi = N }` — direct 256-color slot in the same shape.
 #[derive(Debug, Clone)]
 pub enum LuaColor {
     Group(String),
-    Rgb([u8; 3]),
+    Direct(smelt_core::style::Color),
 }
 
 impl LuaType for LuaColor {
     fn lua_type() -> String {
-        "string | integer[]".into()
+        "string | integer[] | { ansi: integer } | { rgb: integer[] }".into()
     }
 }
 
@@ -59,14 +63,24 @@ impl FromLua for LuaColor {
         match value {
             mlua::Value::String(s) => Ok(LuaColor::Group(s.to_str()?.to_string())),
             mlua::Value::Table(t) => {
+                if let Ok(n) = t.get::<u8>("ansi") {
+                    return Ok(LuaColor::Direct(smelt_core::style::Color::AnsiValue(n)));
+                }
+                if let Ok(rgb) = t.get::<[u8; 3]>("rgb") {
+                    return Ok(LuaColor::Direct(smelt_core::style::Color::Rgb {
+                        r: rgb[0],
+                        g: rgb[1],
+                        b: rgb[2],
+                    }));
+                }
                 let r: u8 = t.get(1)?;
                 let g: u8 = t.get(2)?;
                 let b: u8 = t.get(3)?;
-                Ok(LuaColor::Rgb([r, g, b]))
+                Ok(LuaColor::Direct(smelt_core::style::Color::Rgb { r, g, b }))
             }
             other => Err(mlua::Error::FromLuaConversionError {
                 from: other.type_name(),
-                to: "smelt color (theme group name or {r,g,b} table)".into(),
+                to: "smelt color (theme group name, {r,g,b}, {ansi=N}, or {rgb={...}})".into(),
                 message: None,
             }),
         }
@@ -77,22 +91,14 @@ impl LuaColor {
     fn resolve_fg(&self) -> Option<smelt_core::style::Color> {
         match self {
             LuaColor::Group(name) => crate::lua::with_app(|app| app.ui.theme().get(name).fg),
-            LuaColor::Rgb([r, g, b]) => Some(smelt_core::style::Color::Rgb {
-                r: *r,
-                g: *g,
-                b: *b,
-            }),
+            LuaColor::Direct(c) => Some(*c),
         }
     }
 
     fn resolve_bg(&self) -> Option<smelt_core::style::Color> {
         match self {
             LuaColor::Group(name) => crate::lua::with_app(|app| app.ui.theme().get(name).bg),
-            LuaColor::Rgb([r, g, b]) => Some(smelt_core::style::Color::Rgb {
-                r: *r,
-                g: *g,
-                b: *b,
-            }),
+            LuaColor::Direct(c) => Some(*c),
         }
     }
 }
@@ -577,21 +583,13 @@ fn set_styled_lines(id: crate::smelt_term::BufId, lines: mlua::Table) -> LuaResu
                     if let Some(c) = &span.style.fg {
                         style.fg = match c {
                             LuaColor::Group(name) => sink.theme().get(name).fg,
-                            LuaColor::Rgb([r, g, b]) => Some(smelt_core::style::Color::Rgb {
-                                r: *r,
-                                g: *g,
-                                b: *b,
-                            }),
+                            LuaColor::Direct(color) => Some(*color),
                         };
                     }
                     if let Some(c) = &span.style.bg {
                         style.bg = match c {
                             LuaColor::Group(name) => sink.theme().get(name).bg,
-                            LuaColor::Rgb([r, g, b]) => Some(smelt_core::style::Color::Rgb {
-                                r: *r,
-                                g: *g,
-                                b: *b,
-                            }),
+                            LuaColor::Direct(color) => Some(*color),
                         };
                     }
                     sink.push(group, style);

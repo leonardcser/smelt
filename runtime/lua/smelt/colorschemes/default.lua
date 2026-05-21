@@ -29,7 +29,7 @@ end
 return {
   -- ── Base palette: groups that hold literal color values. ──────────
   SmeltAccent         = fg({ ansi = 208 }),   -- ember
-  SmeltSlug           = fg({ ansi = 0 }),     -- pill fg; bg falls back to SmeltAccent in status.lua
+  SmeltSlug           = fg({ ansi = 0 }),     -- pill fg; bg falls back to SmeltAccent in statusline.lua
   SmeltMuted          = fg({ ansi = 244 }),   -- "comment grey"
   SmeltSuccess        = fg({ ansi = 77 }),    -- check-mark green
   SmeltHeading        = fg({ ansi = 117 }),   -- sky blue headings

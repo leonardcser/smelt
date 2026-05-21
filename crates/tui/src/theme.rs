@@ -627,7 +627,9 @@ mod tests {
         // Comment is aliased to SmeltMuted → fg = AnsiValue(244).
         assert_eq!(theme.get("Comment").fg, Some(Color::AnsiValue(244)));
         assert_eq!(theme.get("SmeltMuted").fg, Some(Color::AnsiValue(244)));
-        // SmeltSlug carries the pill fg only; bg falls back to SmeltAccent in status.lua.
+        // SmeltSlug carries the pill fg only; bg falls back to
+        // SmeltAccent in statusline.lua so `/color` and theme swaps
+        // both propagate through SmeltAccent without rewriting the slug.
         assert_eq!(theme.get("SmeltSlug").fg, Some(Color::AnsiValue(0)));
         assert_eq!(theme.get("SmeltSlug").bg, None);
         assert_eq!(theme.get("SmeltAccent").fg, Some(Color::AnsiValue(208)));

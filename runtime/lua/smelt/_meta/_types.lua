@@ -26,8 +26,8 @@
 ---@field right_gravity? boolean If true, the mark sticks with text inserted to its right.
 ---@field end_right_gravity? boolean Right-gravity flag for the end-of-range cursor.
 ---@field hl_group? string Theme group whose style is applied as the highlight base.
----@field fg? string | integer[] Foreground override. Either a theme group name (string) or a direct RGB triple `{ r, g, b }`. Takes precedence over `hl_group`.
----@field bg? string | integer[] Background override. Either a theme group name (string) or a direct RGB triple `{ r, g, b }`. Takes precedence over `hl_group`.
+---@field fg? string | integer[] | { ansi: integer } | { rgb: integer[] } Foreground override. Either a theme group name (string) or a direct RGB triple `{ r, g, b }`. Takes precedence over `hl_group`.
+---@field bg? string | integer[] | { ansi: integer } | { rgb: integer[] } Background override. Either a theme group name (string) or a direct RGB triple `{ r, g, b }`. Takes precedence over `hl_group`.
 ---@field bold? boolean Force-bold the highlight.
 ---@field dim? boolean Force-dim the highlight.
 ---@field italic? boolean Force-italic the highlight.
