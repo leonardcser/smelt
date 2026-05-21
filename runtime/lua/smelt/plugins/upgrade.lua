@@ -533,21 +533,10 @@ end, { desc = "install the newest smelt build (background)" })
 -- instead of opening an empty panel.
 
 local function changelog_lines()
-  local channel = settings_channel()
   local lines = {}
-  table.insert(lines, "channel: " .. channel)
-  table.insert(lines, "current: " .. (latest.current or "?"))
-  table.insert(lines, "latest:  " .. (latest.next or "?"))
-  if channel == "stable" and latest.details and latest.details.published_at then
-    table.insert(lines, "tagged:  " .. latest.details.published_at)
-  elseif channel == "unstable" and latest.details and latest.details.date then
-    table.insert(lines, "commit:  " .. latest.details.date)
-  end
-  table.insert(lines, "")
   local body = latest.details
       and (latest.details.body or latest.details.message)
   if body and body ~= "" then
-    table.insert(lines, "── notes ─────────────────────────────────")
     for line in body:gmatch("([^\n]*)\n?") do
       table.insert(lines, line)
     end
@@ -563,7 +552,7 @@ local function open_changelog_dialog()
   local leaf = smelt.dialog.content({ buf = body_buf, interactive = true })
 
   smelt.dialog.open({
-    title      = "smelt changelog",
+    title      = "changelog",
     min_height = "30%",
     max_height = "70%",
     panels     = { { leaf = leaf, height = "fill" } },
