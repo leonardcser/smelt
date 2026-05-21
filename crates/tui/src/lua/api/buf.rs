@@ -39,6 +39,64 @@ impl From<LuaVirtTextPos> for smelt_core::buffer::VirtTextPos {
     }
 }
 
+/// Color value for the `fg`/`bg` highlight fields. Accepts either a
+/// `string` (theme group name resolved through the active theme) or an
+/// integer triple `{ r, g, b }` (direct RGB sample).
+#[derive(Debug, Clone)]
+pub enum LuaColor {
+    Group(String),
+    Rgb([u8; 3]),
+}
+
+impl LuaType for LuaColor {
+    fn lua_type() -> String {
+        "string | integer[]".into()
+    }
+}
+
+impl FromLua for LuaColor {
+    fn from_lua(value: mlua::Value, _: &Lua) -> LuaResult<Self> {
+        match value {
+            mlua::Value::String(s) => Ok(LuaColor::Group(s.to_str()?.to_string())),
+            mlua::Value::Table(t) => {
+                let r: u8 = t.get(1)?;
+                let g: u8 = t.get(2)?;
+                let b: u8 = t.get(3)?;
+                Ok(LuaColor::Rgb([r, g, b]))
+            }
+            other => Err(mlua::Error::FromLuaConversionError {
+                from: other.type_name(),
+                to: "smelt color (theme group name or {r,g,b} table)".into(),
+                message: None,
+            }),
+        }
+    }
+}
+
+impl LuaColor {
+    fn resolve_fg(&self) -> Option<smelt_core::style::Color> {
+        match self {
+            LuaColor::Group(name) => crate::lua::with_app(|app| app.ui.theme().get(name).fg),
+            LuaColor::Rgb([r, g, b]) => Some(smelt_core::style::Color::Rgb {
+                r: *r,
+                g: *g,
+                b: *b,
+            }),
+        }
+    }
+
+    fn resolve_bg(&self) -> Option<smelt_core::style::Color> {
+        match self {
+            LuaColor::Group(name) => crate::lua::with_app(|app| app.ui.theme().get(name).bg),
+            LuaColor::Rgb([r, g, b]) => Some(smelt_core::style::Color::Rgb {
+                r: *r,
+                g: *g,
+                b: *b,
+            }),
+        }
+    }
+}
+
 /// Options accepted by `buf:mark(ns, row, col, opts)`. Mirrors a useful
 /// subset of `nvim_buf_set_extmark`'s keyset; pick highlight or
 /// virt-text fields, not both.
@@ -62,18 +120,12 @@ pub struct LuaMarkOpts {
 
     /// Theme group whose style is applied as the highlight base.
     pub hl_group: Option<String>,
-    /// Theme group whose foreground overrides `hl_group`.
-    pub fg: Option<String>,
-    /// Theme group whose background overrides `hl_group`.
-    pub bg: Option<String>,
-    /// Direct foreground RGB triple `{ r, g, b }`. Takes precedence over
-    /// `fg`/`hl_group`. Used for renderer-driven colors that can't be
-    /// pre-baked as theme groups (e.g. the prompt top bar's traveling
-    /// wave samples a sinusoid per cell).
-    pub fg_rgb: Option<[u8; 3]>,
-    /// Direct background RGB triple `{ r, g, b }`. Takes precedence over
-    /// `bg`/`hl_group`.
-    pub bg_rgb: Option<[u8; 3]>,
+    /// Foreground override. Either a theme group name (string) or a
+    /// direct RGB triple `{ r, g, b }`. Takes precedence over `hl_group`.
+    pub fg: Option<LuaColor>,
+    /// Background override. Either a theme group name (string) or a
+    /// direct RGB triple `{ r, g, b }`. Takes precedence over `hl_group`.
+    pub bg: Option<LuaColor>,
     /// Force-bold the highlight.
     pub bold: Option<bool>,
     /// Force-dim the highlight.
@@ -447,8 +499,8 @@ fn set_styled_lines(id: crate::smelt_term::BufId, lines: mlua::Table) -> LuaResu
         dim: bool,
         bold: bool,
         italic: bool,
-        fg: Option<String>,
-        bg: Option<String>,
+        fg: Option<LuaColor>,
+        bg: Option<LuaColor>,
     }
 
     struct Span {
@@ -473,8 +525,8 @@ fn set_styled_lines(id: crate::smelt_term::BufId, lines: mlua::Table) -> LuaResu
             dim: tbl.get::<Option<bool>>("dim")?.unwrap_or(false),
             bold: tbl.get::<Option<bool>>("bold")?.unwrap_or(false),
             italic: tbl.get::<Option<bool>>("italic")?.unwrap_or(false),
-            fg: tbl.get::<Option<String>>("fg")?,
-            bg: tbl.get::<Option<String>>("bg")?,
+            fg: tbl.get::<Option<LuaColor>>("fg")?,
+            bg: tbl.get::<Option<LuaColor>>("bg")?,
         })
     }
 
@@ -522,15 +574,25 @@ fn set_styled_lines(id: crate::smelt_term::BufId, lines: mlua::Table) -> LuaResu
                     style.dim = span.style.dim;
                     style.bold = span.style.bold;
                     style.italic = span.style.italic;
-                    if let Some(fg_group) = &span.style.fg {
-                        if let Some(fg) = sink.theme().get(fg_group).fg {
-                            style.fg = Some(fg);
-                        }
+                    if let Some(c) = &span.style.fg {
+                        style.fg = match c {
+                            LuaColor::Group(name) => sink.theme().get(name).fg,
+                            LuaColor::Rgb([r, g, b]) => Some(smelt_core::style::Color::Rgb {
+                                r: *r,
+                                g: *g,
+                                b: *b,
+                            }),
+                        };
                     }
-                    if let Some(bg_group) = &span.style.bg {
-                        if let Some(bg) = sink.theme().get(bg_group).bg {
-                            style.bg = Some(bg);
-                        }
+                    if let Some(c) = &span.style.bg {
+                        style.bg = match c {
+                            LuaColor::Group(name) => sink.theme().get(name).bg,
+                            LuaColor::Rgb([r, g, b]) => Some(smelt_core::style::Color::Rgb {
+                                r: *r,
+                                g: *g,
+                                b: *b,
+                            }),
+                        };
                     }
                     sink.push(group, style);
                     if let Some(lang) = &span.syntax {
@@ -633,24 +695,15 @@ fn set_extmark(
 fn build_highlight_style(opts: &LuaMarkOpts) -> crate::smelt_term::SpanStyle {
     use smelt_core::style::Style;
 
-    let resolve_group =
-        |name: &str| -> Style { crate::lua::with_app(|app| app.ui.theme().get(name)) };
-
     let mut style = match opts.hl_group.as_deref() {
-        Some(name) => resolve_group(name),
+        Some(name) => crate::lua::with_app(|app| app.ui.theme().get(name)),
         None => Style::default(),
     };
-    if let Some(name) = opts.fg.as_deref() {
-        style.fg = resolve_group(name).fg;
+    if let Some(c) = &opts.fg {
+        style.fg = c.resolve_fg();
     }
-    if let Some(name) = opts.bg.as_deref() {
-        style.bg = resolve_group(name).bg;
-    }
-    if let Some([r, g, b]) = opts.fg_rgb {
-        style.fg = Some(smelt_core::style::Color::Rgb { r, g, b });
-    }
-    if let Some([r, g, b]) = opts.bg_rgb {
-        style.bg = Some(smelt_core::style::Color::Rgb { r, g, b });
+    if let Some(c) = &opts.bg {
+        style.bg = c.resolve_bg();
     }
     if let Some(b) = opts.bold {
         style.bold = b;

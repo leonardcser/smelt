@@ -9,7 +9,8 @@
 -- A `Span` is the unit input these functions accept:
 --   { text, style?, priority?, separated?, truncatable?, align_right? }
 -- where `style` is a subset of `smelt.buf.MarkOpts` (`fg`, `bg`,
--- `fg_rgb`, `bg_rgb`, `hl_group`, `bold`, `dim`, `italic`). The same
+-- `hl_group`, `bold`, `dim`, `italic`). `fg` / `bg` accept either a
+-- theme group name (string) or a direct `{ r, g, b }` triple. The same
 -- style table is forwarded verbatim to `buf:mark` so callers don't
 -- need to translate.
 --
@@ -251,7 +252,7 @@ function M.compose_status(items, opts)
   local function with_default_bg(style)
     local s = {}
     for k, v in pairs(style) do s[k] = v end
-    if bg_group and not s.bg and not s.bg_rgb then s.bg = bg_group end
+    if bg_group and not s.bg then s.bg = bg_group end
     return s
   end
   local fill_style = with_default_bg({})

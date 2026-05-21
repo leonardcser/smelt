@@ -111,7 +111,7 @@ local function indicator_spans()
       local rgb = bar.wave_color_at(elapsed_ms, x)
       spans[#spans + 1] = {
         text = ch,
-        style = { fg_rgb = rgb, bold = true },
+        style = { fg = rgb, bold = true },
         priority = 0,
       }
       x = x + 1
