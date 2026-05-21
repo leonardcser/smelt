@@ -177,6 +177,7 @@ impl BusyStack {
         self.entries.last().map(|(_, l)| l.clone())
     }
 
+    #[cfg(any(test, feature = "harness"))]
     pub(crate) fn since(&self) -> Option<Instant> {
         self.since
     }
@@ -536,10 +537,9 @@ impl TuiApp {
     /// Publish `vim_mode`, `confirms_pending`, `now`, `spinner_frame`,
     /// and the `work_*` family of cells whenever their values change.
     pub(crate) fn publish_diff_cells(&mut self) {
-        self.core.cells.publish_if_changed(
-            "vim_mode",
-            self.focused_vim_mode_label().unwrap_or_default(),
-        );
+        self.core
+            .cells
+            .publish_if_changed("vim_mode", self.vim_mode_cell_value());
         self.core
             .cells
             .publish_if_changed("confirms_pending", !self.core.confirms.is_clear());
@@ -559,7 +559,70 @@ impl TuiApp {
             .unwrap_or(0);
         self.core.cells.publish_if_changed("spinner_frame", frame);
 
+        let tps = self
+            .working
+            .turn_meta()
+            .and_then(|m| m.avg_tps)
+            .unwrap_or(0.0);
+        self.core.cells.publish_if_changed("tps", tps);
+
+        let task_label = self.task_label.clone().unwrap_or_default();
+        self.core.cells.publish_if_changed("task_label", task_label);
+
+        let running_procs = self.core.processes.running_count() as u32;
+        self.core
+            .cells
+            .publish_if_changed("running_procs", running_procs);
+
+        let permission_pending = self.pending_dialog && !self.focused_overlay_blocks_agent();
+        self.core
+            .cells
+            .publish_if_changed("permission_pending", permission_pending);
+
+        let cursor = self.focused_cursor_pos();
+        self.core.cells.publish_if_changed("cursor_pos", cursor);
+
         self.publish_work_cells();
+    }
+
+    /// User-facing vim mode label for the focused surface — or empty
+    /// when no vim-enabled surface owns input. The Lua statusline reads
+    /// this directly from the `vim_mode` cell.
+    fn vim_mode_cell_value(&self) -> String {
+        let Some(mode) = self.focused_vim_mode() else {
+            return String::new();
+        };
+        match mode {
+            crate::smelt_term::VimMode::Insert => "INSERT",
+            crate::smelt_term::VimMode::Visual => "VISUAL",
+            crate::smelt_term::VimMode::VisualLine => "VISUAL LINE",
+            crate::smelt_term::VimMode::Normal => "NORMAL",
+        }
+        .into()
+    }
+
+    /// Cursor position of the focused window, published as `cursor_pos`.
+    /// Returns the default `(0, 0, 0)` when no focused window has lines.
+    fn focused_cursor_pos(&self) -> smelt_core::cells::CursorPos {
+        let Some(w) = self.ui.focused_window() else {
+            return smelt_core::cells::CursorPos::default();
+        };
+        let total = self.ui.buf(w.buf).map(|b| b.line_count()).unwrap_or(0);
+        if total == 0 {
+            return smelt_core::cells::CursorPos::default();
+        }
+        let line_idx = w.cursor_abs_row();
+        let col = w.cursor_col() as usize;
+        let scroll_pct = if total <= 1 {
+            100u8
+        } else {
+            ((line_idx as u64 * 100) / (total.saturating_sub(1) as u64)) as u8
+        };
+        smelt_core::cells::CursorPos {
+            line: (line_idx as u32) + 1,
+            col: (col as u32) + 1,
+            scroll_pct: scroll_pct.min(100),
+        }
     }
 
     /// Resolve the public `WorkState` and label from `WorkingState` +

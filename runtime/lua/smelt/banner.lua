@@ -118,7 +118,7 @@ function M.ansi_render(pixels, palette)
 end
 
 -- Named-source registry for the splash banner. Mirrors
--- `smelt.statusline.register`: each call by `name` replaces any prior
+-- `require("smelt.statusline").add`: each call by `name` replaces any prior
 -- registration with the same name; the bundled banner plugin queries
 -- every source each time it opens the splash. Each source returns one
 -- of:

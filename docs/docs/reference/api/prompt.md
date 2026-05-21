@@ -40,6 +40,14 @@ fun(pos: integer?): integer
 
 Read or write the prompt cursor as a byte offset into `text()`. Without an argument returns the current offset; with one snaps it to a char boundary and clamps to source length. Returns the resulting offset.
 
+## `smelt.prompt.has_stash`
+
+```lua
+fun(): boolean
+```
+
+Return whether the prompt currently holds a stashed input snapshot (Ctrl+S). The top-bar renderer uses this to surface a `» Stashed (ctrl+s to unstash)` row.
+
 ## `smelt.prompt.is_modal`
 
 ```lua
@@ -64,6 +72,14 @@ Pass `opts.on_select` for the per-navigation hook; pass `opts.on_enter`
 to switch to persistent mode (the picker stays open across selections
 until Esc). Returns `{ action, item, index }` on accept or `nil` on
 dismiss (single-shot mode). Must run inside a `smelt.spawn` frame.
+
+## `smelt.prompt.queued`
+
+```lua
+fun(): string[]
+```
+
+Return the array of messages currently queued behind the active turn. Empty when the agent is idle and no busy work is in flight. The top-bar renderer reads this each frame to surface waiting messages above the input.
 
 ## `smelt.prompt.remove_section`
 

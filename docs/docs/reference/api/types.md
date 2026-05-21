@@ -41,10 +41,8 @@ Options accepted by `buf:mark(ns, row, col, opts)`. Mirrors a useful subset of `
 | `right_gravity` | `boolean` |  | If true, the mark sticks with text inserted to its right. |
 | `end_right_gravity` | `boolean` |  | Right-gravity flag for the end-of-range cursor. |
 | `hl_group` | `string` |  | Theme group whose style is applied as the highlight base. |
-| `fg` | `string` |  | Theme group whose foreground overrides `hl_group`. |
-| `bg` | `string` |  | Theme group whose background overrides `hl_group`. |
-| `fg_rgb` | `integer[]` |  | Direct foreground RGB triple `{ r, g, b }`. Takes precedence over `fg`/`hl_group`. Used for renderer-driven colors that can't be pre-baked as theme groups (e.g. the prompt top bar's traveling wave samples a sinusoid per cell). |
-| `bg_rgb` | `integer[]` |  | Direct background RGB triple `{ r, g, b }`. Takes precedence over `bg`/`hl_group`. |
+| `fg` | `string | integer[]` |  | Foreground override. Either a theme group name (string) or a direct RGB triple `{ r, g, b }`. Takes precedence over `hl_group`. |
+| `bg` | `string | integer[]` |  | Background override. Either a theme group name (string) or a direct RGB triple `{ r, g, b }`. Takes precedence over `hl_group`. |
 | `bold` | `boolean` |  | Force-bold the highlight. |
 | `dim` | `boolean` |  | Force-dim the highlight. |
 | `italic` | `boolean` |  | Force-italic the highlight. |
@@ -560,7 +558,7 @@ Variants: `"inline"` \| `"overlay"` \| `"right_align"` \| `"eol"`
 
 Name of a reactive cell. Open alias — plugin-defined cells declared via `smelt.cell.new` are accepted alongside the well-known runtime cells listed here.
 
-Open alias — accepts any `string`. Well-known names: `"agent_mode"` \| `"block_done"` \| `"branch"` \| `"cmd_post"` \| `"cmd_pre"` \| `"confirm_requested"` \| `"confirm_resolved"` \| `"confirms_pending"` \| `"cwd"` \| `"errors"` \| `"history"` \| `"input_submit"` \| `"model"` \| `"now"` \| `"reasoning"` \| `"session_ended"` \| `"session_started"` \| `"session_title"` \| `"shutdown"` \| `"spinner_frame"` \| `"stream_delta"` \| `"tokens_used"` \| `"tool_end"` \| `"tool_start"` \| `"turn_complete"` \| `"turn_end"` \| `"turn_error"` \| `"turn_start"` \| `"vim_mode"` \| `"work_busy"` \| `"work_elapsed_ms"` \| `"work_label"` \| `"work_outcome"` \| `"work_retry_attempt"` \| `"work_retry_remaining_ms"` \| `"work_state"`.
+Open alias — accepts any `string`. Well-known names: `"agent_mode"` \| `"block_done"` \| `"branch"` \| `"cmd_post"` \| `"cmd_pre"` \| `"confirm_requested"` \| `"confirm_resolved"` \| `"confirms_pending"` \| `"cursor_pos"` \| `"cwd"` \| `"errors"` \| `"history"` \| `"input_submit"` \| `"model"` \| `"now"` \| `"permission_pending"` \| `"reasoning"` \| `"running_procs"` \| `"session_ended"` \| `"session_started"` \| `"session_title"` \| `"shutdown"` \| `"spinner_frame"` \| `"stream_delta"` \| `"task_label"` \| `"tokens_used"` \| `"tool_end"` \| `"tool_start"` \| `"tps"` \| `"turn_complete"` \| `"turn_end"` \| `"turn_error"` \| `"turn_start"` \| `"vim_mode"` \| `"work_busy"` \| `"work_elapsed_ms"` \| `"work_label"` \| `"work_outcome"` \| `"work_retry_attempt"` \| `"work_retry_remaining_ms"` \| `"work_state"`.
 
 ### `smelt.cli.FlagKind`
 

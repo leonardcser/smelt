@@ -8,13 +8,11 @@
 --     returned segments, composes via `_bar.compose_status`, and
 --     writes to the window's buffer.
 --
--- The renderer reads engine state through `smelt.statusline.snapshot()`
--- (vim mode, agent mode, position, tps, settings, permission/proc
--- counters, task label) and `smelt.session.tokens()` for cache info.
--- A built-in `core` source produces the default left/right strips;
--- plugins extend the line by registering additional sources via
--- `smelt.statusline.register(name, fn)` (kept as an alias to
--- `M.add`).
+-- The built-in `core` source reads engine state directly from cells
+-- (`vim_mode`, `agent_mode`, `tps`, `task_label`, `running_procs`,
+-- `permission_pending`, `cursor_pos`) and `smelt.session.tokens()` for
+-- cache info. Plugins extend the line by registering additional
+-- sources via `M.add(name, fn)`.
 
 local bar = require("smelt._bar")
 
@@ -45,16 +43,9 @@ end
 
 -- ── default `core` source ───────────────────────────────────────────
 
-local function reasoning_pill_extra(slug, accent)
-  if not slug.bg and accent and accent.fg then
-    return { bg = accent.fg }
-  end
-  return nil
-end
-
-local function vim_group(kind)
-  if kind == "insert" then return "SmeltVimInsert"
-  elseif kind == "visual" then return "SmeltVimVisual"
+local function vim_group(label)
+  if label == "INSERT" then return "SmeltVimInsert"
+  elseif label == "VISUAL" or label == "VISUAL LINE" then return "SmeltVimVisual"
   else return "SmeltVimNormal"
   end
 end
@@ -68,55 +59,55 @@ local function agent_mode_group(name)
   end
 end
 
-local function core_compose()
-  local snap = smelt.statusline.snapshot()
-  if not snap then return {} end
+local function cell(name) return smelt.cell(name):get() end
 
+local function core_compose()
   local items = {}
 
   -- Slug pill.
-  if snap.settings and snap.settings.show_slug and snap.task_label then
-    local slug = smelt.theme.get("SmeltSlug") or {}
-    local extra = reasoning_pill_extra(slug, smelt.theme.get("SmeltAccent"))
+  local task_label = cell("task_label")
+  if smelt.settings.show_slug and task_label and task_label ~= "" then
     items[#items + 1] = {
-      text = " " .. snap.task_label .. " ",
+      text = " " .. task_label .. " ",
       style = { hl_group = "SmeltSlug" },
-      style_extra = extra,
       priority = 5,
       truncatable = true,
     }
   end
 
   -- Vim mode pill.
-  if snap.vim and snap.vim.enabled then
+  local vim_label = cell("vim_mode")
+  if vim_label and vim_label ~= "" then
     items[#items + 1] = {
-      text = " " .. (snap.vim.label or "NORMAL") .. " ",
-      style = { hl_group = vim_group(snap.vim.kind) },
+      text = " " .. vim_label .. " ",
+      style = { hl_group = vim_group(vim_label) },
       priority = 3,
     }
   end
 
   -- Agent mode pill.
-  if snap.mode then
-    local icon = smelt.mode.icon and smelt.mode.icon(snap.mode.name) or ""
+  local mode_name = cell("agent_mode")
+  if mode_name and mode_name ~= "" then
+    local icon = smelt.mode.icon and smelt.mode.icon(mode_name) or ""
     items[#items + 1] = {
-      text = " " .. icon .. (snap.mode.name or "") .. " ",
-      style = { hl_group = agent_mode_group(snap.mode.name) },
+      text = " " .. icon .. mode_name .. " ",
+      style = { hl_group = agent_mode_group(mode_name) },
       priority = 1,
     }
   end
 
   -- tok/s.
-  if snap.settings and snap.settings.show_tps and snap.tps then
+  local tps = cell("tps") or 0
+  if smelt.settings.show_tps and tps > 0 then
     items[#items + 1] = {
-      text = string.format(" %.1f tok/s", snap.tps),
+      text = string.format(" %.1f tok/s", tps),
       style = { fg = "Comment" },
       priority = 4,
     }
   end
 
   -- Cache hit ratio (grouped with token indicators; hides when show_tokens is off).
-  if snap.settings and snap.settings.show_tokens then
+  if smelt.settings.show_tokens then
     local tokens = smelt.session.tokens()
     if tokens and tokens.cache_hit_ratio then
       local pct = math.floor(tokens.cache_hit_ratio * 100 + 0.5)
@@ -130,7 +121,7 @@ local function core_compose()
   end
 
   -- Right-strip indicators.
-  if snap.permission_pending then
+  if cell("permission_pending") then
     items[#items + 1] = {
       text = "permission pending",
       style = { fg = "SmeltAccent", bold = true },
@@ -139,7 +130,7 @@ local function core_compose()
     }
   end
 
-  local procs = snap.running_procs or 0
+  local procs = cell("running_procs") or 0
   if procs > 0 then
     items[#items + 1] = {
       text = procs == 1 and "1 proc" or (procs .. " procs"),
@@ -149,19 +140,10 @@ local function core_compose()
     }
   end
 
-  local agents = snap.running_agents or 0
-  if agents > 0 then
+  local pos = cell("cursor_pos")
+  if pos and pos.line and pos.line > 0 then
     items[#items + 1] = {
-      text = agents == 1 and "1 agent" or (agents .. " agents"),
-      style = { fg = "SmeltAccent" },
-      priority = 2,
-      separated = true,
-    }
-  end
-
-  if snap.position and snap.position.text then
-    items[#items + 1] = {
-      text = snap.position.text,
+      text = string.format("%d:%d %d%%", pos.line, pos.col or 1, pos.scroll_pct or 0),
       style = { fg = "Comment" },
       priority = 3,
       align_right = true,
@@ -221,12 +203,5 @@ if M.win then M.win:set_renderer(render) end
 -- replacing this module is free to override `M.rows` if it produces a
 -- multi-row statusline.
 M.rows = 1
-
--- Back-compat alias: callers that used the old `smelt.statusline.register`
--- (e.g. the upgrade plugin) keep working through this Lua-side surface.
-if smelt.statusline then
-  smelt.statusline.register = M.add
-  smelt.statusline.unregister = M.remove
-end
 
 return M

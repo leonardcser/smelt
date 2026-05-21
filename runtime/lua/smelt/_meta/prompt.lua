@@ -26,6 +26,10 @@ prompt.completer = nil
 ---@type fun(pos: integer?): integer
 prompt.cursor = nil
 
+--- Return whether the prompt currently holds a stashed input snapshot (Ctrl+S). The top-bar renderer uses this to surface a `» Stashed (ctrl+s to unstash)` row.
+---@type fun(): boolean
+prompt.has_stash = nil
+
 --- True while at least one `smelt.prompt.acquire()` lock is outstanding.
 --- Plugins read this to skip non-blocking work that would race the
 --- modal owner.
@@ -42,6 +46,10 @@ prompt.is_modal = nil
 ---@see smelt.fuzzy.rank
 ---@type fun(opts: smelt.prompt.PickerOpts): table?
 prompt.open_picker = nil
+
+--- Return the array of messages currently queued behind the active turn. Empty when the agent is idle and no busy work is in flight. The top-bar renderer reads this each frame to surface waiting messages above the input.
+---@type fun(): string[]
+prompt.queued = nil
 
 --- Remove the named prompt section. No-op if the section does not exist.
 ---@type fun(name: string): nil

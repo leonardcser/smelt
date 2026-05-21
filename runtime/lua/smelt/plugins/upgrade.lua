@@ -341,7 +341,7 @@ end
 
 -- ── statusline pill ────────────────────────────────────────────────────
 
-smelt.statusline.register("upgrade", function()
+require("smelt.statusline").add("upgrade", function()
   if not latest.has_update or settings_mode() == "off" then return {} end
   return {
     {

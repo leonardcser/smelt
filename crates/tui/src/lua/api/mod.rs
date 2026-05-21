@@ -22,7 +22,6 @@ mod render;
 mod session;
 mod settings;
 mod spinner;
-mod statusline;
 mod text;
 pub(crate) mod theme;
 mod transcript;
@@ -104,7 +103,6 @@ impl LuaRuntime {
         work::register(lua, &smelt)?;
         prompt::register(lua, &smelt)?;
         theme::register(lua, &smelt)?;
-        statusline::register(lua, &smelt, shared)?;
         confirm::register(lua, &smelt)?;
         layout::register(lua, &smelt, shared)?;
         notebook::register(lua, &smelt)?;

@@ -324,6 +324,15 @@ pub struct WorkBusyEntry {
     pub label: String,
 }
 
+/// Payload for the `cursor_pos` cell. Tracks the focused window's
+/// cursor for the statusline position pill.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct CursorPos {
+    pub line: u32,
+    pub col: u32,
+    pub scroll_pct: u8,
+}
+
 /// Payload for the `stream_delta` cell. Emitted for every streaming
 /// chunk arriving from the provider — text, thinking, and tool-call
 /// argument JSON fragments. Use `bytes` for cheap counters (live TPS);
@@ -359,22 +368,27 @@ pub const SEEDED_CELL_NAMES: &[&str] = &[
     "confirm_requested",
     "confirm_resolved",
     "confirms_pending",
+    "cursor_pos",
     "cwd",
     "errors",
     "history",
     "input_submit",
     "model",
     "now",
+    "permission_pending",
     "reasoning",
+    "running_procs",
     "session_ended",
     "session_started",
     "session_title",
     "shutdown",
     "spinner_frame",
     "stream_delta",
+    "task_label",
     "tokens_used",
     "tool_end",
     "tool_start",
+    "tps",
     "turn_complete",
     "turn_end",
     "turn_error",
@@ -457,6 +471,16 @@ pub(crate) fn build_with_builtins(seeds: BuiltinSeeds) -> Cells {
     cells.register_lua_projector::<u32, _>(|n, _| mlua::Value::Integer(*n as i64));
     cells.register_lua_projector::<u64, _>(|n, _| mlua::Value::Integer(*n as i64));
     cells.register_lua_projector::<u8, _>(|n, _| mlua::Value::Integer(*n as i64));
+    cells.register_lua_projector::<f64, _>(|n, _| mlua::Value::Number(*n));
+    cells.register_lua_projector::<CursorPos, _>(|p, lua| {
+        let Ok(t) = lua.create_table() else {
+            return mlua::Value::Nil;
+        };
+        let _ = t.set("line", p.line as i64);
+        let _ = t.set("col", p.col as i64);
+        let _ = t.set("scroll_pct", p.scroll_pct as i64);
+        mlua::Value::Table(t)
+    });
     cells.register_lua_projector::<EventStub, _>(|_, _| mlua::Value::Nil);
     // `None` fields are absent so plugins can write `usage.prompt_tokens or 0`.
     cells.register_lua_projector::<TokenUsage, _>(|u, lua| {
@@ -612,6 +636,11 @@ pub(crate) fn build_with_builtins(seeds: BuiltinSeeds) -> Cells {
     cells.declare("branch", seeds.branch);
     cells.declare("now", 0u64);
     cells.declare("spinner_frame", 0u8);
+    cells.declare("tps", 0.0f64);
+    cells.declare("task_label", String::new());
+    cells.declare("running_procs", 0u32);
+    cells.declare("permission_pending", false);
+    cells.declare("cursor_pos", CursorPos::default());
 
     cells.register_lua_projector::<Vec<WorkBusyEntry>, _>(|v, lua| {
         let Ok(out) = lua.create_table() else {
