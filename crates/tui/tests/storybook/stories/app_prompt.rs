@@ -39,6 +39,27 @@ app_story!(prompt_shell_escape_prefix, |ctx| {
     ctx.assert_snapshot();
 });
 
+// ── Prompt top-bar chrome (queued + stash) ────────────────────────
+
+app_story!(prompt_stash_row, |ctx| {
+    // Ctrl+S stashes the current buffer. The top bar grows by one row
+    // with the `» Stashed (ctrl+s to unstash)` cue.
+    ctx.set_viewport(50, 8);
+    ctx.type_prompt("draft note");
+    ctx.stash_prompt();
+    ctx.assert_snapshot();
+});
+
+app_story!(prompt_queued_messages, |ctx| {
+    // While a turn is active, Enter-on-prompt enqueues the message
+    // instead of submitting. The top bar surfaces each queued entry on
+    // its own row, prefixed with the `↪ ` glyph.
+    ctx.set_viewport(50, 10);
+    ctx.push_queued_message("first follow-up");
+    ctx.push_queued_message("second follow-up");
+    ctx.assert_snapshot();
+});
+
 // ── Exec block (`!cmd` shell escape) ──────────────────────────────
 
 app_story!(exec_command_block_with_output, |ctx| {

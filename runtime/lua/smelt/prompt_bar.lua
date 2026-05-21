@@ -21,11 +21,11 @@ local BOT_NS = smelt.ns("smelt.prompt_bar.bottom")
 
 local function queued_message_rows(queued, width)
   local rows = {}
+  local prefix = " \u{21AA} "
   for _, msg in ipairs(queued) do
-    -- Mirror prompt_buf::queued_message_rows: leading "  " indent, dim style.
-    -- We don't wrap — the buffer line shows the message verbatim trimmed by
-    -- the bar's available width.
-    local text = "  " .. msg
+    -- Leading "↪ " glyph mirrors the user-block continuation cue; the
+    -- rest renders verbatim, trimmed by the bar's available width.
+    local text = prefix .. msg
     rows[#rows + 1] = {
       text = text,
       highlights = {

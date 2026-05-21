@@ -273,6 +273,25 @@ impl AppStoryCtx {
         self.app.type_text(s);
     }
 
+    /// Press `ctrl+s` to toggle the prompt stash. Use this to drive the
+    /// stash chrome (the `» Stashed` row) from a story.
+    pub fn stash_prompt(&mut self) {
+        self.app.press_mod(
+            crossterm::event::KeyCode::Char('s'),
+            crossterm::event::KeyModifiers::CONTROL,
+        );
+    }
+
+    /// Push a synthetic queued user message. In production these arrive
+    /// by pressing Enter on the prompt while a turn is active; the
+    /// harness side-channels them straight onto `app.queued_messages`.
+    /// Auto-starts a turn so the top bar's `prompt.queued()` accessor
+    /// (which gates on `agent.is_some() || busy`) surfaces the entries.
+    pub fn push_queued_message(&mut self, text: &str) {
+        self.start_turn();
+        self.app.push_queued_message(text.to_string());
+    }
+
     /// Execute a Lua snippet against the embedded runtime. Used by
     /// dialog stories that need to seed state or invoke a primitive
     /// directly.
