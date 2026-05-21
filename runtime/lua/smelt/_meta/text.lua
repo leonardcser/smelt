@@ -27,13 +27,17 @@ text.format_tokens = nil
 ---@type fun(s: string): integer
 text.line_count = nil
 
+--- Return `s` as valid UTF-8, replacing malformed byte sequences with the Unicode replacement character. Useful when a Lua string came from raw bytes; prefer `smelt.text.truncate` when shortening text.
+---@see smelt.text.truncate
+---@type fun(s: string): string
+text.sanitize_utf8 = nil
+
 --- Lowercase `s`, replace non-alphanumeric runs with `-`, drop empty segments. Same algorithm the title plugin uses for fallback slugs.
 ---@type fun(s: string): string
 text.slugify = nil
 
---- Truncate `s` to at most `max_bytes`, snapping to the previous UTF-8 char boundary. Returns `s` unchanged when it already fits; appends `suffix` when provided and truncation actually occurred. **Byte-based** — use `smelt.text.fit` instead when you need to fit into a terminal-cell budget.
----@see smelt.text.fit
----@type fun(s: string, max_bytes: integer, suffix: string?): string
+--- Return a valid UTF-8 string shortened to a byte budget. By default keeps the head: `truncate(s, n)`. Passing a string third argument appends it as a suffix when truncation happens. Passing an opts table enables `{ keep = "head"|"tail", prefix?, suffix? }`; use `{ keep = "tail" }` for recent-message snippets. Lua string slicing is byte-based and can split multi-byte characters; this function snaps to UTF-8 boundaries and also accepts already-invalid Lua byte strings.
+---@type fun(s: string, max_bytes: integer, opts: any?): string
 text.truncate = nil
 
 --- Return the visual column count of `s`. Lua's `#s` counts bytes; use this for sizing extmark ranges or computing column offsets so multi-byte and wide characters land correctly.

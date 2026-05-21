@@ -8,6 +8,121 @@ use smelt_core::lua::doc::Tier;
 use smelt_core::lua::module::LuaMod;
 use unicode_width::UnicodeWidthStr;
 
+fn lossy_utf8(bytes: &[u8]) -> String {
+    String::from_utf8_lossy(bytes).into_owned()
+}
+
+fn head_bytes(bytes: &[u8], max_bytes: usize) -> String {
+    let s = lossy_utf8(bytes);
+    smelt_buffer::text::slice(&s, 0..max_bytes).to_string()
+}
+
+fn tail_bytes(bytes: &[u8], max_bytes: usize) -> String {
+    let s = lossy_utf8(bytes);
+    if s.len() <= max_bytes {
+        return s;
+    }
+    let start = s.len() - max_bytes;
+    let snapped = smelt_buffer::text::snap(&s, start);
+    let start = if snapped == start {
+        start
+    } else {
+        smelt_buffer::text::next_char_boundary(&s, start)
+    };
+    smelt_buffer::text::slice(&s, start..s.len()).to_string()
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Keep {
+    Head,
+    Tail,
+}
+
+struct TruncateOptions {
+    keep: Keep,
+    prefix: String,
+    suffix: String,
+}
+
+impl Default for TruncateOptions {
+    fn default() -> Self {
+        Self {
+            keep: Keep::Head,
+            prefix: String::new(),
+            suffix: String::new(),
+        }
+    }
+}
+
+fn lua_string_lossy(s: mlua::String) -> String {
+    let bytes = s.as_bytes();
+    lossy_utf8(bytes.as_ref())
+}
+
+fn table_string(t: &mlua::Table, key: &str) -> LuaResult<Option<String>> {
+    match t.get::<mlua::Value>(key)? {
+        mlua::Value::Nil => Ok(None),
+        mlua::Value::String(s) => Ok(Some(lua_string_lossy(s))),
+        other => Err(mlua::Error::FromLuaConversionError {
+            from: other.type_name(),
+            to: "string".into(),
+            message: Some(format!("smelt.text.truncate: opts.{key} must be a string")),
+        }),
+    }
+}
+
+fn parse_truncate_options(opts: Option<mlua::Value>) -> LuaResult<TruncateOptions> {
+    match opts {
+        None | Some(mlua::Value::Nil) => Ok(TruncateOptions::default()),
+        Some(mlua::Value::String(s)) => Ok(TruncateOptions {
+            suffix: lua_string_lossy(s),
+            ..TruncateOptions::default()
+        }),
+        Some(mlua::Value::Table(t)) => {
+            let keep = match table_string(&t, "keep")?.as_deref() {
+                None | Some("head") => Keep::Head,
+                Some("tail") => Keep::Tail,
+                Some(_) => {
+                    return Err(mlua::Error::RuntimeError(
+                        "smelt.text.truncate: opts.keep must be 'head' or 'tail'".into(),
+                    ));
+                }
+            };
+            Ok(TruncateOptions {
+                keep,
+                prefix: table_string(&t, "prefix")?.unwrap_or_default(),
+                suffix: table_string(&t, "suffix")?.unwrap_or_default(),
+            })
+        }
+        Some(other) => Err(mlua::Error::FromLuaConversionError {
+            from: other.type_name(),
+            to: "string or table".into(),
+            message: Some("smelt.text.truncate: opts must be a suffix string or table".into()),
+        }),
+    }
+}
+
+fn truncate_bytes(bytes: &[u8], max_bytes: usize, opts: &TruncateOptions) -> String {
+    let truncated = bytes.len() > max_bytes;
+    match opts.keep {
+        Keep::Head => {
+            let mut out = head_bytes(bytes, max_bytes);
+            if truncated {
+                out.push_str(&opts.suffix);
+            }
+            out
+        }
+        Keep::Tail => {
+            let mut out = String::new();
+            if truncated {
+                out.push_str(&opts.prefix);
+            }
+            out.push_str(&tail_bytes(bytes, max_bytes));
+            out
+        }
+    }
+}
+
 pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
     let m = LuaMod::under(
         lua,
@@ -36,6 +151,15 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
         },
     )?;
     m.fn_(
+        "sanitize_utf8",
+        "Return `s` as valid UTF-8, replacing malformed byte sequences with the Unicode replacement character. Useful when a Lua string came from raw bytes; prefer `smelt.text.truncate` when shortening text.",
+        &["s"],
+        |_, s: mlua::String| {
+            let bytes = s.as_bytes();
+            Ok(lossy_utf8(bytes.as_ref()))
+        },
+    )?;
+    m.fn_(
         "slugify",
         "Lowercase `s`, replace non-alphanumeric runs with `-`, drop empty segments. Same algorithm the title plugin uses for fallback slugs.",
         &["s"],
@@ -43,19 +167,12 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
     )?;
     m.fn_(
         "truncate",
-        "Truncate `s` to at most `max_bytes`, snapping to the previous UTF-8 char boundary. Returns `s` unchanged when it already fits; appends `suffix` when provided and truncation actually occurred. **Byte-based** — use `smelt.text.fit` instead when you need to fit into a terminal-cell budget.",
-        &["s", "max_bytes", "suffix"],
-        |_, (s, max_bytes, suffix): (String, usize, Option<String>)| -> LuaResult<String> {
-            if s.len() <= max_bytes {
-                return Ok(s);
-            }
-            let cut = smelt_buffer::text::snap(&s, max_bytes);
-            let mut out = String::with_capacity(cut + suffix.as_ref().map_or(0, |s| s.len()));
-            out.push_str(&s[..cut]);
-            if let Some(suf) = suffix {
-                out.push_str(&suf);
-            }
-            Ok(out)
+        "Return a valid UTF-8 string shortened to a byte budget. By default keeps the head: `truncate(s, n)`. Passing a string third argument appends it as a suffix when truncation happens. Passing an opts table enables `{ keep = \"head\"|\"tail\", prefix?, suffix? }`; use `{ keep = \"tail\" }` for recent-message snippets. Lua string slicing is byte-based and can split multi-byte characters; this function snaps to UTF-8 boundaries and also accepts already-invalid Lua byte strings.",
+        &["s", "max_bytes", "opts"],
+        |_, (s, max_bytes, opts): (mlua::String, usize, Option<mlua::Value>)| -> LuaResult<String> {
+            let bytes = s.as_bytes();
+            let opts = parse_truncate_options(opts)?;
+            Ok(truncate_bytes(bytes.as_ref(), max_bytes, &opts))
         },
     )?;
     m.fn_(
@@ -139,4 +256,65 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
         },
     )?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn truncate_bytes_keeps_utf8_boundary_at_head() {
+        let opts = TruncateOptions::default();
+        assert_eq!(truncate_bytes("abc😀x".as_bytes(), 5, &opts), "abc");
+        assert_eq!(truncate_bytes("abc😀x".as_bytes(), 7, &opts), "abc😀");
+    }
+
+    #[test]
+    fn truncate_bytes_can_keep_tail() {
+        let opts = TruncateOptions {
+            keep: Keep::Tail,
+            ..TruncateOptions::default()
+        };
+        assert_eq!(truncate_bytes("x😀abc".as_bytes(), 6, &opts), "abc");
+        assert_eq!(truncate_bytes("x😀abc".as_bytes(), 7, &opts), "😀abc");
+    }
+
+    #[test]
+    fn lua_truncate_accepts_invalid_byte_strings() {
+        let lua = Lua::new();
+        let smelt = lua.create_table().unwrap();
+        register(&lua, &smelt).unwrap();
+        let text: mlua::Table = smelt.get("text").unwrap();
+        let truncate: mlua::Function = text.get("truncate").unwrap();
+        let invalid = lua.create_string([0xff, b'a']).unwrap();
+
+        let out: String = truncate.call((invalid, 10usize, mlua::Value::Nil)).unwrap();
+        assert_eq!(out, "�a");
+    }
+
+    #[test]
+    fn lua_truncate_supports_tail_option() {
+        let lua = Lua::new();
+        let smelt = lua.create_table().unwrap();
+        register(&lua, &smelt).unwrap();
+        lua.globals().set("smelt", smelt).unwrap();
+        let out: String = lua
+            .load("return smelt.text.truncate('x😀abc', 7, { keep = 'tail' })")
+            .eval()
+            .unwrap();
+        assert_eq!(out, "😀abc");
+    }
+
+    #[test]
+    fn lua_api_accepts_invalid_byte_strings() {
+        let lua = Lua::new();
+        let smelt = lua.create_table().unwrap();
+        register(&lua, &smelt).unwrap();
+        let text: mlua::Table = smelt.get("text").unwrap();
+        let sanitize: mlua::Function = text.get("sanitize_utf8").unwrap();
+        let invalid = lua.create_string([0xff, b'a']).unwrap();
+
+        let out: String = sanitize.call(invalid).unwrap();
+        assert_eq!(out, "�a");
+    }
 }

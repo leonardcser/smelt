@@ -36,16 +36,12 @@ smelt.cell("turn_end"):subscribe(function(payload)
   local parts = {}
   for _, msg in ipairs(user_msgs) do
     local text = msg.content or ""
-    if #text > 500 then
-      text = text:sub(-500)
-    end
+    text = smelt.text.truncate(text, 500, { keep = "tail" })
     table.insert(parts, "User: " .. text)
   end
   if last_assistant then
     local text = last_assistant.content or ""
-    if #text > 500 then
-      text = text:sub(-500)
-    end
+    text = smelt.text.truncate(text, 500, { keep = "tail" })
     table.insert(parts, "Assistant: " .. text)
   end
 

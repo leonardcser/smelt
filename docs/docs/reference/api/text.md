@@ -46,6 +46,14 @@ fun(s: string): integer
 
 Return the number of lines in `s`. Counts `\n` separators and adds one if the last line is unterminated; an empty string returns `0`. Matches the line count users see in a renderer that splits on `\n` without dropping the trailing partial line.
 
+## `smelt.text.sanitize_utf8`
+
+```lua
+fun(s: string): string
+```
+
+Return `s` as valid UTF-8, replacing malformed byte sequences with the Unicode replacement character. Useful when a Lua string came from raw bytes; prefer `smelt.text.truncate` when shortening text.
+
 ## `smelt.text.slugify`
 
 ```lua
@@ -57,10 +65,10 @@ Lowercase `s`, replace non-alphanumeric runs with `-`, drop empty segments. Same
 ## `smelt.text.truncate`
 
 ```lua
-fun(s: string, max_bytes: integer, suffix: string?): string
+fun(s: string, max_bytes: integer, opts: any?): string
 ```
 
-Truncate `s` to at most `max_bytes`, snapping to the previous UTF-8 char boundary. Returns `s` unchanged when it already fits; appends `suffix` when provided and truncation actually occurred. **Byte-based** — use `smelt.text.fit` instead when you need to fit into a terminal-cell budget.
+Return a valid UTF-8 string shortened to a byte budget. By default keeps the head: `truncate(s, n)`. Passing a string third argument appends it as a suffix when truncation happens. Passing an opts table enables `{ keep = "head"|"tail", prefix?, suffix? }`; use `{ keep = "tail" }` for recent-message snippets. Lua string slicing is byte-based and can split multi-byte characters; this function snaps to UTF-8 boundaries and also accepts already-invalid Lua byte strings.
 
 ## `smelt.text.width`
 
