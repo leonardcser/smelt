@@ -80,5 +80,6 @@ return {
   Visual              = "SmeltSelection",
   CursorLine          = "SmeltCursorLineBg",
   ErrorMsg            = fg({ ansi = 9 }),   -- bright red
+  WarningMsg          = fg({ ansi = 11 }),  -- bright yellow
   GhostText           = { dim = true },
 }

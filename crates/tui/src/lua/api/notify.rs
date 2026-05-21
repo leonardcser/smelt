@@ -1,32 +1,58 @@
-//! `smelt.notify` — informational notifications in the status area.
-//! Callable: `smelt.notify("msg")` shows an info toast; `smelt.notify.error("msg")`
-//! shows an error toast (highlighted with the error color). UiHost-only.
+//! `smelt.notify` — informational toasts in the status area.
+//!
+//! `smelt.notify("msg")`, `smelt.notify.warn("msg")`, and
+//! `smelt.notify.error("msg")` each show a one-line toast over the
+//! prompt-above region AND append the full body to the persistent
+//! message log (`smelt.messages`) so the user can recover the details
+//! later via `/messages`. An optional second positional arg names the
+//! source plugin (defaults to `"lua"`) so `/messages` can attribute
+//! every toast back to whoever raised it. Multi-line bodies
+//! (tracebacks, command stderr) collapse to the first line in the
+//! toast and the toast is clipped to terminal width so it can never
+//! spill onto adjacent rows. UiHost-only.
 
 use mlua::prelude::*;
 use smelt_core::lua::doc::Tier;
 use smelt_core::lua::module::LuaMod;
+use smelt_core::messages::MessageKind;
 
 pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
     let m = LuaMod::under(
         lua,
         smelt,
         "notify",
-        "Status-area notifications. Call `smelt.notify(\"msg\")` for an info toast or `smelt.notify.error(\"msg\")` for an error toast. UiHost-only.",
+        "Status-area toasts. Each call appends the body to `smelt.messages` and surfaces a one-line summary in the toast row above the prompt. The optional `source` arg tags the entry in `/messages` (defaults to `\"lua\"`). UiHost-only.",
         Tier::UiHost,
     )?;
     m.fn_(
         "error",
-        "Show an error notification in the status area (highlighted with the error color).",
-        &["msg"],
-        |_, msg: String| -> LuaResult<()> {
-            crate::lua::with_app(|app| app.notify_error(msg));
+        "Show an error toast (highlighted with the error color) and append the body to the message log. Pass `source` to tag the `/messages` entry (e.g. `\"upgrade\"`); defaults to `\"lua\"`.",
+        &["msg", "source"],
+        |_, (msg, source): (String, Option<String>)| -> LuaResult<()> {
+            record_from_lua(MessageKind::Error, source, msg);
             Ok(())
         },
     )?;
-    // Callable: smelt.notify("msg") -> info toast.
-    m.callable(|_, (_tbl, msg): (mlua::Table, String)| -> LuaResult<()> {
-        crate::lua::with_app(|app| app.notify(msg));
-        Ok(())
-    })?;
+    m.fn_(
+        "warn",
+        "Show a warning toast and append the body to the message log. Pass `source` to tag the `/messages` entry; defaults to `\"lua\"`.",
+        &["msg", "source"],
+        |_, (msg, source): (String, Option<String>)| -> LuaResult<()> {
+            record_from_lua(MessageKind::Warning, source, msg);
+            Ok(())
+        },
+    )?;
+    // Callable: smelt.notify("msg", source?) -> info toast + log entry.
+    m.callable(
+        |_, (_tbl, msg, source): (mlua::Table, String, Option<String>)| -> LuaResult<()> {
+            record_from_lua(MessageKind::Info, source, msg);
+            Ok(())
+        },
+    )?;
     Ok(())
+}
+
+fn record_from_lua(kind: MessageKind, source: Option<String>, msg: String) {
+    let source = source.unwrap_or_else(|| "lua".into());
+    crate::lua::with_app(|app| app.record_notice(kind, source, msg));
 }

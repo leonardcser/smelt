@@ -707,18 +707,25 @@ impl LuaRuntime {
         }
     }
 
-    /// Log to the persistent message store and surface a one-line summary via `smelt.notify.error`.
+    /// Surface an error to the user. Routes through `smelt.notify.error`,
+    /// which appends the full body to the persistent message log AND
+    /// pops a one-line toast. Falls back to a direct log write if the
+    /// Lua surface isn't bound (e.g. an early-boot failure before
+    /// `register_api` has run).
     pub fn record_error(&self, msg: String) {
-        let summary = msg.lines().next().unwrap_or("").to_string();
+        let routed = self
+            .lua
+            .globals()
+            .get::<mlua::Table>("smelt")
+            .and_then(|s| s.get::<mlua::Table>("notify"))
+            .and_then(|n| n.get::<mlua::Function>("error"))
+            .and_then(|f| f.call::<()>(msg.clone()))
+            .is_ok();
+        if routed {
+            return;
+        }
         if let Ok(mut messages) = self.shared.messages.lock() {
             messages.append(crate::messages::MessageKind::Error, "lua".to_string(), msg);
-        }
-        if let Ok(smelt) = self.lua.globals().get::<mlua::Table>("smelt") {
-            if let Ok(notify) = smelt.get::<mlua::Table>("notify") {
-                if let Ok(func) = notify.get::<mlua::Function>("error") {
-                    let _ = func.call::<()>(summary);
-                }
-            }
         }
     }
 

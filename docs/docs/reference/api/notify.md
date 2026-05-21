@@ -4,13 +4,21 @@
 
 **Tier:** `UiHost` — Requires a terminal UI; calling these from headless mode raises.
 
-Status-area notifications. Call `smelt.notify("msg")` for an info toast or `smelt.notify.error("msg")` for an error toast. UiHost-only.
+Status-area toasts. Each call appends the body to `smelt.messages` and surfaces a one-line summary in the toast row above the prompt. The optional `source` arg tags the entry in `/messages` (defaults to `"lua"`). UiHost-only.
 
 ## `smelt.notify.error`
 
 ```lua
-fun(msg: string): nil
+fun(msg: string, source: string?): nil
 ```
 
-Show an error notification in the status area (highlighted with the error color).
+Show an error toast (highlighted with the error color) and append the body to the message log. Pass `source` to tag the `/messages` entry (e.g. `"upgrade"`); defaults to `"lua"`.
+
+## `smelt.notify.warn`
+
+```lua
+fun(msg: string, source: string?): nil
+```
+
+Show a warning toast and append the body to the message log. Pass `source` to tag the `/messages` entry; defaults to `"lua"`.
 

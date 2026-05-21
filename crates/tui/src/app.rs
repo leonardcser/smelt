@@ -973,22 +973,71 @@ impl TuiApp {
     }
 
     pub(crate) fn notify(&mut self, message: String) {
-        self.open_notification(message, false);
+        self.record_notice(
+            smelt_core::messages::MessageKind::Info,
+            "smelt".into(),
+            message,
+        );
     }
 
     pub(crate) fn notify_error(&mut self, message: String) {
-        self.open_notification(message, true);
+        self.record_notice(
+            smelt_core::messages::MessageKind::Error,
+            "smelt".into(),
+            message,
+        );
     }
 
-    fn open_notification(&mut self, message: String, is_error: bool) {
+    #[allow(dead_code)] // Only reachable via the Lua surface today.
+    pub(crate) fn notify_warn(&mut self, message: String) {
+        self.record_notice(
+            smelt_core::messages::MessageKind::Warning,
+            "smelt".into(),
+            message,
+        );
+    }
+
+    /// Append `body` to the persistent message log AND surface the first
+    /// line of `body` as a toast clipped to the terminal width. Every
+    /// user-visible toast in the TUI goes through here so `/messages`
+    /// stays a faithful audit log and no toast can ever wrap past its
+    /// reserved row.
+    pub(crate) fn record_notice(
+        &mut self,
+        kind: smelt_core::messages::MessageKind,
+        source: String,
+        body: String,
+    ) {
+        if let Ok(mut messages) = self.lua.core_shared().messages.lock() {
+            messages.append(kind, source, body.clone());
+        }
+        self.open_notification(kind, &body);
+    }
+
+    fn open_notification(&mut self, kind: smelt_core::messages::MessageKind, body: &str) {
+        use smelt_core::messages::MessageKind;
         if let Some(win) = self.notification.take() {
             self.close_overlay_leaf(win);
         }
 
-        let label = if is_error { "error" } else { "info" };
+        let label = match kind {
+            MessageKind::Info => "info",
+            MessageKind::Warning => "warn",
+            MessageKind::Error => "error",
+        };
         let indent = " ";
         let gap = "  ";
-        let line = format!("{indent}{label}{gap}{message}");
+
+        // The toast is a single visible row anchored over the prompt-above
+        // region. A multi-line body (e.g. an error with a traceback) would
+        // wrap past that row and obliterate the prompt bar underneath, so
+        // collapse to the first line and clamp to terminal width.
+        let summary = body.lines().next().unwrap_or("");
+        let prefix_w = indent.len() + label.len() + gap.len();
+        let term_w = self.ui.terminal_size().0 as usize;
+        let budget = term_w.saturating_sub(prefix_w).saturating_sub(1);
+        let summary = smelt_core::content::width::take_to_cells(summary, budget);
+        let line = format!("{indent}{label}{gap}{summary}");
 
         let buf = self
             .ui
@@ -997,12 +1046,12 @@ impl TuiApp {
         let label_start = indent.len() as u16;
         let label_end = label_start + label.len() as u16;
         let msg_start = label_end + gap.len() as u16;
-        let msg_end = msg_start + message.chars().count() as u16;
+        let msg_end = msg_start + summary.chars().count() as u16;
 
-        let label_color = if is_error {
-            self.ui.theme().get("ErrorMsg").fg
-        } else {
-            None
+        let label_color = match kind {
+            MessageKind::Error => self.ui.theme().get("ErrorMsg").fg,
+            MessageKind::Warning => self.ui.theme().get("WarningMsg").fg,
+            MessageKind::Info => None,
         };
         if let Some(b) = self.ui.buf_mut(buf) {
             b.set_all_lines(vec![line]);
@@ -1061,9 +1110,8 @@ impl TuiApp {
                     col_offset: 0,
                 },
             )
-            // Sits below dialogs (default overlay z 50) so a toast
-            // never obscures a modal asking for input.
-            // Sits below dialogs (z 50) so a toast never obscures a modal.
+            // Sits below dialogs (default overlay z 50) so a toast never
+            // obscures a modal asking for input.
             .with_z(40),
         );
         self.notification = Some(win);

@@ -3,53 +3,10 @@
 //! helpers live in `smelt.render`.
 
 use mlua::prelude::*;
+use smelt_core::content::width::{pad_to_cells, truncate_to_cells};
 use smelt_core::lua::doc::Tier;
 use smelt_core::lua::module::LuaMod;
-use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
-
-/// Truncate `s` to at most `max_cells` display columns, char-aligned, appending
-/// `suffix` when truncation actually happened. When the suffix alone overruns
-/// the budget we return as many of its leading chars as fit.
-fn truncate_to_width(s: &str, max_cells: usize, suffix: &str) -> String {
-    if UnicodeWidthStr::width(s) <= max_cells {
-        return s.to_string();
-    }
-    let suffix_w = UnicodeWidthStr::width(suffix);
-    if suffix_w >= max_cells {
-        return take_to_width(suffix, max_cells);
-    }
-    let mut out = take_to_width(s, max_cells - suffix_w);
-    out.push_str(suffix);
-    out
-}
-
-/// Greatest prefix of `s` whose display width is `<= max_cells`.
-fn take_to_width(s: &str, max_cells: usize) -> String {
-    let mut out = String::new();
-    let mut col = 0usize;
-    for ch in s.chars() {
-        let w = UnicodeWidthChar::width(ch).unwrap_or(0);
-        if col + w > max_cells {
-            break;
-        }
-        out.push(ch);
-        col += w;
-    }
-    out
-}
-
-/// Build a padding string of exactly `gap` display cells using whole repeats of
-/// `fill` plus a leading-char slice for any remainder. `fill_w` is the cached
-/// width of `fill` (caller checked it's non-zero).
-fn pad_to_width(fill: &str, fill_w: usize, gap: usize) -> String {
-    let whole = gap / fill_w;
-    let remainder = gap - whole * fill_w;
-    let mut pad = fill.repeat(whole);
-    if remainder > 0 {
-        pad.push_str(&take_to_width(fill, remainder));
-    }
-    pad
-}
+use unicode_width::UnicodeWidthStr;
 
 pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
     let m = LuaMod::under(
@@ -121,20 +78,20 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
                     "smelt.text.fit: fill must have non-zero display width".into(),
                 ));
             }
-            let trimmed = truncate_to_width(&s, width, &suffix);
+            let trimmed = truncate_to_cells(&s, width, &suffix);
             let gap = width.saturating_sub(UnicodeWidthStr::width(trimmed.as_str()));
             if gap == 0 {
                 return Ok(trimmed);
             }
             let out = match align.as_str() {
-                "right" => format!("{}{trimmed}", pad_to_width(&fill, fill_w, gap)),
+                "right" => format!("{}{trimmed}", pad_to_cells(&fill, fill_w, gap)),
                 "center" => {
                     let left_w = gap / 2;
-                    let left = pad_to_width(&fill, fill_w, left_w);
-                    let right = pad_to_width(&fill, fill_w, gap - left_w);
+                    let left = pad_to_cells(&fill, fill_w, left_w);
+                    let right = pad_to_cells(&fill, fill_w, gap - left_w);
                     format!("{left}{trimmed}{right}")
                 }
-                _ => format!("{trimmed}{}", pad_to_width(&fill, fill_w, gap)),
+                _ => format!("{trimmed}{}", pad_to_cells(&fill, fill_w, gap)),
             };
             Ok(out)
         },
