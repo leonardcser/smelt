@@ -2,6 +2,7 @@
 //! the fold marker when `show_thinking` is off.
 
 use smelt_core::content::builder::LineBuilder;
+use smelt_core::content::highlight::{emit_inline_spans, parse_inline_spans, wrap_inline_spans};
 use smelt_core::content::wrap::wrap_line;
 
 use super::metrics::{block_inner_width, THINKING_GUTTER};
@@ -20,15 +21,21 @@ pub(super) fn render(
     let max_cols = block_inner_width(width);
     let mut rows = 0u16;
     for line in content.lines() {
-        let segments = wrap_line(line, max_cols);
-        if segments.len() > 1 {
+        let mut spans = parse_inline_spans(line, true);
+        // Preserve the dim-italic thinking aesthetic across every span,
+        // so bold/code/strike runs stay italic instead of resetting to upright.
+        for span in &mut spans {
+            span.style.italic = true;
+        }
+        let wrapped = wrap_inline_spans(&spans, max_cols);
+        if wrapped.len() > 1 {
             out.mark_wrapped();
         }
-        for seg in &segments {
+        for row_spans in &wrapped {
             out.set_dim_italic();
             out.print_gutter(THINKING_GUTTER);
-            out.print(seg);
             out.reset_style();
+            emit_inline_spans(out, row_spans);
             out.newline();
             rows += 1;
         }
