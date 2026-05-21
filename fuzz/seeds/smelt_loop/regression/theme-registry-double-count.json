@@ -1,0 +1,26 @@
+{
+  "_about": "registry_len() double-counted anonymous styles: every call to intern_anonymous_style inserts an `__anon__/<hash>` entry into the named id_to_name vec AND a parallel entry into the anon_styles map. The fuzz invariant summed both, so 46 distinct anon styles registered during one render were charged as 92 entries against the INTERN_SLACK=64 budget and tripped the leak assertion.",
+  "_fix": "fix(style): drop anon double-count from theme::registry_len",
+  "mode": "plan",
+  "ops": [
+    { "data": 255, "kind": "key_ctrl" },
+    { "data": { "call_id": 182, "content": "", "is_error": true }, "kind": "engine_tool_finish" },
+    { "data": { "call_id": 191, "content": "", "is_error": true }, "kind": "engine_tool_finish" },
+    { "data": 27, "kind": "start_turn" },
+    { "data": 65535, "kind": "tick" },
+    { "data": 0, "kind": "key_ctrl" },
+    { "data": 0, "kind": "key_ctrl" },
+    { "data": 61, "kind": "start_turn" },
+    { "data": "", "kind": "engine_text" },
+    { "data": "", "kind": "engine_text" },
+    { "data": 50235, "kind": "tick" },
+    { "data": { "attempt": 0, "delay_ms": 37 }, "kind": "engine_retrying" },
+    { "data": 61, "kind": "key_shift" },
+    { "data": 21845, "kind": "tick" },
+    { "data": 109, "kind": "key_shift" },
+    { "data": 97, "kind": "key_shift" },
+    { "data": 238, "kind": "start_turn" },
+    { "data": 191, "kind": "tick" }
+  ],
+  "vim": true
+}
