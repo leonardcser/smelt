@@ -130,6 +130,15 @@ async fn main() {
         eprintln!("{info}");
     }));
 
+    // Mirror the embedded runtime tree to `<XDG_DATA_HOME>/smelt/builtins/`
+    // on first launch / after a version bump, so the `customize` skill
+    // can point the agent at on-disk source for inspection. Best-effort:
+    // a failure here just means the skill's example links won't resolve,
+    // not that smelt can't run.
+    if let Err(e) = smelt_core::lua::ensure_builtins_extracted() {
+        eprintln!("smelt: failed to extract built-in runtime: {e}");
+    }
+
     // Two-pass startup so `early.lua` can declare extra CLI flags
     // before argv is parsed:
     //

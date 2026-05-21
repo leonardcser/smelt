@@ -13,6 +13,18 @@ struct SkillEntry {
     formatted: String,
 }
 
+/// Built-in skills shipped with smelt. Embedded at compile time and seeded
+/// at lowest precedence so user/project copies with the same name win.
+///
+/// Bundled files (anything other than `SKILL.md` in the skill dir) are not
+/// supported for built-ins — there's no real on-disk path to point the
+/// agent at. If a built-in needs ancillary content, inline it into the
+/// SKILL.md body.
+static BUILTIN_SKILLS: &[(&str, &str)] = &[(
+    "customize",
+    include_str!("../../../runtime/skills/customize/SKILL.md"),
+)];
+
 #[derive(Debug, Clone)]
 pub struct SkillLoader {
     skills: HashMap<String, SkillEntry>,
@@ -20,9 +32,22 @@ pub struct SkillLoader {
 }
 
 impl SkillLoader {
-    /// Load skills from global, project-local, and extra directories. Later entries override earlier ones.
+    /// Load skills from built-ins, global, project-local, and extra
+    /// directories. Later sources override earlier ones, so user skills
+    /// can shadow built-ins by sharing the same `name:` in frontmatter.
     pub fn load(extra_paths: &[PathBuf]) -> Self {
         let mut skills = HashMap::new();
+
+        for (name, body) in BUILTIN_SKILLS {
+            match parse_skill_text(body, None) {
+                Some(entry) => {
+                    skills.insert(entry.name.clone(), entry);
+                }
+                None => {
+                    eprintln!("smelt: built-in skill `{name}` failed to parse");
+                }
+            }
+        }
 
         let global = crate::config_dir().join("skills");
         scan_dir(&global, &mut skills);
@@ -106,12 +131,19 @@ fn scan_dir(dir: &Path, skills: &mut HashMap<String, SkillEntry>) {
 
 fn parse_skill(path: &Path) -> Option<SkillEntry> {
     let text = std::fs::read_to_string(path).ok()?;
-    let (fm, body) = split_frontmatter(&text)?;
+    parse_skill_text(&text, path.parent())
+}
+
+/// Parse a `SKILL.md` body into a [`SkillEntry`]. `dir` is the on-disk
+/// directory the skill came from — used to enumerate bundled files. Pass
+/// `None` for built-ins, which have no on-disk base directory.
+fn parse_skill_text(text: &str, dir: Option<&Path>) -> Option<SkillEntry> {
+    let (fm, body) = split_frontmatter(text)?;
     let meta = parse_frontmatter(fm)?;
 
     let mut formatted = format!("<skill name=\"{}\">\n{}", meta.name, body);
 
-    if let Some(dir) = path.parent() {
+    if let Some(dir) = dir {
         let files = list_bundled_files(dir);
         if !files.is_empty() {
             formatted.push_str("\n\n## Bundled files\n");

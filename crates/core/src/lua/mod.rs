@@ -15,7 +15,8 @@ pub use reg::LuaReg;
 
 pub use hooks::{composite_reg, HookEntry, HookRegistry};
 pub use runtime::{
-    autoload_modules, autoload_modules_filtered, init_lua_path, load_bootstrap_chunks, LuaRuntime,
+    autoload_modules, autoload_modules_filtered, ensure_builtins_extracted, init_lua_path,
+    load_bootstrap_chunks, LuaRuntime, OPTIONAL_PLUGINS,
 };
 pub use shared::{
     CliFlagKind, CliFlagSpec, CliFlagValue, DefaultShell, Hooks, LuaResumeSink, LuaShared, Phase,

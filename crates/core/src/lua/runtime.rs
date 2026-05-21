@@ -43,8 +43,10 @@ const AUTOLOAD_DIRS: &[&str] = &["tools", "commands", "completers", "plugins", "
 const EARLY_DIRS: &[&str] = &["early"];
 
 /// Bundled plugins that ship with smelt but are NOT autoloaded. Users opt in by
-/// calling `require("smelt.plugins.<name>")` from their `init.lua`.
-const OPTIONAL_PLUGINS: &[&str] = &[
+/// calling `require("smelt.plugins.<name>")` from their `init.lua`. Exposed
+/// so the `gen-lua-docs` xtask can emit an opt-in vs autoload table in the
+/// `customize` skill.
+pub const OPTIONAL_PLUGINS: &[&str] = &[
     "smelt.plugins.background_commands",
     "smelt.plugins.plan_mode",
 ];
@@ -1672,6 +1674,58 @@ pub fn load_bootstrap_chunks(lua: &Lua) -> mlua::Result<()> {
     for rel in BOOTSTRAP_FILES {
         let (src, name) = read_bootstrap_source(rel)?;
         lua.load(&src).set_name(name).exec()?;
+    }
+    Ok(())
+}
+
+/// Extract the embedded `runtime/lua/smelt/` tree to
+/// `<XDG_DATA_HOME>/smelt/builtins/lua/smelt/` so the agent (and humans)
+/// can inspect the built-in source as worked examples. Versioned by
+/// `CARGO_PKG_VERSION`: re-extracts on smelt upgrade, skips otherwise.
+///
+/// Best-effort. Returns the target directory on success, or the I/O
+/// error on failure — callers should log and continue, since the
+/// runtime stays fully functional from the embedded copy.
+///
+/// This is intentionally separate from the user-overlay path
+/// (`<XDG_DATA_HOME>/smelt/runtime/`) so user overrides don't get
+/// clobbered on upgrade.
+pub fn ensure_builtins_extracted() -> std::io::Result<PathBuf> {
+    let target = engine::data_dir().join("builtins");
+    let version_file = target.join(".version");
+    let expected = env!("CARGO_PKG_VERSION");
+    if let Ok(found) = std::fs::read_to_string(&version_file) {
+        if found.trim() == expected {
+            return Ok(target);
+        }
+    }
+    if target.exists() {
+        std::fs::remove_dir_all(&target)?;
+    }
+    let lua_root = target.join("lua").join("smelt");
+    std::fs::create_dir_all(&lua_root)?;
+    write_dir_recursive(&EMBEDDED_LUA, &lua_root)?;
+    std::fs::write(&version_file, expected)?;
+    Ok(target)
+}
+
+fn write_dir_recursive(dir: &Dir<'_>, target: &std::path::Path) -> std::io::Result<()> {
+    for entry in dir.entries() {
+        match entry {
+            DirEntry::File(f) => {
+                let rel = f.path();
+                let dest = target.join(rel);
+                if let Some(parent) = dest.parent() {
+                    std::fs::create_dir_all(parent)?;
+                }
+                std::fs::write(&dest, f.contents())?;
+            }
+            DirEntry::Dir(d) => {
+                let dest = target.join(d.path());
+                std::fs::create_dir_all(&dest)?;
+                write_dir_recursive(d, target)?;
+            }
+        }
     }
     Ok(())
 }

@@ -89,6 +89,11 @@ impl SettingValue {
 pub struct SettingDecl {
     pub key: &'static str,
     pub kind: SettingKind,
+    /// Concatenated doc lines from the `settings!` declaration. Empty
+    /// when the macro entry had no `///` lines above it. Surfaced in
+    /// `/settings` help and the auto-generated table in the `customize`
+    /// skill.
+    pub doc: &'static str,
     /// Closed set of accepted values for `String` settings; `None`
     /// means free-form. Ignored for non-`String` kinds.
     pub choices: Option<&'static [&'static str]>,
@@ -142,6 +147,7 @@ macro_rules! settings {
             $(SettingDecl {
                 key: stringify!($key),
                 kind: SettingKind::$kind,
+                doc: concat!($($doc, " "),*),
                 choices: settings!(@choices $($($choice),*)?),
                 read: |s| settings!(@read $kind, s.$key),
                 write: |s, v| settings!(@write $kind, s.$key, v),
@@ -171,15 +177,25 @@ macro_rules! settings {
 }
 
 settings! {
+    /// Vi keybindings in the prompt.
     vim:                   Bool   = false;
+    /// Auto-summarize when context usage crosses `compact_threshold` (forced on in headless).
     auto_compact:          Bool   = true;
+    /// Tokens/sec in status bar.
     show_tps:              Bool   = true;
+    /// Context token count in status bar.
     show_tokens:           Bool   = true;
+    /// Session cost in status bar.
     show_cost:             Bool   = true;
+    /// Ghost-text input predictions in the prompt.
     show_prediction:       Bool   = true;
+    /// Task-slug label in status bar.
     show_slug:             Bool   = true;
+    /// Show full thinking/reasoning blocks (false shows a single summary).
     show_thinking:         Bool   = true;
+    /// Downgrade `Allow` to `Ask` for paths outside the workspace.
     restrict_to_workspace: Bool   = true;
+    /// Scrub detected secrets from user input and tool results before they reach the LLM.
     redact_secrets:        Bool   = true;
     /// Watch on-disk config inputs (init.lua, plugins/, commands/,
     /// skills/, AGENTS.md, `--system-prompt` file) and dispatch
