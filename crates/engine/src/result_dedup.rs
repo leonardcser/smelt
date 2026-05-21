@@ -44,16 +44,28 @@ pub(crate) fn dedup_stub(prior_call_id: &str) -> String {
 }
 
 /// Mutate every `ToolInvocation.result.content` whose body duplicates an
-/// earlier history entry, replacing it with a `dedup_stub`. Idempotent
-/// and safe to call on the freshly-built invocations of the current turn
-/// before the assistant `HistoryItem` is pushed.
+/// earlier entry, replacing it with a `dedup_stub`. Checks two sources:
+/// earlier invocations in the *current* turn (e.g. parallel tool_calls
+/// returning identical payloads), then committed `history`. The current
+/// turn is checked first so the stub points at the nearest prior call.
 pub(crate) fn apply_in_place(invocations: &mut [ToolInvocation], history: &[HistoryItem]) {
-    for inv in invocations.iter_mut() {
+    for i in 0..invocations.len() {
+        let (earlier, rest) = invocations.split_at_mut(i);
+        let inv = &mut rest[0];
+        if inv.result.content.len() < MIN_DEDUP_LEN {
+            continue;
+        }
+        let same_turn = earlier.iter().rev().find(|p| {
+            p.result.is_error == inv.result.is_error
+                && p.result.content.len() >= MIN_DEDUP_LEN
+                && p.result.content == inv.result.content
+        });
+        if let Some(prior) = same_turn {
+            inv.result.content = dedup_stub(&prior.call_id);
+            continue;
+        }
         if let Some(prior_id) = duplicate_of(&inv.result.content, inv.result.is_error, history) {
-            // Cloning is necessary: `prior_id` borrows immutably from `history`
-            // while we then mutate `inv.result.content`.
-            let stub = dedup_stub(prior_id);
-            inv.result.content = stub;
+            inv.result.content = dedup_stub(prior_id);
         }
     }
 }
@@ -145,5 +157,21 @@ mod tests {
         apply_in_place(&mut current, &history);
         assert!(current[0].result.content.contains("prior"));
         assert_eq!(current[1].result.content, "small");
+    }
+
+    #[test]
+    fn apply_in_place_dedups_within_same_turn() {
+        // Two parallel tool_calls returning identical large bodies. The
+        // second should stub to the first even though the body is not in
+        // committed history yet.
+        let body = big("same ");
+        let mut current = vec![inv("first", &body, false), inv("second", &body, false)];
+        apply_in_place(&mut current, &[]);
+        assert_eq!(current[0].result.content, body, "first kept verbatim");
+        assert!(
+            current[1].result.content.contains("first"),
+            "second should stub to first; got {:?}",
+            current[1].result.content
+        );
     }
 }

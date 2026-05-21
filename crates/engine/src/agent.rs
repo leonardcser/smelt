@@ -418,6 +418,11 @@ struct ToolExecutionPlan<'a> {
 /// production (all execution paths produce an outcome), but the safety net
 /// makes the on-disk + on-wire invariant true *by construction*, not by
 /// careful code review.
+///
+/// Precedence on `call_id` collision: `slot` > `plugin` > `inline`. The
+/// classify-then-execute pipeline routes each call to exactly one path,
+/// so collisions shouldn't happen in practice — but if a path bug starts
+/// double-writing, the explicit precedence keeps the result deterministic.
 fn pair_invocations_in_order(
     calls: &[protocol::ToolCall],
     slot_outcomes: Vec<(String, ToolOutcome, Option<u64>)>,
@@ -2017,6 +2022,52 @@ impl PricingContext {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ---- pair_invocations_in_order ----
+
+    fn tc(id: &str) -> protocol::ToolCall {
+        protocol::ToolCall::new(
+            id.into(),
+            protocol::FunctionCall {
+                name: "f".into(),
+                arguments: "{}".into(),
+            },
+        )
+    }
+
+    fn outcome(content: &str) -> ToolOutcome {
+        ToolOutcome {
+            content: content.into(),
+            is_error: false,
+            metadata: None,
+        }
+    }
+
+    #[test]
+    fn pair_invocations_in_order_precedence_is_slot_then_plugin_then_inline() {
+        // Same call_id appears in all three inputs. The classifier guarantees
+        // this can't happen in practice — this test pins the tiebreaker so a
+        // future refactor that *does* introduce a collision behaves
+        // predictably instead of silently flipping which outcome wins.
+        let calls = vec![tc("c1"), tc("c2"), tc("c3")];
+        let slot = vec![("c1".into(), outcome("slot-c1"), Some(11))];
+        let plugin = vec![
+            ("c1".into(), outcome("plugin-c1"), Some(99)),
+            ("c2".into(), outcome("plugin-c2"), Some(22)),
+        ];
+        let inline = vec![
+            ("c1".into(), outcome("inline-c1")),
+            ("c2".into(), outcome("inline-c2")),
+            ("c3".into(), outcome("inline-c3")),
+        ];
+        let out = pair_invocations_in_order(&calls, slot, plugin, inline);
+        assert_eq!(out[0].result.content, "slot-c1");
+        assert_eq!(out[0].elapsed_ms, Some(11));
+        assert_eq!(out[1].result.content, "plugin-c2");
+        assert_eq!(out[1].elapsed_ms, Some(22));
+        assert_eq!(out[2].result.content, "inline-c3");
+        assert_eq!(out[2].elapsed_ms, None);
+    }
 
     fn api_cfg() -> ApiConfig {
         ApiConfig {
