@@ -1,0 +1,48 @@
+---
+source: crates/tui/tests/storybook/app_ctx.rs
+expression: frame.styles_text()
+---
+dim: 60 12
+  2   0   2 fg=Rgb { r: 102, g: 217, b: 239 } bg=AnsiValue(233)
+  2   2   1 fg=Rgb { r: 248, g: 248, b: 242 } bg=AnsiValue(233)
+  2   3   3 fg=Rgb { r: 166, g: 226, b: 46 } bg=AnsiValue(233)
+  2   6   1 fg=Rgb { r: 248, g: 248, b: 242 } bg=AnsiValue(233)
+  2   7   1 fg=Rgb { r: 253, g: 151, b: 31 } bg=AnsiValue(233)
+  2   8   2 fg=Rgb { r: 248, g: 248, b: 242 } bg=AnsiValue(233)
+  2  10   3 fg=Rgb { r: 102, g: 217, b: 239 } bg=AnsiValue(233)
+  2  13   2 fg=Rgb { r: 248, g: 248, b: 242 } bg=AnsiValue(233)
+  2  15   1 fg=Rgb { r: 253, g: 151, b: 31 } bg=AnsiValue(233)
+  2  16   2 fg=Rgb { r: 248, g: 248, b: 242 } bg=AnsiValue(233)
+  2  18   3 fg=Rgb { r: 102, g: 217, b: 239 } bg=AnsiValue(233)
+  2  21   5 fg=Rgb { r: 248, g: 248, b: 242 } bg=AnsiValue(233)
+  2  26   3 fg=Rgb { r: 102, g: 217, b: 239 } bg=AnsiValue(233)
+  2  29   2 fg=Rgb { r: 248, g: 248, b: 242 } bg=AnsiValue(233)
+  2  31  28 bg=AnsiValue(233)
+  3   0   6 fg=Rgb { r: 248, g: 248, b: 242 } bg=AnsiValue(233)
+  3   6  11 fg=Rgb { r: 102, g: 217, b: 239 } bg=AnsiValue(233)
+  3  17   4 fg=Rgb { r: 248, g: 248, b: 242 } bg=AnsiValue(233)
+  3  21   6 fg=Rgb { r: 102, g: 217, b: 239 } bg=AnsiValue(233)
+  3  27   1 fg=Rgb { r: 248, g: 248, b: 242 } bg=AnsiValue(233)
+  3  28  10 fg=Rgb { r: 230, g: 219, b: 116 } bg=AnsiValue(233)
+  3  38   1 fg=Rgb { r: 248, g: 248, b: 242 } bg=AnsiValue(233)
+  3  39  20 bg=AnsiValue(233)
+  4   0   1 fg=Rgb { r: 248, g: 248, b: 242 } bg=AnsiValue(233)
+  4   1  58 bg=AnsiValue(233)
+  8   0   1 fg=AnsiValue(237)
+  8   1   1 fg=Rgb { r: 198, g: 198, b: 198 } attrs=bold
+  8   2   1 fg=Rgb { r: 175, g: 175, b: 175 } attrs=bold
+  8   3   1 fg=Rgb { r: 157, g: 157, b: 157 } attrs=bold
+  8   4   1 fg=Rgb { r: 144, g: 144, b: 144 } attrs=bold
+  8   5   1 fg=Rgb { r: 140, g: 140, b: 140 } attrs=bold
+  8   6   1 fg=Rgb { r: 144, g: 144, b: 144 } attrs=bold
+  8   7   1 fg=Rgb { r: 157, g: 157, b: 157 } attrs=bold
+  8   8   1 fg=Rgb { r: 175, g: 175, b: 175 } attrs=bold
+  8   9   1 fg=Rgb { r: 198, g: 198, b: 198 } attrs=bold
+  8  10   1 fg=Rgb { r: 220, g: 220, b: 220 } attrs=bold
+  8  11   1 fg=Rgb { r: 238, g: 238, b: 238 } attrs=bold
+  8  13  47 fg=AnsiValue(237)
+  9   1   1 fg=Black bg=White
+ 10   0  60 fg=AnsiValue(237)
+ 11   0  10 fg=AnsiValue(244) bg=AnsiValue(234)
+ 11  10  42 bg=AnsiValue(233)
+ 11  52   8 fg=AnsiValue(244) bg=AnsiValue(233)

@@ -22,6 +22,7 @@ pub fn render_markdown_inner(
     let mut rows = 0u16;
     let mut last_content_line: Option<&str> = None;
     let mut pending_blank = false;
+    let mut prev_was_block = false;
     while i < lines.len() {
         if lines[i].trim().is_empty() {
             let after_heading = last_content_line.is_some_and(|l| l.trim_start().starts_with('#'));
@@ -35,15 +36,22 @@ pub fn render_markdown_inner(
             i = next_i;
             continue;
         }
+        let mut gap_emitted = false;
         if pending_blank {
             out.newline();
             rows += 1;
             pending_blank = false;
+            gap_emitted = true;
         }
         if let Some((fence_len, lang)) = markdown_opening_fence(lines[i]) {
-            // Don't add an extra blank line before the fence — paragraph spacing
-            // is already handled by pending_blank, and inter-block gaps handle
-            // spacing between separate blocks.
+            if rows > 0 && !gap_emitted {
+                let after_heading =
+                    last_content_line.is_some_and(|l| l.trim_start().starts_with('#'));
+                if !after_heading {
+                    out.newline();
+                    rows += 1;
+                }
+            }
             i += 1;
             let code_start = i;
             while i < lines.len() {
@@ -58,7 +66,16 @@ pub fn render_markdown_inner(
             }
             rows += render_code_block(out, code_lines, lang, width, dim, bctx, true);
             last_content_line = None;
+            prev_was_block = true;
         } else if lines[i].trim_start().starts_with('|') {
+            if rows > 0 && !gap_emitted {
+                let after_heading =
+                    last_content_line.is_some_and(|l| l.trim_start().starts_with('#'));
+                if !after_heading {
+                    out.newline();
+                    rows += 1;
+                }
+            }
             let table_start = i;
             while i < lines.len() && lines[i].trim_start().starts_with('|') {
                 i += 1;
@@ -72,11 +89,25 @@ pub fn render_markdown_inner(
                 indent,
             );
             last_content_line = None;
+            prev_was_block = true;
         } else if is_horizontal_rule(lines[i]) {
+            if rows > 0 && !gap_emitted {
+                let after_heading =
+                    last_content_line.is_some_and(|l| l.trim_start().starts_with('#'));
+                if !after_heading {
+                    out.newline();
+                    rows += 1;
+                }
+            }
             rows += render_horizontal_rule(out, bctx, indent);
             last_content_line = None;
+            prev_was_block = true;
             i += 1;
         } else {
+            if prev_was_block && !gap_emitted {
+                out.newline();
+                rows += 1;
+            }
             let trimmed = lines[i].trim_start();
             {
                 use smelt_core::content::highlight::{
@@ -151,6 +182,7 @@ pub fn render_markdown_inner(
                 rows += wrapped.len() as u16;
             }
             last_content_line = Some(lines[i]);
+            prev_was_block = false;
             i += 1;
         }
     }
@@ -361,7 +393,7 @@ mod tests {
             .map(|l| l.text.trim_end().to_string())
             .collect();
 
-        assert_eq!(rows, vec!["inside", "after"]);
+        assert_eq!(rows, vec!["inside", "", "after"]);
     }
 
     #[test]
@@ -376,7 +408,10 @@ mod tests {
             .map(|l| l.text.trim_end().to_string())
             .collect();
 
-        assert_eq!(rows, vec!["```", "```", "```", "nested code block", "```"]);
+        assert_eq!(
+            rows,
+            vec!["```", "```", "", "```", "nested code block", "```"]
+        );
     }
 
     #[test]

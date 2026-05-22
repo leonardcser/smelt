@@ -9,13 +9,24 @@ use protocol::EngineEvent;
 use crate::app_story;
 
 app_story!(text_block_markdown_with_code_fence, |ctx| {
-    // Fenced code blocks become `Block::CodeLine`s during streaming,
-    // which the renderer pipes through `render_code_block` — syntax
+    // Fenced code blocks are rendered inside `Block::Text` via
+    // `render_markdown_inner` → `render_code_block` — syntax
     // highlighting in the snapshot proves the highlight pipeline is
     // wired end-to-end (not just inside the dialog diff renderer).
     ctx.set_viewport(60, 16);
     ctx.engine(EngineEvent::Text {
         content: "Here's the fix:\n\n```rust\nfn add(a: i64, b: i64) -> i64 {\n    a.checked_add(b).expect(\"overflow\")\n}\n```\n\nDone.".into(),
+    });
+    ctx.assert_snapshot();
+});
+
+app_story!(text_block_markdown_code_fence_no_blank_line, |ctx| {
+    // Markdown without a blank line before the fence must still render
+    // with a gap because the markdown renderer virtually enforces spacing
+    // between text and block-level elements.
+    ctx.set_viewport(60, 12);
+    ctx.engine(EngineEvent::Text {
+        content: "Here's the fix:\n```rust\nfn add(a: i64, b: i64) -> i64 {\n    a.checked_add(b).expect(\"overflow\")\n}\n```\nDone.".into(),
     });
     ctx.assert_snapshot();
 });
