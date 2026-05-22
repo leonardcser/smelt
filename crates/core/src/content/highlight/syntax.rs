@@ -57,10 +57,6 @@ pub fn render_code_block(
     let mut rows = 0u16;
     let mut h = HighlightLines::new(syntax, theme);
 
-    if dim {
-        out.set_dim();
-    }
-
     let bg_group = intern("SmeltCodeBlockBg");
     let bg = out.theme().resolve(bg_group).bg.unwrap_or(Color::Reset);
     let last_idx = expanded.len().saturating_sub(1);
@@ -94,9 +90,9 @@ pub fn render_code_block(
                     out.reset_style();
                 }
                 b.print_left(out);
-                if dim {
-                    out.set_dim();
-                }
+            }
+            if dim {
+                out.set_dim();
             }
             let cols = print_split_regions(out, vrow, Some(bg));
             let pad = content_width.saturating_sub(cols);
@@ -414,6 +410,29 @@ mod tests {
         });
         assert!(rows >= 1);
         assert!(block.lines[0].text.contains("let x = 1;"));
+    }
+
+    #[test]
+    fn render_code_block_dim_applies_to_every_row() {
+        let block = render_test(80, |out| {
+            render_code_block(
+                out,
+                &["first", "second", "third"],
+                "rust",
+                80,
+                true,
+                None,
+                false,
+            );
+        });
+        assert_eq!(block.lines.len(), 3, "expected 3 rows");
+        for line in &block.lines {
+            for span in &line.spans {
+                if !span.text.trim().is_empty() {
+                    assert!(span.style.dim, "dim missing on span '{}'", span.text);
+                }
+            }
+        }
     }
 
     #[test]
