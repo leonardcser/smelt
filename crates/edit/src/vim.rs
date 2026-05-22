@@ -1837,7 +1837,9 @@ fn apply_linewise_op(op: Op, ctx: &mut VimContext<'_>, start: usize, end: usize)
         }
         Op::Yank => {
             // Linewise yank does not reposition the cursor (vim default).
-            ctx.yank_range(s, e, true);
+            // Use the original line-content range (no trailing newline) so
+            // linewise paste can consistently prepend/append its own newline.
+            ctx.yank_range(start, end, true);
             ctx.clipboard.kill_ring.mark_yanked(ctx.now);
         }
     }
@@ -2378,7 +2380,18 @@ mod tests {
         h.handle(key('y'));
         h.handle(key('y'));
         assert_eq!(h.cpos, before, "yy must not move cursor");
-        assert_eq!(h.clipboard.kill_ring.current(), "hello world\n");
+        assert_eq!(h.clipboard.kill_ring.current(), "hello world");
+    }
+
+    #[test]
+    fn test_yy_p_does_not_add_extra_newline() {
+        // Regression: `yy` used to include a trailing newline in the kill
+        // ring; `p` then prepended its own, producing a blank line.
+        let mut h = TestHarness::new("aaa\nbbb\nccc");
+        h.handle(key('y'));
+        h.handle(key('y'));
+        h.handle(key('p'));
+        assert_eq!(h.buf, "aaa\naaa\nbbb\nccc");
     }
 
     #[test]
