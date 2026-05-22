@@ -1,12 +1,12 @@
 # Getting Started
 
-## Installation
+## Install
 
 === "Prebuilt Binaries"
 
-    Download the latest binary for your platform from
-    [GitHub Releases](https://github.com/leonardcser/smelt/releases) and place
-    it somewhere on your `$PATH`:
+    Grab the latest binary from
+    [GitHub Releases](https://github.com/leonardcser/smelt/releases) and put
+    it on your `$PATH`:
 
     ```bash
     tar xzf smelt-*.tar.gz
@@ -19,94 +19,84 @@
     cargo install --git https://github.com/leonardcser/smelt.git
     ```
 
-    Or clone and build locally:
+## Run
+
+Just run `smelt`. The first launch opens a wizard that picks a provider, logs
+you into ChatGPT or GitHub Copilot if needed, and writes
+`~/.config/smelt/init.lua`.
+
+To skip the wizard, pass connection flags directly:
+
+=== "Ollama (local)"
 
     ```bash
-    git clone https://github.com/leonardcser/smelt.git
-    cd smelt
-    cargo install --path .
+    ollama pull qwen3.5:0.8b
+    smelt --model qwen3.5:0.8b --api-base http://localhost:11434/v1
     ```
 
-## First-Time Setup
+    Any OpenAI-compatible server works (Ollama, vLLM, SGLang, llama.cpp).
 
-Just run `smelt`. With no config file, it launches an interactive wizard that
-picks a provider, runs OAuth if needed (Codex, Copilot), and writes
-`~/.config/smelt/init.lua` for API-key providers.
-
-You can also skip the wizard and connect directly with CLI flags.
-
-### Local Models (Ollama)
-
-```bash
-ollama pull qwen3.5:0.8b
-smelt --model qwen3.5:0.8b --api-base http://localhost:11434/v1
-```
-
-Any server that speaks the OpenAI chat completions API works: Ollama, vLLM,
-SGLang, llama.cpp.
-
-### Cloud Providers
-
-=== ":fontawesome-brands-openai: OpenAI"
+=== ":fontawesome-brands-openai: OpenAI / OpenRouter"
 
     ```bash
-    read -s OPENAI_API_KEY && export OPENAI_API_KEY
+    export OPENAI_API_KEY=...
     smelt --model gpt-5.5 \
           --api-base https://api.openai.com/v1 \
           --api-key-env OPENAI_API_KEY
     ```
 
-=== ":fontawesome-brands-openai: OpenAI Codex"
-
-    No API key needed — authenticate with your ChatGPT subscription:
-
-    ```bash
-    smelt auth   # pick "OpenAI Codex", choose browser or device-code login
-    smelt --model gpt-5.4
-    ```
-
-    The Codex provider uses OAuth to connect to your ChatGPT subscription.
-    Tokens are stored locally and refreshed automatically.
-
-=== ":simple-github: GitHub Copilot"
-
-    No API key needed — authenticate with your GitHub Copilot subscription
-    via device-code OAuth:
-
-    ```bash
-    smelt auth   # pick "GitHub Copilot", follow the device-code prompt
-    smelt --model claude-sonnet-4-6
-    ```
-
-    On login, smelt enables the policy for every model your account exposes
-    (so Claude, GPT, Grok, etc. work immediately). The list of available
-    models is discovered from the `/models` endpoint and cached locally.
-    Short-lived Copilot tokens refresh automatically in the background.
+    OpenRouter and other OpenAI-compatible services follow the same shape;
+    swap `--api-base` and the model name.
 
 === ":simple-anthropic: Anthropic"
 
     ```bash
-    read -s ANTHROPIC_API_KEY && export ANTHROPIC_API_KEY
+    export ANTHROPIC_API_KEY=...
     smelt --model claude-opus-4-7 \
           --api-base https://api.anthropic.com/v1 \
           --api-key-env ANTHROPIC_API_KEY
     ```
 
-=== ":simple-openrouter: OpenRouter"
+=== ":fontawesome-brands-openai: ChatGPT (Codex)"
+
+    No API key; uses your ChatGPT subscription.
 
     ```bash
-    read -s OPENROUTER_API_KEY && export OPENROUTER_API_KEY
-    smelt --model anthropic/claude-sonnet-4-6 \
-          --api-base https://openrouter.ai/api/v1 \
-          --api-key-env OPENROUTER_API_KEY
+    smelt auth                # one-time browser or device-code login
+    smelt --model gpt-5.4
     ```
 
-## Configure with Lua
+=== ":simple-github: GitHub Copilot"
 
-smelt's config lives at `~/.config/smelt/init.lua`. It's a real Lua file, not a
-schema — anything you can call on the `smelt` table runs at startup. Once you
-have a setup you like, save it there and run `smelt` with no flags from then
-on.
+    No API key; uses your Copilot subscription.
+
+    ```bash
+    smelt auth                # device-code login
+    smelt --model claude-sonnet-4-6
+    ```
+
+    Every model your Copilot account exposes (Claude, GPT, Grok, …) is
+    available immediately.
+
+=== "Kimi Code"
+
+    Uses your Kimi Code subscription. Create an API key in your
+    [Kimi account](https://www.kimi.com/code/console) and pass it:
+
+    ```bash
+    export KIMI_API_KEY=...
+    smelt --model kimi-for-coding \
+          --api-base https://api.kimi.com/coding/v1 \
+          --api-key-env KIMI_API_KEY
+    ```
+
+    Or run `smelt auth`, pick "Kimi Code", and paste the generated block into
+    `~/.config/smelt/init.lua`.
+
+## Save your config
+
+Once you have a setup you like, write it to `~/.config/smelt/init.lua` and run
+`smelt` from then on with no flags:
 
 ```lua
 smelt.provider.register("ollama", {
@@ -125,15 +115,17 @@ smelt.provider.register("openai", {
 smelt.settings.vim = true
 ```
 
-The same file is where you add keymaps, custom slash commands, MCP servers,
-permission rules, statusline segments, and your own tools. Switch models at
-runtime with `/model`.
+Switch models at runtime with `/model`. Edit the file and press `F5` to
+hot-reload without losing the session.
 
-## Next Steps
+`init.lua` is real Lua, not a schema: keymaps, slash commands, MCP servers,
+permission rules, statusline segments, and custom tools all live here.
 
-- [Usage Guide](usage.md) — modes, tools, sessions, and the full daily workflow
-- [Customization](customization.md) — themes, keymaps, custom commands, MCP
-- [Plugin Authoring](plugins.md) — write larger extensions against the Lua API
-- [Configuration Reference](../reference/configuration.md) — every provider and
-  setting field
-- [CLI Reference](../reference/cli.md) — all command-line flags
+## Next
+
+- [Usage](usage.md) — modes, tools, sessions, daily workflow
+- [Customization](customization.md) — themes, keymaps, slash commands, MCP
+- [Plugin Authoring](plugins.md) — the Lua API in depth
+- [Configuration Reference](../reference/configuration.md) — every setting and
+  provider field
+- [CLI Reference](../reference/cli.md) — every flag
