@@ -177,6 +177,11 @@ impl BusyStack {
         self.entries.last().map(|(_, l)| l.clone())
     }
 
+    /// Elapsed time since the first token was pushed, or `None` when empty.
+    pub(crate) fn elapsed(&self) -> Option<std::time::Duration> {
+        self.since.map(|t| t.elapsed())
+    }
+
     #[cfg(any(test, feature = "harness"))]
     pub(crate) fn since(&self) -> Option<Instant> {
         self.since
@@ -679,11 +684,15 @@ impl TuiApp {
             _ => "",
         };
 
-        let elapsed_ms = self
-            .working
-            .elapsed()
-            .map(|d| d.as_millis() as u64)
-            .unwrap_or(0);
+        let elapsed_ms = if self.working.is_animating() {
+            self.working.elapsed()
+        } else if self.busy_stack.is_busy() {
+            self.busy_stack.elapsed()
+        } else {
+            self.working.elapsed()
+        }
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0);
 
         let (retry_attempt, retry_remaining_ms) = self.working.retry_info().unwrap_or((0, 0));
 
