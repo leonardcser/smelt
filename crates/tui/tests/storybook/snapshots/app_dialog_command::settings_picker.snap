@@ -1,20 +1,20 @@
 ---
 source: crates/tui/tests/storybook/app_ctx.rs
-assertion_line: 344
+assertion_line: 363
 expression: frame.text()
 ---
 
 
 
 
- show thinking          on
- show slug              on
- show prediction        on
- show cost              on
- show tokens            on
- show tps               on
- auto compact           on
- vim                    off
+ show thinking              on
+ show slug                  on
+ show prediction            on
+ show cost                  on
+ show tokens                on
+ show tps                   on
+ auto compact               on
+ vim                        off
 ──────────────────────────────────────────────────────────────────────
 
 ──────────────────────────────────────────────────────────────────────

@@ -43,7 +43,7 @@ File contents, error messages, command output, exact identifiers, etc. that the 
 Bullet list of file paths that were touched or are about to be touched, with a one-line note on why each matters.
 ]]
 
-local SUMMARY_PREFIX = "Another language model started to solve this problem and produced a summary of its thinking process. You also have access to the state of the tools that were used by that language model. Use this to build on the work that has already been done and avoid duplicating work. Here is the summary produced by the other language model, use the information in this summary to assist with your own analysis:"
+local SUMMARY_PREFIX = smelt.engine.summary_prefix()
 
 local INSTRUCTIONS_PREAMBLE = "The user has asked you to pay special attention to the following when summarizing:"
 
@@ -51,10 +51,6 @@ local INSTRUCTIONS_PREAMBLE = "The user has asked you to pay special attention t
 -- runaway tool outputs from blowing up the summariser's own context.
 local MAX_STRINGIFIED_MESSAGE_BYTES = 8000
 local TRUNCATION_SUFFIX = "\n…[truncated for compaction]"
-
--- Soft token cap on user messages carried forward when injecting recent
--- user turns alongside the summary.
-local COMPACT_USER_MESSAGE_MAX_TOKENS = 20000
 
 -- Phase A: replace tool-result bodies older than this byte budget with
 -- an elision marker. Keeps the most recent `PHASE_A_KEEP_RECENT_BYTES`
@@ -73,56 +69,10 @@ local consecutive_failures = 0
 
 -- ── helpers ────────────────────────────────────────────────────────────
 
-local function approx_tokens(s) return math.ceil(#s / 4) end
-
-local function approx_history_tokens(history)
-  local total = 0
-  for _, m in ipairs(history) do
-    if type(m.content) == "string" then total = total + approx_tokens(m.content) end
-    if m.reasoning_content then total = total + approx_tokens(m.reasoning_content) end
-    if m.tool_calls then
-      for _, c in ipairs(m.tool_calls) do
-        local fn = c["function"] or c.function_call or {}
-        if fn.arguments then total = total + approx_tokens(fn.arguments) end
-      end
-    end
-  end
-  return total
-end
-
 local function is_summary_user(msg)
   if msg.role ~= "user" or not msg.content then return false end
   local trimmed = msg.content:gsub("^%s+", ""):gsub("%s+$", "")
   return trimmed:sub(1, #SUMMARY_PREFIX) == SUMMARY_PREFIX
-end
-
-local function collect_user_messages(history)
-  local out = {}
-  for _, m in ipairs(history) do
-    if m.role == "user" and m.content and m.content ~= "" and not is_summary_user(m) then
-      table.insert(out, m.content)
-    end
-  end
-  return out
-end
-
-local function select_recent(user_msgs, max_tokens)
-  if max_tokens <= 0 or #user_msgs == 0 then return {} end
-  local remaining = max_tokens
-  local picked = {}
-  for i = #user_msgs, 1, -1 do
-    if remaining <= 0 then break end
-    local msg = user_msgs[i]
-    local tokens = approx_tokens(msg)
-    if tokens <= remaining then
-      table.insert(picked, 1, msg)
-      remaining = remaining - tokens
-    else
-      table.insert(picked, 1, smelt.text.truncate(msg, remaining * 4, TRUNCATION_SUFFIX))
-      break
-    end
-  end
-  return picked
 end
 
 -- Strip image attachments from a flat copy of the history. The summariser
@@ -185,22 +135,6 @@ local function prune_old_tool_results(history)
     end
   end
   return new_history, elided_bytes
-end
-
-local function build_replacement(history, summary, inject_recent_user_messages)
-  local out = {}
-  if inject_recent_user_messages then
-    local users = collect_user_messages(history)
-    for _, text in ipairs(select_recent(users, COMPACT_USER_MESSAGE_MAX_TOKENS)) do
-      table.insert(out, { role = "user", content = text })
-    end
-  end
-  local body = summary
-  if not body or body:gsub("%s+", "") == "" then
-    body = "(no summary available)"
-  end
-  table.insert(out, { role = "user", content = SUMMARY_PREFIX .. "\n" .. body })
-  return out
 end
 
 -- Build a single flattened transcript string the summarizer model sees
@@ -372,23 +306,17 @@ local function summarize(history, instructions, done)
 end
 
 local function emit_event(phase, before_tokens, after_tokens, extra)
-  local data = {
-    phase = phase,
-    before_tokens = before_tokens,
-    after_tokens = after_tokens,
-    saved_tokens = math.max(0, before_tokens - after_tokens),
-  }
+  local data = { phase = phase }
+  if before_tokens then data.before_tokens = before_tokens end
+  if after_tokens then data.after_tokens = after_tokens end
+  if before_tokens and after_tokens then
+    data.saved_tokens = math.max(0, before_tokens - after_tokens)
+  end
   if extra then
     for k, v in pairs(extra) do data[k] = v end
   end
   smelt.log.info("compaction", data)
 end
-
--- Threshold (fraction of context window) below which Phase A's prune is
--- considered "enough" — we commit the prune and skip the summarisation
--- LLM call. Above this we discard the prune so Phase B can inherit the
--- un-mutated session and reuse the main turn's prompt-cache slot.
-local PHASE_A_SUFFICIENT_THRESHOLD = 0.60
 
 local function run_compact(opts)
   local history = smelt.session.messages()
@@ -396,40 +324,37 @@ local function run_compact(opts)
     smelt.notify.error("nothing to compact")
     return
   end
-  local before_tokens = approx_history_tokens(history)
-
-  -- Phase A: speculatively prune older tool-result bodies. Commit only
-  -- when prune alone brings tokens comfortably under threshold; otherwise
-  -- discard so the Phase B summariser inherits the original session and
-  -- hits the main-turn cache. Applying the prune before summarising
-  -- would rewrite early-prefix messages and bust that cache.
-  local pruned, elided_bytes = prune_old_tool_results(history)
-  local window = smelt.session.context_window()
-  if elided_bytes > 0 and window then
-    local pruned_tokens = approx_history_tokens(pruned)
-    if pruned_tokens < window * PHASE_A_SUFFICIENT_THRESHOLD then
-      smelt.session.messages(pruned)
-      emit_event("prune", before_tokens, pruned_tokens, { elided_bytes = elided_bytes })
-      return
-    end
+  -- Use the provider's actual prompt-token count.  If no turn has
+  -- completed yet (context_tokens is nil) we skip rather than guess.
+  local before_tokens = smelt.session.context_tokens()
+  if not before_tokens then
+    smelt.notify.error("no token usage available yet; try again after the next turn completes")
+    return
   end
 
-  -- Phase B: summarise the original history. `inherit_session` keeps the
-  -- request prefix byte-identical to the main turn for cache reuse.
+  -- Phase B only: summarise the original history. `inherit_session`
+  -- keeps the request prefix byte-identical to the main turn for cache
+  -- reuse.  Phase A (prune) is reserved for mid-turn recovery where we
+  -- have no other option.
   summarize(history, opts and opts.instructions, function(summary)
     if not summary then
       consecutive_failures = consecutive_failures + 1
       return
     end
     consecutive_failures = 0
-    local replacement = build_replacement(
-      history,
-      summary,
-      opts and opts.inject_recent_user_messages or false
-    )
-    smelt.session.messages(replacement)
-    local after_tokens = approx_history_tokens(replacement)
-    emit_event("summarize", before_tokens, after_tokens)
+    local keep_recent_turns = smelt.settings.compact_keep_recent_turns or 3
+    local keep_recent_bytes = smelt.settings.compact_keep_recent_bytes or 40000
+    smelt.session.checkpoint({
+      kind = "compaction",
+      summary = summary,
+      keep_recent_turns = keep_recent_turns,
+      keep_recent_bytes = keep_recent_bytes,
+      tokens_before = before_tokens,
+    })
+    emit_event("summarize", before_tokens, nil, {
+      keep_recent_turns = keep_recent_turns,
+      keep_recent_bytes = keep_recent_bytes,
+    })
   end)
 end
 
@@ -453,10 +378,14 @@ smelt.cell("turn_complete"):subscribe(function()
   if not smelt.settings.auto_compact then return end
   if consecutive_failures >= MAX_CONSECUTIVE_FAILURES then return end
   local window = smelt.session.context_window()
-  local tokens = smelt.session.context_tokens()
-  if not window or not tokens then return end
+  if not window then return end
   local threshold = smelt.settings.compact_threshold
   if not (threshold > 0 and threshold <= 1) then threshold = 0.80 end
+  -- Use the provider's actual prompt-token count when available.
+  -- If no turn has completed yet (context_tokens is nil) we skip
+  -- auto-compact rather than guess.
+  local tokens = smelt.session.context_tokens()
+  if not tokens then return end
   if tokens < window * threshold then return end
   run_compact({ inject_recent_user_messages = true })
 end)
@@ -475,15 +404,13 @@ smelt.engine.on_context_limit(function(messages, reply)
     reply(nil)
     return
   end
-  local before_tokens = approx_history_tokens(messages)
 
   -- Cascading fallback: try phase A first (cheap, no LLM). If pruning
   -- alone reclaims enough space the recovery returns the pruned list
   -- without a summarisation round-trip.
   local pruned, elided_bytes = prune_old_tool_results(messages)
   if elided_bytes > 0 then
-    emit_event("prune-recovery", before_tokens, approx_history_tokens(pruned),
-      { elided_bytes = elided_bytes })
+    emit_event("prune-recovery", 0, 0, { elided_bytes = elided_bytes })
     -- Try with just the prune. If the engine still 413s, this hook will
     -- fire again and we'll fall through to summarisation.
     reply(pruned)
@@ -502,7 +429,7 @@ smelt.engine.on_context_limit(function(messages, reply)
     end
     consecutive_failures = 0
     local replacement = { { role = "user", content = SUMMARY_PREFIX .. "\n" .. summary } }
-    emit_event("summarize-recovery", before_tokens, approx_history_tokens(replacement))
+    emit_event("summarize-recovery", 0, 0)
     reply(replacement)
   end)
 end)

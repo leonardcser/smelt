@@ -140,10 +140,11 @@ pub struct LuaAskSpec {
     /// Single-shot question appended as a final user message after `messages`.
     pub question: Option<String>,
     /// When true, override `system` with the current session's assembled
-    /// system prompt and prepend the live `session.messages` (full message
-    /// shape including tool turns) plus the active tool list. The request
-    /// then shares the Anthropic prefix cache with the main turn. Used by
-    /// the compaction summariser to keep its prompt off the cache miss path.
+    /// system prompt and prepend the same model-visible history the next
+    /// main turn would receive (checkpoint summary plus retained tail when
+    /// compacted) plus the active tool list. The request then shares the
+    /// Anthropic prefix cache with the main turn. Used by the compaction
+    /// summariser to keep its prompt off the cache miss path.
     #[lua(default)]
     pub inherit_session: bool,
     /// Model reference (`"provider/model"` or a bare name resolved against
@@ -183,6 +184,12 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
         "Return `true` if an agent turn is currently in flight (a request is being streamed or a tool is executing).",
         &[],
         |_, ()| Ok(crate::lua::try_with_app(|app| app.agent.is_some()).unwrap_or(false)),
+    )?;
+    m.fn_(
+        "summary_prefix",
+        "Return the canonical compaction-summary prefix used when a checkpoint summary is represented as a user message.",
+        &[],
+        |_, ()| Ok(engine::SUMMARY_PREFIX.trim_end().to_string()),
     )?;
     {
         let s = shared.clone();
@@ -333,7 +340,7 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
                         // must not mutate `app.prompt_sections`. Validation
                         // above guarantees `messages` is empty here.
                         system = app.assemble_system_prompt();
-                        messages = protocol::history_to_messages(&app.core.session.history);
+                        messages = protocol::history_to_messages(&app.model_history());
                         tools = app.lua.tool_defs(app.core.config.mode);
                     }
                     if let Some(q) = question {

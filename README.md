@@ -34,6 +34,8 @@ scriptable in Lua like Neovim. Built from scratch, with care for the details.
 - **Terminal renderer.** Its own grid and layout engine, not `ratatui`.
 - **Vim editor.** Motions, text objects, registers, undo.
 - **Lua plugins.** Keymaps, commands, autocmds, custom tools.
+- **Checkpoint compaction.** Long transcripts stay visible while older
+  model context is summarized behind a checkpoint marker.
 - **Deterministic fuzzing.** Fixed clock and stubbed I/O, so any crash can be
   replayed.
 - **No config needed.** Run with flags, or `smelt auth` for ChatGPT and Copilot.

@@ -205,6 +205,42 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
             .unwrap_or_default())
         },
     )?;
+    m.fn_(
+        "checkpoint",
+        "Install a model-context checkpoint without deleting transcript history. Takes `{ kind?, summary, keep_recent_turns?, keep_recent_bytes?, tokens_before? }`; future model requests use the summary plus a bounded set of retained recent turns.",
+        &["spec"],
+        |_, spec: mlua::Table| -> LuaResult<()> {
+            let kind = spec
+                .get::<Option<String>>("kind")?
+                .unwrap_or_else(|| "compaction".to_string());
+            let summary = spec.get::<String>("summary")?;
+            let keep_recent_turns = spec
+                .get::<Option<usize>>("keep_recent_turns")?
+                .unwrap_or_else(|| {
+                    crate::lua::try_with_app(|app| app.core.config.settings.compact_keep_recent_turns as usize)
+                        .unwrap_or(3)
+                });
+            let keep_recent_bytes = spec
+                .get::<Option<usize>>("keep_recent_bytes")?
+                .unwrap_or_else(|| {
+                    crate::lua::try_with_app(|app| {
+                        app.core.config.settings.compact_keep_recent_bytes as usize
+                    })
+                    .unwrap_or(40_000)
+                });
+            let tokens_before = spec.get::<Option<u32>>("tokens_before")?;
+            crate::lua::with_app(|app| {
+                app.install_context_checkpoint(
+                    kind,
+                    summary,
+                    keep_recent_turns,
+                    keep_recent_bytes,
+                    tokens_before,
+                )
+            });
+            Ok(())
+        },
+    )?;
     // smelt.session.messages() reads (optional opts table filters);
     // smelt.session.messages(list) atomically replaces the message list,
     // clears snapshots, restores the screen, and saves the session.

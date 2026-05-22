@@ -46,4 +46,8 @@ engine.reload = nil
 ---@type fun(name: string, body: string, overrides: smelt.engine.CommandOverrides?): nil
 engine.submit_command = nil
 
+--- Return the canonical compaction-summary prefix used when a checkpoint summary is represented as a user message.
+---@type fun(): string
+engine.summary_prefix = nil
+
 return engine

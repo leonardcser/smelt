@@ -6,6 +6,14 @@
 
 Current session metadata, turn list, message snapshots, rewind, and persisted session management. UiHost-only.
 
+## `smelt.session.checkpoint`
+
+```lua
+fun(spec: table): nil
+```
+
+Install a model-context checkpoint without deleting transcript history. Takes `{ kind?, summary, keep_recent_turns?, keep_recent_bytes?, tokens_before? }`; future model requests use the summary plus a bounded set of retained recent turns.
+
 ## `smelt.session.context_tokens`
 
 ```lua

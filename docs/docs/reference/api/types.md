@@ -229,7 +229,7 @@ Spec for `smelt.engine.ask`.
 | `system` | `string` |  | System prompt sent before the conversation. Optional when `inherit_session = true` (the current session's system prompt is substituted in that case). |
 | `messages` | [smelt.engine.AskMessage[]](types.md#smeltengineaskmessage) |  | Prior turns. Each message is `{ role = "user"|"assistant", content = "..." }`. |
 | `question` | `string` |  | Single-shot question appended as a final user message after `messages`. |
-| `inherit_session` | `boolean` |  | When true, override `system` with the current session's assembled system prompt and prepend the live `session.messages` (full message shape including tool turns) plus the active tool list. The request then shares the Anthropic prefix cache with the main turn. Used by the compaction summariser to keep its prompt off the cache miss path. |
+| `inherit_session` | `boolean` |  | When true, override `system` with the current session's assembled system prompt and prepend the same model-visible history the next main turn would receive (checkpoint summary plus retained tail when compacted) plus the active tool list. The request then shares the Anthropic prefix cache with the main turn. Used by the compaction summariser to keep its prompt off the cache miss path. |
 | `model` | `string` |  | Model reference (`"provider/model"` or a bare name resolved against the configured providers). When `nil`, falls back to the primary model. |
 | `response_format` | [smelt.engine.AskResponseFormat](types.md#smeltengineaskresponseformat) |  | JSON-schema response constraint. |
 | `reasoning_effort` | [smelt.reasoning.Effort](types.md#smeltreasoningeffort) |  | Reasoning effort for the request; defaults to `"off"`. |

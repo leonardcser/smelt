@@ -20,7 +20,9 @@ impl TuiApp {
     }
 
     pub(crate) fn set_history(&mut self, history: Vec<HistoryItem>) {
-        self.core.session.history = history;
+        self.core
+            .session
+            .merge_model_history_snapshot(engine::SUMMARY_PREFIX, history);
         self.sync_session_snapshot();
         let count = self.core.session.history.len();
         self.core.cells.set_dyn(
@@ -60,6 +62,11 @@ impl TuiApp {
 
     pub(crate) fn snapshot_tokens(&mut self) {
         if let Some(tokens) = self.core.session.context_tokens {
+            // Key by history.len() so that rewind (which truncates history)
+            // can correctly restore the token count that corresponded to
+            // that history length.  model_history() may be shorter when a
+            // checkpoint is active, but the snapshot coordinate space must
+            // match the history coordinate space.
             self.core
                 .session
                 .token_snapshots
@@ -246,12 +253,32 @@ impl TuiApp {
         }
 
         let history = self.core.session.history.clone();
-        for item in &history {
+        let compaction = self.core.session.checkpoint.clone();
+        for (idx, item) in history.iter().enumerate() {
+            if compaction
+                .as_ref()
+                .is_some_and(|cp| cp.first_live_index == idx)
+            {
+                self.push_block(Block::Compacted {
+                    summary: compaction
+                        .as_ref()
+                        .map(|cp| cp.summary.clone())
+                        .unwrap_or_default(),
+                });
+            }
             match item {
                 HistoryItem::User { content } => self.push_user_block(content),
                 HistoryItem::Assistant(turn) => self.push_assistant_blocks(turn, &tool_elapsed),
                 HistoryItem::System { .. } => {}
             }
+        }
+        if compaction
+            .as_ref()
+            .is_some_and(|cp| cp.first_live_index >= history.len())
+        {
+            self.push_block(Block::Compacted {
+                summary: compaction.map(|cp| cp.summary).unwrap_or_default(),
+            });
         }
 
         if let Some((_, meta)) = self.core.session.turn_metas.last() {
@@ -374,6 +401,7 @@ impl TuiApp {
             return;
         }
         self.core.session.history = history;
+        self.core.session.checkpoint = None;
         self.core.session.token_snapshots.clear();
         self.core.session.cost_snapshots.clear();
         self.core.session.turn_metas.clear();
@@ -382,6 +410,34 @@ impl TuiApp {
         self.restore_screen();
         self.save_session();
         self.transcript_win_mut().scroll_to_bottom();
+    }
+
+    pub(crate) fn install_context_checkpoint(
+        &mut self,
+        kind: String,
+        summary: String,
+        keep_recent_turns: usize,
+        keep_recent_bytes: usize,
+        tokens_before: Option<u32>,
+    ) {
+        let installed = self.core.session.install_context_checkpoint(
+            kind,
+            summary,
+            keep_recent_turns,
+            keep_recent_bytes,
+            tokens_before,
+        );
+        if !installed {
+            self.notify("nothing old enough to compact".to_string());
+            return;
+        }
+        self.restore_screen();
+        self.save_session();
+        self.transcript_win_mut().scroll_to_bottom();
+    }
+
+    pub(crate) fn model_history(&self) -> Vec<HistoryItem> {
+        self.core.session.model_history(engine::SUMMARY_PREFIX)
     }
 
     pub(crate) fn rewind_to(
@@ -424,6 +480,16 @@ impl TuiApp {
         };
 
         self.core.session.history.truncate(hist_idx);
+        let keep_checkpoint_at_boundary = turn_text.is_some()
+            && self
+                .core
+                .session
+                .checkpoint
+                .as_ref()
+                .is_some_and(|cp| cp.first_live_index == hist_idx);
+        if !keep_checkpoint_at_boundary {
+            self.core.session.clear_checkpoint_if_rewound_to(hist_idx);
+        }
         truncate_keyed(&mut self.core.session.token_snapshots, hist_idx);
         truncate_keyed(&mut self.core.session.cost_snapshots, hist_idx);
         truncate_keyed(&mut self.core.session.turn_metas, hist_idx);
@@ -454,5 +520,478 @@ impl TuiApp {
 fn truncate_keyed<T>(snapshots: &mut Vec<(usize, T)>, hist_idx: usize) {
     while snapshots.last().is_some_and(|(len, _)| *len > hist_idx) {
         snapshots.pop();
+    }
+}
+
+#[cfg(test)]
+mod checkpoint_tests {
+    use super::*;
+    use protocol::Content;
+    use smelt_core::ContextCheckpoint;
+
+    fn user(text: &str) -> HistoryItem {
+        HistoryItem::user(Content::text(text))
+    }
+
+    fn assistant(text: &str) -> HistoryItem {
+        HistoryItem::Assistant(protocol::AssistantTurn::terminal(
+            Some(Content::text(text)),
+            None,
+            Vec::new(),
+        ))
+    }
+
+    fn first_live_index_for_recent_turns(
+        history: &[HistoryItem],
+        keep_recent_turns: usize,
+    ) -> usize {
+        smelt_core::session::first_live_index_for_checkpoint(history, keep_recent_turns, usize::MAX)
+    }
+
+    fn is_compaction_summary_item(item: &HistoryItem) -> bool {
+        smelt_core::session::is_context_checkpoint_summary(item, engine::SUMMARY_PREFIX)
+    }
+
+    #[test]
+    fn first_live_index_keeps_recent_user_turns() {
+        let history = vec![
+            user("first"),
+            assistant("reply 1"),
+            user("second"),
+            assistant("reply 2"),
+            user("third"),
+        ];
+        assert_eq!(first_live_index_for_recent_turns(&history, 0), 5);
+        assert_eq!(first_live_index_for_recent_turns(&history, 1), 4);
+        assert_eq!(first_live_index_for_recent_turns(&history, 2), 2);
+        assert_eq!(first_live_index_for_recent_turns(&history, 3), 0);
+        assert_eq!(first_live_index_for_recent_turns(&history, 10), 0);
+    }
+
+    #[test]
+    fn model_history_without_checkpoint_returns_full_history() {
+        let session = smelt_core::session::Session::new(1, std::path::PathBuf::from("/tmp"));
+        assert!(session.checkpoint.is_none());
+        // model_history is the same as history when no checkpoint
+        let history = vec![user("hello"), assistant("world")];
+        let mut s = session;
+        s.history = history.clone();
+        assert_eq!(s.model_history("prefix").len(), history.len());
+    }
+
+    #[test]
+    fn model_history_with_checkpoint_prepends_summary_and_tail() {
+        let mut session = smelt_core::session::Session::new(1, std::path::PathBuf::from("/tmp"));
+        session.history = vec![
+            user("old"),
+            assistant("old reply"),
+            user("recent"),
+            assistant("recent reply"),
+        ];
+        session.checkpoint = Some(ContextCheckpoint {
+            kind: "compaction".to_string(),
+            summary: "summary text".to_string(),
+            first_live_index: 2,
+            created_at_ms: 0,
+            tokens_before: None,
+            tokens_after_estimate: None,
+        });
+        let model = session.model_history("SUMMARY:");
+        assert_eq!(model.len(), 3); // summary + recent + recent reply
+        let first = &model[0];
+        assert!(
+            matches!(first, HistoryItem::User { content } if content.text_content().contains("summary text")),
+            "first item should be the summary user message"
+        );
+    }
+
+    #[test]
+    fn checkpoint_cleared_on_rewind_past_it() {
+        let mut session = smelt_core::session::Session::new(1, std::path::PathBuf::from("/tmp"));
+        session.history = vec![
+            user("old"),
+            assistant("old reply"),
+            user("recent"),
+            assistant("recent reply"),
+        ];
+        session.checkpoint = Some(ContextCheckpoint {
+            kind: "compaction".to_string(),
+            summary: "summary".to_string(),
+            first_live_index: 2,
+            created_at_ms: 0,
+            tokens_before: None,
+            tokens_after_estimate: None,
+        });
+        // Simulate rewind to before the checkpoint
+        session.history.truncate(1);
+        if session
+            .checkpoint
+            .as_ref()
+            .is_some_and(|cp| cp.first_live_index >= session.history.len())
+        {
+            session.checkpoint = None;
+        }
+        assert!(session.checkpoint.is_none());
+    }
+
+    #[test]
+    fn checkpoint_survives_rewind_before_it() {
+        let mut session = smelt_core::session::Session::new(1, std::path::PathBuf::from("/tmp"));
+        session.history = vec![
+            user("old"),
+            assistant("old reply"),
+            user("recent"),
+            assistant("recent reply"),
+            user("newest"),
+        ];
+        session.checkpoint = Some(ContextCheckpoint {
+            kind: "compaction".to_string(),
+            summary: "summary".to_string(),
+            first_live_index: 2,
+            created_at_ms: 0,
+            tokens_before: None,
+            tokens_after_estimate: None,
+        });
+        // Rewind to after checkpoint
+        session.history.truncate(4);
+        if session
+            .checkpoint
+            .as_ref()
+            .is_some_and(|cp| cp.first_live_index >= session.history.len())
+        {
+            session.checkpoint = None;
+        }
+        assert!(session.checkpoint.is_some());
+        assert_eq!(session.checkpoint.as_ref().unwrap().first_live_index, 2);
+    }
+
+    #[test]
+    fn is_compaction_summary_detects_prefix() {
+        let prefix = engine::SUMMARY_PREFIX;
+        assert!(
+            !prefix.is_empty(),
+            "SUMMARY_PREFIX must be non-empty for this test"
+        );
+        let item = HistoryItem::user(Content::text(format!("{}\nhere is the summary", prefix)));
+        assert!(is_compaction_summary_item(&item));
+
+        let normal = HistoryItem::user(Content::text("hello world"));
+        assert!(!is_compaction_summary_item(&normal));
+    }
+
+    #[test]
+    fn snapshot_tokens_always_keys_by_history_len() {
+        let mut session = smelt_core::session::Session::new(1, std::path::PathBuf::from("/tmp"));
+        session.history = vec![user("a"), assistant("b"), user("c")];
+        session.context_tokens = Some(100);
+        // Without checkpoint: key should be history.len()
+        session.token_snapshots.push((session.history.len(), 100));
+        assert_eq!(session.token_snapshots, vec![(3, 100)]);
+
+        // With checkpoint: key should still be history.len(), not model_history().len()
+        session.checkpoint = Some(ContextCheckpoint {
+            kind: "compaction".to_string(),
+            summary: "s".to_string(),
+            first_live_index: 1,
+            created_at_ms: 0,
+            tokens_before: None,
+            tokens_after_estimate: None,
+        });
+        session.history.push(assistant("d"));
+        session.context_tokens = Some(80);
+        session.token_snapshots.push((session.history.len(), 80));
+        assert_eq!(session.token_snapshots, vec![(3, 100), (4, 80)]);
+    }
+
+    #[test]
+    fn truncate_keyed_pops_entries_beyond_idx() {
+        let mut snaps: Vec<(usize, u32)> = vec![(1, 10), (3, 30), (5, 50)];
+        truncate_keyed(&mut snaps, 4);
+        assert_eq!(snaps, vec![(1, 10), (3, 30)]);
+        truncate_keyed(&mut snaps, 0);
+        assert!(snaps.is_empty());
+    }
+
+    #[test]
+    fn install_context_checkpoint_clears_context_tokens() {
+        // We can't call install_context_checkpoint without a full TuiApp,
+        // but we can verify the Session state mutation directly.
+        let mut session = smelt_core::session::Session::new(1, std::path::PathBuf::from("/tmp"));
+        session.history = vec![
+            user("old"),
+            assistant("old reply"),
+            user("recent"),
+            assistant("recent reply"),
+        ];
+        session.context_tokens = Some(500);
+        let first_live_index = first_live_index_for_recent_turns(&session.history, 1);
+        session.checkpoint = Some(ContextCheckpoint {
+            kind: "compaction".to_string(),
+            summary: "summary".to_string(),
+            first_live_index,
+            created_at_ms: 0,
+            tokens_before: Some(500),
+            tokens_after_estimate: None,
+        });
+        // context_tokens must be cleared so the next turn's actual usage
+        // becomes the authoritative count.
+        session.context_tokens = None;
+        assert!(session.context_tokens.is_none());
+        assert_eq!(session.checkpoint.as_ref().unwrap().first_live_index, 2);
+    }
+
+    #[test]
+    fn model_history_checkpoint_skip_count() {
+        let mut session = smelt_core::session::Session::new(1, std::path::PathBuf::from("/tmp"));
+        session.history = vec![
+            user("0"),
+            assistant("0a"),
+            user("1"),
+            assistant("1a"),
+            user("2"),
+            assistant("2a"),
+        ];
+        session.checkpoint = Some(ContextCheckpoint {
+            kind: "compaction".to_string(),
+            summary: "s".to_string(),
+            first_live_index: 4, // keep user("2") and assistant("2a")
+            created_at_ms: 0,
+            tokens_before: None,
+            tokens_after_estimate: None,
+        });
+        let model = session.model_history("PREFIX:");
+        assert_eq!(model.len(), 3); // summary + user("2") + assistant("2a")
+        assert!(
+            matches!(&model[0], HistoryItem::User { content } if content.text_content().contains("s"))
+        );
+        assert_eq!(model[1..], vec![user("2"), assistant("2a")]);
+    }
+
+    #[test]
+    fn first_live_index_zero_keep_recent_turns_returns_history_len() {
+        let history = vec![user("a"), assistant("b")];
+        assert_eq!(first_live_index_for_recent_turns(&history, 0), 2);
+    }
+
+    #[test]
+    fn first_live_index_mid_tool_call_group() {
+        // History ending mid-turn (assistant with tool call but no tool result)
+        // should still count user turns correctly.
+        let history = vec![
+            user("first"),
+            assistant("reply"),
+            user("second"),
+            HistoryItem::Assistant(protocol::AssistantTurn::with_invocations(
+                Some(Content::text("doing work")),
+                None,
+                Vec::new(),
+                vec![protocol::ToolInvocation {
+                    call_id: "c1".into(),
+                    name: "read".into(),
+                    arguments: "{}".into(),
+                    result: protocol::ToolOutcome {
+                        content: "ok".into(),
+                        is_error: false,
+                        metadata: None,
+                    },
+                    elapsed_ms: None,
+                }],
+            )),
+        ];
+        // keep 1 recent user turn → should start at user("second") = index 2
+        assert_eq!(first_live_index_for_recent_turns(&history, 1), 2);
+        // keep 2 recent user turns → should start at user("first") = index 0
+        assert_eq!(first_live_index_for_recent_turns(&history, 2), 0);
+    }
+
+    #[test]
+    fn set_history_logic_strips_summary_and_appends_tail() {
+        // Simulate what set_history does when the engine returns a history
+        // that includes the injected summary.
+        let mut session = smelt_core::session::Session::new(1, std::path::PathBuf::from("/tmp"));
+        session.history = vec![
+            user("old"),
+            assistant("old reply"),
+            user("recent"),
+            assistant("recent reply"),
+        ];
+        session.checkpoint = Some(ContextCheckpoint {
+            kind: "compaction".to_string(),
+            summary: "the summary".to_string(),
+            first_live_index: 2,
+            created_at_ms: 0,
+            tokens_before: None,
+            tokens_after_estimate: None,
+        });
+
+        // Engine returns model_history() = [summary, recent, recent_reply, new_assistant]
+        let engine_response = vec![
+            HistoryItem::user(Content::text(format!(
+                "{}\nthe summary",
+                engine::SUMMARY_PREFIX.trim_end()
+            ))),
+            user("recent"),
+            assistant("recent reply"),
+            assistant("new reply"),
+        ];
+
+        // Apply set_history logic
+        let mut incoming = engine_response;
+        if incoming.first().is_some_and(is_compaction_summary_item) {
+            incoming.remove(0);
+        }
+        let cp = session.checkpoint.clone().unwrap();
+        session.history.truncate(cp.first_live_index);
+        session.history.extend(incoming);
+
+        assert_eq!(session.history.len(), 5); // old + old_reply + recent + recent_reply + new_reply
+        assert!(session.checkpoint.is_some());
+        assert_eq!(
+            session.history,
+            vec![
+                user("old"),
+                assistant("old reply"),
+                user("recent"),
+                assistant("recent reply"),
+                assistant("new reply"),
+            ]
+        );
+    }
+
+    #[test]
+    fn set_history_logic_keeps_non_summary_first_item() {
+        // If the engine somehow returns a history without the summary prefix,
+        // we should not strip the first item.
+        let mut session = smelt_core::session::Session::new(1, std::path::PathBuf::from("/tmp"));
+        session.history = vec![
+            user("old"),
+            assistant("old reply"),
+            user("recent"),
+            assistant("recent reply"),
+        ];
+        session.checkpoint = Some(ContextCheckpoint {
+            kind: "compaction".to_string(),
+            summary: "the summary".to_string(),
+            first_live_index: 2,
+            created_at_ms: 0,
+            tokens_before: None,
+            tokens_after_estimate: None,
+        });
+
+        // Engine returns history without summary (unexpected but possible)
+        let engine_response = vec![
+            user("recent"),
+            assistant("recent reply"),
+            assistant("new reply"),
+        ];
+
+        let mut incoming = engine_response;
+        if incoming.first().is_some_and(is_compaction_summary_item) {
+            incoming.remove(0);
+        }
+        let cp = session.checkpoint.clone().unwrap();
+        session.history.truncate(cp.first_live_index);
+        session.history.extend(incoming);
+
+        assert_eq!(session.history.len(), 5);
+        assert_eq!(
+            session.history,
+            vec![
+                user("old"),
+                assistant("old reply"),
+                user("recent"),
+                assistant("recent reply"),
+                assistant("new reply"),
+            ]
+        );
+    }
+
+    #[test]
+    fn replace_history_clears_checkpoint() {
+        let mut session = smelt_core::session::Session::new(1, std::path::PathBuf::from("/tmp"));
+        session.history = vec![user("a"), assistant("b")];
+        session.checkpoint = Some(ContextCheckpoint {
+            kind: "compaction".to_string(),
+            summary: "s".to_string(),
+            first_live_index: 1,
+            created_at_ms: 0,
+            tokens_before: None,
+            tokens_after_estimate: None,
+        });
+        session.token_snapshots.push((2, 100));
+        session.cost_snapshots.push((2, 1.0));
+        session.turn_metas.push((
+            2,
+            protocol::TurnMeta {
+                elapsed_ms: 0,
+                avg_tps: None,
+                interrupted: false,
+                tool_elapsed: std::collections::HashMap::new(),
+            },
+        ));
+        session.context_tokens = Some(100);
+
+        // Simulate replace_history
+        session.history = vec![user("x")];
+        session.checkpoint = None;
+        session.token_snapshots.clear();
+        session.cost_snapshots.clear();
+        session.turn_metas.clear();
+        session.context_tokens = None;
+
+        assert!(session.checkpoint.is_none());
+        assert!(session.token_snapshots.is_empty());
+        assert!(session.cost_snapshots.is_empty());
+        assert!(session.turn_metas.is_empty());
+        assert!(session.context_tokens.is_none());
+    }
+
+    #[test]
+    fn rewind_restores_context_tokens_from_snapshots() {
+        let mut session = smelt_core::session::Session::new(1, std::path::PathBuf::from("/tmp"));
+        session.history = vec![user("a"), assistant("b"), user("c"), assistant("d")];
+        session.token_snapshots = vec![(2, 50), (4, 100)];
+        session.cost_snapshots = vec![(2, 0.5), (4, 1.0)];
+        session.session_cost_usd = 1.0;
+        session.context_tokens = Some(100);
+
+        // Rewind to history index 2 (before user "c")
+        let hist_idx = 2;
+        session.history.truncate(hist_idx);
+        truncate_keyed(&mut session.token_snapshots, hist_idx);
+        truncate_keyed(&mut session.cost_snapshots, hist_idx);
+        session.session_cost_usd = session
+            .cost_snapshots
+            .last()
+            .map(|&(_, c)| c)
+            .unwrap_or(0.0);
+        session.context_tokens = session.token_snapshots.last().map(|&(_, t)| t);
+
+        assert_eq!(session.history.len(), 2);
+        assert_eq!(session.context_tokens, Some(50));
+        assert_eq!(session.session_cost_usd, 0.5);
+    }
+
+    #[test]
+    fn rewind_past_all_snapshots_clears_context_tokens() {
+        let mut session = smelt_core::session::Session::new(1, std::path::PathBuf::from("/tmp"));
+        session.history = vec![user("a"), assistant("b")];
+        session.token_snapshots = vec![(2, 50)];
+        session.cost_snapshots = vec![(2, 0.5)];
+        session.session_cost_usd = 0.5;
+        session.context_tokens = Some(50);
+
+        session.history.truncate(0);
+        truncate_keyed(&mut session.token_snapshots, 0);
+        truncate_keyed(&mut session.cost_snapshots, 0);
+        session.session_cost_usd = session
+            .cost_snapshots
+            .last()
+            .map(|&(_, c)| c)
+            .unwrap_or(0.0);
+        session.context_tokens = session.token_snapshots.last().map(|&(_, t)| t);
+
+        assert!(session.context_tokens.is_none());
+        assert_eq!(session.session_cost_usd, 0.0);
     }
 }

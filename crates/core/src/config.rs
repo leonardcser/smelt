@@ -204,6 +204,14 @@ settings! {
     /// Fraction of the configured context window (0, 1] at which the
     /// bundled compact plugin auto-triggers between turns.
     compact_threshold:     Number = 0.80;
+    /// Number of most-recent user turns kept verbatim after a compaction
+    /// checkpoint. Older turns remain visible in the transcript but are
+    /// summarized out of the next model request.
+    compact_keep_recent_turns: Number = 3.0;
+    /// Maximum text bytes retained verbatim after a compaction checkpoint.
+    /// The compact plugin keeps whole recent turns up to both this budget
+    /// and `compact_keep_recent_turns`.
+    compact_keep_recent_bytes: Number = 40000.0;
     /// Anthropic prompt cache TTL. `false` uses the 5-minute ephemeral
     /// TTL; `true` opts into the 1-hour TTL. Has no effect on
     /// non-Anthropic providers.

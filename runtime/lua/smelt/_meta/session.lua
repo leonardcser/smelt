@@ -7,6 +7,10 @@
 ---@class smelt.session
 local session = {}
 
+--- Install a model-context checkpoint without deleting transcript history. Takes `{ kind?, summary, keep_recent_turns?, keep_recent_bytes?, tokens_before? }`; future model requests use the summary plus a bounded set of retained recent turns.
+---@type fun(spec: table): nil
+session.checkpoint = nil
+
 --- Most recent prompt-token count reported by the provider, or `nil` if no turn has completed yet.
 ---@type fun(): integer?
 session.context_tokens = nil

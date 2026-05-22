@@ -64,7 +64,7 @@ pub use engine_client::EngineClient;
 pub use headless::{ColorMode, HeadlessSink, OutputFormat};
 pub use headless_app::HeadlessApp;
 pub use runtime::{Core, FrontendKind};
-pub use session::Session;
+pub use session::{ContextCheckpoint, Session};
 pub use timers::Timers;
 
 pub use crate::transcript_model::{

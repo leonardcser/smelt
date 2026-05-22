@@ -99,10 +99,21 @@ condensed summary, freeing space while preserving essential information.
 /compact keep details about the auth refactor
 ```
 
-Your last 2 turns are always kept verbatim.
+The full transcript remains visible and scrollable — only the model's context
+is compacted. A checkpoint marker appears in the transcript where compaction
+occurred. Your most recent turns are kept verbatim so the model still sees
+recent detail; older turns are summarized away.
+
+Recent detail is retained only while it fits both retention limits:
+`smelt.settings.compact_keep_recent_turns` (default `3`) and
+`smelt.settings.compact_keep_recent_bytes` (default `40000`). If the retained
+tail would exceed the byte budget, Smelt drops whole older turns from the
+model-visible tail; the full transcript still stays visible.
 
 When `auto_compact` is enabled (via `/settings`), compaction triggers
-automatically when context is running low. Press `Esc Esc` to cancel.
+automatically when the provider-reported prompt token count crosses
+`compact_threshold` of the configured context window. Press `Esc Esc` to
+cancel.
 
 ## Vim Mode
 

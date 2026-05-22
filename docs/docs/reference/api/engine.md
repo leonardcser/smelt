@@ -72,3 +72,11 @@ Types: [`smelt.engine.CommandOverrides`](types.md#smeltenginecommandoverrides)
 
 Start an agent turn from a Lua-defined custom command (`/name`). Notifies and no-ops if an agent is already running. See [`smelt.engine.CommandOverrides`](types.md#smeltenginecommandoverrides) for the override shape.
 
+## `smelt.engine.summary_prefix`
+
+```lua
+fun(): string
+```
+
+Return the canonical compaction-summary prefix used when a checkpoint summary is represented as a user message.
+
