@@ -2615,6 +2615,7 @@ version = "0.5.0-alpha.2"
 dependencies = [
  "base64",
  "sha2",
+ "smelt-perf",
  "smelt-style",
  "tempfile",
  "unicode-width",

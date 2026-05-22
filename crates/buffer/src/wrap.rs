@@ -119,6 +119,16 @@ pub fn wrap_line(line: &str, width: usize) -> Vec<String> {
         .collect()
 }
 
+/// Like [`wrap_line`] but returns borrowed slices into `line` instead of
+/// allocating a `String` per chunk. The caller must ensure `line` outlives
+/// the returned slices.
+pub fn wrap_line_borrowed(line: &str, width: usize) -> Vec<&str> {
+    wrap_line_ranges(line, width)
+        .into_iter()
+        .map(|(s, e)| &line[s..e])
+        .collect()
+}
+
 #[cfg(test)]
 mod wrap_tests {
     use super::*;

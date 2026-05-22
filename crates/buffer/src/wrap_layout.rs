@@ -41,9 +41,68 @@ impl WrappedLayout {
     /// contribute an identity chunk so the producer's layout (parser output,
     /// markdown tables, diff hunks) is preserved verbatim.
     pub fn from_buffer(buf: &Buffer, width: u16, wrap: bool) -> Self {
-        Self::from_lines_with(buf.lines(), width, |row| {
-            wrap && !buf.decoration_at(row).pre_formatted
-        })
+        let _perf = smelt_perf::perf::begin("wrap_layout:from_buffer");
+        let line_count = buf.line_count();
+        let mut chunks_per_row: Vec<Vec<(usize, usize)>> = Vec::with_capacity(line_count);
+        let mut row_starts: Vec<usize> = Vec::with_capacity(line_count);
+        let mut visual_count = 0usize;
+        let mut max_row_width: usize = 0;
+
+        // Fast path: when wrap is disabled, every row is a single identity chunk.
+        // We only need line lengths, not the actual text.
+        if !wrap {
+            for idx in 0..line_count {
+                row_starts.push(visual_count);
+                let line = buf.get_line(idx).unwrap_or_default();
+                let line_len = line.len();
+                chunks_per_row.push(vec![(0, line_len)]);
+                let w = UnicodeWidthStr::width(line);
+                if w > max_row_width {
+                    max_row_width = w;
+                }
+                visual_count += 1;
+            }
+            if line_count == 0 {
+                chunks_per_row.push(vec![(0, 0)]);
+                row_starts.push(0);
+                visual_count = 1;
+            }
+            return Self {
+                chunks_per_row,
+                row_starts,
+                visual_count,
+                max_row_width: max_row_width.min(u16::MAX as usize) as u16,
+            };
+        }
+
+        for idx in 0..line_count {
+            row_starts.push(visual_count);
+            let line = buf.get_line(idx).unwrap_or_default();
+            let chunks = if buf.decoration_at(idx).pre_formatted || line.is_empty() {
+                vec![(0, line.len())]
+            } else {
+                wrap_line_ranges(line, width as usize)
+            };
+            for &(s, e) in &chunks {
+                let w = UnicodeWidthStr::width(&line[s..e]);
+                if w > max_row_width {
+                    max_row_width = w;
+                }
+            }
+            visual_count += chunks.len();
+            chunks_per_row.push(chunks);
+        }
+        if line_count == 0 {
+            chunks_per_row.push(vec![(0, 0)]);
+            row_starts.push(0);
+            visual_count = 1;
+        }
+        Self {
+            chunks_per_row,
+            row_starts,
+            visual_count,
+            max_row_width: max_row_width.min(u16::MAX as usize) as u16,
+        }
     }
 
     fn from_lines_with<F: Fn(usize) -> bool>(lines: &[String], width: u16, row_wraps: F) -> Self {

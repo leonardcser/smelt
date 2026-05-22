@@ -87,7 +87,7 @@ pub fn selection_to_row_ranges(
     let (end_row, end_col) = buf.display_cursor_pos(end_byte);
     let mut ranges = Vec::with_capacity(end_row - start_row + 1);
     for row in start_row..=end_row {
-        let line = buf.get_line(row).unwrap_or("");
+        let line = buf.get_line(row).unwrap_or_default();
         let line_chars = line.chars().count();
         let cs = if row == start_row { start_col } else { 0 };
         let mut ce = if row == end_row {

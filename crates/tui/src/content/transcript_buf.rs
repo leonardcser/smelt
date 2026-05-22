@@ -65,14 +65,15 @@ impl TranscriptProjection {
     }
 
     fn gc_if_stale(&mut self, gen: u64, width: u16) {
-        if gen != self.cache_generation || width != self.cache_width {
+        if width != self.cache_width {
+            // Width change invalidates all layouts (wrapping changes).
             self.cache.clear();
-            self.cache_generation = gen;
             self.cache_width = width;
             self.project_key = None;
             self.layout.clear();
             self.cached_rows = None;
         }
+        self.cache_generation = gen;
     }
 
     /// Render every block (parallel on cache misses) and stitch the unified buffer.
@@ -180,17 +181,26 @@ impl TranscriptProjection {
             });
         }
 
-        let total_rows = clamp_u16(texts.len() as u32);
-        buf.set_all_lines(texts);
-        for p in pending {
-            apply_row_highlights(buf, p.row, p.highlights);
-            if p.decoration != LineDecoration::default() {
-                buf.set_decoration(p.row, p.decoration);
+        // Streaming fast-path: if only the last block grew, trim the buffer
+        // to before the last block and append the new tail instead of
+        // rebuilding from scratch. This keeps changedtick stable for earlier
+        // rows so Window::render re-uses its WrappedLayout cache.
+        let incremental = self.can_incremental(&layout)
+            && self.apply_incremental(buf, history, &block_ids, &block_keys, &layout);
+
+        if !incremental {
+            buf.set_all_lines(texts);
+            for p in pending {
+                apply_row_highlights(buf, p.row, p.highlights);
+                if p.decoration != LineDecoration::default() {
+                    buf.set_decoration(p.row, p.decoration);
+                }
             }
         }
 
         self.layout = layout;
         self.project_key = Some(key);
+        let total_rows = clamp_u16(buf.line_count() as u32);
 
         let restored_scroll = resize_anchor
             .and_then(|(block_id, offset)| {
@@ -204,6 +214,93 @@ impl TranscriptProjection {
         ProjectOutput {
             clamped_scroll: clamp_scroll(restored_scroll, total_rows, viewport_rows),
         }
+    }
+
+    // ── Incremental streaming helpers ─────────────────────────────────
+
+    /// True when the layout differs only by the last block growing.
+    fn can_incremental(&self, new_layout: &[LayoutEntry]) -> bool {
+        if self.layout.len() != new_layout.len() || self.layout.is_empty() {
+            return false;
+        }
+        // All blocks except last must be identical.
+        let all_same_except_last = self
+            .layout
+            .iter()
+            .zip(new_layout.iter())
+            .take(self.layout.len().saturating_sub(1))
+            .all(|(a, b)| a.id == b.id && a.rows == b.rows);
+        if !all_same_except_last {
+            return false;
+        }
+        // Last block must have same id and not shrunk.
+        let old_last = self.layout.last().unwrap();
+        let new_last = new_layout.last().unwrap();
+        old_last.id == new_last.id && new_last.rows >= old_last.rows
+    }
+
+    /// Append only the new rows from the last block. Returns true on success.
+    fn apply_incremental(
+        &mut self,
+        buf: &mut Buffer,
+        history: &BlockHistory,
+        block_ids: &[BlockId],
+        block_keys: &[LayoutKey],
+        _new_layout: &[LayoutEntry],
+    ) -> bool {
+        let old_last = match self.layout.last() {
+            Some(e) => e,
+            None => return false,
+        };
+
+        let i = block_ids.len().saturating_sub(1);
+        let id = block_ids[i];
+        let bkey = block_keys[i];
+        let block_buf = match self.cache.get(id, bkey) {
+            Some(b) => b,
+            None => return false,
+        };
+        let block_rows = block_buf.line_count();
+
+        // Trim buffer to just before the last block's old start.
+        let keep_rows = old_last.start as usize;
+        let old_line_count = buf.line_count();
+        if keep_rows < old_line_count {
+            buf.set_lines(keep_rows, old_line_count, vec![]);
+        }
+
+        // Append gap + all rows from the last block.
+        let mut new_lines: Vec<String> = Vec::with_capacity(block_rows + 1);
+        if block_rows > 0 {
+            let gap = history.block_gap(i);
+            for _ in 0..gap {
+                new_lines.push(String::new());
+            }
+        }
+        for r in 0..block_rows {
+            new_lines.push(block_buf.get_line(r).unwrap_or("").to_string());
+        }
+
+        let base_row = buf.line_count();
+        let end_row = base_row + new_lines.len();
+        buf.set_lines(base_row, base_row, new_lines);
+
+        // Apply highlights/decorations for the appended rows.
+        for r in 0..block_rows {
+            let row = base_row + r;
+            if row >= end_row {
+                break;
+            }
+            let h = block_buf.highlights_at(r);
+            if !h.is_empty() {
+                apply_row_highlights(buf, row, h);
+            }
+            let dec = block_buf.decoration_at(r);
+            if *dec != LineDecoration::default() {
+                buf.set_decoration(row, dec.clone());
+            }
+        }
+        true
     }
 
     /// Map an absolute row to its `(BlockId, row_offset_within_block)`. Gap
