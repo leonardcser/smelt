@@ -185,10 +185,17 @@ pub(super) fn build_body(
         }
     }
 
+    let mut max_tokens = 4096;
+    if effort != ReasoningEffort::Off && supports_budget_thinking(model) {
+        // Thinking tokens count toward max_tokens, so bump the limit by the
+        // thinking budget so the model still has room for content after thinking.
+        max_tokens += config.thinking_budget.unwrap_or(2048);
+    }
+
     let mut body = serde_json::json!({
         "model": model,
         "messages": content,
-        "max_tokens": 4096,
+        "max_tokens": max_tokens,
     });
 
     if let Some(sys) = system_content {
@@ -952,6 +959,21 @@ mod tests {
         );
         assert!(body.get("thinking").is_none());
         assert!(body.get("output_config").is_none());
+    }
+
+    #[test]
+    fn build_body_bumps_max_tokens_for_budget_thinking() {
+        let body = build_body(
+            &[user("hi")],
+            &[],
+            "kimi-for-coding",
+            ReasoningEffort::High,
+            &cfg(),
+            &CacheConfig::default(),
+        );
+        assert_eq!(body["thinking"]["type"], "enabled");
+        assert_eq!(body["thinking"]["budget_tokens"], 2048);
+        assert_eq!(body["max_tokens"], 4096 + 2048);
     }
 
     #[test]
