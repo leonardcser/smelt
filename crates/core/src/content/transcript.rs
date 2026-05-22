@@ -111,6 +111,7 @@ mod tests {
             output: None,
             user_message: None,
             render_cache: None,
+            layout_revision: 0,
         }
     }
 

@@ -351,6 +351,7 @@ impl StreamParser {
             output: None,
             user_message: None,
             render_cache: None,
+            layout_revision: 0,
         };
         let block_id = history.push_with_state(block, call_id.clone(), state);
         history.set_status(block_id, Status::Streaming);
@@ -505,6 +506,7 @@ impl StreamParser {
         // Any mutation can shift what the plugin's `render` would produce, so drop
         // the pre-baked layout; the next render pass refills it on the main thread.
         state.invalidate_render_cache();
+        state.layout_revision = state.layout_revision.wrapping_add(1);
         history.bump_generation();
     }
 

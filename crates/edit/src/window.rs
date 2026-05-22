@@ -387,6 +387,21 @@ impl Window {
             return;
         }
         let prev_width_wrap = self.layout_key.map(|(_, w, wrap)| (w, wrap));
+        if let Some((prev_tick, prev_width, prev_wrap)) = self.layout_key {
+            if prev_width == width && prev_wrap == self.wrap {
+                if let Some(edit) = buf.last_line_edit() {
+                    if edit.before_tick == prev_tick
+                        && edit.after_tick == buf.changedtick()
+                        && edit.old_end == edit.old_line_count
+                    {
+                        self.layout
+                            .replace_suffix_from_buffer(buf, edit.start, width, self.wrap);
+                        self.layout_key = Some(key);
+                        return;
+                    }
+                }
+            }
+        }
         // Snapshot the cursor's distance from `scroll_top` before rebuild.
         // Only meaningful when the layout matches the buffer — otherwise
         // `cursor_row` was computed against a stale layout. Buffers replaced

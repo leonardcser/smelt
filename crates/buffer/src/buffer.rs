@@ -230,6 +230,16 @@ pub struct SelectionRange {
 #[derive(Default)]
 pub struct BufCreateOpts {}
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct LineEdit {
+    pub before_tick: u64,
+    pub after_tick: u64,
+    pub start: usize,
+    pub old_end: usize,
+    pub old_line_count: usize,
+    pub new_end: usize,
+}
+
 // ─── Extmark model ─────────────────────────────────────────────────
 
 /// How a Highlight extmark blends with its row's existing background.
@@ -529,6 +539,7 @@ pub struct Buffer {
     extmarks: ExtmarkStore,
     /// Bumped on every lines mutation.
     changedtick: u64,
+    last_line_edit: Option<LineEdit>,
     /// Interned at construction so convenience methods skip a hashmap lookup.
     ns_highlights: NsId,
     ns_decorations: NsId,
@@ -564,6 +575,7 @@ impl Buffer {
             lines: Arc::new(vec![String::new()]),
             extmarks,
             changedtick: 0,
+            last_line_edit: None,
             ns_highlights,
             ns_decorations,
             ns_virt_text,
@@ -759,11 +771,17 @@ impl Buffer {
     pub fn set_lines(&mut self, start: usize, end: usize, replacement: Vec<String>) {
         let end = end.min(self.lines.len());
         let start = start.min(end);
+        let old_line_count = self.lines.len();
+        let replacement_len = replacement.len();
+        let before_tick = self.changedtick;
         let lines = Arc::make_mut(&mut self.lines);
         lines.splice(start..end, replacement);
-        if lines.is_empty() {
+        let inserted_len = if lines.is_empty() {
             lines.push(String::new());
-        }
+            1
+        } else {
+            replacement_len
+        };
         // Clear extmarks in the replaced range (wholesale line replacement
         // drops all marks in the slice, mirroring nvim's behavior).
         for ns in [self.ns_highlights, self.ns_decorations, self.ns_virt_text] {
@@ -771,6 +789,14 @@ impl Buffer {
         }
         self.selection.retain(|r| r.line < start || r.line >= end);
         self.changedtick += 1;
+        self.last_line_edit = Some(LineEdit {
+            before_tick,
+            after_tick: self.changedtick,
+            start,
+            old_end: end,
+            old_line_count,
+            new_end: start + inserted_len,
+        });
     }
 
     pub fn set_all_lines(&mut self, lines: Vec<String>) {
@@ -786,6 +812,7 @@ impl Buffer {
         }
         self.selection.clear();
         self.changedtick += 1;
+        self.last_line_edit = None;
     }
 
     pub fn text(&self) -> String {
@@ -969,6 +996,10 @@ impl Buffer {
         self.changedtick
     }
 
+    pub fn last_line_edit(&self) -> Option<LineEdit> {
+        self.last_line_edit
+    }
+
     // ── Extmark API (the primary surface) ──────────────────────────
 
     /// Get-or-create a namespace by name.
@@ -1138,6 +1169,11 @@ impl Buffer {
         // bg fills). Bump the tick so caches keyed on it (LineNumberGutter widths,
         // Window wrap layout) invalidate.
         self.changedtick += 1;
+        if let Some(edit) = self.last_line_edit.as_mut() {
+            if line >= edit.start {
+                edit.after_tick = self.changedtick;
+            }
+        }
     }
 
     pub fn decoration_at(&self, line: usize) -> &LineDecoration {

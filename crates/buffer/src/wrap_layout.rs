@@ -20,6 +20,8 @@ pub struct WrappedLayout {
     /// `row_starts[crow]` is the absolute visual-row index of the first chunk
     /// of logical row `crow`.
     row_starts: Vec<usize>,
+    /// Widest chunk for each logical row, in terminal cells.
+    row_max_widths: Vec<u16>,
     /// Total visual row count.
     visual_count: usize,
     /// Widest visual row, in terminal cells. Drives horizontal scroll math:
@@ -45,6 +47,7 @@ impl WrappedLayout {
         let line_count = buf.line_count();
         let mut chunks_per_row: Vec<Vec<(usize, usize)>> = Vec::with_capacity(line_count);
         let mut row_starts: Vec<usize> = Vec::with_capacity(line_count);
+        let mut row_max_widths: Vec<u16> = Vec::with_capacity(line_count);
         let mut visual_count = 0usize;
         let mut max_row_width: usize = 0;
 
@@ -57,6 +60,7 @@ impl WrappedLayout {
                 let line_len = line.len();
                 chunks_per_row.push(vec![(0, line_len)]);
                 let w = UnicodeWidthStr::width(line);
+                row_max_widths.push(w.min(u16::MAX as usize) as u16);
                 if w > max_row_width {
                     max_row_width = w;
                 }
@@ -65,11 +69,13 @@ impl WrappedLayout {
             if line_count == 0 {
                 chunks_per_row.push(vec![(0, 0)]);
                 row_starts.push(0);
+                row_max_widths.push(0);
                 visual_count = 1;
             }
             return Self {
                 chunks_per_row,
                 row_starts,
+                row_max_widths,
                 visual_count,
                 max_row_width: max_row_width.min(u16::MAX as usize) as u16,
             };
@@ -83,23 +89,30 @@ impl WrappedLayout {
             } else {
                 wrap_line_ranges(line, width as usize)
             };
+            let mut row_max = 0usize;
             for &(s, e) in &chunks {
                 let w = UnicodeWidthStr::width(&line[s..e]);
+                if w > row_max {
+                    row_max = w;
+                }
                 if w > max_row_width {
                     max_row_width = w;
                 }
             }
             visual_count += chunks.len();
             chunks_per_row.push(chunks);
+            row_max_widths.push(row_max.min(u16::MAX as usize) as u16);
         }
         if line_count == 0 {
             chunks_per_row.push(vec![(0, 0)]);
             row_starts.push(0);
+            row_max_widths.push(0);
             visual_count = 1;
         }
         Self {
             chunks_per_row,
             row_starts,
+            row_max_widths,
             visual_count,
             max_row_width: max_row_width.min(u16::MAX as usize) as u16,
         }
@@ -108,6 +121,7 @@ impl WrappedLayout {
     fn from_lines_with<F: Fn(usize) -> bool>(lines: &[String], width: u16, row_wraps: F) -> Self {
         let mut chunks_per_row: Vec<Vec<(usize, usize)>> = Vec::with_capacity(lines.len());
         let mut row_starts: Vec<usize> = Vec::with_capacity(lines.len());
+        let mut row_max_widths: Vec<u16> = Vec::with_capacity(lines.len());
         let mut visual_count = 0usize;
         let mut max_row_width: usize = 0;
         for (idx, line) in lines.iter().enumerate() {
@@ -117,26 +131,86 @@ impl WrappedLayout {
             } else {
                 wrap_line_ranges(line, width as usize)
             };
+            let mut row_max = 0usize;
             for &(s, e) in &chunks {
                 let w = UnicodeWidthStr::width(&line[s..e]);
+                if w > row_max {
+                    row_max = w;
+                }
                 if w > max_row_width {
                     max_row_width = w;
                 }
             }
             visual_count += chunks.len();
             chunks_per_row.push(chunks);
+            row_max_widths.push(row_max.min(u16::MAX as usize) as u16);
         }
         if lines.is_empty() {
             chunks_per_row.push(vec![(0, 0)]);
             row_starts.push(0);
+            row_max_widths.push(0);
             visual_count = 1;
         }
         Self {
             chunks_per_row,
             row_starts,
+            row_max_widths,
             visual_count,
             max_row_width: max_row_width.min(u16::MAX as usize) as u16,
         }
+    }
+
+    /// Rebuild only logical rows from `start` to the end of `buf`, preserving
+    /// the already-computed prefix. This is useful for append/replace-suffix
+    /// edits such as transcript streaming, where rescanning a long immutable
+    /// prefix dominates frame time.
+    pub fn replace_suffix_from_buffer(
+        &mut self,
+        buf: &Buffer,
+        start: usize,
+        width: u16,
+        wrap: bool,
+    ) {
+        let line_count = buf.line_count();
+        let start = start.min(self.chunks_per_row.len()).min(line_count);
+        let visual_count = self
+            .row_starts
+            .get(start)
+            .copied()
+            .unwrap_or(self.visual_count);
+        self.chunks_per_row.truncate(start);
+        self.row_starts.truncate(start);
+        self.row_max_widths.truncate(start);
+        self.visual_count = visual_count;
+        let mut max_row_width = self.row_max_widths.iter().copied().max().unwrap_or(0);
+
+        for idx in start..line_count {
+            self.row_starts.push(self.visual_count);
+            let line = buf.get_line(idx).unwrap_or_default();
+            let chunks = if !wrap || buf.decoration_at(idx).pre_formatted || line.is_empty() {
+                vec![(0, line.len())]
+            } else {
+                wrap_line_ranges(line, width as usize)
+            };
+            let row_max = chunks
+                .iter()
+                .map(|&(s, e)| UnicodeWidthStr::width(&line[s..e]).min(u16::MAX as usize) as u16)
+                .max()
+                .unwrap_or(0);
+            self.visual_count += chunks.len();
+            self.chunks_per_row.push(chunks);
+            self.row_max_widths.push(row_max);
+            max_row_width = max_row_width.max(row_max);
+        }
+
+        if self.chunks_per_row.is_empty() {
+            self.chunks_per_row.push(vec![(0, 0)]);
+            self.row_starts.push(0);
+            self.row_max_widths.push(0);
+            self.visual_count = 1;
+            max_row_width = 0;
+        }
+        self.max_row_width = max_row_width;
     }
 
     pub fn visual_count(&self) -> usize {
@@ -329,5 +403,35 @@ mod tests {
             layout.chunks_of(1).len() > 1,
             "neighbouring non-pre_formatted row should still wrap"
         );
+    }
+
+    #[test]
+    fn replace_suffix_from_buffer_matches_full_rebuild() {
+        use crate::buffer::{BufCreateOpts, BufId, Buffer};
+        let mut buf = Buffer::new(BufId(0), BufCreateOpts::default());
+        buf.set_all_lines(vec![
+            "stable prefix row".to_string(),
+            "another stable prefix row".to_string(),
+            "old tail".to_string(),
+        ]);
+        let mut incremental = WrappedLayout::from_buffer(&buf, 8, true);
+
+        buf.set_lines(
+            2,
+            3,
+            vec![
+                "new tail wraps differently".to_string(),
+                "short".to_string(),
+            ],
+        );
+        incremental.replace_suffix_from_buffer(&buf, 2, 8, true);
+        let full = WrappedLayout::from_buffer(&buf, 8, true);
+
+        assert_eq!(incremental.visual_count(), full.visual_count());
+        assert_eq!(incremental.max_row_width(), full.max_row_width());
+        for row in 0..buf.line_count() {
+            assert_eq!(incremental.chunks_of(row), full.chunks_of(row));
+            assert_eq!(incremental.row_start(row), full.row_start(row));
+        }
     }
 }

@@ -299,6 +299,7 @@ mod tests {
             output: None,
             user_message: None,
             render_cache: None,
+            layout_revision: 0,
         }
     }
 
@@ -694,6 +695,7 @@ mod tests {
             output: None,
             user_message: None,
             render_cache: None,
+            layout_revision: 0,
         };
         let ctx = LayoutContext {
             width: 30,
@@ -737,6 +739,7 @@ mod tests {
             output: None,
             user_message: None,
             render_cache: None,
+            layout_revision: 0,
         };
         let ctx = LayoutContext {
             width: 80,
@@ -791,6 +794,7 @@ mod tests {
             })),
             user_message: None,
             render_cache: Some(cache),
+            layout_revision: 0,
         };
         let ctx = LayoutContext {
             width: W as u16,
@@ -845,6 +849,7 @@ mod tests {
             })),
             user_message: None,
             render_cache: Some(stale_cache),
+            layout_revision: 0,
         };
         let ctx = LayoutContext {
             width: W as u16,
@@ -883,6 +888,7 @@ mod tests {
             output: None,
             user_message: None,
             render_cache: None,
+            layout_revision: 0,
         };
         let ctx = LayoutContext {
             width: 80,

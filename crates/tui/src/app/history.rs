@@ -333,6 +333,7 @@ impl TuiApp {
                     output: Some(Box::new(output)),
                     user_message: None,
                     render_cache: None,
+                    layout_revision: 0,
                 },
             );
         }

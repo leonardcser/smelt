@@ -29,6 +29,7 @@ struct LayoutEntry {
     /// First absolute row of the block, after its leading gap.
     start: u32,
     rows: u16,
+    key: LayoutKey,
 }
 
 #[derive(PartialEq, Eq, Clone, Copy)]
@@ -124,6 +125,7 @@ impl TranscriptProjection {
             width,
             show_thinking,
             content_hash: 0,
+            sidecar_hash: 0,
         };
         let _perf = smelt_perf::perf::begin("project:render");
 
@@ -178,6 +180,7 @@ impl TranscriptProjection {
                 id,
                 start,
                 rows: block_rows as u16,
+                key: bkey,
             });
         }
 
@@ -218,28 +221,31 @@ impl TranscriptProjection {
 
     // ── Incremental streaming helpers ─────────────────────────────────
 
-    /// True when the layout differs only by the last block growing.
+    /// True when all earlier blocks are unchanged and only the last block's
+    /// rendered suffix needs replacement.
     fn can_incremental(&self, new_layout: &[LayoutEntry]) -> bool {
         if self.layout.len() != new_layout.len() || self.layout.is_empty() {
             return false;
         }
-        // All blocks except last must be identical.
+        // All blocks except last must be identical (same id, rows, and cache key).
         let all_same_except_last = self
             .layout
             .iter()
             .zip(new_layout.iter())
             .take(self.layout.len().saturating_sub(1))
-            .all(|(a, b)| a.id == b.id && a.rows == b.rows);
+            .all(|(a, b)| a.id == b.id && a.rows == b.rows && a.key == b.key);
         if !all_same_except_last {
             return false;
         }
-        // Last block must have same id and not shrunk.
+        // The last block may have a different key while streaming because its
+        // content hash changes. `apply_incremental` replaces the whole last
+        // block suffix, so only the stable identity matters here.
         let old_last = self.layout.last().unwrap();
         let new_last = new_layout.last().unwrap();
-        old_last.id == new_last.id && new_last.rows >= old_last.rows
+        old_last.id == new_last.id
     }
 
-    /// Append only the new rows from the last block. Returns true on success.
+    /// Replace the last block's rendered suffix. Returns true on success.
     fn apply_incremental(
         &mut self,
         buf: &mut Buffer,
@@ -263,16 +269,24 @@ impl TranscriptProjection {
         let block_rows = block_buf.line_count();
 
         // Trim buffer to just before the last block's old start.
-        let keep_rows = old_last.start as usize;
-        let old_line_count = buf.line_count();
-        if keep_rows < old_line_count {
-            buf.set_lines(keep_rows, old_line_count, vec![]);
-        }
-
-        // Append gap + all rows from the last block.
-        let mut new_lines: Vec<String> = Vec::with_capacity(block_rows + 1);
-        if block_rows > 0 {
+        // If the last block previously had rows, it was preceded by a gap
+        // that must also be removed — otherwise the gap is duplicated when
+        // we re-append gap + block rows below.
+        let mut keep_rows = old_last.start as usize;
+        if old_last.rows > 0 {
             let gap = history.block_gap(i);
+            keep_rows = keep_rows.saturating_sub(gap as usize);
+        }
+        // Replace the entire suffix in one buffer mutation. Besides being
+        // easier to reason about, this lets the window update only the changed
+        // suffix of its wrap layout.
+        let gap = if block_rows > 0 {
+            history.block_gap(i) as usize
+        } else {
+            0
+        };
+        let mut new_lines: Vec<String> = Vec::with_capacity(gap + block_rows);
+        if block_rows > 0 {
             for _ in 0..gap {
                 new_lines.push(String::new());
             }
@@ -281,13 +295,16 @@ impl TranscriptProjection {
             new_lines.push(block_buf.get_line(r).unwrap_or("").to_string());
         }
 
-        let base_row = buf.line_count();
-        let end_row = base_row + new_lines.len();
-        buf.set_lines(base_row, base_row, new_lines);
+        let old_line_count = buf.line_count();
+        let inserted_len = new_lines.len();
+        buf.set_lines(keep_rows, old_line_count, new_lines);
+
+        let base_row = keep_rows;
+        let end_row = base_row + inserted_len;
 
         // Apply highlights/decorations for the appended rows.
         for r in 0..block_rows {
-            let row = base_row + r;
+            let row = base_row + gap + r;
             if row >= end_row {
                 break;
             }
@@ -346,6 +363,7 @@ impl TranscriptProjection {
             width,
             show_thinking,
             content_hash: 0,
+            sidecar_hash: 0,
         };
         let n = history.order.len();
         let mut ids = Vec::with_capacity(n);
@@ -379,6 +397,7 @@ impl TranscriptProjection {
             width,
             show_thinking,
             content_hash: 0,
+            sidecar_hash: 0,
         };
         let mut rows: Vec<String> = Vec::new();
         for i in 0..history.order.len() {
@@ -423,6 +442,7 @@ impl TranscriptProjection {
             width,
             show_thinking,
             content_hash: 0,
+            sidecar_hash: 0,
         };
 
         // The break ending row r is soft iff r+1 has `decoration.soft_wrapped`.
@@ -690,8 +710,34 @@ pub(crate) fn snap_col_to_selectable(buf: &Buffer, row: usize, col: usize) -> us
 #[cfg(test)]
 mod tests {
     use super::*;
+    use smelt_core::content::stream_parser::StreamParser;
     use smelt_core::content::transcript::Transcript;
-    use smelt_core::transcript_model::Block;
+    use smelt_core::transcript_model::{Block, ToolStatus};
+
+    #[derive(Debug, PartialEq)]
+    struct RowSnapshot {
+        line: String,
+        highlights: Vec<Span>,
+        decoration: LineDecoration,
+    }
+
+    fn snapshot(buf: &Buffer) -> Vec<RowSnapshot> {
+        (0..buf.line_count())
+            .map(|row| RowSnapshot {
+                line: buf.get_line(row).unwrap_or("").to_string(),
+                highlights: buf.highlights_at(row),
+                decoration: buf.decoration_at(row).clone(),
+            })
+            .collect()
+    }
+
+    fn project_fresh(history: &mut smelt_core::transcript_model::BlockHistory) -> Vec<RowSnapshot> {
+        let theme = Theme::default();
+        let mut projection = TranscriptProjection::new();
+        let mut buf = Buffer::new(crate::smelt_term::BufId(99), Default::default());
+        projection.project(&mut buf, history, 80, false, &theme, 0, 80);
+        snapshot(&buf)
+    }
 
     #[test]
     fn project_renders_text_block_into_buffer() {
@@ -707,6 +753,70 @@ mod tests {
 
         assert!(buf.line_count() > 0);
         assert_eq!(buf.get_line(buf.line_count() - 1), Some("hello"));
+    }
+
+    #[test]
+    fn incremental_projection_matches_full_after_markdown_table_growth() {
+        let mut transcript = Transcript::new();
+        transcript.push(Block::User {
+            text: "show a table".into(),
+            image_labels: vec![],
+        });
+        let mut parser = StreamParser::new();
+        parser.append_streaming_text(
+            &mut transcript.history,
+            "| Name | Value |\n| --- | --- |\n| alpha |",
+        );
+
+        let theme = Theme::default();
+        let mut projection = TranscriptProjection::new();
+        let mut buf = Buffer::new(crate::smelt_term::BufId(2), Default::default());
+        projection.project(&mut buf, &mut transcript.history, 80, false, &theme, 0, 80);
+
+        parser.append_streaming_text(&mut transcript.history, " 1 |");
+        projection.project(&mut buf, &mut transcript.history, 80, false, &theme, 0, 80);
+
+        let incremental = snapshot(&buf);
+        let full = project_fresh(&mut transcript.history);
+        assert_eq!(incremental, full);
+    }
+
+    #[test]
+    fn incremental_projection_rerenders_tool_state_changes() {
+        let mut transcript = Transcript::new();
+        transcript.push(Block::User {
+            text: "run ls".into(),
+            image_labels: vec![],
+        });
+        let mut parser = StreamParser::new();
+        parser.start_tool(
+            &mut transcript.history,
+            "call-1".into(),
+            "bash".into(),
+            protocol::StyledLines::from_plain("ls"),
+            std::collections::HashMap::new(),
+            std::time::Instant::now(),
+        );
+
+        let theme = Theme::default();
+        let mut projection = TranscriptProjection::new();
+        let mut buf = Buffer::new(crate::smelt_term::BufId(3), Default::default());
+        projection.project(&mut buf, &mut transcript.history, 80, false, &theme, 0, 80);
+        let before = snapshot(&buf);
+
+        parser.append_active_output(&mut transcript.history, "call-1", "done");
+        parser.set_active_status(
+            &mut transcript.history,
+            "call-1",
+            ToolStatus::Ok,
+            std::time::Instant::now(),
+        );
+        projection.project(&mut buf, &mut transcript.history, 80, false, &theme, 0, 80);
+
+        let incremental = snapshot(&buf);
+        let full = project_fresh(&mut transcript.history);
+        assert_ne!(incremental, before);
+        assert_eq!(incremental, full);
     }
 
     #[test]

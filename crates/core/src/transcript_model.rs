@@ -64,6 +64,10 @@ pub struct ToolState {
     /// the tuple's `u16` is the width the layout was rendered at — a mismatch on read
     /// triggers re-render. Cleared automatically by every mutator on `ToolState`.
     pub render_cache: Option<(u16, crate::content::block_layout::RenderedLayout)>,
+    /// Bumped when mutable tool state changes. Tool call blocks keep immutable
+    /// `Block` content, so the transcript layout key needs this sidecar
+    /// revision to avoid reusing stale rendered rows.
+    pub layout_revision: u64,
 }
 
 impl ToolState {
@@ -225,6 +229,7 @@ pub struct LayoutKey {
     pub show_thinking: bool,
     pub view_state: ViewState,
     pub content_hash: u64,
+    pub sidecar_hash: u64,
 }
 
 pub struct BlockHistory {
@@ -390,9 +395,18 @@ impl BlockHistory {
     /// Substitute the actual per-block view state and content hash into a base
     /// `LayoutKey` so cache lookups and layout passes agree.
     pub fn resolve_key(&self, id: BlockId, base: LayoutKey) -> LayoutKey {
+        let sidecar_hash = match self.blocks.get(&id) {
+            Some(Block::ToolCall { call_id, .. }) => self
+                .tool_states
+                .get(call_id)
+                .map(|state| state.layout_revision)
+                .unwrap_or(0),
+            _ => 0,
+        };
         LayoutKey {
             view_state: self.view_state(id),
             content_hash: self.content_hash(id),
+            sidecar_hash,
             ..base
         }
     }
@@ -606,6 +620,7 @@ mod tests {
             output: None,
             user_message: None,
             render_cache: None,
+            layout_revision: 0,
         }
     }
 
@@ -848,10 +863,12 @@ mod tests {
             show_thinking: true,
             view_state: ViewState::Expanded,
             content_hash: 0,
+            sidecar_hash: 0,
         };
         let resolved = history.resolve_key(id, base);
         assert_eq!(resolved.view_state, ViewState::Collapsed);
         assert_eq!(resolved.content_hash, history.content_hash(id));
+        assert_eq!(resolved.sidecar_hash, 0);
         assert_eq!(resolved.width, 80);
         assert!(resolved.show_thinking);
     }
