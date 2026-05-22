@@ -6,6 +6,12 @@
 local aux = require("smelt.aux")
 local prompt = smelt.prompt.win()
 
+smelt.cell("history"):subscribe(function(payload)
+  if payload.kind == "cleared" then
+    prompt:clear_placeholder()
+  end
+end)
+
 smelt.cell("turn_end"):subscribe(function(payload)
   if payload.cancelled then
     return
