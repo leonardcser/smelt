@@ -174,3 +174,10 @@ smelt.lifecycle.on_ready(function()
     refresh_top()
   end)
 end)
+
+-- Jump to bottom when the user submits a message so the new turn is visible.
+smelt.cell("input_submit"):subscribe(function()
+  if state.transcript_win then
+    state.transcript_win:scroll("tail")
+  end
+end)
