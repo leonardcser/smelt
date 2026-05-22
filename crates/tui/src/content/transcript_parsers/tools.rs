@@ -50,7 +50,7 @@ pub(super) fn render_tool(
             let inner_width = (width as u16).saturating_sub(BLOCK_GUTTER_W as u16);
             rows += replay_rendered(out, layout, inner_width);
         } else if let Some(out_data) = output {
-            if !out_data.content.is_empty() {
+            if !out_data.content.trim().is_empty() {
                 rows += print_tool_output(out, name, out_data, args, width);
             }
         }

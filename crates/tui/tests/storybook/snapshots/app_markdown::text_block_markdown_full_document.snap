@@ -1,6 +1,6 @@
 ---
 source: crates/tui/tests/storybook/app_ctx.rs
-assertion_line: 344
+assertion_line: 363
 expression: frame.text()
 ---
 # Release notes
@@ -16,7 +16,6 @@ legacy paths removed.
 
 ───
 
-
 fn run() -> Result<()> {
     println!("hello");
     Ok(())
@@ -28,6 +27,7 @@ fn run() -> Result<()> {
 ┃ parser ┃ core ┃
 ┃ diff   ┃ tui  ┃
 ┗━━━━━━━━┻━━━━━━┛
+
 
 ─ ✿ working… ─────────────────────────────────────────────────────────
 

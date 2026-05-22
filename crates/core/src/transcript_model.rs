@@ -440,12 +440,14 @@ pub struct ActiveText {
     pub(crate) current_line: String,
     pub(crate) paragraph: String,
     pub(crate) in_code_block: Option<String>,
+    /// Backtick count of the opening fence (3 for ```, 4 for ````, etc.).
+    /// Used to match the correct closing fence for nested blocks.
+    pub(crate) fence_backticks: usize,
     pub(crate) table_rows: Vec<String>,
     /// Cached non-separator row count; avoids recomputing per frame.
     pub(crate) table_data_rows: usize,
     pub(crate) streaming_id: Option<BlockId>,
     pub(crate) table_streaming_id: Option<BlockId>,
-    pub(crate) code_line_streaming_id: Option<BlockId>,
 }
 
 /// Blank row gap before `below` given the preceding block. Headings suppress

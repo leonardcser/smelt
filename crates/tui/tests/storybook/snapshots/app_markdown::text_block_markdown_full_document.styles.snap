@@ -1,6 +1,6 @@
 ---
 source: crates/tui/tests/storybook/app_ctx.rs
-assertion_line: 345
+assertion_line: 364
 expression: frame.styles_text()
 ---
 dim: 70 30
@@ -16,33 +16,33 @@ dim: 70 30
   7   2   3 attrs=crossedout
   9   0  53 attrs=dim|italic
  11   0   3 attrs=dim
- 14   0   2 fg=Rgb { r: 102, g: 217, b: 239 } bg=AnsiValue(233)
- 14   2   1 fg=Rgb { r: 248, g: 248, b: 242 } bg=AnsiValue(233)
- 14   3   3 fg=Rgb { r: 166, g: 226, b: 46 } bg=AnsiValue(233)
- 14   6  18 fg=Rgb { r: 248, g: 248, b: 242 } bg=AnsiValue(233)
- 14  24  45 bg=AnsiValue(233)
- 15   0  13 fg=Rgb { r: 248, g: 248, b: 242 } bg=AnsiValue(233)
- 15  13   7 fg=Rgb { r: 230, g: 219, b: 116 } bg=AnsiValue(233)
- 15  20   2 fg=Rgb { r: 248, g: 248, b: 242 } bg=AnsiValue(233)
- 15  22  47 bg=AnsiValue(233)
- 16   0   4 fg=Rgb { r: 248, g: 248, b: 242 } bg=AnsiValue(233)
- 16   4   2 fg=Rgb { r: 166, g: 226, b: 46 } bg=AnsiValue(233)
- 16   6   4 fg=Rgb { r: 248, g: 248, b: 242 } bg=AnsiValue(233)
- 16  10  59 bg=AnsiValue(233)
- 17   0   1 fg=Rgb { r: 248, g: 248, b: 242 } bg=AnsiValue(233)
- 17   1  68 bg=AnsiValue(233)
- 19   0  17 attrs=dim
- 20   0   1 attrs=dim
- 20   9   1 attrs=dim
- 20  16   1 attrs=dim
- 21   0  17 attrs=dim
+ 13   0   2 fg=Rgb { r: 102, g: 217, b: 239 } bg=AnsiValue(233)
+ 13   2   1 fg=Rgb { r: 248, g: 248, b: 242 } bg=AnsiValue(233)
+ 13   3   3 fg=Rgb { r: 166, g: 226, b: 46 } bg=AnsiValue(233)
+ 13   6  18 fg=Rgb { r: 248, g: 248, b: 242 } bg=AnsiValue(233)
+ 13  24  45 bg=AnsiValue(233)
+ 14   0  13 fg=Rgb { r: 248, g: 248, b: 242 } bg=AnsiValue(233)
+ 14  13   7 fg=Rgb { r: 230, g: 219, b: 116 } bg=AnsiValue(233)
+ 14  20   2 fg=Rgb { r: 248, g: 248, b: 242 } bg=AnsiValue(233)
+ 14  22  47 bg=AnsiValue(233)
+ 15   0   4 fg=Rgb { r: 248, g: 248, b: 242 } bg=AnsiValue(233)
+ 15   4   2 fg=Rgb { r: 166, g: 226, b: 46 } bg=AnsiValue(233)
+ 15   6   4 fg=Rgb { r: 248, g: 248, b: 242 } bg=AnsiValue(233)
+ 15  10  59 bg=AnsiValue(233)
+ 16   0   1 fg=Rgb { r: 248, g: 248, b: 242 } bg=AnsiValue(233)
+ 16   1  68 bg=AnsiValue(233)
+ 18   0  17 attrs=dim
+ 19   0   1 attrs=dim
+ 19   9   1 attrs=dim
+ 19  16   1 attrs=dim
+ 20   0  17 attrs=dim
+ 21   0   1 attrs=dim
+ 21   9   1 attrs=dim
+ 21  16   1 attrs=dim
  22   0   1 attrs=dim
  22   9   1 attrs=dim
  22  16   1 attrs=dim
- 23   0   1 attrs=dim
- 23   9   1 attrs=dim
- 23  16   1 attrs=dim
- 24   0  17 attrs=dim
+ 23   0  17 attrs=dim
  26   0   1 fg=AnsiValue(237)
  26   1   1 fg=Rgb { r: 198, g: 198, b: 198 } attrs=bold
  26   2   1 fg=Rgb { r: 175, g: 175, b: 175 } attrs=bold

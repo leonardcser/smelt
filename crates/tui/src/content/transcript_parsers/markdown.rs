@@ -1,5 +1,6 @@
 use smelt_core::content::builder::LineBuilder;
 use smelt_core::content::highlight::{render_code_block, render_markdown_table};
+use smelt_core::content::{markdown_closes_fence, markdown_opening_fence};
 use smelt_core::theme::intern;
 
 pub fn render_markdown_inner(
@@ -39,17 +40,16 @@ pub fn render_markdown_inner(
             rows += 1;
             pending_blank = false;
         }
-        if lines[i].trim_start().starts_with("```") {
-            let prev_blank = i > 0 && lines[i - 1].trim().is_empty();
-            let after_heading = last_content_line.is_some_and(|l| l.trim_start().starts_with('#'));
-            if rows > 0 && !prev_blank && !after_heading {
-                out.newline();
-                rows += 1;
-            }
-            let lang = lines[i].trim_start().trim_start_matches('`').trim();
+        if let Some((fence_len, lang)) = markdown_opening_fence(lines[i]) {
+            // Don't add an extra blank line before the fence — paragraph spacing
+            // is already handled by pending_blank, and inter-block gaps handle
+            // spacing between separate blocks.
             i += 1;
             let code_start = i;
-            while i < lines.len() && !lines[i].trim_start().starts_with("```") {
+            while i < lines.len() {
+                if markdown_closes_fence(fence_len, lines[i]) {
+                    break;
+                }
                 i += 1;
             }
             let code_lines = &lines[code_start..i];
@@ -73,23 +73,7 @@ pub fn render_markdown_inner(
             );
             last_content_line = None;
         } else if is_horizontal_rule(lines[i]) {
-            let prev_blank = i > 0 && lines[i - 1].trim().is_empty();
-            let after_heading = last_content_line.is_some_and(|l| l.trim_start().starts_with('#'));
-            if rows > 0 && !prev_blank && !after_heading {
-                out.newline();
-                rows += 1;
-            }
             rows += render_horizontal_rule(out, bctx, indent);
-            let mut next_i = i + 1;
-            while next_i < lines.len() && lines[next_i].trim().is_empty() {
-                next_i += 1;
-            }
-            let next_is_heading =
-                next_i < lines.len() && lines[next_i].trim_start().starts_with('#');
-            if next_i < lines.len() && !next_is_heading && !lines[next_i].trim().is_empty() {
-                out.newline();
-                rows += 1;
-            }
             last_content_line = None;
             i += 1;
         } else {
@@ -311,6 +295,88 @@ mod tests {
         assert_eq!(rows.iter().filter(|row| row.is_empty()).count(), 1);
         assert!(rows.iter().any(|row| row.contains("cargo test")));
         assert!(!rows.iter().any(|row| row.contains("``")), "rows: {rows:?}");
+    }
+
+    #[test]
+    fn markdown_code_block_can_contain_shorter_fenced_block() {
+        let md = "````markdown\n```rust\nfn main() {}\n```\n````";
+        let block = render_test(80, |sink| {
+            render_markdown_inner(sink, md, 80, "", false, None);
+        });
+        let rows: Vec<&str> = block.lines.iter().map(|l| l.text.as_str()).collect();
+
+        assert!(
+            rows.iter().any(|row| row.contains("```rust")),
+            "rows: {rows:?}"
+        );
+        assert!(
+            rows.iter().any(|row| row.contains("fn main()")),
+            "rows: {rows:?}"
+        );
+        assert_eq!(rows.iter().filter(|row| row.contains("````")).count(), 0);
+    }
+
+    #[test]
+    fn markdown_code_block_ignores_longer_opening_fence_line() {
+        let md = "````markdown\n`````text\ninside\n`````\n````";
+        let block = render_test(80, |sink| {
+            render_markdown_inner(sink, md, 80, "", false, None);
+        });
+        let rows: Vec<&str> = block.lines.iter().map(|l| l.text.as_str()).collect();
+
+        assert!(
+            rows.iter().any(|row| row.contains("`````text")),
+            "rows: {rows:?}"
+        );
+        assert!(
+            rows.iter().any(|row| row.contains("inside")),
+            "rows: {rows:?}"
+        );
+    }
+
+    #[test]
+    fn markdown_code_block_keeps_fence_with_trailing_text_as_content() {
+        let md = "````\n```` text\ninside\n````";
+        let block = render_test(80, |sink| {
+            render_markdown_inner(sink, md, 80, "", false, None);
+        });
+        let rows: Vec<String> = block
+            .lines
+            .iter()
+            .map(|l| l.text.trim_end().to_string())
+            .collect();
+
+        assert_eq!(rows, vec!["```` text", "inside"]);
+    }
+
+    #[test]
+    fn markdown_code_block_closes_on_longer_plain_fence() {
+        let md = "````\ninside\n`````\nafter";
+        let block = render_test(80, |sink| {
+            render_markdown_inner(sink, md, 80, "", false, None);
+        });
+        let rows: Vec<String> = block
+            .lines
+            .iter()
+            .map(|l| l.text.trim_end().to_string())
+            .collect();
+
+        assert_eq!(rows, vec!["inside", "after"]);
+    }
+
+    #[test]
+    fn markdown_adjacent_nested_code_blocks_preserve_inner_fences() {
+        let md = "````\n```\n```\n````\n````\n```\nnested code block\n```\n````";
+        let block = render_test(80, |sink| {
+            render_markdown_inner(sink, md, 80, "", false, None);
+        });
+        let rows: Vec<String> = block
+            .lines
+            .iter()
+            .map(|l| l.text.trim_end().to_string())
+            .collect();
+
+        assert_eq!(rows, vec!["```", "```", "```", "nested code block", "```"]);
     }
 
     #[test]

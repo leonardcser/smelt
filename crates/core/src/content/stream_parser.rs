@@ -1,7 +1,7 @@
 //! Streaming input adapter: accumulates character deltas, detects structural boundaries
 //! (paragraphs, code blocks, tables), and writes finished blocks into `BlockHistory`.
 
-use super::is_table_separator;
+use super::{is_table_separator, markdown_closes_fence, markdown_opening_fence};
 use crate::transcript_model::{
     ActiveText, ActiveThinking, ActiveTool, Block, BlockHistory, BlockId, Status, ToolOutput,
     ToolOutputRef, ToolState, ToolStatus,
@@ -142,11 +142,11 @@ impl StreamParser {
             current_line: String::new(),
             paragraph: String::new(),
             in_code_block: None,
+            fence_backticks: 0,
             table_rows: Vec::new(),
             table_data_rows: 0,
             streaming_id: None,
             table_streaming_id: None,
-            code_line_streaming_id: None,
         });
 
         for ch in delta.chars() {
@@ -164,22 +164,6 @@ impl StreamParser {
     }
 
     fn sync_streaming_text(history: &mut BlockHistory, at: &mut ActiveText) {
-        if let Some(ref lang) = at.in_code_block {
-            if !at.current_line.is_empty() {
-                let block = Block::CodeLine {
-                    content: at.current_line.clone(),
-                    lang: lang.clone(),
-                };
-                if let Some(id) = at.code_line_streaming_id {
-                    history.rewrite(id, block);
-                } else {
-                    let id = history.push(block);
-                    history.set_status(id, Status::Streaming);
-                    at.code_line_streaming_id = Some(id);
-                }
-            }
-            return;
-        }
         let in_table = !at.table_rows.is_empty() || at.current_line.trim_start().starts_with('|');
         if in_table {
             let mut content = String::new();
@@ -230,33 +214,25 @@ impl StreamParser {
     fn process_text_line(history: &mut BlockHistory, at: &mut ActiveText, line: &str) {
         let trimmed = line.trim_start();
 
-        if trimmed.starts_with("```") {
+        if let Some((fence_len, info)) = markdown_opening_fence(line) {
             if at.in_code_block.is_some() {
-                if let Some(id) = at.code_line_streaming_id.take() {
-                    history.set_status(id, Status::Done);
+                Self::append_paragraph_line(at, line);
+                if markdown_closes_fence(at.fence_backticks, line) {
+                    at.in_code_block = None;
+                    at.fence_backticks = 0;
                 }
-                at.in_code_block = None;
-                return;
-            } else {
-                Self::flush_paragraph(history, at);
-                Self::flush_table(history, at);
-                let lang = trimmed.trim_start_matches('`').trim().to_string();
-                at.in_code_block = Some(lang);
                 return;
             }
+
+            Self::flush_table(history, at);
+            Self::append_paragraph_line(at, line);
+            at.in_code_block = Some(info.to_string());
+            at.fence_backticks = fence_len;
+            return;
         }
 
-        if let Some(ref lang) = at.in_code_block {
-            let block = Block::CodeLine {
-                content: line.to_string(),
-                lang: lang.clone(),
-            };
-            if let Some(id) = at.code_line_streaming_id.take() {
-                history.rewrite(id, block);
-                history.set_status(id, Status::Done);
-            } else {
-                history.push(block);
-            }
+        if at.in_code_block.is_some() {
+            Self::append_paragraph_line(at, line);
             return;
         }
 
@@ -281,6 +257,10 @@ impl StreamParser {
 
         Self::flush_table(history, at);
 
+        Self::append_paragraph_line(at, line);
+    }
+
+    fn append_paragraph_line(at: &mut ActiveText, line: &str) {
         if !at.paragraph.is_empty() {
             at.paragraph.push('\n');
         }
@@ -326,27 +306,12 @@ impl StreamParser {
         self.flush_streaming_thinking(history);
         if let Some(mut at) = self.active_text.take() {
             if at.in_code_block.is_some() {
-                if at.current_line.trim_start().starts_with("```") {
-                    at.current_line.clear();
-                    if let Some(id) = at.code_line_streaming_id.take() {
-                        history.set_status(id, Status::Done);
-                    }
-                } else if !at.current_line.is_empty() {
-                    let lang = at.in_code_block.as_ref().unwrap().clone();
-                    let block = Block::CodeLine {
-                        content: std::mem::take(&mut at.current_line),
-                        lang,
-                    };
-                    if let Some(id) = at.code_line_streaming_id.take() {
-                        history.rewrite(id, block);
-                        history.set_status(id, Status::Done);
-                    } else {
-                        history.push(block);
-                    }
-                } else if let Some(id) = at.code_line_streaming_id.take() {
-                    history.set_status(id, Status::Done);
+                if !at.current_line.is_empty() {
+                    let line = std::mem::take(&mut at.current_line);
+                    Self::append_paragraph_line(&mut at, &line);
                 }
                 at.in_code_block = None;
+                at.fence_backticks = 0;
             }
             if !at.current_line.is_empty() && at.current_line.trim_start().starts_with('|') {
                 at.table_rows.push(std::mem::take(&mut at.current_line));
@@ -691,19 +656,11 @@ mod tests {
         let (mut parser, mut history) = setup();
         parser.append_streaming_text(&mut history, "```rust\nfn main() {}\n```");
         parser.flush_streaming_text(&mut history);
-        assert_eq!(history.len(), 2);
+        assert_eq!(history.len(), 1);
         assert_eq!(
             history.block_at(0),
-            &Block::CodeLine {
-                content: "fn main() {}".into(),
-                lang: "rust".into(),
-            }
-        );
-        assert_eq!(
-            history.block_at(1),
-            &Block::CodeLine {
-                content: "```".into(),
-                lang: "rust".into(),
+            &Block::Text {
+                content: "```rust\nfn main() {}\n```".into(),
             }
         );
         assert_eq!(history.status(history.order[0]), Status::Done);
@@ -716,19 +673,11 @@ mod tests {
             parser.append_streaming_text(&mut history, chunk);
         }
         parser.flush_streaming_text(&mut history);
-        assert_eq!(history.len(), 2);
+        assert_eq!(history.len(), 1);
         assert_eq!(
             history.block_at(0),
-            &Block::CodeLine {
-                content: "fn main() {}".into(),
-                lang: "rust".into(),
-            }
-        );
-        assert_eq!(
-            history.block_at(1),
-            &Block::CodeLine {
-                content: "```".into(),
-                lang: "rust".into(),
+            &Block::Text {
+                content: "```rust\nfn main() {}\n```".into(),
             }
         );
     }
@@ -738,26 +687,87 @@ mod tests {
         let (mut parser, mut history) = setup();
         parser.append_streaming_text(&mut history, "```py\nprint(1)\nprint(2)\n```");
         parser.flush_streaming_text(&mut history);
-        assert_eq!(history.len(), 3);
+        assert_eq!(history.len(), 1);
         assert_eq!(
             history.block_at(0),
-            &Block::CodeLine {
-                content: "print(1)".into(),
-                lang: "py".into(),
+            &Block::Text {
+                content: "```py\nprint(1)\nprint(2)\n```".into(),
             }
         );
+    }
+
+    #[test]
+    fn code_block_can_contain_shorter_fenced_block() {
+        let (mut parser, mut history) = setup();
+        parser.append_streaming_text(
+            &mut history,
+            "````markdown\n```rust\nfn main() {}\n```\n````",
+        );
+        parser.flush_streaming_text(&mut history);
+        assert_eq!(history.len(), 1);
         assert_eq!(
-            history.block_at(1),
-            &Block::CodeLine {
-                content: "print(2)".into(),
-                lang: "py".into(),
+            history.block_at(0),
+            &Block::Text {
+                content: "````markdown\n```rust\nfn main() {}\n```\n````".into(),
             }
         );
+    }
+
+    #[test]
+    fn code_block_does_not_close_on_longer_opening_fence_line() {
+        let (mut parser, mut history) = setup();
+        parser.append_streaming_text(&mut history, "````markdown\n`````text\ninside\n`````\n````");
+        parser.flush_streaming_text(&mut history);
+        assert_eq!(history.len(), 1);
         assert_eq!(
-            history.block_at(2),
-            &Block::CodeLine {
-                content: "```".into(),
-                lang: "py".into(),
+            history.block_at(0),
+            &Block::Text {
+                content: "````markdown\n`````text\ninside\n`````\n````".into(),
+            }
+        );
+    }
+
+    #[test]
+    fn code_block_keeps_fence_with_trailing_text_as_content() {
+        let (mut parser, mut history) = setup();
+        parser.append_streaming_text(&mut history, "````\n```` text\ninside\n````");
+        parser.flush_streaming_text(&mut history);
+        assert_eq!(history.len(), 1);
+        assert_eq!(
+            history.block_at(0),
+            &Block::Text {
+                content: "````\n```` text\ninside\n````".into(),
+            }
+        );
+    }
+
+    #[test]
+    fn code_block_closes_on_longer_plain_fence() {
+        let (mut parser, mut history) = setup();
+        parser.append_streaming_text(&mut history, "````\ninside\n`````\nafter");
+        parser.flush_streaming_text(&mut history);
+        assert_eq!(history.len(), 1);
+        assert_eq!(
+            history.block_at(0),
+            &Block::Text {
+                content: "````\ninside\n`````\nafter".into(),
+            }
+        );
+    }
+
+    #[test]
+    fn adjacent_nested_code_blocks_preserve_inner_fences() {
+        let (mut parser, mut history) = setup();
+        parser.append_streaming_text(
+            &mut history,
+            "````\n```\n```\n````\n````\n```\nnested code block\n```\n````",
+        );
+        parser.flush_streaming_text(&mut history);
+        assert_eq!(history.len(), 1);
+        assert_eq!(
+            history.block_at(0),
+            &Block::Text {
+                content: "````\n```\n```\n````\n````\n```\nnested code block\n```\n````".into(),
             }
         );
     }
@@ -867,9 +877,8 @@ mod tests {
         assert_eq!(history.len(), 1);
         assert_eq!(
             history.block_at(0),
-            &Block::CodeLine {
-                content: "partial".into(),
-                lang: "rust".into(),
+            &Block::Text {
+                content: "```rust\npartial".into(),
             }
         );
         assert_eq!(history.status(history.order[0]), Status::Done);
