@@ -25,8 +25,10 @@ pub struct ModelConfig {
     pub cache_read_cost: Option<f64>,
     /// Cost per 1M cache-write tokens in USD.
     pub cache_write_cost: Option<f64>,
-    /// Token budget for models that use budget-based thinking.
-    pub thinking_budget: Option<u32>,
+    /// Maximum output tokens for this model.
+    pub max_tokens: Option<u32>,
+    /// Per-level token budgets for budget-based thinking.
+    pub thinking_budgets: Option<protocol::ThinkingBudgets>,
 }
 
 impl From<&ModelConfig> for engine::ModelConfig {
@@ -43,7 +45,8 @@ impl From<&ModelConfig> for engine::ModelConfig {
             output_cost: c.output_cost,
             cache_read_cost: c.cache_read_cost,
             cache_write_cost: c.cache_write_cost,
-            thinking_budget: c.thinking_budget,
+            max_tokens: c.max_tokens,
+            thinking_budgets: c.thinking_budgets,
         }
     }
 }

@@ -1,3 +1,4 @@
+use protocol::ThinkingBudgets;
 use serde::Deserialize;
 
 #[derive(Debug, Default, Clone, Deserialize)]
@@ -18,9 +19,10 @@ pub struct ModelConfig {
     pub cache_read_cost: Option<f64>,
     /// Cost per 1M cache-write tokens in USD.
     pub cache_write_cost: Option<f64>,
-    /// Token budget for models that use budget-based thinking
-    /// (e.g. Kimi via the Anthropic-compatible endpoint).
-    pub thinking_budget: Option<u32>,
+    /// Maximum output tokens for this model.
+    pub max_tokens: Option<u32>,
+    /// Per-level token budgets for budget-based thinking.
+    pub thinking_budgets: Option<ThinkingBudgets>,
 }
 
 impl ModelConfig {
@@ -44,8 +46,11 @@ impl ModelConfig {
         if let Some(v) = overrides.repeat_penalty {
             self.repeat_penalty = Some(v);
         }
-        if let Some(v) = overrides.thinking_budget {
-            self.thinking_budget = Some(v);
+        if let Some(v) = overrides.max_tokens {
+            self.max_tokens = Some(v);
+        }
+        if let Some(v) = overrides.thinking_budgets {
+            self.thinking_budgets = Some(v);
         }
         self
     }

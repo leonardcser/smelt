@@ -99,7 +99,8 @@ Per-model overrides:
 | `output_cost`     | USD per 1M output tokens                             |
 | `cache_read_cost` | USD per 1M cache-read tokens                         |
 | `cache_write_cost`| USD per 1M cache-write tokens                        |
-| `thinking_budget` | Token budget for budget-based thinking (default 2048) |
+| `max_tokens`      | Maximum output tokens for this model (default 4096)  |
+| `thinking_budgets`| Per-level budgets for budget-based thinking: `{ low = 2048, medium = 8192, high = 16384, max = 16384 }` |
 
 #### Pricing
 

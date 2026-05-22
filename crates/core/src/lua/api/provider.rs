@@ -40,8 +40,55 @@ pub struct LuaProviderModel {
     pub cache_read_cost: Option<f64>,
     /// Cost per cache-write token in USD.
     pub cache_write_cost: Option<f64>,
-    /// Token budget for models that use budget-based thinking.
-    pub thinking_budget: Option<u32>,
+    /// Maximum output tokens for this model.
+    pub max_tokens: Option<u32>,
+    /// Per-level token budgets for budget-based thinking.
+    pub thinking_budgets: Option<LuaThinkingBudgets>,
+}
+
+#[derive(Debug, Default, Clone)]
+pub struct LuaThinkingBudgets {
+    pub low: u32,
+    pub medium: u32,
+    pub high: u32,
+    pub max: u32,
+}
+
+impl From<LuaThinkingBudgets> for protocol::ThinkingBudgets {
+    fn from(t: LuaThinkingBudgets) -> Self {
+        Self {
+            low: t.low,
+            medium: t.medium,
+            high: t.high,
+            max: t.max,
+        }
+    }
+}
+
+impl crate::lua::lua_type::LuaType for LuaThinkingBudgets {
+    fn lua_type() -> String {
+        "table".into()
+    }
+}
+
+impl mlua::FromLua for LuaThinkingBudgets {
+    fn from_lua(value: mlua::Value, _lua: &mlua::Lua) -> mlua::Result<Self> {
+        let t = match value {
+            mlua::Value::Table(t) => t,
+            other => {
+                return Err(mlua::Error::external(format!(
+                    "thinking_budgets must be a table, got {}",
+                    other.type_name()
+                )))
+            }
+        };
+        Ok(Self {
+            low: t.get("low").unwrap_or(2048),
+            medium: t.get("medium").unwrap_or(8192),
+            high: t.get("high").unwrap_or(16384),
+            max: t.get("max").unwrap_or(16384),
+        })
+    }
 }
 
 /// Wrapper that accepts either a `string` model id or a full
@@ -71,7 +118,8 @@ impl FromLua for LuaModelEntry {
                     output_cost: m.output_cost,
                     cache_read_cost: m.cache_read_cost,
                     cache_write_cost: m.cache_write_cost,
-                    thinking_budget: m.thinking_budget,
+                    max_tokens: m.max_tokens,
+                    thinking_budgets: m.thinking_budgets.map(Into::into),
                 }))
             }
             other => Err(mlua::Error::external(format!(
@@ -186,6 +234,15 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
                         row.set("output_cost", m.output_cost)?;
                         row.set("cache_read_cost", m.cache_read_cost)?;
                         row.set("cache_write_cost", m.cache_write_cost)?;
+                        row.set("max_tokens", m.max_tokens)?;
+                        if let Some(tb) = &m.thinking_budgets {
+                            let t = lua.create_table()?;
+                            t.set("low", tb.low)?;
+                            t.set("medium", tb.medium)?;
+                            t.set("high", tb.high)?;
+                            t.set("max", tb.max)?;
+                            row.set("thinking_budgets", t)?;
+                        }
                         models.set(j + 1, row)?;
                     }
                     t.set("models", models)?;

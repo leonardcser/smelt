@@ -27,4 +27,7 @@ pub use history::{
 pub use message::{FunctionCall, Message, ReasoningBlock, Role, ToolCall, ToolOutcome};
 pub use mode::{mode_change_note, AgentMode, ReasoningEffort, MODE_NOTE_PREFIX};
 pub use style::{StyledLines, StyledSpan};
-pub use usage::{ModelConfigOverrides, PermissionOverrides, RuleSetOverride, TokenUsage, TurnMeta};
+pub use usage::{
+    ModelConfigOverrides, PermissionOverrides, RuleSetOverride, ThinkingBudgets, TokenUsage,
+    TurnMeta,
+};

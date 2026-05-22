@@ -327,7 +327,8 @@
 ---@field output_cost? number Cost per output token in USD.
 ---@field cache_read_cost? number Cost per cache-read token in USD.
 ---@field cache_write_cost? number Cost per cache-write token in USD.
----@field thinking_budget? integer Token budget for models that use budget-based thinking.
+---@field max_tokens? integer Maximum output tokens for this model.
+---@field thinking_budgets? table Per-level token budgets for budget-based thinking.
 
 --- Color value. Set `ansi` (256-color palette index) or `rgb` (`{R, G, B}` triple) for a direct color, or `dark` / `light` (themselves `ColorDecl`s) for a branch that resolves against the terminal background. A matching-side branch wins over the direct fields.
 ---@class smelt.theme.ColorDecl

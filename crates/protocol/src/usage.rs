@@ -45,6 +45,28 @@ pub struct TurnMeta {
     pub tool_elapsed: HashMap<String, u64>,
 }
 
+/// Per-level token budgets for budget-based thinking.
+#[derive(Debug, Default, Clone, Copy, Serialize, Deserialize)]
+pub struct ThinkingBudgets {
+    pub low: u32,
+    pub medium: u32,
+    pub high: u32,
+    pub max: u32,
+}
+
+impl ThinkingBudgets {
+    /// Budget for a specific reasoning effort level.
+    pub fn for_effort(&self, effort: crate::ReasoningEffort) -> u32 {
+        match effort {
+            crate::ReasoningEffort::Off => 0,
+            crate::ReasoningEffort::Low => self.low,
+            crate::ReasoningEffort::Medium => self.medium,
+            crate::ReasoningEffort::High => self.high,
+            crate::ReasoningEffort::Max => self.max,
+        }
+    }
+}
+
 /// Model-parameter overrides applied to a single turn.
 #[derive(Debug, Default, Clone, Serialize, Deserialize)]
 #[serde(default)]
@@ -60,7 +82,9 @@ pub struct ModelConfigOverrides {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub repeat_penalty: Option<f64>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub thinking_budget: Option<u32>,
+    pub max_tokens: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub thinking_budgets: Option<ThinkingBudgets>,
 }
 
 /// Permission rule-set override (allow / ask / deny glob patterns).
@@ -204,6 +228,8 @@ mod tests {
         assert!(o.top_k.is_none());
         assert!(o.min_p.is_none());
         assert!(o.repeat_penalty.is_none());
+        assert!(o.max_tokens.is_none());
+        assert!(o.thinking_budgets.is_none());
     }
 
     // ---- RuleSetOverride ----

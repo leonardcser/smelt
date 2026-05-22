@@ -48,13 +48,36 @@ fn count_cache_breakpoints(body: &serde_json::Value) -> usize {
 }
 
 fn supports_adaptive_thinking(model: &str) -> bool {
-    model.contains("opus-4-6") || model.contains("sonnet-4-6")
+    model.contains("opus-4-6")
+        || model.contains("opus-4.6")
+        || model.contains("opus-4-7")
+        || model.contains("opus-4.7")
+        || model.contains("sonnet-4-6")
+        || model.contains("sonnet-4.6")
 }
 
-/// Budget-based thinking for models that support reasoning but not the
-/// adaptive-thinking control (e.g. Kimi via the Anthropic-compatible endpoint).
-fn supports_budget_thinking(model: &str) -> bool {
-    model.contains("kimi")
+/// Default per-level thinking budgets. Mirrors pi-mono.
+fn default_thinking_budgets() -> protocol::ThinkingBudgets {
+    protocol::ThinkingBudgets {
+        low: 2048,
+        medium: 8192,
+        high: 16384,
+        max: 16384,
+    }
+}
+
+/// Bump `max_tokens` by the thinking budget so content still has room
+/// after thinking. If the cap is smaller than the budget, shrink the
+/// budget to leave at least `min_output` tokens for content.
+fn adjust_max_tokens_for_thinking(base: u32, budget: u32) -> (u32, u32) {
+    let min_output = 1024;
+    let max_tokens = base.saturating_add(budget);
+    if max_tokens <= budget {
+        let adjusted = max_tokens.saturating_sub(min_output);
+        (max_tokens, adjusted)
+    } else {
+        (max_tokens, budget)
+    }
 }
 
 fn parse_cache_write_tokens(u: &serde_json::Value) -> Option<u32> {
@@ -185,12 +208,8 @@ pub(super) fn build_body(
         }
     }
 
-    let mut max_tokens = 4096;
-    if effort != ReasoningEffort::Off && supports_budget_thinking(model) {
-        // Thinking tokens count toward max_tokens, so bump the limit by the
-        // thinking budget so the model still has room for content after thinking.
-        max_tokens += config.thinking_budget.unwrap_or(2048);
-    }
+    let base_max = config.max_tokens.unwrap_or(4096);
+    let mut max_tokens = base_max;
 
     let mut body = serde_json::json!({
         "model": model,
@@ -235,10 +254,19 @@ pub(super) fn build_body(
             body["output_config"] = serde_json::json!({
                 "effort": effort.label(),
             });
-        } else if supports_budget_thinking(model) {
+        } else {
+            // Budget-based thinking for all non-adaptive models (Kimi, older
+            // Claude, etc.). Mirrors pi-mono behaviour.
+            let budgets = config
+                .thinking_budgets
+                .unwrap_or_else(default_thinking_budgets);
+            let mut budget = budgets.for_effort(effort);
+            (max_tokens, budget) = adjust_max_tokens_for_thinking(base_max, budget);
+            body["max_tokens"] = serde_json::json!(max_tokens);
             body["thinking"] = serde_json::json!({
                 "type": "enabled",
-                "budget_tokens": config.thinking_budget.unwrap_or(2048),
+                "budget_tokens": budget,
+                "display": "summarized",
             });
         }
     }
@@ -948,7 +976,7 @@ mod tests {
     }
 
     #[test]
-    fn build_body_omits_thinking_for_non_adaptive_models_even_with_effort() {
+    fn build_body_emits_budget_thinking_for_non_adaptive_models_with_effort() {
         let body = build_body(
             &[user("hi")],
             &[],
@@ -957,8 +985,9 @@ mod tests {
             &cfg(),
             &CacheConfig::default(),
         );
-        assert!(body.get("thinking").is_none());
-        assert!(body.get("output_config").is_none());
+        assert_eq!(body["thinking"]["type"], "enabled");
+        assert_eq!(body["thinking"]["display"], "summarized");
+        assert!(body["thinking"]["budget_tokens"].as_u64().unwrap() > 0);
     }
 
     #[test]
@@ -972,8 +1001,9 @@ mod tests {
             &CacheConfig::default(),
         );
         assert_eq!(body["thinking"]["type"], "enabled");
-        assert_eq!(body["thinking"]["budget_tokens"], 2048);
-        assert_eq!(body["max_tokens"], 4096 + 2048);
+        assert_eq!(body["thinking"]["budget_tokens"], 16384);
+        assert_eq!(body["thinking"]["display"], "summarized");
+        assert_eq!(body["max_tokens"], 4096 + 16384);
     }
 
     #[test]

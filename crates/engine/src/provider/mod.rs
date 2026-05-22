@@ -1682,14 +1682,25 @@ mod tests {
                 top_k: Some(3),
                 min_p: Some(0.4),
                 repeat_penalty: Some(1.5),
-                thinking_budget: Some(1024),
+                max_tokens: Some(8192),
+                thinking_budgets: Some(protocol::ThinkingBudgets {
+                    low: 1024,
+                    medium: 2048,
+                    high: 4096,
+                    max: 8192,
+                }),
             });
         assert_eq!(cfg.temperature, Some(0.1));
         assert_eq!(cfg.top_p, Some(0.2));
         assert_eq!(cfg.top_k, Some(3));
         assert_eq!(cfg.min_p, Some(0.4));
         assert_eq!(cfg.repeat_penalty, Some(1.5));
-        assert_eq!(cfg.thinking_budget, Some(1024));
+        assert_eq!(cfg.max_tokens, Some(8192));
+        let tb = cfg.thinking_budgets.unwrap();
+        assert_eq!(tb.low, 1024);
+        assert_eq!(tb.medium, 2048);
+        assert_eq!(tb.high, 4096);
+        assert_eq!(tb.max, 8192);
     }
 
     #[test]

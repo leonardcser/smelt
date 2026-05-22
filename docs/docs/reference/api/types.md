@@ -478,7 +478,8 @@ One model entry in a provider's `models` list. Plugin authors can pass either a 
 | `output_cost` | `number` |  | Cost per output token in USD. |
 | `cache_read_cost` | `number` |  | Cost per cache-read token in USD. |
 | `cache_write_cost` | `number` |  | Cost per cache-write token in USD. |
-| `thinking_budget` | `integer` |  | Token budget for models that use budget-based thinking. |
+| `max_tokens` | `integer` |  | Maximum output tokens for this model. |
+| `thinking_budgets` | `table` |  | Per-level token budgets for budget-based thinking. |
 
 ### `smelt.theme.ColorDecl`
 
