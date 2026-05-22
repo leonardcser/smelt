@@ -51,6 +51,12 @@ fn supports_adaptive_thinking(model: &str) -> bool {
     model.contains("opus-4-6") || model.contains("sonnet-4-6")
 }
 
+/// Budget-based thinking for models that support reasoning but not the
+/// adaptive-thinking control (e.g. Kimi via the Anthropic-compatible endpoint).
+fn supports_budget_thinking(model: &str) -> bool {
+    model.contains("kimi")
+}
+
 fn parse_cache_write_tokens(u: &serde_json::Value) -> Option<u32> {
     u["cache_creation_input_tokens"]
         .as_u64()
@@ -213,14 +219,21 @@ pub(super) fn build_body(
         body["top_p"] = serde_json::json!(v);
     }
 
-    if effort != ReasoningEffort::Off && supports_adaptive_thinking(model) {
-        body["thinking"] = serde_json::json!({
-            "type": "adaptive",
-            "display": "summarized",
-        });
-        body["output_config"] = serde_json::json!({
-            "effort": effort.label(),
-        });
+    if effort != ReasoningEffort::Off {
+        if supports_adaptive_thinking(model) {
+            body["thinking"] = serde_json::json!({
+                "type": "adaptive",
+                "display": "summarized",
+            });
+            body["output_config"] = serde_json::json!({
+                "effort": effort.label(),
+            });
+        } else if supports_budget_thinking(model) {
+            body["thinking"] = serde_json::json!({
+                "type": "enabled",
+                "budget_tokens": config.thinking_budget.unwrap_or(2048),
+            });
+        }
     }
 
     body

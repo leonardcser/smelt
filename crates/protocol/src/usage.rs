@@ -59,6 +59,8 @@ pub struct ModelConfigOverrides {
     pub min_p: Option<f64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub repeat_penalty: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub thinking_budget: Option<u32>,
 }
 
 /// Permission rule-set override (allow / ask / deny glob patterns).

@@ -40,6 +40,8 @@ pub struct LuaProviderModel {
     pub cache_read_cost: Option<f64>,
     /// Cost per cache-write token in USD.
     pub cache_write_cost: Option<f64>,
+    /// Token budget for models that use budget-based thinking.
+    pub thinking_budget: Option<u32>,
 }
 
 /// Wrapper that accepts either a `string` model id or a full
@@ -69,6 +71,7 @@ impl FromLua for LuaModelEntry {
                     output_cost: m.output_cost,
                     cache_read_cost: m.cache_read_cost,
                     cache_write_cost: m.cache_write_cost,
+                    thinking_budget: m.thinking_budget,
                 }))
             }
             other => Err(mlua::Error::external(format!(

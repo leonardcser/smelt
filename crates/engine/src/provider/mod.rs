@@ -1682,12 +1682,14 @@ mod tests {
                 top_k: Some(3),
                 min_p: Some(0.4),
                 repeat_penalty: Some(1.5),
+                thinking_budget: Some(1024),
             });
         assert_eq!(cfg.temperature, Some(0.1));
         assert_eq!(cfg.top_p, Some(0.2));
         assert_eq!(cfg.top_k, Some(3));
         assert_eq!(cfg.min_p, Some(0.4));
         assert_eq!(cfg.repeat_penalty, Some(1.5));
+        assert_eq!(cfg.thinking_budget, Some(1024));
     }
 
     #[test]

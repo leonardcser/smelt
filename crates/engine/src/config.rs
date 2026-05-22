@@ -18,6 +18,9 @@ pub struct ModelConfig {
     pub cache_read_cost: Option<f64>,
     /// Cost per 1M cache-write tokens in USD.
     pub cache_write_cost: Option<f64>,
+    /// Token budget for models that use budget-based thinking
+    /// (e.g. Kimi via the Anthropic-compatible endpoint).
+    pub thinking_budget: Option<u32>,
 }
 
 impl ModelConfig {
@@ -40,6 +43,9 @@ impl ModelConfig {
         }
         if let Some(v) = overrides.repeat_penalty {
             self.repeat_penalty = Some(v);
+        }
+        if let Some(v) = overrides.thinking_budget {
+            self.thinking_budget = Some(v);
         }
         self
     }

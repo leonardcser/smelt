@@ -202,6 +202,7 @@ impl TuiApp {
                     top_k: o.top_k,
                     min_p: o.min_p,
                     repeat_penalty: o.repeat_penalty,
+                    thinking_budget: None,
                 })
             } else {
                 None

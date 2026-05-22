@@ -99,6 +99,7 @@ Per-model overrides:
 | `output_cost`     | USD per 1M output tokens                             |
 | `cache_read_cost` | USD per 1M cache-read tokens                         |
 | `cache_write_cost`| USD per 1M cache-write tokens                        |
+| `thinking_budget` | Token budget for budget-based thinking (default 2048) |
 
 #### Pricing
 

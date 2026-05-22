@@ -598,7 +598,7 @@ Modal overlay builders.
 - `smelt.dialog.markdown` :: `fun(text: string): smelt.win.Win, smelt.buf.Buf`
   Render `text` as a non-focusable markdown leaf.
 - `smelt.dialog.menu` :: `fun(items: (string|smelt.dialog.MenuItem)[], opts: smelt.dialog.MenuOpts?): smelt.win.Win, table`
-
+  
 - `smelt.dialog.open` :: `fun(opts: smelt.dialog.Opts): any`
   Coroutine-blocking dialog opener.
 - `smelt.dialog.open_handle` :: `fun(opts: smelt.dialog.Opts): table`
@@ -1153,7 +1153,7 @@ Model selector.
 - `smelt.model.list` :: `fun(): table`
   Return an array of `{ key, name, provider }` records for every model the active config can switch to.
 - `smelt.model.preferred` :: `fun(name: any, value: any): any`
-
+  
 
 #### `smelt.notebook`
 
