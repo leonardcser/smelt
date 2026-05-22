@@ -21,7 +21,7 @@ local BOT_NS = smelt.ns("smelt.prompt_bar.bottom")
 
 local function queued_message_rows(queued, width)
   local rows = {}
-  local prefix = " \u{21AA} "
+  local prefix = "  \u{21AA} "
   for _, msg in ipairs(queued) do
     -- Leading "↪ " glyph mirrors the user-block continuation cue; the
     -- rest renders verbatim, trimmed by the bar's available width.
