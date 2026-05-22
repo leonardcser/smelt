@@ -1,4 +1,4 @@
-use super::metrics::{BLOCK_GUTTER_SPACE, BLOCK_GUTTER_W};
+use super::metrics::{block_inner_width, BLOCK_GUTTER_SPACE, BLOCK_GUTTER_W};
 use super::MAX_TOOL_BLOCK_ROWS;
 use protocol::{StyledLines, StyledSpan};
 use smelt_core::buffer::SpanMeta;
@@ -47,7 +47,7 @@ pub(super) fn render_tool(
     }
     if status != ToolStatus::Denied {
         if let Some(layout) = rendered {
-            let inner_width = (width as u16).saturating_sub(BLOCK_GUTTER_W as u16);
+            let inner_width = block_inner_width(width) as u16;
             rows += replay_rendered(out, layout, inner_width);
         } else if let Some(out_data) = output {
             if !out_data.content.trim().is_empty() {
@@ -271,8 +271,8 @@ fn render_leaf(
 ) -> u16 {
     match leaf {
         RenderedLeaf::Buf(buf) => replay_leaf(out, buf, rows_cap, width, with_gutter),
-        RenderedLeaf::Diff(spec) => render_diff_spec(out, spec, rows_cap, with_gutter),
-        RenderedLeaf::FileView(spec) => render_file_view_spec(out, spec, rows_cap, with_gutter),
+        RenderedLeaf::Diff(spec) => render_diff_spec(out, spec, with_gutter),
+        RenderedLeaf::FileView(spec) => render_file_view_spec(out, spec, with_gutter),
     }
 }
 
@@ -280,12 +280,7 @@ fn render_leaf(
 /// 2-cell indent gets baked into the diff renderer (every row gets it), so
 /// bg, indent, line numbers, content, and trailing pad all share one render
 /// pass and survive the projection seam intact.
-fn render_diff_spec(
-    out: &mut LineBuilder,
-    spec: &DiffSpec,
-    rows_cap: u16,
-    with_gutter: bool,
-) -> u16 {
+fn render_diff_spec(out: &mut LineBuilder, spec: &DiffSpec, with_gutter: bool) -> u16 {
     let ext = spec
         .lang
         .as_deref()
@@ -305,20 +300,12 @@ fn render_diff_spec(
         GutterStyle::InlineLineNumbers,
         indent,
         0,
-        rows_cap,
+        u16::MAX,
     )
 }
 
 /// Render a `FileView` spec leaf — single-line-number column, no diff bg.
-/// File-view is the deliverable (the contents the tool wrote), so we ignore
-/// the rows cap and emit every line: a 200-line `write_file` shows all 200.
-/// The diff path stays capped because a diff is a summary of changes.
-fn render_file_view_spec(
-    out: &mut LineBuilder,
-    spec: &FileViewSpec,
-    _rows_cap: u16,
-    with_gutter: bool,
-) -> u16 {
+fn render_file_view_spec(out: &mut LineBuilder, spec: &FileViewSpec, with_gutter: bool) -> u16 {
     let ext = spec
         .lang
         .as_deref()

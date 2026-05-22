@@ -78,14 +78,16 @@ smelt.tools.register({
     end
     return smelt.fs.file_state.staleness_error(path, "file")
   end,
-  render = function(args, output, ctx)
+  render = function(args, output)
     if output.is_error then
       return smelt.layout.text(output.content, { hl_group = "ErrorMsg" })
     end
+    local meta = output.metadata or {}
     return smelt.layout.diff({
-      old = args.old_string or "",
-      new = args.new_string or "",
-      path = args.file_path or "",
+      old = meta.old_content or args.old_string or "",
+      new = meta.new_content or args.new_string or "",
+      path = meta.path or args.file_path or "",
+      anchor = args.old_string or "",
     })
   end,
   paths_for_workspace = function(args)
@@ -93,10 +95,30 @@ smelt.tools.register({
     return p ~= "" and { p } or {}
   end,
   preview = function(args)
+    local path = args.file_path or ""
+    local old_string = args.old_string or ""
+    local new_string = args.new_string or ""
+    local do_all = args.replace_all == true
+    local content = path ~= "" and smelt.fs.read(path) or nil
+    if not content then
+      return smelt.layout.diff({
+        old = old_string,
+        new = new_string,
+        path = path,
+      })
+    end
+
+    local new_content
+    if do_all then
+      new_content = replace_all(content, old_string, new_string)
+    else
+      new_content = replace_first(content, old_string, new_string)
+    end
     return smelt.layout.diff({
-      old  = args.old_string or "",
-      new  = args.new_string or "",
-      path = args.file_path or "",
+      old = content,
+      new = new_content,
+      path = path,
+      anchor = old_string,
     })
   end,
 
@@ -169,6 +191,13 @@ smelt.tools.register({
     smelt.fs.file_state.record_write(path, new_content)
     lock:release()
 
-    return string.format("edited %s", smelt.path.display(path))
+    return {
+      content = string.format("edited %s", smelt.path.display(path)),
+      metadata = {
+        old_content = content,
+        new_content = new_content,
+        path = path,
+      },
+    }
   end,
 })
