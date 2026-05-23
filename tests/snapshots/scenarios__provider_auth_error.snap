@@ -16,20 +16,8 @@ expression: out.events
     }
   },
   {
-    "TurnComplete": {
-      "history": [
-        {
-          "content": "hi",
-          "kind": "user"
-        }
-      ],
-      "meta": {
-        "avg_tps": "[avg_tps]",
-        "elapsed_ms": "[elapsed_ms]",
-        "interrupted": false,
-        "tool_elapsed": {}
-      },
-      "turn_id": 1
+    "TurnError": {
+      "message": "authentication failed: {\"error\":{\"message\":\"invalid api key\",\"type\":\"authentication_error\"}}"
     }
   }
 ]

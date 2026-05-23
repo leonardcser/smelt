@@ -132,6 +132,7 @@ pub(super) struct StreamState {
     /// content block index -> (id, name, args-json)
     pub(super) tool_calls: HashMap<usize, (String, String, String)>,
     pub(super) usage: TokenUsage,
+    pub(super) saw_finish_reason: bool,
 }
 
 impl StreamState {
@@ -188,7 +189,14 @@ pub(super) fn apply_sse_event(
             .map(|n| n as u32);
     }
 
-    let Some(delta) = ev["choices"].get(0).and_then(|c| c.get("delta")) else {
+    let choice = ev["choices"].get(0);
+    if let Some(reason) = choice.and_then(|c| c.get("finish_reason")) {
+        if !reason.is_null() {
+            state.saw_finish_reason = true;
+        }
+    }
+
+    let Some(delta) = choice.and_then(|c| c.get("delta")) else {
         return;
     };
 
@@ -253,6 +261,12 @@ pub(super) async fn read_stream(
         apply_sse_event(&mut state, ev, &mut |d| on_delta(d));
     })
     .await?;
+
+    if !state.saw_finish_reason {
+        return Err(ProviderError::InvalidResponse(
+            "stream ended without finish_reason".into(),
+        ));
+    }
 
     Ok(state.finalize())
 }

@@ -374,6 +374,7 @@ pub(super) struct StreamState {
     /// content block index -> (id, name, args-json)
     pub(super) tool_calls: HashMap<usize, (String, String, String)>,
     pub(super) usage: TokenUsage,
+    pub(super) saw_message_stop: bool,
 }
 
 impl StreamState {
@@ -529,6 +530,9 @@ pub(super) fn apply_sse_event(
                 }
             }
         }
+        "message_stop" => {
+            state.saw_message_stop = true;
+        }
         _ => {}
     }
 }
@@ -544,6 +548,12 @@ pub(super) async fn read_stream(
         apply_sse_event(&mut state, ev, &mut |d| on_delta(d));
     })
     .await?;
+
+    if !state.saw_message_stop {
+        return Err(ProviderError::InvalidResponse(
+            "stream ended without message_stop".into(),
+        ));
+    }
 
     Ok(state.finalize())
 }

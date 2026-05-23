@@ -258,6 +258,7 @@ pub(super) struct StreamState {
     pub(super) tool_calls: HashMap<String, (String, String, String)>,
     pub(super) usage: TokenUsage,
     pub(super) error: Option<ProviderError>,
+    pub(super) saw_completed: bool,
 }
 
 impl StreamState {
@@ -360,6 +361,7 @@ pub(super) fn apply_sse_event(
             }
         }
         "response.completed" | "response.done" => {
+            state.saw_completed = true;
             if let Some(u) = ev.get("response").and_then(|r| r.get("usage")) {
                 state.usage = parse_usage(u);
             }
@@ -403,6 +405,12 @@ pub(super) async fn read_stream(
         apply_sse_event(&mut state, ev, &mut |d| on_delta(d));
     })
     .await?;
+
+    if !state.saw_completed {
+        return Err(ProviderError::InvalidResponse(
+            "stream ended without response.completed".into(),
+        ));
+    }
 
     state.finalize()
 }

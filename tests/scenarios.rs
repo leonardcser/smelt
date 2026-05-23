@@ -217,10 +217,8 @@ async fn provider_auth_error() {
 
 /// Incomplete stream: provider sends a `text_delta` then closes the
 /// connection without `content_block_stop` / `message_delta` /
-/// `message_stop`. Engine treats EOF as the end of the turn and emits
-/// a normal `TurnComplete` with the partial text. Token usage is
-/// missing the `completion_tokens` field (no `message_delta` carried
-/// it).
+/// `message_stop`. Engine detects the premature EOF and emits a
+/// `TurnError` instead of a silent `TurnComplete`.
 #[tokio::test]
 async fn incomplete_stream() {
     let h = Harness::new().await;

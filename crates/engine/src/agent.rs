@@ -917,11 +917,11 @@ impl<'a> Turn<'a> {
                         "agent_stop",
                         &serde_json::json!({"reason": "quota_exceeded", "error": body}),
                     );
-                    self.emit_turn_complete(false);
                     self.emit(EngineEvent::TurnError {
                         message: "API quota exceeded — check your plan and billing details"
                             .to_string(),
                     });
+                    self.emit_turn_complete(false);
                     return;
                 }
                 Err(e) => {
@@ -969,13 +969,13 @@ impl<'a> Turn<'a> {
                             continue;
                         }
                     }
-                    self.emit_turn_complete(false);
                     let message = if is_ctx {
                         "Context limit reached. Run /compact and retry.".to_string()
                     } else {
                         error_msg
                     };
                     self.emit(EngineEvent::TurnError { message });
+                    self.emit_turn_complete(false);
                     return;
                 }
             };
