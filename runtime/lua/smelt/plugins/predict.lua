@@ -2,15 +2,24 @@
 -- LLM call and renders it as the prompt's placeholder. Tab accepts; Esc and
 -- Ctrl-C dismiss; typing hides it without destroying it, so an undo back to
 -- an empty buffer brings it back.
+--
+-- The system prompt carries the stable instruction; messages carry the recent
+-- conversation. Consecutive calls share the KV cache prefix up to the last
+-- common message.
 
-local aux = require("smelt.aux")
 local prompt = smelt.prompt.win()
+
+local SYSTEM = "Task: predict what the user will type next in the conversation below. Keep it short — one sentence max. If you cannot predict, reply with an empty string."
 
 smelt.cell("history"):subscribe(function(payload)
   if payload.kind == "cleared" then
     prompt:clear_placeholder()
   end
 end)
+
+-- Accumulated context sent so far. The system prompt is stable,
+-- so only the messages array is compared between calls.
+local sent_messages = {}
 
 smelt.cell("turn_end"):subscribe(function(payload)
   if payload.cancelled then
@@ -39,25 +48,35 @@ smelt.cell("turn_end"):subscribe(function(payload)
     return
   end
 
-  local parts = {}
+  -- Build messages from recent context.
+  local messages = {}
   for _, msg in ipairs(user_msgs) do
     local text = msg.content or ""
     text = smelt.text.truncate(text, 500, { keep = "tail" })
-    table.insert(parts, "User: " .. text)
+    table.insert(messages, { role = "user", content = "User: " .. text })
   end
   if last_assistant then
     local text = last_assistant.content or ""
     text = smelt.text.truncate(text, 500, { keep = "tail" })
-    table.insert(parts, "Assistant: " .. text)
+    table.insert(messages, { role = "assistant", content = "Assistant: " .. text })
   end
 
-  local question = "Recent conversation:\n\n"
-    .. table.concat(parts, "\n\n")
-    .. "\n\nTask: predict what the user will type next in the conversation above. Keep it short — one sentence max. If you cannot predict, reply with an empty string."
+  -- Skip if nothing changed since last call.
+  local changed = #messages ~= #sent_messages
+  if not changed then
+    for i = 1, #messages do
+      if messages[i].content ~= sent_messages[i].content then
+        changed = true
+        break
+      end
+    end
+  end
+  if not changed then return end
+  sent_messages = messages
 
   smelt.engine.ask({
-    system = aux.SYSTEM,
-    question = question,
+    system = SYSTEM,
+    messages = messages,
     model = smelt.model.preferred("predict"),
     on_response = function(content, err)
       if err then return end

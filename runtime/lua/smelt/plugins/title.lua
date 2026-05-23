@@ -1,14 +1,14 @@
 -- Session title plugin. Generates a short session title + slug from the
--- first user submission. Fires on `input_submit` so the title appears
--- immediately and survives mid-turn interrupts. Skips when a title is
--- already set, the submission is empty, or the submission is a shell
--- escape (`!cmd`).
+-- accumulated user messages. Fires on `turn_end` so the title reflects the
+-- full assistant response. Re-evaluates each turn so the title tracks the
+-- current high-level task even when the user changes direction.
+--
+-- The system prompt carries the stable instruction; user messages are appended
+-- in the messages array. Consecutive calls share the KV cache prefix up to the
+-- last common user message.
 -- Per-plugin model override: smelt.model.preferred("title", "provider/model").
 
-local aux = require("smelt.aux")
-
-local PROMPT_TEMPLATE = [[
-Task: generate a concise session title and git-branch-style slug for a coding session.
+local SYSTEM = [[Task: generate a concise session title and git-branch-style slug for the coding session below.
 
 Title: 3-6 words, sentence case (capitalize only the first word and proper nouns, not Title Case), clear enough that the user can recognize the session in a list.
 Slug: 1-5 lowercase words separated by dashes, like a git branch name.
@@ -25,9 +25,6 @@ Good examples:
 Bad (too vague): {"title": "Code changes", "slug": "changes"}
 Bad (too long): {"title": "Investigate and fix the issue where the login button does not respond on mobile", "slug": "fix"}
 Bad (wrong case): {"title": "Fix Login Button On Mobile", "slug": "fix-login"}
-
-User message:
-%s
 ]]
 
 local SCHEMA = {
@@ -60,26 +57,57 @@ local function parse_response(raw)
 end
 
 local inflight = false
+-- Accumulated user messages sent so far. The system prompt is stable,
+-- so only the messages array is compared between calls.
+local sent_messages = {}
 
-smelt.cell("input_submit"):subscribe(function(text)
-  if smelt.session.title() then return end
+local function update_title()
   if inflight then return end
-  if type(text) ~= "string" then return end
-  local trimmed = text:gsub("^%s+", ""):gsub("%s+$", "")
+
+  -- Gather all user messages from the session history.
+  local history = smelt.session.messages()
+  local user_msgs = {}
+  for _, m in ipairs(history) do
+    if m.role == "user" and m.content and m.content ~= "" then
+      table.insert(user_msgs, m.content)
+    end
+  end
+
+  -- Skip shell escapes and empty submissions.
+  local last = user_msgs[#user_msgs]
+  if not last then return end
+  local trimmed = last:gsub("^%s+", ""):gsub("%s+$", "")
   if trimmed == "" or trimmed:sub(1, 1) == "!" then return end
 
+  -- Build messages from accumulated user texts.
+  local messages = {}
+  for _, text in ipairs(user_msgs) do
+    table.insert(messages, { role = "user", content = text })
+  end
+
+  -- If nothing changed since the last call, skip.
+  local changed = #messages ~= #sent_messages
+  if not changed then
+    for i = 1, #messages do
+      if messages[i].content ~= sent_messages[i].content then
+        changed = true
+        break
+      end
+    end
+  end
+  if not changed then return end
+
   inflight = true
-  local question = string.format(PROMPT_TEMPLATE, trimmed)
+  sent_messages = messages
 
   smelt.engine.ask({
-    system = aux.SYSTEM,
-    question = question,
+    system = SYSTEM,
+    messages = messages,
     model = smelt.model.preferred("title"),
     reasoning_effort = "off",
     response_format = { name = "session_title", schema = SCHEMA },
     on_response = function(content, err)
       inflight = false
-      if smelt.session.title() then return end
       if err then
         local title, slug = fallback_title(trimmed)
         smelt.session.title(title, slug)
@@ -104,4 +132,9 @@ smelt.cell("input_submit"):subscribe(function(text)
       smelt.session.title(title, slug)
     end,
   })
+end
+
+smelt.cell("turn_end"):subscribe(function(payload)
+  if payload.cancelled then return end
+  update_title()
 end)
