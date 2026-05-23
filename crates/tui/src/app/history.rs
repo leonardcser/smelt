@@ -84,6 +84,12 @@ impl TuiApp {
             self.notify_error("nothing to fork".into());
             return;
         }
+        // Cancel any in-flight turn and Lua tasks before swapping sessions.
+        if self.agent.is_some() {
+            self.core.engine.send(UiCommand::Cancel);
+            self.lua.cancel_tasks();
+            self.agent = None;
+        }
         self.save_session();
         self.flush_persist();
         let original_id = self.core.session.id.clone();
@@ -106,12 +112,17 @@ impl TuiApp {
             }),
         );
         self.notify(format!("forked from {original_id}"));
+        // Drain stale events so old snapshots don't overwrite the forked session.
+        while self.core.engine.try_recv().is_ok() {}
     }
 
     pub(crate) fn reset_session(&mut self) {
         let _perf = smelt_perf::perf::begin("app:reset_session");
-        // Cancel in-flight engine work before clearing state so stale events don't restore old data.
+        // Cancel in-flight engine work and Lua tasks before clearing state so
+        // stale events and running child processes don't restore old data.
         self.core.engine.send(UiCommand::Cancel);
+        self.lua.cancel_tasks();
+        self.agent = None;
         let old_id = self.core.session.id.clone();
         self.core.session.history.clear();
         self.reset_session_permissions();
@@ -154,6 +165,12 @@ impl TuiApp {
     }
 
     pub fn load_session(&mut self, loaded: session::Session) {
+        // Cancel any in-flight turn and Lua tasks before swapping sessions.
+        if self.agent.is_some() {
+            self.core.engine.send(UiCommand::Cancel);
+            self.lua.cancel_tasks();
+            self.agent = None;
+        }
         let old_id = self.core.session.id.clone();
         self.flush_persist();
 

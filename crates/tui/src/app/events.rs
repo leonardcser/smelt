@@ -98,6 +98,29 @@ impl TuiApp {
             return false;
         }
 
+        // Interrupt background work (compaction, etc.) even when no turn is active.
+        if self.agent.is_none() && self.busy_stack.is_busy() {
+            if let Event::Key(KeyEvent {
+                code, modifiers, ..
+            }) = &ev
+            {
+                let is_esc = *code == KeyCode::Esc;
+                let is_ctrl_c = *code == KeyCode::Char('c') && *modifiers == KeyModifiers::CONTROL;
+                if is_esc || is_ctrl_c {
+                    engine::log::entry(
+                        engine::log::Level::Info,
+                        "agent_stop",
+                        &serde_json::json!({
+                            "reason": "user_cancel",
+                            "busy": true,
+                        }),
+                    );
+                    self.discard_turn(true);
+                    return false;
+                }
+            }
+        }
+
         let outcome = if self.agent.is_some() {
             self.handle_event_running(ev)
         } else {

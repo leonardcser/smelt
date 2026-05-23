@@ -44,7 +44,12 @@ pub(crate) async fn engine_task(
 
     let _ = event_tx.send(EngineEvent::Ready);
 
+    let mut bg_cancel = crate::cancel::CancellationToken::new();
+
     loop {
+        if bg_cancel.is_cancelled() {
+            bg_cancel = crate::cancel::CancellationToken::new();
+        }
         tokio::select! {
             Some(cmd) = cmd_rx.recv() => {
                 match cmd {
@@ -80,6 +85,7 @@ pub(crate) async fn engine_task(
                             config: &config,
                             http_client: &client,
                             cancel: crate::cancel::CancellationToken::new(),
+                            bg_cancel: bg_cancel.clone(),
                             history: Vec::new(),
                             mode,
                             reasoning_effort,
@@ -109,15 +115,16 @@ pub(crate) async fn engine_task(
                         config.skill_section = skill_section;
                         config.system_prompt_override = system_prompt_override;
                     }
+                    UiCommand::Cancel => {
+                        bg_cancel.cancel();
+                    }
                     other => {
-                        // EngineAsk routes here; Steer/Cancel/etc. silently
-                        // fall through — they're turn-scoped and a no-op
-                        // outside a turn.
                         let ctx = BackgroundCtx {
                             config: &config,
                             http_client: &client,
                             dispatcher: &*dispatcher,
                             event_tx: &event_tx,
+                            bg_cancel: bg_cancel.clone(),
                         };
                         let _ = dispatch_background_cmd(other, &ctx);
                     }
@@ -177,6 +184,7 @@ pub(crate) struct BackgroundCtx<'a> {
     pub http_client: &'a reqwest::Client,
     pub dispatcher: &'a dyn ToolDispatcher,
     pub event_tx: &'a mpsc::UnboundedSender<EngineEvent>,
+    pub bg_cancel: crate::cancel::CancellationToken,
 }
 
 /// Dispatch a command that doesn't depend on turn state. Returns `None`
@@ -214,6 +222,7 @@ pub(crate) fn dispatch_background_cmd(
                     session_id,
                 },
                 ctx.event_tx,
+                ctx.bg_cancel.clone(),
             );
             None
         }
@@ -227,6 +236,7 @@ fn spawn_engine_ask(
     dispatcher: &dyn ToolDispatcher,
     task: AskTask,
     event_tx: &mpsc::UnboundedSender<EngineEvent>,
+    cancel: crate::cancel::CancellationToken,
 ) {
     let AskTask {
         id,
@@ -266,7 +276,6 @@ fn spawn_engine_ask(
     let tx = event_tx.clone();
     let cache_ttl_long = config.cache_ttl_long;
     tokio::spawn(async move {
-        let cancel = crate::cancel::CancellationToken::new();
         messages.insert(0, protocol::Message::system(&system));
 
         let mut opts = ChatOptions::new(&cancel);
@@ -555,6 +564,7 @@ struct Turn<'a> {
     config: &'a EngineConfig,
     http_client: &'a reqwest::Client,
     cancel: crate::cancel::CancellationToken,
+    bg_cancel: crate::cancel::CancellationToken,
     /// Committed conversation history. Invariant: every `Assistant` turn
     /// either has no `invocations` (terminal) or has a `ToolOutcome` paired
     /// with every `ToolCall` the LLM emitted. There is no in-flight tool
@@ -817,6 +827,7 @@ impl<'a> Turn<'a> {
             http_client: self.http_client,
             dispatcher: self.dispatcher,
             event_tx: self.event_tx,
+            bg_cancel: self.bg_cancel.clone(),
         }
     }
 
@@ -880,6 +891,7 @@ impl<'a> Turn<'a> {
             }
             UiCommand::Cancel => {
                 self.cancel.cancel();
+                self.bg_cancel.cancel();
                 true
             }
             other => dispatch_background_cmd(other, &self.bg_ctx()).is_none(),
@@ -1430,6 +1442,7 @@ impl<'a> Turn<'a> {
             http_client: self.http_client,
             dispatcher,
             event_tx: self.event_tx,
+            bg_cancel: self.bg_cancel.clone(),
         };
         let mut deferred: Vec<UiCommand> = Vec::new();
         let mut tool_results: Vec<(String, ToolOutcome, Option<u64>)> = Vec::new();
@@ -1442,7 +1455,10 @@ impl<'a> Turn<'a> {
                 biased;
                 _ = cancel.cancelled() => break true,
                 Some(cmd) = cmd_rx.recv() => match cmd {
-                    UiCommand::Cancel => cancel.cancel(),
+                    UiCommand::Cancel => {
+                        cancel.cancel();
+                        self.bg_cancel.cancel();
+                    }
                     UiCommand::PermissionDecision { request_id, approved, message } => {
                         if let Some(pos) = plan
                             .pending_perms
@@ -1960,6 +1976,7 @@ impl<'a> Turn<'a> {
                         UiCommand::Cancel => {
                             self.cancel.cancel();
                             cancel_received = true;
+                            self.bg_cancel.cancel();
                         }
                         UiCommand::SetAgentMode { mode, system_prompt, tools } => {
                             self.mode = mode;
@@ -2032,6 +2049,7 @@ impl<'a> Turn<'a> {
                 }) => self.apply_model_change(model, api_base, api_key, provider_type),
                 Some(UiCommand::Cancel) => {
                     self.cancel.cancel();
+                    self.bg_cancel.cancel();
                     return None;
                 }
                 None => return None,

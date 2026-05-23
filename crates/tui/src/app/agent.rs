@@ -293,6 +293,12 @@ impl TuiApp {
         if self.agent.is_some() {
             self.finish_turn(cancelled);
             self.agent = None;
+        } else if cancelled {
+            // No active turn but user requested cancel — still notify the
+            // engine and kill any running Lua tasks (background tool calls,
+            // bash executions, etc.).
+            self.core.engine.send(UiCommand::Cancel);
+            self.lua.cancel_tasks();
         }
     }
 
@@ -300,6 +306,7 @@ impl TuiApp {
         self.sleep_inhibit.release();
         if cancelled {
             self.core.engine.send(UiCommand::Cancel);
+            self.lua.cancel_tasks();
         }
         self.core.cells.set_dyn(
             "turn_end",
