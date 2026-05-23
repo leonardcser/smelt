@@ -692,7 +692,9 @@ impl TestApp {
     /// responsible for terminal setup (raw mode, alternate screen).
     pub fn render(&mut self) {
         let agent_running = self.app.agent.is_some();
-        self.app.render_normal(agent_running);
+        crate::lua::with_app_ptr(&mut self.app, |app| {
+            app.render_normal(agent_running);
+        });
     }
 
     /// Render variant that exercises the full projection pipeline (layout,

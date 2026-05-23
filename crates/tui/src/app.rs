@@ -533,10 +533,16 @@ impl TuiApp {
     /// Fire due timer callbacks; re-arms recurring entries and drops one-shots.
     pub(crate) fn tick_timers(&mut self) {
         let due = self.core.timers.drain_due(self.lua.lua());
+        if due.is_empty() {
+            return;
+        }
+        let _guard = crate::lua::install_app_ptr(self);
         for func in due {
             let _perf = smelt_perf::perf::begin("lua:timer");
             if let Err(e) = func.call::<()>(()) {
-                self.lua.record_error(format!("timer: {e}"));
+                crate::lua::try_with_app(|app| {
+                    app.lua.record_error(format!("timer: {e}"));
+                });
             }
         }
     }
