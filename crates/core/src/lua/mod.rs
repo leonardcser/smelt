@@ -31,7 +31,11 @@ pub use task::{
 /// Outcome of invoking a plugin tool handler.
 pub enum ToolExecResult {
     /// Handler returned synchronously; forward content to the engine immediately.
-    Immediate { content: String, is_error: bool },
+    Immediate {
+        content: String,
+        is_error: bool,
+        metadata: Option<serde_json::Value>,
+    },
     /// Handler yielded; result arrives later via `drive_tasks() -> TaskDriveOutput::ToolComplete`.
     Pending,
 }

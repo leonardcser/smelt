@@ -796,9 +796,14 @@ mod tests {
             test_env(),
             std::time::Instant::now(),
         ) {
-            ToolExecResult::Immediate { content, is_error } => {
+            ToolExecResult::Immediate {
+                content,
+                is_error,
+                metadata,
+            } => {
                 assert_eq!(content, "hi world");
                 assert!(!is_error);
+                assert!(metadata.is_none());
             }
             ToolExecResult::Pending => panic!("expected immediate"),
         }
@@ -847,11 +852,13 @@ mod tests {
                 call_id,
                 content,
                 is_error,
+                metadata,
             } => {
                 assert_eq!(*request_id, 7);
                 assert_eq!(call_id, "c9");
                 assert_eq!(content, "yes");
                 assert!(!*is_error);
+                assert!(metadata.is_none());
             }
             _ => unreachable!(),
         }

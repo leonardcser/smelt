@@ -1382,6 +1382,7 @@ impl LuaRuntime {
                         return Some(ToolExecResult::Immediate {
                             content: reason,
                             is_error: true,
+                            metadata: None,
                         });
                     }
                     *args = t;
@@ -1463,6 +1464,7 @@ impl LuaRuntime {
                 return ToolExecResult::Immediate {
                     content: format!("no tool registered: {tool_name}"),
                     is_error: true,
+                    metadata: None,
                 };
             };
             match self
@@ -1474,6 +1476,7 @@ impl LuaRuntime {
                     return ToolExecResult::Immediate {
                         content: format!("tool handler not found: {tool_name}"),
                         is_error: true,
+                        metadata: None,
                     };
                 }
             }
@@ -1485,6 +1488,7 @@ impl LuaRuntime {
                 return ToolExecResult::Immediate {
                     content: format!("tool arg table: {e}"),
                     is_error: true,
+                    metadata: None,
                 };
             }
         };
@@ -1495,6 +1499,7 @@ impl LuaRuntime {
                 return ToolExecResult::Immediate {
                     content: format!("tool ctx table: {e}"),
                     is_error: true,
+                    metadata: None,
                 };
             }
         };
@@ -1519,6 +1524,7 @@ impl LuaRuntime {
                 return ToolExecResult::Immediate {
                     content: "task runtime poisoned".into(),
                     is_error: true,
+                    metadata: None,
                 };
             }
         };
@@ -1534,6 +1540,7 @@ impl LuaRuntime {
             return ToolExecResult::Immediate {
                 content: format!("tool spawn: {e}"),
                 is_error: true,
+                metadata: None,
             };
         }
         // Single-step the freshly-spawned task: if the handler yields, callers
@@ -1549,7 +1556,7 @@ impl LuaRuntime {
         }
         drop(rt);
 
-        let mut immediate: Option<(String, bool)> = None;
+        let mut immediate: Option<(String, bool, Option<serde_json::Value>)> = None;
         for out in outputs {
             match out {
                 TaskDriveOutput::ToolComplete {
@@ -1557,15 +1564,16 @@ impl LuaRuntime {
                     call_id: cid,
                     content,
                     is_error,
+                    metadata,
                 } if rid == request_id && cid == call_id => {
-                    immediate = Some((content, is_error));
+                    immediate = Some((content, is_error, metadata));
                 }
                 TaskDriveOutput::ToolComplete { .. } => {}
                 TaskDriveOutput::Error(msg) => self.record_error(msg),
             }
         }
         match immediate {
-            Some((mut content, mut is_error)) => {
+            Some((mut content, mut is_error, metadata)) => {
                 self.run_after_hooks(
                     tool_name,
                     &args_for_after,
@@ -1573,7 +1581,11 @@ impl LuaRuntime {
                     &mut content,
                     &mut is_error,
                 );
-                ToolExecResult::Immediate { content, is_error }
+                ToolExecResult::Immediate {
+                    content,
+                    is_error,
+                    metadata,
+                }
             }
             None => ToolExecResult::Pending,
         }

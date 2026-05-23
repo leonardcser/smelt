@@ -49,6 +49,7 @@ pub enum TaskDriveOutput {
         call_id: String,
         content: String,
         is_error: bool,
+        metadata: Option<serde_json::Value>,
     },
     Error(String),
 }
@@ -238,12 +239,16 @@ pub(crate) fn step_task_owned(
                         request_id,
                         call_id,
                     } => {
-                        let (content, is_error) = coerce_tool_result(&v);
+                        let (content, is_error, metadata_lua) = coerce_tool_result(&v);
+                        let metadata = metadata_lua
+                            .as_ref()
+                            .and_then(|mv| crate::lua::lua_to_serde::<serde_json::Value>(lua, mv));
                         outputs.push(TaskDriveOutput::ToolComplete {
                             request_id: *request_id,
                             call_id: call_id.clone(),
                             content,
                             is_error,
+                            metadata,
                         });
                     }
                 }
@@ -330,6 +335,7 @@ fn fail_completion(completion: &TaskCompletion, msg: &str, outputs: &mut Vec<Tas
             call_id: call_id.clone(),
             content: format!("tool error: {msg}"),
             is_error: true,
+            metadata: None,
         });
     }
 }
@@ -368,19 +374,22 @@ fn decode_yield(_lua: &Lua, v: LuaValue) -> Result<Yield, String> {
     }
 }
 
-/// Coerce a task return value to `(content, is_error)`: string or `{ content, is_error }` table.
-fn coerce_tool_result(v: &LuaValue) -> (String, bool) {
+/// Coerce a task return value to `(content, is_error, metadata_lua_value)`:
+/// string or `{ content, is_error, metadata? }` table.
+fn coerce_tool_result(v: &LuaValue) -> (String, bool, Option<mlua::Value>) {
     match v {
-        LuaValue::String(s) => (s.to_string_lossy().to_string(), false),
+        LuaValue::String(s) => (s.to_string_lossy().to_string(), false, None),
         LuaValue::Table(t) => {
             let content: String = t.get("content").unwrap_or_default();
             let is_error: bool = t.get("is_error").unwrap_or(false);
-            (content, is_error)
+            let metadata: Option<mlua::Value> = t.get("metadata").ok();
+            (content, is_error, metadata)
         }
-        LuaValue::Nil => (String::new(), false),
+        LuaValue::Nil => (String::new(), false, None),
         other => (
             format!("tool returned non-string value: {}", other.type_name()),
             true,
+            None,
         ),
     }
 }
@@ -486,11 +495,13 @@ mod tests {
                 call_id,
                 content,
                 is_error,
+                metadata,
             } => {
                 assert_eq!(*request_id, 7);
                 assert_eq!(call_id, "c1");
                 assert_eq!(content, "hello");
                 assert!(!*is_error);
+                assert!(metadata.is_none());
             }
             _ => panic!("expected ToolComplete"),
         }

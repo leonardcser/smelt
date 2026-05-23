@@ -145,12 +145,14 @@ impl TuiApp {
                     call_id,
                     content,
                     is_error,
+                    metadata,
                 } => {
                     self.core.engine.send(protocol::UiCommand::ToolResult {
                         request_id,
                         call_id,
                         content,
                         is_error,
+                        metadata,
                     });
                 }
                 crate::lua::TaskDriveOutput::Error(msg) => {

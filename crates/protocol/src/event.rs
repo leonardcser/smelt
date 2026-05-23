@@ -452,6 +452,8 @@ pub enum UiCommand {
         call_id: String,
         content: String,
         is_error: bool,
+        #[serde(skip_serializing_if = "Option::is_none", default)]
+        metadata: Option<serde_json::Value>,
     },
 
     /// Result of evaluating a tool's permission hooks (response

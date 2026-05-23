@@ -26,6 +26,7 @@ struct DiffViewData {
     view_end: usize,
     max_display_lineno: usize,
     changes: Vec<DiffChange>,
+    is_full_file: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -146,7 +147,11 @@ pub fn build_inline_diff_cache_ext(
         .chars()
         .take_while(|c| c.is_whitespace())
         .count();
-    let extra_indent = " ".repeat(file_indent.saturating_sub(lookup_indent));
+    let extra_indent = if dv.is_full_file {
+        String::new()
+    } else {
+        " ".repeat(file_indent.saturating_sub(lookup_indent))
+    };
 
     let ext = syntax_ext.unwrap_or_else(|| {
         Path::new(path)
@@ -164,21 +169,24 @@ pub fn build_inline_diff_cache_ext(
     let visible = compute_change_visibility(&dv.changes, ctx);
     let mut lines = Vec::new();
 
-    let ctx_before_end = dv.start_line.min(dv.first_mod);
-    let ctx_before_start = dv.view_start.min(ctx_before_end);
-    for (idx, line) in file_lines[ctx_before_start..ctx_before_end]
-        .iter()
-        .enumerate()
-    {
-        lines.push(CachedDiffLine::Context {
-            lineno: ctx_before_start + idx + 1,
-            text: (*line).to_string(),
-            spans: cached_spans_for_line(&mut h, line),
-        });
+    if !dv.is_full_file {
+        let ctx_before_end = dv.start_line.min(dv.first_mod);
+        let ctx_before_start = dv.view_start.min(ctx_before_end);
+        for (idx, line) in file_lines[ctx_before_start..ctx_before_end]
+            .iter()
+            .enumerate()
+        {
+            lines.push(CachedDiffLine::Context {
+                lineno: ctx_before_start + idx + 1,
+                text: (*line).to_string(),
+                spans: cached_spans_for_line(&mut h, line),
+            });
+        }
     }
 
-    let mut old_lineno = dv.start_line;
-    let mut new_lineno = dv.start_line;
+    let track_start = if dv.is_full_file { 0 } else { dv.start_line };
+    let mut old_lineno = track_start;
+    let mut new_lineno = track_start;
     let mut pending_ellipsis = false;
     let mut emitted_any = !lines.is_empty();
     for (ci, change) in dv.changes.iter().enumerate() {
@@ -236,20 +244,21 @@ pub fn build_inline_diff_cache_ext(
         }
     }
 
-    let anchor_lines = anchor.lines().count();
-    let after_start = dv.start_line + anchor_lines;
-    let after_end = dv.view_end.min(file_lines.len());
-    for (idx, line) in file_lines
-        .iter()
-        .take(after_end)
-        .skip(after_start)
-        .enumerate()
-    {
-        lines.push(CachedDiffLine::Context {
-            lineno: after_start + idx + 1,
-            text: (*line).to_string(),
-            spans: cached_spans_for_line(&mut h, line),
-        });
+    if !dv.is_full_file {
+        let after_start = new_lineno;
+        let after_end = dv.view_end.min(file_lines.len());
+        for (idx, line) in file_lines
+            .iter()
+            .take(after_end)
+            .skip(after_start)
+            .enumerate()
+        {
+            lines.push(CachedDiffLine::Context {
+                lineno: after_start + idx + 1,
+                text: (*line).to_string(),
+                spans: cached_spans_for_line(&mut h, line),
+            });
+        }
     }
 
     CachedInlineDiff {
@@ -285,6 +294,9 @@ fn compute_diff_view(old: &str, new: &str, path: &str, anchor: &str) -> DiffView
             .unwrap_or(0)
     };
 
+    let is_full_file =
+        old.lines().count() == file_lines_count || new.lines().count() == file_lines_count;
+
     let diff = TextDiff::from_lines(old, new);
     let changes: Vec<DiffChange> = diff
         .iter_all_changes()
@@ -296,8 +308,9 @@ fn compute_diff_view(old: &str, new: &str, path: &str, anchor: &str) -> DiffView
     let ctx = 3usize;
     let mut first_mod: Option<usize> = None;
     let mut last_mod: Option<usize> = None;
-    let mut new_line = start_line;
-    let mut old_line = start_line;
+    let track_start = if is_full_file { 0 } else { start_line };
+    let mut new_line = track_start;
+    let mut old_line = track_start;
     for c in &changes {
         match c.tag {
             ChangeTag::Equal => {
@@ -320,8 +333,8 @@ fn compute_diff_view(old: &str, new: &str, path: &str, anchor: &str) -> DiffView
             }
         }
     }
-    let first_mod = first_mod.unwrap_or(start_line);
-    let last_mod = last_mod.unwrap_or(start_line);
+    let first_mod = first_mod.unwrap_or(track_start);
+    let last_mod = last_mod.unwrap_or(track_start);
     let view_start = first_mod.saturating_sub(ctx);
     let view_end = (last_mod + 1 + ctx).min(file_lines_count);
     let max_display_lineno = view_end.max(old_line).max(new_line);
@@ -334,6 +347,7 @@ fn compute_diff_view(old: &str, new: &str, path: &str, anchor: &str) -> DiffView
         view_end,
         max_display_lineno,
         changes,
+        is_full_file,
     }
 }
 
@@ -1275,6 +1289,85 @@ mod tests {
         let cache = build_inline_diff_cache(&old, &new, path.to_str().unwrap(), "");
         let (_, _, _, ell) = count_lines(&cache);
         assert!(ell >= 1, "expected at least one ellipsis collapse");
+    }
+
+    #[test]
+    fn build_inline_diff_cache_snippet_insert_no_duplication() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.rs");
+        // File on disk already has the inserted content.
+        std::fs::write(
+            &path,
+            "auto_reload: Bool = false;\n\
+             compact_threshold: Number = 0.80;\n\
+             /// Number of most-recent user turns kept verbatim after a compaction\n\
+             /// checkpoint. Older turns remain visible in the transcript but are\n\
+             /// summarized out of the next model request.\n\
+             compact_keep_recent_turns: Number = 3.0;\n\
+             anthropic_cache: Bool = false;\n",
+        )
+        .unwrap();
+
+        let old = "compact_threshold: Number = 0.80;\n";
+        let new = "compact_threshold: Number = 0.80;\n\
+                   /// Number of most-recent user turns kept verbatim after a compaction\n\
+                   /// checkpoint. Older turns remain visible in the transcript but are\n\
+                   /// summarized out of the next model request.\n\
+                   compact_keep_recent_turns: Number = 3.0;\n";
+        let cache = build_inline_diff_cache(old, new, path.to_str().unwrap(), old);
+
+        let mut insert_texts: Vec<String> = Vec::new();
+        let mut ctx_texts: Vec<String> = Vec::new();
+        for line in &cache.lines {
+            match line {
+                CachedDiffLine::Insert { text, .. } => insert_texts.push(text.clone()),
+                CachedDiffLine::Context { text, .. } => ctx_texts.push(text.clone()),
+                _ => {}
+            }
+        }
+        for ins in &insert_texts {
+            assert!(
+                !ctx_texts.contains(ins),
+                "insert line {ins:?} duplicated as context"
+            );
+        }
+    }
+
+    #[test]
+    fn build_inline_diff_cache_full_file_has_correct_line_numbers() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("a.rs");
+        let old = "fn main() {\n    let x = 1;\n}\n";
+        let new = "fn main() {\n    let x = 42;\n}\n";
+        std::fs::write(&path, new).unwrap();
+        let cache = build_inline_diff_cache(old, new, path.to_str().unwrap(), "    let x = 1;\n");
+
+        let mut saw_delete = false;
+        let mut saw_insert = false;
+        for line in &cache.lines {
+            match line {
+                CachedDiffLine::Delete { lineno, text, .. } => {
+                    assert_eq!(*lineno, 2, "delete should be on line 2, got {lineno}");
+                    assert!(text.contains("let x = 1"));
+                    saw_delete = true;
+                }
+                CachedDiffLine::Insert { lineno, text, .. } => {
+                    assert_eq!(*lineno, 2, "insert should be on line 2, got {lineno}");
+                    assert!(text.contains("let x = 42"));
+                    saw_insert = true;
+                }
+                CachedDiffLine::Context { text, .. } => {
+                    // Context lines should not duplicate the change lines
+                    assert!(
+                        !text.contains("let x = 1") && !text.contains("let x = 42"),
+                        "context line should not duplicate change: {text}"
+                    );
+                }
+                _ => {}
+            }
+        }
+        assert!(saw_delete, "expected a delete line");
+        assert!(saw_insert, "expected an insert line");
     }
 
     #[test]

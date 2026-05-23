@@ -271,17 +271,22 @@ Hooks fire in registration order; an earlier hook's replacement is visible to la
     }
     m.fn_(
         "resolve",
-        "Resolve the pending tool call `call_id` from request `request_id` with `{ content, is_error }`. Sends a `ToolResult` back to the engine.",
+        "Resolve the pending tool call `call_id` from request `request_id` with `{ content, is_error, metadata? }`. Sends a `ToolResult` back to the engine.",
         &["request_id", "call_id", "result"],
-        |_, (request_id, call_id, result): (u64, String, mlua::Table)| -> LuaResult<()> {
+        |lua, (request_id, call_id, result): (u64, String, mlua::Table)| -> LuaResult<()> {
             let content: String = result.get("content").unwrap_or_default();
             let is_error: bool = result.get("is_error").unwrap_or(false);
+            let metadata = result
+                .get::<mlua::Value>("metadata")
+                .ok()
+                .and_then(|v| crate::lua::lua_to_serde::<serde_json::Value>(lua, &v));
             crate::host::with_core(|core| {
                 core.engine.send(protocol::UiCommand::ToolResult {
                     request_id,
                     call_id,
                     content,
                     is_error,
+                    metadata,
                 })
             });
             Ok(())

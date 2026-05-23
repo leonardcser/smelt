@@ -1621,7 +1621,7 @@ impl<'a> Turn<'a> {
                             }
                         }
                     }
-                    UiCommand::ToolResult { request_id, call_id, content, is_error } => {
+                    UiCommand::ToolResult { request_id, call_id, content, is_error, metadata } => {
                         if let Some(pos) = plan
                             .pending_tools
                             .iter()
@@ -1632,7 +1632,7 @@ impl<'a> Turn<'a> {
                             let outcome = ToolOutcome {
                                 content,
                                 is_error,
-                                metadata: None,
+                                metadata,
                             };
                             let _ = self.event_tx.send(EngineEvent::ToolFinished {
                                 call_id: call_id.clone(),
@@ -1764,9 +1764,9 @@ impl<'a> Turn<'a> {
         let mut tool_results = Vec::new();
         let mut cancelled = false;
         for (tc, args, start) in &plan.sequential_tools {
-            let (content, is_error) = if cancelled || self.cancel.is_cancelled() {
+            let (content, is_error, metadata) = if cancelled || self.cancel.is_cancelled() {
                 cancelled = true;
-                ("cancelled".to_string(), true)
+                ("cancelled".to_string(), true, None)
             } else {
                 let request_id = next_request_id();
                 let _ = self.event_tx.send(EngineEvent::ToolDispatch {
@@ -1776,10 +1776,10 @@ impl<'a> Turn<'a> {
                     args: args.clone(),
                 });
                 match self.wait_for_tool_result(request_id).await {
-                    Some(result) => result,
+                    Some((c, e, m)) => (c, e, m),
                     None => {
                         cancelled = true;
-                        ("cancelled".to_string(), true)
+                        ("cancelled".to_string(), true, None)
                     }
                 }
             };
@@ -1787,7 +1787,7 @@ impl<'a> Turn<'a> {
             let outcome = ToolOutcome {
                 content,
                 is_error,
-                metadata: None,
+                metadata,
             };
             let _ = self.event_tx.send(EngineEvent::ToolFinished {
                 call_id: tc.id.clone(),
@@ -1995,15 +1995,19 @@ impl<'a> Turn<'a> {
         (result.map(|r| (r, had_injected)), pt, pr)
     }
 
-    async fn wait_for_tool_result(&mut self, request_id: u64) -> Option<(String, bool)> {
+    async fn wait_for_tool_result(
+        &mut self,
+        request_id: u64,
+    ) -> Option<(String, bool, Option<serde_json::Value>)> {
         loop {
             match self.cmd_rx.recv().await {
                 Some(UiCommand::ToolResult {
                     request_id: id,
+                    call_id: _,
                     content,
                     is_error,
-                    ..
-                }) if id == request_id => return Some((content, is_error)),
+                    metadata,
+                }) if id == request_id => return Some((content, is_error, metadata)),
                 Some(UiCommand::SetAgentMode {
                     mode,
                     system_prompt,

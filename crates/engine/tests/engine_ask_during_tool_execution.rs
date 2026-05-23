@@ -232,6 +232,7 @@ async fn engine_ask_during_tool_execution_is_not_silently_dropped() {
                         call_id: TOOL_CALL_ID.into(),
                         content: "tool finished".into(),
                         is_error: false,
+                        metadata: None,
                     });
                 }
                 break;

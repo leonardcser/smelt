@@ -1,8 +1,9 @@
 ---
 source: crates/tui/tests/storybook/app_ctx.rs
-assertion_line: 344
+assertion_line: 363
 expression: frame.text()
 ---
+
 
 
 
@@ -18,7 +19,6 @@ expression: frame.text()
   1   import pandas as pd
   2   df = pd.read_csv('data.csv')
   3 + print(df.head())
-  3         "nbformat_minor": 5,
   4         "metadata": {},
   5         "cells": [
   6           { "cell_type": "markdown", "id": "intro",

@@ -363,12 +363,17 @@ impl TuiApp {
             },
             self.core.clock.instant_now(),
         ) {
-            crate::lua::ToolExecResult::Immediate { content, is_error } => {
+            crate::lua::ToolExecResult::Immediate {
+                content,
+                is_error,
+                metadata,
+            } => {
                 self.core.engine.send(protocol::UiCommand::ToolResult {
                     request_id,
                     call_id,
                     content,
                     is_error,
+                    metadata,
                 });
             }
             crate::lua::ToolExecResult::Pending => {}
