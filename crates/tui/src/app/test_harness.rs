@@ -219,6 +219,12 @@ impl TestAppBuilder {
             let _ = app.lua.reload(None);
         }
 
+        // Pin spinner glyph for snapshot determinism. The production
+        // `smelt.spinner.glyph()` uses wall-clock time, so parallel or
+        // sequential test runs land on different frames. Freezing it to
+        // the first frame makes storybook snapshots stable.
+        let _ = app.lua.lua().load("smelt.spinner.glyph = function() return '✿' end").exec();
+
         // Production wires the Tui frontend to `Osc52Sink`, which writes
         // `\x1b]52;c;...` to real stdout on every kill-ring copy. Inside the
         // harness that's a ring leak — corrupts test stdout, slows the fuzz
@@ -1454,10 +1460,16 @@ static TEST_HOME: OnceLock<TempDir> = OnceLock::new();
 /// same process.
 fn ensure_test_home() {
     let dir = TEST_HOME.get_or_init(|| TempDir::new().expect("create test $HOME tempdir"));
-    let home = dir.path();
+    // On macOS `TempDir::new()` returns a path under `/var/folders/…` which
+    // `canonicalize` resolves to `/private/var/folders/…`. `AppStoryCtx::new`
+    // canonicalizes `HOME` before setting cwd, so the actual cwd directory
+    // lives under the canonical path. If we don't canonicalize here, we try
+    // to preserve the wrong `cwd` path and delete the real one, breaking
+    // `std::env::current_dir()` for every subsequent test.
+    let home = std::fs::canonicalize(dir.path()).unwrap_or_else(|_| dir.path().to_path_buf());
     // SAFETY: env vars are set to the same constant path on every call;
     // concurrent reads from other threads see a stable value.
-    std::env::set_var("HOME", home);
+    std::env::set_var("HOME", &home);
     std::env::set_var("XDG_CONFIG_HOME", home.join("config"));
     std::env::set_var("XDG_STATE_HOME", home.join("state"));
     std::env::set_var("XDG_CACHE_HOME", home.join("cache"));
@@ -1465,9 +1477,18 @@ fn ensure_test_home() {
     // Wipe everything in `home` so the next scenario sees an empty
     // filesystem. We can't `remove_dir_all` `home` itself (it'd drop the
     // tempdir backing path), so iterate one level down.
-    if let Ok(entries) = std::fs::read_dir(home) {
+    //
+    // Skip the `cwd` subdirectory — storybook tests pin the process cwd
+    // there so `smelt.os.cwd()` renders as `~/cwd`. On Unix deleting the
+    // cwd invalidates it (`getcwd` returns ENOENT), so parallel tests
+    // must not remove each other's working directory.
+    let preserved = home.join("cwd");
+    if let Ok(entries) = std::fs::read_dir(&home) {
         for entry in entries.flatten() {
             let path = entry.path();
+            if path == preserved {
+                continue;
+            }
             let _ = if entry.file_type().is_ok_and(|t| t.is_dir()) {
                 std::fs::remove_dir_all(&path)
             } else {
