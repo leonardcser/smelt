@@ -16,8 +16,8 @@ use crossterm::event::{
 };
 use protocol::UiCommand;
 use protocol::{
-    AgentMode, Content, EngineAskError, EngineAskErrorKind, EngineEvent, TokenUsage,
-    ToolOutcome,
+    AgentMode, Content, EngineAskError, EngineAskErrorKind, EngineEvent, ReasoningBlock,
+    TokenUsage, ToolOutcome,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -382,6 +382,23 @@ pub enum FuzzOp {
     /// `clear_placeholder` so scenarios can drop a placeholder without
     /// going through accept / dismiss.
     ClearPlaceholder,
+    /// Side channel: emit `EngineAskResponse` with the smallest pending ask
+    /// id, if any. Exercises `lua.fire_ask_callback` and plugin paths that
+    /// depend on it (e.g., `/btw`, compaction plugins).
+    EngineAskResponsePending {
+        content: String,
+    },
+    /// Side channel: emit `EngineAskResponse` with a typed error payload
+    /// against the smallest pending ask id, if any.
+    EngineAskErrorPending {
+        kind_idx: u8,
+        message: String,
+    },
+    /// Side channel: open an exec block in the transcript so subsequent
+    /// `ExecOutput`/`ExecDone` exercise the full lifecycle.
+    StartExec {
+        command: String,
+    },
 }
 
 impl FuzzOp {
@@ -445,6 +462,9 @@ impl FuzzOp {
             OpenOverlay { variant } => format!("open overlay v={variant}"),
             InstallPlaceholder { variant, .. } => format!("install placeholder v={variant}"),
             ClearPlaceholder => "clear placeholder".into(),
+            EngineAskResponsePending { .. } => "ask response (pending)".into(),
+            EngineAskErrorPending { .. } => "ask error (pending)".into(),
+            StartExec { .. } => "start exec".into(),
         }
     }
 }
@@ -735,6 +755,22 @@ const FUZZOP_BUILDERS: &[FuzzOpBuilder] = &[
         })
     },
     |_| Ok(FuzzOp::ClearPlaceholder),
+    |u| {
+        Ok(FuzzOp::EngineAskResponsePending {
+            content: u.arbitrary()?,
+        })
+    },
+    |u| {
+        Ok(FuzzOp::EngineAskErrorPending {
+            kind_idx: u.arbitrary()?,
+            message: u.arbitrary()?,
+        })
+    },
+    |u| {
+        Ok(FuzzOp::StartExec {
+            command: u.arbitrary()?,
+        })
+    },
 ];
 
 /// Total `FuzzOp` variant count, derived from the dispatch table so it
@@ -858,12 +894,20 @@ fn synth_history(count: usize) -> Vec<protocol::HistoryItem> {
     (0..count)
         .map(|i| {
             let body = format!("compacted-{i}");
+            let reasoning_blocks = if i % 4 == 0 {
+                Vec::new()
+            } else {
+                vec![ReasoningBlock {
+                    provider: "fuzz".to_string(),
+                    data: serde_json::Value::Null,
+                }]
+            };
             match i % 3 {
                 0 => protocol::HistoryItem::user(Content::text(body)),
                 1 => protocol::HistoryItem::Assistant(protocol::AssistantTurn::terminal(
                     Some(Content::text(body)),
                     None,
-                    Vec::new(),
+                    reasoning_blocks,
                 )),
                 _ => {
                     let invocation = protocol::ToolInvocation {
@@ -880,7 +924,7 @@ fn synth_history(count: usize) -> Vec<protocol::HistoryItem> {
                     protocol::HistoryItem::Assistant(protocol::AssistantTurn::with_invocations(
                         Some(Content::text(body)),
                         None,
-                        Vec::new(),
+                        reasoning_blocks,
                         vec![invocation],
                     ))
                 }
@@ -1573,9 +1617,12 @@ fn plan(op: FuzzOp) -> (Option<SourceEvent>, PostCheck) {
         | FuzzOp::ReloadLua
         | FuzzOp::OpenOverlay { .. }
         | FuzzOp::InstallPlaceholder { .. }
-        | FuzzOp::ClearPlaceholder => {
+        | FuzzOp::ClearPlaceholder
+        | FuzzOp::EngineAskResponsePending { .. }
+        | FuzzOp::EngineAskErrorPending { .. }
+        | FuzzOp::StartExec { .. } => {
             unreachable!(
-                "InsertAttachment / TogglePaneFocus / ReloadLua / OpenOverlay / InstallPlaceholder / ClearPlaceholder side channels handled inline in apply()"
+                "side channels handled inline in apply()"
             )
         }
         FuzzOp::EngineToolArgsDelta {
@@ -1683,6 +1730,31 @@ fn try_dispatch_side_channel(app: &mut TestApp, op: FuzzOp) -> Result<(), FuzzOp
                 new_actions,
             );
             check_turn_end_invariants(&pre, &post);
+        }
+        FuzzOp::EngineAskResponsePending { content } => {
+            if let Some(id) = app.pending_ask_id() {
+                let ev = SourceEvent::Engine(EngineEvent::EngineAskResponse {
+                    id,
+                    content,
+                    error: None,
+                });
+                app.feed_one(ev);
+            }
+        }
+        FuzzOp::EngineAskErrorPending { kind_idx, message } => {
+            if let Some(id) = app.pending_ask_id() {
+                let kind = ENGINE_ASK_ERROR_KINDS
+                    [(kind_idx as usize) % ENGINE_ASK_ERROR_KINDS.len()];
+                let ev = SourceEvent::Engine(EngineEvent::EngineAskResponse {
+                    id,
+                    content: String::new(),
+                    error: Some(EngineAskError { kind, message }),
+                });
+                app.feed_one(ev);
+            }
+        }
+        FuzzOp::StartExec { command } => {
+            app.start_exec(&command);
         }
         other => return Err(other),
     }
