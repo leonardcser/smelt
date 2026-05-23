@@ -1073,6 +1073,7 @@ impl<'a> Turn<'a> {
                 send_usage(
                     self.event_tx,
                     &self.config.api.provider_type,
+                    &self.config.api.base,
                     &self.config.api.model_config,
                     &self.model,
                     resp.usage,
@@ -2064,16 +2065,18 @@ impl<'a> Turn<'a> {
 
 // ── Helpers ─────────────────────────────────────────────────────────────────
 
+#[allow(clippy::too_many_arguments)]
 fn send_usage(
     tx: &mpsc::UnboundedSender<EngineEvent>,
     provider_type: &str,
+    api_base: &str,
     model_config: &crate::ModelConfig,
     model: &str,
     usage: protocol::TokenUsage,
     tokens_per_sec: Option<f64>,
     background: bool,
 ) {
-    let resolved = crate::pricing::resolve(model, provider_type, model_config);
+    let resolved = crate::pricing::resolve(model, provider_type, api_base, model_config);
     let cost = resolved.pricing.cost(&usage);
     let _ = tx.send(EngineEvent::TokenUsage {
         usage,
@@ -2086,6 +2089,7 @@ fn send_usage(
 #[derive(Clone)]
 struct PricingContext {
     provider_type: String,
+    api_base: String,
     model_config: crate::ModelConfig,
 }
 
@@ -2093,6 +2097,7 @@ impl PricingContext {
     fn from_api(api: &crate::ApiConfig) -> Self {
         Self {
             provider_type: api.provider_type.clone(),
+            api_base: api.base.clone(),
             model_config: api.model_config.clone(),
         }
     }
@@ -2106,6 +2111,7 @@ impl PricingContext {
         send_usage(
             tx,
             &self.provider_type,
+            &self.api_base,
             &self.model_config,
             model,
             usage,
@@ -2303,7 +2309,7 @@ mod tests {
             cache_write_tokens: None,
             reasoning_tokens: None,
         };
-        send_usage(&tx, "openai", &cfg, "model-x", usage, Some(50.0), false);
+        send_usage(&tx, "openai", "", &cfg, "model-x", usage, Some(50.0), false);
         match rx.try_recv().unwrap() {
             EngineEvent::TokenUsage {
                 cost_usd,
@@ -2324,7 +2330,16 @@ mod tests {
         let (tx, mut rx) = mpsc::unbounded_channel::<EngineEvent>();
         let cfg = ModelConfig::default();
         let usage = protocol::TokenUsage::default();
-        send_usage(&tx, "openai-compatible", &cfg, "model", usage, None, false);
+        send_usage(
+            &tx,
+            "openai-compatible",
+            "",
+            &cfg,
+            "model",
+            usage,
+            None,
+            false,
+        );
         match rx.try_recv().unwrap() {
             EngineEvent::TokenUsage { cost_usd, .. } => assert!(cost_usd.is_none()),
             _ => panic!("expected TokenUsage"),
@@ -2338,6 +2353,7 @@ mod tests {
         let api = api_cfg();
         let pc = PricingContext::from_api(&api);
         assert_eq!(pc.provider_type, "openai");
+        assert_eq!(pc.api_base, "https://x/");
         assert!(pc.model_config.tool_calling.is_none());
     }
 

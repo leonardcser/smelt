@@ -67,10 +67,12 @@ pub struct ResolvedPricing {
 pub fn resolve(
     model: &str,
     provider_type: &str,
+    api_base: &str,
     config: &crate::config::ModelConfig,
 ) -> ResolvedPricing {
     let has_config_override = config.input_cost.is_some() || config.output_cost.is_some();
-    let catalog_hit = crate::catalog::lookup(provider_type, model).and_then(|e| e.pricing);
+    let catalog_hit =
+        crate::catalog::lookup(provider_type, api_base, model).and_then(|e| e.pricing);
 
     if has_config_override {
         let base = catalog_hit.unwrap_or(ZERO);
@@ -235,7 +237,7 @@ mod tests {
     #[test]
     fn resolve_returns_none_source_when_no_config_override_and_catalog_empty() {
         let cfg = crate::config::ModelConfig::default();
-        let r = resolve("any-model", "openai-compatible", &cfg);
+        let r = resolve("any-model", "openai-compatible", "", &cfg);
         assert_eq!(r.source, PricingSource::None);
         assert_eq!(r.pricing.input, 0.0);
     }
@@ -249,7 +251,7 @@ mod tests {
             cache_write_cost: Some(2.0),
             ..Default::default()
         };
-        let r = resolve("m", "openai", &cfg);
+        let r = resolve("m", "openai", "", &cfg);
         assert_eq!(r.source, PricingSource::Config);
         assert_eq!(r.pricing.input, 5.0);
         assert_eq!(r.pricing.output, 10.0);
@@ -263,7 +265,7 @@ mod tests {
             input_cost: Some(5.0),
             ..Default::default()
         };
-        let r = resolve("m", "openai-compatible", &cfg);
+        let r = resolve("m", "openai-compatible", "", &cfg);
         assert_eq!(r.source, PricingSource::Config);
         assert_eq!(r.pricing.input, 5.0);
         assert_eq!(r.pricing.output, 0.0);

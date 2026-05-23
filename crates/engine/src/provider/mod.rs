@@ -547,7 +547,9 @@ impl Provider {
 
         let mut config = self.model_config.clone();
         if config.max_tokens.is_none() {
-            if let Some(tokens) = crate::catalog::output_tokens(self.kind.as_str(), model) {
+            if let Some(tokens) =
+                crate::catalog::output_tokens(self.kind.as_str(), &self.api_base, model)
+            {
                 config.max_tokens = Some(tokens);
             }
         }
@@ -876,8 +878,8 @@ impl Provider {
             }
             ProviderKind::Copilot => copilot::cached_context_window(model),
         };
-        let result =
-            from_provider.or_else(|| crate::catalog::context_window(provider_label, model));
+        let result = from_provider
+            .or_else(|| crate::catalog::context_window(provider_label, &self.api_base, model));
         crate::log::entry(
             crate::log::Level::Info,
             "fetch_context_window",

@@ -35,6 +35,7 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
                 let resolved = engine::pricing::resolve(
                     &app.core.config.model,
                     &app.core.config.provider_type,
+                    &app.core.config.api_base,
                     &app.core.config.model_config,
                 );
                 let lines = crate::metrics::render_session_cost(

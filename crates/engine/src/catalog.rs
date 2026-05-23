@@ -81,10 +81,12 @@ pub fn spawn_fetch(client: reqwest::Client) {
     });
 }
 
-/// Look up `(provider_type, model)` in the catalog. Returns `None` if
-/// the catalog isn't loaded yet or the entry isn't listed.
-pub fn lookup(provider_type: &str, model: &str) -> Option<ModelEntry> {
-    let key = catalog_key(provider_type)?;
+/// Look up `(provider_type, api_base, model)` in the catalog. Returns `None`
+/// if the catalog isn't loaded yet or the entry isn't listed.  The `api_base`
+/// is used to disambiguate providers that share a wire format (e.g. Kimi
+/// exposes an Anthropic-compatible endpoint but has its own catalog key).
+pub fn lookup(provider_type: &str, api_base: &str, model: &str) -> Option<ModelEntry> {
+    let key = catalog_key(provider_type, api_base)?;
     CATALOG
         .get()?
         .get(&(key.to_string(), model.to_string()))
@@ -94,14 +96,14 @@ pub fn lookup(provider_type: &str, model: &str) -> Option<ModelEntry> {
 /// Convenience: pull just the context window out of the catalog. The
 /// engine falls back to this when a provider's own `/v1/models` doesn't
 /// expose a window field.
-pub fn context_window(provider_type: &str, model: &str) -> Option<u32> {
-    lookup(provider_type, model).and_then(|e| e.context_window)
+pub fn context_window(provider_type: &str, api_base: &str, model: &str) -> Option<u32> {
+    lookup(provider_type, api_base, model).and_then(|e| e.context_window)
 }
 
 /// Convenience: pull the max-output limit out of the catalog.
 /// This maps to `max_tokens` on the wire.
-pub fn output_tokens(provider_type: &str, model: &str) -> Option<u32> {
-    lookup(provider_type, model).and_then(|e| e.output_tokens)
+pub fn output_tokens(provider_type: &str, api_base: &str, model: &str) -> Option<u32> {
+    lookup(provider_type, api_base, model).and_then(|e| e.output_tokens)
 }
 
 async fn load_or_fetch(client: &reqwest::Client) -> HashMap<(String, String), ModelEntry> {
@@ -124,10 +126,15 @@ async fn load_or_fetch(client: &reqwest::Client) -> HashMap<(String, String), Mo
     map
 }
 
-/// Maps smelt's `provider_type` to the catalog key models.dev uses.
-/// `openai-compatible` returns `None` because the catalog lists no
-/// generic provider for it.
-pub(crate) fn catalog_key(provider_type: &str) -> Option<&str> {
+/// Maps smelt's `provider_type` + `api_base` to the catalog key models.dev
+/// uses.  `openai-compatible` returns `None` because the catalog lists no
+/// generic provider for it.  The `api_base` is used to disambiguate
+/// providers that share a wire format (e.g. Kimi's Anthropic-compatible
+/// endpoint maps to the `kimi-for-coding` key).
+pub(crate) fn catalog_key<'a>(provider_type: &'a str, api_base: &'a str) -> Option<&'a str> {
+    if provider_type == "anthropic-compatible" && api_base.contains("api.kimi.com/coding") {
+        return Some("kimi-for-coding");
+    }
     match provider_type {
         "openai" | "codex" => Some("openai"),
         "anthropic" | "anthropic-compatible" => Some("anthropic"),
@@ -215,30 +222,38 @@ mod tests {
 
     #[test]
     fn catalog_key_maps_openai_aliases_to_openai() {
-        assert_eq!(catalog_key("openai"), Some("openai"));
-        assert_eq!(catalog_key("codex"), Some("openai"));
+        assert_eq!(catalog_key("openai", ""), Some("openai"));
+        assert_eq!(catalog_key("codex", ""), Some("openai"));
     }
 
     #[test]
     fn catalog_key_maps_anthropic_aliases_to_anthropic() {
-        assert_eq!(catalog_key("anthropic"), Some("anthropic"));
-        assert_eq!(catalog_key("anthropic-compatible"), Some("anthropic"));
+        assert_eq!(catalog_key("anthropic", ""), Some("anthropic"));
+        assert_eq!(catalog_key("anthropic-compatible", ""), Some("anthropic"));
     }
 
     #[test]
     fn catalog_key_maps_copilot_aliases_to_github_copilot() {
-        assert_eq!(catalog_key("copilot"), Some("github-copilot"));
-        assert_eq!(catalog_key("github-copilot"), Some("github-copilot"));
+        assert_eq!(catalog_key("copilot", ""), Some("github-copilot"));
+        assert_eq!(catalog_key("github-copilot", ""), Some("github-copilot"));
     }
 
     #[test]
     fn catalog_key_returns_none_for_openai_compatible() {
-        assert_eq!(catalog_key("openai-compatible"), None);
+        assert_eq!(catalog_key("openai-compatible", ""), None);
     }
 
     #[test]
     fn catalog_key_passes_through_unknown_provider_types() {
-        assert_eq!(catalog_key("xai"), Some("xai"));
+        assert_eq!(catalog_key("xai", ""), Some("xai"));
+    }
+
+    #[test]
+    fn catalog_key_maps_kimi_api_base_to_kimi_for_coding() {
+        assert_eq!(
+            catalog_key("anthropic-compatible", "https://api.kimi.com/coding/v1"),
+            Some("kimi-for-coding")
+        );
     }
 
     #[test]
