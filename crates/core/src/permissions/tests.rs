@@ -1244,6 +1244,12 @@ fn dev_null_mixed_with_real_redirect() {
 }
 
 #[test]
+fn dev_null_prefix_not_treated_as_dev_null() {
+    // `/dev/null-x` is a real file, not `/dev/null` — should escalate
+    assert!(has_output_redirection("echo hi > /dev/null-backup"));
+}
+
+#[test]
 fn auto_allowed_with_dev_null_stays_allow() {
     assert_bash(
         &["find *"],

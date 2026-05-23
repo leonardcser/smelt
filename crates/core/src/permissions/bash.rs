@@ -171,11 +171,11 @@ fn parse_heredoc(cmd: &str, i: usize) -> Option<(usize, usize)> {
     while si < len {
         if bytes[si] == b'\n' {
             let line_start = si + 1;
-            let line_end = cmd[line_start..]
+            let line_end = slice(cmd, line_start..len)
                 .find('\n')
                 .map(|p| line_start + p)
                 .unwrap_or(len);
-            let line = cmd[line_start..line_end].trim();
+            let line = slice(cmd, line_start..line_end).trim();
             if line == delim {
                 return Some((header_end, line_end));
             }
@@ -220,8 +220,9 @@ pub(super) fn strip_heredoc_bodies(cmd: &str) -> String {
                 out.push_str(slice(cmd, start..i));
             }
             b'\\' if i + 1 < len => {
-                out.push_str(slice(cmd, i..i + 2));
-                i += 2;
+                let ch_end = next_char_boundary(cmd, i + 1);
+                out.push_str(slice(cmd, i..ch_end));
+                i = ch_end;
             }
             _ => {
                 let rest = slice(cmd, i..cmd.len());
@@ -448,6 +449,12 @@ pub(super) fn has_output_redirection(cmd: &str) -> bool {
     false
 }
 
+/// True for characters that unambiguously end a shell word
+/// (whitespace or common operators).
+const fn is_shell_word_boundary(b: u8) -> bool {
+    b.is_ascii_whitespace() || matches!(b, b';' | b'|' | b'&' | b'>' | b'<' | b'(' | b')')
+}
+
 /// Starting at `bytes[*pos]` (`>`), check whether the redirection target is `/dev/null`.
 /// Advances `*pos` past the target on a match.
 fn redirect_is_dev_null(bytes: &[u8], pos: &mut usize) -> bool {
@@ -466,7 +473,7 @@ fn redirect_is_dev_null(bytes: &[u8], pos: &mut usize) -> bool {
     if j + DEV_NULL.len() <= len && &bytes[j..j + DEV_NULL.len()] == DEV_NULL {
         let end = j + DEV_NULL.len();
         // Must be followed by a word boundary (whitespace, shell operator, or end).
-        if end == len || !bytes[end].is_ascii_alphanumeric() && bytes[end] != b'/' {
+        if end == len || is_shell_word_boundary(bytes[end]) {
             *pos = end;
             return true;
         }
