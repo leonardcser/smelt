@@ -1,0 +1,19 @@
+{
+  "mode": "normal",
+  "ops": [
+    {
+      "data": {
+        "msg_count": 41
+      },
+      "kind": "engine_turn_complete"
+    },
+    {
+      "data": 65,
+      "kind": "start_turn"
+    },
+    {
+      "kind": "cancel"
+    }
+  ],
+  "vim": true
+}

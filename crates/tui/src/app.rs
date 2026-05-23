@@ -726,6 +726,7 @@ impl TuiApp {
         }
         let fires = self.core.cells.drain_pending();
         let lua = self.lua.lua();
+        let mut calls = Vec::new();
         for fire in fires {
             let value = self.core.cells.project_to_lua(&*fire.value, lua);
             let prev = self.core.cells.project_to_lua(&*fire.prev, lua);
@@ -735,15 +736,21 @@ impl TuiApp {
                     Ok(f) => f,
                     Err(_) => continue,
                 };
-                let _perf = smelt_perf::perf::begin("lua:cell_cb");
-                let result = if cb.is_glob {
-                    func.call::<()>((fire.name.clone(), value.clone(), prev.clone()))
-                } else {
-                    func.call::<()>((value.clone(), prev.clone()))
-                };
-                if let Err(e) = result {
-                    self.lua.record_error(format!("cell `{}`: {e}", fire.name));
-                }
+                calls.push((fire.name.clone(), value.clone(), prev.clone(), func, cb.is_glob));
+            }
+        }
+        let _guard = crate::lua::install_app_ptr(self);
+        for (name, value, prev, func, is_glob) in calls {
+            let _perf = smelt_perf::perf::begin("lua:cell_cb");
+            let result = if is_glob {
+                func.call::<()>((name.clone(), value, prev))
+            } else {
+                func.call::<()>((value, prev))
+            };
+            if let Err(e) = result {
+                crate::lua::try_with_app(|app| {
+                    app.lua.record_error(format!("cell `{name}`: {e}"));
+                });
             }
         }
     }
