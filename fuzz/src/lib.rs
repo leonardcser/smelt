@@ -1513,6 +1513,7 @@ fn plan(op: FuzzOp) -> (Option<SourceEvent>, PostCheck) {
             let completion = u32::from(completion);
             let cost_usd = f64::from(cost_cents) / 100.0;
             let usage = TokenUsage {
+                context_tokens: None,
                 prompt_tokens: Some(prompt),
                 completion_tokens: Some(completion),
                 cache_read_tokens: None,
