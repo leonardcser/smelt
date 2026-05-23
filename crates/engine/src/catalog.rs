@@ -60,6 +60,7 @@ fn cache_put_with_ttl(key: &str, value: &str, ttl: Duration) {
 pub struct ModelEntry {
     pub pricing: Option<ModelPricing>,
     pub context_window: Option<u32>,
+    pub output_tokens: Option<u32>,
 }
 
 const MODELS_API_URL: &str = "https://models.dev/api.json";
@@ -95,6 +96,12 @@ pub fn lookup(provider_type: &str, model: &str) -> Option<ModelEntry> {
 /// expose a window field.
 pub fn context_window(provider_type: &str, model: &str) -> Option<u32> {
     lookup(provider_type, model).and_then(|e| e.context_window)
+}
+
+/// Convenience: pull the max-output limit out of the catalog.
+/// This maps to `max_tokens` on the wire.
+pub fn output_tokens(provider_type: &str, model: &str) -> Option<u32> {
+    lookup(provider_type, model).and_then(|e| e.output_tokens)
 }
 
 async fn load_or_fetch(client: &reqwest::Client) -> HashMap<(String, String), ModelEntry> {
@@ -156,6 +163,7 @@ fn parse(json: &str) -> Option<HashMap<(String, String), ModelEntry>> {
     #[derive(serde::Deserialize)]
     struct CatalogLimit {
         context: Option<u32>,
+        output: Option<u32>,
     }
 
     let root: HashMap<String, CatalogProvider> = serde_json::from_str(json).ok()?;
@@ -175,8 +183,17 @@ fn parse(json: &str) -> Option<HashMap<(String, String), ModelEntry>> {
                     cache_write: cost.cache_write.unwrap_or(0.0),
                 })
             });
-            let context_window = model_val.limit.and_then(|l| l.context).filter(|v| *v > 0);
-            if pricing.is_none() && context_window.is_none() {
+            let context_window = model_val
+                .limit
+                .as_ref()
+                .and_then(|l| l.context)
+                .filter(|v| *v > 0);
+            let output_tokens = model_val
+                .limit
+                .as_ref()
+                .and_then(|l| l.output)
+                .filter(|v| *v > 0);
+            if pricing.is_none() && context_window.is_none() && output_tokens.is_none() {
                 continue;
             }
             map.insert(
@@ -184,6 +201,7 @@ fn parse(json: &str) -> Option<HashMap<(String, String), ModelEntry>> {
                 ModelEntry {
                     pricing,
                     context_window,
+                    output_tokens,
                 },
             );
         }
@@ -229,7 +247,7 @@ mod tests {
             "openai": {"models": {
                 "gpt-4": {
                     "cost": {"input": 30, "output": 60, "cache_read": 1.5, "cache_write": 3.0},
-                    "limit": {"context": 128000}
+                    "limit": {"context": 128000, "output": 4096}
                 }
             }}
         }"#;
@@ -238,6 +256,7 @@ mod tests {
         let pricing = entry.pricing.unwrap();
         assert_eq!(pricing.input, 30.0);
         assert_eq!(entry.context_window, Some(128_000));
+        assert_eq!(entry.output_tokens, Some(4096));
     }
 
     #[test]
@@ -251,6 +270,21 @@ mod tests {
         let entry = map.get(&("openai".into(), "ctx-only".into())).unwrap();
         assert!(entry.pricing.is_none());
         assert_eq!(entry.context_window, Some(200_000));
+        assert!(entry.output_tokens.is_none());
+    }
+
+    #[test]
+    fn parse_keeps_output_only_entries() {
+        let json = r#"{
+            "openai": {"models": {
+                "out-only": {"limit": {"output": 8192}}
+            }}
+        }"#;
+        let map = parse(json).unwrap();
+        let entry = map.get(&("openai".into(), "out-only".into())).unwrap();
+        assert!(entry.pricing.is_none());
+        assert!(entry.context_window.is_none());
+        assert_eq!(entry.output_tokens, Some(8192));
     }
 
     #[test]

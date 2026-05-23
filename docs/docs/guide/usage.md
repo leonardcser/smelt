@@ -111,9 +111,12 @@ tail would exceed the byte budget, Smelt drops whole older turns from the
 model-visible tail; the full transcript still stays visible.
 
 When `auto_compact` is enabled (via `/settings`), compaction triggers
-automatically before a model request whose current context is estimated to
-cross `compact_threshold` of the configured context window. Press `Esc Esc`
-to cancel.
+automatically before a model request whose active context would cross
+`compact_threshold` of the configured context window. After the first provider
+usage report, Smelt anchors this check to the provider-reported context size
+and adds only messages created locally since the last model response, so the
+trigger matches the prompt bar rather than a full-history byte estimate. Press
+`Esc Esc` to cancel.
 
 ## Vim Mode
 

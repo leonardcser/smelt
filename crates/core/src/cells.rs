@@ -487,6 +487,9 @@ pub(crate) fn build_with_builtins(seeds: BuiltinSeeds) -> Cells {
         let Ok(t) = lua.create_table() else {
             return mlua::Value::Nil;
         };
+        if let Some(n) = u.context_tokens {
+            let _ = t.set("context_tokens", n);
+        }
         if let Some(n) = u.prompt_tokens {
             let _ = t.set("prompt_tokens", n);
         }
@@ -1072,6 +1075,9 @@ mod tests {
             let Ok(t) = lua.create_table() else {
                 return mlua::Value::Nil;
             };
+            if let Some(n) = u.context_tokens {
+                let _ = t.set("context_tokens", n);
+            }
             if let Some(n) = u.prompt_tokens {
                 let _ = t.set("prompt_tokens", n);
             }
@@ -1083,6 +1089,7 @@ mod tests {
         c.declare(
             "tokens_used",
             TokenUsage {
+                context_tokens: Some(1690),
                 prompt_tokens: Some(1234),
                 completion_tokens: Some(456),
                 ..Default::default()
@@ -1091,6 +1098,7 @@ mod tests {
         match c.get_lua("tokens_used", &lua) {
             mlua::Value::Table(t) => {
                 assert_eq!(t.get::<i64>("prompt_tokens").unwrap(), 1234);
+                assert_eq!(t.get::<i64>("context_tokens").unwrap(), 1690);
                 assert_eq!(t.get::<i64>("completion_tokens").unwrap(), 456);
                 // Absent fields surface as nil — not 0 — so plugins can
                 // distinguish "no data" from "0 tokens".

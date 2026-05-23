@@ -10,18 +10,32 @@ use protocol::{
 };
 use std::collections::HashMap;
 
-/// OpenAI reports total input tokens (including cached); subtract cached to match Anthropic semantics.
+fn add_tokens(a: Option<u32>, b: Option<u32>) -> Option<u32> {
+    match (a, b) {
+        (Some(a), Some(b)) => Some(a.saturating_add(b)),
+        (Some(a), None) => Some(a),
+        (None, Some(b)) => Some(b),
+        (None, None) => None,
+    }
+}
+
+/// OpenAI reports total input tokens (including cached). Keep non-cached
+/// input for pricing, but preserve total/context tokens for context-window
+/// accounting.
 fn parse_usage(u: &serde_json::Value) -> TokenUsage {
     let total_input = u["input_tokens"].as_u64().map(|n| n as u32);
     let cached = u["input_tokens_details"]["cached_tokens"]
         .as_u64()
         .map(|n| n as u32);
+    let output = u["output_tokens"].as_u64().map(|n| n as u32);
+    let total = u["total_tokens"].as_u64().map(|n| n as u32);
     TokenUsage {
+        context_tokens: total.or_else(|| add_tokens(total_input, output)),
         prompt_tokens: match (total_input, cached) {
             (Some(t), Some(c)) => Some(t.saturating_sub(c)),
             (t, _) => t,
         },
-        completion_tokens: u["output_tokens"].as_u64().map(|n| n as u32),
+        completion_tokens: output,
         cache_read_tokens: cached,
         cache_write_tokens: None,
         reasoning_tokens: u["output_tokens_details"]["reasoning_tokens"]
@@ -176,6 +190,9 @@ pub(super) fn build_body(
         // on subsequent turns without keeping a `previous_response_id` —
         // stateless rounds with full history match smelt's design.
         body["include"] = serde_json::json!(["reasoning.encrypted_content"]);
+    }
+    if let Some(v) = config.max_tokens {
+        body["max_output_tokens"] = serde_json::json!(v);
     }
 
     body
@@ -440,8 +457,10 @@ mod tests {
             "input_tokens_details": {"cached_tokens": 30},
             "output_tokens": 40,
             "output_tokens_details": {"reasoning_tokens": 5},
+            "total_tokens": 140,
         });
         let u = parse_usage(&v);
+        assert_eq!(u.context_tokens, Some(140));
         assert_eq!(u.prompt_tokens, Some(70));
         assert_eq!(u.completion_tokens, Some(40));
         assert_eq!(u.cache_read_tokens, Some(30));
@@ -460,8 +479,9 @@ mod tests {
 
     #[test]
     fn parse_usage_passes_through_input_when_no_cached_field() {
-        let v = json!({"input_tokens": 42});
+        let v = json!({"input_tokens": 42, "output_tokens": 3});
         assert_eq!(parse_usage(&v).prompt_tokens, Some(42));
+        assert_eq!(parse_usage(&v).context_tokens, Some(45));
     }
 
     #[test]

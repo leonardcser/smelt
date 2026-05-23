@@ -62,7 +62,7 @@ fun(hook: fun(arg1: smelt.engine.PrepareRequest, arg2: fun(value: smelt.engine.A
 
 Types: [`smelt.engine.PrepareRequest`](types.md#smeltenginepreparerequest), [`smelt.engine.AskMessage`](types.md#smeltengineaskmessage), [`smelt.Reg`](types.md#smeltreg)
 
-Register a hook the engine calls immediately before each provider request. `hook` receives `{ messages, estimated_tokens }` and a `reply` callback the hook MUST call exactly once — either with a replacement messages array (engine swaps it in before sampling) or `nil` (engine sends the original request). Returns a `Reg` whose `:remove()` drops the hook.
+Register a hook the engine calls immediately before each provider request. `hook` receives `{ messages, estimated_tokens, estimated_context_tokens }` and a `reply` callback the hook MUST call exactly once — either with a replacement messages array (engine swaps it in before sampling) or `nil` (engine sends the original request). Returns a `Reg` whose `:remove()` drops the hook.
 
 ## `smelt.engine.reload`
 

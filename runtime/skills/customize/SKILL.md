@@ -1024,7 +1024,7 @@ Register, unregister, and resolve plugin tools for the engine.
 - `smelt.tools.register` :: `fun(def: smelt.tools.ToolDef): smelt.Reg`
   Register a plugin tool.
 - `smelt.tools.resolve` :: `fun(request_id: integer, call_id: string, result: table): nil`
-  Resolve the pending tool call `call_id` from request `request_id` with `{ content, is_error }`.
+  Resolve the pending tool call `call_id` from request `request_id` with `{ content, is_error, metadata? }`.
 - `smelt.tools.unregister` :: `fun(name: string): boolean`
   Unregister a previously-registered tool by `name`.
 
@@ -1274,7 +1274,7 @@ Current session metadata, turn list, message snapshots, rewind, and persisted se
 - `smelt.session.checkpoint` :: `fun(spec: table): table?`
   Install a model-context checkpoint without deleting transcript history.
 - `smelt.session.context_tokens` :: `fun(): integer?`
-  Most recent prompt-token count reported by the provider, or `nil` if no turn has completed yet.
+  Most recent active context-token count reported by the provider, or `nil` if no turn has completed yet.
 - `smelt.session.context_window` :: `fun(): integer?`
   Configured context-window size in tokens for the active model.
 - `smelt.session.cost` :: `fun(): number`

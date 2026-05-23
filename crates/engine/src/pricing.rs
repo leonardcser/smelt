@@ -111,6 +111,7 @@ mod tests {
         reasoning: u32,
     ) -> TokenUsage {
         TokenUsage {
+            context_tokens: None,
             prompt_tokens: Some(prompt),
             completion_tokens: Some(completion),
             cache_read_tokens: Some(cache_read),
@@ -136,6 +137,7 @@ mod tests {
             cache_write: 1.5,
         };
         let u = TokenUsage {
+            context_tokens: Some(2_000_000),
             prompt_tokens: Some(1_000_000),
             completion_tokens: None,
             cache_read_tokens: None,
@@ -165,6 +167,7 @@ mod tests {
             cache_write: 0.0,
         };
         let u = TokenUsage {
+            context_tokens: None,
             prompt_tokens: None,
             completion_tokens: None,
             cache_read_tokens: None,

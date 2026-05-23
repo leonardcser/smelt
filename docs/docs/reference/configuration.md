@@ -99,7 +99,7 @@ Per-model overrides:
 | `output_cost`     | USD per 1M output tokens                             |
 | `cache_read_cost` | USD per 1M cache-read tokens                         |
 | `cache_write_cost`| USD per 1M cache-write tokens                        |
-| `max_tokens`      | Maximum output tokens for this model (default 4096)  |
+| `max_tokens`      | Maximum output tokens for this model. Defaults to the model's own limit, falling back to 4096 if unknown. |
 | `thinking_budgets`| Per-level budgets for budget-based thinking: `{ low = 2048, medium = 8192, high = 16384, max = 16384 }` |
 
 #### Pricing
@@ -236,8 +236,8 @@ keys raise at the access site; type mismatches raise on assignment.
 | Key                     | Type      | Default | Description                                                                       |
 | ----------------------- | --------- | ------- | --------------------------------------------------------------------------------- |
 | `vim`                   | `boolean` | `false` | Vi keybindings in the prompt                                                      |
-| `auto_compact`          | `boolean` | `true`  | Auto-summarize when request context usage crosses `compact_threshold` (forced on in headless) |
-| `compact_threshold`     | `number`  | `0.80`  | Fraction of the context window at which auto-compact fires before oversized requests (0 < x ≤ 1) |
+| `auto_compact`          | `boolean` | `true`  | Auto-summarize when active request context usage crosses `compact_threshold` (forced on in headless) |
+| `compact_threshold`     | `number`  | `0.80`  | Fraction of the active context window at which auto-compact fires before oversized requests (0 < x ≤ 1) |
 | `compact_keep_recent_turns` | `number` | `3` | Maximum user turns kept verbatim after compaction; older turns stay visible but are summarized out of model context |
 | `compact_keep_recent_bytes` | `number` | `40000` | Maximum text bytes kept verbatim after compaction; retained turns are dropped oldest-first until this budget is met |
 | `show_tps`              | `boolean` | `true`  | Tokens/sec in status bar                                                          |

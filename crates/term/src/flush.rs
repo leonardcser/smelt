@@ -158,6 +158,7 @@ mod tests {
     /// Run `flush_diff` over the diff between `curr` and `prev` and return the bytes
     /// crossterm wrote. Tests assert on the exact byte sequence to pin SGR + cursor codes.
     fn flush_to_string(curr: &Grid, prev: &Grid) -> String {
+        crossterm::style::force_color_output(true);
         let mut out = Vec::new();
         flush_diff(&mut out, curr.diff(prev)).unwrap();
         String::from_utf8(out).unwrap()

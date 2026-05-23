@@ -261,6 +261,7 @@ Request object passed to `smelt.engine.on_prepare_request`.
 | --- | --- | --- | --- |
 | `messages` | [smelt.engine.AskMessage[]](types.md#smeltengineaskmessage) | yes | Model-visible conversation excluding the system prompt. |
 | `estimated_tokens` | `integer` | yes | Conservative token estimate for the request about to be sent, including system prompt, messages, and tool definitions. |
+| `estimated_context_tokens` | `integer` | yes | Active-context estimate for auto-compaction. When a provider has reported context usage, this starts from that server-observed count and adds only local messages appended after the last assistant response; before the first usage report it equals `estimated_tokens`. |
 
 ### `smelt.engine.RuleOverride`
 
@@ -487,7 +488,7 @@ One model entry in a provider's `models` list. Plugin authors can pass either a 
 | `output_cost` | `number` |  | Cost per output token in USD. |
 | `cache_read_cost` | `number` |  | Cost per cache-read token in USD. |
 | `cache_write_cost` | `number` |  | Cost per cache-write token in USD. |
-| `max_tokens` | `integer` |  | Maximum output tokens for this model. |
+| `max_tokens` | `integer` |  | Maximum output tokens for this model. Defaults to the model's own limit, falling back to 4096 if unknown. |
 | `thinking_budgets` | `table` |  | Per-level token budgets for budget-based thinking. |
 
 ### `smelt.theme.ColorDecl`

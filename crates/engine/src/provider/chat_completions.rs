@@ -7,6 +7,37 @@ use crate::trim::{trim_tool_output, MAX_TOOL_OUTPUT_LINES};
 use protocol::{Message, ReasoningEffort, Role, TokenUsage, ToolCall};
 use std::collections::HashMap;
 
+fn add_tokens(a: Option<u32>, b: Option<u32>) -> Option<u32> {
+    match (a, b) {
+        (Some(a), Some(b)) => Some(a.saturating_add(b)),
+        (Some(a), None) => Some(a),
+        (None, Some(b)) => Some(b),
+        (None, None) => None,
+    }
+}
+
+fn parse_usage(u: &serde_json::Value) -> TokenUsage {
+    let total_prompt = u["prompt_tokens"].as_u64().map(|n| n as u32);
+    let cached = u["prompt_tokens_details"]["cached_tokens"]
+        .as_u64()
+        .map(|n| n as u32);
+    let completion = u["completion_tokens"].as_u64().map(|n| n as u32);
+    let total = u["total_tokens"].as_u64().map(|n| n as u32);
+    TokenUsage {
+        context_tokens: total.or_else(|| add_tokens(total_prompt, completion)),
+        prompt_tokens: match (total_prompt, cached) {
+            (Some(t), Some(c)) => Some(t.saturating_sub(c)),
+            (t, _) => t,
+        },
+        completion_tokens: completion,
+        cache_read_tokens: cached,
+        cache_write_tokens: None,
+        reasoning_tokens: u["completion_tokens_details"]["reasoning_tokens"]
+            .as_u64()
+            .map(|n| n as u32),
+    }
+}
+
 pub(super) fn build_body(
     messages: &[Message],
     tools: &[ToolDefinition],
@@ -56,6 +87,9 @@ pub(super) fn build_body(
     if let Some(v) = config.repeat_penalty {
         body["repeat_penalty"] = serde_json::json!(v);
     }
+    if let Some(v) = config.max_tokens {
+        body["max_tokens"] = serde_json::json!(v);
+    }
 
     let label = effort.label();
     if effort != ReasoningEffort::Off {
@@ -102,18 +136,7 @@ pub(super) fn parse_response(data: &serde_json::Value) -> Result<ParsedResponse,
         }
     }
 
-    let u = &data["usage"];
-    let usage = TokenUsage {
-        prompt_tokens: u["prompt_tokens"].as_u64().map(|n| n as u32),
-        completion_tokens: u["completion_tokens"].as_u64().map(|n| n as u32),
-        cache_read_tokens: u["prompt_tokens_details"]["cached_tokens"]
-            .as_u64()
-            .map(|n| n as u32),
-        cache_write_tokens: None,
-        reasoning_tokens: u["completion_tokens_details"]["reasoning_tokens"]
-            .as_u64()
-            .map(|n| n as u32),
-    };
+    let usage = parse_usage(&data["usage"]);
 
     Ok(ParsedResponse {
         content,
@@ -176,17 +199,12 @@ pub(super) fn apply_sse_event(
     on_delta: &mut dyn FnMut(StreamDelta),
 ) {
     if let Some(u) = ev.get("usage") {
-        state.usage.prompt_tokens = u["prompt_tokens"].as_u64().map(|n| n as u32);
-        state.usage.completion_tokens = state
-            .usage
-            .completion_tokens
-            .or(u["completion_tokens"].as_u64().map(|n| n as u32));
-        state.usage.cache_read_tokens = u["prompt_tokens_details"]["cached_tokens"]
-            .as_u64()
-            .map(|n| n as u32);
-        state.usage.reasoning_tokens = u["completion_tokens_details"]["reasoning_tokens"]
-            .as_u64()
-            .map(|n| n as u32);
+        let parsed = parse_usage(u);
+        state.usage.context_tokens = parsed.context_tokens.or(state.usage.context_tokens);
+        state.usage.prompt_tokens = parsed.prompt_tokens.or(state.usage.prompt_tokens);
+        state.usage.completion_tokens = state.usage.completion_tokens.or(parsed.completion_tokens);
+        state.usage.cache_read_tokens = parsed.cache_read_tokens.or(state.usage.cache_read_tokens);
+        state.usage.reasoning_tokens = parsed.reasoning_tokens.or(state.usage.reasoning_tokens);
     }
 
     let choice = ev["choices"].get(0);
@@ -520,7 +538,8 @@ mod tests {
             }
         });
         let r = parse_response(&v).unwrap();
-        assert_eq!(r.usage.prompt_tokens, Some(10));
+        assert_eq!(r.usage.context_tokens, Some(15));
+        assert_eq!(r.usage.prompt_tokens, Some(7));
         assert_eq!(r.usage.completion_tokens, Some(5));
         assert_eq!(r.usage.cache_read_tokens, Some(3));
         assert_eq!(r.usage.reasoning_tokens, Some(1));
@@ -547,7 +566,8 @@ mod tests {
                 }
             }),
         );
-        assert_eq!(state.usage.prompt_tokens, Some(7));
+        assert_eq!(state.usage.context_tokens, Some(10));
+        assert_eq!(state.usage.prompt_tokens, Some(5));
         assert_eq!(state.usage.completion_tokens, Some(3));
         assert_eq!(state.usage.cache_read_tokens, Some(2));
         assert_eq!(state.usage.reasoning_tokens, Some(1));

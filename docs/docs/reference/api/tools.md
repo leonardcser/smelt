@@ -62,7 +62,7 @@ Register a plugin tool. See [`smelt.tools.ToolDef`](types.md#smelttoolstooldef) 
 fun(request_id: integer, call_id: string, result: table): nil
 ```
 
-Resolve the pending tool call `call_id` from request `request_id` with `{ content, is_error }`. Sends a `ToolResult` back to the engine.
+Resolve the pending tool call `call_id` from request `request_id` with `{ content, is_error, metadata? }`. Sends a `ToolResult` back to the engine.
 
 ## `smelt.tools.unregister`
 

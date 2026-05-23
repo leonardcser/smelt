@@ -19,7 +19,7 @@ pub struct ModelConfig {
     pub cache_read_cost: Option<f64>,
     /// Cost per 1M cache-write tokens in USD.
     pub cache_write_cost: Option<f64>,
-    /// Maximum output tokens for this model.
+    /// Maximum output tokens for this model. Defaults to the model's own limit, falling back to 4096 if unknown.
     pub max_tokens: Option<u32>,
     /// Per-level token budgets for budget-based thinking.
     pub thinking_budgets: Option<ThinkingBudgets>,

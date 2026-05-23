@@ -37,6 +37,7 @@ expression: out.events
       "tokens_per_sec": "[tps]",
       "usage": {
         "completion_tokens": 2,
+        "context_tokens": 6,
         "prompt_tokens": 4
       }
     }

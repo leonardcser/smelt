@@ -135,6 +135,11 @@ pub struct LuaPrepareRequest {
     /// Conservative token estimate for the request about to be sent,
     /// including system prompt, messages, and tool definitions.
     pub estimated_tokens: u32,
+    /// Active-context estimate for auto-compaction. When a provider has
+    /// reported context usage, this starts from that server-observed count
+    /// and adds only local messages appended after the last assistant
+    /// response; before the first usage report it equals `estimated_tokens`.
+    pub estimated_context_tokens: u32,
 }
 
 /// Spec for `smelt.engine.ask`.
@@ -223,7 +228,7 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
         type HookCb = LuaCallback<(LuaPrepareRequest, ReplyCb), ()>;
         m.fn_(
             "on_prepare_request",
-            "Register a hook the engine calls immediately before each provider request. `hook` receives `{ messages, estimated_tokens }` and a `reply` callback the hook MUST call exactly once — either with a replacement messages array (engine swaps it in before sampling) or `nil` (engine sends the original request). Returns a `Reg` whose `:remove()` drops the hook.",
+            "Register a hook the engine calls immediately before each provider request. `hook` receives `{ messages, estimated_tokens, estimated_context_tokens }` and a `reply` callback the hook MUST call exactly once — either with a replacement messages array (engine swaps it in before sampling) or `nil` (engine sends the original request). Returns a `Reg` whose `:remove()` drops the hook.",
             &["hook"],
             move |lua, hook: HookCb| -> LuaResult<smelt_core::lua::reg::LuaReg> {
                 let id = s.hooks.prepare_request.register(lua, hook.into_inner(), "")?;

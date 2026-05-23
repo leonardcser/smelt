@@ -35,7 +35,7 @@ tools.middleware = nil
 ---@type fun(def: smelt.tools.ToolDef): smelt.Reg
 tools.register = nil
 
---- Resolve the pending tool call `call_id` from request `request_id` with `{ content, is_error }`. Sends a `ToolResult` back to the engine.
+--- Resolve the pending tool call `call_id` from request `request_id` with `{ content, is_error, metadata? }`. Sends a `ToolResult` back to the engine.
 ---@type fun(request_id: integer, call_id: string, result: table): nil
 tools.resolve = nil
 

@@ -164,7 +164,7 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
     )?;
     m.fn_(
         "context_tokens",
-        "Most recent prompt-token count reported by the provider, or `nil` if no turn has completed yet.",
+        "Most recent active context-token count reported by the provider, or `nil` if no turn has completed yet. Cached input tokens and generated output are included when the provider reports them, because they still occupy the next request's context window.",
         &[],
         |_, ()| -> LuaResult<Option<u32>> {
             Ok(crate::lua::try_with_app(|app| app.core.session.context_tokens).unwrap_or_default())

@@ -6,6 +6,13 @@ use std::collections::HashMap;
 /// Parsed token usage from an API response.
 #[derive(Debug, Default, Clone, Serialize, Deserialize)]
 pub struct TokenUsage {
+    /// Active model context size reported or derived for this response.
+    ///
+    /// Unlike `prompt_tokens`, this includes cached input and generated
+    /// output when the provider reports them, because cached tokens and prior
+    /// assistant output still occupy the next request's context window.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub context_tokens: Option<u32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub prompt_tokens: Option<u32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -19,6 +26,15 @@ pub struct TokenUsage {
 }
 
 impl TokenUsage {
+    pub fn has_any(&self) -> bool {
+        self.context_tokens.is_some()
+            || self.prompt_tokens.is_some()
+            || self.completion_tokens.is_some()
+            || self.cache_read_tokens.is_some()
+            || self.cache_write_tokens.is_some()
+            || self.reasoning_tokens.is_some()
+    }
+
     /// Add another usage report into this accumulator.
     pub fn accumulate(&mut self, other: &TokenUsage) {
         fn add(a: &mut Option<u32>, b: Option<u32>) {
@@ -31,6 +47,8 @@ impl TokenUsage {
         add(&mut self.cache_read_tokens, other.cache_read_tokens);
         add(&mut self.cache_write_tokens, other.cache_write_tokens);
         add(&mut self.reasoning_tokens, other.reasoning_tokens);
+        // `context_tokens` is a per-response active-window measurement, not a
+        // cumulative usage counter. Session totals intentionally leave it unset.
     }
 }
 
@@ -119,11 +137,13 @@ mod tests {
     fn accumulate_adds_other_to_none_self_sets_value() {
         let mut acc = TokenUsage::default();
         let other = TokenUsage {
+            context_tokens: Some(20),
             prompt_tokens: Some(10),
             completion_tokens: Some(5),
             ..Default::default()
         };
         acc.accumulate(&other);
+        assert!(acc.context_tokens.is_none());
         assert_eq!(acc.prompt_tokens, Some(10));
         assert_eq!(acc.completion_tokens, Some(5));
         assert!(acc.cache_read_tokens.is_none());
@@ -155,6 +175,7 @@ mod tests {
     #[test]
     fn accumulate_threads_all_five_fields() {
         let mut acc = TokenUsage {
+            context_tokens: Some(99),
             prompt_tokens: Some(1),
             completion_tokens: Some(2),
             cache_read_tokens: Some(3),
@@ -162,6 +183,7 @@ mod tests {
             reasoning_tokens: Some(5),
         };
         acc.accumulate(&TokenUsage {
+            context_tokens: Some(199),
             prompt_tokens: Some(10),
             completion_tokens: Some(20),
             cache_read_tokens: Some(30),
@@ -173,6 +195,7 @@ mod tests {
         assert_eq!(acc.cache_read_tokens, Some(33));
         assert_eq!(acc.cache_write_tokens, Some(44));
         assert_eq!(acc.reasoning_tokens, Some(55));
+        assert_eq!(acc.context_tokens, Some(99));
     }
 
     // ---- TokenUsage serde ----
@@ -180,16 +203,18 @@ mod tests {
     #[test]
     fn token_usage_omits_none_fields_on_serialize() {
         let u = TokenUsage {
+            context_tokens: Some(8),
             prompt_tokens: Some(5),
             ..Default::default()
         };
         let v = serde_json::to_value(u).unwrap();
-        assert_eq!(v, json!({"prompt_tokens": 5}));
+        assert_eq!(v, json!({"context_tokens": 8, "prompt_tokens": 5}));
     }
 
     #[test]
     fn token_usage_deserialize_defaults_missing_fields_to_none() {
         let u: TokenUsage = serde_json::from_value(json!({})).unwrap();
+        assert!(u.context_tokens.is_none());
         assert!(u.prompt_tokens.is_none());
         assert!(u.completion_tokens.is_none());
     }

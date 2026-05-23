@@ -12,7 +12,7 @@
 
 use crate::app::TuiApp;
 use engine::HostCall;
-use protocol::Message;
+use protocol::{Message, Role};
 use smelt_core::lua::{HookRegistry, LuaShared};
 use std::sync::{Arc, Mutex};
 use tokio::sync::oneshot;
@@ -100,6 +100,11 @@ impl TuiApp {
         while let Ok(ev) = self.core.engine.try_recv() {
             self.dispatch_engine_event(ev);
         }
+        let estimated_context_tokens = estimate_prepare_context_tokens(
+            self.core.session.context_tokens,
+            &messages,
+            estimated_tokens,
+        );
         self.call_message_reply_hook(
             "on_prepare_request",
             |s| &s.hooks.prepare_request,
@@ -109,6 +114,7 @@ impl TuiApp {
                 let request = lua.create_table()?;
                 request.set("messages", messages_table)?;
                 request.set("estimated_tokens", estimated_tokens)?;
+                request.set("estimated_context_tokens", estimated_context_tokens)?;
                 func.call::<()>((request, reply_fn))
             },
         );
@@ -208,5 +214,66 @@ impl TuiApp {
             return None;
         }
         smelt_core::lua::lua_to_serde::<T>(lua, &current)
+    }
+}
+
+fn estimate_prepare_context_tokens(
+    current_context_tokens: Option<u32>,
+    messages: &[Message],
+    full_request_estimate: u32,
+) -> u32 {
+    let Some(base) = current_context_tokens else {
+        return full_request_estimate;
+    };
+    let Some(last_assistant_idx) = messages.iter().rposition(|m| m.role == Role::Assistant) else {
+        return full_request_estimate;
+    };
+    let added = &messages[last_assistant_idx.saturating_add(1)..];
+    if added.is_empty() {
+        return base;
+    }
+    let added_bytes = serde_json::to_vec(added)
+        .map(|v| v.len())
+        .unwrap_or_default();
+    let added_tokens = added_bytes.div_ceil(4).min(u32::MAX as usize) as u32;
+    base.saturating_add(added_tokens)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use protocol::Content;
+
+    #[test]
+    fn prepare_context_estimate_uses_full_estimate_without_provider_baseline() {
+        let messages = vec![Message::user(Content::text("hello"))];
+        assert_eq!(estimate_prepare_context_tokens(None, &messages, 123), 123);
+    }
+
+    #[test]
+    fn prepare_context_estimate_adds_only_messages_after_last_assistant() {
+        let messages = vec![
+            Message::user(Content::text("old")),
+            Message::assistant(Some(Content::text("reply")), None, None),
+            Message::user(Content::text("new prompt")),
+        ];
+
+        let estimated = estimate_prepare_context_tokens(Some(100), &messages, 10_000);
+
+        assert!(estimated > 100);
+        assert!(estimated < 10_000);
+    }
+
+    #[test]
+    fn prepare_context_estimate_stays_at_baseline_without_new_messages() {
+        let messages = vec![
+            Message::user(Content::text("old")),
+            Message::assistant(Some(Content::text("reply")), None, None),
+        ];
+
+        assert_eq!(
+            estimate_prepare_context_tokens(Some(100), &messages, 10_000),
+            100
+        );
     }
 }

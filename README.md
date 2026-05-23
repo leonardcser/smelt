@@ -36,7 +36,8 @@ scriptable in Lua like Neovim. Built from scratch, with care for the details.
 - **Lua plugins.** Keymaps, commands, autocmds, custom tools.
 - **Checkpoint compaction.** Long transcripts stay visible while older
   model context is summarized behind a checkpoint marker before oversized
-  requests reach the provider.
+  requests reach the provider, using provider-reported active context usage
+  when available.
 - **Deterministic fuzzing.** Fixed clock and stubbed I/O, so any crash can be
   replayed.
 - **No config needed.** Run with flags, or `smelt auth` for ChatGPT and Copilot.

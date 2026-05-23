@@ -182,6 +182,7 @@
 ---@class smelt.engine.PrepareRequest
 ---@field messages smelt.engine.AskMessage[] Model-visible conversation excluding the system prompt.
 ---@field estimated_tokens integer Conservative token estimate for the request about to be sent, including system prompt, messages, and tool definitions.
+---@field estimated_context_tokens integer Active-context estimate for auto-compaction. When a provider has reported context usage, this starts from that server-observed count and adds only local messages appended after the last assistant response; before the first usage report it equals `estimated_tokens`.
 
 --- Subcommand rule override accepted inside `CommandOverrides`. Mirrors the front-matter `{ allow?, ask?, deny? }` shape.
 ---@class smelt.engine.RuleOverride
@@ -332,7 +333,7 @@
 ---@field output_cost? number Cost per output token in USD.
 ---@field cache_read_cost? number Cost per cache-read token in USD.
 ---@field cache_write_cost? number Cost per cache-write token in USD.
----@field max_tokens? integer Maximum output tokens for this model.
+---@field max_tokens? integer Maximum output tokens for this model. Defaults to the model's own limit, falling back to 4096 if unknown.
 ---@field thinking_budgets? table Per-level token budgets for budget-based thinking.
 
 --- Color value. Set `ansi` (256-color palette index) or `rgb` (`{R, G, B}` triple) for a direct color, or `dark` / `light` (themselves `ColorDecl`s) for a branch that resolves against the terminal background. A matching-side branch wins over the direct fields.

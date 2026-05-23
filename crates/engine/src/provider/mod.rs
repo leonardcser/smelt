@@ -545,27 +545,27 @@ impl Provider {
         };
         let mut copilot_401_retried = false;
 
+        let mut config = self.model_config.clone();
+        if config.max_tokens.is_none() {
+            if let Some(tokens) = crate::catalog::output_tokens(self.kind.as_str(), model) {
+                config.max_tokens = Some(tokens);
+            }
+        }
+
         let (mut url, mut body) = match self.kind {
             ProviderKind::OpenAiCompatible => {
                 let url = format!("{}/chat/completions", self.api_base);
-                let body = chat_completions::build_body(
-                    messages,
-                    tools,
-                    model,
-                    effort,
-                    &self.model_config,
-                );
+                let body = chat_completions::build_body(messages, tools, model, effort, &config);
                 (url, body)
             }
             ProviderKind::OpenAi => {
                 let url = format!("{}/responses", self.api_base);
-                let body = openai::build_body(messages, tools, model, effort, &self.model_config);
+                let body = openai::build_body(messages, tools, model, effort, &config);
                 (url, body)
             }
             ProviderKind::Codex => {
                 let url = codex::CODEX_API_ENDPOINT.to_string();
-                let mut body =
-                    openai::build_body(messages, tools, model, effort, &self.model_config);
+                let mut body = openai::build_body(messages, tools, model, effort, &config);
                 body["store"] = serde_json::json!(false);
                 if let Some(obj) = body.as_object_mut() {
                     obj.remove("temperature");
@@ -575,14 +575,8 @@ impl Provider {
             }
             ProviderKind::AnthropicCompatible | ProviderKind::Anthropic => {
                 let url = format!("{}/messages", self.api_base);
-                let body = anthropic::build_body(
-                    messages,
-                    tools,
-                    model,
-                    effort,
-                    &self.model_config,
-                    &opts.cache,
-                );
+                let body =
+                    anthropic::build_body(messages, tools, model, effort, &config, &opts.cache);
                 (url, body)
             }
             ProviderKind::Copilot => {
@@ -592,13 +586,7 @@ impl Provider {
                     .map(|t| t.api_base.as_str())
                     .unwrap_or(copilot::DEFAULT_COPILOT_API_BASE);
                 let url = format!("{}/chat/completions", base.trim_end_matches('/'));
-                let body = chat_completions::build_body(
-                    messages,
-                    tools,
-                    model,
-                    effort,
-                    &self.model_config,
-                );
+                let body = chat_completions::build_body(messages, tools, model, effort, &config);
                 (url, body)
             }
         };
@@ -854,6 +842,7 @@ impl Provider {
                         "content": parsed.content,
                         "reasoning_content": parsed.reasoning,
                         "tool_calls": parsed.tool_calls,
+                        "context_tokens": parsed.usage.context_tokens,
                         "prompt_tokens": parsed.usage.prompt_tokens,
                     }),
                 );

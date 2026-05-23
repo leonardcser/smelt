@@ -1056,7 +1056,7 @@ impl<'a> Turn<'a> {
             if let Some(tps) = resp.tokens_per_sec {
                 self.tps_samples.push(tps);
             }
-            if resp.usage.prompt_tokens.is_some() {
+            if resp.usage.has_any() {
                 send_usage(
                     self.event_tx,
                     &self.config.api.provider_type,
@@ -2265,6 +2265,7 @@ mod tests {
             ..Default::default()
         };
         let usage = protocol::TokenUsage {
+            context_tokens: Some(1_500_000),
             prompt_tokens: Some(1_000_000),
             completion_tokens: Some(500_000),
             cache_read_tokens: None,

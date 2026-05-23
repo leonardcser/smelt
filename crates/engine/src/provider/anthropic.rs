@@ -96,6 +96,38 @@ fn parse_cache_write_tokens(u: &serde_json::Value) -> Option<u32> {
         })
 }
 
+fn sum_tokens(parts: impl IntoIterator<Item = Option<u32>>) -> Option<u32> {
+    let mut total: Option<u32> = None;
+    for part in parts.into_iter().flatten() {
+        total = Some(total.unwrap_or(0).saturating_add(part));
+    }
+    total
+}
+
+fn context_tokens_from_usage(usage: &TokenUsage) -> Option<u32> {
+    // Total input = input_tokens + cache_read_input_tokens + cache_creation_input_tokens.
+    // Context window = total input + output_tokens.
+    sum_tokens([
+        usage.prompt_tokens,
+        usage.cache_read_tokens,
+        usage.cache_write_tokens,
+        usage.completion_tokens,
+    ])
+}
+
+fn parse_usage(u: &serde_json::Value) -> TokenUsage {
+    let mut usage = TokenUsage {
+        prompt_tokens: u["input_tokens"].as_u64().map(|n| n as u32),
+        completion_tokens: u["output_tokens"].as_u64().map(|n| n as u32),
+        cache_read_tokens: u["cache_read_input_tokens"].as_u64().map(|n| n as u32),
+        cache_write_tokens: parse_cache_write_tokens(u),
+        reasoning_tokens: None,
+        context_tokens: None,
+    };
+    usage.context_tokens = context_tokens_from_usage(&usage);
+    usage
+}
+
 pub(super) fn build_body(
     messages: &[Message],
     tools: &[ToolDefinition],
@@ -333,14 +365,7 @@ pub(super) fn parse_response(data: &serde_json::Value) -> Result<ParsedResponse,
         }
     }
 
-    let u = &data["usage"];
-    let usage = TokenUsage {
-        prompt_tokens: u["input_tokens"].as_u64().map(|n| n as u32),
-        completion_tokens: u["output_tokens"].as_u64().map(|n| n as u32),
-        cache_read_tokens: u["cache_read_input_tokens"].as_u64().map(|n| n as u32),
-        cache_write_tokens: parse_cache_write_tokens(u),
-        reasoning_tokens: None,
-    };
+    let usage = parse_usage(&data["usage"]);
 
     Ok(ParsedResponse {
         content,
@@ -420,10 +445,7 @@ pub(super) fn apply_sse_event(
     match event_type {
         "message_start" => {
             if let Some(u) = ev.get("message").and_then(|m| m.get("usage")) {
-                state.usage.prompt_tokens = u["input_tokens"].as_u64().map(|n| n as u32);
-                state.usage.cache_read_tokens =
-                    u["cache_read_input_tokens"].as_u64().map(|n| n as u32);
-                state.usage.cache_write_tokens = parse_cache_write_tokens(u);
+                state.usage = parse_usage(u);
             }
         }
         "content_block_start" => {
@@ -528,6 +550,7 @@ pub(super) fn apply_sse_event(
                 if state.usage.prompt_tokens.is_none() {
                     state.usage.prompt_tokens = u["input_tokens"].as_u64().map(|n| n as u32);
                 }
+                state.usage.context_tokens = context_tokens_from_usage(&state.usage);
             }
         }
         "message_stop" => {
@@ -1103,6 +1126,7 @@ mod tests {
             "cache_creation_input_tokens": 2,
         }});
         let r = parse_response(&v).unwrap();
+        assert_eq!(r.usage.context_tokens, Some(20));
         assert_eq!(r.usage.prompt_tokens, Some(10));
         assert_eq!(r.usage.completion_tokens, Some(5));
         assert_eq!(r.usage.cache_read_tokens, Some(3));
@@ -1132,6 +1156,7 @@ mod tests {
         assert_eq!(state.usage.prompt_tokens, Some(11));
         assert_eq!(state.usage.cache_read_tokens, Some(4));
         assert_eq!(state.usage.cache_write_tokens, Some(7));
+        assert_eq!(state.usage.context_tokens, Some(22));
     }
 
     #[test]
@@ -1277,6 +1302,8 @@ mod tests {
             }),
         );
         assert_eq!(state.usage.completion_tokens, Some(12));
+        // No input_tokens in this event, so context is just completion.
+        assert_eq!(state.usage.context_tokens, Some(12));
     }
 
     #[test]
@@ -1292,6 +1319,8 @@ mod tests {
         );
         // prompt_tokens stays at 99 because message_start already populated it.
         assert_eq!(state.usage.prompt_tokens, Some(99));
+        // context_tokens = 99 (prompt) + 1 (completion); no cache fields set.
+        assert_eq!(state.usage.context_tokens, Some(100));
 
         let mut state2 = StreamState::default();
         step(
@@ -1302,6 +1331,7 @@ mod tests {
             }),
         );
         assert_eq!(state2.usage.prompt_tokens, Some(5));
+        assert_eq!(state2.usage.context_tokens, Some(6));
     }
 
     #[test]

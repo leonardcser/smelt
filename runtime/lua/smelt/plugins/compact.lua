@@ -413,12 +413,12 @@ end, { desc = "compact conversation history", while_busy = false })
 -- ── pre-request auto-compaction ───────────────────────────────────────
 --
 -- Engine invokes this immediately before sending a model request. This
--- is the single normal auto-compact path: it uses the request the engine
--- is actually about to send, so newly appended tool results can't drift
--- past the last provider-reported token count.
+-- is the single normal auto-compact path: it uses the active-context
+-- estimate for the request the engine is actually about to send, anchored
+-- to the last provider-reported context size when available.
 
 smelt.engine.on_prepare_request(function(request, reply)
-  local estimated_tokens = request and request.estimated_tokens
+  local estimated_tokens = request and (request.estimated_context_tokens or request.estimated_tokens)
   if not auto_compact_due(estimated_tokens) then
     reply(nil)
     return
