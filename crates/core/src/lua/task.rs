@@ -286,6 +286,13 @@ pub(crate) fn step_task_owned(
             }
         }
         Err(e) => {
+            if task.cancel.is_cancelled() {
+                if let mlua::Error::RuntimeError(ref msg) = e {
+                    if msg == "cancelled" {
+                        return None;
+                    }
+                }
+            }
             let msg = e.to_string();
             outputs.push(TaskDriveOutput::Error(format!(
                 "{}: {msg}",
