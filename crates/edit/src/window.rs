@@ -547,6 +547,16 @@ impl Window {
         (vrow as u16, cell_col as u16)
     }
 
+    /// Convert viewport-relative mouse coordinates to a buffer cpos,
+    /// accounting for both vertical and horizontal scroll.
+    fn cpos_at_mouse(&self, buf: &Buffer, rel_row: u16, rel_col: u16) -> usize {
+        let visual_total = self.visual_row_total(buf) as usize;
+        let vrow = (self.scroll_top as usize + rel_row as usize)
+            .min(visual_total.max(1).saturating_sub(1));
+        let vcell = rel_col as usize + self.scroll_left as usize;
+        self.cpos_at_visual(buf, vrow, vcell)
+    }
+
     /// Project a visual `(row, cell_col)` hit to a buffer cpos via the layout.
     /// Used by mouse hit-test and pan-preserving-cursor.
     fn cpos_at_visual(&self, buf: &Buffer, vrow: usize, vcell: usize) -> usize {
@@ -1004,9 +1014,7 @@ impl Window {
         }
 
         let viewport_rows = ctx.viewport.rect.height;
-        let visual_total = (self.visual_row_total(buf) as usize).max(1);
-        let vrow = (self.scroll_top as usize + rel_row as usize).min(visual_total - 1);
-        let click_byte = self.cpos_at_visual(buf, vrow, rel_col as usize);
+        let click_byte = self.cpos_at_mouse(buf, rel_row, rel_col);
         // All leaves stage the click into `drag_endpoint`; `cpos` is committed on Up
         // only for caret-bearing leaves (see `is_caret_leaf`). Readers route through
         // `effective_endpoint` so the cursor and selection track the drag without
@@ -1071,9 +1079,7 @@ impl Window {
             .saturating_sub(ctx.viewport.gutter_width)
             .saturating_sub(self.config.gutters.pad_left)
             .min(ctx.viewport.content_width.saturating_sub(1));
-        let visual_total = (self.visual_row_total(buf) as usize).max(1);
-        let vrow = (self.scroll_top as usize + rel_row as usize).min(visual_total - 1);
-        let drag_byte = self.cpos_at_visual(buf, vrow, rel_col as usize);
+        let drag_byte = self.cpos_at_mouse(buf, rel_row, rel_col);
         self.drag_endpoint = Some(drag_byte);
 
         if self.drag_anchor_word.is_some() {
@@ -3060,6 +3066,79 @@ mod tests {
         );
         assert_eq!(r, Status::Consumed);
         assert_eq!(yank, Some((0, 11)));
+    }
+
+    #[test]
+    fn mouse_click_respects_horizontal_scroll() {
+        // With scroll_left = 5, a click at viewport column 2 must land on
+        // source column 7, not column 2. Before `cpos_at_mouse` centralised
+        // the coordinate transform, `scroll_left` was ignored and clicks
+        // drifted left by exactly the horizontal scroll offset.
+        let mut w = make_win();
+        let row = "abcdefghijklmnopqrstuvwxyz".to_string();
+        let buf = make_buf(vec![row.clone()]);
+        w.ensure_layout(&buf, 100);
+        w.scroll_left = 5;
+
+        let rect = Rect::new(0, 0, 20, 5);
+        let mut vp = viewport_for(std::slice::from_ref(&row), rect);
+        vp.scrollbar = None;
+        let ctx = MouseCtx {
+            soft_breaks: &[],
+            hard_breaks: &hard_breaks(std::slice::from_ref(&row)),
+            viewport: vp,
+            click_count: 1,
+        };
+
+        // Click at viewport column 2 → source column 7 → byte for 'h'
+        let _ = w.handle_mouse(
+            &buf,
+            click_event(MouseEventKind::Down(MouseButton::Left), 0, 2),
+            ctx,
+        );
+        assert_eq!(w.drag_endpoint, Some(row.find('h').unwrap()));
+    }
+
+    #[test]
+    fn mouse_drag_respects_horizontal_scroll() {
+        // Drag end-point must also account for scroll_left.
+        let mut w = make_win();
+        let row = "abcdefghijklmnopqrstuvwxyz".to_string();
+        let buf = make_buf(vec![row.clone()]);
+        w.ensure_layout(&buf, 100);
+        w.scroll_left = 5;
+
+        let rect = Rect::new(0, 0, 20, 5);
+        let mut vp = viewport_for(std::slice::from_ref(&row), rect);
+        vp.scrollbar = None;
+        let hb = hard_breaks(std::slice::from_ref(&row));
+
+        // Down at viewport col 2
+        let ctx_down = MouseCtx {
+            soft_breaks: &[],
+            hard_breaks: &hb,
+            viewport: vp,
+            click_count: 1,
+        };
+        let _ = w.handle_mouse(
+            &buf,
+            click_event(MouseEventKind::Down(MouseButton::Left), 0, 2),
+            ctx_down,
+        );
+
+        // Drag to viewport col 4 → source col 9 → byte for 'j'
+        let ctx_drag = MouseCtx {
+            soft_breaks: &[],
+            hard_breaks: &hb,
+            viewport: vp,
+            click_count: 1,
+        };
+        let _ = w.handle_mouse(
+            &buf,
+            click_event(MouseEventKind::Drag(MouseButton::Left), 0, 4),
+            ctx_drag,
+        );
+        assert_eq!(w.drag_endpoint, Some(row.find('j').unwrap()));
     }
 
     /// Highlight cols are visual columns, so a span anchored after a

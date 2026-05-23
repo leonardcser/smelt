@@ -23,6 +23,12 @@ impl TuiApp {
         let width = term_w as usize;
         let show_queued = agent_running || self.busy_stack.is_busy();
 
+        // Capture the cursor's screen-row offset BEFORE any scroll mutations.
+        // `apply_tail_follow` and the transcript sentinel both change
+        // `scroll_top`, so reading this afterward would underflow and return
+        // None, skipping the post-projection restore.
+        let transcript_cursor_screen_row = self.transcript_win().cursor_screen_row_in_viewport();
+
         self.ui.apply_tail_follow();
         // Transcript's buffer is rebuilt mid-frame by `project_transcript_buffer`,
         // so the `apply_tail_follow` clamp is one row stale during streaming.
@@ -75,7 +81,12 @@ impl TuiApp {
         let _ = queued;
         {
             let _p = smelt_perf::perf::begin("compositor:transcript");
-            self.sync_transcript_layer(width, viewport_rows, has_transcript_cursor);
+            self.sync_transcript_layer(
+                width,
+                viewport_rows,
+                has_transcript_cursor,
+                transcript_cursor_screen_row,
+            );
         }
         {
             let _p = smelt_perf::perf::begin("compositor:input");
@@ -137,17 +148,15 @@ impl TuiApp {
     /// Project the transcript into its display buffer and drive `Ui::wins[TRANSCRIPT_WIN]`.
     /// When content owns focus, surfaces a Block cursor; `Window::render` derives the
     /// position from `effective_endpoint`, so the cursor naturally tracks the live drag.
+    /// `cursor_screen_row` is the pre-capture from before `apply_tail_follow` / the
+    /// `u16::MAX` sentinel so it doesn't underflow when read after scroll mutations.
     fn sync_transcript_layer(
         &mut self,
         width: usize,
         viewport_rows: u16,
         has_transcript_cursor: bool,
+        cursor_screen_row: Option<u16>,
     ) {
-        // Snapshot the cursor's screen-row offset before the projection
-        // rebuilds the buffer — once the changedtick bumps, `ensure_layout`
-        // can't recover this offset from inside Window, so we capture it
-        // here while the OLD layout/scroll are still in sync.
-        let cursor_screen_row = self.transcript_win().cursor_screen_row_in_viewport();
         let tdata = {
             let _p = smelt_perf::perf::begin("compositor:project_transcript");
             self.project_transcript_buffer(

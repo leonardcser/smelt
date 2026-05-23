@@ -378,6 +378,8 @@ impl TuiApp {
     }
 
     /// Translate `me`'s column to the nearest selectable cell for the clicked display row.
+    /// Accounts for horizontal scroll so the snap operates on source-cell columns, not
+    /// viewport-relative ones.
     fn snap_event_for_selection(
         &mut self,
         me: MouseEvent,
@@ -388,10 +390,16 @@ impl TuiApp {
         let line_idx =
             (self.transcript_win().scroll_top as usize + rel_row).min(rows.len().saturating_sub(1));
         let rel_col = me.column.saturating_sub(vp.rect.left) as usize;
-        let snapped =
-            self.snap_col_to_selectable(line_idx, rel_col, self.core.config.settings.show_thinking);
+        let scroll_left = self.transcript_win().scroll_left as usize;
+        let source_col = rel_col + scroll_left;
+        let snapped = self.snap_col_to_selectable(
+            line_idx,
+            source_col,
+            self.core.config.settings.show_thinking,
+        );
+        let screen_col = snapped.saturating_sub(scroll_left);
         MouseEvent {
-            column: vp.rect.left.saturating_add(snapped as u16),
+            column: vp.rect.left.saturating_add(screen_col as u16),
             ..me
         }
     }

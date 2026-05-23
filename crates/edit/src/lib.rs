@@ -1888,15 +1888,23 @@ impl Ui {
     /// [`Self::should_follow_tail`] holds. Buffers rebuilt mid-frame (e.g.
     /// transcript streaming) should set `scroll_top = u16::MAX` themselves
     /// after this pass.
+    ///
+    /// The cursor's screen-row offset is preserved so it stays visually fixed
+    /// relative to the viewport instead of drifting with the auto-scroll.
     pub fn apply_tail_follow(&mut self) {
         let ids: Vec<WinId> = self.wins.keys().copied().collect();
         for id in ids {
             if !self.should_follow_tail(id) {
                 continue;
             }
-            let win = &self.wins[&id];
-            let buf_id = win.buf;
-            let viewport_rows = win.viewport.map(|v| v.rect.height).unwrap_or(0);
+            let (buf_id, viewport_rows, cursor_screen_row) = {
+                let win = self.wins.get(&id).expect("win exists");
+                (
+                    win.buf,
+                    win.viewport.map(|v| v.rect.height).unwrap_or(0),
+                    win.cursor_screen_row_in_viewport(),
+                )
+            };
             let total_rows = self
                 .bufs
                 .get(&buf_id)
@@ -1905,6 +1913,13 @@ impl Ui {
             let max_scroll = total_rows.saturating_sub(viewport_rows);
             if let Some(w) = self.wins.get_mut(&id) {
                 w.scroll_top = max_scroll;
+            }
+            if let Some(screen_row) = cursor_screen_row {
+                if let Some(buf) = self.bufs.get(&buf_id) {
+                    if let Some(win) = self.wins.get_mut(&id) {
+                        win.restore_cursor_screen_row(buf, screen_row);
+                    }
+                }
             }
         }
     }
