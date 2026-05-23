@@ -399,6 +399,40 @@ pub enum FuzzOp {
     StartExec {
         command: String,
     },
+    /// Side channel: cancel the active turn (or idle background tasks).
+    /// Exercises `discard_turn(true)` → flush streaming, send `Cancel`,
+    /// `lua.cancel_tasks()`, and the interrupted-transcript path.
+    Cancel,
+    /// Emit `RequestPermission` with `tool_name = "bash"` so the
+    /// permission hook evaluator routes through `bash::parse` and
+    /// exercises multi-byte UTF-8 in the shell command parser.
+    EngineRequestPermissionBash {
+        req_id: u8,
+        call_id: u8,
+        command: String,
+    },
+    /// Side channel: push a steer text onto the queued-messages stack.
+    /// Exercises the mid-turn steering queue growth path.
+    Steer {
+        text: String,
+    },
+    /// Side channel: remove up to `count` queued messages from the front.
+    /// Exercises the mid-turn steering queue shrink path.
+    Unsteer {
+        count: u8,
+    },
+    /// Side channel: send a `CallCoreTool` UiCommand. Exercises the
+    /// tool-call round-trip initiation path (pair with
+    /// `EngineCoreToolResult` for the full lifecycle).
+    CallCoreTool {
+        tool_name: String,
+        args: ArgsBag,
+    },
+    /// Side channel: change the active agent mode. Exercises mode-
+    /// dependent rendering and permission rule-sets.
+    SetAgentMode {
+        mode: FuzzMode,
+    },
 }
 
 impl FuzzOp {
@@ -465,6 +499,12 @@ impl FuzzOp {
             EngineAskResponsePending { .. } => "ask response (pending)".into(),
             EngineAskErrorPending { .. } => "ask error (pending)".into(),
             StartExec { .. } => "start exec".into(),
+            Cancel => "cancel".into(),
+            EngineRequestPermissionBash { .. } => "request permission (bash)".into(),
+            Steer { .. } => "steer".into(),
+            Unsteer { count } => format!("unsteer {count}"),
+            CallCoreTool { tool_name, .. } => format!("call core tool {tool_name}"),
+            SetAgentMode { mode } => format!("set mode {mode:?}"),
         }
     }
 }
@@ -771,6 +811,27 @@ const FUZZOP_BUILDERS: &[FuzzOpBuilder] = &[
             command: u.arbitrary()?,
         })
     },
+    |_| Ok(FuzzOp::Cancel),
+    |u| {
+        Ok(FuzzOp::EngineRequestPermissionBash {
+            req_id: u.arbitrary()?,
+            call_id: u.arbitrary()?,
+            command: u.arbitrary()?,
+        })
+    },
+    |u| Ok(FuzzOp::Steer { text: u.arbitrary()? }),
+    |u| Ok(FuzzOp::Unsteer { count: u.arbitrary()? }),
+    |u| {
+        Ok(FuzzOp::CallCoreTool {
+            tool_name: u.arbitrary()?,
+            args: u.arbitrary()?,
+        })
+    },
+    |u| {
+        Ok(FuzzOp::SetAgentMode {
+            mode: u.arbitrary()?,
+        })
+    },
 ];
 
 /// Total `FuzzOp` variant count, derived from the dispatch table so it
@@ -1069,6 +1130,8 @@ enum PostCheck {
     CoreToolResultReceived,
     /// `Shutdown` ends any active turn.
     ShutdownReceived,
+    /// `Cancel` side channel ends any active turn and flushes streaming.
+    TurnCancelled,
 }
 
 fn run_check(check: PostCheck, pre: &Snapshot, post: &Snapshot, new_actions: &[Action]) {
@@ -1357,6 +1420,16 @@ fn run_check(check: PostCheck, pre: &Snapshot, post: &Snapshot, new_actions: &[A
                 assert!(!post.agent_running, "Shutdown did not end the active turn",);
             }
         }
+        PostCheck::TurnCancelled => {
+            if pre.agent_running {
+                assert!(!post.agent_running, "Cancel did not end the active turn",);
+            }
+            assert!(
+                !post.streaming.text && !post.streaming.thinking,
+                "Cancel left streaming active: {:?}",
+                post.streaming
+            );
+        }
     }
 }
 
@@ -1564,6 +1637,23 @@ fn plan(op: FuzzOp) -> (Option<SourceEvent>, PostCheck) {
             });
             (Some(ev), PostCheck::PermissionRequested)
         }
+        FuzzOp::EngineRequestPermissionBash {
+            req_id,
+            call_id,
+            command,
+        } => {
+            let mut args = std::collections::HashMap::new();
+            args.insert("command".to_string(), serde_json::Value::String(command));
+            let ev = SourceEvent::Engine(EngineEvent::RequestPermission {
+                request_id: u64::from(req_id),
+                call_id: call_id_string(call_id),
+                tool_name: "bash".to_string(),
+                args,
+                approval_patterns: Vec::new(),
+                summary: protocol::style::StyledLines::from_plain("bash".to_string()),
+            });
+            (Some(ev), PostCheck::PermissionRequested)
+        }
         FuzzOp::ApproveFirstConfirm | FuzzOp::DenyFirstConfirm { .. } => {
             unreachable!("Approve/Deny side channels handled inline in apply()")
         }
@@ -1613,7 +1703,12 @@ fn plan(op: FuzzOp) -> (Option<SourceEvent>, PostCheck) {
             let ev = SourceEvent::Engine(EngineEvent::Shutdown { reason });
             (Some(ev), PostCheck::ShutdownReceived)
         }
-        FuzzOp::InsertAttachment { .. }
+        FuzzOp::Cancel
+        | FuzzOp::Steer { .. }
+        | FuzzOp::Unsteer { .. }
+        | FuzzOp::CallCoreTool { .. }
+        | FuzzOp::SetAgentMode { .. }
+        | FuzzOp::InsertAttachment { .. }
         | FuzzOp::TogglePaneFocus
         | FuzzOp::ReloadLua
         | FuzzOp::OpenOverlay { .. }
@@ -1622,9 +1717,7 @@ fn plan(op: FuzzOp) -> (Option<SourceEvent>, PostCheck) {
         | FuzzOp::EngineAskResponsePending { .. }
         | FuzzOp::EngineAskErrorPending { .. }
         | FuzzOp::StartExec { .. } => {
-            unreachable!(
-                "side channels handled inline in apply()"
-            )
+            unreachable!("side channels handled inline in apply()")
         }
         FuzzOp::EngineToolArgsDelta {
             call_id,
@@ -1756,6 +1849,26 @@ fn try_dispatch_side_channel(app: &mut TestApp, op: FuzzOp) -> Result<(), FuzzOp
         }
         FuzzOp::StartExec { command } => {
             app.start_exec(&command);
+        }
+        FuzzOp::Cancel => {
+            let pre = Snapshot::capture(app);
+            app.cancel();
+            let post = Snapshot::capture(app);
+            let new_actions = app.actions_since(pre.action_count);
+            run_check(PostCheck::TurnCancelled, &pre, &post, new_actions);
+            check_turn_end_invariants(&pre, &post);
+        }
+        FuzzOp::Steer { text } => {
+            app.steer(&text);
+        }
+        FuzzOp::Unsteer { count } => {
+            app.unsteer(usize::from(count));
+        }
+        FuzzOp::CallCoreTool { tool_name, args } => {
+            app.call_core_tool(&tool_name, args.into_map());
+        }
+        FuzzOp::SetAgentMode { mode } => {
+            app.set_agent_mode(mode.into());
         }
         other => return Err(other),
     }

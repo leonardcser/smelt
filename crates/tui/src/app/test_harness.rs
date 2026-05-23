@@ -773,6 +773,49 @@ impl TestApp {
         self.app.start_exec(command.to_string());
     }
 
+    /// Cancel the active turn (or idle background tasks). Mirrors
+    /// `EventOutcome::CancelAgent` → `discard_turn(true)`.
+    pub fn cancel(&mut self) {
+        self.app.discard_turn(true);
+        self.drain_cmd();
+    }
+
+    /// Push a steer text onto the queued-messages stack.
+    pub fn steer(&mut self, text: &str) {
+        if !text.is_empty() && self.app.queued_messages.len() < crate::app::MAX_QUEUED_MESSAGES {
+            self.app.queued_messages.push(text.to_string());
+        }
+    }
+
+    /// Remove up to `count` queued messages from the front.
+    pub fn unsteer(&mut self, count: usize) {
+        let n = count.min(self.app.queued_messages.len());
+        self.app.queued_messages.drain(..n);
+    }
+
+    /// Send a `CallCoreTool` UiCommand to the engine channel.
+    pub fn call_core_tool(
+        &mut self,
+        tool_name: &str,
+        args: std::collections::HashMap<String, serde_json::Value>,
+    ) {
+        self.app
+            .core
+            .engine
+            .send(protocol::UiCommand::CallCoreTool {
+                request_id: 1,
+                parent_call_id: String::new(),
+                tool_name: tool_name.to_string(),
+                args,
+            });
+        self.drain_cmd();
+    }
+
+    /// Change the active agent mode.
+    pub fn set_agent_mode(&mut self, mode: AgentMode) {
+        self.app.core.config.mode = mode;
+    }
+
     /// Push an `assistant` text block onto the transcript history so
     /// flows that read message history see a multi-turn conversation.
     pub fn push_assistant_text(&mut self, text: &str) {
