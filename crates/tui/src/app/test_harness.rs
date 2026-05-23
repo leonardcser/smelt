@@ -223,7 +223,11 @@ impl TestAppBuilder {
         // `smelt.spinner.glyph()` uses wall-clock time, so parallel or
         // sequential test runs land on different frames. Freezing it to
         // the first frame makes storybook snapshots stable.
-        let _ = app.lua.lua().load("smelt.spinner.glyph = function() return '✿' end").exec();
+        let _ = app
+            .lua
+            .lua()
+            .load("smelt.spinner.glyph = function() return '✿' end")
+            .exec();
 
         // Production wires the Tui frontend to `Osc52Sink`, which writes
         // `\x1b]52;c;...` to real stdout on every kill-ring copy. Inside the

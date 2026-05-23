@@ -381,6 +381,65 @@ fn split_shell_commands_basic() {
     );
 }
 
+#[test]
+fn split_shell_commands_utf8_multibyte() {
+    // Multi-byte characters should not cause panics on byte-index slicing.
+    assert_eq!(split_shell_commands("✿"), vec!["✿"]);
+    assert_eq!(split_shell_commands("echo ✿"), vec!["echo ✿"]);
+    assert_eq!(
+        split_shell_commands("echo ✿ && rm foo"),
+        vec!["echo ✿", "rm foo"]
+    );
+    assert_eq!(
+        split_shell_commands("echo '✿ && world'"),
+        vec!["echo '✿ && world'"]
+    );
+}
+
+#[test]
+fn split_shell_commands_utf8_with_backslash() {
+    // Backslash before a multi-byte char should not land mid-char.
+    assert_eq!(split_shell_commands(r"\✿"), vec![r"\✿"]);
+    assert_eq!(split_shell_commands(r"echo \✿"), vec![r"echo \✿"]);
+}
+
+#[test]
+fn split_shell_commands_utf8_in_subshell() {
+    // Subshell extraction with multi-byte chars — inner commands are appended.
+    assert_eq!(
+        split_shell_commands("echo $(echo ✿)"),
+        vec!["echo $(echo ✿)", "echo ✿"]
+    );
+    assert_eq!(
+        split_shell_commands("echo ✿ && (echo ✿)"),
+        vec!["echo ✿", "(echo ✿)", "echo ✿"]
+    );
+}
+
+#[test]
+fn split_shell_commands_utf8_with_heredoc() {
+    let cmd = "cat << 'EOF'\n✿\nEOF";
+    assert_eq!(split_shell_commands(cmd), vec![cmd]);
+}
+
+#[test]
+fn has_output_redirection_utf8() {
+    // Multi-byte chars near redirection operators.
+    assert!(!has_output_redirection("echo ✿"));
+    assert!(has_output_redirection("echo ✿ > out.txt"));
+}
+
+#[test]
+fn split_shell_commands_with_ops_utf8() {
+    assert_eq!(
+        split_shell_commands_with_ops("echo ✿ && rm foo"),
+        vec![
+            ("echo ✿".to_string(), Some("&&".to_string())),
+            ("rm foo".to_string(), None),
+        ]
+    );
+}
+
 // --- edge cases ---
 
 // Empty / whitespace-only commands

@@ -4,6 +4,8 @@
 //! aware), extracts embedded commands from `$(...)`, backticks, and `(...)`
 //! subshells, parses heredocs, and detects output redirections.
 
+use smelt_buffer::text::{next_char_boundary, slice};
+
 const SHELL_OPERATORS: &[(&str, usize)] = &[
     ("&&", 2),
     ("||", 2),
@@ -73,7 +75,7 @@ fn split_impl(cmd: &str) -> (Vec<String>, Vec<String>) {
                 i += 2;
             }
             _ => {
-                let rest = &cmd[i..];
+                let rest = slice(cmd, i..cmd.len());
 
                 // Heredoc: skip body so its content isn't parsed as operators.
                 if rest.starts_with("<<") {
@@ -100,7 +102,7 @@ fn split_impl(cmd: &str) -> (Vec<String>, Vec<String>) {
                 if let Some(&(op, op_len)) =
                     SHELL_OPERATORS.iter().find(|(op, _)| rest.starts_with(op))
                 {
-                    let part = cmd[start..i].trim();
+                    let part = slice(cmd, start..i).trim();
                     if !part.is_empty() {
                         commands.push(part.to_string());
                         operators.push(op.to_string());
@@ -108,13 +110,13 @@ fn split_impl(cmd: &str) -> (Vec<String>, Vec<String>) {
                     i += op_len;
                     start = i;
                 } else {
-                    i += 1;
+                    i = next_char_boundary(cmd, i);
                 }
             }
         }
     }
 
-    let part = cmd[start..].trim();
+    let part = slice(cmd, start..cmd.len()).trim();
     if !part.is_empty() {
         commands.push(part.to_string());
     }
@@ -125,7 +127,7 @@ fn split_impl(cmd: &str) -> (Vec<String>, Vec<String>) {
 /// Returns `(header_end, body_end)`: byte offsets past the delimiter word and past the
 /// closing delimiter line respectively (`cmd.len()` if no closing delimiter found).
 fn parse_heredoc(cmd: &str, i: usize) -> Option<(usize, usize)> {
-    let rest = &cmd[i..];
+    let rest = slice(cmd, i..cmd.len());
     let bytes = cmd.as_bytes();
     let len = cmd.len();
 
@@ -156,7 +158,7 @@ fn parse_heredoc(cmd: &str, i: usize) -> Option<(usize, usize)> {
             hi += 1;
         }
     }
-    let delim = &rest[delim_start..hi];
+    let delim = slice(rest, delim_start..hi);
     if delim.is_empty() {
         return None;
     }
@@ -201,7 +203,7 @@ pub(super) fn strip_heredoc_bodies(cmd: &str) -> String {
                 if i < len {
                     i += 1;
                 }
-                out.push_str(&cmd[start..i]);
+                out.push_str(slice(cmd, start..i));
             }
             b'"' => {
                 let start = i;
@@ -215,29 +217,31 @@ pub(super) fn strip_heredoc_bodies(cmd: &str) -> String {
                 if i < len {
                     i += 1;
                 }
-                out.push_str(&cmd[start..i]);
+                out.push_str(slice(cmd, start..i));
             }
             b'\\' if i + 1 < len => {
-                out.push_str(&cmd[i..i + 2]);
+                out.push_str(slice(cmd, i..i + 2));
                 i += 2;
             }
             _ => {
-                let rest = &cmd[i..];
+                let rest = slice(cmd, i..cmd.len());
                 if rest.starts_with("<<") {
                     if let Some((header_end, body_end)) = parse_heredoc(cmd, i) {
                         // Emit header and closing delimiter line; drop the body.
-                        out.push_str(&cmd[i..header_end]);
-                        if body_end < len || cmd[header_end..body_end].contains('\n') {
-                            if let Some(last_nl) = cmd[header_end..body_end].rfind('\n') {
-                                out.push_str(&cmd[header_end + last_nl..body_end]);
+                        out.push_str(slice(cmd, i..header_end));
+                        let body = slice(cmd, header_end..body_end);
+                        if body_end < len || body.contains('\n') {
+                            if let Some(last_nl) = body.rfind('\n') {
+                                out.push_str(slice(cmd, header_end + last_nl..body_end));
                             }
                         }
                         i = body_end;
                         continue;
                     }
                 }
-                out.push(bytes[i] as char);
-                i += 1;
+                let ch_end = next_char_boundary(cmd, i);
+                out.push_str(slice(cmd, i..ch_end));
+                i = ch_end;
             }
         }
     }
@@ -293,7 +297,7 @@ fn extract_embedded_commands(raw_cmd: &str) -> Vec<String> {
                     i += 1;
                 }
                 if i < len {
-                    let inner = &cmd[start..i];
+                    let inner = slice(cmd, start..i);
                     for sub in split_shell_commands(inner) {
                         extra.push(sub);
                     }
@@ -357,7 +361,7 @@ fn find_matching_paren(cmd: &str, start: usize) -> Option<(&str, usize)> {
             b')' => {
                 depth -= 1;
                 if depth == 0 {
-                    return Some((&cmd[start..i], i));
+                    return Some((slice(cmd, start..i), i));
                 }
                 i += 1;
             }
