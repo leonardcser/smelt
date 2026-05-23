@@ -178,6 +178,11 @@
 ---@field tools? smelt.engine.RuleOverride Per-tool `allow`/`ask`/`deny` patterns for the duration of the turn.
 ---@field [string] smelt.engine.RuleOverride Per-subcommand pattern buckets keyed by tool name.
 
+--- Request object passed to `smelt.engine.on_prepare_request`.
+---@class smelt.engine.PrepareRequest
+---@field messages smelt.engine.AskMessage[] Model-visible conversation excluding the system prompt.
+---@field estimated_tokens integer Conservative token estimate for the request about to be sent, including system prompt, messages, and tool definitions.
+
 --- Subcommand rule override accepted inside `CommandOverrides`. Mirrors the front-matter `{ allow?, ask?, deny? }` shape.
 ---@class smelt.engine.RuleOverride
 ---@field allow? string[] Patterns that auto-allow.

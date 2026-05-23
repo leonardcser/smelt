@@ -185,7 +185,7 @@ macro_rules! settings {
 settings! {
     /// Vi keybindings in the prompt.
     vim:                   Bool   = false;
-    /// Auto-summarize when context usage crosses `compact_threshold` (forced on in headless).
+    /// Auto-summarize when request context usage crosses `compact_threshold` (forced on in headless).
     auto_compact:          Bool   = true;
     /// Tokens/sec in status bar.
     show_tps:              Bool   = true;
@@ -208,7 +208,7 @@ settings! {
     /// `/reload` when any of them changes.
     auto_reload:           Bool   = false;
     /// Fraction of the configured context window (0, 1] at which the
-    /// bundled compact plugin auto-triggers between turns.
+    /// bundled compact plugin auto-triggers before oversized requests.
     compact_threshold:     Number = 0.80;
     /// Number of most-recent user turns kept verbatim after a compaction
     /// checkpoint. Older turns remain visible in the transcript but are

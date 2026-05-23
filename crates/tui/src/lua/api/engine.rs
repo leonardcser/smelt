@@ -125,6 +125,18 @@ pub struct LuaAskErrorTable {
     pub message: String,
 }
 
+/// Request object passed to `smelt.engine.on_prepare_request`.
+#[allow(dead_code)]
+#[derive(Debug, LuaOpts)]
+#[lua(name = "smelt.engine.PrepareRequest")]
+pub struct LuaPrepareRequest {
+    /// Model-visible conversation excluding the system prompt.
+    pub messages: Vec<LuaAskMessage>,
+    /// Conservative token estimate for the request about to be sent,
+    /// including system prompt, messages, and tool definitions.
+    pub estimated_tokens: u32,
+}
+
 /// Spec for `smelt.engine.ask`.
 #[derive(Debug, LuaOpts)]
 #[lua(name = "smelt.engine.AskSpec")]
@@ -202,6 +214,20 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
             move |lua, hook: HookCb| -> LuaResult<smelt_core::lua::reg::LuaReg> {
                 let id = s.hooks.context_limit.register(lua, hook.into_inner(), "")?;
                 Ok(s.hooks.context_limit.reg_for(id))
+            },
+        )?;
+    }
+    {
+        let s = shared.clone();
+        type ReplyCb = LuaCallback<(Option<Vec<LuaAskMessage>>,), ()>;
+        type HookCb = LuaCallback<(LuaPrepareRequest, ReplyCb), ()>;
+        m.fn_(
+            "on_prepare_request",
+            "Register a hook the engine calls immediately before each provider request. `hook` receives `{ messages, estimated_tokens }` and a `reply` callback the hook MUST call exactly once — either with a replacement messages array (engine swaps it in before sampling) or `nil` (engine sends the original request). Returns a `Reg` whose `:remove()` drops the hook.",
+            &["hook"],
+            move |lua, hook: HookCb| -> LuaResult<smelt_core::lua::reg::LuaReg> {
+                let id = s.hooks.prepare_request.register(lua, hook.into_inner(), "")?;
+                Ok(s.hooks.prepare_request.reg_for(id))
             },
         )?;
     }

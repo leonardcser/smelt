@@ -111,9 +111,9 @@ tail would exceed the byte budget, Smelt drops whole older turns from the
 model-visible tail; the full transcript still stays visible.
 
 When `auto_compact` is enabled (via `/settings`), compaction triggers
-automatically when the provider-reported prompt token count crosses
-`compact_threshold` of the configured context window. Press `Esc Esc` to
-cancel.
+automatically before a model request whose current context is estimated to
+cross `compact_threshold` of the configured context window. Press `Esc Esc`
+to cancel.
 
 ## Vim Mode
 

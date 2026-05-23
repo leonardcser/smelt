@@ -36,6 +36,10 @@ engine.is_running = nil
 ---@type fun(hook: fun(arg1: smelt.engine.AskMessage[], arg2: fun(value: smelt.engine.AskMessage[]?))): smelt.Reg
 engine.on_context_limit = nil
 
+--- Register a hook the engine calls immediately before each provider request. `hook` receives `{ messages, estimated_tokens }` and a `reply` callback the hook MUST call exactly once — either with a replacement messages array (engine swaps it in before sampling) or `nil` (engine sends the original request). Returns a `Reg` whose `:remove()` drops the hook.
+---@type fun(hook: fun(arg1: smelt.engine.PrepareRequest, arg2: fun(value: smelt.engine.AskMessage[]?))): smelt.Reg
+engine.on_prepare_request = nil
+
 --- Re-evaluate every Lua surface: clears every command, keymap, statusline source, tool, hook, timer, and cell subscriber, wipes non-stdlib `package.loaded` entries, then re-runs the bootstrap chunks (from disk overlay if present, embedded otherwise, using the same `module_overlay_roots()` lookup as `require`), bundled autoload modules, `init.lua`, global plugins, and `.smelt/init.lua` + `.smelt/plugins/*`. Cancels any in-flight `smelt.spawn` tasks and dismisses an open modal dialog before reloading (the parked coroutine is dropped with the rest). `early.lua` is intentionally skipped — its CLI-flag and `smelt.builtins.disable` effects are startup-only.
 ---@see smelt.builtins.disable
 ---@type fun(): nil

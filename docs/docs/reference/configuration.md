@@ -236,8 +236,8 @@ keys raise at the access site; type mismatches raise on assignment.
 | Key                     | Type      | Default | Description                                                                       |
 | ----------------------- | --------- | ------- | --------------------------------------------------------------------------------- |
 | `vim`                   | `boolean` | `false` | Vi keybindings in the prompt                                                      |
-| `auto_compact`          | `boolean` | `true`  | Auto-summarize when context usage crosses `compact_threshold` (forced on in headless) |
-| `compact_threshold`     | `number`  | `0.80`  | Fraction of the context window at which auto-compact fires (0 < x ≤ 1)            |
+| `auto_compact`          | `boolean` | `true`  | Auto-summarize when request context usage crosses `compact_threshold` (forced on in headless) |
+| `compact_threshold`     | `number`  | `0.80`  | Fraction of the context window at which auto-compact fires before oversized requests (0 < x ≤ 1) |
 | `compact_keep_recent_turns` | `number` | `3` | Maximum user turns kept verbatim after compaction; older turns stay visible but are summarized out of model context |
 | `compact_keep_recent_bytes` | `number` | `40000` | Maximum text bytes kept verbatim after compaction; retained turns are dropped oldest-first until this budget is met |
 | `show_tps`              | `boolean` | `true`  | Tokens/sec in status bar                                                          |

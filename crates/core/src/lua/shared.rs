@@ -177,6 +177,11 @@ pub struct Hooks {
     /// context-window error mid-turn; the first hook to return a
     /// non-nil messages array wins. Always uses `name = ""`.
     pub context_limit: Arc<HookRegistry>,
+    /// `smelt.engine.on_prepare_request(fn)` registry. Engine
+    /// consults these immediately before each model request so plugins
+    /// can replace an oversized conversation before the provider sees it.
+    /// Always uses `name = ""`.
+    pub prepare_request: Arc<HookRegistry>,
     /// `smelt.lifecycle.on(event, fn)` registry. Unlike the other
     /// surfaces this one uses `drain_for` semantics — the host takes
     /// every hook matching the event name and clears them, so each
@@ -305,6 +310,7 @@ impl LuaShared {
         self.hooks.provider_request.clear();
         self.hooks.provider_response.clear();
         self.hooks.context_limit.clear();
+        self.hooks.prepare_request.clear();
         self.hooks.lifecycle.clear();
         if let Ok(mut m) = self.watchers.lock() {
             m.clear();

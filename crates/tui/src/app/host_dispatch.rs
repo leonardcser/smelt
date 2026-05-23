@@ -17,6 +17,9 @@ use smelt_core::lua::{HookRegistry, LuaShared};
 use std::sync::{Arc, Mutex};
 use tokio::sync::oneshot;
 
+type MessageReply = oneshot::Sender<Option<Vec<Message>>>;
+type MessageReplySlot = Arc<Mutex<Option<MessageReply>>>;
+
 impl TuiApp {
     /// Pull every pending `HostCall` and dispatch it. Non-blocking;
     /// returns once the channel reports `Empty`.
@@ -48,6 +51,13 @@ impl TuiApp {
             HostCall::RecoverFromContextLimit { messages, reply } => {
                 self.dispatch_recover_from_context_limit(messages, reply);
             }
+            HostCall::PrepareRequest {
+                messages,
+                estimated_tokens,
+                reply,
+            } => {
+                self.dispatch_prepare_request(messages, estimated_tokens, reply);
+            }
             // Phase B targets. The engine doesn't emit these on the host
             // channel yet — they still travel as `EngineEvent::*Request`
             // pairs handled in `engine_events.rs`. Once migrated, the
@@ -66,18 +76,54 @@ impl TuiApp {
     /// and retries) or `nil` (engine aborts the turn). If the hook
     /// vanishes without calling `reply`, the wrapping closure is GC'd,
     /// the Sender drops, and the engine's `.await` resolves to `None`.
-    fn dispatch_recover_from_context_limit(
-        &self,
+    fn dispatch_recover_from_context_limit(&self, messages: Vec<Message>, reply: MessageReply) {
+        self.call_message_reply_hook(
+            "on_context_limit",
+            |s| &s.hooks.context_limit,
+            messages,
+            reply,
+            |_, func, messages_table, reply_fn| func.call::<()>((messages_table, reply_fn)),
+        );
+    }
+
+    /// Hand the first registered `smelt.engine.on_prepare_request`
+    /// hook the exact non-system message slice the engine is about to
+    /// send, plus a conservative token estimate for that slice. The
+    /// hook can return a replacement via `reply(messages)`;
+    /// `nil` means "send the original request".
+    fn dispatch_prepare_request(
+        &mut self,
         messages: Vec<Message>,
-        reply: oneshot::Sender<Option<Vec<Message>>>,
+        estimated_tokens: u32,
+        reply: MessageReply,
+    ) {
+        while let Ok(ev) = self.core.engine.try_recv() {
+            self.dispatch_engine_event(ev);
+        }
+        self.call_message_reply_hook(
+            "on_prepare_request",
+            |s| &s.hooks.prepare_request,
+            messages,
+            reply,
+            |lua, func, messages_table, reply_fn| {
+                let request = lua.create_table()?;
+                request.set("messages", messages_table)?;
+                request.set("estimated_tokens", estimated_tokens)?;
+                func.call::<()>((request, reply_fn))
+            },
+        );
+    }
+
+    fn call_message_reply_hook(
+        &self,
+        label: &'static str,
+        registry: impl Fn(&LuaShared) -> &Arc<HookRegistry>,
+        messages: Vec<Message>,
+        reply: MessageReply,
+        call: impl FnOnce(&mlua::Lua, mlua::Function, mlua::Value, mlua::Function) -> mlua::Result<()>,
     ) {
         let lua = self.lua.lua();
-        let funcs = self
-            .lua
-            .core_shared()
-            .hooks
-            .context_limit
-            .snapshot_for(lua, "");
+        let funcs = registry(self.lua.core_shared()).snapshot_for(lua, "");
         let Some(func) = funcs.into_iter().next() else {
             let _ = reply.send(None);
             return;
@@ -86,13 +132,12 @@ impl TuiApp {
             Ok(v) => v,
             Err(e) => {
                 self.lua
-                    .record_error(format!("on_context_limit: serialize messages: {e}"));
+                    .record_error(format!("{label}: serialize messages: {e}"));
                 let _ = reply.send(None);
                 return;
             }
         };
-        type ReplySlot = Arc<Mutex<Option<oneshot::Sender<Option<Vec<Message>>>>>>;
-        let reply_slot: ReplySlot = Arc::new(Mutex::new(Some(reply)));
+        let reply_slot: MessageReplySlot = Arc::new(Mutex::new(Some(reply)));
         let reply_for_closure = Arc::clone(&reply_slot);
         let reply_fn = match lua.create_function(move |inner_lua, value: mlua::Value| {
             let Some(tx) = reply_for_closure.lock().ok().and_then(|mut g| g.take()) else {
@@ -109,16 +154,15 @@ impl TuiApp {
         }) {
             Ok(f) => f,
             Err(e) => {
-                self.lua
-                    .record_error(format!("on_context_limit: build reply: {e}"));
+                self.lua.record_error(format!("{label}: build reply: {e}"));
                 if let Some(tx) = reply_slot.lock().ok().and_then(|mut g| g.take()) {
                     let _ = tx.send(None);
                 }
                 return;
             }
         };
-        if let Err(e) = func.call::<()>((messages_table, reply_fn)) {
-            self.lua.record_error(format!("on_context_limit: {e}"));
+        if let Err(e) = call(lua, func, messages_table, reply_fn) {
+            self.lua.record_error(format!("{label}: {e}"));
             if let Some(tx) = reply_slot.lock().ok().and_then(|mut g| g.take()) {
                 let _ = tx.send(None);
             }

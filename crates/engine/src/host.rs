@@ -78,6 +78,18 @@ pub enum HostCall {
         messages: Vec<Message>,
         reply: oneshot::Sender<Option<Vec<Message>>>,
     },
+
+    /// Engine is about to send a model request. The host may replace
+    /// the conversation before the request is
+    /// sent. `messages` excludes the system prompt; `estimated_tokens`
+    /// is a conservative estimate for the exact message slice the
+    /// engine is about to sample with, used to catch drift since the
+    /// provider's last reported prompt-token count.
+    PrepareRequest {
+        messages: Vec<Message>,
+        estimated_tokens: u32,
+        reply: oneshot::Sender<Option<Vec<Message>>>,
+    },
 }
 
 /// Outcome of an `AskPermission` round-trip.

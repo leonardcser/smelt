@@ -9,10 +9,10 @@ Current session metadata, turn list, message snapshots, rewind, and persisted se
 ## `smelt.session.checkpoint`
 
 ```lua
-fun(spec: table): nil
+fun(spec: table): table?
 ```
 
-Install a model-context checkpoint without deleting transcript history. Takes `{ kind?, summary, keep_recent_turns?, keep_recent_bytes?, tokens_before? }`; future model requests use the summary plus a bounded set of retained recent turns.
+Install a model-context checkpoint without deleting transcript history. Takes `{ kind?, summary, keep_recent_turns?, keep_recent_bytes?, tokens_before? }`; future model requests use the summary plus a bounded set of retained recent turns. Returns the model-visible messages after the checkpoint is installed, or `nil` when there was nothing old enough to compact.
 
 ## `smelt.session.context_tokens`
 

@@ -457,7 +457,7 @@ Read or write via `smelt.settings.<key>` from `init.lua`. Booleans also toggle a
 | Key | Type | Default | Description |
 | --- | --- | --- | --- |
 | `vim` | `bool` | `false` | Vi keybindings in the prompt. |
-| `auto_compact` | `bool` | `true` | Auto-summarize when context usage crosses `compact_threshold` (forced on in headless). |
+| `auto_compact` | `bool` | `true` | Auto-summarize when request context usage crosses `compact_threshold` (forced on in headless). |
 | `show_tps` | `bool` | `true` | Tokens/sec in status bar. |
 | `show_tokens` | `bool` | `true` | Context token count in status bar. |
 | `show_cost` | `bool` | `true` | Session cost in status bar. |
@@ -467,7 +467,7 @@ Read or write via `smelt.settings.<key>` from `init.lua`. Booleans also toggle a
 | `restrict_to_workspace` | `bool` | `true` | Downgrade `Allow` to `Ask` for paths outside the workspace. |
 | `redact_secrets` | `bool` | `true` | Scrub detected secrets from user input and tool results before they reach the LLM. |
 | `auto_reload` | `bool` | `false` | Watch on-disk config inputs (init.lua, plugins/, commands/,  skills/, AGENTS.md, `--system-prompt` file) and dispatch  `/reload` when any of them changes. |
-| `compact_threshold` | `number` | `0.8` | Fraction of the configured context window (0, 1] at which the  bundled compact plugin auto-triggers between turns. |
+| `compact_threshold` | `number` | `0.8` | Fraction of the configured context window (0, 1] at which the  bundled compact plugin auto-triggers before oversized requests. |
 | `compact_keep_recent_turns` | `number` | `3` | Number of most-recent user turns kept verbatim after a compaction  checkpoint. Older turns remain visible in the transcript but are  summarized out of the next model request. |
 | `compact_keep_recent_bytes` | `number` | `40000` | Maximum text bytes retained verbatim after a compaction checkpoint.  The compact plugin keeps whole recent turns up to both this budget  and `compact_keep_recent_turns`. |
 | `cache_ttl_long` | `bool` | `false` | Anthropic prompt cache TTL. `false` uses the 5-minute ephemeral  TTL; `true` opts into the 1-hour TTL. Has no effect on  non-Anthropic providers. |
@@ -1086,6 +1086,8 @@ LLM engine control — cancel, ask, submit commands, and request tool approval.
   Return `true` if an agent turn is currently in flight (a request is being streamed or a tool is executing).
 - `smelt.engine.on_context_limit` :: `fun(hook: fun(arg1: smelt.engine.AskMessage[], arg2: fun(value: smelt.engine.AskMessage[]?))): smelt.Reg`
   Register a recovery hook the engine calls when a provider returns a context-window error mid-turn.
+- `smelt.engine.on_prepare_request` :: `fun(hook: fun(arg1: smelt.engine.PrepareRequest, arg2: fun(value: smelt.engine.AskMessage[]?))): smelt.Reg`
+  Register a hook the engine calls immediately before each provider request.
 - `smelt.engine.reload` :: `fun(): nil`
   Re-evaluate every Lua surface: clears every command, keymap, statusline source, tool, hook, timer, and cell subscriber, wipes non-stdlib `package.loaded` entries, then re-runs the bootstrap chunks (from disk overlay if present, embedded otherwise, using the same `module_overlay_roots()` lookup as `require`), bundled autoload modules, `init.lua`, global plugins, and `.smelt/init.lua` + `.smelt/plugins/*`.
 - `smelt.engine.submit_command` :: `fun(name: string, body: string, overrides: smelt.engine.CommandOverrides?): nil`
@@ -1269,7 +1271,7 @@ Paint text / markdown / syntax-highlighted code / split diffs into a `Buf`.
 
 Current session metadata, turn list, message snapshots, rewind, and persisted session management.
 
-- `smelt.session.checkpoint` :: `fun(spec: table): nil`
+- `smelt.session.checkpoint` :: `fun(spec: table): table?`
   Install a model-context checkpoint without deleting transcript history.
 - `smelt.session.context_tokens` :: `fun(): integer?`
   Most recent prompt-token count reported by the provider, or `nil` if no turn has completed yet.

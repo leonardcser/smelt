@@ -207,9 +207,9 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
     )?;
     m.fn_(
         "checkpoint",
-        "Install a model-context checkpoint without deleting transcript history. Takes `{ kind?, summary, keep_recent_turns?, keep_recent_bytes?, tokens_before? }`; future model requests use the summary plus a bounded set of retained recent turns.",
+        "Install a model-context checkpoint without deleting transcript history. Takes `{ kind?, summary, keep_recent_turns?, keep_recent_bytes?, tokens_before? }`; future model requests use the summary plus a bounded set of retained recent turns. Returns the model-visible messages after the checkpoint is installed, or `nil` when there was nothing old enough to compact.",
         &["spec"],
-        |_, spec: mlua::Table| -> LuaResult<()> {
+        |lua, spec: mlua::Table| -> LuaResult<Option<mlua::Table>> {
             let kind = spec
                 .get::<Option<String>>("kind")?
                 .unwrap_or_else(|| "compaction".to_string());
@@ -229,7 +229,7 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
                     .unwrap_or(40_000)
                 });
             let tokens_before = spec.get::<Option<u32>>("tokens_before")?;
-            crate::lua::with_app(|app| {
+            let installed = crate::lua::with_app(|app| {
                 app.install_context_checkpoint(
                     kind,
                     summary,
@@ -238,7 +238,13 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
                     tokens_before,
                 )
             });
-            Ok(())
+            if !installed {
+                return Ok(None);
+            }
+            let messages =
+                crate::lua::try_with_app(|app| protocol::history_to_messages(&app.model_history()))
+                    .unwrap_or_default();
+            Ok(Some(messages_to_lua(lua, &messages)?))
         },
     )?;
     // smelt.session.messages() reads (optional opts table filters);

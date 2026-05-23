@@ -419,7 +419,7 @@ impl TuiApp {
         keep_recent_turns: usize,
         keep_recent_bytes: usize,
         tokens_before: Option<u32>,
-    ) {
+    ) -> bool {
         let installed = self.core.session.install_context_checkpoint(
             kind,
             summary,
@@ -429,11 +429,12 @@ impl TuiApp {
         );
         if !installed {
             self.notify("nothing old enough to compact".to_string());
-            return;
+            return false;
         }
         self.restore_screen();
         self.save_session();
         self.transcript_win_mut().scroll_to_bottom();
+        true
     }
 
     pub(crate) fn model_history(&self) -> Vec<HistoryItem> {

@@ -358,6 +358,51 @@ local function run_compact(opts)
   end)
 end
 
+local function auto_compact_due(tokens)
+  if not smelt.settings.auto_compact then return false end
+  if consecutive_failures >= MAX_CONSECUTIVE_FAILURES then return false end
+  local window = smelt.session.context_window()
+  if not window then return false end
+  local threshold = smelt.settings.compact_threshold
+  if not (threshold > 0 and threshold <= 1) then threshold = 0.80 end
+  if not tokens then return false end
+  return tokens >= window * threshold
+end
+
+local function compact_live_session(before_tokens, phase, done)
+  local history = smelt.session.messages()
+  if not history or #history == 0 then
+    done(nil)
+    return
+  end
+  summarize(history, nil, function(summary)
+    if not summary then
+      consecutive_failures = consecutive_failures + 1
+      done(nil)
+      return
+    end
+    consecutive_failures = 0
+    local keep_recent_turns = smelt.settings.compact_keep_recent_turns or 3
+    local keep_recent_bytes = smelt.settings.compact_keep_recent_bytes or 40000
+    local model_messages = smelt.session.checkpoint({
+      kind = "compaction",
+      summary = summary,
+      keep_recent_turns = keep_recent_turns,
+      keep_recent_bytes = keep_recent_bytes,
+      tokens_before = before_tokens,
+    })
+    if not model_messages then
+      done(nil)
+      return
+    end
+    emit_event(phase, before_tokens, nil, {
+      keep_recent_turns = keep_recent_turns,
+      keep_recent_bytes = keep_recent_bytes,
+    })
+    done(model_messages)
+  end)
+end
+
 -- ── /compact command ──────────────────────────────────────────────────
 
 smelt.cmd.register("compact", function(arg)
@@ -365,29 +410,22 @@ smelt.cmd.register("compact", function(arg)
   run_compact({ instructions = arg, inject_recent_user_messages = false })
 end, { desc = "compact conversation history", while_busy = false })
 
--- ── post-turn auto-compaction ─────────────────────────────────────────
+-- ── pre-request auto-compaction ───────────────────────────────────────
 --
--- Subscribes to `turn_complete`. Fires when settings.auto_compact is on AND
--- the live prompt token count crosses `compact_threshold` of the configured
--- context window. Uses BeforeLastUserMessage so the user's most recent asks
--- carry forward into the compacted history. A circuit breaker disables
--- auto-firing after `MAX_CONSECUTIVE_FAILURES` consecutive failed attempts
--- so a broken summariser model can't drain the user's tokens in a loop.
+-- Engine invokes this immediately before sending a model request. This
+-- is the single normal auto-compact path: it uses the request the engine
+-- is actually about to send, so newly appended tool results can't drift
+-- past the last provider-reported token count.
 
-smelt.cell("turn_complete"):subscribe(function()
-  if not smelt.settings.auto_compact then return end
-  if consecutive_failures >= MAX_CONSECUTIVE_FAILURES then return end
-  local window = smelt.session.context_window()
-  if not window then return end
-  local threshold = smelt.settings.compact_threshold
-  if not (threshold > 0 and threshold <= 1) then threshold = 0.80 end
-  -- Use the provider's actual prompt-token count when available.
-  -- If no turn has completed yet (context_tokens is nil) we skip
-  -- auto-compact rather than guess.
-  local tokens = smelt.session.context_tokens()
-  if not tokens then return end
-  if tokens < window * threshold then return end
-  run_compact({ inject_recent_user_messages = true })
+smelt.engine.on_prepare_request(function(request, reply)
+  local estimated_tokens = request and request.estimated_tokens
+  if not auto_compact_due(estimated_tokens) then
+    reply(nil)
+    return
+  end
+  compact_live_session(estimated_tokens, "summarize-pre-request", function(messages)
+    reply(messages)
+  end)
 end)
 
 -- ── mid-turn recovery hook ────────────────────────────────────────────

@@ -253,6 +253,15 @@ Front-matter override block accepted by `smelt.engine.submit_command`. Mirrors w
 | `tools` | [smelt.engine.RuleOverride](types.md#smeltengineruleoverride) |  | Per-tool `allow`/`ask`/`deny` patterns for the duration of the turn. |
 | `[string]` | [smelt.engine.RuleOverride](types.md#smeltengineruleoverride) |  | Per-subcommand pattern buckets keyed by tool name. |
 
+### `smelt.engine.PrepareRequest`
+
+Request object passed to `smelt.engine.on_prepare_request`.
+
+| Field | Type | Required | Description |
+| --- | --- | --- | --- |
+| `messages` | [smelt.engine.AskMessage[]](types.md#smeltengineaskmessage) | yes | Model-visible conversation excluding the system prompt. |
+| `estimated_tokens` | `integer` | yes | Conservative token estimate for the request about to be sent, including system prompt, messages, and tool definitions. |
+
 ### `smelt.engine.RuleOverride`
 
 Subcommand rule override accepted inside `CommandOverrides`. Mirrors the front-matter `{ allow?, ask?, deny? }` shape.

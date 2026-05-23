@@ -4,7 +4,7 @@
 
 Reference for every namespace exposed under the global `smelt` table. Signatures are derived from the Rust closure's argument tuple and return type, so the LuaCATS-style annotation always matches what mlua actually marshals.
 
-**Coverage:** 65 namespace(s), 281 function(s), 43 class(es), 9 alias(es).
+**Coverage:** 65 namespace(s), 282 function(s), 44 class(es), 9 alias(es).
 
 ## IDE completion
 
@@ -59,7 +59,7 @@ Requires a terminal UI; calling these from headless mode raises.
 - [`smelt`](index_smelt.md) — 6 function(s)
 - [`smelt.buf`](buf.md) — 1 function(s)
 - [`smelt.confirm`](confirm.md) — 1 function(s)
-- [`smelt.engine`](engine.md) — 8 function(s)
+- [`smelt.engine`](engine.md) — 9 function(s)
 - [`smelt.history`](history.md) — 2 function(s)
 - [`smelt.keymap`](keymap.md) — 4 function(s)
 - [`smelt.log`](log.md) — 3 function(s)

@@ -520,6 +520,22 @@ fn warn_if_replacement_has_orphans(replacement: &[Message], site: &str) {
     }
 }
 
+fn estimate_prompt_tokens(
+    system_prompt: &str,
+    messages: &[Message],
+    tool_defs: &[ToolDefinition],
+) -> u32 {
+    let message_bytes = serde_json::to_vec(messages)
+        .map(|v| v.len())
+        .unwrap_or_default();
+    let tool_bytes = serde_json::to_vec(tool_defs)
+        .map(|v| v.len())
+        .unwrap_or_default();
+    let bytes = system_prompt.len() + message_bytes + tool_bytes;
+    let tokens = bytes.div_ceil(4);
+    tokens.min(u32::MAX as usize) as u32
+}
+
 struct PendingToolCall<'a> {
     tc: &'a protocol::ToolCall,
     args: HashMap<String, Value>,
@@ -568,7 +584,7 @@ impl<'a> Turn<'a> {
     /// Fire a `HostCall` and await its `oneshot::Sender<Reply>`. Returns
     /// `None` if the host dropped the reply (channel closed) — callers
     /// treat that as "no mutation, proceed with the original value".
-    async fn host_call<Reply, F>(&self, build: F) -> Option<Reply>
+    async fn host_call<Reply, F>(&mut self, build: F) -> Option<Reply>
     where
         F: FnOnce(tokio::sync::oneshot::Sender<Reply>) -> crate::host::HostCall,
     {
@@ -576,13 +592,25 @@ impl<'a> Turn<'a> {
         if self.host_tx.send(build(tx)).is_err() {
             return None;
         }
-        rx.await.ok()
+        tokio::pin!(rx);
+        loop {
+            tokio::select! {
+                res = &mut rx => return res.ok(),
+                Some(cmd) = self.cmd_rx.recv() => {
+                    self.handle_turn_cmd(cmd);
+                    if self.cancel.is_cancelled() {
+                        return None;
+                    }
+                }
+                else => return None,
+            }
+        }
     }
 
     /// Run `smelt.provider.middleware{on_response=...}` hooks against
     /// the assembled assistant `Message`. Returns the replacement when
     /// any hook produced one; otherwise the original.
-    async fn apply_response_hooks(&self, message: Message) -> Message {
+    async fn apply_response_hooks(&mut self, message: Message) -> Message {
         match self
             .host_call(|reply| crate::host::HostCall::ProviderResponse {
                 message: message.clone(),
@@ -736,6 +764,47 @@ impl<'a> Turn<'a> {
             std::sync::Arc::clone(&self.config.clock),
         )
         .with_model_config(self.config.api.model_config.clone());
+    }
+
+    async fn prepare_request_with_host(&mut self, tool_defs: &[ToolDefinition]) -> bool {
+        let history_without_system: Vec<HistoryItem> =
+            self.history.iter().skip(1).cloned().collect();
+        let request_view = protocol::history_to_messages(&history_without_system);
+        let estimated_tokens =
+            estimate_prompt_tokens(&self.system_prompt, &request_view, tool_defs);
+        let replacement = self
+            .host_call(|reply| crate::host::HostCall::PrepareRequest {
+                messages: request_view,
+                estimated_tokens,
+                reply,
+            })
+            .await
+            .flatten();
+        let Some(replacement) = replacement else {
+            return false;
+        };
+        if replacement.is_empty() {
+            log::entry(
+                log::Level::Warn,
+                "prepare_request_empty_replacement",
+                &serde_json::json!({}),
+            );
+            return false;
+        }
+        warn_if_replacement_has_orphans(&replacement, "prepare_request");
+        let new = protocol::history_from_messages(replacement);
+        log::entry(
+            log::Level::Info,
+            "prepare_request_replaced",
+            &serde_json::json!({
+                "estimated_tokens_before": estimated_tokens,
+                "new_message_count": new.len() + 1,
+            }),
+        );
+        self.history.truncate(1);
+        self.history.extend(new);
+        self.emit_messages_snapshot();
+        true
     }
 
     /// Bundle of refs that out-of-band command dispatch needs. Built on
@@ -901,6 +970,10 @@ impl<'a> Turn<'a> {
                 warn_if_replacement_has_orphans(&replacement, "provider_request");
                 self.history = protocol::history_from_messages(replacement);
                 self.ensure_system_prefix();
+            }
+
+            if self.prepare_request_with_host(&tool_defs).await {
+                continue;
             }
 
             let (result, partial_text, partial_reasoning) = self.call_llm(&tool_defs).await;
