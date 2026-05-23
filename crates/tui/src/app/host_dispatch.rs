@@ -100,8 +100,10 @@ impl TuiApp {
         while let Ok(ev) = self.core.engine.try_recv() {
             self.dispatch_engine_event(ev);
         }
-        let estimated_context_tokens = estimate_prepare_context_tokens(
+        let context_estimate = PrepareContextEstimate::from_request(
             self.core.session.context_tokens,
+            self.core.session.token_snapshots.last().copied(),
+            &self.core.session.history,
             &messages,
             estimated_tokens,
         );
@@ -114,7 +116,11 @@ impl TuiApp {
                 let request = lua.create_table()?;
                 request.set("messages", messages_table)?;
                 request.set("estimated_tokens", estimated_tokens)?;
-                request.set("estimated_context_tokens", estimated_context_tokens)?;
+                request.set(
+                    "estimated_context_tokens",
+                    context_estimate.total_context_tokens,
+                )?;
+                request.set("context_estimate", context_estimate.into_lua_table(lua)?)?;
                 func.call::<()>((request, reply_fn))
             },
         );
@@ -217,63 +223,384 @@ impl TuiApp {
     }
 }
 
-fn estimate_prepare_context_tokens(
-    current_context_tokens: Option<u32>,
-    messages: &[Message],
-    full_request_estimate: u32,
-) -> u32 {
-    let Some(base) = current_context_tokens else {
-        return full_request_estimate;
-    };
-    let Some(last_assistant_idx) = messages.iter().rposition(|m| m.role == Role::Assistant) else {
-        return full_request_estimate;
-    };
-    let added = &messages[last_assistant_idx.saturating_add(1)..];
-    if added.is_empty() {
-        return base;
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct TokenSnapshot {
+    history_len: usize,
+    context_tokens: u32,
+}
+
+impl From<(usize, u32)> for TokenSnapshot {
+    fn from((history_len, context_tokens): (usize, u32)) -> Self {
+        Self {
+            history_len,
+            context_tokens,
+        }
     }
-    let added_bytes = serde_json::to_vec(added)
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PrepareContextEstimateSource {
+    FullRequestEstimate,
+    ProviderSnapshot,
+    ProviderSnapshotPlusHistoryDelta,
+    ProviderBaselineAfterLastAssistant,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct PrepareContextEstimate {
+    total_context_tokens: u32,
+    provider_context_tokens: Option<u32>,
+    estimated_delta_tokens: u32,
+    latest_snapshot_history_len: Option<usize>,
+    current_history_len: usize,
+    source: PrepareContextEstimateSource,
+}
+
+impl PrepareContextEstimate {
+    fn from_request(
+        current_context_tokens: Option<u32>,
+        latest_token_snapshot: Option<(usize, u32)>,
+        current_history: &[protocol::HistoryItem],
+        request_messages: &[Message],
+        full_request_estimate: u32,
+    ) -> Self {
+        let Some(base) = current_context_tokens else {
+            return Self::full_request(full_request_estimate, current_history.len(), None);
+        };
+        let latest_snapshot = latest_token_snapshot.map(TokenSnapshot::from);
+
+        if let Some(snapshot) = latest_snapshot {
+            if snapshot.context_tokens == base
+                && snapshot_has_valid_history_anchor(snapshot, current_history)
+            {
+                return Self::from_matching_snapshot(base, snapshot, current_history);
+            }
+        }
+
+        Self::from_unsnapshotted_baseline(
+            base,
+            latest_snapshot,
+            current_history.len(),
+            request_messages,
+            full_request_estimate,
+        )
+    }
+
+    fn full_request(
+        full_request_estimate: u32,
+        current_history_len: usize,
+        latest_snapshot: Option<TokenSnapshot>,
+    ) -> Self {
+        Self {
+            total_context_tokens: full_request_estimate,
+            provider_context_tokens: None,
+            estimated_delta_tokens: full_request_estimate,
+            latest_snapshot_history_len: latest_snapshot.map(|snapshot| snapshot.history_len),
+            current_history_len,
+            source: PrepareContextEstimateSource::FullRequestEstimate,
+        }
+    }
+
+    fn from_matching_snapshot(
+        base: u32,
+        snapshot: TokenSnapshot,
+        current_history: &[protocol::HistoryItem],
+    ) -> Self {
+        if snapshot.history_len >= current_history.len() {
+            return Self {
+                total_context_tokens: base,
+                provider_context_tokens: Some(base),
+                estimated_delta_tokens: 0,
+                latest_snapshot_history_len: Some(snapshot.history_len),
+                current_history_len: current_history.len(),
+                source: PrepareContextEstimateSource::ProviderSnapshot,
+            };
+        }
+
+        let added_messages =
+            protocol::history_to_messages(&current_history[snapshot.history_len..]);
+        let estimated_delta_tokens = estimate_message_tokens(&added_messages);
+        Self {
+            total_context_tokens: base.saturating_add(estimated_delta_tokens),
+            provider_context_tokens: Some(base),
+            estimated_delta_tokens,
+            latest_snapshot_history_len: Some(snapshot.history_len),
+            current_history_len: current_history.len(),
+            source: PrepareContextEstimateSource::ProviderSnapshotPlusHistoryDelta,
+        }
+    }
+
+    fn from_unsnapshotted_baseline(
+        base: u32,
+        latest_snapshot: Option<TokenSnapshot>,
+        current_history_len: usize,
+        request_messages: &[Message],
+        full_request_estimate: u32,
+    ) -> Self {
+        let Some(last_assistant_idx) = request_messages
+            .iter()
+            .rposition(|m| m.role == Role::Assistant)
+        else {
+            return Self::full_request(full_request_estimate, current_history_len, latest_snapshot);
+        };
+        let added_messages = &request_messages[last_assistant_idx.saturating_add(1)..];
+        let estimated_delta_tokens = estimate_message_tokens(added_messages);
+        Self {
+            total_context_tokens: base.saturating_add(estimated_delta_tokens),
+            provider_context_tokens: Some(base),
+            estimated_delta_tokens,
+            latest_snapshot_history_len: latest_snapshot.map(|snapshot| snapshot.history_len),
+            current_history_len,
+            source: PrepareContextEstimateSource::ProviderBaselineAfterLastAssistant,
+        }
+    }
+
+    fn into_lua_table(self, lua: &mlua::Lua) -> mlua::Result<mlua::Table> {
+        let table = lua.create_table()?;
+        table.set("source", self.source.as_str())?;
+        table.set("total_context_tokens", self.total_context_tokens)?;
+        table.set("provider_context_tokens", self.provider_context_tokens)?;
+        table.set("estimated_delta_tokens", self.estimated_delta_tokens)?;
+        table.set(
+            "latest_snapshot_history_len",
+            self.latest_snapshot_history_len,
+        )?;
+        table.set("current_history_len", self.current_history_len)?;
+        Ok(table)
+    }
+}
+
+impl PrepareContextEstimateSource {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::FullRequestEstimate => "full_request_estimate",
+            Self::ProviderSnapshot => "provider_snapshot",
+            Self::ProviderSnapshotPlusHistoryDelta => "provider_snapshot_plus_history_delta",
+            Self::ProviderBaselineAfterLastAssistant => "provider_baseline_after_last_assistant",
+        }
+    }
+}
+
+fn estimate_message_tokens(messages: &[Message]) -> u32 {
+    let bytes = serde_json::to_vec(messages)
         .map(|v| v.len())
         .unwrap_or_default();
-    let added_tokens = added_bytes.div_ceil(4).min(u32::MAX as usize) as u32;
-    base.saturating_add(added_tokens)
+    bytes.div_ceil(4).min(u32::MAX as usize) as u32
+}
+
+fn snapshot_has_valid_history_anchor(
+    snapshot: TokenSnapshot,
+    current_history: &[protocol::HistoryItem],
+) -> bool {
+    let Some(covered_idx) = snapshot.history_len.checked_sub(1) else {
+        return false;
+    };
+    let Some(item) = current_history.get(covered_idx) else {
+        return false;
+    };
+    matches!(
+        item,
+        protocol::HistoryItem::Assistant(turn) if turn.invocations.is_empty()
+    )
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use protocol::Content;
+    use protocol::{AssistantTurn, Content, HistoryItem, ToolInvocation, ToolOutcome};
 
     #[test]
     fn prepare_context_estimate_uses_full_estimate_without_provider_baseline() {
-        let messages = vec![Message::user(Content::text("hello"))];
-        assert_eq!(estimate_prepare_context_tokens(None, &messages, 123), 123);
-    }
+        let estimate = PrepareContextEstimate::from_request(None, None, &[], &[], 123);
 
-    #[test]
-    fn prepare_context_estimate_adds_only_messages_after_last_assistant() {
-        let messages = vec![
-            Message::user(Content::text("old")),
-            Message::assistant(Some(Content::text("reply")), None, None),
-            Message::user(Content::text("new prompt")),
-        ];
-
-        let estimated = estimate_prepare_context_tokens(Some(100), &messages, 10_000);
-
-        assert!(estimated > 100);
-        assert!(estimated < 10_000);
-    }
-
-    #[test]
-    fn prepare_context_estimate_stays_at_baseline_without_new_messages() {
-        let messages = vec![
-            Message::user(Content::text("old")),
-            Message::assistant(Some(Content::text("reply")), None, None),
-        ];
-
+        assert_eq!(estimate.total_context_tokens, 123);
         assert_eq!(
-            estimate_prepare_context_tokens(Some(100), &messages, 10_000),
-            100
+            estimate.source,
+            PrepareContextEstimateSource::FullRequestEstimate
+        );
+    }
+
+    #[test]
+    fn prepare_context_estimate_adds_only_history_after_latest_token_snapshot() {
+        let history = vec![
+            HistoryItem::user(Content::text("old")),
+            HistoryItem::assistant(AssistantTurn::terminal(
+                Some(Content::text("reply")),
+                None,
+                Vec::new(),
+            )),
+            HistoryItem::user(Content::text("new prompt")),
+        ];
+        let request_messages = protocol::history_to_messages(&history);
+        let estimate = PrepareContextEstimate::from_request(
+            Some(100),
+            Some((2, 100)),
+            &history,
+            &request_messages,
+            10_000,
+        );
+
+        assert!(estimate.total_context_tokens > 100);
+        assert!(estimate.total_context_tokens < 10_000);
+        assert_eq!(estimate.provider_context_tokens, Some(100));
+        assert!(estimate.estimated_delta_tokens > 0);
+        assert_eq!(
+            estimate.source,
+            PrepareContextEstimateSource::ProviderSnapshotPlusHistoryDelta
+        );
+    }
+
+    #[test]
+    fn prepare_context_estimate_stays_at_baseline_when_snapshot_covers_history() {
+        let history = vec![
+            HistoryItem::user(Content::text("old")),
+            HistoryItem::assistant(AssistantTurn::terminal(
+                Some(Content::text("reply")),
+                None,
+                Vec::new(),
+            )),
+        ];
+        let request_messages = protocol::history_to_messages(&history);
+        let estimate = PrepareContextEstimate::from_request(
+            Some(100),
+            Some((2, 100)),
+            &history,
+            &request_messages,
+            10_000,
+        );
+
+        assert_eq!(estimate.total_context_tokens, 100);
+        assert_eq!(estimate.estimated_delta_tokens, 0);
+        assert_eq!(
+            estimate.source,
+            PrepareContextEstimateSource::ProviderSnapshot
+        );
+    }
+
+    #[test]
+    fn prepare_context_estimate_does_not_double_count_snapshotted_tool_output() {
+        let history = vec![
+            HistoryItem::user(Content::text("run tests")),
+            HistoryItem::assistant(AssistantTurn::with_invocations(
+                None,
+                None,
+                Vec::new(),
+                vec![ToolInvocation {
+                    call_id: "call-1".into(),
+                    name: "bash".into(),
+                    arguments: r#"{"cmd":"cargo nextest run"}"#.into(),
+                    result: ToolOutcome {
+                        content: "test output\n".repeat(30_000),
+                        is_error: false,
+                        metadata: None,
+                    },
+                    elapsed_ms: None,
+                }],
+            )),
+            HistoryItem::assistant(AssistantTurn::terminal(
+                Some(Content::text("done")),
+                None,
+                Vec::new(),
+            )),
+        ];
+        let messages = protocol::history_to_messages(&history);
+
+        assert!(matches!(
+            messages
+                .get(messages.len().saturating_sub(2))
+                .map(|m| m.role),
+            Some(protocol::Role::Tool)
+        ));
+        let estimate = PrepareContextEstimate::from_request(
+            Some(171_359),
+            Some((history.len(), 171_359)),
+            &history,
+            &messages,
+            250_000,
+        );
+
+        assert_eq!(estimate.total_context_tokens, 171_359);
+        assert_eq!(estimate.estimated_delta_tokens, 0);
+        assert_eq!(
+            estimate.source,
+            PrepareContextEstimateSource::ProviderSnapshot
+        );
+    }
+
+    #[test]
+    fn prepare_context_estimate_rejects_snapshot_ending_on_tool_turn() {
+        let history = vec![
+            HistoryItem::user(Content::text("run tests")),
+            HistoryItem::assistant(AssistantTurn::with_invocations(
+                None,
+                None,
+                Vec::new(),
+                vec![ToolInvocation {
+                    call_id: "call-1".into(),
+                    name: "bash".into(),
+                    arguments: r#"{"cmd":"cargo nextest run"}"#.into(),
+                    result: ToolOutcome {
+                        content: "test output\n".repeat(30_000),
+                        is_error: false,
+                        metadata: None,
+                    },
+                    elapsed_ms: None,
+                }],
+            )),
+        ];
+        let messages = protocol::history_to_messages(&history);
+        let estimate = PrepareContextEstimate::from_request(
+            Some(171_359),
+            Some((history.len(), 171_359)),
+            &history,
+            &messages,
+            250_000,
+        );
+
+        assert!(estimate.total_context_tokens > 171_359);
+        assert_eq!(
+            estimate.source,
+            PrepareContextEstimateSource::ProviderBaselineAfterLastAssistant
+        );
+    }
+
+    #[test]
+    fn prepare_context_estimate_uses_last_assistant_for_unsnapshotted_provider_baseline() {
+        let history = vec![
+            HistoryItem::user(Content::text("run command")),
+            HistoryItem::assistant(AssistantTurn::with_invocations(
+                None,
+                None,
+                Vec::new(),
+                vec![ToolInvocation {
+                    call_id: "call-1".into(),
+                    name: "bash".into(),
+                    arguments: r#"{"cmd":"printf hello"}"#.into(),
+                    result: ToolOutcome {
+                        content: "hello\n".repeat(100),
+                        is_error: false,
+                        metadata: None,
+                    },
+                    elapsed_ms: None,
+                }],
+            )),
+        ];
+        let messages = protocol::history_to_messages(&history);
+        let estimate = PrepareContextEstimate::from_request(
+            Some(1_000),
+            Some((1, 750)),
+            &history,
+            &messages,
+            10_000,
+        );
+
+        assert!(estimate.total_context_tokens > 1_000);
+        assert!(estimate.total_context_tokens < 10_000);
+        assert_eq!(estimate.provider_context_tokens, Some(1_000));
+        assert!(estimate.estimated_delta_tokens > 0);
+        assert_eq!(
+            estimate.source,
+            PrepareContextEstimateSource::ProviderBaselineAfterLastAssistant
         );
     }
 }

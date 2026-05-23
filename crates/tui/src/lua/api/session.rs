@@ -252,7 +252,7 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
     // clears snapshots, restores the screen, and saves the session.
     let msgs = m.sub(
         "messages",
-        "Session messages. Callable: `messages()` (or `messages(opts)`) returns `{ role, content?, tool_calls?, tool_call_id?, is_error? }` rows; pass `opts.roles`, `opts.include_tool`, `opts.since_index`, `opts.limit` to filter. `messages(list)` (a sequence of `{ role, content? }` rows) atomically replaces `session.messages`, drops token/cost/turn-meta snapshots, repaints the transcript, and saves the session.",
+        "Session messages. Callable: `messages()` (or `messages(opts)`) returns persisted transcript rows as `{ role, content?, tool_calls?, tool_call_id?, is_error? }`; pass `opts.roles`, `opts.include_tool`, `opts.since_index`, or `opts.limit` to filter. `messages(list)` (a sequence of `{ role, content? }` rows) atomically replaces `session.messages`, drops token/cost/turn-meta snapshots, repaints the transcript, and saves the session. Use `smelt.session.model_messages()` for the model-visible history after checkpointing.",
     )?;
     msgs.callable(
         |lua, (_tbl, arg): (mlua::Table, Option<mlua::Table>)| -> LuaResult<mlua::Value> {
@@ -319,6 +319,17 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
                 .collect();
             let out = messages_to_lua(lua, &filtered)?;
             Ok(mlua::Value::Table(out))
+        },
+    )?;
+    m.fn_(
+        "model_messages",
+        "Return the model-visible message list for the next request. If the session has a context checkpoint, this is the checkpoint summary plus retained live tail; otherwise it is the persisted transcript. Read-only.",
+        &[],
+        |lua, ()| -> LuaResult<mlua::Table> {
+            let messages =
+                crate::lua::try_with_app(|app| protocol::history_to_messages(&app.model_history()))
+                    .unwrap_or_default();
+            messages_to_lua(lua, &messages)
         },
     )?;
     m.fn_(

@@ -102,6 +102,14 @@ fun(id: string): nil
 
 Switch the UI to the persisted session with `id`. Replays its message log and resets transient state.
 
+## `smelt.session.model_messages`
+
+```lua
+fun(): table
+```
+
+Return the model-visible message list for the next request. If the session has a context checkpoint, this is the checkpoint summary plus retained live tail; otherwise it is the persisted transcript. Read-only.
+
 ## `smelt.session.reset`
 
 ```lua

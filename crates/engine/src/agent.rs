@@ -372,6 +372,7 @@ fn is_context_window_error(e: &ProviderError) -> bool {
         || lower.contains("prompt is too long")
         || lower.contains("prompt too long")
         || lower.contains("too many tokens")
+        || lower.contains("model token limit")
 }
 
 fn build_provider(
@@ -2117,6 +2118,18 @@ impl PricingContext {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn classify_provider_error_detects_kimi_model_token_limit() {
+        let err = ProviderError::InvalidResponse(
+            r#"{"error":{"type":"invalid_request_error","message":"Invalid request: Your request exceeded model token limit: 262144 (requested: 264866)"},"type":"error"}"#.into(),
+        );
+
+        assert_eq!(
+            classify_provider_error(&err),
+            EngineAskErrorKind::ContextWindow
+        );
+    }
 
     // ---- pair_invocations_in_order ----
 

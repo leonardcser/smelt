@@ -137,9 +137,35 @@ pub struct LuaPrepareRequest {
     pub estimated_tokens: u32,
     /// Active-context estimate for auto-compaction. When a provider has
     /// reported context usage, this starts from that server-observed count
-    /// and adds only local messages appended after the last assistant
-    /// response; before the first usage report it equals `estimated_tokens`.
+    /// and adds only local messages appended after the matching token
+    /// snapshot; before the first usage report it equals `estimated_tokens`.
     pub estimated_context_tokens: u32,
+    /// Structured breakdown explaining how `estimated_context_tokens` was
+    /// computed.
+    pub context_estimate: LuaPrepareContextEstimate,
+}
+
+/// Token accounting breakdown passed inside `smelt.engine.PrepareRequest`.
+#[allow(dead_code)]
+#[derive(Debug, LuaOpts)]
+#[lua(name = "smelt.engine.PrepareContextEstimate")]
+pub struct LuaPrepareContextEstimate {
+    /// One of `"full_request_estimate" | "provider_snapshot" |
+    /// "provider_snapshot_plus_history_delta" |
+    /// "provider_baseline_after_last_assistant"`.
+    pub source: String,
+    /// Total active-context estimate used by auto-compaction.
+    pub total_context_tokens: u32,
+    /// Latest provider-reported active context, when available.
+    #[lua(default)]
+    pub provider_context_tokens: Option<u32>,
+    /// Locally estimated tokens added on top of provider usage.
+    pub estimated_delta_tokens: u32,
+    /// History length attached to the latest token snapshot, when available.
+    #[lua(default)]
+    pub latest_snapshot_history_len: Option<usize>,
+    /// Current session history length at the prepare hook.
+    pub current_history_len: usize,
 }
 
 /// Spec for `smelt.engine.ask`.

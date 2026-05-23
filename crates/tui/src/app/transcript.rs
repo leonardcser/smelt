@@ -18,6 +18,7 @@ pub(crate) struct TranscriptData {
 
 impl TuiApp {
     pub(crate) fn begin_turn(&mut self) {
+        self.context_tokens_updated_this_turn = false;
         self.parser.begin_turn();
     }
 

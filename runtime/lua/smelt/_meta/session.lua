@@ -55,6 +55,10 @@ session.list = nil
 ---@type fun(id: string): nil
 session.load = nil
 
+--- Return the model-visible message list for the next request. If the session has a context checkpoint, this is the checkpoint summary plus retained live tail; otherwise it is the persisted transcript. Read-only.
+---@type fun(): table
+session.model_messages = nil
+
 --- Cancel any in-flight agent and clear the session to a blank slate. Logs an `agent_stop` event with reason `user_cancel_and_clear`.
 ---@type fun(): nil
 session.reset = nil

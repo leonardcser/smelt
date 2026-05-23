@@ -61,17 +61,40 @@ impl TuiApp {
     }
 
     pub(crate) fn snapshot_tokens(&mut self) {
-        if let Some(tokens) = self.core.session.context_tokens {
-            // Key by history.len() so that rewind (which truncates history)
-            // can correctly restore the token count that corresponded to
-            // that history length.  model_history() may be shorter when a
-            // checkpoint is active, but the snapshot coordinate space must
-            // match the history coordinate space.
-            self.core
+        if self.context_tokens_updated_this_turn {
+            if let Some(tokens) = self.core.session.context_tokens {
+                if let Some(history_len) =
+                    context_token_snapshot_history_len(&self.core.session.history)
+                {
+                    // Key by the covered history length so rewind can restore
+                    // the token count that corresponded to that history state.
+                    // model_history() may be shorter when a checkpoint is
+                    // active, but the snapshot coordinate space must match the
+                    // history coordinate space.
+                    self.core
+                        .session
+                        .token_snapshots
+                        .push((history_len, tokens));
+                } else {
+                    // A turn can stop after a tool result but before the next
+                    // provider response. The last usage reading then predates
+                    // the current history tail, so persisting it would falsely
+                    // claim that large tool output is already accounted for.
+                    self.core.session.context_tokens = None;
+                }
+            }
+        } else {
+            let last_snapshot_len = self
+                .core
                 .session
                 .token_snapshots
-                .push((self.core.session.history.len(), tokens));
+                .last()
+                .map(|(history_len, _)| *history_len);
+            if last_snapshot_len != Some(self.core.session.history.len()) {
+                self.core.session.context_tokens = None;
+            }
         }
+        self.context_tokens_updated_this_turn = false;
         let cost = self.core.session.session_cost_usd;
         self.core
             .session
@@ -541,6 +564,13 @@ fn truncate_keyed<T>(snapshots: &mut Vec<(usize, T)>, hist_idx: usize) {
     }
 }
 
+fn context_token_snapshot_history_len(history: &[HistoryItem]) -> Option<usize> {
+    match history.last() {
+        Some(HistoryItem::Assistant(turn)) if turn.invocations.is_empty() => Some(history.len()),
+        _ => None,
+    }
+}
+
 #[cfg(test)]
 mod checkpoint_tests {
     use super::*;
@@ -556,6 +586,25 @@ mod checkpoint_tests {
             Some(Content::text(text)),
             None,
             Vec::new(),
+        ))
+    }
+
+    fn assistant_with_tool_result(text: &str) -> HistoryItem {
+        HistoryItem::Assistant(protocol::AssistantTurn::with_invocations(
+            None,
+            None,
+            Vec::new(),
+            vec![protocol::ToolInvocation {
+                call_id: "call-1".into(),
+                name: "bash".into(),
+                arguments: "{}".into(),
+                result: protocol::ToolOutcome {
+                    content: text.into(),
+                    is_error: false,
+                    metadata: None,
+                },
+                elapsed_ms: None,
+            }],
         ))
     }
 
@@ -700,11 +749,11 @@ mod checkpoint_tests {
     #[test]
     fn snapshot_tokens_always_keys_by_history_len() {
         let mut session = smelt_core::session::Session::new(1, std::path::PathBuf::from("/tmp"));
-        session.history = vec![user("a"), assistant("b"), user("c")];
+        session.history = vec![user("a"), assistant("b")];
         session.context_tokens = Some(100);
         // Without checkpoint: key should be history.len()
         session.token_snapshots.push((session.history.len(), 100));
-        assert_eq!(session.token_snapshots, vec![(3, 100)]);
+        assert_eq!(session.token_snapshots, vec![(2, 100)]);
 
         // With checkpoint: key should still be history.len(), not model_history().len()
         session.checkpoint = Some(ContextCheckpoint {
@@ -715,10 +764,28 @@ mod checkpoint_tests {
             tokens_before: None,
             tokens_after_estimate: None,
         });
+        session.history.push(user("c"));
         session.history.push(assistant("d"));
         session.context_tokens = Some(80);
         session.token_snapshots.push((session.history.len(), 80));
-        assert_eq!(session.token_snapshots, vec![(3, 100), (4, 80)]);
+        assert_eq!(session.token_snapshots, vec![(2, 100), (4, 80)]);
+    }
+
+    #[test]
+    fn context_token_snapshot_history_len_requires_terminal_assistant() {
+        assert_eq!(
+            context_token_snapshot_history_len(&[user("a"), assistant("b")]),
+            Some(2)
+        );
+        assert_eq!(
+            context_token_snapshot_history_len(&[
+                user("a"),
+                assistant_with_tool_result("large tool output")
+            ]),
+            None
+        );
+        assert_eq!(context_token_snapshot_history_len(&[user("a")]), None);
+        assert_eq!(context_token_snapshot_history_len(&[]), None);
     }
 
     #[test]

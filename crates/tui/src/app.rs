@@ -78,6 +78,7 @@ pub struct TuiApp {
     pub(crate) last_height: u16,
     pub(crate) next_turn_id: u64,
     pub(crate) pending_turn_meta: Option<protocol::TurnMeta>,
+    pub(crate) context_tokens_updated_this_turn: bool,
     /// `smelt.work.busy` token stack. Non-empty → prompt top-bar
     /// indicator animates with the top token's label.
     pub(crate) busy_stack: BusyStack,
@@ -471,6 +472,7 @@ impl TuiApp {
             last_height: term_h,
             next_turn_id: 1,
             pending_turn_meta: None,
+            context_tokens_updated_this_turn: false,
             busy_stack: BusyStack::default(),
             startup_auth_error,
             project_trust: Some(project_trust),

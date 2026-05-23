@@ -253,6 +253,19 @@ Front-matter override block accepted by `smelt.engine.submit_command`. Mirrors w
 | `tools` | [smelt.engine.RuleOverride](types.md#smeltengineruleoverride) |  | Per-tool `allow`/`ask`/`deny` patterns for the duration of the turn. |
 | `[string]` | [smelt.engine.RuleOverride](types.md#smeltengineruleoverride) |  | Per-subcommand pattern buckets keyed by tool name. |
 
+### `smelt.engine.PrepareContextEstimate`
+
+Token accounting breakdown passed inside `smelt.engine.PrepareRequest`.
+
+| Field | Type | Required | Description |
+| --- | --- | --- | --- |
+| `source` | `string` | yes | One of `"full_request_estimate" | "provider_snapshot" | "provider_snapshot_plus_history_delta" | "provider_baseline_after_last_assistant"`. |
+| `total_context_tokens` | `integer` | yes | Total active-context estimate used by auto-compaction. |
+| `provider_context_tokens` | `integer` |  | Latest provider-reported active context, when available. |
+| `estimated_delta_tokens` | `integer` | yes | Locally estimated tokens added on top of provider usage. |
+| `latest_snapshot_history_len` | `integer` |  | History length attached to the latest token snapshot, when available. |
+| `current_history_len` | `integer` | yes | Current session history length at the prepare hook. |
+
 ### `smelt.engine.PrepareRequest`
 
 Request object passed to `smelt.engine.on_prepare_request`.
@@ -261,7 +274,8 @@ Request object passed to `smelt.engine.on_prepare_request`.
 | --- | --- | --- | --- |
 | `messages` | [smelt.engine.AskMessage[]](types.md#smeltengineaskmessage) | yes | Model-visible conversation excluding the system prompt. |
 | `estimated_tokens` | `integer` | yes | Conservative token estimate for the request about to be sent, including system prompt, messages, and tool definitions. |
-| `estimated_context_tokens` | `integer` | yes | Active-context estimate for auto-compaction. When a provider has reported context usage, this starts from that server-observed count and adds only local messages appended after the last assistant response; before the first usage report it equals `estimated_tokens`. |
+| `estimated_context_tokens` | `integer` | yes | Active-context estimate for auto-compaction. When a provider has reported context usage, this starts from that server-observed count and adds only local messages appended after the matching token snapshot; before the first usage report it equals `estimated_tokens`. |
+| `context_estimate` | [smelt.engine.PrepareContextEstimate](types.md#smeltenginepreparecontextestimate) | yes | Structured breakdown explaining how `estimated_context_tokens` was computed. |
 
 ### `smelt.engine.RuleOverride`
 

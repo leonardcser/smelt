@@ -1295,6 +1295,8 @@ Current session metadata, turn list, message snapshots, rewind, and persisted se
   List persisted sessions other than the current one.
 - `smelt.session.load` :: `fun(id: string): nil`
   Switch the UI to the persisted session with `id`.
+- `smelt.session.model_messages` :: `fun(): table`
+  Return the model-visible message list for the next request.
 - `smelt.session.reset` :: `fun(): nil`
   Cancel any in-flight agent and clear the session to a blank slate.
 - `smelt.session.rewind_to` :: `fun(block_idx: integer?, opts: table?): nil`

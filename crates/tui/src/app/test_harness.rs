@@ -357,6 +357,7 @@ impl TestApp {
         if self.app.agent.is_some() {
             return;
         }
+        self.app.context_tokens_updated_this_turn = false;
         self.app.agent = Some(crate::app::TurnState {
             turn_id,
             pending: Vec::new(),

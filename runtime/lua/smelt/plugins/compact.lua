@@ -137,52 +137,6 @@ local function prune_old_tool_results(history)
   return new_history, elided_bytes
 end
 
--- Build a single flattened transcript string the summarizer model sees
--- as `user` content. Labels by role, trims, drops blanks, caps each
--- entry's bytes so a single oversized tool result can't blow the
--- summariser's own context budget.
-local function stringify_conversation(history)
-  local parts = {}
-  for _, m in ipairs(history) do
-    local label, body
-    if m.role == "system" then
-      label, body = "System", m.content or ""
-    elseif m.role == "user" then
-      label, body = "User", m.content or ""
-    elseif m.role == "tool" then
-      label, body = "ToolResult", m.content or ""
-    elseif m.role == "assistant" then
-      label = "Assistant"
-      local pieces = {}
-      if m.reasoning_content and m.reasoning_content:gsub("%s+", "") ~= "" then
-        table.insert(pieces, "[thinking]\n" .. m.reasoning_content:gsub("^%s+", ""):gsub("%s+$", "") .. "\n")
-      end
-      if m.content and m.content ~= "" then
-        table.insert(pieces, m.content)
-      end
-      if m.tool_calls then
-        for _, call in ipairs(m.tool_calls) do
-          local fn = call.function_call or call["function"] or {}
-          local name = fn.name or call.name or "?"
-          local args = fn.arguments or call.arguments or ""
-          table.insert(pieces, "[tool_call] " .. name .. "(" .. args .. ")")
-        end
-      end
-      body = table.concat(pieces, "\n")
-    else
-      label, body = nil, nil
-    end
-    if label and body then
-      local trimmed = body:gsub("^%s+", ""):gsub("%s+$", "")
-      if trimmed ~= "" then
-        local capped = smelt.text.truncate(trimmed, MAX_STRINGIFIED_MESSAGE_BYTES, TRUNCATION_SUFFIX)
-        table.insert(parts, label .. ": " .. capped)
-      end
-    end
-  end
-  return table.concat(parts, "\n\n")
-end
-
 -- Compose the trailing user message. Folds optional per-call instructions
 -- into the structured-summary spec.
 local function build_summary_task(instructions)
@@ -196,18 +150,71 @@ local function build_summary_task(instructions)
   return task
 end
 
+-- Build a trim-friendly summarizer message. `smelt.engine.ask_with_trim`
+-- removes whole entries from the front on context-window errors, matching
+-- Codex's "drop oldest history item and retry" compaction behavior.
+local function summarizer_message(m)
+  local label, body
+  if m.role == "system" then
+    return nil
+  elseif m.role == "user" then
+    label, body = "User", m.content or ""
+  elseif m.role == "tool" then
+    label, body = "ToolResult", m.content or ""
+  elseif m.role == "assistant" then
+    label = "Assistant"
+    local pieces = {}
+    if m.reasoning_content and m.reasoning_content:gsub("%s+", "") ~= "" then
+      table.insert(pieces, "[thinking]\n" .. m.reasoning_content:gsub("^%s+", ""):gsub("%s+$", "") .. "\n")
+    end
+    if m.content and m.content ~= "" then
+      table.insert(pieces, m.content)
+    end
+    if m.tool_calls then
+      for _, call in ipairs(m.tool_calls) do
+        local fn = call.function_call or call["function"] or {}
+        local name = fn.name or call.name or "?"
+        local args = fn.arguments or call.arguments or ""
+        table.insert(pieces, "[tool_call] " .. name .. "(" .. args .. ")")
+      end
+    end
+    body = table.concat(pieces, "\n")
+  else
+    label, body = nil, nil
+  end
+  if not (label and body) then return nil end
+  local trimmed = body:gsub("^%s+", ""):gsub("%s+$", "")
+  if trimmed == "" then return nil end
+  local capped = smelt.text.truncate(trimmed, MAX_STRINGIFIED_MESSAGE_BYTES, TRUNCATION_SUFFIX)
+  local role = "user"
+  if m.role == "assistant" then role = "assistant" end
+  return { role = role, content = label .. ": " .. capped }
+end
+
+local function build_summarizer_messages(history, instructions)
+  local messages = {}
+  for _, m in ipairs(history or {}) do
+    local msg = summarizer_message(m)
+    if msg then table.insert(messages, msg) end
+  end
+  table.insert(messages, {
+    role = "user",
+    content = build_summary_task(instructions),
+  })
+  return messages
+end
+
 -- Legacy fallback summariser: flattens the supplied history into a single
--- user message and sends it with `ask_with_trim`. Used by the mid-turn
--- recovery hook (where the live session may not be settled) and as the
--- overflow fallback for the inheriting path.
+-- trim-friendly message list and sends it with `ask_with_trim`. Used by
+-- the mid-turn recovery hook (where the live session may not be settled)
+-- and as the overflow fallback for the inheriting path.
 local function summarize_flat(history, instructions, done)
   if not history or #history == 0 then
     done(nil)
     return
   end
   local cleaned = strip_images(history)
-  local task = build_summary_task(instructions)
-  local user_text = task .. "\n\nConversation to summarize:\n\n" .. stringify_conversation(cleaned)
+  local messages = build_summarizer_messages(cleaned, instructions)
   local handle = smelt.work.busy("compacting")
   local empty_retries = 0
 
@@ -223,7 +230,7 @@ local function summarize_flat(history, instructions, done)
   local function send()
     smelt.engine.ask_with_trim({
       system      = system,
-      messages    = { { role = "user", content = user_text } },
+      messages    = messages,
       model       = smelt.model.preferred("compact"),
       max_trims   = 20,
       on_response = function(summary, err)
@@ -319,7 +326,7 @@ local function emit_event(phase, before_tokens, after_tokens, extra)
 end
 
 local function run_compact(opts)
-  local history = smelt.session.messages()
+  local history = smelt.session.model_messages()
   if not history or #history == 0 then
     smelt.notify.error("nothing to compact")
     return
@@ -370,7 +377,7 @@ local function auto_compact_due(tokens)
 end
 
 local function compact_live_session(before_tokens, phase, done)
-  local history = smelt.session.messages()
+  local history = smelt.session.model_messages()
   if not history or #history == 0 then
     done(nil)
     return
@@ -423,6 +430,14 @@ smelt.engine.on_prepare_request(function(request, reply)
     reply(nil)
     return
   end
+  local estimate = request and request.context_estimate
+  emit_event("trigger-pre-request", estimated_tokens, nil, {
+    estimate_source = estimate and estimate.source or nil,
+    provider_context_tokens = estimate and estimate.provider_context_tokens or nil,
+    estimated_delta_tokens = estimate and estimate.estimated_delta_tokens or nil,
+    snapshot_history_len = estimate and estimate.latest_snapshot_history_len or nil,
+    current_history_len = estimate and estimate.current_history_len or nil,
+  })
   compact_live_session(estimated_tokens, "summarize-pre-request", function(messages)
     reply(messages)
   end)
