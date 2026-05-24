@@ -109,8 +109,7 @@ impl TuiApp {
         }
         // Cancel any in-flight turn and Lua tasks before swapping sessions.
         if self.agent.is_some() {
-            self.core.engine.send(UiCommand::Cancel);
-            self.lua.cancel_tasks();
+            self.cancel_agent();
             self.agent = None;
         }
         self.save_session();
@@ -143,9 +142,13 @@ impl TuiApp {
         let _perf = smelt_perf::perf::begin("app:reset_session");
         // Cancel in-flight engine work and Lua tasks before clearing state so
         // stale events and running child processes don't restore old data.
-        self.core.engine.send(UiCommand::Cancel);
-        self.lua.cancel_tasks();
-        self.agent = None;
+        if self.agent.is_some() {
+            self.cancel_agent();
+            self.agent = None;
+        } else {
+            self.core.engine.send(UiCommand::Cancel);
+            self.lua.cancel_tasks();
+        }
         let old_id = self.core.session.id.clone();
         self.core.session.history.clear();
         self.reset_session_permissions();
@@ -190,8 +193,7 @@ impl TuiApp {
     pub fn load_session(&mut self, loaded: session::Session) {
         // Cancel any in-flight turn and Lua tasks before swapping sessions.
         if self.agent.is_some() {
-            self.core.engine.send(UiCommand::Cancel);
-            self.lua.cancel_tasks();
+            self.cancel_agent();
             self.agent = None;
         }
         let old_id = self.core.session.id.clone();

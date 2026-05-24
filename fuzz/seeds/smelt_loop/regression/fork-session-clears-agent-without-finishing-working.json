@@ -1,0 +1,30 @@
+{
+  "mode": "plan",
+  "ops": [
+    {
+      "data": {
+        "label": ""
+      },
+      "kind": "insert_attachment"
+    },
+    {
+      "data": {
+        "msg_count": 12
+      },
+      "kind": "engine_turn_complete"
+    },
+    {
+      "data": 0,
+      "kind": "key_special"
+    },
+    {
+      "data": "/",
+      "kind": "paste"
+    },
+    {
+      "data": 0,
+      "kind": "key_special"
+    }
+  ],
+  "vim": true
+}
