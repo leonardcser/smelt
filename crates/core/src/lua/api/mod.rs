@@ -75,7 +75,7 @@ pub fn lua_table_to_json(lua: &Lua, table: &mlua::Table) -> serde_json::Value {
             ints.first().copied() == Some(1) && ints.windows(2).all(|w| w[1] == w[0] + 1)
         };
 
-    if is_array || pairs.is_empty() {
+    if is_array {
         let len = table.raw_len();
         let mut arr = Vec::with_capacity(len);
         for i in 1..=len {
