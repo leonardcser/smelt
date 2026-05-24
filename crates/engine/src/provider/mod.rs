@@ -572,6 +572,7 @@ impl Provider {
                 if let Some(obj) = body.as_object_mut() {
                     obj.remove("temperature");
                     obj.remove("top_p");
+                    obj.remove("max_output_tokens");
                 }
                 (url, body)
             }

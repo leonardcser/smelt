@@ -1,5 +1,5 @@
 -- F12 perf panel. Top-right overlay showing live duration percentiles.
--- Non-modal, non-focusable; F12 toggles it.
+-- Non-modal, focusable, read-only; F12 toggles it, Esc or Ctrl-C closes.
 --
 -- Hot-reload contract: every resource opens with `opts.name`, so on
 -- `/reload` the runtime hands back the existing overlay/win/buf and
@@ -139,9 +139,30 @@ local function paint()
 	end
 end
 
+local function close()
+	state.open = false
+	if state.timer then
+		state.timer:remove()
+		state.timer = nil
+	end
+	if state.overlay then
+		state.overlay:close()
+		state.overlay = nil
+	end
+	state.win = nil
+	-- Named buf survives for next open by design.
+	if state.owns_perf then
+		smelt.metrics.perf.set_enabled(false)
+		smelt.metrics.perf.clear()
+		state.owns_perf = nil
+	end
+end
+
 local function attach()
-	state.buf = smelt.buf.new({ name = "perf_panel.buf" })
-	state.win = smelt.win.new(state.buf, { name = "perf_panel.win", focusable = false })
+	state.buf = smelt.buf.new({ name = "perf_panel.buf", readonly = true })
+	state.win = smelt.win.new(state.buf, { name = "perf_panel.win", focusable = true, selectable = true })
+	state.win:key("esc", close)
+	state.win:key("c-c", close)
 	state.overlay = smelt.overlay.new({
 		name = "perf_panel",
 		title = panel_title(),
@@ -174,25 +195,6 @@ local function open()
 		smelt.metrics.perf.set_enabled(true)
 	end
 	attach()
-end
-
-local function close()
-	state.open = false
-	if state.timer then
-		state.timer:remove()
-		state.timer = nil
-	end
-	if state.overlay then
-		state.overlay:close()
-		state.overlay = nil
-	end
-	state.win = nil
-	-- Named buf survives for next open by design.
-	if state.owns_perf then
-		smelt.metrics.perf.set_enabled(false)
-		smelt.metrics.perf.clear()
-		state.owns_perf = nil
-	end
 end
 
 local function toggle()

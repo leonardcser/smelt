@@ -123,6 +123,7 @@ deferred wiring). The hook fires with `ctx = { kind = "launch" |
 | --- | --- | --- |
 | `compact` | yes | Owns `/compact` and post-turn auto-compaction (uses `smelt.engine.ask_with_trim`, drives the prompt top-bar working indicator via `smelt.work.busy`) |
 | `esc_chord` | yes | `<Esc><Esc>` to cancel `/compact` or rewind a turn |
+| `debug_panel` | yes | F3 overlay with resolved model config, context tokens, and pricing |
 | `perf_panel` | yes | F12 overlay with live duration percentiles |
 | `predict` | yes | After each turn, predicts your next message and shows it as ghost text |
 | `scroll_pills` | yes | While the transcript is scrolled away from the tail, shows two click-only overlays — a "↓ jump to bottom" pill above the prompt and a one-row "jump to next message" pill at the top of the terminal |

@@ -32,6 +32,7 @@ nav = [
     { "`smelt.cli`" = "reference/api/cli.md" },
     { "`smelt.clipboard`" = "reference/api/clipboard.md" },
     { "`smelt.cmd`" = "reference/api/cmd.md" },
+    { "`smelt.config`" = "reference/api/config.md" },
     { "`smelt.confirm`" = "reference/api/confirm.md" },
     { "`smelt.dialog`" = "reference/api/dialog.md" },
     { "`smelt.engine`" = "reference/api/engine.md" },

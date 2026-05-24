@@ -14,6 +14,14 @@ fun(): table
 
 Return an array of `{ key, name, provider }` records for every model the active config can switch to.
 
+## `smelt.model.max_tokens`
+
+```lua
+fun(): integer?
+```
+
+Resolved maximum output tokens for the active model. Returns the config override if set, otherwise falls back to the models.dev catalog value, then to the provider default. Returns `nil` when no limit is known.
+
 ## `smelt.model.preferred`
 
 ```lua
@@ -21,4 +29,12 @@ fun(name: any, value: any): any
 ```
 
 
+
+## `smelt.model.pricing`
+
+```lua
+fun(): table
+```
+
+Resolved pricing for the active model as `{ input, output, cache_read, cache_write, source }`. `source` is one of `"config override"`, `"models.dev"`, or `"none"`. Prices are USD per 1M tokens.
 

@@ -11,7 +11,15 @@ local model = {}
 ---@type fun(): table
 model.list = nil
 
+--- Resolved maximum output tokens for the active model. Returns the config override if set, otherwise falls back to the models.dev catalog value, then to the provider default. Returns `nil` when no limit is known.
+---@type fun(): integer?
+model.max_tokens = nil
+
 ---@type fun(name: any, value: any): any
 model.preferred = nil
+
+--- Resolved pricing for the active model as `{ input, output, cache_read, cache_write, source }`. `source` is one of `"config override"`, `"models.dev"`, or `"none"`. Prices are USD per 1M tokens.
+---@type fun(): table
+model.pricing = nil
 
 return model

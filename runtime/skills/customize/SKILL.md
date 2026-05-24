@@ -428,6 +428,7 @@ Loaded on every launch unless opted out via `smelt.builtins.disable({ plugins = 
 | --- | --- |
 | `smelt.plugins.banner` | Empty-state logo overlay + shutdown logo/resume-hint banner. |
 | `smelt.plugins.compact` | Compaction plugin. |
+| `smelt.plugins.debug_panel` | F3 debug panel. |
 | `smelt.plugins.esc_chord` | Idle-mode Esc-Esc: cancel any in-flight background work (`smelt.work.busy` tokens, e.g. /compact), or rewind to the previous turn. |
 | `smelt.plugins.perf_panel` | F12 perf panel. |
 | `smelt.plugins.predict` | Input prediction plugin. |
@@ -1065,6 +1066,21 @@ Buffer handle constructor.
 - `smelt.buf.new` :: `fun(opts: table?): smelt.buf.Buf`
   Create a buffer and return a `Buf` userdata.
 
+#### `smelt.config`
+
+Resolved application configuration introspection.
+
+- `smelt.config.api_base` :: `fun(): string`
+  Active API base URL.
+- `smelt.config.api_key_env` :: `fun(): string`
+  Name of the environment variable that supplies the API key for the active provider.
+- `smelt.config.context_window` :: `fun(): integer?`
+  Configured context-window size in tokens for the active model, or `nil` when not declared.
+- `smelt.config.model_config` :: `fun(): table`
+  Resolved model-level sampling and cost overrides as a table.
+- `smelt.config.provider_type` :: `fun(): string`
+  Active provider type string, e.g.
+
 #### `smelt.confirm`
 
 Confirm dialog primitives — preview dispatch, back-tab cycling, and choice resolution.
@@ -1154,8 +1170,12 @@ Model selector.
 
 - `smelt.model.list` :: `fun(): table`
   Return an array of `{ key, name, provider }` records for every model the active config can switch to.
+- `smelt.model.max_tokens` :: `fun(): integer?`
+  Resolved maximum output tokens for the active model.
 - `smelt.model.preferred` :: `fun(name: any, value: any): any`
   
+- `smelt.model.pricing` :: `fun(): table`
+  Resolved pricing for the active model as `{ input, output, cache_read, cache_write, source }`.
 
 #### `smelt.notebook`
 

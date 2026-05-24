@@ -142,12 +142,18 @@ impl TuiApp {
                 self.fire_pointer_event(win, ev, me, crate::smelt_term::MouseButton::Left);
             }
             if win == crate::app::PROMPT_WIN {
+                if is_down && self.ui.active_modal().is_none() {
+                    self.ui.set_focus(win);
+                }
                 self.handle_prompt_mouse(me, count);
             } else if win == crate::app::TRANSCRIPT_WIN {
                 // Empty transcript: don't start a drag-select on the void.
                 if is_down && !self.has_transcript_content(self.core.config.settings.show_thinking)
                 {
                     return EventOutcome::Noop;
+                }
+                if is_down && self.ui.active_modal().is_none() {
+                    self.ui.set_focus(win);
                 }
                 let yank = self.handle_content_mouse(me, count);
                 if is_up {

@@ -2,6 +2,7 @@
 //! Host-tier bindings are registered first via `smelt_core::lua::api::register_host_api`.
 
 mod buf;
+mod config;
 mod confirm;
 mod engine;
 mod history;
@@ -111,6 +112,7 @@ impl LuaRuntime {
         history::register(lua, &smelt)?;
         keymap::register(lua, &smelt_keymap, shared)?;
         metrics::register(lua, &smelt)?;
+        config::register(lua, &smelt)?;
         log::register(lua, &smelt)?;
         model::register(lua, &smelt)?;
         permissions::register(lua, &smelt, shared)?;
