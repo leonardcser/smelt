@@ -2,10 +2,12 @@
 
 smelt.cmd.register("vim", function()
   smelt.settings.vim = not smelt.settings.vim
+  smelt.notify("vim mode: " .. (smelt.settings.vim and "on" or "off"))
 end, { desc = "toggle vim mode" })
 
 smelt.cmd.register("thinking", function()
   smelt.settings.show_thinking = not smelt.settings.show_thinking
+  smelt.notify("thinking blocks: " .. (smelt.settings.show_thinking and "on" or "off"))
 end, { desc = "toggle thinking blocks" })
 
 -- `/reasoning` — set explicitly or show current effort.
