@@ -272,6 +272,21 @@ fn render_leaf(
     match leaf {
         RenderedLeaf::Buf(buf) => replay_leaf(out, buf, rows_cap, width, with_gutter),
         RenderedLeaf::Diff(spec) => render_diff_spec(out, spec, with_gutter),
+        RenderedLeaf::DiffCache(cache) => {
+            let indent = if with_gutter {
+                BLOCK_GUTTER_W as u16
+            } else {
+                0
+            };
+            print_cached_inline_diff(
+                out,
+                cache,
+                GutterStyle::InlineLineNumbers,
+                indent,
+                0,
+                u16::MAX,
+            )
+        }
         RenderedLeaf::FileView(spec) => render_file_view_spec(out, spec, with_gutter),
     }
 }

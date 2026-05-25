@@ -11,6 +11,7 @@
 //!   to the parallel layout workers, which cannot touch `app.ui`.
 
 use crate::buffer::{BufId, Buffer};
+use crate::content::highlight::CachedInlineDiff;
 
 /// Inline-diff render directive. The worker calls `print_inline_diff` directly,
 /// so width / indent / bg-fill / wrap math all live in one render path with no
@@ -41,6 +42,7 @@ pub enum Leaf<B> {
     Buf(B),
     Diff(DiffSpec),
     FileView(FileViewSpec),
+    DiffCache(CachedInlineDiff),
 }
 
 pub type LuaLeaf = Leaf<BufId>;

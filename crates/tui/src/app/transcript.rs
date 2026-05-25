@@ -499,10 +499,24 @@ pub(crate) fn extract_rendered_layout(
             BlockLayout::Leaf(RenderedLeaf::Buf(Box::new(buf)))
         }
         BlockLayout::Leaf(LuaLeaf::Diff(spec)) => {
-            BlockLayout::Leaf(RenderedLeaf::Diff(spec.clone()))
+            let ext = spec
+                .lang
+                .as_deref()
+                .map(smelt_core::content::highlight::lang_to_ext);
+            let cache = smelt_core::content::highlight::build_inline_diff_cache_ext(
+                &spec.old,
+                &spec.new,
+                &spec.path,
+                &spec.anchor,
+                ext,
+            );
+            BlockLayout::Leaf(RenderedLeaf::DiffCache(cache))
         }
         BlockLayout::Leaf(LuaLeaf::FileView(spec)) => {
             BlockLayout::Leaf(RenderedLeaf::FileView(spec.clone()))
+        }
+        BlockLayout::Leaf(LuaLeaf::DiffCache(_)) => {
+            panic!("DiffCache should not be produced by Lua render hooks")
         }
         BlockLayout::Vbox(items) => BlockLayout::Vbox(
             items
