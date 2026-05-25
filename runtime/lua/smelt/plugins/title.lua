@@ -1,7 +1,7 @@
 -- Session title plugin. Generates a short session title + slug from the
--- accumulated user messages. Fires on `turn_end` so the title reflects the
--- full assistant response. Re-evaluates each turn so the title tracks the
--- current high-level task even when the user changes direction.
+-- accumulated user messages. Fires on `input_submit` so the title is set
+-- immediately when the user sends a message. Re-evaluates each turn so the
+-- title tracks the current high-level task even when the user changes direction.
 --
 -- The system prompt carries the stable instruction; user messages are appended
 -- in the messages array. Consecutive calls share the KV cache prefix up to the
@@ -61,16 +61,21 @@ local inflight = false
 -- so only the messages array is compared between calls.
 local sent_messages = {}
 
-local function update_title()
+local function update_title(new_text)
   if inflight then return end
 
-  -- Gather all user messages from the session history.
+  -- Gather all prior user messages from the session history.
   local history = smelt.session.messages()
   local user_msgs = {}
   for _, m in ipairs(history) do
     if m.role == "user" and m.content and m.content ~= "" then
       table.insert(user_msgs, m.content)
     end
+  end
+
+  -- Append the newly submitted text.
+  if new_text and new_text ~= "" then
+    table.insert(user_msgs, new_text)
   end
 
   -- Skip shell escapes and empty submissions.
@@ -134,7 +139,6 @@ local function update_title()
   })
 end
 
-smelt.cell("turn_end"):subscribe(function(payload)
-  if payload.cancelled then return end
-  update_title()
+smelt.cell("input_submit"):subscribe(function(text)
+  update_title(text)
 end)

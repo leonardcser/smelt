@@ -78,6 +78,7 @@ smelt.cell("turn_end"):subscribe(function(payload)
     system = SYSTEM,
     messages = messages,
     model = smelt.model.preferred("predict"),
+    reasoning_effort = "off",
     on_response = function(content, err)
       if err then return end
       -- Keep only the first line; `Win:placeholder` rejects newlines and
