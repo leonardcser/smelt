@@ -12,6 +12,10 @@ local engine = {}
 ---@type fun(spec: smelt.engine.AskSpec): integer
 engine.ask = nil
 
+--- Run an auxiliary LLM request that inherits the current session's assembled system prompt and active tool list. When `spec.messages` is omitted or empty, the live model-visible history is inherited exactly; otherwise the supplied full `protocol::Message` rows override the inherited history while preserving the same prompt structure. Returns the request id.
+---@type fun(spec: smelt.engine.InheritedAskSpec): integer
+engine.ask_inherited = nil
+
 --- Wrap `smelt.engine.ask` with a trim-and-retry loop for context-window
 --- errors: drops the oldest message from `spec.messages` and re-issues
 --- the request up to `spec.max_trims` times (default 20). `spec` accepts

@@ -9,7 +9,8 @@ use smelt_core::lua::lua_type::LuaCallback;
 use smelt_core::lua::module::LuaMod;
 use std::sync::Arc;
 
-/// One message in a `smelt.engine.ask` conversation.
+/// One text-only message in a `smelt.engine.ask` conversation.
+#[allow(dead_code)]
 #[derive(Debug, LuaOpts)]
 #[lua(name = "smelt.engine.AskMessage")]
 pub struct LuaAskMessage {
@@ -152,7 +153,7 @@ pub struct LuaPrepareRequest {
 pub struct LuaPrepareContextEstimate {
     /// One of `"full_request_estimate" | "provider_snapshot" |
     /// "provider_snapshot_plus_history_delta" |
-    /// "provider_baseline_after_last_assistant"`.
+    /// "visible_fallback"`.
     pub source: String,
     /// Total active-context estimate used by auto-compaction.
     pub total_context_tokens: u32,
@@ -172,24 +173,40 @@ pub struct LuaPrepareContextEstimate {
 #[derive(Debug, LuaOpts)]
 #[lua(name = "smelt.engine.AskSpec")]
 pub struct LuaAskSpec {
-    /// System prompt sent before the conversation. Optional when
-    /// `inherit_session = true` (the current session's system prompt is
-    /// substituted in that case).
+    /// System prompt sent before the conversation.
+    pub system: String,
+    /// Prior turns. When present, this must be a sequence of full
+    /// `protocol::Message`-shaped rows such as `{ role, content?,
+    /// reasoning_content?, tool_calls?, tool_call_id?, is_error? }`.
     #[lua(default)]
-    pub system: Option<String>,
-    /// Prior turns. Each message is `{ role = "user"|"assistant", content = "..." }`.
-    #[lua(default)]
-    pub messages: Vec<LuaAskMessage>,
+    pub messages: Option<mlua::Table>,
     /// Single-shot question appended as a final user message after `messages`.
     pub question: Option<String>,
-    /// When true, override `system` with the current session's assembled
-    /// system prompt and prepend the same model-visible history the next
-    /// main turn would receive (checkpoint summary plus retained tail when
-    /// compacted) plus the active tool list. The request then shares the
-    /// Anthropic prefix cache with the main turn. Used by the compaction
-    /// summariser to keep its prompt off the cache miss path.
+    /// Model reference (`"provider/model"` or a bare name resolved against
+    /// the configured providers). When `nil`, falls back to the primary model.
+    pub model: Option<String>,
+    /// JSON-schema response constraint.
+    pub response_format: Option<LuaAskResponseFormat>,
+    /// Reasoning effort for the request; defaults to `"off"`.
+    pub reasoning_effort: Option<LuaReasoningEffort>,
+    /// Fires once with `(content, err)`. On success `err` is `nil` and
+    /// `content` carries the assistant text. On failure `err` is a
+    /// `smelt.engine.AskError` table and `content` is `""`.
+    pub on_response: Option<LuaCallback<(String, Option<LuaAskErrorTable>), ()>>,
+}
+
+/// Spec for `smelt.engine.ask_inherited`.
+#[derive(Debug, LuaOpts)]
+#[lua(name = "smelt.engine.InheritedAskSpec")]
+pub struct LuaInheritedAskSpec {
+    /// Prior turns. When present, this must be a sequence of full
+    /// `protocol::Message`-shaped rows such as `{ role, content?,
+    /// reasoning_content?, tool_calls?, tool_call_id?, is_error? }`.
+    /// When omitted or empty, the live model-visible history is inherited.
     #[lua(default)]
-    pub inherit_session: bool,
+    pub messages: Option<mlua::Table>,
+    /// Single-shot question appended as a final user message after `messages`.
+    pub question: Option<String>,
     /// Model reference (`"provider/model"` or a bare name resolved against
     /// the configured providers). When `nil`, falls back to the primary model.
     pub model: Option<String>,
@@ -322,51 +339,17 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
             "Run an out-of-band LLM request without touching the main turn. `spec.model` selects an alternate model (defaults to the primary), `spec.response_format` enforces a JSON schema, `spec.reasoning_effort` controls effort (defaults to `\"off\"`). `spec.on_response` fires once with `(content, err)`; on context-window errors `err.kind = \"context_window\"` so callers can compose retries in Lua (see `smelt.engine.ask_with_trim`). Returns the request id.",
             &["spec"],
             move |lua, spec: LuaAskSpec| -> LuaResult<u64> {
-                // Validate the (system, inherit_session, messages) combination
-                // before touching any state. inherit_session=true substitutes
-                // the live session — supplying a separate system or messages
-                // alongside is almost always a caller bug (silently dropped
-                // in the old code path). inherit_session=false requires
-                // an explicit system prompt.
-                if spec.inherit_session {
-                    if spec.system.is_some() {
-                        return Err(LuaError::external(
-                            "smelt.engine.ask: `system` is ignored when `inherit_session = true`; pass either one, not both",
-                        ));
-                    }
-                    if !spec.messages.is_empty() {
-                        return Err(LuaError::external(
-                            "smelt.engine.ask: `messages` is ignored when `inherit_session = true`; the live session is substituted",
-                        ));
-                    }
-                } else {
-                    let sys_ok = spec
-                        .system
-                        .as_deref()
-                        .map(|s| !s.is_empty())
-                        .unwrap_or(false);
-                    if !sys_ok {
-                        return Err(LuaError::external(
-                            "smelt.engine.ask: `system` must be a non-empty string when `inherit_session = false`",
-                        ));
-                    }
+                if spec.system.is_empty() {
+                    return Err(LuaError::external(
+                        "smelt.engine.ask: `system` must be a non-empty string",
+                    ));
                 }
 
                 let mut messages: Vec<protocol::Message> = spec
                     .messages
-                    .into_iter()
-                    .filter_map(|m| match m.role.as_str() {
-                        "user" => Some(protocol::Message::user(protocol::Content::text(
-                            &m.content,
-                        ))),
-                        "assistant" => Some(protocol::Message::assistant(
-                            Some(protocol::Content::text(&m.content)),
-                            None,
-                            None,
-                        )),
-                        _ => None,
-                    })
-                    .collect();
+                    .as_ref()
+                    .map(|table| crate::lua::api::session::lua_messages_to_protocol(lua, table))
+                    .unwrap_or_default();
 
                 let id = s.next_id.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
 
@@ -377,7 +360,7 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
                     }
                 }
 
-                let mut system = spec.system.unwrap_or_default();
+                let system = spec.system;
                 let response_format = spec.response_format.map(|f| protocol::AskResponseFormat {
                     name: f.name,
                     schema: smelt_core::lua::api::lua_table_to_json(lua, &f.schema),
@@ -387,18 +370,66 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
                     .map(Into::into)
                     .unwrap_or(protocol::ReasoningEffort::Off);
                 let model_ref = spec.model;
-                let inherit_session = spec.inherit_session;
                 let question = spec.question;
                 crate::lua::with_app(|app| {
-                    let mut tools: Vec<protocol::ToolDef> = Vec::new();
-                    if inherit_session {
-                        // Snapshot live session state so the request prefix
-                        // matches the main turn byte-for-byte. Pure read —
-                        // must not mutate `app.prompt_sections`. Validation
-                        // above guarantees `messages` is empty here.
-                        system = app.assemble_system_prompt();
+                    if let Some(q) = question {
+                        messages.push(protocol::Message::user(protocol::Content::text(&q)));
+                    }
+                    let model = model_ref.and_then(|r| resolve_model_for_ask(app, &r));
+                    let session_id = app.core.session.id.clone();
+                    app.core.engine.send(protocol::UiCommand::EngineAsk {
+                        id,
+                        system,
+                        messages,
+                        model,
+                        response_format,
+                        reasoning_effort,
+                        tools: Vec::new(),
+                        session_id,
+                    })
+                });
+                Ok(id)
+            },
+        )?;
+    }
+
+    // smelt.engine.ask_inherited({messages?, question?, model?, response_format?, reasoning_effort?, on_response})
+    {
+        let s = shared.clone();
+        m.fn_(
+            "ask_inherited",
+            "Run an auxiliary LLM request that inherits the current session's assembled system prompt and active tool list. When `spec.messages` is omitted or empty, the live model-visible history is inherited exactly; otherwise the supplied full `protocol::Message` rows override the inherited history while preserving the same prompt structure. Returns the request id.",
+            &["spec"],
+            move |lua, spec: LuaInheritedAskSpec| -> LuaResult<u64> {
+                let mut messages: Vec<protocol::Message> = spec
+                    .messages
+                    .as_ref()
+                    .map(|table| crate::lua::api::session::lua_messages_to_protocol(lua, table))
+                    .unwrap_or_default();
+
+                let id = s.next_id.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+
+                if let Some(cb) = spec.on_response {
+                    let handle = LuaHandle::from_func(lua, cb.into_inner())?;
+                    if let Ok(mut cbs) = s.ask_callbacks.lock() {
+                        cbs.insert(id, handle);
+                    }
+                }
+
+                let response_format = spec.response_format.map(|f| protocol::AskResponseFormat {
+                    name: f.name,
+                    schema: smelt_core::lua::api::lua_table_to_json(lua, &f.schema),
+                });
+                let reasoning_effort = spec
+                    .reasoning_effort
+                    .map(Into::into)
+                    .unwrap_or(protocol::ReasoningEffort::Off);
+                let model_ref = spec.model;
+                let question = spec.question;
+                crate::lua::with_app(|app| {
+                    let system = app.assemble_system_prompt();
+                    if messages.is_empty() {
                         messages = protocol::history_to_messages(&app.model_history());
-                        tools = app.lua.tool_defs(app.core.config.mode);
                     }
                     if let Some(q) = question {
                         messages.push(protocol::Message::user(protocol::Content::text(&q)));
@@ -412,7 +443,7 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
                         model,
                         response_format,
                         reasoning_effort,
-                        tools,
+                        tools: app.lua.tool_defs(app.core.config.mode),
                         session_id,
                     })
                 });

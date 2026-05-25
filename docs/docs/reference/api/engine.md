@@ -16,6 +16,16 @@ Types: [`smelt.engine.AskSpec`](types.md#smeltengineaskspec)
 
 Run an out-of-band LLM request without touching the main turn. `spec.model` selects an alternate model (defaults to the primary), `spec.response_format` enforces a JSON schema, `spec.reasoning_effort` controls effort (defaults to `"off"`). `spec.on_response` fires once with `(content, err)`; on context-window errors `err.kind = "context_window"` so callers can compose retries in Lua (see `smelt.engine.ask_with_trim`). Returns the request id.
 
+## `smelt.engine.ask_inherited`
+
+```lua
+fun(spec: smelt.engine.InheritedAskSpec): integer
+```
+
+Types: [`smelt.engine.InheritedAskSpec`](types.md#smeltengineinheritedaskspec)
+
+Run an auxiliary LLM request that inherits the current session's assembled system prompt and active tool list. When `spec.messages` is omitted or empty, the live model-visible history is inherited exactly; otherwise the supplied full `protocol::Message` rows override the inherited history while preserving the same prompt structure. Returns the request id.
+
 ## `smelt.engine.ask_with_trim`
 
 ```lua

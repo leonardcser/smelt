@@ -299,6 +299,9 @@ impl TuiApp {
             // bash executions, etc.).
             self.core.engine.send(UiCommand::Cancel);
             self.lua.cancel_tasks();
+            // Archive an interrupted outcome so the prompt bar shows
+            // "interrupted" rather than falling back to idle/done.
+            self.working.finish(TurnOutcome::Interrupted);
         }
     }
 

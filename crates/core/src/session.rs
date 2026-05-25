@@ -52,12 +52,14 @@ pub struct Session {
     pub history: Vec<HistoryItem>,
     pub checkpoint: Option<ContextCheckpoint>,
     pub context_tokens: Option<u32>,
+    /// History length at the time `context_tokens` was recorded. Used to
+    /// decide whether the provider baseline exactly covers the current
+    /// history or needs a delta estimate for appended messages.
+    pub context_tokens_history_len: Option<usize>,
     /// Last authoritative context-token count the UI should continue to
     /// display, even if `context_tokens` has been invalidated for request
     /// estimation while waiting for a fresh provider reading.
     pub visible_context_tokens: Option<u32>,
-    /// Token-count snapshot, keyed by `history.len()` at write time.
-    pub token_snapshots: Vec<(usize, u32)>,
     /// Cost snapshot, keyed by `history.len()` at write time.
     pub cost_snapshots: Vec<(usize, f64)>,
     /// Per-turn metadata, keyed by `history.len()` at turn-complete time.
@@ -103,10 +105,10 @@ struct SessionWire {
     #[serde(default)]
     pub context_tokens: Option<u32>,
     #[serde(default)]
+    pub context_tokens_history_len: Option<usize>,
+    #[serde(default)]
     #[serde(alias = "display_context_tokens")]
     pub visible_context_tokens: Option<u32>,
-    #[serde(default)]
-    pub token_snapshots: Vec<(usize, u32)>,
     #[serde(default)]
     pub cost_snapshots: Vec<(usize, f64)>,
     #[serde(default)]
@@ -185,12 +187,12 @@ impl From<SessionWire> for Session {
             model: w.model,
             cwd: w.cwd,
             parent_id: w.parent_id,
-            token_snapshots: remap_msg_to_hist(&w.token_snapshots, &table, hist_len),
             cost_snapshots: remap_msg_to_hist(&w.cost_snapshots, &table, hist_len),
             turn_metas: remap_msg_to_hist(&w.turn_metas, &table, hist_len),
             history,
             checkpoint: w.checkpoint,
             context_tokens: w.context_tokens,
+            context_tokens_history_len: w.context_tokens_history_len,
             visible_context_tokens: w.visible_context_tokens.or(w.context_tokens),
             session_cost_usd: w.session_cost_usd,
             session_usage: w.session_usage,
@@ -218,8 +220,8 @@ impl From<&Session> for SessionWire {
             messages,
             checkpoint: s.checkpoint.clone(),
             context_tokens: s.context_tokens,
+            context_tokens_history_len: s.context_tokens_history_len,
             visible_context_tokens: s.visible_context_tokens,
-            token_snapshots: remap_hist_to_msg(&s.token_snapshots, &table, msg_len),
             cost_snapshots: remap_hist_to_msg(&s.cost_snapshots, &table, msg_len),
             turn_metas: remap_hist_to_msg(&s.turn_metas, &table, msg_len),
             session_cost_usd: s.session_cost_usd,
@@ -293,8 +295,8 @@ impl Session {
             history: Vec::new(),
             checkpoint: None,
             context_tokens: None,
+            context_tokens_history_len: None,
             visible_context_tokens: None,
-            token_snapshots: Vec::new(),
             cost_snapshots: Vec::new(),
             turn_metas: Vec::new(),
             session_cost_usd: 0.0,
@@ -315,29 +317,43 @@ impl Session {
             model: self.model.clone(),
             cwd: self.cwd.clone(),
             parent_id: self.parent_id.clone(),
-            context_tokens: self.visible_context_tokens,
+            context_tokens: self.context_tokens,
             text_bytes: Some(compute_text_bytes(&self.history)),
         }
     }
 
     pub fn record_context_tokens(&mut self, tokens: u32) {
         self.context_tokens = Some(tokens);
+        self.context_tokens_history_len = Some(self.history.len());
         self.visible_context_tokens = Some(tokens);
     }
 
     pub fn invalidate_context_tokens(&mut self) {
         self.context_tokens = None;
+        self.context_tokens_history_len = None;
     }
 
     pub fn clear_context_tokens(&mut self) {
         self.context_tokens = None;
+        self.context_tokens_history_len = None;
         self.visible_context_tokens = None;
     }
 
-    pub fn restore_context_tokens_from_snapshots(&mut self) {
-        let restored = self.token_snapshots.last().map(|&(_, tokens)| tokens);
-        self.context_tokens = restored;
-        self.visible_context_tokens = restored;
+    pub fn clear_context_tokens_baseline(&mut self) {
+        self.context_tokens = None;
+        self.context_tokens_history_len = None;
+    }
+
+    /// Internal heuristic used for compaction / prepare-request estimation.
+    /// This must not be treated as authoritative provider usage.
+    pub fn estimate_model_context_tokens(&self, summary_prefix: &str) -> u32 {
+        estimate_message_tokens(&history_to_messages(&self.model_history(summary_prefix)))
+    }
+
+    /// Legacy helper retained for internal callers that want to persist the
+    /// latest estimate separately from the authoritative provider reading.
+    pub fn recompute_visible_context_tokens(&mut self, summary_prefix: &str) {
+        self.visible_context_tokens = Some(self.estimate_model_context_tokens(summary_prefix));
     }
 
     pub fn model_history(&self, summary_prefix: &str) -> Vec<HistoryItem> {
@@ -359,18 +375,17 @@ impl Session {
         &mut self,
         kind: String,
         summary: String,
-        keep_recent_turns: usize,
-        keep_recent_bytes: usize,
+        first_live_message_index: usize,
         tokens_before: Option<u32>,
     ) -> bool {
         if summary.trim().is_empty() || self.history.is_empty() {
             return false;
         }
-        let first_live_index =
-            first_live_index_for_checkpoint(&self.history, keep_recent_turns, keep_recent_bytes);
-        if first_live_index == 0 {
+        let Some(first_live_index) =
+            self.first_live_history_index_for_model_message(first_live_message_index)
+        else {
             return false;
-        }
+        };
         self.checkpoint = Some(ContextCheckpoint {
             kind,
             summary,
@@ -379,10 +394,51 @@ impl Session {
             tokens_before,
             tokens_after_estimate: None,
         });
-        // The next provider response is the first authoritative token
-        // reading for checkpointed model history.
-        self.clear_context_tokens();
+        // The next provider response is the first authoritative baseline
+        // token reading for checkpointed model history, but we keep the
+        // last visible count as a display estimate (stale is better than nil).
+        self.clear_context_tokens_baseline();
         true
+    }
+
+    fn first_live_history_index_for_model_message(
+        &self,
+        first_live_message_index: usize,
+    ) -> Option<usize> {
+        let model_history = self.model_history("");
+        if model_history.is_empty() {
+            return None;
+        }
+
+        let mut item_to_history_index: Vec<Option<usize>> = Vec::with_capacity(model_history.len());
+        if let Some(cp) = &self.checkpoint {
+            item_to_history_index.push(None);
+            item_to_history_index.extend((cp.first_live_index..self.history.len()).map(Some));
+        } else {
+            item_to_history_index.extend((0..self.history.len()).map(Some));
+        }
+
+        let model_messages = history_to_messages(&model_history);
+        if first_live_message_index > model_messages.len() {
+            return None;
+        }
+        if first_live_message_index == 0 {
+            return None;
+        }
+        if first_live_message_index == model_messages.len() {
+            return Some(self.history.len());
+        }
+
+        let message_to_item = message_to_history_positions(&model_messages);
+        let item_index = *message_to_item.get(first_live_message_index)?;
+        if first_live_message_index > 0
+            && message_to_item
+                .get(first_live_message_index - 1)
+                .is_some_and(|prev| *prev == item_index)
+        {
+            return None;
+        }
+        item_to_history_index.get(item_index).and_then(|idx| *idx)
     }
 
     pub fn merge_model_history_snapshot(
@@ -432,8 +488,8 @@ impl Session {
             history: self.history.clone(),
             checkpoint: self.checkpoint.clone(),
             context_tokens: self.context_tokens,
+            context_tokens_history_len: self.context_tokens_history_len,
             visible_context_tokens: self.visible_context_tokens,
-            token_snapshots: self.token_snapshots.clone(),
             cost_snapshots: self.cost_snapshots.clone(),
             turn_metas: self.turn_metas.clone(),
             session_cost_usd: self.session_cost_usd,
@@ -442,37 +498,29 @@ impl Session {
     }
 }
 
-pub fn first_live_index_for_checkpoint(
-    history: &[HistoryItem],
-    keep_recent_turns: usize,
-    keep_recent_bytes: usize,
-) -> usize {
-    if history.is_empty() || keep_recent_turns == 0 || keep_recent_bytes == 0 {
-        return history.len();
-    }
-
-    let user_starts: Vec<usize> = history
-        .iter()
-        .enumerate()
-        .filter_map(|(idx, item)| matches!(item, HistoryItem::User { .. }).then_some(idx))
-        .collect();
-    if user_starts.is_empty() {
-        return history.len();
-    }
-
-    let mut start_pos = user_starts.len().saturating_sub(keep_recent_turns);
-    loop {
-        let first_live_index = user_starts.get(start_pos).copied().unwrap_or(history.len());
-        if first_live_index >= history.len()
-            || compute_model_context_bytes(&history[first_live_index..]) <= keep_recent_bytes as u64
-        {
-            return first_live_index;
+/// Internal heuristic used for compaction and request-preparation estimates.
+/// This must not be surfaced to users as authoritative provider usage.
+pub fn estimate_message_tokens(messages: &[Message]) -> u32 {
+    let mut chars = 0usize;
+    for msg in messages {
+        if let Some(ref content) = msg.content {
+            chars += content.text_content().len();
+            chars += content.image_count() * 4800;
         }
-        start_pos += 1;
-        if start_pos >= user_starts.len() {
-            return history.len();
+        if let Some(ref reasoning) = msg.reasoning_content {
+            chars += reasoning.len();
+        }
+        if let Some(ref calls) = msg.tool_calls {
+            for call in calls {
+                chars += call.function.name.len();
+                chars += call.function.arguments.len();
+            }
+        }
+        if let Some(ref id) = msg.tool_call_id {
+            chars += id.len();
         }
     }
+    chars.div_ceil(4).min(u32::MAX as usize) as u32
 }
 
 pub fn is_context_checkpoint_summary(item: &HistoryItem, summary_prefix: &str) -> bool {
@@ -664,18 +712,6 @@ fn compute_text_bytes(history: &[HistoryItem]) -> u64 {
                     total += inv.name.len() as u64;
                     total += inv.arguments.len() as u64;
                 }
-            }
-        }
-    }
-    total
-}
-
-fn compute_model_context_bytes(history: &[HistoryItem]) -> u64 {
-    let mut total = compute_text_bytes(history);
-    for item in history {
-        if let HistoryItem::Assistant(turn) = item {
-            for inv in &turn.invocations {
-                total += inv.result.content.len() as u64;
             }
         }
     }
@@ -881,7 +917,7 @@ mod tests {
     // ── Context checkpoints ──────────────────────────────────────────
 
     #[test]
-    fn first_live_index_keeps_recent_turns_within_byte_budget() {
+    fn install_checkpoint_uses_explicit_message_boundary_without_checkpoint() {
         let history = vec![
             user_item("first"),
             assistant_text_item("reply 1"),
@@ -889,30 +925,18 @@ mod tests {
             assistant_text_item("reply 2"),
             user_item("third"),
         ];
-        assert_eq!(first_live_index_for_checkpoint(&history, 0, 100), 5);
-        assert_eq!(first_live_index_for_checkpoint(&history, 1, 100), 4);
-        assert_eq!(first_live_index_for_checkpoint(&history, 2, 100), 2);
-        assert_eq!(first_live_index_for_checkpoint(&history, 3, 100), 0);
-        assert_eq!(first_live_index_for_checkpoint(&history, 10, 100), 0);
+        let mut s = fixture_session();
+        s.history = history;
+
+        let installed =
+            s.install_context_checkpoint("compaction".into(), "summary".into(), 2, Some(100));
+
+        assert!(installed);
+        assert_eq!(s.checkpoint.as_ref().unwrap().first_live_index, 2);
     }
 
     #[test]
-    fn first_live_index_drops_whole_turns_until_tail_fits_budget() {
-        let history = vec![
-            user_item("first"),
-            assistant_text_item("small"),
-            user_item("second is too large to keep"),
-            assistant_text_item("reply"),
-            user_item("third"),
-            assistant_text_item("ok"),
-        ];
-        assert_eq!(first_live_index_for_checkpoint(&history, 3, 100), 0);
-        assert_eq!(first_live_index_for_checkpoint(&history, 3, 10), 4);
-        assert_eq!(first_live_index_for_checkpoint(&history, 3, 1), 6);
-    }
-
-    #[test]
-    fn first_live_index_budget_counts_tool_output() {
+    fn install_checkpoint_uses_explicit_message_boundary_with_tool_group() {
         let tool_heavy_turn = HistoryItem::Assistant(AssistantTurn::with_invocations(
             Some(Content::Text("done".into())),
             None,
@@ -935,9 +959,62 @@ mod tests {
             user_item("recent"),
             tool_heavy_turn,
         ];
+        let mut s = fixture_session();
+        s.history = history;
 
-        assert_eq!(first_live_index_for_checkpoint(&history, 1, 200), 2);
-        assert_eq!(first_live_index_for_checkpoint(&history, 1, 20), 4);
+        let installed =
+            s.install_context_checkpoint("compaction".into(), "summary".into(), 2, Some(100));
+
+        assert!(installed);
+        assert_eq!(s.checkpoint.as_ref().unwrap().first_live_index, 2);
+    }
+
+    #[test]
+    fn install_checkpoint_rejects_boundary_inside_assistant_tool_group() {
+        let tool_heavy_turn = HistoryItem::Assistant(AssistantTurn::with_invocations(
+            Some(Content::Text("done".into())),
+            None,
+            Vec::new(),
+            vec![ToolInvocation {
+                call_id: "c1".into(),
+                name: "read".into(),
+                arguments: "{}".into(),
+                result: ToolOutcome {
+                    content: "x".repeat(100),
+                    is_error: false,
+                    metadata: None,
+                },
+                elapsed_ms: None,
+            }],
+        ));
+        let mut s = fixture_session();
+        s.history = vec![user_item("recent"), tool_heavy_turn];
+
+        // Message index 2 is the tool output inside the collapsed assistant item.
+        let installed =
+            s.install_context_checkpoint("compaction".into(), "summary".into(), 2, Some(100));
+
+        assert!(!installed);
+        assert!(s.checkpoint.is_none());
+    }
+
+    #[test]
+    fn install_checkpoint_maps_model_message_boundary_through_existing_checkpoint() {
+        let mut s = fixture_session();
+        s.history = vec![
+            user_item("old"),
+            assistant_text_item("old reply"),
+            user_item("kept user"),
+            assistant_text_item("kept reply"),
+            user_item("newest user"),
+        ];
+        s.checkpoint = Some(checkpoint("older summary", 2));
+
+        let installed =
+            s.install_context_checkpoint("compaction".into(), "new summary".into(), 2, Some(100));
+
+        assert!(installed);
+        assert_eq!(s.checkpoint.as_ref().unwrap().first_live_index, 3);
     }
 
     #[test]
@@ -948,7 +1025,7 @@ mod tests {
         s.visible_context_tokens = Some(100);
 
         let installed =
-            s.install_context_checkpoint("compaction".into(), "summary".into(), 3, 1000, Some(100));
+            s.install_context_checkpoint("compaction".into(), "summary".into(), 0, Some(100));
 
         assert!(!installed);
         assert!(s.checkpoint.is_none());
@@ -957,7 +1034,7 @@ mod tests {
     }
 
     #[test]
-    fn install_context_checkpoint_clears_context_tokens() {
+    fn install_context_checkpoint_clears_baseline_keeps_visible() {
         let mut s = fixture_session();
         s.history = vec![
             user_item("old"),
@@ -969,11 +1046,11 @@ mod tests {
         s.visible_context_tokens = Some(500);
 
         let installed =
-            s.install_context_checkpoint("compaction".into(), "summary".into(), 1, 1000, Some(500));
+            s.install_context_checkpoint("compaction".into(), "summary".into(), 2, Some(500));
 
         assert!(installed);
         assert!(s.context_tokens.is_none());
-        assert!(s.visible_context_tokens.is_none());
+        assert_eq!(s.visible_context_tokens, Some(500));
         assert_eq!(s.checkpoint.as_ref().unwrap().first_live_index, 2);
     }
 
@@ -986,6 +1063,32 @@ mod tests {
 
         assert!(s.context_tokens.is_none());
         assert_eq!(s.visible_context_tokens, Some(321));
+    }
+
+    #[test]
+    fn recompute_visible_context_tokens_uses_model_history_after_checkpoint() {
+        let mut s = fixture_session();
+        s.history = vec![
+            user_item("old"),
+            assistant_text_item(&"x".repeat(200)),
+            user_item("recent"),
+            assistant_text_item("recent reply"),
+        ];
+        s.checkpoint = Some(checkpoint("summary", 2));
+
+        s.recompute_visible_context_tokens("SUMMARY:");
+
+        let expected = history_to_messages(&s.model_history("SUMMARY:"))
+            .iter()
+            .map(|msg| {
+                msg.content
+                    .as_ref()
+                    .map(|c| c.text_content().len())
+                    .unwrap_or(0)
+            })
+            .sum::<usize>()
+            .div_ceil(4) as u32;
+        assert_eq!(s.visible_context_tokens, Some(expected));
     }
 
     #[test]
@@ -1099,7 +1202,7 @@ mod tests {
         assert_eq!(m.model.as_deref(), Some("claude-opus"));
         assert_eq!(m.cwd.as_deref(), Some("/work"));
         assert_eq!(m.parent_id.as_deref(), Some("p1"));
-        assert_eq!(m.context_tokens, Some(5678));
+        assert_eq!(m.context_tokens, Some(1234));
         assert_eq!(m.text_bytes, Some(2)); // "hi"
     }
 
@@ -1110,6 +1213,7 @@ mod tests {
         s.history.push(assistant_text_item("a1"));
         s.title = Some("kept".into());
         s.context_tokens = Some(500);
+        s.context_tokens_history_len = Some(2);
         s.session_cost_usd = 1.25;
 
         let forked = s.fork(4242);
@@ -1118,6 +1222,7 @@ mod tests {
         assert_eq!(forked.title.as_deref(), Some("kept"));
         assert_eq!(forked.history.len(), s.history.len());
         assert_eq!(forked.context_tokens, Some(500));
+        assert_eq!(forked.context_tokens_history_len, Some(2));
         assert_eq!(forked.session_cost_usd, 1.25);
         assert!(forked.created_at_ms >= s.created_at_ms);
     }
@@ -1304,11 +1409,9 @@ mod tests {
     }
 
     #[test]
-    fn legacy_snapshot_keys_remap_to_history_positions_on_load() {
-        // messages.len() positions for a [user, assistant+tool_call, tool]
-        // sequence collapse to history.len() positions [user, assistant].
-        // A snapshot keyed by messages.len()==3 (after the tool result)
-        // should remap to history.len()==2.
+    fn legacy_session_with_token_snapshots_loads_without_error() {
+        // Old session files may contain `token_snapshots`. The field is no
+        // longer used, but deserialization should not fail.
         let json = serde_json::json!({
             "id": "abc",
             "messages": [
@@ -1327,7 +1430,6 @@ mod tests {
         });
         let s: Session = serde_json::from_value(json).unwrap();
         assert_eq!(s.history.len(), 2);
-        assert_eq!(s.token_snapshots, vec![(2, 100)]);
         assert_eq!(s.cost_snapshots, vec![(2, 0.5)]);
     }
 
@@ -1377,9 +1479,9 @@ mod tests {
                 Vec::new(),
                 vec![inv_ok, inv_err],
             )));
-        original.token_snapshots = vec![(1, 50), (3, 200)];
         original.cost_snapshots = vec![(3, 1.25)];
         original.context_tokens = Some(200);
+        original.context_tokens_history_len = Some(3);
         original.visible_context_tokens = Some(250);
         original.session_cost_usd = 1.25;
 
@@ -1387,9 +1489,12 @@ mod tests {
         let round: Session = serde_json::from_str(&json).unwrap();
 
         assert_eq!(round.history, original.history);
-        assert_eq!(round.token_snapshots, original.token_snapshots);
         assert_eq!(round.cost_snapshots, original.cost_snapshots);
         assert_eq!(round.context_tokens, original.context_tokens);
+        assert_eq!(
+            round.context_tokens_history_len,
+            original.context_tokens_history_len
+        );
         assert_eq!(
             round.visible_context_tokens,
             original.visible_context_tokens

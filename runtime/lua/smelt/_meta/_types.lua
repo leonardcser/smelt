@@ -143,7 +143,7 @@
 ---@field kind string One of `"network" | "rate_limited" | "quota" | "invalid_response" | "context_window" | "cancelled" | "other"`.
 ---@field message string Human-readable single-line description (newlines collapsed to spaces).
 
---- One message in a `smelt.engine.ask` conversation.
+--- One text-only message in a `smelt.engine.ask` conversation.
 ---@class smelt.engine.AskMessage
 ---@field role string Either `"user"` or `"assistant"`. Other roles are silently dropped.
 ---@field content string Message body as plain text.
@@ -155,10 +155,9 @@
 
 --- Spec for `smelt.engine.ask`.
 ---@class smelt.engine.AskSpec
----@field system? string System prompt sent before the conversation. Optional when `inherit_session = true` (the current session's system prompt is substituted in that case).
----@field messages? smelt.engine.AskMessage[] Prior turns. Each message is `{ role = "user"|"assistant", content = "..." }`.
+---@field system string System prompt sent before the conversation.
+---@field messages? table Prior turns. When present, this must be a sequence of full `protocol::Message`-shaped rows such as `{ role, content?, reasoning_content?, tool_calls?, tool_call_id?, is_error? }`.
 ---@field question? string Single-shot question appended as a final user message after `messages`.
----@field inherit_session? boolean When true, override `system` with the current session's assembled system prompt and prepend the same model-visible history the next main turn would receive (checkpoint summary plus retained tail when compacted) plus the active tool list. The request then shares the Anthropic prefix cache with the main turn. Used by the compaction summariser to keep its prompt off the cache miss path.
 ---@field model? string Model reference (`"provider/model"` or a bare name resolved against the configured providers). When `nil`, falls back to the primary model.
 ---@field response_format? smelt.engine.AskResponseFormat JSON-schema response constraint.
 ---@field reasoning_effort? smelt.reasoning.Effort Reasoning effort for the request; defaults to `"off"`.
@@ -178,9 +177,18 @@
 ---@field tools? smelt.engine.RuleOverride Per-tool `allow`/`ask`/`deny` patterns for the duration of the turn.
 ---@field [string] smelt.engine.RuleOverride Per-subcommand pattern buckets keyed by tool name.
 
+--- Spec for `smelt.engine.ask_inherited`.
+---@class smelt.engine.InheritedAskSpec
+---@field messages? table Prior turns. When present, this must be a sequence of full `protocol::Message`-shaped rows such as `{ role, content?, reasoning_content?, tool_calls?, tool_call_id?, is_error? }`. When omitted or empty, the live model-visible history is inherited.
+---@field question? string Single-shot question appended as a final user message after `messages`.
+---@field model? string Model reference (`"provider/model"` or a bare name resolved against the configured providers). When `nil`, falls back to the primary model.
+---@field response_format? smelt.engine.AskResponseFormat JSON-schema response constraint.
+---@field reasoning_effort? smelt.reasoning.Effort Reasoning effort for the request; defaults to `"off"`.
+---@field on_response? fun(arg1: string, arg2: smelt.engine.AskError?) Fires once with `(content, err)`. On success `err` is `nil` and `content` carries the assistant text. On failure `err` is a `smelt.engine.AskError` table and `content` is `""`.
+
 --- Token accounting breakdown passed inside `smelt.engine.PrepareRequest`.
 ---@class smelt.engine.PrepareContextEstimate
----@field source string One of `"full_request_estimate" | "provider_snapshot" | "provider_snapshot_plus_history_delta" | "provider_baseline_after_last_assistant"`.
+---@field source string One of `"full_request_estimate" | "provider_snapshot" | "provider_snapshot_plus_history_delta" | "visible_fallback"`.
 ---@field total_context_tokens integer Total active-context estimate used by auto-compaction.
 ---@field provider_context_tokens? integer Latest provider-reported active context, when available.
 ---@field estimated_delta_tokens integer Locally estimated tokens added on top of provider usage.

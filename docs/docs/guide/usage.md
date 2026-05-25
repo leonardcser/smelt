@@ -101,14 +101,13 @@ condensed summary, freeing space while preserving essential information.
 
 The full transcript remains visible and scrollable — only the model's context
 is compacted. A checkpoint marker appears in the transcript where compaction
-occurred. Your most recent turns are kept verbatim so the model still sees
-recent detail; older turns are summarized away.
-
-Recent detail is retained only while it fits both retention limits:
-`smelt.settings.compact_keep_recent_turns` (default `3`) and
-`smelt.settings.compact_keep_recent_bytes` (default `40000`). If the retained
-tail would exceed the byte budget, Smelt drops whole older turns from the
-model-visible tail; the full transcript still stays visible.
+occurred. Smelt first tries to compact the full model-visible conversation; if
+that compaction request would overflow, it moves the compaction point earlier
+by whole message groups until the summary fits. A group is either a user
+message, a plain assistant message, or an assistant tool-use step together
+with its tool outputs. The postponed suffix is then reattached unchanged after
+the new summary. By default Smelt always postpones the latest group first;
+adjust that minimum with `smelt.settings.compact_keep_recent_groups`.
 
 When `auto_compact` is enabled (via `/settings`), compaction triggers
 automatically before a model request whose active context would cross

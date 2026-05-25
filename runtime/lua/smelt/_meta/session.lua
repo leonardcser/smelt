@@ -7,11 +7,11 @@
 ---@class smelt.session
 local session = {}
 
---- Install a model-context checkpoint without deleting transcript history. Takes `{ kind?, summary, keep_recent_turns?, keep_recent_bytes?, tokens_before? }`; future model requests use the summary plus a bounded set of retained recent turns. Returns the model-visible messages after the checkpoint is installed, or `nil` when there was nothing old enough to compact.
+--- Install a model-context checkpoint without deleting transcript history. Takes `{ kind?, summary, first_live_message_index, tokens_before? }`; future model requests use the summary plus the original model-visible suffix starting at `first_live_message_index`. Returns the model-visible messages after the checkpoint is installed, or `nil` when the boundary would be a no-op.
 ---@type fun(spec: table): table?
 session.checkpoint = nil
 
---- Context token count currently shown in the UI, or `nil` if no token usage has been observed yet. This usually matches the most recent provider-reported active context count, but Smelt keeps the last visible value across transient turn bookkeeping such as retries or interruptions until a new authoritative reading arrives or compaction completes.
+--- Latest authoritative provider-reported active-context token count, or `nil` when Smelt does not currently have a valid reading for the model-visible history.
 ---@type fun(): integer?
 session.context_tokens = nil
 

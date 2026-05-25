@@ -9,7 +9,7 @@ use smelt_core::lua::module::LuaMod;
 /// rows into `Vec<protocol::Message>` via serde. Rows that fail to
 /// deserialize (unknown role, malformed shape) are silently dropped so a
 /// single bad entry doesn't poison the whole replacement list.
-fn lua_messages_to_protocol(lua: &Lua, table: &mlua::Table) -> Vec<protocol::Message> {
+pub(crate) fn lua_messages_to_protocol(lua: &Lua, table: &mlua::Table) -> Vec<protocol::Message> {
     let mut out = Vec::new();
     for value in table.clone().sequence_values::<mlua::Value>().flatten() {
         if let Some(msg) = smelt_core::lua::lua_to_serde::<protocol::Message>(lua, &value) {
@@ -19,7 +19,7 @@ fn lua_messages_to_protocol(lua: &Lua, table: &mlua::Table) -> Vec<protocol::Mes
     out
 }
 
-fn messages_to_lua(lua: &Lua, msgs: &[protocol::Message]) -> LuaResult<mlua::Table> {
+pub(crate) fn messages_to_lua(lua: &Lua, msgs: &[protocol::Message]) -> LuaResult<mlua::Table> {
     let tbl = lua.create_table()?;
     for (i, msg) in msgs.iter().enumerate() {
         let entry = lua.create_table()?;
@@ -164,10 +164,10 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
     )?;
     m.fn_(
         "context_tokens",
-        "Context token count currently shown in the UI, or `nil` if no token usage has been observed yet. This usually matches the most recent provider-reported active context count, but Smelt keeps the last visible value across transient turn bookkeeping such as retries or interruptions until a new authoritative reading arrives or compaction completes.",
+        "Latest authoritative provider-reported active-context token count, or `nil` when Smelt does not currently have a valid reading for the model-visible history.",
         &[],
         |_, ()| -> LuaResult<Option<u32>> {
-            Ok(crate::lua::try_with_app(|app| app.core.session.visible_context_tokens)
+            Ok(crate::lua::try_with_app(|app| app.core.session.context_tokens)
                 .unwrap_or_default())
         },
     )?;
@@ -208,34 +208,20 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
     )?;
     m.fn_(
         "checkpoint",
-        "Install a model-context checkpoint without deleting transcript history. Takes `{ kind?, summary, keep_recent_turns?, keep_recent_bytes?, tokens_before? }`; future model requests use the summary plus a bounded set of retained recent turns. Returns the model-visible messages after the checkpoint is installed, or `nil` when there was nothing old enough to compact.",
+        "Install a model-context checkpoint without deleting transcript history. Takes `{ kind?, summary, first_live_message_index, tokens_before? }`; future model requests use the summary plus the original model-visible suffix starting at `first_live_message_index`. Returns the model-visible messages after the checkpoint is installed, or `nil` when the boundary would be a no-op.",
         &["spec"],
         |lua, spec: mlua::Table| -> LuaResult<Option<mlua::Table>> {
             let kind = spec
                 .get::<Option<String>>("kind")?
                 .unwrap_or_else(|| "compaction".to_string());
             let summary = spec.get::<String>("summary")?;
-            let keep_recent_turns = spec
-                .get::<Option<usize>>("keep_recent_turns")?
-                .unwrap_or_else(|| {
-                    crate::lua::try_with_app(|app| app.core.config.settings.compact_keep_recent_turns as usize)
-                        .unwrap_or(3)
-                });
-            let keep_recent_bytes = spec
-                .get::<Option<usize>>("keep_recent_bytes")?
-                .unwrap_or_else(|| {
-                    crate::lua::try_with_app(|app| {
-                        app.core.config.settings.compact_keep_recent_bytes as usize
-                    })
-                    .unwrap_or(40_000)
-                });
+            let first_live_message_index = spec.get::<usize>("first_live_message_index")?;
             let tokens_before = spec.get::<Option<u32>>("tokens_before")?;
             let installed = crate::lua::with_app(|app| {
                 app.install_context_checkpoint(
                     kind,
                     summary,
-                    keep_recent_turns,
-                    keep_recent_bytes,
+                    first_live_message_index,
                     tokens_before,
                 )
             });

@@ -6,9 +6,10 @@
 
 /// Maximum lines of tool output sent to the LLM.
 pub(crate) const MAX_TOOL_OUTPUT_LINES: usize = 2000;
+const TRUNCATION_NOTICE: &str = "[tool output truncated for model context]";
 
-/// Trim tool output to `max_lines` for LLM context. Appends a note with
-/// the total line count when truncated.
+/// Trim tool output to `max_lines` for LLM context. Prepends the total line
+/// count and appends an explicit truncation notice when content is clipped.
 pub(crate) fn trim_tool_output(content: &str, max_lines: usize) -> String {
     if content == "no matches found" {
         return content.to_string();
@@ -17,13 +18,12 @@ pub(crate) fn trim_tool_output(content: &str, max_lines: usize) -> String {
     if total <= max_lines {
         return content.to_string();
     }
-    let mut out: String = content
+    let visible: String = content
         .lines()
         .take(max_lines)
         .collect::<Vec<_>>()
         .join("\n");
-    out.push_str(&format!("\n... (trimmed, {} lines total)", total));
-    out
+    format!("Total output lines: {total}\n\n{visible}\n\n{TRUNCATION_NOTICE}")
 }
 
 #[cfg(test)]
@@ -48,11 +48,12 @@ mod tests {
     }
 
     #[test]
-    fn content_over_max_lines_truncated_with_footer() {
+    fn content_over_max_lines_truncated_with_header_and_notice() {
         let input = "a\nb\nc\nd\ne";
         let out = trim_tool_output(input, 2);
-        assert!(out.starts_with("a\nb"));
-        assert!(out.contains("... (trimmed, 5 lines total)"));
+        assert!(out.starts_with("Total output lines: 5\n\n"));
+        assert!(out.contains("a\nb"));
+        assert!(out.contains(TRUNCATION_NOTICE));
     }
 
     #[test]
@@ -61,9 +62,9 @@ mod tests {
     }
 
     #[test]
-    fn footer_reports_total_not_kept_count() {
+    fn header_reports_total_line_count() {
         let input = "1\n2\n3\n4";
         let out = trim_tool_output(input, 1);
-        assert!(out.contains("4 lines total"));
+        assert!(out.contains("Total output lines: 4"));
     }
 }

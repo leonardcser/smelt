@@ -204,7 +204,7 @@ Typed error table delivered to `on_response` when the underlying provider call f
 
 ### `smelt.engine.AskMessage`
 
-One message in a `smelt.engine.ask` conversation.
+One text-only message in a `smelt.engine.ask` conversation.
 
 | Field | Type | Required | Description |
 | --- | --- | --- | --- |
@@ -226,10 +226,9 @@ Spec for `smelt.engine.ask`.
 
 | Field | Type | Required | Description |
 | --- | --- | --- | --- |
-| `system` | `string` |  | System prompt sent before the conversation. Optional when `inherit_session = true` (the current session's system prompt is substituted in that case). |
-| `messages` | [smelt.engine.AskMessage[]](types.md#smeltengineaskmessage) |  | Prior turns. Each message is `{ role = "user"|"assistant", content = "..." }`. |
+| `system` | `string` | yes | System prompt sent before the conversation. |
+| `messages` | `table` |  | Prior turns. When present, this must be a sequence of full `protocol::Message`-shaped rows such as `{ role, content?, reasoning_content?, tool_calls?, tool_call_id?, is_error? }`. |
 | `question` | `string` |  | Single-shot question appended as a final user message after `messages`. |
-| `inherit_session` | `boolean` |  | When true, override `system` with the current session's assembled system prompt and prepend the same model-visible history the next main turn would receive (checkpoint summary plus retained tail when compacted) plus the active tool list. The request then shares the Anthropic prefix cache with the main turn. Used by the compaction summariser to keep its prompt off the cache miss path. |
 | `model` | `string` |  | Model reference (`"provider/model"` or a bare name resolved against the configured providers). When `nil`, falls back to the primary model. |
 | `response_format` | [smelt.engine.AskResponseFormat](types.md#smeltengineaskresponseformat) |  | JSON-schema response constraint. |
 | `reasoning_effort` | [smelt.reasoning.Effort](types.md#smeltreasoningeffort) |  | Reasoning effort for the request; defaults to `"off"`. |
@@ -253,13 +252,26 @@ Front-matter override block accepted by `smelt.engine.submit_command`. Mirrors w
 | `tools` | [smelt.engine.RuleOverride](types.md#smeltengineruleoverride) |  | Per-tool `allow`/`ask`/`deny` patterns for the duration of the turn. |
 | `[string]` | [smelt.engine.RuleOverride](types.md#smeltengineruleoverride) |  | Per-subcommand pattern buckets keyed by tool name. |
 
+### `smelt.engine.InheritedAskSpec`
+
+Spec for `smelt.engine.ask_inherited`.
+
+| Field | Type | Required | Description |
+| --- | --- | --- | --- |
+| `messages` | `table` |  | Prior turns. When present, this must be a sequence of full `protocol::Message`-shaped rows such as `{ role, content?, reasoning_content?, tool_calls?, tool_call_id?, is_error? }`. When omitted or empty, the live model-visible history is inherited. |
+| `question` | `string` |  | Single-shot question appended as a final user message after `messages`. |
+| `model` | `string` |  | Model reference (`"provider/model"` or a bare name resolved against the configured providers). When `nil`, falls back to the primary model. |
+| `response_format` | [smelt.engine.AskResponseFormat](types.md#smeltengineaskresponseformat) |  | JSON-schema response constraint. |
+| `reasoning_effort` | [smelt.reasoning.Effort](types.md#smeltreasoningeffort) |  | Reasoning effort for the request; defaults to `"off"`. |
+| `on_response` | `fun(arg1: string, arg2: smelt.engine.AskError?)` |  | Fires once with `(content, err)`. On success `err` is `nil` and `content` carries the assistant text. On failure `err` is a `smelt.engine.AskError` table and `content` is `""`. |
+
 ### `smelt.engine.PrepareContextEstimate`
 
 Token accounting breakdown passed inside `smelt.engine.PrepareRequest`.
 
 | Field | Type | Required | Description |
 | --- | --- | --- | --- |
-| `source` | `string` | yes | One of `"full_request_estimate" | "provider_snapshot" | "provider_snapshot_plus_history_delta" | "provider_baseline_after_last_assistant"`. |
+| `source` | `string` | yes | One of `"full_request_estimate" | "provider_snapshot" | "provider_snapshot_plus_history_delta" | "visible_fallback"`. |
 | `total_context_tokens` | `integer` | yes | Total active-context estimate used by auto-compaction. |
 | `provider_context_tokens` | `integer` |  | Latest provider-reported active context, when available. |
 | `estimated_delta_tokens` | `integer` | yes | Locally estimated tokens added on top of provider usage. |

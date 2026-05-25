@@ -469,8 +469,7 @@ Read or write via `smelt.settings.<key>` from `init.lua`. Booleans also toggle a
 | `redact_secrets` | `bool` | `true` | Scrub detected secrets from user input and tool results before they reach the LLM. |
 | `auto_reload` | `bool` | `false` | Watch on-disk config inputs (init.lua, plugins/, commands/,  skills/, AGENTS.md, `--system-prompt` file) and dispatch  `/reload` when any of them changes. |
 | `compact_threshold` | `number` | `0.8` | Fraction of the configured context window (0, 1] at which the  bundled compact plugin auto-triggers before oversized requests. |
-| `compact_keep_recent_turns` | `number` | `3` | Number of most-recent user turns kept verbatim after a compaction  checkpoint. Older turns remain visible in the transcript but are  summarized out of the next model request. |
-| `compact_keep_recent_bytes` | `number` | `40000` | Maximum text bytes retained verbatim after a compaction checkpoint.  The compact plugin keeps whole recent turns up to both this budget  and `compact_keep_recent_turns`. |
+| `compact_keep_recent_groups` | `number` | `1` | Minimum number of trailing message groups kept verbatim after  compaction. A group is a user message, a plain assistant message,  or an assistant tool-use step together with its tool outputs. |
 | `cache_ttl_long` | `bool` | `false` | Anthropic prompt cache TTL. `false` uses the 5-minute ephemeral  TTL; `true` opts into the 1-hour TTL. Has no effect on  non-Anthropic providers. |
 | `autoupgrade` | `"off"` \| `"notify"` \| `"auto"` | `"notify"` | Autoupgrade behavior. `"off"` skips checks; `"notify"` shows a  pill when an update is available; `"auto"` installs in  background on detection. |
 | `autoupgrade_channel` | `"stable"` \| `"unstable"` | `"stable"` | Release channel autoupgrade tracks: `"stable"` (tagged releases,  including prereleases) or `"unstable"` (`main` HEAD). |
@@ -1096,6 +1095,8 @@ LLM engine control — cancel, ask, submit commands, and request tool approval.
 
 - `smelt.engine.ask` :: `fun(spec: smelt.engine.AskSpec): integer`
   Run an out-of-band LLM request without touching the main turn.
+- `smelt.engine.ask_inherited` :: `fun(spec: smelt.engine.InheritedAskSpec): integer`
+  Run an auxiliary LLM request that inherits the current session's assembled system prompt and active tool list.
 - `smelt.engine.ask_with_trim` :: `fun(spec: table): integer`
   Wrap `smelt.engine.ask` with a trim-and-retry loop for context-window errors: drops the oldest message from `spec.messages` and re-issues the request up to `spec.max_trims` times (default 20).
 - `smelt.engine.cancel` :: `fun(): nil`
@@ -1296,7 +1297,7 @@ Current session metadata, turn list, message snapshots, rewind, and persisted se
 - `smelt.session.checkpoint` :: `fun(spec: table): table?`
   Install a model-context checkpoint without deleting transcript history.
 - `smelt.session.context_tokens` :: `fun(): integer?`
-  Context token count currently shown in the UI, or `nil` if no token usage has been observed yet.
+  Latest authoritative provider-reported active-context token count, or `nil` when Smelt does not currently have a valid reading for the model-visible history.
 - `smelt.session.context_window` :: `fun(): integer?`
   Configured context-window size in tokens for the active model.
 - `smelt.session.cost` :: `fun(): number`

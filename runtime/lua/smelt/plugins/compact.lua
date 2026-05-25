@@ -208,14 +208,18 @@ end
 -- trim-friendly message list and sends it with `ask_with_trim`. Used by
 -- the mid-turn recovery hook (where the live session may not be settled)
 -- and as the overflow fallback for the inheriting path.
-local function summarize_flat(history, instructions, done)
+local function summarize_flat_with_handle(history, instructions, handle, done)
   if not history or #history == 0 then
     done(nil)
     return
   end
   local cleaned = strip_images(history)
   local messages = build_summarizer_messages(cleaned, instructions)
-  local handle = smelt.work.busy("compacting")
+  local owns_handle = false
+  if not handle then
+    handle = smelt.work.busy("compacting")
+    owns_handle = true
+  end
   local empty_retries = 0
 
   -- Reuse the main session's system prompt so the system block hits the
@@ -235,7 +239,7 @@ local function summarize_flat(history, instructions, done)
       max_trims   = 20,
       on_response = function(summary, err)
         if err then
-          handle:remove()
+          if owns_handle then handle:remove() end
           if smelt.task.is_cancelled(err) then
             done(nil, err)
             return
@@ -250,12 +254,12 @@ local function summarize_flat(history, instructions, done)
             send()
             return
           end
-          handle:remove()
+          if owns_handle then handle:remove() end
           smelt.notify.error("compaction failed: empty summary after retries")
           done(nil, nil)
           return
         end
-        handle:remove()
+        if owns_handle then handle:remove() end
         done(summary, nil)
       end,
     })
@@ -264,34 +268,36 @@ local function summarize_flat(history, instructions, done)
   send()
 end
 
+local function summarize_flat(history, instructions, done)
+  summarize_flat_with_handle(history, instructions, nil, done)
+end
+
 -- Async summarizer primitive shared by /compact and post-turn auto-compact.
--- Uses `inherit_session = true` so the request prefix matches the main
--- turn byte-for-byte and reuses its Anthropic prompt-cache slot. Falls
--- back to the flat stringify path on context-window overflow.
-local function summarize(history, instructions, done)
+-- Uses `ask_inherited` so the request shares the main turn's
+-- system prompt and tool list. `history` may be a strict prefix of the
+-- live model-visible conversation; when omitted the full live history is
+-- inherited.
+local function summarize_messages_with_handle(history, instructions, handle, done)
   if not history or #history == 0 then
     done(nil)
     return
   end
   local task = build_summary_task(instructions)
-  local handle = smelt.work.busy("compacting")
+  local owns_handle = false
+  if not handle then
+    handle = smelt.work.busy("compacting")
+    owns_handle = true
+  end
   local empty_retries = 0
 
   local function send()
-    smelt.engine.ask({
-      inherit_session = true,
-      question        = task,
-      model           = smelt.model.preferred("compact"),
-      on_response     = function(summary, err)
+    smelt.engine.ask_inherited({
+      messages    = history,
+      question    = task,
+      model       = smelt.model.preferred("compact"),
+      on_response = function(summary, err)
         if err then
-          if err.kind == "context_window" then
-            -- Inherited session overflowed the summariser window. Fall back
-            -- to the flat stringify path, which trims aggressively.
-            handle:remove()
-            summarize_flat(history, instructions, done)
-            return
-          end
-          handle:remove()
+          if owns_handle then handle:remove() end
           if smelt.task.is_cancelled(err) then
             done(nil, err)
             return
@@ -306,18 +312,132 @@ local function summarize(history, instructions, done)
             send()
             return
           end
-          handle:remove()
+          if owns_handle then handle:remove() end
           smelt.notify.error("compaction failed: empty summary after retries")
           done(nil, nil)
           return
         end
-        handle:remove()
+        if owns_handle then handle:remove() end
         done(summary, nil)
       end,
     })
   end
 
   send()
+end
+
+local function summarize_messages(history, instructions, done)
+  summarize_messages_with_handle(history, instructions, nil, done)
+end
+
+local function build_message_groups(history)
+  local groups = {}
+  local i = 1
+  while i <= #history do
+    local msg = history[i]
+    if msg.role == "assistant" then
+      local j = i
+      if msg.tool_calls and #msg.tool_calls > 0 then
+        j = i + 1
+        while j <= #history and history[j].role == "tool" do
+          j = j + 1
+        end
+        j = j - 1
+      end
+      table.insert(groups, { start_idx = i, end_idx = j })
+      i = j + 1
+    else
+      table.insert(groups, { start_idx = i, end_idx = i })
+      i = i + 1
+    end
+  end
+  return groups
+end
+
+local function slice_group_prefix(history, groups, last_group)
+  local out = {}
+  if last_group <= 0 then return out end
+  for group_idx = 1, last_group do
+    local group = groups[group_idx]
+    for msg_idx = group.start_idx, group.end_idx do
+      table.insert(out, history[msg_idx])
+    end
+  end
+  return out
+end
+
+local function suffix_first_live_message_index(history, groups, suffix_start_group)
+  if suffix_start_group > #groups then
+    return #history
+  end
+  return groups[suffix_start_group].start_idx - 1
+end
+
+local function summarize_by_group_boundary(history, instructions, done)
+  if not history or #history == 0 then
+    done(nil)
+    return
+  end
+
+  local groups = build_message_groups(history)
+  if #groups == 0 then
+    done(nil)
+    return
+  end
+
+  local min_postponed_groups = math.max(0, math.floor(smelt.settings.compact_keep_recent_groups or 1))
+  local suffix_start_group = math.max(1, (#groups + 1) - math.min(min_postponed_groups, #groups))
+  local handle = smelt.work.busy("compacting")
+  local finished = false
+
+  local function finish(summary, err, first_live_message_index)
+    if finished then return end
+    finished = true
+    handle:remove()
+    done(summary, err, first_live_message_index)
+  end
+
+  local function fallback_trimmed(prefix_messages)
+    summarize_flat_with_handle(prefix_messages, instructions, handle, function(summary, err)
+      if not summary or smelt.task.is_cancelled(err) then
+        finish(nil, err)
+        return
+      end
+      finish(summary, nil, suffix_first_live_message_index(history, groups, suffix_start_group))
+    end)
+  end
+
+  local function attempt()
+    local prefix_last_group = suffix_start_group - 1
+    if prefix_last_group <= 0 then
+      finish(nil)
+      return
+    end
+
+    local prefix_messages = slice_group_prefix(history, groups, prefix_last_group)
+    summarize_messages_with_handle(prefix_messages, instructions, handle, function(summary, err)
+      if summary then
+        finish(summary, nil, suffix_first_live_message_index(history, groups, suffix_start_group))
+        return
+      end
+      if smelt.task.is_cancelled(err) then
+        finish(nil, err)
+        return
+      end
+      if err and err.kind == "context_window" then
+        if prefix_last_group > 1 then
+          suffix_start_group = suffix_start_group - 1
+          attempt()
+          return
+        end
+        fallback_trimmed(prefix_messages)
+        return
+      end
+      finish(nil, err)
+    end)
+  end
+
+  attempt()
 end
 
 local function emit_event(phase, before_tokens, after_tokens, extra)
@@ -347,11 +467,11 @@ local function run_compact(opts)
     return
   end
 
-  -- Phase B only: summarise the original history. `inherit_session`
+  -- Phase B only: summarise the original history. `ask_inherited`
   -- keeps the request prefix byte-identical to the main turn for cache
   -- reuse.  Phase A (prune) is reserved for mid-turn recovery where we
   -- have no other option.
-  summarize(history, opts and opts.instructions, function(summary, err)
+  summarize_by_group_boundary(history, opts and opts.instructions, function(summary, err, first_live_message_index)
     if smelt.task.is_cancelled(err) then
       return
     end
@@ -360,18 +480,14 @@ local function run_compact(opts)
       return
     end
     consecutive_failures = 0
-    local keep_recent_turns = smelt.settings.compact_keep_recent_turns or 3
-    local keep_recent_bytes = smelt.settings.compact_keep_recent_bytes or 40000
     smelt.session.checkpoint({
       kind = "compaction",
       summary = summary,
-      keep_recent_turns = keep_recent_turns,
-      keep_recent_bytes = keep_recent_bytes,
+      first_live_message_index = first_live_message_index,
       tokens_before = before_tokens,
     })
     emit_event("summarize", before_tokens, nil, {
-      keep_recent_turns = keep_recent_turns,
-      keep_recent_bytes = keep_recent_bytes,
+      first_live_message_index = first_live_message_index,
     })
   end)
 end
@@ -393,7 +509,7 @@ local function compact_live_session(before_tokens, phase, done)
     done(nil)
     return
   end
-  summarize(history, nil, function(summary, err)
+  summarize_by_group_boundary(history, nil, function(summary, err, first_live_message_index)
     if smelt.task.is_cancelled(err) then
       done(nil)
       return
@@ -404,13 +520,10 @@ local function compact_live_session(before_tokens, phase, done)
       return
     end
     consecutive_failures = 0
-    local keep_recent_turns = smelt.settings.compact_keep_recent_turns or 3
-    local keep_recent_bytes = smelt.settings.compact_keep_recent_bytes or 40000
     local model_messages = smelt.session.checkpoint({
       kind = "compaction",
       summary = summary,
-      keep_recent_turns = keep_recent_turns,
-      keep_recent_bytes = keep_recent_bytes,
+      first_live_message_index = first_live_message_index,
       tokens_before = before_tokens,
     })
     if not model_messages then
@@ -418,8 +531,7 @@ local function compact_live_session(before_tokens, phase, done)
       return
     end
     emit_event(phase, before_tokens, nil, {
-      keep_recent_turns = keep_recent_turns,
-      keep_recent_bytes = keep_recent_bytes,
+      first_live_message_index = first_live_message_index,
     })
     done(model_messages)
   end)
@@ -487,7 +599,7 @@ smelt.engine.on_context_limit(function(messages, reply)
 
   -- Mid-turn recovery uses the flat path: the engine hands us a `messages`
   -- snapshot that doesn't match `smelt.session.messages()`, so we can't
-  -- inherit_session cleanly. Cache reuse is worth less here anyway — the
+  -- use `ask_inherited` cleanly. Cache reuse is worth less here anyway — the
   -- turn is already failing.
   summarize_flat(messages, nil, function(summary, err)
     if smelt.task.is_cancelled(err) then

@@ -1300,20 +1300,19 @@ mod tests {
             &path,
             "auto_reload: Bool = false;\n\
              compact_threshold: Number = 0.80;\n\
-             /// Number of most-recent user turns kept verbatim after a compaction\n\
-             /// checkpoint. Older turns remain visible in the transcript but are\n\
-             /// summarized out of the next model request.\n\
-             compact_keep_recent_turns: Number = 3.0;\n\
-             anthropic_cache: Bool = false;\n",
+             /// Anthropic prompt cache TTL. `false` uses the 5-minute ephemeral\n\
+             /// TTL; `true` opts into the 1-hour TTL. Has no effect on\n\
+             /// non-Anthropic providers.\n\
+             cache_ttl_long: Bool = false;\n",
         )
         .unwrap();
 
         let old = "compact_threshold: Number = 0.80;\n";
         let new = "compact_threshold: Number = 0.80;\n\
-                   /// Number of most-recent user turns kept verbatim after a compaction\n\
-                   /// checkpoint. Older turns remain visible in the transcript but are\n\
-                   /// summarized out of the next model request.\n\
-                   compact_keep_recent_turns: Number = 3.0;\n";
+                   /// Anthropic prompt cache TTL. `false` uses the 5-minute ephemeral\n\
+                   /// TTL; `true` opts into the 1-hour TTL. Has no effect on\n\
+                   /// non-Anthropic providers.\n\
+                   cache_ttl_long: Bool = false;\n";
         let cache = build_inline_diff_cache(old, new, path.to_str().unwrap(), old);
 
         let mut insert_texts: Vec<String> = Vec::new();
