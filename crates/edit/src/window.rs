@@ -883,6 +883,16 @@ impl Window {
         }
     }
 
+    /// Clamp `scroll_top` to the valid range `[0, total_rows - viewport_rows]`
+    /// and stamp the scroll anchor. Returns `max_scroll`.
+    fn clamp_scroll_top(&mut self, total_rows: u16, viewport_rows: u16, buf: &Buffer) -> u16 {
+        let max_scroll = total_rows.saturating_sub(viewport_rows);
+        if self.scroll_top > max_scroll {
+            self.set_scroll(max_scroll, buf);
+        }
+        max_scroll
+    }
+
     /// Pan `scroll_top` and `scroll_left` so the cursor stays inside the
     /// viewport on both axes. Zero on either dimension treats that axis as
     /// "no viewport yet" and skips it — the host's `pending_scroll_to_cursor`
@@ -898,7 +908,7 @@ impl Window {
         viewport_cols: u16,
     ) {
         if viewport_rows > 0 {
-            let max_scroll = total_rows.saturating_sub(viewport_rows);
+            let max_scroll = self.clamp_scroll_top(total_rows, viewport_rows, buf);
             let viewport_bottom = self
                 .scroll_top
                 .saturating_add(viewport_rows.saturating_sub(1));
@@ -1400,9 +1410,8 @@ impl Window {
         if total == 0 || viewport_rows == 0 || delta == 0 {
             return;
         }
-        let max_scroll = total.saturating_sub(viewport_rows);
-        let cur_scroll = self.scroll_top.min(max_scroll);
-        let new_scroll = (cur_scroll as isize + delta).clamp(0, max_scroll as isize) as u16;
+        let max_scroll = self.clamp_scroll_top(total, viewport_rows, buf);
+        let new_scroll = (self.scroll_top as isize + delta).clamp(0, max_scroll as isize) as u16;
         self.scroll_to_preserving_cursor_screen_row(new_scroll, buf, viewport_rows);
     }
 
@@ -1418,8 +1427,8 @@ impl Window {
         if total_visual == 0 || viewport_rows == 0 {
             return;
         }
-        let max_scroll = total_visual.saturating_sub(viewport_rows);
-        let cur_scroll = self.scroll_top.min(max_scroll);
+        let max_scroll = self.clamp_scroll_top(total_visual, viewport_rows, buf);
+        let cur_scroll = self.scroll_top;
 
         let screen_row = self
             .cursor_screen_row_at(cur_scroll, viewport_rows)
@@ -2211,6 +2220,23 @@ mod tests {
         w.cursor_col = 10;
         w.keep_cursor_visible(&buf, 0, 0, 20);
         assert_eq!(w.scroll_left, 10);
+    }
+
+    #[test]
+    fn keep_cursor_visible_clamps_scroll_when_content_shrinks() {
+        let mut w = make_win();
+        let buf = make_buf(vec![]);
+        // 10 rows of content, 4-row viewport, cursor at end.
+        w.cursor_row = 9;
+        w.keep_cursor_visible(&buf, 10, 4, 0);
+        assert_eq!(w.scroll_top, 6);
+
+        // Content shrinks to 8 rows: max_scroll becomes 4.
+        // Cursor drops to row 7, still inside the old viewport [6, 9],
+        // but scroll_top is now past the end. It must be clamped down.
+        w.cursor_row = 7;
+        w.keep_cursor_visible(&buf, 8, 4, 0);
+        assert_eq!(w.scroll_top, 4);
     }
 
     #[test]
