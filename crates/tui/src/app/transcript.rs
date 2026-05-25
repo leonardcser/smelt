@@ -2,7 +2,7 @@
 
 use crate::app::TuiApp;
 use crate::content::selection::wrap_with_offsets;
-use crate::smelt_term::{BufCreateOpts, Buffer};
+use crate::smelt_term::{BufCreateOpts, Buffer, Theme};
 
 use smelt_core::content::block_layout::{BlockLayout, HboxItem, RenderedLayout};
 use smelt_core::transcript_model::{
@@ -250,6 +250,24 @@ impl TuiApp {
 
     /// No-op: width changes invalidate the cache implicitly on next paint.
     pub(crate) fn invalidate_for_width(&mut self, _width: u16) {}
+
+    pub(crate) fn invalidate_for_theme(&mut self) {
+        self.transcript_projection.invalidate_theme();
+    }
+
+    /// Install a complete theme and publish it to the process-wide active slot.
+    pub(crate) fn install_theme(&mut self, theme: Theme) {
+        *self.ui.theme_mut() = theme;
+        smelt_core::theme::set_active(self.ui.theme().clone());
+        self.invalidate_for_theme();
+    }
+
+    /// Mutate the current theme and republish.
+    pub(crate) fn mutate_theme(&mut self, f: impl FnOnce(&mut Theme)) {
+        f(self.ui.theme_mut());
+        smelt_core::theme::set_active(self.ui.theme().clone());
+        self.invalidate_for_theme();
+    }
 
     pub(crate) fn clear_transcript(&mut self) {
         self.transcript.history.clear();

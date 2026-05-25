@@ -38,8 +38,7 @@ at compile time; cycles and dangling references raise a runtime error.",
                 let is_light = app.ui.theme().is_light();
                 match compile(&spec, is_light) {
                     Ok(theme) => {
-                        *app.ui.theme_mut() = theme;
-                        publish_active(app);
+                        app.install_theme(theme);
                         Ok(())
                     }
                     Err(e) => Err(LuaError::RuntimeError(format!("theme.apply: {e}"))),
@@ -58,8 +57,7 @@ sticks until the next `apply()` or `use()` call.",
             crate::lua::with_app(|app| {
                 let is_light = app.ui.theme().is_light();
                 let s = style_decl_to_style(&style, is_light);
-                app.ui.theme_mut().set(group, s);
-                publish_active(app);
+                app.mutate_theme(|t| t.set(group, s));
             });
             Ok(())
         },
@@ -168,13 +166,4 @@ fn style_decl_to_style(decl: &StyleDecl, is_light: bool) -> Style {
         underline: decl.underline.unwrap_or(false),
         crossedout: decl.crossedout.unwrap_or(false),
     }
-}
-
-/// Publish the app's current theme to the process-wide active theme
-/// slot. Deep renderers (the diff renderer in `smelt_core`) read from
-/// that slot, so any Lua-driven mutation needs to refresh it.
-fn publish_active(app: &mut crate::app::TuiApp) {
-    // `app.ui.theme()` returns `&Arc<Theme>`. Clone the Arc into the
-    // active slot — no extra Theme allocation.
-    smelt_core::theme::set_active(app.ui.theme().clone());
 }

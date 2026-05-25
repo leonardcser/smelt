@@ -77,6 +77,16 @@ impl TranscriptProjection {
         self.cache_generation = gen;
     }
 
+    /// Clear every cached layout so the next `project()` rebuilds from scratch.
+    /// Called when the theme changes — colors that were baked into anonymous
+    /// highlight groups need to be re-resolved against the new palette.
+    pub(crate) fn invalidate_theme(&mut self) {
+        self.cache.clear();
+        self.project_key = None;
+        self.layout.clear();
+        self.cached_rows = None;
+    }
+
     /// Render every block (parallel on cache misses) and stitch the unified buffer.
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn project(

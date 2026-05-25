@@ -1106,11 +1106,7 @@ impl TuiApp {
         // Lua-side colorschemes overwrite this via `smelt.theme.apply`.
         let mut baked = crate::theme::default_baked().as_ref().clone();
         baked.set_light(self.ui.theme().is_light());
-        *self.ui.theme_mut() = baked;
-        // Publish to the process-wide active theme slot so the diff
-        // renderer (which can't reach the app context from a worker
-        // thread) reads the right colors.
-        smelt_core::theme::set_active(self.ui.theme().clone());
+        self.install_theme(baked);
         // Capture the thread-safe Lua command-name set directly. Going through
         // `try_with_app` would only work on the main thread (APP is a thread-
         // local), and `layout_block_into` runs in worker threads via
