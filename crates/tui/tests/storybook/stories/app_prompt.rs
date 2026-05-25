@@ -60,6 +60,16 @@ app_story!(prompt_queued_messages, |ctx| {
     ctx.assert_snapshot();
 });
 
+app_story!(prompt_compacting_keeps_token_counter_visible, |ctx| {
+    // A narrow prompt bar during compaction should keep the token counter
+    // visible even when secondary chrome needs to drop.
+    ctx.set_viewport(28, 8);
+    ctx.set_context_window(Some(25_000));
+    ctx.set_context_tokens(19_500);
+    ctx.run_lua("_G._busy_handle = smelt.work.busy('compacting')");
+    ctx.assert_snapshot();
+});
+
 // ── Exec block (`!cmd` shell escape) ──────────────────────────────
 
 app_story!(exec_command_block_with_output, |ctx| {

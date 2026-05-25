@@ -742,7 +742,13 @@ impl TuiApp {
                     Ok(f) => f,
                     Err(_) => continue,
                 };
-                calls.push((fire.name.clone(), value.clone(), prev.clone(), func, cb.is_glob));
+                calls.push((
+                    fire.name.clone(),
+                    value.clone(),
+                    prev.clone(),
+                    func,
+                    cb.is_glob,
+                ));
             }
         }
         let _guard = crate::lua::install_app_ptr(self);

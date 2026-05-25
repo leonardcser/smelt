@@ -21,7 +21,7 @@
 #![allow(dead_code)]
 
 use insta::{assert_snapshot, with_settings};
-use protocol::{EngineEvent, ToolOutcome};
+use protocol::{EngineEvent, TokenUsage, ToolOutcome};
 use tui::app::test_harness::TestApp;
 use tui::smelt_term::SnapshotFrame;
 
@@ -67,6 +67,12 @@ impl AppStoryCtx {
 
     pub fn set_viewport(&mut self, w: u16, h: u16) {
         self.app.set_terminal_size(w, h);
+    }
+
+    /// Set the configured context window so prompt-bar token percentages
+    /// render in stories.
+    pub fn set_context_window(&mut self, context_window: Option<u32>) {
+        self.app.set_context_window(context_window);
     }
 
     /// Begin an agent turn. Required before `engine(...)` events route
@@ -298,6 +304,21 @@ impl AppStoryCtx {
     pub fn run_lua(&mut self, snippet: &str) {
         let ok = self.app.run_lua(snippet);
         assert!(ok, "story Lua snippet failed");
+    }
+
+    /// Seed the latest provider-reported context token count through the
+    /// normal engine event path so prompt-bar stories exercise the live
+    /// bookkeeping.
+    pub fn set_context_tokens(&mut self, context_tokens: u32) {
+        self.engine(EngineEvent::TokenUsage {
+            usage: TokenUsage {
+                context_tokens: Some(context_tokens),
+                ..TokenUsage::default()
+            },
+            tokens_per_sec: None,
+            cost_usd: None,
+            background: false,
+        });
     }
 
     /// Seed a user turn on the transcript. Required by `/rewind` (and

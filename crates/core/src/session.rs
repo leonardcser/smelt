@@ -52,6 +52,10 @@ pub struct Session {
     pub history: Vec<HistoryItem>,
     pub checkpoint: Option<ContextCheckpoint>,
     pub context_tokens: Option<u32>,
+    /// Last authoritative context-token count the UI should continue to
+    /// display, even if `context_tokens` has been invalidated for request
+    /// estimation while waiting for a fresh provider reading.
+    pub visible_context_tokens: Option<u32>,
     /// Token-count snapshot, keyed by `history.len()` at write time.
     pub token_snapshots: Vec<(usize, u32)>,
     /// Cost snapshot, keyed by `history.len()` at write time.
@@ -98,6 +102,9 @@ struct SessionWire {
     pub checkpoint: Option<ContextCheckpoint>,
     #[serde(default)]
     pub context_tokens: Option<u32>,
+    #[serde(default)]
+    #[serde(alias = "display_context_tokens")]
+    pub visible_context_tokens: Option<u32>,
     #[serde(default)]
     pub token_snapshots: Vec<(usize, u32)>,
     #[serde(default)]
@@ -184,6 +191,7 @@ impl From<SessionWire> for Session {
             history,
             checkpoint: w.checkpoint,
             context_tokens: w.context_tokens,
+            visible_context_tokens: w.visible_context_tokens.or(w.context_tokens),
             session_cost_usd: w.session_cost_usd,
             session_usage: w.session_usage,
         }
@@ -210,6 +218,7 @@ impl From<&Session> for SessionWire {
             messages,
             checkpoint: s.checkpoint.clone(),
             context_tokens: s.context_tokens,
+            visible_context_tokens: s.visible_context_tokens,
             token_snapshots: remap_hist_to_msg(&s.token_snapshots, &table, msg_len),
             cost_snapshots: remap_hist_to_msg(&s.cost_snapshots, &table, msg_len),
             turn_metas: remap_hist_to_msg(&s.turn_metas, &table, msg_len),
@@ -284,6 +293,7 @@ impl Session {
             history: Vec::new(),
             checkpoint: None,
             context_tokens: None,
+            visible_context_tokens: None,
             token_snapshots: Vec::new(),
             cost_snapshots: Vec::new(),
             turn_metas: Vec::new(),
@@ -305,9 +315,29 @@ impl Session {
             model: self.model.clone(),
             cwd: self.cwd.clone(),
             parent_id: self.parent_id.clone(),
-            context_tokens: self.context_tokens,
+            context_tokens: self.visible_context_tokens,
             text_bytes: Some(compute_text_bytes(&self.history)),
         }
+    }
+
+    pub fn record_context_tokens(&mut self, tokens: u32) {
+        self.context_tokens = Some(tokens);
+        self.visible_context_tokens = Some(tokens);
+    }
+
+    pub fn invalidate_context_tokens(&mut self) {
+        self.context_tokens = None;
+    }
+
+    pub fn clear_context_tokens(&mut self) {
+        self.context_tokens = None;
+        self.visible_context_tokens = None;
+    }
+
+    pub fn restore_context_tokens_from_snapshots(&mut self) {
+        let restored = self.token_snapshots.last().map(|&(_, tokens)| tokens);
+        self.context_tokens = restored;
+        self.visible_context_tokens = restored;
     }
 
     pub fn model_history(&self, summary_prefix: &str) -> Vec<HistoryItem> {
@@ -351,7 +381,7 @@ impl Session {
         });
         // The next provider response is the first authoritative token
         // reading for checkpointed model history.
-        self.context_tokens = None;
+        self.clear_context_tokens();
         true
     }
 
@@ -402,6 +432,7 @@ impl Session {
             history: self.history.clone(),
             checkpoint: self.checkpoint.clone(),
             context_tokens: self.context_tokens,
+            visible_context_tokens: self.visible_context_tokens,
             token_snapshots: self.token_snapshots.clone(),
             cost_snapshots: self.cost_snapshots.clone(),
             turn_metas: self.turn_metas.clone(),
@@ -914,6 +945,7 @@ mod tests {
         let mut s = fixture_session();
         s.history = vec![user_item("only recent"), assistant_text_item("reply")];
         s.context_tokens = Some(100);
+        s.visible_context_tokens = Some(100);
 
         let installed =
             s.install_context_checkpoint("compaction".into(), "summary".into(), 3, 1000, Some(100));
@@ -921,6 +953,7 @@ mod tests {
         assert!(!installed);
         assert!(s.checkpoint.is_none());
         assert_eq!(s.context_tokens, Some(100));
+        assert_eq!(s.visible_context_tokens, Some(100));
     }
 
     #[test]
@@ -933,13 +966,26 @@ mod tests {
             assistant_text_item("recent reply"),
         ];
         s.context_tokens = Some(500);
+        s.visible_context_tokens = Some(500);
 
         let installed =
             s.install_context_checkpoint("compaction".into(), "summary".into(), 1, 1000, Some(500));
 
         assert!(installed);
         assert!(s.context_tokens.is_none());
+        assert!(s.visible_context_tokens.is_none());
         assert_eq!(s.checkpoint.as_ref().unwrap().first_live_index, 2);
+    }
+
+    #[test]
+    fn invalidate_context_tokens_keeps_visible_snapshot() {
+        let mut s = fixture_session();
+        s.record_context_tokens(321);
+
+        s.invalidate_context_tokens();
+
+        assert!(s.context_tokens.is_none());
+        assert_eq!(s.visible_context_tokens, Some(321));
     }
 
     #[test]
@@ -1041,6 +1087,7 @@ mod tests {
         s.cwd = Some("/work".into());
         s.parent_id = Some("p1".into());
         s.context_tokens = Some(1234);
+        s.visible_context_tokens = Some(5678);
         s.history.push(user_item("hi"));
 
         let m = s.meta();
@@ -1052,7 +1099,7 @@ mod tests {
         assert_eq!(m.model.as_deref(), Some("claude-opus"));
         assert_eq!(m.cwd.as_deref(), Some("/work"));
         assert_eq!(m.parent_id.as_deref(), Some("p1"));
-        assert_eq!(m.context_tokens, Some(1234));
+        assert_eq!(m.context_tokens, Some(5678));
         assert_eq!(m.text_bytes, Some(2)); // "hi"
     }
 
@@ -1333,6 +1380,7 @@ mod tests {
         original.token_snapshots = vec![(1, 50), (3, 200)];
         original.cost_snapshots = vec![(3, 1.25)];
         original.context_tokens = Some(200);
+        original.visible_context_tokens = Some(250);
         original.session_cost_usd = 1.25;
 
         let json = serde_json::to_string(&original).unwrap();
@@ -1342,6 +1390,10 @@ mod tests {
         assert_eq!(round.token_snapshots, original.token_snapshots);
         assert_eq!(round.cost_snapshots, original.cost_snapshots);
         assert_eq!(round.context_tokens, original.context_tokens);
+        assert_eq!(
+            round.visible_context_tokens,
+            original.visible_context_tokens
+        );
         assert_eq!(round.session_cost_usd, original.session_cost_usd);
         assert_eq!(round.id, original.id);
     }

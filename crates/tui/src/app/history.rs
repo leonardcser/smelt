@@ -80,7 +80,7 @@ impl TuiApp {
                     // provider response. The last usage reading then predates
                     // the current history tail, so persisting it would falsely
                     // claim that large tool output is already accounted for.
-                    self.core.session.context_tokens = None;
+                    self.core.session.invalidate_context_tokens();
                 }
             }
         } else {
@@ -91,7 +91,7 @@ impl TuiApp {
                 .last()
                 .map(|(history_len, _)| *history_len);
             if last_snapshot_len != Some(self.core.session.history.len()) {
-                self.core.session.context_tokens = None;
+                self.core.session.invalidate_context_tokens();
             }
         }
         self.context_tokens_updated_this_turn = false;
@@ -447,7 +447,7 @@ impl TuiApp {
         self.core.session.token_snapshots.clear();
         self.core.session.cost_snapshots.clear();
         self.core.session.turn_metas.clear();
-        self.core.session.context_tokens = None;
+        self.core.session.clear_context_tokens();
 
         self.restore_screen();
         self.save_session();
@@ -543,8 +543,7 @@ impl TuiApp {
             .last()
             .map(|&(_, c)| c)
             .unwrap_or(0.0);
-        self.core.session.context_tokens =
-            self.core.session.token_snapshots.last().map(|&(_, t)| t);
+        self.core.session.restore_context_tokens_from_snapshots();
         self.truncate_to(block_idx);
         self.reset_session_permissions();
 
@@ -1017,6 +1016,7 @@ mod checkpoint_tests {
             },
         ));
         session.context_tokens = Some(100);
+        session.visible_context_tokens = Some(100);
 
         // Simulate replace_history
         session.history = vec![user("x")];
@@ -1024,13 +1024,14 @@ mod checkpoint_tests {
         session.token_snapshots.clear();
         session.cost_snapshots.clear();
         session.turn_metas.clear();
-        session.context_tokens = None;
+        session.clear_context_tokens();
 
         assert!(session.checkpoint.is_none());
         assert!(session.token_snapshots.is_empty());
         assert!(session.cost_snapshots.is_empty());
         assert!(session.turn_metas.is_empty());
         assert!(session.context_tokens.is_none());
+        assert!(session.visible_context_tokens.is_none());
     }
 
     #[test]
@@ -1041,6 +1042,7 @@ mod checkpoint_tests {
         session.cost_snapshots = vec![(2, 0.5), (4, 1.0)];
         session.session_cost_usd = 1.0;
         session.context_tokens = Some(100);
+        session.visible_context_tokens = Some(100);
 
         // Rewind to history index 2 (before user "c")
         let hist_idx = 2;
@@ -1052,10 +1054,11 @@ mod checkpoint_tests {
             .last()
             .map(|&(_, c)| c)
             .unwrap_or(0.0);
-        session.context_tokens = session.token_snapshots.last().map(|&(_, t)| t);
+        session.restore_context_tokens_from_snapshots();
 
         assert_eq!(session.history.len(), 2);
         assert_eq!(session.context_tokens, Some(50));
+        assert_eq!(session.visible_context_tokens, Some(50));
         assert_eq!(session.session_cost_usd, 0.5);
     }
 
@@ -1067,6 +1070,7 @@ mod checkpoint_tests {
         session.cost_snapshots = vec![(2, 0.5)];
         session.session_cost_usd = 0.5;
         session.context_tokens = Some(50);
+        session.visible_context_tokens = Some(50);
 
         session.history.truncate(0);
         truncate_keyed(&mut session.token_snapshots, 0);
@@ -1076,9 +1080,10 @@ mod checkpoint_tests {
             .last()
             .map(|&(_, c)| c)
             .unwrap_or(0.0);
-        session.context_tokens = session.token_snapshots.last().map(|&(_, t)| t);
+        session.restore_context_tokens_from_snapshots();
 
         assert!(session.context_tokens.is_none());
+        assert!(session.visible_context_tokens.is_none());
         assert_eq!(session.session_cost_usd, 0.0);
     }
 }

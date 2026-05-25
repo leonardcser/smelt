@@ -42,7 +42,7 @@ impl TuiApp {
                 if !background {
                     if let Some(tokens) = usage.context_tokens.or(usage.prompt_tokens) {
                         if tokens > 0 {
-                            self.core.session.context_tokens = Some(tokens);
+                            self.core.session.record_context_tokens(tokens);
                             self.context_tokens_updated_this_turn = true;
                         }
                     }

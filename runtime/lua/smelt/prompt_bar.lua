@@ -16,6 +16,11 @@ local M = {}
 
 local TOP_NS = smelt.ns("smelt.prompt_bar.top")
 local BOT_NS = smelt.ns("smelt.prompt_bar.bottom")
+local TOKEN_PRIORITY = 0
+local INDICATOR_PRIORITY = 0
+local LABEL_PRIORITY = 2
+local SECONDARY_PRIORITY = 3
+local OPTIONAL_PRIORITY = 4
 
 -- ── helpers ─────────────────────────────────────────────────────────
 
@@ -94,7 +99,7 @@ local function indicator_spans()
   spans[#spans + 1] = {
     text = "\u{2500}",
     style = { fg = "SmeltBar" },
-    priority = 0,
+    priority = INDICATOR_PRIORITY,
   }
 
   if active then
@@ -112,7 +117,7 @@ local function indicator_spans()
       spans[#spans + 1] = {
         text = ch,
         style = { fg = rgb, bold = true },
-        priority = 0,
+        priority = codepoint == utf8.codepoint(" ", 1, 1) and LABEL_PRIORITY or INDICATOR_PRIORITY,
       }
       x = x + 1
     end
@@ -124,10 +129,18 @@ local function indicator_spans()
       style = { fg = "Normal", bold = true }
     end
     if glyph ~= "" then
-      spans[#spans + 1] = { text = " " .. glyph, style = style, priority = 0 }
+      spans[#spans + 1] = {
+        text = " " .. glyph,
+        style = style,
+        priority = INDICATOR_PRIORITY,
+      }
     end
     if label ~= "" then
-      spans[#spans + 1] = { text = " " .. label, style = style, priority = 0 }
+      spans[#spans + 1] = {
+        text = " " .. label,
+        style = style,
+        priority = LABEL_PRIORITY,
+      }
     end
   end
 
@@ -137,7 +150,7 @@ local function indicator_spans()
     spans[#spans + 1] = {
       text = " " .. smelt.text.format_duration(secs),
       style = { fg = "Comment", dim = true },
-      priority = 1,
+      priority = SECONDARY_PRIORITY,
     }
   end
 
@@ -146,7 +159,7 @@ local function indicator_spans()
       text = string.format(" (retrying in %ds #%d)",
         math.floor(retry_remaining_ms / 1000), retry_attempt),
       style = { fg = "Comment", dim = true },
-      priority = 2,
+      priority = OPTIONAL_PRIORITY,
     }
   end
 
@@ -171,14 +184,14 @@ local function right_spans()
     spans[#spans + 1] = {
       text = " " .. model,
       style = { fg = "Comment" },
-      priority = 2,
+      priority = SECONDARY_PRIORITY,
     }
     local effort = smelt.reasoning()
     if effort and effort ~= "off" then
       spans[#spans + 1] = {
         text = " " .. effort,
         style = { fg = reasoning_color_group(effort) },
-        priority = 2,
+        priority = SECONDARY_PRIORITY,
       }
     end
   end
@@ -190,7 +203,7 @@ local function right_spans()
         spans[#spans + 1] = {
           text = " ·",
           style = { fg = "SmeltBar" },
-          priority = 2,
+          priority = TOKEN_PRIORITY,
         }
       end
       local window = smelt.session.context_window()
@@ -204,7 +217,7 @@ local function right_spans()
       spans[#spans + 1] = {
         text = tok_text,
         style = { fg = "Comment" },
-        priority = 1,
+        priority = TOKEN_PRIORITY,
       }
     end
   end
@@ -216,13 +229,13 @@ local function right_spans()
         spans[#spans + 1] = {
           text = " ·",
           style = { fg = "SmeltBar" },
-          priority = 2,
+          priority = OPTIONAL_PRIORITY,
         }
       end
       spans[#spans + 1] = {
         text = " " .. smelt.text.format_cost(cost),
         style = { fg = "Comment" },
-        priority = 1,
+        priority = OPTIONAL_PRIORITY,
       }
     end
   end

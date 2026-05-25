@@ -454,6 +454,12 @@ impl TestApp {
         self.app.core.session.context_tokens
     }
 
+    /// Set the configured context window size used by the prompt bar's
+    /// percentage display.
+    pub fn set_context_window(&mut self, context_window: Option<u32>) {
+        self.app.core.config.context_window = context_window;
+    }
+
     /// Number of transcript blocks. Used by event invariants that assert
     /// a block was pushed (e.g. `ProcessCompleted`).
     pub fn transcript_block_count(&self) -> usize {
