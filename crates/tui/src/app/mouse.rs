@@ -111,11 +111,27 @@ impl TuiApp {
         // on individual leaves don't have to know about app-level focus, and
         // visually-grouped chrome (prompt's top/bottom bars) inherits the
         // input's focus naturally.
+        //
+        // Skip promotion when an overlay covers the point — overlays paint above
+        // splits, so clicking a pill / notification / picker should not shift
+        // app_focus to the underlying pane even when the overlay leaf is not
+        // focusable or selectable.
         if is_left_down(me.kind) && self.ui.active_modal().is_none() {
-            let region = self.layout.hit_test(me.row, me.column);
-            let has_content = self.has_transcript_content(self.core.config.settings.show_thinking);
-            if let Some(focus) = focus_for_region_click(region, has_content) {
-                self.app_focus = focus;
+            let hits_overlay =
+                self.ui
+                    .hit_test(me.row, me.column, None)
+                    .is_some_and(|ht| match ht {
+                        HitTarget::Window(w) => self.ui.overlay_for_leaf(w).is_some(),
+                        HitTarget::Chrome { .. } => true,
+                        _ => false,
+                    });
+            if !hits_overlay {
+                let region = self.layout.hit_test(me.row, me.column);
+                let has_content =
+                    self.has_transcript_content(self.core.config.settings.show_thinking);
+                if let Some(focus) = focus_for_region_click(region, has_content) {
+                    self.app_focus = focus;
+                }
             }
         }
 
