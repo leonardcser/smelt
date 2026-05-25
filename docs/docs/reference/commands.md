@@ -20,6 +20,7 @@ Type `/` to open the command picker with fuzzy search.
 | `/cost`                   | Show current session cost                                  |
 | `/vim`                    | Toggle vim mode                                            |
 | `/thinking`               | Toggle display of thinking blocks                          |
+| `/reasoning [off|low|medium|high|max]` | Set or show reasoning effort                    |
 | `/permissions`            | Manage saved permissions                                   |
 | `/ps`                     | Manage background processes                                |
 | `/history`                | Fuzzy-search prompt history (also `Ctrl+R`)                |
