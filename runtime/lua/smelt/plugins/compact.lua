@@ -236,8 +236,12 @@ local function summarize_flat(history, instructions, done)
       on_response = function(summary, err)
         if err then
           handle:remove()
+          if err.kind == "cancelled" then
+            done(nil, true)
+            return
+          end
           smelt.notify.error("compaction failed: " .. err.message)
-          done(nil)
+          done(nil, false)
           return
         end
         if not summary or summary == "" then
@@ -248,11 +252,11 @@ local function summarize_flat(history, instructions, done)
           end
           handle:remove()
           smelt.notify.error("compaction failed: empty summary after retries")
-          done(nil)
+          done(nil, false)
           return
         end
         handle:remove()
-        done(summary)
+        done(summary, false)
       end,
     })
   end
@@ -288,8 +292,12 @@ local function summarize(history, instructions, done)
             return
           end
           handle:remove()
+          if err.kind == "cancelled" then
+            done(nil, true)
+            return
+          end
           smelt.notify.error("compaction failed: " .. err.message)
-          done(nil)
+          done(nil, false)
           return
         end
         if not summary or summary == "" then
@@ -300,11 +308,11 @@ local function summarize(history, instructions, done)
           end
           handle:remove()
           smelt.notify.error("compaction failed: empty summary after retries")
-          done(nil)
+          done(nil, false)
           return
         end
         handle:remove()
-        done(summary)
+        done(summary, false)
       end,
     })
   end
@@ -343,7 +351,10 @@ local function run_compact(opts)
   -- keeps the request prefix byte-identical to the main turn for cache
   -- reuse.  Phase A (prune) is reserved for mid-turn recovery where we
   -- have no other option.
-  summarize(history, opts and opts.instructions, function(summary)
+  summarize(history, opts and opts.instructions, function(summary, cancelled)
+    if cancelled then
+      return
+    end
     if not summary then
       consecutive_failures = consecutive_failures + 1
       return
@@ -382,7 +393,11 @@ local function compact_live_session(before_tokens, phase, done)
     done(nil)
     return
   end
-  summarize(history, nil, function(summary)
+  summarize(history, nil, function(summary, cancelled)
+    if cancelled then
+      done(nil)
+      return
+    end
     if not summary then
       consecutive_failures = consecutive_failures + 1
       done(nil)

@@ -276,29 +276,17 @@ pub(crate) fn step_task_owned(
                     Some(task)
                 }
                 Err(msg) => {
-                    outputs.push(TaskDriveOutput::Error(format!(
-                        "{}: {msg}",
-                        task.completion.error_label(task.id)
-                    )));
-                    fail_completion(&task.completion, &msg, outputs);
+                    emit_task_failure(&task, &msg, outputs);
                     None
                 }
             }
         }
         Err(e) => {
-            if task.cancel.is_cancelled() {
-                if let mlua::Error::RuntimeError(ref msg) = e {
-                    if msg == "cancelled" {
-                        return None;
-                    }
-                }
+            if task.cancel.is_cancelled() && is_cancelled_lua_error(&e) {
+                return None;
             }
             let msg = e.to_string();
-            outputs.push(TaskDriveOutput::Error(format!(
-                "{}: {msg}",
-                task.completion.error_label(task.id)
-            )));
-            fail_completion(&task.completion, &msg, outputs);
+            emit_task_failure(&task, &msg, outputs);
             None
         }
     }
@@ -329,6 +317,22 @@ fn cancelled_marker(lua: &Lua) -> LuaValue {
             Ok(LuaValue::Table(t))
         })
         .unwrap_or(LuaValue::Nil)
+}
+
+fn emit_task_failure(task: &LuaTask, msg: &str, outputs: &mut Vec<TaskDriveOutput>) {
+    outputs.push(TaskDriveOutput::Error(format!(
+        "{}: {msg}",
+        task.completion.error_label(task.id)
+    )));
+    fail_completion(&task.completion, msg, outputs);
+}
+
+fn is_cancelled_lua_error(err: &mlua::Error) -> bool {
+    match err {
+        mlua::Error::RuntimeError(msg) => msg == "cancelled",
+        mlua::Error::CallbackError { cause, .. } => is_cancelled_lua_error(cause.as_ref()),
+        _ => false,
+    }
 }
 
 fn fail_completion(completion: &TaskCompletion, msg: &str, outputs: &mut Vec<TaskDriveOutput>) {
