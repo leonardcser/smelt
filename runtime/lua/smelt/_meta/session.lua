@@ -11,7 +11,7 @@ local session = {}
 ---@type fun(spec: table): table?
 session.checkpoint = nil
 
---- Most recent active context-token count reported by the provider, or `nil` if no turn has completed yet. Cached input tokens and generated output are included when the provider reports them, because they still occupy the next request's context window.
+--- Context token count currently shown in the UI, or `nil` if no token usage has been observed yet. This usually matches the most recent provider-reported active context count, but Smelt keeps the last visible value across transient turn bookkeeping such as retries or interruptions until a new authoritative reading arrives or compaction completes.
 ---@type fun(): integer?
 session.context_tokens = nil
 
