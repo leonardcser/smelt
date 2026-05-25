@@ -79,7 +79,9 @@ The polling behaviour is `smelt.settings.autoupgrade`: `"off"`, `"notify"`
 (default, show pill but don't install), or `"auto"` (install in the
 background as soon as an update is detected). The poll cadence is
 `smelt.settings.autoupgrade_interval` (seconds, default `3600`, floored
-at 60).
+at 60). Automatic background checks stay quiet on transient fetch
+failures such as being offline, then retry later instead of raising an
+error toast while you're just reopening the app.
 
 ## Run
 

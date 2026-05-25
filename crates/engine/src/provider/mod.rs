@@ -547,6 +547,7 @@ impl Provider {
 
         let mut config = self.model_config.clone();
         if config.max_tokens.is_none() {
+            crate::catalog::ensure_loaded(&self.client).await;
             if let Some(tokens) =
                 crate::catalog::output_tokens(self.kind.as_str(), &self.api_base, model)
             {

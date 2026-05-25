@@ -77,8 +77,23 @@ pub fn spawn_fetch(client: reqwest::Client) {
     }
     tokio::spawn(async move {
         let map = load_or_fetch(&client).await;
-        let _ = CATALOG.set(map);
+        if !map.is_empty() {
+            let _ = CATALOG.set(map);
+        }
     });
+}
+
+/// Ensure the catalog is available before a caller needs a synchronous lookup.
+/// This keeps startup non-blocking while letting request construction wait for
+/// model limits when the cache is cold.
+pub async fn ensure_loaded(client: &reqwest::Client) {
+    if CATALOG.get().is_some() {
+        return;
+    }
+    let map = load_or_fetch(client).await;
+    if !map.is_empty() {
+        let _ = CATALOG.set(map);
+    }
 }
 
 /// Look up `(provider_type, api_base, model)` in the catalog. Returns `None`
@@ -86,11 +101,19 @@ pub fn spawn_fetch(client: reqwest::Client) {
 /// is used to disambiguate providers that share a wire format (e.g. Kimi
 /// exposes an Anthropic-compatible endpoint but has its own catalog key).
 pub fn lookup(provider_type: &str, api_base: &str, model: &str) -> Option<ModelEntry> {
-    let key = catalog_key(provider_type, api_base)?;
-    CATALOG
-        .get()?
-        .get(&(key.to_string(), model.to_string()))
-        .copied()
+    let catalog = CATALOG.get()?;
+    for key in catalog_keys(provider_type, api_base) {
+        if let Some(entry) = catalog.get(&(key.clone(), model.to_string())) {
+            return Some(*entry);
+        }
+        let slug = model_slug(model);
+        if slug != model {
+            if let Some(entry) = catalog.get(&(key, slug)) {
+                return Some(*entry);
+            }
+        }
+    }
+    None
 }
 
 /// Convenience: pull just the context window out of the catalog. The
@@ -126,11 +149,30 @@ async fn load_or_fetch(client: &reqwest::Client) -> HashMap<(String, String), Mo
     map
 }
 
+/// Maps smelt's `provider_type` + `api_base` to the candidate catalog keys
+/// models.dev uses. Generic wire-compatible provider types can still resolve
+/// when the catalog has a provider with the same API base URL.
+fn catalog_keys(provider_type: &str, api_base: &str) -> Vec<String> {
+    let mut keys = Vec::new();
+    if let Some(key) = catalog_key(provider_type, api_base) {
+        push_unique(&mut keys, key.to_string());
+    }
+    if let Some(key) = api_key(api_base) {
+        push_unique(&mut keys, key);
+    }
+    keys
+}
+
+fn push_unique(keys: &mut Vec<String>, key: String) {
+    if !keys.iter().any(|existing| existing == &key) {
+        keys.push(key);
+    }
+}
+
 /// Maps smelt's `provider_type` + `api_base` to the catalog key models.dev
 /// uses.  `openai-compatible` returns `None` because the catalog lists no
 /// generic provider for it.  The `api_base` is used to disambiguate
-/// providers that share a wire format (e.g. Kimi's Anthropic-compatible
-/// endpoint maps to the `kimi-for-coding` key).
+/// providers that share a wire format.
 pub(crate) fn catalog_key<'a>(provider_type: &'a str, api_base: &'a str) -> Option<&'a str> {
     if provider_type == "anthropic-compatible" && api_base.contains("api.kimi.com/coding") {
         return Some("kimi-for-coding");
@@ -144,17 +186,66 @@ pub(crate) fn catalog_key<'a>(provider_type: &'a str, api_base: &'a str) -> Opti
     }
 }
 
+fn api_key(api_base: &str) -> Option<String> {
+    let normalized = normalize_api_url(api_base);
+    if normalized.is_empty() {
+        None
+    } else {
+        Some(format!("api:{normalized}"))
+    }
+}
+
+fn normalize_api_url(api_base: &str) -> String {
+    api_base.trim().trim_end_matches('/').to_ascii_lowercase()
+}
+
+fn model_slug(name: &str) -> String {
+    let mut slug = String::new();
+    let mut pending_dash = false;
+    for ch in name.chars().flat_map(|ch| ch.to_lowercase()) {
+        if ch.is_ascii_alphanumeric() || ch == '.' {
+            if pending_dash && !slug.is_empty() {
+                slug.push('-');
+            }
+            slug.push(ch);
+            pending_dash = false;
+        } else {
+            pending_dash = true;
+        }
+    }
+    slug.trim_matches('-').to_string()
+}
+
+fn insert_entry(
+    map: &mut HashMap<(String, String), ModelEntry>,
+    provider_keys: &[String],
+    model_keys: &[String],
+    entry: ModelEntry,
+) {
+    for provider_key in provider_keys {
+        for model_key in model_keys {
+            map.entry((provider_key.clone(), model_key.clone()))
+                .or_insert(entry);
+        }
+    }
+}
+
 fn parse(json: &str) -> Option<HashMap<(String, String), ModelEntry>> {
     // Typed deserialization to skip building a `serde_json::Value` tree for
     // the entire ~50 KB response. Unknown fields on providers/models are
     // ignored automatically.
     #[derive(serde::Deserialize)]
     struct CatalogProvider {
+        name: Option<String>,
+        api: Option<String>,
         #[serde(default)]
         models: HashMap<String, CatalogModel>,
     }
     #[derive(serde::Deserialize)]
     struct CatalogModel {
+        name: Option<String>,
+        release_date: Option<String>,
+        last_updated: Option<String>,
         cost: Option<CatalogCost>,
         limit: Option<CatalogLimit>,
     }
@@ -176,6 +267,24 @@ fn parse(json: &str) -> Option<HashMap<(String, String), ModelEntry>> {
     let root: HashMap<String, CatalogProvider> = serde_json::from_str(json).ok()?;
     let mut map = HashMap::new();
     for (provider, provider_val) in root {
+        let mut provider_keys = vec![provider.clone()];
+        if let Some(api) = provider_val.api.as_deref().and_then(api_key) {
+            provider_keys.push(api);
+        }
+        let provider_model_aliases = [
+            Some(provider.clone()),
+            provider_val.name.as_deref().map(model_slug),
+        ]
+        .into_iter()
+        .flatten()
+        .filter(|alias| !alias.is_empty())
+        .collect::<Vec<_>>();
+        let mut default_entry: Option<(String, ModelEntry)> = None;
+        let has_provider_model_alias = provider_val.models.keys().any(|model_id| {
+            provider_model_aliases
+                .iter()
+                .any(|alias| model_id == alias || model_slug(model_id) == *alias)
+        });
         for (model_id, model_val) in provider_val.models {
             let pricing = model_val.cost.and_then(|cost| {
                 let input = cost.input.unwrap_or(0.0);
@@ -203,14 +312,35 @@ fn parse(json: &str) -> Option<HashMap<(String, String), ModelEntry>> {
             if pricing.is_none() && context_window.is_none() && output_tokens.is_none() {
                 continue;
             }
-            map.insert(
-                (provider.clone(), model_id),
-                ModelEntry {
-                    pricing,
-                    context_window,
-                    output_tokens,
-                },
-            );
+            let entry = ModelEntry {
+                pricing,
+                context_window,
+                output_tokens,
+            };
+            let mut model_keys = vec![model_id.clone()];
+            if let Some(name) = model_val.name.as_deref() {
+                let slug = model_slug(name);
+                if !slug.is_empty() && !model_keys.iter().any(|key| key == &slug) {
+                    model_keys.push(slug);
+                }
+            }
+            insert_entry(&mut map, &provider_keys, &model_keys, entry);
+            let default_sort = model_val
+                .last_updated
+                .or(model_val.release_date)
+                .unwrap_or_default();
+            if !default_sort.is_empty()
+                && default_entry
+                    .as_ref()
+                    .is_none_or(|(current_sort, _)| default_sort > *current_sort)
+            {
+                default_entry = Some((default_sort, entry));
+            }
+        }
+        if !has_provider_model_alias {
+            if let Some((_, entry)) = default_entry {
+                insert_entry(&mut map, &provider_keys, &provider_model_aliases, entry);
+            }
         }
     }
     Some(map)
@@ -257,6 +387,14 @@ mod tests {
     }
 
     #[test]
+    fn catalog_keys_include_normalized_api_base_alias() {
+        assert_eq!(
+            catalog_keys("openai-compatible", "https://OpenRouter.ai/api/v1/"),
+            vec!["api:https://openrouter.ai/api/v1".to_string()]
+        );
+    }
+
+    #[test]
     fn parse_extracts_pricing_and_context_window() {
         let json = r#"{
             "openai": {"models": {
@@ -272,6 +410,72 @@ mod tests {
         assert_eq!(pricing.input, 30.0);
         assert_eq!(entry.context_window, Some(128_000));
         assert_eq!(entry.output_tokens, Some(4096));
+    }
+
+    #[test]
+    fn parse_indexes_models_by_provider_api_base() {
+        let json = r#"{
+            "openrouter": {
+                "api": "https://openrouter.ai/api/v1",
+                "models": {
+                    "moonshotai/kimi-k2.6": {"limit": {"output": 32768}}
+                }
+            }
+        }"#;
+        let map = parse(json).unwrap();
+        let entry = map
+            .get(&(
+                "api:https://openrouter.ai/api/v1".into(),
+                "moonshotai/kimi-k2.6".into(),
+            ))
+            .unwrap();
+        assert_eq!(entry.output_tokens, Some(32_768));
+    }
+
+    #[test]
+    fn parse_indexes_models_by_slugged_display_name() {
+        let json = r#"{
+            "moonshotai": {"models": {
+                "k2p6": {"name": "Kimi K2.6", "limit": {"output": 32768}}
+            }}
+        }"#;
+        let map = parse(json).unwrap();
+        let entry = map.get(&("moonshotai".into(), "kimi-k2.6".into())).unwrap();
+        assert_eq!(entry.output_tokens, Some(32_768));
+    }
+
+    #[test]
+    fn parse_indexes_dated_provider_alias_to_newest_model() {
+        let json = r#"{
+            "kimi-for-coding": {
+                "name": "Kimi For Coding",
+                "api": "https://api.kimi.com/coding/v1",
+                "models": {
+                    "k2p5": {
+                        "name": "Kimi K2.5",
+                        "last_updated": "2026-01",
+                        "limit": {"output": 16384}
+                    },
+                    "k2p6": {
+                        "name": "Kimi K2.6",
+                        "last_updated": "2026-04",
+                        "limit": {"output": 32768}
+                    }
+                }
+            }
+        }"#;
+        let map = parse(json).unwrap();
+        let provider_entry = map
+            .get(&("kimi-for-coding".into(), "kimi-for-coding".into()))
+            .unwrap();
+        let api_entry = map
+            .get(&(
+                "api:https://api.kimi.com/coding/v1".into(),
+                "kimi-for-coding".into(),
+            ))
+            .unwrap();
+        assert_eq!(provider_entry.output_tokens, Some(32_768));
+        assert_eq!(api_entry.output_tokens, Some(32_768));
     }
 
     #[test]

@@ -250,7 +250,7 @@ keys raise at the access site; type mismatches raise on assignment.
 | `redact_secrets`        | `boolean` | `true`  | Scrub detected secrets from user input and tool results before they reach the LLM |
 | `auto_reload`           | `boolean` | `false` | Watch `~/.config/smelt/`, `.smelt/`, `AGENTS.md`, and `--system-prompt` and fire `/reload` on change |
 | `cache_ttl_long`        | `boolean` | `false` | Opt the Anthropic prompt cache into the 1-hour TTL (default is the 5-minute ephemeral TTL). No effect on non-Anthropic providers |
-| `autoupgrade`           | `string`  | `"notify"` | `"off"` no checks; `"notify"` show pill + banner subtitle when a new build is available; `"auto"` install in background as soon as an update is detected |
+| `autoupgrade`           | `string`  | `"notify"` | `"off"` no checks; `"notify"` show pill + banner subtitle when a new build is available; `"auto"` install in background as soon as an update is detected. Automatic background checks stay quiet on transient fetch failures and retry later. |
 | `autoupgrade_channel`   | `string`  | `"stable"` | `"stable"` downloads tagged prebuilt tarballs (any tag, including `alpha`/`beta` prereleases); `"unstable"` follows `main` HEAD via `cargo install` |
 | `autoupgrade_interval`  | `number`  | `3600`  | Seconds between background autoupgrade checks. Clamped to a 60 s minimum to avoid hammering GitHub |
 

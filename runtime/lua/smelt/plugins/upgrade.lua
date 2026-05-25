@@ -12,6 +12,9 @@
 -- smelt.state.persistent("upgrade"), and surfaces "update available" via:
 --   * a right-strip statusline pill, and
 --   * a dim subtitle under the splash version.
+-- Automatic background checks stay quiet on transient fetch failures
+-- (offline, DNS, GitHub hiccups) and retry later instead of raising an
+-- error toast while the user is just opening their laptop.
 --
 -- Slash commands:
 --   /upgrade          install the newest build (no confirm dialog, just a
@@ -29,6 +32,7 @@ local REPO_URL = "https://github.com/" .. OWNER .. "/" .. REPO .. ".git"
 -- anonymous limit is 60 req/hr/IP; 60 s gives the user headroom while
 -- keeping a hard guard against accidentally setting `0`.
 local MIN_INTERVAL_SECS = 60
+local TRANSIENT_RETRY_SECS = 300
 -- Polling tick rate. We re-evaluate the configured interval and the
 -- per-channel `last_checked_at` on every fire, so live setting changes
 -- take effect within one tick instead of waiting for the next full
@@ -326,13 +330,23 @@ end
 
 local checking = false
 
+local function retry_after_transient_failure()
+  return math.min(settings_interval(), TRANSIENT_RETRY_SECS)
+end
+
+local function mark_next_check_in(channel, secs)
+  channel_state(channel).last_checked_at = now() - settings_interval() + secs
+end
+
 -- Drive a check and call `on_done(status)` exactly once when the work
 -- finishes. `status` is one of `"busy" | "cached" | "no_update" |
--- "has_update" | "rate_limited" | "error"`. The tick loop passes no
--- callback and relies on the transition-based auto-notify below; user
--- commands pass a callback so they can always surface a terminal result.
-local function run_check(force, on_done)
+-- "has_update" | "rate_limited" | "deferred" | "error"`. Automatic
+-- background polls pass `opts.background = true`, which suppresses
+-- user-facing error toasts for transient fetch problems and misconfig.
+local function run_check(force, on_done, opts)
   on_done = on_done or function() end
+  opts = opts or {}
+  local background = opts.background == true
   if checking then
     on_done("busy")
     return
@@ -346,9 +360,20 @@ local function run_check(force, on_done)
   smelt.spawn(function()
     local channel = settings_channel()
     if channel == "unstable" and not smelt.build.sha then
+      smelt.log.error("upgrade.check_failed", {
+        channel = channel,
+        background = background,
+        reason = "missing_build_sha",
+      })
+      mark_next_check_in(channel, retry_after_transient_failure())
+      state.save()
       checking = false
-      notify.error("autoupgrade: unstable channel requires a build SHA (this binary was built without git)")
-      on_done("error")
+      if not background then
+        notify.error("autoupgrade: unstable channel requires a build SHA (this binary was built without git)")
+        on_done("error")
+      else
+        on_done("deferred")
+      end
       return
     end
     local rec, err, backoff
@@ -365,17 +390,31 @@ local function run_check(force, on_done)
     else
       channel_state(channel).last_checked_at = now()
     end
-    state.save()
-    checking = false
     if backoff then
+      state.save()
+      checking = false
       on_done("rate_limited")
       return
     end
     if not rec then
-      notify.error("autoupgrade: " .. tostring(err))
-      on_done("error")
+      smelt.log.error("upgrade.check_failed", {
+        channel = channel,
+        background = background,
+        error = tostring(err),
+      })
+      mark_next_check_in(channel, retry_after_transient_failure())
+      state.save()
+      checking = false
+      if not background then
+        notify.warn("autoupgrade: " .. tostring(err) .. "\nretrying later")
+        on_done("deferred")
+      else
+        on_done("deferred")
+      end
       return
     end
+    state.save()
+    checking = false
     local before = latest.has_update
     recompute()
     if latest.has_update and not before then
@@ -679,4 +718,4 @@ end, { desc = "show release notes for the latest smelt build" })
 -- tick rate is intentionally tighter than the configured interval so
 -- live changes to `autoupgrade_interval` take effect on the next poll;
 -- the actual network fetch is gated by `should_check_now`.
-smelt.tick.every(POLL_TICK_SECS, function() run_check(false) end)
+smelt.tick.every(POLL_TICK_SECS, function() run_check(false, nil, { background = true }) end)

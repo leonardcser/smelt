@@ -459,10 +459,12 @@ mod tests {
                 r#"
                     _G.test_log = {}
                     _G.test_err = {}
+                    _G.test_warn = {}
                     local mt = getmetatable(smelt.notify) or {}
                     mt.__call = function(_, msg) table.insert(_G.test_log, msg) end
                     setmetatable(smelt.notify, mt)
                     smelt.notify.error = function(msg) table.insert(_G.test_err, msg) end
+                    smelt.notify.warn = function(msg) table.insert(_G.test_warn, msg) end
                 "#,
             )
             .exec()
@@ -508,6 +510,22 @@ mod tests {
             .lua
             .globals()
             .set("test_err", rt.lua.create_table().unwrap());
+        out
+    }
+
+    fn drain_warnings(rt: &LuaRuntime) -> Vec<String> {
+        let log: mlua::Table = match rt.lua.globals().get("test_warn") {
+            Ok(t) => t,
+            Err(_) => return Vec::new(),
+        };
+        let out: Vec<String> = log
+            .sequence_values::<String>()
+            .filter_map(|r| r.ok())
+            .collect();
+        let _ = rt
+            .lua
+            .globals()
+            .set("test_warn", rt.lua.create_table().unwrap());
         out
     }
 
@@ -904,6 +922,105 @@ mod tests {
         assert!(rt.run_command("hello", None));
         assert_eq!(drain_notifications(&rt), vec!["hello world".to_string()]);
         assert!(!rt.run_command("unknown", None));
+    }
+
+    #[test]
+    fn upgrade_background_check_stays_quiet_when_fetch_fails() {
+        let rt = LuaRuntime::new();
+        install_test_notify(&rt);
+        rt.lua
+            .load(
+                r#"
+                    smelt.settings = {
+                      autoupgrade = "notify",
+                      autoupgrade_channel = "stable",
+                      autoupgrade_interval = 3600,
+                    }
+
+                    smelt.banner = smelt.banner or {}
+                    smelt.banner.source = function() end
+
+                    smelt.spawn = function(fn)
+                      fn()
+                      return { remove = function() end }
+                    end
+
+                    smelt.tick.every = function(_, fn)
+                      _G.upgrade_tick = fn
+                      return { remove = function() end }
+                    end
+
+                    smelt.process.run = function()
+                      return { exit_code = 1, stdout = "", stderr = "" }
+                    end
+
+                    smelt.http.get = function()
+                      return nil, "network is unreachable"
+                    end
+
+                    require("smelt.plugins.upgrade")
+                "#,
+            )
+            .exec()
+            .expect("load upgrade plugin");
+        rt.lua
+            .load("assert(_G.upgrade_tick ~= nil); _G.upgrade_tick()")
+            .exec()
+            .expect("run captured tick");
+        assert!(drain_notifications(&rt).is_empty());
+        assert!(drain_warnings(&rt).is_empty());
+        assert!(drain_errors(&rt).is_empty());
+    }
+
+    #[test]
+    fn upgrade_check_command_defers_cleanly_when_fetch_fails() {
+        let rt = LuaRuntime::new();
+        install_test_notify(&rt);
+        rt.lua
+            .load(
+                r#"
+                    smelt.settings = {
+                      autoupgrade = "notify",
+                      autoupgrade_channel = "stable",
+                      autoupgrade_interval = 3600,
+                    }
+
+                    smelt.banner = smelt.banner or {}
+                    smelt.banner.source = function() end
+
+                    smelt.spawn = function(fn)
+                      fn()
+                      return { remove = function() end }
+                    end
+
+                    smelt.tick.every = function(_, fn)
+                      _G.upgrade_tick = fn
+                      return { remove = function() end }
+                    end
+
+                    smelt.process.run = function()
+                      return { exit_code = 1, stdout = "", stderr = "" }
+                    end
+
+                    smelt.http.get = function()
+                      return nil, "network is unreachable"
+                    end
+
+                    require("smelt.plugins.upgrade")
+                "#,
+            )
+            .exec()
+            .expect("load upgrade plugin");
+        assert!(rt.run_command("upgrade", Some("check".to_string())));
+        assert_eq!(
+            drain_notifications(&rt),
+            vec!["checking for upgrades…".to_string()]
+        );
+        assert_eq!(
+            drain_warnings(&rt),
+            vec!["autoupgrade: network is unreachable\nretrying later".to_string()]
+        );
+        assert!(drain_errors(&rt).is_empty());
     }
 
     #[test]
