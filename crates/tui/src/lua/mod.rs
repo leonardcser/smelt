@@ -958,6 +958,8 @@ mod tests {
                       return nil, "network is unreachable"
                     end
 
+                    smelt.state.__save = function() end
+
                     require("smelt.plugins.upgrade")
                 "#,
             )
