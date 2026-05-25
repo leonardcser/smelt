@@ -4,7 +4,7 @@
 //! `Extmark`s grouped into namespaces. Highlights, decorations, and
 //! virtual text are all extmarks queried per-line at render time.
 
-use crate::attachment::AttachmentId;
+use crate::attachment::{AttachmentId, ATTACHMENT_MARKER};
 use crate::undo::UndoHistory;
 use smelt_style::style::{Color, Style};
 use smelt_style::theme::{intern_anonymous_style, HlGroup};
@@ -647,11 +647,23 @@ impl Buffer {
             return;
         };
         let out = self.copy_range(start..end);
-        if out.clipboard.is_empty() {
+        let kill_text = clipboard.kill_ring.current();
+
+        // If the buffer was mutated after the yank (e.g. vim d/x), the text at
+        // source_range no longer matches what was captured. Fall back to the
+        // kill-ring text so we copy the actual deleted/yanked text, not whatever
+        // shifted into its place.
+        let clipboard_text = if out.kill_ring.replace(ATTACHMENT_MARKER, "") == kill_text {
+            out.clipboard
+        } else {
+            kill_text.to_string()
+        };
+
+        if clipboard_text.is_empty() {
             return;
         }
-        if clipboard.write(&out.clipboard).is_ok() {
-            clipboard.kill_ring.record_clipboard_write(out.clipboard);
+        if clipboard.write(&clipboard_text).is_ok() {
+            clipboard.kill_ring.record_clipboard_write(clipboard_text);
         }
     }
 
@@ -1498,6 +1510,69 @@ mod tests {
         let out = buf.copy_range(0..5);
         assert_eq!(out.kill_ring, "hello");
         assert_eq!(out.clipboard, "HELLO");
+    }
+
+    #[test]
+    fn sync_clipboard_uses_copier_when_buffer_untouched() {
+        struct UpperCopier;
+        impl BufferCopy for UpperCopier {
+            fn copy(&self, _buf: &Buffer, src: &str, range: std::ops::Range<usize>) -> CopyOutput {
+                let raw = src[range].to_string();
+                CopyOutput {
+                    clipboard: raw.to_uppercase(),
+                    kill_ring: raw,
+                }
+            }
+        }
+        let mut buf = make_buf();
+        buf.set_source("hello".into());
+        buf.set_copier(std::sync::Arc::new(UpperCopier));
+
+        let mut clipboard = crate::Clipboard::null();
+        clipboard
+            .kill_ring
+            .set_with_source("hello".into(), false, 0, 5);
+        buf.sync_clipboard_from_kill_ring(&mut clipboard);
+        assert_eq!(clipboard.kill_ring.last_clipboard_write(), Some("HELLO"));
+    }
+
+    #[test]
+    fn sync_clipboard_falls_back_to_kill_ring_when_buffer_mutated() {
+        struct UpperCopier;
+        impl BufferCopy for UpperCopier {
+            fn copy(&self, _buf: &Buffer, src: &str, range: std::ops::Range<usize>) -> CopyOutput {
+                let raw = src[range].to_string();
+                CopyOutput {
+                    clipboard: raw.to_uppercase(),
+                    kill_ring: raw,
+                }
+            }
+        }
+        let mut buf = make_buf();
+        buf.set_source("hello".into());
+        buf.set_copier(std::sync::Arc::new(UpperCopier));
+
+        let mut clipboard = crate::Clipboard::null();
+        // Simulate vim x on the last char: yank "o" at 4..5 then delete it.
+        clipboard.kill_ring.set_with_source("o".into(), false, 4, 5);
+        // Mutate buffer so the range no longer contains "o".
+        buf.set_source("hell".into());
+        buf.sync_clipboard_from_kill_ring(&mut clipboard);
+        // Should fall back to kill-ring text, not the shifted/wrong buffer text.
+        assert_eq!(clipboard.kill_ring.last_clipboard_write(), Some("o"));
+    }
+
+    #[test]
+    fn sync_clipboard_falls_back_when_range_collapses_after_delete() {
+        let mut buf = make_buf();
+        buf.set_source("hello".into());
+
+        let mut clipboard = crate::Clipboard::null();
+        clipboard.kill_ring.set_with_source("o".into(), false, 4, 5);
+        // Delete the last character: buffer shrinks so range 4..5 is empty.
+        buf.set_source("hell".into());
+        buf.sync_clipboard_from_kill_ring(&mut clipboard);
+        assert_eq!(clipboard.kill_ring.last_clipboard_write(), Some("o"));
     }
 
     /// Property test: stale byte offsets surviving an edit must never panic
