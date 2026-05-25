@@ -236,12 +236,12 @@ local function summarize_flat(history, instructions, done)
       on_response = function(summary, err)
         if err then
           handle:remove()
-          if err.kind == "cancelled" then
-            done(nil, true)
+          if smelt.task.is_cancelled(err) then
+            done(nil, err)
             return
           end
           smelt.notify.error("compaction failed: " .. err.message)
-          done(nil, false)
+          done(nil, err)
           return
         end
         if not summary or summary == "" then
@@ -252,11 +252,11 @@ local function summarize_flat(history, instructions, done)
           end
           handle:remove()
           smelt.notify.error("compaction failed: empty summary after retries")
-          done(nil, false)
+          done(nil, nil)
           return
         end
         handle:remove()
-        done(summary, false)
+        done(summary, nil)
       end,
     })
   end
@@ -292,12 +292,12 @@ local function summarize(history, instructions, done)
             return
           end
           handle:remove()
-          if err.kind == "cancelled" then
-            done(nil, true)
+          if smelt.task.is_cancelled(err) then
+            done(nil, err)
             return
           end
           smelt.notify.error("compaction failed: " .. err.message)
-          done(nil, false)
+          done(nil, err)
           return
         end
         if not summary or summary == "" then
@@ -308,11 +308,11 @@ local function summarize(history, instructions, done)
           end
           handle:remove()
           smelt.notify.error("compaction failed: empty summary after retries")
-          done(nil, false)
+          done(nil, nil)
           return
         end
         handle:remove()
-        done(summary, false)
+        done(summary, nil)
       end,
     })
   end
@@ -351,8 +351,8 @@ local function run_compact(opts)
   -- keeps the request prefix byte-identical to the main turn for cache
   -- reuse.  Phase A (prune) is reserved for mid-turn recovery where we
   -- have no other option.
-  summarize(history, opts and opts.instructions, function(summary, cancelled)
-    if cancelled then
+  summarize(history, opts and opts.instructions, function(summary, err)
+    if smelt.task.is_cancelled(err) then
       return
     end
     if not summary then
@@ -393,8 +393,8 @@ local function compact_live_session(before_tokens, phase, done)
     done(nil)
     return
   end
-  summarize(history, nil, function(summary, cancelled)
-    if cancelled then
+  summarize(history, nil, function(summary, err)
+    if smelt.task.is_cancelled(err) then
       done(nil)
       return
     end
@@ -489,7 +489,11 @@ smelt.engine.on_context_limit(function(messages, reply)
   -- snapshot that doesn't match `smelt.session.messages()`, so we can't
   -- inherit_session cleanly. Cache reuse is worth less here anyway — the
   -- turn is already failing.
-  summarize_flat(messages, nil, function(summary)
+  summarize_flat(messages, nil, function(summary, err)
+    if smelt.task.is_cancelled(err) then
+      reply(nil)
+      return
+    end
     if not summary then
       consecutive_failures = consecutive_failures + 1
       reply(nil)

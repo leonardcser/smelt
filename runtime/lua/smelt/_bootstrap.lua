@@ -19,6 +19,21 @@ local function yield_with_cancel(payload)
   return result
 end
 
+-- Check whether an error value represents a task or engine-ask cancellation.
+-- Matches both the task-runtime `RuntimeError("cancelled")` shape and the
+-- engine-ask `{ kind = "cancelled", message = "..." }` shape.
+---@type fun(err: any): boolean
+function smelt.task.is_cancelled(err)
+  if type(err) == "table" and err.kind == "cancelled" then
+    return true
+  end
+  if type(err) == "string" then
+    local first = err:match("^([^\r\n]*)")
+    return first == "cancelled"
+  end
+  return false
+end
+
 -- Sleep for `ms` milliseconds. Must be called from inside `smelt.spawn(fn)`
 -- or a `tool.execute`. Raises `cancelled` if the task is cancelled while
 -- parked.

@@ -43,6 +43,7 @@ pub(crate) struct LuaTask {
     cancel: CancellationToken,
 }
 
+#[derive(Debug)]
 pub enum TaskDriveOutput {
     ToolComplete {
         request_id: u64,
@@ -329,7 +330,9 @@ fn emit_task_failure(task: &LuaTask, msg: &str, outputs: &mut Vec<TaskDriveOutpu
 
 fn is_cancelled_lua_error(err: &mlua::Error) -> bool {
     match err {
-        mlua::Error::RuntimeError(msg) => msg == "cancelled",
+        // mlua appends a Lua traceback after the error string, so the
+        // RuntimeError payload is "cancelled\nstack traceback:\n...".
+        mlua::Error::RuntimeError(msg) => msg.lines().next() == Some("cancelled"),
         mlua::Error::CallbackError { cause, .. } => is_cancelled_lua_error(cause.as_ref()),
         _ => false,
     }
@@ -685,6 +688,63 @@ mod tests {
         // loop, resumed with the cancel marker, and finishes.
         let out = rt.drive(&lua, Instant::now());
         assert!(out.is_empty());
+        assert_eq!(rt.tasks.len(), 0);
+    }
+
+    #[test]
+    fn cancelled_task_using_yield_with_cancel_silently_drops() {
+        let lua = Lua::new();
+        // Reproduce the real _bootstrap.lua yield_with_cancel path so the
+        // error string carries a Lua traceback (mlua appends it), not just
+        // the bare "cancelled" word.
+        lua.load(
+            r#"
+            smelt = {}
+            function smelt.sleep(ms)
+              local result = coroutine.yield({__yield = "sleep", ms = ms})
+              if type(result) == "table" and result.__cancelled then
+                error("cancelled", 3)
+              end
+              return result
+            end
+            "#,
+        )
+        .exec()
+        .unwrap();
+        let mut rt = LuaTaskRuntime::new();
+        let func: mlua::Function = lua
+            .load(
+                r#"function()
+                local r = smelt.sleep(100)
+                return r
+              end"#,
+            )
+            .eval()
+            .unwrap();
+        rt.spawn(
+            &lua,
+            func,
+            LuaMultiValue::new(),
+            TaskCompletion::FireAndForget,
+        )
+        .unwrap();
+
+        // First drive parks on sleep.
+        let out = rt.drive(&lua, Instant::now());
+        assert!(out.is_empty());
+        assert_eq!(rt.tasks.len(), 1);
+        assert!(matches!(rt.tasks[0].wait, TaskWait::Sleep(_)));
+
+        // Cancel all tasks.
+        rt.cancel_all(&lua);
+        assert!(matches!(rt.tasks[0].wait, TaskWait::Ready(_)));
+
+        // Next drive resumes with cancel marker and finishes silently.
+        let out = rt.drive(&lua, Instant::now());
+        assert!(
+            out.is_empty(),
+            "cancelled task should not emit error output, got: {out:?}"
+        );
         assert_eq!(rt.tasks.len(), 0);
     }
 }

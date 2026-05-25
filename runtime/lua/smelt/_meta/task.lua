@@ -27,6 +27,12 @@ task.alloc = nil
 ---@type fun(start: fun(id: integer)): any
 task.external = nil
 
+--- Check whether an error value represents a task or engine-ask cancellation.
+--- Matches both the task-runtime `RuntimeError("cancelled")` shape and the
+--- engine-ask `{ kind = "cancelled", message = "..." }` shape.
+---@type fun(err: any): boolean
+task.is_cancelled = nil
+
 --- Run `fns` concurrently; first to return wins. Returns the winner's
 --- `(index, result)` as multi-value, mirroring `task.timeout`'s
 --- `(value, err)` shape. All other branches are cancelled. Errors from

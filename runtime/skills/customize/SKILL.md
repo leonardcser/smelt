@@ -985,6 +985,8 @@ Yield-then-resume coroutine bridge: alloc and resume external tasks.
   Allocate and return a fresh external task id used to pair a yielded coroutine with a later `task.resume` call.
 - `smelt.task.external` :: `fun(start: fun(id: integer)): any`
   Allocate an external task id, invoke `start(id)` to kick off whatever will eventually call `smelt.task.resume(id, value)` (or resolve through the Rust resume sink), and park until that resolution arrives.
+- `smelt.task.is_cancelled` :: `fun(err: any): boolean`
+  Check whether an error value represents a task or engine-ask cancellation.
 - `smelt.task.race` :: `fun(...: fun(): any): integer, any`
   Run `fns` concurrently; first to return wins.
 - `smelt.task.resume` :: `fun(id: integer, value: any): nil`

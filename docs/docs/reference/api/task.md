@@ -38,6 +38,16 @@ the resolved value. Raises `cancelled` if the task is cancelled while
 parked. Plugin authors bridging custom Rust extensions use this to
 avoid hand-rolling the alloc + start + wait dance.
 
+## `smelt.task.is_cancelled`
+
+```lua
+fun(err: any): boolean
+```
+
+Check whether an error value represents a task or engine-ask cancellation.
+Matches both the task-runtime `RuntimeError("cancelled")` shape and the
+engine-ask `{ kind = "cancelled", message = "..." }` shape.
+
 ## `smelt.task.race`
 
 ```lua
