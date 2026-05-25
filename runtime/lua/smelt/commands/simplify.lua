@@ -86,5 +86,6 @@ smelt.cmd.register("simplify", function(arg)
   smelt.engine.submit_command("simplify", body)
 end, {
   desc = "review changed code for reuse, quality, and efficiency",
+  args = { "<focus>" },
   while_busy = false,
 })

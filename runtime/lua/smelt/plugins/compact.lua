@@ -430,7 +430,7 @@ end
 smelt.cmd.register("compact", function(arg)
   consecutive_failures = 0
   run_compact({ instructions = arg, inject_recent_user_messages = false })
-end, { desc = "compact conversation history", while_busy = false })
+end, { desc = "compact conversation history", args = { "<instructions>" }, while_busy = false })
 
 -- ── pre-request auto-compaction ───────────────────────────────────────
 --

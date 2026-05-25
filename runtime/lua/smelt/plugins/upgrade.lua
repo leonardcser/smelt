@@ -654,7 +654,7 @@ smelt.cmd.register("upgrade", function(args)
   end
   notify_install_kickoff()
   dispatch_install()
-end, { desc = "install the newest smelt build (background)" })
+end, { desc = "install the newest smelt build (background)", args = { "check" } })
 
 -- ── /changelog command ────────────────────────────────────────────────
 --

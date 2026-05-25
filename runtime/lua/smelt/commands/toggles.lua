@@ -23,4 +23,4 @@ smelt.cmd.register("reasoning", function(arg)
     end
   end
   smelt.notify("reasoning effort: " .. smelt.reasoning())
-end, { desc = "set or show reasoning effort" })
+end, { desc = "set or show reasoning effort", args = { "off", "low", "medium", "high", "max" } })

@@ -51,5 +51,6 @@ smelt.cmd.register("reflect", function(arg)
   smelt.engine.submit_command("reflect", body)
 end, {
   desc = "step back and rethink recent changes before moving on",
+  args = { "<focus>" },
   while_busy = false,
 })

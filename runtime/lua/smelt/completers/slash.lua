@@ -1,6 +1,6 @@
 -- `/cmd` completer — opens when the buffer starts with `/` and the cursor sits
 -- inside the unwhitespaced command name. Enter dispatches the command; Tab
--- accepts the name + trailing space (which cascades into the arg completer
+-- accepts the name + trailing space (which shows the dim arg placeholder
 -- when the command declared `args`).
 
 if not (smelt.prompt and smelt.prompt.completer) then return end

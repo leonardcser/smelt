@@ -135,6 +135,6 @@ end
 
 smelt.cmd.register("diff", function(value)
 	smelt.spawn(function() open(value) end)
-end, { desc = "side-by-side diff of <filepath> vs HEAD (demo)" })
+end, { desc = "side-by-side diff of <filepath> vs HEAD (demo)", args = { "<filepath>" } })
 
 return M

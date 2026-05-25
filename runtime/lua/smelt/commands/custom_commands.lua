@@ -196,6 +196,7 @@ local function register_all()
       smelt.spawn(function() run_custom(stem, path, arg) end)
     end, {
       desc            = file_desc(path),
+      args            = { "<arg>" },
       while_busy      = false,
       queue_when_busy = true,
     })
