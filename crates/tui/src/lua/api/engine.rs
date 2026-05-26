@@ -22,13 +22,25 @@ pub struct LuaAskMessage {
 }
 
 /// One assistant tool call returned by `smelt.engine.ask` /
-/// `smelt.engine.ask_inherited`.
+/// `smelt.engine.ask_inherited`. Matches the provider wire shape.
 #[allow(dead_code)]
 #[derive(Debug, LuaOpts)]
 #[lua(name = "smelt.engine.AskToolCall")]
 pub struct LuaAskToolCall {
     /// Stable provider-generated call id.
     pub id: String,
+    /// Always `"function"`.
+    #[lua(rename = "type")]
+    pub call_type: String,
+    /// Tool name and arguments.
+    pub function: LuaAskFunctionCall,
+}
+
+/// Function payload inside an `AskToolCall`.
+#[allow(dead_code)]
+#[derive(Debug, LuaOpts)]
+#[lua(name = "smelt.engine.AskFunctionCall")]
+pub struct LuaAskFunctionCall {
     /// Tool/function name.
     pub name: String,
     /// JSON arguments string.

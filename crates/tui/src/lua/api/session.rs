@@ -33,13 +33,19 @@ pub(crate) fn messages_to_lua(lua: &Lua, msgs: &[protocol::Message]) -> LuaResul
         if let Some(ref c) = msg.content {
             entry.set("content", c.text_content())?;
         }
+        if let Some(ref rc) = msg.reasoning_content {
+            entry.set("reasoning_content", rc.as_str())?;
+        }
         if let Some(ref tc) = msg.tool_calls {
             let calls = lua.create_table()?;
             for (j, call) in tc.iter().enumerate() {
                 let ct = lua.create_table()?;
                 ct.set("id", call.id.as_str())?;
-                ct.set("name", call.function.name.as_str())?;
-                ct.set("arguments", call.function.arguments.as_str())?;
+                ct.set("type", "function")?;
+                let func = lua.create_table()?;
+                func.set("name", call.function.name.as_str())?;
+                func.set("arguments", call.function.arguments.as_str())?;
+                ct.set("function", func)?;
                 calls.set(j + 1, ct)?;
             }
             entry.set("tool_calls", calls)?;

@@ -90,9 +90,9 @@ local function format_markdown()
       end
       if msg.tool_calls then
         for _, call in ipairs(msg.tool_calls) do
-          table.insert(parts, string.format("**Tool call:** `%s`\n", call.name))
+          table.insert(parts, string.format("**Tool call:** `%s`\n", call["function"].name))
           table.insert(parts, "```json")
-          table.insert(parts, call.arguments)
+          table.insert(parts, call["function"].arguments)
           table.insert(parts, "```\n")
           local result = tool_results[call.id]
           if result then
