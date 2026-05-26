@@ -1,4 +1,4 @@
-//! `smelt.engine` — cancel, `ask`, and `submit_command` for Lua-rendered turns.
+//! `smelt.engine` — cancel, ask, inherited ask, and submit_command for Lua-rendered turns.
 
 use crate::lua::{LuaHandle, LuaShared};
 use lua_doc_derive::LuaOpts;
@@ -9,7 +9,8 @@ use smelt_core::lua::lua_type::LuaCallback;
 use smelt_core::lua::module::LuaMod;
 use std::sync::Arc;
 
-/// One text-only message in a `smelt.engine.ask` conversation.
+/// One text-only message used by request hooks that exchange plain
+/// user/assistant rows.
 #[allow(dead_code)]
 #[derive(Debug, LuaOpts)]
 #[lua(name = "smelt.engine.AskMessage")]
@@ -18,6 +19,38 @@ pub struct LuaAskMessage {
     pub role: String,
     /// Message body as plain text.
     pub content: String,
+}
+
+/// One assistant tool call returned by `smelt.engine.ask` /
+/// `smelt.engine.ask_inherited`.
+#[allow(dead_code)]
+#[derive(Debug, LuaOpts)]
+#[lua(name = "smelt.engine.AskToolCall")]
+pub struct LuaAskToolCall {
+    /// Stable provider-generated call id.
+    pub id: String,
+    /// Tool/function name.
+    pub name: String,
+    /// JSON arguments string.
+    pub arguments: String,
+}
+
+/// Structured assistant reply delivered to `smelt.engine.ask` /
+/// `smelt.engine.ask_inherited` callbacks on success. The live table may
+/// also carry provider-specific `reasoning_details` blocks when the model
+/// returned them.
+#[allow(dead_code)]
+#[derive(Debug, LuaOpts)]
+#[lua(name = "smelt.engine.AskResponse")]
+pub struct LuaAskResponseTable {
+    /// Always `"assistant"` for successful ask replies.
+    pub role: String,
+    /// Assistant text content when present.
+    pub content: Option<String>,
+    /// Flattened reasoning text when present.
+    pub reasoning_content: Option<String>,
+    /// Structured tool calls emitted by the model, if any.
+    pub tool_calls: Option<Vec<LuaAskToolCall>>,
 }
 
 /// Subcommand rule override accepted inside `CommandOverrides`. Mirrors
@@ -189,10 +222,12 @@ pub struct LuaAskSpec {
     pub response_format: Option<LuaAskResponseFormat>,
     /// Reasoning effort for the request; defaults to `"off"`.
     pub reasoning_effort: Option<LuaReasoningEffort>,
-    /// Fires once with `(content, err)`. On success `err` is `nil` and
-    /// `content` carries the assistant text. On failure `err` is a
-    /// `smelt.engine.AskError` table and `content` is `""`.
-    pub on_response: Option<LuaCallback<(String, Option<LuaAskErrorTable>), ()>>,
+    /// Fires once with `(response, err)`. On success `err` is `nil` and
+    /// `response` is a full assistant message table
+    /// ([`smelt.engine.AskResponse`](types.md#smeltengineaskresponse));
+    /// on failure `response` is `nil` and `err` is a
+    /// `smelt.engine.AskError` table.
+    pub on_response: Option<LuaCallback<(mlua::Value, Option<LuaAskErrorTable>), ()>>,
 }
 
 /// Spec for `smelt.engine.ask_inherited`.
@@ -214,10 +249,12 @@ pub struct LuaInheritedAskSpec {
     pub response_format: Option<LuaAskResponseFormat>,
     /// Reasoning effort for the request; defaults to `"off"`.
     pub reasoning_effort: Option<LuaReasoningEffort>,
-    /// Fires once with `(content, err)`. On success `err` is `nil` and
-    /// `content` carries the assistant text. On failure `err` is a
-    /// `smelt.engine.AskError` table and `content` is `""`.
-    pub on_response: Option<LuaCallback<(String, Option<LuaAskErrorTable>), ()>>,
+    /// Fires once with `(response, err)`. On success `err` is `nil` and
+    /// `response` is a full assistant message table
+    /// ([`smelt.engine.AskResponse`](types.md#smeltengineaskresponse));
+    /// on failure `response` is `nil` and `err` is a
+    /// `smelt.engine.AskError` table.
+    pub on_response: Option<LuaCallback<(mlua::Value, Option<LuaAskErrorTable>), ()>>,
 }
 
 pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) -> LuaResult<()> {
@@ -225,7 +262,7 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
         lua,
         smelt,
         "engine",
-        "LLM engine control — cancel, ask, submit commands, and request tool approval. UiHost-only.",
+        "LLM engine control — cancel, ask, inherited ask, submit commands, and request tool approval. UiHost-only.",
         Tier::UiHost,
     )?;
     m.fn_(
@@ -336,7 +373,7 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
         let s = shared.clone();
         m.fn_(
             "ask",
-            "Run an out-of-band LLM request without touching the main turn. `spec.model` selects an alternate model (defaults to the primary), `spec.response_format` enforces a JSON schema, `spec.reasoning_effort` controls effort (defaults to `\"off\"`). `spec.on_response` fires once with `(content, err)`; on context-window errors `err.kind = \"context_window\"` so callers can compose retries in Lua (see `smelt.engine.ask_with_trim`). Returns the request id.",
+            "Run an out-of-band LLM request without touching the main turn. `spec.model` selects an alternate model (defaults to the primary), `spec.response_format` enforces a JSON schema, `spec.reasoning_effort` controls effort (defaults to `\"off\"`). `spec.on_response` fires once with `(response, err)`, where `response` is a structured assistant message table on success. Returns the request id.",
             &["spec"],
             move |lua, spec: LuaAskSpec| -> LuaResult<u64> {
                 if spec.system.is_empty() {
@@ -398,7 +435,7 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
         let s = shared.clone();
         m.fn_(
             "ask_inherited",
-            "Run an auxiliary LLM request that inherits the current session's assembled system prompt and active tool list. When `spec.messages` is omitted or empty, the live model-visible history is inherited exactly; otherwise the supplied full `protocol::Message` rows override the inherited history while preserving the same prompt structure. Returns the request id.",
+            "Run an auxiliary LLM request that inherits the current session's assembled system prompt and active tool list. When `spec.messages` is omitted or empty, the live model-visible history is inherited exactly; otherwise the supplied full `protocol::Message` rows override the inherited history while preserving the same prompt structure. `spec.on_response` fires once with `(response, err)`, where `response` is a structured assistant message table on success. Returns the request id.",
             &["spec"],
             move |lua, spec: LuaInheritedAskSpec| -> LuaResult<u64> {
                 let mut messages: Vec<protocol::Message> = spec

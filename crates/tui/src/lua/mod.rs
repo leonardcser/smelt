@@ -389,13 +389,14 @@ impl LuaRuntime {
     }
 
     /// Fire the `smelt.engine.ask` callback registered under `id` with
-    /// `(content, err_or_nil)`. The error table mirrors the
+    /// `(response_or_nil, err_or_nil)`. The success payload mirrors the
+    /// provider-shaped assistant `protocol::Message` row; the error table mirrors the
     /// `smelt.engine.AskError` shape — `{ kind, message }` strings —
     /// so plugins can branch on the failure mode without parsing text.
     pub(crate) fn fire_ask_callback(
         &self,
         id: u64,
-        content: &str,
+        message: Option<&protocol::Message>,
         error: Option<protocol::EngineAskError>,
     ) {
         let handle = {
@@ -410,6 +411,12 @@ impl LuaRuntime {
         let Ok(func) = self.core.lua.registry_value::<mlua::Function>(&handle.key) else {
             return;
         };
+        let response_value: mlua::Value = match message {
+            Some(msg) => {
+                smelt_core::lua::serde_to_lua(&self.core.lua, msg).unwrap_or(mlua::Value::Nil)
+            }
+            None => mlua::Value::Nil,
+        };
         let err_value: mlua::Value = match error {
             None => mlua::Value::Nil,
             Some(e) => match self.core.lua.create_table() {
@@ -422,7 +429,7 @@ impl LuaRuntime {
             },
         };
         let _perf = smelt_perf::perf::begin("lua:ask_cb");
-        if let Err(e) = func.call::<()>((content.to_string(), err_value)) {
+        if let Err(e) = func.call::<()>((response_value, err_value)) {
             self.record_error(format!("ask callback: {e}"));
         }
     }
@@ -637,7 +644,9 @@ mod tests {
         // counter means a real ask call would never collide with this id,
         // but a buggy engine emitting a stale id used to fire the wrong
         // handler — verify the ask path stays in its own lane.
-        rt.fire_ask_callback(id, "synthetic", None);
+        let msg =
+            protocol::Message::assistant(Some(protocol::Content::text("synthetic")), None, None);
+        rt.fire_ask_callback(id, Some(&msg), None);
 
         let fired: u64 = rt.lua.load("return _G.fired").eval().unwrap();
         assert_eq!(fired, 0, "non-ask handle must not fire on ask response");

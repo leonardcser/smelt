@@ -1441,6 +1441,17 @@ impl TestApp {
         }
     }
 
+    /// Drain queued `UiCommand`s from the engine channel and return them.
+    /// Useful for host-hook tests that need to inspect background
+    /// `EngineAsk` requests directly without going through `feed_one`.
+    pub fn drain_engine_sends(&mut self) -> Vec<UiCommand> {
+        let mut out = Vec::new();
+        while let Ok(cmd) = self.cmd_rx.try_recv() {
+            out.push(cmd);
+        }
+        out
+    }
+
     pub fn actions(&self) -> &[Action] {
         &self.actions
     }

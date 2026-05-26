@@ -223,6 +223,270 @@ impl TuiApp {
     }
 }
 
+#[cfg(test)]
+mod compaction_tests {
+    use super::*;
+    use crate::app::test_harness::TestAppBuilder;
+    use protocol::{Content, EngineAskError, EngineAskErrorKind, EngineEvent, Message, UiCommand};
+    use tokio::sync::oneshot;
+
+    fn user(text: &str) -> Message {
+        Message::user(Content::text(text))
+    }
+
+    fn assistant(text: &str) -> Message {
+        Message::assistant(Some(Content::text(text)), None, None)
+    }
+
+    fn ask_messages(cmds: Vec<UiCommand>) -> Vec<(String, Vec<Message>)> {
+        cmds.into_iter()
+            .filter_map(|cmd| match cmd {
+                UiCommand::EngineAsk {
+                    system, messages, ..
+                } => Some((system, messages)),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn prepare_request_compaction_preserves_session_prefix_and_appends_summary_instruction() {
+        let mut t = TestAppBuilder::default().build();
+        t.app.core.config.context_window = Some(100);
+        t.app
+            .core
+            .session
+            .history
+            .push(protocol::HistoryItem::user(Content::text("u1")));
+        t.push_assistant_text("a1");
+        t.app
+            .core
+            .session
+            .history
+            .push(protocol::HistoryItem::user(Content::text("u2")));
+
+        let full_history = protocol::history_to_messages(&t.app.model_history());
+        let expected_prefix = &full_history[..2];
+        let (tx, rx) = oneshot::channel();
+        {
+            let _guard = crate::lua::install_app_ptr(&mut t.app);
+            t.app.dispatch_host_call(HostCall::PrepareRequest {
+                messages: full_history.clone(),
+                estimated_tokens: 200,
+                reply: tx,
+            });
+        }
+
+        let asks = ask_messages(t.drain_engine_sends());
+        assert_eq!(asks.len(), 1, "compaction should issue one EngineAsk");
+        let (system, messages) = &asks[0];
+        assert_eq!(system, &t.app.assemble_system_prompt());
+        assert_eq!(
+            &messages[..expected_prefix.len()],
+            expected_prefix,
+            "initial compaction attempt must preserve the exact session prefix up to the current boundary"
+        );
+        let last_text = messages
+            .last()
+            .and_then(|m| m.content.as_ref())
+            .map(|c| c.text_content());
+        let last_text = last_text.expect("summary task");
+        assert!(last_text.contains("CONTEXT CHECKPOINT COMPACTION"));
+        assert!(last_text.contains("Under no circumstances use tools"));
+        assert!(last_text.contains("# Goal"));
+
+        {
+            let _guard = crate::lua::install_app_ptr(&mut t.app);
+            t.app.dispatch_engine_event(EngineEvent::EngineAskResponse {
+                id: t.pending_ask_id().expect("pending ask id"),
+                message: Some(Message::assistant(
+                    Some(Content::text("# Goal\nok")),
+                    None,
+                    None,
+                )),
+                error: None,
+            });
+        }
+        let replacement = rx
+            .await
+            .expect("prepare_request reply")
+            .expect("replacement");
+        let replacement_text = replacement
+            .first()
+            .and_then(|m| m.content.as_ref())
+            .map(|c| c.text_content());
+        let expected = format!("{}\n# Goal\nok", engine::SUMMARY_PREFIX.trim_end());
+        assert_eq!(replacement_text.as_deref(), Some(expected.as_str()));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn context_limit_recovery_moves_boundary_earlier_on_context_window() {
+        let mut t = TestAppBuilder::default().build();
+        let messages = vec![
+            user("u1"),
+            assistant("a1"),
+            user("u2"),
+            assistant("a2"),
+            user("u3"),
+        ];
+        let (tx, rx) = oneshot::channel();
+        {
+            let _guard = crate::lua::install_app_ptr(&mut t.app);
+            t.app.dispatch_host_call(HostCall::RecoverFromContextLimit {
+                messages: messages.clone(),
+                reply: tx,
+            });
+        }
+
+        let first = ask_messages(t.drain_engine_sends());
+        assert_eq!(first.len(), 1);
+        let first_messages = &first[0].1;
+        assert_eq!(
+            &first_messages[..4],
+            &messages[..4],
+            "keep_recent_groups=1 should compact everything before the last group"
+        );
+
+        {
+            let _guard = crate::lua::install_app_ptr(&mut t.app);
+            t.app.dispatch_engine_event(EngineEvent::EngineAskResponse {
+                id: t.pending_ask_id().expect("pending ask id"),
+                message: None,
+                error: Some(EngineAskError {
+                    kind: EngineAskErrorKind::ContextWindow,
+                    message: "too large".into(),
+                }),
+            });
+        }
+
+        let second = ask_messages(t.drain_engine_sends());
+        assert_eq!(second.len(), 1);
+        let second_messages = &second[0].1;
+        assert_eq!(
+            &second_messages[..3],
+            &messages[..3],
+            "retry should move the boundary one group earlier"
+        );
+
+        {
+            let _guard = crate::lua::install_app_ptr(&mut t.app);
+            t.app.dispatch_engine_event(EngineEvent::EngineAskResponse {
+                id: t.pending_ask_id().expect("pending ask id"),
+                message: Some(Message::assistant(
+                    Some(Content::text("# Goal\nok")),
+                    None,
+                    None,
+                )),
+                error: None,
+            });
+        }
+
+        let replacement = rx.await.expect("recovery reply").expect("replacement");
+        assert_eq!(replacement.len(), 3);
+        assert_eq!(replacement[1], messages[3]);
+        assert_eq!(replacement[2], messages[4]);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn context_limit_recovery_denies_tool_calls_without_moving_boundary() {
+        let mut t = TestAppBuilder::default().build();
+        let messages = vec![user("u1"), assistant("a1"), user("u2")];
+        let (tx, rx) = oneshot::channel();
+        {
+            let _guard = crate::lua::install_app_ptr(&mut t.app);
+            t.app.dispatch_host_call(HostCall::RecoverFromContextLimit {
+                messages: messages.clone(),
+                reply: tx,
+            });
+        }
+
+        let first = ask_messages(t.drain_engine_sends());
+        assert_eq!(first.len(), 1);
+        let first_messages = first[0].1.clone();
+
+        {
+            let _guard = crate::lua::install_app_ptr(&mut t.app);
+            t.app.dispatch_engine_event(EngineEvent::EngineAskResponse {
+                id: t.pending_ask_id().expect("pending ask id"),
+                message: Some(Message::assistant(
+                    None,
+                    None,
+                    Some(vec![protocol::ToolCall::new(
+                        "call-1".into(),
+                        protocol::FunctionCall {
+                            name: "read_file".into(),
+                            arguments: "{}".into(),
+                        },
+                    )]),
+                )),
+                error: None,
+            });
+        }
+
+        let second = ask_messages(t.drain_engine_sends());
+        assert_eq!(second.len(), 1);
+        let second_messages = &second[0].1;
+        assert_eq!(
+            &second_messages[..first_messages.len()],
+            first_messages.as_slice(),
+            "tool denial retry must keep the same boundary prefix"
+        );
+        assert_eq!(
+            second_messages[first_messages.len()].role,
+            protocol::Role::Assistant
+        );
+        assert_eq!(
+            second_messages[first_messages.len() + 1].role,
+            protocol::Role::Tool
+        );
+        assert!(second_messages[first_messages.len() + 1].is_error);
+
+        {
+            let _guard = crate::lua::install_app_ptr(&mut t.app);
+            t.app.dispatch_engine_event(EngineEvent::EngineAskResponse {
+                id: t.pending_ask_id().expect("pending ask id"),
+                message: Some(Message::assistant(
+                    Some(Content::text("# Goal\nok")),
+                    None,
+                    None,
+                )),
+                error: None,
+            });
+        }
+
+        let replacement = rx.await.expect("recovery reply").expect("replacement");
+        assert_eq!(replacement.first().unwrap().role, protocol::Role::User);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn context_limit_recovery_returns_none_when_no_earlier_boundary_fits() {
+        let mut t = TestAppBuilder::default().build();
+        let messages = vec![user("u1"), user("u2")];
+        let (tx, rx) = oneshot::channel();
+        {
+            let _guard = crate::lua::install_app_ptr(&mut t.app);
+            t.app.dispatch_host_call(HostCall::RecoverFromContextLimit {
+                messages,
+                reply: tx,
+            });
+        }
+
+        {
+            let _guard = crate::lua::install_app_ptr(&mut t.app);
+            t.app.dispatch_engine_event(EngineEvent::EngineAskResponse {
+                id: t.pending_ask_id().expect("pending ask id"),
+                message: None,
+                error: Some(EngineAskError {
+                    kind: EngineAskErrorKind::ContextWindow,
+                    message: "too large".into(),
+                }),
+            });
+        }
+
+        assert!(rx.await.expect("recovery reply").is_none());
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum PrepareContextEstimateSource {
     FullRequestEstimate,

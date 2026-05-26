@@ -106,11 +106,17 @@ app_story!(btw_dialog_with_answer, |ctx| {
     let ask_id = ctx.pending_ask_id().expect("/btw registered ask callback");
     ctx.engine(EngineEvent::EngineAskResponse {
         id: ask_id,
-        content: "`buf:source(text)` replaces the whole buffer with a single string and reparses; "
-            .to_string()
-            + "`buf:lines(...)` overwrites the row array directly without reparsing. Use "
-            + "`source` for markdown/code where formatting depends on the whole text, "
-            + "`lines` for list/picker buffers that are already shaped row-by-row.",
+        message: Some(protocol::Message::assistant(
+            Some(protocol::Content::text(
+                "`buf:source(text)` replaces the whole buffer with a single string and reparses; "
+                    .to_string()
+                    + "`buf:lines(...)` overwrites the row array directly without reparsing. Use "
+                    + "`source` for markdown/code where formatting depends on the whole text, "
+                    + "`lines` for list/picker buffers that are already shaped row-by-row.",
+            )),
+            None,
+            None,
+        )),
         error: None,
     });
     ctx.assert_snapshot();

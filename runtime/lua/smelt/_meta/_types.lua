@@ -143,7 +143,7 @@
 ---@field kind string One of `"network" | "rate_limited" | "quota" | "invalid_response" | "context_window" | "cancelled" | "other"`.
 ---@field message string Human-readable single-line description (newlines collapsed to spaces).
 
---- One text-only message in a `smelt.engine.ask` conversation.
+--- One text-only message used by request hooks that exchange plain user/assistant rows.
 ---@class smelt.engine.AskMessage
 ---@field role string Either `"user"` or `"assistant"`. Other roles are silently dropped.
 ---@field content string Message body as plain text.
@@ -161,7 +161,7 @@
 ---@field model? string Model reference (`"provider/model"` or a bare name resolved against the configured providers). When `nil`, falls back to the primary model.
 ---@field response_format? smelt.engine.AskResponseFormat JSON-schema response constraint.
 ---@field reasoning_effort? smelt.reasoning.Effort Reasoning effort for the request; defaults to `"off"`.
----@field on_response? fun(arg1: string, arg2: smelt.engine.AskError?) Fires once with `(content, err)`. On success `err` is `nil` and `content` carries the assistant text. On failure `err` is a `smelt.engine.AskError` table and `content` is `""`.
+---@field on_response? fun(arg1: any, arg2: smelt.engine.AskError?) Fires once with `(response, err)`. On success `err` is `nil` and `response` is a full assistant message table ([`smelt.engine.AskResponse`](types.md#smeltengineaskresponse)); on failure `response` is `nil` and `err` is a `smelt.engine.AskError` table.
 
 --- Front-matter override block accepted by `smelt.engine.submit_command`. Mirrors what plugin commands set in their markdown header. Tool-name keys (e.g. `bash`, `edit`) become per-subcommand pattern buckets.
 ---@class smelt.engine.CommandOverrides
@@ -184,7 +184,7 @@
 ---@field model? string Model reference (`"provider/model"` or a bare name resolved against the configured providers). When `nil`, falls back to the primary model.
 ---@field response_format? smelt.engine.AskResponseFormat JSON-schema response constraint.
 ---@field reasoning_effort? smelt.reasoning.Effort Reasoning effort for the request; defaults to `"off"`.
----@field on_response? fun(arg1: string, arg2: smelt.engine.AskError?) Fires once with `(content, err)`. On success `err` is `nil` and `content` carries the assistant text. On failure `err` is a `smelt.engine.AskError` table and `content` is `""`.
+---@field on_response? fun(arg1: any, arg2: smelt.engine.AskError?) Fires once with `(response, err)`. On success `err` is `nil` and `response` is a full assistant message table ([`smelt.engine.AskResponse`](types.md#smeltengineaskresponse)); on failure `response` is `nil` and `err` is a `smelt.engine.AskError` table.
 
 --- Token accounting breakdown passed inside `smelt.engine.PrepareRequest`.
 ---@class smelt.engine.PrepareContextEstimate

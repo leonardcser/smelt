@@ -4,7 +4,7 @@
 
 **Tier:** `UiHost` — Requires a terminal UI; calling these from headless mode raises.
 
-LLM engine control — cancel, ask, submit commands, and request tool approval. UiHost-only.
+LLM engine control — cancel, ask, inherited ask, submit commands, and request tool approval. UiHost-only.
 
 ## `smelt.engine.ask`
 
@@ -14,7 +14,7 @@ fun(spec: smelt.engine.AskSpec): integer
 
 Types: [`smelt.engine.AskSpec`](types.md#smeltengineaskspec)
 
-Run an out-of-band LLM request without touching the main turn. `spec.model` selects an alternate model (defaults to the primary), `spec.response_format` enforces a JSON schema, `spec.reasoning_effort` controls effort (defaults to `"off"`). `spec.on_response` fires once with `(content, err)`; on context-window errors `err.kind = "context_window"` so callers can compose retries in Lua (see `smelt.engine.ask_with_trim`). Returns the request id.
+Run an out-of-band LLM request without touching the main turn. `spec.model` selects an alternate model (defaults to the primary), `spec.response_format` enforces a JSON schema, `spec.reasoning_effort` controls effort (defaults to `"off"`). `spec.on_response` fires once with `(response, err)`, where `response` is a structured assistant message table on success. Returns the request id.
 
 ## `smelt.engine.ask_inherited`
 
@@ -24,19 +24,7 @@ fun(spec: smelt.engine.InheritedAskSpec): integer
 
 Types: [`smelt.engine.InheritedAskSpec`](types.md#smeltengineinheritedaskspec)
 
-Run an auxiliary LLM request that inherits the current session's assembled system prompt and active tool list. When `spec.messages` is omitted or empty, the live model-visible history is inherited exactly; otherwise the supplied full `protocol::Message` rows override the inherited history while preserving the same prompt structure. Returns the request id.
-
-## `smelt.engine.ask_with_trim`
-
-```lua
-fun(spec: table): integer
-```
-
-Wrap `smelt.engine.ask` with a trim-and-retry loop for context-window
-errors: drops the oldest message from `spec.messages` and re-issues
-the request up to `spec.max_trims` times (default 20). `spec` accepts
-every field `smelt.engine.ask` accepts, plus `max_trims`. The engine
-itself is one-shot; composition lives here so the policy stays visible.
+Run an auxiliary LLM request that inherits the current session's assembled system prompt and active tool list. When `spec.messages` is omitted or empty, the live model-visible history is inherited exactly; otherwise the supplied full `protocol::Message` rows override the inherited history while preserving the same prompt structure. `spec.on_response` fires once with `(response, err)`, where `response` is a structured assistant message table on success. Returns the request id.
 
 ## `smelt.engine.cancel`
 

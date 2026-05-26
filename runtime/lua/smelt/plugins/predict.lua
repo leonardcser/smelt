@@ -79,8 +79,9 @@ smelt.cell("turn_end"):subscribe(function(payload)
     messages = messages,
     model = smelt.model.preferred("predict"),
     reasoning_effort = "off",
-    on_response = function(content, err)
+    on_response = function(response, err)
       if err then return end
+      local content = (response and response.content) or ""
       -- Keep only the first line; `Win:placeholder` rejects newlines and
       -- the prompt only renders a single line of ghost text anyway.
       local text = (content:match("[^\n]+") or ""):match("^%s*(.-)%s*$")

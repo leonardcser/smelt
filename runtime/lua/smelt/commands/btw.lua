@@ -33,12 +33,12 @@ smelt.cmd.register("btw", function(args)
       system = SYSTEM,
       messages = messages,
       model = smelt.model.preferred("btw"),
-      on_response = function(content, err)
+      on_response = function(response, err)
         done = true
         if err then
           buf:source("error (" .. err.kind .. "): " .. err.message)
         else
-          buf:source(content)
+          buf:source((response and response.content) or "")
         end
       end,
     })

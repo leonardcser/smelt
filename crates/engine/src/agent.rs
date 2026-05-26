@@ -310,9 +310,15 @@ fn spawn_engine_ask(
         match result {
             Ok(resp) => {
                 pricing.emit(&tx, &model_name, resp.usage);
+                let message = protocol::Message::assistant_with_reasoning(
+                    resp.content.map(protocol::Content::text),
+                    resp.reasoning_content,
+                    resp.reasoning_details,
+                    (!resp.tool_calls.is_empty()).then_some(resp.tool_calls),
+                );
                 let _ = tx.send(EngineEvent::EngineAskResponse {
                     id,
-                    content: resp.content.unwrap_or_default(),
+                    message: Some(message),
                     error: None,
                 });
             }
@@ -321,7 +327,7 @@ fn spawn_engine_ask(
                 let message = e.to_string().replace('\n', " ");
                 let _ = tx.send(EngineEvent::EngineAskResponse {
                     id,
-                    content: String::new(),
+                    message: None,
                     error: Some(EngineAskError { kind, message }),
                 });
             }

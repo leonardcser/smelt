@@ -189,7 +189,12 @@ local function ask_extract(content, prompt)
       .. "web page content. Be concise and direct.",
     question = "<content>\n" .. content .. "</content>\n\n" .. prompt,
     model = smelt.model.preferred("web_fetch"),
-    on_response = function(resp, err) smelt.task.resume(id, { content = resp, err = err }) end,
+    on_response = function(response, err)
+      smelt.task.resume(id, {
+        content = response and response.content or nil,
+        err = err,
+      })
+    end,
   })
   local result = smelt.task.wait(id)
   if not result or result.err then return nil end

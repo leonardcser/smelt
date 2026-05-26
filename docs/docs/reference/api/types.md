@@ -204,7 +204,7 @@ Typed error table delivered to `on_response` when the underlying provider call f
 
 ### `smelt.engine.AskMessage`
 
-One text-only message in a `smelt.engine.ask` conversation.
+One text-only message used by request hooks that exchange plain user/assistant rows.
 
 | Field | Type | Required | Description |
 | --- | --- | --- | --- |
@@ -232,7 +232,7 @@ Spec for `smelt.engine.ask`.
 | `model` | `string` |  | Model reference (`"provider/model"` or a bare name resolved against the configured providers). When `nil`, falls back to the primary model. |
 | `response_format` | [smelt.engine.AskResponseFormat](types.md#smeltengineaskresponseformat) |  | JSON-schema response constraint. |
 | `reasoning_effort` | [smelt.reasoning.Effort](types.md#smeltreasoningeffort) |  | Reasoning effort for the request; defaults to `"off"`. |
-| `on_response` | `fun(arg1: string, arg2: smelt.engine.AskError?)` |  | Fires once with `(content, err)`. On success `err` is `nil` and `content` carries the assistant text. On failure `err` is a `smelt.engine.AskError` table and `content` is `""`. |
+| `on_response` | `fun(arg1: any, arg2: smelt.engine.AskError?)` |  | Fires once with `(response, err)`. On success `err` is `nil` and `response` is a full assistant message table ([`smelt.engine.AskResponse`](types.md#smeltengineaskresponse)); on failure `response` is `nil` and `err` is a `smelt.engine.AskError` table. |
 
 ### `smelt.engine.CommandOverrides`
 
@@ -263,7 +263,7 @@ Spec for `smelt.engine.ask_inherited`.
 | `model` | `string` |  | Model reference (`"provider/model"` or a bare name resolved against the configured providers). When `nil`, falls back to the primary model. |
 | `response_format` | [smelt.engine.AskResponseFormat](types.md#smeltengineaskresponseformat) |  | JSON-schema response constraint. |
 | `reasoning_effort` | [smelt.reasoning.Effort](types.md#smeltreasoningeffort) |  | Reasoning effort for the request; defaults to `"off"`. |
-| `on_response` | `fun(arg1: string, arg2: smelt.engine.AskError?)` |  | Fires once with `(content, err)`. On success `err` is `nil` and `content` carries the assistant text. On failure `err` is a `smelt.engine.AskError` table and `content` is `""`. |
+| `on_response` | `fun(arg1: any, arg2: smelt.engine.AskError?)` |  | Fires once with `(response, err)`. On success `err` is `nil` and `response` is a full assistant message table ([`smelt.engine.AskResponse`](types.md#smeltengineaskresponse)); on failure `response` is `nil` and `err` is a `smelt.engine.AskError` table. |
 
 ### `smelt.engine.PrepareContextEstimate`
 

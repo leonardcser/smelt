@@ -262,12 +262,13 @@ pub enum EngineEvent {
     ProcessCompleted { id: String, exit_code: Option<i32> },
 
     /// Response to a `UiCommand::EngineAsk` request. On success
-    /// `error` is `None` and `content` is the assistant reply. On
-    /// failure `error` carries a typed classification and `content` is
-    /// empty.
+    /// `error` is `None` and `message` is the assistant reply in the
+    /// normal `protocol::Message` shape. On failure `error` carries a
+    /// typed classification and `message` is absent.
     EngineAskResponse {
         id: u64,
-        content: String,
+        #[serde(skip_serializing_if = "Option::is_none", default)]
+        message: Option<Message>,
         #[serde(skip_serializing_if = "Option::is_none", default)]
         error: Option<EngineAskError>,
     },

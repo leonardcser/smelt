@@ -111,14 +111,14 @@ local function update_title(new_text)
     model = smelt.model.preferred("title"),
     reasoning_effort = "off",
     response_format = { name = "session_title", schema = SCHEMA },
-    on_response = function(content, err)
+    on_response = function(response, err)
       inflight = false
       if err then
         local title, slug = fallback_title(trimmed)
         smelt.session.title(title, slug)
         return
       end
-      local parsed = parse_response(content)
+      local parsed = parse_response((response and response.content) or "")
       if parsed and type(parsed.title) == "string" and parsed.title ~= "" then
         local title = smelt.text.truncate(parsed.title, 64):gsub("^%s+", ""):gsub("%s+$", "")
         local slug = (type(parsed.slug) == "string" and parsed.slug ~= "")

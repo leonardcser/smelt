@@ -254,8 +254,8 @@ impl TuiApp {
                 self.handle_process_completed(id, exit_code);
                 SessionControl::Continue
             }
-            EngineEvent::EngineAskResponse { id, content, error } => {
-                self.lua.fire_ask_callback(id, &content, error);
+            EngineEvent::EngineAskResponse { id, message, error } => {
+                self.lua.fire_ask_callback(id, message.as_ref(), error);
                 SessionControl::Continue
             }
             EngineEvent::HistoryUpdated {
@@ -375,8 +375,8 @@ impl TuiApp {
             self.set_history(history);
             self.save_session();
         }
-        EngineEvent::EngineAskResponse { id, content, error } => {
-            self.lua.fire_ask_callback(id, &content, error);
+        EngineEvent::EngineAskResponse { id, message, error } => {
+            self.lua.fire_ask_callback(id, message.as_ref(), error);
         }
         EngineEvent::ProcessCompleted { id, exit_code } => {
             self.handle_process_completed(id, exit_code);
