@@ -16,7 +16,7 @@ use crossterm::event::{
 };
 use protocol::UiCommand;
 use protocol::{
-    AgentMode, Content, EngineAskError, EngineAskErrorKind, EngineEvent, ReasoningBlock,
+    AgentMode, Content, EngineAskError, EngineAskErrorKind, EngineEvent, Message, ReasoningBlock,
     TokenUsage, ToolOutcome,
 };
 use serde::{Deserialize, Serialize};
@@ -1734,7 +1734,7 @@ fn plan(op: FuzzOp) -> (Option<SourceEvent>, PostCheck) {
         FuzzOp::EngineAskResponse { id, content } => {
             let ev = SourceEvent::Engine(EngineEvent::EngineAskResponse {
                 id,
-                content,
+                message: Some(Message::assistant(Some(Content::text(content)), None, None)),
                 error: None,
             });
             (Some(ev), PostCheck::None)
@@ -1747,7 +1747,7 @@ fn plan(op: FuzzOp) -> (Option<SourceEvent>, PostCheck) {
             let kind = ENGINE_ASK_ERROR_KINDS[(kind_idx as usize) % ENGINE_ASK_ERROR_KINDS.len()];
             let ev = SourceEvent::Engine(EngineEvent::EngineAskResponse {
                 id,
-                content: String::new(),
+                message: None,
                 error: Some(EngineAskError { kind, message }),
             });
             (Some(ev), PostCheck::None)
@@ -1829,7 +1829,7 @@ fn try_dispatch_side_channel(app: &mut TestApp, op: FuzzOp) -> Result<(), FuzzOp
             if let Some(id) = app.pending_ask_id() {
                 let ev = SourceEvent::Engine(EngineEvent::EngineAskResponse {
                     id,
-                    content,
+                    message: Some(Message::assistant(Some(Content::text(content)), None, None)),
                     error: None,
                 });
                 app.feed_one(ev);
@@ -1841,7 +1841,7 @@ fn try_dispatch_side_channel(app: &mut TestApp, op: FuzzOp) -> Result<(), FuzzOp
                     [(kind_idx as usize) % ENGINE_ASK_ERROR_KINDS.len()];
                 let ev = SourceEvent::Engine(EngineEvent::EngineAskResponse {
                     id,
-                    content: String::new(),
+                    message: None,
                     error: Some(EngineAskError { kind, message }),
                 });
                 app.feed_one(ev);
