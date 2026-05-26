@@ -1582,6 +1582,50 @@ mod tests {
             .collect()
     }
 
+    fn user_message(text: &str) -> protocol::Message {
+        protocol::Message::user(protocol::Content::text(text))
+    }
+
+    fn assistant_message(text: &str) -> protocol::Message {
+        protocol::Message::assistant(Some(protocol::Content::text(text)), None, None)
+    }
+
+    fn respond_pending_ask_with_text(app: &mut TestApp, text: &str) {
+        let _g = crate::lua::install_app_ptr(&mut app.app);
+        app.app
+            .dispatch_engine_event(protocol::EngineEvent::EngineAskResponse {
+                id: app.pending_ask_id().expect("pending ask id"),
+                message: Some(protocol::Message::assistant(
+                    Some(protocol::Content::text(text)),
+                    None,
+                    None,
+                )),
+                error: None,
+            });
+        app.app.drive_lua_tasks();
+    }
+
+    fn respond_pending_ask_with_tool_call(app: &mut TestApp, call_id: &str, name: &str) {
+        let _g = crate::lua::install_app_ptr(&mut app.app);
+        app.app
+            .dispatch_engine_event(protocol::EngineEvent::EngineAskResponse {
+                id: app.pending_ask_id().expect("pending ask id"),
+                message: Some(protocol::Message::assistant(
+                    None,
+                    None,
+                    Some(vec![protocol::ToolCall::new(
+                        call_id.into(),
+                        protocol::FunctionCall {
+                            name: name.into(),
+                            arguments: "{}".into(),
+                        },
+                    )]),
+                )),
+                error: None,
+            });
+        app.app.drive_lua_tasks();
+    }
+
     fn stub_btw_ui(app: &mut TestApp) {
         let _g = crate::lua::install_app_ptr(&mut app.app);
         app.app
@@ -3222,20 +3266,7 @@ mod tests {
         assert!(last_text.contains("Under no circumstances use tools"));
         assert!(last_text.contains("Question: what changed?"));
 
-        {
-            let _g = crate::lua::install_app_ptr(&mut app.app);
-            app.app
-                .dispatch_engine_event(protocol::EngineEvent::EngineAskResponse {
-                    id: app.pending_ask_id().expect("pending ask id"),
-                    message: Some(protocol::Message::assistant(
-                        Some(protocol::Content::text("done")),
-                        None,
-                        None,
-                    )),
-                    error: None,
-                });
-            app.app.drive_lua_tasks();
-        }
+        respond_pending_ask_with_text(&mut app, "done");
         app.app.core.timers.clear();
     }
 
@@ -3261,25 +3292,7 @@ mod tests {
         assert_eq!(first.len(), 1);
         let first_messages = first[0].1.clone();
 
-        {
-            let _g = crate::lua::install_app_ptr(&mut app.app);
-            app.app
-                .dispatch_engine_event(protocol::EngineEvent::EngineAskResponse {
-                    id: app.pending_ask_id().expect("pending ask id"),
-                    message: Some(protocol::Message::assistant(
-                        None,
-                        None,
-                        Some(vec![protocol::ToolCall::new(
-                            "call-1".into(),
-                            protocol::FunctionCall {
-                                name: "grep".into(),
-                                arguments: "{}".into(),
-                            },
-                        )]),
-                    )),
-                    error: None,
-                });
-        }
+        respond_pending_ask_with_tool_call(&mut app, "call-1", "grep");
 
         let second = ask_messages(app.drain_engine_sends());
         assert_eq!(second.len(), 1);
@@ -3304,21 +3317,203 @@ mod tests {
         );
         assert!(second_messages[first_messages.len() + 1].is_error);
 
+        respond_pending_ask_with_text(&mut app, "done");
+        app.app.core.timers.clear();
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn compaction_prepare_request_preserves_session_prefix_and_appends_summary_instruction() {
+        let mut app = TestApp::builder().build();
+        app.app.core.config.context_window = Some(100);
+        app.app
+            .core
+            .session
+            .history
+            .push(protocol::HistoryItem::user(protocol::Content::text("u1")));
+        app.push_assistant_text("a1");
+        app.app
+            .core
+            .session
+            .history
+            .push(protocol::HistoryItem::user(protocol::Content::text("u2")));
+
+        let full_history = protocol::history_to_messages(&app.app.model_history());
+        let expected_prefix = &full_history[..2];
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        {
+            let _g = crate::lua::install_app_ptr(&mut app.app);
+            app.app
+                .dispatch_host_call(engine::HostCall::PrepareRequest {
+                    messages: full_history.clone(),
+                    estimated_tokens: 200,
+                    reply: tx,
+                });
+        }
+
+        let asks = ask_messages(app.drain_engine_sends());
+        assert_eq!(asks.len(), 1, "compaction should issue one EngineAsk");
+        let (system, messages) = &asks[0];
+        assert_eq!(system, &app.app.assemble_system_prompt());
+        assert_eq!(
+            &messages[..expected_prefix.len()],
+            expected_prefix,
+            "initial compaction attempt must preserve the exact session prefix up to the current boundary"
+        );
+        let last_text = messages
+            .last()
+            .and_then(|m| m.content.as_ref())
+            .map(|c| c.text_content())
+            .expect("summary task");
+        assert!(last_text.contains("CONTEXT CHECKPOINT COMPACTION"));
+        assert!(last_text.contains("Under no circumstances use tools"));
+        assert!(last_text.contains("# Goal"));
+
+        respond_pending_ask_with_text(&mut app, "# Goal\nok");
+        let replacement = rx
+            .await
+            .expect("prepare_request reply")
+            .expect("replacement");
+        let replacement_text = replacement
+            .first()
+            .and_then(|m| m.content.as_ref())
+            .map(|c| c.text_content());
+        let expected = format!("{}\n# Goal\nok", engine::SUMMARY_PREFIX.trim_end());
+        assert_eq!(replacement_text.as_deref(), Some(expected.as_str()));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn compaction_context_limit_moves_boundary_earlier_on_context_window() {
+        let mut app = TestApp::builder().build();
+        let messages = vec![
+            user_message("u1"),
+            assistant_message("a1"),
+            user_message("u2"),
+            assistant_message("a2"),
+            user_message("u3"),
+        ];
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        {
+            let _g = crate::lua::install_app_ptr(&mut app.app);
+            app.app
+                .dispatch_host_call(engine::HostCall::RecoverFromContextLimit {
+                    messages: messages.clone(),
+                    reply: tx,
+                });
+        }
+
+        let first = ask_messages(app.drain_engine_sends());
+        assert_eq!(first.len(), 1);
+        let first_messages = &first[0].1;
+        assert_eq!(
+            &first_messages[..4],
+            &messages[..4],
+            "keep_recent_groups=1 should compact everything before the last group"
+        );
+
         {
             let _g = crate::lua::install_app_ptr(&mut app.app);
             app.app
                 .dispatch_engine_event(protocol::EngineEvent::EngineAskResponse {
                     id: app.pending_ask_id().expect("pending ask id"),
-                    message: Some(protocol::Message::assistant(
-                        Some(protocol::Content::text("done")),
-                        None,
-                        None,
-                    )),
-                    error: None,
+                    message: None,
+                    error: Some(protocol::EngineAskError {
+                        kind: protocol::EngineAskErrorKind::ContextWindow,
+                        message: "too large".into(),
+                    }),
                 });
-            app.app.drive_lua_tasks();
         }
-        app.app.core.timers.clear();
+
+        let second = ask_messages(app.drain_engine_sends());
+        assert_eq!(second.len(), 1);
+        let second_messages = &second[0].1;
+        assert_eq!(
+            &second_messages[..3],
+            &messages[..3],
+            "retry should move the boundary one group earlier"
+        );
+
+        respond_pending_ask_with_text(&mut app, "# Goal\nok");
+        let replacement = rx.await.expect("recovery reply").expect("replacement");
+        assert_eq!(replacement.len(), 3);
+        assert_eq!(replacement[1], messages[3]);
+        assert_eq!(replacement[2], messages[4]);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn compaction_context_limit_denies_tool_calls_without_moving_boundary() {
+        let mut app = TestApp::builder().build();
+        let messages = vec![
+            user_message("u1"),
+            assistant_message("a1"),
+            user_message("u2"),
+        ];
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        {
+            let _g = crate::lua::install_app_ptr(&mut app.app);
+            app.app
+                .dispatch_host_call(engine::HostCall::RecoverFromContextLimit {
+                    messages: messages.clone(),
+                    reply: tx,
+                });
+        }
+
+        let first = ask_messages(app.drain_engine_sends());
+        assert_eq!(first.len(), 1);
+        let first_messages = first[0].1.clone();
+
+        respond_pending_ask_with_tool_call(&mut app, "call-1", "read_file");
+
+        let second = ask_messages(app.drain_engine_sends());
+        assert_eq!(second.len(), 1);
+        let second_messages = &second[0].1;
+        assert_eq!(
+            &second_messages[..first_messages.len()],
+            first_messages.as_slice(),
+            "tool denial retry must keep the same boundary prefix"
+        );
+        assert_eq!(
+            second_messages[first_messages.len()].role,
+            protocol::Role::Assistant
+        );
+        assert_eq!(
+            second_messages[first_messages.len() + 1].role,
+            protocol::Role::Tool
+        );
+        assert!(second_messages[first_messages.len() + 1].is_error);
+
+        respond_pending_ask_with_text(&mut app, "# Goal\nok");
+        let replacement = rx.await.expect("recovery reply").expect("replacement");
+        assert_eq!(replacement.first().unwrap().role, protocol::Role::User);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn compaction_context_limit_returns_none_when_no_earlier_boundary_fits() {
+        let mut app = TestApp::builder().build();
+        let messages = vec![user_message("u1"), user_message("u2")];
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        {
+            let _g = crate::lua::install_app_ptr(&mut app.app);
+            app.app
+                .dispatch_host_call(engine::HostCall::RecoverFromContextLimit {
+                    messages,
+                    reply: tx,
+                });
+        }
+
+        {
+            let _g = crate::lua::install_app_ptr(&mut app.app);
+            app.app
+                .dispatch_engine_event(protocol::EngineEvent::EngineAskResponse {
+                    id: app.pending_ask_id().expect("pending ask id"),
+                    message: None,
+                    error: Some(protocol::EngineAskError {
+                        kind: protocol::EngineAskErrorKind::ContextWindow,
+                        message: "too large".into(),
+                    }),
+                });
+        }
+
+        assert!(rx.await.expect("recovery reply").is_none());
     }
 
     /// User-resized overlay (`size_override`) must survive reload —
