@@ -1,11 +1,7 @@
 -- Built-in ask_user_question tool. Sequential; blocks the LLM turn until the
 -- user replies. One dialog per question with a markdown body, a numbered
--- option menu, and a synthetic "Other" item that focuses an inline input.
+-- option menu, and a free-text input below it for custom answers.
 -- `multiSelect` is accepted in the schema but treated as single-select.
-
-local OTHER_KIND        = "other"
-local OTHER_LABEL       = "Other"
-local OTHER_PLACEHOLDER = "or type a custom answer..."
 
 smelt.tools.register({
   name = "ask_user_question",
@@ -66,8 +62,7 @@ smelt.tools.register({
     for _, q in ipairs(questions) do
       local options = q.options or {}
 
-      -- Build the visible item list: each provided option plus a synthetic
-      -- "Other" row whose description doubles as the input's placeholder.
+      -- Build the visible item list from the provided options.
       -- The menu primitive renders ` N. label` / `    description` with
       -- the prefix and description dim and the focused label in
       -- SmeltAccent, plus digit shortcuts and multi-row stride.
@@ -78,36 +73,21 @@ smelt.tools.register({
           description = opt.description or "",
         })
       end
-      table.insert(items, {
-        label       = OTHER_LABEL,
-        description = OTHER_PLACEHOLDER,
-        kind        = OTHER_KIND,
-      })
 
       local title = q.header
       if title == nil or title == "" then title = "question" end
 
       local md_leaf     = smelt.dialog.markdown(q.question or "")
       local spacer_leaf = smelt.dialog.content({ text = "", wrap = false })
-      -- The menu's "Other" row already shows the placeholder text, so the
-      -- raw input below it is silent until the user starts typing.
-      local other_leaf, other_buf = smelt.dialog.input("")
+      -- Free-text input for a custom answer, shown below the options.
+      local other_leaf, other_buf = smelt.dialog.input("type a custom answer…")
 
-      local menu_leaf, _menu = smelt.dialog.menu(items, {
-        on_submit = function(ctx)
-          if ctx.item.kind == OTHER_KIND then
-            -- "Other" selected via Enter or its digit: pivot to the input.
-            other_leaf:focus()
-            return
-          end
-          ctx.resolve({ index = ctx.index })
-        end,
-      })
+      local menu_leaf, _menu = smelt.dialog.menu(items)
 
-      -- Enter inside the input commits the custom answer (when non-empty);
-      -- empty Enter is a no-op so the user doesn't accidentally submit a
-      -- blank "Other". Esc pops focus back to the menu so the dialog only
-      -- dismisses from the menu leaf.
+      -- Tab from the menu jumps into the custom input; Esc inside the
+      -- input pops focus back to the menu (instead of dismissing). Enter
+      -- in the input commits the custom answer when non-empty.
+      menu_leaf:key("tab", function() other_leaf:focus() end)
       other_leaf:key("enter", function()
         local custom = other_buf:line(1) or ""
         if custom == "" then return end

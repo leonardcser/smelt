@@ -1,8 +1,10 @@
 ---
 source: crates/tui/tests/storybook/app_ctx.rs
-assertion_line: 344
+assertion_line: 384
 expression: frame.text()
 ---
+
+
 
 
 
@@ -21,7 +23,5 @@ expression: frame.text()
      paste a secret token
   3. Anonymous
      skip auth entirely
-  4. Other
-     or type a custom answer...
-
+ type a custom answer…
  ○ normal                                                                 1:1 0%
