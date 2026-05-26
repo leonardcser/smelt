@@ -509,7 +509,6 @@ impl TuiApp {
             .last()
             .map(|&(_, c)| c)
             .unwrap_or(0.0);
-        self.core.session.clear_context_tokens_baseline();
         self.truncate_to(block_idx);
         self.reset_session_permissions();
 
@@ -580,6 +579,7 @@ mod checkpoint_tests {
             created_at_ms: 0,
             tokens_before: None,
             tokens_after_estimate: None,
+            ..Default::default()
         });
         let model = session.model_history("SUMMARY:");
         assert_eq!(model.len(), 3); // summary + recent + recent reply
@@ -606,6 +606,7 @@ mod checkpoint_tests {
             created_at_ms: 0,
             tokens_before: None,
             tokens_after_estimate: None,
+            ..Default::default()
         });
         // Simulate rewind to before the checkpoint
         session.history.truncate(1);
@@ -636,6 +637,7 @@ mod checkpoint_tests {
             created_at_ms: 0,
             tokens_before: None,
             tokens_after_estimate: None,
+            ..Default::default()
         });
         // Rewind to after checkpoint
         session.history.truncate(4);
@@ -692,6 +694,7 @@ mod checkpoint_tests {
             created_at_ms: 0,
             tokens_before: Some(500),
             tokens_after_estimate: None,
+            ..Default::default()
         });
         // context_tokens must be cleared so the next turn's actual usage
         // becomes the authoritative count.
@@ -718,6 +721,7 @@ mod checkpoint_tests {
             created_at_ms: 0,
             tokens_before: None,
             tokens_after_estimate: None,
+            ..Default::default()
         });
         let model = session.model_history("PREFIX:");
         assert_eq!(model.len(), 3); // summary + user("2") + assistant("2a")
@@ -745,6 +749,7 @@ mod checkpoint_tests {
             created_at_ms: 0,
             tokens_before: None,
             tokens_after_estimate: None,
+            ..Default::default()
         });
 
         // Engine returns model_history() = [summary, recent, recent_reply, new_assistant]
@@ -799,6 +804,7 @@ mod checkpoint_tests {
             created_at_ms: 0,
             tokens_before: None,
             tokens_after_estimate: None,
+            ..Default::default()
         });
 
         // Engine returns history without summary (unexpected but possible)
@@ -840,6 +846,7 @@ mod checkpoint_tests {
             created_at_ms: 0,
             tokens_before: None,
             tokens_after_estimate: None,
+            ..Default::default()
         });
         session.cost_snapshots.push((2, 1.0));
         session.turn_metas.push((
@@ -871,7 +878,7 @@ mod checkpoint_tests {
     }
 
     #[test]
-    fn rewind_clears_baseline_keeps_visible_and_cost() {
+    fn rewind_keeps_baseline_and_cost() {
         let mut session = smelt_core::session::Session::new(1, std::path::PathBuf::from("/tmp"));
         session.history = vec![user("a"), assistant("b"), user("c"), assistant("d")];
         session.cost_snapshots = vec![(2, 0.5), (4, 1.0)];
@@ -889,17 +896,16 @@ mod checkpoint_tests {
             .last()
             .map(|&(_, c)| c)
             .unwrap_or(0.0);
-        session.clear_context_tokens_baseline();
 
         assert_eq!(session.history.len(), 2);
-        assert!(session.context_tokens.is_none());
-        assert!(session.context_tokens_history_len.is_none());
+        assert_eq!(session.context_tokens, Some(100));
+        assert_eq!(session.context_tokens_history_len, Some(4));
         assert_eq!(session.visible_context_tokens, Some(100));
         assert_eq!(session.session_cost_usd, 0.5);
     }
 
     #[test]
-    fn rewind_past_all_cost_snapshots_clears_cost_and_baseline() {
+    fn rewind_past_all_cost_snapshots_clears_cost_keeps_baseline() {
         let mut session = smelt_core::session::Session::new(1, std::path::PathBuf::from("/tmp"));
         session.history = vec![user("a"), assistant("b")];
         session.cost_snapshots = vec![(2, 0.5)];
@@ -915,11 +921,77 @@ mod checkpoint_tests {
             .last()
             .map(|&(_, c)| c)
             .unwrap_or(0.0);
-        session.clear_context_tokens_baseline();
 
-        assert!(session.context_tokens.is_none());
-        assert!(session.context_tokens_history_len.is_none());
+        assert_eq!(session.context_tokens, Some(50));
+        assert_eq!(session.context_tokens_history_len, Some(2));
         assert_eq!(session.visible_context_tokens, Some(50));
         assert_eq!(session.session_cost_usd, 0.0);
+    }
+
+    #[test]
+    fn rewind_past_checkpoint_restores_pre_checkpoint_baseline() {
+        let mut session = smelt_core::session::Session::new(1, std::path::PathBuf::from("/tmp"));
+        session.history = vec![
+            user("old"),
+            assistant("old reply"),
+            user("recent"),
+            assistant("recent reply"),
+        ];
+        session.context_tokens = Some(100);
+        session.context_tokens_history_len = Some(4);
+        session.visible_context_tokens = Some(100);
+        session.checkpoint = Some(ContextCheckpoint {
+            kind: "compaction".to_string(),
+            summary: "summary".to_string(),
+            first_live_index: 2,
+            created_at_ms: 0,
+            tokens_before: Some(100),
+            tokens_after_estimate: None,
+            pre_checkpoint_context_tokens: Some(100),
+            pre_checkpoint_context_history_len: Some(4),
+        });
+
+        // Rewind to before the checkpoint
+        session.history.truncate(1);
+        session.clear_checkpoint_if_rewound_to(session.history.len());
+
+        assert!(session.checkpoint.is_none());
+        assert_eq!(session.context_tokens, Some(100));
+        assert_eq!(session.context_tokens_history_len, Some(4));
+        assert_eq!(session.visible_context_tokens, Some(100));
+    }
+
+    #[test]
+    fn rewind_keeps_checkpoint_keeps_post_checkpoint_baseline() {
+        let mut session = smelt_core::session::Session::new(1, std::path::PathBuf::from("/tmp"));
+        session.history = vec![
+            user("old"),
+            assistant("old reply"),
+            user("recent"),
+            assistant("recent reply"),
+            user("newest"),
+        ];
+        session.context_tokens = Some(80);
+        session.context_tokens_history_len = Some(5);
+        session.visible_context_tokens = Some(80);
+        session.checkpoint = Some(ContextCheckpoint {
+            kind: "compaction".to_string(),
+            summary: "summary".to_string(),
+            first_live_index: 2,
+            created_at_ms: 0,
+            tokens_before: Some(100),
+            tokens_after_estimate: None,
+            pre_checkpoint_context_tokens: Some(100),
+            pre_checkpoint_context_history_len: Some(4),
+        });
+
+        // Rewind to after the checkpoint (hist len = 4)
+        session.history.truncate(4);
+        session.clear_checkpoint_if_rewound_to(session.history.len());
+
+        assert!(session.checkpoint.is_some());
+        assert_eq!(session.context_tokens, Some(80));
+        assert_eq!(session.context_tokens_history_len, Some(5));
+        assert_eq!(session.visible_context_tokens, Some(80));
     }
 }

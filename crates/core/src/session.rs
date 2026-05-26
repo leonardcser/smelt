@@ -21,10 +21,31 @@ pub struct ContextCheckpoint {
     pub created_at_ms: u64,
     pub tokens_before: Option<u32>,
     pub tokens_after_estimate: Option<u32>,
+    /// Token baseline that was active just before this checkpoint was
+    /// installed. Restored when the session is rewound past the checkpoint.
+    #[serde(default)]
+    pub pre_checkpoint_context_tokens: Option<u32>,
+    #[serde(default)]
+    pub pre_checkpoint_context_history_len: Option<usize>,
 }
 
 fn default_checkpoint_kind() -> String {
     "compaction".to_string()
+}
+
+impl Default for ContextCheckpoint {
+    fn default() -> Self {
+        Self {
+            kind: default_checkpoint_kind(),
+            summary: String::new(),
+            first_live_index: 0,
+            created_at_ms: 0,
+            tokens_before: None,
+            tokens_after_estimate: None,
+            pre_checkpoint_context_tokens: None,
+            pre_checkpoint_context_history_len: None,
+        }
+    }
 }
 
 /// In-memory conversation state.
@@ -393,6 +414,8 @@ impl Session {
             created_at_ms: now_ms(),
             tokens_before,
             tokens_after_estimate: None,
+            pre_checkpoint_context_tokens: self.context_tokens,
+            pre_checkpoint_context_history_len: self.context_tokens_history_len,
         });
         // The next provider response is the first authoritative baseline
         // token reading for checkpointed model history, but we keep the
@@ -467,7 +490,17 @@ impl Session {
             .as_ref()
             .is_some_and(|cp| cp.first_live_index >= hist_idx)
         {
-            self.checkpoint = None;
+            if let Some(cp) = self.checkpoint.take() {
+                // Restore the token baseline that was active before the
+                // checkpoint was installed. The current history is a prefix
+                // of that pre-checkpoint history, so the old count is a
+                // conservative upper-bound.
+                self.context_tokens = cp.pre_checkpoint_context_tokens;
+                self.context_tokens_history_len = cp.pre_checkpoint_context_history_len;
+                if let Some(tokens) = self.context_tokens {
+                    self.visible_context_tokens = Some(tokens);
+                }
+            }
         }
     }
 
@@ -911,6 +944,8 @@ mod tests {
             created_at_ms: 0,
             tokens_before: None,
             tokens_after_estimate: None,
+            pre_checkpoint_context_tokens: None,
+            pre_checkpoint_context_history_len: None,
         }
     }
 
@@ -1043,6 +1078,7 @@ mod tests {
             assistant_text_item("recent reply"),
         ];
         s.context_tokens = Some(500);
+        s.context_tokens_history_len = Some(4);
         s.visible_context_tokens = Some(500);
 
         let installed =
@@ -1052,6 +1088,17 @@ mod tests {
         assert!(s.context_tokens.is_none());
         assert_eq!(s.visible_context_tokens, Some(500));
         assert_eq!(s.checkpoint.as_ref().unwrap().first_live_index, 2);
+        assert_eq!(
+            s.checkpoint.as_ref().unwrap().pre_checkpoint_context_tokens,
+            Some(500)
+        );
+        assert_eq!(
+            s.checkpoint
+                .as_ref()
+                .unwrap()
+                .pre_checkpoint_context_history_len,
+            Some(4)
+        );
     }
 
     #[test]
@@ -1159,6 +1206,65 @@ mod tests {
         s.checkpoint = Some(checkpoint("summary", 2));
         s.clear_checkpoint_if_rewound_to(3);
         assert!(s.checkpoint.is_some());
+    }
+
+    #[test]
+    fn clear_checkpoint_if_rewound_to_restores_pre_checkpoint_baseline() {
+        let mut s = fixture_session();
+        s.history = vec![
+            user_item("old"),
+            assistant_text_item("old reply"),
+            user_item("recent"),
+            assistant_text_item("recent reply"),
+        ];
+        s.context_tokens = Some(100);
+        s.context_tokens_history_len = Some(4);
+        s.visible_context_tokens = Some(100);
+        s.checkpoint = Some(ContextCheckpoint {
+            kind: "compaction".to_string(),
+            summary: "summary".to_string(),
+            first_live_index: 2,
+            created_at_ms: 0,
+            tokens_before: Some(100),
+            tokens_after_estimate: None,
+            pre_checkpoint_context_tokens: Some(100),
+            pre_checkpoint_context_history_len: Some(4),
+        });
+
+        s.history.truncate(2);
+        s.clear_checkpoint_if_rewound_to(2);
+
+        assert!(s.checkpoint.is_none());
+        assert_eq!(s.context_tokens, Some(100));
+        assert_eq!(s.context_tokens_history_len, Some(4));
+        assert_eq!(s.visible_context_tokens, Some(100));
+    }
+
+    #[test]
+    fn clear_checkpoint_if_rewound_to_without_pre_checkpoint_baseline_clears_tokens() {
+        let mut s = fixture_session();
+        s.history = vec![
+            user_item("old"),
+            assistant_text_item("old reply"),
+            user_item("recent"),
+        ];
+        s.checkpoint = Some(ContextCheckpoint {
+            kind: "compaction".to_string(),
+            summary: "summary".to_string(),
+            first_live_index: 2,
+            created_at_ms: 0,
+            tokens_before: None,
+            tokens_after_estimate: None,
+            pre_checkpoint_context_tokens: None,
+            pre_checkpoint_context_history_len: None,
+        });
+
+        s.history.truncate(1);
+        s.clear_checkpoint_if_rewound_to(1);
+
+        assert!(s.checkpoint.is_none());
+        assert!(s.context_tokens.is_none());
+        assert!(s.context_tokens_history_len.is_none());
     }
 
     // ── Session::new / fork / meta ───────────────────────────────────
