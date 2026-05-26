@@ -399,6 +399,58 @@ async fn fs_watch_delivers_events_until_removed() {
     assert_eq!(events_after, events_before, "no events after remove");
 }
 
+// -- smelt.grep.run -----------------------------------------------------
+
+#[tokio::test(flavor = "current_thread")]
+async fn grep_run_files_with_matches_happy_path() {
+    let dir = tempfile::tempdir().expect("tmp");
+    std::fs::write(dir.path().join("a.rs"), "needle\n").unwrap();
+    std::fs::write(dir.path().join("b.txt"), "needle\n").unwrap();
+    let dir_path = dir.path().to_string_lossy().into_owned();
+    let rt = fresh();
+    rt.lua.globals().set("GREP_DIR", dir_path.clone()).unwrap();
+    rt.lua
+        .load(
+            r#"
+            smelt.spawn(function()
+                local out, err = smelt.grep.run("needle", GREP_DIR, {
+                    mode = "files_with_matches",
+                    glob = "*.rs",
+                    timeout_secs = 5
+                })
+                RESULT = out
+                ERR = err
+                DONE = true
+            end)
+            "#,
+        )
+        .exec()
+        .expect("spawn grep");
+    assert!(
+        pump_until_async(&rt, 10000, |rt| rt
+            .lua
+            .globals()
+            .get::<bool>("DONE")
+            .unwrap_or(false))
+        .await,
+        "grep never completed"
+    );
+    let done: bool = get_global(&rt, "DONE");
+    assert!(done);
+    let err: Option<String> = get_global(&rt, "ERR");
+    assert!(err.is_none(), "unexpected err: {:?}", err);
+    let result: mlua::Table = rt.lua.globals().get("RESULT").expect("RESULT table");
+    let stdout: String = result.get("stdout").expect("stdout field");
+    let stderr: String = result.get("stderr").expect("stderr field");
+    let exit_code: i32 = result.get("exit_code").expect("exit_code field");
+    let timed_out: bool = result.get("timed_out").expect("timed_out field");
+    assert!(!timed_out, "grep should not time out");
+    assert!(stdout.contains("a.rs"), "should find a.rs");
+    assert!(!stdout.contains("b.txt"), "glob should exclude b.txt");
+    assert_eq!(exit_code, 0, "grep should succeed");
+    assert!(stderr.is_empty(), "stderr should be empty");
+}
+
 // -- smelt.state --------------------------------------------------------
 
 #[test]
