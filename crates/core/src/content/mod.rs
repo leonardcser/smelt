@@ -1,3 +1,4 @@
+pub mod ansi;
 pub mod block_layout;
 pub mod builder;
 pub(crate) mod context;

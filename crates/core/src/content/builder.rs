@@ -320,6 +320,10 @@ impl<'a> LineBuilder<'a> {
         self.cur_style.crossedout = true;
     }
 
+    pub fn set_underline(&mut self) {
+        self.cur_style.underline = true;
+    }
+
     pub fn set_dim_italic(&mut self) {
         self.cur_style.dim = true;
         self.cur_style.italic = true;
@@ -353,6 +357,11 @@ impl<'a> LineBuilder<'a> {
     pub fn push_crossedout(&mut self) {
         self.push_clone();
         self.cur_style.crossedout = true;
+    }
+
+    pub fn push_underline(&mut self) {
+        self.push_clone();
+        self.cur_style.underline = true;
     }
 
     // ── Internals ───────────────────────────────────────────────────

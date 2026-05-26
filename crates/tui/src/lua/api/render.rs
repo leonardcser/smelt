@@ -17,7 +17,6 @@ use crate::content::to_buffer::render_into_buffer;
 use crate::smelt_term::BufId;
 use mlua::prelude::*;
 use smelt_core::content::highlight::SplitSide;
-use smelt_core::content::wrap::wrap_line;
 use smelt_core::lua::doc::Tier;
 use smelt_core::lua::module::LuaMod;
 use smelt_core::theme::intern;
@@ -48,22 +47,25 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
                     render_into_buffer(buf, width, &theme_snap, |sink| {
                         let max_cols = (width as usize).saturating_sub(3);
                         let hl = hl_group.as_deref().map(intern);
+                        match hl {
+                            Some(g) => sink.push_hl(g),
+                            None => sink.push_dim(),
+                        }
                         for line in content.lines() {
                             let expanded = line.replace('\t', "    ");
-                            let segs = wrap_line(&expanded, max_cols);
-                            if segs.len() > 1 {
+                            let (spans, ranges, boundaries) =
+                                smelt_core::content::ansi::wrap_ansi(&expanded, max_cols);
+                            if ranges.len() > 1 {
                                 sink.mark_wrapped();
                             }
-                            for seg in &segs {
-                                match hl {
-                                    Some(g) => sink.push_hl(g),
-                                    None => sink.push_dim(),
-                                }
-                                sink.print(seg);
-                                sink.pop_style();
+                            for &(ws, we) in &ranges {
+                                smelt_core::content::ansi::emit_ansi_row(
+                                    sink, &spans, &boundaries, ws, we,
+                                );
                                 sink.newline();
                             }
                         }
+                        sink.pop_style();
                     });
                 }
             });

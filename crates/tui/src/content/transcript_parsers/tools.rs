@@ -2,13 +2,14 @@ use super::metrics::{block_inner_width, BLOCK_GUTTER_SPACE, BLOCK_GUTTER_W};
 use super::MAX_TOOL_BLOCK_ROWS;
 use protocol::{StyledLines, StyledSpan};
 use smelt_core::buffer::SpanMeta;
+use smelt_core::content::ansi::{emit_ansi_row, wrap_ansi};
 use smelt_core::content::block_layout::{DiffSpec, FileViewSpec, RenderedLayout, RenderedLeaf};
 use smelt_core::content::builder::{replay_buffer_row_into, LineBuilder};
 use smelt_core::content::highlight::{
     build_file_view_cache, print_cached_inline_diff, print_inline_diff_ext, GutterStyle,
     InlineSyntax,
 };
-use smelt_core::content::wrap::{wrap_line, wrap_line_ranges};
+use smelt_core::content::wrap::wrap_line_ranges;
 use smelt_core::theme::{intern, HlGroup};
 use smelt_core::transcript_model::{ToolOutput, ToolStatus};
 use smelt_core::utils::format_duration;
@@ -632,22 +633,22 @@ pub fn render_wrapped_output(
     let _perf = smelt_perf::perf::begin("render:wrapped_output");
     let max_cols = super::metrics::block_inner_width(width);
 
-    let wrapped: Vec<String> = content
-        .lines()
-        .flat_map(|line| {
-            let expanded = normalize_terminal_line(line).replace('\t', "    ");
-            let segs = wrap_line(&expanded, max_cols);
-            if segs.len() > 1 {
-                out.mark_wrapped();
-            }
-            segs
-        })
-        .collect();
+    let mut all_lines = Vec::new();
+    let mut total_rows = 0usize;
 
-    let total = wrapped.len();
+    for line in content.lines() {
+        let expanded = line.replace('\t', "    ");
+        let (spans, ranges, boundaries) = wrap_ansi(&expanded, max_cols);
+        if ranges.len() > 1 {
+            out.mark_wrapped();
+        }
+        total_rows += ranges.len();
+        all_lines.push((spans, ranges, boundaries));
+    }
+
     let mut rows = 0u16;
-    if total > MAX_TOOL_BLOCK_ROWS {
-        let skipped = total - MAX_TOOL_BLOCK_ROWS;
+    if total_rows > MAX_TOOL_BLOCK_ROWS {
+        let skipped = total_rows - MAX_TOOL_BLOCK_ROWS;
         print_dim(
             out,
             &format!(
@@ -658,57 +659,30 @@ pub fn render_wrapped_output(
         out.newline();
         rows += 1;
     }
-    let start = total.saturating_sub(MAX_TOOL_BLOCK_ROWS);
-    for seg in &wrapped[start..] {
-        if is_error {
-            out.push_hl(intern("ErrorMsg"));
-            out.print_string(format!("{BLOCK_GUTTER_SPACE}{seg}"));
-            out.pop_style();
-        } else {
-            print_dim(out, &format!("{BLOCK_GUTTER_SPACE}{seg}"));
+
+    let mut skip = total_rows.saturating_sub(MAX_TOOL_BLOCK_ROWS);
+    for (spans, ranges, boundaries) in &all_lines {
+        let count = ranges.len();
+        if skip >= count {
+            skip -= count;
+            continue;
         }
-        out.newline();
-        rows += 1;
+        let start = skip;
+        skip = 0;
+        for &(ws, we) in &ranges[start..] {
+            if is_error {
+                out.push_hl(intern("ErrorMsg"));
+            } else {
+                out.push_dim();
+            }
+            out.print(BLOCK_GUTTER_SPACE);
+            emit_ansi_row(out, spans, boundaries, ws, we);
+            out.pop_style();
+            out.newline();
+            rows += 1;
+        }
     }
     rows
-}
-
-fn normalize_terminal_line(line: &str) -> String {
-    let latest = line.rsplit('\r').next().unwrap_or("");
-    strip_ansi_and_controls(latest)
-}
-
-fn strip_ansi_and_controls(text: &str) -> String {
-    let mut out = String::with_capacity(text.len());
-    let mut chars = text.chars().peekable();
-    while let Some(ch) = chars.next() {
-        if ch == '\x1b' {
-            match chars.next() {
-                Some('[') => {
-                    for c in chars.by_ref() {
-                        if ('@'..='~').contains(&c) {
-                            break;
-                        }
-                    }
-                }
-                Some(']') => {
-                    while let Some(c) = chars.next() {
-                        if c == '\u{7}' {
-                            break;
-                        }
-                        if c == '\x1b' && chars.peek() == Some(&'\\') {
-                            chars.next();
-                            break;
-                        }
-                    }
-                }
-                Some(_) | None => {}
-            }
-        } else if !ch.is_control() {
-            out.push(ch);
-        }
-    }
-    out
 }
 
 pub(super) fn pluralize(count: usize, singular: &str, plural: &str) -> String {
