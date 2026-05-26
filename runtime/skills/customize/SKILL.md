@@ -570,6 +570,13 @@ Read and write the system clipboard.
 - `smelt.clipboard.write` :: `fun(text: string): nil`
   Write `text` to the system clipboard.
 
+#### `smelt.clock`
+
+Wall-clock time primitives.
+
+- `smelt.clock.unix_ms` :: `fun(): integer`
+  Return the current Unix timestamp in milliseconds.
+
 #### `smelt.cmd`
 
 Register and list slash commands.
@@ -1341,15 +1348,6 @@ Metatable-backed proxy table for preferences.
 
 - `smelt.settings.schema` :: `fun(): table`
   Return the settings schema as an array of `{ key, kind, choices? }` rows.
-
-#### `smelt.spinner`
-
-Shared spinner glyph and cadence for plugin animations.
-
-- `smelt.spinner.glyph` :: `fun(): string`
-  Return the current spinner glyph (single grapheme).
-- `smelt.spinner.period_ms` :: `fun(): integer`
-  Return the spinner frame period in milliseconds.
 
 #### `smelt.text`
 

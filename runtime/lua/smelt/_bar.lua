@@ -27,25 +27,6 @@ local DASH = "\u{2500}"
 local STATUS_SEP = " \u{00b7} "
 local STATUS_SEP_LEN = 3
 
--- ── traveling-wave color ────────────────────────────────────────────
---
--- Phase moves left→right as `elapsed_ms` grows. Returns a grayscale
--- RGB triple `{ r, g, b }` between LOW and HIGH. Matches the Rust
--- port `wave_color_at` (PERIOD_MS=1200, WAVELENGTH=16, LOW=140,
--- HIGH=255).
-
-function M.wave_color_at(elapsed_ms, x)
-  local PERIOD_MS = 1200.0
-  local WAVELENGTH = 16.0
-  local HIGH = 255
-  local LOW = 140
-  local t = elapsed_ms / PERIOD_MS
-  local phase = (t - x / WAVELENGTH) * 2 * math.pi
-  local intensity = (math.sin(phase) + 1.0) * 0.5
-  local level = math.floor(LOW + (HIGH - LOW) * intensity + 0.5)
-  return { level, level, level }
-end
-
 -- ── segments → line + byte-offset highlights ────────────────────────
 
 function M.segments_to_line(segs)

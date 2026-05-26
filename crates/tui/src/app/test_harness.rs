@@ -219,14 +219,20 @@ impl TestAppBuilder {
             let _ = app.lua.reload(None);
         }
 
-        // Pin spinner glyph for snapshot determinism. The production
-        // `smelt.spinner.glyph()` uses wall-clock time, so parallel or
-        // sequential test runs land on different frames. Freezing it to
-        // the first frame makes storybook snapshots stable.
+        // Pin spinner glyph and wall-clock time for snapshot determinism.
+        // The production `smelt.spinner.glyph()` and `wave_color_at()` use
+        // wall-clock time, so parallel or sequential test runs land on
+        // different frames / colors. Freezing both makes storybook
+        // snapshots stable.
         let _ = app
             .lua
             .lua()
-            .load("smelt.spinner.glyph = function() return '✿' end")
+            .load(
+                r#"
+                smelt.clock.unix_ms = function() return 0 end
+                smelt.spinner.glyph = function() return '✿' end
+                "#,
+            )
             .exec();
 
         // Production wires the Tui frontend to `Osc52Sink`, which writes

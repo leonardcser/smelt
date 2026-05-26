@@ -113,7 +113,7 @@ local function indicator_spans()
     local x = 0
     for _, codepoint in utf8.codes(text) do
       local ch = utf8.char(codepoint)
-      local rgb = bar.wave_color_at(elapsed_ms, x)
+      local rgb = smelt.spinner.wave_color_at(x)
       spans[#spans + 1] = {
         text = ch,
         style = { fg = rgb, bold = true },

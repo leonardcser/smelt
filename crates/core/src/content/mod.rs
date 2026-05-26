@@ -53,23 +53,6 @@ pub fn spinner_frame_index(elapsed: std::time::Duration) -> usize {
     ((elapsed.as_millis() / SPINNER_FRAME_MS as u128) as usize) % SPINNER_FRAMES.len()
 }
 
-/// Current glyph from a process-start epoch; all callers converge on the same frame.
-pub fn spinner_glyph() -> &'static str {
-    use std::sync::OnceLock;
-    use std::time::Instant;
-    static EPOCH: OnceLock<Instant> = OnceLock::new();
-    let epoch = EPOCH.get_or_init(Instant::now);
-    SPINNER_FRAMES[spinner_frame_index(epoch.elapsed())]
-}
-
-/// Glyph for a caller-provided elapsed duration. Use this when the
-/// frame must derive from a virtual or paused-aware clock so snapshot
-/// tests stay deterministic. Callers that want process-wide animation
-/// use `spinner_glyph` instead.
-pub fn glyph_for(elapsed: std::time::Duration) -> &'static str {
-    SPINNER_FRAMES[spinner_frame_index(elapsed)]
-}
-
 /// Fallback column budget when no explicit width is provided.
 pub(crate) fn default_width() -> usize {
     80

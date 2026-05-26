@@ -13,6 +13,7 @@ mod builtins;
 pub(crate) mod cell;
 mod cli;
 mod clipboard;
+mod clock;
 mod cmd;
 mod defaults;
 mod frontend;
@@ -128,6 +129,7 @@ pub fn register_host_api(
     crate::lua::reg::register_class_doc();
     builtins::register(lua, smelt, shared)?;
     cell::register(lua, smelt, shared)?;
+    clock::register(lua, smelt)?;
     cli::register(lua, smelt, shared)?;
     clipboard::register(lua, smelt)?;
     cmd::register(lua, smelt, shared)?;

@@ -408,6 +408,11 @@ function smelt.fs.watch(path, handler, opts)
   end))
 end
 
+-- Shared spinner — pure Lua, loaded once so plugins see the same table.
+if smelt.clock and smelt.clock.unix_ms then
+  smelt.spinner = smelt.spinner or require("smelt.spinner")
+end
+
 -- `smelt.theme` is UiHost. Only attach the convenience loader when it exists.
 if smelt.theme then
   -- Load colorscheme `name` from `runtime/lua/smelt/colorschemes/<name>.lua`

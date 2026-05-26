@@ -22,7 +22,6 @@ mod prompt;
 mod render;
 mod session;
 mod settings;
-mod spinner;
 mod text;
 pub(crate) mod theme;
 mod transcript;
@@ -98,7 +97,6 @@ impl LuaRuntime {
         overlay::register(lua, &smelt)?;
         picker::register(lua, &smelt)?;
         notify::register(lua, &smelt)?;
-        spinner::register(lua, &smelt)?;
         work::register(lua, &smelt)?;
         prompt::register(lua, &smelt)?;
         theme::register(lua, &smelt)?;
