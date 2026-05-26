@@ -1,6 +1,6 @@
 //! Shared helpers: visible-width measurement, break-candidate detection, and inline-syntax stripping.
 
-/// Strip inline markdown markers and return visible text. Must match `print_inline_styled` output.
+/// Strip inline markdown markers and return visible text. Must match parsed inline-span output.
 pub(crate) fn strip_markdown_markers(text: &str) -> String {
     let chars: Vec<char> = text.chars().collect();
     strip_range(&chars, 0, chars.len())
@@ -19,7 +19,7 @@ fn strip_range(chars: &[char], start: usize, end: usize) -> String {
             i = after;
             continue;
         }
-        // Consume the whole unmatched run at once to stay consistent with `print_inline_styled`.
+        // Consume the whole unmatched run at once to stay consistent with the inline parser.
         if chars[i] == '*' || chars[i] == '_' {
             let run = run_length(chars, i, end, chars[i]);
             for _ in 0..run {

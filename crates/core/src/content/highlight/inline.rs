@@ -2,8 +2,8 @@
 //! `~~`), inline-span flattening + word-wrap, and the markdown table
 //! renderer that uses both.
 
-use crate::content::builder::LineBuilder;
-use crate::content::{default_width, ColumnAlignment};
+use crate::content::builder::{display_width, LineBuilder};
+use crate::content::ColumnAlignment;
 use crate::style::Color;
 use crate::theme::{intern, HlGroup};
 use unicode_width::UnicodeWidthStr;
@@ -35,14 +35,14 @@ pub fn render_markdown_table(
     }
 
     let max_table = match bctx {
-        Some(b) => b.inner_w.saturating_sub(indent.len()),
-        None => width.saturating_sub(indent.len()),
+        Some(b) => b.inner_w,
+        None => width.saturating_sub(display_width(indent)),
     };
     let align_for = |c: usize| alignments.get(c).copied().unwrap_or_default();
 
     let start = out.line_count();
     let Some(col_widths) = fit_column_widths(rows, num_cols, max_table) else {
-        let rendered = render_table_stacked(out, rows, dim);
+        let rendered = render_table_stacked(out, rows, max_table, dim, bctx, indent);
         out.stamp_chrome_delimited_block(start);
         return rendered;
     };
@@ -146,7 +146,7 @@ fn render_border(
     render_row_prefix(out, bctx, indent);
     enter_border_style(out);
     out.print_gutter(l);
-    let mut line_cols = indent.len() + 1;
+    let mut line_cols = 1;
     for (c, width) in widths.iter().enumerate() {
         let seg = width + 2;
         out.print_gutter(&"━".repeat(seg));
@@ -172,10 +172,10 @@ fn render_table_row(
     bctx: Option<&super::super::BoxContext>,
     indent: &str,
 ) -> u16 {
-    let wrapped: Vec<Vec<String>> = row
+    let wrapped: Vec<Vec<Vec<InlineSpan>>> = row
         .iter()
         .enumerate()
-        .map(|(c, cell)| wrap_cell_words(out, cell, widths.get(c).copied().unwrap_or(0)))
+        .map(|(c, cell)| wrap_cell_spans(out, cell, widths.get(c).copied().unwrap_or(0), dim))
         .collect();
     let height = wrapped.iter().map(|w| w.len()).max().unwrap_or(1);
 
@@ -184,14 +184,14 @@ fn render_table_row(
         enter_border_style(out);
         out.print_gutter("┃");
         out.reset_style();
-        let mut line_cols = indent.len() + 1;
+        let mut line_cols = 1;
         for (c, width) in widths.iter().enumerate() {
-            let text = wrapped
+            let spans: &[InlineSpan] = wrapped
                 .get(c)
                 .and_then(|w| w.get(vline))
-                .map(String::as_str)
-                .unwrap_or("");
-            let pad = width.saturating_sub(strip_markdown_markers(text).width());
+                .map(Vec::as_slice)
+                .unwrap_or(&[]);
+            let pad = width.saturating_sub(inline_spans_width(spans));
             let (left_pad, right_pad) = match align_for(c) {
                 ColumnAlignment::Left => (0, pad),
                 ColumnAlignment::Right => (pad, 0),
@@ -201,7 +201,7 @@ fn render_table_row(
             if left_pad > 0 {
                 out.print_gutter(&" ".repeat(left_pad));
             }
-            print_inline_styled(out, text, dim);
+            emit_inline_spans(out, spans);
             if right_pad > 0 {
                 out.print_gutter(&" ".repeat(right_pad));
             }
@@ -216,99 +216,140 @@ fn render_table_row(
     height as u16
 }
 
-/// Stacked fallback: each data row becomes "Header: value" lines, used when the table is too wide.
-fn render_table_stacked(out: &mut LineBuilder, rows: &[Vec<String>], dim: bool) -> u16 {
+/// Stacked fallback: each data row becomes "Header  value" lines, used when
+/// the table is too wide. The layout is still width-bounded; otherwise the
+/// fallback itself creates horizontal overflow in pre-formatted panes.
+fn render_table_stacked(
+    out: &mut LineBuilder,
+    rows: &[Vec<String>],
+    max_table: usize,
+    dim: bool,
+    bctx: Option<&super::super::BoxContext>,
+    indent: &str,
+) -> u16 {
     let header = match rows.first() {
         Some(h) => h,
         None => return 0,
     };
+    out.mark_wrapped();
 
     let label_width = header
         .iter()
         .map(|h| strip_markdown_markers(h).width())
         .max()
         .unwrap_or(0);
-
-    let value_indent = 2 + label_width + 2;
-    let value_width = default_width().saturating_sub(value_indent);
+    let content_width = max_table.max(1);
+    let label_value_indent = 2 + label_width + 2;
+    let side_by_side = label_width > 0 && label_value_indent < content_width;
+    let value_width = content_width.saturating_sub(label_value_indent).max(1);
 
     let mut total_rows = 0u16;
     for (ri, row) in rows.iter().skip(1).enumerate() {
         if ri > 0 {
-            out.newline();
+            if bctx.is_some() {
+                render_row_prefix(out, bctx, indent);
+                render_row_suffix(out, bctx, 0);
+            } else {
+                out.newline();
+            }
             total_rows += 1;
         }
         for (c, cell) in row.iter().enumerate() {
             let label = header.get(c).map(|s| s.as_str()).unwrap_or("");
-            let label_visual = strip_markdown_markers(label).width();
-            let pad = label_width.saturating_sub(label_visual);
-
-            let wrapped = wrap_cell_words(out, cell, value_width);
-            for (li, line) in wrapped.iter().enumerate() {
-                if li == 0 {
-                    out.print("  ");
-                    out.set_fg(Color::DarkGrey);
-                    if dim {
-                        out.set_dim();
+            if side_by_side {
+                let label_visual = strip_markdown_markers(label).width();
+                let pad = label_width.saturating_sub(label_visual);
+                let wrapped = wrap_cell_spans(out, cell, value_width, dim);
+                for (li, spans) in wrapped.iter().enumerate() {
+                    render_row_prefix(out, bctx, indent);
+                    if li == 0 {
+                        out.print_gutter("  ");
+                        emit_table_label(out, label, dim);
+                        if pad > 0 {
+                            out.print_gutter(&" ".repeat(pad));
+                        }
+                        out.print_gutter("  ");
+                    } else {
+                        out.print_gutter(&" ".repeat(label_value_indent));
                     }
-                    print_inline_styled(out, label, dim);
-                    if pad > 0 {
-                        out.print_string(" ".repeat(pad));
-                    }
-                    out.reset_style();
-                    out.print("  ");
-                } else {
-                    out.print_string(" ".repeat(value_indent));
+                    emit_inline_spans(out, spans);
+                    let line_cols = label_value_indent + inline_spans_width(spans);
+                    render_row_suffix(out, bctx, line_cols);
+                    total_rows += 1;
                 }
-                print_inline_styled(out, line, dim);
-                out.newline();
-                total_rows += 1;
+            } else {
+                let inner_indent = content_width.min(2);
+                let text_width = content_width.saturating_sub(inner_indent).max(1);
+                if !label.is_empty() {
+                    let labels = wrap_cell_spans(out, label, text_width, dim);
+                    for spans in &labels {
+                        render_row_prefix(out, bctx, indent);
+                        if inner_indent > 0 {
+                            out.print_gutter(&" ".repeat(inner_indent));
+                        }
+                        emit_table_label_spans(out, spans, dim);
+                        render_row_suffix(out, bctx, inner_indent + inline_spans_width(spans));
+                        total_rows += 1;
+                    }
+                }
+
+                let wrapped = wrap_cell_spans(out, cell, text_width, dim);
+                for spans in &wrapped {
+                    render_row_prefix(out, bctx, indent);
+                    if inner_indent > 0 {
+                        out.print_gutter(&" ".repeat(inner_indent));
+                    }
+                    emit_inline_spans(out, spans);
+                    render_row_suffix(out, bctx, inner_indent + inline_spans_width(spans));
+                    total_rows += 1;
+                }
             }
         }
     }
     total_rows
 }
 
-/// Word-wrap cell text to `max_width`, breaking only at spaces outside inline spans.
-fn wrap_cell_words(out: &mut LineBuilder, text: &str, max_width: usize) -> Vec<String> {
-    if max_width == 0 {
-        return vec![text.to_string()];
-    }
-
-    let chars: Vec<char> = text.chars().collect();
-    let len = chars.len();
-    let breakable = breakable_positions(text);
-
-    let mut lines = Vec::new();
-    let mut line_start = 0usize;
-    let mut last_break = None::<usize>;
-    for ci in 0..len {
-        if breakable[ci] {
-            last_break = Some(ci);
-        }
-        let visual_width =
-            strip_markdown_markers(&chars[line_start..=ci].iter().collect::<String>()).width();
-
-        if visual_width > max_width {
-            if let Some(bp) = last_break {
-                let line: String = chars[line_start..bp].iter().collect();
-                lines.push(line);
-                line_start = bp + 1;
-                last_break = None;
-            }
-        }
-    }
-    if line_start < len {
-        let line: String = chars[line_start..].iter().collect();
-        lines.push(line);
-    }
-    if lines.is_empty() {
-        lines.push(String::new());
-    }
-    if lines.len() > 1 {
+fn wrap_cell_spans(
+    out: &mut LineBuilder,
+    text: &str,
+    max_width: usize,
+    dim: bool,
+) -> Vec<Vec<InlineSpan>> {
+    let spans = parse_inline_spans(text, dim);
+    let rows = wrap_inline_spans(&spans, max_width);
+    if rows.len() > 1 {
         out.mark_wrapped();
     }
-    lines
+    rows
+}
+
+fn emit_table_label(out: &mut LineBuilder, label: &str, dim: bool) {
+    let spans = parse_inline_spans(label, dim);
+    emit_table_label_spans(out, &spans, dim);
+}
+
+fn emit_table_label_spans(out: &mut LineBuilder, spans: &[InlineSpan], dim: bool) {
+    for span in spans {
+        out.save_style();
+        out.set_fg(Color::DarkGrey);
+        if dim || span.style.dim {
+            out.set_dim();
+        }
+        if span.style.bold {
+            out.set_bold();
+        }
+        if span.style.italic {
+            out.set_italic();
+        }
+        if span.style.crossedout {
+            out.set_crossedout();
+        }
+        if let Some(group) = span.style.group {
+            out.set_hl(group);
+        }
+        out.print(&span.text);
+        out.pop_style();
+    }
 }
 
 /// Visual width of the longest unwrappable segment; used for minimum column widths.
@@ -333,21 +374,6 @@ fn min_visual_width(text: &str) -> usize {
         max_w = max_w.max(strip_markdown_markers(&seg).width());
     }
     max_w
-}
-
-/// Render inline markdown spans: `**bold**`, `__bold__`, `*italic*`, `_italic_`,
-/// `***bold+italic***`, `` `code` ``, `~~strikethrough~~`.
-/// Everything else passes through literally.
-pub(crate) fn print_inline_styled(out: &mut LineBuilder, text: &str, dim: bool) {
-    if dim {
-        out.push_dim();
-    }
-    let chars: Vec<char> = text.chars().collect();
-    let nodes = parse_inline(&chars, 0, chars.len());
-    emit_inline_nodes(out, &nodes);
-    if dim {
-        out.pop_style();
-    }
 }
 
 // ── Inline markdown AST + parser ─────────────────────────────────────────
@@ -436,40 +462,6 @@ fn parse_inline(chars: &[char], start: usize, end: usize) -> Vec<InlineNode> {
 
     flush_plain!();
     nodes
-}
-
-fn emit_inline_nodes(out: &mut LineBuilder, nodes: &[InlineNode]) {
-    for node in nodes {
-        match node {
-            InlineNode::Text(s) => out.print(s),
-            InlineNode::Code(s) => {
-                out.push_hl(intern("SmeltAccent"));
-                out.print(s);
-                out.pop_style();
-            }
-            InlineNode::Strike(children) => {
-                out.push_crossedout();
-                emit_inline_nodes(out, children);
-                out.pop_style();
-            }
-            InlineNode::Bold(children) => {
-                out.push_bold();
-                emit_inline_nodes(out, children);
-                out.pop_style();
-            }
-            InlineNode::Italic(children) => {
-                out.push_italic();
-                emit_inline_nodes(out, children);
-                out.pop_style();
-            }
-            InlineNode::BoldItalic(children) => {
-                out.push_bold();
-                out.set_italic();
-                emit_inline_nodes(out, children);
-                out.pop_style();
-            }
-        }
-    }
 }
 
 // ── Parse-then-wrap pipeline ─────────────────────────────────────────
@@ -675,33 +667,21 @@ mod tests {
     use super::super::super::builder::test_util::render_test;
     use super::super::syntax::render_code_block;
     use super::*;
-    use crate::style::Style;
 
-    /// Render `text` through `print_inline_styled` (dim=false) and return
-    /// a compact `Vec<(tag, text)>` representation of the span tree.
+    /// Parse `text` into styled inline spans and return a compact
+    /// `Vec<(tag, text)>` representation.
     /// Tags: "plain", "bold", "italic", "bi" (bold+italic), "code",
-    /// "strike". Adjacent spans with the same style are merged by the
-    /// sink, so you get one entry per visible style run.
+    /// "strike". Adjacent spans with the same style are merged.
     fn parse(text: &str) -> Vec<(&'static str, String)> {
-        let block = render_test(200, |sink| print_inline_styled(sink, text, false));
-        let line = match block.lines.into_iter().next() {
-            Some(l) => l,
-            None => return Vec::new(),
-        };
-        line.spans
+        parse_inline_spans(text, false)
             .into_iter()
             .filter(|s| !s.text.is_empty())
             .map(|s| (tag_for(&s.style), s.text))
             .collect()
     }
 
-    fn tag_for(style: &Style) -> &'static str {
-        // Code spans flow through `intern("SmeltAccent")` and the default
-        // core Theme keeps `SmeltAccent` empty, so the resolved fg is
-        // `Some(Color::Reset)` — distinct from plain runs (which never
-        // make it to the highlight list because their style is
-        // entirely default).
-        let is_code = style.fg.is_some();
+    fn tag_for(style: &InlineStyle) -> &'static str {
+        let is_code = style.group == Some(intern("SmeltAccent"));
         match (style.bold, style.italic, style.crossedout, is_code) {
             (false, false, false, false) => "plain",
             (true, false, false, false) => "bold",
@@ -1041,7 +1021,7 @@ mod tests {
         let text = "**bold *it* bold**";
         let stripped = strip_markdown_markers(text);
         assert_eq!(stripped, "bold it bold");
-        // And matches what print_inline_styled would emit:
+        // And matches what the inline span parser emits:
         let emitted: String = parse(text).into_iter().map(|(_, t)| t).collect();
         assert_eq!(emitted, stripped);
     }
@@ -1389,6 +1369,101 @@ mod tests {
             total = render_markdown_table(out, &rows, &[], 80, false, Some(&bctx), "");
         });
         assert!(total > 0);
+    }
+
+    #[test]
+    fn render_markdown_table_stacked_fallback_respects_width_budget() {
+        let rows = vec![
+            vec![
+                "Approach".to_string(),
+                "Worth it?".to_string(),
+                "Risk".to_string(),
+                "Notes".to_string(),
+            ],
+            vec![
+                "Revert pre-pruning and add retry loop".to_string(),
+                "Yes fixes cache and matches reference".to_string(),
+                "Low".to_string(),
+                "Post-compaction token recompute".to_string(),
+            ],
+        ];
+        let block = render_test(24, |out| {
+            render_markdown_table(out, &rows, &[], 24, false, None, "");
+        });
+        let joined: String = block
+            .lines
+            .iter()
+            .map(|l| l.text.as_str())
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(
+            !joined.contains('┏'),
+            "expected stacked fallback:\n{joined}"
+        );
+        for line in &block.lines {
+            let width = line.text.width();
+            assert!(
+                width <= 24,
+                "stacked row overflowed: width={width}, line={:?}",
+                line.text
+            );
+        }
+    }
+
+    #[test]
+    fn render_markdown_table_stacked_breaks_unspaced_values() {
+        let rows = vec![
+            vec!["Header".to_string(), "Other".to_string()],
+            vec![
+                "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".to_string(),
+                "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".to_string(),
+            ],
+        ];
+        let bctx = narrow_bctx(10);
+        let block = render_test(80, |out| {
+            render_markdown_table(out, &rows, &[], 80, false, Some(&bctx), "");
+        });
+        for line in &block.lines {
+            let width = line.text.width();
+            assert!(
+                width <= 10,
+                "stacked row overflowed: width={width}, line={:?}",
+                line.text
+            );
+        }
+    }
+
+    #[test]
+    fn render_markdown_table_stacked_wraps_parsed_inline_spans() {
+        let rows = vec![
+            vec!["Header".to_string()],
+            vec!["**abcdefghijklmnop**".to_string()],
+        ];
+        let bctx = narrow_bctx(8);
+        let block = render_test(80, |out| {
+            render_markdown_table(out, &rows, &[], 80, false, Some(&bctx), "");
+        });
+        let joined: String = block
+            .lines
+            .iter()
+            .map(|l| l.text.as_str())
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(!joined.contains("**"), "raw markers leaked:\n{joined}");
+        assert!(joined.contains("abc"));
+        assert!(block
+            .lines
+            .iter()
+            .flat_map(|l| l.spans.iter())
+            .any(|s| s.style.bold && s.text.contains('a')));
+        for line in &block.lines {
+            let width = line.text.width();
+            assert!(
+                width <= 8,
+                "stacked row overflowed: width={width}, line={:?}",
+                line.text
+            );
+        }
     }
 
     #[test]

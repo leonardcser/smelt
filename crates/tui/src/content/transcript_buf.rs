@@ -1048,4 +1048,34 @@ mod tests {
             acc += line.len() + 1;
         }
     }
+
+    #[test]
+    fn narrow_stacked_table_does_not_overflow_transcript_width() {
+        let mut transcript = Transcript::new();
+        transcript.push(Block::Text {
+            content: "\
+| Approach | Worth it? | Risk | Notes |
+| --- | --- | --- | --- |
+| Revert pre-pruning and add retry loop | Yes fixes cache and matches reference | Low | Post-compaction token recompute |
+"
+            .into(),
+        });
+        let theme = Theme::default();
+        let mut projection = TranscriptProjection::new();
+        let mut buf = Buffer::new(crate::smelt_term::BufId(6), Default::default());
+        projection.project(&mut buf, &mut transcript.history, 24, false, &theme, 0, 80);
+
+        let lines = buf.lines();
+        assert!(
+            lines.iter().all(|line| !line.contains('┏')),
+            "expected stacked fallback, got {lines:?}"
+        );
+        for line in lines {
+            let width = smelt_core::content::builder::display_width(line);
+            assert!(
+                width <= 24,
+                "projected table row overflowed transcript width: width={width}, line={line:?}"
+            );
+        }
+    }
 }
