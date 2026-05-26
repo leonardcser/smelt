@@ -6,6 +6,7 @@
 use crate::buffer::{Buffer, LineDecoration, SourceLine, SpanMeta};
 use crate::style::{Color, Style};
 use crate::theme::{intern_anonymous_style, HlGroup, Theme};
+use smelt_buffer::text;
 use unicode_width::UnicodeWidthStr;
 
 /// Display-column width of a string slice.
@@ -141,8 +142,6 @@ impl<'a> LineBuilder<'a> {
         if text.is_empty() {
             return;
         }
-        let w = display_width(text) as u16;
-        self.cur_visible_cols = self.cur_visible_cols.saturating_add(w);
         self.append_span_styled(text, SpanMeta::default());
     }
 
@@ -154,8 +153,6 @@ impl<'a> LineBuilder<'a> {
         if text.is_empty() {
             return;
         }
-        let w = display_width(text) as u16;
-        self.cur_visible_cols = self.cur_visible_cols.saturating_add(w);
         self.append_span_styled(text, meta);
     }
 
@@ -174,6 +171,7 @@ impl<'a> LineBuilder<'a> {
             self.cur_decoration.source_text = Some(src);
         } else if self.auto_soft_wrap_continuation {
             self.cur_decoration.soft_wrapped = true;
+            self.cur_decoration.copy_continuation = true;
         }
         if self.cur_visible_cols > self.max_line_width {
             self.max_line_width = self.cur_visible_cols;
@@ -223,11 +221,64 @@ impl<'a> LineBuilder<'a> {
 
     pub fn mark_soft_wrap_continuation(&mut self) {
         self.cur_decoration.soft_wrapped = true;
+        self.cur_decoration.copy_continuation = true;
+    }
+
+    /// Mark the current line as a copy continuation: it coalesces with the
+    /// previous line during `copy_byte_range` (no newline, skipped if
+    /// `source_text` was already emitted). Use this for table rows after the
+    /// first so copy emits the raw markdown while each row remains a hard
+    /// selection boundary.
+    pub fn mark_copy_continuation(&mut self) {
+        self.cur_decoration.copy_continuation = true;
+    }
+
+    /// Mark the current row as a chrome-delimited selection row. Double-click
+    /// selection may choose the selectable run between neighboring
+    /// non-selectable spans (for example, a table cell).
+    pub fn mark_cell_selectable(&mut self) {
+        self.cur_decoration.cell_selectable = true;
+    }
+
+    /// Mark the current row as part of a contiguous block-selectable structure.
+    /// Triple-click selection may expand through adjacent rows with this bit.
+    pub fn mark_block_selectable(&mut self) {
+        self.cur_decoration.block_selectable = true;
     }
 
     /// Attach raw source text to the current line so copy emits markdown rather than display text.
     pub fn set_source_text(&mut self, text: &str) {
         self.cur_decoration.source_text = Some(text.to_string());
+    }
+
+    /// Set `source_text` on the first row in `[start, end)` and `copy_continuation`
+    /// on the remaining rows. Used by table renderers that want copy-coalescing
+    /// without `soft_wrapped`.
+    pub fn stamp_copy_group(&mut self, start: usize, source_text: &str) {
+        let end = self.buf.line_count();
+        if start >= end {
+            return;
+        }
+        let mut first = self.buf.decoration_at(start).clone();
+        first.source_text = Some(source_text.to_string());
+        self.buf.set_decoration(start, first);
+        for r in (start + 1)..end {
+            let mut dec = self.buf.decoration_at(r).clone();
+            dec.copy_continuation = true;
+            self.buf.set_decoration(r, dec);
+        }
+    }
+
+    /// Mark all rows emitted since `start` as a chrome-delimited selectable
+    /// block. This is used by structured renderers such as Markdown tables.
+    pub fn stamp_chrome_delimited_block(&mut self, start: usize) {
+        let end = self.buf.line_count();
+        for r in start..end {
+            let mut dec = self.buf.decoration_at(r).clone();
+            dec.cell_selectable = true;
+            dec.block_selectable = true;
+            self.buf.set_decoration(r, dec);
+        }
     }
 
     /// Stamp the current line's logical source-line mapping. Gutter providers
@@ -390,32 +441,37 @@ impl<'a> LineBuilder<'a> {
     }
 
     fn append_text(&mut self, text: &str) {
-        let chars_before = self.cur_text.chars().count() as u16;
+        let cols_before = self.cur_visible_cols;
         self.cur_text.push_str(text);
-        let chars_after = self.cur_text.chars().count() as u16;
-        if chars_after != chars_before {
+        let cols_after = cols_before.saturating_add(display_width(text) as u16);
+        self.cur_visible_cols = cols_after;
+        if !text.is_empty() {
             self.has_pending_content = true;
         }
     }
 
     fn append_span_with_hl(&mut self, text: &str, hl: HlGroup, meta: SpanMeta) {
-        let chars_before = self.cur_text.chars().count() as u16;
+        let cols_before = self.cur_visible_cols;
         self.cur_text.push_str(text);
-        let chars_after = self.cur_text.chars().count() as u16;
-        if chars_after == chars_before {
+        let cols_after = cols_before.saturating_add(display_width(text) as u16);
+        self.cur_visible_cols = cols_after;
+        if text.is_empty() {
             return;
         }
         self.has_pending_content = true;
+        if cols_after == cols_before {
+            return;
+        }
         // Coalesce with the previous highlight if it has the same
         // hl+meta and was contiguous.
         if let Some(last) = self.cur_highlights.last_mut() {
-            if last.1 == chars_before && last.2 == hl && last.3 == meta {
-                last.1 = chars_after;
+            if last.1 == cols_before && last.2 == hl && last.3 == meta {
+                last.1 = cols_after;
                 return;
             }
         }
         self.cur_highlights
-            .push((chars_before, chars_after, hl, meta));
+            .push((cols_before, cols_after, hl, meta));
     }
 
     /// Map the active (group, style) to an interned [`HlGroup`].
@@ -496,7 +552,12 @@ fn style_has_axis_mods(s: &Style) -> bool {
 }
 
 fn has_decoration(dec: &LineDecoration) -> bool {
-    dec.fill_bg.is_some() || dec.soft_wrapped || dec.source_text.is_some()
+    dec.fill_bg.is_some()
+        || dec.soft_wrapped
+        || dec.cell_selectable
+        || dec.block_selectable
+        || dec.copy_continuation
+        || dec.source_text.is_some()
 }
 
 fn style_is_default(s: &Style) -> bool {
@@ -548,32 +609,35 @@ pub fn replay_buffer_row_into(buf: &Buffer, row: u16, out: &mut LineBuilder) {
     let mut highlights = buf.highlights_at(row as usize);
     highlights.sort_by_key(|h| h.col_start);
 
-    let chars: Vec<char> = text.chars().collect();
     let mut col_idx: u16 = 0;
     for h in &highlights {
         if h.col_end <= col_idx {
             continue;
         }
         if h.col_start > col_idx {
-            let plain: String = chars[col_idx as usize..h.col_start as usize]
-                .iter()
-                .collect();
+            let plain = slice_cells(text, col_idx, h.col_start).to_string();
             out.print(&plain);
             col_idx = h.col_start;
         }
-        let end = h.col_end.min(chars.len() as u16);
+        let end = h.col_end.min(display_width(text) as u16);
         if end <= col_idx {
             continue;
         }
-        let segment: String = chars[col_idx as usize..end as usize].iter().collect();
+        let segment = slice_cells(text, col_idx, end).to_string();
         let style = out.theme.resolve(h.hl);
         out.append_resolved_span(&segment, style, h.meta.clone());
         col_idx = end;
     }
-    if (col_idx as usize) < chars.len() {
-        let tail: String = chars[col_idx as usize..].iter().collect();
+    if (col_idx as usize) < display_width(text) {
+        let tail = slice_cells(text, col_idx, display_width(text) as u16).to_string();
         out.print(&tail);
     }
+}
+
+fn slice_cells(s: &str, start: u16, end: u16) -> &str {
+    let start = text::cell_to_byte(s, start as usize);
+    let end = text::cell_to_byte(s, end as usize);
+    text::slice(s, start..end)
 }
 
 impl<'a> LineBuilder<'a> {
@@ -582,8 +646,6 @@ impl<'a> LineBuilder<'a> {
         if text.is_empty() {
             return;
         }
-        let w = display_width(text) as u16;
-        self.cur_visible_cols = self.cur_visible_cols.saturating_add(w);
         self.append_span_resolved(text, style, meta);
     }
 }
@@ -602,6 +664,9 @@ pub mod test_util {
         pub text: String,
         pub source_text: Option<String>,
         pub soft_wrapped: bool,
+        pub cell_selectable: bool,
+        pub block_selectable: bool,
+        pub copy_continuation: bool,
         pub spans: Vec<TestSpan>,
     }
 
@@ -626,16 +691,15 @@ pub mod test_util {
                 let dec = buf.decoration_at(i).clone();
                 let mut highlights = buf.highlights_at(i);
                 highlights.sort_by_key(|h| h.col_start);
-                let chars: Vec<char> = text.chars().collect();
                 let mut spans = Vec::new();
                 let mut col: u16 = 0;
+                let width = display_width(&text) as u16;
                 for h in &highlights {
                     if h.col_end <= col {
                         continue;
                     }
                     if h.col_start > col {
-                        let plain: String =
-                            chars[col as usize..h.col_start as usize].iter().collect();
+                        let plain = slice_cells(&text, col, h.col_start).to_string();
                         spans.push(TestSpan {
                             text: plain,
                             style: Style::default(),
@@ -643,11 +707,11 @@ pub mod test_util {
                         });
                         col = h.col_start;
                     }
-                    let end = h.col_end.min(chars.len() as u16);
+                    let end = h.col_end.min(width);
                     if end <= col {
                         continue;
                     }
-                    let segment: String = chars[col as usize..end as usize].iter().collect();
+                    let segment = slice_cells(&text, col, end).to_string();
                     let style = theme.resolve(h.hl);
                     spans.push(TestSpan {
                         text: segment,
@@ -656,8 +720,8 @@ pub mod test_util {
                     });
                     col = end;
                 }
-                if (col as usize) < chars.len() {
-                    let tail: String = chars[col as usize..].iter().collect();
+                if col < width {
+                    let tail = slice_cells(&text, col, width).to_string();
                     spans.push(TestSpan {
                         text: tail,
                         style: Style::default(),
@@ -668,6 +732,9 @@ pub mod test_util {
                     text,
                     source_text: dec.source_text,
                     soft_wrapped: dec.soft_wrapped,
+                    cell_selectable: dec.cell_selectable,
+                    block_selectable: dec.block_selectable,
+                    copy_continuation: dec.copy_continuation,
                     spans,
                 }
             })

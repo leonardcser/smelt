@@ -1,7 +1,8 @@
 //! Pure text-motion helpers over `&str` buffers and byte positions.
 
 pub use smelt_buffer::text::{
-    byte_to_cell, cell_to_byte, next_char_boundary, prev_char_boundary, snap,
+    byte_of_char, byte_to_cell, cell_to_byte, char_pos, next_char_boundary, prev_char_boundary,
+    snap,
 };
 pub use smelt_buffer::wrap::wrap_line;
 

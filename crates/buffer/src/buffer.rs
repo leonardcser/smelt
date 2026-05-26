@@ -182,6 +182,22 @@ pub struct LineDecoration {
     /// instead, so the bg, content, and chrome cells share one mechanism.
     pub fill_bg: Option<Color>,
     pub soft_wrapped: bool,
+    /// Rows with this bit opt into chrome-delimited region selection. A
+    /// double-click can select the selectable run between neighboring
+    /// non-selectable spans. Renderers use this for structured rows such as
+    /// Markdown table data rows without making the window inspect glyphs.
+    pub cell_selectable: bool,
+    /// Rows with this bit opt into contiguous block selection. A triple-click
+    /// expands through adjacent rows with the same bit. This is generic row
+    /// metadata for preformatted structures, not transcript-specific behavior.
+    pub block_selectable: bool,
+    /// When `true`, `copy_byte_range` treats this row as part of the previous
+    /// row's copy group: it skips the newline and, if `source_text` was already
+    /// emitted from the group's first row, skips this row entirely. This is
+    /// orthogonal to `soft_wrapped` — table rows use `copy_continuation` without
+    /// `soft_wrapped` so each display row is a hard selection boundary while
+    /// still coalescing into a single `source_text` on copy.
+    pub copy_continuation: bool,
     pub source_text: Option<String>,
     /// Logical line mapping for this row. `None` = fall back to `row + 1`.
     pub source_line: Option<SourceLine>,
@@ -1192,6 +1208,9 @@ impl Buffer {
         static DEFAULT: LineDecoration = LineDecoration {
             fill_bg: None,
             soft_wrapped: false,
+            cell_selectable: false,
+            block_selectable: false,
+            copy_continuation: false,
             source_text: None,
             source_line: None,
             pre_formatted: false,

@@ -302,11 +302,9 @@ fn render_markdown_table_from_lines(
         let cells: Vec<String> = trimmed.split('|').map(|c| c.trim().to_string()).collect();
         table_rows.push(cells);
     }
-    // Source text on row 0 lets copy_range reconstruct the raw markdown; subsequent
-    // rows are soft-wrap continuations so they're skipped once row 0's source is emitted.
-    out.arm_source_text(lines.join("\n"));
+    let start = out.line_count();
     let n = render_markdown_table(out, &table_rows, &alignments, width, dim, bctx, indent);
-    out.disarm_source_text();
+    out.stamp_copy_group(start, &lines.join("\n"));
     n
 }
 
@@ -425,8 +423,13 @@ mod tests {
             block.lines[0].source_text.as_deref(),
             Some("| col | val |\n| --- | --- |\n| a   | 1   |")
         );
+        for line in &block.lines {
+            assert!(line.cell_selectable);
+            assert!(line.block_selectable);
+        }
         for line in block.lines.iter().skip(1) {
-            assert!(line.soft_wrapped);
+            assert!(line.copy_continuation);
+            assert!(!line.soft_wrapped);
             assert!(line.source_text.is_none());
         }
     }

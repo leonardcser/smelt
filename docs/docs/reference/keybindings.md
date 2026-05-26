@@ -77,6 +77,10 @@ Drag with the mouse in the prompt or transcript to select text. Releasing the
 drag copies the selection to the clipboard. While dragging the status bar
 shows a temporary `VISUAL` indicator.
 
+Double-click selects a word in normal text or a table cell in rendered
+Markdown tables. Triple-click selects a line in normal text or the whole
+rendered table block when the click lands inside a table.
+
 !!! note
 
     `Cmd` keybindings depend on terminal support. Some terminals intercept

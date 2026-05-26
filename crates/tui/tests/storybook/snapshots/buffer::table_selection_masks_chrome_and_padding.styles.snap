@@ -1,0 +1,21 @@
+---
+source: crates/tui/tests/storybook/mod.rs
+expression: frame.styles_text()
+---
+dim: 18 5
+  0   0   9 attrs=dim
+  0   9   1 bg=DarkGrey
+  1   0   1 attrs=dim
+  1   2   1 bg=DarkGrey
+  1   4   1 attrs=dim
+  1   6   1 bg=DarkGrey
+  1   8   1 attrs=dim
+  2   0   9 attrs=dim
+  2   9   1 bg=DarkGrey
+  3   0   1 attrs=dim
+  3   2   1 bg=DarkGrey
+  3   4   1 attrs=dim
+  3   6   1 bg=DarkGrey
+  3   8   1 attrs=dim
+  4   0   9 attrs=dim
+  4   9   1 bg=DarkGrey

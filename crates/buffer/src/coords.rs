@@ -8,6 +8,7 @@
 
 use crate::buffer::{Buffer, SelectionRange};
 use crate::text;
+use unicode_width::UnicodeWidthStr;
 
 /// Bidirectional source↔display char maps + per-row offsets.
 /// Stored on [`Buffer`] after parse for buffers whose source-byte stream
@@ -75,6 +76,10 @@ impl ProjectionMaps {
 /// selection extends past it, end-of-line cursor past the last char). This
 /// mirrors vim's visible-newline behavior so multi-line selections always show
 /// the empty rows as part of the range.
+///
+/// For rows that contain only non-selectable chrome (e.g. a thinking-block
+/// gutter `│ ` or a user-block padding space), the virtual cell is placed
+/// *after* the chrome so the selection highlight doesn't paint over it.
 pub fn selection_to_row_ranges(
     buf: &Buffer,
     start_byte: usize,
@@ -88,22 +93,23 @@ pub fn selection_to_row_ranges(
     let mut ranges = Vec::with_capacity(end_row - start_row + 1);
     for row in start_row..=end_row {
         let line = buf.get_line(row).unwrap_or_default();
-        let line_chars = line.chars().count();
-        let cs = if row == start_row { start_col } else { 0 };
+        let line_width = UnicodeWidthStr::width(line);
+        let mut cs = if row == start_row { start_col } else { 0 };
         let mut ce = if row == end_row {
-            if end_col > line_chars {
-                line_chars + 1
+            if end_col > line_width {
+                line_width + 1
             } else {
                 end_col
             }
         } else {
-            line_chars
+            line_width
         };
-        // A row that's part of the selection but has no chars to paint (empty
-        // middle row, or a start row whose selection extends into the next
-        // row) gets a one-cell virtual span at `cs` so the row visibly stays
-        // in the highlight.
-        if cs == ce && row != end_row {
+        // A row that's part of the selection but has no selectable text gets a
+        // one-cell virtual span placed after any leading non-selectable chrome
+        // (gutter, padding) so the highlight doesn't paint over chrome cells.
+        if !range_contains_selectable(buf, row, 0, line_width) {
+            let chrome_end = last_non_selectable_end(buf, row, line_width);
+            cs = cs.max(chrome_end);
             ce = cs + 1;
         }
         ranges.push(SelectionRange {
@@ -113,6 +119,51 @@ pub fn selection_to_row_ranges(
         });
     }
     ranges
+}
+
+/// True if any column in `[col_start, col_end)` on `row` is selectable.
+/// Unstyled cells (not covered by any highlight span) are implicitly
+/// selectable. Empty ranges always return `false`.
+fn range_contains_selectable(buf: &Buffer, row: usize, col_start: usize, col_end: usize) -> bool {
+    let line = buf.get_line(row).unwrap_or_default();
+    let line_width = UnicodeWidthStr::width(line);
+    if col_start >= col_end || line_width == 0 {
+        return false;
+    }
+    let highlights = buf.highlights_at(row);
+    let mut unselectable = vec![false; line_width];
+    for span in highlights {
+        if !span.meta.selectable {
+            for i in span.col_start as usize..span.col_end as usize {
+                if i < unselectable.len() {
+                    unselectable[i] = true;
+                }
+            }
+        }
+    }
+    for cell in unselectable
+        .iter()
+        .take(col_end.min(line_width))
+        .skip(col_start)
+    {
+        if !cell {
+            return true;
+        }
+    }
+    false
+}
+
+/// The largest `col_end` among non-selectable spans on `row`, clamped to the
+/// row display width. Returns `0` when there is no non-selectable span.
+fn last_non_selectable_end(buf: &Buffer, row: usize, line_width: usize) -> usize {
+    let highlights = buf.highlights_at(row);
+    let mut max_end = 0;
+    for span in highlights {
+        if !span.meta.selectable {
+            max_end = max_end.max(span.col_end as usize);
+        }
+    }
+    max_end.min(line_width)
 }
 
 #[cfg(test)]
@@ -147,6 +198,117 @@ mod tests {
         assert_eq!(ranges.len(), 2);
         assert_eq!((ranges[0].col_start, ranges[0].col_end), (0, 1));
         assert_eq!((ranges[1].col_start, ranges[1].col_end), (0, 2));
+    }
+
+    #[test]
+    fn selection_paints_virtual_cell_after_chrome_on_empty_middle_row() {
+        // Thinking-block empty line: gutter "│ " is non-selectable chrome.
+        // Selecting across the block should place the virtual cell after the
+        // gutter so the bar itself doesn't receive the visual bg.
+        let mut buf = Buffer::new(BufId(0), BufCreateOpts::default());
+        buf.set_all_lines(vec!["│ hello".into(), "│ ".into(), "│ world".into()]);
+        buf.add_highlight_group_with_meta(
+            1,
+            0,
+            2,
+            crate::theme::intern("Normal"),
+            crate::buffer::SpanMeta {
+                selectable: false,
+                copy_as: None,
+            },
+        );
+        // "│ hello" = 9 bytes + newline + "│ " = 4 bytes + newline + "│ world" = 9 bytes
+        // Total bytes = 9 + 1 + 4 + 1 + 9 = 24. Select all: 0..24.
+        let ranges = selection_to_row_ranges(&buf, 0, 24);
+        assert_eq!(ranges.len(), 3);
+        // Row 0: content row, normal range.
+        assert_eq!((ranges[0].col_start, ranges[0].col_end), (0, 7));
+        // Row 1: empty chrome-only row; virtual span placed after the 2-char gutter.
+        assert_eq!((ranges[1].col_start, ranges[1].col_end), (2, 3));
+        // Row 2: end row.
+        assert_eq!((ranges[2].col_start, ranges[2].col_end), (0, 7));
+    }
+
+    #[test]
+    fn selection_paints_virtual_cell_after_padding_on_user_empty_row() {
+        // User-block blank row: one padding space is non-selectable chrome.
+        let mut buf = Buffer::new(BufId(0), BufCreateOpts::default());
+        buf.set_all_lines(vec![" hello ".into(), " ".into(), " world ".into()]);
+        buf.add_highlight_group_with_meta(
+            1,
+            0,
+            1,
+            crate::theme::intern("Normal"),
+            crate::buffer::SpanMeta {
+                selectable: false,
+                copy_as: None,
+            },
+        );
+        // " hello " = 7 bytes + newline + " " = 1 byte + newline + " world " = 7 bytes
+        // Total = 7 + 1 + 1 + 1 + 7 = 17.
+        let ranges = selection_to_row_ranges(&buf, 0, 17);
+        assert_eq!(ranges.len(), 3);
+        assert_eq!((ranges[0].col_start, ranges[0].col_end), (0, 7));
+        // Virtual span after the 1-char padding.
+        assert_eq!((ranges[1].col_start, ranges[1].col_end), (1, 2));
+        assert_eq!((ranges[2].col_start, ranges[2].col_end), (0, 7));
+    }
+
+    #[test]
+    fn selection_does_not_override_chrome_on_start_row_with_no_selectable_cells() {
+        // Selection starts on an empty chrome-only row and extends down.
+        // The virtual span should be after the chrome, not at col 0.
+        let mut buf = Buffer::new(BufId(0), BufCreateOpts::default());
+        buf.set_all_lines(vec!["│ ".into(), "│ content".into()]);
+        buf.add_highlight_group_with_meta(
+            0,
+            0,
+            3,
+            crate::theme::intern("Normal"),
+            crate::buffer::SpanMeta {
+                selectable: false,
+                copy_as: None,
+            },
+        );
+        // "│ " = 4 bytes + newline + "│ content" = 11 bytes. Total = 16.
+        let ranges = selection_to_row_ranges(&buf, 0, 16);
+        assert_eq!(ranges.len(), 2);
+        // Start row (also middle row): virtual span after gutter.
+        assert_eq!((ranges[0].col_start, ranges[0].col_end), (2, 3));
+        assert_eq!((ranges[1].col_start, ranges[1].col_end), (0, 9));
+    }
+
+    #[test]
+    fn selection_ranges_use_display_cells_for_wide_chars() {
+        let mut buf = Buffer::new(BufId(0), BufCreateOpts::default());
+        buf.set_source("a\n你b".into());
+        buf.set_all_lines(vec!["a".into(), "你b".into()]);
+
+        let ranges = selection_to_row_ranges(&buf, 0, "a\n你b".len());
+        assert_eq!(ranges.len(), 2);
+        assert_eq!((ranges[0].col_start, ranges[0].col_end), (0, 1));
+        assert_eq!((ranges[1].col_start, ranges[1].col_end), (0, 3));
+    }
+
+    #[test]
+    fn virtual_span_after_chrome_uses_display_cells() {
+        let mut buf = Buffer::new(BufId(0), BufCreateOpts::default());
+        buf.set_all_lines(vec!["你 ".into(), "done".into()]);
+        buf.add_highlight_group_with_meta(
+            0,
+            0,
+            3,
+            crate::theme::intern("Normal"),
+            crate::buffer::SpanMeta {
+                selectable: false,
+                copy_as: None,
+            },
+        );
+
+        let ranges = selection_to_row_ranges(&buf, 0, "你 \ndone".len());
+        assert_eq!(ranges.len(), 2);
+        assert_eq!((ranges[0].col_start, ranges[0].col_end), (3, 4));
+        assert_eq!((ranges[1].col_start, ranges[1].col_end), (0, 4));
     }
 
     #[test]

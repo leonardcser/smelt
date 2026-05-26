@@ -40,8 +40,11 @@ pub fn render_markdown_table(
     };
     let align_for = |c: usize| alignments.get(c).copied().unwrap_or_default();
 
+    let start = out.line_count();
     let Some(col_widths) = fit_column_widths(rows, num_cols, max_table) else {
-        return render_table_stacked(out, rows, dim);
+        let rendered = render_table_stacked(out, rows, dim);
+        out.stamp_chrome_delimited_block(start);
+        return rendered;
     };
 
     let mut total_rows = 0u16;
@@ -54,6 +57,7 @@ pub fn render_markdown_table(
         total_rows += render_table_row(out, row, &col_widths, align_for, dim, bctx, indent);
     }
     total_rows += render_border(out, &col_widths, bctx, indent, "┗", "┻", "┛");
+    out.stamp_chrome_delimited_block(start);
     total_rows
 }
 

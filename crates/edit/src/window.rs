@@ -774,6 +774,103 @@ impl Window {
         Some((start, end))
     }
 
+    /// Select the table cell containing `cpos`. Returns `None` when the row
+    /// does not look like a table (no `┃` border character). The returned
+    /// range spans from the right edge of the left border/padding to the left
+    /// edge of the right border/padding, so the mask in `Window::render` drops
+    /// chrome and only the cell text is visually highlighted.
+    fn select_cell_at(
+        &mut self,
+        cpos: usize,
+        buf: &Buffer,
+        viewport_rows: u16,
+    ) -> Option<(usize, usize)> {
+        let (row, col) = buf.display_cursor_pos(cpos);
+        if !buf.decoration_at(row).cell_selectable {
+            return None;
+        }
+        let line = buf.get_line(row)?;
+        let highlights = buf.highlights_at(row);
+        let line_width = text::byte_to_cell(line, line.len());
+
+        // Collect boundaries of non-selectable spans (borders + padding).
+        let mut boundaries = Vec::new();
+        boundaries.push(0);
+        boundaries.push(line_width);
+        let mut saw_chrome_span = false;
+        for span in &highlights {
+            if !span.meta.selectable {
+                saw_chrome_span = true;
+                boundaries.push(span.col_start as usize);
+                boundaries.push(span.col_end as usize);
+            }
+        }
+        if !saw_chrome_span {
+            return None;
+        }
+        boundaries.sort_unstable();
+        boundaries.dedup();
+
+        // Find the gap between two chrome boundaries that contains `col`.
+        let mut cell_start = None;
+        let mut cell_end = None;
+        for window in boundaries.windows(2) {
+            let (s, e) = (window[0], window[1]);
+            if s <= col && col < e {
+                cell_start = Some(s);
+                cell_end = Some(e);
+                break;
+            }
+        }
+        let (start, end) = (cell_start?, cell_end?);
+
+        // Require at least one selectable character inside the gap. Plain text
+        // often has no explicit highlight span, so unstyled characters are
+        // selectable unless covered by non-selectable chrome.
+        if !cell_range_contains_selectable(&highlights, start, end) {
+            return None;
+        }
+
+        let start_byte = buf.byte_at_display_pos(row, start);
+        let end_byte = buf.byte_at_display_pos(row, end);
+        self.finish_range_select(start_byte, end_byte, buf, viewport_rows);
+        Some((start_byte, end_byte))
+    }
+
+    /// Expand the selection to the full contiguous selectable block containing
+    /// `cpos`. Structured renderers opt rows into this behavior through
+    /// `LineDecoration::block_selectable`.
+    fn select_block_at(
+        &mut self,
+        cpos: usize,
+        buf: &Buffer,
+        viewport_rows: u16,
+    ) -> Option<(usize, usize)> {
+        let (row, _col) = buf.display_cursor_pos(cpos);
+        if !buf.decoration_at(row).block_selectable {
+            return None;
+        }
+
+        let mut first = row;
+        while first > 0 && buf.decoration_at(first - 1).block_selectable {
+            first -= 1;
+        }
+
+        let mut last = row;
+        while last + 1 < buf.line_count() && buf.decoration_at(last + 1).block_selectable {
+            last += 1;
+        }
+
+        let start_byte = buf.byte_at_display_pos(first, 0);
+        let last_line = buf.get_line(last)?;
+        // In identity mode (transcript buffers) `byte_at_display_pos(last,0)` is the
+        // start of the row and `+ line.len()` lands on the newline byte (or EOF),
+        // which `copy_byte_range` maps to the end of the current display row.
+        let end_byte = buf.byte_at_display_pos(last, 0) + last_line.len();
+        self.finish_range_select(start_byte, end_byte, buf, viewport_rows);
+        Some((start_byte, end_byte))
+    }
+
     /// Select the source line at `cpos` and enter Visual mode anchored at its start.
     /// Uses `Visual` (not `VisualLine`) so soft-wrapped lines select correctly.
     fn select_line_at(
@@ -1033,7 +1130,10 @@ impl Window {
 
         match ctx.click_count {
             2 => {
-                if let Some((s, e)) = self.select_big_word_at_transparent(
+                if let Some((s, e)) = self.select_cell_at(click_byte, buf, viewport_rows) {
+                    self.drag_anchor_word = Some((s, e));
+                    self.drag_anchor_line = None;
+                } else if let Some((s, e)) = self.select_big_word_at_transparent(
                     click_byte,
                     ctx.soft_breaks,
                     buf,
@@ -1045,7 +1145,10 @@ impl Window {
                 Status::Capture
             }
             3 => {
-                if let Some((s, e)) =
+                if let Some((s, e)) = self.select_block_at(click_byte, buf, viewport_rows) {
+                    self.drag_anchor_line = Some((s, e));
+                    self.drag_anchor_word = None;
+                } else if let Some((s, e)) =
                     self.select_line_at(click_byte, ctx.hard_breaks, buf, viewport_rows)
                 {
                     self.drag_anchor_line = Some((s, e));
@@ -1691,12 +1794,14 @@ impl Window {
             // Selection painting: after highlights (wins over base) but before virt-text.
             // Mask out cells under `selectable = false` spans so chrome (e.g. inline
             // gutter, line-number column) doesn't receive the Visual bg. Skip the mask
-            // when the row has only chrome and no selectable cells — that's a padding
-            // row (e.g. user-block bg blank) whose 1-cell virtual selection span must
-            // still paint so a multi-line selection stays visually continuous.
+            // when the row has only chrome and no selectable cells — the virtual
+            // selection span placed after the chrome by `selection_to_row_ranges` will
+            // paint there, keeping multi-line selections visually continuous without
+            // highlighting the chrome itself.
             let line_has_selection = selection_ranges.iter().any(|r| r.line == logical_row);
             let any_chrome = spans_buf.iter().any(|s| !s.meta.selectable);
-            let any_selectable = spans_buf.iter().any(|s| s.meta.selectable);
+            let any_selectable =
+                cell_range_contains_selectable(&spans_buf, 0, text::byte_to_cell(line, line.len()));
             let mask_slice: Option<&[bool]> = if line_has_selection && any_chrome && any_selectable
             {
                 mask_buf.clear();
@@ -1825,17 +1930,27 @@ impl Window {
 /// a trailing bg pad, or an all-chrome user-block padding row), clamp back to
 /// the last selectable col_end so the cursor never escapes the row's content
 /// edge and triggers horizontal pan.
+fn cell_range_contains_selectable(
+    spans: &[smelt_buffer::buffer::Span],
+    start: usize,
+    end: usize,
+) -> bool {
+    if start >= end {
+        return false;
+    }
+    (start..end).any(|col| {
+        !spans.iter().any(|span| {
+            !span.meta.selectable && col >= span.col_start as usize && col < span.col_end as usize
+        })
+    })
+}
+
 fn snap_col_past_chrome(buf: &Buffer, logical_row: usize, col: u16) -> u16 {
     let mut spans = Vec::new();
     buf.highlights_at_into(logical_row, &mut spans);
     if spans.iter().all(|s| s.meta.selectable) {
         return col;
     }
-    let max_selectable_end = spans
-        .iter()
-        .filter(|s| s.meta.selectable)
-        .map(|s| s.col_end)
-        .max();
     let mut col = col;
     loop {
         let mut advanced = false;
@@ -1849,10 +1964,21 @@ fn snap_col_past_chrome(buf: &Buffer, logical_row: usize, col: u16) -> u16 {
             break;
         }
     }
-    match max_selectable_end {
-        Some(end) if col > end => end,
+    let Some(line) = buf.get_line(logical_row) else {
+        return col;
+    };
+    let line_width = text::byte_to_cell(line, line.len()).min(u16::MAX as usize) as u16;
+    if col < line_width && cell_range_contains_selectable(&spans, col as usize, col as usize + 1) {
+        return col;
+    }
+    let last_selectable_edge = (0..line_width)
+        .filter(|c| cell_range_contains_selectable(&spans, *c as usize, *c as usize + 1))
+        .map(|c| c.saturating_add(1))
+        .next_back();
+    match last_selectable_edge {
+        Some(edge) if col > edge => edge,
         None => 0,
-        _ => col,
+        _ => col.min(line_width),
     }
 }
 
@@ -3317,6 +3443,83 @@ mod tests {
     }
 
     #[test]
+    fn render_highlight_span_columns_are_display_cells_with_wide_text() {
+        let mut buf = Buffer::new(BufId(1), BufCreateOpts::default());
+        buf.set_all_lines(vec!["你x".into()]);
+        buf.add_highlight(0, 2, 3, crate::SpanStyle::new().bold());
+
+        let w = make_win();
+        let ctx = DrawContext {
+            terminal_width: 20,
+            terminal_height: 3,
+            focused: false,
+            cursor_shape: CursorShape::Hidden,
+            theme: std::sync::Arc::new(Theme::default()),
+            vim_mode: VimMode::default(),
+        };
+        let mut grid = Grid::new(10, 1);
+        let mut slice = grid.slice_mut(Rect::new(0, 0, 10, 1));
+        w.render(&buf, &mut slice, &ctx);
+
+        assert_eq!(grid.cell(0, 0).symbol, '你');
+        assert!(!grid.cell(0, 0).style.bold);
+        assert_eq!(grid.cell(2, 0).symbol, 'x');
+        assert!(grid.cell(2, 0).style.bold);
+    }
+
+    #[test]
+    fn render_selection_masks_table_chrome_for_plain_text_cells() {
+        let line = "┃ a ┃ b ┃  ";
+        let mut buf = Buffer::new(BufId(1), BufCreateOpts::default());
+        buf.set_all_lines(vec![line.into()]);
+        let chrome = smelt_buffer::buffer::SpanMeta {
+            selectable: false,
+            ..Default::default()
+        };
+        buf.add_highlight_with_meta(0, 0, 2, crate::SpanStyle::new(), chrome.clone());
+        buf.add_highlight_with_meta(0, 3, 6, crate::SpanStyle::new(), chrome.clone());
+        buf.add_highlight_with_meta(0, 7, 11, crate::SpanStyle::new(), chrome);
+        buf.set_selection(vec![smelt_buffer::buffer::SelectionRange {
+            line: 0,
+            col_start: 0,
+            col_end: unicode_width::UnicodeWidthStr::width(line) as u16,
+        }]);
+
+        let w = make_win();
+        let mut theme = Theme::default();
+        let visual_bg = crate::grid::Style::new().bg(crate::grid::Color::AnsiValue(60));
+        theme.set("Visual", visual_bg);
+        let ctx = DrawContext {
+            terminal_width: 40,
+            terminal_height: 3,
+            focused: true,
+            cursor_shape: CursorShape::Hidden,
+            theme: std::sync::Arc::new(theme),
+            vim_mode: VimMode::default(),
+        };
+        let mut grid = Grid::new(20, 1);
+        let mut slice = grid.slice_mut(Rect::new(0, 0, 20, 1));
+        w.render(&buf, &mut slice, &ctx);
+
+        for char_col in [0, 1, 3, 4, 5, 7, 8, 9, 10] {
+            let cell = text::byte_to_cell(line, text::byte_of_char(line, char_col as usize)) as u16;
+            assert_ne!(
+                grid.cell(cell, 0).style.bg,
+                visual_bg.bg,
+                "chrome char at {char_col} should not be selected"
+            );
+        }
+        for char_col in [2, 6] {
+            let cell = text::byte_to_cell(line, text::byte_of_char(line, char_col as usize)) as u16;
+            assert_eq!(
+                grid.cell(cell, 0).style.bg,
+                visual_bg.bg,
+                "cell text at {char_col} should be selected"
+            );
+        }
+    }
+
+    #[test]
     fn scroll_anchor_restored_after_width_change() {
         // Build a wrapped buffer where each row wraps into 4 visual rows at
         // width=5, and 2 visual rows at width=10. With cursor at the top,
@@ -3398,5 +3601,135 @@ mod tests {
         w.ensure_layout(&buf, 10);
         // Anchor cleared because changedtick mismatched.
         assert!(w.scroll_anchor.is_none());
+    }
+
+    #[test]
+    fn select_cell_at_selects_between_table_borders() {
+        let mut w = make_win();
+        let mut buf = make_buf(vec!["┃ a ┃ b ┃".into()]);
+        let hl = smelt_buffer::theme::intern("Normal");
+        let unsel = smelt_buffer::buffer::SpanMeta {
+            selectable: false,
+            copy_as: None,
+        };
+        buf.set_decoration(
+            0,
+            smelt_buffer::buffer::LineDecoration {
+                cell_selectable: true,
+                ..Default::default()
+            },
+        );
+        // cols: 0┃1 2a3 4┃5 6b7 8┃
+        // Mark borders and padding as non-selectable. Cell text is plain and
+        // implicitly selectable, matching normal markdown table rendering.
+        buf.add_highlight_group_with_meta(0, 0, 2, hl, unsel.clone()); // ┃ +
+        buf.add_highlight_group_with_meta(0, 3, 4, hl, unsel.clone()); //  (pad)
+        buf.add_highlight_group_with_meta(0, 4, 5, hl, unsel.clone()); // ┃
+        buf.add_highlight_group_with_meta(0, 5, 6, hl, unsel.clone()); //  (pad)
+        buf.add_highlight_group_with_meta(0, 7, 8, hl, unsel.clone()); //  (pad)
+        buf.add_highlight_group_with_meta(0, 8, 9, hl, unsel); // ┃
+                                                               // Click on the first cell content 'a' (display col 2).
+        let cpos = buf.byte_at_display_pos(0, 2);
+        let (s, e) = w.select_cell_at(cpos, &buf, 10).expect("cell selected");
+        let selected = &buf.text()[s..e];
+        assert_eq!(selected, "a");
+    }
+
+    #[test]
+    fn select_cell_at_returns_none_for_non_table_row() {
+        let mut w = make_win();
+        let buf = make_buf(vec!["hello world".into()]);
+        let cpos = buf.byte_at_display_pos(0, 6);
+        assert!(w.select_cell_at(cpos, &buf, 10).is_none());
+    }
+
+    #[test]
+    fn select_block_at_selects_full_table_block() {
+        let mut w = make_win();
+        let mut buf = make_buf(vec![
+            "before".into(),
+            "┏━┓".into(),
+            "┃a┃".into(),
+            "┗━┛".into(),
+            "after".into(),
+        ]);
+        for row in 1..=3 {
+            buf.set_decoration(
+                row,
+                smelt_buffer::buffer::LineDecoration {
+                    block_selectable: true,
+                    ..Default::default()
+                },
+            );
+        }
+        // Click on the middle table row (row 2, the data row).
+        let cpos = buf.byte_at_display_pos(2, 1);
+        let (s, e) = w.select_block_at(cpos, &buf, 10).expect("table selected");
+        let selected = &buf.text()[s..e];
+        assert_eq!(selected, "┏━┓\n┃a┃\n┗━┛");
+    }
+
+    #[test]
+    fn select_block_at_returns_none_for_plain_row() {
+        let mut w = make_win();
+        let buf = make_buf(vec!["hello world".into()]);
+        let cpos = buf.byte_at_display_pos(0, 6);
+        assert!(w.select_block_at(cpos, &buf, 10).is_none());
+    }
+
+    #[test]
+    fn triple_click_on_table_row_selects_whole_table() {
+        let mut w = make_win();
+        w.set_vim_mode(VimMode::Normal);
+        let rows: Vec<String> = vec![
+            "before".into(),
+            "┏━┓".into(),
+            "┃a┃".into(),
+            "┗━┛".into(),
+            "after".into(),
+        ];
+        let mut buf = make_buf(rows.clone());
+        for row in 1..=3 {
+            buf.set_decoration(
+                row,
+                smelt_buffer::buffer::LineDecoration {
+                    block_selectable: true,
+                    ..Default::default()
+                },
+            );
+        }
+        let rect = Rect::new(0, 0, 20, 10);
+        let viewport = viewport_for(&rows, rect);
+
+        // Triple-click on the data row (display row 2).
+        let ctx = MouseCtx {
+            soft_breaks: &[],
+            hard_breaks: &hard_breaks(&rows),
+            viewport,
+            click_count: 3,
+        };
+        let (r, _yank) = w.handle_mouse(
+            &buf,
+            click_event(MouseEventKind::Down(MouseButton::Left), 2, 1),
+            ctx,
+        );
+        assert_eq!(r, Status::Capture);
+
+        // Up returns the selected table block.
+        let ctx = MouseCtx {
+            soft_breaks: &[],
+            hard_breaks: &hard_breaks(&rows),
+            viewport,
+            click_count: 3,
+        };
+        let (r, yank) = w.handle_mouse(
+            &buf,
+            click_event(MouseEventKind::Up(MouseButton::Left), 2, 1),
+            ctx,
+        );
+        assert_eq!(r, Status::Consumed);
+        let (s, e) = yank.expect("yank range");
+        let selected = &buf.text()[s..e];
+        assert_eq!(selected, "┏━┓\n┃a┃\n┗━┛");
     }
 }

@@ -561,10 +561,11 @@ pub(crate) fn copy_byte_range(buf: &Buffer, start: usize, end: usize) -> String 
     let mut out = String::new();
     let mut source_text_emitted = false;
     for (r, line) in lines.iter().enumerate().take(er + 1).skip(sr) {
-        let line_chars = line.chars().count();
+        let line_width = smelt_buffer::text::byte_to_cell(line, line.len());
         let dec = buf.decoration_at(r);
         let is_soft = dec.soft_wrapped;
-        if r > sr && !is_soft {
+        let is_copy_cont = dec.copy_continuation;
+        if r > sr && !is_soft && !is_copy_cont {
             out.push('\n');
             source_text_emitted = false;
         }
@@ -573,17 +574,17 @@ pub(crate) fn copy_byte_range(buf: &Buffer, start: usize, end: usize) -> String 
         let is_last = r == er;
         let c_start = if is_first { sc } else { 0 };
         let c_end = if is_last {
-            ec.min(line_chars)
+            ec.min(line_width)
         } else {
-            line_chars
+            line_width
         };
 
         let highlights = buf.highlights_at(r);
-        let unselectable_intervals = collect_unselectable(&highlights, line_chars);
+        let unselectable_intervals = collect_unselectable(&highlights, line_width);
         let all_selectable_covered =
-            all_selectable_in_range(&unselectable_intervals, line_chars, c_start, c_end);
+            all_selectable_in_range(&unselectable_intervals, line_width, c_start, c_end);
 
-        if all_selectable_covered && is_soft && source_text_emitted {
+        if all_selectable_covered && is_copy_cont && source_text_emitted {
             continue;
         }
 
@@ -606,24 +607,27 @@ fn byte_to_row_col(lines: &[String], byte: usize) -> (usize, usize) {
         let row_end = acc + row.len();
         if byte <= row_end {
             let col_byte = byte.saturating_sub(acc).min(row.len());
-            let col = row[..col_byte].chars().count();
+            let col = smelt_buffer::text::byte_to_cell(row, col_byte);
             return (r, col);
         }
         acc = row_end + 1;
     }
     let last_row = lines.len().saturating_sub(1);
-    let last_col = lines.last().map(|r| r.chars().count()).unwrap_or(0);
+    let last_col = lines
+        .last()
+        .map(|r| smelt_buffer::text::byte_to_cell(r, r.len()))
+        .unwrap_or(0);
     (last_row, last_col)
 }
 
-fn collect_unselectable(highlights: &[Span], line_chars: usize) -> Vec<(usize, usize)> {
+fn collect_unselectable(highlights: &[Span], line_width: usize) -> Vec<(usize, usize)> {
     let mut out = Vec::new();
     for h in highlights {
         if h.meta.selectable {
             continue;
         }
-        let s = (h.col_start as usize).min(line_chars);
-        let e = (h.col_end as usize).min(line_chars);
+        let s = (h.col_start as usize).min(line_width);
+        let e = (h.col_end as usize).min(line_width);
         if e > s {
             out.push((s, e));
         }
@@ -633,11 +637,11 @@ fn collect_unselectable(highlights: &[Span], line_chars: usize) -> Vec<(usize, u
 
 fn all_selectable_in_range(
     unselectable: &[(usize, usize)],
-    line_chars: usize,
+    line_width: usize,
     c_start: usize,
     c_end: usize,
 ) -> bool {
-    'outer: for i in 0..line_chars {
+    'outer: for i in 0..line_width {
         for (s, e) in unselectable {
             if i >= *s && i < *e {
                 continue 'outer;
@@ -652,8 +656,14 @@ fn all_selectable_in_range(
 
 fn emit_row_cells(line: &str, highlights: &[Span], c_start: usize, c_end: usize, out: &mut String) {
     let mut emitted_copy_as: Vec<usize> = Vec::new();
-    for (col, ch) in line.chars().enumerate() {
-        if col < c_start || col >= c_end {
+    let mut col = 0usize;
+    for ch in line.chars() {
+        let w = unicode_width::UnicodeWidthChar::width(ch)
+            .unwrap_or(0)
+            .max(1);
+        let ch_end = col.saturating_add(w);
+        if ch_end <= c_start || col >= c_end {
+            col = ch_end;
             continue;
         }
         let mut selectable = true;
@@ -661,7 +671,7 @@ fn emit_row_cells(line: &str, highlights: &[Span], c_start: usize, c_end: usize,
         for (idx, span) in highlights.iter().enumerate() {
             let s = span.col_start as usize;
             let e = span.col_end as usize;
-            if col < s || col >= e {
+            if ch_end <= s || col >= e {
                 continue;
             }
             if !span.meta.selectable {
@@ -673,6 +683,7 @@ fn emit_row_cells(line: &str, highlights: &[Span], c_start: usize, c_end: usize,
             }
         }
         if !selectable {
+            col = ch_end;
             continue;
         }
         if let Some((idx, s)) = copy_as_hit {
@@ -683,6 +694,7 @@ fn emit_row_cells(line: &str, highlights: &[Span], c_start: usize, c_end: usize,
         } else {
             out.push(ch);
         }
+        col = ch_end;
     }
 }
 
@@ -691,24 +703,24 @@ pub(crate) fn snap_col_to_selectable(buf: &Buffer, row: usize, col: usize) -> us
     let Some(line) = buf.get_line(row) else {
         return col;
     };
-    let line_chars = line.chars().count();
-    if line_chars == 0 {
+    let line_width = smelt_buffer::text::byte_to_cell(line, line.len());
+    if line_width == 0 {
         return col;
     }
     let highlights = buf.highlights_at(row);
-    let unselectable = collect_unselectable(&highlights, line_chars);
+    let unselectable = collect_unselectable(&highlights, line_width);
     let is_selectable =
-        |c: usize| c < line_chars && !unselectable.iter().any(|(s, e)| c >= *s && c < *e);
+        |c: usize| c < line_width && !unselectable.iter().any(|(s, e)| c >= *s && c < *e);
     if is_selectable(col) {
         return col;
     }
-    for c in (col + 1)..line_chars {
+    for c in (col + 1)..line_width {
         if is_selectable(c) {
             return c;
         }
     }
     if col > 0 {
-        for c in (0..col.min(line_chars)).rev() {
+        for c in (0..col.min(line_width)).rev() {
             if is_selectable(c) {
                 return c;
             }
@@ -889,7 +901,7 @@ mod tests {
     }
 
     #[test]
-    fn copy_coalesces_soft_wrapped_rows_via_source_text() {
+    fn copy_coalesces_copy_continuation_rows_via_source_text() {
         let mut buf = Buffer::new(crate::smelt_term::BufId(1), Default::default());
         buf.set_all_lines(vec!["hello".into(), "world".into()]);
         buf.set_decoration(
@@ -902,11 +914,25 @@ mod tests {
         buf.set_decoration(
             1,
             LineDecoration {
-                soft_wrapped: true,
+                copy_continuation: true,
                 ..Default::default()
             },
         );
         assert_eq!(copy_byte_range(&buf, 0, 11), "hello world");
+    }
+
+    #[test]
+    fn copy_copy_continuation_without_source_text_emits_all_rows() {
+        let mut buf = Buffer::new(crate::smelt_term::BufId(1), Default::default());
+        buf.set_all_lines(vec!["abc".into(), "def".into()]);
+        buf.set_decoration(
+            1,
+            LineDecoration {
+                copy_continuation: true,
+                ..Default::default()
+            },
+        );
+        assert_eq!(copy_byte_range(&buf, 0, 7), "abcdef");
     }
 
     #[test]
@@ -921,5 +947,105 @@ mod tests {
             },
         );
         assert_eq!(copy_byte_range(&buf, 0, 7), "abcdef");
+    }
+
+    #[test]
+    fn table_rows_are_hard_breaks_not_soft() {
+        let mut transcript = Transcript::new();
+        transcript.push(Block::Text {
+            content: "before".into(),
+        });
+        transcript.push(Block::Text {
+            content: "| a | b |\n| - | - |\n| 1 | 2 |".into(),
+        });
+        transcript.push(Block::Text {
+            content: "after".into(),
+        });
+        let theme = Theme::default();
+        let mut projection = TranscriptProjection::new();
+        let mut buf = Buffer::new(crate::smelt_term::BufId(3), Default::default());
+        projection.project(&mut buf, &mut transcript.history, 40, false, &theme, 0, 80);
+
+        let (soft, _hard) = projection.line_breaks(&mut transcript.history, 40, false, &theme);
+        // For a transcript with only a table, every row boundary should be a
+        // hard break (no soft breaks) so triple-click selects one display row.
+        // The table is at rows 2-6; verify no soft break falls inside it.
+        let lines = buf.lines();
+        let mut table_start = None;
+        let mut table_end = None;
+        for (i, line) in lines.iter().enumerate() {
+            if line.contains('\u{2503}') {
+                if table_start.is_none() {
+                    table_start = Some(i);
+                }
+                table_end = Some(i);
+            }
+        }
+        let (t0, t1) = (
+            table_start.expect("table start"),
+            table_end.expect("table end"),
+        );
+        let mut acc = 0usize;
+        for (i, line) in lines.iter().enumerate() {
+            acc += line.len();
+            if i + 1 < lines.len() {
+                let break_pos = acc;
+                if i >= t0 && i < t1 && soft.contains(&break_pos) {
+                    panic!(
+                        "row {} boundary at {} should be hard, not soft",
+                        i + 1,
+                        break_pos
+                    );
+                }
+                acc += 1; // '\n'
+            }
+        }
+    }
+
+    #[test]
+    fn table_full_selection_copies_raw_markdown() {
+        let mut transcript = Transcript::new();
+        transcript.push(Block::Text {
+            content: "| a | b |\n| - | - |\n| 1 | 2 |".into(),
+        });
+        let theme = Theme::default();
+        let mut projection = TranscriptProjection::new();
+        let mut buf = Buffer::new(crate::smelt_term::BufId(4), Default::default());
+        projection.project(&mut buf, &mut transcript.history, 40, false, &theme, 0, 80);
+
+        // Select the entire table (all rows).
+        let total_bytes = buf.text().len();
+        let copied = copy_byte_range(&buf, 0, total_bytes);
+        assert_eq!(copied, "| a | b |\n| - | - |\n| 1 | 2 |");
+    }
+
+    #[test]
+    fn table_single_row_selection_copies_cell_contents() {
+        let mut transcript = Transcript::new();
+        transcript.push(Block::Text {
+            content: "| a | b |\n| - | - |\n| 1 | 2 |".into(),
+        });
+        let theme = Theme::default();
+        let mut projection = TranscriptProjection::new();
+        let mut buf = Buffer::new(crate::smelt_term::BufId(5), Default::default());
+        projection.project(&mut buf, &mut transcript.history, 40, false, &theme, 0, 80);
+
+        let lines = buf.lines();
+        // Find the data row (contains '1' and '2').
+        let data_row = lines
+            .iter()
+            .position(|l| l.contains('1') && l.contains('2'))
+            .expect("data row");
+        let mut acc = 0usize;
+        for (i, line) in lines.iter().enumerate() {
+            if i == data_row {
+                let row_end = acc + line.len();
+                let copied = copy_byte_range(&buf, acc, row_end);
+                // Should emit selectable cells only, no borders or padding.
+                assert_eq!(copied, "12");
+                break;
+            }
+            acc += line.len() + 1;
+        }
     }
 }

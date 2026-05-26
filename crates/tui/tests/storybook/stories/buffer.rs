@@ -3,8 +3,10 @@
 use smelt_core::buffer::{
     ExtmarkOpts, ExtmarkPayload, HlMode, LineDecoration, SpanMeta, VirtTextPos,
 };
+use smelt_core::content::builder::render_into;
+use smelt_core::content::highlight::render_markdown_table;
 use smelt_core::style::{Color, Style};
-use smelt_core::theme::intern;
+use smelt_core::theme::{intern, Theme};
 use tui::smelt_term::layout::{Constraint, Gutters};
 use tui::smelt_term::{BufId, LayoutTree, SplitConfig};
 
@@ -90,6 +92,29 @@ story!(highlight_hl_eol_paints_to_line_end, |ctx| {
         let ns = buf.create_namespace("test:diff_add");
         buf.set_extmark(ns, 0, 0, opts);
     }
+    ctx.assert_snapshot();
+});
+
+story!(table_selection_masks_chrome_and_padding, |ctx| {
+    ctx.set_viewport(18, 5);
+    let buf_id = ctx.buf();
+    if let Some(buf) = ctx.ui.buf_mut(buf_id) {
+        let rows = vec![
+            vec!["A".to_string(), "B".to_string()],
+            vec!["1".to_string(), "2".to_string()],
+        ];
+        let theme = Theme::default();
+        render_into(buf, 18, &theme, |out| {
+            render_markdown_table(out, &rows, &[], 18, false, None, "");
+        });
+        let selection = smelt_buffer::coords::selection_to_row_ranges(buf, 0, buf.text().len());
+        buf.set_selection(selection);
+    }
+    let win = ctx.open_split(buf_id, pane("only"));
+    ctx.set_layout(LayoutTree::vbox(vec![(
+        Constraint::Fill,
+        LayoutTree::leaf(win),
+    )]));
     ctx.assert_snapshot();
 });
 
