@@ -1571,6 +1571,40 @@ fn ensure_test_home() {
 mod tests {
     use super::*;
 
+    fn ask_messages(cmds: Vec<protocol::UiCommand>) -> Vec<(String, Vec<protocol::Message>)> {
+        cmds.into_iter()
+            .filter_map(|cmd| match cmd {
+                protocol::UiCommand::EngineAsk {
+                    system, messages, ..
+                } => Some((system, messages)),
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn stub_btw_ui(app: &mut TestApp) {
+        let _g = crate::lua::install_app_ptr(&mut app.app);
+        app.app
+            .lua
+            .lua
+            .load(
+                r#"
+                smelt.buf.new = function()
+                  return {
+                    source = function() end,
+                  }
+                end
+                smelt.timer.set = function() end
+                smelt.dialog.content = function() return {} end
+                smelt.dialog.open = function() end
+                smelt.spinner.glyph = function() return "*" end
+                smelt.spinner.period_ms = function() return 1 end
+                "#,
+            )
+            .exec()
+            .expect("stub /btw ui");
+    }
+
     #[test]
     fn lua_prompt_text_strips_attachment_markers() {
         // Inserting an attachment seeds the prompt with U+FFFC + a backing id.
@@ -3145,6 +3179,146 @@ mod tests {
             app.app.ui.active_modal().is_some(),
             "command survived reload and reopens modal"
         );
+    }
+
+    #[test]
+    fn btw_command_preserves_model_history_prefix_and_appends_question() {
+        let mut app = TestApp::builder().build();
+        stub_btw_ui(&mut app);
+        app.app
+            .core
+            .session
+            .history
+            .push(protocol::HistoryItem::user(protocol::Content::text("u1")));
+        app.push_assistant_text("a1");
+        app.app
+            .core
+            .session
+            .history
+            .push(protocol::HistoryItem::user(protocol::Content::text("u2")));
+
+        let expected_prefix = protocol::history_to_messages(&app.app.model_history());
+
+        {
+            let _g = crate::lua::install_app_ptr(&mut app.app);
+            app.app.apply_lua_command("btw what changed?");
+            app.app.drive_lua_tasks();
+        }
+
+        let asks = ask_messages(app.drain_engine_sends());
+        assert_eq!(asks.len(), 1, "/btw should issue one inherited ask");
+        let (system, messages) = &asks[0];
+        assert_eq!(system, &app.app.assemble_system_prompt());
+        assert_eq!(
+            &messages[..expected_prefix.len()],
+            expected_prefix.as_slice(),
+            "/btw must preserve the exact model-visible prefix"
+        );
+        let last_text = messages
+            .last()
+            .and_then(|m| m.content.as_ref())
+            .map(|c| c.text_content())
+            .expect("/btw question");
+        assert!(last_text.contains("Under no circumstances use tools"));
+        assert!(last_text.contains("Question: what changed?"));
+
+        {
+            let _g = crate::lua::install_app_ptr(&mut app.app);
+            app.app
+                .dispatch_engine_event(protocol::EngineEvent::EngineAskResponse {
+                    id: app.pending_ask_id().expect("pending ask id"),
+                    message: Some(protocol::Message::assistant(
+                        Some(protocol::Content::text("done")),
+                        None,
+                        None,
+                    )),
+                    error: None,
+                });
+            app.app.drive_lua_tasks();
+        }
+        app.app.core.timers.clear();
+    }
+
+    #[test]
+    fn btw_command_denies_tool_calls_then_retries_same_request_shape() {
+        let mut app = TestApp::builder().build();
+        stub_btw_ui(&mut app);
+        app.app
+            .core
+            .session
+            .history
+            .push(protocol::HistoryItem::user(protocol::Content::text("u1")));
+        app.push_assistant_text("a1");
+        let expected_prefix = protocol::history_to_messages(&app.app.model_history());
+
+        {
+            let _g = crate::lua::install_app_ptr(&mut app.app);
+            app.app.apply_lua_command("btw quick summary");
+            app.app.drive_lua_tasks();
+        }
+
+        let first = ask_messages(app.drain_engine_sends());
+        assert_eq!(first.len(), 1);
+        let first_messages = first[0].1.clone();
+
+        {
+            let _g = crate::lua::install_app_ptr(&mut app.app);
+            app.app
+                .dispatch_engine_event(protocol::EngineEvent::EngineAskResponse {
+                    id: app.pending_ask_id().expect("pending ask id"),
+                    message: Some(protocol::Message::assistant(
+                        None,
+                        None,
+                        Some(vec![protocol::ToolCall::new(
+                            "call-1".into(),
+                            protocol::FunctionCall {
+                                name: "grep".into(),
+                                arguments: "{}".into(),
+                            },
+                        )]),
+                    )),
+                    error: None,
+                });
+        }
+
+        let second = ask_messages(app.drain_engine_sends());
+        assert_eq!(second.len(), 1);
+        let second_messages = &second[0].1;
+        assert_eq!(
+            &second_messages[..first_messages.len()],
+            first_messages.as_slice(),
+            "/btw tool denial retry must keep the same request prefix"
+        );
+        assert_eq!(
+            &second_messages[..expected_prefix.len()],
+            expected_prefix.as_slice(),
+            "/btw tool denial retry must keep the same inherited conversation prefix"
+        );
+        assert_eq!(
+            second_messages[first_messages.len()].role,
+            protocol::Role::Assistant
+        );
+        assert_eq!(
+            second_messages[first_messages.len() + 1].role,
+            protocol::Role::Tool
+        );
+        assert!(second_messages[first_messages.len() + 1].is_error);
+
+        {
+            let _g = crate::lua::install_app_ptr(&mut app.app);
+            app.app
+                .dispatch_engine_event(protocol::EngineEvent::EngineAskResponse {
+                    id: app.pending_ask_id().expect("pending ask id"),
+                    message: Some(protocol::Message::assistant(
+                        Some(protocol::Content::text("done")),
+                        None,
+                        None,
+                    )),
+                    error: None,
+                });
+            app.app.drive_lua_tasks();
+        }
+        app.app.core.timers.clear();
     }
 
     /// User-resized overlay (`size_override`) must survive reload —
