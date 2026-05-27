@@ -18,9 +18,8 @@
   <a href="https://github.com/leonardcser/smelt/issues">Issues</a>
 </p>
 
-> [!WARNING]
-> smelt is in active development. `main` is mid-refactor, so code and docs
-> are not fully in sync and some features are unfinished. Use the latest
+> [!WARNING] smelt is in active development. `main` is mid-refactor, so code and
+> docs are not fully in sync and some features are unfinished. Use the latest
 > pre-release tag and update often. The last stable release is significantly
 > behind and not recommended.
 
@@ -35,15 +34,9 @@ scriptable in Lua like Neovim. Built from scratch, with care for the details.
 
 ## What's inside
 
+- **Lua plugins.** Keymaps, commands, autocmds, custom tools.
 - **Terminal renderer.** Its own grid and layout engine, not `ratatui`.
 - **Vim editor.** Motions, text objects, registers, undo.
-- **Transcript selection.** Mouse drag, word/cell double-click, and line/table
-  triple-click copying.
-- **Lua plugins.** Keymaps, commands, autocmds, custom tools.
-- **Checkpoint compaction.** Long transcripts stay visible while older
-  model context is summarized behind a checkpoint marker before oversized
-  requests reach the provider. Smelt compacts the largest prefix that fits
-  and preserves the newest coherent message groups verbatim.
 - **Deterministic fuzzing.** Fixed clock and stubbed I/O, so any crash can be
   replayed.
 - **No config needed.** Run with flags, or `smelt auth` for ChatGPT and Copilot.
@@ -56,38 +49,6 @@ Prebuilt binaries on the
 ```bash
 cargo install --git https://github.com/leonardcser/smelt.git
 ```
-
-## Upgrade
-
-smelt checks for a new build hourly and shows a pill in the status bar
-when one's available. Run `/upgrade` to install — no confirmation
-dialog, just a notification: the install runs in the background, so
-you keep working while it happens; another notification fires when
-it's done and reminds you to restart. Overwriting an in-use binary is
-safe on Unix (the running process keeps its inode, future launches
-pick up the new one). `/upgrade check` forces a fresh poll without
-installing; `/changelog` opens the release notes for the cached
-latest build; `/version` shows the running build identity.
-
-`smelt --version` prints the same string surfaced by `/version`,
-shaped `{tag}-{commits}-g{sha}[-dirty]` (e.g. `0.5.0-alpha.2-80-g827e6646`)
-so bug reports always pin down the exact source commit.
-
-Two channels controlled by `smelt.settings.autoupgrade_channel`:
-
-- `"stable"` (default) — latest tagged release, including `alpha`/`beta`
-  prereleases. Installs by downloading the prebuilt tarball from
-  GitHub Releases (seconds; no toolchain required).
-- `"unstable"` — latest commit on the `main` branch. Installs via
-  `cargo install --branch main` (a few minutes; requires `cargo`).
-
-The polling behaviour is `smelt.settings.autoupgrade`: `"off"`, `"notify"`
-(default, show pill but don't install), or `"auto"` (install in the
-background as soon as an update is detected). The poll cadence is
-`smelt.settings.autoupgrade_interval` (seconds, default `3600`, floored
-at 60). Automatic background checks stay quiet on transient fetch
-failures such as being offline, then retry later instead of raising an
-error toast while you're just reopening the app.
 
 ## Run
 
