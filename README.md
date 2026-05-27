@@ -1,5 +1,9 @@
 <p align="center">
-  <img src="docs/docs/logo-dark.svg" alt="smelt logo" width="360">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="docs/docs/logo-dark.svg">
+    <source media="(prefers-color-scheme: light)" srcset="docs/docs/logo-light.svg">
+    <img src="docs/docs/logo-dark.svg" alt="smelt logo" width="360">
+  </picture>
 </p>
 
 <h1 align="center">smelt</h1>
