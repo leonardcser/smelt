@@ -61,7 +61,7 @@ dialog, just a notification: the install runs in the background, so
 you keep working while it happens; another notification fires when
 it's done and reminds you to restart. Overwriting an in-use binary is
 safe on Unix (the running process keeps its inode, future launches
-pick up the new one). `/upgrade --check` forces a fresh poll without
+pick up the new one). `/upgrade check` forces a fresh poll without
 installing; `/changelog` opens the release notes for the cached
 latest build; `/version` shows the running build identity.
 
