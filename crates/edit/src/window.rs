@@ -583,6 +583,17 @@ impl Window {
         buf.byte_at_display_pos(lrow, cell)
     }
 
+    /// Text space that `cpos_at_visual` / `byte_at_display_pos` return offsets
+    /// into for this buffer. Parsed or source-backed editable buffers use
+    /// `source`; line-backed and readonly buffers use joined display rows.
+    fn coordinate_text<'a>(buf: &'a Buffer) -> std::borrow::Cow<'a, str> {
+        if buf.has_parser() || !buf.source().is_empty() {
+            std::borrow::Cow::Borrowed(buf.source())
+        } else {
+            std::borrow::Cow::Owned(buf.text())
+        }
+    }
+
     /// Read access to the most recent layout. Always populated after the first
     /// `ensure_layout`; before that it's an empty identity layout.
     pub fn layout(&self) -> &WrappedLayout {
@@ -1076,7 +1087,7 @@ impl Window {
     // ── Mouse dispatch ─────────────────────────────────────────────────
 
     /// Handle a mouse event. On `Up`, returns the selected byte range `(start, end)` over
-    /// the joined display rows if a selection was active (host applies the copy primitive).
+    /// the buffer's coordinate text if a selection was active (host applies the copy primitive).
     pub fn handle_mouse(
         &mut self,
         buf: &Buffer,
@@ -1086,12 +1097,12 @@ impl Window {
         match event.kind {
             MouseEventKind::Down(MouseButton::Left) => (self.mouse_down(buf, event, &ctx), None),
             MouseEventKind::Drag(MouseButton::Left) => {
-                let text = buf.text();
-                (self.mouse_drag(buf, event, &ctx, &text), None)
+                let text = Self::coordinate_text(buf);
+                (self.mouse_drag(buf, event, &ctx, text.as_ref()), None)
             }
             MouseEventKind::Up(MouseButton::Left) => {
-                let text = buf.text();
-                let range = self.mouse_yank_range(buf, &ctx, &text);
+                let text = Self::coordinate_text(buf);
+                let range = self.mouse_yank_range(&ctx, text.as_ref());
                 let status = self.mouse_up(buf, ctx.viewport.rect.height);
                 (status, range)
             }
@@ -1215,12 +1226,7 @@ impl Window {
     }
 
     /// Selection byte range before `mouse_up` clears anchors; `None` if empty or absent.
-    fn mouse_yank_range(
-        &self,
-        _buf: &Buffer,
-        _ctx: &MouseCtx,
-        text: &str,
-    ) -> Option<(usize, usize)> {
+    fn mouse_yank_range(&self, _ctx: &MouseCtx, text: &str) -> Option<(usize, usize)> {
         let endpoint = self.effective_endpoint();
         let (start, end) = if self.vim_enabled {
             vim::visual_range(&self.vim_state, text, endpoint, self.vim_mode)?
@@ -1248,12 +1254,11 @@ impl Window {
                 // The drag endpoint was computed at mouse-down against the
                 // buffer state then; by mouse-up the source or projected lines
                 // may have shifted (streaming delta into the transcript,
-                // resize-driven re-layout). Snap into the joined-display space
-                // (`text()`, which equals `source()` for editable buffers and
-                // is the only meaningful coordinate for readonly leaves) so
-                // the committed cpos never lands past EOF or mid-codepoint.
-                let text = buf.text();
-                self.cpos = text::snap(&text, end.min(text.len()));
+                // resize-driven re-layout). Snap in the same coordinate space
+                // that produced the endpoint so the committed cpos never lands
+                // past EOF or mid-codepoint.
+                let text = Self::coordinate_text(buf);
+                self.cpos = text::snap(text.as_ref(), end.min(text.len()));
                 self.sync_from_cpos(buf, viewport_rows);
                 // Mirror vim: a click or drag-release stamps curswant at the
                 // landing column so a subsequent j/k keeps that column.
@@ -3249,6 +3254,55 @@ mod tests {
             ctx,
         );
         assert_eq!(w.drag_endpoint, Some(row.find('h').unwrap()));
+    }
+
+    #[test]
+    fn mouse_up_commits_projected_editable_buffer_cpos_in_source_space() {
+        // Parsed editable buffers (the prompt) have a canonical source string
+        // plus rendered display lines. Mouse hit-testing maps display cells
+        // back to source byte offsets via ProjectionMaps; mouse-up must keep
+        // that byte in source space. Snapping it against `buf.text()` clamps
+        // to the rendered display length instead and parks the edit cursor too
+        // far left, so follow-up typing inserts before existing text.
+        let mut w = make_win();
+        let mut buf = Buffer::new(BufId(1), BufCreateOpts::default());
+        buf.set_source("abcdef".into());
+        buf.set_all_lines(vec!["x".into()]);
+        buf.set_projection_maps(smelt_buffer::coords::ProjectionMaps {
+            source_char_to_display_char: vec![0, 1, 1, 1, 1, 1, 1],
+            display_char_to_source_char: vec![0, 6],
+            row_offsets: vec![0],
+        });
+        w.ensure_layout(&buf, 20);
+
+        let rect = Rect::new(0, 0, 20, 1);
+        let rows = vec!["x".to_string()];
+        let viewport = viewport_for(&rows, rect);
+        let ctx = MouseCtx {
+            soft_breaks: &[],
+            hard_breaks: &[],
+            viewport,
+            click_count: 1,
+        };
+        let _ = w.handle_mouse(
+            &buf,
+            click_event(MouseEventKind::Down(MouseButton::Left), 0, 1),
+            ctx,
+        );
+
+        let ctx = MouseCtx {
+            soft_breaks: &[],
+            hard_breaks: &[],
+            viewport,
+            click_count: 1,
+        };
+        let _ = w.handle_mouse(
+            &buf,
+            click_event(MouseEventKind::Up(MouseButton::Left), 0, 1),
+            ctx,
+        );
+
+        assert_eq!(w.cpos, 6);
     }
 
     #[test]
