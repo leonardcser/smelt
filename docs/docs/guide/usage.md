@@ -13,7 +13,10 @@ The agent streams its response and may call tools along the way.
 ## Modes
 
 The agent has four modes, each with different permission defaults. Press
-`Shift+Tab` to cycle through them.
+`Shift+Tab` to cycle through them. Modes let you change the agent's
+behaviour to match the task: review a risky refactor in Plan mode, speed
+through routine edits in Apply mode, or stay hands-off on a trusted
+legacy codebase in Yolo mode.
 
 | Mode       | What it does                                                                                                                      |
 | ---------- | --------------------------------------------------------------------------------------------------------------------------------- |
@@ -31,15 +34,20 @@ matrix.
 ## Reasoning Effort
 
 Press `Ctrl+T` to cycle through reasoning levels (`off`, `low`, `medium`,
-`high`, `max`). Set the starting level with `--reasoning-effort`, and configure
-which levels appear in the cycle with `--reasoning-cycle`.
+`high`, `max`). Lower levels are faster and cheaper; use them for routine
+questions. Higher levels give the agent more compute for architecture
+reviews, complex refactors, or debugging tangled bugs. Set the starting
+level with `--reasoning-effort`, and configure which levels appear in the
+cycle with `--reasoning-cycle`.
 
 ## Tools
 
 The agent can read files, edit code, run shell commands, fetch URLs, and more.
 When a tool requires permission, a **confirm dialog** appears showing what the
 tool wants to do. You can approve once, for the session, or for the workspace.
-Press `Tab` to attach an optional message to your approval.
+Session and workspace approvals save you from repeatedly confirming the same
+safe operation — for example, allowing every `git status` call in a repo you
+trust. Press `Tab` to attach an optional message to your approval.
 
 See [Tools Reference](../reference/tools.md) for the full list and
 [Permissions](../reference/permissions.md) for details on approval scopes.
@@ -53,23 +61,30 @@ file picker opens automatically:
 explain @src/main.rs
 ```
 
-Multiple `@` references work in the same message. Attaching the same file twice
-won't double-send it.
+`@` references let you point the agent at exactly the code you mean without
+copy-pasting into the prompt. Multiple `@` references work in the same message.
+Attaching the same file twice won't double-send it.
 
 ## Shell Escape
 
 Prefix with `!` to run a shell command directly: `!git status`. Output appears
-inline in the conversation.
+inline in the conversation. This is useful for quick checks — verifying test
+output, reading a config value — without bloating the agent's context window
+with a full tool call.
 
 ## Pasting
 
 `Cmd+V` pastes from your clipboard — images are attached inline, and multi-line
-text is collapsed into a single attachment.
+text is collapsed into a single attachment. Pasting images is handy for sharing
+screenshots of UI bugs, diagrams, or design mock-ups without leaving the
+terminal.
 
 ## Message Queuing
 
 While the agent is responding, keep typing. Messages queue up and are sent one
-at a time — each queued message becomes its own turn, in order.
+at a time — each queued message becomes its own turn, in order. This lets you
+fire off follow-up questions or corrections as soon as you think of them,
+instead of waiting for the current response to finish.
 
 - `Enter` on an empty prompt — pop and send the next queued message immediately
 - `Esc` — unqueue pending messages so you can edit them
@@ -77,7 +92,10 @@ at a time — each queued message becomes its own turn, in order.
 
 ## Sessions
 
-Every conversation is automatically saved after each turn.
+Every conversation is automatically saved after each turn. Sessions let you
+maintain parallel workstreams — one for the frontend refactor, another for the
+API migration — and pick up exactly where you left off days later without
+re-explaining the codebase.
 
 Resume from the CLI:
 
@@ -120,17 +138,21 @@ trigger matches the prompt bar rather than a full-history byte estimate. Press
 ## Vim Mode
 
 Toggle with `/vim` or set `smelt.settings.vim = true` in `init.lua`. Supports
-insert, normal, and visual modes. See the
+insert, normal, and visual modes. If you already live in Vim, this keeps your
+muscle memory intact — navigate the transcript, edit the prompt, and select
+text with the same chords you use in your editor. See the
 [Keybindings Reference](../reference/keybindings.md#vim-mode) for details.
 
 ## Input Stashing
 
 Press `Ctrl+S` to stash your current input and get a blank buffer. Press
-`Ctrl+S` again to restore it.
+`Ctrl+S` again to restore it. Stashing is useful when you are halfway through
+a long prompt and need to ask a quick side question without losing your draft.
 
 ## Input Prediction
 
 After each turn, the agent may suggest your next message as dim **ghost text**.
-Press `Tab` to accept it, or just start typing to dismiss. Toggle in `/settings`
-→ `input prediction` or set `smelt.settings.show_prediction = false` in
-`init.lua`.
+Press `Tab` to accept it, or just start typing to dismiss. Prediction saves
+keystrokes on repetitive follow-ups — "also add tests", "fix the lint errors",
+and so on. Toggle in `/settings` → `input prediction` or set
+`smelt.settings.show_prediction = false` in `init.lua`.

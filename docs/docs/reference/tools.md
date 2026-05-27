@@ -7,6 +7,10 @@ add or override tools.
 
 ## File I/O
 
+These tools let the agent inspect and mutate source code. File I/O is the
+most common operation in a coding workflow, so read tools are auto-approved
+by default; writes and edits prompt for confirmation.
+
 ### `read_file`
 
 Reads a file from the local filesystem. Supports text files and image files
@@ -63,6 +67,10 @@ show a scrollable diff.
 
 ## Search
 
+Search tools let the agent discover files and grep for patterns without
+needing a shell escape. Results are sorted and filtered so the model gets
+only what it asked for.
+
 ### `glob`
 
 Fast file pattern matching. Supports `**` recursive globs. Results are sorted
@@ -97,6 +105,10 @@ modes.
 | `timeout_ms`   | Timeout in milliseconds (default: 30000)                                                     |
 
 ## Execution
+
+Run shell commands and background processes. Bash is the agent's escape
+hatch into your build system, package manager, and test runner. Output is
+captured and returned so the model can react to failures.
 
 ### `bash`
 
@@ -146,6 +158,10 @@ Stops a running background bash process and returns its accumulated output.
 
 ## Web
 
+Fetch live documentation, API specs, or reference material from the
+internet. Results are cached for 15 minutes so repeated queries don't
+hammer the same endpoint.
+
 ### `web_fetch`
 
 Fetches a URL, converts the page to markdown, and asks an isolated LLM call
@@ -176,6 +192,10 @@ title, URL, and description. Results are cached for 15 minutes per query.
 
 ## Interaction
 
+Ask the user structured questions when the agent needs a decision it can't
+make on its own — for example, choosing between two implementation
+approaches or confirming an ambiguous requirement.
+
 ### `ask_user_question`
 
 Asks you 1-4 questions with 2-4 selectable options each. A free-text "Other"
@@ -188,6 +208,9 @@ interactive mode only; the agent's turn is blocked until you reply.
 
 ## Knowledge
 
+Load domain-specific instructions on demand. Skills keep the system prompt
+lean by injecting only the knowledge relevant to the current task.
+
 ### `load_skill`
 
 Loads a skill by name to give the agent specialized instructions and
@@ -199,6 +222,8 @@ configuration reference for how to create and organize skills.
 | `name`    | Name of the skill to load (required) |
 
 ## Mode-Specific
+
+Tools that only appear in certain modes.
 
 ### `exit_plan_mode`
 

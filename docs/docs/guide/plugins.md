@@ -156,8 +156,10 @@ per-namespace page calls it out in the header.
   headless mode raises. Examples: `smelt.win`, `smelt.buf`, `smelt.theme`,
   `smelt.notify`, `smelt.statusline`, `smelt.keymap`.
 
-Plugins that should keep working in headless contexts must avoid UiHost
-namespaces or guard them behind a tier check.
+The split matters because the same plugin can run in a TUI session and in a
+CI script (`smelt --headless`). Keeping UI logic behind a tier check lets you
+write one plugin that works everywhere: core logic in Host, presentation
+layer in UiHost.
 
 ## Slash commands
 
@@ -326,7 +328,9 @@ Dialog height has two modes:
 
 Anything that yields — `smelt.sleep`, `smelt.dialog.open`,
 `smelt.picker.open`, `smelt.tools.call`, `smelt.task.wait` — must run inside
-a task-yielding context. There are two:
+a task-yielding context. Yielding keeps the TUI responsive: while your
+coroutine waits for a dialog answer or a slow HTTP response, the main thread
+continues rendering and handling input. There are two contexts:
 
 1. **Inside `tool.execute`** — every plugin tool already runs on a coroutine.
 2. **Wrapped in `smelt.spawn(fn)`** — fire-and-forget coroutine for everything
@@ -391,7 +395,8 @@ local results = smelt.task.all(
 ## Plugin state
 
 `smelt.state(name)` returns an ephemeral table scoped to `name`. Survives
-`/reload` but not a restart — perfect for caches and live counters. Plugins
+`/reload` but not a restart. Use it for live UI state — whether a panel is
+open, the current scroll position, or a cache that can be rebuilt. Plugins
 removed since the last load have their slots swept automatically.
 
 ```lua
@@ -400,7 +405,8 @@ s.counter = (s.counter or 0) + 1
 ```
 
 `smelt.state.persistent(name)` returns a JSON-backed wrapper that writes
-through to `$XDG_STATE_HOME/smelt/plugins/<name>.json`. Top-level
+through to `$XDG_STATE_HOME/smelt/plugins/<name>.json`. Use it for user preferences or data that
+must survive restarts. Top-level
 assignments are debounced and auto-saved; nested mutations need an
 explicit `:save()`.
 
@@ -437,11 +443,13 @@ end)
 
 `smelt.process.run` and `smelt.grep.run` yield the calling coroutine
 through the task runtime instead of blocking the main loop; they must
-run inside `smelt.spawn(fn)` or a `tool.execute` body. The same is
-true for the explicit `smelt.fs.read_async` / `smelt.fs.write_async`
-variants when reading or writing large files. `smelt.fs.read` /
-`smelt.fs.write` stay synchronous and are fine for small config-time
-reads:
+run inside `smelt.spawn(fn)` or a `tool.execute` body. Off-thread I/O
+keeps the TUI responsive while a large file is read or a long command
+runs — the agent can still stream tokens and you can still scroll and
+type. The same is true for the explicit `smelt.fs.read_async` /
+`smelt.fs.write_async` variants when reading or writing large files.
+`smelt.fs.read` / `smelt.fs.write` stay synchronous and are fine for
+small config-time reads:
 
 ```lua
 smelt.spawn(function()

@@ -78,7 +78,7 @@ To skip the wizard, pass connection flags directly:
     Every model your Copilot account exposes (Claude, GPT, Grok, …) is
     available immediately.
 
-=== "Kimi Code"
+=== ":simple-moonshotai: Kimi Code"
 
     Uses your Kimi Code subscription. Create an API key in your
     [Kimi account](https://www.kimi.com/code/console) and pass it:
@@ -96,7 +96,9 @@ To skip the wizard, pass connection flags directly:
 ## Save your config
 
 Once you have a setup you like, write it to `~/.config/smelt/init.lua` and run
-`smelt` from then on with no flags:
+`smelt` from then on with no flags. Keeping config in a file means your
+providers, keymaps, and custom commands are version-controlled and portable
+across machines — no need to remember a long CLI invocation every time.
 
 ```lua
 smelt.provider.register("ollama", {
