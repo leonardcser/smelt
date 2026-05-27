@@ -21,7 +21,8 @@ creates one for you.
 Project-local files (`.smelt/*`) are gated by the trust prompt — accept the
 directory the first time you open it. Use them for repo-specific keymaps,
 slash commands, permission rules, or MCP servers without polluting your
-global config.
+global config. Project-local config is especially useful on teams: clone the
+repo and the agent already knows the project's conventions and tooling.
 
 The [Getting Started](getting-started.md) guide covers basic provider setup.
 See the [Configuration Reference](../reference/configuration.md) for every
@@ -53,8 +54,10 @@ smelt.model.preferred("title", "openai/gpt-5-mini")
 smelt.model.preferred("compact", "anthropic/claude-haiku-4-5")
 ```
 
-The model must be registered under a provider. Custom plugins can pick any
-name they like to expose the same override pattern to users.
+This lets you route cheap, fast models to boilerplate tasks (title generation,
+compaction) while keeping the expensive model for actual coding. The model
+must be registered under a provider. Custom plugins can pick any name they
+like to expose the same override pattern to users.
 
 
 ## Themes
@@ -65,7 +68,10 @@ Built-in accent presets:
 > `lilac` · `mint` · `sage` · `silver`
 
 Change at runtime with `/theme`, or accept a raw ANSI value (0–255). The task
-slug color is separate — change it per-session with `/color`.
+slug color is separate — change it per-session with `/color`. This is useful
+when you have several smelt sessions open in parallel (e.g. one per project):
+give each session a distinct slug color and you can tell at a glance which
+terminal belongs to which codebase.
 
 ### Custom Colorschemes
 
@@ -127,7 +133,9 @@ Reference](../reference/keybindings.md).
 ### Markdown commands
 
 Drop a `.md` file in `~/.config/smelt/commands/` and it becomes a slash
-command. For example, `~/.config/smelt/commands/commit.md`:
+command. Markdown commands are ideal for prompts you want to version-control
+or share with a team: anyone can edit the text and frontmatter without
+writing Lua. For example, `~/.config/smelt/commands/commit.md`:
 
 ```markdown
 ---
@@ -197,6 +205,8 @@ sends a source's segments to the right strip by default.
 ## Skills
 
 Skills are on-demand knowledge packs the agent can load during a conversation.
+They keep the system prompt lean: only the skills relevant to the current
+task are injected, so the agent stays focused and you save context tokens.
 Place a `SKILL.md` file in `~/.config/smelt/skills/<name>/` (global) or
 `.smelt/skills/<name>/` (project-local). See the
 [Configuration Reference](../reference/configuration.md#skills) for the full
@@ -206,8 +216,10 @@ format.
 
 Connect external tool servers via the
 [Model Context Protocol](https://modelcontextprotocol.io). Servers run as child
-processes and their tools become available to the agent. Register them in
-`init.lua` with `smelt.mcp.register` — see the
+processes and their tools become available to the agent. MCP lets you extend
+smelt without writing Lua: if a server exists for Postgres, Slack, or your
+internal API, the agent can use it immediately. Register them in `init.lua`
+with `smelt.mcp.register` — see the
 [Configuration Reference](../reference/configuration.md#mcp-model-context-protocol)
 for setup.
 
@@ -239,8 +251,11 @@ replacement. To observe streaming tokens without mutating mid-stream, use
 ## Early-phase config
 
 `early.lua` runs *before* the binary parses argv, so it's the only place where
-you can declare new CLI flags or opt out of bundled modules. The rest of
-`init.lua` runs as normal afterwards.
+you can declare new CLI flags or opt out of bundled modules. Use it when you
+need to change smelt's behaviour from the command line — for example, adding
+a `--ci` flag that switches to headless mode and disables interactive dialogs —
+or to prevent unwanted built-in tools from ever loading. The rest of `init.lua`
+runs as normal afterwards.
 
 ```lua
 -- ~/.config/smelt/early.lua
@@ -266,4 +281,7 @@ for global instructions). Its contents are automatically appended to the
 system prompt for every conversation in that directory.
 
 Use it for project conventions, coding standards, or any persistent context
-the agent should know. Disable with `--no-system-prompt`.
+the agent should know. Keeping this in a file means the rules travel with the
+repo: a new teammate clones the project and the agent already knows the
+naming conventions, test patterns, and architectural constraints. Disable with
+`--no-system-prompt`.

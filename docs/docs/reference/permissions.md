@@ -6,6 +6,11 @@ when a tool is gated offers several scopes for approving the call.
 
 ## How Rules Work
 
+Permissions exist so you can trade safety for speed. In a trusted codebase
+you might auto-approve every `git` command; on an unfamiliar repo you may
+want the agent to ask before every edit. The system lets you set these
+boundaries per mode, per tool, and per workspace.
+
 Permissions are split between **tool-level** rules and **subcommand-level**
 rules. The tool name (`bash`, `edit_file`, `web_fetch`, …) decides whether the
 call needs gating at all; subcommand buckets (`bash`, `web_fetch`, `mcp`, and
@@ -184,8 +189,9 @@ Use `/permissions` to view and remove session/workspace approvals:
 When `restrict_to_workspace` is enabled (default), any tool call targeting a
 path outside the current workspace has its decision downgraded from Allow to
 Ask — even if the call would otherwise have been auto-approved by tool, bash
-pattern, or runtime approval. The prompt then offers per-directory approval
-options.
+pattern, or runtime approval. This catches mistakes like the agent editing a
+file in your home directory when it meant to edit one in the project root.
+The prompt then offers per-directory approval options.
 
 !!! warning
 
@@ -208,7 +214,9 @@ project path. See [`smelt.trust`](api/trust.md) for the Lua API.
 When `redact_secrets` is enabled (default), smelt scrubs detected secrets from
 user-submitted text and tool output — including command lines and file
 contents shown in the confirm prompt — before they reach the LLM or the
-transcript. Disable it with:
+transcript. This matters because LLM providers may log or train on prompts;
+redaction lowers the risk of accidentally leaking API keys or tokens into a
+third-party system. Disable it with:
 
 ```lua
 smelt.settings.redact_secrets = false

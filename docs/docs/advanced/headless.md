@@ -1,6 +1,9 @@
 # Headless Mode
 
-Run the agent without the TUI for scripting and automation.
+Run the agent without the TUI for scripting and automation. Headless mode is
+useful in CI pipelines, pre-commit hooks, or any workflow where you want the
+agent to answer a single question and exit — no interactive prompt, no
+keyboard shortcuts, just stdout.
 
 ## Usage
 

@@ -97,9 +97,11 @@ guide](../guide/customization.md#keymaps).
 
 ## Vim Mode
 
-Toggle with `/vim` or set `settings.vim = true` in config. Supports insert,
-normal, and visual modes. In normal mode, several emacs-style keys take on
-their vim meanings:
+Toggle with `/vim` or set `settings.vim = true` in config. If you already
+live in Vim, this keeps your muscle memory intact — navigate the transcript,
+edit the prompt, and select text with the same chords you use in your editor.
+Supports insert, normal, and visual modes. In normal mode, several emacs-style
+keys take on their vim meanings:
 
 | Key      | Vim normal        | Insert / non-vim      |
 | -------- | ----------------- | --------------------- |

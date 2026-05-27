@@ -18,9 +18,10 @@ autocmds) behaves like a plugin and is also loaded at startup.
 
 After the user `init.lua` runs, smelt looks for `.smelt/init.lua` and
 `.smelt/plugins/*.lua` under the current working directory and sources them.
-Project config is gated by a content trust system: run `/trust` once to record
-the SHA-256 hash of `.smelt/`. Any edit invalidates the hash and requires
-re-running `/trust`.
+Project-local config is especially useful on teams: clone the repo and the
+agent already knows the project's conventions and tooling. It is gated by a
+content trust system: run `/trust` once to record the SHA-256 hash of `.smelt/`.
+Any edit invalidates the hash and requires re-running `/trust`.
 
 | Lua API             | Description                                                 |
 | ------------------- | ----------------------------------------------------------- |
@@ -279,7 +280,9 @@ worked example.
 ## MCP (Model Context Protocol)
 
 Connect external tool servers that expose tools via MCP. Each server runs as
-a child process communicating over stdio.
+a child process communicating over stdio. MCP lets you extend smelt without
+writing Lua: if a server exists for Postgres, Slack, or your internal API,
+the agent can use it immediately.
 
 ```lua
 smelt.mcp.register("filesystem", {
@@ -311,7 +314,9 @@ matched against the qualified tool name (`servername_toolname`). See the
 ## Skills
 
 Skills are on-demand knowledge packs the agent can load via the `load_skill`
-tool.
+tool. They keep the system prompt lean: only the skills relevant to the
+current task are injected, so the agent stays focused and you save context
+tokens.
 
 They are scanned from these directories (later entries override):
 

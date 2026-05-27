@@ -14,6 +14,7 @@ Type `/` to open the command picker with fuzzy search.
 | `/export`                 | Export conversation; prompts for clipboard or file         |
 | `/model [provider/model]` | Switch model (opens picker if no name given)               |
 | `/settings`               | Toggle runtime settings                                    |
+| `/settings-export`        | Copy current settings + defaults as a Lua snippet          |
 | `/theme [name]`           | Change accent color                                        |
 | `/color [name]`           | Set task slug color                                        |
 | `/stats`                  | Show token usage statistics                                |
@@ -22,7 +23,7 @@ Type `/` to open the command picker with fuzzy search.
 | `/thinking`               | Toggle display of thinking blocks                          |
 | `/reasoning [off|low|medium|high|max]` | Set or show reasoning effort                    |
 | `/permissions`            | Manage saved permissions                                   |
-| `/ps`                     | Manage background processes                                |
+| `/ps`                     | Manage background processes (requires `background_commands` plugin) |
 | `/history`                | Fuzzy-search prompt history (also `Ctrl+R`)                |
 | `/messages`               | Show recorded errors, warnings, and notices               |
 | `/help`                   | Show keybindings (also `?` on an empty prompt)             |
@@ -34,13 +35,15 @@ Type `/` to open the command picker with fuzzy search.
 | `/reload`                 | Re-evaluate user Lua (init + plugins) without restarting (also `F5`) |
 | `/version`                | Show the running build identity as a notification          |
 | `/changelog`              | Open the release notes for the latest cached build         |
-| `/upgrade [--check]`      | Install the newest smelt build (or refresh the cache with `--check`) |
+| `/upgrade [check]`        | Install the newest smelt build (or refresh the cache with `check`)   |
 | `/exit`, `/quit`          | Exit (also `:q`, `:qa`, `:wq`, `:wqa`)                     |
 
 ## Shell Escape
 
 Prefix with `!` to run a shell command directly, without going through the
-agent. Output appears inline in the conversation.
+agent. Output appears inline in the conversation. Shell escapes are useful for
+quick checks — verifying test output, reading a config value — without
+bloating the agent's context window with a full tool call.
 
 ```
 !git status
