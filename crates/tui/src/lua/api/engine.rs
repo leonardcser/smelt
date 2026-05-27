@@ -235,8 +235,7 @@ pub struct LuaAskSpec {
     /// Reasoning effort for the request; defaults to `"off"`.
     pub reasoning_effort: Option<LuaReasoningEffort>,
     /// Fires once with `(response, err)`. On success `err` is `nil` and
-    /// `response` is a full assistant message table
-    /// ([`smelt.engine.AskResponse`](types.md#smeltengineaskresponse));
+    /// `response` is a full assistant message table;
     /// on failure `response` is `nil` and `err` is a
     /// `smelt.engine.AskError` table.
     pub on_response: Option<LuaCallback<(mlua::Value, Option<LuaAskErrorTable>), ()>>,
@@ -262,8 +261,7 @@ pub struct LuaInheritedAskSpec {
     /// Reasoning effort for the request; defaults to `"off"`.
     pub reasoning_effort: Option<LuaReasoningEffort>,
     /// Fires once with `(response, err)`. On success `err` is `nil` and
-    /// `response` is a full assistant message table
-    /// ([`smelt.engine.AskResponse`](types.md#smeltengineaskresponse));
+    /// `response` is a full assistant message table;
     /// on failure `response` is `nil` and `err` is a
     /// `smelt.engine.AskError` table.
     pub on_response: Option<LuaCallback<(mlua::Value, Option<LuaAskErrorTable>), ()>>,
