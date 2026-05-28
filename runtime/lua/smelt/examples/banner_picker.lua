@@ -37,7 +37,7 @@ local function logo_info()
 		end
 end
 
-local function paint(slice, _ctx)
+local function paint(slice)
 	if not STATE then return end
 	local w, h, paint_fn = logo_info()
 	local r0 = math.max(0, math.floor((slice:height() - h) / 2))

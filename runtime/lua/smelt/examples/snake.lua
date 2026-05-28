@@ -132,16 +132,18 @@ end
 
 -- O(1) cell-kind lookup for the paint pass.
 local function build_grid()
+	local state = STATE
+	if not state then return {} end
 	local g = {}
-	for i, seg in ipairs(STATE.snake) do
+	for i, seg in ipairs(state.snake) do
 		local key = seg.row * 1000 + seg.col
-		if i == #STATE.snake then
+		if i == #state.snake then
 			g[key] = "head"
 		else
 			g[key] = "body"
 		end
 	end
-	g[STATE.food.row * 1000 + STATE.food.col] = "food"
+	g[state.food.row * 1000 + state.food.col] = "food"
 	return g
 end
 
@@ -181,7 +183,7 @@ local function paint_pair(slice, term_y, term_x, top_kind, bot_kind, bg)
 	end
 end
 
-local function paint(slice, _ctx)
+local function paint(slice)
 	if not STATE then
 		return
 	end

@@ -24,7 +24,7 @@ local OPTIONAL_PRIORITY = 4
 
 -- ── helpers ─────────────────────────────────────────────────────────
 
-local function queued_message_rows(queued, width)
+local function queued_message_rows(queued)
   local rows = {}
   local prefix = "  \u{21AA} "
   for _, msg in ipairs(queued) do
@@ -45,7 +45,7 @@ local function queued_message_rows(queued, width)
   return rows
 end
 
-local function stash_row(width)
+local function stash_row()
   local indent = "  "
   local label = "» Stashed (ctrl+s to unstash)"
   local text = indent .. label
@@ -251,11 +251,11 @@ local function render_top(win)
   local width = win:content_width() or 80
   local rows = {}
   local queued = smelt.prompt.queued()
-  for _, row in ipairs(queued_message_rows(queued, width)) do
+  for _, row in ipairs(queued_message_rows(queued)) do
     rows[#rows + 1] = row
   end
   if smelt.prompt.has_stash() then
-    rows[#rows + 1] = stash_row(width)
+    rows[#rows + 1] = stash_row()
   end
   rows[#rows + 1] = bar.compose(width, indicator_spans(), right_spans())
   bar.write_rows(buf, rows, TOP_NS)

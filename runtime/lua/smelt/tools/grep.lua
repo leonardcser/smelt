@@ -138,7 +138,7 @@ smelt.tools.register({
     if path == "" then return pattern end
     return pattern .. " in " .. path
   end,
-  render = function(args, output, ctx)
+  render = function(_, output)
     if output.is_error then
       return smelt.layout.text(output.content, { hl_group = "ErrorMsg" })
     end

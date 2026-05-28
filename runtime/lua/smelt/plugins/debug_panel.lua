@@ -22,16 +22,6 @@ local function panel_title()
 	}
 end
 
-local function fmt_opt(val, fmt_fn)
-	if val == nil then
-		return "nil"
-	end
-	if fmt_fn then
-		return fmt_fn(val)
-	end
-	return tostring(val)
-end
-
 local function fmt_bool(v)
 	return v and "true" or "false"
 end

@@ -4,7 +4,17 @@
     "version": "Lua 5.4"
   },
   "diagnostics": {
-    "globals": ["smelt"]
+    "globals": ["smelt"],
+    "disable": [
+      "duplicate-doc-field",
+      "redundant-parameter",
+      "param-type-mismatch",
+      "assign-type-mismatch",
+      "undefined-field",
+      "lowercase-global",
+      "return-type-mismatch",
+      "inject-field"
+    ]
   },
   "workspace": {
     "library": ["lua/smelt/_meta"],

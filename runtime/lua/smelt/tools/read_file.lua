@@ -85,7 +85,7 @@ smelt.tools.register({
   summary = function(args)
     return smelt.path.display(args.file_path or "")
   end,
-  render = function(args, output, ctx)
+  render = function(_, output)
     if output.is_error then
       return smelt.layout.text(output.content, { hl_group = "ErrorMsg" })
     end

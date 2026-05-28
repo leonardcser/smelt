@@ -11,7 +11,6 @@
 --     the dialog lifetime. Opening the dialog stays instant; the first
 --     keystroke pays the IO cost once.
 
-local NS_META  = smelt.ns("smelt.resume.meta")
 local NS_STATE = smelt.ns("smelt.resume.state")
 
 local function is_junk(s)

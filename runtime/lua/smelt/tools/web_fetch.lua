@@ -236,7 +236,7 @@ smelt.tools.register({
     if pat then return { pat } end
     return {}
   end,
-  render = function(args, output, ctx)
+  render = function(args, output)
     local items = {}
     if args.prompt and args.prompt ~= "" then
       table.insert(items, smelt.layout.text(args.prompt))

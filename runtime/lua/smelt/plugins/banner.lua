@@ -236,7 +236,7 @@ local function paint_rows_for_frame()
 	return banner.logo_mark_pixels(fire)
 end
 
-local function paint_logo(slice, _ctx)
+local function paint_logo(slice)
 	local w = banner.logo_mark_size()
 	local col0 = math.max(0, math.floor((slice:width() - w) / 2))
 	local row0 = state.fire_pixels and 0 or FIRE_HEADROOM

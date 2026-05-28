@@ -81,8 +81,11 @@ smelt.tools.register({
       local spacer_leaf = smelt.dialog.content({ text = "", wrap = false })
       -- Free-text input for a custom answer, shown below the options.
       local other_leaf, other_buf = smelt.dialog.input("type a custom answer…")
+      ---@cast other_leaf any
+      ---@cast other_buf any
 
-      local menu_leaf, _menu = smelt.dialog.menu(items)
+      local menu_leaf = smelt.dialog.menu(items)
+      ---@cast menu_leaf any
 
       -- Tab from the menu jumps into the custom input; Esc inside the
       -- input pops focus back to the menu (instead of dismissing). Enter

@@ -171,18 +171,20 @@ local function open_for(spec, anchor)
 end
 
 local function refilter()
+  local cur = current
+  if not cur then return end
   local text = smelt.prompt.text()
   local cpos = smelt.prompt.cursor()
-  local anchor = current.spec.detect(text, cpos)
-  if not anchor or anchor ~= current.anchor then
+  local anchor = cur.spec.detect(text, cpos)
+  if not anchor or anchor ~= cur.anchor then
     close_current()
     M._recompute()
     return
   end
-  local query = current.spec.query(text, current.anchor, cpos)
-  current.view = rank_items(current.items, query)
-  current.selected = 1
-  current.picker:items(to_picker_items(current.view, current.spec)):selected(0)
+  local query = cur.spec.query(text, cur.anchor, cpos)
+  cur.view = rank_items(cur.items, query)
+  cur.selected = 1
+  cur.picker:items(to_picker_items(cur.view, cur.spec)):selected(0)
   fire_on_select()
 end
 

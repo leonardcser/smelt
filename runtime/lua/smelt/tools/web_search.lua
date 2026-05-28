@@ -25,7 +25,7 @@ smelt.tools.register({
   summary = function(args)
     return args.query or ""
   end,
-  render = function(args, output, ctx)
+  render = function(_, output)
     return smelt.layout.text(output.content, {
       hl_group = output.is_error and "ErrorMsg" or nil,
     })
@@ -55,14 +55,14 @@ smelt.tools.register({
         ["Origin"] = "https://html.duckduckgo.com",
       },
     })
-    if err then
-      return { content = "Search failed: " .. err, is_error = true }
+    if not resp then
+      return { content = "Search failed: " .. (err or "no response"), is_error = true }
     end
     if resp.status < 200 or resp.status >= 300 then
       return { content = "Search failed: HTTP " .. resp.status, is_error = true }
     end
 
-    local results = smelt.html.parse_ddg_results(resp.body)
+    local results = smelt.html.parse_ddg_results(resp.body or "")
     if #results == 0 then
       return "No results found"
     end

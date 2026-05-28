@@ -329,6 +329,7 @@ local function should_check_now()
 end
 
 local checking = false
+local dispatch_install
 
 local function retry_after_transient_failure()
   return math.min(settings_interval(), TRANSIENT_RETRY_SECS)
@@ -579,7 +580,7 @@ local function install_unstable_async(sha, on_done)
   end)
 end
 
-local function dispatch_install()
+function dispatch_install()
   if not latest.has_update then return end
   if settings_channel() == "stable" then
     local tag = latest.details and latest.details.tag_name
