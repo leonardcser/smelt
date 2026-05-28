@@ -9,7 +9,7 @@
 //!   - SMELT_BUILD_DIRTY     "1" when the working tree has uncommitted changes, else "0"
 //!   - SMELT_DISPLAY         canonical user-facing identity string. Single
 //!     source of truth for the banner, `/version`, `/upgrade`, and `--version`.
-//!     Shape: `v{tag}` for a clean tagged build, `v{tag}-{commits}-g{sha}[-dirty]`
+//!     Shape: `v{tag}` for a clean tagged build, `v{tag}-{commits}-{sha}[-dirty]`
 //!     for a dev build, `v{CARGO_PKG_VERSION}` when git is unavailable.
 //!
 //! The git lookups go through `git rev-parse` / `git show` / `git describe`,
@@ -63,8 +63,8 @@ fn main() {
 /// Split a `git describe --tags --long --dirty` result like
 /// `v0.5.0-alpha.2-80-g827e6646-dirty` into `(tag, commits, dirty, display)`.
 /// `display` is the canonical user-facing identity: `v{tag}` on a clean
-/// tagged build (commits == 0, not dirty), otherwise the full
-/// `v{tag}-{commits}-g{sha}[-dirty]`. A missing or unparseable result
+/// tagged build (commits == 0, not dirty), otherwise
+/// `v{tag}-{commits}-{sha}[-dirty]`. A missing or unparseable result
 /// falls back to `v{pkg_version}`.
 fn parse_describe(described: &str, pkg_version: &str) -> (String, String, String, String) {
     let (core, dirty_flag) = match described.strip_suffix("-dirty") {
@@ -74,8 +74,12 @@ fn parse_describe(described: &str, pkg_version: &str) -> (String, String, String
     // `core` looks like `<tag>-<commits>-g<sha>`. Tags may themselves
     // contain `-` (e.g. `v0.5.0-alpha.2`), so split from the right.
     let parts: Vec<&str> = core.rsplitn(3, '-').collect();
-    let (tag, commits) = if parts.len() == 3 && parts[0].starts_with('g') {
-        (parts[2].to_string(), parts[1].to_string())
+    let (tag, commits, sha) = if parts.len() == 3 && parts[0].starts_with('g') {
+        (
+            parts[2].to_string(),
+            parts[1].to_string(),
+            parts[0].trim_start_matches('g').to_string(),
+        )
     } else {
         return (
             "unknown".into(),
@@ -91,17 +95,12 @@ fn parse_describe(described: &str, pkg_version: &str) -> (String, String, String
     };
     let display = if commits == "0" && dirty_flag == "0" {
         tag_with_v
-    } else if dirty_flag == "1" {
-        let core_with_v = if core.starts_with('v') {
-            core.to_string()
-        } else {
-            format!("v{core}")
-        };
-        format!("{core_with_v}-dirty")
-    } else if core.starts_with('v') {
-        core.to_string()
     } else {
-        format!("v{core}")
+        let mut display = format!("{tag_with_v}-{commits}-{sha}");
+        if dirty_flag == "1" {
+            display.push_str("-dirty");
+        }
+        display
     };
     (tag, commits, dirty_flag.into(), display)
 }

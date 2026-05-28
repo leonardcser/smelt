@@ -25,7 +25,7 @@ end
 local STATE = nil
 
 local function logo_info()
-	local version = "v" .. (smelt.build.version or "")
+	local version = smelt.build.display or ""
 	local rows = banner.LOGO_MARK_PIXELS
 	local w, h = banner.logo_mark_size()
 	return w,
