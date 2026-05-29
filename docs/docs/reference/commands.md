@@ -18,7 +18,7 @@ Type `/` to open the command picker with fuzzy search.
 | `/theme [name]`           | Change accent color                                        |
 | `/color [name]`           | Set task slug color                                        |
 | `/stats`                  | Show token usage statistics                                |
-| `/cost`                   | Show current session cost                                  |
+| `/usage`, `/cost`         | Show session cost and active-provider usage limits         |
 | `/vim`                    | Toggle vim mode                                            |
 | `/thinking`               | Toggle display of thinking blocks                          |
 | `/reasoning [off|low|medium|high|max]` | Set or show reasoning effort                    |

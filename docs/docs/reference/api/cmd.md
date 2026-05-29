@@ -45,3 +45,11 @@ fun(line: string): nil
 
 Execute the slash-command line `line` (with or without leading `/`) as if the user had typed it. Errors are surfaced as in-app notifications.
 
+## `smelt.cmd.text_dialog`
+
+```lua
+fun(title: string, text: string|table|nil, opts: table?): nil
+```
+
+Open a read-only text dialog docked above the prompt. `text` may be a string or styled lines. `q`, `?`, or Esc dismiss it.
+

@@ -28,4 +28,8 @@ cmd.register = nil
 ---@type fun(line: string): nil
 cmd.run = nil
 
+--- Open a read-only text dialog docked above the prompt. `text` may be a string or styled lines. `q`, `?`, or Esc dismiss it.
+---@type fun(title: string, text: string|table|nil, opts: table?): nil
+cmd.text_dialog = nil
+
 return cmd

@@ -14,6 +14,40 @@
 --   on_dismiss function()                  — Esc dismiss.
 --   stay_open  bool                        — keep picker open after Enter (persistent mode).
 
+local function open_text_dialog(title, text, opts)
+  opts = opts or {}
+  smelt.spawn(function()
+    local buf = smelt.buf.new({ readonly = true })
+    if type(text) == "table" then
+      buf:styled(text)
+    else
+      local lines = {}
+      for line in ((text or "") .. "\n"):gmatch("([^\n]*)\n") do
+        lines[#lines + 1] = line
+      end
+      if #lines == 0 then lines = { "" } end
+      buf:lines(lines)
+    end
+    local leaf = smelt.dialog.content({ buf = buf, interactive = true, wrap = opts.wrap })
+
+    smelt.dialog.open({
+      title      = title,
+      max_height = opts.max_height or "50%",
+      panels     = { { leaf = leaf } },
+      keymaps    = {
+        { key = "q", on_press = function(ctx) ctx.close() end },
+        { key = "?", on_press = function(ctx) ctx.close() end },
+      },
+    })
+  end)
+end
+
+-- Open a read-only text dialog docked above the prompt. `text` may be a string or styled lines. `q`, `?`, or Esc dismiss it.
+---@type fun(title: string, text: string|table|nil, opts: table?): nil
+function smelt.cmd.text_dialog(title, text, opts)
+  open_text_dialog(title, text, opts)
+end
+
 local function run_picker(opts)
   smelt.spawn(function()
     if opts.stay_open then
