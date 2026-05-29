@@ -1,4 +1,4 @@
-use crate::app::{CommandAction, EventOutcome, InputOutcome, TuiApp};
+use crate::app::{CommandAction, ContextWindowUpdate, EventOutcome, InputOutcome, TuiApp};
 use crate::state;
 use protocol::{AgentMode, Content, ReasoningEffort, UiCommand};
 
@@ -286,14 +286,24 @@ impl TuiApp {
         let Some(client) = self.http_client.clone() else {
             return;
         };
+        self.context_window_request_id = self.context_window_request_id.wrapping_add(1);
+        let request_id = self.context_window_request_id;
         let api_base = self.core.config.api_base.clone();
         let api_key = self.resolve_api_key().unwrap_or_default();
         let provider_type = self.core.config.provider_type.clone();
         let model = self.core.config.model.clone();
+        let update_api_base = api_base.clone();
         let clock = std::sync::Arc::clone(&self.core.clock);
         tokio::spawn(async move {
             let provider = engine::Provider::new(api_base, api_key, &provider_type, client, clock);
-            let _ = tx.send(provider.fetch_context_window(&model).await);
+            let value = provider.fetch_context_window(&model).await;
+            let _ = tx.send(ContextWindowUpdate {
+                request_id,
+                model,
+                api_base: update_api_base,
+                provider_type,
+                value,
+            });
         });
     }
 

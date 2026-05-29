@@ -36,6 +36,14 @@ use std::pin::Pin;
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
+pub(crate) struct ContextWindowUpdate {
+    pub(crate) request_id: u64,
+    pub(crate) model: String,
+    pub(crate) api_base: String,
+    pub(crate) provider_type: String,
+    pub(crate) value: Option<u32>,
+}
+
 pub struct TuiApp {
     pub core: smelt_core::Core,
     pub lua: crate::lua::LuaRuntime,
@@ -115,7 +123,9 @@ pub struct TuiApp {
     /// Sender into the channel `run()` drains for context-window updates.
     /// `apply_model` spawns a fetch task that pushes the result here so the
     /// UI footer reflects the new model immediately.
-    pub(crate) context_window_tx: Option<tokio::sync::mpsc::UnboundedSender<Option<u32>>>,
+    pub(crate) context_window_tx: Option<tokio::sync::mpsc::UnboundedSender<ContextWindowUpdate>>,
+    /// Monotonic request id for context-window side fetches.
+    pub(crate) context_window_request_id: u64,
     /// Per-window placeholder dispatch options. `text` lives on the
     /// buffer (extmark) for the prompt; this side-table holds the
     /// accept/dismiss chord policy plugins configure when calling
@@ -306,6 +316,16 @@ pub(crate) struct PendingTool {
 }
 
 impl TuiApp {
+    pub(crate) fn apply_context_window_update(&mut self, update: ContextWindowUpdate) {
+        if update.request_id == self.context_window_request_id
+            && update.model == self.core.config.model
+            && update.api_base == self.core.config.api_base
+            && update.provider_type == self.core.config.provider_type
+        {
+            self.core.config.context_window = update.value;
+        }
+    }
+
     #[allow(clippy::too_many_arguments)]
     pub fn new(
         config: smelt_core::AppConfig,
@@ -502,6 +522,7 @@ impl TuiApp {
             terminal: None,
             http_client: None,
             context_window_tx: None,
+            context_window_request_id: 0,
             placeholder_opts: HashMap::new(),
         }
     }
@@ -1103,7 +1124,7 @@ impl TuiApp {
     }
 
     pub async fn run(&mut self, http_client: engine::HttpClient, initial_message: Option<String>) {
-        let (ctx_tx, mut ctx_rx) = tokio::sync::mpsc::unbounded_channel::<Option<u32>>();
+        let (ctx_tx, mut ctx_rx) = tokio::sync::mpsc::unbounded_channel::<ContextWindowUpdate>();
         self.http_client = Some(http_client);
         self.context_window_tx = Some(ctx_tx);
         self.refresh_context_window();
@@ -1258,8 +1279,8 @@ impl TuiApp {
             }
             self.flush_lua_callbacks();
 
-            while let Ok(result) = ctx_rx.try_recv() {
-                self.core.config.context_window = result;
+            while let Ok(update) = ctx_rx.try_recv() {
+                self.apply_context_window_update(update);
             }
 
             self.drain_host_calls();
@@ -1535,6 +1556,71 @@ impl TuiApp {
 
         // Drop the terminal guard last so any rendering above stays in TUI mode.
         self.terminal = None;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn stale_context_window_update_does_not_overwrite_current_generation() {
+        let mut app = crate::app::test_harness::TestApp::builder().build();
+        app.app.context_window_request_id = 2;
+        app.app.core.config.model = "gpt-5.5".into();
+        app.app.core.config.api_base = "https://codex.example".into();
+        app.app.core.config.provider_type = "codex".into();
+        app.app.core.config.context_window = Some(272_000);
+
+        app.app.apply_context_window_update(ContextWindowUpdate {
+            request_id: 1,
+            model: "gpt-5.5".into(),
+            api_base: "https://codex.example".into(),
+            provider_type: "codex".into(),
+            value: None,
+        });
+
+        assert_eq!(app.app.core.config.context_window, Some(272_000));
+    }
+
+    #[test]
+    fn current_context_window_update_applies_even_when_value_is_none() {
+        let mut app = crate::app::test_harness::TestApp::builder().build();
+        app.app.context_window_request_id = 2;
+        app.app.core.config.model = "Qwen/Qwen3.6-27B".into();
+        app.app.core.config.api_base = "https://openai-compatible.example".into();
+        app.app.core.config.provider_type = "openai-compatible".into();
+        app.app.core.config.context_window = Some(272_000);
+
+        app.app.apply_context_window_update(ContextWindowUpdate {
+            request_id: 2,
+            model: "Qwen/Qwen3.6-27B".into(),
+            api_base: "https://openai-compatible.example".into(),
+            provider_type: "openai-compatible".into(),
+            value: None,
+        });
+
+        assert_eq!(app.app.core.config.context_window, None);
+    }
+
+    #[test]
+    fn matching_request_id_with_stale_model_identity_does_not_apply() {
+        let mut app = crate::app::test_harness::TestApp::builder().build();
+        app.app.context_window_request_id = 2;
+        app.app.core.config.model = "gpt-5.5".into();
+        app.app.core.config.api_base = "https://codex.example".into();
+        app.app.core.config.provider_type = "codex".into();
+        app.app.core.config.context_window = Some(272_000);
+
+        app.app.apply_context_window_update(ContextWindowUpdate {
+            request_id: 2,
+            model: "Qwen/Qwen3.6-27B".into(),
+            api_base: "https://openai-compatible.example".into(),
+            provider_type: "openai-compatible".into(),
+            value: None,
+        });
+
+        assert_eq!(app.app.core.config.context_window, Some(272_000));
     }
 }
 
