@@ -144,6 +144,8 @@ pub enum ProviderError {
     Server { status: u16, body: String },
     #[error("network error: {0}")]
     Network(String),
+    #[error("stream error: {0}")]
+    Stream(String),
     #[error("invalid response: {0}")]
     InvalidResponse(String),
     #[error("max retries exceeded")]
@@ -206,7 +208,7 @@ impl ProviderError {
     fn is_retryable(&self) -> bool {
         matches!(
             self,
-            ProviderError::Server { .. } | ProviderError::Network(_)
+            ProviderError::Server { .. } | ProviderError::Network(_) | ProviderError::Stream(_)
         )
     }
 
@@ -640,6 +642,7 @@ impl Provider {
         }
 
         let max_retries = 9;
+        let max_stream_retries = 5;
 
         for attempt in 0..=max_retries {
             let request_start = self.clock.instant_now();
@@ -788,7 +791,7 @@ impl Provider {
             let noop_delta: &(dyn Fn(StreamDelta<'_>) + Send + Sync) = &|_| {};
             let on_delta = opts.on_delta.unwrap_or(noop_delta);
 
-            let parsed = if use_stream {
+            let parsed_result = if use_stream {
                 match self.kind {
                     ProviderKind::OpenAiCompatible | ProviderKind::Copilot => {
                         chat_completions::read_stream(resp, opts.cancel, on_delta).await
@@ -799,7 +802,7 @@ impl Provider {
                     ProviderKind::AnthropicCompatible | ProviderKind::Anthropic => {
                         anthropic::read_stream(resp, opts.cancel, on_delta).await
                     }
-                }?
+                }
             } else {
                 let data: serde_json::Value = resp
                     .json()
@@ -820,13 +823,36 @@ impl Provider {
 
                 match self.kind {
                     ProviderKind::OpenAiCompatible | ProviderKind::Copilot => {
-                        chat_completions::parse_response(&data)?
+                        chat_completions::parse_response(&data)
                     }
-                    ProviderKind::OpenAi | ProviderKind::Codex => openai::parse_response(&data)?,
+                    ProviderKind::OpenAi | ProviderKind::Codex => openai::parse_response(&data),
                     ProviderKind::AnthropicCompatible | ProviderKind::Anthropic => {
-                        anthropic::parse_response(&data)?
+                        anthropic::parse_response(&data)
                     }
                 }
+            };
+
+            let parsed = match parsed_result {
+                Ok(parsed) => parsed,
+                Err(err) if err.is_retryable() && attempt < max_stream_retries => {
+                    log::entry(
+                        log::Level::Warn,
+                        "request_error",
+                        &serde_json::json!({
+                            "attempt": attempt,
+                            "error": err.to_string(),
+                        }),
+                    );
+                    let delay = backoff_delay(attempt);
+                    if attempt > 0 {
+                        if let Some(f) = opts.on_retry {
+                            f(delay, attempt as u32);
+                        }
+                    }
+                    tokio::time::sleep(delay).await;
+                    continue;
+                }
+                Err(err) => return Err(err),
             };
 
             let elapsed = self.clock.instant_now().duration_since(request_start);

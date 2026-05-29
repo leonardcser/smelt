@@ -340,7 +340,7 @@ fn classify_provider_error(e: &ProviderError) -> EngineAskErrorKind {
     match e {
         ProviderError::Cancelled => EngineAskErrorKind::Cancelled,
         ProviderError::QuotaExceeded(_) => EngineAskErrorKind::Quota,
-        ProviderError::Network(_) => EngineAskErrorKind::Network,
+        ProviderError::Network(_) | ProviderError::Stream(_) => EngineAskErrorKind::Network,
         ProviderError::RateLimited { .. } => EngineAskErrorKind::RateLimited,
         ProviderError::Server { .. } => {
             if is_context_window_error(e) {

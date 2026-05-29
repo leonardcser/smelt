@@ -283,6 +283,11 @@ impl StreamState {
         if let Some(err) = self.error {
             return Err(err);
         }
+        if !self.saw_completed {
+            return Err(ProviderError::Stream(
+                "stream ended without response.completed".into(),
+            ));
+        }
         let tool_calls: Vec<ToolCall> = self
             .tool_calls
             .into_values()
@@ -407,6 +412,17 @@ pub(super) fn apply_sse_event(
                 }
             }
         }
+        "response.incomplete" => {
+            let reason = ev
+                .get("response")
+                .and_then(|r| r.get("incomplete_details"))
+                .and_then(|d| d.get("reason"))
+                .and_then(|r| r.as_str())
+                .unwrap_or("unknown");
+            state.error = Some(ProviderError::Stream(format!(
+                "incomplete response returned, reason: {reason}"
+            )));
+        }
         _ => {}
     }
 }
@@ -422,12 +438,6 @@ pub(super) async fn read_stream(
         apply_sse_event(&mut state, ev, &mut |d| on_delta(d));
     })
     .await?;
-
-    if !state.saw_completed {
-        return Err(ProviderError::InvalidResponse(
-            "stream ended without response.completed".into(),
-        ));
-    }
 
     state.finalize()
 }
@@ -446,6 +456,13 @@ mod tests {
 
     fn cfg() -> ModelConfig {
         ModelConfig::default()
+    }
+
+    fn completed_state() -> StreamState {
+        StreamState {
+            saw_completed: true,
+            ..Default::default()
+        }
     }
 
     // ---- parse_usage ----
@@ -896,7 +913,7 @@ mod tests {
 
     #[test]
     fn sse_function_call_added_then_args_delta_and_done() {
-        let mut state = StreamState::default();
+        let mut state = completed_state();
         step(
             &mut state,
             json!({
@@ -927,7 +944,7 @@ mod tests {
 
     #[test]
     fn sse_function_call_args_done_replaces_accumulated_args() {
-        let mut state = StreamState::default();
+        let mut state = completed_state();
         step(
             &mut state,
             json!({
@@ -955,7 +972,7 @@ mod tests {
 
     #[test]
     fn sse_function_call_added_skipped_when_id_or_name_empty() {
-        let mut state = StreamState::default();
+        let mut state = completed_state();
         step(
             &mut state,
             json!({
@@ -1002,7 +1019,7 @@ mod tests {
 
     #[test]
     fn sse_args_done_defaults_to_empty_object_when_arguments_missing() {
-        let mut state = StreamState::default();
+        let mut state = completed_state();
         step(
             &mut state,
             json!({
@@ -1160,6 +1177,22 @@ mod tests {
     }
 
     #[test]
+    fn sse_incomplete_sets_stream_error() {
+        let mut state = StreamState::default();
+        step(
+            &mut state,
+            json!({
+                "type": "response.incomplete",
+                "response": {"incomplete_details": {"reason": "max_output_tokens"}}
+            }),
+        );
+        match state.error.unwrap() {
+            ProviderError::Stream(message) => assert!(message.contains("max_output_tokens")),
+            e => panic!("expected Stream, got {e:?}"),
+        }
+    }
+
+    #[test]
     fn sse_unknown_event_type_ignored() {
         let mut state = StreamState::default();
         step(&mut state, json!({"type": "something.unknown"}));
@@ -1169,6 +1202,12 @@ mod tests {
     }
 
     // ---- finalize ----
+
+    #[test]
+    fn finalize_returns_stream_error_without_completed() {
+        let state = StreamState::default();
+        assert!(matches!(state.finalize(), Err(ProviderError::Stream(_))));
+    }
 
     #[test]
     fn finalize_returns_error_when_state_error_set() {
@@ -1184,7 +1223,10 @@ mod tests {
 
     #[test]
     fn finalize_filters_tool_calls_missing_call_id_or_name() {
-        let mut state = StreamState::default();
+        let mut state = StreamState {
+            saw_completed: true,
+            ..Default::default()
+        };
         state
             .tool_calls
             .insert("i1".into(), ("".into(), "name".into(), "{}".into()));
@@ -1201,7 +1243,10 @@ mod tests {
 
     #[test]
     fn finalize_empty_content_and_reasoning_become_none() {
-        let state = StreamState::default();
+        let state = StreamState {
+            saw_completed: true,
+            ..Default::default()
+        };
         let r = state.finalize().unwrap();
         assert!(r.content.is_none());
         assert!(r.reasoning.is_none());
@@ -1242,7 +1287,7 @@ mod tests {
 
     #[test]
     fn sse_output_item_done_reasoning_captured_verbatim() {
-        let mut state = StreamState::default();
+        let mut state = completed_state();
         step(
             &mut state,
             json!({
