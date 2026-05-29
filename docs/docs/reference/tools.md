@@ -126,7 +126,6 @@ directory persists between calls.
 - Interactive commands (editors, pagers, interactive rebases) are blocked
 - Shell backgrounding (`&`) in the command string is rejected
 - Output is line-buffered (stdout and stderr multiplexed)
-- Running calls show an elapsed-time badge after one second; the timeout badge is hidden after the call finishes
 - A non-zero exit code is flagged as an error
 - The call can be cancelled from the UI
 

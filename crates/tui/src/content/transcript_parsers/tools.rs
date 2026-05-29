@@ -34,10 +34,10 @@ pub(super) fn render_tool(
         ToolStatus::Confirm => intern("SmeltAccent"),
         ToolStatus::Pending => intern("SmeltToolPending"),
     };
-    let time = if status == ToolStatus::Pending {
-        elapsed
-    } else {
+    let time = if status == ToolStatus::Confirm {
         None
+    } else {
+        elapsed
     };
     let mut rows = print_tool_line(out, name, summary, color, status, time, width);
     if let Some(msg) = user_message {
@@ -77,16 +77,21 @@ fn tool_line_layout(
     }
 }
 
-fn tool_title_suffix(status: ToolStatus, elapsed: Option<Duration>) -> String {
-    if status != ToolStatus::Pending {
-        return String::new();
-    }
+fn tool_title_suffix(elapsed: Option<Duration>) -> String {
     elapsed.and_then(format_tool_duration).unwrap_or_default()
 }
 
 fn format_tool_duration(duration: Duration) -> Option<String> {
     let secs = duration.as_secs();
-    (secs >= 1).then(|| format!("{secs}s"))
+    if secs < 1 {
+        None
+    } else if secs < 60 {
+        Some(format!("{secs}s"))
+    } else if secs < 60 * 60 {
+        Some(format!("{}m{}s", secs / 60, secs % 60))
+    } else {
+        Some(format!("{}h{}m", secs / 3600, (secs % 3600) / 60))
+    }
 }
 
 fn print_tool_line(
@@ -101,7 +106,7 @@ fn print_tool_line(
     out.push_hl(pill_color);
     out.print("\u{23fa}");
     out.pop_style();
-    let timer = tool_title_suffix(status, elapsed);
+    let timer = tool_title_suffix(elapsed);
     let (summary, suffix_spans) = split_title_summary(summary, &timer, status);
     let has_summary = !summary.as_plain_text().is_empty();
     let suffix_text_len: usize = suffix_spans.iter().map(|s| s.text.len()).sum();

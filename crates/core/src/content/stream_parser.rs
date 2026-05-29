@@ -588,7 +588,13 @@ impl StreamParser {
 
 fn elapsed_bucket(elapsed: Option<Duration>) -> Option<u64> {
     let secs = elapsed?.as_secs();
-    (secs >= 1).then_some(secs)
+    if secs < 1 {
+        None
+    } else if secs < 60 * 60 {
+        Some(secs)
+    } else {
+        Some(60 * 60 + secs / 60)
+    }
 }
 
 #[cfg(test)]

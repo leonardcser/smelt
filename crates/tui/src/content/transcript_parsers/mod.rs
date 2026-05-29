@@ -754,7 +754,7 @@ mod tests {
     }
 
     #[test]
-    fn tool_title_chrome_only_renders_while_pending() {
+    fn tool_title_chrome_renders_elapsed_after_completion() {
         let summary = protocol::StyledLines(vec![vec![
             protocol::StyledSpan {
                 text: "echo hi".into(),
@@ -802,35 +802,56 @@ mod tests {
             layout_revision: 0,
         };
         let done_display = layout_block_test(&block, Some(&done), &ctx);
-        assert!(done_display[0].text.contains("echo hi"));
-        assert!(!done_display[0].text.contains("2s"));
+        assert!(done_display[0].text.contains("echo hi  2s"));
         assert!(!done_display[0].text.contains("timeout"));
+
+        let failed = ToolState {
+            status: ToolStatus::Err,
+            elapsed: Some(std::time::Duration::from_secs(65)),
+            output: None,
+            user_message: None,
+            render_cache: None,
+            layout_revision: 0,
+        };
+        let failed_display = layout_block_test(&block, Some(&failed), &ctx);
+        assert!(failed_display[0].text.contains("echo hi  1m5s"));
+        assert!(!failed_display[0].text.contains("timeout"));
     }
 
     #[test]
-    fn tool_timer_waits_until_one_second() {
+    fn tool_timer_waits_until_one_second_and_formats_coarsely() {
         let block = Block::ToolCall {
             call_id: "c-short-timer".into(),
             name: "bash".into(),
             summary: protocol::StyledLines::from_plain("echo hi"),
             args: HashMap::new(),
         };
-        let state = ToolState {
-            status: ToolStatus::Pending,
-            elapsed: Some(std::time::Duration::from_millis(999)),
-            output: None,
-            user_message: None,
-            render_cache: None,
-            layout_revision: 0,
-        };
         let ctx = LayoutContext {
             width: 80,
             show_thinking: true,
             view_state: ViewState::Expanded,
         };
-        let display = layout_block_test(&block, Some(&state), &ctx);
-        assert!(!display[0].text.contains("0."));
-        assert!(!display[0].text.contains("  0s"));
+        let render_elapsed = |elapsed| {
+            let state = ToolState {
+                status: ToolStatus::Ok,
+                elapsed: Some(elapsed),
+                output: None,
+                user_message: None,
+                render_cache: None,
+                layout_revision: 0,
+            };
+            layout_block_test(&block, Some(&state), &ctx)[0]
+                .text
+                .clone()
+        };
+
+        let under_one = render_elapsed(std::time::Duration::from_millis(999));
+        assert!(!under_one.contains("0."));
+        assert!(!under_one.contains("  0s"));
+        assert!(render_elapsed(std::time::Duration::from_secs(59)).contains("  59s"));
+        assert!(render_elapsed(std::time::Duration::from_secs(60)).contains("  1m0s"));
+        assert!(render_elapsed(std::time::Duration::from_secs(65)).contains("  1m5s"));
+        assert!(render_elapsed(std::time::Duration::from_secs(3660)).contains("  1h1m"));
     }
 
     /// Regression guard for the silent fall-through where parallel layout workers
