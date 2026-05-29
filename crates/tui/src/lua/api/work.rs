@@ -40,7 +40,7 @@ concurrently; the most recently pushed label wins for display.",
         &[],
         |lua, ()| -> LuaResult<mlua::Table> {
             let (turn_id, cancel_generation) = crate::lua::try_with_app(|app| {
-                (app.agent.as_ref().map(|agent| agent.turn_id), app.cancel_generation)
+                (app.active_agent_turn_id(), app.cancel_generation)
             })
             .unwrap_or((None, 0));
             let table = lua.create_table()?;
@@ -58,7 +58,7 @@ concurrently; the most recently pushed label wins for display.",
             let cancel_generation = guard.get::<u64>("cancel_generation")?;
             Ok(crate::lua::try_with_app(|app| {
                 app.cancel_generation == cancel_generation
-                    && app.agent.as_ref().map(|agent| agent.turn_id) == turn_id
+                    && app.active_agent_turn_id() == turn_id
             })
             .unwrap_or(false))
         },

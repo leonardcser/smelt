@@ -108,7 +108,7 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
         &[],
         |_, ()| -> LuaResult<Vec<String>> {
             Ok(crate::lua::try_with_app(|app| {
-                let agent_running = app.agent.is_some();
+                let agent_running = app.agent_is_running();
                 let show_queued = agent_running || app.busy_stack.is_busy();
                 if show_queued {
                     app.queued_inputs

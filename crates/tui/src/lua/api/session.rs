@@ -229,7 +229,7 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
                     let turn_id = guard.get::<Option<u64>>("turn_id").ok().flatten();
                     let cancel_generation = guard.get::<u64>("cancel_generation").ok();
                     if cancel_generation != Some(app.cancel_generation)
-                        || app.agent.as_ref().map(|agent| agent.turn_id) != turn_id
+                        || app.active_agent_turn_id() != turn_id
                     {
                         return false;
                     }

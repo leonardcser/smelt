@@ -291,7 +291,7 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
         "is_running",
         "Return `true` if an agent turn is currently in flight (a request is being streamed or a tool is executing).",
         &[],
-        |_, ()| Ok(crate::lua::try_with_app(|app| app.agent.is_some()).unwrap_or(false)),
+        |_, ()| Ok(crate::lua::try_with_app(|app| app.agent_is_running()).unwrap_or(false)),
     )?;
     m.fn_(
         "summary_prefix",
@@ -333,7 +333,7 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
         &[],
         |_, ()| -> LuaResult<()> {
             crate::lua::with_app(|app| {
-                if app.agent.is_some() {
+                if app.agent_is_running() {
                     app.notify_error("cannot reload while agent is working".into());
                     return;
                 }
@@ -374,7 +374,7 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
                     body,
                     overrides: parsed,
                 };
-                if app.agent.is_some() || app.busy_stack.is_busy() {
+                if app.agent_is_running() || app.busy_stack.is_busy() {
                     if app.queued_inputs.len() < crate::app::MAX_QUEUED_MESSAGES {
                         app.queued_inputs.push(QueuedInput::CustomCommand(Box::new(cmd)));
                     }

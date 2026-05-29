@@ -23,7 +23,7 @@ type MessageReplySlot = Arc<Mutex<Option<MessageReply>>>;
 
 fn restore_working_phase() {
     crate::lua::try_with_app(|app| {
-        if app.agent.is_some() {
+        if app.agent_is_running() {
             app.working.begin(TurnPhase::Working);
         }
     });
@@ -161,7 +161,7 @@ impl TuiApp {
                 return;
             }
         };
-        if compact_phase && self.agent.is_some() {
+        if compact_phase && self.agent_is_running() {
             self.working.begin(TurnPhase::Compacting);
         }
         let reply_slot: MessageReplySlot = Arc::new(Mutex::new(Some(reply)));
@@ -197,7 +197,7 @@ impl TuiApp {
         match call(lua, func, messages_table, reply_fn) {
             Ok(()) => {
                 let replied = reply_slot.lock().ok().is_some_and(|g| g.is_none());
-                if compact_phase && replied && self.agent.is_some() {
+                if compact_phase && replied && self.agent_is_running() {
                     self.working.begin(TurnPhase::Working);
                 }
             }

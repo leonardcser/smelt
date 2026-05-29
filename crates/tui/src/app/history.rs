@@ -61,13 +61,12 @@ impl TuiApp {
     }
 
     pub(crate) fn snapshot_tokens(&mut self) {
-        // The provider baseline is only valid when it was updated this turn.
-        // If not, clear it so the next PrepareContextEstimate falls back to
-        // the visible count or a full estimate rather than using a stale
-        // baseline.
-        if !self.context_tokens_updated_this_turn {
-            self.core.session.invalidate_context_tokens();
-        }
+        // Keep the last provider baseline when this turn produced no fresh
+        // usage. It is keyed by `context_tokens_history_len`, so request
+        // preparation can add a local delta for appended history instead of
+        // losing the authoritative count after a cancel or failed compaction.
+        // Successful checkpoints and full history replacements clear the
+        // baseline explicitly because they change the model-visible prefix.
         self.context_tokens_updated_this_turn = false;
         let cost = self.core.session.session_cost_usd;
         self.core

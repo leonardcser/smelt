@@ -12,16 +12,20 @@ impl TuiApp {
     /// a stop signal; when idle, falls through to `handle_idle_engine_event`.
     /// Shared by the production main loop, the test harness, and the
     /// scenario replay binary so all three drive identical state.
-    pub fn dispatch_engine_event(&mut self, ev: EngineEvent) {
+    pub fn dispatch_engine_event(&mut self, ev: EngineEvent) -> bool {
         if let Some(mut ag) = self.agent.take() {
+            let prev_dispatching_turn_id = self.dispatching_turn_id.replace(ag.turn_id);
             let ctrl = self.handle_engine_event(ev, ag.turn_id, &mut ag.pending);
             let cont = self.dispatch_control(ctrl, &ag.pending);
+            self.dispatching_turn_id = prev_dispatching_turn_id;
             self.agent = Some(ag);
             if !cont {
                 self.discard_turn(false);
             }
+            cont
         } else {
             self.handle_idle_engine_event(ev);
+            true
         }
     }
 

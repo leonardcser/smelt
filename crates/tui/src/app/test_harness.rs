@@ -382,7 +382,7 @@ impl TestApp {
 
     /// Whether an agent turn is currently active.
     pub fn agent_running(&self) -> bool {
-        self.app.agent.is_some()
+        self.app.agent_is_running()
     }
 
     /// Snapshot the pending tool `call_id`s on the active turn. Empty
@@ -418,7 +418,7 @@ impl TestApp {
     /// synthesize engine events whose dispatch is gated on a matching id
     /// (e.g. `TurnComplete`, `Messages`).
     pub fn current_turn_id(&self) -> Option<u64> {
-        self.app.agent.as_ref().map(|ag| ag.turn_id)
+        self.app.active_agent_turn_id()
     }
 
     /// Number of user messages waiting to be sent on the next turn. Used
@@ -3521,6 +3521,74 @@ mod tests {
             .map(|c| c.text_content());
         let expected = format!("{}\n# Goal\nok", engine::SUMMARY_PREFIX.trim_end());
         assert_eq!(replacement_text.as_deref(), Some(expected.as_str()));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn compaction_prepare_request_keeps_active_turn_guard_current() {
+        let mut app = TestApp::builder().build();
+        app.app.core.config.context_window = Some(100);
+        app.app
+            .core
+            .session
+            .history
+            .push(protocol::HistoryItem::user(protocol::Content::text("u1")));
+        app.push_assistant_text("a1");
+        app.app
+            .core
+            .session
+            .history
+            .push(protocol::HistoryItem::user(protocol::Content::text("u2")));
+        app.start_turn(42);
+
+        let full_history = protocol::history_to_messages(&app.app.model_history());
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        {
+            let _g = crate::lua::install_app_ptr(&mut app.app);
+            app.app
+                .dispatch_host_call(engine::HostCall::PrepareRequest {
+                    messages: full_history,
+                    estimated_tokens: 200,
+                    reply: tx,
+                });
+        }
+
+        assert_eq!(app.app.working.phase_label(), Some("compacting"));
+        assert_eq!(ask_messages(app.drain_engine_sends()).len(), 1);
+
+        respond_pending_ask_with_text(&mut app, "# Goal\nok");
+        let replacement = rx
+            .await
+            .expect("prepare_request reply")
+            .expect("active-turn guard should allow replacement");
+        let replacement_text = replacement
+            .first()
+            .and_then(|m| m.content.as_ref())
+            .map(|c| c.text_content());
+        let expected = format!("{}\n# Goal\nok", engine::SUMMARY_PREFIX.trim_end());
+        assert_eq!(replacement_text.as_deref(), Some(expected.as_str()));
+        assert_eq!(app.app.working.phase_label(), Some("working"));
+        assert!(app.agent_running());
+    }
+
+    #[test]
+    fn cancelled_turn_without_usage_preserves_context_token_baseline() {
+        let mut app = TestApp::builder().build();
+        app.app
+            .core
+            .session
+            .history
+            .push(protocol::HistoryItem::user(protocol::Content::text("u1")));
+        app.push_assistant_text("a1");
+        app.app.core.session.context_tokens = Some(500);
+        app.app.core.session.context_tokens_history_len = Some(app.app.core.session.history.len());
+        app.app.core.session.visible_context_tokens = Some(500);
+        app.start_turn(7);
+
+        app.app.discard_turn(true);
+
+        assert_eq!(app.app.core.session.context_tokens, Some(500));
+        assert_eq!(app.app.core.session.context_tokens_history_len, Some(2));
+        assert_eq!(app.app.core.session.visible_context_tokens, Some(500));
     }
 
     #[tokio::test(flavor = "current_thread")]

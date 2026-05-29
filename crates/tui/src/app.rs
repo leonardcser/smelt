@@ -88,6 +88,10 @@ pub struct TuiApp {
     pub(crate) pending_turn_meta: Option<protocol::TurnMeta>,
     pub(crate) context_tokens_updated_this_turn: bool,
     pub(crate) cancel_generation: u64,
+    /// Set while routing an engine event whose `TurnState` has been moved
+    /// out of `self.agent` to satisfy borrowing. Lua callbacks can still
+    /// observe the active turn through `active_agent_turn_id`.
+    pub(crate) dispatching_turn_id: Option<u64>,
     /// `smelt.work.busy` token stack. Non-empty → prompt top-bar
     /// indicator animates with the top token's label.
     pub(crate) busy_stack: BusyStack,
@@ -335,6 +339,17 @@ pub(crate) struct PendingTool {
 }
 
 impl TuiApp {
+    pub(crate) fn active_agent_turn_id(&self) -> Option<u64> {
+        self.agent
+            .as_ref()
+            .map(|agent| agent.turn_id)
+            .or(self.dispatching_turn_id)
+    }
+
+    pub(crate) fn agent_is_running(&self) -> bool {
+        self.active_agent_turn_id().is_some()
+    }
+
     pub(crate) fn start_queued_input(&mut self, queued: QueuedInput) {
         match queued {
             QueuedInput::Message(text) if !text.is_empty() => {
@@ -534,6 +549,7 @@ impl TuiApp {
             pending_turn_meta: None,
             context_tokens_updated_this_turn: false,
             cancel_generation: 0,
+            dispatching_turn_id: None,
             busy_stack: BusyStack::default(),
             startup_auth_error,
             project_trust: Some(project_trust),
@@ -1336,18 +1352,8 @@ impl TuiApp {
                         break;
                     }
                 };
-                let action = if let Some(mut ag) = self.agent.take() {
-                    let ctrl = self.handle_engine_event(ev, ag.turn_id, &mut ag.pending);
-                    let action = self.dispatch_control(ctrl, &ag.pending);
-                    self.agent = Some(ag);
-                    action
-                } else {
-                    // No active turn — handle out-of-band events.
-                    self.handle_idle_engine_event(ev);
-                    true
-                };
+                let action = self.dispatch_engine_event(ev);
                 if !action {
-                    self.discard_turn(false);
                     break;
                 }
             }
