@@ -1,5 +1,6 @@
 //! `smelt.engine` — cancel, ask, inherited ask, and submit_command for Lua-rendered turns.
 
+use crate::app::QueuedInput;
 use crate::lua::{LuaHandle, LuaShared};
 use lua_doc_derive::LuaOpts;
 use mlua::prelude::*;
@@ -355,22 +356,30 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
 
     m.fn_(
         "submit_command",
-        "Start an agent turn from a Lua-defined custom command (`/name`). Notifies and no-ops if an agent is already running. See [`smelt.engine.CommandOverrides`](types.md#smeltenginecommandoverrides) for the override shape.",
-        &["name", "body", "overrides"],
+        "Start an agent turn from a Lua-defined custom command (`/name`). `display` overrides the transcript label while `name` remains the command id. Queues behind the active turn if the agent is already running. See [`smelt.engine.CommandOverrides`](types.md#smeltenginecommandoverrides) for the override shape.",
+        &["name", "body", "overrides", "display"],
         |_,
-         (name, body, overrides): (String, String, Option<LuaCommandOverrides>)|
+         (name, body, overrides, display): (
+            String,
+            String,
+            Option<LuaCommandOverrides>,
+            Option<String>,
+        )|
          -> LuaResult<()> {
             let parsed = overrides.map(Into::into).unwrap_or_default();
             crate::lua::with_app(|app| {
-                if app.agent.is_some() {
-                    app.notify_error(format!("cannot run /{name} while agent is working"));
-                    return;
-                }
                 let cmd = smelt_core::custom_commands::CustomCommand {
+                    display: display.unwrap_or_else(|| name.clone()),
                     name,
                     body,
                     overrides: parsed,
                 };
+                if app.agent.is_some() || app.busy_stack.is_busy() {
+                    if app.queued_inputs.len() < crate::app::MAX_QUEUED_MESSAGES {
+                        app.queued_inputs.push(QueuedInput::CustomCommand(Box::new(cmd)));
+                    }
+                    return;
+                }
                 let turn = app.begin_custom_command_turn(cmd);
                 app.agent = Some(turn);
             });

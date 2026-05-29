@@ -1,10 +1,9 @@
-use crate::app::{CommandAction, EventOutcome, InputOutcome, TuiApp};
+use crate::app::{CommandAction, EventOutcome, InputOutcome, QueuedInput, TuiApp};
 
 use crate::input::{resolve_agent_esc, Action, EscAction};
 use crate::keymap::{self, KeyAction};
 use crate::smelt_term::UiHost;
 use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
-use protocol::Content;
 
 impl TuiApp {
     // ── Terminal event dispatch ───────────────────────────────────────────
@@ -133,9 +132,9 @@ impl TuiApp {
             }
             EventOutcome::InterruptWithQueued => {
                 // Save queued messages before cancel — the cancel path dumps them into the input buffer.
-                let remaining = std::mem::take(&mut self.queued_messages);
+                let remaining = std::mem::take(&mut self.queued_inputs);
                 self.discard_turn(true);
-                self.queued_messages = remaining;
+                self.queued_inputs = remaining;
                 false
             }
             EventOutcome::Exec(handle) => {
@@ -153,9 +152,10 @@ impl TuiApp {
                 if self.busy_stack.is_busy() {
                     let text = content.text_content();
                     if !text.is_empty()
-                        && self.queued_messages.len() < crate::app::MAX_QUEUED_MESSAGES
+                        && self.queued_inputs.len() < crate::app::MAX_QUEUED_MESSAGES
                     {
-                        self.queued_messages.push(text.into_owned());
+                        self.queued_inputs
+                            .push(QueuedInput::Message(text.into_owned()));
                     }
                 } else {
                     let text = content.text_content();
@@ -167,12 +167,10 @@ impl TuiApp {
                             self.process_input(&text)
                         };
                         self.apply_input_outcome(outcome, content, &display);
-                    } else if !self.queued_messages.is_empty() {
+                    } else if !self.queued_inputs.is_empty() {
                         // Empty submit: send the oldest queued message immediately.
-                        let queued = self.queued_messages.remove(0);
-                        let outcome = self.process_input(&queued);
-                        let content = Content::text(queued.clone());
-                        self.apply_input_outcome(outcome, content, &queued);
+                        let queued = self.queued_inputs.remove(0);
+                        self.start_queued_input(queued);
                     }
                 }
                 // Don't restore stash if a dialog opened — it restores on close.
@@ -410,14 +408,14 @@ impl TuiApp {
             if let Some(action) = keymap::lookup(code, modifiers, &ctx) {
                 match action {
                     KeyAction::CancelAgent => {
-                        self.queued_messages.clear();
+                        self.queued_inputs.clear();
                         return EventOutcome::CancelAgent;
                     }
                     KeyAction::ClearBuffer => {
                         self.timers.last_ctrlc = Some(self.core.clock.instant_now());
                         let mut pctx = crate::input::prompt_ctx_mut(&mut self.ui);
                         self.input.clear(&mut pctx);
-                        self.queued_messages.clear();
+                        self.queued_inputs.clear();
                         return EventOutcome::Noop;
                     }
                     _ => {}
@@ -440,7 +438,7 @@ impl TuiApp {
             let now = self.core.clock.instant_now();
             match resolve_agent_esc(
                 cur_mode,
-                !self.queued_messages.is_empty(),
+                !self.queued_inputs.is_empty(),
                 &mut self.timers.last_esc,
                 &mut self.timers.esc_vim_mode,
                 now,
@@ -452,12 +450,17 @@ impl TuiApp {
                 }
                 EscAction::Unqueue => {
                     let mut pctx = crate::input::prompt_ctx_mut(&mut self.ui);
-                    let mut prefix = self.queued_messages.join("\n");
+                    let mut prefix = self
+                        .queued_inputs
+                        .iter()
+                        .map(QueuedInput::prompt_replay_text)
+                        .collect::<Vec<_>>()
+                        .join("\n");
                     if !prefix.is_empty() && !pctx.buf.source().is_empty() {
                         prefix.push('\n');
                     }
                     self.input.prepend_text(&mut pctx, prefix);
-                    self.queued_messages.clear();
+                    self.queued_inputs.clear();
                 }
                 EscAction::Cancel { restore_vim } => {
                     if let Some(mode) = restore_vim {
@@ -493,13 +496,13 @@ impl TuiApp {
                 if let Some(outcome) = self.try_command_while_running(text.trim()) {
                     return outcome;
                 }
-                if !text.is_empty() && self.queued_messages.len() < crate::app::MAX_QUEUED_MESSAGES
-                {
-                    self.queued_messages.push(text.into_owned());
+                if !text.is_empty() && self.queued_inputs.len() < crate::app::MAX_QUEUED_MESSAGES {
+                    self.queued_inputs
+                        .push(QueuedInput::Message(text.into_owned()));
                 }
             }
             Action::SubmitEmpty => {
-                if !self.queued_messages.is_empty() {
+                if !self.queued_inputs.is_empty() {
                     return EventOutcome::InterruptWithQueued;
                 }
             }

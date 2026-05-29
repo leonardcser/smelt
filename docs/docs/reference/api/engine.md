@@ -73,12 +73,12 @@ Re-evaluate every Lua surface: clears every command, keymap, statusline source, 
 ## `smelt.engine.submit_command`
 
 ```lua
-fun(name: string, body: string, overrides: smelt.engine.CommandOverrides?): nil
+fun(name: string, body: string, overrides: smelt.engine.CommandOverrides?, display: string?): nil
 ```
 
 Types: [`smelt.engine.CommandOverrides`](types.md#smeltenginecommandoverrides)
 
-Start an agent turn from a Lua-defined custom command (`/name`). Notifies and no-ops if an agent is already running. See [`smelt.engine.CommandOverrides`](types.md#smeltenginecommandoverrides) for the override shape.
+Start an agent turn from a Lua-defined custom command (`/name`). `display` overrides the transcript label while `name` remains the command id. Queues behind the active turn if the agent is already running. See [`smelt.engine.CommandOverrides`](types.md#smeltenginecommandoverrides) for the override shape.
 
 ## `smelt.engine.summary_prefix`
 

@@ -1114,7 +1114,7 @@ LLM engine control — cancel, ask, inherited ask, submit commands, and request 
   Register a hook the engine calls immediately before each provider request.
 - `smelt.engine.reload` :: `fun(): nil`
   Re-evaluate every Lua surface: clears every command, keymap, statusline source, tool, hook, timer, and cell subscriber, wipes non-stdlib `package.loaded` entries, then re-runs the bootstrap chunks (from disk overlay if present, embedded otherwise, using the same `module_overlay_roots()` lookup as `require`), bundled autoload modules, `init.lua`, global plugins, and `.smelt/init.lua` + `.smelt/plugins/*`.
-- `smelt.engine.submit_command` :: `fun(name: string, body: string, overrides: smelt.engine.CommandOverrides?): nil`
+- `smelt.engine.submit_command` :: `fun(name: string, body: string, overrides: smelt.engine.CommandOverrides?, display: string?): nil`
   Start an agent turn from a Lua-defined custom command (`/name`).
 - `smelt.engine.summary_prefix` :: `fun(): string`
   Return the canonical compaction-summary prefix used when a checkpoint summary is represented as a user message.

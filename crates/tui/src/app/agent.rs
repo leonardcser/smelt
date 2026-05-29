@@ -112,7 +112,7 @@ impl TuiApp {
         } else {
             cmd.body.clone()
         };
-        let display = format!("/{}", cmd.name);
+        let display = format!("/{}", cmd.display);
 
         if !evaluated.is_empty() {
             self.core
@@ -288,7 +288,7 @@ impl TuiApp {
         {
             self.working.finish(TurnOutcome::Interrupted);
         };
-        self.queued_messages.clear();
+        self.queued_inputs.clear();
     }
 
     pub(crate) fn discard_turn(&mut self, cancelled: bool) {
@@ -329,10 +329,14 @@ impl TuiApp {
             {
                 self.working.finish(TurnOutcome::Interrupted);
             };
-            let leftover = std::mem::take(&mut self.queued_messages);
+            let leftover = std::mem::take(&mut self.queued_inputs);
             if !leftover.is_empty() {
                 let mut ctx = crate::input::prompt_ctx_mut(&mut self.ui);
-                let mut prefix = leftover.join("\n");
+                let mut prefix = leftover
+                    .iter()
+                    .map(crate::app::QueuedInput::prompt_replay_text)
+                    .collect::<Vec<_>>()
+                    .join("\n");
                 if !ctx.buf.source().is_empty() {
                     prefix.push('\n');
                 }

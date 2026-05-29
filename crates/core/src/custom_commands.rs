@@ -30,6 +30,7 @@ pub struct CommandOverrides {
 #[derive(Debug, Clone)]
 pub struct CustomCommand {
     pub name: String,
+    pub display: String,
     pub body: String,
     pub overrides: CommandOverrides,
 }

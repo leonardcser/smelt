@@ -39,7 +39,7 @@ pub struct AppSnapshot {
     pub cmdline_text: String,
     pub focused_overlay: Option<OverlayId>,
     pub prompt_text: String,
-    pub queued_messages: Vec<String>,
+    pub queued_inputs: Vec<String>,
     pub agent_running: bool,
     pub term_focused: bool,
     pub quit_requested: bool,
@@ -424,17 +424,19 @@ impl TestApp {
     /// Number of user messages waiting to be sent on the next turn. Used
     /// by `Steered` invariants that assert the drain semantics.
     pub fn queued_message_count(&self) -> usize {
-        self.app.queued_messages.len()
+        self.app.queued_inputs.len()
     }
 
     /// Side-channel: push a synthetic queued message. In production
-    /// `queued_messages` is filled by pressing Enter on the prompt while a
+    /// `queued_inputs` is filled by pressing Enter on the prompt while a
     /// turn is active; the harness short-circuits that flow but honors
     /// the same `MAX_QUEUED_MESSAGES` cap so the fuzz observes the real
     /// drop-on-overflow behavior instead of unbounded growth.
     pub fn push_queued_message(&mut self, text: String) {
-        if self.app.queued_messages.len() < crate::app::MAX_QUEUED_MESSAGES {
-            self.app.queued_messages.push(text);
+        if self.app.queued_inputs.len() < crate::app::MAX_QUEUED_MESSAGES {
+            self.app
+                .queued_inputs
+                .push(crate::app::QueuedInput::Message(text));
         }
     }
 
@@ -797,15 +799,17 @@ impl TestApp {
 
     /// Push a steer text onto the queued-messages stack.
     pub fn steer(&mut self, text: &str) {
-        if !text.is_empty() && self.app.queued_messages.len() < crate::app::MAX_QUEUED_MESSAGES {
-            self.app.queued_messages.push(text.to_string());
+        if !text.is_empty() && self.app.queued_inputs.len() < crate::app::MAX_QUEUED_MESSAGES {
+            self.app
+                .queued_inputs
+                .push(crate::app::QueuedInput::Message(text.to_string()));
         }
     }
 
     /// Remove up to `count` queued messages from the front.
     pub fn unsteer(&mut self, count: usize) {
-        let n = count.min(self.app.queued_messages.len());
-        self.app.queued_messages.drain(..n);
+        let n = count.min(self.app.queued_inputs.len());
+        self.app.queued_inputs.drain(..n);
     }
 
     /// Send a `CallCoreTool` UiCommand to the engine channel.
@@ -1224,9 +1228,9 @@ impl TestApp {
         const PENDING_DIALOGS_CAP: usize = 64;
 
         assert!(
-            self.app.queued_messages.len() <= crate::app::MAX_QUEUED_MESSAGES,
-            "queued_messages {} > cap {}",
-            self.app.queued_messages.len(),
+            self.app.queued_inputs.len() <= crate::app::MAX_QUEUED_MESSAGES,
+            "queued_inputs {} > cap {}",
+            self.app.queued_inputs.len(),
             crate::app::MAX_QUEUED_MESSAGES,
         );
         assert!(
@@ -1497,7 +1501,12 @@ impl TestApp {
             cmdline_text,
             focused_overlay: self.app.ui.focused_overlay(),
             prompt_text,
-            queued_messages: self.app.queued_messages.clone(),
+            queued_inputs: self
+                .app
+                .queued_inputs
+                .iter()
+                .map(crate::app::QueuedInput::display)
+                .collect(),
             agent_running: self.app.agent.is_some(),
             term_focused: self.app.term_focused,
             quit_requested: self.quit,
@@ -1691,7 +1700,7 @@ mod tests {
         assert!(!s.quit_requested);
         assert!(!s.agent_running);
         assert_eq!(s.app_focus, AppFocus::Prompt);
-        assert!(s.queued_messages.is_empty());
+        assert!(s.queued_inputs.is_empty());
     }
 
     // ── Resource invariants: per-event allocation tracking ────────────

@@ -84,8 +84,8 @@ impl TuiApp {
             EngineEvent::Steered { text, count } => {
                 self.flush_streaming_thinking();
                 self.flush_streaming_text();
-                let drain_n = count.min(self.queued_messages.len());
-                self.queued_messages.drain(..drain_n);
+                let drain_n = count.min(self.queued_inputs.len());
+                self.queued_inputs.drain(..drain_n);
                 if drain_n > 0 {
                     self.push_block(Block::User {
                         text,

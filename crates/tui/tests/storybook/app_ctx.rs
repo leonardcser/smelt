@@ -290,7 +290,7 @@ impl AppStoryCtx {
 
     /// Push a synthetic queued user message. In production these arrive
     /// by pressing Enter on the prompt while a turn is active; the
-    /// harness side-channels them straight onto `app.queued_messages`.
+    /// harness side-channels them straight onto `app.queued_inputs`.
     /// Auto-starts a turn so the top bar's `prompt.queued()` accessor
     /// (which gates on `agent.is_some() || busy`) surfaces the entries.
     pub fn push_queued_message(&mut self, text: &str) {

@@ -147,10 +147,14 @@ impl TuiApp {
             .strip_prefix('/')
             .and_then(|s| s.split_whitespace().next())
             .unwrap_or("");
-        // Commands that opt into `queue_when_busy` are deferred until after
-        // the current turn rather than running mid-turn.
+        // Commands that opt into `queue_when_busy` get one synchronous pass so
+        // handlers that build a custom-command turn can capture their evaluated
+        // body and enqueue it via `smelt.engine.submit_command`.
         if !name.is_empty() && self.lua.command_queues_when_busy(name) {
-            return None;
+            return match run_command(self, &normalized) {
+                CommandAction::Exec(handle) => Some(EventOutcome::Exec(handle)),
+                CommandAction::Continue => Some(EventOutcome::Noop),
+            };
         }
         // Commands registered with `{ while_busy = false }` are blocked mid-turn.
         if !name.is_empty() && self.lua.command_blocks_while_busy(name) == Some(true) {

@@ -38,9 +38,9 @@ engine.on_prepare_request = nil
 ---@type fun(): nil
 engine.reload = nil
 
---- Start an agent turn from a Lua-defined custom command (`/name`). Notifies and no-ops if an agent is already running. See `smelt.engine.CommandOverrides` for the override shape.
+--- Start an agent turn from a Lua-defined custom command (`/name`). `display` overrides the transcript label while `name` remains the command id. Queues behind the active turn if the agent is already running. See `smelt.engine.CommandOverrides` for the override shape.
 ---@see smelt.engine.CommandOverrides
----@type fun(name: string, body: string, overrides: smelt.engine.CommandOverrides?): nil
+---@type fun(name: string, body: string, overrides: smelt.engine.CommandOverrides?, display: string?): nil
 engine.submit_command = nil
 
 --- Return the canonical compaction-summary prefix used when a checkpoint summary is represented as a user message.

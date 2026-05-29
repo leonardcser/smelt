@@ -80,12 +80,15 @@ clean).
 
 smelt.cmd.register("simplify", function(arg)
   local body = BODY
+  local display = "simplify"
   if arg and arg ~= "" then
     body = body .. "\n\n## Additional Focus\n\n" .. arg
+    display = display .. " " .. arg
   end
-  smelt.engine.submit_command("simplify", body)
+  smelt.engine.submit_command("simplify", body, nil, display)
 end, {
   desc = "review changed code for reuse, quality, and efficiency",
   args = { "<focus>" },
   while_busy = false,
+  queue_when_busy = true,
 })

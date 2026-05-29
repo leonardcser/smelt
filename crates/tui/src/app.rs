@@ -59,7 +59,7 @@ pub struct TuiApp {
     /// engine's event receiver but is moved out at construction time so
     /// the two can be polled in the same `tokio::select!`.
     pub(crate) host_rx: tokio::sync::mpsc::UnboundedReceiver<engine::HostCall>,
-    pub(crate) queued_messages: Vec<String>,
+    pub(crate) queued_inputs: Vec<QueuedInput>,
     /// Current working directory (cached at startup).
     pub(crate) cwd: String,
     pub(crate) shared_session: Arc<Mutex<Option<Session>>>,
@@ -300,6 +300,25 @@ pub(crate) const CONFIRM_DEFER_MS: u64 = 1500;
 /// the overflow is preferable to unbounded memory growth.
 pub(crate) const MAX_QUEUED_MESSAGES: usize = 64;
 
+#[derive(Clone)]
+pub(crate) enum QueuedInput {
+    Message(String),
+    CustomCommand(Box<smelt_core::custom_commands::CustomCommand>),
+}
+
+impl QueuedInput {
+    pub(crate) fn display(&self) -> String {
+        match self {
+            QueuedInput::Message(text) => text.clone(),
+            QueuedInput::CustomCommand(cmd) => format!("/{}", cmd.display),
+        }
+    }
+
+    pub(crate) fn prompt_replay_text(&self) -> String {
+        self.display()
+    }
+}
+
 pub(crate) enum DeferredDialog {
     Confirm(Box<ConfirmRequest>),
 }
@@ -316,6 +335,21 @@ pub(crate) struct PendingTool {
 }
 
 impl TuiApp {
+    pub(crate) fn start_queued_input(&mut self, queued: QueuedInput) {
+        match queued {
+            QueuedInput::Message(text) if !text.is_empty() => {
+                let outcome = self.process_input(&text);
+                let content = Content::text(text.clone());
+                self.apply_input_outcome(outcome, content, &text);
+            }
+            QueuedInput::CustomCommand(cmd) => {
+                let turn = self.begin_custom_command_turn(*cmd);
+                self.agent = Some(turn);
+            }
+            QueuedInput::Message(_) => {}
+        }
+    }
+
     pub(crate) fn apply_context_window_update(&mut self, update: ContextWindowUpdate) {
         if update.request_id == self.context_window_request_id
             && update.model == self.core.config.model
@@ -478,7 +512,7 @@ impl TuiApp {
             exec: None,
             lua_wakeup_rx,
             host_rx,
-            queued_messages: Vec::new(),
+            queued_inputs: Vec::new(),
             cwd,
             shared_session,
             task_label: None,
@@ -1318,16 +1352,10 @@ impl TuiApp {
                 }
             }
 
-            if self.agent.is_none()
-                && !self.queued_messages.is_empty()
-                && !self.busy_stack.is_busy()
+            if self.agent.is_none() && !self.queued_inputs.is_empty() && !self.busy_stack.is_busy()
             {
-                let text = self.queued_messages.remove(0);
-                if !text.is_empty() {
-                    let outcome = self.process_input(&text);
-                    let content = Content::text(text.clone());
-                    self.apply_input_outcome(outcome, content, &text);
-                }
+                let queued = self.queued_inputs.remove(0);
+                self.start_queued_input(queued);
             }
 
             if self.agent.is_none() && !self.pending_dialogs.is_empty() {
@@ -1559,6 +1587,14 @@ impl TuiApp {
     }
 }
 
+/// Poll one item from a `futures_core::Stream`, equivalent to `StreamExt::next`.
+async fn stream_next<S>(stream: &mut S) -> Option<S::Item>
+where
+    S: futures_core::Stream + Unpin,
+{
+    std::future::poll_fn(|cx| Pin::new(&mut *stream).poll_next(cx)).await
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1622,12 +1658,4 @@ mod tests {
 
         assert_eq!(app.app.core.config.context_window, Some(272_000));
     }
-}
-
-/// Poll one item from a `futures_core::Stream`, equivalent to `StreamExt::next`.
-async fn stream_next<S>(stream: &mut S) -> Option<S::Item>
-where
-    S: futures_core::Stream + Unpin,
-{
-    std::future::poll_fn(|cx| Pin::new(&mut *stream).poll_next(cx)).await
 }

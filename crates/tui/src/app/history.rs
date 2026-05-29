@@ -126,7 +126,7 @@ impl TuiApp {
         let old_id = self.core.session.id.clone();
         self.core.session.history.clear();
         self.reset_session_permissions();
-        self.queued_messages.clear();
+        self.queued_inputs.clear();
         self.task_label = None;
         self.working.clear();
         if let Some(w) = self.ui.win_mut(crate::app::PROMPT_WIN) {
@@ -216,7 +216,7 @@ impl TuiApp {
             .map(|&(_, c)| c)
             .unwrap_or(0.0);
         self.reset_session_permissions();
-        self.queued_messages.clear();
+        self.queued_inputs.clear();
         let mut pctx = crate::input::prompt_ctx_mut(&mut self.ui);
         self.input.clear(&mut pctx);
         self.input.store.lock().unwrap().clear();

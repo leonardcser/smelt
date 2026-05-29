@@ -157,6 +157,13 @@ local function build_overrides(fm)
   return out
 end
 
+local function command_display(name, arg)
+  if arg and arg ~= "" then
+    return name .. " " .. arg
+  end
+  return name
+end
+
 local function run_custom(name, path, arg)
   local content = read_file(path)
   if not content then
@@ -168,7 +175,7 @@ local function run_custom(name, path, arg)
   if arg and arg ~= "" then
     body = body .. "\n\n" .. arg
   end
-  smelt.engine.submit_command(name, body, build_overrides(fm))
+  smelt.engine.submit_command(name, body, build_overrides(fm), command_display(name, arg))
 end
 
 local function register_all()
