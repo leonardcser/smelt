@@ -36,8 +36,9 @@ pub struct CachedInlineDiff {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub(crate) struct CachedSpan {
-    pub(crate) text: String,
+pub(crate) struct CachedStyleRange {
+    pub(crate) start: usize,
+    pub(crate) end: usize,
     pub(crate) fg: (u8, u8, u8),
 }
 
@@ -46,36 +47,60 @@ pub(crate) enum CachedDiffLine {
     Context {
         lineno: usize,
         text: String,
-        spans: Vec<CachedSpan>,
+        spans: Vec<CachedStyleRange>,
     },
     Delete {
         lineno: usize,
         text: String,
-        spans: Vec<CachedSpan>,
+        spans: Vec<CachedStyleRange>,
     },
     Insert {
         lineno: usize,
         text: String,
-        spans: Vec<CachedSpan>,
+        spans: Vec<CachedStyleRange>,
     },
     Ellipsis,
 }
 
-fn cached_spans_for_line(h: &mut HighlightLines, line: &str) -> Vec<CachedSpan> {
+fn cached_style_ranges_for_line(h: &mut HighlightLines, line: &str) -> Vec<CachedStyleRange> {
     let line_with_nl = format!("{}\n", line);
-    h.highlight_line(&line_with_nl, &SYNTAX_SET)
-        .unwrap_or_default()
+    let regions = h
+        .highlight_line(&line_with_nl, &SYNTAX_SET)
+        .unwrap_or_default();
+    let pieces: Vec<_> = regions
         .into_iter()
         .filter_map(|(style, text)| {
             let text = text.trim_end_matches('\n').trim_end_matches('\r');
-            if text.is_empty() {
-                None
-            } else {
-                Some(CachedSpan {
-                    text: text.to_string(),
-                    fg: (style.foreground.r, style.foreground.g, style.foreground.b),
-                })
-            }
+            (!text.is_empty()).then_some((style, text))
+        })
+        .collect();
+    let joined: String = pieces.iter().map(|(_, text)| *text).collect();
+    if joined != line {
+        let fg = pieces
+            .first()
+            .map(|(style, _)| (style.foreground.r, style.foreground.g, style.foreground.b))
+            .unwrap_or((200, 200, 200));
+        return (!line.is_empty())
+            .then_some(CachedStyleRange {
+                start: 0,
+                end: line.len(),
+                fg,
+            })
+            .into_iter()
+            .collect();
+    }
+
+    let mut offset = 0;
+    pieces
+        .into_iter()
+        .filter_map(|(style, text)| {
+            let start = offset;
+            offset += text.len();
+            (start < offset).then_some(CachedStyleRange {
+                start,
+                end: offset,
+                fg: (style.foreground.r, style.foreground.g, style.foreground.b),
+            })
         })
         .collect()
 }
@@ -108,7 +133,7 @@ pub fn build_file_view_cache(content: &str, ext: Option<&str>) -> CachedInlineDi
         .map(|(i, line)| CachedDiffLine::Context {
             lineno: i + 1,
             text: line.to_string(),
-            spans: cached_spans_for_line(&mut h, line),
+            spans: cached_style_ranges_for_line(&mut h, line),
         })
         .collect();
     let max_display_lineno = lines.len().max(1);
@@ -179,7 +204,7 @@ pub fn build_inline_diff_cache_ext(
             lines.push(CachedDiffLine::Context {
                 lineno: ctx_before_start + idx + 1,
                 text: (*line).to_string(),
-                spans: cached_spans_for_line(&mut h, line),
+                spans: cached_style_ranges_for_line(&mut h, line),
             });
         }
     }
@@ -195,7 +220,7 @@ pub fn build_inline_diff_cache_ext(
             extra_indent,
             change.value.trim_end_matches('\n').replace('\t', "    ")
         );
-        let spans = cached_spans_for_line(&mut h, &raw);
+        let spans = cached_style_ranges_for_line(&mut h, &raw);
         match change.tag {
             ChangeTag::Equal => {
                 if visible[ci] {
@@ -256,7 +281,7 @@ pub fn build_inline_diff_cache_ext(
             lines.push(CachedDiffLine::Context {
                 lineno: after_start + idx + 1,
                 text: (*line).to_string(),
-                spans: cached_spans_for_line(&mut h, line),
+                spans: cached_style_ranges_for_line(&mut h, line),
             });
         }
     }
@@ -417,7 +442,30 @@ pub fn print_inline_diff_ext(
     print_cached_inline_diff(out, &cache, gutter, indent_cells, skip, max_rows)
 }
 
-fn print_cached_spans(out: &mut LineBuilder, spans: &[CachedSpan], bg: Option<Color>) -> usize {
+#[derive(Debug, Clone)]
+struct RenderSpan {
+    text: String,
+    fg: (u8, u8, u8),
+}
+
+fn render_spans_for_line(line: &str, spans: &[CachedStyleRange]) -> Vec<RenderSpan> {
+    spans
+        .iter()
+        .filter_map(|span| {
+            let text = smelt_buffer::text::slice(line, span.start..span.end);
+            if text.is_empty() {
+                None
+            } else {
+                Some(RenderSpan {
+                    text: text.to_string(),
+                    fg: span.fg,
+                })
+            }
+        })
+        .collect()
+}
+
+fn print_cached_spans(out: &mut LineBuilder, spans: &[RenderSpan], bg: Option<Color>) -> usize {
     use unicode_width::UnicodeWidthStr;
 
     let mut col = 0;
@@ -442,13 +490,15 @@ fn print_cached_spans(out: &mut LineBuilder, spans: &[CachedSpan], bg: Option<Co
 
 fn split_cached_spans_into_rows(
     out: &mut LineBuilder,
-    spans: &[CachedSpan],
+    line: &str,
+    spans: &[CachedStyleRange],
     max_width: usize,
-) -> Vec<Vec<CachedSpan>> {
+) -> Vec<Vec<RenderSpan>> {
+    let spans = render_spans_for_line(line, spans);
     let _ = out;
     let max_width = max_width.max(1);
-    let mut rows: Vec<Vec<CachedSpan>> = Vec::new();
-    let mut current_row: Vec<CachedSpan> = Vec::new();
+    let mut rows: Vec<Vec<RenderSpan>> = Vec::new();
+    let mut current_row: Vec<RenderSpan> = Vec::new();
     let mut col = 0;
 
     for span in spans {
@@ -483,7 +533,7 @@ fn split_cached_spans_into_rows(
                 continue;
             }
             col += chunk_w;
-            current_row.push(CachedSpan {
+            current_row.push(RenderSpan {
                 text: chunk,
                 fg: span.fg,
             });
@@ -564,35 +614,50 @@ pub fn print_cached_inline_diff(
                 out.newline();
             }
             _ => {
-                let (source_line, sign, bg, spans) = match line {
-                    CachedDiffLine::Context { lineno, spans, .. } => (
+                let (source_line, sign, bg, text, spans) = match line {
+                    CachedDiffLine::Context {
+                        lineno,
+                        text,
+                        spans,
+                    } => (
                         smelt_buffer::buffer::SourceLine::Linear {
                             lineno: *lineno as u32,
                         },
                         None,
                         None,
+                        text.as_str(),
                         spans,
                     ),
-                    CachedDiffLine::Delete { lineno, spans, .. } => (
+                    CachedDiffLine::Delete {
+                        lineno,
+                        text,
+                        spans,
+                    } => (
                         smelt_buffer::buffer::SourceLine::Linear {
                             lineno: *lineno as u32,
                         },
                         Some(('-', Color::Red)),
                         bg_del,
+                        text.as_str(),
                         spans,
                     ),
-                    CachedDiffLine::Insert { lineno, spans, .. } => (
+                    CachedDiffLine::Insert {
+                        lineno,
+                        text,
+                        spans,
+                    } => (
                         smelt_buffer::buffer::SourceLine::Linear {
                             lineno: *lineno as u32,
                         },
                         Some(('+', Color::Green)),
                         bg_add,
+                        text.as_str(),
                         spans,
                     ),
                     CachedDiffLine::Ellipsis => unreachable!(),
                 };
                 let line_fg = sign.map(|(_, color)| color);
-                let visual_rows = split_cached_spans_into_rows(out, spans, max_content);
+                let visual_rows = split_cached_spans_into_rows(out, text, spans, max_content);
                 let pad_meta = SpanMeta {
                     selectable: false,
                     copy_as: None,
@@ -972,6 +1037,37 @@ mod tests {
         (ctx, del, ins, ell)
     }
 
+    fn assert_style_ranges_valid(cache: &CachedInlineDiff) {
+        for line in &cache.lines {
+            let (text, spans) = match line {
+                CachedDiffLine::Context { text, spans, .. }
+                | CachedDiffLine::Delete { text, spans, .. }
+                | CachedDiffLine::Insert { text, spans, .. } => (text, spans),
+                CachedDiffLine::Ellipsis => continue,
+            };
+            for span in spans {
+                assert!(span.start <= span.end, "inverted range: {span:?}");
+                assert!(
+                    span.end <= text.len(),
+                    "range past text: {span:?} in {text:?}"
+                );
+                assert_eq!(smelt_buffer::text::snap(text, span.start), span.start);
+                assert_eq!(smelt_buffer::text::snap(text, span.end), span.end);
+            }
+        }
+    }
+
+    #[test]
+    fn cached_diff_style_ranges_are_valid_for_tabs_and_unicode() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("unicode.rs");
+        let old = "fn main() {\n\tlet s = \"é😀\";\n}\n";
+        let new = "fn main() {\n\tlet s = \"é😀!\";\n}\n";
+        std::fs::write(&path, new).unwrap();
+        let cache = build_inline_diff_cache(old, new, path.to_str().unwrap(), "");
+        assert_style_ranges_valid(&cache);
+    }
+
     #[test]
     fn compute_change_visibility_marks_all_equal_lines_when_no_changes() {
         let changes = vec![
@@ -1044,11 +1140,12 @@ mod tests {
     #[test]
     fn split_cached_spans_into_rows_wraps_at_max_width() {
         let block = render_test(80, |out| {
-            let spans = vec![CachedSpan {
-                text: "abcdefghij".to_string(),
+            let spans = vec![CachedStyleRange {
+                start: 0,
+                end: "abcdefghij".len(),
                 fg: (10, 20, 30),
             }];
-            let rows = split_cached_spans_into_rows(out, &spans, 4);
+            let rows = split_cached_spans_into_rows(out, "abcdefghij", &spans, 4);
             assert_eq!(rows.len(), 3);
             let concat: String = rows
                 .iter()
@@ -1071,11 +1168,12 @@ mod tests {
     #[test]
     fn split_cached_spans_into_rows_counts_display_width() {
         render_test(80, |out| {
-            let spans = vec![CachedSpan {
-                text: "😀abc".to_string(),
+            let spans = vec![CachedStyleRange {
+                start: 0,
+                end: "😀abc".len(),
                 fg: (1, 2, 3),
             }];
-            let rows = split_cached_spans_into_rows(out, &spans, 2);
+            let rows = split_cached_spans_into_rows(out, "😀abc", &spans, 2);
             assert_eq!(rows[0][0].text, "😀");
             assert_eq!(rows[1][0].text, "ab");
         });
@@ -1085,16 +1183,18 @@ mod tests {
     fn split_cached_spans_into_rows_ignores_empty_spans() {
         render_test(80, |out| {
             let spans = vec![
-                CachedSpan {
-                    text: "".to_string(),
+                CachedStyleRange {
+                    start: 0,
+                    end: 0,
                     fg: (0, 0, 0),
                 },
-                CachedSpan {
-                    text: "ab".to_string(),
+                CachedStyleRange {
+                    start: 0,
+                    end: 2,
                     fg: (1, 2, 3),
                 },
             ];
-            let rows = split_cached_spans_into_rows(out, &spans, 10);
+            let rows = split_cached_spans_into_rows(out, "ab", &spans, 10);
             assert_eq!(rows.len(), 1);
             assert_eq!(rows[0].len(), 1);
             assert_eq!(rows[0][0].text, "ab");
@@ -1104,11 +1204,12 @@ mod tests {
     #[test]
     fn split_cached_spans_into_rows_clamps_max_width_to_one() {
         render_test(80, |out| {
-            let spans = vec![CachedSpan {
-                text: "ab".to_string(),
+            let spans = vec![CachedStyleRange {
+                start: 0,
+                end: 2,
                 fg: (0, 0, 0),
             }];
-            let rows = split_cached_spans_into_rows(out, &spans, 0);
+            let rows = split_cached_spans_into_rows(out, "ab", &spans, 0);
             // max_width clamped to 1
             assert_eq!(rows.len(), 2);
             assert_eq!(rows[0][0].text, "a");
@@ -1119,30 +1220,63 @@ mod tests {
     #[test]
     fn split_cached_spans_into_rows_emits_empty_row_for_empty_input() {
         render_test(80, |out| {
-            let rows = split_cached_spans_into_rows(out, &[], 4);
+            let rows = split_cached_spans_into_rows(out, "", &[], 4);
             assert_eq!(rows.len(), 1);
             assert!(rows[0].is_empty());
         });
     }
 
     #[test]
-    fn cached_spans_for_line_returns_non_empty_for_plain_text() {
+    fn render_spans_for_line_uses_line_text_for_ranges() {
+        let spans = vec![CachedStyleRange {
+            start: 0,
+            end: 3,
+            fg: (1, 2, 3),
+        }];
+        let rendered = render_spans_for_line("abc", &spans);
+        assert_eq!(rendered.len(), 1);
+        assert_eq!(rendered[0].text, "abc");
+        assert_eq!(rendered[0].fg, (1, 2, 3));
+    }
+
+    #[test]
+    fn split_cached_spans_into_rows_uses_line_text_for_chunk_text() {
+        render_test(80, |out| {
+            let spans = vec![CachedStyleRange {
+                start: 0,
+                end: 3,
+                fg: (1, 2, 3),
+            }];
+            let rows = split_cached_spans_into_rows(out, "abc", &spans, 2);
+            assert_eq!(rows[0][0].text, "ab");
+            assert_eq!(rows[1][0].text, "c");
+        });
+    }
+
+    #[test]
+    fn cached_style_ranges_for_line_returns_non_empty_for_plain_text() {
         let theme = syntax_theme();
         let syntax = SYNTAX_SET.find_syntax_plain_text();
         let mut h = HighlightLines::new(syntax, theme);
-        let spans = cached_spans_for_line(&mut h, "hello world");
+        let spans = cached_style_ranges_for_line(&mut h, "hello world");
         assert!(!spans.is_empty());
-        let concat: String = spans.iter().map(|s| s.text.as_str()).collect();
+        let concat: String = spans
+            .iter()
+            .map(|s| smelt_buffer::text::slice("hello world", s.start..s.end))
+            .collect();
         assert_eq!(concat, "hello world");
     }
 
     #[test]
-    fn cached_spans_for_line_strips_trailing_newline_and_cr() {
+    fn cached_style_ranges_for_line_strips_trailing_newline_and_cr() {
         let theme = syntax_theme();
         let syntax = SYNTAX_SET.find_syntax_plain_text();
         let mut h = HighlightLines::new(syntax, theme);
-        let spans = cached_spans_for_line(&mut h, "ab");
-        let concat: String = spans.iter().map(|s| s.text.as_str()).collect();
+        let spans = cached_style_ranges_for_line(&mut h, "ab");
+        let concat: String = spans
+            .iter()
+            .map(|s| smelt_buffer::text::slice("ab", s.start..s.end))
+            .collect();
         assert!(!concat.ends_with('\n'));
         assert!(!concat.ends_with('\r'));
     }
@@ -1376,8 +1510,9 @@ mod tests {
             lines: vec![CachedDiffLine::Context {
                 lineno: 1,
                 text: "x".to_string(),
-                spans: vec![CachedSpan {
-                    text: "x".to_string(),
+                spans: vec![CachedStyleRange {
+                    start: 0,
+                    end: 1,
                     fg: (200, 200, 200),
                 }],
             }],
@@ -1395,13 +1530,17 @@ mod tests {
         let cache = CachedInlineDiff {
             max_display_lineno: 3,
             lines: (1..=3)
-                .map(|i| CachedDiffLine::Context {
-                    lineno: i,
-                    text: format!("line{i}"),
-                    spans: vec![CachedSpan {
-                        text: format!("line{i}"),
-                        fg: (0, 0, 0),
-                    }],
+                .map(|i| {
+                    let text = format!("line{i}");
+                    CachedDiffLine::Context {
+                        lineno: i,
+                        spans: vec![CachedStyleRange {
+                            start: 0,
+                            end: text.len(),
+                            fg: (0, 0, 0),
+                        }],
+                        text,
+                    }
                 })
                 .collect(),
         };
@@ -1416,13 +1555,17 @@ mod tests {
         let cache = CachedInlineDiff {
             max_display_lineno: 3,
             lines: (1..=3)
-                .map(|i| CachedDiffLine::Context {
-                    lineno: i,
-                    text: format!("line{i}"),
-                    spans: vec![CachedSpan {
-                        text: format!("line{i}"),
-                        fg: (0, 0, 0),
-                    }],
+                .map(|i| {
+                    let text = format!("line{i}");
+                    CachedDiffLine::Context {
+                        lineno: i,
+                        spans: vec![CachedStyleRange {
+                            start: 0,
+                            end: text.len(),
+                            fg: (0, 0, 0),
+                        }],
+                        text,
+                    }
                 })
                 .collect(),
         };
@@ -1443,8 +1586,9 @@ mod tests {
 
     #[test]
     fn print_cached_inline_diff_renders_delete_insert_and_ellipsis_markers() {
-        let span = |s: &str| CachedSpan {
-            text: s.to_string(),
+        let span = |s: &str| CachedStyleRange {
+            start: 0,
+            end: s.len(),
             fg: (200, 200, 200),
         };
         let cache = CachedInlineDiff {
