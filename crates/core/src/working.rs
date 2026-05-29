@@ -13,6 +13,7 @@ use std::time::{Duration, Instant};
 #[derive(Clone, Copy, PartialEq)]
 pub enum TurnPhase {
     Working,
+    Compacting,
     Retrying { delay: Duration, attempt: u32 },
 }
 
@@ -168,7 +169,19 @@ impl WorkingState {
         }
         Some(match live.phase {
             TurnPhase::Retrying { .. } => WorkState::Retrying,
-            TurnPhase::Working => WorkState::Working,
+            TurnPhase::Working | TurnPhase::Compacting => WorkState::Working,
+        })
+    }
+
+    pub fn phase_label(&self) -> Option<&'static str> {
+        let live = self.live.as_ref()?;
+        if live.pause_started.is_some() {
+            return Some("paused");
+        }
+        Some(match live.phase {
+            TurnPhase::Working => "working",
+            TurnPhase::Compacting => "compacting",
+            TurnPhase::Retrying { .. } => "retrying",
         })
     }
 
@@ -325,6 +338,18 @@ mod tests {
         assert!(s.is_animating());
         assert!(s.elapsed().is_some());
         assert_eq!(s.engine_state(), Some(WorkState::Working));
+    }
+
+    #[test]
+    fn compacting_is_live_working_without_resetting_elapsed() {
+        let (clock, mut s) = fixture();
+        s.begin(TurnPhase::Working);
+        clock.advance(Duration::from_millis(500));
+        s.begin(TurnPhase::Compacting);
+
+        assert_eq!(s.engine_state(), Some(WorkState::Working));
+        assert_eq!(s.phase_label(), Some("compacting"));
+        assert_eq!(s.elapsed(), Some(Duration::from_millis(500)));
     }
 
     #[test]

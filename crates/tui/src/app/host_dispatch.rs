@@ -14,11 +14,20 @@ use crate::app::TuiApp;
 use engine::HostCall;
 use protocol::Message;
 use smelt_core::lua::{HookRegistry, LuaShared};
+use smelt_core::working::TurnPhase;
 use std::sync::{Arc, Mutex};
 use tokio::sync::oneshot;
 
 type MessageReply = oneshot::Sender<Option<Vec<Message>>>;
 type MessageReplySlot = Arc<Mutex<Option<MessageReply>>>;
+
+fn restore_working_phase() {
+    crate::lua::try_with_app(|app| {
+        if app.agent.is_some() {
+            app.working.begin(TurnPhase::Working);
+        }
+    });
+}
 
 impl TuiApp {
     /// Pull every pending `HostCall` and dispatch it. Non-blocking;
@@ -76,12 +85,13 @@ impl TuiApp {
     /// and retries) or `nil` (engine aborts the turn). If the hook
     /// vanishes without calling `reply`, the wrapping closure is GC'd,
     /// the Sender drops, and the engine's `.await` resolves to `None`.
-    fn dispatch_recover_from_context_limit(&self, messages: Vec<Message>, reply: MessageReply) {
+    fn dispatch_recover_from_context_limit(&mut self, messages: Vec<Message>, reply: MessageReply) {
         self.call_message_reply_hook(
             "on_context_limit",
             |s| &s.hooks.context_limit,
             messages,
             reply,
+            true,
             |_, func, messages_table, reply_fn| func.call::<()>((messages_table, reply_fn)),
         );
     }
@@ -112,6 +122,7 @@ impl TuiApp {
             |s| &s.hooks.prepare_request,
             messages,
             reply,
+            true,
             |lua, func, messages_table, reply_fn| {
                 let request = lua.create_table()?;
                 request.set("messages", messages_table)?;
@@ -127,11 +138,12 @@ impl TuiApp {
     }
 
     fn call_message_reply_hook(
-        &self,
+        &mut self,
         label: &'static str,
         registry: impl Fn(&LuaShared) -> &Arc<HookRegistry>,
         messages: Vec<Message>,
         reply: MessageReply,
+        compact_phase: bool,
         call: impl FnOnce(&mlua::Lua, mlua::Function, mlua::Value, mlua::Function) -> mlua::Result<()>,
     ) {
         let lua = self.lua.lua();
@@ -149,9 +161,15 @@ impl TuiApp {
                 return;
             }
         };
+        if compact_phase && self.agent.is_some() {
+            self.working.begin(TurnPhase::Compacting);
+        }
         let reply_slot: MessageReplySlot = Arc::new(Mutex::new(Some(reply)));
         let reply_for_closure = Arc::clone(&reply_slot);
         let reply_fn = match lua.create_function(move |inner_lua, value: mlua::Value| {
+            if compact_phase {
+                restore_working_phase();
+            }
             let Some(tx) = reply_for_closure.lock().ok().and_then(|mut g| g.take()) else {
                 // Already replied; subsequent calls are silent no-ops so
                 // hook authors aren't punished for defensive double-calls.
@@ -167,16 +185,30 @@ impl TuiApp {
             Ok(f) => f,
             Err(e) => {
                 self.lua.record_error(format!("{label}: build reply: {e}"));
+                if compact_phase {
+                    restore_working_phase();
+                }
                 if let Some(tx) = reply_slot.lock().ok().and_then(|mut g| g.take()) {
                     let _ = tx.send(None);
                 }
                 return;
             }
         };
-        if let Err(e) = call(lua, func, messages_table, reply_fn) {
-            self.lua.record_error(format!("{label}: {e}"));
-            if let Some(tx) = reply_slot.lock().ok().and_then(|mut g| g.take()) {
-                let _ = tx.send(None);
+        match call(lua, func, messages_table, reply_fn) {
+            Ok(()) => {
+                let replied = reply_slot.lock().ok().is_some_and(|g| g.is_none());
+                if compact_phase && replied && self.agent.is_some() {
+                    self.working.begin(TurnPhase::Working);
+                }
+            }
+            Err(e) => {
+                self.lua.record_error(format!("{label}: {e}"));
+                if compact_phase {
+                    restore_working_phase();
+                }
+                if let Some(tx) = reply_slot.lock().ok().and_then(|mut g| g.take()) {
+                    let _ = tx.send(None);
+                }
             }
         }
     }

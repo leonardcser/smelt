@@ -16,6 +16,22 @@ Types: [`smelt.Reg`](types.md#smeltreg)
 
 Push a busy token onto the per-app stack and return a `Reg` whose `:remove()` pops it. While any token is live the prompt top-bar indicator animates with the top token's `label`, and `work_state` flips to `"busy"` (unless an engine-side turn is also live, in which case engine state wins). Multiple plugins can hold tokens concurrently; the most recently pushed label wins for display.
 
+## `smelt.work.guard`
+
+```lua
+fun(): table
+```
+
+Return an opaque snapshot of the current work lifecycle. Pass it to guarded APIs or `work.guard_current` so late async callbacks can avoid committing after cancellation or turn replacement.
+
+## `smelt.work.guard_current`
+
+```lua
+fun(guard: table): boolean
+```
+
+Return whether a guard from `work.guard()` still matches the current turn and cancellation generation.
+
 ## `smelt.work.is_busy`
 
 ```lua

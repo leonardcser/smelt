@@ -35,6 +35,35 @@ concurrently; the most recently pushed label wins for display.",
         },
     )?;
     m.fn_(
+        "guard",
+        "Return an opaque snapshot of the current work lifecycle. Pass it to guarded APIs or `work.guard_current` so late async callbacks can avoid committing after cancellation or turn replacement.",
+        &[],
+        |lua, ()| -> LuaResult<mlua::Table> {
+            let (turn_id, cancel_generation) = crate::lua::try_with_app(|app| {
+                (app.agent.as_ref().map(|agent| agent.turn_id), app.cancel_generation)
+            })
+            .unwrap_or((None, 0));
+            let table = lua.create_table()?;
+            table.set("turn_id", turn_id)?;
+            table.set("cancel_generation", cancel_generation)?;
+            Ok(table)
+        },
+    )?;
+    m.fn_(
+        "guard_current",
+        "Return whether a guard from `work.guard()` still matches the current turn and cancellation generation.",
+        &["guard"],
+        |_, guard: mlua::Table| -> LuaResult<bool> {
+            let turn_id = guard.get::<Option<u64>>("turn_id")?;
+            let cancel_generation = guard.get::<u64>("cancel_generation")?;
+            Ok(crate::lua::try_with_app(|app| {
+                app.cancel_generation == cancel_generation
+                    && app.agent.as_ref().map(|agent| agent.turn_id) == turn_id
+            })
+            .unwrap_or(false))
+        },
+    )?;
+    m.fn_(
         "is_busy",
         "Return `true` while at least one `smelt.work.busy` token is \
 live. Plugins that need richer state (top label, full stack, retry \

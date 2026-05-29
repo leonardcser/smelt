@@ -103,26 +103,18 @@ end
 -- system prompt and tool list. `history` may be a strict prefix of the
 -- live model-visible conversation; when omitted the full live history is
 -- inherited.
-local function summarize_messages_with_handle(history, instructions, handle, done)
+local function summarize_messages(history, instructions, done)
 	if not history or #history == 0 then
 		done(nil)
 		return
 	end
 	local task = build_summary_task(instructions)
-	local owns_handle = false
-	if not handle then
-		handle = smelt.work.busy("compacting")
-		owns_handle = true
-	end
 	local empty_retries = 0
 	local boundary_restarts = 0
 	local base_messages = clone_messages(history)
 	table.insert(base_messages, { role = "user", content = task })
 
 	local function finish(summary, err)
-		if owns_handle then
-			handle:remove()
-		end
 		done(summary, err)
 	end
 
@@ -230,21 +222,26 @@ local function checkpointed_messages_from_boundary(history, summary, first_live_
 	return out
 end
 
-local function summarize_by_group_boundary(history, instructions, done)
-	if not history or #history == 0 then
+local function summarize_by_group_boundary(history, instructions, handle, done)
+	local function finish_early()
+		if handle then
+			handle:remove()
+		end
 		done(nil)
+	end
+	if not history or #history == 0 then
+		finish_early()
 		return
 	end
 
 	local groups = build_message_groups(history)
 	if #groups == 0 then
-		done(nil)
+		finish_early()
 		return
 	end
 
 	local min_postponed_groups = math.max(0, math.floor(smelt.settings.compact_keep_recent_groups or 1))
 	local suffix_start_group = math.max(1, (#groups + 1) - math.min(min_postponed_groups, #groups))
-	local handle = smelt.work.busy("compacting")
 	local finished = false
 
 	local function finish(summary, err, first_live_message_index)
@@ -252,7 +249,9 @@ local function summarize_by_group_boundary(history, instructions, done)
 			return
 		end
 		finished = true
-		handle:remove()
+		if handle then
+			handle:remove()
+		end
 		done(summary, err, first_live_message_index)
 	end
 
@@ -264,7 +263,7 @@ local function summarize_by_group_boundary(history, instructions, done)
 		end
 
 		local prefix_messages = slice_group_prefix(history, groups, prefix_last_group)
-		summarize_messages_with_handle(prefix_messages, instructions, handle, function(summary, err)
+		summarize_messages(prefix_messages, instructions, function(summary, err)
 			if summary then
 				finish(summary, nil, suffix_first_live_message_index(history, groups, suffix_start_group))
 				return
@@ -287,6 +286,15 @@ local function summarize_by_group_boundary(history, instructions, done)
 	end
 
 	attempt()
+end
+
+local function summarize_by_group_boundary_with_busy(history, instructions, done)
+	local handle = smelt.work.busy("compacting")
+	summarize_by_group_boundary(history, instructions, handle, done)
+end
+
+local function summarize_by_group_boundary_quiet(history, instructions, done)
+	summarize_by_group_boundary(history, instructions, nil, done)
 end
 
 local function emit_event(phase, before_tokens, after_tokens, extra)
@@ -324,7 +332,8 @@ local function run_compact(opts)
 
 	-- Summarise the original history. `ask_inherited` keeps the request
 	-- prefix byte-identical to the main turn for cache reuse.
-	summarize_by_group_boundary(history, opts and opts.instructions, function(summary, err, first_live_message_index)
+	local guard = smelt.work.guard()
+	summarize_by_group_boundary_with_busy(history, opts and opts.instructions, function(summary, err, first_live_message_index)
 		if smelt.task.is_cancelled(err) then
 			return
 		end
@@ -333,12 +342,16 @@ local function run_compact(opts)
 			return
 		end
 		consecutive_failures = 0
-		smelt.session.checkpoint({
+		local model_messages = smelt.session.checkpoint({
 			kind = "compaction",
 			summary = summary,
 			first_live_message_index = first_live_message_index,
 			tokens_before = before_tokens,
+			guard = guard,
 		})
+		if not model_messages then
+			return
+		end
 		emit_event("summarize", before_tokens, nil, {
 			first_live_message_index = first_live_message_index,
 		})
@@ -366,13 +379,17 @@ local function auto_compact_due(tokens)
 	return tokens >= window * threshold
 end
 
-local function compact_live_session(before_tokens, phase, done)
+local function compact_live_session(before_tokens, phase, opts, done)
 	local history = smelt.session.model_messages()
 	if not history or #history == 0 then
 		done(nil)
 		return
 	end
-	summarize_by_group_boundary(history, nil, function(summary, err, first_live_message_index)
+	summarize_by_group_boundary_quiet(history, nil, function(summary, err, first_live_message_index)
+		if opts and opts.guard and not smelt.work.guard_current(opts.guard) then
+			done(nil)
+			return
+		end
 		if smelt.task.is_cancelled(err) then
 			done(nil)
 			return
@@ -388,6 +405,7 @@ local function compact_live_session(before_tokens, phase, done)
 			summary = summary,
 			first_live_message_index = first_live_message_index,
 			tokens_before = before_tokens,
+			guard = opts and opts.guard or nil,
 		})
 		if not model_messages then
 			done(nil)
@@ -428,7 +446,8 @@ smelt.engine.on_prepare_request(function(request, reply)
 		snapshot_history_len = estimate and estimate.latest_snapshot_history_len or nil,
 		current_history_len = estimate and estimate.current_history_len or nil,
 	})
-	compact_live_session(estimated_tokens, "summarize-pre-request", function(messages)
+	local guard = smelt.work.guard()
+	compact_live_session(estimated_tokens, "summarize-pre-request", { guard = guard }, function(messages)
 		reply(messages)
 	end)
 end)
@@ -448,7 +467,12 @@ smelt.engine.on_context_limit(function(messages, reply)
 		return
 	end
 
-	summarize_by_group_boundary(messages, nil, function(summary, err, first_live_message_index)
+	local guard = smelt.work.guard()
+	summarize_by_group_boundary_quiet(messages, nil, function(summary, err, first_live_message_index)
+		if not smelt.work.guard_current(guard) then
+			reply(nil)
+			return
+		end
 		if smelt.task.is_cancelled(err) then
 			reply(nil)
 			return

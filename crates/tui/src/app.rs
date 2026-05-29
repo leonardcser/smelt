@@ -79,6 +79,7 @@ pub struct TuiApp {
     pub(crate) next_turn_id: u64,
     pub(crate) pending_turn_meta: Option<protocol::TurnMeta>,
     pub(crate) context_tokens_updated_this_turn: bool,
+    pub(crate) cancel_generation: u64,
     /// `smelt.work.busy` token stack. Non-empty → prompt top-bar
     /// indicator animates with the top token's label.
     pub(crate) busy_stack: BusyStack,
@@ -172,6 +173,11 @@ impl BusyStack {
 
     pub(crate) fn is_busy(&self) -> bool {
         !self.entries.is_empty()
+    }
+
+    pub(crate) fn clear(&mut self) {
+        self.entries.clear();
+        self.since = None;
     }
 
     pub(crate) fn top_label(&self) -> Option<String> {
@@ -473,6 +479,7 @@ impl TuiApp {
             next_turn_id: 1,
             pending_turn_meta: None,
             context_tokens_updated_this_turn: false,
+            cancel_generation: 0,
             busy_stack: BusyStack::default(),
             startup_auth_error,
             project_trust: Some(project_trust),
@@ -669,7 +676,7 @@ impl TuiApp {
             engine,
             Some(WorkState::Working) | Some(WorkState::Retrying) | Some(WorkState::Paused)
         ) {
-            "working".to_string()
+            self.working.phase_label().unwrap_or("working").to_string()
         } else {
             String::new()
         };

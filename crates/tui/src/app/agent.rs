@@ -276,6 +276,8 @@ impl TuiApp {
         self.sleep_inhibit.release();
         self.core.engine.send(UiCommand::Cancel);
         self.lua.cancel_tasks();
+        self.cancel_generation = self.cancel_generation.wrapping_add(1);
+        self.busy_stack.clear();
         // A turn is ending without going through `finish_turn`. Commit any
         // in-flight streaming buffers so the post-cancel state honors the
         // "no agent ⇒ no active stream" invariant (an empty thinking delta
@@ -299,6 +301,8 @@ impl TuiApp {
             // bash executions, etc.).
             self.core.engine.send(UiCommand::Cancel);
             self.lua.cancel_tasks();
+            self.cancel_generation = self.cancel_generation.wrapping_add(1);
+            self.busy_stack.clear();
             // Archive an interrupted outcome so the prompt bar shows
             // "interrupted" rather than falling back to idle/done.
             self.working.finish(TurnOutcome::Interrupted);
@@ -310,6 +314,8 @@ impl TuiApp {
         if cancelled {
             self.core.engine.send(UiCommand::Cancel);
             self.lua.cancel_tasks();
+            self.cancel_generation = self.cancel_generation.wrapping_add(1);
+            self.busy_stack.clear();
         }
         self.core.cells.set_dyn(
             "turn_end",

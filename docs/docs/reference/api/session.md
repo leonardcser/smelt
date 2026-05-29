@@ -12,7 +12,7 @@ Current session metadata, turn list, message snapshots, rewind, and persisted se
 fun(spec: table): table?
 ```
 
-Install a model-context checkpoint without deleting transcript history. Takes `{ kind?, summary, first_live_message_index, tokens_before? }`; future model requests use the summary plus the original model-visible suffix starting at `first_live_message_index`. Returns the model-visible messages after the checkpoint is installed, or `nil` when the boundary would be a no-op.
+Install a model-context checkpoint without deleting transcript history. Takes `{ kind?, summary, first_live_message_index, tokens_before?, guard? }`; future model requests use the summary plus the original model-visible suffix starting at `first_live_message_index`. When `guard` from `smelt.work.guard()` is provided, the checkpoint is installed only if that lifecycle is still current; late callbacks after cancel or turn replacement return `nil`. Returns the model-visible messages after the checkpoint is installed, or `nil` when the boundary would be a no-op.
 
 ## `smelt.session.context_tokens`
 

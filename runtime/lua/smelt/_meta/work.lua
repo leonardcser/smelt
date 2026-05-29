@@ -11,6 +11,14 @@ local work = {}
 ---@type fun(label: string): smelt.Reg
 work.busy = nil
 
+--- Return an opaque snapshot of the current work lifecycle. Pass it to guarded APIs or `work.guard_current` so late async callbacks can avoid committing after cancellation or turn replacement.
+---@type fun(): table
+work.guard = nil
+
+--- Return whether a guard from `work.guard()` still matches the current turn and cancellation generation.
+---@type fun(guard: table): boolean
+work.guard_current = nil
+
 --- Return `true` while at least one `smelt.work.busy` token is live. Plugins that need richer state (top label, full stack, retry countdown, archived outcome) subscribe to the reactive `work_*` cells instead.
 ---@see smelt.work.busy
 ---@type fun(): boolean

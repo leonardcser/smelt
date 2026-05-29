@@ -1439,6 +1439,10 @@ Push background work-state tokens.
 
 - `smelt.work.busy` :: `fun(label: string): smelt.Reg`
   Push a busy token onto the per-app stack and return a `Reg` whose `:remove()` pops it.
+- `smelt.work.guard` :: `fun(): table`
+  Return an opaque snapshot of the current work lifecycle.
+- `smelt.work.guard_current` :: `fun(guard: table): boolean`
+  Return whether a guard from `work.guard()` still matches the current turn and cancellation generation.
 - `smelt.work.is_busy` :: `fun(): boolean`
   Return `true` while at least one `smelt.work.busy` token is live.
 
