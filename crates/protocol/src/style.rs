@@ -8,15 +8,25 @@
 
 use serde::{Deserialize, Serialize};
 
+fn default_true() -> bool {
+    true
+}
+
+fn is_true(v: &bool) -> bool {
+    *v
+}
+
 /// One styled run of characters. `text` is the only required field; the
 /// rest are optional decoration that the renderer applies on top.
 ///
 /// `syntax` runs `text` through `InlineSyntax` for that language and
 /// overrides per-character fg; `style` modifiers (dim/bold/italic) stack.
-/// `hl` names a theme group whose style is composed before the per-span
-/// modifiers. `fg`/`bg` name theme groups whose fg/bg axis is extracted
-/// (matching `buf:mark` semantics).
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+/// `selectable = false` marks chrome text that should render but be omitted
+/// from selection/copy. `title_suffix = true` marks summary metadata that renders
+/// after the live tool timer rather than as part of the primary title. `hl` names
+/// a theme group whose style is composed before the per-span modifiers. `fg`/`bg`
+/// name theme groups whose fg/bg axis is extracted (matching `buf:mark` semantics).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct StyledSpan {
     pub text: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -33,6 +43,27 @@ pub struct StyledSpan {
     pub bold: bool,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub italic: bool,
+    #[serde(default = "default_true", skip_serializing_if = "is_true")]
+    pub selectable: bool,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub title_suffix: bool,
+}
+
+impl Default for StyledSpan {
+    fn default() -> Self {
+        Self {
+            text: String::new(),
+            syntax: None,
+            hl: None,
+            fg: None,
+            bg: None,
+            dim: false,
+            bold: false,
+            italic: false,
+            selectable: true,
+            title_suffix: false,
+        }
+    }
 }
 
 /// A multi-line styled payload. Each inner `Vec<StyledSpan>` is one

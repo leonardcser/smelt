@@ -307,6 +307,8 @@ impl TuiApp {
     ) -> TranscriptData {
         let gutters = self.transcript_gutters();
         let tw = (gutters.content_width(width as u16) as usize).max(1);
+        self.parser
+            .sync_active_tool_elapsed(&mut self.transcript.history);
         // Run plugin `render` hooks on the main thread (Lua is single-threaded) and stash
         // the resulting owned buffers on `ToolState.render_cache`. Worker layout below
         // reads those buffers without touching `app.ui` or the Lua VM.

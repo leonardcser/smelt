@@ -40,7 +40,7 @@ pub(super) fn render_tool(
     } else {
         None
     };
-    let mut rows = print_tool_line(out, name, summary, color, time, width);
+    let mut rows = print_tool_line(out, name, summary, color, status, time, width);
     if let Some(msg) = user_message {
         print_dim(out, &format!("{BLOCK_GUTTER_SPACE}{msg}"));
         out.newline();
@@ -64,12 +64,33 @@ struct ToolLineLayout {
     max_summary: usize,
 }
 
-fn tool_line_layout(name: &str, suffix_len: usize, width: usize) -> ToolLineLayout {
-    let prefix_len = 2 + name.len() + 1; // "⏺ name "
+fn tool_line_layout(
+    name: &str,
+    suffix_len: usize,
+    has_title_tail: bool,
+    width: usize,
+) -> ToolLineLayout {
+    let prefix_len = 2 + name.len() + usize::from(has_title_tail); // "⏺ name" + optional separator
     let max_summary = width.saturating_sub(prefix_len + suffix_len + 1);
     ToolLineLayout {
         prefix_len,
         max_summary,
+    }
+}
+
+fn tool_title_suffix(status: ToolStatus, elapsed: Option<Duration>) -> String {
+    if status == ToolStatus::Confirm {
+        return String::new();
+    }
+    elapsed.map(format_tool_duration).unwrap_or_default()
+}
+
+fn format_tool_duration(duration: Duration) -> String {
+    let millis = duration.as_millis();
+    if millis < 1000 {
+        format!("{:.1}s", millis as f64 / 1000.0)
+    } else {
+        format_duration(duration.as_secs())
     }
 }
 
@@ -78,20 +99,27 @@ fn print_tool_line(
     name: &str,
     summary: &StyledLines,
     pill_color: HlGroup,
+    status: ToolStatus,
     elapsed: Option<Duration>,
     width: usize,
 ) -> u16 {
     out.push_hl(pill_color);
     out.print("\u{23fa}");
     out.pop_style();
-    let time_str = elapsed
-        .filter(|d| d.as_secs_f64() >= 1.0)
-        .map(|d| format!("  {}", format_duration(d.as_secs())))
-        .unwrap_or_default();
-    let suffix_len = time_str.len();
-    let ly = tool_line_layout(name, suffix_len, width);
+    let timer = tool_title_suffix(status, elapsed);
+    let (summary, suffix_spans) = split_title_summary(summary, &timer);
+    let has_summary = !summary.as_plain_text().is_empty();
+    let suffix_text_len: usize = suffix_spans.iter().map(|s| s.text.len()).sum();
+    let suffix_len = suffix_text_len
+        + suffix_spans.len().saturating_sub(1)
+        + usize::from(has_summary && !suffix_spans.is_empty());
+    let has_title_tail = has_summary || !suffix_spans.is_empty();
+    let ly = tool_line_layout(name, suffix_len, has_title_tail, width);
 
-    print_dim(out, &format!(" {} ", name));
+    print_dim(out, &format!(" {name}"));
+    if has_title_tail {
+        out.print(" ");
+    }
 
     let max_seg = ly.max_summary.max(1);
 
@@ -130,7 +158,7 @@ fn print_tool_line(
 
     let total: usize = wlines.iter().map(|w| w.ranges.len()).sum();
     let show = total.min(MAX_TOOL_BLOCK_ROWS);
-    let plain_source = summary.as_plain_text();
+    let selectable_source = selectable_plain_text(&summary);
     let mut rows = 0u16;
     let mut emitted = 0usize;
 
@@ -159,7 +187,7 @@ fn print_tool_line(
                 }
             }
             if is_first {
-                out.set_source_text(&plain_source);
+                out.set_source_text(&selectable_source);
             }
 
             for (sp_idx, span) in spans.iter().enumerate() {
@@ -195,13 +223,28 @@ fn print_tool_line(
                 }
                 match syntaxes[sp_idx].as_mut() {
                     Some(h) => h.print_line(out, piece),
-                    None => out.print(piece),
+                    None if span.selectable => out.print(piece),
+                    None => out.print_with_meta(
+                        piece,
+                        SpanMeta {
+                            selectable: false,
+                            copy_as: None,
+                        },
+                    ),
                 }
                 out.pop_style();
             }
 
-            if is_first {
-                print_dim_non_selectable(out, &time_str);
+            if is_first && !suffix_spans.is_empty() {
+                if has_summary {
+                    print_dim_non_selectable(out, " ");
+                }
+                for (idx, span) in suffix_spans.iter().enumerate() {
+                    if idx > 0 {
+                        print_dim_non_selectable(out, " ");
+                    }
+                    print_nonselectable_styled_span(out, span);
+                }
             }
             out.newline();
             rows += 1;
@@ -221,6 +264,81 @@ fn print_tool_line(
     }
 
     rows
+}
+
+fn split_title_summary(summary: &StyledLines, timer: &str) -> (StyledLines, Vec<StyledSpan>) {
+    let mut body = summary.clone();
+    let mut suffix = Vec::new();
+    if !timer.is_empty() {
+        suffix.push(StyledSpan {
+            text: timer.to_string(),
+            dim: true,
+            selectable: false,
+            ..Default::default()
+        });
+    }
+
+    let Some(first_line) = body.0.first_mut() else {
+        return (body, suffix);
+    };
+    let mut trailing = Vec::new();
+    while first_line.last().is_some_and(|span| span.title_suffix) {
+        let mut span = first_line.pop().unwrap();
+        span.text = span.text.trim().to_string();
+        if !span.text.is_empty() {
+            trailing.push(span);
+        }
+    }
+    trailing.reverse();
+    suffix.extend(trailing);
+    (body, suffix)
+}
+
+fn print_nonselectable_styled_span(out: &mut LineBuilder, span: &StyledSpan) {
+    let fg_color = span.fg.as_deref().and_then(|name| out.theme().get(name).fg);
+    let bg_color = span.bg.as_deref().and_then(|name| out.theme().get(name).bg);
+    out.save_style();
+    if let Some(group) = span.hl.as_deref() {
+        out.set_hl(intern(group));
+    }
+    if let Some(c) = fg_color {
+        out.set_fg(c);
+    }
+    if let Some(c) = bg_color {
+        out.set_bg(c);
+    }
+    if span.dim {
+        out.set_dim();
+    }
+    if span.bold {
+        out.set_bold();
+    }
+    if span.italic {
+        out.set_italic();
+    }
+    out.print_with_meta(
+        &span.text,
+        SpanMeta {
+            selectable: false,
+            copy_as: None,
+        },
+    );
+    out.pop_style();
+}
+
+fn selectable_plain_text(lines: &StyledLines) -> String {
+    let mut out = String::new();
+    for (i, line) in lines.0.iter().enumerate() {
+        if i > 0 {
+            out.push('\n');
+        }
+        for span in line {
+            if span.selectable {
+                out.push_str(&span.text);
+            }
+        }
+    }
+    out
 }
 
 fn replay_rendered(out: &mut LineBuilder, layout: &RenderedLayout, inner_width: u16) -> u16 {

@@ -32,6 +32,29 @@ impl StreamParser {
         }
     }
 
+    pub fn sync_active_tool_elapsed(&self, history: &mut BlockHistory) {
+        let mut changed = false;
+        for tool in &self.active_tools {
+            let Some(state) = history.tool_states.get_mut(&tool.call_id) else {
+                continue;
+            };
+            if state.status != ToolStatus::Pending {
+                continue;
+            }
+            let elapsed = tool.elapsed();
+            if elapsed_bucket(state.elapsed) == elapsed_bucket(Some(elapsed)) {
+                continue;
+            }
+            state.elapsed = Some(elapsed);
+            state.invalidate_render_cache();
+            state.layout_revision = state.layout_revision.wrapping_add(1);
+            changed = true;
+        }
+        if changed {
+            history.bump_generation();
+        }
+    }
+
     pub fn clear(&mut self) {
         self.active_thinking = None;
         self.active_text = None;
@@ -560,6 +583,16 @@ impl StreamParser {
             );
         }
         history.set_status(id, Status::Done);
+    }
+}
+
+fn elapsed_bucket(elapsed: Option<Duration>) -> Option<u128> {
+    let elapsed = elapsed?;
+    let millis = elapsed.as_millis();
+    if millis < 1000 {
+        Some(millis / 100)
+    } else {
+        Some(10 + u128::from(elapsed.as_secs()))
     }
 }
 

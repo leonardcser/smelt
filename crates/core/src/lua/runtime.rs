@@ -1610,7 +1610,7 @@ impl LuaRuntime {
 ///   * `nil` — empty
 ///   * `string` — wrapped as one or more plain-text lines (split on `\n`)
 ///   * `table` — must be a 2D sequence: outer list is lines, each line is a
-///     list of span tables of shape `{ text, syntax?, style? = { hl?, dim?,
+///     list of span tables of shape `{ text, syntax?, selectable?, title_suffix?, style? = { hl?, dim?,
 ///     bold?, italic?, fg?, bg? } }`. Mirrors `buf:styled`.
 fn decode_styled_lines(value: mlua::Value) -> Result<protocol::StyledLines, String> {
     use protocol::{StyledLines, StyledSpan};
@@ -1669,6 +1669,14 @@ fn decode_styled_lines(value: mlua::Value) -> Result<protocol::StyledLines, Stri
                         dim,
                         bold,
                         italic,
+                        selectable: span_tbl
+                            .get::<Option<bool>>("selectable")
+                            .map_err(|e| format!("decode span selectable: {e}"))?
+                            .unwrap_or(true),
+                        title_suffix: span_tbl
+                            .get::<Option<bool>>("title_suffix")
+                            .map_err(|e| format!("decode span title_suffix: {e}"))?
+                            .unwrap_or(false),
                     });
                 }
                 lines.push(spans);

@@ -576,7 +576,7 @@ Plugin tool definition passed to `smelt.tools.register`. `execute` is required; 
 | `subpattern_parser` | `string` |  | Built-in subpattern parser kind (e.g. `"bash"`). |
 | `modes` | `table` |  | Agent modes the tool is available in; nil means all modes. |
 | `execution_mode` | `string` |  | `"concurrent"` (default) or `"sequential"`. |
-| `summary` | `function` |  | `summary(args) -> string | styled_lines | nil` — styled label rendered in the transcript header AND confirm dialog body header. Plain string is auto-wrapped as one plain span; the styled-lines form is `{ { { text, syntax?, style? }, ... }, ... }` — same span shape as `buf:styled`. |
+| `summary` | `function` |  | `summary(args) -> string | styled_lines | nil` — styled label rendered in the transcript header AND confirm dialog body header. Plain string is auto-wrapped as one plain span; the styled-lines form is `{ { { text, syntax?, selectable?, title_suffix?, style? }, ... }, ... }` — same span shape as `buf:styled` plus optional `selectable = false` for chrome text and `title_suffix = true` for metadata rendered after the live tool timer. |
 | `approval_patterns` | `function` |  | `approval_patterns(args, ctx) -> string[]` — patterns offered as one-click approvals. |
 | `preflight` | `function` |  | `preflight(args, ctx) -> table?` — validation hook; nil result skips. |
 | `render` | `function` |  | `render(buf, args, result)` — custom transcript render. |

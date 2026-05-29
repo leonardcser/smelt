@@ -1,4 +1,4 @@
-use crate::mcp::{McpManager, McpToolDef};
+use crate::mcp::{args_summary, McpManager, McpToolDef};
 use engine::provider::{FunctionSchema, ToolDefinition};
 use engine::tools::{ToolContext, ToolDispatcher, ToolFuture, ToolResult};
 use protocol::{AgentMode, ToolHooks};
@@ -71,8 +71,13 @@ impl ToolDispatcher for McpDispatcher {
         args: &HashMap<String, Value>,
         mode: AgentMode,
     ) -> Option<ToolHooks> {
-        let def = self.def_for(name)?;
-        let summary_text = format!("MCP {}_{}", def.server_name, def.tool_name);
+        self.def_for(name)?;
+        let summary = args_summary(args);
+        let summary_text = if summary.is_empty() {
+            name.to_string()
+        } else {
+            format!("{name} {}", summary.as_plain_text())
+        };
         let mut decision = self.permissions.decide(mode, name, args, true);
         if decision == protocol::Decision::Ask {
             let rt = self.permissions.approvals.read().unwrap();
@@ -83,7 +88,7 @@ impl ToolDispatcher for McpDispatcher {
         Some(ToolHooks {
             decision,
             approval_patterns: Vec::new(),
-            summary: protocol::StyledLines::from_plain(summary_text),
+            summary,
         })
     }
 

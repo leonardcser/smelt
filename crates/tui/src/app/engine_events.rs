@@ -166,7 +166,13 @@ impl TuiApp {
                 }
                 self.flush_streaming_thinking();
                 self.flush_streaming_text();
-                let summary = self.lua.tool_summary(&tool_name, &args);
+                let mut summary = self.lua.tool_summary(&tool_name, &args);
+                if summary.is_empty() {
+                    summary = self
+                        .core
+                        .mcp_tool_summary(&tool_name, &args)
+                        .unwrap_or(summary);
+                }
                 self.start_tool(call_id.clone(), tool_name.clone(), summary, args.clone());
                 self.core.cells.set_dyn(
                     "tool_start",

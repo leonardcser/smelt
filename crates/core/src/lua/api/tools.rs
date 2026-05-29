@@ -77,8 +77,9 @@ pub struct LuaToolDef {
     /// `summary(args) -> string | styled_lines | nil` — styled label
     /// rendered in the transcript header AND confirm dialog body header.
     /// Plain string is auto-wrapped as one plain span; the styled-lines
-    /// form is `{ { { text, syntax?, style? }, ... }, ... }` — same span
-    /// shape as `buf:styled`.
+    /// form is `{ { { text, syntax?, selectable?, title_suffix?, style? }, ... }, ... }` — same span
+    /// shape as `buf:styled` plus optional `selectable = false` for chrome text and
+    /// `title_suffix = true` for metadata rendered after the live tool timer.
     pub summary: Option<mlua::Function>,
     /// `approval_patterns(args, ctx) -> string[]` — patterns offered as one-click approvals.
     pub approval_patterns: Option<mlua::Function>,

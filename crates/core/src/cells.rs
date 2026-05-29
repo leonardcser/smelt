@@ -405,7 +405,7 @@ pub const SEEDED_CELL_NAMES: &[&str] = &[
 
 /// Project a `StyledLines` payload into the same shape Lua sees from
 /// `buf:styled` — a sequence of lines, each a sequence
-/// of `{ text, syntax?, style? = { hl?, dim?, bold?, italic?, fg?, bg? } }`
+/// of `{ text, syntax?, selectable?, title_suffix?, style? = { hl?, dim?, bold?, italic?, fg?, bg? } }`
 /// span tables. Empty lines come through as `{}`.
 fn styled_lines_to_lua(lua: &mlua::Lua, sl: &protocol::StyledLines) -> mlua::Value {
     let Ok(out) = lua.create_table() else {
@@ -451,6 +451,12 @@ fn styled_lines_to_lua(lua: &mlua::Lua, sl: &protocol::StyledLines) -> mlua::Val
                     }
                     let _ = span_tbl.set("style", style_tbl);
                 }
+            }
+            if !span.selectable {
+                let _ = span_tbl.set("selectable", false);
+            }
+            if span.title_suffix {
+                let _ = span_tbl.set("title_suffix", true);
             }
             let _ = line_tbl.set(j + 1, span_tbl);
         }

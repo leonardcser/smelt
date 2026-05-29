@@ -101,4 +101,20 @@ impl Core {
             env,
         }
     }
+
+    pub fn mcp_tool_summary(
+        &self,
+        name: &str,
+        args: &std::collections::HashMap<String, serde_json::Value>,
+    ) -> Option<protocol::StyledLines> {
+        let mcp = self.mcp.as_ref()?;
+        if !mcp
+            .tool_defs()
+            .iter()
+            .any(|def| def.qualified_name() == name)
+        {
+            return None;
+        }
+        Some(crate::mcp::args_summary(args))
+    }
 }

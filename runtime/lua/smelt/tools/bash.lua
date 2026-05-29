@@ -42,6 +42,10 @@ local function format_duration(secs)
   end
 end
 
+local function format_timeout(ms)
+  return format_duration(math.floor(ms / 1000))
+end
+
 function M.approval_patterns(args)
   local cmd = args.command or ""
   local subs = smelt.shell.split(cmd)
@@ -110,19 +114,25 @@ smelt.tools.register({
   summary = function(args)
     local cmd = args.command or ""
     if cmd == "" then return nil end
+    local timeout_ms = args.timeout_ms or DEFAULT_TIMEOUT_MS
+    if timeout_ms > MAX_TIMEOUT_MS then timeout_ms = MAX_TIMEOUT_MS end
     local lines = {}
     for line in (cmd .. "\n"):gmatch("([^\n]*)\n") do
-      lines[#lines + 1] = { { text = line, syntax = "bash" } }
+      local spans = { { text = line, syntax = "bash" } }
+      if #lines == 0 then
+        spans[#spans + 1] = {
+          text = "(timeout: " .. format_timeout(timeout_ms) .. ")",
+          selectable = false,
+          title_suffix = true,
+          style = { dim = true },
+        }
+      end
+      lines[#lines + 1] = spans
     end
     return lines
   end,
-  render = function(args, output, ctx)
+  render = function(_, output)
     local items = {}
-    if ctx.status == "pending" then
-      local ms = args.timeout_ms or DEFAULT_TIMEOUT_MS
-      local secs = math.floor(ms / 1000)
-      table.insert(items, smelt.layout.text("(timeout: " .. format_duration(secs) .. ")"))
-    end
     local content = (output.content or ""):gsub("%s+$", "")
     if content:match("%S") then
       table.insert(items, smelt.layout.text(content, {
