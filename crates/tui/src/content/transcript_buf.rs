@@ -483,6 +483,7 @@ impl TranscriptProjection {
                 let gap = history.block_gap(i);
                 for _ in 0..gap {
                     push_row(&mut metas, pos, false);
+                    pos += 1;
                 }
             }
             for r in 0..block_buf.line_count() {
@@ -490,6 +491,7 @@ impl TranscriptProjection {
                 pos += line_len;
                 let current_soft = block_buf.decoration_at(r).soft_wrapped;
                 push_row(&mut metas, pos, current_soft);
+                pos += 1;
             }
         }
 
@@ -1000,6 +1002,25 @@ mod tests {
                 acc += 1; // '\n'
             }
         }
+    }
+
+    #[test]
+    fn line_break_offsets_include_join_newlines() {
+        let mut transcript = Transcript::new();
+        transcript.push(Block::Text {
+            content: "aa\nbbb\nc".into(),
+        });
+        let theme = Theme::default();
+        let mut projection = TranscriptProjection::new();
+        let mut buf = Buffer::new(crate::smelt_term::BufId(7), Default::default());
+        projection.project(&mut buf, &mut transcript.history, 80, false, &theme, 0, 80);
+
+        let (soft, hard) = projection.line_breaks(&mut transcript.history, 80, false, &theme);
+        assert!(
+            soft.is_empty(),
+            "unwrapped source lines must be hard breaks"
+        );
+        assert_eq!(hard, crate::smelt_term::hard_breaks_for_lines(buf.lines()));
     }
 
     #[test]

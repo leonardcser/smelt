@@ -2292,6 +2292,63 @@ mod tests {
     }
 
     #[test]
+    fn transcript_triple_click_event_pipeline_yanks_clicked_display_line() {
+        use crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
+
+        let mut app = TestApp::builder().with_vim(false).build();
+        app.app
+            .push_block(smelt_core::transcript_model::Block::Text {
+                content: "```text\nalpha\nbeta\ngamma\n```\n\nIt avoids background weirdness, looks good in most themes.".into(),
+            });
+        app.render_silent();
+
+        let transcript_win = app.app.transcript_win();
+        let vp = transcript_win
+            .viewport
+            .expect("transcript viewport after render");
+        let pad_left = transcript_win.config.gutters.pad_left;
+        let scroll_top = transcript_win.scroll_top as usize;
+        let buf = app
+            .app
+            .ui
+            .buf(transcript_win.buf)
+            .expect("transcript buffer");
+        let line_idx = buf
+            .lines()
+            .iter()
+            .position(|line| line.contains("It avoids background weirdness"))
+            .expect("target line rendered");
+        assert!(line_idx >= scroll_top, "target line should be visible");
+        let row = vp.rect.top + (line_idx - scroll_top) as u16;
+        let column = vp
+            .rect
+            .left
+            .saturating_add(vp.gutter_width)
+            .saturating_add(pad_left)
+            .saturating_add(3);
+
+        for _ in 0..3 {
+            app.feed_one(SourceEvent::Term(Event::Mouse(MouseEvent {
+                kind: MouseEventKind::Down(MouseButton::Left),
+                row,
+                column,
+                modifiers: KeyModifiers::empty(),
+            })));
+            app.feed_one(SourceEvent::Term(Event::Mouse(MouseEvent {
+                kind: MouseEventKind::Up(MouseButton::Left),
+                row,
+                column,
+                modifiers: KeyModifiers::empty(),
+            })));
+        }
+
+        assert_eq!(
+            app.app.core.clipboard.kill_ring.current(),
+            "It avoids background weirdness, looks good in most themes."
+        );
+    }
+
+    #[test]
     fn prompt_triple_click_event_pipeline_yanks_clicked_source_line() {
         use crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
 
