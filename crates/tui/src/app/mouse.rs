@@ -263,6 +263,8 @@ impl TuiApp {
             return;
         };
         let usable = vp.content_width as usize;
+        let (soft, hard) =
+            crate::smelt_term::UiHost::breaks_for(self, crate::app::PROMPT_WIN).unwrap_or_default();
         let yank = {
             let (win, buf) = self
                 .ui
@@ -271,8 +273,8 @@ impl TuiApp {
             let win = win.expect("prompt window");
             buf.ensure_rendered_at(usable as u16);
             let mouse_ctx = crate::smelt_term::MouseCtx {
-                soft_breaks: &[],
-                hard_breaks: &[],
+                soft_breaks: &soft,
+                hard_breaks: &hard,
                 viewport: vp,
                 click_count,
             };
@@ -298,29 +300,11 @@ impl TuiApp {
     ) -> Option<crate::smelt_term::CopyOutput> {
         let viewport = crate::smelt_term::UiHost::viewport_for(self, win)?;
         let buf_id = self.ui.win(win).map(|w| w.buf)?;
-        // Triple-click selects the line at the cursor; without hard breaks
-        // `line_range_at` falls through to "whole buffer". Compute byte
-        // offsets of every `\n` in the joined text — matches `Buffer::text`'s
-        // `lines.join("\n")` layout. `buf.source()` is empty for buffers
-        // populated via the line/decoration API (rendered diffs, etc.).
-        let hard_breaks: Vec<usize> = {
-            let buf = self.ui.buf(buf_id)?;
-            let lines = buf.lines();
-            let mut breaks = Vec::with_capacity(lines.len().saturating_sub(1));
-            let mut acc: usize = 0;
-            for (i, line) in lines.iter().enumerate() {
-                if i + 1 < lines.len() {
-                    acc += line.len();
-                    breaks.push(acc);
-                    acc += 1; // the joining '\n'
-                }
-            }
-            breaks
-        };
+        let (soft, hard) = crate::smelt_term::UiHost::breaks_for(self, win).unwrap_or_default();
         let range = {
             let mouse_ctx = crate::smelt_term::MouseCtx {
-                soft_breaks: &[],
-                hard_breaks: &hard_breaks,
+                soft_breaks: &soft,
+                hard_breaks: &hard,
                 viewport,
                 click_count,
             };
@@ -559,5 +543,53 @@ mod tests {
     #[test]
     fn region_click_outside_does_not_change_focus() {
         assert_eq!(focus_for_region_click(HitRegion::Outside, true), None);
+    }
+
+    #[test]
+    fn prompt_triple_click_yanks_only_clicked_source_line() {
+        let mut app = crate::app::test_harness::TestApp::builder().build().app;
+        let source = "first line\nsecond line\nthird line";
+        {
+            let buf = app
+                .ui
+                .buf_mut(crate::app::PROMPT_EDIT_BUF)
+                .expect("prompt edit buffer");
+            buf.set_source(source.into());
+            buf.ensure_rendered_at(80);
+        }
+        let viewport = crate::smelt_term::WindowViewport::new(
+            crate::smelt_term::Rect::new(0, 0, 80, 5),
+            80,
+            3,
+            0,
+            None,
+        );
+        app.ui
+            .win_mut(crate::app::PROMPT_WIN)
+            .expect("prompt window")
+            .viewport = Some(viewport);
+
+        for (row, expected) in [(0, "first line"), (1, "second line"), (2, "third line")] {
+            app.handle_prompt_mouse(
+                MouseEvent {
+                    kind: MouseEventKind::Down(MouseButton::Left),
+                    row,
+                    column: 2,
+                    modifiers: crossterm::event::KeyModifiers::NONE,
+                },
+                3,
+            );
+            app.handle_prompt_mouse(
+                MouseEvent {
+                    kind: MouseEventKind::Up(MouseButton::Left),
+                    row,
+                    column: 2,
+                    modifiers: crossterm::event::KeyModifiers::NONE,
+                },
+                3,
+            );
+
+            assert_eq!(app.core.clipboard.kill_ring.current(), expected);
+        }
     }
 }

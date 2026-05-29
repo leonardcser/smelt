@@ -69,6 +69,25 @@ pub use window::{
     WindowViewport,
 };
 
+/// Byte offsets of hard `\n` line breaks in `text`.
+pub fn hard_breaks_for_text(text: &str) -> Vec<usize> {
+    text.match_indices('\n').map(|(idx, _)| idx).collect()
+}
+
+/// Hard break offsets for `lines.join("\n")` without allocating the joined text.
+pub fn hard_breaks_for_lines(lines: &[String]) -> Vec<usize> {
+    let mut hard = Vec::with_capacity(lines.len().saturating_sub(1));
+    let mut pos = 0usize;
+    for (i, line) in lines.iter().enumerate() {
+        pos += line.len();
+        if i + 1 < lines.len() {
+            hard.push(pos);
+            pos += 1;
+        }
+    }
+    hard
+}
+
 use std::collections::HashMap;
 
 pub struct Ui {
@@ -2084,17 +2103,7 @@ impl UiHost for Ui {
     fn breaks_for(&mut self, win: WinId) -> Option<(Vec<usize>, Vec<usize>)> {
         let buf_id = Ui::win(self, win)?.buf;
         let buf = Ui::buf(self, buf_id)?;
-        let lines = buf.lines();
-        let mut hard = Vec::new();
-        let mut pos = 0usize;
-        for (i, l) in lines.iter().enumerate() {
-            pos += l.len();
-            if i + 1 < lines.len() {
-                hard.push(pos);
-                pos += 1;
-            }
-        }
-        Some((Vec::new(), hard))
+        Some((Vec::new(), hard_breaks_for_lines(buf.lines())))
     }
 }
 
@@ -3962,6 +3971,16 @@ mod tests {
     }
 
     // ── UiHost per-pane data accessors ───────────────────────────────
+
+    #[test]
+    fn hard_break_helpers_return_newline_byte_offsets() {
+        assert_eq!(hard_breaks_for_text("first\nsecond\nthird"), vec![5, 12]);
+        assert_eq!(hard_breaks_for_text("é\nz"), vec![2]);
+        assert_eq!(
+            hard_breaks_for_lines(&["first".into(), "second".into(), "third".into()]),
+            vec![5, 12]
+        );
+    }
 
     #[test]
     fn ui_host_per_pane_data_default_impl() {

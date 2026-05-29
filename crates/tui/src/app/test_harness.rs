@@ -2292,6 +2292,34 @@ mod tests {
     }
 
     #[test]
+    fn prompt_triple_click_event_pipeline_yanks_clicked_source_line() {
+        use crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
+
+        let mut app = TestApp::builder().with_vim(false).build();
+        assert!(app.run_lua(r#"smelt.prompt.set_text("first line\nsecond line\nthird line")"#));
+        let (top, column) = prompt_content_cell(&mut app);
+        let row = top + 1;
+        let column = column + 2;
+
+        for _ in 0..3 {
+            app.feed_one(SourceEvent::Term(Event::Mouse(MouseEvent {
+                kind: MouseEventKind::Down(MouseButton::Left),
+                row,
+                column,
+                modifiers: KeyModifiers::empty(),
+            })));
+            app.feed_one(SourceEvent::Term(Event::Mouse(MouseEvent {
+                kind: MouseEventKind::Up(MouseButton::Left),
+                row,
+                column,
+                modifiers: KeyModifiers::empty(),
+            })));
+        }
+
+        assert_eq!(app.app.core.clipboard.kill_ring.current(), "second line");
+    }
+
+    #[test]
     fn keyboard_input_cancels_stale_prompt_mouse_endpoint() {
         use crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
 

@@ -55,8 +55,12 @@ impl crate::smelt_term::UiHost for TuiApp {
     }
     fn breaks_for(&mut self, win: crate::smelt_term::WinId) -> Option<(Vec<usize>, Vec<usize>)> {
         if win == crate::app::PROMPT_WIN {
-            // Prompt lines are already wrapped; no additional soft/hard break tracking.
-            Some((Vec::new(), Vec::new()))
+            let buf_id = self.ui.win(self.well_known.prompt)?.buf;
+            let buf = self.ui.buf(buf_id)?;
+            Some((
+                Vec::new(),
+                crate::smelt_term::hard_breaks_for_text(buf.source()),
+            ))
         } else if win == crate::app::TRANSCRIPT_WIN {
             Some(self.transcript_line_breaks(self.core.config.settings.show_thinking))
         } else {
