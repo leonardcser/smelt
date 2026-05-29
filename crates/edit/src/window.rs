@@ -662,6 +662,33 @@ impl Window {
         self.curswant = None;
     }
 
+    /// Cancel a partially completed mouse gesture without moving the
+    /// persistent cursor. Used when terminal focus or keyboard input makes it
+    /// clear that a staged Down/Drag will not receive its matching Up event.
+    pub fn clear_mouse_state(&mut self) {
+        self.drag_endpoint = None;
+        self.drag_anchor_word = None;
+        self.drag_anchor_line = None;
+        self.pending_press = None;
+    }
+
+    /// Finish a staged single-click because keyboard input is taking over.
+    /// Terminals can deliver a Down without the matching Up around focus
+    /// changes; committing here keeps the visible click location and the
+    /// persistent insertion cursor in sync.
+    pub fn commit_pending_caret_click(&mut self, buf: &Buffer) {
+        if self.pending_press.is_some() {
+            if let Some(end) = self.drag_endpoint {
+                if self.is_caret_leaf() {
+                    let text = Self::coordinate_text(buf);
+                    self.cpos = text::snap(text.as_ref(), end.min(text.len()));
+                    self.selection_anchor = None;
+                }
+            }
+        }
+        self.clear_mouse_state();
+    }
+
     /// Re-derive `cursor_row` / `cursor_col` from the persisted `cpos` using the
     /// buffer's display mapping. The prompt layer calls this after a buffer
     /// mutation has moved `cpos` but no scroll/recenter decision has been made
@@ -1064,7 +1091,10 @@ impl Window {
     ) -> Status {
         use super::event::Event;
         match ev {
-            Event::Key(k) => self.handle_key(buf, k, ctx.clipboard, ctx.now),
+            Event::Key(k) => {
+                self.clear_mouse_state();
+                self.handle_key(buf, k, ctx.clipboard, ctx.now)
+            }
             Event::Mouse(me) => {
                 let (status, _) = self.handle_mouse(
                     buf,

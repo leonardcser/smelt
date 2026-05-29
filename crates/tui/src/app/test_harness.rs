@@ -2234,6 +2234,133 @@ mod tests {
     }
 
     #[test]
+    fn generic_win_cursor_setter_cannot_repark_prompt_cursor() {
+        let mut app = TestApp::builder().with_vim(false).build();
+        assert!(app.run_lua(r#"smelt.prompt.set_text("hel\nlo")"#));
+        app.app.render_normal(false);
+        assert!(app.run_lua("smelt.prompt.win():cursor(0)"));
+        app.type_text("!");
+        assert_eq!(app.state().prompt_text, "hel\nlo!");
+    }
+
+    #[test]
+    fn generic_prompt_buf_source_setter_uses_prompt_install_path() {
+        let mut app = TestApp::builder().with_vim(false).build();
+        assert!(app.run_lua(r#"smelt.prompt.win():buf():source("hel")"#));
+        app.type_text("lo");
+        assert_eq!(app.state().prompt_text, "hello");
+    }
+
+    #[test]
+    fn generic_prompt_buf_lines_setter_uses_prompt_install_path() {
+        let mut app = TestApp::builder().with_vim(false).build();
+        assert!(app.run_lua(r#"smelt.prompt.win():buf():lines({ "hel" })"#));
+        app.type_text("lo");
+        assert_eq!(app.state().prompt_text, "hello");
+    }
+
+    fn prompt_content_cell(app: &mut TestApp) -> (u16, u16) {
+        app.app.render_normal(false);
+        let vp = app
+            .app
+            .ui
+            .win(crate::app::PROMPT_WIN)
+            .and_then(|w| w.viewport)
+            .expect("prompt viewport after render");
+        let pad_left = app
+            .app
+            .ui
+            .win(crate::app::PROMPT_WIN)
+            .map(|w| w.config.gutters.pad_left)
+            .unwrap_or_default();
+        (
+            vp.rect.top,
+            vp.rect
+                .left
+                .saturating_add(vp.gutter_width)
+                .saturating_add(pad_left),
+        )
+    }
+
+    #[test]
+    fn keyboard_input_cancels_stale_prompt_mouse_endpoint() {
+        use crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
+
+        let mut app = TestApp::builder().with_vim(false).build();
+        let (row, column) = prompt_content_cell(&mut app);
+
+        app.feed_one(SourceEvent::Term(Event::Mouse(MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            row,
+            column,
+            modifiers: KeyModifiers::empty(),
+        })));
+        assert!(
+            app.app.ui.any_drag_active(),
+            "mouse down staged a drag endpoint"
+        );
+
+        app.type_text("Hello");
+
+        let prompt = app.app.prompt_win();
+        assert_eq!(app.state().prompt_text, "Hello");
+        assert_eq!(prompt.effective_endpoint(), 5);
+        assert_eq!(app.app.ui.capture(), None);
+        assert!(!app.app.ui.any_drag_active());
+    }
+
+    #[test]
+    fn typing_after_unfinished_prompt_click_uses_clicked_caret() {
+        use crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
+
+        let mut app = TestApp::builder().with_vim(false).build();
+        assert!(app.run_lua(r#"smelt.prompt.set_text("abcd")"#));
+        let (row, column) = prompt_content_cell(&mut app);
+
+        app.feed_one(SourceEvent::Term(Event::Mouse(MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            row,
+            column: column + 1,
+            modifiers: KeyModifiers::empty(),
+        })));
+        assert_eq!(app.app.prompt_win().effective_endpoint(), 1);
+
+        app.type_text("X");
+
+        let prompt = app.app.prompt_win();
+        assert_eq!(app.state().prompt_text, "aXbcd");
+        assert_eq!(prompt.cpos, 2);
+        assert_eq!(prompt.effective_endpoint(), 2);
+        assert_eq!(app.app.ui.capture(), None);
+        assert!(!app.app.ui.any_drag_active());
+    }
+
+    #[test]
+    fn focus_lost_cancels_stale_prompt_mouse_endpoint() {
+        use crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
+
+        let mut app = TestApp::builder().with_vim(false).build();
+        let (row, column) = prompt_content_cell(&mut app);
+
+        app.feed_one(SourceEvent::Term(Event::Mouse(MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            row,
+            column,
+            modifiers: KeyModifiers::empty(),
+        })));
+        assert!(
+            app.app.ui.any_drag_active(),
+            "mouse down staged a drag endpoint"
+        );
+
+        app.feed_one(SourceEvent::Term(Event::FocusLost));
+
+        assert_eq!(app.app.ui.capture(), None);
+        assert!(!app.app.ui.any_drag_active());
+        assert_eq!(app.app.prompt_win().effective_endpoint(), 0);
+    }
+
+    #[test]
     fn vim_dd_in_normal_deletes_line() {
         let mut app = TestApp::builder().with_vim(true).build();
         app.type_text("line one");

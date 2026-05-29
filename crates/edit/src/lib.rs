@@ -1110,6 +1110,35 @@ impl Ui {
         self.drag_autoscroll_since = None;
     }
 
+    /// Cancel any in-flight pointer gesture across the UI. This does not move
+    /// persistent window cursors; it only drops transient capture/drag state.
+    pub fn cancel_pointer_interaction(&mut self) {
+        self.clear_capture();
+        for win in self.wins.values_mut() {
+            win.clear_mouse_state();
+        }
+    }
+
+    /// Finish pointer state before keyboard routing. A pending caret click is
+    /// committed to `cpos`; all transient mouse capture/drag state is cleared.
+    pub fn finish_pointer_interaction_for_keyboard(&mut self) {
+        let captured = self.drag_capture_window();
+        if let Some(win_id) = captured {
+            if let Some(buf_id) = self.wins.get(&win_id).map(|win| win.buf) {
+                if let (Some(win), Some(buf)) = (self.wins.get_mut(&win_id), self.bufs.get(&buf_id))
+                {
+                    win.commit_pending_caret_click(buf);
+                }
+            }
+        }
+        self.clear_capture();
+        for (win_id, win) in self.wins.iter_mut() {
+            if Some(*win_id) != captured {
+                win.clear_mouse_state();
+            }
+        }
+    }
+
     pub fn cursor_shape(&self) -> CursorShape {
         self.cursor_shape
     }

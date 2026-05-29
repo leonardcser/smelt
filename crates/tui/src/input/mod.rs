@@ -960,6 +960,10 @@ impl PromptState {
         clipboard: &mut crate::smelt_term::Clipboard,
         now: std::time::Instant,
     ) -> Action {
+        if matches!(ev, Event::Key(_) | Event::Paste(_)) {
+            ctx.win.commit_pending_caret_click(ctx.buf);
+        }
+
         match self.dispatch_vim(ctx, &ev, &mut history, clipboard, now) {
             VimBridgeResult::Handled(action) => return action,
             VimBridgeResult::Passthrough | VimBridgeResult::NotAKey => {}

@@ -9,8 +9,8 @@
 
 --- Buffer handle returned by `smelt.buf.new(opts?)`. Setter methods return the same handle for chaining.
 ---@class smelt.buf.Buf
----@field source fun(s: string?): any Read or write the buffer's full source. Without arg returns the source string (or `nil` if the buffer is gone). With arg replaces the source and returns the handle for chaining.
----@field lines fun(arr: string[]?): any Read or write the buffer as a string array. Without arg returns the lines; with arg replaces all lines and returns the handle for chaining.
+---@field source fun(s: string?): any Read or write the buffer's full source. Without arg returns the source string (or `nil` if the buffer is gone). With arg replaces the source and returns the handle for chaining. On the built-in prompt buffer, this routes through `smelt.prompt.set_text` semantics so cursor, undo, attachments, and completer state stay coherent.
+---@field lines fun(arr: string[]?): any Read or write the buffer as a string array. Without arg returns the lines; with arg replaces all lines and returns the handle for chaining. On the built-in prompt buffer, writes are joined with `\n` and installed through `smelt.prompt.set_text` semantics.
 ---@field line fun(idx: integer): string? Read a single line by 1-based index. `nil` if out of range or the buffer is gone.
 ---@field styled fun(lines: table): smelt.buf.Buf Replace the buffer with a list of styled lines (`{ { text, style?, syntax? }, ... }`). Returns the handle for chaining.
 ---@field readonly fun(val: boolean?): any Read or write the readonly flag. With arg, returns the handle for chaining.
@@ -409,8 +409,8 @@
 ---@field buf fun(): smelt.buf.Buf? Return the backing Buf handle, or `nil` if the window is gone.
 ---@field rect fun(): any Return the window's current viewport rect as `{ row, col, width, height }`, or `nil` until the first render lays it out.
 ---@field content_width fun(): any Return the inner-content width in cells (gutter and pad_left/pad_right already subtracted), or `nil` until the first render lays the window out. Use this instead of `rect().width` when fitting text into the window's actual content budget.
----@field cursor fun(row: integer?): any Read or write the cursor row (0-based). Without arg returns the row; with arg sets and returns the handle for chaining.
----@field move_cursor fun(delta: integer): smelt.win.Win Move the cursor by `delta` rows (clamped to the buffer's line count). Returns the handle for chaining.
+---@field cursor fun(row: integer?): any Read or write the cursor row (0-based). Without arg returns the row; with arg sets and returns the handle for chaining. The built-in prompt window ignores row-cursor writes; use `smelt.prompt.cursor(byte_offset)` for prompt text cursor control.
+---@field move_cursor fun(delta: integer): smelt.win.Win Move the cursor by `delta` rows (clamped to the buffer's line count). Returns the handle for chaining. The built-in prompt window ignores row-cursor moves; use `smelt.prompt.cursor(byte_offset)` for prompt text cursor control.
 ---@field key fun(chord: string, func: fun(value: table)): smelt.Reg Bind `func` to `chord` on this window. Returns a Reg handle whose `:remove()` undoes the binding. Raises on unknown chords.
 ---@field on fun(event: smelt.win.Event, func: fun(value: table)): smelt.Reg Subscribe `func` to `event` on this window. Returns a Reg handle whose `:remove()` undoes the subscription.
 ---@field placeholder fun(text: string, opts: table?): smelt.win.Win Set the window's placeholder — a dim suggestion rendered when the buffer is empty. Replaces any prior placeholder. `text` must be a single line (no `\n`); split before calling. `opts.accept_keys` (array of chord strings, default `{}`) accept the placeholder into the buffer and fire `placeholder_accepted`. `opts.dismiss_keys` (default `{ "esc", "c-c" }`) clear the placeholder and fire `placeholder_dismissed`. Typing does not destroy the placeholder; the extmark survives so an undo back to an empty buffer makes it visible again. Today only the prompt window renders the dim text and runs the accept/dismiss dispatch — calls on other windows store state but won't render. Returns the handle for chaining.

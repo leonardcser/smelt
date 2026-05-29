@@ -16,7 +16,14 @@ impl TuiApp {
             if self.term_focused != focused {
                 self.term_focused = focused;
             }
+            if !focused {
+                self.ui.cancel_pointer_interaction();
+            }
             return false;
+        }
+
+        if matches!(ev, Event::Key(_) | Event::Paste(_)) {
+            self.ui.finish_pointer_interaction_for_keyboard();
         }
 
         // Global chords fire before focus-specific routing so no handler can swallow them.

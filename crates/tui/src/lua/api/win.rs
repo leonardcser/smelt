@@ -222,6 +222,9 @@ impl mlua::UserData for LuaWin {
                 match row {
                     Some(r) => {
                         crate::lua::with_app(|app| {
+                            if this.id == crate::app::PROMPT_WIN {
+                                return;
+                            }
                             crate::lua::ui_ops::set_cursor_row(
                                 app,
                                 this.id,
@@ -250,6 +253,9 @@ impl mlua::UserData for LuaWin {
             |_, (this_ud, delta): (mlua::AnyUserData, i64)| -> LuaResult<mlua::AnyUserData> {
                 let this = *this_ud.borrow::<LuaWin>()?;
                 crate::lua::with_app(|app| {
+                    if this.id == crate::app::PROMPT_WIN {
+                        return;
+                    }
                     crate::lua::ui_ops::move_cursor(app, this.id, delta as isize);
                 });
                 Ok(this_ud)
@@ -606,8 +612,8 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
             "buf" => fn() -> Option<super::buf::LuaBuf>, "Return the backing Buf handle, or `nil` if the window is gone.",
             "rect" => fn() -> mlua::Value, "Return the window's current viewport rect as `{ row, col, width, height }`, or `nil` until the first render lays it out.",
             "content_width" => fn() -> mlua::Value, "Return the inner-content width in cells (gutter and pad_left/pad_right already subtracted), or `nil` until the first render lays the window out. Use this instead of `rect().width` when fitting text into the window's actual content budget.",
-            "cursor" => fn(row: Option<u64>) -> mlua::Value, "Read or write the cursor row (0-based). Without arg returns the row; with arg sets and returns the handle for chaining.",
-            "move_cursor" => fn(delta: i64) -> LuaWin, "Move the cursor by `delta` rows (clamped to the buffer's line count). Returns the handle for chaining.",
+            "cursor" => fn(row: Option<u64>) -> mlua::Value, "Read or write the cursor row (0-based). Without arg returns the row; with arg sets and returns the handle for chaining. The built-in prompt window ignores row-cursor writes; use `smelt.prompt.cursor(byte_offset)` for prompt text cursor control.",
+            "move_cursor" => fn(delta: i64) -> LuaWin, "Move the cursor by `delta` rows (clamped to the buffer's line count). Returns the handle for chaining. The built-in prompt window ignores row-cursor moves; use `smelt.prompt.cursor(byte_offset)` for prompt text cursor control.",
             "key" => fn(chord: String, func: LuaCallback<mlua::Table, ()>) -> LuaReg, "Bind `func` to `chord` on this window. Returns a Reg handle whose `:remove()` undoes the binding. Raises on unknown chords.",
             "on" => fn(event: LuaWinEvent, func: LuaCallback<mlua::Table, ()>) -> LuaReg, "Subscribe `func` to `event` on this window. Returns a Reg handle whose `:remove()` undoes the subscription.",
             "placeholder" => fn(text: String, opts: Option<mlua::Table>) -> LuaWin, "Set the window's placeholder — a dim suggestion rendered when the buffer is empty. Replaces any prior placeholder. `text` must be a single line (no `\\n`); split before calling. `opts.accept_keys` (array of chord strings, default `{}`) accept the placeholder into the buffer and fire `placeholder_accepted`. `opts.dismiss_keys` (default `{ \"esc\", \"c-c\" }`) clear the placeholder and fire `placeholder_dismissed`. Typing does not destroy the placeholder; the extmark survives so an undo back to an empty buffer makes it visible again. Today only the prompt window renders the dim text and runs the accept/dismiss dispatch — calls on other windows store state but won't render. Returns the handle for chaining.",

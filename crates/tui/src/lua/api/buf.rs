@@ -165,6 +165,11 @@ pub struct LuaBuf {
     pub(crate) id: crate::smelt_term::BufId,
 }
 
+fn replace_builtin_prompt_source(app: &mut crate::app::TuiApp, text: String) {
+    let mut pctx = crate::input::prompt_ctx_mut(&mut app.ui);
+    app.input.replace_text(&mut pctx, text);
+}
+
 impl LuaType for LuaBuf {
     fn lua_type() -> String {
         "smelt.buf.Buf".into()
@@ -198,7 +203,9 @@ impl mlua::UserData for LuaBuf {
                 match s {
                     Some(text) => {
                         crate::lua::with_app(|app| {
-                            if let Some(buf) = app.ui.buf_mut(this.id) {
+                            if this.id == crate::app::PROMPT_EDIT_BUF {
+                                replace_builtin_prompt_source(app, text);
+                            } else if let Some(buf) = app.ui.buf_mut(this.id) {
                                 buf.set_source(text);
                             }
                         });
@@ -228,7 +235,9 @@ impl mlua::UserData for LuaBuf {
                 match arr {
                     Some(lines) => {
                         crate::lua::with_app(|app| {
-                            if let Some(buf) = app.ui.buf_mut(this.id) {
+                            if this.id == crate::app::PROMPT_EDIT_BUF {
+                                replace_builtin_prompt_source(app, lines.join("\n"));
+                            } else if let Some(buf) = app.ui.buf_mut(this.id) {
                                 buf.set_all_lines(lines);
                             }
                         });
@@ -359,8 +368,8 @@ UiHost-only — buffers are terminal-screen backing stores that windows render i
         name: "smelt.buf.Buf",
         doc: "Buffer handle returned by `smelt.buf.new(opts?)`. Setter methods return the same handle for chaining.",
         fields: smelt_core::class_methods! {
-            "source" => fn(s: Option<String>) -> mlua::Value, "Read or write the buffer's full source. Without arg returns the source string (or `nil` if the buffer is gone). With arg replaces the source and returns the handle for chaining.",
-            "lines" => fn(arr: Option<Vec<String>>) -> mlua::Value, "Read or write the buffer as a string array. Without arg returns the lines; with arg replaces all lines and returns the handle for chaining.",
+            "source" => fn(s: Option<String>) -> mlua::Value, "Read or write the buffer's full source. Without arg returns the source string (or `nil` if the buffer is gone). With arg replaces the source and returns the handle for chaining. On the built-in prompt buffer, this routes through `smelt.prompt.set_text` semantics so cursor, undo, attachments, and completer state stay coherent.",
+            "lines" => fn(arr: Option<Vec<String>>) -> mlua::Value, "Read or write the buffer as a string array. Without arg returns the lines; with arg replaces all lines and returns the handle for chaining. On the built-in prompt buffer, writes are joined with `\\n` and installed through `smelt.prompt.set_text` semantics.",
             "line" => fn(idx: u64) -> Option<String>, "Read a single line by 1-based index. `nil` if out of range or the buffer is gone.",
             "styled" => fn(lines: mlua::Table) -> LuaBuf, "Replace the buffer with a list of styled lines (`{ { text, style?, syntax? }, ... }`). Returns the handle for chaining.",
             "readonly" => fn(val: Option<bool>) -> mlua::Value, "Read or write the readonly flag. With arg, returns the handle for chaining.",
