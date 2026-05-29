@@ -4,21 +4,13 @@
 
 **Tier:** `UiHost` — Requires a terminal UI; calling these from headless mode raises.
 
-Preformatted stats text and live perf instrumentation. UiHost-only.
+Metrics ledger access and live perf instrumentation. UiHost-only.
 
-## `smelt.metrics.session_cost_text`
-
-```lua
-fun(): string
-```
-
-Return preformatted text for the `/cost` dialog showing the current session's cost, per-turn average, and resolved pricing for the active model.
-
-## `smelt.metrics.stats_text`
+## `smelt.metrics.entries`
 
 ```lua
-fun(): string
+fun(): table
 ```
 
-Return preformatted text for the `/stats` dialog (per-model token totals and request counts loaded from the on-disk metrics ledger).
+Return raw entries from the on-disk metrics ledger. Lua commands aggregate and render these records into UI.
 

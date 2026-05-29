@@ -121,3 +121,15 @@ block above `NAV_KEYS` for every accepted `opts` field. Returns the
 value resolved from `on_submit` (defaults to the highlighted item) or
 `nil` on dismiss.
 
+## `smelt.dialog.viewer`
+
+```lua
+fun(opts: table): table, smelt.buf.Buf, smelt.win.Win
+```
+
+Types: [`smelt.buf.Buf`](types.md#smeltbufbuf), [`smelt.win.Win`](types.md#smeltwinwin)
+
+Open a read-only content dialog. Pass `text` for plain text, `lines` for
+plain line tables, `styled` for styled lines, or `buf` for a live buffer the
+caller will update after opening. Returns `(handle, buf, leaf)`.
+

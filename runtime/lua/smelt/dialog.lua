@@ -30,6 +30,7 @@
 --   smelt.dialog.list(buf, opts)            -> leaf       (existing buffer as a list)
 --   smelt.dialog.markdown(text)             -> leaf, buf  (markdown-rendered content)
 --   smelt.dialog.content(opts)              -> leaf, buf  (plain content; opts.text or opts.buf)
+--   smelt.dialog.viewer(opts)               -> handle, buf, leaf  (read-only content dialog)
 --
 -- Dialog context (active dialog introspection):
 --   smelt.dialog.current()                  -> ctx | nil  (resolve/close/panels/focused_leaf)
@@ -483,6 +484,51 @@ function smelt.dialog.content(opts)
     wrap        = opts.wrap,
   })
   return leaf, buf
+end
+
+local function viewer_keymaps(extra)
+  local keymaps = {
+    { key = "q", on_press = function(ctx) ctx.close() end },
+    { key = "?", on_press = function(ctx) ctx.close() end },
+  }
+  for _, km in ipairs(extra or {}) do keymaps[#keymaps + 1] = km end
+  return keymaps
+end
+
+--- Open a read-only content dialog. Pass `text` for plain text, `lines` for
+--- plain line tables, `styled` for styled lines, or `buf` for a live buffer the
+--- caller will update after opening. Returns `(handle, buf, leaf)`.
+---@type fun(opts: table): table, smelt.buf.Buf, smelt.win.Win
+function smelt.dialog.viewer(opts)
+  opts = opts or {}
+  local buf = opts.buf or smelt.buf.new({ readonly = true })
+  if opts.styled then
+    buf:styled(opts.styled)
+  elseif opts.lines then
+    buf:lines(opts.lines)
+  elseif opts.text ~= nil then
+    buf:lines(split_lines(opts.text or ""))
+  end
+
+  local leaf = smelt.dialog.content({
+    buf         = buf,
+    interactive = opts.interactive ~= false,
+    wrap        = opts.wrap,
+    focusable   = opts.focusable,
+  })
+
+  local panel = { leaf = leaf, height = opts.panel_height }
+  local max_height = opts.max_height
+  if opts.height == nil and max_height == nil then max_height = "50%" end
+  local handle = smelt.dialog.open_handle({
+    title      = opts.title,
+    height     = opts.height,
+    max_height = max_height,
+    min_height = opts.min_height,
+    panels     = { panel },
+    keymaps    = viewer_keymaps(opts.keymaps),
+  })
+  return handle, buf, leaf
 end
 
 -- ── Dialog overlay wrapper ────────────────────────────────────────────

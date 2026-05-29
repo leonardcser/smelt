@@ -74,4 +74,10 @@ dialog.open_handle = nil
 ---@type fun(opts: smelt.dialog.PickerOpts): any
 dialog.picker = nil
 
+--- Open a read-only content dialog. Pass `text` for plain text, `lines` for
+--- plain line tables, `styled` for styled lines, or `buf` for a live buffer the
+--- caller will update after opening. Returns `(handle, buf, leaf)`.
+---@type fun(opts: table): table, smelt.buf.Buf, smelt.win.Win
+dialog.viewer = nil
+
 return dialog

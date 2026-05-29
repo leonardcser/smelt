@@ -2,7 +2,7 @@
 
 local bar = require("smelt.bar")
 
-local DIM = { fg = "Comment", dim = true }
+local DIM = { fg = "Comment" }
 local HEAD = { fg = "SmeltAccent", bold = true }
 local VALUE = { fg = "Normal" }
 local ERR = { fg = "ErrorMsg" }
@@ -349,17 +349,11 @@ local function loading_lines()
 end
 
 local function open_usage()
-  local buf = smelt.buf.new({ readonly = true })
-  buf:styled(loading_lines())
-  local leaf = smelt.dialog.content({ buf = buf, interactive = true, wrap = false })
-  local handle = smelt.dialog.open_handle({
+  local handle, buf = smelt.dialog.viewer({
     title      = "usage",
+    styled     = loading_lines(),
+    wrap       = false,
     max_height = "50%",
-    panels     = { { leaf = leaf } },
-    keymaps    = {
-      { key = "q", on_press = function(ctx) ctx.close() end },
-      { key = "?", on_press = function(ctx) ctx.close() end },
-    },
   })
 
   smelt.spawn(function()

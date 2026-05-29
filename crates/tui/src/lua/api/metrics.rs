@@ -1,6 +1,5 @@
-//! `smelt.metrics` bindings — preformatted text for the `/stats` and
-//! `/cost` dialogs, plus a live perf snapshot consumed by the F12
-//! debug panel.
+//! `smelt.metrics` bindings — metrics ledger access plus live perf
+//! instrumentation consumed by Lua UI.
 
 use mlua::prelude::*;
 use smelt_core::lua::doc::Tier;
@@ -11,43 +10,29 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
         lua,
         smelt,
         "metrics",
-        "Preformatted stats text and live perf instrumentation. UiHost-only.",
+        "Metrics ledger access and live perf instrumentation. UiHost-only.",
         Tier::UiHost,
     )?;
     m.fn_(
-        "stats_text",
-        "Return preformatted text for the `/stats` dialog (per-model token totals and request counts loaded from the on-disk metrics ledger).",
+        "entries",
+        "Return raw entries from the on-disk metrics ledger. Lua commands aggregate and render these records into UI.",
         &[],
-        |_, ()| -> LuaResult<String> {
+        |lua, ()| -> LuaResult<mlua::Table> {
             let entries = crate::metrics::load();
-            let stats = crate::metrics::render_stats(&entries);
-            Ok(crate::metrics::render_stats_text(&stats))
-        },
-    )?;
-
-    m.fn_(
-        "session_cost_text",
-        "Return preformatted text for the `/cost` dialog showing the current session's cost, per-turn average, and resolved pricing for the active model.",
-        &[],
-        |_, ()| -> LuaResult<String> {
-            let text = crate::lua::try_with_app(|app| {
-                let turns = app.user_turns().len();
-                let resolved = engine::pricing::resolve(
-                    &app.core.config.model,
-                    &app.core.config.provider_type,
-                    &app.core.config.api_base,
-                    &app.core.config.model_config,
-                );
-                let lines = crate::metrics::render_session_cost(
-                    app.core.session.session_cost_usd,
-                    &app.core.config.model,
-                    turns,
-                    &resolved,
-                );
-                crate::metrics::render_cost_text(&lines)
-            })
-            .unwrap_or_default();
-            Ok(text)
+            let out = lua.create_table()?;
+            for (i, e) in entries.iter().enumerate() {
+                let row = lua.create_table()?;
+                row.set("timestamp_ms", e.timestamp_ms)?;
+                row.set("prompt_tokens", e.prompt_tokens)?;
+                row.set("completion_tokens", e.completion_tokens)?;
+                row.set("model", e.model.as_str())?;
+                row.set("cost_usd", e.cost_usd)?;
+                row.set("cache_read_tokens", e.cache_read_tokens)?;
+                row.set("cache_write_tokens", e.cache_write_tokens)?;
+                row.set("reasoning_tokens", e.reasoning_tokens)?;
+                out.set(i + 1, row)?;
+            }
+            Ok(out)
         },
     )?;
 

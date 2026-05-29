@@ -589,8 +589,6 @@ Register and list slash commands.
   Register a slash command `name` whose `handler` is invoked when the user runs it.
 - `smelt.cmd.run` :: `fun(line: string): nil`
   Execute the slash-command line `line` (with or without leading `/`) as if the user had typed it.
-- `smelt.cmd.text_dialog` :: `fun(title: string, text: string|table|nil, opts: table?): nil`
-  Open a read-only text dialog docked above the prompt.
 
 #### `smelt.dialog`
 
@@ -614,6 +612,8 @@ Modal overlay builders.
   Non-coroutine open.
 - `smelt.dialog.picker` :: `fun(opts: smelt.dialog.PickerOpts): any`
   Coroutine-blocking Telescope-style picker.
+- `smelt.dialog.viewer` :: `fun(opts: table): table, smelt.buf.Buf, smelt.win.Win`
+  Open a read-only content dialog.
 
 #### `smelt.frontend`
 
@@ -1156,12 +1156,10 @@ Structured JSONL log entries written to the engine log file.
 
 #### `smelt.metrics`
 
-Preformatted stats text and live perf instrumentation.
+Metrics ledger access and live perf instrumentation.
 
-- `smelt.metrics.session_cost_text` :: `fun(): string`
-  Return preformatted text for the `/cost` dialog showing the current session's cost, per-turn average, and resolved pricing for the active model.
-- `smelt.metrics.stats_text` :: `fun(): string`
-  Return preformatted text for the `/stats` dialog (per-model token totals and request counts loaded from the on-disk metrics ledger).
+- `smelt.metrics.entries` :: `fun(): table`
+  Return raw entries from the on-disk metrics ledger.
 
 #### `smelt.metrics.perf`
 
