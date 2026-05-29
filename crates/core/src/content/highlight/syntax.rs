@@ -262,6 +262,51 @@ impl<'a> InlineSyntax<'a> {
         }
     }
 
+    /// Print a byte range from one logical line with syntax highlighting.
+    ///
+    /// The whole logical line is highlighted before clipping, so soft-wrapped
+    /// rows keep the same tokenization as the unwrapped line.
+    pub fn print_line_range(
+        &mut self,
+        out: &mut LineBuilder,
+        line: &str,
+        range: std::ops::Range<usize>,
+    ) {
+        let line_with_nl = format!("{}\n", line);
+        let regions = self
+            .h
+            .highlight_line(&line_with_nl, &SYNTAX_SET)
+            .unwrap_or_default();
+        out.save_style();
+        let mut pos = 0usize;
+        for (style, text) in &regions {
+            let text = text.trim_end_matches('\n').trim_end_matches('\r');
+            if text.is_empty() {
+                continue;
+            }
+            let start = pos;
+            let end = pos + text.len();
+            pos = end;
+            let lo = start.max(range.start);
+            let hi = end.min(range.end);
+            if lo >= hi {
+                continue;
+            }
+            let piece = smelt_buffer::text::slice(text, lo - start..hi - start);
+            if piece.is_empty() {
+                continue;
+            }
+            let fg = Color::Rgb {
+                r: style.foreground.r,
+                g: style.foreground.g,
+                b: style.foreground.b,
+            };
+            out.set_fg(fg);
+            out.print(piece);
+        }
+        out.pop_style();
+    }
+
     /// Print a single line with syntax highlighting; does not emit a newline.
     /// Snapshots the caller's style on entry and restores it on exit, so per-region
     /// fg mutations don't leak (other axes — dim/bold/italic/group — stay in effect).

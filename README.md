@@ -35,7 +35,7 @@ scriptable in Lua like Neovim. Built from scratch, with care for the details.
 ## What's inside
 
 - **Lua plugins.** Keymaps, commands, autocmds, custom tools.
-- **Terminal renderer.** Its own grid and layout engine, not `ratatui`.
+- **Terminal renderer.** Its own grid and layout engine, not `ratatui`, with compact live tool-call titles.
 - **Vim editor.** Motions, text objects, registers, undo.
 - **Deterministic fuzzing.** Fixed clock and stubbed I/O, so any crash can be
   replayed.

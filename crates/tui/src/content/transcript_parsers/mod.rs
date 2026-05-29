@@ -753,6 +753,86 @@ mod tests {
         assert!(!display[1].soft_wrapped);
     }
 
+    #[test]
+    fn tool_title_chrome_only_renders_while_pending() {
+        let summary = protocol::StyledLines(vec![vec![
+            protocol::StyledSpan {
+                text: "echo hi".into(),
+                syntax: Some("bash".into()),
+                ..Default::default()
+            },
+            protocol::StyledSpan {
+                text: "(timeout: 2m)".into(),
+                selectable: false,
+                title_suffix: true,
+                ..Default::default()
+            },
+        ]]);
+        let block = Block::ToolCall {
+            call_id: "c-title-chrome".into(),
+            name: "bash".into(),
+            summary,
+            args: HashMap::new(),
+        };
+        let ctx = LayoutContext {
+            width: 80,
+            show_thinking: true,
+            view_state: ViewState::Expanded,
+        };
+
+        let pending = ToolState {
+            status: ToolStatus::Pending,
+            elapsed: Some(std::time::Duration::from_secs(2)),
+            output: None,
+            user_message: None,
+            render_cache: None,
+            layout_revision: 0,
+        };
+        let pending_display = layout_block_test(&block, Some(&pending), &ctx);
+        assert!(pending_display[0]
+            .text
+            .contains("echo hi  2s (timeout: 2m)"));
+
+        let done = ToolState {
+            status: ToolStatus::Ok,
+            elapsed: Some(std::time::Duration::from_secs(2)),
+            output: None,
+            user_message: None,
+            render_cache: None,
+            layout_revision: 0,
+        };
+        let done_display = layout_block_test(&block, Some(&done), &ctx);
+        assert!(done_display[0].text.contains("echo hi"));
+        assert!(!done_display[0].text.contains("2s"));
+        assert!(!done_display[0].text.contains("timeout"));
+    }
+
+    #[test]
+    fn tool_timer_waits_until_one_second() {
+        let block = Block::ToolCall {
+            call_id: "c-short-timer".into(),
+            name: "bash".into(),
+            summary: protocol::StyledLines::from_plain("echo hi"),
+            args: HashMap::new(),
+        };
+        let state = ToolState {
+            status: ToolStatus::Pending,
+            elapsed: Some(std::time::Duration::from_millis(999)),
+            output: None,
+            user_message: None,
+            render_cache: None,
+            layout_revision: 0,
+        };
+        let ctx = LayoutContext {
+            width: 80,
+            show_thinking: true,
+            view_state: ViewState::Expanded,
+        };
+        let display = layout_block_test(&block, Some(&state), &ctx);
+        assert!(!display[0].text.contains("0."));
+        assert!(!display[0].text.contains("  0s"));
+    }
+
     /// Regression guard for the silent fall-through where parallel layout workers
     /// couldn't reach Lua, so `render_tool` dropped to `render_wrapped_output` and showed
     /// the raw `output.content` (e.g. "wrote 562 bytes to poem.txt") instead of the
@@ -883,7 +963,7 @@ mod tests {
             args,
         };
         let state = ToolState {
-            status: ToolStatus::Ok,
+            status: ToolStatus::Pending,
             elapsed: Some(std::time::Duration::from_secs(3)),
             output: None,
             user_message: None,

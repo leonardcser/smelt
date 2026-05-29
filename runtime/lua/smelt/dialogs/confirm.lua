@@ -79,7 +79,9 @@ local function render_header(buf, req)
         new_line = { { text = indent } }
       end
       for _, span in ipairs(line) do
-        new_line[#new_line + 1] = span
+        if not span.title_suffix then
+          new_line[#new_line + 1] = span
+        end
       end
       lines[#lines + 1] = new_line
     end

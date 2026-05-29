@@ -1,6 +1,6 @@
 ---
 source: crates/tui/tests/storybook/app_ctx.rs
-assertion_line: 345
+assertion_line: 385
 expression: frame.styles_text()
 ---
 dim: 80 22

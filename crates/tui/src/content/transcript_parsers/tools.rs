@@ -12,7 +12,6 @@ use smelt_core::content::highlight::{
 use smelt_core::content::wrap::wrap_line_ranges;
 use smelt_core::theme::{intern, HlGroup};
 use smelt_core::transcript_model::{ToolOutput, ToolStatus};
-use smelt_core::utils::format_duration;
 use std::collections::HashMap;
 use std::time::Duration;
 
@@ -35,7 +34,7 @@ pub(super) fn render_tool(
         ToolStatus::Confirm => intern("SmeltAccent"),
         ToolStatus::Pending => intern("SmeltToolPending"),
     };
-    let time = if status != ToolStatus::Confirm {
+    let time = if status == ToolStatus::Pending {
         elapsed
     } else {
         None
@@ -79,19 +78,15 @@ fn tool_line_layout(
 }
 
 fn tool_title_suffix(status: ToolStatus, elapsed: Option<Duration>) -> String {
-    if status == ToolStatus::Confirm {
+    if status != ToolStatus::Pending {
         return String::new();
     }
-    elapsed.map(format_tool_duration).unwrap_or_default()
+    elapsed.and_then(format_tool_duration).unwrap_or_default()
 }
 
-fn format_tool_duration(duration: Duration) -> String {
-    let millis = duration.as_millis();
-    if millis < 1000 {
-        format!("{:.1}s", millis as f64 / 1000.0)
-    } else {
-        format_duration(duration.as_secs())
-    }
+fn format_tool_duration(duration: Duration) -> Option<String> {
+    let secs = duration.as_secs();
+    (secs >= 1).then(|| format!("{secs}s"))
 }
 
 fn print_tool_line(
@@ -107,12 +102,12 @@ fn print_tool_line(
     out.print("\u{23fa}");
     out.pop_style();
     let timer = tool_title_suffix(status, elapsed);
-    let (summary, suffix_spans) = split_title_summary(summary, &timer);
+    let (summary, suffix_spans) = split_title_summary(summary, &timer, status);
     let has_summary = !summary.as_plain_text().is_empty();
     let suffix_text_len: usize = suffix_spans.iter().map(|s| s.text.len()).sum();
     let suffix_len = suffix_text_len
         + suffix_spans.len().saturating_sub(1)
-        + usize::from(has_summary && !suffix_spans.is_empty());
+        + 2 * usize::from(has_summary && !suffix_spans.is_empty());
     let has_title_tail = has_summary || !suffix_spans.is_empty();
     let ly = tool_line_layout(name, suffix_len, has_title_tail, width);
 
@@ -168,13 +163,6 @@ fn print_tool_line(
             .get(li)
             .map(Vec::as_slice)
             .unwrap_or(&[] as &[StyledSpan]);
-        // One InlineSyntax per span — state carries across wrap segments of the
-        // same span so syntax context survives soft-wraps.
-        let mut syntaxes: Vec<Option<InlineSyntax<'static>>> = spans
-            .iter()
-            .map(|s| s.syntax.as_deref().map(InlineSyntax::new))
-            .collect();
-
         for (seg_idx, &(rs, re)) in w.ranges.iter().enumerate() {
             if emitted >= show {
                 break 'outer;
@@ -198,7 +186,9 @@ fn print_tool_line(
                 if lo >= hi {
                     continue;
                 }
-                let piece = &span.text[lo - sp_start..hi - sp_start];
+                let start = lo - sp_start;
+                let end = hi - sp_start;
+                let piece = smelt_buffer::text::slice(&span.text, start..end);
 
                 let fg_color = span.fg.as_deref().and_then(|name| out.theme().get(name).fg);
                 let bg_color = span.bg.as_deref().and_then(|name| out.theme().get(name).bg);
@@ -221,8 +211,11 @@ fn print_tool_line(
                 if span.italic {
                     out.set_italic();
                 }
-                match syntaxes[sp_idx].as_mut() {
-                    Some(h) => h.print_line(out, piece),
+                match span.syntax.as_deref() {
+                    Some(lang) => {
+                        let mut h = InlineSyntax::new(lang);
+                        h.print_line_range(out, &span.text, start..end);
+                    }
                     None if span.selectable => out.print(piece),
                     None => out.print_with_meta(
                         piece,
@@ -237,7 +230,7 @@ fn print_tool_line(
 
             if is_first && !suffix_spans.is_empty() {
                 if has_summary {
-                    print_dim_non_selectable(out, " ");
+                    print_dim_non_selectable(out, "  ");
                 }
                 for (idx, span) in suffix_spans.iter().enumerate() {
                     if idx > 0 {
@@ -266,7 +259,11 @@ fn print_tool_line(
     rows
 }
 
-fn split_title_summary(summary: &StyledLines, timer: &str) -> (StyledLines, Vec<StyledSpan>) {
+fn split_title_summary(
+    summary: &StyledLines,
+    timer: &str,
+    status: ToolStatus,
+) -> (StyledLines, Vec<StyledSpan>) {
     let mut body = summary.clone();
     let mut suffix = Vec::new();
     if !timer.is_empty() {
@@ -285,7 +282,7 @@ fn split_title_summary(summary: &StyledLines, timer: &str) -> (StyledLines, Vec<
     while first_line.last().is_some_and(|span| span.title_suffix) {
         let mut span = first_line.pop().unwrap();
         span.text = span.text.trim().to_string();
-        if !span.text.is_empty() {
+        if status == ToolStatus::Pending && !span.text.is_empty() {
             trailing.push(span);
         }
     }

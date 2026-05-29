@@ -1,11 +1,11 @@
 ---
 source: crates/tui/tests/storybook/app_ctx.rs
-assertion_line: 345
+assertion_line: 385
 expression: frame.styles_text()
 ---
 dim: 70 14
   0   0   1 fg=AnsiValue(77)
-  0   1  12 attrs=dim
+  0   1  11 attrs=dim
   1   2   3 fg=AnsiValue(244)
   1   7   3 fg=Rgb { r: 249, g: 38, b: 114 }
   1  10   1 fg=Rgb { r: 248, g: 248, b: 242 }
