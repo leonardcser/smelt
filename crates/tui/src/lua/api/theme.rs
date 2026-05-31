@@ -107,7 +107,7 @@ resolve to an empty table.",
         "Return `true` if the active theme is a light theme. Lets \
 plugins flip glyphs or contrast levels based on the current palette.",
         &[],
-        |_, ()| Ok(crate::lua::with_app(|app| app.ui.theme().is_light())),
+        |_, ()| Ok(smelt_core::theme::active().is_light()),
     )?;
 
     Ok(())

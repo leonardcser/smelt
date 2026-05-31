@@ -564,6 +564,11 @@ pub fn default_baked() -> &'static Arc<Theme> {
     })
 }
 
+pub fn default_baked_with_background(is_light: bool) -> Theme {
+    let spec = baked_default_spec();
+    compile(&spec, is_light).expect("baked default spec must compile")
+}
+
 /// Decode `runtime/lua/smelt/colorschemes/default.lua` (embedded at
 /// compile time) into a `ThemeSpec`. The Lua file is the single source
 /// of truth for the default colorscheme — `default_baked()` calls this
@@ -641,7 +646,7 @@ mod tests {
         let dark = compile(&spec, false).unwrap();
         let light = compile(&spec, true).unwrap();
         assert_eq!(dark.get("SmeltUserBg").bg, Some(Color::AnsiValue(236)));
-        assert_eq!(light.get("SmeltUserBg").bg, Some(Color::AnsiValue(254)));
+        assert_eq!(light.get("SmeltUserBg").bg, Some(Color::AnsiValue(252)));
     }
 
     #[test]

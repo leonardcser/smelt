@@ -1213,8 +1213,8 @@ impl TuiApp {
         // Install the baked default theme so the first frame renders with
         // real colors before Lua's `theme.use(...)` runs during bootstrap.
         // Lua-side colorschemes overwrite this via `smelt.theme.apply`.
-        let mut baked = crate::theme::default_baked().as_ref().clone();
-        baked.set_light(self.ui.theme().is_light());
+        let is_light = self.ui.theme().is_light();
+        let baked = crate::theme::default_baked_with_background(is_light);
         self.install_theme(baked);
         // Capture the thread-safe Lua command-name set directly. Going through
         // `try_with_app` would only work on the main thread (APP is a thread-

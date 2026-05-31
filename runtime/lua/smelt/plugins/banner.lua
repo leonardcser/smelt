@@ -420,7 +420,7 @@ smelt.lifecycle.on_shutdown(function(ctx)
 	local rows = banner.LOGO_MARK_PIXELS
 	local version_text = smelt.build.display or ""
 	local pad = math.max(0, math.floor((#rows[1] - #version_text) / 2))
-	print(banner.ansi_render(rows, banner.PALETTE))
+	print(banner.ansi_render(rows))
 	print(string.rep(" ", pad) .. "\27[2m" .. version_text .. "\27[0m")
 	print("")
 	io.write(string.format("\27[2mresume with:\nsmelt --resume %s\27[0m\n\n", ctx.session_id))

@@ -17,6 +17,20 @@ M.PALETTE = {
 	G = 244, -- wordmark shadow
 }
 
+M.LIGHT_PALETTE = {
+	R = 124,
+	O = 202,
+	o = 208,
+	Y = 220,
+	W = 235, -- wordmark
+	G = 250, -- wordmark shadow
+}
+
+function M.palette()
+	if smelt.theme.is_light() then return M.LIGHT_PALETTE end
+	return M.PALETTE
+end
+
 -- 5-glyph "smelt" assembled from a 4-row pixel font with 1-pixel gaps.
 M.WORDMARK_PIXELS = {
 	"WWW.WWWWW.WWW.W..WWW",
@@ -71,7 +85,7 @@ end
 
 -- Paint a pixel grid into a `smelt.paint.Slice` using half-block glyphs.
 function M.paint_pixels(slice, row0, col0, pixels, palette)
-	palette = palette or M.PALETTE
+	palette = palette or M.palette()
 	for y = 1, #pixels, 2 do
 		local top = pixels[y]
 		local bot = pixels[y + 1] or string.rep(".", #top)
@@ -93,7 +107,7 @@ end
 
 -- Render a pixel grid to an ANSI-escape string for stdout.
 function M.ansi_render(pixels, palette)
-	palette = palette or M.PALETTE
+	palette = palette or M.palette()
 	local out = {}
 	for y = 1, #pixels, 2 do
 		local top = pixels[y]
