@@ -33,11 +33,15 @@ impl TuiApp {
             self.commit_pending_mode_change();
         }
         self.sync_session_snapshot();
+        self.publish_history_delta("set");
+    }
+
+    pub(crate) fn publish_history_delta(&mut self, kind: &str) {
         let count = self.core.session.history.len();
         self.core.cells.set_dyn(
             "history",
             std::rc::Rc::new(smelt_core::cells::HistoryDelta {
-                kind: "set".into(),
+                kind: kind.into(),
                 count,
             }),
         );
@@ -129,13 +133,7 @@ impl TuiApp {
             "session_started",
             std::rc::Rc::new(self.core.session.id.clone()),
         );
-        self.core.cells.set_dyn(
-            "history",
-            std::rc::Rc::new(smelt_core::cells::HistoryDelta {
-                kind: "forked".into(),
-                count: self.core.session.history.len(),
-            }),
-        );
+        self.publish_history_delta("forked");
         self.notify(format!("forked from {original_id}"));
         // Drain stale events so old snapshots don't overwrite the forked session.
         while self.core.engine.try_recv().is_ok() {}
@@ -182,13 +180,7 @@ impl TuiApp {
             "session_started",
             std::rc::Rc::new(self.core.session.id.clone()),
         );
-        self.core.cells.set_dyn(
-            "history",
-            std::rc::Rc::new(smelt_core::cells::HistoryDelta {
-                kind: "cleared".into(),
-                count: 0,
-            }),
-        );
+        self.publish_history_delta("cleared");
         // Drain stale events so old Messages snapshots don't restore history into the fresh session.
         while self.core.engine.try_recv().is_ok() {}
     }
@@ -258,13 +250,7 @@ impl TuiApp {
             "session_started",
             std::rc::Rc::new(self.core.session.id.clone()),
         );
-        self.core.cells.set_dyn(
-            "history",
-            std::rc::Rc::new(smelt_core::cells::HistoryDelta {
-                kind: "loaded".into(),
-                count: self.core.session.history.len(),
-            }),
-        );
+        self.publish_history_delta("loaded");
         // Drain stale engine events so old snapshots don't overwrite
         // the loaded session's state.
         while self.core.engine.try_recv().is_ok() {}
@@ -544,8 +530,27 @@ impl TuiApp {
             .unwrap_or(0.0);
         self.truncate_to(block_idx);
         self.reset_session_permissions();
+        if self.core.session.history.is_empty() {
+            self.task_label = None;
+        }
+        self.sync_session_snapshot();
+        self.publish_history_delta("rewound");
 
         turn_text.map(|t| (t, images))
+    }
+
+    pub(crate) fn rewind_to_start(&mut self) {
+        self.core.session.history.clear();
+        self.core.session.checkpoint = None;
+        self.core.session.cost_snapshots.clear();
+        self.core.session.turn_metas.clear();
+        self.core.session.session_cost_usd = 0.0;
+        self.core.session.clear_context_tokens();
+        self.task_label = None;
+        self.clear_transcript();
+        self.reset_session_permissions();
+        self.sync_session_snapshot();
+        self.publish_history_delta("rewound");
     }
 
     pub(crate) fn show_user_message(&mut self, input: &str, image_labels: Vec<String>) {

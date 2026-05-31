@@ -30,10 +30,12 @@ smelt.cmd.register("rewind", function(args)
 
     if not picked or not picked.index then return end
 
-    local block_idx = nil
-    if picked.index <= #turns then
-      block_idx = turns[picked.index].block_idx
+    if picked.index > #turns then
+      if restore_vim_insert then smelt.vim.set_mode("insert") end
+      return
     end
+
+    local block_idx = turns[picked.index].block_idx
     smelt.session.rewind_to(block_idx, { restore_vim_insert = restore_vim_insert })
   end)
 end, { desc = "rewind to a previous turn" })

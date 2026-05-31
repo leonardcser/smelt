@@ -143,7 +143,7 @@ impl TuiApp {
         self.picker_state.clear();
     }
 
-    /// Rewind to a transcript block, or restore Vim Insert mode when `block_idx` is `None`.
+    /// Rewind to a transcript block, or to before the first turn when `block_idx` is `None`.
     pub(crate) fn rewind_to_block(&mut self, block_idx: Option<usize>, restore_vim_insert: bool) {
         if let Some(bidx) = block_idx {
             if self.agent.is_some() {
@@ -156,13 +156,22 @@ impl TuiApp {
             }
             while self.core.engine.try_recv().is_ok() {}
             self.save_session();
-        } else if restore_vim_insert {
-            let win = self
-                .ui
-                .win_mut(crate::app::PROMPT_WIN)
-                .expect("prompt window");
-            self.input
-                .set_vim_mode(win, crate::smelt_term::VimMode::Insert);
+        } else {
+            if self.agent.is_some() {
+                self.cancel_agent();
+                self.agent = None;
+            }
+            self.rewind_to_start();
+            while self.core.engine.try_recv().is_ok() {}
+            self.save_session();
+            if restore_vim_insert {
+                let win = self
+                    .ui
+                    .win_mut(crate::app::PROMPT_WIN)
+                    .expect("prompt window");
+                self.input
+                    .set_vim_mode(win, crate::smelt_term::VimMode::Insert);
+            }
         }
     }
 
