@@ -13,6 +13,18 @@ local function text_row(text, style) return row(span(text, style)) end
 local function blank() return row(span("", DIM)) end
 local function append(dst, src) for _, line in ipairs(src) do dst[#dst + 1] = line end end
 
+local function log_usage_error(provider, message, data)
+  data = data or {}
+  data.provider = provider
+  data.message = message
+  smelt.log.warn("usage_fetch_failed", data)
+end
+
+local function usage_unavailable(provider, message, data, style)
+  log_usage_error(provider, message, data)
+  return { text_row(provider .. ": " .. message, style or DIM) }
+end
+
 local function join_path(...)
   local out = table.concat({ ... }, "/")
   return out:gsub("/+/", "/")
@@ -24,13 +36,6 @@ local function read_json(path)
   local value = smelt.parse.json(raw)
   if value == nil then return nil, "invalid json" end
   return value, nil
-end
-
-local function read_root_toml_string(path, key)
-  local raw = smelt.fs.read(path)
-  if not raw then return nil end
-  local pattern = "\n%s*" .. key .. "%s*=%s*([\"'])(.-)%1"
-  return ("\n" .. raw):match(pattern)
 end
 
 local function active_provider()
@@ -142,36 +147,48 @@ local function add_codex_rate_limits(rows, details, prefix)
 end
 
 local function codex_usage_lines()
-  local home = smelt.os.getenv("CODEX_HOME") or join_path(smelt.os.home() or "", ".codex")
-  local auth, err = read_json(join_path(home, "auth.json"))
-  if not auth then
-    if err and not err:match("No such file") and not err:match("os error 2") then
-      return { text_row("Codex: failed to read auth.json: " .. err, ERR) }
+  local res, auth_err = smelt.auth.request("codex", { path = "/wham/usage" })
+  if not res then
+    local msg = tostring(auth_err or "")
+    local friendly = "usage unavailable — try again later"
+    local style = DIM
+    if msg:find("not logged in", 1, true) then
+      return { text_row("Codex: not logged in", DIM) }
     end
-    return { text_row("Codex: not logged in", DIM) }
+    if msg:find("sign in again", 1, true) or msg:find("refresh token", 1, true) then
+      friendly = "authentication expired — run `smelt auth` to sign in again"
+      style = ERR
+    end
+    return usage_unavailable("Codex", friendly, {
+      kind = "auth",
+      error = msg,
+    }, style)
   end
-
-  local tokens = type(auth.tokens) == "table" and auth.tokens or {}
-  local token = tokens.access_token
-  if not token then return { text_row("Codex: usage limits require ChatGPT/Codex login", DIM) } end
-
-  local base = read_root_toml_string(join_path(home, "config.toml"), "chatgpt_base_url")
-    or smelt.os.getenv("CHATGPT_BASE_URL")
-    or "https://chatgpt.com/backend-api"
-  base = base:gsub("/+$", "")
-
-  local headers = { Authorization = "Bearer " .. token }
-  if tokens.account_id then headers["ChatGPT-Account-ID"] = tostring(tokens.account_id) end
-
-  local res, http_err = smelt.http.get(base .. "/wham/usage", { headers = headers, timeout_secs = 20 })
-  if not res then return { text_row("Codex: failed to fetch usage: " .. tostring(http_err), ERR) } end
 
   local payload = smelt.parse.json(res.body or "")
   if res.status ~= 200 then
-    local detail = type(payload) == "table" and (payload.detail or payload.message) or (res.body or "")
-    return { text_row(string.format("Codex: failed to fetch usage (%s): %s", tostring(res.status), tostring(detail):sub(1, 180)), ERR) }
+    local body = tostring(res.body or "")
+    local message = "usage unavailable right now — try again later"
+    local style = DIM
+    if tonumber(res.status) == 401 then
+      message = "authentication expired — run `smelt auth` to sign in again"
+      style = ERR
+    elseif tonumber(res.status) == 403 then
+      message = "usage unavailable for this account"
+    end
+    return usage_unavailable("Codex", message, {
+      kind = "http",
+      status = res.status,
+      body = body:sub(1, 1000),
+    }, style)
   end
-  if type(payload) ~= "table" then return { text_row("Codex: invalid usage response", ERR) } end
+  if type(payload) ~= "table" then
+    return usage_unavailable("Codex", "usage response was invalid — try again later", {
+      kind = "invalid_json",
+      status = res.status,
+      body = tostring(res.body or ""):sub(1, 1000),
+    })
+  end
 
   local lines = { text_row("Codex", HEAD) }
   if payload.plan_type then lines[#lines + 1] = row(span("  plan ", DIM), span(tostring(payload.plan_type), VALUE)) end
@@ -262,14 +279,38 @@ local function kimi_usage_lines()
     headers = { Authorization = "Bearer " .. token, Accept = "application/json" },
     timeout_secs = 20,
   })
-  if not res then return { text_row("Kimi Code: failed to fetch usage: " .. tostring(http_err), ERR) } end
+  if not res then
+    return usage_unavailable("Kimi Code", "usage unavailable — check your connection and try again", {
+      kind = "network",
+      error = tostring(http_err),
+      url = base .. "/usages",
+    })
+  end
 
   local payload = smelt.parse.json(res.body or "")
   if res.status ~= 200 then
-    local detail = type(payload) == "table" and (payload.message or payload.error or payload.detail) or (res.body or "")
-    return { text_row(string.format("Kimi Code: failed to fetch usage (%s): %s", tostring(res.status), tostring(detail):sub(1, 180)), ERR) }
+    local body = tostring(res.body or "")
+    local message = "usage unavailable right now — try again later"
+    local style = DIM
+    if tonumber(res.status) == 401 then
+      message = "authentication expired — sign in to Kimi Code again"
+      style = ERR
+    elseif tonumber(res.status) == 403 then
+      message = "usage unavailable for this account"
+    end
+    return usage_unavailable("Kimi Code", message, {
+      kind = "http",
+      status = res.status,
+      body = body:sub(1, 1000),
+    }, style)
   end
-  if type(payload) ~= "table" then return { text_row("Kimi Code: invalid usage response", ERR) } end
+  if type(payload) ~= "table" then
+    return usage_unavailable("Kimi Code", "usage response was invalid — try again later", {
+      kind = "invalid_json",
+      status = res.status,
+      body = tostring(res.body or ""):sub(1, 1000),
+    })
+  end
 
   local rows = {}
   local summary = kimi_row(payload.usage, "Weekly limit")

@@ -14,6 +14,18 @@
 --   on_dismiss function()                  — Esc dismiss.
 --   stay_open  bool                        — keep picker open after Enter (persistent mode).
 
+local function report_picker_error(event, err)
+  local msg = tostring(err)
+  smelt.log.error("cmd.picker_callback_failed", { event = event, error = msg })
+  smelt.notify.error("cmd.picker " .. event .. ": " .. msg)
+end
+
+local function safe_dismiss(fn)
+  if not fn then return end
+  local ok, err = pcall(fn)
+  if not ok then report_picker_error("on_dismiss", err) end
+end
+
 local function run_picker(opts)
   smelt.spawn(function()
     if opts.stay_open then
@@ -27,19 +39,19 @@ local function run_picker(opts)
           if opts.on_enter then
             local ok, err = pcall(opts.on_enter, item, idx)
             if not ok then
-              smelt.notify.error("cmd.picker on_enter: " .. tostring(err))
+              report_picker_error("on_enter", err)
             end
           end
         end,
       })
-      if opts.on_dismiss then pcall(opts.on_dismiss) end
+      safe_dismiss(opts.on_dismiss)
       return
     end
 
     -- Single-shot mode: open once, dispatch once, close.
     local items = type(opts.items) == "function" and opts.items() or opts.items
     if not items or #items == 0 then
-      if opts.on_dismiss then pcall(opts.on_dismiss) end
+      safe_dismiss(opts.on_dismiss)
       return
     end
     local r = smelt.prompt.open_picker({
@@ -47,13 +59,13 @@ local function run_picker(opts)
       on_select = opts.on_select,
     })
     if not r then
-      if opts.on_dismiss then pcall(opts.on_dismiss) end
+      safe_dismiss(opts.on_dismiss)
       return
     end
     if r.action == "enter" and opts.on_enter then
       local ok, err = pcall(opts.on_enter, r.item, r.index)
       if not ok then
-        smelt.notify.error("cmd.picker on_enter: " .. tostring(err))
+        report_picker_error("on_enter", err)
       end
     end
   end)

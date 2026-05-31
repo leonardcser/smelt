@@ -46,6 +46,12 @@ smelt.dialog = smelt.dialog or {}
 
 local REGION = "dialog_overlay"
 
+local function report_callback_error(event, err)
+  local msg = tostring(err)
+  smelt.log.error("dialog.callback_failed", { event = event, error = msg })
+  smelt.notify.error("dialog " .. event .. ": " .. msg)
+end
+
 -- Stack of active dialog contexts. Pushed by `setup_lifecycle` at open
 -- time, popped on resolve. `smelt.dialog.current()` returns the topmost
 -- ctx so nested dialogs (e.g. confirm-on-top-of-picker) don't shadow each
@@ -352,7 +358,7 @@ function smelt.dialog.menu(items, opts)
     }
     local handler = opts.on_submit or default_on_submit
     local ok, err = pcall(handler, ctx)
-    if not ok then smelt.notify.error("dialog menu submit: " .. tostring(err)) end
+    if not ok then report_callback_error("menu submit", err) end
   end
 
   function ctrl:submit() submit_at(self:cursor()) end
@@ -723,7 +729,7 @@ local function setup_lifecycle(opts, leaves, overlay, resolve_fn)
         local on_press = km.on_press
         overlay:key(km.key, function(raw_ctx)
           local ok, err = pcall(on_press, make_ctx(raw_ctx))
-          if not ok then smelt.notify.error("dialog keymap: " .. tostring(err)) end
+          if not ok then report_callback_error("keymap", err) end
         end)
       end
     end
@@ -743,7 +749,7 @@ local function setup_lifecycle(opts, leaves, overlay, resolve_fn)
   if type(opts.on_submit) == "function" then
     register_on_all("submit", function(raw_ctx)
       local ok, err = pcall(opts.on_submit, make_ctx(raw_ctx))
-      if not ok then smelt.notify.error("dialog on_submit: " .. tostring(err)) end
+      if not ok then report_callback_error("on_submit", err) end
     end)
   end
 
@@ -751,7 +757,7 @@ local function setup_lifecycle(opts, leaves, overlay, resolve_fn)
   register_on_all("dismiss", function(raw_ctx)
     if type(opts.on_dismiss) == "function" then
       local ok, err = pcall(opts.on_dismiss, make_ctx(raw_ctx))
-      if not ok then smelt.notify.error("dialog on_dismiss: " .. tostring(err)) end
+      if not ok then report_callback_error("on_dismiss", err) end
     else
       resolve(nil)
     end
@@ -760,7 +766,7 @@ local function setup_lifecycle(opts, leaves, overlay, resolve_fn)
   if type(opts.on_tick) == "function" then
     register_on_all("tick", function(raw_ctx)
       local ok, err = pcall(opts.on_tick, make_ctx(raw_ctx))
-      if not ok then smelt.notify.error("dialog on_tick: " .. tostring(err)) end
+      if not ok then report_callback_error("on_tick", err) end
     end)
   end
 
@@ -769,7 +775,7 @@ local function setup_lifecycle(opts, leaves, overlay, resolve_fn)
       if type(fn) == "function" then
         register_on_all(event_name, function(raw_ctx)
           local ok, err = pcall(fn, make_ctx(raw_ctx))
-          if not ok then smelt.notify.error("dialog on_event[" .. event_name .. "]: " .. tostring(err)) end
+          if not ok then report_callback_error("on_event[" .. event_name .. "]", err) end
         end)
       end
     end

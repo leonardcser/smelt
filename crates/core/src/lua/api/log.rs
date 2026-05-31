@@ -1,7 +1,6 @@
 //! `smelt.log` — structured JSONL log entries written to the rotating
-//! engine log. Lua callers use this to emit machine-readable telemetry
-//! events (e.g. compaction summaries) that complement `smelt.notify`
-//! toasts. UiHost-only.
+//! engine log. Lua callers use this to emit machine-readable telemetry.
+//! Host-tier so bundled runtime code can log without a terminal UI.
 
 use mlua::prelude::*;
 use smelt_core::lua::doc::Tier;
@@ -22,7 +21,7 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
         smelt,
         "log",
         "Structured JSONL log entries written to the engine log file. Use for machine-readable telemetry events; pair with `smelt.notify` for user-visible toasts.",
-        Tier::UiHost,
+        Tier::Host,
     )?;
     m.fn_(
         "info",

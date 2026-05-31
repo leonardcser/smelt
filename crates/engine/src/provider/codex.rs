@@ -6,6 +6,7 @@ use std::time::Duration;
 
 const CLIENT_ID: &str = "app_EMoamEEZ73f0CkXaXp7hrann";
 const ISSUER: &str = "https://auth.openai.com";
+pub const CHATGPT_BACKEND_API_BASE: &str = "https://chatgpt.com/backend-api";
 pub const CODEX_API_ENDPOINT: &str = "https://chatgpt.com/backend-api/codex/responses";
 const OAUTH_PORT: u16 = 1455;
 const REFRESH_INTERVAL_SECS: u64 = 8 * 24 * 3600; // 8 days, matching codex
@@ -49,6 +50,15 @@ impl CodexTokens {
     pub(crate) fn load() -> Option<Self> {
         let json = cred_store().load()?;
         serde_json::from_str(&json).ok()
+    }
+
+    pub(crate) fn apply_headers(&self, req: reqwest::RequestBuilder) -> reqwest::RequestBuilder {
+        let req = req.bearer_auth(&self.access_token);
+        if let Some(account_id) = self.account_id.as_deref() {
+            req.header("ChatGPT-Account-ID", account_id)
+        } else {
+            req
+        }
     }
 
     pub(crate) fn delete() {

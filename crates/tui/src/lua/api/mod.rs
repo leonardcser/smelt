@@ -8,7 +8,6 @@ mod engine;
 mod history;
 mod keymap;
 mod layout;
-mod log;
 mod metrics;
 mod model;
 mod notebook;
@@ -110,7 +109,6 @@ impl LuaRuntime {
         keymap::register(lua, &smelt_keymap, shared)?;
         metrics::register(lua, &smelt)?;
         config::register(lua, &smelt)?;
-        log::register(lua, &smelt)?;
         model::register(lua, &smelt)?;
         permissions::register(lua, &smelt, shared)?;
         session::register(lua, &smelt)?;

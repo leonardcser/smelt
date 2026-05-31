@@ -528,6 +528,13 @@ details (parameter shapes, return tables, type records), open the matching
 
 Available in every runtime, including headless mode.
 
+#### `smelt.auth`
+
+Authenticated provider helpers.
+
+- `smelt.auth.request` :: `fun(provider: string, opts: { path: string, method: string?, body: string? }): { status: integer, body: string }?, string?`
+  Run an authenticated request against a provider-owned endpoint using smelt-managed credentials.
+
 #### `smelt.builtins`
 
 Opt out of bundled `smelt.<dotted>` modules.
@@ -784,6 +791,17 @@ Picker-style virtual list widget.
 
 - `smelt.list.new` :: `fun(opts: smelt.list.Opts): table`
   Build a structured list bound to the dialog-list `opts.leaf` and its backing `opts.buf`.
+
+#### `smelt.log`
+
+Structured JSONL log entries written to the engine log file.
+
+- `smelt.log.error` :: `fun(event: string, data: any?): nil`
+  Write a JSONL log entry at Error level.
+- `smelt.log.info` :: `fun(event: string, data: any?): nil`
+  Write a JSONL log entry at Info level.
+- `smelt.log.warn` :: `fun(event: string, data: any?): nil`
+  Write a JSONL log entry at Warn level.
 
 #### `smelt.mcp`
 
@@ -1156,17 +1174,6 @@ Register chord→callback bindings and inspect the layered help index.
   Bind `chord` in `mode` to a Lua callback.
 - `smelt.keymap.unset` :: `fun(mode: string, chord: string): boolean`
   Drop the binding for `chord` in `mode`.
-
-#### `smelt.log`
-
-Structured JSONL log entries written to the engine log file.
-
-- `smelt.log.error` :: `fun(event: string, data: any?): nil`
-  Write a JSONL log entry at Error level.
-- `smelt.log.info` :: `fun(event: string, data: any?): nil`
-  Write a JSONL log entry at Info level.
-- `smelt.log.warn` :: `fun(event: string, data: any?): nil`
-  Write a JSONL log entry at Warn level.
 
 #### `smelt.metrics`
 

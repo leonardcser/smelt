@@ -650,11 +650,7 @@ impl Provider {
             let mut req = self.client.post(&url).json(&body);
             if is_codex {
                 if let Some(ref tokens) = codex_auth {
-                    req = req.bearer_auth(&tokens.access_token);
-                    if let Some(id) = &tokens.account_id {
-                        req = req.header("ChatGPT-Account-Id", id);
-                    }
-                    req = req.header("originator", "smelt");
+                    req = tokens.apply_headers(req).header("originator", "smelt");
                     if let Some(ref ts) = *self.turn_state.lock().unwrap() {
                         req = req.header("x-codex-turn-state", ts.as_str());
                     }

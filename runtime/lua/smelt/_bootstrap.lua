@@ -323,6 +323,17 @@ function smelt.http.post(url, body, opts)
   return result, nil
 end
 
+--- Run an authenticated request against a provider-owned endpoint using
+--- smelt-managed credentials. Credentials stay in Rust; Lua receives only
+--- the HTTP status and body. `opts.path` must be an absolute path without a
+--- URL scheme; `opts.method` defaults to `GET`.
+---@type fun(provider: string, opts: { path: string, method: string?, body: string? }): { status: integer, body: string }?, string?
+function smelt.auth.request(provider, opts)
+  local result = smelt.task.external(function(id) smelt.auth.__request_async_start(id, provider, opts or {}) end)
+  if result.err ~= nil then return nil, result.err end
+  return result, nil
+end
+
 -- Run ripgrep with `pattern` over `path` off the main thread. Yields the
 -- calling coroutine until the child exits; must be called from inside
 -- `smelt.spawn(fn)` or a `tool.execute`. `opts` accepts the same fields
@@ -398,7 +409,11 @@ function smelt.fs.watch(path, handler, opts)
       for _, ev in ipairs(events) do
         local ok, perr = pcall(handler, ev)
         if not ok then
-          io.stderr:write("smelt.fs.watch: " .. tostring(perr) .. "\n")
+          smelt.log.error("fs.watch_handler_failed", {
+            path = path,
+            event = ev,
+            error = tostring(perr),
+          })
         end
       end
     end

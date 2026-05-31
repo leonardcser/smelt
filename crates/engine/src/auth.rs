@@ -70,7 +70,64 @@ pub fn is_logged_in(provider: AuthProvider) -> bool {
     }
 }
 
-/// Fetch fresh model identifiers from the provider API, or return empty on failure.
+#[derive(Debug, Clone)]
+pub struct AuthenticatedResponse {
+    pub status: u16,
+    pub body: String,
+}
+
+pub async fn authenticated_request(
+    provider: AuthProvider,
+    method: &str,
+    path: &str,
+    body: Option<Vec<u8>>,
+    client: &reqwest::Client,
+) -> Result<AuthenticatedResponse, String> {
+    match provider {
+        AuthProvider::Codex => codex_authenticated_request(method, path, body, client).await,
+        AuthProvider::Copilot => {
+            Err("authenticated Copilot requests are not supported".to_string())
+        }
+    }
+}
+
+async fn codex_authenticated_request(
+    method: &str,
+    path: &str,
+    body: Option<Vec<u8>>,
+    client: &reqwest::Client,
+) -> Result<AuthenticatedResponse, String> {
+    let tokens = provider::codex::ensure_access_token_full(client).await?;
+    let url = format!(
+        "{}{}",
+        provider::codex::CHATGPT_BACKEND_API_BASE,
+        authenticated_path(path)?
+    );
+    let mut req = match method.to_ascii_uppercase().as_str() {
+        "GET" => client.get(url),
+        "POST" => client.post(url).body(body.unwrap_or_default()),
+        other => return Err(format!("unsupported authenticated request method: {other}")),
+    };
+    req = tokens
+        .apply_headers(req)
+        .header("Accept", "application/json");
+
+    let resp = req
+        .send()
+        .await
+        .map_err(|e| format!("authenticated request failed: {e}"))?;
+    let status = resp.status().as_u16();
+    let body = resp.text().await.unwrap_or_default();
+    Ok(AuthenticatedResponse { status, body })
+}
+
+fn authenticated_path(path: &str) -> Result<String, String> {
+    if !path.starts_with('/') || path.starts_with("//") || path.contains("://") {
+        return Err("authenticated request path must be an absolute path without a scheme".into());
+    }
+    Ok(path.to_string())
+}
+
 pub async fn refresh_models_cache(kind: AuthProvider, client: &reqwest::Client) -> Vec<String> {
     match kind {
         AuthProvider::Codex => provider::codex::refresh_models_cache(client)
