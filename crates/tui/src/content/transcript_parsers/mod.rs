@@ -925,6 +925,130 @@ mod tests {
         );
     }
 
+    #[test]
+    fn edit_file_diff_body_column_stays_stable_across_completion() {
+        use smelt_core::content::block_layout::RenderedLayout;
+        use smelt_core::transcript_model::ToolOutput;
+
+        fn render_insert_column(layout: RenderedLayout, status: ToolStatus) -> usize {
+            let block = Block::ToolCall {
+                call_id: "c-edit-shift".into(),
+                name: "edit_file".into(),
+                summary: protocol::StyledLines::from_plain("a.txt"),
+                args: HashMap::new(),
+            };
+            let state = ToolState {
+                status,
+                elapsed: None,
+                output: None,
+                user_message: None,
+                render_cache: Some((W as u16, layout)),
+                layout_revision: 0,
+            };
+            let ctx = LayoutContext {
+                width: W as u16,
+                show_thinking: true,
+                view_state: ViewState::Expanded,
+            };
+            layout_block_test(&block, Some(&state), &ctx)
+                .into_iter()
+                .find_map(|line| line.text.find("inserted line"))
+                .expect("diff should render the inserted line")
+        }
+
+        fn edit_file_layout(
+            app: &mut crate::app::test_harness::TestApp,
+            args: &HashMap<String, serde_json::Value>,
+            output: Option<&ToolOutput>,
+            status: &'static str,
+        ) -> RenderedLayout {
+            let ctx = smelt_core::lua::runtime::ToolRenderCtx {
+                width: W,
+                summary: "",
+                status,
+                elapsed_secs: None,
+                call_id: Some("c-edit-shift"),
+            };
+            let layout = app
+                .app
+                .lua
+                .render_tool_layout("edit_file", args, output, ctx)
+                .expect("edit_file should render a layout");
+            crate::app::transcript::extract_rendered_layout(&layout, &mut app.app.ui)
+        }
+
+        fn layout_text(layout: RenderedLayout) -> String {
+            let block = Block::ToolCall {
+                call_id: "c-edit-shift".into(),
+                name: "edit_file".into(),
+                summary: protocol::StyledLines::from_plain("a.txt"),
+                args: HashMap::new(),
+            };
+            let state = ToolState {
+                status: ToolStatus::Pending,
+                elapsed: None,
+                output: None,
+                user_message: None,
+                render_cache: Some((W as u16, layout)),
+                layout_revision: 0,
+            };
+            let ctx = LayoutContext {
+                width: W as u16,
+                show_thinking: true,
+                view_state: ViewState::Expanded,
+            };
+            layout_block_test(&block, Some(&state), &ctx)
+                .into_iter()
+                .map(|line| line.text)
+                .collect::<Vec<_>>()
+                .join("\n")
+        }
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("a.txt");
+        let path_str = path.to_str().unwrap().to_string();
+        let before: String = (1..=9).map(|i| format!("line {i}\n")).collect();
+        let after = before.replacen("line 1\n", "line 1\ninserted line\n", 1);
+        std::fs::write(&path, &before).unwrap();
+
+        let mut app = crate::app::test_harness::TestApp::builder().build();
+        let mut args = HashMap::new();
+        args.insert(
+            "file_path".into(),
+            serde_json::Value::String(path_str.clone()),
+        );
+        args.insert(
+            "old_string".into(),
+            serde_json::Value::String("line 1\n".into()),
+        );
+        args.insert(
+            "new_string".into(),
+            serde_json::Value::String("line 1\ninserted line\n".into()),
+        );
+
+        let pending_layout = edit_file_layout(&mut app, &args, None, "pending");
+        assert!(
+            layout_text(pending_layout.clone()).contains("line 2"),
+            "pending edit_file render should use the same full-file planned diff as preview"
+        );
+
+        std::fs::write(&path, &after).unwrap();
+        let output = ToolOutput {
+            content: "edited a.txt".into(),
+            is_error: false,
+            metadata: Some(serde_json::json!({
+                "old_content": before,
+                "new_content": after,
+                "path": path_str,
+            })),
+        };
+        let finished_layout = edit_file_layout(&mut app, &args, Some(&output), "ok");
+
+        let pending_col = render_insert_column(pending_layout, ToolStatus::Pending);
+        let finished_col = render_insert_column(finished_layout, ToolStatus::Ok);
+        assert_eq!(pending_col, finished_col);
+    }
+
     /// When the cached width doesn't match the layout width, the cache is ignored and
     /// the rendered body falls back to `output.content`. This guards the resize path.
     #[test]

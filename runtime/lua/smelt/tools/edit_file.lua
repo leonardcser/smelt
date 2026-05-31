@@ -41,6 +41,36 @@ local function replace_all(haystack, needle, replacement)
   return table.concat(out)
 end
 
+local function apply_edit(content, old_string, new_string, do_all)
+  if do_all then
+    return replace_all(content, old_string, new_string)
+  end
+  return replace_first(content, old_string, new_string)
+end
+
+local function edit_fields(args)
+  return args.file_path or "", args.old_string or "", args.new_string or "", args.replace_all == true
+end
+
+local function planned_diff(args)
+  local path, old_string, new_string, do_all = edit_fields(args)
+  local content = path ~= "" and smelt.fs.read(path) or nil
+  if not content then
+    return smelt.layout.diff({
+      old = old_string,
+      new = new_string,
+      path = path,
+    })
+  end
+
+  return smelt.layout.diff({
+    old = content,
+    new = apply_edit(content, old_string, new_string, do_all),
+    path = path,
+    anchor = old_string,
+  })
+end
+
 smelt.tools.register({
   name = "edit_file",
   description = "Performs exact string replacements in files. The old_string must be unique in the file unless replace_all is true.",
@@ -82,51 +112,27 @@ smelt.tools.register({
     if output.is_error then
       return smelt.layout.text(output.content, { hl_group = "ErrorMsg" })
     end
-    local meta = output.metadata or {}
-    return smelt.layout.diff({
-      old = meta.old_content or args.old_string or "",
-      new = meta.new_content or args.new_string or "",
-      path = meta.path or args.file_path or "",
-      anchor = args.old_string or "",
-    })
+    local meta = output.metadata
+    if meta then
+      return smelt.layout.diff({
+        old = meta.old_content or args.old_string or "",
+        new = meta.new_content or args.new_string or "",
+        path = meta.path or args.file_path or "",
+        anchor = args.old_string or "",
+      })
+    end
+    return planned_diff(args)
   end,
   paths_for_workspace = function(args)
     local p = args.file_path or ""
     return p ~= "" and { p } or {}
   end,
   preview = function(args)
-    local path = args.file_path or ""
-    local old_string = args.old_string or ""
-    local new_string = args.new_string or ""
-    local do_all = args.replace_all == true
-    local content = path ~= "" and smelt.fs.read(path) or nil
-    if not content then
-      return smelt.layout.diff({
-        old = old_string,
-        new = new_string,
-        path = path,
-      })
-    end
-
-    local new_content
-    if do_all then
-      new_content = replace_all(content, old_string, new_string)
-    else
-      new_content = replace_first(content, old_string, new_string)
-    end
-    return smelt.layout.diff({
-      old = content,
-      new = new_content,
-      path = path,
-      anchor = old_string,
-    })
+    return planned_diff(args)
   end,
 
   execute = function(args)
-    local path = args.file_path or ""
-    local old_string = args.old_string or ""
-    local new_string = args.new_string or ""
-    local do_all = args.replace_all == true
+    local path, old_string, new_string, do_all = edit_fields(args)
 
     if path == "" then
       return { content = "missing required parameter: file_path", is_error = true }
@@ -175,12 +181,7 @@ smelt.tools.register({
       }
     end
 
-    local new_content
-    if do_all then
-      new_content = replace_all(content, old_string, new_string)
-    else
-      new_content = replace_first(content, old_string, new_string)
-    end
+    local new_content = apply_edit(content, old_string, new_string, do_all)
 
     local _, write_err = smelt.fs.write(path, new_content)
     if write_err then

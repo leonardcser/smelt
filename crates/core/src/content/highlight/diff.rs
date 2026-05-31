@@ -319,8 +319,15 @@ fn compute_diff_view(old: &str, new: &str, path: &str, anchor: &str) -> DiffView
             .unwrap_or(0)
     };
 
-    let is_full_file =
-        old.lines().count() == file_lines_count || new.lines().count() == file_lines_count;
+    let old_line_count = old.lines().count();
+    let new_line_count = new.lines().count();
+    let is_full_file = old_line_count == file_lines_count || new_line_count == file_lines_count;
+    let projected_file_lines_count = projected_file_line_count(
+        file_lines_count,
+        old_line_count,
+        new_line_count,
+        is_full_file,
+    );
 
     let diff = TextDiff::from_lines(old, new);
     let changes: Vec<DiffChange> = diff
@@ -362,7 +369,13 @@ fn compute_diff_view(old: &str, new: &str, path: &str, anchor: &str) -> DiffView
     let last_mod = last_mod.unwrap_or(track_start);
     let view_start = first_mod.saturating_sub(ctx);
     let view_end = (last_mod + 1 + ctx).min(file_lines_count);
-    let max_display_lineno = view_end.max(old_line).max(new_line);
+    let gutter_max_lineno = diff_gutter_max_lineno(
+        view_end,
+        old_line,
+        new_line,
+        file_lines_count,
+        projected_file_lines_count,
+    );
 
     DiffViewData {
         file_content,
@@ -370,10 +383,41 @@ fn compute_diff_view(old: &str, new: &str, path: &str, anchor: &str) -> DiffView
         first_mod,
         view_start,
         view_end,
-        max_display_lineno,
+        max_display_lineno: gutter_max_lineno,
         changes,
         is_full_file,
     }
+}
+
+fn projected_file_line_count(
+    file_lines_count: usize,
+    old_line_count: usize,
+    new_line_count: usize,
+    is_full_file: bool,
+) -> usize {
+    if is_full_file {
+        file_lines_count
+    } else {
+        file_lines_count
+            .saturating_sub(old_line_count)
+            .saturating_add(new_line_count)
+    }
+}
+
+fn diff_gutter_max_lineno(
+    view_end: usize,
+    old_line: usize,
+    new_line: usize,
+    file_lines_count: usize,
+    projected_file_lines_count: usize,
+) -> usize {
+    // Snippet diffs still reserve line-number space for the whole file: the
+    // current length matters for deletions, the projected length for insertions.
+    view_end
+        .max(old_line)
+        .max(new_line)
+        .max(file_lines_count)
+        .max(projected_file_lines_count)
 }
 
 /// Mark equal lines within `ctx` of any non-Equal change as visible; collapse the rest.
