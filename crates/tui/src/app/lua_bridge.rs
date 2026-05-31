@@ -62,6 +62,7 @@ impl TuiApp {
         if self.last_prompt_text == current_text {
             return;
         }
+        let cursor_before = self.prompt_win().cpos;
         self.last_prompt_text = current_text.clone();
         let lua = &self.lua;
         let mut lua_invoke = |handle: crate::smelt_term::LuaHandle,
@@ -73,11 +74,21 @@ impl TuiApp {
             crate::app::PROMPT_WIN,
             crate::smelt_term::WinEvent::TextChanged,
             crate::smelt_term::Payload::Text {
-                content: current_text,
+                content: current_text.clone(),
             },
             &mut lua_invoke,
         );
         self.flush_lua_callbacks();
+
+        // `text_changed` is observational: filter/completer callbacks can edit
+        // the prompt explicitly, but a callback that only moves the cursor must
+        // not repark the insertion point after every typed character.
+        if self.prompt_buf().source() == current_text && self.prompt_win().cpos != cursor_before {
+            let pctx = crate::input::prompt_ctx_mut(&mut self.ui);
+            pctx.win.cpos = smelt_buffer::text::snap(pctx.buf.source(), cursor_before);
+            pctx.win.selection_anchor = None;
+            pctx.win.clamp_anchors_to_source(pctx.buf.source());
+        }
     }
 
     pub(crate) fn flush_lua_callbacks(&mut self) {

@@ -923,6 +923,13 @@ impl Ui {
         self.callbacks.clear_all(WinId(leaf.0))
     }
 
+    /// Remove every Lua callback/keymap still attached to surviving UI leaves.
+    /// Rust callbacks are preserved. Returns Lua handle ids for caller cleanup.
+    #[must_use]
+    pub fn clear_lua_callbacks(&mut self) -> Vec<u64> {
+        self.callbacks.clear_lua_callbacks()
+    }
+
     /// Fire a `WinEvent` on `win`. Callbacks registered on `win` for `ev` fire in
     /// registration order. The event does not bubble to other leaves — consumers that
     /// need to catch events from multiple panels (e.g. `dialog.lua`) register on each

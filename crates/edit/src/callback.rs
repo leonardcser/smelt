@@ -154,6 +154,15 @@ impl std::fmt::Debug for Callback {
     }
 }
 
+impl Callback {
+    fn lua_id(&self) -> Option<u64> {
+        match self {
+            Callback::Lua(LuaHandle(id)) => Some(*id),
+            Callback::Rust(_) => None,
+        }
+    }
+}
+
 /// Context passed to Rust callbacks. Provides full `&mut Ui` access.
 pub struct CallbackCtx<'a> {
     pub ui: &'a mut super::Ui,
@@ -221,24 +230,57 @@ impl Callbacks {
     pub(crate) fn clear_all(&mut self, win: WinId) -> Vec<u64> {
         let mut lua_ids = Vec::new();
         if let Some(table) = self.keymaps.remove(&win) {
-            for cb in table.into_values() {
-                if let Callback::Lua(LuaHandle(id)) = cb {
-                    lua_ids.push(id);
-                }
-            }
+            lua_ids.extend(table.into_values().filter_map(|cb| cb.lua_id()));
         }
         if let Some(events) = self.events.remove(&win) {
             for cbs in events.into_values() {
-                for cb in cbs {
-                    if let Callback::Lua(LuaHandle(id)) = cb {
-                        lua_ids.push(id);
-                    }
-                }
+                lua_ids.extend(cbs.into_iter().filter_map(|cb| cb.lua_id()));
             }
         }
-        if let Some(Callback::Lua(LuaHandle(id))) = self.key_fallback.remove(&win) {
-            lua_ids.push(id);
+        if let Some(cb) = self.key_fallback.remove(&win) {
+            if let Some(id) = cb.lua_id() {
+                lua_ids.push(id);
+            }
         }
+        lua_ids
+    }
+
+    fn retain_non_lua(cb: &Callback, lua_ids: &mut Vec<u64>) -> bool {
+        if let Some(id) = cb.lua_id() {
+            lua_ids.push(id);
+            false
+        } else {
+            true
+        }
+    }
+
+    /// Remove every Lua callback across window and overlay registries. Rust
+    /// callbacks are preserved. Returns Lua handle ids for caller cleanup.
+    #[must_use]
+    pub(crate) fn clear_lua_callbacks(&mut self) -> Vec<u64> {
+        let mut lua_ids = Vec::new();
+
+        self.keymaps.retain(|_, table| {
+            table.retain(|_, cb| Self::retain_non_lua(cb, &mut lua_ids));
+            !table.is_empty()
+        });
+
+        self.events.retain(|_, events| {
+            events.retain(|_, callbacks| {
+                callbacks.retain(|cb| Self::retain_non_lua(cb, &mut lua_ids));
+                !callbacks.is_empty()
+            });
+            !events.is_empty()
+        });
+
+        self.key_fallback
+            .retain(|_, cb| Self::retain_non_lua(cb, &mut lua_ids));
+
+        self.overlay_keymaps.retain(|_, table| {
+            table.retain(|_, cb| Self::retain_non_lua(cb, &mut lua_ids));
+            !table.is_empty()
+        });
+
         lua_ids
     }
 

@@ -2404,6 +2404,64 @@ mod tests {
     }
 
     #[test]
+    fn typing_after_turn_complete_keeps_prompt_cursor_coherent() {
+        let mut app = TestApp::builder().with_vim(false).build();
+        app.start_turn(1);
+        app.feed_one(SourceEvent::Engine(EngineEvent::TurnComplete {
+            turn_id: 1,
+            history: vec![],
+            meta: None,
+        }));
+        app.render_silent();
+
+        for (idx, ch) in "Hello".chars().enumerate() {
+            app.type_char(ch);
+            assert_eq!(app.app.prompt_win().cpos, idx + 1);
+        }
+
+        app.press(KeyCode::Left);
+        app.type_char('!');
+
+        assert_eq!(app.state().prompt_text, "Hell!o");
+        assert_eq!(app.app.prompt_win().cpos, 5);
+    }
+
+    #[test]
+    fn text_changed_callbacks_do_not_repark_prompt_cursor() {
+        let mut app = TestApp::builder().with_vim(false).build();
+        assert!(app.run_lua(
+            r#"
+            smelt.prompt.win():on("text_changed", function()
+                smelt.prompt.cursor(0)
+            end)
+            "#,
+        ));
+
+        app.type_text("Hello");
+
+        assert_eq!(app.state().prompt_text, "Hello");
+        assert_eq!(app.app.prompt_win().cpos, 5);
+    }
+
+    #[test]
+    fn reload_clears_surviving_prompt_keymaps() {
+        let mut app = TestApp::builder().with_vim(false).build();
+        assert!(app.run_lua(
+            r#"
+            smelt.prompt.win():key("left", function() end)
+            "#,
+        ));
+
+        app.reload_lua();
+        app.type_text("ab");
+        app.press(KeyCode::Left);
+        app.type_char('X');
+
+        assert_eq!(app.state().prompt_text, "aXb");
+        assert_eq!(app.app.prompt_win().cpos, 2);
+    }
+
+    #[test]
     fn typing_after_unfinished_prompt_click_uses_clicked_caret() {
         use crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
 

@@ -115,6 +115,13 @@ impl TuiApp {
     fn clear_tui_for_reload(&mut self) {
         self.core.cells.clear_lua_subscribers();
         self.core.timers.clear();
+        // Window/event keymaps live on the UI tree, including named and
+        // built-in windows that survive reload. Drop their Lua handles before
+        // the runtime clears the callback registry so stale bindings cannot
+        // keep swallowing prompt keys after the new Lua context comes up.
+        for handle in self.ui.clear_lua_callbacks() {
+            self.lua.remove_callback(handle);
+        }
         // Anonymous paint slots get reaped; named slots survive with
         // stable `PaintId`s so overlays/layouts referencing them keep
         // working when the plugin re-registers in module body.

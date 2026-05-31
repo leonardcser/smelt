@@ -14,7 +14,7 @@ local function schedule_reload()
   smelt.__pending_reload = true
   local reg
   reg = smelt.cell.glob("turn_complete", function(_, value)
-    if value ~= true then return end
+    if not value then return end
     if reg then reg:remove(); reg = nil end
     smelt.__pending_reload = nil
     smelt.engine.reload()
