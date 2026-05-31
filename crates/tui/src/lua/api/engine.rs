@@ -499,7 +499,7 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
                         model,
                         response_format,
                         reasoning_effort,
-                        tools: app.lua.tool_defs(app.core.config.mode),
+                        tools: app.lua.tool_defs(app.core.config.mode.clone()),
                         session_id,
                     })
                 });

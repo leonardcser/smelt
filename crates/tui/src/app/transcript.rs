@@ -222,6 +222,7 @@ impl TuiApp {
             };
             let role = match block {
                 Block::User { .. } => "user",
+                Block::Mode { .. } => "mode",
                 Block::Text { .. } => "assistant",
                 Block::Thinking { .. } => "thinking",
                 Block::ToolCall { .. } => "tool",

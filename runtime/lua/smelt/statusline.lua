@@ -46,15 +46,6 @@ local function vim_group(label)
   end
 end
 
-local function agent_mode_group(name)
-  if name == "plan" then return "SmeltModePlan"
-  elseif name == "apply" then return "SmeltModeApply"
-  elseif name == "yolo" then return "SmeltModeYolo"
-  elseif name == "exec" then return "SmeltModeExec"
-  else return "SmeltModeDefault"
-  end
-end
-
 local function cell(name) return smelt.cell(name):get() end
 
 local function core_compose()
@@ -98,7 +89,7 @@ local function core_compose()
     local icon = smelt.mode.icon and smelt.mode.icon(mode_name) or ""
     items[#items + 1] = {
       text = " " .. icon .. mode_name .. " ",
-      style = { hl_group = agent_mode_group(mode_name) },
+      style = smelt.mode.style and smelt.mode.style(mode_name) or { hl_group = "SmeltModeDefault" },
       priority = 1,
     }
   end

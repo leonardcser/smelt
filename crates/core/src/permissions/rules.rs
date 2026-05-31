@@ -9,7 +9,7 @@ use std::sync::Arc;
 /// Custom decision function for a subpattern bucket. When present, `check_subcommand` delegates.
 pub type SubpatternParserFn = dyn Fn(&RuleSet, &str, AgentMode) -> Decision + Send + Sync;
 
-#[derive(Debug, Default, Deserialize)]
+#[derive(Debug, Default, Clone, Deserialize)]
 #[serde(default)]
 pub struct RawRuleSet {
     pub allow: Vec<String>,
@@ -17,7 +17,7 @@ pub struct RawRuleSet {
     pub deny: Vec<String>,
 }
 
-#[derive(Debug, Default, Deserialize)]
+#[derive(Debug, Default, Clone, Deserialize)]
 #[serde(default)]
 pub struct RawModePerms {
     pub tools: RawRuleSet,
@@ -25,14 +25,12 @@ pub struct RawModePerms {
     pub subcommands: HashMap<String, RawRuleSet>,
 }
 
-#[derive(Debug, Default, Deserialize)]
+#[derive(Debug, Default, Clone, Deserialize)]
 #[serde(default)]
 pub struct RawPerms {
     pub default: RawModePerms,
-    pub normal: RawModePerms,
-    pub plan: RawModePerms,
-    pub apply: RawModePerms,
-    pub yolo: RawModePerms,
+    #[serde(flatten)]
+    pub modes: HashMap<String, RawModePerms>,
 }
 
 fn merge_ruleset(default: &RawRuleSet, mode: &RawRuleSet) -> RawRuleSet {
@@ -67,7 +65,7 @@ pub(super) fn merge_mode(default: &RawModePerms, mode: &RawModePerms) -> RawMode
     }
 }
 
-#[derive(Debug, Default, Deserialize)]
+#[derive(Debug, Default, Clone, Deserialize)]
 #[serde(default)]
 pub(crate) struct RawConfig {
     pub(super) permissions: RawPerms,
@@ -78,6 +76,23 @@ pub struct RuleSet {
     pub(super) allow: Vec<glob::Pattern>,
     pub(super) ask: Vec<glob::Pattern>,
     pub(super) deny: Vec<glob::Pattern>,
+}
+
+#[derive(Debug, Clone)]
+pub struct ModeBehavior {
+    pub default_decision: Decision,
+    pub allow_subcommands_by_default: bool,
+    pub ask_on_output_redirection: bool,
+}
+
+impl Default for ModeBehavior {
+    fn default() -> Self {
+        Self {
+            default_decision: Decision::Ask,
+            allow_subcommands_by_default: false,
+            ask_on_output_redirection: true,
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -107,23 +122,15 @@ fn build_tool_map(raw: &RawRuleSet) -> HashMap<String, Decision> {
     map
 }
 
-/// Per-tool, per-mode defaults declared at registration. `None` falls back to the global default.
+/// Per-tool, per-mode defaults declared at registration. Missing modes fall back to the global default.
 #[derive(Debug, Default, Clone)]
 pub struct ToolPermDefaults {
-    pub normal: Option<Decision>,
-    pub plan: Option<Decision>,
-    pub apply: Option<Decision>,
-    pub yolo: Option<Decision>,
+    pub modes: HashMap<String, Decision>,
 }
 
 impl ToolPermDefaults {
-    pub fn for_mode(&self, mode: AgentMode) -> Option<&Decision> {
-        match mode {
-            AgentMode::Normal => self.normal.as_ref(),
-            AgentMode::Plan => self.plan.as_ref(),
-            AgentMode::Apply => self.apply.as_ref(),
-            AgentMode::Yolo => self.yolo.as_ref(),
-        }
+    pub fn for_mode(&self, mode: &AgentMode) -> Option<&Decision> {
+        self.modes.get(mode.as_str())
     }
 }
 
@@ -153,12 +160,12 @@ impl std::fmt::Debug for ToolDefaults {
 fn build_subcommand_ruleset(
     name: &str,
     raw: &RawRuleSet,
-    mode: AgentMode,
+    mode_behavior: &ModeBehavior,
     tool_defaults: &ToolDefaults,
 ) -> RuleSet {
     let mut allow = compile_patterns(&raw.allow);
     if allow.is_empty() {
-        if mode == AgentMode::Yolo {
+        if mode_behavior.allow_subcommands_by_default {
             allow = vec![glob::Pattern::new("*").unwrap()];
         } else if let Some(default_allow) = tool_defaults.subcommand_allow.get(name) {
             allow = compile_patterns(default_allow);
@@ -173,7 +180,8 @@ fn build_subcommand_ruleset(
 
 pub(super) fn build_mode(
     raw: &RawModePerms,
-    mode: AgentMode,
+    mode: &AgentMode,
+    mode_behavior: ModeBehavior,
     tool_defaults: &ToolDefaults,
 ) -> ModePerms {
     let mut tools = build_tool_map(&raw.tools);
@@ -188,13 +196,13 @@ pub(super) fn build_mode(
     for (name, rs) in &raw.subcommands {
         subcommands.insert(
             name.clone(),
-            build_subcommand_ruleset(name, rs, mode, tool_defaults),
+            build_subcommand_ruleset(name, rs, &mode_behavior, tool_defaults),
         );
     }
     // Insert default rulesets for tool-declared buckets the user didn't configure.
     for name in tool_defaults.subcommand_allow.keys() {
         subcommands.entry(name.clone()).or_insert_with(|| {
-            build_subcommand_ruleset(name, &RawRuleSet::default(), mode, tool_defaults)
+            build_subcommand_ruleset(name, &RawRuleSet::default(), &mode_behavior, tool_defaults)
         });
     }
 

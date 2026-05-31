@@ -32,18 +32,13 @@ impl From<LuaDecision> for protocol::Decision {
 }
 
 /// Per-mode default decisions installed by `smelt.tools.register`.
-/// Each missing field falls through to the host's generic rules.
+/// Keys are mode names and values are `"allow"`, `"ask"`, or `"deny"`.
 #[derive(Default, Debug, LuaOpts)]
 #[lua(name = "smelt.tools.PermissionDefaults")]
 pub struct LuaToolPermissionDefaults {
-    /// Decision applied in normal mode.
-    pub normal: Option<LuaDecision>,
-    /// Decision applied in plan mode.
-    pub plan: Option<LuaDecision>,
-    /// Decision applied in apply mode.
-    pub apply: Option<LuaDecision>,
-    /// Decision applied in yolo mode.
-    pub yolo: Option<LuaDecision>,
+    /// Per-mode decisions keyed by registered mode name.
+    #[lua(rest)]
+    pub modes: std::collections::HashMap<String, LuaDecision>,
 }
 
 /// Plugin tool definition passed to `smelt.tools.register`.
@@ -121,10 +116,9 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
                 if let Some(perms) = def.permission_defaults {
                     let mut defaults = s.tool_defaults.lock().unwrap_or_else(|e| e.into_inner());
                     let entry = defaults.tool_decisions.entry(name.clone()).or_default();
-                    entry.normal = perms.normal.map(Into::into);
-                    entry.plan = perms.plan.map(Into::into);
-                    entry.apply = perms.apply.map(Into::into);
-                    entry.yolo = perms.yolo.map(Into::into);
+                    for (mode, decision) in perms.modes {
+                        entry.modes.insert(mode, decision.into());
+                    }
                 }
                 if !def.default_allow.is_empty() {
                     let mut defaults = s.tool_defaults.lock().unwrap_or_else(|e| e.into_inner());

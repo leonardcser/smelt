@@ -1,6 +1,7 @@
 use crate::app::{CommandAction, ContextWindowUpdate, EventOutcome, InputOutcome, TuiApp};
 use crate::state;
 use protocol::{AgentMode, Content, ReasoningEffort, UiCommand};
+use smelt_core::transcript_model::Block;
 
 pub(crate) enum ExecEvent {
     Output(String),
@@ -335,10 +336,10 @@ impl TuiApp {
     /// `record=false` skips the `recent.json` write so session
     /// resume doesn't overwrite the user's last explicit pick.
     pub(crate) fn set_mode(&mut self, mode: AgentMode, record: bool) {
-        let old = self.core.config.mode;
-        self.core.config.mode = mode;
+        let old = self.core.config.mode.clone();
+        self.core.config.mode = mode.clone();
         if record && self.core.config.remember.mode {
-            state::set_mode(self.core.config.mode);
+            state::set_mode(self.core.config.mode.clone());
         }
         // Publish new mode before snapshotting tools/prompt for the engine.
         if old != mode {
@@ -355,7 +356,11 @@ impl TuiApp {
             // If the previous message is also a mode note (back-to-back
             // toggles between turns), replace it in place rather than
             // stack — the model only needs the *current* mode.
-            let note = protocol::mode_change_note(self.core.config.mode);
+            let note_text = self.lua.mode_note(self.core.config.mode.as_str());
+            let note = protocol::mode_change_note(&note_text);
+            let mode_block = self
+                .lua
+                .mode_block(Some(self.core.config.mode.as_str()), &note_text);
             let new_item = protocol::HistoryItem::user(protocol::Content::text(note));
             let last_is_mode_note = self
                 .core
@@ -372,14 +377,27 @@ impl TuiApp {
                 if let Some(last) = self.core.session.history.last_mut() {
                     *last = new_item;
                 }
+                if let Some(id) = self.transcript.history.order.last().copied() {
+                    if matches!(
+                        self.transcript.history.blocks.get(&id),
+                        Some(Block::Mode { .. })
+                    ) {
+                        self.transcript.history.rewrite(id, mode_block);
+                    } else {
+                        self.push_block(mode_block);
+                    }
+                } else {
+                    self.push_block(mode_block);
+                }
             } else {
                 self.core.session.history.push(new_item);
+                self.push_block(mode_block);
             }
         }
         let system_prompt = self.rebuild_system_prompt();
-        let tools = self.lua.tool_defs(self.core.config.mode);
+        let tools = self.lua.tool_defs(self.core.config.mode.clone());
         self.core.engine.send(UiCommand::SetAgentMode {
-            mode: self.core.config.mode,
+            mode: self.core.config.mode.clone(),
             system_prompt: Some(system_prompt),
             tools: Some(tools),
         });

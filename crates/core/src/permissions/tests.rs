@@ -9,6 +9,26 @@ use protocol::AgentMode;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
+fn mode(name: &str) -> AgentMode {
+    AgentMode::parse(name).unwrap()
+}
+
+fn normal() -> AgentMode {
+    AgentMode::normal()
+}
+
+fn plan() -> AgentMode {
+    mode("plan")
+}
+
+fn apply() -> AgentMode {
+    mode("apply")
+}
+
+fn yolo() -> AgentMode {
+    mode("yolo")
+}
+
 fn ruleset(allow: &[&str], ask: &[&str], deny: &[&str]) -> RuleSet {
     RuleSet {
         allow: compile_patterns(&allow.iter().map(|s| s.to_string()).collect::<Vec<_>>()),
@@ -42,20 +62,38 @@ fn bash_parser_map() -> HashMap<String, std::sync::Arc<crate::permissions::Subpa
     m
 }
 
-fn perms_with_bash(allow: &[&str], ask: &[&str], deny: &[&str]) -> Permissions {
-    let mode = mode_perms(HashMap::new(), &[("bash", ruleset(allow, ask, deny))]);
+fn permissions_from_mode(
+    mode: ModePerms,
+    restrict_to_workspace: bool,
+    workspace: PathBuf,
+) -> Permissions {
+    let modes = ["normal", "plan", "apply", "yolo"]
+        .into_iter()
+        .map(|name| (name.to_string(), mode.clone()))
+        .collect();
+    let mode_behaviors = HashMap::from([(
+        "yolo".to_string(),
+        ModeBehavior {
+            default_decision: Decision::Allow,
+            allow_subcommands_by_default: true,
+            ask_on_output_redirection: false,
+        },
+    )]);
     Permissions {
-        normal: mode.clone(),
-        plan: mode.clone(),
-        apply: mode.clone(),
-        yolo: mode,
-        restrict_to_workspace: false,
-        workspace: PathBuf::new(),
+        modes,
+        mode_behaviors,
+        restrict_to_workspace,
+        workspace,
         paths_fn: None,
         decide_hook_fn: None,
         subpattern_parsers: bash_parser_map(),
         approvals: std::sync::Arc::new(std::sync::RwLock::new(RuntimeApprovals::new())),
     }
+}
+
+fn perms_with_bash(allow: &[&str], ask: &[&str], deny: &[&str]) -> Permissions {
+    let mode = mode_perms(HashMap::new(), &[("bash", ruleset(allow, ask, deny))]);
+    permissions_from_mode(mode, false, PathBuf::new())
 }
 
 /// Installs a stub `decide_hook_fn` mirroring production Lua hooks for `bash` and `web_fetch`.
@@ -66,7 +104,7 @@ fn install_stub_decide_hook(perms: &mut crate::permissions::Permissions) {
     perms.set_decide_hook_fn(std::sync::Arc::new(move |name, args, mode| match name {
         "bash" => {
             let cmd = args.get("command").and_then(|v| v.as_str()).unwrap_or("");
-            let tool = perms_for_hook.check_tool(mode, "bash");
+            let tool = perms_for_hook.check_tool(mode.clone(), "bash");
             if tool == protocol::Decision::Deny {
                 return Some(protocol::Decision::Deny);
             }
@@ -81,7 +119,7 @@ fn install_stub_decide_hook(perms: &mut crate::permissions::Permissions) {
         }
         "web_fetch" => {
             let url = args.get("url").and_then(|v| v.as_str()).unwrap_or("");
-            let tool = perms_for_hook.check_tool(mode, "web_fetch");
+            let tool = perms_for_hook.check_tool(mode.clone(), "web_fetch");
             if tool == protocol::Decision::Deny {
                 return Some(protocol::Decision::Deny);
             }
@@ -145,7 +183,7 @@ fn assert_bash(
 fn yolo_allows_mcp_by_default() {
     let p = perms_with_bash(&[], &[], &[]);
     assert_eq!(
-        p.check_subcommand(AgentMode::Yolo, "mcp", "filesystem_read_file"),
+        p.check_subcommand(yolo(), "mcp", "filesystem_read_file"),
         Decision::Allow
     );
 }
@@ -154,7 +192,7 @@ fn yolo_allows_mcp_by_default() {
 fn normal_mode_asks_for_mcp_by_default() {
     let p = perms_with_bash(&[], &[], &[]);
     assert_eq!(
-        p.check_subcommand(AgentMode::Normal, "mcp", "filesystem_read_file"),
+        p.check_subcommand(normal(), "mcp", "filesystem_read_file"),
         Decision::Ask
     );
 }
@@ -163,52 +201,24 @@ fn normal_mode_asks_for_mcp_by_default() {
 
 #[test]
 fn simple_allowed() {
-    assert_bash(
-        &["ls *"],
-        &[],
-        &[],
-        AgentMode::Normal,
-        "ls -la",
-        Decision::Allow,
-    );
+    assert_bash(&["ls *"], &[], &[], normal(), "ls -la", Decision::Allow);
 }
 
 #[test]
 fn simple_denied() {
-    assert_bash(
-        &[],
-        &[],
-        &["rm *"],
-        AgentMode::Normal,
-        "rm -rf /",
-        Decision::Deny,
-    );
+    assert_bash(&[], &[], &["rm *"], normal(), "rm -rf /", Decision::Deny);
 }
 
 #[test]
 fn simple_ask() {
-    assert_bash(
-        &[],
-        &["rm *"],
-        &[],
-        AgentMode::Normal,
-        "rm -rf /",
-        Decision::Ask,
-    );
+    assert_bash(&[], &["rm *"], &[], normal(), "rm -rf /", Decision::Ask);
 }
 
 // --- deny rules with chained commands ---
 
 #[test]
 fn deny_rm_simple() {
-    assert_bash(
-        &[],
-        &[],
-        &["rm *"],
-        AgentMode::Normal,
-        "rm -rf /",
-        Decision::Deny,
-    );
+    assert_bash(&[], &[], &["rm *"], normal(), "rm -rf /", Decision::Deny);
 }
 
 #[test]
@@ -217,7 +227,7 @@ fn deny_rm_after_ls() {
         &["ls *"],
         &[],
         &["rm *"],
-        AgentMode::Normal,
+        normal(),
         "ls && rm -rf /",
         Decision::Deny,
     );
@@ -229,7 +239,7 @@ fn deny_rm_before_ls() {
         &["ls *"],
         &[],
         &["rm *"],
-        AgentMode::Normal,
+        normal(),
         "rm -rf / && ls",
         Decision::Deny,
     );
@@ -239,14 +249,7 @@ fn deny_rm_before_ls() {
 
 #[test]
 fn ask_rm_simple() {
-    assert_bash(
-        &[],
-        &["rm *"],
-        &[],
-        AgentMode::Normal,
-        "rm -rf /",
-        Decision::Ask,
-    );
+    assert_bash(&[], &["rm *"], &[], normal(), "rm -rf /", Decision::Ask);
 }
 
 #[test]
@@ -255,7 +258,7 @@ fn ask_rm_after_ls() {
         &["ls *"],
         &["rm *"],
         &[],
-        AgentMode::Normal,
+        normal(),
         "ls && rm -rf /",
         Decision::Ask,
     );
@@ -267,7 +270,7 @@ fn ask_rm_before_ls() {
         &["ls *"],
         &["rm *"],
         &[],
-        AgentMode::Normal,
+        normal(),
         "rm -rf / && ls",
         Decision::Ask,
     );
@@ -281,7 +284,7 @@ fn allow_ls_does_not_allow_chained_rm() {
         &["ls *"],
         &[],
         &[],
-        AgentMode::Normal,
+        normal(),
         "ls && rm README.md",
         Decision::Ask,
     );
@@ -295,7 +298,7 @@ fn chained_both_allowed() {
         &["ls *", "rm *"],
         &[],
         &[],
-        AgentMode::Normal,
+        normal(),
         "ls && rm README.md",
         Decision::Allow,
     );
@@ -309,7 +312,7 @@ fn pipe_both_allowed() {
         &["cat *", "grep *"],
         &[],
         &[],
-        AgentMode::Normal,
+        normal(),
         "cat file.txt | grep foo",
         Decision::Allow,
     );
@@ -321,7 +324,7 @@ fn pipe_second_not_allowed() {
         &["cat *"],
         &[],
         &[],
-        AgentMode::Normal,
+        normal(),
         "cat file.txt | rm foo",
         Decision::Ask,
     );
@@ -335,7 +338,7 @@ fn semicolon_second_denied() {
         &["echo *"],
         &[],
         &["rm *"],
-        AgentMode::Normal,
+        normal(),
         "echo hi; rm -rf /",
         Decision::Deny,
     );
@@ -349,7 +352,7 @@ fn or_chain_both_allowed() {
         &["make *"],
         &[],
         &[],
-        AgentMode::Normal,
+        normal(),
         "make || make install",
         Decision::Allow,
     );
@@ -363,7 +366,7 @@ fn deny_wins_over_allow() {
         &["rm *"],
         &[],
         &["rm *"],
-        AgentMode::Normal,
+        normal(),
         "rm foo",
         Decision::Deny,
     );
@@ -445,12 +448,12 @@ fn split_shell_commands_with_ops_utf8() {
 // Empty / whitespace-only commands
 #[test]
 fn empty_command() {
-    assert_bash(&["ls *"], &[], &[], AgentMode::Normal, "", Decision::Ask);
+    assert_bash(&["ls *"], &[], &[], normal(), "", Decision::Ask);
 }
 
 #[test]
 fn whitespace_only_command() {
-    assert_bash(&["ls *"], &[], &[], AgentMode::Normal, "   ", Decision::Ask);
+    assert_bash(&["ls *"], &[], &[], normal(), "   ", Decision::Ask);
 }
 
 // --- quote-aware splitting (shlex) ---
@@ -460,7 +463,7 @@ fn whitespace_only_command() {
 fn operator_in_quoted_argument() {
     let p = perms_with_bash(&["grep *"], &[], &[]);
     assert_eq!(
-        p.check_subcommand(AgentMode::Normal, "bash", r#"grep "&&" file.txt"#),
+        p.check_subcommand(normal(), "bash", r#"grep "&&" file.txt"#),
         Decision::Allow
     );
 }
@@ -469,7 +472,7 @@ fn operator_in_quoted_argument() {
 fn semicolon_in_echo() {
     let p = perms_with_bash(&["echo *"], &[], &["rm *"]);
     assert_eq!(
-        p.check_subcommand(AgentMode::Normal, "bash", r#"echo "hello; world""#),
+        p.check_subcommand(normal(), "bash", r#"echo "hello; world""#),
         Decision::Allow
     );
 }
@@ -478,7 +481,7 @@ fn semicolon_in_echo() {
 fn pipe_in_quoted_filename() {
     let p = perms_with_bash(&["cat *"], &[], &["rm *"]);
     assert_eq!(
-        p.check_subcommand(AgentMode::Normal, "bash", r#"cat "file|name""#),
+        p.check_subcommand(normal(), "bash", r#"cat "file|name""#),
         Decision::Allow
     );
 }
@@ -489,7 +492,7 @@ fn pipe_in_quoted_filename() {
 fn single_ampersand_background() {
     let p = perms_with_bash(&["sleep *"], &[], &["rm *"]);
     assert_eq!(
-        p.check_subcommand(AgentMode::Normal, "bash", "sleep 5 & rm foo"),
+        p.check_subcommand(normal(), "bash", "sleep 5 & rm foo"),
         Decision::Deny
     );
 }
@@ -500,7 +503,7 @@ fn single_ampersand_background() {
 fn command_substitution() {
     let p = perms_with_bash(&["echo *"], &[], &["rm *"]);
     assert_eq!(
-        p.check_subcommand(AgentMode::Normal, "bash", "echo $(rm -rf /)"),
+        p.check_subcommand(normal(), "bash", "echo $(rm -rf /)"),
         Decision::Deny
     );
 }
@@ -509,7 +512,7 @@ fn command_substitution() {
 fn backtick_substitution() {
     let p = perms_with_bash(&["echo *"], &[], &["rm *"]);
     assert_eq!(
-        p.check_subcommand(AgentMode::Normal, "bash", "echo `rm -rf /`"),
+        p.check_subcommand(normal(), "bash", "echo `rm -rf /`"),
         Decision::Deny
     );
 }
@@ -520,7 +523,7 @@ fn backtick_substitution() {
 fn newline_separator() {
     let p = perms_with_bash(&["ls *"], &[], &["rm *"]);
     assert_eq!(
-        p.check_subcommand(AgentMode::Normal, "bash", "ls\nrm -rf /"),
+        p.check_subcommand(normal(), "bash", "ls\nrm -rf /"),
         Decision::Deny
     );
 }
@@ -529,14 +532,7 @@ fn newline_separator() {
 
 #[test]
 fn trailing_operator() {
-    assert_bash(
-        &["ls *"],
-        &[],
-        &[],
-        AgentMode::Normal,
-        "ls &&",
-        Decision::Allow,
-    );
+    assert_bash(&["ls *"], &[], &[], normal(), "ls &&", Decision::Allow);
 }
 
 #[test]
@@ -548,7 +544,7 @@ fn split_trailing_operator() {
 fn leading_operator() {
     let p = perms_with_bash(&["rm *"], &[], &[]);
     assert_eq!(
-        p.check_subcommand(AgentMode::Normal, "bash", "&& rm foo"),
+        p.check_subcommand(normal(), "bash", "&& rm foo"),
         Decision::Ask
     );
 }
@@ -574,26 +570,12 @@ fn triple_ampersand_spaced() {
 
 #[test]
 fn bare_command_matches_star_pattern() {
-    assert_bash(
-        &["ls *"],
-        &[],
-        &[],
-        AgentMode::Normal,
-        "ls",
-        Decision::Allow,
-    );
+    assert_bash(&["ls *"], &[], &[], normal(), "ls", Decision::Allow);
 }
 
 #[test]
 fn trailing_space_no_false_positive() {
-    assert_bash(
-        &["ls *"],
-        &[],
-        &[],
-        AgentMode::Normal,
-        "lsof",
-        Decision::Ask,
-    );
+    assert_bash(&["ls *"], &[], &[], normal(), "lsof", Decision::Ask);
 }
 
 // --- unclosed quotes ---
@@ -602,7 +584,7 @@ fn trailing_space_no_false_positive() {
 fn unclosed_quote() {
     let p = perms_with_bash(&["echo *"], &[], &["rm *"]);
     assert_eq!(
-        p.check_subcommand(AgentMode::Normal, "bash", r#"echo "hello && rm foo"#),
+        p.check_subcommand(normal(), "bash", r#"echo "hello && rm foo"#),
         Decision::Allow
     );
 }
@@ -641,7 +623,7 @@ fn single_quotes_inside_double() {
     // echo "it's fine" && rm foo → two commands
     let p = perms_with_bash(&["echo *"], &[], &["rm *"]);
     assert_eq!(
-        p.check_subcommand(AgentMode::Normal, "bash", r#"echo "it's fine" && rm foo"#),
+        p.check_subcommand(normal(), "bash", r#"echo "it's fine" && rm foo"#),
         Decision::Deny
     );
 }
@@ -651,7 +633,7 @@ fn double_quotes_inside_single() {
     // echo '"hello"' && rm foo → two commands
     let p = perms_with_bash(&["echo *"], &[], &["rm *"]);
     assert_eq!(
-        p.check_subcommand(AgentMode::Normal, "bash", r#"echo '"hello"' && rm foo"#),
+        p.check_subcommand(normal(), "bash", r#"echo '"hello"' && rm foo"#),
         Decision::Deny
     );
 }
@@ -663,7 +645,7 @@ fn escaped_quote_inside_double_quotes() {
     // echo "he said \"hi\" && rm" is all one quoted string — single command
     let p = perms_with_bash(&["echo *"], &[], &["rm *"]);
     assert_eq!(
-        p.check_subcommand(AgentMode::Normal, "bash", r#"echo "he said \"hi\" && rm""#),
+        p.check_subcommand(normal(), "bash", r#"echo "he said \"hi\" && rm""#),
         Decision::Allow
     );
 }
@@ -682,7 +664,7 @@ fn double_semicolons_deny() {
         &["ls *"],
         &[],
         &["rm *"],
-        AgentMode::Normal,
+        normal(),
         "ls ;; rm foo",
         Decision::Deny,
     );
@@ -712,7 +694,7 @@ fn extra_whitespace_around_operators() {
 fn leading_whitespace_single_command() {
     let p = perms_with_bash(&["ls *"], &[], &[]);
     assert_eq!(
-        p.check_subcommand(AgentMode::Normal, "bash", "  ls -la"),
+        p.check_subcommand(normal(), "bash", "  ls -la"),
         Decision::Allow
     );
 }
@@ -721,7 +703,7 @@ fn leading_whitespace_single_command() {
 fn leading_whitespace_chained_command() {
     let p = perms_with_bash(&["ls *", "echo *"], &[], &[]);
     assert_eq!(
-        p.check_subcommand(AgentMode::Normal, "bash", "  ls -la && echo hi"),
+        p.check_subcommand(normal(), "bash", "  ls -la && echo hi"),
         Decision::Allow
     );
 }
@@ -732,7 +714,7 @@ fn leading_whitespace_chained_command() {
 fn subshell_not_parsed() {
     let p = perms_with_bash(&["echo *"], &[], &["rm *"]);
     assert_eq!(
-        p.check_subcommand(AgentMode::Normal, "bash", "echo hi && (rm -rf /)"),
+        p.check_subcommand(normal(), "bash", "echo hi && (rm -rf /)"),
         Decision::Deny
     );
 }
@@ -742,7 +724,7 @@ fn subshell_hides_denied_command() {
     let p = perms_with_bash(&["echo *"], &[], &["rm *"]);
     // extract_embedded_commands scans through quotes; $() is found and rm is extracted.
     assert_eq!(
-        p.check_subcommand(AgentMode::Normal, "bash", r#"echo "$(rm -rf /)""#),
+        p.check_subcommand(normal(), "bash", r#"echo "$(rm -rf /)""#),
         Decision::Deny
     );
 }
@@ -824,10 +806,7 @@ fn heredoc_permission_check() {
     let p = perms_with_bash(&["cat *", "grep *"], &[], &["rm *"]);
     let cmd = "cat << 'EOF' | grep foo\nrm -rf /\nEOF";
     // "rm -rf /" is heredoc content, not a command — should not be denied
-    assert_eq!(
-        p.check_subcommand(AgentMode::Normal, "bash", cmd),
-        Decision::Allow
-    );
+    assert_eq!(p.check_subcommand(normal(), "bash", cmd), Decision::Allow);
 }
 
 // --- 2>&1 not split on & ---
@@ -846,7 +825,7 @@ fn redirect_stderr_permission() {
         &["cargo *"],
         &[],
         &[],
-        AgentMode::Normal,
+        normal(),
         "cargo build 2>&1",
         Decision::Allow,
     );
@@ -889,18 +868,7 @@ fn perms_with_workspace(workspace: &str) -> Permissions {
             },
         )],
     );
-    let mut p = Permissions {
-        normal: mode.clone(),
-        plan: mode.clone(),
-        apply: mode.clone(),
-        yolo: mode,
-        restrict_to_workspace: true,
-        workspace: PathBuf::from(workspace),
-        paths_fn: None,
-        decide_hook_fn: None,
-        subpattern_parsers: bash_parser_map(),
-        approvals: std::sync::Arc::new(std::sync::RwLock::new(RuntimeApprovals::new())),
-    };
+    let mut p = permissions_from_mode(mode, true, PathBuf::from(workspace));
     p.set_paths_fn(stub_paths_fn());
     install_stub_decide_hook(&mut p);
     p
@@ -988,7 +956,7 @@ fn workspace_allows_file_inside() {
     let p = perms_with_workspace("/home/user/project");
     let args = args_with("file_path", "/home/user/project/src/main.rs");
     assert_eq!(
-        p.decide(AgentMode::Normal, "read_file", &args, false),
+        p.decide(normal(), "read_file", &args, false),
         Decision::Allow
     );
 }
@@ -997,10 +965,7 @@ fn workspace_allows_file_inside() {
 fn workspace_downgrades_file_outside() {
     let p = perms_with_workspace("/home/user/project");
     let args = args_with("file_path", "/etc/passwd");
-    assert_eq!(
-        p.decide(AgentMode::Normal, "read_file", &args, false),
-        Decision::Ask
-    );
+    assert_eq!(p.decide(normal(), "read_file", &args, false), Decision::Ask);
 }
 
 #[test]
@@ -1008,7 +973,7 @@ fn workspace_allows_relative_path() {
     let p = perms_with_workspace("/home/user/project");
     let args = args_with("file_path", "src/main.rs");
     assert_eq!(
-        p.decide(AgentMode::Normal, "write_file", &args, false),
+        p.decide(normal(), "write_file", &args, false),
         Decision::Allow
     );
 }
@@ -1017,40 +982,28 @@ fn workspace_allows_relative_path() {
 fn workspace_downgrades_bash_outside() {
     let p = perms_with_workspace("/home/user/project");
     let args = args_with("command", "rm -rf /tmp/foo");
-    assert_eq!(
-        p.decide(AgentMode::Normal, "bash", &args, false),
-        Decision::Ask
-    );
+    assert_eq!(p.decide(normal(), "bash", &args, false), Decision::Ask);
 }
 
 #[test]
 fn workspace_allows_bash_inside() {
     let p = perms_with_workspace("/home/user/project");
     let args = args_with("command", "rm -rf /home/user/project/target");
-    assert_eq!(
-        p.decide(AgentMode::Normal, "bash", &args, false),
-        Decision::Allow
-    );
+    assert_eq!(p.decide(normal(), "bash", &args, false), Decision::Allow);
 }
 
 #[test]
 fn workspace_allows_bash_relative() {
     let p = perms_with_workspace("/home/user/project");
     let args = args_with("command", "cargo build");
-    assert_eq!(
-        p.decide(AgentMode::Normal, "bash", &args, false),
-        Decision::Allow
-    );
+    assert_eq!(p.decide(normal(), "bash", &args, false), Decision::Allow);
 }
 
 #[test]
 fn workspace_downgrades_yolo_outside() {
     let p = perms_with_workspace("/home/user/project");
     let args = args_with("command", "rm -rf /etc");
-    assert_eq!(
-        p.decide(AgentMode::Yolo, "bash", &args, false),
-        Decision::Ask
-    );
+    assert_eq!(p.decide(yolo(), "bash", &args, false), Decision::Ask);
 }
 
 #[test]
@@ -1058,7 +1011,7 @@ fn workspace_yolo_allows_inside() {
     let p = perms_with_workspace("/home/user/project");
     let args = args_with("file_path", "/home/user/project/foo.txt");
     assert_eq!(
-        p.decide(AgentMode::Yolo, "write_file", &args, false),
+        p.decide(yolo(), "write_file", &args, false),
         Decision::Allow
     );
 }
@@ -1069,7 +1022,7 @@ fn workspace_restriction_off_allows_everything() {
     p.restrict_to_workspace = false;
     let args = args_with("file_path", "/etc/passwd");
     assert_eq!(
-        p.decide(AgentMode::Normal, "read_file", &args, false),
+        p.decide(normal(), "read_file", &args, false),
         Decision::Allow
     );
 }
@@ -1077,10 +1030,14 @@ fn workspace_restriction_off_allows_everything() {
 #[test]
 fn workspace_ask_stays_ask() {
     let mut p = perms_with_workspace("/home/user/project");
-    p.normal.tools.remove("write_file"); // defaults to Ask
+    p.modes
+        .get_mut("normal")
+        .unwrap()
+        .tools
+        .remove("write_file"); // defaults to Ask
     let args = args_with("file_path", "/home/user/project/foo.txt");
     assert_eq!(
-        p.decide(AgentMode::Normal, "write_file", &args, false),
+        p.decide(normal(), "write_file", &args, false),
         Decision::Ask
     );
 }
@@ -1089,10 +1046,7 @@ fn workspace_ask_stays_ask() {
 fn workspace_glob_outside_downgrades() {
     let p = perms_with_workspace("/home/user/project");
     let args = args_with("path", "/tmp");
-    assert_eq!(
-        p.decide(AgentMode::Normal, "glob", &args, false),
-        Decision::Ask
-    );
+    assert_eq!(p.decide(normal(), "glob", &args, false), Decision::Ask);
 }
 
 #[test]
@@ -1100,36 +1054,48 @@ fn workspace_no_path_tools_unaffected() {
     let p = perms_with_workspace("/home/user/project");
     let args = HashMap::new();
     assert_eq!(
-        p.decide(AgentMode::Yolo, "web_search", &args, false),
+        p.decide(yolo(), "web_search", &args, false),
         Decision::Allow
     );
 }
 
-// --- yolo mode is configurable ---
+// --- mode behavior is configurable ---
 
-#[test]
-fn yolo_defaults_to_allow() {
-    let p = Permissions::load();
-    assert_eq!(p.check_tool(AgentMode::Yolo, "bash"), Decision::Allow);
-    assert_eq!(p.check_tool(AgentMode::Yolo, "edit_file"), Decision::Allow);
-    assert_eq!(p.check_tool(AgentMode::Yolo, "write_file"), Decision::Allow);
-    assert_eq!(p.check_tool(AgentMode::Yolo, "read_file"), Decision::Allow);
+fn yolo_allow_permissions() -> Permissions {
+    Permissions::from_raw_with_mode_behaviors(
+        &RawConfig::default().permissions,
+        &ToolDefaults::default(),
+        HashMap::from([(
+            "yolo".to_string(),
+            ModeBehavior {
+                default_decision: Decision::Allow,
+                allow_subcommands_by_default: true,
+                ask_on_output_redirection: false,
+            },
+        )]),
+    )
 }
 
 #[test]
-fn yolo_unknown_tool_defaults_allow() {
-    let p = Permissions::load();
-    assert_eq!(
-        p.check_tool(AgentMode::Yolo, "some_unknown_tool"),
-        Decision::Allow
-    );
+fn configured_allow_mode_defaults_to_allow() {
+    let p = yolo_allow_permissions();
+    assert_eq!(p.check_tool(yolo(), "bash"), Decision::Allow);
+    assert_eq!(p.check_tool(yolo(), "edit_file"), Decision::Allow);
+    assert_eq!(p.check_tool(yolo(), "write_file"), Decision::Allow);
+    assert_eq!(p.check_tool(yolo(), "read_file"), Decision::Allow);
 }
 
 #[test]
-fn yolo_bash_allows_everything_by_default() {
-    let p = Permissions::load();
+fn configured_allow_mode_unknown_tool_defaults_allow() {
+    let p = yolo_allow_permissions();
+    assert_eq!(p.check_tool(yolo(), "some_unknown_tool"), Decision::Allow);
+}
+
+#[test]
+fn configured_allow_mode_bash_allows_everything_by_default() {
+    let p = yolo_allow_permissions();
     assert_eq!(
-        p.check_subcommand(AgentMode::Yolo, "bash", "rm -rf /"),
+        p.check_subcommand(yolo(), "bash", "rm -rf /"),
         Decision::Allow
     );
 }
@@ -1137,10 +1103,7 @@ fn yolo_bash_allows_everything_by_default() {
 #[test]
 fn normal_unknown_tool_defaults_ask() {
     let p = Permissions::load();
-    assert_eq!(
-        p.check_tool(AgentMode::Normal, "some_unknown_tool"),
-        Decision::Ask
-    );
+    assert_eq!(p.check_tool(normal(), "some_unknown_tool"), Decision::Ask);
 }
 
 // --- output redirection escalation ---
@@ -1255,43 +1218,38 @@ fn auto_allowed_with_dev_null_stays_allow() {
         &["find *"],
         &[],
         &[],
-        AgentMode::Normal,
+        normal(),
         "find /tmp 2>/dev/null",
         Decision::Allow,
     );
 }
 
 #[test]
-fn auto_allowed_with_output_redirect_escalates_to_ask() {
-    // cat * is in the default allowlist, but with > it should ask
+fn auto_allowed_with_output_redirect_stays_allow_in_core_parser() {
     let p = perms_with_bash(&["cat *"], &[], &[]);
     assert_eq!(
-        p.check_subcommand(AgentMode::Normal, "bash", "cat file.txt > output.txt"),
-        Decision::Ask
+        p.check_subcommand(normal(), "bash", "cat file.txt > output.txt"),
+        Decision::Allow
     );
 }
 
 #[test]
-fn auto_allowed_with_append_redirect_escalates_to_ask() {
+fn auto_allowed_with_append_redirect_stays_allow_in_core_parser() {
     assert_bash(
         &["cat *"],
         &[],
         &[],
-        AgentMode::Normal,
+        normal(),
         "cat file.txt >> output.txt",
-        Decision::Ask,
+        Decision::Allow,
     );
 }
 
 #[test]
-fn auto_allowed_heredoc_with_redirect_escalates_to_ask() {
-    // cat << 'EOF' > file.txt matches cat * but has output redirection
+fn auto_allowed_heredoc_with_redirect_stays_allow_in_core_parser() {
     let p = perms_with_bash(&["cat *"], &[], &[]);
     let cmd = "cat << 'EOF' > long_file.txt\nhello\nworld\nEOF";
-    assert_eq!(
-        p.check_subcommand(AgentMode::Normal, "bash", cmd),
-        Decision::Ask
-    );
+    assert_eq!(p.check_subcommand(normal(), "bash", cmd), Decision::Allow);
 }
 
 #[test]
@@ -1299,28 +1257,26 @@ fn auto_allowed_no_redirect_stays_allow() {
     // Without redirection, cat * should still be allowed
     let p = perms_with_bash(&["cat *"], &[], &[]);
     assert_eq!(
-        p.check_subcommand(AgentMode::Normal, "bash", "cat file.txt"),
+        p.check_subcommand(normal(), "bash", "cat file.txt"),
         Decision::Allow
     );
 }
 
 #[test]
-fn chained_command_with_redirect_escalates() {
+fn chained_command_with_redirect_stays_allow_in_core_parser() {
     let p = perms_with_bash(&["ls *", "cat *"], &[], &[]);
-    // ls is allowed, cat with redirect should escalate
     assert_eq!(
-        p.check_subcommand(AgentMode::Normal, "bash", "ls -la && cat file > out.txt"),
-        Decision::Ask
+        p.check_subcommand(normal(), "bash", "ls -la && cat file > out.txt"),
+        Decision::Allow
     );
 }
 
 #[test]
-fn pipe_with_output_redirect_escalates() {
+fn pipe_with_output_redirect_stays_allow_in_core_parser() {
     let p = perms_with_bash(&["cat *", "grep *"], &[], &[]);
-    // pipe is allowed, but output redirect at end should escalate
     assert_eq!(
-        p.check_subcommand(AgentMode::Normal, "bash", "cat file | grep foo > out.txt"),
-        Decision::Ask
+        p.check_subcommand(normal(), "bash", "cat file | grep foo > out.txt"),
+        Decision::Allow
     );
 }
 
@@ -1329,7 +1285,7 @@ fn denied_command_with_redirect_stays_deny() {
     let p = perms_with_bash(&[], &[], &["rm *"]);
     // rm is denied regardless of redirection
     assert_eq!(
-        p.check_subcommand(AgentMode::Normal, "bash", "rm file.txt > /dev/null"),
+        p.check_subcommand(normal(), "bash", "rm file.txt > /dev/null"),
         Decision::Deny
     );
 }
@@ -1355,24 +1311,10 @@ fn bash_tool_allow_pattern_ask() {
     let mut tools = HashMap::new();
     tools.insert("bash".to_string(), Decision::Allow);
     let mode = mode_perms(tools, &[("bash", ruleset(&[], &["git push *"], &[]))]);
-    let mut perms = Permissions {
-        normal: mode.clone(),
-        plan: mode.clone(),
-        apply: mode.clone(),
-        yolo: mode,
-        restrict_to_workspace: false,
-        workspace: PathBuf::new(),
-        paths_fn: None,
-        decide_hook_fn: None,
-        subpattern_parsers: bash_parser_map(),
-        approvals: std::sync::Arc::new(std::sync::RwLock::new(RuntimeApprovals::new())),
-    };
+    let mut perms = permissions_from_mode(mode, false, PathBuf::new());
     install_stub_decide_hook(&mut perms);
     let args = args_with("command", "git push origin main");
-    assert_eq!(
-        decide_base(&perms, AgentMode::Yolo, "bash", &args),
-        Decision::Ask
-    );
+    assert_eq!(decide_base(&perms, yolo(), "bash", &args), Decision::Ask);
 }
 
 // --- override tightening ---
@@ -1382,18 +1324,7 @@ fn override_tightens_allow_to_ask() {
     let mut tools = HashMap::new();
     tools.insert("bash".to_string(), Decision::Allow);
     let mode = mode_perms(tools, &[("bash", empty_ruleset())]);
-    let mut perms = Permissions {
-        normal: mode.clone(),
-        plan: mode.clone(),
-        apply: mode.clone(),
-        yolo: mode,
-        restrict_to_workspace: false,
-        workspace: PathBuf::new(),
-        paths_fn: None,
-        decide_hook_fn: None,
-        subpattern_parsers: bash_parser_map(),
-        approvals: std::sync::Arc::new(std::sync::RwLock::new(RuntimeApprovals::new())),
-    };
+    let mut perms = permissions_from_mode(mode, false, PathBuf::new());
     install_stub_decide_hook(&mut perms);
     let overrides = protocol::PermissionOverrides {
         tools: Some(protocol::RuleSetOverride {
@@ -1404,19 +1335,19 @@ fn override_tightens_allow_to_ask() {
         subcommands: std::collections::HashMap::new(),
     };
     let tightened = perms.with_overrides(&overrides);
-    assert_eq!(tightened.check_tool(AgentMode::Yolo, "bash"), Decision::Ask);
+    assert_eq!(tightened.check_tool(yolo(), "bash"), Decision::Ask);
 }
 
 // --- cd command handling ---
 
 #[test]
 fn cd_alone_is_allowed() {
-    assert_bash(&[], &[], &[], AgentMode::Normal, "cd /tmp", Decision::Allow);
+    assert_bash(&[], &[], &[], normal(), "cd /tmp", Decision::Allow);
 }
 
 #[test]
 fn cd_no_args_is_allowed() {
-    assert_bash(&[], &[], &[], AgentMode::Normal, "cd", Decision::Allow);
+    assert_bash(&[], &[], &[], normal(), "cd", Decision::Allow);
 }
 
 #[test]
@@ -1424,7 +1355,7 @@ fn cd_in_chain_does_not_escalate() {
     // cd should not contribute to the worst decision; only ls matters
     let p = perms_with_bash(&["ls *"], &[], &[]);
     assert_eq!(
-        p.check_subcommand(AgentMode::Normal, "bash", "cd /tmp && ls -la"),
+        p.check_subcommand(normal(), "bash", "cd /tmp && ls -la"),
         Decision::Allow
     );
 }
@@ -1435,7 +1366,7 @@ fn cd_with_denied_command_still_denies() {
         &[],
         &[],
         &["rm *"],
-        AgentMode::Normal,
+        normal(),
         "cd /tmp && rm -rf foo",
         Decision::Deny,
     );
@@ -1446,30 +1377,21 @@ fn cd_outside_workspace_downgrades_to_ask() {
     // cd itself is Allow, but the workspace path restriction catches /tmp
     let p = perms_with_workspace("/home/user/project");
     let args = args_with("command", "cd /tmp && ls");
-    assert_eq!(
-        p.decide(AgentMode::Normal, "bash", &args, false),
-        Decision::Ask
-    );
+    assert_eq!(p.decide(normal(), "bash", &args, false), Decision::Ask);
 }
 
 #[test]
 fn cd_inside_workspace_stays_allowed() {
     let p = perms_with_workspace("/home/user/project");
     let args = args_with("command", "cd /home/user/project/src && ls");
-    assert_eq!(
-        p.decide(AgentMode::Normal, "bash", &args, false),
-        Decision::Allow
-    );
+    assert_eq!(p.decide(normal(), "bash", &args, false), Decision::Allow);
 }
 
 #[test]
 fn cd_workspace_root_stays_allowed() {
     let p = perms_with_workspace("/home/user/project");
     let args = args_with("command", "cd /home/user/project && cargo build");
-    assert_eq!(
-        p.decide(AgentMode::Normal, "bash", &args, false),
-        Decision::Allow
-    );
+    assert_eq!(p.decide(normal(), "bash", &args, false), Decision::Allow);
 }
 
 #[test]
@@ -1493,7 +1415,7 @@ fn runtime_tool_approval_does_not_bypass_workspace_restriction() {
     let mut rt = RuntimeApprovals::new();
     rt.add_session_tool("bash", vec![glob::Pattern::new("rm *").unwrap()]);
     let args = args_with("command", "rm -rf /tmp/foo");
-    assert!(!rt.is_auto_approved(&p, AgentMode::Normal, "bash", &args, "rm -rf /tmp/foo"));
+    assert!(!rt.is_auto_approved(&p, normal(), "bash", &args, "rm -rf /tmp/foo"));
 }
 
 #[test]
@@ -1503,7 +1425,7 @@ fn runtime_tool_and_dir_approval_allow_outside_workspace_request() {
     rt.add_session_tool("bash", vec![glob::Pattern::new("rm *").unwrap()]);
     rt.add_session_dir(PathBuf::from("/tmp"));
     let args = args_with("command", "rm -rf /tmp/foo");
-    assert!(rt.is_auto_approved(&p, AgentMode::Normal, "bash", &args, "rm -rf /tmp/foo"));
+    assert!(rt.is_auto_approved(&p, normal(), "bash", &args, "rm -rf /tmp/foo"));
 }
 
 #[test]
@@ -1512,7 +1434,7 @@ fn runtime_dir_approval_allows_default_allowed_command_outside_workspace() {
     let mut rt = RuntimeApprovals::new();
     rt.add_session_dir(PathBuf::from("/tmp"));
     let args = args_with("command", "cat /tmp/foo");
-    assert!(rt.is_auto_approved(&p, AgentMode::Normal, "bash", &args, "cat /tmp/foo"));
+    assert!(rt.is_auto_approved(&p, normal(), "bash", &args, "cat /tmp/foo"));
 }
 
 #[test]
@@ -1523,7 +1445,7 @@ fn runtime_tool_approval_allows_inside_workspace_request() {
     let args = args_with("command", "rm -rf /home/user/project/target");
     assert!(rt.is_auto_approved(
         &p,
-        AgentMode::Normal,
+        normal(),
         "bash",
         &args,
         "rm -rf /home/user/project/target",
@@ -1538,7 +1460,7 @@ fn runtime_dir_approval_does_not_affect_inside_workspace_request() {
     let args = args_with("command", "rm -rf /home/user/project/target");
     assert!(!rt.is_auto_approved(
         &p,
-        AgentMode::Normal,
+        normal(),
         "bash",
         &args,
         "rm -rf /home/user/project/target",
@@ -1643,18 +1565,7 @@ fn perms_with_workspace_bash_allow(workspace: &str, bash_allow: &[&str]) -> Perm
     tools.insert("grep".to_string(), Decision::Allow);
     tools.insert("bash".to_string(), Decision::Allow);
     let mode = mode_perms(tools, &[("bash", ruleset(bash_allow, &[], &[]))]);
-    let mut p = Permissions {
-        normal: mode.clone(),
-        plan: mode.clone(),
-        apply: mode.clone(),
-        yolo: mode,
-        restrict_to_workspace: true,
-        workspace: PathBuf::from(workspace),
-        paths_fn: None,
-        decide_hook_fn: None,
-        subpattern_parsers: bash_parser_map(),
-        approvals: std::sync::Arc::new(std::sync::RwLock::new(RuntimeApprovals::new())),
-    };
+    let mut p = permissions_from_mode(mode, true, PathBuf::from(workspace));
     p.set_paths_fn(stub_paths_fn());
     install_stub_decide_hook(&mut p);
     p
@@ -1669,7 +1580,7 @@ fn tilde_dir_approval_works_for_absolute_read_file() {
     rt.add_session_dir(PathBuf::from("~/syncthing"));
     let file = format!("{}/syncthing/vault/notes.md", home.display());
     let args = args_with("file_path", &file);
-    assert!(rt.is_auto_approved(&p, AgentMode::Normal, "read_file", &args, &file));
+    assert!(rt.is_auto_approved(&p, normal(), "read_file", &args, &file));
 }
 
 #[test]
@@ -1682,7 +1593,7 @@ fn absolute_dir_approval_works_for_tilde_bash() {
     let args = args_with("command", "cat ~/syncthing/vault/notes.md");
     assert!(rt.is_auto_approved(
         &p,
-        AgentMode::Normal,
+        normal(),
         "bash",
         &args,
         "cat ~/syncthing/vault/notes.md",
@@ -1697,13 +1608,7 @@ fn dir_approval_alone_insufficient_for_ask_command_outside_workspace() {
     let mut rt = RuntimeApprovals::new();
     rt.add_session_dir(PathBuf::from("~/syncthing"));
     let args = args_with("command", "rm ~/syncthing/vault/old.md");
-    assert!(!rt.is_auto_approved(
-        &p,
-        AgentMode::Normal,
-        "bash",
-        &args,
-        "rm ~/syncthing/vault/old.md",
-    ));
+    assert!(!rt.is_auto_approved(&p, normal(), "bash", &args, "rm ~/syncthing/vault/old.md",));
 }
 
 #[test]
@@ -1715,13 +1620,7 @@ fn dir_plus_tool_approval_for_ask_command_outside_workspace() {
     rt.add_session_dir(PathBuf::from("~/syncthing"));
     rt.add_session_tool("bash", vec![glob::Pattern::new("rm *").unwrap()]);
     let args = args_with("command", "rm ~/syncthing/vault/old.md");
-    assert!(rt.is_auto_approved(
-        &p,
-        AgentMode::Normal,
-        "bash",
-        &args,
-        "rm ~/syncthing/vault/old.md",
-    ));
+    assert!(rt.is_auto_approved(&p, normal(), "bash", &args, "rm ~/syncthing/vault/old.md",));
 }
 
 #[test]
@@ -1730,13 +1629,7 @@ fn compound_command_default_allowed_with_dir_approval() {
     let mut rt = RuntimeApprovals::new();
     rt.add_session_dir(PathBuf::from("/tmp"));
     let args = args_with("command", "find /tmp/data -type f | sort");
-    assert!(rt.is_auto_approved(
-        &p,
-        AgentMode::Normal,
-        "bash",
-        &args,
-        "find /tmp/data -type f | sort",
-    ));
+    assert!(rt.is_auto_approved(&p, normal(), "bash", &args, "find /tmp/data -type f | sort",));
 }
 
 #[test]
@@ -1749,7 +1642,7 @@ fn compound_command_with_ask_subcommand_needs_tool_approval() {
     let args = args_with("command", "find /tmp/data -name '*.py' | python3");
     assert!(!rt.is_auto_approved(
         &p,
-        AgentMode::Normal,
+        normal(),
         "bash",
         &args,
         "find /tmp/data -name '*.py' | python3",
@@ -1767,7 +1660,7 @@ fn compound_command_with_ask_subcommand_and_tool_approval() {
     let args = args_with("command", "find /tmp/data -name '*.py' | python3");
     assert!(rt.is_auto_approved(
         &p,
-        AgentMode::Normal,
+        normal(),
         "bash",
         &args,
         "find /tmp/data -name '*.py' | python3",
@@ -2069,22 +1962,24 @@ fn merge_mode_handles_subcommand_present_only_in_mode() {
 #[test]
 fn tool_perm_defaults_for_mode_returns_per_mode_decisions() {
     let defaults = ToolPermDefaults {
-        normal: Some(Decision::Ask),
-        plan: Some(Decision::Allow),
-        apply: Some(Decision::Allow),
-        yolo: Some(Decision::Allow),
+        modes: HashMap::from([
+            ("normal".to_string(), Decision::Ask),
+            ("plan".to_string(), Decision::Allow),
+            ("apply".to_string(), Decision::Allow),
+            ("yolo".to_string(), Decision::Allow),
+        ]),
     };
-    assert_eq!(defaults.for_mode(AgentMode::Normal), Some(&Decision::Ask));
-    assert_eq!(defaults.for_mode(AgentMode::Plan), Some(&Decision::Allow));
-    assert_eq!(defaults.for_mode(AgentMode::Apply), Some(&Decision::Allow));
-    assert_eq!(defaults.for_mode(AgentMode::Yolo), Some(&Decision::Allow));
+    assert_eq!(defaults.for_mode(&normal()), Some(&Decision::Ask));
+    assert_eq!(defaults.for_mode(&plan()), Some(&Decision::Allow));
+    assert_eq!(defaults.for_mode(&apply()), Some(&Decision::Allow));
+    assert_eq!(defaults.for_mode(&yolo()), Some(&Decision::Allow));
 }
 
 #[test]
 fn tool_perm_defaults_for_mode_falls_back_to_none_when_unset() {
     let defaults = ToolPermDefaults::default();
-    assert_eq!(defaults.for_mode(AgentMode::Normal), None);
-    assert_eq!(defaults.for_mode(AgentMode::Yolo), None);
+    assert_eq!(defaults.for_mode(&normal()), None);
+    assert_eq!(defaults.for_mode(&yolo()), None);
 }
 
 // ── store.rs (backfill: into_approvals) ─────────────────────────────

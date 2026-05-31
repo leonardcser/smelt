@@ -25,70 +25,70 @@ Each rule list has three slots:
 
 Patterns are globs. For subcommand rules, the most specific (longest) matching
 pattern wins; on a tie, **ask** beats **allow**. Anything not matched defaults
-to **Ask** in Normal/Plan/Apply or **Allow** in Yolo.
+to the active mode's registered default decision.
 
 ## Default Tool Permissions
 
-| Tool                  | Normal | Plan  | Apply | Yolo  |
-| --------------------- | ------ | ----- | ----- | ----- |
-| `read_file`           | Allow  | Allow | Allow | Allow |
-| `glob`                | Allow  | Allow | Allow | Allow |
-| `grep`                | Allow  | Allow | Allow | Allow |
-| `ask_user_question`   | Allow  | Allow | Allow | Allow |
-| `edit_file`           | Ask    | Ask   | Allow | Allow |
-| `write_file`          | Ask    | Ask   | Allow | Allow |
-| `edit_notebook`       | Ask    | Ask   | Ask   | Allow |
-| `bash`                | Ask    | Ask   | Ask   | Allow |
-| `web_fetch`           | Ask    | Ask   | Ask   | Allow |
-| `web_search`          | Ask    | Ask   | Ask   | Allow |
-| `read_process_output` | Ask    | Ask   | Ask   | Allow |
-| `stop_process`        | Ask    | Ask   | Ask   | Allow |
-| `load_skill`          | Ask    | Ask   | Ask   | Allow |
-| `exit_plan_mode`      | —      | Ask   | —     | —     |
+| Tool                  | Normal | Apply | Yolo  |
+| --------------------- | ------ | ----- | ----- |
+| `read_file`           | Allow  | Allow | Allow |
+| `glob`                | Allow  | Allow | Allow |
+| `grep`                | Allow  | Allow | Allow |
+| `ask_user_question`   | Allow  | Allow | Allow |
+| `edit_file`           | Ask    | Allow | Allow |
+| `write_file`          | Ask    | Allow | Allow |
+| `edit_notebook`       | Ask    | Ask   | Allow |
+| `bash`                | Ask    | Ask   | Allow |
+| `web_fetch`           | Ask    | Ask   | Allow |
+| `web_search`          | Ask    | Ask   | Allow |
+| `read_process_output` | Ask    | Ask   | Allow |
+| `stop_process`        | Ask    | Ask   | Allow |
+| `load_skill`          | Ask    | Ask   | Allow |
 
-— = not registered in that mode.
+Plan mode is registered by the optional `smelt.plugins.plan_mode` plugin; when
+enabled, it uses read-only defaults and adds the `exit_plan_mode` tool.
 
 ## Default Bash Patterns
 
 Read-only commands with no side effects are allowed by default. Commands that
 can modify files, install packages, or affect system state require approval.
 
-| Pattern       | Normal | Plan  | Apply | Yolo  |
-| ------------- | ------ | ----- | ----- | ----- |
-| `ls *`        | Allow  | Allow | Allow | Allow |
-| `find *`      | Allow  | Allow | Allow | Allow |
-| `tree *`      | Allow  | Allow | Allow | Allow |
-| `cat *`       | Allow  | Allow | Allow | Allow |
-| `head *`      | Allow  | Allow | Allow | Allow |
-| `tail *`      | Allow  | Allow | Allow | Allow |
-| `less *`      | Allow  | Allow | Allow | Allow |
-| `grep *`      | Allow  | Allow | Allow | Allow |
-| `sort *`      | Allow  | Allow | Allow | Allow |
-| `uniq *`      | Allow  | Allow | Allow | Allow |
-| `wc *`        | Allow  | Allow | Allow | Allow |
-| `diff *`      | Allow  | Allow | Allow | Allow |
-| `tr *`        | Allow  | Allow | Allow | Allow |
-| `cut *`       | Allow  | Allow | Allow | Allow |
-| `jq *`        | Allow  | Allow | Allow | Allow |
-| `echo *`      | Allow  | Allow | Allow | Allow |
-| `pwd *`       | Allow  | Allow | Allow | Allow |
-| `which *`     | Allow  | Allow | Allow | Allow |
-| `dirname *`   | Allow  | Allow | Allow | Allow |
-| `basename *`  | Allow  | Allow | Allow | Allow |
-| `realpath *`  | Allow  | Allow | Allow | Allow |
-| `stat *`      | Allow  | Allow | Allow | Allow |
-| `file *`      | Allow  | Allow | Allow | Allow |
-| `test *`      | Allow  | Allow | Allow | Allow |
-| `du *`        | Allow  | Allow | Allow | Allow |
-| `df *`        | Allow  | Allow | Allow | Allow |
-| `date *`      | Allow  | Allow | Allow | Allow |
-| `whoami *`    | Allow  | Allow | Allow | Allow |
-| `sha256sum *` | Allow  | Allow | Allow | Allow |
-| `md5sum *`    | Allow  | Allow | Allow | Allow |
-| `xxd *`       | Allow  | Allow | Allow | Allow |
-| `hexdump *`   | Allow  | Allow | Allow | Allow |
-| `strings *`   | Allow  | Allow | Allow | Allow |
-| _other_       | Ask    | Ask   | Ask   | Allow |
+| Pattern       | Normal | Apply | Yolo  |
+| ------------- | ------ | ----- | ----- |
+| `ls *`        | Allow  | Allow | Allow |
+| `find *`      | Allow  | Allow | Allow |
+| `tree *`      | Allow  | Allow | Allow |
+| `cat *`       | Allow  | Allow | Allow |
+| `head *`      | Allow  | Allow | Allow |
+| `tail *`      | Allow  | Allow | Allow |
+| `less *`      | Allow  | Allow | Allow |
+| `grep *`      | Allow  | Allow | Allow |
+| `sort *`      | Allow  | Allow | Allow |
+| `uniq *`      | Allow  | Allow | Allow |
+| `wc *`        | Allow  | Allow | Allow |
+| `diff *`      | Allow  | Allow | Allow |
+| `tr *`        | Allow  | Allow | Allow |
+| `cut *`       | Allow  | Allow | Allow |
+| `jq *`        | Allow  | Allow | Allow |
+| `echo *`      | Allow  | Allow | Allow |
+| `pwd *`       | Allow  | Allow | Allow |
+| `which *`     | Allow  | Allow | Allow |
+| `dirname *`   | Allow  | Allow | Allow |
+| `basename *`  | Allow  | Allow | Allow |
+| `realpath *`  | Allow  | Allow | Allow |
+| `stat *`      | Allow  | Allow | Allow |
+| `file *`      | Allow  | Allow | Allow |
+| `test *`      | Allow  | Allow | Allow |
+| `du *`        | Allow  | Allow | Allow |
+| `df *`        | Allow  | Allow | Allow |
+| `date *`      | Allow  | Allow | Allow |
+| `whoami *`    | Allow  | Allow | Allow |
+| `sha256sum *` | Allow  | Allow | Allow |
+| `md5sum *`    | Allow  | Allow | Allow |
+| `xxd *`       | Allow  | Allow | Allow |
+| `hexdump *`   | Allow  | Allow | Allow |
+| `strings *`   | Allow  | Allow | Allow |
+| _other_       | Ask    | Ask   | Allow |
 
 Compound commands split on shell operators (`&&`, `||`, `;`, `|`) are evaluated
 per subcommand; the worst decision wins, and a single deny blocks the whole
@@ -96,8 +96,9 @@ command. `cd` is always allowed.
 
 !!! note
 
-    In Normal and Plan modes, otherwise-allowed bash commands that contain
-    output redirection (`>`, `>>`, `&>`) are escalated to Ask.
+    In modes whose metadata enables `ask_on_output_redirection` (Normal and Apply by default),
+    otherwise-allowed bash commands that contain output redirection (`>`, `>>`, `&>`)
+    are escalated to Ask.
 
 ## Configuring Permissions
 
@@ -124,9 +125,9 @@ smelt.permissions.set_rules({
 })
 ```
 
-`default` applies to all modes. Mode-specific rules (`normal`, `plan`, `apply`,
-`yolo`) are merged on top: their allow/ask/deny lists are appended to the
-default lists. Since deny always wins, a mode-level deny overrides a
+`default` applies to all registered modes. Mode-specific rules are keyed by mode
+name (`normal`, `apply`, `yolo`, or plugin-registered names such as `plan`) and
+are merged on top: their allow/ask/deny lists are appended to the default lists. Since deny always wins, a mode-level deny overrides a
 default-level allow for the same entry.
 
 Each mode table can contain:

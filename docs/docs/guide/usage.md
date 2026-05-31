@@ -12,18 +12,20 @@ The agent streams its response and may call tools along the way.
 
 ## Modes
 
-The agent has four modes, each with different permission defaults. Press
+Smelt ships with three modes by default, each with different permission defaults. Press
 `Shift+Tab` to cycle through them. Modes let you change the agent's
-behaviour to match the task: review a risky refactor in Plan mode, speed
-through routine edits in Apply mode, or stay hands-off on a trusted
-legacy codebase in Yolo mode.
+behaviour to match the task: stay cautious in Normal mode, speed through
+routine edits in Apply mode, or stay hands-off on a trusted codebase in Yolo mode.
 
-| Mode       | What it does                                                                                                                      |
-| ---------- | --------------------------------------------------------------------------------------------------------------------------------- |
-| **Normal** | Default. Asks before editing files or running commands. Read tools are auto-allowed.                                              |
-| **Plan**   | Read-only. The agent produces a plan and calls `exit_plan_mode` when done. You review the summary and approve to switch to Apply. Requires the [`plan_mode` plugin](plugins.md#bundled-plugins). |
-| **Apply**  | File edits are auto-approved. Bash still asks.                                                                                    |
-| **Yolo**   | Everything auto-approved. You can still deny specific patterns via config.                                                        |
+| Mode       | What it does                                                                                 |
+| ---------- | -------------------------------------------------------------------------------------------- |
+| **Normal** | Default. Asks before editing files or running commands. Read tools are auto-allowed.         |
+| **Apply**  | File edits are auto-approved. Bash still asks.                                               |
+| **Yolo**   | Everything auto-approved. You can still deny specific patterns via config.                   |
+
+Plan mode is available as an optional plugin. Add `require("smelt.plugins.plan_mode")`
+to `~/.config/smelt/init.lua` to register the `plan` mode after Normal, enable its
+read-only prompt behavior, and add the `exit_plan_mode` tool.
 
 The current mode is shown in the status bar. Set the starting mode with
 `--mode`, and customize which modes appear in the cycle with `--mode-cycle`.

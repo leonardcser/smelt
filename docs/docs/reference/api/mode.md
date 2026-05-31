@@ -18,12 +18,18 @@ wrapping at the end. No-op when the cycle is empty.
 ## `smelt.mode.cycle_list`
 
 ```lua
-fun(): smelt.mode.Mode[]
+fun(): string[]
 ```
 
-Types: [`smelt.mode.Mode`](types.md#smeltmodemode)
+Return the configured agent-mode cycle; falls back to the built-in default when the user has not customized one.
 
-Return the configured agent-mode cycle; falls back to all known modes when the user has not customized one.
+## `smelt.mode.get`
+
+```lua
+fun(name: string): table|nil
+```
+
+
 
 ## `smelt.mode.icon`
 
@@ -31,7 +37,39 @@ Return the configured agent-mode cycle; falls back to all known modes when the u
 fun(name: string): string
 ```
 
-Lookup the icon registered for `name`, or `""` when none is set.
+
+
+## `smelt.mode.list`
+
+```lua
+fun(): table[]
+```
+
+
+
+## `smelt.mode.note`
+
+```lua
+fun(name: string): string
+```
+
+
+
+## `smelt.mode.permission_behaviors`
+
+```lua
+fun(): table<string, table>
+```
+
+
+
+## `smelt.mode.register`
+
+```lua
+fun(spec: table): nil
+```
+
+
 
 ## `smelt.mode.set_icon`
 
@@ -39,6 +77,13 @@ Lookup the icon registered for `name`, or `""` when none is set.
 fun(name: string, icon: string): nil
 ```
 
-Override the icon shown alongside `name` in the statusline; subsequent
-`smelt.mode.icon(name)` calls return `icon`.
+
+
+## `smelt.mode.style`
+
+```lua
+fun(name: string): table
+```
+
+
 

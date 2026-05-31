@@ -99,14 +99,9 @@ impl From<LuaModePerms> for crate::permissions::rules::RawModePerms {
 pub struct LuaPermissionRulesSpec {
     /// Baseline rules applied unless a mode-specific slot overrides.
     pub default: Option<LuaModePerms>,
-    /// Rules active while the agent is in normal mode.
-    pub normal: Option<LuaModePerms>,
-    /// Rules active while the agent is in plan mode.
-    pub plan: Option<LuaModePerms>,
-    /// Rules active while the agent is in apply mode.
-    pub apply: Option<LuaModePerms>,
-    /// Rules active while the agent is in yolo mode.
-    pub yolo: Option<LuaModePerms>,
+    /// Mode-specific rules keyed by registered mode name.
+    #[lua(rest)]
+    pub modes: std::collections::HashMap<String, LuaModePerms>,
 }
 
 pub(super) fn register(
@@ -196,10 +191,11 @@ pub(super) fn register(
             move |_, spec: LuaPermissionRulesSpec| -> LuaResult<()> {
                 let rules = crate::permissions::rules::RawPerms {
                     default: spec.default.map(Into::into).unwrap_or_default(),
-                    normal: spec.normal.map(Into::into).unwrap_or_default(),
-                    plan: spec.plan.map(Into::into).unwrap_or_default(),
-                    apply: spec.apply.map(Into::into).unwrap_or_default(),
-                    yolo: spec.yolo.map(Into::into).unwrap_or_default(),
+                    modes: spec
+                        .modes
+                        .into_iter()
+                        .map(|(k, v)| (k, v.into()))
+                        .collect(),
                 };
                 let mut guard = shared
                     .permission_rules
@@ -241,7 +237,7 @@ pub(super) fn register(
 }
 
 fn parse_mode(s: &str) -> protocol::AgentMode {
-    protocol::AgentMode::parse(s).unwrap_or(protocol::AgentMode::Normal)
+    protocol::AgentMode::parse(s).unwrap_or_default()
 }
 
 fn decision_label(d: protocol::Decision) -> &'static str {

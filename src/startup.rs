@@ -84,6 +84,7 @@ pub async fn resolve(
     args: &Args,
     cfg: smelt_core::config::Config,
     http_client: &reqwest::Client,
+    registered_modes: &[AgentMode],
 ) -> ResolvedStartup {
     let mut cfg = cfg;
 
@@ -232,10 +233,12 @@ pub async fn resolve(
     }
 
     let parse_mode = |s: &str| {
-        AgentMode::parse(s).unwrap_or_else(|| {
-            eprintln!("warning: unknown mode '{s}', defaulting to normal");
-            AgentMode::Normal
-        })
+        AgentMode::parse(s)
+            .filter(|mode| registered_modes.is_empty() || registered_modes.contains(mode))
+            .unwrap_or_else(|| {
+                eprintln!("warning: invalid or unregistered mode '{s}', defaulting to normal");
+                AgentMode::normal()
+            })
     };
     let mode_override = if let Some(s) = args.mode.as_deref() {
         Some(parse_mode(s))
@@ -250,9 +253,20 @@ pub async fn resolve(
     let mode_cycle = args
         .mode_cycle
         .as_deref()
-        .map(AgentMode::parse_list)
+        .map(|items| {
+            AgentMode::parse_list(items)
+                .into_iter()
+                .filter(|mode| registered_modes.is_empty() || registered_modes.contains(mode))
+                .collect::<Vec<_>>()
+        })
         .filter(|v| !v.is_empty())
-        .unwrap_or_else(|| AgentMode::ALL.to_vec());
+        .unwrap_or_else(|| {
+            if registered_modes.is_empty() {
+                AgentMode::default_cycle()
+            } else {
+                registered_modes.to_vec()
+            }
+        });
 
     let default_effort = cfg
         .defaults

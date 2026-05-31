@@ -625,7 +625,7 @@ mod tests {
         let p = StartTurnPayload {
             turn_id: 1,
             content: Content::text("hi"),
-            mode: AgentMode::Normal,
+            mode: AgentMode::normal(),
             model: "m".into(),
             reasoning_effort: ReasoningEffort::Off,
             history: vec![],

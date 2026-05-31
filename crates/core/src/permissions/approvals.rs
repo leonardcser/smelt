@@ -114,7 +114,7 @@ impl RuntimeApprovals {
         args: &HashMap<String, Value>,
         desc: &str,
     ) -> bool {
-        let config_subpatterns = permissions.subcommand_ruleset(mode, tool_name);
+        let config_subpatterns = permissions.subcommand_ruleset(mode.clone(), tool_name);
         let tool_approved = self.is_approved(tool_name, desc, config_subpatterns);
         let outside = permissions.outside_workspace_paths(tool_name, args);
         if outside.is_empty() {

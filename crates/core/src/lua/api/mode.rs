@@ -4,18 +4,7 @@
 
 use crate::lua::doc::Tier;
 use crate::lua::module::LuaMod;
-use lua_doc_derive::LuaAlias;
 use mlua::prelude::*;
-
-/// Agent mode string literal.
-#[derive(Clone, Copy, Debug, LuaAlias)]
-#[lua(name = "smelt.mode.Mode", mirror = "protocol::AgentMode")]
-pub enum LuaAgentMode {
-    Normal,
-    Plan,
-    Apply,
-    Yolo,
-}
 
 pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
     let m = LuaMod::under(
@@ -27,16 +16,16 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
     )?;
     m.fn_(
         "cycle_list",
-        "Return the configured agent-mode cycle; falls back to all known modes when the user has not customized one.",
+        "Return the configured agent-mode cycle; falls back to the built-in default when the user has not customized one.",
         &[],
-        |_, ()| -> LuaResult<Vec<LuaAgentMode>> {
+        |_, ()| -> LuaResult<Vec<String>> {
             Ok(crate::host::try_with_core(|core| {
-                let cycle: &[protocol::AgentMode] = if core.config.mode_cycle.is_empty() {
-                    protocol::AgentMode::ALL
+                let cycle = if core.config.mode_cycle.is_empty() {
+                    protocol::AgentMode::default_cycle()
                 } else {
-                    &core.config.mode_cycle
+                    core.config.mode_cycle.clone()
                 };
-                cycle.iter().copied().map(LuaAgentMode::from).collect()
+                cycle.into_iter().map(String::from).collect()
             })
             .unwrap_or_default())
         },
@@ -44,12 +33,12 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
 
     // `__call`: get when no arg, no-op set stub here (TUI overrides).
     m.callable(
-        |lua, (_tbl, v): (mlua::Table, Option<LuaAgentMode>)| -> LuaResult<mlua::Value> {
+        |lua, (_tbl, v): (mlua::Table, Option<String>)| -> LuaResult<mlua::Value> {
             if v.is_some() {
                 return Ok(mlua::Value::Nil);
             }
-            let cur = crate::host::try_with_core(|core| LuaAgentMode::from(core.config.mode))
-                .unwrap_or(LuaAgentMode::Normal);
+            let cur = crate::host::try_with_core(|core| core.config.mode.as_str().to_string())
+                .unwrap_or_else(|| protocol::AgentMode::normal().to_string());
             cur.into_lua(lua)
         },
     )?;

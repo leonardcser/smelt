@@ -334,7 +334,10 @@ impl TuiApp {
                 drop(_guard);
                 // Permission policy is evaluated on the TUI side.
                 if !matches!(hooks.decision, protocol::Decision::Error(_)) {
-                    let decision = self.core.permissions.decide(mode, &tool_name, &args, false);
+                    let decision =
+                        self.core
+                            .permissions
+                            .decide(mode.clone(), &tool_name, &args, false);
                     let mut decision = decision;
                     if decision == protocol::Decision::Ask {
                         let summary_text = hooks.summary.as_plain_text();

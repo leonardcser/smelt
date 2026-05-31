@@ -585,7 +585,7 @@ impl TuiApp {
         let cwd = std::path::Path::new(&self.cwd);
         self.prompt_sections = crate::prompt_sections::build_defaults(
             cwd,
-            self.core.config.mode,
+            self.core.config.mode.clone(),
             true, // TUI is always interactive
             self.prompt_inputs.skill_section.as_deref(),
             self.prompt_inputs.instructions.as_deref(),
@@ -600,7 +600,7 @@ impl TuiApp {
         let cwd = std::path::Path::new(&self.cwd);
         crate::prompt_sections::build_defaults(
             cwd,
-            self.core.config.mode,
+            self.core.config.mode.clone(),
             true,
             self.prompt_inputs.skill_section.as_deref(),
             self.prompt_inputs.instructions.as_deref(),

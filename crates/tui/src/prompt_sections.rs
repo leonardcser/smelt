@@ -220,16 +220,20 @@ mod tests {
         ps.sections.iter().map(|(n, _)| n.as_str()).collect()
     }
 
+    fn mode(name: &str) -> AgentMode {
+        AgentMode::parse(name).unwrap()
+    }
+
     #[test]
     fn build_defaults_includes_base_and_behavior_for_normal_mode() {
-        let ps = build_defaults(Path::new("/work"), AgentMode::Normal, true, None, None);
+        let ps = build_defaults(Path::new("/work"), mode("normal"), true, None, None);
         assert_eq!(names(&ps), vec!["base", "behavior"]);
     }
 
     #[test]
     fn build_defaults_picks_interactive_vs_autonomous_behavior_section() {
-        let interactive = build_defaults(Path::new("/w"), AgentMode::Normal, true, None, None);
-        let autonomous = build_defaults(Path::new("/w"), AgentMode::Normal, false, None, None);
+        let interactive = build_defaults(Path::new("/w"), mode("normal"), true, None, None);
+        let autonomous = build_defaults(Path::new("/w"), mode("normal"), false, None, None);
         let i_body = &interactive
             .sections
             .iter()
@@ -252,10 +256,10 @@ mod tests {
         // The base prompt must not change with mode; mode-specific
         // behavior is communicated via a runtime message instead.
         let cwd = Path::new("/w");
-        let plan = build_defaults(cwd, AgentMode::Plan, true, None, None).assemble();
-        let apply = build_defaults(cwd, AgentMode::Apply, true, None, None).assemble();
-        let yolo = build_defaults(cwd, AgentMode::Yolo, true, None, None).assemble();
-        let normal = build_defaults(cwd, AgentMode::Normal, true, None, None).assemble();
+        let plan = build_defaults(cwd, mode("plan"), true, None, None).assemble();
+        let apply = build_defaults(cwd, mode("apply"), true, None, None).assemble();
+        let yolo = build_defaults(cwd, mode("yolo"), true, None, None).assemble();
+        let normal = build_defaults(cwd, mode("normal"), true, None, None).assemble();
         assert_eq!(plan, apply);
         assert_eq!(apply, yolo);
         assert_eq!(yolo, normal);
@@ -265,7 +269,7 @@ mod tests {
     fn build_defaults_appends_skill_and_instruction_sections_when_provided() {
         let ps = build_defaults(
             Path::new("/w"),
-            AgentMode::Normal,
+            mode("normal"),
             true,
             Some("# Skills\nfoo"),
             Some("Project rules: be terse."),
@@ -277,7 +281,7 @@ mod tests {
 
     #[test]
     fn build_defaults_skips_empty_skill_and_instruction_strings() {
-        let ps = build_defaults(Path::new("/w"), AgentMode::Normal, true, Some(""), Some(""));
+        let ps = build_defaults(Path::new("/w"), mode("normal"), true, Some(""), Some(""));
         let n = names(&ps);
         assert!(!n.contains(&"skills"));
         assert!(!n.contains(&"instructions"));
@@ -285,13 +289,7 @@ mod tests {
 
     #[test]
     fn build_defaults_base_section_embeds_the_cwd() {
-        let ps = build_defaults(
-            Path::new("/some/where"),
-            AgentMode::Normal,
-            true,
-            None,
-            None,
-        );
+        let ps = build_defaults(Path::new("/some/where"), mode("normal"), true, None, None);
         let base = &ps.sections.iter().find(|(n, _)| n == "base").unwrap().1;
         assert!(base.contains("/some/where"), "got: {base}");
     }

@@ -16,6 +16,7 @@ mod code_line;
 mod compacted;
 mod exec;
 mod metrics;
+mod mode;
 mod text;
 mod thinking;
 mod tool_call;
@@ -186,6 +187,7 @@ pub(super) fn render_block(
 ) -> u16 {
     let _perf = smelt_perf::perf::begin(match block {
         Block::User { .. } => "render:user",
+        Block::Mode { .. } => "render:mode",
         Block::Thinking { .. } => "render:thinking",
         Block::Text { .. } => "render:text",
         Block::CodeLine { .. } => "render:code_line",
@@ -195,6 +197,11 @@ pub(super) fn render_block(
     });
     match block {
         Block::User { text, image_labels } => user::render(out, text, image_labels, width),
+        Block::Mode {
+            text,
+            icon,
+            hl_group,
+        } => mode::render(out, text, icon, hl_group),
         Block::Thinking { content } => thinking::render(out, content, width, show_thinking),
         Block::Text { content } => text::render(out, content, width),
         Block::CodeLine { content, lang } => code_line::render(out, content, lang, width),

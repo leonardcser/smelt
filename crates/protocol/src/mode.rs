@@ -2,42 +2,68 @@
 
 use serde::{Deserialize, Serialize};
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
-pub enum AgentMode {
-    Normal,
-    Plan,
-    Apply,
-    Yolo,
-}
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct AgentMode(String);
 
 impl AgentMode {
+    pub fn new(name: impl Into<String>) -> Option<Self> {
+        let name = name.into();
+        if Self::is_valid_name(&name) {
+            Some(Self(name))
+        } else {
+            None
+        }
+    }
+
+    pub fn normal() -> Self {
+        Self("normal".to_string())
+    }
+
     pub fn parse(s: &str) -> Option<Self> {
-        match s {
-            "normal" => Some(AgentMode::Normal),
-            "plan" => Some(AgentMode::Plan),
-            "apply" => Some(AgentMode::Apply),
-            "yolo" => Some(AgentMode::Yolo),
-            _ => None,
-        }
+        Self::new(s.trim())
     }
 
-    pub fn as_str(self) -> &'static str {
-        match self {
-            AgentMode::Normal => "normal",
-            AgentMode::Plan => "plan",
-            AgentMode::Apply => "apply",
-            AgentMode::Yolo => "yolo",
-        }
+    pub fn as_str(&self) -> &str {
+        &self.0
     }
 
-    /// Parse a list of mode labels, skipping unknown ones.
+    /// Parse a list of mode labels, skipping invalid entries.
     pub fn parse_list(items: &[String]) -> Vec<Self> {
         items.iter().filter_map(|s| Self::parse(s)).collect()
     }
 
-    /// The full default cycle order.
-    pub const ALL: &[Self] = &[Self::Normal, Self::Plan, Self::Apply, Self::Yolo];
+    pub fn default_cycle() -> Vec<Self> {
+        ["normal", "apply", "yolo"]
+            .into_iter()
+            .filter_map(Self::parse)
+            .collect()
+    }
+
+    fn is_valid_name(name: &str) -> bool {
+        !name.is_empty()
+            && name
+                .bytes()
+                .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_' || b == b'-')
+    }
+}
+
+impl Default for AgentMode {
+    fn default() -> Self {
+        Self::normal()
+    }
+}
+
+impl From<AgentMode> for String {
+    fn from(mode: AgentMode) -> Self {
+        mode.0
+    }
+}
+
+impl std::fmt::Display for AgentMode {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
 }
 
 /// Marker prefix on synthetic user messages that announce a mode change.
@@ -47,17 +73,11 @@ impl AgentMode {
 /// must stay stable so the prefix doesn't bust the prompt cache.
 pub const MODE_NOTE_PREFIX: &str = "[smelt:mode] ";
 
-/// Build the synthetic user-note text appended to history when the
-/// agent's mode switches. Bytes are stable per mode so the cached
-/// prefix that includes earlier mode notes still hits the cache.
-pub fn mode_change_note(mode: AgentMode) -> String {
-    let body = match mode {
-        AgentMode::Plan => "now in plan mode. Investigate and reason only; do not modify files or run mutating commands. Use read_file, glob, grep, and read-only bash. edit_file and write_file are unavailable.",
-        AgentMode::Apply => "now in apply mode. You may read, edit, and create files. Continue to confirm destructive bash commands before running them.",
-        AgentMode::Yolo => "now in yolo mode. Full autonomy; act without pausing for confirmation. Continue to avoid genuinely irreversible operations.",
-        AgentMode::Normal => "now in normal mode.",
-    };
-    format!("{MODE_NOTE_PREFIX}{body}")
+/// Build a synthetic user-note text appended to history when the agent's
+/// mode switches. The human-facing body comes from the Lua mode registry;
+/// this wrapper keeps the model-visible marker stable.
+pub fn mode_change_note(note: &str) -> String {
+    format!("{MODE_NOTE_PREFIX}{}", note.trim())
 }
 
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -107,61 +127,52 @@ mod tests {
     // ---- AgentMode ----
 
     #[test]
-    fn agent_mode_parse_each_label() {
-        assert_eq!(AgentMode::parse("normal"), Some(AgentMode::Normal));
-        assert_eq!(AgentMode::parse("plan"), Some(AgentMode::Plan));
-        assert_eq!(AgentMode::parse("apply"), Some(AgentMode::Apply));
-        assert_eq!(AgentMode::parse("yolo"), Some(AgentMode::Yolo));
+    fn agent_mode_parse_accepts_registered_style_labels() {
+        assert_eq!(AgentMode::parse("normal").unwrap().as_str(), "normal");
+        assert_eq!(AgentMode::parse("plan").unwrap().as_str(), "plan");
+        assert_eq!(AgentMode::parse("review-2").unwrap().as_str(), "review-2");
     }
 
     #[test]
-    fn agent_mode_parse_rejects_unknown_and_is_case_sensitive() {
+    fn agent_mode_parse_rejects_invalid_names() {
         assert_eq!(AgentMode::parse("Normal"), None);
         assert_eq!(AgentMode::parse(""), None);
-        assert_eq!(AgentMode::parse("planning"), None);
+        assert_eq!(AgentMode::parse("has space"), None);
     }
 
     #[test]
-    fn agent_mode_as_str_matches_parse_inverse() {
-        for m in AgentMode::ALL.iter().copied() {
-            assert_eq!(AgentMode::parse(m.as_str()), Some(m));
-        }
-    }
-
-    #[test]
-    fn agent_mode_parse_list_filters_unknown_entries() {
-        let items = vec!["normal".into(), "garbage".into(), "yolo".into(), "".into()];
+    fn agent_mode_parse_list_filters_invalid_entries() {
+        let items = vec!["normal".into(), "bad mode".into(), "yolo".into(), "".into()];
         assert_eq!(
             AgentMode::parse_list(&items),
-            vec![AgentMode::Normal, AgentMode::Yolo]
-        );
-    }
-
-    #[test]
-    fn agent_mode_all_contains_every_variant_in_cycle_order() {
-        assert_eq!(
-            AgentMode::ALL,
-            &[
-                AgentMode::Normal,
-                AgentMode::Plan,
-                AgentMode::Apply,
-                AgentMode::Yolo
+            vec![
+                AgentMode::parse("normal").unwrap(),
+                AgentMode::parse("yolo").unwrap()
             ]
         );
     }
 
     #[test]
-    fn agent_mode_serializes_as_lowercase_string() {
+    fn agent_mode_default_cycle_contains_builtin_labels() {
+        let labels: Vec<_> = AgentMode::default_cycle()
+            .into_iter()
+            .map(|m| m.as_str().to_string())
+            .collect();
+        assert_eq!(labels, vec!["normal", "apply", "yolo"]);
+    }
+
+    #[test]
+    fn agent_mode_serializes_as_string() {
         assert_eq!(
-            serde_json::to_value(AgentMode::Plan).unwrap(),
+            serde_json::to_value(AgentMode::parse("plan").unwrap()).unwrap(),
             serde_json::json!("plan")
         );
     }
 
     #[test]
-    fn agent_mode_deserializes_from_lowercase_string() {
-        let m: AgentMode = serde_json::from_value(serde_json::json!("apply")).unwrap();
-        assert_eq!(m, AgentMode::Apply);
+    fn agent_mode_deserializes_from_string() {
+        let m: AgentMode = serde_json::from_value(serde_json::json!("custom")).unwrap();
+        assert_eq!(m.as_str(), "custom");
     }
 
     // ---- ReasoningEffort ----

@@ -36,14 +36,14 @@ pub struct Args {
     #[arg(
         long,
         value_name = "MODE",
-        help = "Agent mode: normal, plan, apply, yolo"
+        help = "Initial agent mode (registered by Lua)"
     )]
     mode: Option<String>,
     #[arg(
         long,
         value_delimiter = ',',
         value_name = "MODES",
-        help = "Modes available for cycling (comma-separated: normal,plan,apply,yolo)"
+        help = "Modes available for cycling (comma-separated labels)"
     )]
     mode_cycle: Option<Vec<String>>,
     #[arg(
@@ -205,6 +205,8 @@ async fn main() {
     let lua_cfg = lua_runtime.to_config();
     let lua_permission_rules = lua_runtime.take_permission_rules();
     let lua_tool_defaults = lua_runtime.tool_defaults();
+    let lua_modes = lua_runtime.mode_names();
+    let lua_mode_behaviors = lua_runtime.mode_behaviors();
     if let Some(err) = lua_runtime.load_error() {
         eprintln!("warning: lua init: {err}");
     }
@@ -218,7 +220,7 @@ async fn main() {
         .build()
         .unwrap_or_else(|_| reqwest::Client::new());
 
-    let s = startup::resolve(&args, lua_cfg, &startup_http_client).await;
+    let s = startup::resolve(&args, lua_cfg, &startup_http_client, &lua_modes).await;
     let startup::ResolvedStartup {
         cfg,
         available_models,
@@ -356,9 +358,10 @@ async fn main() {
     };
 
     let workspace = engine::paths::git_root(&cwd).unwrap_or_else(|| cwd.clone());
-    let mut permissions = smelt_core::permissions::Permissions::from_raw(
+    let mut permissions = smelt_core::permissions::Permissions::from_raw_with_mode_behaviors(
         &lua_permission_rules.unwrap_or_default(),
         &lua_tool_defaults,
+        lua_mode_behaviors,
     );
     permissions.set_workspace(workspace);
     permissions.set_restrict_to_workspace(settings.restrict_to_workspace);
@@ -467,7 +470,7 @@ async fn main() {
             .run_oneshot(args.message.unwrap(), headless_cancel)
             .await;
     } else {
-        let initial_mode = mode_override.unwrap_or(protocol::AgentMode::Normal);
+        let initial_mode = mode_override.unwrap_or_default();
         let app_config = smelt_core::AppConfig {
             model,
             api_base: initial_api_base,
@@ -501,7 +504,10 @@ async fn main() {
         app.core.mcp = Some(Arc::clone(&mcp_manager));
         app.prompt_inputs = prompt_inputs;
         if !app.core.config.mode_cycle.contains(&app.core.config.mode) {
-            app.core.config.mode_cycle.push(app.core.config.mode);
+            app.core
+                .config
+                .mode_cycle
+                .push(app.core.config.mode.clone());
         }
 
         redirect_stderr();
@@ -621,10 +627,10 @@ fn build_headless_config(
     settings: smelt_core::config::ResolvedSettings,
     remember: smelt_core::config::RememberConfig,
 ) -> smelt_core::AppConfig {
-    let mode = mode_override.unwrap_or(protocol::AgentMode::Normal);
+    let mode = mode_override.unwrap_or_default();
     let mut mode_cycle = mode_cycle;
     if !mode_cycle.contains(&mode) {
-        mode_cycle.push(mode);
+        mode_cycle.push(mode.clone());
     }
     smelt_core::AppConfig {
         model,

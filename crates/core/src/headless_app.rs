@@ -4,7 +4,7 @@ use std::collections::HashMap;
 use std::io;
 use std::sync::Arc;
 
-use protocol::{AgentMode, Content, EngineEvent, UiCommand};
+use protocol::{Content, Decision, EngineEvent, UiCommand};
 
 use super::headless::{HeadlessSink, OutputFormat};
 use super::runtime::Core;
@@ -31,6 +31,23 @@ impl HeadlessApp {
 
     fn api_key(&self) -> String {
         std::env::var(&self.core.config.api_key_env).unwrap_or_default()
+    }
+
+    fn approves_permission(
+        &self,
+        tool_name: &str,
+        args: &HashMap<String, serde_json::Value>,
+    ) -> bool {
+        let mode = self.core.config.mode.clone();
+        self.core
+            .permissions
+            .decide(mode.clone(), tool_name, args, false)
+            == Decision::Allow
+            || self
+                .core
+                .permissions
+                .check_subcommand(mode, "mcp", tool_name)
+                == Decision::Allow
     }
 
     /// Send `message`, drain engine events, print assistant text + token/cost
@@ -68,7 +85,7 @@ impl HeadlessApp {
             .send(UiCommand::StartTurn(Box::new(protocol::StartTurnPayload {
                 turn_id,
                 content: Content::text(message),
-                mode: self.core.config.mode,
+                mode: self.core.config.mode.clone(),
                 model: self.core.config.model.clone(),
                 reasoning_effort: self.core.config.reasoning_effort,
                 history: self.core.session.history.clone(),
@@ -106,8 +123,13 @@ impl HeadlessApp {
                 OutputFormat::Json => {
                     self.sink.emit_json(&ev);
                     match ev {
-                        EngineEvent::RequestPermission { request_id, .. } => {
-                            let approved = self.core.config.mode == AgentMode::Yolo;
+                        EngineEvent::RequestPermission {
+                            request_id,
+                            ref tool_name,
+                            ref args,
+                            ..
+                        } => {
+                            let approved = self.approves_permission(tool_name, args);
                             self.core.engine.send(UiCommand::PermissionDecision {
                                 request_id,
                                 approved,
@@ -181,8 +203,13 @@ impl HeadlessApp {
                     EngineEvent::Retrying { delay_ms, attempt } => {
                         self.sink.log_retry(attempt, delay_ms);
                     }
-                    EngineEvent::RequestPermission { request_id, .. } => {
-                        let approved = self.core.config.mode == AgentMode::Yolo;
+                    EngineEvent::RequestPermission {
+                        request_id,
+                        ref tool_name,
+                        ref args,
+                        ..
+                    } => {
+                        let approved = self.approves_permission(tool_name, args);
                         self.core.engine.send(UiCommand::PermissionDecision {
                             request_id,
                             approved,

@@ -90,6 +90,11 @@ pub enum Block {
         /// Accent-highlighted in the rendered message.
         image_labels: Vec<String>,
     },
+    Mode {
+        text: String,
+        icon: String,
+        hl_group: String,
+    },
     Thinking {
         content: String,
     },
@@ -151,6 +156,7 @@ impl Block {
     pub fn raw_text(&self) -> Option<String> {
         match self {
             Block::User { text, .. } => Some(text.clone()),
+            Block::Mode { text, icon, .. } => Some(format!("{icon}{text}")),
             Block::Text { content } | Block::Thinking { content } => Some(content.clone()),
             Block::Compacted { summary } => Some(summary.clone()),
             Block::CodeLine { content, .. } => Some(content.clone()),
@@ -359,7 +365,7 @@ impl BlockHistory {
     /// Replace block content in place. Preserves `BlockId`, `Status`, and
     /// `ViewState`. No-ops when the block doesn't exist (e.g. truncated during
     /// a stream). Same content hash skips the generation bump.
-    pub(crate) fn rewrite(&mut self, id: BlockId, block: Block) {
+    pub fn rewrite(&mut self, id: BlockId, block: Block) {
         if !self.blocks.contains_key(&id) {
             return;
         }

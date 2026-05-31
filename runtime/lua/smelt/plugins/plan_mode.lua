@@ -1,4 +1,17 @@
--- Plan-mode plugin: manages the `exit_plan_mode` tool and system prompt section.
+-- Plan-mode plugin: registers the `plan` mode, `exit_plan_mode` tool, and system prompt section.
+
+smelt.mode.register({
+  name = "plan",
+  after = "normal",
+  icon = "◇ ",
+  hl_group = "SmeltModePlan",
+  note = "now in plan mode. Investigate and reason only; do not modify files or run mutating commands. Use read_file, glob, grep, and read-only bash. edit_file and write_file are unavailable.",
+  permissions = {
+    default_decision = "ask",
+    allow_subcommands_by_default = false,
+    ask_on_output_redirection = true,
+  },
+})
 
 local PLAN_PROMPT = [[
 # Plan mode

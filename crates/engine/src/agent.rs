@@ -937,7 +937,7 @@ impl<'a> Turn<'a> {
                     .into_iter()
                     .filter(|d| {
                         self.dispatcher
-                            .is_visible(d.function.name.as_str(), self.mode)
+                            .is_visible(d.function.name.as_str(), self.mode.clone())
                     })
                     .collect();
                 // Plugin tools with `override_core` shadow the same-named core tool.
@@ -1271,7 +1271,7 @@ impl<'a> Turn<'a> {
                         call_id: tc.id.clone(),
                         tool_name: tc.function.name.clone(),
                         args: args.clone(),
-                        mode: self.mode,
+                        mode: self.mode.clone(),
                     });
                     plan.pending_tool_hooks.push((
                         request_id,
@@ -1298,26 +1298,27 @@ impl<'a> Turn<'a> {
                 continue;
             }
 
-            let hooks = match self
-                .dispatcher
-                .evaluate_hooks(&tc.function.name, &args, self.mode)
-            {
-                Some(h) => h,
-                None => {
-                    let outcome = ToolOutcome {
-                        content: format!("unknown tool: {}", tc.function.name),
-                        is_error: true,
-                        metadata: None,
-                    };
-                    self.emit(EngineEvent::ToolFinished {
-                        call_id: tc.id.clone(),
-                        result: outcome.clone(),
-                        elapsed_ms: Some(self.elapsed_ms_since(tool_start)),
-                    });
-                    plan.inline_outcomes.push((tc.id.clone(), outcome));
-                    continue;
-                }
-            };
+            let hooks =
+                match self
+                    .dispatcher
+                    .evaluate_hooks(&tc.function.name, &args, self.mode.clone())
+                {
+                    Some(h) => h,
+                    None => {
+                        let outcome = ToolOutcome {
+                            content: format!("unknown tool: {}", tc.function.name),
+                            is_error: true,
+                            metadata: None,
+                        };
+                        self.emit(EngineEvent::ToolFinished {
+                            call_id: tc.id.clone(),
+                            result: outcome.clone(),
+                            elapsed_ms: Some(self.elapsed_ms_since(tool_start)),
+                        });
+                        plan.inline_outcomes.push((tc.id.clone(), outcome));
+                        continue;
+                    }
+                };
 
             let idx = plan.slots.len();
             match hooks.decision {

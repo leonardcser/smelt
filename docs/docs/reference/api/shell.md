@@ -30,6 +30,14 @@ fun(command: string): string[]
 
 Extract filesystem paths referenced by `command` for workspace permission checks.
 
+## `smelt.shell.has_output_redirection`
+
+```lua
+fun(command: string): boolean
+```
+
+Return true when `command` contains shell output redirection such as `>` or `>>`.
+
 ## `smelt.shell.split`
 
 ```lua

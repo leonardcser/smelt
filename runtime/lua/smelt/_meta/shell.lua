@@ -19,6 +19,10 @@ shell.check_interactive = nil
 ---@type fun(command: string): string[]
 shell.extract_paths = nil
 
+--- Return true when `command` contains shell output redirection such as `>` or `>>`.
+---@type fun(command: string): boolean
+shell.has_output_redirection = nil
+
 --- Split `command` into the sequence of subcommands separated by shell operators (`;`, `&&`, `||`, `|`). Operators themselves are dropped.
 ---@type fun(command: string): string[]
 shell.split = nil

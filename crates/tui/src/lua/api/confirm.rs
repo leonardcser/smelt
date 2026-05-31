@@ -76,7 +76,7 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
                 if app
                     .core
                     .permissions
-                    .decide(app.core.config.mode, &tool_name, &args, false)
+                    .decide(app.core.config.mode.clone(), &tool_name, &args, false)
                     == protocol::Decision::Allow
                 {
                     app.set_active_status(

@@ -521,10 +521,10 @@ pub enum FuzzMode {
 impl From<FuzzMode> for AgentMode {
     fn from(m: FuzzMode) -> Self {
         match m {
-            FuzzMode::Normal => AgentMode::Normal,
-            FuzzMode::Plan => AgentMode::Plan,
-            FuzzMode::Apply => AgentMode::Apply,
-            FuzzMode::Yolo => AgentMode::Yolo,
+            FuzzMode::Normal => AgentMode::normal(),
+            FuzzMode::Plan => AgentMode::parse("plan").unwrap(),
+            FuzzMode::Apply => AgentMode::parse("apply").unwrap(),
+            FuzzMode::Yolo => AgentMode::parse("yolo").unwrap(),
         }
     }
 }
@@ -1682,7 +1682,7 @@ fn plan(op: FuzzOp) -> (Option<SourceEvent>, PostCheck) {
                 call_id: call_id_string(call_id),
                 tool_name,
                 args: args.into_map(),
-                mode: AgentMode::Normal,
+                mode: AgentMode::normal(),
             });
             (Some(ev), PostCheck::ToolHooksRequested)
         }

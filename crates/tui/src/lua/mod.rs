@@ -434,6 +434,115 @@ impl LuaRuntime {
         }
     }
 
+    pub(crate) fn mode_note(&self, name: &str) -> String {
+        let result: mlua::Result<String> = (|| {
+            let smelt: mlua::Table = self.core.lua.globals().get("smelt")?;
+            let mode: mlua::Table = smelt.get("mode")?;
+            let note: mlua::Function = mode.get("note")?;
+            note.call(name.to_string())
+        })();
+        result.unwrap_or_else(|_| format!("now in {name} mode."))
+    }
+
+    pub(crate) fn mode_block(
+        &self,
+        name: Option<&str>,
+        note: &str,
+    ) -> smelt_core::transcript_model::Block {
+        let result: mlua::Result<(String, String)> = (|| {
+            let smelt: mlua::Table = self.core.lua.globals().get("smelt")?;
+            let mode: mlua::Table = smelt.get("mode")?;
+            if let Some(name) = name {
+                let get: mlua::Function = mode.get("get")?;
+                let info: Option<mlua::Table> = get.call(name.to_string())?;
+                if let Some(info) = info {
+                    let icon = info.get::<Option<String>>("icon")?.unwrap_or_default();
+                    let hl_group = info
+                        .get::<Option<String>>("hl_group")?
+                        .unwrap_or_else(|| "SmeltModeDefault".to_string());
+                    return Ok((icon, hl_group));
+                }
+            }
+            let list: mlua::Function = mode.get("list")?;
+            let rows: mlua::Table = list.call(())?;
+            for row in rows.sequence_values::<mlua::Table>() {
+                let row = row?;
+                if row.get::<Option<String>>("note")?.as_deref() == Some(note) {
+                    let icon = row.get::<Option<String>>("icon")?.unwrap_or_default();
+                    let hl_group = row
+                        .get::<Option<String>>("hl_group")?
+                        .unwrap_or_else(|| "SmeltModeDefault".to_string());
+                    return Ok((icon, hl_group));
+                }
+            }
+            Ok((String::new(), "SmeltModeDefault".to_string()))
+        })();
+        let (icon, hl_group) =
+            result.unwrap_or_else(|_| (String::new(), "SmeltModeDefault".to_string()));
+        smelt_core::transcript_model::Block::Mode {
+            text: note.to_string(),
+            icon,
+            hl_group,
+        }
+    }
+
+    pub fn mode_names(&self) -> Vec<protocol::AgentMode> {
+        let result: mlua::Result<Vec<String>> = (|| {
+            let smelt: mlua::Table = self.core.lua.globals().get("smelt")?;
+            let mode: mlua::Table = smelt.get("mode")?;
+            let list: mlua::Function = mode.get("list")?;
+            let rows: mlua::Table = list.call(())?;
+            let mut names = Vec::new();
+            for row in rows.sequence_values::<mlua::Table>() {
+                let row = row?;
+                names.push(row.get::<String>("name")?);
+            }
+            Ok(names)
+        })();
+        result
+            .unwrap_or_default()
+            .into_iter()
+            .filter_map(|name| protocol::AgentMode::parse(&name))
+            .collect()
+    }
+
+    pub fn mode_behaviors(
+        &self,
+    ) -> std::collections::HashMap<String, smelt_core::permissions::ModeBehavior> {
+        let result: mlua::Result<
+            std::collections::HashMap<String, smelt_core::permissions::ModeBehavior>,
+        > = (|| {
+            let smelt: mlua::Table = self.core.lua.globals().get("smelt")?;
+            let mode: mlua::Table = smelt.get("mode")?;
+            let behaviors: mlua::Function = mode.get("permission_behaviors")?;
+            let table: mlua::Table = behaviors.call(())?;
+            let mut out = std::collections::HashMap::new();
+            for pair in table.pairs::<String, mlua::Table>() {
+                let (name, spec) = pair?;
+                let default_decision =
+                    match spec.get::<Option<String>>("default_decision")?.as_deref() {
+                        Some("allow") => protocol::Decision::Allow,
+                        Some("deny") => protocol::Decision::Deny,
+                        _ => protocol::Decision::Ask,
+                    };
+                out.insert(
+                    name,
+                    smelt_core::permissions::ModeBehavior {
+                        default_decision,
+                        allow_subcommands_by_default: spec
+                            .get("allow_subcommands_by_default")
+                            .unwrap_or(false),
+                        ask_on_output_redirection: spec
+                            .get("ask_on_output_redirection")
+                            .unwrap_or(true),
+                    },
+                );
+            }
+            Ok(out)
+        })();
+        result.unwrap_or_default()
+    }
+
     /// Fire `smelt.confirm.open(handle_id)` to hand a pending confirm request to the Lua dialog.
     pub(crate) fn fire_confirm_open(&self, handle_id: u64) {
         let result: mlua::Result<()> = (|| {
@@ -482,7 +591,7 @@ mod tests {
         static EMPTY_PATH: std::sync::OnceLock<std::path::PathBuf> = std::sync::OnceLock::new();
         let p = EMPTY_PATH.get_or_init(std::path::PathBuf::new);
         ToolEnv {
-            mode: protocol::AgentMode::Apply,
+            mode: protocol::AgentMode::parse("apply").unwrap(),
             session_id: "",
             session_dir: p,
         }
@@ -750,7 +859,7 @@ mod tests {
         let mut rt = LuaRuntime::new();
         rt.load_autoload();
         assert!(rt.load_error.is_none(), "load_error: {:?}", rt.load_error);
-        let defs = rt.tool_defs(protocol::AgentMode::Normal);
+        let defs = rt.tool_defs(protocol::AgentMode::normal());
         let ask = defs
             .iter()
             .find(|d| d.name == "ask_user_question")

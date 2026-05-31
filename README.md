@@ -34,7 +34,7 @@ scriptable in Lua like Neovim. Built from scratch, with care for the details.
 
 ## What's inside
 
-- **Lua plugins.** Keymaps, commands, autocmds, custom tools.
+- **Lua plugins.** Keymaps, commands, autocmds, custom tools, and custom modes.
 - **Terminal renderer.** Its own grid and layout engine, not `ratatui`.
 - **Vim editor.** Motions, text objects, registers, undo.
 - **Deterministic fuzzing.** Fixed clock and stubbed I/O, so any crash can be
@@ -70,7 +70,9 @@ smelt --model gpt-5.4               # Codex
 smelt --model claude-sonnet-4-6     # Copilot
 ```
 
-Or just run `smelt` with no arguments and follow the wizard.
+Or just run `smelt` with no arguments and follow the wizard. By default the
+mode cycle is Normal → Apply → Yolo; enable the optional Plan mode plugin with
+`require("smelt.plugins.plan_mode")` in `~/.config/smelt/init.lua`.
 
 ## Docs
 

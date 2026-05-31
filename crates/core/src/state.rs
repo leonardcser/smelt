@@ -167,7 +167,7 @@ mod tests {
             let mode_thread = std::thread::spawn(move || {
                 b1.wait();
                 update_recent(|s| {
-                    s.mode = AgentMode::Apply.as_str().to_string();
+                    s.mode = AgentMode::parse("apply").unwrap().as_str().to_string();
                     std::thread::sleep(Duration::from_millis(50));
                 });
             });
@@ -182,7 +182,7 @@ mod tests {
             model_thread.join().unwrap();
 
             let recent = Recent::load();
-            assert_eq!(recent.mode(), Some(AgentMode::Apply));
+            assert_eq!(recent.mode(), Some(AgentMode::parse("apply").unwrap()));
             assert_eq!(recent.selected_model.as_deref(), Some("anthropic/claude"));
         });
     }

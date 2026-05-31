@@ -28,7 +28,7 @@ use engine::ModelConfig;
 use libfuzzer_sys::fuzz_target;
 use protocol::{mode_change_note, Content, Message, ReasoningEffort};
 use serde_json::Value;
-use smelt_fuzz::cache_common::{ArbTool, StableAction, MODES};
+use smelt_fuzz::cache_common::{mode_at, ArbTool, StableAction};
 
 #[derive(Debug, Arbitrary)]
 struct Input {
@@ -155,13 +155,14 @@ fn run(input: Input) {
             assert_prefix_stable(&before, &after, prefix_msg_count, "AppendTurn");
         }
         StableAction::AppendModeNote { mode, user_text } => {
-            let m = MODES[(*mode as usize) % MODES.len()];
+            let m = mode_at(*mode as usize);
+            let note = format!("now in {} mode.", m.as_str());
             messages.push(Message::assistant(
                 Some(Content::text(String::from("ok"))),
                 None,
                 None,
             ));
-            messages.push(Message::user(Content::text(mode_change_note(m))));
+            messages.push(Message::user(Content::text(mode_change_note(&note))));
             messages.push(Message::user(Content::text(user_text.clone())));
             let after = body(&messages, &tools, &cfg, ReasoningEffort::Off);
             assert_prefix_stable(&before, &after, prefix_msg_count, "AppendModeNote");

@@ -174,7 +174,7 @@ async fn engine_ask_during_tool_execution_is_not_silently_dropped() {
     handle.send(UiCommand::StartTurn(Box::new(StartTurnPayload {
         turn_id: 1,
         content: Content::text("go"),
-        mode: AgentMode::Normal,
+        mode: AgentMode::normal(),
         model: "test-model".into(),
         reasoning_effort: ReasoningEffort::Off,
         history: Vec::new(),

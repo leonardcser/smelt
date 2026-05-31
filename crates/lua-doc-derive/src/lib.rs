@@ -303,6 +303,7 @@ fn expand_lua_opts(input: &DeriveInput) -> syn::Result<TokenStream2> {
         from_lua_field_reads.push(read);
     }
 
+    let has_regular_fields = !from_lua_field_reads.is_empty();
     let rest_read = match rest_field {
         Some((fname, ty, _)) => {
             quote! {
@@ -323,10 +324,10 @@ fn expand_lua_opts(input: &DeriveInput) -> syn::Result<TokenStream2> {
         }
         None => quote! {},
     };
-    let trailing_comma = if rest_read.is_empty() {
-        quote! {}
-    } else {
+    let trailing_comma = if has_regular_fields && !rest_read.is_empty() {
         quote! { , }
+    } else {
+        quote! {}
     };
 
     Ok(quote! {

@@ -151,6 +151,11 @@ smelt.tools.register({
     local sub = smelt.permissions.check(mode, "bash", args.command or "")
     if sub == "deny" then return "deny" end
     if tool == "allow" and sub == "ask" then return "ask" end
+    local mode_info = smelt.mode.get and smelt.mode.get(mode)
+    local perms = mode_info and mode_info.permissions or {}
+    if sub == "allow" and perms.ask_on_output_redirection and smelt.shell.has_output_redirection(args.command or "") then
+      return "ask"
+    end
     return sub
   end,
   execute = M.execute,

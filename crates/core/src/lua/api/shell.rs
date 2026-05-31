@@ -105,5 +105,11 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
             ))
         },
     )?;
+    m.fn_(
+        "has_output_redirection",
+        "Return true when `command` contains shell output redirection such as `>` or `>>`.",
+        &["command"],
+        |_, command: String| Ok(crate::permissions::shell_has_output_redirection(&command)),
+    )?;
     Ok(())
 }

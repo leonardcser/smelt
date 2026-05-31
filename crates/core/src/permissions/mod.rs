@@ -34,12 +34,12 @@ pub type PathsFn = dyn Fn(&str, &HashMap<String, Value>) -> Vec<String> + Send +
 pub type DecideFn =
     dyn Fn(&str, &HashMap<String, Value>, AgentMode) -> Option<Decision> + Send + Sync;
 
+pub use rules::ModeBehavior;
+
 #[derive(Clone)]
 pub struct Permissions {
-    normal: ModePerms,
-    plan: ModePerms,
-    apply: ModePerms,
-    yolo: ModePerms,
+    modes: HashMap<String, ModePerms>,
+    mode_behaviors: HashMap<String, ModeBehavior>,
     restrict_to_workspace: bool,
     workspace: PathBuf,
     paths_fn: Option<Arc<PathsFn>>,
@@ -52,10 +52,11 @@ pub struct Permissions {
 impl std::fmt::Debug for Permissions {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Permissions")
-            .field("normal", &self.normal)
-            .field("plan", &self.plan)
-            .field("apply", &self.apply)
-            .field("yolo", &self.yolo)
+            .field("modes", &self.modes.keys().collect::<Vec<_>>())
+            .field(
+                "mode_behaviors",
+                &self.mode_behaviors.keys().collect::<Vec<_>>(),
+            )
             .field("restrict_to_workspace", &self.restrict_to_workspace)
             .field("workspace", &self.workspace)
             .field("paths_fn", &self.paths_fn.as_ref().map(|_| "<fn>"))
@@ -77,20 +78,31 @@ impl Permissions {
     }
 
     pub fn from_raw(raw: &RawPerms, tool_defaults: &ToolDefaults) -> Self {
+        Self::from_raw_with_mode_behaviors(raw, tool_defaults, HashMap::new())
+    }
+
+    pub fn from_raw_with_mode_behaviors(
+        raw: &RawPerms,
+        tool_defaults: &ToolDefaults,
+        mode_behaviors: HashMap<String, ModeBehavior>,
+    ) -> Self {
         let def = &raw.default;
+        let mut modes = HashMap::new();
+        let mut names: std::collections::HashSet<String> = raw.modes.keys().cloned().collect();
+        names.extend(mode_behaviors.keys().cloned());
+        names.insert(protocol::AgentMode::normal().to_string());
+        for name in names {
+            let mode = AgentMode::parse(&name).unwrap_or_else(protocol::AgentMode::normal);
+            let raw_mode = raw.modes.get(&name).cloned().unwrap_or_default();
+            let behavior = mode_behaviors.get(&name).cloned().unwrap_or_default();
+            modes.insert(
+                name,
+                build_mode(&merge_mode(def, &raw_mode), &mode, behavior, tool_defaults),
+            );
+        }
         Self {
-            normal: build_mode(
-                &merge_mode(def, &raw.normal),
-                AgentMode::Normal,
-                tool_defaults,
-            ),
-            plan: build_mode(&merge_mode(def, &raw.plan), AgentMode::Plan, tool_defaults),
-            apply: build_mode(
-                &merge_mode(def, &raw.apply),
-                AgentMode::Apply,
-                tool_defaults,
-            ),
-            yolo: build_mode(&merge_mode(def, &raw.yolo), AgentMode::Yolo, tool_defaults),
+            modes,
+            mode_behaviors,
             restrict_to_workspace: true,
             workspace: PathBuf::new(),
             paths_fn: None,
@@ -154,10 +166,9 @@ impl Permissions {
                 entry.deny = deny;
             }
         }
-        apply_to_mode(&mut cloned.normal, overrides);
-        apply_to_mode(&mut cloned.plan, overrides);
-        apply_to_mode(&mut cloned.apply, overrides);
-        apply_to_mode(&mut cloned.yolo, overrides);
+        for mode in cloned.modes.values_mut() {
+            apply_to_mode(mode, overrides);
+        }
         cloned
     }
 
@@ -195,45 +206,41 @@ impl Permissions {
             .and_then(|f| f(tool_name, args, mode))
     }
 
-    fn mode_perms(&self, mode: AgentMode) -> &ModePerms {
-        match mode {
-            AgentMode::Normal => &self.normal,
-            AgentMode::Plan => &self.plan,
-            AgentMode::Apply => &self.apply,
-            AgentMode::Yolo => &self.yolo,
-        }
+    fn mode_behavior(&self, mode: &AgentMode) -> ModeBehavior {
+        self.mode_behaviors
+            .get(mode.as_str())
+            .cloned()
+            .unwrap_or_default()
+    }
+
+    fn mode_perms(&self, mode: &AgentMode) -> Option<&ModePerms> {
+        self.modes.get(mode.as_str())
     }
 
     pub fn check_tool(&self, mode: AgentMode, tool_name: &str) -> Decision {
-        let perms = self.mode_perms(mode);
-        let default = if mode == AgentMode::Yolo {
-            Decision::Allow
-        } else {
-            Decision::Ask
-        };
-        perms.tools.get(tool_name).cloned().unwrap_or(default)
+        let behavior = self.mode_behavior(&mode);
+        self.mode_perms(&mode)
+            .and_then(|perms| perms.tools.get(tool_name).cloned())
+            .unwrap_or(behavior.default_decision)
     }
 
     pub fn subcommand_ruleset(&self, mode: AgentMode, bucket: &str) -> Option<&RuleSet> {
-        self.mode_perms(mode).subcommands.get(bucket)
+        self.mode_perms(&mode)?.subcommands.get(bucket)
     }
 
     /// Check `value` against the bucket's ruleset. Custom parsers (e.g. `bash`'s shell parser)
-    /// run when registered; otherwise plain glob-match. Returns `Ask` (or `Allow` in Yolo)
-    /// when no bucket is registered.
+    /// run when registered; otherwise plain glob-match. Falls back to the active mode's default
+    /// decision when no bucket is registered.
     pub fn check_subcommand(&self, mode: AgentMode, bucket: &str, value: &str) -> Decision {
-        let Some(rs) = self.subcommand_ruleset(mode, bucket) else {
-            return if mode == AgentMode::Yolo {
-                Decision::Allow
-            } else {
-                Decision::Ask
-            };
+        let behavior = self.mode_behavior(&mode);
+        let Some(rs) = self.subcommand_ruleset(mode.clone(), bucket) else {
+            return behavior.default_decision;
         };
         if let Some(parser) = self.subpattern_parsers.get(bucket) {
             return parser(rs, value, mode);
         }
         let decision = check_ruleset(rs, value);
-        if decision == Decision::Ask && mode == AgentMode::Yolo {
+        if decision == Decision::Ask && behavior.allow_subcommands_by_default {
             Decision::Allow
         } else {
             decision
@@ -249,9 +256,9 @@ impl Permissions {
         is_mcp: bool,
     ) -> Decision {
         let base = if is_mcp {
-            self.check_subcommand(mode, "mcp", tool_name)
+            self.check_subcommand(mode.clone(), "mcp", tool_name)
         } else {
-            decide_base(self, mode, tool_name, args)
+            decide_base(self, mode.clone(), tool_name, args)
         };
         if base == Decision::Allow
             && self.restrict_to_workspace
@@ -298,27 +305,22 @@ fn decide_base(
     tool_name: &str,
     args: &HashMap<String, Value>,
 ) -> Decision {
-    if let Some(d) = permissions.decide_hook(tool_name, args, mode) {
+    if let Some(d) = permissions.decide_hook(tool_name, args, mode.clone()) {
         return d;
     }
     permissions.check_tool(mode, tool_name)
 }
 
 /// Shell-aware decision: splits on operators, folds subcommands to the worst decision,
-/// escalates output redirection in Normal/Plan, trusts `cd` unconditionally.
-pub fn shell_parser_decide(rs: &RuleSet, command: &str, mode: AgentMode) -> Decision {
+/// trusts `cd` unconditionally.
+pub fn shell_parser_decide(rs: &RuleSet, command: &str, _mode: AgentMode) -> Decision {
     let command = command.trim();
-    let escalate_redirect = matches!(mode, AgentMode::Normal | AgentMode::Plan);
     let subcmds = split_shell_commands(command);
     if subcmds.len() <= 1 {
         if is_cd_command(command) {
             return Decision::Allow;
         }
-        let d = check_ruleset(rs, command);
-        if escalate_redirect && d == Decision::Allow && has_output_redirection(command) {
-            return Decision::Ask;
-        }
-        return d;
+        return check_ruleset(rs, command);
     }
     let mut worst = Decision::Allow;
     for subcmd in subcmds {
@@ -326,11 +328,6 @@ pub fn shell_parser_decide(rs: &RuleSet, command: &str, mode: AgentMode) -> Deci
             continue;
         }
         let d = check_ruleset(rs, &subcmd);
-        let d = if escalate_redirect && d == Decision::Allow && has_output_redirection(&subcmd) {
-            Decision::Ask
-        } else {
-            d
-        };
         match d {
             Decision::Deny => return Decision::Deny,
             Decision::Ask if worst == Decision::Allow => worst = Decision::Ask,
@@ -338,6 +335,12 @@ pub fn shell_parser_decide(rs: &RuleSet, command: &str, mode: AgentMode) -> Deci
         }
     }
     worst
+}
+
+pub fn shell_has_output_redirection(command: &str) -> bool {
+    split_shell_commands(command)
+        .into_iter()
+        .any(|cmd| has_output_redirection(&cmd))
 }
 
 /// Look up a built-in subpattern parser by name. Currently only `"shell"`.

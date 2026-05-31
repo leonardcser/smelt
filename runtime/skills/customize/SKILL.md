@@ -444,7 +444,7 @@ Shipped but not autoloaded. Add `require("smelt.plugins.<name>")` to `~/.config/
 | Plugin | Summary |
 | --- | --- |
 | `smelt.plugins.background_commands` | Overrides `bash` to add `run_in_background`, registers `read_process_output` and `stop_process` tools, and the `/ps` command. |
-| `smelt.plugins.plan_mode` | Plan-mode plugin: manages the `exit_plan_mode` tool and system prompt section. |
+| `smelt.plugins.plan_mode` | Plan-mode plugin: registers the `plan` mode, `exit_plan_mode` tool, and system prompt section. |
 
 <!-- PLUGINS_END -->
 
@@ -821,12 +821,24 @@ Agent-mode selector.
 
 - `smelt.mode.cycle` :: `fun(): nil`
   Advance the active agent mode to the next entry in `smelt.mode.cycle_list()`, wrapping at the end.
-- `smelt.mode.cycle_list` :: `fun(): smelt.mode.Mode[]`
-  Return the configured agent-mode cycle; falls back to all known modes when the user has not customized one.
+- `smelt.mode.cycle_list` :: `fun(): string[]`
+  Return the configured agent-mode cycle; falls back to the built-in default when the user has not customized one.
+- `smelt.mode.get` :: `fun(name: string): table|nil`
+  
 - `smelt.mode.icon` :: `fun(name: string): string`
-  Lookup the icon registered for `name`, or `""` when none is set.
+  
+- `smelt.mode.list` :: `fun(): table[]`
+  
+- `smelt.mode.note` :: `fun(name: string): string`
+  
+- `smelt.mode.permission_behaviors` :: `fun(): table<string, table>`
+  
+- `smelt.mode.register` :: `fun(spec: table): nil`
+  
 - `smelt.mode.set_icon` :: `fun(name: string, icon: string): nil`
-  Override the icon shown alongside `name` in the statusline; subsequent `smelt.mode.icon(name)` calls return `icon`.
+  
+- `smelt.mode.style` :: `fun(name: string): table`
+  
 
 #### `smelt.os`
 
@@ -962,6 +974,8 @@ Shell command splitting and interactive/background-operator validators.
   Return a user-facing error message if `command` would invoke an interactive program (editor, REPL, pager, `git -i`, etc.), or `nil` if it is safe to run non-interactively.
 - `smelt.shell.extract_paths` :: `fun(command: string): string[]`
   Extract filesystem paths referenced by `command` for workspace permission checks.
+- `smelt.shell.has_output_redirection` :: `fun(command: string): boolean`
+  Return true when `command` contains shell output redirection such as `>` or `>>`.
 - `smelt.shell.split` :: `fun(command: string): string[]`
   Split `command` into the sequence of subcommands separated by shell operators (`;`, `&&`, `||`, `|`).
 - `smelt.shell.split_with_ops` :: `fun(command: string): table`

@@ -398,10 +398,7 @@ Spec for `smelt.permissions.set_rules`. Each mode falls back to `default` (and t
 | Field | Type | Required | Description |
 | --- | --- | --- | --- |
 | `default` | [smelt.permissions.ModePerms](types.md#smeltpermissionsmodeperms) |  | Baseline rules applied unless a mode-specific slot overrides. |
-| `normal` | [smelt.permissions.ModePerms](types.md#smeltpermissionsmodeperms) |  | Rules active while the agent is in normal mode. |
-| `plan` | [smelt.permissions.ModePerms](types.md#smeltpermissionsmodeperms) |  | Rules active while the agent is in plan mode. |
-| `apply` | [smelt.permissions.ModePerms](types.md#smeltpermissionsmodeperms) |  | Rules active while the agent is in apply mode. |
-| `yolo` | [smelt.permissions.ModePerms](types.md#smeltpermissionsmodeperms) |  | Rules active while the agent is in yolo mode. |
+| `[string]` | [smelt.permissions.ModePerms](types.md#smeltpermissionsmodeperms) |  | Mode-specific rules keyed by registered mode name. |
 
 ### `smelt.permissions.SessionEntry`
 
@@ -552,14 +549,11 @@ Flat map keyed by highlight-group name (`Comment`, `Visual`, `SmeltAccent`, …)
 
 ### `smelt.tools.PermissionDefaults`
 
-Per-mode default decisions installed by `smelt.tools.register`. Each missing field falls through to the host's generic rules.
+Per-mode default decisions installed by `smelt.tools.register`. Keys are mode names and values are `"allow"`, `"ask"`, or `"deny"`.
 
 | Field | Type | Required | Description |
 | --- | --- | --- | --- |
-| `normal` | [smelt.tools.Decision](types.md#smelttoolsdecision) |  | Decision applied in normal mode. |
-| `plan` | [smelt.tools.Decision](types.md#smelttoolsdecision) |  | Decision applied in plan mode. |
-| `apply` | [smelt.tools.Decision](types.md#smelttoolsdecision) |  | Decision applied in apply mode. |
-| `yolo` | [smelt.tools.Decision](types.md#smelttoolsdecision) |  | Decision applied in yolo mode. |
+| `[string]` | [smelt.tools.Decision](types.md#smelttoolsdecision) |  | Per-mode decisions keyed by registered mode name. |
 
 ### `smelt.tools.ToolDef`
 
@@ -625,12 +619,6 @@ Open alias — accepts any `string`. Well-known names: `"agent_mode"` \| `"block
 Type of CLI flag declared via `smelt.cli.register_flag`. Matches the subset of clap that we expose to Lua.
 
 Variants: `"boolean"` \| `"string"` \| `"integer"`
-
-### `smelt.mode.Mode`
-
-Agent mode string literal.
-
-Variants: `"normal"` \| `"plan"` \| `"apply"` \| `"yolo"`
 
 ### `smelt.paint.Event`
 

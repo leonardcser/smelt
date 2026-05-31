@@ -20,7 +20,7 @@ use crate::lua::LuaShared;
 pub struct LuaDefaults {
     /// Starting model reference (`"provider/model"` or bare model name).
     pub model: Option<String>,
-    /// Starting agent mode: `"normal"`, `"plan"`, `"apply"`, `"yolo"`.
+    /// Starting agent mode. Must name a registered mode.
     pub mode: Option<String>,
     /// Starting reasoning effort: `"off"`, `"low"`, `"medium"`, `"high"`, `"max"`.
     pub reasoning_effort: Option<String>,

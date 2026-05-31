@@ -271,10 +271,7 @@
 --- Spec for `smelt.permissions.set_rules`. Each mode falls back to `default` (and then to host-level rules) when its slot is `nil`.
 ---@class smelt.permissions.RulesSpec
 ---@field default? smelt.permissions.ModePerms Baseline rules applied unless a mode-specific slot overrides.
----@field normal? smelt.permissions.ModePerms Rules active while the agent is in normal mode.
----@field plan? smelt.permissions.ModePerms Rules active while the agent is in plan mode.
----@field apply? smelt.permissions.ModePerms Rules active while the agent is in apply mode.
----@field yolo? smelt.permissions.ModePerms Rules active while the agent is in yolo mode.
+---@field [string] smelt.permissions.ModePerms Mode-specific rules keyed by registered mode name.
 
 --- A single session permission entry (one approved tool/pattern pair).
 ---@class smelt.permissions.SessionEntry
@@ -375,12 +372,9 @@
 ---@class smelt.theme.ThemeSpec
 ---@field [string] string | smelt.theme.StyleDecl Style table or alias string for the group named by the key.
 
---- Per-mode default decisions installed by `smelt.tools.register`. Each missing field falls through to the host's generic rules.
+--- Per-mode default decisions installed by `smelt.tools.register`. Keys are mode names and values are `"allow"`, `"ask"`, or `"deny"`.
 ---@class smelt.tools.PermissionDefaults
----@field normal? smelt.tools.Decision Decision applied in normal mode.
----@field plan? smelt.tools.Decision Decision applied in plan mode.
----@field apply? smelt.tools.Decision Decision applied in apply mode.
----@field yolo? smelt.tools.Decision Decision applied in yolo mode.
+---@field [string] smelt.tools.Decision Per-mode decisions keyed by registered mode name.
 
 --- Plugin tool definition passed to `smelt.tools.register`. `execute` is required; the remaining hooks are optional and are invoked at well-defined points during a tool turn — see the field docs for each callback's contract.
 ---@class smelt.tools.ToolDef
@@ -427,9 +421,6 @@
 
 --- Type of CLI flag declared via `smelt.cli.register_flag`. Matches the subset of clap that we expose to Lua.
 ---@alias smelt.cli.FlagKind "boolean"|"string"|"integer"
-
---- Agent mode string literal.
----@alias smelt.mode.Mode "normal"|"plan"|"apply"|"yolo"
 
 --- Paint-leaf events accepted by `paint:on(event, fn)`.
 ---@alias smelt.paint.Event "press"|"release"|"drag"

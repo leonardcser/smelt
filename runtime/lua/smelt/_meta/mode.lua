@@ -13,17 +13,32 @@ local mode = {}
 ---@type fun(): nil
 mode.cycle = nil
 
---- Return the configured agent-mode cycle; falls back to all known modes when the user has not customized one.
----@type fun(): smelt.mode.Mode[]
+--- Return the configured agent-mode cycle; falls back to the built-in default when the user has not customized one.
+---@type fun(): string[]
 mode.cycle_list = nil
 
---- Lookup the icon registered for `name`, or `""` when none is set.
+---@type fun(name: string): table|nil
+mode.get = nil
+
 ---@type fun(name: string): string
 mode.icon = nil
 
---- Override the icon shown alongside `name` in the statusline; subsequent
---- `smelt.mode.icon(name)` calls return `icon`.
+---@type fun(): table[]
+mode.list = nil
+
+---@type fun(name: string): string
+mode.note = nil
+
+---@type fun(): table<string, table>
+mode.permission_behaviors = nil
+
+---@type fun(spec: table): nil
+mode.register = nil
+
 ---@type fun(name: string, icon: string): nil
 mode.set_icon = nil
+
+---@type fun(name: string): table
+mode.style = nil
 
 return mode

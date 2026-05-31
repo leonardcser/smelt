@@ -71,7 +71,7 @@ impl TuiApp {
         };
         let tools = {
             let _perf = smelt_perf::perf::begin("agent:tool_defs");
-            self.lua.tool_defs(self.core.config.mode)
+            self.lua.tool_defs(self.core.config.mode.clone())
         };
 
         let turn_id = self.next_turn_id;
@@ -82,7 +82,7 @@ impl TuiApp {
             .send(UiCommand::StartTurn(Box::new(protocol::StartTurnPayload {
                 turn_id,
                 content,
-                mode: self.core.config.mode,
+                mode: self.core.config.mode.clone(),
                 model: self.core.config.model.clone(),
                 reasoning_effort: self.core.config.reasoning_effort,
                 history: self.model_history(),
@@ -250,7 +250,7 @@ impl TuiApp {
             .send(UiCommand::StartTurn(Box::new(protocol::StartTurnPayload {
                 turn_id,
                 content: Content::text(evaluated),
-                mode: self.core.config.mode,
+                mode: self.core.config.mode.clone(),
                 model,
                 reasoning_effort: reasoning,
                 history: self.model_history(),
@@ -368,7 +368,7 @@ impl TuiApp {
         tool_name: String,
         args: std::collections::HashMap<String, serde_json::Value>,
     ) {
-        let mode = self.core.config.mode;
+        let mode = self.core.config.mode.clone();
         let session_id = self.core.session.id.clone();
         let session_dir = smelt_core::session::dir_for(&self.core.session);
         match self.lua.execute_tool(
@@ -638,7 +638,7 @@ impl TuiApp {
                     let rt = self.core.permissions.approvals.read().unwrap();
                     rt.is_auto_approved(
                         &self.core.permissions,
-                        self.core.config.mode,
+                        self.core.config.mode.clone(),
                         &req.tool_name,
                         &req.args,
                         &summary_plain,
@@ -650,7 +650,7 @@ impl TuiApp {
                 }
 
                 if self.core.permissions.decide(
-                    self.core.config.mode,
+                    self.core.config.mode.clone(),
                     &req.tool_name,
                     &req.args,
                     false,
@@ -673,7 +673,7 @@ impl TuiApp {
                 }
 
                 let downgraded = self.core.permissions.was_downgraded(
-                    self.core.config.mode,
+                    self.core.config.mode.clone(),
                     &req.tool_name,
                     &req.args,
                 );

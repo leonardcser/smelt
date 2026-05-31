@@ -78,7 +78,7 @@ impl ToolDispatcher for McpDispatcher {
         } else {
             format!("{name} {}", summary.as_plain_text())
         };
-        let mut decision = self.permissions.decide(mode, name, args, true);
+        let mut decision = self.permissions.decide(mode.clone(), name, args, true);
         if decision == protocol::Decision::Ask {
             let rt = self.permissions.approvals.read().unwrap();
             if rt.is_auto_approved(&self.permissions, mode, name, args, &summary_text) {

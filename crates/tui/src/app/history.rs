@@ -307,6 +307,10 @@ impl TuiApp {
             });
             return;
         }
+        if let Some(note) = text.strip_prefix(protocol::MODE_NOTE_PREFIX) {
+            self.push_block(self.lua.mode_block(None, note.trim()));
+            return;
+        }
         let image_labels = content.image_labels();
         let display_text = if image_labels.is_empty() {
             text.into_owned()

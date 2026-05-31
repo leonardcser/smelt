@@ -145,13 +145,17 @@ mod tests {
     #[test]
     fn empty_dispatcher_default_is_visible_returns_true() {
         // Trait-default is_visible returns true; EmptyDispatcher inherits it.
-        assert!(EmptyDispatcher.is_visible("anything", protocol::AgentMode::Plan));
+        assert!(EmptyDispatcher.is_visible("anything", protocol::AgentMode::parse("plan").unwrap()));
     }
 
     #[test]
     fn empty_dispatcher_evaluate_hooks_returns_none() {
         let d = EmptyDispatcher;
-        let res = d.evaluate_hooks("name", &HashMap::new(), protocol::AgentMode::Plan);
+        let res = d.evaluate_hooks(
+            "name",
+            &HashMap::new(),
+            protocol::AgentMode::parse("plan").unwrap(),
+        );
         assert!(res.is_none());
     }
 

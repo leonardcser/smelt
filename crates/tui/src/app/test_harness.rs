@@ -118,7 +118,7 @@ impl Default for TestAppBuilder {
     fn default() -> Self {
         Self {
             vim: false,
-            mode: AgentMode::Normal,
+            mode: AgentMode::normal(),
             init_lua: None,
         }
     }
@@ -171,10 +171,10 @@ impl TestAppBuilder {
             cli_api_key_env_override: false,
             mode: self.mode,
             mode_cycle: vec![
-                AgentMode::Normal,
-                AgentMode::Plan,
-                AgentMode::Apply,
-                AgentMode::Yolo,
+                AgentMode::normal(),
+                AgentMode::parse("plan").unwrap(),
+                AgentMode::parse("apply").unwrap(),
+                AgentMode::parse("yolo").unwrap(),
             ],
             reasoning_effort: ReasoningEffort::Off,
             reasoning_cycle: Vec::new(),

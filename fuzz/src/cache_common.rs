@@ -19,13 +19,12 @@ pub const TOOL_NAMES: &[&str] = &[
     "read", "write", "edit", "grep", "glob", "ls", "bash", "fetch", "spawn",
 ];
 
-/// Modes the synthetic `[smelt:mode]` note iterates through.
-pub const MODES: &[AgentMode] = &[
-    AgentMode::Normal,
-    AgentMode::Plan,
-    AgentMode::Apply,
-    AgentMode::Yolo,
-];
+/// Mode names the synthetic `[smelt:mode]` note iterates through.
+pub const MODE_NAMES: &[&str] = &["normal", "plan", "apply", "yolo"];
+
+pub fn mode_at(index: usize) -> AgentMode {
+    AgentMode::parse(MODE_NAMES[index % MODE_NAMES.len()]).unwrap()
+}
 
 /// One tool definition, hand-rolled rather than `derive(Arbitrary)` so
 /// the parameters schema stays valid JSON (random `Value`s would produce

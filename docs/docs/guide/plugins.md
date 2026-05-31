@@ -129,7 +129,7 @@ deferred wiring). The hook fires with `ctx = { kind = "launch" |
 | `scroll_pills` | yes | While the transcript is scrolled away from the tail, shows two click-only overlays — a "↓ jump to bottom" pill above the prompt and a one-row "jump to next message" pill at the top of the terminal |
 | `title` | yes | After each turn, generates a session title + slug if one isn't set |
 | `background_commands` | **opt-in** (experimental) | Adds `run_in_background` to `bash`, plus `read_process_output`, `stop_process`, and `/ps` |
-| `plan_mode` | **opt-in** | Wires up plan mode — registers `exit_plan_mode` and injects the plan-mode system prompt |
+| `plan_mode` | **opt-in** | Registers the optional `plan` mode after Normal, adds `exit_plan_mode`, and injects the plan-mode system prompt |
 
 To enable an opt-in plugin, `require` it from `~/.config/smelt/init.lua`:
 
@@ -140,8 +140,8 @@ require("smelt.plugins.plan_mode")
 
 `background_commands` is **experimental** — the background-process model is
 still evolving and the tool surface (`run_in_background`, `read_process_output`,
-`stop_process`) may change. Without `plan_mode` enabled, switching to plan mode
-has no effect on the agent.
+`stop_process`) may change. Without `require("smelt.plugins.plan_mode")`, Plan
+mode is not registered and does not appear in the mode cycle.
 
 ## Host vs UiHost
 

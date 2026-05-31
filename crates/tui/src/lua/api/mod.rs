@@ -31,7 +31,6 @@ mod work;
 
 use super::{LuaRuntime, LuaShared};
 use mlua::prelude::*;
-use smelt_core::lua::api::mode::LuaAgentMode;
 use smelt_core::lua::api::reasoning::LuaReasoningEffort;
 use smelt_core::lua::doc::{record_module_doc, Tier};
 use smelt_core::lua::module::LuaMod;
@@ -166,13 +165,15 @@ impl LuaRuntime {
         // `smelt.reasoning` with the live setter, so `smelt.mode("plan")`
         // and `smelt.reasoning("high")` actually take effect.
         LuaMod::extend(lua, smelt.get("mode")?, "smelt.mode", Tier::UiHost).callable(
-            |lua, (_tbl, v): (mlua::Table, Option<LuaAgentMode>)| -> LuaResult<mlua::Value> {
+            |lua, (_tbl, v): (mlua::Table, Option<String>)| -> LuaResult<mlua::Value> {
                 if let Some(mode) = v {
-                    crate::lua::with_app(|app| app.set_mode(mode.into(), true));
+                    let mode = protocol::AgentMode::parse(&mode)
+                        .ok_or_else(|| LuaError::RuntimeError(format!("invalid mode `{mode}`")))?;
+                    crate::lua::with_app(|app| app.set_mode(mode, true));
                     return Ok(mlua::Value::Nil);
                 }
-                let cur = crate::lua::try_with_app(|app| LuaAgentMode::from(app.core.config.mode))
-                    .unwrap_or(LuaAgentMode::Normal);
+                let cur = crate::lua::try_with_app(|app| app.core.config.mode.as_str().to_string())
+                    .unwrap_or_else(|| protocol::AgentMode::normal().to_string());
                 cur.into_lua(lua)
             },
         )?;
