@@ -17,9 +17,10 @@ pub use rules::{SubpatternParserFn, ToolDefaults};
 use bash::{has_output_redirection, is_cd_command};
 
 use protocol::AgentMode;
-#[cfg(test)]
-use rules::compile_patterns;
-use rules::{build_mode, check_ruleset, merge_mode, ModePerms, RawConfig, RawPerms, RuleSet};
+use rules::{
+    build_mode, check_ruleset, compile_patterns, merge_mode, ModePerms, RawConfig, RawPerms,
+    RuleSet,
+};
 use serde_json::Value;
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -134,8 +135,7 @@ impl Permissions {
     /// Create a clone with per-turn permission overrides layered on top.
     /// Override rules are prepended (checked first) to the existing rules
     /// for every mode.
-    #[cfg(test)]
-    pub(crate) fn with_overrides(&self, overrides: &protocol::PermissionOverrides) -> Self {
+    pub fn with_overrides(&self, overrides: &protocol::PermissionOverrides) -> Self {
         let mut cloned = self.clone();
         fn apply_to_mode(mode: &mut ModePerms, overrides: &protocol::PermissionOverrides) {
             if let Some(ref tools) = overrides.tools {

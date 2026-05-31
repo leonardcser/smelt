@@ -52,6 +52,7 @@ impl TuiApp {
             return TurnState {
                 turn_id: 0,
                 pending: Vec::new(),
+                permissions: self.core.permissions.clone(),
                 _perf: smelt_perf::perf::begin("agent:turn"),
             };
         };
@@ -100,6 +101,7 @@ impl TuiApp {
         TurnState {
             turn_id,
             pending: Vec::new(),
+            permissions: self.core.permissions.clone(),
             _perf: smelt_perf::perf::begin("agent:turn"),
         }
     }
@@ -233,6 +235,11 @@ impl TuiApp {
             }
         };
 
+        let permissions = permission_overrides
+            .as_ref()
+            .map(|overrides| std::sync::Arc::new(self.core.permissions.with_overrides(overrides)))
+            .unwrap_or_else(|| self.core.permissions.clone());
+
         self.sleep_inhibit.acquire();
         self.begin_turn();
         self.show_user_message(&display, vec![]);
@@ -241,6 +248,15 @@ impl TuiApp {
         }
         {
             self.working.begin(TurnPhase::Working);
+        };
+
+        let system_prompt = {
+            let _perf = smelt_perf::perf::begin("agent:rebuild_prompt");
+            self.rebuild_system_prompt()
+        };
+        let tools = {
+            let _perf = smelt_perf::perf::begin("agent:tool_defs");
+            self.lua.tool_defs(self.core.config.mode.clone())
         };
         self.apply_pending_mode_change_for_request();
 
@@ -262,13 +278,14 @@ impl TuiApp {
                 session_dir: smelt_core::session::dir_for(&self.core.session),
                 model_config_overrides,
                 permission_overrides,
-                system_prompt: None,
-                tools: vec![],
+                system_prompt: Some(system_prompt),
+                tools,
             })));
 
         TurnState {
             turn_id,
             pending: Vec::new(),
+            permissions,
             _perf: smelt_perf::perf::begin("agent:turn"),
         }
     }
@@ -642,11 +659,17 @@ impl TuiApp {
                     req.tool_name = pending.last().map(|p| p.name.clone()).unwrap_or_default();
                 }
 
+                let permissions = self
+                    .agent
+                    .as_ref()
+                    .map(|turn| &turn.permissions)
+                    .unwrap_or(&self.core.permissions);
+
                 let summary_plain = req.summary.as_plain_text();
                 let auto_approved = {
-                    let rt = self.core.permissions.approvals.read().unwrap();
+                    let rt = permissions.approvals.read().unwrap();
                     rt.is_auto_approved(
-                        &self.core.permissions,
+                        permissions,
                         self.core.config.mode.clone(),
                         &req.tool_name,
                         &req.args,
@@ -658,7 +681,7 @@ impl TuiApp {
                     return true;
                 }
 
-                if self.core.permissions.decide(
+                if permissions.decide(
                     self.core.config.mode.clone(),
                     &req.tool_name,
                     &req.args,
@@ -669,10 +692,7 @@ impl TuiApp {
                     return true;
                 }
 
-                let outside_paths = self
-                    .core
-                    .permissions
-                    .outside_workspace_paths(&req.tool_name, &req.args);
+                let outside_paths = permissions.outside_workspace_paths(&req.tool_name, &req.args);
 
                 if should_queue {
                     self.set_active_status(&req.call_id, ToolStatus::Confirm);
@@ -681,7 +701,7 @@ impl TuiApp {
                     return true;
                 }
 
-                let downgraded = self.core.permissions.was_downgraded(
+                let downgraded = permissions.was_downgraded(
                     self.core.config.mode.clone(),
                     &req.tool_name,
                     &req.args,
@@ -700,7 +720,7 @@ impl TuiApp {
                 };
 
                 if !req.approval_patterns.is_empty() {
-                    let rt = self.core.permissions.approvals.read().unwrap();
+                    let rt = permissions.approvals.read().unwrap();
                     req.approval_patterns
                         .retain(|p| !rt.has_pattern(&req.tool_name, p));
                 }

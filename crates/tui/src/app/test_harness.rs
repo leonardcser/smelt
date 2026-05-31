@@ -367,6 +367,7 @@ impl TestApp {
         self.app.agent = Some(crate::app::TurnState {
             turn_id,
             pending: Vec::new(),
+            permissions: self.app.core.permissions.clone(),
             _perf: smelt_perf::perf::begin("test_harness:turn"),
         });
         // Production `dispatch_turn` flips `working` into `Working` phase

@@ -244,6 +244,7 @@ pub enum AppFocus {
 pub(crate) struct TurnState {
     pub(crate) turn_id: u64,
     pub(crate) pending: Vec<PendingTool>,
+    pub(crate) permissions: std::sync::Arc<smelt_core::permissions::Permissions>,
     pub(crate) _perf: Option<smelt_perf::perf::Guard>,
 }
 
