@@ -2,7 +2,7 @@
 //! Lua coroutine via `smelt.task.external` and resolves it from a tokio
 //! task, so the runtime never blocks on a request. `smelt.http.get` and
 //! `smelt.http.post` are defined in `_bootstrap.lua` over the
-//! `__get_async_start` / `__post_async_start` primitives below; both
+//! `__start_get` / `__start_post` primitives below; both
 //! require a yieldable context.
 
 use mlua::prelude::*;
@@ -26,9 +26,8 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
 
     {
         let shared = Arc::clone(shared);
-        http.fn_(
-            "__get_async_start",
-            "Begin an async HTTP GET. Resolves `task_id` with `{ status, final_url, body, headers }` on success, `{ __cancelled = true }` if the calling coroutine is cancelled, or `{ err }` on spawn failure. Used internally by `smelt.http.get`.",
+        http.private_fn(
+            "__start_get",
             &["task_id", "url", "opts"],
             move |_, (task_id, url, opts): (u64, String, Option<mlua::Table>)| -> LuaResult<()> {
                 let parsed = parse_options(opts.as_ref())?;
@@ -39,9 +38,8 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
     }
     {
         let shared = Arc::clone(shared);
-        http.fn_(
-            "__post_async_start",
-            "Begin an async HTTP POST with `body` bytes. Resolves `task_id` with `{ status, final_url, body, headers }` on success, `{ __cancelled = true }` if the calling coroutine is cancelled, or `{ err }` on spawn failure. Used internally by `smelt.http.post`.",
+        http.private_fn(
+            "__start_post",
             &["task_id", "url", "body", "opts"],
             move |_,
                   (task_id, url, body, opts): (
@@ -53,7 +51,12 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
                   -> LuaResult<()> {
                 let parsed = parse_options(opts.as_ref())?;
                 let body_bytes = body.map(|s| s.as_bytes().to_vec()).unwrap_or_default();
-                spawn_request(&shared, task_id, RequestKind::Post { url, body_bytes }, parsed);
+                spawn_request(
+                    &shared,
+                    task_id,
+                    RequestKind::Post { url, body_bytes },
+                    parsed,
+                );
                 Ok(())
             },
         )?;

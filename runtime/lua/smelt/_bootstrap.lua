@@ -263,13 +263,19 @@ if smelt.picker and smelt.prompt and smelt.prompt.open_picker then
   end
 end
 
+local function external_or_err(start)
+  local result = smelt.task.external(start)
+  if result.err ~= nil then return nil, result.err end
+  return result, nil
+end
+
 -- Read `path` off the main thread. Must be called from inside
 -- `smelt.spawn(fn)` or a `tool.execute` (anything that runs on the Lua
 -- task runtime). Returns `(content, nil)` on success or `(nil, err)` on
 -- failure — same convention as `smelt.fs.read`.
 ---@type fun(path: string): string?, string?
 function smelt.fs.read_async(path)
-  local result = smelt.task.external(function(id) smelt.fs.__read_async_start(id, path) end)
+  local result = smelt.task.external(function(id) smelt.fs.__start_read(id, path) end)
   if result.content ~= nil then return result.content, nil end
   return nil, result.err
 end
@@ -279,7 +285,7 @@ end
 -- `(false, err)` on failure — mirrors `smelt.fs.write`.
 ---@type fun(path: string, contents: string): boolean, string?
 function smelt.fs.write_async(path, contents)
-  local result = smelt.task.external(function(id) smelt.fs.__write_async_start(id, path, contents) end)
+  local result = smelt.task.external(function(id) smelt.fs.__start_write(id, path, contents) end)
   if result.ok then return true, nil end
   return false, result.err
 end
@@ -296,9 +302,7 @@ end
 -- yielding API.
 ---@type fun(cmd: string, args: string[]?, opts: table?): { stdout: string, stderr: string, exit_code: integer, timed_out: boolean }?, string?
 function smelt.process.run(cmd, args, opts)
-  local result = smelt.task.external(function(id) smelt.process.__run_async_start(id, cmd, args, opts) end)
-  if result.err ~= nil then return nil, result.err end
-  return result, nil
+  return external_or_err(function(id) smelt.process.__start_run(id, cmd, args, opts) end)
 end
 
 -- Perform an HTTP GET against `url`. Yields the calling coroutine until the
@@ -309,18 +313,14 @@ end
 -- request and raises `cancelled` from this call.
 ---@type fun(url: string, opts: table?): { status: integer, final_url: string, body: string, headers: table }?, string?
 function smelt.http.get(url, opts)
-  local result = smelt.task.external(function(id) smelt.http.__get_async_start(id, url, opts) end)
-  if result.err ~= nil then return nil, result.err end
-  return result, nil
+  return external_or_err(function(id) smelt.http.__start_get(id, url, opts) end)
 end
 
 -- Perform an HTTP POST against `url` with `body` bytes. Yields the calling
 -- coroutine until the response lands. Same return shape as `smelt.http.get`.
 ---@type fun(url: string, body: string?, opts: table?): { status: integer, final_url: string, body: string, headers: table }?, string?
 function smelt.http.post(url, body, opts)
-  local result = smelt.task.external(function(id) smelt.http.__post_async_start(id, url, body, opts) end)
-  if result.err ~= nil then return nil, result.err end
-  return result, nil
+  return external_or_err(function(id) smelt.http.__start_post(id, url, body, opts) end)
 end
 
 --- Run an authenticated request against a provider-owned endpoint using
@@ -329,9 +329,7 @@ end
 --- URL scheme; `opts.method` defaults to `GET`.
 ---@type fun(provider: string, opts: { path: string, method: string?, body: string? }): { status: integer, body: string }?, string?
 function smelt.auth.request(provider, opts)
-  local result = smelt.task.external(function(id) smelt.auth.__request_async_start(id, provider, opts or {}) end)
-  if result.err ~= nil then return nil, result.err end
-  return result, nil
+  return external_or_err(function(id) smelt.auth.__start_request(id, provider, opts or {}) end)
 end
 
 -- Run ripgrep with `pattern` over `path` off the main thread. Yields the
@@ -346,9 +344,7 @@ end
 -- is not an error — inspect `exit_code` on the result.
 ---@type fun(pattern: string, path: string, opts: table?): { stdout: string, stderr: string, exit_code: integer, timed_out: boolean }?, string?
 function smelt.grep.run(pattern, path, opts)
-  local result = smelt.task.external(function(id) smelt.grep.__run_async_start(id, pattern, path, opts) end)
-  if result.err ~= nil then return nil, result.err end
-  return result, nil
+  return external_or_err(function(id) smelt.grep.__start_run(id, pattern, path, opts) end)
 end
 
 smelt.tick = smelt.tick or {}

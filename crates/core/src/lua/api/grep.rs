@@ -18,11 +18,12 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
     )?;
     {
         let s = Arc::clone(shared);
-        m.fn_(
-            "__run_async_start",
-            "Begin an async ripgrep run for `pattern` over `path`. Resolves `task_id` with `{ stdout, stderr, exit_code, timed_out }` on completion, `{ __cancelled = true }` if the calling coroutine is cancelled (child is killed), or `{ err }` on spawn failure. `opts` mirrors `smelt.grep.run`. Used internally by `smelt.grep.run`.",
+        m.private_fn(
+            "__start_run",
             &["task_id", "pattern", "path", "opts"],
-            move |_, (task_id, pattern, path, opts): (u64, String, String, Option<mlua::Table>)| -> LuaResult<()> {
+            move |_,
+                  (task_id, pattern, path, opts): (u64, String, String, Option<mlua::Table>)|
+                  -> LuaResult<()> {
                 let parsed = parse_options(opts.as_ref())?;
                 let cancel = crate::lua::current_task_cancel().unwrap_or_default();
                 let sink = s.resume_sink();

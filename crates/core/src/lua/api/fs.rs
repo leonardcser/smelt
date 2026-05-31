@@ -276,9 +276,8 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
 
     {
         let s = shared.clone();
-        fs.fn_(
-            "__read_async_start",
-            "Begin an off-thread read of `path` and resolve `task_id` with `{ content }` on success or `{ err }` on failure. Used internally by `smelt.fs.read_async`.",
+        fs.private_fn(
+            "__start_read",
             &["task_id", "path"],
             move |_, (task_id, path): (u64, String)| -> LuaResult<()> {
                 s.resume_sink().spawn_blocking_resolve(task_id, move || {
@@ -294,9 +293,8 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
 
     {
         let s = shared.clone();
-        fs.fn_(
-            "__write_async_start",
-            "Begin an off-thread write of `contents` to `path` and resolve `task_id` with `{ ok = true }` on success or `{ err }` on failure. Used internally by `smelt.fs.write_async`.",
+        fs.private_fn(
+            "__start_write",
             &["task_id", "path", "contents"],
             move |_, (task_id, path, contents): (u64, String, mlua::String)| -> LuaResult<()> {
                 let bytes = contents.as_bytes().to_vec();
@@ -313,11 +311,12 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
 
     {
         let s = shared.clone();
-        fs.fn_(
+        fs.private_fn(
             "__watch_register",
-            "Start a filesystem watcher on `path` and return `(watcher_id, nil)` on success or `(nil, err_string)` on failure. `opts.recursive` (default `true`) controls subdirectory traversal. Used internally by `smelt.fs.watch`; prefer that.",
             &["path", "opts"],
-            move |_, (path, opts): (String, Option<mlua::Table>)| -> LuaResult<(Option<u64>, Option<String>)> {
+            move |_,
+                  (path, opts): (String, Option<mlua::Table>)|
+                  -> LuaResult<(Option<u64>, Option<String>)> {
                 let recursive = opts
                     .as_ref()
                     .and_then(|t| t.get::<Option<bool>>("recursive").ok().flatten())
@@ -341,15 +340,15 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
                         // where __watch_arm could be re-entered and steal the
                         // pending list out from under us — keep them atomic.
                         let resume = {
-                            let Ok(mut st) = state_clone.lock() else { return };
+                            let Ok(mut st) = state_clone.lock() else {
+                                return;
+                            };
                             if st.closed {
                                 return;
                             }
                             st.pending.push(payload);
                             match st.armed.take() {
-                                Some(task_id) => {
-                                    Some((task_id, std::mem::take(&mut st.pending)))
-                                }
+                                Some(task_id) => Some((task_id, std::mem::take(&mut st.pending))),
                                 None => None,
                             }
                         };
@@ -380,9 +379,8 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
 
     {
         let s = shared.clone();
-        fs.fn_(
+        fs.private_fn(
             "__watch_arm",
-            "Register `task_id` to receive the next batch of events from watcher `watcher_id`. If events are already queued they resolve `task_id` synchronously; otherwise the next event resolves it. Resolves with `nil` if the watcher has been stopped. Used internally by `smelt.fs.watch`.",
             &["watcher_id", "task_id"],
             move |_, (watcher_id, task_id): (u64, u64)| -> LuaResult<()> {
                 let sink = s.resume_sink();
@@ -420,23 +418,23 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
 
     {
         let s = shared.clone();
-        fs.fn_(
+        fs.private_fn(
             "__watch_stop",
-            "Stop the watcher with id `watcher_id`. Any task waiting through `__watch_arm` is resolved with `nil`. Used internally by `smelt.fs.watch`.",
             &["watcher_id"],
             move |_, watcher_id: u64| -> LuaResult<()> {
-                let entry = s.watchers.lock().ok().and_then(|mut m| m.remove(&watcher_id));
+                let entry = s
+                    .watchers
+                    .lock()
+                    .ok()
+                    .and_then(|mut m| m.remove(&watcher_id));
                 if let Some(entry) = entry {
-                    let armed = entry
-                        .state
-                        .lock()
-                        .ok()
-                        .and_then(|mut st| {
-                            st.closed = true;
-                            st.armed.take()
-                        });
+                    let armed = entry.state.lock().ok().and_then(|mut st| {
+                        st.closed = true;
+                        st.armed.take()
+                    });
                     if let Some(task_id) = armed {
-                        s.resume_sink().resolve_json(task_id, serde_json::Value::Null);
+                        s.resume_sink()
+                            .resolve_json(task_id, serde_json::Value::Null);
                     }
                 }
                 Ok(())

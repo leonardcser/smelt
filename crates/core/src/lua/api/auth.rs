@@ -17,9 +17,8 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
 
     {
         let shared = Arc::clone(shared);
-        auth.fn_(
-            "__request_async_start",
-            "Begin an async authenticated provider request. Resolves `task_id` with `{ status, body }` or `{ err }`. Used internally by `smelt.auth.request`.",
+        auth.private_fn(
+            "__start_request",
             &["task_id", "provider", "opts"],
             move |_, (task_id, provider, opts): (u64, String, mlua::Table)| -> LuaResult<()> {
                 let req = parse_request(provider, opts)?;

@@ -114,6 +114,33 @@ impl<'a> LuaMod<'a> {
         )
     }
 
+    /// Register a private Lua function at `<self.path>.<name>` without
+    /// adding it to the generated API docs or LuaCATS stubs. Use this for
+    /// Rust-backed implementation hooks consumed by bundled Lua wrappers.
+    pub fn private_fn<F, A, R>(
+        &self,
+        name: &'static str,
+        params: &[&'static str],
+        f: F,
+    ) -> mlua::Result<()>
+    where
+        F: Fn(&Lua, A) -> mlua::Result<R> + MaybeSend + 'static,
+        A: FromLuaMulti + LuaTypeTuple,
+        R: IntoLuaMulti,
+    {
+        assert_eq!(
+            params.len(),
+            A::ARITY,
+            "param_names length ({}) does not match arity ({}) for {}.{}",
+            params.len(),
+            A::ARITY,
+            self.path,
+            name
+        );
+        self.tbl.set(name, self.lua.create_function(f)?)?;
+        Ok(())
+    }
+
     /// Wire a `__call` metamethod on the module's table. Replaces any
     /// existing `__call` so a higher tier can override a lower tier's
     /// stub (e.g. TUI installing the live setter over the host-tier

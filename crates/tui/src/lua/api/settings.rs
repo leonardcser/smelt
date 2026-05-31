@@ -72,9 +72,8 @@ pub(super) fn register(
     let mt_tbl = lua.create_table()?;
     let mt = LuaMod::extend(lua, mt_tbl.clone(), "smelt.settings", Tier::UiHost);
 
-    mt.fn_(
+    mt.private_fn(
         "__index",
-        "Read a preference by `key` from the resolved settings. Raises if the app is not yet initialized or if `key` is not in the schema.",
         &["_", "key"],
         |lua, (_, key): (mlua::Value, String)| -> LuaResult<mlua::Value> {
             let Some(decl) = setting_decl(&key) else {
@@ -92,9 +91,8 @@ pub(super) fn register(
 
     {
         let shared = Arc::clone(shared);
-        mt.fn_(
+        mt.private_fn(
             "__newindex",
-            "Write a preference. Persists to the running config when the app is initialized; otherwise stashes the write in `LuaShared.settings_overrides` for pickup at init time. Raises on unknown keys or type mismatches.",
             &["_", "key", "value"],
             move |_, (_, key, value): (mlua::Value, String, mlua::Value)| -> LuaResult<()> {
                 let parsed = lua_to_setting(&key, value)?;
@@ -119,9 +117,8 @@ pub(super) fn register(
         )?;
     }
 
-    mt.fn_(
+    mt.private_fn(
         "__pairs",
-        "Iterate every known settings key and its current resolved value as `(key, value)` pairs. Value type matches the key's declared kind.",
         &["_"],
         |lua, _: mlua::Value| -> LuaResult<(mlua::Function, mlua::Value, mlua::Value)> {
             let next = lua.create_function(|lua, (_, prev): (mlua::Value, mlua::Value)| {
@@ -140,8 +137,7 @@ pub(super) fn register(
                     return Ok((mlua::Value::Nil, mlua::Value::Nil));
                 }
                 let decl = &SETTINGS[idx];
-                let value =
-                    crate::lua::try_with_app(|app| (decl.read)(&app.core.config.settings));
+                let value = crate::lua::try_with_app(|app| (decl.read)(&app.core.config.settings));
                 let v = match value {
                     Some(ref val) => setting_to_lua(lua, val)?,
                     None => mlua::Value::Nil,

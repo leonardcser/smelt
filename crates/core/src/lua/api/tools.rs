@@ -324,17 +324,11 @@ Hooks fire in registration order; an earlier hook's replacement is visible to la
             Ok(String::new())
         },
     )?;
-    m.fn_(
+    m.private_fn(
         "__send_call",
-        "Internal: forward a tool call invocation to the engine. Used by Lua wrappers to delegate to a core tool.",
         &["request_id", "parent_call_id", "tool_name", "args"],
         |lua,
-         (request_id, parent_call_id, tool_name, args): (
-            u64,
-            String,
-            String,
-            mlua::Table,
-        )|
+         (request_id, parent_call_id, tool_name, args): (u64, String, String, mlua::Table)|
          -> LuaResult<()> {
             let arg_map = lua_table_to_args(lua, &args);
             crate::host::with_core(|core| {

@@ -118,11 +118,17 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
     }
     {
         let s = Arc::clone(shared);
-        m.fn_(
-            "__run_async_start",
-            "Begin an async run of `cmd` with `args`. Resolves `task_id` with `{ stdout, stderr, exit_code, timed_out }` on completion, `{ __cancelled = true }` if the calling coroutine is cancelled (child is killed), or `{ err }` on spawn failure. `opts` accepts `cwd`, `env`, `timeout_secs`, and `stdin`. Used internally by `smelt.process.run`.",
+        m.private_fn(
+            "__start_run",
             &["task_id", "cmd", "args", "opts"],
-            move |_, (task_id, cmd, args, opts): (u64, String, Option<Vec<String>>, Option<mlua::Table>)| -> LuaResult<()> {
+            move |_,
+                  (task_id, cmd, args, opts): (
+                u64,
+                String,
+                Option<Vec<String>>,
+                Option<mlua::Table>,
+            )|
+                  -> LuaResult<()> {
                 let parsed = parse_run_options(opts.as_ref())?;
                 let args = args.unwrap_or_default();
                 let cancel = crate::lua::current_task_cancel().unwrap_or_default();

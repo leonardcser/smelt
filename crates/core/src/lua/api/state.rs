@@ -19,9 +19,8 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
         "Per-plugin state. `smelt.state(name)` returns an ephemeral table that survives `/reload` only; `smelt.state.persistent(name)` returns a JSON-backed wrapper that survives restarts too.",
         Tier::Host,
     )?;
-    m.fn_(
+    m.private_fn(
         "__load",
-        "Read the JSON-backed state file for `name` into a Lua table. Returns an empty table if the file doesn't exist or fails to parse. Used internally by `smelt.state.persistent`.",
         &["name"],
         |lua, name: String| -> LuaResult<mlua::Table> {
             let path = state_path(&name);
@@ -36,9 +35,8 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
             }
         },
     )?;
-    m.fn_(
+    m.private_fn(
         "__save",
-        "Atomically write the Lua value `value` to the JSON-backed state file for `name`. Used internally by `smelt.state.persistent`.",
         &["name", "value"],
         |lua, (name, value): (String, mlua::Value)| -> LuaResult<()> {
             let json = match &value {
