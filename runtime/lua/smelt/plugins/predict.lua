@@ -11,6 +11,10 @@ local prompt = smelt.prompt.win()
 
 local SYSTEM = "Task: predict what the user will type next in the conversation below. Keep it short — one sentence max. If you cannot predict, reply with an empty string."
 
+local function has_queued_messages()
+  return #smelt.prompt.queued() > 0
+end
+
 smelt.cell("history"):subscribe(function(payload)
   if payload.kind == "cleared" or payload.kind == "rewound" then
     prompt:clear_placeholder()
@@ -27,6 +31,10 @@ smelt.cell("turn_end"):subscribe(function(payload)
   end
 
   prompt:clear_placeholder()
+
+  if has_queued_messages() then
+    return
+  end
 
   local history = smelt.session.messages()
 
@@ -85,7 +93,7 @@ smelt.cell("turn_end"):subscribe(function(payload)
       -- Keep only the first line; `Win:placeholder` rejects newlines and
       -- the prompt only renders a single line of ghost text anyway.
       local text = (content:match("[^\n]+") or ""):match("^%s*(.-)%s*$")
-      if text ~= "" then
+      if text ~= "" and not has_queued_messages() then
         prompt:placeholder(text, { accept_keys = { "tab" } })
       end
     end,
