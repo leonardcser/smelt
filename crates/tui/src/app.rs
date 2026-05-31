@@ -1181,6 +1181,24 @@ impl TuiApp {
         };
     }
 
+    fn dispatch_ui_window_events(&mut self, include_tick: bool) {
+        {
+            let lua = &self.lua;
+            let mut lua_invoke =
+                |handle: crate::smelt_term::LuaHandle,
+                 win: crate::smelt_term::WinId,
+                 payload: &crate::smelt_term::Payload| {
+                    lua.queue_invocation(handle, win, payload);
+                };
+            if include_tick {
+                self.ui.dispatch_tick(&mut lua_invoke);
+            }
+            self.ui.dispatch_scroll_events(&mut lua_invoke);
+            self.ui.dispatch_resize_events(&mut lua_invoke);
+        }
+        self.flush_lua_callbacks();
+    }
+
     pub async fn run(&mut self, http_client: engine::HttpClient, initial_message: Option<String>) {
         let (ctx_tx, mut ctx_rx) = tokio::sync::mpsc::unbounded_channel::<ContextWindowUpdate>();
         self.http_client = Some(http_client);
@@ -1323,19 +1341,7 @@ impl TuiApp {
                     .set_dyn("block_done", std::rc::Rc::new(smelt_core::cells::EventStub));
             }
             self.pump_lua();
-            {
-                let lua = &self.lua;
-                let mut lua_invoke =
-                    |handle: crate::smelt_term::LuaHandle,
-                     win: crate::smelt_term::WinId,
-                     payload: &crate::smelt_term::Payload| {
-                        lua.queue_invocation(handle, win, payload);
-                    };
-                self.ui.dispatch_tick(&mut lua_invoke);
-                self.ui.dispatch_scroll_events(&mut lua_invoke);
-                self.ui.dispatch_resize_events(&mut lua_invoke);
-            }
-            self.flush_lua_callbacks();
+            self.dispatch_ui_window_events(true);
 
             while let Ok(update) = ctx_rx.try_recv() {
                 self.apply_context_window_update(update);
@@ -1497,6 +1503,7 @@ impl TuiApp {
                         let _ = self.ui.scroll_at(scroll_row, scroll_col, scroll_delta);
                     }
 
+                    self.dispatch_ui_window_events(false);
                     self.render_normal(self.agent.is_some());
                 }
 
@@ -1564,7 +1571,9 @@ impl TuiApp {
                         .unwrap_or(MIN_FRAME_INTERVAL);
                     want.saturating_sub(since)
                 }), if has_animation => {
-                    self.ui.tick_drag_autoscroll();
+                    if self.ui.tick_drag_autoscroll() {
+                        self.dispatch_ui_window_events(false);
+                    }
                     self.render_normal(self.agent.is_some());
                 }
 

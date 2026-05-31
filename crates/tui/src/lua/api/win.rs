@@ -390,7 +390,7 @@ impl mlua::UserData for LuaWin {
         );
 
         // ── scroll: get / set / pin-to-tail ────────────────────────
-        // `win:scroll()` returns `{ top, follow, total, viewport }`.
+        // `win:scroll()` returns `{ top, follow, total, viewport, max, overflow, at_top, at_bottom }`.
         // `win:scroll(integer)` sets `scroll_top` and clears `follow_tail`.
         // `win:scroll("tail")` re-pins (`follow_tail = true`).
         methods.add_function(
@@ -403,16 +403,26 @@ impl mlua::UserData for LuaWin {
                             let win = app.ui.win(this.id)?;
                             let total = app.ui.buf(win.buf).map(|b| b.lines().len()).unwrap_or(0);
                             let viewport = win.viewport.map(|v| v.rect.height).unwrap_or(0);
-                            Some((win.scroll_top, win.follow_tail, total as u64, viewport))
+                            let max = total
+                                .saturating_sub(viewport as usize)
+                                .min(u16::MAX as usize)
+                                as u16;
+                            let top = win.scroll_top.min(max);
+                            let overflow = total > viewport as usize;
+                            Some((top, win.follow_tail, total as u64, viewport, max, overflow))
                         })
                         .flatten();
                         match info {
-                            Some((top, follow, total, viewport)) => {
+                            Some((top, follow, total, viewport, max, overflow)) => {
                                 let t = lua.create_table()?;
                                 t.set("top", top)?;
                                 t.set("follow", follow)?;
                                 t.set("total", total)?;
                                 t.set("viewport", viewport)?;
+                                t.set("max", max)?;
+                                t.set("overflow", overflow)?;
+                                t.set("at_top", top == 0)?;
+                                t.set("at_bottom", top >= max)?;
                                 Ok(mlua::Value::Table(t))
                             }
                             None => Ok(mlua::Value::Nil),
@@ -620,7 +630,7 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
             "clear_placeholder" => fn() -> (), "Clear the window's placeholder text and opts. Idempotent.",
             "placeholder_text" => fn() -> Option<String>, "Return the current placeholder text, or `nil` if none is set.",
             "link_scroll" => fn(others: mlua::Variadic<LuaWin>) -> LuaWin, "Link `scroll_top` between this window and the variadic `others`. Closing any member auto-removes it. Returns the handle for chaining.",
-            "scroll" => fn(arg: mlua::Value) -> mlua::Value, "Read or write the window's scroll state. No arg returns `{ top, follow, total, viewport }` (`total` is the buffer's line count; `viewport` is the leaf's height). An integer sets `scroll_top` and clears the pin-to-tail flag. The literal string `\"tail\"` re-pins the viewport to the buffer's tail.",
+            "scroll" => fn(arg: mlua::Value) -> mlua::Value, "Read or write the window's scroll state. No arg returns `{ top, follow, total, viewport, max, overflow, at_top, at_bottom }` (`total` is the buffer's line count; `viewport` is the leaf's height; `max` is the largest valid `top`). An integer sets `scroll_top` and clears the pin-to-tail flag. The literal string `\"tail\"` re-pins the viewport to the buffer's tail.",
         },
     });
 
