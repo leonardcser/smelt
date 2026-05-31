@@ -180,17 +180,23 @@ async fn main() {
         lua_runtime.set_init_lua_path(std::path::PathBuf::from(path));
     }
 
-    // First-run wizard: if no init.lua exists and the user didn't bypass it
-    // with --api-base, walk them through writing a starter config. The
-    // wizard writes to init.lua; load_user_config picks it up below.
+    // First-run wizard: only prompt when startup has no provider source at all:
+    // no provider CLI overrides, no config file, and no stored OAuth login.
+    // The wizard writes to init.lua; load_user_config picks it up below.
     let init_lua = args
         .config
         .as_deref()
         .map(std::path::PathBuf::from)
         .or_else(smelt_core::lua::init_lua_path);
+    let has_provider_cli_flags = args.api_base.is_some()
+        || args.api_key_env.is_some()
+        || args.r#type.is_some()
+        || args.model.is_some();
     if !args.headless
-        && args.api_base.is_none()
+        && !has_provider_cli_flags
+        && args.config.is_none()
         && init_lua.as_deref().is_some_and(|p| !p.exists())
+        && !setup::has_authed_provider()
         && !setup::run_initial_setup(init_lua.as_deref().unwrap()).await
     {
         std::process::exit(1);

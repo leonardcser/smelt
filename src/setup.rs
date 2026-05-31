@@ -250,6 +250,13 @@ fn run_logout(kind: AuthProvider, label: &str) {
     println!("\nLogged out of {label}.");
 }
 
+pub fn has_authed_provider() -> bool {
+    PROVIDERS
+        .iter()
+        .filter_map(|provider| provider.oauth)
+        .any(engine::auth::is_logged_in)
+}
+
 /// First-time setup wizard. Returns true if config was written.
 pub async fn run_initial_setup(config_path: &Path) -> bool {
     let _cursor_guard = CursorGuard;
