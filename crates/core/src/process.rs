@@ -12,23 +12,6 @@ use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
-/// Poll `child.try_wait()` in a tight loop with a small sleep.
-///
-/// Workaround for tokio-rs/tokio#6770: on macOS `child.wait()` can hang
-/// indefinitely when multiple runtimes in the same process register
-/// SIGCHLD handlers concurrently. `try_wait()` uses `waitpid(WNOHANG)`
-/// and never blocks, so it is immune to the deadlock.
-pub(crate) async fn wait_child(
-    child: &mut tokio::process::Child,
-) -> io::Result<std::process::ExitStatus> {
-    loop {
-        if let Some(status) = child.try_wait()? {
-            return Ok(status);
-        }
-        tokio::time::sleep(Duration::from_millis(10)).await;
-    }
-}
-
 /// Defaults: 30s timeout, inherit env, no stdin, capture stdout+stderr.
 #[derive(Debug, Clone, Default)]
 pub(crate) struct Options {
@@ -109,14 +92,14 @@ pub(crate) async fn run_async(
         biased;
         _ = cancel.cancelled() => {
             kill_process_group(&child);
-            let _ = wait_child(&mut child).await;
+            let _ = child.wait().await;
             let _ = stdout_task.await;
             let _ = stderr_task.await;
             Ok(RunOutcome::Cancelled)
         }
         _ = &mut deadline => {
             kill_process_group(&child);
-            let _ = wait_child(&mut child).await;
+            let _ = child.wait().await;
             let stdout_buf = stdout_task.await.unwrap_or_default();
             let stderr_buf = stderr_task.await.unwrap_or_default();
             let stderr_msg = if stderr_buf.is_empty() {
@@ -131,7 +114,7 @@ pub(crate) async fn run_async(
                 timed_out: true,
             }))
         }
-        status = wait_child(&mut child) => {
+        status = child.wait() => {
             let stdout_buf = stdout_task.await.unwrap_or_default();
             let stderr_buf = stderr_task.await.unwrap_or_default();
             Ok(RunOutcome::Done(Output {
@@ -275,7 +258,7 @@ pub async fn run_streaming_with_shell(
         }
     }
 
-    let status = wait_child(&mut child).await;
+    let status = child.wait().await;
     let is_error = status.map(|s| !s.success()).unwrap_or(true);
     StreamOutput {
         content: output,
@@ -430,7 +413,7 @@ impl ProcessRegistry {
                 }
             }
 
-            let status = wait_child(&mut child).await;
+            let status = child.wait().await;
             let code = status.ok().and_then(|s| s.code());
             {
                 let mut map = registry.lock().unwrap();

@@ -69,19 +69,42 @@ pub(crate) struct GlobMatch {
     pub path: String,
 }
 
-/// Walk `search_dir` (or `.`) honouring `.gitignore`, matching `pattern` against
-/// paths relative to `search_dir`. Stops after `max` matches; returns unsorted.
+/// Walk the narrowest literal subtree implied by `pattern`, honouring
+/// `.gitignore`, and match against paths relative to `search_dir`. Stops after
+/// `max` matches; returns unsorted.
 pub(crate) fn glob(pattern: &str, search_dir: &str, max: usize) -> Result<Vec<GlobMatch>, String> {
     let matcher = match globset::Glob::new(pattern) {
         Ok(g) => g.compile_matcher(),
         Err(e) => return Err(format!("invalid glob pattern: {e}")),
     };
     let dir = if search_dir.is_empty() {
-        "."
+        Path::new(".")
     } else {
-        search_dir
+        Path::new(search_dir)
     };
-    let walker = ignore::WalkBuilder::new(dir)
+
+    if !has_glob_meta(pattern) {
+        let path = dir.join(pattern);
+        if !path.is_file() || !matcher.is_match(Path::new(pattern)) {
+            return Ok(Vec::new());
+        }
+        let meta = path.metadata().map_err(|e| e.to_string())?;
+        let mtime = meta.modified().map_err(|e| e.to_string())?;
+        return Ok(vec![GlobMatch {
+            mtime,
+            path: path.display().to_string(),
+        }]);
+    }
+
+    let walk_root = match literal_prefix_before_meta(pattern) {
+        Some(prefix) => dir.join(prefix),
+        None => dir.to_path_buf(),
+    };
+    if !walk_root.exists() {
+        return Ok(Vec::new());
+    }
+
+    let walker = ignore::WalkBuilder::new(&walk_root)
         .hidden(false)
         .git_ignore(true)
         .build();
@@ -112,10 +135,77 @@ pub(crate) fn glob(pattern: &str, search_dir: &str, max: usize) -> Result<Vec<Gl
     Ok(out)
 }
 
+fn has_glob_meta(pattern: &str) -> bool {
+    pattern
+        .chars()
+        .any(|c| matches!(c, '*' | '?' | '[' | ']' | '{' | '}'))
+}
+
+fn literal_prefix_before_meta(pattern: &str) -> Option<PathBuf> {
+    let mut prefix = PathBuf::new();
+    for segment in pattern.split('/') {
+        if segment.is_empty() {
+            continue;
+        }
+        if has_glob_meta(segment) {
+            break;
+        }
+        prefix.push(segment);
+    }
+    (!prefix.as_os_str().is_empty()).then_some(prefix)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use tempfile::TempDir;
+
+    #[test]
+    fn literal_prefix_uses_existing_subtree() {
+        assert_eq!(
+            literal_prefix_before_meta("crates/smelt_term/**/*.rs"),
+            Some(PathBuf::from("crates/smelt_term"))
+        );
+        assert_eq!(
+            literal_prefix_before_meta("crates/term/src/*.rs"),
+            Some(PathBuf::from("crates/term/src"))
+        );
+        assert_eq!(literal_prefix_before_meta("**/*.rs"), None);
+        assert_eq!(literal_prefix_before_meta("*.rs"), None);
+    }
+
+    #[test]
+    fn glob_returns_empty_for_missing_literal_prefix() {
+        let tmp = TempDir::new().unwrap();
+        mkdir_all(tmp.path().join("present/src")).unwrap();
+        write(tmp.path().join("present/src/lib.rs"), "fn main() {}").unwrap();
+
+        let matches = glob("missing/**/*.rs", tmp.path().to_str().unwrap(), 200).unwrap();
+        assert!(matches.is_empty());
+    }
+
+    #[test]
+    fn glob_matches_inside_literal_prefix() {
+        let tmp = TempDir::new().unwrap();
+        mkdir_all(tmp.path().join("crates/term/src")).unwrap();
+        write(tmp.path().join("crates/term/src/lib.rs"), "pub mod x;").unwrap();
+        write(tmp.path().join("crates/term/src/lib.txt"), "nope").unwrap();
+
+        let matches = glob("crates/term/**/*.rs", tmp.path().to_str().unwrap(), 200).unwrap();
+        assert_eq!(matches.len(), 1);
+        assert!(matches[0].path.ends_with("crates/term/src/lib.rs"));
+    }
+
+    #[test]
+    fn glob_matches_exact_literal_file() {
+        let tmp = TempDir::new().unwrap();
+        mkdir_all(tmp.path().join("src")).unwrap();
+        write(tmp.path().join("src/lib.rs"), "pub mod x;").unwrap();
+
+        let matches = glob("src/lib.rs", tmp.path().to_str().unwrap(), 200).unwrap();
+        assert_eq!(matches.len(), 1);
+        assert!(matches[0].path.ends_with("src/lib.rs"));
+    }
 
     #[test]
     fn read_write_round_trip() {

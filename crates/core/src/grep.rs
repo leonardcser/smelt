@@ -2,7 +2,6 @@
 //! composition, no policy. Missing/failed `rg` surfaces as `io::Error`;
 //! fallback is the caller's concern.
 
-use crate::process::wait_child;
 use std::io;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
@@ -134,14 +133,14 @@ pub(crate) async fn run_async(
         biased;
         _ = cancel.cancelled() => {
             let _ = child.start_kill();
-            let _ = wait_child(&mut child).await;
+            let _ = child.wait().await;
             let _ = stdout_task.await;
             let _ = stderr_task.await;
             Ok(RunOutcome::Cancelled)
         }
         _ = &mut deadline => {
             let _ = child.start_kill();
-            let _ = wait_child(&mut child).await;
+            let _ = child.wait().await;
             let stdout_buf = stdout_task.await.unwrap_or_default();
             let stderr_buf = stderr_task.await.unwrap_or_default();
             let stderr_msg = if stderr_buf.is_empty() {
@@ -156,7 +155,7 @@ pub(crate) async fn run_async(
                 timed_out: true,
             }))
         }
-        status = wait_child(&mut child) => {
+        status = child.wait() => {
             let stdout_buf = stdout_task.await.unwrap_or_default();
             let stderr_buf = stderr_task.await.unwrap_or_default();
             Ok(RunOutcome::Done(Output {
