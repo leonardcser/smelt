@@ -23,6 +23,26 @@ impl TuiApp {
         });
     }
 
+    pub(crate) fn active_permissions(&self) -> &smelt_core::permissions::Permissions {
+        self.agent
+            .as_ref()
+            .map(|turn| turn.permissions.as_ref())
+            .unwrap_or_else(|| self.core.permissions.as_ref())
+    }
+
+    fn prepare_turn_context(&mut self) -> (String, Vec<protocol::ToolDef>) {
+        let system_prompt = {
+            let _perf = smelt_perf::perf::begin("agent:rebuild_prompt");
+            self.rebuild_system_prompt()
+        };
+        let tools = {
+            let _perf = smelt_perf::perf::begin("agent:tool_defs");
+            self.lua.tool_defs(self.core.config.mode.clone())
+        };
+        self.apply_pending_mode_change_for_request();
+        (system_prompt, tools)
+    }
+
     pub(crate) fn begin_agent_turn(&mut self, display: &str, content: Content) -> TurnState {
         let _perf = smelt_perf::perf::begin("agent:begin_turn");
         self.sleep_inhibit.acquire();
@@ -66,15 +86,7 @@ impl TuiApp {
             .set_dyn("turn_start", std::rc::Rc::new(smelt_core::cells::EventStub));
         self.pump_lua();
 
-        let system_prompt = {
-            let _perf = smelt_perf::perf::begin("agent:rebuild_prompt");
-            self.rebuild_system_prompt()
-        };
-        let tools = {
-            let _perf = smelt_perf::perf::begin("agent:tool_defs");
-            self.lua.tool_defs(self.core.config.mode.clone())
-        };
-        self.apply_pending_mode_change_for_request();
+        let (system_prompt, tools) = self.prepare_turn_context();
 
         let turn_id = self.next_turn_id;
         self.next_turn_id += 1;
@@ -118,6 +130,8 @@ impl TuiApp {
         let display = format!("/{}", cmd.display);
 
         if !evaluated.is_empty() {
+            // Publish the expanded command body to session observers before dispatch;
+            // the engine receives the same text as this turn's user content below.
             self.core
                 .session
                 .history
@@ -250,15 +264,7 @@ impl TuiApp {
             self.working.begin(TurnPhase::Working);
         };
 
-        let system_prompt = {
-            let _perf = smelt_perf::perf::begin("agent:rebuild_prompt");
-            self.rebuild_system_prompt()
-        };
-        let tools = {
-            let _perf = smelt_perf::perf::begin("agent:tool_defs");
-            self.lua.tool_defs(self.core.config.mode.clone())
-        };
-        self.apply_pending_mode_change_for_request();
+        let (system_prompt, tools) = self.prepare_turn_context();
 
         let turn_id = self.next_turn_id;
         self.next_turn_id += 1;
@@ -659,11 +665,7 @@ impl TuiApp {
                     req.tool_name = pending.last().map(|p| p.name.clone()).unwrap_or_default();
                 }
 
-                let permissions = self
-                    .agent
-                    .as_ref()
-                    .map(|turn| &turn.permissions)
-                    .unwrap_or(&self.core.permissions);
+                let permissions = self.active_permissions();
 
                 let summary_plain = req.summary.as_plain_text();
                 let auto_approved = {
