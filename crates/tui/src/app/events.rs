@@ -145,6 +145,7 @@ impl TuiApp {
                 mut content,
                 mut display,
             } => {
+                self.clear_prompt_prediction();
                 self.redact_user_submission(&mut content, &mut display);
                 // Queue while a background plugin (compaction, etc.) has
                 // taken a `smelt.work.busy` token so messages run
@@ -314,6 +315,17 @@ impl TuiApp {
             }
         }
         if self.app_focus == crate::app::AppFocus::Content {
+            if matches!(
+                ev,
+                Event::Key(KeyEvent {
+                    code: KeyCode::Esc,
+                    ..
+                })
+            ) {
+                if let Some(outcome) = self.dismiss_notification_for_esc() {
+                    return Some(outcome);
+                }
+            }
             return Some(self.handle_event_app_history(ev));
         }
         if let Some(outcome) = self.handle_overlay_keys(ev) {
@@ -327,23 +339,14 @@ impl TuiApp {
             return outcome;
         }
 
-        // Single Esc: vim falls through to PromptState::handle_event; non-vim is a no-op.
-        // Esc-Esc lives in the chord registry (esc_chord.lua).
-        if matches!(
-            ev,
-            Event::Key(KeyEvent {
-                code: KeyCode::Esc,
-                ..
-            })
-        ) && !self.input.vim_enabled(self.prompt_win())
-        {
-            return EventOutcome::Noop;
-        }
-
         if let Event::Key(KeyEvent {
             code, modifiers, ..
         }) = ev
         {
+            if matches!(code, KeyCode::Esc) {
+                return self.handle_idle_prompt_esc(ev, modifiers);
+            }
+
             // Placeholder routing: when the prompt is empty and a placeholder is set,
             // matching `accept_keys` accept the text into the buffer; matching
             // `dismiss_keys` clear it. Both fire the corresponding win event.
@@ -430,51 +433,7 @@ impl TuiApp {
                 ..
             })
         ) {
-            let cur_mode = if self.input.vim_enabled(self.prompt_win()) {
-                Some(self.prompt_win().vim_mode)
-            } else {
-                None
-            };
-            let now = self.core.clock.instant_now();
-            match resolve_agent_esc(
-                cur_mode,
-                !self.queued_inputs.is_empty(),
-                &mut self.timers.last_esc,
-                &mut self.timers.esc_vim_mode,
-                now,
-            ) {
-                EscAction::VimToNormal => {
-                    let mut pctx = crate::input::prompt_ctx_mut(&mut self.ui);
-                    self.input
-                        .handle_event(&mut pctx, ev, None, &mut self.core.clipboard, now);
-                }
-                EscAction::Unqueue => {
-                    let mut pctx = crate::input::prompt_ctx_mut(&mut self.ui);
-                    let mut prefix = self
-                        .queued_inputs
-                        .iter()
-                        .map(QueuedInput::prompt_replay_text)
-                        .collect::<Vec<_>>()
-                        .join("\n");
-                    if !prefix.is_empty() && !pctx.buf.source().is_empty() {
-                        prefix.push('\n');
-                    }
-                    self.input.prepend_text(&mut pctx, prefix);
-                    self.queued_inputs.clear();
-                }
-                EscAction::Cancel { restore_vim } => {
-                    if let Some(mode) = restore_vim {
-                        let win = self
-                            .ui
-                            .win_mut(crate::app::PROMPT_WIN)
-                            .expect("prompt window");
-                        self.input.set_vim_mode(win, mode);
-                    }
-                    return EventOutcome::CancelAgent;
-                }
-                EscAction::StartTimer => {}
-            }
-            return EventOutcome::Noop;
+            return self.handle_running_prompt_esc(ev);
         }
 
         let now = self.core.clock.instant_now();
@@ -491,6 +450,7 @@ impl TuiApp {
                 mut content,
                 mut display,
             } => {
+                self.clear_prompt_prediction();
                 self.redact_user_submission(&mut content, &mut display);
                 let text = content.text_content();
                 if let Some(outcome) = self.try_command_while_running(text.trim()) {
@@ -503,6 +463,7 @@ impl TuiApp {
             }
             Action::SubmitEmpty => {
                 if !self.queued_inputs.is_empty() {
+                    self.clear_prompt_prediction();
                     return EventOutcome::InterruptWithQueued;
                 }
             }
@@ -525,6 +486,121 @@ impl TuiApp {
     }
 
     // ── Shared helpers ────────────────────────────────────────────────────
+
+    fn handle_idle_prompt_esc(&mut self, ev: Event, modifiers: KeyModifiers) -> EventOutcome {
+        if self.input.vim_enabled(self.prompt_win())
+            && matches!(
+                self.prompt_win().vim_mode,
+                crate::smelt_term::VimMode::Insert
+                    | crate::smelt_term::VimMode::Visual
+                    | crate::smelt_term::VimMode::VisualLine
+            )
+        {
+            let now = self.core.clock.instant_now();
+            let action = {
+                let mut pctx = crate::input::prompt_ctx_mut(&mut self.ui);
+                self.input.handle_event(
+                    &mut pctx,
+                    ev,
+                    Some(&mut self.input_history),
+                    &mut self.core.clipboard,
+                    now,
+                )
+            };
+            self.timers.pending_chord = None;
+            return self.dispatch_input_action(action);
+        }
+
+        if let Some(outcome) =
+            self.dispatch_placeholder_key(self.well_known.prompt, KeyCode::Esc, modifiers)
+        {
+            self.timers.pending_chord = None;
+            return outcome;
+        }
+
+        if let Some(outcome) = self.dismiss_notification_for_esc() {
+            self.timers.pending_chord = None;
+            return outcome;
+        }
+
+        EventOutcome::Noop
+    }
+
+    fn handle_running_prompt_esc(&mut self, ev: Event) -> EventOutcome {
+        let cur_mode = if self.input.vim_enabled(self.prompt_win()) {
+            Some(self.prompt_win().vim_mode)
+        } else {
+            None
+        };
+        let now = self.core.clock.instant_now();
+
+        if cur_mode != Some(crate::smelt_term::VimMode::Insert) {
+            if let Some(outcome) = self.dispatch_placeholder_key(
+                self.well_known.prompt,
+                KeyCode::Esc,
+                KeyModifiers::empty(),
+            ) {
+                self.timers.last_esc = None;
+                self.timers.esc_vim_mode = None;
+                return outcome;
+            }
+            if self.queued_inputs.is_empty() {
+                if let Some(outcome) = self.dismiss_notification_for_esc() {
+                    self.timers.last_esc = None;
+                    self.timers.esc_vim_mode = None;
+                    return outcome;
+                }
+            }
+        }
+
+        match resolve_agent_esc(
+            cur_mode,
+            !self.queued_inputs.is_empty(),
+            &mut self.timers.last_esc,
+            &mut self.timers.esc_vim_mode,
+            now,
+        ) {
+            EscAction::VimToNormal => {
+                let mut pctx = crate::input::prompt_ctx_mut(&mut self.ui);
+                self.input
+                    .handle_event(&mut pctx, ev, None, &mut self.core.clipboard, now);
+            }
+            EscAction::Unqueue => {
+                let mut pctx = crate::input::prompt_ctx_mut(&mut self.ui);
+                let mut prefix = self
+                    .queued_inputs
+                    .iter()
+                    .map(QueuedInput::prompt_replay_text)
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                if !prefix.is_empty() && !pctx.buf.source().is_empty() {
+                    prefix.push('\n');
+                }
+                self.input.prepend_text(&mut pctx, prefix);
+                self.queued_inputs.clear();
+            }
+            EscAction::Cancel { restore_vim } => {
+                if let Some(mode) = restore_vim {
+                    let win = self
+                        .ui
+                        .win_mut(crate::app::PROMPT_WIN)
+                        .expect("prompt window");
+                    self.input.set_vim_mode(win, mode);
+                }
+                return EventOutcome::CancelAgent;
+            }
+            EscAction::StartTimer => {}
+        }
+        EventOutcome::Noop
+    }
+
+    fn dismiss_notification_for_esc(&mut self) -> Option<EventOutcome> {
+        if self.notification.is_some() {
+            self.dismiss_notification();
+            return Some(EventOutcome::Redraw);
+        }
+        None
+    }
 
     fn dispatch_input_action(&mut self, action: Action) -> EventOutcome {
         match action {
@@ -601,7 +677,7 @@ impl TuiApp {
     }
 
     fn handle_overlay_keys(&mut self, ev: &Event) -> Option<EventOutcome> {
-        if matches!(ev, Event::Key(_)) && self.notification.is_some() {
+        if matches!(ev, Event::Key(k) if k.code != KeyCode::Esc) && self.notification.is_some() {
             self.dismiss_notification();
         }
 

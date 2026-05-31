@@ -151,6 +151,7 @@ impl TuiApp {
                 self.agent = None;
             }
             if let Some((text, images)) = self.rewind_to(bidx) {
+                self.clear_prompt_prediction();
                 let mut pctx = crate::input::prompt_ctx_mut(&mut self.ui);
                 self.input.restore_from_rewind(&mut pctx, text, images);
             }
@@ -161,6 +162,7 @@ impl TuiApp {
                 self.cancel_agent();
                 self.agent = None;
             }
+            self.clear_prompt_prediction();
             self.rewind_to_start();
             while self.core.engine.try_recv().is_ok() {}
             self.save_session();

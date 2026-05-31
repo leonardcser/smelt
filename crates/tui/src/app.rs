@@ -357,7 +357,12 @@ impl TuiApp {
         self.active_agent_turn_id().is_some()
     }
 
+    pub(crate) fn clear_prompt_prediction(&mut self) {
+        self.clear_placeholder(self.well_known.prompt);
+    }
+
     pub(crate) fn start_queued_input(&mut self, queued: QueuedInput) {
+        self.clear_prompt_prediction();
         match queued {
             QueuedInput::Message(text) if !text.is_empty() => {
                 let outcome = self.process_input(&text);

@@ -12,7 +12,7 @@ local prompt = smelt.prompt.win()
 local SYSTEM = "Task: predict what the user will type next in the conversation below. Keep it short — one sentence max. If you cannot predict, reply with an empty string."
 
 smelt.cell("history"):subscribe(function(payload)
-  if payload.kind == "cleared" then
+  if payload.kind == "cleared" or payload.kind == "rewound" then
     prompt:clear_placeholder()
   end
 end)
