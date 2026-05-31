@@ -1,6 +1,7 @@
 //! Wire protocol between the engine and the UI.
 
 use crate::content::Content;
+use crate::history::HistoryItem;
 use crate::message::{Message, ToolOutcome};
 use crate::mode::{AgentMode, ReasoningEffort};
 use crate::style::StyledLines;
@@ -385,15 +386,11 @@ pub enum UiCommand {
         message: Option<String>,
     },
 
-    /// Change the active mode while the engine is running.
-    SetAgentMode {
-        mode: AgentMode,
-        /// Updated system prompt for the new mode (if managed by TUI).
+    /// Append an item to the active turn's history before its next LLM request.
+    AppendHistoryItem {
+        item: HistoryItem,
         #[serde(skip_serializing_if = "Option::is_none", default)]
-        system_prompt: Option<String>,
-        /// Updated tools for the new mode.
-        #[serde(skip_serializing_if = "Option::is_none", default)]
-        tools: Option<Vec<ToolDef>>,
+        replace_user_prefix: Option<String>,
     },
 
     /// Change reasoning effort while the engine is running.
@@ -409,8 +406,8 @@ pub enum UiCommand {
 
     /// Replace cached prompt inputs after `/reload`. Updates
     /// `EngineConfig::instructions`, `EngineConfig::skill_section`, and
-    /// `EngineConfig::system_prompt_override` so subsequent turns,
-    /// compactions, and mid-turn mode changes see the refreshed values.
+    /// `EngineConfig::system_prompt_override` so subsequent turns and
+    /// compactions see the refreshed values.
     ReloadAgentConfig {
         instructions: Option<String>,
         skill_section: Option<String>,

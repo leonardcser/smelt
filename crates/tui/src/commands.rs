@@ -1,7 +1,6 @@
 use crate::app::{CommandAction, ContextWindowUpdate, EventOutcome, InputOutcome, TuiApp};
 use crate::state;
 use protocol::{AgentMode, Content, ReasoningEffort, UiCommand};
-use smelt_core::transcript_model::Block;
 
 pub(crate) enum ExecEvent {
     Output(String),
@@ -341,66 +340,38 @@ impl TuiApp {
         if record && self.core.config.remember.mode {
             state::set_mode(self.core.config.mode.clone());
         }
-        // Publish new mode before snapshotting tools/prompt for the engine.
+        // Publish new mode before Lua/tool snapshots for future requests.
         if old != mode {
             self.core
                 .cells
                 .set_dyn("agent_mode", std::rc::Rc::new(mode.as_str().to_string()));
             self.drain_cells_pending();
-            // Append a synthetic user note so the model learns about the
-            // new mode without us regenerating the (cached) system prompt.
-            // The history's prefix is unchanged; the note lives at the
-            // moving cache breakpoint and becomes part of the cacheable
-            // prefix on the next user turn.
-            //
-            // If the previous message is also a mode note (back-to-back
-            // toggles between turns), replace it in place rather than
-            // stack — the model only needs the *current* mode.
+            // Queue a synthetic user note so the next LLM request learns about
+            // the new mode without regenerating the cached prompt prefix. If a
+            // turn is active, the engine applies the same note when it reaches
+            // its next request boundary; otherwise we apply it locally before
+            // the next turn starts.
             let note_text = self.lua.mode_note(self.core.config.mode.as_str());
             let note = protocol::mode_change_note(&note_text);
             let mode_block = self
                 .lua
                 .mode_block(Some(self.core.config.mode.as_str()), &note_text);
-            let new_item = protocol::HistoryItem::user(protocol::Content::text(note));
-            let last_is_mode_note = self
-                .core
-                .session
-                .history
-                .last()
-                .and_then(|item| match item {
-                    protocol::HistoryItem::User { content } => Some(content),
-                    _ => None,
-                })
-                .map(|c| c.as_text().starts_with(protocol::MODE_NOTE_PREFIX))
-                .unwrap_or(false);
-            if last_is_mode_note {
-                if let Some(last) = self.core.session.history.last_mut() {
-                    *last = new_item;
-                }
-                if let Some(id) = self.transcript.history.order.last().copied() {
-                    if matches!(
-                        self.transcript.history.blocks.get(&id),
-                        Some(Block::Mode { .. })
-                    ) {
-                        self.transcript.history.rewrite(id, mode_block);
-                    } else {
-                        self.push_block(mode_block);
-                    }
-                } else {
-                    self.push_block(mode_block);
-                }
+            if self.agent_is_running() {
+                self.pending_mode_change = Some(crate::app::PendingModeChange {
+                    note: note.clone(),
+                    block: mode_block,
+                });
+                self.core.engine.send(UiCommand::AppendHistoryItem {
+                    item: protocol::HistoryItem::user(protocol::Content::text(note.clone())),
+                    replace_user_prefix: Some(protocol::MODE_NOTE_PREFIX.to_string()),
+                });
+            } else if !self.core.session.history.is_empty() {
+                self.apply_mode_change_to_history(note.clone());
+                self.commit_mode_block(mode_block);
             } else {
-                self.core.session.history.push(new_item);
-                self.push_block(mode_block);
+                self.pending_mode_change = None;
             }
         }
-        let system_prompt = self.rebuild_system_prompt();
-        let tools = self.lua.tool_defs(self.core.config.mode.clone());
-        self.core.engine.send(UiCommand::SetAgentMode {
-            mode: self.core.config.mode.clone(),
-            system_prompt: Some(system_prompt),
-            tools: Some(tools),
-        });
     }
 
     /// `record=false` skips the `recent.json` write so session
@@ -423,8 +394,81 @@ impl TuiApp {
 mod tests {
     use super::*;
 
+    use smelt_core::transcript_model::Block;
+
     fn slash<'a>(name: &'a str, arg: Option<&'a str>) -> ParsedCommand<'a> {
         ParsedCommand::Slash { name, arg }
+    }
+
+    fn mode_blocks(app: &crate::app::TuiApp) -> Vec<&str> {
+        app.transcript
+            .history
+            .order
+            .iter()
+            .filter_map(|id| match app.transcript.history.blocks.get(id) {
+                Some(Block::Mode { text, .. }) => Some(text.as_str()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn mode_change_during_turn_commits_when_history_reaches_next_request() {
+        let mut app = crate::app::test_harness::TestApp::builder().build();
+        app.start_turn(1);
+
+        let note = protocol::mode_change_note(&app.app.lua.mode_note("apply"));
+        app.app.set_mode(AgentMode::parse("apply").unwrap(), false);
+        assert!(mode_blocks(&app.app).is_empty());
+
+        app.feed_one(crate::event_source::SourceEvent::Engine(
+            protocol::EngineEvent::HistoryUpdated {
+                turn_id: 1,
+                history: vec![protocol::HistoryItem::user(protocol::Content::text(note))],
+            },
+        ));
+
+        assert_eq!(mode_blocks(&app.app), vec!["now in apply mode"]);
+    }
+
+    #[test]
+    fn multiple_mode_changes_during_turn_commit_only_the_last_request_note() {
+        let mut app = crate::app::test_harness::TestApp::builder().build();
+        app.start_turn(1);
+
+        app.app.set_mode(AgentMode::parse("apply").unwrap(), false);
+        let note = protocol::mode_change_note(&app.app.lua.mode_note("yolo"));
+        app.app.set_mode(AgentMode::parse("yolo").unwrap(), false);
+
+        app.feed_one(crate::event_source::SourceEvent::Engine(
+            protocol::EngineEvent::HistoryUpdated {
+                turn_id: 1,
+                history: vec![protocol::HistoryItem::user(protocol::Content::text(note))],
+            },
+        ));
+
+        assert_eq!(mode_blocks(&app.app), vec!["now in yolo mode"]);
+    }
+
+    #[test]
+    fn mode_change_without_another_turn_request_commits_at_turn_end() {
+        let mut app = crate::app::test_harness::TestApp::builder().build();
+        app.start_turn(1);
+
+        app.app.set_mode(AgentMode::parse("apply").unwrap(), false);
+        app.app.discard_turn(false);
+
+        assert_eq!(mode_blocks(&app.app), vec!["now in apply mode"]);
+    }
+
+    #[test]
+    fn mode_change_before_first_user_message_does_not_push_mode_block() {
+        let mut app = crate::app::test_harness::TestApp::builder().build();
+
+        app.app.set_mode(AgentMode::parse("apply").unwrap(), false);
+
+        assert!(app.app.core.session.history.is_empty());
+        assert!(mode_blocks(&app.app).is_empty());
     }
 
     #[test]

@@ -398,6 +398,14 @@ impl BlockHistory {
         }
     }
 
+    pub fn rendered_block_gap(&self, i: usize, rendered_rows: usize) -> u16 {
+        if rendered_rows == 0 {
+            0
+        } else {
+            self.block_gap(i)
+        }
+    }
+
     /// Substitute the actual per-block view state and content hash into a base
     /// `LayoutKey` so cache lookups and layout passes agree.
     pub fn resolve_key(&self, id: BlockId, base: LayoutKey) -> LayoutKey {
@@ -470,46 +478,39 @@ pub struct ActiveText {
     pub(crate) table_streaming_id: Option<BlockId>,
 }
 
-/// Blank row gap before `below` given the preceding block. Headings suppress
-/// the trailing gap; CodeLine→CodeLine is zero; most other transitions are 1.
+/// Blank row gap before `below` given the preceding block. Most block
+/// transitions are separated by one blank row. Adjacent code lines and
+/// consecutive thinking blocks collapse, and markdown headings sit directly on
+/// top of their following content.
 pub fn gap_between(above: &Block, below: &Block) -> u16 {
-    match (above, below) {
-        (Block::CodeLine { .. }, Block::CodeLine { .. }) => return 0,
-        (Block::CodeLine { .. }, _) => return 1,
-        (Block::Text { content }, Block::CodeLine { .. }) => {
-            let last_line = content.lines().last().unwrap_or("");
-            if last_line.trim_start().starts_with('#') {
-                return 0;
-            }
-            return 1;
-        }
-        (_, Block::CodeLine { .. }) => return 1,
-        _ => {}
+    if matches!(
+        (above, below),
+        (Block::CodeLine { .. }, Block::CodeLine { .. })
+    ) {
+        return 0;
     }
-    match (above, below) {
-        (Block::User { .. }, _) => 1,
-        (_, Block::User { .. }) => 1,
-        (Block::Exec { .. }, _) => 1,
-        (_, Block::Exec { .. }) => 1,
-        (Block::ToolCall { .. }, Block::ToolCall { .. }) => 1,
-        (Block::Text { .. }, Block::ToolCall { .. }) => 1,
-        (Block::Thinking { .. }, Block::Thinking { .. }) => 0,
-        (_, Block::Thinking { .. }) => 1,
-        (Block::Thinking { .. }, _) => 1,
-        (Block::ToolCall { .. }, Block::Text { .. }) => 1,
-        (_, Block::Compacted { .. }) => 1,
-        (Block::Compacted { .. }, _) => 1,
+    if matches!(
+        (above, below),
+        (Block::Thinking { .. }, Block::Thinking { .. })
+    ) {
+        return 0;
+    }
+    if matches!(below, Block::Text { .. } | Block::CodeLine { .. }) && ends_with_heading(above) {
+        return 0;
+    }
+    1
+}
 
-        (Block::Text { content }, Block::Text { .. }) => {
-            let last_line = content.lines().last().unwrap_or("");
-            if last_line.trim_start().starts_with('#') {
-                0
-            } else {
-                1
-            }
-        }
-        _ => 0,
-    }
+fn ends_with_heading(block: &Block) -> bool {
+    let Block::Text { content } = block else {
+        return false;
+    };
+    content
+        .lines()
+        .last()
+        .unwrap_or("")
+        .trim_start()
+        .starts_with('#')
 }
 
 /// Heuristic: does this look like a `/command` line?
@@ -918,6 +919,13 @@ mod tests {
             summary: "sum".into(),
         }
     }
+    fn mode() -> Block {
+        Block::Mode {
+            text: "now in apply mode".into(),
+            icon: "● ".into(),
+            hl_group: "SmeltModeApply".into(),
+        }
+    }
 
     #[test]
     fn gap_between_codeline_to_codeline_is_zero() {
@@ -988,8 +996,10 @@ mod tests {
     }
 
     #[test]
-    fn gap_between_text_to_text_is_one_normally() {
-        assert_eq!(gap_between(&text("a"), &text("b")), 1);
+    fn gap_between_mode_blocks_are_separated_by_one() {
+        assert_eq!(gap_between(&text("a"), &mode()), 1);
+        assert_eq!(gap_between(&mode(), &text("b")), 1);
+        assert_eq!(gap_between(&mode(), &tool("b")), 1);
     }
 
     // ── is_command_like ──────────────────────────────────────────────

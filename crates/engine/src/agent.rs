@@ -93,6 +93,7 @@ pub(crate) async fn engine_task(
                             model,
                             system_prompt,
                             tools,
+                            pending_history_items: Vec::new(),
                             session_id,
                             started_at: config.clock.instant_now(),
                             tps_samples: Vec::new(),
@@ -585,6 +586,7 @@ struct Turn<'a> {
     model: String,
     system_prompt: String,
     tools: Vec<protocol::ToolDef>,
+    pending_history_items: Vec<HistoryItem>,
     /// Stable per-session identifier sent as OpenAI's `prompt_cache_key`
     /// to anchor cache routing across all turns in this session.
     session_id: String,
@@ -711,6 +713,40 @@ impl<'a> Turn<'a> {
             turn_id: self.turn_id,
             history: items,
         });
+    }
+
+    fn queue_history_item(&mut self, item: HistoryItem, replace_user_prefix: Option<String>) {
+        if let Some(prefix) = replace_user_prefix.as_deref() {
+            if let HistoryItem::User { content } = &item {
+                if content.as_text().starts_with(prefix) {
+                    if let Some(last) = self.pending_history_items.last_mut() {
+                        if matches!(last, HistoryItem::User { content } if content.as_text().starts_with(prefix))
+                        {
+                            *last = item;
+                            return;
+                        }
+                    }
+                    if let Some(last) = self.history.last_mut() {
+                        if matches!(last, HistoryItem::User { content } if content.as_text().starts_with(prefix))
+                        {
+                            *last = item;
+                            self.emit_messages_snapshot();
+                            return;
+                        }
+                    }
+                }
+            }
+        }
+        self.pending_history_items.push(item);
+    }
+
+    fn apply_pending_history_items_for_request(&mut self) {
+        if self.pending_history_items.is_empty() {
+            return;
+        }
+        let items = std::mem::take(&mut self.pending_history_items);
+        self.history.extend(items);
+        self.emit_messages_snapshot();
     }
 
     /// Commit a streamed-but-cancelled assistant message. The model never
@@ -862,25 +898,11 @@ impl<'a> Turn<'a> {
                 self.emit_messages_snapshot();
                 true
             }
-            UiCommand::SetAgentMode {
-                mode,
-                system_prompt,
-                tools,
+            UiCommand::AppendHistoryItem {
+                item,
+                replace_user_prefix,
             } => {
-                self.mode = mode;
-                if let Some(prompt) = system_prompt {
-                    self.system_prompt = prompt;
-                    if let Some(first) = self.history.first_mut() {
-                        if matches!(first, HistoryItem::System { .. }) {
-                            *first = HistoryItem::system(&self.system_prompt);
-                        }
-                    }
-                } else {
-                    self.regenerate_system_prompt();
-                }
-                if let Some(tools) = tools {
-                    self.tools = tools;
-                }
+                self.queue_history_item(item, replace_user_prefix);
                 true
             }
             UiCommand::SetReasoningEffort { effort } => {
@@ -972,6 +994,8 @@ impl<'a> Turn<'a> {
                 self.emit_turn_complete(true);
                 return;
             }
+
+            self.apply_pending_history_items_for_request();
 
             // Fire `smelt.provider.middleware{on_request=...}` hooks
             // against the wire-format view. The host trait still speaks
@@ -1690,7 +1714,7 @@ impl<'a> Turn<'a> {
                     }
                     UiCommand::Steer { .. }
                     | UiCommand::Unsteer { .. }
-                    | UiCommand::SetAgentMode { .. }
+                    | UiCommand::AppendHistoryItem { .. }
                     | UiCommand::SetReasoningEffort { .. }
                     | UiCommand::SetModel { .. } => deferred.push(cmd),
                     other => { let _ = dispatch_background_cmd(other, &bg_ctx); }
@@ -1987,16 +2011,12 @@ impl<'a> Turn<'a> {
                             cancel_received = true;
                             self.bg_cancel.cancel();
                         }
-                        UiCommand::SetAgentMode { mode, system_prompt, tools } => {
-                            self.mode = mode;
-                            if let Some(p) = system_prompt { self.system_prompt = p; }
-                            if let Some(t) = tools { self.tools = t; }
-                        }
                         UiCommand::SetReasoningEffort { effort } => self.reasoning_effort = effort,
                         UiCommand::SetModel { model, api_base, api_key, provider_type } => {
                             pending_model = Some((model, api_base, api_key, provider_type));
                         }
-                        UiCommand::Steer { .. }
+                        UiCommand::AppendHistoryItem { .. }
+                        | UiCommand::Steer { .. }
                         | UiCommand::Unsteer { .. } => deferred_turn_cmds.push(cmd),
                         other => {
                             let _ = dispatch_background_cmd(other, &self.bg_ctx());
@@ -2034,20 +2054,11 @@ impl<'a> Turn<'a> {
                     is_error,
                     metadata,
                 }) if id == request_id => return Some((content, is_error, metadata)),
-                Some(UiCommand::SetAgentMode {
-                    mode,
-                    system_prompt,
-                    tools,
+                Some(UiCommand::AppendHistoryItem {
+                    item,
+                    replace_user_prefix,
                 }) => {
-                    self.mode = mode;
-                    if let Some(p) = system_prompt {
-                        self.system_prompt = p;
-                    } else {
-                        self.regenerate_system_prompt();
-                    }
-                    if let Some(t) = tools {
-                        self.tools = t;
-                    }
+                    self.queue_history_item(item, replace_user_prefix);
                 }
                 Some(UiCommand::SetReasoningEffort { effort }) => self.reasoning_effort = effort,
                 Some(UiCommand::SetModel {

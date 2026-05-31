@@ -22,6 +22,7 @@ use engine::EngineHandle;
 use protocol::Content;
 use smelt_core::history::History;
 use smelt_core::session::Session;
+use smelt_core::transcript_model::Block;
 use smelt_core::ConfirmRequest;
 use smelt_core::FrontendKind;
 use std::sync::Arc;
@@ -86,6 +87,7 @@ pub struct TuiApp {
     pub(crate) last_height: u16,
     pub(crate) next_turn_id: u64,
     pub(crate) pending_turn_meta: Option<protocol::TurnMeta>,
+    pub(crate) pending_mode_change: Option<PendingModeChange>,
     pub(crate) context_tokens_updated_this_turn: bool,
     pub(crate) cancel_generation: u64,
     /// Set while routing an engine event whose `TurnState` has been moved
@@ -338,6 +340,11 @@ pub(crate) struct PendingTool {
     pub(crate) name: String,
 }
 
+pub(crate) struct PendingModeChange {
+    pub(crate) note: String,
+    pub(crate) block: Block,
+}
+
 impl TuiApp {
     pub(crate) fn active_agent_turn_id(&self) -> Option<u64> {
         self.agent
@@ -547,6 +554,7 @@ impl TuiApp {
             last_height: term_h,
             next_turn_id: 1,
             pending_turn_meta: None,
+            pending_mode_change: None,
             context_tokens_updated_this_turn: false,
             cancel_generation: 0,
             dispatching_turn_id: None,

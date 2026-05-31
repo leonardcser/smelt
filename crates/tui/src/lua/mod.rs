@@ -441,7 +441,7 @@ impl LuaRuntime {
             let note: mlua::Function = mode.get("note")?;
             note.call(name.to_string())
         })();
-        result.unwrap_or_else(|_| format!("now in {name} mode."))
+        result.unwrap_or_else(|_| format!("now in {name} mode"))
     }
 
     pub(crate) fn mode_block(
@@ -449,7 +449,7 @@ impl LuaRuntime {
         name: Option<&str>,
         note: &str,
     ) -> smelt_core::transcript_model::Block {
-        let result: mlua::Result<(String, String)> = (|| {
+        let result: mlua::Result<(String, String, String)> = (|| {
             let smelt: mlua::Table = self.core.lua.globals().get("smelt")?;
             let mode: mlua::Table = smelt.get("mode")?;
             if let Some(name) = name {
@@ -460,27 +460,42 @@ impl LuaRuntime {
                     let hl_group = info
                         .get::<Option<String>>("hl_group")?
                         .unwrap_or_else(|| "SmeltModeDefault".to_string());
-                    return Ok((icon, hl_group));
+                    return Ok((icon, hl_group, format!("now in {name} mode")));
                 }
+                return Ok((
+                    String::new(),
+                    "SmeltModeDefault".to_string(),
+                    format!("now in {name} mode"),
+                ));
             }
             let list: mlua::Function = mode.get("list")?;
             let rows: mlua::Table = list.call(())?;
             for row in rows.sequence_values::<mlua::Table>() {
                 let row = row?;
                 if row.get::<Option<String>>("note")?.as_deref() == Some(note) {
+                    let name = row.get::<String>("name")?;
                     let icon = row.get::<Option<String>>("icon")?.unwrap_or_default();
                     let hl_group = row
                         .get::<Option<String>>("hl_group")?
                         .unwrap_or_else(|| "SmeltModeDefault".to_string());
-                    return Ok((icon, hl_group));
+                    return Ok((icon, hl_group, format!("now in {name} mode")));
                 }
             }
-            Ok((String::new(), "SmeltModeDefault".to_string()))
+            Ok((
+                String::new(),
+                "SmeltModeDefault".to_string(),
+                note.to_string(),
+            ))
         })();
-        let (icon, hl_group) =
-            result.unwrap_or_else(|_| (String::new(), "SmeltModeDefault".to_string()));
+        let (icon, hl_group, text) = result.unwrap_or_else(|_| {
+            (
+                String::new(),
+                "SmeltModeDefault".to_string(),
+                note.to_string(),
+            )
+        });
         smelt_core::transcript_model::Block::Mode {
-            text: note.to_string(),
+            text,
             icon,
             hl_group,
         }

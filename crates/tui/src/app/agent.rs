@@ -73,6 +73,7 @@ impl TuiApp {
             let _perf = smelt_perf::perf::begin("agent:tool_defs");
             self.lua.tool_defs(self.core.config.mode.clone())
         };
+        self.apply_pending_mode_change_for_request();
 
         let turn_id = self.next_turn_id;
         self.next_turn_id += 1;
@@ -241,6 +242,7 @@ impl TuiApp {
         {
             self.working.begin(TurnPhase::Working);
         };
+        self.apply_pending_mode_change_for_request();
 
         let turn_id = self.next_turn_id;
         self.next_turn_id += 1;
@@ -285,6 +287,7 @@ impl TuiApp {
         // sentinel that lingers past `agent = None`).
         self.flush_streaming_thinking();
         self.flush_streaming_text();
+        self.pending_mode_change = None;
         {
             self.working.finish(TurnOutcome::Interrupted);
         };
@@ -326,6 +329,9 @@ impl TuiApp {
         self.flush_streaming_text();
         self.finish_transcript_turn();
         if cancelled {
+            self.pending_mode_change = None;
+        }
+        if cancelled {
             {
                 self.working.finish(TurnOutcome::Interrupted);
             };
@@ -355,6 +361,9 @@ impl TuiApp {
                 .session
                 .turn_metas
                 .push((self.core.session.history.len(), meta));
+        }
+        if !cancelled {
+            self.apply_pending_mode_change_for_request();
         }
         self.snapshot_tokens();
         self.save_session();

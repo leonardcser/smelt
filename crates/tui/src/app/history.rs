@@ -20,9 +20,18 @@ impl TuiApp {
     }
 
     pub(crate) fn set_history(&mut self, history: Vec<HistoryItem>) {
+        let applies_pending_mode = self.pending_mode_change.as_ref().is_some_and(|pending| {
+            history.iter().any(|item| match item {
+                HistoryItem::User { content } => content.as_text() == pending.note,
+                _ => false,
+            })
+        });
         self.core
             .session
             .merge_model_history_snapshot(engine::SUMMARY_PREFIX, history);
+        if applies_pending_mode {
+            self.commit_pending_mode_change();
+        }
         self.sync_session_snapshot();
         let count = self.core.session.history.len();
         self.core.cells.set_dyn(
@@ -32,6 +41,27 @@ impl TuiApp {
                 count,
             }),
         );
+    }
+
+    pub(crate) fn apply_mode_change_to_history(&mut self, note: String) {
+        let new_item = HistoryItem::user(Content::text(note));
+        let last_is_mode_note = self
+            .core
+            .session
+            .history
+            .last()
+            .and_then(|item| match item {
+                HistoryItem::User { content } => Some(content),
+                _ => None,
+            })
+            .is_some_and(|c| c.as_text().starts_with(protocol::MODE_NOTE_PREFIX));
+        if last_is_mode_note {
+            if let Some(last) = self.core.session.history.last_mut() {
+                *last = new_item;
+            }
+        } else {
+            self.core.session.history.push(new_item);
+        }
     }
 
     pub(crate) fn sync_session_snapshot(&mut self) {

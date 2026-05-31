@@ -166,11 +166,9 @@ impl TranscriptProjection {
                 continue;
             };
             let block_rows = block_buf.line_count();
-            if block_rows > 0 {
-                let gap = history.block_gap(i);
-                for _ in 0..gap {
-                    texts.push(String::new());
-                }
+            let gap = history.rendered_block_gap(i, block_rows);
+            for _ in 0..gap {
+                texts.push(String::new());
             }
             let start = texts.len() as u32;
             for r in 0..block_rows {
@@ -284,22 +282,16 @@ impl TranscriptProjection {
         // we re-append gap + block rows below.
         let mut keep_rows = old_last.start as usize;
         if old_last.rows > 0 {
-            let gap = history.block_gap(i);
+            let gap = history.rendered_block_gap(i, old_last.rows as usize);
             keep_rows = keep_rows.saturating_sub(gap as usize);
         }
         // Replace the entire suffix in one buffer mutation. Besides being
         // easier to reason about, this lets the window update only the changed
         // suffix of its wrap layout.
-        let gap = if block_rows > 0 {
-            history.block_gap(i) as usize
-        } else {
-            0
-        };
+        let gap = history.rendered_block_gap(i, block_rows) as usize;
         let mut new_lines: Vec<String> = Vec::with_capacity(gap + block_rows);
-        if block_rows > 0 {
-            for _ in 0..gap {
-                new_lines.push(String::new());
-            }
+        for _ in 0..gap {
+            new_lines.push(String::new());
         }
         for r in 0..block_rows {
             new_lines.push(block_buf.get_line(r).unwrap_or("").to_string());
@@ -416,13 +408,12 @@ impl TranscriptProjection {
             let Some(block_buf) = self.cache.get(id, bkey) else {
                 continue;
             };
-            if block_buf.line_count() > 0 {
-                let gap = history.block_gap(i);
-                for _ in 0..gap {
-                    rows.push(String::new());
-                }
+            let block_rows = block_buf.line_count();
+            let gap = history.rendered_block_gap(i, block_rows);
+            for _ in 0..gap {
+                rows.push(String::new());
             }
-            for r in 0..block_buf.line_count() {
+            for r in 0..block_rows {
                 rows.push(block_buf.get_line(r).unwrap_or("").to_string());
             }
         }
@@ -479,14 +470,13 @@ impl TranscriptProjection {
             let Some(block_buf) = self.cache.get(id, bkey) else {
                 continue;
             };
-            if block_buf.line_count() > 0 {
-                let gap = history.block_gap(i);
-                for _ in 0..gap {
-                    push_row(&mut metas, pos, false);
-                    pos += 1;
-                }
+            let block_rows = block_buf.line_count();
+            let gap = history.rendered_block_gap(i, block_rows);
+            for _ in 0..gap {
+                push_row(&mut metas, pos, false);
+                pos += 1;
             }
-            for r in 0..block_buf.line_count() {
+            for r in 0..block_rows {
                 let line_len = block_buf.get_line(r).unwrap_or("").len();
                 pos += line_len;
                 let current_soft = block_buf.decoration_at(r).soft_wrapped;
@@ -777,6 +767,29 @@ mod tests {
 
         assert!(buf.line_count() > 0);
         assert_eq!(buf.get_line(buf.line_count() - 1), Some("hello"));
+    }
+
+    #[test]
+    fn project_inserts_gap_around_mode_blocks() {
+        let mut transcript = Transcript::new();
+        transcript.push(Block::Text {
+            content: "before".into(),
+        });
+        transcript.push(Block::Mode {
+            text: "now in apply mode".into(),
+            icon: "● ".into(),
+            hl_group: "SmeltModeApply".into(),
+        });
+        transcript.push(Block::Text {
+            content: "after".into(),
+        });
+
+        let rows = project_fresh(&mut transcript.history);
+        let lines: Vec<&str> = rows.iter().map(|row| row.line.as_str()).collect();
+        assert_eq!(
+            lines,
+            vec!["before", "", "● now in apply mode", "", "after"]
+        );
     }
 
     #[test]

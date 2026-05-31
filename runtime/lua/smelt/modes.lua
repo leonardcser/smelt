@@ -12,6 +12,11 @@ end
 local registry = {}
 local order = {}
 
+local function note_for(name)
+  local mode = registry[name]
+  return mode and mode.note or ("now in " .. name .. " mode")
+end
+
 local function normalize(spec)
   if type(spec) ~= "table" or type(spec.name) ~= "string" or spec.name == "" then
     error("smelt.mode.register requires { name = string }")
@@ -21,7 +26,7 @@ local function normalize(spec)
     label = spec.label or spec.name,
     icon = spec.icon or "",
     hl_group = spec.hl_group or ("SmeltMode" .. spec.name:gsub("^%l", string.upper)),
-    note = spec.note or ("now in " .. spec.name .. " mode."),
+    note = spec.note or ("now in " .. spec.name .. " mode"),
     permissions = spec.permissions or {},
   }
   return mode
@@ -84,8 +89,7 @@ end
 
 ---@type fun(name: string): string
 smelt.mode.note = function(name)
-  local mode = registry[name]
-  return mode and mode.note or ("now in " .. name .. " mode.")
+  return note_for(name)
 end
 
 ---@type fun(): table<string, table>

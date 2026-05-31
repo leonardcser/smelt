@@ -245,6 +245,34 @@ impl TuiApp {
             .finalize_active_tools(&mut self.transcript.history);
     }
 
+    pub(crate) fn apply_pending_mode_change_for_request(&mut self) {
+        let Some(mode_change) = self.pending_mode_change.take() else {
+            return;
+        };
+        self.apply_mode_change_to_history(mode_change.note);
+        self.commit_mode_block(mode_change.block);
+    }
+
+    pub(crate) fn commit_pending_mode_change(&mut self) {
+        let Some(mode_change) = self.pending_mode_change.take() else {
+            return;
+        };
+        self.commit_mode_block(mode_change.block);
+    }
+
+    pub(crate) fn commit_mode_block(&mut self, mode_block: Block) {
+        if let Some(id) = self.transcript.history.order.last().copied() {
+            if matches!(
+                self.transcript.history.blocks.get(&id),
+                Some(Block::Mode { .. })
+            ) {
+                self.transcript.history.rewrite(id, mode_block);
+                return;
+            }
+        }
+        self.push_block(mode_block);
+    }
+
     pub(crate) fn drain_finished_blocks(&mut self) -> Vec<BlockId> {
         self.transcript.drain_finished_blocks()
     }
@@ -271,6 +299,7 @@ impl TuiApp {
     }
 
     pub(crate) fn clear_transcript(&mut self) {
+        self.pending_mode_change = None;
         self.transcript.history.clear();
         self.parser.clear();
     }
