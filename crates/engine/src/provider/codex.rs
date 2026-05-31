@@ -664,7 +664,7 @@ pub(crate) async fn device_code_login(client: &reqwest::Client) -> Result<CodexT
                 .code_verifier
                 .ok_or("missing code_verifier in poll response")?;
 
-            let redirect_uri = format!("http://localhost:{OAUTH_PORT}/auth/callback");
+            let redirect_uri = format!("{ISSUER}/deviceauth/callback");
             return exchange_code(client, &code, &verifier, &redirect_uri).await;
         }
 
