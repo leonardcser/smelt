@@ -2074,6 +2074,43 @@ pub trait UiHost {
     /// Soft (word-wrap) and hard (`\n`) break byte positions in `rows_for(win)?.join("\n")`.
     /// Default returns no soft breaks and hard breaks at join points.
     fn breaks_for(&mut self, win: WinId) -> Option<(Vec<usize>, Vec<usize>)>;
+
+    /// Display rows for a bounded range in `win`. Default slices `rows_for`, which keeps
+    /// compatibility for existing hosts and makes full materialization explicit at this seam.
+    fn rows_for_range(
+        &mut self,
+        win: WinId,
+        start: RowIndex,
+        count: RowIndex,
+    ) -> Option<Vec<String>> {
+        let rows = self.rows_for(win)?;
+        let start_idx = document::row_to_usize(start).min(rows.len());
+        let end = document::row_to_usize(start.saturating_add(count)).min(rows.len());
+        Some(rows[start_idx..end].to_vec())
+    }
+
+    /// Soft and hard breaks for `rows_for_range`. Hosts with virtual documents should
+    /// override this to avoid collecting the full document.
+    fn breaks_for_range(
+        &mut self,
+        win: WinId,
+        start: RowIndex,
+        count: RowIndex,
+    ) -> Option<(Vec<usize>, Vec<usize>)> {
+        let rows = self.rows_for_range(win, start, count)?;
+        Some((Vec::new(), hard_breaks_for_lines(&rows)))
+    }
+
+    /// Last-painted visible row range for `win`.
+    fn visible_range(&self, win: WinId) -> Option<std::ops::Range<RowIndex>> {
+        let viewport = self.viewport_for(win)?;
+        Some(
+            viewport.scroll_top
+                ..viewport
+                    .scroll_top
+                    .saturating_add(viewport.rect.height as RowIndex),
+        )
+    }
 }
 
 impl UiHost for Ui {

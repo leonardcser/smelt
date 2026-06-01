@@ -232,6 +232,6 @@ impl Document for BufferDocument<'_> {
     }
 }
 
-pub(crate) fn row_to_usize(row: RowIndex) -> usize {
+pub fn row_to_usize(row: RowIndex) -> usize {
     row.min(usize::MAX as RowIndex) as usize
 }

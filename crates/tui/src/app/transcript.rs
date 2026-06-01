@@ -129,6 +129,7 @@ impl TuiApp {
     /// Full transcript as one string per display row. Result is cached as an
     /// `Arc<Vec<String>>` until the generation, width, or `show_thinking` changes.
     pub(crate) fn full_transcript_display_text(&mut self, show_thinking: bool) -> Arc<Vec<String>> {
+        let _perf = smelt_perf::perf::begin("transcript:materialize_rows_full");
         let tw = self.transcript_width() as u16;
         let theme = self.ui.theme().clone();
         self.transcript_projection.build_rows(
@@ -139,6 +140,19 @@ impl TuiApp {
         )
     }
 
+    pub(crate) fn transcript_display_rows_range(
+        &mut self,
+        show_thinking: bool,
+        start: crate::smelt_term::RowIndex,
+        count: crate::smelt_term::RowIndex,
+    ) -> Vec<String> {
+        let rows = self.full_transcript_display_text(show_thinking);
+        let start_idx = crate::smelt_term::document::row_to_usize(start).min(rows.len());
+        let end =
+            crate::smelt_term::document::row_to_usize(start.saturating_add(count)).min(rows.len());
+        rows[start_idx..end].to_vec()
+    }
+
     /// `\n` byte positions in `full_transcript_display_text(..).join("\n")`,
     /// partitioned into soft-wrap and hard-break sets. Soft positions are
     /// transparent to word-select; hard positions bound line-select.
@@ -146,6 +160,7 @@ impl TuiApp {
         &mut self,
         show_thinking: bool,
     ) -> (Vec<usize>, Vec<usize>) {
+        let _perf = smelt_perf::perf::begin("transcript:materialize_breaks_full");
         let tw = self.transcript_width() as u16;
         let theme = self.ui.theme().clone();
         let (mut soft, mut hard) = self.transcript_projection.line_breaks(
@@ -157,6 +172,16 @@ impl TuiApp {
         soft.sort_unstable();
         hard.sort_unstable();
         (soft, hard)
+    }
+
+    pub(crate) fn transcript_line_breaks_range(
+        &mut self,
+        show_thinking: bool,
+        start: crate::smelt_term::RowIndex,
+        count: crate::smelt_term::RowIndex,
+    ) -> (Vec<usize>, Vec<usize>) {
+        let rows = self.transcript_display_rows_range(show_thinking, start, count);
+        (Vec::new(), crate::smelt_term::hard_breaks_for_lines(&rows))
     }
 
     /// Snap a clicked cell column to the nearest selectable cell on `abs_row`.

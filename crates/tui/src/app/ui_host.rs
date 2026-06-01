@@ -67,4 +67,46 @@ impl crate::smelt_term::UiHost for TuiApp {
             crate::smelt_term::UiHost::breaks_for(&mut self.ui, win)
         }
     }
+
+    fn rows_for_range(
+        &mut self,
+        win: crate::smelt_term::WinId,
+        start: crate::smelt_term::RowIndex,
+        count: crate::smelt_term::RowIndex,
+    ) -> Option<Vec<String>> {
+        if win == crate::app::TRANSCRIPT_WIN {
+            Some(self.transcript_display_rows_range(
+                self.core.config.settings.show_thinking,
+                start,
+                count,
+            ))
+        } else if win == crate::app::PROMPT_WIN {
+            let buf_id = self.ui.win(self.well_known.prompt)?.buf;
+            let buf = self.ui.buf(buf_id)?;
+            let rows = buf.lines();
+            let start_idx = crate::smelt_term::document::row_to_usize(start).min(rows.len());
+            let end = crate::smelt_term::document::row_to_usize(start.saturating_add(count))
+                .min(rows.len());
+            Some(rows[start_idx..end].to_vec())
+        } else {
+            crate::smelt_term::UiHost::rows_for_range(&mut self.ui, win, start, count)
+        }
+    }
+
+    fn breaks_for_range(
+        &mut self,
+        win: crate::smelt_term::WinId,
+        start: crate::smelt_term::RowIndex,
+        count: crate::smelt_term::RowIndex,
+    ) -> Option<(Vec<usize>, Vec<usize>)> {
+        if win == crate::app::TRANSCRIPT_WIN {
+            Some(self.transcript_line_breaks_range(
+                self.core.config.settings.show_thinking,
+                start,
+                count,
+            ))
+        } else {
+            crate::smelt_term::UiHost::breaks_for_range(&mut self.ui, win, start, count)
+        }
+    }
 }
