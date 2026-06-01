@@ -683,14 +683,20 @@ impl TuiApp {
                 let permissions = self.active_permissions();
 
                 let summary_plain = req.summary.as_plain_text();
+                let outcome = permissions.evaluate_tool(
+                    self.core.config.mode.clone(),
+                    smelt_core::permissions::ToolOrigin::Lua,
+                    &req.tool_name,
+                    &req.args,
+                );
                 let auto_approved = {
                     let rt = permissions.approvals.read().unwrap();
-                    rt.is_auto_approved(
+                    rt.is_auto_approved_for_outcome(
                         permissions,
                         self.core.config.mode.clone(),
                         &req.tool_name,
-                        &req.args,
                         &summary_plain,
+                        &outcome,
                     )
                 };
                 if auto_approved {
@@ -698,18 +704,12 @@ impl TuiApp {
                     return true;
                 }
 
-                if permissions.decide(
-                    self.core.config.mode.clone(),
-                    &req.tool_name,
-                    &req.args,
-                    false,
-                ) == Decision::Allow
-                {
+                if outcome.decision == Decision::Allow {
                     self.send_permission_decision(req.request_id, true, None);
                     return true;
                 }
 
-                let outside_paths = permissions.outside_workspace_paths(&req.tool_name, &req.args);
+                let outside_paths = outcome.outside_workspace_paths.clone();
 
                 if should_queue {
                     self.set_active_status(&req.call_id, ToolStatus::Confirm);
@@ -718,12 +718,7 @@ impl TuiApp {
                     return true;
                 }
 
-                let downgraded = permissions.was_downgraded(
-                    self.core.config.mode.clone(),
-                    &req.tool_name,
-                    &req.args,
-                );
-                req.outside_dir = if downgraded && !outside_paths.is_empty() {
+                req.outside_dir = if outcome.downgraded_by_workspace && !outside_paths.is_empty() {
                     let raw = std::path::Path::new(&outside_paths[0]);
                     let expanded = engine::paths::expand_tilde(raw);
                     let abs_dir = if expanded.is_dir() {

@@ -98,6 +98,13 @@ pub struct PermissionRequest<'a> {
     pub effects: Vec<ToolEffect>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PermissionOutcome {
+    pub decision: Decision,
+    pub outside_workspace_paths: Vec<String>,
+    pub downgraded_by_workspace: bool,
+}
+
 /// Maps `(tool_name, args)` to filesystem paths the call would touch.
 /// Tools that don't touch paths don't register one; the workspace check short-circuits.
 pub type PathsFn = dyn Fn(&str, &HashMap<String, Value>) -> Vec<String> + Send + Sync;
@@ -335,10 +342,6 @@ impl Permissions {
             .collect()
     }
 
-    fn effects_outside_workspace(&self, effects: &[ToolEffect]) -> bool {
-        !self.outside_workspace_effect_paths(effects).is_empty()
-    }
-
     fn mode_behavior(&self, mode: &AgentMode) -> ModeBehavior {
         self.mode_behaviors
             .get(mode.as_str())
@@ -380,22 +383,15 @@ impl Permissions {
         }
     }
 
-    /// Full decision including workspace restriction. Legacy wrapper for callers
-    /// that have not yet built a typed permission request.
-    pub fn decide(
+    pub fn evaluate_tool(
         &self,
         mode: AgentMode,
+        origin: ToolOrigin,
         tool_name: &str,
         args: &HashMap<String, Value>,
-        is_mcp: bool,
-    ) -> Decision {
-        let origin = if is_mcp {
-            ToolOrigin::Mcp
-        } else {
-            ToolOrigin::Lua
-        };
+    ) -> PermissionOutcome {
         let effects = self.effects_for_tool(origin.clone(), tool_name, args);
-        self.decide_request(PermissionRequest {
+        self.evaluate_request(PermissionRequest {
             mode,
             tool_name,
             args,
@@ -404,7 +400,7 @@ impl Permissions {
         })
     }
 
-    pub fn decide_request(&self, request: PermissionRequest<'_>) -> Decision {
+    pub fn evaluate_request(&self, request: PermissionRequest<'_>) -> PermissionOutcome {
         let base = match request.origin {
             ToolOrigin::Mcp => {
                 self.check_subcommand(request.mode.clone(), "mcp", request.tool_name)
@@ -413,34 +409,19 @@ impl Permissions {
                 decide_base(self, request.mode.clone(), request.tool_name, request.args)
             }
         };
-        if base == Decision::Allow && self.effects_outside_workspace(&request.effects) {
-            return Decision::Ask;
+        let outside_workspace_paths = self.outside_workspace_effect_paths(&request.effects);
+        let downgraded_by_workspace =
+            base == Decision::Allow && !outside_workspace_paths.is_empty();
+        let decision = if downgraded_by_workspace {
+            Decision::Ask
+        } else {
+            base
+        };
+        PermissionOutcome {
+            decision,
+            outside_workspace_paths,
+            downgraded_by_workspace,
         }
-        base
-    }
-
-    /// `true` when the base decision is Allow but was downgraded to Ask solely by workspace paths.
-    pub fn was_downgraded(
-        &self,
-        mode: AgentMode,
-        tool_name: &str,
-        args: &HashMap<String, Value>,
-    ) -> bool {
-        let base = decide_base(self, mode.clone(), tool_name, args);
-        let effects = self.effects_for_tool(ToolOrigin::Lua, tool_name, args);
-        base == Decision::Allow && self.effects_outside_workspace(&effects)
-    }
-
-    pub fn outside_workspace_paths(
-        &self,
-        tool_name: &str,
-        args: &HashMap<String, Value>,
-    ) -> Vec<String> {
-        if !self.restrict_to_workspace || self.workspace.as_os_str().is_empty() {
-            return vec![];
-        }
-        let effects = self.effects_for_tool(ToolOrigin::Lua, tool_name, args);
-        self.outside_workspace_effect_paths(&effects)
     }
 }
 

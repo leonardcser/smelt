@@ -336,9 +336,13 @@ impl TuiApp {
                 if !matches!(hooks.decision, protocol::Decision::Error(_)) {
                     let permissions = self.active_permissions();
                     let active_mode = self.core.config.mode.clone();
-                    let decision =
-                        permissions.decide(active_mode.clone(), &tool_name, &args, false);
-                    let mut decision = decision;
+                    let outcome = permissions.evaluate_tool(
+                        active_mode.clone(),
+                        smelt_core::permissions::ToolOrigin::Lua,
+                        &tool_name,
+                        &args,
+                    );
+                    let mut decision = outcome.decision.clone();
                     if decision == protocol::Decision::Ask {
                         let summary_text = hooks.summary.as_plain_text();
                         let label = if summary_text.is_empty() {
@@ -347,8 +351,13 @@ impl TuiApp {
                             summary_text
                         };
                         let rt = permissions.approvals.read().unwrap();
-                        if rt.is_auto_approved(permissions, active_mode, &tool_name, &args, &label)
-                        {
+                        if rt.is_auto_approved_for_outcome(
+                            permissions,
+                            active_mode,
+                            &tool_name,
+                            &label,
+                            &outcome,
+                        ) {
                             decision = protocol::Decision::Allow;
                         }
                     }

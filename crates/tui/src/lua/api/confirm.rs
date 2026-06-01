@@ -71,12 +71,17 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
             cycle.call::<()>(())?;
 
             let auto_allowed = crate::lua::with_app(|app| {
-                if app.core.permissions.decide(
-                    app.core.config.mode.clone(),
-                    &tool_name,
-                    &args,
-                    false,
-                ) == protocol::Decision::Allow
+                if app
+                    .core
+                    .permissions
+                    .evaluate_tool(
+                        app.core.config.mode.clone(),
+                        smelt_core::permissions::ToolOrigin::Lua,
+                        &tool_name,
+                        &args,
+                    )
+                    .decision
+                    == protocol::Decision::Allow
                 {
                     app.set_active_status(
                         &call_id,

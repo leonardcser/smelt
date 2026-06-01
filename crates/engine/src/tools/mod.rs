@@ -40,8 +40,6 @@ pub trait ToolDispatcher: Send + Sync {
 
     fn contains(&self, name: &str) -> bool;
 
-    fn is_mcp(&self, name: &str) -> bool;
-
     fn is_visible(&self, _name: &str, _mode: protocol::AgentMode) -> bool {
         true
     }
@@ -79,10 +77,6 @@ impl ToolDispatcher for EmptyDispatcher {
     }
 
     fn contains(&self, _name: &str) -> bool {
-        false
-    }
-
-    fn is_mcp(&self, _name: &str) -> bool {
         false
     }
 
@@ -137,11 +131,6 @@ mod tests {
         let d = EmptyDispatcher;
         assert!(!d.contains("anything"));
         assert!(!d.contains(""));
-    }
-
-    #[test]
-    fn empty_dispatcher_is_mcp_returns_false() {
-        assert!(!EmptyDispatcher.is_mcp("name"));
     }
 
     #[test]

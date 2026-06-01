@@ -39,14 +39,19 @@ impl HeadlessApp {
         args: &HashMap<String, serde_json::Value>,
     ) -> bool {
         let mode = self.core.config.mode.clone();
-        self.core
-            .permissions
-            .decide(mode.clone(), tool_name, args, false)
+        let permissions = &self.core.permissions;
+        permissions
+            .evaluate_tool(
+                mode.clone(),
+                crate::permissions::ToolOrigin::Lua,
+                tool_name,
+                args,
+            )
+            .decision
             == Decision::Allow
-            || self
-                .core
-                .permissions
-                .check_subcommand(mode, "mcp", tool_name)
+            || permissions
+                .evaluate_tool(mode, crate::permissions::ToolOrigin::Mcp, tool_name, args)
+                .decision
                 == Decision::Allow
     }
 

@@ -2,7 +2,7 @@
 
 use crate::permissions::bash::split_shell_commands;
 use crate::permissions::rules::{check_ruleset, RuleSet};
-use crate::permissions::Permissions;
+use crate::permissions::{PermissionOutcome, Permissions};
 use protocol::AgentMode;
 use protocol::Decision;
 use serde_json::Value;
@@ -105,6 +105,27 @@ impl RuntimeApprovals {
         })
     }
 
+    pub fn is_auto_approved_for_outcome(
+        &self,
+        permissions: &Permissions,
+        mode: AgentMode,
+        tool_name: &str,
+        desc: &str,
+        outcome: &PermissionOutcome,
+    ) -> bool {
+        let config_subpatterns = permissions.subcommand_ruleset(mode, tool_name);
+        let tool_approved = self.is_approved(tool_name, desc, config_subpatterns);
+        if outcome.outside_workspace_paths.is_empty() {
+            return tool_approved;
+        }
+        let dirs_ok = self.dirs_approved(&outcome.outside_workspace_paths);
+        if dirs_ok && tool_approved {
+            return true;
+        }
+        // Directory approved + base Allow (downgraded only by workspace restriction) → auto-approve.
+        dirs_ok && outcome.downgraded_by_workspace
+    }
+
     /// Full auto-approval check. Outside the workspace, directory approvals must also match.
     pub fn is_auto_approved(
         &self,
@@ -114,21 +135,13 @@ impl RuntimeApprovals {
         args: &HashMap<String, Value>,
         desc: &str,
     ) -> bool {
-        let config_subpatterns = permissions.subcommand_ruleset(mode.clone(), tool_name);
-        let tool_approved = self.is_approved(tool_name, desc, config_subpatterns);
-        let outside = permissions.outside_workspace_paths(tool_name, args);
-        if outside.is_empty() {
-            return tool_approved;
-        }
-        let dirs_ok = self.dirs_approved(&outside);
-        if dirs_ok && tool_approved {
-            return true;
-        }
-        // Directory approved + base Allow (downgraded only by workspace restriction) → auto-approve.
-        if dirs_ok && permissions.was_downgraded(mode, tool_name, args) {
-            return true;
-        }
-        false
+        let outcome = permissions.evaluate_tool(
+            mode.clone(),
+            crate::permissions::ToolOrigin::Lua,
+            tool_name,
+            args,
+        );
+        self.is_auto_approved_for_outcome(permissions, mode, tool_name, desc, &outcome)
     }
 
     /// `true` when `pattern` is already approved for `tool_name`.

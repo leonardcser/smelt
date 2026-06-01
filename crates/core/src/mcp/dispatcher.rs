@@ -57,10 +57,6 @@ impl ToolDispatcher for McpDispatcher {
         self.def_for(name).is_some()
     }
 
-    fn is_mcp(&self, _name: &str) -> bool {
-        true
-    }
-
     fn is_visible(&self, name: &str, mode: AgentMode) -> bool {
         self.def_for(name).is_some()
             && self.permissions.check_subcommand(mode, "mcp", name) != protocol::Decision::Deny
@@ -88,16 +84,23 @@ impl ToolDispatcher for McpDispatcher {
             self.permissions.as_ref()
         };
         let effects = active_permissions.effects_for_tool(ToolOrigin::Mcp, name, args);
-        let mut decision = active_permissions.decide_request(PermissionRequest {
+        let outcome = active_permissions.evaluate_request(PermissionRequest {
             mode: mode.clone(),
             tool_name: name,
             args,
             origin: ToolOrigin::Mcp,
             effects,
         });
+        let mut decision = outcome.decision.clone();
         if decision == protocol::Decision::Ask {
             let rt = active_permissions.approvals.read().unwrap();
-            if rt.is_auto_approved(active_permissions, mode, name, args, &summary_text) {
+            if rt.is_auto_approved_for_outcome(
+                active_permissions,
+                mode,
+                name,
+                &summary_text,
+                &outcome,
+            ) {
                 decision = protocol::Decision::Allow;
             }
         }
