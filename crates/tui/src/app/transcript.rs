@@ -766,3 +766,53 @@ pub(crate) fn extract_rendered_layout(
         ),
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::app::test_harness::TestApp;
+    use crate::content::transcript_buf::ScrollTarget;
+
+    #[test]
+    fn selection_highlights_subtract_tail_row_base() {
+        let mut harness = TestApp::builder().build();
+        for i in 0..40 {
+            harness.app.transcript.push(Block::Text {
+                content: format!("line {i}"),
+            });
+        }
+
+        let data = harness
+            .app
+            .project_transcript_buffer(80, 5, ScrollTarget::Tail, false);
+        assert!(data.row_base > 0);
+
+        let buf_id = harness.app.transcript_win().buf;
+        let (line_idx, start, end, line_count) = {
+            let buf = harness.app.ui.buf(buf_id).expect("transcript buffer");
+            let line_idx = buf
+                .lines()
+                .iter()
+                .position(|line| line == "line 39")
+                .expect("tail line is materialized");
+            let offsets = smelt_buffer::text::line_start_offsets(buf.lines());
+            let start = offsets[line_idx];
+            (line_idx, start, start + "line 39".len(), buf.lines().len())
+        };
+        {
+            let win = harness.app.transcript_win_mut();
+            win.selection_anchor = Some(start);
+            win.cpos = end;
+        }
+
+        let ranges =
+            harness
+                .app
+                .transcript_selection_highlights(data.clamped_scroll, data.row_base, 5);
+        assert!(
+            ranges.iter().any(|(line, _, _)| *line == line_idx),
+            "selection range should be expressed in materialized buffer rows"
+        );
+        assert!(ranges.iter().all(|(line, _, _)| *line < line_count));
+    }
+}

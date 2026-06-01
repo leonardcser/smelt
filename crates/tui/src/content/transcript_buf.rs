@@ -288,14 +288,17 @@ impl TranscriptProjection {
 
         // When width changes, capture a content-stable anchor at the current
         // scroll_top — (BlockId, row_offset_in_block) — before the layout is
-        // discarded. After the new layout is built we remap this back to a
-        // visual row so resize keeps the same block anchored at the viewport
-        // top instead of letting the visual-row counter drift.
+        // discarded. The same remap is needed when leaving a tail projection:
+        // prefix rows may have been estimated, but the block-local anchor is stable.
         let width_changed = self
             .project_key
             .map(|prev| prev.width != width)
             .unwrap_or(false);
-        let resize_anchor = if width_changed {
+        let leaving_tail_projection = self
+            .project_key
+            .map(|prev| prev.tail_viewport_rows.is_some())
+            .unwrap_or(false);
+        let resize_anchor = if width_changed || leaving_tail_projection {
             self.block_anchor_at(scroll_top)
         } else {
             None
@@ -419,6 +422,7 @@ impl TranscriptProjection {
 
         self.document.refresh_height_index();
         let total_rows = self.document.total_rows();
+        let materialized_rows = texts.len() as RowIndex;
         buf.set_all_lines(texts);
         for p in pending {
             apply_row_highlights(buf, p.row, p.highlights);
@@ -430,6 +434,8 @@ impl TranscriptProjection {
         self.visible_row_base = row_base;
         self.visible_total_rows = total_rows;
         self.project_key = Some(key);
+        debug_assert!(total_rows >= row_base);
+        debug_assert!(row_base.saturating_add(materialized_rows) <= total_rows);
         let clamped_scroll = clamp_scroll(RowIndex::MAX, total_rows, viewport_rows);
         debug_assert!(clamped_scroll >= row_base.saturating_sub(1));
         ProjectOutput {
@@ -1310,6 +1316,48 @@ mod tests {
         assert_eq!(layout.first().map(|(_, start, _)| *start), Some(0));
         assert_eq!(layout.last().map(|(_, _, rows)| *rows), Some(1));
         assert_eq!(projection.visible_block_layout().count(), visible_count);
+    }
+
+    #[test]
+    fn full_projection_remaps_scroll_when_leaving_estimated_tail() {
+        let mut transcript = Transcript::new();
+        for i in 0..40 {
+            let lines = (0..10)
+                .map(|j| format!("block {i} line {j}"))
+                .collect::<Vec<_>>()
+                .join("\n");
+            transcript.push(Block::Text { content: lines });
+        }
+        let theme = Theme::default();
+        let mut projection = TranscriptProjection::new();
+        let mut buf = Buffer::new(crate::smelt_term::BufId(7), Default::default());
+
+        let tail = projection.project(
+            &mut buf,
+            &mut transcript.history,
+            80,
+            false,
+            &theme,
+            ScrollTarget::Tail,
+            5,
+        );
+        assert!(tail.total_rows < 439, "prefix rows start as estimates");
+
+        let full = projection.project(
+            &mut buf,
+            &mut transcript.history,
+            80,
+            false,
+            &theme,
+            ScrollTarget::Row(tail.clamped_scroll.saturating_sub(1)),
+            5,
+        );
+
+        assert_eq!(full.total_rows, 439);
+        assert!(
+            full.clamped_scroll > 300,
+            "leaving tail should stay anchored near the resumed tail, not jump to the top"
+        );
     }
 
     #[test]

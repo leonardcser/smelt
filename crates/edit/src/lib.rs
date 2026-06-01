@@ -1319,7 +1319,7 @@ impl Ui {
                     win.ensure_layout(buf, content_width);
                 }
                 let total_rows = match (self.bufs.get(&buf_id), self.wins.get(&win_id)) {
-                    (Some(buf), Some(win)) => win.display_row_total(buf),
+                    (Some(buf), Some(win)) => win.scroll_row_total(buf),
                     _ => 0,
                 };
                 if let Some(win) = self.wins.get_mut(&win_id) {
@@ -1376,7 +1376,7 @@ impl Ui {
                 win.ensure_layout(buf, content_width);
             }
             let total_rows = match (self.bufs.get(&buf_id), self.wins.get(win_id)) {
-                (Some(buf), Some(win)) => win.display_row_total(buf),
+                (Some(buf), Some(win)) => win.scroll_row_total(buf),
                 _ => 0,
             };
             if let Some(win) = self.wins.get_mut(win_id) {
@@ -1961,7 +1961,7 @@ impl Ui {
                 )
             };
             let total_rows = match (self.bufs.get(&buf_id), self.wins.get(&id)) {
-                (Some(buf), Some(win)) => win.display_row_total(buf),
+                (Some(buf), Some(win)) => win.scroll_row_total(buf),
                 _ => 0,
             };
             let max_scroll = total_rows.saturating_sub(viewport_rows as RowIndex);

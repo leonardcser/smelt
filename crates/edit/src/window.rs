@@ -549,6 +549,10 @@ impl Window {
     }
 
     pub fn set_virtual_rows(&mut self, row_base: RowIndex, total_rows: RowIndex) {
+        debug_assert!(
+            total_rows >= row_base,
+            "virtual row total {total_rows} must cover row_base {row_base}"
+        );
         self.row_base = row_base;
         self.total_rows_override = Some(total_rows);
     }
@@ -558,7 +562,7 @@ impl Window {
         self.total_rows_override = None;
     }
 
-    pub fn display_row_total(&self, buf: &Buffer) -> RowIndex {
+    pub fn scroll_row_total(&self, buf: &Buffer) -> RowIndex {
         self.total_rows_override
             .unwrap_or_else(|| buf.lines().len() as RowIndex)
     }
@@ -1129,7 +1133,7 @@ impl Window {
         let (row, col) = self.cursor_visual(buf, self.cpos);
         self.cursor_row = row;
         self.cursor_col = col;
-        let total_rows = self.display_row_total(buf);
+        let total_rows = self.scroll_row_total(buf);
         let viewport_cols = self.viewport.map(|v| v.content_width).unwrap_or(0);
         self.keep_cursor_visible(buf, total_rows, viewport_rows, viewport_cols);
     }
@@ -1490,7 +1494,7 @@ impl Window {
         let (row, col) = self.cursor_visual(buf, self.cpos);
         self.cursor_row = row;
         self.cursor_col = col;
-        let total_rows = self.display_row_total(buf);
+        let total_rows = self.scroll_row_total(buf);
         let viewport_cols = self.viewport.map(|v| v.content_width).unwrap_or(0);
         match action {
             // `zz` recenters the cursor row; horizontal still tracks the cursor.
@@ -1537,7 +1541,7 @@ impl Window {
         }
         self.sync_from_cpos(buf, viewport_rows);
         let max_scroll = self
-            .display_row_total(buf)
+            .scroll_row_total(buf)
             .saturating_sub(viewport_rows as RowIndex);
         self.follow_tail = self.scroll_top >= max_scroll;
     }
@@ -1571,7 +1575,7 @@ impl Window {
         if delta == 0 || viewport_rows == 0 {
             return false;
         }
-        let total = self.display_row_total(buf);
+        let total = self.scroll_row_total(buf);
         if total == 0 {
             return false;
         }
@@ -1602,7 +1606,7 @@ impl Window {
     /// buffer row changes to whatever row is now under that screen cell.
     /// To move the cursor first and reveal it afterward, use `move_cursor_by_lines`.
     pub fn pan_by_lines(&mut self, buf: &Buffer, delta: isize, viewport_rows: u16) {
-        let total = self.display_row_total(buf);
+        let total = self.scroll_row_total(buf);
         if total == 0 || viewport_rows == 0 || delta == 0 {
             return;
         }
@@ -1619,7 +1623,7 @@ impl Window {
         buf: &Buffer,
         viewport_rows: u16,
     ) {
-        let total_visual = self.display_row_total(buf);
+        let total_visual = self.scroll_row_total(buf);
         if total_visual == 0 || viewport_rows == 0 {
             return;
         }
@@ -2719,6 +2723,66 @@ mod tests {
         assert_eq!(grid.cell(4, 0).symbol, 'o');
         assert_eq!(grid.cell(0, 1).symbol, 'c');
         assert_eq!(grid.cell(6, 1).symbol, 'e');
+    }
+
+    #[test]
+    fn render_paints_virtual_rows_from_absolute_scroll_top() {
+        let mut buf = Buffer::new(BufId(1), BufCreateOpts::default());
+        buf.set_all_lines(vec!["row 20".into(), "row 21".into(), "row 22".into()]);
+        let mut w = make_win();
+        w.set_virtual_rows(20, 30);
+        w.scroll_top = 21;
+        let mut grid = Grid::new(10, 2);
+        let mut slice = grid.slice_mut(Rect::new(0, 0, 10, 2));
+        w.render(&buf, &mut slice, &ctx());
+        assert_eq!(grid.cell(0, 0).symbol, 'r');
+        assert_eq!(grid.cell(4, 0).symbol, '2');
+        assert_eq!(grid.cell(5, 0).symbol, '1');
+        assert_eq!(grid.cell(4, 1).symbol, '2');
+        assert_eq!(grid.cell(5, 1).symbol, '2');
+    }
+
+    #[test]
+    fn virtual_rows_pan_preserves_cursor_screen_row_in_absolute_space() {
+        let mut w = make_win();
+        let rows = sample_rows(20);
+        let buf = make_buf(rows.clone());
+        let viewport = 5;
+        w.set_virtual_rows(80, 100);
+        w.jump_to_line_col(&buf, 19, 0, viewport);
+        assert_eq!(w.scroll_top, 95);
+        assert_eq!(w.cursor_abs_row(), 99);
+        assert_eq!(w.cursor_screen_row(viewport), Some(4));
+
+        w.pan_by_lines(&buf, -2, viewport);
+        assert_eq!(w.scroll_top, 93);
+        assert_eq!(w.cursor_abs_row(), 97);
+        assert_eq!(w.cursor_row, 17);
+        assert_eq!(w.cursor_screen_row(viewport), Some(4));
+        let offsets = smelt_buffer::text::line_start_offsets(&rows);
+        assert_eq!(w.cpos, offsets[17]);
+    }
+
+    #[test]
+    fn virtual_rows_mouse_hit_testing_subtracts_row_base() {
+        let mut w = make_win();
+        let rows = sample_rows(20);
+        let buf = make_buf(rows.clone());
+        w.set_virtual_rows(80, 100);
+        w.scroll_top = 90;
+
+        let cpos = w.cpos_at_mouse(&buf, 3, 2);
+        let offsets = smelt_buffer::text::line_start_offsets(&rows);
+        assert_eq!(cpos, offsets[13] + 2);
+    }
+
+    #[test]
+    fn virtual_rows_scroll_row_total_uses_logical_extent() {
+        let mut w = make_win();
+        let buf = make_buf(sample_rows(20));
+        assert_eq!(w.scroll_row_total(&buf), 20);
+        w.set_virtual_rows(80, 100);
+        assert_eq!(w.scroll_row_total(&buf), 100);
     }
 
     #[test]

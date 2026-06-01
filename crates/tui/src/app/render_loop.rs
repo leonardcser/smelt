@@ -169,6 +169,10 @@ impl TuiApp {
             )
         };
         if let Some(win) = self.ui.win_mut(crate::app::TRANSCRIPT_WIN) {
+            debug_assert!(tdata.total_rows >= tdata.row_base);
+            debug_assert!(
+                tdata.clamped_scroll <= tdata.total_rows.saturating_sub(viewport_rows as _)
+            );
             if tdata.row_base == 0 {
                 win.clear_virtual_rows();
             } else {
