@@ -715,6 +715,7 @@ impl TuiApp {
             return InputOutcome::Continue;
         }
 
+        self.bump_epoch("input_epoch");
         self.core
             .cells
             .set_dyn("input_submit", std::rc::Rc::new(trimmed.to_string()));

@@ -104,6 +104,13 @@ impl Cells {
         self.lua_projectors.insert(TypeId::of::<T>(), wrapper);
     }
 
+    /// Return the typed value at `name`, if the cell exists with that exact type.
+    pub fn get<T: Any + Clone + 'static>(&self, name: &str) -> Option<T> {
+        self.slots
+            .get(name)
+            .and_then(|slot| slot.value.downcast_ref::<T>().cloned())
+    }
+
     /// Project the cell at `name` to a Lua value. Returns `Nil` when undeclared or no projector.
     pub(crate) fn get_lua(&self, name: &str, lua: &mlua::Lua) -> mlua::Value {
         let Some(slot) = self.slots.get(name) else {
@@ -372,6 +379,8 @@ pub const SEEDED_CELL_NAMES: &[&str] = &[
     "cwd",
     "errors",
     "history",
+    "history_epoch",
+    "input_epoch",
     "input_submit",
     "model",
     "now",
@@ -379,6 +388,7 @@ pub const SEEDED_CELL_NAMES: &[&str] = &[
     "reasoning",
     "running_procs",
     "session_ended",
+    "session_epoch",
     "session_started",
     "session_title",
     "shutdown",
@@ -641,8 +651,11 @@ pub(crate) fn build_with_builtins(seeds: BuiltinSeeds) -> Cells {
     cells.declare("tokens_used", TokenUsage::default());
     cells.declare("errors", 0u32);
     cells.declare("cwd", seeds.cwd);
+    cells.declare("session_epoch", 0u64);
     cells.declare("session_title", seeds.session_title);
     cells.declare("branch", seeds.branch);
+    cells.declare("history_epoch", 0u64);
+    cells.declare("input_epoch", 0u64);
     cells.declare("now", 0u64);
     cells.declare("spinner_frame", 0u8);
     cells.declare("tps", 0.0f64);

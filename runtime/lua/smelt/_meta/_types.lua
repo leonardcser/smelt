@@ -162,6 +162,7 @@
 ---@field model? string Model reference (`"provider/model"` or a bare name resolved against the configured providers). When `nil`, falls back to the primary model.
 ---@field response_format? smelt.engine.AskResponseFormat JSON-schema response constraint.
 ---@field reasoning_effort? smelt.reasoning.Effort Reasoning effort for the request; defaults to `"off"`.
+---@field guard? table Lifecycle guard returned by `smelt.lifecycle.guard(...)`. When provided, the Lua bootstrap suppresses `on_response` after the guard expires.
 ---@field on_response? fun(arg1: any, arg2: smelt.engine.AskError?) Fires once with `(response, err)`. On success `err` is `nil` and `response` is a full assistant message table; on failure `response` is `nil` and `err` is a `smelt.engine.AskError` table.
 
 --- Front-matter override block accepted by `smelt.engine.submit_command`. Mirrors what plugin commands set in their markdown header. Tool-name keys (e.g. `bash`, `edit`) become per-subcommand pattern buckets.
@@ -185,6 +186,7 @@
 ---@field model? string Model reference (`"provider/model"` or a bare name resolved against the configured providers). When `nil`, falls back to the primary model.
 ---@field response_format? smelt.engine.AskResponseFormat JSON-schema response constraint.
 ---@field reasoning_effort? smelt.reasoning.Effort Reasoning effort for the request; defaults to `"off"`.
+---@field guard? table Lifecycle guard returned by `smelt.lifecycle.guard(...)`. When provided, the Lua bootstrap suppresses `on_response` after the guard expires.
 ---@field on_response? fun(arg1: any, arg2: smelt.engine.AskError?) Fires once with `(response, err)`. On success `err` is `nil` and `response` is a full assistant message table; on failure `response` is `nil` and `err` is a `smelt.engine.AskError` table.
 
 --- Token accounting breakdown passed inside `smelt.engine.PrepareRequest`.
@@ -418,7 +420,7 @@
 ---@alias smelt.buf.VirtTextPos "inline"|"overlay"|"right_align"|"eol"
 
 --- Name of a reactive cell. Open alias - plugin-defined cells declared via `smelt.cell.new` are accepted alongside the well-known runtime cells listed here.
----@alias smelt.cell.Name string|"agent_mode"|"block_done"|"branch"|"cmd_post"|"cmd_pre"|"confirm_requested"|"confirm_resolved"|"confirms_pending"|"cursor_pos"|"cwd"|"errors"|"history"|"input_submit"|"model"|"now"|"permission_pending"|"reasoning"|"running_procs"|"session_ended"|"session_started"|"session_title"|"shutdown"|"spinner_frame"|"stream_delta"|"task_label"|"tokens_used"|"tool_end"|"tool_start"|"tps"|"turn_complete"|"turn_end"|"turn_error"|"turn_start"|"vim_mode"|"work_busy"|"work_elapsed_ms"|"work_label"|"work_outcome"|"work_retry_attempt"|"work_retry_remaining_ms"|"work_state"
+---@alias smelt.cell.Name string|"agent_mode"|"block_done"|"branch"|"cmd_post"|"cmd_pre"|"confirm_requested"|"confirm_resolved"|"confirms_pending"|"cursor_pos"|"cwd"|"errors"|"history"|"history_epoch"|"input_epoch"|"input_submit"|"model"|"now"|"permission_pending"|"reasoning"|"running_procs"|"session_ended"|"session_epoch"|"session_started"|"session_title"|"shutdown"|"spinner_frame"|"stream_delta"|"task_label"|"tokens_used"|"tool_end"|"tool_start"|"tps"|"turn_complete"|"turn_end"|"turn_error"|"turn_start"|"vim_mode"|"work_busy"|"work_elapsed_ms"|"work_label"|"work_outcome"|"work_retry_attempt"|"work_retry_remaining_ms"|"work_state"
 
 --- Type of CLI flag declared via `smelt.cli.register_flag`. Matches the subset of clap that we expose to Lua.
 ---@alias smelt.cli.FlagKind "boolean"|"string"|"integer"

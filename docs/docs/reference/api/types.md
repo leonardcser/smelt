@@ -233,6 +233,7 @@ Spec for `smelt.engine.ask`.
 | `model` | `string` |  | Model reference (`"provider/model"` or a bare name resolved against the configured providers). When `nil`, falls back to the primary model. |
 | `response_format` | [smelt.engine.AskResponseFormat](types.md#smeltengineaskresponseformat) |  | JSON-schema response constraint. |
 | `reasoning_effort` | [smelt.reasoning.Effort](types.md#smeltreasoningeffort) |  | Reasoning effort for the request; defaults to `"off"`. |
+| `guard` | `table` |  | Lifecycle guard returned by `smelt.lifecycle.guard(...)`. When provided, the Lua bootstrap suppresses `on_response` after the guard expires. |
 | `on_response` | `fun(arg1: any, arg2: smelt.engine.AskError?)` |  | Fires once with `(response, err)`. On success `err` is `nil` and `response` is a full assistant message table; on failure `response` is `nil` and `err` is a `smelt.engine.AskError` table. |
 
 ### `smelt.engine.CommandOverrides`
@@ -264,6 +265,7 @@ Spec for `smelt.engine.ask_inherited`.
 | `model` | `string` |  | Model reference (`"provider/model"` or a bare name resolved against the configured providers). When `nil`, falls back to the primary model. |
 | `response_format` | [smelt.engine.AskResponseFormat](types.md#smeltengineaskresponseformat) |  | JSON-schema response constraint. |
 | `reasoning_effort` | [smelt.reasoning.Effort](types.md#smeltreasoningeffort) |  | Reasoning effort for the request; defaults to `"off"`. |
+| `guard` | `table` |  | Lifecycle guard returned by `smelt.lifecycle.guard(...)`. When provided, the Lua bootstrap suppresses `on_response` after the guard expires. |
 | `on_response` | `fun(arg1: any, arg2: smelt.engine.AskError?)` |  | Fires once with `(response, err)`. On success `err` is `nil` and `response` is a full assistant message table; on failure `response` is `nil` and `err` is a `smelt.engine.AskError` table. |
 
 ### `smelt.engine.PrepareContextEstimate`
@@ -613,7 +615,7 @@ Variants: `"inline"` \| `"overlay"` \| `"right_align"` \| `"eol"`
 
 Name of a reactive cell. Open alias - plugin-defined cells declared via `smelt.cell.new` are accepted alongside the well-known runtime cells listed here.
 
-Open alias - accepts any `string`. Well-known names: `"agent_mode"` \| `"block_done"` \| `"branch"` \| `"cmd_post"` \| `"cmd_pre"` \| `"confirm_requested"` \| `"confirm_resolved"` \| `"confirms_pending"` \| `"cursor_pos"` \| `"cwd"` \| `"errors"` \| `"history"` \| `"input_submit"` \| `"model"` \| `"now"` \| `"permission_pending"` \| `"reasoning"` \| `"running_procs"` \| `"session_ended"` \| `"session_started"` \| `"session_title"` \| `"shutdown"` \| `"spinner_frame"` \| `"stream_delta"` \| `"task_label"` \| `"tokens_used"` \| `"tool_end"` \| `"tool_start"` \| `"tps"` \| `"turn_complete"` \| `"turn_end"` \| `"turn_error"` \| `"turn_start"` \| `"vim_mode"` \| `"work_busy"` \| `"work_elapsed_ms"` \| `"work_label"` \| `"work_outcome"` \| `"work_retry_attempt"` \| `"work_retry_remaining_ms"` \| `"work_state"`.
+Open alias - accepts any `string`. Well-known names: `"agent_mode"` \| `"block_done"` \| `"branch"` \| `"cmd_post"` \| `"cmd_pre"` \| `"confirm_requested"` \| `"confirm_resolved"` \| `"confirms_pending"` \| `"cursor_pos"` \| `"cwd"` \| `"errors"` \| `"history"` \| `"history_epoch"` \| `"input_epoch"` \| `"input_submit"` \| `"model"` \| `"now"` \| `"permission_pending"` \| `"reasoning"` \| `"running_procs"` \| `"session_ended"` \| `"session_epoch"` \| `"session_started"` \| `"session_title"` \| `"shutdown"` \| `"spinner_frame"` \| `"stream_delta"` \| `"task_label"` \| `"tokens_used"` \| `"tool_end"` \| `"tool_start"` \| `"tps"` \| `"turn_complete"` \| `"turn_end"` \| `"turn_error"` \| `"turn_start"` \| `"vim_mode"` \| `"work_busy"` \| `"work_elapsed_ms"` \| `"work_label"` \| `"work_outcome"` \| `"work_retry_attempt"` \| `"work_retry_remaining_ms"` \| `"work_state"`.
 
 ### `smelt.cli.FlagKind`
 

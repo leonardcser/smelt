@@ -777,6 +777,8 @@ Composable block layout (vbox/hbox/leaf/diff/file_view) for tool render callback
 
 Host-phase hooks keyed by event name.
 
+- `smelt.lifecycle.guard` :: `fun(scopes: string|string[]|table?): table`
+  Create a guard whose `:alive()` flips false when any scoped epoch changes.
 - `smelt.lifecycle.on` :: `fun(event: string, fn: function): smelt.Reg`
   Queue `fn(ctx)` for the lifecycle event named `event`.
 - `smelt.lifecycle.on_ready` :: `fun(fn: function): smelt.Reg`

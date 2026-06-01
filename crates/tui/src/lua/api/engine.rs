@@ -235,6 +235,9 @@ pub struct LuaAskSpec {
     pub response_format: Option<LuaAskResponseFormat>,
     /// Reasoning effort for the request; defaults to `"off"`.
     pub reasoning_effort: Option<LuaReasoningEffort>,
+    /// Lifecycle guard returned by `smelt.lifecycle.guard(...)`. When provided,
+    /// the Lua bootstrap suppresses `on_response` after the guard expires.
+    pub guard: Option<mlua::Table>,
     /// Fires once with `(response, err)`. On success `err` is `nil` and
     /// `response` is a full assistant message table;
     /// on failure `response` is `nil` and `err` is a
@@ -261,6 +264,9 @@ pub struct LuaInheritedAskSpec {
     pub response_format: Option<LuaAskResponseFormat>,
     /// Reasoning effort for the request; defaults to `"off"`.
     pub reasoning_effort: Option<LuaReasoningEffort>,
+    /// Lifecycle guard returned by `smelt.lifecycle.guard(...)`. When provided,
+    /// the Lua bootstrap suppresses `on_response` after the guard expires.
+    pub guard: Option<mlua::Table>,
     /// Fires once with `(response, err)`. On success `err` is `nil` and
     /// `response` is a full assistant message table;
     /// on failure `response` is `nil` and `err` is a
@@ -417,6 +423,7 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
                 }
 
                 let system = spec.system;
+                let _guard = spec.guard;
                 let response_format = spec.response_format.map(|f| protocol::AskResponseFormat {
                     name: f.name,
                     schema: smelt_core::lua::api::lua_table_to_json(lua, &f.schema),
@@ -472,6 +479,7 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
                     }
                 }
 
+                let _guard = spec.guard;
                 let response_format = spec.response_format.map(|f| protocol::AskResponseFormat {
                     name: f.name,
                     schema: smelt_core::lua::api::lua_table_to_json(lua, &f.schema),

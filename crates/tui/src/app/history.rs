@@ -42,6 +42,9 @@ impl TuiApp {
     }
 
     pub(crate) fn publish_history_delta(&mut self, kind: &str) {
+        if matches!(kind, "cleared" | "rewound" | "loaded" | "forked") {
+            self.bump_epoch("history_epoch");
+        }
         let count = self.core.session.history.len();
         self.core.cells.set_dyn(
             "history",
@@ -136,6 +139,7 @@ impl TuiApp {
         let original_id = self.core.session.id.clone();
         let forked = self.core.session.fork(self.core.env.pid());
         self.core.session = forked;
+        self.bump_epoch("session_epoch");
         self.save_session();
         self.flush_persist();
         self.core
@@ -182,6 +186,7 @@ impl TuiApp {
         self.input.store.lock().unwrap().clear();
         self.stop_background_processes();
         self.core.session = session::Session::new(self.core.env.pid(), self.core.env.cwd());
+        self.bump_epoch("session_epoch");
         if let Ok(mut guard) = self.shared_session.lock() {
             *guard = None;
         }
@@ -232,6 +237,7 @@ impl TuiApp {
         }
 
         self.core.session = loaded;
+        self.bump_epoch("session_epoch");
         if let Some(ref slug) = self.core.session.slug {
             self.set_task_label(slug.clone());
         }

@@ -6,6 +6,16 @@
 
 Host-phase hooks keyed by event name. `on(event, fn)` is the general form; `on_ready` / `on_shutdown` are shorthands. `on_ready` fires on every Lua-context bring-up (cold start AND `/reload`) with `ctx = { kind = "launch" | "reload" }` - use this when you need UiHost-tier APIs that aren't reachable from the pre-TUI plugin load. `on_shutdown` fires once on clean process exit. The registry is wiped between bring-ups - re-register the hook in module body if you want it to fire every time. Each `on*` returns a `Reg` whose `:remove()` unregisters the hook before it fires.
 
+## `smelt.lifecycle.guard`
+
+```lua
+fun(scopes: string|string[]|table?): table
+```
+
+Create a guard whose `:alive()` flips false when any scoped epoch changes.
+Scopes are `"session"`, `"history"`, `"input"`, or a concrete cell name.
+Use `:latest(key)` when only the newest request in a family may complete.
+
 ## `smelt.lifecycle.on`
 
 ```lua

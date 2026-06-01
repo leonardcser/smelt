@@ -56,29 +56,20 @@ local function parse_response(raw)
   return nil
 end
 
-local generation = 0
 -- Accumulated user messages sent so far. The system prompt is stable,
 -- so only the messages array is compared between calls.
 local sent_messages = {}
 
-local function invalidate(reset_sent)
-  generation = generation + 1
-  if reset_sent then
-    sent_messages = {}
-  end
+local function reset_sent_messages()
+  sent_messages = {}
 end
 
-smelt.cell("session_started"):subscribe(function()
-  invalidate(true)
-end)
-
-smelt.cell("session_ended"):subscribe(function()
-  invalidate(true)
-end)
+smelt.cell("session_started"):subscribe(reset_sent_messages)
+smelt.cell("session_ended"):subscribe(reset_sent_messages)
 
 smelt.cell("history"):subscribe(function(payload)
   if payload.kind == "cleared" or payload.kind == "rewound" or payload.kind == "loaded" or payload.kind == "forked" then
-    invalidate(true)
+    reset_sent_messages()
   end
 end)
 
@@ -122,9 +113,7 @@ local function update_title(new_text)
   end
   if not changed then return end
 
-  invalidate(false)
-  local request_generation = generation
-  local request_session_id = smelt.session.id()
+  local guard = smelt.lifecycle.guard({ "session", "history" }):latest("title")
   sent_messages = messages
 
   smelt.engine.ask({
@@ -133,8 +122,8 @@ local function update_title(new_text)
     model = smelt.model.preferred("title"),
     reasoning_effort = "off",
     response_format = { name = "session_title", schema = SCHEMA },
+    guard = guard,
     on_response = function(response, err)
-      if request_generation ~= generation or request_session_id ~= smelt.session.id() then return end
       if err then
         local title, slug = fallback_title(trimmed)
         smelt.session.title(title, slug)

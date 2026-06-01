@@ -391,6 +391,16 @@ impl TuiApp {
         self.clear_placeholder(self.well_known.prompt);
     }
 
+    pub(crate) fn bump_epoch(&mut self, name: &str) {
+        let next = self
+            .core
+            .cells
+            .get::<u64>(name)
+            .unwrap_or_default()
+            .wrapping_add(1);
+        self.core.cells.set_dyn(name, std::rc::Rc::new(next));
+    }
+
     pub(crate) fn queue_history_append(&mut self, append: PendingHistoryAppend) {
         let note = append.history_note().to_string();
         let replace_user_prefix = append.replacement_prefix().map(str::to_string);

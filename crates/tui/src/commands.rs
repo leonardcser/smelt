@@ -176,6 +176,7 @@ impl TuiApp {
             return None;
         }
         self.start_exec(cmd.to_string());
+        self.bump_epoch("input_epoch");
         self.core
             .cells
             .set_dyn("input_submit", std::rc::Rc::new(format!("!{cmd}")));

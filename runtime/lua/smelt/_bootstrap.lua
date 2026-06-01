@@ -191,6 +191,125 @@ function smelt.task.all(...)
   return results
 end
 
+-- Lifecycle guards capture stable app epochs and let async callbacks cheaply
+-- ignore stale completions after a session/history/input boundary changes.
+if smelt.lifecycle and smelt.cell then
+  local epoch_cells = {
+    session = "session_epoch",
+    history = "history_epoch",
+    input = "input_epoch",
+  }
+  __smelt_lifecycle_latest__ = __smelt_lifecycle_latest__ or {}
+
+  local function normalize_guard_scopes(scopes)
+    local out = {}
+    local function add(scope)
+      if type(scope) ~= "string" or scope == "" then return end
+      table.insert(out, epoch_cells[scope] or scope)
+    end
+
+    if scopes == nil then
+      return out
+    end
+    if type(scopes) == "string" then
+      add(scopes)
+      return out
+    end
+    if type(scopes) ~= "table" then
+      error("smelt.lifecycle.guard: scopes must be a string or table", 3)
+    end
+
+    for k, v in pairs(scopes) do
+      if type(k) == "number" then
+        add(v)
+      elseif v then
+        add(k)
+      end
+    end
+    return out
+  end
+
+  ---Create a guard whose `:alive()` flips false when any scoped epoch changes.
+  ---Scopes are `"session"`, `"history"`, `"input"`, or a concrete cell name.
+  ---Use `:latest(key)` when only the newest request in a family may complete.
+  ---@type fun(scopes: string|string[]|table?): table
+  function smelt.lifecycle.guard(scopes)
+    local snapshot = {}
+    for _, cell_name in ipairs(normalize_guard_scopes(scopes)) do
+      snapshot[cell_name] = smelt.cell(cell_name):get()
+    end
+
+    local active = true
+    local latest_key = nil
+    local latest_token = nil
+    local guard = {}
+
+    function guard:alive()
+      if not active then return false end
+      if latest_key and __smelt_lifecycle_latest__[latest_key] ~= latest_token then return false end
+      for cell_name, value in pairs(snapshot) do
+        if smelt.cell(cell_name):get() ~= value then return false end
+      end
+      return true
+    end
+
+    function guard:cancel()
+      active = false
+    end
+
+    function guard:latest(key)
+      latest_key = tostring(key)
+      latest_token = {}
+      __smelt_lifecycle_latest__[latest_key] = latest_token
+      return self
+    end
+
+    function guard:wrap(fn)
+      return function(...)
+        if self:alive() then
+          return fn(...)
+        end
+      end
+    end
+
+    return guard
+  end
+end
+
+-- `smelt.engine.ask({ guard = ... })` suppresses stale callbacks centrally.
+if smelt.engine and smelt.lifecycle then
+  __smelt_raw_engine_ask__ = __smelt_raw_engine_ask__ or smelt.engine.ask
+  __smelt_raw_engine_ask_inherited__ = __smelt_raw_engine_ask_inherited__ or smelt.engine.ask_inherited
+
+  local function guarded_ask(raw, spec)
+    if type(spec) == "table" and spec.guard then
+      local guard = spec.guard
+      local wrapped = {}
+      for k, v in pairs(spec) do
+        if k ~= "guard" then wrapped[k] = v end
+      end
+      local on_response = spec.on_response
+      if type(on_response) == "function" then
+        wrapped.on_response = function(...)
+          if guard:alive() then
+            return on_response(...)
+          end
+        end
+      end
+      spec = wrapped
+    end
+    return raw(spec)
+  end
+
+  smelt.engine.ask = function(spec)
+    return guarded_ask(__smelt_raw_engine_ask__, spec)
+  end
+
+  smelt.engine.ask_inherited = function(spec)
+    return guarded_ask(__smelt_raw_engine_ask_inherited__, spec)
+  end
+end
+
 -- Idempotent across `/reload`: cache the raw register in a global so each
 -- bootstrap run re-wraps the same raw - never the previous wrap.
 __smelt_raw_tools_register__ = __smelt_raw_tools_register__ or smelt.tools.register

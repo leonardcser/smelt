@@ -1627,6 +1627,7 @@ mod tests {
 
     fn publish_input_submit(app: &mut TestApp, text: &str) {
         let _g = crate::lua::install_app_ptr(&mut app.app);
+        app.app.bump_epoch("input_epoch");
         app.app
             .core
             .cells
