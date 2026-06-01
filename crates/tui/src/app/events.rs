@@ -1056,9 +1056,7 @@ impl TuiApp {
             let buf = buf.expect("buffer");
             let now = self.core.clock.instant_now();
             let status = win.handle_key(buf, k, &mut self.core.clipboard, now);
-            let max_scroll = (buf.lines().len() as crate::smelt_term::RowIndex)
-                .saturating_sub(viewport_rows as crate::smelt_term::RowIndex);
-            win.follow_tail = win.scroll_top >= max_scroll;
+            win.sync_follow_tail(buf, viewport_rows);
             if matches!(status, Status::Consumed) {
                 return Status::Consumed;
             }
@@ -1163,9 +1161,7 @@ impl TuiApp {
             let win = win.expect("window");
             let buf = buf.expect("buffer");
             win.move_cursor_by_lines(buf, d, viewport_rows);
-            let max_scroll = (buf.lines().len() as crate::smelt_term::RowIndex)
-                .saturating_sub(viewport_rows as crate::smelt_term::RowIndex);
-            win.follow_tail = win.scroll_top >= max_scroll;
+            win.sync_follow_tail(buf, viewport_rows);
             return Status::Consumed;
         }
 

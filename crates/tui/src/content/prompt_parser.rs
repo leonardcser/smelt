@@ -2,7 +2,7 @@
 //! display rows, highlights them, and writes source↔display coord maps to the
 //! buffer for cursor mapping. Window layout owns soft wrapping.
 
-use crate::content::selection::{
+use crate::content::prompt_spans::{
     build_char_kinds, build_display_spans, spans_to_string, Span, SpanKind,
 };
 use smelt_buffer::attachment::{AttachmentId, AttachmentStore, ATTACHMENT_MARKER};

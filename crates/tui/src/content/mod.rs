@@ -1,6 +1,6 @@
 pub use smelt_core::content::builder;
 pub use smelt_core::content::highlight;
-pub(crate) mod selection;
+pub(crate) mod prompt_spans;
 
 pub(crate) mod block_buffers;
 pub(crate) mod layout;

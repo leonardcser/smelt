@@ -595,6 +595,19 @@ impl Window {
             .unwrap_or_else(|| buf.lines().len() as RowIndex)
     }
 
+    pub fn max_scroll(&self, buf: &Buffer, viewport_rows: u16) -> RowIndex {
+        self.scroll_row_total(buf)
+            .saturating_sub(viewport_rows as RowIndex)
+    }
+
+    pub fn is_at_tail(&self, buf: &Buffer, viewport_rows: u16) -> bool {
+        self.scroll_top >= self.max_scroll(buf, viewport_rows)
+    }
+
+    pub fn sync_follow_tail(&mut self, buf: &Buffer, viewport_rows: u16) {
+        self.follow_tail = self.is_at_tail(buf, viewport_rows);
+    }
+
     pub fn local_visual_row(&self, absolute_row: RowIndex) -> RowIndex {
         self.local_row(absolute_row)
     }
@@ -1559,6 +1572,7 @@ impl Window {
             }
             _ => self.keep_cursor_visible(buf, total_rows, viewport_rows, viewport_cols),
         }
+        self.sync_follow_tail(buf, viewport_rows);
         Status::Consumed
     }
 
@@ -1572,7 +1586,7 @@ impl Window {
         let want = self.absolute_cursor_row().saturating_sub(half);
         let max_scroll = total_rows.saturating_sub(viewport_rows as RowIndex);
         self.set_scroll(want.min(max_scroll), buf);
-        self.follow_tail = self.scroll_top >= max_scroll;
+        self.sync_follow_tail(buf, viewport_rows);
     }
 
     /// Cursor-led vertical motion: move `cpos` by `delta` rows; viewport pans only
@@ -1589,10 +1603,7 @@ impl Window {
             self.vim_state.set_mode(&mut self.vim_mode, VimMode::Normal);
         }
         self.sync_from_cpos(buf, viewport_rows);
-        let max_scroll = self
-            .scroll_row_total(buf)
-            .saturating_sub(viewport_rows as RowIndex);
-        self.follow_tail = self.scroll_top >= max_scroll;
+        self.sync_follow_tail(buf, viewport_rows);
     }
 
     /// Viewport-led horizontal pan: bump `scroll_left` by `delta` cells,
@@ -1691,7 +1702,7 @@ impl Window {
         let new_scroll = scroll_top.min(max_scroll);
         if new_scroll == cur_scroll {
             self.set_scroll(new_scroll, buf);
-            self.follow_tail = new_scroll >= max_scroll;
+            self.sync_follow_tail(buf, viewport_rows);
             return;
         }
         let target_vrow = self
@@ -1704,7 +1715,7 @@ impl Window {
         self.cursor_col = col;
         self.curswant = Some(want);
         self.set_scroll(new_scroll, buf);
-        self.follow_tail = new_scroll >= max_scroll;
+        self.sync_follow_tail(buf, viewport_rows);
     }
 
     /// One-shot positioning. Leaves `follow_tail` alone - callers that want
@@ -2369,6 +2380,17 @@ mod tests {
     }
 
     #[test]
+    fn virtual_tail_checks_use_logical_total_rows() {
+        let mut w = make_win();
+        let buf = make_buf(sample_rows(20));
+        w.set_virtual_rows(80, 100);
+        w.scroll_top = 94;
+        assert!(!w.is_at_tail(&buf, 5));
+        w.scroll_top = 95;
+        assert!(w.is_at_tail(&buf, 5));
+    }
+
+    #[test]
     fn scrollbar_maps_rows_beyond_u16() {
         let bar = ScrollbarState::new(0, 1_000_000, 10).expect("overflowing scrollbar");
         let bottom = bar.scroll_from_top_for_thumb(bar.max_thumb_top());
@@ -2423,6 +2445,13 @@ mod tests {
         let rows = sample_rows(11);
         let mut buf = make_buf(rows.clone());
         let viewport = 2;
+        w.viewport = Some(WindowViewport::new(
+            Rect::new(0, 0, 80, viewport),
+            80,
+            rows.len() as RowIndex,
+            0,
+            None,
+        ));
         w.jump_to_line_col(&buf, 10, 0, viewport);
         w.scroll_to_bottom();
         assert!(w.follow_tail);
@@ -2438,8 +2467,6 @@ mod tests {
         // One 'k' keeps us in the bottom region (scroll_top == max_scroll == 9),
         // so follow_tail should still be true.
         w.handle_key(&mut buf, k, &mut clipboard, std::time::Instant::now());
-        let max_scroll = (rows.len() as RowIndex).saturating_sub(viewport as RowIndex);
-        w.follow_tail = w.scroll_top >= max_scroll;
         assert_eq!(w.cursor_row, 9);
         assert_eq!(w.scroll_top, 9);
         assert!(
@@ -2449,7 +2476,6 @@ mod tests {
 
         // Second 'k' moves above max_scroll; follow_tail must clear.
         w.handle_key(&mut buf, k, &mut clipboard, std::time::Instant::now());
-        w.follow_tail = w.scroll_top >= max_scroll;
         assert_eq!(w.cursor_row, 8);
         assert_eq!(w.scroll_top, 8);
         assert!(
