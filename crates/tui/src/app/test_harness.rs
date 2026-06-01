@@ -1026,6 +1026,7 @@ impl TestApp {
         self.app.timers.pending_chord = None;
         self.app.timers.pending_pane_chord = None;
         self.app.timers.app_sequence.clear();
+        self.app.ui.cancel_pointer_interaction();
         self.app.app_focus = AppFocus::Prompt;
         self.app.term_focused = true;
         self.app.clear_prompt_prediction();

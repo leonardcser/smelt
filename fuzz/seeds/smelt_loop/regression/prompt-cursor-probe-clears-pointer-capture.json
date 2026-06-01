@@ -1,0 +1,29 @@
+{
+  "_about": "Prompt cursor probe isolation seed: a prior mouse-down after compaction can leave transient pointer capture/drag state; forcing prompt focus for the cursor probe must cancel pointer interaction before asserting plain insertion readiness.",
+  "mode": "normal",
+  "ops": [
+    {
+      "kind": "probe_compaction_prepare_request",
+      "data": {
+        "variant": 182
+      }
+    },
+    {
+      "kind": "mouse",
+      "data": {
+        "kind": 0,
+        "button": 0,
+        "col": 0,
+        "row": 0,
+        "mods": 0
+      }
+    },
+    {
+      "kind": "probe_prompt_cursor_after_turn",
+      "data": {
+        "variant": 0
+      }
+    }
+  ],
+  "vim": true
+}
