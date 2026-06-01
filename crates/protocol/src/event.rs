@@ -104,24 +104,22 @@ pub struct ToolDef {
     /// is an error reported back to the user.
     #[serde(default)]
     pub override_core: bool,
-    /// Hook signals declared by the tool. Each `true` flag tells the
-    /// engine to round-trip through `ToolHooksRequest` before
-    /// dispatching the tool - to ask the user for permission, run a
-    /// preflight check, etc. When all flags are false the engine
-    /// dispatches the tool directly (today's behavior, no permission
-    /// gate). Tools that touch security-sensitive surfaces
-    /// (bash, file mutation) MUST opt in.
+    /// Hook signals declared by the tool. These are metadata hooks: they
+    /// add approval suggestions and preflight validation to the mandatory
+    /// permission pipeline. They do not decide whether a tool call is
+    /// permission-checked; every model-initiated tool call must pass
+    /// through the gate before dispatch.
     #[serde(default)]
     pub hooks: ToolHookFlags,
 }
 
-/// Which permission hooks a tool has registered. Sent with
-/// `ToolDef` so the engine knows whether to ask the TUI to
-/// evaluate them per-call.
+/// Which metadata hooks a tool has registered. Sent with `ToolDef` so
+/// the engine/host can avoid evaluating optional Lua callbacks that do
+/// not exist.
 ///
 /// `summary` is always evaluated regardless of this flag set - it's a
-/// display concern, not a permission hook. The flags here gate the
-/// `ToolHooksRequest` round-trip that produces a `ToolHooks` reply.
+/// display concern, not a permission hook. These flags are not a security
+/// boundary and must not be used as the permission gate.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct ToolHookFlags {
     #[serde(default)]
@@ -131,8 +129,9 @@ pub struct ToolHookFlags {
 }
 
 impl ToolHookFlags {
-    /// True when at least one hook is registered - i.e. the engine must
-    /// round-trip through `ToolHooksRequest` before dispatch.
+    /// True when at least one optional metadata hook is registered.
+    /// This is only an optimization hint; it must not control whether
+    /// permission evaluation runs.
     pub fn any(&self) -> bool {
         self.approval_patterns || self.preflight
     }
@@ -392,6 +391,11 @@ pub enum UiCommand {
         #[serde(skip_serializing_if = "Option::is_none", default)]
         replace_user_prefix: Option<String>,
     },
+
+    /// Change the active agent mode while the engine is running. This is
+    /// separate from the synthetic mode-change history note: permission
+    /// decisions must observe the runtime mode immediately, even mid-turn.
+    SetMode { mode: AgentMode },
 
     /// Change reasoning effort while the engine is running.
     SetReasoningEffort { effort: ReasoningEffort },

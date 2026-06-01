@@ -327,7 +327,7 @@ impl TuiApp {
                 call_id: _,
                 tool_name,
                 args,
-                mode,
+                mode: _,
             } => {
                 let _guard = crate::lua::install_app_ptr(self);
                 let mut hooks = self.lua.evaluate_hooks(&tool_name, &args);
@@ -335,7 +335,9 @@ impl TuiApp {
                 // Permission policy is evaluated on the TUI side.
                 if !matches!(hooks.decision, protocol::Decision::Error(_)) {
                     let permissions = self.active_permissions();
-                    let decision = permissions.decide(mode.clone(), &tool_name, &args, false);
+                    let active_mode = self.core.config.mode.clone();
+                    let decision =
+                        permissions.decide(active_mode.clone(), &tool_name, &args, false);
                     let mut decision = decision;
                     if decision == protocol::Decision::Ask {
                         let summary_text = hooks.summary.as_plain_text();
@@ -345,7 +347,8 @@ impl TuiApp {
                             summary_text
                         };
                         let rt = permissions.approvals.read().unwrap();
-                        if rt.is_auto_approved(permissions, mode, &tool_name, &args, &label) {
+                        if rt.is_auto_approved(permissions, active_mode, &tool_name, &args, &label)
+                        {
                             decision = protocol::Decision::Allow;
                         }
                     }

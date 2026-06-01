@@ -52,6 +52,7 @@ pub trait ToolDispatcher: Send + Sync {
         name: &str,
         args: &HashMap<String, Value>,
         mode: protocol::AgentMode,
+        permission_overrides: Option<&protocol::PermissionOverrides>,
     ) -> Option<ToolHooks>;
 
     fn dispatch<'a>(
@@ -90,6 +91,7 @@ impl ToolDispatcher for EmptyDispatcher {
         _name: &str,
         _args: &HashMap<String, Value>,
         _mode: protocol::AgentMode,
+        _permission_overrides: Option<&protocol::PermissionOverrides>,
     ) -> Option<ToolHooks> {
         None
     }
@@ -155,6 +157,7 @@ mod tests {
             "name",
             &HashMap::new(),
             protocol::AgentMode::parse("plan").unwrap(),
+            None,
         );
         assert!(res.is_none());
     }

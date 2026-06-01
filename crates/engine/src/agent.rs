@@ -57,7 +57,7 @@ pub(crate) async fn engine_task(
                         let protocol::StartTurnPayload {
                             turn_id, content: input_content, mode, model, reasoning_effort,
                             history, api_base, api_key, session_id, session_dir: _,
-                            model_config_overrides, permission_overrides: _,
+                            model_config_overrides, permission_overrides,
                             system_prompt: tui_system_prompt, tools,
                         } = *payload;
 
@@ -93,6 +93,7 @@ pub(crate) async fn engine_task(
                             model,
                             system_prompt,
                             tools,
+                            permission_overrides,
                             pending_history_items: Vec::new(),
                             session_id,
                             started_at: config.clock.instant_now(),
@@ -116,6 +117,7 @@ pub(crate) async fn engine_task(
                         config.skill_section = skill_section;
                         config.system_prompt_override = system_prompt_override;
                     }
+                    UiCommand::SetMode { .. } => {}
                     UiCommand::Cancel => {
                         bg_cancel.cancel();
                     }
@@ -586,6 +588,7 @@ struct Turn<'a> {
     model: String,
     system_prompt: String,
     tools: Vec<protocol::ToolDef>,
+    permission_overrides: Option<protocol::PermissionOverrides>,
     pending_history_items: Vec<HistoryItem>,
     /// Stable per-session identifier sent as OpenAI's `prompt_cache_key`
     /// to anchor cache routing across all turns in this session.
@@ -907,6 +910,10 @@ impl<'a> Turn<'a> {
             }
             UiCommand::SetReasoningEffort { effort } => {
                 self.reasoning_effort = effort;
+                true
+            }
+            UiCommand::SetMode { mode } => {
+                self.mode = mode;
                 true
             }
             UiCommand::SetModel {
@@ -1288,61 +1295,48 @@ impl<'a> Turn<'a> {
             if let Some(pt) = tool {
                 let is_sequential =
                     matches!(pt.execution_mode, protocol::ToolExecutionMode::Sequential);
-                if pt.hooks.any() {
-                    let request_id = next_request_id();
-                    self.emit(EngineEvent::ToolHooksRequest {
-                        request_id,
-                        call_id: tc.id.clone(),
-                        tool_name: tc.function.name.clone(),
+                let request_id = next_request_id();
+                self.emit(EngineEvent::ToolHooksRequest {
+                    request_id,
+                    call_id: tc.id.clone(),
+                    tool_name: tc.function.name.clone(),
+                    args: args.clone(),
+                    mode: self.mode.clone(),
+                });
+                plan.pending_tool_hooks.push((
+                    request_id,
+                    PendingToolCall {
+                        tc,
                         args: args.clone(),
-                        mode: self.mode.clone(),
-                    });
-                    plan.pending_tool_hooks.push((
-                        request_id,
-                        PendingToolCall {
-                            tc,
-                            args: args.clone(),
-                            tool_start,
-                            is_sequential,
-                        },
-                    ));
-                } else if is_sequential {
-                    plan.sequential_tools.push((tc, args.clone(), tool_start));
-                } else {
-                    let request_id = next_request_id();
-                    self.emit(EngineEvent::ToolDispatch {
-                        request_id,
-                        call_id: tc.id.clone(),
-                        tool_name: tc.function.name.clone(),
-                        args: args.clone(),
-                    });
-                    plan.pending_tools
-                        .push((request_id, tc.id.clone(), tool_start));
-                }
+                        tool_start,
+                        is_sequential,
+                    },
+                ));
                 continue;
             }
 
-            let hooks =
-                match self
-                    .dispatcher
-                    .evaluate_hooks(&tc.function.name, &args, self.mode.clone())
-                {
-                    Some(h) => h,
-                    None => {
-                        let outcome = ToolOutcome {
-                            content: format!("unknown tool: {}", tc.function.name),
-                            is_error: true,
-                            metadata: None,
-                        };
-                        self.emit(EngineEvent::ToolFinished {
-                            call_id: tc.id.clone(),
-                            result: outcome.clone(),
-                            elapsed_ms: Some(self.elapsed_ms_since(tool_start)),
-                        });
-                        plan.inline_outcomes.push((tc.id.clone(), outcome));
-                        continue;
-                    }
-                };
+            let hooks = match self.dispatcher.evaluate_hooks(
+                &tc.function.name,
+                &args,
+                self.mode.clone(),
+                self.permission_overrides.as_ref(),
+            ) {
+                Some(h) => h,
+                None => {
+                    let outcome = ToolOutcome {
+                        content: format!("unknown tool: {}", tc.function.name),
+                        is_error: true,
+                        metadata: None,
+                    };
+                    self.emit(EngineEvent::ToolFinished {
+                        call_id: tc.id.clone(),
+                        result: outcome.clone(),
+                        elapsed_ms: Some(self.elapsed_ms_since(tool_start)),
+                    });
+                    plan.inline_outcomes.push((tc.id.clone(), outcome));
+                    continue;
+                }
+            };
 
             let idx = plan.slots.len();
             match hooks.decision {
@@ -1716,6 +1710,7 @@ impl<'a> Turn<'a> {
                     | UiCommand::Unsteer { .. }
                     | UiCommand::AppendHistoryItem { .. }
                     | UiCommand::SetReasoningEffort { .. }
+                    | UiCommand::SetMode { .. }
                     | UiCommand::SetModel { .. } => deferred.push(cmd),
                     other => { let _ = dispatch_background_cmd(other, &bg_ctx); }
                 },
@@ -2012,6 +2007,7 @@ impl<'a> Turn<'a> {
                             self.bg_cancel.cancel();
                         }
                         UiCommand::SetReasoningEffort { effort } => self.reasoning_effort = effort,
+                        UiCommand::SetMode { mode } => self.mode = mode,
                         UiCommand::SetModel { model, api_base, api_key, provider_type } => {
                             pending_model = Some((model, api_base, api_key, provider_type));
                         }
@@ -2061,6 +2057,7 @@ impl<'a> Turn<'a> {
                     self.queue_history_item(item, replace_user_prefix);
                 }
                 Some(UiCommand::SetReasoningEffort { effort }) => self.reasoning_effort = effort,
+                Some(UiCommand::SetMode { mode }) => self.mode = mode,
                 Some(UiCommand::SetModel {
                     model,
                     api_base,

@@ -70,6 +70,7 @@ impl ToolDispatcher for McpDispatcher {
         name: &str,
         args: &HashMap<String, Value>,
         mode: AgentMode,
+        permission_overrides: Option<&protocol::PermissionOverrides>,
     ) -> Option<ToolHooks> {
         self.def_for(name)?;
         let summary = args_summary(args);
@@ -78,10 +79,17 @@ impl ToolDispatcher for McpDispatcher {
         } else {
             format!("{name} {}", summary.as_plain_text())
         };
-        let mut decision = self.permissions.decide(mode.clone(), name, args, true);
+        let permissions;
+        let active_permissions = if let Some(overrides) = permission_overrides {
+            permissions = self.permissions.with_overrides(overrides);
+            &permissions
+        } else {
+            self.permissions.as_ref()
+        };
+        let mut decision = active_permissions.decide(mode.clone(), name, args, true);
         if decision == protocol::Decision::Ask {
-            let rt = self.permissions.approvals.read().unwrap();
-            if rt.is_auto_approved(&self.permissions, mode, name, args, &summary_text) {
+            let rt = active_permissions.approvals.read().unwrap();
+            if rt.is_auto_approved(active_permissions, mode, name, args, &summary_text) {
                 decision = protocol::Decision::Allow;
             }
         }

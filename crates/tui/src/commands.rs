@@ -347,6 +347,9 @@ impl TuiApp {
                 .cells
                 .set_dyn("agent_mode", std::rc::Rc::new(mode.as_str().to_string()));
             self.drain_cells_pending();
+            self.core
+                .engine
+                .send(UiCommand::SetMode { mode: mode.clone() });
             // Queue a synthetic user note so the next LLM request learns about
             // the new mode without regenerating the cached prompt prefix. If a
             // turn is active, the engine applies the same note when it reaches
