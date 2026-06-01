@@ -18,6 +18,8 @@ use std::time::{Duration, Instant};
 /// bootstrap chain (`dialog.lua`, `widgets/picker.lua`, …) would pull
 /// in UiHost-tier namespaces the core tests don't register.
 const BOOTSTRAP_LUA: &str = include_str!("../../../runtime/lua/smelt/_bootstrap.lua");
+const READ_PROCESS_OUTPUT_LUA: &str =
+    include_str!("../../../runtime/lua/smelt/tools/read_process_output.lua");
 
 /// Build a runtime with bootstrap evaluated. Tests that don't need
 /// host I/O can drive coroutines through this directly.
@@ -352,6 +354,69 @@ async fn process_run_kills_child_on_cancel() {
         elapsed < Duration::from_secs(3),
         "child should die fast after cancel; took {elapsed:?}"
     );
+}
+
+// -- read_process_output tool ---------------------------------------------
+
+#[test]
+fn read_process_output_tool_is_snapshot_only() {
+    let rt = fresh();
+    rt.lua
+        .load(
+            r#"
+            local raw_register = smelt.tools.register
+            CAPTURED_TOOL = nil
+            OUTPUT_ID = nil
+            smelt.tools.register = function(def)
+                CAPTURED_TOOL = def
+                return raw_register(def)
+            end
+            smelt.process.output = function(id)
+                OUTPUT_ID = id
+                return { text = "partial", running = true, elapsed_secs = 12 }
+            end
+            "#,
+        )
+        .exec()
+        .expect("install capture");
+    rt.lua
+        .load(READ_PROCESS_OUTPUT_LUA)
+        .set_name("smelt/tools/read_process_output.lua")
+        .exec()
+        .expect("load read_process_output");
+
+    let tool: mlua::Table = get_global(&rt, "CAPTURED_TOOL");
+    let parameters: mlua::Table = tool.get("parameters").expect("parameters");
+    let properties: mlua::Table = parameters.get("properties").expect("properties");
+    assert!(matches!(
+        properties.get::<mlua::Value>("wait").unwrap(),
+        mlua::Value::Nil
+    ));
+    assert!(matches!(
+        properties.get::<mlua::Value>("timeout_ms").unwrap(),
+        mlua::Value::Nil
+    ));
+
+    let args = rt.lua.create_table().unwrap();
+    args.set("id", "proc_1").unwrap();
+    // Older callers may still pass these fields; they must not make the tool wait.
+    args.set("wait", true).unwrap();
+    args.set("timeout_ms", 60_000).unwrap();
+
+    let execute: mlua::Function = tool.get("execute").expect("execute");
+    let started = Instant::now();
+    let result: mlua::Value = execute.call(args).expect("execute read_process_output");
+    assert!(
+        started.elapsed() < Duration::from_millis(100),
+        "read_process_output should return a snapshot immediately"
+    );
+
+    let mlua::Value::String(content) = result else {
+        panic!("expected string result, got {result:?}");
+    };
+    assert_eq!(content.to_string_lossy(), "partial\n[running]");
+    let output_id: String = get_global(&rt, "OUTPUT_ID");
+    assert_eq!(output_id, "proc_1");
 }
 
 // -- fs.watch -----------------------------------------------------------

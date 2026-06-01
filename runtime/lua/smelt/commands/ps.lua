@@ -1,5 +1,8 @@
 -- Built-in /ps command. Lists background shell commands and opens their logs.
 
+local DIALOG_HEIGHT = "60%"
+local META_KEY_WIDTH = 10
+
 local function format_duration(secs)
   secs = math.max(0, tonumber(secs) or 0)
   if secs < 60 then return string.format("%ds", secs) end
@@ -52,34 +55,34 @@ local function output_state(out)
   return "running"
 end
 
+local function meta_key(key)
+  return string.format("%-" .. tostring(META_KEY_WIDTH) .. "s", key .. ":")
+end
+
+local function meta_row(key, value, opts)
+  opts = opts or {}
+  return {
+    { text = meta_key(key), style = { dim = true } },
+    { text = tostring(value or ""), syntax = opts.syntax },
+  }
+end
+
 local function meta_lines(proc, out)
   local command = proc.command or ""
   local lines = {
-    {
-      { text = "pid:", style = { dim = true } },
-      { text = " " .. tostring(proc.pid or proc.id or "") },
-    },
-    {
-      { text = "status:", style = { dim = true } },
-      { text = " " .. output_state(out) },
-    },
-    {
-      { text = "duration:", style = { dim = true } },
-      { text = " " .. format_duration(proc.elapsed_secs) },
-    },
+    meta_row("pid", proc.pid or proc.id or ""),
+    meta_row("status", output_state(out)),
+    meta_row("duration", format_duration(proc.elapsed_secs)),
   }
 
   local first = true
   for line in (command .. "\n"):gmatch("([^\n]*)\n") do
     if first then
-      lines[#lines + 1] = {
-        { text = "command:", style = { dim = true } },
-        { text = " " .. line, syntax = "bash" },
-      }
+      lines[#lines + 1] = meta_row("command", line, { syntax = "bash" })
       first = false
     else
       lines[#lines + 1] = {
-        { text = "         ", style = { dim = true } },
+        { text = string.rep(" ", META_KEY_WIDTH), style = { dim = true } },
         { text = line, syntax = "bash" },
       }
     end
@@ -140,9 +143,9 @@ local function show_logs(proc)
   end
 
   smelt.dialog.open({
-    title      = "ps pid: " .. tostring(proc.pid or proc.id or ""),
-    max_height = "70%",
-    panels     = {
+    title  = "ps pid: " .. tostring(proc.pid or proc.id or ""),
+    height = DIALOG_HEIGHT,
+    panels = {
       { leaf = meta_leaf, height = "fit" },
       { leaf = log_leaf,  height = "fill" },
     },
@@ -190,7 +193,7 @@ local function open_ps()
     list_ctx = nil
     local picked = smelt.dialog.picker({
       title       = "ps",
-      height      = "60%",
+      height      = DIALOG_HEIGHT,
       placeholder = "filter processes…",
       items       = rows,
       render      = render_proc,

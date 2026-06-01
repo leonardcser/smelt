@@ -328,14 +328,23 @@ fn kill_process_group(_child: &tokio::process::Child) {}
 
 /// SIGKILL variant used by the process registry stop path (skips SIGTERM grace period).
 #[cfg(unix)]
-fn kill_group_sigkill(child: &tokio::process::Child) {
-    if let Some(pid) = child.id() {
-        // SAFETY: pid is a valid process group ID (set via process_group(0) at spawn).
-        unsafe {
-            libc::kill(-(pid as i32), libc::SIGKILL);
-        }
+fn kill_group_pid_sigkill(pid: u32) {
+    // SAFETY: background children are spawned with process_group(0), so the
+    // child's pid is also the process group id.
+    unsafe {
+        libc::kill(-(pid as i32), libc::SIGKILL);
     }
 }
+
+#[cfg(unix)]
+fn kill_group_sigkill(child: &tokio::process::Child) {
+    if let Some(pid) = child.id() {
+        kill_group_pid_sigkill(pid);
+    }
+}
+
+#[cfg(not(unix))]
+fn kill_group_pid_sigkill(_pid: u32) {}
 
 #[cfg(not(unix))]
 fn kill_group_sigkill(_child: &tokio::process::Child) {}
@@ -691,6 +700,10 @@ impl ProcessRegistry {
     pub fn clear(&self) {
         let mut map = self.0.processes.lock().unwrap();
         for p in map.values_mut() {
+            p.suppress_notify = true;
+            if let Some(pid) = p.pid {
+                kill_group_pid_sigkill(pid);
+            }
             if let Some(tx) = p.kill_tx.take() {
                 let _ = tx.try_send(());
             }
@@ -725,6 +738,23 @@ mod tests {
             kill_tx: None,
             finished_rx: finished_rx(finished),
             suppress_notify: false,
+        }
+    }
+
+    #[cfg(unix)]
+    fn process_exists(pid: u32) -> bool {
+        unsafe { libc::kill(pid as i32, 0) == 0 }
+    }
+
+    #[cfg(unix)]
+    async fn wait_for_process_exit(pid: u32) {
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
+        while process_exists(pid) {
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "process {pid} was still alive after registry clear"
+            );
+            tokio::time::sleep(Duration::from_millis(10)).await;
         }
     }
 
@@ -1022,6 +1052,24 @@ mod tests {
         r.clear();
         assert_eq!(r.running_count(), 0);
         assert!(r.list().is_empty());
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn registry_clear_kills_running_child_immediately() {
+        let registry = ProcessRegistry::new();
+        let child = spawn_shell_child("sleep 30", &ShellSpec::default()).unwrap();
+        let pid = child.id().expect("spawned child has pid");
+        let id = registry.child_id(&child);
+
+        registry.spawn(id, "sleep 30", child, Instant::now());
+        assert_eq!(registry.running_count(), 1);
+
+        registry.clear();
+
+        assert_eq!(registry.running_count(), 0);
+        assert!(registry.list().is_empty());
+        wait_for_process_exit(pid).await;
     }
 
     #[test]

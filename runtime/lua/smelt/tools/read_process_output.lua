@@ -1,9 +1,5 @@
 -- Built-in read_process_output tool. Lets the agent inspect background bash processes.
 
-local DEFAULT_TIMEOUT_MS = 30000
-local MAX_TIMEOUT_MS = 600000
-local POLL_MS = 100
-
 local function is_empty(t)
   return t == nil or next(t) == nil
 end
@@ -27,7 +23,7 @@ end
 
 smelt.tools.register({
   name = "read_process_output",
-  description = "Read buffered output from a background bash process by id without draining it. Can optionally wait for the process to finish.",
+  description = "Read the current buffered output from a background bash process by id without draining or waiting.",
   override = true,
   elapsed_visible = true,
   permission_defaults = { normal = "allow", plan = "allow", apply = "allow" },
@@ -35,8 +31,6 @@ smelt.tools.register({
     type = "object",
     properties = {
       id = { type = "string", description = "Background process id (usually the child pid returned by bash), e.g. 12345" },
-      wait = { type = "boolean", description = "Wait for the process to finish before returning (default: false)" },
-      timeout_ms = { type = "integer", description = "Max wait time in milliseconds when wait=true (default: 30000, max: 600000)" },
     },
     required = { "id" },
   },
@@ -55,23 +49,10 @@ smelt.tools.register({
       return { content = "missing required parameter: id", is_error = true }
     end
 
-    local wait = args.wait == true
-    local timeout_ms = math.min(args.timeout_ms or DEFAULT_TIMEOUT_MS, MAX_TIMEOUT_MS)
-    local elapsed = 0
-
-    while true do
-      local r = smelt.process.output(id)
-      if is_empty(r) then
-        return { content = "no process with id '" .. id .. "'", is_error = true }
-      end
-      if not wait or not r.running then
-        return format_result(r)
-      end
-      if elapsed >= timeout_ms then
-        return format_result(r)
-      end
-      smelt.sleep(POLL_MS)
-      elapsed = elapsed + POLL_MS
+    local r = smelt.process.output(id)
+    if is_empty(r) then
+      return { content = "no process with id '" .. id .. "'", is_error = true }
     end
+    return format_result(r)
   end,
 })

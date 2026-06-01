@@ -695,6 +695,11 @@ impl TuiApp {
         .assemble()
     }
 
+    pub(crate) fn stop_background_processes(&mut self) {
+        self.core.processes.clear();
+        while self.process_completion_rx.try_recv().is_ok() {}
+    }
+
     /// Fire due timer callbacks; re-arms recurring entries and drops one-shots.
     pub(crate) fn tick_timers(&mut self) {
         let due = self.core.timers.drain_due(self.lua.lua());
@@ -1689,6 +1694,7 @@ impl TuiApp {
                 .cells
                 .set_dyn("shutdown", std::rc::Rc::new(smelt_core::cells::EventStub));
             app.drain_cells_pending();
+            app.stop_background_processes();
             app.save_session();
         });
 
