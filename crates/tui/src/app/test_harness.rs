@@ -1236,7 +1236,7 @@ impl TestApp {
                 protocol::UiCommand::EngineAsk { id, .. } => Some(id),
                 _ => None,
             })
-            .last()
+            .next_back()
             .expect("compaction prepare request should issue EngineAsk");
 
         {

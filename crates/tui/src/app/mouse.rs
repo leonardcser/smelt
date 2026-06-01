@@ -68,6 +68,37 @@ pub(crate) fn focus_for_region_click(
     }
 }
 
+struct TranscriptMouseCell {
+    row: usize,
+    source_col: usize,
+    scroll_left: usize,
+    content_left: usize,
+}
+
+fn transcript_mouse_cell(
+    win: &crate::smelt_term::Window,
+    me: MouseEvent,
+    vp: crate::smelt_term::WindowViewport,
+    row_count: usize,
+) -> TranscriptMouseCell {
+    let rel_row = me.row.saturating_sub(vp.rect.top) as crate::smelt_term::RowIndex;
+    let abs_row = win.scroll_top.saturating_add(rel_row);
+    let row = (win.local_visual_row(abs_row) as usize).min(row_count.saturating_sub(1));
+
+    let content_left =
+        (vp.gutter_width as usize).saturating_add(win.config.gutters.pad_left as usize);
+    let viewport_col = me.column.saturating_sub(vp.rect.left) as usize;
+    let content_col = viewport_col.saturating_sub(content_left);
+    let scroll_left = win.scroll_left as usize;
+
+    TranscriptMouseCell {
+        row,
+        source_col: content_col.saturating_add(scroll_left),
+        scroll_left,
+        content_left,
+    }
+}
+
 impl TuiApp {
     // ── Mouse event dispatch ─────────────────────────────────────────────
     pub(crate) fn handle_mouse(&mut self, me: MouseEvent) -> EventOutcome {
@@ -392,18 +423,15 @@ impl TuiApp {
         rows: &[String],
         vp: crate::smelt_term::WindowViewport,
     ) -> MouseEvent {
-        let rel_row = me.row.saturating_sub(vp.rect.top) as usize;
-        let line_idx =
-            (self.transcript_win().scroll_top as usize + rel_row).min(rows.len().saturating_sub(1));
-        let rel_col = me.column.saturating_sub(vp.rect.left) as usize;
-        let scroll_left = self.transcript_win().scroll_left as usize;
-        let source_col = rel_col + scroll_left;
+        let cell = transcript_mouse_cell(self.transcript_win(), me, vp, rows.len());
         let snapped = self.snap_col_to_selectable(
-            line_idx,
-            source_col,
+            cell.row,
+            cell.source_col,
             self.core.config.settings.show_thinking,
         );
-        let screen_col = snapped.saturating_sub(scroll_left);
+        let screen_col = snapped
+            .saturating_sub(cell.scroll_left)
+            .saturating_add(cell.content_left);
         MouseEvent {
             column: vp.rect.left.saturating_add(screen_col as u16),
             ..me
@@ -543,6 +571,171 @@ mod tests {
     #[test]
     fn region_click_outside_does_not_change_focus() {
         assert_eq!(focus_for_region_click(HitRegion::Outside, true), None);
+    }
+
+    #[test]
+    fn transcript_click_after_tail_render_lands_on_clicked_screen_row() {
+        let mut app = crate::app::test_harness::TestApp::builder().build().app;
+        for i in 0..100 {
+            app.push_block(smelt_core::Block::Text {
+                content: format!("line {i}"),
+            });
+        }
+        app.transcript_win_mut().scroll_to_bottom();
+        app.render_normal_to(false, &mut std::io::sink());
+
+        let vp = app
+            .transcript_win()
+            .viewport
+            .expect("render populated transcript viewport");
+        let click_row = vp.rect.top.saturating_add(3);
+        let click_col = vp.rect.left;
+        let down = MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            row: click_row,
+            column: click_col,
+            modifiers: crossterm::event::KeyModifiers::NONE,
+        };
+        let up = MouseEvent {
+            kind: MouseEventKind::Up(MouseButton::Left),
+            ..down
+        };
+
+        app.handle_mouse(down);
+        app.render_normal_to(false, &mut std::io::sink());
+        app.handle_mouse(up);
+
+        let win = app.transcript_win();
+        assert_eq!(
+            win.cursor_screen_row(vp.rect.height),
+            Some(click_row - vp.rect.top),
+            "scroll_top={} local_scroll={} cursor_abs={} cursor_local={} cursor_col={} rows={:?}",
+            win.scroll_top,
+            win.local_visual_row(win.scroll_top),
+            win.cursor_abs_row(),
+            win.cursor_row(),
+            win.cursor_col(),
+            app.ui.buf(win.buf).unwrap().lines(),
+        );
+    }
+
+    #[test]
+    fn transcript_drag_after_tail_render_starts_from_clicked_row() {
+        let mut app = crate::app::test_harness::TestApp::builder().build().app;
+        for i in 0..100 {
+            app.push_block(smelt_core::Block::Text {
+                content: format!("line {i}"),
+            });
+        }
+        app.transcript_win_mut().scroll_to_bottom();
+        app.render_normal_to(false, &mut std::io::sink());
+
+        let vp = app
+            .transcript_win()
+            .viewport
+            .expect("render populated transcript viewport");
+        let top = app.transcript_win().scroll_top;
+        let start_rel = 2u16;
+        let end_rel = 4u16;
+        let start_local = app
+            .transcript_win()
+            .local_visual_row(top.saturating_add(start_rel as crate::smelt_term::RowIndex))
+            as usize;
+        let expected_start = app
+            .ui
+            .buf(app.transcript_win().buf)
+            .and_then(|buf| buf.get_line(start_local))
+            .unwrap_or("")
+            .to_string();
+        assert!(!expected_start.is_empty());
+
+        let down = MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            row: vp.rect.top.saturating_add(start_rel),
+            column: vp.rect.left,
+            modifiers: crossterm::event::KeyModifiers::NONE,
+        };
+        let drag = MouseEvent {
+            kind: MouseEventKind::Drag(MouseButton::Left),
+            row: vp.rect.top.saturating_add(end_rel),
+            ..down
+        };
+        let up = MouseEvent {
+            kind: MouseEventKind::Up(MouseButton::Left),
+            ..drag
+        };
+
+        app.handle_mouse(down);
+        app.render_normal_to(false, &mut std::io::sink());
+        app.handle_mouse(drag);
+        app.render_normal_to(false, &mut std::io::sink());
+        app.handle_mouse(up);
+
+        let yanked = app.core.clipboard.kill_ring.current();
+        assert!(
+            yanked.contains(&expected_start),
+            "selection should start at clicked row {expected_start:?}, got {yanked:?}"
+        );
+        assert!(
+            !yanked.contains("line 0"),
+            "selection started from the top of the transcript: {yanked:?}"
+        );
+    }
+
+    #[test]
+    fn transcript_click_uses_local_row_in_tail_projection() {
+        let mut app = crate::app::test_harness::TestApp::builder().build().app;
+        let buf_id = app.transcript_win().buf;
+        {
+            let buf = app.ui.buf_mut(buf_id).expect("transcript buffer");
+            buf.set_all_lines(vec!["alpha".into(), ">>>>target".into()]);
+            buf.add_highlight_group_with_meta(
+                1,
+                0,
+                4,
+                smelt_core::theme::intern("Normal"),
+                smelt_core::buffer::SpanMeta {
+                    selectable: false,
+                    copy_as: None,
+                },
+            );
+        }
+
+        let viewport = crate::smelt_term::WindowViewport::new(
+            crate::smelt_term::Rect::new(5, 3, 40, 2),
+            40,
+            22,
+            20,
+            None,
+        );
+        {
+            let win = app
+                .ui
+                .win_mut(crate::app::TRANSCRIPT_WIN)
+                .expect("transcript window");
+            win.set_virtual_rows(20, 22);
+            win.scroll_top = 20;
+            win.scroll_left = 0;
+            win.viewport = Some(viewport);
+        }
+
+        let down = MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            row: viewport.rect.top,
+            column: viewport.rect.left,
+            modifiers: crossterm::event::KeyModifiers::NONE,
+        };
+        let up = MouseEvent {
+            kind: MouseEventKind::Up(MouseButton::Left),
+            ..down
+        };
+
+        app.handle_content_mouse(down, 1);
+        app.handle_content_mouse(up, 1);
+
+        let win = app.transcript_win();
+        assert_eq!(win.cursor_abs_row(), 20);
+        assert_eq!(win.cursor_col(), 0);
     }
 
     #[test]

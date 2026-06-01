@@ -595,6 +595,10 @@ impl Window {
             .unwrap_or_else(|| buf.lines().len() as RowIndex)
     }
 
+    pub fn local_visual_row(&self, absolute_row: RowIndex) -> RowIndex {
+        self.local_row(absolute_row)
+    }
+
     fn local_row(&self, absolute_row: RowIndex) -> RowIndex {
         absolute_row.saturating_sub(self.row_base)
     }

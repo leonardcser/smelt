@@ -153,14 +153,17 @@ pub(crate) struct ProjectOutput {
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(crate) enum ScrollTarget {
+    /// Materialize the full transcript and scroll to an absolute row.
     Row(RowIndex),
+    /// Keep the current virtual projection when the requested viewport is already materialized.
+    VisibleRow(RowIndex),
     Tail,
 }
 
 impl ScrollTarget {
     fn as_scroll_top(self) -> RowIndex {
         match self {
-            Self::Row(row) => row,
+            Self::Row(row) | Self::VisibleRow(row) => row,
             Self::Tail => RowIndex::MAX,
         }
     }
@@ -262,9 +265,22 @@ impl TranscriptProjection {
             tail_viewport_rows: (scroll_target == ScrollTarget::Tail).then_some(viewport_rows),
         };
 
+        if let ScrollTarget::VisibleRow(row) = scroll_target {
+            if let Some(out) = self.reuse_visible_projection_for_row(
+                buf,
+                gen,
+                width,
+                show_thinking,
+                row,
+                viewport_rows,
+            ) {
+                return out;
+            }
+        }
+
         if self.project_key == Some(key) {
             let total_rows = match scroll_target {
-                ScrollTarget::Row(_) => buf.line_count() as RowIndex,
+                ScrollTarget::Row(_) | ScrollTarget::VisibleRow(_) => buf.line_count() as RowIndex,
                 ScrollTarget::Tail => self.visible_total_rows,
             };
             return ProjectOutput {
@@ -374,6 +390,40 @@ impl TranscriptProjection {
             row_base: 0,
             total_rows,
         }
+    }
+
+    fn reuse_visible_projection_for_row(
+        &self,
+        buf: &Buffer,
+        gen: u64,
+        width: u16,
+        show_thinking: bool,
+        row: RowIndex,
+        viewport_rows: u16,
+    ) -> Option<ProjectOutput> {
+        let prev = self.project_key?;
+        if prev.generation != gen
+            || prev.width != width
+            || prev.show_thinking != show_thinking
+            || prev.tail_viewport_rows.is_none()
+        {
+            return None;
+        }
+
+        let total_rows = self.visible_total_rows;
+        let clamped_scroll = clamp_scroll(row, total_rows, viewport_rows);
+        let materialized_end = self
+            .visible_row_base
+            .saturating_add(buf.line_count() as RowIndex);
+        let viewport_end = clamped_scroll.saturating_add(viewport_rows as RowIndex);
+        if clamped_scroll >= self.visible_row_base && viewport_end <= materialized_end {
+            return Some(ProjectOutput {
+                clamped_scroll,
+                row_base: self.visible_row_base,
+                total_rows,
+            });
+        }
+        None
     }
 
     #[allow(clippy::too_many_arguments)]

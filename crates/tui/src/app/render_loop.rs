@@ -30,8 +30,16 @@ impl TuiApp {
 
         self.ui.apply_tail_follow();
         self.ui.sync_scroll_links();
+        let transcript_captured = matches!(
+            self.ui.capture(),
+            Some(crate::smelt_term::HitTarget::Window(win)) if win == crate::app::TRANSCRIPT_WIN
+        );
         let transcript_scroll_target = if self.ui.should_follow_tail(crate::app::TRANSCRIPT_WIN) {
             crate::content::transcript_buf::ScrollTarget::Tail
+        } else if transcript_captured {
+            crate::content::transcript_buf::ScrollTarget::VisibleRow(
+                self.transcript_win().scroll_top,
+            )
         } else {
             crate::content::transcript_buf::ScrollTarget::Row(self.transcript_win().scroll_top)
         };
