@@ -348,9 +348,9 @@ fn replay_rendered(out: &mut LineBuilder, layout: &RenderedLayout, inner_width: 
     replay_node(out, layout, cap, inner_width, true)
 }
 
-/// Render a `RenderedLayout` directly into `out` (no tool-block gutter, no row cap)
-/// - used by the confirm dialog's preview pipeline, which renders into a fresh
-/// dialog-owned buffer instead of stamping into a transcript row.
+/// Render a `RenderedLayout` directly into `out` without a tool-block gutter
+/// or row cap. Used by the confirm dialog's preview pipeline, which renders
+/// into a fresh dialog-owned buffer instead of stamping into a transcript row.
 pub fn render_layout_into(out: &mut LineBuilder, layout: &RenderedLayout, width: u16) -> u16 {
     replay_node(out, layout, u16::MAX, width, false)
 }

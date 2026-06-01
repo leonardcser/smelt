@@ -236,10 +236,10 @@ pub struct Window {
     layout_key: Option<(u64, u16, bool)>,
     pub focusable: bool,
     /// Caret-style cursorline: paints `CursorLine` bg on the cursor row
-    /// **only when this window is focused**. Models Neovim's `'cursorline'`
-    /// - the cursor lives in this window, this is where it is. Off by
-    /// default. Set on caret leaves (transcript, code/diff viewers) where
-    /// an unfocused sibling pane should not show a stale cursor row.
+    /// **only when this window is focused**. Models Neovim's `'cursorline'`:
+    /// the cursor lives in this window, this is where it is. Off by default.
+    /// Set on caret leaves (transcript, code/diff viewers) where an unfocused
+    /// sibling pane should not show a stale cursor row.
     pub cursor_line: bool,
     /// List-style selection highlight: paints `CursorLine` bg on the row at
     /// `cursor_row` **regardless of focus**. Models "this is the active

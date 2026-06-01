@@ -8,8 +8,8 @@
 //!
 //! All timings are measured from "first byte written" to "flush() returns,"
 //! which is when the kernel has delivered all bytes to the TTY. The
-//! terminal's own rendering happens asynchronously and is not measured here
-//! - but on modern terminals the kernel delivery is the dominant cost at
+//! terminal's own rendering happens asynchronously and is not measured here,
+//! but on modern terminals the kernel delivery is the dominant cost at
 //! the user-space level.
 
 use std::io::{self, BufWriter, Write};

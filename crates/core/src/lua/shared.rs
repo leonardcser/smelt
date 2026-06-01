@@ -94,9 +94,9 @@ pub struct LuaShared {
     pub callbacks: Mutex<HashMap<u64, LuaHandle>>,
     /// Callbacks registered for `smelt.engine.ask`. Separate from
     /// `callbacks` so `fire_ask_callback` can't accidentally fire a
-    /// paint/win/overlay handler that happens to share an id namespace
-    /// - the two maps allocate ids from the same `next_id` counter but
-    /// each call_id only ever lands in one of them.
+    /// paint/win/overlay handler that happens to share an id namespace:
+    /// the two maps allocate ids from the same `next_id` counter but each
+    /// call_id only ever lands in one of them.
     pub ask_callbacks: Mutex<HashMap<u64, LuaHandle>>,
     pub next_id: AtomicU64,
     /// Starts at `LUA_BUF_ID_BASE` so Lua-allocated `BufId`s never collide with Rust-side buffers.
@@ -148,9 +148,9 @@ pub struct LuaShared {
     pub watchers: Mutex<HashMap<u64, crate::lua::watchers::WatcherEntry>>,
     pub next_watcher_id: AtomicU64,
     /// Current boot phase. Phase-sensitive APIs use this to gate their
-    /// behavior (refuse-when-late or warn-when-late). Defaults to `Early`
-    /// - the runtime promotes it to `Init` before autoload and `Running`
-    /// once the agent loop is live.
+    /// behavior (refuse-when-late or warn-when-late). Defaults to `Early`;
+    /// the runtime promotes it to `Init` before autoload and `Running` once
+    /// the agent loop is live.
     phase: AtomicU8,
 }
 

@@ -755,8 +755,8 @@ impl LuaRuntime {
     }
 
     /// Invoke every `smelt.lifecycle.on(event, fn)` callback in registration
-    /// order, then drop them. The host calls this at the corresponding phase
-    /// - `"ready"` after Lua bootstrap and argv parse, `"shutdown"` after the
+    /// order, then drop them. The host calls this at the corresponding phase:
+    /// `"ready"` after Lua bootstrap and argv parse, `"shutdown"` after the
     /// TUI tears down but before the process exits. Per-hook errors are
     /// returned so the caller can surface them as in-app notifications without
     /// aborting the remaining hooks.
