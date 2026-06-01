@@ -1,56 +1,44 @@
--- Plan-mode plugin: registers the `plan` mode, `exit_plan_mode` tool, and system prompt section.
+-- Plan-mode plugin: registers the `plan` mode and `exit_plan_mode` tool.
 
 smelt.mode.register({
   name = "plan",
   after = "normal",
   icon = "◇ ",
   hl_group = "SmeltModePlan",
-  note = "now in plan mode. Investigate and reason only; do not modify files or run mutating commands. Use read_file, glob, grep, read_process_output, and read-only bash. edit_file, write_file, and stop_process are unavailable.",
+  note = [[now in plan mode.
+
+Investigate and reason only. Do not modify files, write files, or run mutating commands.
+
+Allowed tools:
+- read_file, glob, grep, read_process_output
+- bash, but only for read-only commands
+- ask_user_question when requirements or trade-offs need user input
+- exit_plan_mode when the plan is ready for approval
+
+Unavailable or forbidden:
+- edit_file, write_file, stop_process
+- destructive shell commands, package installs, formatters, tests that write artifacts, or anything that changes the workspace
+
+Workflow:
+1. Understand the request and inspect relevant files.
+2. Reuse existing code, conventions, and utilities where possible.
+3. Compare viable approaches and pick the recommended one.
+4. Call exit_plan_mode with a concise plan_summary.
+
+The plan_summary should include:
+- context and intended outcome
+- recommended approach
+- critical files and code paths
+- existing functions/utilities to reuse
+- verification steps
+
+Your turn should only end with ask_user_question for clarification or exit_plan_mode with the final plan.]],
   permissions = {
     default_decision = "ask",
     allow_subcommands_by_default = false,
     ask_on_output_redirection = true,
   },
 })
-
-local PLAN_PROMPT = [[
-# Plan mode
-You are in PLAN mode. You must NOT make any edits, write files, or run any non-readonly tools.
-
-You may only use read-only tools: read_file, glob, grep, read_process_output, bash (read-only commands only).
-
-## Workflow
-
-### Phase 1: Understand
-- Understand the user's request by reading code and asking questions
-- Search for existing functions, utilities, and patterns that can be reused
-- Avoid proposing new code when suitable implementations already exist
-
-### Phase 2: Design
-- Design the implementation based on your findings
-- Consider multiple approaches and their trade-offs
-- Identify critical files and code paths
-
-### Phase 3: Review
-- Read critical files to deepen understanding
-- Ensure the design aligns with the user's original request
-- Use ask_user_question to clarify any remaining questions
-
-### Phase 4: Finalize
-- Call exit_plan_mode with your plan as the plan_summary argument
-- The plan should include:
-  - Context: why the change is being made and the intended outcome
-  - The recommended approach (not all alternatives)
-  - Paths of critical files to modify
-  - Existing functions and utilities to reuse
-  - How to verify/test the changes
-- Keep it concise enough to scan quickly, but detailed enough to execute
-
-## Rules
-- Your turn should only end with ask_user_question OR exit_plan_mode
-- Use ask_user_question ONLY to clarify requirements or choose between approaches
-- Use exit_plan_mode to submit the plan for approval -- do NOT ask about plan approval via text
-- Don't make large assumptions about user intent -- ask first]]
 
 
 local ADJECTIVES = {
@@ -191,12 +179,10 @@ end
 
 
 local function activate()
-  smelt.prompt.set_section("plan_mode", PLAN_PROMPT)
   register_exit_plan_mode()
 end
 
 local function deactivate()
-  smelt.prompt.remove_section("plan_mode")
   unregister_exit_plan_mode()
 end
 

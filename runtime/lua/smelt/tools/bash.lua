@@ -138,9 +138,6 @@ smelt.tools.register({
       local spans = { { text = line, syntax = "bash" } }
       if #lines == 0 then
         local suffix = args.background and "(background)" or ("(timeout: " .. format_timeout(timeout_ms) .. ")")
-        if not args.background and args.background_on_timeout == false then
-          suffix = suffix .. " (kill on timeout)"
-        end
         spans[#spans + 1] = {
           text = suffix,
           selectable = false,
