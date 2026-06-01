@@ -683,27 +683,13 @@ impl TuiApp {
                 let permissions = self.active_permissions();
 
                 let summary_plain = req.summary.as_plain_text();
-                let outcome = permissions.evaluate_tool(
+                let outcome = permissions.evaluate_tool_with_approvals(
                     self.core.config.mode.clone(),
                     smelt_core::permissions::ToolOrigin::Lua,
                     &req.tool_name,
                     &req.args,
+                    &summary_plain,
                 );
-                let auto_approved = {
-                    let rt = permissions.approvals.read().unwrap();
-                    rt.is_auto_approved_for_outcome(
-                        permissions,
-                        self.core.config.mode.clone(),
-                        &req.tool_name,
-                        &summary_plain,
-                        &outcome,
-                    )
-                };
-                if auto_approved {
-                    self.send_permission_decision(req.request_id, true, None);
-                    return true;
-                }
-
                 if outcome.decision == Decision::Allow {
                     self.send_permission_decision(req.request_id, true, None);
                     return true;

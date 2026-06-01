@@ -400,6 +400,24 @@ impl Permissions {
         })
     }
 
+    pub fn evaluate_tool_with_approvals(
+        &self,
+        mode: AgentMode,
+        origin: ToolOrigin,
+        tool_name: &str,
+        args: &HashMap<String, Value>,
+        summary: &str,
+    ) -> PermissionOutcome {
+        let mut outcome = self.evaluate_tool(mode.clone(), origin, tool_name, args);
+        if outcome.decision == Decision::Ask {
+            let approvals = self.approvals.read().unwrap();
+            if approvals.is_auto_approved_for_outcome(self, mode, tool_name, summary, &outcome) {
+                outcome.decision = Decision::Allow;
+            }
+        }
+        outcome
+    }
+
     pub fn evaluate_request(&self, request: PermissionRequest<'_>) -> PermissionOutcome {
         let base = match request.origin {
             ToolOrigin::Mcp => {

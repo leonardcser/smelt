@@ -337,32 +337,20 @@ impl TuiApp {
                 } else {
                     let permissions = self.active_permissions();
                     let active_mode = self.core.config.mode.clone();
-                    let outcome = permissions.evaluate_tool(
-                        active_mode.clone(),
+                    let summary_text = hooks.summary.as_plain_text();
+                    let label = if summary_text.is_empty() {
+                        tool_name.clone()
+                    } else {
+                        summary_text
+                    };
+                    let outcome = permissions.evaluate_tool_with_approvals(
+                        active_mode,
                         smelt_core::permissions::ToolOrigin::Lua,
                         &tool_name,
                         &args,
+                        &label,
                     );
-                    let mut decision = outcome.decision.clone();
-                    if decision == protocol::Decision::Ask {
-                        let summary_text = hooks.summary.as_plain_text();
-                        let label = if summary_text.is_empty() {
-                            tool_name.clone()
-                        } else {
-                            summary_text
-                        };
-                        let rt = permissions.approvals.read().unwrap();
-                        if rt.is_auto_approved_for_outcome(
-                            permissions,
-                            active_mode,
-                            &tool_name,
-                            &label,
-                            &outcome,
-                        ) {
-                            decision = protocol::Decision::Allow;
-                        }
-                    }
-                    decision
+                    outcome.decision
                 };
                 let evaluation = protocol::ToolEvaluation { decision, hooks };
                 self.core
