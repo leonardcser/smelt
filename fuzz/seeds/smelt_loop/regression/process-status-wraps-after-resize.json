@@ -1,0 +1,21 @@
+{
+  "_about": "Transcript layout seed: a background process status line can exceed the transcript viewport after a narrow resize; process status rendering must wrap to the active layout width instead of producing a preformatted clipped row.",
+  "mode": "apply",
+  "ops": [
+    {
+      "kind": "engine_process_completed",
+      "data": {
+        "exit_code": -994351274,
+        "id": "esholdt.command@s2.tog"
+      }
+    },
+    {
+      "kind": "resize",
+      "data": {
+        "h": 0,
+        "w": 62
+      }
+    }
+  ],
+  "vim": false
+}
