@@ -2211,6 +2211,12 @@ mod tests {
         protocol::Message::assistant(Some(protocol::Content::text(text)), None, None)
     }
 
+    fn drive_lua_tasks(app: &mut TestApp) {
+        for _ in 0..4 {
+            app.feed_one(SourceEvent::LuaWakeup);
+        }
+    }
+
     fn respond_ask_with_text(app: &mut TestApp, id: u64, text: &str) {
         let _g = crate::lua::install_app_ptr(&mut app.app);
         app.app
@@ -2599,6 +2605,57 @@ mod tests {
     }
 
     // ── Escape sequence semantics ────────────────────────────────────
+
+    #[test]
+    fn vim_insert_double_esc_opens_rewind_dialog_when_idle() {
+        let mut app = TestApp::builder().with_vim(true).build();
+        app.push_user_block("write the parser");
+        assert_eq!(app.state().vim_mode, VimMode::Insert);
+
+        app.press(KeyCode::Esc);
+        let after_first = app.state();
+        assert_eq!(after_first.vim_mode, VimMode::Normal);
+        assert!(
+            after_first.focused_overlay.is_none(),
+            "first Esc is only the local Vim action"
+        );
+
+        app.press(KeyCode::Esc);
+        drive_lua_tasks(&mut app);
+
+        assert!(
+            app.state().focused_overlay.is_some(),
+            "second Esc should complete the idle Esc-Esc rewind chord"
+        );
+    }
+
+    #[test]
+    fn idle_placeholder_dismissal_does_not_swallow_second_escape_rewind() {
+        let mut app = TestApp::builder().build();
+        app.push_user_block("write the parser");
+        app.install_prompt_placeholder(
+            "ghost".to_string(),
+            Vec::new(),
+            vec![crate::smelt_term::KeyBind::new(
+                KeyCode::Esc,
+                KeyModifiers::NONE,
+            )],
+        );
+
+        app.press(KeyCode::Esc);
+        assert!(
+            app.state().focused_overlay.is_none(),
+            "first Esc only dismisses the placeholder"
+        );
+
+        app.press(KeyCode::Esc);
+        drive_lua_tasks(&mut app);
+
+        assert!(
+            app.state().focused_overlay.is_some(),
+            "second Esc should still complete the idle Esc-Esc rewind chord"
+        );
+    }
 
     #[test]
     fn vim_insert_double_esc_cancels_running_agent_on_second_press() {

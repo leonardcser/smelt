@@ -623,19 +623,16 @@ impl TuiApp {
                     now,
                 )
             };
-            self.timers.pending_chord = None;
             return self.dispatch_input_action(action);
         }
 
         if let Some(outcome) =
             self.dispatch_placeholder_key(self.well_known.prompt, KeyCode::Esc, modifiers)
         {
-            self.timers.pending_chord = None;
             return outcome;
         }
 
         if let Some(outcome) = self.dismiss_notification_for_esc() {
-            self.timers.pending_chord = None;
             return outcome;
         }
 
