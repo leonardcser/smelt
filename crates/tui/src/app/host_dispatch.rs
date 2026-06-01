@@ -1,14 +1,6 @@
 //! Drain `engine::HostCall` requests and run the matching Lua hooks
 //! on the TUI main thread. Each `HostCall` carries its own
 //! `oneshot::Sender` for the reply; we send back at most once.
-//!
-//! Phase A handles `ProviderRequest` / `ProviderResponse`. The
-//! `DispatchTool` / `EvalHooks` / `AskPermission` variants are
-//! reserved for Phase B, which migrates today's
-//! `EngineEvent::*Request` + `UiCommand::*Response` pairs onto this
-//! channel. The engine never emits them yet, so the match arms here
-//! exist only to keep the dispatcher exhaustive against future
-//! additions to `HostCall`.
 
 use crate::app::TuiApp;
 use engine::HostCall;
@@ -67,14 +59,6 @@ impl TuiApp {
             } => {
                 self.dispatch_prepare_request(messages, estimated_tokens, reply);
             }
-            // Phase B targets. The engine doesn't emit these on the host
-            // channel yet - they still travel as `EngineEvent::*Request`
-            // pairs handled in `engine_events.rs`. Once migrated, the
-            // existing match arms there get deleted and the logic lands
-            // here, sharing the same dispatcher loop.
-            HostCall::DispatchTool { reply, .. } => drop(reply),
-            HostCall::EvalHooks { reply, .. } => drop(reply),
-            HostCall::AskPermission { reply, .. } => drop(reply),
         }
     }
 

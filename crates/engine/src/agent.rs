@@ -30,10 +30,6 @@ pub(crate) async fn engine_task(
     event_tx: mpsc::UnboundedSender<EngineEvent>,
     host_tx: mpsc::UnboundedSender<crate::host::HostCall>,
 ) {
-    // Phase A: `host_tx` is plumbed into each `Turn` for provider
-    // request/response hooks. Phase B migrates the existing
-    // ToolDispatch / ToolHooks / RequestPermission RPCs onto it and
-    // removes their `UiCommand::*Response` variants.
     // Some openai-compatible endpoints gate on User-Agent (e.g. api.kimi.com).
     // Per-request header() calls (Copilot, Codex) still override this.
     let client = reqwest::Client::builder()
@@ -567,9 +563,7 @@ struct Turn<'a> {
     dispatcher: &'a dyn ToolDispatcher,
     cmd_rx: &'a mut mpsc::UnboundedReceiver<UiCommand>,
     event_tx: &'a mpsc::UnboundedSender<EngineEvent>,
-    /// Host-callback channel. Used for `smelt.provider.middleware` round-trips
-    /// (and, in Phase B, the legacy `ToolDispatch`/`ToolHooks`/`Permission`
-    /// RPCs once they're migrated off `EngineEvent::*Request`/`UiCommand::*Response`).
+    /// Host-callback channel for provider middleware and request preparation.
     host_tx: &'a mpsc::UnboundedSender<crate::host::HostCall>,
     config: &'a EngineConfig,
     http_client: &'a reqwest::Client,

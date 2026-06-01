@@ -21,7 +21,7 @@ pub(crate) mod test_util;
 pub mod tools;
 pub(crate) mod trim;
 
-pub use host::{HostCall, PermissionDecision};
+pub use host::HostCall;
 use protocol::{EngineEvent, UiCommand};
 use std::path::PathBuf;
 use std::sync::Arc;

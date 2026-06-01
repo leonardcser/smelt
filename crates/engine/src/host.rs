@@ -11,9 +11,7 @@
 //! plus a handler arm on the consumer side - no protocol churn, no pending
 //! HashMap on the engine, no `*Response` variants on `UiCommand`.
 
-use protocol::{AgentMode, Message, ToolHooks, ToolOutcome};
-use serde_json::Value;
-use std::collections::HashMap;
+use protocol::Message;
 use tokio::sync::oneshot;
 
 /// One synchronous request from the engine to the host (TUI / headless).
@@ -22,34 +20,6 @@ use tokio::sync::oneshot;
 /// to a default; both paths are intentional - dropping a `reply` is a
 /// "no-op" signal.
 pub enum HostCall {
-    /// Execute a Lua-defined tool. Engine awaits the `ToolOutcome`.
-    DispatchTool {
-        call_id: String,
-        tool_name: String,
-        args: HashMap<String, Value>,
-        reply: oneshot::Sender<ToolOutcome>,
-    },
-
-    /// Evaluate a Lua tool's permission hooks
-    /// (`summary`, `approval_patterns`, `preflight`).
-    EvalHooks {
-        call_id: String,
-        tool_name: String,
-        args: HashMap<String, Value>,
-        mode: AgentMode,
-        reply: oneshot::Sender<ToolHooks>,
-    },
-
-    /// Surface an Ask-tier tool decision to the user.
-    /// `reply` carries `(approved, optional_reason_message)`.
-    AskPermission {
-        call_id: String,
-        tool_name: String,
-        args: HashMap<String, Value>,
-        description: String,
-        reply: oneshot::Sender<PermissionDecision>,
-    },
-
     /// Run `smelt.provider.middleware{on_request=...}` hooks against
     /// the chat history about to be sent. `Some(msgs)` replaces the
     /// engine's slice; `None` leaves it untouched. Hooks see the full
@@ -90,11 +60,4 @@ pub enum HostCall {
         estimated_tokens: u32,
         reply: oneshot::Sender<Option<Vec<Message>>>,
     },
-}
-
-/// Outcome of an `AskPermission` round-trip.
-#[derive(Debug, Clone)]
-pub struct PermissionDecision {
-    pub approved: bool,
-    pub message: Option<String>,
 }
