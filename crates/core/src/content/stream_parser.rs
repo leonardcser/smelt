@@ -33,6 +33,10 @@ impl StreamParser {
     }
 
     pub fn sync_active_tool_elapsed(&self, history: &mut BlockHistory) {
+        self.sync_active_tool_elapsed_at(history, Instant::now());
+    }
+
+    pub fn sync_active_tool_elapsed_at(&self, history: &mut BlockHistory, now: Instant) {
         let mut changed = false;
         for tool in &self.active_tools {
             let Some(state) = history.tool_states.get_mut(&tool.call_id) else {
@@ -41,7 +45,7 @@ impl StreamParser {
             if state.status != ToolStatus::Pending {
                 continue;
             }
-            let elapsed = tool.elapsed();
+            let elapsed = tool.elapsed_at(now);
             if elapsed_bucket(state.elapsed) == elapsed_bucket(Some(elapsed)) {
                 continue;
             }
@@ -52,6 +56,22 @@ impl StreamParser {
         }
         if changed {
             history.bump_generation();
+        }
+    }
+
+    pub fn set_active_tools_paused(&mut self, history: &BlockHistory, paused: bool, now: Instant) {
+        for tool in &mut self.active_tools {
+            if !matches!(
+                history.tool_states.get(&tool.call_id).map(|s| s.status),
+                Some(ToolStatus::Pending)
+            ) {
+                continue;
+            }
+            if paused {
+                tool.pause(now);
+            } else {
+                tool.resume(now);
+            }
         }
     }
 
@@ -378,11 +398,8 @@ impl StreamParser {
         };
         let block_id = history.push_with_state(block, call_id.clone(), state);
         history.set_status(block_id, Status::Streaming);
-        self.active_tools.push(ActiveTool {
-            call_id,
-            block_id,
-            start_time,
-        });
+        self.active_tools
+            .push(ActiveTool::new(call_id, block_id, start_time));
     }
 
     fn resolve_active_call_id(&self, history: &BlockHistory, call_id: &str) -> Option<String> {
@@ -439,15 +456,23 @@ impl StreamParser {
             return;
         };
         if let Some(active) = self.active_tools.iter_mut().find(|t| t.call_id == cid) {
-            if matches!(
-                history.tool_states.get(&cid).map(|s| s.status),
-                Some(ToolStatus::Confirm)
-            ) && status == ToolStatus::Pending
-            {
-                active.start_time = now;
+            let previous = history.tool_states.get(&cid).map(|s| s.status);
+            match (previous, status) {
+                (_, ToolStatus::Confirm) => active.pause(now),
+                (Some(ToolStatus::Confirm), ToolStatus::Pending) => active.resume(now),
+                _ => {}
             }
         }
-        Self::update_tool_state(history, &cid, |state| state.status = status);
+        Self::update_tool_state(history, &cid, |state| {
+            state.status = status;
+            if status == ToolStatus::Confirm {
+                state.elapsed = self
+                    .active_tools
+                    .iter()
+                    .find(|t| t.call_id == cid)
+                    .map(|tool| tool.elapsed_at(now));
+            }
+        });
     }
 
     pub fn set_active_user_message(
@@ -469,16 +494,19 @@ impl StreamParser {
         status: ToolStatus,
         output: Option<ToolOutputRef>,
         engine_elapsed: Option<Duration>,
+        now: Instant,
     ) {
         let Some(cid) = self.resolve_active_call_id(history, call_id) else {
             return;
         };
         let active_idx = self.active_tools.iter().position(|t| t.call_id == cid);
+        // Active tools use the UI timer so elapsed excludes time spent in
+        // blocking dialogs; replayed/completed tools keep engine-provided elapsed.
         let elapsed = if status == ToolStatus::Denied {
             None
         } else if let Some(idx) = active_idx {
             let tool = &self.active_tools[idx];
-            engine_elapsed.or(Some(tool.elapsed()))
+            Some(tool.elapsed_at(now))
         } else {
             engine_elapsed
         };
@@ -497,16 +525,21 @@ impl StreamParser {
     }
 
     pub fn finalize_active_tools(&mut self, history: &mut BlockHistory) {
-        self.finalize_active_tools_as(history, ToolStatus::Err);
+        self.finalize_active_tools_at(history, ToolStatus::Err, Instant::now());
     }
 
-    fn finalize_active_tools_as(&mut self, history: &mut BlockHistory, status: ToolStatus) {
+    fn finalize_active_tools_at(
+        &mut self,
+        history: &mut BlockHistory,
+        status: ToolStatus,
+        now: Instant,
+    ) {
         let tools: Vec<ActiveTool> = self.active_tools.drain(..).collect();
         for tool in tools {
             let elapsed = if status == ToolStatus::Denied {
                 None
             } else {
-                Some(tool.elapsed())
+                Some(tool.elapsed_at(now))
             };
             history.set_status(tool.block_id, Status::Done);
             let cid = tool.call_id.clone();
@@ -863,8 +896,88 @@ mod tests {
         );
         let tool_block_id = history.order[0];
         assert_eq!(history.status(tool_block_id), Status::Streaming);
-        parser.finish_tool(&mut history, "c1", ToolStatus::Ok, None, None);
+        parser.finish_tool(
+            &mut history,
+            "c1",
+            ToolStatus::Ok,
+            None,
+            None,
+            Instant::now(),
+        );
         assert_eq!(history.status(tool_block_id), Status::Done);
+    }
+
+    #[test]
+    fn tool_elapsed_pauses_while_waiting_for_confirm() {
+        let (mut parser, mut history) = setup();
+        let start = Instant::now();
+        parser.start_tool(
+            &mut history,
+            "c1".into(),
+            "bash".into(),
+            "bash".into(),
+            HashMap::new(),
+            start,
+        );
+
+        parser.sync_active_tool_elapsed_at(&mut history, start + Duration::from_secs(2));
+        assert_eq!(
+            history.tool_states["c1"].elapsed,
+            Some(Duration::from_secs(2))
+        );
+
+        parser.set_active_status(
+            &mut history,
+            "c1",
+            ToolStatus::Confirm,
+            start + Duration::from_secs(2),
+        );
+        parser.sync_active_tool_elapsed_at(&mut history, start + Duration::from_secs(12));
+        assert_eq!(
+            history.tool_states["c1"].elapsed,
+            Some(Duration::from_secs(2))
+        );
+
+        parser.set_active_status(
+            &mut history,
+            "c1",
+            ToolStatus::Pending,
+            start + Duration::from_secs(12),
+        );
+        parser.sync_active_tool_elapsed_at(&mut history, start + Duration::from_secs(15));
+        assert_eq!(
+            history.tool_states["c1"].elapsed,
+            Some(Duration::from_secs(5))
+        );
+    }
+
+    #[test]
+    fn tool_elapsed_pauses_while_blocking_overlay_is_open() {
+        let (mut parser, mut history) = setup();
+        let start = Instant::now();
+        parser.start_tool(
+            &mut history,
+            "c1".into(),
+            "bash".into(),
+            "bash".into(),
+            HashMap::new(),
+            start,
+        );
+
+        parser.sync_active_tool_elapsed_at(&mut history, start + Duration::from_secs(1));
+        parser.set_active_tools_paused(&history, true, start + Duration::from_secs(1));
+        parser.sync_active_tool_elapsed_at(&mut history, start + Duration::from_secs(8));
+        assert_eq!(
+            history.tool_states["c1"].elapsed,
+            Some(Duration::from_secs(1))
+        );
+
+        parser.set_active_tools_paused(&history, false, start + Duration::from_secs(8));
+        parser.sync_active_tool_elapsed_at(&mut history, start + Duration::from_secs(10));
+        assert_eq!(
+            history.tool_states["c1"].elapsed,
+            Some(Duration::from_secs(3))
+        );
     }
 
     // -- Exec lifecycle -----------------------------------------------

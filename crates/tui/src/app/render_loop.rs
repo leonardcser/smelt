@@ -79,7 +79,7 @@ impl TuiApp {
         // Freeze timer/spinner while a blocking dialog is up. Done before
         // Lua renderers run so the prompt top-bar indicator they paint
         // this frame already reflects the pause.
-        self.working.set_paused(self.focused_overlay_blocks_agent());
+        self.set_agent_blocked_paused(self.focused_overlay_blocks_agent());
 
         {
             let _p = smelt_perf::perf::begin("compositor:lua_renderers");

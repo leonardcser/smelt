@@ -2,14 +2,15 @@
 //! result. Separate slots prevent the render loop from mistaking a completed
 //! turn for an ongoing animation (which would pin CPU at 60 Hz).
 
+use crate::paused_timer::PausedTimer;
 use engine::clock::Clock;
 use protocol::TurnMeta;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-/// Phase of the currently-running turn. The spinner animates based on
-/// `since` and the phase; `Retrying` additionally carries a delay and
-/// attempt counter for the countdown display.
+/// Phase of the currently-running turn. The spinner animates from the
+/// live turn's elapsed timer and the phase; `Retrying` additionally carries
+/// a delay and attempt counter for the countdown display.
 #[derive(Clone, Copy, PartialEq)]
 pub enum TurnPhase {
     Working,
@@ -56,29 +57,17 @@ pub enum TurnOutcome {
 /// A turn that is currently running.
 struct LiveTurn {
     phase: TurnPhase,
-    /// Anchor for elapsed math. Shifted forward by the pause duration
-    /// on resume, so `since.elapsed()` is the correct paused-aware
-    /// elapsed whenever `pause_started` is `None`.
-    since: Instant,
+    timer: PausedTimer,
     /// Absolute time at which a `Retrying` phase ends. `None` for
     /// other phases.
     retry_deadline: Option<Instant>,
     tps_samples: Vec<f64>,
     last_spinner_frame: usize,
-    /// Some(t) while paused (blocking dialog up). Timer + spinner
-    /// freeze; `since` gets shifted forward by `t.elapsed()` on resume.
-    pause_started: Option<Instant>,
 }
 
 impl LiveTurn {
-    /// Elapsed time the user sees: frozen at the moment of pause while
-    /// `pause_started` is set, otherwise `now - since` (paused-aware
-    /// because resume shifts `since` forward by the pause duration).
     fn effective_elapsed(&self, now: Instant) -> Duration {
-        match self.pause_started {
-            Some(t) => t.duration_since(self.since),
-            None => now.duration_since(self.since),
-        }
+        self.timer.elapsed_at(now)
     }
 }
 
@@ -106,7 +95,7 @@ impl WorkingState {
     }
 
     /// Start a new live turn, or update the phase of the currently-
-    /// running one (keeps `since` and accumulated `tps_samples`).
+    /// running one (keeps elapsed time and accumulated `tps_samples`).
     pub fn begin(&mut self, phase: TurnPhase) {
         let now = self.clock.instant_now();
         let retry_deadline = match phase {
@@ -121,11 +110,10 @@ impl WorkingState {
             None => {
                 self.live = Some(LiveTurn {
                     phase,
-                    since: now,
+                    timer: PausedTimer::new(now),
                     retry_deadline,
                     tps_samples: Vec::new(),
                     last_spinner_frame: usize::MAX,
-                    pause_started: None,
                 });
                 self.last = None;
             }
@@ -164,7 +152,7 @@ impl WorkingState {
     /// decide `Idle` / `Busy` / `Done` / `Interrupted`.
     pub fn engine_state(&self) -> Option<WorkState> {
         let live = self.live.as_ref()?;
-        if live.pause_started.is_some() {
+        if live.timer.is_paused() {
             return Some(WorkState::Paused);
         }
         Some(match live.phase {
@@ -175,7 +163,7 @@ impl WorkingState {
 
     pub fn phase_label(&self) -> Option<&'static str> {
         let live = self.live.as_ref()?;
-        if live.pause_started.is_some() {
+        if live.timer.is_paused() {
             return Some("paused");
         }
         Some(match live.phase {
@@ -218,9 +206,8 @@ impl WorkingState {
         }
     }
 
-    /// Elapsed time for the display - `since` for a live turn,
-    /// archived `elapsed` otherwise. Live elapsed excludes time
-    /// during which a blocking dialog paused the turn.
+    /// Elapsed time for the display: paused-aware elapsed for a live turn,
+    /// archived `elapsed` otherwise.
     pub fn elapsed(&self) -> Option<Duration> {
         if let Some(live) = self.live.as_ref() {
             Some(live.effective_elapsed(self.clock.instant_now()))
@@ -230,21 +217,16 @@ impl WorkingState {
     }
 
     /// Toggle the paused state on the live turn (if any). While paused,
-    /// `effective_elapsed` and the spinner freeze. On resume, `since`
-    /// is shifted forward by the pause duration so subsequent elapsed
-    /// reads are still correct. Idempotent.
+    /// elapsed time and the spinner freeze. Idempotent.
     pub fn set_paused(&mut self, paused: bool) {
         let now = self.clock.instant_now();
         let Some(live) = self.live.as_mut() else {
             return;
         };
-        match (paused, live.pause_started) {
-            (true, None) => live.pause_started = Some(now),
-            (false, Some(t)) => {
-                live.since += now.duration_since(t);
-                live.pause_started = None;
-            }
-            _ => {}
+        if paused {
+            live.timer.pause(now);
+        } else {
+            live.timer.resume(now);
         }
     }
 
@@ -470,7 +452,7 @@ mod tests {
     }
 
     #[test]
-    fn pause_resume_shifts_since_so_elapsed_excludes_paused_window() {
+    fn pause_resume_excludes_paused_window_from_elapsed() {
         let (clock, mut s) = fixture();
         s.begin(TurnPhase::Working);
         clock.advance(Duration::from_millis(100));
@@ -570,7 +552,7 @@ mod tests {
     }
 
     #[test]
-    fn engine_state_paused_when_pause_started() {
+    fn engine_state_paused_when_timer_paused() {
         let (_clock, mut s) = fixture();
         s.begin(TurnPhase::Working);
         s.set_paused(true);

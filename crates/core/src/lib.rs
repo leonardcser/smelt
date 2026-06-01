@@ -26,6 +26,7 @@ pub mod mcp;
 pub mod messages;
 pub mod notebook;
 pub mod path;
+pub(crate) mod paused_timer;
 pub mod permissions;
 pub mod process;
 pub mod runtime;

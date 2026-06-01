@@ -2,6 +2,7 @@
 //! and mutable sidecar state (tool output, exec output). Held inside
 //! `app::transcript::Transcript`, which adds streaming and paint orchestration.
 
+use crate::paused_timer::PausedTimer;
 use std::collections::{HashMap, HashSet};
 use std::time::{Duration, Instant};
 
@@ -9,12 +10,28 @@ use std::time::{Duration, Instant};
 pub struct ActiveTool {
     pub call_id: String,
     pub(crate) block_id: BlockId,
-    pub(crate) start_time: Instant,
+    timer: PausedTimer,
 }
 
 impl ActiveTool {
-    pub fn elapsed(&self) -> Duration {
-        self.start_time.elapsed()
+    pub fn new(call_id: String, block_id: BlockId, start_time: Instant) -> Self {
+        Self {
+            call_id,
+            block_id,
+            timer: PausedTimer::new(start_time),
+        }
+    }
+
+    pub fn elapsed_at(&self, now: Instant) -> Duration {
+        self.timer.elapsed_at(now)
+    }
+
+    pub fn pause(&mut self, now: Instant) {
+        self.timer.pause(now);
+    }
+
+    pub fn resume(&mut self, now: Instant) {
+        self.timer.resume(now);
     }
 }
 

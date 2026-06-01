@@ -154,12 +154,14 @@ impl TuiApp {
         output: Option<ToolOutputRef>,
         engine_elapsed: Option<Duration>,
     ) {
+        let now = self.core.clock.instant_now();
         self.parser.finish_tool(
             &mut self.transcript.history,
             call_id,
             status,
             output,
             engine_elapsed,
+            now,
         );
     }
 
@@ -343,6 +345,13 @@ impl TuiApp {
             .finalize_active_tools(&mut self.transcript.history);
     }
 
+    pub(crate) fn set_agent_blocked_paused(&mut self, paused: bool) {
+        let now = self.core.clock.instant_now();
+        self.working.set_paused(paused);
+        self.parser
+            .set_active_tools_paused(&self.transcript.history, paused, now);
+    }
+
     pub(crate) fn apply_pending_history_appends_for_request(&mut self) {
         let appends = std::mem::take(&mut self.pending_history_appends);
         for append in appends {
@@ -458,8 +467,9 @@ impl TuiApp {
     ) -> TranscriptData {
         let gutters = self.transcript_gutters();
         let tw = (gutters.content_width(width as u16) as usize).max(1);
+        let now = self.core.clock.instant_now();
         self.parser
-            .sync_active_tool_elapsed(&mut self.transcript.history);
+            .sync_active_tool_elapsed_at(&mut self.transcript.history, now);
         // Run plugin `render` hooks on the main thread (Lua is single-threaded) and stash
         // the resulting owned buffers on `ToolState.render_cache`. Worker layout below
         // reads those buffers without touching `app.ui` or the Lua VM. Tail-follow asks
