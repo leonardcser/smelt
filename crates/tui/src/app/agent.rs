@@ -469,9 +469,7 @@ impl TuiApp {
             Some(c) => format!("exited with code {c}"),
             None => "exited".to_string(),
         };
-        let note = format!(
-            "Background process {id} {status}. Use read_process_output with id {id} to inspect its output."
-        );
+        let note = format!("Background process {id} {status}.");
         if self.agent_is_running() {
             self.queue_history_append(crate::app::PendingHistoryAppend::ProcessStatus { note });
         } else if self.busy_stack.is_busy() {
@@ -875,7 +873,7 @@ mod tests {
         assert_eq!(user_blocks(&app), Vec::<String>::new());
         assert_eq!(
             process_status_blocks(&app),
-            vec!["Background process 1234 finished successfully. Use read_process_output with id 1234 to inspect its output."]
+            vec!["Background process 1234 finished successfully."]
         );
     }
 
@@ -894,14 +892,14 @@ mod tests {
         ));
         assert_eq!(
             app.app.pending_history_appends[0].history_note(),
-            "Background process 4242 exited with code 9. Use read_process_output with id 4242 to inspect its output."
+            "Background process 4242 exited with code 9."
         );
     }
 
     #[test]
     fn queued_process_status_starts_process_status_turn() {
         let mut app = crate::app::test_harness::TestApp::builder().build();
-        let note = "Background process 77 exited. Use read_process_output with id 77 to inspect its output.".to_string();
+        let note = "Background process 77 exited.".to_string();
 
         app.app
             .start_queued_input(crate::app::QueuedInput::ProcessStatus(note.clone()));

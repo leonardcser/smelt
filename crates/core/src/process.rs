@@ -356,6 +356,7 @@ struct Process {
     finished_at: Option<Instant>,
     kill_tx: Option<mpsc::Sender<()>>,
     finished_rx: watch::Receiver<bool>,
+    suppress_notify: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -503,6 +504,7 @@ impl ProcessRegistry {
                 finished_at: None,
                 kill_tx: Some(kill_tx),
                 finished_rx,
+                suppress_notify: false,
             };
             for line in initial_lines {
                 process.push_line(line);
@@ -523,21 +525,25 @@ impl ProcessRegistry {
                     return;
                 }
                 completion_sent = true;
-                let tx = {
+                let should_notify = {
                     let mut map = registry.processes.lock().unwrap();
                     if let Some(p) = map.get_mut(&id) {
                         p.finished = true;
                         p.finished_at = Some(Instant::now());
                         p.exit_code = code;
                         p.kill_tx = None;
+                        !p.suppress_notify
+                    } else {
+                        false
                     }
-                    registry.completion_tx.lock().unwrap().clone()
                 };
-                if let Some(tx) = tx {
-                    let _ = tx.send(ProcessCompletion {
-                        id: id.clone(),
-                        exit_code: code,
-                    });
+                if should_notify {
+                    if let Some(tx) = registry.completion_tx.lock().unwrap().clone() {
+                        let _ = tx.send(ProcessCompletion {
+                            id: id.clone(),
+                            exit_code: code,
+                        });
+                    }
                 }
                 let _ = finished_tx.send(true);
             };
@@ -637,6 +643,7 @@ impl ProcessRegistry {
             let p = map
                 .get_mut(id)
                 .ok_or_else(|| format!("no process with id '{id}'"))?;
+            p.suppress_notify = true;
             (p.kill_tx.take(), p.finished_rx.clone())
         };
         if let Some(tx) = kill_tx {
@@ -647,8 +654,11 @@ impl ProcessRegistry {
         }
         let mut map = self.0.processes.lock().unwrap();
         let p = map
-            .remove(id)
+            .get_mut(id)
             .ok_or_else(|| format!("no process with id '{id}'"))?;
+        p.finished = true;
+        p.finished_at = Some(Instant::now());
+        p.kill_tx = None;
         Ok(p.lines.join("\n"))
     }
 
@@ -714,6 +724,7 @@ mod tests {
             finished_at,
             kill_tx: None,
             finished_rx: finished_rx(finished),
+            suppress_notify: false,
         }
     }
 
@@ -905,7 +916,9 @@ mod tests {
             .unwrap()
             .unwrap();
         assert!(output.contains("started"));
-        assert!(registry.snapshot_output(&id).is_err());
+        let snapshot = registry.snapshot_output(&id).unwrap();
+        assert!(!snapshot.running);
+        assert_eq!(snapshot.text, output);
         assert_eq!(registry.running_count(), 0);
     }
 

@@ -840,25 +840,6 @@ mod tests {
     }
 
     #[test]
-    fn background_commands_plugin_is_opt_in() {
-        let mut rt = LuaRuntime::new();
-        rt.load_autoload();
-        assert!(rt.load_error.is_none(), "load_error: {:?}", rt.load_error);
-        assert!(
-            !rt.has_command("ps"),
-            "/ps must not be registered until the background_commands plugin is required"
-        );
-        rt.lua()
-            .load(r#"require("smelt.plugins.background_commands")"#)
-            .exec()
-            .expect("require background_commands");
-        assert!(
-            rt.has_command("ps"),
-            "/ps should be registered once background_commands is loaded"
-        );
-    }
-
-    #[test]
     fn autoload_registers_rewind_command() {
         let mut rt = LuaRuntime::new();
         rt.load_autoload();
