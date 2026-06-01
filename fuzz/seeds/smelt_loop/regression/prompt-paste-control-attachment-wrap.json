@@ -1,0 +1,59 @@
+{
+  "_about": "Prompt layout regression: pasted control characters inside attachment-heavy prompt text must render as safe display glyphs so wrapped prompt rows do not exceed the pinned content viewport.",
+  "mode": "normal",
+  "ops": [
+    {
+      "kind": "insert_attachment",
+      "data": {
+        "label": "\u001b_\u001bNS_STATE\u001b\u001b\u001b\u001b\u001b\u001b\u001bA"
+      }
+    },
+    {
+      "kind": "insert_attachment",
+      "data": {
+        "label": ""
+      }
+    },
+    {
+      "kind": "insert_attachment",
+      "data": {
+        "label": ""
+      }
+    },
+    {
+      "kind": "paste",
+      "data": "\u0000"
+    },
+    {
+      "kind": "insert_attachment",
+      "data": {
+        "label": ""
+      }
+    },
+    {
+      "kind": "insert_attachment",
+      "data": {
+        "label": ""
+      }
+    },
+    {
+      "kind": "insert_attachment",
+      "data": {
+        "label": ""
+      }
+    },
+    {
+      "kind": "insert_attachment",
+      "data": {
+        "label": ""
+      }
+    },
+    {
+      "kind": "insert_attachment",
+      "data": {
+        "label": ""
+      }
+    }
+  ],
+  "vim": false
+}
