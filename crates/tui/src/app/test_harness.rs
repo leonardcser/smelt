@@ -984,6 +984,7 @@ impl TestApp {
     /// fails this probe immediately.
     pub fn probe_prompt_cursor_after_turn(&mut self, variant: u8) {
         self.force_prompt_keyboard_focus();
+        self.app.queued_inputs.clear();
         let _ = self.run_lua(r#"smelt.prompt.set_text("")"#);
         if variant % 4 == 1 {
             self.install_prompt_cursor_trap(variant);
