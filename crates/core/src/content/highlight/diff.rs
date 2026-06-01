@@ -63,46 +63,84 @@ pub(crate) enum CachedDiffLine {
 }
 
 fn cached_style_ranges_for_line(h: &mut HighlightLines, line: &str) -> Vec<CachedStyleRange> {
-    let line_with_nl = format!("{}\n", line);
+    let mut line_with_nl = String::with_capacity(line.len() + 1);
+    line_with_nl.push_str(line);
+    line_with_nl.push('\n');
+
     let regions = h
         .highlight_line(&line_with_nl, &SYNTAX_SET)
         .unwrap_or_default();
-    let pieces: Vec<_> = regions
-        .into_iter()
-        .filter_map(|(style, text)| {
-            let text = text.trim_end_matches('\n').trim_end_matches('\r');
-            (!text.is_empty()).then_some((style, text))
-        })
-        .collect();
-    let joined: String = pieces.iter().map(|(_, text)| *text).collect();
-    if joined != line {
-        let fg = pieces
-            .first()
-            .map(|(style, _)| (style.foreground.r, style.foreground.g, style.foreground.b))
-            .unwrap_or((200, 200, 200));
-        return (!line.is_empty())
+
+    let mut ranges = Vec::new();
+    let mut offset = 0;
+    let mut fallback_fg = None;
+    let mut matched = true;
+
+    for (style, text) in regions {
+        let text = text.trim_end_matches('\n').trim_end_matches('\r');
+        if text.is_empty() {
+            continue;
+        }
+        fallback_fg.get_or_insert((style.foreground.r, style.foreground.g, style.foreground.b));
+
+        let Some(rest) = line.get(offset..) else {
+            matched = false;
+            break;
+        };
+        if !rest.starts_with(text) {
+            matched = false;
+            break;
+        }
+
+        let start = offset;
+        offset += text.len();
+        ranges.push(CachedStyleRange {
+            start,
+            end: offset,
+            fg: (style.foreground.r, style.foreground.g, style.foreground.b),
+        });
+    }
+
+    if matched && offset == line.len() {
+        ranges
+    } else {
+        (!line.is_empty())
             .then_some(CachedStyleRange {
                 start: 0,
                 end: line.len(),
-                fg,
+                fg: fallback_fg.unwrap_or((200, 200, 200)),
             })
             .into_iter()
-            .collect();
+            .collect()
     }
+}
 
-    let mut offset = 0;
-    pieces
-        .into_iter()
-        .filter_map(|(style, text)| {
-            let start = offset;
-            offset += text.len();
-            (start < offset).then_some(CachedStyleRange {
-                start,
-                end: offset,
-                fg: (style.foreground.r, style.foreground.g, style.foreground.b),
-            })
-        })
-        .collect()
+fn push_expanded_tabs(out: &mut String, s: &str) {
+    let mut rest = s;
+    while let Some(tab) = rest.find('\t') {
+        out.push_str(&rest[..tab]);
+        out.push_str("    ");
+        rest = &rest[tab + 1..];
+    }
+    out.push_str(rest);
+}
+
+fn expanded_line(line: &str) -> String {
+    if line.contains('\t') {
+        let mut out = String::with_capacity(line.len());
+        push_expanded_tabs(&mut out, line);
+        out
+    } else {
+        line.to_string()
+    }
+}
+
+fn expanded_change_line(extra_indent: &str, value: &str) -> String {
+    let value = value.trim_end_matches('\n');
+    let mut out = String::with_capacity(extra_indent.len() + value.len());
+    out.push_str(extra_indent);
+    push_expanded_tabs(&mut out, value);
+    out
 }
 
 #[cfg(test)]
@@ -152,12 +190,7 @@ pub fn build_inline_diff_cache_ext(
 ) -> CachedInlineDiff {
     let _perf = smelt_perf::perf::begin("render:build_diff_cache");
     let dv = compute_diff_view(old, new, path, anchor);
-    let expanded_lines: Vec<String> = dv
-        .file_content
-        .lines()
-        .map(|l| l.replace('\t', "    "))
-        .collect();
-    let file_lines: Vec<&str> = expanded_lines.iter().map(|s| s.as_str()).collect();
+    let file_lines: Vec<&str> = dv.file_content.lines().collect();
     let lookup = if !anchor.is_empty() { anchor } else { old };
     let lookup_indent = lookup
         .lines()
@@ -201,10 +234,11 @@ pub fn build_inline_diff_cache_ext(
             .iter()
             .enumerate()
         {
+            let text = expanded_line(line);
             lines.push(CachedDiffLine::Context {
                 lineno: ctx_before_start + idx + 1,
-                text: (*line).to_string(),
-                spans: cached_style_ranges_for_line(&mut h, line),
+                spans: cached_style_ranges_for_line(&mut h, &text),
+                text,
             });
         }
     }
@@ -215,20 +249,17 @@ pub fn build_inline_diff_cache_ext(
     let mut pending_ellipsis = false;
     let mut emitted_any = !lines.is_empty();
     for (ci, change) in dv.changes.iter().enumerate() {
-        let raw = format!(
-            "{}{}",
-            extra_indent,
-            change.value.trim_end_matches('\n').replace('\t', "    ")
-        );
-        let spans = cached_style_ranges_for_line(&mut h, &raw);
         match change.tag {
             ChangeTag::Equal => {
                 if visible[ci] {
                     if pending_ellipsis {
                         pending_ellipsis = false;
                         lines.push(CachedDiffLine::Ellipsis);
+                        h = HighlightLines::new(syntax, theme);
                     }
                     if new_lineno >= dv.view_start && new_lineno < dv.view_end {
+                        let raw = expanded_change_line(&extra_indent, &change.value);
+                        let spans = cached_style_ranges_for_line(&mut h, &raw);
                         lines.push(CachedDiffLine::Context {
                             lineno: new_lineno + 1,
                             text: raw,
@@ -246,7 +277,10 @@ pub fn build_inline_diff_cache_ext(
                 if pending_ellipsis {
                     pending_ellipsis = false;
                     lines.push(CachedDiffLine::Ellipsis);
+                    h = HighlightLines::new(syntax, theme);
                 }
+                let raw = expanded_change_line(&extra_indent, &change.value);
+                let spans = cached_style_ranges_for_line(&mut h, &raw);
                 lines.push(CachedDiffLine::Delete {
                     lineno: old_lineno + 1,
                     text: raw,
@@ -258,7 +292,10 @@ pub fn build_inline_diff_cache_ext(
                 if pending_ellipsis {
                     pending_ellipsis = false;
                     lines.push(CachedDiffLine::Ellipsis);
+                    h = HighlightLines::new(syntax, theme);
                 }
+                let raw = expanded_change_line(&extra_indent, &change.value);
+                let spans = cached_style_ranges_for_line(&mut h, &raw);
                 lines.push(CachedDiffLine::Insert {
                     lineno: new_lineno + 1,
                     text: raw,
@@ -278,10 +315,11 @@ pub fn build_inline_diff_cache_ext(
             .skip(after_start)
             .enumerate()
         {
+            let text = expanded_line(line);
             lines.push(CachedDiffLine::Context {
                 lineno: after_start + idx + 1,
-                text: (*line).to_string(),
-                spans: cached_style_ranges_for_line(&mut h, line),
+                spans: cached_style_ranges_for_line(&mut h, &text),
+                text,
             });
         }
     }
