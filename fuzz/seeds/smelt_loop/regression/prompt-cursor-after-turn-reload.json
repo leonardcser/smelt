@@ -1,0 +1,13 @@
+{
+  "_about": "Regression probe for #15: turn completion followed by reload must not leave stale Lua keymaps or prompt cursor state that prevents arrow motion / cursor advancement.",
+  "mode": "normal",
+  "ops": [
+    {
+      "kind": "probe_prompt_cursor_after_turn",
+      "data": {
+        "variant": 4
+      }
+    }
+  ],
+  "vim": true
+}

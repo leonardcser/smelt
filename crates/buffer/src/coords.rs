@@ -4,7 +4,9 @@
 //! used when source bytes don't equal display bytes (e.g. the prompt's
 //! attachment markers expanding to `[label]`). Buffers without maps fall
 //! through to identity walks of `Buffer::lines()` inside
-//! [`Buffer::display_cursor_pos`] / [`Buffer::byte_at_display_pos`].
+//! [`Buffer::display_cursor_pos`] / [`Buffer::byte_at_display_pos`]. The maps
+//! are indexed by display characters internally; `Buffer` converts public
+//! columns to and from terminal cells.
 
 use crate::buffer::{Buffer, SelectionRange};
 use crate::text;
@@ -27,7 +29,8 @@ pub struct ProjectionMaps {
 
 impl ProjectionMaps {
     /// Map a source byte offset to a display `(row, col)` pair. `col` is in
-    /// display chars (matches the prompt's wrapped-row indexing).
+    /// display chars; `Buffer::display_cursor_pos` converts it to cells for
+    /// callers.
     pub fn cursor_pos(&self, source: &str, src_byte: usize) -> (usize, usize) {
         if self.row_offsets.is_empty() {
             return (0, 0);

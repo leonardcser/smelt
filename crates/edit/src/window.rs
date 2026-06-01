@@ -227,13 +227,17 @@ pub struct Window {
     pub gutter: Option<Arc<dyn GutterProvider>>,
     /// Whether long lines wrap to the window's content width on render.
     pub wrap: bool,
+    /// For editable wrapped inputs, reserve an empty visual row when a row ends
+    /// exactly at the right edge so the caret has a visible end-of-line cell.
+    /// Display-only wrapped panes leave this off to avoid synthetic blank rows.
+    pub wrap_cursor_padding: bool,
     /// Visual-row layout derived from the buffer's lines + this window's width.
     /// Refreshed by `ensure_layout` before paint; render and coordinate helpers
     /// read it instead of indexing the buffer directly.
     pub(crate) layout: WrappedLayout,
-    /// `(source_tick, width, wrap)` last used to compute `layout`; `None` forces
-    /// a rebuild on the next `ensure_layout`.
-    layout_key: Option<(u64, u16, bool)>,
+    /// `(source_tick, width, wrap, wrap_cursor_padding)` last used to compute
+    /// `layout`; `None` forces a rebuild on the next `ensure_layout`.
+    layout_key: Option<(u64, u16, bool, bool)>,
     pub focusable: bool,
     /// Caret-style cursorline: paints `CursorLine` bg on the cursor row
     /// **only when this window is focused**. Models Neovim's `'cursorline'`:
@@ -344,6 +348,7 @@ impl Window {
             // Direct callers (host code, tests) default to no-wrap; the Lua API
             // overrides this to `true` so end-user content panes wrap by default.
             wrap: false,
+            wrap_cursor_padding: false,
             layout: WrappedLayout::default(),
             layout_key: None,
             focusable: true,
@@ -394,20 +399,36 @@ impl Window {
     /// whose decoration sets `pre_formatted = true` (parser output, markdown
     /// tables, diff hunks) stay as identity chunks regardless of `self.wrap`.
     pub fn ensure_layout(&mut self, buf: &Buffer, width: u16) {
-        let key = (buf.changedtick(), width, self.wrap);
+        let key = (
+            buf.changedtick(),
+            width,
+            self.wrap,
+            self.wrap_cursor_padding,
+        );
         if self.layout_key == Some(key) {
             return;
         }
-        let prev_width_wrap = self.layout_key.map(|(_, w, wrap)| (w, wrap));
-        if let Some((prev_tick, prev_width, prev_wrap)) = self.layout_key {
-            if prev_width == width && prev_wrap == self.wrap {
+        let prev_width_wrap = self
+            .layout_key
+            .map(|(_, w, wrap, cursor_padding)| (w, wrap, cursor_padding));
+        if let Some((prev_tick, prev_width, prev_wrap, prev_cursor_padding)) = self.layout_key {
+            if prev_width == width
+                && prev_wrap == self.wrap
+                && prev_cursor_padding == self.wrap_cursor_padding
+            {
                 if let Some(edit) = buf.last_line_edit() {
                     if edit.before_tick == prev_tick
                         && edit.after_tick == buf.changedtick()
                         && edit.old_end == edit.old_line_count
                     {
-                        self.layout
-                            .replace_suffix_from_buffer(buf, edit.start, width, self.wrap);
+                        if self.wrap_cursor_padding {
+                            self.layout.replace_suffix_from_buffer_with_cursor_padding(
+                                buf, edit.start, width, self.wrap,
+                            );
+                        } else {
+                            self.layout
+                                .replace_suffix_from_buffer(buf, edit.start, width, self.wrap);
+                        }
                         self.layout_key = Some(key);
                         return;
                     }
@@ -427,14 +448,21 @@ impl Window {
         } else {
             None
         };
-        self.layout = WrappedLayout::from_buffer(buf, width, self.wrap);
+        self.layout = if self.wrap_cursor_padding {
+            WrappedLayout::from_buffer_with_cursor_padding(buf, width, self.wrap)
+        } else {
+            WrappedLayout::from_buffer(buf, width, self.wrap)
+        };
         self.layout_key = Some(key);
         // Restore the logical anchor only on width/wrap changes - a content
         // change (changedtick bump) shouldn't move the viewport behind the
         // user's back, and the anchor's `(lrow, byte)` may no longer reference
         // the same content.
-        if let Some((prev_w, prev_wrap)) = prev_width_wrap {
-            if prev_w != width || prev_wrap != self.wrap {
+        if let Some((prev_w, prev_wrap, prev_cursor_padding)) = prev_width_wrap {
+            if prev_w != width
+                || prev_wrap != self.wrap
+                || prev_cursor_padding != self.wrap_cursor_padding
+            {
                 self.restore_scroll_from_anchor(buf);
                 if let Some(screen_row) = cursor_screen_row {
                     self.restore_cursor_screen_row(buf, screen_row);
@@ -531,7 +559,7 @@ impl Window {
     /// coordinates in `cursor_visual` / `cpos_at_visual` / `visual_row_total`.
     fn layout_matches(&self, buf: &Buffer) -> bool {
         match self.layout_key {
-            Some((tick, _, _)) => {
+            Some((tick, _, _, _)) => {
                 tick == buf.changedtick() && self.layout.logical_count() == buf.lines().len()
             }
             None => false,
@@ -1116,15 +1144,32 @@ impl Window {
             }
         }
         if viewport_cols > 0 {
+            let max_scroll_left = if self.layout_matches(buf) {
+                let content_extent = self.layout.max_row_width();
+                let scroll_extent = if buf.readonly {
+                    content_extent
+                } else {
+                    content_extent.max(self.cursor_col.saturating_add(1))
+                };
+                Some(scroll_extent.saturating_sub(viewport_cols))
+            } else {
+                None
+            };
+            if let Some(max) = max_scroll_left {
+                self.scroll_left = self.scroll_left.min(max);
+            }
             let viewport_right = self
                 .scroll_left
                 .saturating_add(viewport_cols.saturating_sub(1));
             if self.cursor_col > viewport_right {
-                self.scroll_left = self
+                let target = self
                     .cursor_col
                     .saturating_sub(viewport_cols.saturating_sub(1));
+                self.scroll_left = max_scroll_left.map(|max| target.min(max)).unwrap_or(target);
             } else if self.cursor_col < self.scroll_left {
-                self.scroll_left = self.cursor_col;
+                self.scroll_left = max_scroll_left
+                    .map(|max| self.cursor_col.min(max))
+                    .unwrap_or(self.cursor_col);
             }
         }
     }
@@ -1751,10 +1796,20 @@ impl Window {
         // skip the prep pass build a one-shot fallback so render stays correct
         // without requiring &mut self.
         let fallback_layout;
-        let layout = if self.layout_key == Some((buf.changedtick(), content_width, self.wrap)) {
+        let layout_key = (
+            buf.changedtick(),
+            content_width,
+            self.wrap,
+            self.wrap_cursor_padding,
+        );
+        let layout = if self.layout_key == Some(layout_key) {
             &self.layout
         } else {
-            fallback_layout = WrappedLayout::from_buffer(buf, content_width, self.wrap);
+            fallback_layout = if self.wrap_cursor_padding {
+                WrappedLayout::from_buffer_with_cursor_padding(buf, content_width, self.wrap)
+            } else {
+                WrappedLayout::from_buffer(buf, content_width, self.wrap)
+            };
             &fallback_layout
         };
         let line_count = layout.visual_count();
@@ -2525,6 +2580,17 @@ mod tests {
         w.cursor_col = 95;
         w.keep_cursor_visible(&buf, 0, 0, 20);
         assert_eq!(w.scroll_left, 76);
+    }
+
+    #[test]
+    fn keep_cursor_visible_does_not_pan_readonly_full_width_row() {
+        let mut w = make_win();
+        let mut buf = make_buf(vec!["x".repeat(20)]);
+        buf.readonly = true;
+        w.ensure_layout(&buf, 20);
+        w.cursor_col = 20;
+        w.keep_cursor_visible(&buf, 1, 1, 20);
+        assert_eq!(w.scroll_left, 0);
     }
 
     #[test]

@@ -16,6 +16,7 @@ path = "src/lib.rs"
 libfuzzer-sys = "0.4"
 arbitrary = { version = "1", features = ["derive"] }
 smelt-tui = { path = "../crates/tui", features = ["harness"] }
+smelt-core = { path = "../crates/core" }
 smelt-buffer = { path = "../crates/buffer" }
 smelt-style = { path = "../crates/style" }
 smelt-term = { path = "../crates/term" }
@@ -79,6 +80,13 @@ bench = false
 [[bin]]
 name = "grid_invariants"
 path = "fuzz_targets/grid_invariants.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "ansi_parser"
+path = "fuzz_targets/ansi_parser.rs"
 test = false
 doc = false
 bench = false

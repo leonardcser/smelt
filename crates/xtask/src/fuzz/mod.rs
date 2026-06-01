@@ -18,6 +18,7 @@ pub fn run(args: Vec<String>) {
             std::process::exit(2);
         }
         Some("run") => run::run(rest),
+        Some("build") => build(rest),
         Some("triage") => triage::run(rest),
         Some("replay-regression") => replay_regression::run(rest),
         Some("coverage-snapshot") => coverage::run(rest),
@@ -34,11 +35,39 @@ pub fn print_usage() {
     eprintln!();
     eprintln!("subcommands:");
     eprintln!("  run <target> [--fork N] [--cmin]   fuzz a target until crash or Ctrl-C");
+    eprintln!("  build [target...]                    build real fuzz targets one-by-one");
     eprintln!("  triage <target> <crash-artifact>   crash → JSON → shrink → print");
     eprintln!("  replay-regression                  replay every seed under fuzz/seeds/<target>/regression/");
     eprintln!(
         "  coverage-snapshot [target...]      per-target line/function/region coverage snapshot"
     );
+}
+
+fn build(args: Vec<String>) {
+    let known: Vec<&str> = all_target_names().collect();
+    let targets: Vec<String> = if args.is_empty() {
+        known.iter().map(|name| (*name).to_string()).collect()
+    } else {
+        for target in &args {
+            if !known.contains(&target.as_str()) {
+                die(&format!(
+                    "unknown target `{target}`. Known: {}",
+                    known.join(", ")
+                ));
+            }
+        }
+        args
+    };
+
+    let root = repo_root();
+    for target in targets {
+        step(
+            &format!("build {target}"),
+            Command::new("cargo")
+                .args(["+nightly", "fuzz", "build", "--sanitizer=none", &target])
+                .current_dir(&root),
+        );
+    }
 }
 
 pub(super) fn step(label: &str, cmd: &mut Command) {
@@ -99,6 +128,7 @@ pub(super) const TARGETS: &[(&str, TargetKind)] = &[
     ("openai_cache_invariance", TargetKind::Bytes),
     ("snapshot_roundtrip", TargetKind::Bytes),
     ("grid_invariants", TargetKind::Bytes),
+    ("ansi_parser", TargetKind::Bytes),
 ];
 
 #[derive(Copy, Clone, PartialEq, Eq)]

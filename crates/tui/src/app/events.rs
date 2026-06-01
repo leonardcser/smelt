@@ -701,7 +701,11 @@ impl TuiApp {
         };
         let status = match self.terminal.as_ref() {
             Some(t) => t.suspended(spawn),
-            None => spawn(),
+            None => {
+                self.notify_error("editor: unavailable without an attached terminal".to_string());
+                self.ui.force_redraw();
+                return;
+            }
         };
         // Vim et al re-show the hardware cursor and scribble over the alt
         // screen; force a full repaint so the diff baseline is rebuilt.

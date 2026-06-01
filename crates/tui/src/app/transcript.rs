@@ -1,8 +1,9 @@
 //! Transcript block history, streaming state, projection, and cursor glyph cache.
 
 use crate::app::TuiApp;
-use crate::content::selection::wrap_with_offsets;
+use crate::content::prompt_parser::build_prompt_display_lines;
 use crate::smelt_term::{BufCreateOpts, Buffer, Theme};
+use smelt_buffer::wrap_layout::WrappedLayout;
 
 use smelt_core::content::block_layout::{BlockLayout, HboxItem, RenderedLayout};
 use smelt_core::transcript_model::{
@@ -709,9 +710,14 @@ impl TuiApp {
         edit_buf: &crate::smelt_term::Buffer,
         width: usize,
     ) -> u16 {
-        let usable = width.saturating_sub(2);
-        let wrap = wrap_with_offsets(edit_buf.source(), &[], usable);
-        wrap.visual_lines.len().max(1) as u16
+        let usable = width.saturating_sub(2).min(u16::MAX as usize) as u16;
+        let lines = build_prompt_display_lines(
+            edit_buf.source(),
+            &edit_buf.attachment_ids,
+            &self.input.store.lock().unwrap(),
+        );
+        let layout = WrappedLayout::from_lines_with_cursor_padding(&lines, usable, true);
+        layout.visual_count().max(1) as u16
     }
 }
 

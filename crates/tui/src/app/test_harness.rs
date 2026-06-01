@@ -852,6 +852,257 @@ impl TestApp {
             ));
     }
 
+    /// Prompt cursor byte offset in source space.
+    pub fn prompt_cpos(&self) -> usize {
+        self.app
+            .ui
+            .win(crate::app::PROMPT_WIN)
+            .map(|w| w.cpos)
+            .unwrap_or(0)
+    }
+
+    /// Whether a plain printable key should insert at the prompt cursor with
+    /// no overlay/cmdline/selection/key-capture semantics in front of it.
+    pub fn prompt_plain_insert_ready(&self) -> bool {
+        let state = self.state();
+        if !matches!(state.app_focus, AppFocus::Prompt)
+            || state.agent_running
+            || state.cmdline_open
+            || state.focused_overlay.is_some()
+            || !state.term_focused
+        {
+            return false;
+        }
+        let Some(win) = self.app.ui.win(crate::app::PROMPT_WIN) else {
+            return false;
+        };
+        if win.vim_enabled && !matches!(win.vim_mode, VimMode::Insert) {
+            return false;
+        }
+        if win.selection_anchor.is_some() || win.effective_endpoint() != win.cpos {
+            return false;
+        }
+        !self.app.ui.any_drag_active()
+            && !self
+                .app
+                .placeholder_opts
+                .contains_key(&crate::app::PROMPT_WIN)
+    }
+
+    /// Side-channel: install a hostile prompt `text_changed` callback that
+    /// tries to move the prompt cursor away from the edit endpoint.
+    pub fn install_prompt_cursor_trap(&mut self, variant: u8) {
+        const SNIPPETS: &[&str] = &[
+            r#"
+            smelt.prompt.win():on("text_changed", function()
+                smelt.prompt.cursor(0)
+            end)
+            "#,
+            r#"
+            smelt.prompt.win():on("text_changed", function()
+                smelt.prompt.win():cursor(0)
+            end)
+            "#,
+            r#"
+            smelt.prompt.win():on("text_changed", function()
+                smelt.prompt.cursor(999999)
+            end)
+            "#,
+        ];
+        let snippet = SNIPPETS[(variant as usize) % SNIPPETS.len()];
+        let _ = self.run_lua(snippet);
+    }
+
+    /// Side-channel: register a small Lua tool and begin a synthetic custom
+    /// command turn, returning the `StartTurn` payload that was sent.
+    pub fn start_custom_command_with_lua_tool(
+        &mut self,
+        variant: u8,
+    ) -> Option<protocol::StartTurnPayload> {
+        let tool_name = format!("fuzz_custom_tool_{}", variant % 4);
+        let snippet = format!(
+            r#"
+            smelt.tools.register({{
+                name = "{tool_name}",
+                description = "fuzz custom command tool",
+                parameters = {{ type = "object", properties = {{}} }},
+                execute = function(args) return "ok" end,
+            }})
+            "#,
+        );
+        let _ = self.run_lua(&snippet);
+
+        let cmd = smelt_core::custom_commands::CustomCommand {
+            name: "fuzz-custom".to_string(),
+            display: "fuzz-custom".to_string(),
+            body: "fuzz custom body".to_string(),
+            overrides: smelt_core::custom_commands::CommandOverrides::default(),
+        };
+        let turn = self.app.begin_custom_command_turn(cmd);
+        self.app.agent = Some(turn);
+        self.drain_cmd();
+        self.actions.iter().rev().find_map(|a| match a {
+            Action::EngineSend(cmd) => match cmd.as_ref() {
+                protocol::UiCommand::StartTurn(payload) => Some((**payload).clone()),
+                _ => None,
+            },
+            _ => None,
+        })
+    }
+
+    /// Side-channel: start a Lua `smelt.engine.ask` request so fuzzed
+    /// `EngineAskResponsePending` ops can drive the callback path.
+    pub fn start_engine_ask_probe(&mut self, question: &str) {
+        let question = serde_json::to_string(question).unwrap_or_else(|_| "\"\"".to_string());
+        let snippet = format!(
+            r#"
+            smelt.engine.ask({{
+                system = "fuzz ask probe",
+                question = {question},
+                on_response = function(_message, _err) end,
+            }})
+            "#,
+        );
+        let _ = self.run_lua(&snippet);
+        self.drain_cmd();
+    }
+
+    fn force_prompt_keyboard_focus(&mut self) {
+        self.app.app_focus = AppFocus::Prompt;
+        self.app.term_focused = true;
+        self.app.clear_prompt_prediction();
+        let _ = self.app.ui.set_focus(crate::app::PROMPT_WIN);
+        if let Some(win) = self.app.ui.win_mut(crate::app::PROMPT_WIN) {
+            win.clear_mouse_state();
+            win.selection_anchor = None;
+        }
+    }
+
+    /// Side-channel: drive the exact bug class from #15. After a turn lifecycle
+    /// transition, typing must advance the prompt cursor; left motion must also
+    /// move the insertion point. A stuck cursor reverses "ab" into "ba" and
+    /// fails this probe immediately.
+    pub fn probe_prompt_cursor_after_turn(&mut self, variant: u8) {
+        self.force_prompt_keyboard_focus();
+        let _ = self.run_lua(r#"smelt.prompt.set_text("")"#);
+        if variant % 4 == 1 {
+            self.install_prompt_cursor_trap(variant);
+        }
+
+        let turn_id = 10_000 + u64::from(variant);
+        self.start_turn(turn_id);
+        match variant % 4 {
+            2 => self.feed_one(SourceEvent::Engine(EngineEvent::TurnError {
+                message: "fuzz turn error".into(),
+            })),
+            3 => self.cancel(),
+            _ => self.feed_one(SourceEvent::Engine(EngineEvent::TurnComplete {
+                turn_id,
+                history: vec![],
+                meta: None,
+            })),
+        }
+        if variant % 8 >= 4 {
+            self.reload_lua();
+        }
+        self.force_prompt_keyboard_focus();
+        self.render_silent();
+
+        for (idx, ch) in "ab".chars().enumerate() {
+            self.type_char(ch);
+            assert_eq!(
+                self.prompt_cpos(),
+                idx + 1,
+                "prompt cursor did not advance after typing {ch:?} in probe variant {variant}",
+            );
+        }
+        assert_eq!(self.state().prompt_text, "ab");
+
+        self.press(KeyCode::Left);
+        assert_eq!(
+            self.prompt_cpos(),
+            1,
+            "left motion did not move prompt cursor in probe variant {variant}",
+        );
+        self.type_char('X');
+        assert_eq!(self.state().prompt_text, "aXb");
+        assert_eq!(self.prompt_cpos(), 2);
+
+        self.press(KeyCode::End);
+        self.type_text("cd");
+        assert_eq!(self.state().prompt_text, "aXbcd");
+        assert_eq!(self.prompt_cpos(), 5);
+    }
+
+    /// Side-channel: exercise the real compaction prepare-request path through
+    /// `HostCall::PrepareRequest`, pair the generated EngineAsk with a response,
+    /// and assert the replacement arrives while active-turn state survives.
+    pub fn probe_compaction_prepare_request(&mut self, variant: u8) {
+        self.app.core.config.context_window = Some(100);
+        self.app
+            .core
+            .session
+            .history
+            .push(protocol::HistoryItem::user(protocol::Content::text("u1")));
+        self.push_assistant_text("a1");
+        self.app
+            .core
+            .session
+            .history
+            .push(protocol::HistoryItem::user(protocol::Content::text("u2")));
+        if variant % 2 == 1 {
+            self.start_turn(20_000 + u64::from(variant));
+        }
+        let should_preserve_turn = self.agent_running();
+
+        let full_history = protocol::history_to_messages(&self.app.model_history());
+        let (tx, mut rx) = tokio::sync::oneshot::channel();
+        {
+            let _g = crate::lua::install_app_ptr(&mut self.app);
+            self.app
+                .dispatch_host_call(engine::HostCall::PrepareRequest {
+                    messages: full_history,
+                    estimated_tokens: 200,
+                    reply: tx,
+                });
+        }
+
+        let ask_id = self
+            .drain_engine_sends()
+            .into_iter()
+            .filter_map(|cmd| match cmd {
+                protocol::UiCommand::EngineAsk { id, .. } => Some(id),
+                _ => None,
+            })
+            .last()
+            .expect("compaction prepare request should issue EngineAsk");
+
+        {
+            let _g = crate::lua::install_app_ptr(&mut self.app);
+            self.app
+                .dispatch_engine_event(protocol::EngineEvent::EngineAskResponse {
+                    id: ask_id,
+                    message: Some(protocol::Message::assistant(
+                        Some(protocol::Content::text("# Goal\nok")),
+                        None,
+                        None,
+                    )),
+                    error: None,
+                });
+            self.app.drive_lua_tasks();
+        }
+
+        let replacement = rx
+            .try_recv()
+            .expect("compaction prepare reply should be ready")
+            .expect("compaction prepare should produce replacement history");
+        assert!(!replacement.is_empty(), "compaction replacement is empty");
+        if should_preserve_turn {
+            assert!(self.agent_running(), "compaction ended the active turn");
+            assert_eq!(self.app.working.phase_label(), Some("working"));
+        }
+    }
+
     /// Resize the app's surface to `(width, height)`. Used by replay
     /// drivers that own a real terminal and need to match the app's
     /// internal grid to the OS-reported size.
@@ -1079,6 +1330,30 @@ impl TestApp {
                 "window {wid:?} buf {:?} points at non-existent buffer",
                 win.buf,
             );
+        }
+
+        // Prompt and transcript are projected/wrapped surfaces; they should
+        // never require horizontal panning. Generic plugin-created windows may
+        // still use `scroll_left`, but these two well-known panes must remain
+        // pinned so vim `zh`/`zl` or viewport resync cannot silently clip text.
+        for win_id in [crate::app::PROMPT_WIN, crate::app::TRANSCRIPT_WIN] {
+            if let Some(win) = self.app.ui.win(win_id) {
+                assert_eq!(
+                    win.scroll_left, 0,
+                    "well-known window {win_id:?} has horizontal scroll_left {}",
+                    win.scroll_left,
+                );
+                if let Some(viewport) = win.viewport {
+                    let width = viewport.content_width;
+                    if width > 0 {
+                        let max_row_width = win.layout().max_row_width();
+                        assert!(
+                            max_row_width <= width,
+                            "well-known window {win_id:?} has row width {max_row_width} > viewport width {width}; content would clip with scroll_left pinned",
+                        );
+                    }
+                }
+            }
         }
 
         // Notification overlay's WinId, when set, must still resolve.
@@ -2749,6 +3024,48 @@ mod tests {
         assert_eq!(app.app.ui.capture(), None);
         assert!(!app.app.ui.any_drag_active());
         assert_eq!(app.app.prompt_win().effective_endpoint(), 0);
+    }
+
+    #[test]
+    fn prompt_window_wraps_parser_output() {
+        let mut app = TestApp::builder().with_vim(false).build();
+        app.feed_one(SourceEvent::Term(crossterm::event::Event::Paste(
+            "x".repeat(200),
+        )));
+        app.render_silent();
+        app.assert_ui_invariants();
+    }
+
+    #[test]
+    fn custom_command_turn_includes_registered_lua_tools() {
+        let mut app = TestApp::builder().with_vim(false).build();
+        let payload = app
+            .start_custom_command_with_lua_tool(0)
+            .expect("custom command should send StartTurn");
+        assert!(
+            payload.tools.iter().any(|t| t.name == "fuzz_custom_tool_0"),
+            "registered Lua tool missing from custom command payload: {:?}",
+            payload.tools.iter().map(|t| &t.name).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn engine_ask_probe_registers_pending_callback() {
+        let mut app = TestApp::builder().with_vim(false).build();
+        app.start_engine_ask_probe("summarize this");
+        assert!(app.pending_ask_id().is_some());
+    }
+
+    #[test]
+    fn prompt_cursor_probe_catches_stuck_insert_after_turn() {
+        let mut app = TestApp::builder().with_vim(false).build();
+        app.probe_prompt_cursor_after_turn(1);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn compaction_prepare_probe_completes_and_preserves_turn() {
+        let mut app = TestApp::builder().with_vim(false).build();
+        app.probe_compaction_prepare_request(1);
     }
 
     #[test]

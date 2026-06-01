@@ -937,9 +937,9 @@ impl Buffer {
     /// byte space).
     pub fn display_byte_pos(&self, cpos: usize) -> (usize, usize) {
         if let Some(maps) = &self.projection_maps {
-            let (row, cell) = maps.cursor_pos(&self.source, cpos);
+            let (row, char_col) = maps.cursor_pos(&self.source, cpos);
             let line = self.lines.get(row).map(String::as_str).unwrap_or("");
-            return (row, crate::text::cell_to_byte(line, cell));
+            return (row, crate::text::byte_of_char(line, char_col));
         }
         if self.lines.is_empty() {
             return (0, 0);
@@ -958,9 +958,18 @@ impl Buffer {
     ///
     /// Uses the parser-written [`ProjectionMaps`](crate::coords::ProjectionMaps)
     /// if present; otherwise walks `lines()` directly (1:1 identity mapping).
+    /// `col` is always in terminal cells, even though `ProjectionMaps` stores
+    /// display-character indexes internally.
     pub fn display_cursor_pos(&self, cpos: usize) -> (usize, usize) {
         if let Some(maps) = &self.projection_maps {
-            return maps.cursor_pos(&self.source, cpos);
+            let (row, char_col) = maps.cursor_pos(&self.source, cpos);
+            let line = self.lines.get(row).map(String::as_str).unwrap_or("");
+            let col = line
+                .chars()
+                .take(char_col)
+                .map(|ch| unicode_width::UnicodeWidthChar::width(ch).unwrap_or(0))
+                .sum();
+            return (row, col);
         }
         if self.lines.is_empty() {
             return (0, 0);
@@ -981,6 +990,8 @@ impl Buffer {
     ///
     /// Uses the parser-written [`ProjectionMaps`](crate::coords::ProjectionMaps)
     /// if present; otherwise walks `lines()` directly (1:1 identity mapping).
+    /// `col` is in terminal cells; projection maps are addressed by the
+    /// corresponding display-character column after cell snapping.
     pub fn byte_at_display_pos(&self, row: usize, col: usize) -> usize {
         if self.lines.is_empty() {
             return 0;
@@ -988,13 +999,13 @@ impl Buffer {
         let row = row.min(self.lines.len() - 1);
         let line = &self.lines[row];
         if let Some(maps) = &self.projection_maps {
-            // Clamp `col` to the row's display-char count. `ProjectionMaps`
-            // stores one continuous display↔source char stream, so an
-            // unclamped `col` would index past this row and resolve into the
-            // NEXT line - making click-past-EOL and "preserve screen row"
-            // scrolling onto a shorter row silently slip to the wrong byte.
-            let col = col.min(line.chars().count());
-            return maps.byte_at(&self.source, row, col);
+            // Clamp `col` to the row's display-cell width, then translate that
+            // cell into the display-character index used by ProjectionMaps.
+            // Without per-row clamping, `byte_at(0, 5)` on a 3-cell row would
+            // index past row 0 into row 1's chars and resolve to the wrong byte.
+            let byte_col = crate::text::cell_to_byte(line, col);
+            let char_col = crate::text::char_pos(line, byte_col).min(line.chars().count());
+            return maps.byte_at(&self.source, row, char_col);
         }
         // Identity path: `cell_to_byte` clamps `cell > line_width` to `line.len()`.
         let offsets = crate::text::line_start_offsets(&self.lines);
@@ -1002,7 +1013,8 @@ impl Buffer {
     }
 
     /// Set source↔display coord maps. Parsers call this from `parse()` when
-    /// their source bytes don't map 1:1 to display chars.
+    /// their source bytes don't map 1:1 to display chars. Public Buffer APIs
+    /// convert map character columns to terminal-cell columns.
     pub fn set_projection_maps(&mut self, maps: crate::coords::ProjectionMaps) {
         self.projection_maps = Some(maps);
     }
@@ -1817,5 +1829,28 @@ mod tests {
         assert_eq!(buf.byte_at_display_pos(0, 1), 1);
         // Click within row 1.
         assert_eq!(buf.byte_at_display_pos(1, 1), 5);
+    }
+
+    #[test]
+    fn projection_cursor_columns_are_terminal_cells() {
+        // ProjectionMaps are indexed by display chars, but public cursor and
+        // hit-test APIs speak terminal cells. Zero-width controls and wide
+        // chars must not trick viewport code into horizontal panning.
+        let mut buf = make_buf();
+        buf.set_source("abc".into());
+        buf.set_all_lines(vec!["a\0日".into()]);
+        let s2d: Vec<usize> = (0..=3).collect();
+        let d2s: Vec<usize> = (0..=3).collect();
+        buf.set_projection_maps(crate::coords::ProjectionMaps {
+            source_char_to_display_char: s2d,
+            display_char_to_source_char: d2s,
+            row_offsets: vec![0],
+        });
+
+        assert_eq!(buf.display_cursor_pos(2), (0, 1));
+        assert_eq!(buf.display_cursor_pos(3), (0, 3));
+        assert_eq!(buf.display_byte_pos(3), (0, "a\0日".len()));
+        assert_eq!(buf.byte_at_display_pos(0, 1), 1);
+        assert_eq!(buf.byte_at_display_pos(0, 3), 3);
     }
 }

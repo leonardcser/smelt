@@ -10,6 +10,45 @@ use crate::buffer::Buffer;
 use crate::wrap::wrap_line_ranges;
 use unicode_width::UnicodeWidthStr;
 
+fn chunks_for_line(
+    line: &str,
+    width: u16,
+    wrap: bool,
+    reserve_full_width_cursor_row: bool,
+) -> Vec<(usize, usize)> {
+    let mut chunks = if wrap && !line.is_empty() {
+        wrap_line_ranges(line, width as usize)
+    } else {
+        vec![(0, line.len())]
+    };
+    if reserve_full_width_cursor_row
+        && wrap
+        && width > 0
+        && chunks
+            .last()
+            .map(|&(s, e)| UnicodeWidthStr::width(&line[s..e]) >= width as usize)
+            .unwrap_or(false)
+    {
+        chunks.push((line.len(), line.len()));
+    }
+    chunks
+}
+
+fn layout_line(
+    line: &str,
+    width: u16,
+    wrap: bool,
+    reserve_full_width_cursor_row: bool,
+) -> (Vec<(usize, usize)>, u16) {
+    let chunks = chunks_for_line(line, width, wrap, reserve_full_width_cursor_row);
+    let max_width = chunks
+        .iter()
+        .map(|&(s, e)| UnicodeWidthStr::width(&line[s..e]).min(u16::MAX as usize) as u16)
+        .max()
+        .unwrap_or(0);
+    (chunks, max_width)
+}
+
 /// Mapping from logical lines to visual rows at a specific width.
 #[derive(Clone, Debug, Default)]
 pub struct WrappedLayout {
@@ -35,7 +74,15 @@ impl WrappedLayout {
     /// Build a layout for `lines` at `width`. When `wrap` is false every logical
     /// row contributes exactly one identity chunk regardless of width.
     pub fn from_lines(lines: &[String], width: u16, wrap: bool) -> Self {
-        Self::from_lines_with(lines, width, |_| wrap)
+        Self::from_lines_with(lines, width, |_| wrap, false)
+    }
+
+    /// Build a layout that reserves an extra empty visual row when a wrapped row
+    /// ends exactly at the right edge. Caret-style inputs use this so an
+    /// end-of-line cursor has a visible cell; display-only panes should use
+    /// [`Self::from_lines`] to avoid inserting blank rows into content.
+    pub fn from_lines_with_cursor_padding(lines: &[String], width: u16, wrap: bool) -> Self {
+        Self::from_lines_with(lines, width, |_| wrap, true)
     }
 
     /// Build a layout against `buf`'s lines, consulting each row's
@@ -43,6 +90,22 @@ impl WrappedLayout {
     /// contribute an identity chunk so the producer's layout (parser output,
     /// markdown tables, diff hunks) is preserved verbatim.
     pub fn from_buffer(buf: &Buffer, width: u16, wrap: bool) -> Self {
+        Self::from_buffer_with(buf, width, wrap, false)
+    }
+
+    /// Like [`Self::from_buffer`], but reserves a visual cursor row after full-width
+    /// wrapped rows. This is for editable prompt-style windows, not generic
+    /// display panes.
+    pub fn from_buffer_with_cursor_padding(buf: &Buffer, width: u16, wrap: bool) -> Self {
+        Self::from_buffer_with(buf, width, wrap, true)
+    }
+
+    fn from_buffer_with(
+        buf: &Buffer,
+        width: u16,
+        wrap: bool,
+        reserve_full_width_cursor_row: bool,
+    ) -> Self {
         let _perf = smelt_perf::perf::begin("wrap_layout:from_buffer");
         let line_count = buf.line_count();
         let mut chunks_per_row: Vec<Vec<(usize, usize)>> = Vec::with_capacity(line_count);
@@ -84,24 +147,13 @@ impl WrappedLayout {
         for idx in 0..line_count {
             row_starts.push(visual_count);
             let line = buf.get_line(idx).unwrap_or_default();
-            let chunks = if buf.decoration_at(idx).pre_formatted || line.is_empty() {
-                vec![(0, line.len())]
-            } else {
-                wrap_line_ranges(line, width as usize)
-            };
-            let mut row_max = 0usize;
-            for &(s, e) in &chunks {
-                let w = UnicodeWidthStr::width(&line[s..e]);
-                if w > row_max {
-                    row_max = w;
-                }
-                if w > max_row_width {
-                    max_row_width = w;
-                }
-            }
+            let row_wraps = !buf.decoration_at(idx).pre_formatted;
+            let (chunks, row_max) =
+                layout_line(line, width, row_wraps, reserve_full_width_cursor_row);
+            max_row_width = max_row_width.max(row_max as usize);
             visual_count += chunks.len();
             chunks_per_row.push(chunks);
-            row_max_widths.push(row_max.min(u16::MAX as usize) as u16);
+            row_max_widths.push(row_max);
         }
         if line_count == 0 {
             chunks_per_row.push(vec![(0, 0)]);
@@ -118,7 +170,12 @@ impl WrappedLayout {
         }
     }
 
-    fn from_lines_with<F: Fn(usize) -> bool>(lines: &[String], width: u16, row_wraps: F) -> Self {
+    fn from_lines_with<F: Fn(usize) -> bool>(
+        lines: &[String],
+        width: u16,
+        row_wraps: F,
+        reserve_full_width_cursor_row: bool,
+    ) -> Self {
         let mut chunks_per_row: Vec<Vec<(usize, usize)>> = Vec::with_capacity(lines.len());
         let mut row_starts: Vec<usize> = Vec::with_capacity(lines.len());
         let mut row_max_widths: Vec<u16> = Vec::with_capacity(lines.len());
@@ -126,24 +183,13 @@ impl WrappedLayout {
         let mut max_row_width: usize = 0;
         for (idx, line) in lines.iter().enumerate() {
             row_starts.push(visual_count);
-            let chunks = if !row_wraps(idx) || line.is_empty() {
-                vec![(0, line.len())]
-            } else {
-                wrap_line_ranges(line, width as usize)
-            };
-            let mut row_max = 0usize;
-            for &(s, e) in &chunks {
-                let w = UnicodeWidthStr::width(&line[s..e]);
-                if w > row_max {
-                    row_max = w;
-                }
-                if w > max_row_width {
-                    max_row_width = w;
-                }
-            }
+            let row_wraps = row_wraps(idx);
+            let (chunks, row_max) =
+                layout_line(line, width, row_wraps, reserve_full_width_cursor_row);
+            max_row_width = max_row_width.max(row_max as usize);
             visual_count += chunks.len();
             chunks_per_row.push(chunks);
-            row_max_widths.push(row_max.min(u16::MAX as usize) as u16);
+            row_max_widths.push(row_max);
         }
         if lines.is_empty() {
             chunks_per_row.push(vec![(0, 0)]);
@@ -171,6 +217,29 @@ impl WrappedLayout {
         width: u16,
         wrap: bool,
     ) {
+        self.replace_suffix_from_buffer_with(buf, start, width, wrap, false);
+    }
+
+    /// Like [`Self::replace_suffix_from_buffer`], preserving cursor-padding
+    /// semantics used by prompt-style wrapped inputs.
+    pub fn replace_suffix_from_buffer_with_cursor_padding(
+        &mut self,
+        buf: &Buffer,
+        start: usize,
+        width: u16,
+        wrap: bool,
+    ) {
+        self.replace_suffix_from_buffer_with(buf, start, width, wrap, true);
+    }
+
+    fn replace_suffix_from_buffer_with(
+        &mut self,
+        buf: &Buffer,
+        start: usize,
+        width: u16,
+        wrap: bool,
+        reserve_full_width_cursor_row: bool,
+    ) {
         let line_count = buf.line_count();
         let start = start.min(self.chunks_per_row.len()).min(line_count);
         let visual_count = self
@@ -187,16 +256,9 @@ impl WrappedLayout {
         for idx in start..line_count {
             self.row_starts.push(self.visual_count);
             let line = buf.get_line(idx).unwrap_or_default();
-            let chunks = if !wrap || buf.decoration_at(idx).pre_formatted || line.is_empty() {
-                vec![(0, line.len())]
-            } else {
-                wrap_line_ranges(line, width as usize)
-            };
-            let row_max = chunks
-                .iter()
-                .map(|&(s, e)| UnicodeWidthStr::width(&line[s..e]).min(u16::MAX as usize) as u16)
-                .max()
-                .unwrap_or(0);
+            let row_wraps = wrap && !buf.decoration_at(idx).pre_formatted;
+            let (chunks, row_max) =
+                layout_line(line, width, row_wraps, reserve_full_width_cursor_row);
             self.visual_count += chunks.len();
             self.chunks_per_row.push(chunks);
             self.row_max_widths.push(row_max);
@@ -339,6 +401,14 @@ mod tests {
         assert_eq!(layout.logical_at_visual(2), Some((1, 1)));
         assert_eq!(layout.logical_at_visual(3), Some((2, 0)));
         assert_eq!(layout.logical_at_visual(4), None);
+    }
+
+    #[test]
+    fn wrap_reserves_empty_row_when_final_chunk_is_full() {
+        let ls = lines(&["abcdefghij"]);
+        let layout = WrappedLayout::from_lines_with_cursor_padding(&ls, 5, true);
+        assert_eq!(layout.chunks_of(0), &[(0, 5), (5, 10), (10, 10)]);
+        assert_eq!(layout.visual_for_logical(0, 10), (2, 0));
     }
 
     #[test]

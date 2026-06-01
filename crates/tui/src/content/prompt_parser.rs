@@ -1,10 +1,11 @@
-//! Buffer parser for the prompt input: wraps lines, highlights attachments / @refs,
-//! and writes source↔display coord maps to the buffer for cursor mapping.
+//! Buffer parser for the prompt input: projects attachments / @refs into
+//! display rows, highlights them, and writes source↔display coord maps to the
+//! buffer for cursor mapping. Window layout owns soft wrapping.
 
 use crate::content::selection::{
     build_char_kinds, build_display_spans, spans_to_string, Span, SpanKind,
 };
-use smelt_buffer::attachment::{AttachmentStore, ATTACHMENT_MARKER};
+use smelt_buffer::attachment::{AttachmentId, AttachmentStore, ATTACHMENT_MARKER};
 use smelt_buffer::buffer::{Buffer, BufferCopy, BufferParser, CopyOutput, SpanMeta};
 use smelt_buffer::coords::ProjectionMaps;
 use smelt_core::theme::intern;
@@ -119,18 +120,78 @@ fn build_coord_maps(spans: &[Span]) -> (Vec<usize>, Vec<usize>) {
     (s2d, d2s)
 }
 
-impl BufferParser for PromptBufferParser {
-    fn parse(&self, buf: &mut Buffer, source: &str, width: u16) {
-        let store = self.store.lock().unwrap();
-        let spans = build_display_spans(source, &buf.attachment_ids, &store);
-        drop(store);
+/// Split the flat display buffer into logical display rows while carrying the
+/// per-display-char span kind used for highlighting. Newline characters delimit
+/// rows and are not part of any rendered row. Row offsets are in the flat
+/// display-character stream, including newline delimiters.
+fn display_rows_with_kinds_and_offsets(
+    buf: &str,
+    char_kinds: &[SpanKind],
+) -> (Vec<(String, Vec<SpanKind>)>, Vec<usize>) {
+    let mut rows = Vec::new();
+    let mut offsets = vec![0];
+    let mut line = String::new();
+    let mut kinds = Vec::new();
+    let mut chars_seen = 0usize;
+    for (idx, ch) in buf.chars().enumerate() {
+        chars_seen += 1;
+        if ch == '\n' {
+            rows.push((std::mem::take(&mut line), std::mem::take(&mut kinds)));
+            offsets.push(chars_seen);
+        } else {
+            line.push(ch);
+            kinds.push(char_kinds.get(idx).copied().unwrap_or(SpanKind::Plain));
+        }
+    }
+    rows.push((line, kinds));
+    (rows, offsets)
+}
 
-        let display_buf = spans_to_string(&spans);
-        let char_kinds = build_char_kinds(&spans);
-        let wrap =
-            crate::content::selection::wrap_with_offsets(&display_buf, &char_kinds, width as usize);
-        let visual_lines = wrap.visual_lines;
-        let row_offsets = wrap.row_offsets;
+fn display_lines(buf: &str) -> Vec<String> {
+    buf.split('\n').map(str::to_string).collect()
+}
+
+struct PromptDisplayRows {
+    spans: Vec<Span>,
+    visual_lines: Vec<(String, Vec<SpanKind>)>,
+    row_offsets: Vec<usize>,
+}
+
+pub(crate) fn build_prompt_display_lines(
+    source: &str,
+    attachment_ids: &[AttachmentId],
+    store: &AttachmentStore,
+) -> Vec<String> {
+    let spans = build_display_spans(source, attachment_ids, store);
+    display_lines(&spans_to_string(&spans))
+}
+
+fn build_prompt_display_rows(
+    source: &str,
+    attachment_ids: &[AttachmentId],
+    store: &AttachmentStore,
+) -> PromptDisplayRows {
+    let spans = build_display_spans(source, attachment_ids, store);
+    let display_buf = spans_to_string(&spans);
+    let char_kinds = build_char_kinds(&spans);
+    let (visual_lines, row_offsets) =
+        display_rows_with_kinds_and_offsets(&display_buf, &char_kinds);
+    PromptDisplayRows {
+        spans,
+        visual_lines,
+        row_offsets,
+    }
+}
+
+impl BufferParser for PromptBufferParser {
+    fn parse(&self, buf: &mut Buffer, source: &str, _width: u16) {
+        let store = self.store.lock().unwrap();
+        let PromptDisplayRows {
+            spans,
+            visual_lines,
+            row_offsets,
+        } = build_prompt_display_rows(source, &buf.attachment_ids, &store);
+        drop(store);
 
         let lines: Vec<String> = visual_lines.iter().map(|(l, _)| l.clone()).collect();
 
@@ -166,27 +227,27 @@ impl BufferParser for PromptBufferParser {
 
         for (li, (line, kinds)) in visual_lines.iter().enumerate() {
             let mut col = 0u16;
-            for (i, kind) in kinds.iter().enumerate() {
-                let ch = line.chars().nth(i).unwrap_or('\0');
+            for (i, (ch, kind)) in line.chars().zip(kinds.iter()).enumerate() {
                 let ch_width = unicode_width::UnicodeWidthChar::width(ch).unwrap_or(0) as u16;
+                let next_col = col.saturating_add(ch_width);
                 match kind {
                     SpanKind::Attachment | SpanKind::AtRef => {
-                        if ch_width > 0 {
+                        if next_col > col {
                             buf.add_highlight_group_with_meta(
                                 li,
                                 col,
-                                col + ch_width,
+                                next_col,
                                 accent_group,
                                 SpanMeta::default(),
                             );
                         }
                     }
                     SpanKind::Plain => {
-                        if is_command && li == 0 && i < command_token_end && ch_width > 0 {
+                        if is_command && li == 0 && i < command_token_end && next_col > col {
                             buf.add_highlight_group_with_meta(
                                 li,
                                 col,
-                                col + ch_width,
+                                next_col,
                                 accent_group,
                                 SpanMeta::default(),
                             );
@@ -195,14 +256,14 @@ impl BufferParser for PromptBufferParser {
                             buf.add_highlight_group_with_meta(
                                 li,
                                 col,
-                                col + ch_width,
+                                next_col,
                                 exec_group,
                                 SpanMeta::default(),
                             );
                         }
                     }
                 }
-                col += ch_width;
+                col = next_col;
             }
         }
 
@@ -227,40 +288,26 @@ mod tests {
     }
 
     #[test]
-    fn parser_reserves_trailing_row_when_line_is_full() {
+    fn parser_keeps_prompt_lines_unwrapped() {
         let store = Arc::new(Mutex::new(AttachmentStore::new()));
         let parser = Arc::new(PromptBufferParser::new(store));
-        // 78 chars at width 78: line fills, an empty trailing row is added so
-        // a cursor at end-of-line has a visible home (neovim-style wrap).
-        let mut buf = make_buf_with_parser(parser.clone());
-        buf.set_source("a".repeat(78));
-        buf.ensure_rendered_at(78);
-        assert_eq!(
-            buf.line_count(),
-            2,
-            "78 ascii chars at width 78 reserves a padding row"
-        );
-        assert_eq!(buf.get_line(0).unwrap().chars().count(), 78);
-        assert_eq!(buf.get_line(1).unwrap(), "");
-        // 79 chars wraps the last char to its own row; that row has 1 char and
-        // isn't full, so no extra padding row is appended.
         let mut buf = make_buf_with_parser(parser.clone());
         buf.set_source("a".repeat(79));
-        buf.ensure_rendered_at(78);
-        assert_eq!(buf.line_count(), 2, "79 ascii chars at width 78 wraps");
+        buf.ensure_rendered_at(10);
+        assert_eq!(buf.line_count(), 1);
+        assert_eq!(buf.get_line(0).unwrap().chars().count(), 79);
     }
 
     #[test]
-    fn parser_wraps_plain_text() {
+    fn parser_splits_source_newlines_only() {
         let store = Arc::new(Mutex::new(AttachmentStore::new()));
         let parser = Arc::new(PromptBufferParser::new(store));
         let mut buf = make_buf_with_parser(parser.clone());
-        buf.set_source("hello world".into());
+        buf.set_source("hello world\nsecond".into());
         buf.ensure_rendered_at(10);
         assert_eq!(buf.line_count(), 2);
-        // Word-wraps at the space, so "hello " and "world".
-        assert_eq!(buf.get_line(0).unwrap(), "hello ");
-        assert_eq!(buf.get_line(1).unwrap(), "world");
+        assert_eq!(buf.get_line(0).unwrap(), "hello world");
+        assert_eq!(buf.get_line(1).unwrap(), "second");
     }
 
     #[test]

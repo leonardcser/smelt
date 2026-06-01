@@ -1,6 +1,6 @@
 # smelt fuzz
 
-Six targets covering distinct surfaces:
+Nine targets covering distinct surfaces:
 
 | target | what it fuzzes | how |
 |---|---|---|
@@ -11,6 +11,8 @@ Six targets covering distinct surfaces:
 | `cache_invariance` | Anthropic prompt-cache prefix stability | random history + `cache_control`-aware byte diff |
 | `openai_cache_invariance` | OpenAI / aux-model prompt-cache stability | random history + `prompt_cache_key`-aware byte diff |
 | `snapshot_roundtrip` | `SnapshotFrame::parse` round-trip | random grid + style palette + assert `from_grid → text+styles → parse` is identity |
+| `grid_invariants` | terminal grid mutation/diff invariants | random cell writes/fills + wide-char and diff-replay oracles |
+| `ansi_parser` | ANSI SGR parser + wrapped emission | random bytes → lossy UTF-8 + `wrap_ansi` / `emit_ansi_row` UTF-8 boundary checks |
 
 ## Setup once
 
@@ -20,6 +22,13 @@ cargo install cargo-fuzz
 ```
 
 ## Day-to-day
+
+Build all real fuzz targets without accidentally building helper bins:
+
+```sh
+cargo xtask fuzz build
+cargo xtask fuzz build smelt_loop ansi_parser
+```
 
 Fuzz a single target until first crash or Ctrl-C:
 
@@ -99,7 +108,11 @@ cargo xtask fuzz coverage-snapshot smelt_loop      # one target only
 ## Lower-level
 
 ```sh
-# Raw shrinker - predicate is `panic::catch_unwind(run_scenario)`.
+# Build real fuzz targets one-by-one (preferred over bare `cargo fuzz build`,
+# which also tries to instrument helper binaries in this crate).
+cargo xtask fuzz build
+
+# Raw shrinker — predicate is `panic::catch_unwind(run_scenario)`.
 cargo run --release --bin shrink_scenario -- --target lua_loop in.json out.min.json
 
 # Headless replay (exits non-zero on panic; what triage and CI use):

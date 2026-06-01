@@ -477,7 +477,7 @@ impl PromptState {
     pub(crate) fn sync_display_coords(&mut self, ctx: &mut PromptCtx<'_>, viewport_rows: u16) {
         ctx.win.resync_display_coords(ctx.buf);
         let cursor_line = ctx.win.cursor_row();
-        let total_rows = ctx.buf.line_count() as crate::smelt_term::RowIndex;
+        let total_rows = ctx.win.layout().visual_count() as crate::smelt_term::RowIndex;
         if ctx.win.pending_recenter {
             let rows = viewport_rows.max(1) as crate::smelt_term::RowIndex;
             let max_scroll = total_rows.saturating_sub(rows);

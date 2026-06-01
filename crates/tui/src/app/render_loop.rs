@@ -229,6 +229,7 @@ impl TuiApp {
         }
         if let Some(win) = self.ui.win_mut(crate::app::TRANSCRIPT_WIN) {
             win.scroll_top = tdata.clamped_scroll;
+            win.scroll_left = 0;
         }
     }
 
@@ -240,17 +241,19 @@ impl TuiApp {
             .win(crate::app::PROMPT_WIN)
             .map(|w| w.config.gutters)
             .unwrap_or_default();
-        // Use the same content width the auto-attach pre-pass will use - both pad
-        // gutters AND the reserved scrollbar column. Otherwise `wrap_with_offsets`
-        // wraps to a wider width than the renderer paints, so trailing chars get
-        // clipped and word wrap fires at the wrong column as the user types.
+        // Use the same content width the auto-attach pre-pass will use — both pad
+        // gutters AND the reserved scrollbar column. PromptBufferParser now
+        // emits unwrapped display rows; Window::ensure_layout owns wrapping at
+        // this exact width so cursor projection and paint agree.
         let content_width = gutters.content_width(prompt_rect.width);
 
         {
             let mut pctx = crate::input::prompt_ctx_mut(&mut self.ui);
             pctx.buf.ensure_rendered_at(content_width);
+            pctx.win.ensure_layout(pctx.buf, content_width);
             self.input
                 .sync_display_coords(&mut pctx, prompt_rect.height);
+            pctx.win.scroll_left = 0;
             pctx.win.pending_recenter = false;
             pctx.win.last_render_cpos = Some(pctx.win.cpos);
         }

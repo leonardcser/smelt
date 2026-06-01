@@ -433,6 +433,31 @@ pub enum FuzzOp {
     SetAgentMode {
         mode: FuzzMode,
     },
+    /// Side channel: install a prompt `text_changed` callback that attempts
+    /// to repark the prompt cursor while typing is in progress.
+    InstallPromptCursorTrap {
+        variant: u8,
+    },
+    /// Side channel: register a Lua tool and begin a synthetic custom-command
+    /// turn, asserting the outbound `StartTurn` carries Lua tool definitions.
+    StartCustomCommand {
+        variant: u8,
+    },
+    /// Side channel: issue a Lua `smelt.engine.ask` request so pending ask
+    /// response/error ops exercise callback completion.
+    StartEngineAsk {
+        question: String,
+    },
+    /// Side channel: deterministic regression probe for #15. Exercises typing
+    /// and cursor motion after turn completion/error/cancel/reload/traps.
+    ProbePromptCursorAfterTurn {
+        variant: u8,
+    },
+    /// Side channel: drive the real compaction prepare-request + EngineAsk
+    /// response path, including active-turn phase preservation.
+    ProbeCompactionPrepareRequest {
+        variant: u8,
+    },
 }
 
 impl FuzzOp {
@@ -505,6 +530,11 @@ impl FuzzOp {
             Unsteer { count } => format!("unsteer {count}"),
             CallCoreTool { tool_name, .. } => format!("call core tool {tool_name}"),
             SetAgentMode { mode } => format!("set mode {mode:?}"),
+            InstallPromptCursorTrap { variant } => format!("prompt cursor trap v={variant}"),
+            StartCustomCommand { variant } => format!("custom command v={variant}"),
+            StartEngineAsk { .. } => "engine ask".into(),
+            ProbePromptCursorAfterTurn { variant } => format!("prompt cursor probe v={variant}"),
+            ProbeCompactionPrepareRequest { variant } => format!("compaction probe v={variant}"),
         }
     }
 }
@@ -552,7 +582,7 @@ impl<'a> Arbitrary<'a> for FuzzInput {
         // space. Some variants are disabled outright; the rest get
         // wildly skewed weights. Drawing the table here (not per-op)
         // means a single seed goes deep into its chosen corner rather
-        // than uniformly bouncing across 43 variants.
+        // than uniformly bouncing across dozens of variants.
         let swarm = SwarmWeights::arbitrary(u, N_FUZZOP_VARIANTS)?;
         let mut ops = Vec::new();
         while !u.is_empty() && ops.len() < MAX_OPS {
@@ -832,6 +862,31 @@ const FUZZOP_BUILDERS: &[FuzzOpBuilder] = &[
             mode: u.arbitrary()?,
         })
     },
+    |u| {
+        Ok(FuzzOp::InstallPromptCursorTrap {
+            variant: u.arbitrary()?,
+        })
+    },
+    |u| {
+        Ok(FuzzOp::StartCustomCommand {
+            variant: u.arbitrary()?,
+        })
+    },
+    |u| {
+        Ok(FuzzOp::StartEngineAsk {
+            question: u.arbitrary()?,
+        })
+    },
+    |u| {
+        Ok(FuzzOp::ProbePromptCursorAfterTurn {
+            variant: u.arbitrary()?,
+        })
+    },
+    |u| {
+        Ok(FuzzOp::ProbeCompactionPrepareRequest {
+            variant: u.arbitrary()?,
+        })
+    },
 ];
 
 /// Total `FuzzOp` variant count, derived from the dispatch table so it
@@ -1009,6 +1064,9 @@ struct Snapshot {
     transcript_blocks: usize,
     pending_confirms: usize,
     deferred_dialogs: usize,
+    prompt_source: String,
+    prompt_cpos: usize,
+    prompt_plain_insert_ready: bool,
     /// Length of the harness's action log at capture time. Use
     /// `app.actions_since(snapshot.action_count)` to inspect actions
     /// produced after the snapshot, replacing the previous per-UiCommand
@@ -1030,6 +1088,9 @@ impl Snapshot {
             transcript_blocks: app.transcript_block_count(),
             pending_confirms: app.pending_confirm_count(),
             deferred_dialogs: app.pending_deferred_dialog_count(),
+            prompt_source: app.state().prompt_text,
+            prompt_cpos: app.prompt_cpos(),
+            prompt_plain_insert_ready: app.prompt_plain_insert_ready(),
             action_count: app.actions().len(),
         }
     }
@@ -1132,6 +1193,16 @@ enum PostCheck {
     ShutdownReceived,
     /// `Cancel` side channel ends any active turn and flushes streaming.
     TurnCancelled,
+    /// Plain prompt character insertion should mutate source at the old cursor
+    /// and advance the cursor by the inserted UTF-8 width.
+    PromptCharInserted {
+        ch: char,
+    },
+    /// Paste into a ready prompt should insert the full string at the old
+    /// cursor and advance by the inserted byte length.
+    PromptTextInserted {
+        text: String,
+    },
 }
 
 fn run_check(check: PostCheck, pre: &Snapshot, post: &Snapshot, new_actions: &[Action]) {
@@ -1430,6 +1501,45 @@ fn run_check(check: PostCheck, pre: &Snapshot, post: &Snapshot, new_actions: &[A
                 post.streaming
             );
         }
+        PostCheck::PromptCharInserted { ch } => {
+            if !pre.prompt_plain_insert_ready || ch.is_control() || ch == '\u{FFFC}' {
+                return;
+            }
+            let mut expected = pre.prompt_source.clone();
+            let at = smelt_buffer::text::insert(&mut expected, pre.prompt_cpos, ch);
+            assert_eq!(
+                post.prompt_source, expected,
+                "prompt char {ch:?} inserted at wrong location: pre cpos {}, pre {:?}, post {:?}",
+                pre.prompt_cpos, pre.prompt_source, post.prompt_source,
+            );
+            assert_eq!(
+                post.prompt_cpos,
+                at + ch.len_utf8(),
+                "prompt char {ch:?} left cursor at {}, expected {}",
+                post.prompt_cpos,
+                at + ch.len_utf8(),
+            );
+        }
+        PostCheck::PromptTextInserted { text } => {
+            if !pre.prompt_plain_insert_ready || text.contains('\u{FFFC}') {
+                return;
+            }
+            let mut expected = pre.prompt_source.clone();
+            let at = smelt_buffer::text::insert_str(&mut expected, pre.prompt_cpos, &text);
+            assert_eq!(
+                post.prompt_source, expected,
+                "prompt paste inserted at wrong location: pre cpos {}, inserted {:?}, pre {:?}, post {:?}",
+                pre.prompt_cpos, text, pre.prompt_source, post.prompt_source,
+            );
+            assert_eq!(
+                post.prompt_cpos,
+                at + text.len(),
+                "prompt paste left cursor at {}, expected {} after inserting {:?}",
+                post.prompt_cpos,
+                at + text.len(),
+                text,
+            );
+        }
     }
 }
 
@@ -1439,9 +1549,15 @@ fn run_check(check: PostCheck, pre: &Snapshot, post: &Snapshot, new_actions: &[A
 fn plan(op: FuzzOp) -> (Option<SourceEvent>, PostCheck) {
     match op {
         FuzzOp::KeyUnicode(raw) => {
+            let valid = char::from_u32(raw).is_some();
             let c = decode_codepoint(raw);
             let ev = SourceEvent::Term(key_event(KeyCode::Char(c), KeyModifiers::NONE));
-            (Some(ev), PostCheck::None)
+            let check = if valid {
+                PostCheck::PromptCharInserted { ch: c }
+            } else {
+                PostCheck::None
+            };
+            (Some(ev), check)
         }
         FuzzOp::KeyCtrl(b) => {
             let c = (b'a' + (b % 26)) as char;
@@ -1467,10 +1583,10 @@ fn plan(op: FuzzOp) -> (Option<SourceEvent>, PostCheck) {
                 PostCheck::None,
             )
         }
-        FuzzOp::Paste(s) => (
-            Some(SourceEvent::Term(TermEvent::Paste(s))),
-            PostCheck::None,
-        ),
+        FuzzOp::Paste(s) => {
+            let check = PostCheck::PromptTextInserted { text: s.clone() };
+            (Some(SourceEvent::Term(TermEvent::Paste(s))), check)
+        }
         FuzzOp::Mouse(m) => {
             let ev = MouseEvent {
                 kind: decode_mouse_kind(m.kind, m.button),
@@ -1708,6 +1824,11 @@ fn plan(op: FuzzOp) -> (Option<SourceEvent>, PostCheck) {
         | FuzzOp::Unsteer { .. }
         | FuzzOp::CallCoreTool { .. }
         | FuzzOp::SetAgentMode { .. }
+        | FuzzOp::InstallPromptCursorTrap { .. }
+        | FuzzOp::StartCustomCommand { .. }
+        | FuzzOp::StartEngineAsk { .. }
+        | FuzzOp::ProbePromptCursorAfterTurn { .. }
+        | FuzzOp::ProbeCompactionPrepareRequest { .. }
         | FuzzOp::InsertAttachment { .. }
         | FuzzOp::TogglePaneFocus
         | FuzzOp::ReloadLua
@@ -1869,6 +1990,29 @@ fn try_dispatch_side_channel(app: &mut TestApp, op: FuzzOp) -> Result<(), FuzzOp
         }
         FuzzOp::SetAgentMode { mode } => {
             app.set_agent_mode(mode.into());
+        }
+        FuzzOp::InstallPromptCursorTrap { variant } => {
+            app.install_prompt_cursor_trap(variant);
+        }
+        FuzzOp::StartCustomCommand { variant } => {
+            let payload = app
+                .start_custom_command_with_lua_tool(variant)
+                .expect("custom-command side channel did not send StartTurn");
+            let expected = format!("fuzz_custom_tool_{}", variant % 4);
+            assert!(
+                payload.tools.iter().any(|t| t.name == expected),
+                "custom-command StartTurn missing registered tool {expected}: {:?}",
+                payload.tools.iter().map(|t| &t.name).collect::<Vec<_>>()
+            );
+        }
+        FuzzOp::StartEngineAsk { question } => {
+            app.start_engine_ask_probe(&question);
+        }
+        FuzzOp::ProbePromptCursorAfterTurn { variant } => {
+            app.probe_prompt_cursor_after_turn(variant);
+        }
+        FuzzOp::ProbeCompactionPrepareRequest { variant } => {
+            app.probe_compaction_prepare_request(variant);
         }
         other => return Err(other),
     }
