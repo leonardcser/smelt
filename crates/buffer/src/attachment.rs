@@ -17,7 +17,7 @@ pub enum Attachment {
 impl Attachment {
     pub fn display_label(&self) -> String {
         match self {
-            Attachment::Image { label, .. } => format!("[{label}]"),
+            Attachment::Image { label, .. } => format!("[{}]", display_safe_label(label)),
         }
     }
 
@@ -37,6 +37,13 @@ impl Attachment {
         }
         format!("{:x}", hasher.finalize())
     }
+}
+
+fn display_safe_label(label: &str) -> String {
+    label
+        .chars()
+        .map(|ch| if ch.is_control() { '�' } else { ch })
+        .collect()
 }
 
 // ── Store ────────────────────────────────────────────────────────────────────

@@ -1,0 +1,59 @@
+{
+  "_about": "Attachment display seed: image labels containing terminal control bytes must be sanitized before prompt wrapping/layout sees them.",
+  "mode": "normal",
+  "ops": [
+    {
+      "kind": "insert_attachment",
+      "data": {
+        "label": "\u001b_\u001b'\u001b\u0000\u0000v\u001b\u001b\u0000zA񂝷\u0000\u0000\u0010\u0000"
+      }
+    },
+    {
+      "kind": "insert_attachment",
+      "data": {
+        "label": ""
+      }
+    },
+    {
+      "kind": "insert_attachment",
+      "data": {
+        "label": ""
+      }
+    },
+    {
+      "kind": "insert_attachment",
+      "data": {
+        "label": ""
+      }
+    },
+    {
+      "kind": "insert_attachment",
+      "data": {
+        "label": ""
+      }
+    },
+    {
+      "kind": "insert_attachment",
+      "data": {
+        "label": ""
+      }
+    },
+    {
+      "kind": "insert_attachment",
+      "data": {
+        "label": ""
+      }
+    },
+    {
+      "kind": "insert_attachment",
+      "data": {
+        "label": ""
+      }
+    },
+    {
+      "kind": "key_special",
+      "data": 1
+    }
+  ],
+  "vim": false
+}

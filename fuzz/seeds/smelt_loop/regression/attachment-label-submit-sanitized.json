@@ -1,0 +1,83 @@
+{
+  "_about": "Attachment display regression: submitted prompt text must use sanitized attachment labels so control bytes in labels cannot create over-wide transcript rows.",
+  "mode": "normal",
+  "ops": [
+    {
+      "kind": "insert_attachment",
+      "data": {
+        "label": "\u0001\u0001\t\u0001\u0001\u0000\u0000\u0000="
+      }
+    },
+    {
+      "kind": "insert_attachment",
+      "data": {
+        "label": ""
+      }
+    },
+    {
+      "kind": "insert_attachment",
+      "data": {
+        "label": ""
+      }
+    },
+    {
+      "kind": "insert_attachment",
+      "data": {
+        "label": ""
+      }
+    },
+    {
+      "kind": "insert_attachment",
+      "data": {
+        "label": ""
+      }
+    },
+    {
+      "kind": "insert_attachment",
+      "data": {
+        "label": ""
+      }
+    },
+    {
+      "kind": "insert_attachment",
+      "data": {
+        "label": ""
+      }
+    },
+    {
+      "kind": "insert_attachment",
+      "data": {
+        "label": ""
+      }
+    },
+    {
+      "kind": "insert_attachment",
+      "data": {
+        "label": ""
+      }
+    },
+    {
+      "kind": "insert_attachment",
+      "data": {
+        "label": ""
+      }
+    },
+    {
+      "kind": "insert_attachment",
+      "data": {
+        "label": ""
+      }
+    },
+    {
+      "kind": "key_special",
+      "data": 0
+    },
+    {
+      "kind": "insert_attachment",
+      "data": {
+        "label": ""
+      }
+    }
+  ],
+  "vim": false
+}

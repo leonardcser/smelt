@@ -1,0 +1,17 @@
+{
+  "_about": "Process status seed: background process ids are displayed in transcript/history and must not carry raw control bytes into wrapped rows.",
+  "mode": "normal",
+  "ops": [
+    {
+      "kind": "engine_process_completed",
+      "data": {
+        "id": "\u001f\u001f\u001f\u001f\u001fcal\u0000^\u0000\u0000~~\u001f\u001f\u001f\u001f\u001f\u001f\u001f\u001f\u0000\u001d\u0012",
+        "exit_code": -1050666239
+      }
+    },
+    {
+      "kind": "approve_first_confirm"
+    }
+  ],
+  "vim": true
+}

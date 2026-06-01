@@ -34,7 +34,10 @@ impl PromptState {
         // and `attachment_ids` in 1:1 sync. A raw keystroke or paste of the
         // sentinel char would desync the two and break every downstream
         // attachment indexing path.
-        if c == ATTACHMENT_MARKER {
+        // Control characters do not have a stable prompt glyph model when
+        // delivered as raw `KeyCode::Char` values; printable editing and
+        // newline insertion come through normal keymap actions instead.
+        if c.is_control() || c == ATTACHMENT_MARKER {
             return;
         }
         self.from_paste = false;

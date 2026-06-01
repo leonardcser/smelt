@@ -452,6 +452,7 @@ impl TuiApp {
     }
 
     pub(crate) fn handle_process_completed(&mut self, id: String, exit_code: Option<i32>) {
+        let id = display_safe_process_id(&id);
         let status = match exit_code {
             Some(0) => "finished successfully".to_string(),
             Some(c) => format!("exited with code {c}"),
@@ -768,6 +769,12 @@ impl TuiApp {
             }
         }
     }
+}
+
+fn display_safe_process_id(id: &str) -> String {
+    id.chars()
+        .map(|ch| if ch.is_control() { '�' } else { ch })
+        .collect()
 }
 
 /// Reason an API-key env lookup failed; carries enough context for the

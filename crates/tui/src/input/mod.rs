@@ -409,10 +409,8 @@ impl PromptState {
         for c in source.chars() {
             if c == ATTACHMENT_MARKER {
                 if let Some(&id) = buf.attachment_ids.get(att_idx) {
-                    if let Some(Attachment::Image { label, .. }) =
-                        self.store.lock().unwrap().get(id)
-                    {
-                        result.push_str(&format!("[{label}]"));
+                    if let Some(attachment) = self.store.lock().unwrap().get(id) {
+                        result.push_str(&attachment.display_label());
                     }
                 }
                 att_idx += 1;

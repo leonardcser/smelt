@@ -1,0 +1,30 @@
+{
+  "_about": "Prompt input regression: raw control characters delivered as KeyCode::Char must be ignored so they cannot create unwrappable prompt rows in tiny viewports.",
+  "mode": "normal",
+  "ops": [
+    {
+      "kind": "key_shift",
+      "data": 23
+    },
+    {
+      "kind": "resize",
+      "data": {
+        "w": 4,
+        "h": 2560
+      }
+    },
+    {
+      "kind": "key_shift",
+      "data": 1
+    },
+    {
+      "kind": "key_unicode",
+      "data": 0
+    },
+    {
+      "kind": "engine_turn_error",
+      "data": ""
+    }
+  ],
+  "vim": true
+}
