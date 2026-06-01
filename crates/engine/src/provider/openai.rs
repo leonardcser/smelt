@@ -52,6 +52,22 @@ fn effort_label(effort: ReasoningEffort) -> String {
     }
 }
 
+fn normalize_openai_reasoning_item(data: &serde_json::Value) -> serde_json::Value {
+    let mut out = data.clone();
+    let Some(obj) = out.as_object_mut() else {
+        return out;
+    };
+    let Some(summary) = obj.get_mut("summary") else {
+        return out;
+    };
+    if summary.is_object() {
+        *summary = serde_json::json!([summary.clone()]);
+    } else if let Some(text) = summary.as_str() {
+        *summary = serde_json::json!([{ "type": "summary_text", "text": text }]);
+    }
+    out
+}
+
 pub(super) fn build_body(
     messages: &[Message],
     tools: &[ToolDefinition],
@@ -101,7 +117,7 @@ pub(super) fn build_body(
                 if let Some(blocks) = &m.reasoning_details {
                     for block in blocks {
                         if block.provider == ReasoningBlock::OPENAI_RESPONSES {
-                            input.push(block.data.clone());
+                            input.push(normalize_openai_reasoning_item(&block.data));
                         }
                     }
                 }
@@ -230,12 +246,13 @@ pub(super) fn parse_response(data: &serde_json::Value) -> Result<ParsedResponse,
                 tool_calls.push(ToolCall::new(call_id, FunctionCall { name, arguments }));
             }
             Some("reasoning") => {
+                let data = normalize_openai_reasoning_item(item);
                 let mut texts: Vec<&str> = Vec::new();
-                if let Some(summaries) = item["summary"].as_array() {
+                if let Some(summaries) = data["summary"].as_array() {
                     texts.extend(summaries.iter().filter_map(|s| s["text"].as_str()));
                 }
                 if texts.is_empty() {
-                    if let Some(parts) = item["content"].as_array() {
+                    if let Some(parts) = data["content"].as_array() {
                         texts.extend(parts.iter().filter_map(|p| p["text"].as_str()));
                     }
                 }
@@ -244,7 +261,7 @@ pub(super) fn parse_response(data: &serde_json::Value) -> Result<ParsedResponse,
                 }
                 reasoning_blocks.push(ReasoningBlock {
                     provider: ReasoningBlock::OPENAI_RESPONSES.to_string(),
-                    data: item.clone(),
+                    data,
                 });
             }
             _ => {}
@@ -307,7 +324,7 @@ impl StreamState {
             .into_iter()
             .map(|data| ReasoningBlock {
                 provider: ReasoningBlock::OPENAI_RESPONSES.to_string(),
-                data,
+                data: normalize_openai_reasoning_item(&data),
             })
             .collect();
         Ok(ParsedResponse {
@@ -623,6 +640,33 @@ mod tests {
     }
 
     #[test]
+    fn build_body_wraps_legacy_reasoning_summary_object() {
+        let m = Message {
+            role: Role::Assistant,
+            content: None,
+            reasoning_content: None,
+            reasoning_details: Some(vec![ReasoningBlock {
+                provider: ReasoningBlock::OPENAI_RESPONSES.to_string(),
+                data: json!({
+                    "type": "reasoning",
+                    "id": "rs_1",
+                    "summary": {"type": "summary_text", "text": "legacy"},
+                    "encrypted_content": "ciphertext",
+                }),
+            }]),
+            tool_calls: None,
+            tool_call_id: None,
+            is_error: false,
+        };
+
+        let body = build_body(&[m], &[], "m", ReasoningEffort::Off, &cfg());
+
+        assert_eq!(body["input"][0]["type"], "reasoning");
+        assert!(body["input"][0]["summary"].is_array());
+        assert_eq!(body["input"][0]["summary"][0]["text"], "legacy");
+    }
+
+    #[test]
     fn build_body_assistant_emits_function_call_entries_for_tool_calls() {
         let calls = vec![ToolCall::new(
             "call-1".into(),
@@ -827,6 +871,22 @@ mod tests {
         });
         let r = parse_response(&v).unwrap();
         assert_eq!(r.reasoning.as_deref(), Some("sum1\nsum2"));
+    }
+
+    #[test]
+    fn parse_response_normalizes_legacy_reasoning_summary_object() {
+        let v = json!({
+            "output": [
+                {"type": "reasoning",
+                 "summary": {"type": "summary_text", "text": "legacy"}}
+            ],
+            "usage": {}
+        });
+        let r = parse_response(&v).unwrap();
+        assert_eq!(r.reasoning.as_deref(), Some("legacy"));
+        let details = r.reasoning_blocks.unwrap();
+        assert!(details[0].data["summary"].is_array());
+        assert_eq!(details[0].data["summary"][0]["text"], "legacy");
     }
 
     #[test]

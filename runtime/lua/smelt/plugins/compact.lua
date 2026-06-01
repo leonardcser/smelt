@@ -128,7 +128,9 @@ local function summarize_messages(history, instructions, done)
 						finish(nil, err)
 						return
 					end
-					smelt.notify.error("compaction failed: " .. err.message)
+					if err.kind ~= "context_window" then
+						smelt.notify.error("compaction failed: " .. err.message)
+					end
 					finish(nil, err)
 					return
 				end
