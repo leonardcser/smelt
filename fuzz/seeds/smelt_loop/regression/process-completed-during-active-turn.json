@@ -1,0 +1,20 @@
+{
+  "_about": "ProcessCompleted fuzz seed: a background process completion during an active compaction/engine turn defers status instead of immediately pushing a transcript block.",
+  "mode": "normal",
+  "ops": [
+    {
+      "kind": "probe_compaction_prepare_request",
+      "data": {
+        "variant": 147
+      }
+    },
+    {
+      "kind": "engine_process_completed",
+      "data": {
+        "id": "",
+        "exit_code": -2060420017
+      }
+    }
+  ],
+  "vim": false
+}

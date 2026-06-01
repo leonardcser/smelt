@@ -1157,7 +1157,9 @@ enum PostCheck {
         cost_usd: f64,
         background: bool,
     },
-    /// `ProcessCompleted` pushes one transcript block describing the exit.
+    /// `ProcessCompleted` immediately pushes one transcript block when idle.
+    /// Active turns defer the status into pending history; busy plugin scopes
+    /// queue it as input for later.
     ProcessCompleted,
     /// `Messages` against the active turn (matching turn_id) replaces
     /// `session.messages` mid-turn; idle dispatch is a no-op.
@@ -1332,13 +1334,15 @@ fn run_check(check: PostCheck, pre: &Snapshot, post: &Snapshot, new_actions: &[A
             }
         }
         PostCheck::ProcessCompleted => {
-            assert_eq!(
-                post.transcript_blocks,
-                pre.transcript_blocks + 1,
-                "ProcessCompleted did not push exactly one transcript block: pre {} → post {}",
-                pre.transcript_blocks,
-                post.transcript_blocks,
-            );
+            if !pre.agent_running && !pre.working.busy {
+                assert_eq!(
+                    post.transcript_blocks,
+                    pre.transcript_blocks + 1,
+                    "ProcessCompleted did not push exactly one transcript block: pre {} → post {}",
+                    pre.transcript_blocks,
+                    post.transcript_blocks,
+                );
+            }
         }
         PostCheck::MessagesReplaced {
             msg_count,
