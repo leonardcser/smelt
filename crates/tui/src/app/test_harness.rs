@@ -1192,6 +1192,9 @@ impl TestApp {
     /// and assert the replacement arrives while active-turn state survives.
     pub fn probe_compaction_prepare_request(&mut self, variant: u8) {
         self.app.core.config.context_window = Some(100);
+        self.app.core.session.context_tokens = None;
+        self.app.core.session.context_tokens_history_len = None;
+        self.app.core.session.visible_context_tokens = None;
         self.app
             .core
             .session

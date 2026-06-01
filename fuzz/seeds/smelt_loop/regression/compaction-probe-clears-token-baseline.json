@@ -1,0 +1,29 @@
+{
+  "_about": "Compaction prepare probe isolation seed: a previous non-background TokenUsage can install a low provider context-token baseline, causing the prepare hook to skip auto-compaction unless the probe clears the stale baseline before expecting EngineAsk.",
+  "mode": "apply",
+  "ops": [
+    {
+      "kind": "probe_compaction_prepare_request",
+      "data": {
+        "variant": 255
+      }
+    },
+    {
+      "kind": "engine_token_usage",
+      "data": {
+        "background": false,
+        "completion": 0,
+        "cost_cents": 0,
+        "prompt": 45,
+        "tps": 0
+      }
+    },
+    {
+      "kind": "probe_compaction_prepare_request",
+      "data": {
+        "variant": 0
+      }
+    }
+  ],
+  "vim": true
+}
