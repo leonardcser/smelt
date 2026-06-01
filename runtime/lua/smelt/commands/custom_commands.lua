@@ -9,6 +9,8 @@
 --   `!`<command>`` ` - inline; replaces the marker with stdout/stderr.
 -- A leading backslash escapes the marker.
 
+local MAX_COMMAND_FILE_BYTES = 200000
+
 local function trim_trailing(s)
   return (s:gsub("[%s\n]+$", ""))
 end
@@ -100,11 +102,12 @@ local function evaluate(body)
 end
 
 local function read_file(path)
-  local f = io.open(path, "r")
-  if not f then return nil end
-  local content = f:read("*a")
-  f:close()
-  return content
+  local r = smelt.fs.read_limited(path, MAX_COMMAND_FILE_BYTES)
+  if not r then return nil end
+  if r.truncated then
+    return r.content .. "\n\n[custom command file truncated at " .. tostring(MAX_COMMAND_FILE_BYTES) .. " bytes]"
+  end
+  return r.content
 end
 
 local function first_nonempty_line(body)

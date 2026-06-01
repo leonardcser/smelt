@@ -2,7 +2,8 @@
 //! streaming (`run_streaming`) primitives. `ProcessRegistry` manages
 //! long-lived background children (`spawn_bg`, `read_output`, `stop`).
 
-use std::collections::HashMap;
+use crate::output_limit::{limit_text_tail, OutputLimiter, DEFAULT_MAX_BYTES, TRUNCATION_NOTICE};
+use std::collections::{HashMap, VecDeque};
 use std::io;
 use std::process::Stdio;
 use std::sync::atomic::{AtomicU32, Ordering};
@@ -43,7 +44,7 @@ pub(crate) async fn run_async(
     opts: &Options,
     cancel: CancellationToken,
 ) -> io::Result<RunOutcome> {
-    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::io::AsyncWriteExt;
 
     let mut command = tokio::process::Command::new(cmd);
     command.args(args);
@@ -74,16 +75,8 @@ pub(crate) async fn run_async(
 
     let mut stdout = child.stdout.take().expect("stdout piped");
     let mut stderr = child.stderr.take().expect("stderr piped");
-    let stdout_task = tokio::spawn(async move {
-        let mut buf = String::new();
-        let _ = stdout.read_to_string(&mut buf).await;
-        buf
-    });
-    let stderr_task = tokio::spawn(async move {
-        let mut buf = String::new();
-        let _ = stderr.read_to_string(&mut buf).await;
-        buf
-    });
+    let stdout_task = tokio::spawn(async move { read_output_tail(&mut stdout).await });
+    let stderr_task = tokio::spawn(async move { read_output_tail(&mut stderr).await });
 
     let timeout = opts.timeout.unwrap_or(Duration::from_secs(30));
     let deadline = tokio::time::sleep(timeout);
@@ -126,6 +119,39 @@ pub(crate) async fn run_async(
             }))
         }
     }
+}
+
+async fn read_output_tail<R>(reader: &mut R) -> String
+where
+    R: tokio::io::AsyncRead + Unpin,
+{
+    use tokio::io::AsyncReadExt;
+
+    let mut retained = VecDeque::new();
+    let mut total_bytes = 0usize;
+    let mut buf = [0u8; 8192];
+    loop {
+        let n = match reader.read(&mut buf).await {
+            Ok(0) => break,
+            Ok(n) => n,
+            Err(_) => break,
+        };
+        total_bytes = total_bytes.saturating_add(n);
+        retained.extend(&buf[..n]);
+        while retained.len() > DEFAULT_MAX_BYTES {
+            retained.pop_front();
+        }
+    }
+
+    let retained_bytes = retained.len();
+    let bytes: Vec<u8> = retained.into_iter().collect();
+    let body = String::from_utf8_lossy(&bytes).into_owned();
+    if total_bytes <= retained_bytes {
+        return limit_text_tail(&body);
+    }
+
+    let body = limit_text_tail(&body);
+    format!("{TRUNCATION_NOTICE}: last {retained_bytes} of {total_bytes} bytes\n\n{body}")
 }
 
 /// Result of [`run_async`]: `Done` for natural completion or timeout,
@@ -224,8 +250,7 @@ pub async fn run_streaming_with_shell(
     let stderr = child.stderr.take().unwrap();
     let mut stdout_reader = BufReader::new(stdout).lines();
     let mut stderr_reader = BufReader::new(stderr).lines();
-    let mut output = String::new();
-    let mut output_lines = Vec::new();
+    let mut output = OutputLimiter::default();
     let mut stdout_done = false;
     let mut stderr_done = false;
 
@@ -257,9 +282,7 @@ pub async fn run_streaming_with_shell(
                 match line {
                     Ok(Some(line)) => {
                         on_line(line.clone());
-                        if !output.is_empty() { output.push('\n'); }
-                        output.push_str(&line);
-                        output_lines.push(line);
+                        output.push_line(line);
                     }
                     _ => stdout_done = true,
                 }
@@ -268,9 +291,7 @@ pub async fn run_streaming_with_shell(
                 match line {
                     Ok(Some(line)) => {
                         on_line(line.clone());
-                        if !output.is_empty() { output.push('\n'); }
-                        output.push_str(&line);
-                        output_lines.push(line);
+                        output.push_line(line);
                     }
                     _ => stderr_done = true,
                 }
@@ -283,7 +304,7 @@ pub async fn run_streaming_with_shell(
                         stdout_reader,
                         stderr_reader,
                         detach.now,
-                        output_lines,
+                        output,
                     );
                     return StreamOutput {
                         content: format!("timed out after {:.0}s; moved to background as {id}", config.timeout.as_secs_f64()),
@@ -306,7 +327,7 @@ pub async fn run_streaming_with_shell(
     let status = child.wait().await;
     let is_error = status.map(|s| !s.success()).unwrap_or(true);
     StreamOutput {
-        content: output,
+        content: output.format_text(),
         is_error,
         timed_out: false,
         background_id: None,
@@ -353,11 +374,9 @@ fn kill_group_sigkill(_child: &tokio::process::Child) {}
 
 static NEXT_PROC_ID: AtomicU32 = AtomicU32::new(1);
 
-const MAX_LINES: usize = 10_000;
-
 struct Process {
     pid: Option<u32>,
-    lines: Vec<String>,
+    output: OutputLimiter,
     finished: bool,
     exit_code: Option<i32>,
     command: String,
@@ -386,7 +405,7 @@ struct AdoptedChild {
     stdout_reader: Lines<BufReader<ChildStdout>>,
     stderr_reader: Lines<BufReader<ChildStderr>>,
     started_at: Instant,
-    initial_lines: Vec<String>,
+    initial_output: OutputLimiter,
 }
 
 pub struct ProcessInfo {
@@ -411,14 +430,6 @@ impl Process {
             .unwrap_or_else(Instant::now)
             .saturating_duration_since(self.started_at)
             .as_secs()
-    }
-
-    fn push_line(&mut self, line: String) {
-        self.lines.push(line);
-        if self.lines.len() > MAX_LINES {
-            let drop = self.lines.len() - MAX_LINES;
-            self.lines.drain(..drop);
-        }
     }
 }
 
@@ -462,7 +473,7 @@ impl ProcessRegistry {
             stdout_reader,
             stderr_reader,
             started_at: now,
-            initial_lines: Vec::new(),
+            initial_output: OutputLimiter::default(),
         });
     }
 
@@ -473,7 +484,7 @@ impl ProcessRegistry {
         stdout_reader: Lines<BufReader<ChildStdout>>,
         stderr_reader: Lines<BufReader<ChildStderr>>,
         now: Instant,
-        initial_lines: Vec<String>,
+        initial_output: OutputLimiter,
     ) -> String {
         let id = self.child_id(&child);
         self.adopt_readers(AdoptedChild {
@@ -483,7 +494,7 @@ impl ProcessRegistry {
             stdout_reader,
             stderr_reader,
             started_at: now,
-            initial_lines,
+            initial_output,
         });
         id
     }
@@ -496,16 +507,16 @@ impl ProcessRegistry {
             mut stdout_reader,
             mut stderr_reader,
             started_at,
-            initial_lines,
+            initial_output,
         } = adopted;
         let (kill_tx, mut kill_rx) = mpsc::channel::<()>(1);
         let (finished_tx, finished_rx) = watch::channel(false);
         let pid = child.id();
 
         {
-            let mut process = Process {
+            let process = Process {
                 pid,
-                lines: Vec::new(),
+                output: initial_output,
                 finished: false,
                 exit_code: None,
                 command,
@@ -515,9 +526,6 @@ impl ProcessRegistry {
                 finished_rx,
                 suppress_notify: false,
             };
-            for line in initial_lines {
-                process.push_line(line);
-            }
             let mut map = self.0.processes.lock().unwrap();
             map.insert(id.clone(), process);
         }
@@ -574,7 +582,7 @@ impl ProcessRegistry {
                             Ok(Some(line)) => {
                                 let mut map = registry.processes.lock().unwrap();
                                 if let Some(p) = map.get_mut(&id) {
-                                    p.push_line(line);
+                                    p.output.push_line(line);
                                 }
                             }
                             _ => stdout_done = true,
@@ -585,7 +593,7 @@ impl ProcessRegistry {
                             Ok(Some(line)) => {
                                 let mut map = registry.processes.lock().unwrap();
                                 if let Some(p) = map.get_mut(&id) {
-                                    p.push_line(line);
+                                    p.output.push_line(line);
                                 }
                             }
                             _ => stderr_done = true,
@@ -613,7 +621,7 @@ impl ProcessRegistry {
         let p = map
             .get_mut(id)
             .ok_or_else(|| format!("no process with id '{id}'"))?;
-        let output = std::mem::take(&mut p.lines).join("\n");
+        let output = p.output.drain_text();
         let running = !p.finished;
         let finished = p.finished;
         let exit_code = p.exit_code;
@@ -639,7 +647,7 @@ impl ProcessRegistry {
             .ok_or_else(|| format!("no process with id '{id}'"))?;
         Ok(ProcessOutput {
             pid: p.pid,
-            text: p.lines.join("\n"),
+            text: p.output.format_text(),
             running: !p.finished,
             exit_code: p.exit_code,
             elapsed_secs: p.elapsed_secs(),
@@ -668,7 +676,7 @@ impl ProcessRegistry {
         p.finished = true;
         p.finished_at = Some(Instant::now());
         p.kill_tx = None;
-        Ok(p.lines.join("\n"))
+        Ok(p.output.format_text())
     }
 
     pub fn next_id(&self) -> String {
@@ -727,9 +735,13 @@ mod tests {
         started_at: Instant,
         finished_at: Option<Instant>,
     ) -> Process {
+        let mut output = OutputLimiter::default();
+        for line in lines {
+            output.push_line(line.to_string());
+        }
         Process {
             pid: None,
-            lines: lines.into_iter().map(String::from).collect(),
+            output,
             finished,
             exit_code,
             command: "cmd".into(),
@@ -1073,20 +1085,6 @@ mod tests {
     }
 
     #[test]
-    fn process_push_line_truncates_to_max_lines() {
-        let mut p = process_fixture(Vec::new(), false, None, Instant::now(), None);
-        for i in 0..(MAX_LINES + 5) {
-            p.push_line(format!("line{i}"));
-        }
-        assert_eq!(p.lines.len(), MAX_LINES);
-        assert_eq!(p.lines.first().map(String::as_str), Some("line5"));
-        assert_eq!(
-            p.lines.last().map(String::as_str),
-            Some(format!("line{}", MAX_LINES + 4)).as_deref()
-        );
-    }
-
-    #[test]
     fn process_info_lists_running_processes_in_id_order() {
         // Insert synthetic entries directly via the lock so we don't spawn real children.
         let r = ProcessRegistry::new();
@@ -1160,6 +1158,6 @@ mod tests {
         // Entry is still registered with drained lines.
         let map = r.0.processes.lock().unwrap();
         assert!(map.get("p1").is_some());
-        assert!(map.get("p1").unwrap().lines.is_empty());
+        assert_eq!(map.get("p1").unwrap().output.retained_lines(), 0);
     }
 }

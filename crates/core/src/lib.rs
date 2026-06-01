@@ -25,6 +25,7 @@ pub mod lua;
 pub mod mcp;
 pub mod messages;
 pub mod notebook;
+pub mod output_limit;
 pub mod path;
 pub(crate) mod paused_timer;
 pub mod permissions;

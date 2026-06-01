@@ -1,10 +1,32 @@
 //! Filesystem capability - sync primitives over `std::fs`. Pure I/O, no policy.
 
-use std::io;
+use std::io::{self, Read};
 use std::path::{Path, PathBuf};
 
 pub(crate) fn read_to_string(path: impl AsRef<Path>) -> io::Result<String> {
     std::fs::read_to_string(path)
+}
+
+pub(crate) struct LimitedRead {
+    pub content: String,
+    pub truncated: bool,
+}
+
+pub(crate) fn read_to_string_limited(
+    path: impl AsRef<Path>,
+    max_bytes: usize,
+) -> io::Result<LimitedRead> {
+    let mut file = std::fs::File::open(path)?;
+    let mut bytes = Vec::new();
+    file.by_ref()
+        .take(max_bytes.saturating_add(1) as u64)
+        .read_to_end(&mut bytes)?;
+    let truncated = bytes.len() > max_bytes;
+    if truncated {
+        bytes.truncate(max_bytes);
+    }
+    let content = String::from_utf8_lossy(&bytes).into_owned();
+    Ok(LimitedRead { content, truncated })
 }
 
 pub(crate) fn write(path: impl AsRef<Path>, contents: impl AsRef<[u8]>) -> io::Result<()> {

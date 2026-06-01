@@ -31,6 +31,23 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
     )?;
 
     fs.fn_(
+        "read_limited",
+        "Read at most `max_bytes` bytes from `p`. Returns `({ content, truncated }, nil)` on success or `(nil, err_string)` on failure.",
+        &["p", "max_bytes"],
+        |lua, (p, max_bytes): (String, usize)| -> LuaResult<(Option<mlua::Table>, Option<String>)> {
+            match crate::fs::read_to_string_limited(&p, max_bytes) {
+                Ok(read) => {
+                    let t = lua.create_table()?;
+                    t.set("content", read.content)?;
+                    t.set("truncated", read.truncated)?;
+                    Ok((Some(t), None))
+                }
+                Err(err) => Ok((None, Some(err.to_string()))),
+            }
+        },
+    )?;
+
+    fs.fn_(
         "write",
         "Write `contents` to file `p`, creating it if necessary. Returns `(true, nil)` on success or `(false, err_string)` on failure.",
         &["p", "contents"],
