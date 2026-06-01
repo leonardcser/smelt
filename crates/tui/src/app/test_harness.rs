@@ -1088,6 +1088,11 @@ impl TestApp {
             .push(protocol::HistoryItem::user(protocol::Content::text(
                 format!("fuzz stale prompt prediction {variant}/{seq}"),
             )));
+        {
+            let _g = crate::lua::install_app_ptr(&mut self.app);
+            self.app.bump_epoch("history_epoch");
+            self.app.pump_lua();
+        }
         self.publish_turn_end_for_probe();
         let prediction_id = self
             .drain_engine_ask_ids()

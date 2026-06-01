@@ -1,0 +1,19 @@
+{
+  "_about": "Prompt cursor probe isolation seed: repeated hard-Esc stale-prediction probes can reset model history to the same synthetic context, so the stale-prediction subprobe must reset prediction dedup state before expecting a new EngineAsk.",
+  "mode": "normal",
+  "ops": [
+    {
+      "kind": "probe_prompt_cursor_after_turn",
+      "data": {
+        "variant": 248
+      }
+    },
+    {
+      "kind": "probe_prompt_cursor_after_turn",
+      "data": {
+        "variant": 248
+      }
+    }
+  ],
+  "vim": false
+}
