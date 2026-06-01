@@ -1,0 +1,27 @@
+{
+  "_about": "TurnComplete oracle seed: process-status notes queued during an active turn are committed to history after the final model snapshot is merged.",
+  "mode": "normal",
+  "ops": [
+    {
+      "kind": "engine_process_completed",
+      "data": {
+        "id": "",
+        "exit_code": -658060
+      }
+    },
+    {
+      "kind": "engine_process_completed",
+      "data": {
+        "id": "",
+        "exit_code": null
+      }
+    },
+    {
+      "kind": "engine_turn_complete",
+      "data": {
+        "msg_count": 42
+      }
+    }
+  ],
+  "vim": true
+}

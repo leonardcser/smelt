@@ -1,0 +1,11 @@
+{
+  "_about": "Prompt insertion oracle regression: '?' on an empty prompt is a global help keymap, not plain text insertion.",
+  "mode": "plan",
+  "ops": [
+    {
+      "kind": "key_unicode",
+      "data": 63
+    }
+  ],
+  "vim": true
+}

@@ -1,0 +1,17 @@
+{
+  "_about": "Prompt cursor probe isolation seed: a prior global '?' keymap can leave a help overlay focused; the cursor probe must close transient overlays before asserting prompt insertion.",
+  "mode": "yolo",
+  "ops": [
+    {
+      "kind": "key_unicode",
+      "data": 3742328471
+    },
+    {
+      "kind": "probe_prompt_cursor_after_turn",
+      "data": {
+        "variant": 0
+      }
+    }
+  ],
+  "vim": false
+}

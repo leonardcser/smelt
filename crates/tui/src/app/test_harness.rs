@@ -463,6 +463,24 @@ impl TestApp {
         self.app.core.session.context_tokens
     }
 
+    /// Active context checkpoint prefix length, if compaction installed one.
+    /// `TuiApp::set_history` preserves this prefix and merges incoming model
+    /// history after it.
+    pub fn checkpoint_first_live_index(&self) -> Option<usize> {
+        self.app
+            .core
+            .session
+            .checkpoint
+            .as_ref()
+            .map(|checkpoint| checkpoint.first_live_index)
+    }
+
+    /// Number of deferred model-history notes that will be committed when the
+    /// active turn finishes successfully.
+    pub fn pending_history_append_count(&self) -> usize {
+        self.app.pending_history_appends.len()
+    }
+
     /// Set the configured context window size used by the prompt bar's
     /// percentage display.
     pub fn set_context_window(&mut self, context_window: Option<u32>) {
@@ -726,6 +744,27 @@ impl TestApp {
         crate::lua::with_app_ptr(&mut self.app, |app| {
             app.render_normal_to(agent_running, &mut sink);
         });
+        self.assert_render_layout_invariants();
+    }
+
+    fn assert_render_layout_invariants(&self) {
+        for win_id in [crate::app::PROMPT_WIN, crate::app::TRANSCRIPT_WIN] {
+            let Some(win) = self.app.ui.win(win_id) else {
+                continue;
+            };
+            let Some(viewport) = win.viewport else {
+                continue;
+            };
+            let width = viewport.content_width;
+            if width < 40 {
+                continue;
+            }
+            let max_row_width = win.layout().max_row_width();
+            assert!(
+                max_row_width <= width,
+                "well-known window {win_id:?} has row width {max_row_width} > viewport width {width}; content would clip with scroll_left pinned",
+            );
+        }
     }
 
     /// Render one frame and return the resulting `SnapshotFrame`. Used
@@ -879,7 +918,12 @@ impl TestApp {
         if win.vim_enabled && !matches!(win.vim_mode, VimMode::Insert) {
             return false;
         }
-        if win.selection_anchor.is_some() || win.effective_endpoint() != win.cpos {
+        if win.selection_anchor.is_some()
+            || win.effective_endpoint() != win.cpos
+            || self.app.timers.pending_chord.is_some()
+            || self.app.timers.pending_pane_chord.is_some()
+            || self.app.timers.app_sequence.has_pending()
+        {
             return false;
         }
         !self.app.ui.any_drag_active()
@@ -968,11 +1012,28 @@ impl TestApp {
     }
 
     fn force_prompt_keyboard_focus(&mut self) {
+        if self.app.well_known.cmdline.is_some() {
+            self.app.close_cmdline();
+        }
+        while let Some(overlay_id) = self
+            .app
+            .ui
+            .focused_overlay()
+            .or_else(|| self.app.ui.active_modal())
+        {
+            self.app.close_overlay(overlay_id);
+        }
+        self.app.timers.pending_chord = None;
+        self.app.timers.pending_pane_chord = None;
+        self.app.timers.app_sequence.clear();
         self.app.app_focus = AppFocus::Prompt;
         self.app.term_focused = true;
         self.app.clear_prompt_prediction();
         let _ = self.app.ui.set_focus(crate::app::PROMPT_WIN);
         if let Some(win) = self.app.ui.win_mut(crate::app::PROMPT_WIN) {
+            if win.vim_enabled {
+                win.set_vim_mode(VimMode::Insert);
+            }
             win.clear_mouse_state();
             win.selection_anchor = None;
         }
@@ -1051,6 +1112,12 @@ impl TestApp {
             .session
             .history
             .push(protocol::HistoryItem::user(protocol::Content::text("u2")));
+        // Prepare-request runs before a model request is dispatched. Keep the
+        // probe on that lifecycle edge rather than injecting compaction while
+        // a synthetic tool call is already in flight.
+        if self.agent_running() && !self.pending_tool_call_ids().is_empty() {
+            return;
+        }
         if variant % 2 == 1 {
             self.start_turn(20_000 + u64::from(variant));
         }
@@ -1100,7 +1167,6 @@ impl TestApp {
         assert!(!replacement.is_empty(), "compaction replacement is empty");
         if should_preserve_turn {
             assert!(self.agent_running(), "compaction ended the active turn");
-            assert_eq!(self.app.working.phase_label(), Some("working"));
         }
     }
 
@@ -1337,6 +1403,8 @@ impl TestApp {
         // never require horizontal panning. Generic plugin-created windows may
         // still use `scroll_left`, but these two well-known panes must remain
         // pinned so vim `zh`/`zl` or viewport resync cannot silently clip text.
+        // Width-vs-layout checks live in `assert_render_layout_invariants`,
+        // after render has rebuilt layouts for the current viewport.
         for win_id in [crate::app::PROMPT_WIN, crate::app::TRANSCRIPT_WIN] {
             if let Some(win) = self.app.ui.win(win_id) {
                 assert_eq!(
@@ -1344,16 +1412,6 @@ impl TestApp {
                     "well-known window {win_id:?} has horizontal scroll_left {}",
                     win.scroll_left,
                 );
-                if let Some(viewport) = win.viewport {
-                    let width = viewport.content_width;
-                    if width > 0 {
-                        let max_row_width = win.layout().max_row_width();
-                        assert!(
-                            max_row_width <= width,
-                            "well-known window {win_id:?} has row width {max_row_width} > viewport width {width}; content would clip with scroll_left pinned",
-                        );
-                    }
-                }
             }
         }
 

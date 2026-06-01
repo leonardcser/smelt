@@ -1,0 +1,11 @@
+{
+  "_about": "Prompt paste oracle regression: bracketed-paste input normalizes CR and CRLF to LF before inserting into the prompt.",
+  "mode": "normal",
+  "ops": [
+    {
+      "kind": "paste",
+      "data": "\n\r"
+    }
+  ],
+  "vim": true
+}

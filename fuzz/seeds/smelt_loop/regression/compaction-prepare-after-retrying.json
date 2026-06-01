@@ -1,0 +1,26 @@
+{
+  "_about": "Compaction prepare probe regression: preparing a request after an engine retry notification must preserve the active turn without assuming the retrying phase survives unchanged.",
+  "mode": "yolo",
+  "ops": [
+    {
+      "kind": "probe_compaction_prepare_request",
+      "data": {
+        "variant": 195
+      }
+    },
+    {
+      "kind": "engine_retrying",
+      "data": {
+        "attempt": 195,
+        "delay_ms": 50119
+      }
+    },
+    {
+      "kind": "probe_compaction_prepare_request",
+      "data": {
+        "variant": 195
+      }
+    }
+  ],
+  "vim": true
+}

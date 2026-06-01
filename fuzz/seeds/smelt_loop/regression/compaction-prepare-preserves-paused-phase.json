@@ -1,0 +1,27 @@
+{
+  "_about": "Compaction prepare probe regression: preparing a request during a paused permission dialog must preserve the active turn without assuming a specific working phase.",
+  "mode": "plan",
+  "ops": [
+    {
+      "kind": "probe_compaction_prepare_request",
+      "data": {
+        "variant": 3
+      }
+    },
+    {
+      "kind": "engine_request_permission_bash",
+      "data": {
+        "req_id": 255,
+        "call_id": 255,
+        "command": ""
+      }
+    },
+    {
+      "kind": "probe_compaction_prepare_request",
+      "data": {
+        "variant": 255
+      }
+    }
+  ],
+  "vim": true
+}

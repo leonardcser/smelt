@@ -1,0 +1,29 @@
+{
+  "_about": "Compaction prepare probe isolation regression: the side-channel must not inject prepare-request compaction into an active synthetic turn with an in-flight tool call.",
+  "mode": "yolo",
+  "ops": [
+    {
+      "kind": "start_custom_command",
+      "data": {
+        "variant": 115
+      }
+    },
+    {
+      "kind": "engine_tool_start",
+      "data": {
+        "call_id": 0,
+        "tool_name": "",
+        "args": {
+          "": null
+        }
+      }
+    },
+    {
+      "kind": "probe_compaction_prepare_request",
+      "data": {
+        "variant": 9
+      }
+    }
+  ],
+  "vim": true
+}

@@ -1,0 +1,23 @@
+{
+  "_about": "Prompt cursor probe isolation seed: previous vim Escape can leave the prompt in Normal mode; the cursor probe must force Insert before asserting typed characters advance.",
+  "mode": "normal",
+  "ops": [
+    {
+      "kind": "key_special",
+      "data": 1
+    },
+    {
+      "kind": "start_engine_ask",
+      "data": {
+        "question": " \u0001g"
+      }
+    },
+    {
+      "kind": "probe_prompt_cursor_after_turn",
+      "data": {
+        "variant": 0
+      }
+    }
+  ],
+  "vim": true
+}

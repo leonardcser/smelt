@@ -98,7 +98,7 @@ impl TuiApp {
         }
     }
 
-    fn close_cmdline(&mut self) {
+    pub(crate) fn close_cmdline(&mut self) {
         if let Some(win) = self.well_known.cmdline.take() {
             self.close_overlay_leaf(win);
         }

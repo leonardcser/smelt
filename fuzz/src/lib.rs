@@ -216,7 +216,9 @@ pub enum FuzzOp {
 
     /// Emit `TurnComplete` against the currently-active turn (when any),
     /// carrying `msg_count` synthetic messages and a zero `TurnMeta`. Idle
-    /// dispatch also accepts this and replaces history when non-empty.
+    /// dispatch also accepts this and merges history when non-empty.
+    /// If a compaction checkpoint is installed, the checkpoint prefix is
+    /// preserved ahead of the incoming messages.
     EngineTurnComplete {
         msg_count: u8,
     },
@@ -1061,6 +1063,8 @@ struct Snapshot {
     working: tui::app::test_harness::WorkingSnapshot,
     session_cost_usd: f64,
     context_tokens: Option<u32>,
+    checkpoint_first_live_index: Option<usize>,
+    pending_history_appends: usize,
     transcript_blocks: usize,
     pending_confirms: usize,
     deferred_dialogs: usize,
@@ -1085,6 +1089,8 @@ impl Snapshot {
             working: app.working_state(),
             session_cost_usd: app.session_cost_usd(),
             context_tokens: app.context_tokens(),
+            checkpoint_first_live_index: app.checkpoint_first_live_index(),
+            pending_history_appends: app.pending_history_append_count(),
             transcript_blocks: app.transcript_block_count(),
             pending_confirms: app.pending_confirm_count(),
             deferred_dialogs: app.pending_deferred_dialog_count(),
@@ -1094,6 +1100,25 @@ impl Snapshot {
             action_count: app.actions().len(),
         }
     }
+}
+
+fn expected_model_history_len(pre: &Snapshot, msg_count: usize) -> usize {
+    pre.checkpoint_first_live_index.unwrap_or(0) + msg_count
+}
+
+fn expected_completed_history_len(pre: &Snapshot, msg_count: usize, targeted_active: bool) -> usize {
+    let pending_appends = if targeted_active {
+        pre.pending_history_appends
+    } else {
+        0
+    };
+    expected_model_history_len(pre, msg_count) + pending_appends
+}
+
+fn normalize_prompt_paste_text(text: &str) -> String {
+    text.replace("\r\n", "\n")
+        .replace('\r', "\n")
+        .replace(smelt_buffer::ATTACHMENT_MARKER, "")
 }
 
 fn count_action<F>(actions: &[Action], pred: F) -> usize
@@ -1161,7 +1186,7 @@ enum PostCheck {
     /// Active turns defer the status into pending history; busy plugin scopes
     /// queue it as input for later.
     ProcessCompleted,
-    /// `Messages` against the active turn (matching turn_id) replaces
+    /// `Messages` against the active turn (matching turn_id) merges
     /// `session.messages` mid-turn; idle dispatch is a no-op.
     MessagesReplaced {
         msg_count: usize,
@@ -1200,8 +1225,8 @@ enum PostCheck {
     PromptCharInserted {
         ch: char,
     },
-    /// Paste into a ready prompt should insert the full string at the old
-    /// cursor and advance by the inserted byte length.
+    /// Paste into a ready prompt should insert the normalized paste text at the
+    /// old cursor and advance by the inserted byte length.
     PromptTextInserted {
         text: String,
     },
@@ -1282,13 +1307,22 @@ fn run_check(check: PostCheck, pre: &Snapshot, post: &Snapshot, new_actions: &[A
             targeted_active,
         } => {
             // Either active-turn dispatch (matching turn_id) or idle
-            // dispatch with non-empty messages replaces history.
+            // dispatch with non-empty messages merges history. A compaction
+            // checkpoint preserves its pre-summary prefix before appending
+            // incoming model messages.
             let history_path = targeted_active || msg_count > 0;
             if history_path {
+                let expected = expected_completed_history_len(pre, msg_count, targeted_active);
                 assert_eq!(
-                    post.session_messages, msg_count,
-                    "TurnComplete did not replace session.messages: post {} (expected {msg_count})",
+                    post.session_messages, expected,
+                    "TurnComplete did not merge session.messages: post {} (expected {expected}, incoming {msg_count}, checkpoint prefix {:?}, pending appends {})",
                     post.session_messages,
+                    pre.checkpoint_first_live_index,
+                    if targeted_active {
+                        pre.pending_history_appends
+                    } else {
+                        0
+                    },
                 );
             }
             if targeted_active {
@@ -1351,10 +1385,12 @@ fn run_check(check: PostCheck, pre: &Snapshot, post: &Snapshot, new_actions: &[A
             // Only the active-turn arm with matching turn_id calls
             // set_history; idle dispatch is an explicit no-op.
             if targeted_active {
+                let expected = expected_model_history_len(pre, msg_count);
                 assert_eq!(
-                    post.session_messages, msg_count,
-                    "Messages did not replace session.messages: post {} (expected {msg_count})",
+                    post.session_messages, expected,
+                    "Messages did not merge session.messages: post {} (expected {expected}, incoming {msg_count}, checkpoint prefix {:?})",
                     post.session_messages,
+                    pre.checkpoint_first_live_index,
                 );
                 // Doesn't end the turn.
                 assert!(
@@ -1506,7 +1542,11 @@ fn run_check(check: PostCheck, pre: &Snapshot, post: &Snapshot, new_actions: &[A
             );
         }
         PostCheck::PromptCharInserted { ch } => {
-            if !pre.prompt_plain_insert_ready || ch.is_control() || ch == '\u{FFFC}' {
+            if !pre.prompt_plain_insert_ready
+                || ch.is_control()
+                || ch == '\u{FFFC}'
+                || (ch == '?' && pre.prompt_source.is_empty())
+            {
                 return;
             }
             let mut expected = pre.prompt_source.clone();
@@ -1525,22 +1565,24 @@ fn run_check(check: PostCheck, pre: &Snapshot, post: &Snapshot, new_actions: &[A
             );
         }
         PostCheck::PromptTextInserted { text } => {
-            if !pre.prompt_plain_insert_ready || text.contains('\u{FFFC}') {
+            if !pre.prompt_plain_insert_ready {
                 return;
             }
+            let inserted = normalize_prompt_paste_text(&text);
             let mut expected = pre.prompt_source.clone();
-            let at = smelt_buffer::text::insert_str(&mut expected, pre.prompt_cpos, &text);
+            let at = smelt_buffer::text::insert_str(&mut expected, pre.prompt_cpos, &inserted);
             assert_eq!(
                 post.prompt_source, expected,
-                "prompt paste inserted at wrong location: pre cpos {}, inserted {:?}, pre {:?}, post {:?}",
-                pre.prompt_cpos, text, pre.prompt_source, post.prompt_source,
+                "prompt paste inserted at wrong location: pre cpos {}, pasted {:?}, normalized {:?}, pre {:?}, post {:?}",
+                pre.prompt_cpos, text, inserted, pre.prompt_source, post.prompt_source,
             );
             assert_eq!(
                 post.prompt_cpos,
-                at + text.len(),
-                "prompt paste left cursor at {}, expected {} after inserting {:?}",
+                at + inserted.len(),
+                "prompt paste left cursor at {}, expected {} after inserting {:?} from paste {:?}",
                 post.prompt_cpos,
-                at + text.len(),
+                at + inserted.len(),
+                inserted,
                 text,
             );
         }
