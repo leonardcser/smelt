@@ -2,7 +2,9 @@
 //!
 //! Thin wrapper over `cargo +nightly fuzz run` that wires the flags we
 //! actually want:
-//!   - `-ignore_crashes=0` so the first crash drops an artifact and exits.
+//!   - preflight corpus replay without `-fork`, so stale corpus crashes fail
+//!     before libFuzzer's fork-mode merge can keep going after writing artifacts.
+//!   - `-ignore_crashes=0` so the first new fork-worker crash drops an artifact and exits.
 //!   - `-fork=N` for parallel workers (default 1).
 //!   - optional `--cmin` runs `cargo fuzz cmin` first to sweep the
 //!     accumulated corpus for regressions and shrink it before fuzzing.
@@ -54,6 +56,8 @@ pub fn run(args: Vec<String>) {
 
     let root = repo_root();
 
+    preflight_corpus(&root, &target);
+
     if cmin {
         println!(">>> cmin {target}");
         let status = Command::new("cargo")
@@ -99,6 +103,32 @@ pub fn run(args: Vec<String>) {
     }
 }
 
+fn preflight_corpus(root: &std::path::Path, target: &str) {
+    println!("xtask fuzz: preflight corpus {target}");
+    let status = Command::new("cargo")
+        .args([
+            "+nightly",
+            "fuzz",
+            "run",
+            "--sanitizer=none",
+            target,
+            "--",
+            "-runs=0",
+            "-ignore_crashes=0",
+        ])
+        .current_dir(root)
+        .status()
+        .unwrap_or_else(|e| die(&format!("spawn corpus preflight: {e}")));
+    if !status.success() {
+        eprintln!();
+        eprintln!(
+            ">>> corpus preflight exited {status} — check fuzz/artifacts/{target}/ for the crash artifact"
+        );
+        eprintln!(">>> next: cargo xtask fuzz triage {target} fuzz/artifacts/{target}/crash-<hex>");
+        std::process::exit(status.code().unwrap_or(1));
+    }
+}
+
 fn print_help() {
     let names: Vec<&str> = all_target_names().collect();
     eprintln!("usage: cargo xtask fuzz run <target> [--fork N] [--cmin] [-- libfuzzer-flags...]");
@@ -109,5 +139,5 @@ fn print_help() {
     eprintln!("  --fork N    parallel workers (default 1)");
     eprintln!("  --cmin      run `cargo fuzz cmin <target>` first");
     eprintln!();
-    eprintln!("Stops on first crash. To bound time, append `-max_total_time=<secs>`.");
+    eprintln!("Stops on corpus preflight crash before forking, then on first fork-worker crash. To bound time, append `-max_total_time=<secs>`.");
 }
