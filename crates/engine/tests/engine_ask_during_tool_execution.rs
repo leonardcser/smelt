@@ -212,7 +212,10 @@ async fn engine_ask_during_tool_execution_is_not_silently_dropped() {
             Ok(Some(EngineEvent::ToolHooksRequest { request_id, .. })) => {
                 handle.send(UiCommand::ToolHooksResponse {
                     request_id,
-                    hooks: ToolHooks::default(),
+                    evaluation: protocol::ToolEvaluation {
+                        decision: protocol::Decision::Allow,
+                        hooks: ToolHooks::default(),
+                    },
                 });
             }
             Ok(Some(EngineEvent::ToolDispatch {

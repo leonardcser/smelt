@@ -1315,7 +1315,7 @@ impl<'a> Turn<'a> {
                 continue;
             }
 
-            let hooks = match self.dispatcher.evaluate_hooks(
+            let evaluation = match self.dispatcher.evaluate_hooks(
                 &tc.function.name,
                 &args,
                 self.mode.clone(),
@@ -1338,8 +1338,9 @@ impl<'a> Turn<'a> {
                 }
             };
 
+            let protocol::ToolEvaluation { decision, hooks } = evaluation;
             let idx = plan.slots.len();
-            match hooks.decision {
+            match decision {
                 Decision::Allow => {
                     plan.slots.push(ToolSlot {
                         tc,
@@ -1572,14 +1573,15 @@ impl<'a> Turn<'a> {
                             }
                         }
                     }
-                    UiCommand::ToolHooksResponse { request_id, hooks } => {
+                    UiCommand::ToolHooksResponse { request_id, evaluation } => {
                         if let Some(pos) = plan
                             .pending_tool_hooks
                             .iter()
                             .position(|(rid, _)| *rid == request_id)
                         {
                             let (_, pending) = plan.pending_tool_hooks.swap_remove(pos);
-                            match hooks.decision {
+                            let protocol::ToolEvaluation { decision, hooks } = evaluation;
+                            match decision {
                                 Decision::Allow => {
                                     if pending.is_sequential {
                                         plan.sequential_tools.push((

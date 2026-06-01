@@ -137,8 +137,8 @@ impl ToolHookFlags {
     }
 }
 
-/// Final permission decision for a single tool call, produced by the
-/// dispatcher after evaluating hooks and checking policy.
+/// Permission decision for a single tool call, produced by central policy
+/// evaluation after tool metadata has been collected.
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Decision {
@@ -150,29 +150,35 @@ pub enum Decision {
     Error(String),
 }
 
-/// Result of evaluating a tool's permission hooks for a specific
-/// invocation. Returned by the TUI in response to
-/// `EngineEvent::ToolHooksRequest` (Lua tools) or by the dispatcher's
-/// `evaluate_hooks` (MCP / core tools).
-///
-/// The `decision` field is authoritative: `Allow` → dispatch,
-/// `Ask` → prompt the user, `Deny` → synthetic denial,
-/// `Error(msg)` → synthetic error result.
+/// Metadata hooks evaluated for a specific tool invocation. These values
+/// describe the call for display and auto-approval matching; they do not
+/// grant permission to execute the tool.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct ToolHooks {
-    /// Final permission decision.
-    #[serde(default)]
-    pub decision: Decision,
     /// Approval patterns to offer "always allow" for.
-    /// Used when `decision == Ask`.
+    /// Used when the central permission decision is `Ask`.
     #[serde(default)]
     pub approval_patterns: Vec<String>,
+    /// Preflight validation error reported by the tool before execution.
+    /// The central evaluator converts this into `Decision::Error`.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub preflight_error: Option<String>,
     /// Styled one-line-or-more summary of this invocation. Comes from
     /// the tool's `summary(args)` Lua callback. Sole source of truth
     /// for the transcript header AND confirm dialog body header - the
     /// engine never extracts arg fields by tool name.
     #[serde(default)]
     pub summary: StyledLines,
+}
+
+/// Complete tool evaluation result: tool-provided metadata plus the central
+/// permission decision derived from that metadata, mode, origin, and policy.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct ToolEvaluation {
+    #[serde(default)]
+    pub decision: Decision,
+    #[serde(default)]
+    pub hooks: ToolHooks,
 }
 
 /// Events emitted by the engine. The UI consumes these to update its display.
@@ -458,9 +464,12 @@ pub enum UiCommand {
         metadata: Option<serde_json::Value>,
     },
 
-    /// Result of evaluating a tool's permission hooks (response
-    /// to `EngineEvent::ToolHooksRequest`).
-    ToolHooksResponse { request_id: u64, hooks: ToolHooks },
+    /// Result of evaluating tool metadata and central permission policy
+    /// (response to `EngineEvent::ToolHooksRequest`).
+    ToolHooksResponse {
+        request_id: u64,
+        evaluation: ToolEvaluation,
+    },
 
     /// Side-call from Lua to a core tool.
     /// The engine runs the named tool and replies with
@@ -588,11 +597,20 @@ mod tests {
     // ---- ToolHooks ----
 
     #[test]
-    fn tool_hooks_default_decision_is_allow() {
+    fn tool_hooks_default_is_empty_metadata() {
         let h = ToolHooks::default();
-        assert_eq!(h.decision, Decision::Allow);
         assert!(h.approval_patterns.is_empty());
+        assert!(h.preflight_error.is_none());
         assert!(h.summary.is_empty());
+    }
+
+    #[test]
+    fn tool_evaluation_default_decision_is_allow() {
+        let e = ToolEvaluation::default();
+        assert_eq!(e.decision, Decision::Allow);
+        assert!(e.hooks.approval_patterns.is_empty());
+        assert!(e.hooks.preflight_error.is_none());
+        assert!(e.hooks.summary.is_empty());
     }
 
     // ---- EngineEvent roundtrip sanity ----

@@ -1196,7 +1196,7 @@ impl LuaRuntime {
         if let Some(func) = preflight_fn {
             let _perf = smelt_perf::perf::begin("lua:tool");
             match func.call::<Option<String>>(args_table) {
-                Ok(Some(s)) => out.decision = protocol::Decision::Error(s),
+                Ok(Some(s)) => out.preflight_error = Some(s),
                 Ok(None) => {}
                 Err(e) => self.record_error(format!("tool hook preflight: {e}")),
             }

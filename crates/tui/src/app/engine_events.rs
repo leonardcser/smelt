@@ -330,10 +330,11 @@ impl TuiApp {
                 mode: _,
             } => {
                 let _guard = crate::lua::install_app_ptr(self);
-                let mut hooks = self.lua.evaluate_hooks(&tool_name, &args);
+                let hooks = self.lua.evaluate_hooks(&tool_name, &args);
                 drop(_guard);
-                // Permission policy is evaluated on the TUI side.
-                if !matches!(hooks.decision, protocol::Decision::Error(_)) {
+                let decision = if let Some(err) = hooks.preflight_error.clone() {
+                    protocol::Decision::Error(err)
+                } else {
                     let permissions = self.active_permissions();
                     let active_mode = self.core.config.mode.clone();
                     let outcome = permissions.evaluate_tool(
@@ -361,11 +362,15 @@ impl TuiApp {
                             decision = protocol::Decision::Allow;
                         }
                     }
-                    hooks.decision = decision;
-                }
+                    decision
+                };
+                let evaluation = protocol::ToolEvaluation { decision, hooks };
                 self.core
                     .engine
-                    .send(protocol::UiCommand::ToolHooksResponse { request_id, hooks });
+                    .send(protocol::UiCommand::ToolHooksResponse {
+                        request_id,
+                        evaluation,
+                    });
                 SessionControl::Continue
             }
             EngineEvent::CoreToolResult {

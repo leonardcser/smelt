@@ -1,5 +1,5 @@
 use crate::provider::ToolDefinition;
-use protocol::ToolHooks;
+use protocol::ToolEvaluation;
 use serde_json::Value;
 use std::collections::HashMap;
 use std::future::Future;
@@ -51,7 +51,7 @@ pub trait ToolDispatcher: Send + Sync {
         args: &HashMap<String, Value>,
         mode: protocol::AgentMode,
         permission_overrides: Option<&protocol::PermissionOverrides>,
-    ) -> Option<ToolHooks>;
+    ) -> Option<ToolEvaluation>;
 
     fn dispatch<'a>(
         &'a self,
@@ -86,7 +86,7 @@ impl ToolDispatcher for EmptyDispatcher {
         _args: &HashMap<String, Value>,
         _mode: protocol::AgentMode,
         _permission_overrides: Option<&protocol::PermissionOverrides>,
-    ) -> Option<ToolHooks> {
+    ) -> Option<ToolEvaluation> {
         None
     }
 
