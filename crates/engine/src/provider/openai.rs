@@ -57,6 +57,7 @@ fn normalize_openai_reasoning_item(data: &serde_json::Value) -> serde_json::Valu
     let Some(obj) = out.as_object_mut() else {
         return out;
     };
+    obj.remove("id");
     let Some(summary) = obj.get_mut("summary") else {
         return out;
     };
@@ -285,8 +286,8 @@ pub(super) struct StreamState {
     pub(super) content: String,
     pub(super) reasoning: String,
     /// Verbatim reasoning items captured via `response.output_item.done`.
-    /// Echoed back on the next turn so the model retains its chain of
-    /// thought (encrypted_content + id).
+    /// Echoed back on the next turn after normalization; item ids are
+    /// omitted because stateless requests do not persist server items.
     pub(super) reasoning_items: Vec<serde_json::Value>,
     /// item_id -> (call_id, name, args)
     pub(super) tool_calls: HashMap<String, (String, String, String)>,
@@ -662,8 +663,35 @@ mod tests {
         let body = build_body(&[m], &[], "m", ReasoningEffort::Off, &cfg());
 
         assert_eq!(body["input"][0]["type"], "reasoning");
+        assert!(body["input"][0].get("id").is_none());
         assert!(body["input"][0]["summary"].is_array());
         assert_eq!(body["input"][0]["summary"][0]["text"], "legacy");
+    }
+
+    #[test]
+    fn build_body_strips_replayed_reasoning_item_ids() {
+        let m = Message {
+            role: Role::Assistant,
+            content: None,
+            reasoning_content: None,
+            reasoning_details: Some(vec![ReasoningBlock {
+                provider: ReasoningBlock::OPENAI_RESPONSES.to_string(),
+                data: json!({
+                    "type": "reasoning",
+                    "id": "rs_0638b310c39c8750016a1de93c61b4819191b4c8d21301d82f",
+                    "summary": [{"type": "summary_text", "text": "thought"}],
+                }),
+            }]),
+            tool_calls: None,
+            tool_call_id: None,
+            is_error: false,
+        };
+
+        let body = build_body(&[m], &[], "m", ReasoningEffort::Off, &cfg());
+
+        assert_eq!(body["input"][0]["type"], "reasoning");
+        assert!(body["input"][0].get("id").is_none());
+        assert_eq!(body["input"][0]["summary"][0]["text"], "thought");
     }
 
     #[test]
@@ -1329,7 +1357,7 @@ mod tests {
     }
 
     #[test]
-    fn parse_response_captures_reasoning_items_verbatim() {
+    fn parse_response_captures_reasoning_items_without_server_id() {
         let v = json!({
             "output": [
                 {"type": "reasoning", "id": "rs_1", "summary": [{"text": "sum"}], "encrypted_content": "enc"},
@@ -1341,12 +1369,12 @@ mod tests {
         let blocks = r.reasoning_blocks.expect("blocks");
         assert_eq!(blocks.len(), 1);
         assert_eq!(blocks[0].provider, "openai_responses");
-        assert_eq!(blocks[0].data["id"], "rs_1");
+        assert!(blocks[0].data.get("id").is_none());
         assert_eq!(blocks[0].data["encrypted_content"], "enc");
     }
 
     #[test]
-    fn sse_output_item_done_reasoning_captured_verbatim() {
+    fn sse_output_item_done_reasoning_captured_without_server_id() {
         let mut state = completed_state();
         step(
             &mut state,
@@ -1357,7 +1385,7 @@ mod tests {
         );
         let r = state.finalize().unwrap();
         let blocks = r.reasoning_blocks.expect("blocks");
-        assert_eq!(blocks[0].data["id"], "rs_1");
+        assert!(blocks[0].data.get("id").is_none());
         assert_eq!(blocks[0].data["encrypted_content"], "enc");
     }
 
@@ -1379,7 +1407,7 @@ mod tests {
         let body = build_body(&[m], &[], "gpt-5", ReasoningEffort::Off, &cfg());
         let input = body["input"].as_array().unwrap();
         assert_eq!(input[0]["type"], "reasoning");
-        assert_eq!(input[0]["id"], "rs_1");
+        assert!(input[0].get("id").is_none());
         assert_eq!(input[1]["type"], "message");
         assert_eq!(input[2]["type"], "function_call");
     }
