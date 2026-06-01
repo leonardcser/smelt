@@ -45,7 +45,7 @@ pub trait ToolDispatcher: Send + Sync {
     }
 
     /// `None` means the tool is unknown.
-    fn evaluate_hooks(
+    fn evaluate_tool_call(
         &self,
         name: &str,
         args: &HashMap<String, Value>,
@@ -80,7 +80,7 @@ impl ToolDispatcher for EmptyDispatcher {
         false
     }
 
-    fn evaluate_hooks(
+    fn evaluate_tool_call(
         &self,
         _name: &str,
         _args: &HashMap<String, Value>,
@@ -140,9 +140,9 @@ mod tests {
     }
 
     #[test]
-    fn empty_dispatcher_evaluate_hooks_returns_none() {
+    fn empty_dispatcher_evaluate_tool_call_returns_none() {
         let d = EmptyDispatcher;
-        let res = d.evaluate_hooks(
+        let res = d.evaluate_tool_call(
             "name",
             &HashMap::new(),
             protocol::AgentMode::parse("plan").unwrap(),

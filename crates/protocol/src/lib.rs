@@ -18,7 +18,7 @@ pub mod usage;
 pub use content::{Content, ContentPart};
 pub use event::{
     AskModel, AskResponseFormat, Decision, EngineAskError, EngineAskErrorKind, EngineEvent,
-    StartTurnPayload, ToolDef, ToolEvaluation, ToolExecutionMode, ToolHookFlags, ToolHooks,
+    StartTurnPayload, ToolDef, ToolEvaluation, ToolExecutionMode, ToolHookFlags, ToolMetadata,
     UiCommand,
 };
 pub use history::{

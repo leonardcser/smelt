@@ -322,7 +322,7 @@ impl TuiApp {
                 self.handle_tool_call(request_id, call_id, tool_name, args);
                 SessionControl::Continue
             }
-            EngineEvent::ToolHooksRequest {
+            EngineEvent::ToolEvaluationRequest {
                 request_id,
                 call_id: _,
                 tool_name,
@@ -330,14 +330,14 @@ impl TuiApp {
                 mode: _,
             } => {
                 let _guard = crate::lua::install_app_ptr(self);
-                let hooks = self.lua.evaluate_hooks(&tool_name, &args);
+                let metadata = self.lua.evaluate_tool_metadata(&tool_name, &args);
                 drop(_guard);
-                let decision = if let Some(err) = hooks.preflight_error.clone() {
+                let decision = if let Some(err) = metadata.preflight_error.clone() {
                     protocol::Decision::Error(err)
                 } else {
                     let permissions = self.active_permissions();
                     let active_mode = self.core.config.mode.clone();
-                    let summary_text = hooks.summary.as_plain_text();
+                    let summary_text = metadata.summary.as_plain_text();
                     let label = if summary_text.is_empty() {
                         tool_name.clone()
                     } else {
@@ -352,10 +352,10 @@ impl TuiApp {
                     );
                     outcome.decision
                 };
-                let evaluation = protocol::ToolEvaluation { decision, hooks };
+                let evaluation = protocol::ToolEvaluation { decision, metadata };
                 self.core
                     .engine
-                    .send(protocol::UiCommand::ToolHooksResponse {
+                    .send(protocol::UiCommand::ToolEvaluationResponse {
                         request_id,
                         evaluation,
                     });

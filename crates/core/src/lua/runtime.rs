@@ -1149,12 +1149,12 @@ impl LuaRuntime {
         }
     }
 
-    pub fn evaluate_hooks(
+    pub fn evaluate_tool_metadata(
         &self,
         tool_name: &str,
         args: &HashMap<String, serde_json::Value>,
-    ) -> protocol::ToolHooks {
-        let mut out = protocol::ToolHooks::default();
+    ) -> protocol::ToolMetadata {
+        let mut out = protocol::ToolMetadata::default();
 
         let (approval_patterns_fn, preflight_fn) = {
             let handlers = self.shared.tools.lock().unwrap_or_else(|e| e.into_inner());
@@ -1175,7 +1175,7 @@ impl LuaRuntime {
         let args_table = match self.args_to_lua_table(args) {
             Ok(t) => t,
             Err(e) => {
-                self.record_error(format!("tool hooks: build args: {e}"));
+                self.record_error(format!("tool metadata: build args: {e}"));
                 return out;
             }
         };

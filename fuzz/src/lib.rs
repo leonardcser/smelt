@@ -26,7 +26,7 @@ use tui::app::test_harness::{Action, AllocBudget, SourceEvent};
 pub use tui::app::test_harness::TestApp;
 
 /// Bounded JSON value tree for tool argument fuzzing. Production paths
-/// (`evaluate_hooks`, `permissions.decide`, pattern matching in
+/// (`evaluate_tool_metadata`, `permissions.evaluate_tool`, pattern matching in
 /// `RequestPermission`) consume `HashMap<String, serde_json::Value>` -
 /// feeding them all-empty bags reaches none of that logic. The
 /// `Arbitrary` impl synthesises small (≤ 6 keys, depth ≤ 3) trees so
@@ -295,10 +295,10 @@ pub enum FuzzOp {
         tool_name: String,
         args: ArgsBag,
     },
-    /// Emit `ToolHooksRequest`. Active-turn dispatch always queues a
-    /// `ToolHooksResponse` UiCommand back; `evaluate_hooks` short-circuits
+    /// Emit `ToolEvaluationRequest`. Active-turn dispatch always queues a
+    /// `ToolEvaluationResponse` UiCommand back; `evaluate_tool_metadata` short-circuits
     /// when no Lua hook is registered.
-    EngineToolHooksRequest {
+    EngineToolEvaluationRequest {
         req_id: u8,
         call_id: u8,
         tool_name: String,
@@ -512,7 +512,7 @@ impl FuzzOp {
             ApproveFirstConfirm => "approve confirm".into(),
             DenyFirstConfirm { .. } => "deny confirm".into(),
             EngineToolDispatch { tool_name, .. } => format!("tool dispatch {tool_name}"),
-            EngineToolHooksRequest { tool_name, .. } => format!("tool hooks {tool_name}"),
+            EngineToolEvaluationRequest { tool_name, .. } => format!("tool hooks {tool_name}"),
             EngineCoreToolResult { .. } => "core tool result".into(),
             EngineShutdown { .. } => "shutdown".into(),
             InsertAttachment { label } => format!("insert attachment {label}"),
@@ -755,7 +755,7 @@ const FUZZOP_BUILDERS: &[FuzzOpBuilder] = &[
         })
     },
     |u| {
-        Ok(FuzzOp::EngineToolHooksRequest {
+        Ok(FuzzOp::EngineToolEvaluationRequest {
             req_id: u.arbitrary()?,
             call_id: u.arbitrary()?,
             tool_name: u.arbitrary()?,
@@ -1211,9 +1211,9 @@ enum PostCheck {
     /// tool registered it could yield `Pending` instead, but the harness
     /// loads no tools so strict equality holds.
     ToolDispatched,
-    /// `ToolHooksRequest` always produces exactly one `ToolHooksResponse`
+    /// `ToolEvaluationRequest` always produces exactly one `ToolEvaluationResponse`
     /// UiCommand, regardless of whether hooks are registered.
-    ToolHooksRequested,
+    ToolEvaluationRequested,
     /// `CoreToolResult` with no pending Lua coroutine is silently dropped;
     /// only the no-panic invariant matters.
     CoreToolResultReceived,
@@ -1512,14 +1512,14 @@ fn run_check(check: PostCheck, pre: &Snapshot, post: &Snapshot, new_actions: &[A
                 );
             }
         }
-        PostCheck::ToolHooksRequested => {
+        PostCheck::ToolEvaluationRequested => {
             if pre.agent_running {
                 let new_responses = count_action(new_actions, |c| {
-                    matches!(c, UiCommand::ToolHooksResponse { .. })
+                    matches!(c, UiCommand::ToolEvaluationResponse { .. })
                 });
                 assert_eq!(
                     new_responses, 1,
-                    "ToolHooksRequest should queue exactly one ToolHooksResponse (got {new_responses})",
+                    "ToolEvaluationRequest should queue exactly one ToolEvaluationResponse (got {new_responses})",
                 );
             }
         }
@@ -1834,20 +1834,20 @@ fn plan(op: FuzzOp) -> (Option<SourceEvent>, PostCheck) {
             });
             (Some(ev), PostCheck::ToolDispatched)
         }
-        FuzzOp::EngineToolHooksRequest {
+        FuzzOp::EngineToolEvaluationRequest {
             req_id,
             call_id,
             tool_name,
             args,
         } => {
-            let ev = SourceEvent::Engine(EngineEvent::ToolHooksRequest {
+            let ev = SourceEvent::Engine(EngineEvent::ToolEvaluationRequest {
                 request_id: u64::from(req_id),
                 call_id: call_id_string(call_id),
                 tool_name,
                 args: args.into_map(),
                 mode: AgentMode::normal(),
             });
-            (Some(ev), PostCheck::ToolHooksRequested)
+            (Some(ev), PostCheck::ToolEvaluationRequested)
         }
         FuzzOp::EngineCoreToolResult {
             req_id,

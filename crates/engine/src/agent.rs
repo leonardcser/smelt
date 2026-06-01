@@ -1290,7 +1290,7 @@ impl<'a> Turn<'a> {
                 let is_sequential =
                     matches!(pt.execution_mode, protocol::ToolExecutionMode::Sequential);
                 let request_id = next_request_id();
-                self.emit(EngineEvent::ToolHooksRequest {
+                self.emit(EngineEvent::ToolEvaluationRequest {
                     request_id,
                     call_id: tc.id.clone(),
                     tool_name: tc.function.name.clone(),
@@ -1309,7 +1309,7 @@ impl<'a> Turn<'a> {
                 continue;
             }
 
-            let evaluation = match self.dispatcher.evaluate_hooks(
+            let evaluation = match self.dispatcher.evaluate_tool_call(
                 &tc.function.name,
                 &args,
                 self.mode.clone(),
@@ -1332,7 +1332,7 @@ impl<'a> Turn<'a> {
                 }
             };
 
-            let protocol::ToolEvaluation { decision, hooks } = evaluation;
+            let protocol::ToolEvaluation { decision, metadata } = evaluation;
             let idx = plan.slots.len();
             match decision {
                 Decision::Allow => {
@@ -1373,10 +1373,10 @@ impl<'a> Turn<'a> {
                     plan.inline_outcomes.push((tc.id.clone(), outcome));
                 }
                 Decision::Ask => {
-                    let summary = if hooks.summary.is_empty() {
+                    let summary = if metadata.summary.is_empty() {
                         protocol::StyledLines::from_plain(&tc.function.name)
                     } else {
-                        hooks.summary
+                        metadata.summary
                     };
                     let request_id = next_request_id();
                     self.emit(EngineEvent::RequestPermission {
@@ -1384,7 +1384,7 @@ impl<'a> Turn<'a> {
                         call_id: tc.id.clone(),
                         tool_name: tc.function.name.clone(),
                         args: args.clone(),
-                        approval_patterns: hooks.approval_patterns,
+                        approval_patterns: metadata.approval_patterns,
                         summary,
                     });
                     plan.slots.push(ToolSlot {
@@ -1567,14 +1567,14 @@ impl<'a> Turn<'a> {
                             }
                         }
                     }
-                    UiCommand::ToolHooksResponse { request_id, evaluation } => {
+                    UiCommand::ToolEvaluationResponse { request_id, evaluation } => {
                         if let Some(pos) = plan
                             .pending_tool_hooks
                             .iter()
                             .position(|(rid, _)| *rid == request_id)
                         {
                             let (_, pending) = plan.pending_tool_hooks.swap_remove(pos);
-                            let protocol::ToolEvaluation { decision, hooks } = evaluation;
+                            let protocol::ToolEvaluation { decision, metadata } = evaluation;
                             match decision {
                                 Decision::Allow => {
                                     if pending.is_sequential {
@@ -1637,12 +1637,12 @@ impl<'a> Turn<'a> {
                                     outstanding -= 1;
                                 }
                                 Decision::Ask => {
-                                    let summary = if hooks.summary.is_empty() {
+                                    let summary = if metadata.summary.is_empty() {
                                         protocol::StyledLines::from_plain(
                                             &pending.tc.function.name,
                                         )
                                     } else {
-                                        hooks.summary.clone()
+                                        metadata.summary.clone()
                                     };
                                     let rid = next_request_id();
                                     let _ = self
@@ -1652,7 +1652,7 @@ impl<'a> Turn<'a> {
                                             call_id: pending.tc.id.clone(),
                                             tool_name: pending.tc.function.name.clone(),
                                             args: pending.args.clone(),
-                                            approval_patterns: hooks.approval_patterns,
+                                            approval_patterns: metadata.approval_patterns,
                                             summary,
                                         });
                                     plan.pending_tool_perms.push((rid, pending));

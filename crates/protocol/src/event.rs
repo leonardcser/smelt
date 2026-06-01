@@ -150,11 +150,11 @@ pub enum Decision {
     Error(String),
 }
 
-/// Metadata hooks evaluated for a specific tool invocation. These values
+/// Tool metadata evaluated for a specific invocation. These values
 /// describe the call for display and auto-approval matching; they do not
 /// grant permission to execute the tool.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
-pub struct ToolHooks {
+pub struct ToolMetadata {
     /// Approval patterns to offer "always allow" for.
     /// Used when the central permission decision is `Ask`.
     #[serde(default)]
@@ -178,7 +178,7 @@ pub struct ToolEvaluation {
     #[serde(default)]
     pub decision: Decision,
     #[serde(default)]
-    pub hooks: ToolHooks,
+    pub metadata: ToolMetadata,
 }
 
 /// Events emitted by the engine. The UI consumes these to update its display.
@@ -309,12 +309,12 @@ pub enum EngineEvent {
         args: HashMap<String, serde_json::Value>,
     },
 
-    /// Engine asks the TUI to evaluate a tool's permission
-    /// hooks (`summary`, `approval_patterns`, `preflight`) for a
+    /// Engine asks the TUI to evaluate a Lua tool's metadata
+    /// callbacks (`summary`, `approval_patterns`, `preflight`) for a
     /// specific invocation. The TUI replies with
-    /// `UiCommand::ToolHooksResponse`, after which the engine
+    /// `UiCommand::ToolEvaluationResponse`, after which the engine
     /// resumes the standard Allow / Deny / Ask flow.
-    ToolHooksRequest {
+    ToolEvaluationRequest {
         request_id: u64,
         call_id: String,
         tool_name: String,
@@ -465,8 +465,8 @@ pub enum UiCommand {
     },
 
     /// Result of evaluating tool metadata and central permission policy
-    /// (response to `EngineEvent::ToolHooksRequest`).
-    ToolHooksResponse {
+    /// (response to `EngineEvent::ToolEvaluationRequest`).
+    ToolEvaluationResponse {
         request_id: u64,
         evaluation: ToolEvaluation,
     },
@@ -594,11 +594,11 @@ mod tests {
         assert!(v.get("modes").is_none());
     }
 
-    // ---- ToolHooks ----
+    // ---- ToolMetadata ----
 
     #[test]
-    fn tool_hooks_default_is_empty_metadata() {
-        let h = ToolHooks::default();
+    fn tool_metadata_default_is_empty() {
+        let h = ToolMetadata::default();
         assert!(h.approval_patterns.is_empty());
         assert!(h.preflight_error.is_none());
         assert!(h.summary.is_empty());
@@ -608,9 +608,9 @@ mod tests {
     fn tool_evaluation_default_decision_is_allow() {
         let e = ToolEvaluation::default();
         assert_eq!(e.decision, Decision::Allow);
-        assert!(e.hooks.approval_patterns.is_empty());
-        assert!(e.hooks.preflight_error.is_none());
-        assert!(e.hooks.summary.is_empty());
+        assert!(e.metadata.approval_patterns.is_empty());
+        assert!(e.metadata.preflight_error.is_none());
+        assert!(e.metadata.summary.is_empty());
     }
 
     // ---- EngineEvent roundtrip sanity ----

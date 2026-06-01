@@ -2,7 +2,7 @@ use crate::mcp::{args_summary, McpManager, McpToolDef};
 use crate::permissions::ToolOrigin;
 use engine::provider::{FunctionSchema, ToolDefinition};
 use engine::tools::{ToolContext, ToolDispatcher, ToolFuture, ToolResult};
-use protocol::{AgentMode, ToolEvaluation, ToolHooks};
+use protocol::{AgentMode, ToolEvaluation, ToolMetadata};
 use serde_json::Value;
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -62,7 +62,7 @@ impl ToolDispatcher for McpDispatcher {
             && self.permissions.check_subcommand(mode, "mcp", name) != protocol::Decision::Deny
     }
 
-    fn evaluate_hooks(
+    fn evaluate_tool_call(
         &self,
         name: &str,
         args: &HashMap<String, Value>,
@@ -93,7 +93,7 @@ impl ToolDispatcher for McpDispatcher {
         let decision = outcome.decision;
         Some(ToolEvaluation {
             decision,
-            hooks: ToolHooks {
+            metadata: ToolMetadata {
                 approval_patterns: Vec::new(),
                 preflight_error: None,
                 summary,

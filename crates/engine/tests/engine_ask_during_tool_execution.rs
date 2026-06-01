@@ -19,7 +19,7 @@
 use engine::{ApiConfig, EngineConfig, ModelConfig};
 use protocol::{
     AgentMode, Content, EngineEvent, Message, ReasoningEffort, StartTurnPayload, ToolDef,
-    ToolExecutionMode, ToolHookFlags, ToolHooks, UiCommand,
+    ToolExecutionMode, ToolHookFlags, ToolMetadata, UiCommand,
 };
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -209,12 +209,12 @@ async fn engine_ask_during_tool_execution_is_not_silently_dropped() {
     while tokio::time::Instant::now() < deadline {
         let recv = tokio::time::timeout(Duration::from_millis(200), handle.recv()).await;
         match recv {
-            Ok(Some(EngineEvent::ToolHooksRequest { request_id, .. })) => {
-                handle.send(UiCommand::ToolHooksResponse {
+            Ok(Some(EngineEvent::ToolEvaluationRequest { request_id, .. })) => {
+                handle.send(UiCommand::ToolEvaluationResponse {
                     request_id,
                     evaluation: protocol::ToolEvaluation {
                         decision: protocol::Decision::Allow,
-                        hooks: ToolHooks::default(),
+                        metadata: ToolMetadata::default(),
                     },
                 });
             }
