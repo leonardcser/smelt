@@ -16,6 +16,15 @@ pub(crate) struct TranscriptData {
     pub(crate) clamped_scroll: crate::smelt_term::RowIndex,
 }
 
+struct ToolRenderJob {
+    call_id: String,
+    name: String,
+    args: HashMap<String, serde_json::Value>,
+    output: Option<ToolOutput>,
+    status: ToolStatus,
+    elapsed_secs: Option<u64>,
+}
+
 impl TuiApp {
     pub(crate) fn begin_turn(&mut self) {
         self.context_tokens_updated_this_turn = false;
@@ -396,8 +405,16 @@ impl TuiApp {
             .sync_active_tool_elapsed(&mut self.transcript.history);
         // Run plugin `render` hooks on the main thread (Lua is single-threaded) and stash
         // the resulting owned buffers on `ToolState.render_cache`. Worker layout below
-        // reads those buffers without touching `app.ui` or the Lua VM.
-        self.prerender_tool_blocks(tw as u16);
+        // reads those buffers without touching `app.ui` or the Lua VM. Tail-follow can
+        // pre-render only a bounded suffix; arbitrary scroll positions still use the
+        // compatibility full pre-pass until the transcript document owns random-access
+        // height lookup.
+        if scroll_top == crate::smelt_term::RowIndex::MAX {
+            let ids = self.tail_prerender_block_ids(viewport_rows);
+            self.prerender_tool_blocks_for_ids(tw as u16, &ids);
+        } else {
+            self.prerender_tool_blocks(tw as u16);
+        }
         let theme = self.ui.theme().clone();
 
         let buf = self
@@ -419,21 +436,59 @@ impl TuiApp {
         }
     }
 
+    fn tail_prerender_block_ids(&self, viewport_rows: u16) -> Vec<BlockId> {
+        let count = (viewport_rows as usize).saturating_add(20);
+        let order = &self.transcript.history.order;
+        let start = order.len().saturating_sub(count.max(1));
+        order[start..].to_vec()
+    }
+
+    fn prerender_tool_blocks_for_ids(&mut self, width: u16, ids: &[BlockId]) {
+        let jobs: Vec<ToolRenderJob> = {
+            let history = &self.transcript.history;
+            let mut jobs = Vec::new();
+            for id in ids {
+                let Some(block) = history.blocks.get(id) else {
+                    continue;
+                };
+                let Block::ToolCall {
+                    call_id,
+                    name,
+                    args,
+                    ..
+                } = block
+                else {
+                    continue;
+                };
+                let Some(state) = history.tool_states.get(call_id) else {
+                    continue;
+                };
+                if matches!(state.status, ToolStatus::Denied) {
+                    continue;
+                }
+                if matches!(&state.render_cache, Some((w, _)) if *w == width) {
+                    continue;
+                }
+                jobs.push(ToolRenderJob {
+                    call_id: call_id.clone(),
+                    name: name.clone(),
+                    args: args.clone(),
+                    output: state.output.as_deref().cloned(),
+                    status: state.status,
+                    elapsed_secs: state.elapsed.map(|d| d.as_secs()),
+                });
+            }
+            jobs
+        };
+        self.render_tool_jobs(width, jobs);
+    }
+
     /// Main-thread pre-pass: walk every `Block::ToolCall` whose `ToolState.render_cache`
     /// is missing or width-stale, call the plugin's `render` hook (Lua VM is single-
     /// threaded), and stash the resulting owned-buffer tree on the state. Parallel layout
     /// workers downstream just read those buffers — they never touch `app.ui` or Lua.
     fn prerender_tool_blocks(&mut self, width: u16) {
-        struct Job {
-            call_id: String,
-            name: String,
-            args: HashMap<String, serde_json::Value>,
-            output: Option<ToolOutput>,
-            status: ToolStatus,
-            elapsed_secs: Option<u64>,
-        }
-
-        let jobs: Vec<Job> = {
+        let jobs: Vec<ToolRenderJob> = {
             let history = &self.transcript.history;
             let mut jobs = Vec::new();
             for id in &history.order {
@@ -456,7 +511,7 @@ impl TuiApp {
                 if matches!(&state.render_cache, Some((w, _)) if *w == width) {
                     continue;
                 }
-                jobs.push(Job {
+                jobs.push(ToolRenderJob {
                     call_id: call_id.clone(),
                     name: name.clone(),
                     args: args.clone(),
@@ -467,6 +522,10 @@ impl TuiApp {
             }
             jobs
         };
+        self.render_tool_jobs(width, jobs);
+    }
+
+    fn render_tool_jobs(&mut self, width: u16, jobs: Vec<ToolRenderJob>) {
         if jobs.is_empty() {
             return;
         }

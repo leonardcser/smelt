@@ -37,6 +37,7 @@ struct ProjectKey {
     generation: u64,
     width: u16,
     show_thinking: bool,
+    tail_viewport_rows: Option<u16>,
 }
 
 pub(crate) struct ProjectOutput {
@@ -102,6 +103,7 @@ impl TranscriptProjection {
             generation: gen,
             width,
             show_thinking,
+            tail_viewport_rows: (scroll_top == RowIndex::MAX).then_some(viewport_rows),
         };
 
         if self.project_key == Some(key) {
@@ -109,6 +111,18 @@ impl TranscriptProjection {
             return ProjectOutput {
                 clamped_scroll: clamp_scroll(scroll_top, total_rows, viewport_rows),
             };
+        }
+
+        if scroll_top == RowIndex::MAX {
+            return self.project_tail_visible(
+                buf,
+                history,
+                width,
+                show_thinking,
+                theme,
+                viewport_rows,
+                key,
+            );
         }
 
         // When width changes, capture a content-stable anchor at the current
@@ -223,6 +237,117 @@ impl TranscriptProjection {
         ProjectOutput {
             clamped_scroll: clamp_scroll(restored_scroll, total_rows, viewport_rows),
         }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn project_tail_visible(
+        &mut self,
+        buf: &mut Buffer,
+        history: &mut BlockHistory,
+        width: u16,
+        show_thinking: bool,
+        theme: &Theme,
+        viewport_rows: u16,
+        key: ProjectKey,
+    ) -> ProjectOutput {
+        let gen = history.generation();
+        self.gc_if_stale(gen, width);
+
+        let base_key = LayoutKey {
+            view_state: ViewState::Expanded,
+            width,
+            show_thinking,
+            content_hash: 0,
+            sidecar_hash: 0,
+        };
+        let overscan = 20usize;
+        let target_rows = viewport_rows as usize + overscan;
+        let n = history.order.len();
+        let mut first = n;
+        let mut selected_rows = 0usize;
+        let mut ids = Vec::new();
+        let mut keys = Vec::new();
+
+        for i in (0..n).rev() {
+            let id = history.order[i];
+            let bkey = history.resolve_key(id, base_key);
+            self.cache.ensure_many(history, &[id], &[bkey], theme);
+            let rows = self
+                .cache
+                .get(id, bkey)
+                .map(|b| b.line_count())
+                .unwrap_or(0);
+            let gap = history.rendered_block_gap(i, rows) as usize;
+            selected_rows = selected_rows.saturating_add(gap).saturating_add(rows);
+            ids.push(id);
+            keys.push(bkey);
+            first = i;
+            if selected_rows >= target_rows {
+                break;
+            }
+        }
+        ids.reverse();
+        keys.reverse();
+
+        let estimated_prefix_rows = first as RowIndex;
+        let mut texts: Vec<String> = Vec::with_capacity(first.saturating_add(selected_rows));
+        for _ in 0..first {
+            texts.push(String::new());
+        }
+
+        struct PendingRow {
+            row: usize,
+            highlights: Vec<Span>,
+            decoration: LineDecoration,
+        }
+        let mut pending = Vec::new();
+        let mut layout = Vec::with_capacity(ids.len());
+
+        for (offset, (&id, &bkey)) in ids.iter().zip(keys.iter()).enumerate() {
+            let i = first + offset;
+            let Some(block_buf) = self.cache.get(id, bkey) else {
+                continue;
+            };
+            let block_rows = block_buf.line_count();
+            let gap = history.rendered_block_gap(i, block_rows);
+            for _ in 0..gap {
+                texts.push(String::new());
+            }
+            let start = texts.len() as RowIndex;
+            for r in 0..block_rows {
+                let row_idx = texts.len();
+                texts.push(block_buf.get_line(r).unwrap_or("").to_string());
+                let h = block_buf.highlights_at(r);
+                let dec = block_buf.decoration_at(r).clone();
+                if !h.is_empty() || dec != LineDecoration::default() {
+                    pending.push(PendingRow {
+                        row: row_idx,
+                        highlights: h,
+                        decoration: dec,
+                    });
+                }
+            }
+            layout.push(LayoutEntry {
+                id,
+                start,
+                rows: block_rows as RowIndex,
+                key: bkey,
+            });
+        }
+
+        buf.set_all_lines(texts);
+        for p in pending {
+            apply_row_highlights(buf, p.row, p.highlights);
+            if p.decoration != LineDecoration::default() {
+                buf.set_decoration(p.row, p.decoration);
+            }
+        }
+        self.layout = layout;
+        self.project_key = Some(key);
+        let total_rows = buf.line_count() as RowIndex;
+        let clamped_scroll = clamp_scroll(RowIndex::MAX, total_rows, viewport_rows);
+        debug_assert!(clamped_scroll >= estimated_prefix_rows.saturating_sub(1));
+        ProjectOutput { clamped_scroll }
     }
 
     // ── Incremental streaming helpers ─────────────────────────────────
@@ -848,6 +973,37 @@ mod tests {
         let full = project_fresh(&mut transcript.history);
         assert_ne!(incremental, before);
         assert_eq!(incremental, full);
+    }
+
+    #[test]
+    fn tail_projection_renders_bounded_suffix_then_scroll_materializes_full_buffer() {
+        let mut transcript = Transcript::new();
+        for i in 0..100 {
+            transcript.push(Block::Text {
+                content: format!("line {i}"),
+            });
+        }
+        let theme = Theme::default();
+        let mut projection = TranscriptProjection::new();
+        let mut buf = Buffer::new(crate::smelt_term::BufId(4), Default::default());
+
+        projection.project(
+            &mut buf,
+            &mut transcript.history,
+            80,
+            false,
+            &theme,
+            RowIndex::MAX,
+            5,
+        );
+        let tail_lines: Vec<String> = buf.lines().to_vec();
+        assert!(tail_lines.iter().any(|line| line == "line 99"));
+        assert!(!tail_lines.iter().any(|line| line == "line 0"));
+
+        projection.project(&mut buf, &mut transcript.history, 80, false, &theme, 0, 5);
+        let full_lines: Vec<String> = buf.lines().to_vec();
+        assert!(full_lines.iter().any(|line| line == "line 0"));
+        assert!(full_lines.iter().any(|line| line == "line 99"));
     }
 
     #[test]
