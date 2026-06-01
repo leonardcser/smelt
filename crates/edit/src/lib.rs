@@ -1318,11 +1318,10 @@ impl Ui {
                 {
                     win.ensure_layout(buf, content_width);
                 }
-                let total_rows = self
-                    .bufs
-                    .get(&buf_id)
-                    .map(|buf| buf.lines().len() as RowIndex)
-                    .unwrap_or(0);
+                let total_rows = match (self.bufs.get(&buf_id), self.wins.get(&win_id)) {
+                    (Some(buf), Some(win)) => win.display_row_total(buf),
+                    _ => 0,
+                };
                 if let Some(win) = self.wins.get_mut(&win_id) {
                     if win.pending_scroll_to_cursor && leaf_rect.height > 0 {
                         if let Some(buf) = self.bufs.get(&buf_id) {
@@ -1376,11 +1375,10 @@ impl Ui {
             if let (Some(buf), Some(win)) = (self.bufs.get(&buf_id), self.wins.get_mut(win_id)) {
                 win.ensure_layout(buf, content_width);
             }
-            let total_rows = self
-                .bufs
-                .get(&buf_id)
-                .map(|buf| buf.lines().len() as RowIndex)
-                .unwrap_or(0);
+            let total_rows = match (self.bufs.get(&buf_id), self.wins.get(win_id)) {
+                (Some(buf), Some(win)) => win.display_row_total(buf),
+                _ => 0,
+            };
             if let Some(win) = self.wins.get_mut(win_id) {
                 let scrollbar = if win.config.gutters.scrollbar && rect.width > 0 {
                     let bar_col = rect.left + rect.width.saturating_sub(1);
@@ -1962,11 +1960,10 @@ impl Ui {
                     win.cursor_screen_row_in_viewport(),
                 )
             };
-            let total_rows = self
-                .bufs
-                .get(&buf_id)
-                .map(|b| b.lines().len() as RowIndex)
-                .unwrap_or(0);
+            let total_rows = match (self.bufs.get(&buf_id), self.wins.get(&id)) {
+                (Some(buf), Some(win)) => win.display_row_total(buf),
+                _ => 0,
+            };
             let max_scroll = total_rows.saturating_sub(viewport_rows as RowIndex);
             if let Some(w) = self.wins.get_mut(&id) {
                 w.scroll_top = max_scroll;

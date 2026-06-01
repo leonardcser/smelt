@@ -168,7 +168,14 @@ impl TuiApp {
                 self.core.config.settings.show_thinking,
             )
         };
-        self.transcript_win_mut().scroll_top = tdata.clamped_scroll;
+        if let Some(win) = self.ui.win_mut(crate::app::TRANSCRIPT_WIN) {
+            if tdata.row_base == 0 {
+                win.clear_virtual_rows();
+            } else {
+                win.set_virtual_rows(tdata.row_base, tdata.total_rows);
+            }
+            win.scroll_top = tdata.clamped_scroll;
+        }
         // After scroll is restored to the new block anchor, pin the cursor to
         // the same screen-row offset so it stays visually fixed across resize
         // instead of drifting off-viewport as reflow shifts visual rows.
@@ -193,8 +200,11 @@ impl TuiApp {
             }
         }
 
-        let transcript_selection =
-            self.transcript_selection_highlights(tdata.clamped_scroll, viewport_rows);
+        let transcript_selection = self.transcript_selection_highlights(
+            tdata.clamped_scroll,
+            tdata.row_base,
+            viewport_rows,
+        );
         if let Some(buf) = self.ui.win_buf_mut(self.well_known.transcript) {
             let ranges: Vec<crate::smelt_term::SelectionRange> = transcript_selection
                 .iter()

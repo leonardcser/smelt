@@ -5,6 +5,8 @@ use smelt_core::buffer::{LineDecoration, Span, SpanMeta};
 use smelt_core::transcript_model::{BlockHistory, BlockId, LayoutKey, ViewState};
 use std::sync::Arc;
 
+const TAIL_OVERSCAN_ROWS: RowIndex = 20;
+
 pub(crate) struct TranscriptProjection {
     cache: BlockBufferCache,
     cache_generation: u64,
@@ -12,6 +14,10 @@ pub(crate) struct TranscriptProjection {
     project_key: Option<ProjectKey>,
     /// Block layout from the last visible `project()`. Surfaced to Lua via `visible_blocks`.
     visible_layout: Vec<LayoutEntry>,
+    /// Absolute row represented by local row 0 in the backing buffer.
+    visible_row_base: RowIndex,
+    /// Total rows in the logical transcript represented by the visible projection.
+    visible_total_rows: RowIndex,
     /// Cached `build_rows` result for full-text consumers (Lua API, vim navigation).
     cached_rows: Option<CachedRows>,
     document: TranscriptDocument,
@@ -88,6 +94,28 @@ impl TranscriptDocument {
         self.prefix_rows.last().copied().unwrap_or(0)
     }
 
+    fn tail_start_index(&self, viewport_rows: u16) -> usize {
+        let target_rows = (viewport_rows as RowIndex).saturating_add(TAIL_OVERSCAN_ROWS);
+        let mut selected_rows: RowIndex = 0;
+        let mut first = self.nodes.len();
+        for i in (0..self.nodes.len()).rev() {
+            let node = &self.nodes[i];
+            selected_rows =
+                selected_rows.saturating_add(node.exact_height.unwrap_or(node.estimated_height));
+            first = i;
+            if selected_rows >= target_rows {
+                break;
+            }
+        }
+        first
+    }
+
+    fn tail_block_ids(&self, viewport_rows: u16) -> impl Iterator<Item = BlockId> + '_ {
+        self.nodes[self.tail_start_index(viewport_rows)..]
+            .iter()
+            .map(|node| node.id)
+    }
+
     fn rebuild_prefix_rows(&mut self) {
         self.prefix_rows.clear();
         self.prefix_rows.reserve(self.nodes.len() + 1);
@@ -119,6 +147,8 @@ struct ProjectKey {
 
 pub(crate) struct ProjectOutput {
     pub clamped_scroll: RowIndex,
+    pub row_base: RowIndex,
+    pub total_rows: RowIndex,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -136,6 +166,29 @@ impl ScrollTarget {
     }
 }
 
+struct PendingRow {
+    row: usize,
+    highlights: Vec<Span>,
+    decoration: LineDecoration,
+}
+
+struct ProjectRows<'a> {
+    row_base: RowIndex,
+    texts: &'a mut Vec<String>,
+    pending: &'a mut Vec<PendingRow>,
+    layout: &'a mut Vec<LayoutEntry>,
+}
+
+fn base_layout_key(width: u16, show_thinking: bool) -> LayoutKey {
+    LayoutKey {
+        view_state: ViewState::Expanded,
+        width,
+        show_thinking,
+        content_hash: 0,
+        sidecar_hash: 0,
+    }
+}
+
 impl TranscriptProjection {
     pub(crate) fn new() -> Self {
         Self {
@@ -144,16 +197,19 @@ impl TranscriptProjection {
             cache_width: 0,
             project_key: None,
             visible_layout: Vec::new(),
+            visible_row_base: 0,
+            visible_total_rows: 0,
             cached_rows: None,
             document: TranscriptDocument::default(),
         }
     }
 
-    /// Snapshot of the laid-out blocks: `(BlockId, first_row, rows)` for each
-    /// entry from the most recent `project()`. Used by Lua's
-    /// `smelt.transcript.blocks()` to map block indices back to display rows
-    /// without duplicating the layout walk.
-    pub(crate) fn block_layout(&self) -> impl Iterator<Item = (BlockId, RowIndex, RowIndex)> + '_ {
+    /// Snapshot of the visibly laid-out blocks: `(BlockId, first_row, rows)`.
+    /// Used by Lua's `smelt.transcript.visible_blocks()` to map block indices
+    /// back to display rows without forcing full transcript materialization.
+    pub(crate) fn visible_block_layout(
+        &self,
+    ) -> impl Iterator<Item = (BlockId, RowIndex, RowIndex)> + '_ {
         self.visible_layout.iter().map(|e| (e.id, e.start, e.rows))
     }
 
@@ -164,6 +220,8 @@ impl TranscriptProjection {
             self.cache_width = width;
             self.project_key = None;
             self.visible_layout.clear();
+            self.visible_row_base = 0;
+            self.visible_total_rows = 0;
             self.cached_rows = None;
             self.document = TranscriptDocument::default();
         }
@@ -177,6 +235,8 @@ impl TranscriptProjection {
         self.cache.clear();
         self.project_key = None;
         self.visible_layout.clear();
+        self.visible_row_base = 0;
+        self.visible_total_rows = 0;
         self.cached_rows = None;
         self.document = TranscriptDocument::default();
     }
@@ -203,9 +263,14 @@ impl TranscriptProjection {
         };
 
         if self.project_key == Some(key) {
-            let total_rows = buf.line_count() as RowIndex;
+            let total_rows = match scroll_target {
+                ScrollTarget::Row(_) => buf.line_count() as RowIndex,
+                ScrollTarget::Tail => self.visible_total_rows,
+            };
             return ProjectOutput {
                 clamped_scroll: clamp_scroll(scroll_top, total_rows, viewport_rows),
+                row_base: self.visible_row_base,
+                total_rows,
             };
         }
 
@@ -238,13 +303,7 @@ impl TranscriptProjection {
 
         self.gc_if_stale(gen, width);
 
-        let base_key = LayoutKey {
-            view_state: ViewState::Expanded,
-            width,
-            show_thinking,
-            content_hash: 0,
-            sidecar_hash: 0,
-        };
+        let base_key = base_layout_key(width, show_thinking);
         self.document
             .rebuild_if_stale(history, width, show_thinking, base_key);
         let _perf = smelt_perf::perf::begin("project:render");
@@ -261,47 +320,17 @@ impl TranscriptProjection {
             .ensure_many(history, &block_ids, &block_keys, theme);
 
         let mut texts: Vec<String> = Vec::with_capacity(n.saturating_mul(8));
-        struct PendingRow {
-            row: usize,
-            highlights: Vec<Span>,
-            decoration: LineDecoration,
-        }
         let mut pending: Vec<PendingRow> = Vec::new();
         let mut layout: Vec<LayoutEntry> = Vec::with_capacity(n);
+        let mut rows = ProjectRows {
+            row_base: 0,
+            texts: &mut texts,
+            pending: &mut pending,
+            layout: &mut layout,
+        };
 
         for i in 0..n {
-            let id = block_ids[i];
-            let bkey = block_keys[i];
-            let Some(block_buf) = self.cache.get(id, bkey) else {
-                continue;
-            };
-            let block_rows = block_buf.line_count();
-            let gap = history.rendered_block_gap(i, block_rows);
-            self.document
-                .set_exact_height(i, (gap as usize).saturating_add(block_rows) as RowIndex);
-            for _ in 0..gap {
-                texts.push(String::new());
-            }
-            let start = texts.len() as RowIndex;
-            for r in 0..block_rows {
-                let row_idx = texts.len();
-                texts.push(block_buf.get_line(r).unwrap_or("").to_string());
-                let h = block_buf.highlights_at(r);
-                let dec = block_buf.decoration_at(r).clone();
-                if !h.is_empty() || dec != LineDecoration::default() {
-                    pending.push(PendingRow {
-                        row: row_idx,
-                        highlights: h,
-                        decoration: dec,
-                    });
-                }
-            }
-            layout.push(LayoutEntry {
-                id,
-                start,
-                rows: block_rows as RowIndex,
-                key: bkey,
-            });
+            self.append_projected_block(history, i, block_ids[i], block_keys[i], &mut rows);
         }
         self.document.refresh_height_index();
 
@@ -323,8 +352,10 @@ impl TranscriptProjection {
         }
 
         self.visible_layout = layout;
-        self.project_key = Some(key);
         let total_rows = buf.line_count() as RowIndex;
+        self.visible_row_base = 0;
+        self.visible_total_rows = total_rows;
+        self.project_key = Some(key);
 
         let restored_scroll = resize_anchor
             .and_then(|(block_id, offset)| {
@@ -337,6 +368,8 @@ impl TranscriptProjection {
 
         ProjectOutput {
             clamped_scroll: clamp_scroll(restored_scroll, total_rows, viewport_rows),
+            row_base: 0,
+            total_rows,
         }
     }
 
@@ -354,98 +387,38 @@ impl TranscriptProjection {
         let gen = history.generation();
         self.gc_if_stale(gen, width);
 
-        let base_key = LayoutKey {
-            view_state: ViewState::Expanded,
-            width,
-            show_thinking,
-            content_hash: 0,
-            sidecar_hash: 0,
-        };
+        let base_key = base_layout_key(width, show_thinking);
         self.document
             .rebuild_if_stale(history, width, show_thinking, base_key);
-        let overscan = 20usize;
-        let target_rows = viewport_rows as usize + overscan;
-        let n = history.order.len();
-        let mut first = n;
-        let mut selected_rows = 0usize;
-        let mut ids = Vec::new();
-        let mut keys = Vec::new();
 
-        for i in (0..n).rev() {
-            let node = &self.document.nodes[i];
-            let id = node.id;
-            let bkey = node.key;
-            self.cache.ensure_many(history, &[id], &[bkey], theme);
-            let rows = self
-                .cache
-                .get(id, bkey)
-                .map(|b| b.line_count())
-                .unwrap_or(0);
-            let gap = history.rendered_block_gap(i, rows) as usize;
-            let height = gap.saturating_add(rows);
-            self.document.set_exact_height(i, height as RowIndex);
-            selected_rows = selected_rows.saturating_add(height);
-            ids.push(id);
-            keys.push(bkey);
-            first = i;
-            if selected_rows >= target_rows {
-                break;
-            }
-        }
-        ids.reverse();
-        keys.reverse();
-        self.document.refresh_height_index();
+        let first = self.document.tail_start_index(viewport_rows);
+        let ids: Vec<BlockId> = self.document.nodes[first..]
+            .iter()
+            .map(|node| node.id)
+            .collect();
+        let keys: Vec<LayoutKey> = self.document.nodes[first..]
+            .iter()
+            .map(|node| node.key)
+            .collect();
+        self.cache.ensure_many(history, &ids, &keys, theme);
 
-        let estimated_prefix_rows = self.document.prefix_row(first);
-        let prefix_placeholders = estimated_prefix_rows.min(usize::MAX as RowIndex) as usize;
-        let mut texts: Vec<String> =
-            Vec::with_capacity(prefix_placeholders.saturating_add(selected_rows));
-        for _ in 0..prefix_placeholders {
-            texts.push(String::new());
-        }
-
-        struct PendingRow {
-            row: usize,
-            highlights: Vec<Span>,
-            decoration: LineDecoration,
-        }
+        let row_base = self.document.prefix_row(first);
+        let mut texts: Vec<String> = Vec::new();
         let mut pending = Vec::new();
         let mut layout = Vec::with_capacity(ids.len());
+        let mut rows = ProjectRows {
+            row_base,
+            texts: &mut texts,
+            pending: &mut pending,
+            layout: &mut layout,
+        };
 
         for (offset, (&id, &bkey)) in ids.iter().zip(keys.iter()).enumerate() {
-            let i = first + offset;
-            let Some(block_buf) = self.cache.get(id, bkey) else {
-                continue;
-            };
-            let block_rows = block_buf.line_count();
-            let gap = history.rendered_block_gap(i, block_rows);
-            self.document
-                .set_exact_height(i, (gap as usize).saturating_add(block_rows) as RowIndex);
-            for _ in 0..gap {
-                texts.push(String::new());
-            }
-            let start = texts.len() as RowIndex;
-            for r in 0..block_rows {
-                let row_idx = texts.len();
-                texts.push(block_buf.get_line(r).unwrap_or("").to_string());
-                let h = block_buf.highlights_at(r);
-                let dec = block_buf.decoration_at(r).clone();
-                if !h.is_empty() || dec != LineDecoration::default() {
-                    pending.push(PendingRow {
-                        row: row_idx,
-                        highlights: h,
-                        decoration: dec,
-                    });
-                }
-            }
-            layout.push(LayoutEntry {
-                id,
-                start,
-                rows: block_rows as RowIndex,
-                key: bkey,
-            });
+            self.append_projected_block(history, first + offset, id, bkey, &mut rows);
         }
 
+        self.document.refresh_height_index();
+        let total_rows = self.document.total_rows();
         buf.set_all_lines(texts);
         for p in pending {
             apply_row_highlights(buf, p.row, p.highlights);
@@ -454,11 +427,59 @@ impl TranscriptProjection {
             }
         }
         self.visible_layout = layout;
+        self.visible_row_base = row_base;
+        self.visible_total_rows = total_rows;
         self.project_key = Some(key);
-        let total_rows = self.document.total_rows();
         let clamped_scroll = clamp_scroll(RowIndex::MAX, total_rows, viewport_rows);
-        debug_assert!(clamped_scroll >= estimated_prefix_rows.saturating_sub(1));
-        ProjectOutput { clamped_scroll }
+        debug_assert!(clamped_scroll >= row_base.saturating_sub(1));
+        ProjectOutput {
+            clamped_scroll,
+            row_base,
+            total_rows,
+        }
+    }
+
+    fn append_projected_block(
+        &mut self,
+        history: &BlockHistory,
+        block_index: usize,
+        id: BlockId,
+        key: LayoutKey,
+        rows: &mut ProjectRows<'_>,
+    ) {
+        let Some(block_buf) = self.cache.get(id, key) else {
+            return;
+        };
+        let block_rows = block_buf.line_count();
+        let gap = history.rendered_block_gap(block_index, block_rows);
+        self.document.set_exact_height(
+            block_index,
+            (gap as usize).saturating_add(block_rows) as RowIndex,
+        );
+        for _ in 0..gap {
+            rows.texts.push(String::new());
+        }
+        let local_start = rows.texts.len() as RowIndex;
+        for r in 0..block_rows {
+            let row_idx = rows.texts.len();
+            rows.texts
+                .push(block_buf.get_line(r).unwrap_or("").to_string());
+            let h = block_buf.highlights_at(r);
+            let dec = block_buf.decoration_at(r).clone();
+            if !h.is_empty() || dec != LineDecoration::default() {
+                rows.pending.push(PendingRow {
+                    row: row_idx,
+                    highlights: h,
+                    decoration: dec,
+                });
+            }
+        }
+        rows.layout.push(LayoutEntry {
+            id,
+            start: rows.row_base.saturating_add(local_start),
+            rows: block_rows as RowIndex,
+            key,
+        });
     }
 
     // ── Incremental streaming helpers ─────────────────────────────────
@@ -590,33 +611,10 @@ impl TranscriptProjection {
         show_thinking: bool,
         viewport_rows: u16,
     ) -> Vec<BlockId> {
-        let base_key = LayoutKey {
-            view_state: ViewState::Expanded,
-            width,
-            show_thinking,
-            content_hash: 0,
-            sidecar_hash: 0,
-        };
+        let base_key = base_layout_key(width, show_thinking);
         self.document
             .rebuild_if_stale(history, width, show_thinking, base_key);
-
-        let overscan: RowIndex = 20;
-        let target_rows = viewport_rows as RowIndex + overscan;
-        let mut selected_rows: RowIndex = 0;
-        let mut first = self.document.nodes.len();
-        for i in (0..self.document.nodes.len()).rev() {
-            let node = &self.document.nodes[i];
-            selected_rows =
-                selected_rows.saturating_add(node.exact_height.unwrap_or(node.estimated_height));
-            first = i;
-            if selected_rows >= target_rows {
-                break;
-            }
-        }
-        self.document.nodes[first..]
-            .iter()
-            .map(|node| node.id)
-            .collect()
+        self.document.tail_block_ids(viewport_rows).collect()
     }
 
     /// Render every block into the cache. For full-text consumers that may run
@@ -630,13 +628,7 @@ impl TranscriptProjection {
     ) {
         let gen = history.generation();
         self.gc_if_stale(gen, width);
-        let base_key = LayoutKey {
-            view_state: ViewState::Expanded,
-            width,
-            show_thinking,
-            content_hash: 0,
-            sidecar_hash: 0,
-        };
+        let base_key = base_layout_key(width, show_thinking);
         let n = history.order.len();
         let mut ids = Vec::with_capacity(n);
         let mut keys = Vec::with_capacity(n);
@@ -658,13 +650,7 @@ impl TranscriptProjection {
         theme: &Theme,
     ) -> Vec<(BlockId, RowIndex, RowIndex)> {
         self.ensure_all(history, width, show_thinking, theme);
-        let base_key = LayoutKey {
-            view_state: ViewState::Expanded,
-            width,
-            show_thinking,
-            content_hash: 0,
-            sidecar_hash: 0,
-        };
+        let base_key = base_layout_key(width, show_thinking);
         self.document
             .rebuild_if_stale(history, width, show_thinking, base_key);
 
@@ -709,13 +695,7 @@ impl TranscriptProjection {
             }
         }
         self.ensure_all(history, width, show_thinking, theme);
-        let base_key = LayoutKey {
-            view_state: ViewState::Expanded,
-            width,
-            show_thinking,
-            content_hash: 0,
-            sidecar_hash: 0,
-        };
+        let base_key = base_layout_key(width, show_thinking);
         self.document
             .rebuild_if_stale(history, width, show_thinking, base_key);
         let mut rows: Vec<String> = Vec::new();
@@ -758,13 +738,7 @@ impl TranscriptProjection {
         theme: &Theme,
     ) -> (Vec<usize>, Vec<usize>) {
         self.ensure_all(history, width, show_thinking, theme);
-        let base_key = LayoutKey {
-            view_state: ViewState::Expanded,
-            width,
-            show_thinking,
-            content_hash: 0,
-            sidecar_hash: 0,
-        };
+        let base_key = base_layout_key(width, show_thinking);
         self.document
             .rebuild_if_stale(history, width, show_thinking, base_key);
 
@@ -1297,7 +1271,10 @@ mod tests {
             5,
         );
 
-        assert_eq!(buf.line_count() as RowIndex, full_rows);
+        assert!(buf.line_count() as RowIndex <= full_rows);
+        assert!(buf.line_count() as RowIndex >= 5);
+        assert!(output.row_base > 0);
+        assert_eq!(output.total_rows, full_rows);
         assert_eq!(output.clamped_scroll, full_rows.saturating_sub(5));
         assert!(buf.lines().iter().any(|line| line == "block 39"));
         assert!(!buf.lines().iter().any(|line| line == "block 0"));
@@ -1306,7 +1283,7 @@ mod tests {
     #[test]
     fn materialized_block_layout_is_exact_after_tail_projection() {
         let mut transcript = Transcript::new();
-        for i in 0..20 {
+        for i in 0..40 {
             transcript.push(Block::Text {
                 content: format!("line {i}"),
             });
@@ -1324,7 +1301,7 @@ mod tests {
             ScrollTarget::Tail,
             5,
         );
-        let visible_count = projection.block_layout().count();
+        let visible_count = projection.visible_block_layout().count();
         assert!(visible_count < transcript.history.order.len());
 
         let layout =
@@ -1332,7 +1309,7 @@ mod tests {
         assert_eq!(layout.len(), transcript.history.order.len());
         assert_eq!(layout.first().map(|(_, start, _)| *start), Some(0));
         assert_eq!(layout.last().map(|(_, _, rows)| *rows), Some(1));
-        assert_eq!(projection.block_layout().count(), visible_count);
+        assert_eq!(projection.visible_block_layout().count(), visible_count);
     }
 
     #[test]

@@ -14,6 +14,8 @@ use std::time::Duration;
 
 pub(crate) struct TranscriptData {
     pub(crate) clamped_scroll: crate::smelt_term::RowIndex,
+    pub(crate) row_base: crate::smelt_term::RowIndex,
+    pub(crate) total_rows: crate::smelt_term::RowIndex,
 }
 
 struct ToolRenderJob {
@@ -271,7 +273,9 @@ impl TuiApp {
     /// the caller as needed). Returns empty when no projection has run yet
     /// (i.e. before the first frame).
     pub(crate) fn visible_transcript_block_snapshots(&self) -> Vec<TranscriptBlockSnapshot> {
-        self.transcript_block_snapshots_from_layout(self.transcript_projection.block_layout())
+        self.transcript_block_snapshots_from_layout(
+            self.transcript_projection.visible_block_layout(),
+        )
     }
 
     pub(crate) fn transcript_block_snapshots(&mut self) -> Vec<TranscriptBlockSnapshot> {
@@ -484,6 +488,8 @@ impl TuiApp {
 
         TranscriptData {
             clamped_scroll: out.clamped_scroll,
+            row_base: out.row_base,
+            total_rows: out.total_rows,
         }
     }
 
@@ -621,6 +627,7 @@ impl TuiApp {
     pub(crate) fn transcript_selection_highlights(
         &mut self,
         scroll_top: crate::smelt_term::RowIndex,
+        row_base: crate::smelt_term::RowIndex,
         viewport_rows: u16,
     ) -> Vec<(usize, u16, u16)> {
         let win = self.transcript_win();
@@ -683,7 +690,9 @@ impl TuiApp {
         // Route through the shared coord helper so the prompt's per-row
         // selection painting and the transcript's stay one implementation —
         // including the "1-cell virtual span on empty middle rows" rule.
-        let first = scroll_top.min(usize::MAX as crate::smelt_term::RowIndex) as usize;
+        let first = scroll_top
+            .saturating_sub(row_base)
+            .min(usize::MAX as crate::smelt_term::RowIndex) as usize;
         let last = first + viewport_rows as usize;
         smelt_buffer::coords::selection_to_row_ranges(buf, s, e)
             .into_iter()

@@ -280,11 +280,19 @@ pub struct Window {
     /// transcript projection rebuilds its buffer on every frame), since the
     /// `(lrow, byte)` would no longer reference the same content.
     pub(crate) scroll_anchor: Option<(u64, usize, usize)>,
-    /// Visual-row index of the cursor (0-based, in the same space as `scroll_top`).
+    /// Local visual-row index of the cursor (0-based in the backing buffer's
+    /// materialized row space). Add `row_base` to compare with `scroll_top`.
     /// Derived from `cpos` via `sync_from_cpos`, projected through `self.layout`
     /// so it tracks visual rows when wrap splits a logical row into multiple
     /// visual rows.
     pub(crate) cursor_row: RowIndex,
+    /// Absolute display row represented by local visual row 0. Normally zero;
+    /// virtualized transcript projections set this when the backing buffer only
+    /// materializes a suffix of a larger row space.
+    pub(crate) row_base: RowIndex,
+    /// Logical total row count for virtualized projections. `None` means the
+    /// backing buffer's current row count is the full scrollable extent.
+    pub(crate) total_rows_override: Option<RowIndex>,
     /// Cell-column of the cursor within its visual row. Derived from `cpos`
     /// via `sync_from_cpos`.
     pub(crate) cursor_col: u16,
@@ -354,6 +362,8 @@ impl Window {
             scroll_anchor: None,
             scroll_left: 0,
             cursor_row: 0,
+            row_base: 0,
+            total_rows_override: None,
             cursor_col: 0,
             // Opt-in; callers that want sticky-bottom set this true.
             follow_tail: false,
@@ -411,7 +421,7 @@ impl Window {
         // mismatched tick and skip the snapshot here; the render loop takes
         // it earlier via `cursor_screen_row_in_viewport`.
         let cursor_screen_row = if self.layout_matches(buf) {
-            self.cursor_row
+            self.absolute_cursor_row()
                 .checked_sub(self.scroll_top)
                 .and_then(|rel| (rel <= u16::MAX as RowIndex).then_some(rel as u16))
         } else {
@@ -438,7 +448,7 @@ impl Window {
     /// (transcript projection) capture this before the mutation so the
     /// cursor's screen row can be restored after the new layout lands.
     pub fn cursor_screen_row_in_viewport(&self) -> Option<u16> {
-        let rel = self.cursor_row.checked_sub(self.scroll_top)?;
+        let rel = self.absolute_cursor_row().checked_sub(self.scroll_top)?;
         (rel <= u16::MAX as RowIndex).then_some(rel as u16)
     }
 
@@ -453,7 +463,9 @@ impl Window {
         if !self.layout_matches(buf) {
             return;
         }
-        let Some((lrow, chunk_idx)) = self.layout.logical_at_visual(row_to_usize(visual_row))
+        let Some((lrow, chunk_idx)) = self
+            .layout
+            .logical_at_visual(row_to_usize(self.local_row(visual_row)))
         else {
             return;
         };
@@ -487,7 +499,7 @@ impl Window {
             return;
         }
         let (vrow, _) = self.layout.visual_for_logical(lrow, byte);
-        self.scroll_top = vrow as RowIndex;
+        self.scroll_top = self.absolute_row(vrow as RowIndex);
     }
 
     /// Reposition the cursor so it sits at `scroll_top + screen_row` in the
@@ -501,8 +513,7 @@ impl Window {
             return;
         }
         let target_vrow = self
-            .scroll_top
-            .saturating_add(screen_row as RowIndex)
+            .local_row(self.scroll_top.saturating_add(screen_row as RowIndex))
             .min(total.saturating_sub(1));
         let want = self.curswant.unwrap_or(self.cursor_col as usize);
         self.cpos = self.cpos_at_visual(buf, row_to_usize(target_vrow), want);
@@ -537,9 +548,40 @@ impl Window {
         }
     }
 
+    pub fn set_virtual_rows(&mut self, row_base: RowIndex, total_rows: RowIndex) {
+        self.row_base = row_base;
+        self.total_rows_override = Some(total_rows);
+    }
+
+    pub fn clear_virtual_rows(&mut self) {
+        self.row_base = 0;
+        self.total_rows_override = None;
+    }
+
+    pub fn display_row_total(&self, buf: &Buffer) -> RowIndex {
+        self.total_rows_override
+            .unwrap_or_else(|| buf.lines().len() as RowIndex)
+    }
+
+    fn local_row(&self, absolute_row: RowIndex) -> RowIndex {
+        absolute_row.saturating_sub(self.row_base)
+    }
+
+    fn absolute_row(&self, local_row: RowIndex) -> RowIndex {
+        self.row_base.saturating_add(local_row)
+    }
+
+    fn local_scroll_top(&self) -> RowIndex {
+        self.local_row(self.scroll_top)
+    }
+
+    fn absolute_cursor_row(&self) -> RowIndex {
+        self.absolute_row(self.cursor_row)
+    }
+
     /// Project `cpos` to a visual `(row, cell_col)` through this window's
-    /// layout. Used by cursor sync after navigation/edit so `cursor_row` is in
-    /// the same coordinate space as `scroll_top`.
+    /// layout. Used by cursor sync after navigation/edit so `cursor_row` stays
+    /// in the backing buffer's local visual-row space.
     fn cursor_visual(&self, buf: &Buffer, cpos: usize) -> (RowIndex, u16) {
         let (lrow, byte_col) = buf.display_byte_pos(cpos);
         if !self.layout_matches(buf) {
@@ -558,8 +600,7 @@ impl Window {
     fn cpos_at_mouse(&self, buf: &Buffer, rel_row: u16, rel_col: u16) -> usize {
         let visual_total = self.visual_row_total(buf);
         let vrow = self
-            .scroll_top
-            .saturating_add(rel_row as RowIndex)
+            .local_row(self.scroll_top.saturating_add(rel_row as RowIndex))
             .min(visual_total.max(1).saturating_sub(1));
         let vcell = rel_col as usize + self.scroll_left as usize;
         self.cpos_at_visual(buf, row_to_usize(vrow), vcell)
@@ -632,7 +673,7 @@ impl Window {
     // ── Cursor ─────────────────────────────────────────────────────────
 
     pub fn cursor_abs_row(&self) -> RowIndex {
-        self.cursor_row
+        self.absolute_cursor_row()
     }
 
     /// Screen row (relative to the viewport top) where the cursor should render.
@@ -643,7 +684,7 @@ impl Window {
     }
 
     pub fn cursor_screen_row_at(&self, scroll_top: RowIndex, viewport_rows: u16) -> Option<u16> {
-        let rel = self.cursor_row.checked_sub(scroll_top)?;
+        let rel = self.absolute_cursor_row().checked_sub(scroll_top)?;
         (rel < viewport_rows as RowIndex).then_some(rel as u16)
     }
 
@@ -1060,15 +1101,14 @@ impl Window {
             let viewport_bottom = self
                 .scroll_top
                 .saturating_add(viewport_rows.saturating_sub(1) as RowIndex);
-            if self.cursor_row > viewport_bottom {
-                let target = self
-                    .cursor_row
+            let cursor_row = self.absolute_cursor_row();
+            if cursor_row > viewport_bottom {
+                let target = cursor_row
                     .saturating_sub(viewport_rows.saturating_sub(1) as RowIndex)
                     .min(max_scroll);
                 self.set_scroll(target, buf);
-            } else if self.cursor_row < self.scroll_top {
-                let target = self.cursor_row;
-                self.set_scroll(target, buf);
+            } else if cursor_row < self.scroll_top {
+                self.set_scroll(cursor_row, buf);
             }
         }
         if viewport_cols > 0 {
@@ -1089,7 +1129,7 @@ impl Window {
         let (row, col) = self.cursor_visual(buf, self.cpos);
         self.cursor_row = row;
         self.cursor_col = col;
-        let total_rows = self.visual_row_total(buf);
+        let total_rows = self.display_row_total(buf);
         let viewport_cols = self.viewport.map(|v| v.content_width).unwrap_or(0);
         self.keep_cursor_visible(buf, total_rows, viewport_rows, viewport_cols);
     }
@@ -1450,7 +1490,7 @@ impl Window {
         let (row, col) = self.cursor_visual(buf, self.cpos);
         self.cursor_row = row;
         self.cursor_col = col;
-        let total_rows = self.visual_row_total(buf);
+        let total_rows = self.display_row_total(buf);
         let viewport_cols = self.viewport.map(|v| v.content_width).unwrap_or(0);
         match action {
             // `zz` recenters the cursor row; horizontal still tracks the cursor.
@@ -1476,7 +1516,7 @@ impl Window {
             return;
         }
         let half = viewport_rows as RowIndex / 2;
-        let want = self.cursor_row.saturating_sub(half);
+        let want = self.absolute_cursor_row().saturating_sub(half);
         let max_scroll = total_rows.saturating_sub(viewport_rows as RowIndex);
         self.set_scroll(want.min(max_scroll), buf);
         self.follow_tail = self.scroll_top >= max_scroll;
@@ -1496,7 +1536,9 @@ impl Window {
             self.vim_state.set_mode(&mut self.vim_mode, VimMode::Normal);
         }
         self.sync_from_cpos(buf, viewport_rows);
-        let max_scroll = (self.visual_row_total(buf)).saturating_sub(viewport_rows as RowIndex);
+        let max_scroll = self
+            .display_row_total(buf)
+            .saturating_sub(viewport_rows as RowIndex);
         self.follow_tail = self.scroll_top >= max_scroll;
     }
 
@@ -1529,7 +1571,7 @@ impl Window {
         if delta == 0 || viewport_rows == 0 {
             return false;
         }
-        let total = self.visual_row_total(buf);
+        let total = self.display_row_total(buf);
         if total == 0 {
             return false;
         }
@@ -1550,7 +1592,8 @@ impl Window {
         };
         // `cpos_at_visual` snaps past non-selectable chrome (transcript fold
         // markers, gutter cells), so no transcript-specific snap is needed here.
-        self.drag_endpoint = Some(self.cpos_at_visual(buf, row_to_usize(edge_vrow), col));
+        self.drag_endpoint =
+            Some(self.cpos_at_visual(buf, row_to_usize(self.local_row(edge_vrow)), col));
         true
     }
 
@@ -1559,7 +1602,7 @@ impl Window {
     /// buffer row changes to whatever row is now under that screen cell.
     /// To move the cursor first and reveal it afterward, use `move_cursor_by_lines`.
     pub fn pan_by_lines(&mut self, buf: &Buffer, delta: isize, viewport_rows: u16) {
-        let total = self.visual_row_total(buf);
+        let total = self.display_row_total(buf);
         if total == 0 || viewport_rows == 0 || delta == 0 {
             return;
         }
@@ -1576,7 +1619,7 @@ impl Window {
         buf: &Buffer,
         viewport_rows: u16,
     ) {
-        let total_visual = self.visual_row_total(buf);
+        let total_visual = self.display_row_total(buf);
         if total_visual == 0 || viewport_rows == 0 {
             return;
         }
@@ -1586,7 +1629,7 @@ impl Window {
         let screen_row = self
             .cursor_screen_row_at(cur_scroll, viewport_rows)
             .unwrap_or_else(|| {
-                if self.cursor_row < cur_scroll {
+                if self.absolute_cursor_row() < cur_scroll {
                     0
                 } else {
                     viewport_rows.saturating_sub(1)
@@ -1598,9 +1641,9 @@ impl Window {
             self.follow_tail = new_scroll >= max_scroll;
             return;
         }
-        let target_vrow = new_scroll
-            .saturating_add(screen_row as RowIndex)
-            .min(total_visual.saturating_sub(1));
+        let target_vrow = self
+            .local_row(new_scroll.saturating_add(screen_row as RowIndex))
+            .min(self.visual_row_total(buf).saturating_sub(1));
         let want = self.curswant.unwrap_or(self.cursor_col as usize);
         self.cpos = self.cpos_at_visual(buf, row_to_usize(target_vrow), want);
         let (row, col) = self.cursor_visual(buf, self.cpos);
@@ -1686,7 +1729,7 @@ impl Window {
 
         let width = slice.width();
         let height = slice.height();
-        let scroll = row_to_usize(self.scroll_top);
+        let scroll = row_to_usize(self.local_scroll_top());
         let gutter_width = self.gutter_width(buf).min(width);
         let pad_left = self
             .config
@@ -1716,7 +1759,7 @@ impl Window {
         // is on, and gates `on_cursor_row` extmark painting regardless so
         // selection-aware spans always work.
         let cursor_screen_row = {
-            let effective_row = self.effective_cursor_row(buf);
+            let effective_row = self.absolute_row(self.effective_cursor_row(buf));
             effective_row
                 .checked_sub(self.scroll_top)
                 .filter(|rel| *rel < height as RowIndex)
@@ -2005,7 +2048,8 @@ impl Window {
                     .map(|(lr, _)| lr)
                     .unwrap_or_else(|| row_to_usize(row));
                 let col = snap_col_past_chrome(buf, logical_row, col);
-                row.checked_sub(self.scroll_top)
+                self.absolute_row(row)
+                    .checked_sub(self.scroll_top)
                     .filter(|rel| *rel < height as RowIndex)
                     .map(|screen_row| (col, screen_row as u16))
             });
