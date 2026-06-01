@@ -1108,6 +1108,9 @@ impl TestApp {
     /// move the insertion point. A stuck cursor reverses "ab" into "ba" and
     /// fails this probe immediately.
     pub fn probe_prompt_cursor_after_turn(&mut self, variant: u8) {
+        if self.agent_running() {
+            self.cancel();
+        }
         self.force_prompt_keyboard_focus();
         self.app.queued_inputs.clear();
         let _ = self.run_lua(r#"smelt.prompt.set_text("")"#);

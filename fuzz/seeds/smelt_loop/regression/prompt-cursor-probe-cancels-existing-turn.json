@@ -1,0 +1,17 @@
+{
+  "_about": "Prompt cursor probe isolation seed: a pre-existing synthetic turn must be cancelled before the probe starts its own turn, otherwise completion targets the wrong turn and the prompt remains in running mode.",
+  "mode": "plan",
+  "ops": [
+    {
+      "kind": "start_turn",
+      "data": 177
+    },
+    {
+      "kind": "probe_prompt_cursor_after_turn",
+      "data": {
+        "variant": 0
+      }
+    }
+  ],
+  "vim": true
+}
