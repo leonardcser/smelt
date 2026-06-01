@@ -23,13 +23,12 @@ recompute pass. Idempotent - multiple acquirers stack.
 ## `smelt.prompt.completer`
 
 ```lua
-fun(spec: smelt.prompt.CompleterSpec): smelt.Reg
+fun(spec: smelt.prompt.CompleterSpec|smelt.prompt.MatchesCompleterSpec): smelt.Reg
 ```
 
-Types: [`smelt.prompt.CompleterSpec`](types.md#smeltpromptcompleterspec), [`smelt.Reg`](types.md#smeltreg)
+Types: [`smelt.prompt.CompleterSpec`](types.md#smeltpromptcompleterspec), [`smelt.prompt.MatchesCompleterSpec`](types.md#smeltpromptmatchescompleterspec), [`smelt.Reg`](types.md#smeltreg)
 
-Register a completer spec. See `smelt.prompt.CompleterSpec` for the
-required fields. Returns a `Reg` whose `:remove()` unregisters the
+Register a completer spec. Returns a `Reg` whose `:remove()` unregisters the
 completer and closes the picker if it was active.
 
 ## `smelt.prompt.cursor`

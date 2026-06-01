@@ -453,18 +453,30 @@ Picker handle returned by `smelt.picker.new(opts)`. Setter methods return the sa
 
 ### `smelt.prompt.CompleterSpec`
 
-Completer specification handed to `smelt.prompt.completer`. Every
-field is required: `detect` recognises a trigger token in the live
-prompt text, `items` enumerates the candidate set, `query` ranks
-the candidates against the user's input, and `accept` splices the
-chosen value back into the prompt.
+Completer specification handed to `smelt.prompt.completer` for full candidate
+sets ranked in Lua.
 
 | Field | Type | Required | Description |
 | --- | --- | --- | --- |
-| `detect` | `fun(text: string, cpos: integer):` | yes | any?, integer? Detect the trigger; returns `(spec_data, anchor_byte_offset)` or `nil`. |
-| `items` | `fun(spec_data: any):` | yes | table[] Build the candidate list (one entry per row). |
-| `query` | `fun(spec_data: any, token: string, items: table[]):` | yes | table[] Filter / rank the candidates. |
-| `accept` | `fun(spec_data: any, item: table):` | yes | nil Splice the accepted candidate into the prompt. |
+| `detect` | `fun(text: string, cpos: integer):` | yes | integer? Detect the active trigger and return its 0-based anchor byte offset. |
+| `items` | `fun(anchor: integer, text: string, cpos: integer):` | yes | table[] Build a full candidate set for Lua-side ranking. |
+| `query` | `fun(text: string, anchor: integer, cpos: integer):` | yes | string Query used for Lua-side ranking. |
+| `accept` | `fun(item: table, anchor: integer, action: string):` | yes | nil Splice the accepted candidate into the prompt. |
+| `limit` | `integer` |  | Maximum rows requested from `matches` providers. |
+| `on_select` | `fun(item: table):` |  | nil Live selection callback. |
+
+### `smelt.prompt.MatchesCompleterSpec`
+
+Completer specification handed to `smelt.prompt.completer` for bounded,
+already-ranked providers.
+
+| Field | Type | Required | Description |
+| --- | --- | --- | --- |
+| `detect` | `fun(text: string, cpos: integer):` | yes | integer? Detect the active trigger and return its 0-based anchor byte offset. |
+| `matches` | `fun(anchor: integer, text: string, cpos: integer, limit: integer):` | yes | table[] Return bounded already-filtered/ranked rows. |
+| `accept` | `fun(item: table, anchor: integer, action: string):` | yes | nil Splice the accepted candidate into the prompt. |
+| `limit` | `integer` |  | Maximum rows requested from `matches` providers. |
+| `on_select` | `fun(item: table):` |  | nil Live selection callback. |
 
 ### `smelt.prompt.PickerItem`
 

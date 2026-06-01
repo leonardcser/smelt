@@ -3,8 +3,9 @@
 -- One singleton orchestrator owns the prompt's `text_changed` subscription.
 -- Each registered completer declares:
 --   detect(text, cpos)             -> anchor_byte | nil
---   items(anchor, text)            -> { { label, description?, ansi_color?, prefix?, search_terms? }, ... }
---   query(text, anchor, cpos)      -> string
+--   items(anchor, text, cpos)?      -> { { label, description?, ansi_color?, prefix?, search_terms? }, ... }
+--   matches(anchor, text, cpos, limit)? -> already-filtered/ranked rows
+--   query(text, anchor, cpos)?     -> string (required with items)
 --   accept(item, anchor, action)   -- action ∈ "enter" | "tab"
 --   on_select?(item)               -- fires on every navigation (live preview)
 --   prefix?                        -- picker row prefix glyph
@@ -55,18 +56,13 @@ end
 
 -- ── Helpers ─────────────────────────────────────────────────────────────
 
-local function to_picker_items(list, spec)
-  local out = {}
-  for i, it in ipairs(list) do
-    out[i] = {
-      label        = it.label,
-      description  = it.description,
-      ansi_color   = it.ansi_color or spec.prefix_color,
-      label_color  = it.label_color or spec.label_color,
-      prefix       = it.prefix or spec.prefix,
-    }
+local function prepare_picker_items(list, spec)
+  for _, it in ipairs(list) do
+    if it.ansi_color == nil then it.ansi_color = spec.prefix_color end
+    if it.label_color == nil then it.label_color = spec.label_color end
+    if it.prefix == nil then it.prefix = spec.prefix end
   end
-  return out
+  return list
 end
 
 local function rank_items(all, query)
@@ -87,6 +83,15 @@ local function precompute_hay(items)
       it._hay = (it.label or "") .. " " .. (it.description or "") .. " " .. (it.search_terms or "")
     end
   end
+end
+
+local function candidate_rows(spec, anchor, text, cpos)
+  if spec.matches then
+    return spec.matches(anchor, text, cpos, spec.limit or 200) or {}, nil
+  end
+  local items = spec.items(anchor, text, cpos) or {}
+  precompute_hay(items)
+  return rank_items(items, spec.query(text, anchor, cpos)), items
 end
 
 local function detect_any(text, cpos)
@@ -114,15 +119,11 @@ end
 local function open_for(spec, anchor)
   local text = smelt.prompt.text()
   local cpos = smelt.prompt.cursor()
-  local items = spec.items(anchor, text) or {}
-  if #items == 0 then return end
-  precompute_hay(items)
-  local query = spec.query(text, anchor, cpos)
-  local view = rank_items(items, query)
+  local view, items = candidate_rows(spec, anchor, text, cpos)
   if #view == 0 then return end
 
   local picker = smelt.picker.new({
-    items     = to_picker_items(view, spec),
+    items     = prepare_picker_items(view, spec),
     placement = "prompt_docked",
   })
   local lock_reg = smelt.prompt.acquire()
@@ -181,10 +182,14 @@ local function refilter()
     M._recompute()
     return
   end
-  local query = cur.spec.query(text, cur.anchor, cpos)
-  cur.view = rank_items(cur.items, query)
+  if cur.spec.matches then
+    cur.view = cur.spec.matches(cur.anchor, text, cpos, cur.spec.limit or 200) or {}
+  else
+    local query = cur.spec.query(text, cur.anchor, cpos)
+    cur.view = rank_items(cur.items, query)
+  end
   cur.selected = 1
-  cur.picker:items(to_picker_items(cur.view, cur.spec)):selected(0)
+  cur.picker:items(prepare_picker_items(cur.view, cur.spec)):selected(0)
   fire_on_select()
 end
 
@@ -209,26 +214,33 @@ end
 -- re-executed inside the `install_app_ptr` scope.
 smelt.prompt.win():on("text_changed", function() M._recompute() end)
 
---- Completer specification handed to `smelt.prompt.completer`. Every
---- field is required: `detect` recognises a trigger token in the live
---- prompt text, `items` enumerates the candidate set, `query` ranks
---- the candidates against the user's input, and `accept` splices the
---- chosen value back into the prompt.
+--- Completer specification handed to `smelt.prompt.completer` for full candidate
+--- sets ranked in Lua.
 ---@class smelt.prompt.CompleterSpec
----@field detect fun(text: string, cpos: integer): any?, integer? Detect the trigger; returns `(spec_data, anchor_byte_offset)` or `nil`.
----@field items fun(spec_data: any): table[] Build the candidate list (one entry per row).
----@field query fun(spec_data: any, token: string, items: table[]): table[] Filter / rank the candidates.
----@field accept fun(spec_data: any, item: table): nil Splice the accepted candidate into the prompt.
+---@field detect fun(text: string, cpos: integer): integer? Detect the active trigger and return its 0-based anchor byte offset.
+---@field items fun(anchor: integer, text: string, cpos: integer): table[] Build a full candidate set for Lua-side ranking.
+---@field query fun(text: string, anchor: integer, cpos: integer): string Query used for Lua-side ranking.
+---@field accept fun(item: table, anchor: integer, action: string): nil Splice the accepted candidate into the prompt.
+---@field limit? integer Maximum rows requested from `matches` providers.
+---@field on_select? fun(item: table): nil Live selection callback.
 
--- Register a completer spec. See `smelt.prompt.CompleterSpec` for the
--- required fields. Returns a `Reg` whose `:remove()` unregisters the
+--- Completer specification handed to `smelt.prompt.completer` for bounded,
+--- already-ranked providers.
+---@class smelt.prompt.MatchesCompleterSpec
+---@field detect fun(text: string, cpos: integer): integer? Detect the active trigger and return its 0-based anchor byte offset.
+---@field matches fun(anchor: integer, text: string, cpos: integer, limit: integer): table[] Return bounded already-filtered/ranked rows.
+---@field accept fun(item: table, anchor: integer, action: string): nil Splice the accepted candidate into the prompt.
+---@field limit? integer Maximum rows requested from `matches` providers.
+---@field on_select? fun(item: table): nil Live selection callback.
+
+-- Register a completer spec. Returns a `Reg` whose `:remove()` unregisters the
 -- completer and closes the picker if it was active.
----@type fun(spec: smelt.prompt.CompleterSpec): smelt.Reg
+---@type fun(spec: smelt.prompt.CompleterSpec|smelt.prompt.MatchesCompleterSpec): smelt.Reg
 function smelt.prompt.completer(spec)
   assert(type(spec) == "table", "smelt.prompt.completer: expected table")
   assert(type(spec.detect) == "function", "spec.detect required")
-  assert(type(spec.items)  == "function", "spec.items required")
-  assert(type(spec.query)  == "function", "spec.query required")
+  assert(type(spec.items) == "function" or type(spec.matches) == "function", "spec.items or spec.matches required")
+  if spec.items then assert(type(spec.query) == "function", "spec.query required with spec.items") end
   assert(type(spec.accept) == "function", "spec.accept required")
   table.insert(registry, spec)
   return smelt.reg.new(function()

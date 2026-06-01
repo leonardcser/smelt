@@ -305,16 +305,24 @@
 ---@field selected fun(idx: integer?): any Read or write the current logical selection (0-based). Without arg returns the index (`nil` if the picker is empty); with arg sets the selection and returns the handle for chaining.
 ---@field move fun(delta: integer): smelt.picker.Picker Move the picker's cursor by `delta` rows (clamped to the buffer's line count). Returns the handle for chaining.
 
---- Completer specification handed to `smelt.prompt.completer`. Every
---- field is required: `detect` recognises a trigger token in the live
---- prompt text, `items` enumerates the candidate set, `query` ranks
---- the candidates against the user's input, and `accept` splices the
---- chosen value back into the prompt.
+--- Completer specification handed to `smelt.prompt.completer` for full candidate
+--- sets ranked in Lua.
 ---@class smelt.prompt.CompleterSpec
----@field detect fun(text: string, cpos: integer): any?, integer? Detect the trigger; returns `(spec_data, anchor_byte_offset)` or `nil`.
----@field items fun(spec_data: any): table[] Build the candidate list (one entry per row).
----@field query fun(spec_data: any, token: string, items: table[]): table[] Filter / rank the candidates.
----@field accept fun(spec_data: any, item: table): nil Splice the accepted candidate into the prompt.
+---@field detect fun(text: string, cpos: integer): integer? Detect the active trigger and return its 0-based anchor byte offset.
+---@field items fun(anchor: integer, text: string, cpos: integer): table[] Build a full candidate set for Lua-side ranking.
+---@field query fun(text: string, anchor: integer, cpos: integer): string Query used for Lua-side ranking.
+---@field accept fun(item: table, anchor: integer, action: string): nil Splice the accepted candidate into the prompt.
+---@field limit? integer Maximum rows requested from `matches` providers.
+---@field on_select? fun(item: table): nil Live selection callback.
+
+--- Completer specification handed to `smelt.prompt.completer` for bounded,
+--- already-ranked providers.
+---@class smelt.prompt.MatchesCompleterSpec
+---@field detect fun(text: string, cpos: integer): integer? Detect the active trigger and return its 0-based anchor byte offset.
+---@field matches fun(anchor: integer, text: string, cpos: integer, limit: integer): table[] Return bounded already-filtered/ranked rows.
+---@field accept fun(item: table, anchor: integer, action: string): nil Splice the accepted candidate into the prompt.
+---@field limit? integer Maximum rows requested from `matches` providers.
+---@field on_select? fun(item: table): nil Live selection callback.
 
 --- Picker entry shown in the prompt-docked dropdown. `label` and the
 --- optional flavour fields mirror what the fuzzy ranker renders; the

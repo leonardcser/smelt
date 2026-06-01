@@ -15,11 +15,9 @@ local prompt = {}
 ---@type fun(): smelt.Reg
 prompt.acquire = nil
 
---- Register a completer spec. See `smelt.prompt.CompleterSpec` for the
---- required fields. Returns a `Reg` whose `:remove()` unregisters the
+--- Register a completer spec. Returns a `Reg` whose `:remove()` unregisters the
 --- completer and closes the picker if it was active.
----@see smelt.prompt.CompleterSpec
----@type fun(spec: smelt.prompt.CompleterSpec): smelt.Reg
+---@type fun(spec: smelt.prompt.CompleterSpec|smelt.prompt.MatchesCompleterSpec): smelt.Reg
 prompt.completer = nil
 
 --- Read or write the prompt cursor as a byte offset into `text()`. Without an argument returns the current offset; with one snaps it to a char boundary and clamps to source length. Returns the resulting offset.

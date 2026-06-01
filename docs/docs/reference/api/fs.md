@@ -30,6 +30,14 @@ fun(pattern: string, path: string?, opts: table?): string[]?, string?
 
 Find paths matching `pattern` under `path` (defaults to cwd). Returns the matches sorted newest-first, capped at `opts.max` (default 200). On error returns `(nil, err_string)`.
 
+## `smelt.fs.invalidate_workspace_files`
+
+```lua
+fun(): nil
+```
+
+Clear the cached workspace file list. The next `workspace_file_matches` call rebuilds it for the current cwd.
+
 ## `smelt.fs.is_dir`
 
 ```lua
@@ -143,6 +151,14 @@ Filesystem watcher. Calls `handler(event)` for each event, where
 `opts.recursive` defaults to true; set false to watch only the immediate
 entries of a directory. Returns a `Reg` whose `:remove()` stops the
 watcher and cancels the polling coroutine.
+
+## `smelt.fs.workspace_file_matches`
+
+```lua
+fun(query: string, limit: integer?): table
+```
+
+Return bounded fuzzy-matched workspace file rows as `{ index, label }` tables. `index` is the 1-based index in the cached workspace file list.
 
 ## `smelt.fs.workspace_files`
 

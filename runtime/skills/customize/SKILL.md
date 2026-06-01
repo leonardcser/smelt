@@ -640,6 +640,8 @@ Sync filesystem primitives.
   Return `true` if a filesystem entry exists at `p`.
 - `smelt.fs.glob` :: `fun(pattern: string, path: string?, opts: table?): string[]?, string?`
   Find paths matching `pattern` under `path` (defaults to cwd).
+- `smelt.fs.invalidate_workspace_files` :: `fun(): nil`
+  Clear the cached workspace file list.
 - `smelt.fs.is_dir` :: `fun(p: string): boolean`
   Return `true` if `p` exists and refers to a directory.
 - `smelt.fs.is_file` :: `fun(p: string): boolean`
@@ -666,6 +668,8 @@ Sync filesystem primitives.
   Return the size of file `p` in bytes.
 - `smelt.fs.watch` :: `fun(path: string, handler: fun(event: { kind: string, detail: string?, paths: string[] }), opts: table?): smelt.Reg`
   Filesystem watcher.
+- `smelt.fs.workspace_file_matches` :: `fun(query: string, limit: integer?): table`
+  Return bounded fuzzy-matched workspace file rows as `{ index, label }` tables.
 - `smelt.fs.workspace_files` :: `fun(): string[]`
   Return tracked + untracked non-ignored files under the cwd, plus every intermediate parent directory, sorted lexicographically.
 - `smelt.fs.write` :: `fun(p: string, contents: string): boolean, string?`
@@ -1283,7 +1287,7 @@ The main editable input surface: win handle, text get/set, and cursor control.
 
 - `smelt.prompt.acquire` :: `fun(): smelt.Reg`
   ── Modality lock ─────────────────────────────────────────────────────── Take a modality lock on the prompt area so completers/pickers don't pop while the caller owns the screen.
-- `smelt.prompt.completer` :: `fun(spec: smelt.prompt.CompleterSpec): smelt.Reg`
+- `smelt.prompt.completer` :: `fun(spec: smelt.prompt.CompleterSpec|smelt.prompt.MatchesCompleterSpec): smelt.Reg`
   Register a completer spec.
 - `smelt.prompt.cursor` :: `fun(pos: integer?): integer`
   Read or write the prompt cursor as a byte offset into `text()`.

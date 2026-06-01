@@ -1,6 +1,6 @@
 use super::block_buffers::BlockBufferCache;
 use crate::smelt_term::Theme;
-use crate::smelt_term::{Buffer, RowIndex};
+use crate::smelt_term::{clamp_scroll, Buffer, RowIndex};
 use smelt_core::buffer::{LineDecoration, Span, SpanMeta};
 use smelt_core::transcript_model::{BlockHistory, BlockId, LayoutKey, ViewState};
 use std::sync::Arc;
@@ -855,10 +855,6 @@ impl TranscriptProjection {
         }
         (soft, hard)
     }
-}
-
-fn clamp_scroll(scroll_top: RowIndex, total_rows: RowIndex, viewport_rows: u16) -> RowIndex {
-    scroll_top.min(total_rows.saturating_sub(viewport_rows as RowIndex))
 }
 
 fn apply_row_highlights(buf: &mut Buffer, row: usize, highlights: Vec<Span>) {

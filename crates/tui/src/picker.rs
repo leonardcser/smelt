@@ -72,18 +72,23 @@ pub(crate) enum PickerPlacement {
     ScreenBottom,
 }
 
-/// Per-leaf picker state, keyed by `WinId`. Lets `set_items` / `set_selected`
-/// resize the overlay and reverse logical → visual indices without re-deriving placement.
-#[derive(Clone, Copy, Debug)]
+/// Per-leaf picker state, keyed by `WinId`. The picker owns the full logical
+/// item set, but its backing buffer materializes only the visible slice.
+#[derive(Clone, Debug)]
 pub(crate) struct PickerState {
     pub(crate) overlay: OverlayId,
     pub(crate) placement: PickerPlacement,
     pub(crate) reversed: bool,
     pub(crate) max_rows: u16,
+    pub(crate) items: Vec<PickerItem>,
+    pub(crate) selected: usize,
+    pub(crate) materialized: std::ops::Range<RowIndex>,
+    pub(crate) max_label: usize,
 }
 
 const INDENT: usize = 1;
 const DESC_GAP: usize = 2;
+const PICKER_OVERSCAN_ROWS: RowIndex = 32;
 
 /// Open a picker overlay. `selected` is a logical 0-based index into `items`.
 /// Returns the leaf `WinId` for subsequent `set_items` / `set_selected` calls.
@@ -101,9 +106,10 @@ pub(crate) fn open(
         _ => 32,
     };
     let reversed = matches!(placement, PickerPlacement::PromptDocked { .. });
+    let total = items.len();
+    let selected = clamp_selected(selected, total);
 
     let buf = app.ui.buf_create(BufCreateOpts::default());
-    write_buffer(app, buf, &items, reversed);
 
     let leaf = app.ui.win_open_split(
         buf,
@@ -115,25 +121,13 @@ pub(crate) fn open(
             },
         },
     )?;
-    let height = picker_height(items.len(), max_rows);
-    let (cursor_row, scroll) = cursor_and_scroll(selected, items.len(), height, reversed, 0);
-    let (w, buf_ref) = app.ui.win_and_buf_mut(leaf, buf);
-    if let (Some(w), Some(buf_ref)) = (w, buf_ref) {
-        w.selection_highlight = true;
-        // Mouse-scroll opt-in: doubles as the caret-leaf opt-out so a click
-        // doesn't commit `cpos` mid-line. Wheel pans the viewport and shifts
-        // the highlight visually (same as `dialog.list` / resume).
-        w.mouse_scroll = true;
-        w.focusable = focusable;
-        w.scroll_top = scroll;
-        w.jump_to_row(buf_ref, cursor_row, height);
-    }
-
-    let layout = layout_for(leaf, height);
-    let anchor = anchor_for(&app.ui, placement, height);
-    let overlay = Overlay::new(layout, anchor)
-        .with_z(z)
-        .blocks_agent(blocks_agent);
+    let height = picker_height(total, max_rows);
+    let overlay = Overlay::new(
+        layout_for(leaf, height),
+        anchor_for(&app.ui, placement, height),
+    )
+    .with_z(z)
+    .blocks_agent(blocks_agent);
     let overlay_id = app.ui.overlay_open(overlay);
 
     app.picker_state.insert(
@@ -143,8 +137,22 @@ pub(crate) fn open(
             placement,
             reversed,
             max_rows,
+            max_label: max_label_chars(&items),
+            items,
+            selected,
+            materialized: 0..0,
         },
     );
+
+    sync_selected(app, leaf, selected);
+    if let Some(w) = app.ui.win_mut(leaf) {
+        w.selection_highlight = true;
+        // Mouse-scroll opt-in: doubles as the caret-leaf opt-out so a click
+        // doesn't commit `cpos` mid-line. Wheel pans the viewport and shifts
+        // the highlight visually (same as `dialog.list` / resume).
+        w.mouse_scroll = true;
+        w.focusable = focusable;
+    }
     if focusable {
         app.ui.set_focus(leaf);
     }
@@ -153,51 +161,66 @@ pub(crate) fn open(
 
 /// Replace picker items, resizing the overlay. No-op if `leaf` is not a known picker.
 pub(crate) fn set_items(app: &mut TuiApp, leaf: WinId, items: Vec<PickerItem>, selected: usize) {
-    let Some(state) = app.picker_state.get(&leaf).copied() else {
+    let Some(mut state) = app.picker_state.remove(&leaf) else {
         return;
     };
-    let prev_scroll = app.ui.win(leaf).map(|w| w.scroll_top).unwrap_or(0);
-    let buf_id = app.ui.win(leaf).map(|w| w.buf);
-    if let Some(buf_id) = buf_id {
-        write_buffer(app, buf_id, &items, state.reversed);
-    }
-    let height = picker_height(items.len(), state.max_rows);
-    let (cursor_row, scroll) =
-        cursor_and_scroll(selected, items.len(), height, state.reversed, prev_scroll);
-    if let Some(buf_id) = buf_id {
-        let (w, buf_ref) = app.ui.win_and_buf_mut(leaf, buf_id);
-        if let (Some(w), Some(buf_ref)) = (w, buf_ref) {
-            w.scroll_top = scroll;
-            w.jump_to_row(buf_ref, cursor_row, height);
-        }
-    }
-    // Compute the anchor before grabbing the &mut on `Ui::overlay_mut` so
-    // the immutable read of `app.ui.named_win(...)` doesn't overlap the
-    // mutable borrow on the overlay record.
+    state.max_label = max_label_chars(&items);
+    state.items = items;
+    state.selected = clamp_selected(selected, state.items.len());
+    state.materialized = 0..0;
+    let height = picker_height(state.items.len(), state.max_rows);
     let new_anchor = anchor_for(&app.ui, state.placement, height);
-    if let Some(ov) = app.ui.overlay_mut(state.overlay) {
+    let overlay = state.overlay;
+    app.picker_state.insert(leaf, state);
+
+    if let Some(ov) = app.ui.overlay_mut(overlay) {
         ov.layout = layout_for(leaf, height);
         ov.anchor = new_anchor;
     }
+    sync_selected(app, leaf, selected);
 }
 
 /// Update the picker's logical selection (clamped to `n - 1`).
 pub(crate) fn set_selected(app: &mut TuiApp, leaf: WinId, selected: usize) {
-    let Some(state) = app.picker_state.get(&leaf).copied() else {
+    sync_selected(app, leaf, selected);
+}
+
+/// Move the picker's logical selection by `delta`, clamped to the item set.
+pub(crate) fn move_selected(app: &mut TuiApp, leaf: WinId, delta: isize) {
+    let Some(state) = app.picker_state.get(&leaf) else {
         return;
     };
-    let buf_id = match app.ui.win(leaf).map(|w| w.buf) {
-        Some(id) => id,
-        None => return,
+    let total = state.items.len();
+    if total == 0 {
+        return;
+    }
+    let selected = if delta.is_negative() {
+        state.selected.saturating_sub(delta.unsigned_abs())
+    } else {
+        state
+            .selected
+            .saturating_add(delta as usize)
+            .min(total.saturating_sub(1))
     };
-    let n = app.ui.buf(buf_id).map(|b| b.line_count()).unwrap_or(0);
-    let prev_scroll = app.ui.win(leaf).map(|w| w.scroll_top).unwrap_or(0);
-    let height = picker_height(n, state.max_rows);
-    let (cursor_row, scroll) = cursor_and_scroll(selected, n, height, state.reversed, prev_scroll);
-    let (w, buf_ref) = app.ui.win_and_buf_mut(leaf, buf_id);
-    if let (Some(w), Some(buf_ref)) = (w, buf_ref) {
-        w.scroll_top = scroll;
-        w.jump_to_row(buf_ref, cursor_row, height);
+    sync_selected(app, leaf, selected);
+}
+
+/// Refresh virtualized picker buffers after viewport-led scrolling.
+pub(crate) fn sync_scrolled(app: &mut TuiApp) {
+    let leaves: Vec<WinId> = app.picker_state.keys().copied().collect();
+    for leaf in leaves {
+        let Some(state) = app.picker_state.get(&leaf) else {
+            continue;
+        };
+        let total = state.items.len();
+        if total == 0 {
+            continue;
+        }
+        let Some(abs_cursor) = app.ui.win(leaf).map(|w| w.cursor_abs_row()) else {
+            continue;
+        };
+        let selected = logical_from_visual(abs_cursor, total, state.reversed);
+        sync_to_view(app, leaf, selected, SyncAnchor::ScrollTop);
     }
 }
 
@@ -207,20 +230,79 @@ pub(crate) fn forget(app: &mut TuiApp, leaf: WinId) {
     app.picker_state.remove(&leaf);
 }
 
-/// Current logical selection index (0-based) for `leaf`. Resolves the buffer
-/// cursor row through the picker's `reversed` mapping. `None` when `leaf` is
-/// not a known picker or has no items.
+/// Current logical selection index (0-based) for `leaf`.
 pub(crate) fn selected_index(app: &TuiApp, leaf: WinId) -> Option<usize> {
     let state = app.picker_state.get(&leaf)?;
-    let win = app.ui.win(leaf)?;
-    let buf = app.ui.buf(win.buf)?;
-    let n = buf.line_count();
-    if n == 0 {
-        return None;
+    (!state.items.is_empty()).then_some(state.selected)
+}
+
+#[derive(Clone, Copy)]
+enum SyncAnchor {
+    Selected,
+    ScrollTop,
+}
+
+fn sync_selected(app: &mut TuiApp, leaf: WinId, selected: usize) {
+    sync_to_view(app, leaf, selected, SyncAnchor::Selected);
+}
+
+fn sync_to_view(app: &mut TuiApp, leaf: WinId, selected: usize, anchor: SyncAnchor) {
+    let Some(mut state) = app.picker_state.remove(&leaf) else {
+        return;
+    };
+    let total = state.items.len();
+    state.selected = clamp_selected(selected, total);
+    let height = picker_height(total, state.max_rows);
+    let selected_visual = visual_cursor(state.selected, total, state.reversed);
+    let prev_scroll = app.ui.win(leaf).map(|w| w.scroll_top).unwrap_or(0);
+    let scroll = match anchor {
+        SyncAnchor::Selected => {
+            crate::smelt_term::scroll_to_show(prev_scroll, selected_visual, height)
+        }
+        SyncAnchor::ScrollTop => {
+            crate::smelt_term::clamp_scroll(prev_scroll, total as RowIndex, height)
+        }
+    };
+    let range_anchor = match anchor {
+        SyncAnchor::Selected => selected_visual,
+        SyncAnchor::ScrollTop => scroll,
+    };
+    let range = crate::smelt_term::materialized_row_range(
+        range_anchor,
+        total as RowIndex,
+        height,
+        PICKER_OVERSCAN_ROWS,
+    );
+    let buf_id = app.ui.win(leaf).map(|w| w.buf);
+    if let Some(buf_id) = buf_id {
+        write_buffer_range(
+            app,
+            buf_id,
+            &state.items,
+            range.clone(),
+            state.reversed,
+            state.max_label,
+        );
+        let (w, buf_ref) = app.ui.win_and_buf_mut(leaf, buf_id);
+        if let (Some(w), Some(buf_ref)) = (w, buf_ref) {
+            w.scroll_top = scroll;
+            if range.start == 0 && range.end == total as RowIndex {
+                w.clear_virtual_rows();
+            } else {
+                w.set_virtual_rows(range.start, total as RowIndex);
+            }
+            let local_cursor = selected_visual
+                .saturating_sub(range.start)
+                .min(buf_ref.line_count().saturating_sub(1) as RowIndex);
+            w.jump_to_row(buf_ref, local_cursor, height);
+        }
     }
-    let row = win.cursor_row() as usize;
-    let row = row.min(n - 1);
-    Some(if state.reversed { n - 1 - row } else { row })
+    state.materialized = range;
+    app.picker_state.insert(leaf, state);
+}
+
+fn clamp_selected(selected: usize, total: usize) -> usize {
+    selected.min(total.saturating_sub(1))
 }
 
 fn picker_height(item_count: usize, max_rows: u16) -> u16 {
@@ -228,28 +310,16 @@ fn picker_height(item_count: usize, max_rows: u16) -> u16 {
     n.min(max_rows.max(1))
 }
 
-/// Compute `(cursor_row, scroll_top)` for a picker leaf. Adjusts scroll
-/// so the selected buffer row stays in `[scroll, scroll + height)`.
-/// `cursor_row` is buffer-absolute.
-fn cursor_and_scroll(
-    selected: usize,
-    item_count: usize,
-    height: u16,
-    reversed: bool,
-    prev_scroll: RowIndex,
-) -> (RowIndex, RowIndex) {
-    let buf_row = visual_cursor(selected, item_count, reversed);
-    let h = height.max(1) as RowIndex;
-    let max_scroll = (item_count as RowIndex).max(1).saturating_sub(h);
-    let scroll = if buf_row < prev_scroll {
-        buf_row
-    } else if buf_row >= prev_scroll.saturating_add(h) {
-        buf_row + 1 - h
-    } else {
-        prev_scroll
+fn logical_from_visual(visual: RowIndex, n: usize, reversed: bool) -> usize {
+    if n == 0 {
+        return 0;
     }
-    .min(max_scroll);
-    (buf_row, scroll)
+    let visual = visual.min((n - 1) as RowIndex) as usize;
+    if reversed {
+        n - 1 - visual
+    } else {
+        visual
+    }
 }
 
 fn visual_cursor(logical: usize, n: usize, reversed: bool) -> RowIndex {
@@ -304,16 +374,15 @@ fn max_label_chars(items: &[PickerItem]) -> usize {
         .unwrap_or(0)
 }
 
-/// Write items into the buffer, one row each, via `LineBuilder`. Reversed mode
-/// flips order so logical 0 lands on the last row.
-fn write_buffer(app: &mut TuiApp, buf: BufId, items: &[PickerItem], reversed: bool) {
-    let max_label = max_label_chars(items);
-    let order: Vec<usize> = if reversed {
-        (0..items.len()).rev().collect()
-    } else {
-        (0..items.len()).collect()
-    };
-
+/// Write a materialized visual-row range into the backing buffer.
+fn write_buffer_range(
+    app: &mut TuiApp,
+    buf: BufId,
+    items: &[PickerItem],
+    range: std::ops::Range<RowIndex>,
+    reversed: bool,
+    max_label: usize,
+) {
     // Clone the theme Arc so the buffer can be borrowed mutably alongside it.
     let theme = app.ui.theme().clone();
     let Some(b) = app.ui.buf_mut(buf) else {
@@ -331,7 +400,13 @@ fn write_buffer(app: &mut TuiApp, buf: BufId, items: &[PickerItem], reversed: bo
             out.newline();
             return;
         }
-        for &src_idx in &order {
+        let total = items.len() as RowIndex;
+        for visual_row in range.start..range.end.min(total) {
+            let src_idx = if reversed {
+                (total - 1 - visual_row) as usize
+            } else {
+                visual_row as usize
+            };
             let item = &items[src_idx];
             let label_chars = item.prefix.chars().count() + item.label.chars().count();
 
@@ -413,6 +488,19 @@ mod tests {
     fn visual_cursor_returns_zero_for_empty_list() {
         assert_eq!(visual_cursor(0, 0, false), 0);
         assert_eq!(visual_cursor(0, 0, true), 0);
+    }
+
+    fn cursor_and_scroll(
+        selected: usize,
+        item_count: usize,
+        height: u16,
+        reversed: bool,
+        prev_scroll: RowIndex,
+    ) -> (RowIndex, RowIndex) {
+        let cursor = visual_cursor(selected, item_count, reversed);
+        let max_scroll = (item_count as RowIndex).saturating_sub(height as RowIndex);
+        let scroll = crate::smelt_term::scroll_to_show(prev_scroll, cursor, height).min(max_scroll);
+        (cursor, scroll)
     }
 
     // ── cursor_and_scroll ────────────────────────────────────────────────

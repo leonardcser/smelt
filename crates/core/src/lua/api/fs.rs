@@ -10,7 +10,7 @@ use notify::{Config, EventKind, RecommendedWatcher, RecursiveMode, Watcher};
 use std::cell::RefCell;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::Ordering;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 
 pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) -> LuaResult<()> {
     let fs = LuaMod::under(
@@ -179,6 +179,33 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
         "Return tracked + untracked non-ignored files under the cwd, plus every intermediate parent directory, sorted lexicographically. Uses `git ls-files` when a git repo is present and falls back to a depth-capped filesystem walk otherwise. Suitable as the source for an `@file` completer.",
         &[],
         |_, ()| -> LuaResult<Vec<String>> { Ok(workspace_files()) },
+    )?;
+
+    fs.fn_(
+        "workspace_file_matches",
+        "Return bounded fuzzy-matched workspace file rows as `{ index, label }` tables. `index` is the 1-based index in the cached workspace file list.",
+        &["query", "limit"],
+        |lua, (query, limit): (String, Option<usize>)| -> LuaResult<mlua::Table> {
+            let matches = workspace_file_matches(&query, limit.unwrap_or(200));
+            let out = lua.create_table_with_capacity(matches.len(), 0)?;
+            for (row, m) in matches.into_iter().enumerate() {
+                let t = lua.create_table_with_capacity(0, 2)?;
+                t.set("index", m.index)?;
+                t.set("label", m.label)?;
+                out.raw_set(row + 1, t)?;
+            }
+            Ok(out)
+        },
+    )?;
+
+    fs.fn_(
+        "invalidate_workspace_files",
+        "Clear the cached workspace file list. The next `workspace_file_matches` call rebuilds it for the current cwd.",
+        &[],
+        |_, ()| -> LuaResult<()> {
+            invalidate_workspace_file_index();
+            Ok(())
+        },
     )?;
 
     let file_state = fs.sub(
@@ -533,6 +560,92 @@ fn paths_to_strings(paths: Vec<PathBuf>) -> Vec<String> {
 
 // ── Workspace file enumeration ──────────────────────────────────────────────
 
+#[derive(Clone)]
+struct WorkspaceFileEntry {
+    label: String,
+    haystack: String,
+}
+
+struct WorkspaceFileIndex {
+    cwd: PathBuf,
+    entries: Vec<WorkspaceFileEntry>,
+}
+
+struct WorkspaceFileMatch {
+    index: usize,
+    label: String,
+}
+
+static WORKSPACE_FILE_INDEX: OnceLock<Mutex<Option<WorkspaceFileIndex>>> = OnceLock::new();
+
+fn invalidate_workspace_file_index() {
+    let lock = WORKSPACE_FILE_INDEX.get_or_init(|| Mutex::new(None));
+    *lock.lock().unwrap_or_else(|e| e.into_inner()) = None;
+}
+
+fn workspace_file_matches(query: &str, limit: usize) -> Vec<WorkspaceFileMatch> {
+    if limit == 0 {
+        return Vec::new();
+    }
+    let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::new());
+    let lock = WORKSPACE_FILE_INDEX.get_or_init(|| Mutex::new(None));
+    let mut guard = lock.lock().unwrap_or_else(|e| e.into_inner());
+    let stale = guard.as_ref().map(|idx| idx.cwd != cwd).unwrap_or(true);
+    if stale {
+        *guard = Some(build_workspace_file_index(cwd));
+    }
+    let Some(index) = guard.as_ref() else {
+        return Vec::new();
+    };
+
+    workspace_file_matches_from_entries(query, limit, &index.entries)
+}
+
+fn workspace_file_matches_from_entries(
+    query: &str,
+    limit: usize,
+    entries: &[WorkspaceFileEntry],
+) -> Vec<WorkspaceFileMatch> {
+    if limit == 0 {
+        return Vec::new();
+    }
+    if query.is_empty() {
+        return entries
+            .iter()
+            .take(limit)
+            .enumerate()
+            .map(|(i, entry)| WorkspaceFileMatch {
+                index: i + 1,
+                label: entry.label.clone(),
+            })
+            .collect();
+    }
+
+    let haystacks: Vec<&str> = entries
+        .iter()
+        .map(|entry| entry.haystack.as_str())
+        .collect();
+    crate::fuzzy::fuzzy_rank(query, &haystacks)
+        .into_iter()
+        .take(limit)
+        .map(|i| WorkspaceFileMatch {
+            index: i + 1,
+            label: entries[i].label.clone(),
+        })
+        .collect()
+}
+
+fn build_workspace_file_index(cwd: PathBuf) -> WorkspaceFileIndex {
+    let entries = workspace_files()
+        .into_iter()
+        .map(|label| WorkspaceFileEntry {
+            haystack: label.clone(),
+            label,
+        })
+        .collect();
+    WorkspaceFileIndex { cwd, entries }
+}
+
 /// Tracked + untracked non-ignored files via git, plus every intermediate
 /// parent directory. Falls back to a depth-capped filesystem walk when git
 /// is unavailable or the cwd is not a git repo. Used by the `@file` completer.
@@ -666,6 +779,43 @@ mod workspace_tests {
 
     fn paths<const N: usize>(arr: [&str; N]) -> Vec<String> {
         arr.iter().map(|s| (*s).to_string()).collect()
+    }
+
+    fn entry(label: &str) -> WorkspaceFileEntry {
+        WorkspaceFileEntry {
+            label: label.to_string(),
+            haystack: label.to_string(),
+        }
+    }
+
+    #[test]
+    fn workspace_file_matches_empty_query_is_bounded_and_1_based() {
+        let entries = [entry("a.rs"), entry("b.rs"), entry("c.rs")];
+        let out = workspace_file_matches_from_entries("", 2, &entries);
+        assert_eq!(out.len(), 2);
+        assert_eq!(out[0].index, 1);
+        assert_eq!(out[0].label, "a.rs");
+        assert_eq!(out[1].index, 2);
+        assert_eq!(out[1].label, "b.rs");
+    }
+
+    #[test]
+    fn workspace_file_matches_fuzzy_query_preserves_original_index() {
+        let entries = [
+            entry("src/lib.rs"),
+            entry("docs/readme.md"),
+            entry("crates/core/src/lua/api/fs.rs"),
+        ];
+        let out = workspace_file_matches_from_entries("fs", 1, &entries);
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].index, 3);
+        assert_eq!(out[0].label, "crates/core/src/lua/api/fs.rs");
+    }
+
+    #[test]
+    fn workspace_file_matches_zero_limit_returns_empty() {
+        let entries = [entry("a.rs")];
+        assert!(workspace_file_matches_from_entries("a", 0, &entries).is_empty());
     }
 
     #[test]

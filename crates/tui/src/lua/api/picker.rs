@@ -96,7 +96,7 @@ impl mlua::UserData for LuaPicker {
             |_, (this_ud, delta): (mlua::AnyUserData, i64)| -> LuaResult<mlua::AnyUserData> {
                 let this = *this_ud.borrow::<LuaPicker>()?;
                 crate::lua::with_app(|app| {
-                    crate::lua::ui_ops::move_cursor(app, this.win, delta as isize);
+                    crate::picker::move_selected(app, this.win, delta as isize);
                 });
                 Ok(this_ud)
             },

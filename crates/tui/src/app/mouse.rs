@@ -123,6 +123,7 @@ impl TuiApp {
                 return EventOutcome::Redraw;
             }
             return if is_scroll_event(me.kind) {
+                crate::picker::sync_scrolled(self);
                 EventOutcome::Redraw
             } else {
                 EventOutcome::Noop

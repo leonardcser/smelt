@@ -36,20 +36,14 @@ end
 
 smelt.prompt.completer({
   prefix = "./",
+  limit = 200,
   detect = function(text, cpos)
     return cursor_in_at_zone(text, cpos)
   end,
-  items = function()
-    local out = {}
-    for _, path in ipairs(smelt.fs.workspace_files()) do
-      out[#out + 1] = { label = path }
-    end
-    return out
-  end,
-  query = function(text, anchor, cpos)
-    -- Skip the `@` byte.
-    if cpos <= anchor + 1 then return "" end
-    return text:sub(anchor + 2, cpos)
+  matches = function(anchor, text, cpos, limit)
+    local query = ""
+    if cpos > anchor + 1 then query = text:sub(anchor + 2, cpos) end
+    return smelt.fs.workspace_file_matches(query, limit)
   end,
   accept = function(item, anchor, _)
     -- Replace from `@` through the cursor with the quoted token + trailing space.

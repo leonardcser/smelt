@@ -169,6 +169,39 @@ impl WindowViewport {
     }
 }
 
+pub fn clamp_scroll(scroll_top: RowIndex, total_rows: RowIndex, viewport_rows: u16) -> RowIndex {
+    scroll_top.min(total_rows.saturating_sub(viewport_rows as RowIndex))
+}
+
+pub fn scroll_to_show(scroll_top: RowIndex, target: RowIndex, viewport_rows: u16) -> RowIndex {
+    let h = viewport_rows.max(1) as RowIndex;
+    if target < scroll_top {
+        target
+    } else if target >= scroll_top.saturating_add(h) {
+        target + 1 - h
+    } else {
+        scroll_top
+    }
+}
+
+pub fn materialized_row_range(
+    anchor: RowIndex,
+    total_rows: RowIndex,
+    viewport_rows: u16,
+    overscan_rows: RowIndex,
+) -> std::ops::Range<RowIndex> {
+    if total_rows == 0 {
+        return 0..0;
+    }
+    let visible = viewport_rows.max(1) as RowIndex;
+    let len = visible
+        .saturating_add(overscan_rows.saturating_mul(2))
+        .min(total_rows);
+    let max_start = total_rows.saturating_sub(len);
+    let start = anchor.saturating_sub(overscan_rows).min(max_start);
+    start..start.saturating_add(len)
+}
+
 /// Per-call context for [`Window::handle`]. Geometry is recomputed each frame and
 /// supplied here so one `Window` drives heterogeneous backings.
 pub struct EventCtx<'a> {

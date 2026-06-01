@@ -67,8 +67,8 @@ use overlay::OverlayHitTarget;
 pub use overlay::{HitTarget, Overlay, OverlayId};
 pub use vim::VimMode;
 pub use window::{
-    CursorShape, DrawContext, EventCtx, MouseCtx, ScrollbarState, SplitConfig, Window,
-    WindowViewport,
+    clamp_scroll, materialized_row_range, scroll_to_show, CursorShape, DrawContext, EventCtx,
+    MouseCtx, ScrollbarState, SplitConfig, Window, WindowViewport,
 };
 
 /// Byte offsets of hard `\n` line breaks in `text`.

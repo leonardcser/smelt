@@ -19,6 +19,10 @@ fs.exists = nil
 ---@type fun(pattern: string, path: string?, opts: table?): string[]?, string?
 fs.glob = nil
 
+--- Clear the cached workspace file list. The next `workspace_file_matches` call rebuilds it for the current cwd.
+---@type fun(): nil
+fs.invalidate_workspace_files = nil
+
 --- Return `true` if `p` exists and refers to a directory.
 ---@type fun(p: string): boolean
 fs.is_dir = nil
@@ -79,6 +83,10 @@ fs.size = nil
 --- watcher and cancels the polling coroutine.
 ---@type fun(path: string, handler: fun(event: { kind: string, detail: string?, paths: string[] }), opts: table?): smelt.Reg
 fs.watch = nil
+
+--- Return bounded fuzzy-matched workspace file rows as `{ index, label }` tables. `index` is the 1-based index in the cached workspace file list.
+---@type fun(query: string, limit: integer?): table
+fs.workspace_file_matches = nil
 
 --- Return tracked + untracked non-ignored files under the cwd, plus every intermediate parent directory, sorted lexicographically. Uses `git ls-files` when a git repo is present and falls back to a depth-capped filesystem walk otherwise. Suitable as the source for an `@file` completer.
 ---@type fun(): string[]
