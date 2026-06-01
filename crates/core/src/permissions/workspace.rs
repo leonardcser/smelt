@@ -1,17 +1,13 @@
-use crate::permissions::bash::strip_heredoc_bodies;
 use std::path::{Path, PathBuf};
 
-/// Extract absolute and tilde-prefixed path tokens from a shell command.
+/// Extract local path effects from a shell command, returning the raw path
+/// strings for legacy callers and approval matching.
 pub fn extract_paths_from_command(cmd: &str) -> Vec<String> {
-    let cmd = strip_heredoc_bodies(cmd); // heredoc bodies are data, not paths
-    let mut paths = Vec::new();
-    for token in cmd.split_whitespace() {
-        let clean = token.trim_matches(|c: char| c == '\'' || c == '"' || c == ';');
-        if (clean.starts_with('/') && clean.len() > 1) || clean.starts_with("~/") {
-            paths.push(clean.to_string());
-        }
-    }
-    paths
+    crate::permissions::bash::analyze_shell_command(cmd, Path::new(""))
+        .paths
+        .into_iter()
+        .map(|p| p.raw_path)
+        .collect()
 }
 
 fn normalize_path(path: &Path) -> PathBuf {

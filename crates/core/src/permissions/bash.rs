@@ -6,6 +6,9 @@
 
 use smelt_buffer::text::{next_char_boundary, slice};
 
+use super::{PathAccess, PathEffect, ShellRisk};
+use std::path::Path;
+
 const SHELL_OPERATORS: &[(&str, usize)] = &[
     ("&&", 2),
     ("||", 2),
@@ -14,6 +17,12 @@ const SHELL_OPERATORS: &[(&str, usize)] = &[
     ("&", 1),
     ("\n", 1),
 ];
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct ShellAnalysis {
+    pub risk: ShellRisk,
+    pub paths: Vec<PathEffect>,
+}
 
 /// Split on shell operators; pairs each sub-command with the following operator (`None` for last).
 pub fn split_shell_commands_with_ops(cmd: &str) -> Vec<(String, Option<String>)> {
@@ -372,6 +381,349 @@ fn find_matching_paren(cmd: &str, start: usize) -> Option<(&str, usize)> {
         }
     }
     None
+}
+
+pub(super) fn analyze_shell_command(command: &str, base_dir: &Path) -> ShellAnalysis {
+    let command = strip_heredoc_bodies(command);
+    let mut cwd = base_dir.to_path_buf();
+    let mut paths = Vec::new();
+    let mut risk = ShellRisk::ReadOnly;
+
+    for (subcmd, op) in split_shell_commands_with_ops(&command) {
+        let words = shell_words(&subcmd);
+        if words.is_empty() {
+            continue;
+        }
+        let command_name = words[0].as_str();
+        let command_risk = classify_risk(&words);
+        risk = merge_risk(risk, command_risk);
+
+        if command_name == "cd" {
+            if let Some(target) = words.get(1).filter(|w| !w.starts_with('-')) {
+                let effect = PathEffect::from_raw(target.clone(), &cwd, PathAccess::Unknown);
+                cwd = effect.path.clone();
+                paths.push(effect);
+            }
+            continue;
+        }
+
+        paths.extend(paths_for_command(&words, &cwd));
+
+        if !matches!(op.as_deref(), Some("&&") | Some(";")) {
+            // Cwd after `cmd | ...`, `cmd || ...`, or backgrounding is too
+            // ambiguous for this lightweight analyzer. Keep subsequent
+            // relative paths anchored where they were.
+            continue;
+        }
+    }
+
+    ShellAnalysis { risk, paths }
+}
+
+fn merge_risk(a: ShellRisk, b: ShellRisk) -> ShellRisk {
+    use ShellRisk::*;
+    match (a, b) {
+        (Destructive, _) | (_, Destructive) => Destructive,
+        (Writes, _) | (_, Writes) => Writes,
+        (Unknown, _) | (_, Unknown) => Unknown,
+        (ReadOnly, ReadOnly) => ReadOnly,
+    }
+}
+
+fn classify_risk(words: &[String]) -> ShellRisk {
+    let Some(cmd) = words.first().map(String::as_str) else {
+        return ShellRisk::ReadOnly;
+    };
+    match cmd {
+        "rm" | "rmdir" | "mv" | "chmod" | "chown" => ShellRisk::Destructive,
+        "cp" | "touch" | "mkdir" | "ln" => ShellRisk::Writes,
+        "sed" if words.iter().any(|w| w == "-i" || w.starts_with("-i")) => ShellRisk::Writes,
+        "perl" if words.iter().any(|w| w == "-pi" || w == "-p -i") => ShellRisk::Writes,
+        "git" => match words.get(1).map(String::as_str) {
+            Some(
+                "commit" | "reset" | "checkout" | "clean" | "stash" | "apply" | "am" | "merge"
+                | "rebase",
+            ) => ShellRisk::Writes,
+            Some("status" | "diff" | "log" | "show" | "grep" | "ls-files") => ShellRisk::ReadOnly,
+            _ => ShellRisk::Unknown,
+        },
+        "curl" | "wget" | "scp" | "rsync" | "ssh" => ShellRisk::Unknown,
+        "python" | "python3" | "node" | "ruby" | "perl" | "bash" | "sh" => ShellRisk::Unknown,
+        "ls" | "tree" | "cat" | "head" | "tail" | "grep" | "rg" | "find" | "wc" | "du" | "df"
+        | "stat" | "file" | "realpath" | "pwd" | "which" | "cargo" => ShellRisk::ReadOnly,
+        _ => ShellRisk::Unknown,
+    }
+}
+
+fn paths_for_command(words: &[String], cwd: &Path) -> Vec<PathEffect> {
+    let Some(cmd) = words.first().map(String::as_str) else {
+        return Vec::new();
+    };
+    let mut paths = redirection_paths(words, cwd);
+    match cmd {
+        "git" => paths.extend(git_paths(words, cwd)),
+        "ssh" => paths.extend(ssh_paths(words, cwd)),
+        "sed" => paths.extend(sed_paths(words, cwd)),
+        "grep" | "rg" => paths.extend(grep_paths(words, cwd)),
+        "find" => paths.extend(find_paths(words, cwd)),
+        _ => paths.extend(generic_paths(
+            words.iter().skip(1),
+            cwd,
+            PathAccess::Unknown,
+        )),
+    }
+    paths
+}
+
+fn git_paths(words: &[String], cwd: &Path) -> Vec<PathEffect> {
+    let mut out = Vec::new();
+    let mut i = 1;
+    while i < words.len() {
+        match words[i].as_str() {
+            "-C" => {
+                if let Some(path) = words.get(i + 1) {
+                    out.push(PathEffect::from_raw(path.clone(), cwd, PathAccess::Unknown));
+                }
+                i += 2;
+            }
+            "commit" => {
+                i += 1;
+                while i < words.len() {
+                    match words[i].as_str() {
+                        "-m" | "--message" => i += 2,
+                        "-F" | "--file" => {
+                            if let Some(path) = words.get(i + 1) {
+                                out.push(PathEffect::from_raw(path.clone(), cwd, PathAccess::Read));
+                            }
+                            i += 2;
+                        }
+                        w if w.starts_with("--message=") => i += 1,
+                        w if w.starts_with("--file=") => {
+                            out.push(PathEffect::from_raw(
+                                w.trim_start_matches("--file=").to_string(),
+                                cwd,
+                                PathAccess::Read,
+                            ));
+                            i += 1;
+                        }
+                        w => {
+                            maybe_push_path(&mut out, w, cwd, PathAccess::Unknown);
+                            i += 1;
+                        }
+                    }
+                }
+            }
+            w => {
+                maybe_push_path(&mut out, w, cwd, PathAccess::Unknown);
+                i += 1;
+            }
+        }
+    }
+    out
+}
+
+fn ssh_paths(words: &[String], cwd: &Path) -> Vec<PathEffect> {
+    let mut out = Vec::new();
+    let mut i = 1;
+    while i < words.len() {
+        match words[i].as_str() {
+            "-i" | "-F" => {
+                if let Some(path) = words.get(i + 1) {
+                    out.push(PathEffect::from_raw(path.clone(), cwd, PathAccess::Read));
+                }
+                i += 2;
+            }
+            w if w.starts_with('-') => i += 1,
+            _host => break, // Remaining words are remote command text.
+        }
+    }
+    out
+}
+
+fn sed_paths(words: &[String], cwd: &Path) -> Vec<PathEffect> {
+    let mut out = Vec::new();
+    let mut saw_script = false;
+    let mut i = 1;
+    while i < words.len() {
+        match words[i].as_str() {
+            "-f" => {
+                if let Some(path) = words.get(i + 1) {
+                    out.push(PathEffect::from_raw(path.clone(), cwd, PathAccess::Read));
+                }
+                i += 2;
+            }
+            w if w.starts_with('-') => i += 1,
+            w if !saw_script => {
+                saw_script = true;
+                if looks_like_path(w) {
+                    // `sed /pattern/ file` has a regex script in this slot.
+                }
+                i += 1;
+            }
+            w => {
+                maybe_push_path(&mut out, w, cwd, PathAccess::Unknown);
+                i += 1;
+            }
+        }
+    }
+    out
+}
+
+fn grep_paths(words: &[String], cwd: &Path) -> Vec<PathEffect> {
+    let mut out = Vec::new();
+    let mut saw_pattern = false;
+    let mut i = 1;
+    while i < words.len() {
+        let w = &words[i];
+        if w.starts_with('-') {
+            i += 1;
+        } else if !saw_pattern {
+            saw_pattern = true;
+            i += 1;
+        } else {
+            maybe_push_path(&mut out, w, cwd, PathAccess::Read);
+            i += 1;
+        }
+    }
+    out
+}
+
+fn find_paths(words: &[String], cwd: &Path) -> Vec<PathEffect> {
+    let mut out = Vec::new();
+    for w in words.iter().skip(1) {
+        if w.starts_with('-') {
+            break;
+        }
+        maybe_push_path(&mut out, w, cwd, PathAccess::Read);
+    }
+    out
+}
+
+fn redirection_paths(words: &[String], cwd: &Path) -> Vec<PathEffect> {
+    let mut out = Vec::new();
+    let mut i = 0;
+    while i < words.len() {
+        match words[i].as_str() {
+            ">" | ">>" | "&>" | "&>>" => {
+                if let Some(path) = words.get(i + 1).filter(|p| p.as_str() != "/dev/null") {
+                    out.push(PathEffect::from_raw(path.clone(), cwd, PathAccess::Write));
+                }
+                i += 2;
+            }
+            "<<" => i += 2,
+            "<" => {
+                if let Some(path) = words.get(i + 1) {
+                    out.push(PathEffect::from_raw(path.clone(), cwd, PathAccess::Read));
+                }
+                i += 2;
+            }
+            _ => i += 1,
+        }
+    }
+    out
+}
+
+fn generic_paths<'a>(
+    words: impl Iterator<Item = &'a String>,
+    cwd: &Path,
+    access: PathAccess,
+) -> Vec<PathEffect> {
+    let mut out = Vec::new();
+    for word in words {
+        maybe_push_path(&mut out, word, cwd, access.clone());
+    }
+    out
+}
+
+fn maybe_push_path(out: &mut Vec<PathEffect>, word: &str, cwd: &Path, access: PathAccess) {
+    if looks_like_path(word) {
+        out.push(PathEffect::from_raw(word.to_string(), cwd, access));
+    }
+}
+
+fn looks_like_path(word: &str) -> bool {
+    if word.is_empty() || word == "/dev/null" || word.starts_with('-') || word.contains("://") {
+        return false;
+    }
+    word.starts_with('/')
+        || word.starts_with("~/")
+        || word.starts_with("./")
+        || word.starts_with("../")
+}
+
+fn shell_words(cmd: &str) -> Vec<String> {
+    let bytes = cmd.as_bytes();
+    let mut out = Vec::new();
+    let mut current = String::new();
+    let mut quote: Option<u8> = None;
+    let mut i = 0;
+    while i < bytes.len() {
+        let b = bytes[i];
+        if let Some(q) = quote {
+            if b == q {
+                quote = None;
+            } else if b == b'\\' && q == b'"' && i + 1 < bytes.len() {
+                i += 1;
+                current.push(bytes[i] as char);
+            } else {
+                current.push(b as char);
+            }
+            i += 1;
+            continue;
+        }
+        match b {
+            b'\'' | b'"' => {
+                quote = Some(b);
+                i += 1;
+            }
+            b'\\' if i + 1 < bytes.len() => {
+                i += 1;
+                current.push(bytes[i] as char);
+                i += 1;
+            }
+            b if b.is_ascii_whitespace() => {
+                if !current.is_empty() {
+                    out.push(std::mem::take(&mut current));
+                }
+                i += 1;
+            }
+            b'&' if i + 1 < bytes.len() && bytes[i + 1] == b'>' => {
+                if !current.is_empty() {
+                    out.push(std::mem::take(&mut current));
+                }
+                if i + 2 < bytes.len() && bytes[i + 2] == b'>' {
+                    out.push("&>>".to_string());
+                    i += 3;
+                } else {
+                    out.push("&>".to_string());
+                    i += 2;
+                }
+            }
+            b'>' | b'<' => {
+                if !current.is_empty() {
+                    out.push(std::mem::take(&mut current));
+                }
+                if b == b'>' && i + 1 < bytes.len() && bytes[i + 1] == b'>' {
+                    out.push(">>".to_string());
+                    i += 2;
+                } else if b == b'<' && i + 1 < bytes.len() && bytes[i + 1] == b'<' {
+                    out.push("<<".to_string());
+                    i += 2;
+                } else {
+                    out.push((b as char).to_string());
+                    i += 1;
+                }
+            }
+            _ => {
+                current.push(b as char);
+                i += 1;
+            }
+        }
+    }
+    if !current.is_empty() {
+        out.push(current);
+    }
+    out
 }
 
 /// `cd` is always allowed at the command level; workspace path restriction handles the target.

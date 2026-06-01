@@ -1446,6 +1446,50 @@ fn cd_workspace_root_stays_allowed() {
 }
 
 #[test]
+fn shell_ignores_git_commit_message_paths() {
+    let paths = extract_paths_from_command("git commit -m 'fix /api/foo'");
+    assert!(paths.is_empty(), "got: {paths:?}");
+}
+
+#[test]
+fn shell_ignores_ssh_remote_command_paths() {
+    let paths = extract_paths_from_command("ssh host 'cat /etc/passwd'");
+    assert!(paths.is_empty(), "got: {paths:?}");
+}
+
+#[test]
+fn shell_ignores_sed_script_paths() {
+    let paths = extract_paths_from_command("sed 's#/old#/new#' file");
+    assert!(paths.is_empty(), "got: {paths:?}");
+}
+
+#[test]
+fn shell_reports_find_relative_escape() {
+    let paths = extract_paths_from_command("find ../third_party -name '*.rs'");
+    assert_eq!(paths, vec!["../third_party"]);
+}
+
+#[test]
+fn shell_cd_updates_relative_path_base_for_workspace() {
+    let p = perms_with_workspace("/home/user/project");
+    let args = args_with("command", "cd .. && grep needle other_project");
+    assert_eq!(p.decide(normal(), "bash", &args, false), Decision::Ask);
+}
+
+#[test]
+fn shell_output_redirection_reports_write_effect() {
+    let p = perms_with_workspace("/home/user/project");
+    let args = args_with("command", "echo hi > /tmp/out");
+    assert_eq!(p.decide(normal(), "bash", &args, false), Decision::Ask);
+}
+
+#[test]
+fn shell_dev_null_redirection_is_ignored() {
+    let paths = extract_paths_from_command("echo hi > /dev/null");
+    assert!(paths.is_empty(), "got: {paths:?}");
+}
+
+#[test]
 fn heredoc_paths_not_extracted() {
     // Paths inside heredoc bodies are data, not shell arguments.
     let cmd = "python3 << 'PYEOF'\nwith open('/tmp/secret') as f:\n    pass\nPYEOF";

@@ -50,7 +50,11 @@ pub struct PathEffect {
 }
 
 impl PathEffect {
-    fn from_raw(raw_path: String, base_dir: &std::path::Path, access: PathAccess) -> Self {
+    pub(super) fn from_raw(
+        raw_path: String,
+        base_dir: &std::path::Path,
+        access: PathAccess,
+    ) -> Self {
         let path = workspace::resolve_path(&raw_path, base_dir);
         Self {
             raw_path,
@@ -286,15 +290,11 @@ impl Permissions {
                     .and_then(Value::as_str)
                     .unwrap_or_default()
                     .to_string();
-                let paths = self
-                    .paths_for_tool(tool_name, args)
-                    .into_iter()
-                    .map(|p| PathEffect::from_raw(p, &self.workspace, PathAccess::Unknown))
-                    .collect();
+                let analysis = bash::analyze_shell_command(&command, &self.workspace);
                 vec![ToolEffect::Shell {
                     command,
-                    risk: ShellRisk::Unknown,
-                    paths,
+                    risk: analysis.risk,
+                    paths: analysis.paths,
                 }]
             }
             "web_fetch" | "web_search" => vec![ToolEffect::Network],
