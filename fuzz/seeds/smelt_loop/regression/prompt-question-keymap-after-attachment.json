@@ -1,0 +1,18 @@
+{
+  "_about": "Prompt insertion oracle regression: '?' after an attachment is still a global help keymap, not plain text insertion.",
+  "_fix": "Skip the plain-character insertion oracle when an exact Lua keymap binding can preempt prompt input.",
+  "mode": "yolo",
+  "ops": [
+    {
+      "kind": "insert_attachment",
+      "data": {
+        "label": ""
+      }
+    },
+    {
+      "kind": "key_unicode",
+      "data": 63
+    }
+  ],
+  "vim": true
+}

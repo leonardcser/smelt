@@ -670,6 +670,25 @@ impl LuaRuntime {
         }
     }
 
+    /// Returns true if a registered chord would be considered for this mode.
+    /// Does not execute the handler, so pass-through callbacks are still treated
+    /// as bindings by conservative callers.
+    pub fn chord_has_binding(&self, chord: &str, current_mode: Option<&str>) -> bool {
+        let Ok(map) = self.shared.keymaps.lock() else {
+            return false;
+        };
+        let mode_char = current_mode.map(|m| match m {
+            "Normal" => "n",
+            "Insert" => "i",
+            "Visual" => "v",
+            _ => "n",
+        });
+        mode_char
+            .map(|mc| map.contains_key(&(mc.to_string(), chord.to_string())))
+            .unwrap_or(false)
+            || map.contains_key(&(String::new(), chord.to_string()))
+    }
+
     /// Returns true if `sequence` is a strict prefix of a registered chord (exact match excluded).
     pub fn chord_has_longer(&self, sequence: &str, current_mode: Option<&str>) -> bool {
         let Ok(map) = self.shared.keymaps.lock() else {

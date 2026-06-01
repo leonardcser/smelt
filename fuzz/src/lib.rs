@@ -1225,6 +1225,7 @@ enum PostCheck {
     /// and advance the cursor by the inserted UTF-8 width.
     PromptCharInserted {
         ch: char,
+        lua_keymap_bound: bool,
     },
     /// Paste into a ready prompt should insert the normalized paste text at the
     /// old cursor and advance by the inserted byte length.
@@ -1542,8 +1543,12 @@ fn run_check(check: PostCheck, pre: &Snapshot, post: &Snapshot, new_actions: &[A
                 post.streaming
             );
         }
-        PostCheck::PromptCharInserted { ch } => {
+        PostCheck::PromptCharInserted {
+            ch,
+            lua_keymap_bound,
+        } => {
             if !pre.prompt_plain_insert_ready
+                || lua_keymap_bound
                 || ch.is_control()
                 || ch == '\u{FFFC}'
                 || (ch == '?' && pre.prompt_source.is_empty())
@@ -1593,14 +1598,17 @@ fn run_check(check: PostCheck, pre: &Snapshot, post: &Snapshot, new_actions: &[A
 /// Translate a `FuzzOp` into the `SourceEvent` to feed and the post-check
 /// to run after. `None` for the event means the op was handled inline (via
 /// a harness side channel) and the caller should not feed anything.
-fn plan(op: FuzzOp) -> (Option<SourceEvent>, PostCheck) {
+fn plan(app: &TestApp, op: FuzzOp) -> (Option<SourceEvent>, PostCheck) {
     match op {
         FuzzOp::KeyUnicode(raw) => {
             let valid = char::from_u32(raw).is_some();
             let c = decode_codepoint(raw);
             let ev = SourceEvent::Term(key_event(KeyCode::Char(c), KeyModifiers::NONE));
             let check = if valid {
-                PostCheck::PromptCharInserted { ch: c }
+                PostCheck::PromptCharInserted {
+                    ch: c,
+                    lua_keymap_bound: app.prompt_plain_char_has_lua_keymap(c),
+                }
             } else {
                 PostCheck::None
             };
@@ -2115,7 +2123,7 @@ pub fn apply(app: &mut TestApp, op: FuzzOp) {
                 },
             )
         }
-        op => plan(op),
+        op => plan(app, op),
     };
     if let Some(ev) = ev {
         app.feed_one_within_budget(ev, AllocBudget::DEFAULT);

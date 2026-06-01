@@ -933,6 +933,12 @@ impl TestApp {
                 .contains_key(&crate::app::PROMPT_WIN)
     }
 
+    pub fn prompt_plain_char_has_lua_keymap(&self, ch: char) -> bool {
+        let chord = ch.to_string();
+        let mode = self.app.current_vim_mode_label();
+        self.app.lua.chord_has_binding(&chord, mode.as_deref())
+    }
+
     /// Side-channel: install a hostile prompt `text_changed` callback that
     /// tries to move the prompt cursor away from the edit endpoint.
     pub fn install_prompt_cursor_trap(&mut self, variant: u8) {
@@ -2130,6 +2136,35 @@ mod tests {
             )
             .exec()
             .expect("stub /btw ui");
+    }
+
+    #[test]
+    fn question_keymap_after_prompt_attachment_is_not_plain_insertion() {
+        let mut app = TestApp::builder()
+            .with_vim(true)
+            .with_mode(AgentMode::parse("yolo").expect("valid mode"))
+            .build();
+        app.insert_attachment(String::new());
+        app.render_silent();
+
+        assert!(app.prompt_plain_insert_ready());
+        assert!(app.prompt_plain_char_has_lua_keymap('?'));
+
+        app.feed_one(SourceEvent::Term(Event::Key(KeyEvent {
+            code: KeyCode::Char('?'),
+            modifiers: KeyModifiers::NONE,
+            kind: KeyEventKind::Press,
+            state: KeyEventState::NONE,
+        })));
+
+        assert_eq!(
+            app.state().prompt_text,
+            crate::input::ATTACHMENT_MARKER.to_string()
+        );
+        assert_eq!(
+            app.prompt_cpos(),
+            crate::input::ATTACHMENT_MARKER.len_utf8()
+        );
     }
 
     #[test]
