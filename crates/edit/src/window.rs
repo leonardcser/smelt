@@ -2519,6 +2519,36 @@ mod tests {
     }
 
     #[test]
+    fn tail_follow_frozen_with_selection() {
+        let mut w = make_win();
+        w.follow_tail = true;
+        assert!(!w.tail_follow_frozen(), "no selection → not frozen");
+        w.selection_anchor = Some(5);
+        assert!(w.tail_follow_frozen(), "selection anchor → frozen");
+        w.selection_anchor = None;
+        assert!(!w.tail_follow_frozen(), "cleared selection → not frozen");
+    }
+
+    #[test]
+    fn tail_follow_frozen_with_visual_mode() {
+        let mut w = make_win();
+        w.vim_enabled = true;
+        w.follow_tail = true;
+        w.set_vim_mode(VimMode::Normal);
+        assert!(!w.tail_follow_frozen(), "Normal mode → not frozen");
+        w.set_vim_mode(VimMode::Visual);
+        assert!(w.tail_follow_frozen(), "Visual mode → frozen");
+        w.set_vim_mode(VimMode::VisualLine);
+        assert!(w.tail_follow_frozen(), "VisualLine mode → frozen");
+        w.set_vim_mode(VimMode::Insert);
+        assert!(!w.tail_follow_frozen(), "Insert mode → not frozen");
+        // When vim is disabled, Visual mode should not freeze.
+        w.vim_enabled = false;
+        w.set_vim_mode(VimMode::Visual);
+        assert!(!w.tail_follow_frozen(), "vim disabled → not frozen even in Visual");
+    }
+
+    #[test]
     fn render_paints_visible_lines_from_scroll_top() {
         let mut buf = Buffer::new(BufId(1), BufCreateOpts::default());
         buf.set_all_lines(vec![

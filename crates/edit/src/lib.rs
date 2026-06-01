@@ -4363,4 +4363,120 @@ mod tests {
         assert!(ui.drag_autoscroll_interval().is_none());
         assert!(!ui.tick_drag_autoscroll());
     }
+
+    #[test]
+    fn apply_tail_follow_respects_frozen() {
+        let mut ui = make_ui();
+        let buf = ui.buf_create(BufCreateOpts::default());
+        if let Some(b) = ui.buf_mut(buf) {
+            b.set_all_lines((0..50).map(|i| format!("line {i}")).collect());
+        }
+        let win = ui
+            .win_open_split(
+                buf,
+                SplitConfig {
+                    region: "p".into(),
+                    gutters: Gutters::default(),
+                },
+            )
+            .unwrap();
+        ui.set_layout(LayoutTree::vbox(vec![(Constraint::Fill, LayoutTree::leaf(win))]));
+        let rect = layout::Rect::new(0, 0, 20, 10);
+        let bar = window::ScrollbarState::new(19, 50, 10).unwrap();
+        ui.win_mut(win).unwrap().viewport = Some(window::WindowViewport::new(
+            rect, 19, 50, 0, Some(bar),
+        ));
+        // Start at top with follow_tail enabled.
+        ui.win_mut(win).unwrap().scroll_top = 0;
+        ui.win_mut(win).unwrap().follow_tail = true;
+        // Without frozen, apply_tail_follow snaps to bottom (scroll_top = 40).
+        ui.apply_tail_follow();
+        assert_eq!(ui.win(win).unwrap().scroll_top, 40, "follow_tail snaps to bottom");
+
+        // Move back to top and freeze with a selection anchor.
+        ui.win_mut(win).unwrap().scroll_top = 0;
+        ui.win_mut(win).unwrap().follow_tail = true;
+        ui.win_mut(win).unwrap().selection_anchor = Some(5);
+        ui.apply_tail_follow();
+        assert_eq!(
+            ui.win(win).unwrap().scroll_top, 0,
+            "frozen by selection → scroll stays put"
+        );
+
+        // Unfreeze and verify follow resumes.
+        ui.win_mut(win).unwrap().selection_anchor = None;
+        ui.apply_tail_follow();
+        assert_eq!(ui.win(win).unwrap().scroll_top, 40, "unfrozen → snaps to bottom again");
+    }
+
+    #[test]
+    fn scrollbar_drag_maps_thumb_to_scroll_top() {
+        let mut ui = make_ui();
+        let win = make_scrollbar_split(&mut ui);
+        // 100 rows, 10-row viewport → max_scroll = 90.
+        // Click at row 0 (top of scrollbar) → scroll_top = 0.
+        ui.apply_scrollbar_drag(win, 0);
+        assert_eq!(ui.win(win).unwrap().scroll_top, 0);
+
+        // Click at row 9 (bottom of scrollbar) → scroll_top = max_scroll = 90.
+        ui.apply_scrollbar_drag(win, 9);
+        assert_eq!(ui.win(win).unwrap().scroll_top, 90);
+
+        // Click in the middle (row 4) → somewhere near middle of scroll range.
+        ui.apply_scrollbar_drag(win, 4);
+        let scroll = ui.win(win).unwrap().scroll_top;
+        assert!(scroll > 0 && scroll < 90, "mid-thumb maps to mid-scroll: got {scroll}");
+    }
+
+    #[test]
+    fn scroll_anchor_restored_after_terminal_resize() {
+        let mut ui = make_ui();
+        let buf = ui.buf_create(BufCreateOpts::default());
+        if let Some(b) = ui.buf_mut(buf) {
+            b.set_all_lines((0..100).map(|i| format!("line {i}")).collect());
+        }
+        let win = ui
+            .win_open_split(
+                buf,
+                SplitConfig {
+                    region: "p".into(),
+                    gutters: Gutters {
+                        scrollbar: false,
+                        ..Default::default()
+                    },
+                },
+            )
+            .unwrap();
+        ui.set_layout(LayoutTree::vbox(vec![(Constraint::Fill, LayoutTree::leaf(win))]));
+        let w = ui.win_mut(win).unwrap();
+        w.viewport = Some(window::WindowViewport::new(
+            layout::Rect::new(0, 0, 80, 24),
+            80,
+            100,
+            50,
+            None,
+        ));
+        w.wrap = false;
+        // Build layout first so set_scroll can stamp an anchor.
+        {
+            let (w, b) = ui.win_and_buf_mut(win, buf);
+            let ww = w.unwrap();
+            let bref = b.unwrap();
+            ww.ensure_layout(bref, 80);
+            ww.set_scroll(50, bref);
+        }
+        assert!(ui.win(win).unwrap().scroll_anchor.is_some(), "anchor stamped");
+
+        // Simulate terminal resize: narrower width forces layout rebuild.
+        // ensure_layout already calls restore_scroll_from_anchor internally
+        // when there is no cursor screen row to preserve.
+        ui.set_terminal_size(40, 24);
+        {
+            let (w, b) = ui.win_and_buf_mut(win, buf);
+            w.unwrap().ensure_layout(b.unwrap(), 40);
+        }
+        // At width 40 each line still fits on one row ("line N" < 40 chars),
+        // so visual row should still be 50.
+        assert_eq!(ui.win(win).unwrap().scroll_top, 50, "anchor restored same logical row after resize");
+    }
 }

@@ -855,6 +855,17 @@ Do before architectural changes:
   - scrollbar drag and drag autoscroll;
   - scroll to block/tail.
 
+Completed:
+
+- [x] Crate rename commit (`chore: rename workspace crates to smelt-* prefix`).
+- [x] Baseline perf profile recorded in PLAN.md.
+- [x] Regression tests added:
+  - `tail_follow_frozen_with_selection` — selection anchor freezes tail-follow.
+  - `tail_follow_frozen_with_visual_mode` — Vim Visual/VisualLine freezes tail-follow.
+  - `apply_tail_follow_respects_frozen` — `Ui::apply_tail_follow` skips frozen windows.
+  - `scrollbar_drag_maps_thumb_to_scroll_top` — thumb position maps to correct scroll.
+  - `scroll_anchor_restored_after_terminal_resize` — resize restores logical position.
+
 Success criteria:
 
 - No behavior changes except Cargo package names/import paths.
