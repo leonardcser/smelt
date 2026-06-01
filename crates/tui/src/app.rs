@@ -794,7 +794,7 @@ impl TuiApp {
         let scroll_pct = if total <= 1 {
             100u8
         } else {
-            ((line_idx as u64 * 100) / (total.saturating_sub(1) as u64)) as u8
+            ((line_idx * 100) / (total.saturating_sub(1) as u64)) as u8
         };
         smelt_core::cells::CursorPos {
             line: (line_idx as u32) + 1,

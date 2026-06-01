@@ -225,11 +225,7 @@ impl mlua::UserData for LuaWin {
                             if this.id == crate::app::PROMPT_WIN {
                                 return;
                             }
-                            crate::lua::ui_ops::set_cursor_row(
-                                app,
-                                this.id,
-                                r.min(u16::MAX as u64) as u16,
-                            );
+                            crate::lua::ui_ops::set_cursor_row(app, this.id, r);
                         });
                         Ok(mlua::Value::UserData(this_ud))
                     }
@@ -401,15 +397,16 @@ impl mlua::UserData for LuaWin {
                     mlua::Value::Nil => {
                         let info = crate::lua::try_with_app(|app| {
                             let win = app.ui.win(this.id)?;
-                            let total = app.ui.buf(win.buf).map(|b| b.lines().len()).unwrap_or(0);
+                            let total = app
+                                .ui
+                                .buf(win.buf)
+                                .map(|b| b.lines().len() as u64)
+                                .unwrap_or(0);
                             let viewport = win.viewport.map(|v| v.rect.height).unwrap_or(0);
-                            let max = total
-                                .saturating_sub(viewport as usize)
-                                .min(u16::MAX as usize)
-                                as u16;
+                            let max = total.saturating_sub(viewport as u64);
                             let top = win.scroll_top.min(max);
-                            let overflow = total > viewport as usize;
-                            Some((top, win.follow_tail, total as u64, viewport, max, overflow))
+                            let overflow = total > viewport as u64;
+                            Some((top, win.follow_tail, total, viewport, max, overflow))
                         })
                         .flatten();
                         match info {
@@ -435,7 +432,7 @@ impl mlua::UserData for LuaWin {
                             };
                             let buf_id = win.buf;
                             let viewport_rows = win.viewport.map(|v| v.rect.height).unwrap_or(0);
-                            let target = n.max(0).min(u16::MAX as i64) as u16;
+                            let target = n.max(0) as u64;
                             let (w, buf) = app.ui.win_and_buf_mut(this.id, buf_id);
                             if let (Some(w), Some(buf)) = (w, buf) {
                                 // Match mouse-wheel semantics: keep the cursor on
@@ -773,7 +770,7 @@ fn open_or_refresh(
                             crate::lua::ui_ops::configure_list_leaf(
                                 app,
                                 win_id,
-                                initial.unwrap_or(0).min(u16::MAX as u64) as u16,
+                                initial.unwrap_or(0),
                             );
                         }
                         _ => {}

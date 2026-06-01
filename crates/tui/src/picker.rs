@@ -13,7 +13,8 @@ use crate::app::TuiApp;
 use crate::smelt_term::layout::Anchor;
 use crate::smelt_term::BufCreateOpts;
 use crate::smelt_term::{
-    BufId, Constraint, Corner, Gutters, LayoutTree, Overlay, OverlayId, SplitConfig, WinId,
+    BufId, Constraint, Corner, Gutters, LayoutTree, Overlay, OverlayId, RowIndex, SplitConfig,
+    WinId,
 };
 use smelt_core::content::builder::render_into;
 use smelt_core::style::Style;
@@ -235,11 +236,11 @@ fn cursor_and_scroll(
     item_count: usize,
     height: u16,
     reversed: bool,
-    prev_scroll: u16,
-) -> (u16, u16) {
+    prev_scroll: RowIndex,
+) -> (RowIndex, RowIndex) {
     let buf_row = visual_cursor(selected, item_count, reversed);
-    let h = height.max(1);
-    let max_scroll = (item_count as u16).max(1).saturating_sub(h);
+    let h = height.max(1) as RowIndex;
+    let max_scroll = (item_count as RowIndex).max(1).saturating_sub(h);
     let scroll = if buf_row < prev_scroll {
         buf_row
     } else if buf_row >= prev_scroll.saturating_add(h) {
@@ -251,15 +252,15 @@ fn cursor_and_scroll(
     (buf_row, scroll)
 }
 
-fn visual_cursor(logical: usize, n: usize, reversed: bool) -> u16 {
+fn visual_cursor(logical: usize, n: usize, reversed: bool) -> RowIndex {
     if n == 0 {
         return 0;
     }
     let clamped = logical.min(n - 1);
     if reversed {
-        (n - 1 - clamped) as u16
+        (n - 1 - clamped) as RowIndex
     } else {
-        clamped as u16
+        clamped as RowIndex
     }
 }
 

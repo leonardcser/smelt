@@ -1,7 +1,7 @@
 //! Per-window keymap and event callback registry. Also hosts overlay-scoped
 //! keymaps: bindings that fire when any leaf of the overlay holds focus,
 //! letting an overlay own its key handling without each leaf re-registering.
-use super::{OverlayId, WinId};
+use super::{OverlayId, RowIndex, WinId};
 use crossterm::event::{KeyCode, KeyModifiers};
 use std::collections::HashMap;
 
@@ -108,7 +108,7 @@ pub enum Payload {
     },
     /// Scroll state changed. `top` is the new `scroll_top`; `follow` is `follow_tail`.
     Scroll {
-        top: u16,
+        top: RowIndex,
         follow: bool,
     },
     /// Resize payload. `row`/`col`/`width`/`height` describe the new outer

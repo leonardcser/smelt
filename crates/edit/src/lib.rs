@@ -4,6 +4,7 @@
 //! to layout and routes events. Renderer primitives come from `smelt-term`.
 
 pub mod callback;
+pub mod document;
 pub(crate) mod event;
 pub mod gutter;
 pub(crate) mod motions;
@@ -60,6 +61,7 @@ use callback::Callbacks;
 pub use callback::{
     Callback, CallbackCtx, CallbackResult, KeyBind, LuaHandle, MouseButton, Payload, WinEvent,
 };
+pub use document::{BufferDocument, DisplayRow, DocPos, Document, RowIndex, ViewAnchor};
 pub use event::{Event, Status};
 use overlay::OverlayHitTarget;
 pub use overlay::{HitTarget, Overlay, OverlayId};
@@ -137,7 +139,7 @@ pub struct Ui {
 /// one member mirrors only horizontally, leaving vertical positions untouched.
 struct ScrollGroup {
     members: Vec<WinId>,
-    last: Vec<(u16, u16)>,
+    last: Vec<(RowIndex, u16)>,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -244,7 +246,7 @@ impl Ui {
             if g.members.len() < 2 {
                 return false;
             }
-            let now: Vec<(u16, u16)> = g
+            let now: Vec<(RowIndex, u16)> = g
                 .members
                 .iter()
                 .map(|w| {
@@ -1236,10 +1238,10 @@ impl Ui {
         let screen_row = win
             .effective_cursor_row(buf)
             .checked_sub(win.scroll_top)
-            .filter(|r| *r < viewport_h)?;
+            .filter(|r| *r < viewport_h as RowIndex)?;
         let delta = if screen_row == 0 {
             -1
-        } else if screen_row >= viewport_h.saturating_sub(1) {
+        } else if screen_row >= viewport_h.saturating_sub(1) as RowIndex {
             1
         } else {
             return None;
@@ -1319,7 +1321,7 @@ impl Ui {
                 let total_rows = self
                     .bufs
                     .get(&buf_id)
-                    .map(|buf| buf.lines().len().min(u16::MAX as usize) as u16)
+                    .map(|buf| buf.lines().len() as RowIndex)
                     .unwrap_or(0);
                 if let Some(win) = self.wins.get_mut(&win_id) {
                     if win.pending_scroll_to_cursor && leaf_rect.height > 0 {
@@ -1377,7 +1379,7 @@ impl Ui {
             let total_rows = self
                 .bufs
                 .get(&buf_id)
-                .map(|buf| buf.lines().len().min(u16::MAX as usize) as u16)
+                .map(|buf| buf.lines().len() as RowIndex)
                 .unwrap_or(0);
             if let Some(win) = self.wins.get_mut(win_id) {
                 let scrollbar = if win.config.gutters.scrollbar && rect.width > 0 {
@@ -1941,7 +1943,7 @@ impl Ui {
 
     /// Pin `scroll_top` to the tail for every window where
     /// [`Self::should_follow_tail`] holds. Buffers rebuilt mid-frame (e.g.
-    /// transcript streaming) should set `scroll_top = u16::MAX` themselves
+    /// transcript streaming) should set `scroll_top = RowIndex::MAX` themselves
     /// after this pass.
     ///
     /// The cursor's screen-row offset is preserved so it stays visually fixed
@@ -1963,9 +1965,9 @@ impl Ui {
             let total_rows = self
                 .bufs
                 .get(&buf_id)
-                .map(|b| b.lines().len().min(u16::MAX as usize) as u16)
+                .map(|b| b.lines().len() as RowIndex)
                 .unwrap_or(0);
-            let max_scroll = total_rows.saturating_sub(viewport_rows);
+            let max_scroll = total_rows.saturating_sub(viewport_rows as RowIndex);
             if let Some(w) = self.wins.get_mut(&id) {
                 w.scroll_top = max_scroll;
             }
@@ -4380,18 +4382,24 @@ mod tests {
                 },
             )
             .unwrap();
-        ui.set_layout(LayoutTree::vbox(vec![(Constraint::Fill, LayoutTree::leaf(win))]));
+        ui.set_layout(LayoutTree::vbox(vec![(
+            Constraint::Fill,
+            LayoutTree::leaf(win),
+        )]));
         let rect = layout::Rect::new(0, 0, 20, 10);
         let bar = window::ScrollbarState::new(19, 50, 10).unwrap();
-        ui.win_mut(win).unwrap().viewport = Some(window::WindowViewport::new(
-            rect, 19, 50, 0, Some(bar),
-        ));
+        ui.win_mut(win).unwrap().viewport =
+            Some(window::WindowViewport::new(rect, 19, 50, 0, Some(bar)));
         // Start at top with follow_tail enabled.
         ui.win_mut(win).unwrap().scroll_top = 0;
         ui.win_mut(win).unwrap().follow_tail = true;
         // Without frozen, apply_tail_follow snaps to bottom (scroll_top = 40).
         ui.apply_tail_follow();
-        assert_eq!(ui.win(win).unwrap().scroll_top, 40, "follow_tail snaps to bottom");
+        assert_eq!(
+            ui.win(win).unwrap().scroll_top,
+            40,
+            "follow_tail snaps to bottom"
+        );
 
         // Move back to top and freeze with a selection anchor.
         ui.win_mut(win).unwrap().scroll_top = 0;
@@ -4399,14 +4407,19 @@ mod tests {
         ui.win_mut(win).unwrap().selection_anchor = Some(5);
         ui.apply_tail_follow();
         assert_eq!(
-            ui.win(win).unwrap().scroll_top, 0,
+            ui.win(win).unwrap().scroll_top,
+            0,
             "frozen by selection → scroll stays put"
         );
 
         // Unfreeze and verify follow resumes.
         ui.win_mut(win).unwrap().selection_anchor = None;
         ui.apply_tail_follow();
-        assert_eq!(ui.win(win).unwrap().scroll_top, 40, "unfrozen → snaps to bottom again");
+        assert_eq!(
+            ui.win(win).unwrap().scroll_top,
+            40,
+            "unfrozen → snaps to bottom again"
+        );
     }
 
     #[test]
@@ -4425,7 +4438,10 @@ mod tests {
         // Click in the middle (row 4) → somewhere near middle of scroll range.
         ui.apply_scrollbar_drag(win, 4);
         let scroll = ui.win(win).unwrap().scroll_top;
-        assert!(scroll > 0 && scroll < 90, "mid-thumb maps to mid-scroll: got {scroll}");
+        assert!(
+            scroll > 0 && scroll < 90,
+            "mid-thumb maps to mid-scroll: got {scroll}"
+        );
     }
 
     #[test]
@@ -4447,7 +4463,10 @@ mod tests {
                 },
             )
             .unwrap();
-        ui.set_layout(LayoutTree::vbox(vec![(Constraint::Fill, LayoutTree::leaf(win))]));
+        ui.set_layout(LayoutTree::vbox(vec![(
+            Constraint::Fill,
+            LayoutTree::leaf(win),
+        )]));
         let w = ui.win_mut(win).unwrap();
         w.viewport = Some(window::WindowViewport::new(
             layout::Rect::new(0, 0, 80, 24),
@@ -4465,7 +4484,10 @@ mod tests {
             ww.ensure_layout(bref, 80);
             ww.set_scroll(50, bref);
         }
-        assert!(ui.win(win).unwrap().scroll_anchor.is_some(), "anchor stamped");
+        assert!(
+            ui.win(win).unwrap().scroll_anchor.is_some(),
+            "anchor stamped"
+        );
 
         // Simulate terminal resize: narrower width forces layout rebuild.
         // ensure_layout already calls restore_scroll_from_anchor internally
@@ -4477,6 +4499,10 @@ mod tests {
         }
         // At width 40 each line still fits on one row ("line N" < 40 chars),
         // so visual row should still be 50.
-        assert_eq!(ui.win(win).unwrap().scroll_top, 50, "anchor restored same logical row after resize");
+        assert_eq!(
+            ui.win(win).unwrap().scroll_top,
+            50,
+            "anchor restored same logical row after resize"
+        );
     }
 }

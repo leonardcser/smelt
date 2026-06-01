@@ -477,11 +477,12 @@ impl PromptState {
     pub(crate) fn sync_display_coords(&mut self, ctx: &mut PromptCtx<'_>, viewport_rows: u16) {
         ctx.win.resync_display_coords(ctx.buf);
         let cursor_line = ctx.win.cursor_row();
-        let total_rows = ctx.buf.line_count() as u16;
+        let total_rows = ctx.buf.line_count() as crate::smelt_term::RowIndex;
         if ctx.win.pending_recenter {
-            let max_scroll = total_rows.saturating_sub(viewport_rows.max(1));
-            let s = (cursor_line as usize).saturating_sub((viewport_rows.max(1) / 2) as usize);
-            ctx.win.scroll_top = (s as u16).min(max_scroll);
+            let rows = viewport_rows.max(1) as crate::smelt_term::RowIndex;
+            let max_scroll = total_rows.saturating_sub(rows);
+            let s = cursor_line.saturating_sub(rows / 2);
+            ctx.win.scroll_top = s.min(max_scroll);
         } else {
             let viewport_cols = ctx.win.viewport.map(|v| v.content_width).unwrap_or(0);
             ctx.win

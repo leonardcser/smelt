@@ -2126,8 +2126,8 @@ mod tests {
             .viewport
             .map(|v| v.rect.height)
             .expect("picker leaf must have a viewport after render_normal");
-        let total_rows = buf.line_count() as u16;
-        let max_scroll = total_rows.saturating_sub(viewport_rows);
+        let total_rows = buf.line_count() as crate::smelt_term::RowIndex;
+        let max_scroll = total_rows.saturating_sub(viewport_rows as crate::smelt_term::RowIndex);
         assert!(
             win.scroll_top <= max_scroll,
             "picker scroll_top must stay within bounds on first render \

@@ -11,7 +11,9 @@
 
 use crate::app::TuiApp;
 use crate::smelt_term::layout::{Align, Anchor, Corner, PaintId};
-use crate::smelt_term::{Callback, CallbackResult, KeyBind, Overlay, Payload, WinEvent, WinId};
+use crate::smelt_term::{
+    Callback, CallbackResult, KeyBind, Overlay, Payload, RowIndex, WinEvent, WinId,
+};
 use crossterm::event::{KeyCode, KeyModifiers};
 
 pub(crate) fn open_overlay(app: &mut TuiApp, opts: mlua::Table) -> Result<u64, String> {
@@ -254,7 +256,7 @@ fn parse_overlay_anchor(opts: &mlua::Table, term_w: u16, term_h: u16) -> Result<
 
 /// Wire the built-in list keymap: j/k/arrows/Home/End/PgUp/PgDn navigate,
 /// Enter fires `WinEvent::Submit` with the absolute selected row.
-pub(crate) fn configure_list_leaf(app: &mut TuiApp, leaf: WinId, initial_cursor: u16) {
+pub(crate) fn configure_list_leaf(app: &mut TuiApp, leaf: WinId, initial_cursor: RowIndex) {
     let buf_id = match app.ui.win(leaf) {
         Some(w) => w.buf,
         None => return,
@@ -265,7 +267,7 @@ pub(crate) fn configure_list_leaf(app: &mut TuiApp, leaf: WinId, initial_cursor:
         .paint_rect(PaintId::from(leaf))
         .map(|r| r.height)
         .unwrap_or(0);
-    let max = line_count.saturating_sub(1) as u16;
+    let max = line_count.saturating_sub(1) as RowIndex;
     let target = initial_cursor.min(max);
     let (win, buf) = app.ui.win_and_buf_mut(leaf, buf_id);
     if let (Some(win), Some(buf)) = (win, buf) {
@@ -293,15 +295,15 @@ pub(crate) fn configure_list_leaf(app: &mut TuiApp, leaf: WinId, initial_cursor:
         let mut new_abs: Option<usize> = None;
         let (win, buf) = ctx.ui.win_and_buf_mut(ctx.win, buf_id);
         if let (Some(win), Some(buf)) = (win, buf) {
-            let abs = win.cursor_row() as usize;
-            let max = line_count.saturating_sub(1);
-            let target = (abs as isize + delta).clamp(0, max as isize) as usize;
+            let abs = win.cursor_row();
+            let max = line_count.saturating_sub(1) as RowIndex;
+            let target = add_signed_row(abs, delta).min(max);
             if target == abs {
                 return CallbackResult::Consumed;
             }
-            win.scroll_top = scroll_to_show(win.scroll_top, target as u16, viewport);
-            win.jump_to_row(buf, target as u16, viewport.unwrap_or(0));
-            new_abs = Some(target);
+            win.scroll_top = scroll_to_show(win.scroll_top, target, viewport);
+            win.jump_to_row(buf, target, viewport.unwrap_or(0));
+            new_abs = Some(target as usize);
         }
         match new_abs {
             Some(abs) => CallbackResult::Event(
@@ -359,9 +361,10 @@ pub(crate) fn configure_list_leaf(app: &mut TuiApp, leaf: WinId, initial_cursor:
 /// Adjust `scroll_top` so `target` falls within `[scroll, scroll + height)`. `height`
 /// is the leaf's painted viewport height (rows). Falls back to top-edge-only when
 /// height is unknown.
-fn scroll_to_show(scroll: u16, target: u16, height: Option<u16>) -> u16 {
+fn scroll_to_show(scroll: RowIndex, target: RowIndex, height: Option<u16>) -> RowIndex {
     match height {
         Some(h) if h >= 1 => {
+            let h = h as RowIndex;
             if target < scroll {
                 target
             } else if target >= scroll.saturating_add(h) {
@@ -384,7 +387,7 @@ fn scroll_to_show(scroll: u16, target: u16, height: Option<u16>) -> u16 {
 /// row on-screen by nudging `scroll_top`, and emit `SelectionChanged` if the position
 /// actually moved. Used by both the absolute (`set_cursor_row`) and relative
 /// (`move_cursor`) entry points.
-fn apply_cursor(app: &mut TuiApp, leaf: WinId, target: u16) {
+fn apply_cursor(app: &mut TuiApp, leaf: WinId, target: RowIndex) {
     let buf_id = match app.ui.win(leaf) {
         Some(w) => w.buf,
         None => return,
@@ -393,7 +396,7 @@ fn apply_cursor(app: &mut TuiApp, leaf: WinId, target: u16) {
     if line_count == 0 {
         return;
     }
-    let max = line_count.saturating_sub(1) as u16;
+    let max = line_count.saturating_sub(1) as RowIndex;
     let target = target.min(max);
     let viewport = app.ui.paint_rect(PaintId::from(leaf)).map(|r| r.height);
     let (win, buf) = app.ui.win_and_buf_mut(leaf, buf_id);
@@ -426,21 +429,29 @@ fn apply_cursor(app: &mut TuiApp, leaf: WinId, target: u16) {
 /// to drive selection without holding focus on the list itself.
 pub(crate) fn move_cursor(app: &mut TuiApp, leaf: WinId, delta: isize) {
     let abs = match app.ui.win(leaf) {
-        Some(w) => w.cursor_row() as isize,
+        Some(w) => w.cursor_row(),
         None => return,
     };
-    let target = abs.saturating_add(delta).max(0) as u16;
+    let target = add_signed_row(abs, delta);
     apply_cursor(app, leaf, target);
 }
 
 /// Place `leaf`'s cursor at an absolute row.
-pub(crate) fn set_cursor_row(app: &mut TuiApp, leaf: WinId, row: u16) {
+pub(crate) fn set_cursor_row(app: &mut TuiApp, leaf: WinId, row: RowIndex) {
     apply_cursor(app, leaf, row);
 }
 
 /// Read the current cursor row of `leaf` (0-based), or `None` if the leaf doesn't exist.
-pub(crate) fn cursor_row(app: &TuiApp, leaf: WinId) -> Option<u16> {
+pub(crate) fn cursor_row(app: &TuiApp, leaf: WinId) -> Option<RowIndex> {
     app.ui.win(leaf).map(|w| w.cursor_row())
+}
+
+fn add_signed_row(row: RowIndex, delta: isize) -> RowIndex {
+    if delta >= 0 {
+        row.saturating_add(delta as RowIndex)
+    } else {
+        row.saturating_sub(delta.unsigned_abs() as RowIndex)
+    }
 }
 
 /// Wire the built-in input recipe: printable chars insert at cursor, Backspace deletes,

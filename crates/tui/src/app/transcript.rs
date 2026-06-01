@@ -13,7 +13,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 pub(crate) struct TranscriptData {
-    pub(crate) clamped_scroll: u16,
+    pub(crate) clamped_scroll: crate::smelt_term::RowIndex,
 }
 
 impl TuiApp {
@@ -209,7 +209,13 @@ impl TuiApp {
     /// (i.e. before the first frame).
     pub(crate) fn transcript_block_snapshots(
         &self,
-    ) -> Vec<(usize, &'static str, u16, u16, String)> {
+    ) -> Vec<(
+        usize,
+        &'static str,
+        crate::smelt_term::RowIndex,
+        crate::smelt_term::RowIndex,
+        String,
+    )> {
         use smelt_core::transcript_model::Block;
         let mut out = Vec::new();
         let history = &self.transcript.history;
@@ -356,7 +362,7 @@ impl TuiApp {
         &mut self,
         width: usize,
         viewport_rows: u16,
-        scroll_top: u16,
+        scroll_top: crate::smelt_term::RowIndex,
         show_thinking: bool,
     ) -> TranscriptData {
         let gutters = self.transcript_gutters();
@@ -472,7 +478,7 @@ impl TuiApp {
     /// No-op when no vim visual, selection anchor, or yank-flash is active.
     pub(crate) fn transcript_selection_highlights(
         &mut self,
-        scroll_top: u16,
+        scroll_top: crate::smelt_term::RowIndex,
         viewport_rows: u16,
     ) -> Vec<(usize, u16, u16)> {
         let win = self.transcript_win();
@@ -535,7 +541,7 @@ impl TuiApp {
         // Route through the shared coord helper so the prompt's per-row
         // selection painting and the transcript's stay one implementation —
         // including the "1-cell virtual span on empty middle rows" rule.
-        let first = scroll_top as usize;
+        let first = scroll_top.min(usize::MAX as crate::smelt_term::RowIndex) as usize;
         let last = first + viewport_rows as usize;
         smelt_buffer::coords::selection_to_row_ranges(buf, s, e)
             .into_iter()

@@ -35,7 +35,7 @@ impl TuiApp {
         // Pin the sentinel instead — the projection's own clamp_scroll resolves
         // it against the post-rebuild row count.
         if self.ui.should_follow_tail(crate::app::TRANSCRIPT_WIN) {
-            self.transcript_win_mut().scroll_top = u16::MAX;
+            self.transcript_win_mut().scroll_top = crate::smelt_term::RowIndex::MAX;
         }
         self.ui.sync_scroll_links();
 
@@ -152,7 +152,7 @@ impl TuiApp {
     /// When content owns focus, surfaces a Block cursor; `Window::render` derives the
     /// position from `effective_endpoint`, so the cursor naturally tracks the live drag.
     /// `cursor_screen_row` is the pre-capture from before `apply_tail_follow` / the
-    /// `u16::MAX` sentinel so it doesn't underflow when read after scroll mutations.
+    /// `RowIndex::MAX` sentinel so it doesn't underflow when read after scroll mutations.
     fn sync_transcript_layer(
         &mut self,
         width: usize,

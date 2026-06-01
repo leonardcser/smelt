@@ -1,6 +1,6 @@
 use super::block_buffers::BlockBufferCache;
-use crate::smelt_term::Buffer;
 use crate::smelt_term::Theme;
+use crate::smelt_term::{Buffer, RowIndex};
 use smelt_core::buffer::{LineDecoration, Span, SpanMeta};
 use smelt_core::transcript_model::{BlockHistory, BlockId, LayoutKey, ViewState};
 use std::sync::Arc;
@@ -27,8 +27,8 @@ struct CachedRows {
 struct LayoutEntry {
     id: BlockId,
     /// First absolute row of the block, after its leading gap.
-    start: u32,
-    rows: u16,
+    start: RowIndex,
+    rows: RowIndex,
     key: LayoutKey,
 }
 
@@ -40,7 +40,7 @@ struct ProjectKey {
 }
 
 pub(crate) struct ProjectOutput {
-    pub clamped_scroll: u16,
+    pub clamped_scroll: RowIndex,
 }
 
 impl TranscriptProjection {
@@ -59,10 +59,8 @@ impl TranscriptProjection {
     /// entry from the most recent `project()`. Used by Lua's
     /// `smelt.transcript.blocks()` to map block indices back to display rows
     /// without duplicating the layout walk.
-    pub(crate) fn block_layout(&self) -> impl Iterator<Item = (BlockId, u16, u16)> + '_ {
-        self.layout
-            .iter()
-            .map(|e| (e.id, e.start.min(u16::MAX as u32) as u16, e.rows))
+    pub(crate) fn block_layout(&self) -> impl Iterator<Item = (BlockId, RowIndex, RowIndex)> + '_ {
+        self.layout.iter().map(|e| (e.id, e.start, e.rows))
     }
 
     fn gc_if_stale(&mut self, gen: u64, width: u16) {
@@ -96,7 +94,7 @@ impl TranscriptProjection {
         width: u16,
         show_thinking: bool,
         theme: &Theme,
-        scroll_top: u16,
+        scroll_top: RowIndex,
         viewport_rows: u16,
     ) -> ProjectOutput {
         let gen = history.generation();
@@ -107,7 +105,7 @@ impl TranscriptProjection {
         };
 
         if self.project_key == Some(key) {
-            let total_rows = buf.line_count() as u16;
+            let total_rows = buf.line_count() as RowIndex;
             return ProjectOutput {
                 clamped_scroll: clamp_scroll(scroll_top, total_rows, viewport_rows),
             };
@@ -123,7 +121,7 @@ impl TranscriptProjection {
             .map(|prev| prev.width != width)
             .unwrap_or(false);
         let resize_anchor = if width_changed {
-            self.block_anchor_at(scroll_top as usize)
+            self.block_anchor_at(scroll_top)
         } else {
             None
         };
@@ -170,7 +168,7 @@ impl TranscriptProjection {
             for _ in 0..gap {
                 texts.push(String::new());
             }
-            let start = texts.len() as u32;
+            let start = texts.len() as RowIndex;
             for r in 0..block_rows {
                 let row_idx = texts.len();
                 texts.push(block_buf.get_line(r).unwrap_or("").to_string());
@@ -187,7 +185,7 @@ impl TranscriptProjection {
             layout.push(LayoutEntry {
                 id,
                 start,
-                rows: block_rows as u16,
+                rows: block_rows as RowIndex,
                 key: bkey,
             });
         }
@@ -211,14 +209,14 @@ impl TranscriptProjection {
 
         self.layout = layout;
         self.project_key = Some(key);
-        let total_rows = clamp_u16(buf.line_count() as u32);
+        let total_rows = buf.line_count() as RowIndex;
 
         let restored_scroll = resize_anchor
             .and_then(|(block_id, offset)| {
-                self.layout.iter().find(|e| e.id == block_id).map(|entry| {
-                    let target = entry.start.saturating_add(offset as u32);
-                    clamp_u16(target)
-                })
+                self.layout
+                    .iter()
+                    .find(|e| e.id == block_id)
+                    .map(|entry| entry.start.saturating_add(offset))
             })
             .unwrap_or(scroll_top);
 
@@ -280,9 +278,10 @@ impl TranscriptProjection {
         // If the last block previously had rows, it was preceded by a gap
         // that must also be removed — otherwise the gap is duplicated when
         // we re-append gap + block rows below.
-        let mut keep_rows = old_last.start as usize;
+        let mut keep_rows = old_last.start.min(usize::MAX as RowIndex) as usize;
         if old_last.rows > 0 {
-            let gap = history.rendered_block_gap(i, old_last.rows as usize);
+            let gap =
+                history.rendered_block_gap(i, old_last.rows.min(usize::MAX as RowIndex) as usize);
             keep_rows = keep_rows.saturating_sub(gap as usize);
         }
         // Replace the entire suffix in one buffer mutation. Besides being
@@ -325,28 +324,27 @@ impl TranscriptProjection {
     /// Map an absolute row to its `(BlockId, row_offset_within_block)`. Gap
     /// rows resolve to the previous block's last row so a scroll position
     /// stranded in a gap still anchors to a stable block boundary. Rows past
-    /// the end of all blocks (e.g. `follow_tail`'s `u16::MAX` sentinel) return
+    /// the end of all blocks (e.g. `follow_tail`'s `RowIndex::MAX` sentinel) return
     /// `None` so the caller falls back to scroll_top and the natural clamp
     /// pins the viewport to the new bottom.
-    fn block_anchor_at(&self, row: usize) -> Option<(BlockId, u16)> {
+    fn block_anchor_at(&self, row: RowIndex) -> Option<(BlockId, RowIndex)> {
         let last = self.layout.last()?;
-        let last_end = last.start.saturating_add(last.rows as u32);
-        let row_u32 = row as u32;
-        if row_u32 >= last_end {
+        let last_end = last.start.saturating_add(last.rows);
+        if row >= last_end {
             return None;
         }
-        let idx = self.layout.partition_point(|e| e.start <= row_u32);
+        let idx = self.layout.partition_point(|e| e.start <= row);
         if idx == 0 {
             return None;
         }
         let entry = self.layout[idx - 1];
-        let end = entry.start.saturating_add(entry.rows as u32);
-        let offset_u32 = if row_u32 < end {
-            row_u32 - entry.start
+        let end = entry.start.saturating_add(entry.rows);
+        let offset = if row < end {
+            row - entry.start
         } else {
-            entry.rows.saturating_sub(1) as u32
+            entry.rows.saturating_sub(1)
         };
-        Some((entry.id, offset_u32.min(u16::MAX as u32) as u16))
+        Some((entry.id, offset))
     }
 
     /// Render every block into the cache. For full-text consumers that may run
@@ -502,12 +500,8 @@ impl TranscriptProjection {
     }
 }
 
-fn clamp_u16(v: u32) -> u16 {
-    v.min(u16::MAX as u32) as u16
-}
-
-fn clamp_scroll(scroll_top: u16, total_rows: u16, viewport_rows: u16) -> u16 {
-    scroll_top.min(total_rows.saturating_sub(viewport_rows))
+fn clamp_scroll(scroll_top: RowIndex, total_rows: RowIndex, viewport_rows: u16) -> RowIndex {
+    scroll_top.min(total_rows.saturating_sub(viewport_rows as RowIndex))
 }
 
 fn apply_row_highlights(buf: &mut Buffer, row: usize, highlights: Vec<Span>) {

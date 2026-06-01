@@ -5,6 +5,7 @@ use super::vim::{self, Action, VimContext, VimMode, VimWindowState};
 use super::Buffer;
 use super::Clipboard;
 use super::{BufId, UndoHistory, WinId};
+use crate::document::{row_to_usize, RowIndex};
 use crate::Theme;
 use crossterm::event::{KeyEvent, MouseButton, MouseEvent, MouseEventKind};
 use smelt_buffer::buffer::VirtTextPos;
@@ -42,27 +43,28 @@ pub(crate) enum ViewportHit {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct ScrollbarState {
     pub col: u16,
-    pub total_rows: u16,
+    pub total_rows: RowIndex,
     pub viewport_rows: u16,
 }
 
 impl ScrollbarState {
-    pub fn new(col: u16, total_rows: u16, viewport_rows: u16) -> Option<Self> {
-        (viewport_rows > 0 && total_rows > viewport_rows).then_some(Self {
+    pub fn new(col: u16, total_rows: RowIndex, viewport_rows: u16) -> Option<Self> {
+        (viewport_rows > 0 && total_rows > viewport_rows as RowIndex).then_some(Self {
             col,
             total_rows,
             viewport_rows,
         })
     }
 
-    fn max_scroll(&self) -> u16 {
-        self.total_rows.saturating_sub(self.viewport_rows)
+    fn max_scroll(&self) -> RowIndex {
+        self.total_rows
+            .saturating_sub(self.viewport_rows as RowIndex)
     }
 
     fn thumb_size(&self) -> u16 {
-        let rows = self.viewport_rows as usize;
-        let total = self.total_rows as usize;
-        ((rows * rows) / total).max(1) as u16
+        let rows = self.viewport_rows as u128;
+        let total = self.total_rows.max(1) as u128;
+        ((rows * rows) / total).clamp(1, self.viewport_rows as u128) as u16
     }
 
     fn max_thumb_top(&self) -> u16 {
@@ -75,7 +77,7 @@ impl ScrollbarState {
         rel_row.saturating_sub(half).min(self.max_thumb_top())
     }
 
-    pub(crate) fn scroll_from_top_for_thumb(&self, thumb_top: u16) -> u16 {
+    pub(crate) fn scroll_from_top_for_thumb(&self, thumb_top: u16) -> RowIndex {
         let max_thumb = self.max_thumb_top();
         let max_scroll = self.max_scroll();
         if max_thumb == 0 || max_scroll == 0 {
@@ -83,8 +85,8 @@ impl ScrollbarState {
         }
         let thumb_top = thumb_top.min(max_thumb);
         let from_top =
-            (thumb_top as u32 * max_scroll as u32 + max_thumb as u32 / 2) / max_thumb as u32;
-        from_top.min(u16::MAX as u32) as u16
+            (thumb_top as u128 * max_scroll as u128 + max_thumb as u128 / 2) / max_thumb as u128;
+        from_top.min(RowIndex::MAX as u128) as RowIndex
     }
 
     pub(crate) fn contains(&self, rect: Rect, row: u16, col: u16) -> bool {
@@ -92,17 +94,17 @@ impl ScrollbarState {
     }
 
     /// Scroll offset → thumb top row (0-based). Inverse of `thumb_top_for_click`.
-    pub(crate) fn thumb_top_for_scroll(&self, scroll_top: u16) -> u16 {
+    pub(crate) fn thumb_top_for_scroll(&self, scroll_top: RowIndex) -> u16 {
         let max_thumb = self.max_thumb_top();
         let max_scroll = self.max_scroll();
         if max_thumb == 0 || max_scroll == 0 {
             return 0;
         }
         let scroll = scroll_top.min(max_scroll);
-        ((scroll as u32 * max_thumb as u32 + max_scroll as u32 / 2) / max_scroll as u32) as u16
+        ((scroll as u128 * max_thumb as u128 + max_scroll as u128 / 2) / max_scroll as u128) as u16
     }
 
-    pub(crate) fn is_thumb_at(&self, scroll_top: u16, row: u16) -> bool {
+    pub(crate) fn is_thumb_at(&self, scroll_top: RowIndex, row: u16) -> bool {
         let thumb_top = self.thumb_top_for_scroll(scroll_top);
         let thumb_end = thumb_top + self.thumb_size();
         row >= thumb_top && row < thumb_end
@@ -113,8 +115,8 @@ impl ScrollbarState {
 pub struct WindowViewport {
     pub rect: Rect,
     pub content_width: u16,
-    pub total_rows: u16,
-    pub scroll_top: u16,
+    pub total_rows: RowIndex,
+    pub scroll_top: RowIndex,
     pub scrollbar: Option<ScrollbarState>,
     /// Cells reserved on the left for the data-driven gutter column (line numbers, signs, …),
     /// before `Gutters::pad_left`. Zero when no `GutterProvider` is attached.
@@ -125,8 +127,8 @@ impl WindowViewport {
     pub fn new(
         rect: Rect,
         content_width: u16,
-        total_rows: u16,
-        scroll_top: u16,
+        total_rows: RowIndex,
+        scroll_top: RowIndex,
         scrollbar: Option<ScrollbarState>,
     ) -> Self {
         Self {
@@ -268,7 +270,7 @@ pub struct Window {
     pub selection_anchor: Option<usize>,
     /// Preferred display column for vertical motion; measured in terminal cells.
     pub curswant: Option<usize>,
-    pub scroll_top: u16,
+    pub scroll_top: RowIndex,
     /// Logical anchor for `scroll_top` — `(changedtick, logical_row, byte_offset)`
     /// of the chunk that was at the top of the viewport when scroll was last
     /// set. Restored after a width/wrap-driven layout rebuild so resize keeps
@@ -282,7 +284,7 @@ pub struct Window {
     /// Derived from `cpos` via `sync_from_cpos`, projected through `self.layout`
     /// so it tracks visual rows when wrap splits a logical row into multiple
     /// visual rows.
-    pub(crate) cursor_row: u16,
+    pub(crate) cursor_row: RowIndex,
     /// Cell-column of the cursor within its visual row. Derived from `cpos`
     /// via `sync_from_cpos`.
     pub(crate) cursor_col: u16,
@@ -310,7 +312,7 @@ pub struct Window {
     /// first `Drag` event. A bare press-release with no motion leaves no selection.
     pub pending_press: Option<usize>,
     /// `(scroll_top, follow_tail)` last emitted via `WinEvent::Scrolled`.
-    pub(crate) last_emitted_scroll: Option<(u16, bool)>,
+    pub(crate) last_emitted_scroll: Option<(RowIndex, bool)>,
     /// `(rect, content_width)` last emitted via `WinEvent::Resized`. Tracked
     /// here so the dispatcher can fire only when the leaf's geometry
     /// actually changed since the last frame.
@@ -409,7 +411,9 @@ impl Window {
         // mismatched tick and skip the snapshot here; the render loop takes
         // it earlier via `cursor_screen_row_in_viewport`.
         let cursor_screen_row = if self.layout_matches(buf) {
-            self.cursor_row.checked_sub(self.scroll_top)
+            self.cursor_row
+                .checked_sub(self.scroll_top)
+                .and_then(|rel| (rel <= u16::MAX as RowIndex).then_some(rel as u16))
         } else {
             None
         };
@@ -434,7 +438,8 @@ impl Window {
     /// (transcript projection) capture this before the mutation so the
     /// cursor's screen row can be restored after the new layout lands.
     pub fn cursor_screen_row_in_viewport(&self) -> Option<u16> {
-        self.cursor_row.checked_sub(self.scroll_top)
+        let rel = self.cursor_row.checked_sub(self.scroll_top)?;
+        (rel <= u16::MAX as RowIndex).then_some(rel as u16)
     }
 
     /// Single mutation entry for `scroll_top`. Stamps `scroll_anchor` at the
@@ -443,12 +448,13 @@ impl Window {
     /// position. Skips the anchor stamp when the layout doesn't match the
     /// buffer (callers before the first `ensure_layout`); the next
     /// `set_scroll` post-layout will pick up the anchor correctly.
-    pub fn set_scroll(&mut self, visual_row: u16, buf: &Buffer) {
+    pub fn set_scroll(&mut self, visual_row: RowIndex, buf: &Buffer) {
         self.scroll_top = visual_row;
         if !self.layout_matches(buf) {
             return;
         }
-        let Some((lrow, chunk_idx)) = self.layout.logical_at_visual(visual_row as usize) else {
+        let Some((lrow, chunk_idx)) = self.layout.logical_at_visual(row_to_usize(visual_row))
+        else {
             return;
         };
         let byte = self
@@ -481,7 +487,7 @@ impl Window {
             return;
         }
         let (vrow, _) = self.layout.visual_for_logical(lrow, byte);
-        self.scroll_top = vrow as u16;
+        self.scroll_top = vrow as RowIndex;
     }
 
     /// Reposition the cursor so it sits at `scroll_top + screen_row` in the
@@ -496,10 +502,10 @@ impl Window {
         }
         let target_vrow = self
             .scroll_top
-            .saturating_add(screen_row)
-            .min(total.saturating_sub(1)) as usize;
+            .saturating_add(screen_row as RowIndex)
+            .min(total.saturating_sub(1));
         let want = self.curswant.unwrap_or(self.cursor_col as usize);
-        self.cpos = self.cpos_at_visual(buf, target_vrow, want);
+        self.cpos = self.cpos_at_visual(buf, row_to_usize(target_vrow), want);
         let (row, col) = self.cursor_visual(buf, self.cpos);
         self.cursor_row = row;
         self.cursor_col = col;
@@ -523,38 +529,40 @@ impl Window {
 
     /// Total visual rows for scroll/keep-visible math. Falls back to the
     /// buffer's logical row count when `layout` hasn't been refreshed yet.
-    fn visual_row_total(&self, buf: &Buffer) -> u16 {
+    fn visual_row_total(&self, buf: &Buffer) -> RowIndex {
         if self.layout_matches(buf) {
-            self.layout.visual_count() as u16
+            self.layout.visual_count() as RowIndex
         } else {
-            buf.lines().len() as u16
+            buf.lines().len() as RowIndex
         }
     }
 
     /// Project `cpos` to a visual `(row, cell_col)` through this window's
     /// layout. Used by cursor sync after navigation/edit so `cursor_row` is in
     /// the same coordinate space as `scroll_top`.
-    fn cursor_visual(&self, buf: &Buffer, cpos: usize) -> (u16, u16) {
+    fn cursor_visual(&self, buf: &Buffer, cpos: usize) -> (RowIndex, u16) {
         let (lrow, byte_col) = buf.display_byte_pos(cpos);
         if !self.layout_matches(buf) {
             let line = buf.get_line(lrow).unwrap_or("");
             let cell_col = smelt_buffer::text::byte_to_cell(line, byte_col);
-            return (lrow as u16, cell_col as u16);
+            return (lrow as RowIndex, cell_col as u16);
         }
         let (vrow, byte_in_chunk) = self.layout.visual_for_logical(lrow, byte_col);
         let line = self.layout.visual_line(buf.lines(), vrow).unwrap_or("");
         let cell_col = smelt_buffer::text::byte_to_cell(line, byte_in_chunk);
-        (vrow as u16, cell_col as u16)
+        (vrow as RowIndex, cell_col as u16)
     }
 
     /// Convert viewport-relative mouse coordinates to a buffer cpos,
     /// accounting for both vertical and horizontal scroll.
     fn cpos_at_mouse(&self, buf: &Buffer, rel_row: u16, rel_col: u16) -> usize {
-        let visual_total = self.visual_row_total(buf) as usize;
-        let vrow = (self.scroll_top as usize + rel_row as usize)
+        let visual_total = self.visual_row_total(buf);
+        let vrow = self
+            .scroll_top
+            .saturating_add(rel_row as RowIndex)
             .min(visual_total.max(1).saturating_sub(1));
         let vcell = rel_col as usize + self.scroll_left as usize;
-        self.cpos_at_visual(buf, vrow, vcell)
+        self.cpos_at_visual(buf, row_to_usize(vrow), vcell)
     }
 
     /// Project a visual `(row, cell_col)` hit to a buffer cpos via the layout.
@@ -623,8 +631,8 @@ impl Window {
 
     // ── Cursor ─────────────────────────────────────────────────────────
 
-    pub fn cursor_abs_row(&self) -> usize {
-        self.cursor_row as usize
+    pub fn cursor_abs_row(&self) -> RowIndex {
+        self.cursor_row
     }
 
     /// Screen row (relative to the viewport top) where the cursor should render.
@@ -634,12 +642,12 @@ impl Window {
         self.cursor_screen_row_at(self.scroll_top, viewport_rows)
     }
 
-    pub fn cursor_screen_row_at(&self, scroll_top: u16, viewport_rows: u16) -> Option<u16> {
+    pub fn cursor_screen_row_at(&self, scroll_top: RowIndex, viewport_rows: u16) -> Option<u16> {
         let rel = self.cursor_row.checked_sub(scroll_top)?;
-        (rel < viewport_rows).then_some(rel)
+        (rel < viewport_rows as RowIndex).then_some(rel as u16)
     }
 
-    pub fn cursor_row(&self) -> u16 {
+    pub fn cursor_row(&self) -> RowIndex {
         self.cursor_row
     }
 
@@ -706,8 +714,8 @@ impl Window {
     /// global active-cursor machinery paints the block on the correct row when
     /// this leaf takes the cursor (e.g. when focus lands here, or when a drag
     /// ends here).
-    pub fn jump_to_row(&mut self, buf: &Buffer, row: u16, viewport_rows: u16) {
-        self.jump_to_line_col(buf, row as usize, 0, viewport_rows);
+    pub fn jump_to_row(&mut self, buf: &Buffer, row: RowIndex, viewport_rows: u16) {
+        self.jump_to_line_col(buf, row_to_usize(row), 0, viewport_rows);
     }
 
     /// Set `selection_anchor` to `cpos` if unset. Call before a shift-move.
@@ -974,9 +982,9 @@ impl Window {
 
     // ── Follow-tail ────────────────────────────────────────────────────
 
-    /// Snap to the bottom. `u16::MAX` is the sentinel; the render loop clamps it.
+    /// Snap to the bottom. `RowIndex::MAX` is the sentinel; the render loop clamps it.
     pub fn scroll_to_bottom(&mut self) {
-        self.scroll_top = u16::MAX;
+        self.scroll_top = RowIndex::MAX;
         self.follow_tail = true;
     }
 
@@ -996,7 +1004,7 @@ impl Window {
     // ── Navigation ─────────────────────────────────────────────────────
 
     pub fn compute_cpos(&self, buf: &Buffer) -> usize {
-        self.cpos_at_visual(buf, self.cursor_row as usize, self.cursor_col as usize)
+        self.cpos_at_visual(buf, row_to_usize(self.cursor_row), self.cursor_col as usize)
     }
 
     /// Byte to use as the selection/cursor endpoint. Returns `drag_endpoint` if an
@@ -1011,7 +1019,7 @@ impl Window {
     /// Display-row component of `effective_endpoint`, looked up through `buf`.
     /// Used by the renderer to paint CursorLine / caret at the drag end while a
     /// drag is in flight.
-    pub fn effective_cursor_row(&self, buf: &Buffer) -> u16 {
+    pub fn effective_cursor_row(&self, buf: &Buffer) -> RowIndex {
         match self.drag_endpoint {
             Some(end) => self.cursor_visual(buf, end).0,
             None => self.cursor_row,
@@ -1020,8 +1028,13 @@ impl Window {
 
     /// Clamp `scroll_top` to the valid range `[0, total_rows - viewport_rows]`
     /// and stamp the scroll anchor. Returns `max_scroll`.
-    fn clamp_scroll_top(&mut self, total_rows: u16, viewport_rows: u16, buf: &Buffer) -> u16 {
-        let max_scroll = total_rows.saturating_sub(viewport_rows);
+    fn clamp_scroll_top(
+        &mut self,
+        total_rows: RowIndex,
+        viewport_rows: u16,
+        buf: &Buffer,
+    ) -> RowIndex {
+        let max_scroll = total_rows.saturating_sub(viewport_rows as RowIndex);
         if self.scroll_top > max_scroll {
             self.set_scroll(max_scroll, buf);
         }
@@ -1038,7 +1051,7 @@ impl Window {
     pub fn keep_cursor_visible(
         &mut self,
         buf: &Buffer,
-        total_rows: u16,
+        total_rows: RowIndex,
         viewport_rows: u16,
         viewport_cols: u16,
     ) {
@@ -1046,11 +1059,11 @@ impl Window {
             let max_scroll = self.clamp_scroll_top(total_rows, viewport_rows, buf);
             let viewport_bottom = self
                 .scroll_top
-                .saturating_add(viewport_rows.saturating_sub(1));
+                .saturating_add(viewport_rows.saturating_sub(1) as RowIndex);
             if self.cursor_row > viewport_bottom {
                 let target = self
                     .cursor_row
-                    .saturating_sub(viewport_rows.saturating_sub(1))
+                    .saturating_sub(viewport_rows.saturating_sub(1) as RowIndex)
                     .min(max_scroll);
                 self.set_scroll(target, buf);
             } else if self.cursor_row < self.scroll_top {
@@ -1458,13 +1471,13 @@ impl Window {
 
     /// Vim `zz`: scroll so the cursor row sits at the vertical middle of the
     /// viewport, clamped to the available scroll range.
-    fn recenter_on_cursor(&mut self, buf: &Buffer, total_rows: u16, viewport_rows: u16) {
+    fn recenter_on_cursor(&mut self, buf: &Buffer, total_rows: RowIndex, viewport_rows: u16) {
         if viewport_rows == 0 {
             return;
         }
-        let half = viewport_rows / 2;
+        let half = viewport_rows as RowIndex / 2;
         let want = self.cursor_row.saturating_sub(half);
-        let max_scroll = total_rows.saturating_sub(viewport_rows);
+        let max_scroll = total_rows.saturating_sub(viewport_rows as RowIndex);
         self.set_scroll(want.min(max_scroll), buf);
         self.follow_tail = self.scroll_top >= max_scroll;
     }
@@ -1483,7 +1496,7 @@ impl Window {
             self.vim_state.set_mode(&mut self.vim_mode, VimMode::Normal);
         }
         self.sync_from_cpos(buf, viewport_rows);
-        let max_scroll = (self.visual_row_total(buf)).saturating_sub(viewport_rows);
+        let max_scroll = (self.visual_row_total(buf)).saturating_sub(viewport_rows as RowIndex);
         self.follow_tail = self.scroll_top >= max_scroll;
     }
 
@@ -1520,22 +1533,24 @@ impl Window {
         if total == 0 {
             return false;
         }
-        let max_scroll = total.saturating_sub(viewport_rows);
+        let max_scroll = total.saturating_sub(viewport_rows as RowIndex);
         let cur_scroll = self.scroll_top.min(max_scroll);
-        let new_scroll = (cur_scroll as isize + delta).clamp(0, max_scroll as isize) as u16;
+        let new_scroll = add_signed_row(cur_scroll, delta).min(max_scroll);
         if new_scroll == self.scroll_top {
             return false;
         }
         let col = self.cursor_visual(buf, self.effective_endpoint()).1 as usize;
         self.set_scroll(new_scroll, buf);
         let edge_vrow = if delta < 0 {
-            new_scroll as usize
+            new_scroll
         } else {
-            (new_scroll + viewport_rows.saturating_sub(1)).min(total.saturating_sub(1)) as usize
+            new_scroll
+                .saturating_add(viewport_rows.saturating_sub(1) as RowIndex)
+                .min(total.saturating_sub(1))
         };
         // `cpos_at_visual` snaps past non-selectable chrome (transcript fold
         // markers, gutter cells), so no transcript-specific snap is needed here.
-        self.drag_endpoint = Some(self.cpos_at_visual(buf, edge_vrow, col));
+        self.drag_endpoint = Some(self.cpos_at_visual(buf, row_to_usize(edge_vrow), col));
         true
     }
 
@@ -1549,7 +1564,7 @@ impl Window {
             return;
         }
         let max_scroll = self.clamp_scroll_top(total, viewport_rows, buf);
-        let new_scroll = (self.scroll_top as isize + delta).clamp(0, max_scroll as isize) as u16;
+        let new_scroll = add_signed_row(self.scroll_top, delta).min(max_scroll);
         self.scroll_to_preserving_cursor_screen_row(new_scroll, buf, viewport_rows);
     }
 
@@ -1557,7 +1572,7 @@ impl Window {
     /// and re-anchor the cursor to the buffer position now under that row.
     pub fn scroll_to_preserving_cursor_screen_row(
         &mut self,
-        scroll_top: u16,
+        scroll_top: RowIndex,
         buf: &Buffer,
         viewport_rows: u16,
     ) {
@@ -1583,9 +1598,11 @@ impl Window {
             self.follow_tail = new_scroll >= max_scroll;
             return;
         }
-        let target_vrow = (new_scroll + screen_row).min(total_visual.saturating_sub(1)) as usize;
+        let target_vrow = new_scroll
+            .saturating_add(screen_row as RowIndex)
+            .min(total_visual.saturating_sub(1));
         let want = self.curswant.unwrap_or(self.cursor_col as usize);
-        self.cpos = self.cpos_at_visual(buf, target_vrow, want);
+        self.cpos = self.cpos_at_visual(buf, row_to_usize(target_vrow), want);
         let (row, col) = self.cursor_visual(buf, self.cpos);
         self.cursor_row = row;
         self.cursor_col = col;
@@ -1615,7 +1632,7 @@ impl Window {
 
         let width = slice.width();
         let height = slice.height();
-        let scroll = self.scroll_top as usize;
+        let scroll = row_to_usize(self.scroll_top);
         let gutter_width = self.gutter_width(buf).min(width);
         let pad_left = self
             .config
@@ -1648,7 +1665,8 @@ impl Window {
             let effective_row = self.effective_cursor_row(buf);
             effective_row
                 .checked_sub(self.scroll_top)
-                .filter(|rel| *rel < height)
+                .filter(|rel| *rel < height as RowIndex)
+                .map(|rel| rel as u16)
         };
         // Two opt-ins; `selection_highlight` always paints (picker semantics),
         // `cursor_line` paints only when this window owns focus (caret semantics).
@@ -1929,13 +1947,13 @@ impl Window {
                 // back to identity (vrow == logical).
                 let logical_row = self
                     .layout
-                    .logical_at_visual(row as usize)
+                    .logical_at_visual(row_to_usize(row))
                     .map(|(lr, _)| lr)
-                    .unwrap_or(row as usize);
+                    .unwrap_or_else(|| row_to_usize(row));
                 let col = snap_col_past_chrome(buf, logical_row, col);
                 row.checked_sub(self.scroll_top)
-                    .filter(|rel| *rel < height)
-                    .map(|screen_row| (col, screen_row))
+                    .filter(|rel| *rel < height as RowIndex)
+                    .map(|screen_row| (col, screen_row as u16))
             });
             if let Some((col, screen_row)) = resolved {
                 // `col` is in source-row cells; shift into viewport coords. Off
@@ -1954,6 +1972,14 @@ impl Window {
                 }
             }
         }
+    }
+}
+
+fn add_signed_row(row: RowIndex, delta: isize) -> RowIndex {
+    if delta >= 0 {
+        row.saturating_add(delta as RowIndex)
+    } else {
+        row.saturating_sub(delta.unsigned_abs() as RowIndex)
     }
 }
 
@@ -2177,8 +2203,34 @@ mod tests {
         w.follow_tail = false;
         w.scroll_top = 10;
         w.scroll_to_bottom();
-        assert_eq!(w.scroll_top, u16::MAX);
+        assert_eq!(w.scroll_top, RowIndex::MAX);
         assert!(w.follow_tail);
+    }
+
+    #[test]
+    fn scrollbar_maps_rows_beyond_u16() {
+        let bar = ScrollbarState::new(0, 1_000_000, 10).expect("overflowing scrollbar");
+        let bottom = bar.scroll_from_top_for_thumb(bar.max_thumb_top());
+        assert_eq!(bottom, 999_990);
+        assert_eq!(bar.thumb_top_for_scroll(999_990), bar.max_thumb_top());
+        assert_eq!(bar.thumb_top_for_scroll(500_000), 5);
+    }
+
+    #[test]
+    fn cursor_screen_row_handles_large_scroll_top() {
+        let mut w = make_win();
+        w.scroll_top = 70_000;
+        w.cursor_row = 70_003;
+        assert_eq!(w.cursor_screen_row(10), Some(3));
+        w.cursor_row = 69_999;
+        assert_eq!(w.cursor_screen_row(10), None);
+    }
+
+    #[test]
+    fn window_viewport_keeps_large_total_rows() {
+        let vp = WindowViewport::new(Rect::new(0, 0, 20, 10), 20, 100_000, 80_000, None);
+        assert_eq!(vp.total_rows, 100_000);
+        assert_eq!(vp.scroll_top, 80_000);
     }
 
     #[test]
@@ -2213,7 +2265,7 @@ mod tests {
         w.jump_to_line_col(&buf, 10, 0, viewport);
         w.scroll_to_bottom();
         assert!(w.follow_tail);
-        assert_eq!(w.scroll_top, u16::MAX);
+        assert_eq!(w.scroll_top, RowIndex::MAX);
 
         let k = KeyEvent {
             code: KeyCode::Char('k'),
@@ -2225,7 +2277,7 @@ mod tests {
         // One 'k' keeps us in the bottom region (scroll_top == max_scroll == 9),
         // so follow_tail should still be true.
         w.handle_key(&mut buf, k, &mut clipboard, std::time::Instant::now());
-        let max_scroll = (rows.len() as u16).saturating_sub(viewport);
+        let max_scroll = (rows.len() as RowIndex).saturating_sub(viewport as RowIndex);
         w.follow_tail = w.scroll_top >= max_scroll;
         assert_eq!(w.cursor_row, 9);
         assert_eq!(w.scroll_top, 9);
@@ -2283,7 +2335,7 @@ mod tests {
         let buf = make_buf(rows.clone());
         let viewport = 10;
         w.jump_to_line_col(&buf, 29, 0, viewport);
-        let max_scroll = 30 - viewport;
+        let max_scroll = (30 - viewport) as RowIndex;
         assert_eq!(w.scroll_top, max_scroll);
         w.pan_by_lines(&buf, 5, viewport);
         assert_eq!(w.scroll_top, max_scroll, "scroll clamps at max");
@@ -2295,16 +2347,16 @@ mod tests {
 
     #[test]
     fn pan_by_lines_collapses_follow_tail_sentinel() {
-        // `follow_tail` mode stores `u16::MAX` as the scroll_top sentinel.
+        // `follow_tail` mode stores `RowIndex::MAX` as the scroll_top sentinel.
         // Pan must normalize that to the real max_scroll, not arithmetic on MAX.
         let mut w = make_win();
         let rows = sample_rows(30);
         let buf = make_buf(rows.clone());
         let viewport = 10;
-        let max_scroll = 30 - viewport;
+        let max_scroll = (30 - viewport) as RowIndex;
         w.jump_to_line_col(&buf, 29, 0, viewport);
         w.scroll_to_bottom();
-        assert_eq!(w.scroll_top, u16::MAX);
+        assert_eq!(w.scroll_top, RowIndex::MAX);
         w.pan_by_lines(&buf, 3, viewport);
         assert_eq!(w.scroll_top, max_scroll, "sentinel collapses to max_scroll");
         assert!(w.follow_tail);
@@ -2316,10 +2368,10 @@ mod tests {
         let rows = sample_rows(30);
         let buf = make_buf(rows.clone());
         let viewport = 10;
-        let max_scroll = 30 - viewport;
+        let max_scroll = (30 - viewport) as RowIndex;
         w.jump_to_line_col(&buf, 29, 0, viewport);
         w.scroll_to_bottom();
-        assert_eq!(w.scroll_top, u16::MAX);
+        assert_eq!(w.scroll_top, RowIndex::MAX);
         w.pan_by_lines(&buf, -3, viewport);
         assert_eq!(w.scroll_top, max_scroll - 3);
         assert!(!w.follow_tail);
@@ -2464,7 +2516,7 @@ mod tests {
     }
 
     fn viewport_for(rows: &[String], rect: Rect) -> WindowViewport {
-        WindowViewport::new(rect, rect.width, rows.len() as u16, 0, None)
+        WindowViewport::new(rect, rect.width, rows.len() as RowIndex, 0, None)
     }
 
     fn hard_breaks(rows: &[String]) -> Vec<usize> {
@@ -2545,7 +2597,10 @@ mod tests {
         // When vim is disabled, Visual mode should not freeze.
         w.vim_enabled = false;
         w.set_vim_mode(VimMode::Visual);
-        assert!(!w.tail_follow_frozen(), "vim disabled → not frozen even in Visual");
+        assert!(
+            !w.tail_follow_frozen(),
+            "vim disabled → not frozen even in Visual"
+        );
     }
 
     #[test]

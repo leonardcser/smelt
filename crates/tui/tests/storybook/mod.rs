@@ -7,8 +7,8 @@ use smelt_core::style::Color;
 use smelt_core::style::Style;
 use tui::smelt_term::layout::Rect;
 use tui::smelt_term::{
-    BufId, Buffer, Event, EventCtx, LayoutTree, SnapshotFrame, SplitConfig, Theme, Ui, VimMode,
-    WinId, WindowViewport,
+    BufId, Buffer, Event, EventCtx, LayoutTree, RowIndex, SnapshotFrame, SplitConfig, Theme, Ui,
+    VimMode, WinId, WindowViewport,
 };
 
 pub struct StoryCtx {
@@ -103,7 +103,7 @@ impl StoryCtx {
         let viewport = WindowViewport::new(
             Rect::new(0, 0, term_w, term_h),
             term_w,
-            rows.len() as u16,
+            rows.len() as RowIndex,
             0,
             None,
         );
