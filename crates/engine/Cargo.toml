@@ -1,10 +1,13 @@
 [package]
-name = "engine"
+name = "smelt-engine"
 version = "0.5.0-alpha.3"
 edition = "2021"
 
+[lib]
+name = "engine"
+
 [dependencies]
-protocol = { workspace = true }
+smelt-protocol = { workspace = true }
 tokio = { workspace = true, features = ["macros", "rt", "sync", "time", "io-util", "net", "process"] }
 reqwest = { workspace = true, features = ["stream"] }
 serde = { workspace = true }

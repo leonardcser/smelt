@@ -4,16 +4,16 @@ exclude = ["fuzz"]
 
 [workspace.dependencies]
 # Internal crates
-protocol = { path = "crates/protocol" }
-engine = { path = "crates/engine" }
+smelt-protocol = { path = "crates/protocol" }
+smelt-engine = { path = "crates/engine" }
 smelt-style = { path = "crates/style", version = "0.1.0" }
 smelt-perf = { path = "crates/perf", version = "0.1.0" }
 smelt-buffer = { path = "crates/buffer" }
 smelt-term = { path = "crates/term", version = "0.1.0" }
 smelt-edit = { path = "crates/edit" }
 smelt-core = { path = "crates/core" }
-tui = { path = "crates/tui", default-features = false }
-lua-doc-derive = { path = "crates/lua-doc-derive" }
+smelt-tui = { path = "crates/tui", default-features = false }
+smelt-lua-doc-derive = { path = "crates/lua-doc-derive" }
 
 # Async / runtime
 tokio = { version = "1", default-features = false }
@@ -69,11 +69,11 @@ name = "smelt"
 path = "src/main.rs"
 
 [dependencies]
-protocol = { workspace = true }
-engine = { workspace = true }
+smelt-protocol = { workspace = true }
+smelt-engine = { workspace = true }
 smelt-core = { workspace = true }
 smelt-perf = { workspace = true }
-tui = { workspace = true }
+smelt-tui = { workspace = true }
 tokio = { workspace = true, features = ["macros", "rt-multi-thread", "sync", "signal", "time"] }
 clap = { version = "4", features = ["derive"] }
 crossterm = { workspace = true }

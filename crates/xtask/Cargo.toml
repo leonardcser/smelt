@@ -6,5 +6,5 @@ publish = false
 
 [dependencies]
 smelt-core = { workspace = true }
-tui = { workspace = true }
-protocol = { workspace = true }
+smelt-tui = { workspace = true }
+smelt-protocol = { workspace = true }

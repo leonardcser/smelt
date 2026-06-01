@@ -1,10 +1,11 @@
 [package]
-name = "lua-doc-derive"
+name = "smelt-lua-doc-derive"
 version = "0.5.0-alpha.3"
 edition = "2021"
 description = "Proc macros for declaring Lua-side types from Rust structs/enums (smelt internal)"
 
 [lib]
+name = "lua_doc_derive"
 proc-macro = true
 
 [dependencies]
