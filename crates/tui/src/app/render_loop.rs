@@ -24,20 +24,17 @@ impl TuiApp {
         let show_queued = agent_running || self.busy_stack.is_busy();
 
         // Capture the cursor's screen-row offset BEFORE any scroll mutations.
-        // `apply_tail_follow` and the transcript sentinel both change
-        // `scroll_top`, so reading this afterward would underflow and return
-        // None, skipping the post-projection restore.
+        // `apply_tail_follow` can change `scroll_top`, so reading this afterward
+        // may underflow and return None, skipping the post-projection restore.
         let transcript_cursor_screen_row = self.transcript_win().cursor_screen_row_in_viewport();
 
         self.ui.apply_tail_follow();
-        // Transcript's buffer is rebuilt mid-frame by `project_transcript_buffer`,
-        // so the `apply_tail_follow` clamp is one row stale during streaming.
-        // Pin the sentinel instead — the projection's own clamp_scroll resolves
-        // it against the post-rebuild row count.
-        if self.ui.should_follow_tail(crate::app::TRANSCRIPT_WIN) {
-            self.transcript_win_mut().scroll_top = crate::smelt_term::RowIndex::MAX;
-        }
         self.ui.sync_scroll_links();
+        let transcript_scroll_target = if self.ui.should_follow_tail(crate::app::TRANSCRIPT_WIN) {
+            crate::content::transcript_buf::ScrollTarget::Tail
+        } else {
+            crate::content::transcript_buf::ScrollTarget::Row(self.transcript_win().scroll_top)
+        };
 
         let queued_owned: Vec<String> = if show_queued {
             self.queued_inputs
@@ -87,6 +84,7 @@ impl TuiApp {
             self.sync_transcript_layer(
                 width,
                 viewport_rows,
+                transcript_scroll_target,
                 has_transcript_cursor,
                 transcript_cursor_screen_row,
             );
@@ -151,12 +149,13 @@ impl TuiApp {
     /// Project the transcript into its display buffer and drive `Ui::wins[TRANSCRIPT_WIN]`.
     /// When content owns focus, surfaces a Block cursor; `Window::render` derives the
     /// position from `effective_endpoint`, so the cursor naturally tracks the live drag.
-    /// `cursor_screen_row` is the pre-capture from before `apply_tail_follow` / the
-    /// `RowIndex::MAX` sentinel so it doesn't underflow when read after scroll mutations.
+    /// `cursor_screen_row` is captured before `apply_tail_follow` so it doesn't underflow
+    /// when read after scroll mutations.
     fn sync_transcript_layer(
         &mut self,
         width: usize,
         viewport_rows: u16,
+        scroll_target: crate::content::transcript_buf::ScrollTarget,
         has_transcript_cursor: bool,
         cursor_screen_row: Option<u16>,
     ) {
@@ -165,7 +164,7 @@ impl TuiApp {
             self.project_transcript_buffer(
                 width,
                 viewport_rows,
-                self.transcript_win().scroll_top,
+                scroll_target,
                 self.core.config.settings.show_thinking,
             )
         };

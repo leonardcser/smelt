@@ -1942,9 +1942,9 @@ impl Ui {
     }
 
     /// Pin `scroll_top` to the tail for every window where
-    /// [`Self::should_follow_tail`] holds. Buffers rebuilt mid-frame (e.g.
-    /// transcript streaming) should set `scroll_top = RowIndex::MAX` themselves
-    /// after this pass.
+    /// [`Self::should_follow_tail`] holds. Buffers rebuilt later in the frame
+    /// should resolve tail-follow against their rebuilt row count rather than
+    /// relying on this pre-projection clamp.
     ///
     /// The cursor's screen-row offset is preserved so it stays visually fixed
     /// relative to the viewport instead of drifting with the auto-scroll.

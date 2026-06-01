@@ -448,7 +448,7 @@ impl TuiApp {
         &mut self,
         width: usize,
         viewport_rows: u16,
-        scroll_top: crate::smelt_term::RowIndex,
+        scroll_target: crate::content::transcript_buf::ScrollTarget,
         show_thinking: bool,
     ) -> TranscriptData {
         let gutters = self.transcript_gutters();
@@ -457,12 +457,11 @@ impl TuiApp {
             .sync_active_tool_elapsed(&mut self.transcript.history);
         // Run plugin `render` hooks on the main thread (Lua is single-threaded) and stash
         // the resulting owned buffers on `ToolState.render_cache`. Worker layout below
-        // reads those buffers without touching `app.ui` or the Lua VM. Tail-follow can
-        // pre-render only a bounded suffix; arbitrary scroll positions still use the
-        // compatibility full pre-pass until the transcript document owns random-access
-        // height lookup.
-        if scroll_top == crate::smelt_term::RowIndex::MAX {
-            let ids = self.tail_prerender_block_ids(viewport_rows);
+        // reads those buffers without touching `app.ui` or the Lua VM. Tail-follow asks
+        // the transcript height index for the bounded suffix; arbitrary scroll positions
+        // still use the compatibility full pre-pass until random-access projection lands.
+        if scroll_target == crate::content::transcript_buf::ScrollTarget::Tail {
+            let ids = self.tail_prerender_block_ids(tw as u16, show_thinking, viewport_rows);
             self.prerender_tool_blocks_for_ids(tw as u16, &ids);
         } else {
             self.prerender_tool_blocks(tw as u16);
@@ -479,7 +478,7 @@ impl TuiApp {
             tw as u16,
             show_thinking,
             &theme,
-            scroll_top,
+            scroll_target,
             viewport_rows,
         );
 
@@ -488,11 +487,18 @@ impl TuiApp {
         }
     }
 
-    fn tail_prerender_block_ids(&self, viewport_rows: u16) -> Vec<BlockId> {
-        let count = (viewport_rows as usize).saturating_add(20);
-        let order = &self.transcript.history.order;
-        let start = order.len().saturating_sub(count.max(1));
-        order[start..].to_vec()
+    fn tail_prerender_block_ids(
+        &mut self,
+        width: u16,
+        show_thinking: bool,
+        viewport_rows: u16,
+    ) -> Vec<BlockId> {
+        self.transcript_projection.tail_block_ids(
+            &self.transcript.history,
+            width,
+            show_thinking,
+            viewport_rows,
+        )
     }
 
     fn prerender_tool_blocks_for_ids(&mut self, width: u16, ids: &[BlockId]) {
