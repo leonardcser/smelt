@@ -356,21 +356,10 @@ impl TuiApp {
             let mode_block = self
                 .lua
                 .mode_block(Some(self.core.config.mode.as_str()), &note_text);
-            if self.agent_is_running() {
-                self.pending_mode_change = Some(crate::app::PendingModeChange {
-                    note: note.clone(),
-                    block: mode_block,
-                });
-                self.core.engine.send(UiCommand::AppendHistoryItem {
-                    item: protocol::HistoryItem::user(protocol::Content::text(note.clone())),
-                    replace_user_prefix: Some(protocol::MODE_NOTE_PREFIX.to_string()),
-                });
-            } else if !self.core.session.history.is_empty() {
-                self.apply_mode_change_to_history(note.clone());
-                self.commit_mode_block(mode_block);
-            } else {
-                self.pending_mode_change = None;
-            }
+            self.queue_history_append(crate::app::PendingHistoryAppend::ModeChange {
+                note,
+                block: mode_block,
+            });
         }
     }
 

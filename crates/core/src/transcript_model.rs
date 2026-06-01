@@ -95,6 +95,9 @@ pub enum Block {
         icon: String,
         hl_group: String,
     },
+    ProcessStatus {
+        text: String,
+    },
     Thinking {
         content: String,
     },
@@ -157,6 +160,7 @@ impl Block {
         match self {
             Block::User { text, .. } => Some(text.clone()),
             Block::Mode { text, icon, .. } => Some(format!("{icon}{text}")),
+            Block::ProcessStatus { text } => Some(text.clone()),
             Block::Text { content } | Block::Thinking { content } => Some(content.clone()),
             Block::Compacted { summary } => Some(summary.clone()),
             Block::CodeLine { content, .. } => Some(content.clone()),

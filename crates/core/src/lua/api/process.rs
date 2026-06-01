@@ -24,6 +24,28 @@ fn current_shell_spec(shared: &Arc<LuaShared>) -> process::ShellSpec {
         .unwrap_or_default()
 }
 
+fn output_table(
+    lua: &Lua,
+    result: Option<Result<process::ProcessOutput, String>>,
+) -> LuaResult<mlua::Table> {
+    match result {
+        Some(Ok(out)) => {
+            let t = lua.create_table()?;
+            t.set("text", out.text)?;
+            t.set("running", out.running)?;
+            if let Some(code) = out.exit_code {
+                t.set("exit_code", code)?;
+            }
+            if let Some(pid) = out.pid {
+                t.set("pid", pid)?;
+            }
+            t.set("elapsed_secs", out.elapsed_secs)?;
+            Ok(t)
+        }
+        _ => lua.create_table(),
+    }
+}
+
 pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) -> LuaResult<()> {
     let m = LuaMod::under(
         lua,
@@ -34,7 +56,7 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
     )?;
     m.fn_(
         "list",
-        "Return the registry of running processes as rows of `{ id, command, elapsed_secs }`.",
+        "Return the registry of running processes as rows of `{ id, pid?, command, elapsed_secs }`. `id` is the stable registry key; `pid` is present when the OS exposes a child pid.",
         &[],
         |lua, ()| -> LuaResult<mlua::Table> {
             let procs =
@@ -43,6 +65,9 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
             for (i, p) in procs.into_iter().enumerate() {
                 let row = lua.create_table()?;
                 row.set("id", p.id)?;
+                if let Some(pid) = p.pid {
+                    row.set("pid", pid)?;
+                }
                 row.set("command", p.command)?;
                 row.set("elapsed_secs", p.started_at.elapsed().as_secs())?;
                 out.set(i + 1, row)?;
@@ -64,24 +89,42 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
             Ok(())
         },
     )?;
+    {
+        let s = Arc::clone(shared);
+        m.private_fn(
+            "__start_stop",
+            &["task_id", "id"],
+            move |_, (task_id, id): (u64, String)| -> LuaResult<()> {
+                let registry = crate::host::try_with_core(|core| core.processes.clone())
+                    .ok_or_else(|| {
+                        mlua::Error::external("process.__start_stop: app unavailable")
+                    })?;
+                let sink = s.resume_sink();
+                tokio::spawn(async move {
+                    let payload = match registry.stop(&id).await {
+                        Ok(text) => serde_json::json!({ "text": text }),
+                        Err(err) => serde_json::json!({ "err": err }),
+                    };
+                    sink.resolve_json(task_id, payload);
+                });
+                Ok(())
+            },
+        )?;
+    }
     m.fn_(
         "read_output",
-        "Drain buffered output from the registered process `id`. Returns `{ text, running, exit_code? }`, or an empty table when no such process exists.",
+        "Drain buffered output from the registered process `id`. Returns `{ text, running, exit_code?, elapsed_secs, pid? }`, or an empty table when no such process exists.",
         &["id"],
         |lua, id: String| -> LuaResult<mlua::Table> {
-            let read = crate::host::try_with_core(|core| core.processes.read(&id));
-            match read {
-                Some(Ok((text, running, exit_code))) => {
-                    let t = lua.create_table()?;
-                    t.set("text", text)?;
-                    t.set("running", running)?;
-                    if let Some(code) = exit_code {
-                        t.set("exit_code", code)?;
-                    }
-                    Ok(t)
-                }
-                _ => lua.create_table(),
-            }
+            output_table(lua, crate::host::try_with_core(|core| core.processes.drain_output(&id)))
+        },
+    )?;
+    m.fn_(
+        "output",
+        "Return the buffered output snapshot for registered process `id` without draining it. Returns `{ text, running, exit_code?, elapsed_secs, pid? }`, or an empty table when no such process exists.",
+        &["id"],
+        |lua, id: String| -> LuaResult<mlua::Table> {
+            output_table(lua, crate::host::try_with_core(|core| core.processes.snapshot_output(&id)))
         },
     )?;
     {
@@ -96,22 +139,10 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
                 })
                 .ok_or_else(|| mlua::Error::external("process.spawn_bg: app unavailable"))?;
                 let shell = current_shell_spec(&shared_spawn);
-                let mut cmd = tokio::process::Command::new(&shell.program);
-                for a in &shell.args {
-                    cmd.arg(a);
-                }
-                cmd.arg(&command)
-                    .stdin(std::process::Stdio::null())
-                    .stdout(std::process::Stdio::piped())
-                    .stderr(std::process::Stdio::piped());
-                #[cfg(unix)]
-                cmd.process_group(0);
-                let child = cmd
-                    .spawn()
+                let child = process::spawn_shell_child(&command, &shell)
                     .map_err(|e| mlua::Error::external(e.to_string()))?;
-                let id = registry.next_id();
-                let (done_tx, _done_rx) = tokio::sync::mpsc::unbounded_channel();
-                registry.spawn(id.clone(), &command, child, done_tx, now);
+                let id = registry.child_id(&child);
+                registry.spawn(id.clone(), &command, child, now);
                 Ok(id)
             },
         )?;
@@ -156,10 +187,12 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
         let shared_run_streaming = Arc::clone(shared);
         m.fn_(
             "run_streaming",
-            "Run `command` with a `timeout_ms` deadline, streaming each output line into the live tool call `call_id` and resolving task `task_id` with `{ content, is_error, timed_out }` (or `{ __cancelled = true }` if cancelled).",
-            &["task_id", "call_id", "command", "timeout_ms"],
-            move |_, (task_id, call_id, command, timeout_ms): (u64, String, String, u64)| -> LuaResult<()> {
-                let injector = crate::host::try_with_core(|core| core.engine.injector())
+            "Run `command` with a `timeout_ms` deadline, streaming each output line into the live tool call `call_id` and resolving task `task_id` with `{ content, is_error, timed_out, background_id? }` (or `{ __cancelled = true }` if cancelled). When `background_on_timeout` is true, timeout detaches the still-running process into the process registry instead of killing it.",
+            &["task_id", "call_id", "command", "timeout_ms", "background_on_timeout"],
+            move |_, (task_id, call_id, command, timeout_ms, background_on_timeout): (u64, String, String, u64, bool)| -> LuaResult<()> {
+                let (injector, registry, now) = crate::host::try_with_core(|core| {
+                    (core.engine.injector(), core.processes.clone(), core.clock.instant_now())
+                })
                     .ok_or_else(|| {
                         mlua::Error::external("process.run_streaming: app unavailable")
                     })?;
@@ -167,16 +200,24 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
                 let cancel = crate::lua::current_task_cancel();
                 let timeout = std::time::Duration::from_millis(timeout_ms);
                 let shell = current_shell_spec(&shared_run_streaming);
+                let detach_on_timeout = background_on_timeout.then(|| process::StreamDetach {
+                    registry,
+                    command: command.clone(),
+                    now,
+                });
                 tokio::spawn(async move {
                     let on_line = |line: String| {
                         injector.inject_tool_output(call_id.clone(), line);
                     };
                     let out = process::run_streaming_with_shell(
                         &command,
-                        timeout,
-                        shell,
+                        process::StreamConfig {
+                            timeout,
+                            shell,
+                            cancel: cancel.clone(),
+                            detach_on_timeout,
+                        },
                         on_line,
-                        cancel.clone(),
                     )
                     .await;
                     if cancel.as_ref().is_some_and(|c| c.is_cancelled()) {
@@ -188,6 +229,7 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
                         "content": out.content,
                         "is_error": out.is_error,
                         "timed_out": out.timed_out,
+                        "background_id": out.background_id,
                     });
                     sink.resolve_json(task_id, payload);
                 });

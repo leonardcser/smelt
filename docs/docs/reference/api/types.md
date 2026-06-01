@@ -158,6 +158,7 @@ and `"fit"` pass through verbatim. Pick one of `height` or
 | `keymaps` | [smelt.dialog.Keymap[]](types.md#smeltdialogkeymap) |  | Dialog-level key bindings (merged with built-ins). |
 | `on_submit` | `fun(ctx: any):` |  | any Handler invoked on Enter; default resolves with the focused leaf. |
 | `on_dismiss` | `fun():` |  | nil Handler invoked when the dialog is dismissed. |
+| `on_close` | `fun(ctx: any):` |  | nil Handler invoked once whenever the dialog resolves or closes. |
 
 ### `smelt.dialog.Panel`
 
@@ -310,7 +311,7 @@ the rest configure how data is sourced, filtered, and rendered.
 | `leaf` | [smelt.win.Win](types.md#smeltwinwin) | yes | Selectable list leaf (typically from `smelt.dialog.list`). |
 | `buf` | [smelt.buf.Buf](types.md#smeltbufbuf) | yes | Backing buffer that mirrors the rendered rows. |
 | `items` | `any[]` |  | Initial item set. Mutate via `:set_items(...)` later if needed. |
-| `render` | `fun(item: any):` | yes | table Returns `{ text, marks }` per visible row. |
+| `render` | `fun(item: any):` | yes | table Returns `{ text, spans?, marks? }` per visible row. |
 | `filter` | `fun(item: any):` |  | boolean Predicate re-run on `:set_filter` / `:refresh`. |
 | `empty_text` | `string` |  | Placeholder line shown when no row passes the filter. |
 

@@ -28,7 +28,15 @@ Stop the registered process with `id`. Schedules the kill asynchronously; no-op 
 fun(): table
 ```
 
-Return the registry of running processes as rows of `{ id, command, elapsed_secs }`.
+Return the registry of running processes as rows of `{ id, pid?, command, elapsed_secs }`. `id` is the stable registry key; `pid` is present when the OS exposes a child pid.
+
+## `smelt.process.output`
+
+```lua
+fun(id: string): table
+```
+
+Return the buffered output snapshot for registered process `id` without draining it. Returns `{ text, running, exit_code?, elapsed_secs, pid? }`, or an empty table when no such process exists.
 
 ## `smelt.process.read_output`
 
@@ -36,7 +44,7 @@ Return the registry of running processes as rows of `{ id, command, elapsed_secs
 fun(id: string): table
 ```
 
-Drain buffered output from the registered process `id`. Returns `{ text, running, exit_code? }`, or an empty table when no such process exists.
+Drain buffered output from the registered process `id`. Returns `{ text, running, exit_code?, elapsed_secs, pid? }`, or an empty table when no such process exists.
 
 ## `smelt.process.run`
 
@@ -58,10 +66,10 @@ yielding API.
 ## `smelt.process.run_streaming`
 
 ```lua
-fun(task_id: integer, call_id: string, command: string, timeout_ms: integer): nil
+fun(task_id: integer, call_id: string, command: string, timeout_ms: integer, background_on_timeout: boolean): nil
 ```
 
-Run `command` with a `timeout_ms` deadline, streaming each output line into the live tool call `call_id` and resolving task `task_id` with `{ content, is_error, timed_out }` (or `{ __cancelled = true }` if cancelled).
+Run `command` with a `timeout_ms` deadline, streaming each output line into the live tool call `call_id` and resolving task `task_id` with `{ content, is_error, timed_out, background_id? }` (or `{ __cancelled = true }` if cancelled). When `background_on_timeout` is true, timeout detaches the still-running process into the process registry instead of killing it.
 
 ## `smelt.process.set_default_shell`
 
@@ -78,4 +86,15 @@ fun(command: string): string
 ```
 
 Spawn `command` as a background child registered with the process registry. The wrapping shell defaults to `sh -c` and can be overridden process-wide via `smelt.process.set_default_shell`. Returns the process id; raises if no host is installed or the spawn fails.
+
+## `smelt.process.stop`
+
+```lua
+fun(id: string): { text: string }?, string?
+```
+
+Stop a registered background process and return its buffered output. Yields
+the calling coroutine until the process has exited and the registry entry is
+removed. Returns `({ text }, nil)` on success or `(nil, err)` when no process
+exists for `id`.
 

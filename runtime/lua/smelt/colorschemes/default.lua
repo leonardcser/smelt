@@ -33,6 +33,7 @@ return {
   SmeltMuted          = fg({ ansi = 244 }),   -- "comment grey"
   SmeltSuccess        = fg({ ansi = 77 }),    -- check-mark green
   SmeltHeading        = fg({ ansi = 117 }),   -- sky blue headings
+  SmeltProcess        = fg({ ansi = 117 }),   -- background-process notices and counters
 
   -- Background fills, light/dark aware.
   SmeltStatusBg       = bg(dl(233, 253)),

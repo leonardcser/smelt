@@ -305,6 +305,15 @@ function smelt.process.run(cmd, args, opts)
   return external_or_err(function(id) smelt.process.__start_run(id, cmd, args, opts) end)
 end
 
+-- Stop a registered background process and return its buffered output. Yields
+-- the calling coroutine until the process has exited and the registry entry is
+-- removed. Returns `({ text }, nil)` on success or `(nil, err)` when no process
+-- exists for `id`.
+---@type fun(id: string): { text: string }?, string?
+function smelt.process.stop(id)
+  return external_or_err(function(task_id) smelt.process.__start_stop(task_id, id) end)
+end
+
 -- Perform an HTTP GET against `url`. Yields the calling coroutine until the
 -- response lands; the runtime stays responsive throughout. `opts` accepts
 -- `headers`, `timeout_secs`, and `max_redirects`. Returns

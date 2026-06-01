@@ -15,11 +15,15 @@ process.get_default_shell = nil
 ---@type fun(id: string): nil
 process.kill = nil
 
---- Return the registry of running processes as rows of `{ id, command, elapsed_secs }`.
+--- Return the registry of running processes as rows of `{ id, pid?, command, elapsed_secs }`. `id` is the stable registry key; `pid` is present when the OS exposes a child pid.
 ---@type fun(): table
 process.list = nil
 
---- Drain buffered output from the registered process `id`. Returns `{ text, running, exit_code? }`, or an empty table when no such process exists.
+--- Return the buffered output snapshot for registered process `id` without draining it. Returns `{ text, running, exit_code?, elapsed_secs, pid? }`, or an empty table when no such process exists.
+---@type fun(id: string): table
+process.output = nil
+
+--- Drain buffered output from the registered process `id`. Returns `{ text, running, exit_code?, elapsed_secs, pid? }`, or an empty table when no such process exists.
 ---@type fun(id: string): table
 process.read_output = nil
 
@@ -38,8 +42,8 @@ process.read_output = nil
 ---@type fun(cmd: string, args: string[]?, opts: table?): { stdout: string, stderr: string, exit_code: integer, timed_out: boolean }?, string?
 process.run = nil
 
---- Run `command` with a `timeout_ms` deadline, streaming each output line into the live tool call `call_id` and resolving task `task_id` with `{ content, is_error, timed_out }` (or `{ __cancelled = true }` if cancelled).
----@type fun(task_id: integer, call_id: string, command: string, timeout_ms: integer): nil
+--- Run `command` with a `timeout_ms` deadline, streaming each output line into the live tool call `call_id` and resolving task `task_id` with `{ content, is_error, timed_out, background_id? }` (or `{ __cancelled = true }` if cancelled). When `background_on_timeout` is true, timeout detaches the still-running process into the process registry instead of killing it.
+---@type fun(task_id: integer, call_id: string, command: string, timeout_ms: integer, background_on_timeout: boolean): nil
 process.run_streaming = nil
 
 --- Override the wrapping shell used by `spawn_bg` and `run_streaming` for string-form commands. `opts.program` is the executable (e.g. `"/bin/zsh"`); `opts.args` is the leading argv (e.g. `{ "-fc" }`) — the command string is appended after these. Pass `nil` (no args) to revert to the default `sh -c`.
@@ -50,5 +54,12 @@ process.set_default_shell = nil
 ---@see smelt.process.set_default_shell
 ---@type fun(command: string): string
 process.spawn_bg = nil
+
+--- Stop a registered background process and return its buffered output. Yields
+--- the calling coroutine until the process has exited and the registry entry is
+--- removed. Returns `({ text }, nil)` on success or `(nil, err)` when no process
+--- exists for `id`.
+---@type fun(id: string): { text: string }?, string?
+process.stop = nil
 
 return process

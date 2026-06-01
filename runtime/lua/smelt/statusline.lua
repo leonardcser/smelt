@@ -118,7 +118,7 @@ local function core_compose()
   if procs > 0 then
     items[#items + 1] = {
       text = procs == 1 and "1 proc" or (procs .. " procs"),
-      style = { fg = "SmeltAccent" },
+      style = { fg = "SmeltProcess", italic = false },
       priority = 2,
       separated = true,
     }

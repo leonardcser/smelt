@@ -443,7 +443,6 @@ Shipped but not autoloaded. Add `require("smelt.plugins.<name>")` to `~/.config/
 
 | Plugin | Summary |
 | --- | --- |
-| `smelt.plugins.background_commands` | Overrides `bash` to add `run_in_background`, registers `read_process_output` and `stop_process` tools, and the `/ps` command. |
 | `smelt.plugins.plan_mode` | Plan-mode plugin: registers the `plan` mode, `exit_plan_mode` tool, and system prompt section. |
 
 <!-- PLUGINS_END -->
@@ -941,17 +940,21 @@ Run, spawn, list, and kill processes against the `ProcessRegistry`. spawned proc
 - `smelt.process.kill` :: `fun(id: string): nil`
   Stop the registered process with `id`.
 - `smelt.process.list` :: `fun(): table`
-  Return the registry of running processes as rows of `{ id, command, elapsed_secs }`.
+  Return the registry of running processes as rows of `{ id, pid?, command, elapsed_secs }`.
+- `smelt.process.output` :: `fun(id: string): table`
+  Return the buffered output snapshot for registered process `id` without draining it.
 - `smelt.process.read_output` :: `fun(id: string): table`
   Drain buffered output from the registered process `id`.
 - `smelt.process.run` :: `fun(cmd: string, args: string[]?, opts: table?): { stdout: string, stderr: string, exit_code: integer, timed_out: boolean }?, string?`
   Run `cmd` with `args` off the main thread.
-- `smelt.process.run_streaming` :: `fun(task_id: integer, call_id: string, command: string, timeout_ms: integer): nil`
-  Run `command` with a `timeout_ms` deadline, streaming each output line into the live tool call `call_id` and resolving task `task_id` with `{ content, is_error, timed_out }` (or `{ __cancelled = true }` if cancelled).
+- `smelt.process.run_streaming` :: `fun(task_id: integer, call_id: string, command: string, timeout_ms: integer, background_on_timeout: boolean): nil`
+  Run `command` with a `timeout_ms` deadline, streaming each output line into the live tool call `call_id` and resolving task `task_id` with `{ content, is_error, timed_out, background_id? }` (or `{ __cancelled = true }` if cancelled).
 - `smelt.process.set_default_shell` :: `fun(opts: table?): nil`
   Override the wrapping shell used by `spawn_bg` and `run_streaming` for string-form commands.
 - `smelt.process.spawn_bg` :: `fun(command: string): string`
   Spawn `command` as a background child registered with the process registry.
+- `smelt.process.stop` :: `fun(id: string): { text: string }?, string?`
+  Stop a registered background process and return its buffered output.
 
 #### `smelt.provider`
 

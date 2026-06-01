@@ -23,7 +23,7 @@ Type `/` to open the command picker with fuzzy search.
 | `/thinking`               | Toggle display of thinking blocks                          |
 | `/reasoning [off|low|medium|high|max]` | Set or show reasoning effort                    |
 | `/permissions`            | Manage saved permissions                                   |
-| `/ps`                     | Manage background processes (requires `background_commands` plugin) |
+| `/ps`                     | Manage background processes                                |
 | `/history`                | Fuzzy-search prompt history (also `Ctrl+R`)                |
 | `/messages`               | Show recorded errors, warnings, and notices               |
 | `/help`                   | Show keybindings (also `?` on an empty prompt)             |

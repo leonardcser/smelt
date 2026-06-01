@@ -5,7 +5,7 @@ smelt.mode.register({
   after = "normal",
   icon = "◇ ",
   hl_group = "SmeltModePlan",
-  note = "now in plan mode. Investigate and reason only; do not modify files or run mutating commands. Use read_file, glob, grep, and read-only bash. edit_file and write_file are unavailable.",
+  note = "now in plan mode. Investigate and reason only; do not modify files or run mutating commands. Use read_file, glob, grep, read_process_output, and read-only bash. edit_file, write_file, and stop_process are unavailable.",
   permissions = {
     default_decision = "ask",
     allow_subcommands_by_default = false,
@@ -17,7 +17,7 @@ local PLAN_PROMPT = [[
 # Plan mode
 You are in PLAN mode. You must NOT make any edits, write files, or run any non-readonly tools.
 
-You may only use read-only tools: read_file, glob, grep, bash (read-only commands only).
+You may only use read-only tools: read_file, glob, grep, read_process_output, bash (read-only commands only).
 
 ## Workflow
 

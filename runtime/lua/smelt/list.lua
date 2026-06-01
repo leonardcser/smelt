@@ -21,13 +21,16 @@
 --   })
 --
 --   list:set_filter(function(it) ... end)   -- swaps the predicate + refresh
+--   list:set_items_preserve(items, function(it) return it.id end)
 --   list:refresh()                          -- re-derive visible + re-render
 --   local item = list:selected()            -- or nil
 --   list:move_cursor(1)
 --
 -- Text rendered by `render(item).text` is truncated with `smelt.text.fit`
 -- to the leaf's `content_width()` so long items don't trigger horizontal
--- panning. The list re-renders automatically when the leaf is resized.
+-- panning. Return `spans = { { text, style?, syntax? }, ... }` to render the
+-- fitted row through `buf:styled`, including inline syntax highlighting.
+-- The list re-renders automatically when the leaf is resized.
 
 smelt.list = smelt.list or {}
 
@@ -41,6 +44,44 @@ local function clone_marks(marks)
   local out = {}
   for i, m in ipairs(marks) do out[i] = m end
   return out
+end
+
+local function span_text(spans)
+  local out = {}
+  for i, span in ipairs(spans or {}) do out[i] = span.text or "" end
+  return table.concat(out)
+end
+
+local function fit_spans(spans, width)
+  if not spans then return nil end
+  if not width or width <= 0 then return spans end
+
+  local fitted = {}
+  local remaining = width
+  for _, span in ipairs(spans) do
+    if remaining <= 0 then break end
+    local text = span.text or ""
+    local span_width = smelt.text.width(text)
+    local part = text
+    if span_width > remaining then
+      part = smelt.text.fit(text, remaining)
+    end
+    if part ~= "" then
+      local out = { text = part }
+      if span.style then out.style = span.style end
+      if span.syntax then out.syntax = span.syntax end
+      fitted[#fitted + 1] = out
+    end
+    remaining = remaining - smelt.text.width(part)
+  end
+  if remaining > 0 then
+    fitted[#fitted + 1] = { text = string.rep(" ", remaining) }
+  end
+  return fitted
+end
+
+local function plain_spans(text)
+  return { { text = text } }
 end
 
 -- Read the leaf's inner-content width in cells (gutter and pad already
@@ -61,10 +102,12 @@ local function render_visible(self)
   end
   local width = content_width(self)
   local lines = {}
+  local styled_lines = {}
   local row_marks = {}
+  local use_styled = false
   for i, item in ipairs(visible) do
     local rendered = self.render(item) or {}
-    local text = rendered.text or ""
+    local text = rendered.text or span_text(rendered.spans)
     -- Truncate to the leaf's content width so long items don't trigger
     -- horizontal panning. `fit` pads to exact width — trailing whitespace
     -- is invisible and keeps the selection-highlight row uniform.
@@ -72,9 +115,19 @@ local function render_visible(self)
       text = smelt.text.fit(text, width)
     end
     lines[i] = text
+    if rendered.spans then
+      use_styled = true
+      styled_lines[i] = fit_spans(rendered.spans, width)
+    else
+      styled_lines[i] = plain_spans(text)
+    end
     row_marks[i] = clone_marks(rendered.marks)
   end
-  self.buf:lines(lines)
+  if use_styled then
+    self.buf:styled(styled_lines)
+  else
+    self.buf:lines(lines)
+  end
   for i, marks in ipairs(row_marks) do
     if marks then
       for _, m in ipairs(marks) do
@@ -106,6 +159,23 @@ end
 function List:set_items(items)
   self.items = items or {}
   self:refresh()
+end
+
+function List:set_items_preserve(items, key_fn)
+  if type(key_fn) ~= "function" then
+    error("smelt.list: key function is required", 2)
+  end
+  local selected = self:selected()
+  local selected_key = selected and key_fn(selected)
+  self.items = items or {}
+  self:refresh()
+  if selected_key == nil then return end
+  for i, item in ipairs(self.visible_items) do
+    if key_fn(item) == selected_key then
+      self.leaf:cursor(i - 1)
+      return
+    end
+  end
 end
 
 function List:set_filter(fn)
@@ -155,17 +225,18 @@ end
 ---@field leaf smelt.win.Win Selectable list leaf (typically from `smelt.dialog.list`).
 ---@field buf smelt.buf.Buf Backing buffer that mirrors the rendered rows.
 ---@field items? any[] Initial item set. Mutate via `:set_items(...)` later if needed.
----@field render fun(item: any): table Returns `{ text, marks }` per visible row.
+---@field render fun(item: any): table Returns `{ text, spans?, marks? }` per visible row.
 ---@field filter? fun(item: any): boolean Predicate re-run on `:set_filter` / `:refresh`.
 ---@field empty_text? string Placeholder line shown when no row passes the filter.
 
 -- Build a structured list bound to the dialog-list `opts.leaf` and its
 -- backing `opts.buf`. `opts.items` is the data source; `opts.render(item)`
--- returns `{ text, marks }`; `opts.filter(item)` is optional and re-runs
+-- returns `{ text, spans?, marks }`; `opts.filter(item)` is optional and re-runs
 -- whenever `:set_filter` / `:refresh` fires. `opts.empty_text` shows
 -- when no row passes the filter. Returns a handle with `:selected`,
--- `:set_filter`, `:refresh`, `:set_cursor`, `:move_cursor`. See the
--- header docstring for the full usage shape.
+-- `:set_items`, `:set_items_preserve`, `:set_filter`, `:refresh`,
+-- `:set_cursor`, `:move_cursor`. See the header docstring for the full
+-- usage shape.
 ---@type fun(opts: smelt.list.Opts): table
 function smelt.list.new(opts)
   if type(opts) ~= "table" then

@@ -16,9 +16,10 @@ Types: [`smelt.list.Opts`](types.md#smeltlistopts)
 
 Build a structured list bound to the dialog-list `opts.leaf` and its
 backing `opts.buf`. `opts.items` is the data source; `opts.render(item)`
-returns `{ text, marks }`; `opts.filter(item)` is optional and re-runs
+returns `{ text, spans?, marks }`; `opts.filter(item)` is optional and re-runs
 whenever `:set_filter` / `:refresh` fires. `opts.empty_text` shows
 when no row passes the filter. Returns a handle with `:selected`,
-`:set_filter`, `:refresh`, `:set_cursor`, `:move_cursor`. See the
-header docstring for the full usage shape.
+`:set_items`, `:set_items_preserve`, `:set_filter`, `:refresh`,
+`:set_cursor`, `:move_cursor`. See the header docstring for the full
+usage shape.
 

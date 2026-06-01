@@ -120,6 +120,8 @@ directory persists between calls.
 | `command`      | Shell command to execute (required)                        |
 | `description`  | Short (max 10 words) description of what this command does |
 | `timeout_ms`   | Timeout in milliseconds (default: 120000, max: 600000)     |
+| `background`   | Start the command in the background and return immediately (default: false) |
+| `background_on_timeout` | Move a foreground command to the background if it times out (default: true) |
 
 **Behavior:**
 
@@ -127,34 +129,30 @@ directory persists between calls.
 - Shell backgrounding (`&`) in the command string is rejected
 - Output is line-buffered (stdout and stderr multiplexed)
 - A non-zero exit code is flagged as an error
-- The call can be cancelled from the UI
+- The call can be cancelled from the UI while it is still foreground
+- `background=true` starts the command in the background immediately and returns the process id (the child pid when available)
+- With `background_on_timeout=true` (default), a foreground command that reaches `timeout_ms` keeps running in the background instead of being killed
 
-The [`background_commands`
-plugin](../guide/plugins.md#bundled-plugins) — **experimental**, opt-in — adds
-a `run_in_background` parameter to `bash` and registers the
-`read_process_output`, `stop_process`, and `/ps` interfaces described below.
-Enable it from `init.lua` with
-`require("smelt.plugins.background_commands")`.
+Use `read_process_output` and `stop_process` with the returned process id. `/ps` shows the same running process registry with live output, pid, and duration.
 
 ### `read_process_output`
 
-Reads output from a background bash process started by `bash` with
-`run_in_background=true`. Blocks until the process finishes by default; set
-`block=false` for a non-blocking check.
+Reads buffered output from a background bash process without draining it. Set
+`wait=true` to wait for the process to finish before returning.
 
 | Parameter     | Description                                                            |
 | ------------- | ---------------------------------------------------------------------- |
-| `id`          | Background process ID, e.g. `proc_1` (required)                        |
-| `block`       | Wait for the process to finish (default: true)                         |
-| `timeout_ms`  | Max wait time in ms when blocking (default: 30000)                     |
+| `id`          | Background process id (usually the child pid), e.g. `12345` (required)  |
+| `wait`        | Wait for the process to finish (default: false)                        |
+| `timeout_ms`  | Max wait time in ms when waiting (default: 30000, max: 600000)         |
 
 ### `stop_process`
 
-Stops a running background bash process and returns its accumulated output.
+Stops a running background bash process and returns its buffered output.
 
-| Parameter | Description                                     |
-| --------- | ----------------------------------------------- |
-| `id`      | Background process ID, e.g. `proc_1` (required) |
+| Parameter | Description                                                |
+| --------- | ---------------------------------------------------------- |
+| `id`      | Background process id (usually the child pid), e.g. `12345` (required) |
 
 ## Web
 

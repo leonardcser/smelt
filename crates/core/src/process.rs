@@ -8,8 +8,9 @@ use std::process::Stdio;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
-use tokio::io::{AsyncBufReadExt, BufReader};
-use tokio::sync::mpsc;
+use tokio::io::{AsyncBufReadExt, BufReader, Lines};
+use tokio::process::{Child, ChildStderr, ChildStdout};
+use tokio::sync::{mpsc, watch};
 use tokio_util::sync::CancellationToken;
 
 /// Defaults: 30s timeout, inherit env, no stdin, capture stdout+stderr.
@@ -141,6 +142,20 @@ pub struct StreamOutput {
     pub content: String,
     pub is_error: bool,
     pub timed_out: bool,
+    pub background_id: Option<String>,
+}
+
+pub struct StreamDetach {
+    pub registry: ProcessRegistry,
+    pub command: String,
+    pub now: Instant,
+}
+
+pub struct StreamConfig {
+    pub timeout: Duration,
+    pub shell: ShellSpec,
+    pub cancel: Option<CancellationToken>,
+    pub detach_on_timeout: Option<StreamDetach>,
 }
 
 /// Shell used to run a string-form command (`sh -c <cmd>` by default).
@@ -160,26 +175,7 @@ impl Default for ShellSpec {
     }
 }
 
-/// Spawn `<shell> <args...> command`, stream lines through `on_line`, return
-/// aggregated output once the child exits or the timeout expires. Child runs
-/// in its own process group so the whole group can be signalled on cancel/timeout.
-/// `shell` is the wrapping program (default `sh -c`); callers swap it to e.g.
-/// `("/bin/zsh", &["-fc"])` to run user-shell commands.
-pub async fn run_streaming_with_shell(
-    command: &str,
-    timeout: Duration,
-    shell: ShellSpec,
-    mut on_line: impl FnMut(String),
-    cancel: Option<CancellationToken>,
-) -> StreamOutput {
-    if cancel.as_ref().is_some_and(|c| c.is_cancelled()) {
-        return StreamOutput {
-            content: "cancelled".to_string(),
-            is_error: true,
-            timed_out: false,
-        };
-    }
-
+pub fn spawn_shell_child(command: &str, shell: &ShellSpec) -> io::Result<Child> {
     let mut cmd = tokio::process::Command::new(&shell.program);
     for a in &shell.args {
         cmd.arg(a);
@@ -190,14 +186,36 @@ pub async fn run_streaming_with_shell(
         .stderr(Stdio::piped());
     #[cfg(unix)]
     cmd.process_group(0);
+    cmd.spawn()
+}
 
-    let mut child = match cmd.spawn() {
+/// Spawn `<shell> <args...> command`, stream lines through `on_line`, return
+/// aggregated output once the child exits or the timeout expires. Child runs
+/// in its own process group so the whole group can be signalled on cancel/timeout.
+/// `shell` is the wrapping program (default `sh -c`); callers swap it to e.g.
+/// `("/bin/zsh", &["-fc"])` to run user-shell commands.
+pub async fn run_streaming_with_shell(
+    command: &str,
+    config: StreamConfig,
+    mut on_line: impl FnMut(String),
+) -> StreamOutput {
+    if config.cancel.as_ref().is_some_and(|c| c.is_cancelled()) {
+        return StreamOutput {
+            content: "cancelled".to_string(),
+            is_error: true,
+            timed_out: false,
+            background_id: None,
+        };
+    }
+
+    let mut child = match spawn_shell_child(command, &config.shell) {
         Ok(c) => c,
         Err(e) => {
             return StreamOutput {
                 content: e.to_string(),
                 is_error: true,
                 timed_out: false,
+                background_id: None,
             };
         }
     };
@@ -207,10 +225,11 @@ pub async fn run_streaming_with_shell(
     let mut stdout_reader = BufReader::new(stdout).lines();
     let mut stderr_reader = BufReader::new(stderr).lines();
     let mut output = String::new();
+    let mut output_lines = Vec::new();
     let mut stdout_done = false;
     let mut stderr_done = false;
 
-    let deadline = tokio::time::sleep(timeout);
+    let deadline = tokio::time::sleep(config.timeout);
     tokio::pin!(deadline);
 
     loop {
@@ -219,12 +238,19 @@ pub async fn run_streaming_with_shell(
         }
         tokio::select! {
             biased;
-            _ = cancel.as_ref().unwrap().cancelled(), if cancel.as_ref().is_some_and(|c| !c.is_cancelled()) => {
+            _ = async {
+                if let Some(cancel) = config.cancel.as_ref() {
+                    cancel.cancelled().await;
+                } else {
+                    std::future::pending::<()>().await;
+                }
+            } => {
                 kill_process_group(&child);
                 return StreamOutput {
                     content: "cancelled".to_string(),
                     is_error: true,
                     timed_out: false,
+                    background_id: None,
                 };
             }
             line = stdout_reader.next_line(), if !stdout_done => {
@@ -233,6 +259,7 @@ pub async fn run_streaming_with_shell(
                         on_line(line.clone());
                         if !output.is_empty() { output.push('\n'); }
                         output.push_str(&line);
+                        output_lines.push(line);
                     }
                     _ => stdout_done = true,
                 }
@@ -243,16 +270,34 @@ pub async fn run_streaming_with_shell(
                         on_line(line.clone());
                         if !output.is_empty() { output.push('\n'); }
                         output.push_str(&line);
+                        output_lines.push(line);
                     }
                     _ => stderr_done = true,
                 }
             }
             _ = &mut deadline => {
+                if let Some(detach) = config.detach_on_timeout {
+                    let id = detach.registry.adopt_streaming(
+                        &detach.command,
+                        child,
+                        stdout_reader,
+                        stderr_reader,
+                        detach.now,
+                        output_lines,
+                    );
+                    return StreamOutput {
+                        content: format!("timed out after {:.0}s; moved to background as {id}", config.timeout.as_secs_f64()),
+                        is_error: false,
+                        timed_out: true,
+                        background_id: Some(id),
+                    };
+                }
                 kill_process_group(&child);
                 return StreamOutput {
-                    content: format!("timed out after {:.0}s", timeout.as_secs_f64()),
+                    content: format!("timed out after {:.0}s", config.timeout.as_secs_f64()),
                     is_error: true,
                     timed_out: true,
+                    background_id: None,
                 };
             }
         }
@@ -264,6 +309,7 @@ pub async fn run_streaming_with_shell(
         content: output,
         is_error,
         timed_out: false,
+        background_id: None,
     }
 }
 
@@ -301,38 +347,80 @@ static NEXT_PROC_ID: AtomicU32 = AtomicU32::new(1);
 const MAX_LINES: usize = 10_000;
 
 struct Process {
+    pid: Option<u32>,
     lines: Vec<String>,
-    read_cursor: usize,
     finished: bool,
     exit_code: Option<i32>,
     command: String,
     started_at: Instant,
+    finished_at: Option<Instant>,
     kill_tx: Option<mpsc::Sender<()>>,
+    finished_rx: watch::Receiver<bool>,
+}
+
+#[derive(Debug, Clone)]
+pub struct ProcessCompletion {
+    pub id: String,
+    pub exit_code: Option<i32>,
+}
+
+struct ProcessRegistryInner {
+    processes: Mutex<HashMap<String, Process>>,
+    completion_tx: Mutex<Option<mpsc::UnboundedSender<ProcessCompletion>>>,
+}
+
+struct AdoptedChild {
+    id: String,
+    command: String,
+    child: Child,
+    stdout_reader: Lines<BufReader<ChildStdout>>,
+    stderr_reader: Lines<BufReader<ChildStderr>>,
+    started_at: Instant,
+    initial_lines: Vec<String>,
 }
 
 pub struct ProcessInfo {
     pub id: String,
+    pub pid: Option<u32>,
     pub command: String,
     pub started_at: Instant,
 }
 
+#[derive(Debug)]
+pub struct ProcessOutput {
+    pub text: String,
+    pub running: bool,
+    pub exit_code: Option<i32>,
+    pub elapsed_secs: u64,
+    pub pid: Option<u32>,
+}
+
 impl Process {
+    fn elapsed_secs(&self) -> u64 {
+        self.finished_at
+            .unwrap_or_else(Instant::now)
+            .saturating_duration_since(self.started_at)
+            .as_secs()
+    }
+
     fn push_line(&mut self, line: String) {
         self.lines.push(line);
         if self.lines.len() > MAX_LINES {
             let drop = self.lines.len() - MAX_LINES;
             self.lines.drain(..drop);
-            self.read_cursor = self.read_cursor.saturating_sub(drop);
         }
     }
 }
 
 #[derive(Clone)]
-pub struct ProcessRegistry(Arc<Mutex<HashMap<String, Process>>>);
+pub struct ProcessRegistry(Arc<ProcessRegistryInner>);
 
 impl Default for ProcessRegistry {
     fn default() -> Self {
-        Self(Arc::new(Mutex::new(HashMap::new())))
+        Self(Arc::new(ProcessRegistryInner {
+            processes: Mutex::new(HashMap::new()),
+            completion_tx: Mutex::new(None),
+        }))
     }
 }
 
@@ -341,42 +429,118 @@ impl ProcessRegistry {
         Self::default()
     }
 
-    pub fn spawn(
-        &self,
-        id: String,
-        command: &str,
-        mut child: tokio::process::Child,
-        done_tx: mpsc::UnboundedSender<(String, Option<i32>)>,
-        now: Instant,
-    ) {
+    pub fn set_completion_sender(&self, tx: mpsc::UnboundedSender<ProcessCompletion>) {
+        *self.0.completion_tx.lock().unwrap() = Some(tx);
+    }
+
+    pub fn child_id(&self, child: &Child) -> String {
+        child
+            .id()
+            .map(|pid| pid.to_string())
+            .unwrap_or_else(|| self.next_id())
+    }
+
+    pub fn spawn(&self, id: String, command: &str, mut child: Child, now: Instant) {
         let stdout = child.stdout.take().unwrap();
         let stderr = child.stderr.take().unwrap();
+        let stdout_reader = BufReader::new(stdout).lines();
+        let stderr_reader = BufReader::new(stderr).lines();
+        self.adopt_readers(AdoptedChild {
+            id,
+            command: command.to_string(),
+            child,
+            stdout_reader,
+            stderr_reader,
+            started_at: now,
+            initial_lines: Vec::new(),
+        });
+    }
 
+    fn adopt_streaming(
+        &self,
+        command: &str,
+        child: Child,
+        stdout_reader: Lines<BufReader<ChildStdout>>,
+        stderr_reader: Lines<BufReader<ChildStderr>>,
+        now: Instant,
+        initial_lines: Vec<String>,
+    ) -> String {
+        let id = self.child_id(&child);
+        self.adopt_readers(AdoptedChild {
+            id: id.clone(),
+            command: command.to_string(),
+            child,
+            stdout_reader,
+            stderr_reader,
+            started_at: now,
+            initial_lines,
+        });
+        id
+    }
+
+    fn adopt_readers(&self, adopted: AdoptedChild) {
+        let AdoptedChild {
+            id,
+            command,
+            mut child,
+            mut stdout_reader,
+            mut stderr_reader,
+            started_at,
+            initial_lines,
+        } = adopted;
         let (kill_tx, mut kill_rx) = mpsc::channel::<()>(1);
+        let (finished_tx, finished_rx) = watch::channel(false);
+        let pid = child.id();
 
         {
-            let mut map = self.0.lock().unwrap();
-            map.insert(
-                id.clone(),
-                Process {
-                    lines: Vec::new(),
-                    read_cursor: 0,
-                    finished: false,
-                    exit_code: None,
-                    command: command.to_string(),
-                    started_at: now,
-                    kill_tx: Some(kill_tx),
-                },
-            );
+            let mut process = Process {
+                pid,
+                lines: Vec::new(),
+                finished: false,
+                exit_code: None,
+                command,
+                started_at,
+                finished_at: None,
+                kill_tx: Some(kill_tx),
+                finished_rx,
+            };
+            for line in initial_lines {
+                process.push_line(line);
+            }
+            let mut map = self.0.processes.lock().unwrap();
+            map.insert(id.clone(), process);
         }
 
         let registry = self.0.clone();
-        let id2 = id.clone();
         tokio::spawn(async move {
-            let mut stdout_reader = BufReader::new(stdout).lines();
-            let mut stderr_reader = BufReader::new(stderr).lines();
             let mut stdout_done = false;
             let mut stderr_done = false;
+            let mut child_done = false;
+            let mut completion_sent = false;
+
+            let mut mark_finished = |code: Option<i32>| {
+                if completion_sent {
+                    return;
+                }
+                completion_sent = true;
+                let tx = {
+                    let mut map = registry.processes.lock().unwrap();
+                    if let Some(p) = map.get_mut(&id) {
+                        p.finished = true;
+                        p.finished_at = Some(Instant::now());
+                        p.exit_code = code;
+                        p.kill_tx = None;
+                    }
+                    registry.completion_tx.lock().unwrap().clone()
+                };
+                if let Some(tx) = tx {
+                    let _ = tx.send(ProcessCompletion {
+                        id: id.clone(),
+                        exit_code: code,
+                    });
+                }
+                let _ = finished_tx.send(true);
+            };
 
             loop {
                 if stdout_done && stderr_done {
@@ -384,15 +548,17 @@ impl ProcessRegistry {
                 }
                 tokio::select! {
                     biased;
-                    _ = kill_rx.recv() => {
+                    _ = kill_rx.recv(), if !child_done => {
                         kill_group_sigkill(&child);
-                        break;
+                        let code = child.wait().await.ok().and_then(|s| s.code());
+                        child_done = true;
+                        mark_finished(code);
                     }
                     line = stdout_reader.next_line(), if !stdout_done => {
                         match line {
                             Ok(Some(line)) => {
-                                let mut map = registry.lock().unwrap();
-                                if let Some(p) = map.get_mut(&id2) {
+                                let mut map = registry.processes.lock().unwrap();
+                                if let Some(p) = map.get_mut(&id) {
                                     p.push_line(line);
                                 }
                             }
@@ -402,66 +568,84 @@ impl ProcessRegistry {
                     line = stderr_reader.next_line(), if !stderr_done => {
                         match line {
                             Ok(Some(line)) => {
-                                let mut map = registry.lock().unwrap();
-                                if let Some(p) = map.get_mut(&id2) {
+                                let mut map = registry.processes.lock().unwrap();
+                                if let Some(p) = map.get_mut(&id) {
                                     p.push_line(line);
                                 }
                             }
                             _ => stderr_done = true,
                         }
                     }
+                    _ = tokio::time::sleep(Duration::from_millis(100)), if !child_done => {
+                        if let Ok(Some(status)) = child.try_wait() {
+                            child_done = true;
+                            mark_finished(status.code());
+                        }
+                    }
                 }
             }
 
-            let status = child.wait().await;
-            let code = status.ok().and_then(|s| s.code());
-            {
-                let mut map = registry.lock().unwrap();
-                if let Some(p) = map.get_mut(&id2) {
-                    p.finished = true;
-                    p.exit_code = code;
-                    p.kill_tx = None;
-                }
+            if !child_done {
+                let code = child.wait().await.ok().and_then(|s| s.code());
+                mark_finished(code);
             }
-            let _ = done_tx.send((id2, code));
         });
     }
 
-    /// Returns `(new_lines, running, exit_code)`.
-    pub fn read(&self, id: &str) -> Result<(String, bool, Option<i32>), String> {
-        let mut map = self.0.lock().unwrap();
+    /// Drains buffered output and removes finished processes.
+    pub fn drain_output(&self, id: &str) -> Result<ProcessOutput, String> {
+        let mut map = self.0.processes.lock().unwrap();
         let p = map
             .get_mut(id)
             .ok_or_else(|| format!("no process with id '{id}'"))?;
         let output = std::mem::take(&mut p.lines).join("\n");
-        p.read_cursor = 0;
         let running = !p.finished;
+        let finished = p.finished;
         let exit_code = p.exit_code;
-        if p.finished {
+        let elapsed_secs = p.elapsed_secs();
+        let pid = p.pid;
+        if finished {
             map.remove(id);
         }
-        Ok((output, running, exit_code))
+        Ok(ProcessOutput {
+            pid,
+            text: output,
+            running,
+            exit_code,
+            elapsed_secs,
+        })
+    }
+
+    /// Returns buffered output without draining or removing the process.
+    pub fn snapshot_output(&self, id: &str) -> Result<ProcessOutput, String> {
+        let map = self.0.processes.lock().unwrap();
+        let p = map
+            .get(id)
+            .ok_or_else(|| format!("no process with id '{id}'"))?;
+        Ok(ProcessOutput {
+            pid: p.pid,
+            text: p.lines.join("\n"),
+            running: !p.finished,
+            exit_code: p.exit_code,
+            elapsed_secs: p.elapsed_secs(),
+        })
     }
 
     pub async fn stop(&self, id: &str) -> Result<String, String> {
-        let kill_tx = {
-            let mut map = self.0.lock().unwrap();
+        let (kill_tx, mut finished_rx) = {
+            let mut map = self.0.processes.lock().unwrap();
             let p = map
                 .get_mut(id)
                 .ok_or_else(|| format!("no process with id '{id}'"))?;
-            p.kill_tx.take()
+            (p.kill_tx.take(), p.finished_rx.clone())
         };
         if let Some(tx) = kill_tx {
             let _ = tx.try_send(());
         }
-        for _ in 0..20 {
-            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
-            let map = self.0.lock().unwrap();
-            if map.get(id).is_some_and(|p| p.finished) {
-                break;
-            }
+        if !*finished_rx.borrow() {
+            let _ = tokio::time::timeout(Duration::from_secs(2), finished_rx.changed()).await;
         }
-        let mut map = self.0.lock().unwrap();
+        let mut map = self.0.processes.lock().unwrap();
         let p = map
             .remove(id)
             .ok_or_else(|| format!("no process with id '{id}'"))?;
@@ -474,17 +658,18 @@ impl ProcessRegistry {
     }
 
     pub fn running_count(&self) -> usize {
-        let map = self.0.lock().unwrap();
+        let map = self.0.processes.lock().unwrap();
         map.values().filter(|p| !p.finished).count()
     }
 
     pub fn list(&self) -> Vec<ProcessInfo> {
-        let map = self.0.lock().unwrap();
+        let map = self.0.processes.lock().unwrap();
         let mut procs: Vec<ProcessInfo> = map
             .iter()
             .filter(|(_, p)| !p.finished)
             .map(|(id, p)| ProcessInfo {
                 id: id.clone(),
+                pid: p.pid,
                 command: p.command.clone(),
                 started_at: p.started_at,
             })
@@ -494,7 +679,7 @@ impl ProcessRegistry {
     }
 
     pub fn clear(&self) {
-        let mut map = self.0.lock().unwrap();
+        let mut map = self.0.processes.lock().unwrap();
         for p in map.values_mut() {
             if let Some(tx) = p.kill_tx.take() {
                 let _ = tx.try_send(());
@@ -507,6 +692,49 @@ impl ProcessRegistry {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn finished_rx(finished: bool) -> watch::Receiver<bool> {
+        watch::channel(finished).1
+    }
+
+    fn process_fixture(
+        lines: Vec<&str>,
+        finished: bool,
+        exit_code: Option<i32>,
+        started_at: Instant,
+        finished_at: Option<Instant>,
+    ) -> Process {
+        Process {
+            pid: None,
+            lines: lines.into_iter().map(String::from).collect(),
+            finished,
+            exit_code,
+            command: "cmd".into(),
+            started_at,
+            finished_at,
+            kill_tx: None,
+            finished_rx: finished_rx(finished),
+        }
+    }
+
+    async fn wait_for_snapshot(
+        registry: &ProcessRegistry,
+        id: &str,
+        mut predicate: impl FnMut(&ProcessOutput) -> bool,
+    ) -> ProcessOutput {
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
+        loop {
+            let snapshot = registry.snapshot_output(id).unwrap();
+            if predicate(&snapshot) {
+                return snapshot;
+            }
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "timed out waiting for process {id}; last snapshot: {snapshot:?}"
+            );
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    }
 
     async fn run(cmd: &str, args: &[&str], opts: &Options) -> Output {
         let args: Vec<String> = args.iter().map(|s| s.to_string()).collect();
@@ -566,6 +794,148 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn streaming_timeout_can_detach_to_registry() {
+        let registry = ProcessRegistry::new();
+        let out = run_streaming_with_shell(
+            "echo start; sleep 5",
+            StreamConfig {
+                timeout: Duration::from_millis(100),
+                shell: ShellSpec::default(),
+                cancel: None,
+                detach_on_timeout: Some(StreamDetach {
+                    registry: registry.clone(),
+                    command: "echo start; sleep 5".into(),
+                    now: Instant::now(),
+                }),
+            },
+            |_| {},
+        )
+        .await;
+
+        let id = out.background_id.expect("detached process id");
+        assert!(out.timed_out);
+        assert!(!out.is_error);
+        assert_eq!(registry.running_count(), 1);
+        let snapshot = registry.snapshot_output(&id).unwrap();
+        assert!(snapshot.running);
+        assert!(snapshot.text.contains("start"));
+        let _ = registry.stop(&id).await;
+    }
+
+    #[tokio::test]
+    async fn registry_uses_child_pid_as_background_id() {
+        let registry = ProcessRegistry::new();
+        let child = spawn_shell_child("sleep 5", &ShellSpec::default()).unwrap();
+        let pid = child.id().expect("spawned child has pid");
+        let id = registry.child_id(&child);
+
+        registry.spawn(id.clone(), "sleep 5", child, Instant::now());
+
+        assert_eq!(id, pid.to_string());
+        assert_eq!(registry.running_count(), 1);
+        let _ = registry.stop(&id).await;
+    }
+
+    #[tokio::test]
+    async fn registry_reports_natural_completion_and_keeps_snapshot() {
+        let registry = ProcessRegistry::new();
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        registry.set_completion_sender(tx);
+        let child = spawn_shell_child("echo done", &ShellSpec::default()).unwrap();
+        let id = registry.child_id(&child);
+
+        registry.spawn(id.clone(), "echo done", child, Instant::now());
+
+        let completion = tokio::time::timeout(Duration::from_secs(2), rx.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(completion.id, id);
+        assert_eq!(completion.exit_code, Some(0));
+
+        let snapshot = wait_for_snapshot(&registry, &id, |out| !out.running).await;
+        assert!(!snapshot.running);
+        assert_eq!(snapshot.exit_code, Some(0));
+        assert!(snapshot.text.contains("done"));
+        assert_eq!(registry.running_count(), 0);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn registry_detects_external_process_exit() {
+        let registry = ProcessRegistry::new();
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        registry.set_completion_sender(tx);
+        let child = spawn_shell_child("echo ready; sleep 30", &ShellSpec::default()).unwrap();
+        let id = registry.child_id(&child);
+
+        registry.spawn(id.clone(), "echo ready; sleep 30", child, Instant::now());
+        wait_for_snapshot(&registry, &id, |out| out.text.contains("ready")).await;
+
+        // SAFETY: the registry spawned the child in its own process group whose
+        // group id matches the pid-derived background id.
+        unsafe {
+            libc::kill(-(id.parse::<i32>().unwrap()), libc::SIGTERM);
+        }
+
+        let completion = tokio::time::timeout(Duration::from_secs(2), rx.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(completion.id, id);
+        assert_eq!(completion.exit_code, None);
+
+        let snapshot = wait_for_snapshot(&registry, &id, |out| !out.running).await;
+        assert!(!snapshot.running);
+        assert_eq!(snapshot.exit_code, None);
+        assert_eq!(registry.running_count(), 0);
+    }
+
+    #[tokio::test]
+    async fn registry_stop_kills_process_and_returns_buffered_output() {
+        let registry = ProcessRegistry::new();
+        let child = spawn_shell_child("echo started; sleep 30", &ShellSpec::default()).unwrap();
+        let id = registry.child_id(&child);
+
+        registry.spawn(id.clone(), "echo started; sleep 30", child, Instant::now());
+        wait_for_snapshot(&registry, &id, |out| out.text.contains("started")).await;
+
+        let output = tokio::time::timeout(Duration::from_secs(2), registry.stop(&id))
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(output.contains("started"));
+        assert!(registry.snapshot_output(&id).is_err());
+        assert_eq!(registry.running_count(), 0);
+    }
+
+    #[test]
+    fn process_elapsed_secs_freezes_at_finished_at() {
+        let registry = ProcessRegistry::new();
+        let started_at = Instant::now() - Duration::from_secs(10);
+        {
+            let mut map = registry.0.processes.lock().unwrap();
+            map.insert(
+                "done".into(),
+                process_fixture(
+                    Vec::new(),
+                    true,
+                    Some(0),
+                    started_at,
+                    Some(started_at + Duration::from_secs(3)),
+                ),
+            );
+        }
+
+        let first = registry.snapshot_output("done").unwrap().elapsed_secs;
+        std::thread::sleep(Duration::from_millis(20));
+        let second = registry.snapshot_output("done").unwrap().elapsed_secs;
+
+        assert_eq!(first, 3);
+        assert_eq!(second, first);
+    }
+
+    #[tokio::test]
     async fn run_passes_custom_env_to_child() {
         let mut env = HashMap::new();
         env.insert("SMELT_TEST_VAR".into(), "from_test".into());
@@ -622,7 +992,7 @@ mod tests {
     #[test]
     fn registry_read_unknown_id_returns_error() {
         let r = ProcessRegistry::new();
-        let err = r.read("no_such_proc").unwrap_err();
+        let err = r.drain_output("no_such_proc").unwrap_err();
         assert!(err.contains("no_such_proc"));
     }
 
@@ -643,16 +1013,7 @@ mod tests {
 
     #[test]
     fn process_push_line_truncates_to_max_lines() {
-        // Constructed directly: registry is private, so build a Process inline.
-        let mut p = Process {
-            lines: Vec::new(),
-            read_cursor: 0,
-            finished: false,
-            exit_code: None,
-            command: "cmd".into(),
-            started_at: Instant::now(),
-            kill_tx: None,
-        };
+        let mut p = process_fixture(Vec::new(), false, None, Instant::now(), None);
         for i in 0..(MAX_LINES + 5) {
             p.push_line(format!("line{i}"));
         }
@@ -669,19 +1030,11 @@ mod tests {
         // Insert synthetic entries directly via the lock so we don't spawn real children.
         let r = ProcessRegistry::new();
         {
-            let mut map = r.0.lock().unwrap();
+            let mut map = r.0.processes.lock().unwrap();
             for i in ["proc_b", "proc_a", "proc_c"] {
                 map.insert(
                     i.into(),
-                    Process {
-                        lines: Vec::new(),
-                        read_cursor: 0,
-                        finished: false,
-                        exit_code: None,
-                        command: format!("cmd_{i}"),
-                        started_at: Instant::now(),
-                        kill_tx: None,
-                    },
+                    process_fixture(Vec::new(), false, None, Instant::now(), None),
                 );
             }
         }
@@ -695,30 +1048,14 @@ mod tests {
     fn process_list_filters_out_finished_entries() {
         let r = ProcessRegistry::new();
         {
-            let mut map = r.0.lock().unwrap();
+            let mut map = r.0.processes.lock().unwrap();
             map.insert(
                 "live".into(),
-                Process {
-                    lines: Vec::new(),
-                    read_cursor: 0,
-                    finished: false,
-                    exit_code: None,
-                    command: "x".into(),
-                    started_at: Instant::now(),
-                    kill_tx: None,
-                },
+                process_fixture(Vec::new(), false, None, Instant::now(), None),
             );
             map.insert(
                 "dead".into(),
-                Process {
-                    lines: Vec::new(),
-                    read_cursor: 0,
-                    finished: true,
-                    exit_code: Some(0),
-                    command: "y".into(),
-                    started_at: Instant::now(),
-                    kill_tx: None,
-                },
+                process_fixture(Vec::new(), true, Some(0), Instant::now(), None),
             );
         }
         let listing = r.list();
@@ -731,52 +1068,36 @@ mod tests {
     fn process_read_drains_lines_and_removes_finished_entry() {
         let r = ProcessRegistry::new();
         {
-            let mut map = r.0.lock().unwrap();
+            let mut map = r.0.processes.lock().unwrap();
             map.insert(
                 "p1".into(),
-                Process {
-                    lines: vec!["a".into(), "b".into()],
-                    read_cursor: 0,
-                    finished: true,
-                    exit_code: Some(0),
-                    command: "x".into(),
-                    started_at: Instant::now(),
-                    kill_tx: None,
-                },
+                process_fixture(vec!["a", "b"], true, Some(0), Instant::now(), None),
             );
         }
-        let (out, running, exit) = r.read("p1").unwrap();
-        assert_eq!(out, "a\nb");
-        assert!(!running);
-        assert_eq!(exit, Some(0));
+        let out = r.drain_output("p1").unwrap();
+        assert_eq!(out.text, "a\nb");
+        assert!(!out.running);
+        assert_eq!(out.exit_code, Some(0));
         // Finished entry should be removed.
-        assert!(r.read("p1").is_err());
+        assert!(r.drain_output("p1").is_err());
     }
 
     #[test]
     fn process_read_keeps_entry_when_still_running() {
         let r = ProcessRegistry::new();
         {
-            let mut map = r.0.lock().unwrap();
+            let mut map = r.0.processes.lock().unwrap();
             map.insert(
                 "p1".into(),
-                Process {
-                    lines: vec!["a".into()],
-                    read_cursor: 0,
-                    finished: false,
-                    exit_code: None,
-                    command: "x".into(),
-                    started_at: Instant::now(),
-                    kill_tx: None,
-                },
+                process_fixture(vec!["a"], false, None, Instant::now(), None),
             );
         }
-        let (out, running, exit) = r.read("p1").unwrap();
-        assert_eq!(out, "a");
-        assert!(running);
-        assert_eq!(exit, None);
+        let out = r.drain_output("p1").unwrap();
+        assert_eq!(out.text, "a");
+        assert!(out.running);
+        assert_eq!(out.exit_code, None);
         // Entry is still registered with drained lines.
-        let map = r.0.lock().unwrap();
+        let map = r.0.processes.lock().unwrap();
         assert!(map.get("p1").is_some());
         assert!(map.get("p1").unwrap().lines.is_empty());
     }

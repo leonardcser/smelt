@@ -85,11 +85,12 @@ referencing another group in the same spec.
 ```lua
 -- ~/.config/smelt/lua/smelt/colorschemes/mytheme.lua
 return {
-  SmeltAccent = { fg = { ansi = 208 } },           -- ember
-  SmeltMuted  = { fg = { ansi = 244 } },
-  SmeltUserBg = { bg = { dark = { ansi = 236 },    -- light/dark branches
+  SmeltAccent  = { fg = { ansi = 208 } },           -- ember
+  SmeltProcess = { fg = { ansi = 117 } },           -- background-process notices/counters
+  SmeltMuted   = { fg = { ansi = 244 } },
+  SmeltUserBg  = { bg = { dark = { ansi = 236 },    -- light/dark branches
                          light = { ansi = 254 } } },
-  Comment     = "SmeltMuted",                       -- alias another group
+  Comment      = "SmeltMuted",                       -- alias another group
 }
 ```
 

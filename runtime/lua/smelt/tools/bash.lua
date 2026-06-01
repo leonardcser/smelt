@@ -4,6 +4,7 @@ local M = {}
 
 local DEFAULT_TIMEOUT_MS = 120000
 local MAX_TIMEOUT_MS = 600000
+local DEFAULT_BACKGROUND_ON_TIMEOUT = true
 
 -- Read-only command prefixes that auto-approve. Also used locally to avoid
 -- suggesting patterns that are already permanently allowed.
@@ -77,17 +78,31 @@ function M.execute(args, ctx)
     return { content = err, is_error = true }
   end
 
+  local background = args.background == true
+  local background_on_timeout = args.background_on_timeout
+  if background_on_timeout == nil then background_on_timeout = DEFAULT_BACKGROUND_ON_TIMEOUT end
+
   local timeout_ms = args.timeout_ms or DEFAULT_TIMEOUT_MS
   if timeout_ms > MAX_TIMEOUT_MS then
     timeout_ms = MAX_TIMEOUT_MS
   end
 
+  if background then
+    local proc_id = smelt.process.spawn_bg(command)
+    return {
+      content = "started background process " .. proc_id,
+      is_error = false,
+      metadata = { background_id = proc_id },
+    }
+  end
+
   local id = smelt.task.alloc()
-  smelt.process.run_streaming(id, ctx.call_id or "", command, timeout_ms)
+  smelt.process.run_streaming(id, ctx.call_id or "", command, timeout_ms, background_on_timeout)
   local result = smelt.task.wait(id)
   return {
     content = result.content or "",
     is_error = result.is_error and true or false,
+    metadata = result.background_id and { background_id = result.background_id } or nil,
   }
 end
 
@@ -97,13 +112,15 @@ smelt.tools.register({
   default_allow = DEFAULT_ALLOW,
   subpattern_parser = "shell",
   description =
-  "Execute a non-interactive bash command and return its output. The working directory persists between calls. Commands time out after 2 minutes by default (configurable up to 10 minutes). Do not use shell backgrounding (`&`) in the command string. Do not run interactive commands (editors, pagers, interactive rebases, etc.) — they will hang. If there is no non-interactive alternative, ask the user to run it themselves.",
+  "Execute a non-interactive bash command and return its output. The working directory persists between calls. Commands time out after 2 minutes by default (configurable up to 10 minutes); by default, a still-running command is moved to the background on timeout. Use background=true to start it in the background immediately. When a command is in the background, use read_process_output to inspect it and stop_process to kill it. Do not use shell backgrounding (`&`) in the command string. Do not run interactive commands (editors, pagers, interactive rebases, etc.) — they will hang. If there is no non-interactive alternative, ask the user to run it themselves.",
   parameters = {
     type = "object",
     properties = {
       command = { type = "string", description = "Shell command to execute" },
       description = { type = "string", description = "Short (max 10 words) description of what this command does" },
       timeout_ms = { type = "integer", description = "Timeout in milliseconds (default: 120000, max: 600000)" },
+      background = { type = "boolean", description = "Run the command in the background and return immediately (default: false)" },
+      background_on_timeout = { type = "boolean", description = "If the timeout expires, keep the command running in the background instead of killing it (default: true)" },
     },
     required = { "command" },
   },
@@ -120,8 +137,12 @@ smelt.tools.register({
     for line in (cmd .. "\n"):gmatch("([^\n]*)\n") do
       local spans = { { text = line, syntax = "bash" } }
       if #lines == 0 then
+        local suffix = args.background and "(background)" or ("(timeout: " .. format_timeout(timeout_ms) .. ")")
+        if not args.background and args.background_on_timeout == false then
+          suffix = suffix .. " (kill on timeout)"
+        end
         spans[#spans + 1] = {
-          text = "(timeout: " .. format_timeout(timeout_ms) .. ")",
+          text = suffix,
           selectable = false,
           title_suffix = true,
           style = { dim = true },

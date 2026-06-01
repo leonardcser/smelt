@@ -111,6 +111,7 @@
 ---@field keymaps? smelt.dialog.Keymap[] Dialog-level key bindings (merged with built-ins).
 ---@field on_submit? fun(ctx: any): any Handler invoked on Enter; default resolves with the focused leaf.
 ---@field on_dismiss? fun(): nil Handler invoked when the dialog is dismissed.
+---@field on_close? fun(ctx: any): nil Handler invoked once whenever the dialog resolves or closes.
 
 --- One body panel inside a dialog. `leaf` is the win/leaf built by one of
 --- the `smelt.dialog.*` helpers; `height` follows the same grammar as
@@ -215,7 +216,7 @@
 ---@field leaf smelt.win.Win Selectable list leaf (typically from `smelt.dialog.list`).
 ---@field buf smelt.buf.Buf Backing buffer that mirrors the rendered rows.
 ---@field items? any[] Initial item set. Mutate via `:set_items(...)` later if needed.
----@field render fun(item: any): table Returns `{ text, marks }` per visible row.
+---@field render fun(item: any): table Returns `{ text, spans?, marks? }` per visible row.
 ---@field filter? fun(item: any): boolean Predicate re-run on `:set_filter` / `:refresh`.
 ---@field empty_text? string Placeholder line shown when no row passes the filter.
 

@@ -223,6 +223,7 @@ impl TuiApp {
             let role = match block {
                 Block::User { .. } => "user",
                 Block::Mode { .. } => "mode",
+                Block::ProcessStatus { .. } => "process_status",
                 Block::Text { .. } => "assistant",
                 Block::Thinking { .. } => "thinking",
                 Block::ToolCall { .. } => "tool",
@@ -245,32 +246,55 @@ impl TuiApp {
             .finalize_active_tools(&mut self.transcript.history);
     }
 
-    pub(crate) fn apply_pending_mode_change_for_request(&mut self) {
-        let Some(mode_change) = self.pending_mode_change.take() else {
-            return;
-        };
-        self.apply_mode_change_to_history(mode_change.note);
-        self.commit_mode_block(mode_change.block);
+    pub(crate) fn apply_pending_history_appends_for_request(&mut self) {
+        let appends = std::mem::take(&mut self.pending_history_appends);
+        for append in appends {
+            self.apply_history_append_to_history(
+                append.history_note(),
+                append.replacement_prefix(),
+            );
+            self.commit_history_append_block(
+                append.transcript_block(),
+                append.replacement_prefix(),
+            );
+        }
     }
 
-    pub(crate) fn commit_pending_mode_change(&mut self) {
-        let Some(mode_change) = self.pending_mode_change.take() else {
+    pub(crate) fn commit_pending_history_append(&mut self, note: &str) {
+        let Some(idx) = self
+            .pending_history_appends
+            .iter()
+            .position(|append| append.history_note() == note)
+        else {
             return;
         };
-        self.commit_mode_block(mode_change.block);
+        let append = self.pending_history_appends.remove(idx);
+        self.commit_history_append_block(append.transcript_block(), append.replacement_prefix());
     }
 
-    pub(crate) fn commit_mode_block(&mut self, mode_block: Block) {
-        if let Some(id) = self.transcript.history.order.last().copied() {
-            if matches!(
-                self.transcript.history.blocks.get(&id),
-                Some(Block::Mode { .. })
-            ) {
-                self.transcript.history.rewrite(id, mode_block);
-                return;
+    pub(crate) fn commit_history_append_block(
+        &mut self,
+        block: Block,
+        replace_user_prefix: Option<&str>,
+    ) {
+        if let Some(prefix) = replace_user_prefix {
+            if let Some(id) = self.transcript.history.order.last().copied() {
+                let replaces_mode_block = prefix == protocol::MODE_NOTE_PREFIX
+                    && matches!(
+                        self.transcript.history.blocks.get(&id),
+                        Some(Block::Mode { .. })
+                    );
+                let replaces_prefixed_text = matches!(
+                    self.transcript.history.blocks.get(&id),
+                    Some(Block::User { text, .. }) if text.starts_with(prefix)
+                );
+                if replaces_mode_block || replaces_prefixed_text {
+                    self.transcript.history.rewrite(id, block);
+                    return;
+                }
             }
         }
-        self.push_block(mode_block);
+        self.push_block(block);
     }
 
     pub(crate) fn drain_finished_blocks(&mut self) -> Vec<BlockId> {
@@ -299,7 +323,7 @@ impl TuiApp {
     }
 
     pub(crate) fn clear_transcript(&mut self) {
-        self.pending_mode_change = None;
+        self.pending_history_appends.clear();
         self.transcript.history.clear();
         self.parser.clear();
     }

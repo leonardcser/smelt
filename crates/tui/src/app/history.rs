@@ -20,17 +20,22 @@ impl TuiApp {
     }
 
     pub(crate) fn set_history(&mut self, history: Vec<HistoryItem>) {
-        let applies_pending_mode = self.pending_mode_change.as_ref().is_some_and(|pending| {
-            history.iter().any(|item| match item {
-                HistoryItem::User { content } => content.as_text() == pending.note,
-                _ => false,
+        let applied_notes: Vec<String> = self
+            .pending_history_appends
+            .iter()
+            .filter(|pending| {
+                history.iter().any(|item| match item {
+                    HistoryItem::User { content } => content.as_text() == pending.history_note(),
+                    _ => false,
+                })
             })
-        });
+            .map(|pending| pending.history_note().to_string())
+            .collect();
         self.core
             .session
             .merge_model_history_snapshot(engine::SUMMARY_PREFIX, history);
-        if applies_pending_mode {
-            self.commit_pending_mode_change();
+        for note in applied_notes {
+            self.commit_pending_history_append(&note);
         }
         self.sync_session_snapshot();
         self.publish_history_delta("set");
@@ -47,25 +52,31 @@ impl TuiApp {
         );
     }
 
-    pub(crate) fn apply_mode_change_to_history(&mut self, note: String) {
-        let new_item = HistoryItem::user(Content::text(note));
-        let last_is_mode_note = self
-            .core
-            .session
-            .history
-            .last()
-            .and_then(|item| match item {
-                HistoryItem::User { content } => Some(content),
-                _ => None,
-            })
-            .is_some_and(|c| c.as_text().starts_with(protocol::MODE_NOTE_PREFIX));
-        if last_is_mode_note {
-            if let Some(last) = self.core.session.history.last_mut() {
-                *last = new_item;
+    pub(crate) fn apply_history_append_to_history(
+        &mut self,
+        note: &str,
+        replace_user_prefix: Option<&str>,
+    ) {
+        let new_item = HistoryItem::user(Content::text(note.to_string()));
+        if let Some(prefix) = replace_user_prefix {
+            let last_matches = self
+                .core
+                .session
+                .history
+                .last()
+                .and_then(|item| match item {
+                    HistoryItem::User { content } => Some(content),
+                    _ => None,
+                })
+                .is_some_and(|c| c.as_text().starts_with(prefix));
+            if last_matches {
+                if let Some(last) = self.core.session.history.last_mut() {
+                    *last = new_item;
+                }
+                return;
             }
-        } else {
-            self.core.session.history.push(new_item);
         }
+        self.core.session.history.push(new_item);
     }
 
     pub(crate) fn sync_session_snapshot(&mut self) {

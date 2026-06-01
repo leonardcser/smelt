@@ -39,7 +39,7 @@ impl TuiApp {
             let _perf = smelt_perf::perf::begin("agent:tool_defs");
             self.lua.tool_defs(self.core.config.mode.clone())
         };
-        self.apply_pending_mode_change_for_request();
+        self.apply_pending_history_appends_for_request();
         (system_prompt, tools)
     }
 
@@ -116,6 +116,22 @@ impl TuiApp {
             permissions: self.core.permissions.clone(),
             _perf: smelt_perf::perf::begin("agent:turn"),
         }
+    }
+
+    pub(crate) fn begin_process_status_turn(&mut self, note: String) -> TurnState {
+        self.sleep_inhibit.acquire();
+        self.clear_prompt_prediction();
+        self.begin_turn();
+        self.push_block(Block::ProcessStatus { text: note.clone() });
+        if !note.is_empty() {
+            self.core
+                .session
+                .history
+                .push(HistoryItem::user(Content::text(note.clone())));
+            self.sync_session_snapshot();
+            self.core.session.history.pop();
+        }
+        self.dispatch_turn(Content::text(note))
     }
 
     pub(crate) fn begin_custom_command_turn(
@@ -310,7 +326,7 @@ impl TuiApp {
         // sentinel that lingers past `agent = None`).
         self.flush_streaming_thinking();
         self.flush_streaming_text();
-        self.pending_mode_change = None;
+        self.pending_history_appends.clear();
         {
             self.working.finish(TurnOutcome::Interrupted);
         };
@@ -352,7 +368,7 @@ impl TuiApp {
         self.flush_streaming_text();
         self.finish_transcript_turn();
         if cancelled {
-            self.pending_mode_change = None;
+            self.pending_history_appends.clear();
         }
         if cancelled {
             {
@@ -386,7 +402,7 @@ impl TuiApp {
                 .push((self.core.session.history.len(), meta));
         }
         if !cancelled {
-            self.apply_pending_mode_change_for_request();
+            self.apply_pending_history_appends_for_request();
         }
         self.snapshot_tokens();
         self.save_session();
@@ -448,12 +464,24 @@ impl TuiApp {
     }
 
     pub(crate) fn handle_process_completed(&mut self, id: String, exit_code: Option<i32>) {
-        let msg = match exit_code {
-            Some(0) => format!("Background process {id} has finished."),
-            Some(c) => format!("Background process {id} exited with code {c}."),
-            None => format!("Background process {id} exited."),
+        let status = match exit_code {
+            Some(0) => "finished successfully".to_string(),
+            Some(c) => format!("exited with code {c}"),
+            None => "exited".to_string(),
         };
-        self.push_block(Block::Text { content: msg });
+        let note = format!(
+            "Background process {id} {status}. Use read_process_output with id {id} to inspect its output."
+        );
+        if self.agent_is_running() {
+            self.queue_history_append(crate::app::PendingHistoryAppend::ProcessStatus { note });
+        } else if self.busy_stack.is_busy() {
+            if self.queued_inputs.len() < crate::app::MAX_QUEUED_MESSAGES {
+                self.queued_inputs
+                    .push(crate::app::QueuedInput::ProcessStatus(note));
+            }
+        } else {
+            self.agent = Some(self.begin_process_status_turn(note));
+        }
     }
 
     pub(crate) fn session_permission_entries(&self) -> Vec<PermissionEntry> {
@@ -808,6 +836,105 @@ pub(crate) fn lookup_api_key(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn process_status_blocks(app: &crate::app::test_harness::TestApp) -> Vec<String> {
+        app.app
+            .transcript
+            .history
+            .order
+            .iter()
+            .filter_map(|id| app.app.transcript.history.blocks.get(id))
+            .filter_map(|block| match block {
+                Block::ProcessStatus { text } => Some(text.clone()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn user_blocks(app: &crate::app::test_harness::TestApp) -> Vec<String> {
+        app.app
+            .transcript
+            .history
+            .order
+            .iter()
+            .filter_map(|id| app.app.transcript.history.blocks.get(id))
+            .filter_map(|block| match block {
+                Block::User { text, .. } => Some(text.clone()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn idle_process_completion_starts_turn_with_process_status_block() {
+        let mut app = crate::app::test_harness::TestApp::builder().build();
+
+        app.app.handle_process_completed("1234".into(), Some(0));
+
+        assert!(app.app.agent_is_running());
+        assert_eq!(user_blocks(&app), Vec::<String>::new());
+        assert_eq!(
+            process_status_blocks(&app),
+            vec!["Background process 1234 finished successfully. Use read_process_output with id 1234 to inspect its output."]
+        );
+    }
+
+    #[test]
+    fn running_agent_process_completion_queues_process_status_append() {
+        let mut app = crate::app::test_harness::TestApp::builder().build();
+        app.start_turn(7);
+
+        app.app.handle_process_completed("4242".into(), Some(9));
+
+        assert!(process_status_blocks(&app).is_empty());
+        assert_eq!(app.app.pending_history_appends.len(), 1);
+        assert!(matches!(
+            app.app.pending_history_appends[0],
+            crate::app::PendingHistoryAppend::ProcessStatus { .. }
+        ));
+        assert_eq!(
+            app.app.pending_history_appends[0].history_note(),
+            "Background process 4242 exited with code 9. Use read_process_output with id 4242 to inspect its output."
+        );
+    }
+
+    #[test]
+    fn queued_process_status_starts_process_status_turn() {
+        let mut app = crate::app::test_harness::TestApp::builder().build();
+        let note = "Background process 77 exited. Use read_process_output with id 77 to inspect its output.".to_string();
+
+        app.app
+            .start_queued_input(crate::app::QueuedInput::ProcessStatus(note.clone()));
+
+        assert!(app.app.agent_is_running());
+        assert_eq!(process_status_blocks(&app), vec![note]);
+        assert!(user_blocks(&app).is_empty());
+    }
+
+    #[tokio::test]
+    async fn cancelling_turn_does_not_kill_registered_background_process() {
+        let mut app = crate::app::test_harness::TestApp::builder().build();
+        let registry = app.app.core.processes.clone();
+        let child = smelt_core::process::spawn_shell_child(
+            "echo alive; sleep 30",
+            &smelt_core::process::ShellSpec::default(),
+        )
+        .unwrap();
+        let id = registry.child_id(&child);
+        registry.spawn(
+            id.clone(),
+            "echo alive; sleep 30",
+            child,
+            std::time::Instant::now(),
+        );
+        app.start_turn(1);
+
+        app.cancel();
+
+        assert!(registry.snapshot_output(&id).unwrap().running);
+        assert_eq!(registry.running_count(), 1);
+        let _ = registry.stop(&id).await;
+    }
 
     #[test]
     fn empty_key_env_returns_empty_string_without_consulting_environment() {

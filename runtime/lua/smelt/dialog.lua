@@ -113,6 +113,7 @@ local GUTTER = 1
 ---@field keymaps? smelt.dialog.Keymap[] Dialog-level key bindings (merged with built-ins).
 ---@field on_submit? fun(ctx: any): any Handler invoked on Enter; default resolves with the focused leaf.
 ---@field on_dismiss? fun(): nil Handler invoked when the dialog is dismissed.
+---@field on_close? fun(ctx: any): nil Handler invoked once whenever the dialog resolves or closes.
 
 --- Options accepted by `smelt.dialog.picker`. Layered on top of
 --- `smelt.dialog.Opts`; only the picker-specific fields are listed.
@@ -675,10 +676,15 @@ local function setup_lifecycle(opts, leaves, overlay, resolve_fn)
     focused_leaf = opts.focus,
   }
 
+  local make_ctx
   local resolved = false
   local function resolve(value)
     if resolved then return end
     resolved = true
+    if type(opts.on_close) == "function" then
+      local ok, err = pcall(opts.on_close, make_ctx())
+      if not ok then report_callback_error("on_close", err) end
+    end
     -- Pop our entry off the dialog stack. We scan the stack from the top
     -- in case nested dialogs resolve out of order (a child dialog closes
     -- last) — only remove our own entry.
@@ -705,7 +711,7 @@ local function setup_lifecycle(opts, leaves, overlay, resolve_fn)
   -- Build a ctx for user callbacks. Raw event fields (`text`, `index`, `code`,
   -- `mods`, `leaf`) flow through unchanged; the shared dialog ctx is layered
   -- underneath so callbacks see `resolve`, `close`, `panels`, `focused_leaf`.
-  local function make_ctx(raw_ctx)
+  make_ctx = function(raw_ctx)
     local out = {
       win          = ctx.win,
       panels       = ctx.panels,

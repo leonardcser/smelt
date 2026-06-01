@@ -87,7 +87,9 @@ pub struct TuiApp {
     pub(crate) last_height: u16,
     pub(crate) next_turn_id: u64,
     pub(crate) pending_turn_meta: Option<protocol::TurnMeta>,
-    pub(crate) pending_mode_change: Option<PendingModeChange>,
+    pub(crate) pending_history_appends: Vec<PendingHistoryAppend>,
+    process_completion_rx:
+        tokio::sync::mpsc::UnboundedReceiver<smelt_core::process::ProcessCompletion>,
     pub(crate) context_tokens_updated_this_turn: bool,
     pub(crate) cancel_generation: u64,
     /// Set while routing an engine event whose `TurnState` has been moved
@@ -310,13 +312,14 @@ pub(crate) const MAX_QUEUED_MESSAGES: usize = 64;
 #[derive(Clone)]
 pub(crate) enum QueuedInput {
     Message(String),
+    ProcessStatus(String),
     CustomCommand(Box<smelt_core::custom_commands::CustomCommand>),
 }
 
 impl QueuedInput {
     pub(crate) fn display(&self) -> String {
         match self {
-            QueuedInput::Message(text) => text.clone(),
+            QueuedInput::Message(text) | QueuedInput::ProcessStatus(text) => text.clone(),
             QueuedInput::CustomCommand(cmd) => format!("/{}", cmd.display),
         }
     }
@@ -341,9 +344,35 @@ pub(crate) struct PendingTool {
     pub(crate) name: String,
 }
 
-pub(crate) struct PendingModeChange {
-    pub(crate) note: String,
-    pub(crate) block: Block,
+#[derive(Clone)]
+pub(crate) enum PendingHistoryAppend {
+    ModeChange { note: String, block: Block },
+    ProcessStatus { note: String },
+}
+
+impl PendingHistoryAppend {
+    pub(crate) fn history_note(&self) -> &str {
+        match self {
+            PendingHistoryAppend::ModeChange { note, .. }
+            | PendingHistoryAppend::ProcessStatus { note } => note,
+        }
+    }
+
+    pub(crate) fn transcript_block(&self) -> Block {
+        match self {
+            PendingHistoryAppend::ModeChange { block, .. } => block.clone(),
+            PendingHistoryAppend::ProcessStatus { note } => {
+                Block::ProcessStatus { text: note.clone() }
+            }
+        }
+    }
+
+    pub(crate) fn replacement_prefix(&self) -> Option<&'static str> {
+        match self {
+            PendingHistoryAppend::ModeChange { .. } => Some(protocol::MODE_NOTE_PREFIX),
+            PendingHistoryAppend::ProcessStatus { .. } => None,
+        }
+    }
 }
 
 impl TuiApp {
@@ -362,6 +391,43 @@ impl TuiApp {
         self.clear_placeholder(self.well_known.prompt);
     }
 
+    pub(crate) fn queue_history_append(&mut self, append: PendingHistoryAppend) {
+        let note = append.history_note().to_string();
+        let replace_user_prefix = append.replacement_prefix().map(str::to_string);
+
+        if let Some(prefix) = append.replacement_prefix() {
+            if let Some(existing) = self
+                .pending_history_appends
+                .iter_mut()
+                .find(|pending| pending.replacement_prefix() == Some(prefix))
+            {
+                *existing = append.clone();
+            } else if self.agent_is_running() {
+                self.pending_history_appends.push(append.clone());
+            }
+        } else if self.agent_is_running() {
+            self.pending_history_appends.push(append.clone());
+        }
+
+        if self.agent_is_running() {
+            self.core
+                .engine
+                .send(protocol::UiCommand::AppendHistoryItem {
+                    item: protocol::HistoryItem::user(protocol::Content::text(note)),
+                    replace_user_prefix,
+                });
+        } else if !self.core.session.history.is_empty() {
+            self.apply_history_append_to_history(&note, append.replacement_prefix());
+            self.commit_history_append_block(
+                append.transcript_block(),
+                append.replacement_prefix(),
+            );
+        } else if let Some(prefix) = append.replacement_prefix() {
+            self.pending_history_appends
+                .retain(|pending| pending.replacement_prefix() != Some(prefix));
+        }
+    }
+
     pub(crate) fn start_queued_input(&mut self, queued: QueuedInput) {
         self.clear_prompt_prediction();
         match queued {
@@ -370,11 +436,15 @@ impl TuiApp {
                 let content = Content::text(text.clone());
                 self.apply_input_outcome(outcome, content, &text);
             }
+            QueuedInput::ProcessStatus(text) if !text.is_empty() => {
+                let turn = self.begin_process_status_turn(text);
+                self.agent = Some(turn);
+            }
             QueuedInput::CustomCommand(cmd) => {
                 let turn = self.begin_custom_command_turn(*cmd);
                 self.agent = Some(turn);
             }
-            QueuedInput::Message(_) => {}
+            QueuedInput::Message(_) | QueuedInput::ProcessStatus(_) => {}
         }
     }
 
@@ -527,6 +597,8 @@ impl TuiApp {
             clock,
             env,
         );
+        let (process_completion_tx, process_completion_rx) = tokio::sync::mpsc::unbounded_channel();
+        core.processes.set_completion_sender(process_completion_tx);
         let (lua_wakeup_tx, lua_wakeup_rx) = tokio::sync::mpsc::unbounded_channel();
         let _ = lua.shared().wakeup_tx.set(lua_wakeup_tx);
         Self {
@@ -560,7 +632,8 @@ impl TuiApp {
             last_height: term_h,
             next_turn_id: 1,
             pending_turn_meta: None,
-            pending_mode_change: None,
+            pending_history_appends: Vec::new(),
+            process_completion_rx,
             context_tokens_updated_this_turn: false,
             cancel_generation: 0,
             dispatching_turn_id: None,
@@ -1378,6 +1451,10 @@ impl TuiApp {
                 }
             }
 
+            while let Ok(completion) = self.process_completion_rx.try_recv() {
+                self.handle_process_completed(completion.id, completion.exit_code);
+            }
+
             if self.agent.is_none() && !self.queued_inputs.is_empty() && !self.busy_stack.is_busy()
             {
                 let queued = self.queued_inputs.remove(0);
@@ -1511,6 +1588,10 @@ impl TuiApp {
 
                     self.dispatch_ui_window_events(false);
                     self.render_normal(self.agent.is_some());
+                }
+
+                Some(completion) = self.process_completion_rx.recv() => {
+                    self.handle_process_completed(completion.id, completion.exit_code);
                 }
 
                 Some(ev) = self.core.engine.recv() => {
