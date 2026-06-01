@@ -25,7 +25,6 @@ use serde_json::Value;
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::{Arc, RwLock};
-use workspace::{any_outside_workspace, is_in_workspace};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ToolOrigin {
@@ -103,10 +102,6 @@ pub struct PermissionRequest<'a> {
 /// Tools that don't touch paths don't register one; the workspace check short-circuits.
 pub type PathsFn = dyn Fn(&str, &HashMap<String, Value>) -> Vec<String> + Send + Sync;
 
-/// Per-tool decision override. `Some(decision)` skips the generic `check_tool` path.
-pub type DecideFn =
-    dyn Fn(&str, &HashMap<String, Value>, AgentMode) -> Option<Decision> + Send + Sync;
-
 pub use rules::ModeBehavior;
 
 #[derive(Clone)]
@@ -116,7 +111,6 @@ pub struct Permissions {
     restrict_to_workspace: bool,
     workspace: PathBuf,
     paths_fn: Option<Arc<PathsFn>>,
-    decide_hook_fn: Option<Arc<DecideFn>>,
     subpattern_parsers: HashMap<String, Arc<SubpatternParserFn>>,
     /// Interior-mutable so `Arc<Permissions>` holders can grant approvals without a writable handle.
     pub approvals: Arc<RwLock<RuntimeApprovals>>,
@@ -133,10 +127,6 @@ impl std::fmt::Debug for Permissions {
             .field("restrict_to_workspace", &self.restrict_to_workspace)
             .field("workspace", &self.workspace)
             .field("paths_fn", &self.paths_fn.as_ref().map(|_| "<fn>"))
-            .field(
-                "decide_hook_fn",
-                &self.decide_hook_fn.as_ref().map(|_| "<fn>"),
-            )
             .field(
                 "subpattern_parsers",
                 &self.subpattern_parsers.keys().collect::<Vec<_>>(),
@@ -179,7 +169,6 @@ impl Permissions {
             restrict_to_workspace: true,
             workspace: PathBuf::new(),
             paths_fn: None,
-            decide_hook_fn: None,
             subpattern_parsers: tool_defaults.subpattern_parsers.clone(),
             approvals: Arc::new(RwLock::new(RuntimeApprovals::new())),
         }
@@ -319,40 +308,35 @@ impl Permissions {
         }
     }
 
-    fn effects_outside_workspace(&self, effects: &[ToolEffect]) -> bool {
-        if !self.restrict_to_workspace || self.workspace.as_os_str().is_empty() {
-            return false;
+    fn effect_paths<'a>(effects: &'a [ToolEffect], out: &mut Vec<&'a PathEffect>) {
+        for effect in effects {
+            match effect {
+                ToolEffect::Fs(path) => out.push(path),
+                ToolEffect::Shell { paths, .. } => out.extend(paths),
+                _ => {}
+            }
         }
-        effects.iter().any(|effect| match effect {
-            ToolEffect::Fs(path) => !path.path.starts_with(
-                self.workspace
-                    .canonicalize()
-                    .unwrap_or_else(|_| self.workspace.clone()),
-            ),
-            ToolEffect::Shell { paths, .. } => paths.iter().any(|path| {
-                !path.path.starts_with(
-                    self.workspace
-                        .canonicalize()
-                        .unwrap_or_else(|_| self.workspace.clone()),
-                )
-            }),
-            _ => false,
-        })
     }
 
-    pub fn set_decide_hook_fn(&mut self, f: Arc<DecideFn>) {
-        self.decide_hook_fn = Some(f);
+    fn outside_workspace_effect_paths(&self, effects: &[ToolEffect]) -> Vec<String> {
+        if !self.restrict_to_workspace || self.workspace.as_os_str().is_empty() {
+            return vec![];
+        }
+        let workspace = self
+            .workspace
+            .canonicalize()
+            .unwrap_or_else(|_| self.workspace.clone());
+        let mut paths = Vec::new();
+        Self::effect_paths(effects, &mut paths);
+        paths
+            .into_iter()
+            .filter(|path| !path.path.starts_with(&workspace))
+            .map(|path| path.raw_path.clone())
+            .collect()
     }
 
-    fn decide_hook(
-        &self,
-        tool_name: &str,
-        args: &HashMap<String, Value>,
-        mode: AgentMode,
-    ) -> Option<Decision> {
-        self.decide_hook_fn
-            .as_ref()
-            .and_then(|f| f(tool_name, args, mode))
+    fn effects_outside_workspace(&self, effects: &[ToolEffect]) -> bool {
+        !self.outside_workspace_effect_paths(effects).is_empty()
     }
 
     fn mode_behavior(&self, mode: &AgentMode) -> ModeBehavior {
@@ -442,11 +426,9 @@ impl Permissions {
         tool_name: &str,
         args: &HashMap<String, Value>,
     ) -> bool {
-        let base = decide_base(self, mode, tool_name, args);
-        base == Decision::Allow
-            && self.restrict_to_workspace
-            && !self.workspace.as_os_str().is_empty()
-            && any_outside_workspace(&self.paths_for_tool(tool_name, args), &self.workspace)
+        let base = decide_base(self, mode.clone(), tool_name, args);
+        let effects = self.effects_for_tool(ToolOrigin::Lua, tool_name, args);
+        base == Decision::Allow && self.effects_outside_workspace(&effects)
     }
 
     pub fn outside_workspace_paths(
@@ -457,10 +439,8 @@ impl Permissions {
         if !self.restrict_to_workspace || self.workspace.as_os_str().is_empty() {
             return vec![];
         }
-        self.paths_for_tool(tool_name, args)
-            .into_iter()
-            .filter(|p| !is_in_workspace(p, &self.workspace))
-            .collect()
+        let effects = self.effects_for_tool(ToolOrigin::Lua, tool_name, args);
+        self.outside_workspace_effect_paths(&effects)
     }
 }
 
@@ -470,10 +450,59 @@ fn decide_base(
     tool_name: &str,
     args: &HashMap<String, Value>,
 ) -> Decision {
-    if let Some(d) = permissions.decide_hook(tool_name, args, mode.clone()) {
-        return d;
+    match tool_name {
+        "bash" => decide_bash(permissions, mode, args),
+        "web_fetch" => decide_web_fetch(permissions, mode, args),
+        _ => permissions.check_tool(mode, tool_name),
     }
-    permissions.check_tool(mode, tool_name)
+}
+
+fn decide_bash(
+    permissions: &Permissions,
+    mode: AgentMode,
+    args: &HashMap<String, Value>,
+) -> Decision {
+    let tool = permissions.check_tool(mode.clone(), "bash");
+    if tool == Decision::Deny {
+        return Decision::Deny;
+    }
+
+    let command = args.get("command").and_then(Value::as_str).unwrap_or("");
+    let sub = permissions.check_subcommand(mode.clone(), "bash", command);
+    if sub == Decision::Deny {
+        return Decision::Deny;
+    }
+    if tool == Decision::Allow && sub == Decision::Ask {
+        return Decision::Ask;
+    }
+    if sub == Decision::Allow
+        && permissions.mode_behavior(&mode).ask_on_output_redirection
+        && shell_has_output_redirection(command)
+    {
+        return Decision::Ask;
+    }
+    sub
+}
+
+fn decide_web_fetch(
+    permissions: &Permissions,
+    mode: AgentMode,
+    args: &HashMap<String, Value>,
+) -> Decision {
+    let tool = permissions.check_tool(mode.clone(), "web_fetch");
+    if tool == Decision::Deny {
+        return Decision::Deny;
+    }
+
+    let url = args.get("url").and_then(Value::as_str).unwrap_or("");
+    let pattern = permissions.check_subcommand(mode, "web_fetch", url);
+    if pattern == Decision::Deny || pattern == Decision::Allow {
+        return pattern;
+    }
+    if tool == Decision::Allow && pattern == Decision::Ask {
+        return Decision::Ask;
+    }
+    pattern
 }
 
 /// Shell-aware decision: splits on operators, folds subcommands to the worst decision,

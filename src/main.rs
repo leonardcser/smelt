@@ -375,9 +375,6 @@ async fn main() {
         tui::lua::try_with_app(|app| app.lua.tool_paths_for_workspace(name, args))
             .unwrap_or_default()
     }));
-    permissions.set_decide_hook_fn(std::sync::Arc::new(|name, args, mode| {
-        tui::lua::try_with_app(|app| app.lua.tool_decide(name, args, mode)).flatten()
-    }));
     {
         let cwd_str = cwd.to_string_lossy();
         let rules = smelt_core::permissions::store::load(&cwd_str);

@@ -41,14 +41,12 @@ pub(super) fn resolve_path(path_str: &str, workspace: &Path) -> PathBuf {
     }
 }
 
+#[cfg(test)]
+#[allow(dead_code)]
 pub(super) fn is_in_workspace(path_str: &str, workspace: &Path) -> bool {
     let resolved = resolve_path(path_str, workspace);
     let ws = workspace
         .canonicalize()
         .unwrap_or_else(|_| workspace.to_path_buf());
     resolved.starts_with(&ws)
-}
-
-pub(super) fn any_outside_workspace(paths: &[String], workspace: &Path) -> bool {
-    paths.iter().any(|p| !is_in_workspace(p, workspace))
 }

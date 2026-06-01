@@ -246,16 +246,6 @@ smelt.tools.register({
     }))
     return smelt.layout.vbox(items)
   end,
-  decide = function(args, mode)
-    -- Deny dominates; pattern allow short-circuits; Allow tool + Ask pattern → Ask.
-    local tool = smelt.permissions.check_tool(mode, "web_fetch")
-    if tool == "deny" then return "deny" end
-    local pat = smelt.permissions.check(mode, "web_fetch", args.url or "")
-    if pat == "deny" then return "deny" end
-    if pat == "allow" then return "allow" end
-    if tool == "allow" and pat == "ask" then return "ask" end
-    return pat
-  end,
   execute = function(args)
     local raw = fetch_raw(args)
     if type(raw) == "table" and raw.is_error then return raw end

@@ -1773,9 +1773,6 @@ impl TestApp {
                 if let Some(h) = &t.preview {
                     check(&format!("tools[{name}].preview"), h);
                 }
-                if let Some(h) = &t.decide {
-                    check(&format!("tools[{name}].decide"), h);
-                }
             }
         }
 

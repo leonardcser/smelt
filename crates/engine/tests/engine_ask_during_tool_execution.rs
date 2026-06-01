@@ -19,7 +19,7 @@
 use engine::{ApiConfig, EngineConfig, ModelConfig};
 use protocol::{
     AgentMode, Content, EngineEvent, Message, ReasoningEffort, StartTurnPayload, ToolDef,
-    ToolExecutionMode, ToolHookFlags, UiCommand,
+    ToolExecutionMode, ToolHookFlags, ToolHooks, UiCommand,
 };
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -183,7 +183,14 @@ async fn engine_ask_during_tool_execution_is_not_silently_dropped() {
         session_id: "sess".into(),
         session_dir: PathBuf::from("/tmp"),
         model_config_overrides: None,
-        permission_overrides: None,
+        permission_overrides: Some(protocol::PermissionOverrides {
+            tools: Some(protocol::RuleSetOverride {
+                allow: vec![TOOL_NAME.into()],
+                ask: Vec::new(),
+                deny: Vec::new(),
+            }),
+            subcommands: Default::default(),
+        }),
         system_prompt: Some("test system".into()),
         tools: vec![tool],
     })));
@@ -202,6 +209,12 @@ async fn engine_ask_during_tool_execution_is_not_silently_dropped() {
     while tokio::time::Instant::now() < deadline {
         let recv = tokio::time::timeout(Duration::from_millis(200), handle.recv()).await;
         match recv {
+            Ok(Some(EngineEvent::ToolHooksRequest { request_id, .. })) => {
+                handle.send(UiCommand::ToolHooksResponse {
+                    request_id,
+                    hooks: ToolHooks::default(),
+                });
+            }
             Ok(Some(EngineEvent::ToolDispatch {
                 request_id,
                 call_id,

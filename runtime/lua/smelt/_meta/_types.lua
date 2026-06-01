@@ -410,7 +410,6 @@
 ---@field render? function `render(buf, args, result)` - custom transcript render.
 ---@field paths_for_workspace? function `paths_for_workspace(args) -> string[]` - files this invocation will touch.
 ---@field preview? function `preview(args) -> smelt.layout` - pre-execute preview render. Returns the same `smelt.layout` value the `render` callback returns; the confirm dialog renders it directly into the preview pane.
----@field decide? function `decide(args, mode) -> smelt.tools.Decision?` - per-call decision; nil falls through to generic permissions.
 ---@field override? boolean Replace a core tool of the same name (advanced).
 
 --- Window handle returned by `smelt.win.new(buf, opts?)`. Setter methods return the same handle for chaining.

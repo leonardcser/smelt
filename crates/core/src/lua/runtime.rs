@@ -1046,47 +1046,6 @@ impl LuaRuntime {
         }
     }
 
-    /// Run a tool's `decide(args, mode)` callback; returns `None` to fall through to generic permissions.
-    pub fn tool_decide(
-        &self,
-        tool_name: &str,
-        args: &HashMap<String, serde_json::Value>,
-        mode: protocol::AgentMode,
-    ) -> Option<protocol::Decision> {
-        let func = {
-            let handlers = self.shared.tools.lock().unwrap_or_else(|e| e.into_inner());
-            let h = handlers.get(tool_name)?;
-            let rh = h.decide.as_ref()?;
-            self.lua.registry_value::<mlua::Function>(&rh.key).ok()?
-        };
-        let args_table = match self.args_to_lua_table(args) {
-            Ok(t) => t,
-            Err(e) => {
-                self.record_error(format!("tool decide: build args: {e}"));
-                return None;
-            }
-        };
-        let mode_str = mode.as_str();
-        let _perf = smelt_perf::perf::begin("lua:tool");
-        match func.call::<String>((args_table, mode_str)) {
-            Ok(label) => match label.as_str() {
-                "allow" => Some(protocol::Decision::Allow),
-                "ask" => Some(protocol::Decision::Ask),
-                "deny" => Some(protocol::Decision::Deny),
-                other => {
-                    self.record_error(format!(
-                        "tool decide `{tool_name}`: unknown decision `{other}`"
-                    ));
-                    None
-                }
-            },
-            Err(e) => {
-                self.record_error(format!("tool decide `{tool_name}`: {e}"));
-                None
-            }
-        }
-    }
-
     pub fn tool_has_preview(&self, tool_name: &str) -> bool {
         let handlers = self.shared.tools.lock().unwrap_or_else(|e| e.into_inner());
         handlers.get(tool_name).is_some_and(|h| h.preview.is_some())

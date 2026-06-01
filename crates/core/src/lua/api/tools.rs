@@ -88,8 +88,6 @@ pub struct LuaToolDef {
     /// the same `smelt.layout` value the `render` callback returns; the confirm
     /// dialog renders it directly into the preview pane.
     pub preview: Option<mlua::Function>,
-    /// `decide(args, mode) -> smelt.tools.Decision?` - per-call decision; nil falls through to generic permissions.
-    pub decide: Option<mlua::Function>,
     /// Replace a core tool of the same name (advanced).
     #[lua(rename = "override", default)]
     pub override_core: bool,
@@ -142,7 +140,6 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
                 let render_handle = def.render.map(stash).transpose()?;
                 let paths_for_workspace_handle = def.paths_for_workspace.map(stash).transpose()?;
                 let preview_handle = def.preview.map(stash).transpose()?;
-                let decide_handle = def.decide.map(stash).transpose()?;
 
                 let meta = lua.create_table()?;
                 meta.set("description", def.description)?;
@@ -165,7 +162,6 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
                     paths_for_workspace_handle.is_some(),
                 )?;
                 meta.set("hook_preview", preview_handle.is_some())?;
-                meta.set("hook_decide", decide_handle.is_some())?;
                 meta.set("override_core", def.override_core)?;
                 if let Some(summary) = def.summary {
                     meta.set("summary", summary)?;
@@ -182,7 +178,6 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
                             render: render_handle,
                             paths_for_workspace: paths_for_workspace_handle,
                             preview: preview_handle,
-                            decide: decide_handle,
                         },
                     );
                 }

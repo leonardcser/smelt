@@ -85,7 +85,6 @@ fn permissions_from_mode(
         restrict_to_workspace,
         workspace,
         paths_fn: None,
-        decide_hook_fn: None,
         subpattern_parsers: bash_parser_map(),
         approvals: std::sync::Arc::new(std::sync::RwLock::new(RuntimeApprovals::new())),
     }
@@ -96,51 +95,8 @@ fn perms_with_bash(allow: &[&str], ask: &[&str], deny: &[&str]) -> Permissions {
     permissions_from_mode(mode, false, PathBuf::new())
 }
 
-/// Installs a stub `decide_hook_fn` mirroring production Lua hooks for `bash` and `web_fetch`.
-/// The captured clone has its hook cleared to prevent recursion.
-fn install_stub_decide_hook(perms: &mut crate::permissions::Permissions) {
-    let mut perms_for_hook = perms.clone();
-    perms_for_hook.set_decide_hook_fn(std::sync::Arc::new(|_, _, _| None));
-    perms.set_decide_hook_fn(std::sync::Arc::new(move |name, args, mode| match name {
-        "bash" => {
-            let cmd = args.get("command").and_then(|v| v.as_str()).unwrap_or("");
-            let tool = perms_for_hook.check_tool(mode.clone(), "bash");
-            if tool == protocol::Decision::Deny {
-                return Some(protocol::Decision::Deny);
-            }
-            let sub = perms_for_hook.check_subcommand(mode, "bash", cmd);
-            if sub == protocol::Decision::Deny {
-                return Some(protocol::Decision::Deny);
-            }
-            if tool == protocol::Decision::Allow && sub == protocol::Decision::Ask {
-                return Some(protocol::Decision::Ask);
-            }
-            Some(sub)
-        }
-        "web_fetch" => {
-            let url = args.get("url").and_then(|v| v.as_str()).unwrap_or("");
-            let tool = perms_for_hook.check_tool(mode.clone(), "web_fetch");
-            if tool == protocol::Decision::Deny {
-                return Some(protocol::Decision::Deny);
-            }
-            let pat = perms_for_hook.check_subcommand(mode, "web_fetch", url);
-            if pat == protocol::Decision::Deny {
-                return Some(protocol::Decision::Deny);
-            }
-            if pat == protocol::Decision::Allow {
-                return Some(protocol::Decision::Allow);
-            }
-            if tool == protocol::Decision::Allow && pat == protocol::Decision::Ask {
-                return Some(protocol::Decision::Ask);
-            }
-            Some(pat)
-        }
-        _ => None,
-    }));
-}
-
 /// Stub `paths_fn` mirroring production `paths_for_workspace` callbacks
-/// (file tools → `file_path`, glob/grep → `path`, bash → shell extraction).
+/// for structured file/path tools.
 fn stub_paths_fn() -> std::sync::Arc<crate::permissions::PathsFn> {
     std::sync::Arc::new(|name, args| match name {
         "read_file" | "write_file" | "edit_file" => {
@@ -159,9 +115,6 @@ fn stub_paths_fn() -> std::sync::Arc<crate::permissions::PathsFn> {
                 vec![p.to_string()]
             }
         }
-        "bash" => crate::permissions::workspace::extract_paths_from_command(
-            args.get("command").and_then(|v| v.as_str()).unwrap_or(""),
-        ),
         _ => vec![],
     })
 }
@@ -870,7 +823,6 @@ fn perms_with_workspace(workspace: &str) -> Permissions {
     );
     let mut p = permissions_from_mode(mode, true, PathBuf::from(workspace));
     p.set_paths_fn(stub_paths_fn());
-    install_stub_decide_hook(&mut p);
     p
 }
 
@@ -1362,10 +1314,51 @@ fn bash_tool_allow_pattern_ask() {
     let mut tools = HashMap::new();
     tools.insert("bash".to_string(), Decision::Allow);
     let mode = mode_perms(tools, &[("bash", ruleset(&[], &["git push *"], &[]))]);
-    let mut perms = permissions_from_mode(mode, false, PathBuf::new());
-    install_stub_decide_hook(&mut perms);
+    let perms = permissions_from_mode(mode, false, PathBuf::new());
     let args = args_with("command", "git push origin main");
     assert_eq!(decide_base(&perms, yolo(), "bash", &args), Decision::Ask);
+}
+
+#[test]
+fn bash_allowed_redirect_asks_in_normal_mode() {
+    let mut tools = HashMap::new();
+    tools.insert("bash".to_string(), Decision::Allow);
+    let mode = mode_perms(tools, &[("bash", ruleset(&["echo *"], &[], &[]))]);
+    let perms = permissions_from_mode(mode, false, PathBuf::new());
+    let args = args_with("command", "echo hi > out.txt");
+    assert_eq!(decide_base(&perms, normal(), "bash", &args), Decision::Ask);
+}
+
+#[test]
+fn web_fetch_pattern_allow_short_circuits_tool_ask() {
+    let mut tools = HashMap::new();
+    tools.insert("web_fetch".to_string(), Decision::Ask);
+    let mode = mode_perms(
+        tools,
+        &[("web_fetch", ruleset(&["https://example.com/*"], &[], &[]))],
+    );
+    let perms = permissions_from_mode(mode, false, PathBuf::new());
+    let args = args_with("url", "https://example.com/docs");
+    assert_eq!(
+        decide_base(&perms, normal(), "web_fetch", &args),
+        Decision::Allow
+    );
+}
+
+#[test]
+fn web_fetch_tool_deny_dominates_pattern_allow() {
+    let mut tools = HashMap::new();
+    tools.insert("web_fetch".to_string(), Decision::Deny);
+    let mode = mode_perms(
+        tools,
+        &[("web_fetch", ruleset(&["https://example.com/*"], &[], &[]))],
+    );
+    let perms = permissions_from_mode(mode, false, PathBuf::new());
+    let args = args_with("url", "https://example.com/docs");
+    assert_eq!(
+        decide_base(&perms, normal(), "web_fetch", &args),
+        Decision::Deny
+    );
 }
 
 // --- override tightening ---
@@ -1375,8 +1368,7 @@ fn override_tightens_allow_to_ask() {
     let mut tools = HashMap::new();
     tools.insert("bash".to_string(), Decision::Allow);
     let mode = mode_perms(tools, &[("bash", empty_ruleset())]);
-    let mut perms = permissions_from_mode(mode, false, PathBuf::new());
-    install_stub_decide_hook(&mut perms);
+    let perms = permissions_from_mode(mode, false, PathBuf::new());
     let overrides = protocol::PermissionOverrides {
         tools: Some(protocol::RuleSetOverride {
             allow: vec![],
@@ -1662,7 +1654,6 @@ fn perms_with_workspace_bash_allow(workspace: &str, bash_allow: &[&str]) -> Perm
     let mode = mode_perms(tools, &[("bash", ruleset(bash_allow, &[], &[]))]);
     let mut p = permissions_from_mode(mode, true, PathBuf::from(workspace));
     p.set_paths_fn(stub_paths_fn());
-    install_stub_decide_hook(&mut p);
     p
 }
 
