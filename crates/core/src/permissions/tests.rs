@@ -952,6 +952,57 @@ fn workspace_root_itself_is_in_workspace() {
 // --- decide with workspace restriction ---
 
 #[test]
+fn effects_for_file_tool_records_write_access_and_base() {
+    let p = perms_with_workspace("/home/user/project");
+    let args = args_with("file_path", "src/main.rs");
+    let effects = p.effects_for_tool(ToolOrigin::Lua, "write_file", &args);
+    assert_eq!(effects.len(), 1);
+    match &effects[0] {
+        ToolEffect::Fs(path) => {
+            assert_eq!(path.raw_path, "src/main.rs");
+            assert_eq!(path.base_dir, PathBuf::from("/home/user/project"));
+            assert_eq!(path.path, PathBuf::from("/home/user/project/src/main.rs"));
+            assert_eq!(path.access, PathAccess::Write);
+        }
+        other => panic!("expected filesystem effect, got {other:?}"),
+    }
+}
+
+#[test]
+fn decide_request_uses_typed_effects_for_workspace_downgrade() {
+    let p = perms_with_workspace("/home/user/project");
+    let args = args_with("file_path", "/etc/passwd");
+    let effects = p.effects_for_tool(ToolOrigin::Lua, "read_file", &args);
+    assert_eq!(
+        p.decide_request(PermissionRequest {
+            mode: normal(),
+            tool_name: "read_file",
+            args: &args,
+            origin: ToolOrigin::Lua,
+            effects,
+        }),
+        Decision::Ask
+    );
+}
+
+#[test]
+fn mcp_request_uses_mcp_origin_without_boolean_branch() {
+    let p = perms_with_bash(&[], &[], &[]);
+    let args = HashMap::new();
+    let effects = p.effects_for_tool(ToolOrigin::Mcp, "filesystem_read_file", &args);
+    assert_eq!(
+        p.decide_request(PermissionRequest {
+            mode: yolo(),
+            tool_name: "filesystem_read_file",
+            args: &args,
+            origin: ToolOrigin::Mcp,
+            effects,
+        }),
+        Decision::Allow
+    );
+}
+
+#[test]
 fn workspace_allows_file_inside() {
     let p = perms_with_workspace("/home/user/project");
     let args = args_with("file_path", "/home/user/project/src/main.rs");

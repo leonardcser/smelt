@@ -28,7 +28,7 @@ fn normalize_path(path: &Path) -> PathBuf {
     components.iter().collect()
 }
 
-fn resolve_path(path_str: &str, workspace: &Path) -> PathBuf {
+pub(super) fn resolve_path(path_str: &str, workspace: &Path) -> PathBuf {
     if let Some(rest) = path_str.strip_prefix("~/") {
         let resolved = engine::paths::home_dir().join(rest);
         resolved

@@ -1,4 +1,5 @@
 use crate::mcp::{args_summary, McpManager, McpToolDef};
+use crate::permissions::{PermissionRequest, ToolOrigin};
 use engine::provider::{FunctionSchema, ToolDefinition};
 use engine::tools::{ToolContext, ToolDispatcher, ToolFuture, ToolResult};
 use protocol::{AgentMode, ToolHooks};
@@ -86,7 +87,14 @@ impl ToolDispatcher for McpDispatcher {
         } else {
             self.permissions.as_ref()
         };
-        let mut decision = active_permissions.decide(mode.clone(), name, args, true);
+        let effects = active_permissions.effects_for_tool(ToolOrigin::Mcp, name, args);
+        let mut decision = active_permissions.decide_request(PermissionRequest {
+            mode: mode.clone(),
+            tool_name: name,
+            args,
+            origin: ToolOrigin::Mcp,
+            effects,
+        });
         if decision == protocol::Decision::Ask {
             let rt = active_permissions.approvals.read().unwrap();
             if rt.is_auto_approved(active_permissions, mode, name, args, &summary_text) {

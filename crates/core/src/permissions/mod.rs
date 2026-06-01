@@ -27,6 +27,74 @@ use std::path::PathBuf;
 use std::sync::{Arc, RwLock};
 use workspace::{any_outside_workspace, is_in_workspace};
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ToolOrigin {
+    Lua,
+    Core,
+    Mcp,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PathAccess {
+    Read,
+    Write,
+    Unknown,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PathEffect {
+    pub raw_path: String,
+    pub base_dir: PathBuf,
+    pub path: PathBuf,
+    pub access: PathAccess,
+}
+
+impl PathEffect {
+    fn from_raw(raw_path: String, base_dir: &std::path::Path, access: PathAccess) -> Self {
+        let path = workspace::resolve_path(&raw_path, base_dir);
+        Self {
+            raw_path,
+            base_dir: base_dir.to_path_buf(),
+            path,
+            access,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ShellRisk {
+    ReadOnly,
+    Writes,
+    Destructive,
+    Unknown,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ToolEffect {
+    Fs(PathEffect),
+    Shell {
+        command: String,
+        risk: ShellRisk,
+        paths: Vec<PathEffect>,
+    },
+    Network,
+    Mcp {
+        tool: String,
+    },
+    UserInteraction,
+    ProcessControl,
+    ConfigReload,
+    Unknown,
+}
+
+pub struct PermissionRequest<'a> {
+    pub mode: AgentMode,
+    pub tool_name: &'a str,
+    pub args: &'a HashMap<String, Value>,
+    pub origin: ToolOrigin,
+    pub effects: Vec<ToolEffect>,
+}
+
 /// Maps `(tool_name, args)` to filesystem paths the call would touch.
 /// Tools that don't touch paths don't register one; the workspace check short-circuits.
 pub type PathsFn = dyn Fn(&str, &HashMap<String, Value>) -> Vec<String> + Send + Sync;
@@ -191,6 +259,87 @@ impl Permissions {
         }
     }
 
+    fn path_access_for_tool(tool_name: &str) -> PathAccess {
+        match tool_name {
+            "edit_file" | "write_file" | "edit_notebook" => PathAccess::Write,
+            "bash" => PathAccess::Unknown,
+            _ => PathAccess::Read,
+        }
+    }
+
+    pub fn effects_for_tool(
+        &self,
+        origin: ToolOrigin,
+        tool_name: &str,
+        args: &HashMap<String, Value>,
+    ) -> Vec<ToolEffect> {
+        if origin == ToolOrigin::Mcp {
+            return vec![ToolEffect::Mcp {
+                tool: tool_name.to_string(),
+            }];
+        }
+
+        match tool_name {
+            "bash" => {
+                let command = args
+                    .get("command")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default()
+                    .to_string();
+                let paths = self
+                    .paths_for_tool(tool_name, args)
+                    .into_iter()
+                    .map(|p| PathEffect::from_raw(p, &self.workspace, PathAccess::Unknown))
+                    .collect();
+                vec![ToolEffect::Shell {
+                    command,
+                    risk: ShellRisk::Unknown,
+                    paths,
+                }]
+            }
+            "web_fetch" | "web_search" => vec![ToolEffect::Network],
+            "ask_user_question" => vec![ToolEffect::UserInteraction],
+            "read_process_output" | "stop_process" => vec![ToolEffect::ProcessControl],
+            "smelt_reload" => vec![ToolEffect::ConfigReload],
+            _ => {
+                let access = Self::path_access_for_tool(tool_name);
+                let effects: Vec<_> = self
+                    .paths_for_tool(tool_name, args)
+                    .into_iter()
+                    .map(|p| {
+                        ToolEffect::Fs(PathEffect::from_raw(p, &self.workspace, access.clone()))
+                    })
+                    .collect();
+                if effects.is_empty() {
+                    vec![ToolEffect::Unknown]
+                } else {
+                    effects
+                }
+            }
+        }
+    }
+
+    fn effects_outside_workspace(&self, effects: &[ToolEffect]) -> bool {
+        if !self.restrict_to_workspace || self.workspace.as_os_str().is_empty() {
+            return false;
+        }
+        effects.iter().any(|effect| match effect {
+            ToolEffect::Fs(path) => !path.path.starts_with(
+                self.workspace
+                    .canonicalize()
+                    .unwrap_or_else(|_| self.workspace.clone()),
+            ),
+            ToolEffect::Shell { paths, .. } => paths.iter().any(|path| {
+                !path.path.starts_with(
+                    self.workspace
+                        .canonicalize()
+                        .unwrap_or_else(|_| self.workspace.clone()),
+                )
+            }),
+            _ => false,
+        })
+    }
+
     pub fn set_decide_hook_fn(&mut self, f: Arc<DecideFn>) {
         self.decide_hook_fn = Some(f);
     }
@@ -247,7 +396,8 @@ impl Permissions {
         }
     }
 
-    /// Full decision including workspace restriction. MCP calls route through the `mcp` bucket.
+    /// Full decision including workspace restriction. Legacy wrapper for callers
+    /// that have not yet built a typed permission request.
     pub fn decide(
         &self,
         mode: AgentMode,
@@ -255,16 +405,31 @@ impl Permissions {
         args: &HashMap<String, Value>,
         is_mcp: bool,
     ) -> Decision {
-        let base = if is_mcp {
-            self.check_subcommand(mode.clone(), "mcp", tool_name)
+        let origin = if is_mcp {
+            ToolOrigin::Mcp
         } else {
-            decide_base(self, mode.clone(), tool_name, args)
+            ToolOrigin::Lua
         };
-        if base == Decision::Allow
-            && self.restrict_to_workspace
-            && !self.workspace.as_os_str().is_empty()
-            && any_outside_workspace(&self.paths_for_tool(tool_name, args), &self.workspace)
-        {
+        let effects = self.effects_for_tool(origin.clone(), tool_name, args);
+        self.decide_request(PermissionRequest {
+            mode,
+            tool_name,
+            args,
+            origin,
+            effects,
+        })
+    }
+
+    pub fn decide_request(&self, request: PermissionRequest<'_>) -> Decision {
+        let base = match request.origin {
+            ToolOrigin::Mcp => {
+                self.check_subcommand(request.mode.clone(), "mcp", request.tool_name)
+            }
+            ToolOrigin::Lua | ToolOrigin::Core => {
+                decide_base(self, request.mode.clone(), request.tool_name, request.args)
+            }
+        };
+        if base == Decision::Allow && self.effects_outside_workspace(&request.effects) {
             return Decision::Ask;
         }
         base
