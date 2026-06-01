@@ -1851,7 +1851,11 @@ impl TestApp {
     /// Type each char of `s` as a separate keystroke.
     pub fn type_text(&mut self, s: &str) {
         for c in s.chars() {
-            self.type_char(c);
+            if c == '\n' {
+                self.press_mod(KeyCode::Enter, KeyModifiers::SHIFT);
+            } else {
+                self.type_char(c);
+            }
         }
     }
 
