@@ -58,16 +58,16 @@ pub(crate) fn build_display_spans(
             if !plain.is_empty() {
                 spans.push(Span::Plain(std::mem::take(&mut plain)));
             }
-            spans.push(Span::AtRef(display_safe_plain_text(&token)));
+            spans.push(Span::AtRef(crate::content::display_safe_text(&token)));
             i = end;
         } else if let Some((token, _, end)) = scan_at_token(&chars, i) {
             if !plain.is_empty() {
                 spans.push(Span::Plain(std::mem::take(&mut plain)));
             }
-            spans.push(Span::Plain(display_safe_plain_text(&token)));
+            spans.push(Span::Plain(crate::content::display_safe_text(&token)));
             i = end;
         } else {
-            plain.push(display_safe_plain_char(chars[i]));
+            plain.push(crate::content::display_safe_char(chars[i]));
             i += 1;
         }
     }
@@ -75,18 +75,6 @@ pub(crate) fn build_display_spans(
         spans.push(Span::Plain(plain));
     }
     spans
-}
-
-fn display_safe_plain_char(ch: char) -> char {
-    if ch != '\n' && ch.is_control() {
-        '\u{FFFD}'
-    } else {
-        ch
-    }
-}
-
-fn display_safe_plain_text(text: &str) -> String {
-    text.chars().map(display_safe_plain_char).collect()
 }
 
 pub(crate) fn spans_to_string(spans: &[Span]) -> String {

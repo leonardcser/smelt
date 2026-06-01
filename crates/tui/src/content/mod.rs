@@ -10,6 +10,18 @@ pub(crate) mod to_buffer;
 pub(crate) mod transcript_buf;
 pub mod transcript_parsers;
 
+pub(crate) fn display_safe_char(ch: char) -> char {
+    if ch != '\n' && ch.is_control() {
+        '\u{FFFD}'
+    } else {
+        ch
+    }
+}
+
+pub(crate) fn display_safe_text(text: &str) -> String {
+    text.chars().map(display_safe_char).collect()
+}
+
 use crossterm::terminal;
 
 pub(crate) fn term_width() -> usize {

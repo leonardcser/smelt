@@ -12,7 +12,10 @@ pub(super) struct UserBlockGeometry {
 
 impl UserBlockGeometry {
     pub(super) fn new(text: &str) -> Self {
-        let all_lines: Vec<String> = text.lines().map(|l| l.replace('\t', "    ")).collect();
+        let all_lines: Vec<String> = text
+            .lines()
+            .map(|l| crate::content::display_safe_text(&l.replace('\t', "    ")))
+            .collect();
         let start = all_lines.iter().position(|l| !l.is_empty()).unwrap_or(0);
         let end = all_lines
             .iter()
@@ -162,6 +165,15 @@ mod tests {
         assert_eq!(
             lines[rows - 1].text.len(),
             super::super::metrics::CHROME_INNER_PAD
+        );
+    }
+
+    #[test]
+    fn user_geometry_sanitizes_display_controls() {
+        let geom = UserBlockGeometry::new("a\0\tb\nc\r");
+        assert_eq!(
+            geom.lines,
+            vec!["a\u{FFFD}    b".to_string(), "c\u{FFFD}".to_string()]
         );
     }
 

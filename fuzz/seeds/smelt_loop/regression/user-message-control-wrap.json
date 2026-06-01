@@ -1,0 +1,52 @@
+{
+  "_about": "Transcript layout regression: submitted prompt text containing control characters must render as safe display glyphs before user-message chrome wrap math runs.",
+  "_fix": "Sanitize control characters in user-message display geometry so wrapped transcript rows stay within the pinned viewport.",
+  "mode": "plan",
+  "ops": [
+    {
+      "kind": "paste",
+      "data": "77S7\u0000\u0000\u0000\u0000\u0000\u0000k\u0000177 @FI"
+    },
+    {
+      "kind": "key_special",
+      "data": 10
+    },
+    {
+      "kind": "key_special",
+      "data": 0
+    },
+    {
+      "kind": "key_special",
+      "data": 0
+    },
+    {
+      "kind": "key_special",
+      "data": 0
+    },
+    {
+      "kind": "key_special",
+      "data": 0
+    },
+    {
+      "kind": "key_special",
+      "data": 107
+    },
+    {
+      "kind": "key_special",
+      "data": 0
+    },
+    {
+      "kind": "key_special",
+      "data": 3
+    },
+    {
+      "kind": "paste",
+      "data": "\u0000\\&"
+    },
+    {
+      "kind": "key_special",
+      "data": 0
+    }
+  ],
+  "vim": true
+}
