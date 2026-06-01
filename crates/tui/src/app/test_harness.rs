@@ -1964,6 +1964,99 @@ mod tests {
         assert_eq!(after - before, Duration::from_millis(500));
     }
 
+    // ── Escape sequence semantics ────────────────────────────────────
+
+    #[test]
+    fn vim_insert_double_esc_cancels_running_agent_on_second_press() {
+        let mut app = TestApp::builder().with_vim(true).build();
+        app.start_turn(1);
+        assert_eq!(app.state().vim_mode, VimMode::Insert);
+        assert!(app.agent_running());
+
+        app.press(KeyCode::Esc);
+        assert!(app.agent_running(), "first Esc is the local Vim action");
+        assert_eq!(app.state().vim_mode, VimMode::Normal);
+
+        app.press(KeyCode::Esc);
+        assert!(!app.agent_running(), "second Esc hard-cancels the agent");
+    }
+
+    #[test]
+    fn vim_insert_double_esc_unqueues_messages_on_second_press() {
+        let mut app = TestApp::builder().with_vim(true).build();
+        app.start_turn(1);
+        app.push_queued_message("queued".to_string());
+
+        app.press(KeyCode::Esc);
+        let after_first = app.state();
+        assert!(after_first.agent_running);
+        assert_eq!(after_first.vim_mode, VimMode::Normal);
+        assert_eq!(after_first.queued_inputs, vec!["queued".to_string()]);
+        assert_eq!(after_first.prompt_text, "");
+
+        app.press(KeyCode::Esc);
+        let after_second = app.state();
+        assert!(
+            after_second.agent_running,
+            "unqueue does not cancel the turn"
+        );
+        assert!(after_second.queued_inputs.is_empty());
+        assert_eq!(after_second.prompt_text, "queued");
+    }
+
+    #[test]
+    fn placeholder_dismissal_does_not_swallow_second_escape_cancel() {
+        let mut app = TestApp::builder().build();
+        app.install_prompt_placeholder(
+            "ghost".to_string(),
+            Vec::new(),
+            vec![crate::smelt_term::KeyBind::new(
+                KeyCode::Esc,
+                KeyModifiers::NONE,
+            )],
+        );
+        app.start_turn(1);
+
+        app.press(KeyCode::Esc);
+        assert!(
+            app.agent_running(),
+            "first Esc only dismisses the placeholder"
+        );
+
+        app.press(KeyCode::Esc);
+        assert!(!app.agent_running(), "second Esc still reaches hard cancel");
+    }
+
+    #[test]
+    fn slow_double_escape_is_two_single_escapes() {
+        let mut app = TestApp::builder().build();
+        app.start_turn(1);
+
+        app.press(KeyCode::Esc);
+        app.feed_one(SourceEvent::Tick(crate::app::CHORD_TIMEOUT_MS + 1));
+        app.press(KeyCode::Esc);
+
+        assert!(
+            app.agent_running(),
+            "expired Esc prefix must not hard-cancel"
+        );
+    }
+
+    #[test]
+    fn non_escape_key_breaks_pending_escape_sequence() {
+        let mut app = TestApp::builder().build();
+        app.start_turn(1);
+
+        app.press(KeyCode::Esc);
+        app.type_char('x');
+        app.press(KeyCode::Esc);
+
+        assert!(
+            app.agent_running(),
+            "Esc, other key, Esc is not a double Esc"
+        );
+    }
+
     // ── Ctrl-C semantics ───────────────────────────────────────────
 
     #[test]

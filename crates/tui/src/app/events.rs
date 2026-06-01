@@ -1,9 +1,28 @@
-use crate::app::{CommandAction, EventOutcome, InputOutcome, QueuedInput, TuiApp};
+use crate::app::{
+    AppSequenceAction, CommandAction, EventOutcome, InputOutcome, QueuedInput, TuiApp,
+};
 
-use crate::input::{resolve_agent_esc, Action, EscAction};
+use crate::input::Action;
 use crate::keymap::{self, KeyAction};
 use crate::smelt_term::UiHost;
 use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
+
+const APP_ESC: &[&str] = &["<Esc>"];
+const APP_ESC_ESC: &[&str] = &["<Esc>", "<Esc>"];
+const APP_SEQUENCE_BINDINGS: &[smelt_core::keymap::SequenceBinding<'static, AppSequenceAction>] = &[
+    smelt_core::keymap::SequenceBinding {
+        sequence: APP_ESC_ESC,
+        action: AppSequenceAction::HardEsc,
+        ambiguity: smelt_core::keymap::AmbiguityBehavior::RunAndClose,
+        priority: 100,
+    },
+    smelt_core::keymap::SequenceBinding {
+        sequence: APP_ESC,
+        action: AppSequenceAction::LocalEsc,
+        ambiguity: smelt_core::keymap::AmbiguityBehavior::RunAndKeepPrefix,
+        priority: 0,
+    },
+];
 
 impl TuiApp {
     // ── Terminal event dispatch ───────────────────────────────────────────
@@ -23,6 +42,13 @@ impl TuiApp {
 
         if matches!(ev, Event::Key(_) | Event::Paste(_)) {
             self.ui.finish_pointer_interaction_for_keyboard();
+        }
+
+        if let Event::Key(k) = ev {
+            if let Some(outcome) = self.dispatch_app_key_sequence(k) {
+                self.emit_prompt_text_changed_if_dirty();
+                return self.apply_event_outcome(outcome);
+            }
         }
 
         // Global chords fire before focus-specific routing so no handler can swallow them.
@@ -113,6 +139,10 @@ impl TuiApp {
         // Notify Lua subscribers if the prompt buffer changed (drives filter-as-you-type pickers).
         self.emit_prompt_text_changed_if_dirty();
 
+        self.apply_event_outcome(outcome)
+    }
+
+    fn apply_event_outcome(&mut self, outcome: EventOutcome) -> bool {
         match outcome {
             EventOutcome::Noop | EventOutcome::Redraw => false,
             EventOutcome::Quit => {
@@ -182,6 +212,48 @@ impl TuiApp {
                 false
             }
         }
+    }
+
+    fn dispatch_app_key_sequence(&mut self, key: KeyEvent) -> Option<EventOutcome> {
+        if self.agent.is_none() && !self.busy_stack.is_busy() {
+            self.timers.app_sequence.clear();
+            return None;
+        }
+
+        if !self.timers.app_sequence.has_pending() && !matches!(key.code, KeyCode::Esc) {
+            return None;
+        }
+
+        let token = match crate::lua::chord_string(key) {
+            Some(token) => token,
+            None => {
+                self.timers.app_sequence.clear();
+                return None;
+            }
+        };
+        let now = self.core.clock.instant_now();
+        match self.timers.app_sequence.step(
+            token,
+            APP_SEQUENCE_BINDINGS,
+            now,
+            crate::app::CHORD_TIMEOUT_MS,
+        ) {
+            smelt_core::keymap::SequenceStep::Run(AppSequenceAction::HardEsc) => {
+                Some(self.handle_hard_escape_sequence())
+            }
+            smelt_core::keymap::SequenceStep::Run(AppSequenceAction::LocalEsc)
+            | smelt_core::keymap::SequenceStep::Pending
+            | smelt_core::keymap::SequenceStep::NoMatch => None,
+        }
+    }
+
+    fn handle_hard_escape_sequence(&mut self) -> EventOutcome {
+        self.timers.pending_chord = None;
+        if !self.queued_inputs.is_empty() {
+            self.drain_queued_inputs_into_prompt();
+            return EventOutcome::Noop;
+        }
+        EventOutcome::CancelAgent
     }
 
     // ── Idle event handler ───────────────────────────────────────────────
@@ -534,64 +606,43 @@ impl TuiApp {
         };
         let now = self.core.clock.instant_now();
 
-        if cur_mode != Some(crate::smelt_term::VimMode::Insert) {
-            if let Some(outcome) = self.dispatch_placeholder_key(
-                self.well_known.prompt,
-                KeyCode::Esc,
-                KeyModifiers::empty(),
-            ) {
-                self.timers.last_esc = None;
-                self.timers.esc_vim_mode = None;
-                return outcome;
-            }
-            if self.queued_inputs.is_empty() {
-                if let Some(outcome) = self.dismiss_notification_for_esc() {
-                    self.timers.last_esc = None;
-                    self.timers.esc_vim_mode = None;
-                    return outcome;
-                }
-            }
+        if cur_mode == Some(crate::smelt_term::VimMode::Insert) {
+            self.apply_prompt_escape_to_input(ev, now);
+            return EventOutcome::Noop;
         }
 
-        match resolve_agent_esc(
-            cur_mode,
-            !self.queued_inputs.is_empty(),
-            &mut self.timers.last_esc,
-            &mut self.timers.esc_vim_mode,
-            now,
+        if let Some(outcome) = self.dispatch_placeholder_key(
+            self.well_known.prompt,
+            KeyCode::Esc,
+            KeyModifiers::empty(),
         ) {
-            EscAction::VimToNormal => {
-                let mut pctx = crate::input::prompt_ctx_mut(&mut self.ui);
-                self.input
-                    .handle_event(&mut pctx, ev, None, &mut self.core.clipboard, now);
-            }
-            EscAction::Unqueue => {
-                let mut pctx = crate::input::prompt_ctx_mut(&mut self.ui);
-                let mut prefix = self
-                    .queued_inputs
-                    .iter()
-                    .map(QueuedInput::prompt_replay_text)
-                    .collect::<Vec<_>>()
-                    .join("\n");
-                if !prefix.is_empty() && !pctx.buf.source().is_empty() {
-                    prefix.push('\n');
-                }
-                self.input.prepend_text(&mut pctx, prefix);
-                self.queued_inputs.clear();
-            }
-            EscAction::Cancel { restore_vim } => {
-                if let Some(mode) = restore_vim {
-                    let win = self
-                        .ui
-                        .win_mut(crate::app::PROMPT_WIN)
-                        .expect("prompt window");
-                    self.input.set_vim_mode(win, mode);
-                }
-                return EventOutcome::CancelAgent;
-            }
-            EscAction::StartTimer => {}
+            return outcome;
         }
+
+        if !self.queued_inputs.is_empty() {
+            self.drain_queued_inputs_into_prompt();
+            self.timers.app_sequence.clear();
+            return EventOutcome::Noop;
+        }
+
+        if let Some(outcome) = self.dismiss_notification_for_esc() {
+            return outcome;
+        }
+
+        if matches!(
+            cur_mode,
+            Some(crate::smelt_term::VimMode::Visual | crate::smelt_term::VimMode::VisualLine)
+        ) {
+            self.apply_prompt_escape_to_input(ev, now);
+        }
+
         EventOutcome::Noop
+    }
+
+    fn apply_prompt_escape_to_input(&mut self, ev: Event, now: std::time::Instant) {
+        let mut pctx = crate::input::prompt_ctx_mut(&mut self.ui);
+        self.input
+            .handle_event(&mut pctx, ev, None, &mut self.core.clipboard, now);
     }
 
     fn dismiss_notification_for_esc(&mut self) -> Option<EventOutcome> {

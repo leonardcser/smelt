@@ -90,6 +90,234 @@ pub fn chord_expired(started: Instant, now: Instant, timeout_ms: u64) -> bool {
     now.duration_since(started) >= Duration::from_millis(timeout_ms)
 }
 
+/// How an exact sequence binding behaves when the same sequence is also a
+/// prefix of a longer binding.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AmbiguityBehavior {
+    /// Run the exact binding and clear pending sequence state.
+    RunAndClose,
+    /// Keep the sequence pending; callers may run the exact binding later via
+    /// [`SequenceRouter::expire`].
+    WaitForTimeout,
+    /// Run the exact binding now but keep the sequence pending so a longer
+    /// binding can still match the next key.
+    RunAndKeepPrefix,
+}
+
+/// A sequence binding for the generic router. `sequence` uses the same token
+/// vocabulary as the caller (for the TUI this is the nvim-style strings used
+/// by Lua keymaps, e.g. `"<Esc>"`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct SequenceBinding<'a, A> {
+    pub sequence: &'a [&'a str],
+    pub action: A,
+    pub ambiguity: AmbiguityBehavior,
+    pub priority: i32,
+}
+
+/// Result of feeding one token into [`SequenceRouter`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SequenceStep<A> {
+    /// A binding matched and should run now.
+    Run(A),
+    /// A prefix matched but no action should run yet.
+    Pending,
+    /// No binding matched; pending state was cleared.
+    NoMatch,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct PendingSequence<A> {
+    tokens: Vec<String>,
+    started: Instant,
+    deferred: Option<A>,
+}
+
+/// Small sequence router shared by app/window key routing. It is deliberately
+/// UI-free: callers own scopes, predicates, and action execution.
+///
+/// The router only decides which action should run and which tokens remain
+/// pending. It does not roll back actions that already ran. In particular,
+/// [`AmbiguityBehavior::RunAndKeepPrefix`] is an eager-prefix contract: run the
+/// short binding now, but keep those tokens available so the next key may still
+/// match a longer binding.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SequenceRouter<A> {
+    pending: Option<PendingSequence<A>>,
+}
+
+impl<A> Default for SequenceRouter<A> {
+    fn default() -> Self {
+        Self { pending: None }
+    }
+}
+
+impl<A: Copy> SequenceRouter<A> {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn clear(&mut self) {
+        self.pending = None;
+    }
+
+    pub fn has_pending(&self) -> bool {
+        self.pending.is_some()
+    }
+
+    /// If the pending sequence has timed out, clear it and return the deferred
+    /// exact action, if any. Only bindings using
+    /// [`AmbiguityBehavior::WaitForTimeout`] create deferred actions.
+    pub fn expire(&mut self, now: Instant, timeout_ms: u64) -> Option<A> {
+        let pending = self.pending.as_ref()?;
+        if !chord_expired(pending.started, now, timeout_ms) {
+            return None;
+        }
+        self.pending.take().and_then(|p| p.deferred)
+    }
+
+    /// Feed one key token into the router.
+    ///
+    /// Stale pending state is dropped before matching. On no match, the router
+    /// decays by removing older tokens until a suffix can match or no tokens
+    /// remain. This lets callers keep routing simple: every key either extends
+    /// the active sequence, starts a new one, or clears the pending state.
+    pub fn step(
+        &mut self,
+        token: String,
+        bindings: &[SequenceBinding<'_, A>],
+        now: Instant,
+        timeout_ms: u64,
+    ) -> SequenceStep<A> {
+        if self
+            .pending
+            .as_ref()
+            .is_some_and(|p| chord_expired(p.started, now, timeout_ms))
+        {
+            self.pending = None;
+        }
+
+        let started = self.pending.as_ref().map(|p| p.started).unwrap_or(now);
+        let mut tokens = self
+            .pending
+            .as_ref()
+            .map(|p| p.tokens.clone())
+            .unwrap_or_default();
+        tokens.push(token);
+
+        loop {
+            match match_tokens(&tokens, bindings) {
+                TokenMatch::Exact {
+                    binding,
+                    has_longer,
+                } => {
+                    return self.resolve_exact(tokens, started, binding, has_longer);
+                }
+                TokenMatch::Prefix => {
+                    self.pending = Some(PendingSequence {
+                        tokens,
+                        started,
+                        deferred: None,
+                    });
+                    return SequenceStep::Pending;
+                }
+                TokenMatch::None => {
+                    if tokens.is_empty() {
+                        self.pending = None;
+                        return SequenceStep::NoMatch;
+                    }
+                    tokens.remove(0);
+                    if tokens.is_empty() {
+                        self.pending = None;
+                        return SequenceStep::NoMatch;
+                    }
+                }
+            }
+        }
+    }
+
+    fn resolve_exact(
+        &mut self,
+        tokens: Vec<String>,
+        started: Instant,
+        binding: SequenceBinding<'_, A>,
+        has_longer: bool,
+    ) -> SequenceStep<A> {
+        match (binding.ambiguity, has_longer) {
+            (AmbiguityBehavior::WaitForTimeout, true) => {
+                self.pending = Some(PendingSequence {
+                    tokens,
+                    started,
+                    deferred: Some(binding.action),
+                });
+                SequenceStep::Pending
+            }
+            (AmbiguityBehavior::RunAndKeepPrefix, true) => {
+                self.pending = Some(PendingSequence {
+                    tokens,
+                    started,
+                    deferred: None,
+                });
+                SequenceStep::Run(binding.action)
+            }
+            _ => {
+                self.pending = None;
+                SequenceStep::Run(binding.action)
+            }
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
+enum TokenMatch<'a, A> {
+    Exact {
+        binding: SequenceBinding<'a, A>,
+        has_longer: bool,
+    },
+    Prefix,
+    None,
+}
+
+fn match_tokens<'a, A: Copy>(
+    tokens: &[String],
+    bindings: &[SequenceBinding<'a, A>],
+) -> TokenMatch<'a, A> {
+    let mut exact: Option<SequenceBinding<'a, A>> = None;
+    let mut has_longer = false;
+
+    for binding in bindings {
+        if !starts_with(binding.sequence, tokens) {
+            continue;
+        }
+        if binding.sequence.len() == tokens.len() {
+            if exact.is_none_or(|cur| binding.priority > cur.priority) {
+                exact = Some(*binding);
+            }
+        } else {
+            has_longer = true;
+        }
+    }
+
+    if let Some(binding) = exact {
+        TokenMatch::Exact {
+            binding,
+            has_longer,
+        }
+    } else if has_longer {
+        TokenMatch::Prefix
+    } else {
+        TokenMatch::None
+    }
+}
+
+fn starts_with(sequence: &[&str], tokens: &[String]) -> bool {
+    sequence.len() >= tokens.len()
+        && tokens
+            .iter()
+            .zip(sequence.iter())
+            .all(|(token, expected)| token == expected)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -260,5 +488,176 @@ mod tests {
         let now = Instant::now();
         let started = now - Duration::from_millis(500);
         assert!(chord_expired(started, now, 500));
+    }
+
+    // ── SequenceRouter ────────────────────────────────────────────────────
+
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    enum Act {
+        LocalEsc,
+        HardEsc,
+        GotoTop,
+    }
+
+    const ESC: &[&str] = &["<Esc>"];
+    const ESC_ESC: &[&str] = &["<Esc>", "<Esc>"];
+    const GG: &[&str] = &["g", "g"];
+
+    fn esc_bindings() -> [SequenceBinding<'static, Act>; 2] {
+        [
+            SequenceBinding {
+                sequence: ESC_ESC,
+                action: Act::HardEsc,
+                ambiguity: AmbiguityBehavior::RunAndClose,
+                priority: 100,
+            },
+            SequenceBinding {
+                sequence: ESC,
+                action: Act::LocalEsc,
+                ambiguity: AmbiguityBehavior::RunAndKeepPrefix,
+                priority: 0,
+            },
+        ]
+    }
+
+    #[test]
+    fn eager_prefix_runs_single_and_keeps_longer_sequence_available() {
+        let now = Instant::now();
+        let mut router = SequenceRouter::new();
+        let bindings = esc_bindings();
+
+        assert_eq!(
+            router.step("<Esc>".to_string(), &bindings, now, 500),
+            SequenceStep::Run(Act::LocalEsc)
+        );
+        assert!(router.has_pending());
+
+        assert_eq!(
+            router.step("<Esc>".to_string(), &bindings, now, 500),
+            SequenceStep::Run(Act::HardEsc)
+        );
+        assert!(!router.has_pending());
+    }
+
+    #[test]
+    fn non_matching_key_clears_pending_sequence() {
+        let now = Instant::now();
+        let mut router = SequenceRouter::new();
+        let bindings = esc_bindings();
+        let _ = router.step("<Esc>".to_string(), &bindings, now, 500);
+
+        assert_eq!(
+            router.step("x".to_string(), &bindings, now, 500),
+            SequenceStep::NoMatch
+        );
+        assert!(!router.has_pending());
+    }
+
+    #[test]
+    fn sequence_router_decays_to_matching_suffix_prefix() {
+        const XY: &[&str] = &["x", "y"];
+        let now = Instant::now();
+        let mut router = SequenceRouter::new();
+        let bindings = [
+            SequenceBinding {
+                sequence: XY,
+                action: Act::LocalEsc,
+                ambiguity: AmbiguityBehavior::RunAndClose,
+                priority: 0,
+            },
+            SequenceBinding {
+                sequence: GG,
+                action: Act::GotoTop,
+                ambiguity: AmbiguityBehavior::RunAndClose,
+                priority: 0,
+            },
+        ];
+
+        assert_eq!(
+            router.step("x".to_string(), &bindings, now, 500),
+            SequenceStep::Pending
+        );
+        assert_eq!(
+            router.step("g".to_string(), &bindings, now, 500),
+            SequenceStep::Pending
+        );
+        assert_eq!(
+            router.step("g".to_string(), &bindings, now, 500),
+            SequenceStep::Run(Act::GotoTop)
+        );
+    }
+
+    #[test]
+    fn expired_pending_sequence_does_not_match_later_key() {
+        let now = Instant::now();
+        let mut router = SequenceRouter::new();
+        let bindings = esc_bindings();
+        let _ = router.step("<Esc>".to_string(), &bindings, now, 500);
+
+        assert_eq!(
+            router.step(
+                "<Esc>".to_string(),
+                &bindings,
+                now + Duration::from_millis(600),
+                500,
+            ),
+            SequenceStep::Run(Act::LocalEsc)
+        );
+        assert!(router.has_pending());
+    }
+
+    #[test]
+    fn higher_priority_exact_binding_wins() {
+        let now = Instant::now();
+        let mut router = SequenceRouter::new();
+        let bindings = [
+            SequenceBinding {
+                sequence: ESC,
+                action: Act::LocalEsc,
+                ambiguity: AmbiguityBehavior::RunAndClose,
+                priority: 0,
+            },
+            SequenceBinding {
+                sequence: ESC,
+                action: Act::HardEsc,
+                ambiguity: AmbiguityBehavior::RunAndClose,
+                priority: 10,
+            },
+        ];
+
+        assert_eq!(
+            router.step("<Esc>".to_string(), &bindings, now, 500),
+            SequenceStep::Run(Act::HardEsc)
+        );
+    }
+
+    #[test]
+    fn wait_for_timeout_defers_exact_prefix_until_expired() {
+        let now = Instant::now();
+        let mut router = SequenceRouter::new();
+        let bindings = [
+            SequenceBinding {
+                sequence: GG,
+                action: Act::GotoTop,
+                ambiguity: AmbiguityBehavior::RunAndClose,
+                priority: 10,
+            },
+            SequenceBinding {
+                sequence: &["g"],
+                action: Act::LocalEsc,
+                ambiguity: AmbiguityBehavior::WaitForTimeout,
+                priority: 0,
+            },
+        ];
+
+        assert_eq!(
+            router.step("g".to_string(), &bindings, now, 500),
+            SequenceStep::Pending
+        );
+        assert_eq!(router.expire(now + Duration::from_millis(499), 500), None);
+        assert_eq!(
+            router.expire(now + Duration::from_millis(500), 500),
+            Some(Act::LocalEsc)
+        );
     }
 }

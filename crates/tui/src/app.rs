@@ -275,11 +275,17 @@ pub(crate) enum InputOutcome {
     Exec(crate::commands::ExecHandle),
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum AppSequenceAction {
+    LocalEsc,
+    HardEsc,
+}
+
 /// Mutable timer state shared across event handlers.
 pub(crate) struct Timers {
-    /// Timestamp of the most recent Esc; used by double-Esc cancel logic in `resolve_agent_esc`.
-    pub(crate) last_esc: Option<Instant>,
-    pub(crate) esc_vim_mode: Option<crate::smelt_term::VimMode>,
+    /// Active app-level key sequence. Escape uses eager-prefix routing so a
+    /// single Esc stays instant while a following Esc can still hard-cancel.
+    pub(crate) app_sequence: smelt_core::keymap::SequenceRouter<AppSequenceAction>,
     pub(crate) last_ctrlc: Option<Instant>,
     pub(crate) last_keypress: Option<Instant>,
     /// Pending `Ctrl-W` pane chord; next key navigates panes instead of flowing to input.
@@ -385,6 +391,24 @@ impl TuiApp {
 
     pub(crate) fn agent_is_running(&self) -> bool {
         self.active_agent_turn_id().is_some()
+    }
+
+    pub(crate) fn drain_queued_inputs_into_prompt(&mut self) {
+        let queued = std::mem::take(&mut self.queued_inputs);
+        if queued.is_empty() {
+            return;
+        }
+
+        let mut pctx = crate::input::prompt_ctx_mut(&mut self.ui);
+        let mut prefix = queued
+            .iter()
+            .map(QueuedInput::prompt_replay_text)
+            .collect::<Vec<_>>()
+            .join("\n");
+        if !prefix.is_empty() && !pctx.buf.source().is_empty() {
+            prefix.push('\n');
+        }
+        self.input.prepend_text(&mut pctx, prefix);
     }
 
     pub(crate) fn clear_prompt_prediction(&mut self) {
@@ -658,8 +682,7 @@ impl TuiApp {
             ui,
             well_known,
             timers: Timers {
-                last_esc: None,
-                esc_vim_mode: None,
+                app_sequence: smelt_core::keymap::SequenceRouter::new(),
                 last_ctrlc: None,
                 last_keypress: None,
                 pending_pane_chord: None,

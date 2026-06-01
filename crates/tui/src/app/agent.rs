@@ -374,19 +374,7 @@ impl TuiApp {
             {
                 self.working.finish(TurnOutcome::Interrupted);
             };
-            let leftover = std::mem::take(&mut self.queued_inputs);
-            if !leftover.is_empty() {
-                let mut ctx = crate::input::prompt_ctx_mut(&mut self.ui);
-                let mut prefix = leftover
-                    .iter()
-                    .map(crate::app::QueuedInput::prompt_replay_text)
-                    .collect::<Vec<_>>()
-                    .join("\n");
-                if !ctx.buf.source().is_empty() {
-                    prefix.push('\n');
-                }
-                self.input.prepend_text(&mut ctx, prefix);
-            }
+            self.drain_queued_inputs_into_prompt();
         } else {
             self.working.finish(TurnOutcome::Done);
             self.clear_prompt_prediction();
