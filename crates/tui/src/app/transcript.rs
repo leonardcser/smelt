@@ -25,6 +25,35 @@ struct ToolRenderJob {
     elapsed_secs: Option<u64>,
 }
 
+type TranscriptBlockSnapshot = (
+    usize,
+    &'static str,
+    crate::smelt_term::RowIndex,
+    crate::smelt_term::RowIndex,
+    String,
+);
+
+fn transcript_block_role(block: &Block) -> &'static str {
+    match block {
+        Block::User { .. } => "user",
+        Block::Mode { .. } => "mode",
+        Block::ProcessStatus { .. } => "process_status",
+        Block::Text { .. } => "assistant",
+        Block::Thinking { .. } => "thinking",
+        Block::ToolCall { .. } => "tool",
+        Block::CodeLine { .. } => "code",
+        Block::Exec { .. } => "exec",
+        Block::Compacted { .. } => "compacted",
+    }
+}
+
+fn transcript_block_first_line(block: &Block) -> String {
+    block
+        .raw_text()
+        .and_then(|t| t.lines().find(|l| !l.trim().is_empty()).map(str::to_string))
+        .unwrap_or_default()
+}
+
 impl TuiApp {
     pub(crate) fn begin_turn(&mut self) {
         self.context_tokens_updated_this_turn = false;
@@ -241,43 +270,66 @@ impl TuiApp {
     /// non-empty line of the block's raw source text (truncated upstream by
     /// the caller as needed). Returns empty when no projection has run yet
     /// (i.e. before the first frame).
-    pub(crate) fn transcript_block_snapshots(
+    pub(crate) fn visible_transcript_block_snapshots(&self) -> Vec<TranscriptBlockSnapshot> {
+        self.transcript_block_snapshots_from_layout(self.transcript_projection.block_layout())
+    }
+
+    pub(crate) fn transcript_block_snapshots(&mut self) -> Vec<TranscriptBlockSnapshot> {
+        let tw = self.transcript_width() as u16;
+        let theme = self.ui.theme().clone();
+        let layout = self.transcript_projection.materialize_block_layout(
+            &mut self.transcript.history,
+            tw,
+            self.core.config.settings.show_thinking,
+            &theme,
+        );
+        self.transcript_block_snapshots_from_layout(layout.into_iter())
+    }
+
+    fn transcript_block_snapshots_from_layout(
         &self,
-    ) -> Vec<(
-        usize,
-        &'static str,
-        crate::smelt_term::RowIndex,
-        crate::smelt_term::RowIndex,
-        String,
-    )> {
-        use smelt_core::transcript_model::Block;
+        layout: impl Iterator<
+            Item = (
+                BlockId,
+                crate::smelt_term::RowIndex,
+                crate::smelt_term::RowIndex,
+            ),
+        >,
+    ) -> Vec<TranscriptBlockSnapshot> {
         let mut out = Vec::new();
         let history = &self.transcript.history;
-        for (block_id, first_row, rows) in self.transcript_projection.block_layout() {
+        for (block_id, first_row, rows) in layout {
             let Some(idx) = history.order.iter().position(|id| *id == block_id) else {
                 continue;
             };
             let Some(block) = history.blocks.get(&block_id) else {
                 continue;
             };
-            let role = match block {
-                Block::User { .. } => "user",
-                Block::Mode { .. } => "mode",
-                Block::ProcessStatus { .. } => "process_status",
-                Block::Text { .. } => "assistant",
-                Block::Thinking { .. } => "thinking",
-                Block::ToolCall { .. } => "tool",
-                Block::CodeLine { .. } => "code",
-                Block::Exec { .. } => "exec",
-                Block::Compacted { .. } => "compacted",
-            };
-            let first_line = block
-                .raw_text()
-                .and_then(|t| t.lines().find(|l| !l.trim().is_empty()).map(str::to_string))
-                .unwrap_or_default();
+            let role = transcript_block_role(block);
+            let first_line = transcript_block_first_line(block);
             out.push((idx, role, first_row, rows, first_line));
         }
         out
+    }
+
+    pub(crate) fn transcript_block_at_row(
+        &mut self,
+        row: crate::smelt_term::RowIndex,
+    ) -> Option<TranscriptBlockSnapshot> {
+        self.transcript_block_snapshots()
+            .into_iter()
+            .find(|(_, _, first_row, rows, _)| {
+                let end = first_row.saturating_add(*rows);
+                row >= *first_row && row < end
+            })
+    }
+
+    pub(crate) fn transcript_visible_rows(
+        &mut self,
+        start: crate::smelt_term::RowIndex,
+        count: crate::smelt_term::RowIndex,
+    ) -> Vec<String> {
+        self.transcript_display_rows_range(self.core.config.settings.show_thinking, start, count)
     }
 
     pub(crate) fn finish_transcript_turn(&mut self) {

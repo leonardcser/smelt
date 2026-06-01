@@ -5,6 +5,23 @@ use mlua::prelude::*;
 use smelt_core::lua::doc::Tier;
 use smelt_core::lua::module::LuaMod;
 
+fn block_snapshot_table(
+    lua: &Lua,
+    idx: usize,
+    role: &'static str,
+    first_row: crate::smelt_term::RowIndex,
+    rows: crate::smelt_term::RowIndex,
+    first_line: String,
+) -> LuaResult<mlua::Table> {
+    let t = lua.create_table()?;
+    t.set("idx", idx)?;
+    t.set("role", role)?;
+    t.set("first_row", first_row)?;
+    t.set("rows", rows)?;
+    t.set("first_line", first_line)?;
+    Ok(t)
+}
+
 pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
     let m = LuaMod::under(
         lua,
@@ -42,15 +59,55 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
                 .unwrap_or_default();
             let out = lua.create_table_with_capacity(snaps.len(), 0)?;
             for (i, (idx, role, first_row, rows, first_line)) in snaps.into_iter().enumerate() {
-                let t = lua.create_table()?;
-                t.set("idx", idx)?;
-                t.set("role", role)?;
-                t.set("first_row", first_row)?;
-                t.set("rows", rows)?;
-                t.set("first_line", first_line)?;
-                out.set(i + 1, t)?;
+                out.set(
+                    i + 1,
+                    block_snapshot_table(lua, idx, role, first_row, rows, first_line)?,
+                )?;
             }
             Ok(out)
+        },
+    )?;
+    m.fn_(
+        "visible_blocks",
+        "Return the transcript blocks materialized in the current visible projection as `{ idx, role, first_row, rows, first_line }` entries. Unlike `blocks()`, this does not force full transcript materialization.",
+        &[],
+        |lua, ()| -> LuaResult<mlua::Table> {
+            let snaps = crate::lua::try_with_app(|app| app.visible_transcript_block_snapshots())
+                .unwrap_or_default();
+            let out = lua.create_table_with_capacity(snaps.len(), 0)?;
+            for (i, (idx, role, first_row, rows, first_line)) in snaps.into_iter().enumerate() {
+                out.set(
+                    i + 1,
+                    block_snapshot_table(lua, idx, role, first_row, rows, first_line)?,
+                )?;
+            }
+            Ok(out)
+        },
+    )?;
+    m.fn_(
+        "rows",
+        "Return rendered transcript display rows in `[start, start + count)`. This is exact and may materialize the full transcript until range-native transcript documents land.",
+        &["start", "count"],
+        |lua, (start, count): (crate::smelt_term::RowIndex, crate::smelt_term::RowIndex)| -> LuaResult<mlua::Table> {
+            let rows = crate::lua::try_with_app(|app| app.transcript_visible_rows(start, count))
+                .unwrap_or_default();
+            let out = lua.create_table_with_capacity(rows.len(), 0)?;
+            for (i, row) in rows.into_iter().enumerate() {
+                out.set(i + 1, row)?;
+            }
+            Ok(out)
+        },
+    )?;
+    m.fn_(
+        "block_at_row",
+        "Return the exact transcript block containing absolute display row `row`, or nil when the row is outside a block. This may materialize full block layout.",
+        &["row"],
+        |lua, row: crate::smelt_term::RowIndex| -> LuaResult<Option<mlua::Table>> {
+            let snap = crate::lua::try_with_app(|app| app.transcript_block_at_row(row)).flatten();
+            snap.map(|(idx, role, first_row, rows, first_line)| {
+                block_snapshot_table(lua, idx, role, first_row, rows, first_line)
+            })
+            .transpose()
         },
     )?;
     Ok(())

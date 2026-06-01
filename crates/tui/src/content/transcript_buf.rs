@@ -596,6 +596,55 @@ impl TranscriptProjection {
         self.cache.ensure_many(history, &ids, &keys, theme);
     }
 
+    /// Exact full block layout for compatibility APIs. This may materialize every
+    /// transcript block, but does not rewrite the backing display buffer.
+    pub(crate) fn materialize_block_layout(
+        &mut self,
+        history: &mut BlockHistory,
+        width: u16,
+        show_thinking: bool,
+        theme: &Theme,
+    ) -> Vec<(BlockId, RowIndex, RowIndex)> {
+        self.ensure_all(history, width, show_thinking, theme);
+        let base_key = LayoutKey {
+            view_state: ViewState::Expanded,
+            width,
+            show_thinking,
+            content_hash: 0,
+            sidecar_hash: 0,
+        };
+        self.document
+            .rebuild_if_stale(history, width, show_thinking, base_key);
+
+        let mut row: RowIndex = 0;
+        let mut layout = Vec::with_capacity(history.order.len());
+        for i in 0..history.order.len() {
+            let id = history.order[i];
+            let bkey = history.resolve_key(id, base_key);
+            let Some(block_buf) = self.cache.get(id, bkey) else {
+                continue;
+            };
+            let block_rows = block_buf.line_count();
+            let gap = history.rendered_block_gap(i, block_rows) as RowIndex;
+            self.document
+                .set_exact_height(i, gap.saturating_add(block_rows as RowIndex));
+            row = row.saturating_add(gap);
+            layout.push(LayoutEntry {
+                id,
+                start: row,
+                rows: block_rows as RowIndex,
+                key: bkey,
+            });
+            row = row.saturating_add(block_rows as RowIndex);
+        }
+        self.document.refresh_height_index();
+        self.layout = layout;
+        self.layout
+            .iter()
+            .map(|e| (e.id, e.start, e.rows))
+            .collect()
+    }
+
     /// Full display rows. Cached by `(generation, width, show_thinking)`; repeat
     /// callers get a free `Arc::clone`.
     pub(crate) fn build_rows(
@@ -1140,6 +1189,36 @@ mod tests {
         assert_eq!(output.clamped_scroll, full_rows.saturating_sub(5));
         assert!(buf.lines().iter().any(|line| line == "block 39"));
         assert!(!buf.lines().iter().any(|line| line == "block 0"));
+    }
+
+    #[test]
+    fn materialized_block_layout_is_exact_after_tail_projection() {
+        let mut transcript = Transcript::new();
+        for i in 0..20 {
+            transcript.push(Block::Text {
+                content: format!("line {i}"),
+            });
+        }
+        let theme = Theme::default();
+        let mut projection = TranscriptProjection::new();
+        let mut buf = Buffer::new(crate::smelt_term::BufId(6), Default::default());
+
+        projection.project(
+            &mut buf,
+            &mut transcript.history,
+            80,
+            false,
+            &theme,
+            RowIndex::MAX,
+            5,
+        );
+        assert!(projection.block_layout().count() < transcript.history.order.len());
+
+        let layout =
+            projection.materialize_block_layout(&mut transcript.history, 80, false, &theme);
+        assert_eq!(layout.len(), transcript.history.order.len());
+        assert_eq!(layout.first().map(|(_, start, _)| *start), Some(0));
+        assert_eq!(layout.last().map(|(_, _, rows)| *rows), Some(1));
     }
 
     #[test]
