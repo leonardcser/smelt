@@ -773,7 +773,7 @@ impl TuiApp {
 
 fn display_safe_process_id(id: &str) -> String {
     id.chars()
-        .map(|ch| if ch.is_control() { '�' } else { ch })
+        .map(|ch| if ch.is_control() { '\u{FFFD}' } else { ch })
         .collect()
 }
 

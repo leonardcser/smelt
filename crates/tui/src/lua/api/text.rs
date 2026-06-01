@@ -289,7 +289,7 @@ mod tests {
         let invalid = lua.create_string([0xff, b'a']).unwrap();
 
         let out: String = truncate.call((invalid, 10usize, mlua::Value::Nil)).unwrap();
-        assert_eq!(out, "�a");
+        assert_eq!(out, "\u{FFFD}a");
     }
 
     #[test]
@@ -315,6 +315,6 @@ mod tests {
         let invalid = lua.create_string([0xff, b'a']).unwrap();
 
         let out: String = sanitize.call(invalid).unwrap();
-        assert_eq!(out, "�a");
+        assert_eq!(out, "\u{FFFD}a");
     }
 }

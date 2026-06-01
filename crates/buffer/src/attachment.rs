@@ -42,7 +42,7 @@ impl Attachment {
 fn display_safe_label(label: &str) -> String {
     label
         .chars()
-        .map(|ch| if ch.is_control() { '�' } else { ch })
+        .map(|ch| if ch.is_control() { '\u{FFFD}' } else { ch })
         .collect()
 }
 
