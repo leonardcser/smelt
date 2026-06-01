@@ -4,17 +4,20 @@
 # build
 cargo build
 
-# test (requires `cargo install cargo-nextest` — much faster than `cargo test`)
-cargo nextest run --workspace
+# test (requires `cargo install cargo-nextest` — much faster and quieter than `cargo test`)
+set -o pipefail; cargo nextest run --workspace 2>&1 | tail -120
+
+# targeted cargo test fallback: keep output bounded; rerun narrower tests if tail omits context
+set -o pipefail; cargo test -p smelt-tui double_esc 2>&1 | tail -120
 
 # format and lint
-cargo fmt && cargo clippy --workspace --all-targets -- -D warnings
+set -o pipefail; cargo fmt && cargo clippy --workspace --all-targets -- -D warnings 2>&1 | tail -120
 
 # coverage (requires `cargo install cargo-llvm-cov`)
-cargo llvm-cov nextest --workspace --summary-only
+set -o pipefail; cargo llvm-cov nextest --workspace --summary-only 2>&1 | tail -120
 
 # regenerate Lua API stubs + reference docs (commit the result)
-cargo xtask gen-lua-docs
+set -o pipefail; cargo xtask gen-lua-docs 2>&1 | tail -120
 ```
 
 ## Conventions
