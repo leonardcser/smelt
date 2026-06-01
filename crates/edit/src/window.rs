@@ -1361,6 +1361,7 @@ impl Window {
             self.extend_line_anchored_drag(buf, ctx, text);
         } else {
             if let Some(press) = self.pending_press.take() {
+                let press = text::snap(text, press.min(text.len()));
                 if self.vim_enabled {
                     self.vim_state
                         .begin_visual(&mut self.vim_mode, VimMode::Visual, press);

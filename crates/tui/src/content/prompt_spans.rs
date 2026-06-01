@@ -110,4 +110,3 @@ mod tests {
         assert_eq!(spans_to_string(&spans), "a\u{FFFD}\u{FFFD}b\nc");
     }
 }
-

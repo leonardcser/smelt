@@ -1,0 +1,40 @@
+{
+  "_about": "Mouse drag regression: a pending transcript mouse-down can outlive a resize/reprojection before the drag starts; the drag anchor must clamp to the current coordinate text before entering vim visual mode.",
+  "mode": "normal",
+  "ops": [
+    {
+      "kind": "start_custom_command",
+      "data": {
+        "variant": 137
+      }
+    },
+    {
+      "kind": "mouse",
+      "data": {
+        "button": 99,
+        "col": 0,
+        "kind": 0,
+        "mods": 199,
+        "row": 10
+      }
+    },
+    {
+      "kind": "resize",
+      "data": {
+        "h": 5662,
+        "w": 0
+      }
+    },
+    {
+      "kind": "mouse",
+      "data": {
+        "button": 0,
+        "col": 0,
+        "kind": 10,
+        "mods": 0,
+        "row": 0
+      }
+    }
+  ],
+  "vim": true
+}
