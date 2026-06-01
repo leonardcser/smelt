@@ -941,7 +941,14 @@ impl TuiApp {
             }
         }
 
-        // Tier 3: per-window catch-all fallback (dialog inputs, etc.).
+        // Tier 3: vim viewer keys for vim-enabled read-only overlay leaves.
+        // Run before per-window catch-alls so generic dialog/list fallbacks do
+        // not swallow Normal/Visual-mode motions and yanks.
+        if self.dispatch_overlay_viewer_key(k) {
+            return Status::Consumed;
+        }
+
+        // Tier 4: per-window catch-all fallback (dialog inputs, etc.).
         {
             let lua = &self.lua;
             let mut lua_invoke =
@@ -957,11 +964,6 @@ impl TuiApp {
             ) {
                 return Status::Consumed;
             }
-        }
-
-        // Tier 4: vim viewer keys for vim-enabled read-only overlay leaves.
-        if self.dispatch_overlay_viewer_key(k) {
-            return Status::Consumed;
         }
 
         // Tier 5: bare Esc / Ctrl-C dismisses the active modal.

@@ -638,12 +638,13 @@ impl TuiApp {
                 crate::smelt_term::VimMode::Visual | crate::smelt_term::VimMode::VisualLine
             );
         let anchor_set = win.selection_anchor.is_some();
-        let yank_flash = self
-            .core
-            .clipboard
-            .kill_ring
-            .yank_flash_range(self.core.clock.instant_now())
-            .is_some();
+        let yank_flash = self.ui.focused_overlay().is_none()
+            && self
+                .core
+                .clipboard
+                .kill_ring
+                .yank_flash_range(self.core.clock.instant_now())
+                .is_some();
         if !vim_visual && !anchor_set && !yank_flash {
             return Vec::new();
         }
@@ -676,12 +677,15 @@ impl TuiApp {
             win.selection_range_at(endpoint, &text)
         };
         // Fall back to yank-flash range (mirrors nvim's `vim.highlight.on_yank`).
-        let (s, e) = match active_selection.or_else(|| {
+        let flash_range = if self.ui.focused_overlay().is_none() {
             self.core
                 .clipboard
                 .kill_ring
                 .yank_flash_range(self.core.clock.instant_now())
-        }) {
+        } else {
+            None
+        };
+        let (s, e) = match active_selection.or(flash_range) {
             Some(range) => range,
             None => return Vec::new(),
         };
