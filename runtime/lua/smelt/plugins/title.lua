@@ -56,13 +56,33 @@ local function parse_response(raw)
   return nil
 end
 
-local inflight = false
+local generation = 0
 -- Accumulated user messages sent so far. The system prompt is stable,
 -- so only the messages array is compared between calls.
 local sent_messages = {}
 
+local function invalidate(reset_sent)
+  generation = generation + 1
+  if reset_sent then
+    sent_messages = {}
+  end
+end
+
+smelt.cell("session_started"):subscribe(function()
+  invalidate(true)
+end)
+
+smelt.cell("session_ended"):subscribe(function()
+  invalidate(true)
+end)
+
+smelt.cell("history"):subscribe(function(payload)
+  if payload.kind == "cleared" or payload.kind == "rewound" or payload.kind == "loaded" or payload.kind == "forked" then
+    invalidate(true)
+  end
+end)
+
 local function update_title(new_text)
-  if inflight then return end
 
   -- Gather all prior user messages from the session history.
   local history = smelt.session.messages()
@@ -102,7 +122,9 @@ local function update_title(new_text)
   end
   if not changed then return end
 
-  inflight = true
+  invalidate(false)
+  local request_generation = generation
+  local request_session_id = smelt.session.id()
   sent_messages = messages
 
   smelt.engine.ask({
@@ -112,7 +134,7 @@ local function update_title(new_text)
     reasoning_effort = "off",
     response_format = { name = "session_title", schema = SCHEMA },
     on_response = function(response, err)
-      inflight = false
+      if request_generation ~= generation or request_session_id ~= smelt.session.id() then return end
       if err then
         local title, slug = fallback_title(trimmed)
         smelt.session.title(title, slug)

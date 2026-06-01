@@ -1606,11 +1606,11 @@ mod tests {
         protocol::Message::assistant(Some(protocol::Content::text(text)), None, None)
     }
 
-    fn respond_pending_ask_with_text(app: &mut TestApp, text: &str) {
+    fn respond_ask_with_text(app: &mut TestApp, id: u64, text: &str) {
         let _g = crate::lua::install_app_ptr(&mut app.app);
         app.app
             .dispatch_engine_event(protocol::EngineEvent::EngineAskResponse {
-                id: app.pending_ask_id().expect("pending ask id"),
+                id,
                 message: Some(protocol::Message::assistant(
                     Some(protocol::Content::text(text)),
                     None,
@@ -1619,6 +1619,43 @@ mod tests {
                 error: None,
             });
         app.app.drive_lua_tasks();
+    }
+
+    fn respond_pending_ask_with_text(app: &mut TestApp, text: &str) {
+        respond_ask_with_text(app, app.pending_ask_id().expect("pending ask id"), text);
+    }
+
+    fn publish_input_submit(app: &mut TestApp, text: &str) {
+        let _g = crate::lua::install_app_ptr(&mut app.app);
+        app.app
+            .core
+            .cells
+            .set_dyn("input_submit", std::rc::Rc::new(text.to_string()));
+        app.app.pump_lua();
+    }
+
+    fn publish_turn_end(app: &mut TestApp) {
+        let _g = crate::lua::install_app_ptr(&mut app.app);
+        app.app.core.cells.set_dyn(
+            "turn_end",
+            std::rc::Rc::new(smelt_core::cells::TurnEnd { cancelled: false }),
+        );
+        app.app.pump_lua();
+    }
+
+    fn publish_history_delta(app: &mut TestApp, kind: &str) {
+        let _g = crate::lua::install_app_ptr(&mut app.app);
+        app.app.publish_history_delta(kind);
+        app.app.pump_lua();
+    }
+
+    fn engine_ask_ids(cmds: Vec<protocol::UiCommand>) -> Vec<u64> {
+        cmds.into_iter()
+            .filter_map(|cmd| match cmd {
+                protocol::UiCommand::EngineAsk { id, .. } => Some(id),
+                _ => None,
+            })
+            .collect()
     }
 
     fn respond_pending_ask_with_tool_call(app: &mut TestApp, call_id: &str, name: &str) {
@@ -1663,6 +1700,113 @@ mod tests {
             )
             .exec()
             .expect("stub /btw ui");
+    }
+
+    #[test]
+    fn stale_prompt_prediction_response_after_submit_is_ignored() {
+        let mut app = TestApp::builder().build();
+        app.app
+            .core
+            .session
+            .history
+            .push(protocol::HistoryItem::user(protocol::Content::text(
+                "How should I debug this failing test?",
+            )));
+
+        publish_turn_end(&mut app);
+        let ask_ids = engine_ask_ids(app.drain_engine_sends());
+        assert_eq!(
+            ask_ids.len(),
+            1,
+            "prediction should issue one background ask"
+        );
+        let prediction_id = ask_ids[0];
+
+        publish_input_submit(&mut app, "Run the focused test first");
+        respond_ask_with_text(&mut app, prediction_id, "Run cargo test");
+
+        let prompt = app.app.well_known.prompt;
+        assert_eq!(app.app.placeholder_text(prompt), None);
+    }
+
+    #[test]
+    fn stale_title_response_after_reset_is_ignored() {
+        let mut app = TestApp::builder().build();
+        let original_session_id = app.app.core.session.id.clone();
+
+        publish_input_submit(&mut app, "Fix flaky integration tests");
+        let ask_ids = engine_ask_ids(app.drain_engine_sends());
+        assert_eq!(ask_ids.len(), 1, "title should issue one background ask");
+        let title_id = ask_ids[0];
+
+        {
+            let _g = crate::lua::install_app_ptr(&mut app.app);
+            app.app.reset_session();
+        }
+        assert_ne!(app.app.core.session.id, original_session_id);
+
+        respond_ask_with_text(
+            &mut app,
+            title_id,
+            r#"{"title":"Wrong session title","slug":"wrong-session"}"#,
+        );
+
+        assert_eq!(app.app.core.session.title, None);
+        assert_eq!(app.app.core.session.slug, None);
+    }
+
+    #[test]
+    fn title_response_after_rewind_is_ignored() {
+        let mut app = TestApp::builder().build();
+
+        publish_input_submit(&mut app, "Add caching to parser");
+        let ask_ids = engine_ask_ids(app.drain_engine_sends());
+        assert_eq!(ask_ids.len(), 1, "title should issue one background ask");
+        let title_id = ask_ids[0];
+
+        publish_history_delta(&mut app, "rewound");
+        respond_ask_with_text(
+            &mut app,
+            title_id,
+            r#"{"title":"Stale parser cache","slug":"stale-parser-cache"}"#,
+        );
+
+        assert_eq!(app.app.core.session.title, None);
+        assert_eq!(app.app.core.session.slug, None);
+    }
+
+    #[test]
+    fn second_title_request_supersedes_inflight_response() {
+        let mut app = TestApp::builder().build();
+
+        publish_input_submit(&mut app, "Investigate parser panic");
+        let first_ids = engine_ask_ids(app.drain_engine_sends());
+        assert_eq!(first_ids.len(), 1);
+        let first_id = first_ids[0];
+
+        publish_input_submit(&mut app, "Fix renderer panic instead");
+        let second_ids = engine_ask_ids(app.drain_engine_sends());
+        assert_eq!(second_ids.len(), 1);
+        let second_id = second_ids[0];
+        assert_ne!(first_id, second_id);
+
+        respond_ask_with_text(
+            &mut app,
+            first_id,
+            r#"{"title":"Old parser panic","slug":"old-parser"}"#,
+        );
+        assert_eq!(app.app.core.session.title, None);
+
+        respond_ask_with_text(
+            &mut app,
+            second_id,
+            r#"{"title":"Fix renderer panic","slug":"fix-renderer"}"#,
+        );
+        assert_eq!(
+            app.app.core.session.title.as_deref(),
+            Some("Fix renderer panic")
+        );
+        assert_eq!(app.app.core.session.slug.as_deref(), Some("fix-renderer"));
     }
 
     #[test]

@@ -8,6 +8,12 @@
 -- common message.
 
 local prompt = smelt.prompt.win()
+local generation = 0
+
+local function invalidate()
+  generation = generation + 1
+  prompt:clear_placeholder()
+end
 
 local SYSTEM = "Task: predict what the user will type next in the conversation below. Keep it short - one sentence max. If you cannot predict, reply with an empty string."
 
@@ -15,15 +21,30 @@ local function has_queued_messages()
   return #smelt.prompt.queued() > 0
 end
 
-smelt.cell("history"):subscribe(function(payload)
-  if payload.kind == "cleared" or payload.kind == "rewound" then
-    prompt:clear_placeholder()
-  end
-end)
-
 -- Accumulated context sent so far. The system prompt is stable,
 -- so only the messages array is compared between calls.
 local sent_messages = {}
+
+smelt.cell("input_submit"):subscribe(function()
+  invalidate()
+end)
+
+smelt.cell("session_started"):subscribe(function()
+  invalidate()
+  sent_messages = {}
+end)
+
+smelt.cell("session_ended"):subscribe(function()
+  invalidate()
+  sent_messages = {}
+end)
+
+smelt.cell("history"):subscribe(function(payload)
+  if payload.kind == "cleared" or payload.kind == "rewound" or payload.kind == "loaded" or payload.kind == "forked" then
+    invalidate()
+    sent_messages = {}
+  end
+end)
 
 smelt.cell("turn_end"):subscribe(function(payload)
   if payload.cancelled then
@@ -82,13 +103,16 @@ smelt.cell("turn_end"):subscribe(function(payload)
   if not changed then return end
   sent_messages = messages
 
+  local request_generation = generation
+  local request_session_id = smelt.session.id()
+
   smelt.engine.ask({
     system = SYSTEM,
     messages = messages,
     model = smelt.model.preferred("predict"),
     reasoning_effort = "off",
     on_response = function(response, err)
-      if err then return end
+      if err or request_generation ~= generation or request_session_id ~= smelt.session.id() then return end
       local content = (response and response.content) or ""
       -- Keep only the first line; `Win:placeholder` rejects newlines and
       -- the prompt only renders a single line of ghost text anyway.
