@@ -2900,6 +2900,56 @@ mod tests {
     }
 
     #[test]
+    fn vim_yank_in_overlay_viewer_writes_system_clipboard() {
+        let mut app = TestApp::builder().with_vim(true).build();
+        let buf = app
+            .app
+            .ui
+            .buf_create(crate::smelt_term::BufCreateOpts::default());
+        {
+            let buf = app.app.ui.buf_mut(buf).expect("overlay buffer");
+            buf.readonly = true;
+            buf.set_all_lines(vec!["alpha beta".into(), "gamma".into()]);
+        }
+
+        let leaf = app
+            .app
+            .ui
+            .win_open_split(
+                buf,
+                crate::smelt_term::SplitConfig {
+                    region: "dialog".into(),
+                    gutters: Default::default(),
+                },
+            )
+            .expect("overlay leaf");
+        if let Some(win) = app.app.ui.win_mut(leaf) {
+            win.focusable = true;
+            win.selectable = true;
+            win.set_vim_enabled(true);
+        }
+        app.app.ui.overlay_open(
+            crate::smelt_term::Overlay::new(
+                crate::smelt_term::LayoutTree::leaf(leaf),
+                crate::smelt_term::layout::Anchor::ScreenCenter,
+            )
+            .with_size((40, 5))
+            .modal(true),
+        );
+        app.render_silent();
+
+        app.type_char('v');
+        app.type_char('e');
+        app.type_char('y');
+
+        assert_eq!(app.app.core.clipboard.kill_ring.current(), "alpha");
+        assert_eq!(
+            app.app.core.clipboard.kill_ring.last_clipboard_write(),
+            Some("alpha")
+        );
+    }
+
+    #[test]
     fn picker_open_focuses_overlay() {
         let mut app = TestApp::builder().build();
         let leaf = open_test_picker(&mut app, &["one", "two", "three"], 0);

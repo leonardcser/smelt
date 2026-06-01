@@ -1050,6 +1050,19 @@ impl TuiApp {
         )
     }
 
+    fn sync_viewer_clipboard_from_kill_ring(
+        &mut self,
+        buf_id: crate::smelt_term::BufId,
+        yank_tick_before: u64,
+    ) {
+        if self.core.clipboard.kill_ring.yank_tick() == yank_tick_before {
+            return;
+        }
+        if let Some(buf) = self.ui.buf(buf_id) {
+            buf.sync_clipboard_from_kill_ring(&mut self.core.clipboard);
+        }
+    }
+
     /// Unified viewer-key dispatcher shared between transcript, overlay leaves,
     /// and any future scrollable window. Resolution order:
     ///   1. Vim engine (when `vim_enabled`) - handles motions, operators,
@@ -1092,6 +1105,7 @@ impl TuiApp {
         }
 
         if vim_enabled {
+            let yank_tick_before = self.core.clipboard.kill_ring.yank_tick();
             let (win, buf) = self.ui.win_and_buf_mut(win_id, buf_id);
             let win = win.expect("window");
             let buf = buf.expect("buffer");
@@ -1099,6 +1113,7 @@ impl TuiApp {
             let status = win.handle_key(buf, k, &mut self.core.clipboard, now);
             win.sync_follow_tail(buf, viewport_rows);
             if matches!(status, Status::Consumed) {
+                self.sync_viewer_clipboard_from_kill_ring(buf_id, yank_tick_before);
                 return Status::Consumed;
             }
             // Vim Passthrough (Shift+Arrows, etc.) falls through so the

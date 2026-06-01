@@ -22,18 +22,8 @@ impl TuiApp {
         }
 
         let win_id = self.well_known.transcript;
-        let yank_tick_before = self.core.clipboard.kill_ring.yank_tick();
         let status = self.dispatch_window_viewer_key(win_id, k);
         if matches!(status, crate::smelt_term::Status::Consumed) {
-            // Vim yanks land in the kill ring; mirror them to the system
-            // clipboard through the transcript's `BufferCopy` so soft-wrap
-            // joins + `copy_as` substitutions are honoured.
-            if self.core.clipboard.kill_ring.yank_tick() != yank_tick_before {
-                let buf_id = self.transcript_win().buf;
-                if let Some(buf) = self.ui.buf(buf_id) {
-                    buf.sync_clipboard_from_kill_ring(&mut self.core.clipboard);
-                }
-            }
             self.snap_transcript_cursor();
             return EventOutcome::Redraw;
         }
