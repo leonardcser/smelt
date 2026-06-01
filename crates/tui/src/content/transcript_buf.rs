@@ -14,6 +14,7 @@ pub(crate) struct TranscriptProjection {
     layout: Vec<LayoutEntry>,
     /// Cached `build_rows` result for full-text consumers (Lua API, vim navigation).
     cached_rows: Option<CachedRows>,
+    document: TranscriptDocument,
 }
 
 struct CachedRows {
@@ -21,6 +22,82 @@ struct CachedRows {
     generation: u64,
     width: u16,
     show_thinking: bool,
+}
+
+#[derive(Default)]
+struct TranscriptDocument {
+    nodes: Vec<TranscriptNode>,
+    prefix_rows: Vec<RowIndex>,
+    generation: u64,
+    width: u16,
+    show_thinking: bool,
+}
+
+struct TranscriptNode {
+    id: BlockId,
+    key: LayoutKey,
+    estimated_height: RowIndex,
+    exact_height: Option<RowIndex>,
+}
+
+impl TranscriptDocument {
+    fn rebuild_if_stale(
+        &mut self,
+        history: &BlockHistory,
+        width: u16,
+        show_thinking: bool,
+        base_key: LayoutKey,
+    ) {
+        let gen = history.generation();
+        if self.generation == gen && self.width == width && self.show_thinking == show_thinking {
+            return;
+        }
+
+        self.nodes.clear();
+        self.nodes.reserve(history.order.len());
+        for &id in &history.order {
+            self.nodes.push(TranscriptNode {
+                id,
+                key: history.resolve_key(id, base_key),
+                estimated_height: 1,
+                exact_height: None,
+            });
+        }
+        self.generation = gen;
+        self.width = width;
+        self.show_thinking = show_thinking;
+        self.rebuild_prefix_rows();
+    }
+
+    fn set_exact_height(&mut self, index: usize, rows: RowIndex) {
+        let Some(node) = self.nodes.get_mut(index) else {
+            return;
+        };
+        node.exact_height = Some(rows);
+    }
+
+    fn refresh_height_index(&mut self) {
+        self.rebuild_prefix_rows();
+    }
+
+    fn prefix_row(&self, index: usize) -> RowIndex {
+        self.prefix_rows.get(index).copied().unwrap_or(0)
+    }
+
+    fn total_rows(&self) -> RowIndex {
+        self.prefix_rows.last().copied().unwrap_or(0)
+    }
+
+    fn rebuild_prefix_rows(&mut self) {
+        self.prefix_rows.clear();
+        self.prefix_rows.reserve(self.nodes.len() + 1);
+        self.prefix_rows.push(0);
+        let mut total: RowIndex = 0;
+        for node in &self.nodes {
+            total = total.saturating_add(node.exact_height.unwrap_or(node.estimated_height));
+            self.prefix_rows.push(total);
+        }
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -53,6 +130,7 @@ impl TranscriptProjection {
             project_key: None,
             layout: Vec::new(),
             cached_rows: None,
+            document: TranscriptDocument::default(),
         }
     }
 
@@ -72,6 +150,7 @@ impl TranscriptProjection {
             self.project_key = None;
             self.layout.clear();
             self.cached_rows = None;
+            self.document = TranscriptDocument::default();
         }
         self.cache_generation = gen;
     }
@@ -84,6 +163,7 @@ impl TranscriptProjection {
         self.project_key = None;
         self.layout.clear();
         self.cached_rows = None;
+        self.document = TranscriptDocument::default();
     }
 
     /// Render every block (parallel on cache misses) and stitch the unified buffer.
@@ -149,6 +229,8 @@ impl TranscriptProjection {
             content_hash: 0,
             sidecar_hash: 0,
         };
+        self.document
+            .rebuild_if_stale(history, width, show_thinking, base_key);
         let _perf = smelt_perf::perf::begin("project:render");
 
         let n = history.order.len();
@@ -179,6 +261,8 @@ impl TranscriptProjection {
             };
             let block_rows = block_buf.line_count();
             let gap = history.rendered_block_gap(i, block_rows);
+            self.document
+                .set_exact_height(i, (gap as usize).saturating_add(block_rows) as RowIndex);
             for _ in 0..gap {
                 texts.push(String::new());
             }
@@ -203,6 +287,7 @@ impl TranscriptProjection {
                 key: bkey,
             });
         }
+        self.document.refresh_height_index();
 
         // Streaming fast-path: if only the last block grew, trim the buffer
         // to before the last block and append the new tail instead of
@@ -260,6 +345,8 @@ impl TranscriptProjection {
             content_hash: 0,
             sidecar_hash: 0,
         };
+        self.document
+            .rebuild_if_stale(history, width, show_thinking, base_key);
         let overscan = 20usize;
         let target_rows = viewport_rows as usize + overscan;
         let n = history.order.len();
@@ -269,8 +356,9 @@ impl TranscriptProjection {
         let mut keys = Vec::new();
 
         for i in (0..n).rev() {
-            let id = history.order[i];
-            let bkey = history.resolve_key(id, base_key);
+            let node = &self.document.nodes[i];
+            let id = node.id;
+            let bkey = node.key;
             self.cache.ensure_many(history, &[id], &[bkey], theme);
             let rows = self
                 .cache
@@ -278,7 +366,9 @@ impl TranscriptProjection {
                 .map(|b| b.line_count())
                 .unwrap_or(0);
             let gap = history.rendered_block_gap(i, rows) as usize;
-            selected_rows = selected_rows.saturating_add(gap).saturating_add(rows);
+            let height = gap.saturating_add(rows);
+            self.document.set_exact_height(i, height as RowIndex);
+            selected_rows = selected_rows.saturating_add(height);
             ids.push(id);
             keys.push(bkey);
             first = i;
@@ -288,10 +378,13 @@ impl TranscriptProjection {
         }
         ids.reverse();
         keys.reverse();
+        self.document.refresh_height_index();
 
-        let estimated_prefix_rows = first as RowIndex;
-        let mut texts: Vec<String> = Vec::with_capacity(first.saturating_add(selected_rows));
-        for _ in 0..first {
+        let estimated_prefix_rows = self.document.prefix_row(first);
+        let prefix_placeholders = estimated_prefix_rows.min(usize::MAX as RowIndex) as usize;
+        let mut texts: Vec<String> =
+            Vec::with_capacity(prefix_placeholders.saturating_add(selected_rows));
+        for _ in 0..prefix_placeholders {
             texts.push(String::new());
         }
 
@@ -310,6 +403,8 @@ impl TranscriptProjection {
             };
             let block_rows = block_buf.line_count();
             let gap = history.rendered_block_gap(i, block_rows);
+            self.document
+                .set_exact_height(i, (gap as usize).saturating_add(block_rows) as RowIndex);
             for _ in 0..gap {
                 texts.push(String::new());
             }
@@ -344,7 +439,7 @@ impl TranscriptProjection {
         }
         self.layout = layout;
         self.project_key = Some(key);
-        let total_rows = buf.line_count() as RowIndex;
+        let total_rows = self.document.total_rows();
         let clamped_scroll = clamp_scroll(RowIndex::MAX, total_rows, viewport_rows);
         debug_assert!(clamped_scroll >= estimated_prefix_rows.saturating_sub(1));
         ProjectOutput { clamped_scroll }
@@ -524,6 +619,8 @@ impl TranscriptProjection {
             content_hash: 0,
             sidecar_hash: 0,
         };
+        self.document
+            .rebuild_if_stale(history, width, show_thinking, base_key);
         let mut rows: Vec<String> = Vec::new();
         for i in 0..history.order.len() {
             let id = history.order[i];
@@ -533,6 +630,8 @@ impl TranscriptProjection {
             };
             let block_rows = block_buf.line_count();
             let gap = history.rendered_block_gap(i, block_rows);
+            self.document
+                .set_exact_height(i, (gap as usize).saturating_add(block_rows) as RowIndex);
             for _ in 0..gap {
                 rows.push(String::new());
             }
@@ -540,6 +639,7 @@ impl TranscriptProjection {
                 rows.push(block_buf.get_line(r).unwrap_or("").to_string());
             }
         }
+        self.document.refresh_height_index();
         let rows = Arc::new(rows);
         self.cached_rows = Some(CachedRows {
             rows: Arc::clone(&rows),
@@ -568,6 +668,8 @@ impl TranscriptProjection {
             content_hash: 0,
             sidecar_hash: 0,
         };
+        self.document
+            .rebuild_if_stale(history, width, show_thinking, base_key);
 
         // The break ending row r is soft iff r+1 has `decoration.soft_wrapped`.
         struct RowMeta {
@@ -595,6 +697,8 @@ impl TranscriptProjection {
             };
             let block_rows = block_buf.line_count();
             let gap = history.rendered_block_gap(i, block_rows);
+            self.document
+                .set_exact_height(i, (gap as usize).saturating_add(block_rows) as RowIndex);
             for _ in 0..gap {
                 push_row(&mut metas, pos, false);
                 pos += 1;
@@ -607,6 +711,7 @@ impl TranscriptProjection {
                 pos += 1;
             }
         }
+        self.document.refresh_height_index();
 
         let mut soft = Vec::new();
         let mut hard = Vec::new();
@@ -1004,6 +1109,37 @@ mod tests {
         let full_lines: Vec<String> = buf.lines().to_vec();
         assert!(full_lines.iter().any(|line| line == "line 0"));
         assert!(full_lines.iter().any(|line| line == "line 99"));
+    }
+
+    #[test]
+    fn tail_projection_uses_measured_prefix_heights() {
+        let mut transcript = Transcript::new();
+        for i in 0..40 {
+            transcript.push(Block::Text {
+                content: format!("block {i}\ncontinued {i}"),
+            });
+        }
+        let theme = Theme::default();
+        let mut projection = TranscriptProjection::new();
+        let mut buf = Buffer::new(crate::smelt_term::BufId(5), Default::default());
+
+        projection.project(&mut buf, &mut transcript.history, 80, false, &theme, 0, 5);
+        let full_rows = buf.line_count() as RowIndex;
+
+        let output = projection.project(
+            &mut buf,
+            &mut transcript.history,
+            80,
+            false,
+            &theme,
+            RowIndex::MAX,
+            5,
+        );
+
+        assert_eq!(buf.line_count() as RowIndex, full_rows);
+        assert_eq!(output.clamped_scroll, full_rows.saturating_sub(5));
+        assert!(buf.lines().iter().any(|line| line == "block 39"));
+        assert!(!buf.lines().iter().any(|line| line == "block 0"));
     }
 
     #[test]
