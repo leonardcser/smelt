@@ -1080,12 +1080,13 @@ impl TestApp {
     }
 
     fn probe_stale_prompt_prediction_response(&mut self, variant: u8) {
+        let seq = self.app.core.session.history.len();
         self.app
             .core
             .session
             .history
             .push(protocol::HistoryItem::user(protocol::Content::text(
-                format!("fuzz stale prompt prediction {variant}"),
+                format!("fuzz stale prompt prediction {variant}/{seq}"),
             )));
         self.publish_turn_end_for_probe();
         let prediction_id = self
