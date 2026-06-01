@@ -802,12 +802,50 @@ Do before architectural changes:
 
 - Rename workspace package names as described in **Workspace crate-name cleanup** in a
   separate mechanical commit.
-- Capture perf profile for a huge restored session:
+- Capture perf profile for a huge restored session. Baseline recorded before any
+  architectural changes:
+
+  ```text
+  compositor:project_transcript    count 3    total 300.4ms  avg 100.2ms
+  render:tool_call                  count 758  total 219.2ms  avg 289µs
+  render:build_diff_cache           count 234  total 139.9ms  avg 598µs
+  render:markdown                   count 17   total 72.3ms   avg 4.3ms
+  project:render                    count 1    total 62.1ms   avg 62.1ms
+  render:inline_diff_cached         count 238  total 52.7ms   avg 221µs
+  render:text                       count 16   total 45.3ms   avg 2.8ms
+  render:code_block                 count 35   total 36.7ms   avg 1.0ms
+  render:compacted                  count 1    total 27.0ms   avg 27.0ms
+  render:thinking                   count 123  total 21.4ms   avg 174µs
+  render:build_file_view_cache      count 4    total 15.0ms   avg 3.8ms
+  ```
+
+  Allocation baseline:
+
+  ```text
+  compositor:project_transcript  (bytes)    count 3    total 154.65MB  avg 51.55MB
+  render:build_diff_cache        (bytes)    count 234  total 80.94MB   avg 354.2KB
+  render:tool_call               (bytes)    count 758  total 17.85MB   avg 24.1KB
+  project:render                 (bytes)    count 1    total 9.70MB    avg 9.70MB
+  render:markdown                (bytes)    count 17   total 6.03MB    avg 363.2KB
+  render:code_block              (bytes)    count 35   total 4.62MB    avg 135.2KB
+  render:build_file_view_cache   (bytes)    count 4    total 3.86MB    avg 987.1KB
+  render:text                    (bytes)    count 16   total 3.14MB    avg 201.0KB
+  render:compacted               (bytes)    count 1    total 2.89MB    avg 2.89MB
+  ```
+
+  Key observations:
+  - First frame spends ~300ms in transcript projection alone.
+  - 758 tool render calls happen even though only a viewport-sized subset is visible.
+  - Transcript projection allocates ~155MB across 593k allocations on first frame.
+  - Diff cache building is the second-largest cost at ~140ms for 234 calls.
+
+  Target metrics to track during migration:
   - first frame total;
-  - tool render count;
+  - tool render count (should drop to visible/overscan only);
   - visible rows rendered;
-  - full materialization calls;
-  - row cache hit/miss counts.
+  - full materialization calls (should be zero in normal render);
+  - row cache hit/miss counts;
+  - allocation bytes in transcript projection (should drop to ~viewport size).
 - Add or tighten regression tests around current transcript/window behavior:
   - block layout snapshots;
   - copy/yank semantics;
